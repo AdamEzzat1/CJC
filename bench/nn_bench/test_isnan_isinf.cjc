@@ -1,0 +1,26 @@
+// Test isnan, isinf, abs builtins
+
+// isnan tests
+assert(isnan(0.0 / 0.0));
+assert(!isnan(1.0));
+assert(!isnan(0.0));
+assert(!isnan(42));
+print("isnan PASS");
+
+// isinf tests
+assert(isinf(1.0 / 0.0));
+assert(isinf(-1.0 / 0.0));
+assert(!isinf(1.0));
+assert(!isinf(0.0));
+assert(!isinf(42));
+print("isinf PASS");
+
+// abs tests
+assert_eq(abs(-3.14), 3.14);
+assert_eq(abs(3.14), 3.14);
+assert_eq(abs(-7), 7);
+assert_eq(abs(7), 7);
+assert_eq(abs(0.0), 0.0);
+print("abs PASS");
+
+print("=== ALL isnan/isinf/abs TESTS PASSED ===");

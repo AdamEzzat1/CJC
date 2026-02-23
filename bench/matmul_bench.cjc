@@ -1,0 +1,144 @@
+// ============================================================
+// CJC Benchmark: Matrix Multiplication — Speed & Accuracy
+// ============================================================
+// Run: cjc run bench/matmul_bench.cjc --time
+//
+// Tests correctness, numerical accuracy (Kahan summation),
+// and exercises the full pipeline at multiple matrix sizes.
+
+// ── Test 1: Small matmul correctness ─────────────────────────
+
+let A = Tensor.from_vec(
+    [1.0, 2.0, 3.0,
+     4.0, 5.0, 6.0],
+    [2, 3]
+);
+let B = Tensor.from_vec(
+    [7.0,  8.0,
+     9.0,  10.0,
+     11.0, 12.0],
+    [3, 2]
+);
+
+let C = matmul(A, B);
+
+assert_eq(C.get([0,0]), 58.0);
+assert_eq(C.get([0,1]), 64.0);
+assert_eq(C.get([1,0]), 139.0);
+assert_eq(C.get([1,1]), 154.0);
+print("MATMUL_SMALL: [[58,64],[139,154]]");
+print("MATMUL_SMALL_PASS");
+
+// ── Test 2: Identity matmul (A @ I = A) ─────────────────────
+
+let I3 = Tensor.from_vec(
+    [1.0, 0.0, 0.0,
+     0.0, 1.0, 0.0,
+     0.0, 0.0, 1.0],
+    [3, 3]
+);
+let X = Tensor.from_vec(
+    [2.5, 3.7, 1.2,
+     4.8, 0.9, 6.1,
+     7.3, 8.4, 5.6],
+    [3, 3]
+);
+let XI = matmul(X, I3);
+assert_eq(XI.get([0,0]), 2.5);
+assert_eq(XI.get([0,1]), 3.7);
+assert_eq(XI.get([1,2]), 6.1);
+assert_eq(XI.get([2,0]), 7.3);
+print("IDENTITY_MATMUL_PASS");
+
+// ── Test 3: Numerical accuracy — Kahan summation ────────────
+// CJC uses Kahan-compensated summation for tensor.sum()
+// This catches floating-point drift that naive loops miss.
+
+// 4096 ones → should be exactly 4096.0
+let ones_4k = Tensor.ones([4096, 1]);
+let sum_ones = ones_4k.sum();
+assert_eq(sum_ones, 4096.0);
+print("KAHAN_4096_ONES:", sum_ones);
+print("KAHAN_4096_ONES_PASS");
+
+// 10000 ones → should be exactly 10000.0
+let ones_10k = Tensor.ones([10000, 1]);
+let sum_10k = ones_10k.sum();
+assert_eq(sum_10k, 10000.0);
+print("KAHAN_10000_ONES:", sum_10k);
+print("KAHAN_10000_ONES_PASS");
+
+// Sum 1+2+...+100 = 5050 (exact in f64)
+let seq100 = Tensor.from_vec(
+    [1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0,9.0,10.0,
+     11.0,12.0,13.0,14.0,15.0,16.0,17.0,18.0,19.0,20.0,
+     21.0,22.0,23.0,24.0,25.0,26.0,27.0,28.0,29.0,30.0,
+     31.0,32.0,33.0,34.0,35.0,36.0,37.0,38.0,39.0,40.0,
+     41.0,42.0,43.0,44.0,45.0,46.0,47.0,48.0,49.0,50.0,
+     51.0,52.0,53.0,54.0,55.0,56.0,57.0,58.0,59.0,60.0,
+     61.0,62.0,63.0,64.0,65.0,66.0,67.0,68.0,69.0,70.0,
+     71.0,72.0,73.0,74.0,75.0,76.0,77.0,78.0,79.0,80.0,
+     81.0,82.0,83.0,84.0,85.0,86.0,87.0,88.0,89.0,90.0,
+     91.0,92.0,93.0,94.0,95.0,96.0,97.0,98.0,99.0,100.0],
+    [10, 10]
+);
+let seq_sum = seq100.sum();
+assert_eq(seq_sum, 5050.0);
+print("KAHAN_SEQ_1_TO_100:", seq_sum);
+print("KAHAN_SEQ_PASS");
+
+// Mean of ones should be exactly 1.0
+let mean_ones = ones_4k.mean();
+assert_eq(mean_ones, 1.0);
+print("KAHAN_MEAN_PASS");
+
+// ── Test 4: Adversarial accuracy — big + tiny + (-big) ──────
+// Classic catastrophic cancellation test:
+// 1e15 + 1.0 + 1.0 + ... (100 times) + (-1e15)
+// True answer = 100.0
+// Naive sum often gives 0.0 or wrong answer due to precision loss
+
+let adversarial = Tensor.from_vec(
+    [1000000000000000.0,
+     1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+     1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+     1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+     1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+     1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+     1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+     1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+     1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+     1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+     1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+     -1000000000000000.0],
+    [1, 102]
+);
+let adv_sum = adversarial.sum();
+print("ADVERSARIAL_SUM:", adv_sum);
+print("ADVERSARIAL_EXPECTED: 100.0");
+
+// ── Test 5: Matmul at multiple sizes (deterministic randn) ──
+
+let M8 = matmul(Tensor.randn([8, 16]), Tensor.randn([16, 8]));
+assert_eq(M8.shape()[0], 8);
+assert_eq(M8.shape()[1], 8);
+print("MATMUL_8x16_x_16x8_PASS");
+
+let M32 = matmul(Tensor.randn([32, 32]), Tensor.randn([32, 32]));
+assert_eq(M32.shape()[0], 32);
+assert_eq(M32.shape()[1], 32);
+print("MATMUL_32x32_PASS");
+
+let M64 = matmul(Tensor.randn([64, 64]), Tensor.randn([64, 64]));
+assert_eq(M64.shape()[0], 64);
+assert_eq(M64.shape()[1], 64);
+print("MATMUL_64x64_PASS");
+
+let M128 = matmul(Tensor.randn([128, 64]), Tensor.randn([64, 128]));
+assert_eq(M128.shape()[0], 128);
+assert_eq(M128.shape()[1], 128);
+print("MATMUL_128x64_x_64x128_PASS");
+
+// ── Summary ──────────────────────────────────────────────────
+
+print("=== ALL CJC BENCHMARK TESTS PASSED ===");

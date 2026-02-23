@@ -1,0 +1,9 @@
+[package]
+name = "cjc-parser"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cjc-ast = { workspace = true }
+cjc-diag = { workspace = true }
+cjc-lexer = { workspace = true }

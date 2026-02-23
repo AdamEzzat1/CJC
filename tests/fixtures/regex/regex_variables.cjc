@@ -1,0 +1,23 @@
+fn has_digits(s: String) -> bool {
+    s ~= /\d/
+}
+
+fn main() -> i64 {
+    // Regex stored in let binding
+    let pat = /\w+/;
+    let s = "hello";
+    print(s ~= pat);
+    // Regex in if condition
+    let input = "ERROR: something";
+    if input ~= /^ERROR/ {
+        print("matched error");
+    } else {
+        print("no match");
+    }
+    // Regex passed to function
+    print(has_digits("abc123"));
+    print(has_digits("nodigits"));
+    // Word boundary
+    print("hello world" ~= /\bworld\b/);
+    0
+}

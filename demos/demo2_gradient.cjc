@@ -1,0 +1,71 @@
+// ============================================================
+// Demo 2: Manual Gradient Descent on a Quadratic
+// ============================================================
+// Proves: Arithmetic, while loops, functions, conditionals,
+//         variables, mutation, and the full execution pipeline.
+//
+// We minimize f(x) = (x - 3)^2 using gradient descent.
+// The gradient is f'(x) = 2*(x - 3).
+// Starting from x = 0, learning rate = 0.1, 100 steps.
+
+fn square(x: f64) -> f64 {
+    x * x
+}
+
+fn f(x: f64) -> f64 {
+    square(x - 3.0)
+}
+
+fn grad_f(x: f64) -> f64 {
+    2.0 * (x - 3.0)
+}
+
+fn abs(x: f64) -> f64 {
+    if x < 0.0 {
+        0.0 - x
+    } else {
+        x
+    }
+}
+
+// -- Gradient Descent -----------------------------------------
+let x = 0.0;
+let lr = 0.1;
+let steps = 100;
+let i = 0;
+
+print("Starting gradient descent on f(x) = (x-3)^2");
+print("Initial x:", x, " f(x):", f(x));
+
+while i < steps {
+    let g = grad_f(x);
+    x = x - lr * g;
+    i = i + 1;
+
+    // Print progress every 20 steps
+    if i == 20 {
+        print("Step", i, " x =", x, " f(x) =", f(x));
+    }
+    if i == 40 {
+        print("Step", i, " x =", x, " f(x) =", f(x));
+    }
+    if i == 60 {
+        print("Step", i, " x =", x, " f(x) =", f(x));
+    }
+    if i == 80 {
+        print("Step", i, " x =", x, " f(x) =", f(x));
+    }
+    if i == 100 {
+        print("Step", i, " x =", x, " f(x) =", f(x));
+    }
+}
+
+print("Final x:", x);
+print("Final f(x):", f(x));
+
+// -- Verify convergence ---------------------------------------
+// After 100 steps of GD with lr=0.1, x should be very close to 3.0
+assert(abs(x - 3.0) < 0.001);
+assert(f(x) < 0.000001);
+
+print("Gradient descent converged! x is within 0.001 of optimal.");

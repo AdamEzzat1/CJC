@@ -1,0 +1,15 @@
+[package]
+name = "cjc-eval"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cjc-ast = { workspace = true }
+cjc-types = { workspace = true }
+cjc-dispatch = { workspace = true }
+cjc-runtime = { workspace = true }
+cjc-diag = { workspace = true }
+cjc-ad = { workspace = true }
+cjc-data = { workspace = true }
+cjc-repro = { workspace = true }
+cjc-regex = { path = "../cjc-regex" }

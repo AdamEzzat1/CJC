@@ -1,0 +1,87 @@
+================================================================================
+  CJC PROGRAMMING LANGUAGE - DEMO EXECUTION OUTPUT
+================================================================================
+
+  Date:       2026-02-14 23:22 EST
+  Command:    cargo run -- run demos/<file>.cjc
+  Platform:   Windows (Rust, Edition 2021)
+  Result:     3/3 DEMOS RUN SUCCESSFULLY, ALL ASSERTIONS PASSED
+
+================================================================================
+  DEMO 1: Matrix Multiplication on Deterministic Tensors
+================================================================================
+
+  File: demos/demo1_matmul.cjc
+  Proves: Tensor runtime, nogc-safe buffers, reproducibility,
+          struct dispatch, and the full lex-parse-eval pipeline.
+
+  $ cjc run demos/demo1_matmul.cjc
+
+  Matrix A (2x3):
+  Tensor(shape=[2, 3], data=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+  Matrix B (3x2):
+  Tensor(shape=[3, 2], data=[7.0, 8.0, 9.0, 10.0, 11.0, 12.0])
+  C = A @ B (2x2):
+  Tensor(shape=[2, 2], data=[58.0, 64.0, 139.0, 154.0])
+  Expected:
+  Tensor(shape=[2, 2], data=[58.0, 64.0, 139.0, 154.0])
+  All assertions passed!
+  Shape of C: [2, 2]
+  Sum of C: 415
+  Mean of C: 103.75
+
+  STATUS: PASS (all 4 element assertions verified)
+
+================================================================================
+  DEMO 2: Manual Gradient Descent on a Quadratic
+================================================================================
+
+  File: demos/demo2_gradient.cjc
+  Proves: Arithmetic, while loops, functions, conditionals,
+          variables, mutation, and the full execution pipeline.
+          Minimizes f(x) = (x - 3)^2 via gradient descent.
+
+  $ cjc run demos/demo2_gradient.cjc
+
+  Starting gradient descent on f(x) = (x-3)^2
+  Initial x: 0  f(x): 9
+  Step 20  x = 2.9654123548617948  f(x) = 0.0011963051962064115
+  Step 40  x = 2.9996012316012646  f(x) = 0.00000015901623583001677
+  Step 60  x = 2.999995402513377  f(x) = 0.00000000002113688324828901
+  Step 80  x = 2.999999946994588  f(x) = 0.000000000000002809573707602477
+  Step 100  x = 2.9999999993888893  f(x) = 0.00000000000000000037345630914781746
+  Final x: 2.9999999993888893
+  Final f(x): 0.00000000000000000037345630914781746
+  Gradient descent converged! x is within 0.001 of optimal.
+
+  STATUS: PASS (converged to x=3.0 within tolerance, |x-3| < 0.001)
+
+================================================================================
+  DEMO 3: Struct-based Neural Network Forward Pass
+================================================================================
+
+  File: demos/demo3_pipeline.cjc
+  Proves: Structs, field access, method dispatch, pipe operator,
+          higher-level abstractions built on the tensor runtime.
+          2-layer network: hidden = relu(x @ W1 + b1), output = hidden @ W2 + b2
+
+  $ cjc run demos/demo3_pipeline.cjc
+
+  === 2-Layer Neural Network Forward Pass ===
+  Input x: Tensor(shape=[1, 3], data=[1.0, 2.0, 3.0])
+  Hidden pre-activation: Tensor(shape=[1, 4], data=[0.1, 0.0, 0.75, 1.0])
+  Hidden post-ReLU: Tensor(shape=[1, 4], data=[0.1, 0.0, 0.75, 1.0])
+  Network output: Tensor(shape=[1, 2], data=[0.17, 0.045])
+  Output shape: [1, 2]
+  All shape assertions passed!
+  Target: Tensor(shape=[1, 2], data=[1.0, 0.0])
+  Output - Target: Tensor(shape=[1, 2], data=[-0.83, 0.045])
+  Struct-based forward pass output: Tensor(shape=[1, 2], data=[0.17, 0.045])
+  Struct-based result matches manual computation!
+  === Demo 3 complete ===
+
+  STATUS: PASS (shapes verified, struct-based matches manual computation)
+
+================================================================================
+  END OF DEMO REPORT
+================================================================================

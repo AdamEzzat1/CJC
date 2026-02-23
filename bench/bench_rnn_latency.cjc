@@ -1,0 +1,100 @@
+// ============================================================================
+// bench_rnn_latency.cjc — Elman RNN Latency Benchmark
+// ============================================================================
+//
+// Simulates an Elman-style RNN over 10,000 time steps using CJC's
+// Phase 4 Silicon Realism engine.
+//
+// Architecture:
+//   h_t = gelu(x_t @ W_ih + h_{t-1} @ W_hh + b)
+//
+// Uses PagedKvCache to store hidden-state history (zero-allocation per step).
+// Uses clock() for high-resolution timing in microseconds.
+// ============================================================================
+
+// --- Model Hyperparameters ---
+let hidden_dim = 16;
+let input_dim  = 16;
+let num_steps  = 10000;
+
+// --- Weight Initialization (deterministic small values) ---
+// W_ih: [hidden_dim, input_dim] = [16, 16]
+let wih_data = [];
+let i = 0;
+while i < 256 {
+    wih_data = push(wih_data, (i + 1) * 0.001);
+    i = i + 1;
+}
+let W_ih = Tensor.from_vec(wih_data, [16, 16]);
+
+// W_hh: [hidden_dim, hidden_dim] = [16, 16]
+let whh_data = [];
+i = 0;
+while i < 256 {
+    whh_data = push(whh_data, (i + 1) * 0.0005);
+    i = i + 1;
+}
+let W_hh = Tensor.from_vec(whh_data, [16, 16]);
+
+// Bias: [hidden_dim]
+let bias = Tensor.zeros([16]);
+
+// --- Input sequence (constant token, repeated) ---
+let x_data = [];
+i = 0;
+while i < 16 {
+    x_data = push(x_data, (i + 1) * 0.1);
+    i = i + 1;
+}
+let x_token = Tensor.from_vec(x_data, [1, 16]);
+
+// --- Hidden state (initially zeros) ---
+let h = Tensor.zeros([1, 16]);
+
+// --- KV-Cache to store hidden state history ---
+let state_cache = PagedKvCache.new(num_steps, hidden_dim);
+
+// --- Timing ---
+print("RNN_BENCH_START");
+print("hidden_dim:", hidden_dim);
+print("input_dim:", input_dim);
+print("num_steps:", num_steps);
+
+let t0 = clock();
+
+// --- Main RNN Loop: 10,000 steps ---
+let step = 0;
+while step < num_steps {
+    // h_t = gelu( x_t @ W_ih^T + h_{t-1} @ W_hh^T + bias )
+    let xW = x_token.linear(W_ih, bias);
+    let hW = h.linear(W_hh, bias);
+    let pre_act = xW + hW;
+    h = pre_act.gelu();
+
+    // Store hidden state in PagedKvCache (zero-allocation append)
+    let h_row = h.view_reshape([1, 16]);
+    state_cache.append(h_row);
+
+    step = step + 1;
+}
+
+let t1 = clock();
+let elapsed_sec = t1 - t0;
+
+// --- Telemetry Output ---
+print("RNN_BENCH_END");
+print("total_steps:", num_steps);
+print("elapsed_sec:", elapsed_sec);
+print("cache_len:", state_cache.len());
+print("cache_blocks_in_use:", state_cache.blocks_in_use());
+
+// Verify determinism: re-read first and last tokens from cache
+let first_h = state_cache.get_token(0);
+let last_h = state_cache.get_token(num_steps - 1);
+print("first_h_shape:", first_h.shape());
+print("last_h_shape:", last_h.shape());
+print("last_h[0]:", last_h.get([0]));
+
+// Final hidden state check
+print("h_final[0]:", h.get([0, 0]));
+print("PASS");

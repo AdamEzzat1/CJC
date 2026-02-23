@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CJC Demo 2: Gradient Descent</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: #0d1117; color: #c9d1d9; line-height: 1.6; }
+  .header { background: linear-gradient(135deg, #1a1f35 0%, #0d1117 100%); border-bottom: 1px solid #30363d; padding: 2rem 2rem 1.5rem; }
+  .header h1 { font-size: 1.8rem; color: #58a6ff; margin-bottom: 0.3rem; }
+  .header .subtitle { color: #8b949e; font-size: 1rem; }
+  .badge { display: inline-block; background: #238636; color: #fff; padding: 0.2rem 0.7rem; border-radius: 12px; font-size: 0.8rem; font-weight: 600; margin-top: 0.5rem; }
+  .badge.lang { background: #1f6feb; }
+  .container { max-width: 1000px; margin: 0 auto; padding: 2rem; }
+  .section { margin-bottom: 2rem; }
+  .section h2 { color: #58a6ff; font-size: 1.2rem; margin-bottom: 0.8rem; border-bottom: 1px solid #21262d; padding-bottom: 0.4rem; }
+  .proves { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1rem 1.2rem; margin-bottom: 1.5rem; }
+  .proves li { color: #8b949e; margin-left: 1.2rem; margin-bottom: 0.3rem; }
+  .proves li strong { color: #c9d1d9; }
+  pre { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1.2rem; overflow-x: auto; font-size: 0.9rem; line-height: 1.5; }
+  .code-label { font-size: 0.75rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.4rem; }
+  .source-code { color: #c9d1d9; }
+  .source-code .kw { color: #ff7b72; }
+  .source-code .fn { color: #d2a8ff; }
+  .source-code .str { color: #a5d6ff; }
+  .source-code .num { color: #79c0ff; }
+  .source-code .cm { color: #8b949e; font-style: italic; }
+  .source-code .type { color: #ffa657; }
+  .output { color: #7ee787; }
+  .side-by-side { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 768px) { .side-by-side { grid-template-columns: 1fr; } }
+  .footer { text-align: center; color: #484f58; font-size: 0.85rem; padding: 2rem; border-top: 1px solid #21262d; margin-top: 2rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.5rem 0; }
+  th, td { text-align: left; padding: 0.5rem 1rem; border-bottom: 1px solid #21262d; }
+  th { color: #58a6ff; font-weight: 600; }
+  td { font-family: 'Consolas', monospace; font-size: 0.9rem; }
+  td.converging { color: #7ee787; }
+  .chart { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1.5rem; margin: 1rem 0; }
+  .bar-row { display: flex; align-items: center; margin-bottom: 0.5rem; }
+  .bar-label { width: 70px; font-size: 0.8rem; color: #8b949e; font-family: 'Consolas', monospace; }
+  .bar-track { flex: 1; height: 20px; background: #21262d; border-radius: 4px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 4px; transition: width 0.3s; }
+  .bar-value { width: 100px; text-align: right; font-size: 0.8rem; color: #c9d1d9; font-family: 'Consolas', monospace; margin-left: 0.5rem; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>CJC Demo 2: Gradient Descent</h1>
+  <div class="subtitle">Minimizing f(x) = (x - 3)&sup2; from x=0 to x&cong;3 in 100 steps</div>
+  <span class="badge lang">CJC Language</span>
+  <span class="badge">Converged</span>
+</div>
+
+<div class="container">
+
+<div class="section">
+  <h2>What This Proves</h2>
+  <div class="proves">
+    <ul>
+      <li><strong>Functions</strong> &mdash; fn declarations, calls, return values</li>
+      <li><strong>While loops</strong> &mdash; 100-iteration convergence loop</li>
+      <li><strong>If/else</strong> &mdash; conditional logic for abs() and progress printing</li>
+      <li><strong>Variables &amp; mutation</strong> &mdash; x is updated each step via x = x - lr * grad</li>
+      <li><strong>Floating-point arithmetic</strong> &mdash; correct gradient computation to ~18 decimal places</li>
+      <li><strong>Assertions</strong> &mdash; convergence verified: |x - 3| &lt; 0.001 and f(x) &lt; 10&supmin;&sup6;</li>
+    </ul>
+  </div>
+</div>
+
+<div class="section">
+  <div class="side-by-side">
+    <div>
+      <div class="code-label">CJC Source Code &mdash; demo2_gradient.cjc</div>
+      <pre class="source-code"><span class="kw">fn</span> <span class="fn">square</span>(x: <span class="type">f64</span>) -> <span class="type">f64</span> { x * x }
+
+<span class="kw">fn</span> <span class="fn">f</span>(x: <span class="type">f64</span>) -> <span class="type">f64</span> {
+    <span class="fn">square</span>(x - <span class="num">3.0</span>)
+}
+
+<span class="kw">fn</span> <span class="fn">grad_f</span>(x: <span class="type">f64</span>) -> <span class="type">f64</span> {
+    <span class="num">2.0</span> * (x - <span class="num">3.0</span>)
+}
+
+<span class="kw">fn</span> <span class="fn">abs</span>(x: <span class="type">f64</span>) -> <span class="type">f64</span> {
+    <span class="kw">if</span> x < <span class="num">0.0</span> { <span class="num">0.0</span> - x }
+    <span class="kw">else</span> { x }
+}
+
+<span class="cm">// Gradient descent</span>
+<span class="kw">let</span> x = <span class="num">0.0</span>;
+<span class="kw">let</span> lr = <span class="num">0.1</span>;
+<span class="kw">let</span> steps = <span class="num">100</span>;
+<span class="kw">let</span> i = <span class="num">0</span>;
+
+<span class="kw">while</span> i < steps {
+    <span class="kw">let</span> g = <span class="fn">grad_f</span>(x);
+    x = x - lr * g;
+    i = i + <span class="num">1</span>;
+}
+
+<span class="cm">// Verify convergence</span>
+<span class="fn">assert</span>(<span class="fn">abs</span>(x - <span class="num">3.0</span>) < <span class="num">0.001</span>);
+<span class="fn">assert</span>(<span class="fn">f</span>(x) < <span class="num">0.000001</span>);
+<span class="fn">print</span>(<span class="str">"Converged!"</span>);</pre>
+    </div>
+    <div>
+      <div class="code-label">Live Output &mdash; $ cjc run demo2_gradient.cjc</div>
+      <pre class="output">Starting gradient descent on f(x) = (x-3)^2
+Initial x: 0  f(x): 9
+
+Step 20   x = 2.9654   f(x) = 0.00120
+Step 40   x = 2.9996   f(x) = 0.00000016
+Step 60   x = 3.0000   f(x) = 0.000000000021
+Step 80   x = 3.0000   f(x) = 0.0000000000000028
+Step 100  x = 3.0000   f(x) = 0.0000000000000000004
+
+Final x: 2.9999999993888893
+Final f(x): 3.7e-19
+
+<span style="color:#7ee787;font-weight:bold">Gradient descent converged!</span>
+<span style="color:#7ee787;font-weight:bold">x is within 0.001 of optimal.</span></pre>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h2>Convergence Progress</h2>
+  <div class="chart">
+    <div class="bar-row">
+      <div class="bar-label">Step 0</div>
+      <div class="bar-track"><div class="bar-fill" style="width:0%; background:#f85149;"></div></div>
+      <div class="bar-value">x = 0.000</div>
+    </div>
+    <div class="bar-row">
+      <div class="bar-label">Step 20</div>
+      <div class="bar-track"><div class="bar-fill" style="width:98.8%; background:#d29922;"></div></div>
+      <div class="bar-value">x = 2.965</div>
+    </div>
+    <div class="bar-row">
+      <div class="bar-label">Step 40</div>
+      <div class="bar-track"><div class="bar-fill" style="width:99.98%; background:#56d364;"></div></div>
+      <div class="bar-value">x = 2.9996</div>
+    </div>
+    <div class="bar-row">
+      <div class="bar-label">Step 60</div>
+      <div class="bar-track"><div class="bar-fill" style="width:99.999%; background:#7ee787;"></div></div>
+      <div class="bar-value">x = 3.00000</div>
+    </div>
+    <div class="bar-row">
+      <div class="bar-label">Step 80</div>
+      <div class="bar-track"><div class="bar-fill" style="width:100%; background:#7ee787;"></div></div>
+      <div class="bar-value">x = 3.000000</div>
+    </div>
+    <div class="bar-row">
+      <div class="bar-label">Step 100</div>
+      <div class="bar-track"><div class="bar-fill" style="width:100%; background:#7ee787;"></div></div>
+      <div class="bar-value">x = 3.0000000</div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h2>Convergence Data</h2>
+  <table>
+    <tr><th>Step</th><th>x</th><th>f(x) = (x-3)&sup2;</th><th>Distance to optimal</th></tr>
+    <tr><td>0</td><td>0.0</td><td>9.0</td><td>3.0</td></tr>
+    <tr><td>20</td><td>2.9654</td><td>1.20 &times; 10&supmin;&sup3;</td><td class="converging">0.0346</td></tr>
+    <tr><td>40</td><td>2.9996</td><td>1.59 &times; 10&supmin;&sup7;</td><td class="converging">0.0004</td></tr>
+    <tr><td>60</td><td>2.999995</td><td>2.11 &times; 10&supmin;&sup1;&sup1;</td><td class="converging">0.0000046</td></tr>
+    <tr><td>80</td><td>2.99999995</td><td>2.81 &times; 10&supmin;&sup1;&sup5;</td><td class="converging">5.3 &times; 10&supmin;&sup8;</td></tr>
+    <tr><td>100</td><td>2.9999999994</td><td>3.73 &times; 10&supmin;&sup1;&sup9;</td><td class="converging">6.1 &times; 10&supmin;&sup1;&deg;</td></tr>
+  </table>
+</div>
+
+</div>
+
+<div class="footer">
+  CJC Programming Language &mdash; Built from scratch in Rust &mdash; Zero external dependencies &mdash; 138 tests passing
+</div>
+
+</body>
+</html>

@@ -1,0 +1,54 @@
+// ============================================================
+// Demo 1: Matrix Multiplication on Deterministic Tensors
+// ============================================================
+// Proves: Tensor runtime, nogc-safe buffers, reproducibility,
+//         struct dispatch, and the full lex-parse-eval pipeline.
+
+// -- Build two 2x3 and 3x2 matrices from literal data --------
+
+let a = Tensor.from_vec(
+    [1.0, 2.0, 3.0,
+     4.0, 5.0, 6.0],
+    [2, 3]
+);
+
+let b = Tensor.from_vec(
+    [7.0,  8.0,
+     9.0,  10.0,
+     11.0, 12.0],
+    [3, 2]
+);
+
+print("Matrix A (2x3):");
+print(a);
+
+print("Matrix B (3x2):");
+print(b);
+
+// -- Perform matrix multiplication: C = A @ B ----------------
+let c = matmul(a, b);
+
+print("C = A @ B (2x2):");
+print(c);
+
+// -- Verify expected result -----------------------------------
+// A @ B = [[1*7+2*9+3*11, 1*8+2*10+3*12],
+//          [4*7+5*9+6*11, 4*8+5*10+6*12]]
+//       = [[58, 64], [139, 154]]
+
+let expected = Tensor.from_vec([58.0, 64.0, 139.0, 154.0], [2, 2]);
+print("Expected:");
+print(expected);
+
+// Verify element by element
+assert_eq(c.get([0, 0]), 58.0);
+assert_eq(c.get([0, 1]), 64.0);
+assert_eq(c.get([1, 0]), 139.0);
+assert_eq(c.get([1, 1]), 154.0);
+
+print("All assertions passed!");
+
+// -- Show tensor metadata -------------------------------------
+print("Shape of C:", c.shape());
+print("Sum of C:", c.sum());
+print("Mean of C:", c.mean());

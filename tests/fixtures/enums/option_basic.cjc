@@ -1,0 +1,16 @@
+fn maybe_double(x: i64) -> Option<i64> {
+    if x > 0 {
+        Some(x * 2)
+    } else {
+        None
+    }
+}
+fn main() -> i64 {
+    let a: Option<i64> = maybe_double(5);
+    let b: Option<i64> = maybe_double(0);
+    let result: i64 = a.unwrap();
+    let fallback: i64 = b.unwrap_or(99);
+    print(f"double 5: {result}");
+    print(f"double 0 fallback: {fallback}");
+    result
+}

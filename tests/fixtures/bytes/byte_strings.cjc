@@ -1,0 +1,20 @@
+fn main() -> i64 {
+    // Byte string literal
+    let bs = b"hello";
+    print(bs.len());
+    print(bs.is_empty());
+    // Empty byte string
+    let empty = b"";
+    print(empty.len());
+    print(empty.is_empty());
+    // Byte indexing
+    print(bs.get(0));
+    print(bs.get(1));
+    // find_byte
+    let csv = b"hello,world";
+    print(csv.find_byte(b','));
+    // split_byte
+    let parts = csv.split_byte(b',');
+    print(parts.len());
+    0
+}

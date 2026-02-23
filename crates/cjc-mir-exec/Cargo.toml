@@ -1,0 +1,18 @@
+[package]
+name = "cjc-mir-exec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cjc-mir = { path = "../cjc-mir" }
+cjc-hir = { path = "../cjc-hir" }
+cjc-ast = { path = "../cjc-ast" }
+cjc-types = { path = "../cjc-types" }
+cjc-runtime = { path = "../cjc-runtime" }
+cjc-dispatch = { path = "../cjc-dispatch" }
+cjc-diag = { path = "../cjc-diag" }
+cjc-repro = { path = "../cjc-repro" }
+cjc-ad = { path = "../cjc-ad" }
+cjc-data = { path = "../cjc-data" }
+cjc-regex = { path = "../cjc-regex" }

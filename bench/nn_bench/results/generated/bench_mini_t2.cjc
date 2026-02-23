@@ -1,0 +1,442 @@
+// ============================================================
+// CJC Benchmark Suite: MLP with Manual Backpropagation
+// ============================================================
+// Implements the same MLP as bench_numpy_mlp.py:
+//   Forward: Z = X @ W + b, A = relu(Z)
+//   Backward: manual chain rule through each layer
+//   Update: vanilla SGD
+//
+// This benchmark is parameterized via the variables below.
+// The orchestrator generates variants with different sizes.
+//
+// Output: prints JSONL-compatible results to stdout.
+// ============================================================
+
+// ── Configuration (set by orchestrator or manually) ──────────
+// These are defaults for the "mini" case for testing.
+// The orchestrator script will generate case-specific .cjc files.
+
+let BATCH = 4;
+let DIM_IN = 8;
+let DIM_H = 16;
+let DIM_OUT = 4;
+let NUM_LAYERS = 2;
+let WARMUP_STEPS = 10;
+let MEASURE_STEPS = 100;
+let LR = 0.01;
+let SEED_VAL = 12345;
+let CASE_NAME = "mini";
+let TRIAL_NUM = 2;
+
+// ── Helper functions ─────────────────────────────────────────
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 {
+        0.0 - x
+    } else {
+        x
+    }
+}
+
+fn max_f(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+fn min_f(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+fn is_nan(x: f64) -> bool {
+    // NaN is the only value that is not equal to itself
+    x != x
+}
+
+fn is_inf(x: f64) -> bool {
+    if x > 1e308 { return true; }
+    if x < -1e308 { return true; }
+    return false;
+}
+
+// ── ReLU element-wise (via Tensor * mask) ────────────────────
+// relu(Z) = Z * (Z > 0) mask
+// For CJC, we build the mask by iterating elements.
+
+fn make_relu_mask(Z: Tensor) -> Tensor {
+    let data = Z.to_vec();
+    let n = len(data);
+    let mask_data = [];
+    let i = 0;
+    while i < n {
+        if data[i] > 0.0 {
+            mask_data = push(mask_data, 1.0);
+        } else {
+            mask_data = push(mask_data, 0.0);
+        }
+        i = i + 1;
+    }
+    Tensor.from_vec(mask_data, Z.shape())
+}
+
+fn relu(Z: Tensor) -> Tensor {
+    let mask = make_relu_mask(Z);
+    Z * mask
+}
+
+// ── MSE Loss ─────────────────────────────────────────────────
+
+fn mse_loss(pred: Tensor, target: Tensor) -> f64 {
+    let diff = pred - target;
+    let sq = diff * diff;
+    sq.mean()
+}
+
+fn mse_grad(pred: Tensor, target: Tensor) -> Tensor {
+    let diff = pred - target;
+    let n = float(len(diff.to_vec()));
+    diff * (2.0 / n)
+}
+
+// ── Gradient norm computation ────────────────────────────────
+
+fn tensor_sq_sum(t: Tensor) -> f64 {
+    let sq = t * t;
+    sq.sum()
+}
+
+// ── Hash computation (simple checksum) ───────────────────────
+// Hash f64 values by summing their integer bit representations modulo 2^53
+
+fn hash_tensor(t: Tensor, h: f64) -> f64 {
+    let data = t.to_vec();
+    let n = len(data);
+    let i = 0;
+    while i < n {
+        // Simple additive hash on float values
+        h = h + data[i] * 1000003.0;
+        // Keep in reasonable range to avoid overflow
+        if h > 1e15 {
+            h = h - floor(h / 1e10) * 1e10;
+        }
+        if h < -1e15 {
+            h = h - floor(h / 1e10) * 1e10;
+        }
+        i = i + 1;
+    }
+    h
+}
+
+fn hash_array(arr: [f64], h: f64) -> f64 {
+    let n = len(arr);
+    let i = 0;
+    while i < n {
+        h = h + arr[i] * 1000003.0;
+        if h > 1e15 {
+            h = h - floor(h / 1e10) * 1e10;
+        }
+        if h < -1e15 {
+            h = h - floor(h / 1e10) * 1e10;
+        }
+        i = i + 1;
+    }
+    h
+}
+
+// ── Main benchmark ───────────────────────────────────────────
+
+// Initialize weights and biases for each layer
+// Layer 0: DIM_IN -> DIM_H
+// Layers 1..NUM_LAYERS-1: DIM_H -> DIM_H
+// Layer NUM_LAYERS: DIM_H -> DIM_OUT
+// Total layers = NUM_LAYERS + 1 (hidden layers + output layer)
+
+// We store weights and biases in arrays indexed by layer number.
+// Pre-allocate all arrays.
+
+let total_layers = NUM_LAYERS + 1;
+
+// He initialization scale
+let scale_in = sqrt(2.0 / float(DIM_IN));
+let scale_h = sqrt(2.0 / float(DIM_H));
+
+// Initialize weights array (indexed by layer)
+let weights = [];
+let biases = [];
+
+// Layer 0: input -> hidden
+weights = push(weights, Tensor.randn([DIM_IN, DIM_H]) * scale_in);
+biases = push(biases, Tensor.zeros([1, DIM_H]));
+
+// Hidden layers 1..NUM_LAYERS-1
+let layer_idx = 1;
+while layer_idx < NUM_LAYERS {
+    weights = push(weights, Tensor.randn([DIM_H, DIM_H]) * scale_h);
+    biases = push(biases, Tensor.zeros([1, DIM_H]));
+    layer_idx = layer_idx + 1;
+}
+
+// Output layer: hidden -> output
+weights = push(weights, Tensor.randn([DIM_H, DIM_OUT]) * scale_h);
+biases = push(biases, Tensor.zeros([1, DIM_OUT]));
+
+// Generate synthetic data
+let X_data = Tensor.randn([BATCH, DIM_IN]);
+let teacher = Tensor.randn([DIM_IN, DIM_OUT]) * 0.1;
+let noise = Tensor.randn([BATCH, DIM_OUT]) * 0.01;
+let Y_data = matmul(X_data, teacher) + noise;
+
+// Pre-allocate scratch buffers for forward/backward pass
+// We need to store activations and pre-activations for each layer
+// Forward: Z[l], A[l], masks[l]
+// A[0] = input X
+
+// ── Training loop ────────────────────────────────────────────
+
+// Warmup
+let warmup_step = 0;
+while warmup_step < WARMUP_STEPS {
+    // === Forward pass ===
+    let A_prev = X_data;
+    let activations = [X_data];
+    let pre_activations = [];
+    let relu_masks = [];
+
+    let l = 0;
+    while l < total_layers {
+        let Z = matmul(A_prev, weights[l]) + biases[l];
+        pre_activations = push(pre_activations, Z);
+
+        if l < total_layers - 1 {
+            // Hidden layer: apply ReLU
+            let mask = make_relu_mask(Z);
+            relu_masks = push(relu_masks, mask);
+            A_prev = Z * mask;
+        } else {
+            // Output layer: no activation
+            relu_masks = push(relu_masks, Tensor.zeros([1, 1]));
+            A_prev = Z;
+        }
+        activations = push(activations, A_prev);
+        l = l + 1;
+    }
+
+    // Loss
+    let loss = mse_loss(A_prev, Y_data);
+
+    // === Backward pass ===
+    let dA = mse_grad(A_prev, Y_data);
+
+    l = total_layers - 1;
+    while l >= 0 {
+        let dZ = dA;
+        if l < total_layers - 1 {
+            // Apply ReLU derivative
+            dZ = dA * relu_masks[l];
+        }
+
+        // dW = X^T @ dZ
+        let dW = matmul(activations[l].transpose(), dZ);
+        // db = sum_axis(dZ, 0) -- sum over batch dimension
+        let db = dZ.sum_axis(0);
+        // dX = dZ @ W^T (for next layer)
+        if l > 0 {
+            dA = matmul(dZ, weights[l].transpose());
+        }
+
+        // SGD update
+        weights[l] = weights[l] - dW * LR;
+        biases[l] = biases[l] - db * LR;
+
+        l = l - 1;
+    }
+
+    warmup_step = warmup_step + 1;
+}
+
+// ── Measured steps ───────────────────────────────────────────
+
+let step_times = [];
+let loss_samples = [];
+let grad_norm_samples = [];
+let nan_count = 0;
+let diverged = false;
+
+let measure_step = 0;
+let total_time = 0.0;
+
+while measure_step < MEASURE_STEPS {
+    let t0 = clock();
+
+    // === Forward pass ===
+    let A_prev = X_data;
+    let activations = [X_data];
+    let pre_activations = [];
+    let relu_masks = [];
+
+    let l = 0;
+    while l < total_layers {
+        let Z = matmul(A_prev, weights[l]) + biases[l];
+        pre_activations = push(pre_activations, Z);
+
+        if l < total_layers - 1 {
+            let mask = make_relu_mask(Z);
+            relu_masks = push(relu_masks, mask);
+            A_prev = Z * mask;
+        } else {
+            relu_masks = push(relu_masks, Tensor.zeros([1, 1]));
+            A_prev = Z;
+        }
+        activations = push(activations, A_prev);
+        l = l + 1;
+    }
+
+    // Loss
+    let loss = mse_loss(A_prev, Y_data);
+
+    // === Backward pass ===
+    let dA = mse_grad(A_prev, Y_data);
+    let grad_sq_total = 0.0;
+
+    l = total_layers - 1;
+    while l >= 0 {
+        let dZ = dA;
+        if l < total_layers - 1 {
+            dZ = dA * relu_masks[l];
+        }
+
+        let dW = matmul(activations[l].transpose(), dZ);
+        let db = dZ.sum_axis(0);
+
+        // Accumulate gradient norm
+        grad_sq_total = grad_sq_total + tensor_sq_sum(dW) + tensor_sq_sum(db);
+
+        if l > 0 {
+            dA = matmul(dZ, weights[l].transpose());
+        }
+
+        // SGD update
+        weights[l] = weights[l] - dW * LR;
+        biases[l] = biases[l] - db * LR;
+
+        l = l - 1;
+    }
+
+    let t1 = clock();
+    let step_time = t1 - t0;
+    step_times = push(step_times, step_time);
+    total_time = total_time + step_time;
+
+    // Sample metrics every 100 steps (or every step if fewer than 100)
+    let sample_interval = 100;
+    if MEASURE_STEPS < 200 {
+        sample_interval = 10;
+    }
+
+    if measure_step % sample_interval == 0 {
+        loss_samples = push(loss_samples, loss);
+        let grad_norm = sqrt(grad_sq_total);
+        grad_norm_samples = push(grad_norm_samples, grad_norm);
+
+        if is_nan(loss) {
+            nan_count = nan_count + 1;
+            diverged = true;
+        }
+        if is_inf(loss) {
+            nan_count = nan_count + 1;
+            diverged = true;
+        }
+        if loss > 1e10 {
+            diverged = true;
+        }
+    }
+
+    measure_step = measure_step + 1;
+}
+
+// ── Compute metrics ──────────────────────────────────────────
+
+let n_steps = len(step_times);
+let sorted_times = sort(step_times);
+
+// Convert to microseconds
+let sorted_us = [];
+let st_i = 0;
+while st_i < n_steps {
+    sorted_us = push(sorted_us, sorted_times[st_i] * 1000000.0);
+    st_i = st_i + 1;
+}
+
+let p50_idx = n_steps * 50 / 100;
+let p95_idx = n_steps * 95 / 100;
+let p99_idx = n_steps * 99 / 100;
+
+let p50 = 0.0;
+let p95 = 0.0;
+let p99 = 0.0;
+if n_steps > 0 {
+    p50 = sorted_us[p50_idx];
+    p95 = sorted_us[p95_idx];
+    p99 = sorted_us[p99_idx];
+}
+
+let steps_per_sec = 0.0;
+let examples_per_sec = 0.0;
+if total_time > 0.0 {
+    steps_per_sec = float(MEASURE_STEPS) / total_time;
+    examples_per_sec = steps_per_sec * float(BATCH);
+}
+
+// Hashes
+let final_h = 0.0;
+let l_h = 0;
+while l_h < total_layers {
+    final_h = hash_tensor(weights[l_h], final_h);
+    final_h = hash_tensor(biases[l_h], final_h);
+    l_h = l_h + 1;
+}
+
+let loss_h = hash_array(loss_samples, 0.0);
+
+// Gradient norm stats
+let gn_min = 1e30;
+let gn_max = 0.0;
+let gn_i = 0;
+while gn_i < len(grad_norm_samples) {
+    gn_min = min_f(gn_min, grad_norm_samples[gn_i]);
+    gn_max = max_f(gn_max, grad_norm_samples[gn_i]);
+    gn_i = gn_i + 1;
+}
+if len(grad_norm_samples) == 0 {
+    gn_min = 0.0;
+}
+
+let loss_start = 0.0;
+let loss_end = 0.0;
+if len(loss_samples) > 0 {
+    loss_start = loss_samples[0];
+    loss_end = loss_samples[len(loss_samples) - 1];
+}
+
+// ── Output JSONL ─────────────────────────────────────────────
+// CJC doesn't have string formatting, so we build the JSON manually.
+
+print("{\"impl\":\"cjc\",\"case\":\"", CASE_NAME,
+    "\",\"trial\":", TRIAL_NUM,
+    ",\"steps\":", MEASURE_STEPS,
+    ",\"batch_size\":", BATCH,
+    ",\"seconds\":", total_time,
+    ",\"steps_per_sec\":", steps_per_sec,
+    ",\"examples_per_sec\":", examples_per_sec,
+    ",\"p50_us\":", p50,
+    ",\"p95_us\":", p95,
+    ",\"p99_us\":", p99,
+    ",\"final_hash\":\"", final_h,
+    "\",\"loss_hash\":\"", loss_h,
+    "\",\"loss_start\":", loss_start,
+    ",\"loss_end\":", loss_end,
+    ",\"grad_norm_min\":", gn_min,
+    ",\"grad_norm_max\":", gn_max,
+    ",\"nan_count\":", nan_count,
+    ",\"diverged\":", diverged,
+    "}");
+
+print("CJC_BENCH_COMPLETE");

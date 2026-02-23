@@ -1,0 +1,120 @@
+// ============================================================================
+// bench_cnn_2d_vision.cjc — Phase 7: 2D CNN Vision Stress Test
+// ============================================================================
+//
+// Simulates a spatial feature extraction pipeline for vision/imaging workloads.
+//
+// Architecture (10×10 spatial input for interpreter speed; algorithm is
+// identical to the 64×64 RGB case — just scale the shapes):
+//
+//   Input:   [1, 1, 10, 10]              1 channel, 10×10 frame
+//   Layer 1: Conv2D(1→4, k=3, stride=1) + ReLU  → [1, 4, 8, 8]
+//   Layer 2: Conv2D(4→8, k=3, stride=2) + ReLU  → [1, 8, 3, 3]
+//   Output:  Scalar fingerprint (binned sum of final activations)
+//
+// Determinism Contract:
+//   The "Deterministic Fingerprint" must be bit-identical across all runs.
+//   Achieved via BinnedAccumulatorF64 inner loops in conv2d_raw.
+//
+// NoGC Contract:
+//   All conv2d and relu operations are @nogc-safe builtins.
+//
+// Usage:
+//   cjc run bench/bench_cnn_2d_vision.cjc
+//   cjc run --mir-opt bench/bench_cnn_2d_vision.cjc
+// ============================================================================
+
+// --- Layer 1 weights: [C_out=4, C_in=1, kH=3, kW=3] = 36 elements ---
+// Fixed synthetic edge-detection-style filters.
+let filters1 = Tensor.from_vec(
+    [ 1.0, 0.0,-1.0,  1.0, 0.0,-1.0,  1.0, 0.0,-1.0,
+      0.0, 1.0, 0.0, -1.0, 0.0, 1.0,  0.0,-1.0, 0.0,
+      1.0, 1.0, 1.0,  0.0, 0.0, 0.0, -1.0,-1.0,-1.0,
+      0.5,-0.5, 0.5, -0.5, 0.5,-0.5,  0.5,-0.5, 0.5],
+    [4, 1, 3, 3]
+);
+let bias1 = Tensor.zeros([4]);
+
+// --- Layer 2 weights: [C_out=8, C_in=4, kH=3, kW=3] = 288 elements ---
+// Simple alternating +0.1/-0.1 pattern for reproducibility.
+let filters2 = Tensor.from_vec(
+    [ 0.1,-0.1, 0.1,-0.1, 0.1,-0.1, 0.1,-0.1, 0.1,
+      0.1,-0.1, 0.1,-0.1, 0.1,-0.1, 0.1,-0.1, 0.1,
+      0.1,-0.1, 0.1,-0.1, 0.1,-0.1, 0.1,-0.1, 0.1,
+      0.1,-0.1, 0.1,-0.1, 0.1,-0.1, 0.1,-0.1, 0.1,
+     -0.1, 0.1,-0.1, 0.1,-0.1, 0.1,-0.1, 0.1,-0.1,
+     -0.1, 0.1,-0.1, 0.1,-0.1, 0.1,-0.1, 0.1,-0.1,
+     -0.1, 0.1,-0.1, 0.1,-0.1, 0.1,-0.1, 0.1,-0.1,
+     -0.1, 0.1,-0.1, 0.1,-0.1, 0.1,-0.1, 0.1,-0.1,
+      0.2,-0.2, 0.2,-0.2, 0.2,-0.2, 0.2,-0.2, 0.2,
+      0.2,-0.2, 0.2,-0.2, 0.2,-0.2, 0.2,-0.2, 0.2,
+      0.2,-0.2, 0.2,-0.2, 0.2,-0.2, 0.2,-0.2, 0.2,
+      0.2,-0.2, 0.2,-0.2, 0.2,-0.2, 0.2,-0.2, 0.2,
+     -0.2, 0.2,-0.2, 0.2,-0.2, 0.2,-0.2, 0.2,-0.2,
+     -0.2, 0.2,-0.2, 0.2,-0.2, 0.2,-0.2, 0.2,-0.2,
+     -0.2, 0.2,-0.2, 0.2,-0.2, 0.2,-0.2, 0.2,-0.2,
+     -0.2, 0.2,-0.2, 0.2,-0.2, 0.2,-0.2, 0.2,-0.2,
+      0.3,-0.3, 0.3,-0.3, 0.3,-0.3, 0.3,-0.3, 0.3,
+      0.3,-0.3, 0.3,-0.3, 0.3,-0.3, 0.3,-0.3, 0.3,
+      0.3,-0.3, 0.3,-0.3, 0.3,-0.3, 0.3,-0.3, 0.3,
+      0.3,-0.3, 0.3,-0.3, 0.3,-0.3, 0.3,-0.3, 0.3,
+     -0.3, 0.3,-0.3, 0.3,-0.3, 0.3,-0.3, 0.3,-0.3,
+     -0.3, 0.3,-0.3, 0.3,-0.3, 0.3,-0.3, 0.3,-0.3,
+     -0.3, 0.3,-0.3, 0.3,-0.3, 0.3,-0.3, 0.3,-0.3,
+     -0.3, 0.3,-0.3, 0.3,-0.3, 0.3,-0.3, 0.3,-0.3,
+      0.4,-0.4, 0.4,-0.4, 0.4,-0.4, 0.4,-0.4, 0.4,
+      0.4,-0.4, 0.4,-0.4, 0.4,-0.4, 0.4,-0.4, 0.4,
+      0.4,-0.4, 0.4,-0.4, 0.4,-0.4, 0.4,-0.4, 0.4,
+      0.4,-0.4, 0.4,-0.4, 0.4,-0.4, 0.4,-0.4, 0.4,
+     -0.4, 0.4,-0.4, 0.4,-0.4, 0.4,-0.4, 0.4,-0.4,
+     -0.4, 0.4,-0.4, 0.4,-0.4, 0.4,-0.4, 0.4,-0.4,
+     -0.4, 0.4,-0.4, 0.4,-0.4, 0.4,-0.4, 0.4,-0.4,
+     -0.4, 0.4,-0.4, 0.4,-0.4, 0.4,-0.4, 0.4,-0.4],
+    [8, 4, 3, 3]
+);
+let bias2 = Tensor.zeros([8]);
+
+// --- Fixed 10×10 single-channel input frame ---
+// Repeating synthetic ramp: pixel[i] = (i mod 10) * 0.1
+let input = Tensor.from_vec(
+    [0.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,
+     0.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,
+     0.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,
+     0.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,
+     0.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,
+     0.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,
+     0.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,
+     0.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,
+     0.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,
+     0.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9],
+    [1, 1, 10, 10]
+);
+
+print("CNN_2D_START");
+let t0 = clock();
+
+// --- Processing loop (10 frames) ---
+// Same fixed input each frame — fingerprint must be identical every iteration,
+// proving BinnedAccumulatorF64 determinism.
+let frames = 10;
+let frame_i = 0;
+let fingerprint = 0.0;
+
+while frame_i < frames {
+    // Layer 1: [1,1,10,10] → [1,4,8,8] (valid conv, stride=1)
+    let l1 = input.conv2d(filters1, bias1, 1);
+    let a1 = l1.relu();
+
+    // Layer 2: [1,4,8,8] → [1,8,3,3] (valid conv, stride=2)
+    let l2 = a1.conv2d(filters2, bias2, 2);
+    let a2 = l2.relu();
+
+    // Accumulate scalar fingerprint
+    fingerprint = fingerprint + a2.sum();
+    frame_i = frame_i + 1;
+}
+
+let t1 = clock();
+print("Frames processed:", frames);
+print("Total Time (s):", t1 - t0);
+print("Deterministic Fingerprint:", fingerprint);

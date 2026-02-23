@@ -1,0 +1,15 @@
+fn main() -> i64 {
+    let a: i64 = 10;
+    let b: i64 = 20;
+    let c: i64 = a + b;
+    print(f"sum: {c}");
+    let d: i64 = a * b;
+    print(f"product: {d}");
+    let e: i64 = b - a;
+    print(f"diff: {e}");
+    let f: i64 = b / a;
+    print(f"div: {f}");
+    let g: i64 = 7 % 3;
+    print(f"mod: {g}");
+    c
+}

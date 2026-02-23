@@ -1,0 +1,363 @@
+================================================================================
+  CJC PROGRAMMING LANGUAGE - OFFICIAL TEST RESULTS
+================================================================================
+
+  Date:       2026-02-14 23:22 EST
+  Command:    cargo test --workspace
+  Platform:   Windows (Rust, Edition 2021)
+  Workspace:  12 crates, ~11,300 lines of Rust, zero external dependencies
+  Result:     138 TESTS PASSED | 0 FAILED | 0 IGNORED
+
+================================================================================
+  SUMMARY BY CRATE
+================================================================================
+
+  Crate           | Tests | Status
+  ----------------+-------+--------
+  cjc-ad          |    12 | PASS
+  cjc-ast         |     0 | (no tests)
+  cjc-cli         |     0 | (no tests)
+  cjc-data        |    10 | PASS
+  cjc-diag        |     3 | PASS
+  cjc-dispatch    |     8 | PASS
+  cjc-eval        |    28 | PASS
+  cjc-lexer       |    14 | PASS
+  cjc-parser      |    33 | PASS
+  cjc-repro       |     6 | PASS
+  cjc-runtime     |    17 | PASS
+  cjc-types       |     7 | PASS
+  ----------------+-------+--------
+  TOTAL           |   138 | ALL PASS
+
+================================================================================
+  FULL TEST OUTPUT (cargo test --workspace)
+================================================================================
+
+warning: unused import: `cjc_types::*`
+   --> crates\cjc-dispatch\src\lib.rs:316:9
+    |
+316 |     use cjc_types::*;
+    |         ^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `cjc-dispatch` (lib test) generated 1 warning (run `cargo fix --lib -p cjc-dispatch --tests` to apply 1 suggestion)
+warning: function `make_let_decl` is never used
+    --> crates\cjc-eval\src\lib.rs:1393:8
+     |
+1393 |     fn make_let_decl(name: &str, init: Expr) -> Decl {
+     |        ^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `cjc-eval` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+
+--- cjc-ad (Automatic Differentiation Engine) ---
+
+running 12 tests
+test tests::test_dual_add ... ok
+test tests::test_dual_chain_rule ... ok
+test tests::test_dual_exp ... ok
+test tests::test_dual_div ... ok
+test tests::test_dual_sin_cos ... ok
+test tests::test_reverse_add ... ok
+test tests::test_finite_diff_validation ... ok
+test tests::test_dual_mul ... ok
+test tests::test_reverse_matmul_gradient ... ok
+test tests::test_reverse_mean_gradient ... ok
+test tests::test_reverse_mse_loss ... ok
+test tests::test_reverse_mul ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+--- cjc-data (Data Processing DSL) ---
+
+running 10 tests
+test tests::test_dataframe_creation ... ok
+test tests::test_column_not_found ... ok
+test tests::test_empty_dataframe ... ok
+test tests::test_display ... ok
+test tests::test_expr_display ... ok
+test tests::test_aggregation_functions ... ok
+test tests::test_filter ... ok
+test tests::test_filter_then_aggregate ... ok
+test tests::test_group_by_summarize ... ok
+test tests::test_to_tensor_data ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+--- cjc-diag (Diagnostics & Error Reporting) ---
+
+running 3 tests
+test tests::test_diagnostic_bag ... ok
+test tests::test_diagnostic_render ... ok
+test tests::test_span_merge ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+--- cjc-dispatch (Multiple Dispatch System) ---
+
+running 8 tests
+test tests::test_specificity_ordering ... ok
+test tests::test_no_match ... ok
+test tests::test_constrained_over_unconstrained ... ok
+test tests::test_concrete_dispatch ... ok
+test tests::test_concrete_over_generic ... ok
+test tests::test_dispatch_error_diagnostic ... ok
+test tests::test_undefined_function ... ok
+test tests::test_wrong_arity ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+--- cjc-eval (Tree-Walk Interpreter) ---
+
+running 28 tests
+test tests::test_basic_arithmetic_int ... ok
+test tests::test_basic_arithmetic_float ... ok
+test tests::test_boolean_logic ... ok
+test tests::test_comparison_operators ... ok
+test tests::test_array_literal_and_indexing ... ok
+test tests::test_division_by_zero ... ok
+test tests::test_function_call ... ok
+test tests::test_early_return ... ok
+test tests::test_if_else ... ok
+test tests::test_if_else_chain ... ok
+test tests::test_matmul ... ok
+test tests::test_mixed_int_float_arithmetic ... ok
+test tests::test_nested_scopes ... ok
+test tests::test_pipe_with_extra_args ... ok
+test tests::test_pipe_operator ... ok
+test tests::test_print_builtin ... ok
+test tests::test_string_concatenation ... ok
+test tests::test_recursive_function ... ok
+test tests::test_struct_creation_and_field_access ... ok
+test tests::test_struct_field_assignment ... ok
+test tests::test_tensor_arithmetic ... ok
+test tests::test_tensor_multi_index ... ok
+test tests::test_tensor_operations ... ok
+test tests::test_tensor_randn_deterministic ... ok
+test tests::test_unary_operators ... ok
+test tests::test_undefined_variable ... ok
+test tests::test_variable_assignment ... ok
+test tests::test_while_loop ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+--- cjc-lexer (Tokenizer / Lexical Analyzer) ---
+
+running 14 tests
+test tests::test_block_comment ... ok
+test tests::test_comments ... ok
+test tests::test_identifiers ... ok
+test tests::test_delimiters ... ok
+test tests::test_function_signature ... ok
+test tests::test_empty ... ok
+test tests::test_keywords ... ok
+test tests::test_nested_block_comment ... ok
+test tests::test_numbers ... ok
+test tests::test_operators ... ok
+test tests::test_pipe_operator ... ok
+test tests::test_spans ... ok
+test tests::test_strings ... ok
+test tests::test_unterminated_string ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+--- cjc-parser (Recursive Descent Parser) ---
+
+running 33 tests
+test tests::test_error_expected_expression ... ok
+test tests::test_error_recovery_missing_semicolon ... ok
+test tests::test_parse_array_literal ... ok
+test tests::test_parse_assignment ... ok
+test tests::test_error_recovery_unexpected_token ... ok
+test tests::test_parse_binary_precedence ... ok
+test tests::test_parse_class ... ok
+test tests::test_parse_call_with_named_args ... ok
+test tests::test_parse_col ... ok
+test tests::test_parse_comparison_chain ... ok
+test tests::test_parse_field_access_and_method_call ... ok
+test tests::test_parse_fn_no_return_type ... ok
+test tests::test_parse_fn_nogc ... ok
+test tests::test_parse_fn_simple ... ok
+test tests::test_parse_full_program ... ok
+test tests::test_parse_impl ... ok
+test tests::test_parse_import ... ok
+test tests::test_parse_if_else_if_else ... ok
+test tests::test_parse_import_no_alias ... ok
+test tests::test_parse_index_and_multi_index ... ok
+test tests::test_parse_let ... ok
+test tests::test_parse_let_mut ... ok
+test tests::test_parse_logical_operators ... ok
+test tests::test_parse_nogc_block ... ok
+test tests::test_parse_pipe ... ok
+test tests::test_parse_pipe_chain ... ok
+test tests::test_parse_return ... ok
+test tests::test_parse_struct_generic ... ok
+test tests::test_parse_struct_literal ... ok
+test tests::test_parse_struct_simple ... ok
+test tests::test_parse_trait ... ok
+test tests::test_parse_unary ... ok
+test tests::test_parse_while ... ok
+
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+--- cjc-repro (Reproducibility: Deterministic RNG & Summation) ---
+
+running 6 tests
+test tests::test_rng_deterministic ... ok
+test tests::test_kahan_sum ... ok
+test tests::test_kahan_sum_f32 ... ok
+test tests::test_rng_f64_range ... ok
+test tests::test_rng_fork_deterministic ... ok
+test tests::test_pairwise_sum ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+--- cjc-runtime (Memory Manager, Buffers, Tensors, GC) ---
+
+running 17 tests
+test tests::test_buffer_alloc_get_set ... ok
+test tests::test_buffer_clone_buffer_forces_deep_copy ... ok
+test tests::test_buffer_cow_behavior ... ok
+test tests::test_buffer_from_vec ... ok
+test tests::test_gc_alloc_and_read ... ok
+test tests::test_gc_collect_frees_unreachable ... ok
+test tests::test_gc_slot_reuse ... ok
+test tests::test_tensor_creation_and_indexing ... ok
+test tests::test_tensor_elementwise_ops ... ok
+test tests::test_tensor_from_vec_and_set ... ok
+test tests::test_tensor_matmul_correctness ... ok
+test tests::test_tensor_matmul_nonsquare ... ok
+test tests::test_tensor_randn_deterministic ... ok
+test tests::test_tensor_reshape_shares_buffer ... ok
+test tests::test_tensor_sum_and_mean ... ok
+test tests::test_value_display ... ok
+test tests::test_stable_summation_via_tensor ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+--- cjc-types (Type System: Inference, Generics, Traits) ---
+
+running 7 tests
+test tests::test_builtin_types ... ok
+test tests::test_scope ... ok
+test tests::test_matmul_shape_check ... ok
+test tests::test_trait_satisfaction ... ok
+test tests::test_type_display ... ok
+test tests::test_value_vs_gc_type ... ok
+test tests::test_types_match ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+================================================================================
+  WHAT THESE TESTS PROVE
+================================================================================
+
+  LEXER (14 tests):
+    - Tokenizes keywords, identifiers, numbers, strings, operators, delimiters
+    - Handles line comments, block comments, nested block comments
+    - Correctly tracks source spans for error reporting
+    - Detects unterminated strings with proper error recovery
+    - Recognizes CJC-specific pipe operator |>
+
+  PARSER (33 tests):
+    - Parses complete CJC programs (structs, functions, traits, impls, let bindings)
+    - Handles operator precedence via Pratt parsing (*, / bind tighter than +, -)
+    - Parses complex expressions: field access, method calls, indexing, multi-indexing
+    - Parses control flow: if/else, if/else-if/else, while loops
+    - Parses CJC-specific features: nogc blocks, pipe chains, col() expressions
+    - Named arguments in function calls
+    - Generic type parameters on structs
+    - Error recovery: continues parsing after syntax errors
+    - Handles struct literal vs. comparison ambiguity in conditionals
+
+  EVALUATOR (28 tests):
+    - Integer and float arithmetic with correct operator semantics
+    - Automatic int-to-float promotion in mixed expressions
+    - Boolean logic (&&, ||, !) with short-circuit evaluation
+    - All comparison operators (<, <=, >, >=, ==, !=)
+    - Unary operators (-, !)
+    - String concatenation via +
+    - Variable declaration (let), assignment, nested scopes with shadowing
+    - If/else and if/else-if chains as expressions (return values)
+    - While loops
+    - Function definitions, calls, early return
+    - Recursive functions (factorial)
+    - Struct creation, field access, field mutation
+    - Array literals and indexing
+    - Pipe operator (|>) desugaring to function calls
+    - Tensor creation, arithmetic, matmul, multi-dimensional indexing
+    - Deterministic tensor operations (RNG-seeded)
+    - Division by zero error handling
+    - Undefined variable error detection
+    - Built-in print() function
+
+  AUTOMATIC DIFFERENTIATION (12 tests):
+    - Forward-mode AD via Dual numbers: add, mul, div, exp, sin/cos, chain rule
+    - Finite difference validation (numerically verifies AD gradients)
+    - Reverse-mode AD via GradNode graph: add, mul, matmul gradients
+    - MSE loss backward pass with correct gradient computation
+    - Mean gradient aggregation
+
+  RUNTIME (17 tests):
+    - Buffer allocation, get/set with bounds checking
+    - Copy-on-write (COW) semantics: writes to shared buffer trigger deep copy
+    - clone_buffer forces independent deep copies
+    - Tensor creation from shape, from_vec, indexing, set operations
+    - Element-wise tensor ops (add, sub, mul, div)
+    - Matrix multiplication (square and non-square)
+    - Tensor reshape with buffer sharing (zero-copy)
+    - Tensor sum and mean reductions
+    - Deterministic randn with seeded RNG
+    - Stable summation via Kahan algorithm in tensors
+    - GC allocation, read-back, collection of unreachable objects, slot reuse
+    - Value display formatting
+
+  TYPE SYSTEM (7 tests):
+    - Built-in type recognition (Int, Float, Bool, String, Tensor)
+    - Type variable scoping and shadowing
+    - Generic type matching with constraints
+    - Trait satisfaction checking
+    - Value vs. GC type classification (for nogc enforcement)
+    - Matrix shape checking for matmul compatibility
+    - Type display formatting
+
+  DISPATCH (8 tests):
+    - Concrete type dispatch (exact match)
+    - Generic dispatch (type variable)
+    - Specificity ordering: Concrete > Constrained > Generic > None
+    - Constrained dispatch beats unconstrained generic
+    - Error: no matching method
+    - Error: undefined function
+    - Error: wrong arity
+    - Diagnostic generation for dispatch errors
+
+  DATA DSL (10 tests):
+    - DataFrame creation from column vectors
+    - Column access and "column not found" errors
+    - Empty DataFrame handling
+    - Display formatting (tabular output)
+    - Expression display (pretty-printed logical plan)
+    - Filter operations (predicate-based row selection)
+    - Aggregation functions (sum, mean, count, min, max)
+    - Chained filter-then-aggregate pipelines
+    - GroupBy with summarize (grouping + per-group aggregation)
+    - DataFrame-to-Tensor data conversion
+
+  REPRODUCIBILITY (6 tests):
+    - SplitMix64 RNG determinism (same seed = same sequence)
+    - RNG fork determinism (child RNGs are reproducible)
+    - RNG f64 output range [0, 1)
+    - Kahan summation accuracy (f64 and f32)
+    - Pairwise summation accuracy
+
+  DIAGNOSTICS (3 tests):
+    - DiagnosticBag collects errors and warnings
+    - Source span merging for multi-token errors
+    - Rendered diagnostic output formatting
+
+================================================================================
+  END OF TEST REPORT
+================================================================================

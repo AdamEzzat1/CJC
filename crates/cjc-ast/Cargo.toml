@@ -1,0 +1,6 @@
+[package]
+name = "cjc-ast"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

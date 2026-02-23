@@ -1,0 +1,7 @@
+[package]
+name = "cjc-ad"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cjc-runtime = { workspace = true }

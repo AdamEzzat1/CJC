@@ -1,0 +1,13 @@
+[package]
+name = "ad-bench"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ad_bench"
+path = "main.rs"
+
+[dependencies]
+cjc-ad = { path = "../../crates/cjc-ad" }
+cjc-runtime = { path = "../../crates/cjc-runtime" }
+cjc-repro = { path = "../../crates/cjc-repro" }

@@ -1,0 +1,13 @@
+[package]
+name = "nlp-preprocess-bench"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "nlp_preprocess_bench"
+path = "main.rs"
+
+[dependencies]
+cjc-ast = { path = "../../crates/cjc-ast" }
+cjc-eval = { path = "../../crates/cjc-eval" }
+cjc-runtime = { path = "../../crates/cjc-runtime" }

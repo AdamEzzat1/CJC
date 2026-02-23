@@ -1,0 +1,28 @@
+// CJC Reference Kernel C: CSV Scanner + Typed Parse
+// Scan/parse rows without per-field allocations.
+//
+// Pipeline: split on newline -> split on comma -> validate/accumulate
+//
+// NOTE: This file documents the intended CJC syntax. Actual execution is
+// done via the Rust integration test harness.
+
+let csv_data: ByteSlice = b"name,age,score\nAlice,30,95.5\nBob,25,87.3\nCharlie,35,91.2";
+
+// Split rows
+let rows = csv_data.split_byte(b'\n');
+
+// Skip header
+let header = rows[0];
+let header_fields = header.split_byte(b',');
+print(header_fields);
+
+// Parse data rows
+let total_score = 0.0;
+let count = 0;
+for i in 1..rows.len() {
+    let fields = rows[i].split_byte(b',');
+    let name = fields[0];
+    let age = fields[1];
+    let score = fields[2];
+    print(name);
+}

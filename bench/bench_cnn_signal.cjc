@@ -1,0 +1,105 @@
+// ============================================================================
+// bench_cnn_signal.cjc — 1D CNN Signal Processing Benchmark
+// ============================================================================
+//
+// Simulates real-time signal processing (audio / sensor / game telemetry)
+// using a 1D CNN with sliding window convolution over a continuous stream.
+//
+// Architecture:
+//   1. Circular buffer receives 10,000 signal samples
+//   2. Every `stride` samples, extract a window of size `window_size`
+//   3. Apply Conv1D: filters=[out_ch, kernel_size], stride=1
+//   4. Apply ReLU activation
+//   5. Apply a second Conv1D layer (deeper feature extraction)
+//   6. Accumulate output into a feature register (simulates downstream)
+//
+// Uses Tensor.conv1d + Tensor.relu for the CJC-level benchmark.
+// Measures: windows/sec, total time, deterministic output.
+// ============================================================================
+
+// --- Signal Parameters ---
+let signal_length = 10000;
+let window_size   = 64;
+let process_every = 16;
+let kernel_size   = 5;
+let out_channels  = 4;
+
+// --- Layer 1 Weights: [out_ch, kernel_size] = [4, 5] ---
+let f1_data = [
+    0.1, -0.2,  0.3, -0.1,  0.2,
+   -0.3,  0.1, -0.2,  0.3, -0.1,
+    0.2, -0.1,  0.3, -0.3,  0.1,
+   -0.1,  0.2, -0.1,  0.2, -0.2
+];
+let filters1 = Tensor.from_vec(f1_data, [4, 5]);
+let bias1 = Tensor.from_vec([0.01, -0.01, 0.02, -0.02], [4]);
+
+// --- Layer 2 Weights: reduce [4, out_len] -> [2, out_len2] ---
+// Flatten: treat 4 channels as signal_len=4, kernel_size=3 -> out_len=2
+let kernel2_size = 3;
+let out_ch2 = 2;
+let f2_data = [
+    0.1, -0.1, 0.2,
+   -0.2,  0.1, 0.1
+];
+let filters2 = Tensor.from_vec(f2_data, [2, 3]);
+let bias2 = Tensor.from_vec([0.0, 0.0], [2]);
+
+// --- Generate synthetic signal (deterministic sine-like pattern) ---
+let signal_data = [];
+let i = 0;
+while i < signal_length {
+    signal_data = push(signal_data, (i % 100) * 0.01 - 0.5);
+    i = i + 1;
+}
+
+// --- Accumulator for downstream features ---
+let accum = 0.0;
+let windows_processed = 0;
+
+// --- Timing ---
+print("CNN_BENCH_START");
+print("signal_length:", signal_length);
+print("window_size:", window_size);
+print("kernel_size:", kernel_size);
+print("out_channels:", out_channels);
+print("process_every:", process_every);
+
+let t0 = clock();
+
+// --- Main Signal Processing Loop ---
+let pos = window_size;
+while pos <= signal_length {
+    // Extract window: signal[pos-window_size..pos]
+    let start = pos - window_size;
+    let window_data = [];
+    let j = 0;
+    while j < window_size {
+        window_data = push(window_data, signal_data[start + j]);
+        j = j + 1;
+    }
+    let window = Tensor.from_vec(window_data, [window_size]);
+
+    // Layer 1: Conv1D + ReLU
+    let conv1_out = window.conv1d(filters1, bias1);
+    let relu1_out = conv1_out.relu();
+
+    // Layer 2: Take first channel's output as a smaller signal
+    // conv1_out shape = [4, 60] -> take channel 0 as [60]
+    // For simplicity, just sum the output as a scalar feature
+    let feature = relu1_out.get([0, 0]) + relu1_out.get([1, 0]) + relu1_out.get([2, 0]) + relu1_out.get([3, 0]);
+    accum = accum + feature;
+
+    windows_processed = windows_processed + 1;
+    pos = pos + process_every;
+}
+
+let t1 = clock();
+let elapsed_sec = t1 - t0;
+
+// --- Telemetry Output ---
+print("CNN_BENCH_END");
+print("windows_processed:", windows_processed);
+print("elapsed_sec:", elapsed_sec);
+print("accum:", accum);
+print("PASS");

@@ -1,0 +1,14 @@
+[package]
+name = "cjc-runtime"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cjc-repro = { workspace = true }
+
+[dependencies.rayon]
+version = "1"
+optional = true
+
+[features]
+parallel = ["rayon"]

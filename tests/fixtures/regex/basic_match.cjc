@@ -1,0 +1,17 @@
+fn main() -> i64 {
+    // Basic regex matching with ~= operator
+    print("hello world" ~= /world/);
+    print("hello" ~= /xyz/);
+    // Not-match operator !~
+    print("hello" !~ /xyz/);
+    print("hello" !~ /hello/);
+    // Case-insensitive flag
+    print("Hello" ~= /hello/i);
+    // Digit matching
+    print("abc123" ~= /\d+/);
+    // Anchored match
+    print("abc" ~= /^abc$/);
+    // Alternation
+    print("dog" ~= /cat|dog/);
+    0
+}

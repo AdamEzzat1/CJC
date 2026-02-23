@@ -1,0 +1,6 @@
+fn main() -> i64 {
+    let name: str = "CJC";
+    let version: i64 = 1;
+    print(f"language: {name} v{version}");
+    0
+}

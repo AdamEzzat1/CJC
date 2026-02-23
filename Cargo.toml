@@ -1,0 +1,76 @@
+﻿[package]
+name = "cjc"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace]
+members = [
+    "crates/cjc-ast",
+    "crates/cjc-diag",
+    "crates/cjc-lexer",
+    "crates/cjc-parser",
+    "crates/cjc-types",
+    "crates/cjc-dispatch",
+    "crates/cjc-runtime",
+    "crates/cjc-eval",
+    "crates/cjc-ad",
+    "crates/cjc-data",
+    "crates/cjc-repro",
+    "crates/cjc-cli",
+    "crates/cjc-hir",
+    "crates/cjc-mir",
+    "crates/cjc-mir-exec",
+    "crates/cjc-regex",
+    "bench/ad_bench",
+    "bench/nlp_preprocess_bench",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# Root package dependencies — enables integration tests in tests/
+[dependencies]
+cjc-ast = { path = "crates/cjc-ast" }
+cjc-diag = { path = "crates/cjc-diag" }
+cjc-lexer = { path = "crates/cjc-lexer" }
+cjc-parser = { path = "crates/cjc-parser" }
+cjc-types = { path = "crates/cjc-types" }
+cjc-dispatch = { path = "crates/cjc-dispatch" }
+cjc-runtime = { path = "crates/cjc-runtime" }
+cjc-eval = { path = "crates/cjc-eval" }
+cjc-ad = { path = "crates/cjc-ad" }
+cjc-data = { path = "crates/cjc-data" }
+cjc-repro = { path = "crates/cjc-repro" }
+cjc-hir = { path = "crates/cjc-hir" }
+cjc-mir = { path = "crates/cjc-mir" }
+cjc-mir-exec = { path = "crates/cjc-mir-exec" }
+cjc-regex = { path = "crates/cjc-regex" }
+
+[dev-dependencies]
+proptest = "1"
+
+[workspace.dependencies]
+cjc-ast = { path = "crates/cjc-ast" }
+cjc-diag = { path = "crates/cjc-diag" }
+cjc-lexer = { path = "crates/cjc-lexer" }
+cjc-parser = { path = "crates/cjc-parser" }
+cjc-types = { path = "crates/cjc-types" }
+cjc-dispatch = { path = "crates/cjc-dispatch" }
+cjc-runtime = { path = "crates/cjc-runtime" }
+cjc-eval = { path = "crates/cjc-eval" }
+cjc-ad = { path = "crates/cjc-ad" }
+cjc-data = { path = "crates/cjc-data" }
+cjc-repro = { path = "crates/cjc-repro" }
+cjc-cli = { path = "crates/cjc-cli" }
+
+[[test]]
+name = "fixtures"
+path = "tests/fixtures/runner.rs"
+
+[[test]]
+name = "prop_tests"
+path = "tests/prop_tests/mod.rs"

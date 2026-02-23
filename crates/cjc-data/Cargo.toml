@@ -1,0 +1,8 @@
+[package]
+name = "cjc-data"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cjc-runtime = { workspace = true }
+cjc-repro = { workspace = true }

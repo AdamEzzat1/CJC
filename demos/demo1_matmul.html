@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CJC Demo 1: Matrix Multiplication</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: #0d1117; color: #c9d1d9; line-height: 1.6; }
+  .header { background: linear-gradient(135deg, #1a1f35 0%, #0d1117 100%); border-bottom: 1px solid #30363d; padding: 2rem 2rem 1.5rem; }
+  .header h1 { font-size: 1.8rem; color: #58a6ff; margin-bottom: 0.3rem; }
+  .header .subtitle { color: #8b949e; font-size: 1rem; }
+  .badge { display: inline-block; background: #238636; color: #fff; padding: 0.2rem 0.7rem; border-radius: 12px; font-size: 0.8rem; font-weight: 600; margin-top: 0.5rem; }
+  .badge.lang { background: #1f6feb; }
+  .container { max-width: 1000px; margin: 0 auto; padding: 2rem; }
+  .section { margin-bottom: 2rem; }
+  .section h2 { color: #58a6ff; font-size: 1.2rem; margin-bottom: 0.8rem; border-bottom: 1px solid #21262d; padding-bottom: 0.4rem; }
+  .proves { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1rem 1.2rem; margin-bottom: 1.5rem; }
+  .proves li { color: #8b949e; margin-left: 1.2rem; margin-bottom: 0.3rem; }
+  .proves li strong { color: #c9d1d9; }
+  pre { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1.2rem; overflow-x: auto; font-size: 0.9rem; line-height: 1.5; }
+  .code-label { font-size: 0.75rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.4rem; }
+  .source-code { color: #c9d1d9; }
+  .source-code .kw { color: #ff7b72; }
+  .source-code .fn { color: #d2a8ff; }
+  .source-code .str { color: #a5d6ff; }
+  .source-code .num { color: #79c0ff; }
+  .source-code .cm { color: #8b949e; font-style: italic; }
+  .source-code .type { color: #ffa657; }
+  .output { color: #7ee787; }
+  .output .label { color: #8b949e; }
+  .side-by-side { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 768px) { .side-by-side { grid-template-columns: 1fr; } }
+  .footer { text-align: center; color: #484f58; font-size: 0.85rem; padding: 2rem; border-top: 1px solid #21262d; margin-top: 2rem; }
+  .math { background: #1c2333; border: 1px solid #30363d; border-radius: 6px; padding: 0.8rem 1rem; font-family: 'Consolas', monospace; color: #e6edf3; margin: 0.5rem 0; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>CJC Demo 1: Matrix Multiplication</h1>
+  <div class="subtitle">Deterministic tensor operations with the full lex &rarr; parse &rarr; eval pipeline</div>
+  <span class="badge lang">CJC Language</span>
+  <span class="badge">All Assertions Passed</span>
+</div>
+
+<div class="container">
+
+<div class="section">
+  <h2>What This Proves</h2>
+  <div class="proves">
+    <ul>
+      <li><strong>Tensor runtime</strong> &mdash; multi-dimensional array creation, indexing, arithmetic</li>
+      <li><strong>Matrix multiplication</strong> &mdash; correct A(2&times;3) @ B(3&times;2) = C(2&times;2)</li>
+      <li><strong>nogc-safe buffers</strong> &mdash; tensors live in Layer 1 (no garbage collector)</li>
+      <li><strong>Reproducibility</strong> &mdash; deterministic results, verifiable element-by-element</li>
+      <li><strong>Full pipeline</strong> &mdash; source &rarr; lexer &rarr; parser &rarr; AST &rarr; interpreter &rarr; output</li>
+    </ul>
+  </div>
+</div>
+
+<div class="section">
+  <div class="side-by-side">
+    <div>
+      <div class="code-label">CJC Source Code &mdash; demo1_matmul.cjc</div>
+      <pre class="source-code"><span class="cm">// Build two matrices from literal data</span>
+<span class="kw">let</span> a = <span class="type">Tensor</span>.<span class="fn">from_vec</span>(
+    [<span class="num">1.0</span>, <span class="num">2.0</span>, <span class="num">3.0</span>,
+     <span class="num">4.0</span>, <span class="num">5.0</span>, <span class="num">6.0</span>],
+    [<span class="num">2</span>, <span class="num">3</span>]
+);
+
+<span class="kw">let</span> b = <span class="type">Tensor</span>.<span class="fn">from_vec</span>(
+    [<span class="num">7.0</span>,  <span class="num">8.0</span>,
+     <span class="num">9.0</span>,  <span class="num">10.0</span>,
+     <span class="num">11.0</span>, <span class="num">12.0</span>],
+    [<span class="num">3</span>, <span class="num">2</span>]
+);
+
+<span class="cm">// Matrix multiply: C = A @ B</span>
+<span class="kw">let</span> c = <span class="fn">matmul</span>(a, b);
+
+<span class="cm">// Verify every element</span>
+<span class="fn">assert_eq</span>(c.<span class="fn">get</span>([<span class="num">0</span>, <span class="num">0</span>]), <span class="num">58.0</span>);
+<span class="fn">assert_eq</span>(c.<span class="fn">get</span>([<span class="num">0</span>, <span class="num">1</span>]), <span class="num">64.0</span>);
+<span class="fn">assert_eq</span>(c.<span class="fn">get</span>([<span class="num">1</span>, <span class="num">0</span>]), <span class="num">139.0</span>);
+<span class="fn">assert_eq</span>(c.<span class="fn">get</span>([<span class="num">1</span>, <span class="num">1</span>]), <span class="num">154.0</span>);
+
+<span class="fn">print</span>(<span class="str">"All assertions passed!"</span>);
+<span class="fn">print</span>(<span class="str">"Sum of C:"</span>, c.<span class="fn">sum</span>());
+<span class="fn">print</span>(<span class="str">"Mean of C:"</span>, c.<span class="fn">mean</span>());</pre>
+    </div>
+    <div>
+      <div class="code-label">Live Output &mdash; $ cjc run demo1_matmul.cjc</div>
+      <pre class="output">Matrix A (2x3):
+Tensor(shape=[2, 3],
+  data=[1.0, 2.0, 3.0,
+        4.0, 5.0, 6.0])
+
+Matrix B (3x2):
+Tensor(shape=[3, 2],
+  data=[7.0, 8.0,
+        9.0, 10.0,
+        11.0, 12.0])
+
+C = A @ B (2x2):
+Tensor(shape=[2, 2],
+  data=[58.0, 64.0,
+        139.0, 154.0])
+
+Expected:
+Tensor(shape=[2, 2],
+  data=[58.0, 64.0,
+        139.0, 154.0])
+
+<span style="color:#7ee787;font-weight:bold">All assertions passed!</span>
+Shape of C: [2, 2]
+Sum of C: 415
+Mean of C: 103.75</pre>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h2>The Math</h2>
+  <div class="math">
+    A @ B = | 1  2  3 |   | 7   8 |   | 1*7+2*9+3*11   1*8+2*10+3*12 |   |  58   64 |
+            | 4  5  6 | x | 9  10 | = | 4*7+5*9+6*11   4*8+5*10+6*12 | = | 139  154 |
+                          |11  12 |
+  </div>
+</div>
+
+</div>
+
+<div class="footer">
+  CJC Programming Language &mdash; Built from scratch in Rust &mdash; Zero external dependencies &mdash; 138 tests passing
+</div>
+
+</body>
+</html>

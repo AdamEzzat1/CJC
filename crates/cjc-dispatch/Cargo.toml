@@ -1,0 +1,9 @@
+[package]
+name = "cjc-dispatch"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cjc-ast = { workspace = true }
+cjc-types = { workspace = true }
+cjc-diag = { workspace = true }

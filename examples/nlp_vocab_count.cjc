@@ -1,0 +1,26 @@
+// CJC Reference Kernel B: Vocab Counter
+// Counts token frequencies and emits top-K sorted deterministically.
+//
+// Pipeline: split -> count into Map<ByteSlice, i64> -> sort by count desc, token asc
+//
+// NOTE: This file documents the intended CJC syntax. Actual execution is
+// done via the Rust integration test harness.
+
+let input: ByteSlice = b"the cat sat on the mat the cat on the mat";
+
+// Split on space
+let tokens = input.split_byte(b' ');
+
+// Count into a map
+let counts = Map();
+for i in 0..tokens.len() {
+    let tok = tokens[i];
+    if counts.contains_key(tok) {
+        counts.insert(tok, counts.get(tok) + 1);
+    } else {
+        counts.insert(tok, 1);
+    }
+}
+
+// Emit sorted output (count desc, token bytes asc)
+print(counts);

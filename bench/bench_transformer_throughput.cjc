@@ -1,0 +1,155 @@
+// ============================================================================
+// bench_transformer_throughput.cjc — Transformer Block Throughput Benchmark
+// ============================================================================
+//
+// Simulates autoregressive token generation through a standard Transformer
+// block (Attention + FFN) for 1,000 tokens using CJC's Phase 4 engine.
+//
+// Architecture per token:
+//   1. LayerNorm(x)
+//   2. Q/K/V = linear projections
+//   3. KV-Cache append (PagedKvCache, zero-allocation)
+//   4. Multi-Head Attention (split_heads → attention → merge_heads)
+//   5. Residual + Output projection
+//   6. FFN: linear → gelu → linear + residual
+//
+// Measures: tokens/sec, total time, cache utilization, memory stability.
+// ============================================================================
+
+// --- Model Hyperparameters ---
+let model_dim  = 128;
+let num_heads  = 4;
+let head_dim   = model_dim / num_heads;
+let ff_dim     = 256;
+let max_seq    = 1024;
+let gen_tokens = 1000;
+
+// --- Weight Initialization ---
+// Q/K/V/O projection weights: [model_dim, model_dim] = [128, 128]
+let wq_data = [];
+let wk_data = [];
+let wv_data = [];
+let wo_data = [];
+let i = 0;
+while i < model_dim * model_dim {
+    wq_data = push(wq_data, ((i % 127) + 1) * 0.0001);
+    wk_data = push(wk_data, ((i % 131) + 1) * 0.0001);
+    wv_data = push(wv_data, ((i % 137) + 1) * 0.0001);
+    wo_data = push(wo_data, ((i % 139) + 1) * 0.00005);
+    i = i + 1;
+}
+let Wq = Tensor.from_vec(wq_data, [model_dim, model_dim]);
+let Wk = Tensor.from_vec(wk_data, [model_dim, model_dim]);
+let Wv = Tensor.from_vec(wv_data, [model_dim, model_dim]);
+let Wo = Tensor.from_vec(wo_data, [model_dim, model_dim]);
+let bias_qkvo = Tensor.zeros([model_dim]);
+
+// FFN weights: W1=[ff_dim, model_dim], W2=[model_dim, ff_dim]
+let ff1_data = [];
+let ff2_data = [];
+i = 0;
+while i < ff_dim * model_dim {
+    ff1_data = push(ff1_data, ((i % 149) + 1) * 0.00005);
+    i = i + 1;
+}
+i = 0;
+while i < model_dim * ff_dim {
+    ff2_data = push(ff2_data, ((i % 151) + 1) * 0.00003);
+    i = i + 1;
+}
+let W_ff1 = Tensor.from_vec(ff1_data, [ff_dim, model_dim]);
+let W_ff2 = Tensor.from_vec(ff2_data, [model_dim, ff_dim]);
+let bias_ff1 = Tensor.zeros([ff_dim]);
+let bias_ff2 = Tensor.zeros([model_dim]);
+
+// LayerNorm parameters
+let gamma = Tensor.ones([model_dim]);
+let beta  = Tensor.zeros([model_dim]);
+
+// --- KV-Cache Setup (PagedKvCache) ---
+let cache_k = PagedKvCache.new(max_seq, model_dim);
+let cache_v = PagedKvCache.new(max_seq, model_dim);
+
+// --- Initial token embedding (simulated) ---
+let embed_data = [];
+i = 0;
+while i < model_dim {
+    embed_data = push(embed_data, (i + 1) * 0.01);
+    i = i + 1;
+}
+
+// --- Telemetry ---
+print("TRANSFORMER_BENCH_START");
+print("model_dim:", model_dim);
+print("num_heads:", num_heads);
+print("ff_dim:", ff_dim);
+print("gen_tokens:", gen_tokens);
+print("max_seq:", max_seq);
+
+let t0 = clock();
+
+// --- Main Generation Loop: 1,000 tokens ---
+let token = 0;
+let x = Tensor.from_vec(embed_data, [1, 1, model_dim]);
+
+while token < gen_tokens {
+    // Step 1: Pre-norm
+    let x_norm = x.layer_norm(gamma, beta);
+
+    // Step 2: Q/K/V projections  [1, 1, model_dim]
+    let Q = x_norm.linear(Wq, bias_qkvo);
+    let K = x_norm.linear(Wk, bias_qkvo);
+    let V = x_norm.linear(Wv, bias_qkvo);
+
+    // Step 3: Append K/V to PagedKvCache
+    let K_sq = K.view_reshape([1, model_dim]);
+    let V_sq = V.view_reshape([1, model_dim]);
+    cache_k.append(K_sq);
+    cache_v.append(V_sq);
+
+    // Step 4: Multi-Head Attention over full cache
+    let seq_so_far = cache_k.len();
+    let Q_heads = Q.split_heads(num_heads);
+
+    let Kt = cache_k.as_tensor();
+    let Kt_3d = Kt.view_reshape([1, seq_so_far, model_dim]);
+    let K_heads = Kt_3d.split_heads(num_heads);
+
+    let Vt = cache_v.as_tensor();
+    let Vt_3d = Vt.view_reshape([1, seq_so_far, model_dim]);
+    let V_heads = Vt_3d.split_heads(num_heads);
+
+    let attn_out = attention(Q_heads, K_heads, V_heads);
+    let attn_merged = attn_out.merge_heads();
+
+    // Step 5: Output projection + residual
+    let attn_proj = attn_merged.linear(Wo, bias_qkvo);
+    let x2 = x + attn_proj;
+
+    // Step 6: FFN block (pre-norm)
+    let x2_norm = x2.layer_norm(gamma, beta);
+    let ff_h = x2_norm.linear(W_ff1, bias_ff1);
+    let ff_a = ff_h.gelu();
+    let ff_o = ff_a.linear(W_ff2, bias_ff2);
+    x = x2 + ff_o;
+
+    token = token + 1;
+}
+
+let t1 = clock();
+let elapsed_sec = t1 - t0;
+
+// --- Telemetry Output ---
+print("TRANSFORMER_BENCH_END");
+print("tokens_generated:", gen_tokens);
+print("elapsed_sec:", elapsed_sec);
+print("cache_k_len:", cache_k.len());
+print("cache_v_len:", cache_v.len());
+print("cache_k_blocks:", cache_k.blocks_in_use());
+print("cache_v_blocks:", cache_v.blocks_in_use());
+print("cache_k_num_blocks:", cache_k.num_blocks());
+
+// Final output value for determinism
+let final_val = x.get([0, 0, 0]);
+print("final_output[0,0,0]:", final_val);
+print("PASS");

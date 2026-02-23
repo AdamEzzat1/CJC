@@ -1,0 +1,23 @@
+// CJC Reference Kernel A: Tokenizer
+// Splits input on ASCII whitespace, strips punctuation at boundaries.
+//
+// Input:  Bytes buffer (simulated as byte string literal)
+// Output: Array of ByteSlice tokens (views into the original buffer)
+//
+// This is a reference CJC program demonstrating bytes-first tokenization.
+// NOTE: This file documents the intended CJC syntax. Actual execution is
+// done via the Rust integration test harness until the full parser supports
+// all features end-to-end.
+
+let input: ByteSlice = b"  Hello, World!  The quick brown fox jumps.  ";
+
+// Split on space
+let tokens = input.trim_ascii().split_byte(b' ');
+
+// Print each token
+for i in 0..tokens.len() {
+    let tok = tokens[i];
+    if !tok.is_empty() {
+        print(tok);
+    }
+}

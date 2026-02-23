@@ -1,0 +1,18 @@
+[package]
+name = "cjc-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "cjc"
+path = "src/main.rs"
+
+[dependencies]
+cjc-ast = { workspace = true }
+cjc-lexer = { workspace = true }
+cjc-parser = { workspace = true }
+cjc-types = { workspace = true }
+cjc-eval = { workspace = true }
+cjc-hir = { path = "../cjc-hir" }
+cjc-mir = { path = "../cjc-mir" }
+cjc-mir-exec = { path = "../cjc-mir-exec" }

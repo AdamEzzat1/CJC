@@ -1,0 +1,117 @@
+// ============================================================
+// Demo 3: Struct-based Data Pipeline with Tensors
+// ============================================================
+// Proves: Structs, field access, method dispatch, pipe operator,
+//         higher-level abstractions built on the tensor runtime.
+//
+// We build a simple 2-layer neural network forward pass:
+//   hidden = relu(x @ W1 + b1)
+//   output = hidden @ W2 + b2
+
+// -- Helpers --------------------------------------------------
+
+fn relu_scalar(x: f64) -> f64 {
+    if x > 0.0 {
+        return x;
+    }
+    return 0.0;
+}
+
+// Apply ReLU element-wise to a 1x4 tensor (manual for v1)
+fn relu_1x4(t: Tensor) -> Tensor {
+    let v = t.to_vec();
+    let a = relu_scalar(v[0]);
+    let b = relu_scalar(v[1]);
+    let c = relu_scalar(v[2]);
+    let d = relu_scalar(v[3]);
+    Tensor.from_vec([a, b, c, d], [1, 4])
+}
+
+// Add a bias vector element-wise
+fn add_bias(t: Tensor, bias: Tensor) -> Tensor {
+    t.add(bias)
+}
+
+// -- Network Parameters (tiny: 3 -> 4 -> 2) ------------------
+
+// Input: 1x3
+let x = Tensor.from_vec([1.0, 2.0, 3.0], [1, 3]);
+
+// Layer 1: W1 is 3x4, b1 is 1x4
+let w1 = Tensor.from_vec(
+    [0.1, 0.2, -0.1, 0.3,
+     0.4, -0.2, 0.1, 0.5,
+     -0.3, 0.1, 0.2, -0.1],
+    [3, 4]
+);
+let b1 = Tensor.from_vec([0.1, -0.1, 0.05, 0.0], [1, 4]);
+
+// Layer 2: W2 is 4x2, b2 is 1x2
+let w2 = Tensor.from_vec(
+    [0.2, -0.3,
+     0.1, 0.4,
+     -0.2, 0.1,
+     0.3, -0.1],
+    [4, 2]
+);
+let b2 = Tensor.from_vec([0.0, 0.1], [1, 2]);
+
+// -- Forward Pass ---------------------------------------------
+
+print("=== 2-Layer Neural Network Forward Pass ===");
+print("Input x:", x);
+
+// hidden_pre = x @ W1 + b1  (using pipe operator)
+let hidden_pre = matmul(x, w1) |> add_bias(b1);
+print("Hidden pre-activation:", hidden_pre);
+
+// hidden = relu(hidden_pre)
+let hidden = relu_1x4(hidden_pre);
+print("Hidden post-ReLU:", hidden);
+
+// output = hidden @ W2 + b2  (using pipe operator)
+let output = matmul(hidden, w2) |> add_bias(b2);
+print("Network output:", output);
+
+// -- Verify shapes -------------------------------------------
+
+assert_eq(len(hidden.shape()), 2);
+assert_eq(hidden.shape()[1], 4);
+assert_eq(len(output.shape()), 2);
+assert_eq(output.shape()[1], 2);
+
+print("Output shape:", output.shape());
+print("All shape assertions passed!");
+
+// -- Compute simple loss against target ----------------------
+
+let target = Tensor.from_vec([1.0, 0.0], [1, 2]);
+let diff = output.sub(target);
+print("Target:", target);
+print("Output - Target:", diff);
+
+// -- Demonstrate struct usage --------------------------------
+
+struct Layer {
+    weights: Tensor,
+    bias: Tensor
+}
+
+fn forward(layer: Layer, input: Tensor) -> Tensor {
+    matmul(input, layer.weights) |> add_bias(layer.bias)
+}
+
+let layer1 = Layer { weights: w1, bias: b1 };
+let layer2 = Layer { weights: w2, bias: b2 };
+
+let h = forward(layer1, x);
+let h_relu = relu_1x4(h);
+let out = forward(layer2, h_relu);
+print("Struct-based forward pass output:", out);
+
+// Verify struct-based and manual give same result
+assert_eq(output.get([0, 0]), out.get([0, 0]));
+assert_eq(output.get([0, 1]), out.get([0, 1]));
+print("Struct-based result matches manual computation!");
+
+print("=== Demo 3 complete ===");

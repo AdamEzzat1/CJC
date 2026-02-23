@@ -1,0 +1,10 @@
+[package]
+name = "cjc-hir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cjc-ast = { path = "../cjc-ast" }
+cjc-types = { path = "../cjc-types" }
+cjc-diag = { path = "../cjc-diag" }

@@ -1,0 +1,36 @@
+====================================================================================================
+CJC vs NumPy Neural Network Benchmark Results
+Generated: 2026-02-16T19:17:22.358585
+====================================================================================================
+
+--- Case: mini ---
+    Mini validation case (fast)
+    B=4, D=8, H=16, O=4, L=2
+
+  Metric                                   NumPy             CJC    CJC/NumPy
+  ------------------------------------------------------------------------
+  Steps/sec (mean)                       8127.06          875.32        0.11x
+  Examples/sec (mean)                   32508.22         3501.30        0.11x
+  p50 step time (us)                      117.30         1103.60        9.41x
+  p95 step time (us)                      158.45         2198.15       13.87x
+  p99 step time (us)                      290.25         3862.90       13.31x
+  Peak RSS (MB)                            31.70            0.00             
+  Loss start                                0.18            0.63        3.46x
+  Loss end                                  0.18            0.08        0.44x
+  Grad norm min                             1.54            0.30        0.19x
+  Grad norm max                             1.54            1.95        1.27x
+  NaN count                                 0.00            0.00             
+
+  Determinism:
+    NumPy: PASS (all hashes match)
+    CJC: PASS (all hashes match)
+
+  Winner by dimension:
+    Throughput: NumPy (9.3x faster)
+    Tail latency (p99): NumPy
+
+====================================================================================================
+NOTE: CJC uses a tree-walk interpreter (no LLVM/JIT).
+NumPy uses BLAS for matmul (single-threaded).
+CJC step counts may be reduced for large cases due to interpreter speed.
+====================================================================================================

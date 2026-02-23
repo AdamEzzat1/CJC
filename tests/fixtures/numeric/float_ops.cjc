@@ -1,0 +1,9 @@
+fn main() -> i64 {
+    let x: f64 = 3.14;
+    let y: f64 = 2.0;
+    let sum: f64 = x + y;
+    print(f"float sum: {sum}");
+    let prod: f64 = x * y;
+    print(f"float prod: {prod}");
+    0
+}
