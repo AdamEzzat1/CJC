@@ -1,0 +1,14 @@
+fn classify(x: i64) -> str {
+    match x {
+        0 => "zero",
+        1 => "one",
+        _ => "other",
+    }
+}
+
+fn main() -> i64 {
+    print(classify(0));
+    print(classify(1));
+    print(classify(99));
+    0
+}

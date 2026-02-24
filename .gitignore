@@ -1,6 +1,9 @@
 /target
+fuzz/target/
 Cargo.lock
 *.exe
 *.pdb
 .claude/
 nul
+functions_temp.txt
+*_output.txt

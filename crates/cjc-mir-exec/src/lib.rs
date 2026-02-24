@@ -7,7 +7,6 @@
 //! The behavior must be **identical** to `cjc-eval` for all existing programs
 //! (Parity Gate G-1 / G-2).
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
@@ -1002,8 +1001,8 @@ impl MirExecutor {
             "print" => {
                 let parts: Vec<String> = args.iter().map(|v| format!("{v}")).collect();
                 let line = parts.join(" ");
-                self.output.push(line.clone());
                 println!("{line}");
+                self.output.push(line);
                 return Ok(Value::Void);
             }
             "Tensor.randn" => {
@@ -1842,22 +1841,22 @@ impl MirExecutor {
                     ))),
                 }
             }
-            (Value::Enum { enum_name, variant, fields }, "is_some")
+            (Value::Enum { enum_name, variant, fields: _ }, "is_some")
                 if enum_name == "Option" =>
             {
                 Ok(Value::Bool(variant == "Some"))
             }
-            (Value::Enum { enum_name, variant, fields }, "is_none")
+            (Value::Enum { enum_name, variant, fields: _ }, "is_none")
                 if enum_name == "Option" =>
             {
                 Ok(Value::Bool(variant == "None"))
             }
-            (Value::Enum { enum_name, variant, fields }, "is_ok")
+            (Value::Enum { enum_name, variant, fields: _ }, "is_ok")
                 if enum_name == "Result" =>
             {
                 Ok(Value::Bool(variant == "Ok"))
             }
-            (Value::Enum { enum_name, variant, fields }, "is_err")
+            (Value::Enum { enum_name, variant, fields: _ }, "is_err")
                 if enum_name == "Result" =>
             {
                 Ok(Value::Bool(variant == "Err"))
@@ -1935,9 +1934,7 @@ impl MirExecutor {
                 }
             }
 
-            // String methods
-            (Value::String(s), "len") => Ok(Value::Int(s.len() as i64)),
-            (Value::String(s), "is_empty") => Ok(Value::Bool(s.is_empty())),
+            // String methods (len/is_empty handled above with NoGC methods)
             (Value::String(s), "to_upper") | (Value::String(s), "to_uppercase") => {
                 Ok(Value::String(Rc::new(s.to_uppercase())))
             }
@@ -1980,8 +1977,7 @@ impl MirExecutor {
                 Ok(Value::Array(Rc::new(parts)))
             }
 
-            // Array methods
-            (Value::Array(arr), "len") => Ok(Value::Int(arr.len() as i64)),
+            // Array methods (len handled above with NoGC methods)
             (Value::Array(arr), "is_empty") => Ok(Value::Bool(arr.is_empty())),
             (Value::Array(arr), "first") => {
                 Ok(arr.first().map(|v| Value::Enum {
@@ -2274,19 +2270,6 @@ impl MirExecutor {
         }
     }
 
-    /// Extract bytes from a `ByteSlice`, `Bytes`, or `String` value.
-    fn value_to_bytes(&self, val: &Value) -> Result<Vec<u8>, MirExecError> {
-        match val {
-            Value::ByteSlice(b) => Ok(b.as_ref().clone()),
-            Value::Bytes(b)     => Ok(b.borrow().clone()),
-            Value::String(s)    => Ok(s.as_bytes().to_vec()),
-            _ => Err(MirExecError::Runtime(format!(
-                "expected ByteSlice, Bytes, or String for CSV input, got {}",
-                val.type_name()
-            ))),
-        }
-    }
-
     fn value_to_usize(&self, val: &Value) -> Result<usize, MirExecError> {
         match val {
             Value::Int(i) => {
@@ -2300,31 +2283,6 @@ impl MirExecutor {
             }
             _ => Err(MirExecError::Runtime(format!(
                 "expected Int, got {}",
-                val.type_name()
-            ))),
-        }
-    }
-
-    fn value_to_f64_vec(&self, val: &Value) -> Result<Vec<f64>, MirExecError> {
-        match val {
-            Value::Array(arr) => {
-                let mut data = Vec::with_capacity(arr.len());
-                for v in arr.iter() {
-                    match v {
-                        Value::Float(f) => data.push(*f),
-                        Value::Int(i) => data.push(*i as f64),
-                        _ => {
-                            return Err(MirExecError::Runtime(format!(
-                                "expected numeric values in array, got {}",
-                                v.type_name()
-                            )));
-                        }
-                    }
-                }
-                Ok(data)
-            }
-            _ => Err(MirExecError::Runtime(format!(
-                "expected Array, got {}",
                 val.type_name()
             ))),
         }
@@ -2356,20 +2314,6 @@ impl MirExecutor {
         }
     }
 
-    fn values_equal(&self, a: &Value, b: &Value) -> bool {
-        match (a, b) {
-            (Value::Int(a), Value::Int(b)) => a == b,
-            (Value::Float(a), Value::Float(b)) => a == b,
-            (Value::Bool(a), Value::Bool(b)) => a == b,
-            (Value::String(a), Value::String(b)) => a == b,
-            (Value::Tuple(a), Value::Tuple(b)) => {
-                a.len() == b.len()
-                    && a.iter().zip(b.iter()).all(|(x, y)| self.values_equal(x, y))
-            }
-            (Value::Void, Value::Void) => true,
-            _ => false,
-        }
-    }
 }
 
 impl Default for MirExecutor {

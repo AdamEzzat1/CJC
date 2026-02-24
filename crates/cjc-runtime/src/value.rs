@@ -299,3 +299,100 @@ impl fmt::Display for Value {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::rc::Rc;
+
+    #[test]
+    fn int_display() {
+        assert_eq!(format!("{}", Value::Int(42)), "42");
+        assert_eq!(format!("{}", Value::Int(-1)), "-1");
+    }
+
+    #[test]
+    fn float_display() {
+        let s = format!("{}", Value::Float(3.14));
+        assert!(s.starts_with("3.14"), "got: {s}");
+    }
+
+    #[test]
+    fn bool_display() {
+        assert_eq!(format!("{}", Value::Bool(true)), "true");
+        assert_eq!(format!("{}", Value::Bool(false)), "false");
+    }
+
+    #[test]
+    fn string_display() {
+        let v = Value::String(Rc::new("hello".to_string()));
+        assert_eq!(format!("{v}"), "hello");
+    }
+
+    #[test]
+    fn void_display() {
+        assert_eq!(format!("{}", Value::Void), "void");
+    }
+
+    #[test]
+    fn type_name_coverage() {
+        assert_eq!(Value::Int(0).type_name(), "Int");
+        assert_eq!(Value::Float(0.0).type_name(), "Float");
+        assert_eq!(Value::Bool(true).type_name(), "Bool");
+        assert_eq!(Value::String(Rc::new(String::new())).type_name(), "String");
+        assert_eq!(Value::Void.type_name(), "Void");
+    }
+
+    #[test]
+    fn tuple_display() {
+        let t = Value::Tuple(Rc::new(vec![
+            Value::Int(1),
+            Value::Bool(true),
+        ]));
+        let s = format!("{t}");
+        assert!(s.contains("1"), "tuple should contain 1, got: {s}");
+        assert!(s.contains("true"), "tuple should contain true, got: {s}");
+    }
+
+    #[test]
+    fn array_display() {
+        let a = Value::Array(Rc::new(vec![
+            Value::Int(10),
+            Value::Int(20),
+        ]));
+        let s = format!("{a}");
+        assert!(s.contains("10"), "array should contain 10, got: {s}");
+        assert!(s.contains("20"), "array should contain 20, got: {s}");
+    }
+
+    #[test]
+    fn struct_value_display() {
+        let mut fields = std::collections::HashMap::new();
+        fields.insert("x".to_string(), Value::Int(1));
+        fields.insert("y".to_string(), Value::Int(2));
+        let sv = Value::Struct {
+            name: "Point".to_string(),
+            fields,
+        };
+        let s = format!("{sv}");
+        assert!(s.contains("Point"), "struct display should contain name, got: {s}");
+    }
+
+    #[test]
+    fn enum_value_display() {
+        let ev = Value::Enum {
+            enum_name: "Option".to_string(),
+            variant: "Some".to_string(),
+            fields: vec![Value::Int(42)],
+        };
+        let s = format!("{ev}");
+        assert!(s.contains("Some"), "enum display should contain variant, got: {s}");
+    }
+
+    #[test]
+    fn map_display() {
+        let m = Value::Map(Rc::new(std::cell::RefCell::new(crate::det_map::DetMap::new())));
+        let s = format!("{m}");
+        assert!(s.contains("{") || s.contains("Map"), "map display should be readable, got: {s}");
+    }
+}
+

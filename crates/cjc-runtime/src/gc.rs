@@ -142,3 +142,91 @@ impl Default for GcHeap {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alloc_and_read_back() {
+        let mut heap = GcHeap::new(1024);
+        let r = heap.alloc(42i64);
+        assert_eq!(heap.get::<i64>(r), Some(&42));
+        assert_eq!(heap.live_count(), 1);
+    }
+
+    #[test]
+    fn sweep_unmarked_frees_object() {
+        let mut heap = GcHeap::new(1024);
+        let r1 = heap.alloc(10i64);
+        let _r2 = heap.alloc(20i64);
+        // Mark only r1 as reachable
+        heap.collect(&[r1]);
+        assert_eq!(heap.live_count(), 1);
+        assert_eq!(heap.get::<i64>(r1), Some(&10));
+    }
+
+    #[test]
+    fn free_list_slot_reuse() {
+        let mut heap = GcHeap::new(1024);
+        let r1 = heap.alloc(1i64);
+        let _r2 = heap.alloc(2i64);
+        // Collect with only r2 unreachable... actually keep r1
+        heap.collect(&[r1]);
+        assert_eq!(heap.free_list.len(), 1, "one slot freed");
+        // Allocate again — should reuse the freed slot
+        let r3 = heap.alloc(3i64);
+        assert_eq!(heap.free_list.len(), 0, "free list drained");
+        assert_eq!(heap.get::<i64>(r3), Some(&3));
+        assert_eq!(heap.capacity(), 2, "no new slots allocated");
+    }
+
+    #[test]
+    fn collect_all_unreachable() {
+        let mut heap = GcHeap::new(1024);
+        let _r1 = heap.alloc(1i64);
+        let _r2 = heap.alloc(2i64);
+        let _r3 = heap.alloc(3i64);
+        heap.collect(&[]); // no roots
+        assert_eq!(heap.live_count(), 0);
+        assert_eq!(heap.free_list.len(), 3);
+    }
+
+    #[test]
+    fn alloc_auto_triggers_collection() {
+        let mut heap = GcHeap::new(2); // threshold = 2
+        let r1 = heap.alloc(1i64);
+        let _r2 = heap.alloc(2i64);
+        // alloc_auto should trigger collection before allocating
+        let r3 = heap.alloc_auto(3i64, &[r1]);
+        // r1 survived (was a root), _r2 was collected
+        assert_eq!(heap.get::<i64>(r1), Some(&1));
+        assert_eq!(heap.get::<i64>(r3), Some(&3));
+        // _r2 was swept
+        assert_eq!(heap.live_count(), 2);
+    }
+
+    #[test]
+    fn type_mismatch_returns_none() {
+        let mut heap = GcHeap::new(1024);
+        let r = heap.alloc(42i64);
+        // Wrong type should return None
+        assert_eq!(heap.get::<String>(r), None);
+        // Correct type works
+        assert_eq!(heap.get::<i64>(r), Some(&42));
+    }
+
+    #[test]
+    fn mark_sweep_preserves_mark_reset() {
+        let mut heap = GcHeap::new(1024);
+        let r1 = heap.alloc(1i64);
+        let r2 = heap.alloc(2i64);
+        // First collection: keep both
+        heap.collect(&[r1, r2]);
+        assert_eq!(heap.live_count(), 2);
+        // Second collection: keep only r1
+        heap.collect(&[r1]);
+        assert_eq!(heap.live_count(), 1);
+        assert_eq!(heap.get::<i64>(r1), Some(&1));
+    }
+}
+

@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "cjc"
 version = "0.1.0"
 edition = "2021"
@@ -52,6 +52,7 @@ cjc-mir-exec = { path = "crates/cjc-mir-exec" }
 cjc-regex = { path = "crates/cjc-regex" }
 
 [dev-dependencies]
+bolero = "0.13.4"
 proptest = "1"
 
 [workspace.dependencies]
@@ -75,3 +76,7 @@ path = "tests/fixtures/runner.rs"
 [[test]]
 name = "prop_tests"
 path = "tests/prop_tests/mod.rs"
+
+[[test]]
+name = "bolero_fuzz"
+path = "tests/bolero_fuzz/mod.rs"

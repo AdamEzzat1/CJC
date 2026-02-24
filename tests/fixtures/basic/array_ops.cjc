@@ -1,0 +1,7 @@
+fn main() -> i64 {
+    let arr: [i64] = [10, 20, 30];
+    print(arr.len());
+    print(arr[0]);
+    print(arr[2]);
+    0
+}

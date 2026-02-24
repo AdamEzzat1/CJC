@@ -1,0 +1,9 @@
+fn main() -> i64 {
+    let x: i64 = 10;
+    let neg: i64 = -x;
+    print(neg);
+    let b: bool = true;
+    let notb: bool = !b;
+    print(notb);
+    0
+}

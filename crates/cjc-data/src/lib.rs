@@ -1,4 +1,4 @@
-//! CJC Data DSL — Typed expression trees, logical plans, plan optimizer, and
+﻿//! CJC Data DSL â€” Typed expression trees, logical plans, plan optimizer, and
 //! column-buffer kernel execution.
 //!
 //! This implements the tidyverse-inspired data pipeline:
@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
-// ── Column Storage ──────────────────────────────────────────────
+// â”€â”€ Column Storage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// A single column in a DataFrame.
 #[derive(Debug, Clone)]
@@ -57,7 +57,7 @@ impl Column {
     }
 }
 
-// ── DataFrame ───────────────────────────────────────────────────
+// â”€â”€ DataFrame â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// A columnar DataFrame.
 #[derive(Debug, Clone)]
@@ -196,7 +196,7 @@ impl fmt::Display for DataFrame {
     }
 }
 
-// ── Data DSL Expression Trees ───────────────────────────────────
+// â”€â”€ Data DSL Expression Trees â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// An expression in the Data DSL.
 #[derive(Debug, Clone)]
@@ -288,7 +288,7 @@ impl fmt::Display for DExpr {
     }
 }
 
-// ── Logical Plan ────────────────────────────────────────────────
+// â”€â”€ Logical Plan â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// A logical query plan node.
 #[derive(Debug, Clone)]
@@ -410,7 +410,7 @@ fn collect_expr_columns(expr: &DExpr, cols: &mut Vec<String>) {
     }
 }
 
-// ── Plan Optimizer ──────────────────────────────────────────────
+// â”€â”€ Plan Optimizer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Optimize a logical plan.
 pub fn optimize(plan: LogicalPlan) -> LogicalPlan {
@@ -522,7 +522,7 @@ fn prune_columns(plan: LogicalPlan) -> LogicalPlan {
     plan
 }
 
-// ── Plan Executor ───────────────────────────────────────────────
+// â”€â”€ Plan Executor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Execute a logical plan against in-memory data.
 pub fn execute(plan: &LogicalPlan) -> Result<DataFrame, DataError> {
@@ -708,7 +708,7 @@ fn execute_aggregate(
     })
 }
 
-// ── Expression Evaluation ───────────────────────────────────────
+// â”€â”€ Expression Evaluation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[derive(Debug, Clone)]
 enum ExprValue {
@@ -874,7 +874,7 @@ fn extract_float_values(
     }
 }
 
-// ── Pipeline Builder ────────────────────────────────────────────
+// â”€â”€ Pipeline Builder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Fluent builder for data pipelines.
 pub struct Pipeline {
@@ -968,7 +968,7 @@ impl Pipeline {
     }
 }
 
-// ── Errors ──────────────────────────────────────────────────────
+// â”€â”€ Errors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[derive(Debug, Clone)]
 pub enum DataError {
@@ -1001,7 +1001,7 @@ impl fmt::Display for DataError {
 
 impl std::error::Error for DataError {}
 
-// ── Join Execution ──────────────────────────────────────────────
+// â”€â”€ Join Execution â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Get a column value as a string for join key comparison.
 fn column_value_str(col: &Column, row: usize) -> String {
@@ -1179,7 +1179,7 @@ fn gather_column_nullable(col: &Column, indices: &[Option<usize>]) -> Column {
     }
 }
 
-// ── Tests ───────────────────────────────────────────────────────
+// â”€â”€ Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[cfg(test)]
 mod tests {
@@ -1431,9 +1431,9 @@ mod tests {
     }
 }
 
-// ── Phase 8: CSV Ingestion & Tensor Bridge ──────────────────────────────────
+// â”€â”€ Phase 8: CSV Ingestion & Tensor Bridge â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-// ── DataFrame ↔ Tensor bridge ───────────────────────────────────────────────
+// â”€â”€ DataFrame â†” Tensor bridge â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 impl DataFrame {
     /// Convert selected numeric columns to a `cjc_runtime::Tensor` with shape
@@ -1457,7 +1457,7 @@ impl DataFrame {
     /// - `Float`: parsed as f64, falls back to 0.0 on parse error
     /// - `Int`:   parsed as i64, falls back to 0 on parse error
     /// - `Str`:   stored as-is
-    /// - `Bool`:  `"true"` / `"1"` → true, anything else → false
+    /// - `Bool`:  `"true"` / `"1"` â†’ true, anything else â†’ false
     pub fn push_row(&mut self, values: &[&str]) -> Result<(), DataError> {
         if values.len() != self.ncols() {
             return Err(DataError::ColumnLengthMismatch {
@@ -1479,436 +1479,20 @@ impl DataFrame {
     }
 }
 
-// ── CsvConfig ───────────────────────────────────────────────────────────────
+// -- CSV Ingestion (extracted to csv.rs) --------------------------------------
 
-/// Configuration for `CsvReader`.
-#[derive(Debug, Clone)]
-pub struct CsvConfig {
-    /// Field delimiter byte. Default: `b','`.
-    pub delimiter: u8,
-    /// Whether the first row is a header. Default: `true`.
-    pub has_header: bool,
-    /// Maximum number of data rows to read. `None` = read all. Default: `None`.
-    pub max_rows: Option<usize>,
-    /// Trim ASCII whitespace from field values before type inference. Default: `true`.
-    pub trim_whitespace: bool,
-}
+mod csv;
+pub use csv::{CsvConfig, CsvReader, StreamingCsvProcessor};
 
-impl Default for CsvConfig {
-    fn default() -> Self {
-        CsvConfig {
-            delimiter: b',',
-            has_header: true,
-            max_rows: None,
-            trim_whitespace: true,
-        }
-    }
-}
-
-// ── CsvReader ───────────────────────────────────────────────────────────────
-
-/// Zero-copy CSV parser for byte slices.
-///
-/// # Design
-///
-/// `CsvReader` operates directly on a `&[u8]` byte slice — no file I/O, no
-/// intermediate `String` allocation per field during the scan phase. Fields
-/// are referenced as sub-slices of the original input and parsed in a single
-/// pass.
-///
-/// # Type inference
-///
-/// Each column's type is inferred from the first data row:
-/// - All digits (optionally signed, one optional `.`) → `Float`
-/// - All digits (optionally signed, no `.`) → `Int` (but stored as `Float` for
-///   numeric safety — explicit `Int` columns can be forced via `CsvConfig`)
-/// - `"true"` / `"false"` / `"1"` / `"0"` → `Bool`
-/// - Anything else → `Str`
-///
-/// # Example
-///
-/// ```rust,ignore
-/// let csv = b"name,age,score\nAlice,30,9.5\nBob,25,8.1";
-/// let df = CsvReader::new(CsvConfig::default()).parse(csv)?;
-/// assert_eq!(df.nrows(), 2);
-/// ```
-pub struct CsvReader {
-    config: CsvConfig,
-}
-
-/// Inferred column type from first data row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InferredType {
-    Int,
-    Float,
-    Bool,
-    Str,
-}
-
-/// Infer the type of a single field string.
-fn infer_type(s: &str) -> InferredType {
-    let t = s.trim();
-    if t == "true" || t == "false" || t == "1" || t == "0" {
-        return InferredType::Bool;
-    }
-    // Try int: optional leading '-', all digits
-    let digits = t.strip_prefix('-').unwrap_or(t);
-    if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
-        return InferredType::Int;
-    }
-    // Try float: optional leading '-', digits, one '.', digits
-    let no_sign = t.strip_prefix('-').unwrap_or(t);
-    let dot_count = no_sign.chars().filter(|&c| c == '.').count();
-    if dot_count == 1 {
-        let without_dot: String = no_sign.chars().filter(|&c| c != '.').collect();
-        if !without_dot.is_empty() && without_dot.bytes().all(|b| b.is_ascii_digit()) {
-            return InferredType::Float;
-        }
-    }
-    // Also handle scientific notation (e.g., 1.5e-3)
-    if t.parse::<f64>().is_ok() {
-        return InferredType::Float;
-    }
-    InferredType::Str
-}
-
-/// Split a byte slice on `delimiter`, returning field sub-slices.
-/// Handles the case where the last field has a trailing `\r`.
-fn split_fields<'a>(row: &'a [u8], delimiter: u8) -> Vec<&'a str> {
-    let mut fields = Vec::new();
-    let mut start = 0usize;
-    for i in 0..row.len() {
-        if row[i] == delimiter {
-            let field = std::str::from_utf8(&row[start..i]).unwrap_or("");
-            fields.push(field);
-            start = i + 1;
-        }
-    }
-    // Last field (strip trailing \r if present)
-    let tail = &row[start..];
-    let tail = tail.strip_suffix(b"\r").unwrap_or(tail);
-    let field = std::str::from_utf8(tail).unwrap_or("");
-    fields.push(field);
-    fields
-}
-
-impl CsvReader {
-    /// Create a new `CsvReader` with the given configuration.
-    pub fn new(config: CsvConfig) -> Self {
-        CsvReader { config }
-    }
-
-    /// Parse a CSV byte slice into a `DataFrame`.
-    ///
-    /// # Errors
-    /// Returns `DataError::InvalidOperation` if:
-    /// - The input is empty.
-    /// - A data row has fewer fields than the header.
-    pub fn parse(&self, input: &[u8]) -> Result<DataFrame, DataError> {
-        if input.is_empty() {
-            return Ok(DataFrame::new());
-        }
-
-        // Split on newlines, skipping empty trailing lines.
-        let rows: Vec<&[u8]> = input
-            .split(|&b| b == b'\n')
-            .filter(|r| !r.is_empty() && *r != b"\r")
-            .collect();
-
-        if rows.is_empty() {
-            return Ok(DataFrame::new());
-        }
-
-        let delim = self.config.delimiter;
-
-        // Parse header or generate column names.
-        let (header_names, data_rows) = if self.config.has_header {
-            let names: Vec<String> = split_fields(rows[0], delim)
-                .into_iter()
-                .map(|s| {
-                    if self.config.trim_whitespace {
-                        s.trim().to_string()
-                    } else {
-                        s.to_string()
-                    }
-                })
-                .collect();
-            (names, &rows[1..])
-        } else {
-            // Generate column names: col_0, col_1, ...
-            let ncols = split_fields(rows[0], delim).len();
-            let names: Vec<String> = (0..ncols).map(|i| format!("col_{}", i)).collect();
-            (names, &rows[..])
-        };
-
-        let ncols = header_names.len();
-        if ncols == 0 {
-            return Ok(DataFrame::new());
-        }
-
-        // Limit rows if configured.
-        let data_rows = if let Some(max) = self.config.max_rows {
-            &data_rows[..data_rows.len().min(max)]
-        } else {
-            data_rows
-        };
-
-        if data_rows.is_empty() {
-            // No data rows — return header-only DataFrame with empty columns.
-            let columns: Vec<(String, Column)> = header_names
-                .into_iter()
-                .map(|name| (name, Column::Str(Vec::new())))
-                .collect();
-            return DataFrame::from_columns(columns);
-        }
-
-        // Type-infer from first data row.
-        let first_fields = split_fields(data_rows[0], delim);
-        let mut col_types: Vec<InferredType> = first_fields
-            .iter()
-            .map(|s| {
-                let s = if self.config.trim_whitespace { s.trim() } else { *s };
-                infer_type(s)
-            })
-            .collect();
-
-        // Pad col_types if first row is shorter than header.
-        while col_types.len() < ncols {
-            col_types.push(InferredType::Str);
-        }
-
-        // Allocate column buffers.
-        let nrows = data_rows.len();
-        let mut int_bufs:   Vec<Option<Vec<i64>>>    = vec![None; ncols];
-        let mut float_bufs: Vec<Option<Vec<f64>>>    = vec![None; ncols];
-        let mut bool_bufs:  Vec<Option<Vec<bool>>>   = vec![None; ncols];
-        let mut str_bufs:   Vec<Option<Vec<String>>> = vec![None; ncols];
-
-        for (i, &t) in col_types.iter().enumerate() {
-            match t {
-                InferredType::Int   => int_bufs[i]   = Some(Vec::with_capacity(nrows)),
-                InferredType::Float => float_bufs[i] = Some(Vec::with_capacity(nrows)),
-                InferredType::Bool  => bool_bufs[i]  = Some(Vec::with_capacity(nrows)),
-                InferredType::Str   => str_bufs[i]   = Some(Vec::with_capacity(nrows)),
-            }
-        }
-
-        // Parse each data row.
-        for (row_idx, &row_bytes) in data_rows.iter().enumerate() {
-            let fields = split_fields(row_bytes, delim);
-            for col_idx in 0..ncols {
-                let raw = if col_idx < fields.len() {
-                    fields[col_idx]
-                } else {
-                    // Missing field: treat as empty string.
-                    ""
-                };
-                let s = if self.config.trim_whitespace { raw.trim() } else { raw };
-
-                match col_types[col_idx] {
-                    InferredType::Int => {
-                        let v = s.parse::<i64>().unwrap_or(0);
-                        int_bufs[col_idx].as_mut().unwrap().push(v);
-                    }
-                    InferredType::Float => {
-                        let v = s.parse::<f64>().unwrap_or(0.0);
-                        float_bufs[col_idx].as_mut().unwrap().push(v);
-                    }
-                    InferredType::Bool => {
-                        let v = matches!(s, "true" | "1");
-                        bool_bufs[col_idx].as_mut().unwrap().push(v);
-                    }
-                    InferredType::Str => {
-                        str_bufs[col_idx].as_mut().unwrap().push(s.to_string());
-                    }
-                }
-
-                let _ = row_idx; // suppress unused warning
-            }
-        }
-
-        // Assemble columns.
-        let mut columns: Vec<(String, Column)> = Vec::with_capacity(ncols);
-        for (i, name) in header_names.into_iter().enumerate() {
-            let col = match col_types[i] {
-                InferredType::Int   => Column::Int(int_bufs[i].take().unwrap()),
-                InferredType::Float => Column::Float(float_bufs[i].take().unwrap()),
-                InferredType::Bool  => Column::Bool(bool_bufs[i].take().unwrap()),
-                InferredType::Str   => Column::Str(str_bufs[i].take().unwrap()),
-            };
-            columns.push((name, col));
-        }
-
-        DataFrame::from_columns(columns)
-    }
-}
-
-// ── StreamingCsvProcessor ───────────────────────────────────────────────────
-
-/// A streaming CSV processor that visits rows one at a time without
-/// materializing the full DataFrame.
-///
-/// Useful for large datasets where only aggregate statistics are needed.
-/// Memory usage is O(ncols) regardless of the number of rows.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// let csv = b"x,y\n1.0,2.0\n3.0,4.0\n5.0,6.0";
-/// let mut proc = StreamingCsvProcessor::new(CsvConfig::default());
-/// let (headers, sums, count) = proc.sum_columns(csv)?;
-/// ```
-pub struct StreamingCsvProcessor {
-    config: CsvConfig,
-}
-
-impl StreamingCsvProcessor {
-    pub fn new(config: CsvConfig) -> Self {
-        StreamingCsvProcessor { config }
-    }
-
-    /// Stream through CSV, accumulating per-column sums using Kahan summation.
-    ///
-    /// Returns `(column_names, sums_per_col, row_count)`.
-    /// Non-numeric fields contribute `0.0` to the sum.
-    pub fn sum_columns(&self, input: &[u8]) -> Result<(Vec<String>, Vec<f64>, usize), DataError> {
-        if input.is_empty() {
-            return Ok((vec![], vec![], 0));
-        }
-
-        let rows: Vec<&[u8]> = input
-            .split(|&b| b == b'\n')
-            .filter(|r| !r.is_empty() && *r != b"\r")
-            .collect();
-
-        if rows.is_empty() {
-            return Ok((vec![], vec![], 0));
-        }
-
-        let delim = self.config.delimiter;
-        let (header_names, data_rows) = if self.config.has_header {
-            let names: Vec<String> = split_fields(rows[0], delim)
-                .into_iter()
-                .map(|s| s.trim().to_string())
-                .collect();
-            (names, &rows[1..])
-        } else {
-            let ncols = split_fields(rows[0], delim).len();
-            let names: Vec<String> = (0..ncols).map(|i| format!("col_{}", i)).collect();
-            (names, &rows[..])
-        };
-
-        let ncols = header_names.len();
-        // Kahan compensated sums per column.
-        let mut sums: Vec<f64> = vec![0.0; ncols];
-        let mut comp: Vec<f64> = vec![0.0; ncols];
-        let mut row_count = 0usize;
-
-        let data_rows = if let Some(max) = self.config.max_rows {
-            &data_rows[..data_rows.len().min(max)]
-        } else {
-            data_rows
-        };
-
-        for &row_bytes in data_rows {
-            let fields = split_fields(row_bytes, delim);
-            for col_idx in 0..ncols {
-                let s = if col_idx < fields.len() {
-                    if self.config.trim_whitespace {
-                        fields[col_idx].trim()
-                    } else {
-                        fields[col_idx]
-                    }
-                } else {
-                    ""
-                };
-                let v: f64 = s.parse().unwrap_or(0.0);
-                // Kahan step
-                let y = v - comp[col_idx];
-                let t = sums[col_idx] + y;
-                comp[col_idx] = (t - sums[col_idx]) - y;
-                sums[col_idx] = t;
-            }
-            row_count += 1;
-        }
-
-        Ok((header_names, sums, row_count))
-    }
-
-    /// Stream through CSV, collecting per-column min/max without materializing.
-    ///
-    /// Returns `(column_names, mins, maxs, row_count)`.
-    /// Non-numeric fields contribute `f64::NAN` to min/max.
-    pub fn minmax_columns(
-        &self,
-        input: &[u8],
-    ) -> Result<(Vec<String>, Vec<f64>, Vec<f64>, usize), DataError> {
-        if input.is_empty() {
-            return Ok((vec![], vec![], vec![], 0));
-        }
-
-        let rows: Vec<&[u8]> = input
-            .split(|&b| b == b'\n')
-            .filter(|r| !r.is_empty() && *r != b"\r")
-            .collect();
-
-        if rows.is_empty() {
-            return Ok((vec![], vec![], vec![], 0));
-        }
-
-        let delim = self.config.delimiter;
-        let (header_names, data_rows) = if self.config.has_header {
-            let names: Vec<String> = split_fields(rows[0], delim)
-                .into_iter()
-                .map(|s| s.trim().to_string())
-                .collect();
-            (names, &rows[1..])
-        } else {
-            let ncols = split_fields(rows[0], delim).len();
-            let names = (0..ncols).map(|i| format!("col_{}", i)).collect();
-            (names, &rows[..])
-        };
-
-        let ncols = header_names.len();
-        let mut mins: Vec<f64> = vec![f64::INFINITY; ncols];
-        let mut maxs: Vec<f64> = vec![f64::NEG_INFINITY; ncols];
-        let mut row_count = 0usize;
-
-        let data_rows = if let Some(max) = self.config.max_rows {
-            &data_rows[..data_rows.len().min(max)]
-        } else {
-            data_rows
-        };
-
-        for &row_bytes in data_rows {
-            let fields = split_fields(row_bytes, delim);
-            for col_idx in 0..ncols {
-                let s = if col_idx < fields.len() {
-                    fields[col_idx].trim()
-                } else {
-                    ""
-                };
-                if let Ok(v) = s.parse::<f64>() {
-                    if v < mins[col_idx] { mins[col_idx] = v; }
-                    if v > maxs[col_idx] { maxs[col_idx] = v; }
-                }
-            }
-            row_count += 1;
-        }
-
-        Ok((header_names, mins, maxs, row_count))
-    }
-}
-
-// ── Phase 10: Tidy Primitives ────────────────────────────────────────────────
+// -- Phase 10: Tidy Primitives ------------------------------------------------
 //
 // Design goals:
-//   • filter()  → zero-allocation view (bitmask), O(N) time, O(N/8) extra mem
-//   • select()  → zero-allocation view (projection map), O(ncols) time/mem
-//   • mutate()  → new column buffers only, copy-on-write on alias, @nogc-safe
-//   • All operations are bit-deterministic with stable iteration/column order.
+//   - filter()  -> zero-allocation view (bitmask), O(N) time, O(N/8) extra mem
+//   - select()  -> zero-allocation view (projection map), O(ncols) time/mem
+//   - mutate()  -> new column buffers only, copy-on-write on alias, @nogc-safe
+//   - All operations are bit-deterministic with stable iteration/column order.
 
-// ── BitMask ──────────────────────────────────────────────────────────────────
+// â”€â”€ BitMask â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// A compact, word-aligned bitmask over `nrows` rows.
 ///
@@ -1970,7 +1554,7 @@ impl BitMask {
 
     /// Merge two masks with AND semantics (chain of filter().filter()).
     ///
-    /// Panics if `nrows` differs — this is a programming error (same base df).
+    /// Panics if `nrows` differs â€” this is a programming error (same base df).
     pub fn and(&self, other: &BitMask) -> BitMask {
         assert_eq!(
             self.nrows, other.nrows,
@@ -2009,12 +1593,12 @@ fn nwords_for(nrows: usize) -> usize {
     (nrows + 63) / 64
 }
 
-// ── ProjectionMap ─────────────────────────────────────────────────────────────
+// â”€â”€ ProjectionMap â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// A stable ordered list of column indices into the base DataFrame.
 ///
 /// Selecting 0 columns yields an empty projection (valid empty view).
-/// Duplicate names are rejected at construction time — callers must deduplicate.
+/// Duplicate names are rejected at construction time â€” callers must deduplicate.
 /// Column ordering is exactly the order supplied by the caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectionMap {
@@ -2048,14 +1632,14 @@ impl ProjectionMap {
     }
 }
 
-// ── TidyView ─────────────────────────────────────────────────────────────────
+// â”€â”€ TidyView â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// A lazy, zero-allocation view over a base `DataFrame`.
 ///
 /// Holds:
-///   • `base`   — shared reference to the underlying columnar data
-///   • `mask`   — bitmask of which rows are visible
-///   • `proj`   — ordered list of visible column indices
+///   â€¢ `base`   â€” shared reference to the underlying columnar data
+///   â€¢ `mask`   â€” bitmask of which rows are visible
+///   â€¢ `proj`   â€” ordered list of visible column indices
 ///
 /// No column buffers are copied until `materialize()` / `to_tensor()` is called.
 #[derive(Debug, Clone)]
@@ -2066,7 +1650,7 @@ pub struct TidyView {
 }
 
 impl TidyView {
-    // ── constructors ────────────────────────────────────────────────────────
+    // â”€â”€ constructors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Wrap a `DataFrame` as a full view (all rows, all columns).
     pub fn from_df(df: DataFrame) -> Self {
@@ -2090,7 +1674,7 @@ impl TidyView {
         }
     }
 
-    // ── shape ───────────────────────────────────────────────────────────────
+    // â”€â”€ shape â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Number of visible rows (set bits in mask).
     pub fn nrows(&self) -> usize {
@@ -2111,7 +1695,7 @@ impl TidyView {
             .collect()
     }
 
-    // ── filter ──────────────────────────────────────────────────────────────
+    // â”€â”€ filter â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Filter rows by a `DExpr` predicate.
     ///
@@ -2119,10 +1703,10 @@ impl TidyView {
     /// Does NOT copy any column buffers.
     ///
     /// Edge cases:
-    ///   • 0-row base → empty mask returned, no panic.
-    ///   • Non-bool predicate → `TidyError::PredicateNotBool`.
-    ///   • Float NaN comparisons → deterministic: `NaN != NaN` (IEEE 754).
-    ///   • Chained filters compose masks with AND without materializing.
+    ///   â€¢ 0-row base â†’ empty mask returned, no panic.
+    ///   â€¢ Non-bool predicate â†’ `TidyError::PredicateNotBool`.
+    ///   â€¢ Float NaN comparisons â†’ deterministic: `NaN != NaN` (IEEE 754).
+    ///   â€¢ Chained filters compose masks with AND without materializing.
     pub fn filter(&self, predicate: &DExpr) -> Result<TidyView, TidyError> {
         // Validate predicate type references known projected columns
         validate_expr_columns_proj(predicate, &self.base, &self.proj)?;
@@ -2157,7 +1741,7 @@ impl TidyView {
         })
     }
 
-    // ── select ──────────────────────────────────────────────────────────────
+    // â”€â”€ select â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Project to a subset of named columns (in the given order).
     ///
@@ -2165,10 +1749,10 @@ impl TidyView {
     /// No column buffers are copied.
     ///
     /// Edge cases:
-    ///   • 0 columns selected → valid empty-column view (no error).
-    ///   • Unknown column → `TidyError::ColumnNotFound`.
-    ///   • Duplicate column name in `cols` → `TidyError::DuplicateColumn`.
-    ///   • Column ordering is exactly as supplied.
+    ///   â€¢ 0 columns selected â†’ valid empty-column view (no error).
+    ///   â€¢ Unknown column â†’ `TidyError::ColumnNotFound`.
+    ///   â€¢ Duplicate column name in `cols` â†’ `TidyError::DuplicateColumn`.
+    ///   â€¢ Column ordering is exactly as supplied.
     pub fn select(&self, cols: &[&str]) -> Result<TidyView, TidyError> {
         // Check for duplicates in the requested list
         {
@@ -2199,24 +1783,24 @@ impl TidyView {
         })
     }
 
-    // ── mutate ──────────────────────────────────────────────────────────────
+    // â”€â”€ mutate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Apply column-wise assignments and return a materialized `TidyFrame`.
     ///
     /// `assignments` is an ordered list of `(col_name, expr)` pairs evaluated
     /// left-to-right. Each assignment sees the *snapshot* of columns at entry
-    /// to the mutate call (snapshot semantics — new columns created in earlier
+    /// to the mutate call (snapshot semantics â€” new columns created in earlier
     /// assignments are NOT visible to later assignments within the same call).
     ///
     /// Semantics decisions:
-    ///   • Existing column → overwritten (copy-on-write safe).
-    ///   • New column → appended after existing projected columns.
-    ///   • Scalar broadcasting → a scalar expr is broadcast to all visible rows.
-    ///   • Mask-awareness: only masked-in rows are computed; masked-out rows in
+    ///   â€¢ Existing column â†’ overwritten (copy-on-write safe).
+    ///   â€¢ New column â†’ appended after existing projected columns.
+    ///   â€¢ Scalar broadcasting â†’ a scalar expr is broadcast to all visible rows.
+    ///   â€¢ Mask-awareness: only masked-in rows are computed; masked-out rows in
     ///     the materialized output retain the base value (or zero for new cols).
-    ///   • Type promotion: Int + Float → Float; Int overflow → wrapping.
-    ///   • Multiple assignments with the same target name in one call → error.
-    ///   • Mutate on masked view produces a *materialized* `TidyFrame` where
+    ///   â€¢ Type promotion: Int + Float â†’ Float; Int overflow â†’ wrapping.
+    ///   â€¢ Multiple assignments with the same target name in one call â†’ error.
+    ///   â€¢ Mutate on masked view produces a *materialized* `TidyFrame` where
     ///     only visible rows are present (mask applied during materialization).
     pub fn mutate(&self, assignments: &[(&str, DExpr)]) -> Result<TidyFrame, TidyError> {
         // Check for duplicate targets within this call
@@ -2256,7 +1840,7 @@ impl TidyView {
         })
     }
 
-    // ── materialize ─────────────────────────────────────────────────────────
+    // â”€â”€ materialize â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Materialize the view into a new `DataFrame` (applies mask + projection).
     ///
@@ -2264,9 +1848,9 @@ impl TidyView {
     /// Rows are emitted in ascending index order (stable/deterministic).
     ///
     /// Edge cases:
-    ///   • Empty rows → 0-row DataFrame.
-    ///   • Empty cols → 0-column DataFrame.
-    ///   • Row-major iteration is stable.
+    ///   â€¢ Empty rows â†’ 0-row DataFrame.
+    ///   â€¢ Empty cols â†’ 0-column DataFrame.
+    ///   â€¢ Row-major iteration is stable.
     pub fn materialize(&self) -> Result<DataFrame, TidyError> {
         let row_indices: Vec<usize> = self.mask.iter_set().collect();
 
@@ -2302,7 +1886,7 @@ impl TidyView {
 
     /// Access a column from the underlying base DataFrame by name.
     ///
-    /// Returns the raw `Column` (full length, unmasked) — callers must apply
+    /// Returns the raw `Column` (full length, unmasked) â€” callers must apply
     /// the mask themselves if needed.  Used by `fct_summary_means` and similar.
     pub fn base_column(&self, name: &str) -> Option<&Column> {
         self.base.columns.iter()
@@ -2311,7 +1895,7 @@ impl TidyView {
     }
 }
 
-// ── TidyFrame ─────────────────────────────────────────────────────────────────
+// â”€â”€ TidyFrame â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// A materialized, mutable DataFrame with copy-on-write alias safety.
 ///
@@ -2382,7 +1966,7 @@ impl TidyFrame {
     }
 }
 
-// ── TidyError ─────────────────────────────────────────────────────────────────
+// â”€â”€ TidyError â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Errors produced by Phase 10 tidy operations.
 #[derive(Debug, Clone, PartialEq)]
@@ -2434,16 +2018,16 @@ impl fmt::Display for TidyError {
 
 impl std::error::Error for TidyError {}
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
+// â”€â”€ Internal helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 // Note: tidy uses the existing `gather_column(col, indices)` defined earlier in
 // this file (line ~1160). No duplicate needed.
 
 /// Evaluate a `DExpr` for all `nrows` rows, returning a typed `Column`.
 ///
-/// Int + Float → Float promotion.
-/// Int overflow → wrapping (i64 wrapping_add/mul etc.).
-/// Scalar expression → broadcast to all rows.
+/// Int + Float â†’ Float promotion.
+/// Int overflow â†’ wrapping (i64 wrapping_add/mul etc.).
+/// Scalar expression â†’ broadcast to all rows.
 fn eval_expr_column(df: &DataFrame, expr: &DExpr, nrows: usize) -> Result<Column, TidyError> {
     if nrows == 0 {
         // Infer column type from a dry-run on nothing; default to Float for empty
@@ -2533,7 +2117,7 @@ fn eval_expr_row_proj(
 }
 
 /// Validate that all column references in `expr` exist in `base` (via projection
-/// columns — filter predicates may reference any base column visible in proj).
+/// columns â€” filter predicates may reference any base column visible in proj).
 ///
 /// For simplicity: filter predicates may reference ANY column in `base` because
 /// the view is a window over the same base DataFrame. This is analogous to SQL
@@ -2579,12 +2163,12 @@ impl ExprValue {
     }
 }
 
-// ── DataFrame::tidy() convenience entry point ─────────────────────────────────
+// â”€â”€ DataFrame::tidy() convenience entry point â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 impl DataFrame {
     /// Wrap this DataFrame as a `TidyView` for Phase 10 tidy operations.
     ///
-    /// Consumes `self` (zero-copy — moves into an `Rc`).
+    /// Consumes `self` (zero-copy â€” moves into an `Rc`).
     pub fn tidy(self) -> TidyView {
         TidyView::from_df(self)
     }
@@ -2595,14 +2179,14 @@ impl DataFrame {
     }
 }
 
-// ── NoGC annotation gate ──────────────────────────────────────────────────────
+// â”€â”€ NoGC annotation gate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // The @nogc verifier in cjc-mir/src/nogc_verify.rs tracks "safe builtins" that
 // are known not to trigger GC. Phase 10 tidy operations on the Rust side are
 // outside the CJC language runtime (they are library calls), so @nogc
 // annotation at the CJC language level means: the CJC function body does not
 // call gc_alloc. The Rust implementation of filter/select produces a TidyView
-// that holds Rc references — no GC heap involvement.
+// that holds Rc references â€” no GC heap involvement.
 //
 // For the NoGC verifier to accept tidy calls inside @nogc CJC functions, the
 // builtins "tidy_filter", "tidy_select", "tidy_materialize" must be added to
@@ -2610,41 +2194,41 @@ impl DataFrame {
 // the `is_safe_builtin` function.
 //
 // Allocation budget per operation (no GC heap, only Rust stack/heap via alloc):
-//   filter  : O(N/64) u64 words for new mask   (≈ 8 bytes / 64 rows)
+//   filter  : O(N/64) u64 words for new mask   (â‰ˆ 8 bytes / 64 rows)
 //   select  : O(K) usize indices (K = ncols selected)
-//   mutate  : O(N) per new column buffer (allowed — one allocation per column)
+//   mutate  : O(N) per new column buffer (allowed â€” one allocation per column)
 //   materialize: O(N * K) total for visible data
 
-// ════════════════════════════════════════════════════════════════════════════════
-// Phase 11–12: Grouping, Summarise, Arrange, Slice, Distinct, Joins
-// ════════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// Phase 11â€“12: Grouping, Summarise, Arrange, Slice, Distinct, Joins
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 //
 // Spec-Lock Table
-// ───────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // | Decision point            | Choice                                           |
 // |---------------------------|--------------------------------------------------|
 // | Group ordering            | First-occurrence order of keys in visible rows   |
 // | Null/missing in keys      | Not applicable (CJC Column has no null type);    |
 // |                           | NaN in Float keys: each NaN is its own group key |
-// |                           | (NaN != NaN → separate groups per NaN position)  |
+// |                           | (NaN != NaN â†’ separate groups per NaN position)  |
 // | summarise output order    | Stable: same order as group creation             |
-// | Empty group agg behavior  | count→0, sum→0.0, mean→NaN, min→NaN, max→NaN,   |
-// |                           | first/last → TidyError::EmptyGroup               |
+// | Empty group agg behavior  | countâ†’0, sumâ†’0.0, meanâ†’NaN, minâ†’NaN, maxâ†’NaN,   |
+// |                           | first/last â†’ TidyError::EmptyGroup               |
 // | arrange tie-breaking      | Stable sort (Rust's slice::sort_by is stable);   |
 // |                           | equal-key rows preserve original row order       |
 // | NaN ordering in arrange   | NaN sorts LAST (greater than any finite value)   |
-// | null ordering             | N/A — no null type in CJC                       |
+// | null ordering             | N/A â€” no null type in CJC                       |
 // | slice_sample seed         | Deterministic LCG with caller-supplied u64 seed  |
 // | slice_sample n > nrows    | Clamp to nrows (no error)                        |
 // | distinct ordering         | First-occurrence order of distinct key combos    |
-// | Join left order           | Preserved — output rows follow left row order    |
+// | Join left order           | Preserved â€” output rows follow left row order    |
 // | Join right match order    | Stable: sorted by right-side row index ascending  |
-// | Null matching in joins    | N/A — no null type in CJC                       |
+// | Null matching in joins    | N/A â€” no null type in CJC                       |
 // | Join duplicate keys       | All matches included, deterministic order        |
 // | many-many explosion order | Left outer loop, right inner loop (stable)       |
-// ───────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-// ── RowIndexMap ───────────────────────────────────────────────────────────────
+// â”€â”€ RowIndexMap â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// A permutation / selection vector over base-frame row indices.
 ///
@@ -2677,7 +2261,7 @@ impl RowIndexMap {
     }
 }
 
-// ── GroupMeta ─────────────────────────────────────────────────────────────────
+// â”€â”€ GroupMeta â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Metadata for one group in a `GroupIndex`.
 #[derive(Debug, Clone)]
@@ -2688,7 +2272,7 @@ pub struct GroupMeta {
     pub row_indices: Vec<usize>,
 }
 
-// ── GroupIndex ────────────────────────────────────────────────────────────────
+// â”€â”€ GroupIndex â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// A deterministic group index built from a `TidyView`.
 ///
@@ -2720,7 +2304,7 @@ impl GroupIndex {
         // Use a Vec<(key_tuple, group_slot)> with sequential scan to preserve
         // first-occurrence ordering without hash nondeterminism.
         let mut group_order: Vec<Vec<String>> = Vec::new(); // unique keys, in order seen
-        let mut group_map: Vec<(Vec<String>, usize)> = Vec::new(); // (key → slot index)
+        let mut group_map: Vec<(Vec<String>, usize)> = Vec::new(); // (key â†’ slot index)
 
         for &row in visible_rows {
             let key: Vec<String> = key_col_indices
@@ -2728,7 +2312,7 @@ impl GroupIndex {
                 .map(|&ci| base.columns[ci].1.get_display(row))
                 .collect();
 
-            // Linear scan for existing key — preserves insertion order, no hash
+            // Linear scan for existing key â€” preserves insertion order, no hash
             let slot = group_map
                 .iter()
                 .position(|(k, _)| k == &key)
@@ -2772,7 +2356,7 @@ impl GroupIndex {
     }
 }
 
-// ── GroupedTidyView ───────────────────────────────────────────────────────────
+// â”€â”€ GroupedTidyView â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// A grouped view produced by `TidyView::group_by(...)`.
 ///
@@ -2803,7 +2387,7 @@ impl GroupedTidyView {
         &self.index
     }
 
-    // ── summarise ────────────────────────────────────────────────────────────
+    // â”€â”€ summarise â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Collapse each group to one summary row using named aggregators.
     ///
@@ -2811,16 +2395,16 @@ impl GroupedTidyView {
     /// Output rows are in first-occurrence group order (deterministic).
     ///
     /// The result is a `TidyFrame` containing:
-    ///   • One column per group key (in key order)
-    ///   • One column per aggregator (in assignment order)
+    ///   â€¢ One column per group key (in key order)
+    ///   â€¢ One column per aggregator (in assignment order)
     ///
     /// Aggregator semantics (empty group):
-    ///   • count → 0
-    ///   • sum   → 0.0
-    ///   • mean  → f64::NAN
-    ///   • min   → f64::NAN
-    ///   • max   → f64::NAN
-    ///   • first / last → TidyError::EmptyGroup
+    ///   â€¢ count â†’ 0
+    ///   â€¢ sum   â†’ 0.0
+    ///   â€¢ mean  â†’ f64::NAN
+    ///   â€¢ min   â†’ f64::NAN
+    ///   â€¢ max   â†’ f64::NAN
+    ///   â€¢ first / last â†’ TidyError::EmptyGroup
     pub fn summarise(
         &self,
         assignments: &[(&str, TidyAgg)],
@@ -3014,7 +2598,7 @@ fn agg_reduce(
     }
 }
 
-// ── TidyAgg ───────────────────────────────────────────────────────────────────
+// â”€â”€ TidyAgg â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// An aggregator expression for use in `summarise`.
 #[derive(Debug, Clone)]
@@ -3035,7 +2619,7 @@ pub enum TidyAgg {
     Last(String),
 }
 
-// ── ArrangeKey ────────────────────────────────────────────────────────────────
+// â”€â”€ ArrangeKey â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// One sorting key for `arrange`.
 #[derive(Debug, Clone)]
@@ -3055,11 +2639,11 @@ impl ArrangeKey {
     }
 }
 
-// ── TidyView: group_by, arrange, slice, distinct, joins ──────────────────────
+// â”€â”€ TidyView: group_by, arrange, slice, distinct, joins â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 impl TidyView {
 
-    // ── group_by ─────────────────────────────────────────────────────────────
+    // â”€â”€ group_by â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Group the view by one or more column names.
     ///
@@ -3068,10 +2652,10 @@ impl TidyView {
     /// among the currently visible rows (ascending base-row scan).
     ///
     /// Edge cases:
-    ///   • 0 rows → 0 groups, no error.
-    ///   • 0 keys → every visible row becomes one group (equivalent to a
+    ///   â€¢ 0 rows â†’ 0 groups, no error.
+    ///   â€¢ 0 keys â†’ every visible row becomes one group (equivalent to a
     ///     global aggregate).
-    ///   • Unknown key column → `TidyError::ColumnNotFound`.
+    ///   â€¢ Unknown key column â†’ `TidyError::ColumnNotFound`.
     pub fn group_by(&self, keys: &[&str]) -> Result<GroupedTidyView, TidyError> {
         // Validate key columns exist in base
         let mut key_col_indices = Vec::with_capacity(keys.len());
@@ -3096,7 +2680,7 @@ impl TidyView {
         })
     }
 
-    // ── arrange ──────────────────────────────────────────────────────────────
+    // â”€â”€ arrange â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Sort visible rows by one or more `ArrangeKey`s.
     ///
@@ -3109,12 +2693,12 @@ impl TidyView {
     /// subsequent mask-based operations to work correctly.
     ///
     /// Semantics:
-    ///   • Stable sort: equal-key rows keep their original relative order.
-    ///   • NaN sorting: NaN values sort LAST (greater than any finite value).
-    ///   • Multi-key: sort by key[0] first, then key[1], ... (left-to-right).
-    ///   • Unknown column → `TidyError::ColumnNotFound`.
-    ///   • Non-numeric sort of Float col: allowed (NaN last).
-    ///   • Mixed-type sort across columns is column-by-column (each col has one type).
+    ///   â€¢ Stable sort: equal-key rows keep their original relative order.
+    ///   â€¢ NaN sorting: NaN values sort LAST (greater than any finite value).
+    ///   â€¢ Multi-key: sort by key[0] first, then key[1], ... (left-to-right).
+    ///   â€¢ Unknown column â†’ `TidyError::ColumnNotFound`.
+    ///   â€¢ Non-numeric sort of Float col: allowed (NaN last).
+    ///   â€¢ Mixed-type sort across columns is column-by-column (each col has one type).
     pub fn arrange(&self, keys: &[ArrangeKey]) -> Result<TidyView, TidyError> {
         // Validate all sort key columns exist in base
         for key in keys {
@@ -3165,7 +2749,7 @@ impl TidyView {
         })
     }
 
-    // ── slice ─────────────────────────────────────────────────────────────────
+    // â”€â”€ slice â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Select rows by a half-open range `[start, end)` of visible-row positions.
     ///
@@ -3217,7 +2801,7 @@ impl TidyView {
         self.view_from_row_indices(visible)
     }
 
-    // ── distinct ─────────────────────────────────────────────────────────────
+    // â”€â”€ distinct â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Return rows with unique combinations of the specified columns.
     ///
@@ -3225,9 +2809,9 @@ impl TidyView {
     /// key combination is kept).
     ///
     /// Edge cases:
-    ///   • 0 key columns → keeps first row only (all rows equal on zero keys).
-    ///   • Unknown column → `TidyError::ColumnNotFound`.
-    ///   • After projection/mask: only visible columns/rows are considered.
+    ///   â€¢ 0 key columns â†’ keeps first row only (all rows equal on zero keys).
+    ///   â€¢ Unknown column â†’ `TidyError::ColumnNotFound`.
+    ///   â€¢ After projection/mask: only visible columns/rows are considered.
     pub fn distinct(&self, cols: &[&str]) -> Result<TidyView, TidyError> {
         // Validate columns exist in base
         let mut col_indices = Vec::with_capacity(cols.len());
@@ -3263,7 +2847,7 @@ impl TidyView {
         Ok(self.view_from_row_indices(selected_rows))
     }
 
-    // ── joins ─────────────────────────────────────────────────────────────────
+    // â”€â”€ joins â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Inner join: rows where all `on` key columns match.
     ///
@@ -3272,9 +2856,9 @@ impl TidyView {
     /// Produces a materialized `TidyFrame` (joins always materialize).
     ///
     /// Edge cases:
-    ///   • Unknown join key → `TidyError::ColumnNotFound`.
-    ///   • `on` empty → cross join semantics (every left × every right).
-    ///   • Duplicate keys on left or right → all matching pairs included.
+    ///   â€¢ Unknown join key â†’ `TidyError::ColumnNotFound`.
+    ///   â€¢ `on` empty â†’ cross join semantics (every left Ã— every right).
+    ///   â€¢ Duplicate keys on left or right â†’ all matching pairs included.
     pub fn inner_join(
         &self,
         right: &TidyView,
@@ -3321,7 +2905,7 @@ impl TidyView {
         Ok(self.view_from_row_indices(included))
     }
 
-    // ── internal helpers ──────────────────────────────────────────────────────
+    // â”€â”€ internal helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Build a new `TidyView` over the same base using explicit row indices.
     /// The row indices must be valid base-frame indices.
@@ -3339,7 +2923,7 @@ impl TidyView {
     }
 }
 
-// ── Join internals ────────────────────────────────────────────────────────────
+// â”€â”€ Join internals â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[derive(Clone, Copy)]
 enum JoinKind { Inner, Left }
@@ -3372,7 +2956,7 @@ fn row_key(base: &DataFrame, col_indices: &[usize], row: usize) -> Vec<String> {
 }
 
 /// Build a deterministic right-side lookup: sorted Vec of (key_tuple, right_row_idx).
-/// Sorted by key tuple first, then by row index — guarantees determinism.
+/// Sorted by key tuple first, then by row index â€” guarantees determinism.
 fn build_right_lookup(
     right: &TidyView,
     right_key_cols: &[usize],
@@ -3548,7 +3132,7 @@ fn build_left_join_frame(
     Ok(TidyFrame::from_df(df))
 }
 
-// ── Column comparison for arrange ─────────────────────────────────────────────
+// â”€â”€ Column comparison for arrange â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Compare two rows of a `Column` for use in `arrange`.
 ///
@@ -3574,19 +3158,19 @@ fn compare_column_rows(col: &Column, a: usize, b: usize) -> std::cmp::Ordering {
 
 // (TidyError::EmptyGroup is defined in the TidyError enum above.)
 
-// ── NoGC safe-builtin registrations (Phase 11–12) ───────────────────────────
+// â”€â”€ NoGC safe-builtin registrations (Phase 11â€“12) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // Ops that only update metadata (no column buffer alloc):
-//   tidy_group_by      : builds GroupIndex (Vec of Vec<usize>) — no column alloc
-//   tidy_ungroup       : drops GroupIndex — no alloc
-//   tidy_arrange       : materialises sorted base (ALLOCATES) → NOT @nogc safe
-//   tidy_slice         : updates RowIndexMap — O(N) usize alloc, safe
-//   tidy_distinct      : builds RowIndexMap — O(N) usize alloc, safe
-//   tidy_semi_join     : builds RowIndexMap — O(N) usize alloc, safe
-//   tidy_anti_join     : builds RowIndexMap — O(N) usize alloc, safe
-//   tidy_inner_join    : materialises result — ALLOCATES → NOT @nogc safe
-//   tidy_left_join     : materialises result — ALLOCATES → NOT @nogc safe
-//   tidy_summarise     : materialises result — ALLOCATES → NOT @nogc safe
+//   tidy_group_by      : builds GroupIndex (Vec of Vec<usize>) â€” no column alloc
+//   tidy_ungroup       : drops GroupIndex â€” no alloc
+//   tidy_arrange       : materialises sorted base (ALLOCATES) â†’ NOT @nogc safe
+//   tidy_slice         : updates RowIndexMap â€” O(N) usize alloc, safe
+//   tidy_distinct      : builds RowIndexMap â€” O(N) usize alloc, safe
+//   tidy_semi_join     : builds RowIndexMap â€” O(N) usize alloc, safe
+//   tidy_anti_join     : builds RowIndexMap â€” O(N) usize alloc, safe
+//   tidy_inner_join    : materialises result â€” ALLOCATES â†’ NOT @nogc safe
+//   tidy_left_join     : materialises result â€” ALLOCATES â†’ NOT @nogc safe
+//   tidy_summarise     : materialises result â€” ALLOCATES â†’ NOT @nogc safe
 //
 // Safe (registered in nogc_verify.rs):
 //   tidy_group_by, tidy_ungroup, tidy_slice, tidy_distinct,
@@ -3619,7 +3203,7 @@ mod phase10_unit_tests {
 
     #[test]
     fn bitmask_tail_bits_clean() {
-        // 65 rows — two words; tail must not bleed into unset bits
+        // 65 rows â€” two words; tail must not bleed into unset bits
         let m = BitMask::all_true(65);
         assert_eq!(m.count_ones(), 65);
         assert_eq!(m.words.len(), 2);
@@ -3735,7 +3319,7 @@ mod phase10_unit_tests {
     fn mutate_type_promotion() {
         let df = make_df();
         let v = df.tidy();
-        // x (Int) + y (Float) → Float column
+        // x (Int) + y (Float) â†’ Float column
         let frame = v
             .mutate(&[("promoted", DExpr::BinOp {
                 op: DBinOp::Add,
@@ -3749,9 +3333,9 @@ mod phase10_unit_tests {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Phase 13–16: Tidy Completion
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// Phase 13â€“16: Tidy Completion
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 //
 // Spec-Lock Table (invariants that tests must not regress):
 //
@@ -3775,8 +3359,8 @@ mod phase10_unit_tests {
 // |                               | equal to other nulls). |
 // | NullCol in join               | Null key does NOT match null key (SQL NULL
 // |                               | semantics). |
-// | NullCol in aggregation        | Nulls skipped; all-null → null result. |
-// | NullCol comparison            | NULL op x → null result (three-valued). |
+// | NullCol in aggregation        | Nulls skipped; all-null â†’ null result. |
+// | NullCol comparison            | NULL op x â†’ null result (three-valued). |
 // | rename collision              | TidyError::DuplicateColumn. |
 // | rename unknown col            | TidyError::ColumnNotFound. |
 // | relocate ordering             | Stable; relative order of non-moved cols
@@ -3790,15 +3374,15 @@ mod phase10_unit_tests {
 // | across expansion order        | Stable column iteration (projection order).
 // | across generated names        | "{col}_{fn_name}" or user template. |
 // | across name collision         | TidyError::DuplicateColumn. |
-// | join type validation          | Comparable types only (Int↔Int, Float↔Float,
-// |                               | Str↔Str, Bool↔Bool, Int↔Float widened).
+// | join type validation          | Comparable types only (Intâ†”Int, Floatâ†”Float,
+// |                               | Strâ†”Str, Boolâ†”Bool, Intâ†”Float widened).
 // |                               | TidyError::TypeMismatch otherwise. |
 // | join suffix handling          | Default ".x"/".y"; user may override. |
 // | right_join / full_join        | Defined; row order: see semantics section. |
 // | group perf upgrade            | First-occurrence order preserved; identical
 // |                               | output to Phase 11 implementation. |
 
-// ── New TidyError variants ────────────────────────────────────────────────
+// â”€â”€ New TidyError variants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 impl TidyError {
     /// Construct a schema mismatch error.
@@ -3822,7 +3406,7 @@ impl TidyError {
     }
 }
 
-// ── Nullable column layer ─────────────────────────────────────────────────
+// â”€â”€ Nullable column layer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// A nullable column: values buffer + validity bitmap.
 ///
@@ -3889,7 +3473,7 @@ impl<T: Clone + Default> NullableColumn<T> {
 /// A typed nullable column variant stored in a DataFrame column slot.
 ///
 /// Phase 13-16 does not replace `Column` (which has no nulls) with `NullCol`
-/// everywhere — that would be a breaking change across the whole codebase.
+/// everywhere â€” that would be a breaking change across the whole codebase.
 /// Instead, `NullCol` is used as the result type of operations that can
 /// introduce nulls (left_join fills, pivot_wider missing combinations,
 /// bind_rows on mismatched schemas, full_join unmatched rows).
@@ -3980,7 +3564,7 @@ impl NullCol {
     }
 
     /// Convert to `Column`, filling nulls with type-appropriate zero-value.
-    /// Null Int → 0, Null Float → NaN, Null Str → "", Null Bool → false.
+    /// Null Int â†’ 0, Null Float â†’ NaN, Null Str â†’ "", Null Bool â†’ false.
     pub fn to_column_filled(&self) -> Column {
         match self {
             NullCol::Int(nc) => Column::Int(nc.values.clone()),
@@ -3995,7 +3579,7 @@ impl NullCol {
         }
     }
 
-    /// Get display string for a row (null → "null").
+    /// Get display string for a row (null â†’ "null").
     pub fn get_display(&self, i: usize) -> String {
         if self.is_null(i) {
             return "null".to_string();
@@ -4093,9 +3677,9 @@ impl Default for NullableFrame {
     fn default() -> Self { Self::new() }
 }
 
-// ── Helpers for nullable-aware gather ─────────────────────────────────────
+// â”€â”€ Helpers for nullable-aware gather â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/// Gather column rows with optional indices (None → null).
+/// Gather column rows with optional indices (None â†’ null).
 /// Used in left/right/full join output where some rows have no match.
 fn gather_column_nullable_null(col: &Column, indices: &[Option<usize>]) -> NullCol {
     match col {
@@ -4146,7 +3730,7 @@ fn gather_column_nullable_null(col: &Column, indices: &[Option<usize>]) -> NullC
     }
 }
 
-// ── Across support types ───────────────────────────────────────────────────
+// â”€â”€ Across support types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// A scalar transformation function for `across()`.
 ///
@@ -4177,7 +3761,7 @@ pub struct AcrossSpec {
     pub cols: Vec<String>,
     /// Transform to apply.
     pub transform: AcrossTransform,
-    /// Optional output name template. None → "{col}_{fn}".
+    /// Optional output name template. None â†’ "{col}_{fn}".
     /// Use `{col}` and `{fn}` as placeholders.
     pub name_template: Option<String>,
 }
@@ -4207,7 +3791,7 @@ impl AcrossSpec {
     }
 }
 
-// ── Join maturity types ────────────────────────────────────────────────────
+// â”€â”€ Join maturity types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Join suffix options for handling column name collisions in inner/left/right/full joins.
 #[derive(Debug, Clone)]
@@ -4228,7 +3812,7 @@ impl JoinSuffix {
     }
 }
 
-// ── Column type comparison for join validation ────────────────────────────
+// â”€â”€ Column type comparison for join validation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Check whether two Column types are join-compatible.
 /// Int and Float are mutually compatible (numeric widening).
@@ -4244,11 +3828,11 @@ fn join_types_compatible(left: &Column, right: &Column) -> bool {
     }
 }
 
-// ── Phase 13-16 TidyView extensions ───────────────────────────────────────
+// â”€â”€ Phase 13-16 TidyView extensions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 impl TidyView {
 
-    // ── pivot_longer ─────────────────────────────────────────────────────────
+    // â”€â”€ pivot_longer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Pivot selected columns from wide to long format.
     ///
@@ -4261,10 +3845,10 @@ impl TidyView {
     ///   value column (in the order they appear in `value_cols`).
     ///
     /// Edge cases:
-    ///   • `value_cols` empty → `TidyError::EmptySelection`.
-    ///   • Unknown column → `TidyError::ColumnNotFound`.
-    ///   • Duplicate in `value_cols` → `TidyError::DuplicateColumn`.
-    ///   • Mixed types in `value_cols` → `TidyError::TypeMismatch`.
+    ///   â€¢ `value_cols` empty â†’ `TidyError::EmptySelection`.
+    ///   â€¢ Unknown column â†’ `TidyError::ColumnNotFound`.
+    ///   â€¢ Duplicate in `value_cols` â†’ `TidyError::DuplicateColumn`.
+    ///   â€¢ Mixed types in `value_cols` â†’ `TidyError::TypeMismatch`.
     pub fn pivot_longer(
         &self,
         value_cols: &[&str],
@@ -4406,7 +3990,7 @@ impl TidyView {
         Ok(TidyFrame::from_df(df))
     }
 
-    // ── pivot_wider ──────────────────────────────────────────────────────────
+    // â”€â”€ pivot_wider â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Pivot long-format data to wide format.
     ///
@@ -4419,9 +4003,9 @@ impl TidyView {
     ///   (first-occurrence order).
     ///
     /// Edge cases:
-    ///   • Duplicate (id_key, name_key) combo → `TidyError::DuplicateKey`.
-    ///   • Missing combo → null fill via NullableFrame.
-    ///   • Unknown column → `TidyError::ColumnNotFound`.
+    ///   â€¢ Duplicate (id_key, name_key) combo â†’ `TidyError::DuplicateKey`.
+    ///   â€¢ Missing combo â†’ null fill via NullableFrame.
+    ///   â€¢ Unknown column â†’ `TidyError::ColumnNotFound`.
     pub fn pivot_wider(
         &self,
         id_cols: &[&str],
@@ -4450,7 +4034,7 @@ impl TidyView {
         }
 
         // Collect unique id combinations in first-occurrence order
-        // Map: id_tuple → output_row_slot
+        // Map: id_tuple â†’ output_row_slot
         let id_col_refs: Vec<&Column> = id_cols.iter()
             .map(|&name| self.base.get_column(name).unwrap())
             .collect();
@@ -4472,7 +4056,7 @@ impl TidyView {
         let n_rows = id_order.len();
         let n_keys = key_values.len();
 
-        // Cell lookup: (id_slot, key_slot) → source row index
+        // Cell lookup: (id_slot, key_slot) â†’ source row index
         // Detect duplicate (id, key) combinations
         let mut cell_map: Vec<Vec<Option<usize>>> = vec![vec![None; n_keys]; n_rows];
 
@@ -4529,16 +4113,16 @@ impl TidyView {
         Ok(NullableFrame { columns: out_cols })
     }
 
-    // ── rename ────────────────────────────────────────────────────────────────
+    // â”€â”€ rename â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Rename columns: `renames` is a slice of `(old_name, new_name)`.
     ///
     /// Returns a new `TidyView` over a new base DataFrame with renamed columns.
     ///
     /// Edge cases:
-    ///   • Unknown `old_name` → `TidyError::ColumnNotFound`.
-    ///   • `new_name` already exists (collision) → `TidyError::DuplicateColumn`.
-    ///   • `old_name == new_name` → no-op for that pair.
+    ///   â€¢ Unknown `old_name` â†’ `TidyError::ColumnNotFound`.
+    ///   â€¢ `new_name` already exists (collision) â†’ `TidyError::DuplicateColumn`.
+    ///   â€¢ `old_name == new_name` â†’ no-op for that pair.
     pub fn rename(&self, renames: &[(&str, &str)]) -> Result<TidyView, TidyError> {
         // Build rename map
         let mut rename_map: Vec<(usize, String)> = Vec::new();
@@ -4576,7 +4160,7 @@ impl TidyView {
         })
     }
 
-    // ── relocate ─────────────────────────────────────────────────────────────
+    // â”€â”€ relocate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Reorder columns so that `cols` appear at position `before` or `after`
     /// another column, or at the front/back.
@@ -4588,8 +4172,8 @@ impl TidyView {
     /// Returns a new `TidyView` with updated projection.
     ///
     /// Edge cases:
-    ///   • Unknown column in `cols` → `TidyError::ColumnNotFound`.
-    ///   • Unknown anchor column → `TidyError::ColumnNotFound`.
+    ///   â€¢ Unknown column in `cols` â†’ `TidyError::ColumnNotFound`.
+    ///   â€¢ Unknown anchor column â†’ `TidyError::ColumnNotFound`.
     pub fn relocate(&self, cols: &[&str], position: RelocatePos<'_>) -> Result<TidyView, TidyError> {
         // Validate cols exist in projection
         let proj_names: Vec<&str> = self.column_names();
@@ -4659,15 +4243,15 @@ impl TidyView {
         })
     }
 
-    // ── drop_cols ─────────────────────────────────────────────────────────────
+    // â”€â”€ drop_cols â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Drop specified columns from the view (select-minus semantics).
     ///
     /// Returns a new `TidyView` with those columns removed from the projection.
     ///
     /// Edge cases:
-    ///   • Unknown column → `TidyError::ColumnNotFound`.
-    ///   • Dropping all columns → valid (0-col view).
+    ///   â€¢ Unknown column â†’ `TidyError::ColumnNotFound`.
+    ///   â€¢ Dropping all columns â†’ valid (0-col view).
     pub fn drop_cols(&self, cols: &[&str]) -> Result<TidyView, TidyError> {
         let proj_names = self.column_names();
         for &name in cols {
@@ -4683,7 +4267,7 @@ impl TidyView {
         self.select(&keep)
     }
 
-    // ── bind_rows ────────────────────────────────────────────────────────────
+    // â”€â”€ bind_rows â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Concatenate rows from `other` onto `self` (strict schema match).
     ///
@@ -4691,8 +4275,8 @@ impl TidyView {
     /// Row order: `self` rows first, then `other` rows.
     ///
     /// Edge cases:
-    ///   • Column names differ → `TidyError::Internal("schema mismatch: ...")`.
-    ///   • `other` has zero rows → returns self's rows (valid, no error).
+    ///   â€¢ Column names differ â†’ `TidyError::Internal("schema mismatch: ...")`.
+    ///   â€¢ `other` has zero rows â†’ returns self's rows (valid, no error).
     pub fn bind_rows(&self, other: &TidyView) -> Result<TidyFrame, TidyError> {
         let self_names = self.column_names();
         let other_names = other.column_names();
@@ -4725,7 +4309,7 @@ impl TidyView {
         Ok(TidyFrame::from_df(df))
     }
 
-    // ── bind_cols ────────────────────────────────────────────────────────────
+    // â”€â”€ bind_cols â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Concatenate columns from `other` onto `self` (strict row count match).
     ///
@@ -4733,8 +4317,8 @@ impl TidyView {
     /// Column order: `self` columns first, then `other` columns.
     ///
     /// Edge cases:
-    ///   • Row count mismatch → `TidyError::LengthMismatch`.
-    ///   • Column name collision → `TidyError::DuplicateColumn`.
+    ///   â€¢ Row count mismatch â†’ `TidyError::LengthMismatch`.
+    ///   â€¢ Column name collision â†’ `TidyError::DuplicateColumn`.
     pub fn bind_cols(&self, other: &TidyView) -> Result<TidyFrame, TidyError> {
         let self_nrows = self.nrows();
         let other_nrows = other.nrows();
@@ -4773,15 +4357,15 @@ impl TidyView {
         Ok(TidyFrame::from_df(df))
     }
 
-    // ── mutate_across ─────────────────────────────────────────────────────────
+    // â”€â”€ mutate_across â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Apply a transformation across multiple columns, adding/replacing each
     /// with a generated name `{col}_{fn}` (or a user-specified template).
     ///
     /// Edge cases:
-    ///   • Unknown column → `TidyError::ColumnNotFound`.
-    ///   • Generated name collision → `TidyError::DuplicateColumn`.
-    ///   • Empty cols list → no-op (returns materialized frame unchanged).
+    ///   â€¢ Unknown column â†’ `TidyError::ColumnNotFound`.
+    ///   â€¢ Generated name collision â†’ `TidyError::DuplicateColumn`.
+    ///   â€¢ Empty cols list â†’ no-op (returns materialized frame unchanged).
     pub fn mutate_across(&self, specs: &[AcrossSpec]) -> Result<TidyFrame, TidyError> {
         // Materialize self first
         let base_df = self.materialize()?;
@@ -4819,7 +4403,7 @@ impl TidyView {
         Ok(TidyFrame::from_df(df))
     }
 
-    // ── right_join ────────────────────────────────────────────────────────────
+    // â”€â”€ right_join â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Right join: all rows from `right`, matched rows from `self` (left).
     ///
@@ -4841,7 +4425,7 @@ impl TidyView {
         build_right_join_frame(self, right, &left_rows_opt, &right_rows, on, suffix)
     }
 
-    // ── full_join ─────────────────────────────────────────────────────────────
+    // â”€â”€ full_join â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Full outer join: all rows from both sides; null-fill for unmatched.
     ///
@@ -4856,13 +4440,13 @@ impl TidyView {
         build_full_join_frame(self, right, on, suffix)
     }
 
-    // ── inner_join_typed (join maturity upgrade) ───────────────────────────
+    // â”€â”€ inner_join_typed (join maturity upgrade) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Inner join with type validation and collision suffix support.
     ///
     /// Same semantics as `inner_join` but:
-    ///   • validates join key types are compatible (Int/Float widened, others exact).
-    ///   • handles non-key column name collisions using `suffix`.
+    ///   â€¢ validates join key types are compatible (Int/Float widened, others exact).
+    ///   â€¢ handles non-key column name collisions using `suffix`.
     pub fn inner_join_typed(
         &self,
         right: &TidyView,
@@ -4874,7 +4458,7 @@ impl TidyView {
         build_join_frame_with_suffix(self, right, &left_rows, &right_rows, on, suffix, false)
     }
 
-    // ── left_join_typed (join maturity upgrade) ────────────────────────────
+    // â”€â”€ left_join_typed (join maturity upgrade) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Left join with type validation and collision suffix support.
     pub fn left_join_typed(
@@ -4890,7 +4474,7 @@ impl TidyView {
     }
 }
 
-// ── Position enum for relocate ─────────────────────────────────────────────
+// â”€â”€ Position enum for relocate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Position specifier for `TidyView::relocate`.
 pub enum RelocatePos<'a> {
@@ -4904,7 +4488,7 @@ pub enum RelocatePos<'a> {
     After(&'a str),
 }
 
-// ── Column concatenation helper ────────────────────────────────────────────
+// â”€â”€ Column concatenation helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn concat_columns(
     left: &Column,
@@ -4950,7 +4534,7 @@ fn concat_columns(
     }
 }
 
-// ── Join key type validation ───────────────────────────────────────────────
+// â”€â”€ Join key type validation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn validate_join_key_types(
     left: &TidyView,
@@ -4969,7 +4553,7 @@ fn validate_join_key_types(
     Ok(())
 }
 
-// ── Join frames with suffix collision handling ────────────────────────────
+// â”€â”€ Join frames with suffix collision handling â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn build_join_frame_with_suffix(
     left: &TidyView,
@@ -5089,7 +4673,7 @@ fn build_right_join_frame(
 
     let mut columns: Vec<(String, NullCol)> = Vec::new();
 
-    // Left projected columns (nullable — unmatched = null)
+    // Left projected columns (nullable â€” unmatched = null)
     for &ci in left.proj.indices() {
         let (name, col) = &left.base.columns[ci];
         if left_key_names.contains(name.as_str()) { continue; }
@@ -5216,7 +4800,7 @@ fn build_full_join_frame(
     Ok(NullableFrame { columns })
 }
 
-// ── GroupedTidyView: mutate_across + summarise_across ─────────────────────
+// â”€â”€ GroupedTidyView: mutate_across + summarise_across â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 impl GroupedTidyView {
 
@@ -5244,7 +4828,7 @@ impl GroupedTidyView {
         let key_names = &self.index.key_names;
         let mut out_cols: Vec<(String, Column)> = Vec::new();
 
-        // Key columns (String typed — group key values)
+        // Key columns (String typed â€” group key values)
         for ki in 0..key_names.len() {
             let col_vals: Vec<String> = self.index.groups.iter()
                 .map(|g| g.key_values[ki].clone())
@@ -5252,7 +4836,7 @@ impl GroupedTidyView {
             out_cols.push((key_names[ki].clone(), Column::Str(col_vals)));
         }
 
-        // For each spec column × transform
+        // For each spec column Ã— transform
         for spec in specs {
             for col_name in &spec.cols {
                 let out_name = spec.output_name(col_name);
@@ -5295,7 +4879,7 @@ impl GroupedTidyView {
     }
 }
 
-// ── Simple IndexMap for mutate_across column merging ─────────────────────
+// â”€â”€ Simple IndexMap for mutate_across column merging â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // We need ordered insertion with overwrite semantics. Rather than pulling in
 // a dependency, implement a minimal ordered map over (String, Column).
 
@@ -5330,10 +4914,10 @@ mod indexmap_simple {
     }
 }
 
-// ── Group perf upgrade (deterministic hash accelerator) ───────────────────
+// â”€â”€ Group perf upgrade (deterministic hash accelerator) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // The Phase 11 GroupIndex::build() uses a linear scan (Vec<(key, slot)>)
-// which is O(N × G). For large N with small G, we add a hash-accelerated
+// which is O(N Ã— G). For large N with small G, we add a hash-accelerated
 // variant that preserves first-occurrence ordering by using insertion order
 // in a deterministic way.
 //
@@ -5343,14 +4927,14 @@ mod indexmap_simple {
 // The BTreeMap is ONLY used for fast lookup; the output order is still
 // driven by first-occurrence of groups as they appear in the scan.
 //
-// This is a pure internal change — the external API and output semantics
+// This is a pure internal change â€” the external API and output semantics
 // are identical to Phase 11.
 
 impl GroupIndex {
     /// Build a GroupIndex using a BTree-accelerated lookup.
     ///
     /// Semantics: identical to `GroupIndex::build()`. First-occurrence group
-    /// ordering is preserved. The only difference is O(N log G) vs O(N × G).
+    /// ordering is preserved. The only difference is O(N log G) vs O(N Ã— G).
     pub fn build_fast(
         base: &DataFrame,
         key_col_indices: &[usize],
@@ -5381,7 +4965,7 @@ impl GroupIndex {
     }
 }
 
-// ── TidyView: group_by_fast (uses BTree-accelerated GroupIndex) ────────────
+// â”€â”€ TidyView: group_by_fast (uses BTree-accelerated GroupIndex) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 impl TidyView {
     /// Like `group_by` but uses the BTree-accelerated `GroupIndex::build_fast`.
@@ -5402,15 +4986,15 @@ impl TidyView {
     }
 }
 
-// ── NoGC safe-builtin registrations (Phase 13–16) ─────────────────────────
+// â”€â”€ NoGC safe-builtin registrations (Phase 13â€“16) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // New safe (view/metadata-only, no column buffer alloc):
-//   tidy_rename          : builds new DataFrame with renamed cols — O(N×K) clone
-//                          BUT this is a metadata rebuild, not a hot-path — listed as ALLOC
-//                          → NOT @nogc safe (rebuilds base)
-//   tidy_relocate        : updates ProjectionMap only — O(K) — SAFE
-//   tidy_drop_cols       : updates ProjectionMap only — O(K) — SAFE
-//   tidy_group_by_fast   : BTree lookup + GroupIndex — no column alloc — SAFE
+//   tidy_rename          : builds new DataFrame with renamed cols â€” O(NÃ—K) clone
+//                          BUT this is a metadata rebuild, not a hot-path â€” listed as ALLOC
+//                          â†’ NOT @nogc safe (rebuilds base)
+//   tidy_relocate        : updates ProjectionMap only â€” O(K) â€” SAFE
+//   tidy_drop_cols       : updates ProjectionMap only â€” O(K) â€” SAFE
+//   tidy_group_by_fast   : BTree lookup + GroupIndex â€” no column alloc â€” SAFE
 //
 // New materialising (NOT @nogc safe):
 //   tidy_pivot_longer    : allocates new column buffers
@@ -5429,7 +5013,7 @@ impl TidyView {
 //   tidy_relocate, tidy_drop_cols, tidy_group_by_fast
 
 // ============================================================================
-// PHASE 17: CATEGORICAL FOUNDATIONS — fct_encode, fct_lump, fct_reorder,
+// PHASE 17: CATEGORICAL FOUNDATIONS â€” fct_encode, fct_lump, fct_reorder,
 //           fct_collapse, NullableFactor
 // ============================================================================
 //
@@ -5438,7 +5022,7 @@ impl TidyView {
 //  [S-1]  Index type: u16 (max 65,535 distinct levels).  TidyError::CapacityExceeded
 //         on overflow.  A future u32 upgrade is a flag-only change.
 //  [S-2]  Level ordering: first-occurrence order of the STRING values in the
-//         visible rows at encoding time.  No hash involved → deterministic.
+//         visible rows at encoding time.  No hash involved â†’ deterministic.
 //  [S-3]  Null handling: null cells use a SEPARATE validity bitmap (NullableFactor).
 //         Null is NOT a level.  Null index slot is 0 but masked out by bitmap.
 //  [S-4]  fct_lump tie-breaking: equal-frequency levels keep first-occurrence order;
@@ -5447,29 +5031,29 @@ impl TidyView {
 //         renamed "Other_" (iterated until unique).
 //  [S-6]  fct_reorder: stable sort (preserve first-occurrence within ties); NaN
 //         values in the numeric summary column sort LAST (same rule as arrange).
-//  [S-7]  fct_collapse: metadata-only — never rewrites data buffer; O(L) pass over
+//  [S-7]  fct_collapse: metadata-only â€” never rewrites data buffer; O(L) pass over
 //         levels Vec only.  Re-indexes in O(N) only when compacting dead indices.
 //  [S-8]  fct_collapse duplicate level output: if two OLD levels collapse to the
 //         SAME NEW name that new name appears once; index remapping is canonical.
-//  [S-9]  fct_encode is a materialising op (allocates new u16 buffer) → NOT @nogc.
-//  [S-10] fct_lump is materialising (reallocates levels + rebuilds counts) → NOT @nogc.
-//  [S-11] fct_reorder is materialising (reorders levels Vec + rebuilds index map) → NOT @nogc.
-//  [S-12] fct_collapse is metadata-only → SAFE in @nogc (registered as safe builtin).
+//  [S-9]  fct_encode is a materialising op (allocates new u16 buffer) â†’ NOT @nogc.
+//  [S-10] fct_lump is materialising (reallocates levels + rebuilds counts) â†’ NOT @nogc.
+//  [S-11] fct_reorder is materialising (reorders levels Vec + rebuilds index map) â†’ NOT @nogc.
+//  [S-12] fct_collapse is metadata-only â†’ SAFE in @nogc (registered as safe builtin).
 //  [S-13] Encoding stability: fct_encode on an already-encoded FctColumn is a no-op
 //         (returns clone of self) so that double-encoding is idempotent.
 //  [S-14] NullableFactor: FctColumn + BitMask validity.  Null rows carry index=0 in
 //         data buffer but bitmap bit is clear; any op that reads the data MUST check
 //         the bitmap first.
 
-// ── FctColumn ────────────────────────────────────────────────────────────────
+// â”€â”€ FctColumn â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// A compact categorical column: stores u16 indices into a levels table.
 ///
 /// Invariant: `data[i] < levels.len()` for all i where bitmap is set.
-/// Null rows (in NullableFactor) may carry index 0 — callers must check bitmap.
+/// Null rows (in NullableFactor) may carry index 0 â€” callers must check bitmap.
 #[derive(Clone, Debug)]
 pub struct FctColumn {
-    /// Mapping from index → level string.  Order = first-occurrence of each string
+    /// Mapping from index â†’ level string.  Order = first-occurrence of each string
     /// in the source column (deterministic, no hashing).
     pub levels: Vec<String>,
     /// One u16 per row.  Value is the index into `levels`.
@@ -5477,7 +5061,7 @@ pub struct FctColumn {
 }
 
 impl FctColumn {
-    // ── Constructors ─────────────────────────────────────────────────────────
+    // â”€â”€ Constructors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Encode a string column into a FctColumn.
     ///
@@ -5487,7 +5071,7 @@ impl FctColumn {
         use std::collections::BTreeMap;
         let mut levels: Vec<String> = Vec::new();
         // BTreeMap for O(log L) lookup; key ordering is string-lexicographic
-        // (deterministic across runs — no hash randomness).
+        // (deterministic across runs â€” no hash randomness).
         // First-occurrence ORDER is maintained separately by `levels` Vec.
         let mut level_map: BTreeMap<String, u16> = BTreeMap::new();
         let mut data: Vec<u16> = Vec::with_capacity(strings.len());
@@ -5530,7 +5114,7 @@ impl FctColumn {
         Self::encode(&strings)
     }
 
-    // ── Shape ────────────────────────────────────────────────────────────────
+    // â”€â”€ Shape â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     pub fn nrows(&self) -> usize { self.data.len() }
     pub fn nlevels(&self) -> usize { self.levels.len() }
@@ -5540,7 +5124,7 @@ impl FctColumn {
         &self.levels[self.data[i] as usize]
     }
 
-    // ── fct_lump ─────────────────────────────────────────────────────────────
+    // â”€â”€ fct_lump â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Lump all but the top-`n` most frequent levels into "Other".
     ///
@@ -5548,9 +5132,9 @@ impl FctColumn {
     /// the top-n selection.
     ///
     /// Edge cases:
-    /// - n = 0  → all levels become "Other" (one level total)
-    /// - n ≥ nlevels → no lumping, returns self.clone()
-    /// - "Other" already present → renamed to "Other_" (iterate until unique)
+    /// - n = 0  â†’ all levels become "Other" (one level total)
+    /// - n â‰¥ nlevels â†’ no lumping, returns self.clone()
+    /// - "Other" already present â†’ renamed to "Other_" (iterate until unique)
     pub fn fct_lump(&self, n: usize) -> Result<Self, TidyError> {
         if n >= self.levels.len() {
             return Ok(self.clone()); // nothing to lump
@@ -5582,7 +5166,7 @@ impl FctColumn {
         let other_idx = new_levels.len() as u16;
         new_levels.push(other_name);
 
-        // Build old→new index map
+        // Build oldâ†’new index map
         let mut remap = vec![other_idx; self.levels.len()];
         for (new_i, &old_i) in keep_set.iter().enumerate() {
             remap[old_i] = new_i as u16;
@@ -5592,7 +5176,7 @@ impl FctColumn {
         Ok(FctColumn { levels: new_levels, data: new_data })
     }
 
-    // ── fct_reorder ──────────────────────────────────────────────────────────
+    // â”€â”€ fct_reorder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Reorder levels by a numeric summary column from the same frame.
     ///
@@ -5628,7 +5212,7 @@ impl FctColumn {
         // Build new levels in the new order
         let new_levels: Vec<String> = order.iter().map(|&i| self.levels[i].clone()).collect();
 
-        // Build old→new index map
+        // Build oldâ†’new index map
         let mut remap = vec![0u16; self.levels.len()];
         for (new_i, &old_i) in order.iter().enumerate() {
             remap[old_i] = new_i as u16;
@@ -5679,18 +5263,18 @@ impl FctColumn {
         self.fct_reorder(&means, descending)
     }
 
-    // ── fct_collapse ─────────────────────────────────────────────────────────
+    // â”€â”€ fct_collapse â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Collapse multiple old levels into single new level names.
     ///
     /// `mapping`: slice of `(old_level_name, new_level_name)`.
     /// - Levels not in mapping keep their original name.
-    /// - Multiple old levels can map to the same new name → merged into one index.
+    /// - Multiple old levels can map to the same new name â†’ merged into one index.
     /// - Output level order: first-occurrence of each NEW name, following the
     ///   original first-occurrence order of OLD levels.
     /// - Data buffer is rebuilt (O(N) remap) only when indices actually change.
     ///   The levels Vec is rebuilt O(L) regardless.
-    /// - Empty mapping → returns self.clone().
+    /// - Empty mapping â†’ returns self.clone().
     ///
     /// Capacity: if collapsing reduces level count the result always fits in u16.
     /// The collapsed result can never exceed the original level count, so
@@ -5737,7 +5321,7 @@ impl FctColumn {
         Ok(FctColumn { levels: new_levels, data: new_data })
     }
 
-    // ── Materialise back to Column::Str ──────────────────────────────────────
+    // â”€â”€ Materialise back to Column::Str â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Decode all rows back into a `Column::Str`.
     pub fn to_str_column(&self) -> Column {
@@ -5753,7 +5337,7 @@ impl FctColumn {
     }
 }
 
-// ── TidyError extensions for Phase 17 ────────────────────────────────────────
+// â”€â”€ TidyError extensions for Phase 17 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 impl TidyError {
     pub fn capacity_exceeded(limit: usize, got: usize) -> Self {
@@ -5761,7 +5345,7 @@ impl TidyError {
     }
 }
 
-// ── NullableFactor ────────────────────────────────────────────────────────────
+// â”€â”€ NullableFactor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// A FctColumn with a validity bitmap.  Null cells have validity=false.
 /// Null is NOT a level; `data[i]` for a null row is 0 (sentinel, must not be used).
@@ -5785,7 +5369,7 @@ impl NullableFactor {
 
     /// Encode a string slice with optional null markers.
     ///
-    /// `strings[i] = None` → null row.
+    /// `strings[i] = None` â†’ null row.
     pub fn encode_nullable(strings: &[Option<String>]) -> Result<Self, TidyError> {
         use std::collections::BTreeMap;
         let mut levels: Vec<String> = Vec::new();
@@ -5851,13 +5435,13 @@ impl NullableFactor {
     }
 }
 
-// ── TidyView: fct_encode integration ─────────────────────────────────────────
+// â”€â”€ TidyView: fct_encode integration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 impl TidyView {
     /// Encode a string column in this view into an `FctColumn`.
     ///
     /// Only visible rows (mask) in the current projection are used.
-    /// This is a materialising op (allocates u16 buffer) → NOT @nogc safe.
+    /// This is a materialising op (allocates u16 buffer) â†’ NOT @nogc safe.
     pub fn fct_encode(&self, col: &str) -> Result<FctColumn, TidyError> {
         FctColumn::encode_from_view(self, col)
     }
@@ -5911,10 +5495,10 @@ impl TidyView {
     }
 }
 
-// ── Phase 17 NoGC audit notes ─────────────────────────────────────────────────
+// â”€â”€ Phase 17 NoGC audit notes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
-// Safe (@nogc — metadata only, O(L) or O(N) over Rust-heap Vec only):
-//   fct_collapse    : rewrites levels Vec + remap data Vec — both are Rust heap,
+// Safe (@nogc â€” metadata only, O(L) or O(N) over Rust-heap Vec only):
+//   fct_collapse    : rewrites levels Vec + remap data Vec â€” both are Rust heap,
 //                     no GC heap involved.  SAFE.
 //
 // NOT safe (materialising, allocates new Rust heap buffers proportional to N or L):

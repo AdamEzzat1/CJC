@@ -1,0 +1,10 @@
+fn main() -> i64 {
+    let t: (i64, bool) = (42, true);
+    match t {
+        (a, b) => {
+            print(a);
+            print(b);
+        },
+    };
+    0
+}

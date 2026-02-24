@@ -9,7 +9,6 @@
 //! - If/else, while loops, early return
 //! - Reproducible RNG via `cjc_repro::Rng`
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
@@ -1072,8 +1071,8 @@ impl Interpreter {
             "print" => {
                 let parts: Vec<String> = args.iter().map(|v| format!("{v}")).collect();
                 let line = parts.join(" ");
-                self.output.push(line.clone());
                 println!("{line}");
+                self.output.push(line);
                 return Ok(Value::Void);
             }
             "Tensor.randn" => {
@@ -2250,31 +2249,6 @@ impl Interpreter {
         }
     }
 
-    fn value_to_f64_vec(&self, val: &Value) -> Result<Vec<f64>, EvalError> {
-        match val {
-            Value::Array(arr) => {
-                let mut data = Vec::with_capacity(arr.len());
-                for v in arr.iter() {
-                    match v {
-                        Value::Float(f) => data.push(*f),
-                        Value::Int(i) => data.push(*i as f64),
-                        _ => {
-                            return Err(EvalError::Runtime(format!(
-                                "expected numeric values in array, got {}",
-                                v.type_name()
-                            )));
-                        }
-                    }
-                }
-                Ok(data)
-            }
-            _ => Err(EvalError::Runtime(format!(
-                "expected Array, got {}",
-                val.type_name()
-            ))),
-        }
-    }
-
     fn value_to_usize_vec(&self, val: &Value) -> Result<Vec<usize>, EvalError> {
         match val {
             Value::Array(arr) => {
@@ -2301,29 +2275,6 @@ impl Interpreter {
         }
     }
 
-    /// Extract bytes from a `ByteSlice`, `Bytes`, or `String` value.
-    fn value_to_bytes(&self, val: &Value) -> Result<Vec<u8>, EvalError> {
-        match val {
-            Value::ByteSlice(b) => Ok(b.as_ref().clone()),
-            Value::Bytes(b)     => Ok(b.borrow().clone()),
-            Value::String(s)    => Ok(s.as_bytes().to_vec()),
-            _ => Err(EvalError::Runtime(format!(
-                "expected ByteSlice or Bytes, got {}",
-                val.type_name()
-            ))),
-        }
-    }
-
-    fn values_equal(&self, a: &Value, b: &Value) -> bool {
-        match (a, b) {
-            (Value::Int(a), Value::Int(b)) => a == b,
-            (Value::Float(a), Value::Float(b)) => a == b,
-            (Value::Bool(a), Value::Bool(b)) => a == b,
-            (Value::String(a), Value::String(b)) => a == b,
-            (Value::Void, Value::Void) => true,
-            _ => false,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
