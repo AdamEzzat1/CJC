@@ -1,0 +1,4 @@
+// line comment
+/* block comment */
+/* nested /* comment */ end */
+fn main() -> i64 { 0 } // trailing

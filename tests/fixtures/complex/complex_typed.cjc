@@ -1,0 +1,12 @@
+fn add_complex(a: Complex, b: Complex) -> Complex {
+    a.add(b)
+}
+
+fn main() -> i64 {
+    let z1: Complex = Complex(3.0, 4.0);
+    let z2: Complex = Complex(1.0, -2.0);
+    let z3: Complex = add_complex(z1, z2);
+    print(z3.re());
+    print(z3.im());
+    0
+}

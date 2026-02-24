@@ -25,6 +25,7 @@ members = [
     "bench/ad_bench",
     "bench/nlp_preprocess_bench",
 ]
+exclude = ["fuzz"]
 resolver = "2"
 
 [workspace.package]

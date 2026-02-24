@@ -779,6 +779,18 @@ impl MirExecutor {
                     "cannot apply `{op}` to f16 values"
                 ))),
             },
+            // Complex x Complex arithmetic
+            (Value::Complex(a), Value::Complex(b)) => match op {
+                BinOp::Add => Ok(Value::Complex(a.add(*b))),
+                BinOp::Sub => Ok(Value::Complex(a.sub(*b))),
+                BinOp::Mul => Ok(Value::Complex(a.mul_fixed(*b))),
+                BinOp::Div => Ok(Value::Complex(a.div_fixed(*b))),
+                BinOp::Eq => Ok(Value::Bool(a.re == b.re && a.im == b.im)),
+                BinOp::Ne => Ok(Value::Bool(a.re != b.re || a.im != b.im)),
+                _ => Err(MirExecError::Runtime(format!(
+                    "cannot apply `{op}` to Complex values"
+                ))),
+            },
             (Value::Tensor(a), Value::Tensor(b)) => match op {
                 BinOp::Add => Ok(Value::Tensor(a.add(b)?)),
                 BinOp::Sub => Ok(Value::Tensor(a.sub(b)?)),
@@ -855,6 +867,7 @@ impl MirExecutor {
             (UnaryOp::Neg, Value::Float(v)) => Ok(Value::Float(-v)),
             (UnaryOp::Neg, Value::Tensor(t)) => Ok(Value::Tensor(t.map(|x| -x))),
             (UnaryOp::Neg, Value::F16(v)) => Ok(Value::F16(v.neg())),
+            (UnaryOp::Neg, Value::Complex(z)) => Ok(Value::Complex(z.neg())),
             (UnaryOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
             _ => Err(MirExecError::Runtime(format!(
                 "cannot apply `{op}` to {}",
@@ -958,6 +971,7 @@ impl MirExecutor {
                 | "f32_to_f16"
                 | "bf16_to_f32"
                 | "f32_to_bf16"
+                | "Complex"
         )
     }
 
@@ -983,156 +997,65 @@ impl MirExecutor {
                 }
             }
         }
+        // Stateful builtins that need interpreter state
         match name {
             "print" => {
                 let parts: Vec<String> = args.iter().map(|v| format!("{v}")).collect();
                 let line = parts.join(" ");
                 self.output.push(line.clone());
                 println!("{line}");
-                Ok(Value::Void)
-            }
-            // f16 conversion builtins
-            "f16_to_f64" => match &args[0] {
-                Value::F16(v) => Ok(Value::Float(v.to_f64())),
-                _ => Err(MirExecError::Runtime("f16_to_f64 expects f16".into())),
-            },
-            "f64_to_f16" => match &args[0] {
-                Value::Float(v) => Ok(Value::F16(cjc_runtime::f16::F16::from_f64(*v))),
-                Value::Int(v) => Ok(Value::F16(cjc_runtime::f16::F16::from_f64(*v as f64))),
-                _ => Err(MirExecError::Runtime("f64_to_f16 expects f64".into())),
-            },
-            "f16_to_f32" => match &args[0] {
-                Value::F16(v) => Ok(Value::Float(v.to_f32() as f64)),
-                _ => Err(MirExecError::Runtime("f16_to_f32 expects f16".into())),
-            },
-            "f32_to_f16" => match &args[0] {
-                Value::Float(v) => Ok(Value::F16(cjc_runtime::f16::F16::from_f32(*v as f32))),
-                _ => Err(MirExecError::Runtime("f32_to_f16 expects f32".into())),
-            },
-            // bf16 conversion builtins
-            "bf16_to_f32" => match &args[0] {
-                Value::Bf16(v) => Ok(Value::Float(v.to_f32() as f64)),
-                _ => Err(MirExecError::Runtime("bf16_to_f32 expects bf16".into())),
-            },
-            "f32_to_bf16" => match &args[0] {
-                Value::Float(v) => Ok(Value::Bf16(cjc_runtime::Bf16::from_f32(*v as f32))),
-                _ => Err(MirExecError::Runtime("f32_to_bf16 expects f32".into())),
-            },
-            "Tensor.zeros" => {
-                let shape = self.value_to_shape(&args[0])?;
-                Ok(Value::Tensor(Tensor::zeros(&shape)))
-            }
-            "Tensor.ones" => {
-                let shape = self.value_to_shape(&args[0])?;
-                Ok(Value::Tensor(Tensor::ones(&shape)))
+                return Ok(Value::Void);
             }
             "Tensor.randn" => {
-                let shape = self.value_to_shape(&args[0])?;
+                let shape = cjc_runtime::builtins::value_to_shape(&args[0])
+                    .map_err(MirExecError::Runtime)?;
                 let t = Tensor::randn(&shape, &mut self.rng);
-                Ok(Value::Tensor(t))
+                return Ok(Value::Tensor(t));
             }
-            "Tensor.from_vec" => {
-                if args.len() != 2 {
-                    return Err(MirExecError::Runtime(
-                        "Tensor.from_vec requires 2 arguments: data and shape".to_string(),
-                    ));
-                }
-                let data = self.value_to_f64_vec(&args[0])?;
-                let shape = self.value_to_shape(&args[1])?;
-                let t = Tensor::from_vec(data, &shape)?;
-                Ok(Value::Tensor(t))
+            "clock" => {
+                let elapsed = self.start_time.elapsed().as_secs_f64();
+                return Ok(Value::Float(elapsed));
             }
-            "matmul" => {
-                if args.len() != 2 {
-                    return Err(MirExecError::Runtime(
-                        "matmul requires 2 Tensor arguments".to_string(),
-                    ));
-                }
-                let a = self.value_to_tensor(&args[0])?;
-                let b = self.value_to_tensor(&args[1])?;
-                Ok(Value::Tensor(a.matmul(&b)?))
-            }
-            "attention" => {
-                if args.len() != 3 {
-                    return Err(MirExecError::Runtime(
-                        "attention requires 3 Tensor arguments: queries, keys, values".to_string(),
-                    ));
-                }
-                let q = self.value_to_tensor(&args[0])?;
-                let k = self.value_to_tensor(&args[1])?;
-                let v = self.value_to_tensor(&args[2])?;
-                Ok(Value::Tensor(Tensor::scaled_dot_product_attention(&q, &k, &v)?))
-            }
-            "Buffer.alloc" => {
-                if args.is_empty() {
-                    return Err(MirExecError::Runtime(
-                        "Buffer.alloc requires a length argument".to_string(),
-                    ));
-                }
-                let len = self.value_to_usize(&args[0])?;
-                Ok(Value::Tensor(Tensor::zeros(&[len])))
-            }
-            "Tensor.from_bytes" => {
-                if args.len() < 2 || args.len() > 3 {
-                    return Err(MirExecError::Runtime(
-                        "Tensor.from_bytes requires 2-3 arguments: bytes, shape, [dtype='f64']".to_string(),
-                    ));
-                }
-                let bytes = match &args[0] {
-                    Value::ByteSlice(b) => b.clone(),
-                    Value::Bytes(b) => Rc::new(b.borrow().clone()),
-                    _ => return Err(MirExecError::Runtime(
-                        "Tensor.from_bytes: first argument must be ByteSlice or Bytes".to_string(),
-                    )),
-                };
-                let shape = self.value_to_shape(&args[1])?;
-                let dtype = if args.len() == 3 {
-                    match &args[2] {
-                        Value::String(s) => s.as_str().to_string(),
-                        _ => return Err(MirExecError::Runtime(
-                            "Tensor.from_bytes: dtype must be a string".to_string(),
-                        )),
-                    }
+            "gc_alloc" => {
+                let tag = if args.is_empty() {
+                    "anon".to_string()
                 } else {
-                    "f64".to_string()
+                    format!("{}", args[0])
                 };
-                Ok(Value::Tensor(Tensor::from_bytes(&bytes, &shape, &dtype)
-                    .map_err(|e| MirExecError::Runtime(format!("{e}")))?))
+                let _ref = self.gc_heap.alloc(tag);
+                return Ok(Value::Void);
             }
-            "Scratchpad.new" => {
-                if args.len() != 2 {
-                    return Err(MirExecError::Runtime(
-                        "Scratchpad.new requires 2 arguments: max_seq_len, dim".to_string(),
-                    ));
-                }
-                let max_seq_len = self.value_to_usize(&args[0])?;
-                let dim = self.value_to_usize(&args[1])?;
-                Ok(Value::Scratchpad(Rc::new(RefCell::new(
-                    cjc_runtime::Scratchpad::new(max_seq_len, dim),
-                ))))
+            "gc_collect" => {
+                self.gc_heap.collect(&[]);
+                self.gc_collections += 1;
+                return Ok(Value::Void);
             }
-            "PagedKvCache.new" => {
-                if args.len() != 2 {
-                    return Err(MirExecError::Runtime(
-                        "PagedKvCache.new requires 2 arguments: max_tokens, dim".to_string(),
-                    ));
-                }
-                let max_tokens = self.value_to_usize(&args[0])?;
-                let dim = self.value_to_usize(&args[1])?;
-                Ok(Value::PagedKvCache(Rc::new(RefCell::new(
-                    cjc_runtime::PagedKvCache::new(max_tokens, dim),
-                ))))
+            "gc_live_count" => {
+                return Ok(Value::Int(self.gc_heap.live_count() as i64));
             }
-            // ── Phase 8: CSV / Data Logistics ─────────────────────────────────
+            _ => {}
+        }
+
+        // Try shared (stateless) builtins
+        match cjc_runtime::builtins::dispatch_builtin(name, &args) {
+            Ok(Some(value)) => return Ok(value),
+            Err(msg) => return Err(MirExecError::Runtime(msg)),
+            Ok(None) => {} // not a shared builtin, fall through
+        }
+
+        // CSV / Data Logistics builtins (depend on cjc-data, not in shared module)
+        match name {
             "Csv.parse" | "Csv.parse_tsv" => {
                 if args.is_empty() || args.len() > 2 {
                     return Err(MirExecError::Runtime(
                         "Csv.parse requires 1 argument: bytes (+ optional max_rows)".to_string(),
                     ));
                 }
-                let bytes = self.value_to_bytes(&args[0])?;
+                let bytes = cjc_runtime::builtins::value_to_bytes(&args[0])
+                    .map_err(MirExecError::Runtime)?;
                 let max_rows = if args.len() == 2 {
-                    Some(self.value_to_usize(&args[1])?)
+                    Some(cjc_runtime::builtins::value_to_usize(&args[1])
+                        .map_err(MirExecError::Runtime)?)
                 } else {
                     None
                 };
@@ -1141,7 +1064,7 @@ impl MirExecutor {
                 let df = CsvReader::new(config)
                     .parse(&bytes)
                     .map_err(|e| MirExecError::Runtime(format!("Csv.parse error: {}", e)))?;
-                Ok(dataframe_to_value(df))
+                return Ok(dataframe_to_value(df));
             }
             "Csv.stream_sum" => {
                 if args.is_empty() {
@@ -1149,7 +1072,8 @@ impl MirExecutor {
                         "Csv.stream_sum requires 1 argument: bytes".to_string(),
                     ));
                 }
-                let bytes = self.value_to_bytes(&args[0])?;
+                let bytes = cjc_runtime::builtins::value_to_bytes(&args[0])
+                    .map_err(MirExecError::Runtime)?;
                 let config = CsvConfig::default();
                 let (names, sums, count) = StreamingCsvProcessor::new(config)
                     .sum_columns(&bytes)
@@ -1159,7 +1083,7 @@ impl MirExecutor {
                     fields.insert(name.clone(), Value::Float(*sum));
                 }
                 fields.insert("__row_count".to_string(), Value::Int(count as i64));
-                Ok(Value::Struct { name: "CsvStats".to_string(), fields })
+                return Ok(Value::Struct { name: "CsvStats".to_string(), fields });
             }
             "Csv.stream_minmax" => {
                 if args.is_empty() {
@@ -1167,7 +1091,8 @@ impl MirExecutor {
                         "Csv.stream_minmax requires 1 argument: bytes".to_string(),
                     ));
                 }
-                let bytes = self.value_to_bytes(&args[0])?;
+                let bytes = cjc_runtime::builtins::value_to_bytes(&args[0])
+                    .map_err(MirExecError::Runtime)?;
                 let config = CsvConfig::default();
                 let (names, mins, maxs, count) = StreamingCsvProcessor::new(config)
                     .minmax_columns(&bytes)
@@ -1178,111 +1103,18 @@ impl MirExecutor {
                     fields.insert(format!("{}_max", names[i]), Value::Float(maxs[i]));
                 }
                 fields.insert("__row_count".to_string(), Value::Int(count as i64));
-                Ok(Value::Struct { name: "CsvMinMax".to_string(), fields })
+                return Ok(Value::Struct { name: "CsvMinMax".to_string(), fields });
             }
-            "AlignedByteSlice.from_bytes" => {
-                if args.len() != 1 {
-                    return Err(MirExecError::Runtime(
-                        "AlignedByteSlice.from_bytes requires 1 argument: bytes".to_string(),
-                    ));
-                }
-                let bytes = match &args[0] {
-                    Value::ByteSlice(b) => b.clone(),
-                    Value::Bytes(b) => Rc::new(b.borrow().clone()),
-                    _ => return Err(MirExecError::Runtime(
-                        "AlignedByteSlice.from_bytes: argument must be ByteSlice or Bytes".to_string(),
-                    )),
-                };
-                Ok(Value::AlignedBytes(cjc_runtime::AlignedByteSlice::from_bytes(bytes)))
-            }
-            // P2-5: to_string() builtin — converts any value to its string repr.
-            "to_string" => {
-                if args.len() != 1 {
-                    return Err(MirExecError::Runtime(
-                        "to_string requires exactly 1 argument".to_string(),
-                    ));
-                }
-                Ok(Value::String(Rc::new(format!("{}", args[0]))))
-            }
-            "len" => {
-                if args.len() != 1 {
-                    return Err(MirExecError::Runtime(
-                        "len requires exactly 1 argument".to_string(),
-                    ));
-                }
-                match &args[0] {
-                    Value::Array(arr) => Ok(Value::Int(arr.len() as i64)),
-                    Value::String(s) => Ok(Value::Int(s.len() as i64)),
-                    Value::Tensor(t) => Ok(Value::Int(t.len() as i64)),
-                    other => Err(MirExecError::Runtime(format!(
-                        "len not supported for {}",
-                        other.type_name()
-                    ))),
-                }
-            }
-            "assert" => {
-                if args.len() != 1 {
-                    return Err(MirExecError::Runtime(
-                        "assert requires exactly 1 argument".to_string(),
-                    ));
-                }
-                match &args[0] {
-                    Value::Bool(true) => Ok(Value::Void),
-                    Value::Bool(false) => {
-                        Err(MirExecError::Runtime("assertion failed".to_string()))
-                    }
-                    other => Err(MirExecError::Runtime(format!(
-                        "assert requires Bool, got {}",
-                        other.type_name()
-                    ))),
-                }
-            }
-            "assert_eq" => {
-                if args.len() != 2 {
-                    return Err(MirExecError::Runtime(
-                        "assert_eq requires exactly 2 arguments".to_string(),
-                    ));
-                }
-                let eq = self.values_equal(&args[0], &args[1]);
-                if eq {
-                    Ok(Value::Void)
-                } else {
-                    Err(MirExecError::Runtime(format!(
-                        "assertion failed: `{}` != `{}`",
-                        args[0], args[1]
-                    )))
-                }
-            }
-            "clock" => {
-                let elapsed = self.start_time.elapsed().as_secs_f64();
-                Ok(Value::Float(elapsed))
-            }
-            "gc_alloc" => {
-                let tag = if args.is_empty() {
-                    "anon".to_string()
-                } else {
-                    format!("{}", args[0])
-                };
-                let _ref = self.gc_heap.alloc(tag);
-                Ok(Value::Void)
-            }
-            "gc_collect" => {
-                self.gc_heap.collect(&[]);
-                self.gc_collections += 1;
-                Ok(Value::Void)
-            }
-            "gc_live_count" => {
-                Ok(Value::Int(self.gc_heap.live_count() as i64))
-            }
-            _ => {
-                if self.functions.contains_key(name) {
-                    self.call_function(name, &args)
-                } else {
-                    Err(MirExecError::Runtime(format!(
-                        "undefined function `{name}`"
-                    )))
-                }
-            }
+            _ => {}
+        }
+
+        // Try user-defined function.
+        if self.functions.contains_key(name) {
+            self.call_function(name, &args)
+        } else {
+            Err(MirExecError::Runtime(format!(
+                "undefined function `{name}`"
+            )))
         }
     }
 
@@ -1317,6 +1149,32 @@ impl MirExecutor {
                     Err(MirExecError::Runtime("Complex.mul requires a Complex argument".to_string()))
                 }
             }
+            (Value::Complex(z), "sub") => {
+                if let Some(Value::Complex(w)) = args.first() {
+                    Ok(Value::Complex(z.sub(*w)))
+                } else {
+                    Err(MirExecError::Runtime("Complex.sub requires a Complex argument".to_string()))
+                }
+            }
+            (Value::Complex(z), "div") => {
+                if let Some(Value::Complex(w)) = args.first() {
+                    Ok(Value::Complex(z.div_fixed(*w)))
+                } else {
+                    Err(MirExecError::Runtime("Complex.div requires a Complex argument".to_string()))
+                }
+            }
+            (Value::Complex(z), "neg") => Ok(Value::Complex(z.neg())),
+            (Value::Complex(z), "scale") => {
+                if let Some(Value::Float(s)) = args.first() {
+                    Ok(Value::Complex(z.scale(*s)))
+                } else if let Some(Value::Int(s)) = args.first() {
+                    Ok(Value::Complex(z.scale(*s as f64)))
+                } else {
+                    Err(MirExecError::Runtime("Complex.scale requires a numeric argument".to_string()))
+                }
+            }
+            (Value::Complex(z), "is_nan") => Ok(Value::Bool(z.is_nan())),
+            (Value::Complex(z), "is_finite") => Ok(Value::Bool(z.is_finite())),
 
             // F16 methods
             (Value::F16(v), "to_f64") => Ok(Value::Float(v.to_f64())),

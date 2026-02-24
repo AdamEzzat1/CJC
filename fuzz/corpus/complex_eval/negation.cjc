@@ -1,0 +1,3 @@
+let z = Complex(3.0, -4.0);
+let neg = -z;
+print(neg);

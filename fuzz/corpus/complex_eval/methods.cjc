@@ -1,0 +1,6 @@
+let z = Complex(3.0, 4.0);
+print(z.re());
+print(z.im());
+print(z.abs());
+print(z.conj());
+print(z.norm_sq());

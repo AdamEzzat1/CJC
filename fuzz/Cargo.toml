@@ -1,0 +1,33 @@
+[package]
+name = "cjc-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+cjc-lexer = { path = "../crates/cjc-lexer" }
+cjc-parser = { path = "../crates/cjc-parser" }
+cjc-eval = { path = "../crates/cjc-eval" }
+cjc-mir-exec = { path = "../crates/cjc-mir-exec" }
+cjc-runtime = { path = "../crates/cjc-runtime" }
+
+[workspace]
+
+[[bin]]
+name = "parser"
+path = "fuzz_targets/parser.rs"
+doc = false
+
+[[bin]]
+name = "lexer"
+path = "fuzz_targets/lexer.rs"
+doc = false
+
+[[bin]]
+name = "complex_eval"
+path = "fuzz_targets/complex_eval.rs"
+doc = false

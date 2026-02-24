@@ -15,6 +15,9 @@ pub mod dispatch;
 pub mod f16;
 pub mod quantized;
 
+// --- Shared builtin dispatch (used by both cjc-eval and cjc-mir-exec) ---
+pub mod builtins;
+
 // --- Newly extracted modules (from the former monolithic lib.rs) ---
 pub mod buffer;
 pub mod tensor;

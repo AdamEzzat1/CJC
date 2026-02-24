@@ -152,6 +152,37 @@ impl ComplexF64 {
         ComplexF64 { re: -self.re, im: -self.im }
     }
 
+    /// Fixed-Sequence Complex Division.
+    ///
+    /// Computes `(a+bi) / (c+di)` using a fixed sequence:
+    ///
+    /// ```text
+    /// denom = c*c + d*d         (two muls, one add — ordered)
+    /// re = (a*c + b*d) / denom  (two muls, one add, one div)
+    /// im = (b*c - a*d) / denom  (two muls, one sub, one div)
+    /// ```
+    ///
+    /// Division by zero (0+0i) produces NaN/Inf stably (no panic).
+    #[inline]
+    pub fn div_fixed(self, rhs: Self) -> Self {
+        // Step 1: Denominator (ordered: c*c first, then d*d, then add).
+        let cc = rhs.re * rhs.re;
+        let dd = rhs.im * rhs.im;
+        let denom = cc + dd;
+
+        // Step 2: Numerator real part (ordered: a*c first, then b*d, then add).
+        let ac = self.re * rhs.re;
+        let bd = self.im * rhs.im;
+        let re = (ac + bd) / denom;
+
+        // Step 3: Numerator imaginary part (ordered: b*c first, then a*d, then sub).
+        let bc = self.im * rhs.re;
+        let ad = self.re * rhs.im;
+        let im = (bc - ad) / denom;
+
+        ComplexF64 { re, im }
+    }
+
     /// Scalar multiplication: s * (a+bi) = (s*a) + (s*b)i.
     #[inline]
     pub fn scale(self, s: f64) -> Self {
@@ -446,6 +477,50 @@ mod tests {
             assert_eq!(out1[i].re.to_bits(), out2[i].re.to_bits());
             assert_eq!(out1[i].im.to_bits(), out2[i].im.to_bits());
         }
+    }
+
+    #[test]
+    fn test_complex_div_basic() {
+        // (1+2i) / (1+0i) = 1+2i
+        let a = ComplexF64::new(1.0, 2.0);
+        let one = ComplexF64::new(1.0, 0.0);
+        let c = a.div_fixed(one);
+        assert_eq!(c.re, 1.0);
+        assert_eq!(c.im, 2.0);
+    }
+
+    #[test]
+    fn test_complex_div_nontrivial() {
+        // (3+4i) / (1+2i) = (3+4i)(1-2i) / (1+4) = (3+8 + 4i-6i)/5 = (11-2i)/5
+        let a = ComplexF64::new(3.0, 4.0);
+        let b = ComplexF64::new(1.0, 2.0);
+        let c = a.div_fixed(b);
+        let tol = 1e-15;
+        assert!((c.re - 2.2).abs() < tol, "re: {} vs 2.2", c.re);
+        assert!((c.im - (-0.4)).abs() < tol, "im: {} vs -0.4", c.im);
+    }
+
+    #[test]
+    fn test_complex_div_by_zero() {
+        // Division by 0+0i should produce NaN/Inf stably (no panic).
+        let a = ComplexF64::new(1.0, 2.0);
+        let zero = ComplexF64::ZERO;
+        let c = a.div_fixed(zero);
+        // Result should be NaN or Inf (stable, no panic).
+        assert!(!c.re.is_finite() || c.re.is_nan());
+        assert!(!c.im.is_finite() || c.im.is_nan());
+    }
+
+    #[test]
+    fn test_complex_div_roundtrip() {
+        // (z * w) / w ≈ z for non-zero w.
+        let z = ComplexF64::new(3.7, -2.1);
+        let w = ComplexF64::new(1.5, 0.8);
+        let product = z.mul_fixed(w);
+        let back = product.div_fixed(w);
+        let tol = 1e-12;
+        assert!((back.re - z.re).abs() < tol, "re roundtrip: {} vs {}", back.re, z.re);
+        assert!((back.im - z.im).abs() < tol, "im roundtrip: {} vs {}", back.im, z.im);
     }
 
     #[test]

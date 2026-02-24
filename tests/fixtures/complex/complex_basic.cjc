@@ -1,0 +1,39 @@
+fn main() -> i64 {
+    // Construction and display
+    let z = Complex(3.0, 4.0);
+    print(z);
+
+    // Accessor methods
+    print(z.re());
+    print(z.im());
+
+    // Arithmetic
+    let w = Complex(1.0, -2.0);
+    let sum = z + w;
+    let diff = z - w;
+    let prod = z * w;
+    let quot = z / w;
+    print(sum);
+    print(diff);
+    print(prod);
+    print(quot);
+
+    // Unary negation
+    let neg_z = -z;
+    print(neg_z);
+
+    // Methods
+    print(z.abs());
+    print(z.norm_sq());
+    print(z.conj());
+
+    // Equality
+    let a = Complex(1.0, 2.0);
+    let b = Complex(1.0, 2.0);
+    let c = Complex(1.0, 3.0);
+    print(a == b);
+    print(a != c);
+    print(a == c);
+
+    0
+}

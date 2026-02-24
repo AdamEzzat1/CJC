@@ -124,10 +124,20 @@ pub enum Value {
     /// Complex f64: deterministic fixed-sequence arithmetic
     Complex(complex::ComplexF64),
     /// Pre-allocated KV-cache scratchpad for zero-allocation inference.
+    ///
+    /// **Runtime-only:** No corresponding `Type::Scratchpad` exists. Created
+    /// via `Scratchpad.new()` builtin. Type-checking treats it as opaque.
     Scratchpad(Rc<RefCell<Scratchpad>>),
     /// Block-paged KV-cache (vLLM-style).
+    ///
+    /// **Runtime-only:** No corresponding `Type::PagedKvCache` exists. Created
+    /// via `PagedKvCache.new()` builtin. Type-checking treats it as opaque.
     PagedKvCache(Rc<RefCell<PagedKvCache>>),
     /// Aligned byte slice with 16-byte alignment guarantee.
+    ///
+    /// **Runtime-only:** No corresponding `Type::AlignedBytes` exists. Created
+    /// via `AlignedByteSlice.from_bytes()` builtin. Type-checking treats it
+    /// as opaque.
     AlignedBytes(AlignedByteSlice),
     Void,
 }

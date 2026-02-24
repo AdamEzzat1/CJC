@@ -70,14 +70,25 @@ pub enum Type {
     F16,
 
     /// Range type: `start..end` (half-open interval).
+    ///
+    /// **Status:** Type-system placeholder. No `Value::Range` exists yet;
+    /// the runtime represents ranges via for-loop desugaring. This type is
+    /// reserved for future range-literal support.
     Range {
         elem: Box<Type>,
     },
 
     /// Generic slice (non-owning view into an array).
+    ///
+    /// **Status:** Type-system placeholder. No `Value::Slice` exists yet;
+    /// the runtime uses `ByteSlice` / `StrView` for concrete slice-like
+    /// values. This type is reserved for future generic slice support.
     Slice {
         elem: Box<Type>,
     },
+
+    /// Complex number type (f64 real + f64 imaginary).
+    Complex,
 
     /// Compiled regex pattern type.
     Regex,
@@ -111,7 +122,7 @@ pub enum Type {
 
 impl Type {
     pub fn is_numeric(&self) -> bool {
-        matches!(self, Type::I32 | Type::I64 | Type::U8 | Type::F32 | Type::F64 | Type::Bf16 | Type::F16)
+        matches!(self, Type::I32 | Type::I64 | Type::U8 | Type::F32 | Type::F64 | Type::Bf16 | Type::F16 | Type::Complex)
     }
 
     pub fn is_float(&self) -> bool {
@@ -146,6 +157,7 @@ impl Type {
                 | Type::Enum(_)
                 | Type::Map { .. }
                 | Type::SparseTensor { .. }
+                | Type::Complex
                 | Type::Regex
                 | Type::Range { .. }
                 | Type::Slice { .. }
@@ -164,6 +176,7 @@ impl Type {
                 | Type::Bf16
                 | Type::F16
                 | Type::Bool
+                | Type::Complex
                 | Type::Void
                 | Type::ByteSlice
                 | Type::StrView
@@ -226,6 +239,7 @@ impl fmt::Display for Type {
             Type::F16 => write!(f, "f16"),
             Type::Range { elem } => write!(f, "Range<{}>", elem),
             Type::Slice { elem } => write!(f, "Slice<{}>", elem),
+            Type::Complex => write!(f, "Complex"),
             Type::Regex => write!(f, "Regex"),
             Type::Fn { params, ret } => {
                 write!(f, "fn(")?;
@@ -309,6 +323,7 @@ pub fn unify(a: &Type, b: &Type, subst: &mut TypeSubst) -> Result<Type, String> 
         | (Type::F64, Type::F64)
         | (Type::Bf16, Type::Bf16)
         | (Type::F16, Type::F16)
+        | (Type::Complex, Type::Complex)
         | (Type::Bool, Type::Bool)
         | (Type::Str, Type::Str)
         | (Type::Void, Type::Void) => Ok(a.clone()),
@@ -933,6 +948,7 @@ impl TypeEnv {
         env.type_defs.insert("f64".into(), Type::F64);
         env.type_defs.insert("bf16".into(), Type::Bf16);
         env.type_defs.insert("f16".into(), Type::F16);
+        env.type_defs.insert("Complex".into(), Type::Complex);
         env.type_defs.insert("bool".into(), Type::Bool);
         env.type_defs.insert("String".into(), Type::Str);
 
@@ -2751,6 +2767,7 @@ impl TypeChecker {
                     }
                     "bf16" => Type::Bf16,
                     "f16" => Type::F16,
+                    "Complex" => Type::Complex,
                     "Range" => {
                         let elem = if !args.is_empty() {
                             if let TypeArg::Type(t) = &args[0] {

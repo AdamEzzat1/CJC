@@ -16,3 +16,6 @@ mod test_phase2_fstring;
 mod test_phase2_result_option;
 mod test_phase2_impl_trait_syntax;
 mod test_phase2_monomorphization;
+
+// F5 Complex Numbers audit tests
+mod test_complex_f64_runtime;
