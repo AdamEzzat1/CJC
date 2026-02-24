@@ -832,8 +832,10 @@ fn cse_body(body: &mut MirBody) {
     let mut replacements: HashMap<String, String> = HashMap::new();
 
     for stmt in &body.stmts {
-        if let MirStmt::Let { name, init, .. } = stmt {
-            if is_pure_expr(init) {
+        if let MirStmt::Let { name, init, mutable } = stmt {
+            // Only CSE immutable bindings — mutable variables may diverge
+            // after their initializer (e.g. loop counters both init to 0).
+            if !mutable && is_pure_expr(init) {
                 let key = expr_key(init);
                 if let Some(existing) = expr_to_var.get(&key) {
                     // This expression is already computed in `existing`.
