@@ -15,7 +15,7 @@
 //! LICM/liveness/SSA cannot be implemented without restructuring MirBody into
 //! a proper BasicBlock graph.
 
-use cjc_mir::{MirBody, MirStmt, MirExpr, MirExprKind, MirFunction, MirFnId, MirProgram};
+use cjc_mir::{AllocHint, MirBody, MirStmt, MirExpr, MirExprKind, MirFunction, MirFnId, MirProgram};
 use cjc_parser::parse_source;
 
 /// Test 1: MirBody is a flat Vec<MirStmt> — not a BasicBlock graph.
@@ -46,6 +46,7 @@ fn test_mirstmt_has_no_basic_block_variant() {
         name: "x".to_string(),
         mutable: false,
         init: MirExpr { kind: MirExprKind::IntLit(0) },
+        alloc_hint: None,
     };
     let _expr_stmt = MirStmt::Expr(MirExpr { kind: MirExprKind::Void });
     let _if_stmt = MirStmt::If {

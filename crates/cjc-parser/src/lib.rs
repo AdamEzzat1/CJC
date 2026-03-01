@@ -64,6 +64,8 @@ pub struct Parser {
     /// Used to resolve the ambiguity between struct literals and block
     /// bodies in `if`/`while` conditions.
     allow_struct_lit: bool,
+    /// Nesting depth of while/for loops. Used to validate break/continue.
+    loop_depth: usize,
 }
 
 /// Result type used internally — `Err(())` means a diagnostic was already
@@ -79,6 +81,7 @@ impl Parser {
             pos: 0,
             diagnostics: DiagnosticBag::new(),
             allow_struct_lit: true,
+            loop_depth: 0,
         }
     }
 
@@ -1067,6 +1070,36 @@ impl Parser {
                         span: to_ast_span(ret_start.merge(end)),
                     });
                 }
+                TokenKind::Break => {
+                    let brk_start = self.advance().span;
+                    if self.loop_depth == 0 {
+                        self.diagnostics.emit(Diagnostic::error(
+                            "E0400",
+                            "`break` outside of loop",
+                            brk_start,
+                        ));
+                    }
+                    let end = self.expect(TokenKind::Semicolon)?.span;
+                    stmts.push(Stmt {
+                        kind: StmtKind::Break,
+                        span: to_ast_span(brk_start.merge(end)),
+                    });
+                }
+                TokenKind::Continue => {
+                    let cont_start = self.advance().span;
+                    if self.loop_depth == 0 {
+                        self.diagnostics.emit(Diagnostic::error(
+                            "E0401",
+                            "`continue` outside of loop",
+                            cont_start,
+                        ));
+                    }
+                    let end = self.expect(TokenKind::Semicolon)?.span;
+                    stmts.push(Stmt {
+                        kind: StmtKind::Continue,
+                        span: to_ast_span(cont_start.merge(end)),
+                    });
+                }
                 TokenKind::If => {
                     let if_start_span = to_ast_span(self.current_span());
                     let if_stmt = self.parse_if_stmt()?;
@@ -1175,7 +1208,9 @@ impl Parser {
         let condition = self.parse_expr();
         self.allow_struct_lit = prev;
         let condition = condition?;
+        self.loop_depth += 1;
         let body = self.parse_block()?;
+        self.loop_depth -= 1;
         Ok(WhileStmt { condition, body })
     }
 
@@ -1204,7 +1239,9 @@ impl Parser {
         };
         self.allow_struct_lit = prev;
 
+        self.loop_depth += 1;
         let body = self.parse_block()?;
+        self.loop_depth -= 1;
         Ok(ForStmt { ident, iter, body })
     }
 

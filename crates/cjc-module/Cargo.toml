@@ -1,0 +1,16 @@
+[package]
+name = "cjc-module"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cjc-ast = { workspace = true }
+cjc-parser = { workspace = true }
+cjc-diag = { workspace = true }
+cjc-lexer = { workspace = true }
+cjc-hir = { path = "../cjc-hir" }
+cjc-mir = { path = "../cjc-mir" }
+cjc-types = { path = "../cjc-types" }
+
+[dev-dependencies]
+tempfile = "3"

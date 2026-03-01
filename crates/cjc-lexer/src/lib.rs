@@ -25,6 +25,8 @@ pub enum TokenKind {
     Let,
     Mut,
     Return,
+    Break,
+    Continue,
     If,
     Else,
     While,
@@ -99,6 +101,8 @@ impl TokenKind {
                 | TokenKind::Let
                 | TokenKind::Mut
                 | TokenKind::Return
+                | TokenKind::Break
+                | TokenKind::Continue
                 | TokenKind::If
                 | TokenKind::Else
                 | TokenKind::While
@@ -138,6 +142,8 @@ impl TokenKind {
             TokenKind::Let => "`let`",
             TokenKind::Mut => "`mut`",
             TokenKind::Return => "`return`",
+            TokenKind::Break => "`break`",
+            TokenKind::Continue => "`continue`",
             TokenKind::If => "`if`",
             TokenKind::Else => "`else`",
             TokenKind::While => "`while`",
@@ -1065,6 +1071,8 @@ impl<'a> Lexer<'a> {
             "let" => TokenKind::Let,
             "mut" => TokenKind::Mut,
             "return" => TokenKind::Return,
+            "break" => TokenKind::Break,
+            "continue" => TokenKind::Continue,
             "if" => TokenKind::If,
             "else" => TokenKind::Else,
             "while" => TokenKind::While,

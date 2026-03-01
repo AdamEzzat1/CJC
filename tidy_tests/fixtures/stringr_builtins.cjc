@@ -1,0 +1,47 @@
+fn main() -> i64 {
+    // stringr builtins — byte-first string view
+    let s = "Hello, World! Hello again.";
+
+    // str_detect
+    print(str_detect(s, "World"));
+    print(str_detect(s, "xyz"));
+
+    // str_extract
+    print(str_extract(s, "Hello"));
+    print(str_extract(s, "xyz"));
+
+    // str_extract_all
+    let matches = str_extract_all(s, "Hello");
+    print(len(matches));
+
+    // str_replace (first only)
+    print(str_replace(s, "Hello", "Hi"));
+
+    // str_replace_all
+    print(str_replace_all(s, "Hello", "Hi"));
+
+    // str_split
+    let parts = str_split("a,b,c", ",");
+    print(len(parts));
+
+    // str_count
+    print(str_count(s, "Hello"));
+
+    // str_trim
+    print(str_trim("  padded  "));
+
+    // str_to_upper / str_to_lower
+    print(str_to_upper("hello"));
+    print(str_to_lower("HELLO"));
+
+    // str_starts / str_ends
+    print(str_starts(s, "Hello"));
+    print(str_ends(s, "again."));
+
+    // str_sub (byte-indexed)
+    print(str_sub("abcdef", 0, 3));
+
+    // str_len
+    print(str_len(s));
+    0
+}

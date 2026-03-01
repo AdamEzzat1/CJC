@@ -170,6 +170,7 @@ impl<'a> Monomorphizer<'a> {
             }
             MirStmt::Return(Some(e)) => self.collect_from_expr(e),
             MirStmt::Return(None) => {}
+            MirStmt::Break | MirStmt::Continue => {}
             MirStmt::NoGcBlock(body) => self.collect_from_body(body),
         }
     }
@@ -482,10 +483,11 @@ fn substitute_body(body: &MirBody, subst: &HashMap<String, String>) -> MirBody {
 
 fn substitute_stmt(stmt: &MirStmt, subst: &HashMap<String, String>) -> MirStmt {
     match stmt {
-        MirStmt::Let { name, mutable, init } => MirStmt::Let {
+        MirStmt::Let { name, mutable, init, alloc_hint } => MirStmt::Let {
             name: name.clone(),
             mutable: *mutable,
             init: substitute_expr(init, subst),
+            alloc_hint: *alloc_hint,
         },
         MirStmt::Expr(e) => MirStmt::Expr(substitute_expr(e, subst)),
         MirStmt::If {
@@ -503,6 +505,8 @@ fn substitute_stmt(stmt: &MirStmt, subst: &HashMap<String, String>) -> MirStmt {
         },
         MirStmt::Return(Some(e)) => MirStmt::Return(Some(substitute_expr(e, subst))),
         MirStmt::Return(None) => MirStmt::Return(None),
+        MirStmt::Break => MirStmt::Break,
+        MirStmt::Continue => MirStmt::Continue,
         MirStmt::NoGcBlock(body) => MirStmt::NoGcBlock(substitute_body(body, subst)),
     }
 }
@@ -705,6 +709,7 @@ fn rewrite_calls_in_stmt(
         }
         MirStmt::Return(Some(e)) => rewrite_calls_in_expr(e, inst_lookup, fn_map),
         MirStmt::Return(None) => {}
+        MirStmt::Break | MirStmt::Continue => {}
         MirStmt::NoGcBlock(body) => rewrite_calls_in_body(body, inst_lookup, fn_map),
     }
 }

@@ -11,9 +11,11 @@
 //!   --seed <N>                   Set RNG seed (default: 42)
 //!   --time                       Print execution time after running
 //!   --mir-opt                    Enable MIR optimizations (CF + DCE)
+//!   --multi-file                 Enable multi-file module resolution
 
 use std::env;
 use std::fs;
+use std::path::Path;
 use std::process;
 use std::time::Instant;
 
@@ -34,6 +36,7 @@ fn main() {
     let mut time_execution = false;
     let mut mir_opt = false;
     let mut mir_mono = false;
+    let mut multi_file = false;
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
@@ -41,6 +44,7 @@ fn main() {
             "--time" => time_execution = true,
             "--mir-opt" => mir_opt = true,
             "--mir-mono" => mir_mono = true,
+            "--multi-file" => multi_file = true,
             "--seed" => {
                 i += 1;
                 if i < args.len() {
@@ -70,7 +74,7 @@ fn main() {
         "lex" => cmd_lex(&source, filename),
         "parse" => cmd_parse(&source, filename),
         "check" => cmd_check(&source, filename),
-        "run" => cmd_run(&source, filename, seed, time_execution, mir_opt, mir_mono),
+        "run" => cmd_run(&source, filename, seed, time_execution, mir_opt, mir_mono, multi_file),
         _ => {
             eprintln!("error: unknown command `{}`", command);
             print_usage();
@@ -94,6 +98,7 @@ fn print_usage() {
     eprintln!("  --time                          Print execution time after running");
     eprintln!("  --mir-opt                       Enable MIR optimizations (CF + DCE)");
     eprintln!("  --mir-mono                      Enable MIR monomorphization");
+    eprintln!("  --multi-file                    Enable multi-file module resolution");
 }
 
 fn cmd_lex(source: &str, filename: &str) {
@@ -165,43 +170,27 @@ fn cmd_check(source: &str, filename: &str) {
     println!("OK — no errors found in `{}`", filename);
 }
 
-fn cmd_run(source: &str, filename: &str, seed: u64, time_execution: bool, mir_opt: bool, mir_mono: bool) {
-    let lexer = cjc_lexer::Lexer::new(source);
-    let (tokens, lex_diags) = lexer.tokenize();
-
-    if lex_diags.has_errors() {
-        eprintln!("{}", lex_diags.render_all(source, filename));
-        process::exit(1);
-    }
-
-    let parser = cjc_parser::Parser::new(tokens);
-    let (program, parse_diags) = parser.parse_program();
-
-    if parse_diags.has_errors() {
-        eprintln!("{}", parse_diags.render_all(source, filename));
-        process::exit(1);
-    }
-
-    // Run NoGC verification unconditionally (only errors on is_nogc fns)
-    if let Err(e) = cjc_mir_exec::verify_nogc(&program) {
-        eprintln!("NoGC verification failed:\n{}", e);
-        process::exit(1);
-    }
-
+fn cmd_run(
+    source: &str,
+    filename: &str,
+    seed: u64,
+    time_execution: bool,
+    mir_opt: bool,
+    mir_mono: bool,
+    multi_file: bool,
+) {
     let start = Instant::now();
 
-    if mir_mono {
-        // Run with MIR monomorphization + optimization
-        match cjc_mir_exec::run_program_monomorphized(&program, seed) {
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("{}", e);
+    if multi_file {
+        // Multi-file module system: resolve imports, merge, execute
+        let entry_path = Path::new(filename)
+            .canonicalize()
+            .unwrap_or_else(|e| {
+                eprintln!("error: could not resolve path `{}`: {}", filename, e);
                 process::exit(1);
-            }
-        }
-    } else if mir_opt {
-        // Run with MIR optimizations enabled
-        match cjc_mir_exec::run_program_optimized(&program, seed) {
+            });
+
+        match cjc_mir_exec::run_program_with_modules(&entry_path, seed) {
             Ok(_) => {}
             Err(e) => {
                 eprintln!("{}", e);
@@ -209,13 +198,56 @@ fn cmd_run(source: &str, filename: &str, seed: u64, time_execution: bool, mir_op
             }
         }
     } else {
-        // Run the program via AST interpreter (default)
-        let mut interpreter = cjc_eval::Interpreter::new(seed);
-        match interpreter.exec(&program) {
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("{}", e);
-                process::exit(1);
+        // Single-file mode (default)
+        let lexer = cjc_lexer::Lexer::new(source);
+        let (tokens, lex_diags) = lexer.tokenize();
+
+        if lex_diags.has_errors() {
+            eprintln!("{}", lex_diags.render_all(source, filename));
+            process::exit(1);
+        }
+
+        let parser = cjc_parser::Parser::new(tokens);
+        let (program, parse_diags) = parser.parse_program();
+
+        if parse_diags.has_errors() {
+            eprintln!("{}", parse_diags.render_all(source, filename));
+            process::exit(1);
+        }
+
+        // Run NoGC verification unconditionally (only errors on is_nogc fns)
+        if let Err(e) = cjc_mir_exec::verify_nogc(&program) {
+            eprintln!("NoGC verification failed:\n{}", e);
+            process::exit(1);
+        }
+
+        if mir_mono {
+            // Run with MIR monomorphization + optimization
+            match cjc_mir_exec::run_program_monomorphized(&program, seed) {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("{}", e);
+                    process::exit(1);
+                }
+            }
+        } else if mir_opt {
+            // Run with MIR optimizations enabled
+            match cjc_mir_exec::run_program_optimized(&program, seed) {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("{}", e);
+                    process::exit(1);
+                }
+            }
+        } else {
+            // Run the program via AST interpreter (default)
+            let mut interpreter = cjc_eval::Interpreter::new(seed);
+            match interpreter.exec(&program) {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("{}", e);
+                    process::exit(1);
+                }
             }
         }
     }
@@ -223,8 +255,10 @@ fn cmd_run(source: &str, filename: &str, seed: u64, time_execution: bool, mir_op
     let elapsed = start.elapsed();
 
     if time_execution {
-        eprintln!("[cjc --time] Execution took {:.6} seconds ({} us)",
+        eprintln!(
+            "[cjc --time] Execution took {:.6} seconds ({} us)",
             elapsed.as_secs_f64(),
-            elapsed.as_micros());
+            elapsed.as_micros()
+        );
     }
 }

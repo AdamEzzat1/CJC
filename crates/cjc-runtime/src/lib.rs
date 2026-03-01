@@ -3,7 +3,8 @@
 //! Provides the core runtime infrastructure for the CJC programming language:
 //! - `Buffer<T>`: Deterministic memory allocation with COW (Copy-On-Write) semantics
 //! - `Tensor`: N-dimensional tensor with element-wise ops, matmul, and stable reductions
-//! - `GcHeap` / `GcRef`: Simple mark-sweep garbage collector for Layer 3 objects
+//! - `ObjectSlab` / `GcRef`: Deterministic RC-backed object slab (replaces mark-sweep GC)
+//! - `FrameArena` / `ArenaStore`: Bump-arena per function frame for non-escaping values
 //! - `Value`: Tagged union for the CJC interpreter
 //! - `accumulator`: BinnedAccumulator for order-invariant deterministic summation
 //! - `dispatch`: Hybrid summation strategy dispatch (Kahan vs Binned)
@@ -26,12 +27,19 @@ pub mod aligned_pool;
 mod kernel_bridge;
 pub use kernel_bridge::kernel;
 pub mod paged_kv;
+pub mod binned_alloc;
+pub mod frame_arena;
+pub mod object_slab;
 pub mod gc;
 pub mod sparse;
+pub mod tensor_tiled;
 pub mod det_map;
 pub mod linalg;
 pub mod value;
 pub mod error;
+pub mod json;
+pub mod datetime;
+pub mod window;
 
 // --- Re-exports for backward compatibility ---
 // All downstream crates that were doing `use cjc_runtime::Tensor` etc. continue to work.
@@ -40,8 +48,12 @@ pub use tensor::Tensor;
 pub use scratchpad::Scratchpad;
 pub use aligned_pool::{AlignedPool, AlignedByteSlice};
 pub use paged_kv::{KvBlock, PagedKvCache};
-pub use gc::{GcRef, GcObject, GcHeap};
+pub use gc::{GcRef, GcHeap};
+pub use binned_alloc::BinnedAllocator;
+pub use frame_arena::{FrameArena, ArenaStore};
+pub use object_slab::{ObjectSlab, SlabRef};
 pub use sparse::{SparseCsr, SparseCoo};
+pub use tensor_tiled::TiledMatmul;
 pub use det_map::{DetMap, murmurhash3, murmurhash3_finalize, value_hash, values_equal_static};
 pub use value::{Value, Bf16, FnValue};
 pub use error::RuntimeError;
@@ -215,34 +227,43 @@ mod tests {
     }
 
     #[test]
-    fn test_gc_collect_frees_unreachable() {
+    fn test_gc_collect_is_noop_rc_backed() {
+        // In the RC-backed ObjectSlab, collect() is a no-op.
+        // All objects survive regardless of roots provided.
         let mut heap = GcHeap::new(100);
         let r1 = heap.alloc(1i64);
         let r2 = heap.alloc(2i64);
-        let _r3 = heap.alloc(3i64);
+        let r3 = heap.alloc(3i64);
 
         assert_eq!(heap.live_count(), 3);
 
+        // collect with partial roots — all objects survive (RC, not GC)
         heap.collect(&[r1, r2]);
 
-        assert_eq!(heap.live_count(), 2);
+        assert_eq!(heap.live_count(), 3, "RC keeps all objects alive");
         assert_eq!(*heap.get::<i64>(r1).unwrap(), 1);
         assert_eq!(*heap.get::<i64>(r2).unwrap(), 2);
+        assert_eq!(*heap.get::<i64>(r3).unwrap(), 3);
     }
 
     #[test]
-    fn test_gc_slot_reuse() {
+    fn test_gc_explicit_free_and_slot_reuse() {
+        // Slot reuse now requires explicit free() — no automatic GC collection.
         let mut heap = GcHeap::new(100);
-        let _r1 = heap.alloc(1i64);
-        let _r2 = heap.alloc(2i64);
-        let _r3 = heap.alloc(3i64);
+        let r1 = heap.alloc(1i64);
+        let r2 = heap.alloc(2i64);
+        let r3 = heap.alloc(3i64);
 
-        heap.collect(&[]);
+        // Explicitly free all three slots
+        heap.free(r1);
+        heap.free(r2);
+        heap.free(r3);
         assert_eq!(heap.live_count(), 0);
-        assert_eq!(heap.free_list.len(), 3);
+        assert_eq!(heap.free_list().len(), 3);
 
+        // New alloc reuses freed slot (LIFO)
         let r4 = heap.alloc(99i64);
-        assert!(r4.index < 3);
+        assert!(r4.index < 3, "should reuse a freed slot");
         assert_eq!(*heap.get::<i64>(r4).unwrap(), 99);
     }
 

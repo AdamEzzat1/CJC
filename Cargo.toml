@@ -22,6 +22,7 @@ members = [
     "crates/cjc-mir",
     "crates/cjc-mir-exec",
     "crates/cjc-regex",
+    "crates/cjc-module",
     "bench/ad_bench",
     "bench/nlp_preprocess_bench",
 ]
@@ -50,10 +51,12 @@ cjc-hir = { path = "crates/cjc-hir" }
 cjc-mir = { path = "crates/cjc-mir" }
 cjc-mir-exec = { path = "crates/cjc-mir-exec" }
 cjc-regex = { path = "crates/cjc-regex" }
+cjc-module = { path = "crates/cjc-module" }
 
 [dev-dependencies]
 bolero = "0.13.4"
 proptest = "1"
+tempfile = "3"
 
 [workspace.dependencies]
 cjc-ast = { path = "crates/cjc-ast" }
@@ -68,6 +71,7 @@ cjc-ad = { path = "crates/cjc-ad" }
 cjc-data = { path = "crates/cjc-data" }
 cjc-repro = { path = "crates/cjc-repro" }
 cjc-cli = { path = "crates/cjc-cli" }
+cjc-module = { path = "crates/cjc-module" }
 
 [[test]]
 name = "fixtures"
@@ -80,3 +84,7 @@ path = "tests/prop_tests/mod.rs"
 [[test]]
 name = "bolero_fuzz"
 path = "tests/bolero_fuzz/mod.rs"
+
+[[test]]
+name = "tidy_tests"
+path = "tidy_tests/mod.rs"

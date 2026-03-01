@@ -229,7 +229,7 @@ impl CfgBuilder {
 
         for stmt in &body.stmts {
             match stmt {
-                MirStmt::Let { name, mutable, init } => {
+                MirStmt::Let { name, mutable, init, .. } => {
                     stmts.push(CfgStmt::Let {
                         name: name.clone(),
                         mutable: *mutable,
@@ -343,6 +343,8 @@ impl CfgBuilder {
 
                     current = exit_id;
                 }
+                // Break/Continue: no-op in CFG lowering (handled as control flow in executor)
+                MirStmt::Break | MirStmt::Continue => {}
                 MirStmt::NoGcBlock(inner_body) => {
                     // NoGC blocks are transparent to the CFG — inline them.
                     let (next_current, inner_stmts, inner_result) =
@@ -409,6 +411,7 @@ mod tests {
                     name: "x".into(),
                     mutable: false,
                     init: int_expr(42),
+                    alloc_hint: None,
                 },
             ],
             result: Some(Box::new(int_expr(42))),

@@ -168,6 +168,8 @@ pub enum HirStmtKind {
         body: HirBlock,
     },
     Return(Option<HirExpr>),
+    Break,
+    Continue,
     NoGcBlock(HirBlock),
 }
 
@@ -739,6 +741,8 @@ impl AstLowering {
             cjc_ast::StmtKind::Return(e) => {
                 HirStmtKind::Return(e.as_ref().map(|ex| self.lower_expr(ex)))
             }
+            cjc_ast::StmtKind::Break => HirStmtKind::Break,
+            cjc_ast::StmtKind::Continue => HirStmtKind::Continue,
             cjc_ast::StmtKind::If(if_stmt) => HirStmtKind::If(self.lower_if(if_stmt)),
             cjc_ast::StmtKind::While(w) => HirStmtKind::While {
                 cond: self.lower_expr(&w.condition),
@@ -1047,12 +1051,11 @@ impl AstLowering {
         };
 
         // Lower the user's body statements
-        let mut while_body_stmts = vec![let_loop_var];
-        for stmt in &body.stmts {
-            while_body_stmts.push(self.lower_stmt(stmt));
-        }
-
         // Increment: __for_idx_N = __for_idx_N + 1;
+        // Placed BEFORE the user body so that `continue` in user code cannot
+        // skip the increment (which would cause an infinite loop in desugared
+        // for-loops).  The loop variable `i` already captured its value via
+        // `let i = __for_idx_N`, so pre-incrementing is correct.
         let increment = HirStmt {
             kind: HirStmtKind::Expr(HirExpr {
                 kind: HirExprKind::Assign {
@@ -1079,7 +1082,11 @@ impl AstLowering {
             }),
             hir_id: self.fresh_id(),
         };
-        while_body_stmts.push(increment);
+
+        let mut while_body_stmts = vec![let_loop_var, increment];
+        for stmt in &body.stmts {
+            while_body_stmts.push(self.lower_stmt(stmt));
+        }
 
         // Lower the tail expression if any
         let tail_expr = body.expr.as_ref().map(|e| Box::new(self.lower_expr(e)));
@@ -1673,6 +1680,8 @@ impl AstLowering {
             cjc_ast::StmtKind::NoGcBlock(block) => {
                 Self::collect_var_refs_block(block, out);
             }
+            // Break/Continue reference no variables.
+            cjc_ast::StmtKind::Break | cjc_ast::StmtKind::Continue => {}
         }
     }
 

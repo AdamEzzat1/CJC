@@ -12,6 +12,11 @@ use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
+mod csv;
+pub use csv::{CsvConfig, CsvReader, StreamingCsvProcessor};
+
+pub mod tidy_dispatch;
+
 // â”€â”€ Column Storage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// A single column in a DataFrame.
@@ -1478,11 +1483,6 @@ impl DataFrame {
         Ok(())
     }
 }
-
-// -- CSV Ingestion (extracted to csv.rs) --------------------------------------
-
-mod csv;
-pub use csv::{CsvConfig, CsvReader, StreamingCsvProcessor};
 
 // -- Phase 10: Tidy Primitives ------------------------------------------------
 //

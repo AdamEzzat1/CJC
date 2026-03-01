@@ -1,7 +1,7 @@
 //! H-4: MIR CFG structure — BasicBlock, Terminator, predecessor/successor analysis.
 
 use cjc_mir::cfg::{BasicBlock, CfgBuilder, MirCfg, Terminator};
-use cjc_mir::{BlockId, MirBody, MirExpr, MirExprKind, MirStmt};
+use cjc_mir::{AllocHint, BlockId, MirBody, MirExpr, MirExprKind, MirStmt};
 
 fn int_expr(v: i64) -> MirExpr {
     MirExpr { kind: MirExprKind::IntLit(v) }
@@ -33,8 +33,8 @@ fn test_cfg_types_are_exported() {
 fn test_cfg_straight_line_single_block_return() {
     let body = MirBody {
         stmts: vec![
-            MirStmt::Let { name: "x".into(), mutable: false, init: int_expr(1) },
-            MirStmt::Let { name: "y".into(), mutable: false, init: int_expr(2) },
+            MirStmt::Let { name: "x".into(), mutable: false, init: int_expr(1), alloc_hint: None },
+            MirStmt::Let { name: "y".into(), mutable: false, init: int_expr(2), alloc_hint: None },
         ],
         result: Some(Box::new(int_expr(3))),
     };
@@ -179,11 +179,11 @@ fn test_cfg_build_is_deterministic() {
             MirStmt::If {
                 cond: bool_expr(true),
                 then_body: MirBody {
-                    stmts: vec![MirStmt::Let { name: "a".into(), mutable: false, init: int_expr(1) }],
+                    stmts: vec![MirStmt::Let { name: "a".into(), mutable: false, init: int_expr(1), alloc_hint: None }],
                     result: None,
                 },
                 else_body: Some(MirBody {
-                    stmts: vec![MirStmt::Let { name: "b".into(), mutable: false, init: int_expr(2) }],
+                    stmts: vec![MirStmt::Let { name: "b".into(), mutable: false, init: int_expr(2), alloc_hint: None }],
                     result: None,
                 }),
             },

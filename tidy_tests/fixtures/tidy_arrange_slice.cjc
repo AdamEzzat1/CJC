@@ -1,0 +1,19 @@
+fn main() -> i64 {
+    // Tidy bridge: arrange + slice
+    let csv = "name,score\nAlice,85\nBob,92\nCharlie,78\nDiana,95\n";
+    let df = Csv.parse(csv);
+    let view = df.view();
+
+    // arrange descending by score
+    let sorted = view.arrange([desc("score")]);
+    print(sorted.nrows());
+
+    // slice_head(2) = top 2 rows
+    let top2 = sorted.slice_head(2);
+    print(top2.nrows());
+
+    // distinct on all columns (no change since all unique)
+    let uniq = view.distinct(["name"]);
+    print(uniq.nrows());
+    0
+}

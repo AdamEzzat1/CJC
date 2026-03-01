@@ -1,0 +1,19 @@
+fn main() -> i64 {
+    // Tidy bridge: filter + select on DataFrame → TidyView
+    let csv_data = "name,age,city\nAlice,30,NYC\nBob,25,LA\nCharlie,35,NYC\nDiana,28,LA\n";
+    let df = Csv.parse(csv_data);
+    let view = df.view();
+    print(view.nrows());
+    print(view.ncols());
+
+    // filter: age > 28 (should keep Alice=30, Charlie=35)
+    let pred = dexpr_binop(">", col("age"), 28);
+    let filtered = view.filter(pred);
+    print(filtered.nrows());
+
+    // select only name and city columns
+    let selected = filtered.select(["name", "city"]);
+    print(selected.ncols());
+    print(selected.column_names());
+    0
+}

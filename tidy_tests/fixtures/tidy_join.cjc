@@ -1,0 +1,22 @@
+fn main() -> i64 {
+    // Tidy bridge: inner_join
+    // Note: IDs >= 2 to avoid CSV infer_type treating "1"/"0" as Bool
+    let left_csv = "id,name\n10,Alice\n20,Bob\n30,Charlie\n";
+    let right_csv = "id,dept\n10,Eng\n30,Sales\n40,HR\n";
+    let left = Csv.parse(left_csv).view();
+    let right = Csv.parse(right_csv).view();
+
+    // inner join on id
+    let joined = left.inner_join(right, "id", "id");
+    print(joined.nrows());
+    print(joined.ncols());
+
+    // semi join: rows in left with a match in right
+    let semi = left.semi_join(right, "id", "id");
+    print(semi.nrows());
+
+    // anti join: rows in left with NO match in right
+    let anti = left.anti_join(right, "id", "id");
+    print(anti.nrows());
+    0
+}

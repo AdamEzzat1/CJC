@@ -1,0 +1,21 @@
+fn main() -> i64 {
+    // stats builtins: median, sd, variance, n_distinct
+    let nums = [1.0, 2.0, 3.0, 4.0, 5.0];
+    print(median(nums));
+
+    let vals = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
+    print(median(vals));
+
+    // sd and variance (sample, N-1 denominator)
+    let data = [10.0, 20.0, 30.0];
+    print(variance(data));
+    print(sd(data));
+
+    // n_distinct
+    let arr = [1, 2, 2, 3, 3, 3];
+    print(n_distinct(arr));
+
+    // edge: empty array → NaN
+    print(median([]));
+    0
+}

@@ -1,0 +1,25 @@
+fn main() -> i64 {
+    // Full tidy pipeline using pipe operator
+    let csv = "dept,name,salary\nEng,Alice,100\nEng,Bob,120\nSales,Carol,80\nSales,Dave,90\nEng,Eve,110\n";
+    let df = Csv.parse(csv);
+
+    // Pipeline: view → filter salary > 85 → group_by dept → summarise count + mean
+    let view = df.view();
+    let result = view
+        .filter(dexpr_binop(">", col("salary"), 85))
+        .group_by(["dept"])
+        .summarise("n", tidy_count(), "avg", tidy_mean("salary"));
+    print(result.nrows());
+
+    // Mutate: add a computed column, then select
+    let view2 = df.view();
+    let mutated = view2.mutate("bonus", dexpr_binop("*", col("salary"), 10));
+    print(mutated.nrows());
+    print(mutated.ncols());
+
+    // Rename
+    let renamed = view2.rename([["dept", "department"]]);
+    let names = renamed.column_names();
+    print(names);
+    0
+}

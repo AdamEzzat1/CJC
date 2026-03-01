@@ -110,6 +110,12 @@ pub enum Type {
         elem: Box<Type>,
     },
 
+    /// Tidy data view (lazy bitmask + projection over a DataFrame).
+    TidyView,
+
+    /// Grouped tidy data view (TidyView partitioned by key columns).
+    GroupedTidyView,
+
     /// Type variable (for generics).
     Var(TypeVarId),
 
@@ -253,6 +259,8 @@ impl fmt::Display for Type {
             }
             Type::Map { key, value } => write!(f, "Map<{}, {}>", key, value),
             Type::SparseTensor { elem } => write!(f, "SparseTensor<{}>", elem),
+            Type::TidyView => write!(f, "TidyView"),
+            Type::GroupedTidyView => write!(f, "GroupedTidyView"),
             Type::Var(id) => write!(f, "T{}", id.0),
             Type::Unresolved(name) => write!(f, "?{}", name),
             Type::Error => write!(f, "<error>"),
@@ -919,6 +927,117 @@ pub struct TypeEnv {
     next_var: usize,
 }
 
+// ---------------------------------------------------------------------------
+// Effect Classification
+// ---------------------------------------------------------------------------
+
+/// Bitflag effect classification for builtin functions.
+///
+/// Each flag represents a category of side effect. A function with `PURE` (no
+/// flags set) is guaranteed to be deterministic and allocation-free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EffectSet {
+    bits: u16,
+}
+
+impl Default for EffectSet {
+    fn default() -> Self {
+        Self::PURE
+    }
+}
+
+impl EffectSet {
+    /// No effects — pure, deterministic, no allocation.
+    pub const PURE: Self = Self { bits: 0 };
+
+    // Individual effect flags.
+    pub const IO: u16 = 0b0000_0001; // print, file read/write
+    pub const ALLOC: u16 = 0b0000_0010; // heap allocation (Rc/String/Vec/Tensor)
+    pub const GC: u16 = 0b0000_0100; // triggers GC (gc_alloc, gc_collect)
+    pub const NONDET: u16 = 0b0000_1000; // nondeterministic (randn, clock, hash-order)
+    pub const MUTATES: u16 = 0b0001_0000; // mutates arguments (push, Map.insert)
+    pub const ARENA_OK: u16 = 0b0010_0000; // result can safely live on arena
+    pub const CAPTURES: u16 = 0b0100_0000; // may capture/store arguments beyond call
+
+    /// Create an EffectSet from raw bits.
+    pub const fn new(bits: u16) -> Self {
+        Self { bits }
+    }
+
+    /// Check whether a specific flag is set.
+    pub const fn has(&self, flag: u16) -> bool {
+        self.bits & flag != 0
+    }
+
+    /// Return a new set with the given flag added.
+    pub const fn with(self, flag: u16) -> Self {
+        Self {
+            bits: self.bits | flag,
+        }
+    }
+
+    /// True if no flags are set (pure function).
+    pub const fn is_pure(&self) -> bool {
+        self.bits == 0
+    }
+
+    /// True if the function does NOT trigger GC.
+    pub const fn is_nogc_safe(&self) -> bool {
+        !self.has(Self::GC)
+    }
+
+    /// True if the function may allocate (heap or GC).
+    pub const fn may_alloc(&self) -> bool {
+        self.bits & (Self::ALLOC | Self::GC) != 0
+    }
+
+    /// Raw bits (for serialization / debug).
+    pub const fn bits(&self) -> u16 {
+        self.bits
+    }
+}
+
+impl fmt::Display for EffectSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_pure() {
+            return write!(f, "PURE");
+        }
+        let mut parts = Vec::new();
+        if self.has(Self::IO) {
+            parts.push("IO");
+        }
+        if self.has(Self::ALLOC) {
+            parts.push("ALLOC");
+        }
+        if self.has(Self::GC) {
+            parts.push("GC");
+        }
+        if self.has(Self::NONDET) {
+            parts.push("NONDET");
+        }
+        if self.has(Self::MUTATES) {
+            parts.push("MUTATES");
+        }
+        if self.has(Self::ARENA_OK) {
+            parts.push("ARENA_OK");
+        }
+        if self.has(Self::CAPTURES) {
+            parts.push("CAPTURES");
+        }
+        write!(f, "{}", parts.join("|"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Effect Registry
+// ---------------------------------------------------------------------------
+
+pub mod effect_registry;
+
+// ---------------------------------------------------------------------------
+// Function Signature Entry
+// ---------------------------------------------------------------------------
+
 /// Entry in the function signature table (for multiple dispatch).
 #[derive(Debug, Clone)]
 pub struct FnSigEntry {
@@ -927,6 +1046,9 @@ pub struct FnSigEntry {
     pub params: Vec<(String, Type)>,
     pub ret: Type,
     pub is_nogc: bool,
+    /// Effect classification for this function. Used by the nogc verifier,
+    /// escape analysis, and optimizer to reason about side effects.
+    pub effects: EffectSet,
 }
 
 impl TypeEnv {
@@ -1048,6 +1170,7 @@ impl TypeEnv {
                 ],
             }),
             is_nogc: false,
+            effects: EffectSet::default(),
         });
         // None -> Option<T>
         env.fn_sigs.entry("None".into()).or_default().push(FnSigEntry {
@@ -1063,6 +1186,7 @@ impl TypeEnv {
                 ],
             }),
             is_nogc: false,
+            effects: EffectSet::default(),
         });
         // Ok(v) -> Result<T, E>
         env.fn_sigs.entry("Ok".into()).or_default().push(FnSigEntry {
@@ -1078,6 +1202,7 @@ impl TypeEnv {
                 ],
             }),
             is_nogc: false,
+            effects: EffectSet::default(),
         });
         // Err(e) -> Result<T, E>
         env.fn_sigs.entry("Err".into()).or_default().push(FnSigEntry {
@@ -1093,6 +1218,7 @@ impl TypeEnv {
                 ],
             }),
             is_nogc: false,
+            effects: EffectSet::default(),
         });
 
         env
@@ -1446,6 +1572,7 @@ impl TypeChecker {
                     params,
                     ret,
                     is_nogc: f.is_nogc,
+                    effects: EffectSet::default(),
                 });
             }
             DeclKind::Trait(t) => {
@@ -1500,6 +1627,7 @@ impl TypeChecker {
                         params,
                         ret,
                         is_nogc: method.is_nogc,
+                        effects: EffectSet::default(),
                     });
                 }
             }
@@ -1548,6 +1676,7 @@ impl TypeChecker {
                 params,
                 ret: ret_type.clone(),
                 is_nogc: false,
+                effects: EffectSet::default(),
             });
         }
     }
@@ -1844,6 +1973,9 @@ impl TypeChecker {
                 self.check_nogc_block(block);
                 self.check_block(block);
             }
+            // Break/Continue are validated at parse time (loop depth check).
+            // No type checking needed — they produce no values.
+            StmtKind::Break | StmtKind::Continue => {}
         }
     }
 

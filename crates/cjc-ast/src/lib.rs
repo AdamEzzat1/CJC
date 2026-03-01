@@ -235,6 +235,8 @@ pub enum StmtKind {
     Let(LetStmt),
     Expr(Expr),
     Return(Option<Expr>),
+    Break,
+    Continue,
     If(IfStmt),
     While(WhileStmt),
     For(ForStmt),
@@ -880,6 +882,14 @@ impl PrettyPrinter {
                     self.print_expr(expr);
                 }
                 self.output.push_str(";\n");
+            }
+            StmtKind::Break => {
+                self.output.push_str(&self.indent_str());
+                self.output.push_str("break;\n");
+            }
+            StmtKind::Continue => {
+                self.output.push_str(&self.indent_str());
+                self.output.push_str("continue;\n");
             }
             StmtKind::If(if_stmt) => {
                 self.output.push_str(&self.indent_str());

@@ -394,6 +394,7 @@ fn test_mir_no_new_constructs_for_range() {
                     check_no_for_in_stmts(&body.stmts);
                 }
                 cjc_mir::MirStmt::Return(_) => {}
+                cjc_mir::MirStmt::Break | cjc_mir::MirStmt::Continue => {}
                 cjc_mir::MirStmt::NoGcBlock(body) => {
                     check_no_for_in_stmts(&body.stmts);
                 }

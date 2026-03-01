@@ -161,55 +161,88 @@ fn test_tensor_sum_and_mean() {
     assert!((t.mean() - 2.5).abs() < 1e-12);
 }
 
-// -- GC tests -----------------------------------------------------------
+// -- ObjectSlab tests (replaced mark-sweep GC) ----------------------------
 
 #[test]
-fn test_gc_alloc_and_read() {
-    let mut heap = GcHeap::new(100);
-    let r1 = heap.alloc(42i64);
-    let r2 = heap.alloc("hello".to_string());
+fn test_slab_alloc_and_read() {
+    let mut slab = ObjectSlab::new();
+    let r1 = slab.alloc(42i64);
+    let r2 = slab.alloc("hello".to_string());
 
-    assert_eq!(heap.live_count(), 2);
-    assert_eq!(*heap.get::<i64>(r1).unwrap(), 42);
-    assert_eq!(heap.get::<String>(r2).unwrap().as_str(), "hello");
+    assert_eq!(slab.live_count(), 2);
+    assert_eq!(*slab.get::<i64>(r1).unwrap(), 42);
+    assert_eq!(slab.get::<String>(r2).unwrap().as_str(), "hello");
 
     // Wrong type returns None.
-    assert!(heap.get::<f64>(r1).is_none());
+    assert!(slab.get::<f64>(r1).is_none());
 }
 
 #[test]
-fn test_gc_collect_frees_unreachable() {
+fn test_slab_free_and_reuse() {
+    let mut slab = ObjectSlab::new();
+    let r1 = slab.alloc(1i64);
+    let r2 = slab.alloc(2i64);
+    let r3 = slab.alloc(3i64);
+
+    assert_eq!(slab.live_count(), 3);
+
+    // Explicitly free r2 and r3
+    slab.free(r2);
+    slab.free(r3);
+
+    assert_eq!(slab.live_count(), 1);
+    assert_eq!(slab.get::<i64>(r1), Some(&1));
+
+    // New alloc reuses freed slots (LIFO)
+    let r4 = slab.alloc(99i64);
+    assert_eq!(r4.index, r3.index, "LIFO reuse: last freed = first reused");
+    assert_eq!(slab.get::<i64>(r4), Some(&99));
+}
+
+#[test]
+fn test_slab_deterministic_slot_order() {
+    // Same allocation sequence → identical slot indices
+    let mut s1 = ObjectSlab::new();
+    let mut s2 = ObjectSlab::new();
+
+    let a1 = s1.alloc(1i64);
+    let a2 = s1.alloc(2i64);
+    let a3 = s1.alloc(3i64);
+    s1.free(a2);
+    let a4 = s1.alloc(4i64);
+
+    let b1 = s2.alloc(1i64);
+    let b2 = s2.alloc(2i64);
+    let b3 = s2.alloc(3i64);
+    s2.free(b2);
+    let b4 = s2.alloc(4i64);
+
+    assert_eq!(a1.index, b1.index);
+    assert_eq!(a2.index, b2.index);
+    assert_eq!(a3.index, b3.index);
+    assert_eq!(a4.index, b4.index, "deterministic LIFO slot reuse");
+}
+
+// -- GcHeap compat tests (thin wrapper over ObjectSlab) -------------------
+
+#[test]
+fn test_gc_compat_alloc_and_read() {
+    let mut heap = GcHeap::new(100);
+    let r1 = heap.alloc(42i64);
+    assert_eq!(heap.get::<i64>(r1), Some(&42));
+    assert_eq!(heap.live_count(), 1);
+}
+
+#[test]
+fn test_gc_compat_collect_is_noop() {
     let mut heap = GcHeap::new(100);
     let r1 = heap.alloc(1i64);
     let r2 = heap.alloc(2i64);
-    let _r3 = heap.alloc(3i64);
-
-    assert_eq!(heap.live_count(), 3);
-
-    // Only r1 and r2 are roots — r3 should be collected.
-    heap.collect(&[r1, r2]);
-
-    assert_eq!(heap.live_count(), 2);
-    assert_eq!(*heap.get::<i64>(r1).unwrap(), 1);
-    assert_eq!(*heap.get::<i64>(r2).unwrap(), 2);
-}
-
-#[test]
-fn test_gc_slot_reuse() {
-    let mut heap = GcHeap::new(100);
-    let _r1 = heap.alloc(1i64);
-    let _r2 = heap.alloc(2i64);
-    let _r3 = heap.alloc(3i64);
-
-    // Collect with no roots — frees everything.
-    heap.collect(&[]);
-    assert_eq!(heap.live_count(), 0);
-    assert_eq!(heap.free_list.len(), 3);
-
-    // New allocation reuses a freed slot.
-    let r4 = heap.alloc(99i64);
-    assert!(r4.index < 3); // reused one of the first 3 slots
-    assert_eq!(*heap.get::<i64>(r4).unwrap(), 99);
+    // collect is now a no-op; all objects survive (RC-backed)
+    heap.collect(&[r1]);
+    assert_eq!(heap.live_count(), 2, "RC keeps all objects alive");
+    assert_eq!(heap.get::<i64>(r1), Some(&1));
+    assert_eq!(heap.get::<i64>(r2), Some(&2));
 }
 
 // -- Stable summation test ----------------------------------------------

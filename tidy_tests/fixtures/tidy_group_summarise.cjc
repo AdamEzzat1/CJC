@@ -1,0 +1,18 @@
+fn main() -> i64 {
+    // Tidy bridge: group_by + summarise
+    let csv = "dept,salary\nEng,100\nEng,120\nSales,80\nSales,90\nEng,110\n";
+    let df = Csv.parse(csv);
+    let view = df.view();
+
+    let grouped = view.group_by(["dept"]);
+    print(grouped.ngroups());
+
+    // summarise: count and mean salary per dept
+    let result = grouped.summarise("n", tidy_count(), "avg_sal", tidy_mean("salary"));
+    print(result.nrows());
+
+    // Collect back to DataFrame struct for field access
+    let collected = result.collect();
+    print(collected.nrows());
+    0
+}

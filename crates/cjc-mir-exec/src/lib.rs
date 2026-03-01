@@ -25,6 +25,10 @@ use cjc_runtime::{GcHeap, Tensor, Value};
 #[derive(Debug)]
 pub enum MirExecError {
     Return(Value),
+    /// A `break` statement — caught by the innermost loop.
+    Break,
+    /// A `continue` statement — caught by the innermost loop.
+    Continue,
     Runtime(String),
     RuntimeError(cjc_runtime::RuntimeError),
     /// Compile-time type errors — collected by the type checker before execution.
@@ -39,6 +43,8 @@ impl fmt::Display for MirExecError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             MirExecError::Return(_) => write!(f, "uncaught return"),
+            MirExecError::Break => write!(f, "break outside of loop"),
+            MirExecError::Continue => write!(f, "continue outside of loop"),
             MirExecError::Runtime(msg) => write!(f, "runtime error: {msg}"),
             MirExecError::RuntimeError(e) => write!(f, "runtime error: {e}"),
             MirExecError::TypeErrors(errs) => {
@@ -77,6 +83,11 @@ pub struct MirExecutor {
     pub gc_collections: u64,
     /// Name of the currently-executing function (for TCO detection).
     current_fn: Option<String>,
+    /// Per-call-frame arena stack. Provides bulk-free discipline:
+    /// push on function entry, reset on tail-call, pop on return/error.
+    arena_stack: Vec<cjc_runtime::ArenaStore>,
+    /// Running count of arena allocations (for diagnostics/testing).
+    pub arena_alloc_count: u64,
 }
 
 impl MirExecutor {
@@ -91,6 +102,8 @@ impl MirExecutor {
             start_time: Instant::now(),
             gc_collections: 0,
             current_fn: None,
+            arena_stack: Vec::new(),
+            arena_alloc_count: 0,
         }
     }
 
@@ -197,8 +210,12 @@ impl MirExecutor {
 
     fn exec_stmt(&mut self, stmt: &MirStmt) -> MirExecResult {
         match stmt {
-            MirStmt::Let { name, init, .. } => {
+            MirStmt::Let { name, init, alloc_hint, .. } => {
                 let val = self.eval_expr(init)?;
+                // Track arena-classified allocations for diagnostics.
+                if let Some(cjc_mir::AllocHint::Arena) = alloc_hint {
+                    self.arena_alloc_count += 1;
+                }
                 self.define(name, val);
                 Ok(Value::Void)
             }
@@ -244,7 +261,12 @@ impl MirExecutor {
                     if !cond_bool {
                         break;
                     }
-                    self.exec_body_scoped(body)?;
+                    match self.exec_body_scoped(body) {
+                        Ok(_) => {}
+                        Err(MirExecError::Break) => break,
+                        Err(MirExecError::Continue) => continue,
+                        Err(e) => return Err(e),
+                    }
                 }
                 Ok(Value::Void)
             }
@@ -275,6 +297,8 @@ impl MirExecutor {
                     Err(MirExecError::Return(Value::Void))
                 }
             }
+            MirStmt::Break => Err(MirExecError::Break),
+            MirStmt::Continue => Err(MirExecError::Continue),
             MirStmt::NoGcBlock(body) => self.exec_body_scoped(body),
         }
     }
@@ -971,6 +995,32 @@ impl MirExecutor {
                 | "bf16_to_f32"
                 | "f32_to_bf16"
                 | "Complex"
+                // JSON builtins
+                | "json_parse"
+                | "json_stringify"
+                // DateTime builtins
+                | "datetime_now"
+                | "datetime_from_epoch"
+                | "datetime_from_parts"
+                | "datetime_year"
+                | "datetime_month"
+                | "datetime_day"
+                | "datetime_hour"
+                | "datetime_minute"
+                | "datetime_second"
+                | "datetime_diff"
+                | "datetime_add_millis"
+                | "datetime_format"
+                // File I/O builtins
+                | "file_read"
+                | "file_write"
+                | "file_exists"
+                | "file_lines"
+                // Window functions
+                | "window_sum"
+                | "window_mean"
+                | "window_min"
+                | "window_max"
         )
     }
 
@@ -1014,6 +1064,9 @@ impl MirExecutor {
             "clock" => {
                 let elapsed = self.start_time.elapsed().as_secs_f64();
                 return Ok(Value::Float(elapsed));
+            }
+            "datetime_now" => {
+                return Ok(Value::Int(cjc_runtime::datetime::datetime_now()));
             }
             "gc_alloc" => {
                 let tag = if args.is_empty() {
@@ -2044,6 +2097,7 @@ impl MirExecutor {
             }
 
             self.push_scope();
+            self.arena_stack.push(cjc_runtime::ArenaStore::new());
             for (param, val) in func.params.iter().zip(current_args.iter()) {
                 self.define(&param.name, val.clone());
             }
@@ -2056,7 +2110,10 @@ impl MirExecutor {
                 Ok(val) => val,
                 Err(MirExecError::Return(val)) => val,
                 Err(MirExecError::TailCall { name: tco_name, args: tco_args }) => {
-                    // Tail call detected — pop current scope and loop.
+                    // Tail call detected — reset arena for reuse, pop scope, loop.
+                    if let Some(arena) = self.arena_stack.last_mut() {
+                        arena.reset();
+                    }
                     self.pop_scope();
                     self.current_fn = prev_fn;
                     current_name = tco_name;
@@ -2064,12 +2121,14 @@ impl MirExecutor {
                     continue;
                 }
                 Err(e) => {
+                    self.arena_stack.pop();
                     self.pop_scope();
                     self.current_fn = prev_fn;
                     return Err(e);
                 }
             };
 
+            self.arena_stack.pop();
             self.pop_scope();
             self.current_fn = prev_fn;
             return Ok(result);
@@ -2368,7 +2427,8 @@ pub fn run_program(program: &cjc_ast::Program, seed: u64) -> MirExecResult {
     let hir = ast_lowering.lower_program(program);
 
     let mut hir_to_mir = cjc_mir::HirToMir::new();
-    let mir = hir_to_mir.lower_program(&hir);
+    let mut mir = hir_to_mir.lower_program(&hir);
+    cjc_mir::escape::annotate_program(&mut mir);
 
     let mut executor = MirExecutor::new(seed);
     executor.exec(&mir)
@@ -2383,7 +2443,8 @@ pub fn run_program_with_executor(
     let hir = ast_lowering.lower_program(program);
 
     let mut hir_to_mir = cjc_mir::HirToMir::new();
-    let mir = hir_to_mir.lower_program(&hir);
+    let mut mir = hir_to_mir.lower_program(&hir);
+    cjc_mir::escape::annotate_program(&mut mir);
 
     let mut executor = MirExecutor::new(seed);
     let result = executor.exec(&mir)?;
@@ -2398,7 +2459,8 @@ pub fn run_program_optimized(program: &cjc_ast::Program, seed: u64) -> MirExecRe
     let mut hir_to_mir = cjc_mir::HirToMir::new();
     let mir = hir_to_mir.lower_program(&hir);
 
-    let optimized = cjc_mir::optimize::optimize_program(&mir);
+    let mut optimized = cjc_mir::optimize::optimize_program(&mir);
+    cjc_mir::escape::annotate_program(&mut optimized);
 
     let mut executor = MirExecutor::new(seed);
     executor.exec(&optimized)
@@ -2415,7 +2477,8 @@ pub fn run_program_optimized_with_executor(
     let mut hir_to_mir = cjc_mir::HirToMir::new();
     let mir = hir_to_mir.lower_program(&hir);
 
-    let optimized = cjc_mir::optimize::optimize_program(&mir);
+    let mut optimized = cjc_mir::optimize::optimize_program(&mir);
+    cjc_mir::escape::annotate_program(&mut optimized);
 
     let mut executor = MirExecutor::new(seed);
     let result = executor.exec(&optimized)?;
@@ -2439,7 +2502,8 @@ pub fn run_program_type_checked(program: &cjc_ast::Program, seed: u64) -> MirExe
     let hir = ast_lowering.lower_program(program);
 
     let mut hir_to_mir = cjc_mir::HirToMir::new();
-    let mir = hir_to_mir.lower_program(&hir);
+    let mut mir = hir_to_mir.lower_program(&hir);
+    cjc_mir::escape::annotate_program(&mut mir);
 
     let mut executor = MirExecutor::new(seed);
     executor.exec(&mir)
@@ -2456,10 +2520,54 @@ pub fn run_program_monomorphized(program: &cjc_ast::Program, seed: u64) -> MirEx
     // Monomorphize before optimization
     let (monomorphized, _report) = cjc_mir::monomorph::monomorphize_program(&mir);
 
-    let optimized = cjc_mir::optimize::optimize_program(&monomorphized);
+    let mut optimized = cjc_mir::optimize::optimize_program(&monomorphized);
+    cjc_mir::escape::annotate_program(&mut optimized);
 
     let mut executor = MirExecutor::new(seed);
     executor.exec(&optimized)
+}
+
+/// Run a multi-file CJC program starting from the entry file path.
+///
+/// This function:
+/// 1. Builds the module graph (resolving imports, detecting cycles)
+/// 2. Merges all modules into a single MIR program (symbol-prefixed)
+/// 3. Runs escape analysis annotation
+/// 4. Executes the merged program
+///
+/// Returns the execution result or an error.
+pub fn run_program_with_modules(
+    entry_path: &std::path::Path,
+    seed: u64,
+) -> MirExecResult {
+    let graph = cjc_module::build_module_graph(entry_path)
+        .map_err(|e| MirExecError::Runtime(format!("module error: {}", e)))?;
+
+    let mut mir = cjc_module::merge_programs(&graph)
+        .map_err(|e| MirExecError::Runtime(format!("module merge error: {}", e)))?;
+
+    cjc_mir::escape::annotate_program(&mut mir);
+
+    let mut executor = MirExecutor::new(seed);
+    executor.exec(&mir)
+}
+
+/// Run a multi-file CJC program and return the executor for inspection.
+pub fn run_program_with_modules_executor(
+    entry_path: &std::path::Path,
+    seed: u64,
+) -> Result<(Value, MirExecutor), MirExecError> {
+    let graph = cjc_module::build_module_graph(entry_path)
+        .map_err(|e| MirExecError::Runtime(format!("module error: {}", e)))?;
+
+    let mut mir = cjc_module::merge_programs(&graph)
+        .map_err(|e| MirExecError::Runtime(format!("module merge error: {}", e)))?;
+
+    cjc_mir::escape::annotate_program(&mut mir);
+
+    let mut executor = MirExecutor::new(seed);
+    let result = executor.exec(&mir)?;
+    Ok((result, executor))
 }
 
 /// Run NoGC verification on a program's MIR.

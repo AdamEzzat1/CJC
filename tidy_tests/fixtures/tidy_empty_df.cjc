@@ -1,0 +1,18 @@
+fn main() -> i64 {
+    // Edge case: empty DataFrame
+    let csv = "name,age\n";
+    let df = Csv.parse(csv);
+    let view = df.view();
+    print(view.nrows());
+    print(view.ncols());
+
+    // filter on empty → still empty, no panic
+    let pred = dexpr_binop(">", col("age"), 0);
+    let filtered = view.filter(pred);
+    print(filtered.nrows());
+
+    // group_by on empty → 0 groups
+    let grouped = view.group_by(["name"]);
+    print(grouped.ngroups());
+    0
+}

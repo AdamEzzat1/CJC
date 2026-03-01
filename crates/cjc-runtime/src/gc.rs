@@ -1,138 +1,115 @@
+//! GC compatibility layer — thin wrapper over `ObjectSlab`.
+//!
+//! The mark-sweep garbage collector has been removed. This module preserves
+//! the `GcRef` and `GcHeap` API for backward compatibility, but all allocation
+//! is now backed by deterministic reference counting via `ObjectSlab`.
+//!
+//! # What changed
+//!
+//! - `GcHeap::alloc()` → delegates to `ObjectSlab::alloc()` (RC-backed)
+//! - `GcHeap::collect()` → no-op (RC handles deallocation)
+//! - `GcHeap::mark()` / `sweep()` → removed (no mark-sweep semantics)
+//! - `GcHeap::get()` → delegates to `ObjectSlab::get()`
+//! - `GcHeap::live_count()` → delegates to `ObjectSlab::live_count()`
+//!
+//! # Determinism
+//!
+//! The `ObjectSlab` provides deterministic LIFO slot reuse. Same allocation
+//! sequence → same slot indices. No stop-the-world pauses.
+
 use std::any::Any;
 use std::fmt;
 
-// ---------------------------------------------------------------------------
-// 3. GC for Layer 3 — simple mark-sweep
-// ---------------------------------------------------------------------------
+use crate::object_slab::{ObjectSlab, SlabRef};
 
 /// A handle into the GC heap. Lightweight, copyable index.
+///
+/// Now backed by `SlabRef` (RC-based slab) instead of mark-sweep GC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GcRef {
     pub index: usize,
 }
 
-/// A type-erased object managed by the GC.
-pub struct GcObject {
-    marked: bool,
-    value: Box<dyn Any>,
+impl GcRef {
+    fn from_slab(sr: SlabRef) -> Self {
+        GcRef { index: sr.index }
+    }
+
+    fn to_slab(self) -> SlabRef {
+        SlabRef { index: self.index }
+    }
 }
 
-impl fmt::Debug for GcObject {
+/// Backward-compatible GC heap interface backed by `ObjectSlab`.
+///
+/// All mark-sweep semantics have been removed. Objects are reference-counted
+/// and freed deterministically when no references remain.
+pub struct GcHeap {
+    slab: ObjectSlab,
+    /// Maintained for API compat; incremented on `collect()` calls.
+    collection_count: u64,
+}
+
+impl fmt::Debug for GcHeap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("GcObject")
-            .field("marked", &self.marked)
-            .field("value", &"<dyn Any>")
+        f.debug_struct("GcHeap")
+            .field("live_count", &self.slab.live_count())
+            .field("capacity", &self.slab.capacity())
+            .field("collection_count", &self.collection_count)
             .finish()
     }
 }
 
-/// A simple mark-sweep garbage-collected heap.
-///
-/// Objects are stored in a `Vec` with `Option` slots; freed slots are reused
-/// via a free-list. Collection is triggered automatically every
-/// `collection_threshold` allocations.
-#[derive(Debug)]
-pub struct GcHeap {
-    objects: Vec<Option<GcObject>>,
-    pub free_list: Vec<usize>,
-    alloc_count: usize,
-    collection_threshold: usize,
-}
-
 impl GcHeap {
-    /// Create a new GC heap with the given collection threshold.
-    pub fn new(collection_threshold: usize) -> Self {
+    /// Create a new heap. The `_collection_threshold` parameter is accepted
+    /// for API compatibility but ignored (no automatic collection in RC mode).
+    pub fn new(_collection_threshold: usize) -> Self {
         GcHeap {
-            objects: Vec::new(),
-            free_list: Vec::new(),
-            alloc_count: 0,
-            collection_threshold,
+            slab: ObjectSlab::new(),
+            collection_count: 0,
         }
     }
 
-    /// Allocate a value on the GC heap, returning a handle.
-    ///
-    /// If the allocation counter has reached the threshold, a collection is
-    /// triggered first (the caller must provide roots).
+    /// Allocate a value on the heap, returning a handle.
     pub fn alloc<T: Any + 'static>(&mut self, value: T) -> GcRef {
-        let obj = GcObject {
-            marked: false,
-            value: Box::new(value),
-        };
-
-        let index = if let Some(idx) = self.free_list.pop() {
-            self.objects[idx] = Some(obj);
-            idx
-        } else {
-            self.objects.push(Some(obj));
-            self.objects.len() - 1
-        };
-
-        self.alloc_count += 1;
-        GcRef { index }
+        GcRef::from_slab(self.slab.alloc(value))
     }
 
-    /// Allocate with automatic collection when the threshold is reached.
-    pub fn alloc_auto<T: Any + 'static>(&mut self, value: T, roots: &[GcRef]) -> GcRef {
-        if self.alloc_count >= self.collection_threshold {
-            self.collect(roots);
-            self.alloc_count = 0;
-        }
+    /// Allocate with "auto-collection" — for API compat.
+    /// The `_roots` parameter is ignored (no GC to trigger).
+    pub fn alloc_auto<T: Any + 'static>(&mut self, value: T, _roots: &[GcRef]) -> GcRef {
         self.alloc(value)
     }
 
     /// Read a reference to the value behind `gc_ref`, downcasting to `T`.
-    /// Returns `None` if the slot is empty or the type does not match.
     pub fn get<T: Any + 'static>(&self, gc_ref: GcRef) -> Option<&T> {
-        self.objects
-            .get(gc_ref.index)
-            .and_then(|slot| slot.as_ref())
-            .and_then(|obj| obj.value.downcast_ref::<T>())
+        self.slab.get::<T>(gc_ref.to_slab())
     }
 
-    /// Mark a single object as reachable.
-    pub fn mark(&mut self, gc_ref: GcRef) {
-        if let Some(Some(obj)) = self.objects.get_mut(gc_ref.index) {
-            obj.marked = true;
-        }
+    /// No-op: mark-sweep has been removed. Objects are reference-counted.
+    pub fn collect(&mut self, _roots: &[GcRef]) {
+        self.collection_count += 1;
+        self.slab.collect_noop();
     }
 
-    /// Sweep all unmarked objects, freeing their memory and returning their
-    /// slots to the free-list. Resets the mark flag on surviving objects.
-    pub fn sweep(&mut self) {
-        for i in 0..self.objects.len() {
-            let should_free = match &self.objects[i] {
-                Some(obj) => !obj.marked,
-                None => false,
-            };
-            if should_free {
-                self.objects[i] = None;
-                self.free_list.push(i);
-            } else if let Some(obj) = &mut self.objects[i] {
-                obj.marked = false; // reset for next cycle
-            }
-        }
-    }
-
-    /// Run a full mark-sweep collection. Only objects reachable from `roots`
-    /// survive.
-    pub fn collect(&mut self, roots: &[GcRef]) {
-        // Mark phase
-        for &root in roots {
-            self.mark(root);
-        }
-        // Sweep phase
-        self.sweep();
-    }
-
-    /// Number of live (non-None) objects on the heap.
+    /// Number of live objects on the heap.
     pub fn live_count(&self) -> usize {
-        self.objects.iter().filter(|s| s.is_some()).count()
+        self.slab.live_count()
     }
 
     /// Total capacity (number of slots, including freed ones).
     pub fn capacity(&self) -> usize {
-        self.objects.len()
+        self.slab.capacity()
+    }
+
+    /// Access the free list (for backward compat with tests).
+    pub fn free_list(&self) -> &[usize] {
+        &self.slab.free_list
+    }
+
+    /// Explicitly free a slot.
+    pub fn free(&mut self, gc_ref: GcRef) {
+        self.slab.free(gc_ref.to_slab());
     }
 }
 
@@ -155,78 +132,73 @@ mod tests {
     }
 
     #[test]
-    fn sweep_unmarked_frees_object() {
+    fn collect_is_noop_objects_survive() {
         let mut heap = GcHeap::new(1024);
         let r1 = heap.alloc(10i64);
-        let _r2 = heap.alloc(20i64);
-        // Mark only r1 as reachable
+        let r2 = heap.alloc(20i64);
+        // Collect with partial roots — but since it's RC-backed, ALL survive
         heap.collect(&[r1]);
-        assert_eq!(heap.live_count(), 1);
+        assert_eq!(heap.live_count(), 2, "RC keeps all objects alive");
         assert_eq!(heap.get::<i64>(r1), Some(&10));
+        assert_eq!(heap.get::<i64>(r2), Some(&20));
     }
 
     #[test]
-    fn free_list_slot_reuse() {
+    fn explicit_free_and_slot_reuse() {
         let mut heap = GcHeap::new(1024);
         let r1 = heap.alloc(1i64);
-        let _r2 = heap.alloc(2i64);
-        // Collect with only r2 unreachable... actually keep r1
-        heap.collect(&[r1]);
-        assert_eq!(heap.free_list.len(), 1, "one slot freed");
-        // Allocate again — should reuse the freed slot
-        let r3 = heap.alloc(3i64);
-        assert_eq!(heap.free_list.len(), 0, "free list drained");
-        assert_eq!(heap.get::<i64>(r3), Some(&3));
-        assert_eq!(heap.capacity(), 2, "no new slots allocated");
-    }
-
-    #[test]
-    fn collect_all_unreachable() {
-        let mut heap = GcHeap::new(1024);
-        let _r1 = heap.alloc(1i64);
-        let _r2 = heap.alloc(2i64);
+        let r2 = heap.alloc(2i64);
         let _r3 = heap.alloc(3i64);
-        heap.collect(&[]); // no roots
-        assert_eq!(heap.live_count(), 0);
-        assert_eq!(heap.free_list.len(), 3);
-    }
 
-    #[test]
-    fn alloc_auto_triggers_collection() {
-        let mut heap = GcHeap::new(2); // threshold = 2
-        let r1 = heap.alloc(1i64);
-        let _r2 = heap.alloc(2i64);
-        // alloc_auto should trigger collection before allocating
-        let r3 = heap.alloc_auto(3i64, &[r1]);
-        // r1 survived (was a root), _r2 was collected
+        // Explicitly free r2
+        heap.free(r2);
+        assert_eq!(heap.free_list().len(), 1);
+
+        // New alloc reuses freed slot (LIFO)
+        let r4 = heap.alloc(4i64);
+        assert_eq!(r4.index, r2.index, "LIFO slot reuse");
+        assert_eq!(heap.get::<i64>(r4), Some(&4));
         assert_eq!(heap.get::<i64>(r1), Some(&1));
-        assert_eq!(heap.get::<i64>(r3), Some(&3));
-        // _r2 was swept
-        assert_eq!(heap.live_count(), 2);
     }
 
     #[test]
     fn type_mismatch_returns_none() {
         let mut heap = GcHeap::new(1024);
         let r = heap.alloc(42i64);
-        // Wrong type should return None
         assert_eq!(heap.get::<String>(r), None);
-        // Correct type works
         assert_eq!(heap.get::<i64>(r), Some(&42));
     }
 
     #[test]
-    fn mark_sweep_preserves_mark_reset() {
-        let mut heap = GcHeap::new(1024);
+    fn alloc_auto_compat() {
+        let mut heap = GcHeap::new(2);
         let r1 = heap.alloc(1i64);
-        let r2 = heap.alloc(2i64);
-        // First collection: keep both
-        heap.collect(&[r1, r2]);
-        assert_eq!(heap.live_count(), 2);
-        // Second collection: keep only r1
-        heap.collect(&[r1]);
-        assert_eq!(heap.live_count(), 1);
+        let _ = heap.alloc(2i64);
+        // alloc_auto ignores roots in RC mode
+        let r3 = heap.alloc_auto(3i64, &[r1]);
         assert_eq!(heap.get::<i64>(r1), Some(&1));
+        assert_eq!(heap.get::<i64>(r3), Some(&3));
+        // All objects still alive (RC, not GC)
+        assert_eq!(heap.live_count(), 3);
+    }
+
+    #[test]
+    fn deterministic_slot_order() {
+        let mut h1 = GcHeap::new(1024);
+        let mut h2 = GcHeap::new(1024);
+
+        let a1 = h1.alloc(10i64);
+        let a2 = h1.alloc(20i64);
+        h1.free(a1);
+        let a3 = h1.alloc(30i64);
+
+        let b1 = h2.alloc(10i64);
+        let b2 = h2.alloc(20i64);
+        h2.free(b1);
+        let b3 = h2.alloc(30i64);
+
+        assert_eq!(a1.index, b1.index);
+        assert_eq!(a2.index, b2.index);
+        assert_eq!(a3.index, b3.index, "LIFO reuse deterministic");
     }
 }
-

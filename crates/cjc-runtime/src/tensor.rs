@@ -6,6 +6,7 @@ use crate::buffer::Buffer;
 use crate::dispatch;
 use crate::error::RuntimeError;
 use crate::kernel as kernel_fns;
+use crate::tensor_tiled::TiledMatmul;
 
 // ---------------------------------------------------------------------------
 // 2. Tensor Runtime
@@ -582,6 +583,14 @@ impl Tensor {
             }
         }
 
+        // Tiled path: use L2-friendly tiled matmul for medium-to-large matrices.
+        // Threshold: any dimension >= 64 (the default tile size).
+        // NOTE: tiled path uses naive accumulation (not Kahan) — different
+        // numerical path for large matrices, but better cache locality.
+        if m >= 64 || n >= 64 || k >= 64 {
+            return Self::matmul_tiled(&a, &b, m, n, k);
+        }
+
         // Sequential path: single-threaded with Kahan summation.
         Self::matmul_sequential(&a, &b, m, n, k)
     }
@@ -600,6 +609,20 @@ impl Tensor {
                 result[i * n + j] = acc.finalize();
             }
         }
+        Tensor::from_vec(result, &[m, n])
+    }
+
+    /// Tiled matmul: delegates to `TiledMatmul` for L2-cache-friendly tiling.
+    ///
+    /// Used for medium matrices (any dimension >= 64) where cache locality
+    /// matters but parallel overhead isn't justified. The tiled path uses
+    /// naive accumulation (not Kahan summation), trading a small amount of
+    /// floating-point precision for better cache behavior.
+    fn matmul_tiled(
+        a: &[f64], b: &[f64], m: usize, n: usize, k: usize,
+    ) -> Result<Tensor, RuntimeError> {
+        let engine = TiledMatmul::new();
+        let result = engine.matmul(a, m, k, b, n);
         Tensor::from_vec(result, &[m, n])
     }
 

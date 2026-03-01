@@ -16,3 +16,4 @@ cjc-eval = { workspace = true }
 cjc-hir = { path = "../cjc-hir" }
 cjc-mir = { path = "../cjc-mir" }
 cjc-mir-exec = { path = "../cjc-mir-exec" }
+cjc-module = { path = "../cjc-module" }

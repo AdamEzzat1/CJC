@@ -419,6 +419,185 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 Err(format!("assertion failed: `{}` != `{}`", args[0], args[1]))
             }
         }
+        // ── JSON builtins ──────────────────────────────────────────
+        "json_parse" => {
+            if args.len() != 1 {
+                return Err("json_parse requires exactly 1 argument".into());
+            }
+            let s = match &args[0] {
+                Value::String(s) => s.as_str(),
+                _ => return Err(format!("json_parse requires String, got {}", args[0].type_name())),
+            };
+            crate::json::json_parse(s).map(Some)
+        }
+        "json_stringify" => {
+            if args.len() != 1 {
+                return Err("json_stringify requires exactly 1 argument".into());
+            }
+            crate::json::json_stringify(&args[0]).map(|s| Some(Value::String(Rc::new(s))))
+        }
+
+        // ── DateTime builtins (pure arithmetic, except datetime_now) ──
+        "datetime_from_epoch" => {
+            if args.len() != 1 {
+                return Err("datetime_from_epoch requires exactly 1 argument".into());
+            }
+            match &args[0] {
+                Value::Int(n) => Ok(Some(Value::Int(crate::datetime::datetime_from_epoch(*n)))),
+                _ => Err(format!("datetime_from_epoch requires Int, got {}", args[0].type_name())),
+            }
+        }
+        "datetime_from_parts" => {
+            if args.len() != 6 {
+                return Err("datetime_from_parts requires 6 arguments (year, month, day, hour, min, sec)".into());
+            }
+            let mut vals = [0i64; 6];
+            for (i, arg) in args.iter().enumerate() {
+                match arg {
+                    Value::Int(n) => vals[i] = *n,
+                    _ => return Err(format!("datetime_from_parts arg {} must be Int", i)),
+                }
+            }
+            Ok(Some(Value::Int(crate::datetime::datetime_from_parts(
+                vals[0], vals[1], vals[2], vals[3], vals[4], vals[5],
+            ))))
+        }
+        "datetime_year" => {
+            if args.len() != 1 { return Err("datetime_year requires 1 argument".into()); }
+            match &args[0] {
+                Value::Int(n) => Ok(Some(Value::Int(crate::datetime::datetime_year(*n)))),
+                _ => Err(format!("datetime_year requires Int, got {}", args[0].type_name())),
+            }
+        }
+        "datetime_month" => {
+            if args.len() != 1 { return Err("datetime_month requires 1 argument".into()); }
+            match &args[0] {
+                Value::Int(n) => Ok(Some(Value::Int(crate::datetime::datetime_month(*n)))),
+                _ => Err(format!("datetime_month requires Int, got {}", args[0].type_name())),
+            }
+        }
+        "datetime_day" => {
+            if args.len() != 1 { return Err("datetime_day requires 1 argument".into()); }
+            match &args[0] {
+                Value::Int(n) => Ok(Some(Value::Int(crate::datetime::datetime_day(*n)))),
+                _ => Err(format!("datetime_day requires Int, got {}", args[0].type_name())),
+            }
+        }
+        "datetime_hour" => {
+            if args.len() != 1 { return Err("datetime_hour requires 1 argument".into()); }
+            match &args[0] {
+                Value::Int(n) => Ok(Some(Value::Int(crate::datetime::datetime_hour(*n)))),
+                _ => Err(format!("datetime_hour requires Int, got {}", args[0].type_name())),
+            }
+        }
+        "datetime_minute" => {
+            if args.len() != 1 { return Err("datetime_minute requires 1 argument".into()); }
+            match &args[0] {
+                Value::Int(n) => Ok(Some(Value::Int(crate::datetime::datetime_minute(*n)))),
+                _ => Err(format!("datetime_minute requires Int, got {}", args[0].type_name())),
+            }
+        }
+        "datetime_second" => {
+            if args.len() != 1 { return Err("datetime_second requires 1 argument".into()); }
+            match &args[0] {
+                Value::Int(n) => Ok(Some(Value::Int(crate::datetime::datetime_second(*n)))),
+                _ => Err(format!("datetime_second requires Int, got {}", args[0].type_name())),
+            }
+        }
+        "datetime_diff" => {
+            if args.len() != 2 { return Err("datetime_diff requires 2 arguments".into()); }
+            match (&args[0], &args[1]) {
+                (Value::Int(a), Value::Int(b)) => Ok(Some(Value::Int(crate::datetime::datetime_diff(*a, *b)))),
+                _ => Err("datetime_diff requires two Int arguments".into()),
+            }
+        }
+        "datetime_add_millis" => {
+            if args.len() != 2 { return Err("datetime_add_millis requires 2 arguments".into()); }
+            match (&args[0], &args[1]) {
+                (Value::Int(a), Value::Int(b)) => Ok(Some(Value::Int(crate::datetime::datetime_add_millis(*a, *b)))),
+                _ => Err("datetime_add_millis requires two Int arguments".into()),
+            }
+        }
+        "datetime_format" => {
+            if args.len() != 1 { return Err("datetime_format requires 1 argument".into()); }
+            match &args[0] {
+                Value::Int(n) => Ok(Some(Value::String(Rc::new(crate::datetime::datetime_format(*n))))),
+                _ => Err(format!("datetime_format requires Int, got {}", args[0].type_name())),
+            }
+        }
+
+        // ── File I/O builtins ─────────────────────────────────────────
+        "file_read" => {
+            if args.len() != 1 { return Err("file_read requires 1 argument".into()); }
+            match &args[0] {
+                Value::String(path) => {
+                    let content = std::fs::read_to_string(path.as_str())
+                        .map_err(|e| format!("file_read error: {}", e))?;
+                    Ok(Some(Value::String(Rc::new(content))))
+                }
+                _ => Err(format!("file_read requires String path, got {}", args[0].type_name())),
+            }
+        }
+        "file_write" => {
+            if args.len() != 2 { return Err("file_write requires 2 arguments (path, content)".into()); }
+            match (&args[0], &args[1]) {
+                (Value::String(path), Value::String(content)) => {
+                    std::fs::write(path.as_str(), content.as_str())
+                        .map_err(|e| format!("file_write error: {}", e))?;
+                    Ok(Some(Value::Void))
+                }
+                _ => Err("file_write requires (String, String) arguments".into()),
+            }
+        }
+        "file_exists" => {
+            if args.len() != 1 { return Err("file_exists requires 1 argument".into()); }
+            match &args[0] {
+                Value::String(path) => Ok(Some(Value::Bool(std::path::Path::new(path.as_str()).exists()))),
+                _ => Err(format!("file_exists requires String path, got {}", args[0].type_name())),
+            }
+        }
+        "file_lines" => {
+            if args.len() != 1 { return Err("file_lines requires 1 argument".into()); }
+            match &args[0] {
+                Value::String(path) => {
+                    let content = std::fs::read_to_string(path.as_str())
+                        .map_err(|e| format!("file_lines error: {}", e))?;
+                    let lines: Vec<Value> = content
+                        .lines()
+                        .map(|l| Value::String(Rc::new(l.to_string())))
+                        .collect();
+                    Ok(Some(Value::Array(Rc::new(lines))))
+                }
+                _ => Err(format!("file_lines requires String path, got {}", args[0].type_name())),
+            }
+        }
+
+        // ── Window function builtins ──────────────────────────────────
+        "window_sum" | "window_mean" | "window_min" | "window_max" => {
+            if args.len() != 2 {
+                return Err(format!("{name} requires 2 arguments (array, window_size)"));
+            }
+            let data = value_to_f64_vec(&args[0])?;
+            let ws = match &args[1] {
+                Value::Int(i) => {
+                    if *i < 0 {
+                        return Err(format!("{name}: window_size must be non-negative, got {i}"));
+                    }
+                    *i as usize
+                }
+                _ => return Err(format!("{name} requires Int window_size, got {}", args[1].type_name())),
+            };
+            let result = match name {
+                "window_sum" => crate::window::window_sum(&data, ws),
+                "window_mean" => crate::window::window_mean(&data, ws),
+                "window_min" => crate::window::window_min(&data, ws),
+                "window_max" => crate::window::window_max(&data, ws),
+                _ => unreachable!(),
+            };
+            let values: Vec<Value> = result.into_iter().map(Value::Float).collect();
+            Ok(Some(Value::Array(Rc::new(values))))
+        }
+
         _ => Ok(None), // Not a shared builtin
     }
 }

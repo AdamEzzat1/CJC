@@ -12,11 +12,13 @@
 //! straight-line code, if/else, while, and function calls.
 
 pub mod cfg;
+pub mod escape;
 pub mod monomorph;
 pub mod nogc_verify;
 pub mod optimize;
 
 use cjc_ast::{BinOp, UnaryOp};
+pub use escape::AllocHint;
 
 // ---------------------------------------------------------------------------
 // IDs
@@ -105,6 +107,8 @@ pub enum MirStmt {
         name: String,
         mutable: bool,
         init: MirExpr,
+        /// Escape analysis annotation. `None` before analysis runs.
+        alloc_hint: Option<AllocHint>,
     },
     Expr(MirExpr),
     If {
@@ -117,6 +121,8 @@ pub enum MirStmt {
         body: MirBody,
     },
     Return(Option<MirExpr>),
+    Break,
+    Continue,
     NoGcBlock(MirBody),
 }
 
@@ -341,6 +347,7 @@ impl HirToMir {
                         name: l.name.clone(),
                         mutable: l.mutable,
                         init: self.lower_expr(&l.init),
+                        alloc_hint: None,
                     });
                 }
                 HirItem::Stmt(s) => {
@@ -425,6 +432,7 @@ impl HirToMir {
                 name: name.clone(),
                 mutable: *mutable,
                 init: self.lower_expr(init),
+                alloc_hint: None,
             },
             HirStmtKind::Expr(e) => MirStmt::Expr(self.lower_expr(e)),
             HirStmtKind::If(if_expr) => self.lower_if_stmt(if_expr),
@@ -435,6 +443,8 @@ impl HirToMir {
             HirStmtKind::Return(e) => {
                 MirStmt::Return(e.as_ref().map(|ex| self.lower_expr(ex)))
             }
+            HirStmtKind::Break => MirStmt::Break,
+            HirStmtKind::Continue => MirStmt::Continue,
             HirStmtKind::NoGcBlock(block) => MirStmt::NoGcBlock(self.lower_block(block)),
         }
     }

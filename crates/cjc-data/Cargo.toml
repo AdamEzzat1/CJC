@@ -6,3 +6,4 @@ edition.workspace = true
 [dependencies]
 cjc-runtime = { workspace = true }
 cjc-repro = { workspace = true }
+cjc-regex = { path = "../cjc-regex" }

@@ -10,7 +10,7 @@
 
 use cjc_ast::*;
 use cjc_mir::nogc_verify::verify_nogc;
-use cjc_mir::{MirBody, MirExpr, MirExprKind, MirFnId, MirFunction, MirProgram, MirStmt};
+use cjc_mir::{AllocHint, MirBody, MirExpr, MirExprKind, MirFnId, MirFunction, MirProgram, MirStmt};
 
 // ---------------------------------------------------------------------------
 // MIR-level helpers
@@ -241,6 +241,7 @@ fn g8_pure_arithmetic_in_nogc_allowed() {
                     left: Box::new(mk_expr(MirExprKind::IntLit(1))),
                     right: Box::new(mk_expr(MirExprKind::IntLit(2))),
                 }),
+                alloc_hint: None,
             },
         ]),
     ]);
@@ -374,4 +375,110 @@ fn g8_nogc_block_transitive_rejection() {
     ]);
     let errors = verify_nogc(&program).unwrap_err();
     assert!(errors.iter().any(|e| e.reason.contains("allocator")));
+}
+
+// ===========================================================================
+// Step 5: Escape analysis integration tests
+// ===========================================================================
+
+#[test]
+fn step5_nogc_rejects_returned_string_binding() {
+    // A @no_gc function with a string binding that is returned (escapes → Rc).
+    // Escape analysis should flag this as Rc, and the verifier should reject it.
+    let program = mk_program(vec![
+        mk_fn("nogc_returns_string", true, vec![
+            MirStmt::Let {
+                name: "s".to_string(),
+                mutable: false,
+                init: mk_expr(MirExprKind::StringLit("hello".to_string())),
+                alloc_hint: None,
+            },
+            MirStmt::Return(Some(mk_expr(MirExprKind::Var("s".to_string())))),
+        ]),
+    ]);
+    let errors = verify_nogc(&program).unwrap_err();
+    assert!(errors.iter().any(|e|
+        e.function == "nogc_returns_string"
+        && e.reason.contains("heap allocation")
+    ));
+}
+
+#[test]
+fn step5_nogc_allows_primitive_only_function() {
+    // A @no_gc function with only primitive operations should pass.
+    let program = mk_program(vec![
+        mk_fn("pure_prims", true, vec![
+            MirStmt::Let {
+                name: "a".to_string(),
+                mutable: false,
+                init: mk_expr(MirExprKind::IntLit(42)),
+                alloc_hint: None,
+            },
+            MirStmt::Let {
+                name: "b".to_string(),
+                mutable: false,
+                init: mk_expr(MirExprKind::FloatLit(3.14)),
+                alloc_hint: None,
+            },
+            MirStmt::Let {
+                name: "c".to_string(),
+                mutable: false,
+                init: mk_expr(MirExprKind::BoolLit(true)),
+                alloc_hint: None,
+            },
+            MirStmt::Let {
+                name: "d".to_string(),
+                mutable: false,
+                init: mk_expr(MirExprKind::Binary {
+                    op: BinOp::Add,
+                    left: Box::new(mk_expr(MirExprKind::IntLit(10))),
+                    right: Box::new(mk_expr(MirExprKind::IntLit(20))),
+                }),
+                alloc_hint: None,
+            },
+        ]),
+    ]);
+    assert!(verify_nogc(&program).is_ok());
+}
+
+#[test]
+fn step5_nogc_allows_non_escaping_string_arena() {
+    // A @no_gc function with a string that does NOT escape (never returned,
+    // never captured) should be classified as Arena, which is allowed.
+    let program = mk_program(vec![
+        mk_fn("nogc_local_string", true, vec![
+            MirStmt::Let {
+                name: "s".to_string(),
+                mutable: false,
+                init: mk_expr(MirExprKind::StringLit("local".to_string())),
+                alloc_hint: None,
+            },
+            // Only use s in a safe builtin call (print) — no escape.
+            MirStmt::Expr(mk_call("print", vec![
+                mk_expr(MirExprKind::Var("s".to_string())),
+            ])),
+        ]),
+    ]);
+    assert!(verify_nogc(&program).is_ok());
+}
+
+#[test]
+fn step5_nogc_rejects_mutable_string_binding() {
+    // A @no_gc function with a mutable string binding. Mutable → Rc (conservative).
+    // The verifier should reject this.
+    let program = mk_program(vec![
+        mk_fn("nogc_mut_string", true, vec![
+            MirStmt::Let {
+                name: "s".to_string(),
+                mutable: true,
+                init: mk_expr(MirExprKind::StringLit("mutable".to_string())),
+                alloc_hint: None,
+            },
+        ]),
+    ]);
+    let errors = verify_nogc(&program).unwrap_err();
+    assert!(errors.iter().any(|e|
+        e.function == "nogc_mut_string"
+        && e.reason.contains("heap allocation")
+    ));
 }

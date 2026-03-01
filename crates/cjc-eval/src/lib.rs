@@ -18,7 +18,8 @@ use cjc_ast::{
     BinOp, Block, CallArg, Decl, DeclKind, ElseBranch, Expr, ExprKind, FnDecl, ForIter, ForStmt,
     IfStmt, LetStmt, Program, Stmt, StmtKind, UnaryOp, WhileStmt,
 };
-use cjc_data::{Column, CsvConfig, CsvReader, DataFrame, StreamingCsvProcessor};
+use cjc_data::{Column, CsvConfig, CsvReader, DataFrame, StreamingCsvProcessor, TidyView};
+use cjc_data::tidy_dispatch;
 use cjc_repro::Rng;
 use cjc_runtime::{GcHeap, Tensor, Value};
 
@@ -33,6 +34,12 @@ pub enum EvalError {
     /// stack until a function boundary catches this variant.
     Return(Value),
 
+    /// A `break` statement was executed. Caught by the innermost loop.
+    Break,
+
+    /// A `continue` statement was executed. Caught by the innermost loop.
+    Continue,
+
     /// A runtime error with a human-readable message.
     Runtime(String),
 
@@ -44,6 +51,8 @@ impl fmt::Display for EvalError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             EvalError::Return(_) => write!(f, "uncaught return"),
+            EvalError::Break => write!(f, "break outside of loop"),
+            EvalError::Continue => write!(f, "continue outside of loop"),
             EvalError::Runtime(msg) => write!(f, "runtime error: {msg}"),
             EvalError::RuntimeError(e) => write!(f, "runtime error: {e}"),
         }
@@ -262,6 +271,8 @@ impl Interpreter {
                 };
                 Err(EvalError::Return(val))
             }
+            StmtKind::Break => Err(EvalError::Break),
+            StmtKind::Continue => Err(EvalError::Continue),
             StmtKind::If(if_stmt) => self.exec_if(if_stmt),
             StmtKind::While(while_stmt) => self.exec_while(while_stmt),
             StmtKind::For(for_stmt) => self.exec_for(for_stmt),
@@ -318,7 +329,12 @@ impl Interpreter {
             if !cond_bool {
                 break;
             }
-            self.exec_block(&while_stmt.body)?;
+            match self.exec_block(&while_stmt.body) {
+                Ok(_) => {}
+                Err(EvalError::Break) => break,
+                Err(EvalError::Continue) => continue,
+                Err(e) => return Err(e),
+            }
         }
         Ok(Value::Void)
     }
@@ -352,6 +368,15 @@ impl Interpreter {
                     self.define(&for_stmt.ident.name, Value::Int(i));
                     match self.exec_block(&for_stmt.body) {
                         Ok(_) => {}
+                        Err(EvalError::Break) => {
+                            self.pop_scope();
+                            break;
+                        }
+                        Err(EvalError::Continue) => {
+                            self.pop_scope();
+                            i += 1;
+                            continue;
+                        }
                         Err(e) => {
                             self.pop_scope();
                             return Err(e);
@@ -378,6 +403,14 @@ impl Interpreter {
                     self.define(&for_stmt.ident.name, item);
                     match self.exec_block(&for_stmt.body) {
                         Ok(_) => {}
+                        Err(EvalError::Break) => {
+                            self.pop_scope();
+                            break;
+                        }
+                        Err(EvalError::Continue) => {
+                            self.pop_scope();
+                            continue;
+                        }
                         Err(e) => {
                             self.pop_scope();
                             return Err(e);
@@ -505,9 +538,9 @@ impl Interpreter {
             }
 
             ExprKind::Col(name) => {
-                // Column references are opaque at the interpreter level.
-                // Store them as strings for downstream data-DSL processing.
-                Ok(Value::String(Rc::new(format!("col:{name}"))))
+                // Build a proper DExpr struct so that downstream tidy dispatch
+                // correctly resolves the column name without any prefix.
+                Ok(tidy_dispatch::build_col_expr(name))
             }
 
             ExprKind::Lambda { params, body } => {
@@ -1062,6 +1095,64 @@ impl Interpreter {
                 | "bf16_to_f32"
                 | "f32_to_bf16"
                 | "Complex"
+                // Tidy builder builtins
+                | "col"
+                | "desc"
+                | "asc"
+                | "dexpr_binop"
+                | "tidy_count"
+                | "tidy_sum"
+                | "tidy_mean"
+                | "tidy_min"
+                | "tidy_max"
+                | "tidy_first"
+                | "tidy_last"
+                // stringr builtins
+                | "str_detect"
+                | "str_extract"
+                | "str_extract_all"
+                | "str_replace"
+                | "str_replace_all"
+                | "str_split"
+                | "str_count"
+                | "str_trim"
+                | "str_to_upper"
+                | "str_to_lower"
+                | "str_starts"
+                | "str_ends"
+                | "str_sub"
+                | "str_len"
+                // stats builtins
+                | "median"
+                | "sd"
+                | "variance"
+                | "n_distinct"
+                // JSON builtins
+                | "json_parse"
+                | "json_stringify"
+                // DateTime builtins
+                | "datetime_now"
+                | "datetime_from_epoch"
+                | "datetime_from_parts"
+                | "datetime_year"
+                | "datetime_month"
+                | "datetime_day"
+                | "datetime_hour"
+                | "datetime_minute"
+                | "datetime_second"
+                | "datetime_diff"
+                | "datetime_add_millis"
+                | "datetime_format"
+                // File I/O builtins
+                | "file_read"
+                | "file_write"
+                | "file_exists"
+                | "file_lines"
+                // Window functions
+                | "window_sum"
+                | "window_mean"
+                | "window_min"
+                | "window_max"
         )
     }
 
@@ -1084,6 +1175,9 @@ impl Interpreter {
             "clock" => {
                 let elapsed = self.start_time.elapsed().as_secs_f64();
                 return Ok(Value::Float(elapsed));
+            }
+            "datetime_now" => {
+                return Ok(Value::Int(cjc_runtime::datetime::datetime_now()));
             }
             "gc_alloc" => {
                 let tag = if args.is_empty() {
@@ -1175,6 +1269,13 @@ impl Interpreter {
                 return Ok(Value::Struct { name: "CsvMinMax".to_string(), fields });
             }
             _ => {}
+        }
+
+        // Tidy builder builtins: col(), desc(), asc(), tidy_sum(), etc.
+        match tidy_dispatch::dispatch_tidy_builtin(name, &args) {
+            Ok(Some(value)) => return Ok(value),
+            Err(msg) => return Err(EvalError::Runtime(msg)),
+            Ok(None) => {} // not a tidy builtin, fall through
         }
 
         // Try user-defined function.
@@ -1870,6 +1971,11 @@ impl Interpreter {
                             EvalError::Runtime(format!("column '{}' not found", col_name))
                         })
                     }
+                    "view" => {
+                        // df.view() → TidyView
+                        let df = rebuild_dataframe_from_struct(fields)?;
+                        Ok(tidy_dispatch::wrap_view(TidyView::from_df(df)))
+                    }
                     "to_tensor" => {
                         // df.to_tensor(["x", "y"]) → Tensor[nrows, ncols]
                         if args.len() != 1 {
@@ -1934,6 +2040,35 @@ impl Interpreter {
                             "no method `{}` on DataFrame", other
                         )));
                     }
+                }
+            }
+
+            // -- TidyView dispatch (all tidy verbs) --
+            (Value::TidyView(inner), _) => {
+                match tidy_dispatch::dispatch_tidy_method(inner, method, &args) {
+                    Ok(Some(Value::String(s))) if method == "print" => {
+                        // print returns a formatted string; output it
+                        let line = s.as_ref().clone();
+                        println!("{line}");
+                        self.output.push(line);
+                        Ok(Value::Void)
+                    }
+                    Ok(Some(val)) => Ok(val),
+                    Ok(None) => Err(EvalError::Runtime(format!(
+                        "no method `{method}` on TidyView"
+                    ))),
+                    Err(msg) => Err(EvalError::Runtime(msg)),
+                }
+            }
+
+            // -- GroupedTidyView dispatch --
+            (Value::GroupedTidyView(inner), _) => {
+                match tidy_dispatch::dispatch_grouped_method(inner, method, &args) {
+                    Ok(Some(val)) => Ok(val),
+                    Ok(None) => Err(EvalError::Runtime(format!(
+                        "no method `{method}` on GroupedTidyView"
+                    ))),
+                    Err(msg) => Err(EvalError::Runtime(msg)),
                 }
             }
 
@@ -2314,6 +2449,94 @@ fn dataframe_to_value(df: DataFrame) -> Value {
     }
 
     Value::Struct { name: "DataFrame".to_string(), fields }
+}
+
+/// Rebuild a `cjc_data::DataFrame` from a `Value::Struct { name: "DataFrame", fields }`.
+///
+/// Reads `__columns` for column ordering, then converts each `Value::Array`
+/// back into a `Column`. Used by `DataFrame.view()` to bridge the legacy
+/// Struct-encoded representation into the typed TidyView layer.
+fn rebuild_dataframe_from_struct(
+    fields: &std::collections::HashMap<String, Value>,
+) -> Result<DataFrame, EvalError> {
+    let col_names: Vec<String> = match fields.get("__columns") {
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| {
+                if let Value::String(s) = v { Some(s.as_ref().clone()) } else { None }
+            })
+            .collect(),
+        _ => {
+            // fallback: use all non-meta keys
+            fields
+                .keys()
+                .filter(|k| !k.starts_with("__"))
+                .cloned()
+                .collect()
+        }
+    };
+    let mut df_cols: Vec<(String, Column)> = Vec::new();
+    for name in &col_names {
+        let arr_val = fields.get(name).ok_or_else(|| {
+            EvalError::Runtime(format!("column '{}' not found in DataFrame struct", name))
+        })?;
+        let col = value_array_to_column(arr_val, name)?;
+        df_cols.push((name.clone(), col));
+    }
+    DataFrame::from_columns(df_cols)
+        .map_err(|e| EvalError::Runtime(format!("DataFrame rebuild: {e}")))
+}
+
+/// Convert a `Value::Array` to a `Column`, inferring the type from the first element.
+fn value_array_to_column(v: &Value, col_name: &str) -> Result<Column, EvalError> {
+    match v {
+        Value::Array(arr) => {
+            if arr.is_empty() {
+                return Ok(Column::Float(vec![])); // default to float for empty
+            }
+            match &arr[0] {
+                Value::Float(_) | Value::Int(_) => {
+                    // Try float first
+                    let mut floats = Vec::with_capacity(arr.len());
+                    let mut all_int = true;
+                    for v in arr.iter() {
+                        match v {
+                            Value::Float(f) => { floats.push(*f); all_int = false; }
+                            Value::Int(i) => { floats.push(*i as f64); }
+                            _ => return Err(EvalError::Runtime(format!(
+                                "column '{}' has mixed types", col_name
+                            ))),
+                        }
+                    }
+                    if all_int {
+                        Ok(Column::Int(arr.iter().map(|v| if let Value::Int(i) = v { *i } else { 0 }).collect()))
+                    } else {
+                        Ok(Column::Float(floats))
+                    }
+                }
+                Value::String(_) => {
+                    let strs: Result<Vec<_>, _> = arr.iter().map(|v| match v {
+                        Value::String(s) => Ok(s.as_ref().clone()),
+                        _ => Err(EvalError::Runtime(format!("column '{}' has mixed types", col_name))),
+                    }).collect();
+                    Ok(Column::Str(strs?))
+                }
+                Value::Bool(_) => {
+                    let bools: Result<Vec<_>, _> = arr.iter().map(|v| match v {
+                        Value::Bool(b) => Ok(*b),
+                        _ => Err(EvalError::Runtime(format!("column '{}' has mixed types", col_name))),
+                    }).collect();
+                    Ok(Column::Bool(bools?))
+                }
+                other => Err(EvalError::Runtime(format!(
+                    "unsupported column element type: {}", other.type_name()
+                ))),
+            }
+        }
+        _ => Err(EvalError::Runtime(format!(
+            "expected Array for column '{}', got {}", col_name, v.type_name()
+        ))),
+    }
 }
 
 impl Default for Interpreter {

@@ -44,153 +44,19 @@ impl std::fmt::Display for NoGcError {
 }
 
 // ---------------------------------------------------------------------------
-// Known GC builtins
+// Known GC builtins — delegated to the effect registry
 // ---------------------------------------------------------------------------
 
 /// Functions that are known to perform GC allocation or trigger GC.
+/// Backed by `cjc_types::effect_registry` — single source of truth.
 fn is_gc_builtin(name: &str) -> bool {
-    matches!(name, "gc_alloc" | "gc_collect")
+    cjc_types::effect_registry::is_gc_builtin(name)
 }
 
 /// Functions that are known builtins and do NOT trigger GC.
+/// Unknown builtins return false (conservative — treated as may-GC).
 fn is_safe_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        "print"
-            | "Tensor.zeros"
-            | "Tensor.ones"
-            | "Tensor.randn"
-            | "Tensor.from_vec"
-            | "matmul"
-            | "Buffer.alloc"
-            | "len"
-            | "push"
-            | "assert"
-            | "assert_eq"
-            | "clock"
-            | "gc_live_count"
-            // Linalg builtins (pure math, no GC)
-            | "linalg.lu"
-            | "linalg.qr"
-            | "linalg.cholesky"
-            | "linalg.inv"
-            // Tensor views (no GC)
-            | "Tensor.slice"
-            | "Tensor.transpose"
-            | "Tensor.broadcast_to"
-            // Sparse tensor ops (no GC)
-            | "SparseCsr.matvec"
-            | "SparseCsr.to_dense"
-            | "SparseCoo.to_csr"
-            // Transformer kernels (pure math, no GC)
-            | "attention"
-            | "Tensor.softmax"
-            | "Tensor.layer_norm"
-            | "Tensor.relu"
-            | "Tensor.gelu"
-            | "Tensor.bmm"
-            | "Tensor.linear"
-            | "Tensor.transpose_last_two"
-            // Phase 6: CNN Signal Processing (pure math, no GC)
-            | "Tensor.conv1d"
-            // Phase 7: 2D Spatial Vision (pure math, BinnedAccumulator inner loop, no GC)
-            | "Tensor.conv2d"
-            | "Tensor.maxpool2d"
-            // Milestone 2.7: Deterministic summation (pure math, stack-only, no GC)
-            | "Tensor.binned_sum"
-            // Milestone 2.7 Expansion: Complex BLAS (fixed-sequence, stack-only, no GC)
-            | "Complex.re" | "Complex.im" | "Complex.abs" | "Complex.conj"
-            | "Complex.norm_sq" | "Complex.add" | "Complex.mul"
-            // Milestone 2.7 Expansion: F16 (stack-only, no GC)
-            | "F16.to_f64" | "F16.to_f32"
-            // Phase 3: Zero-Copy and Multi-Head (pure math, no GC)
-            | "Tensor.from_bytes"
-            | "Tensor.split_heads"
-            | "Tensor.merge_heads"
-            | "Tensor.view_reshape"
-            | "ByteSlice.as_tensor"
-            // KV-Cache Scratchpad (pre-allocated, no GC)
-            | "Scratchpad.new"
-            | "Scratchpad.append"
-            | "Scratchpad.append_tensor"
-            | "Scratchpad.as_tensor"
-            | "Scratchpad.len"
-            | "Scratchpad.capacity"
-            | "Scratchpad.dim"
-            | "Scratchpad.clear"
-            | "Scratchpad.is_empty"
-            // Phase 4: Block-Paged KV-Cache (pre-allocated, no GC)
-            | "PagedKvCache.new"
-            | "PagedKvCache.append"
-            | "PagedKvCache.append_tensor"
-            | "PagedKvCache.as_tensor"
-            | "PagedKvCache.clear"
-            | "PagedKvCache.len"
-            | "PagedKvCache.is_empty"
-            | "PagedKvCache.max_tokens"
-            | "PagedKvCache.dim"
-            | "PagedKvCache.num_blocks"
-            | "PagedKvCache.blocks_in_use"
-            | "PagedKvCache.get_token"
-            // Phase 4: Aligned ByteSlice (one-time copy fallback, no GC)
-            | "AlignedByteSlice.from_bytes"
-            | "AlignedByteSlice.as_tensor"
-            | "AlignedByteSlice.was_realigned"
-            | "AlignedByteSlice.len"
-            | "AlignedByteSlice.is_empty"
-            // Deterministic Map (nogc variant)
-            | "Map.new"
-            | "Map.insert"
-            | "Map.get"
-            | "Map.remove"
-            | "Map.len"
-            | "Map.contains_key"
-            | "Map.keys"
-            | "Map.values"
-            // Phase 10: Tidy Primitives (view ops produce bitmask/projection, no GC heap)
-            // filter and select return TidyView — O(N/64) bitmask or O(K) index alloc only.
-            // materialize/to_tensor trigger column buffer allocation (allowed outside @nogc).
-            | "tidy_filter"
-            | "tidy_select"
-            | "tidy_mask_and"
-            | "tidy_nrows"
-            | "tidy_ncols"
-            | "tidy_column_names"
-            // Phase 11: Grouping (GroupIndex = Vec<Vec<usize>>, no column alloc)
-            | "tidy_group_by"
-            | "tidy_ungroup"
-            | "tidy_ngroups"
-            // Phase 11: Slice/distinct (RowIndexMap = Vec<usize>, no column alloc)
-            | "tidy_slice"
-            | "tidy_slice_head"
-            | "tidy_slice_tail"
-            | "tidy_slice_sample"
-            | "tidy_distinct"
-            // Phase 12: Semi/anti join (RowIndexMap only, no column alloc)
-            | "tidy_semi_join"
-            | "tidy_anti_join"
-            // Phase 13-16: View-only ops (ProjectionMap update only, no column alloc)
-            | "tidy_relocate"
-            | "tidy_drop_cols"
-            // Phase 16: Group perf upgrade (BTree-accelerated GroupIndex, no column alloc)
-            | "tidy_group_by_fast"
-            // Phase 17: Categorical / forcats
-            // fct_collapse is metadata-only: rewrites levels Vec + remaps data Vec
-            // entirely on Rust heap (Vec<String>, Vec<u16>) — no GC heap involved.
-            // O(L) for levels rewrite + O(N) for data remap, but no column buffer alloc.
-            | "fct_collapse"
-            // Materialising ops (column buffer alloc) — NOT safe inside @nogc:
-            // tidy_arrange, tidy_summarise, tidy_inner_join, tidy_left_join,
-            // tidy_pivot_longer, tidy_pivot_wider, tidy_bind_rows, tidy_bind_cols,
-            // tidy_mutate_across, tidy_right_join, tidy_full_join,
-            // tidy_inner_join_typed, tidy_left_join_typed, tidy_summarise_across,
-            // tidy_rename (rebuilds base DataFrame)
-            // Phase 17 materialising (intentionally absent):
-            //   fct_encode  : allocates Vec<u16> + Vec<String> levels
-            //   fct_lump    : allocates new levels Vec + new data Vec
-            //   fct_reorder : allocates new levels Vec + new data Vec
-            // are intentionally absent from this list.
-    )
+    cjc_types::effect_registry::is_safe_builtin(name)
 }
 
 // ---------------------------------------------------------------------------
@@ -250,6 +116,8 @@ fn collect_calls_stmt(stmt: &MirStmt, in_nogc_block: bool, info: &mut FnCallInfo
             // Everything inside a NoGcBlock is treated as in_nogc context.
             collect_calls_body(body, true, info);
         }
+        // Break/Continue have no sub-expressions.
+        MirStmt::Break | MirStmt::Continue => {}
     }
 }
 
@@ -432,56 +300,12 @@ fn compute_may_gc(
         call_infos.insert(func.name.clone(), info);
     }
 
-    // Step 2: Seed may_gc.
+    // Step 2: Seed may_gc from the effect registry (single source of truth).
     let mut may_gc: HashMap<String, bool> = HashMap::new();
 
-    // All GC builtins are may_gc = true.
-    may_gc.insert("gc_alloc".to_string(), true);
-    may_gc.insert("gc_collect".to_string(), true);
-
-    // Safe builtins are may_gc = false.
-    // This list must stay in sync with `is_safe_builtin` above.
-    for &name in &[
-        "print",
-        "Tensor.zeros",
-        "Tensor.ones",
-        "Tensor.randn",
-        "Tensor.from_vec",
-        "matmul",
-        "Buffer.alloc",
-        "len",
-        "push",
-        "assert",
-        "assert_eq",
-        "clock",
-        "gc_live_count",
-        // Linalg
-        "linalg.lu", "linalg.qr", "linalg.cholesky", "linalg.inv",
-        // Tensor views
-        "Tensor.slice", "Tensor.transpose", "Tensor.broadcast_to",
-        // Sparse
-        "SparseCsr.matvec", "SparseCsr.to_dense", "SparseCoo.to_csr",
-        // Transformer kernels
-        "attention", "Tensor.softmax", "Tensor.layer_norm",
-        "Tensor.relu", "Tensor.gelu", "Tensor.bmm", "Tensor.linear",
-        "Tensor.transpose_last_two",
-        // Phase 6: CNN Signal Processing
-        "Tensor.conv1d",
-        // Phase 7: 2D Spatial Vision
-        "Tensor.conv2d", "Tensor.maxpool2d",
-        // Milestone 2.7
-        "Tensor.binned_sum",
-        "Complex.re", "Complex.im", "Complex.abs", "Complex.conj",
-        "Complex.norm_sq", "Complex.add", "Complex.mul",
-        "F16.to_f64", "F16.to_f32",
-        // Phase 3: Zero-Copy
-        "Tensor.from_bytes", "Tensor.split_heads", "Tensor.merge_heads",
-        "Tensor.view_reshape", "ByteSlice.as_tensor",
-        // KV-Cache
-        "Scratchpad.new", "Scratchpad.append", "Scratchpad.append_tensor",
-        "Scratchpad.as_tensor", "Scratchpad.len", "Scratchpad.capacity",
-    ] {
-        may_gc.insert(name.to_string(), false);
+    // Seed ALL known builtins from the registry.
+    for (name, effects) in cjc_types::effect_registry::builtin_effects() {
+        may_gc.insert(name.to_string(), effects.has(cjc_types::EffectSet::GC));
     }
 
     // Seed user functions.
@@ -666,6 +490,37 @@ pub fn verify_nogc(program: &MirProgram) -> Result<(), Vec<NoGcError>> {
                     call_chain: vec![],
                 });
             }
+        }
+    }
+
+    // Phase 5 (Production Hardening): Strengthen @no_gc with escape analysis.
+    // After the call-graph analysis passes, run escape analysis on each @no_gc
+    // function and reject any that contain heap allocations.
+    //
+    // Only AllocHint::Rc is rejected — these are truly escaping heap values
+    // requiring reference counting. AllocHint::Arena is acceptable in @no_gc
+    // because arena memory is stack-like (bulk-freed at function return, no GC).
+    // AllocHint::Stack is always fine (primitives on the stack).
+    for func in &program.functions {
+        if !func.is_nogc {
+            continue;
+        }
+        let escape_info = crate::escape::analyze_function(func);
+        let rc_bindings: Vec<_> = escape_info
+            .bindings
+            .iter()
+            .filter(|(_, (hint, _))| matches!(hint, crate::escape::AllocHint::Rc))
+            .map(|(name, (hint, reason))| (name.clone(), *hint, *reason))
+            .collect();
+        for (binding_name, _hint, reason) in &rc_bindings {
+            errors.push(NoGcError {
+                function: func.name.clone(),
+                reason: format!(
+                    "binding `{}` requires heap allocation (escape reason: {:?})",
+                    binding_name, reason
+                ),
+                call_chain: vec![],
+            });
         }
     }
 

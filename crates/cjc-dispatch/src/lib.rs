@@ -325,6 +325,7 @@ mod tests {
             params: vec![("a".into(), Type::F32), ("b".into(), Type::F32)],
             ret: Type::F32,
             is_nogc: false,
+            effects: EffectSet::default(),
         });
 
         // fn add(a: f64, b: f64) -> f64
@@ -334,6 +335,7 @@ mod tests {
             params: vec![("a".into(), Type::F64), ("b".into(), Type::F64)],
             ret: Type::F64,
             is_nogc: false,
+            effects: EffectSet::default(),
         });
 
         // fn add<T: Numeric>(a: T, b: T) -> T  (generic fallback)
@@ -346,6 +348,7 @@ mod tests {
             ],
             ret: Type::Unresolved("T".into()),
             is_nogc: false,
+            effects: EffectSet::default(),
         });
 
         // fn process(x: f64)
@@ -355,6 +358,7 @@ mod tests {
             params: vec![("x".into(), Type::F64)],
             ret: Type::Void,
             is_nogc: false,
+            effects: EffectSet::default(),
         });
 
         // fn process<T: Float>(x: T)
@@ -364,6 +368,7 @@ mod tests {
             params: vec![("x".into(), Type::Unresolved("T".into()))],
             ret: Type::Void,
             is_nogc: false,
+            effects: EffectSet::default(),
         });
 
         // fn process<T: Numeric>(x: T)
@@ -373,6 +378,7 @@ mod tests {
             params: vec![("x".into(), Type::Unresolved("T".into()))],
             ret: Type::Void,
             is_nogc: false,
+            effects: EffectSet::default(),
         });
 
         env

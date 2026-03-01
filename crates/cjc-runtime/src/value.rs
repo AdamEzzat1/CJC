@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
@@ -139,6 +140,15 @@ pub enum Value {
     /// via `AlignedByteSlice.from_bytes()` builtin. Type-checking treats it
     /// as opaque.
     AlignedBytes(AlignedByteSlice),
+    /// Type-erased tidy data view. Concrete type is `cjc_data::TidyView`.
+    /// Wrapped in `Rc<dyn Any>` for cheap cloning without circular deps
+    /// (cjc-runtime cannot depend on cjc-data).
+    ///
+    /// Dispatch is handled by `cjc_data::tidy_dispatch::dispatch_tidy_method`.
+    TidyView(Rc<dyn Any>),
+    /// Type-erased grouped tidy view. Concrete type is
+    /// `cjc_data::GroupedTidyView`. Same erasure strategy as TidyView.
+    GroupedTidyView(Rc<dyn Any>),
     Void,
 }
 
@@ -171,6 +181,8 @@ impl Value {
             Value::Scratchpad(_) => "Scratchpad",
             Value::PagedKvCache(_) => "PagedKvCache",
             Value::AlignedBytes(_) => "AlignedBytes",
+            Value::TidyView(_) => "TidyView",
+            Value::GroupedTidyView(_) => "GroupedTidyView",
             Value::Void => "Void",
         }
     }
@@ -294,6 +306,8 @@ impl fmt::Display for Value {
             Value::Scratchpad(s) => write!(f, "{}", s.borrow()),
             Value::PagedKvCache(c) => write!(f, "{}", c.borrow()),
             Value::AlignedBytes(a) => write!(f, "{}", a),
+            Value::TidyView(_) => write!(f, "<TidyView>"),
+            Value::GroupedTidyView(_) => write!(f, "<GroupedTidyView>"),
             Value::Void => write!(f, "void"),
         }
     }
