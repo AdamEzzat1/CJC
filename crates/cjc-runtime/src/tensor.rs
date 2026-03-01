@@ -869,6 +869,95 @@ impl Tensor {
         Tensor::from_vec(result, &self.shape).unwrap()
     }
 
+    /// Sigmoid activation: 1 / (1 + exp(-x)) element-wise.
+    pub fn sigmoid(&self) -> Tensor {
+        let data = self.to_vec();
+        let result: Vec<f64> = data.iter().map(|&x| 1.0 / (1.0 + (-x).exp())).collect();
+        Tensor::from_vec(result, &self.shape).unwrap()
+    }
+
+    /// Tanh activation element-wise.
+    pub fn tanh_activation(&self) -> Tensor {
+        let data = self.to_vec();
+        let result: Vec<f64> = data.iter().map(|&x| x.tanh()).collect();
+        Tensor::from_vec(result, &self.shape).unwrap()
+    }
+
+    /// Leaky ReLU activation: max(alpha*x, x) element-wise.
+    pub fn leaky_relu(&self, alpha: f64) -> Tensor {
+        let data = self.to_vec();
+        let result: Vec<f64> = data.iter().map(|&x| if x > 0.0 { x } else { alpha * x }).collect();
+        Tensor::from_vec(result, &self.shape).unwrap()
+    }
+
+    /// SiLU (Swish) activation: x * sigmoid(x) element-wise.
+    pub fn silu(&self) -> Tensor {
+        let data = self.to_vec();
+        let result: Vec<f64> = data.iter().map(|&x| x / (1.0 + (-x).exp())).collect();
+        Tensor::from_vec(result, &self.shape).unwrap()
+    }
+
+    /// Mish activation: x * tanh(softplus(x)) = x * tanh(ln(1 + exp(x))).
+    pub fn mish(&self) -> Tensor {
+        let data = self.to_vec();
+        let result: Vec<f64> = data.iter().map(|&x| {
+            let sp = (1.0 + x.exp()).ln();
+            x * sp.tanh()
+        }).collect();
+        Tensor::from_vec(result, &self.shape).unwrap()
+    }
+
+    /// Argmax: index of the maximum element (first occurrence, deterministic).
+    pub fn argmax(&self) -> usize {
+        let data = self.to_vec();
+        let mut best_idx = 0;
+        let mut best_val = f64::NEG_INFINITY;
+        for (i, &v) in data.iter().enumerate() {
+            if v > best_val || (v == best_val && i < best_idx) {
+                best_val = v;
+                best_idx = i;
+            }
+        }
+        best_idx
+    }
+
+    /// Argmin: index of the minimum element (first occurrence, deterministic).
+    pub fn argmin(&self) -> usize {
+        let data = self.to_vec();
+        let mut best_idx = 0;
+        let mut best_val = f64::INFINITY;
+        for (i, &v) in data.iter().enumerate() {
+            if v < best_val || (v == best_val && i < best_idx) {
+                best_val = v;
+                best_idx = i;
+            }
+        }
+        best_idx
+    }
+
+    /// Clamp all elements to [min, max].
+    pub fn clamp(&self, min: f64, max: f64) -> Tensor {
+        let data = self.to_vec();
+        let result: Vec<f64> = data.iter().map(|&x| x.max(min).min(max)).collect();
+        Tensor::from_vec(result, &self.shape).unwrap()
+    }
+
+    /// One-hot encoding: given a 1D tensor of integer indices and a depth,
+    /// returns a 2D tensor of shape [len, depth].
+    pub fn one_hot(indices: &[usize], depth: usize) -> Result<Tensor, RuntimeError> {
+        let n = indices.len();
+        let mut data = vec![0.0; n * depth];
+        for (i, &idx) in indices.iter().enumerate() {
+            if idx >= depth {
+                return Err(RuntimeError::InvalidOperation(format!(
+                    "one_hot: index {idx} >= depth {depth}"
+                )));
+            }
+            data[i * depth + idx] = 1.0;
+        }
+        Tensor::from_vec(data, &[n, depth])
+    }
+
     /// GELU activation (approximate): x * 0.5 * (1 + tanh(√(2/π) * (x + 0.044715 * x³)))
     pub fn gelu(&self) -> Tensor {
         let data = self.to_vec();

@@ -288,6 +288,7 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 Value::Array(arr) => Ok(Some(Value::Int(arr.len() as i64))),
                 Value::String(s) => Ok(Some(Value::Int(s.len() as i64))),
                 Value::Tensor(t) => Ok(Some(Value::Int(t.len() as i64))),
+                Value::Tuple(t) => Ok(Some(Value::Int(t.len() as i64))),
                 other => Err(format!("len not supported for {}", other.type_name())),
             }
         }
@@ -594,6 +595,550 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 "window_max" => crate::window::window_max(&data, ws),
                 _ => unreachable!(),
             };
+            let values: Vec<Value> = result.into_iter().map(Value::Float).collect();
+            Ok(Some(Value::Array(Rc::new(values))))
+        }
+
+        // ── Stats builtins ───────────────────────────────────────────
+        "variance" => {
+            if args.len() != 1 { return Err("variance requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            Ok(Some(Value::Float(crate::stats::variance(&data)?)))
+        }
+        "sd" => {
+            if args.len() != 1 { return Err("sd requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            Ok(Some(Value::Float(crate::stats::sd(&data)?)))
+        }
+        "se" => {
+            if args.len() != 1 { return Err("se requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            Ok(Some(Value::Float(crate::stats::se(&data)?)))
+        }
+        "median" => {
+            if args.len() != 1 { return Err("median requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            Ok(Some(Value::Float(crate::stats::median(&data)?)))
+        }
+        "quantile" => {
+            if args.len() != 2 { return Err("quantile requires 2 arguments".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let p = match &args[1] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err("quantile: p must be a number".into()),
+            };
+            Ok(Some(Value::Float(crate::stats::quantile(&data, p)?)))
+        }
+        "iqr" => {
+            if args.len() != 1 { return Err("iqr requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            Ok(Some(Value::Float(crate::stats::iqr(&data)?)))
+        }
+        "skewness" => {
+            if args.len() != 1 { return Err("skewness requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            Ok(Some(Value::Float(crate::stats::skewness(&data)?)))
+        }
+        "kurtosis" => {
+            if args.len() != 1 { return Err("kurtosis requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            Ok(Some(Value::Float(crate::stats::kurtosis(&data)?)))
+        }
+        "z_score" => {
+            if args.len() != 1 { return Err("z_score requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let result = crate::stats::z_score(&data)?;
+            let values: Vec<Value> = result.into_iter().map(Value::Float).collect();
+            Ok(Some(Value::Array(Rc::new(values))))
+        }
+        "standardize" => {
+            if args.len() != 1 { return Err("standardize requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let result = crate::stats::standardize(&data)?;
+            let values: Vec<Value> = result.into_iter().map(Value::Float).collect();
+            Ok(Some(Value::Array(Rc::new(values))))
+        }
+        "n_distinct" => {
+            if args.len() != 1 { return Err("n_distinct requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            Ok(Some(Value::Int(crate::stats::n_distinct(&data) as i64)))
+        }
+        // ── Correlation builtins ─────────────────────────────────────
+        "cor" => {
+            if args.len() != 2 { return Err("cor requires 2 arguments".into()); }
+            let x = value_to_f64_vec(&args[0])?;
+            let y = value_to_f64_vec(&args[1])?;
+            Ok(Some(Value::Float(crate::stats::cor(&x, &y)?)))
+        }
+        "cov" => {
+            if args.len() != 2 { return Err("cov requires 2 arguments".into()); }
+            let x = value_to_f64_vec(&args[0])?;
+            let y = value_to_f64_vec(&args[1])?;
+            Ok(Some(Value::Float(crate::stats::cov(&x, &y)?)))
+        }
+        // ── Distribution builtins ────────────────────────────────────
+        "normal_cdf" => {
+            if args.len() != 1 { return Err("normal_cdf requires 1 argument".into()); }
+            let x = match &args[0] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err("normal_cdf requires a number".into()),
+            };
+            Ok(Some(Value::Float(crate::distributions::normal_cdf(x))))
+        }
+        "normal_pdf" => {
+            if args.len() != 1 { return Err("normal_pdf requires 1 argument".into()); }
+            let x = match &args[0] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err("normal_pdf requires a number".into()),
+            };
+            Ok(Some(Value::Float(crate::distributions::normal_pdf(x))))
+        }
+        "normal_ppf" => {
+            if args.len() != 1 { return Err("normal_ppf requires 1 argument".into()); }
+            let p = match &args[0] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err("normal_ppf requires a number".into()),
+            };
+            Ok(Some(Value::Float(crate::distributions::normal_ppf(p)?)))
+        }
+        "t_cdf" => {
+            if args.len() != 2 { return Err("t_cdf requires 2 arguments (x, df)".into()); }
+            let x = match &args[0] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("t_cdf: x must be a number".into()) };
+            let df = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("t_cdf: df must be a number".into()) };
+            Ok(Some(Value::Float(crate::distributions::t_cdf(x, df))))
+        }
+        "chi2_cdf" => {
+            if args.len() != 2 { return Err("chi2_cdf requires 2 arguments (x, df)".into()); }
+            let x = match &args[0] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("chi2_cdf: x must be a number".into()) };
+            let df = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("chi2_cdf: df must be a number".into()) };
+            Ok(Some(Value::Float(crate::distributions::chi2_cdf(x, df))))
+        }
+        "f_cdf" => {
+            if args.len() != 3 { return Err("f_cdf requires 3 arguments (x, df1, df2)".into()); }
+            let x = match &args[0] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("f_cdf: x must be a number".into()) };
+            let df1 = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("f_cdf: df1 must be a number".into()) };
+            let df2 = match &args[2] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("f_cdf: df2 must be a number".into()) };
+            Ok(Some(Value::Float(crate::distributions::f_cdf(x, df1, df2))))
+        }
+        // ── Hypothesis test builtins ─────────────────────────────────
+        "t_test" => {
+            if args.len() != 2 { return Err("t_test requires 2 arguments (data, mu)".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let mu = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("t_test: mu must be a number".into()) };
+            let r = crate::hypothesis::t_test(&data, mu)?;
+            let mut fields = std::collections::HashMap::new();
+            fields.insert("t_statistic".into(), Value::Float(r.t_statistic));
+            fields.insert("p_value".into(), Value::Float(r.p_value));
+            fields.insert("df".into(), Value::Float(r.df));
+            fields.insert("mean".into(), Value::Float(r.mean));
+            fields.insert("se".into(), Value::Float(r.se));
+            Ok(Some(Value::Struct { name: "TTestResult".into(), fields }))
+        }
+        "t_test_two_sample" => {
+            if args.len() != 2 { return Err("t_test_two_sample requires 2 arguments".into()); }
+            let x = value_to_f64_vec(&args[0])?;
+            let y = value_to_f64_vec(&args[1])?;
+            let r = crate::hypothesis::t_test_two_sample(&x, &y)?;
+            let mut fields = std::collections::HashMap::new();
+            fields.insert("t_statistic".into(), Value::Float(r.t_statistic));
+            fields.insert("p_value".into(), Value::Float(r.p_value));
+            fields.insert("df".into(), Value::Float(r.df));
+            Ok(Some(Value::Struct { name: "TTestResult".into(), fields }))
+        }
+        "chi_squared_test" => {
+            if args.len() != 2 { return Err("chi_squared_test requires 2 arguments".into()); }
+            let obs = value_to_f64_vec(&args[0])?;
+            let exp = value_to_f64_vec(&args[1])?;
+            let r = crate::hypothesis::chi_squared_test(&obs, &exp)?;
+            let mut fields = std::collections::HashMap::new();
+            fields.insert("chi2".into(), Value::Float(r.chi2));
+            fields.insert("p_value".into(), Value::Float(r.p_value));
+            fields.insert("df".into(), Value::Float(r.df));
+            Ok(Some(Value::Struct { name: "ChiSquaredResult".into(), fields }))
+        }
+        // ── Linalg builtins ──────────────────────────────────────────
+        "det" => {
+            if args.len() != 1 { return Err("det requires 1 Tensor argument".into()); }
+            let t = value_to_tensor(&args[0])?;
+            Ok(Some(Value::Float(t.det().map_err(|e| format!("{e}"))?)))
+        }
+        "solve" => {
+            if args.len() != 2 { return Err("solve requires 2 Tensor arguments".into()); }
+            let a = value_to_tensor(&args[0])?;
+            let b = value_to_tensor(&args[1])?;
+            Ok(Some(Value::Tensor(a.solve(b).map_err(|e| format!("{e}"))?)))
+        }
+        "lstsq" => {
+            if args.len() != 2 { return Err("lstsq requires 2 Tensor arguments".into()); }
+            let a = value_to_tensor(&args[0])?;
+            let b = value_to_tensor(&args[1])?;
+            Ok(Some(Value::Tensor(a.lstsq(b).map_err(|e| format!("{e}"))?)))
+        }
+        "trace" => {
+            if args.len() != 1 { return Err("trace requires 1 Tensor argument".into()); }
+            let t = value_to_tensor(&args[0])?;
+            Ok(Some(Value::Float(t.trace().map_err(|e| format!("{e}"))?)))
+        }
+        "norm_frobenius" => {
+            if args.len() != 1 { return Err("norm_frobenius requires 1 Tensor argument".into()); }
+            let t = value_to_tensor(&args[0])?;
+            Ok(Some(Value::Float(t.norm_frobenius().map_err(|e| format!("{e}"))?)))
+        }
+        "eigh" => {
+            if args.len() != 1 { return Err("eigh requires 1 Tensor argument".into()); }
+            let t = value_to_tensor(&args[0])?;
+            let (vals, vecs) = t.eigh().map_err(|e| format!("{e}"))?;
+            let val_values: Vec<Value> = vals.into_iter().map(Value::Float).collect();
+            Ok(Some(Value::Tuple(Rc::new(vec![
+                Value::Array(Rc::new(val_values)),
+                Value::Tensor(vecs),
+            ]))))
+        }
+        "matrix_rank" => {
+            if args.len() != 1 { return Err("matrix_rank requires 1 Tensor argument".into()); }
+            let t = value_to_tensor(&args[0])?;
+            Ok(Some(Value::Int(t.matrix_rank().map_err(|e| format!("{e}"))? as i64)))
+        }
+        "kron" => {
+            if args.len() != 2 { return Err("kron requires 2 Tensor arguments".into()); }
+            let a = value_to_tensor(&args[0])?;
+            let b = value_to_tensor(&args[1])?;
+            Ok(Some(Value::Tensor(a.kron(b).map_err(|e| format!("{e}"))?)))
+        }
+        // ── ML builtins ──────────────────────────────────────────────
+        "mse_loss" => {
+            if args.len() != 2 { return Err("mse_loss requires 2 arguments".into()); }
+            let pred = value_to_f64_vec(&args[0])?;
+            let target = value_to_f64_vec(&args[1])?;
+            Ok(Some(Value::Float(crate::ml::mse_loss(&pred, &target)?)))
+        }
+        "cross_entropy_loss" => {
+            if args.len() != 2 { return Err("cross_entropy_loss requires 2 arguments".into()); }
+            let pred = value_to_f64_vec(&args[0])?;
+            let target = value_to_f64_vec(&args[1])?;
+            Ok(Some(Value::Float(crate::ml::cross_entropy_loss(&pred, &target)?)))
+        }
+        "huber_loss" => {
+            if args.len() != 3 { return Err("huber_loss requires 3 arguments".into()); }
+            let pred = value_to_f64_vec(&args[0])?;
+            let target = value_to_f64_vec(&args[1])?;
+            let delta = match &args[2] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("huber_loss: delta must be a number".into()) };
+            Ok(Some(Value::Float(crate::ml::huber_loss(&pred, &target, delta)?)))
+        }
+        // ── Cumulative builtins ──────────────────────────────────────
+        "cumsum" => {
+            if args.len() != 1 { return Err("cumsum requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let result = crate::stats::cumsum(&data);
+            let values: Vec<Value> = result.into_iter().map(Value::Float).collect();
+            Ok(Some(Value::Array(Rc::new(values))))
+        }
+        "cumprod" => {
+            if args.len() != 1 { return Err("cumprod requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let result = crate::stats::cumprod(&data);
+            let values: Vec<Value> = result.into_iter().map(Value::Float).collect();
+            Ok(Some(Value::Array(Rc::new(values))))
+        }
+        "cummax" => {
+            if args.len() != 1 { return Err("cummax requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let result = crate::stats::cummax(&data);
+            let values: Vec<Value> = result.into_iter().map(Value::Float).collect();
+            Ok(Some(Value::Array(Rc::new(values))))
+        }
+        "cummin" => {
+            if args.len() != 1 { return Err("cummin requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let result = crate::stats::cummin(&data);
+            let values: Vec<Value> = result.into_iter().map(Value::Float).collect();
+            Ok(Some(Value::Array(Rc::new(values))))
+        }
+        "lag" => {
+            if args.len() != 2 { return Err("lag requires 2 arguments".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let n = value_to_usize(&args[1])?;
+            let result = crate::stats::lag(&data, n);
+            let values: Vec<Value> = result.into_iter().map(Value::Float).collect();
+            Ok(Some(Value::Array(Rc::new(values))))
+        }
+        "lead" => {
+            if args.len() != 2 { return Err("lead requires 2 arguments".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let n = value_to_usize(&args[1])?;
+            let result = crate::stats::lead(&data, n);
+            let values: Vec<Value> = result.into_iter().map(Value::Float).collect();
+            Ok(Some(Value::Array(Rc::new(values))))
+        }
+        "rank" => {
+            if args.len() != 1 { return Err("rank requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let result = crate::stats::rank(&data);
+            let values: Vec<Value> = result.into_iter().map(Value::Float).collect();
+            Ok(Some(Value::Array(Rc::new(values))))
+        }
+        "dense_rank" => {
+            if args.len() != 1 { return Err("dense_rank requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let result = crate::stats::dense_rank(&data);
+            let values: Vec<Value> = result.into_iter().map(Value::Float).collect();
+            Ok(Some(Value::Array(Rc::new(values))))
+        }
+        "histogram" => {
+            if args.len() != 2 { return Err("histogram requires 2 arguments".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let n_bins = value_to_usize(&args[1])?;
+            let (edges, counts) = crate::stats::histogram(&data, n_bins)?;
+            let edge_values: Vec<Value> = edges.into_iter().map(Value::Float).collect();
+            let count_values: Vec<Value> = counts.into_iter().map(|c| Value::Int(c as i64)).collect();
+            Ok(Some(Value::Tuple(Rc::new(vec![
+                Value::Array(Rc::new(edge_values)),
+                Value::Array(Rc::new(count_values)),
+            ]))))
+        }
+        // ── Additional stats builtins ───────────────────────────────
+        "sample_variance" => {
+            if args.len() != 1 { return Err("sample_variance requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            Ok(Some(Value::Float(crate::stats::sample_variance(&data)?)))
+        }
+        "sample_sd" => {
+            if args.len() != 1 { return Err("sample_sd requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            Ok(Some(Value::Float(crate::stats::sample_sd(&data)?)))
+        }
+        "sample_cov" => {
+            if args.len() != 2 { return Err("sample_cov requires 2 arguments".into()); }
+            let x = value_to_f64_vec(&args[0])?;
+            let y = value_to_f64_vec(&args[1])?;
+            Ok(Some(Value::Float(crate::stats::sample_cov(&x, &y)?)))
+        }
+        "row_number" => {
+            if args.len() != 1 { return Err("row_number requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let result = crate::stats::row_number(&data);
+            let values: Vec<Value> = result.into_iter().map(Value::Float).collect();
+            Ok(Some(Value::Array(Rc::new(values))))
+        }
+        // ── Distribution PPF builtins ───────────────────────────────
+        "t_ppf" => {
+            if args.len() != 2 { return Err("t_ppf requires 2 arguments (p, df)".into()); }
+            let p = match &args[0] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("t_ppf: p must be a number".into()) };
+            let df = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("t_ppf: df must be a number".into()) };
+            Ok(Some(Value::Float(crate::distributions::t_ppf(p, df)?)))
+        }
+        "chi2_ppf" => {
+            if args.len() != 2 { return Err("chi2_ppf requires 2 arguments (p, df)".into()); }
+            let p = match &args[0] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("chi2_ppf: p must be a number".into()) };
+            let df = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("chi2_ppf: df must be a number".into()) };
+            Ok(Some(Value::Float(crate::distributions::chi2_ppf(p, df)?)))
+        }
+        "f_ppf" => {
+            if args.len() != 3 { return Err("f_ppf requires 3 arguments (p, df1, df2)".into()); }
+            let p = match &args[0] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("f_ppf: p must be a number".into()) };
+            let df1 = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("f_ppf: df1 must be a number".into()) };
+            let df2 = match &args[2] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("f_ppf: df2 must be a number".into()) };
+            Ok(Some(Value::Float(crate::distributions::f_ppf(p, df1, df2)?)))
+        }
+        // ── Discrete distribution builtins ──────────────────────────
+        "binomial_pmf" => {
+            if args.len() != 3 { return Err("binomial_pmf requires 3 arguments (k, n, p)".into()); }
+            let k = value_to_usize(&args[0])? as u64;
+            let n = value_to_usize(&args[1])? as u64;
+            let p = match &args[2] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("binomial_pmf: p must be a number".into()) };
+            Ok(Some(Value::Float(crate::distributions::binomial_pmf(k, n, p))))
+        }
+        "binomial_cdf" => {
+            if args.len() != 3 { return Err("binomial_cdf requires 3 arguments (k, n, p)".into()); }
+            let k = value_to_usize(&args[0])? as u64;
+            let n = value_to_usize(&args[1])? as u64;
+            let p = match &args[2] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("binomial_cdf: p must be a number".into()) };
+            Ok(Some(Value::Float(crate::distributions::binomial_cdf(k, n, p))))
+        }
+        "poisson_pmf" => {
+            if args.len() != 2 { return Err("poisson_pmf requires 2 arguments (k, lambda)".into()); }
+            let k = value_to_usize(&args[0])? as u64;
+            let lambda = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("poisson_pmf: lambda must be a number".into()) };
+            Ok(Some(Value::Float(crate::distributions::poisson_pmf(k, lambda))))
+        }
+        "poisson_cdf" => {
+            if args.len() != 2 { return Err("poisson_cdf requires 2 arguments (k, lambda)".into()); }
+            let k = value_to_usize(&args[0])? as u64;
+            let lambda = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("poisson_cdf: lambda must be a number".into()) };
+            Ok(Some(Value::Float(crate::distributions::poisson_cdf(k, lambda))))
+        }
+        // ── Hypothesis test builtins (additional) ───────────────────
+        "t_test_paired" => {
+            if args.len() != 2 { return Err("t_test_paired requires 2 arguments".into()); }
+            let x = value_to_f64_vec(&args[0])?;
+            let y = value_to_f64_vec(&args[1])?;
+            let r = crate::hypothesis::t_test_paired(&x, &y)?;
+            let mut fields = std::collections::HashMap::new();
+            fields.insert("t_statistic".into(), Value::Float(r.t_statistic));
+            fields.insert("p_value".into(), Value::Float(r.p_value));
+            fields.insert("df".into(), Value::Float(r.df));
+            Ok(Some(Value::Struct { name: "TTestResult".into(), fields }))
+        }
+        "anova_oneway" => {
+            if args.len() < 2 { return Err("anova_oneway requires at least 2 group arguments".into()); }
+            let mut groups = Vec::new();
+            let mut group_vecs = Vec::new();
+            for a in args.iter() {
+                group_vecs.push(value_to_f64_vec(a)?);
+            }
+            for gv in &group_vecs {
+                groups.push(gv.as_slice());
+            }
+            let r = crate::hypothesis::anova_oneway(&groups)?;
+            let mut fields = std::collections::HashMap::new();
+            fields.insert("f_statistic".into(), Value::Float(r.f_statistic));
+            fields.insert("p_value".into(), Value::Float(r.p_value));
+            fields.insert("df_between".into(), Value::Float(r.df_between));
+            fields.insert("df_within".into(), Value::Float(r.df_within));
+            fields.insert("ss_between".into(), Value::Float(r.ss_between));
+            fields.insert("ss_within".into(), Value::Float(r.ss_within));
+            Ok(Some(Value::Struct { name: "AnovaResult".into(), fields }))
+        }
+        "f_test" => {
+            if args.len() != 2 { return Err("f_test requires 2 arguments".into()); }
+            let x = value_to_f64_vec(&args[0])?;
+            let y = value_to_f64_vec(&args[1])?;
+            let (f_stat, p_val) = crate::hypothesis::f_test(&x, &y)?;
+            let mut fields = std::collections::HashMap::new();
+            fields.insert("f_statistic".into(), Value::Float(f_stat));
+            fields.insert("p_value".into(), Value::Float(p_val));
+            Ok(Some(Value::Struct { name: "FTestResult".into(), fields }))
+        }
+        "lm" => {
+            // lm(X, y, n, p) — linear model
+            if args.len() != 4 { return Err("lm requires 4 arguments (X_flat, y, n, p)".into()); }
+            let x_flat = value_to_f64_vec(&args[0])?;
+            let y = value_to_f64_vec(&args[1])?;
+            let n = value_to_usize(&args[2])?;
+            let p = value_to_usize(&args[3])?;
+            let r = crate::hypothesis::lm(&x_flat, &y, n, p)?;
+            let coef_values: Vec<Value> = r.coefficients.into_iter().map(Value::Float).collect();
+            let se_values: Vec<Value> = r.std_errors.into_iter().map(Value::Float).collect();
+            let t_values: Vec<Value> = r.t_values.into_iter().map(Value::Float).collect();
+            let p_values: Vec<Value> = r.p_values.into_iter().map(Value::Float).collect();
+            let resid_values: Vec<Value> = r.residuals.into_iter().map(Value::Float).collect();
+            let mut fields = std::collections::HashMap::new();
+            fields.insert("coefficients".into(), Value::Array(Rc::new(coef_values)));
+            fields.insert("std_errors".into(), Value::Array(Rc::new(se_values)));
+            fields.insert("t_values".into(), Value::Array(Rc::new(t_values)));
+            fields.insert("p_values".into(), Value::Array(Rc::new(p_values)));
+            fields.insert("r_squared".into(), Value::Float(r.r_squared));
+            fields.insert("adj_r_squared".into(), Value::Float(r.adj_r_squared));
+            fields.insert("residuals".into(), Value::Array(Rc::new(resid_values)));
+            fields.insert("f_statistic".into(), Value::Float(r.f_statistic));
+            Ok(Some(Value::Struct { name: "LmResult".into(), fields }))
+        }
+        // ── ML builtins (additional) ────────────────────────────────
+        "binary_cross_entropy" => {
+            if args.len() != 2 { return Err("binary_cross_entropy requires 2 arguments".into()); }
+            let pred = value_to_f64_vec(&args[0])?;
+            let target = value_to_f64_vec(&args[1])?;
+            Ok(Some(Value::Float(crate::ml::binary_cross_entropy(&pred, &target)?)))
+        }
+        "hinge_loss" => {
+            if args.len() != 2 { return Err("hinge_loss requires 2 arguments".into()); }
+            let pred = value_to_f64_vec(&args[0])?;
+            let target = value_to_f64_vec(&args[1])?;
+            Ok(Some(Value::Float(crate::ml::hinge_loss(&pred, &target)?)))
+        }
+        "confusion_matrix" => {
+            if args.len() != 2 { return Err("confusion_matrix requires 2 arguments".into()); }
+            let pred = value_to_f64_vec(&args[0])?;
+            let actual = value_to_f64_vec(&args[1])?;
+            let pred_bool: Vec<bool> = pred.iter().map(|&x| x > 0.5).collect();
+            let actual_bool: Vec<bool> = actual.iter().map(|&x| x > 0.5).collect();
+            let cm = crate::ml::confusion_matrix(&pred_bool, &actual_bool);
+            let mut fields = std::collections::HashMap::new();
+            fields.insert("tp".into(), Value::Int(cm.tp as i64));
+            fields.insert("fp".into(), Value::Int(cm.fp as i64));
+            fields.insert("tn".into(), Value::Int(cm.tn as i64));
+            fields.insert("fn_count".into(), Value::Int(cm.fn_count as i64));
+            fields.insert("precision".into(), Value::Float(crate::ml::precision(&cm)));
+            fields.insert("recall".into(), Value::Float(crate::ml::recall(&cm)));
+            fields.insert("f1_score".into(), Value::Float(crate::ml::f1_score(&cm)));
+            fields.insert("accuracy".into(), Value::Float(crate::ml::accuracy(&cm)));
+            Ok(Some(Value::Struct { name: "ConfusionMatrix".into(), fields }))
+        }
+        "auc_roc" => {
+            if args.len() != 2 { return Err("auc_roc requires 2 arguments (scores, labels)".into()); }
+            let scores = value_to_f64_vec(&args[0])?;
+            let labels_f = value_to_f64_vec(&args[1])?;
+            let labels: Vec<bool> = labels_f.iter().map(|&x| x > 0.5).collect();
+            Ok(Some(Value::Float(crate::ml::auc_roc(&scores, &labels)?)))
+        }
+        // ── Tensor activation builtins ──────────────────────────────
+        "sigmoid" => {
+            if args.len() != 1 { return Err("sigmoid requires 1 argument".into()); }
+            let t = value_to_tensor(&args[0])?;
+            Ok(Some(Value::Tensor(t.sigmoid())))
+        }
+        "tanh_activation" => {
+            if args.len() != 1 { return Err("tanh_activation requires 1 argument".into()); }
+            let t = value_to_tensor(&args[0])?;
+            Ok(Some(Value::Tensor(t.tanh_activation())))
+        }
+        "leaky_relu" => {
+            if args.len() != 2 { return Err("leaky_relu requires 2 arguments (tensor, alpha)".into()); }
+            let t = value_to_tensor(&args[0])?;
+            let alpha = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("leaky_relu: alpha must be a number".into()) };
+            Ok(Some(Value::Tensor(t.leaky_relu(alpha))))
+        }
+        "silu" => {
+            if args.len() != 1 { return Err("silu requires 1 argument".into()); }
+            let t = value_to_tensor(&args[0])?;
+            Ok(Some(Value::Tensor(t.silu())))
+        }
+        "mish" => {
+            if args.len() != 1 { return Err("mish requires 1 argument".into()); }
+            let t = value_to_tensor(&args[0])?;
+            Ok(Some(Value::Tensor(t.mish())))
+        }
+        "argmax" => {
+            if args.len() != 1 { return Err("argmax requires 1 argument".into()); }
+            let t = value_to_tensor(&args[0])?;
+            Ok(Some(Value::Int(t.argmax() as i64)))
+        }
+        "argmin" => {
+            if args.len() != 1 { return Err("argmin requires 1 argument".into()); }
+            let t = value_to_tensor(&args[0])?;
+            Ok(Some(Value::Int(t.argmin() as i64)))
+        }
+        "clamp" => {
+            if args.len() != 3 { return Err("clamp requires 3 arguments (tensor, min, max)".into()); }
+            let t = value_to_tensor(&args[0])?;
+            let min_v = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("clamp: min must be a number".into()) };
+            let max_v = match &args[2] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("clamp: max must be a number".into()) };
+            Ok(Some(Value::Tensor(t.clamp(min_v, max_v))))
+        }
+        "one_hot" => {
+            if args.len() != 2 { return Err("one_hot requires 2 arguments (indices, depth)".into()); }
+            let indices = value_to_usize_vec(&args[0])?;
+            let depth = value_to_usize(&args[1])?;
+            Ok(Some(Value::Tensor(Tensor::one_hot(&indices, depth).map_err(|e| format!("{e}"))?)))
+        }
+        // ── FFT builtins ────────────────────────────────────────────
+        "rfft" => {
+            if args.len() != 1 { return Err("rfft requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let result = crate::fft::rfft(&data);
+            let pairs: Vec<Value> = result.iter().map(|&(re, im)| {
+                Value::Tuple(Rc::new(vec![Value::Float(re), Value::Float(im)]))
+            }).collect();
+            Ok(Some(Value::Array(Rc::new(pairs))))
+        }
+        "psd" => {
+            if args.len() != 1 { return Err("psd requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let result = crate::fft::psd(&data);
             let values: Vec<Value> = result.into_iter().map(Value::Float).collect();
             Ok(Some(Value::Array(Rc::new(values))))
         }

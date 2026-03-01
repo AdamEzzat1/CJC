@@ -40,6 +40,11 @@ pub mod error;
 pub mod json;
 pub mod datetime;
 pub mod window;
+pub mod stats;
+pub mod distributions;
+pub mod hypothesis;
+pub mod ml;
+pub mod fft;
 
 // --- Re-exports for backward compatibility ---
 // All downstream crates that were doing `use cjc_runtime::Tensor` etc. continue to work.

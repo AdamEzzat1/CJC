@@ -291,6 +291,85 @@ pub fn builtin_effects() -> HashMap<&'static str, EffectSet> {
     m.insert("sd", alloc);
     m.insert("variance", alloc);
     m.insert("n_distinct", EffectSet::new(EffectSet::ALLOC | EffectSet::NONDET)); // hash-order
+    m.insert("se", alloc);
+    m.insert("quantile", alloc);
+    m.insert("iqr", alloc);
+    m.insert("skewness", alloc);
+    m.insert("kurtosis", alloc);
+    m.insert("z_score", alloc);
+    m.insert("standardize", alloc);
+    m.insert("cor", alloc);
+    m.insert("cov", alloc);
+    // Cumulative / ranking
+    m.insert("cumsum", alloc);
+    m.insert("cumprod", alloc);
+    m.insert("cummax", alloc);
+    m.insert("cummin", alloc);
+    m.insert("lag", alloc);
+    m.insert("lead", alloc);
+    m.insert("rank", alloc);
+    m.insert("dense_rank", alloc);
+    m.insert("histogram", alloc);
+    // Distributions
+    m.insert("normal_cdf", pure);
+    m.insert("normal_pdf", pure);
+    m.insert("normal_ppf", pure);
+    m.insert("t_cdf", pure);
+    m.insert("chi2_cdf", pure);
+    m.insert("f_cdf", pure);
+    // Hypothesis tests
+    m.insert("t_test", alloc);
+    m.insert("t_test_two_sample", alloc);
+    m.insert("chi_squared_test", alloc);
+    // Extended linalg
+    m.insert("det", alloc);
+    m.insert("solve", alloc);
+    m.insert("lstsq", alloc);
+    m.insert("trace", pure);
+    m.insert("norm_frobenius", pure);
+    m.insert("eigh", alloc);
+    m.insert("matrix_rank", alloc);
+    m.insert("kron", alloc);
+    // ML
+    m.insert("mse_loss", alloc);
+    m.insert("cross_entropy_loss", alloc);
+    m.insert("huber_loss", alloc);
+    m.insert("binary_cross_entropy", alloc);
+    m.insert("hinge_loss", alloc);
+    m.insert("confusion_matrix", alloc);
+    m.insert("auc_roc", alloc);
+    // Additional stats
+    m.insert("sample_variance", pure);
+    m.insert("sample_sd", pure);
+    m.insert("sample_cov", pure);
+    m.insert("row_number", alloc);
+    // Distribution PPFs
+    m.insert("t_ppf", pure);
+    m.insert("chi2_ppf", pure);
+    m.insert("f_ppf", pure);
+    // Discrete distributions
+    m.insert("binomial_pmf", pure);
+    m.insert("binomial_cdf", pure);
+    m.insert("poisson_pmf", pure);
+    m.insert("poisson_cdf", pure);
+    // Additional hypothesis tests
+    m.insert("t_test_paired", alloc);
+    m.insert("anova_oneway", alloc);
+    m.insert("f_test", alloc);
+    m.insert("lm", alloc);
+    // FFT
+    m.insert("rfft", alloc);
+    m.insert("psd", alloc);
+    // Tensor activations & utilities
+    m.insert("sigmoid", alloc);
+    m.insert("tanh_activation", alloc);
+    m.insert("leaky_relu", alloc);
+    m.insert("silu", alloc);
+    m.insert("mish", alloc);
+    m.insert("argmax", pure);
+    m.insert("argmin", pure);
+    m.insert("clamp", alloc);
+    m.insert("one_hot", alloc);
 
     // -----------------------------------------------------------------
     // CSV builtins

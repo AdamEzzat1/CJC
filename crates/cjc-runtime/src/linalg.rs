@@ -161,6 +161,328 @@ impl Tensor {
         Tensor::from_vec(l, &[n, n])
     }
 
+    /// Determinant via LU decomposition: product of U diagonal * parity.
+    pub fn det(&self) -> Result<f64, RuntimeError> {
+        if self.ndim() != 2 || self.shape[0] != self.shape[1] {
+            return Err(RuntimeError::InvalidOperation(
+                "det requires a square 2D matrix".to_string(),
+            ));
+        }
+        let n = self.shape[0];
+        let mut a = self.to_vec();
+        let mut sign = 1.0f64;
+        for k in 0..n {
+            let mut max_val = a[k * n + k].abs();
+            let mut max_row = k;
+            for i in (k + 1)..n {
+                let v = a[i * n + k].abs();
+                if v > max_val {
+                    max_val = v;
+                    max_row = i;
+                }
+            }
+            if max_val < 1e-15 {
+                return Ok(0.0); // singular
+            }
+            if max_row != k {
+                sign = -sign;
+                for j in 0..n {
+                    let tmp = a[k * n + j];
+                    a[k * n + j] = a[max_row * n + j];
+                    a[max_row * n + j] = tmp;
+                }
+            }
+            for i in (k + 1)..n {
+                a[i * n + k] /= a[k * n + k];
+                for j in (k + 1)..n {
+                    a[i * n + j] -= a[i * n + k] * a[k * n + j];
+                }
+            }
+        }
+        let mut det = sign;
+        for i in 0..n {
+            det *= a[i * n + i];
+        }
+        Ok(det)
+    }
+
+    /// Solve Ax = b via LU decomposition.
+    /// self = A (n x n), b = vector (n).
+    pub fn solve(&self, b: &Tensor) -> Result<Tensor, RuntimeError> {
+        if self.ndim() != 2 || self.shape[0] != self.shape[1] {
+            return Err(RuntimeError::InvalidOperation(
+                "solve requires a square 2D matrix A".to_string(),
+            ));
+        }
+        let n = self.shape[0];
+        if b.len() != n {
+            return Err(RuntimeError::InvalidOperation(
+                format!("solve: b length {} != n = {n}", b.len()),
+            ));
+        }
+        let (l, u, pivots) = self.lu_decompose()?;
+        let l_data = l.to_vec();
+        let u_data = u.to_vec();
+        let b_data = b.to_vec();
+
+        // Permute b
+        let mut pb = vec![0.0; n];
+        for i in 0..n {
+            pb[i] = b_data[pivots[i]];
+        }
+
+        // Forward substitution: L * y = pb
+        let mut y = vec![0.0; n];
+        for i in 0..n {
+            let mut s = pb[i];
+            for j in 0..i {
+                s -= l_data[i * n + j] * y[j];
+            }
+            y[i] = s;
+        }
+
+        // Back substitution: U * x = y
+        let mut x = vec![0.0; n];
+        for i in (0..n).rev() {
+            let mut s = y[i];
+            for j in (i + 1)..n {
+                s -= u_data[i * n + j] * x[j];
+            }
+            x[i] = s / u_data[i * n + i];
+        }
+
+        Tensor::from_vec(x, &[n])
+    }
+
+    /// Least squares solution: min ||Ax - b||_2 via QR decomposition.
+    /// self = A (m x n, m >= n), b = vector (m).
+    pub fn lstsq(&self, b: &Tensor) -> Result<Tensor, RuntimeError> {
+        if self.ndim() != 2 {
+            return Err(RuntimeError::InvalidOperation(
+                "lstsq requires a 2D matrix".to_string(),
+            ));
+        }
+        let m = self.shape[0];
+        let n = self.shape[1];
+        if m < n {
+            return Err(RuntimeError::InvalidOperation(
+                "lstsq requires m >= n".to_string(),
+            ));
+        }
+        if b.len() != m {
+            return Err(RuntimeError::InvalidOperation(
+                format!("lstsq: b length {} != m = {m}", b.len()),
+            ));
+        }
+        let (q, r) = self.qr_decompose()?;
+        let q_data = q.to_vec();
+        let r_data = r.to_vec();
+        let b_data = b.to_vec();
+
+        // Q^T * b (Q is m x n, so Q^T * b gives n-vector)
+        let mut qtb = vec![0.0; n];
+        for j in 0..n {
+            for i in 0..m {
+                qtb[j] += q_data[i * n + j] * b_data[i];
+            }
+        }
+
+        // Back substitution: R * x = Q^T * b
+        let mut x = vec![0.0; n];
+        for i in (0..n).rev() {
+            let mut s = qtb[i];
+            for j in (i + 1)..n {
+                s -= r_data[i * n + j] * x[j];
+            }
+            if r_data[i * n + i].abs() < 1e-15 {
+                return Err(RuntimeError::InvalidOperation(
+                    "lstsq: rank-deficient matrix".to_string(),
+                ));
+            }
+            x[i] = s / r_data[i * n + i];
+        }
+
+        Tensor::from_vec(x, &[n])
+    }
+
+    /// Matrix trace: sum of diagonal elements.
+    pub fn trace(&self) -> Result<f64, RuntimeError> {
+        if self.ndim() != 2 || self.shape[0] != self.shape[1] {
+            return Err(RuntimeError::InvalidOperation(
+                "trace requires a square 2D matrix".to_string(),
+            ));
+        }
+        let n = self.shape[0];
+        let data = self.to_vec();
+        let mut acc = cjc_repro::KahanAccumulatorF64::new();
+        for i in 0..n {
+            acc.add(data[i * n + i]);
+        }
+        Ok(acc.finalize())
+    }
+
+    /// Frobenius norm: sqrt(sum(aij^2)).
+    pub fn norm_frobenius(&self) -> Result<f64, RuntimeError> {
+        if self.ndim() != 2 {
+            return Err(RuntimeError::InvalidOperation(
+                "norm_frobenius requires a 2D matrix".to_string(),
+            ));
+        }
+        let data = self.to_vec();
+        let mut acc = cjc_repro::KahanAccumulatorF64::new();
+        for &v in &data {
+            acc.add(v * v);
+        }
+        Ok(acc.finalize().sqrt())
+    }
+
+    /// Eigenvalue decomposition for symmetric matrices (Jacobi method).
+    /// Returns (eigenvalues sorted ascending, eigenvectors n x n).
+    /// DETERMINISM: fixed row-major sweep order, smallest (i,j) tie-breaking.
+    pub fn eigh(&self) -> Result<(Vec<f64>, Tensor), RuntimeError> {
+        if self.ndim() != 2 || self.shape[0] != self.shape[1] {
+            return Err(RuntimeError::InvalidOperation(
+                "eigh requires a square 2D matrix".to_string(),
+            ));
+        }
+        let n = self.shape[0];
+        let mut a = self.to_vec();
+        // V = identity (eigenvectors)
+        let mut v = vec![0.0; n * n];
+        for i in 0..n {
+            v[i * n + i] = 1.0;
+        }
+        let max_iter = 100 * n * n;
+        for _ in 0..max_iter {
+            // Find largest off-diagonal element (row-major for determinism)
+            let mut max_val = 0.0;
+            let mut p = 0;
+            let mut q = 1;
+            for i in 0..n {
+                for j in (i + 1)..n {
+                    let v_abs = a[i * n + j].abs();
+                    if v_abs > max_val {
+                        max_val = v_abs;
+                        p = i;
+                        q = j;
+                    }
+                }
+            }
+            if max_val < 1e-14 {
+                break; // converged
+            }
+            // Compute rotation angle
+            let app = a[p * n + p];
+            let aqq = a[q * n + q];
+            let apq = a[p * n + q];
+            let theta = if (app - aqq).abs() < 1e-15 {
+                std::f64::consts::FRAC_PI_4
+            } else {
+                0.5 * (2.0 * apq / (app - aqq)).atan()
+            };
+            let c = theta.cos();
+            let s = theta.sin();
+            // Apply Givens rotation
+            for i in 0..n {
+                let aip = a[i * n + p];
+                let aiq = a[i * n + q];
+                a[i * n + p] = c * aip + s * aiq;
+                a[i * n + q] = -s * aip + c * aiq;
+            }
+            for j in 0..n {
+                let apj = a[p * n + j];
+                let aqj = a[q * n + j];
+                a[p * n + j] = c * apj + s * aqj;
+                a[q * n + j] = -s * apj + c * aqj;
+            }
+            // Fix diagonal after double rotation
+            a[p * n + q] = 0.0;
+            a[q * n + p] = 0.0;
+            // Accumulate eigenvectors
+            for i in 0..n {
+                let vip = v[i * n + p];
+                let viq = v[i * n + q];
+                v[i * n + p] = c * vip + s * viq;
+                v[i * n + q] = -s * vip + c * viq;
+            }
+        }
+        // Extract eigenvalues (diagonal of a)
+        let mut eigenvalues: Vec<(f64, usize)> = (0..n).map(|i| (a[i * n + i], i)).collect();
+        eigenvalues.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let vals: Vec<f64> = eigenvalues.iter().map(|&(v, _)| v).collect();
+        // Reorder eigenvector columns
+        let mut v_sorted = vec![0.0; n * n];
+        for (new_col, &(_, old_col)) in eigenvalues.iter().enumerate() {
+            for row in 0..n {
+                v_sorted[row * n + new_col] = v[row * n + old_col];
+            }
+        }
+        // Sign-canonical: first nonzero component positive
+        for col in 0..n {
+            let mut first_nonzero = 0.0;
+            for row in 0..n {
+                if v_sorted[row * n + col].abs() > 1e-15 {
+                    first_nonzero = v_sorted[row * n + col];
+                    break;
+                }
+            }
+            if first_nonzero < 0.0 {
+                for row in 0..n {
+                    v_sorted[row * n + col] = -v_sorted[row * n + col];
+                }
+            }
+        }
+
+        Ok((vals, Tensor::from_vec(v_sorted, &[n, n])?))
+    }
+
+    /// Matrix rank via SVD: count singular values > tolerance.
+    pub fn matrix_rank(&self) -> Result<usize, RuntimeError> {
+        if self.ndim() != 2 {
+            return Err(RuntimeError::InvalidOperation(
+                "matrix_rank requires a 2D matrix".to_string(),
+            ));
+        }
+        // Simple approach: use QR and count non-zero diagonal
+        let (_q, r) = self.qr_decompose()?;
+        let r_data = r.to_vec();
+        let n = r.shape()[0].min(r.shape()[1]);
+        let cols = r.shape()[1];
+        let mut rank = 0;
+        for i in 0..n {
+            if r_data[i * cols + i].abs() > 1e-10 {
+                rank += 1;
+            }
+        }
+        Ok(rank)
+    }
+
+    /// Kronecker product: A ⊗ B.
+    pub fn kron(&self, other: &Tensor) -> Result<Tensor, RuntimeError> {
+        if self.ndim() != 2 || other.ndim() != 2 {
+            return Err(RuntimeError::InvalidOperation(
+                "kron requires two 2D matrices".to_string(),
+            ));
+        }
+        let (m, n) = (self.shape[0], self.shape[1]);
+        let (p, q) = (other.shape()[0], other.shape()[1]);
+        let a = self.to_vec();
+        let b = other.to_vec();
+        let mut result = vec![0.0; m * p * n * q];
+        let out_cols = n * q;
+        for i in 0..m {
+            for j in 0..n {
+                let aij = a[i * n + j];
+                for k in 0..p {
+                    for l in 0..q {
+                        result[(i * p + k) * out_cols + (j * q + l)] = aij * b[k * q + l];
+                    }
+                }
+            }
+        }
+        Tensor::from_vec(result, &[m * p, n * q])
+    }
+
     /// Matrix inverse via LU decomposition + back-substitution.
     pub fn inverse(&self) -> Result<Tensor, RuntimeError> {
         if self.ndim() != 2 || self.shape[0] != self.shape[1] {
