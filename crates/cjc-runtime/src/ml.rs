@@ -293,6 +293,144 @@ pub fn train_test_split(n: usize, test_fraction: f64, seed: u64) -> (Vec<usize>,
 }
 
 // ---------------------------------------------------------------------------
+// Phase B4: ML Training Extensions
+// ---------------------------------------------------------------------------
+
+/// Batch normalization (inference mode).
+/// y = gamma * (x - running_mean) / sqrt(running_var + eps) + beta.
+pub fn batch_norm(
+    x: &[f64],
+    running_mean: &[f64],
+    running_var: &[f64],
+    gamma: &[f64],
+    beta: &[f64],
+    eps: f64,
+) -> Result<Vec<f64>, String> {
+    let n = x.len();
+    if running_mean.len() != n || running_var.len() != n || gamma.len() != n || beta.len() != n {
+        return Err("batch_norm: all arrays must have same length".into());
+    }
+    let mut result = Vec::with_capacity(n);
+    for i in 0..n {
+        let normed = (x[i] - running_mean[i]) / (running_var[i] + eps).sqrt();
+        result.push(gamma[i] * normed + beta[i]);
+    }
+    Ok(result)
+}
+
+/// Dropout mask generation using seeded RNG for determinism.
+/// Returns mask of 0.0 and scale values (1/(1-p)) using inverted dropout.
+pub fn dropout_mask(n: usize, drop_prob: f64, seed: u64) -> Vec<f64> {
+    let mut rng = cjc_repro::Rng::seeded(seed);
+    let scale = if drop_prob < 1.0 { 1.0 / (1.0 - drop_prob) } else { 0.0 };
+    let mut mask = Vec::with_capacity(n);
+    for _ in 0..n {
+        let r = (rng.next_u64() as f64) / (u64::MAX as f64);
+        if r < drop_prob {
+            mask.push(0.0);
+        } else {
+            mask.push(scale);
+        }
+    }
+    mask
+}
+
+/// Apply dropout: element-wise multiply data by mask.
+pub fn apply_dropout(data: &[f64], mask: &[f64]) -> Result<Vec<f64>, String> {
+    if data.len() != mask.len() {
+        return Err("apply_dropout: data and mask must have same length".into());
+    }
+    Ok(data.iter().zip(mask.iter()).map(|(&d, &m)| d * m).collect())
+}
+
+/// Learning rate schedule: step decay.
+/// lr = initial_lr * decay_rate^(floor(epoch / step_size))
+pub fn lr_step_decay(initial_lr: f64, decay_rate: f64, epoch: usize, step_size: usize) -> f64 {
+    initial_lr * decay_rate.powi((epoch / step_size) as i32)
+}
+
+/// Learning rate schedule: cosine annealing.
+/// lr = min_lr + 0.5 * (max_lr - min_lr) * (1 + cos(pi * epoch / total_epochs))
+pub fn lr_cosine(max_lr: f64, min_lr: f64, epoch: usize, total_epochs: usize) -> f64 {
+    let ratio = epoch as f64 / total_epochs as f64;
+    min_lr + 0.5 * (max_lr - min_lr) * (1.0 + (std::f64::consts::PI * ratio).cos())
+}
+
+/// Learning rate schedule: linear warmup.
+/// lr = initial_lr * min(1.0, epoch / warmup_epochs).
+pub fn lr_linear_warmup(initial_lr: f64, epoch: usize, warmup_epochs: usize) -> f64 {
+    if warmup_epochs == 0 {
+        return initial_lr;
+    }
+    initial_lr * (epoch as f64 / warmup_epochs as f64).min(1.0)
+}
+
+/// L1 regularization penalty: lambda * sum(|params|).
+pub fn l1_penalty(params: &[f64], lambda: f64) -> f64 {
+    let mut acc = KahanAccumulatorF64::new();
+    for &p in params {
+        acc.add(p.abs());
+    }
+    lambda * acc.finalize()
+}
+
+/// L2 regularization penalty: 0.5 * lambda * sum(params^2).
+pub fn l2_penalty(params: &[f64], lambda: f64) -> f64 {
+    let mut acc = KahanAccumulatorF64::new();
+    for &p in params {
+        acc.add(p * p);
+    }
+    0.5 * lambda * acc.finalize()
+}
+
+/// L1 regularization gradient: lambda * sign(params).
+pub fn l1_grad(params: &[f64], lambda: f64) -> Vec<f64> {
+    params.iter().map(|&p| {
+        if p > 0.0 { lambda } else if p < 0.0 { -lambda } else { 0.0 }
+    }).collect()
+}
+
+/// L2 regularization gradient: lambda * params.
+pub fn l2_grad(params: &[f64], lambda: f64) -> Vec<f64> {
+    params.iter().map(|&p| lambda * p).collect()
+}
+
+/// Early stopping state tracker.
+pub struct EarlyStoppingState {
+    pub patience: usize,
+    pub min_delta: f64,
+    pub best_loss: f64,
+    pub wait: usize,
+    pub stopped: bool,
+}
+
+impl EarlyStoppingState {
+    pub fn new(patience: usize, min_delta: f64) -> Self {
+        Self {
+            patience,
+            min_delta,
+            best_loss: f64::INFINITY,
+            wait: 0,
+            stopped: false,
+        }
+    }
+
+    /// Check if training should stop.
+    pub fn check(&mut self, current_loss: f64) -> bool {
+        if current_loss < self.best_loss - self.min_delta {
+            self.best_loss = current_loss;
+            self.wait = 0;
+        } else {
+            self.wait += 1;
+        }
+        if self.wait >= self.patience {
+            self.stopped = true;
+        }
+        self.stopped
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -385,5 +523,107 @@ mod tests {
         let (train, test) = train_test_split(100, 0.2, 42);
         assert_eq!(train.len() + test.len(), 100);
         assert_eq!(test.len(), 20);
+    }
+
+    // --- B4: ML Training Extensions tests ---
+
+    #[test]
+    fn test_batch_norm_identity() {
+        // mean=0, var=1, gamma=1, beta=0, eps=0 → input unchanged
+        let x = vec![1.0, 2.0, 3.0];
+        let mean = vec![0.0, 0.0, 0.0];
+        let var = vec![1.0, 1.0, 1.0];
+        let gamma = vec![1.0, 1.0, 1.0];
+        let beta = vec![0.0, 0.0, 0.0];
+        let result = batch_norm(&x, &mean, &var, &gamma, &beta, 0.0).unwrap();
+        assert!((result[0] - 1.0).abs() < 1e-12);
+        assert!((result[1] - 2.0).abs() < 1e-12);
+        assert!((result[2] - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_batch_norm_shift_scale() {
+        let x = vec![0.0];
+        let mean = vec![1.0]; // shift: x - 1 = -1
+        let var = vec![4.0];  // scale: -1/sqrt(4) = -0.5
+        let gamma = vec![2.0]; // multiply: 2 * -0.5 = -1
+        let beta = vec![3.0]; // add: -1 + 3 = 2
+        let result = batch_norm(&x, &mean, &var, &gamma, &beta, 0.0).unwrap();
+        assert!((result[0] - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_dropout_mask_seed_determinism() {
+        let m1 = dropout_mask(100, 0.5, 42);
+        let m2 = dropout_mask(100, 0.5, 42);
+        assert_eq!(m1, m2);
+    }
+
+    #[test]
+    fn test_dropout_mask_different_seeds() {
+        let m1 = dropout_mask(100, 0.5, 42);
+        let m2 = dropout_mask(100, 0.5, 99);
+        assert_ne!(m1, m2);
+    }
+
+    #[test]
+    fn test_lr_step_decay_schedule() {
+        let lr0 = lr_step_decay(0.1, 0.5, 0, 10);
+        assert!((lr0 - 0.1).abs() < 1e-12);
+        let lr10 = lr_step_decay(0.1, 0.5, 10, 10);
+        assert!((lr10 - 0.05).abs() < 1e-12);
+        let lr20 = lr_step_decay(0.1, 0.5, 20, 10);
+        assert!((lr20 - 0.025).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_lr_cosine_endpoints() {
+        let lr0 = lr_cosine(0.1, 0.001, 0, 100);
+        assert!((lr0 - 0.1).abs() < 1e-10);
+        let lr_end = lr_cosine(0.1, 0.001, 100, 100);
+        assert!((lr_end - 0.001).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_lr_linear_warmup() {
+        let lr0 = lr_linear_warmup(0.1, 0, 10);
+        assert!((lr0).abs() < 1e-12);
+        let lr5 = lr_linear_warmup(0.1, 5, 10);
+        assert!((lr5 - 0.05).abs() < 1e-12);
+        let lr15 = lr_linear_warmup(0.1, 15, 10);
+        assert!((lr15 - 0.1).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_l1_penalty_known() {
+        let params = [1.0, -2.0, 3.0];
+        let p = l1_penalty(&params, 0.1);
+        assert!((p - 0.6).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_l2_penalty_known() {
+        let params = [1.0, -2.0, 3.0];
+        let p = l2_penalty(&params, 0.1);
+        // 0.5 * 0.1 * (1 + 4 + 9) = 0.5 * 0.1 * 14 = 0.7
+        assert!((p - 0.7).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_early_stopping_triggers() {
+        let mut es = EarlyStoppingState::new(3, 0.01);
+        assert!(!es.check(1.0)); // best_loss=1.0, wait=0
+        assert!(!es.check(1.0)); // no improvement, wait=1
+        assert!(!es.check(1.0)); // no improvement, wait=2
+        assert!(es.check(1.0));  // no improvement, wait=3 >= patience
+    }
+
+    #[test]
+    fn test_early_stopping_resets() {
+        let mut es = EarlyStoppingState::new(3, 0.01);
+        es.check(1.0);
+        es.check(1.0); // wait=1
+        assert!(!es.check(0.5)); // improvement, wait=0
+        assert!(!es.check(0.5)); // wait=1
     }
 }

@@ -393,6 +393,77 @@ pub fn poisson_cdf(k: u64, lambda: f64) -> f64 {
 }
 
 // ---------------------------------------------------------------------------
+// Phase B6: Beta, Gamma, Exponential, Weibull distributions
+// ---------------------------------------------------------------------------
+
+/// Beta distribution PDF: x^(a-1) * (1-x)^(b-1) / B(a,b).
+/// x in [0,1], a > 0, b > 0.
+pub fn beta_pdf(x: f64, a: f64, b: f64) -> f64 {
+    if x < 0.0 || x > 1.0 { return 0.0; }
+    if x == 0.0 && a < 1.0 { return f64::INFINITY; }
+    if x == 1.0 && b < 1.0 { return f64::INFINITY; }
+    let log_beta = ln_gamma(a) + ln_gamma(b) - ln_gamma(a + b);
+    ((a - 1.0) * x.ln() + (b - 1.0) * (1.0 - x).ln() - log_beta).exp()
+}
+
+/// Beta distribution CDF via regularized incomplete beta function.
+pub fn beta_cdf(x: f64, a: f64, b: f64) -> f64 {
+    if x <= 0.0 { return 0.0; }
+    if x >= 1.0 { return 1.0; }
+    regularized_incomplete_beta(a, b, x)
+}
+
+/// Gamma distribution PDF: x^(k-1) * exp(-x/theta) / (theta^k * Gamma(k)).
+/// x >= 0, k > 0 (shape), theta > 0 (scale).
+pub fn gamma_pdf(x: f64, k: f64, theta: f64) -> f64 {
+    if x < 0.0 { return 0.0; }
+    if x == 0.0 {
+        if k < 1.0 { return f64::INFINITY; }
+        if k == 1.0 { return 1.0 / theta; }
+        return 0.0;
+    }
+    let log_pdf = (k - 1.0) * x.ln() - x / theta - k * theta.ln() - ln_gamma(k);
+    log_pdf.exp()
+}
+
+/// Gamma distribution CDF via regularized lower incomplete gamma function.
+pub fn gamma_cdf(x: f64, k: f64, theta: f64) -> f64 {
+    if x <= 0.0 { return 0.0; }
+    regularized_gamma_p(k, x / theta)
+}
+
+/// Exponential distribution PDF: lambda * exp(-lambda * x).
+/// x >= 0, lambda > 0 (rate).
+pub fn exp_pdf(x: f64, lambda: f64) -> f64 {
+    if x < 0.0 { return 0.0; }
+    lambda * (-lambda * x).exp()
+}
+
+/// Exponential distribution CDF: 1 - exp(-lambda * x).
+pub fn exp_cdf(x: f64, lambda: f64) -> f64 {
+    if x <= 0.0 { return 0.0; }
+    1.0 - (-lambda * x).exp()
+}
+
+/// Weibull distribution PDF: (k/lambda) * (x/lambda)^(k-1) * exp(-(x/lambda)^k).
+/// x >= 0, k > 0 (shape), lambda > 0 (scale).
+pub fn weibull_pdf(x: f64, k: f64, lambda: f64) -> f64 {
+    if x < 0.0 { return 0.0; }
+    if x == 0.0 {
+        if k < 1.0 { return f64::INFINITY; }
+        if k == 1.0 { return 1.0 / lambda; }
+        return 0.0;
+    }
+    (k / lambda) * (x / lambda).powf(k - 1.0) * (-(x / lambda).powf(k)).exp()
+}
+
+/// Weibull distribution CDF: 1 - exp(-(x/lambda)^k).
+pub fn weibull_cdf(x: f64, k: f64, lambda: f64) -> f64 {
+    if x <= 0.0 { return 0.0; }
+    1.0 - (-(x / lambda).powf(k)).exp()
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -476,6 +547,99 @@ mod tests {
     fn test_determinism() {
         let r1 = normal_cdf(1.5);
         let r2 = normal_cdf(1.5);
+        assert_eq!(r1.to_bits(), r2.to_bits());
+    }
+
+    // --- B6: New distribution tests ---
+
+    #[test]
+    fn test_beta_pdf_symmetric() {
+        // Beta(2, 2) at x=0.5 should be 1.5
+        let r = beta_pdf(0.5, 2.0, 2.0);
+        assert!((r - 1.5).abs() < 1e-10, "beta_pdf(0.5, 2, 2) = {r}");
+    }
+
+    #[test]
+    fn test_beta_cdf_uniform() {
+        // Beta(1, 1) = Uniform[0,1], CDF(x) = x
+        for &x in &[0.1, 0.3, 0.5, 0.7, 0.9] {
+            let r = beta_cdf(x, 1.0, 1.0);
+            assert!((r - x).abs() < 1e-6, "beta_cdf({x}, 1, 1) = {r}");
+        }
+    }
+
+    #[test]
+    fn test_beta_cdf_endpoints() {
+        assert!((beta_cdf(0.0, 2.0, 3.0) - 0.0).abs() < 1e-12);
+        assert!((beta_cdf(1.0, 2.0, 3.0) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_gamma_cdf_exponential() {
+        // Gamma(1, 1/lambda) ≈ Exp(lambda)
+        let lambda = 2.0;
+        for &x in &[0.5, 1.0, 2.0] {
+            let gc = gamma_cdf(x, 1.0, 1.0 / lambda);
+            let ec = exp_cdf(x, lambda);
+            assert!((gc - ec).abs() < 1e-6, "gamma_cdf({x}) = {gc}, exp_cdf = {ec}");
+        }
+    }
+
+    #[test]
+    fn test_exp_cdf_memoryless() {
+        // exp_cdf(1/lambda, lambda) ≈ 1 - 1/e
+        let lambda = 3.0;
+        let r = exp_cdf(1.0 / lambda, lambda);
+        let expected = 1.0 - (-1.0_f64).exp();
+        assert!((r - expected).abs() < 1e-10, "exp_cdf = {r}, expected {expected}");
+    }
+
+    #[test]
+    fn test_exp_pdf_integral() {
+        // Numerical integration of PDF should be ~1.0
+        let lambda = 1.5;
+        let dx = 0.001;
+        let mut sum = 0.0;
+        let mut x = 0.0;
+        while x < 20.0 {
+            sum += exp_pdf(x, lambda) * dx;
+            x += dx;
+        }
+        assert!((sum - 1.0).abs() < 0.01, "integral = {sum}");
+    }
+
+    #[test]
+    fn test_weibull_cdf_exponential() {
+        // Weibull(k=1, lambda) = Exp(1/lambda)
+        let lambda = 2.0;
+        for &x in &[0.5, 1.0, 3.0] {
+            let wc = weibull_cdf(x, 1.0, lambda);
+            let ec = exp_cdf(x, 1.0 / lambda);
+            assert!((wc - ec).abs() < 1e-10, "weibull_cdf({x}) = {wc}, exp_cdf = {ec}");
+        }
+    }
+
+    #[test]
+    fn test_weibull_pdf_mode() {
+        // For k > 1, mode = lambda * ((k-1)/k)^(1/k)
+        let k: f64 = 3.0;
+        let lambda: f64 = 2.0;
+        let mode = lambda * ((k - 1.0) / k).powf(1.0_f64 / k);
+        let pdf_at_mode = weibull_pdf(mode, k, lambda);
+        // PDF at mode should be a maximum
+        let pdf_left = weibull_pdf(mode - 0.01, k, lambda);
+        let pdf_right = weibull_pdf(mode + 0.01, k, lambda);
+        assert!(pdf_at_mode >= pdf_left, "mode not a max left");
+        assert!(pdf_at_mode >= pdf_right, "mode not a max right");
+    }
+
+    #[test]
+    fn test_b6_dist_determinism() {
+        let r1 = beta_pdf(0.3, 2.0, 5.0);
+        let r2 = beta_pdf(0.3, 2.0, 5.0);
+        assert_eq!(r1.to_bits(), r2.to_bits());
+        let r1 = gamma_cdf(1.5, 3.0, 2.0);
+        let r2 = gamma_cdf(1.5, 3.0, 2.0);
         assert_eq!(r1.to_bits(), r2.to_bits());
     }
 }

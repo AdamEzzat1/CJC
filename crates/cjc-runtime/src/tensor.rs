@@ -958,6 +958,128 @@ impl Tensor {
         Tensor::from_vec(data, &[n, depth])
     }
 
+    // -----------------------------------------------------------------------
+    // Phase B4: Tensor extensions (cat, stack, topk)
+    // -----------------------------------------------------------------------
+
+    /// Concatenate tensors along existing axis.
+    pub fn cat(tensors: &[&Tensor], axis: usize) -> Result<Tensor, RuntimeError> {
+        if tensors.is_empty() {
+            return Err(RuntimeError::InvalidOperation("cat: no tensors".to_string()));
+        }
+        let ndim = tensors[0].ndim();
+        if axis >= ndim {
+            return Err(RuntimeError::InvalidOperation(
+                format!("cat: axis {axis} out of bounds for {ndim}D tensor"),
+            ));
+        }
+        for (i, t) in tensors.iter().enumerate().skip(1) {
+            if t.ndim() != ndim {
+                return Err(RuntimeError::InvalidOperation(
+                    format!("cat: tensor {i} has different ndim"),
+                ));
+            }
+            for d in 0..ndim {
+                if d != axis && t.shape[d] != tensors[0].shape[d] {
+                    return Err(RuntimeError::InvalidOperation(
+                        format!("cat: shape mismatch at dim {d}"),
+                    ));
+                }
+            }
+        }
+        let mut out_shape = tensors[0].shape.clone();
+        for t in tensors.iter().skip(1) {
+            out_shape[axis] += t.shape[axis];
+        }
+        let total = out_shape.iter().product::<usize>();
+        let mut result = vec![0.0; total];
+        let mut out_strides = vec![1usize; ndim];
+        for d in (0..ndim - 1).rev() {
+            out_strides[d] = out_strides[d + 1] * out_shape[d + 1];
+        }
+        let mut offset = 0;
+        for t in tensors {
+            let t_data = t.to_vec();
+            let t_total: usize = t.shape.iter().product();
+            let mut t_strides = vec![1usize; ndim];
+            for d in (0..ndim - 1).rev() {
+                t_strides[d] = t_strides[d + 1] * t.shape[d + 1];
+            }
+            for idx in 0..t_total {
+                let mut remaining = idx;
+                let mut out_flat = 0;
+                for d in 0..ndim {
+                    let coord = remaining / t_strides[d];
+                    remaining %= t_strides[d];
+                    let out_coord = if d == axis { coord + offset } else { coord };
+                    out_flat += out_coord * out_strides[d];
+                }
+                result[out_flat] = t_data[idx];
+            }
+            offset += t.shape[axis];
+        }
+        Tensor::from_vec(result, &out_shape)
+    }
+
+    /// Stack tensors along a new axis.
+    pub fn stack(tensors: &[&Tensor], axis: usize) -> Result<Tensor, RuntimeError> {
+        if tensors.is_empty() {
+            return Err(RuntimeError::InvalidOperation("stack: no tensors".to_string()));
+        }
+        let base_shape = &tensors[0].shape;
+        let ndim = base_shape.len();
+        if axis > ndim {
+            return Err(RuntimeError::InvalidOperation(
+                format!("stack: axis {axis} out of bounds"),
+            ));
+        }
+        for (i, t) in tensors.iter().enumerate().skip(1) {
+            if &t.shape != base_shape {
+                return Err(RuntimeError::InvalidOperation(
+                    format!("stack: tensor {i} shape mismatch"),
+                ));
+            }
+        }
+        let mut out_shape = Vec::with_capacity(ndim + 1);
+        for d in 0..axis { out_shape.push(base_shape[d]); }
+        out_shape.push(tensors.len());
+        for d in axis..ndim { out_shape.push(base_shape[d]); }
+        let total: usize = out_shape.iter().product();
+        let mut result = vec![0.0; total];
+        let inner_size: usize = base_shape[axis..].iter().product::<usize>().max(1);
+        let outer_size: usize = base_shape[..axis].iter().product::<usize>().max(1);
+        for (t_idx, t) in tensors.iter().enumerate() {
+            let t_data = t.to_vec();
+            for outer in 0..outer_size {
+                for inner in 0..inner_size {
+                    let src = outer * inner_size + inner;
+                    let dst = outer * (tensors.len() * inner_size) + t_idx * inner_size + inner;
+                    if src < t_data.len() && dst < result.len() {
+                        result[dst] = t_data[src];
+                    }
+                }
+            }
+        }
+        Tensor::from_vec(result, &out_shape)
+    }
+
+    /// Top-k values and indices (largest k values from flat data).
+    pub fn topk(&self, k: usize) -> Result<(Tensor, Vec<usize>), RuntimeError> {
+        let data = self.to_vec();
+        let n = data.len();
+        if k > n {
+            return Err(RuntimeError::InvalidOperation(
+                format!("topk: k={k} exceeds data length {n}"),
+            ));
+        }
+        let mut indexed: Vec<(usize, f64)> = data.into_iter().enumerate().collect();
+        indexed.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        let top_k: Vec<(usize, f64)> = indexed[..k].to_vec();
+        let values: Vec<f64> = top_k.iter().map(|&(_, v)| v).collect();
+        let indices: Vec<usize> = top_k.iter().map(|&(i, _)| i).collect();
+        Ok((Tensor::from_vec(values, &[k])?, indices))
+    }
+
     /// GELU activation (approximate): x * 0.5 * (1 + tanh(√(2/π) * (x + 0.044715 * x³)))
     pub fn gelu(&self) -> Tensor {
         let data = self.to_vec();

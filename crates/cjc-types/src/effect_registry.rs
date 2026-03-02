@@ -416,6 +416,72 @@ pub fn builtin_effects() -> HashMap<&'static str, EffectSet> {
     m.insert("file_exists", io);       // filesystem query
     m.insert("file_lines", io_alloc);  // reads file, allocates array
 
+    // ── Phase B1: Weighted & robust statistics ──
+    m.insert("weighted_mean", alloc);
+    m.insert("weighted_var", alloc);
+    m.insert("trimmed_mean", alloc);
+    m.insert("winsorize", alloc);
+    m.insert("mad", alloc);
+    m.insert("mode", alloc);
+    m.insert("percentile_rank", alloc);
+
+    // ── Phase B2: Rank correlations ──
+    m.insert("spearman_cor", alloc);
+    m.insert("kendall_cor", alloc);
+    m.insert("partial_cor", alloc);
+    m.insert("cor_ci", alloc);
+
+    // ── Phase B3: Linear algebra extensions ──
+    m.insert("cond", alloc);
+    m.insert("norm_1", pure);
+    m.insert("norm_inf", pure);
+    m.insert("schur", alloc);
+    m.insert("matrix_exp", alloc);
+
+    // ── Phase B4: ML training extensions ──
+    m.insert("cat", alloc);
+    m.insert("stack", alloc);
+    m.insert("topk", alloc);
+    m.insert("batch_norm", alloc);
+    m.insert("dropout_mask", alloc);
+    m.insert("lr_step_decay", pure);
+    m.insert("lr_cosine", pure);
+    m.insert("lr_linear_warmup", pure);
+    m.insert("l1_penalty", alloc);
+    m.insert("l2_penalty", alloc);
+
+    // ── Phase B6: Advanced FFT & Distributions ──
+    m.insert("hann", alloc);
+    m.insert("hamming", alloc);
+    m.insert("blackman", alloc);
+    m.insert("fft_arbitrary", alloc);
+    m.insert("fft_2d", alloc);
+    m.insert("ifft_2d", alloc);
+    m.insert("beta_pdf", pure);
+    m.insert("beta_cdf", pure);
+    m.insert("gamma_pdf", pure);
+    m.insert("gamma_cdf", pure);
+    m.insert("exp_pdf", pure);
+    m.insert("exp_cdf", pure);
+    m.insert("weibull_pdf", pure);
+    m.insert("weibull_cdf", pure);
+
+    // ── Phase B7: Non-parametric tests & multiple comparisons ──
+    m.insert("tukey_hsd", alloc);
+    m.insert("mann_whitney", alloc);
+    m.insert("kruskal_wallis", alloc);
+    m.insert("wilcoxon_signed_rank", alloc);
+    m.insert("bonferroni", alloc);
+    m.insert("fdr_bh", alloc);
+    m.insert("logistic_regression", alloc);
+
+    // ── Phase B5: Analyst QoL extensions ──
+    m.insert("case_when", alloc);
+    m.insert("ntile", alloc);
+    m.insert("percent_rank", alloc);
+    m.insert("cume_dist", alloc);
+    m.insert("wls", alloc);
+
     // ── Window functions ──
     m.insert("window_sum", alloc);   // allocates result array
     m.insert("window_mean", alloc);  // allocates result array

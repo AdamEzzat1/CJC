@@ -166,6 +166,14 @@ pub enum GradOp {
         key_index: usize,
         total_keys: usize,
     },
+    // Phase B8: Transcendental & activation ops
+    Sin(usize),
+    Cos(usize),
+    Sqrt(usize),
+    Pow(usize, f64),
+    Sigmoid(usize),
+    Relu(usize),
+    TanhAct(usize),
 }
 
 /// A node in the reverse-mode AD graph.
@@ -287,6 +295,127 @@ impl GradGraph {
         let idx = self.nodes.len();
         self.nodes.push(Rc::new(RefCell::new(GradNode {
             op: GradOp::Mean(a),
+            tensor: result,
+            grad: None,
+        })));
+        idx
+    }
+
+    // ── Phase B8: Transcendental & activation forward ops ──
+
+    /// Element-wise sine.
+    pub fn sin(&mut self, a: usize) -> usize {
+        let a_t = self.nodes[a].borrow().tensor.clone();
+        let data = a_t.to_vec();
+        let result = Tensor::from_vec_unchecked(
+            data.iter().map(|&x| x.sin()).collect(),
+            a_t.shape(),
+        );
+        let idx = self.nodes.len();
+        self.nodes.push(Rc::new(RefCell::new(GradNode {
+            op: GradOp::Sin(a),
+            tensor: result,
+            grad: None,
+        })));
+        idx
+    }
+
+    /// Element-wise cosine.
+    pub fn cos(&mut self, a: usize) -> usize {
+        let a_t = self.nodes[a].borrow().tensor.clone();
+        let data = a_t.to_vec();
+        let result = Tensor::from_vec_unchecked(
+            data.iter().map(|&x| x.cos()).collect(),
+            a_t.shape(),
+        );
+        let idx = self.nodes.len();
+        self.nodes.push(Rc::new(RefCell::new(GradNode {
+            op: GradOp::Cos(a),
+            tensor: result,
+            grad: None,
+        })));
+        idx
+    }
+
+    /// Element-wise square root.
+    pub fn sqrt(&mut self, a: usize) -> usize {
+        let a_t = self.nodes[a].borrow().tensor.clone();
+        let data = a_t.to_vec();
+        let result = Tensor::from_vec_unchecked(
+            data.iter().map(|&x| x.sqrt()).collect(),
+            a_t.shape(),
+        );
+        let idx = self.nodes.len();
+        self.nodes.push(Rc::new(RefCell::new(GradNode {
+            op: GradOp::Sqrt(a),
+            tensor: result,
+            grad: None,
+        })));
+        idx
+    }
+
+    /// Element-wise power with constant exponent.
+    pub fn pow(&mut self, a: usize, n: f64) -> usize {
+        let a_t = self.nodes[a].borrow().tensor.clone();
+        let data = a_t.to_vec();
+        let result = Tensor::from_vec_unchecked(
+            data.iter().map(|&x| x.powf(n)).collect(),
+            a_t.shape(),
+        );
+        let idx = self.nodes.len();
+        self.nodes.push(Rc::new(RefCell::new(GradNode {
+            op: GradOp::Pow(a, n),
+            tensor: result,
+            grad: None,
+        })));
+        idx
+    }
+
+    /// Sigmoid activation: 1 / (1 + exp(-x)).
+    pub fn sigmoid(&mut self, a: usize) -> usize {
+        let a_t = self.nodes[a].borrow().tensor.clone();
+        let data = a_t.to_vec();
+        let result = Tensor::from_vec_unchecked(
+            data.iter().map(|&x| 1.0 / (1.0 + (-x).exp())).collect(),
+            a_t.shape(),
+        );
+        let idx = self.nodes.len();
+        self.nodes.push(Rc::new(RefCell::new(GradNode {
+            op: GradOp::Sigmoid(a),
+            tensor: result,
+            grad: None,
+        })));
+        idx
+    }
+
+    /// ReLU activation: max(0, x).
+    pub fn relu(&mut self, a: usize) -> usize {
+        let a_t = self.nodes[a].borrow().tensor.clone();
+        let data = a_t.to_vec();
+        let result = Tensor::from_vec_unchecked(
+            data.iter().map(|&x| if x > 0.0 { x } else { 0.0 }).collect(),
+            a_t.shape(),
+        );
+        let idx = self.nodes.len();
+        self.nodes.push(Rc::new(RefCell::new(GradNode {
+            op: GradOp::Relu(a),
+            tensor: result,
+            grad: None,
+        })));
+        idx
+    }
+
+    /// Tanh activation.
+    pub fn tanh_act(&mut self, a: usize) -> usize {
+        let a_t = self.nodes[a].borrow().tensor.clone();
+        let data = a_t.to_vec();
+        let result = Tensor::from_vec_unchecked(
+            data.iter().map(|&x| x.tanh()).collect(),
+            a_t.shape(),
+        );
+        let idx = self.nodes.len();
+        self.nodes.push(Rc::new(RefCell::new(GradNode {
+            op: GradOp::TanhAct(a),
             tensor: result,
             grad: None,
         })));
@@ -467,6 +596,73 @@ impl GradGraph {
                     let _ = (key_index, total_keys);
                     accumulate_grad(&mut grads, map_node, &grad);
                 }
+                // Phase B8: Transcendental & activation backward
+                GradOp::Sin(a) => {
+                    let a_val = self.nodes[a].borrow().tensor.clone();
+                    let cos_a = Tensor::from_vec_unchecked(
+                        a_val.to_vec().iter().map(|&x| x.cos()).collect(),
+                        a_val.shape(),
+                    );
+                    let grad_a = grad.mul_elem_unchecked(&cos_a);
+                    accumulate_grad(&mut grads, a, &grad_a);
+                }
+                GradOp::Cos(a) => {
+                    let a_val = self.nodes[a].borrow().tensor.clone();
+                    let neg_sin_a = Tensor::from_vec_unchecked(
+                        a_val.to_vec().iter().map(|&x| -x.sin()).collect(),
+                        a_val.shape(),
+                    );
+                    let grad_a = grad.mul_elem_unchecked(&neg_sin_a);
+                    accumulate_grad(&mut grads, a, &grad_a);
+                }
+                GradOp::Sqrt(a) => {
+                    // d/dx sqrt(x) = 0.5 / sqrt(x) = 0.5 / node_tensor
+                    let inv_2sqrt = Tensor::from_vec_unchecked(
+                        node_tensor.to_vec().iter().map(|&x| 0.5 / x).collect(),
+                        node_tensor.shape(),
+                    );
+                    let grad_a = grad.mul_elem_unchecked(&inv_2sqrt);
+                    accumulate_grad(&mut grads, a, &grad_a);
+                }
+                GradOp::Pow(a, n) => {
+                    let a_val = self.nodes[a].borrow().tensor.clone();
+                    let coeff = Tensor::from_vec_unchecked(
+                        a_val.to_vec().iter().map(|&x| n * x.powf(n - 1.0)).collect(),
+                        a_val.shape(),
+                    );
+                    let grad_a = grad.mul_elem_unchecked(&coeff);
+                    accumulate_grad(&mut grads, a, &grad_a);
+                }
+                GradOp::Sigmoid(a) => {
+                    // sigmoid'(x) = sigmoid(x) * (1 - sigmoid(x))
+                    let sig = &node_tensor;
+                    let one_minus = Tensor::from_vec_unchecked(
+                        sig.to_vec().iter().map(|&s| 1.0 - s).collect(),
+                        sig.shape(),
+                    );
+                    let local = sig.mul_elem_unchecked(&one_minus);
+                    let grad_a = grad.mul_elem_unchecked(&local);
+                    accumulate_grad(&mut grads, a, &grad_a);
+                }
+                GradOp::Relu(a) => {
+                    let a_val = self.nodes[a].borrow().tensor.clone();
+                    let mask = Tensor::from_vec_unchecked(
+                        a_val.to_vec().iter().map(|&x| if x > 0.0 { 1.0 } else { 0.0 }).collect(),
+                        a_val.shape(),
+                    );
+                    let grad_a = grad.mul_elem_unchecked(&mask);
+                    accumulate_grad(&mut grads, a, &grad_a);
+                }
+                GradOp::TanhAct(a) => {
+                    // tanh'(x) = 1 - tanh(x)^2
+                    let t = &node_tensor;
+                    let one_minus_sq = Tensor::from_vec_unchecked(
+                        t.to_vec().iter().map(|&x| 1.0 - x * x).collect(),
+                        t.shape(),
+                    );
+                    let grad_a = grad.mul_elem_unchecked(&one_minus_sq);
+                    accumulate_grad(&mut grads, a, &grad_a);
+                }
             }
         }
     }
@@ -640,6 +836,145 @@ mod tests {
         for &v in &ga_data {
             assert!((v - 0.25).abs() < 1e-10);
         }
+    }
+
+    // ── Phase B8: Reverse Mode Transcendental & Activation Tests ──
+
+    #[test]
+    fn test_reverse_sin() {
+        let mut g = GradGraph::new();
+        let a = g.parameter(Tensor::from_vec_unchecked(vec![0.0], &[1]));
+        let b = g.sin(a);
+        g.backward(b);
+        let ga = g.grad(a).unwrap();
+        // d/dx sin(x) at x=0 = cos(0) = 1.0
+        assert!((ga.to_vec()[0] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_reverse_cos() {
+        let mut g = GradGraph::new();
+        let a = g.parameter(Tensor::from_vec_unchecked(vec![0.0], &[1]));
+        let b = g.cos(a);
+        g.backward(b);
+        let ga = g.grad(a).unwrap();
+        // d/dx cos(x) at x=0 = -sin(0) = 0.0
+        assert!(ga.to_vec()[0].abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_reverse_sqrt() {
+        let mut g = GradGraph::new();
+        let a = g.parameter(Tensor::from_vec_unchecked(vec![4.0], &[1]));
+        let b = g.sqrt(a);
+        g.backward(b);
+        let ga = g.grad(a).unwrap();
+        // d/dx sqrt(x) at x=4 = 1/(2*2) = 0.25
+        assert!((ga.to_vec()[0] - 0.25).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_reverse_pow() {
+        let mut g = GradGraph::new();
+        let a = g.parameter(Tensor::from_vec_unchecked(vec![2.0], &[1]));
+        let b = g.pow(a, 3.0); // x^3
+        g.backward(b);
+        let ga = g.grad(a).unwrap();
+        // d/dx x^3 at x=2 = 3*4 = 12.0
+        assert!((ga.to_vec()[0] - 12.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_reverse_sigmoid() {
+        let mut g = GradGraph::new();
+        let a = g.parameter(Tensor::from_vec_unchecked(vec![0.0], &[1]));
+        let b = g.sigmoid(a);
+        g.backward(b);
+        let ga = g.grad(a).unwrap();
+        // sigmoid(0) = 0.5, sigmoid'(0) = 0.5 * 0.5 = 0.25
+        assert!((ga.to_vec()[0] - 0.25).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_reverse_relu_positive() {
+        let mut g = GradGraph::new();
+        let a = g.parameter(Tensor::from_vec_unchecked(vec![3.0], &[1]));
+        let b = g.relu(a);
+        g.backward(b);
+        let ga = g.grad(a).unwrap();
+        // relu'(3) = 1.0
+        assert!((ga.to_vec()[0] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_reverse_relu_negative() {
+        let mut g = GradGraph::new();
+        let a = g.parameter(Tensor::from_vec_unchecked(vec![-2.0], &[1]));
+        let b = g.relu(a);
+        g.backward(b);
+        let ga = g.grad(a).unwrap();
+        // relu'(-2) = 0.0
+        assert!(ga.to_vec()[0].abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_reverse_tanh() {
+        let mut g = GradGraph::new();
+        let a = g.parameter(Tensor::from_vec_unchecked(vec![0.0], &[1]));
+        let b = g.tanh_act(a);
+        g.backward(b);
+        let ga = g.grad(a).unwrap();
+        // tanh'(0) = 1 - tanh(0)^2 = 1 - 0 = 1.0
+        assert!((ga.to_vec()[0] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_reverse_sin_cos_chain() {
+        // f(x) = sin(cos(x)), f'(x) = cos(cos(x)) * (-sin(x))
+        // at x=1: f'(1) = cos(cos(1)) * (-sin(1))
+        let mut g = GradGraph::new();
+        let a = g.parameter(Tensor::from_vec_unchecked(vec![1.0], &[1]));
+        let c = g.cos(a);
+        let s = g.sin(c);
+        g.backward(s);
+        let ga = g.grad(a).unwrap();
+        let expected = 1.0_f64.cos().cos() * (-1.0_f64.sin());
+        assert!((ga.to_vec()[0] - expected).abs() < 1e-10, "got {}, expected {expected}", ga.to_vec()[0]);
+    }
+
+    #[test]
+    fn test_reverse_sigmoid_sum() {
+        // f(x) = sum(sigmoid(x)) for vector x
+        let mut g = GradGraph::new();
+        let a = g.parameter(Tensor::from_vec_unchecked(vec![0.0, 1.0, -1.0], &[3]));
+        let s = g.sigmoid(a);
+        let loss = g.sum(s);
+        g.backward(loss);
+        let ga = g.grad(a).unwrap();
+        let ga_data = ga.to_vec();
+        // sigmoid'(0) = 0.25, sigmoid'(1) = sig(1)*(1-sig(1)), sigmoid'(-1) = sig(-1)*(1-sig(-1))
+        let sig1 = 1.0 / (1.0 + (-1.0_f64).exp());
+        let sig_neg1 = 1.0 / (1.0 + 1.0_f64.exp());
+        assert!((ga_data[0] - 0.25).abs() < 1e-10);
+        assert!((ga_data[1] - sig1 * (1.0 - sig1)).abs() < 1e-10);
+        assert!((ga_data[2] - sig_neg1 * (1.0 - sig_neg1)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_b8_determinism() {
+        let mut g1 = GradGraph::new();
+        let a1 = g1.parameter(Tensor::from_vec_unchecked(vec![1.5], &[1]));
+        let s1 = g1.sin(a1);
+        g1.backward(s1);
+        let ga1 = g1.grad(a1).unwrap().to_vec()[0];
+
+        let mut g2 = GradGraph::new();
+        let a2 = g2.parameter(Tensor::from_vec_unchecked(vec![1.5], &[1]));
+        let s2 = g2.sin(a2);
+        g2.backward(s2);
+        let ga2 = g2.grad(a2).unwrap().to_vec()[0];
+
+        assert_eq!(ga1.to_bits(), ga2.to_bits());
     }
 
     #[test]

@@ -72,6 +72,27 @@ pub fn value_to_f64_vec(val: &Value) -> Result<Vec<f64>, String> {
     }
 }
 
+/// Convert a `Value::Array` of complex tuples (re, im) to `Vec<(f64, f64)>`.
+pub fn value_to_complex_vec(val: &Value) -> Result<Vec<(f64, f64)>, String> {
+    match val {
+        Value::Array(arr) => {
+            let mut data = Vec::with_capacity(arr.len());
+            for v in arr.iter() {
+                match v {
+                    Value::Tuple(t) if t.len() == 2 => {
+                        let re = match &t[0] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("complex tuple element must be numeric".into()) };
+                        let im = match &t[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("complex tuple element must be numeric".into()) };
+                        data.push((re, im));
+                    }
+                    _ => return Err("expected array of (re, im) tuples".into()),
+                }
+            }
+            Ok(data)
+        }
+        _ => Err(format!("expected Array of complex tuples, got {}", val.type_name())),
+    }
+}
+
 /// Convert a `Value::Array` of ints to `Vec<usize>`.
 pub fn value_to_usize_vec(val: &Value) -> Result<Vec<usize>, String> {
     match val {
@@ -1141,6 +1162,442 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let result = crate::fft::psd(&data);
             let values: Vec<Value> = result.into_iter().map(Value::Float).collect();
             Ok(Some(Value::Array(Rc::new(values))))
+        }
+
+        // ── B1: Weighted & robust statistics ──────────────────────────
+        "weighted_mean" => {
+            if args.len() != 2 { return Err("weighted_mean requires 2 arguments".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let weights = value_to_f64_vec(&args[1])?;
+            Ok(Some(Value::Float(crate::stats::weighted_mean(&data, &weights)?)))
+        }
+        "weighted_var" => {
+            if args.len() != 2 { return Err("weighted_var requires 2 arguments".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let weights = value_to_f64_vec(&args[1])?;
+            Ok(Some(Value::Float(crate::stats::weighted_var(&data, &weights)?)))
+        }
+        "trimmed_mean" => {
+            if args.len() != 2 { return Err("trimmed_mean requires 2 arguments".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let prop = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("trimmed_mean: proportion must be a number".into()) };
+            Ok(Some(Value::Float(crate::stats::trimmed_mean(&data, prop)?)))
+        }
+        "winsorize" => {
+            if args.len() != 2 { return Err("winsorize requires 2 arguments".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let prop = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("winsorize: proportion must be a number".into()) };
+            let result = crate::stats::winsorize(&data, prop)?;
+            let values: Vec<Value> = result.into_iter().map(Value::Float).collect();
+            Ok(Some(Value::Array(Rc::new(values))))
+        }
+        "mad" => {
+            if args.len() != 1 { return Err("mad requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            Ok(Some(Value::Float(crate::stats::mad(&data)?)))
+        }
+        "mode" => {
+            if args.len() != 1 { return Err("mode requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            Ok(Some(Value::Float(crate::stats::mode(&data)?)))
+        }
+        "percentile_rank" => {
+            if args.len() != 2 { return Err("percentile_rank requires 2 arguments".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let value = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("percentile_rank: value must be a number".into()) };
+            Ok(Some(Value::Float(crate::stats::percentile_rank(&data, value)?)))
+        }
+
+        // ── B4: ML training extensions ─────────────────────────────────
+        "cat" => {
+            if args.len() != 2 { return Err("cat requires 2 arguments (array of tensors, axis)".into()); }
+            let tensors_arr = match &args[0] {
+                Value::Array(arr) => arr.iter().map(|v| match v {
+                    Value::Tensor(t) => Ok(t),
+                    _ => Err("cat: first argument must be array of tensors".to_string()),
+                }).collect::<Result<Vec<&Tensor>, String>>()?,
+                _ => return Err("cat: first argument must be array of tensors".into()),
+            };
+            let axis = value_to_usize(&args[1])?;
+            let refs: Vec<&Tensor> = tensors_arr;
+            Ok(Some(Value::Tensor(Tensor::cat(&refs, axis).map_err(|e| format!("{e}"))?)))
+        }
+        "stack" => {
+            if args.len() != 2 { return Err("stack requires 2 arguments (array of tensors, axis)".into()); }
+            let tensors_arr = match &args[0] {
+                Value::Array(arr) => arr.iter().map(|v| match v {
+                    Value::Tensor(t) => Ok(t),
+                    _ => Err("stack: first argument must be array of tensors".to_string()),
+                }).collect::<Result<Vec<&Tensor>, String>>()?,
+                _ => return Err("stack: first argument must be array of tensors".into()),
+            };
+            let axis = value_to_usize(&args[1])?;
+            Ok(Some(Value::Tensor(Tensor::stack(&tensors_arr, axis).map_err(|e| format!("{e}"))?)))
+        }
+        "topk" => {
+            if args.len() != 2 { return Err("topk requires 2 arguments (tensor, k)".into()); }
+            let t = value_to_tensor(&args[0])?;
+            let k = value_to_usize(&args[1])?;
+            let (vals, idxs) = t.topk(k).map_err(|e| format!("{e}"))?;
+            let idx_values: Vec<Value> = idxs.into_iter().map(|i| Value::Int(i as i64)).collect();
+            Ok(Some(Value::Tuple(Rc::new(vec![Value::Tensor(vals), Value::Array(Rc::new(idx_values))]))))
+        }
+        "batch_norm" => {
+            if args.len() != 6 { return Err("batch_norm requires 6 arguments".into()); }
+            let x = value_to_f64_vec(&args[0])?;
+            let mean = value_to_f64_vec(&args[1])?;
+            let var = value_to_f64_vec(&args[2])?;
+            let gamma = value_to_f64_vec(&args[3])?;
+            let beta = value_to_f64_vec(&args[4])?;
+            let eps = match &args[5] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("batch_norm: eps must be a number".into()) };
+            let result = crate::ml::batch_norm(&x, &mean, &var, &gamma, &beta, eps)?;
+            let values: Vec<Value> = result.into_iter().map(Value::Float).collect();
+            Ok(Some(Value::Array(Rc::new(values))))
+        }
+        "dropout_mask" => {
+            if args.len() != 3 { return Err("dropout_mask requires 3 arguments (n, prob, seed)".into()); }
+            let n = value_to_usize(&args[0])?;
+            let prob = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("dropout_mask: prob must be a number".into()) };
+            let seed = match &args[2] { Value::Int(i) => *i as u64, _ => return Err("dropout_mask: seed must be an integer".into()) };
+            let mask = crate::ml::dropout_mask(n, prob, seed);
+            let values: Vec<Value> = mask.into_iter().map(Value::Float).collect();
+            Ok(Some(Value::Array(Rc::new(values))))
+        }
+        "lr_step_decay" => {
+            if args.len() != 4 { return Err("lr_step_decay requires 4 arguments".into()); }
+            let lr = match &args[0] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("lr_step_decay: lr must be a number".into()) };
+            let rate = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("lr_step_decay: rate must be a number".into()) };
+            let epoch = value_to_usize(&args[2])?;
+            let step = value_to_usize(&args[3])?;
+            Ok(Some(Value::Float(crate::ml::lr_step_decay(lr, rate, epoch, step))))
+        }
+        "lr_cosine" => {
+            if args.len() != 4 { return Err("lr_cosine requires 4 arguments".into()); }
+            let max_lr = match &args[0] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("lr_cosine: max_lr must be a number".into()) };
+            let min_lr = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("lr_cosine: min_lr must be a number".into()) };
+            let epoch = value_to_usize(&args[2])?;
+            let total = value_to_usize(&args[3])?;
+            Ok(Some(Value::Float(crate::ml::lr_cosine(max_lr, min_lr, epoch, total))))
+        }
+        "lr_linear_warmup" => {
+            if args.len() != 3 { return Err("lr_linear_warmup requires 3 arguments".into()); }
+            let lr = match &args[0] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("lr_linear_warmup: lr must be a number".into()) };
+            let epoch = value_to_usize(&args[1])?;
+            let warmup = value_to_usize(&args[2])?;
+            Ok(Some(Value::Float(crate::ml::lr_linear_warmup(lr, epoch, warmup))))
+        }
+        "l1_penalty" => {
+            if args.len() != 2 { return Err("l1_penalty requires 2 arguments".into()); }
+            let params = value_to_f64_vec(&args[0])?;
+            let lambda = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("l1_penalty: lambda must be a number".into()) };
+            Ok(Some(Value::Float(crate::ml::l1_penalty(&params, lambda))))
+        }
+        "l2_penalty" => {
+            if args.len() != 2 { return Err("l2_penalty requires 2 arguments".into()); }
+            let params = value_to_f64_vec(&args[0])?;
+            let lambda = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("l2_penalty: lambda must be a number".into()) };
+            Ok(Some(Value::Float(crate::ml::l2_penalty(&params, lambda))))
+        }
+
+        // ── B3: Linear algebra extensions ─────────────────────────────
+        "cond" => {
+            if args.len() != 1 { return Err("cond requires 1 Tensor argument".into()); }
+            let t = value_to_tensor(&args[0])?;
+            Ok(Some(Value::Float(t.cond().map_err(|e| format!("{e}"))?)))
+        }
+        "norm_1" => {
+            if args.len() != 1 { return Err("norm_1 requires 1 Tensor argument".into()); }
+            let t = value_to_tensor(&args[0])?;
+            Ok(Some(Value::Float(t.norm_1().map_err(|e| format!("{e}"))?)))
+        }
+        "norm_inf" => {
+            if args.len() != 1 { return Err("norm_inf requires 1 Tensor argument".into()); }
+            let t = value_to_tensor(&args[0])?;
+            Ok(Some(Value::Float(t.norm_inf().map_err(|e| format!("{e}"))?)))
+        }
+        "schur" => {
+            if args.len() != 1 { return Err("schur requires 1 Tensor argument".into()); }
+            let t = value_to_tensor(&args[0])?;
+            let (q, t_mat) = t.schur().map_err(|e| format!("{e}"))?;
+            Ok(Some(Value::Tuple(Rc::new(vec![Value::Tensor(q), Value::Tensor(t_mat)]))))
+        }
+        "matrix_exp" => {
+            if args.len() != 1 { return Err("matrix_exp requires 1 Tensor argument".into()); }
+            let t = value_to_tensor(&args[0])?;
+            Ok(Some(Value::Tensor(t.matrix_exp().map_err(|e| format!("{e}"))?)))
+        }
+
+        // ── B2: Rank correlations & partial correlation ────────────────
+        "spearman_cor" => {
+            if args.len() != 2 { return Err("spearman_cor requires 2 arguments".into()); }
+            let x = value_to_f64_vec(&args[0])?;
+            let y = value_to_f64_vec(&args[1])?;
+            Ok(Some(Value::Float(crate::stats::spearman_cor(&x, &y)?)))
+        }
+        "kendall_cor" => {
+            if args.len() != 2 { return Err("kendall_cor requires 2 arguments".into()); }
+            let x = value_to_f64_vec(&args[0])?;
+            let y = value_to_f64_vec(&args[1])?;
+            Ok(Some(Value::Float(crate::stats::kendall_cor(&x, &y)?)))
+        }
+        "partial_cor" => {
+            if args.len() != 3 { return Err("partial_cor requires 3 arguments".into()); }
+            let x = value_to_f64_vec(&args[0])?;
+            let y = value_to_f64_vec(&args[1])?;
+            let z = value_to_f64_vec(&args[2])?;
+            Ok(Some(Value::Float(crate::stats::partial_cor(&x, &y, &z)?)))
+        }
+        "cor_ci" => {
+            if args.len() != 3 { return Err("cor_ci requires 3 arguments".into()); }
+            let x = value_to_f64_vec(&args[0])?;
+            let y = value_to_f64_vec(&args[1])?;
+            let alpha = match &args[2] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("cor_ci: alpha must be a number".into()) };
+            let (lo, hi) = crate::stats::cor_ci(&x, &y, alpha)?;
+            Ok(Some(Value::Tuple(Rc::new(vec![Value::Float(lo), Value::Float(hi)]))))
+        }
+
+        // ── B6: Advanced FFT & Distributions ─────────────────────────
+        "hann" => {
+            if args.len() != 1 { return Err("hann requires 1 argument (n)".into()); }
+            let n = match &args[0] { Value::Int(i) => *i as usize, _ => return Err("hann: n must be an integer".into()) };
+            let w = crate::fft::hann_window(n);
+            Ok(Some(Value::Array(Rc::new(w.into_iter().map(Value::Float).collect()))))
+        }
+        "hamming" => {
+            if args.len() != 1 { return Err("hamming requires 1 argument (n)".into()); }
+            let n = match &args[0] { Value::Int(i) => *i as usize, _ => return Err("hamming: n must be an integer".into()) };
+            let w = crate::fft::hamming_window(n);
+            Ok(Some(Value::Array(Rc::new(w.into_iter().map(Value::Float).collect()))))
+        }
+        "blackman" => {
+            if args.len() != 1 { return Err("blackman requires 1 argument (n)".into()); }
+            let n = match &args[0] { Value::Int(i) => *i as usize, _ => return Err("blackman: n must be an integer".into()) };
+            let w = crate::fft::blackman_window(n);
+            Ok(Some(Value::Array(Rc::new(w.into_iter().map(Value::Float).collect()))))
+        }
+        "fft_arbitrary" => {
+            if args.len() != 1 { return Err("fft_arbitrary requires 1 argument (complex array)".into()); }
+            let data = value_to_complex_vec(&args[0])?;
+            let result = crate::fft::fft_arbitrary(&data);
+            let pairs: Vec<Value> = result.iter().map(|&(re, im)| {
+                Value::Tuple(Rc::new(vec![Value::Float(re), Value::Float(im)]))
+            }).collect();
+            Ok(Some(Value::Array(Rc::new(pairs))))
+        }
+        "fft_2d" => {
+            if args.len() != 3 { return Err("fft_2d requires 3 arguments (data, rows, cols)".into()); }
+            let data = value_to_complex_vec(&args[0])?;
+            let rows = match &args[1] { Value::Int(i) => *i as usize, _ => return Err("fft_2d: rows must be an integer".into()) };
+            let cols = match &args[2] { Value::Int(i) => *i as usize, _ => return Err("fft_2d: cols must be an integer".into()) };
+            let result = crate::fft::fft_2d(&data, rows, cols)?;
+            let pairs: Vec<Value> = result.iter().map(|&(re, im)| {
+                Value::Tuple(Rc::new(vec![Value::Float(re), Value::Float(im)]))
+            }).collect();
+            Ok(Some(Value::Array(Rc::new(pairs))))
+        }
+        "ifft_2d" => {
+            if args.len() != 3 { return Err("ifft_2d requires 3 arguments (data, rows, cols)".into()); }
+            let data = value_to_complex_vec(&args[0])?;
+            let rows = match &args[1] { Value::Int(i) => *i as usize, _ => return Err("ifft_2d: rows must be an integer".into()) };
+            let cols = match &args[2] { Value::Int(i) => *i as usize, _ => return Err("ifft_2d: cols must be an integer".into()) };
+            let result = crate::fft::ifft_2d(&data, rows, cols)?;
+            let pairs: Vec<Value> = result.iter().map(|&(re, im)| {
+                Value::Tuple(Rc::new(vec![Value::Float(re), Value::Float(im)]))
+            }).collect();
+            Ok(Some(Value::Array(Rc::new(pairs))))
+        }
+        "beta_pdf" => {
+            if args.len() != 3 { return Err("beta_pdf requires 3 arguments (x, a, b)".into()); }
+            let x = match &args[0] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("beta_pdf: x must be a number".into()) };
+            let a = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("beta_pdf: a must be a number".into()) };
+            let b = match &args[2] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("beta_pdf: b must be a number".into()) };
+            Ok(Some(Value::Float(crate::distributions::beta_pdf(x, a, b))))
+        }
+        "beta_cdf" => {
+            if args.len() != 3 { return Err("beta_cdf requires 3 arguments (x, a, b)".into()); }
+            let x = match &args[0] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("beta_cdf: x must be a number".into()) };
+            let a = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("beta_cdf: a must be a number".into()) };
+            let b = match &args[2] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("beta_cdf: b must be a number".into()) };
+            Ok(Some(Value::Float(crate::distributions::beta_cdf(x, a, b))))
+        }
+        "gamma_pdf" => {
+            if args.len() != 3 { return Err("gamma_pdf requires 3 arguments (x, k, theta)".into()); }
+            let x = match &args[0] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("gamma_pdf: x must be a number".into()) };
+            let k = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("gamma_pdf: k must be a number".into()) };
+            let theta = match &args[2] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("gamma_pdf: theta must be a number".into()) };
+            Ok(Some(Value::Float(crate::distributions::gamma_pdf(x, k, theta))))
+        }
+        "gamma_cdf" => {
+            if args.len() != 3 { return Err("gamma_cdf requires 3 arguments (x, k, theta)".into()); }
+            let x = match &args[0] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("gamma_cdf: x must be a number".into()) };
+            let k = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("gamma_cdf: k must be a number".into()) };
+            let theta = match &args[2] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("gamma_cdf: theta must be a number".into()) };
+            Ok(Some(Value::Float(crate::distributions::gamma_cdf(x, k, theta))))
+        }
+        "exp_pdf" => {
+            if args.len() != 2 { return Err("exp_pdf requires 2 arguments (x, lambda)".into()); }
+            let x = match &args[0] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("exp_pdf: x must be a number".into()) };
+            let lambda = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("exp_pdf: lambda must be a number".into()) };
+            Ok(Some(Value::Float(crate::distributions::exp_pdf(x, lambda))))
+        }
+        "exp_cdf" => {
+            if args.len() != 2 { return Err("exp_cdf requires 2 arguments (x, lambda)".into()); }
+            let x = match &args[0] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("exp_cdf: x must be a number".into()) };
+            let lambda = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("exp_cdf: lambda must be a number".into()) };
+            Ok(Some(Value::Float(crate::distributions::exp_cdf(x, lambda))))
+        }
+        "weibull_pdf" => {
+            if args.len() != 3 { return Err("weibull_pdf requires 3 arguments (x, k, lambda)".into()); }
+            let x = match &args[0] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("weibull_pdf: x must be a number".into()) };
+            let k = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("weibull_pdf: k must be a number".into()) };
+            let lambda = match &args[2] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("weibull_pdf: lambda must be a number".into()) };
+            Ok(Some(Value::Float(crate::distributions::weibull_pdf(x, k, lambda))))
+        }
+        "weibull_cdf" => {
+            if args.len() != 3 { return Err("weibull_cdf requires 3 arguments (x, k, lambda)".into()); }
+            let x = match &args[0] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("weibull_cdf: x must be a number".into()) };
+            let k = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("weibull_cdf: k must be a number".into()) };
+            let lambda = match &args[2] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("weibull_cdf: lambda must be a number".into()) };
+            Ok(Some(Value::Float(crate::distributions::weibull_cdf(x, k, lambda))))
+        }
+
+        // ── B5: Analyst QoL extensions ─────────────────────────────
+        "case_when" => {
+            if args.len() != 3 { return Err("case_when requires 3 arguments (conditions, values, default)".into()); }
+            let conditions = match &args[0] {
+                Value::Array(arr) => arr.iter().map(|v| match v {
+                    Value::Bool(b) => Ok(*b),
+                    _ => Err("case_when conditions must be booleans".into()),
+                }).collect::<Result<Vec<bool>, String>>()?,
+                _ => return Err("case_when conditions must be an array".into()),
+            };
+            let values = match &args[1] {
+                Value::Array(arr) => arr.as_ref().clone(),
+                _ => return Err("case_when values must be an array".into()),
+            };
+            if conditions.len() != values.len() {
+                return Err("case_when conditions and values must have same length".into());
+            }
+            for (i, &cond) in conditions.iter().enumerate() {
+                if cond { return Ok(Some(values[i].clone())); }
+            }
+            Ok(Some(args[2].clone())) // default
+        }
+        "ntile" => {
+            if args.len() != 2 { return Err("ntile requires 2 arguments (data, n)".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let n = match &args[1] { Value::Int(i) => *i as usize, _ => return Err("ntile: n must be an integer".into()) };
+            let result = crate::stats::ntile(&data, n)?;
+            Ok(Some(Value::Array(Rc::new(result.into_iter().map(Value::Float).collect()))))
+        }
+        "percent_rank" => {
+            if args.len() != 1 { return Err("percent_rank requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let result = crate::stats::percent_rank_fn(&data)?;
+            Ok(Some(Value::Array(Rc::new(result.into_iter().map(Value::Float).collect()))))
+        }
+        "cume_dist" => {
+            if args.len() != 1 { return Err("cume_dist requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let result = crate::stats::cume_dist(&data)?;
+            Ok(Some(Value::Array(Rc::new(result.into_iter().map(Value::Float).collect()))))
+        }
+        "wls" => {
+            if args.len() != 5 { return Err("wls requires 5 arguments (X, y, weights, n, p)".into()); }
+            let x = value_to_f64_vec(&args[0])?;
+            let y = value_to_f64_vec(&args[1])?;
+            let w = value_to_f64_vec(&args[2])?;
+            let n = match &args[3] { Value::Int(i) => *i as usize, _ => return Err("wls: n must be an integer".into()) };
+            let p = match &args[4] { Value::Int(i) => *i as usize, _ => return Err("wls: p must be an integer".into()) };
+            let r = crate::hypothesis::wls(&x, &y, &w, n, p)?;
+            let fields = std::collections::HashMap::from([
+                ("coefficients".to_string(), Value::Array(Rc::new(r.coefficients.into_iter().map(Value::Float).collect()))),
+                ("r_squared".to_string(), Value::Float(r.r_squared)),
+                ("residuals".to_string(), Value::Array(Rc::new(r.residuals.into_iter().map(Value::Float).collect()))),
+            ]);
+            Ok(Some(Value::Struct { name: "LmResult".to_string(), fields }))
+        }
+
+        // ── B7: Non-parametric tests & multiple comparisons ────────
+        "tukey_hsd" => {
+            let groups: Vec<Vec<f64>> = args.iter()
+                .map(|a| value_to_f64_vec(a))
+                .collect::<Result<Vec<_>, _>>()?;
+            let group_refs: Vec<&[f64]> = groups.iter().map(|g| g.as_slice()).collect();
+            let results = crate::hypothesis::tukey_hsd(&group_refs)?;
+            let result_values: Vec<Value> = results.iter().map(|pair| {
+                let mut fields = std::collections::HashMap::new();
+                fields.insert("group_i".into(), Value::Int(pair.group_i as i64));
+                fields.insert("group_j".into(), Value::Int(pair.group_j as i64));
+                fields.insert("mean_diff".into(), Value::Float(pair.mean_diff));
+                fields.insert("q_statistic".into(), Value::Float(pair.q_statistic));
+                fields.insert("p_value".into(), Value::Float(pair.p_value));
+                Value::Struct { name: "TukeyHsdPair".into(), fields }
+            }).collect();
+            Ok(Some(Value::Array(Rc::new(result_values))))
+        }
+        "mann_whitney" => {
+            if args.len() != 2 { return Err("mann_whitney requires 2 arguments".into()); }
+            let x = value_to_f64_vec(&args[0])?;
+            let y = value_to_f64_vec(&args[1])?;
+            let r = crate::hypothesis::mann_whitney(&x, &y)?;
+            let mut fields = std::collections::HashMap::new();
+            fields.insert("u_statistic".into(), Value::Float(r.u_statistic));
+            fields.insert("z_score".into(), Value::Float(r.z_score));
+            fields.insert("p_value".into(), Value::Float(r.p_value));
+            Ok(Some(Value::Struct { name: "MannWhitneyResult".into(), fields }))
+        }
+        "kruskal_wallis" => {
+            let groups: Vec<Vec<f64>> = args.iter()
+                .map(|a| value_to_f64_vec(a))
+                .collect::<Result<Vec<_>, _>>()?;
+            let group_refs: Vec<&[f64]> = groups.iter().map(|g| g.as_slice()).collect();
+            let r = crate::hypothesis::kruskal_wallis(&group_refs)?;
+            let mut fields = std::collections::HashMap::new();
+            fields.insert("h_statistic".into(), Value::Float(r.h_statistic));
+            fields.insert("p_value".into(), Value::Float(r.p_value));
+            fields.insert("df".into(), Value::Float(r.df));
+            Ok(Some(Value::Struct { name: "KruskalWallisResult".into(), fields }))
+        }
+        "wilcoxon_signed_rank" => {
+            if args.len() != 2 { return Err("wilcoxon_signed_rank requires 2 arguments".into()); }
+            let x = value_to_f64_vec(&args[0])?;
+            let y = value_to_f64_vec(&args[1])?;
+            let r = crate::hypothesis::wilcoxon_signed_rank(&x, &y)?;
+            let mut fields = std::collections::HashMap::new();
+            fields.insert("w_statistic".into(), Value::Float(r.w_statistic));
+            fields.insert("z_score".into(), Value::Float(r.z_score));
+            fields.insert("p_value".into(), Value::Float(r.p_value));
+            Ok(Some(Value::Struct { name: "WilcoxonResult".into(), fields }))
+        }
+        "bonferroni" => {
+            if args.len() != 1 { return Err("bonferroni requires 1 argument (p_values array)".into()); }
+            let pvals = value_to_f64_vec(&args[0])?;
+            let adj = crate::hypothesis::bonferroni(&pvals);
+            Ok(Some(Value::Array(Rc::new(adj.into_iter().map(Value::Float).collect()))))
+        }
+        "fdr_bh" => {
+            if args.len() != 1 { return Err("fdr_bh requires 1 argument (p_values array)".into()); }
+            let pvals = value_to_f64_vec(&args[0])?;
+            let adj = crate::hypothesis::fdr_bh(&pvals);
+            Ok(Some(Value::Array(Rc::new(adj.into_iter().map(Value::Float).collect()))))
+        }
+        "logistic_regression" => {
+            if args.len() != 4 { return Err("logistic_regression requires 4 arguments (X, y, n, p)".into()); }
+            let x = value_to_f64_vec(&args[0])?;
+            let y = value_to_f64_vec(&args[1])?;
+            let n = match &args[2] { Value::Int(i) => *i as usize, _ => return Err("logistic_regression: n must be an integer".into()) };
+            let p = match &args[3] { Value::Int(i) => *i as usize, _ => return Err("logistic_regression: p must be an integer".into()) };
+            let r = crate::hypothesis::logistic_regression(&x, &y, n, p)?;
+            let mut fields = std::collections::HashMap::new();
+            fields.insert("coefficients".into(), Value::Array(Rc::new(r.coefficients.into_iter().map(Value::Float).collect())));
+            fields.insert("std_errors".into(), Value::Array(Rc::new(r.std_errors.into_iter().map(Value::Float).collect())));
+            fields.insert("z_values".into(), Value::Array(Rc::new(r.z_values.into_iter().map(Value::Float).collect())));
+            fields.insert("p_values".into(), Value::Array(Rc::new(r.p_values.into_iter().map(Value::Float).collect())));
+            fields.insert("log_likelihood".into(), Value::Float(r.log_likelihood));
+            fields.insert("aic".into(), Value::Float(r.aic));
+            fields.insert("iterations".into(), Value::Int(r.iterations as i64));
+            Ok(Some(Value::Struct { name: "LogisticResult".into(), fields }))
         }
 
         _ => Ok(None), // Not a shared builtin

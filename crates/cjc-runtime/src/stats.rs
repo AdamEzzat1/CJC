@@ -511,6 +511,308 @@ pub fn histogram(data: &[f64], n_bins: usize) -> Result<(Vec<f64>, Vec<usize>), 
 }
 
 // ---------------------------------------------------------------------------
+// Weighted & robust statistics (Phase B, sub-sprint B1)
+// ---------------------------------------------------------------------------
+
+/// Weighted mean: sum(data[i] * weights[i]) / sum(weights).
+/// Uses Kahan summation for both numerator and denominator.
+pub fn weighted_mean(data: &[f64], weights: &[f64]) -> Result<f64, String> {
+    if data.len() != weights.len() {
+        return Err("weighted_mean: data and weights must have same length".into());
+    }
+    if data.is_empty() {
+        return Err("weighted_mean: empty data".into());
+    }
+    let mut num_acc = KahanAccumulatorF64::new();
+    let mut den_acc = KahanAccumulatorF64::new();
+    for i in 0..data.len() {
+        num_acc.add(data[i] * weights[i]);
+        den_acc.add(weights[i]);
+    }
+    let denom = den_acc.finalize();
+    if denom == 0.0 {
+        return Err("weighted_mean: weights sum to zero".into());
+    }
+    Ok(num_acc.finalize() / denom)
+}
+
+/// Weighted variance: sum(w[i] * (x[i] - weighted_mean)^2) / sum(w).
+/// Two-pass: first weighted mean (Kahan), then weighted sum of squared deviations.
+pub fn weighted_var(data: &[f64], weights: &[f64]) -> Result<f64, String> {
+    if data.len() != weights.len() {
+        return Err("weighted_var: data and weights must have same length".into());
+    }
+    if data.is_empty() {
+        return Err("weighted_var: empty data".into());
+    }
+    let wm = weighted_mean(data, weights)?;
+    let mut num_acc = KahanAccumulatorF64::new();
+    let mut den_acc = KahanAccumulatorF64::new();
+    for i in 0..data.len() {
+        let d = data[i] - wm;
+        num_acc.add(weights[i] * d * d);
+        den_acc.add(weights[i]);
+    }
+    let denom = den_acc.finalize();
+    if denom == 0.0 {
+        return Err("weighted_var: weights sum to zero".into());
+    }
+    Ok(num_acc.finalize() / denom)
+}
+
+/// Trimmed mean: mean of data with `proportion` fraction removed from each tail.
+/// proportion=0.1 removes bottom 10% and top 10%, computing mean of middle 80%.
+pub fn trimmed_mean(data: &[f64], proportion: f64) -> Result<f64, String> {
+    if data.is_empty() {
+        return Err("trimmed_mean: empty data".into());
+    }
+    if proportion < 0.0 || proportion >= 0.5 {
+        return Err("trimmed_mean: proportion must be in [0, 0.5)".into());
+    }
+    let sorted = sorted_copy(data);
+    let n = sorted.len();
+    let trim = (n as f64 * proportion).floor() as usize;
+    let trimmed = &sorted[trim..n - trim];
+    if trimmed.is_empty() {
+        return Err("trimmed_mean: all data trimmed".into());
+    }
+    Ok(kahan_mean(trimmed))
+}
+
+/// Winsorize: replace values below the `proportion` quantile with the lower
+/// boundary, and values above the `(1-proportion)` quantile with the upper boundary.
+pub fn winsorize(data: &[f64], proportion: f64) -> Result<Vec<f64>, String> {
+    if data.is_empty() {
+        return Err("winsorize: empty data".into());
+    }
+    if proportion < 0.0 || proportion >= 0.5 {
+        return Err("winsorize: proportion must be in [0, 0.5)".into());
+    }
+    if proportion == 0.0 {
+        return Ok(data.to_vec());
+    }
+    let lo = quantile(data, proportion)?;
+    let hi = quantile(data, 1.0 - proportion)?;
+    Ok(data.iter().map(|&x| {
+        if x < lo { lo } else if x > hi { hi } else { x }
+    }).collect())
+}
+
+/// Median absolute deviation: median(|x[i] - median(x)|).
+/// Does NOT multiply by 1.4826 scaling factor.
+pub fn mad(data: &[f64]) -> Result<f64, String> {
+    if data.is_empty() {
+        return Err("mad: empty data".into());
+    }
+    let med = median(data)?;
+    let abs_devs: Vec<f64> = data.iter().map(|&x| (x - med).abs()).collect();
+    median(&abs_devs)
+}
+
+/// Mode: most frequent value. Ties broken by smallest value.
+/// Uses bit-exact comparison via to_bits() on a sorted copy.
+pub fn mode(data: &[f64]) -> Result<f64, String> {
+    if data.is_empty() {
+        return Err("mode: empty data".into());
+    }
+    let sorted = sorted_copy(data);
+    let mut best_val = sorted[0];
+    let mut best_count = 1usize;
+    let mut cur_val = sorted[0];
+    let mut cur_count = 1usize;
+    for i in 1..sorted.len() {
+        if sorted[i].to_bits() == cur_val.to_bits() {
+            cur_count += 1;
+        } else {
+            if cur_count > best_count {
+                best_count = cur_count;
+                best_val = cur_val;
+            }
+            cur_val = sorted[i];
+            cur_count = 1;
+        }
+    }
+    if cur_count > best_count {
+        best_val = cur_val;
+    }
+    Ok(best_val)
+}
+
+/// Percentile rank: fraction of data values strictly less than the given value,
+/// plus half the fraction equal to the value. Returns a value in [0, 1].
+pub fn percentile_rank(data: &[f64], value: f64) -> Result<f64, String> {
+    if data.is_empty() {
+        return Err("percentile_rank: empty data".into());
+    }
+    let n = data.len() as f64;
+    let mut below = 0usize;
+    let mut equal = 0usize;
+    for &x in data {
+        match x.total_cmp(&value) {
+            std::cmp::Ordering::Less => below += 1,
+            std::cmp::Ordering::Equal => equal += 1,
+            std::cmp::Ordering::Greater => {}
+        }
+    }
+    Ok((below as f64 + 0.5 * equal as f64) / n)
+}
+
+// ---------------------------------------------------------------------------
+// Rank correlations & partial correlation (Phase B, sub-sprint B2)
+// ---------------------------------------------------------------------------
+
+/// Spearman rank correlation: Pearson correlation of the ranks of x and y.
+pub fn spearman_cor(x: &[f64], y: &[f64]) -> Result<f64, String> {
+    if x.len() != y.len() {
+        return Err("spearman_cor: arrays must have same length".into());
+    }
+    if x.len() < 2 {
+        return Err("spearman_cor: need at least 2 elements".into());
+    }
+    let rx = rank(x);
+    let ry = rank(y);
+    cor(&rx, &ry)
+}
+
+/// Kendall tau-b correlation coefficient with tie adjustment.
+/// O(n^2) pairwise comparison for determinism.
+pub fn kendall_cor(x: &[f64], y: &[f64]) -> Result<f64, String> {
+    if x.len() != y.len() {
+        return Err("kendall_cor: arrays must have same length".into());
+    }
+    let n = x.len();
+    if n < 2 {
+        return Err("kendall_cor: need at least 2 elements".into());
+    }
+    let mut concordant: i64 = 0;
+    let mut discordant: i64 = 0;
+    let mut ties_x: i64 = 0;
+    let mut ties_y: i64 = 0;
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let dx = x[i].total_cmp(&x[j]);
+            let dy = y[i].total_cmp(&y[j]);
+            match (dx, dy) {
+                (std::cmp::Ordering::Equal, std::cmp::Ordering::Equal) => {
+                    ties_x += 1;
+                    ties_y += 1;
+                }
+                (std::cmp::Ordering::Equal, _) => { ties_x += 1; }
+                (_, std::cmp::Ordering::Equal) => { ties_y += 1; }
+                _ => {
+                    if dx == dy { concordant += 1; } else { discordant += 1; }
+                }
+            }
+        }
+    }
+    let n0 = (n * (n - 1) / 2) as f64;
+    let denom = ((n0 - ties_x as f64) * (n0 - ties_y as f64)).sqrt();
+    if denom == 0.0 {
+        return Err("kendall_cor: no variation in one or both arrays".into());
+    }
+    Ok((concordant - discordant) as f64 / denom)
+}
+
+/// Partial correlation: correlation of x and y controlling for z.
+pub fn partial_cor(x: &[f64], y: &[f64], z: &[f64]) -> Result<f64, String> {
+    let rxy = cor(x, y)?;
+    let rxz = cor(x, z)?;
+    let ryz = cor(y, z)?;
+    let denom_x = (1.0 - rxz * rxz).sqrt();
+    let denom_y = (1.0 - ryz * ryz).sqrt();
+    if denom_x == 0.0 || denom_y == 0.0 {
+        return Err("partial_cor: perfect correlation with control variable".into());
+    }
+    Ok((rxy - rxz * ryz) / (denom_x * denom_y))
+}
+
+/// Confidence interval for Pearson correlation using Fisher z-transform.
+/// Returns (lower_bound, upper_bound).
+pub fn cor_ci(x: &[f64], y: &[f64], alpha: f64) -> Result<(f64, f64), String> {
+    if x.len() != y.len() {
+        return Err("cor_ci: arrays must have same length".into());
+    }
+    let n = x.len();
+    if n < 4 {
+        return Err("cor_ci: need at least 4 elements".into());
+    }
+    if alpha <= 0.0 || alpha >= 1.0 {
+        return Err("cor_ci: alpha must be in (0, 1)".into());
+    }
+    let r = cor(x, y)?;
+    let z_r = r.atanh(); // Fisher z-transform
+    let se = 1.0 / ((n as f64 - 3.0).sqrt());
+    let z_crit = crate::distributions::normal_ppf(1.0 - alpha / 2.0)?;
+    let lo = (z_r - z_crit * se).tanh();
+    let hi = (z_r + z_crit * se).tanh();
+    Ok((lo, hi))
+}
+
+// ---------------------------------------------------------------------------
+// Analyst QoL extensions (Phase B, sub-sprint B5)
+// ---------------------------------------------------------------------------
+
+/// Divide data into n roughly equal groups (ntile/quantile binning).
+/// Returns 1-based group assignments matching original data order.
+pub fn ntile(data: &[f64], n: usize) -> Result<Vec<f64>, String> {
+    if data.is_empty() {
+        return Err("ntile: empty data".into());
+    }
+    if n == 0 {
+        return Err("ntile: n must be > 0".into());
+    }
+    let len = data.len();
+    // Sort by value with stable index tie-breaking
+    let mut indexed: Vec<(usize, f64)> = data.iter().copied().enumerate().collect();
+    indexed.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+    let mut result = vec![0.0; len];
+    for (rank, &(orig_idx, _)) in indexed.iter().enumerate() {
+        let group = (rank * n / len) + 1;
+        result[orig_idx] = group as f64;
+    }
+    Ok(result)
+}
+
+/// Percent rank: (rank - 1) / (n - 1), range [0, 1].
+/// Uses average-tie ranking from existing rank() function.
+pub fn percent_rank_fn(data: &[f64]) -> Result<Vec<f64>, String> {
+    if data.is_empty() {
+        return Err("percent_rank: empty data".into());
+    }
+    let n = data.len();
+    if n == 1 {
+        return Ok(vec![0.0]);
+    }
+    let ranks = rank(data);
+    Ok(ranks.iter().map(|&r| (r - 1.0) / (n as f64 - 1.0)).collect())
+}
+
+/// Cumulative distribution: count(x_i <= x_j) / n for each x_j.
+pub fn cume_dist(data: &[f64]) -> Result<Vec<f64>, String> {
+    if data.is_empty() {
+        return Err("cume_dist: empty data".into());
+    }
+    let n = data.len();
+    // Sort with indices
+    let mut indexed: Vec<(usize, f64)> = data.iter().copied().enumerate().collect();
+    indexed.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let mut result = vec![0.0; n];
+    let mut i = 0;
+    while i < n {
+        let mut j = i;
+        while j < n && indexed[j].1.to_bits() == indexed[i].1.to_bits() {
+            j += 1;
+        }
+        let cd = j as f64 / n as f64;
+        for k in i..j {
+            result[indexed[k].0] = cd;
+        }
+        i = j;
+    }
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -696,5 +998,359 @@ mod tests {
     fn test_n_distinct() {
         let data = [1.0, 2.0, 2.0, 3.0, 3.0, 3.0];
         assert_eq!(n_distinct(&data), 3);
+    }
+
+    // --- B1: Weighted & Robust Statistics tests ---
+
+    #[test]
+    fn test_weighted_mean_uniform() {
+        let data = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let weights = [1.0, 1.0, 1.0, 1.0, 1.0];
+        let wm = weighted_mean(&data, &weights).unwrap();
+        assert!((wm - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_weighted_mean_skewed() {
+        let data = [1.0, 2.0, 3.0];
+        let weights = [3.0, 0.0, 0.0];
+        let wm = weighted_mean(&data, &weights).unwrap();
+        assert!((wm - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_weighted_mean_empty() {
+        assert!(weighted_mean(&[], &[]).is_err());
+    }
+
+    #[test]
+    fn test_weighted_var_uniform() {
+        let data = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
+        let weights = vec![1.0; data.len()];
+        let wv = weighted_var(&data, &weights).unwrap();
+        let pv = pop_variance(&data).unwrap();
+        assert!((wv - pv).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_trimmed_mean_10pct() {
+        // 10 elements, trim 10% = 1 from each end
+        let data = [100.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, -50.0];
+        let tm = trimmed_mean(&data, 0.1).unwrap();
+        // After sorting: [-50, 2, 3, 4, 5, 6, 7, 8, 9, 100], trim 1 each → [2,3,4,5,6,7,8,9]
+        let expected = kahan_mean(&[2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]);
+        assert!((tm - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_trimmed_mean_zero() {
+        let data = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let tm = trimmed_mean(&data, 0.0).unwrap();
+        assert!((tm - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_trimmed_mean_invalid_proportion() {
+        assert!(trimmed_mean(&[1.0, 2.0], 0.5).is_err());
+        assert!(trimmed_mean(&[1.0, 2.0], -0.1).is_err());
+    }
+
+    #[test]
+    fn test_winsorize_basic() {
+        let data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let w = winsorize(&data, 0.1).unwrap();
+        // 10% quantile ≈ 1.9, 90% quantile ≈ 9.1
+        // Values at extremes should be clipped
+        assert!(w.iter().all(|&x| x >= 1.0 && x <= 10.0));
+    }
+
+    #[test]
+    fn test_winsorize_no_change() {
+        let data = [1.0, 2.0, 3.0];
+        let w = winsorize(&data, 0.0).unwrap();
+        assert_eq!(w, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_mad_symmetric() {
+        let data = [-2.0, -1.0, 0.0, 1.0, 2.0];
+        let m = mad(&data).unwrap();
+        // median = 0, deviations = [2,1,0,1,2], median of deviations = 1
+        assert!((m - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_mad_constant() {
+        let data = [5.0, 5.0, 5.0];
+        let m = mad(&data).unwrap();
+        assert!((m - 0.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_mode_simple() {
+        let data = [1.0, 2.0, 2.0, 3.0];
+        assert!((mode(&data).unwrap() - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_mode_tie() {
+        // 1.0 and 2.0 each appear twice; smallest wins
+        let data = [2.0, 1.0, 2.0, 1.0];
+        assert!((mode(&data).unwrap() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_mode_single() {
+        assert!((mode(&[42.0]).unwrap() - 42.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_percentile_rank_median() {
+        let data = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let pr = percentile_rank(&data, 3.0).unwrap();
+        // 2 below, 1 equal: (2 + 0.5*1)/5 = 0.5
+        assert!((pr - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_percentile_rank_min() {
+        let data = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let pr = percentile_rank(&data, 1.0).unwrap();
+        // 0 below, 1 equal: (0 + 0.5*1)/5 = 0.1
+        assert!((pr - 0.1).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_b1_determinism() {
+        let data = [1.1, 2.2, 3.3, 4.4, 5.5];
+        let weights = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let wm1 = weighted_mean(&data, &weights).unwrap();
+        let wm2 = weighted_mean(&data, &weights).unwrap();
+        assert_eq!(wm1.to_bits(), wm2.to_bits());
+        let m1 = mad(&data).unwrap();
+        let m2 = mad(&data).unwrap();
+        assert_eq!(m1.to_bits(), m2.to_bits());
+    }
+
+    // --- B2: Rank correlations & partial correlation tests ---
+
+    #[test]
+    fn test_spearman_perfect_monotone() {
+        let x = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = [10.0, 20.0, 30.0, 40.0, 50.0];
+        let r = spearman_cor(&x, &y).unwrap();
+        assert!((r - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_spearman_perfect_reverse() {
+        let x = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = [50.0, 40.0, 30.0, 20.0, 10.0];
+        let r = spearman_cor(&x, &y).unwrap();
+        assert!((r - (-1.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_spearman_nonlinear() {
+        // x vs x^2: monotonic but nonlinear
+        let x: Vec<f64> = (1..=10).map(|i| i as f64).collect();
+        let y: Vec<f64> = x.iter().map(|&v| v * v).collect();
+        let r = spearman_cor(&x, &y).unwrap();
+        assert!((r - 1.0).abs() < 1e-12); // strictly monotone → rho = 1
+    }
+
+    #[test]
+    fn test_spearman_equals_pearson_for_linear() {
+        let x = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = [2.0, 4.0, 6.0, 8.0, 10.0];
+        let sp = spearman_cor(&x, &y).unwrap();
+        let pe = cor(&x, &y).unwrap();
+        assert!((sp - pe).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_kendall_concordant() {
+        let x = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let t = kendall_cor(&x, &y).unwrap();
+        assert!((t - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_kendall_discordant() {
+        let x = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = [5.0, 4.0, 3.0, 2.0, 1.0];
+        let t = kendall_cor(&x, &y).unwrap();
+        assert!((t - (-1.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_kendall_with_ties() {
+        let x = [1.0, 2.0, 2.0, 3.0];
+        let y = [1.0, 2.0, 3.0, 4.0];
+        let t = kendall_cor(&x, &y).unwrap();
+        // n0=6, concordant=5, discordant=0, ties_x=1, ties_y=0
+        // tau_b = 5 / sqrt(5 * 6) ≈ 0.9129
+        assert!(t > 0.9 && t < 1.0);
+    }
+
+    #[test]
+    fn test_kendall_known_values() {
+        // Known example: x=[12,2,1,12,2], y=[1,4,7,1,0]
+        let x = [12.0, 2.0, 1.0, 12.0, 2.0];
+        let y = [1.0, 4.0, 7.0, 1.0, 0.0];
+        let t = kendall_cor(&x, &y).unwrap();
+        // Should be negative (generally inverse relationship)
+        assert!(t < 0.0);
+    }
+
+    #[test]
+    fn test_partial_cor_no_confounding() {
+        // z independent of both x and y → partial_cor ≈ cor(x,y)
+        let x = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = [2.0, 4.0, 6.0, 8.0, 10.0];
+        let z = [5.0, 3.0, 1.0, 4.0, 2.0]; // shuffled, not correlated
+        let pc = partial_cor(&x, &y, &z).unwrap();
+        // cor(x,y) = 1.0, so partial_cor should be close to 1.0
+        assert!(pc > 0.95);
+    }
+
+    #[test]
+    fn test_cor_ci_contains_r() {
+        let x = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let y = [2.0, 4.0, 5.0, 4.0, 5.0, 7.0, 8.0, 9.0, 10.0, 11.0];
+        let r = cor(&x, &y).unwrap();
+        let (lo, hi) = cor_ci(&x, &y, 0.05).unwrap();
+        assert!(lo <= r && r <= hi, "r={r} should be in [{lo}, {hi}]");
+    }
+
+    #[test]
+    fn test_cor_ci_95_narrower_than_99() {
+        // Use imperfect correlation to avoid atanh(1.0) = inf
+        let x: Vec<f64> = (1..=20).map(|i| i as f64).collect();
+        let y: Vec<f64> = x.iter().enumerate().map(|(i, &v)| {
+            v * 2.0 + 1.0 + if i % 3 == 0 { 0.5 } else { -0.3 }
+        }).collect();
+        let (lo95, hi95) = cor_ci(&x, &y, 0.05).unwrap();
+        let (lo99, hi99) = cor_ci(&x, &y, 0.01).unwrap();
+        assert!(hi95 - lo95 < hi99 - lo99);
+    }
+
+    #[test]
+    fn test_b2_determinism() {
+        let x = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = [5.0, 3.0, 4.0, 2.0, 1.0];
+        let s1 = spearman_cor(&x, &y).unwrap();
+        let s2 = spearman_cor(&x, &y).unwrap();
+        assert_eq!(s1.to_bits(), s2.to_bits());
+        let k1 = kendall_cor(&x, &y).unwrap();
+        let k2 = kendall_cor(&x, &y).unwrap();
+        assert_eq!(k1.to_bits(), k2.to_bits());
+    }
+
+    // --- B5: Analyst QoL extensions tests ---
+
+    #[test]
+    fn test_ntile_even() {
+        let data: Vec<f64> = (1..=12).map(|i| i as f64).collect();
+        let groups = ntile(&data, 4).unwrap();
+        assert_eq!(groups, vec![1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 4.0, 4.0, 4.0]);
+    }
+
+    #[test]
+    fn test_ntile_uneven() {
+        let data: Vec<f64> = (1..=10).map(|i| i as f64).collect();
+        let groups = ntile(&data, 3).unwrap();
+        // 10 items, 3 groups: groups should be 1..=3, each element assigned
+        assert!(groups.iter().all(|&g| g >= 1.0 && g <= 3.0));
+        // Should have roughly equal counts
+        let c1 = groups.iter().filter(|&&g| g == 1.0).count();
+        let c2 = groups.iter().filter(|&&g| g == 2.0).count();
+        let c3 = groups.iter().filter(|&&g| g == 3.0).count();
+        assert!(c1 >= 3 && c1 <= 4);
+        assert!(c2 >= 3 && c2 <= 4);
+        assert!(c3 >= 3 && c3 <= 4);
+    }
+
+    #[test]
+    fn test_ntile_n_equals_len() {
+        let data = [10.0, 20.0, 30.0, 40.0, 50.0];
+        let groups = ntile(&data, 5).unwrap();
+        assert_eq!(groups, vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn test_ntile_error_empty() {
+        assert!(ntile(&[], 3).is_err());
+    }
+
+    #[test]
+    fn test_ntile_error_zero() {
+        assert!(ntile(&[1.0], 0).is_err());
+    }
+
+    #[test]
+    fn test_percent_rank_sorted() {
+        let data = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let pr = percent_rank_fn(&data).unwrap();
+        assert!((pr[0] - 0.0).abs() < 1e-12);
+        assert!((pr[1] - 0.25).abs() < 1e-12);
+        assert!((pr[2] - 0.5).abs() < 1e-12);
+        assert!((pr[3] - 0.75).abs() < 1e-12);
+        assert!((pr[4] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_percent_rank_ties() {
+        let data = [1.0, 2.0, 2.0, 4.0];
+        let pr = percent_rank_fn(&data).unwrap();
+        // ranks: [1.0, 2.5, 2.5, 4.0]
+        // percent_rank = (rank - 1) / (n - 1) = (rank - 1) / 3
+        assert!((pr[0] - 0.0).abs() < 1e-12);
+        assert!((pr[1] - pr[2]).abs() < 1e-12); // tied values same percent rank
+        assert!((pr[1] - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_percent_rank_single() {
+        let pr = percent_rank_fn(&[42.0]).unwrap();
+        assert_eq!(pr, vec![0.0]);
+    }
+
+    #[test]
+    fn test_cume_dist_sorted() {
+        let data = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let cd = cume_dist(&data).unwrap();
+        assert!((cd[0] - 0.2).abs() < 1e-12);
+        assert!((cd[1] - 0.4).abs() < 1e-12);
+        assert!((cd[2] - 0.6).abs() < 1e-12);
+        assert!((cd[3] - 0.8).abs() < 1e-12);
+        assert!((cd[4] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_cume_dist_ties() {
+        let data = [1.0, 2.0, 2.0, 4.0];
+        let cd = cume_dist(&data).unwrap();
+        assert!((cd[0] - 0.25).abs() < 1e-12);
+        // Both 2.0s should have same cume_dist = 3/4 = 0.75
+        assert!((cd[1] - 0.75).abs() < 1e-12);
+        assert!((cd[2] - 0.75).abs() < 1e-12);
+        assert!((cd[3] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_b5_determinism() {
+        let data = [3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0];
+        let n1 = ntile(&data, 4).unwrap();
+        let n2 = ntile(&data, 4).unwrap();
+        for (a, b) in n1.iter().zip(n2.iter()) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+        let pr1 = percent_rank_fn(&data).unwrap();
+        let pr2 = percent_rank_fn(&data).unwrap();
+        for (a, b) in pr1.iter().zip(pr2.iter()) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
     }
 }
