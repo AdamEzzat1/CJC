@@ -1,0 +1,33 @@
+// bench_seed_stress.cjc — Matmul Chain with Stage Hashing
+// 10-step chain of 32x32 matmuls with normalization
+// Verifies deterministic accumulation across many RNG draws
+
+let t0 = clock();
+let n: i64 = 32;
+let steps: i64 = 10;
+
+// Initial matrix (seed-dependent)
+let acc = Tensor.randn([n, n]);
+let h0 = snap_hash(acc);
+print("STAGE:seed_stress:0:" + h0);
+
+for i in 0..steps {
+    let m = Tensor.randn([n, n]);
+    acc = matmul(acc, m);
+
+    // Normalize to prevent explosion
+    let nrm = norm(acc);
+    if nrm > 0.0 {
+        let s = 1.0 / nrm;
+        let st = Tensor.from_vec([s], [1]);
+        acc = broadcast2("mul", acc, st);
+    }
+
+    let sh = snap_hash(acc);
+    print("STAGE:seed_stress:" + to_string(i + 1) + ":" + sh);
+}
+
+let final_hash = snap_hash(acc);
+let elapsed = (clock() - t0) * 1000.0;
+let gc = gc_live_count();
+print("BENCH:seed_stress:42:" + to_string(elapsed) + ":" + to_string(gc) + ":" + final_hash);

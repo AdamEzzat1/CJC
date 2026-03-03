@@ -1,0 +1,46 @@
+// bench_pipeline.cjc — 1M-Row Data Pipeline Benchmark
+// Stages: generate -> transform -> row sums -> stats -> cumsum
+// Output: STAGE lines + final BENCH line
+
+let t0 = clock();
+
+// Stage 0: Generate 1M elements as 1000x1000 tensor (seed-dependent)
+let data = Tensor.randn([1000, 1000]);
+let h0 = snap_hash(data);
+print("STAGE:pipeline:0:" + h0);
+
+// Stage 1: Transform — scale by 2.5 and shift by 10.0 via broadcast2
+let scale_t = Tensor.from_vec([2.5], [1]);
+let shift_t = Tensor.from_vec([10.0], [1]);
+let scaled = broadcast2("mul", data, scale_t);
+let shifted = broadcast2("add", scaled, shift_t);
+let h1 = snap_hash(shifted);
+print("STAGE:pipeline:1:" + h1);
+
+// Stage 2: Row sums via matmul with ones vector -> [1000, 1]
+let ones_col = Tensor.ones([1000, 1]);
+let row_sums = matmul(shifted, ones_col);
+let h2 = snap_hash(row_sums);
+print("STAGE:pipeline:2:" + h2);
+
+// Stage 3: Statistics — mean of row sums
+let row_mean = row_sums.mean();
+let h3 = snap_hash(row_mean);
+print("STAGE:pipeline:3:" + h3);
+
+// Stage 4: Norm of the row sums tensor
+let row_norm = norm(row_sums);
+let h4 = snap_hash(row_norm);
+print("STAGE:pipeline:4:" + h4);
+
+// Stage 5: Transpose check — transpose a small slice
+let small = Tensor.from_vec([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3]);
+let small_t = small.transpose();
+let h5 = snap_hash(small_t);
+print("STAGE:pipeline:5:" + h5);
+
+// Final hash of all stage hashes
+let final_hash = snap_hash(h0 + h1 + h2 + h3 + h4 + h5);
+let elapsed = (clock() - t0) * 1000.0;
+let gc = gc_live_count();
+print("BENCH:pipeline:42:" + to_string(elapsed) + ":" + to_string(gc) + ":" + final_hash);

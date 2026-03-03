@@ -1,0 +1,42 @@
+// bench_reorder_det.cjc — Operation Reordering Determinism
+// Performs the same computation in different orders and verifies:
+//   - Same ops in same order produce identical hashes (determinism)
+//   - Different ops produce different hashes (sanity)
+
+let t0 = clock();
+let a = Tensor.from_vec([1.0, 2.0, 3.0, 4.0], [2, 2]);
+let b = Tensor.from_vec([5.0, 6.0, 7.0, 8.0], [2, 2]);
+
+// Order 1: matmul then broadcast sin
+let r1 = matmul(a, b);
+let r1_sin = broadcast("sin", r1);
+let h1 = snap_hash(r1_sin);
+
+// Order 2: broadcast sin then matmul (DIFFERENT operation)
+let a_sin = broadcast("sin", a);
+let b_sin = broadcast("sin", b);
+let r2 = matmul(a_sin, b_sin);
+let h2 = snap_hash(r2);
+
+// Order 3: Repeat order 1 exactly — MUST match h1
+let r3 = matmul(a, b);
+let r3_sin = broadcast("sin", r3);
+let h3 = snap_hash(r3_sin);
+
+// Check: h1 == h3 (determinism), h1 != h2 (sanity)
+let det_ok = "PASS";
+if h1 != h3 {
+    det_ok = "FAIL_DETERMINISM";
+}
+if h1 == h2 {
+    det_ok = "FAIL_SANITY";
+}
+
+print("STAGE:reorder:0:" + h1);
+print("STAGE:reorder:1:" + h2);
+print("STAGE:reorder:2:" + h3);
+
+let final_hash = snap_hash(det_ok + h1 + h2 + h3);
+let elapsed = (clock() - t0) * 1000.0;
+let gc = gc_live_count();
+print("BENCH:reorder:42:" + to_string(elapsed) + ":" + to_string(gc) + ":" + final_hash);

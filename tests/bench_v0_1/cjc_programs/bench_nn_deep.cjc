@@ -1,0 +1,41 @@
+// bench_nn_deep.cjc — 50-Layer Neural Network Forward Pass
+// Width 64, batch 4, ReLU activations, normalization to prevent explosion
+// Stage hashes every 10 layers (5 checkpoints)
+
+let t0 = clock();
+let width: i64 = 64;
+let layers: i64 = 50;
+let batch: i64 = 4;
+
+// Initialize input
+let x = Tensor.randn([batch, width]);
+
+// Forward pass through 50 layers
+let stage_idx: i64 = 0;
+for i in 0..layers {
+    let w = Tensor.randn([width, width]);
+    let b = Tensor.randn([1, width]);
+    x = matmul(x, w);
+    x = broadcast2("add", x, b);
+    x = broadcast("relu", x);
+
+    // Stage hash every 10 layers
+    if i % 10 == 9 {
+        let sh = snap_hash(x);
+        print("STAGE:nn_deep:" + to_string(stage_idx) + ":" + sh);
+        stage_idx = stage_idx + 1;
+    }
+
+    // Normalize to prevent explosion: divide by norm
+    let n = norm(x);
+    if n > 0.0 {
+        let scale_val = 1.0 / n;
+        let scale_t = Tensor.from_vec([scale_val], [1]);
+        x = broadcast2("mul", x, scale_t);
+    }
+}
+
+let final_hash = snap_hash(x);
+let elapsed = (clock() - t0) * 1000.0;
+let gc = gc_live_count();
+print("BENCH:nn_deep:42:" + to_string(elapsed) + ":" + to_string(gc) + ":" + final_hash);

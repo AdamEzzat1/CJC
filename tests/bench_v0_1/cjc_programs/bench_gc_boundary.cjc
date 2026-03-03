@@ -1,0 +1,41 @@
+// bench_gc_boundary.cjc — GC Stress Test
+// 120 rounds x 500 gc_alloc + gc_collect per round
+// Verifies tensor data is NOT corrupted by GC pressure
+
+let t0 = clock();
+let rounds: i64 = 120;
+let allocs_per_round: i64 = 500;
+
+// Reference tensor: deterministic computation unaffected by GC
+let ref_t = Tensor.randn([32, 32]);
+let ref_hash = snap_hash(ref_t);
+let all_match: i64 = 1;
+
+for r in 0..rounds {
+    // Create GC pressure
+    for a in 0..allocs_per_round {
+        gc_alloc("temp_" + to_string(r) + "_" + to_string(a));
+    }
+    gc_collect();
+
+    // Verify reference tensor hasn't been corrupted
+    let check = snap_hash(ref_t);
+    if check != ref_hash {
+        all_match = 0;
+    }
+
+    // Stage hash every 30 rounds
+    if r % 30 == 29 {
+        let idx = r / 30;
+        print("STAGE:gc_boundary:" + to_string(idx) + ":" + check);
+    }
+}
+
+let result_str = "ALL_MATCH";
+if all_match == 0 {
+    result_str = "MISMATCH";
+}
+let final_hash = snap_hash(result_str);
+let elapsed = (clock() - t0) * 1000.0;
+let gc = gc_live_count();
+print("BENCH:gc_boundary:42:" + to_string(elapsed) + ":" + to_string(gc) + ":" + final_hash);

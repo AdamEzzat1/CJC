@@ -1,0 +1,87 @@
+// bench_primitive_coverage.cjc — 40+ Primitive ABI Lock
+// Hashes every primitive's output, concatenates, and produces a master hash.
+// If ANY builtin changes behavior, the master hash changes.
+
+let t0 = clock();
+let hashes = "";
+
+// --- Tensor constructors ---
+let z = Tensor.zeros([4, 4]);
+hashes = hashes + snap_hash(z) + "|";
+let o = Tensor.ones([4, 4]);
+hashes = hashes + snap_hash(o) + "|";
+let r = Tensor.randn([4, 4]);
+hashes = hashes + snap_hash(r) + "|";
+
+// --- Tensor ops (free functions) ---
+let a = Tensor.from_vec([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], [3, 3]);
+let b = Tensor.from_vec([9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0], [3, 3]);
+hashes = hashes + snap_hash(matmul(a, b)) + "|";
+hashes = hashes + snap_hash(norm(a)) + "|";
+hashes = hashes + snap_hash(argmax(a)) + "|";
+
+// --- Tensor dot methods ---
+hashes = hashes + snap_hash(a.sum()) + "|";
+hashes = hashes + snap_hash(a.mean()) + "|";
+hashes = hashes + snap_hash(a.transpose()) + "|";
+
+// --- dot product (requires 1D) ---
+let v1 = Tensor.from_vec([1.0, 2.0, 3.0], [3]);
+let v2 = Tensor.from_vec([4.0, 5.0, 6.0], [3]);
+hashes = hashes + snap_hash(dot(v1, v2)) + "|";
+
+// --- Broadcast unary ---
+let t = Tensor.from_vec([0.0, 1.0, 4.0, 9.0], [4]);
+hashes = hashes + snap_hash(broadcast("sqrt", t)) + "|";
+hashes = hashes + snap_hash(broadcast("sin", t)) + "|";
+hashes = hashes + snap_hash(broadcast("cos", t)) + "|";
+hashes = hashes + snap_hash(broadcast("exp", t)) + "|";
+hashes = hashes + snap_hash(broadcast("abs", t)) + "|";
+hashes = hashes + snap_hash(broadcast("relu", t)) + "|";
+hashes = hashes + snap_hash(broadcast("sigmoid", t)) + "|";
+hashes = hashes + snap_hash(broadcast("tanh", t)) + "|";
+hashes = hashes + snap_hash(broadcast("floor", t)) + "|";
+hashes = hashes + snap_hash(broadcast("ceil", t)) + "|";
+hashes = hashes + snap_hash(broadcast("neg", t)) + "|";
+
+// --- Broadcast binary ---
+let p = Tensor.from_vec([2.0, 3.0, 4.0], [3]);
+let q = Tensor.from_vec([3.0, 2.0, 1.0], [3]);
+hashes = hashes + snap_hash(broadcast2("add", p, q)) + "|";
+hashes = hashes + snap_hash(broadcast2("sub", p, q)) + "|";
+hashes = hashes + snap_hash(broadcast2("mul", p, q)) + "|";
+hashes = hashes + snap_hash(broadcast2("div", p, q)) + "|";
+hashes = hashes + snap_hash(broadcast2("pow", p, q)) + "|";
+hashes = hashes + snap_hash(broadcast2("min", p, q)) + "|";
+hashes = hashes + snap_hash(broadcast2("max", p, q)) + "|";
+
+// --- Math builtins (scalar) ---
+hashes = hashes + snap_hash(sin(1.0)) + "|";
+hashes = hashes + snap_hash(cos(1.0)) + "|";
+hashes = hashes + snap_hash(sqrt(2.0)) + "|";
+hashes = hashes + snap_hash(exp(1.0)) + "|";
+hashes = hashes + snap_hash(log(2.718281828)) + "|";
+hashes = hashes + snap_hash(abs(-5.0)) + "|";
+hashes = hashes + snap_hash(floor(3.7)) + "|";
+hashes = hashes + snap_hash(ceil(3.2)) + "|";
+hashes = hashes + snap_hash(round(3.5)) + "|";
+
+// --- Stats builtins ---
+let data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+hashes = hashes + snap_hash(median(data)) + "|";
+hashes = hashes + snap_hash(sd(data)) + "|";
+hashes = hashes + snap_hash(variance(data)) + "|";
+hashes = hashes + snap_hash(quantile(data, 0.25)) + "|";
+hashes = hashes + snap_hash(iqr(data)) + "|";
+
+// --- Additional tensor ops ---
+let eye3 = Tensor.from_vec([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], [3, 3]);
+hashes = hashes + snap_hash(matmul(eye3, a)) + "|";
+hashes = hashes + snap_hash(broadcast("sign", t)) + "|";
+hashes = hashes + snap_hash(broadcast2("atan2", p, q)) + "|";
+
+// --- Master hash of all hashes ---
+let master = snap_hash(hashes);
+let elapsed = (clock() - t0) * 1000.0;
+let gc = gc_live_count();
+print("BENCH:primitives:42:" + to_string(elapsed) + ":" + to_string(gc) + ":" + master);
