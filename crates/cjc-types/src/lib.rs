@@ -1892,13 +1892,18 @@ impl TypeChecker {
                         )
                     })
                     .collect();
+                let effects = if let Some(ref ann) = f.effect_annotation {
+                    effects_from_names(ann)
+                } else {
+                    EffectSet::default()
+                };
                 self.env.register_fn(FnSigEntry {
                     name: f.name.name.clone(),
                     type_params,
                     params,
                     ret,
                     is_nogc: f.is_nogc,
-                    effects: EffectSet::default(),
+                    effects,
                 });
             }
             DeclKind::Trait(t) => {
@@ -1947,13 +1952,18 @@ impl TypeChecker {
                         .map(|t| self.resolve_type_expr(t))
                         .unwrap_or(Type::Void);
                     let qualified_name = format!("{}.{}", target_name, method.name.name);
+                    let effects = if let Some(ref ann) = method.effect_annotation {
+                        effects_from_names(ann)
+                    } else {
+                        EffectSet::default()
+                    };
                     self.env.register_fn(FnSigEntry {
                         name: qualified_name,
                         type_params: vec![],
                         params,
                         ret,
                         is_nogc: method.is_nogc,
-                        effects: EffectSet::default(),
+                        effects,
                     });
                 }
             }

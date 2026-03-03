@@ -1525,6 +1525,11 @@ impl Interpreter {
                 | "snap" | "restore" | "snap_hash"
                 | "snap_save" | "snap_load" | "snap_to_json"
                 | "memo_call"
+                // Parity: builtins present in MIR-exec that were missing here
+                | "to_string"
+                | "linalg.lu" | "linalg.qr" | "linalg.cholesky" | "linalg.inv"
+                | "Map.insert" | "Map.get" | "Map.remove" | "Map.len" | "Map.contains_key"
+                | "SparseCsr.matvec" | "SparseCsr.to_dense" | "SparseCoo.to_csr"
         )
     }
 

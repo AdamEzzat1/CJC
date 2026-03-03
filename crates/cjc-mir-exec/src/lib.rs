@@ -1321,6 +1321,17 @@ impl MirExecutor {
                 | "snap" | "restore" | "snap_hash"
                 | "snap_save" | "snap_load" | "snap_to_json"
                 | "memo_call"
+                // Parity: builtins present in eval that were missing here
+                | "sort" | "sqrt" | "floor" | "abs" | "int" | "float" | "isnan" | "isinf"
+                // Tidy builder builtins
+                | "col" | "desc" | "asc" | "dexpr_binop"
+                | "tidy_count" | "tidy_sum" | "tidy_mean" | "tidy_min" | "tidy_max"
+                | "tidy_first" | "tidy_last"
+                // stringr builtins
+                | "str_detect" | "str_extract" | "str_extract_all"
+                | "str_replace" | "str_replace_all" | "str_split"
+                | "str_count" | "str_trim" | "str_to_upper" | "str_to_lower"
+                | "str_starts" | "str_ends" | "str_sub" | "str_len"
         )
     }
 
