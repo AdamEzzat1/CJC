@@ -996,6 +996,7 @@ mod tests {
                 result: None,
             },
             is_nogc: false,
+            cfg_body: None,
         }
     }
 

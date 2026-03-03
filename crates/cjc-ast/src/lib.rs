@@ -45,6 +45,7 @@ pub struct Decl {
 pub enum DeclKind {
     Struct(StructDecl),
     Class(ClassDecl),
+    Record(RecordDecl),
     Fn(FnDecl),
     Trait(TraitDecl),
     Impl(ImplDecl),
@@ -77,6 +78,16 @@ pub struct StructDecl {
 
 #[derive(Debug, Clone)]
 pub struct ClassDecl {
+    pub name: Ident,
+    pub type_params: Vec<TypeParam>,
+    pub fields: Vec<FieldDecl>,
+}
+
+/// Record declaration: immutable value type.
+/// `record Point { x: f64, y: f64 }`
+/// Records are like structs but always immutable — field reassignment is a type error.
+#[derive(Debug, Clone)]
+pub struct RecordDecl {
     pub name: Ident,
     pub type_params: Vec<TypeParam>,
     pub fields: Vec<FieldDecl>,
@@ -117,6 +128,9 @@ pub struct FnDecl {
     pub return_type: Option<TypeExpr>,
     pub body: Block,
     pub is_nogc: bool,
+    /// Effect annotation: `fn foo() -> i64 / pure { ... }`
+    /// None means "any effect" (backward compatible).
+    pub effect_annotation: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -611,6 +625,7 @@ impl PrettyPrinter {
         match &decl.kind {
             DeclKind::Struct(s) => self.print_struct(s),
             DeclKind::Class(c) => self.print_class(c),
+            DeclKind::Record(r) => self.print_record(r),
             DeclKind::Fn(f) => self.print_fn(f),
             DeclKind::Trait(t) => self.print_trait(t),
             DeclKind::Impl(i) => self.print_impl(i),
@@ -660,6 +675,22 @@ impl PrettyPrinter {
         self.output.push_str(" {\n");
         self.indent += 1;
         for field in &c.fields {
+            self.output
+                .push_str(&format!("{}{}: ", self.indent_str(), field.name));
+            self.print_type_expr(&field.ty);
+            self.output.push('\n');
+        }
+        self.indent -= 1;
+        self.output.push_str(&format!("{}}}", self.indent_str()));
+    }
+
+    fn print_record(&mut self, r: &RecordDecl) {
+        self.output.push_str(&self.indent_str());
+        self.output.push_str(&format!("record {}", r.name));
+        self.print_type_params(&r.type_params);
+        self.output.push_str(" {\n");
+        self.indent += 1;
+        for field in &r.fields {
             self.output
                 .push_str(&format!("{}{}: ", self.indent_str(), field.name));
             self.print_type_expr(&field.ty);

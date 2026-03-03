@@ -591,6 +591,7 @@ pub fn merge_programs(graph: &ModuleGraph) -> Result<cjc_mir::MirProgram, Module
             result: None,
         },
         is_nogc: false,
+        cfg_body: None,
     });
 
     Ok(cjc_mir::MirProgram {

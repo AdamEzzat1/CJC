@@ -39,6 +39,7 @@ fn mk_fn(name: &str, is_nogc: bool, stmts: Vec<MirStmt>) -> MirFunction {
             result: None,
         },
         is_nogc,
+        cfg_body: None,
     }
 }
 
@@ -124,6 +125,7 @@ fn make_fn_decl(name: &str, params: Vec<&str>, body: Block, is_nogc: bool) -> De
             return_type: None,
             body,
             is_nogc,
+            effect_annotation: None,
         }),
         span: span(),
     }

@@ -1172,6 +1172,7 @@ mod tests {
                 result: result.map(Box::new),
             },
             is_nogc: false,
+            cfg_body: None,
         }
     }
 

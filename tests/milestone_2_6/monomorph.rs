@@ -73,6 +73,7 @@ fn make_generic_id_fn(id: u32) -> MirFunction {
             result: Some(Box::new(mk_var("x"))),
         },
         is_nogc: false,
+        cfg_body: None,
     }
 }
 
@@ -88,6 +89,7 @@ fn make_main_fn(id: u32, body_stmts: Vec<MirStmt>) -> MirFunction {
             result: None,
         },
         is_nogc: false,
+        cfg_body: None,
     }
 }
 
@@ -110,6 +112,7 @@ fn mono_noop_on_non_generic_program() {
                 result: None,
             },
             is_nogc: false,
+            cfg_body: None,
         }],
         struct_defs: vec![],
         enum_defs: vec![],
@@ -251,6 +254,7 @@ fn mono_report_top_fanout() {
             result: Some(Box::new(mk_var("v"))),
         },
         is_nogc: false,
+        cfg_body: None,
     };
 
     let main_fn = make_main_fn(

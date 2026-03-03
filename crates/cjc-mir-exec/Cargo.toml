@@ -19,3 +19,4 @@ cjc-regex = { path = "../cjc-regex" }
 cjc-module = { path = "../cjc-module" }
 cjc-lexer = { path = "../cjc-lexer" }
 cjc-parser = { path = "../cjc-parser" }
+cjc-snap = { path = "../cjc-snap" }

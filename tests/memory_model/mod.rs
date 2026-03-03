@@ -170,6 +170,7 @@ fn g3_escape_analysis_classifies_primitives_as_stack() {
             result: None,
         },
         is_nogc: true,
+        cfg_body: None,
     };
 
     let info = analyze_function(&func);
@@ -205,6 +206,7 @@ fn g3_escape_analysis_detects_return_escape() {
             result: None,
         },
         is_nogc: false,
+        cfg_body: None,
     };
 
     let info = analyze_function(&func);
@@ -233,6 +235,7 @@ fn g3_has_heap_alloc_detects_arena_and_rc() {
             result: None,
         },
         is_nogc: true,
+        cfg_body: None,
     };
     assert!(!has_heap_alloc(&analyze_function(&pure_fn)));
 
@@ -255,6 +258,7 @@ fn g3_has_heap_alloc_detects_arena_and_rc() {
             result: None,
         },
         is_nogc: false,
+        cfg_body: None,
     };
     assert!(has_heap_alloc(&analyze_function(&string_fn)));
 }

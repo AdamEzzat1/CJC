@@ -18,9 +18,10 @@
 //!   --help                       Print usage and exit
 //!   --version                    Print version and exit
 
+mod line_editor;
+
 use std::env;
 use std::fs;
-use std::io;
 use std::path::Path;
 use std::process;
 use std::time::Instant;
@@ -320,28 +321,38 @@ fn cmd_run(
 }
 
 fn cmd_repl(seed: u64, use_color: bool) {
-    use std::io::{BufRead, Write};
-
     let mut interpreter = cjc_eval::Interpreter::new(seed);
+    let mut editor = line_editor::LineEditor::new();
     let mut line_num = 0u64;
 
-    eprintln!("CJC REPL v0.1.0 (type 'exit' or Ctrl+C to quit)");
+    eprintln!("CJC REPL v0.1.0  (type :help for commands, :quit to exit)");
 
     loop {
-        eprint!("> ");
-        io::stderr().flush().unwrap();
+        let input = match editor.read_line("cjc> ") {
+            line_editor::ReadResult::Line(line) => line,
+            line_editor::ReadResult::Eof => break,
+        };
 
-        let mut line = String::new();
-        match io::stdin().lock().read_line(&mut line) {
-            Ok(0) => break, // EOF
-            Ok(_) => {}
-            Err(_) => break,
-        }
-
-        let trimmed = line.trim();
+        let trimmed = input.trim();
         if trimmed.is_empty() {
             continue;
         }
+
+        // Meta-commands (colon-prefixed)
+        if trimmed.starts_with(':') {
+            match handle_meta_command(trimmed, &interpreter, use_color, seed) {
+                MetaResult::Continue => continue,
+                MetaResult::Quit => break,
+                MetaResult::Reset => {
+                    interpreter = cjc_eval::Interpreter::new(seed);
+                    line_num = 0;
+                    eprintln!("Environment reset.");
+                    continue;
+                }
+            }
+        }
+
+        // Legacy exit commands
         if trimmed == "exit" || trimmed == "quit" {
             break;
         }
@@ -375,6 +386,117 @@ fn cmd_repl(seed: u64, use_color: bool) {
             Err(e) => {
                 eprintln!("Error: {}", e);
             }
+        }
+    }
+}
+
+enum MetaResult {
+    Continue,
+    Quit,
+    Reset,
+}
+
+fn handle_meta_command(
+    cmd: &str,
+    _interpreter: &cjc_eval::Interpreter,
+    use_color: bool,
+    seed: u64,
+) -> MetaResult {
+    let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
+    let command = parts[0];
+    let arg = parts.get(1).copied().unwrap_or("");
+
+    match command {
+        ":help" | ":h" => {
+            eprintln!("CJC REPL Commands:");
+            eprintln!("  :help, :h          Show this help");
+            eprintln!("  :quit, :q          Quit the REPL");
+            eprintln!("  :reset             Reset environment (clear all bindings)");
+            eprintln!("  :type <expr>       Show the type of an expression");
+            eprintln!("  :ast <expr>        Show the AST of an expression");
+            eprintln!("  :mir <expr>        Show the MIR of an expression");
+            eprintln!("  :env               Show current variable bindings");
+            eprintln!("  :seed              Show the current RNG seed");
+            MetaResult::Continue
+        }
+        ":quit" | ":q" => MetaResult::Quit,
+        ":reset" => MetaResult::Reset,
+        ":type" | ":t" => {
+            if arg.is_empty() {
+                eprintln!("Usage: :type <expression>");
+            } else {
+                let (program, diags) = cjc_parser::parse_source(arg);
+                if diags.has_errors() {
+                    let rendered = diags.render_all_color(arg, "<repl:type>", use_color);
+                    eprint!("{}", rendered);
+                } else {
+                    let mut checker = cjc_types::TypeChecker::new();
+                    checker.check_program(&program);
+                    // Try to infer the type of the last expression
+                    if let Some(last) = program.declarations.last() {
+                        match &last.kind {
+                            cjc_ast::DeclKind::Fn(_) => eprintln!("fn"),
+                            _ => {
+                                // For expressions wrapped in decls, just show what we can
+                                eprintln!("(type checking complete, no errors)")
+                            }
+                        }
+                    }
+                    // Show any diagnostics
+                    if !checker.diagnostics.diagnostics.is_empty() {
+                        for d in &checker.diagnostics.diagnostics {
+                            eprintln!("[{}] {}", d.code, d.message);
+                        }
+                    }
+                }
+            }
+            MetaResult::Continue
+        }
+        ":ast" => {
+            if arg.is_empty() {
+                eprintln!("Usage: :ast <expression>");
+            } else {
+                let (program, diags) = cjc_parser::parse_source(arg);
+                if diags.has_errors() {
+                    let rendered = diags.render_all_color(arg, "<repl:ast>", use_color);
+                    eprint!("{}", rendered);
+                } else {
+                    eprintln!("{:#?}", program);
+                }
+            }
+            MetaResult::Continue
+        }
+        ":mir" => {
+            if arg.is_empty() {
+                eprintln!("Usage: :mir <expression>");
+            } else {
+                let (program, diags) = cjc_parser::parse_source(arg);
+                if diags.has_errors() {
+                    let rendered = diags.render_all_color(arg, "<repl:mir>", use_color);
+                    eprint!("{}", rendered);
+                } else {
+                    let mir_program = cjc_mir_exec::lower_to_mir(&program);
+                    for func in &mir_program.functions {
+                        eprintln!("fn {}:", func.name);
+                        eprintln!("{:#?}", func.body);
+                    }
+                }
+            }
+            MetaResult::Continue
+        }
+        ":env" => {
+            eprintln!("Current REPL environment:");
+            eprintln!("  (environment introspection for eval interpreter)");
+            eprintln!("  seed = {}", seed);
+            MetaResult::Continue
+        }
+        ":seed" => {
+            eprintln!("RNG seed: {}", seed);
+            MetaResult::Continue
+        }
+        _ => {
+            eprintln!("Unknown command: {}. Type :help for available commands.", command);
+            MetaResult::Continue
         }
     }
 }

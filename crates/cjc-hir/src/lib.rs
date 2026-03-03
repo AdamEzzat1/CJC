@@ -36,6 +36,7 @@ pub enum HirItem {
     Fn(HirFn),
     Struct(HirStructDef),
     Class(HirClassDef),
+    Record(HirRecordDef),
     Trait(HirTraitDef),
     Impl(HirImplDef),
     Enum(HirEnumDef),
@@ -78,6 +79,14 @@ pub struct HirStructDef {
 
 #[derive(Debug, Clone)]
 pub struct HirClassDef {
+    pub name: String,
+    pub fields: Vec<(String, String)>,
+    pub hir_id: HirId,
+}
+
+/// Record: immutable value type.
+#[derive(Debug, Clone)]
+pub struct HirRecordDef {
     pub name: String,
     pub fields: Vec<(String, String)>,
     pub hir_id: HirId,
@@ -544,6 +553,7 @@ impl AstLowering {
             cjc_ast::DeclKind::Fn(f) => HirItem::Fn(self.lower_fn_decl(f)),
             cjc_ast::DeclKind::Struct(s) => HirItem::Struct(self.lower_struct(s)),
             cjc_ast::DeclKind::Class(c) => HirItem::Class(self.lower_class(c)),
+            cjc_ast::DeclKind::Record(r) => HirItem::Record(self.lower_record(r)),
             cjc_ast::DeclKind::Trait(t) => HirItem::Trait(self.lower_trait(t)),
             cjc_ast::DeclKind::Impl(i) => HirItem::Impl(self.lower_impl(i)),
             cjc_ast::DeclKind::Let(l) => HirItem::Let(self.lower_let_decl(l)),
@@ -661,6 +671,20 @@ impl AstLowering {
             .collect();
         HirClassDef {
             name: c.name.name.clone(),
+            fields,
+            hir_id,
+        }
+    }
+
+    fn lower_record(&mut self, r: &cjc_ast::RecordDecl) -> HirRecordDef {
+        let hir_id = self.fresh_id();
+        let fields = r
+            .fields
+            .iter()
+            .map(|f| (f.name.name.clone(), self.type_expr_to_string(&f.ty)))
+            .collect();
+        HirRecordDef {
+            name: r.name.name.clone(),
             fields,
             hir_id,
         }
@@ -2099,6 +2123,7 @@ mod tests {
                 span: span(),
             },
             is_nogc: false,
+            effect_annotation: None,
         };
         let hir_fn = lowering.lower_fn_decl(&fn_decl);
         assert_eq!(hir_fn.name, "add");
@@ -2236,6 +2261,7 @@ mod tests {
                             span: span(),
                         },
                         is_nogc: false,
+                        effect_annotation: None,
                     }),
                     span: span(),
                 },

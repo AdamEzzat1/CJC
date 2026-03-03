@@ -2,8 +2,8 @@ use cjc_ast::{
     self, BinOp, Block, CallArg, ClassDecl, ConstDecl, Decl, DeclKind, ElseBranch, EnumDecl,
     Expr, ExprKind, FieldDecl, FieldInit, FnDecl, FnSig, ForIter, ForStmt, Ident, IfStmt,
     ImplDecl, ImportDecl, LetStmt, MatchArm, Param, Pattern, PatternField, PatternKind, Program,
-    ShapeDim, Stmt, StmtKind, StructDecl, TraitDecl, TypeArg, TypeExpr, TypeExprKind, TypeParam,
-    UnaryOp, VariantDecl, WhileStmt,
+    RecordDecl, ShapeDim, Stmt, StmtKind, StructDecl, TraitDecl, TypeArg, TypeExpr, TypeExprKind,
+    TypeParam, UnaryOp, VariantDecl, WhileStmt,
 };
 use cjc_diag::{Diagnostic, DiagnosticBag};
 use cjc_lexer::{Token, TokenKind};
@@ -196,6 +196,7 @@ impl Parser {
                 TokenKind::RBrace => return,
                 TokenKind::Struct
                 | TokenKind::Class
+                | TokenKind::Record
                 | TokenKind::Fn
                 | TokenKind::Trait
                 | TokenKind::Impl
@@ -242,6 +243,7 @@ impl Parser {
         match self.peek_kind() {
             TokenKind::Struct => self.parse_struct_decl(),
             TokenKind::Class => self.parse_class_decl(),
+            TokenKind::Record => self.parse_record_decl(),
             TokenKind::Enum => self.parse_enum_decl(),
             TokenKind::Fn => self.parse_fn_decl(false),
             TokenKind::NoGc if self.peek_ahead(1) == TokenKind::Fn => self.parse_nogc_fn_decl(),
@@ -360,6 +362,25 @@ impl Parser {
         })
     }
 
+    // ── record ─────────────────────────────────────────────────────
+
+    fn parse_record_decl(&mut self) -> PResult<Decl> {
+        let start = self.expect(TokenKind::Record)?.span;
+        let name = self.parse_ident()?;
+        let type_params = self.parse_optional_type_params()?;
+        self.expect(TokenKind::LBrace)?;
+        let fields = self.parse_field_list()?;
+        let end = self.expect(TokenKind::RBrace)?.span;
+        Ok(Decl {
+            kind: DeclKind::Record(RecordDecl {
+                name,
+                type_params,
+                fields,
+            }),
+            span: to_ast_span(start.merge(end)),
+        })
+    }
+
     // ── enum ───────────────────────────────────────────────────────
 
     fn parse_enum_decl(&mut self) -> PResult<Decl> {
@@ -461,6 +482,7 @@ impl Parser {
         } else {
             None
         };
+        let effect_annotation = self.parse_effect_annotation()?;
         let body = self.parse_block()?;
         let span = merge_spans(to_ast_span(start), body.span);
         Ok(Decl {
@@ -471,6 +493,7 @@ impl Parser {
                 return_type,
                 body,
                 is_nogc,
+                effect_annotation,
             }),
             span,
         })
@@ -480,6 +503,26 @@ impl Parser {
         // consume `nogc`, then delegate to parse_fn_decl
         self.advance(); // nogc
         self.parse_fn_decl(true)
+    }
+
+    /// Parse optional effect annotation: `/ pure`, `/ io`, `/ pure + alloc`, etc.
+    ///
+    /// Syntax: `/ effect_name (+ effect_name)*`
+    /// Valid effect names: pure, io, alloc, gc, nondet, mutates, arena_ok, captures
+    fn parse_effect_annotation(&mut self) -> PResult<Option<Vec<String>>> {
+        if self.eat(TokenKind::Slash).is_none() {
+            return Ok(None);
+        }
+        let mut effects = Vec::new();
+        // Parse first effect name (required after `/`)
+        let ident = self.parse_ident()?;
+        effects.push(ident.name);
+        // Parse additional effects separated by `+`
+        while self.eat(TokenKind::Plus).is_some() {
+            let ident = self.parse_ident()?;
+            effects.push(ident.name);
+        }
+        Ok(Some(effects))
     }
 
     fn parse_param_list(&mut self) -> PResult<Vec<Param>> {
@@ -614,6 +657,7 @@ impl Parser {
             } else {
                 None
             };
+            let effect_annotation = self.parse_effect_annotation()?;
             let body = self.parse_block()?;
             let fn_span = merge_spans(to_ast_span(fn_start), body.span);
             methods.push(FnDecl {
@@ -623,6 +667,7 @@ impl Parser {
                 return_type,
                 body,
                 is_nogc,
+                effect_annotation,
             });
             let _ = fn_span; // span used for method
         }

@@ -1,3 +1,5 @@
+pub mod inference;
+
 use std::collections::HashMap;
 use std::fmt;
 
@@ -54,11 +56,14 @@ pub enum Type {
     /// Tuple type.
     Tuple(Vec<Type>),
 
-    /// User-defined struct (value type).
+    /// User-defined struct (mutable value type).
     Struct(StructType),
 
     /// User-defined class (GC reference type).
     Class(ClassType),
+
+    /// User-defined record (immutable value type).
+    Record(RecordType),
 
     /// User-defined enum / ADT (value type, stack-allocatable).
     Enum(EnumType),
@@ -160,6 +165,7 @@ impl Type {
                 | Type::Array { .. }
                 | Type::Tuple(_)
                 | Type::Struct(_)
+                | Type::Record(_)
                 | Type::Enum(_)
                 | Type::Map { .. }
                 | Type::SparseTensor { .. }
@@ -240,6 +246,7 @@ impl fmt::Display for Type {
             }
             Type::Struct(s) => write!(f, "{}", s.name),
             Type::Class(c) => write!(f, "{}", c.name),
+            Type::Record(r) => write!(f, "{}", r.name),
             Type::Enum(e) => write!(f, "{}", e.name),
             Type::Bf16 => write!(f, "bf16"),
             Type::F16 => write!(f, "f16"),
@@ -454,6 +461,18 @@ pub fn unify(a: &Type, b: &Type, subst: &mut TypeSubst) -> Result<Type, String> 
                 Err(format!(
                     "type mismatch: class `{}` vs class `{}`",
                     c1.name, c2.name
+                ))
+            }
+        }
+
+        // Record (nominal)
+        (Type::Record(r1), Type::Record(r2)) => {
+            if r1.name == r2.name {
+                Ok(a.clone())
+            } else {
+                Err(format!(
+                    "type mismatch: record `{}` vs record `{}`",
+                    r1.name, r2.name
                 ))
             }
         }
@@ -775,6 +794,14 @@ pub struct ClassType {
     pub fields: Vec<(String, Type)>,
 }
 
+/// Record type: immutable value type with structural equality.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordType {
+    pub name: String,
+    pub type_params: Vec<String>,
+    pub fields: Vec<(String, Type)>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumType {
     pub name: String,
@@ -824,6 +851,9 @@ pub const TRAIT_NUMERIC: &str = "Numeric";
 pub const TRAIT_FLOAT: &str = "Float";
 pub const TRAIT_INT: &str = "Int";
 pub const TRAIT_DIFFERENTIABLE: &str = "Differentiable";
+pub const TRAIT_ORD: &str = "Ord";
+pub const TRAIT_DISPLAY: &str = "Display";
+pub const TRAIT_SNAP: &str = "Snap";
 
 /// Built-in trait hierarchy:
 ///   Numeric
@@ -883,6 +913,24 @@ pub fn builtin_trait_defs() -> Vec<TraitDef> {
             super_traits: vec![TRAIT_FLOAT.into()],
             methods: vec![],
         },
+        TraitDef {
+            name: TRAIT_ORD.into(),
+            type_params: vec![],
+            super_traits: vec![],
+            methods: vec![],
+        },
+        TraitDef {
+            name: TRAIT_DISPLAY.into(),
+            type_params: vec![],
+            super_traits: vec![],
+            methods: vec![],
+        },
+        TraitDef {
+            name: TRAIT_SNAP.into(),
+            type_params: vec![],
+            super_traits: vec![],
+            methods: vec![],
+        },
     ]
 }
 
@@ -903,6 +951,30 @@ pub fn builtin_trait_impls() -> Vec<TraitImpl> {
         TraitImpl { trait_name: TRAIT_NUMERIC.into(), target_type: Type::F64, type_args: vec![] },
         TraitImpl { trait_name: TRAIT_FLOAT.into(), target_type: Type::F64, type_args: vec![] },
         TraitImpl { trait_name: TRAIT_DIFFERENTIABLE.into(), target_type: Type::F64, type_args: vec![] },
+        // Ord: i32, i64, f32, f64, u8, str, bool
+        TraitImpl { trait_name: TRAIT_ORD.into(), target_type: Type::I32, type_args: vec![] },
+        TraitImpl { trait_name: TRAIT_ORD.into(), target_type: Type::I64, type_args: vec![] },
+        TraitImpl { trait_name: TRAIT_ORD.into(), target_type: Type::U8, type_args: vec![] },
+        TraitImpl { trait_name: TRAIT_ORD.into(), target_type: Type::F32, type_args: vec![] },
+        TraitImpl { trait_name: TRAIT_ORD.into(), target_type: Type::F64, type_args: vec![] },
+        TraitImpl { trait_name: TRAIT_ORD.into(), target_type: Type::Str, type_args: vec![] },
+        TraitImpl { trait_name: TRAIT_ORD.into(), target_type: Type::Bool, type_args: vec![] },
+        // Display: all primitives
+        TraitImpl { trait_name: TRAIT_DISPLAY.into(), target_type: Type::I32, type_args: vec![] },
+        TraitImpl { trait_name: TRAIT_DISPLAY.into(), target_type: Type::I64, type_args: vec![] },
+        TraitImpl { trait_name: TRAIT_DISPLAY.into(), target_type: Type::U8, type_args: vec![] },
+        TraitImpl { trait_name: TRAIT_DISPLAY.into(), target_type: Type::F32, type_args: vec![] },
+        TraitImpl { trait_name: TRAIT_DISPLAY.into(), target_type: Type::F64, type_args: vec![] },
+        TraitImpl { trait_name: TRAIT_DISPLAY.into(), target_type: Type::Bool, type_args: vec![] },
+        TraitImpl { trait_name: TRAIT_DISPLAY.into(), target_type: Type::Str, type_args: vec![] },
+        // Snap: all value types (primitives + structs)
+        TraitImpl { trait_name: TRAIT_SNAP.into(), target_type: Type::I32, type_args: vec![] },
+        TraitImpl { trait_name: TRAIT_SNAP.into(), target_type: Type::I64, type_args: vec![] },
+        TraitImpl { trait_name: TRAIT_SNAP.into(), target_type: Type::U8, type_args: vec![] },
+        TraitImpl { trait_name: TRAIT_SNAP.into(), target_type: Type::F32, type_args: vec![] },
+        TraitImpl { trait_name: TRAIT_SNAP.into(), target_type: Type::F64, type_args: vec![] },
+        TraitImpl { trait_name: TRAIT_SNAP.into(), target_type: Type::Bool, type_args: vec![] },
+        TraitImpl { trait_name: TRAIT_SNAP.into(), target_type: Type::Str, type_args: vec![] },
     ]
 }
 
@@ -1442,6 +1514,11 @@ impl TypeEnv {
         self.type_defs.insert(name.to_string(), Type::Class(ct));
     }
 
+    /// Register a record type (immutable value type).
+    pub fn register_record(&mut self, name: &str, rt: RecordType) {
+        self.type_defs.insert(name.to_string(), Type::Record(rt));
+    }
+
     /// Register an enum type.
     pub fn register_enum_type(&mut self, name: &str, et: EnumType) {
         self.type_defs.insert(name.to_string(), Type::Enum(et));
@@ -1478,6 +1555,242 @@ fn to_diag_span(span: cjc_ast::Span) -> cjc_diag::Span {
 
 /// P2-3: Returns true if an expression is a compile-time constant (pure literal).
 /// Only literal values are accepted as const initializers.
+// ── Effect Typing Helpers ─────────────────────────────────────────
+
+/// Convert effect annotation names (e.g. "pure", "io", "alloc") to an EffectSet.
+fn effects_from_names(names: &[String]) -> EffectSet {
+    let mut bits: u16 = 0;
+    for name in names {
+        match name.as_str() {
+            "pure" => {} // pure = no flags
+            "io" => bits |= EffectSet::IO,
+            "alloc" => bits |= EffectSet::ALLOC,
+            "gc" => bits |= EffectSet::GC,
+            "nondet" => bits |= EffectSet::NONDET,
+            "mutates" => bits |= EffectSet::MUTATES,
+            "arena_ok" => bits |= EffectSet::ARENA_OK,
+            "captures" => bits |= EffectSet::CAPTURES,
+            _ => {} // Unknown effect names are silently ignored (caught by tests)
+        }
+    }
+    EffectSet::new(bits)
+}
+
+/// Return the name of an effect flag constant.
+fn effect_flag_name(flag: u16) -> &'static str {
+    match flag {
+        EffectSet::IO => "io",
+        EffectSet::ALLOC => "alloc",
+        EffectSet::GC => "gc",
+        EffectSet::NONDET => "nondet",
+        EffectSet::MUTATES => "mutates",
+        EffectSet::ARENA_OK => "arena_ok",
+        EffectSet::CAPTURES => "captures",
+        _ => "unknown",
+    }
+}
+
+/// Return the set of effect flags that `actual` has but `allowed` does not.
+fn effect_violations(actual: &EffectSet, allowed: &EffectSet) -> Vec<u16> {
+    let mut violations = Vec::new();
+    let excess = actual.bits() & !allowed.bits();
+    for &flag in &[
+        EffectSet::IO,
+        EffectSet::ALLOC,
+        EffectSet::GC,
+        EffectSet::NONDET,
+        EffectSet::MUTATES,
+        EffectSet::ARENA_OK,
+        EffectSet::CAPTURES,
+    ] {
+        if excess & flag != 0 {
+            violations.push(flag);
+        }
+    }
+    violations
+}
+
+/// Recursively collect all function call names from a block.
+fn collect_calls_in_block(block: &cjc_ast::Block, calls: &mut Vec<(String, cjc_ast::Span)>) {
+    for stmt in &block.stmts {
+        collect_calls_in_stmt(stmt, calls);
+    }
+    if let Some(ref expr) = block.expr {
+        collect_calls_in_expr(expr, calls);
+    }
+}
+
+fn collect_calls_in_stmt(stmt: &cjc_ast::Stmt, calls: &mut Vec<(String, cjc_ast::Span)>) {
+    use cjc_ast::StmtKind;
+    match &stmt.kind {
+        StmtKind::Expr(e) => collect_calls_in_expr(e, calls),
+        StmtKind::Let(l) => {
+            collect_calls_in_expr(&l.init, calls);
+        }
+        StmtKind::Return(Some(e)) => collect_calls_in_expr(e, calls),
+        StmtKind::Return(None) => {}
+        StmtKind::If(if_stmt) => {
+            collect_calls_in_if_stmt(if_stmt, calls);
+        }
+        StmtKind::While(w) => {
+            collect_calls_in_expr(&w.condition, calls);
+            collect_calls_in_block(&w.body, calls);
+        }
+        StmtKind::For(f) => {
+            match &f.iter {
+                cjc_ast::ForIter::Range { start, end, .. } => {
+                    collect_calls_in_expr(start, calls);
+                    collect_calls_in_expr(end, calls);
+                }
+                cjc_ast::ForIter::Expr(e) => {
+                    collect_calls_in_expr(e, calls);
+                }
+            }
+            collect_calls_in_block(&f.body, calls);
+        }
+        StmtKind::NoGcBlock(b) => {
+            collect_calls_in_block(b, calls);
+        }
+        StmtKind::Break | StmtKind::Continue => {}
+    }
+}
+
+fn collect_calls_in_if_stmt(if_stmt: &cjc_ast::IfStmt, calls: &mut Vec<(String, cjc_ast::Span)>) {
+    collect_calls_in_expr(&if_stmt.condition, calls);
+    collect_calls_in_block(&if_stmt.then_block, calls);
+    if let Some(ref else_branch) = if_stmt.else_branch {
+        match else_branch {
+            cjc_ast::ElseBranch::ElseIf(nested) => {
+                collect_calls_in_if_stmt(nested, calls);
+            }
+            cjc_ast::ElseBranch::Else(block) => {
+                collect_calls_in_block(block, calls);
+            }
+        }
+    }
+}
+
+fn collect_calls_in_expr(expr: &cjc_ast::Expr, calls: &mut Vec<(String, cjc_ast::Span)>) {
+    use cjc_ast::ExprKind;
+    match &expr.kind {
+        ExprKind::Call { callee, args } => {
+            // Extract function name
+            match &callee.kind {
+                ExprKind::Ident(id) => {
+                    calls.push((id.name.clone(), expr.span));
+                }
+                ExprKind::Field { object: _, name } => {
+                    // Method call — use just the method name for now
+                    calls.push((name.name.clone(), expr.span));
+                }
+                _ => {}
+            }
+            // Recurse into callee and args
+            collect_calls_in_expr(callee, calls);
+            for arg in args {
+                collect_calls_in_expr(&arg.value, calls);
+            }
+        }
+        ExprKind::Binary { left, right, .. } => {
+            collect_calls_in_expr(left, calls);
+            collect_calls_in_expr(right, calls);
+        }
+        ExprKind::Unary { operand, .. } => {
+            collect_calls_in_expr(operand, calls);
+        }
+        ExprKind::ArrayLit(elems) => {
+            for e in elems {
+                collect_calls_in_expr(e, calls);
+            }
+        }
+        ExprKind::TupleLit(elems) => {
+            for e in elems {
+                collect_calls_in_expr(e, calls);
+            }
+        }
+        ExprKind::Index { object, index } => {
+            collect_calls_in_expr(object, calls);
+            collect_calls_in_expr(index, calls);
+        }
+        ExprKind::MultiIndex { object, indices } => {
+            collect_calls_in_expr(object, calls);
+            for idx in indices {
+                collect_calls_in_expr(idx, calls);
+            }
+        }
+        ExprKind::Field { object, .. } => {
+            collect_calls_in_expr(object, calls);
+        }
+        ExprKind::Block(b) => {
+            collect_calls_in_block(b, calls);
+        }
+        ExprKind::Lambda { body, .. } => {
+            collect_calls_in_expr(body, calls);
+        }
+        ExprKind::IfExpr { condition, then_block, else_branch } => {
+            collect_calls_in_expr(condition, calls);
+            collect_calls_in_block(then_block, calls);
+            if let Some(ref eb) = else_branch {
+                match eb {
+                    cjc_ast::ElseBranch::ElseIf(nested) => {
+                        // Treat nested if as having its own condition + blocks
+                        collect_calls_in_if_stmt(nested, calls);
+                    }
+                    cjc_ast::ElseBranch::Else(block) => {
+                        collect_calls_in_block(block, calls);
+                    }
+                }
+            }
+        }
+        ExprKind::Assign { target, value } | ExprKind::CompoundAssign { target, value, .. } => {
+            collect_calls_in_expr(target, calls);
+            collect_calls_in_expr(value, calls);
+        }
+        ExprKind::Pipe { left, right } => {
+            collect_calls_in_expr(left, calls);
+            collect_calls_in_expr(right, calls);
+        }
+        ExprKind::FStringLit(segments) => {
+            for (_lit, interp) in segments {
+                if let Some(e) = interp {
+                    collect_calls_in_expr(e, calls);
+                }
+            }
+        }
+        ExprKind::StructLit { fields, .. } => {
+            for fi in fields {
+                collect_calls_in_expr(&fi.value, calls);
+            }
+        }
+        ExprKind::TensorLit { rows } => {
+            for row in rows {
+                for e in row {
+                    collect_calls_in_expr(e, calls);
+                }
+            }
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            collect_calls_in_expr(scrutinee, calls);
+            for arm in arms {
+                collect_calls_in_expr(&arm.body, calls);
+            }
+        }
+        ExprKind::Try(inner) => {
+            collect_calls_in_expr(inner, calls);
+        }
+        ExprKind::VariantLit { fields, .. } => {
+            for e in fields {
+                collect_calls_in_expr(e, calls);
+            }
+        }
+        // Literals and identifiers — no calls to collect
+        ExprKind::IntLit(_) | ExprKind::FloatLit(_) | ExprKind::StringLit(_)
+        | ExprKind::BoolLit(_) | ExprKind::Ident(_) | ExprKind::ByteStringLit(_)
+        | ExprKind::ByteCharLit(_) | ExprKind::RawStringLit(_) | ExprKind::RawByteStringLit(_)
+        | ExprKind::RegexLit { .. } | ExprKind::Col(_) => {}
+    }
+}
+
 fn is_const_expr(expr: &cjc_ast::Expr) -> bool {
     use cjc_ast::ExprKind;
     match &expr.kind {
@@ -1544,6 +1857,19 @@ impl TypeChecker {
                     fields,
                 };
                 self.env.register_class(&c.name.name, ct);
+            }
+            DeclKind::Record(r) => {
+                let fields: Vec<(String, Type)> = r
+                    .fields
+                    .iter()
+                    .map(|f| (f.name.name.clone(), self.resolve_type_expr(&f.ty)))
+                    .collect();
+                let rt = RecordType {
+                    name: r.name.name.clone(),
+                    type_params: r.type_params.iter().map(|p| p.name.name.clone()).collect(),
+                    fields,
+                };
+                self.env.register_record(&r.name.name, rt);
             }
             DeclKind::Fn(f) => {
                 let params: Vec<(String, Type)> = f
@@ -1844,12 +2170,6 @@ impl TypeChecker {
             self.env.define_var(&tp.name.name, Type::Var(var));
         }
 
-        let expected_ret = f
-            .return_type
-            .as_ref()
-            .map(|t| self.resolve_type_expr(t))
-            .unwrap_or(Type::Void);
-
         // Check nogc constraints
         if f.is_nogc {
             self.check_nogc_block(&f.body);
@@ -1858,26 +2178,92 @@ impl TypeChecker {
         // Check body
         let body_type = self.check_block(&f.body);
 
-        // Check return type
-        if !expected_ret.is_error()
-            && !body_type.is_error()
-            && expected_ret != Type::Void
-            && !self.env.types_match(&body_type, &expected_ret)
-        {
-            self.diagnostics.emit(
-                Diagnostic::error(
-                    "E0103",
-                    format!(
-                        "mismatched return type: expected `{}`, found `{}`",
-                        expected_ret, body_type
-                    ),
-                    to_diag_span(f.body.span),
-                )
-                .with_hint(format!("function `{}` should return `{}`", f.name.name, expected_ret)),
-            );
+        // Return type: infer from body if not annotated
+        if let Some(ref ret_ty_expr) = f.return_type {
+            let expected_ret = self.resolve_type_expr(ret_ty_expr);
+            if !expected_ret.is_error()
+                && !body_type.is_error()
+                && expected_ret != Type::Void
+                && !self.env.types_match(&body_type, &expected_ret)
+            {
+                self.diagnostics.emit(
+                    Diagnostic::error(
+                        "E0103",
+                        format!(
+                            "mismatched return type: expected `{}`, found `{}`",
+                            expected_ret, body_type
+                        ),
+                        to_diag_span(f.body.span),
+                    )
+                    .with_hint(format!("function `{}` should return `{}`", f.name.name, expected_ret)),
+                );
+            }
+        }
+        // When return_type is None, the function's return type is inferred
+        // from the body's tail expression (body_type). This is used by the
+        // register_decl phase which defaults to Void, but at checking time
+        // we just validate the body is well-typed.
+
+        // Effect checking: verify body effects are subset of declared effects
+        if let Some(ref declared_effects) = f.effect_annotation {
+            self.check_effect_annotation(f, declared_effects);
         }
 
         self.env.pop_scope();
+    }
+
+    /// Verify that a function body's computed effects are a subset of the declared effects.
+    fn check_effect_annotation(&mut self, f: &FnDecl, declared_effects: &[String]) {
+        use crate::effect_registry::builtin_effects;
+
+        let declared_set = effects_from_names(declared_effects);
+
+        // Collect all function calls in the body
+        let mut called_fns = Vec::new();
+        collect_calls_in_block(&f.body, &mut called_fns);
+
+        let registry = builtin_effects();
+
+        // Check each call against declared effects
+        for (call_name, call_span) in &called_fns {
+            let call_effects = if let Some(effects) = registry.get(call_name.as_str()) {
+                *effects
+            } else {
+                // User-defined function: look up from registered functions
+                // For now, assume user-defined functions called from an effect-annotated
+                // function must themselves be effect-compatible. We check if they have
+                // effect annotations too (conservative: if unknown, assume any-effect).
+                if let Some(sigs) = self.env.fn_sigs.get(call_name) {
+                    sigs.first().map(|s| s.effects).unwrap_or(EffectSet::PURE)
+                } else {
+                    // Unknown function — conservatively skip (will be caught at call-site type checking)
+                    continue;
+                }
+            };
+
+            // Check: computed effects must be subset of declared effects
+            let violations = effect_violations(&call_effects, &declared_set);
+            if !violations.is_empty() {
+                let violation_names: Vec<&str> = violations.iter().map(|v| effect_flag_name(*v)).collect();
+                self.diagnostics.emit(
+                    Diagnostic::error(
+                        "E4002",
+                        format!(
+                            "function `{}` declared as `/ {}` but calls `{}` which has {} effects",
+                            f.name.name,
+                            declared_effects.join(" + "),
+                            call_name,
+                            violation_names.join(", "),
+                        ),
+                        to_diag_span(*call_span),
+                    )
+                    .with_hint(format!(
+                        "remove `{}` from the body or widen the effect annotation",
+                        call_name,
+                    )),
+                );
+            }
+        }
     }
 
     fn check_let(&mut self, l: &LetStmt, span: cjc_ast::Span) {
@@ -2261,6 +2647,31 @@ impl TypeChecker {
                             Type::Error
                         }
                     }
+                    Type::Record(rt) => {
+                        if let Some((_, ft)) = rt.fields.iter().find(|(n, _)| n == &name.name) {
+                            ft.clone()
+                        } else {
+                            self.diagnostics.emit(
+                                Diagnostic::error(
+                                    "E0108",
+                                    format!(
+                                        "no field `{}` on record `{}`",
+                                        name.name, rt.name
+                                    ),
+                                    to_diag_span(name.span),
+                                )
+                                .with_hint(format!(
+                                    "available fields: {}",
+                                    rt.fields
+                                        .iter()
+                                        .map(|(n, _)| n.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                )),
+                            );
+                            Type::Error
+                        }
+                    }
                     Type::Tensor { .. } => {
                         match name.name.as_str() {
                             "shape" => Type::Array {
@@ -2348,6 +2759,23 @@ impl TypeChecker {
                         }
                     }
                 }
+                // LH10: Enforce record immutability — field assignment on records is a type error.
+                if let ExprKind::Field { object, name: field_name } = &target.kind {
+                    let obj_ty = self.check_expr(object);
+                    if let Type::Record(ref rt) = obj_ty {
+                        self.diagnostics.emit(
+                            Diagnostic::error(
+                                "E0160",
+                                format!(
+                                    "cannot assign to field `{}` of record `{}`: records are immutable",
+                                    field_name.name, rt.name
+                                ),
+                                to_diag_span(expr.span),
+                            )
+                            .with_hint("consider using a struct instead of a record if you need mutability".to_string()),
+                        );
+                    }
+                }
                 Type::Void
             }
             ExprKind::Pipe { left, right } => {
@@ -2358,11 +2786,17 @@ impl TypeChecker {
             ExprKind::Block(block) => self.check_block(block),
             ExprKind::StructLit { name, fields } => {
                 if let Some(ty) = self.env.resolve_type_name(&name.name) {
-                    if let Type::Struct(ref st) = ty {
+                    // Check field types for both struct and record types
+                    let type_fields = match &ty {
+                        Type::Struct(ref st) => Some(&st.fields),
+                        Type::Record(ref rt) => Some(&rt.fields),
+                        _ => None,
+                    };
+                    if let Some(defined_fields) = type_fields {
                         for field in fields {
                             let ft = self.check_expr(&field.value);
                             if let Some((_, expected)) =
-                                st.fields.iter().find(|(n, _)| n == &field.name.name)
+                                defined_fields.iter().find(|(n, _)| n == &field.name.name)
                             {
                                 if !ft.is_error()
                                     && !expected.is_error()

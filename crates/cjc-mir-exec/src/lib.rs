@@ -7,6 +7,7 @@
 //! The behavior must be **identical** to `cjc-eval` for all existing programs
 //! (Parity Gate G-1 / G-2).
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
@@ -67,6 +68,51 @@ impl From<cjc_runtime::RuntimeError> for MirExecError {
 
 pub type MirExecResult = Result<Value, MirExecError>;
 
+/// Recursive structural equality for struct/record values.
+fn structural_eq(
+    n1: &str,
+    f1: &HashMap<String, Value>,
+    n2: &str,
+    f2: &HashMap<String, Value>,
+) -> bool {
+    if n1 != n2 || f1.len() != f2.len() {
+        return false;
+    }
+    for (k, v1) in f1.iter() {
+        match f2.get(k) {
+            Some(v2) => {
+                if !value_eq(v1, v2) {
+                    return false;
+                }
+            }
+            None => return false,
+        }
+    }
+    true
+}
+
+/// Deep equality for values (used by structural equality for nested fields).
+fn value_eq(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => x == y,
+        (Value::Float(x), Value::Float(y)) => x == y,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::String(x), Value::String(y)) => x == y,
+        (Value::Void, Value::Void) => true,
+        (
+            Value::Struct { name: n1, fields: f1 },
+            Value::Struct { name: n2, fields: f2 },
+        ) => structural_eq(n1, f1, n2, f2),
+        (Value::Array(a), Value::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| value_eq(x, y))
+        }
+        (Value::Tuple(a), Value::Tuple(b)) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| value_eq(x, y))
+        }
+        _ => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MIR Executor
 // ---------------------------------------------------------------------------
@@ -88,6 +134,8 @@ pub struct MirExecutor {
     arena_stack: Vec<cjc_runtime::ArenaStore>,
     /// Running count of arena allocations (for diagnostics/testing).
     pub arena_alloc_count: u64,
+    /// Snap memoization cache: SHA-256 hash of (fn_name, args) → cached result.
+    memo_cache: HashMap<[u8; 32], Value>,
 }
 
 impl MirExecutor {
@@ -104,6 +152,7 @@ impl MirExecutor {
             current_fn: None,
             arena_stack: Vec::new(),
             arena_alloc_count: 0,
+            memo_cache: HashMap::new(),
         }
     }
 
@@ -411,6 +460,7 @@ impl MirExecutor {
                         result: Some(body.clone()),
                     },
                     is_nogc: false,
+                    cfg_body: None,
                 };
                 self.functions.insert(lambda_name.clone(), Rc::new(mir_fn));
                 Ok(Value::Fn(cjc_runtime::FnValue {
@@ -863,6 +913,18 @@ impl MirExecutor {
                     "cannot apply `{op}` to Int and Tensor"
                 ))),
             },
+            // Structural equality for records and structs.
+            (
+                Value::Struct { name: n1, fields: f1 },
+                Value::Struct { name: n2, fields: f2 },
+            ) => match op {
+                BinOp::Eq => Ok(Value::Bool(structural_eq(n1, f1, n2, f2))),
+                BinOp::Ne => Ok(Value::Bool(!structural_eq(n1, f1, n2, f2))),
+                _ => Err(MirExecError::Runtime(format!(
+                    "cannot apply `{op}` to {} and {}",
+                    n1, n2
+                ))),
+            },
             _ => Err(MirExecError::Runtime(format!(
                 "cannot apply `{op}` to {} and {}",
                 lv.type_name(),
@@ -1255,6 +1317,10 @@ impl MirExecutor {
                 | "Tensor.full" | "Tensor.diag" | "Tensor.uniform"
                 // ML Autodiff builtins
                 | "stop_gradient" | "grad_checkpoint" | "clip_grad" | "grad_scale"
+                // CJC Snap builtins
+                | "snap" | "restore" | "snap_hash"
+                | "snap_save" | "snap_load" | "snap_to_json"
+                | "memo_call"
         )
     }
 
@@ -1357,6 +1423,114 @@ impl MirExecutor {
                 if line.ends_with('\n') { line.pop(); }
                 if line.ends_with('\r') { line.pop(); }
                 return Ok(Value::String(Rc::new(line)));
+            }
+            // ── CJC Snap builtins ─────────────────────────────────────
+            "snap" => {
+                if args.len() != 1 {
+                    return Err(MirExecError::Runtime("snap requires 1 argument".into()));
+                }
+                if !cjc_snap::is_snappable(&args[0]) {
+                    return Err(MirExecError::Runtime(format!(
+                        "snap: cannot serialize {} (runtime-only type)",
+                        args[0].type_name()
+                    )));
+                }
+                let blob = cjc_snap::snap(&args[0]);
+                let hash_hex = cjc_snap::hash::hex_string(&blob.content_hash);
+                let size = blob.data.len() as i64;
+                let mut fields = HashMap::new();
+                fields.insert("hash".to_string(), Value::String(Rc::new(hash_hex)));
+                fields.insert("data".to_string(), Value::Bytes(Rc::new(RefCell::new(blob.data))));
+                fields.insert("size".to_string(), Value::Int(size));
+                return Ok(Value::Struct { name: "SnapBlob".to_string(), fields });
+            }
+            "restore" => {
+                if args.len() != 1 {
+                    return Err(MirExecError::Runtime("restore requires 1 argument".into()));
+                }
+                match &args[0] {
+                    Value::Struct { name, fields } if name == "SnapBlob" => {
+                        let hash_hex = match fields.get("hash") {
+                            Some(Value::String(s)) => s.as_str().to_string(),
+                            _ => return Err(MirExecError::Runtime("restore: SnapBlob missing 'hash' field".into())),
+                        };
+                        let data = match fields.get("data") {
+                            Some(Value::Bytes(b)) => b.borrow().clone(),
+                            _ => return Err(MirExecError::Runtime("restore: SnapBlob missing 'data' field".into())),
+                        };
+                        let content_hash = cjc_snap::hash::hex_to_hash(&hash_hex)
+                            .map_err(|e| MirExecError::Runtime(format!("restore: {e}")))?;
+                        let blob = cjc_snap::SnapBlob { content_hash, data };
+                        let value = cjc_snap::restore(&blob)
+                            .map_err(|e| MirExecError::Runtime(format!("restore: {e}")))?;
+                        return Ok(value);
+                    }
+                    _ => return Err(MirExecError::Runtime("restore requires a SnapBlob struct".into())),
+                }
+            }
+            "snap_hash" => {
+                if args.len() != 1 {
+                    return Err(MirExecError::Runtime("snap_hash requires 1 argument".into()));
+                }
+                if !cjc_snap::is_snappable(&args[0]) {
+                    return Err(MirExecError::Runtime(format!(
+                        "snap_hash: cannot hash {} (runtime-only type)",
+                        args[0].type_name()
+                    )));
+                }
+                let blob = cjc_snap::snap(&args[0]);
+                let hex = cjc_snap::hash::hex_string(&blob.content_hash);
+                return Ok(Value::String(Rc::new(hex)));
+            }
+            "snap_save" => {
+                if args.len() != 2 {
+                    return Err(MirExecError::Runtime("snap_save requires 2 arguments (value, path)".into()));
+                }
+                let path = match &args[1] {
+                    Value::String(s) => s.as_str().to_string(),
+                    _ => return Err(MirExecError::Runtime("snap_save: second argument must be String path".into())),
+                };
+                cjc_snap::persist::snap_save(&args[0], &path)
+                    .map_err(MirExecError::Runtime)?;
+                return Ok(Value::Void);
+            }
+            "snap_load" => {
+                if args.len() != 1 {
+                    return Err(MirExecError::Runtime("snap_load requires 1 argument (path)".into()));
+                }
+                let path = match &args[0] {
+                    Value::String(s) => s.as_str().to_string(),
+                    _ => return Err(MirExecError::Runtime("snap_load: argument must be String path".into())),
+                };
+                let value = cjc_snap::persist::snap_load(&path)
+                    .map_err(MirExecError::Runtime)?;
+                return Ok(value);
+            }
+            "snap_to_json" => {
+                if args.len() != 1 {
+                    return Err(MirExecError::Runtime("snap_to_json requires 1 argument".into()));
+                }
+                let json = cjc_snap::snap_to_json(&args[0])
+                    .map_err(MirExecError::Runtime)?;
+                return Ok(Value::String(Rc::new(json)));
+            }
+            "memo_call" => {
+                if args.len() < 1 {
+                    return Err(MirExecError::Runtime("memo_call requires at least 1 argument (fn_name)".into()));
+                }
+                let fn_name = match &args[0] {
+                    Value::String(s) => s.as_str().to_string(),
+                    _ => return Err(MirExecError::Runtime("memo_call: first argument must be function name (String)".into())),
+                };
+                let fn_args = args[1..].to_vec();
+                let key_tuple = Value::Tuple(Rc::new(args.clone()));
+                let key_hash = cjc_snap::snap(&key_tuple).content_hash;
+                if let Some(cached) = self.memo_cache.get(&key_hash) {
+                    return Ok(cached.clone());
+                }
+                let result = self.dispatch_call(&fn_name, fn_args)?;
+                self.memo_cache.insert(key_hash, result.clone());
+                return Ok(result);
             }
             _ => {}
         }
@@ -2823,7 +2997,16 @@ impl MirExecutor {
                             MirExecError::Runtime(format!("undefined variable `{obj_name}`"))
                         })?;
                     match &mut obj_val {
-                        Value::Struct { fields, .. } => {
+                        Value::Struct { name: struct_name, fields } => {
+                            // Enforce record immutability at runtime.
+                            if let Some(sd) = self.struct_defs.get(struct_name.as_str()) {
+                                if sd.is_record {
+                                    return Err(MirExecError::Runtime(format!(
+                                        "cannot assign to field `{}` of record `{}`: records are immutable",
+                                        field_name, struct_name
+                                    )));
+                                }
+                            }
                             fields.insert(field_name, val);
                         }
                         _ => {
@@ -3175,6 +3358,123 @@ pub fn lower_to_mir(program: &cjc_ast::Program) -> cjc_mir::MirProgram {
 }
 
 // ---------------------------------------------------------------------------
+// CFG Executor — walks basic blocks instead of tree-form MIR
+// ---------------------------------------------------------------------------
+
+impl MirExecutor {
+    /// Execute a function body using its CFG representation.
+    ///
+    /// Walks basic blocks, executing CfgStmt instructions and following
+    /// Terminator edges until a Return is reached.
+    fn exec_cfg_body(&mut self, cfg: &cjc_mir::cfg::MirCfg) -> MirExecResult {
+        use cjc_mir::cfg::{CfgStmt, Terminator};
+
+        let mut current_block = cfg.entry;
+
+        loop {
+            let block = cfg.block(current_block);
+
+            // Execute all statements in the current block
+            for stmt in &block.statements {
+                match stmt {
+                    CfgStmt::Let { name, init, .. } => {
+                        let val = self.eval_expr(init)?;
+                        self.define(name, val);
+                    }
+                    CfgStmt::Expr(expr) => {
+                        self.eval_expr(expr)?;
+                    }
+                }
+            }
+
+            // Follow the terminator
+            match &block.terminator {
+                Terminator::Goto(target) => {
+                    current_block = *target;
+                }
+                Terminator::Branch { cond, then_block, else_block } => {
+                    let cond_val = self.eval_expr(cond)?;
+                    let cond_bool = match cond_val {
+                        Value::Bool(b) => b,
+                        other => {
+                            return Err(MirExecError::Runtime(format!(
+                                "branch condition must be Bool, got {}",
+                                other.type_name()
+                            )));
+                        }
+                    };
+                    current_block = if cond_bool {
+                        *then_block
+                    } else {
+                        *else_block
+                    };
+                }
+                Terminator::Return(opt_expr) => {
+                    return if let Some(expr) = opt_expr {
+                        self.eval_expr(expr)
+                    } else {
+                        Ok(Value::Void)
+                    };
+                }
+                Terminator::Unreachable => {
+                    return Err(MirExecError::Runtime(
+                        "reached unreachable block".into(),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// Run a full AST program through the CFG-based MIR pipeline.
+///
+/// This is the new execution path that:
+/// 1. Lowers AST → HIR → MIR (tree-form)
+/// 2. Builds CFG for all functions
+/// 3. Executes using the CFG executor (block-walking)
+///
+/// The result must be identical to `run_program_with_executor`.
+pub fn run_program_cfg(
+    program: &cjc_ast::Program,
+    seed: u64,
+) -> Result<(Value, MirExecutor), MirExecError> {
+    let mut ast_lowering = cjc_hir::AstLowering::new();
+    let hir = ast_lowering.lower_program(program);
+
+    let mut hir_to_mir = cjc_mir::HirToMir::new();
+    let mut mir = hir_to_mir.lower_program(&hir);
+    cjc_mir::escape::annotate_program(&mut mir);
+
+    // Build CFG for all functions
+    mir.build_all_cfgs();
+
+    // Execute using CFG: register functions, then run __main via CFG
+    let mut executor = MirExecutor::new(seed);
+
+    // Register all functions and struct defs
+    for func in &mir.functions {
+        executor.functions.insert(func.name.clone(), Rc::new(func.clone()));
+    }
+    for sd in &mir.struct_defs {
+        executor.struct_defs.insert(sd.name.clone(), sd.clone());
+    }
+
+    // Find and execute __main via CFG
+    let main_fn = executor.functions.get("__main")
+        .ok_or_else(|| MirExecError::Runtime("no __main function".into()))?
+        .clone();
+    let cfg = main_fn.cfg_body.as_ref()
+        .ok_or_else(|| MirExecError::Runtime("__main has no CFG body".into()))?
+        .clone();
+
+    executor.push_scope();
+    let result = executor.exec_cfg_body(&cfg)?;
+    executor.pop_scope();
+
+    Ok((result, executor))
+}
+
+// ---------------------------------------------------------------------------
 // Phase 8: DataFrame helper (mirrors cjc-eval's dataframe_to_value)
 // ---------------------------------------------------------------------------
 
@@ -3353,6 +3653,7 @@ mod tests {
                 return_type: None,
                 body,
                 is_nogc: false,
+                effect_annotation: None,
             }),
             span: span(),
         }

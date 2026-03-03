@@ -12,10 +12,13 @@
 //! straight-line code, if/else, while, and function calls.
 
 pub mod cfg;
+pub mod dominators;
 pub mod escape;
 pub mod monomorph;
 pub mod nogc_verify;
 pub mod optimize;
+pub mod ssa;
+pub mod ssa_optimize;
 
 use cjc_ast::{BinOp, UnaryOp};
 pub use escape::AllocHint;
@@ -27,7 +30,7 @@ pub use escape::AllocHint;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MirFnId(pub u32);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BlockId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -52,6 +55,8 @@ pub struct MirProgram {
 pub struct MirStructDef {
     pub name: String,
     pub fields: Vec<(String, String)>, // (name, type_name)
+    /// True if this is a record (immutable value type).
+    pub is_record: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -79,12 +84,42 @@ pub struct MirFunction {
     pub return_type: Option<String>,
     pub body: MirBody,
     pub is_nogc: bool,
+    /// CFG representation of this function's body.
+    /// Built lazily from tree-form `body` via `build_cfg()`.
+    /// When present, this is the canonical representation for the CFG executor.
+    pub cfg_body: Option<cfg::MirCfg>,
 }
 
 #[derive(Debug, Clone)]
 pub struct MirParam {
     pub name: String,
     pub ty_name: String,
+}
+
+impl MirFunction {
+    /// Build the CFG representation from the tree-form body.
+    /// Stores the result in `cfg_body`.
+    pub fn build_cfg(&mut self) {
+        let cfg = cfg::CfgBuilder::build(&self.body);
+        self.cfg_body = Some(cfg);
+    }
+
+    /// Return a reference to the CFG body, building it on demand if needed.
+    pub fn cfg(&mut self) -> &cfg::MirCfg {
+        if self.cfg_body.is_none() {
+            self.build_cfg();
+        }
+        self.cfg_body.as_ref().unwrap()
+    }
+}
+
+impl MirProgram {
+    /// Build CFG for all functions in this program.
+    pub fn build_all_cfgs(&mut self) {
+        for func in &mut self.functions {
+            func.build_cfg();
+        }
+    }
 }
 
 /// The body of a MIR function — a list of MIR statements.
@@ -321,12 +356,21 @@ impl HirToMir {
                     struct_defs.push(MirStructDef {
                         name: s.name.clone(),
                         fields: s.fields.clone(),
+                        is_record: false,
                     });
                 }
                 HirItem::Class(c) => {
                     struct_defs.push(MirStructDef {
                         name: c.name.clone(),
                         fields: c.fields.clone(),
+                        is_record: false,
+                    });
+                }
+                HirItem::Record(r) => {
+                    struct_defs.push(MirStructDef {
+                        name: r.name.clone(),
+                        fields: r.fields.clone(),
+                        is_record: true,
                     });
                 }
                 HirItem::Enum(e) => {
@@ -380,6 +424,8 @@ impl HirToMir {
                 result: None,
             },
             is_nogc: false,
+            cfg_body: None,
+
         });
 
         // Append all lambda-lifted functions
@@ -412,6 +458,8 @@ impl HirToMir {
             return_type: f.return_type.clone(),
             body,
             is_nogc: f.is_nogc,
+            cfg_body: None,
+
         }
     }
 
@@ -577,6 +625,8 @@ impl HirToMir {
                     return_type: None,
                     body: lifted_body,
                     is_nogc: false,
+                    cfg_body: None,
+
                 });
 
                 // At the call site, emit MakeClosure with the capture
@@ -750,6 +800,7 @@ mod tests {
                 hir_id: hir_id(4),
             },
             is_nogc: false,
+
             hir_id: hir_id(5),
         };
         let mir_fn = lowering.lower_fn(&hir_fn);
@@ -781,6 +832,7 @@ mod tests {
                         hir_id: hir_id(1),
                     },
                     is_nogc: false,
+        
                     hir_id: hir_id(2),
                 }),
             ],

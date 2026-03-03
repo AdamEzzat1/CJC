@@ -158,6 +158,7 @@ fn test_lower_fn_decl() {
             span: span(),
         },
         is_nogc: false,
+        effect_annotation: None,
     };
     let hir_fn = lowering.lower_fn_decl(&fn_decl);
     assert_eq!(hir_fn.name, "add");
@@ -277,6 +278,7 @@ fn test_lower_full_program() {
                         span: span(),
                     },
                     is_nogc: false,
+                    effect_annotation: None,
                 }),
                 span: span(),
             },

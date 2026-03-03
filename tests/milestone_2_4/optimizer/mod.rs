@@ -65,6 +65,7 @@ fn mk_fn(name: &str, stmts: Vec<MirStmt>, result: Option<MirExpr>) -> MirFunctio
             result: result.map(Box::new),
         },
         is_nogc: false,
+        cfg_body: None,
     }
 }
 

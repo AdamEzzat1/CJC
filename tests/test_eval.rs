@@ -56,7 +56,7 @@ fn return_stmt(expr: Option<Expr>) -> Stmt { Stmt { kind: StmtKind::Return(expr)
 fn dummy_type_expr() -> TypeExpr { TypeExpr { kind: TypeExprKind::Named { name: ident("i64"), args: vec![] }, span: span() } }
 fn make_param(name: &str) -> Param { Param { name: ident(name), ty: dummy_type_expr(), span: span() } }
 fn make_fn_decl(name: &str, params: Vec<&str>, body: Block) -> Decl {
-    Decl { kind: DeclKind::Fn(FnDecl { name: ident(name), type_params: vec![], params: params.into_iter().map(|n| make_param(n)).collect(), return_type: None, body, is_nogc: false }), span: span() }
+    Decl { kind: DeclKind::Fn(FnDecl { name: ident(name), type_params: vec![], params: params.into_iter().map(|n| make_param(n)).collect(), return_type: None, body, is_nogc: false, effect_annotation: None }), span: span() }
 }
 fn make_block(stmts: Vec<Stmt>, expr: Option<Expr>) -> Block { Block { stmts, expr: expr.map(Box::new), span: span() } }
 fn make_struct_decl(name: &str, fields: Vec<&str>) -> Decl {

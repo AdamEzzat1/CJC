@@ -388,6 +388,8 @@ impl<'a> Monomorphizer<'a> {
             return_type: new_ret,
             body: new_body,
             is_nogc,
+            cfg_body: None,
+
         });
     }
 
@@ -922,6 +924,8 @@ mod tests {
                     result: None,
                 },
                 is_nogc: false,
+                cfg_body: None,
+
             }],
             struct_defs: vec![],
             enum_defs: vec![],
@@ -952,6 +956,8 @@ mod tests {
                 result: Some(Box::new(mk_var("x"))),
             },
             is_nogc: false,
+            cfg_body: None,
+
         };
 
         let main_fn = MirFunction {
@@ -965,6 +971,8 @@ mod tests {
                 result: None,
             },
             is_nogc: false,
+            cfg_body: None,
+
         };
 
         let program = MirProgram {

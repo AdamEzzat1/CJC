@@ -140,6 +140,7 @@ fn make_fn_decl(name: &str, params: Vec<&str>, body: Block) -> Decl {
             return_type: None,
             body,
             is_nogc: false,
+            effect_annotation: None,
         }),
         span: span(),
     }

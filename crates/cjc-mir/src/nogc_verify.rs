@@ -563,6 +563,7 @@ mod tests {
                 result: None,
             },
             is_nogc,
+            cfg_body: None,
         }
     }
 

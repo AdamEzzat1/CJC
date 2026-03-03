@@ -9,14 +9,15 @@
 //! - If/else, while loops, early return
 //! - Reproducible RNG via `cjc_repro::Rng`
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::rc::Rc;
 use std::time::Instant;
 
 use cjc_ast::{
     BinOp, Block, CallArg, Decl, DeclKind, ElseBranch, Expr, ExprKind, FnDecl, ForIter, ForStmt,
-    IfStmt, LetStmt, Program, Stmt, StmtKind, UnaryOp, WhileStmt,
+    IfStmt, LetStmt, Program, Stmt, StmtKind, StructDecl, UnaryOp, WhileStmt,
 };
 use cjc_data::{Column, CsvConfig, CsvReader, DataFrame, StreamingCsvProcessor, TidyView};
 use cjc_data::tidy_dispatch;
@@ -71,6 +72,55 @@ impl From<cjc_runtime::RuntimeError> for EvalError {
 pub type EvalResult = Result<Value, EvalError>;
 
 // ---------------------------------------------------------------------------
+// Structural equality helpers
+// ---------------------------------------------------------------------------
+
+/// Recursive structural equality for struct/record values.
+fn value_structural_eq(
+    n1: &str,
+    f1: &HashMap<String, Value>,
+    n2: &str,
+    f2: &HashMap<String, Value>,
+) -> bool {
+    if n1 != n2 || f1.len() != f2.len() {
+        return false;
+    }
+    for (k, v1) in f1.iter() {
+        match f2.get(k) {
+            Some(v2) => {
+                if !value_deep_eq(v1, v2) {
+                    return false;
+                }
+            }
+            None => return false,
+        }
+    }
+    true
+}
+
+/// Deep equality for values (used by structural equality for nested fields).
+fn value_deep_eq(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => x == y,
+        (Value::Float(x), Value::Float(y)) => x == y,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::String(x), Value::String(y)) => x == y,
+        (Value::Void, Value::Void) => true,
+        (
+            Value::Struct { name: n1, fields: f1 },
+            Value::Struct { name: n2, fields: f2 },
+        ) => value_structural_eq(n1, f1, n2, f2),
+        (Value::Array(a), Value::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| value_deep_eq(x, y))
+        }
+        (Value::Tuple(a), Value::Tuple(b)) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| value_deep_eq(x, y))
+        }
+        _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Interpreter
 // ---------------------------------------------------------------------------
 
@@ -102,6 +152,12 @@ pub struct Interpreter {
 
     /// Number of GC collections triggered so far.
     pub gc_collections: u64,
+
+    /// Names of record types (immutable value types).
+    record_names: HashSet<String>,
+
+    /// Snap memoization cache: SHA-256 hash of (fn_name, args) → cached result.
+    memo_cache: HashMap<[u8; 32], Value>,
 }
 
 impl Interpreter {
@@ -124,6 +180,8 @@ impl Interpreter {
             output: Vec::new(),
             start_time: Instant::now(),
             gc_collections: 0,
+            record_names: HashSet::new(),
+            memo_cache: HashMap::new(),
         }
     }
 
@@ -189,6 +247,7 @@ impl Interpreter {
                     self.define(&c.name.name, val);
                 }
                 DeclKind::Fn(_) | DeclKind::Struct(_) | DeclKind::Class(_)
+                | DeclKind::Record(_)
                 | DeclKind::Trait(_) | DeclKind::Impl(_) | DeclKind::Import(_)
                 | DeclKind::Enum(_) => {
                     // Already registered or not needed at runtime.
@@ -211,6 +270,19 @@ impl Interpreter {
             }
             DeclKind::Struct(s) => {
                 self.struct_defs.insert(s.name.name.clone(), s.clone());
+            }
+            DeclKind::Record(r) => {
+                // Records are registered like structs; immutability is enforced
+                // by the type checker (E0160) and at runtime via is_record flag.
+                self.struct_defs.insert(
+                    r.name.name.clone(),
+                    StructDecl {
+                        name: r.name.clone(),
+                        type_params: r.type_params.clone(),
+                        fields: r.fields.clone(),
+                    },
+                );
+                self.record_names.insert(r.name.name.clone());
             }
             DeclKind::Impl(impl_decl) => {
                 // Register methods with qualified names: `TypeName.method_name`
@@ -558,6 +630,7 @@ impl Interpreter {
                         span: body.span,
                     },
                     is_nogc: false,
+                    effect_annotation: None,
                 };
                 self.functions.insert(lambda_name.clone(), fn_decl);
                 Ok(Value::Fn(cjc_runtime::FnValue {
@@ -955,6 +1028,18 @@ impl Interpreter {
                     "cannot apply `{op}` to Int and Tensor"
                 ))),
             },
+            // Structural equality for records and structs.
+            (
+                Value::Struct { name: n1, fields: f1 },
+                Value::Struct { name: n2, fields: f2 },
+            ) => match op {
+                BinOp::Eq => Ok(Value::Bool(value_structural_eq(n1, f1, n2, f2))),
+                BinOp::Ne => Ok(Value::Bool(!value_structural_eq(n1, f1, n2, f2))),
+                _ => Err(EvalError::Runtime(format!(
+                    "cannot apply `{op}` to {} and {}",
+                    n1, n2
+                ))),
+            },
             _ => Err(EvalError::Runtime(format!(
                 "cannot apply `{op}` to {} and {}",
                 lv.type_name(),
@@ -1002,6 +1087,18 @@ impl Interpreter {
                 BinOp::Div => Ok(Value::Tensor(t.map(|x| *s / x))),
                 _ => Err(EvalError::Runtime(format!(
                     "cannot apply `{op}` to Float and Tensor"
+                ))),
+            },
+            // Structural equality for records and structs.
+            (
+                Value::Struct { name: n1, fields: f1 },
+                Value::Struct { name: n2, fields: f2 },
+            ) => match op {
+                BinOp::Eq => Ok(Value::Bool(value_structural_eq(n1, f1, n2, f2))),
+                BinOp::Ne => Ok(Value::Bool(!value_structural_eq(n1, f1, n2, f2))),
+                _ => Err(EvalError::Runtime(format!(
+                    "cannot apply `{op}` to {} and {}",
+                    n1, n2
                 ))),
             },
             _ => Err(EvalError::Runtime(format!(
@@ -1424,6 +1521,10 @@ impl Interpreter {
                 | "Tensor.full" | "Tensor.diag" | "Tensor.uniform"
                 // ML Autodiff builtins
                 | "stop_gradient" | "grad_checkpoint" | "clip_grad" | "grad_scale"
+                // CJC Snap builtins
+                | "snap" | "restore" | "snap_hash"
+                | "snap_save" | "snap_load" | "snap_to_json"
+                | "memo_call"
         )
     }
 
@@ -1506,6 +1607,117 @@ impl Interpreter {
                 if line.ends_with('\n') { line.pop(); }
                 if line.ends_with('\r') { line.pop(); }
                 return Ok(Value::String(Rc::new(line)));
+            }
+            // ── CJC Snap builtins ─────────────────────────────────────
+            "snap" => {
+                if args.len() != 1 {
+                    return Err(EvalError::Runtime("snap requires 1 argument".into()));
+                }
+                if !cjc_snap::is_snappable(&args[0]) {
+                    return Err(EvalError::Runtime(format!(
+                        "snap: cannot serialize {} (runtime-only type)",
+                        args[0].type_name()
+                    )));
+                }
+                let blob = cjc_snap::snap(&args[0]);
+                let hash_hex = cjc_snap::hash::hex_string(&blob.content_hash);
+                let size = blob.data.len() as i64;
+                let mut fields = HashMap::new();
+                fields.insert("hash".to_string(), Value::String(Rc::new(hash_hex)));
+                fields.insert("data".to_string(), Value::Bytes(Rc::new(RefCell::new(blob.data))));
+                fields.insert("size".to_string(), Value::Int(size));
+                return Ok(Value::Struct { name: "SnapBlob".to_string(), fields });
+            }
+            "restore" => {
+                if args.len() != 1 {
+                    return Err(EvalError::Runtime("restore requires 1 argument".into()));
+                }
+                match &args[0] {
+                    Value::Struct { name, fields } if name == "SnapBlob" => {
+                        let hash_hex = match fields.get("hash") {
+                            Some(Value::String(s)) => s.as_str().to_string(),
+                            _ => return Err(EvalError::Runtime("restore: SnapBlob missing 'hash' field".into())),
+                        };
+                        let data = match fields.get("data") {
+                            Some(Value::Bytes(b)) => b.borrow().clone(),
+                            _ => return Err(EvalError::Runtime("restore: SnapBlob missing 'data' field".into())),
+                        };
+                        let content_hash = cjc_snap::hash::hex_to_hash(&hash_hex)
+                            .map_err(|e| EvalError::Runtime(format!("restore: {e}")))?;
+                        let blob = cjc_snap::SnapBlob { content_hash, data };
+                        let value = cjc_snap::restore(&blob)
+                            .map_err(|e| EvalError::Runtime(format!("restore: {e}")))?;
+                        return Ok(value);
+                    }
+                    _ => return Err(EvalError::Runtime("restore requires a SnapBlob struct".into())),
+                }
+            }
+            "snap_hash" => {
+                if args.len() != 1 {
+                    return Err(EvalError::Runtime("snap_hash requires 1 argument".into()));
+                }
+                if !cjc_snap::is_snappable(&args[0]) {
+                    return Err(EvalError::Runtime(format!(
+                        "snap_hash: cannot hash {} (runtime-only type)",
+                        args[0].type_name()
+                    )));
+                }
+                let blob = cjc_snap::snap(&args[0]);
+                let hex = cjc_snap::hash::hex_string(&blob.content_hash);
+                return Ok(Value::String(Rc::new(hex)));
+            }
+            "snap_save" => {
+                if args.len() != 2 {
+                    return Err(EvalError::Runtime("snap_save requires 2 arguments (value, path)".into()));
+                }
+                let path = match &args[1] {
+                    Value::String(s) => s.as_str().to_string(),
+                    _ => return Err(EvalError::Runtime("snap_save: second argument must be String path".into())),
+                };
+                cjc_snap::persist::snap_save(&args[0], &path)
+                    .map_err(EvalError::Runtime)?;
+                return Ok(Value::Void);
+            }
+            "snap_load" => {
+                if args.len() != 1 {
+                    return Err(EvalError::Runtime("snap_load requires 1 argument (path)".into()));
+                }
+                let path = match &args[0] {
+                    Value::String(s) => s.as_str().to_string(),
+                    _ => return Err(EvalError::Runtime("snap_load: argument must be String path".into())),
+                };
+                let value = cjc_snap::persist::snap_load(&path)
+                    .map_err(EvalError::Runtime)?;
+                return Ok(value);
+            }
+            "snap_to_json" => {
+                if args.len() != 1 {
+                    return Err(EvalError::Runtime("snap_to_json requires 1 argument".into()));
+                }
+                let json = cjc_snap::snap_to_json(&args[0])
+                    .map_err(EvalError::Runtime)?;
+                return Ok(Value::String(Rc::new(json)));
+            }
+            "memo_call" => {
+                if args.len() < 1 {
+                    return Err(EvalError::Runtime("memo_call requires at least 1 argument (fn_name)".into()));
+                }
+                let fn_name = match &args[0] {
+                    Value::String(s) => s.as_str().to_string(),
+                    _ => return Err(EvalError::Runtime("memo_call: first argument must be function name (String)".into())),
+                };
+                let fn_args = args[1..].to_vec();
+                // Build key: hash of (fn_name, arg1, arg2, ...)
+                let key_tuple = Value::Tuple(Rc::new(args.clone()));
+                let key_hash = cjc_snap::snap(&key_tuple).content_hash;
+                // Check cache
+                if let Some(cached) = self.memo_cache.get(&key_hash) {
+                    return Ok(cached.clone());
+                }
+                // Cache miss — call the function
+                let result = self.dispatch_call(&fn_name, fn_args)?;
+                self.memo_cache.insert(key_hash, result.clone());
+                return Ok(result);
             }
             _ => {}
         }
@@ -2834,7 +3046,7 @@ impl Interpreter {
         match &target.kind {
             ExprKind::Ident(id) => self.assign(&id.name, val),
             ExprKind::Field { object, name } => {
-                // Field assignment on a struct.
+                // Field assignment on a struct (rejected for records).
                 if let ExprKind::Ident(obj_id) = &object.kind {
                     let obj_name = obj_id.name.clone();
                     let field_name = name.name.clone();
@@ -2845,7 +3057,14 @@ impl Interpreter {
                             EvalError::Runtime(format!("undefined variable `{obj_name}`"))
                         })?;
                     match &mut obj_val {
-                        Value::Struct { fields, .. } => {
+                        Value::Struct { name: struct_name, fields } => {
+                            // Enforce record immutability at runtime.
+                            if self.record_names.contains(struct_name.as_str()) {
+                                return Err(EvalError::Runtime(format!(
+                                    "cannot assign to field `{}` of record `{}`: records are immutable",
+                                    field_name, struct_name
+                                )));
+                            }
                             fields.insert(field_name, val);
                         }
                         _ => {
@@ -3385,6 +3604,7 @@ mod tests {
                 return_type: None,
                 body,
                 is_nogc: false,
+                effect_annotation: None,
             }),
             span: span(),
         }

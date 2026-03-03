@@ -443,6 +443,15 @@ pub fn builtin_effects() -> HashMap<&'static str, EffectSet> {
     m.insert("file_exists", io);       // filesystem query
     m.insert("file_lines", io_alloc);  // reads file, allocates array
 
+    // ── CJC Snap builtins ──
+    m.insert("snap", alloc);           // allocates SnapBlob struct + bytes
+    m.insert("restore", alloc);        // allocates decoded Value
+    m.insert("snap_hash", alloc);      // allocates String
+    m.insert("snap_save", io);         // writes to filesystem
+    m.insert("snap_load", io_alloc);   // reads file + allocates Value
+    m.insert("snap_to_json", alloc);   // allocates JSON String
+    m.insert("memo_call", alloc);      // allocates cached result
+
     // ── Phase B1: Weighted & robust statistics ──
     m.insert("weighted_mean", alloc);
     m.insert("weighted_var", alloc);

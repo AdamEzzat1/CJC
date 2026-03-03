@@ -19,6 +19,7 @@ pub enum TokenKind {
     Ident,
     Struct,
     Class,
+    Record,
     Fn,
     Trait,
     Impl,
@@ -155,6 +156,7 @@ impl TokenKind {
             TokenKind::Ident => "identifier",
             TokenKind::Struct => "`struct`",
             TokenKind::Class => "`class`",
+            TokenKind::Record => "`record`",
             TokenKind::Fn => "`fn`",
             TokenKind::Trait => "`trait`",
             TokenKind::Impl => "`impl`",
@@ -1237,6 +1239,7 @@ impl<'a> Lexer<'a> {
         let kind = match text {
             "struct" => TokenKind::Struct,
             "class" => TokenKind::Class,
+            "record" => TokenKind::Record,
             "fn" => TokenKind::Fn,
             "trait" => TokenKind::Trait,
             "impl" => TokenKind::Impl,

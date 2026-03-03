@@ -1,0 +1,7 @@
+[package]
+name = "cjc-snap"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cjc-runtime = { path = "../cjc-runtime" }
