@@ -407,6 +407,158 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 _ => Err(format!("exp requires a number, got {}", args[0].type_name())),
             }
         }
+        // ---- Mathematics Hardening Phase: Trigonometric ----
+        "sin" => {
+            if args.len() != 1 { return Err("sin requires exactly 1 argument".into()); }
+            match &args[0] {
+                Value::Float(f) => Ok(Some(Value::Float(f.sin()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).sin()))),
+                _ => Err(format!("sin requires a number, got {}", args[0].type_name())),
+            }
+        }
+        "cos" => {
+            if args.len() != 1 { return Err("cos requires exactly 1 argument".into()); }
+            match &args[0] {
+                Value::Float(f) => Ok(Some(Value::Float(f.cos()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).cos()))),
+                _ => Err(format!("cos requires a number, got {}", args[0].type_name())),
+            }
+        }
+        "tan" => {
+            if args.len() != 1 { return Err("tan requires exactly 1 argument".into()); }
+            match &args[0] {
+                Value::Float(f) => Ok(Some(Value::Float(f.tan()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).tan()))),
+                _ => Err(format!("tan requires a number, got {}", args[0].type_name())),
+            }
+        }
+        "asin" => {
+            if args.len() != 1 { return Err("asin requires exactly 1 argument".into()); }
+            match &args[0] {
+                Value::Float(f) => Ok(Some(Value::Float(f.asin()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).asin()))),
+                _ => Err(format!("asin requires a number, got {}", args[0].type_name())),
+            }
+        }
+        "acos" => {
+            if args.len() != 1 { return Err("acos requires exactly 1 argument".into()); }
+            match &args[0] {
+                Value::Float(f) => Ok(Some(Value::Float(f.acos()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).acos()))),
+                _ => Err(format!("acos requires a number, got {}", args[0].type_name())),
+            }
+        }
+        "atan" => {
+            if args.len() != 1 { return Err("atan requires exactly 1 argument".into()); }
+            match &args[0] {
+                Value::Float(f) => Ok(Some(Value::Float(f.atan()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).atan()))),
+                _ => Err(format!("atan requires a number, got {}", args[0].type_name())),
+            }
+        }
+        "atan2" => {
+            if args.len() != 2 { return Err("atan2 requires exactly 2 arguments".into()); }
+            let y = match &args[0] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err(format!("atan2 requires numbers, got {}", args[0].type_name())),
+            };
+            let x = match &args[1] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err(format!("atan2 requires numbers, got {}", args[1].type_name())),
+            };
+            Ok(Some(Value::Float(y.atan2(x))))
+        }
+        // ---- Mathematics Hardening Phase: Hyperbolic ----
+        "sinh" => {
+            if args.len() != 1 { return Err("sinh requires exactly 1 argument".into()); }
+            match &args[0] {
+                Value::Float(f) => Ok(Some(Value::Float(f.sinh()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).sinh()))),
+                _ => Err(format!("sinh requires a number, got {}", args[0].type_name())),
+            }
+        }
+        "cosh" => {
+            if args.len() != 1 { return Err("cosh requires exactly 1 argument".into()); }
+            match &args[0] {
+                Value::Float(f) => Ok(Some(Value::Float(f.cosh()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).cosh()))),
+                _ => Err(format!("cosh requires a number, got {}", args[0].type_name())),
+            }
+        }
+        "tanh_scalar" => {
+            if args.len() != 1 { return Err("tanh_scalar requires exactly 1 argument".into()); }
+            match &args[0] {
+                Value::Float(f) => Ok(Some(Value::Float(f.tanh()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).tanh()))),
+                _ => Err(format!("tanh_scalar requires a number, got {}", args[0].type_name())),
+            }
+        }
+        // ---- Mathematics Hardening Phase: Exponentiation & Logarithms ----
+        "pow" => {
+            if args.len() != 2 { return Err("pow requires exactly 2 arguments".into()); }
+            let base = match &args[0] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err(format!("pow requires numbers, got {}", args[0].type_name())),
+            };
+            let exp = match &args[1] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err(format!("pow requires numbers, got {}", args[1].type_name())),
+            };
+            Ok(Some(Value::Float(base.powf(exp))))
+        }
+        "log2" => {
+            if args.len() != 1 { return Err("log2 requires exactly 1 argument".into()); }
+            match &args[0] {
+                Value::Float(f) => Ok(Some(Value::Float(f.log2()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).log2()))),
+                _ => Err(format!("log2 requires a number, got {}", args[0].type_name())),
+            }
+        }
+        "log10" => {
+            if args.len() != 1 { return Err("log10 requires exactly 1 argument".into()); }
+            match &args[0] {
+                Value::Float(f) => Ok(Some(Value::Float(f.log10()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).log10()))),
+                _ => Err(format!("log10 requires a number, got {}", args[0].type_name())),
+            }
+        }
+        "log1p" => {
+            if args.len() != 1 { return Err("log1p requires exactly 1 argument".into()); }
+            match &args[0] {
+                Value::Float(f) => Ok(Some(Value::Float(f.ln_1p()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).ln_1p()))),
+                _ => Err(format!("log1p requires a number, got {}", args[0].type_name())),
+            }
+        }
+        "expm1" => {
+            if args.len() != 1 { return Err("expm1 requires exactly 1 argument".into()); }
+            match &args[0] {
+                Value::Float(f) => Ok(Some(Value::Float(f.exp_m1()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).exp_m1()))),
+                _ => Err(format!("expm1 requires a number, got {}", args[0].type_name())),
+            }
+        }
+        // ---- Mathematics Hardening Phase: Rounding ----
+        "ceil" => {
+            if args.len() != 1 { return Err("ceil requires exactly 1 argument".into()); }
+            match &args[0] {
+                Value::Float(f) => Ok(Some(Value::Float(f.ceil()))),
+                Value::Int(i) => Ok(Some(Value::Int(*i))),
+                _ => Err(format!("ceil requires a number, got {}", args[0].type_name())),
+            }
+        }
+        "round" => {
+            if args.len() != 1 { return Err("round requires exactly 1 argument".into()); }
+            match &args[0] {
+                Value::Float(f) => Ok(Some(Value::Float(f.round()))),
+                Value::Int(i) => Ok(Some(Value::Int(*i))),
+                _ => Err(format!("round requires a number, got {}", args[0].type_name())),
+            }
+        }
         "floor" => {
             if args.len() != 1 {
                 return Err("floor requires exactly 1 argument".into());
@@ -465,6 +617,300 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 Value::Float(f) => Ok(Some(Value::Float(f.abs()))),
                 Value::Int(i) => Ok(Some(Value::Int(i.abs()))),
                 _ => Err(format!("abs requires a number, got {}", args[0].type_name())),
+            }
+        }
+        // ---- Mathematics Hardening Phase: Comparison & Sign ----
+        "min" => {
+            if args.len() != 2 { return Err("min requires exactly 2 arguments".into()); }
+            let a = match &args[0] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err(format!("min requires numbers, got {}", args[0].type_name())),
+            };
+            let b = match &args[1] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err(format!("min requires numbers, got {}", args[1].type_name())),
+            };
+            Ok(Some(Value::Float(a.min(b))))
+        }
+        "max" => {
+            if args.len() != 2 { return Err("max requires exactly 2 arguments".into()); }
+            let a = match &args[0] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err(format!("max requires numbers, got {}", args[0].type_name())),
+            };
+            let b = match &args[1] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err(format!("max requires numbers, got {}", args[1].type_name())),
+            };
+            Ok(Some(Value::Float(a.max(b))))
+        }
+        "sign" => {
+            if args.len() != 1 { return Err("sign requires exactly 1 argument".into()); }
+            match &args[0] {
+                Value::Float(f) => Ok(Some(Value::Float(f.signum()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).signum()))),
+                _ => Err(format!("sign requires a number, got {}", args[0].type_name())),
+            }
+        }
+        // ---- Mathematics Hardening Phase: Precision Helpers ----
+        "hypot" => {
+            if args.len() != 2 { return Err("hypot requires exactly 2 arguments".into()); }
+            let x = match &args[0] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err(format!("hypot requires numbers, got {}", args[0].type_name())),
+            };
+            let y = match &args[1] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err(format!("hypot requires numbers, got {}", args[1].type_name())),
+            };
+            Ok(Some(Value::Float(x.hypot(y))))
+        }
+        // ---- Mathematics Hardening Phase: Constants ----
+        "PI" => {
+            if !args.is_empty() { return Err("PI takes no arguments".into()); }
+            Ok(Some(Value::Float(std::f64::consts::PI)))
+        }
+        "E" => {
+            if !args.is_empty() { return Err("E takes no arguments".into()); }
+            Ok(Some(Value::Float(std::f64::consts::E)))
+        }
+        "TAU" => {
+            if !args.is_empty() { return Err("TAU takes no arguments".into()); }
+            Ok(Some(Value::Float(std::f64::consts::TAU)))
+        }
+        "INF" => {
+            if !args.is_empty() { return Err("INF takes no arguments".into()); }
+            Ok(Some(Value::Float(f64::INFINITY)))
+        }
+        "NAN_VAL" => {
+            if !args.is_empty() { return Err("NAN_VAL takes no arguments".into()); }
+            Ok(Some(Value::Float(f64::NAN)))
+        }
+        // ---- Mathematics Hardening Phase: Vector Operations ----
+        "dot" => {
+            if args.len() != 2 { return Err("dot requires exactly 2 arguments".into()); }
+            let a = match &args[0] {
+                Value::Tensor(t) => t,
+                _ => return Err(format!("dot requires tensors, got {}", args[0].type_name())),
+            };
+            let b = match &args[1] {
+                Value::Tensor(t) => t,
+                _ => return Err(format!("dot requires tensors, got {}", args[1].type_name())),
+            };
+            if a.ndim() != 1 || b.ndim() != 1 {
+                return Err("dot requires 1D tensors".into());
+            }
+            if a.len() != b.len() {
+                return Err(format!("dot: length mismatch ({} vs {})", a.len(), b.len()));
+            }
+            let av = a.to_vec();
+            let bv = b.to_vec();
+            let sum: f64 = av.iter().zip(bv.iter()).map(|(x, y)| x * y).sum();
+            Ok(Some(Value::Float(sum)))
+        }
+        "outer" => {
+            if args.len() != 2 { return Err("outer requires exactly 2 arguments".into()); }
+            let a = match &args[0] {
+                Value::Tensor(t) => t,
+                _ => return Err(format!("outer requires tensors, got {}", args[0].type_name())),
+            };
+            let b = match &args[1] {
+                Value::Tensor(t) => t,
+                _ => return Err(format!("outer requires tensors, got {}", args[1].type_name())),
+            };
+            if a.ndim() != 1 || b.ndim() != 1 {
+                return Err("outer requires 1D tensors".into());
+            }
+            let av = a.to_vec();
+            let bv = b.to_vec();
+            let m = av.len();
+            let n = bv.len();
+            let mut data = Vec::with_capacity(m * n);
+            for ai in &av {
+                for bj in &bv {
+                    data.push(ai * bj);
+                }
+            }
+            Ok(Some(Value::Tensor(Tensor::from_vec(data, &[m, n]).map_err(|e| format!("{e}"))?)))
+        }
+        "cross" => {
+            if args.len() != 2 { return Err("cross requires exactly 2 arguments".into()); }
+            let a = match &args[0] {
+                Value::Tensor(t) => t,
+                _ => return Err(format!("cross requires tensors, got {}", args[0].type_name())),
+            };
+            let b = match &args[1] {
+                Value::Tensor(t) => t,
+                _ => return Err(format!("cross requires tensors, got {}", args[1].type_name())),
+            };
+            if a.ndim() != 1 || b.ndim() != 1 || a.len() != 3 || b.len() != 3 {
+                return Err("cross requires two 3-element 1D tensors".into());
+            }
+            let av = a.to_vec();
+            let bv = b.to_vec();
+            let result = vec![
+                av[1] * bv[2] - av[2] * bv[1],
+                av[2] * bv[0] - av[0] * bv[2],
+                av[0] * bv[1] - av[1] * bv[0],
+            ];
+            Ok(Some(Value::Tensor(Tensor::from_vec(result, &[3]).map_err(|e| format!("{e}"))?)))
+        }
+        "norm" => {
+            if args.len() < 1 || args.len() > 2 { return Err("norm requires 1-2 arguments".into()); }
+            let t = match &args[0] {
+                Value::Tensor(t) => t,
+                _ => return Err(format!("norm requires a tensor, got {}", args[0].type_name())),
+            };
+            let ord = if args.len() == 2 {
+                match &args[1] {
+                    Value::Int(i) => *i,
+                    Value::Float(f) => *f as i64,
+                    _ => return Err("norm: ord must be an integer".into()),
+                }
+            } else {
+                2 // default: L2 norm
+            };
+            let data = t.to_vec();
+            let result = match ord {
+                1 => data.iter().map(|x| x.abs()).sum(),
+                2 => data.iter().map(|x| x * x).sum::<f64>().sqrt(),
+                _ => {
+                    let p = ord as f64;
+                    data.iter().map(|x| x.abs().powf(p)).sum::<f64>().powf(1.0 / p)
+                }
+            };
+            Ok(Some(Value::Float(result)))
+        }
+        // ---- Mathematics Hardening Phase: Tensor Constructors ----
+        "Tensor.linspace" => {
+            if args.len() != 3 { return Err("Tensor.linspace requires 3 arguments (start, end, n)".into()); }
+            let start = match &args[0] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err("Tensor.linspace: start must be a number".into()),
+            };
+            let end = match &args[1] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err("Tensor.linspace: end must be a number".into()),
+            };
+            let n = match &args[2] {
+                Value::Int(i) => *i as usize,
+                _ => return Err("Tensor.linspace: n must be an integer".into()),
+            };
+            if n == 0 {
+                return Ok(Some(Value::Tensor(Tensor::from_vec(vec![], &[0]).map_err(|e| format!("{e}"))?)));
+            }
+            if n == 1 {
+                return Ok(Some(Value::Tensor(Tensor::from_vec(vec![start], &[1]).map_err(|e| format!("{e}"))?)));
+            }
+            let step = (end - start) / (n as f64 - 1.0);
+            let data: Vec<f64> = (0..n).map(|i| start + step * i as f64).collect();
+            Ok(Some(Value::Tensor(Tensor::from_vec(data, &[n]).map_err(|e| format!("{e}"))?)))
+        }
+        "Tensor.arange" => {
+            if args.len() < 2 || args.len() > 3 { return Err("Tensor.arange requires 2-3 arguments (start, end, step?)".into()); }
+            let start = match &args[0] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err("Tensor.arange: start must be a number".into()),
+            };
+            let end = match &args[1] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err("Tensor.arange: end must be a number".into()),
+            };
+            let step = if args.len() == 3 {
+                match &args[2] {
+                    Value::Float(f) => *f,
+                    Value::Int(i) => *i as f64,
+                    _ => return Err("Tensor.arange: step must be a number".into()),
+                }
+            } else {
+                1.0
+            };
+            if step == 0.0 { return Err("Tensor.arange: step cannot be zero".into()); }
+            let mut data = Vec::new();
+            let mut val = start;
+            if step > 0.0 {
+                while val < end { data.push(val); val += step; }
+            } else {
+                while val > end { data.push(val); val += step; }
+            }
+            let n = data.len();
+            Ok(Some(Value::Tensor(Tensor::from_vec(data, &[n]).map_err(|e| format!("{e}"))?)))
+        }
+        "Tensor.eye" => {
+            if args.len() != 1 { return Err("Tensor.eye requires 1 argument (n)".into()); }
+            let n = match &args[0] {
+                Value::Int(i) => *i as usize,
+                _ => return Err("Tensor.eye: n must be an integer".into()),
+            };
+            let mut data = vec![0.0; n * n];
+            for i in 0..n {
+                data[i * n + i] = 1.0;
+            }
+            Ok(Some(Value::Tensor(Tensor::from_vec(data, &[n, n]).map_err(|e| format!("{e}"))?)))
+        }
+        "Tensor.full" => {
+            if args.len() != 2 { return Err("Tensor.full requires 2 arguments (shape, value)".into()); }
+            let shape = match &args[0] {
+                Value::Array(arr) => {
+                    let mut s = Vec::new();
+                    for v in arr.iter() {
+                        match v {
+                            Value::Int(i) => s.push(*i as usize),
+                            _ => return Err("Tensor.full: shape must be an array of ints".into()),
+                        }
+                    }
+                    s
+                }
+                _ => return Err("Tensor.full: shape must be an array".into()),
+            };
+            let fill_val = match &args[1] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err("Tensor.full: value must be a number".into()),
+            };
+            let total: usize = shape.iter().product();
+            let data = vec![fill_val; total];
+            Ok(Some(Value::Tensor(Tensor::from_vec(data, &shape).map_err(|e| format!("{e}"))?)))
+        }
+        "Tensor.diag" => {
+            if args.len() != 1 { return Err("Tensor.diag requires 1 argument".into()); }
+            let t = match &args[0] {
+                Value::Tensor(t) => t,
+                _ => return Err("Tensor.diag requires a tensor".into()),
+            };
+            match t.ndim() {
+                1 => {
+                    // 1D -> 2D diagonal matrix
+                    let data = t.to_vec();
+                    let n = data.len();
+                    let mut out = vec![0.0; n * n];
+                    for i in 0..n {
+                        out[i * n + i] = data[i];
+                    }
+                    Ok(Some(Value::Tensor(Tensor::from_vec(out, &[n, n]).map_err(|e| format!("{e}"))?)))
+                }
+                2 => {
+                    // 2D -> 1D diagonal extraction
+                    let rows = t.shape()[0];
+                    let cols = t.shape()[1];
+                    let n = rows.min(cols);
+                    let mut data = Vec::with_capacity(n);
+                    for i in 0..n {
+                        data.push(t.get(&[i, i]).map_err(|e| format!("{e}"))?);
+                    }
+                    Ok(Some(Value::Tensor(Tensor::from_vec(data, &[n]).map_err(|e| format!("{e}"))?)))
+                }
+                _ => Err("Tensor.diag requires a 1D or 2D tensor".into()),
             }
         }
         "assert" => {

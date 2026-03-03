@@ -92,3 +92,7 @@ path = "tidy_tests/mod.rs"
 [[test]]
 name = "test_rl_phase"
 path = "tests/test_rl_phase.rs"
+
+[[test]]
+name = "test_math_hardening"
+path = "tests/test_math_hardening.rs"

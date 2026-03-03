@@ -1320,10 +1320,26 @@ impl Interpreter {
                 | "log"
                 | "exp"
                 | "categorical_sample"
+                // Phase E: Mathematics Hardening
+                | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2"
+                | "sinh" | "cosh" | "tanh_scalar"
+                | "pow" | "log2" | "log10" | "log1p" | "expm1"
+                | "ceil" | "round"
+                | "min" | "max" | "sign"
+                | "hypot"
+                | "PI" | "E" | "TAU" | "INF" | "NAN_VAL"
+                | "dot" | "outer" | "cross" | "norm"
+                | "Tensor.linspace" | "Tensor.arange" | "Tensor.eye"
+                | "Tensor.full" | "Tensor.diag" | "Tensor.uniform"
         )
     }
 
     fn dispatch_call(&mut self, name: &str, args: Vec<Value>) -> EvalResult {
+        // User-defined functions always take priority over builtins
+        // (allows shadowing builtin names like "outer", "min", etc.)
+        if self.functions.contains_key(name) {
+            return self.call_function(name, &args);
+        }
         // Stateful builtins that need interpreter state
         match name {
             "print" => {
@@ -1338,6 +1354,16 @@ impl Interpreter {
                     .map_err(EvalError::Runtime)?;
                 let t = Tensor::randn(&shape, &mut self.rng);
                 return Ok(Value::Tensor(t));
+            }
+            "Tensor.uniform" => {
+                let shape = cjc_runtime::builtins::value_to_shape(&args[0])
+                    .map_err(EvalError::Runtime)?;
+                let total: usize = shape.iter().product();
+                let data: Vec<f64> = (0..total).map(|_| {
+                    let u = self.rng.next_f64().abs();
+                    u - u.floor()
+                }).collect();
+                return Ok(Value::Tensor(Tensor::from_vec(data, &shape).map_err(|e| EvalError::Runtime(format!("{e}")))?));
             }
             "categorical_sample" => {
                 if args.len() != 1 {
@@ -1498,6 +1524,87 @@ impl Interpreter {
             (Value::Tensor(t), "sum") => Ok(Value::Float(t.sum())),
             (Value::Tensor(t), "mean") => Ok(Value::Float(t.mean())),
             (Value::Tensor(t), "binned_sum") => Ok(Value::Float(t.binned_sum())),
+            // Mathematics Hardening Phase: tensor reductions
+            (Value::Tensor(t), "max") => {
+                let data = t.to_vec();
+                if data.is_empty() { return Err(EvalError::Runtime("max on empty tensor".to_string())); }
+                Ok(Value::Float(data.iter().cloned().fold(f64::NEG_INFINITY, f64::max)))
+            }
+            (Value::Tensor(t), "min") => {
+                let data = t.to_vec();
+                if data.is_empty() { return Err(EvalError::Runtime("min on empty tensor".to_string())); }
+                Ok(Value::Float(data.iter().cloned().fold(f64::INFINITY, f64::min)))
+            }
+            (Value::Tensor(t), "var") => {
+                let data = t.to_vec();
+                let n = data.len() as f64;
+                if n == 0.0 { return Err(EvalError::Runtime("var on empty tensor".to_string())); }
+                let mean = data.iter().sum::<f64>() / n;
+                let var = data.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / n;
+                Ok(Value::Float(var))
+            }
+            (Value::Tensor(t), "std") => {
+                let data = t.to_vec();
+                let n = data.len() as f64;
+                if n == 0.0 { return Err(EvalError::Runtime("std on empty tensor".to_string())); }
+                let mean = data.iter().sum::<f64>() / n;
+                let var = data.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / n;
+                Ok(Value::Float(var.sqrt()))
+            }
+            (Value::Tensor(t), "abs") => {
+                Ok(Value::Tensor(t.map(|x| x.abs())))
+            }
+            (Value::Tensor(t), "mean_axis") => {
+                if args.is_empty() { return Err(EvalError::Runtime("mean_axis requires an axis argument".to_string())); }
+                let axis = match &args[0] {
+                    Value::Int(i) => *i as usize,
+                    _ => return Err(EvalError::Runtime("mean_axis: axis must be an integer".to_string())),
+                };
+                if t.ndim() != 2 { return Err(EvalError::Runtime("mean_axis currently requires a 2D tensor".to_string())); }
+                let sum_t = t.sum_axis(axis).map_err(|e| EvalError::Runtime(format!("{e}")))?;
+                let divisor = t.shape()[axis] as f64;
+                Ok(Value::Tensor(sum_t.scalar_mul(1.0 / divisor)))
+            }
+            (Value::Tensor(t), "max_axis") => {
+                if args.is_empty() { return Err(EvalError::Runtime("max_axis requires an axis argument".to_string())); }
+                let axis = match &args[0] {
+                    Value::Int(i) => *i as usize,
+                    _ => return Err(EvalError::Runtime("max_axis: axis must be an integer".to_string())),
+                };
+                if t.ndim() != 2 { return Err(EvalError::Runtime("max_axis currently requires a 2D tensor".to_string())); }
+                let rows = t.shape()[0];
+                let cols = t.shape()[1];
+                let data_vec = t.to_vec();
+                if axis == 0 {
+                    let mut data = vec![f64::NEG_INFINITY; cols];
+                    for r in 0..rows { for c in 0..cols { data[c] = data[c].max(data_vec[r * cols + c]); } }
+                    Ok(Value::Tensor(Tensor::from_vec(data, &[1, cols]).map_err(|e| EvalError::Runtime(format!("{e}")))?))
+                } else {
+                    let mut data = vec![f64::NEG_INFINITY; rows];
+                    for r in 0..rows { for c in 0..cols { data[r] = data[r].max(data_vec[r * cols + c]); } }
+                    Ok(Value::Tensor(Tensor::from_vec(data, &[rows, 1]).map_err(|e| EvalError::Runtime(format!("{e}")))?))
+                }
+            }
+            (Value::Tensor(t), "min_axis") => {
+                if args.is_empty() { return Err(EvalError::Runtime("min_axis requires an axis argument".to_string())); }
+                let axis = match &args[0] {
+                    Value::Int(i) => *i as usize,
+                    _ => return Err(EvalError::Runtime("min_axis: axis must be an integer".to_string())),
+                };
+                if t.ndim() != 2 { return Err(EvalError::Runtime("min_axis currently requires a 2D tensor".to_string())); }
+                let rows = t.shape()[0];
+                let cols = t.shape()[1];
+                let data_vec = t.to_vec();
+                if axis == 0 {
+                    let mut data = vec![f64::INFINITY; cols];
+                    for r in 0..rows { for c in 0..cols { data[c] = data[c].min(data_vec[r * cols + c]); } }
+                    Ok(Value::Tensor(Tensor::from_vec(data, &[1, cols]).map_err(|e| EvalError::Runtime(format!("{e}")))?))
+                } else {
+                    let mut data = vec![f64::INFINITY; rows];
+                    for r in 0..rows { for c in 0..cols { data[r] = data[r].min(data_vec[r * cols + c]); } }
+                    Ok(Value::Tensor(Tensor::from_vec(data, &[rows, 1]).map_err(|e| EvalError::Runtime(format!("{e}")))?))
+                }
+            }
 
             // Complex methods
             (Value::Complex(z), "re") => Ok(Value::Float(z.re)),

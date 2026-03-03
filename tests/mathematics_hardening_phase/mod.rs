@@ -1,0 +1,11 @@
+mod helpers;
+mod test_01_scalar_trig;
+mod test_02_scalar_hyperbolic;
+mod test_03_scalar_exp_log;
+mod test_04_scalar_rounding;
+mod test_05_scalar_comparison;
+mod test_06_constants;
+mod test_07_tensor_constructors;
+mod test_08_tensor_reductions;
+mod test_09_vector_ops;
+mod test_10_parity;

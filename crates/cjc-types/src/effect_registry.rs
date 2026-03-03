@@ -60,9 +60,33 @@ pub fn builtin_effects() -> HashMap<&'static str, EffectSet> {
     for name in &[
         "sqrt", "floor", "int", "float", "isnan", "isinf", "abs",
         "log", "exp",
+        // Mathematics Hardening Phase: scalar math
+        "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
+        "sinh", "cosh", "tanh_scalar",
+        "pow", "log2", "log10", "log1p", "expm1",
+        "ceil", "round",
+        "min", "max", "sign",
+        "hypot",
+        // Mathematics Hardening Phase: constants
+        "PI", "E", "TAU", "INF", "NAN_VAL",
+        // Mathematics Hardening Phase: vector operations (pure for dot/norm)
+        "dot", "norm",
     ] {
         m.insert(name, pure);
     }
+    // Mathematics Hardening Phase: vector ops that allocate
+    for name in &["outer", "cross"] {
+        m.insert(name, alloc);
+    }
+    // Mathematics Hardening Phase: tensor constructors (allocate)
+    for name in &[
+        "Tensor.linspace", "Tensor.arange", "Tensor.eye",
+        "Tensor.full", "Tensor.diag",
+    ] {
+        m.insert(name, alloc);
+    }
+    // Tensor.uniform is nondeterministic (uses RNG)
+    m.insert("Tensor.uniform", nondet_alloc);
     // categorical_sample uses the interpreter RNG — nondeterministic + alloc
     m.insert("categorical_sample", nondet_alloc);
 
