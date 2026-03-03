@@ -59,9 +59,12 @@ pub fn builtin_effects() -> HashMap<&'static str, EffectSet> {
     // -----------------------------------------------------------------
     for name in &[
         "sqrt", "floor", "int", "float", "isnan", "isinf", "abs",
+        "log", "exp",
     ] {
         m.insert(name, pure);
     }
+    // categorical_sample uses the interpreter RNG — nondeterministic + alloc
+    m.insert("categorical_sample", nondet_alloc);
 
     // -----------------------------------------------------------------
     // Type conversion builtins — no allocation, deterministic
@@ -487,6 +490,75 @@ pub fn builtin_effects() -> HashMap<&'static str, EffectSet> {
     m.insert("window_mean", alloc);  // allocates result array
     m.insert("window_min", alloc);   // allocates result array
     m.insert("window_max", alloc);   // allocates result array
+
+    // ── Phase C1: GradGraph Language API ──
+    m.insert("GradGraph.new", alloc);
+    m.insert("GradGraph.parameter", mutates_alloc);
+    m.insert("GradGraph.input", mutates_alloc);
+    m.insert("GradGraph.add", mutates_alloc);
+    m.insert("GradGraph.sub", mutates_alloc);
+    m.insert("GradGraph.mul", mutates_alloc);
+    m.insert("GradGraph.div", mutates_alloc);
+    m.insert("GradGraph.neg", mutates_alloc);
+    m.insert("GradGraph.matmul", mutates_alloc);
+    m.insert("GradGraph.sum", mutates_alloc);
+    m.insert("GradGraph.mean", mutates_alloc);
+    m.insert("GradGraph.sigmoid", mutates_alloc);
+    m.insert("GradGraph.relu", mutates_alloc);
+    m.insert("GradGraph.tanh", mutates_alloc);
+    m.insert("GradGraph.sin", mutates_alloc);
+    m.insert("GradGraph.cos", mutates_alloc);
+    m.insert("GradGraph.sqrt", mutates_alloc);
+    m.insert("GradGraph.pow", mutates_alloc);
+    m.insert("GradGraph.exp", mutates_alloc);
+    m.insert("GradGraph.ln", mutates_alloc);
+    m.insert("GradGraph.scalar_mul", mutates_alloc);
+    m.insert("GradGraph.backward", mutates);
+    m.insert("GradGraph.value", pure);
+    m.insert("GradGraph.tensor", alloc);
+    m.insert("GradGraph.grad", alloc);
+    m.insert("GradGraph.set_tensor", mutates);
+    m.insert("GradGraph.zero_grad", mutates);
+
+    // ── Phase C2: Optimizer builtins ──
+    m.insert("Adam.new", alloc);
+    m.insert("Sgd.new", alloc);
+    m.insert("OptimizerState.step", mutates_alloc);
+
+    // ── Phase C3: Bitwise operations ──
+    for name in &["bit_and", "bit_or", "bit_xor", "bit_not", "bit_shl", "bit_shr", "popcount"] {
+        m.insert(*name, pure);
+    }
+
+    // ── Phase C4: Sorting & Tensor Indexing ──
+    m.insert("argsort", alloc);
+    m.insert("gather", alloc);
+    m.insert("scatter", alloc);
+    m.insert("index_select", alloc);
+
+    // ── Phase C5: Map & Set ──
+    // ── Phase C6: I/O & Collection Utilities ──
+    m.insert("read_line", EffectSet::new(EffectSet::IO | EffectSet::NONDET | EffectSet::ALLOC));
+    m.insert("array_push", alloc);
+    m.insert("array_pop", alloc);
+    m.insert("array_contains", pure);
+    m.insert("array_reverse", alloc);
+    m.insert("array_flatten", alloc);
+    m.insert("array_len", pure);
+    m.insert("array_slice", alloc);
+
+    m.insert("Set.new", alloc);
+    m.insert("Map.insert", mutates);
+    m.insert("Map.get", pure);
+    m.insert("Map.remove", mutates);
+    m.insert("Map.contains_key", pure);
+    m.insert("Map.keys", alloc);
+    m.insert("Map.values", alloc);
+    m.insert("Set.add", mutates);
+    m.insert("Set.contains", pure);
+    m.insert("Set.remove", mutates);
+    m.insert("Set.len", pure);
+    m.insert("Set.to_array", alloc);
 
     m
 }

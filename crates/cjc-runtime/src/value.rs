@@ -140,6 +140,13 @@ pub enum Value {
     /// via `AlignedByteSlice.from_bytes()` builtin. Type-checking treats it
     /// as opaque.
     AlignedBytes(AlignedByteSlice),
+    /// Type-erased reverse-mode AD graph. Concrete type: `cjc_ad::GradGraph`.
+    /// Uses `Rc<RefCell<dyn Any>>` because cjc-runtime cannot depend on cjc-ad.
+    /// Construction and method dispatch happen in cjc-eval and cjc-mir-exec.
+    GradGraph(Rc<RefCell<dyn Any>>),
+    /// Type-erased optimizer state. Concrete types: AdamState or SgdState (from ml.rs).
+    /// Uses `Rc<RefCell<dyn Any>>` for interior mutability (step updates internal state).
+    OptimizerState(Rc<RefCell<dyn Any>>),
     /// Type-erased tidy data view. Concrete type is `cjc_data::TidyView`.
     /// Wrapped in `Rc<dyn Any>` for cheap cloning without circular deps
     /// (cjc-runtime cannot depend on cjc-data).
@@ -181,6 +188,8 @@ impl Value {
             Value::Scratchpad(_) => "Scratchpad",
             Value::PagedKvCache(_) => "PagedKvCache",
             Value::AlignedBytes(_) => "AlignedBytes",
+            Value::GradGraph(_) => "GradGraph",
+            Value::OptimizerState(_) => "OptimizerState",
             Value::TidyView(_) => "TidyView",
             Value::GroupedTidyView(_) => "GroupedTidyView",
             Value::Void => "Void",
@@ -306,6 +315,8 @@ impl fmt::Display for Value {
             Value::Scratchpad(s) => write!(f, "{}", s.borrow()),
             Value::PagedKvCache(c) => write!(f, "{}", c.borrow()),
             Value::AlignedBytes(a) => write!(f, "{}", a),
+            Value::GradGraph(_) => write!(f, "<GradGraph>"),
+            Value::OptimizerState(_) => write!(f, "<OptimizerState>"),
             Value::TidyView(_) => write!(f, "<TidyView>"),
             Value::GroupedTidyView(_) => write!(f, "<GroupedTidyView>"),
             Value::Void => write!(f, "void"),

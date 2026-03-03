@@ -138,6 +138,32 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Deterministic categorical sampling (needs external RNG)
+// ---------------------------------------------------------------------------
+
+/// Sample an index from a 1-D probability tensor using the given uniform
+/// random value `u` in [0, 1). Returns the selected index (0-based).
+/// This is a general-purpose RL primitive, not domain-specific.
+pub fn categorical_sample_with_u(probs: &Tensor, u: f64) -> Result<i64, String> {
+    if probs.ndim() == 0 {
+        return Err("categorical_sample requires at least a 1-D tensor".into());
+    }
+    let data = probs.to_vec();
+    if data.is_empty() {
+        return Err("categorical_sample: empty probability tensor".into());
+    }
+    let mut cumsum = 0.0;
+    for (i, &p) in data.iter().enumerate() {
+        cumsum += p;
+        if u < cumsum {
+            return Ok(i as i64);
+        }
+    }
+    // Numerical safety: return last valid index
+    Ok((data.len() - 1) as i64)
+}
+
+// ---------------------------------------------------------------------------
 // Stateless builtin functions
 // ---------------------------------------------------------------------------
 
@@ -359,6 +385,26 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 Value::Float(f) => Ok(Some(Value::Float(f.sqrt()))),
                 Value::Int(i) => Ok(Some(Value::Float((*i as f64).sqrt()))),
                 _ => Err(format!("sqrt requires a number, got {}", args[0].type_name())),
+            }
+        }
+        "log" => {
+            if args.len() != 1 {
+                return Err("log requires exactly 1 argument".into());
+            }
+            match &args[0] {
+                Value::Float(f) => Ok(Some(Value::Float(f.ln()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).ln()))),
+                _ => Err(format!("log requires a number, got {}", args[0].type_name())),
+            }
+        }
+        "exp" => {
+            if args.len() != 1 {
+                return Err("exp requires exactly 1 argument".into());
+            }
+            match &args[0] {
+                Value::Float(f) => Ok(Some(Value::Float(f.exp()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).exp()))),
+                _ => Err(format!("exp requires a number, got {}", args[0].type_name())),
             }
         }
         "floor" => {
@@ -1600,6 +1646,185 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             Ok(Some(Value::Struct { name: "LogisticResult".into(), fields }))
         }
 
+        // Phase C4: Sorting & Tensor Indexing
+        "argsort" => {
+            if args.len() != 1 { return Err("argsort requires 1 arg: Tensor".into()); }
+            let t = value_to_tensor(&args[0])?;
+            Ok(Some(Value::Tensor(t.argsort())))
+        }
+        "gather" => {
+            if args.len() != 3 { return Err("gather requires 3 args: tensor, dim, indices".into()); }
+            let t = value_to_tensor(&args[0])?;
+            let dim = value_to_usize(&args[1])?;
+            let indices = value_to_tensor(&args[2])?;
+            Ok(Some(Value::Tensor(t.gather(dim, &indices).map_err(|e| format!("{e}"))?)))
+        }
+        "scatter" => {
+            if args.len() != 4 { return Err("scatter requires 4 args: tensor, dim, indices, src".into()); }
+            let t = value_to_tensor(&args[0])?;
+            let dim = value_to_usize(&args[1])?;
+            let indices = value_to_tensor(&args[2])?;
+            let src = value_to_tensor(&args[3])?;
+            Ok(Some(Value::Tensor(t.scatter(dim, &indices, &src).map_err(|e| format!("{e}"))?)))
+        }
+        "index_select" => {
+            if args.len() != 3 { return Err("index_select requires 3 args: tensor, dim, indices".into()); }
+            let t = value_to_tensor(&args[0])?;
+            let dim = value_to_usize(&args[1])?;
+            let indices = value_to_tensor(&args[2])?;
+            Ok(Some(Value::Tensor(t.index_select(dim, &indices).map_err(|e| format!("{e}"))?)))
+        }
+
+        // Phase C6: Collection utilities
+        "array_push" => {
+            if args.len() != 2 { return Err("array_push requires 2 args: array, value".into()); }
+            let arr = match &args[0] { Value::Array(a) => (**a).clone(), _ => return Err("array_push: first arg must be Array".into()) };
+            let mut new_arr = arr;
+            new_arr.push(args[1].clone());
+            Ok(Some(Value::Array(Rc::new(new_arr))))
+        }
+        "array_pop" => {
+            if args.len() != 1 { return Err("array_pop requires 1 arg: array".into()); }
+            let arr = match &args[0] { Value::Array(a) => (**a).clone(), _ => return Err("array_pop: expected Array".into()) };
+            if arr.is_empty() { return Err("array_pop: empty array".into()); }
+            let mut new_arr = arr;
+            let last = new_arr.pop().unwrap();
+            Ok(Some(Value::Tuple(Rc::new(vec![last, Value::Array(Rc::new(new_arr))]))))
+        }
+        "array_contains" => {
+            if args.len() != 2 { return Err("array_contains requires 2 args: array, value".into()); }
+            let arr = match &args[0] { Value::Array(a) => a, _ => return Err("array_contains: first arg must be Array".into()) };
+            let needle = &args[1];
+            let found = arr.iter().any(|v| format!("{v}") == format!("{needle}"));
+            Ok(Some(Value::Bool(found)))
+        }
+        "array_reverse" => {
+            if args.len() != 1 { return Err("array_reverse requires 1 arg: array".into()); }
+            let arr = match &args[0] { Value::Array(a) => (**a).clone(), _ => return Err("array_reverse: expected Array".into()) };
+            let mut new_arr = arr;
+            new_arr.reverse();
+            Ok(Some(Value::Array(Rc::new(new_arr))))
+        }
+        "array_flatten" => {
+            if args.len() != 1 { return Err("array_flatten requires 1 arg: array".into()); }
+            let arr = match &args[0] { Value::Array(a) => a.clone(), _ => return Err("array_flatten: expected Array".into()) };
+            let mut result = Vec::new();
+            fn flatten_recursive(arr: &[Value], result: &mut Vec<Value>) {
+                for v in arr {
+                    match v {
+                        Value::Array(inner) => flatten_recursive(inner, result),
+                        _ => result.push(v.clone()),
+                    }
+                }
+            }
+            flatten_recursive(&arr, &mut result);
+            Ok(Some(Value::Array(Rc::new(result))))
+        }
+        "array_len" => {
+            if args.len() != 1 { return Err("array_len requires 1 arg: array".into()); }
+            match &args[0] {
+                Value::Array(a) => Ok(Some(Value::Int(a.len() as i64))),
+                _ => Err("array_len: expected Array".into()),
+            }
+        }
+        "array_slice" => {
+            if args.len() != 3 { return Err("array_slice requires 3 args: array, start, end".into()); }
+            let arr = match &args[0] { Value::Array(a) => a, _ => return Err("array_slice: expected Array".into()) };
+            let start = match &args[1] { Value::Int(i) => *i as usize, _ => return Err("array_slice: start must be Int".into()) };
+            let end = match &args[2] { Value::Int(i) => *i as usize, _ => return Err("array_slice: end must be Int".into()) };
+            if start > end || end > arr.len() {
+                return Err(format!("array_slice: bounds [{start}, {end}) out of range for len {}", arr.len()));
+            }
+            Ok(Some(Value::Array(Rc::new(arr[start..end].to_vec()))))
+        }
+
+        // Phase C5: Map & Set constructors
+        "Map.new" => {
+            if !args.is_empty() { return Err("Map.new takes 0 arguments".into()); }
+            Ok(Some(Value::Map(Rc::new(RefCell::new(crate::det_map::DetMap::new())))))
+        }
+        "Set.new" => {
+            if !args.is_empty() { return Err("Set.new takes 0 arguments".into()); }
+            Ok(Some(Value::Map(Rc::new(RefCell::new(crate::det_map::DetMap::new())))))
+        }
+
+        // Phase C3: Bitwise operations
+        "bit_and" => {
+            if args.len() != 2 { return Err("bit_and requires 2 Int args".into()); }
+            let a = match &args[0] { Value::Int(i) => *i, _ => return Err("bit_and: expected Int".into()) };
+            let b = match &args[1] { Value::Int(i) => *i, _ => return Err("bit_and: expected Int".into()) };
+            Ok(Some(Value::Int(a & b)))
+        }
+        "bit_or" => {
+            if args.len() != 2 { return Err("bit_or requires 2 Int args".into()); }
+            let a = match &args[0] { Value::Int(i) => *i, _ => return Err("bit_or: expected Int".into()) };
+            let b = match &args[1] { Value::Int(i) => *i, _ => return Err("bit_or: expected Int".into()) };
+            Ok(Some(Value::Int(a | b)))
+        }
+        "bit_xor" => {
+            if args.len() != 2 { return Err("bit_xor requires 2 Int args".into()); }
+            let a = match &args[0] { Value::Int(i) => *i, _ => return Err("bit_xor: expected Int".into()) };
+            let b = match &args[1] { Value::Int(i) => *i, _ => return Err("bit_xor: expected Int".into()) };
+            Ok(Some(Value::Int(a ^ b)))
+        }
+        "bit_not" => {
+            if args.len() != 1 { return Err("bit_not requires 1 Int arg".into()); }
+            let a = match &args[0] { Value::Int(i) => *i, _ => return Err("bit_not: expected Int".into()) };
+            Ok(Some(Value::Int(!a)))
+        }
+        "bit_shl" => {
+            if args.len() != 2 { return Err("bit_shl requires 2 Int args".into()); }
+            let a = match &args[0] { Value::Int(i) => *i, _ => return Err("bit_shl: expected Int".into()) };
+            let n = match &args[1] { Value::Int(i) => *i, _ => return Err("bit_shl: expected Int".into()) };
+            if n < 0 || n > 63 { return Err("bit_shl: shift amount must be 0-63".into()); }
+            Ok(Some(Value::Int(((a as u64) << n) as i64)))
+        }
+        "bit_shr" => {
+            if args.len() != 2 { return Err("bit_shr requires 2 Int args".into()); }
+            let a = match &args[0] { Value::Int(i) => *i, _ => return Err("bit_shr: expected Int".into()) };
+            let n = match &args[1] { Value::Int(i) => *i, _ => return Err("bit_shr: expected Int".into()) };
+            if n < 0 || n > 63 { return Err("bit_shr: shift amount must be 0-63".into()); }
+            Ok(Some(Value::Int(((a as u64) >> n) as i64)))
+        }
+        "popcount" => {
+            if args.len() != 1 { return Err("popcount requires 1 Int arg".into()); }
+            let a = match &args[0] { Value::Int(i) => *i, _ => return Err("popcount: expected Int".into()) };
+            Ok(Some(Value::Int((a as u64).count_ones() as i64)))
+        }
+
+        // Phase C2: Optimizer constructors
+        "Adam.new" => {
+            if args.len() < 2 || args.len() > 4 {
+                return Err("Adam.new requires 2-4 args: n_params, lr, [beta1], [beta2]".into());
+            }
+            let n = match &args[0] { Value::Int(i) => *i as usize, _ => return Err("Adam.new: n_params must be Int".into()) };
+            let lr = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("Adam.new: lr must be Float".into()) };
+            let beta1 = if args.len() > 2 {
+                match &args[2] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("Adam.new: beta1 must be Float".into()) }
+            } else { 0.9 };
+            let beta2 = if args.len() > 3 {
+                match &args[3] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("Adam.new: beta2 must be Float".into()) }
+            } else { 0.999 };
+            let mut state = crate::ml::AdamState::new(n, lr);
+            state.beta1 = beta1;
+            state.beta2 = beta2;
+            let erased: Rc<RefCell<dyn std::any::Any>> = Rc::new(RefCell::new(state));
+            Ok(Some(Value::OptimizerState(erased)))
+        }
+        "Sgd.new" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err("Sgd.new requires 2-3 args: n_params, lr, [momentum]".into());
+            }
+            let n = match &args[0] { Value::Int(i) => *i as usize, _ => return Err("Sgd.new: n_params must be Int".into()) };
+            let lr = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("Sgd.new: lr must be Float".into()) };
+            let momentum = if args.len() > 2 {
+                match &args[2] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("Sgd.new: momentum must be Float".into()) }
+            } else { 0.0 };
+            let state = crate::ml::SgdState::new(n, lr, momentum);
+            let erased: Rc<RefCell<dyn std::any::Any>> = Rc::new(RefCell::new(state));
+            Ok(Some(Value::OptimizerState(erased)))
+        }
+
         _ => Ok(None), // Not a shared builtin
     }
 }
@@ -1843,5 +2068,69 @@ mod tests {
             Value::Float(3.5),
         ]));
         assert_eq!(value_to_f64_vec(&arr).unwrap(), vec![1.0, 2.0, 3.5]);
+    }
+
+    #[test]
+    fn test_log_float() {
+        let result = dispatch_builtin("log", &[Value::Float(1.0)]);
+        match result {
+            Ok(Some(Value::Float(v))) => assert!((v - 0.0).abs() < 1e-15),
+            _ => panic!("expected Float"),
+        }
+    }
+
+    #[test]
+    fn test_log_e() {
+        let result = dispatch_builtin("log", &[Value::Float(std::f64::consts::E)]);
+        match result {
+            Ok(Some(Value::Float(v))) => assert!((v - 1.0).abs() < 1e-15),
+            _ => panic!("expected Float"),
+        }
+    }
+
+    #[test]
+    fn test_exp_float() {
+        let result = dispatch_builtin("exp", &[Value::Float(0.0)]);
+        match result {
+            Ok(Some(Value::Float(v))) => assert!((v - 1.0).abs() < 1e-15),
+            _ => panic!("expected Float"),
+        }
+    }
+
+    #[test]
+    fn test_exp_one() {
+        let result = dispatch_builtin("exp", &[Value::Float(1.0)]);
+        match result {
+            Ok(Some(Value::Float(v))) => assert!((v - std::f64::consts::E).abs() < 1e-15),
+            _ => panic!("expected Float"),
+        }
+    }
+
+    #[test]
+    fn test_categorical_sample_deterministic() {
+        let probs = Tensor::from_vec(vec![0.0, 0.0, 1.0], &[3]).unwrap();
+        // u=0.5, cumsum: 0.0, 0.0, 1.0 → picks index 2
+        assert_eq!(categorical_sample_with_u(&probs, 0.5).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_categorical_sample_first() {
+        let probs = Tensor::from_vec(vec![0.5, 0.3, 0.2], &[3]).unwrap();
+        // u=0.1 → picks index 0 (cumsum 0.5 > 0.1)
+        assert_eq!(categorical_sample_with_u(&probs, 0.1).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_categorical_sample_middle() {
+        let probs = Tensor::from_vec(vec![0.2, 0.5, 0.3], &[3]).unwrap();
+        // u=0.6 → cumsum 0.2, 0.7 → picks index 1
+        assert_eq!(categorical_sample_with_u(&probs, 0.6).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_categorical_sample_last() {
+        let probs = Tensor::from_vec(vec![0.2, 0.3, 0.5], &[3]).unwrap();
+        // u=0.99 → cumsum 0.2, 0.5, 1.0 → picks index 2
+        assert_eq!(categorical_sample_with_u(&probs, 0.99).unwrap(), 2);
     }
 }

@@ -1547,5 +1547,185 @@ impl Tensor {
     pub fn view_reshape(&self, new_shape: &[usize]) -> Result<Tensor, RuntimeError> {
         self.reshape(new_shape)
     }
+
+    // -----------------------------------------------------------------------
+    // Phase C4: Sorting & Tensor Indexing
+    // -----------------------------------------------------------------------
+
+    /// Returns indices that would sort the flattened tensor in ascending order.
+    /// Uses f64::total_cmp for deterministic ordering of NaN.
+    pub fn argsort(&self) -> Tensor {
+        let data = self.to_vec();
+        let mut indices: Vec<usize> = (0..data.len()).collect();
+        indices.sort_by(|&a, &b| data[a].total_cmp(&data[b]));
+        let result: Vec<f64> = indices.iter().map(|&i| i as f64).collect();
+        Tensor::from_vec_unchecked(result, &[data.len()])
+    }
+
+    /// Gather elements from the tensor along a dimension using index tensor.
+    /// For 1D: result[i] = self[indices[i]]
+    /// For 2D dim=0: result[i][j] = self[indices[i][j]][j]
+    /// For 2D dim=1: result[i][j] = self[i][indices[i][j]]
+    pub fn gather(&self, dim: usize, indices: &Tensor) -> Result<Tensor, RuntimeError> {
+        let data = self.to_vec();
+        let idx_data = indices.to_vec();
+        if self.ndim() == 1 {
+            let mut result = Vec::with_capacity(idx_data.len());
+            for &idx in &idx_data {
+                let i = idx as usize;
+                if i >= data.len() {
+                    return Err(RuntimeError::InvalidOperation(
+                        format!("gather: index {} out of bounds for size {}", i, data.len()),
+                    ));
+                }
+                result.push(data[i]);
+            }
+            Ok(Tensor::from_vec_unchecked(result, indices.shape()))
+        } else if self.ndim() == 2 {
+            let rows = self.shape[0];
+            let cols = self.shape[1];
+            let idx_shape = indices.shape();
+            let out_rows = idx_shape[0];
+            let out_cols = idx_shape[1];
+            let mut result = vec![0.0; out_rows * out_cols];
+            for i in 0..out_rows {
+                for j in 0..out_cols {
+                    let idx = idx_data[i * out_cols + j] as usize;
+                    let val = if dim == 0 {
+                        if idx >= rows {
+                            return Err(RuntimeError::InvalidOperation(
+                                format!("gather dim=0: index {} out of bounds for {} rows", idx, rows),
+                            ));
+                        }
+                        data[idx * cols + j]
+                    } else {
+                        if idx >= cols {
+                            return Err(RuntimeError::InvalidOperation(
+                                format!("gather dim=1: index {} out of bounds for {} cols", idx, cols),
+                            ));
+                        }
+                        data[i * cols + idx]
+                    };
+                    result[i * out_cols + j] = val;
+                }
+            }
+            Ok(Tensor::from_vec_unchecked(result, idx_shape))
+        } else {
+            Err(RuntimeError::InvalidOperation(
+                "gather: only 1D and 2D tensors supported".into(),
+            ))
+        }
+    }
+
+    /// Scatter src values into a tensor of given shape at indices along a dimension.
+    /// For 1D: result[indices[i]] = src[i]
+    /// For 2D dim=0: result[indices[i][j]][j] = src[i][j]
+    /// For 2D dim=1: result[i][indices[i][j]] = src[i][j]
+    pub fn scatter(&self, dim: usize, indices: &Tensor, src: &Tensor) -> Result<Tensor, RuntimeError> {
+        let mut result = self.to_vec();
+        let idx_data = indices.to_vec();
+        let src_data = src.to_vec();
+        if self.ndim() == 1 {
+            for (k, &idx) in idx_data.iter().enumerate() {
+                let i = idx as usize;
+                if i >= result.len() {
+                    return Err(RuntimeError::InvalidOperation(
+                        format!("scatter: index {} out of bounds for size {}", i, result.len()),
+                    ));
+                }
+                result[i] = src_data[k];
+            }
+            Ok(Tensor::from_vec_unchecked(result, self.shape()))
+        } else if self.ndim() == 2 {
+            let cols = self.shape[1];
+            let idx_shape = indices.shape();
+            let out_cols = idx_shape[1];
+            let out_rows = idx_shape[0];
+            for i in 0..out_rows {
+                for j in 0..out_cols {
+                    let idx = idx_data[i * out_cols + j] as usize;
+                    let src_val = src_data[i * out_cols + j];
+                    if dim == 0 {
+                        if idx >= self.shape[0] {
+                            return Err(RuntimeError::InvalidOperation(
+                                format!("scatter dim=0: index {} out of bounds for {} rows", idx, self.shape[0]),
+                            ));
+                        }
+                        result[idx * cols + j] = src_val;
+                    } else {
+                        if idx >= cols {
+                            return Err(RuntimeError::InvalidOperation(
+                                format!("scatter dim=1: index {} out of bounds for {} cols", idx, cols),
+                            ));
+                        }
+                        result[i * cols + idx] = src_val;
+                    }
+                }
+            }
+            Ok(Tensor::from_vec_unchecked(result, self.shape()))
+        } else {
+            Err(RuntimeError::InvalidOperation(
+                "scatter: only 1D and 2D tensors supported".into(),
+            ))
+        }
+    }
+
+    /// Select slices along a dimension by index.
+    /// For 2D dim=0: selects rows
+    /// For 2D dim=1: selects columns
+    pub fn index_select(&self, dim: usize, indices: &Tensor) -> Result<Tensor, RuntimeError> {
+        let data = self.to_vec();
+        let idx_data = indices.to_vec();
+        if self.ndim() == 1 {
+            let mut result = Vec::with_capacity(idx_data.len());
+            for &idx in &idx_data {
+                let i = idx as usize;
+                if i >= data.len() {
+                    return Err(RuntimeError::InvalidOperation(
+                        format!("index_select: index {} out of bounds for size {}", i, data.len()),
+                    ));
+                }
+                result.push(data[i]);
+            }
+            Ok(Tensor::from_vec_unchecked(result, &[idx_data.len()]))
+        } else if self.ndim() == 2 {
+            let rows = self.shape[0];
+            let cols = self.shape[1];
+            let n = idx_data.len();
+            if dim == 0 {
+                let mut result = Vec::with_capacity(n * cols);
+                for &idx in &idx_data {
+                    let i = idx as usize;
+                    if i >= rows {
+                        return Err(RuntimeError::InvalidOperation(
+                            format!("index_select dim=0: index {} out of bounds for {} rows", i, rows),
+                        ));
+                    }
+                    for j in 0..cols {
+                        result.push(data[i * cols + j]);
+                    }
+                }
+                Ok(Tensor::from_vec_unchecked(result, &[n, cols]))
+            } else {
+                let mut result = Vec::with_capacity(rows * n);
+                for i in 0..rows {
+                    for &idx in &idx_data {
+                        let j = idx as usize;
+                        if j >= cols {
+                            return Err(RuntimeError::InvalidOperation(
+                                format!("index_select dim=1: index {} out of bounds for {} cols", j, cols),
+                            ));
+                        }
+                        result.push(data[i * cols + j]);
+                    }
+                }
+                Ok(Tensor::from_vec_unchecked(result, &[rows, n]))
+            }
+        } else {
+            Err(RuntimeError::InvalidOperation(
+                "index_select: only 1D and 2D tensors supported".into(),
+            ))
+        }
+    }
 }
 

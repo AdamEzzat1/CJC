@@ -422,6 +422,65 @@ impl GradGraph {
         idx
     }
 
+    // ── Phase C1: Missing forward methods ──
+
+    /// Element-wise division: a / b.
+    /// GradOp::Div(a, b) already has backward implementation.
+    pub fn div(&mut self, a: usize, b: usize) -> usize {
+        let a_tensor = self.nodes[a].borrow().tensor.clone();
+        let b_tensor = self.nodes[b].borrow().tensor.clone();
+        let result = a_tensor.div_elem_unchecked(&b_tensor);
+        let node = GradNode { op: GradOp::Div(a, b), tensor: result, grad: None };
+        self.nodes.push(Rc::new(RefCell::new(node)));
+        self.nodes.len() - 1
+    }
+
+    /// Element-wise negation: -a.
+    /// GradOp::Neg(a) already has backward implementation.
+    pub fn neg(&mut self, a: usize) -> usize {
+        let a_tensor = self.nodes[a].borrow().tensor.clone();
+        let result = a_tensor.neg();
+        let node = GradNode { op: GradOp::Neg(a), tensor: result, grad: None };
+        self.nodes.push(Rc::new(RefCell::new(node)));
+        self.nodes.len() - 1
+    }
+
+    /// Scalar multiply: a * s (where s is an f64 constant).
+    /// GradOp::ScalarMul(a, s) already has backward implementation.
+    pub fn scalar_mul(&mut self, a: usize, s: f64) -> usize {
+        let a_tensor = self.nodes[a].borrow().tensor.clone();
+        let result = a_tensor.scalar_mul(s);
+        let node = GradNode { op: GradOp::ScalarMul(a, s), tensor: result, grad: None };
+        self.nodes.push(Rc::new(RefCell::new(node)));
+        self.nodes.len() - 1
+    }
+
+    /// Element-wise exponential: exp(a).
+    /// GradOp::Exp(a) already has backward implementation.
+    pub fn exp(&mut self, a: usize) -> usize {
+        let a_tensor = self.nodes[a].borrow().tensor.clone();
+        let result = Tensor::from_vec_unchecked(
+            a_tensor.to_vec().iter().map(|x| x.exp()).collect(),
+            a_tensor.shape(),
+        );
+        let node = GradNode { op: GradOp::Exp(a), tensor: result, grad: None };
+        self.nodes.push(Rc::new(RefCell::new(node)));
+        self.nodes.len() - 1
+    }
+
+    /// Element-wise natural logarithm: ln(a).
+    /// GradOp::Ln(a) already has backward implementation.
+    pub fn ln(&mut self, a: usize) -> usize {
+        let a_tensor = self.nodes[a].borrow().tensor.clone();
+        let result = Tensor::from_vec_unchecked(
+            a_tensor.to_vec().iter().map(|x| x.ln()).collect(),
+            a_tensor.shape(),
+        );
+        let node = GradNode { op: GradOp::Ln(a), tensor: result, grad: None };
+        self.nodes.push(Rc::new(RefCell::new(node)));
+        self.nodes.len() - 1
+    }
+
     /// Get the scalar value from a 1-element tensor node.
     pub fn value(&self, idx: usize) -> f64 {
         let node = self.nodes[idx].borrow();
@@ -1002,5 +1061,63 @@ mod tests {
         for &v in &gw.to_vec() {
             assert!(v.is_finite());
         }
+    }
+
+    // ── Phase C1: Reverse Mode Tests for New Forward Methods ──
+
+    #[test]
+    fn test_reverse_div() {
+        // f(x) = x / 2, f'(x) = 0.5
+        let mut g = GradGraph::new();
+        let a = g.parameter(Tensor::from_vec_unchecked(vec![6.0], &[1]));
+        let b = g.input(Tensor::from_vec_unchecked(vec![2.0], &[1]));
+        let c = g.div(a, b);
+        g.backward(c);
+        let ga = g.grad(a).unwrap();
+        assert!((ga.to_vec()[0] - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_reverse_neg() {
+        // f(x) = -x, f'(x) = -1
+        let mut g = GradGraph::new();
+        let a = g.parameter(Tensor::from_vec_unchecked(vec![3.0], &[1]));
+        let c = g.neg(a);
+        g.backward(c);
+        let ga = g.grad(a).unwrap();
+        assert!((ga.to_vec()[0] - (-1.0)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_reverse_scalar_mul() {
+        // f(x) = 3x, f'(x) = 3
+        let mut g = GradGraph::new();
+        let a = g.parameter(Tensor::from_vec_unchecked(vec![2.0], &[1]));
+        let c = g.scalar_mul(a, 3.0);
+        g.backward(c);
+        let ga = g.grad(a).unwrap();
+        assert!((ga.to_vec()[0] - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_reverse_exp() {
+        // f(x) = exp(x), f'(x) = exp(x)
+        let mut g = GradGraph::new();
+        let a = g.parameter(Tensor::from_vec_unchecked(vec![1.0], &[1]));
+        let c = g.exp(a);
+        g.backward(c);
+        let ga = g.grad(a).unwrap();
+        assert!((ga.to_vec()[0] - std::f64::consts::E).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_reverse_ln() {
+        // f(x) = ln(x), f'(x) = 1/x, at x=2 → 0.5
+        let mut g = GradGraph::new();
+        let a = g.parameter(Tensor::from_vec_unchecked(vec![2.0], &[1]));
+        let c = g.ln(a);
+        g.backward(c);
+        let ga = g.grad(a).unwrap();
+        assert!((ga.to_vec()[0] - 0.5).abs() < 1e-10);
     }
 }

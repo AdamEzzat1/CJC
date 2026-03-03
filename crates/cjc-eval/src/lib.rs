@@ -1286,6 +1286,40 @@ impl Interpreter {
                 | "bonferroni"
                 | "fdr_bh"
                 | "logistic_regression"
+                // Phase C1: GradGraph Language API
+                | "GradGraph.new"
+                // Phase C2: Optimizer constructors
+                | "Adam.new"
+                | "Sgd.new"
+                // Phase C6: I/O & Collection Utilities
+                | "read_line"
+                | "array_push"
+                | "array_pop"
+                | "array_contains"
+                | "array_reverse"
+                | "array_flatten"
+                | "array_len"
+                | "array_slice"
+                // Phase C5: Map & Set constructors
+                | "Map.new"
+                | "Set.new"
+                // Phase C4: Sorting & Tensor Indexing
+                | "argsort"
+                | "gather"
+                | "scatter"
+                | "index_select"
+                // Phase C3: Bitwise operations
+                | "bit_and"
+                | "bit_or"
+                | "bit_xor"
+                | "bit_not"
+                | "bit_shl"
+                | "bit_shr"
+                | "popcount"
+                // Phase D: RL primitives
+                | "log"
+                | "exp"
+                | "categorical_sample"
         )
     }
 
@@ -1304,6 +1338,22 @@ impl Interpreter {
                     .map_err(EvalError::Runtime)?;
                 let t = Tensor::randn(&shape, &mut self.rng);
                 return Ok(Value::Tensor(t));
+            }
+            "categorical_sample" => {
+                if args.len() != 1 {
+                    return Err(EvalError::Runtime("categorical_sample requires 1 argument: probs tensor".into()));
+                }
+                let probs = match &args[0] {
+                    Value::Tensor(t) => t,
+                    _ => return Err(EvalError::Runtime(format!(
+                        "categorical_sample requires a Tensor, got {}", args[0].type_name()
+                    ))),
+                };
+                let u = self.rng.next_f64().abs();
+                let u = u - u.floor(); // ensure [0, 1)
+                let idx = cjc_runtime::builtins::categorical_sample_with_u(probs, u)
+                    .map_err(EvalError::Runtime)?;
+                return Ok(Value::Int(idx));
             }
             "clock" => {
                 let elapsed = self.start_time.elapsed().as_secs_f64();
@@ -1329,6 +1379,15 @@ impl Interpreter {
             "gc_live_count" => {
                 return Ok(Value::Int(self.gc_heap.live_count() as i64));
             }
+            // Phase C6: read_line (needs IO)
+            "read_line" => {
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line).map_err(|e| EvalError::Runtime(format!("read_line: {e}")))?;
+                // Strip trailing newline
+                if line.ends_with('\n') { line.pop(); }
+                if line.ends_with('\r') { line.pop(); }
+                return Ok(Value::String(Rc::new(line)));
+            }
             _ => {}
         }
 
@@ -1337,6 +1396,18 @@ impl Interpreter {
             Ok(Some(value)) => return Ok(value),
             Err(msg) => return Err(EvalError::Runtime(msg)),
             Ok(None) => {} // not a shared builtin, fall through
+        }
+
+        // Phase C1: GradGraph constructor (bypasses builtins.rs — cjc-ad dep)
+        if name == "GradGraph.new" {
+            use std::any::Any;
+            use std::cell::RefCell;
+            if !args.is_empty() {
+                return Err(EvalError::Runtime("GradGraph.new takes 0 arguments".into()));
+            }
+            let g = cjc_ad::GradGraph::new();
+            let erased: Rc<RefCell<dyn Any>> = Rc::new(RefCell::new(g));
+            return Ok(Value::GradGraph(erased));
         }
 
         // CSV / Data Logistics builtins (depend on cjc-data, not in shared module)
@@ -2174,6 +2245,210 @@ impl Interpreter {
                         )));
                     }
                 }
+            }
+
+            // -- Phase C5: Map method dispatch --
+            (Value::Map(m), "insert") => {
+                if args.len() != 2 { return Err(EvalError::Runtime("Map.insert requires 2 args: key, value".into())); }
+                m.borrow_mut().insert(args[0].clone(), args[1].clone());
+                Ok(Value::Void)
+            }
+            (Value::Map(m), "get") => {
+                if args.len() != 1 { return Err(EvalError::Runtime("Map.get requires 1 arg: key".into())); }
+                match m.borrow().get(&args[0]) {
+                    Some(v) => Ok(v.clone()),
+                    None => Ok(Value::Void),
+                }
+            }
+            (Value::Map(m), "remove") => {
+                if args.len() != 1 { return Err(EvalError::Runtime("Map.remove requires 1 arg: key".into())); }
+                m.borrow_mut().remove(&args[0]);
+                Ok(Value::Void)
+            }
+            (Value::Map(m), "len") => {
+                Ok(Value::Int(m.borrow().len() as i64))
+            }
+            (Value::Map(m), "contains_key") | (Value::Map(m), "contains") => {
+                if args.len() != 1 { return Err(EvalError::Runtime("contains_key requires 1 arg: key".into())); }
+                Ok(Value::Bool(m.borrow().contains_key(&args[0])))
+            }
+            (Value::Map(m), "keys") => {
+                Ok(Value::Array(Rc::new(m.borrow().keys())))
+            }
+            (Value::Map(m), "values") => {
+                Ok(Value::Array(Rc::new(m.borrow().values_vec())))
+            }
+            // Set methods (Set is a Map with all values = Void)
+            (Value::Map(m), "add") => {
+                if args.len() != 1 { return Err(EvalError::Runtime("Set.add requires 1 arg: value".into())); }
+                m.borrow_mut().insert(args[0].clone(), Value::Void);
+                Ok(Value::Void)
+            }
+            (Value::Map(m), "to_array") => {
+                Ok(Value::Array(Rc::new(m.borrow().keys())))
+            }
+
+            // -- Phase C1: GradGraph method dispatch --
+            (Value::GradGraph(inner), method) => {
+                use std::any::Any;
+                match method {
+                    "parameter" => {
+                        if args.len() != 1 { return Err(EvalError::Runtime("parameter requires 1 arg: Tensor".into())); }
+                        let t = match &args[0] { Value::Tensor(t) => t.clone(), _ => return Err(EvalError::Runtime("expected Tensor".into())) };
+                        let mut borrow = inner.borrow_mut();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        Ok(Value::Int(graph.parameter(t) as i64))
+                    }
+                    "input" => {
+                        if args.len() != 1 { return Err(EvalError::Runtime("input requires 1 arg: Tensor".into())); }
+                        let t = match &args[0] { Value::Tensor(t) => t.clone(), _ => return Err(EvalError::Runtime("expected Tensor".into())) };
+                        let mut borrow = inner.borrow_mut();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        Ok(Value::Int(graph.input(t) as i64))
+                    }
+                    "add" | "sub" | "mul" | "div" | "matmul" => {
+                        if args.len() != 2 { return Err(EvalError::Runtime(format!("{method} requires 2 args: node_a, node_b"))); }
+                        let a = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int (node index)".into())) };
+                        let b = match &args[1] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int (node index)".into())) };
+                        let mut borrow = inner.borrow_mut();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let idx = match method {
+                            "add" => graph.add(a, b),
+                            "sub" => graph.sub(a, b),
+                            "mul" => graph.mul(a, b),
+                            "div" => graph.div(a, b),
+                            "matmul" => graph.matmul(a, b),
+                            _ => unreachable!(),
+                        };
+                        Ok(Value::Int(idx as i64))
+                    }
+                    "neg" | "sum" | "mean" | "sigmoid" | "relu" | "tanh" | "sin" | "cos" | "sqrt" | "exp" | "ln" => {
+                        if args.len() != 1 { return Err(EvalError::Runtime(format!("{method} requires 1 arg: node_index"))); }
+                        let a = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int (node index)".into())) };
+                        let mut borrow = inner.borrow_mut();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let idx = match method {
+                            "neg" => graph.neg(a),
+                            "sum" => graph.sum(a),
+                            "mean" => graph.mean(a),
+                            "sigmoid" => graph.sigmoid(a),
+                            "relu" => graph.relu(a),
+                            "tanh" => graph.tanh_act(a),
+                            "sin" => graph.sin(a),
+                            "cos" => graph.cos(a),
+                            "sqrt" => graph.sqrt(a),
+                            "exp" => graph.exp(a),
+                            "ln" => graph.ln(a),
+                            _ => unreachable!(),
+                        };
+                        Ok(Value::Int(idx as i64))
+                    }
+                    "pow" => {
+                        if args.len() != 2 { return Err(EvalError::Runtime("pow requires 2 args: node_index, exponent".into())); }
+                        let a = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
+                        let n = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err(EvalError::Runtime("expected number".into())) };
+                        let mut borrow = inner.borrow_mut();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        Ok(Value::Int(graph.pow(a, n) as i64))
+                    }
+                    "scalar_mul" => {
+                        if args.len() != 2 { return Err(EvalError::Runtime("scalar_mul requires 2 args: node_index, scalar".into())); }
+                        let a = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
+                        let s = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err(EvalError::Runtime("expected number".into())) };
+                        let mut borrow = inner.borrow_mut();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        Ok(Value::Int(graph.scalar_mul(a, s) as i64))
+                    }
+                    "backward" => {
+                        if args.len() != 1 { return Err(EvalError::Runtime("backward requires 1 arg: loss_node_index".into())); }
+                        let loss_idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
+                        let borrow = inner.borrow();
+                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().unwrap();
+                        graph.backward(loss_idx);
+                        Ok(Value::Void)
+                    }
+                    "value" => {
+                        if args.len() != 1 { return Err(EvalError::Runtime("value requires 1 arg: node_index".into())); }
+                        let idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
+                        let borrow = inner.borrow();
+                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().unwrap();
+                        Ok(Value::Float(graph.value(idx)))
+                    }
+                    "tensor" => {
+                        if args.len() != 1 { return Err(EvalError::Runtime("tensor requires 1 arg: node_index".into())); }
+                        let idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
+                        let borrow = inner.borrow();
+                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().unwrap();
+                        Ok(Value::Tensor(graph.tensor(idx)))
+                    }
+                    "grad" => {
+                        if args.len() != 1 { return Err(EvalError::Runtime("grad requires 1 arg: node_index".into())); }
+                        let idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
+                        let borrow = inner.borrow();
+                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().unwrap();
+                        match graph.grad(idx) {
+                            Some(t) => Ok(Value::Tensor(t)),
+                            None => Ok(Value::Void),
+                        }
+                    }
+                    "set_tensor" => {
+                        if args.len() != 2 { return Err(EvalError::Runtime("set_tensor requires 2 args: node_index, tensor".into())); }
+                        let idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
+                        let t = match &args[1] { Value::Tensor(t) => t.clone(), _ => return Err(EvalError::Runtime("expected Tensor".into())) };
+                        let borrow = inner.borrow();
+                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().unwrap();
+                        graph.set_tensor(idx, t);
+                        Ok(Value::Void)
+                    }
+                    "zero_grad" => {
+                        if !args.is_empty() { return Err(EvalError::Runtime("zero_grad takes 0 arguments".into())); }
+                        let borrow = inner.borrow();
+                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().unwrap();
+                        graph.zero_grad();
+                        Ok(Value::Void)
+                    }
+                    _ => Err(EvalError::Runtime(format!("no method `{method}` on GradGraph"))),
+                }
+            }
+
+            // -- Phase C2: OptimizerState method dispatch --
+            (Value::OptimizerState(inner), "step") => {
+                use std::any::Any;
+                if args.len() != 2 {
+                    return Err(EvalError::Runtime("step requires 2 args: params_tensor, grads_tensor".into()));
+                }
+                let params_t = match &args[0] { Value::Tensor(t) => t.clone(), _ => return Err(EvalError::Runtime("expected Tensor for params".into())) };
+                let grads_t = match &args[1] { Value::Tensor(t) => t.clone(), _ => return Err(EvalError::Runtime("expected Tensor for grads".into())) };
+                let mut params = params_t.to_vec();
+                let grads = grads_t.to_vec();
+                if params.len() != grads.len() {
+                    return Err(EvalError::Runtime("params and grads must have same length".into()));
+                }
+                let mut borrow = inner.borrow_mut();
+                // Try Adam first, then SGD
+                if let Some(adam) = borrow.downcast_mut::<cjc_runtime::ml::AdamState>() {
+                    if params.len() != adam.m.len() {
+                        return Err(EvalError::Runtime(format!(
+                            "param size mismatch: optimizer expects {}, got {}",
+                            adam.m.len(), params.len()
+                        )));
+                    }
+                    cjc_runtime::ml::adam_step(&mut params, &grads, adam);
+                } else if let Some(sgd) = borrow.downcast_mut::<cjc_runtime::ml::SgdState>() {
+                    if params.len() != sgd.velocity.len() {
+                        return Err(EvalError::Runtime(format!(
+                            "param size mismatch: optimizer expects {}, got {}",
+                            sgd.velocity.len(), params.len()
+                        )));
+                    }
+                    cjc_runtime::ml::sgd_step(&mut params, &grads, sgd);
+                } else {
+                    return Err(EvalError::Runtime("unknown optimizer type".into()));
+                }
+                Ok(Value::Tensor(Tensor::from_vec(params, params_t.shape())?))
+            }
+            (Value::OptimizerState(_), method) => {
+                Err(EvalError::Runtime(format!("no method `{method}` on OptimizerState")))
             }
 
             // -- TidyView dispatch (all tidy verbs) --

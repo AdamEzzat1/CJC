@@ -88,3 +88,7 @@ path = "tests/bolero_fuzz/mod.rs"
 [[test]]
 name = "tidy_tests"
 path = "tidy_tests/mod.rs"
+
+[[test]]
+name = "test_rl_phase"
+path = "tests/test_rl_phase.rs"

@@ -1,0 +1,9 @@
+pub mod cjc_source;
+pub mod test_debug;
+pub mod test_01_board_invariants;
+pub mod test_02_movegen_determinism;
+pub mod test_03_legal_move_sanity;
+pub mod test_04_rollout_determinism;
+pub mod test_05_training_smoke;
+pub mod test_06_training_determinism;
+pub mod test_07_eval_vs_random;
