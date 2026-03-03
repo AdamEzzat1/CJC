@@ -2271,6 +2271,37 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             Ok(Some(Value::OptimizerState(erased)))
         }
 
+        // ---- ML Autodiff Builtins ----
+        // stop_gradient: returns x unchanged; in AD context, gradients don't flow through
+        "stop_gradient" => {
+            if args.len() != 1 { return Err("stop_gradient requires exactly 1 argument".into()); }
+            Ok(Some(args[0].clone()))
+        }
+        // grad_checkpoint: returns x unchanged; semantic marker for memory checkpointing
+        "grad_checkpoint" => {
+            if args.len() != 1 { return Err("grad_checkpoint requires exactly 1 argument".into()); }
+            Ok(Some(args[0].clone()))
+        }
+        // clip_grad: clips a gradient value to [min_val, max_val] range
+        "clip_grad" => {
+            if args.len() != 3 { return Err("clip_grad requires 3 arguments (value, min, max)".into()); }
+            let val = match &args[0] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err("clip_grad requires numeric arguments".into()),
+            };
+            let min_val = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("clip_grad min must be numeric".into()) };
+            let max_val = match &args[2] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("clip_grad max must be numeric".into()) };
+            Ok(Some(Value::Float(val.max(min_val).min(max_val))))
+        }
+        // grad_scale: scales a gradient value by a scalar factor
+        "grad_scale" => {
+            if args.len() != 2 { return Err("grad_scale requires 2 arguments (value, scale)".into()); }
+            let val = match &args[0] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("grad_scale requires numeric first arg".into()) };
+            let scale = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("grad_scale requires numeric scale".into()) };
+            Ok(Some(Value::Float(val * scale)))
+        }
+
         _ => Ok(None), // Not a shared builtin
     }
 }

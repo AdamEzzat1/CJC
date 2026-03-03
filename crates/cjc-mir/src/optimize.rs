@@ -290,6 +290,15 @@ fn try_fold_binary(op: BinOp, left: &MirExpr, right: &MirExpr) -> Option<MirExpr
             BinOp::Or => Some(MirExpr {
                 kind: MirExprKind::BoolLit(*a || *b),
             }),
+            BinOp::BitAnd => Some(MirExpr {
+                kind: MirExprKind::BoolLit(*a & *b),
+            }),
+            BinOp::BitOr => Some(MirExpr {
+                kind: MirExprKind::BoolLit(*a | *b),
+            }),
+            BinOp::BitXor => Some(MirExpr {
+                kind: MirExprKind::BoolLit(*a ^ *b),
+            }),
             _ => None,
         },
         // String concat
@@ -329,6 +338,18 @@ fn fold_int_binop(op: BinOp, a: i64, b: i64) -> Option<MirExprKind> {
                 Some(MirExprKind::IntLit(a % b))
             }
         }
+        BinOp::Pow => {
+            if b < 0 {
+                None // Negative exponent on ints — let runtime handle
+            } else {
+                Some(MirExprKind::IntLit(a.wrapping_pow(b as u32)))
+            }
+        }
+        BinOp::BitAnd => Some(MirExprKind::IntLit(a & b)),
+        BinOp::BitOr => Some(MirExprKind::IntLit(a | b)),
+        BinOp::BitXor => Some(MirExprKind::IntLit(a ^ b)),
+        BinOp::Shl => Some(MirExprKind::IntLit(a.wrapping_shl(b as u32))),
+        BinOp::Shr => Some(MirExprKind::IntLit(a.wrapping_shr(b as u32))),
         BinOp::Eq => Some(MirExprKind::BoolLit(a == b)),
         BinOp::Ne => Some(MirExprKind::BoolLit(a != b)),
         BinOp::Lt => Some(MirExprKind::BoolLit(a < b)),
@@ -350,6 +371,7 @@ fn fold_float_binop(op: BinOp, a: f64, b: f64) -> Option<MirExprKind> {
         BinOp::Mul => Some(MirExprKind::FloatLit(a * b)),
         BinOp::Div => Some(MirExprKind::FloatLit(a / b)), // IEEE 754: div by 0 => Inf
         BinOp::Mod => Some(MirExprKind::FloatLit(a % b)),
+        BinOp::Pow => Some(MirExprKind::FloatLit(a.powf(b))),
         BinOp::Eq => Some(MirExprKind::BoolLit(a == b)),
         BinOp::Ne => Some(MirExprKind::BoolLit(a != b)),
         BinOp::Lt => Some(MirExprKind::BoolLit(a < b)),
@@ -357,6 +379,8 @@ fn fold_float_binop(op: BinOp, a: f64, b: f64) -> Option<MirExprKind> {
         BinOp::Le => Some(MirExprKind::BoolLit(a <= b)),
         BinOp::Ge => Some(MirExprKind::BoolLit(a >= b)),
         BinOp::And | BinOp::Or | BinOp::Match | BinOp::NotMatch => None,
+        // Bitwise ops on floats: not applicable, let runtime handle
+        BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => None,
     }
 }
 
@@ -370,6 +394,9 @@ fn try_fold_unary(op: UnaryOp, operand: &MirExpr) -> Option<MirExpr> {
         }),
         (UnaryOp::Not, MirExprKind::BoolLit(b)) => Some(MirExpr {
             kind: MirExprKind::BoolLit(!b),
+        }),
+        (UnaryOp::BitNot, MirExprKind::IntLit(v)) => Some(MirExpr {
+            kind: MirExprKind::IntLit(!v),
         }),
         _ => None,
     }

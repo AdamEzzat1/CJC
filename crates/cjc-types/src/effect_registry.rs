@@ -584,6 +584,13 @@ pub fn builtin_effects() -> HashMap<&'static str, EffectSet> {
     m.insert("Set.len", pure);
     m.insert("Set.to_array", alloc);
 
+    // -----------------------------------------------------------------
+    // ML Autodiff builtins — pure (semantic markers + simple arithmetic)
+    // -----------------------------------------------------------------
+    for name in &["stop_gradient", "grad_checkpoint", "clip_grad", "grad_scale"] {
+        m.insert(name, pure);
+    }
+
     m
 }
 

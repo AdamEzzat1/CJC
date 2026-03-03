@@ -1521,6 +1521,62 @@ impl AstLowering {
                     fields: hir_fields,
                 }
             }
+
+            // CompoundAssign: `target op= value` desugars to `target = target op value`
+            cjc_ast::ExprKind::CompoundAssign { op, target, value } => {
+                let hir_target = self.lower_expr(target);
+                let hir_value = self.lower_expr(value);
+                // Build: target = target op value
+                HirExprKind::Assign {
+                    target: Box::new(hir_target.clone()),
+                    value: Box::new(HirExpr {
+                        hir_id: self.fresh_id(),
+                        kind: HirExprKind::Binary {
+                            op: *op,
+                            left: Box::new(hir_target),
+                            right: Box::new(hir_value),
+                        },
+                    }),
+                }
+            }
+
+            // IfExpr: `if cond { a } else { b }` used as a value expression
+            cjc_ast::ExprKind::IfExpr { condition, then_block, else_branch } => {
+                let cond = Box::new(self.lower_expr(condition));
+                let hir_then = self.lower_block(then_block);
+                let hir_else = else_branch.as_ref().map(|eb| match eb {
+                    cjc_ast::ElseBranch::ElseIf(elif) => {
+                        // Wrap the nested if into a block expression
+                        let nested_if = self.lower_if(elif);
+                        HirElseBranch::ElseIf(Box::new(nested_if))
+                    }
+                    cjc_ast::ElseBranch::Else(block) => {
+                        HirElseBranch::Else(self.lower_block(block))
+                    }
+                });
+                // Lower IfExpr as a block wrapping an if statement, producing a value.
+                // We reuse the existing HirStmtKind::If pattern by wrapping in a block.
+                let if_expr = HirIfExpr {
+                    cond,
+                    then_block: hir_then,
+                    else_branch: hir_else,
+                    hir_id: self.fresh_id(),
+                };
+                // Wrap as: Block { stmts: [If(...)], expr: None }
+                // Actually, since IfExpr is used as an expression, we need to
+                // produce a value. The simplest desugaring is to use the existing
+                // If statement wrapped in a block. The then/else blocks already
+                // carry their tail expressions.
+                let if_stmt = HirStmt {
+                    kind: HirStmtKind::If(if_expr),
+                    hir_id: self.fresh_id(),
+                };
+                HirExprKind::Block(HirBlock {
+                    stmts: vec![if_stmt],
+                    expr: None,
+                    hir_id: self.fresh_id(),
+                })
+            }
         };
         HirExpr { kind, hir_id }
     }
@@ -1628,6 +1684,41 @@ impl AstLowering {
             cjc_ast::ExprKind::VariantLit { fields, .. } => {
                 for f in fields {
                     Self::collect_var_refs(f, out);
+                }
+            }
+            cjc_ast::ExprKind::CompoundAssign { target, value, .. } => {
+                Self::collect_var_refs(target, out);
+                Self::collect_var_refs(value, out);
+            }
+            cjc_ast::ExprKind::IfExpr { condition, then_block, else_branch } => {
+                Self::collect_var_refs(condition, out);
+                for stmt in &then_block.stmts {
+                    Self::collect_var_refs_stmt(stmt, out);
+                }
+                if let Some(e) = &then_block.expr {
+                    Self::collect_var_refs(e, out);
+                }
+                if let Some(eb) = else_branch {
+                    match eb {
+                        cjc_ast::ElseBranch::ElseIf(elif) => {
+                            Self::collect_var_refs(&cjc_ast::Expr {
+                                kind: cjc_ast::ExprKind::IfExpr {
+                                    condition: Box::new(elif.condition.clone()),
+                                    then_block: elif.then_block.clone(),
+                                    else_branch: elif.else_branch.clone(),
+                                },
+                                span: elif.condition.span.clone(),
+                            }, out);
+                        }
+                        cjc_ast::ElseBranch::Else(block) => {
+                            for stmt in &block.stmts {
+                                Self::collect_var_refs_stmt(stmt, out);
+                            }
+                            if let Some(e) = &block.expr {
+                                Self::collect_var_refs(e, out);
+                            }
+                        }
+                    }
                 }
             }
         }

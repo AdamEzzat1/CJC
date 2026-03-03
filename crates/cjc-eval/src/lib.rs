@@ -643,6 +643,37 @@ impl Interpreter {
                     fields: field_vals,
                 })
             }
+
+            ExprKind::CompoundAssign { op, target, value } => {
+                let current = self.eval_expr(target)?;
+                let rhs = self.eval_expr(value)?;
+                let result = self.eval_binary_values(*op, current, rhs)?;
+                self.exec_assign(target, result)?;
+                Ok(Value::Void)
+            }
+
+            ExprKind::IfExpr { condition, then_block, else_branch } => {
+                let cond = self.eval_expr(condition)?;
+                let cond_bool = match cond {
+                    Value::Bool(b) => b,
+                    other => {
+                        return Err(EvalError::Runtime(format!(
+                            "if condition must be Bool, got {}",
+                            other.type_name()
+                        )));
+                    }
+                };
+                if cond_bool {
+                    self.exec_block(then_block)
+                } else if let Some(ref else_br) = else_branch {
+                    match else_br {
+                        ElseBranch::ElseIf(elif) => self.exec_if(elif),
+                        ElseBranch::Else(block) => self.exec_block(block),
+                    }
+                } else {
+                    Ok(Value::Void)
+                }
+            }
         }
     }
 
@@ -932,6 +963,55 @@ impl Interpreter {
         }
     }
 
+    /// Apply a binary operation on two already-evaluated values.
+    /// Used by CompoundAssign desugaring.
+    fn eval_binary_values(&mut self, op: BinOp, lv: Value, rv: Value) -> EvalResult {
+        match (&lv, &rv) {
+            (Value::Int(a), Value::Int(b)) => self.binop_int(op, *a, *b),
+            (Value::Float(a), Value::Float(b)) => self.binop_float(op, *a, *b),
+            (Value::Int(a), Value::Float(b)) => self.binop_float(op, *a as f64, *b),
+            (Value::Float(a), Value::Int(b)) => self.binop_float(op, *a, *b as f64),
+            (Value::String(a), Value::String(b)) => match op {
+                BinOp::Add => Ok(Value::String(Rc::new(format!("{a}{b}")))),
+                _ => Err(EvalError::Runtime(format!(
+                    "cannot apply `{op}` to String values"
+                ))),
+            },
+            (Value::Tensor(a), Value::Tensor(b)) => match op {
+                BinOp::Add => Ok(Value::Tensor(a.add(b)?)),
+                BinOp::Sub => Ok(Value::Tensor(a.sub(b)?)),
+                BinOp::Mul => Ok(Value::Tensor(a.mul_elem(b)?)),
+                BinOp::Div => Ok(Value::Tensor(a.div_elem(b)?)),
+                _ => Err(EvalError::Runtime(format!(
+                    "cannot apply `{op}` to Tensor values"
+                ))),
+            },
+            (Value::Tensor(t), Value::Float(s)) => match op {
+                BinOp::Mul => Ok(Value::Tensor(t.scalar_mul(*s))),
+                BinOp::Div => Ok(Value::Tensor(t.scalar_mul(1.0 / *s))),
+                BinOp::Add => Ok(Value::Tensor(t.map(|x| x + *s))),
+                BinOp::Sub => Ok(Value::Tensor(t.map(|x| x - *s))),
+                _ => Err(EvalError::Runtime(format!(
+                    "cannot apply `{op}` to Tensor and Float"
+                ))),
+            },
+            (Value::Float(s), Value::Tensor(t)) => match op {
+                BinOp::Mul => Ok(Value::Tensor(t.scalar_mul(*s))),
+                BinOp::Add => Ok(Value::Tensor(t.map(|x| *s + x))),
+                BinOp::Sub => Ok(Value::Tensor(t.map(|x| *s - x))),
+                BinOp::Div => Ok(Value::Tensor(t.map(|x| *s / x))),
+                _ => Err(EvalError::Runtime(format!(
+                    "cannot apply `{op}` to Float and Tensor"
+                ))),
+            },
+            _ => Err(EvalError::Runtime(format!(
+                "cannot apply `{op}` to {} and {}",
+                lv.type_name(),
+                rv.type_name()
+            ))),
+        }
+    }
+
     fn binop_int(&self, op: BinOp, a: i64, b: i64) -> EvalResult {
         match op {
             BinOp::Add => Ok(Value::Int(a.wrapping_add(b))),
@@ -957,6 +1037,12 @@ impl Interpreter {
             BinOp::Gt => Ok(Value::Bool(a > b)),
             BinOp::Le => Ok(Value::Bool(a <= b)),
             BinOp::Ge => Ok(Value::Bool(a >= b)),
+            BinOp::Pow => Ok(Value::Int((a as f64).powf(b as f64) as i64)),
+            BinOp::BitAnd => Ok(Value::Int(a & b)),
+            BinOp::BitOr => Ok(Value::Int(a | b)),
+            BinOp::BitXor => Ok(Value::Int(a ^ b)),
+            BinOp::Shl => Ok(Value::Int(a.wrapping_shl(b as u32))),
+            BinOp::Shr => Ok(Value::Int(a.wrapping_shr(b as u32))),
             BinOp::And | BinOp::Or | BinOp::Match | BinOp::NotMatch => Err(EvalError::Runtime(format!(
                 "cannot apply `{op}` to Int values"
             ))),
@@ -976,6 +1062,10 @@ impl Interpreter {
             BinOp::Gt => Ok(Value::Bool(a > b)),
             BinOp::Le => Ok(Value::Bool(a <= b)),
             BinOp::Ge => Ok(Value::Bool(a >= b)),
+            BinOp::Pow => Ok(Value::Float(a.powf(b))),
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => Err(EvalError::Runtime(format!(
+                "cannot apply `{op}` to Float values"
+            ))),
             BinOp::And | BinOp::Or | BinOp::Match | BinOp::NotMatch => Err(EvalError::Runtime(format!(
                 "cannot apply `{op}` to Float values"
             ))),
@@ -993,6 +1083,7 @@ impl Interpreter {
             (UnaryOp::Neg, Value::F16(v)) => Ok(Value::F16(v.neg())),
             (UnaryOp::Neg, Value::Complex(z)) => Ok(Value::Complex(z.neg())),
             (UnaryOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
+            (UnaryOp::BitNot, Value::Int(v)) => Ok(Value::Int(!v)),
             _ => Err(EvalError::Runtime(format!(
                 "cannot apply `{op}` to {}",
                 val.type_name()
@@ -1331,6 +1422,8 @@ impl Interpreter {
                 | "dot" | "outer" | "cross" | "norm"
                 | "Tensor.linspace" | "Tensor.arange" | "Tensor.eye"
                 | "Tensor.full" | "Tensor.diag" | "Tensor.uniform"
+                // ML Autodiff builtins
+                | "stop_gradient" | "grad_checkpoint" | "clip_grad" | "grad_scale"
         )
     }
 

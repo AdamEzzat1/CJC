@@ -49,6 +49,7 @@ pub enum TokenKind {
     Star,
     Slash,
     Percent,
+    StarStar,   // ** (power)
     EqEq,
     BangEq,
     Lt,
@@ -65,6 +66,24 @@ pub enum TokenKind {
     Tilde,     // ~
     TildeEq,   // ~=
     BangTilde, // !~
+    // Compound assignment
+    PlusEq,    // +=
+    MinusEq,   // -=
+    StarEq,    // *=
+    SlashEq,   // /=
+    PercentEq, // %=
+    StarStarEq,// **=
+    // Bitwise operators
+    Amp,       // &  (bitwise AND)
+    Caret,     // ^  (bitwise XOR)
+    LtLt,      // << (left shift)
+    GtGt,      // >> (right shift)
+    // Bitwise compound assignment
+    AmpEq,     // &=
+    PipeEq,    // |=
+    CaretEq,   // ^=
+    LtLtEq,    // <<=
+    GtGtEq,    // >>=
 
     // Delimiters
     LParen,
@@ -164,6 +183,7 @@ impl TokenKind {
             TokenKind::Star => "`*`",
             TokenKind::Slash => "`/`",
             TokenKind::Percent => "`%`",
+            TokenKind::StarStar => "`**`",
             TokenKind::EqEq => "`==`",
             TokenKind::BangEq => "`!=`",
             TokenKind::Lt => "`<`",
@@ -180,6 +200,23 @@ impl TokenKind {
             TokenKind::Tilde => "`~`",
             TokenKind::TildeEq => "`~=`",
             TokenKind::BangTilde => "`!~`",
+            // Compound assignment
+            TokenKind::PlusEq => "`+=`",
+            TokenKind::MinusEq => "`-=`",
+            TokenKind::StarEq => "`*=`",
+            TokenKind::SlashEq => "`/=`",
+            TokenKind::PercentEq => "`%=`",
+            TokenKind::StarStarEq => "`**=`",
+            // Bitwise
+            TokenKind::Amp => "`&`",
+            TokenKind::Caret => "`^`",
+            TokenKind::LtLt => "`<<`",
+            TokenKind::GtGt => "`>>`",
+            TokenKind::AmpEq => "`&=`",
+            TokenKind::PipeEq => "`|=`",
+            TokenKind::CaretEq => "`^=`",
+            TokenKind::LtLtEq => "`<<=`",
+            TokenKind::GtGtEq => "`>>=`",
             TokenKind::LParen => "`(`",
             TokenKind::RParen => "`)`",
             TokenKind::LBrace => "`{`",
@@ -217,7 +254,16 @@ impl Token {
     }
 
     pub fn int_value(&self) -> i64 {
-        self.text.replace('_', "").parse().unwrap_or(0)
+        let clean = self.text.replace('_', "");
+        if clean.starts_with("0x") || clean.starts_with("0X") {
+            i64::from_str_radix(&clean[2..], 16).unwrap_or(0)
+        } else if clean.starts_with("0b") || clean.starts_with("0B") {
+            i64::from_str_radix(&clean[2..], 2).unwrap_or(0)
+        } else if clean.starts_with("0o") || clean.starts_with("0O") {
+            i64::from_str_radix(&clean[2..], 8).unwrap_or(0)
+        } else {
+            clean.parse().unwrap_or(0)
+        }
     }
 
     pub fn float_value(&self) -> f64 {
@@ -388,9 +434,46 @@ impl<'a> Lexer<'a> {
             }
             b':' => Token::new(TokenKind::Colon, Span::new(start, self.pos), ":"),
             b';' => Token::new(TokenKind::Semicolon, Span::new(start, self.pos), ";"),
-            b'+' => Token::new(TokenKind::Plus, Span::new(start, self.pos), "+"),
-            b'*' => Token::new(TokenKind::Star, Span::new(start, self.pos), "*"),
-            b'%' => Token::new(TokenKind::Percent, Span::new(start, self.pos), "%"),
+            b'+' => {
+                if self.peek() == b'=' {
+                    self.advance();
+                    Token::new(TokenKind::PlusEq, Span::new(start, self.pos), "+=")
+                } else {
+                    Token::new(TokenKind::Plus, Span::new(start, self.pos), "+")
+                }
+            }
+            b'*' => {
+                if self.peek() == b'*' {
+                    self.advance();
+                    if self.peek() == b'=' {
+                        self.advance();
+                        Token::new(TokenKind::StarStarEq, Span::new(start, self.pos), "**=")
+                    } else {
+                        Token::new(TokenKind::StarStar, Span::new(start, self.pos), "**")
+                    }
+                } else if self.peek() == b'=' {
+                    self.advance();
+                    Token::new(TokenKind::StarEq, Span::new(start, self.pos), "*=")
+                } else {
+                    Token::new(TokenKind::Star, Span::new(start, self.pos), "*")
+                }
+            }
+            b'%' => {
+                if self.peek() == b'=' {
+                    self.advance();
+                    Token::new(TokenKind::PercentEq, Span::new(start, self.pos), "%=")
+                } else {
+                    Token::new(TokenKind::Percent, Span::new(start, self.pos), "%")
+                }
+            }
+            b'^' => {
+                if self.peek() == b'=' {
+                    self.advance();
+                    Token::new(TokenKind::CaretEq, Span::new(start, self.pos), "^=")
+                } else {
+                    Token::new(TokenKind::Caret, Span::new(start, self.pos), "^")
+                }
+            }
             b'/' => {
                 if !self.prev_is_value() && self.pos < self.bytes.len() && self.peek() != b'/' && self.peek() != b'*' && self.peek() != b' ' && self.peek() != b'\t' && self.peek() != b'\n' && self.peek() != b'\r' {
                     // Try regex lex with backtracking
@@ -405,6 +488,9 @@ impl<'a> Lexer<'a> {
                     } else {
                         tok
                     }
+                } else if self.peek() == b'=' {
+                    self.advance();
+                    Token::new(TokenKind::SlashEq, Span::new(start, self.pos), "/=")
                 } else {
                     Token::new(TokenKind::Slash, Span::new(start, self.pos), "/")
                 }
@@ -416,6 +502,9 @@ impl<'a> Lexer<'a> {
                 if self.peek() == b'>' {
                     self.advance();
                     Token::new(TokenKind::Arrow, Span::new(start, self.pos), "->")
+                } else if self.peek() == b'=' {
+                    self.advance();
+                    Token::new(TokenKind::MinusEq, Span::new(start, self.pos), "-=")
                 } else {
                     Token::new(TokenKind::Minus, Span::new(start, self.pos), "-")
                 }
@@ -443,7 +532,15 @@ impl<'a> Lexer<'a> {
                 }
             }
             b'<' => {
-                if self.peek() == b'=' {
+                if self.peek() == b'<' {
+                    self.advance();
+                    if self.peek() == b'=' {
+                        self.advance();
+                        Token::new(TokenKind::LtLtEq, Span::new(start, self.pos), "<<=")
+                    } else {
+                        Token::new(TokenKind::LtLt, Span::new(start, self.pos), "<<")
+                    }
+                } else if self.peek() == b'=' {
                     self.advance();
                     Token::new(TokenKind::LtEq, Span::new(start, self.pos), "<=")
                 } else {
@@ -451,7 +548,15 @@ impl<'a> Lexer<'a> {
                 }
             }
             b'>' => {
-                if self.peek() == b'=' {
+                if self.peek() == b'>' {
+                    self.advance();
+                    if self.peek() == b'=' {
+                        self.advance();
+                        Token::new(TokenKind::GtGtEq, Span::new(start, self.pos), ">>=")
+                    } else {
+                        Token::new(TokenKind::GtGt, Span::new(start, self.pos), ">>")
+                    }
+                } else if self.peek() == b'=' {
                     self.advance();
                     Token::new(TokenKind::GtEq, Span::new(start, self.pos), ">=")
                 } else {
@@ -462,13 +567,11 @@ impl<'a> Lexer<'a> {
                 if self.peek() == b'&' {
                     self.advance();
                     Token::new(TokenKind::AmpAmp, Span::new(start, self.pos), "&&")
+                } else if self.peek() == b'=' {
+                    self.advance();
+                    Token::new(TokenKind::AmpEq, Span::new(start, self.pos), "&=")
                 } else {
-                    self.diagnostics.emit(Diagnostic::error(
-                        "E0002",
-                        "unexpected character `&`, did you mean `&&`?",
-                        Span::new(start, self.pos),
-                    ));
-                    Token::new(TokenKind::Error, Span::new(start, self.pos), "&")
+                    Token::new(TokenKind::Amp, Span::new(start, self.pos), "&")
                 }
             }
             b'|' => {
@@ -481,8 +584,11 @@ impl<'a> Lexer<'a> {
                 } else if self.peek() == b']' {
                     self.advance();
                     Token::new(TokenKind::PipeRBracket, Span::new(start, self.pos), "|]")
+                } else if self.peek() == b'=' {
+                    self.advance();
+                    Token::new(TokenKind::PipeEq, Span::new(start, self.pos), "|=")
                 } else {
-                    // Single pipe — used for lambda parameter delimiters
+                    // Single pipe — used for lambda parameter delimiters and bitwise OR
                     Token::new(TokenKind::Pipe, Span::new(start, self.pos), "|")
                 }
             }
@@ -993,6 +1099,72 @@ impl<'a> Lexer<'a> {
 
     fn lex_number(&mut self, start: usize) -> Token {
         let mut is_float = false;
+
+        // Check for hex (0x), binary (0b), or octal (0o) prefixes
+        // Note: at this point, `start` points to the first digit and we've already
+        // advanced past it, so self.source[start..self.pos] is "0".
+        if self.source[start..self.pos].starts_with('0') && self.pos < self.bytes.len() {
+            match self.peek() {
+                b'x' | b'X' => {
+                    self.advance(); // consume 'x'
+                    let digit_start = self.pos;
+                    while self.pos < self.bytes.len()
+                        && (self.peek().is_ascii_hexdigit() || self.peek() == b'_')
+                    {
+                        self.advance();
+                    }
+                    if self.pos == digit_start {
+                        self.diagnostics.emit(Diagnostic::error(
+                            "E0006",
+                            "expected hex digits after `0x`",
+                            Span::new(start, self.pos),
+                        ));
+                        return Token::new(TokenKind::Error, Span::new(start, self.pos), &self.source[start..self.pos]);
+                    }
+                    let text = &self.source[start..self.pos];
+                    return Token::new(TokenKind::IntLit, Span::new(start, self.pos), text);
+                }
+                b'b' | b'B' if self.peek_at(1) != b'"' && self.peek_at(1) != b'\'' && self.peek_at(1) != b'r' => {
+                    self.advance(); // consume 'b'
+                    let digit_start = self.pos;
+                    while self.pos < self.bytes.len()
+                        && (self.peek() == b'0' || self.peek() == b'1' || self.peek() == b'_')
+                    {
+                        self.advance();
+                    }
+                    if self.pos == digit_start {
+                        self.diagnostics.emit(Diagnostic::error(
+                            "E0006",
+                            "expected binary digits after `0b`",
+                            Span::new(start, self.pos),
+                        ));
+                        return Token::new(TokenKind::Error, Span::new(start, self.pos), &self.source[start..self.pos]);
+                    }
+                    let text = &self.source[start..self.pos];
+                    return Token::new(TokenKind::IntLit, Span::new(start, self.pos), text);
+                }
+                b'o' | b'O' => {
+                    self.advance(); // consume 'o'
+                    let digit_start = self.pos;
+                    while self.pos < self.bytes.len()
+                        && ((self.peek() >= b'0' && self.peek() <= b'7') || self.peek() == b'_')
+                    {
+                        self.advance();
+                    }
+                    if self.pos == digit_start {
+                        self.diagnostics.emit(Diagnostic::error(
+                            "E0006",
+                            "expected octal digits after `0o`",
+                            Span::new(start, self.pos),
+                        ));
+                        return Token::new(TokenKind::Error, Span::new(start, self.pos), &self.source[start..self.pos]);
+                    }
+                    let text = &self.source[start..self.pos];
+                    return Token::new(TokenKind::IntLit, Span::new(start, self.pos), text);
+                }
+                _ => {}
+            }
+        }
 
         // Integer part
         while self.pos < self.bytes.len()

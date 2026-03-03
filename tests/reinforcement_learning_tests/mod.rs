@@ -1,0 +1,9 @@
+mod helpers;
+mod test_01_compound_assignments;
+mod test_02_if_expression;
+mod test_03_bitwise_operators;
+mod test_04_power_operator;
+mod test_05_hex_bin_oct_literals;
+mod test_06_ml_ad_builtins;
+mod test_07_cli_features;
+mod test_08_parity;

@@ -2191,6 +2191,18 @@ impl TypeChecker {
                             Type::Error
                         }
                     }
+                    UnaryOp::BitNot => {
+                        if t.is_int() || t.is_error() {
+                            t
+                        } else {
+                            self.diagnostics.emit(Diagnostic::error(
+                                "E0107",
+                                format!("cannot apply `~` to type `{}`; bitwise NOT requires an integer", t),
+                                to_diag_span(expr.span),
+                            ));
+                            Type::Error
+                        }
+                    }
                 }
             }
             ExprKind::Call { callee, args } => {
@@ -2534,6 +2546,56 @@ impl TypeChecker {
                     Type::Error
                 }
             }
+            ExprKind::CompoundAssign { op, target, value } => {
+                let tt = self.check_expr(target);
+                let vt = self.check_expr(value);
+                // Type-check the binary operation (target op value)
+                let _result_ty = self.check_binary_op(*op, &tt, &vt, expr.span);
+                // Check mutability like a regular assignment
+                if let ExprKind::Ident(id) = &target.kind {
+                    if let Some((_ty, is_mut)) = self.env.lookup_var_entry(&id.name) {
+                        if !is_mut {
+                            self.diagnostics.emit(
+                                Diagnostic::error(
+                                    "E0150",
+                                    format!(
+                                        "cannot assign to immutable variable `{}`",
+                                        id.name
+                                    ),
+                                    to_diag_span(expr.span),
+                                )
+                                .with_hint(format!(
+                                    "consider making `{}` mutable: `let mut {} = ...`",
+                                    id.name, id.name
+                                )),
+                            );
+                        }
+                    }
+                }
+                Type::Void
+            }
+            ExprKind::IfExpr { condition, then_block, else_branch } => {
+                let cond_type = self.check_expr(condition);
+                if !cond_type.is_error() && cond_type != Type::Bool {
+                    self.diagnostics.emit(Diagnostic::error(
+                        "E0105",
+                        format!("if condition must be `bool`, found `{}`", cond_type),
+                        to_diag_span(condition.span),
+                    ));
+                }
+                let then_ty = self.check_block(then_block);
+                if let Some(ref eb) = else_branch {
+                    match eb {
+                        ElseBranch::ElseIf(elif) => {
+                            self.check_if(elif);
+                        }
+                        ElseBranch::Else(block) => {
+                            self.check_block(block);
+                        }
+                    }
+                }
+                then_ty
+            }
         }
     }
 
@@ -2549,7 +2611,7 @@ impl TypeChecker {
         }
 
         match op {
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow => {
                 if lt.is_numeric() && self.env.types_match(lt, rt) {
                     lt.clone()
                 } else if lt.is_numeric() && rt.is_numeric() {
@@ -2613,6 +2675,21 @@ impl TypeChecker {
                         "E0101",
                         format!(
                             "`{}` requires `bool` operands, found `{}` and `{}`",
+                            op, lt, rt
+                        ),
+                        to_diag_span(span),
+                    ));
+                    Type::Error
+                }
+            }
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
+                if lt.is_int() && self.env.types_match(lt, rt) {
+                    lt.clone()
+                } else {
+                    self.diagnostics.emit(Diagnostic::error(
+                        "E0101",
+                        format!(
+                            "cannot apply `{}` to `{}` and `{}`; bitwise ops require integer operands",
                             op, lt, rt
                         ),
                         to_diag_span(span),

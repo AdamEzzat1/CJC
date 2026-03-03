@@ -32,7 +32,7 @@ fn merge_spans(a: cjc_ast::Span, b: cjc_ast::Span) -> cjc_ast::Span {
 /// operators `right_bp = left_bp + 1`; for right-associative operators
 /// `right_bp = left_bp`.
 mod prec {
-    /// Assignment `=` — right-associative, lowest precedence.
+    /// Assignment `=` `+=` `-=` etc. — right-associative, lowest precedence.
     pub const ASSIGN: u8 = 2;
     /// Pipe `|>` — left-associative.
     pub const PIPE: u8 = 4;
@@ -40,18 +40,28 @@ mod prec {
     pub const OR: u8 = 6;
     /// Logical and `&&`.
     pub const AND: u8 = 8;
+    /// Bitwise or `|`.
+    pub const BIT_OR: u8 = 9;
+    /// Bitwise xor `^`.
+    pub const BIT_XOR: u8 = 10;
+    /// Bitwise and `&`.
+    pub const BIT_AND: u8 = 11;
     /// Equality `==` `!=`.
-    pub const EQ: u8 = 10;
+    pub const EQ: u8 = 12;
     /// Comparison `<` `>` `<=` `>=`.
-    pub const CMP: u8 = 12;
+    pub const CMP: u8 = 14;
+    /// Shift `<<` `>>`.
+    pub const SHIFT: u8 = 16;
     /// Addition `+` `-`.
-    pub const ADD: u8 = 14;
+    pub const ADD: u8 = 18;
     /// Multiplication `*` `/` `%`.
-    pub const MUL: u8 = 16;
-    /// Unary prefix `-` `!`.
-    pub const UNARY: u8 = 18;
+    pub const MUL: u8 = 20;
+    /// Exponentiation `**` — right-associative.
+    pub const POW: u8 = 22;
+    /// Unary prefix `-` `!` `~`.
+    pub const UNARY: u8 = 24;
     /// Postfix `.` `[` `(`.
-    pub const POSTFIX: u8 = 20;
+    pub const POSTFIX: u8 = 26;
 }
 
 // ── Parser ─────────────────────────────────────────────────────────────
@@ -1289,6 +1299,14 @@ impl Parser {
                     (Some((l_bp, r_bp)), false)
                 }
 
+                // Compound assignment (right-associative)
+                TokenKind::PlusEq | TokenKind::MinusEq | TokenKind::StarEq
+                | TokenKind::SlashEq | TokenKind::PercentEq | TokenKind::StarStarEq
+                | TokenKind::AmpEq | TokenKind::PipeEq | TokenKind::CaretEq
+                | TokenKind::LtLtEq | TokenKind::GtGtEq => {
+                    (Some((prec::ASSIGN, prec::ASSIGN)), false)
+                }
+
                 // Pipe
                 TokenKind::PipeGt => {
                     let (l_bp, r_bp) = (prec::PIPE, prec::PIPE + 1);
@@ -1298,15 +1316,23 @@ impl Parser {
                 // Binary operators
                 TokenKind::PipePipe => (Some((prec::OR, prec::OR + 1)), false),
                 TokenKind::AmpAmp => (Some((prec::AND, prec::AND + 1)), false),
+                // Bitwise operators
+                TokenKind::Pipe => (Some((prec::BIT_OR, prec::BIT_OR + 1)), false),
+                TokenKind::Caret => (Some((prec::BIT_XOR, prec::BIT_XOR + 1)), false),
+                TokenKind::Amp => (Some((prec::BIT_AND, prec::BIT_AND + 1)), false),
                 TokenKind::EqEq | TokenKind::BangEq => (Some((prec::EQ, prec::EQ + 1)), false),
                 TokenKind::TildeEq | TokenKind::BangTilde => (Some((prec::EQ, prec::EQ + 1)), false),
                 TokenKind::Lt | TokenKind::Gt | TokenKind::LtEq | TokenKind::GtEq => {
                     (Some((prec::CMP, prec::CMP + 1)), false)
                 }
+                // Shift operators
+                TokenKind::LtLt | TokenKind::GtGt => (Some((prec::SHIFT, prec::SHIFT + 1)), false),
                 TokenKind::Plus | TokenKind::Minus => (Some((prec::ADD, prec::ADD + 1)), false),
                 TokenKind::Star | TokenKind::Slash | TokenKind::Percent => {
                     (Some((prec::MUL, prec::MUL + 1)), false)
                 }
+                // Power (right-associative)
+                TokenKind::StarStar => (Some((prec::POW, prec::POW)), false),
 
                 _ => break,
             };
@@ -1355,6 +1381,34 @@ impl Parser {
                     kind: ExprKind::Unary {
                         op: UnaryOp::Not,
                         operand: Box::new(operand),
+                    },
+                    span,
+                })
+            }
+            // Bitwise NOT
+            TokenKind::Tilde => {
+                let op_tok = self.advance().clone();
+                let operand = self.parse_expr_bp(prec::UNARY)?;
+                let span = merge_spans(to_ast_span(op_tok.span), operand.span);
+                Ok(Expr {
+                    kind: ExprKind::Unary {
+                        op: UnaryOp::BitNot,
+                        operand: Box::new(operand),
+                    },
+                    span,
+                })
+            }
+            // If expression: `if cond { a } else { b }` used in expression context
+            TokenKind::If => {
+                let start_span = to_ast_span(self.current_span());
+                let if_stmt = self.parse_if_stmt()?;
+                let end_span = if_stmt.then_block.span;
+                let span = merge_spans(start_span, end_span);
+                Ok(Expr {
+                    kind: ExprKind::IfExpr {
+                        condition: Box::new(if_stmt.condition),
+                        then_block: if_stmt.then_block,
+                        else_branch: if_stmt.else_branch,
                     },
                     span,
                 })
@@ -2042,6 +2096,23 @@ impl Parser {
                     span,
                 })
             }
+            // Compound assignment: +=, -=, *=, /=, %=, **=, &=, |=, ^=, <<=, >>=
+            TokenKind::PlusEq | TokenKind::MinusEq | TokenKind::StarEq
+            | TokenKind::SlashEq | TokenKind::PercentEq | TokenKind::StarStarEq
+            | TokenKind::AmpEq | TokenKind::PipeEq | TokenKind::CaretEq
+            | TokenKind::LtLtEq | TokenKind::GtGtEq => {
+                let op = compound_assign_to_binop(op_tok.kind);
+                let rhs = self.parse_expr_bp(r_bp)?;
+                let span = merge_spans(lhs.span, rhs.span);
+                Ok(Expr {
+                    kind: ExprKind::CompoundAssign {
+                        op,
+                        target: Box::new(lhs),
+                        value: Box::new(rhs),
+                    },
+                    span,
+                })
+            }
             TokenKind::PipeGt => {
                 let rhs = self.parse_expr_bp(r_bp)?;
                 let span = merge_spans(lhs.span, rhs.span);
@@ -2089,6 +2160,7 @@ fn token_to_binop(kind: TokenKind) -> BinOp {
         TokenKind::Star => BinOp::Mul,
         TokenKind::Slash => BinOp::Div,
         TokenKind::Percent => BinOp::Mod,
+        TokenKind::StarStar => BinOp::Pow,
         TokenKind::EqEq => BinOp::Eq,
         TokenKind::BangEq => BinOp::Ne,
         TokenKind::Lt => BinOp::Lt,
@@ -2099,7 +2171,30 @@ fn token_to_binop(kind: TokenKind) -> BinOp {
         TokenKind::PipePipe => BinOp::Or,
         TokenKind::TildeEq => BinOp::Match,
         TokenKind::BangTilde => BinOp::NotMatch,
+        // Bitwise
+        TokenKind::Amp => BinOp::BitAnd,
+        TokenKind::Pipe => BinOp::BitOr,
+        TokenKind::Caret => BinOp::BitXor,
+        TokenKind::LtLt => BinOp::Shl,
+        TokenKind::GtGt => BinOp::Shr,
         _ => unreachable!("token_to_binop called with non-operator token {:?}", kind),
+    }
+}
+
+fn compound_assign_to_binop(kind: TokenKind) -> BinOp {
+    match kind {
+        TokenKind::PlusEq => BinOp::Add,
+        TokenKind::MinusEq => BinOp::Sub,
+        TokenKind::StarEq => BinOp::Mul,
+        TokenKind::SlashEq => BinOp::Div,
+        TokenKind::PercentEq => BinOp::Mod,
+        TokenKind::StarStarEq => BinOp::Pow,
+        TokenKind::AmpEq => BinOp::BitAnd,
+        TokenKind::PipeEq => BinOp::BitOr,
+        TokenKind::CaretEq => BinOp::BitXor,
+        TokenKind::LtLtEq => BinOp::Shl,
+        TokenKind::GtGtEq => BinOp::Shr,
+        _ => unreachable!("compound_assign_to_binop called with {:?}", kind),
     }
 }
 

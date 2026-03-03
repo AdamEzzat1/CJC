@@ -82,15 +82,40 @@ impl Diagnostic {
     }
 }
 
+// ANSI color code constants.
+const RESET: &str = "\x1b[0m";
+const BOLD: &str = "\x1b[1m";
+const BOLD_RED: &str = "\x1b[1;31m";
+const BOLD_YELLOW: &str = "\x1b[1;33m";
+const BOLD_CYAN: &str = "\x1b[1;36m";
+const BOLD_BLUE: &str = "\x1b[1;34m";
+const BOLD_GREEN: &str = "\x1b[1;32m";
+
 /// Renders diagnostics to a human-readable string with source context.
 pub struct DiagnosticRenderer<'a> {
     source: &'a str,
     filename: &'a str,
+    use_color: bool,
 }
 
 impl<'a> DiagnosticRenderer<'a> {
+    /// Create a new renderer with color disabled (backward compatible).
     pub fn new(source: &'a str, filename: &'a str) -> Self {
-        Self { source, filename }
+        Self { source, filename, use_color: false }
+    }
+
+    /// Create a new renderer with explicit color control.
+    pub fn new_with_color(source: &'a str, filename: &'a str, use_color: bool) -> Self {
+        Self { source, filename, use_color }
+    }
+
+    /// Wrap `text` with ANSI color codes if color is enabled.
+    fn colorize(&self, code: &str, text: &str) -> String {
+        if self.use_color {
+            format!("{}{}{}", code, text, RESET)
+        } else {
+            text.to_string()
+        }
     }
 
     /// Convert a byte offset to (line, column), both 1-based.
@@ -126,15 +151,24 @@ impl<'a> DiagnosticRenderer<'a> {
             Severity::Hint => "hint",
         };
 
+        let severity_color = match diag.severity {
+            Severity::Error => BOLD_RED,
+            Severity::Warning => BOLD_YELLOW,
+            Severity::Hint => BOLD_CYAN,
+        };
+
         // Header: error[E0001]: message
         out.push_str(&format!(
             "{}[{}]: {}\n",
-            severity_str, diag.code, diag.message
+            self.colorize(severity_color, severity_str),
+            self.colorize(BOLD, &diag.code),
+            diag.message
         ));
 
         // Location: --> file:line:col
         out.push_str(&format!(
-            "  --> {}:{}:{}\n",
+            "  {} {}:{}:{}\n",
+            self.colorize(BOLD_BLUE, "-->"),
             self.filename, line, col
         ));
 
@@ -143,22 +177,29 @@ impl<'a> DiagnosticRenderer<'a> {
         let line_num_width = format!("{}", line).len();
         let padding = " ".repeat(line_num_width);
 
-        out.push_str(&format!("{} |\n", padding));
-        out.push_str(&format!("{} | {}\n", line, source_line));
+        out.push_str(&format!("{} {}\n", padding, self.colorize(BOLD_BLUE, "|")));
+        out.push_str(&format!(
+            "{} {} {}\n",
+            self.colorize(BOLD_BLUE, &format!("{}", line)),
+            self.colorize(BOLD_BLUE, "|"),
+            source_line
+        ));
 
         // Underline
         let underline_start = col - 1;
         let underline_len = (diag.span.end - diag.span.start).max(1);
+        let carets = "^".repeat(underline_len);
         out.push_str(&format!(
-            "{} | {}{}",
+            "{} {} {}{}",
             padding,
+            self.colorize(BOLD_BLUE, "|"),
             " ".repeat(underline_start),
-            "^".repeat(underline_len)
+            self.colorize(BOLD_RED, &carets)
         ));
 
         // Primary label
         if !diag.labels.is_empty() {
-            out.push_str(&format!(" {}", diag.labels[0].message));
+            out.push_str(&format!(" {}", self.colorize(BOLD_RED, &diag.labels[0].message)));
         }
         out.push('\n');
 
@@ -167,21 +208,33 @@ impl<'a> DiagnosticRenderer<'a> {
             let (l_line, l_col) = self.offset_to_line_col(label.span.start);
             let l_source = self.get_line(l_line);
             let l_len = (label.span.end - label.span.start).max(1);
-            out.push_str(&format!("{} |\n", padding));
-            out.push_str(&format!("{} | {}\n", l_line, l_source));
+            let l_carets = "^".repeat(l_len);
+            out.push_str(&format!("{} {}\n", padding, self.colorize(BOLD_BLUE, "|")));
             out.push_str(&format!(
-                "{} | {}{} {}\n",
+                "{} {} {}\n",
+                self.colorize(BOLD_BLUE, &format!("{}", l_line)),
+                self.colorize(BOLD_BLUE, "|"),
+                l_source
+            ));
+            out.push_str(&format!(
+                "{} {} {}{} {}\n",
                 padding,
+                self.colorize(BOLD_BLUE, "|"),
                 " ".repeat(l_col - 1),
-                "^".repeat(l_len),
-                label.message
+                self.colorize(BOLD_GREEN, &l_carets),
+                self.colorize(BOLD_GREEN, &label.message)
             ));
         }
 
         // Hints
         for hint in &diag.hints {
-            out.push_str(&format!("{} |\n", padding));
-            out.push_str(&format!("{} = hint: {}\n", padding, hint));
+            out.push_str(&format!("{} {}\n", padding, self.colorize(BOLD_BLUE, "|")));
+            out.push_str(&format!(
+                "{} = {}: {}\n",
+                padding,
+                self.colorize(BOLD_CYAN, "hint"),
+                self.colorize(BOLD_CYAN, hint)
+            ));
         }
 
         out
@@ -226,15 +279,25 @@ impl DiagnosticBag {
     }
 
     pub fn render_all(&self, source: &str, filename: &str) -> String {
-        let renderer = DiagnosticRenderer::new(source, filename);
+        self.render_all_color(source, filename, false)
+    }
+
+    pub fn render_all_color(&self, source: &str, filename: &str, use_color: bool) -> String {
+        let renderer = DiagnosticRenderer::new_with_color(source, filename, use_color);
         let mut out = String::new();
         for diag in &self.diagnostics {
             out.push_str(&renderer.render(diag));
             out.push('\n');
         }
         if self.has_errors() {
+            let prefix = if use_color {
+                format!("{}{}{}", BOLD_RED, "error", RESET)
+            } else {
+                "error".to_string()
+            };
             out.push_str(&format!(
-                "error: aborting due to {} previous error{}\n",
+                "{}: aborting due to {} previous error{}\n",
+                prefix,
                 self.error_count(),
                 if self.error_count() == 1 { "" } else { "s" }
             ));
@@ -290,5 +353,40 @@ mod tests {
 
         bag.emit(Diagnostic::warning("W0001", "test warning", Span::new(0, 1)));
         assert_eq!(bag.error_count(), 1);
+    }
+
+    #[test]
+    fn test_diagnostic_render_color() {
+        let source = "let x = 42 +;\n";
+        let diag = Diagnostic::error("E0001", "unexpected token", Span::new(13, 14))
+            .with_label(Span::new(13, 14), "expected expression")
+            .with_hint("remove the trailing `+` or add an expression after it");
+
+        let renderer = DiagnosticRenderer::new_with_color(source, "test.cjc", true);
+        let output = renderer.render(&diag);
+
+        // Should contain ANSI escape codes
+        assert!(output.contains("\x1b["));
+        // Should still contain the essential text
+        assert!(output.contains("E0001"));
+        assert!(output.contains("unexpected token"));
+        assert!(output.contains("test.cjc:1:14"));
+        assert!(output.contains("expected expression"));
+        assert!(output.contains("hint"));
+    }
+
+    #[test]
+    fn test_render_all_color() {
+        let mut bag = DiagnosticBag::new();
+        bag.emit(Diagnostic::error("E0001", "test error", Span::new(0, 1)));
+
+        let source = "x";
+        let plain = bag.render_all(source, "test.cjc");
+        let colored = bag.render_all_color(source, "test.cjc", true);
+
+        // Plain should not contain ANSI escapes
+        assert!(!plain.contains("\x1b["));
+        // Colored should contain ANSI escapes
+        assert!(colored.contains("\x1b["));
     }
 }

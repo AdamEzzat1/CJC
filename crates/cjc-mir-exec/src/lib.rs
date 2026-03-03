@@ -896,6 +896,12 @@ impl MirExecutor {
             BinOp::Gt => Ok(Value::Bool(a > b)),
             BinOp::Le => Ok(Value::Bool(a <= b)),
             BinOp::Ge => Ok(Value::Bool(a >= b)),
+            BinOp::Pow => Ok(Value::Int((a as f64).powf(b as f64) as i64)),
+            BinOp::BitAnd => Ok(Value::Int(a & b)),
+            BinOp::BitOr => Ok(Value::Int(a | b)),
+            BinOp::BitXor => Ok(Value::Int(a ^ b)),
+            BinOp::Shl => Ok(Value::Int(a.wrapping_shl(b as u32))),
+            BinOp::Shr => Ok(Value::Int(a.wrapping_shr(b as u32))),
             BinOp::And | BinOp::Or | BinOp::Match | BinOp::NotMatch => Err(MirExecError::Runtime(format!(
                 "cannot apply `{op}` to Int values"
             ))),
@@ -915,7 +921,9 @@ impl MirExecutor {
             BinOp::Gt => Ok(Value::Bool(a > b)),
             BinOp::Le => Ok(Value::Bool(a <= b)),
             BinOp::Ge => Ok(Value::Bool(a >= b)),
-            BinOp::And | BinOp::Or | BinOp::Match | BinOp::NotMatch => Err(MirExecError::Runtime(format!(
+            BinOp::Pow => Ok(Value::Float(a.powf(b))),
+            BinOp::And | BinOp::Or | BinOp::Match | BinOp::NotMatch
+            | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => Err(MirExecError::Runtime(format!(
                 "cannot apply `{op}` to Float values"
             ))),
         }
@@ -932,6 +940,7 @@ impl MirExecutor {
             (UnaryOp::Neg, Value::F16(v)) => Ok(Value::F16(v.neg())),
             (UnaryOp::Neg, Value::Complex(z)) => Ok(Value::Complex(z.neg())),
             (UnaryOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
+            (UnaryOp::BitNot, Value::Int(v)) => Ok(Value::Int(!v)),
             _ => Err(MirExecError::Runtime(format!(
                 "cannot apply `{op}` to {}",
                 val.type_name()
@@ -1244,6 +1253,8 @@ impl MirExecutor {
                 | "dot" | "outer" | "cross" | "norm"
                 | "Tensor.linspace" | "Tensor.arange" | "Tensor.eye"
                 | "Tensor.full" | "Tensor.diag" | "Tensor.uniform"
+                // ML Autodiff builtins
+                | "stop_gradient" | "grad_checkpoint" | "clip_grad" | "grad_scale"
         )
     }
 

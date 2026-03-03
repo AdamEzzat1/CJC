@@ -96,3 +96,7 @@ path = "tests/test_rl_phase.rs"
 [[test]]
 name = "test_math_hardening"
 path = "tests/test_math_hardening.rs"
+
+[[test]]
+name = "test_reinforcement_learning"
+path = "tests/test_reinforcement_learning.rs"

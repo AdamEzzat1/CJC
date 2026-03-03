@@ -360,6 +360,19 @@ pub enum ExprKind {
         target: Box<Expr>,
         value: Box<Expr>,
     },
+    /// Compound assignment: `x += e`, `x -= e`, etc.
+    /// Desugars to `x = x op e` during evaluation.
+    CompoundAssign {
+        op: BinOp,
+        target: Box<Expr>,
+        value: Box<Expr>,
+    },
+    /// If expression: `if cond { a } else { b }` used as a value
+    IfExpr {
+        condition: Box<Expr>,
+        then_block: Block,
+        else_branch: Option<ElseBranch>,
+    },
     /// Pipe: `a |> f(b)`
     Pipe {
         left: Box<Expr>,
@@ -473,6 +486,7 @@ pub enum BinOp {
     Mul,
     Div,
     Mod,
+    Pow,       // **
     Eq,
     Ne,
     Lt,
@@ -483,6 +497,12 @@ pub enum BinOp {
     Or,
     Match,     // ~=  (regex binding)
     NotMatch,  // !~  (negative regex binding)
+    // Bitwise operators
+    BitAnd,    // &
+    BitOr,     // |
+    BitXor,    // ^
+    Shl,       // <<
+    Shr,       // >>
 }
 
 impl fmt::Display for BinOp {
@@ -493,6 +513,7 @@ impl fmt::Display for BinOp {
             BinOp::Mul => write!(f, "*"),
             BinOp::Div => write!(f, "/"),
             BinOp::Mod => write!(f, "%"),
+            BinOp::Pow => write!(f, "**"),
             BinOp::Eq => write!(f, "=="),
             BinOp::Ne => write!(f, "!="),
             BinOp::Lt => write!(f, "<"),
@@ -503,6 +524,11 @@ impl fmt::Display for BinOp {
             BinOp::Or => write!(f, "||"),
             BinOp::Match => write!(f, "~="),
             BinOp::NotMatch => write!(f, "!~"),
+            BinOp::BitAnd => write!(f, "&"),
+            BinOp::BitOr => write!(f, "|"),
+            BinOp::BitXor => write!(f, "^"),
+            BinOp::Shl => write!(f, "<<"),
+            BinOp::Shr => write!(f, ">>"),
         }
     }
 }
@@ -511,6 +537,7 @@ impl fmt::Display for BinOp {
 pub enum UnaryOp {
     Neg,
     Not,
+    BitNot,  // ~ (bitwise NOT)
 }
 
 impl fmt::Display for UnaryOp {
@@ -518,6 +545,7 @@ impl fmt::Display for UnaryOp {
         match self {
             UnaryOp::Neg => write!(f, "-"),
             UnaryOp::Not => write!(f, "!"),
+            UnaryOp::BitNot => write!(f, "~"),
         }
     }
 }
@@ -1089,6 +1117,29 @@ impl PrettyPrinter {
                 self.print_expr(target);
                 self.output.push_str(" = ");
                 self.print_expr(value);
+            }
+            ExprKind::CompoundAssign { op, target, value } => {
+                self.print_expr(target);
+                self.output.push_str(&format!(" {}= ", op));
+                self.print_expr(value);
+            }
+            ExprKind::IfExpr { condition, then_block, else_branch } => {
+                self.output.push_str("if ");
+                self.print_expr(condition);
+                self.output.push_str(" ");
+                self.print_block(then_block);
+                if let Some(eb) = else_branch {
+                    self.output.push_str(" else ");
+                    match eb {
+                        ElseBranch::ElseIf(elif) => {
+                            // Print as if statement
+                            self.output.push_str("if ...");
+                        }
+                        ElseBranch::Else(block) => {
+                            self.print_block(block);
+                        }
+                    }
+                }
             }
             ExprKind::Pipe { left, right } => {
                 self.print_expr(left);
