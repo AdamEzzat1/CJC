@@ -1,0 +1,49 @@
+// Example 07: Gradient Descent
+// Demonstrates: optimization loop, functions, while loop, convergence
+// Run: cjc run "CJC V 0.1/examples/07_gradient_descent.cjc"
+
+// Minimize f(x) = (x - 3)^2 + 1
+// Gradient: f'(x) = 2*(x - 3)
+// Minimum at x = 3, f(3) = 1
+
+fn f(x: f64) -> f64 {
+    (x - 3.0) * (x - 3.0) + 1.0
+}
+
+fn grad_f(x: f64) -> f64 {
+    2.0 * (x - 3.0)
+}
+
+// Gradient descent parameters
+let lr: f64 = 0.1;
+let mut x: f64 = 10.0;
+let max_iters: i64 = 50;
+let tolerance: f64 = 0.0001;
+
+print("Starting gradient descent...");
+print("Initial x:");
+print(x);
+print("Initial f(x):");
+print(f(x));
+
+let mut iter: i64 = 0;
+while iter < max_iters {
+    let g = grad_f(x);
+
+    // Check convergence
+    if abs(g) < tolerance {
+        print("Converged!");
+        break;
+    }
+
+    // Update step
+    x = x - lr * g;
+    iter = iter + 1;
+}
+
+print("Final x:");
+print(x);
+print("Final f(x):");
+print(f(x));
+print("Iterations:");
+print(iter);

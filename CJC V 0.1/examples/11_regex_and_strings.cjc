@@ -1,0 +1,51 @@
+// Example 11: Regex and String Operations
+// Demonstrates: string functions, regex patterns
+// Run: cjc run "CJC V 0.1/examples/11_regex_and_strings.cjc"
+
+let text = "Hello, World! CJC is awesome. Hello again!";
+
+// String queries
+print("=== String Queries ===");
+print("Length:");
+print(str_len(text));
+print("Contains 'World':");
+print(str_detect(text, "World"));
+print("Starts with 'Hello':");
+print(str_starts(text, "Hello"));
+print("Ends with '!':");
+print(str_ends(text, "!"));
+print("Count 'Hello':");
+print(str_count(text, "Hello"));
+
+// String extraction
+print("=== Extraction ===");
+print("First capitalized word:");
+print(str_extract(text, "[A-Z][a-z]+"));
+
+// String transformation
+print("=== Transformation ===");
+print("Replace first 'Hello' with 'Hi':");
+print(str_replace(text, "Hello", "Hi"));
+print("Replace all 'Hello' with 'Hi':");
+print(str_replace_all(text, "Hello", "Hi"));
+
+// Case conversion
+print("Uppercase:");
+print(str_to_upper("hello"));
+print("Lowercase:");
+print(str_to_lower("HELLO"));
+
+// Trim whitespace
+print("Trimmed:");
+print(str_trim("  spaces everywhere  "));
+
+// Substring
+print("Substring [0..5]:");
+print(str_sub(text, 0, 5));
+
+// Split
+print("=== Split ===");
+let words = str_split("apple,banana,cherry", ",");
+print(words);
+
+print("String operations complete.");

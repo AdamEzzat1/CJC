@@ -1,0 +1,55 @@
+// Example 09: Data Pipeline
+// Demonstrates: arrays, maps, data manipulation patterns
+// Run: cjc run "CJC V 0.1/examples/09_data_pipeline.cjc"
+
+// Build a dataset as arrays
+let names = ["Alice", "Bob", "Carol", "Dave", "Eve", "Frank"];
+let ages = [30, 25, 35, 28, 32, 40];
+let scores = [95.5, 82.0, 91.3, 77.8, 88.5, 93.2];
+
+// Count records
+print("Total records:");
+print(len(names));
+
+// Compute statistics on scores
+print("=== Score Statistics ===");
+print("Mean score:");
+let scores_t = Tensor.from_vec(scores, [6]);
+print(scores_t.mean());
+print("Max score:");
+print(max(scores[0], max(scores[1], max(scores[2], max(scores[3], max(scores[4], scores[5]))))));
+
+// Count how many have score > 90
+let mut high_scorers: i64 = 0;
+for i in 0..len(scores) {
+    if scores[i] > 90.0 {
+        high_scorers = high_scorers + 1;
+    }
+}
+print("High scorers (>90):");
+print(high_scorers);
+
+// Build a frequency map of age decades
+let decades = Map.new();
+for i in 0..len(ages) {
+    let decade = ages[i] / 10 * 10;
+    let key = to_string(decade);
+    if decades.contains_key(key) {
+        let count = decades.get(key);
+        decades.insert(key, count + 1);
+    } else {
+        decades.insert(key, 1);
+    }
+}
+print("=== Age Distribution ===");
+print(decades);
+
+// Compute cumulative scores
+let cum_scores = cumsum(scores);
+print("Cumulative scores:");
+print(cum_scores);
+
+// Sort scores
+let sorted_scores = sort(scores);
+print("Sorted scores:");
+print(sorted_scores);

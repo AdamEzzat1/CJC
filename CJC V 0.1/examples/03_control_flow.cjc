@@ -1,0 +1,68 @@
+// Example 03: Control Flow
+// Demonstrates: if/else, while, for, match, break, continue
+// Run: cjc run "CJC V 0.1/examples/03_control_flow.cjc"
+
+// If / else
+let x: i64 = 42;
+if x > 100 {
+    print("big");
+} else if x > 10 {
+    print("medium");
+} else {
+    print("small");
+}
+
+// While loop
+let mut sum: i64 = 0;
+let mut i: i64 = 1;
+while i <= 10 {
+    sum = sum + i;
+    i = i + 1;
+}
+print(sum);
+
+// For loop with range
+let mut total: i64 = 0;
+for j in 0..5 {
+    total = total + j;
+}
+print(total);
+
+// Nested loops with break
+fn find_first_divisible(limit: i64, divisor: i64) -> i64 {
+    let mut result: i64 = 0;
+    for k in 1..limit {
+        if k % divisor == 0 {
+            result = k;
+            break;
+        }
+    }
+    result
+}
+print(find_first_divisible(100, 7));
+
+// For loop with continue (skip evens)
+let mut odd_sum: i64 = 0;
+for n in 0..20 {
+    if n % 2 == 0 {
+        continue;
+    }
+    odd_sum = odd_sum + n;
+}
+print(odd_sum);
+
+// FizzBuzz with if/else chain
+fn fizzbuzz(n: i64) -> str {
+    if n % 15 == 0 {
+        return "FizzBuzz";
+    } else if n % 3 == 0 {
+        return "Fizz";
+    } else if n % 5 == 0 {
+        return "Buzz";
+    }
+    to_string(n)
+}
+print(fizzbuzz(15));
+print(fizzbuzz(9));
+print(fizzbuzz(10));
+print(fizzbuzz(7));

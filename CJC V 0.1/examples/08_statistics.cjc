@@ -1,0 +1,49 @@
+// Example 08: Statistics
+// Demonstrates: descriptive stats, distributions, hypothesis testing
+// Run: cjc run "CJC V 0.1/examples/08_statistics.cjc"
+
+// Sample data
+let data = [23.1, 25.4, 22.8, 24.5, 26.1, 23.9, 24.2, 25.0, 22.5, 24.8];
+
+// Descriptive statistics
+print("=== Descriptive Statistics ===");
+print("Mean:");
+let data_t = Tensor.from_vec(data, [10]);
+print(data_t.mean());
+print("Median:");
+print(median(data));
+print("Standard deviation:");
+print(sd(data));
+print("Variance:");
+print(variance(data));
+
+// Distribution functions
+print("=== Normal Distribution ===");
+print("P(Z < 1.96):");
+print(normal_cdf(1.96));
+print("z for p=0.975:");
+print(normal_ppf(0.975));
+print("PDF at 0:");
+print(normal_pdf(0.0));
+
+// Hypothesis test
+print("=== Hypothesis Test ===");
+print("t-test: is mean = 24.0?");
+let test_result = t_test(data, 24.0);
+print(test_result);
+
+// Correlations
+let x = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+let y = [2.1, 4.0, 5.8, 8.1, 9.9, 12.2, 13.8, 16.1, 18.0, 20.1];
+print("=== Correlation ===");
+print("Pearson r:");
+print(cor(x, y));
+
+// Math functions
+print("=== Math ===");
+print("sqrt(144):");
+print(sqrt(144.0));
+print("exp(1):");
+print(exp(1.0));
+print("log(E):");
+print(log(exp(1.0)));

@@ -1,0 +1,67 @@
+// Example 12: Effects and NoGC
+// Demonstrates: effect annotations, pure functions, nogc
+// Run: cjc run "CJC V 0.1/examples/12_effects_and_nogc.cjc"
+
+// Pure function: no side effects allowed
+fn pure_add(a: i64, b: i64) -> i64 / pure {
+    a + b
+}
+
+// IO function: can use print
+fn log_result(x: i64) / io {
+    print(x);
+}
+
+// Unannotated: any effect allowed (backward compatible)
+fn flexible(x: i64) -> i64 {
+    print(x);
+    x * 2
+}
+
+// Use the functions
+let result = pure_add(10, 20);
+log_result(result);
+let doubled = flexible(result);
+print(doubled);
+
+// Effect annotations on methods
+struct Calculator {
+    value: i64
+}
+
+impl Calculator {
+    fn add(self: Calculator, n: i64) -> i64 / pure {
+        self.value + n
+    }
+
+    fn display(self: Calculator) / io {
+        print(self.value);
+    }
+}
+
+let calc = Calculator { value: 100 };
+let sum = Calculator.add(calc, 42);
+print(sum);
+
+// Records are always value types (no GC needed)
+record Vector3 {
+    x: f64,
+    y: f64,
+    z: f64
+}
+
+fn magnitude(v: Any) -> f64 / pure {
+    sqrt(v.x * v.x + v.y * v.y + v.z * v.z)
+}
+
+let v = Vector3 { x: 1.0, y: 2.0, z: 3.0 };
+print(magnitude(v));
+
+// Determinism: same seed = same results
+let t1 = Tensor.randn([3]);
+let t2 = Tensor.randn([3]);
+print("Tensor 1:");
+print(t1);
+print("Tensor 2:");
+print(t2);
+print("These are deterministic with --seed 42 (default)");

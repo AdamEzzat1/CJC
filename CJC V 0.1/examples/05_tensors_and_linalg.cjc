@@ -1,0 +1,48 @@
+// Example 05: Tensors and Linear Algebra
+// Demonstrates: tensor creation, arithmetic, matmul, reductions, linalg
+// Run: cjc run "CJC V 0.1/examples/05_tensors_and_linalg.cjc"
+
+// Create tensors
+let zeros = Tensor.zeros([3, 3]);
+let ones = Tensor.ones([2, 4]);
+let eye = Tensor.eye(3);
+
+// From data
+let A = Tensor.from_vec([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3]);
+let B = Tensor.from_vec([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [3, 2]);
+
+// Matrix multiplication
+let C = matmul(A, B);
+print(C);
+print(C.shape());
+
+// Element-wise operations
+let x = Tensor.from_vec([1.0, 2.0, 3.0, 4.0], [4]);
+let y = Tensor.from_vec([10.0, 20.0, 30.0, 40.0], [4]);
+let added = x + y;
+print(added);
+
+// Scalar operations
+let scaled = x * 5.0;
+print(scaled);
+
+// Reductions (dot method syntax)
+print(x.sum());
+print(x.mean());
+print(argmax(x));
+
+// Reshape and transpose
+let M = Tensor.from_vec([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3]);
+let Mt = M.transpose();
+print(Mt.shape());
+
+// Linear algebra
+let sq = Tensor.from_vec([4.0, 7.0, 2.0, 6.0], [2, 2]);
+print(det(sq));
+print(trace(sq));
+
+// Dot product and norms (require tensors)
+let v1 = Tensor.from_vec([3.0, 4.0], [2]);
+let v2 = Tensor.from_vec([1.0, 0.0], [2]);
+print(dot(v1, v2));
+print(norm(v1));

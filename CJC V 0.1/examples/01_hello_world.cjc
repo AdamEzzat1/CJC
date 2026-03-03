@@ -1,0 +1,7 @@
+// Example 01: Hello World
+// The simplest CJC program.
+// Run: cjc run "CJC V 0.1/examples/01_hello_world.cjc"
+
+print("Hello, CJC!");
+print(2 + 2);
+print(3.14 * 2.0);

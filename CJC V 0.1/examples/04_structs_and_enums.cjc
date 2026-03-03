@@ -1,0 +1,89 @@
+// Example 04: Structs, Records, Enums, Traits
+// Demonstrates: struct, record, enum, trait, impl, pattern matching
+// Run: cjc run "CJC V 0.1/examples/04_structs_and_enums.cjc"
+
+// --- Structs (mutable value type) ---
+struct Point {
+    x: f64,
+    y: f64
+}
+
+fn distance(p: Any) -> f64 {
+    sqrt(p.x * p.x + p.y * p.y)
+}
+
+let p = Point { x: 3.0, y: 4.0 };
+print(distance(p));
+
+// Struct fields are mutable
+let mut q = Point { x: 0.0, y: 0.0 };
+q.x = 10.0;
+q.y = 20.0;
+print(q.x);
+
+// --- Records (immutable value type) ---
+record Color {
+    r: i64,
+    g: i64,
+    b: i64
+}
+
+let red = Color { r: 255, g: 0, b: 0 };
+let also_red = Color { r: 255, g: 0, b: 0 };
+
+// Structural equality
+if red == also_red {
+    print("colors are equal");
+}
+
+// --- Traits and Impl ---
+trait Describable {
+    fn describe(self: Any) -> str;
+}
+
+struct Circle {
+    radius: f64
+}
+
+impl Circle {
+    fn area(self: Circle) -> f64 {
+        3.14159 * self.radius * self.radius
+    }
+}
+
+let c = Circle { radius: 5.0 };
+print(Circle.area(c));
+
+// Dot syntax also works
+print(c.area());
+
+// --- Enum and Pattern Matching ---
+enum Shape {
+    Rect(f64, f64),
+    Circ(f64)
+}
+
+fn shape_area(s: Any) -> f64 {
+    match s {
+        Rect(w, h) => w * h,
+        Circ(r) => 3.14159 * r * r,
+    }
+}
+
+let rect = Rect(10.0, 5.0);
+let circ = Circ(3.0);
+print(shape_area(rect));
+print(shape_area(circ));
+
+// --- Match with struct destructuring ---
+record Pair {
+    first: i64,
+    second: i64
+}
+
+fn sum_pair(p: Any) -> i64 {
+    match p {
+        Pair { first: a, second: b } => a + b,
+    }
+}
+print(sum_pair(Pair { first: 10, second: 20 }));

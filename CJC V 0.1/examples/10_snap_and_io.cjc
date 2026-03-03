@@ -1,0 +1,49 @@
+// Example 10: Snap Serialization and I/O
+// Demonstrates: snap/restore, hashing, JSON export
+// Run: cjc run "CJC V 0.1/examples/10_snap_and_io.cjc"
+
+// Snap: encode a value to a binary blob
+let data = [1, 2, 3, 4, 5];
+let blob = snap(data);
+print("Snapped array");
+
+// Restore: decode it back
+let restored = restore(blob);
+print("Restored:");
+print(restored);
+
+// Content hash: same data always produces same hash
+let hash1 = snap_hash([1, 2, 3, 4, 5]);
+let hash2 = snap_hash([1, 2, 3, 4, 5]);
+print("Hash 1:");
+print(hash1);
+print("Hash 2:");
+print(hash2);
+if hash1 == hash2 {
+    print("Hashes match (content-addressable!)");
+}
+
+// Different data produces different hash
+let hash3 = snap_hash([5, 4, 3, 2, 1]);
+print("Different data hash:");
+print(hash3);
+
+// JSON export
+let json = snap_to_json(42);
+print("JSON of 42:");
+print(json);
+
+let json2 = snap_to_json([1.0, 2.0, 3.0]);
+print("JSON of array:");
+print(json2);
+
+// JSON parse and stringify
+let parsed = json_parse("[1, 2, 3]");
+print("Parsed JSON:");
+print(parsed);
+
+let stringified = json_stringify(parsed);
+print("Stringified:");
+print(stringified);
+
+print("Snap and I/O example complete.");

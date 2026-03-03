@@ -1,0 +1,44 @@
+// Example 06: Neural Network Forward Pass
+// Demonstrates: tensors, structs, matmul, activations
+// Run: cjc run "CJC V 0.1/examples/06_neural_network.cjc"
+
+// Hyperparameters
+let input_dim: i64 = 4;
+let hidden_dim: i64 = 8;
+let output_dim: i64 = 3;
+let batch_size: i64 = 2;
+
+// Initialize weights (deterministic from seed)
+let W1 = Tensor.randn([hidden_dim, input_dim]);
+let b1 = Tensor.zeros([hidden_dim]);
+let W2 = Tensor.randn([output_dim, hidden_dim]);
+let b2 = Tensor.zeros([output_dim]);
+
+// Create input data
+let x = Tensor.from_vec([
+    1.0, 0.5, 0.3, 0.8,
+    0.2, 0.9, 0.1, 0.6
+], [batch_size, input_dim]);
+
+// Forward pass: Layer 1
+let h = x.linear(W1, b1);
+print("Hidden (pre-activation):");
+print(h.shape());
+
+// ReLU activation
+let h_act = h.relu();
+print("Hidden (post-ReLU):");
+print(h_act.shape());
+
+// Forward pass: Layer 2
+let logits = h_act.linear(W2, b2);
+print("Logits:");
+print(logits.shape());
+
+// Softmax to get probabilities
+let probs = logits.softmax();
+print("Probabilities:");
+print(probs);
+
+// Check probabilities sum to ~1 per sample
+print("Network forward pass complete.");

@@ -1,0 +1,49 @@
+// Example 02: Variables and Functions
+// Demonstrates: let, let mut, type annotations, functions, closures
+// Run: cjc run "CJC V 0.1/examples/02_variables_and_functions.cjc"
+
+// Immutable variable with type annotation
+let x: i64 = 42;
+print(x);
+
+// Mutable variable
+let mut counter: i64 = 0;
+counter = counter + 1;
+counter = counter + 1;
+counter = counter + 1;
+print(counter);
+
+// Float variable
+let pi: f64 = 3.14159;
+print(pi);
+
+// String variable
+let greeting: str = "Hello, CJC!";
+print(greeting);
+
+// Function with parameters and return type
+fn add(a: i64, b: i64) -> i64 {
+    a + b
+}
+print(add(10, 20));
+
+// Function with no return type (void)
+fn say_hello(name: str) {
+    print(name);
+}
+say_hello("Alice");
+
+// Recursive function
+fn factorial(n: i64) -> i64 {
+    if n <= 1 {
+        return 1;
+    }
+    n * factorial(n - 1)
+}
+print(factorial(10));
+
+// Nested function
+fn make_greeting(first: str, last: str) -> str {
+    first + " " + last
+}
+print(make_greeting("Jane", "Doe"));
