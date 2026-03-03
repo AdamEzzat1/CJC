@@ -403,6 +403,33 @@ impl Tensor {
         self.elementwise_binop(other, |a, b| a / b)
     }
 
+    // ── v0.1 Broadcasting: additional element-wise binary ops ──
+
+    /// Element-wise power: `a^b`.
+    pub fn elem_pow(&self, other: &Tensor) -> Result<Tensor, RuntimeError> {
+        self.elementwise_binop(other, |a, b| a.powf(b))
+    }
+
+    /// Element-wise minimum.
+    pub fn elem_min(&self, other: &Tensor) -> Result<Tensor, RuntimeError> {
+        self.elementwise_binop(other, |a, b| a.min(b))
+    }
+
+    /// Element-wise maximum.
+    pub fn elem_max(&self, other: &Tensor) -> Result<Tensor, RuntimeError> {
+        self.elementwise_binop(other, |a, b| a.max(b))
+    }
+
+    /// Element-wise atan2(self, other).
+    pub fn elem_atan2(&self, other: &Tensor) -> Result<Tensor, RuntimeError> {
+        self.elementwise_binop(other, |a, b| a.atan2(b))
+    }
+
+    /// Element-wise hypot(self, other).
+    pub fn elem_hypot(&self, other: &Tensor) -> Result<Tensor, RuntimeError> {
+        self.elementwise_binop(other, |a, b| a.hypot(b))
+    }
+
     /// Apply a unary function to every element, returning a new contiguous tensor.
     pub fn map(&self, f: impl Fn(f64) -> f64) -> Tensor {
         let data: Vec<f64> = self.to_vec().iter().map(|&x| f(x)).collect();

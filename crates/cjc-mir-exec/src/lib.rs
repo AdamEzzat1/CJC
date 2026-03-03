@@ -1332,6 +1332,8 @@ impl MirExecutor {
                 | "str_replace" | "str_replace_all" | "str_split"
                 | "str_count" | "str_trim" | "str_to_upper" | "str_to_lower"
                 | "str_starts" | "str_ends" | "str_sub" | "str_len"
+                // v0.1: Broadcasting builtins
+                | "broadcast" | "broadcast2"
         )
     }
 

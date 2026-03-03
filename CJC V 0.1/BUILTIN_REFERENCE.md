@@ -49,6 +49,7 @@ Complete catalog of all built-in functions, constants, and methods available in 
 41. [Scratchpad & KV-Cache](#scratchpad--kv-cache)
 42. [Float16 / BFloat16](#float16--bfloat16)
 43. [Buffer & Memory](#buffer--memory)
+44. [Broadcasting Builtins](#broadcasting-builtins)
 
 ---
 
@@ -1197,6 +1198,77 @@ let aligned = AlignedByteSlice.from_bytes(buf)
 print(AlignedByteSlice.len(aligned))          // 1024
 print(AlignedByteSlice.was_realigned(aligned)) // false or true
 ```
+
+---
+
+## Broadcasting Builtins
+
+Explicit element-wise function application over tensors. These complement the
+implicit broadcasting in tensor arithmetic (`t1 + t2`, `t * 2.0`).
+
+### `broadcast(fn_name, tensor)` -- Unary
+
+Applies a named unary function element-wise to every element of a tensor.
+Returns a new tensor of the same shape.
+
+| `fn_name` | Operation | Notes |
+|-----------|-----------|-------|
+| `"sin"` | sine | radians |
+| `"cos"` | cosine | radians |
+| `"tan"` | tangent | radians |
+| `"asin"` | arcsine | returns radians |
+| `"acos"` | arccosine | returns radians |
+| `"atan"` | arctangent | returns radians |
+| `"exp"` | e^x | |
+| `"ln"` | natural log | alias: `"log"` |
+| `"log"` | natural log | alias for `"ln"` |
+| `"log2"` | log base 2 | |
+| `"log10"` | log base 10 | |
+| `"log1p"` | ln(1+x) | accurate near 0 |
+| `"expm1"` | e^x - 1 | accurate near 0 |
+| `"sqrt"` | square root | |
+| `"abs"` | absolute value | |
+| `"floor"` | floor | |
+| `"ceil"` | ceiling | |
+| `"round"` | round to nearest | |
+| `"sigmoid"` | 1/(1+e^(-x)) | logistic sigmoid |
+| `"relu"` | max(0, x) | rectified linear unit |
+| `"tanh"` | hyperbolic tangent | |
+| `"neg"` | -x | negation |
+| `"sign"` | sign function | -1, 0, or 1 |
+
+```cjc
+let t = Tensor.from_vec([0.0, 1.5708, 3.1416], [3]);
+print(broadcast("sin", t));   // [0, 1, ~0]
+print(broadcast("relu", Tensor.from_vec([-1.0, 0.0, 1.0, 2.0], [4])));  // [0, 0, 1, 2]
+```
+
+### `broadcast2(fn_name, t1, t2)` -- Binary
+
+Applies a named binary function element-wise to two tensors (with NumPy-style
+shape broadcasting). Returns a new tensor.
+
+| `fn_name` | Operation |
+|-----------|-----------|
+| `"add"` | t1 + t2 |
+| `"sub"` | t1 - t2 |
+| `"mul"` | t1 * t2 |
+| `"div"` | t1 / t2 |
+| `"pow"` | t1 ^ t2 |
+| `"min"` | element-wise min |
+| `"max"` | element-wise max |
+| `"atan2"` | atan2(t1, t2) |
+| `"hypot"` | sqrt(t1^2 + t2^2) |
+
+```cjc
+let a = Tensor.from_vec([2.0, 3.0, 4.0], [3]);
+let b = Tensor.from_vec([2.0, 2.0, 2.0], [3]);
+print(broadcast2("pow", a, b));    // [4, 9, 16]
+print(broadcast2("hypot", a, b));  // [~2.83, ~3.61, ~4.47]
+```
+
+**Effect:** Both `broadcast` and `broadcast2` have `ALLOC` effect (they allocate
+new tensors). They are allowed in `/ alloc` functions but not `/ pure`.
 
 ---
 

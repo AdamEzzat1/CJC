@@ -85,15 +85,41 @@ print(fdr_bh(pvals, 0.05));
 ### Regression
 
 ```
-// Linear regression: y = X*beta + epsilon
-let X = Tensor.from_vec([1.0, 1.0, 1.0, 2.0, 1.0, 3.0, 1.0, 4.0], [4, 2]);
-let y = [2.1, 3.9, 6.2, 7.8];
-let result = lm(X, y);
-print(result);
+// Linear regression: lm(X_flat, y, n, p)
+// X_flat is the predictor matrix in row-major order (n rows, p columns)
+// lm() AUTO-ADDS an intercept column — output has p+1 coefficients
+let x = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+let y = [2.1, 4.0, 5.8, 8.1, 9.9, 12.2, 13.8, 16.1, 18.0, 20.1];
+let result = lm(x, y, 10, 1);  // n=10 observations, p=1 predictor
 
-// Weighted least squares
-let weights = [1.0, 1.0, 2.0, 2.0];
-let wls_result = wls(X, y, weights);
+// Result is a struct with fields:
+print(result.coefficients);    // [intercept, slope] — p+1 values
+print(result.r_squared);       // R² goodness of fit (0 to 1)
+print(result.residuals);       // residuals (length n)
+print(result.std_errors);      // standard errors
+print(result.t_values);        // t-statistics
+print(result.p_values);        // p-values
+print(result.f_statistic);     // F-statistic
+
+// Requirements: n > p+1 (otherwise rank-deficiency error)
+// Uses QR decomposition internally for numerical stability
+```
+
+### Broadcasting for Element-wise Math
+
+```
+// Apply a function element-wise to every element of a tensor
+let t = Tensor.from_vec([0.0, 1.0, 4.0, 9.0], [4]);
+print(broadcast("sqrt", t));    // [0, 1, 2, 3]
+print(broadcast("exp", t));     // element-wise e^x
+
+// Binary broadcast: apply a binary op to two tensors
+let a = Tensor.from_vec([2.0, 3.0, 4.0], [3]);
+let b = Tensor.from_vec([2.0, 2.0, 2.0], [3]);
+print(broadcast2("pow", a, b)); // [4, 9, 16]
+
+// Supports 23 unary functions (sin, cos, sqrt, relu, sigmoid, ...)
+// and 9 binary functions (add, sub, mul, div, pow, min, max, atan2, hypot)
 ```
 
 ## Cumulative and Window Functions

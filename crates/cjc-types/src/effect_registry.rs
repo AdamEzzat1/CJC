@@ -186,6 +186,10 @@ pub fn builtin_effects() -> HashMap<&'static str, EffectSet> {
         m.insert(name, alloc);
     }
 
+    // v0.1: Broadcasting builtins — allocate new tensors
+    m.insert("broadcast", alloc);
+    m.insert("broadcast2", alloc);
+
     // -----------------------------------------------------------------
     // Complex number ops — stack-only, no allocation
     // -----------------------------------------------------------------

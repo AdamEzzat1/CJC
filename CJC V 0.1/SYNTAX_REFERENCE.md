@@ -1647,6 +1647,34 @@ let x = operation()?;       // returns Err early on failure
 
 ---
 
+## 10.1 Broadcasting Builtins
+
+CJC provides explicit broadcasting builtins for element-wise tensor math:
+
+```cjc
+// Unary: broadcast(fn_name: str, tensor: Tensor) -> Tensor
+let t = Tensor.from_vec([1.0, 4.0, 9.0], [3]);
+print(broadcast("sqrt", t));     // [1, 2, 3]
+print(broadcast("sin", t));      // element-wise sine
+print(broadcast("relu", t));     // element-wise ReLU
+
+// Binary: broadcast2(fn_name: str, t1: Tensor, t2: Tensor) -> Tensor
+let a = Tensor.from_vec([2.0, 3.0], [2]);
+let b = Tensor.from_vec([3.0, 2.0], [2]);
+print(broadcast2("pow", a, b));  // [8, 9]
+```
+
+Supported unary functions: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `exp`,
+`ln`, `log`, `log2`, `log10`, `log1p`, `expm1`, `sqrt`, `abs`, `floor`, `ceil`,
+`round`, `sigmoid`, `relu`, `tanh`, `neg`, `sign`.
+
+Supported binary functions: `add`, `sub`, `mul`, `div`, `pow`, `min`, `max`,
+`atan2`, `hypot`.
+
+Both builtins have `ALLOC` effect and support NumPy-style shape broadcasting.
+
+---
+
 ## 11. Grammar Summary
 
 ### Program Structure

@@ -146,6 +146,37 @@ cjc> print(fibonacci(10));
 55
 ```
 
+### Multi-Line Input Details
+
+The REPL uses brace balancing to detect incomplete input:
+
+- If a line has more `{` than `}`, the REPL prompts for continuation (`...`)
+- Lines ending with `\` also trigger continuation
+- Once braces are balanced, the buffer is submitted as a single program
+
+### Parse Error Recovery
+
+A parse error does **not** poison the REPL session. If you enter malformed input,
+only that input is discarded. Previously defined variables and functions remain
+available:
+
+```
+cjc> let x: i64 = 42;
+cjc> let @@@ = ;
+Error: unexpected token '@'
+cjc> print(x);        // still works
+42
+```
+
+### Prelude Symbols
+
+These types are always available without import:
+
+- `Map.new()` -- create a new hash map
+- `Set.new()` -- create a new hash set
+- `Tensor.zeros(shape)`, `Tensor.ones(shape)`, `Tensor.from_vec(data, shape)` -- tensor constructors
+- All 300+ built-in functions
+
 ## Color Diagnostics
 
 CJC produces colored error messages with structured error codes:

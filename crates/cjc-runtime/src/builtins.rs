@@ -2302,6 +2302,76 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             Ok(Some(Value::Float(val * scale)))
         }
 
+        // ── v0.1 Broadcasting builtins ──────────────────────────────
+
+        "broadcast" => {
+            if args.len() != 2 {
+                return Err("broadcast requires 2 arguments (fn_name, tensor)".into());
+            }
+            let fn_name = match &args[0] {
+                Value::String(s) => s.clone(),
+                _ => return Err("broadcast: first argument must be a function name string".into()),
+            };
+            let t = value_to_tensor(&args[1])?;
+            let f: Box<dyn Fn(f64) -> f64> = match fn_name.as_str() {
+                "sin"     => Box::new(|x: f64| x.sin()),
+                "cos"     => Box::new(|x: f64| x.cos()),
+                "tan"     => Box::new(|x: f64| x.tan()),
+                "asin"    => Box::new(|x: f64| x.asin()),
+                "acos"    => Box::new(|x: f64| x.acos()),
+                "atan"    => Box::new(|x: f64| x.atan()),
+                "exp"     => Box::new(|x: f64| x.exp()),
+                "ln"      => Box::new(|x: f64| x.ln()),
+                "log"     => Box::new(|x: f64| x.ln()),
+                "log2"    => Box::new(|x: f64| x.log2()),
+                "log10"   => Box::new(|x: f64| x.log10()),
+                "log1p"   => Box::new(|x: f64| x.ln_1p()),
+                "expm1"   => Box::new(|x: f64| x.exp_m1()),
+                "sqrt"    => Box::new(|x: f64| x.sqrt()),
+                "abs"     => Box::new(|x: f64| x.abs()),
+                "floor"   => Box::new(|x: f64| x.floor()),
+                "ceil"    => Box::new(|x: f64| x.ceil()),
+                "round"   => Box::new(|x: f64| x.round()),
+                "sigmoid" => Box::new(|x: f64| 1.0 / (1.0 + (-x).exp())),
+                "relu"    => Box::new(|x: f64| if x > 0.0 { x } else { 0.0 }),
+                "tanh"    => Box::new(|x: f64| x.tanh()),
+                "neg"     => Box::new(|x: f64| -x),
+                "sign"    => Box::new(|x: f64| {
+                    if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 }
+                }),
+                _ => return Err(format!("broadcast: unknown unary function '{fn_name}'")),
+            };
+            Ok(Some(Value::Tensor(t.map(f))))
+        }
+
+        "broadcast2" => {
+            if args.len() != 3 {
+                return Err("broadcast2 requires 3 arguments (fn_name, tensor1, tensor2)".into());
+            }
+            let fn_name = match &args[0] {
+                Value::String(s) => s.clone(),
+                _ => return Err("broadcast2: first argument must be a function name string".into()),
+            };
+            let t1 = value_to_tensor(&args[1])?;
+            let t2 = value_to_tensor(&args[2])?;
+            let result = match fn_name.as_str() {
+                "add"   => t1.add(&t2),
+                "sub"   => t1.sub(&t2),
+                "mul"   => t1.mul_elem(&t2),
+                "div"   => t1.div_elem(&t2),
+                "pow"   => t1.elem_pow(&t2),
+                "min"   => t1.elem_min(&t2),
+                "max"   => t1.elem_max(&t2),
+                "atan2" => t1.elem_atan2(&t2),
+                "hypot" => t1.elem_hypot(&t2),
+                _ => return Err(format!("broadcast2: unknown binary function '{fn_name}'")),
+            };
+            match result {
+                Ok(t) => Ok(Some(Value::Tensor(t))),
+                Err(e) => Err(format!("broadcast2: {e}")),
+            }
+        }
+
         _ => Ok(None), // Not a shared builtin
     }
 }

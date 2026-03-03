@@ -1530,6 +1530,8 @@ impl Interpreter {
                 | "linalg.lu" | "linalg.qr" | "linalg.cholesky" | "linalg.inv"
                 | "Map.insert" | "Map.get" | "Map.remove" | "Map.len" | "Map.contains_key"
                 | "SparseCsr.matvec" | "SparseCsr.to_dense" | "SparseCoo.to_csr"
+                // v0.1: Broadcasting builtins
+                | "broadcast" | "broadcast2"
         )
     }
 

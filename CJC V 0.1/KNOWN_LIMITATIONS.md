@@ -31,6 +31,25 @@
 - **MIR optimizer is basic.** Only constant folding and dead code elimination.
   No common subexpression elimination, loop-invariant code motion, or inlining.
 
+### Statistics API
+
+- **`mean()` is a tensor dot method only.** There is no free function `mean()`.
+  Use `Tensor.from_vec(data, shape).mean()` for tensor mean, or use `median()`,
+  `sd()`, `variance()`, `quantile()`, `iqr()` which are free functions.
+
+- **`lm()` auto-adds an intercept column.** The call `lm(X, y, n, p)` internally
+  prepends a column of ones to the design matrix. Output has `p+1` coefficients
+  (intercept + p slopes). Requires `n > p+1` or rank-deficiency error.
+
+### Broadcasting
+
+- **No MIR-level broadcast fusion.** `broadcast("sin", t)` allocates a new
+  tensor per call. Chaining `broadcast("sin", broadcast("exp", t))` creates an
+  intermediate. Fused broadcast pipelines are planned for v0.2.
+
+- **No dot-operator syntax (`.+`, `.*`).** Broadcasting is explicit via the
+  `broadcast()` and `broadcast2()` builtins, not via operator overloading.
+
 ### Language Features
 
 - **No async/await.** CJC is designed for batch scientific computing.
