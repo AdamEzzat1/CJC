@@ -1266,6 +1266,7 @@ impl Interpreter {
                 | "gc_alloc"
                 | "gc_collect"
                 | "gc_live_count"
+                | "peak_rss"
                 | "Tensor.from_bytes"
                 | "Scratchpad.new"
                 | "PagedKvCache.new"

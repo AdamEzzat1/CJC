@@ -6,6 +6,7 @@ use crate::buffer::Buffer;
 use crate::dispatch;
 use crate::error::RuntimeError;
 use crate::kernel as kernel_fns;
+use crate::tensor_simd::{self, BinOp, UnaryOp};
 use crate::tensor_tiled::TiledMatmul;
 
 // ---------------------------------------------------------------------------
@@ -247,10 +248,10 @@ impl Tensor {
     /// Extract the raw data as a `Vec<f64>`, respecting strides and offset.
     pub fn to_vec(&self) -> Vec<f64> {
         if self.is_contiguous() {
-            let full = self.buffer.as_slice();
+            let full = self.buffer.borrow_data();
             let numel = self.len();
             if full.len() == numel {
-                return full;
+                return full.to_vec();
             }
             // Buffer may be larger than the tensor's logical size
             // (e.g. Scratchpad pre-allocates extra capacity)
@@ -310,9 +311,9 @@ impl Tensor {
         op: impl Fn(f64, f64) -> f64,
     ) -> Result<Tensor, RuntimeError> {
         if self.shape == other.shape && self.is_contiguous() && other.is_contiguous() {
-            // Fast path: same shape, both contiguous
-            let a = self.buffer.as_slice();
-            let b = other.buffer.as_slice();
+            // Fast path: same shape, both contiguous — borrow without cloning
+            let a = self.buffer.borrow_data();
+            let b = other.buffer.borrow_data();
             let data: Vec<f64> = a.iter().zip(b.iter()).map(|(&x, &y)| op(x, y)).collect();
             return Ok(Tensor {
                 buffer: Buffer::from_vec(data),
@@ -383,24 +384,84 @@ impl Tensor {
         Ok(result)
     }
 
-    /// Element-wise addition.
+    /// SIMD-accelerated element-wise binary operation for known ops.
+    ///
+    /// For same-shape contiguous tensors, uses AVX2 (4-wide f64) when available.
+    /// Falls back to the generic closure path for broadcast cases.
+    fn elementwise_binop_simd(
+        &self,
+        other: &Tensor,
+        op: BinOp,
+        fallback: impl Fn(f64, f64) -> f64,
+    ) -> Result<Tensor, RuntimeError> {
+        if self.shape == other.shape && self.is_contiguous() && other.is_contiguous() {
+            // SIMD fast path: same shape, both contiguous
+            let a = self.buffer.borrow_data();
+            let b = other.buffer.borrow_data();
+            let data = tensor_simd::simd_binop(&a, &b, op);
+            return Ok(Tensor {
+                buffer: Buffer::from_vec(data),
+                shape: self.shape.clone(),
+                strides: Self::compute_strides(&self.shape),
+                offset: 0,
+            });
+        }
+        // Broadcast path: fall through to generic
+        self.elementwise_binop(other, fallback)
+    }
+
+    /// Element-wise addition (SIMD-accelerated for contiguous same-shape tensors).
     pub fn add(&self, other: &Tensor) -> Result<Tensor, RuntimeError> {
-        self.elementwise_binop(other, |a, b| a + b)
+        self.elementwise_binop_simd(other, BinOp::Add, |a, b| a + b)
     }
 
-    /// Element-wise subtraction.
+    /// Element-wise subtraction (SIMD-accelerated for contiguous same-shape tensors).
     pub fn sub(&self, other: &Tensor) -> Result<Tensor, RuntimeError> {
-        self.elementwise_binop(other, |a, b| a - b)
+        self.elementwise_binop_simd(other, BinOp::Sub, |a, b| a - b)
     }
 
-    /// Element-wise (Hadamard) multiplication.
+    /// Element-wise (Hadamard) multiplication (SIMD-accelerated for contiguous same-shape tensors).
     pub fn mul_elem(&self, other: &Tensor) -> Result<Tensor, RuntimeError> {
-        self.elementwise_binop(other, |a, b| a * b)
+        self.elementwise_binop_simd(other, BinOp::Mul, |a, b| a * b)
     }
 
-    /// Element-wise division.
+    /// Element-wise division (SIMD-accelerated for contiguous same-shape tensors).
     pub fn div_elem(&self, other: &Tensor) -> Result<Tensor, RuntimeError> {
-        self.elementwise_binop(other, |a, b| a / b)
+        self.elementwise_binop_simd(other, BinOp::Div, |a, b| a / b)
+    }
+
+    /// Fused multiply-add: `self * b + c` element-wise in a single pass.
+    ///
+    /// Eliminates the intermediate tensor that separate mul + add would create.
+    /// Uses software FMA (`a * b + c` with two roundings, not hardware FMA)
+    /// to preserve bit-identity with the non-fused path.
+    pub fn fused_mul_add(&self, b: &Tensor, c: &Tensor) -> Result<Tensor, RuntimeError> {
+        if self.shape != b.shape || self.shape != c.shape {
+            return Err(RuntimeError::InvalidOperation(
+                "broadcast_fma: all three tensors must have the same shape".to_string(),
+            ));
+        }
+        if self.is_contiguous() && b.is_contiguous() && c.is_contiguous() {
+            let a_data = self.buffer.borrow_data();
+            let b_data = b.buffer.borrow_data();
+            let c_data = c.buffer.borrow_data();
+            let n = a_data.len();
+            let mut out = vec![0.0f64; n];
+            // Software FMA: a*b + c (two roundings — NOT hardware FMA which uses one rounding).
+            // This produces identical results to separate broadcast2("mul") + broadcast2("add").
+            for i in 0..n {
+                out[i] = a_data[i] * b_data[i] + c_data[i];
+            }
+            return Ok(Tensor {
+                buffer: Buffer::from_vec(out),
+                shape: self.shape.clone(),
+                strides: Self::compute_strides(&self.shape),
+                offset: 0,
+            });
+        }
+        // Non-contiguous fallback: mul then add
+        let temp = self.mul_elem(b)?;
+        temp.add(c)
     }
 
     // ── v0.1 Broadcasting: additional element-wise binary ops ──
@@ -441,25 +502,43 @@ impl Tensor {
         }
     }
 
+    /// SIMD-accelerated unary map for known operations (sqrt, abs, neg, relu).
+    ///
+    /// Uses AVX2 (4-wide f64) when available, scalar fallback otherwise.
+    /// Bit-identical to `map(f)` for the supported operations.
+    pub fn map_simd(&self, op: UnaryOp) -> Tensor {
+        let src = self.to_vec();
+        let data = tensor_simd::simd_unary(&src, op);
+        Tensor {
+            buffer: Buffer::from_vec(data),
+            shape: self.shape.clone(),
+            strides: Self::compute_strides(&self.shape),
+            offset: 0,
+        }
+    }
+
     // -- Reductions (using Kahan summation) ---------------------------------
 
     /// Sum of all elements (Kahan-compensated).
     pub fn sum(&self) -> f64 {
-        kahan_sum_f64(&self.buffer.as_slice())
+        let data = self.buffer.borrow_data();
+        kahan_sum_f64(&data)
     }
 
     /// Sum of all elements using BinnedAccumulator (order-invariant, deterministic).
     ///
     /// Bit-identical results regardless of element ordering or reduction schedule.
     pub fn binned_sum(&self) -> f64 {
-        accumulator::binned_sum_f64(&self.buffer.as_slice())
+        let data = self.buffer.borrow_data();
+        accumulator::binned_sum_f64(&data)
     }
 
     /// Sum with dispatched strategy based on execution context.
     ///
     /// Uses Kahan in serial mode, Binned in parallel/@nogc/strict/linalg mode.
     pub fn dispatched_sum(&self, ctx: &dispatch::ReductionContext) -> f64 {
-        dispatch::dispatch_sum_f64(&self.buffer.as_slice(), ctx)
+        let data = self.buffer.borrow_data();
+        dispatch::dispatch_sum_f64(&data, ctx)
     }
 
     /// Mean of all elements (Kahan-compensated sum / count).
@@ -481,43 +560,59 @@ impl Tensor {
     }
 
     /// Sum along a specific axis, returning a tensor with that dimension reduced.
-    /// For a 2-D tensor with axis=0, sums each column (result shape [1, N]).
-    /// For axis=1, sums each row (result shape [M, 1]).
+    ///
+    /// Supports N-D tensors. The reduced axis becomes size 1 in the output.
+    /// Uses Kahan summation for numerical stability.
+    ///
+    /// Examples:
+    /// - 2D [M, N] with axis=0: result [1, N] (sum columns)
+    /// - 2D [M, N] with axis=1: result [M, 1] (sum rows)
+    /// - 3D [A, B, C] with axis=1: result [A, 1, C]
     pub fn sum_axis(&self, axis: usize) -> Result<Tensor, RuntimeError> {
-        if self.ndim() != 2 {
-            return Err(RuntimeError::InvalidOperation(
-                "sum_axis currently requires a 2-D tensor".to_string(),
-            ));
-        }
-        if axis >= 2 {
+        let ndim = self.ndim();
+        if axis >= ndim {
             return Err(RuntimeError::IndexOutOfBounds {
                 index: axis,
-                length: 2,
+                length: ndim,
             });
         }
-        let m = self.shape[0];
-        let n = self.shape[1];
-        let data = self.to_vec();
 
-        if axis == 0 {
-            // Sum columns: result shape [1, N]
-            let mut result = vec![0.0f64; n];
-            for j in 0..n {
-                let col: Vec<f64> = (0..m).map(|i| data[i * n + j]).collect();
-                result[j] = kahan_sum_f64(&col);
+        // Build output shape: same as input but with axis dimension = 1
+        let mut out_shape = self.shape.clone();
+        out_shape[axis] = 1;
+        let out_numel = Self::shape_numel(&out_shape);
+        let out_strides = Self::compute_strides(&out_shape);
+
+        let data = self.to_vec();
+        let axis_len = self.shape[axis];
+        let mut result = vec![0.0f64; out_numel];
+
+        // For each output position, sum over the reduced axis with Kahan accumulation.
+        let mut indices = vec![0usize; ndim];
+        for out_idx in 0..out_numel {
+            // Compute the N-D index from flat output index
+            {
+                let mut remaining = out_idx;
+                for d in 0..ndim {
+                    indices[d] = remaining / out_strides[d];
+                    remaining %= out_strides[d];
+                }
             }
-            Tensor::from_vec(result, &[1, n])
-        } else {
-            // Sum rows: result shape [M, 1]
-            // But for bias gradient we actually want shape [1, N] from axis=0
-            // For convenience, sum_axis(1) returns [M, 1]
-            let mut result = vec![0.0f64; m];
-            for i in 0..m {
-                let row: Vec<f64> = (0..n).map(|j| data[i * n + j]).collect();
-                result[i] = kahan_sum_f64(&row);
+
+            let mut acc = KahanAccumulatorF64::new();
+            for k in 0..axis_len {
+                // Compute input flat index with indices[axis] = k
+                let mut flat = self.offset;
+                for d in 0..ndim {
+                    let idx = if d == axis { k } else { indices[d] };
+                    flat += idx * self.strides[d];
+                }
+                acc.add(data[flat]);
             }
-            Tensor::from_vec(result, &[m, 1])
+            result[out_idx] = acc.finalize();
         }
+
+        Tensor::from_vec(result, &out_shape)
     }
 
     // -- Matrix multiplication (2-D only) -----------------------------------
@@ -527,17 +622,57 @@ impl Tensor {
         self.map(|x| -x)
     }
 
-    /// Transpose a 2-D tensor as a zero-copy view (swap strides and shape).
+    /// Transpose a tensor. For 2-D: swaps rows and columns (zero-copy view).
+    /// For N-D: reverses all axes (zero-copy view).
     pub fn transpose(&self) -> Tensor {
-        assert_eq!(self.ndim(), 2, "transpose requires a 2-D tensor");
-        let m = self.shape[0];
-        let n = self.shape[1];
+        let ndim = self.ndim();
+        if ndim <= 1 {
+            return self.clone();
+        }
+        // Reverse shape and strides — zero-copy view
+        let mut new_shape = self.shape.clone();
+        let mut new_strides = self.strides.clone();
+        new_shape.reverse();
+        new_strides.reverse();
         Tensor {
             buffer: self.buffer.clone(), // shared — zero copy
-            shape: vec![n, m],
-            strides: vec![self.strides[1], self.strides[0]],
+            shape: new_shape,
+            strides: new_strides,
             offset: self.offset,
         }
+    }
+
+    /// Transpose with explicit axis permutation (N-D). Zero-copy view.
+    ///
+    /// `axes` must be a permutation of `[0, 1, ..., ndim-1]`.
+    pub fn transpose_axes(&self, axes: &[usize]) -> Result<Tensor, RuntimeError> {
+        let ndim = self.ndim();
+        if axes.len() != ndim {
+            return Err(RuntimeError::InvalidOperation(
+                format!("transpose_axes: expected {} axes, got {}", ndim, axes.len()),
+            ));
+        }
+        // Validate permutation
+        let mut seen = vec![false; ndim];
+        for &ax in axes {
+            if ax >= ndim {
+                return Err(RuntimeError::IndexOutOfBounds { index: ax, length: ndim });
+            }
+            if seen[ax] {
+                return Err(RuntimeError::InvalidOperation(
+                    format!("transpose_axes: duplicate axis {ax}"),
+                ));
+            }
+            seen[ax] = true;
+        }
+        let new_shape: Vec<usize> = axes.iter().map(|&ax| self.shape[ax]).collect();
+        let new_strides: Vec<usize> = axes.iter().map(|&ax| self.strides[ax]).collect();
+        Ok(Tensor {
+            buffer: self.buffer.clone(),
+            shape: new_shape,
+            strides: new_strides,
+            offset: self.offset,
+        })
     }
 
     /// Multiply every element by a scalar, returning a new tensor.

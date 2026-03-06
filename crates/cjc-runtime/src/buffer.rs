@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell};
 use std::rc::Rc;
 
 use crate::error::RuntimeError;
@@ -66,6 +66,12 @@ impl<T: Clone> Buffer<T> {
     /// Return a snapshot of the data as a `Vec<T>`.
     pub fn as_slice(&self) -> Vec<T> {
         self.inner.borrow().clone()
+    }
+
+    /// Borrow the underlying Vec without cloning.
+    /// The returned `Ref` guard keeps the borrow alive.
+    pub fn borrow_data(&self) -> Ref<Vec<T>> {
+        self.inner.borrow()
     }
 
     /// Force a deep copy, returning a new `Buffer` that does not share

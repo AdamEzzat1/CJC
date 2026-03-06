@@ -1076,6 +1076,7 @@ impl MirExecutor {
                 | "gc_alloc"
                 | "gc_collect"
                 | "gc_live_count"
+                | "peak_rss"
                 | "linalg.lu"
                 | "linalg.qr"
                 | "linalg.cholesky"
@@ -1630,6 +1631,13 @@ impl MirExecutor {
                 return Ok(Value::Struct { name: "CsvMinMax".to_string(), fields });
             }
             _ => {}
+        }
+
+        // Try tidy builtins (string functions, tidy aggregators)
+        match cjc_data::tidy_dispatch::dispatch_tidy_builtin(name, &args) {
+            Ok(Some(value)) => return Ok(value),
+            Err(msg) => return Err(MirExecError::Runtime(msg)),
+            Ok(None) => {} // not a tidy builtin, fall through
         }
 
         // Try user-defined function.

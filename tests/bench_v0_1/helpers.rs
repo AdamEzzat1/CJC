@@ -51,6 +51,12 @@ pub fn run_mir(src: &str, seed: u64) -> Vec<String> {
     exec.output.clone()
 }
 
+pub fn run_mir_optimized(src: &str, seed: u64) -> Vec<String> {
+    let program = parse(src);
+    let (_, exec) = cjc_mir_exec::run_program_optimized_with_executor(&program, seed).unwrap();
+    exec.output.clone()
+}
+
 // ---------------------------------------------------------------------------
 // Parsed output types
 // ---------------------------------------------------------------------------

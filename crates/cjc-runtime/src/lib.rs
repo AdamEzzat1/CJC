@@ -33,6 +33,8 @@ pub mod object_slab;
 pub mod gc;
 pub mod sparse;
 pub mod tensor_tiled;
+pub mod tensor_simd;
+pub mod tensor_pool;
 pub mod det_map;
 pub mod linalg;
 pub mod value;

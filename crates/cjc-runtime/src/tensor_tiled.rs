@@ -14,6 +14,8 @@
 //! Default tile size is 64×64 (32 KB per tile at f64, fits in most L2 caches).
 //! Configurable via `TiledMatmul::with_tile_size()`.
 
+use crate::tensor_simd;
+
 /// Default tile dimension. 64×64 doubles = 32 KB per tile.
 const DEFAULT_TILE_SIZE: usize = 64;
 
@@ -70,12 +72,15 @@ impl TiledMatmul {
                     let p_end = (pp + ts).min(k);
 
                     // Micro-kernel: accumulate tile contribution.
+                    // Uses SIMD-accelerated AXPY for the inner j-loop
+                    // (4-wide AVX2 when available, scalar fallback otherwise).
+                    let j_len = j_end - jj;
                     for i in ii..i_end {
                         for p in pp..p_end {
                             let a_ip = a[i * k + p];
-                            for j in jj..j_end {
-                                c[i * n + j] += a_ip * b[p * n + j];
-                            }
+                            let c_slice = &mut c[i * n + jj .. i * n + j_end];
+                            let b_slice = &b[p * n + jj .. p * n + j_end];
+                            tensor_simd::simd_axpy(c_slice, b_slice, a_ip, j_len);
                         }
                     }
 

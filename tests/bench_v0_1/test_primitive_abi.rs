@@ -3,7 +3,7 @@
 use super::helpers;
 
 /// Golden master hash — set to "TBD" initially, will be pinned after first run.
-const GOLDEN_MASTER: &str = "e5e459f5b3505a273865ef00177f5841366827d7449c4a17c422cf05fdbcd854";
+const GOLDEN_MASTER: &str = "7c2e0248d8e50c7a58d9e8c64afb9b8c31db43e81835673eac2ca46a077275d5";
 
 #[test]
 fn primitive_master_hash_golden() {

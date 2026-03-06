@@ -89,7 +89,17 @@ changes and the golden-hash test (`primitive_master_hash_golden`) fails.
 | `broadcast("sign")` | `broadcast("sign", t)` |
 | `broadcast2("atan2")` | `broadcast2("atan2", p, q)` |
 
-## Total: 46 primitive operations
+### String Operations (5)
+
+| Primitive | Test Expression |
+|-----------|----------------|
+| `str_len` | `str_len("hello world")` |
+| `str_to_upper` | `str_to_upper("hello")` |
+| `str_replace` | `str_replace("foo bar foo", "foo", "baz")` |
+| `str_trim` | `str_trim("  hello  ")` |
+| `str_to_lower` | `str_to_lower("WORLD")` |
+
+## Total: 51 primitive operations
 
 ## How to Extend Coverage
 
@@ -101,7 +111,8 @@ changes and the golden-hash test (`primitive_master_hash_golden`) fails.
 
 ## Golden Hash
 
-Current golden master: `e5e459f5b3505a273865ef00177f5841366827d7449c4a17c422cf05fdbcd854`
+Current golden master: `7c2e0248d8e50c7a58d9e8c64afb9b8c31db43e81835673eac2ca46a077275d5`
 
-This hash locks down the combined behavior of all 46 primitives. Any change to
-any builtin's output will produce a different hash and fail the test.
+This hash locks down the combined behavior of all 51 primitives (46 original +
+5 string ops). Any change to any builtin's output will produce a different hash
+and fail the test.

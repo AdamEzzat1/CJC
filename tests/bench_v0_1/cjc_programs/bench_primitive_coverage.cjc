@@ -80,6 +80,13 @@ hashes = hashes + snap_hash(matmul(eye3, a)) + "|";
 hashes = hashes + snap_hash(broadcast("sign", t)) + "|";
 hashes = hashes + snap_hash(broadcast2("atan2", p, q)) + "|";
 
+// --- String ops (now working in both eval and MIR) ---
+hashes = hashes + snap_hash(str_len("hello world")) + "|";
+hashes = hashes + snap_hash(str_to_upper("hello")) + "|";
+hashes = hashes + snap_hash(str_replace("foo bar foo", "foo", "baz")) + "|";
+hashes = hashes + snap_hash(str_trim("  hello  ")) + "|";
+hashes = hashes + snap_hash(str_to_lower("WORLD")) + "|";
+
 // --- Master hash of all hashes ---
 let master = snap_hash(hashes);
 let elapsed = (clock() - t0) * 1000.0;

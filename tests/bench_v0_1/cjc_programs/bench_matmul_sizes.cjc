@@ -1,0 +1,59 @@
+// bench_matmul_sizes.cjc — Matmul at multiple sizes (determinism stress test)
+// Tests matmul correctness and determinism at sizes that cross sequential/tiled/parallel thresholds.
+// Size thresholds: sequential < 64, tiled 64-255, parallel >= 256.
+
+let t0 = clock();
+let hashes = "";
+
+// Size 8: small, sequential path
+let a8 = Tensor.randn([8, 8]);
+let b8 = Tensor.randn([8, 8]);
+let c8 = matmul(a8, b8);
+let h8 = snap_hash(c8);
+hashes = hashes + h8 + "|";
+print("STAGE:matmul_sizes:0:" + h8);
+
+// Size 32: medium-small, still sequential
+let a32 = Tensor.randn([32, 32]);
+let b32 = Tensor.randn([32, 32]);
+let c32 = matmul(a32, b32);
+let h32 = snap_hash(c32);
+hashes = hashes + h32 + "|";
+print("STAGE:matmul_sizes:1:" + h32);
+
+// Size 64: crosses into tiled path
+let a64 = Tensor.randn([64, 64]);
+let b64 = Tensor.randn([64, 64]);
+let c64 = matmul(a64, b64);
+let h64 = snap_hash(c64);
+hashes = hashes + h64 + "|";
+print("STAGE:matmul_sizes:2:" + h64);
+
+// Size 128: solidly tiled
+let a128 = Tensor.randn([128, 128]);
+let b128 = Tensor.randn([128, 128]);
+let c128 = matmul(a128, b128);
+let h128 = snap_hash(c128);
+hashes = hashes + h128 + "|";
+print("STAGE:matmul_sizes:3:" + h128);
+
+// Size 256: crosses into parallel path
+let a256 = Tensor.randn([256, 256]);
+let b256 = Tensor.randn([256, 256]);
+let c256 = matmul(a256, b256);
+let h256 = snap_hash(c256);
+hashes = hashes + h256 + "|";
+print("STAGE:matmul_sizes:4:" + h256);
+
+// Size 512: large parallel
+let a512 = Tensor.randn([512, 512]);
+let b512 = Tensor.randn([512, 512]);
+let c512 = matmul(a512, b512);
+let h512 = snap_hash(c512);
+hashes = hashes + h512 + "|";
+print("STAGE:matmul_sizes:5:" + h512);
+
+let final_hash = snap_hash(hashes);
+let elapsed = (clock() - t0) * 1000.0;
+let gc = gc_live_count();
+print("BENCH:matmul_sizes:42:" + to_string(elapsed) + ":" + to_string(gc) + ":" + final_hash);

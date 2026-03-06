@@ -15,6 +15,7 @@ use crate::complex::ComplexF64;
 use crate::scratchpad::Scratchpad;
 use crate::paged_kv::PagedKvCache;
 use crate::tensor::Tensor;
+use crate::tensor_simd::UnaryOp;
 use crate::value::{Bf16, Value};
 
 // ---------------------------------------------------------------------------
@@ -2124,10 +2125,12 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
         // Phase C6: Collection utilities
         "array_push" => {
             if args.len() != 2 { return Err("array_push requires 2 args: array, value".into()); }
-            let arr = match &args[0] { Value::Array(a) => (**a).clone(), _ => return Err("array_push: first arg must be Array".into()) };
-            let mut new_arr = arr;
-            new_arr.push(args[1].clone());
-            Ok(Some(Value::Array(Rc::new(new_arr))))
+            let mut arr_rc = match &args[0] { Value::Array(a) => Rc::clone(a), _ => return Err("array_push: first arg must be Array".into()) };
+            // COW: Rc::make_mut only clones if refcount > 1.
+            // For `arr = array_push(arr, val)` where old binding is overwritten,
+            // refcount is 1 → zero-copy push (amortized O(1) instead of O(n)).
+            Rc::make_mut(&mut arr_rc).push(args[1].clone());
+            Ok(Some(Value::Array(arr_rc)))
         }
         "array_pop" => {
             if args.len() != 1 { return Err("array_pop requires 1 arg: array".into()); }
@@ -2313,6 +2316,20 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 _ => return Err("broadcast: first argument must be a function name string".into()),
             };
             let t = value_to_tensor(&args[1])?;
+
+            // SIMD-accelerated path for known unary operations that can be
+            // vectorized with AVX2 (bit-identical to scalar).
+            match fn_name.as_str() {
+                "sqrt" => return Ok(Some(Value::Tensor(t.map_simd(UnaryOp::Sqrt)))),
+                "abs"  => return Ok(Some(Value::Tensor(t.map_simd(UnaryOp::Abs)))),
+                "neg"  => return Ok(Some(Value::Tensor(t.map_simd(UnaryOp::Neg)))),
+                "relu" => return Ok(Some(Value::Tensor(t.map_simd(UnaryOp::Relu)))),
+                _ => {} // fall through to scalar path
+            }
+
+            // Scalar path for transcendental functions (sin, cos, exp, etc.)
+            // These cannot be trivially SIMD-vectorized while preserving
+            // bit-identical results with libm scalar implementations.
             let f: Box<dyn Fn(f64) -> f64> = match fn_name.as_str() {
                 "sin"     => Box::new(|x: f64| x.sin()),
                 "cos"     => Box::new(|x: f64| x.cos()),
@@ -2327,15 +2344,11 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 "log10"   => Box::new(|x: f64| x.log10()),
                 "log1p"   => Box::new(|x: f64| x.ln_1p()),
                 "expm1"   => Box::new(|x: f64| x.exp_m1()),
-                "sqrt"    => Box::new(|x: f64| x.sqrt()),
-                "abs"     => Box::new(|x: f64| x.abs()),
                 "floor"   => Box::new(|x: f64| x.floor()),
                 "ceil"    => Box::new(|x: f64| x.ceil()),
                 "round"   => Box::new(|x: f64| x.round()),
                 "sigmoid" => Box::new(|x: f64| 1.0 / (1.0 + (-x).exp())),
-                "relu"    => Box::new(|x: f64| if x > 0.0 { x } else { 0.0 }),
                 "tanh"    => Box::new(|x: f64| x.tanh()),
-                "neg"     => Box::new(|x: f64| -x),
                 "sign"    => Box::new(|x: f64| {
                     if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 }
                 }),
@@ -2372,7 +2385,144 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             }
         }
 
+        // ── Peak RSS memory tracking ─────────────────────────────────
+        "peak_rss" => {
+            Ok(Some(Value::Int(peak_rss_kb() as i64)))
+        }
+
+        // ── Fused broadcast operations (eliminate intermediate tensors) ──
+        "broadcast_fma" => {
+            // broadcast_fma(a, b, c) = a * b + c element-wise in one pass.
+            // Eliminates the intermediate tensor that broadcast2("mul") would create.
+            if args.len() != 3 {
+                return Err("broadcast_fma requires 3 arguments (a, b, c)".into());
+            }
+            let a = value_to_tensor(&args[0])?;
+            let b = value_to_tensor(&args[1])?;
+            let c = value_to_tensor(&args[2])?;
+            let result = a.fused_mul_add(&b, &c)
+                .map_err(|e| format!("broadcast_fma: {e}"))?;
+            Ok(Some(Value::Tensor(result)))
+        }
+
         _ => Ok(None), // Not a shared builtin
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Peak RSS memory tracking (platform-specific)
+// ---------------------------------------------------------------------------
+
+/// Returns peak resident set size in kilobytes.
+///
+/// Platform support:
+/// - **Windows**: `GetProcessMemoryInfo` → `PeakWorkingSetSize`
+/// - **Linux**: Reads `/proc/self/status` → `VmHWM`
+/// - **macOS**: `getrusage(RUSAGE_SELF)` → `ru_maxrss` (in bytes on macOS)
+/// - **Other**: Returns 0
+pub fn peak_rss_kb() -> u64 {
+    #[cfg(target_os = "windows")]
+    {
+        peak_rss_windows()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        peak_rss_linux()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        peak_rss_macos()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    {
+        0
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn peak_rss_windows() -> u64 {
+    use std::mem::{size_of, MaybeUninit};
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct ProcessMemoryCounters {
+        cb: u32,
+        PageFaultCount: u32,
+        PeakWorkingSetSize: usize,
+        WorkingSetSize: usize,
+        QuotaPeakPagedPoolUsage: usize,
+        QuotaPagedPoolUsage: usize,
+        QuotaPeakNonPagedPoolUsage: usize,
+        QuotaNonPagedPoolUsage: usize,
+        PagefileUsage: usize,
+        PeakPagefileUsage: usize,
+    }
+
+    extern "system" {
+        fn GetCurrentProcess() -> isize;
+        fn K32GetProcessMemoryInfo(
+            hProcess: isize,
+            ppsmemCounters: *mut ProcessMemoryCounters,
+            cb: u32,
+        ) -> i32;
+    }
+
+    unsafe {
+        let mut pmc = MaybeUninit::<ProcessMemoryCounters>::zeroed();
+        let pmc_ref = pmc.as_mut_ptr();
+        (*pmc_ref).cb = size_of::<ProcessMemoryCounters>() as u32;
+        let handle = GetCurrentProcess();
+        if K32GetProcessMemoryInfo(handle, pmc_ref, (*pmc_ref).cb) != 0 {
+            let pmc = pmc.assume_init();
+            (pmc.PeakWorkingSetSize / 1024) as u64
+        } else {
+            0
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn peak_rss_linux() -> u64 {
+    // Read VmHWM from /proc/self/status (peak resident set size in kB).
+    if let Ok(contents) = std::fs::read_to_string("/proc/self/status") {
+        for line in contents.lines() {
+            if line.starts_with("VmHWM:") {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    if let Ok(kb) = parts[1].parse::<u64>() {
+                        return kb;
+                    }
+                }
+            }
+        }
+    }
+    0
+}
+
+#[cfg(target_os = "macos")]
+fn peak_rss_macos() -> u64 {
+    #[repr(C)]
+    struct Rusage {
+        ru_utime: [i64; 2],  // timeval (tv_sec, tv_usec)
+        ru_stime: [i64; 2],  // timeval
+        ru_maxrss: i64,      // max resident set size (bytes on macOS)
+        // ... remaining fields omitted (we only need maxrss)
+        _padding: [i64; 11],
+    }
+
+    extern "C" {
+        fn getrusage(who: i32, usage: *mut Rusage) -> i32;
+    }
+
+    unsafe {
+        let mut usage = std::mem::MaybeUninit::<Rusage>::zeroed();
+        if getrusage(0 /* RUSAGE_SELF */, usage.as_mut_ptr()) == 0 {
+            let usage = usage.assume_init();
+            // macOS reports in bytes, convert to KB
+            (usage.ru_maxrss as u64) / 1024
+        } else {
+            0
+        }
     }
 }
 
@@ -2383,6 +2533,24 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_peak_rss_returns_nonzero() {
+        let rss = peak_rss_kb();
+        // On any platform we support, peak RSS should be > 0 for a running process.
+        assert!(rss > 0, "peak_rss_kb() should return non-zero, got {rss}");
+    }
+
+    #[test]
+    fn test_peak_rss_builtin_dispatch() {
+        let result = dispatch_builtin("peak_rss", &[]);
+        match result {
+            Ok(Some(Value::Int(kb))) => {
+                assert!(kb > 0, "peak_rss should return positive value, got {kb}");
+            }
+            other => panic!("Expected Ok(Some(Int)), got: {other:?}"),
+        }
+    }
 
     #[test]
     fn test_complex_constructor() {

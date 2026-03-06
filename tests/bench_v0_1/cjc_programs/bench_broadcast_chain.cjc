@@ -1,0 +1,48 @@
+// bench_broadcast_chain.cjc — Deep broadcast chain stress test
+// Tests determinism of long chains of broadcast operations on large tensors.
+// This stresses the SIMD element-wise paths and memory allocation patterns.
+
+let t0 = clock();
+let n = 500;
+
+// Create base tensors (n × n = 250K elements each)
+let a = Tensor.randn([n, n]);
+let b = Tensor.randn([n, n]);
+let c = Tensor.randn([n, n]);
+
+// Chain of broadcast operations
+let h0 = snap_hash(a);
+print("STAGE:broadcast_chain:0:" + h0);
+
+// Step 1: element-wise ops
+let r1 = broadcast2("add", a, b);
+let r2 = broadcast2("mul", r1, c);
+let h1 = snap_hash(r2);
+print("STAGE:broadcast_chain:1:" + h1);
+
+// Step 2: unary ops chain
+let r3 = broadcast("relu", r2);
+let r4 = broadcast("abs", r3);
+let r5 = broadcast("sqrt", r4);
+let h2 = snap_hash(r5);
+print("STAGE:broadcast_chain:2:" + h2);
+
+// Step 3: more binary ops
+let d = Tensor.randn([n, n]);
+let r6 = broadcast2("sub", r5, d);
+let r7 = broadcast2("div", r6, broadcast("abs", d));
+let h3 = snap_hash(r7);
+print("STAGE:broadcast_chain:3:" + h3);
+
+// Step 4: mixed chain
+let r8 = broadcast("neg", r7);
+let r9 = broadcast2("add", r8, broadcast("relu", a));
+let r10 = broadcast2("mul", r9, broadcast("sigmoid", b));
+let h4 = snap_hash(r10);
+print("STAGE:broadcast_chain:4:" + h4);
+
+// Final hash
+let final_hash = snap_hash(h0 + h1 + h2 + h3 + h4);
+let elapsed = (clock() - t0) * 1000.0;
+let gc = gc_live_count();
+print("BENCH:broadcast_chain:42:" + to_string(elapsed) + ":" + to_string(gc) + ":" + final_hash);

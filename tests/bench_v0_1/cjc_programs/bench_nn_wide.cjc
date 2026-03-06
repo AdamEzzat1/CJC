@@ -1,0 +1,41 @@
+// bench_nn_wide.cjc — Wide neural network forward pass
+// Tests larger tensor operations typical of real-world neural networks:
+// 10 layers, width 256, batch size 16 with ReLU activations.
+
+let t0 = clock();
+let width = 256;
+let layers = 10;
+let batch = 16;
+
+// Initialize input
+let x = Tensor.randn([batch, width]);
+
+// Forward pass through 10 wide layers
+let stage_idx = 0;
+for i in 0..layers {
+    let w = Tensor.randn([width, width]);
+    let b = Tensor.randn([1, width]);
+    x = matmul(x, w);
+    x = broadcast2("add", x, b);
+    x = broadcast("relu", x);
+
+    // Stage hash every 2 layers
+    if i % 2 == 1 {
+        let sh = snap_hash(x);
+        print("STAGE:nn_wide:" + to_string(stage_idx) + ":" + sh);
+        stage_idx = stage_idx + 1;
+    }
+
+    // Normalize to prevent explosion
+    let n = norm(x);
+    if n > 0.0 {
+        let scale_val = 1.0 / n;
+        let scale_t = Tensor.from_vec([scale_val], [1]);
+        x = broadcast2("mul", x, scale_t);
+    }
+}
+
+let final_hash = snap_hash(x);
+let elapsed = (clock() - t0) * 1000.0;
+let gc = gc_live_count();
+print("BENCH:nn_wide:42:" + to_string(elapsed) + ":" + to_string(gc) + ":" + final_hash);
