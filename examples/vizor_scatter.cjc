@@ -1,0 +1,17 @@
+// Vizor Example: Basic Scatter Plot
+// Demonstrates: import, data creation, geom_point, labels, save
+
+import vizor
+
+let x = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+let y = [2.3, 4.1, 5.8, 8.2, 9.7, 12.1, 14.0, 15.8];
+
+let p = vizor_plot(x, y);
+let p = p.geom_point();
+let p = p.title("Linear Growth");
+let p = p.xlab("Time (days)");
+let p = p.ylab("Measurement");
+let p = p.annotate_regression("y = 2.0x + 0.2", 0.998);
+
+p.save("scatter_output.svg");
+print("Scatter plot saved to scatter_output.svg");

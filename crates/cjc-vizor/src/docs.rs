@@ -1,0 +1,194 @@
+//! Builtin documentation metadata for IDE/LSP integration.
+//!
+//! Static documentation strings for each Vizor builtin,
+//! consumable by cjc-analyzer for hover info and completion.
+
+/// A documentation entry for a Vizor builtin or method.
+#[derive(Debug, Clone)]
+pub struct DocEntry {
+    pub name: &'static str,
+    pub signature: &'static str,
+    pub description: &'static str,
+    pub kind: DocKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocKind {
+    Function,
+    Method,
+}
+
+/// All Vizor builtin documentation entries.
+pub fn vizor_docs() -> Vec<DocEntry> {
+    vec![
+        // ── Free functions ──
+        DocEntry {
+            name: "vizor_plot",
+            signature: "vizor_plot(x: Array<f64>, y: Array<f64>) -> VizorPlot",
+            description: "Create a new plot specification from x and y data arrays.",
+            kind: DocKind::Function,
+        },
+        DocEntry {
+            name: "vizor_plot_xy",
+            signature: "vizor_plot_xy(x: Array<f64>, y: Array<f64>) -> VizorPlot",
+            description: "Alias for vizor_plot. Create a plot from x and y arrays.",
+            kind: DocKind::Function,
+        },
+        // ── Methods on VizorPlot ──
+        DocEntry {
+            name: "geom_point",
+            signature: ".geom_point() -> VizorPlot",
+            description: "Add a point (scatter) geometry layer to the plot.",
+            kind: DocKind::Method,
+        },
+        DocEntry {
+            name: "geom_line",
+            signature: ".geom_line() -> VizorPlot",
+            description: "Add a line geometry layer connecting data points in order.",
+            kind: DocKind::Method,
+        },
+        DocEntry {
+            name: "geom_bar",
+            signature: ".geom_bar() -> VizorPlot",
+            description: "Add a bar geometry layer.",
+            kind: DocKind::Method,
+        },
+        DocEntry {
+            name: "geom_histogram",
+            signature: ".geom_histogram(bins: i64) -> VizorPlot",
+            description: "Add a histogram geometry with the specified number of bins.",
+            kind: DocKind::Method,
+        },
+        DocEntry {
+            name: "title",
+            signature: ".title(text: String) -> VizorPlot",
+            description: "Set the plot title.",
+            kind: DocKind::Method,
+        },
+        DocEntry {
+            name: "xlab",
+            signature: ".xlab(text: String) -> VizorPlot",
+            description: "Set the x-axis label.",
+            kind: DocKind::Method,
+        },
+        DocEntry {
+            name: "ylab",
+            signature: ".ylab(text: String) -> VizorPlot",
+            description: "Set the y-axis label.",
+            kind: DocKind::Method,
+        },
+        DocEntry {
+            name: "xlim",
+            signature: ".xlim(min: f64, max: f64) -> VizorPlot",
+            description: "Set x-axis limits.",
+            kind: DocKind::Method,
+        },
+        DocEntry {
+            name: "ylim",
+            signature: ".ylim(min: f64, max: f64) -> VizorPlot",
+            description: "Set y-axis limits.",
+            kind: DocKind::Method,
+        },
+        DocEntry {
+            name: "theme_minimal",
+            signature: ".theme_minimal() -> VizorPlot",
+            description: "Apply the minimal theme (lighter grid, more whitespace).",
+            kind: DocKind::Method,
+        },
+        DocEntry {
+            name: "coord_flip",
+            signature: ".coord_flip() -> VizorPlot",
+            description: "Flip x and y coordinates.",
+            kind: DocKind::Method,
+        },
+        DocEntry {
+            name: "size",
+            signature: ".size(width: i64, height: i64) -> VizorPlot",
+            description: "Set the plot dimensions in pixels.",
+            kind: DocKind::Method,
+        },
+        DocEntry {
+            name: "to_svg",
+            signature: ".to_svg() -> String",
+            description: "Render the plot to an SVG string.",
+            kind: DocKind::Method,
+        },
+        DocEntry {
+            name: "to_bmp",
+            signature: ".to_bmp() -> Bytes",
+            description: "Render the plot to a BMP byte buffer.",
+            kind: DocKind::Method,
+        },
+        DocEntry {
+            name: "save",
+            signature: ".save(path: String) -> Void",
+            description: "Save the plot to a file. Format is inferred from extension (.svg or .bmp).",
+            kind: DocKind::Method,
+        },
+        DocEntry {
+            name: "annotate_text",
+            signature: ".annotate_text(text: String, x: f64, y: f64) -> VizorPlot",
+            description: "Add a free-form text annotation at data coordinates.",
+            kind: DocKind::Method,
+        },
+        DocEntry {
+            name: "annotate_regression",
+            signature: ".annotate_regression(equation: String, r_squared: f64) -> VizorPlot",
+            description: "Add a regression summary annotation (equation + R²).",
+            kind: DocKind::Method,
+        },
+        DocEntry {
+            name: "annotate_ci",
+            signature: ".annotate_ci(level: f64, lower: f64, upper: f64) -> VizorPlot",
+            description: "Add a confidence interval annotation.",
+            kind: DocKind::Method,
+        },
+        DocEntry {
+            name: "annotate_pvalue",
+            signature: ".annotate_pvalue(value: f64) -> VizorPlot",
+            description: "Add a p-value annotation.",
+            kind: DocKind::Method,
+        },
+        DocEntry {
+            name: "annotate_event",
+            signature: ".annotate_event(x: f64, label: String) -> VizorPlot",
+            description: "Add a vertical event marker at an x-value.",
+            kind: DocKind::Method,
+        },
+        DocEntry {
+            name: "annotate_note",
+            signature: ".annotate_note(text: String) -> VizorPlot",
+            description: "Add a small note annotation.",
+            kind: DocKind::Method,
+        },
+        DocEntry {
+            name: "annotate_data_note",
+            signature: ".annotate_data_note(text: String) -> VizorPlot",
+            description: "Add a data provenance / source note.",
+            kind: DocKind::Method,
+        },
+        DocEntry {
+            name: "annotate_inline_label",
+            signature: ".annotate_inline_label(text: String, x: f64, y: f64) -> VizorPlot",
+            description: "Add an inline label near a data point.",
+            kind: DocKind::Method,
+        },
+    ]
+}
+
+/// List of all Vizor builtin function names (for import gating).
+pub const VIZOR_BUILTIN_NAMES: &[&str] = &[
+    "vizor_plot",
+    "vizor_plot_xy",
+];
+
+/// List of all Vizor method names.
+pub const VIZOR_METHOD_NAMES: &[&str] = &[
+    "geom_point", "geom_line", "geom_bar", "geom_histogram",
+    "title", "xlab", "ylab", "xlim", "ylim",
+    "theme_minimal", "coord_flip", "size",
+    "to_svg", "to_bmp", "save",
+    "annotate_text", "annotate_regression", "annotate_ci",
+    "annotate_pvalue", "annotate_event", "annotate_note",
+    "annotate_data_note", "annotate_inline_label",
+];

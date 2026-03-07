@@ -604,6 +604,29 @@ pub fn builtin_effects() -> HashMap<&'static str, EffectSet> {
         m.insert(name, pure);
     }
 
+    // -----------------------------------------------------------------
+    // Vizor builtins — plot construction (alloc) and file output (io)
+    // -----------------------------------------------------------------
+    m.insert("vizor_plot", alloc);
+    m.insert("vizor_plot_xy", alloc);
+    // VizorPlot methods — builder methods allocate new PlotSpec
+    for name in &[
+        "VizorPlot.geom_point", "VizorPlot.geom_line",
+        "VizorPlot.geom_bar", "VizorPlot.geom_histogram",
+        "VizorPlot.title", "VizorPlot.xlab", "VizorPlot.ylab",
+        "VizorPlot.xlim", "VizorPlot.ylim",
+        "VizorPlot.theme_minimal", "VizorPlot.coord_flip",
+        "VizorPlot.size",
+        "VizorPlot.annotate_text", "VizorPlot.annotate_regression",
+        "VizorPlot.annotate_ci", "VizorPlot.annotate_pvalue",
+        "VizorPlot.annotate_event", "VizorPlot.annotate_note",
+        "VizorPlot.annotate_data_note", "VizorPlot.annotate_inline_label",
+        "VizorPlot.to_svg", "VizorPlot.to_bmp", "VizorPlot.to_png",
+    ] {
+        m.insert(name, alloc);
+    }
+    m.insert("VizorPlot.save", io_alloc); // writes file to disk
+
     m
 }
 

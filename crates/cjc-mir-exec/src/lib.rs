@@ -18,6 +18,7 @@ use cjc_data::{Column, CsvConfig, CsvReader, DataFrame, StreamingCsvProcessor};
 use cjc_mir::*;
 use cjc_repro::Rng;
 use cjc_runtime::{GcHeap, Tensor, Value};
+use cjc_vizor::dispatch as vizor_dispatch;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -136,6 +137,8 @@ pub struct MirExecutor {
     pub arena_alloc_count: u64,
     /// Snap memoization cache: SHA-256 hash of (fn_name, args) → cached result.
     memo_cache: HashMap<[u8; 32], Value>,
+    /// Import-gated library set (e.g. "vizor").
+    libraries_enabled: std::collections::HashSet<String>,
 }
 
 impl MirExecutor {
@@ -153,6 +156,20 @@ impl MirExecutor {
             arena_stack: Vec::new(),
             arena_alloc_count: 0,
             memo_cache: HashMap::new(),
+            libraries_enabled: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Scan AST import declarations and populate `libraries_enabled`.
+    /// Must be called before `exec()` when running from an AST Program.
+    pub fn scan_ast_imports(&mut self, program: &cjc_ast::Program) {
+        self.libraries_enabled.clear();
+        for decl in &program.declarations {
+            if let cjc_ast::DeclKind::Import(imp) = &decl.kind {
+                if let Some(first) = imp.path.first() {
+                    self.libraries_enabled.insert(first.name.clone());
+                }
+            }
         }
     }
 
@@ -1286,8 +1303,7 @@ impl MirExecutor {
                 | "array_flatten"
                 | "array_len"
                 | "array_slice"
-                // Phase C5: Map & Set constructors
-                | "Map.new"
+                // Phase C5: Set constructor
                 | "Set.new"
                 // Phase C4: Sorting & Tensor Indexing
                 | "argsort"
@@ -1335,7 +1351,9 @@ impl MirExecutor {
                 | "str_starts" | "str_ends" | "str_sub" | "str_len"
                 // v0.1: Broadcasting builtins
                 | "broadcast" | "broadcast2"
-        )
+        ) || (self.libraries_enabled.contains("vizor") && matches!(name,
+                "vizor_plot" | "vizor_plot_xy"
+        ))
     }
 
     fn dispatch_call(&mut self, name: &str, args: Vec<Value>) -> MirExecResult {
@@ -1638,6 +1656,15 @@ impl MirExecutor {
             Ok(Some(value)) => return Ok(value),
             Err(msg) => return Err(MirExecError::Runtime(msg)),
             Ok(None) => {} // not a tidy builtin, fall through
+        }
+
+        // Vizor builtins (import-gated): vizor_plot(), vizor_plot_xy().
+        if self.libraries_enabled.contains("vizor") {
+            match vizor_dispatch::dispatch_vizor_builtin(name, &args) {
+                Ok(Some(value)) => return Ok(value),
+                Err(msg) => return Err(MirExecError::Runtime(msg)),
+                Ok(None) => {} // not a vizor builtin, fall through
+            }
         }
 
         // Try user-defined function.
@@ -2667,7 +2694,6 @@ impl MirExecutor {
 
             // -- Phase C1: GradGraph method dispatch --
             (Value::GradGraph(inner), method) => {
-                use std::any::Any;
                 match method {
                     "parameter" => {
                         if args.len() != 1 { return Err(MirExecError::Runtime("parameter requires 1 arg: Tensor".into())); }
@@ -2790,7 +2816,6 @@ impl MirExecutor {
 
             // -- Phase C2: OptimizerState method dispatch --
             (Value::OptimizerState(inner), "step") => {
-                use std::any::Any;
                 if args.len() != 2 {
                     return Err(MirExecError::Runtime("step requires 2 args: params_tensor, grads_tensor".into()));
                 }
@@ -2825,6 +2850,17 @@ impl MirExecutor {
             }
             (Value::OptimizerState(_), method) => {
                 Err(MirExecError::Runtime(format!("no method `{method}` on OptimizerState")))
+            }
+
+            // -- VizorPlot dispatch --
+            (Value::VizorPlot(inner), _) => {
+                match vizor_dispatch::dispatch_vizor_method(inner, method, &args) {
+                    Ok(Some(val)) => Ok(val),
+                    Ok(None) => Err(MirExecError::Runtime(format!(
+                        "no method `{method}` on VizorPlot"
+                    ))),
+                    Err(msg) => Err(MirExecError::Runtime(msg)),
+                }
             }
 
             (Value::Struct { name: sname, .. }, _) => {
@@ -3212,6 +3248,7 @@ pub fn run_program(program: &cjc_ast::Program, seed: u64) -> MirExecResult {
     cjc_mir::escape::annotate_program(&mut mir);
 
     let mut executor = MirExecutor::new(seed);
+    executor.scan_ast_imports(program);
     executor.exec(&mir)
 }
 
@@ -3228,6 +3265,7 @@ pub fn run_program_with_executor(
     cjc_mir::escape::annotate_program(&mut mir);
 
     let mut executor = MirExecutor::new(seed);
+    executor.scan_ast_imports(program);
     let result = executor.exec(&mir)?;
     Ok((result, executor))
 }
@@ -3244,6 +3282,7 @@ pub fn run_program_optimized(program: &cjc_ast::Program, seed: u64) -> MirExecRe
     cjc_mir::escape::annotate_program(&mut optimized);
 
     let mut executor = MirExecutor::new(seed);
+    executor.scan_ast_imports(program);
     executor.exec(&optimized)
 }
 
@@ -3262,6 +3301,7 @@ pub fn run_program_optimized_with_executor(
     cjc_mir::escape::annotate_program(&mut optimized);
 
     let mut executor = MirExecutor::new(seed);
+    executor.scan_ast_imports(program);
     let result = executor.exec(&optimized)?;
     Ok((result, executor))
 }
@@ -3287,6 +3327,7 @@ pub fn run_program_type_checked(program: &cjc_ast::Program, seed: u64) -> MirExe
     cjc_mir::escape::annotate_program(&mut mir);
 
     let mut executor = MirExecutor::new(seed);
+    executor.scan_ast_imports(program);
     executor.exec(&mir)
 }
 
@@ -3305,6 +3346,7 @@ pub fn run_program_monomorphized(program: &cjc_ast::Program, seed: u64) -> MirEx
     cjc_mir::escape::annotate_program(&mut optimized);
 
     let mut executor = MirExecutor::new(seed);
+    executor.scan_ast_imports(program);
     executor.exec(&optimized)
 }
 
@@ -3471,6 +3513,7 @@ pub fn run_program_cfg(
 
     // Execute using CFG: register functions, then run __main via CFG
     let mut executor = MirExecutor::new(seed);
+    executor.scan_ast_imports(program);
 
     // Register all functions and struct defs
     for func in &mir.functions {

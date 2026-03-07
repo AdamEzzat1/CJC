@@ -23,6 +23,7 @@ use cjc_data::{Column, CsvConfig, CsvReader, DataFrame, StreamingCsvProcessor, T
 use cjc_data::tidy_dispatch;
 use cjc_repro::Rng;
 use cjc_runtime::{GcHeap, Tensor, Value};
+use cjc_vizor::dispatch as vizor_dispatch;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -158,6 +159,9 @@ pub struct Interpreter {
 
     /// Snap memoization cache: SHA-256 hash of (fn_name, args) → cached result.
     memo_cache: HashMap<[u8; 32], Value>,
+
+    /// Libraries enabled via `import <lib>` declarations.
+    libraries_enabled: HashSet<String>,
 }
 
 impl Interpreter {
@@ -182,6 +186,7 @@ impl Interpreter {
             gc_collections: 0,
             record_names: HashSet::new(),
             memo_cache: HashMap::new(),
+            libraries_enabled: HashSet::new(),
         }
     }
 
@@ -229,6 +234,16 @@ impl Interpreter {
         // First pass: register all function and struct declarations.
         for decl in &program.declarations {
             self.register_decl(decl);
+        }
+
+        // Scan imports to enable libraries.
+        self.libraries_enabled.clear();
+        for decl in &program.declarations {
+            if let DeclKind::Import(imp) = &decl.kind {
+                if let Some(first) = imp.path.first() {
+                    self.libraries_enabled.insert(first.name.clone());
+                }
+            }
         }
 
         // Second pass: execute top-level let bindings and statements.
@@ -1533,7 +1548,9 @@ impl Interpreter {
                 | "SparseCsr.matvec" | "SparseCsr.to_dense" | "SparseCoo.to_csr"
                 // v0.1: Broadcasting builtins
                 | "broadcast" | "broadcast2"
-        )
+        ) || (self.libraries_enabled.contains("vizor") && matches!(name,
+                "vizor_plot" | "vizor_plot_xy"
+        ))
     }
 
     fn dispatch_call(&mut self, name: &str, args: Vec<Value>) -> EvalResult {
@@ -1819,6 +1836,15 @@ impl Interpreter {
             Ok(Some(value)) => return Ok(value),
             Err(msg) => return Err(EvalError::Runtime(msg)),
             Ok(None) => {} // not a tidy builtin, fall through
+        }
+
+        // Vizor builtins (import-gated): vizor_plot(), vizor_plot_xy().
+        if self.libraries_enabled.contains("vizor") {
+            match vizor_dispatch::dispatch_vizor_builtin(name, &args) {
+                Ok(Some(value)) => return Ok(value),
+                Err(msg) => return Err(EvalError::Runtime(msg)),
+                Ok(None) => {} // not a vizor builtin, fall through
+            }
         }
 
         // Try user-defined function.
@@ -2710,7 +2736,6 @@ impl Interpreter {
 
             // -- Phase C1: GradGraph method dispatch --
             (Value::GradGraph(inner), method) => {
-                use std::any::Any;
                 match method {
                     "parameter" => {
                         if args.len() != 1 { return Err(EvalError::Runtime("parameter requires 1 arg: Tensor".into())); }
@@ -2833,7 +2858,6 @@ impl Interpreter {
 
             // -- Phase C2: OptimizerState method dispatch --
             (Value::OptimizerState(inner), "step") => {
-                use std::any::Any;
                 if args.len() != 2 {
                     return Err(EvalError::Runtime("step requires 2 args: params_tensor, grads_tensor".into()));
                 }
@@ -2895,6 +2919,17 @@ impl Interpreter {
                     Ok(Some(val)) => Ok(val),
                     Ok(None) => Err(EvalError::Runtime(format!(
                         "no method `{method}` on GroupedTidyView"
+                    ))),
+                    Err(msg) => Err(EvalError::Runtime(msg)),
+                }
+            }
+
+            // -- VizorPlot dispatch --
+            (Value::VizorPlot(inner), _) => {
+                match vizor_dispatch::dispatch_vizor_method(inner, method, &args) {
+                    Ok(Some(val)) => Ok(val),
+                    Ok(None) => Err(EvalError::Runtime(format!(
+                        "no method `{method}` on VizorPlot"
                     ))),
                     Err(msg) => Err(EvalError::Runtime(msg)),
                 }

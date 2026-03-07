@@ -1,0 +1,22 @@
+[package]
+name = "cjc-vizor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Vizor — grammar-of-graphics data visualization for CJC"
+
+[dependencies]
+cjc-runtime = { workspace = true }
+cjc-repro = { workspace = true }
+
+[features]
+default = []
+png = ["dep:png", "dep:flate2"]
+
+[dependencies.png]
+version = "0.17"
+optional = true
+
+[dependencies.flate2]
+version = "1"
+optional = true

@@ -39,6 +39,7 @@ pub mod det_map;
 pub mod linalg;
 pub mod value;
 pub mod error;
+pub mod lib_registry;
 pub mod json;
 pub mod datetime;
 pub mod window;

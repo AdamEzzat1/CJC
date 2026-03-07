@@ -1,0 +1,17 @@
+// Vizor Example: Bar Chart
+// Demonstrates: geom_bar, size, coord_flip
+
+import vizor
+
+let categories = [1.0, 2.0, 3.0, 4.0];
+let values = [42.0, 67.0, 38.0, 55.0];
+
+let p = vizor_plot(categories, values);
+let p = p.geom_bar();
+let p = p.title("Quarterly Results");
+let p = p.xlab("Quarter");
+let p = p.ylab("Revenue ($K)");
+let p = p.size(800, 500);
+
+p.save("bar_output.svg");
+print("Bar chart saved to bar_output.svg");

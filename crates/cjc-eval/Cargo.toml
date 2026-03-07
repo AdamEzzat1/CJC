@@ -14,3 +14,4 @@ cjc-data = { workspace = true }
 cjc-repro = { workspace = true }
 cjc-regex = { path = "../cjc-regex" }
 cjc-snap = { path = "../cjc-snap" }
+cjc-vizor = { path = "../cjc-vizor" }

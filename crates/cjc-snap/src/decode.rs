@@ -29,6 +29,7 @@ impl<'a> Cursor<'a> {
         Cursor { data, pos: 0 }
     }
 
+    #[allow(dead_code)]
     fn remaining(&self) -> usize {
         self.data.len() - self.pos
     }

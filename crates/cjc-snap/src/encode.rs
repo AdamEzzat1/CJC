@@ -227,7 +227,8 @@ fn encode_value(value: &Value, buf: &mut Vec<u8>) {
         | Value::GradGraph(_)
         | Value::OptimizerState(_)
         | Value::TidyView(_)
-        | Value::GroupedTidyView(_) => {
+        | Value::GroupedTidyView(_)
+        | Value::VizorPlot(_) => {
             panic!(
                 "snap_encode: cannot serialize runtime-only variant: {}",
                 value.type_name()

@@ -156,6 +156,11 @@ pub enum Value {
     /// Type-erased grouped tidy view. Concrete type is
     /// `cjc_data::GroupedTidyView`. Same erasure strategy as TidyView.
     GroupedTidyView(Rc<dyn Any>),
+    /// Type-erased Vizor plot specification. Concrete type is
+    /// `cjc_vizor::spec::PlotSpec`. Same erasure strategy as TidyView.
+    ///
+    /// Dispatch is handled by `cjc_vizor::dispatch::dispatch_vizor_method`.
+    VizorPlot(Rc<dyn Any>),
     Void,
 }
 
@@ -192,6 +197,7 @@ impl Value {
             Value::OptimizerState(_) => "OptimizerState",
             Value::TidyView(_) => "TidyView",
             Value::GroupedTidyView(_) => "GroupedTidyView",
+            Value::VizorPlot(_) => "VizorPlot",
             Value::Void => "Void",
         }
     }
@@ -319,6 +325,7 @@ impl fmt::Display for Value {
             Value::OptimizerState(_) => write!(f, "<OptimizerState>"),
             Value::TidyView(_) => write!(f, "<TidyView>"),
             Value::GroupedTidyView(_) => write!(f, "<GroupedTidyView>"),
+            Value::VizorPlot(_) => write!(f, "<VizorPlot>"),
             Value::Void => write!(f, "void"),
         }
     }

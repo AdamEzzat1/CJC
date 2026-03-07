@@ -1,0 +1,23 @@
+// Vizor Example: Annotated Scatter Plot
+// Demonstrates: multiple annotations, event markers, inline labels, BMP export
+
+import vizor
+
+let x = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+let y = [2.1, 4.0, 5.8, 8.1, 10.2, 11.8, 14.1, 15.9, 18.0, 20.2];
+
+let p = vizor_plot(x, y);
+let p = p.geom_point();
+let p = p.geom_line();
+let p = p.title("Monitored Process");
+let p = p.xlab("Time (hours)");
+let p = p.ylab("Temperature (C)");
+let p = p.annotate_regression("y = 2.0x + 0.1", 0.999);
+let p = p.annotate_event(5.0, "Calibration");
+let p = p.annotate_text("Anomaly detected", 8.0, 16.0);
+let p = p.annotate_pvalue(0.001);
+let p = p.size(1024, 768);
+
+p.save("annotated_output.svg");
+p.save("annotated_output.bmp");
+print("Annotated plot saved as SVG and BMP");
