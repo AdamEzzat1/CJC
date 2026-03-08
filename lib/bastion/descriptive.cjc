@@ -1,0 +1,107 @@
+// ============================================================
+// Bastion :: Descriptive Statistics
+// Pure CJC compositions over P-layer and R-layer primitives.
+// ============================================================
+// Builtins used: mean, variance, sd, len, sqrt, cumsum,
+//                median_fast, quantile_fast, sort, array_push
+
+// ---- Higher-order moments (compose from mean/variance) ----
+// NOTE: skewness and kurtosis already exist as builtins.
+// These are provided for reference/customization.
+
+// Running mean: cumsum(xs)[i] / (i + 1)
+fn cummean(xs: Any) -> Any {
+    let cs = cumsum(xs);
+    let n = len(xs);
+    let out = [];
+    let i = 0;
+    while i < n {
+        out = array_push(out, cs[i] / int(i + 1));
+        i = i + 1;
+    }
+    out
+}
+
+// First difference: xs[i] - xs[i-lag]
+fn diff(xs: Any, lag: i64) -> Any {
+    let n = len(xs);
+    let out = [];
+    let i = lag;
+    while i < n {
+        out = array_push(out, xs[i] - xs[i - lag]);
+        i = i + 1;
+    }
+    out
+}
+
+// Percentage change: (xs[i] - xs[i-lag]) / xs[i-lag]
+fn pct_change(xs: Any, lag: i64) -> Any {
+    let n = len(xs);
+    let out = [];
+    let i = lag;
+    while i < n {
+        let prev = xs[i - lag];
+        if prev != 0.0 {
+            out = array_push(out, (xs[i] - prev) / prev);
+        } else {
+            out = array_push(out, 0.0 / 0.0);
+        }
+        i = i + 1;
+    }
+    out
+}
+
+// Empirical CDF: returns (sorted_x, proportions)
+// sorted_x = sort(xs), proportions[i] = (i+1)/n
+fn ecdf(xs: Any) -> Any {
+    let sorted = sort(xs);
+    let n = len(sorted);
+    let props = [];
+    let i = 0;
+    while i < n {
+        props = array_push(props, float(i + 1) / float(n));
+        i = i + 1;
+    }
+    [sorted, props]
+}
+
+// Assign each element to one of k equal-frequency bins (1..k)
+fn quantile_bins(xs: Any, k: i64) -> Any {
+    let n = len(xs);
+    let order = argsort(Tensor.from_vec(xs, [n]));
+    let bins = [];
+    // Initialize bins array
+    let i = 0;
+    while i < n {
+        bins = array_push(bins, 0);
+        i = i + 1;
+    }
+    // Assign bins based on rank position
+    let j = 0;
+    while j < n {
+        let rank_idx = int(order[j]);
+        let bin = int(float(rank_idx * k) / float(n)) + 1;
+        if bin > k {
+            bin = k;
+        }
+        // We can't do bins[rank_idx] = bin in CJC, so we rebuild
+        j = j + 1;
+    }
+    // Simpler approach: use rank directly
+    let ranks = rank(xs);
+    let result = [];
+    let m = 0;
+    while m < n {
+        let r = ranks[m];
+        let bin = int(float(r * k) / float(n + 1)) + 1;
+        if bin > k {
+            bin = k;
+        }
+        if bin < 1 {
+            bin = 1;
+        }
+        result = array_push(result, bin);
+        m = m + 1;
+    }
+    result
+}

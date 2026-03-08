@@ -1,0 +1,144 @@
+// ============================================================
+// Bastion :: Rolling Window Statistics
+// Pure CJC compositions over window_sum, window_mean, etc.
+// ============================================================
+// Builtins used: window_mean, window_sum, len, sqrt, array_push
+
+// Rolling variance: E[X^2] - E[X]^2 within each window
+fn rolling_var(xs: Any, w: i64) -> Any {
+    let n = len(xs);
+    // Build x^2 array
+    let xsq = [];
+    let i = 0;
+    while i < n {
+        xsq = array_push(xsq, xs[i] * xs[i]);
+        i = i + 1;
+    }
+    let means = window_mean(xs, w);
+    let mean_sq = window_mean(xsq, w);
+    let nm = len(means);
+    let out = [];
+    let j = 0;
+    while j < nm {
+        let v = mean_sq[j] - means[j] * means[j];
+        // Clamp negative due to float rounding
+        if v < 0.0 {
+            v = 0.0;
+        }
+        out = array_push(out, v);
+        j = j + 1;
+    }
+    out
+}
+
+// Rolling standard deviation
+fn rolling_std(xs: Any, w: i64) -> Any {
+    let vars = rolling_var(xs, w);
+    let n = len(vars);
+    let out = [];
+    let i = 0;
+    while i < n {
+        out = array_push(out, sqrt(vars[i]));
+        i = i + 1;
+    }
+    out
+}
+
+// Rolling z-score: (x[i] - rolling_mean[i]) / rolling_std[i]
+fn rolling_zscore(xs: Any, w: i64) -> Any {
+    let means = window_mean(xs, w);
+    let stds = rolling_std(xs, w);
+    let n = len(means);
+    let out = [];
+    let offset = w - 1;
+    let i = 0;
+    while i < n {
+        let s = stds[i];
+        if s > 0.0 {
+            out = array_push(out, (xs[i + offset] - means[i]) / s);
+        } else {
+            out = array_push(out, 0.0);
+        }
+        i = i + 1;
+    }
+    out
+}
+
+// Rolling covariance between xs and ys
+fn rolling_cov(xs: Any, ys: Any, w: i64) -> Any {
+    let n = len(xs);
+    // Build xy product array
+    let xy = [];
+    let i = 0;
+    while i < n {
+        xy = array_push(xy, xs[i] * ys[i]);
+        i = i + 1;
+    }
+    let mean_x = window_mean(xs, w);
+    let mean_y = window_mean(ys, w);
+    let mean_xy = window_mean(xy, w);
+    let nm = len(mean_x);
+    let out = [];
+    let j = 0;
+    while j < nm {
+        out = array_push(out, mean_xy[j] - mean_x[j] * mean_y[j]);
+        j = j + 1;
+    }
+    out
+}
+
+// Rolling correlation: cov(x,y) / (std(x) * std(y))
+fn rolling_corr(xs: Any, ys: Any, w: i64) -> Any {
+    let covs = rolling_cov(xs, ys, w);
+    let std_x = rolling_std(xs, w);
+    let std_y = rolling_std(ys, w);
+    let n = len(covs);
+    let out = [];
+    let i = 0;
+    while i < n {
+        let denom = std_x[i] * std_y[i];
+        if denom > 0.0 {
+            out = array_push(out, covs[i] / denom);
+        } else {
+            out = array_push(out, 0.0 / 0.0);
+        }
+        i = i + 1;
+    }
+    out
+}
+
+// Rolling beta: cov(x,y) / var(x) (regression slope)
+fn rolling_beta(xs: Any, ys: Any, w: i64) -> Any {
+    let covs = rolling_cov(xs, ys, w);
+    let vars = rolling_var(xs, w);
+    let n = len(covs);
+    let out = [];
+    let i = 0;
+    while i < n {
+        if vars[i] > 0.0 {
+            out = array_push(out, covs[i] / vars[i]);
+        } else {
+            out = array_push(out, 0.0 / 0.0);
+        }
+        i = i + 1;
+    }
+    out
+}
+
+// Exponentially Weighted Moving Average
+fn ewma(xs: Any, alpha: f64) -> Any {
+    let n = len(xs);
+    if n == 0 {
+        return [];
+    }
+    let out = [];
+    let prev = xs[0];
+    out = array_push(out, prev);
+    let i = 1;
+    while i < n {
+        prev = alpha * xs[i] + (1.0 - alpha) * prev;
+        out = array_push(out, prev);
+        i = i + 1;
+    }
+    out
+}

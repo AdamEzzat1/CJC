@@ -1,0 +1,30 @@
+// ============================================================
+// Bastion :: Statistical Computing Library for CJC
+// ============================================================
+//
+// A pure CJC statistics library built on CJC's primitive ABI.
+// All functions compose from 15 deterministic primitives +
+// 4 special functions; no external dependencies.
+//
+// Modules:
+//   bastion.descriptive  -- diff, pct_change, ecdf, cummean
+//   bastion.rolling      -- rolling_var/std/zscore/cov/corr, ewma
+//   bastion.robust       -- trimmed_std, huber_location, biweight
+//   bastion.resampling   -- bootstrap, jackknife, permutation tests
+//   bastion.tsa          -- acf, pacf, durbin_watson, spectral
+//   bastion.infer        -- cohens_d, hedges_g, CI, odds_ratio
+//   bastion.dist         -- uniform, lognormal, survival functions
+//   bastion.transform    -- minmax_scale, robust_scale, boxcox
+//
+// Usage (with --multi-file):
+//   import bastion.descriptive
+//   let d = bastion.descriptive::diff(xs, 1)
+
+import bastion.descriptive
+import bastion.rolling
+import bastion.robust
+import bastion.resampling
+import bastion.tsa
+import bastion.infer
+import bastion.dist
+import bastion.transform

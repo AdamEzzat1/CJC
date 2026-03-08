@@ -1,0 +1,193 @@
+// ============================================================
+// Bastion :: Resampling Methods
+// Pure CJC compositions over sample_indices, mean, sd, etc.
+// ============================================================
+// Builtins used: sample_indices, mean, sd, variance, len, sort,
+//                quantile_fast, array_push, normal_ppf
+
+// Bootstrap mean: B resamples with replacement
+fn bootstrap_mean(xs: Any, b: i64, seed: i64) -> f64 {
+    let n = len(xs);
+    let total = 0.0;
+    let i = 0;
+    while i < b {
+        let idx = sample_indices(n, n, true, seed + i);
+        let s = 0.0;
+        let j = 0;
+        while j < n {
+            s = s + xs[idx[j]];
+            j = j + 1;
+        }
+        total = total + s / float(n);
+        i = i + 1;
+    }
+    total / float(b)
+}
+
+// Bootstrap confidence interval (percentile method)
+// Returns [point_estimate, lower, upper]
+fn bootstrap_ci(xs: Any, b: i64, conf: f64, seed: i64) -> Any {
+    let n = len(xs);
+    let samples = [];
+    let i = 0;
+    while i < b {
+        let idx = sample_indices(n, n, true, seed + i);
+        let s = 0.0;
+        let j = 0;
+        while j < n {
+            s = s + xs[idx[j]];
+            j = j + 1;
+        }
+        samples = array_push(samples, s / float(n));
+        i = i + 1;
+    }
+    let alpha = (1.0 - conf) / 2.0;
+    let lo = quantile_fast(samples, alpha);
+    let hi = quantile_fast(samples, 1.0 - alpha);
+    let point = mean(xs);
+    [point, lo, hi]
+}
+
+// Bootstrap standard error
+fn bootstrap_se(xs: Any, b: i64, seed: i64) -> f64 {
+    let n = len(xs);
+    let samples = [];
+    let i = 0;
+    while i < b {
+        let idx = sample_indices(n, n, true, seed + i);
+        let s = 0.0;
+        let j = 0;
+        while j < n {
+            s = s + xs[idx[j]];
+            j = j + 1;
+        }
+        samples = array_push(samples, s / float(n));
+        i = i + 1;
+    }
+    sd(samples)
+}
+
+// Jackknife: leave-one-out estimates for mean
+// Returns [jackknife_mean, bias, se]
+fn jackknife_mean(xs: Any) -> Any {
+    let n = len(xs);
+    let total = 0.0;
+    let i = 0;
+    while i < n {
+        total = total + xs[i];
+        i = i + 1;
+    }
+    let orig_mean = total / float(n);
+
+    // Compute leave-one-out means
+    let loo_means = [];
+    let j = 0;
+    while j < n {
+        let loo_sum = total - xs[j];
+        loo_means = array_push(loo_means, loo_sum / float(n - 1));
+        j = j + 1;
+    }
+
+    // Jackknife estimate = mean of LOO means
+    let jk_mean = mean(loo_means);
+    // Bias = (n-1) * (jk_mean - orig_mean)
+    let bias = float(n - 1) * (jk_mean - orig_mean);
+    // SE = sqrt((n-1)/n * sum((loo_i - jk_mean)^2))
+    let ssq = 0.0;
+    let k = 0;
+    while k < n {
+        let d = loo_means[k] - jk_mean;
+        ssq = ssq + d * d;
+        k = k + 1;
+    }
+    let se = sqrt(float(n - 1) / float(n) * ssq);
+    [jk_mean, bias, se]
+}
+
+// Jackknife confidence interval (normal approximation)
+// Returns [estimate, lower, upper]
+fn jackknife_ci(xs: Any, conf: f64) -> Any {
+    let jk = jackknife_mean(xs);
+    let est = jk[0];
+    let se = jk[2];
+    let alpha = (1.0 - conf) / 2.0;
+    let z = normal_ppf(1.0 - alpha);
+    let lo = est - z * se;
+    let hi = est + z * se;
+    [est, lo, hi]
+}
+
+// Permutation test for difference in means
+// Returns [observed_diff, p_value]
+fn permutation_test_mean(xs: Any, ys: Any, b: i64, seed: i64) -> Any {
+    let nx = len(xs);
+    let ny = len(ys);
+    let n = nx + ny;
+    let obs_diff = mean(xs) - mean(ys);
+
+    // Combine data
+    let combined = [];
+    let i = 0;
+    while i < nx {
+        combined = array_push(combined, xs[i]);
+        i = i + 1;
+    }
+    let j = 0;
+    while j < ny {
+        combined = array_push(combined, ys[j]);
+        j = j + 1;
+    }
+
+    // Count permutations where |diff| >= |obs_diff|
+    let count = 0;
+    let p = 0;
+    while p < b {
+        let perm = sample_indices(n, n, false, seed + p);
+        let sum_x = 0.0;
+        let k = 0;
+        while k < nx {
+            sum_x = sum_x + combined[perm[k]];
+            k = k + 1;
+        }
+        let sum_y = 0.0;
+        let m = nx;
+        while m < n {
+            sum_y = sum_y + combined[perm[m]];
+            m = m + 1;
+        }
+        let perm_diff = sum_x / float(nx) - sum_y / float(ny);
+        if abs(perm_diff) >= abs(obs_diff) {
+            count = count + 1;
+        }
+        p = p + 1;
+    }
+    let pval = float(count) / float(b);
+    [obs_diff, pval]
+}
+
+// Permutation test for correlation
+// Returns [observed_cor, p_value]
+fn permutation_test_corr(xs: Any, ys: Any, b: i64, seed: i64) -> Any {
+    let n = len(xs);
+    let obs_r = cor(xs, ys);
+
+    let count = 0;
+    let p = 0;
+    while p < b {
+        let perm = sample_indices(n, n, false, seed + p);
+        // Shuffle ys
+        let ys_perm = [];
+        let k = 0;
+        while k < n {
+            ys_perm = array_push(ys_perm, ys[perm[k]]);
+            k = k + 1;
+        }
+        let perm_r = cor(xs, ys_perm);
+        if abs(perm_r) >= abs(obs_r) {
+            count = count + 1;
+        }
+        p = p + 1;
+    }
+    let pval = float(count) / float(b);
+    [obs_r, pval]
+}

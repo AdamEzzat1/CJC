@@ -1,0 +1,105 @@
+// ============================================================
+// Bastion :: Data Transformations
+// Pure CJC compositions over min, max, mean, median_fast, etc.
+// ============================================================
+// Builtins used: min, max, mean, sd, median_fast, iqr,
+//                len, array_push
+
+// Min-max scaling to [0, 1]: (x - min) / (max - min)
+fn minmax_scale(xs: Any) -> Any {
+    let n = len(xs);
+    let lo = xs[0];
+    let hi = xs[0];
+    let i = 1;
+    while i < n {
+        if xs[i] < lo { lo = xs[i]; }
+        if xs[i] > hi { hi = xs[i]; }
+        i = i + 1;
+    }
+    let rng = hi - lo;
+    let out = [];
+    let j = 0;
+    while j < n {
+        if rng > 0.0 {
+            out = array_push(out, (xs[j] - lo) / rng);
+        } else {
+            out = array_push(out, 0.0);
+        }
+        j = j + 1;
+    }
+    out
+}
+
+// Robust scaling: (x - median) / IQR
+fn robust_scale(xs: Any) -> Any {
+    let n = len(xs);
+    let med = median_fast(xs);
+    let q = iqr(xs);
+    let out = [];
+    let i = 0;
+    while i < n {
+        if q > 0.0 {
+            out = array_push(out, (xs[i] - med) / q);
+        } else {
+            out = array_push(out, 0.0);
+        }
+        i = i + 1;
+    }
+    out
+}
+
+// De-mean: subtract the mean from each element
+fn demean(xs: Any) -> Any {
+    let n = len(xs);
+    let mu = mean(xs);
+    let out = [];
+    let i = 0;
+    while i < n {
+        out = array_push(out, xs[i] - mu);
+        i = i + 1;
+    }
+    out
+}
+
+// Standard scaling: (x - mean) / sd (alias for z_score)
+fn standard_scale(xs: Any) -> Any {
+    z_score(xs)
+}
+
+// Log transform (natural log, skips non-positive values with NaN)
+fn log_transform(xs: Any) -> Any {
+    let n = len(xs);
+    let out = [];
+    let i = 0;
+    while i < n {
+        if xs[i] > 0.0 {
+            out = array_push(out, log(xs[i]));
+        } else {
+            out = array_push(out, 0.0 / 0.0);
+        }
+        i = i + 1;
+    }
+    out
+}
+
+// Rank transform: replace values with their ranks
+fn rank_transform(xs: Any) -> Any {
+    rank(xs)
+}
+
+// Box-Cox transform (lambda != 0): (x^lambda - 1) / lambda
+// lambda == 0: log(x)
+fn boxcox(xs: Any, lambda: f64) -> Any {
+    let n = len(xs);
+    let out = [];
+    let i = 0;
+    while i < n {
+        if lambda == 0.0 {
+            out = array_push(out, log(xs[i]));
+        } else {
+            out = array_push(out, (pow(xs[i], lambda) - 1.0) / lambda);
+        }
+        i = i + 1;
+    }
+    out
+}

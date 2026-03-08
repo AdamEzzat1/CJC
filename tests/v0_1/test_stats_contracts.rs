@@ -27,13 +27,13 @@ fn mir_output(src: &str) -> Vec<String> {
 // ── Tests ────────────────────────────────────────────────────────
 
 #[test]
-fn mean_absent_as_free_fn() {
-    // mean() is NOT a free function — only a tensor dot method
+fn mean_present_as_free_fn() {
+    // mean() is now a free function (Bastion primitive ABI)
+    // in addition to being a tensor dot method (t.mean())
     let src = "print(mean([1.0, 2.0, 3.0]));";
     let program = parse(src);
-    let mut interp = cjc_eval::Interpreter::new(42);
-    let result = interp.exec(&program);
-    assert!(result.is_err(), "mean() as free function should fail");
+    let (_, exec) = cjc_mir_exec::run_program_with_executor(&program, 42).unwrap();
+    assert_eq!(exec.output[0], "2");
 }
 
 #[test]

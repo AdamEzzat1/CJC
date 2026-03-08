@@ -1,0 +1,296 @@
+// ============================================================
+// Bastion :: Time-Series Analysis
+// Pure CJC compositions over mean, variance, len, etc.
+// ============================================================
+// Builtins used: mean, variance, len, sqrt, log, exp,
+//                array_push, abs
+
+// Autocovariance function (unbiased, lag 0..nlags)
+fn acovf(xs: Any, nlags: i64) -> Any {
+    let n = len(xs);
+    let mu = mean(xs);
+    let out = [];
+    let k = 0;
+    while k <= nlags {
+        let s = 0.0;
+        let i = 0;
+        while i < n - k {
+            s = s + (xs[i] - mu) * (xs[i + k] - mu);
+            i = i + 1;
+        }
+        out = array_push(out, s / float(n));
+        k = k + 1;
+    }
+    out
+}
+
+// Autocorrelation function: acovf(k) / acovf(0)
+fn acf(xs: Any, nlags: i64) -> Any {
+    let gamma = acovf(xs, nlags);
+    let g0 = gamma[0];
+    if g0 == 0.0 {
+        // Constant series: return 1 at lag 0, 0 elsewhere
+        let out = [1.0];
+        let k = 1;
+        while k <= nlags {
+            out = array_push(out, 0.0);
+            k = k + 1;
+        }
+        return out;
+    }
+    let out = [];
+    let k = 0;
+    while k <= nlags {
+        out = array_push(out, gamma[k] / g0);
+        k = k + 1;
+    }
+    out
+}
+
+// Partial Autocorrelation via Levinson-Durbin recursion
+fn pacf(xs: Any, nlags: i64) -> Any {
+    let r = acf(xs, nlags);
+    let out = [1.0];
+    if nlags < 1 {
+        return out;
+    }
+
+    // Levinson-Durbin: iteratively compute partial correlations
+    // phi[k][j] coefficients, but we only need the diagonal phi[k][k]
+    let phi_prev = [];
+    let k = 1;
+    while k <= nlags {
+        // Compute numerator: r[k] - sum(phi_prev[j] * r[k-j])
+        let num = r[k];
+        let j = 0;
+        while j < len(phi_prev) {
+            num = num - phi_prev[j] * r[k - 1 - j];
+            j = j + 1;
+        }
+        // Compute denominator: 1 - sum(phi_prev[j] * r[j+1])
+        let den = 1.0;
+        let j2 = 0;
+        while j2 < len(phi_prev) {
+            den = den - phi_prev[j2] * r[j2 + 1];
+            j2 = j2 + 1;
+        }
+        let pk = 0.0;
+        if abs(den) > 1e-15 {
+            pk = num / den;
+        }
+        out = array_push(out, pk);
+
+        // Update phi: phi_new[j] = phi_prev[j] - pk * phi_prev[k-1-j]
+        let phi_new = [];
+        let m = 0;
+        while m < len(phi_prev) {
+            phi_new = array_push(phi_new, phi_prev[m] - pk * phi_prev[len(phi_prev) - 1 - m]);
+            m = m + 1;
+        }
+        phi_new = array_push(phi_new, pk);
+        phi_prev = phi_new;
+
+        k = k + 1;
+    }
+    out
+}
+
+// Cross-correlation function
+fn ccf(xs: Any, ys: Any, nlags: i64) -> Any {
+    let n = len(xs);
+    let mx = mean(xs);
+    let my = mean(ys);
+    let sx = sd(xs);
+    let sy = sd(ys);
+    let denom = sx * sy;
+    if denom == 0.0 {
+        denom = 1.0;
+    }
+    let out = [];
+    let k = -nlags;
+    while k <= nlags {
+        let s = 0.0;
+        let i = 0;
+        while i < n {
+            let j = i + k;
+            if j >= 0 {
+                if j < n {
+                    s = s + (xs[i] - mx) * (ys[j] - my);
+                }
+            }
+            i = i + 1;
+        }
+        out = array_push(out, s / (float(n) * denom));
+        k = k + 1;
+    }
+    out
+}
+
+// ACF with confidence bands: returns [acf_values, ci_bound]
+// ci_bound = 1.96 / sqrt(n) (Bartlett approximation)
+fn acf_with_ci(xs: Any, nlags: i64) -> Any {
+    let r = acf(xs, nlags);
+    let n = len(xs);
+    let ci = 1.96 / sqrt(float(n));
+    [r, ci]
+}
+
+// Durbin-Watson test statistic for autocorrelation in residuals
+fn durbin_watson(residuals: Any) -> f64 {
+    let n = len(residuals);
+    if n < 2 {
+        return 0.0 / 0.0;
+    }
+    let num = 0.0;
+    let den = 0.0;
+    let i = 0;
+    while i < n {
+        den = den + residuals[i] * residuals[i];
+        if i > 0 {
+            let d = residuals[i] - residuals[i - 1];
+            num = num + d * d;
+        }
+        i = i + 1;
+    }
+    if den == 0.0 {
+        return 0.0 / 0.0;
+    }
+    num / den
+}
+
+// Spectral entropy: -sum(p_i * log(p_i)) where p_i = psd_i / sum(psd)
+fn spectral_entropy(psd: Any) -> f64 {
+    let n = len(psd);
+    let total = 0.0;
+    let i = 0;
+    while i < n {
+        total = total + psd[i];
+        i = i + 1;
+    }
+    if total == 0.0 {
+        return 0.0;
+    }
+    let entropy = 0.0;
+    let j = 0;
+    while j < n {
+        let p = psd[j] / total;
+        if p > 0.0 {
+            entropy = entropy - p * log(p);
+        }
+        j = j + 1;
+    }
+    // Normalize by log(n) for [0, 1] range
+    if n > 1 {
+        entropy = entropy / log(float(n));
+    }
+    entropy
+}
+
+// Dominant frequency: frequency at which PSD is maximum
+fn dominant_frequency(freqs: Any, psd: Any) -> f64 {
+    let n = len(psd);
+    let max_val = psd[0];
+    let max_idx = 0;
+    let i = 1;
+    while i < n {
+        if psd[i] > max_val {
+            max_val = psd[i];
+            max_idx = i;
+        }
+        i = i + 1;
+    }
+    freqs[max_idx]
+}
+
+// Spectral flatness: geometric_mean(psd) / arithmetic_mean(psd)
+fn spectral_flatness(psd: Any) -> f64 {
+    let n = len(psd);
+    let log_sum = 0.0;
+    let arith_sum = 0.0;
+    let i = 0;
+    while i < n {
+        if psd[i] > 0.0 {
+            log_sum = log_sum + log(psd[i]);
+        } else {
+            return 0.0;
+        }
+        arith_sum = arith_sum + psd[i];
+        i = i + 1;
+    }
+    let geo_mean = exp(log_sum / float(n));
+    let arith_mean = arith_sum / float(n);
+    if arith_mean == 0.0 {
+        return 0.0;
+    }
+    geo_mean / arith_mean
+}
+
+// Band power: sum of PSD values where freq is in [f1, f2]
+fn band_power(freqs: Any, psd: Any, f1: f64, f2: f64) -> f64 {
+    let n = len(freqs);
+    let total = 0.0;
+    let i = 0;
+    while i < n {
+        if freqs[i] >= f1 {
+            if freqs[i] <= f2 {
+                total = total + psd[i];
+            }
+        }
+        i = i + 1;
+    }
+    total
+}
+
+// Rolling autocorrelation at a fixed lag k
+fn rolling_autocorr(xs: Any, w: i64, k: i64) -> Any {
+    let n = len(xs);
+    let out = [];
+    let start = 0;
+    while start + w <= n {
+        // Extract window
+        let win = [];
+        let i = start;
+        while i < start + w {
+            win = array_push(win, xs[i]);
+            i = i + 1;
+        }
+        let r = acf(win, k);
+        out = array_push(out, r[k]);
+        start = start + 1;
+    }
+    out
+}
+
+// Fractional differencing (Hosking weights method)
+// d is the differencing order (typically 0 < d < 1)
+// thresh is the minimum weight magnitude to include
+fn fractional_diff(xs: Any, d: f64, thresh: f64) -> Any {
+    let n = len(xs);
+    // Compute weights: w[0]=1, w[k] = w[k-1] * (d-k+1)/k
+    let weights = [1.0];
+    let k = 1;
+    while k < n {
+        let w = weights[k - 1] * (d - float(k) + 1.0) / float(k);
+        if abs(w) < thresh {
+            k = n;
+        } else {
+            weights = array_push(weights, w);
+            k = k + 1;
+        }
+    }
+    let nw = len(weights);
+    // Apply weights as convolution
+    let out = [];
+    let i = nw - 1;
+    while i < n {
+        let s = 0.0;
+        let j = 0;
+        while j < nw {
+            s = s + weights[j] * xs[i - j];
+            j = j + 1;
+        }
+        out = array_push(out, s);
+        i = i + 1;
+    }
+    out
+}

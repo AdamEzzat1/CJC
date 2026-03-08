@@ -813,6 +813,154 @@ pub fn cume_dist(data: &[f64]) -> Result<Vec<f64>, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Selection primitives (Bastion ABI)
+// ---------------------------------------------------------------------------
+
+/// Introselect: partition-based O(n) expected selection of the k-th smallest
+/// element. Operates on a mutable slice and partially reorders it so that
+/// `data[k]` holds the k-th smallest value (0-indexed), all elements
+/// `data[..k]` are <= data[k], and all `data[k+1..]` are >= data[k].
+///
+/// Uses Rust's `select_nth_unstable_by` with `total_cmp` for deterministic
+/// NaN handling (NaN sorts as greater-than everything).
+///
+/// # Determinism Contract
+/// Same input slice + same k => identical partial reorder and return value.
+/// NaN-safe via total_cmp.
+///
+/// # Panics
+/// Panics if k >= data.len().
+pub fn nth_element(data: &mut [f64], k: usize) -> f64 {
+    data.select_nth_unstable_by(k, f64::total_cmp);
+    data[k]
+}
+
+/// Non-mutating nth_element: clones data, selects k-th element, returns it.
+/// O(n) expected time, O(n) space for the clone.
+pub fn nth_element_copy(data: &[f64], k: usize) -> Result<f64, String> {
+    if data.is_empty() {
+        return Err("nth_element: empty data".into());
+    }
+    if k >= data.len() {
+        return Err(format!("nth_element: k={k} out of bounds (n={})", data.len()));
+    }
+    let mut buf = data.to_vec();
+    Ok(nth_element(&mut buf, k))
+}
+
+/// O(n) median using introselect instead of O(n log n) sort.
+/// For even n, selects both middle elements via two partial sorts.
+pub fn median_fast(data: &[f64]) -> Result<f64, String> {
+    if data.is_empty() {
+        return Ok(f64::NAN);
+    }
+    let n = data.len();
+    let mut buf = data.to_vec();
+    if n % 2 == 1 {
+        Ok(nth_element(&mut buf, n / 2))
+    } else {
+        // For even n, we need elements at n/2-1 and n/2.
+        // After nth_element(n/2-1), buf[..n/2-1] are all <= buf[n/2-1],
+        // so the element at n/2 is the min of buf[n/2..].
+        let lo = nth_element(&mut buf, n / 2 - 1);
+        // buf[n/2..] are all >= lo; find min of that subslice
+        let hi = buf[n / 2..].iter().copied().fold(f64::INFINITY, f64::min);
+        Ok((lo + hi) / 2.0)
+    }
+}
+
+/// O(n) quantile using introselect (R type 7 interpolation).
+pub fn quantile_fast(data: &[f64], p: f64) -> Result<f64, String> {
+    if data.is_empty() {
+        return Err("quantile_fast: empty data".into());
+    }
+    if !(0.0..=1.0).contains(&p) {
+        return Err(format!("quantile_fast: p must be in [0, 1], got {p}"));
+    }
+    let n = data.len();
+    if n == 1 {
+        return Ok(data[0]);
+    }
+    let idx = (n as f64 - 1.0) * p;
+    let lo = idx.floor() as usize;
+    let hi = idx.ceil() as usize;
+    let frac = idx - lo as f64;
+
+    let mut buf = data.to_vec();
+    let lo_val = nth_element(&mut buf, lo);
+    if lo == hi || hi >= n {
+        Ok(lo_val)
+    } else {
+        // After nth_element(lo), buf[lo+1..] are >= buf[lo].
+        // Find min of buf[lo+1..] which is the (lo+1)-th element.
+        let hi_val = buf[lo + 1..].iter().copied().fold(f64::INFINITY, f64::min);
+        Ok(lo_val * (1.0 - frac) + hi_val * frac)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sampling primitives (Bastion ABI)
+// ---------------------------------------------------------------------------
+
+/// Generate k random indices in [0, n) with or without replacement.
+///
+/// Uses CJC's deterministic SplitMix64 RNG via seed.
+///
+/// # Determinism Contract
+/// Same (n, k, replace, seed) => identical index vector.
+///
+/// # Panics / Errors
+/// - If !replace && k > n, returns error.
+/// - If n == 0 or k == 0, returns empty vec.
+pub fn sample_indices(n: usize, k: usize, replace: bool, seed: u64) -> Result<Vec<usize>, String> {
+    if n == 0 || k == 0 {
+        return Ok(Vec::new());
+    }
+    let mut rng = cjc_repro::Rng::seeded(seed);
+
+    if replace {
+        // With replacement: just sample k indices
+        let mut result = Vec::with_capacity(k);
+        for _ in 0..k {
+            let idx = (rng.next_f64() * n as f64) as usize;
+            result.push(idx.min(n - 1)); // clamp for edge case
+        }
+        Ok(result)
+    } else {
+        if k > n {
+            return Err(format!(
+                "sample_indices: k={k} > n={n} without replacement"
+            ));
+        }
+        // Fisher-Yates partial shuffle for k <= n
+        let mut pool: Vec<usize> = (0..n).collect();
+        for i in 0..k {
+            let j = i + ((rng.next_f64() * (n - i) as f64) as usize).min(n - i - 1);
+            pool.swap(i, j);
+        }
+        pool.truncate(k);
+        Ok(pool)
+    }
+}
+
+/// Boolean mask selection: return elements of data where mask is true.
+///
+/// # Determinism Contract
+/// Same input => identical output. Order preserved.
+pub fn filter_mask(data: &[f64], mask: &[bool]) -> Result<Vec<f64>, String> {
+    if data.len() != mask.len() {
+        return Err(format!(
+            "filter_mask: data len ({}) != mask len ({})",
+            data.len(), mask.len()
+        ));
+    }
+    Ok(data.iter().zip(mask.iter())
+        .filter(|(_, &m)| m)
+        .map(|(&v, _)| v)
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1352,5 +1500,186 @@ mod tests {
         for (a, b) in pr1.iter().zip(pr2.iter()) {
             assert_eq!(a.to_bits(), b.to_bits());
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Bastion ABI primitive tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_nth_element_basic() {
+        let mut data = vec![5.0, 2.0, 8.0, 1.0, 9.0, 3.0, 7.0, 4.0, 6.0];
+        // k=0 => smallest
+        assert_eq!(nth_element(&mut data.clone(), 0), 1.0);
+        // k=8 => largest
+        assert_eq!(nth_element(&mut data.clone(), 8), 9.0);
+        // k=4 => median of 9 elements
+        assert_eq!(nth_element(&mut data.clone(), 4), 5.0);
+    }
+
+    #[test]
+    fn test_nth_element_copy_basic() {
+        let data = [5.0, 2.0, 8.0, 1.0, 9.0];
+        assert_eq!(nth_element_copy(&data, 0).unwrap(), 1.0);
+        assert_eq!(nth_element_copy(&data, 2).unwrap(), 5.0);
+        assert_eq!(nth_element_copy(&data, 4).unwrap(), 9.0);
+    }
+
+    #[test]
+    fn test_nth_element_copy_errors() {
+        assert!(nth_element_copy(&[], 0).is_err());
+        assert!(nth_element_copy(&[1.0], 1).is_err());
+    }
+
+    #[test]
+    fn test_nth_element_single() {
+        let mut data = vec![42.0];
+        assert_eq!(nth_element(&mut data, 0), 42.0);
+    }
+
+    #[test]
+    fn test_nth_element_duplicates() {
+        let mut data = vec![3.0, 1.0, 3.0, 1.0, 2.0];
+        assert_eq!(nth_element(&mut data.clone(), 0), 1.0);
+        assert_eq!(nth_element(&mut data.clone(), 1), 1.0);
+        assert_eq!(nth_element(&mut data.clone(), 2), 2.0);
+        assert_eq!(nth_element(&mut data.clone(), 3), 3.0);
+        assert_eq!(nth_element(&mut data.clone(), 4), 3.0);
+    }
+
+    #[test]
+    fn test_nth_element_nan_handling() {
+        // NaN sorts as greater than everything via total_cmp
+        let mut data = vec![3.0, f64::NAN, 1.0, 2.0];
+        let val = nth_element(&mut data, 0);
+        assert_eq!(val, 1.0);
+        let mut data2 = vec![3.0, f64::NAN, 1.0, 2.0];
+        let val2 = nth_element(&mut data2, 3);
+        assert!(val2.is_nan());
+    }
+
+    #[test]
+    fn test_median_fast_odd() {
+        assert!((median_fast(&[3.0, 1.0, 2.0]).unwrap() - 2.0).abs() < 1e-15);
+        assert!((median_fast(&[5.0, 1.0, 9.0, 3.0, 7.0]).unwrap() - 5.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_median_fast_even() {
+        assert!((median_fast(&[4.0, 1.0, 3.0, 2.0]).unwrap() - 2.5).abs() < 1e-15);
+        assert!((median_fast(&[6.0, 1.0, 5.0, 2.0, 4.0, 3.0]).unwrap() - 3.5).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_median_fast_parity_with_sort_median() {
+        // Verify fast median matches the sort-based median
+        let data = [7.0, 2.0, 9.0, 4.0, 5.0, 1.0, 8.0, 3.0, 6.0];
+        let slow = median(&data).unwrap();
+        let fast = median_fast(&data).unwrap();
+        assert_eq!(slow.to_bits(), fast.to_bits(), "median_fast != median for odd");
+
+        let data2 = [7.0, 2.0, 9.0, 4.0, 5.0, 1.0, 8.0, 3.0];
+        let slow2 = median(&data2).unwrap();
+        let fast2 = median_fast(&data2).unwrap();
+        assert_eq!(slow2.to_bits(), fast2.to_bits(), "median_fast != median for even");
+    }
+
+    #[test]
+    fn test_median_fast_empty() {
+        assert!(median_fast(&[]).unwrap().is_nan());
+    }
+
+    #[test]
+    fn test_quantile_fast_basic() {
+        let data = [1.0, 2.0, 3.0, 4.0, 5.0];
+        assert!((quantile_fast(&data, 0.0).unwrap() - 1.0).abs() < 1e-15);
+        assert!((quantile_fast(&data, 0.5).unwrap() - 3.0).abs() < 1e-15);
+        assert!((quantile_fast(&data, 1.0).unwrap() - 5.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_quantile_fast_parity_with_sort_quantile() {
+        let data = [7.0, 2.0, 9.0, 4.0, 5.0, 1.0, 8.0, 3.0, 6.0];
+        for p_int in 0..=20 {
+            let p = p_int as f64 / 20.0;
+            let slow = quantile(&data, p).unwrap();
+            let fast = quantile_fast(&data, p).unwrap();
+            assert!(
+                (slow - fast).abs() < 1e-12,
+                "quantile mismatch at p={p}: sort={slow}, fast={fast}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sample_indices_with_replacement() {
+        let idx = sample_indices(10, 5, true, 42).unwrap();
+        assert_eq!(idx.len(), 5);
+        assert!(idx.iter().all(|&i| i < 10));
+    }
+
+    #[test]
+    fn test_sample_indices_without_replacement() {
+        let idx = sample_indices(10, 5, false, 42).unwrap();
+        assert_eq!(idx.len(), 5);
+        assert!(idx.iter().all(|&i| i < 10));
+        // All unique
+        let mut sorted = idx.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 5);
+    }
+
+    #[test]
+    fn test_sample_indices_full_draw() {
+        let idx = sample_indices(5, 5, false, 42).unwrap();
+        assert_eq!(idx.len(), 5);
+        let mut sorted = idx.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_sample_indices_determinism() {
+        let a = sample_indices(100, 20, false, 12345).unwrap();
+        let b = sample_indices(100, 20, false, 12345).unwrap();
+        assert_eq!(a, b, "same seed must produce identical indices");
+    }
+
+    #[test]
+    fn test_sample_indices_error() {
+        assert!(sample_indices(5, 10, false, 0).is_err());
+    }
+
+    #[test]
+    fn test_sample_indices_empty() {
+        assert_eq!(sample_indices(0, 5, true, 0).unwrap(), Vec::<usize>::new());
+        assert_eq!(sample_indices(5, 0, true, 0).unwrap(), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn test_filter_mask_basic() {
+        let data = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let mask = [true, false, true, false, true];
+        assert_eq!(filter_mask(&data, &mask).unwrap(), vec![1.0, 3.0, 5.0]);
+    }
+
+    #[test]
+    fn test_filter_mask_all_true() {
+        let data = [1.0, 2.0, 3.0];
+        let mask = [true, true, true];
+        assert_eq!(filter_mask(&data, &mask).unwrap(), vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_filter_mask_all_false() {
+        let data = [1.0, 2.0, 3.0];
+        let mask = [false, false, false];
+        assert_eq!(filter_mask(&data, &mask).unwrap(), Vec::<f64>::new());
+    }
+
+    #[test]
+    fn test_filter_mask_length_mismatch() {
+        assert!(filter_mask(&[1.0, 2.0], &[true]).is_err());
     }
 }

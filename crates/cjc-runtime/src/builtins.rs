@@ -1114,6 +1114,12 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
         }
 
         // ── Stats builtins ───────────────────────────────────────────
+        "mean" => {
+            if args.len() != 1 { return Err("mean requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            if data.is_empty() { return Err("mean: empty data".into()); }
+            Ok(Some(Value::Float(cjc_repro::kahan_sum_f64(&data) / data.len() as f64)))
+        }
         "variance" => {
             if args.len() != 1 { return Err("variance requires 1 argument".into()); }
             let data = value_to_f64_vec(&args[0])?;
@@ -1143,6 +1149,61 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 _ => return Err("quantile: p must be a number".into()),
             };
             Ok(Some(Value::Float(crate::stats::quantile(&data, p)?)))
+        }
+        // ── Bastion primitives ──────────────────────────────────────
+        "nth_element" => {
+            if args.len() != 2 { return Err("nth_element requires 2 arguments: data, k".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let k = value_to_usize(&args[1])?;
+            Ok(Some(Value::Float(crate::stats::nth_element_copy(&data, k)?)))
+        }
+        "median_fast" => {
+            if args.len() != 1 { return Err("median_fast requires 1 argument".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            Ok(Some(Value::Float(crate::stats::median_fast(&data)?)))
+        }
+        "quantile_fast" => {
+            if args.len() != 2 { return Err("quantile_fast requires 2 arguments: data, p".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let p = match &args[1] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err("quantile_fast: p must be a number".into()),
+            };
+            Ok(Some(Value::Float(crate::stats::quantile_fast(&data, p)?)))
+        }
+        "filter_mask" => {
+            if args.len() != 2 { return Err("filter_mask requires 2 arguments: data, mask".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let mask: Vec<bool> = match &args[1] {
+                Value::Array(arr) => arr.iter().map(|v| match v {
+                    Value::Bool(b) => Ok(*b),
+                    Value::Int(i) => Ok(*i != 0),
+                    _ => Err("filter_mask: mask must be array of bools".to_string()),
+                }).collect::<Result<Vec<_>, _>>()?,
+                _ => return Err("filter_mask: mask must be an array".into()),
+            };
+            let result = crate::stats::filter_mask(&data, &mask)?;
+            let values: Vec<Value> = result.into_iter().map(Value::Float).collect();
+            Ok(Some(Value::Array(Rc::new(values))))
+        }
+        "erf" => {
+            if args.len() != 1 { return Err("erf requires 1 argument".into()); }
+            let x = match &args[0] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err("erf requires a number".into()),
+            };
+            Ok(Some(Value::Float(crate::distributions::erf(x))))
+        }
+        "erfc" => {
+            if args.len() != 1 { return Err("erfc requires 1 argument".into()); }
+            let x = match &args[0] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err("erfc requires a number".into()),
+            };
+            Ok(Some(Value::Float(crate::distributions::erfc(x))))
         }
         "iqr" => {
             if args.len() != 1 { return Err("iqr requires 1 argument".into()); }
@@ -2091,6 +2152,35 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             fields.insert("aic".into(), Value::Float(r.aic));
             fields.insert("iterations".into(), Value::Int(r.iterations as i64));
             Ok(Some(Value::Struct { name: "LogisticResult".into(), fields }))
+        }
+
+        // ── Stationarity tests ────────────────────────────────────────
+        "adf_test" => {
+            if args.len() != 1 { return Err("adf_test requires 1 argument: data".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let (t_stat, p_val) = crate::stationarity::adf_test(&data)?;
+            let mut fields = std::collections::HashMap::new();
+            fields.insert("statistic".into(), Value::Float(t_stat));
+            fields.insert("p_value".into(), Value::Float(p_val));
+            Ok(Some(Value::Struct { name: "AdfResult".into(), fields }))
+        }
+        "kpss_test" => {
+            if args.len() != 1 { return Err("kpss_test requires 1 argument: data".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let (stat, p_val) = crate::stationarity::kpss_test(&data)?;
+            let mut fields = std::collections::HashMap::new();
+            fields.insert("statistic".into(), Value::Float(stat));
+            fields.insert("p_value".into(), Value::Float(p_val));
+            Ok(Some(Value::Struct { name: "KpssResult".into(), fields }))
+        }
+        "pp_test" => {
+            if args.len() != 1 { return Err("pp_test requires 1 argument: data".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let (z_t, p_val) = crate::stationarity::pp_test(&data)?;
+            let mut fields = std::collections::HashMap::new();
+            fields.insert("statistic".into(), Value::Float(z_t));
+            fields.insert("p_value".into(), Value::Float(p_val));
+            Ok(Some(Value::Struct { name: "PpResult".into(), fields }))
         }
 
         // Phase C4: Sorting & Tensor Indexing

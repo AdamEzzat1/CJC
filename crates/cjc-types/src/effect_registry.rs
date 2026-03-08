@@ -89,6 +89,8 @@ pub fn builtin_effects() -> HashMap<&'static str, EffectSet> {
     m.insert("Tensor.uniform", nondet_alloc);
     // categorical_sample uses the interpreter RNG — nondeterministic + alloc
     m.insert("categorical_sample", nondet_alloc);
+    // sample_indices uses RNG — nondeterministic + alloc
+    m.insert("sample_indices", nondet_alloc);
 
     // -----------------------------------------------------------------
     // Type conversion builtins — no allocation, deterministic
@@ -318,12 +320,20 @@ pub fn builtin_effects() -> HashMap<&'static str, EffectSet> {
     // -----------------------------------------------------------------
     // Statistics builtins
     // -----------------------------------------------------------------
+    m.insert("mean", pure); // Kahan sum / n, no allocation
     m.insert("median", alloc); // sorts internally
     m.insert("sd", alloc);
     m.insert("variance", alloc);
     m.insert("n_distinct", EffectSet::new(EffectSet::ALLOC | EffectSet::NONDET)); // hash-order
     m.insert("se", alloc);
     m.insert("quantile", alloc);
+    // Bastion primitives
+    m.insert("nth_element", alloc);
+    m.insert("median_fast", alloc);
+    m.insert("quantile_fast", alloc);
+    m.insert("filter_mask", alloc);
+    m.insert("erf", pure);
+    m.insert("erfc", pure);
     m.insert("iqr", alloc);
     m.insert("skewness", alloc);
     m.insert("kurtosis", alloc);
@@ -348,6 +358,10 @@ pub fn builtin_effects() -> HashMap<&'static str, EffectSet> {
     m.insert("t_cdf", pure);
     m.insert("chi2_cdf", pure);
     m.insert("f_cdf", pure);
+    // Stationarity tests
+    m.insert("adf_test", alloc);
+    m.insert("kpss_test", alloc);
+    m.insert("pp_test", alloc);
     // Hypothesis tests
     m.insert("t_test", alloc);
     m.insert("t_test_two_sample", alloc);

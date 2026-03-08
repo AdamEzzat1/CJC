@@ -1,0 +1,92 @@
+// ============================================================
+// Bastion :: Probability Distributions (composable layer)
+// Pure CJC implementations for simple distribution functions.
+// ============================================================
+// Builtins used: normal_cdf, normal_pdf, log, exp, sqrt, PI
+
+// ---- Uniform distribution ----
+
+fn unif_pdf(x: f64, a: f64, b: f64) -> f64 {
+    if x >= a {
+        if x <= b {
+            return 1.0 / (b - a);
+        }
+    }
+    0.0
+}
+
+fn unif_cdf(x: f64, a: f64, b: f64) -> f64 {
+    if x < a {
+        return 0.0;
+    }
+    if x > b {
+        return 1.0;
+    }
+    (x - a) / (b - a)
+}
+
+fn unif_ppf(q: f64, a: f64, b: f64) -> f64 {
+    a + q * (b - a)
+}
+
+// ---- Exponential distribution (ppf only; pdf/cdf are builtins) ----
+
+fn exp_ppf(q: f64, rate: f64) -> f64 {
+    // Quantile function: -ln(1-q) / rate
+    if q < 0.0 { return 0.0 / 0.0; }
+    if q >= 1.0 { return 1.0 / 0.0; }
+    -log(1.0 - q) / rate
+}
+
+// ---- Normal distribution (survival & log forms) ----
+
+fn norm_sf(x: f64) -> f64 {
+    1.0 - normal_cdf(x)
+}
+
+fn norm_logpdf(x: f64, mu: f64, sig: f64) -> f64 {
+    let z = (x - mu) / sig;
+    -0.5 * z * z - log(sig) - 0.5 * log(2.0 * PI)
+}
+
+fn norm_logsf(x: f64, mu: f64, sig: f64) -> f64 {
+    let z = (x - mu) / sig;
+    let sf = 1.0 - normal_cdf(z);
+    if sf > 0.0 {
+        return log(sf);
+    }
+    // For very large z, use approximation: log(erfc(z/sqrt(2))/2)
+    log(erfc(z / sqrt(2.0)) / 2.0)
+}
+
+// ---- Parametric Normal (non-standard) ----
+
+fn norm_cdf_param(x: f64, mu: f64, sig: f64) -> f64 {
+    normal_cdf((x - mu) / sig)
+}
+
+fn norm_pdf_param(x: f64, mu: f64, sig: f64) -> f64 {
+    let z = (x - mu) / sig;
+    normal_pdf(z) / sig
+}
+
+fn norm_ppf_param(q: f64, mu: f64, sig: f64) -> f64 {
+    mu + sig * normal_ppf(q)
+}
+
+// ---- Log-Normal distribution ----
+
+fn lognorm_pdf(x: f64, mu: f64, sig: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let z = (log(x) - mu) / sig;
+    exp(-0.5 * z * z) / (x * sig * sqrt(2.0 * PI))
+}
+
+fn lognorm_cdf(x: f64, mu: f64, sig: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    normal_cdf((log(x) - mu) / sig)
+}

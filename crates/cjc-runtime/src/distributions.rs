@@ -169,11 +169,68 @@ fn gamma_cf(a: f64, x: f64) -> f64 {
 }
 
 // ---------------------------------------------------------------------------
+// Error functions (Bastion ABI primitives)
+// ---------------------------------------------------------------------------
+
+/// Error function erf(x) using Horner-form rational approximation.
+///
+/// Uses the Abramowitz & Stegun 7.1.28 formula for |x| via the complementary
+/// error function. Maximum error: |eps| < 1.5e-7.
+///
+/// # Determinism Contract
+/// Pure math — same input => identical output. No iteration-order dependency.
+pub fn erf(x: f64) -> f64 {
+    // erf(x) = 1 - erfc(x)
+    1.0 - erfc(x)
+}
+
+/// Complementary error function erfc(x) = 1 - erf(x).
+///
+/// Uses Abramowitz & Stegun 7.1.26 polynomial approximation.
+/// Maximum error: |eps| < 1.5e-7.
+///
+/// # Determinism Contract
+/// Pure math — deterministic for all finite inputs. NaN in => NaN out.
+pub fn erfc(x: f64) -> f64 {
+    if x.is_nan() {
+        return f64::NAN;
+    }
+    if x == 0.0 {
+        return 1.0; // exact
+    }
+    if x == f64::INFINITY {
+        return 0.0;
+    }
+    if x == f64::NEG_INFINITY {
+        return 2.0;
+    }
+
+    let a1 =  0.254829592;
+    let a2 = -0.284496736;
+    let a3 =  1.421413741;
+    let a4 = -1.453152027;
+    let a5 =  1.061405429;
+    let p  =  0.3275911;
+
+    let z = x.abs();
+    let t = 1.0 / (1.0 + p * z);
+    let y = (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-z * z).exp();
+
+    if x < 0.0 {
+        2.0 - y  // erfc(-x) = 2 - erfc(x)
+    } else {
+        y
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Normal distribution
 // ---------------------------------------------------------------------------
 
 /// Normal distribution CDF using Abramowitz & Stegun approximation (7.1.26).
 /// Maximum error: |eps| < 1.5e-7. Deterministic.
+///
+/// Equivalent to 0.5 * erfc(-x / sqrt(2)).
 pub fn normal_cdf(x: f64) -> f64 {
     // Constants for the approximation
     let a1 = 0.254829592;
@@ -641,5 +698,95 @@ mod tests {
         let r1 = gamma_cdf(1.5, 3.0, 2.0);
         let r2 = gamma_cdf(1.5, 3.0, 2.0);
         assert_eq!(r1.to_bits(), r2.to_bits());
+    }
+
+    // -------------------------------------------------------------------
+    // erf / erfc tests (Bastion ABI)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_erf_known_values() {
+        // erf(0) = 0
+        assert!((erf(0.0)).abs() < 1e-10);
+        // erf(+inf) = 1
+        assert!((erf(f64::INFINITY) - 1.0).abs() < 1e-10);
+        // erf(-inf) = -1
+        assert!((erf(f64::NEG_INFINITY) + 1.0).abs() < 1e-10);
+        // erf is odd: erf(-x) = -erf(x)
+        assert!((erf(1.0) + erf(-1.0)).abs() < 1e-10);
+        assert!((erf(0.5) + erf(-0.5)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_erf_reference_values() {
+        // Reference values from mathematical tables
+        assert!((erf(0.5) - 0.5204998778).abs() < 2e-7);
+        assert!((erf(1.0) - 0.8427007929).abs() < 2e-7);
+        assert!((erf(1.5) - 0.9661051465).abs() < 2e-7);
+        assert!((erf(2.0) - 0.9953222650).abs() < 2e-7);
+        assert!((erf(3.0) - 0.9999779095).abs() < 2e-7);
+    }
+
+    #[test]
+    fn test_erfc_known_values() {
+        // erfc(0) = 1
+        assert!((erfc(0.0) - 1.0).abs() < 1e-10);
+        // erfc(+inf) = 0
+        assert!((erfc(f64::INFINITY)).abs() < 1e-10);
+        // erfc(-inf) = 2
+        assert!((erfc(f64::NEG_INFINITY) - 2.0).abs() < 1e-10);
+        // erfc(x) + erfc(-x) = 2
+        assert!((erfc(1.0) + erfc(-1.0) - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_erfc_reference_values() {
+        assert!((erfc(0.5) - 0.4795001222).abs() < 2e-7);
+        assert!((erfc(1.0) - 0.1572992071).abs() < 2e-7);
+        assert!((erfc(2.0) - 0.0046777350).abs() < 2e-7);
+    }
+
+    #[test]
+    fn test_erf_erfc_consistency() {
+        // erf(x) + erfc(x) = 1 for all x
+        for &x in &[0.0, 0.1, 0.5, 1.0, 1.5, 2.0, 3.0, -0.5, -1.0, -2.0] {
+            assert!(
+                (erf(x) + erfc(x) - 1.0).abs() < 1e-12,
+                "erf({x}) + erfc({x}) != 1: got {}",
+                erf(x) + erfc(x)
+            );
+        }
+    }
+
+    #[test]
+    fn test_erf_nan() {
+        assert!(erf(f64::NAN).is_nan());
+        assert!(erfc(f64::NAN).is_nan());
+    }
+
+    #[test]
+    fn test_erf_normal_cdf_consistency() {
+        // normal_cdf(x) should agree with 0.5 * erfc(-x / sqrt(2))
+        // Both use the same A&S 7.1.26 approximation but may differ slightly
+        // due to independent evaluation paths. Tolerance: 2e-7 (within A&S error bound).
+        for &x in &[-3.0, -1.5, -0.5, 0.0, 0.5, 1.5, 3.0] {
+            let via_erfc = 0.5 * erfc(-x / 2.0_f64.sqrt());
+            let via_cdf = normal_cdf(x);
+            assert!(
+                (via_erfc - via_cdf).abs() < 2e-7,
+                "normal_cdf({x}) vs erfc route: cdf={via_cdf}, erfc={via_erfc}, diff={}",
+                (via_erfc - via_cdf).abs()
+            );
+        }
+    }
+
+    #[test]
+    fn test_erf_determinism() {
+        let a = erf(1.23456789);
+        let b = erf(1.23456789);
+        assert_eq!(a.to_bits(), b.to_bits());
+        let a = erfc(1.23456789);
+        let b = erfc(1.23456789);
+        assert_eq!(a.to_bits(), b.to_bits());
     }
 }

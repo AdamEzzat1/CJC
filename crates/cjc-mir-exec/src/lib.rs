@@ -1151,6 +1151,7 @@ impl MirExecutor {
                 | "window_min"
                 | "window_max"
                 // Sprint 1: Descriptive statistics
+                | "mean"
                 | "variance"
                 | "sd"
                 | "se"
@@ -1351,6 +1352,12 @@ impl MirExecutor {
                 | "str_starts" | "str_ends" | "str_sub" | "str_len"
                 // v0.1: Broadcasting builtins
                 | "broadcast" | "broadcast2"
+                // Bastion primitives
+                | "nth_element" | "median_fast" | "quantile_fast"
+                | "filter_mask" | "sample_indices"
+                | "erf" | "erfc"
+                // Stationarity tests
+                | "adf_test" | "kpss_test" | "pp_test"
         ) || (self.libraries_enabled.contains("vizor") && matches!(name,
                 "vizor_plot" | "vizor_plot_xy"
         ))
@@ -1423,6 +1430,39 @@ impl MirExecutor {
                 let idx = cjc_runtime::builtins::categorical_sample_with_u(probs, u)
                     .map_err(MirExecError::Runtime)?;
                 return Ok(Value::Int(idx));
+            }
+            "sample_indices" => {
+                // sample_indices(n, k, replace, seed) — uses interpreter RNG
+                if args.len() < 2 || args.len() > 4 {
+                    return Err(MirExecError::Runtime("sample_indices requires 2-4 arguments: n, k, [replace], [seed]".into()));
+                }
+                let n = match &args[0] {
+                    Value::Int(i) => *i as usize,
+                    _ => return Err(MirExecError::Runtime("sample_indices: n must be an integer".into())),
+                };
+                let k = match &args[1] {
+                    Value::Int(i) => *i as usize,
+                    _ => return Err(MirExecError::Runtime("sample_indices: k must be an integer".into())),
+                };
+                let replace = if args.len() >= 3 {
+                    match &args[2] {
+                        Value::Bool(b) => *b,
+                        _ => return Err(MirExecError::Runtime("sample_indices: replace must be a bool".into())),
+                    }
+                } else { false };
+                // Use interpreter RNG seed (deterministic), or explicit seed if provided
+                let seed = if args.len() >= 4 {
+                    match &args[3] {
+                        Value::Int(i) => *i as u64,
+                        _ => return Err(MirExecError::Runtime("sample_indices: seed must be an integer".into())),
+                    }
+                } else {
+                    self.rng.next_u64()
+                };
+                let indices = cjc_runtime::stats::sample_indices(n, k, replace, seed)
+                    .map_err(MirExecError::Runtime)?;
+                let values: Vec<Value> = indices.into_iter().map(|i| Value::Int(i as i64)).collect();
+                return Ok(Value::Array(std::rc::Rc::new(values)));
             }
             "clock" => {
                 let elapsed = self.start_time.elapsed().as_secs_f64();

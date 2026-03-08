@@ -1,0 +1,113 @@
+// ============================================================
+// Bastion :: Statistical Inference (Effect Sizes & CIs)
+// Pure CJC compositions over mean, sd, t_ppf, normal_ppf, etc.
+// ============================================================
+// Builtins used: mean, sd, variance, len, sqrt, abs, log,
+//                normal_ppf, t_ppf, array_push
+
+// Cohen's d: standardized mean difference (pooled SD)
+fn cohens_d(xs: Any, ys: Any) -> f64 {
+    let nx = len(xs);
+    let ny = len(ys);
+    let mx = mean(xs);
+    let my = mean(ys);
+    let vx = variance(xs);
+    let vy = variance(ys);
+    // Pooled standard deviation
+    let sp = sqrt((float(nx - 1) * vx + float(ny - 1) * vy) / float(nx + ny - 2));
+    if sp == 0.0 {
+        return 0.0;
+    }
+    (mx - my) / sp
+}
+
+// Hedges' g: bias-corrected Cohen's d
+fn hedges_g(xs: Any, ys: Any) -> f64 {
+    let d = cohens_d(xs, ys);
+    let nx = len(xs);
+    let ny = len(ys);
+    let df = nx + ny - 2;
+    // Correction factor: 1 - 3/(4*df - 1)
+    let correction = 1.0 - 3.0 / (4.0 * float(df) - 1.0);
+    d * correction
+}
+
+// Confidence interval for difference in means (t-based)
+// Returns [point_estimate, lower, upper]
+fn mean_diff_ci(xs: Any, ys: Any, conf: f64) -> Any {
+    let nx = len(xs);
+    let ny = len(ys);
+    let mx = mean(xs);
+    let my = mean(ys);
+    let diff = mx - my;
+    let vx = variance(xs);
+    let vy = variance(ys);
+    // Welch's SE
+    let se = sqrt(vx / float(nx) + vy / float(ny));
+    // Welch-Satterthwaite df
+    let num = (vx / float(nx) + vy / float(ny)) * (vx / float(nx) + vy / float(ny));
+    let d1 = vx / float(nx);
+    let d2 = vy / float(ny);
+    let den = d1 * d1 / float(nx - 1) + d2 * d2 / float(ny - 1);
+    let df = num / den;
+    let alpha = (1.0 - conf) / 2.0;
+    let t_crit = t_ppf(1.0 - alpha, df);
+    let lo = diff - t_crit * se;
+    let hi = diff + t_crit * se;
+    [diff, lo, hi]
+}
+
+// Odds ratio from 2x2 contingency table (a,b,c,d)
+// Returns [odds_ratio, lower_ci, upper_ci] (95% CI via log method)
+fn odds_ratio(a: f64, b: f64, c: f64, d: f64) -> Any {
+    let or_val = (a * d) / (b * c);
+    // Log method for CI: log(OR) +/- 1.96 * sqrt(1/a + 1/b + 1/c + 1/d)
+    let log_or = log(or_val);
+    let se = sqrt(1.0 / a + 1.0 / b + 1.0 / c + 1.0 / d);
+    let lo = exp(log_or - 1.96 * se);
+    let hi = exp(log_or + 1.96 * se);
+    [or_val, lo, hi]
+}
+
+// Rank-biserial correlation (from Mann-Whitney U)
+fn rank_biserial(xs: Any, ys: Any) -> f64 {
+    let nx = len(xs);
+    let ny = len(ys);
+    // Count concordant and discordant pairs
+    let concordant = 0.0;
+    let discordant = 0.0;
+    let i = 0;
+    while i < nx {
+        let j = 0;
+        while j < ny {
+            if xs[i] > ys[j] {
+                concordant = concordant + 1.0;
+            } else {
+                if xs[i] < ys[j] {
+                    discordant = discordant + 1.0;
+                }
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    (concordant - discordant) / (float(nx) * float(ny))
+}
+
+// Cliff's delta: non-parametric effect size
+fn cliffs_delta(xs: Any, ys: Any) -> f64 {
+    // Same formula as rank_biserial for independent samples
+    rank_biserial(xs, ys)
+}
+
+// Jarque-Bera test statistic for normality
+// Returns [jb_statistic, p_value]
+fn jarque_bera(xs: Any) -> Any {
+    let n = len(xs);
+    let s = skewness(xs);
+    let k = kurtosis(xs);
+    let jb = float(n) / 6.0 * (s * s + (k * k) / 4.0);
+    // p-value from chi-squared with df=2
+    let pval = 1.0 - chi2_cdf(jb, 2.0);
+    [jb, pval]
+}

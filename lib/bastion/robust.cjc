@@ -1,0 +1,119 @@
+// ============================================================
+// Bastion :: Robust Statistics
+// Pure CJC compositions over median_fast, nth_element, etc.
+// ============================================================
+// Builtins used: median_fast, mad, sort, len, sqrt, abs,
+//                mean, variance, sd, array_push, quantile_fast
+
+// Trimmed standard deviation: std of the middle (1-2*trim) fraction
+fn trimmed_std(xs: Any, trim: f64) -> Any {
+    let sorted = sort(xs);
+    let n = len(sorted);
+    let lo = int(float(n) * trim);
+    let hi = n - lo;
+    if hi <= lo {
+        return 0.0;
+    }
+    // Extract trimmed portion
+    let trimmed = [];
+    let i = lo;
+    while i < hi {
+        trimmed = array_push(trimmed, sorted[i]);
+        i = i + 1;
+    }
+    sd(trimmed)
+}
+
+// Winsorized mean: replace tails with boundary values, then take mean
+fn winsorized_mean(xs: Any, lo_frac: f64, hi_frac: f64) -> Any {
+    let sorted = sort(xs);
+    let n = len(sorted);
+    let lo_idx = int(float(n) * lo_frac);
+    let hi_idx = n - 1 - int(float(n) * hi_frac);
+    if lo_idx >= n { lo_idx = n - 1; }
+    if hi_idx < 0 { hi_idx = 0; }
+    let lo_val = sorted[lo_idx];
+    let hi_val = sorted[hi_idx];
+    let total = 0.0;
+    let i = 0;
+    while i < n {
+        let v = sorted[i];
+        if v < lo_val {
+            total = total + lo_val;
+        } else {
+            if v > hi_val {
+                total = total + hi_val;
+            } else {
+                total = total + v;
+            }
+        }
+        i = i + 1;
+    }
+    total / float(n)
+}
+
+// MAD-based scale estimator: MAD * 1.4826 (consistent with Gaussian)
+fn mad_std(xs: Any) -> f64 {
+    mad(xs) * 1.4826
+}
+
+// Biweight midvariance: robust variance estimator
+// Uses median and MAD for initial location/scale
+fn biweight_midvariance(xs: Any) -> f64 {
+    let n = len(xs);
+    let med = median_fast(xs);
+    let s = mad(xs) * 1.4826;
+    if s == 0.0 {
+        return 0.0;
+    }
+    let c = 9.0;
+    let num = 0.0;
+    let den = 0.0;
+    let i = 0;
+    while i < n {
+        let u = (xs[i] - med) / (c * s);
+        let u2 = u * u;
+        if u2 < 1.0 {
+            let d = xs[i] - med;
+            let w = (1.0 - u2);
+            num = num + d * d * w * w * w * w;
+            den = den + w * (1.0 - 5.0 * u2);
+        }
+        i = i + 1;
+    }
+    let den_sq = den * den;
+    if den_sq == 0.0 {
+        return 0.0;
+    }
+    float(n) * num / den_sq
+}
+
+// Huber M-estimator of location (iterative reweighting)
+fn huber_location(xs: Any, c: f64, tol: f64) -> f64 {
+    let n = len(xs);
+    let mu = median_fast(xs);
+    let max_iter = 50;
+    let iter = 0;
+    while iter < max_iter {
+        let wsum = 0.0;
+        let wgt_total = 0.0;
+        let i = 0;
+        while i < n {
+            let r = xs[i] - mu;
+            let w = 1.0;
+            if abs(r) > c {
+                w = c / abs(r);
+            }
+            wsum = wsum + w * xs[i];
+            wgt_total = wgt_total + w;
+            i = i + 1;
+        }
+        let mu_new = wsum / wgt_total;
+        if abs(mu_new - mu) < tol {
+            return mu_new;
+        }
+        mu = mu_new;
+        iter = iter + 1;
+    }
+    mu
+}
