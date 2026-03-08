@@ -55,6 +55,28 @@ impl Color {
         }
     }
 
+    /// Return a copy of this color with the given alpha (0.0–1.0 mapped to 0–255).
+    pub fn with_alpha(self, alpha: f64) -> Self {
+        Color {
+            r: self.r,
+            g: self.g,
+            b: self.b,
+            a: (alpha.clamp(0.0, 1.0) * 255.0) as u8,
+        }
+    }
+
+    /// Linear interpolation between two colors. `t` in [0, 1].
+    pub fn lerp(a: Color, b: Color, t: f64) -> Self {
+        let t = t.clamp(0.0, 1.0);
+        let inv = 1.0 - t;
+        Color {
+            r: (a.r as f64 * inv + b.r as f64 * t) as u8,
+            g: (a.g as f64 * inv + b.g as f64 * t) as u8,
+            b: (a.b as f64 * inv + b.b as f64 * t) as u8,
+            a: (a.a as f64 * inv + b.a as f64 * t) as u8,
+        }
+    }
+
     // Named colors.
     pub const WHITE: Color = Color::rgb(255, 255, 255);
     pub const BLACK: Color = Color::rgb(0, 0, 0);
@@ -62,6 +84,21 @@ impl Color {
     pub const LIGHT_GRAY: Color = Color::rgb(229, 229, 229);
     pub const GRAY: Color = Color::rgb(128, 128, 128);
     pub const DARK_GRAY: Color = Color::rgb(64, 64, 64);
+}
+
+/// Sequential color palette: white → blue. `t` in [0, 1].
+pub fn sequential_palette(t: f64) -> Color {
+    Color::lerp(Color::WHITE, Color::rgb(8, 48, 107), t)
+}
+
+/// Diverging color palette: blue → white → red. `t` in [0, 1].
+pub fn diverging_palette(t: f64) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    if t < 0.5 {
+        Color::lerp(Color::rgb(33, 102, 172), Color::WHITE, t * 2.0)
+    } else {
+        Color::lerp(Color::WHITE, Color::rgb(178, 24, 43), (t - 0.5) * 2.0)
+    }
 }
 
 /// Default categorical palette (8 colors, ggplot2-inspired).

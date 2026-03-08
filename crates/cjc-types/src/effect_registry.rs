@@ -609,13 +609,42 @@ pub fn builtin_effects() -> HashMap<&'static str, EffectSet> {
     // -----------------------------------------------------------------
     m.insert("vizor_plot", alloc);
     m.insert("vizor_plot_xy", alloc);
+    m.insert("vizor_plot_cat", alloc);
+    m.insert("vizor_plot_matrix", alloc);
+    m.insert("vizor_corr_matrix", alloc);
+    m.insert("vizor_displot", alloc);
+    m.insert("vizor_catplot", alloc);
+    m.insert("vizor_relplot", alloc);
+    m.insert("vizor_lmplot", alloc);
+    m.insert("vizor_jointplot", alloc);
+    m.insert("vizor_pairplot", alloc);
+    m.insert("vizor_clustermap", alloc);
     // VizorPlot methods — builder methods allocate new PlotSpec
     for name in &[
         "VizorPlot.geom_point", "VizorPlot.geom_line",
         "VizorPlot.geom_bar", "VizorPlot.geom_histogram",
+        "VizorPlot.geom_density", "VizorPlot.geom_density_bw",
+        "VizorPlot.geom_area", "VizorPlot.geom_rug", "VizorPlot.geom_ecdf",
+        "VizorPlot.geom_box", "VizorPlot.geom_violin",
+        "VizorPlot.geom_strip", "VizorPlot.geom_swarm", "VizorPlot.geom_boxen",
+        "VizorPlot.geom_tile", "VizorPlot.geom_regression", "VizorPlot.geom_residplot",
+        "VizorPlot.geom_dendrogram",
+        // Phase 3: Polar + 2D density
+        "VizorPlot.geom_pie", "VizorPlot.geom_donut",
+        "VizorPlot.geom_rose", "VizorPlot.geom_radar",
+        "VizorPlot.coord_polar",
+        "VizorPlot.geom_density2d", "VizorPlot.geom_contour",
+        // Phase 3.2: Error bars, step, legend, scales
+        "VizorPlot.geom_errorbar", "VizorPlot.geom_errorbar_col",
+        "VizorPlot.geom_step",
+        "VizorPlot.no_legend", "VizorPlot.subtitle",
+        "VizorPlot.scale_x_log", "VizorPlot.scale_y_log",
+        "VizorPlot.scale_color_diverging", "VizorPlot.show_values",
+        "VizorPlot.facet_wrap", "VizorPlot.facet_wrap_ncol", "VizorPlot.facet_grid",
         "VizorPlot.title", "VizorPlot.xlab", "VizorPlot.ylab",
         "VizorPlot.xlim", "VizorPlot.ylim",
-        "VizorPlot.theme_minimal", "VizorPlot.coord_flip",
+        "VizorPlot.theme_minimal", "VizorPlot.theme_publication", "VizorPlot.theme_dark",
+        "VizorPlot.coord_flip",
         "VizorPlot.size",
         "VizorPlot.annotate_text", "VizorPlot.annotate_regression",
         "VizorPlot.annotate_ci", "VizorPlot.annotate_pvalue",

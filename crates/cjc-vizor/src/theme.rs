@@ -75,6 +75,54 @@ impl Theme {
             tick_length: 4.0,
         }
     }
+
+    /// A publication-ready theme with clean lines and no gridlines.
+    pub fn publication() -> Self {
+        Theme {
+            margin_top: 35.0,
+            margin_right: 20.0,
+            margin_bottom: 55.0,
+            margin_left: 65.0,
+            background: Color::WHITE,
+            plot_background: Color::WHITE,
+            axis_color: Color::BLACK,
+            grid_color: Color::rgba(0, 0, 0, 0), // no gridlines
+            text_color: Color::BLACK,
+            title_font_size: 14.0,
+            axis_label_font_size: 12.0,
+            tick_label_font_size: 10.0,
+            font_width_ratio: 0.6,
+            point_size: 3.5,
+            line_width: 1.5,
+            grid_line_width: 0.0,
+            axis_line_width: 1.2,
+            tick_length: 5.0,
+        }
+    }
+
+    /// A dark theme with light text on dark background.
+    pub fn dark() -> Self {
+        Theme {
+            margin_top: 40.0,
+            margin_right: 20.0,
+            margin_bottom: 60.0,
+            margin_left: 70.0,
+            background: Color::rgb(32, 32, 32),
+            plot_background: Color::rgb(40, 40, 40),
+            axis_color: Color::rgb(180, 180, 180),
+            grid_color: Color::rgb(60, 60, 60),
+            text_color: Color::rgb(200, 200, 200),
+            title_font_size: 16.0,
+            axis_label_font_size: 12.0,
+            tick_label_font_size: 10.0,
+            font_width_ratio: 0.6,
+            point_size: 4.0,
+            line_width: 2.0,
+            grid_line_width: 0.5,
+            axis_line_width: 1.0,
+            tick_length: 5.0,
+        }
+    }
 }
 
 #[cfg(test)]

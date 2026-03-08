@@ -17,8 +17,11 @@ pub struct PlotSpec {
     pub theme: Theme,
     pub coord: CoordSystem,
     pub annotations: Vec<Annotation>,
+    pub facet: crate::facet::FacetSpec,
     pub width: u32,
     pub height: u32,
+    /// Whether to show the legend (auto-enabled for 2+ layers).
+    pub show_legend: bool,
 }
 
 impl PlotSpec {
@@ -32,8 +35,10 @@ impl PlotSpec {
             theme: Theme::default(),
             coord: CoordSystem::Cartesian,
             annotations: Vec::new(),
+            facet: crate::facet::FacetSpec::None,
             width: 800,
             height: 600,
+            show_legend: true,
         }
     }
 
@@ -43,6 +48,46 @@ impl PlotSpec {
             columns: vec![
                 ("x".to_string(), DataColumn::Float(x)),
                 ("y".to_string(), DataColumn::Float(y)),
+            ],
+        };
+        PlotSpec::new(data)
+    }
+
+    /// Create a plot from categorical (string) x-axis and float y-axis.
+    pub fn from_cat(categories: Vec<String>, values: Vec<f64>) -> Self {
+        let data = PlotData {
+            columns: vec![
+                ("x".to_string(), DataColumn::Str(categories)),
+                ("y".to_string(), DataColumn::Float(values)),
+            ],
+        };
+        PlotSpec::new(data)
+    }
+
+    /// Create a plot from arbitrary named columns.
+    pub fn from_columns(columns: Vec<(String, DataColumn)>) -> Self {
+        PlotSpec::new(PlotData { columns })
+    }
+
+    /// Create a plot from a matrix (for heatmaps).
+    ///
+    /// The matrix is stored as a flat Float column `"__values"`, with
+    /// metadata columns for dimensions and labels.
+    pub fn from_matrix(
+        matrix: Vec<Vec<f64>>,
+        row_labels: Vec<String>,
+        col_labels: Vec<String>,
+    ) -> Self {
+        let nrows = matrix.len();
+        let ncols = if nrows > 0 { matrix[0].len() } else { 0 };
+        let flat: Vec<f64> = matrix.into_iter().flat_map(|row| row.into_iter()).collect();
+        let data = PlotData {
+            columns: vec![
+                ("__values".to_string(), DataColumn::Float(flat)),
+                ("__nrows".to_string(), DataColumn::Int(vec![nrows as i64])),
+                ("__ncols".to_string(), DataColumn::Int(vec![ncols as i64])),
+                ("__row_labels".to_string(), DataColumn::Str(row_labels)),
+                ("__col_labels".to_string(), DataColumn::Str(col_labels)),
             ],
         };
         PlotSpec::new(data)
@@ -100,9 +145,233 @@ impl PlotSpec {
         })
     }
 
+    // ── Phase 2B: Distribution geoms ──────────────────────────────────
+
+    /// Add a density (KDE) geometry with Silverman bandwidth.
+    pub fn geom_density(self) -> Self {
+        self.add_layer(Layer {
+            geom: Geom::Density,
+            aes: AesMapping {
+                x: Some("x".to_string()),
+                ..AesMapping::default()
+            },
+            params: GeomParams::default(),
+        })
+    }
+
+    /// Add a density geometry with explicit bandwidth.
+    pub fn geom_density_bw(self, bw: f64) -> Self {
+        self.add_layer(Layer {
+            geom: Geom::Density,
+            aes: AesMapping {
+                x: Some("x".to_string()),
+                ..AesMapping::default()
+            },
+            params: GeomParams {
+                bandwidth: Some(bw),
+                ..GeomParams::default()
+            },
+        })
+    }
+
+    /// Add a filled area geometry.
+    pub fn geom_area(self) -> Self {
+        self.add_layer(Layer {
+            geom: Geom::Area,
+            aes: AesMapping::xy(),
+            params: GeomParams::default(),
+        })
+    }
+
+    /// Add rug marks along the bottom edge.
+    pub fn geom_rug(self) -> Self {
+        self.add_layer(Layer {
+            geom: Geom::Rug,
+            aes: AesMapping {
+                x: Some("x".to_string()),
+                ..AesMapping::default()
+            },
+            params: GeomParams::default(),
+        })
+    }
+
+    /// Add rug marks along a specified side.
+    pub fn geom_rug_side(self, side: RugSide) -> Self {
+        self.add_layer(Layer {
+            geom: Geom::Rug,
+            aes: AesMapping {
+                x: Some("x".to_string()),
+                ..AesMapping::default()
+            },
+            params: GeomParams {
+                rug_side: side,
+                ..GeomParams::default()
+            },
+        })
+    }
+
+    /// Add an empirical CDF geometry.
+    pub fn geom_ecdf(self) -> Self {
+        self.add_layer(Layer {
+            geom: Geom::Ecdf,
+            aes: AesMapping {
+                x: Some("x".to_string()),
+                ..AesMapping::default()
+            },
+            params: GeomParams::default(),
+        })
+    }
+
+    // ── Phase 2B: Categorical geoms ────────────────────────────────────
+
+    /// Add a box plot geometry (Tukey box-and-whisker).
+    pub fn geom_box(self) -> Self {
+        self.add_layer(Layer {
+            geom: Geom::Box,
+            aes: AesMapping::xy(),
+            params: GeomParams::default(),
+        })
+    }
+
+    /// Add a violin plot geometry (mirrored KDE).
+    pub fn geom_violin(self) -> Self {
+        self.add_layer(Layer {
+            geom: Geom::Violin,
+            aes: AesMapping::xy(),
+            params: GeomParams::default(),
+        })
+    }
+
+    /// Add a strip (jittered point) geometry.
+    pub fn geom_strip(self) -> Self {
+        self.add_layer(Layer {
+            geom: Geom::Strip,
+            aes: AesMapping::xy(),
+            params: GeomParams::default(),
+        })
+    }
+
+    /// Add a swarm (packed point) geometry.
+    pub fn geom_swarm(self) -> Self {
+        self.add_layer(Layer {
+            geom: Geom::Swarm,
+            aes: AesMapping::xy(),
+            params: GeomParams::default(),
+        })
+    }
+
+    /// Add a boxen (letter-value) geometry.
+    pub fn geom_boxen(self) -> Self {
+        self.add_layer(Layer {
+            geom: Geom::Boxen,
+            aes: AesMapping::xy(),
+            params: GeomParams::default(),
+        })
+    }
+
+    // ── Phase 2B: Regression geoms ─────────────────────────────────
+
+    /// Add a regression line fitted to the x/y data.
+    pub fn geom_regression(self) -> Self {
+        self.add_layer(Layer {
+            geom: Geom::RegressionLine,
+            aes: AesMapping::xy(),
+            params: GeomParams::default(),
+        })
+    }
+
+    /// Add a residual plot (points at (x, residual)).
+    pub fn geom_residplot(self) -> Self {
+        self.add_layer(Layer {
+            geom: Geom::Residual,
+            aes: AesMapping::xy(),
+            params: GeomParams::default(),
+        })
+    }
+
+    // ── Phase 2B: Dendrogram ─────────────────────────────────────────
+
+    /// Add a dendrogram (hierarchical clustering tree) geometry.
+    pub fn geom_dendrogram(self) -> Self {
+        self.add_layer(Layer {
+            geom: Geom::Dendrogram,
+            aes: AesMapping::default(),
+            params: GeomParams::default(),
+        })
+    }
+
+    // ── Phase 2B: Heatmap / Tile geoms ──────────────────────────────
+
+    /// Add a tile (heatmap) geometry.
+    pub fn geom_tile(self) -> Self {
+        self.add_layer(Layer {
+            geom: Geom::Tile,
+            aes: AesMapping::default(),
+            params: GeomParams::default(),
+        })
+    }
+
+    /// Set the color scale to a two-color gradient.
+    pub fn scale_color_gradient(mut self, low: Color, high: Color) -> Self {
+        self.scales.color = ColorScale::Gradient { low, high };
+        self
+    }
+
+    /// Set the color scale to a diverging palette (blue → white → red).
+    pub fn scale_color_diverging(mut self) -> Self {
+        self.scales.color = ColorScale::Diverging;
+        self
+    }
+
+    /// Enable or disable showing cell values on heatmap tiles.
+    pub fn show_values(mut self, show: bool) -> Self {
+        // Update the most recently added Tile layer's params
+        if let Some(layer) = self.layers.last_mut() {
+            if layer.geom == Geom::Tile {
+                layer.params.show_cell_values = show;
+            }
+        }
+        self
+    }
+
+    // ── Phase 2B: Faceting ────────────────────────────────────────────
+
+    /// Facet by a column, wrapping panels into rows (default 2 columns).
+    pub fn facet_wrap(mut self, column: &str) -> Self {
+        self.facet = crate::facet::FacetSpec::Wrap {
+            column: column.to_string(),
+            ncol: 2,
+        };
+        self
+    }
+
+    /// Facet by a column with explicit number of columns.
+    pub fn facet_wrap_ncol(mut self, column: &str, ncol: usize) -> Self {
+        self.facet = crate::facet::FacetSpec::Wrap {
+            column: column.to_string(),
+            ncol,
+        };
+        self
+    }
+
+    /// Facet into a row × column grid.
+    pub fn facet_grid(mut self, row: &str, col: &str) -> Self {
+        self.facet = crate::facet::FacetSpec::Grid {
+            row: row.to_string(),
+            col: col.to_string(),
+        };
+        self
+    }
+
     /// Set the plot title.
     pub fn title(mut self, title: &str) -> Self {
         self.labels.title = Some(title.to_string());
+        self
+    }
+
+    /// Set the plot subtitle.
+    pub fn subtitle(mut self, sub: &str) -> Self {
+        self.labels.subtitle = Some(sub.to_string());
         self
     }
 
@@ -142,9 +411,160 @@ impl PlotSpec {
         self
     }
 
+    /// Use the publication-ready theme.
+    pub fn theme_publication(mut self) -> Self {
+        self.theme = Theme::publication();
+        self
+    }
+
+    /// Use the dark theme.
+    pub fn theme_dark(mut self) -> Self {
+        self.theme = Theme::dark();
+        self
+    }
+
     /// Flip x and y coordinates.
     pub fn coord_flip(mut self) -> Self {
         self.coord = CoordSystem::FlipXY;
+        self
+    }
+
+    /// Use polar coordinates (x → angle, y → radius).
+    /// Start at 12 o'clock (π/2), go clockwise.
+    pub fn coord_polar(mut self) -> Self {
+        self.coord = CoordSystem::Polar {
+            start_angle: std::f64::consts::FRAC_PI_2,
+            direction: PolarDirection::CW,
+        };
+        self
+    }
+
+    // ── Phase 3: Polar geoms ─────────────────────────────────────────
+
+    /// Add a pie chart geometry (requires categorical x + numeric y data).
+    pub fn geom_pie(self) -> Self {
+        self.add_layer(Layer {
+            geom: Geom::Pie,
+            aes: AesMapping::xy(),
+            params: GeomParams::default(),
+        })
+    }
+
+    /// Add a pie chart with donut hole (inner_radius as fraction of outer: 0.0–1.0).
+    pub fn geom_donut(self, inner_frac: f64) -> Self {
+        self.add_layer(Layer {
+            geom: Geom::Pie,
+            aes: AesMapping::xy(),
+            params: GeomParams {
+                inner_radius: inner_frac.clamp(0.0, 0.95),
+                ..GeomParams::default()
+            },
+        })
+    }
+
+    /// Add a rose (Nightingale) chart geometry.
+    pub fn geom_rose(self) -> Self {
+        self.add_layer(Layer {
+            geom: Geom::Rose,
+            aes: AesMapping::xy(),
+            params: GeomParams::default(),
+        })
+    }
+
+    /// Add a radar (spider) chart geometry.
+    pub fn geom_radar(self) -> Self {
+        self.add_layer(Layer {
+            geom: Geom::Radar,
+            aes: AesMapping::xy(),
+            params: GeomParams::default(),
+        })
+    }
+
+    // ── Phase 3: 2D density + contour geoms ─────────────────────────
+
+    /// Add a 2D density estimation geom (filled contour bands).
+    pub fn geom_density2d(self) -> Self {
+        self.add_layer(Layer {
+            geom: Geom::Density2d,
+            aes: AesMapping::xy(),
+            params: GeomParams::default(),
+        })
+    }
+
+    /// Add a 2D density with custom number of levels and grid size.
+    pub fn geom_density2d_opts(self, n_levels: usize, grid_size: usize) -> Self {
+        self.add_layer(Layer {
+            geom: Geom::Density2d,
+            aes: AesMapping::xy(),
+            params: GeomParams {
+                n_levels,
+                grid_size,
+                ..GeomParams::default()
+            },
+        })
+    }
+
+    /// Add contour lines.
+    pub fn geom_contour(self) -> Self {
+        self.add_layer(Layer {
+            geom: Geom::Contour,
+            aes: AesMapping::xy(),
+            params: GeomParams::default(),
+        })
+    }
+
+    // ── Phase 3.2: Error bars + Step line ───────────────────────────
+
+    /// Add error bars geom. Expects "x", "y", and "error" columns in data.
+    pub fn geom_errorbar(self) -> Self {
+        self.add_layer(Layer {
+            geom: Geom::ErrorBar,
+            aes: AesMapping::xy(),
+            params: GeomParams {
+                error_column: Some("error".to_string()),
+                ..GeomParams::default()
+            },
+        })
+    }
+
+    /// Add error bars with a custom error column name.
+    pub fn geom_errorbar_col(self, col: &str) -> Self {
+        self.add_layer(Layer {
+            geom: Geom::ErrorBar,
+            aes: AesMapping::xy(),
+            params: GeomParams {
+                error_column: Some(col.to_string()),
+                ..GeomParams::default()
+            },
+        })
+    }
+
+    /// Add a step line geom (horizontal-then-vertical segments).
+    pub fn geom_step(self) -> Self {
+        self.add_layer(Layer {
+            geom: Geom::Step,
+            aes: AesMapping::xy(),
+            params: GeomParams::default(),
+        })
+    }
+
+    // ── Phase 3.2: Legend + Log scale ─────────────────────────────────
+
+    /// Disable the legend.
+    pub fn no_legend(mut self) -> Self {
+        self.show_legend = false;
+        self
+    }
+
+    /// Set x-axis to log scale.
+    pub fn scale_x_log(mut self, base: f64) -> Self {
+        self.scales.x = Scale::Log { base };
+        self
+    }
+
+    /// Set y-axis to log scale.
+    pub fn scale_y_log(mut self, base: f64) -> Self {
+        self.scales.y = Scale::Log { base };
         self
     }
 
@@ -241,6 +661,41 @@ pub enum Geom {
     Line,
     Bar,
     Histogram,
+    // Phase 2B: Distribution geoms
+    Density,
+    Area,
+    Rug,
+    Ecdf,
+    // Phase 2B: Categorical geoms
+    Box,
+    Violin,
+    Strip,
+    Swarm,
+    Boxen,
+    // Phase 2B: Matrix/Heatmap
+    Tile,
+    // Phase 2B: Regression
+    RegressionLine,
+    Residual,
+    // Phase 2B: Dendrogram
+    Dendrogram,
+    // Phase 3: Polar geoms
+    /// Pie chart: slices from category/value data.
+    Pie,
+    /// Rose (Nightingale) chart: bars in polar coordinates.
+    Rose,
+    /// Radar (spider) chart: polygon on radial axes.
+    Radar,
+    // Phase 3: 2D density + contour
+    /// 2D kernel density estimation rendered as filled contour bands.
+    Density2d,
+    /// Contour lines at specified density/value levels.
+    Contour,
+    // Phase 3.2: Error bars + step line
+    /// Error bars: vertical bars at each data point (x, y ± error).
+    ErrorBar,
+    /// Step line: horizontal-then-vertical segments (for step functions).
+    Step,
 }
 
 /// Aesthetic mappings: column names → visual channels.
@@ -266,6 +721,21 @@ impl AesMapping {
     }
 }
 
+/// Which side to place rug marks on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RugSide {
+    Bottom,
+    Left,
+    Top,
+    Right,
+}
+
+impl Default for RugSide {
+    fn default() -> Self {
+        RugSide::Bottom
+    }
+}
+
 /// Parameters for geometry rendering.
 #[derive(Debug, Clone)]
 pub struct GeomParams {
@@ -275,6 +745,40 @@ pub struct GeomParams {
     pub bins: Option<usize>,
     pub alpha: f64,
     pub color_override: Option<Color>,
+    // Phase 2B: Distribution params
+    pub bandwidth: Option<f64>,
+    pub n_grid_points: Option<usize>,
+    pub rug_side: RugSide,
+    pub rug_length: f64,
+    // Phase 2B: Categorical params
+    pub jitter_width: f64,
+    pub violin_bw: Option<f64>,
+    pub show_outliers: bool,
+    pub category_width: f64,
+    // Phase 2B: Heatmap params
+    pub show_cell_values: bool,
+    pub cell_format: Option<String>,
+    // Phase 3: Polar params
+    /// Inner radius for donut-style pie charts (0.0 = full pie, >0 = donut).
+    pub inner_radius: f64,
+    /// Whether to show percentage labels on pie slices.
+    pub show_labels: bool,
+    // Phase 3: 2D density / contour params
+    /// Number of contour levels for density2d / contour geoms.
+    pub n_levels: usize,
+    /// Grid resolution for 2D density estimation.
+    pub grid_size: usize,
+    // Phase 3.2: Error bar params
+    /// Column name for error magnitudes (for ErrorBar geom).
+    pub error_column: Option<String>,
+    /// Cap width for error bar whiskers (in data units fraction, default 0.3).
+    pub cap_width: f64,
+    // Phase 3.2: Step direction
+    /// Step direction: true = horizontal-first (step-post), false = vertical-first.
+    pub step_post: bool,
+    // Phase 3.2: Legend
+    /// Whether to show the legend. Auto-enables for 2+ layer plots.
+    pub show_legend: bool,
 }
 
 impl Default for GeomParams {
@@ -286,6 +790,24 @@ impl Default for GeomParams {
             bins: None,
             alpha: 1.0,
             color_override: None,
+            bandwidth: None,
+            n_grid_points: None,
+            rug_side: RugSide::Bottom,
+            rug_length: 8.0,
+            jitter_width: 0.3,
+            violin_bw: None,
+            show_outliers: true,
+            category_width: 0.7,
+            show_cell_values: false,
+            cell_format: None,
+            inner_radius: 0.0,
+            show_labels: true,
+            n_levels: 7,
+            grid_size: 50,
+            error_column: None,
+            cap_width: 0.3,
+            step_post: true,
+            show_legend: true,
         }
     }
 }
@@ -322,6 +844,10 @@ pub enum ColorScale {
     Default,
     Manual(Vec<Color>),
     Gradient { low: Color, high: Color },
+    /// Sequential: white → blue.
+    Sequential,
+    /// Diverging: blue → white → red.
+    Diverging,
 }
 
 /// Axis labels and title.
@@ -334,10 +860,26 @@ pub struct Labels {
 }
 
 /// Coordinate system.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CoordSystem {
     Cartesian,
     FlipXY,
+    /// Polar coordinate system: x → angle (theta), y → radius.
+    /// `start_angle` is the angle (in radians) for the first data point.
+    /// `direction` is CW (clockwise, like a clock) or CCW.
+    Polar {
+        start_angle: f64,
+        direction: PolarDirection,
+    },
+}
+
+/// Direction for polar coordinate traversal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolarDirection {
+    /// Clockwise (like a clock).
+    CW,
+    /// Counter-clockwise (mathematical convention).
+    CCW,
 }
 
 #[cfg(test)]
