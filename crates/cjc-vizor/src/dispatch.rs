@@ -490,6 +490,17 @@ pub fn dispatch_vizor_method(
             Ok(Some(wrap_plot(spec.clone().annotate(Annotation::inline_label(&text, x, y)))))
         }
 
+        // ── Data column management ──
+        "add_column" => {
+            require_args(method, args, 2)?;
+            let col_name = value_to_string(&args[0])?;
+            let col_data = value_to_f64_vec(&args[1])?;
+            Ok(Some(wrap_plot(spec.clone().add_column(
+                &col_name,
+                crate::spec::DataColumn::Float(col_data),
+            ))))
+        }
+
         // ── Rendering ──
         "to_svg" => {
             let scene = build_scene(spec);

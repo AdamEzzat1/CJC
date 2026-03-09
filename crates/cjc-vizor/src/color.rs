@@ -101,16 +101,16 @@ pub fn diverging_palette(t: f64) -> Color {
     }
 }
 
-/// Default categorical palette (8 colors, ggplot2-inspired).
+/// Default categorical palette (8 colors, muted ColorBrewer-inspired).
 pub const PALETTE: [Color; 8] = [
-    Color::rgb(228, 26, 28),   // red
-    Color::rgb(55, 126, 184),  // blue
-    Color::rgb(77, 175, 74),   // green
-    Color::rgb(152, 78, 163),  // purple
-    Color::rgb(255, 127, 0),   // orange
-    Color::rgb(255, 255, 51),  // yellow
-    Color::rgb(166, 86, 40),   // brown
-    Color::rgb(247, 129, 191), // pink
+    Color::rgb(31, 119, 180),  // muted blue
+    Color::rgb(255, 127, 14),  // muted orange
+    Color::rgb(44, 160, 44),   // muted green
+    Color::rgb(214, 39, 40),   // muted red
+    Color::rgb(148, 103, 189), // muted purple
+    Color::rgb(140, 86, 75),   // muted brown
+    Color::rgb(227, 119, 194), // muted pink
+    Color::rgb(127, 127, 127), // muted gray
 ];
 
 /// Get a color from the default palette (wraps around).
@@ -158,5 +158,52 @@ mod tests {
     fn test_palette_wrap() {
         assert_eq!(palette_color(0), palette_color(8));
         assert_eq!(palette_color(1), palette_color(9));
+    }
+
+    // ── Phase 5 (Audit): verify updated muted ColorBrewer palette ──
+
+    #[test]
+    fn test_palette_first_color_is_muted_blue() {
+        assert_eq!(PALETTE[0], Color::rgb(31, 119, 180));
+    }
+
+    #[test]
+    fn test_palette_second_color_is_muted_orange() {
+        assert_eq!(PALETTE[1], Color::rgb(255, 127, 14));
+    }
+
+    #[test]
+    fn test_palette_has_8_colors() {
+        assert_eq!(PALETTE.len(), 8);
+    }
+
+    #[test]
+    fn test_palette_all_distinct() {
+        for i in 0..PALETTE.len() {
+            for j in (i + 1)..PALETTE.len() {
+                assert_ne!(PALETTE[i], PALETTE[j],
+                    "Palette colors {} and {} should be distinct", i, j);
+            }
+        }
+    }
+
+    #[test]
+    fn test_with_alpha() {
+        let c = Color::rgb(100, 200, 50);
+        let ca = c.with_alpha(0.5);
+        assert_eq!(ca.r, 100);
+        assert_eq!(ca.g, 200);
+        assert_eq!(ca.b, 50);
+        assert_eq!(ca.a, 127); // 0.5 * 255 ≈ 127
+    }
+
+    #[test]
+    fn test_lerp_midpoint() {
+        let a = Color::rgb(0, 0, 0);
+        let b = Color::rgb(100, 200, 50);
+        let mid = Color::lerp(a, b, 0.5);
+        assert_eq!(mid.r, 50);
+        assert_eq!(mid.g, 100);
+        assert_eq!(mid.b, 25);
     }
 }

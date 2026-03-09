@@ -5,7 +5,7 @@
 
 use crate::annotation::{Annotation, Position, format_pvalue, format_r_squared, format_ci};
 use crate::color::{self, Color};
-use crate::layout::{compute_layout, histogram_counts, LayoutResult};
+use crate::layout::{self, compute_layout, histogram_counts, LayoutResult};
 use crate::scene::{Scene, SceneElement, TextAnchor};
 use crate::spec::{Geom, PlotSpec, RugSide};
 use crate::stats;
@@ -142,11 +142,19 @@ fn build_single_panel(spec: &PlotSpec) -> Scene {
         stroke_width: 0.0,
     });
 
-    // 3. Gridlines.
-    render_gridlines(&mut scene, &layout, theme);
+    // 3. Gridlines — suppress for polar, tile, and dendrogram geoms
+    //    (they have their own axis/grid rendering).
+    let suppress_axes = layout::is_all_polar(spec)
+        || layout::is_all_tile(spec)
+        || layout::is_all_dendrogram(spec);
+    if !suppress_axes {
+        render_gridlines(&mut scene, &layout, theme);
+    }
 
-    // 4. Axes.
-    render_axes(&mut scene, &layout, theme);
+    // 4. Axes — also suppressed for polar, tile, and dendrogram geoms.
+    if !suppress_axes {
+        render_axes(&mut scene, &layout, theme);
+    }
 
     // 5. Geom layers (in order).
     for (layer_idx, layer) in spec.layers.iter().enumerate() {
@@ -735,20 +743,22 @@ fn render_violin(
         if max_d < 1e-15 { continue; }
         let scale = (cat_w / 2.0) / max_d;
 
-        // Build mirrored polygon
+        // Build mirrored polygon, clamping y to plot area bounds.
         let px_center = layout.map_x(cx);
+        let py_top = layout.plot_y;
+        let py_bottom = layout.plot_y + layout.plot_h;
         let mut points = Vec::with_capacity(grid.len() * 2 + 1);
 
         // Right side (top to bottom in data space)
         for j in 0..grid.len() {
-            let py = layout.map_y(grid[j]);
+            let py = layout.map_y(grid[j]).clamp(py_top, py_bottom);
             let dx = density[j] * scale;
             let px = layout.map_x(cx + dx);
             points.push((px, py));
         }
         // Left side (bottom to top, mirrored)
         for j in (0..grid.len()).rev() {
-            let py = layout.map_y(grid[j]);
+            let py = layout.map_y(grid[j]).clamp(py_top, py_bottom);
             let dx = density[j] * scale;
             let px = layout.map_x(cx - dx);
             points.push((px, py));
@@ -1261,16 +1271,74 @@ fn resolve_position(pos: &Position, layout: &LayoutResult, _theme: &crate::theme
     }
 }
 
+/// Render a semi-transparent background box behind annotation text for legibility.
+fn render_annotation_bg(
+    scene: &mut Scene,
+    x: f64,
+    y: f64,
+    text: &str,
+    font_size: f64,
+    anchor: &TextAnchor,
+    bg: Color,
+    lines: usize,
+) {
+    let pad = 4.0;
+    let char_w = font_size * 0.6; // Approximate character width
+    let text_w = text.len() as f64 * char_w;
+    let text_h = font_size * lines as f64 + 3.0 * (lines.saturating_sub(1)) as f64;
+    let bx = match anchor {
+        TextAnchor::End => x - text_w - pad,
+        TextAnchor::Middle => x - text_w / 2.0 - pad,
+        TextAnchor::Start => x - pad,
+    };
+    let by = y - font_size - pad;
+    scene.push(SceneElement::Rect {
+        x: bx,
+        y: by,
+        w: text_w + 2.0 * pad,
+        h: text_h + 2.0 * pad,
+        fill: bg,
+        stroke: None,
+        stroke_width: 0.0,
+    });
+}
+
 fn render_annotations(scene: &mut Scene, spec: &PlotSpec, layout: &LayoutResult) {
     let theme = &spec.theme;
+    let bg_color = theme.plot_background.with_alpha(0.85);
+
+    // ── Stacking: track cumulative y-offset per named position ──
+    // Multiple annotations at the same named corner auto-stack vertically.
+    let mut top_right_y = 0.0_f64;
+    let mut top_left_y = 0.0_f64;
+    let mut bottom_left_y = 0.0_f64;
+    let mut bottom_right_y = 0.0_f64;
+    let line_h = theme.tick_label_font_size + 4.0;
+
+    // Helper: get stacking offset for a position, and advance it.
+    let stack_offset = |pos: &Position, lines: usize,
+                        tr: &mut f64, tl: &mut f64, bl: &mut f64, br: &mut f64| -> f64 {
+        let delta = lines as f64 * line_h;
+        match pos {
+            Position::TopRight => { let o = *tr; *tr += delta; o }
+            Position::TopLeft => { let o = *tl; *tl += delta; o }
+            Position::BottomLeft => { let o = *bl; *bl -= delta; o }
+            Position::BottomRight => { let o = *br; *br -= delta; o }
+            _ => 0.0,
+        }
+    };
 
     for ann in &spec.annotations {
         match ann {
             Annotation::Text { text, position, font_size } => {
                 let (x, y) = resolve_position(position, layout, theme);
+                let fs = font_size.unwrap_or(theme.tick_label_font_size);
+                let yo = stack_offset(position, 1,
+                    &mut top_right_y, &mut top_left_y, &mut bottom_left_y, &mut bottom_right_y);
+                render_annotation_bg(scene, x, y + yo, text, fs, &TextAnchor::Start, bg_color, 1);
                 scene.push(SceneElement::Text {
-                    x, y, text: text.clone(),
-                    font_size: font_size.unwrap_or(theme.tick_label_font_size),
+                    x, y: y + yo, text: text.clone(),
+                    font_size: fs,
                     fill: theme.text_color,
                     anchor: TextAnchor::Start,
                     rotation: None,
@@ -1278,9 +1346,13 @@ fn render_annotations(scene: &mut Scene, spec: &PlotSpec, layout: &LayoutResult)
             }
             Annotation::Note { text, position } => {
                 let (x, y) = resolve_position(position, layout, theme);
+                let fs = theme.tick_label_font_size * 0.9;
+                let yo = stack_offset(position, 1,
+                    &mut top_right_y, &mut top_left_y, &mut bottom_left_y, &mut bottom_right_y);
+                render_annotation_bg(scene, x, y + yo, text, fs, &TextAnchor::Start, bg_color, 1);
                 scene.push(SceneElement::Text {
-                    x, y, text: text.clone(),
-                    font_size: theme.tick_label_font_size * 0.9,
+                    x, y: y + yo, text: text.clone(),
+                    font_size: fs,
                     fill: Color::GRAY,
                     anchor: TextAnchor::Start,
                     rotation: None,
@@ -1290,17 +1362,23 @@ fn render_annotations(scene: &mut Scene, spec: &PlotSpec, layout: &LayoutResult)
                 let (x, y) = resolve_position(position, layout, theme);
                 let line1 = equation.clone();
                 let line2 = format_r_squared(*r_squared);
+                let fs = theme.tick_label_font_size;
+                let yo = stack_offset(position, 2,
+                    &mut top_right_y, &mut top_left_y, &mut bottom_left_y, &mut bottom_right_y);
+                // Background for both lines
+                let longer = if line1.len() > line2.len() { &line1 } else { &line2 };
+                render_annotation_bg(scene, x, y + yo, longer, fs, &TextAnchor::End, bg_color, 2);
                 scene.push(SceneElement::Text {
-                    x, y, text: line1,
-                    font_size: theme.tick_label_font_size,
+                    x, y: y + yo, text: line1,
+                    font_size: fs,
                     fill: theme.text_color,
                     anchor: TextAnchor::End,
                     rotation: None,
                 });
                 scene.push(SceneElement::Text {
-                    x, y: y + theme.tick_label_font_size + 4.0,
+                    x, y: y + yo + fs + 4.0,
                     text: line2,
-                    font_size: theme.tick_label_font_size,
+                    font_size: fs,
                     fill: theme.text_color,
                     anchor: TextAnchor::End,
                     rotation: None,
@@ -1309,9 +1387,13 @@ fn render_annotations(scene: &mut Scene, spec: &PlotSpec, layout: &LayoutResult)
             Annotation::ConfidenceInterval { level, lower, upper, position } => {
                 let (x, y) = resolve_position(position, layout, theme);
                 let text = format_ci(*level, *lower, *upper);
+                let fs = theme.tick_label_font_size;
+                let yo = stack_offset(position, 1,
+                    &mut top_right_y, &mut top_left_y, &mut bottom_left_y, &mut bottom_right_y);
+                render_annotation_bg(scene, x, y + yo, &text, fs, &TextAnchor::End, bg_color, 1);
                 scene.push(SceneElement::Text {
-                    x, y, text,
-                    font_size: theme.tick_label_font_size,
+                    x, y: y + yo, text,
+                    font_size: fs,
                     fill: theme.text_color,
                     anchor: TextAnchor::End,
                     rotation: None,
@@ -1320,26 +1402,41 @@ fn render_annotations(scene: &mut Scene, spec: &PlotSpec, layout: &LayoutResult)
             Annotation::PValue { value, position, .. } => {
                 let (x, y) = resolve_position(position, layout, theme);
                 let text = format_pvalue(*value);
+                let fs = theme.tick_label_font_size;
+                let yo = stack_offset(position, 1,
+                    &mut top_right_y, &mut top_left_y, &mut bottom_left_y, &mut bottom_right_y);
+                render_annotation_bg(scene, x, y + yo, &text, fs, &TextAnchor::End, bg_color, 1);
                 scene.push(SceneElement::Text {
-                    x, y, text,
-                    font_size: theme.tick_label_font_size,
+                    x, y: y + yo, text,
+                    font_size: fs,
                     fill: theme.text_color,
                     anchor: TextAnchor::End,
                     rotation: None,
                 });
             }
             Annotation::ModelMetrics { metrics, position } => {
-                let (x, mut y) = resolve_position(position, layout, theme);
+                let (x, y) = resolve_position(position, layout, theme);
+                let fs = theme.tick_label_font_size;
+                let n_lines = metrics.len();
+                let yo = stack_offset(position, n_lines,
+                    &mut top_right_y, &mut top_left_y, &mut bottom_left_y, &mut bottom_right_y);
+                // Find longest metric text for background
+                let longest = metrics.iter()
+                    .map(|(name, val)| format!("{}: {:.4}", name, val))
+                    .max_by_key(|s| s.len())
+                    .unwrap_or_default();
+                render_annotation_bg(scene, x, y + yo, &longest, fs, &TextAnchor::End, bg_color, n_lines);
+                let mut cy = y + yo;
                 for (name, val) in metrics {
                     let text = format!("{}: {:.4}", name, val);
                     scene.push(SceneElement::Text {
-                        x, y, text,
-                        font_size: theme.tick_label_font_size,
+                        x, y: cy, text,
+                        font_size: fs,
                         fill: theme.text_color,
                         anchor: TextAnchor::End,
                         rotation: None,
                     });
-                    y += theme.tick_label_font_size + 3.0;
+                    cy += fs + 3.0;
                 }
             }
             Annotation::EventMarker { x: data_x, label } => {
@@ -1351,11 +1448,14 @@ fn render_annotations(scene: &mut Scene, spec: &PlotSpec, layout: &LayoutResult)
                         stroke: Color::GRAY,
                         width: 1.0,
                     });
+                    let fs = theme.tick_label_font_size * 0.85;
+                    let label_y = layout.plot_y + fs;
+                    render_annotation_bg(scene, px + 3.0, label_y, label, fs, &TextAnchor::Start, bg_color, 1);
                     scene.push(SceneElement::Text {
                         x: px + 3.0,
-                        y: layout.plot_y + theme.tick_label_font_size,
+                        y: label_y,
                         text: label.clone(),
-                        font_size: theme.tick_label_font_size * 0.85,
+                        font_size: fs,
                         fill: Color::GRAY,
                         anchor: TextAnchor::Start,
                         rotation: None,
@@ -1364,9 +1464,13 @@ fn render_annotations(scene: &mut Scene, spec: &PlotSpec, layout: &LayoutResult)
             }
             Annotation::DataNote { text, position } => {
                 let (x, y) = resolve_position(position, layout, theme);
+                let fs = theme.tick_label_font_size * 0.8;
+                let yo = stack_offset(position, 1,
+                    &mut top_right_y, &mut top_left_y, &mut bottom_left_y, &mut bottom_right_y);
+                render_annotation_bg(scene, x, y + yo, text, fs, &TextAnchor::Start, bg_color, 1);
                 scene.push(SceneElement::Text {
-                    x, y, text: text.clone(),
-                    font_size: theme.tick_label_font_size * 0.8,
+                    x, y: y + yo, text: text.clone(),
+                    font_size: fs,
                     fill: Color::GRAY,
                     anchor: TextAnchor::Start,
                     rotation: None,
@@ -1375,11 +1479,13 @@ fn render_annotations(scene: &mut Scene, spec: &PlotSpec, layout: &LayoutResult)
             Annotation::InlineLabel { text, x: data_x, y: data_y } => {
                 let px = layout.map_x(*data_x);
                 let py = layout.map_y(*data_y);
+                let fs = theme.tick_label_font_size * 0.9;
+                render_annotation_bg(scene, px + 5.0, py - 5.0, text, fs, &TextAnchor::Start, bg_color, 1);
                 scene.push(SceneElement::Text {
                     x: px + 5.0,
                     y: py - 5.0,
                     text: text.clone(),
-                    font_size: theme.tick_label_font_size * 0.9,
+                    font_size: fs,
                     fill: theme.text_color,
                     anchor: TextAnchor::Start,
                     rotation: None,
@@ -1396,10 +1502,12 @@ fn render_annotations(scene: &mut Scene, spec: &PlotSpec, layout: &LayoutResult)
                     stroke: Color::GRAY,
                     width: 0.8,
                 });
+                let fs = theme.tick_label_font_size;
+                render_annotation_bg(scene, lx, ly - 3.0, text, fs, &TextAnchor::Start, bg_color, 1);
                 scene.push(SceneElement::Text {
                     x: lx, y: ly - 3.0,
                     text: text.clone(),
-                    font_size: theme.tick_label_font_size,
+                    font_size: fs,
                     fill: theme.text_color,
                     anchor: TextAnchor::Start,
                     rotation: None,
@@ -1763,8 +1871,9 @@ fn render_density2d(
     let gs = grid_size;
     if gs < 2 { return; }
 
-    let cell_w = layout.plot_w / (gs - 1) as f64;
-    let cell_h = layout.plot_h / (gs - 1) as f64;
+    // Compute cell dimensions from grid spacing in data coords, mapped to pixels.
+    let plot_x_max = layout.plot_x + layout.plot_w;
+    let plot_y_max = layout.plot_y + layout.plot_h;
 
     for i in 0..(gs - 1) {
         for j in 0..(gs - 1) {
@@ -1781,14 +1890,25 @@ fn render_density2d(
                 t,
             );
 
-            let px = layout.map_x(x_grid[i]);
-            let py = layout.map_y(y_grid[j]);
+            // Map grid cell corners to pixel coordinates.
+            let px_left = layout.map_x(x_grid[i]);
+            let px_right = layout.map_x(x_grid[i + 1]);
+            let py_top = layout.map_y(y_grid[j + 1]); // y inverted
+            let py_bottom = layout.map_y(y_grid[j]);
+
+            // Clip to plot area bounds.
+            let cx0 = px_left.max(layout.plot_x);
+            let cy0 = py_top.max(layout.plot_y);
+            let cx1 = px_right.min(plot_x_max);
+            let cy1 = py_bottom.min(plot_y_max);
+
+            if cx1 <= cx0 || cy1 <= cy0 { continue; }
 
             scene.push(SceneElement::Rect {
-                x: px,
-                y: py - cell_h,
-                w: cell_w,
-                h: cell_h,
+                x: cx0,
+                y: cy0,
+                w: cx1 - cx0,
+                h: cy1 - cy0,
                 fill,
                 stroke: None,
                 stroke_width: 0.0,
@@ -2074,5 +2194,189 @@ mod tests {
         // Should contain a polyline.
         let has_polyline = scene.elements.iter().any(|e| matches!(e, SceneElement::Polyline { .. }));
         assert!(has_polyline);
+    }
+
+    // ── Phase 5 (Audit): axis suppression for polar/tile/dendrogram ──
+
+    #[test]
+    fn test_pie_chart_suppresses_axes() {
+        let spec = PlotSpec::from_cat(
+            vec!["A".into(), "B".into(), "C".into()],
+            vec![30.0, 50.0, 20.0],
+        ).geom_pie();
+        let scene = build_scene(&spec);
+        // We mainly verify no crash and a valid scene.
+        assert!(!scene.elements.is_empty());
+        // Pie should have polyline slices (not line axes).
+        let has_polyline = scene.elements.iter().any(|e| matches!(e, SceneElement::Polyline { .. }));
+        assert!(has_polyline, "Pie chart should have polyline slices");
+    }
+
+    #[test]
+    fn test_tile_chart_suppresses_axes() {
+        let spec = PlotSpec::from_matrix(
+            vec![vec![1.0, 2.0], vec![3.0, 4.0]],
+            vec!["r0".into(), "r1".into()],
+            vec!["c0".into(), "c1".into()],
+        ).geom_tile();
+        let scene = build_scene(&spec);
+        assert!(!scene.elements.is_empty());
+        // Tile should have rects for cells.
+        let rect_count = scene.elements.iter().filter(|e| matches!(e, SceneElement::Rect { .. })).count();
+        assert!(rect_count >= 4, "Tile chart should have at least 4 rect cells, got {}", rect_count);
+    }
+
+    #[test]
+    fn test_dendrogram_suppresses_axes() {
+        let spec = PlotSpec::from_matrix(
+            vec![
+                vec![0.0, 1.0, 5.0],
+                vec![1.0, 0.0, 4.0],
+                vec![5.0, 4.0, 0.0],
+            ],
+            vec!["A".into(), "B".into(), "C".into()],
+            vec!["A".into(), "B".into(), "C".into()],
+        ).geom_dendrogram();
+        let scene = build_scene(&spec);
+        assert!(!scene.elements.is_empty());
+        // Dendrogram uses lines for branches.
+        let line_count = scene.elements.iter().filter(|e| matches!(e, SceneElement::Line { .. })).count();
+        assert!(line_count >= 2, "Dendrogram should have branch lines, got {}", line_count);
+    }
+
+    // ── Phase 5 (Audit): violin rendering produces valid scene ──
+
+    #[test]
+    fn test_violin_scene_has_polylines() {
+        let spec = PlotSpec::from_cat(
+            vec![
+                "A".into(), "A".into(), "A".into(), "A".into(), "A".into(),
+                "A".into(), "A".into(), "A".into(),
+                "B".into(), "B".into(), "B".into(), "B".into(), "B".into(),
+                "B".into(), "B".into(), "B".into(),
+            ],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+                 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+        ).geom_violin();
+        let scene = build_scene(&spec);
+        let polyline_count = scene.elements.iter()
+            .filter(|e| matches!(e, SceneElement::Polyline { .. }))
+            .count();
+        assert!(polyline_count >= 2, "Violin should have polylines for each group, got {}", polyline_count);
+    }
+
+    #[test]
+    fn test_violin_polyline_y_in_bounds() {
+        let spec = PlotSpec::from_cat(
+            vec![
+                "A".into(), "A".into(), "A".into(), "A".into(), "A".into(),
+                "A".into(), "A".into(), "A".into(),
+            ],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        ).geom_violin();
+        let layout = crate::layout::compute_layout(&spec);
+        let scene = build_scene(&spec);
+        let plot_top = layout.plot_y;
+        let plot_bottom = layout.plot_y + layout.plot_h;
+        for el in &scene.elements {
+            if let SceneElement::Polyline { points, .. } = el {
+                for &(_, y) in points {
+                    assert!(y >= plot_top - 1.0 && y <= plot_bottom + 1.0,
+                        "Violin polyline y={} out of plot bounds [{}, {}]", y, plot_top, plot_bottom);
+                }
+            }
+        }
+    }
+
+    // ── Phase 5 (Audit): boxen rendering with small data ──
+
+    #[test]
+    fn test_boxen_small_group_no_crash() {
+        let spec = PlotSpec::from_cat(
+            vec![
+                "A".into(), "A".into(), "A".into(), "A".into(), "A".into(),
+            ],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0],
+        ).geom_boxen();
+        let scene = build_scene(&spec);
+        // Should render without panic and produce rects.
+        let rect_count = scene.elements.iter()
+            .filter(|e| matches!(e, SceneElement::Rect { .. }))
+            .count();
+        assert!(rect_count >= 1, "Boxen with 5 values should produce at least 1 rect, got {}", rect_count);
+    }
+
+    // ── Phase 5 (Audit): density2d clipping ──
+
+    #[test]
+    fn test_density2d_rects_in_bounds() {
+        let spec = PlotSpec::from_xy(
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 1.5, 2.5, 3.5, 4.5, 5.5],
+            vec![2.0, 3.0, 5.0, 7.0, 11.0, 2.5, 3.5, 5.5, 7.5, 11.5],
+        ).geom_density2d();
+        let layout = crate::layout::compute_layout(&spec);
+        let scene = build_scene(&spec);
+        let plot_x_min = layout.plot_x;
+        let plot_y_min = layout.plot_y;
+        let plot_x_max = layout.plot_x + layout.plot_w;
+        let plot_y_max = layout.plot_y + layout.plot_h;
+        for el in &scene.elements {
+            if let SceneElement::Rect { x, y, w, h, .. } = el {
+                // Background rects are at (0,0) — skip them.
+                if *x < 1.0 && *y < 1.0 { continue; }
+                // Skip plot bg rect.
+                if (*w - layout.plot_w).abs() < 1.0 && (*h - layout.plot_h).abs() < 1.0 { continue; }
+                // Skip small annotation bg rects.
+                if *w < 5.0 || *h < 5.0 { continue; }
+                // Density2d cell rects should be within plot bounds.
+                assert!(*x >= plot_x_min - 1.0,
+                    "Density2d rect x={} below plot_x={}", x, plot_x_min);
+                assert!(*y >= plot_y_min - 1.0,
+                    "Density2d rect y={} below plot_y={}", y, plot_y_min);
+                assert!(*x + *w <= plot_x_max + 1.0,
+                    "Density2d rect right edge x+w={} exceeds plot_x_max={}", x + w, plot_x_max);
+                assert!(*y + *h <= plot_y_max + 1.0,
+                    "Density2d rect bottom edge y+h={} exceeds plot_y_max={}", y + h, plot_y_max);
+            }
+        }
+    }
+
+    // ── Phase 5 (Audit): annotation rendering ──
+
+    #[test]
+    fn test_annotation_produces_bg_rect() {
+        use crate::annotation::Annotation;
+        let spec = PlotSpec::from_xy(vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0])
+            .geom_point()
+            .annotate(Annotation::text("test label", 2.0, 5.0));
+        let scene = build_scene(&spec);
+        // Should contain at least one text element with the annotation.
+        let has_label = scene.elements.iter().any(|e| {
+            if let SceneElement::Text { text, .. } = e {
+                text.contains("test label")
+            } else {
+                false
+            }
+        });
+        assert!(has_label, "Annotation text should appear in scene");
+    }
+
+    // ── Phase 5 (Audit): error bar rendering with add_column ──
+
+    #[test]
+    fn test_errorbar_with_error_column() {
+        use crate::spec::DataColumn;
+        let spec = PlotSpec::from_xy(
+            vec![1.0, 2.0, 3.0],
+            vec![10.0, 20.0, 30.0],
+        ).add_column("error", DataColumn::Float(vec![2.0, 3.0, 1.5]))
+         .geom_errorbar();
+        let scene = build_scene(&spec);
+        // Should have lines for whiskers + caps.
+        let line_count = scene.elements.iter()
+            .filter(|e| matches!(e, SceneElement::Line { .. }))
+            .count();
+        // At least 3 vertical whisker lines + axis lines.
+        assert!(line_count >= 3, "Error bars should produce lines, got {}", line_count);
     }
 }

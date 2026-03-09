@@ -1,0 +1,707 @@
+// ============================================================================
+// CJC Vizor Gallery — Every plot type, annotation, and theme
+// ============================================================================
+// Generates SVG files for every Vizor capability.
+
+import vizor
+
+// ============================================================================
+// SHARED DATA
+// ============================================================================
+
+// Numeric XY data
+let x = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+let y = [2.3, 4.1, 3.8, 7.2, 6.5, 8.9, 7.8, 10.1, 9.5, 11.3];
+
+// Distribution data (for histogram, density, etc.)
+let dist = [1.2, 2.5, 2.8, 3.1, 3.3, 3.5, 3.7, 4.0, 4.2, 4.5, 4.8, 5.0, 5.2, 5.5, 5.8, 6.0, 6.3, 7.1, 8.0, 9.5];
+
+// Categorical data
+let cats = ["A", "A", "A", "A", "A", "B", "B", "B", "B", "B", "C", "C", "C", "C", "C"];
+let vals = [4.2, 3.8, 5.1, 4.6, 3.9, 7.1, 6.8, 7.5, 6.3, 7.9, 2.1, 3.0, 2.5, 2.8, 1.9];
+
+// Matrix data (for heatmaps)
+let matrix = [[1.0, 0.8, 0.3], [0.8, 1.0, 0.5], [0.3, 0.5, 1.0]];
+let row_labels = ["Alpha", "Beta", "Gamma"];
+let col_labels = ["Alpha", "Beta", "Gamma"];
+
+// Error data (for error bars)
+let err_x = [1.0, 2.0, 3.0, 4.0, 5.0];
+let err_y = [3.0, 5.0, 4.0, 7.0, 6.5];
+let err_err = [0.5, 0.8, 0.3, 1.0, 0.6];
+
+// Pie data
+let pie_cats = ["Rent", "Food", "Transport", "Savings", "Entertainment"];
+let pie_vals = [35.0, 25.0, 15.0, 15.0, 10.0];
+
+// Radar data
+let radar_cats = ["Speed", "Power", "Range", "Stealth", "Accuracy"];
+let radar_vals = [0.8, 0.6, 0.9, 0.4, 0.7];
+
+// Log scale data
+let log_x = [1.0, 10.0, 100.0, 1000.0, 10000.0];
+let log_y = [2.0, 20.0, 150.0, 800.0, 5000.0];
+
+// Step function data
+let step_x = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+let step_y = [1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 2.0, 1.0];
+
+// Multi-column data for correlation/cluster
+let col_a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+let col_b = [2.1, 3.9, 6.2, 7.8, 10.1, 12.0, 14.2, 15.9];
+let col_c = [8.0, 7.0, 5.5, 4.0, 3.2, 2.0, 1.5, 0.8];
+
+// 2D scatter data for density2d/contour
+let d2_x = [1.0, 1.5, 2.0, 2.2, 2.5, 3.0, 3.1, 3.5, 4.0, 4.5, 2.0, 2.5, 3.0, 3.2, 3.5, 1.8, 2.8, 3.3, 2.1, 3.8];
+let d2_y = [1.0, 1.8, 2.5, 2.0, 3.0, 3.5, 2.8, 4.0, 3.2, 4.5, 2.2, 2.8, 3.0, 3.5, 3.8, 1.5, 2.5, 3.2, 2.0, 3.5];
+
+// ============================================================================
+// 1. BASIC GEOM TYPES (24 geoms)
+// ============================================================================
+
+// --- 1.1 Scatter (Point) ---
+let p = vizor_plot(x, y);
+let p = p.geom_point();
+let p = p.title("1. Scatter Plot (geom_point)");
+let p = p.xlab("X Values");
+let p = p.ylab("Y Values");
+p.save("gallery/01_geom_point.svg");
+
+// --- 1.2 Line ---
+let p = vizor_plot(x, y);
+let p = p.geom_line();
+let p = p.title("2. Line Plot (geom_line)");
+let p = p.xlab("X");
+let p = p.ylab("Y");
+p.save("gallery/02_geom_line.svg");
+
+// --- 1.3 Bar ---
+let p = vizor_plot(x, y);
+let p = p.geom_bar();
+let p = p.title("3. Bar Chart (geom_bar)");
+let p = p.xlab("Category");
+let p = p.ylab("Value");
+p.save("gallery/03_geom_bar.svg");
+
+// --- 1.4 Histogram ---
+let p = vizor_plot(dist, dist);
+let p = p.geom_histogram(8);
+let p = p.title("4. Histogram (geom_histogram, 8 bins)");
+let p = p.xlab("Value");
+let p = p.ylab("Count");
+p.save("gallery/04_geom_histogram.svg");
+
+// --- 1.5 Density (KDE) ---
+let p = vizor_plot(dist, dist);
+let p = p.geom_density();
+let p = p.title("5. Density Plot (geom_density)");
+let p = p.xlab("Value");
+let p = p.ylab("Density");
+p.save("gallery/05_geom_density.svg");
+
+// --- 1.6 Area ---
+let p = vizor_plot(x, y);
+let p = p.geom_area();
+let p = p.title("6. Area Plot (geom_area)");
+let p = p.xlab("X");
+let p = p.ylab("Y");
+p.save("gallery/06_geom_area.svg");
+
+// --- 1.7 Rug ---
+let p = vizor_plot(dist, dist);
+let p = p.geom_point();
+let p = p.geom_rug();
+let p = p.title("7. Rug Marks (geom_rug)");
+let p = p.xlab("Value");
+let p = p.ylab("Y");
+p.save("gallery/07_geom_rug.svg");
+
+// --- 1.8 ECDF ---
+let p = vizor_plot(dist, dist);
+let p = p.geom_ecdf();
+let p = p.title("8. Empirical CDF (geom_ecdf)");
+let p = p.xlab("Value");
+let p = p.ylab("Cumulative Probability");
+p.save("gallery/08_geom_ecdf.svg");
+
+// --- 1.9 Box plot ---
+let p = vizor_plot_cat(cats, vals);
+let p = p.geom_box();
+let p = p.title("9. Box Plot (geom_box)");
+let p = p.xlab("Group");
+let p = p.ylab("Value");
+p.save("gallery/09_geom_box.svg");
+
+// --- 1.10 Violin ---
+let p = vizor_plot_cat(cats, vals);
+let p = p.geom_violin();
+let p = p.title("10. Violin Plot (geom_violin)");
+let p = p.xlab("Group");
+let p = p.ylab("Value");
+p.save("gallery/10_geom_violin.svg");
+
+// --- 1.11 Strip ---
+let p = vizor_plot_cat(cats, vals);
+let p = p.geom_strip();
+let p = p.title("11. Strip Plot (geom_strip)");
+let p = p.xlab("Group");
+let p = p.ylab("Value");
+p.save("gallery/11_geom_strip.svg");
+
+// --- 1.12 Swarm ---
+let p = vizor_plot_cat(cats, vals);
+let p = p.geom_swarm();
+let p = p.title("12. Swarm Plot (geom_swarm)");
+let p = p.xlab("Group");
+let p = p.ylab("Value");
+p.save("gallery/12_geom_swarm.svg");
+
+// --- 1.13 Boxen ---
+let p = vizor_plot_cat(cats, vals);
+let p = p.geom_boxen();
+let p = p.title("13. Boxen (Letter-Value) Plot (geom_boxen)");
+let p = p.xlab("Group");
+let p = p.ylab("Value");
+p.save("gallery/13_geom_boxen.svg");
+
+// --- 1.14 Tile (Heatmap) ---
+let p = vizor_plot_matrix(matrix, row_labels, col_labels);
+let p = p.geom_tile();
+let p = p.show_values(true);
+let p = p.title("14. Heatmap (geom_tile + show_values)");
+p.save("gallery/14_geom_tile.svg");
+
+// --- 1.15 Regression Line ---
+let p = vizor_plot(x, y);
+let p = p.geom_point();
+let p = p.geom_regression();
+let p = p.title("15. Regression Line (geom_regression)");
+let p = p.xlab("X");
+let p = p.ylab("Y");
+p.save("gallery/15_geom_regression.svg");
+
+// --- 1.16 Residual Plot ---
+let p = vizor_plot(x, y);
+let p = p.geom_residplot();
+let p = p.title("16. Residual Plot (geom_residplot)");
+let p = p.xlab("X");
+let p = p.ylab("Residual");
+p.save("gallery/16_geom_residplot.svg");
+
+// --- 1.17 Dendrogram ---
+let p = vizor_plot_matrix(matrix, row_labels, col_labels);
+let p = p.geom_dendrogram();
+let p = p.title("17. Dendrogram (geom_dendrogram)");
+p.save("gallery/17_geom_dendrogram.svg");
+
+// --- 1.18 Pie Chart ---
+let p = vizor_plot_cat(pie_cats, pie_vals);
+let p = p.geom_pie();
+let p = p.title("18. Pie Chart (geom_pie)");
+p.save("gallery/18_geom_pie.svg");
+
+// --- 1.19 Donut Chart ---
+let p = vizor_plot_cat(pie_cats, pie_vals);
+let p = p.geom_donut(0.5);
+let p = p.title("19. Donut Chart (geom_donut, 50% hole)");
+p.save("gallery/19_geom_donut.svg");
+
+// --- 1.20 Rose (Nightingale) Chart ---
+let p = vizor_plot_cat(pie_cats, pie_vals);
+let p = p.geom_rose();
+let p = p.title("20. Rose Chart (geom_rose)");
+p.save("gallery/20_geom_rose.svg");
+
+// --- 1.21 Radar (Spider) Chart ---
+let p = vizor_plot_cat(radar_cats, radar_vals);
+let p = p.geom_radar();
+let p = p.title("21. Radar Chart (geom_radar)");
+p.save("gallery/21_geom_radar.svg");
+
+// --- 1.22 2D Density ---
+let p = vizor_plot(d2_x, d2_y);
+let p = p.geom_density2d();
+let p = p.title("22. 2D Density (geom_density2d)");
+let p = p.xlab("X");
+let p = p.ylab("Y");
+p.save("gallery/22_geom_density2d.svg");
+
+// --- 1.23 Contour ---
+let p = vizor_plot(d2_x, d2_y);
+let p = p.geom_contour();
+let p = p.title("23. Contour Plot (geom_contour)");
+let p = p.xlab("X");
+let p = p.ylab("Y");
+p.save("gallery/23_geom_contour.svg");
+
+// --- 1.24 Error Bars ---
+let p = vizor_plot(err_x, err_y);
+let p = p.add_column("error", err_err);
+let p = p.geom_point();
+let p = p.geom_errorbar();
+let p = p.title("24. Error Bars (geom_errorbar)");
+let p = p.xlab("X");
+let p = p.ylab("Y +/- Error");
+p.save("gallery/24_geom_errorbar.svg");
+
+// --- 1.25 Step Line ---
+let p = vizor_plot(step_x, step_y);
+let p = p.geom_step();
+let p = p.title("25. Step Line (geom_step)");
+let p = p.xlab("X");
+let p = p.ylab("Level");
+p.save("gallery/25_geom_step.svg");
+
+// ============================================================================
+// 2. THEMES (4 themes x scatter plot)
+// ============================================================================
+
+// --- 2.1 Default Theme ---
+let p = vizor_plot(x, y);
+let p = p.geom_point();
+let p = p.geom_line();
+let p = p.title("Theme: Default");
+let p = p.xlab("X");
+let p = p.ylab("Y");
+p.save("gallery/26_theme_default.svg");
+
+// --- 2.2 Minimal Theme ---
+let p = vizor_plot(x, y);
+let p = p.geom_point();
+let p = p.geom_line();
+let p = p.theme_minimal();
+let p = p.title("Theme: Minimal");
+let p = p.xlab("X");
+let p = p.ylab("Y");
+p.save("gallery/27_theme_minimal.svg");
+
+// --- 2.3 Publication Theme ---
+let p = vizor_plot(x, y);
+let p = p.geom_point();
+let p = p.geom_line();
+let p = p.theme_publication();
+let p = p.title("Theme: Publication");
+let p = p.xlab("X");
+let p = p.ylab("Y");
+p.save("gallery/28_theme_publication.svg");
+
+// --- 2.4 Dark Theme ---
+let p = vizor_plot(x, y);
+let p = p.geom_point();
+let p = p.geom_line();
+let p = p.theme_dark();
+let p = p.title("Theme: Dark");
+let p = p.xlab("X");
+let p = p.ylab("Y");
+p.save("gallery/29_theme_dark.svg");
+
+// ============================================================================
+// 3. ANNOTATIONS (8 annotation types)
+// ============================================================================
+
+// --- 3.1 Text Annotation ---
+let p = vizor_plot(x, y);
+let p = p.geom_point();
+let p = p.annotate_text("Peak here!", 8.0, 10.1);
+let p = p.title("Annotation: Text");
+p.save("gallery/30_annotate_text.svg");
+
+// --- 3.2 Regression Annotation ---
+let p = vizor_plot(x, y);
+let p = p.geom_point();
+let p = p.geom_regression();
+let p = p.annotate_regression("y = 0.95x + 1.5", 0.94);
+let p = p.title("Annotation: Regression Summary");
+p.save("gallery/31_annotate_regression.svg");
+
+// --- 3.3 Confidence Interval ---
+let p = vizor_plot(x, y);
+let p = p.geom_point();
+let p = p.annotate_ci(0.95, 2.3, 11.3);
+let p = p.title("Annotation: Confidence Interval");
+p.save("gallery/32_annotate_ci.svg");
+
+// --- 3.4 P-Value ---
+let p = vizor_plot(x, y);
+let p = p.geom_point();
+let p = p.annotate_pvalue(0.003);
+let p = p.title("Annotation: P-Value");
+p.save("gallery/33_annotate_pvalue.svg");
+
+// --- 3.5 Event Marker ---
+let p = vizor_plot(x, y);
+let p = p.geom_line();
+let p = p.annotate_event(5.0, "Phase Change");
+let p = p.title("Annotation: Event Marker");
+p.save("gallery/34_annotate_event.svg");
+
+// --- 3.6 Note ---
+let p = vizor_plot(x, y);
+let p = p.geom_point();
+let p = p.annotate_note("Preliminary data");
+let p = p.title("Annotation: Note");
+p.save("gallery/35_annotate_note.svg");
+
+// --- 3.7 Data Note ---
+let p = vizor_plot(x, y);
+let p = p.geom_point();
+let p = p.annotate_data_note("Source: Lab measurements, 2024");
+let p = p.title("Annotation: Data Note");
+p.save("gallery/36_annotate_data_note.svg");
+
+// --- 3.8 Inline Label ---
+let p = vizor_plot(x, y);
+let p = p.geom_point();
+let p = p.annotate_inline_label("Max", 10.0, 11.3);
+let p = p.annotate_inline_label("Min", 1.0, 2.3);
+let p = p.title("Annotation: Inline Labels");
+p.save("gallery/37_annotate_inline_label.svg");
+
+// ============================================================================
+// 4. COORDINATE SYSTEMS & SCALES
+// ============================================================================
+
+// --- 4.1 Coord Flip ---
+let p = vizor_plot_cat(cats, vals);
+let p = p.geom_bar();
+let p = p.coord_flip();
+let p = p.title("Coord Flip (horizontal bars)");
+p.save("gallery/38_coord_flip.svg");
+
+// --- 4.2 Coord Polar ---
+let p = vizor_plot_cat(pie_cats, pie_vals);
+let p = p.geom_pie();
+let p = p.coord_polar();
+let p = p.title("Coord Polar");
+p.save("gallery/39_coord_polar.svg");
+
+// --- 4.3 Log Scale X ---
+let p = vizor_plot(log_x, log_y);
+let p = p.geom_point();
+let p = p.geom_line();
+let p = p.scale_x_log(10.0);
+let p = p.title("Log Scale X (base 10)");
+let p = p.xlab("X (log)");
+let p = p.ylab("Y");
+p.save("gallery/40_scale_x_log.svg");
+
+// --- 4.4 Log Scale Y ---
+let p = vizor_plot(log_x, log_y);
+let p = p.geom_point();
+let p = p.geom_line();
+let p = p.scale_y_log(10.0);
+let p = p.title("Log Scale Y (base 10)");
+let p = p.xlab("X");
+let p = p.ylab("Y (log)");
+p.save("gallery/41_scale_y_log.svg");
+
+// --- 4.5 Log-Log Scale ---
+let p = vizor_plot(log_x, log_y);
+let p = p.geom_point();
+let p = p.geom_line();
+let p = p.scale_x_log(10.0);
+let p = p.scale_y_log(10.0);
+let p = p.title("Log-Log Scale");
+let p = p.xlab("X (log)");
+let p = p.ylab("Y (log)");
+p.save("gallery/42_scale_log_log.svg");
+
+// --- 4.6 X/Y Limits ---
+let p = vizor_plot(x, y);
+let p = p.geom_point();
+let p = p.xlim(0.0, 12.0);
+let p = p.ylim(0.0, 15.0);
+let p = p.title("Custom Axis Limits (xlim + ylim)");
+p.save("gallery/43_xlim_ylim.svg");
+
+// ============================================================================
+// 5. LABELS, SUBTITLE, SIZE
+// ============================================================================
+
+// --- 5.1 Subtitle ---
+let p = vizor_plot(x, y);
+let p = p.geom_point();
+let p = p.title("Title with Subtitle");
+let p = p.subtitle("Experiment results from Trial #42");
+let p = p.xlab("X Axis");
+let p = p.ylab("Y Axis");
+p.save("gallery/44_subtitle.svg");
+
+// --- 5.2 Custom Size ---
+let p = vizor_plot(x, y);
+let p = p.geom_point();
+let p = p.size(1200, 400);
+let p = p.title("Wide Custom Size (1200x400)");
+p.save("gallery/45_custom_size.svg");
+
+// ============================================================================
+// 6. COLOR SCALES
+// ============================================================================
+
+// --- 6.1 Diverging Color Scale ---
+let p = vizor_plot_matrix(matrix, row_labels, col_labels);
+let p = p.geom_tile();
+let p = p.scale_color_diverging();
+let p = p.show_values(true);
+let p = p.title("Diverging Color Scale");
+p.save("gallery/46_color_diverging.svg");
+
+// ============================================================================
+// 7. LEGEND
+// ============================================================================
+
+// --- 7.1 Multi-Layer (auto legend) ---
+let p = vizor_plot(x, y);
+let p = p.geom_point();
+let p = p.geom_line();
+let p = p.geom_area();
+let p = p.title("Auto Legend (3 layers)");
+p.save("gallery/47_legend_auto.svg");
+
+// --- 7.2 No Legend ---
+let p = vizor_plot(x, y);
+let p = p.geom_point();
+let p = p.geom_line();
+let p = p.no_legend();
+let p = p.title("Legend Disabled (no_legend)");
+p.save("gallery/48_no_legend.svg");
+
+// ============================================================================
+// 8. FIGURE-LEVEL FUNCTIONS
+// ============================================================================
+
+// --- 8.1 displot ---
+let p = vizor_displot(dist);
+let p = p.title("8.1 Distribution Plot (vizor_displot)");
+p.save("gallery/49_vizor_displot.svg");
+
+// --- 8.2 catplot: box ---
+let p = vizor_catplot(cats, vals, "box");
+let p = p.title("8.2 Catplot: Box");
+p.save("gallery/50_vizor_catplot_box.svg");
+
+// --- 8.3 catplot: violin ---
+let p = vizor_catplot(cats, vals, "violin");
+let p = p.title("8.3 Catplot: Violin");
+p.save("gallery/51_vizor_catplot_violin.svg");
+
+// --- 8.4 catplot: strip ---
+let p = vizor_catplot(cats, vals, "strip");
+let p = p.title("8.4 Catplot: Strip");
+p.save("gallery/52_vizor_catplot_strip.svg");
+
+// --- 8.5 catplot: swarm ---
+let p = vizor_catplot(cats, vals, "swarm");
+let p = p.title("8.5 Catplot: Swarm");
+p.save("gallery/53_vizor_catplot_swarm.svg");
+
+// --- 8.6 catplot: boxen ---
+let p = vizor_catplot(cats, vals, "boxen");
+let p = p.title("8.6 Catplot: Boxen");
+p.save("gallery/54_vizor_catplot_boxen.svg");
+
+// --- 8.7 catplot: bar ---
+let p = vizor_catplot(cats, vals, "bar");
+let p = p.title("8.7 Catplot: Bar");
+p.save("gallery/55_vizor_catplot_bar.svg");
+
+// --- 8.8 relplot: scatter ---
+let p = vizor_relplot(x, y, "scatter");
+let p = p.title("8.8 Relplot: Scatter");
+p.save("gallery/56_vizor_relplot_scatter.svg");
+
+// --- 8.9 relplot: line ---
+let p = vizor_relplot(x, y, "line");
+let p = p.title("8.9 Relplot: Line");
+p.save("gallery/57_vizor_relplot_line.svg");
+
+// --- 8.10 lmplot ---
+let p = vizor_lmplot(x, y);
+let p = p.title("8.10 Linear Model Plot (vizor_lmplot)");
+p.save("gallery/58_vizor_lmplot.svg");
+
+// --- 8.11 jointplot ---
+let p = vizor_jointplot(x, y);
+let p = p.title("8.11 Joint Plot (vizor_jointplot)");
+p.save("gallery/59_vizor_jointplot.svg");
+
+// --- 8.12 corr_matrix ---
+let p = vizor_corr_matrix([col_a, col_b, col_c], ["A", "B", "C"]);
+let p = p.title("8.12 Correlation Matrix (vizor_corr_matrix)");
+p.save("gallery/60_vizor_corr_matrix.svg");
+
+// --- 8.13 clustermap ---
+let p = vizor_clustermap([col_a, col_b, col_c], ["A", "B", "C"]);
+let p = p.title("8.13 Clustermap (vizor_clustermap)");
+p.save("gallery/61_vizor_clustermap.svg");
+
+// --- 8.14 pairplot ---
+let p = vizor_pairplot([col_a, col_b, col_c], ["A", "B", "C"]);
+let p = p.title("8.14 Pair Plot (vizor_pairplot)");
+p.save("gallery/62_vizor_pairplot.svg");
+
+// ============================================================================
+// 9. COMBINED / MULTI-LAYER PLOTS
+// ============================================================================
+
+// --- 9.1 Scatter + Regression + Annotations ---
+let p = vizor_plot(x, y);
+let p = p.geom_point();
+let p = p.geom_regression();
+let p = p.annotate_regression("y = 0.95x + 1.5", 0.94);
+let p = p.annotate_text("Outlier?", 4.0, 7.2);
+let p = p.annotate_event(5.0, "Midpoint");
+let p = p.annotate_data_note("Source: Lab Trial #42");
+let p = p.title("Scatter + Regression + All Annotations");
+let p = p.subtitle("Demonstrating combined annotation types");
+let p = p.xlab("Independent Variable");
+let p = p.ylab("Dependent Variable");
+p.save("gallery/63_combined_scatter_regression.svg");
+
+// --- 9.2 Histogram + Density + Rug ---
+let p = vizor_plot(dist, dist);
+let p = p.geom_histogram(10);
+let p = p.geom_density();
+let p = p.geom_rug();
+let p = p.title("Histogram + Density + Rug");
+let p = p.subtitle("Three-layer distribution view");
+p.save("gallery/64_combined_hist_density_rug.svg");
+
+// --- 9.3 Line + Area + Points ---
+let p = vizor_plot(x, y);
+let p = p.geom_area();
+let p = p.geom_line();
+let p = p.geom_point();
+let p = p.title("Area + Line + Points");
+let p = p.subtitle("Layered visualization");
+p.save("gallery/65_combined_area_line_point.svg");
+
+// --- 9.4 Points + Error Bars + Step ---
+let p = vizor_plot(err_x, err_y);
+let p = p.add_column("error", err_err);
+let p = p.geom_errorbar();
+let p = p.geom_point();
+let p = p.geom_step();
+let p = p.title("Error Bars + Points + Step");
+p.save("gallery/66_combined_error_point_step.svg");
+
+// --- 9.5 Box + Violin overlay ---
+let p = vizor_plot_cat(cats, vals);
+let p = p.geom_violin();
+let p = p.geom_box();
+let p = p.geom_strip();
+let p = p.title("Violin + Box + Strip Overlay");
+p.save("gallery/67_combined_violin_box_strip.svg");
+
+// ============================================================================
+// 10. THEME VARIATIONS ON DIFFERENT GEOMS
+// ============================================================================
+
+// --- 10.1 Bar chart with dark theme ---
+let p = vizor_plot_cat(pie_cats, pie_vals);
+let p = p.geom_bar();
+let p = p.theme_dark();
+let p = p.title("Bar Chart — Dark Theme");
+let p = p.xlab("Category");
+let p = p.ylab("Amount");
+p.save("gallery/68_bar_dark.svg");
+
+// --- 10.2 Histogram with minimal theme ---
+let p = vizor_plot(dist, dist);
+let p = p.geom_histogram(12);
+let p = p.theme_minimal();
+let p = p.title("Histogram — Minimal Theme");
+p.save("gallery/69_histogram_minimal.svg");
+
+// --- 10.3 Violin with publication theme ---
+let p = vizor_plot_cat(cats, vals);
+let p = p.geom_violin();
+let p = p.theme_publication();
+let p = p.title("Violin — Publication Theme");
+p.save("gallery/70_violin_publication.svg");
+
+// --- 10.4 Heatmap with dark theme ---
+let p = vizor_plot_matrix(matrix, row_labels, col_labels);
+let p = p.geom_tile();
+let p = p.show_values(true);
+let p = p.scale_color_diverging();
+let p = p.theme_dark();
+let p = p.title("Heatmap — Dark Theme");
+p.save("gallery/71_heatmap_dark.svg");
+
+// --- 10.5 Pie with minimal theme ---
+let p = vizor_plot_cat(pie_cats, pie_vals);
+let p = p.geom_pie();
+let p = p.theme_minimal();
+let p = p.title("Pie Chart — Minimal Theme");
+p.save("gallery/72_pie_minimal.svg");
+
+// --- 10.6 Radar with dark theme ---
+let p = vizor_plot_cat(radar_cats, radar_vals);
+let p = p.geom_radar();
+let p = p.theme_dark();
+let p = p.title("Radar — Dark Theme");
+p.save("gallery/73_radar_dark.svg");
+
+// --- 10.7 Step with publication theme ---
+let p = vizor_plot(step_x, step_y);
+let p = p.geom_step();
+let p = p.theme_publication();
+let p = p.title("Step Line — Publication Theme");
+p.save("gallery/74_step_publication.svg");
+
+// --- 10.8 ECDF with minimal theme ---
+let p = vizor_plot(dist, dist);
+let p = p.geom_ecdf();
+let p = p.theme_minimal();
+let p = p.title("ECDF — Minimal Theme");
+p.save("gallery/75_ecdf_minimal.svg");
+
+// --- 10.9 Density2d with dark theme ---
+let p = vizor_plot(d2_x, d2_y);
+let p = p.geom_density2d();
+let p = p.theme_dark();
+let p = p.title("2D Density — Dark Theme");
+p.save("gallery/76_density2d_dark.svg");
+
+// --- 10.10 Rose with publication theme ---
+let p = vizor_plot_cat(pie_cats, pie_vals);
+let p = p.geom_rose();
+let p = p.theme_publication();
+let p = p.title("Rose Chart — Publication Theme");
+p.save("gallery/77_rose_publication.svg");
+
+// ============================================================================
+// 11. DENSITY BANDWIDTH VARIATIONS
+// ============================================================================
+
+let p = vizor_plot(dist, dist);
+let p = p.geom_density_bw(0.3);
+let p = p.title("Density bw=0.3 (tight)");
+p.save("gallery/78_density_bw_tight.svg");
+
+let p = vizor_plot(dist, dist);
+let p = p.geom_density_bw(2.0);
+let p = p.title("Density bw=2.0 (smooth)");
+p.save("gallery/79_density_bw_smooth.svg");
+
+// ============================================================================
+// 12. ALL ANNOTATIONS ON ONE PLOT
+// ============================================================================
+
+let p = vizor_plot(x, y);
+let p = p.geom_point();
+let p = p.geom_line();
+let p = p.annotate_text("A text note", 3.0, 8.0);
+let p = p.annotate_regression("y = 0.95x + 1.5", 0.94);
+let p = p.annotate_ci(0.95, 2.3, 11.3);
+let p = p.annotate_pvalue(0.001);
+let p = p.annotate_event(7.0, "Event X");
+let p = p.annotate_note("Note: preliminary");
+let p = p.annotate_data_note("Source: simulation");
+let p = p.annotate_inline_label("Peak", 10.0, 11.3);
+let p = p.title("ALL Annotations Combined");
+let p = p.subtitle("Every annotation type on one plot");
+p.save("gallery/80_all_annotations.svg");
+
+print("Gallery complete! 80 SVG files saved to gallery/");

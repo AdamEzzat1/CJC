@@ -29,22 +29,22 @@ pub struct Theme {
 impl Default for Theme {
     fn default() -> Self {
         Theme {
-            margin_top: 40.0,
-            margin_right: 20.0,
+            margin_top: 45.0,
+            margin_right: 25.0,
             margin_bottom: 60.0,
             margin_left: 70.0,
             background: Color::WHITE,
-            plot_background: Color::WHITE,
-            axis_color: Color::DARK_GRAY,
-            grid_color: Color::LIGHT_GRAY,
-            text_color: Color::DARK_GRAY,
+            plot_background: Color::rgb(252, 252, 252), // Subtle off-white plot bg
+            axis_color: Color::rgb(80, 80, 80),
+            grid_color: Color::rgb(230, 230, 230),      // Lighter grid for clean look
+            text_color: Color::rgb(50, 50, 50),
             title_font_size: 16.0,
             axis_label_font_size: 12.0,
             tick_label_font_size: 10.0,
             font_width_ratio: 0.6,
             point_size: 4.0,
             line_width: 2.0,
-            grid_line_width: 0.5,
+            grid_line_width: 0.4,
             axis_line_width: 1.0,
             tick_length: 5.0,
         }
@@ -140,5 +140,51 @@ mod tests {
     fn test_minimal_theme() {
         let t = Theme::minimal();
         assert!(t.grid_line_width < Theme::default().grid_line_width);
+    }
+
+    // ── Phase 5 (Audit): verify updated default theme values ──
+
+    #[test]
+    fn test_default_theme_margins() {
+        let t = Theme::default();
+        assert_eq!(t.margin_top, 45.0, "margin_top should be 45");
+        assert_eq!(t.margin_right, 25.0, "margin_right should be 25");
+        assert_eq!(t.margin_bottom, 60.0);
+        assert_eq!(t.margin_left, 70.0);
+    }
+
+    #[test]
+    fn test_default_theme_colors() {
+        let t = Theme::default();
+        // Off-white plot background.
+        assert_eq!(t.plot_background, Color::rgb(252, 252, 252));
+        // Muted axis color.
+        assert_eq!(t.axis_color, Color::rgb(80, 80, 80));
+        // Light grid color.
+        assert_eq!(t.grid_color, Color::rgb(230, 230, 230));
+        // Dark text color.
+        assert_eq!(t.text_color, Color::rgb(50, 50, 50));
+    }
+
+    #[test]
+    fn test_default_theme_grid_line_width() {
+        let t = Theme::default();
+        assert!((t.grid_line_width - 0.4).abs() < 1e-10, "grid_line_width should be 0.4");
+    }
+
+    #[test]
+    fn test_publication_theme_has_no_gridlines() {
+        let t = Theme::publication();
+        // Publication theme should have thinner or zero grid lines.
+        assert!(t.grid_line_width <= 0.5);
+    }
+
+    #[test]
+    fn test_dark_theme_dark_background() {
+        let t = Theme::dark();
+        assert_eq!(t.background, Color::rgb(32, 32, 32));
+        assert_eq!(t.plot_background, Color::rgb(40, 40, 40));
+        // Text should be light.
+        assert!(t.text_color.r > 150);
     }
 }

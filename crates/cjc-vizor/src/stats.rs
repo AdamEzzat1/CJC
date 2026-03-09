@@ -183,7 +183,7 @@ pub fn letter_value_stats(values: &[f64]) -> Vec<(f64, f64)> {
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     let n = sorted.len();
-    // Number of letter-value levels: floor(log2(n)) - 1, minimum 1.
+    // Number of letter-value levels: floor(log2(n)), minimum 1.
     let k = ((n as f64).log2().floor() as usize).max(1);
 
     let mut levels = Vec::with_capacity(k);
@@ -191,6 +191,9 @@ pub fn letter_value_stats(values: &[f64]) -> Vec<(f64, f64)> {
         let p = 0.5_f64.powi(i as i32);
         let lo = quantile(&sorted, p);
         let hi = quantile(&sorted, 1.0 - p);
+        // Skip degenerate levels where lo ≈ hi (e.g., the median-only level).
+        // The median is drawn as a separate line in the renderer.
+        if (hi - lo).abs() < 1e-12 { continue; }
         levels.push((lo, hi));
     }
     levels
@@ -877,5 +880,74 @@ mod tests {
         assert!((van_der_corput(1) - 0.5).abs() < 1e-10);
         assert!((van_der_corput(2) - 0.25).abs() < 1e-10);
         assert!((van_der_corput(3) - 0.75).abs() < 1e-10);
+    }
+
+    // ── Phase 5 (Audit): letter_value_stats degenerate level fix ──
+
+    #[test]
+    fn test_letter_value_stats_small_group() {
+        // With only 5 identical values, the median level lo==hi should be skipped.
+        let values = vec![3.0, 3.0, 3.0, 3.0, 3.0];
+        let lvs = letter_value_stats(&values);
+        // All levels should have lo < hi (no degenerate boxes).
+        for &(lo, hi) in &lvs {
+            assert!(hi - lo > 1e-12,
+                "Degenerate level found: lo={}, hi={}", lo, hi);
+        }
+    }
+
+    #[test]
+    fn test_letter_value_stats_five_distinct() {
+        // 5 distinct values: median is the middle one.
+        let values = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let lvs = letter_value_stats(&values);
+        // Levels with lo == hi == median should be filtered out.
+        for &(lo, hi) in &lvs {
+            assert!(hi - lo > 1e-12,
+                "Degenerate level found: lo={}, hi={}", lo, hi);
+        }
+        // There should be at least one valid level (the full range).
+        assert!(!lvs.is_empty());
+        // Outermost level should span near the full range.
+        assert!(lvs[0].0 <= 2.0);
+        assert!(lvs[0].1 >= 4.0);
+    }
+
+    #[test]
+    fn test_letter_value_stats_empty() {
+        let lvs = letter_value_stats(&[]);
+        assert!(lvs.is_empty());
+    }
+
+    #[test]
+    fn test_letter_value_stats_single_value() {
+        let lvs = letter_value_stats(&[42.0]);
+        // A single value means all levels lo==hi, so all are filtered.
+        for &(lo, hi) in &lvs {
+            assert!(hi - lo > 1e-12,
+                "Degenerate level found: lo={}, hi={}", lo, hi);
+        }
+    }
+
+    #[test]
+    fn test_letter_value_stats_deterministic() {
+        let values: Vec<f64> = (0..50).map(|i| i as f64).collect();
+        let a = letter_value_stats(&values);
+        let b = letter_value_stats(&values);
+        assert_eq!(a, b, "letter_value_stats should be deterministic");
+    }
+
+    // ── Phase 5 (Audit): group_by_category preserves first-seen order ──
+
+    #[test]
+    fn test_group_by_category_first_seen_order() {
+        let cats = vec!["Z".to_string(), "A".to_string(), "M".to_string(), "A".to_string(), "Z".to_string()];
+        let vals = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let (unique, groups) = group_by_category(&cats, &vals);
+        // First-seen order: Z, A, M (not alphabetically sorted).
+        assert_eq!(unique, vec!["Z", "A", "M"]);
+        assert_eq!(groups[0], vec![1.0, 5.0]); // Z
+        assert_eq!(groups[1], vec![2.0, 4.0]); // A
+        assert_eq!(groups[2], vec![3.0]);       // M
     }
 }

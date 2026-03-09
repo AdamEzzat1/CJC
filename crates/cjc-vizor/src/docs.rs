@@ -374,6 +374,12 @@ pub fn vizor_docs() -> Vec<DocEntry> {
             description: "Set y-axis to logarithmic scale with the given base (default 10).",
             kind: DocKind::Method,
         },
+        DocEntry {
+            name: "add_column",
+            signature: ".add_column(name: String, values: Array<f64>) -> VizorPlot",
+            description: "Add or replace a named data column (e.g., error bars).",
+            kind: DocKind::Method,
+        },
     ]
 }
 
@@ -408,6 +414,7 @@ pub const VIZOR_METHOD_NAMES: &[&str] = &[
     "no_legend", "subtitle",
     "scale_x_log", "scale_y_log",
     "scale_color_diverging", "show_values",
+    "add_column",
     "facet_wrap", "facet_wrap_ncol", "facet_grid",
     "title", "xlab", "ylab", "xlim", "ylim",
     "theme_minimal", "theme_publication", "theme_dark",

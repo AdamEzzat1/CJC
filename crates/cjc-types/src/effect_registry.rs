@@ -654,6 +654,7 @@ pub fn builtin_effects() -> HashMap<&'static str, EffectSet> {
         "VizorPlot.no_legend", "VizorPlot.subtitle",
         "VizorPlot.scale_x_log", "VizorPlot.scale_y_log",
         "VizorPlot.scale_color_diverging", "VizorPlot.show_values",
+        "VizorPlot.add_column",
         "VizorPlot.facet_wrap", "VizorPlot.facet_wrap_ncol", "VizorPlot.facet_grid",
         "VizorPlot.title", "VizorPlot.xlab", "VizorPlot.ylab",
         "VizorPlot.xlim", "VizorPlot.ylim",

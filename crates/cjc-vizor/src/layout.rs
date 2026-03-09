@@ -72,6 +72,61 @@ impl LayoutResult {
     }
 }
 
+/// Geom types that use categorical x-axis grouping.
+const CAT_GEOMS: &[crate::spec::Geom] = &[
+    crate::spec::Geom::Box,
+    crate::spec::Geom::Violin,
+    crate::spec::Geom::Strip,
+    crate::spec::Geom::Swarm,
+    crate::spec::Geom::Boxen,
+];
+
+/// Geom types that are polar (bypass Cartesian axis system).
+const POLAR_GEOMS: &[crate::spec::Geom] = &[
+    crate::spec::Geom::Pie,
+    crate::spec::Geom::Rose,
+    crate::spec::Geom::Radar,
+];
+
+/// Returns true if any layer uses a categorical geom.
+fn has_categorical_geom(spec: &PlotSpec) -> bool {
+    spec.layers.iter().any(|l| CAT_GEOMS.contains(&l.geom))
+}
+
+/// Returns true if all geom layers are polar (pie/rose/radar).
+pub fn is_all_polar(spec: &PlotSpec) -> bool {
+    !spec.layers.is_empty() && spec.layers.iter().all(|l| POLAR_GEOMS.contains(&l.geom))
+}
+
+/// Returns true if all geom layers are tile/heatmap (own axis rendering).
+pub fn is_all_tile(spec: &PlotSpec) -> bool {
+    !spec.layers.is_empty() && spec.layers.iter().all(|l| l.geom == crate::spec::Geom::Tile)
+}
+
+/// Returns true if all geom layers are dendrogram (own axis rendering).
+pub fn is_all_dendrogram(spec: &PlotSpec) -> bool {
+    !spec.layers.is_empty() && spec.layers.iter().all(|l| l.geom == crate::spec::Geom::Dendrogram)
+}
+
+/// Compute unique categories from a discrete x-column (first-seen order).
+/// Returns (unique_labels, unique_count).
+fn unique_categories(spec: &PlotSpec) -> (Vec<String>, usize) {
+    if let Some(col) = spec.data.get("x") {
+        if col.is_discrete() {
+            let labels = col.labels();
+            let mut unique = Vec::new();
+            for l in &labels {
+                if !unique.contains(l) {
+                    unique.push(l.clone());
+                }
+            }
+            let n = unique.len();
+            return (unique, n);
+        }
+    }
+    (vec![], 0)
+}
+
 /// Compute layout from a plot spec.
 pub fn compute_layout(spec: &PlotSpec) -> LayoutResult {
     let theme = &spec.theme;
@@ -82,23 +137,40 @@ pub fn compute_layout(spec: &PlotSpec) -> LayoutResult {
     let plot_w = spec.width as f64 - theme.margin_left - theme.margin_right;
     let plot_h = spec.height as f64 - theme.margin_top - theme.margin_bottom;
 
+    // Detect categorical geom usage (box, violin, strip, swarm, boxen).
+    let has_cat = has_categorical_geom(spec);
+
     // Determine data ranges from all layers.
     let (mut x_min, mut x_max, mut y_min, mut y_max) = (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
     let mut x_discrete = false;
 
+    // Track whether we have only residual layers (to avoid contamination from raw y data).
+    let has_residual_only = spec.layers.iter().all(|l| l.geom == crate::spec::Geom::Residual);
+
     for layer in &spec.layers {
+        // Skip general x/y scan for residual-only plots (they compute their own range).
+        if has_residual_only { break; }
+
         if let Some(ref x_col) = layer.aes.x {
             if let Some(col) = spec.data.get(x_col) {
                 x_discrete = col.is_discrete();
-                let vals = col.to_f64();
-                for &v in &vals {
-                    if v.is_finite() {
-                        if v < x_min { x_min = v; }
-                        if v > x_max { x_max = v; }
+
+                // For categorical geoms with discrete x, use unique category count.
+                if has_cat && x_discrete {
+                    // x range will be set below from unique categories.
+                } else {
+                    let vals = col.to_f64();
+                    for &v in &vals {
+                        if v.is_finite() {
+                            if v < x_min { x_min = v; }
+                            if v > x_max { x_max = v; }
+                        }
                     }
                 }
             }
         }
+        // Skip y scan for layers that compute their own y range.
+        if layer.geom == crate::spec::Geom::Residual { continue; }
         if let Some(ref y_col) = layer.aes.y {
             if let Some(col) = spec.data.get(y_col) {
                 let vals = col.to_f64();
@@ -111,6 +183,18 @@ pub fn compute_layout(spec: &PlotSpec) -> LayoutResult {
             }
         }
     }
+
+    // ── Categorical geom x-range: use unique category count ────────────
+    let (cat_labels, n_cats) = if has_cat && x_discrete {
+        let (labels, n) = unique_categories(spec);
+        if n > 0 {
+            x_min = 0.0;
+            x_max = (n as f64) - 1.0;
+        }
+        (labels, n)
+    } else {
+        (vec![], 0)
+    };
 
     // Handle histogram: compute bins and y range.
     for layer in &spec.layers {
@@ -165,17 +249,27 @@ pub fn compute_layout(spec: &PlotSpec) -> LayoutResult {
         }
     }
 
-    // Handle categorical geoms: compute y range from grouped data.
-    let cat_geoms = [
-        crate::spec::Geom::Box,
-        crate::spec::Geom::Violin,
-        crate::spec::Geom::Strip,
-        crate::spec::Geom::Swarm,
-        crate::spec::Geom::Boxen,
-    ];
+    // Handle error bars: expand y range to include y ± error.
     for layer in &spec.layers {
-        if cat_geoms.contains(&layer.geom) {
-            // For categorical geoms, y-range comes from all y-values.
+        if layer.geom == crate::spec::Geom::ErrorBar {
+            let error_col_name = layer.params.error_column.as_deref().unwrap_or("error");
+            if let (Some(y_data), Some(err_data)) = (spec.data.get("y"), spec.data.get(error_col_name)) {
+                let yv = y_data.to_f64();
+                let ev = err_data.to_f64();
+                let n = yv.len().min(ev.len());
+                for i in 0..n {
+                    let lo = yv[i] - ev[i].abs();
+                    let hi = yv[i] + ev[i].abs();
+                    if lo.is_finite() && lo < y_min { y_min = lo; }
+                    if hi.is_finite() && hi > y_max { y_max = hi; }
+                }
+            }
+        }
+    }
+
+    // Handle categorical geoms: compute y range from grouped data.
+    for layer in &spec.layers {
+        if CAT_GEOMS.contains(&layer.geom) {
             if let Some(col) = spec.data.get("y") {
                 let vals = col.to_f64();
                 for &v in &vals {
@@ -188,7 +282,7 @@ pub fn compute_layout(spec: &PlotSpec) -> LayoutResult {
         }
     }
 
-    // Handle residual plots: y-range from residuals.
+    // Handle residual plots: y-range from RESIDUALS ONLY (not raw y data).
     for layer in &spec.layers {
         if layer.geom == crate::spec::Geom::Residual {
             if let (Some(x_data), Some(y_data)) = (spec.data.get("x"), spec.data.get("y")) {
@@ -196,8 +290,18 @@ pub fn compute_layout(spec: &PlotSpec) -> LayoutResult {
                 let yv = y_data.to_f64();
                 let n = xv.len().min(yv.len());
                 if n >= 2 {
+                    // Set x range from the x data.
+                    for &v in &xv[..n] {
+                        if v.is_finite() {
+                            if v < x_min { x_min = v; }
+                            if v > x_max { x_max = v; }
+                        }
+                    }
                     let (slope, intercept, _) = crate::stats::linear_regression(&xv[..n], &yv[..n]);
                     let resid = crate::stats::residuals(&xv[..n], &yv[..n], slope, intercept);
+                    // RESET y range to residuals only (not contaminated by raw y).
+                    y_min = f64::INFINITY;
+                    y_max = f64::NEG_INFINITY;
                     for &r in &resid {
                         if r.is_finite() {
                             if r < y_min { y_min = r; }
@@ -207,16 +311,51 @@ pub fn compute_layout(spec: &PlotSpec) -> LayoutResult {
                     // Ensure zero line is visible.
                     if 0.0 < y_min { y_min = 0.0; }
                     if 0.0 > y_max { y_max = 0.0; }
+                    // Add 15% padding so residual points don't touch edges.
+                    let r_range = y_max - y_min;
+                    y_min -= r_range * 0.15;
+                    y_max += r_range * 0.15;
                 }
             }
         }
     }
 
-    // Handle dendrogram: y-range is [0, 1] (normalized distance).
+    // Handle dendrogram: set BOTH x and y ranges properly.
     for layer in &spec.layers {
         if layer.geom == crate::spec::Geom::Dendrogram {
+            // X range: 0 to n_leaves-1 (leaf positions).
+            let n_leaves = match spec.data.get("__nrows") {
+                Some(crate::spec::DataColumn::Int(v)) if !v.is_empty() => v[0] as usize,
+                _ => 3,
+            };
+            x_min = 0.0;
+            x_max = (n_leaves as f64 - 1.0).max(1.0);
+            // Y range: 0 to 1 (normalized distance).
             y_min = 0.0;
-            if 1.0 > y_max { y_max = 1.0; }
+            y_max = 1.0;
+        }
+    }
+
+    // Handle Density2d/Contour: expand x/y range to include KDE grid extent.
+    for layer in &spec.layers {
+        if layer.geom == crate::spec::Geom::Density2d || layer.geom == crate::spec::Geom::Contour {
+            if let (Some(x_data), Some(y_data)) = (spec.data.get("x"), spec.data.get("y")) {
+                let xv = x_data.to_f64();
+                let yv = y_data.to_f64();
+                let n = xv.len().min(yv.len());
+                if n >= 3 {
+                    let grid_size = layer.params.grid_size;
+                    let (x_grid, y_grid, _) = crate::stats::kde_2d(&xv[..n], &yv[..n], grid_size);
+                    if let (Some(&gx_min), Some(&gx_max)) = (x_grid.first(), x_grid.last()) {
+                        if gx_min < x_min { x_min = gx_min; }
+                        if gx_max > x_max { x_max = gx_max; }
+                    }
+                    if let (Some(&gy_min), Some(&gy_max)) = (y_grid.first(), y_grid.last()) {
+                        if gy_min < y_min { y_min = gy_min; }
+                        if gy_max > y_max { y_max = gy_max; }
+                    }
+                }
+            }
         }
     }
 
@@ -240,7 +379,7 @@ pub fn compute_layout(spec: &PlotSpec) -> LayoutResult {
     if (x_max - x_min).abs() < 1e-15 { x_min -= 0.5; x_max += 0.5; }
     if (y_max - y_min).abs() < 1e-15 { y_min -= 0.5; y_max += 0.5; }
 
-    // Add padding for bars.
+    // Add padding for discrete/categorical axes.
     if x_discrete {
         x_min -= 0.5;
         x_max += 0.5;
@@ -252,6 +391,9 @@ pub fn compute_layout(spec: &PlotSpec) -> LayoutResult {
 
     if let Some(base) = x_log {
         x_ticks_raw = log_ticks(x_min, x_max, base);
+    } else if has_cat && n_cats > 0 {
+        // Categorical: one tick per unique category (don't use nice_ticks).
+        x_ticks_raw = (0..n_cats).map(|i| i as f64).collect();
     } else {
         x_ticks_raw = nice_ticks(x_min, x_max, 7);
     }
@@ -262,19 +404,33 @@ pub fn compute_layout(spec: &PlotSpec) -> LayoutResult {
         y_ticks_raw = nice_ticks(y_min, y_max, 7);
     }
 
-    // Expand range to include tick endpoints.
-    if let Some(&first) = x_ticks_raw.first() { if first < x_min { x_min = first; } }
-    if let Some(&last) = x_ticks_raw.last() { if last > x_max { x_max = last; } }
+    // Expand range to include tick endpoints (only for non-categorical axes).
+    if !(has_cat && n_cats > 0) {
+        if let Some(&first) = x_ticks_raw.first() { if first < x_min { x_min = first; } }
+        if let Some(&last) = x_ticks_raw.last() { if last > x_max { x_max = last; } }
+    }
     if let Some(&first) = y_ticks_raw.first() { if first < y_min { y_min = first; } }
     if let Some(&last) = y_ticks_raw.last() { if last > y_max { y_max = last; } }
 
     // Format tick labels.
-    let x_ticks: Vec<(f64, String)> = if x_discrete {
+    let x_ticks: Vec<(f64, String)> = if has_cat && n_cats > 0 {
+        // Use unique category labels (one per category, centered).
+        cat_labels.into_iter().enumerate()
+            .map(|(i, l)| (i as f64, l))
+            .collect()
+    } else if x_discrete {
         if let Some(col) = spec.data.get("x") {
             let labels = col.labels();
-            labels.into_iter().enumerate()
-                .map(|(i, l)| (i as f64, l))
-                .collect()
+            // Deduplicate: only unique labels with first-seen position.
+            let mut seen = Vec::new();
+            let mut ticks = Vec::new();
+            for (i, l) in labels.into_iter().enumerate() {
+                if !seen.contains(&l) {
+                    ticks.push((i as f64, l.clone()));
+                    seen.push(l);
+                }
+            }
+            ticks
         } else {
             x_ticks_raw.iter().map(|&v| (v, format_tick(v))).collect()
         }
@@ -482,5 +638,190 @@ mod tests {
         let (min, max) = data_range(&[1.0, f64::NAN, 3.0, f64::INFINITY, 2.0]);
         assert_eq!(min, 1.0);
         assert_eq!(max, 3.0);
+    }
+
+    // ── Phase 5 (Audit): is_all_polar / is_all_tile / is_all_dendrogram ──
+
+    #[test]
+    fn test_is_all_polar_pie() {
+        let spec = PlotSpec::from_cat(
+            vec!["A".into(), "B".into(), "C".into()],
+            vec![30.0, 50.0, 20.0],
+        ).geom_pie();
+        assert!(is_all_polar(&spec));
+    }
+
+    #[test]
+    fn test_is_all_polar_mixed() {
+        let spec = PlotSpec::from_cat(
+            vec!["A".into(), "B".into(), "C".into()],
+            vec![30.0, 50.0, 20.0],
+        ).geom_pie().geom_bar();
+        assert!(!is_all_polar(&spec), "mixed polar+cartesian should not be all-polar");
+    }
+
+    #[test]
+    fn test_is_all_polar_empty() {
+        let spec = PlotSpec::from_xy(vec![1.0], vec![2.0]);
+        assert!(!is_all_polar(&spec), "no layers means not all-polar");
+    }
+
+    #[test]
+    fn test_is_all_tile() {
+        use crate::spec::PlotData;
+        let spec = PlotSpec::from_matrix(
+            vec![vec![1.0, 2.0], vec![3.0, 4.0]],
+            vec!["r0".into(), "r1".into()],
+            vec!["c0".into(), "c1".into()],
+        ).geom_tile();
+        assert!(is_all_tile(&spec));
+    }
+
+    #[test]
+    fn test_is_all_dendrogram() {
+        let spec = PlotSpec::from_matrix(
+            vec![vec![0.0, 1.0, 5.0], vec![1.0, 0.0, 4.0], vec![5.0, 4.0, 0.0]],
+            vec!["A".into(), "B".into(), "C".into()],
+            vec!["A".into(), "B".into(), "C".into()],
+        ).geom_dendrogram();
+        assert!(is_all_dendrogram(&spec));
+    }
+
+    // ── Phase 5 (Audit): categorical layout ──
+
+    #[test]
+    fn test_categorical_layout_x_range() {
+        let spec = PlotSpec::from_cat(
+            vec!["A".into(), "B".into(), "C".into()],
+            vec![10.0, 20.0, 30.0],
+        ).geom_box();
+        let layout = compute_layout(&spec);
+        // With 3 categories (0, 1, 2), discrete padding adds ±0.5.
+        assert_eq!(layout.x_min, -0.5);
+        assert_eq!(layout.x_max, 2.5);
+        assert!(layout.x_discrete);
+    }
+
+    #[test]
+    fn test_categorical_layout_preserves_first_seen_order() {
+        let spec = PlotSpec::from_cat(
+            vec!["C".into(), "A".into(), "B".into(), "A".into(), "C".into()],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0],
+        ).geom_box();
+        let layout = compute_layout(&spec);
+        // Tick labels should preserve first-seen order: C, A, B.
+        let labels: Vec<&str> = layout.x_ticks.iter().map(|(_, l)| l.as_str()).collect();
+        assert_eq!(labels, vec!["C", "A", "B"]);
+    }
+
+    // ── Phase 5 (Audit): error bar y-range expansion ──
+
+    #[test]
+    fn test_errorbar_y_range_expansion() {
+        use crate::spec::DataColumn;
+        let spec = PlotSpec::from_xy(
+            vec![1.0, 2.0, 3.0],
+            vec![10.0, 20.0, 30.0],
+        ).add_column("error", DataColumn::Float(vec![5.0, 5.0, 5.0]))
+         .geom_errorbar();
+        let layout = compute_layout(&spec);
+        // y range should include y-error=5 and y+error=35.
+        assert!(layout.y_min <= 5.0, "y_min should include y-error: {}", layout.y_min);
+        assert!(layout.y_max >= 35.0, "y_max should include y+error: {}", layout.y_max);
+    }
+
+    #[test]
+    fn test_errorbar_custom_col_y_range() {
+        use crate::spec::DataColumn;
+        let spec = PlotSpec::from_xy(
+            vec![1.0, 2.0],
+            vec![10.0, 20.0],
+        ).add_column("custom_err", DataColumn::Float(vec![8.0, 3.0]))
+         .geom_errorbar_col("custom_err");
+        let layout = compute_layout(&spec);
+        // y range should include y-error=2 and y+error=23.
+        assert!(layout.y_min <= 2.0, "y_min should include y-error: {}", layout.y_min);
+        assert!(layout.y_max >= 23.0, "y_max should include y+error: {}", layout.y_max);
+    }
+
+    // ── Phase 5 (Audit): residual y-range isolation ──
+
+    #[test]
+    fn test_residual_y_range_isolated() {
+        // y = 2x, so residuals are all 0. y-range should NOT include raw y values.
+        let spec = PlotSpec::from_xy(
+            vec![1.0, 2.0, 3.0, 4.0, 5.0],
+            vec![2.0, 4.0, 6.0, 8.0, 10.0],
+        ).geom_residplot();
+        let layout = compute_layout(&spec);
+        // Perfect linear fit → residuals all near 0.
+        // y range should be near 0, NOT 2-10.
+        assert!(layout.y_max < 5.0, "Residual y_max should be small, not raw y range: {}", layout.y_max);
+        assert!(layout.y_min > -5.0, "Residual y_min should be small, not raw y range: {}", layout.y_min);
+    }
+
+    // ── Phase 5 (Audit): dendrogram x-range ──
+
+    #[test]
+    fn test_dendrogram_layout_ranges() {
+        let spec = PlotSpec::from_matrix(
+            vec![
+                vec![0.0, 1.0, 5.0, 9.0],
+                vec![1.0, 0.0, 4.0, 8.0],
+                vec![5.0, 4.0, 0.0, 3.0],
+                vec![9.0, 8.0, 3.0, 0.0],
+            ],
+            vec!["A".into(), "B".into(), "C".into(), "D".into()],
+            vec!["A".into(), "B".into(), "C".into(), "D".into()],
+        ).geom_dendrogram();
+        let layout = compute_layout(&spec);
+        // x range: 0 to n_leaves-1 = 3
+        assert_eq!(layout.x_min, 0.0);
+        assert_eq!(layout.x_max, 3.0);
+        // y range: 0 to 1 (normalized)
+        assert_eq!(layout.y_min, 0.0);
+        assert_eq!(layout.y_max, 1.0);
+    }
+
+    // ── Phase 5 (Audit): map_x / map_y correctness ──
+
+    #[test]
+    fn test_map_x_linear() {
+        let layout = LayoutResult {
+            plot_x: 100.0, plot_y: 50.0, plot_w: 400.0, plot_h: 300.0,
+            x_min: 0.0, x_max: 10.0, y_min: 0.0, y_max: 100.0,
+            x_ticks: vec![], y_ticks: vec![], x_discrete: false,
+            x_log: None, y_log: None,
+        };
+        assert!((layout.map_x(0.0) - 100.0).abs() < 1e-10);
+        assert!((layout.map_x(10.0) - 500.0).abs() < 1e-10);
+        assert!((layout.map_x(5.0) - 300.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_map_y_linear() {
+        let layout = LayoutResult {
+            plot_x: 100.0, plot_y: 50.0, plot_w: 400.0, plot_h: 300.0,
+            x_min: 0.0, x_max: 10.0, y_min: 0.0, y_max: 100.0,
+            x_ticks: vec![], y_ticks: vec![], x_discrete: false,
+            x_log: None, y_log: None,
+        };
+        // y=0 maps to bottom (plot_y + plot_h), y=100 maps to top (plot_y).
+        assert!((layout.map_y(0.0) - 350.0).abs() < 1e-10);
+        assert!((layout.map_y(100.0) - 50.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_map_y_clamped_by_renderer() {
+        // This tests that mapped y values outside plot bounds are finite
+        // (the renderer clamps them; layout just maps).
+        let layout = LayoutResult {
+            plot_x: 100.0, plot_y: 50.0, plot_w: 400.0, plot_h: 300.0,
+            x_min: 0.0, x_max: 10.0, y_min: 0.0, y_max: 100.0,
+            x_ticks: vec![], y_ticks: vec![], x_discrete: false,
+            x_log: None, y_log: None,
+        };
+        let out_of_range = layout.map_y(-50.0);
+        assert!(out_of_range.is_finite(), "Out-of-range map_y should be finite");
     }
 }

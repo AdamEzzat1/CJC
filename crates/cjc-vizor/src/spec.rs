@@ -575,6 +575,23 @@ impl PlotSpec {
         self
     }
 
+    /// Add (or replace) a named data column.
+    ///
+    /// This is useful for attaching additional data (like error magnitudes)
+    /// after initial construction:
+    /// ```text
+    /// plot.add_column("error", DataColumn::Float(vec![0.1, 0.2, 0.3]))
+    /// ```
+    pub fn add_column(mut self, name: &str, col: DataColumn) -> Self {
+        // Replace existing column with the same name, or append.
+        if let Some(pos) = self.data.columns.iter().position(|(n, _)| n == name) {
+            self.data.columns[pos] = (name.to_string(), col);
+        } else {
+            self.data.columns.push((name.to_string(), col));
+        }
+        self
+    }
+
     /// Add an annotation.
     pub fn annotate(mut self, ann: Annotation) -> Self {
         self.annotations.push(ann);
@@ -913,5 +930,49 @@ mod tests {
         };
         assert!(d.get("x").is_some());
         assert!(d.get("z").is_none());
+    }
+
+    // ── Phase 5 (Audit): add_column method ──
+
+    #[test]
+    fn test_add_column_new() {
+        let spec = PlotSpec::from_xy(vec![1.0, 2.0], vec![3.0, 4.0])
+            .add_column("error", DataColumn::Float(vec![0.5, 1.0]));
+        assert!(spec.data.get("error").is_some());
+        let col = spec.data.get("error").unwrap();
+        assert_eq!(col.len(), 2);
+    }
+
+    #[test]
+    fn test_add_column_replaces_existing() {
+        let spec = PlotSpec::from_xy(vec![1.0, 2.0], vec![3.0, 4.0])
+            .add_column("y", DataColumn::Float(vec![10.0, 20.0]));
+        // y column should be replaced, not duplicated.
+        let y_count = spec.data.columns.iter().filter(|(n, _)| n == "y").count();
+        assert_eq!(y_count, 1, "Should have exactly one 'y' column after replace");
+        let col = spec.data.get("y").unwrap();
+        let vals = col.to_f64();
+        assert_eq!(vals, vec![10.0, 20.0]);
+    }
+
+    #[test]
+    fn test_add_column_preserves_other_columns() {
+        let spec = PlotSpec::from_xy(vec![1.0, 2.0], vec![3.0, 4.0])
+            .add_column("extra", DataColumn::Float(vec![5.0, 6.0]));
+        // x and y should still exist.
+        assert!(spec.data.get("x").is_some());
+        assert!(spec.data.get("y").is_some());
+        assert!(spec.data.get("extra").is_some());
+        assert_eq!(spec.data.columns.len(), 3);
+    }
+
+    #[test]
+    fn test_add_column_chain() {
+        let spec = PlotSpec::from_xy(vec![1.0], vec![2.0])
+            .add_column("a", DataColumn::Float(vec![3.0]))
+            .add_column("b", DataColumn::Float(vec![4.0]));
+        assert!(spec.data.get("a").is_some());
+        assert!(spec.data.get("b").is_some());
+        assert_eq!(spec.data.columns.len(), 4);
     }
 }
