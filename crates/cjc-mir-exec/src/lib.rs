@@ -478,6 +478,7 @@ impl MirExecutor {
                     },
                     is_nogc: false,
                     cfg_body: None,
+                    decorators: vec![],
                 };
                 self.functions.insert(lambda_name.clone(), Rc::new(mir_fn));
                 Ok(Value::Fn(cjc_runtime::FnValue {
@@ -2850,6 +2851,27 @@ impl MirExecutor {
                         graph.zero_grad();
                         Ok(Value::Void)
                     }
+                    "jacobian" => {
+                        if args.len() != 2 { return Err(MirExecError::Runtime("jacobian requires 2 args: output_idx, param_idx".into())); }
+                        let output_idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int".into())) };
+                        let param_idx = match &args[1] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int".into())) };
+                        let mut borrow = inner.borrow_mut();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let jac = graph.jacobian(output_idx, param_idx);
+                        Ok(Value::Tensor(jac))
+                    }
+                    "hessian_diag" => {
+                        if args.len() < 2 || args.len() > 3 { return Err(MirExecError::Runtime("hessian_diag requires 2-3 args: loss_idx, param_idx[, eps]".into())); }
+                        let loss_idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int".into())) };
+                        let param_idx = match &args[1] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int".into())) };
+                        let eps = if args.len() == 3 {
+                            match &args[2] { Value::Float(f) => *f, _ => return Err(MirExecError::Runtime("expected Float for eps".into())) }
+                        } else { 1e-5 };
+                        let mut borrow = inner.borrow_mut();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let hd = graph.hessian_diag(loss_idx, param_idx, eps);
+                        Ok(Value::Tensor(hd))
+                    }
                     _ => Err(MirExecError::Runtime(format!("no method `{method}` on GradGraph"))),
                 }
             }
@@ -2935,19 +2957,58 @@ impl MirExecutor {
                 MirExecError::Runtime(format!("undefined function `{}`", current_name))
             })?;
 
-            if func.params.len() != current_args.len() {
+            // Count required params (those without defaults).
+            let required = func.params.iter().filter(|p| p.default.is_none()).count();
+            if current_args.len() < required || current_args.len() > func.params.len() {
                 return Err(MirExecError::Runtime(format!(
-                    "function `{}` expects {} arguments, got {}",
+                    "function `{}` expects {}{} arguments, got {}",
                     current_name,
-                    func.params.len(),
+                    required,
+                    if required < func.params.len() {
+                        format!("-{}", func.params.len())
+                    } else {
+                        String::new()
+                    },
                     current_args.len()
                 )));
             }
 
+            // --- Decorator: @memoize — check cache before executing ---
+            let has_memoize = func.decorators.iter().any(|d| d == "memoize");
+            let has_trace = func.decorators.iter().any(|d| d == "trace");
+
+            if has_memoize {
+                let key_tuple = Value::Tuple(Rc::new(current_args.clone()));
+                let key_hash = cjc_snap::snap(&key_tuple).content_hash;
+                if let Some(cached) = self.memo_cache.get(&key_hash) {
+                    if has_trace {
+                        let args_str: Vec<String> = current_args.iter().map(|a| format!("{a:?}")).collect();
+                        self.output.push(format!("[trace] {}({}) => {:?} (cached)", current_name, args_str.join(", "), cached));
+                    }
+                    return Ok(cached.clone());
+                }
+            }
+
+            // --- Decorator: @trace — log entry ---
+            if has_trace {
+                let args_str: Vec<String> = current_args.iter().map(|a| format!("{a:?}")).collect();
+                self.output.push(format!("[trace] {}({}) enter", current_name, args_str.join(", ")));
+            }
+
             self.push_scope();
             self.arena_stack.push(cjc_runtime::ArenaStore::new());
-            for (param, val) in func.params.iter().zip(current_args.iter()) {
-                self.define(&param.name, val.clone());
+            // Bind parameters: use provided args, then fall back to defaults.
+            for (i, param) in func.params.iter().enumerate() {
+                let val = if i < current_args.len() {
+                    current_args[i].clone()
+                } else if let Some(ref default_expr) = param.default {
+                    self.eval_expr(default_expr)?
+                } else {
+                    return Err(MirExecError::Runtime(format!(
+                        "missing required argument `{}`", param.name
+                    )));
+                };
+                self.define(&param.name, val);
             }
 
             // Track which function we're in for TCO detection.
@@ -2979,6 +3040,19 @@ impl MirExecutor {
             self.arena_stack.pop();
             self.pop_scope();
             self.current_fn = prev_fn;
+
+            // --- Decorator: @trace — log exit ---
+            if has_trace {
+                self.output.push(format!("[trace] {}() => {:?}", current_name, result));
+            }
+
+            // --- Decorator: @memoize — store result in cache ---
+            if has_memoize {
+                let key_tuple = Value::Tuple(Rc::new(args.to_vec()));
+                let key_hash = cjc_snap::snap(&key_tuple).content_hash;
+                self.memo_cache.insert(key_hash, result.clone());
+            }
+
             return Ok(result);
         }
     }
@@ -3745,7 +3819,7 @@ mod tests {
     }
 
     fn make_param(name: &str) -> Param {
-        Param { name: ident(name), ty: dummy_type_expr(), span: span() }
+        Param { name: ident(name), ty: dummy_type_expr(), default: None, span: span() }
     }
 
     fn make_fn_decl(name: &str, params: Vec<&str>, body: Block) -> Decl {
@@ -3758,6 +3832,7 @@ mod tests {
                 body,
                 is_nogc: false,
                 effect_annotation: None,
+                decorators: vec![],
             }),
             span: span(),
         }

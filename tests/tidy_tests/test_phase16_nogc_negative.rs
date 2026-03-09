@@ -29,6 +29,7 @@ fn mk_fn(name: &str, is_nogc: bool, calls: &[&str]) -> MirFunction {
         },
         is_nogc,
         cfg_body: None,
+        decorators: vec![],
     }
 }
 fn mk_program(fns: Vec<MirFunction>) -> MirProgram {

@@ -369,6 +369,7 @@ impl<'a> Monomorphizer<'a> {
             .map(|p| MirParam {
                 name: p.name.clone(),
                 ty_name: subst.get(&p.ty_name).unwrap_or(&p.ty_name).clone(),
+                default: p.default.as_ref().map(|d| substitute_expr(d, &subst)),
             })
             .collect();
 
@@ -389,7 +390,7 @@ impl<'a> Monomorphizer<'a> {
             body: new_body,
             is_nogc,
             cfg_body: None,
-
+            decorators: vec![],
         });
     }
 
@@ -575,6 +576,7 @@ fn substitute_expr(expr: &MirExpr, subst: &HashMap<String, String>) -> MirExpr {
                 .map(|p| MirParam {
                     name: p.name.clone(),
                     ty_name: subst.get(&p.ty_name).unwrap_or(&p.ty_name).clone(),
+                    default: p.default.as_ref().map(|d| substitute_expr(d, &subst)),
                 })
                 .collect(),
             body: Box::new(substitute_expr(body, subst)),
@@ -925,7 +927,7 @@ mod tests {
                 },
                 is_nogc: false,
                 cfg_body: None,
-
+                decorators: vec![],
             }],
             struct_defs: vec![],
             enum_defs: vec![],
@@ -949,6 +951,7 @@ mod tests {
             params: vec![MirParam {
                 name: "x".to_string(),
                 ty_name: "T".to_string(),
+                default: None,
             }],
             return_type: Some("T".to_string()),
             body: MirBody {
@@ -957,7 +960,7 @@ mod tests {
             },
             is_nogc: false,
             cfg_body: None,
-
+            decorators: vec![],
         };
 
         let main_fn = MirFunction {
@@ -972,7 +975,7 @@ mod tests {
             },
             is_nogc: false,
             cfg_body: None,
-
+            decorators: vec![],
         };
 
         let program = MirProgram {

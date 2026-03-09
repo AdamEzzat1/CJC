@@ -113,7 +113,7 @@ fn dummy_type_expr() -> TypeExpr {
 }
 
 fn make_param(name: &str) -> Param {
-    Param { name: ident(name), ty: dummy_type_expr(), span: span() }
+    Param { name: ident(name), ty: dummy_type_expr(), default: None, span: span() }
 }
 
 fn make_fn_decl(name: &str, params: Vec<&str>, body: Block) -> Decl {
@@ -126,6 +126,7 @@ fn make_fn_decl(name: &str, params: Vec<&str>, body: Block) -> Decl {
             body,
             is_nogc: false,
             effect_annotation: None,
+            decorators: vec![],
         }),
         span: span(),
     }

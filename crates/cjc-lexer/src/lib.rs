@@ -37,6 +37,7 @@ pub enum TokenKind {
     NoGc,
     Col,
     Import,
+    Mod,
     As,
     Sealed,
     Match,
@@ -103,6 +104,7 @@ pub enum TokenKind {
     Semicolon,
     Arrow, // ->
     FatArrow, // =>
+    At,    // @
 
     // Special
     Eof,
@@ -131,6 +133,7 @@ impl TokenKind {
                 | TokenKind::NoGc
                 | TokenKind::Col
                 | TokenKind::Import
+                | TokenKind::Mod
                 | TokenKind::As
                 | TokenKind::Sealed
                 | TokenKind::Match
@@ -174,6 +177,7 @@ impl TokenKind {
             TokenKind::NoGc => "`nogc`",
             TokenKind::Col => "`col`",
             TokenKind::Import => "`import`",
+            TokenKind::Mod => "`mod`",
             TokenKind::As => "`as`",
             TokenKind::Sealed => "`sealed`",
             TokenKind::Match => "`match`",
@@ -233,6 +237,7 @@ impl TokenKind {
             TokenKind::Semicolon => "`;`",
             TokenKind::Arrow => "`->`",
             TokenKind::FatArrow => "`=>`",
+            TokenKind::At => "`@`",
             TokenKind::Eof => "end of file",
             TokenKind::Error => "error",
         }
@@ -498,6 +503,7 @@ impl<'a> Lexer<'a> {
                 }
             }
             b'?' => Token::new(TokenKind::Question, Span::new(start, self.pos), "?"),
+            b'@' => Token::new(TokenKind::At, Span::new(start, self.pos), "@"),
 
             // Multi-character operators
             b'-' => {
@@ -1256,6 +1262,7 @@ impl<'a> Lexer<'a> {
             "nogc" => TokenKind::NoGc,
             "col" => TokenKind::Col,
             "import" => TokenKind::Import,
+            "mod" => TokenKind::Mod,
             "as" => TokenKind::As,
             "sealed" => TokenKind::Sealed,
             "match" => TokenKind::Match,

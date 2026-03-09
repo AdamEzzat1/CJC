@@ -49,6 +49,8 @@ pub mod hypothesis;
 pub mod ml;
 pub mod fft;
 pub mod stationarity;
+pub mod ode;
+pub mod sparse_eigen;
 
 // --- Re-exports for backward compatibility ---
 // All downstream crates that were doing `use cjc_runtime::Tensor` etc. continue to work.

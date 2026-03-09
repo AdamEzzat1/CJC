@@ -120,6 +120,16 @@ pub struct FieldDecl {
 
 // ── Functions ───────────────────────────────────────────────────
 
+/// A decorator applied to a function declaration.
+///
+/// Syntax: `@decorator_name` or `@decorator_name(args...)`
+#[derive(Debug, Clone)]
+pub struct Decorator {
+    pub name: Ident,
+    pub args: Vec<Expr>,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone)]
 pub struct FnDecl {
     pub name: Ident,
@@ -131,6 +141,8 @@ pub struct FnDecl {
     /// Effect annotation: `fn foo() -> i64 / pure { ... }`
     /// None means "any effect" (backward compatible).
     pub effect_annotation: Option<Vec<String>>,
+    /// Decorators applied to this function (e.g., `@log`, `@timed`).
+    pub decorators: Vec<Decorator>,
 }
 
 #[derive(Debug, Clone)]
@@ -146,6 +158,8 @@ pub struct FnSig {
 pub struct Param {
     pub name: Ident,
     pub ty: TypeExpr,
+    /// Optional default value expression (e.g., `fn f(x: f64 = 1.0)`).
+    pub default: Option<Expr>,
     pub span: Span,
 }
 

@@ -1173,6 +1173,7 @@ mod tests {
             },
             is_nogc: false,
             cfg_body: None,
+            decorators: vec![],
         }
     }
 

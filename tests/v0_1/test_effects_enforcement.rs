@@ -125,6 +125,7 @@ fn nogc_rejects_gc_builtin() {
             },
             is_nogc: true,
             cfg_body: None,
+            decorators: vec![],
         }],
         struct_defs: vec![],
         enum_defs: vec![],

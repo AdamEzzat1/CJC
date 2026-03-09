@@ -202,6 +202,7 @@ impl Parser {
                 | TokenKind::Impl
                 | TokenKind::Let
                 | TokenKind::Import
+                | TokenKind::Mod
                 | TokenKind::NoGc
                 | TokenKind::If
                 | TokenKind::While
@@ -245,11 +246,21 @@ impl Parser {
             TokenKind::Class => self.parse_class_decl(),
             TokenKind::Record => self.parse_record_decl(),
             TokenKind::Enum => self.parse_enum_decl(),
-            TokenKind::Fn => self.parse_fn_decl(false),
+            TokenKind::At => {
+                let decorators = self.parse_decorator_list()?;
+                if self.peek_kind() == TokenKind::NoGc && self.peek_ahead(1) == TokenKind::Fn {
+                    self.advance(); // nogc
+                    self.parse_fn_decl_with(true, decorators)
+                } else {
+                    self.parse_fn_decl_with(false, decorators)
+                }
+            }
+            TokenKind::Fn => self.parse_fn_decl_with(false, vec![]),
             TokenKind::NoGc if self.peek_ahead(1) == TokenKind::Fn => self.parse_nogc_fn_decl(),
             TokenKind::Trait => self.parse_trait_decl(),
             TokenKind::Impl => self.parse_impl_decl(),
             TokenKind::Import => self.parse_import_decl(),
+            TokenKind::Mod => self.parse_mod_decl(),
             TokenKind::Let => self.parse_let_decl(),
             TokenKind::Const => self.parse_const_decl(),
             // Top-level statements: if, while, nogc block, expression statements
@@ -470,7 +481,7 @@ impl Parser {
 
     // ── fn ─────────────────────────────────────────────────────────
 
-    fn parse_fn_decl(&mut self, is_nogc: bool) -> PResult<Decl> {
+    fn parse_fn_decl_with(&mut self, is_nogc: bool, decorators: Vec<cjc_ast::Decorator>) -> PResult<Decl> {
         let start = self.expect(TokenKind::Fn)?.span;
         let name = self.parse_ident()?;
         let type_params = self.parse_optional_type_params()?;
@@ -494,15 +505,41 @@ impl Parser {
                 body,
                 is_nogc,
                 effect_annotation,
+                decorators,
             }),
             span,
         })
     }
 
     fn parse_nogc_fn_decl(&mut self) -> PResult<Decl> {
-        // consume `nogc`, then delegate to parse_fn_decl
+        // consume `nogc`, then delegate to parse_fn_decl_with
         self.advance(); // nogc
-        self.parse_fn_decl(true)
+        self.parse_fn_decl_with(true, vec![])
+    }
+
+    /// Parse a list of decorators: `@name` or `@name(arg1, arg2)`, one per line.
+    fn parse_decorator_list(&mut self) -> PResult<Vec<cjc_ast::Decorator>> {
+        let mut decorators = Vec::new();
+        while self.at(TokenKind::At) {
+            let at_span = self.expect(TokenKind::At)?.span;
+            let name = self.parse_ident()?;
+            let args = if self.eat(TokenKind::LParen).is_some() {
+                let mut args = Vec::new();
+                while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+                    args.push(self.parse_expr()?);
+                    if !self.at(TokenKind::RParen) {
+                        self.expect(TokenKind::Comma)?;
+                    }
+                }
+                self.expect(TokenKind::RParen)?;
+                args
+            } else {
+                vec![]
+            };
+            let span = merge_spans(to_ast_span(at_span), name.span);
+            decorators.push(cjc_ast::Decorator { name, args, span });
+        }
+        Ok(decorators)
     }
 
     /// Parse optional effect annotation: `/ pure`, `/ io`, `/ pure + alloc`, etc.
@@ -548,8 +585,15 @@ impl Parser {
         let name = self.parse_ident()?;
         self.expect(TokenKind::Colon)?;
         let ty = self.parse_type_expr()?;
-        let span = merge_spans(name.span, ty.span);
-        Ok(Param { name, ty, span })
+        // Optional default value: `param: Type = expr`
+        let default = if self.eat(TokenKind::Eq).is_some() {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        let end_span = default.as_ref().map(|d| d.span).unwrap_or(ty.span);
+        let span = merge_spans(name.span, end_span);
+        Ok(Param { name, ty, default, span })
     }
 
     // ── trait ──────────────────────────────────────────────────────
@@ -668,6 +712,7 @@ impl Parser {
                 body,
                 is_nogc,
                 effect_annotation,
+                decorators: vec![],
             });
             let _ = fn_span; // span used for method
         }
@@ -705,6 +750,21 @@ impl Parser {
             .unwrap_or(start);
         Ok(Decl {
             kind: DeclKind::Import(ImportDecl { path, alias }),
+            span: to_ast_span(start.merge(end_span)),
+        })
+    }
+
+    /// Parse `mod name;` — syntactic sugar for `import name`.
+    fn parse_mod_decl(&mut self) -> PResult<Decl> {
+        let start = self.expect(TokenKind::Mod)?.span;
+        let name = self.parse_ident()?;
+        let end_span = to_diag_span(name.span);
+        // `mod X;` desugars to `import X`
+        Ok(Decl {
+            kind: DeclKind::Import(ImportDecl {
+                path: vec![name],
+                alias: None,
+            }),
             span: to_ast_span(start.merge(end_span)),
         })
     }

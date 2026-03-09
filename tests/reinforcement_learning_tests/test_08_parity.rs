@@ -105,6 +105,40 @@ fn parity_if_expr() {
 }
 
 #[test]
+fn parity_if_expr_in_let() {
+    let src = r#"
+        let x: i64 = 10;
+        let result: i64 = if x > 5 { 100 } else { 200 };
+        print(result);
+    "#;
+    assert_eq!(run_eval(src), run_mir(src));
+}
+
+#[test]
+fn parity_if_expr_nested_else_if() {
+    let src = r#"
+        fn classify(score: i64) -> i64 {
+            if score >= 90 { 4 } else if score >= 80 { 3 } else if score >= 70 { 2 } else { 1 }
+        }
+        print(classify(95));
+        print(classify(85));
+        print(classify(75));
+        print(classify(50));
+    "#;
+    assert_eq!(run_eval(src), run_mir(src));
+}
+
+#[test]
+fn parity_if_expr_float_let() {
+    let src = r#"
+        let x: f64 = 3.14;
+        let y: f64 = if x > 3.0 { x * 2.0 } else { x / 2.0 };
+        print(y);
+    "#;
+    assert_eq!(run_eval(src), run_mir(src));
+}
+
+#[test]
 fn parity_all_mixed() {
     let src = r#"
         let mut x: i64 = 0xFF;

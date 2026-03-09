@@ -542,6 +542,7 @@ fn mk_mir_fn(name: &str, is_nogc: bool, stmts: Vec<cjc_mir::MirStmt>) -> cjc_mir
         body: cjc_mir::MirBody { stmts, result: None },
         is_nogc,
         cfg_body: None,
+        decorators: vec![],
     }
 }
 

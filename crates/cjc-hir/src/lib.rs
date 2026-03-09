@@ -57,12 +57,16 @@ pub struct HirFn {
     pub body: HirBlock,
     pub is_nogc: bool,
     pub hir_id: HirId,
+    /// Decorator names applied to this function (e.g., `@memoize`, `@trace`).
+    pub decorators: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct HirParam {
     pub name: String,
     pub ty_name: String,
+    /// Optional default value expression for this parameter.
+    pub default: Option<HirExpr>,
     pub hir_id: HirId,
 }
 
@@ -292,6 +296,13 @@ pub enum HirExprKind {
         enum_name: String,
         variant: String,
         fields: Vec<HirExpr>,
+    },
+
+    // -- If expression (produces a value) --
+    If {
+        cond: Box<HirExpr>,
+        then_block: HirBlock,
+        else_branch: Option<HirElseBranch>,
     },
 
     // -- Void (for empty else branches, etc.) --
@@ -617,6 +628,7 @@ impl AstLowering {
             body,
             is_nogc: f.is_nogc,
             hir_id,
+            decorators: f.decorators.iter().map(|d| d.name.name.clone()).collect(),
         }
     }
 
@@ -641,9 +653,11 @@ impl AstLowering {
 
     fn lower_param(&mut self, p: &cjc_ast::Param) -> HirParam {
         let hir_id = self.fresh_id();
+        let default = p.default.as_ref().map(|d| self.lower_expr(d));
         HirParam {
             name: p.name.name.clone(),
             ty_name: self.type_expr_to_string(&p.ty),
+            default,
             hir_id,
         }
     }
@@ -1564,13 +1578,14 @@ impl AstLowering {
                 }
             }
 
-            // IfExpr: `if cond { a } else { b }` used as a value expression
+            // IfExpr: `if cond { a } else { b }` used as a value expression.
+            // Lowered directly to HirExprKind::If — a first-class expression
+            // that produces the value of the taken branch.
             cjc_ast::ExprKind::IfExpr { condition, then_block, else_branch } => {
                 let cond = Box::new(self.lower_expr(condition));
                 let hir_then = self.lower_block(then_block);
                 let hir_else = else_branch.as_ref().map(|eb| match eb {
                     cjc_ast::ElseBranch::ElseIf(elif) => {
-                        // Wrap the nested if into a block expression
                         let nested_if = self.lower_if(elif);
                         HirElseBranch::ElseIf(Box::new(nested_if))
                     }
@@ -1578,28 +1593,11 @@ impl AstLowering {
                         HirElseBranch::Else(self.lower_block(block))
                     }
                 });
-                // Lower IfExpr as a block wrapping an if statement, producing a value.
-                // We reuse the existing HirStmtKind::If pattern by wrapping in a block.
-                let if_expr = HirIfExpr {
+                HirExprKind::If {
                     cond,
                     then_block: hir_then,
                     else_branch: hir_else,
-                    hir_id: self.fresh_id(),
-                };
-                // Wrap as: Block { stmts: [If(...)], expr: None }
-                // Actually, since IfExpr is used as an expression, we need to
-                // produce a value. The simplest desugaring is to use the existing
-                // If statement wrapped in a block. The then/else blocks already
-                // carry their tail expressions.
-                let if_stmt = HirStmt {
-                    kind: HirStmtKind::If(if_expr),
-                    hir_id: self.fresh_id(),
-                };
-                HirExprKind::Block(HirBlock {
-                    stmts: vec![if_stmt],
-                    expr: None,
-                    hir_id: self.fresh_id(),
-                })
+                }
             }
         };
         HirExpr { kind, hir_id }
@@ -2101,11 +2099,13 @@ mod tests {
                 Param {
                     name: ident("a"),
                     ty: type_expr("i64"),
+                    default: None,
                     span: span(),
                 },
                 Param {
                     name: ident("b"),
                     ty: type_expr("i64"),
+                    default: None,
                     span: span(),
                 },
             ],
@@ -2124,6 +2124,7 @@ mod tests {
             },
             is_nogc: false,
             effect_annotation: None,
+            decorators: vec![],
         };
         let hir_fn = lowering.lower_fn_decl(&fn_decl);
         assert_eq!(hir_fn.name, "add");
@@ -2262,6 +2263,7 @@ mod tests {
                         },
                         is_nogc: false,
                         effect_annotation: None,
+                        decorators: vec![],
                     }),
                     span: span(),
                 },
@@ -2352,6 +2354,7 @@ mod tests {
                 params: vec![Param {
                     name: ident("x"),
                     ty: type_expr("f64"),
+                    default: None,
                     span: span(),
                 }],
                 body: Box::new(ident_expr("x")),

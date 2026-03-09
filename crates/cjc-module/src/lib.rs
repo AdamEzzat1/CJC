@@ -575,6 +575,41 @@ pub fn merge_programs(graph: &ModuleGraph) -> Result<cjc_mir::MirProgram, Module
         }
     }
 
+    // Create function aliases for imported symbols so the entry module
+    // can call them by their unmangled names (e.g., `double(x)` instead
+    // of `mathlib::double(x)`).
+    let entry_module = graph.modules.get(&graph.entry).expect("entry must exist");
+    for import in &entry_module.imports {
+        if let Some(resolved) = &import.resolved_module {
+            let prefix = resolved.symbol_prefix();
+            // For each function in the imported module, register an alias
+            // under the original (unprefixed) name if it doesn't conflict.
+            let imported_mod = graph.modules.get(resolved);
+            if let Some(imp_mod) = imported_mod {
+                if let Some(ast) = &imp_mod.ast {
+                    for decl in &ast.declarations {
+                        if let cjc_ast::DeclKind::Fn(f) = &decl.kind {
+                            let unprefixed = f.name.name.clone();
+                            let prefixed = format!("{}{}", prefix, unprefixed);
+                            // Only add alias if unprefixed name not already taken
+                            if !symbol_origins.contains_key(&unprefixed) {
+                                // Find the prefixed function and clone it with unprefixed name
+                                if let Some(orig) = all_functions.iter().find(|f| f.name == prefixed) {
+                                    let mut alias = orig.clone();
+                                    alias.name = unprefixed.clone();
+                                    alias.id = cjc_mir::MirFnId(fn_id_counter);
+                                    fn_id_counter += 1;
+                                    symbol_origins.insert(unprefixed, graph.entry.clone());
+                                    all_functions.push(alias);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Create merged __main function
     let main_id = cjc_mir::MirFnId(fn_id_counter);
     fn_id_counter += 1;
@@ -592,6 +627,7 @@ pub fn merge_programs(graph: &ModuleGraph) -> Result<cjc_mir::MirProgram, Module
         },
         is_nogc: false,
         cfg_body: None,
+        decorators: vec![],
     });
 
     Ok(cjc_mir::MirProgram {

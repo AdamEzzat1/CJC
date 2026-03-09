@@ -66,6 +66,7 @@ fn make_generic_id_fn(id: u32) -> MirFunction {
         params: vec![MirParam {
             name: "x".to_string(),
             ty_name: "T".to_string(),
+            default: None,
         }],
         return_type: Some("T".to_string()),
         body: MirBody {
@@ -74,6 +75,7 @@ fn make_generic_id_fn(id: u32) -> MirFunction {
         },
         is_nogc: false,
         cfg_body: None,
+        decorators: vec![],
     }
 }
 
@@ -90,6 +92,7 @@ fn make_main_fn(id: u32, body_stmts: Vec<MirStmt>) -> MirFunction {
         },
         is_nogc: false,
         cfg_body: None,
+        decorators: vec![],
     }
 }
 
@@ -113,6 +116,7 @@ fn mono_noop_on_non_generic_program() {
             },
             is_nogc: false,
             cfg_body: None,
+            decorators: vec![],
         }],
         struct_defs: vec![],
         enum_defs: vec![],
@@ -247,6 +251,7 @@ fn mono_report_top_fanout() {
         params: vec![MirParam {
             name: "v".to_string(),
             ty_name: "U".to_string(),
+            default: None,
         }],
         return_type: Some("U".to_string()),
         body: MirBody {
@@ -255,6 +260,7 @@ fn mono_report_top_fanout() {
         },
         is_nogc: false,
         cfg_body: None,
+        decorators: vec![],
     };
 
     let main_fn = make_main_fn(

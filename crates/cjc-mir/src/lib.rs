@@ -88,12 +88,16 @@ pub struct MirFunction {
     /// Built lazily from tree-form `body` via `build_cfg()`.
     /// When present, this is the canonical representation for the CFG executor.
     pub cfg_body: Option<cfg::MirCfg>,
+    /// Decorator names applied to this function (e.g., `@memoize`, `@trace`).
+    pub decorators: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct MirParam {
     pub name: String,
     pub ty_name: String,
+    /// Optional default value expression for this parameter.
+    pub default: Option<MirExpr>,
 }
 
 impl MirFunction {
@@ -425,7 +429,7 @@ impl HirToMir {
             },
             is_nogc: false,
             cfg_body: None,
-
+            decorators: vec![],
         });
 
         // Append all lambda-lifted functions
@@ -447,6 +451,7 @@ impl HirToMir {
             .map(|p| MirParam {
                 name: p.name.clone(),
                 ty_name: p.ty_name.clone(),
+                default: p.default.as_ref().map(|d| self.lower_expr(d)),
             })
             .collect();
         let body = self.lower_block(&f.body);
@@ -459,7 +464,7 @@ impl HirToMir {
             body,
             is_nogc: f.is_nogc,
             cfg_body: None,
-
+            decorators: f.decorators.clone(),
         }
     }
 
@@ -583,6 +588,7 @@ impl HirToMir {
                     .map(|p| MirParam {
                         name: p.name.clone(),
                         ty_name: p.ty_name.clone(),
+                        default: p.default.as_ref().map(|d| self.lower_expr(d)),
                     })
                     .collect(),
                 body: Box::new(self.lower_expr(body)),
@@ -603,12 +609,14 @@ impl HirToMir {
                     .map(|c| MirParam {
                         name: c.name.clone(),
                         ty_name: "any".to_string(), // Type erasure at MIR level
+                        default: None,
                     })
                     .collect();
                 for p in params {
                     lifted_params.push(MirParam {
                         name: p.name.clone(),
                         ty_name: p.ty_name.clone(),
+                        default: p.default.as_ref().map(|d| self.lower_expr(d)),
                     });
                 }
 
@@ -626,7 +634,7 @@ impl HirToMir {
                     body: lifted_body,
                     is_nogc: false,
                     cfg_body: None,
-
+                    decorators: vec![],
                 });
 
                 // At the call site, emit MakeClosure with the capture
@@ -673,6 +681,26 @@ impl HirToMir {
                 variant: variant.clone(),
                 fields: fields.iter().map(|f| self.lower_expr(f)).collect(),
             },
+            HirExprKind::If { cond, then_block, else_branch } => {
+                let mir_cond = Box::new(self.lower_expr(cond));
+                let mir_then = self.lower_block(then_block);
+                let mir_else = else_branch.as_ref().map(|eb| match eb {
+                    HirElseBranch::ElseIf(elif) => {
+                        // Nested else-if: lower as MirStmt::If inside a MirBody
+                        let nested = self.lower_if_stmt(elif);
+                        MirBody {
+                            stmts: vec![nested],
+                            result: None,
+                        }
+                    }
+                    HirElseBranch::Else(block) => self.lower_block(block),
+                });
+                MirExprKind::If {
+                    cond: mir_cond,
+                    then_body: mir_then,
+                    else_body: mir_else,
+                }
+            }
             HirExprKind::Void => MirExprKind::Void,
         };
         MirExpr { kind }
@@ -778,11 +806,13 @@ mod tests {
                 HirParam {
                     name: "a".to_string(),
                     ty_name: "i64".to_string(),
+                    default: None,
                     hir_id: hir_id(1),
                 },
                 HirParam {
                     name: "b".to_string(),
                     ty_name: "i64".to_string(),
+                    default: None,
                     hir_id: hir_id(2),
                 },
             ],
@@ -800,8 +830,8 @@ mod tests {
                 hir_id: hir_id(4),
             },
             is_nogc: false,
-
             hir_id: hir_id(5),
+            decorators: vec![],
         };
         let mir_fn = lowering.lower_fn(&hir_fn);
         assert_eq!(mir_fn.name, "add");
@@ -832,8 +862,8 @@ mod tests {
                         hir_id: hir_id(1),
                     },
                     is_nogc: false,
-        
                     hir_id: hir_id(2),
+                    decorators: vec![],
                 }),
             ],
         };

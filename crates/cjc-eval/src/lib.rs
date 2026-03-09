@@ -646,6 +646,7 @@ impl Interpreter {
                     },
                     is_nogc: false,
                     effect_annotation: None,
+                    decorators: vec![],
                 };
                 self.functions.insert(lambda_name.clone(), fn_decl);
                 Ok(Value::Fn(cjc_runtime::FnValue {
@@ -2852,6 +2853,27 @@ impl Interpreter {
                         graph.zero_grad();
                         Ok(Value::Void)
                     }
+                    "jacobian" => {
+                        if args.len() != 2 { return Err(EvalError::Runtime("jacobian requires 2 args: output_idx, param_idx".into())); }
+                        let output_idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
+                        let param_idx = match &args[1] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
+                        let mut borrow = inner.borrow_mut();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let jac = graph.jacobian(output_idx, param_idx);
+                        Ok(Value::Tensor(jac))
+                    }
+                    "hessian_diag" => {
+                        if args.len() < 2 || args.len() > 3 { return Err(EvalError::Runtime("hessian_diag requires 2-3 args: loss_idx, param_idx[, eps]".into())); }
+                        let loss_idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
+                        let param_idx = match &args[1] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
+                        let eps = if args.len() == 3 {
+                            match &args[2] { Value::Float(f) => *f, _ => return Err(EvalError::Runtime("expected Float for eps".into())) }
+                        } else { 1e-5 };
+                        let mut borrow = inner.borrow_mut();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let hd = graph.hessian_diag(loss_idx, param_idx, eps);
+                        Ok(Value::Tensor(hd))
+                    }
                     _ => Err(EvalError::Runtime(format!("no method `{method}` on GradGraph"))),
                 }
             }
@@ -2961,19 +2983,57 @@ impl Interpreter {
             EvalError::Runtime(format!("undefined function `{name}`"))
         })?;
 
-        if func.params.len() != args.len() {
+        // Count required params (those without defaults).
+        let required = func.params.iter().filter(|p| p.default.is_none()).count();
+        if args.len() < required || args.len() > func.params.len() {
             return Err(EvalError::Runtime(format!(
-                "function `{name}` expects {} arguments, got {}",
-                func.params.len(),
+                "function `{name}` expects {}{} arguments, got {}",
+                required,
+                if required < func.params.len() {
+                    format!("-{}", func.params.len())
+                } else {
+                    String::new()
+                },
                 args.len()
             )));
         }
 
+        // --- Decorator: @memoize — check cache before executing ---
+        let has_memoize = func.decorators.iter().any(|d| d.name.name == "memoize");
+        let has_trace = func.decorators.iter().any(|d| d.name.name == "trace");
+
+        if has_memoize {
+            let key_tuple = Value::Tuple(Rc::new(args.to_vec()));
+            let key_hash = cjc_snap::snap(&key_tuple).content_hash;
+            if let Some(cached) = self.memo_cache.get(&key_hash) {
+                if has_trace {
+                    let args_str: Vec<String> = args.iter().map(|a| format!("{a:?}")).collect();
+                    self.output.push(format!("[trace] {}({}) => {:?} (cached)", name, args_str.join(", "), cached));
+                }
+                return Ok(cached.clone());
+            }
+        }
+
+        // --- Decorator: @trace — log entry ---
+        if has_trace {
+            let args_str: Vec<String> = args.iter().map(|a| format!("{a:?}")).collect();
+            self.output.push(format!("[trace] {}({}) enter", name, args_str.join(", ")));
+        }
+
         self.push_scope();
 
-        // Bind parameters.
-        for (param, val) in func.params.iter().zip(args.iter()) {
-            self.define(&param.name.name, val.clone());
+        // Bind parameters: use provided args, then fall back to defaults.
+        for (i, param) in func.params.iter().enumerate() {
+            let val = if i < args.len() {
+                args[i].clone()
+            } else if let Some(ref default_expr) = param.default {
+                self.eval_expr(default_expr)?
+            } else {
+                return Err(EvalError::Runtime(format!(
+                    "missing required argument `{}`", param.name.name
+                )));
+            };
+            self.define(&param.name.name, val);
         }
 
         // Execute body, catching Return errors.
@@ -2987,6 +3047,19 @@ impl Interpreter {
         };
 
         self.pop_scope();
+
+        // --- Decorator: @trace — log exit ---
+        if has_trace {
+            self.output.push(format!("[trace] {}() => {:?}", name, result));
+        }
+
+        // --- Decorator: @memoize — store result in cache ---
+        if has_memoize {
+            let key_tuple = Value::Tuple(Rc::new(args.to_vec()));
+            let key_hash = cjc_snap::snap(&key_tuple).content_hash;
+            self.memo_cache.insert(key_hash, result.clone());
+        }
+
         Ok(result)
     }
 
@@ -3634,6 +3707,7 @@ mod tests {
         Param {
             name: ident(name),
             ty: dummy_type_expr(),
+            default: None,
             span: span(),
         }
     }
@@ -3648,6 +3722,7 @@ mod tests {
                 body,
                 is_nogc: false,
                 effect_annotation: None,
+                decorators: vec![],
             }),
             span: span(),
         }

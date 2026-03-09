@@ -564,6 +564,7 @@ mod tests {
             },
             is_nogc,
             cfg_body: None,
+            decorators: vec![],
         }
     }
 

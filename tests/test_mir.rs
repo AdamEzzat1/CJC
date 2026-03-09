@@ -57,8 +57,8 @@ fn test_lower_hir_fn() {
         name: "add".to_string(),
         type_params: vec![],
         params: vec![
-            HirParam { name: "a".to_string(), ty_name: "i64".to_string(), hir_id: hir_id(1) },
-            HirParam { name: "b".to_string(), ty_name: "i64".to_string(), hir_id: hir_id(2) },
+            HirParam { name: "a".to_string(), ty_name: "i64".to_string(), default: None, hir_id: hir_id(1) },
+            HirParam { name: "b".to_string(), ty_name: "i64".to_string(), default: None, hir_id: hir_id(2) },
         ],
         return_type: Some("i64".to_string()),
         body: HirBlock {
@@ -75,6 +75,7 @@ fn test_lower_hir_fn() {
         },
         is_nogc: false,
         hir_id: hir_id(5),
+        decorators: vec![],
     };
     let mir_fn = lowering.lower_fn(&hir_fn);
     assert_eq!(mir_fn.name, "add");
@@ -106,6 +107,7 @@ fn test_lower_hir_program_entry() {
                 },
                 is_nogc: false,
                 hir_id: hir_id(2),
+                decorators: vec![],
             }),
         ],
     };
