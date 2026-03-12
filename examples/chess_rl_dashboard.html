@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CJC Chess RL Demo</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0d1117; color: #c9d1d9; font-family: 'JetBrains Mono', 'Fira Code', monospace; }
+.header { background: #161b22; border-bottom: 1px solid #30363d; padding: 16px 24px; }
+.header h1 { font-size: 18px; color: #58a6ff; font-weight: 600; }
+.header .meta { font-size: 12px; color: #8b949e; margin-top: 4px; }
+.container { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: #30363d; margin: 16px; border: 1px solid #30363d; border-radius: 6px; overflow: hidden; }
+.panel { background: #0d1117; padding: 16px; }
+.panel h2 { font-size: 13px; color: #8b949e; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
+.board { display: grid; grid-template-columns: repeat(8, 48px); grid-template-rows: repeat(8, 48px); gap: 0; border: 2px solid #30363d; border-radius: 4px; overflow: hidden; margin: 0 auto; width: fit-content; }
+.sq { width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; font-size: 28px; cursor: default; }
+.sq.light { background: #2d333b; }
+.sq.dark { background: #1c2128; }
+.sq.highlight { box-shadow: inset 0 0 0 3px #f0883e; }
+.decision { margin-bottom: 8px; }
+.decision .label { color: #8b949e; font-size: 11px; }
+.decision .value { color: #c9d1d9; font-size: 14px; margin-bottom: 6px; }
+.prob-bar-container { margin-bottom: 6px; }
+.prob-bar-label { font-size: 12px; color: #8b949e; display: flex; justify-content: space-between; }
+.prob-bar { height: 8px; background: #21262d; border-radius: 4px; overflow: hidden; margin-top: 2px; }
+.prob-bar-fill { height: 100%; background: #f0883e; border-radius: 4px; transition: width 0.3s; }
+.timeline { background: #161b22; padding: 12px; border-radius: 6px; margin: 16px; border: 1px solid #30363d; }
+.timeline h2 { font-size: 13px; color: #8b949e; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+.moves-list { font-size: 13px; color: #c9d1d9; line-height: 1.8; }
+.moves-list .current { background: #f0883e22; color: #f0883e; padding: 2px 6px; border-radius: 3px; }
+.controls { display: flex; gap: 8px; margin: 16px; }
+.btn { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-family: inherit; font-size: 13px; }
+.btn:hover { background: #30363d; }
+.btn.active { background: #f0883e22; border-color: #f0883e; color: #f0883e; }
+.metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+.metric { background: #161b22; padding: 12px; border-radius: 6px; border: 1px solid #30363d; }
+.metric .label { font-size: 11px; color: #8b949e; }
+.metric .value { font-size: 20px; color: #58a6ff; margin-top: 4px; }
+#file-input { display: none; }
+.load-btn { background: #238636; border-color: #2ea043; color: white; }
+.load-btn:hover { background: #2ea043; }
+</style>
+</head>
+<body>
+<div class="header">
+    <h1>CJC Chess RL Demo</h1>
+    <div class="meta">Deterministic MIR Execution &middot; Seed: <span id="seed">42</span> &middot; Episode: <span id="episode">1</span> &middot; Ply: <span id="ply">0</span></div>
+</div>
+
+<div class="controls">
+    <button class="btn" onclick="prevPly()">&larr; Prev</button>
+    <button class="btn" onclick="nextPly()">Next &rarr;</button>
+    <button class="btn" onclick="firstPly()">|&larr; Start</button>
+    <button class="btn" onclick="lastPly()">End &rarr;|</button>
+    <label class="btn load-btn" for="file-input">Load Trace</label>
+    <input type="file" id="file-input" accept=".jsonl,.json" onchange="loadFile(event)">
+    <button class="btn" onclick="loadDemo()">Demo Data</button>
+</div>
+
+<div class="container">
+    <div class="panel">
+        <h2>Chess Board</h2>
+        <div class="board" id="board"></div>
+    </div>
+    <div class="panel">
+        <h2>Policy / Decision Panel</h2>
+        <div class="decision">
+            <div class="label">Chosen Move</div>
+            <div class="value" id="chosen-move">-</div>
+        </div>
+        <div class="decision">
+            <div class="label">Side to Move</div>
+            <div class="value" id="side-to-move">White</div>
+        </div>
+        <div class="decision">
+            <div class="label">Legal Moves</div>
+            <div class="value" id="legal-moves">20</div>
+        </div>
+        <div class="decision">
+            <div class="label">Log Probability</div>
+            <div class="value" id="log-prob">-</div>
+        </div>
+        <h2 style="margin-top: 16px;">Top Move Probabilities</h2>
+        <div id="prob-bars"></div>
+    </div>
+</div>
+
+<div class="timeline">
+    <h2>Move Timeline</h2>
+    <div class="moves-list" id="moves-list">Load a trace file or click "Demo Data" to begin.</div>
+</div>
+
+<div style="margin: 16px;">
+    <div class="metrics">
+        <div class="metric">
+            <div class="label">Total Plies</div>
+            <div class="value" id="total-plies">-</div>
+        </div>
+        <div class="metric">
+            <div class="label">Game Result</div>
+            <div class="value" id="game-result">-</div>
+        </div>
+        <div class="metric">
+            <div class="label">RNG Seed</div>
+            <div class="value" id="rng-seed">42</div>
+        </div>
+        <div class="metric">
+            <div class="label">Executor</div>
+            <div class="value">MIR-exec</div>
+        </div>
+    </div>
+</div>
+
+<script>
+const PIECES = {
+    '6': '\u2654', '-6': '\u265A',
+    '5': '\u2655', '-5': '\u265B',
+    '4': '\u2656', '-4': '\u265C',
+    '3': '\u2657', '-3': '\u265D',
+    '2': '\u2658', '-2': '\u265E',
+    '1': '\u2659', '-1': '\u265F',
+    '0': ''
+};
+
+function sqName(sq) {
+    const file = 'abcdefgh'[sq % 8];
+    const rank = Math.floor(sq / 8) + 1;
+    return file + rank;
+}
+
+let traceData = [];
+let currentPly = 0;
+
+function renderBoard(board, fromSq, toSq) {
+    const el = document.getElementById('board');
+    el.innerHTML = '';
+    for (let rank = 7; rank >= 0; rank--) {
+        for (let file = 0; file < 8; file++) {
+            const sq = rank * 8 + file;
+            const isLight = (rank + file) % 2 === 1;
+            const isHighlight = sq === fromSq || sq === toSq;
+            const div = document.createElement('div');
+            div.className = 'sq ' + (isLight ? 'light' : 'dark') + (isHighlight ? ' highlight' : '');
+            const piece = board ? board[sq] : 0;
+            div.textContent = PIECES[String(piece)] || '';
+            el.appendChild(div);
+        }
+    }
+}
+
+function renderProbBars(topMoves) {
+    const el = document.getElementById('prob-bars');
+    if (!topMoves || topMoves.length === 0) {
+        el.innerHTML = '<div style="color:#8b949e;font-size:12px;">No data</div>';
+        return;
+    }
+    el.innerHTML = topMoves.slice(0, 5).map(m => {
+        const pct = (m.prob * 100).toFixed(1);
+        const width = Math.max(2, m.prob * 100);
+        return `<div class="prob-bar-container">
+            <div class="prob-bar-label"><span>${sqName(m.from)}-${sqName(m.to)}</span><span>${pct}%</span></div>
+            <div class="prob-bar"><div class="prob-bar-fill" style="width:${width}%"></div></div>
+        </div>`;
+    }).join('');
+}
+
+function renderTimeline() {
+    const plies = traceData.filter(d => d.type === 'ply');
+    const el = document.getElementById('moves-list');
+    if (plies.length === 0) { el.textContent = 'No moves yet.'; return; }
+    let html = '';
+    plies.forEach((p, i) => {
+        const cls = i === currentPly ? ' current' : '';
+        const side = p.side === 'white' ? '' : '...';
+        const moveNum = Math.floor(p.ply / 2) + 1;
+        if (p.ply % 2 === 0) html += `${moveNum}. `;
+        html += `<span class="${cls}">${sqName(p.from_sq)}-${sqName(p.to_sq)}</span> `;
+    });
+    el.innerHTML = html;
+}
+
+function showPly(idx) {
+    const plies = traceData.filter(d => d.type === 'ply');
+    if (idx < 0 || idx >= plies.length) return;
+    currentPly = idx;
+    const p = plies[idx];
+
+    document.getElementById('ply').textContent = p.ply;
+    document.getElementById('chosen-move').textContent = sqName(p.from_sq) + ' \u2192 ' + sqName(p.to_sq);
+    document.getElementById('side-to-move').textContent = p.side === 'white' ? 'White' : 'Black';
+    document.getElementById('legal-moves').textContent = p.num_legal_moves;
+    document.getElementById('log-prob').textContent = p.log_prob.toFixed(4);
+
+    renderBoard(p.board, p.from_sq, p.to_sq);
+    renderProbBars(p.top_moves);
+    renderTimeline();
+
+    const terminal = traceData.find(d => d.type === 'terminal');
+    if (terminal) {
+        document.getElementById('total-plies').textContent = terminal.total_plies;
+        document.getElementById('game-result').textContent = terminal.status + ' (' + terminal.reward + ')';
+        document.getElementById('rng-seed').textContent = terminal.seed;
+        document.getElementById('seed').textContent = terminal.seed;
+        document.getElementById('episode').textContent = terminal.episode;
+    }
+}
+
+function nextPly() { showPly(currentPly + 1); }
+function prevPly() { showPly(currentPly - 1); }
+function firstPly() { showPly(0); }
+function lastPly() {
+    const plies = traceData.filter(d => d.type === 'ply');
+    showPly(plies.length - 1);
+}
+
+function loadFile(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        const lines = e.target.result.split('\n').filter(l => l.trim());
+        traceData = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+        currentPly = 0;
+        showPly(0);
+    };
+    reader.readAsText(file);
+}
+
+function loadDemo() {
+    // Generate demo data inline
+    const initBoard = [4,2,3,5,6,3,2,4,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,-1,-1,-1,-1,-1,-1,-1,-1,-4,-2,-3,-5,-6,-3,-2,-4];
+
+    function applyMove(board, from, to) {
+        const b = [...board];
+        b[to] = b[from];
+        b[from] = 0;
+        return b;
+    }
+
+    const moves = [
+        {from: 12, to: 28}, // e2-e4
+        {from: 52, to: 36}, // e7-e5
+        {from: 6, to: 21},  // Ng1-f3
+        {from: 57, to: 42}, // Nb8-c6
+        {from: 5, to: 26},  // Bf1-c4
+        {from: 62, to: 45}, // Ng8-f6
+    ];
+
+    traceData = [];
+    let board = initBoard;
+    moves.forEach((m, i) => {
+        const side = i % 2 === 0 ? 'white' : 'black';
+        const topMoves = [
+            {from: m.from, to: m.to, prob: 0.35 + Math.random() * 0.2},
+            {from: m.from, to: m.to + 8, prob: 0.15 + Math.random() * 0.1},
+            {from: m.from, to: m.to - 1, prob: 0.08 + Math.random() * 0.05},
+        ];
+        traceData.push({
+            type: 'ply', seed: 42, episode: 1, ply: i, side: side,
+            from_sq: m.from, to_sq: m.to, num_legal_moves: 20 + i,
+            log_prob: -2.5 + Math.random(), board: [...board],
+            top_moves: topMoves
+        });
+        board = applyMove(board, m.from, m.to);
+    });
+    traceData.push({type: 'terminal', seed: 42, episode: 1, status: 'in_progress', reward: 0, total_plies: moves.length});
+
+    currentPly = 0;
+    showPly(0);
+}
+
+// Initialize with empty board
+renderBoard(null, -1, -1);
+</script>
+</body>
+</html>
