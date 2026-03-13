@@ -1,0 +1,39 @@
+[Event "Sample Game 1"]
+[Site "CJC Test Suite"]
+[Date "2026.03.12"]
+[Round "1"]
+[White "Test White"]
+[Black "Test Black"]
+[Result "1-0"]
+
+1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. d3 d6 1-0
+
+[Event "Sample Game 2 - Scholars Mate"]
+[Site "CJC Test Suite"]
+[Date "2026.03.12"]
+[Round "2"]
+[White "Aggressive"]
+[Black "Beginner"]
+[Result "1-0"]
+
+1. e4 e5 2. Bc4 Nc6 3. Qh5 Nf6 4. Qxf7# 1-0
+
+[Event "Sample Game 3 - Draw"]
+[Site "CJC Test Suite"]
+[Date "2026.03.12"]
+[Round "3"]
+[White "Player A"]
+[Black "Player B"]
+[Result "1/2-1/2"]
+
+1. d4 d5 2. Nf3 Nf6 3. Bf4 Bf5 1/2-1/2
+
+[Event "Sample Game 4 - With Castling (should be rejected)"]
+[Site "CJC Test Suite"]
+[Date "2026.03.12"]
+[Round "4"]
+[White "Castler"]
+[Black "Defender"]
+[Result "1-0"]
+
+1. e4 e5 2. Nf3 Nc6 3. Bc4 Bc5 4. O-O d6 1-0

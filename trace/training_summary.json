@@ -1,0 +1,63 @@
+{
+  "platform": "CJC Chess RL Interactive Platform",
+  "agent_architecture": "MLP [66 -> 16 -> 1] + positional evaluation + REINFORCE training",
+  "training_method": "Post-game REINFORCE gradient updates with positional evaluation heuristics",
+  "heuristic": {
+    "type": "positional_evaluation",
+    "components": {
+      "capture_value": "2x piece value bonus for captures",
+      "center_control": "bonus for moving to center squares (d4, e4, d5, e5)",
+      "development": "bonus for developing knights/bishops from back rank",
+      "pawn_advancement": "scaled bonus for pushing pawns forward",
+      "check_bonus": "+1.5 for moves that give check",
+      "castling_bonus": "+0.5 for castling moves",
+      "king_safety": "penalty for unnecessary king moves in early game"
+    },
+    "piece_values": {"pawn": 1, "knight": 3, "bishop": 3, "rook": 5, "queen": 9, "king": 0},
+    "temperature": 0.5
+  },
+  "training": {
+    "method": "REINFORCE",
+    "timing": "after every completed game",
+    "learning_rate": 0.01,
+    "reward": "game outcome (1.0 win, -1.0 loss, 0.0 draw)",
+    "weight_persistence": "weights carry over between games via game.trainedWeights",
+    "reset": "available via Reset Agent button in UI"
+  },
+  "weight_initialization": {
+    "W1": "Gaussian(0, 0.1), shape [66, 16]",
+    "b1": "zeros, shape [1, 16]",
+    "W2": "Gaussian(0, 0.1), shape [16, 1]",
+    "rng": "SplitMix64"
+  },
+  "competence_level": "beginner, improving with play",
+  "estimated_elo_range": "850 initial, 900-1100 after 10+ games",
+  "strengths": [
+    "Captures high-value pieces aggressively (2x bonus)",
+    "Plays for check when possible (+1.5 bonus)",
+    "Controls center and develops pieces",
+    "Improves after every game via REINFORCE",
+    "Fully deterministic behavior for given seed",
+    "Honest about capabilities"
+  ],
+  "weaknesses": [
+    "No look-ahead search (single-ply evaluation)",
+    "No opening book (learns from experience)",
+    "Random initial MLP weights (before training)",
+    "Limited positional understanding beyond heuristics"
+  ],
+  "engine_features": {
+    "js_platform": [
+      "Full castling support (kingside + queenside)",
+      "En passant capture",
+      "Promotion choice UI (Q/R/B/N)",
+      "200-halfmove draw limit"
+    ],
+    "cjc_backend": [
+      "No castling (simplified)",
+      "No en passant (simplified)",
+      "Auto-queen promotion",
+      "200-halfmove draw limit"
+    ]
+  }
+}

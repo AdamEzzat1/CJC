@@ -5,6 +5,8 @@ pub mod test_game_logic_hardening;
 pub mod test_agent_hardening;
 pub mod test_training_hardening;
 pub mod test_determinism_hardening;
+pub mod test_capture_audit;
+pub mod test_promotion_audit;
 
 pub mod property {
     pub mod test_board_props;

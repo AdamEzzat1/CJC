@@ -1,0 +1,11 @@
+pub mod helpers;
+pub mod test_multi_training;
+pub mod test_win_rate;
+pub mod test_selfplay;
+pub mod test_snapshots;
+pub mod test_elo;
+pub mod test_replay;
+pub mod test_mir_trace;
+pub mod test_ad_verify;
+pub mod test_castling_ep;
+pub mod test_trace_export;

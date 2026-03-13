@@ -1,0 +1,27 @@
+{
+  "profile_type": "statistical",
+  "source": "human game traces from interactive platform",
+  "storage": "trace/human_games/",
+  "computed_metrics": {
+    "games_played": "count of completed games",
+    "win_draw_loss_record": "W/D/L from human perspective",
+    "win_rate": "wins / total games",
+    "avg_game_length": "mean move count across all games",
+    "capture_rate": "human captures / human total moves",
+    "avg_first_capture_ply": "mean ply of first human capture",
+    "piece_usage_distribution": "per-piece move counts (pawn through king)",
+    "favorite_piece": "most-used non-pawn piece"
+  },
+  "usage": {
+    "style_comparison": "Compare stats across play sessions",
+    "challenge_generation": "Create presets targeting weak areas",
+    "curriculum_weighting": "Optional: weight training on observed weaknesses",
+    "opponent_selection": "Optional: select agent snapshot matching player level"
+  },
+  "constraints": {
+    "optional": true,
+    "deterministic": true,
+    "no_anthropomorphism": "Profile describes statistics, not personality",
+    "honest": "No invented strategy descriptions"
+  }
+}

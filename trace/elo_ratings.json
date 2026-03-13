@@ -1,0 +1,46 @@
+{
+  "rating_system": "ELO-style comparative ratings",
+  "k_factor": 32,
+  "initial_rating": 1000,
+  "agents": {
+    "random": {
+      "rating": 400,
+      "description": "Uniform random move selection",
+      "games_evaluated": 0,
+      "method": "baseline_estimate"
+    },
+    "mlp_random_weights": {
+      "rating": 400,
+      "description": "MLP [66->16->1] with Gaussian(0, 0.1) weights, no heuristic",
+      "games_evaluated": 0,
+      "method": "baseline_estimate"
+    },
+    "mlp_capture_heuristic": {
+      "rating": 700,
+      "description": "MLP + 0.5x capture value bonus (deprecated)",
+      "games_evaluated": 0,
+      "method": "estimate_from_vs_random_winrate"
+    },
+    "mlp_positional_eval": {
+      "rating": 850,
+      "description": "MLP + positional evaluation (captures 2x, center control, development, check bonus, king safety) + T=0.5 softmax",
+      "games_evaluated": 0,
+      "method": "estimate_from_heuristic_strength"
+    },
+    "mlp_reinforce_trained": {
+      "rating": "900-1100 (after 10+ games)",
+      "description": "MLP + positional eval + post-game REINFORCE weight updates",
+      "games_evaluated": 0,
+      "method": "estimate_from_learning_trajectory",
+      "note": "Rating improves with each game played against human"
+    }
+  },
+  "notes": [
+    "Ratings are rough estimates based on theoretical analysis and observed behavior",
+    "Actual ELO would require many games against calibrated opponents",
+    "JS engine now supports castling and en passant; CJC backend remains simplified",
+    "Post-game REINFORCE training causes agent to improve over time",
+    "Temperature=0.5 softmax makes agent play more aggressively (greedier move selection)",
+    "All agents are deterministic for a given seed"
+  ]
+}
