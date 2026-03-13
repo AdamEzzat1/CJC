@@ -41,16 +41,16 @@ body { background: #0d1117; color: #c9d1d9; font-family: 'JetBrains Mono', 'Fira
 /* Layout */
 .play-area { display: flex; gap: 24px; flex-wrap: wrap; }
 .board-column { flex: 0 0 auto; }
-.info-column { flex: 1; min-width: 280px; max-width: 420px; }
+.info-column { flex: 1; min-width: 300px; max-width: 460px; }
 
 /* Chess Board */
 .board-wrapper { position: relative; }
 .board-coords-file { display: flex; padding-left: 22px; }
-.board-coords-file span { width: 48px; text-align: center; font-size: 11px; color: #484f58; }
+.board-coords-file span { width: 56px; text-align: center; font-size: 11px; color: #484f58; }
 .board-row { display: flex; align-items: center; }
 .board-row .rank-label { width: 22px; text-align: center; font-size: 11px; color: #484f58; }
-.board { display: grid; grid-template-columns: repeat(8, 48px); grid-template-rows: repeat(8, 48px); border: 2px solid #30363d; border-radius: 4px; overflow: hidden; }
-.sq { width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; font-size: 30px; cursor: pointer; position: relative; user-select: none; transition: background 0.1s; }
+.board { display: grid; grid-template-columns: repeat(8, 56px); grid-template-rows: repeat(8, 56px); border: 2px solid #30363d; border-radius: 4px; overflow: hidden; }
+.sq { width: 56px; height: 56px; display: flex; align-items: center; justify-content: center; font-size: 34px; cursor: pointer; position: relative; user-select: none; transition: background 0.1s; }
 .sq.light { background: #2d333b; }
 .sq.dark { background: #1c2128; }
 .sq.selected { box-shadow: inset 0 0 0 3px #f0883e; z-index: 1; }
@@ -63,7 +63,7 @@ body { background: #0d1117; color: #c9d1d9; font-family: 'JetBrains Mono', 'Fira
 @keyframes flashRed { 0%,100%{ box-shadow: none; } 50%{ box-shadow: inset 0 0 0 4px #f85149; } }
 
 /* Panels */
-.panel { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 14px; margin-bottom: 12px; }
+.panel { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px; margin-bottom: 14px; }
 .panel-title { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
 .panel h3 { font-size: 13px; color: #58a6ff; margin-bottom: 8px; }
 
@@ -188,6 +188,7 @@ label { font-size: 12px; color: #8b949e; }
     <button class="btn primary" onclick="newGame()">New Game</button>
     <button class="btn" onclick="resignGame()" id="btnResign" disabled>Resign</button>
     <button class="btn" onclick="offerDraw()" id="btnDraw" disabled>Draw</button>
+    <button class="btn" onclick="undoMove()" id="btnUndo" disabled title="Take back last move pair">Undo</button>
     <button class="btn" onclick="resetAgent()" id="btnResetAgent" title="Clear trained weights and start fresh">Reset Agent</button>
     <select id="selOpponent" onchange="updateOpponentInfo()">
         <option value="agent">vs Agent (Trained)</option>
@@ -642,17 +643,57 @@ function legalMoves(board, side, castlingRights, enPassantSq) {
     const legal = [];
     for (let i = 0; i < pseudo.length; i += 2) {
         const fromSq = pseudo[i], toSq = pseudo[i + 1];
+        // applyMove handles promotion (auto-queen) — king safety check is correct
+        // regardless of promotion piece since the destination square is occupied either way
         const newBoard = applyMove(board, fromSq, toSq);
         if (!inCheck(newBoard, side)) { legal.push(fromSq, toSq); }
     }
     return legal;
 }
 
-// Returns: 0=not terminal, 2=side-to-move checkmated, 3=stalemate
+// Returns: 0=not terminal, 2=side-to-move checkmated, 3=stalemate,
+//          4=threefold repetition, 5=fifty-move rule, 6=insufficient material
 function terminalStatus(board, side, castlingRights, enPassantSq) {
     const moves = legalMoves(board, side, castlingRights, enPassantSq);
     if (moves.length === 0) return inCheck(board, side) ? 2 : 3;
+    // Insufficient material
+    if (isInsufficientMaterial(board)) return 6;
     return 0;
+}
+
+// Detect insufficient material: K vs K, K+N vs K, K+B vs K, K+B vs K+B (same color)
+function isInsufficientMaterial(board) {
+    const pieces = []; // {type, side, sq}
+    for (let i = 0; i < 64; i++) {
+        if (board[i] !== 0) pieces.push({ type: Math.abs(board[i]), side: pieceSide(board[i]), sq: i });
+    }
+    // K vs K
+    if (pieces.length === 2) return true;
+    // K+minor vs K
+    if (pieces.length === 3) {
+        const minor = pieces.find(p => p.type === 2 || p.type === 3);
+        if (minor) return true;
+    }
+    // K+B vs K+B same color bishops
+    if (pieces.length === 4) {
+        const bishops = pieces.filter(p => p.type === 3);
+        if (bishops.length === 2 && bishops[0].side !== bishops[1].side) {
+            const color0 = (rankOf(bishops[0].sq) + fileOf(bishops[0].sq)) % 2;
+            const color1 = (rankOf(bishops[1].sq) + fileOf(bishops[1].sq)) % 2;
+            if (color0 === color1) return true;
+        }
+    }
+    return false;
+}
+
+// Simple position hash for repetition detection (Zobrist-like string hash)
+function positionHash(board, side, castlingRights, enPassantSq) {
+    let h = side.toString();
+    for (let i = 0; i < 64; i++) h += ',' + board[i];
+    h += '|' + (castlingRights.wK?1:0) + (castlingRights.wQ?1:0) +
+         (castlingRights.bK?1:0) + (castlingRights.bQ?1:0);
+    h += '|' + enPassantSq;
+    return h;
 }
 
 // Update castling rights after a move
@@ -692,6 +733,30 @@ function computeEnPassant(board, fromSq, toSq) {
         return sqOf(epRank, fileOf(fromSq));
     }
     return -1;
+}
+
+// Update draw-detection state after a move. Call AFTER applying the move and switching side.
+function updateDrawState(board, fromSq, toSq, prevBoard, side, castlingRights, enPassantSq) {
+    // Update halfmove clock: reset on pawn move or capture
+    const movedPiece = Math.abs(prevBoard[fromSq]);
+    const wasCapture = prevBoard[toSq] !== 0 ||
+        (movedPiece === 1 && fileOf(fromSq) !== fileOf(toSq) && prevBoard[toSq] === 0); // EP
+    if (movedPiece === 1 || wasCapture) {
+        game.halfmoveClock = 0;
+    } else {
+        game.halfmoveClock++;
+    }
+    // Record position for threefold repetition
+    const hash = positionHash(board, side, castlingRights, enPassantSq);
+    game.positionHistory[hash] = (game.positionHistory[hash] || 0) + 1;
+}
+
+// Check draw by repetition or 50-move rule. Call AFTER updateDrawState.
+function checkDrawConditions(board, side, castlingRights, enPassantSq) {
+    const hash = positionHash(board, side, castlingRights, enPassantSq);
+    if ((game.positionHistory[hash] || 0) >= 3) return 4; // threefold
+    if (game.halfmoveClock >= 100) return 5; // 50-move rule (100 half-moves)
+    return 0;
 }
 
 function encodeBoard(board, side) {
@@ -838,6 +903,35 @@ function evaluateMove(board, fromSq, toSq, side) {
         }
     }
 
+    // 7. 1-ply tactical lookahead — detect if we're hanging a piece
+    //    Look at opponent's best capture response
+    const oppMoves = generatePseudoLegal(newBoard, -side, null, -1);
+    let worstLoss = 0;
+    const movedPieceVal = PIECE_VALUES[absP] || 0;
+    for (let i = 0; i < oppMoves.length; i += 2) {
+        const oTo = oppMoves[i + 1];
+        const victim = newBoard[oTo];
+        if (victim !== 0 && pieceSide(victim) === side) {
+            const victimVal = PIECE_VALUES[Math.abs(victim)] || 0;
+            if (victimVal > worstLoss) worstLoss = victimVal;
+        }
+    }
+    // Penalize if opponent can capture something valuable after our move
+    if (worstLoss > 0) {
+        bonus -= worstLoss * 0.5;
+    }
+
+    // 8. Detect free captures (opponent can't recapture our capturing piece)
+    if (target !== 0 && pieceSide(target) !== side) {
+        let canRecapture = false;
+        for (let i = 0; i < oppMoves.length; i += 2) {
+            if (oppMoves[i + 1] === toSq) { canRecapture = true; break; }
+        }
+        if (!canRecapture) {
+            bonus += (PIECE_VALUES[Math.abs(target)] || 0) * 1.0; // extra for free capture
+        }
+    }
+
     return bonus;
 }
 
@@ -901,18 +995,27 @@ function selectActionRandom(moves, rng) {
 // POST-GAME REINFORCE TRAINING
 // =====================================================================
 
+// Running reward baseline for variance reduction
+let rewardBaseline = 0;
+
 function trainFromGame() {
     if (game.opponentType !== 'agent') return;
     if (!game.weights) return;
 
-    const lr = 0.01;
     const gamma = 0.99;
+    // Learning rate schedule: decay over training episodes
+    const baseLR = 0.01;
+    const episode = game.trainingEpisodes || 0;
+    const lr = baseLR / (1 + episode * 0.05); // smooth decay
 
     // Determine reward: +1 if agent won, -1 if agent lost, 0 for draw
     let agentReward = 0;
     const agentSide = -game.humanSide;
     if (game.result === 'white_wins') agentReward = agentSide === 1 ? 1 : -1;
     else if (game.result === 'black_wins') agentReward = agentSide === -1 ? 1 : -1;
+
+    // Update baseline (exponential moving average)
+    rewardBaseline = 0.9 * rewardBaseline + 0.1 * agentReward;
 
     // Collect agent moves from trajectory
     const agentSteps = [];
@@ -932,13 +1035,13 @@ function trainFromGame() {
 
     if (agentSteps.length === 0) return;
 
-    // REINFORCE: update weights for each agent decision
+    // REINFORCE with baseline subtraction
     const { W1, b1, W2 } = game.weights;
 
     for (let si = 0; si < agentSteps.length; si++) {
         const step = agentSteps[si];
         const discount = Math.pow(gamma, agentSteps.length - 1 - si);
-        const advantage = agentReward * discount;
+        const advantage = (agentReward - rewardBaseline) * discount;
 
         if (Math.abs(advantage) < 1e-10) continue;
 
@@ -1005,9 +1108,50 @@ function trainFromGame() {
         W2: new Float64Array(game.weights.W2)
     };
 
+    // Persist weights to localStorage
+    saveTrainedWeights();
+
     // Track training progress
     game.trainingEpisodes = (game.trainingEpisodes || 0) + 1;
-    console.log(`REINFORCE training: episode ${game.trainingEpisodes}, reward=${agentReward}, steps=${agentSteps.length}`);
+    console.log(`REINFORCE training: episode ${game.trainingEpisodes}, lr=${lr.toFixed(4)}, reward=${agentReward}, baseline=${rewardBaseline.toFixed(3)}, steps=${agentSteps.length}`);
+}
+
+// Persist/load trained weights to/from localStorage
+function saveTrainedWeights() {
+    if (!game.trainedWeights) return;
+    try {
+        const data = {
+            W1: Array.from(game.trainedWeights.W1),
+            b1: Array.from(game.trainedWeights.b1),
+            W2: Array.from(game.trainedWeights.W2),
+            episodes: game.trainingEpisodes || 0,
+            baseline: rewardBaseline
+        };
+        const json = JSON.stringify(data);
+        // Bound localStorage: only save if under 1MB
+        if (json.length < 1024 * 1024) {
+            localStorage.setItem('cjc_chess_weights', json);
+        }
+    } catch (e) { /* quota exceeded, silently fail */ }
+}
+
+function loadTrainedWeights() {
+    try {
+        const raw = localStorage.getItem('cjc_chess_weights');
+        if (!raw) return false;
+        const data = JSON.parse(raw);
+        if (data.W1 && data.b1 && data.W2) {
+            game.trainedWeights = {
+                W1: new Float64Array(data.W1),
+                b1: new Float64Array(data.b1),
+                W2: new Float64Array(data.W2)
+            };
+            game.trainingEpisodes = data.episodes || 0;
+            rewardBaseline = data.baseline || 0;
+            return true;
+        }
+    } catch (e) { /* corrupt data, ignore */ }
+    return false;
 }
 
 // =====================================================================
@@ -1038,6 +1182,9 @@ let game = {
     // Castling & en passant state
     castlingRights: { wK: true, wQ: true, bK: true, bQ: true },
     enPassantSq: -1,
+    // Draw detection state
+    positionHistory: {},   // hash -> count for threefold repetition
+    halfmoveClock: 0,      // moves since last pawn push or capture (50-move rule)
     // Training state
     trainingEpisodes: 0,
     trainedWeights: null, // accumulated trained weights (persists across games)
@@ -1055,8 +1202,21 @@ function loadStoredTraces() {
 
 function saveStoredTraces() {
     try {
-        localStorage.setItem('cjc_chess_traces', JSON.stringify(storedTraces));
-    } catch (e) { /* quota exceeded, silently fail */ }
+        const json = JSON.stringify(storedTraces);
+        // Bound localStorage: evict oldest traces if over 2MB
+        if (json.length > 2 * 1024 * 1024 && storedTraces.length > 5) {
+            storedTraces = storedTraces.slice(-50); // keep last 50 games max
+            localStorage.setItem('cjc_chess_traces', JSON.stringify(storedTraces));
+        } else {
+            localStorage.setItem('cjc_chess_traces', json);
+        }
+    } catch (e) {
+        // Quota exceeded — evict oldest traces
+        if (storedTraces.length > 5) {
+            storedTraces = storedTraces.slice(-20);
+            try { localStorage.setItem('cjc_chess_traces', JSON.stringify(storedTraces)); } catch (e2) {}
+        }
+    }
 }
 
 // =====================================================================
@@ -1311,7 +1471,23 @@ function updateReplayBadge() {
     }
 
     const stableBadge = document.getElementById('replayStableBadge');
-    stableBadge.style.display = game.isReplay ? 'inline-block' : 'none';
+    // Only show "Replay Stable" when replaying AND agent has NOT been trained
+    // (training changes weights, which changes agent behavior, breaking replay parity)
+    const isStable = game.isReplay && game.trainingEpisodes === 0;
+    stableBadge.style.display = isStable ? 'inline-block' : 'none';
+    // Show warning if replaying with trained weights
+    if (game.isReplay && game.trainingEpisodes > 0) {
+        stableBadge.style.display = 'inline-block';
+        stableBadge.textContent = 'Weights Modified \u26A0';
+        stableBadge.style.borderColor = '#bb8009';
+        stableBadge.style.color = '#f0883e';
+        stableBadge.style.background = '#1c1917';
+    } else if (isStable) {
+        stableBadge.textContent = 'Replay Stable \u2713';
+        stableBadge.style.borderColor = '#238636';
+        stableBadge.style.color = '#3fb950';
+        stableBadge.style.background = '#0d2a0d';
+    }
 
     // Training badge
     const trainingBadge = document.getElementById('badgeTraining');
@@ -1377,6 +1553,8 @@ function completePromotion(pieceType) {
 function resetAgent() {
     game.trainedWeights = null;
     game.trainingEpisodes = 0;
+    rewardBaseline = 0;
+    try { localStorage.removeItem('cjc_chess_weights'); } catch (e) {}
     updateReplayBadge();
     setStatus('Agent weights reset. Start a new game.', 'idle');
 }
@@ -1422,9 +1600,16 @@ function newGame() {
     // Reset castling and en passant for new game
     game.castlingRights = { wK: true, wQ: true, bK: true, bQ: true };
     game.enPassantSq = -1;
+    // Reset draw detection
+    game.positionHistory = {};
+    game.halfmoveClock = 0;
+    // Record initial position
+    const initHash = positionHash(initBoard(), 1, { wK: true, wQ: true, bK: true, bQ: true }, -1);
+    game.positionHistory[initHash] = 1;
 
     document.getElementById('btnResign').disabled = false;
     document.getElementById('btnDraw').disabled = false;
+    document.getElementById('btnUndo').disabled = false;
     document.getElementById('btnDownload').disabled = true;
     document.getElementById('btnCopy').disabled = true;
     document.getElementById('whyMovePanel').style.display = 'none';
@@ -1529,6 +1714,7 @@ function finishHumanMove(fromSq, toSq, promoPiece) {
     });
 
     // Update castling rights and en passant before applying move
+    const prevBoard = game.board;
     game.castlingRights = updateCastlingRights(game.castlingRights, game.board, fromSq, toSq);
     game.enPassantSq = computeEnPassant(game.board, fromSq, toSq);
 
@@ -1539,12 +1725,19 @@ function finishHumanMove(fromSq, toSq, promoPiece) {
     game.selectedSq = -1;
     game.legalFromSelected = [];
 
+    // Update draw detection state
+    updateDrawState(game.board, fromSq, toSq, prevBoard, game.side, game.castlingRights, game.enPassantSq);
+
     renderPlayBoard();
     updateMaterial();
     updateMoveList();
 
-    // Check terminal
-    const status = terminalStatus(game.board, game.side, game.castlingRights, game.enPassantSq);
+    // Check terminal (checkmate/stalemate/insufficient material)
+    let status = terminalStatus(game.board, game.side, game.castlingRights, game.enPassantSq);
+    // Check draw by repetition or 50-move rule
+    if (status === 0) {
+        status = checkDrawConditions(game.board, game.side, game.castlingRights, game.enPassantSq);
+    }
     if (status !== 0 || game.moveCount >= game.maxMoves) {
         endGame(status);
         return;
@@ -1618,6 +1811,7 @@ function agentMove() {
     showWhyMove(actionResult, moves, game.board, game.side);
 
     // Update castling rights and en passant before applying move
+    const prevBoard = game.board;
     game.castlingRights = updateCastlingRights(game.castlingRights, game.board, fromSq, toSq);
     game.enPassantSq = computeEnPassant(game.board, fromSq, toSq);
 
@@ -1626,13 +1820,20 @@ function agentMove() {
     game.lastTo = toSq;
     game.side = -1 * game.side;
 
+    // Update draw detection state
+    updateDrawState(game.board, fromSq, toSq, prevBoard, game.side, game.castlingRights, game.enPassantSq);
+
     renderPlayBoard();
     updateMaterial();
     updateMoveList();
     updateReplayBadge();
 
-    // Check terminal
-    const status = terminalStatus(game.board, game.side, game.castlingRights, game.enPassantSq);
+    // Check terminal (checkmate/stalemate/insufficient material)
+    let status = terminalStatus(game.board, game.side, game.castlingRights, game.enPassantSq);
+    // Check draw by repetition or 50-move rule
+    if (status === 0) {
+        status = checkDrawConditions(game.board, game.side, game.castlingRights, game.enPassantSq);
+    }
     if (status !== 0 || game.moveCount >= game.maxMoves) {
         endGame(status);
         return;
@@ -1665,6 +1866,15 @@ function endGame(termStatus) {
     } else if (termStatus === 3) {
         game.result = 'draw';
         resultMsg = 'Draw by stalemate.';
+    } else if (termStatus === 4) {
+        game.result = 'draw';
+        resultMsg = 'Draw by threefold repetition.';
+    } else if (termStatus === 5) {
+        game.result = 'draw';
+        resultMsg = 'Draw by fifty-move rule.';
+    } else if (termStatus === 6) {
+        game.result = 'draw';
+        resultMsg = 'Draw by insufficient material.';
     } else {
         game.result = 'draw';
         resultMsg = `Draw by move limit (${game.maxMoves} moves).`;
@@ -1734,7 +1944,23 @@ function resignGame() {
 
 function offerDraw() {
     if (game.status !== 'playing') return;
-    // Agent always accepts draws (simple behavior)
+    // Agent decision: accept draw if losing or even, decline if winning
+    // Uses material evaluation to decide
+    let whiteVal = 0, blackVal = 0;
+    for (let i = 0; i < 64; i++) {
+        const p = game.board[i];
+        if (p > 0) whiteVal += PIECE_VALUES[p] || 0;
+        else if (p < 0) blackVal += PIECE_VALUES[-p] || 0;
+    }
+    const agentSide = -game.humanSide;
+    const agentAdv = agentSide === 1 ? (whiteVal - blackVal) : (blackVal - whiteVal);
+    // Agent declines if it has material advantage > 2 (more than a minor piece)
+    if (agentAdv > 2) {
+        setStatus('Draw offer declined — agent believes it is winning.', 'playing');
+        recordTrace({ ply: game.moveCount, type: 'draw_declined', seed: game.seed });
+        return;
+    }
+
     game.result = 'draw';
     recordTrace({ ply: game.moveCount, type: 'draw_agreed', result: 'draw', total_moves: game.moveCount, seed: game.seed });
     game.status = 'ended';
@@ -1757,6 +1983,51 @@ function offerDraw() {
     updateReplayBadge();
     updateReviewTab();
     updateProfileTab();
+}
+
+// Undo last move pair (human + agent response)
+function undoMove() {
+    if (game.status !== 'playing' || game.moveHistory.length < 2) return;
+    // Remove last two moves (agent + human, or human + agent)
+    const movesToUndo = game.side === game.humanSide ? 2 : 1;
+    if (game.moveHistory.length < movesToUndo) return;
+
+    // Reconstruct game state from scratch by replaying all moves except last N
+    const keepMoves = game.moveHistory.slice(0, -movesToUndo);
+    game.board = initBoard();
+    game.side = 1;
+    game.moveCount = 0;
+    game.castlingRights = { wK: true, wQ: true, bK: true, bQ: true };
+    game.enPassantSq = -1;
+    game.positionHistory = {};
+    game.halfmoveClock = 0;
+    const initHash = positionHash(game.board, 1, game.castlingRights, -1);
+    game.positionHistory[initHash] = 1;
+
+    for (const m of keepMoves) {
+        const prevBoard = game.board;
+        game.castlingRights = updateCastlingRights(game.castlingRights, game.board, m.from, m.to);
+        game.enPassantSq = computeEnPassant(game.board, m.from, m.to);
+        game.board = applyMoveWithPromo(game.board, m.from, m.to, m.promoPiece);
+        game.side = -game.side;
+        game.moveCount++;
+        updateDrawState(game.board, m.from, m.to, prevBoard, game.side, game.castlingRights, game.enPassantSq);
+    }
+
+    game.moveHistory = keepMoves;
+    game.lastFrom = keepMoves.length > 0 ? keepMoves[keepMoves.length - 1].from : -1;
+    game.lastTo = keepMoves.length > 0 ? keepMoves[keepMoves.length - 1].to : -1;
+    game.selectedSq = -1;
+    game.legalFromSelected = [];
+
+    // Rebuild trace
+    game.trace = game.trace.slice(0, keepMoves.length + 1); // keep init + kept moves
+
+    renderPlayBoard();
+    updateMaterial();
+    updateMoveList();
+    updateReplayBadge();
+    setStatus('Your turn (' + (game.humanSide === 1 ? 'White' : 'Black') + ')', 'playing');
 }
 
 function updateOpponentInfo() {
@@ -1886,32 +2157,64 @@ function updateOpeningTab() {
         return;
     }
 
-    // Build opening frequency tree (first 4 moves)
-    const tree = {};
+    // Build hierarchical opening tree (up to 6 plies deep)
+    const treeNodes = {}; // key -> { move, count, wins, draws, losses, children: [] }
     for (const g of storedTraces) {
-        let key = '';
-        const depth = Math.min(4, g.moveHistory.length);
+        const depth = Math.min(6, g.moveHistory.length);
         for (let i = 0; i < depth; i++) {
-            key += (key ? ' ' : '') + g.moveHistory[i].notation;
-            if (!tree[key]) tree[key] = { count: 0, wins: 0, draws: 0, losses: 0 };
-            tree[key].count++;
-            if (g.result === 'draw') tree[key].draws++;
+            const key = g.moveHistory.slice(0, i + 1).map(m => m.notation).join(' ');
+            const parentKey = i > 0 ? g.moveHistory.slice(0, i).map(m => m.notation).join(' ') : null;
+            if (!treeNodes[key]) {
+                treeNodes[key] = {
+                    move: g.moveHistory[i].notation,
+                    fullSeq: key,
+                    depth: i + 1,
+                    count: 0, wins: 0, draws: 0, losses: 0,
+                    parentKey
+                };
+            }
+            treeNodes[key].count++;
+            if (g.result === 'draw') treeNodes[key].draws++;
             else if ((g.result === 'white_wins' && g.humanSide === 1) ||
-                     (g.result === 'black_wins' && g.humanSide === -1)) tree[key].wins++;
-            else tree[key].losses++;
+                     (g.result === 'black_wins' && g.humanSide === -1)) treeNodes[key].wins++;
+            else treeNodes[key].losses++;
         }
     }
 
-    // Display sorted by frequency
-    const entries = Object.entries(tree).sort((a, b) => b[1].count - a[1].count).slice(0, 20);
-    let html = '<table style="width:100%;font-size:12px;border-collapse:collapse;">';
-    html += '<tr><th style="text-align:left;color:#484f58;padding:4px;">Sequence</th><th style="color:#484f58;padding:4px;">Games</th><th style="color:#484f58;padding:4px;">W/D/L</th></tr>';
-    for (const [seq, stats] of entries) {
-        html += `<tr><td style="padding:4px;color:#c9d1d9;">${seq}</td>`;
-        html += `<td style="padding:4px;text-align:center;">${stats.count}</td>`;
-        html += `<td style="padding:4px;text-align:center;"><span style="color:#3fb950;">${stats.wins}</span>/<span style="color:#8b949e;">${stats.draws}</span>/<span style="color:#f85149;">${stats.losses}</span></td></tr>`;
+    // Build tree display — root level first, then expandable children
+    const rootNodes = Object.values(treeNodes).filter(n => n.depth === 1)
+        .sort((a, b) => b.count - a.count);
+
+    function renderTreeNode(node, indent) {
+        const childNodes = Object.values(treeNodes)
+            .filter(n => n.parentKey === node.fullSeq)
+            .sort((a, b) => b.count - a.count);
+        const hasChildren = childNodes.length > 0;
+        const arrow = hasChildren ? '<span class="tree-toggle" style="cursor:pointer;color:#484f58;margin-right:4px;" onclick="this.parentElement.nextElementSibling.style.display=this.parentElement.nextElementSibling.style.display===\'none\'?\'block\':\'none\';this.textContent=this.textContent===\'\u25B6\'?\'\u25BC\':\'\u25B6\'">\u25B6</span>' : '<span style="margin-right:4px;color:transparent;">\u25B6</span>';
+        const plyLabel = node.depth % 2 === 1 ? Math.ceil(node.depth / 2) + '.' : '...';
+        const winPct = node.count > 0 ? (node.wins / node.count * 100).toFixed(0) : '0';
+        let html = `<div style="padding:3px 0;padding-left:${indent * 16}px;font-size:12px;display:flex;align-items:center;gap:6px;">`;
+        html += arrow;
+        html += `<span style="color:#484f58;font-size:10px;width:24px;">${plyLabel}</span>`;
+        html += `<span style="color:#c9d1d9;font-weight:500;">${node.move}</span>`;
+        html += `<span style="color:#484f58;font-size:11px;">${node.count} game${node.count !== 1 ? 's' : ''}</span>`;
+        html += `<span style="font-size:11px;"><span style="color:#3fb950;">${node.wins}</span>/<span style="color:#8b949e;">${node.draws}</span>/<span style="color:#f85149;">${node.losses}</span></span>`;
+        html += `<span style="color:#58a6ff;font-size:10px;">${winPct}%</span>`;
+        html += '</div>';
+        if (hasChildren) {
+            html += '<div style="display:none;">';
+            for (const child of childNodes) {
+                html += renderTreeNode(child, indent + 1);
+            }
+            html += '</div>';
+        }
+        return html;
     }
-    html += '</table>';
+
+    let html = `<div style="font-size:11px;color:#484f58;margin-bottom:8px;">${storedTraces.length} game(s) analyzed, up to 6 plies deep. Click \u25B6 to expand.</div>`;
+    for (const root of rootNodes) {
+        html += renderTreeNode(root, 0);
+    }
     document.getElementById('openingContent').innerHTML = html;
 }
 
@@ -1921,9 +2224,9 @@ function updateOpeningTab() {
 
 function updateProfileTab() {
     const humanGames = storedTraces.filter(g => g.moveHistory && g.moveHistory.length > 0);
-    if (humanGames.length < 2) {
+    if (humanGames.length < 1) {
         document.getElementById('profileContent').textContent =
-            `${humanGames.length} game(s) played. Play at least 2 for a style profile.`;
+            'Play a game to generate your style profile.';
         return;
     }
 
@@ -2144,6 +2447,7 @@ function exportSessionSummary() {
 // =====================================================================
 
 loadStoredTraces();
+loadTrainedWeights();
 updateReviewTab();
 updateProfileTab();
 updateOpeningTab();

@@ -2,7 +2,7 @@
 
 ## Portfolio Summary
 
-**One-liner:** Built a fully interactive, human-playable chess RL research platform with post-game REINFORCE training, castling/EP, PGN import parser, policy explainability, player profiling, and 433 engine tests — all in pure CJC + HTML/JS with zero external dependencies.
+**One-liner:** Built a fully interactive chess RL research platform with REINFORCE training (baseline subtraction, LR schedule, weight persistence), 1-ply tactical lookahead, complete draw rules (threefold repetition, 50-move, insufficient material), honest replay determinism, expandable opening tree, PGN import parser, and 499 engine tests — all in pure CJC + HTML/JS with zero external dependencies.
 
 ### Resume Bullet
 
@@ -59,8 +59,11 @@
 | Demo presets bar | One-click start for common play/replay/debug scenarios |
 | Replay badge | Persistent seed/status display with "Replay Exact" button |
 | Promotion choice | Full underpromotion UI (queen/rook/bishop/knight) for human players |
-| Capture heuristic | Agent uses positional evaluation + piece-value bonus for aggressive play |
-| Post-game REINFORCE | Agent improves after every game via gradient updates on MLP weights |
+| Capture heuristic + 1-ply lookahead | Agent uses positional eval + piece-value bonus + tactical threat detection |
+| REINFORCE with baseline | Agent improves via gradient updates with EMA baseline subtraction and LR decay |
+| Draw rules | Threefold repetition, fifty-move rule, insufficient material detection |
+| Weight persistence | Trained weights saved to localStorage, survive page refresh |
+| Undo/takeback | Reconstruct game state for user-friendly play |
 | Castling & en passant | JS engine supports full castling + EP (CJC backend simplified) |
 | PGN import parser | Rust-side SAN resolver with board parity verification against CJC engine |
 | Player profiling | Statistical profiles from stored traces (capture rate, piece preferences, W/D/L) |
@@ -78,8 +81,10 @@
 | Playability tests | 37 |
 | Advanced tests | 135 |
 | Hardening tests | 170 |
-| Total chess RL tests | 433 |
+| Project tests | 66 |
+| Total chess RL tests | 499 |
 | Failures | 0 |
+| Ignored | 12 |
 | Regressions | 0 |
 
 ## Files Created
