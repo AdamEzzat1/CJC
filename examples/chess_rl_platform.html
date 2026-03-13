@@ -1864,9 +1864,9 @@ async function startTraining() {
 
         // Periodic evaluation (every 10 episodes)
         if ((ep + 1) % 10 === 0) {
-            const evalRng = new SplitMix64(99999);
-            const evalRandom = evaluateVsBaseline(game.weightsV2, 'random', 20, 10000);
-            const evalHeuristic = evaluateVsBaseline(game.weightsV2, 'heuristic', 20, 20000);
+            const evalSeedBase = 10000 + episodeNum * 7919;  // vary seeds per eval checkpoint
+            const evalRandom = evaluateVsBaseline(game.weightsV2, 'random', 20, evalSeedBase);
+            const evalHeuristic = evaluateVsBaseline(game.weightsV2, 'heuristic', 20, evalSeedBase + 50000);
             trainingMetrics.winRateVsRandom.push(evalRandom.winRate);
             trainingMetrics.winRateVsHeuristic.push(evalHeuristic.winRate);
 
