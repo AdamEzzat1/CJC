@@ -9,3 +9,4 @@ pub mod test_mir_trace;
 pub mod test_ad_verify;
 pub mod test_castling_ep;
 pub mod test_trace_export;
+pub mod test_ml_upgrade;

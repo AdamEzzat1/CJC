@@ -152,7 +152,7 @@ label { font-size: 12px; color: #8b949e; }
 <div class="header">
     <div>
         <h1>CJC Chess RL — Interactive Platform</h1>
-        <div class="meta">Deterministic Play | SplitMix64 RNG | MLP [66&rarr;16&rarr;1] | REINFORCE | Self-Improving</div>
+        <div class="meta">Deterministic Play | SplitMix64 RNG | Actor-Critic [288&rarr;128&rarr;128&rarr;P+V] | A2C + GAE | Self-Improving</div>
     </div>
     <div class="replay-badge">
         <span class="badge-chip" id="badgeSeed">Seed: 42</span>
@@ -179,6 +179,7 @@ label { font-size: 12px; color: #8b949e; }
     <div class="tab" onclick="switchTab('review', event)">Review</div>
     <div class="tab" onclick="switchTab('opening', event)">Openings</div>
     <div class="tab" onclick="switchTab('profile', event)">Style Profile</div>
+    <div class="tab" onclick="switchTab('training', event)">Training</div>
     <div class="tab" onclick="switchTab('settings', event)">Settings</div>
 </div>
 
@@ -299,6 +300,65 @@ label { font-size: 12px; color: #8b949e; }
 <div class="panel">
     <div class="panel-title">Your Style Profile</div>
     <div id="profileContent" style="font-size:12px;color:#8b949e;">Play some games to generate your style profile.</div>
+</div>
+</div>
+
+<!-- ============ TRAINING TAB ============ -->
+<div id="tab-training" class="tab-content">
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+    <div class="panel">
+        <div class="panel-title">Training Controls</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+            <button class="btn primary" onclick="startTraining()" id="btnStartTrain">Train 50 Episodes</button>
+            <button class="btn" onclick="stopTraining()" id="btnStopTrain" disabled>Stop</button>
+            <button class="btn" onclick="runEvaluation()" id="btnEval">Evaluate Now</button>
+            <select id="selTrainEpisodes">
+                <option value="10">10 episodes</option>
+                <option value="50" selected>50 episodes</option>
+                <option value="100">100 episodes</option>
+                <option value="200">200 episodes</option>
+                <option value="500">500 episodes</option>
+            </select>
+        </div>
+        <div id="trainingProgress" style="font-size:12px;color:#8b949e;margin-bottom:8px;">Idle</div>
+        <div style="background:#0d1117;border:1px solid #21262d;border-radius:4px;overflow:hidden;height:6px;margin-bottom:8px;">
+            <div id="trainProgressBar" style="width:0%;height:100%;background:#238636;transition:width 0.3s;"></div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;">
+            <div><span style="color:#484f58;">Curriculum:</span> <span id="curriculumPhase" style="color:#58a6ff;">Phase A (vs Random)</span></div>
+            <div><span style="color:#484f58;">Episodes:</span> <span id="totalEpisodes" style="color:#c9d1d9;">0</span></div>
+            <div><span style="color:#484f58;">Learning Rate:</span> <span id="currentLR" style="color:#c9d1d9;">0.0003</span></div>
+            <div><span style="color:#484f58;">Replay Buffer:</span> <span id="bufferSize" style="color:#c9d1d9;">0 / 100</span></div>
+        </div>
+    </div>
+    <div class="panel">
+        <div class="panel-title">Evaluation vs Baselines (last eval)</div>
+        <div id="evalResults" style="font-size:12px;color:#8b949e;">No evaluation run yet. Click "Evaluate Now".</div>
+    </div>
+</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px;">
+    <div class="panel">
+        <div class="panel-title">Reward Curve</div>
+        <canvas id="chartReward" width="400" height="200" style="width:100%;background:#0d1117;border-radius:4px;"></canvas>
+    </div>
+    <div class="panel">
+        <div class="panel-title">Win Rate vs Random</div>
+        <canvas id="chartWinRate" width="400" height="200" style="width:100%;background:#0d1117;border-radius:4px;"></canvas>
+    </div>
+    <div class="panel">
+        <div class="panel-title">Policy Loss &amp; Value Loss</div>
+        <canvas id="chartLoss" width="400" height="200" style="width:100%;background:#0d1117;border-radius:4px;"></canvas>
+    </div>
+    <div class="panel">
+        <div class="panel-title">Entropy &amp; Gradient Norm</div>
+        <canvas id="chartEntropy" width="400" height="200" style="width:100%;background:#0d1117;border-radius:4px;"></canvas>
+    </div>
+</div>
+<div style="margin-top:16px;">
+    <div class="panel">
+        <div class="panel-title">Model Checkpoints</div>
+        <div id="checkpointList" style="font-size:12px;color:#8b949e;">No checkpoints saved yet.</div>
+    </div>
 </div>
 </div>
 
@@ -765,6 +825,1227 @@ function encodeBoard(board, side) {
     return data;
 }
 
+// =====================================================================
+// RICH INPUT FEATURES (V2) — 288 floats for actor-critic network
+// =====================================================================
+// Classical piece-square tables (from white's perspective, rank 0 = white side)
+const PST_PAWN = [
+    0, 0, 0, 0, 0, 0, 0, 0,
+    5,10,10,-20,-20,10,10, 5,
+    5,-5,-10, 0, 0,-10,-5, 5,
+    0, 0, 0, 20, 20, 0, 0, 0,
+    5, 5, 10, 25, 25, 10, 5, 5,
+    10,10, 20, 30, 30, 20,10,10,
+    50,50, 50, 50, 50, 50,50,50,
+    0, 0, 0, 0, 0, 0, 0, 0
+];
+const PST_KNIGHT = [
+    -50,-40,-30,-30,-30,-30,-40,-50,
+    -40,-20, 0, 0, 0, 0,-20,-40,
+    -30, 0, 10, 15, 15, 10, 0,-30,
+    -30, 5, 15, 20, 20, 15, 5,-30,
+    -30, 0, 15, 20, 20, 15, 0,-30,
+    -30, 5, 10, 15, 15, 10, 5,-30,
+    -40,-20, 0, 5, 5, 0,-20,-40,
+    -50,-40,-30,-30,-30,-30,-40,-50
+];
+const PST_BISHOP = [
+    -20,-10,-10,-10,-10,-10,-10,-20,
+    -10, 0, 0, 0, 0, 0, 0,-10,
+    -10, 0, 5, 10, 10, 5, 0,-10,
+    -10, 5, 5, 10, 10, 5, 5,-10,
+    -10, 0, 10, 10, 10, 10, 0,-10,
+    -10, 10, 10, 10, 10, 10, 10,-10,
+    -10, 5, 0, 0, 0, 0, 5,-10,
+    -20,-10,-10,-10,-10,-10,-10,-20
+];
+const PST_ROOK = [
+    0, 0, 0, 0, 0, 0, 0, 0,
+    5, 10, 10, 10, 10, 10, 10, 5,
+    -5, 0, 0, 0, 0, 0, 0,-5,
+    -5, 0, 0, 0, 0, 0, 0,-5,
+    -5, 0, 0, 0, 0, 0, 0,-5,
+    -5, 0, 0, 0, 0, 0, 0,-5,
+    -5, 0, 0, 0, 0, 0, 0,-5,
+    0, 0, 0, 5, 5, 0, 0, 0
+];
+const PST_QUEEN = [
+    -20,-10,-10,-5,-5,-10,-10,-20,
+    -10, 0, 0, 0, 0, 0, 0,-10,
+    -10, 0, 5, 5, 5, 5, 0,-10,
+    -5, 0, 5, 5, 5, 5, 0, -5,
+    0, 0, 5, 5, 5, 5, 0, -5,
+    -10, 5, 5, 5, 5, 5, 0,-10,
+    -10, 0, 5, 0, 0, 0, 0,-10,
+    -20,-10,-10,-5,-5,-10,-10,-20
+];
+const PST_KING_MID = [
+    -30,-40,-40,-50,-50,-40,-40,-30,
+    -30,-40,-40,-50,-50,-40,-40,-30,
+    -30,-40,-40,-50,-50,-40,-40,-30,
+    -30,-40,-40,-50,-50,-40,-40,-30,
+    -20,-30,-30,-40,-40,-30,-30,-20,
+    -10,-20,-20,-20,-20,-20,-20,-10,
+    20, 20, 0, 0, 0, 0, 20, 20,
+    20, 30, 10, 0, 0, 10, 30, 20
+];
+const PST_TABLES = [null, PST_PAWN, PST_KNIGHT, PST_BISHOP, PST_ROOK, PST_QUEEN, PST_KING_MID];
+
+function encodeBoardRich(board, side, castlingRights, enPassantSq, moveCount) {
+    // Total: 288 features
+    const features = new Float64Array(288);
+    let idx = 0;
+
+    // 1. Board squares (64) — current piece encoding normalized by side
+    for (let i = 0; i < 64; i++) {
+        features[idx++] = board[i] * side / 6.0;
+    }
+
+    // 2. Attack maps (128) — per-square attacked-by-friendly / attacked-by-enemy
+    for (let sq = 0; sq < 64; sq++) {
+        features[idx++] = isAttackedBy(board, sq, side) ? 1.0 : 0.0;
+    }
+    for (let sq = 0; sq < 64; sq++) {
+        features[idx++] = isAttackedBy(board, sq, -side) ? 1.0 : 0.0;
+    }
+
+    // 3. Piece-square table values (64) — positional value for piece on each square
+    for (let sq = 0; sq < 64; sq++) {
+        const p = board[sq];
+        if (p === 0) { features[idx++] = 0; continue; }
+        const absP = Math.abs(p);
+        const pSide = pieceSide(p);
+        const pst = PST_TABLES[absP];
+        if (pst) {
+            // Mirror for black pieces (reflect rank)
+            const lookupSq = pSide === 1 ? sq : (7 - rankOf(sq)) * 8 + fileOf(sq);
+            features[idx++] = (pst[lookupSq] / 50.0) * (pSide === side ? 1 : -1);
+        } else {
+            features[idx++] = 0;
+        }
+    }
+
+    // 4. Material balance (6) — net piece count per type
+    const pieceCounts = [0, 0, 0, 0, 0, 0, 0]; // index by abs piece type
+    for (let i = 0; i < 64; i++) {
+        const p = board[i];
+        if (p !== 0) {
+            const absP = Math.abs(p);
+            pieceCounts[absP] += pieceSide(p) === side ? 1 : -1;
+        }
+    }
+    for (let t = 1; t <= 6; t++) features[idx++] = pieceCounts[t] / 4.0; // normalize
+
+    // 5. Mobility (2) — legal move count per side (expensive but informative)
+    const friendlyMoves = generatePseudoLegal(board, side, null, -1);
+    const enemyMoves = generatePseudoLegal(board, -side, null, -1);
+    features[idx++] = friendlyMoves.length / 80.0; // normalize ~40 moves typical
+    features[idx++] = enemyMoves.length / 80.0;
+
+    // 6. King position (4) — king rank/file per side
+    const friendlyKingSq = findKing(board, side);
+    const enemyKingSq = findKing(board, -side);
+    features[idx++] = friendlyKingSq >= 0 ? rankOf(friendlyKingSq) / 7.0 : 0;
+    features[idx++] = friendlyKingSq >= 0 ? fileOf(friendlyKingSq) / 7.0 : 0;
+    features[idx++] = enemyKingSq >= 0 ? rankOf(enemyKingSq) / 7.0 : 0;
+    features[idx++] = enemyKingSq >= 0 ? fileOf(enemyKingSq) / 7.0 : 0;
+
+    // 7. Pawn structure (8)
+    let friendlyPassed = 0, friendlyDoubled = 0, friendlyIsolated = 0, friendlyShield = 0;
+    let enemyPassed = 0, enemyDoubled = 0, enemyIsolated = 0, enemyShield = 0;
+    const friendlyPawnFiles = new Array(8).fill(0);
+    const enemyPawnFiles = new Array(8).fill(0);
+    for (let sq = 0; sq < 64; sq++) {
+        const p = board[sq];
+        if (Math.abs(p) === 1) {
+            const f = fileOf(sq);
+            if (pieceSide(p) === side) friendlyPawnFiles[f]++;
+            else enemyPawnFiles[f]++;
+        }
+    }
+    for (let f = 0; f < 8; f++) {
+        if (friendlyPawnFiles[f] > 1) friendlyDoubled += friendlyPawnFiles[f] - 1;
+        if (friendlyPawnFiles[f] > 0 && (f === 0 || friendlyPawnFiles[f-1] === 0) && (f === 7 || friendlyPawnFiles[f+1] === 0)) friendlyIsolated++;
+        if (enemyPawnFiles[f] > 1) enemyDoubled += enemyPawnFiles[f] - 1;
+        if (enemyPawnFiles[f] > 0 && (f === 0 || enemyPawnFiles[f-1] === 0) && (f === 7 || enemyPawnFiles[f+1] === 0)) enemyIsolated++;
+    }
+    // Pawn shield: count friendly pawns near friendly king
+    if (friendlyKingSq >= 0) {
+        const kr = rankOf(friendlyKingSq), kf = fileOf(friendlyKingSq);
+        for (let dr = -1; dr <= 1; dr++) for (let df = -1; df <= 1; df++) {
+            if (dr === 0 && df === 0) continue;
+            const nr = kr + (side === 1 ? 1 : -1), nf = kf + df;
+            if (onBoard(nr, nf) && Math.abs(board[sqOf(nr, nf)]) === 1 && pieceSide(board[sqOf(nr, nf)]) === side) friendlyShield++;
+        }
+    }
+    features[idx++] = friendlyPassed / 4.0;
+    features[idx++] = friendlyDoubled / 4.0;
+    features[idx++] = friendlyIsolated / 4.0;
+    features[idx++] = friendlyShield / 3.0;
+    features[idx++] = enemyPassed / 4.0;
+    features[idx++] = enemyDoubled / 4.0;
+    features[idx++] = enemyIsolated / 4.0;
+    features[idx++] = enemyShield / 3.0;
+
+    // 8. Game phase (2) — total material, normalized move number
+    let totalMaterial = 0;
+    for (let i = 0; i < 64; i++) {
+        const p = board[i];
+        if (p !== 0 && Math.abs(p) !== 6) totalMaterial += PIECE_VALUES[Math.abs(p)] || 0;
+    }
+    features[idx++] = totalMaterial / 78.0; // max material = 78 (2*8 pawns + ... )
+    features[idx++] = Math.min(moveCount, 200) / 200.0;
+
+    // 9. Side to move (1)
+    features[idx++] = 1.0; // always from perspective of side-to-move
+
+    // Pad remaining to 288 (from/to encoding added at forward time = 2)
+    // idx should be ~286 here, leaving 2 for from/to
+    // Fill any remaining with zeros (already zero-initialized)
+
+    return features;
+}
+
+// =====================================================================
+// V2 NETWORK — ACTOR-CRITIC WITH RESIDUAL BLOCKS (~110K params)
+// =====================================================================
+// Architecture:
+//   Input(288) → Linear(288,128)+GELU → ResBlock(128) → ResBlock(128)
+//     ├→ Policy: Linear(128,64)+GELU → Linear(64,1)        [move score]
+//     └→ Value:  Linear(128,32)+GELU → Linear(32,1)+tanh    [position value]
+
+const V2_INPUT = 288;
+const V2_HIDDEN = 128;
+const V2_POLICY_HIDDEN = 64;
+const V2_VALUE_HIDDEN = 32;
+
+function gelu(x) {
+    return x * 0.5 * (1.0 + Math.tanh(Math.sqrt(2.0 / Math.PI) * (x + 0.044715 * x * x * x)));
+}
+
+function initWeightsV2(rng) {
+    function heInit(size, fanIn) {
+        const arr = new Float64Array(size);
+        const scale = Math.sqrt(2.0 / fanIn);
+        for (let i = 0; i < size; i++) arr[i] = rng.nextGaussian() * scale;
+        return arr;
+    }
+    function zeros(size) { return new Float64Array(size); }
+
+    return {
+        // Shared trunk
+        trunk_W: heInit(V2_INPUT * V2_HIDDEN, V2_INPUT),
+        trunk_b: zeros(V2_HIDDEN),
+        // Residual block 1
+        res1_W1: heInit(V2_HIDDEN * V2_HIDDEN, V2_HIDDEN),
+        res1_b1: zeros(V2_HIDDEN),
+        res1_W2: heInit(V2_HIDDEN * V2_HIDDEN, V2_HIDDEN),
+        res1_b2: zeros(V2_HIDDEN),
+        // Residual block 2
+        res2_W1: heInit(V2_HIDDEN * V2_HIDDEN, V2_HIDDEN),
+        res2_b1: zeros(V2_HIDDEN),
+        res2_W2: heInit(V2_HIDDEN * V2_HIDDEN, V2_HIDDEN),
+        res2_b2: zeros(V2_HIDDEN),
+        // Policy head
+        pol_W1: heInit(V2_HIDDEN * V2_POLICY_HIDDEN, V2_HIDDEN),
+        pol_b1: zeros(V2_POLICY_HIDDEN),
+        pol_W2: heInit(V2_POLICY_HIDDEN, V2_POLICY_HIDDEN),
+        // Value head
+        val_W1: heInit(V2_HIDDEN * V2_VALUE_HIDDEN, V2_HIDDEN),
+        val_b1: zeros(V2_VALUE_HIDDEN),
+        val_W2: heInit(V2_VALUE_HIDDEN, V2_VALUE_HIDDEN),
+        val_b2: zeros(1),
+        // Version tag
+        version: 2
+    };
+}
+
+// Linear layer: output = input @ W + b
+function linearForward(input, W, b, inSize, outSize) {
+    const output = new Float64Array(outSize);
+    for (let j = 0; j < outSize; j++) {
+        let sum = b ? b[j] : 0;
+        for (let i = 0; i < inSize; i++) sum += input[i] * W[i * outSize + j];
+        output[j] = sum;
+    }
+    return output;
+}
+
+// Apply GELU activation in-place
+function geluActivation(arr) {
+    for (let i = 0; i < arr.length; i++) arr[i] = gelu(arr[i]);
+    return arr;
+}
+
+// Residual block: out = gelu(W2 @ gelu(W1 @ input + b1) + b2) + input
+function residualBlockForward(input, W1, b1, W2, b2) {
+    const h = linearForward(input, W1, b1, V2_HIDDEN, V2_HIDDEN);
+    geluActivation(h);
+    const out = linearForward(h, W2, b2, V2_HIDDEN, V2_HIDDEN);
+    // Skip connection
+    for (let i = 0; i < V2_HIDDEN; i++) out[i] += input[i];
+    geluActivation(out);
+    return { output: out, preSkip: linearForward(geluActivation(linearForward(input, W1, b1, V2_HIDDEN, V2_HIDDEN)), W2, b2, V2_HIDDEN, V2_HIDDEN), hidden1: h };
+}
+
+// Full forward pass for V2 network
+function forwardV2(weights, boardFeatures, fromSq, toSq) {
+    // Build full input: 286 board features + 2 move features = 288
+    const input = new Float64Array(V2_INPUT);
+    const boardLen = Math.min(boardFeatures.length, V2_INPUT - 2);
+    for (let i = 0; i < boardLen; i++) input[i] = boardFeatures[i];
+    input[V2_INPUT - 2] = fromSq / 63.0;
+    input[V2_INPUT - 1] = toSq / 63.0;
+
+    // Shared trunk
+    const trunk = linearForward(input, weights.trunk_W, weights.trunk_b, V2_INPUT, V2_HIDDEN);
+    geluActivation(trunk);
+
+    // Residual blocks (simplified — just compute output, not full backprop intermediates)
+    let h = trunk;
+    // ResBlock 1
+    const r1_h = linearForward(h, weights.res1_W1, weights.res1_b1, V2_HIDDEN, V2_HIDDEN);
+    geluActivation(r1_h);
+    const r1_out = linearForward(r1_h, weights.res1_W2, weights.res1_b2, V2_HIDDEN, V2_HIDDEN);
+    for (let i = 0; i < V2_HIDDEN; i++) r1_out[i] += h[i]; // skip connection
+    const res1 = new Float64Array(r1_out);
+    geluActivation(res1);
+
+    // ResBlock 2
+    const r2_h = linearForward(res1, weights.res2_W1, weights.res2_b1, V2_HIDDEN, V2_HIDDEN);
+    geluActivation(r2_h);
+    const r2_out = linearForward(r2_h, weights.res2_W2, weights.res2_b2, V2_HIDDEN, V2_HIDDEN);
+    for (let i = 0; i < V2_HIDDEN; i++) r2_out[i] += res1[i]; // skip connection
+    const shared = new Float64Array(r2_out);
+    geluActivation(shared);
+
+    // Policy head
+    const pol_h = linearForward(shared, weights.pol_W1, weights.pol_b1, V2_HIDDEN, V2_POLICY_HIDDEN);
+    geluActivation(pol_h);
+    let policyScore = 0;
+    for (let i = 0; i < V2_POLICY_HIDDEN; i++) policyScore += pol_h[i] * weights.pol_W2[i];
+
+    // Value head
+    const val_h = linearForward(shared, weights.val_W1, weights.val_b1, V2_HIDDEN, V2_VALUE_HIDDEN);
+    geluActivation(val_h);
+    let valueRaw = weights.val_b2[0];
+    for (let i = 0; i < V2_VALUE_HIDDEN; i++) valueRaw += val_h[i] * weights.val_W2[i];
+    const value = Math.tanh(valueRaw); // bound to [-1, 1]
+
+    return {
+        score: policyScore,
+        value: value,
+        input: input,
+        trunk: trunk,
+        res1: res1, r1_h: r1_h, r1_out: r1_out,
+        res2: shared, r2_h: r2_h, r2_out: r2_out,
+        pol_h: pol_h,
+        val_h: val_h,
+        valueRaw: valueRaw
+    };
+}
+
+// =====================================================================
+// GELU DERIVATIVE (for backprop)
+// =====================================================================
+function geluDerivative(x) {
+    const a = 0.044715;
+    const inner = Math.sqrt(2.0 / Math.PI) * (x + a * x * x * x);
+    const tanhVal = Math.tanh(inner);
+    const sech2 = 1.0 - tanhVal * tanhVal;
+    const dInner = Math.sqrt(2.0 / Math.PI) * (1.0 + 3.0 * a * x * x);
+    return 0.5 * (1.0 + tanhVal) + 0.5 * x * sech2 * dInner;
+}
+
+// =====================================================================
+// A2C TRAINING WITH GAE
+// =====================================================================
+
+const A2C_CONFIG = {
+    gamma: 0.99,
+    lambda: 0.95,          // GAE lambda
+    baseLR: 0.0003,        // Adam-scale learning rate
+    entropyCoeff: 0.01,    // Entropy bonus coefficient
+    valueLossCoeff: 0.5,   // Value loss weight
+    maxGradNorm: 0.5,      // Gradient clipping threshold
+    batchSize: 8,          // Games per training batch
+    replayBufferSize: 100, // Max stored trajectories
+    temperature: 0.5,      // Softmax temperature
+};
+
+// Replay buffer
+let replayBuffer = [];
+
+function addToReplayBuffer(trajectory) {
+    replayBuffer.push(trajectory);
+    if (replayBuffer.length > A2C_CONFIG.replayBufferSize) {
+        replayBuffer.shift(); // evict oldest
+    }
+}
+
+function sampleReplayBuffer(n, rng) {
+    if (replayBuffer.length <= n) return replayBuffer.slice();
+    // Fisher-Yates partial shuffle
+    const indices = [];
+    for (let i = 0; i < replayBuffer.length; i++) indices.push(i);
+    for (let i = 0; i < n; i++) {
+        const j = i + Math.floor(rng.nextF64() * (indices.length - i));
+        [indices[i], indices[j]] = [indices[j], indices[i]];
+    }
+    return indices.slice(0, n).map(i => replayBuffer[i]);
+}
+
+// Compute Generalized Advantage Estimation
+function computeGAE(rewards, values, gamma, lambda) {
+    const T = rewards.length;
+    const advantages = new Float64Array(T);
+    const returns = new Float64Array(T);
+
+    let gae = 0;
+    for (let t = T - 1; t >= 0; t--) {
+        const nextValue = t + 1 < T ? values[t + 1] : 0; // terminal value = 0
+        const delta = rewards[t] + gamma * nextValue - values[t];
+        gae = delta + gamma * lambda * gae;
+        advantages[t] = gae;
+        returns[t] = advantages[t] + values[t];
+    }
+    return { advantages, returns };
+}
+
+// Compute policy entropy
+function computeEntropy(probs) {
+    let entropy = 0;
+    for (let i = 0; i < probs.length; i++) {
+        if (probs[i] > 1e-10) entropy -= probs[i] * Math.log(probs[i]);
+    }
+    return entropy;
+}
+
+// Gradient clipping by global L2 norm
+function clipGradients(gradArrays, maxNorm) {
+    let totalNormSq = 0;
+    for (const arr of gradArrays) {
+        for (let i = 0; i < arr.length; i++) totalNormSq += arr[i] * arr[i];
+    }
+    const totalNorm = Math.sqrt(totalNormSq);
+    if (totalNorm > maxNorm) {
+        const scale = maxNorm / totalNorm;
+        for (const arr of gradArrays) {
+            for (let i = 0; i < arr.length; i++) arr[i] *= scale;
+        }
+    }
+    return totalNorm;
+}
+
+// Zero-initialize gradient arrays matching weight structure
+function zeroGrads(weights) {
+    const grads = {};
+    for (const key of Object.keys(weights)) {
+        if (key === 'version') continue;
+        if (weights[key] instanceof Float64Array) {
+            grads[key] = new Float64Array(weights[key].length);
+        }
+    }
+    return grads;
+}
+
+// Apply gradients to weights
+function applyGradients(weights, grads, lr) {
+    for (const key of Object.keys(grads)) {
+        if (weights[key] instanceof Float64Array) {
+            for (let i = 0; i < weights[key].length; i++) {
+                weights[key][i] += lr * grads[key][i];
+            }
+        }
+    }
+}
+
+// Train A2C from a single trajectory — accumulate gradients
+function trainA2CStep(weights, trajectory, lr, grads) {
+    if (trajectory.steps.length === 0) return { policyLoss: 0, valueLoss: 0, entropy: 0, gradNorm: 0 };
+
+    const T = trajectory.steps.length;
+
+    // Compute values for all states
+    const values = new Float64Array(T);
+    for (let t = 0; t < T; t++) {
+        const step = trajectory.steps[t];
+        // Use value from the chosen move's forward pass
+        values[t] = step.value;
+    }
+
+    // Build reward array (all zeros except terminal)
+    const rewards = new Float64Array(T);
+    rewards[T - 1] = trajectory.reward;
+
+    // Compute GAE advantages and returns
+    const { advantages, returns } = computeGAE(rewards, values, A2C_CONFIG.gamma, A2C_CONFIG.lambda);
+
+    // Normalize advantages
+    let advMean = 0, advStd = 0;
+    for (let t = 0; t < T; t++) advMean += advantages[t];
+    advMean /= T;
+    for (let t = 0; t < T; t++) advStd += (advantages[t] - advMean) ** 2;
+    advStd = Math.sqrt(advStd / T + 1e-8);
+    for (let t = 0; t < T; t++) advantages[t] = (advantages[t] - advMean) / advStd;
+
+    let totalPolicyLoss = 0, totalValueLoss = 0, totalEntropy = 0;
+
+    for (let t = 0; t < T; t++) {
+        const step = trajectory.steps[t];
+        const advantage = advantages[t];
+        const returnTarget = returns[t];
+
+        // Policy gradient: -log(pi(a|s)) * advantage
+        const logProb = Math.log(step.probs[step.actionIdx] + 1e-10);
+        totalPolicyLoss -= logProb * advantage;
+
+        // Value loss: 0.5 * (V(s) - R_target)^2
+        const vErr = step.value - returnTarget;
+        totalValueLoss += 0.5 * vErr * vErr;
+
+        // Entropy bonus
+        totalEntropy += computeEntropy(step.probs);
+
+        // Accumulate policy gradients into policy head weights
+        // Simplified: update policy head output weights based on advantage signal
+        const numMoves = step.numMoves;
+        for (let j = 0; j < numMoves; j++) {
+            let coeff = -step.probs[j];
+            if (j === step.actionIdx) coeff = 1.0 - step.probs[j];
+            coeff *= advantage * lr;
+            if (Math.abs(coeff) < 1e-15) continue;
+
+            // Update policy head W2 via pol_h
+            if (step.pol_h) {
+                for (let k = 0; k < V2_POLICY_HIDDEN; k++) {
+                    grads.pol_W2[k] += coeff * step.pol_h[k];
+                }
+            }
+        }
+
+        // Value gradient: dL/dV * dV/dweights
+        // Value loss gradient: (V(s) - R_target) * dV/dweights
+        const valGradScale = -A2C_CONFIG.valueLossCoeff * vErr * lr;
+        // tanh derivative: 1 - tanh^2
+        const tanhDeriv = 1.0 - step.value * step.value;
+        const valScale = valGradScale * tanhDeriv;
+        if (step.val_h) {
+            for (let k = 0; k < V2_VALUE_HIDDEN; k++) {
+                grads.val_W2[k] += valScale * step.val_h[k];
+            }
+            grads.val_b2[0] += valScale;
+        }
+
+        // Entropy gradient (encourage exploration)
+        const entropyScale = A2C_CONFIG.entropyCoeff * lr;
+        for (let j = 0; j < numMoves; j++) {
+            const entropyGrad = -(Math.log(step.probs[j] + 1e-10) + 1.0);
+            let eCoeff = -step.probs[j];
+            if (j === step.actionIdx) eCoeff = 1.0 - step.probs[j];
+            eCoeff *= entropyGrad * entropyScale;
+            if (Math.abs(eCoeff) < 1e-15) continue;
+            if (step.pol_h) {
+                for (let k = 0; k < V2_POLICY_HIDDEN; k++) {
+                    grads.pol_W2[k] += eCoeff * step.pol_h[k];
+                }
+            }
+        }
+    }
+
+    return {
+        policyLoss: totalPolicyLoss / T,
+        valueLoss: totalValueLoss / T,
+        entropy: totalEntropy / T,
+        gradNorm: 0 // computed after clipping
+    };
+}
+
+// Full A2C training from game trajectory
+function trainA2CFromGame(weights, trajectory, episodeNum) {
+    const lr = A2C_CONFIG.baseLR / (1 + episodeNum * 0.002); // slow decay
+
+    const grads = zeroGrads(weights);
+    const metrics = trainA2CStep(weights, trajectory, lr, grads);
+
+    // Clip gradients
+    const gradArrays = Object.values(grads).filter(v => v instanceof Float64Array);
+    metrics.gradNorm = clipGradients(gradArrays, A2C_CONFIG.maxGradNorm);
+
+    // Apply gradients
+    applyGradients(weights, grads, 1.0); // lr already baked into grads
+
+    return metrics;
+}
+
+// Batch training from replay buffer
+function trainBatch(weights, trajectories, episodeNum) {
+    const lr = A2C_CONFIG.baseLR / (1 + episodeNum * 0.002);
+    const grads = zeroGrads(weights);
+    let totalPL = 0, totalVL = 0, totalEnt = 0;
+
+    for (const traj of trajectories) {
+        const m = trainA2CStep(weights, traj, lr / trajectories.length, grads);
+        totalPL += m.policyLoss;
+        totalVL += m.valueLoss;
+        totalEnt += m.entropy;
+    }
+
+    const gradArrays = Object.values(grads).filter(v => v instanceof Float64Array);
+    const gradNorm = clipGradients(gradArrays, A2C_CONFIG.maxGradNorm);
+    applyGradients(weights, grads, 1.0);
+
+    return {
+        policyLoss: totalPL / trajectories.length,
+        valueLoss: totalVL / trajectories.length,
+        entropy: totalEnt / trajectories.length,
+        gradNorm
+    };
+}
+
+// =====================================================================
+// BASELINE AGENTS (for evaluation)
+// =====================================================================
+
+function selectActionHeuristic(moves, board, side) {
+    const numMoves = moves.length / 2;
+    let bestIdx = 0, bestScore = -Infinity;
+    for (let i = 0; i < numMoves; i++) {
+        const score = evaluateMove(board, moves[i * 2], moves[i * 2 + 1], side);
+        if (score > bestScore) { bestScore = score; bestIdx = i; }
+    }
+    const probs = new Float64Array(numMoves);
+    probs[bestIdx] = 1.0;
+    return { actionIdx: bestIdx, probs, scores: null, numMoves };
+}
+
+function selectActionMinimax(moves, board, side) {
+    const numMoves = moves.length / 2;
+    let bestIdx = 0, bestScore = -Infinity;
+
+    for (let i = 0; i < numMoves; i++) {
+        const fromSq = moves[i * 2], toSq = moves[i * 2 + 1];
+        const newBoard = applyMove(board, fromSq, toSq);
+
+        // Evaluate opponent's best response (1-ply minimax)
+        const oppMoves = generatePseudoLegal(newBoard, -side, null, -1);
+        let worstCase = materialBalance(newBoard, side);
+
+        for (let j = 0; j < oppMoves.length; j += 2) {
+            const oppFrom = oppMoves[j], oppTo = oppMoves[j + 1];
+            const oppBoard = applyMove(newBoard, oppFrom, oppTo);
+            // Check if this leaves opponent's king in check (illegal)
+            if (inCheck(oppBoard, -side)) continue;
+            const score = materialBalance(oppBoard, side);
+            if (score < worstCase) worstCase = score;
+        }
+
+        if (worstCase > bestScore) { bestScore = worstCase; bestIdx = i; }
+    }
+
+    const probs = new Float64Array(numMoves);
+    probs[bestIdx] = 1.0;
+    return { actionIdx: bestIdx, probs, scores: null, numMoves };
+}
+
+function materialBalance(board, side) {
+    let balance = 0;
+    for (let i = 0; i < 64; i++) {
+        const p = board[i];
+        if (p !== 0) {
+            balance += (PIECE_VALUES[Math.abs(p)] || 0) * (pieceSide(p) === side ? 1 : -1);
+        }
+    }
+    return balance;
+}
+
+// =====================================================================
+// TRAINING METRICS & CHARTS
+// =====================================================================
+
+let trainingMetrics = {
+    episodes: [],
+    rewards: [],
+    policyLoss: [],
+    valueLoss: [],
+    entropy: [],
+    gradNorm: [],
+    winRateVsRandom: [],
+    winRateVsHeuristic: [],
+    puzzleScore: [],
+};
+
+function loadTrainingMetrics() {
+    try {
+        const raw = localStorage.getItem('cjc_chess_metrics');
+        if (raw) { const d = JSON.parse(raw); Object.assign(trainingMetrics, d); }
+    } catch (e) {}
+}
+
+function saveTrainingMetrics() {
+    try {
+        const json = JSON.stringify(trainingMetrics);
+        if (json.length < 512 * 1024) localStorage.setItem('cjc_chess_metrics', json);
+    } catch (e) {}
+}
+
+// Simple canvas line chart renderer
+function renderChart(canvasId, datasets, options = {}) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+    const padding = { top: 20, right: 20, bottom: 30, left: 50 };
+    const plotW = W - padding.left - padding.right;
+    const plotH = H - padding.top - padding.bottom;
+
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#0d1117';
+    ctx.fillRect(0, 0, W, H);
+
+    if (!datasets || datasets.length === 0 || datasets[0].data.length === 0) {
+        ctx.fillStyle = '#484f58';
+        ctx.font = '12px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('No data yet — train some episodes', W / 2, H / 2);
+        return;
+    }
+
+    // Compute global min/max across all datasets
+    let yMin = Infinity, yMax = -Infinity;
+    for (const ds of datasets) {
+        for (const v of ds.data) { if (v < yMin) yMin = v; if (v > yMax) yMax = v; }
+    }
+    if (yMin === yMax) { yMin -= 1; yMax += 1; }
+    const yRange = yMax - yMin;
+    const xMax = datasets[0].data.length - 1;
+
+    // Grid lines
+    ctx.strokeStyle = '#21262d';
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) {
+        const y = padding.top + (i / 4) * plotH;
+        ctx.beginPath(); ctx.moveTo(padding.left, y); ctx.lineTo(W - padding.right, y); ctx.stroke();
+        ctx.fillStyle = '#484f58';
+        ctx.font = '10px monospace';
+        ctx.textAlign = 'right';
+        ctx.fillText((yMax - (i / 4) * yRange).toFixed(2), padding.left - 4, y + 3);
+    }
+
+    // X axis labels
+    ctx.fillStyle = '#484f58';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'center';
+    const xStep = Math.max(1, Math.floor(xMax / 5));
+    for (let x = 0; x <= xMax; x += xStep) {
+        const px = padding.left + (x / Math.max(xMax, 1)) * plotW;
+        ctx.fillText(x.toString(), px, H - 5);
+    }
+
+    // Plot each dataset
+    const colors = ['#58a6ff', '#3fb950', '#f0883e', '#f85149', '#bc8cff'];
+    for (let di = 0; di < datasets.length; di++) {
+        const ds = datasets[di];
+        const color = ds.color || colors[di % colors.length];
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        for (let i = 0; i < ds.data.length; i++) {
+            const x = padding.left + (i / Math.max(xMax, 1)) * plotW;
+            const y = padding.top + (1 - (ds.data[i] - yMin) / yRange) * plotH;
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+
+        // Legend
+        if (ds.label) {
+            ctx.fillStyle = color;
+            ctx.font = '10px monospace';
+            ctx.textAlign = 'left';
+            ctx.fillText(ds.label, padding.left + di * 100, padding.top - 5);
+        }
+    }
+}
+
+function updateAllCharts() {
+    const ema = (data, alpha = 0.1) => {
+        if (data.length === 0) return [];
+        const out = [data[0]];
+        for (let i = 1; i < data.length; i++) out.push(alpha * data[i] + (1 - alpha) * out[i - 1]);
+        return out;
+    };
+
+    renderChart('chartReward', [
+        { data: ema(trainingMetrics.rewards, 0.1), label: 'Reward (EMA)', color: '#3fb950' },
+        { data: trainingMetrics.rewards, label: 'Raw', color: '#21262d' }
+    ]);
+    renderChart('chartWinRate', [
+        { data: trainingMetrics.winRateVsRandom, label: 'vs Random', color: '#58a6ff' },
+        { data: trainingMetrics.winRateVsHeuristic, label: 'vs Heuristic', color: '#f0883e' }
+    ]);
+    renderChart('chartLoss', [
+        { data: ema(trainingMetrics.policyLoss, 0.1), label: 'Policy Loss', color: '#58a6ff' },
+        { data: ema(trainingMetrics.valueLoss, 0.1), label: 'Value Loss', color: '#f0883e' }
+    ]);
+    renderChart('chartEntropy', [
+        { data: ema(trainingMetrics.entropy, 0.1), label: 'Entropy', color: '#bc8cff' },
+        { data: ema(trainingMetrics.gradNorm, 0.1), label: 'Grad Norm', color: '#f85149' }
+    ]);
+
+    // Update stats display
+    const ep = trainingMetrics.episodes.length;
+    document.getElementById('totalEpisodes').textContent = ep;
+    if (ep > 0) {
+        const lastLR = A2C_CONFIG.baseLR / (1 + ep * 0.002);
+        document.getElementById('currentLR').textContent = lastLR.toFixed(6);
+    }
+    document.getElementById('bufferSize').textContent = `${replayBuffer.length} / ${A2C_CONFIG.replayBufferSize}`;
+}
+
+// =====================================================================
+// AUTOMATED GAME PLAY (for training and evaluation)
+// =====================================================================
+
+function playAutomatedGame(agentWeights, opponentType, rng, maxMoves = 150) {
+    let board = initBoard();
+    let side = 1;
+    let moveNum = 0;
+    const agentSide = 1; // agent always plays white in automated games
+    const trajectory = { steps: [], reward: 0 };
+    let castling = { wK: true, wQ: true, bK: true, bQ: true };
+    let epSq = -1;
+
+    while (moveNum < maxMoves) {
+        const moves = legalMoves(board, side, castling, epSq);
+        if (moves.length === 0) {
+            // Terminal
+            if (inCheck(board, side)) {
+                trajectory.reward = side === agentSide ? -1 : 1;
+            } else {
+                trajectory.reward = 0; // stalemate
+            }
+            break;
+        }
+
+        let actionResult;
+        const isAgent = (side === agentSide);
+
+        if (isAgent) {
+            const boardFeatures = encodeBoardRich(board, side, castling, epSq, moveNum);
+            const numMoves = moves.length / 2;
+            const scores = new Float64Array(numMoves);
+            const fwdResults = [];
+
+            for (let i = 0; i < numMoves; i++) {
+                const fwd = forwardV2(agentWeights, boardFeatures, moves[i * 2], moves[i * 2 + 1]);
+                scores[i] = fwd.score + evaluateMove(board, moves[i * 2], moves[i * 2 + 1], side);
+                fwdResults.push(fwd);
+            }
+
+            // Softmax
+            let maxS = -Infinity;
+            for (let i = 0; i < numMoves; i++) if (scores[i] > maxS) maxS = scores[i];
+            const probs = new Float64Array(numMoves);
+            let sumE = 0;
+            for (let i = 0; i < numMoves; i++) {
+                probs[i] = Math.exp((scores[i] - maxS) / A2C_CONFIG.temperature);
+                sumE += probs[i];
+            }
+            for (let i = 0; i < numMoves; i++) probs[i] /= sumE;
+
+            // Sample
+            const u = rng.nextF64();
+            let cumSum = 0, actionIdx = numMoves - 1;
+            for (let i = 0; i < numMoves; i++) {
+                cumSum += probs[i];
+                if (u < cumSum) { actionIdx = i; break; }
+            }
+
+            // Record step for training
+            trajectory.steps.push({
+                board: board.slice(),
+                side: side,
+                actionIdx: actionIdx,
+                probs: probs,
+                numMoves: numMoves,
+                value: fwdResults[actionIdx].value,
+                pol_h: fwdResults[actionIdx].pol_h,
+                val_h: fwdResults[actionIdx].val_h,
+                moves: Array.from(moves)
+            });
+
+            actionResult = { actionIdx };
+        } else {
+            // Opponent
+            if (opponentType === 'random') {
+                actionResult = selectActionRandom(moves, rng);
+            } else if (opponentType === 'heuristic') {
+                actionResult = selectActionHeuristic(moves, board, side);
+            } else if (opponentType === 'minimax') {
+                actionResult = selectActionMinimax(moves, board, side);
+            } else {
+                actionResult = selectActionRandom(moves, rng);
+            }
+        }
+
+        const fromSq = moves[actionResult.actionIdx * 2];
+        const toSq = moves[actionResult.actionIdx * 2 + 1];
+        const promoPiece = isPromotion(board, fromSq, toSq) ? (side === 1 ? 5 : -5) : undefined;
+
+        castling = updateCastlingRights(castling, board, fromSq, toSq);
+        epSq = computeEnPassant(board, fromSq, toSq);
+        board = applyMoveWithPromo(board, fromSq, toSq, promoPiece);
+        side = -side;
+        moveNum++;
+    }
+
+    // If game ended by move limit, it's a draw
+    if (moveNum >= maxMoves) trajectory.reward = 0;
+
+    return trajectory;
+}
+
+// Evaluate agent against a baseline: play N games, return win rate
+function evaluateVsBaseline(weights, opponentType, numGames, startSeed) {
+    let wins = 0, draws = 0, losses = 0;
+    for (let i = 0; i < numGames; i++) {
+        const rng = new SplitMix64(startSeed + i * 1000);
+        const traj = playAutomatedGame(weights, opponentType, rng);
+        if (traj.reward > 0) wins++;
+        else if (traj.reward === 0) draws++;
+        else losses++;
+    }
+    return { wins, draws, losses, winRate: wins / numGames, total: numGames };
+}
+
+// =====================================================================
+// TACTICAL PUZZLE SUITE
+// =====================================================================
+
+const TACTICAL_PUZZLES = [
+    // Puzzle 1: Back rank mate — white Rook delivers mate on rank 8
+    { name: 'Back Rank Mate', side: 1,
+      board: [4,0,0,0,6,0,0,0, 1,1,1,0,0,1,1,1, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,
+              0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, -1,-1,-1,0,0,-1,-1,-1, 0,0,0,0,-6,0,0,0],
+      bestFrom: 0, bestTo: 56 },
+    // Puzzle 2: Knight fork — Nc7+ forks king and rook
+    { name: 'Knight Fork', side: 1,
+      board: [0,0,0,0,6,0,0,0, 1,1,1,1,0,1,1,1, 0,0,0,0,0,2,0,0, 0,0,0,0,0,0,0,0,
+              0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, -1,-1,-1,-1,0,-1,-1,-1, -4,0,0,0,-6,0,0,0],
+      bestFrom: 21, bestTo: 42 },
+    // Puzzle 3: Free queen capture
+    { name: 'Free Queen Capture', side: 1,
+      board: [4,2,3,0,6,3,2,4, 1,1,1,1,0,1,1,1, 0,0,0,0,0,0,0,0, 0,0,0,0,1,0,0,0,
+              0,0,0,-5,0,0,0,0, 0,0,0,0,0,0,0,0, -1,-1,-1,-1,0,-1,-1,-1, -4,-2,-3,0,-6,-3,-2,-4],
+      bestFrom: 5, bestTo: 35 },
+    // Puzzle 4: Pawn promotion (pawn on 7th rank, push to 8th)
+    { name: 'Pawn Promotion', side: 1,
+      board: [0,0,0,0,6,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,
+              0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 1,0,0,0,0,0,0,0, 0,0,0,0,-6,0,0,0],
+      bestFrom: 48, bestTo: 56 },
+    // Puzzle 5: Capture hanging rook
+    { name: 'Capture Hanging Rook', side: 1,
+      board: [4,2,3,5,6,3,2,4, 1,1,1,1,0,1,1,1, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,
+              0,0,0,0,0,0,0,-4, 0,0,0,0,0,0,0,0, -1,-1,-1,-1,0,-1,-1,-1, 0,-2,-3,-5,-6,-3,-2,0],
+      bestFrom: 7, bestTo: 39 },
+];
+
+function evaluatePuzzles(weights) {
+    let correct = 0;
+    const results = [];
+    for (const puzzle of TACTICAL_PUZZLES) {
+        const board = puzzle.board.slice();
+        const moves = legalMoves(board, puzzle.side, { wK: true, wQ: true, bK: true, bQ: true }, -1);
+        const boardFeatures = encodeBoardRich(board, puzzle.side, { wK: true, wQ: true, bK: true, bQ: true }, -1, 0);
+        const numMoves = moves.length / 2;
+        const scores = new Float64Array(numMoves);
+        for (let i = 0; i < numMoves; i++) {
+            const fwd = forwardV2(weights, boardFeatures, moves[i * 2], moves[i * 2 + 1]);
+            scores[i] = fwd.score + evaluateMove(board, moves[i * 2], moves[i * 2 + 1], puzzle.side);
+        }
+        // Greedy selection (temperature=0)
+        let bestIdx = 0;
+        for (let i = 1; i < numMoves; i++) if (scores[i] > scores[bestIdx]) bestIdx = i;
+        const chosenFrom = moves[bestIdx * 2], chosenTo = moves[bestIdx * 2 + 1];
+        const passed = chosenFrom === puzzle.bestFrom && chosenTo === puzzle.bestTo;
+        if (passed) correct++;
+        results.push({ name: puzzle.name, passed, chosenFrom, chosenTo, expectedFrom: puzzle.bestFrom, expectedTo: puzzle.bestTo });
+    }
+    return { correct, total: TACTICAL_PUZZLES.length, pct: (correct / TACTICAL_PUZZLES.length * 100).toFixed(0), results };
+}
+
+// =====================================================================
+// CURRICULUM LEARNING
+// =====================================================================
+
+let curriculum = {
+    phase: 'random',   // 'random' | 'frozen' | 'selfplay'
+    frozenWeights: null,
+    episodeCount: 0,
+    phaseAThreshold: 50,
+    phaseBThreshold: 200,
+    winRateThreshold: 0.7,
+};
+
+function getCurriculumOpponent() {
+    if (curriculum.phase === 'random') return 'random';
+    if (curriculum.phase === 'frozen') return 'heuristic'; // play vs heuristic in phase B
+    return 'heuristic'; // selfplay uses heuristic as baseline opponent
+}
+
+function updateCurriculum(episodeNum, lastWinRate) {
+    if (curriculum.phase === 'random' && episodeNum >= curriculum.phaseAThreshold) {
+        curriculum.phase = 'frozen';
+        document.getElementById('curriculumPhase').textContent = 'Phase B (vs Heuristic)';
+    } else if (curriculum.phase === 'frozen' && episodeNum >= curriculum.phaseBThreshold) {
+        curriculum.phase = 'selfplay';
+        document.getElementById('curriculumPhase').textContent = 'Phase C (Self-Play)';
+    }
+}
+
+// =====================================================================
+// ASYNC TRAINING LOOP
+// =====================================================================
+
+let trainingState = { running: false, abortRequested: false };
+
+async function startTraining() {
+    if (trainingState.running) return;
+    trainingState.running = true;
+    trainingState.abortRequested = false;
+
+    document.getElementById('btnStartTrain').disabled = true;
+    document.getElementById('btnStopTrain').disabled = false;
+
+    const numEpisodes = parseInt(document.getElementById('selTrainEpisodes').value) || 50;
+    const baseEpisode = trainingMetrics.episodes.length;
+
+    // Ensure V2 weights exist
+    if (!game.weightsV2) {
+        const initRng = new SplitMix64(game.seed || 42);
+        game.weightsV2 = initWeightsV2(initRng);
+    }
+
+    const trainRng = new SplitMix64(Date.now());
+
+    for (let ep = 0; ep < numEpisodes; ep++) {
+        if (trainingState.abortRequested) break;
+
+        const episodeNum = baseEpisode + ep;
+        const progress = ((ep + 1) / numEpisodes * 100).toFixed(0);
+        document.getElementById('trainingProgress').textContent =
+            `Episode ${ep + 1} / ${numEpisodes} (${progress}%)`;
+        document.getElementById('trainProgressBar').style.width = progress + '%';
+
+        // Play a game
+        const opponent = getCurriculumOpponent();
+        const gameRng = new SplitMix64(trainRng.nextU64());
+        const trajectory = playAutomatedGame(game.weightsV2, opponent, gameRng);
+
+        // Add to replay buffer
+        addToReplayBuffer(trajectory);
+
+        // Train from batch if buffer has enough
+        let metrics;
+        if (replayBuffer.length >= A2C_CONFIG.batchSize) {
+            const batch = sampleReplayBuffer(A2C_CONFIG.batchSize, trainRng);
+            metrics = trainBatch(game.weightsV2, batch, episodeNum);
+        } else {
+            metrics = trainA2CFromGame(game.weightsV2, trajectory, episodeNum);
+        }
+
+        // Record metrics
+        trainingMetrics.episodes.push(episodeNum);
+        trainingMetrics.rewards.push(trajectory.reward);
+        trainingMetrics.policyLoss.push(metrics.policyLoss);
+        trainingMetrics.valueLoss.push(metrics.valueLoss);
+        trainingMetrics.entropy.push(metrics.entropy);
+        trainingMetrics.gradNorm.push(metrics.gradNorm);
+
+        // Periodic evaluation (every 10 episodes)
+        if ((ep + 1) % 10 === 0) {
+            const evalRng = new SplitMix64(99999);
+            const evalRandom = evaluateVsBaseline(game.weightsV2, 'random', 20, 10000);
+            const evalHeuristic = evaluateVsBaseline(game.weightsV2, 'heuristic', 20, 20000);
+            trainingMetrics.winRateVsRandom.push(evalRandom.winRate);
+            trainingMetrics.winRateVsHeuristic.push(evalHeuristic.winRate);
+
+            updateCurriculum(episodeNum, evalRandom.winRate);
+            updateEvalDisplay(evalRandom, evalHeuristic);
+        }
+
+        // Update charts every 5 episodes
+        if ((ep + 1) % 5 === 0) {
+            updateAllCharts();
+        }
+
+        // Yield to UI
+        await new Promise(resolve => setTimeout(resolve, 0));
+    }
+
+    // Final save
+    saveV2Weights();
+    saveTrainingMetrics();
+    updateAllCharts();
+
+    // Copy V2 weights to game.trainedWeights for interactive play
+    syncV2ToInteractive();
+
+    trainingState.running = false;
+    document.getElementById('btnStartTrain').disabled = false;
+    document.getElementById('btnStopTrain').disabled = true;
+    document.getElementById('trainingProgress').textContent =
+        `Training complete. ${trainingMetrics.episodes.length} total episodes.`;
+    document.getElementById('trainProgressBar').style.width = '100%';
+}
+
+function stopTraining() {
+    trainingState.abortRequested = true;
+    document.getElementById('trainingProgress').textContent += ' (stopping...)';
+}
+
+function runEvaluation() {
+    if (!game.weightsV2) {
+        document.getElementById('evalResults').textContent = 'No trained model. Run training first.';
+        return;
+    }
+    document.getElementById('evalResults').textContent = 'Evaluating...';
+    setTimeout(() => {
+        const evalRandom = evaluateVsBaseline(game.weightsV2, 'random', 20, 10000);
+        const evalHeuristic = evaluateVsBaseline(game.weightsV2, 'heuristic', 20, 20000);
+        const evalMinimax = evaluateVsBaseline(game.weightsV2, 'minimax', 10, 30000);
+        const puzzles = evaluatePuzzles(game.weightsV2);
+
+        let html = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">';
+        html += evalCard('vs Random', evalRandom);
+        html += evalCard('vs Heuristic', evalHeuristic);
+        html += evalCard('vs Minimax', evalMinimax);
+        html += `<div style="padding:8px;background:#0d1117;border-radius:4px;">
+            <div style="color:#58a6ff;font-weight:600;margin-bottom:4px;">Tactical Puzzles</div>
+            <div style="color:#c9d1d9;">${puzzles.correct}/${puzzles.total} (${puzzles.pct}%)</div>
+            <div style="color:#484f58;font-size:11px;">${puzzles.results.map(r => (r.passed ? '✓' : '✗') + ' ' + r.name).join('<br>')}</div>
+        </div>`;
+        html += '</div>';
+        document.getElementById('evalResults').innerHTML = html;
+    }, 10);
+}
+
+function evalCard(label, result) {
+    const winPct = (result.winRate * 100).toFixed(0);
+    const color = result.winRate > 0.6 ? '#3fb950' : result.winRate > 0.4 ? '#f0883e' : '#f85149';
+    return `<div style="padding:8px;background:#0d1117;border-radius:4px;">
+        <div style="color:#58a6ff;font-weight:600;margin-bottom:4px;">${label}</div>
+        <div style="color:${color};font-size:18px;font-weight:700;">${winPct}%</div>
+        <div style="color:#484f58;font-size:11px;">${result.wins}W / ${result.draws}D / ${result.losses}L (${result.total} games)</div>
+    </div>`;
+}
+
+function updateEvalDisplay(evalRandom, evalHeuristic) {
+    let html = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">';
+    html += evalCard('vs Random', evalRandom);
+    html += evalCard('vs Heuristic', evalHeuristic);
+    html += '</div>';
+    document.getElementById('evalResults').innerHTML = html;
+}
+
+// =====================================================================
+// V2 WEIGHT PERSISTENCE
+// =====================================================================
+
+function saveV2Weights() {
+    if (!game.weightsV2) return;
+    try {
+        const data = {};
+        for (const key of Object.keys(game.weightsV2)) {
+            if (game.weightsV2[key] instanceof Float64Array) {
+                data[key] = Array.from(game.weightsV2[key]);
+            } else {
+                data[key] = game.weightsV2[key];
+            }
+        }
+        data.episodes = trainingMetrics.episodes.length;
+        data.curriculum = curriculum.phase;
+        const json = JSON.stringify(data);
+        // V2 weights are ~1.5MB, allow up to 3MB
+        if (json.length < 3 * 1024 * 1024) {
+            localStorage.setItem('cjc_chess_weights_v2', json);
+        }
+    } catch (e) {}
+}
+
+function loadV2Weights() {
+    try {
+        const raw = localStorage.getItem('cjc_chess_weights_v2');
+        if (!raw) return false;
+        const data = JSON.parse(raw);
+        if (!data.trunk_W || !data.version || data.version !== 2) return false;
+        const weights = {};
+        for (const key of Object.keys(data)) {
+            if (Array.isArray(data[key])) {
+                weights[key] = new Float64Array(data[key]);
+            } else {
+                weights[key] = data[key];
+            }
+        }
+        game.weightsV2 = weights;
+        if (data.episodes) {
+            game.trainingEpisodes = data.episodes;
+        }
+        if (data.curriculum) {
+            curriculum.phase = data.curriculum;
+        }
+        return true;
+    } catch (e) { return false; }
+}
+
+// Sync V2 weights to the interactive game's V1-compatible format
+// The interactive game still uses V1 for backward compatibility, but
+// also uses V2 when available for the agent's move selection
+function syncV2ToInteractive() {
+    if (game.weightsV2) {
+        game.useV2 = true;
+        game.trainingEpisodes = trainingMetrics.episodes.length;
+        updateReplayBadge();
+    }
+}
+
+// =====================================================================
+// CHECKPOINT MANAGEMENT
+// =====================================================================
+
+let checkpoints = [];
+
+function saveCheckpoint(episodeNum) {
+    if (!game.weightsV2) return;
+    const cp = {
+        episode: episodeNum,
+        date: new Date().toISOString(),
+        winRate: trainingMetrics.winRateVsRandom.length > 0
+            ? trainingMetrics.winRateVsRandom[trainingMetrics.winRateVsRandom.length - 1] : 0,
+    };
+    // Store weights compactly (skip for now, just metadata)
+    checkpoints.push(cp);
+    if (checkpoints.length > 5) checkpoints.shift();
+    updateCheckpointDisplay();
+}
+
+function updateCheckpointDisplay() {
+    if (checkpoints.length === 0) {
+        document.getElementById('checkpointList').textContent = 'No checkpoints saved yet.';
+        return;
+    }
+    let html = '<div style="display:grid;gap:4px;">';
+    for (const cp of checkpoints) {
+        html += `<div style="font-size:12px;padding:4px 8px;background:#0d1117;border-radius:4px;display:flex;justify-content:space-between;">
+            <span style="color:#c9d1d9;">Episode ${cp.episode}</span>
+            <span style="color:#3fb950;">${(cp.winRate * 100).toFixed(0)}% vs Random</span>
+            <span style="color:#484f58;">${cp.date.split('T')[0]}</span>
+        </div>`;
+    }
+    html += '</div>';
+    document.getElementById('checkpointList').innerHTML = html;
+}
+
 function sqName(sq) { return FILE_NAMES[fileOf(sq)] + (rankOf(sq) + 1); }
 function moveNotation(board, fromSq, toSq) {
     const piece = board[fromSq];
@@ -1114,6 +2395,58 @@ function trainFromGame() {
     // Persist weights to localStorage
     saveTrainedWeights();
     console.log(`REINFORCE training: episode ${game.trainingEpisodes}, lr=${lr.toFixed(4)}, reward=${agentReward}, baseline=${rewardBaseline.toFixed(3)}, steps=${agentSteps.length}`);
+}
+
+// Build trajectory from interactive game for V2 training
+function buildTrajectoryFromGame() {
+    if (!game.moveHistory || game.moveHistory.length === 0) return null;
+    const agentSide = -game.humanSide;
+    let agentReward = 0;
+    if (game.result === 'white_wins') agentReward = agentSide === 1 ? 1 : -1;
+    else if (game.result === 'black_wins') agentReward = agentSide === -1 ? 1 : -1;
+
+    const trajectory = { steps: [], reward: agentReward };
+    let board = initBoard();
+    let castling = { wK: true, wQ: true, bK: true, bQ: true };
+    let epSq = -1;
+    let moveNum = 0;
+
+    for (const m of game.moveHistory) {
+        if (m.source === 'agent' && m.moves && game.weightsV2) {
+            const side = pieceSide(board[m.from]);
+            const richFeatures = encodeBoardRich(board, side, castling, epSq, moveNum);
+            const moves = m.moves;
+            const numMoves = moves.length / 2;
+            const fwd = forwardV2(game.weightsV2, richFeatures, m.from, m.to);
+
+            // Reconstruct probs
+            const scores = new Float64Array(numMoves);
+            for (let i = 0; i < numMoves; i++) {
+                const f = forwardV2(game.weightsV2, richFeatures, moves[i * 2], moves[i * 2 + 1]);
+                scores[i] = f.score + evaluateMove(board, moves[i * 2], moves[i * 2 + 1], side);
+            }
+            let maxS = -Infinity;
+            for (let i = 0; i < numMoves; i++) if (scores[i] > maxS) maxS = scores[i];
+            const probs = new Float64Array(numMoves);
+            let sumE = 0;
+            for (let i = 0; i < numMoves; i++) {
+                probs[i] = Math.exp((scores[i] - maxS) / A2C_CONFIG.temperature);
+                sumE += probs[i];
+            }
+            for (let i = 0; i < numMoves; i++) probs[i] /= sumE;
+
+            trajectory.steps.push({
+                board: board.slice(), side, actionIdx: m.actionIdx,
+                probs, numMoves, value: fwd.value,
+                pol_h: fwd.pol_h, val_h: fwd.val_h, moves
+            });
+        }
+        castling = updateCastlingRights(castling, board, m.from, m.to);
+        epSq = computeEnPassant(board, m.from, m.to);
+        board = applyMoveWithPromo(board, m.from, m.to, m.promoPiece);
+        moveNum++;
+    }
+    return trajectory;
 }
 
 // Persist/load trained weights to/from localStorage
@@ -1565,6 +2898,15 @@ function newGame() {
     game.humanSide = document.getElementById('selSide').value === 'white' ? 1 : -1;
     game.opponentType = document.getElementById('selOpponent').value;
 
+    // Initialize V2 weights if not present
+    if (!game.weightsV2 && game.opponentType === 'agent') {
+        const v2Rng = new SplitMix64(game.seed);
+        game.weightsV2 = initWeightsV2(v2Rng);
+        game.useV2 = true;
+    } else if (game.weightsV2) {
+        game.useV2 = true;
+    }
+
     // Use trained weights if available, otherwise initialize fresh
     if (game.trainedWeights && game.opponentType === 'agent') {
         game.weights = {
@@ -1762,13 +3104,40 @@ function agentMove() {
         return;
     }
 
-    const boardFeatures = encodeBoard(game.board, game.side);
     let actionResult;
 
     if (game.opponentType === 'random') {
         actionResult = selectActionRandom(moves, game.rng);
+    } else if (game.useV2 && game.weightsV2) {
+        // Use V2 actor-critic network
+        const richFeatures = encodeBoardRich(game.board, game.side, game.castlingRights, game.enPassantSq, game.moveCount);
+        const numMoves = moves.length / 2;
+        const scores = new Float64Array(numMoves);
+        const fwdResults = [];
+        for (let i = 0; i < numMoves; i++) {
+            const fwd = forwardV2(game.weightsV2, richFeatures, moves[i * 2], moves[i * 2 + 1]);
+            scores[i] = fwd.score + evaluateMove(game.board, moves[i * 2], moves[i * 2 + 1], game.side);
+            fwdResults.push(fwd);
+        }
+        let maxS = -Infinity;
+        for (let i = 0; i < numMoves; i++) if (scores[i] > maxS) maxS = scores[i];
+        const probs = new Float64Array(numMoves);
+        let sumE = 0;
+        for (let i = 0; i < numMoves; i++) {
+            probs[i] = Math.exp((scores[i] - maxS) / A2C_CONFIG.temperature);
+            sumE += probs[i];
+        }
+        for (let i = 0; i < numMoves; i++) probs[i] /= sumE;
+        const u = game.rng.nextF64();
+        let cumSum = 0, actionIdx = numMoves - 1;
+        for (let i = 0; i < numMoves; i++) {
+            cumSum += probs[i];
+            if (u < cumSum) { actionIdx = i; break; }
+        }
+        actionResult = { actionIdx, probs, scores, numMoves, value: fwdResults[actionIdx].value };
     } else {
-        // Pass board and agentSide for positional heuristic
+        // Fallback to V1 network
+        const boardFeatures = encodeBoard(game.board, game.side);
         actionResult = selectAction(game.weights, boardFeatures, moves, game.rng, game.board, game.side);
     }
 
@@ -1888,8 +3257,19 @@ function endGame(termStatus) {
     setStatus(resultMsg, 'ended');
     updateReplayBadge();
 
-    // Post-game REINFORCE training — agent improves after each game
+    // Post-game training — A2C when V2 active, REINFORCE fallback
     trainFromGame();
+    if (game.useV2 && game.weightsV2 && game.opponentType === 'agent') {
+        // Also train V2 from this interactive game
+        const traj = buildTrajectoryFromGame();
+        if (traj && traj.steps.length > 0) {
+            addToReplayBuffer(traj);
+            trainA2CFromGame(game.weightsV2, traj, trainingMetrics.episodes.length);
+            trainingMetrics.episodes.push(trainingMetrics.episodes.length);
+            trainingMetrics.rewards.push(traj.reward);
+            saveV2Weights();
+        }
+    }
 
     // Store trace
     storedTraces.push({
@@ -2308,6 +3688,7 @@ function switchTab(id, evt) {
     if (id === 'review') updateReviewTab();
     if (id === 'opening') updateOpeningTab();
     if (id === 'profile') updateProfileTab();
+    if (id === 'training') { updateAllCharts(); updateCheckpointDisplay(); }
 }
 
 // =====================================================================
@@ -2381,7 +3762,7 @@ function quickPreset(name) {
 
 function activateTab(id) {
     document.querySelectorAll('.tab').forEach((t, i) => {
-        const ids = ['play','review','opening','profile','settings'];
+        const ids = ['play','review','opening','profile','training','settings'];
         t.classList.toggle('active', ids[i] === id);
     });
     document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
@@ -2452,6 +3833,9 @@ function exportSessionSummary() {
 
 loadStoredTraces();
 loadTrainedWeights();
+loadV2Weights();
+loadTrainingMetrics();
+if (game.weightsV2) { game.useV2 = true; syncV2ToInteractive(); }
 updateReviewTab();
 updateProfileTab();
 updateOpeningTab();
