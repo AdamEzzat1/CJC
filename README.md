@@ -1,8 +1,8 @@
-# CJC — Deterministic Scientific Computing Language
+# CJC — A Deterministic Numerical Programming Language
 
 **Version 0.1.0** | **Rust** | **Zero External Dependencies** | **MIT License**
 
-CJC is a statically-typed programming language built from scratch in Rust for scientific computing, machine learning, and data analysis. It provides 221+ built-in functions, numerically stable tensor operations, and guaranteed deterministic execution — all with zero external dependencies.
+CJC is a programming language being built for reproducible numerical computation, machine learning, and data analysis. It is implemented entirely in Rust across 20 workspace crates (~75K lines), with zero external runtime dependencies. The language is under active development — it works, but it is not production-ready.
 
 ```cjc
 fn main() -> i64 {
@@ -16,71 +16,143 @@ fn main() -> i64 {
 
 ---
 
-## Key Features
+## What CJC Is Trying to Do
 
-- **Deterministic Execution** — Same seed produces identical results on every run. Kahan/binned summation prevents floating-point drift. All collections use ordered maps.
-- **221+ Built-in Functions** — Math, statistics, linear algebra, ML, signal processing, data wrangling, and more — all built in, no packages needed.
-- **Zero-Copy Tensors** — Copy-on-write buffer system with no garbage collector pauses. Reshape, transpose, and slice without allocation.
-- **Two Execution Engines** — Tree-walk interpreter (eval) and optimized MIR executor with tail-call optimization and arena allocation.
-- **73+ Data Wrangling Operations** — Tidyverse-compatible: filter, select, mutate, group_by, summarize, joins, pivots, window functions.
-- **Interactive REPL** — Explore the language interactively with persistent state across lines.
-- **Color Diagnostics** — ANSI-colored error messages with source context, spans, and actionable hints.
+CJC exists to answer a specific question: *can a single language handle numerical computing, machine learning, and data analysis with guaranteed reproducibility — without depending on any external libraries?*
 
----
+The design priorities are:
 
-## Quick Start
+1. **Deterministic execution** — Same seed produces bit-identical output across runs. No hash map iteration order surprises, no non-deterministic floating-point reductions.
+2. **Zero external dependencies** — The entire toolchain, from lexer to executor, is self-contained. No LLVM, no libc math, no third-party crates.
+3. **Numerical correctness** — Kahan and binned accumulators for floating-point summation. SplitMix64 for reproducible RNG. No fused multiply-add in SIMD kernels.
+4. **Dual execution backends** — An AST tree-walk interpreter (v1) and a MIR register-machine executor (v2). Both must produce identical results for every program.
 
-### Build
-
-```bash
-git clone https://github.com/your-repo/CJC.git
-cd CJC
-cargo build --release
-```
-
-### Run a Program
-
-```bash
-# Via cargo
-cargo run --bin cjc -- run examples/hello.cjc
-
-# Or use the built binary directly
-./target/release/cjc run myfile.cjc
-```
-
-### Install Globally
-
-```bash
-cargo install --path crates/cjc-cli
-cjc run myfile.cjc
-cjc repl
-```
+These are goals being worked toward, not finished claims.
 
 ---
 
-## CLI Usage
+## What CJC Has Proven So Far
 
+The test suite currently has **3,700+ tests** across the workspace, covering:
+
+### Language Fundamentals (Passing)
+- Lexer, parser, and type system correctness
+- Variable binding, control flow (`if`/`while`/`for`), closures with capture analysis
+- Pattern matching with structural destructuring (tuples and structs)
+- First-class functions and higher-order functions
+- String, integer, float, boolean, array, and tensor types
+
+### Compiler Pipeline (Passing)
+- AST → HIR lowering with capture analysis
+- HIR → MIR lowering with register allocation
+- MIR optimizer (constant folding, dead code elimination)
+- NoGC static verifier (proves absence of GC allocations in marked paths)
+- **Parity tests**: AST interpreter and MIR executor produce identical output for all programs
+
+### Numerical Infrastructure (Passing)
+- Kahan summation and binned accumulators
+- SplitMix64 deterministic RNG with explicit seed threading
+- Automatic differentiation (forward-mode dual numbers, reverse-mode tape)
+- Tensor operations (create, reshape, element access, arithmetic)
+- Deterministic linear algebra operations
+- 221+ built-in functions (math, statistics, ML, signal processing, data wrangling)
+
+### Data and Visualization (Passing)
+- 73+ DataFrame operations (filter, group_by, join, select, pivot, window functions)
+- Grammar-of-graphics visualization library (80 chart types, SVG output)
+- NFA-based regex engine
+- Binary serialization
+
+### What Is Not Yet Working
+- Multi-file module system (incomplete)
+- Default function parameters
+- Variadic functions
+- Decorators
+- MIR-level autodiff integration
+- Browser compilation target
+
+---
+
+## The Chess RL Demo
+
+The chess reinforcement learning demo is a capability benchmark — it stress-tests CJC's ability to handle a non-trivial numerical computing workload end-to-end.
+
+### Which Parts Are Written in CJC
+
+The **CJC backend** (`tests/chess_rl_project/`, `tests/chess_rl_advanced/`) implements:
+
+- **Complete chess engine** — Board representation, legal move generation for all piece types, castling, en passant, pawn promotion, check and checkmate detection, draw rules (stalemate, 50-move rule, insufficient material, threefold repetition)
+- **Neural network forward pass** — `forward_move()` computing linear layers with tanh activation through CJC's tensor and arithmetic primitives
+- **Training loop** — REINFORCE policy gradient with reward shaping, weight updates, gradient computation
+- **Board encoding** — Board state to feature tensor conversion
+- **Action selection** — Softmax probability distribution over legal moves with temperature-based exploration
+
+All of the above runs through both CJC execution backends (AST interpreter and MIR executor) and produces identical results. This is verified by **216 dedicated tests** including:
+- Move generation correctness (all piece types, all special moves)
+- Training determinism (same seed → identical weights after N episodes)
+- Network output validity (no NaN, bounded values)
+- Parity between AST and MIR execution
+- Fuzz testing across multiple random seeds
+
+### Which Parts Are Written in JavaScript
+
+The **browser frontend** (`examples/chess_rl_platform.html`, ~3,800 lines) is a self-contained HTML file that mirrors the CJC chess engine in JavaScript to provide an interactive experience. CJC does not yet compile to WebAssembly or have a GUI toolkit, so the browser UI is written in plain JavaScript with no frameworks or libraries.
+
+The JS frontend includes a more advanced version of the agent:
+
+- **Actor-Critic network** — Residual blocks, GELU activation, He initialization, dual policy + value heads (~110K parameters)
+- **A2C with GAE** — Advantage Actor-Critic with Generalized Advantage Estimation (γ=0.99, λ=0.95), entropy regularization, gradient clipping
+- **288-dimensional features** — Board state, attack maps, piece-square tables, pawn structure, material balance, king safety, game phase
+- **Curriculum learning** — Three training phases: vs Random → vs Heuristic → vs Self-Play
+- **Training dashboard** — Real-time charts for reward, win rate, loss, entropy
+- **4 baseline opponents** — Random, Heuristic (greedy material), 1-ply Minimax, Untrained network
+- **Tactical puzzle suite** — 5 predefined positions with known best moves
+
+The JS frontend demonstrates what CJC will eventually support natively. The neural network math is hand-written — no TensorFlow, no PyTorch, no ML libraries. Every gradient is derived manually.
+
+### Training Results (500 Episodes)
+
+| Metric | Value |
+|--------|-------|
+| vs Random | 60% win rate (12W / 8D / 0L) |
+| vs Heuristic | 20% win rate (4W / 16D / 0L) |
+| vs 1-ply Minimax | 20% win rate (2W / 5D / 3L) |
+| Tactical Puzzles | 1/5 (pawn promotion) |
+| Value Loss | Decreased ~47% over training |
+| Policy Entropy | Decreased ~16% (policy specializing) |
+
+These results are modest. The agent learns basic material awareness and consistently beats a random player, but does not play strong chess. 110K parameters with 500 episodes of policy gradient training is not enough for expert play. The demo proves the training pipeline works end-to-end, not that it produces a grandmaster.
+
+### What This Demo Proves About CJC
+
+1. **CJC can express non-trivial algorithms** — A complete chess engine with all standard rules runs correctly through both execution backends
+2. **CJC can do numerical computing** — Neural network forward passes, gradient computation, and weight updates work through CJC's runtime
+3. **Determinism holds under load** — Training with the same seed produces identical results across runs, verified by dedicated tests
+4. **Both backends agree** — Every chess RL test produces identical output from the AST interpreter and MIR executor
+5. **The test infrastructure scales** — 216 chess RL tests including fuzz testing and multi-episode training sequences
+
+### What This Demo Does Not Prove
+
+- CJC is not ready for production use
+- The language still lacks features expected for real ML work (module system, variadic functions, browser target)
+- The JS frontend does the heavy lifting for the interactive experience
+- 500 episodes of A2C is not enough to produce competitive chess play
+- The CJC-native network (V1) is simpler than the JS network (V2)
+
+### Running the Demo
+
+**CJC Tests:**
+```bash
+cargo test --workspace                    # All 3,700+ tests
+cargo test --test test_chess_rl_project   # Chess engine + V1 RL (150 tests)
+cargo test --test test_chess_rl_advanced  # ML upgrade tests (66 tests)
 ```
-cjc run <file.cjc>     Run a CJC program
-cjc repl                Start the interactive REPL
-cjc lex <file.cjc>     Tokenize and print tokens
-cjc parse <file.cjc>   Parse and pretty-print AST
-cjc check <file.cjc>   Type-check without running
-```
 
-### Flags
-
-| Flag | Description |
-|------|-------------|
-| `--help`, `-h` | Print usage and exit |
-| `--version`, `-V` | Print version and exit |
-| `--color` | Force color output |
-| `--no-color` | Disable color output |
-| `--seed N` | Set RNG seed (default: 42) |
-| `--time` | Print execution time |
-| `--mir-opt` | Enable MIR optimizations |
-| `--mir-mono` | Enable monomorphization |
-| `--multi-file` | Enable module resolution |
+**Interactive Browser Demo:**
+Open `examples/chess_rl_platform.html` in any browser. No server, no build step, no dependencies.
+- Click **Play Agent** to play against the neural network
+- Click the **Training** tab, select 500 episodes, and click Train
+- Watch learning curves update in real time
 
 ---
 
@@ -93,7 +165,7 @@ let x: i64 = 42;
 let pi: f64 = 3.14159;
 let name: str = "CJC";
 let flag: bool = true;
-let mut counter: i64 = 0;   // mutable
+let mut counter: i64 = 0;
 counter += 1;
 ```
 
@@ -119,12 +191,6 @@ struct Point {
 
 fn distance(p: Point) -> f64 {
     sqrt(p.x ** 2.0 + p.y ** 2.0)
-}
-
-fn main() -> i64 {
-    let p = Point { x: 3.0, y: 4.0 };
-    print(f"distance: {distance(p)}");
-    0
 }
 ```
 
@@ -161,24 +227,16 @@ fn main() -> i64 {
 ### Control Flow
 
 ```cjc
-// If/else
 if x > 0 {
     print("positive");
-} else if x == 0 {
-    print("zero");
 } else {
-    print("negative");
+    print("non-positive");
 }
 
-// If as expression
-let abs_val = if x >= 0 { x } else { -x };
-
-// While loop
 while count < 100 {
     count += 1;
 }
 
-// For loop (range)
 for i in 0..10 {
     print(i);
 }
@@ -187,279 +245,169 @@ for i in 0..10 {
 ### Operators
 
 ```cjc
-// Arithmetic
-x + y    x - y    x * y    x / y    x % y    x ** y
-
-// Comparison
-x == y   x != y   x < y    x > y    x <= y   x >= y
-
-// Logical
-x && y   x || y   !x
-
-// Bitwise
-x & y    x | y    x ^ y    ~x    x << n    x >> n
-
-// Compound assignment
-x += 1   x -= 1   x *= 2   x /= 2   x %= 3   x **= 2
-
-// Pipe
-data |> transform() |> output()
-```
-
-### Number Literals
-
-```cjc
-42              // decimal integer
-3.14            // float
-0xFF            // hexadecimal (255)
-0b1010          // binary (10)
-0o777           // octal (511)
-1_000_000       // underscore separators
-0xFF_FF         // hex with separators
-```
-
-### String Variants
-
-```cjc
-"hello world"           // standard string
-f"value = {x + 1}"     // format string (interpolation)
-r"no\escape"            // raw string
-b"byte string"          // byte string
+// Arithmetic: + - * / % **
+// Comparison: == != < > <= >=
+// Logical: && || !
+// Bitwise: & | ^ ~ << >>
+// Pipe: data |> transform() |> output()
 ```
 
 ---
 
 ## Tensor Operations
 
-CJC has first-class tensor support with zero-copy semantics and numerically stable operations.
-
 ```cjc
-// Create tensors
 let a = Tensor.zeros([3, 3]);
 let b = Tensor.ones([3, 3]);
-let c = Tensor.randn([2, 4]);          // random normal
-let d = Tensor.eye(3);                  // identity matrix
-let e = [| 1.0, 2.0; 3.0, 4.0 |];     // tensor literal (2x2)
+let c = Tensor.randn([2, 4]);
+let d = Tensor.eye(3);
+let e = [| 1.0, 2.0; 3.0, 4.0 |];
 
-// Operations
-let sum = a.add(b);
 let product = matmul(a, b);
 let transposed = c.transpose();
-let reshaped = c.reshape([4, 2]);       // zero-copy view
-
-// Reductions (Kahan-stable)
-let total: f64 = e.sum();
-let avg: f64 = e.mean();
-
-// Deep learning operations
-let out = attention(query, key, value);
-let conv_out = conv2d(input, kernel, stride, padding);
-let normed = layer_norm(x, gamma, beta, epsilon);
+let total: f64 = e.sum();       // Kahan-stable
 ```
 
 ---
 
 ## Built-in Function Categories
 
-### Mathematics (19 functions)
-`sqrt`, `log`, `exp`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `pow`, `log2`, `log10`, `ceil`, `floor`, `round`, `abs`, `sign`, `hypot`, `clamp`
-
-**Constants:** `PI`, `E`, `TAU`, `INF`, `NAN_VAL`
-
-### Statistics (35+ functions)
-`mean`, `variance`, `sd`, `median`, `quantile`, `cor`, `cov`, `iqr`, `skewness`, `kurtosis`, `z_score`, `standardize`, `trimmed_mean`, `weighted_mean`, `mad`, `spearman_cor`, `kendall_cor`, `partial_cor`
-
-### Distributions (24 functions)
-Normal, t, Chi-squared, F, Beta, Exponential, Gamma, Weibull, Poisson, Binomial — each with PDF/CDF/PPF variants.
-
-### Hypothesis Testing (24 functions)
-`t_test`, `t_test_two_sample`, `t_test_paired`, `chi_squared_test`, `f_test`, `anova_oneway`, `mann_whitney`, `wilcoxon_signed_rank`, `kruskal_wallis`, `tukey_hsd`, `bonferroni`, `fdr_bh`
-
-### Linear Algebra (9+ functions)
-`matmul`, `dot`, `cross`, `outer`, `kron`, `det`, `solve`, `lstsq`, `eigh`, `trace`, `matrix_rank`, `matrix_exp`
-
-### Machine Learning (40+ functions)
-
-**Loss functions:** `mse_loss`, `cross_entropy_loss`, `huber_loss`, `binary_cross_entropy`, `hinge_loss`
-
-**Activations:** `sigmoid`, `relu`, `gelu`, `tanh_activation`, `leaky_relu`, `mish`, `silu`
-
-**Layers:** `layer_norm`, `batch_norm`, `dropout_mask`, `conv1d`, `conv2d`, `maxpool2d`, `attention`
-
-**Optimization:** `Adam.new`, `Sgd.new`, `lr_cosine`, `lr_linear_warmup`, `lr_step_decay`
-
-**Gradient utilities:** `stop_gradient`, `grad_checkpoint`, `clip_grad`, `grad_scale`
-
-### Signal Processing (14+ functions)
-FFT (Cooley-Tukey), RFFT, IFFT, 2D-FFT, Bluestein, PSD, window functions (Hanning, Hamming, Blackman)
-
-### Data Wrangling (73+ functions)
-`filter`, `select`, `mutate`, `group_by`, `summarize`, `arrange`, `distinct`, `inner_join`, `left_join`, `right_join`, `anti_join`, `semi_join`, `pivot_longer`, `pivot_wider`, `lag`, `lead`, `rank`, `dense_rank`, `ntile`, `window_sum`, `window_mean`, `str_detect`, `str_extract`, `str_replace`, `str_split`, `datetime_from_epoch`, `datetime_diff`
-
-### I/O and Utilities
-`print`, `file_read`, `file_write`, `file_exists`, `json_parse`, `json_stringify`, `assert`, `assert_eq`
-
----
-
-## Data Manipulation (TidyView DSL)
-
-CJC includes a tidyverse-compatible data manipulation layer for tabular data.
-
-```cjc
-// Load and transform data
-let df = Csv.parse("data.csv");
-
-// Filter, select, mutate
-df |> filter(col("price") > 100)
-   |> select("name", "price", "category")
-   |> mutate("tax", col("price") * 0.08)
-
-// Group and summarize
-df |> group_by("category")
-   |> summarize("avg_price", mean(col("price")))
-   |> arrange(desc("avg_price"))
-
-// Joins
-inner_join(orders, customers, "customer_id")
-left_join(products, categories, "category_id")
-
-// Pivoting
-df |> pivot_longer("Q1", "Q2", "Q3", "Q4", names_to: "quarter", values_to: "sales")
-df |> pivot_wider(names_from: "metric", values_from: "value")
-```
-
----
-
-## Module System
-
-CJC supports multi-file projects with a module system.
-
-```cjc
-// math/linalg.cjc
-fn dot_product(a: Tensor, b: Tensor) -> f64 {
-    dot(a, b)
-}
-
-// main.cjc
-import math.linalg
-
-fn main() -> i64 {
-    let a = [| 1.0, 2.0, 3.0 |];
-    let b = [| 4.0, 5.0, 6.0 |];
-    print(linalg::dot_product(a, b));
-    0
-}
-```
-
-Run with `cjc run main.cjc --multi-file`.
+| Category | Count | Examples |
+|----------|-------|---------|
+| Mathematics | 19+ | `sqrt`, `log`, `exp`, `sin`, `cos`, `abs`, `clamp` |
+| Statistics | 35+ | `mean`, `sd`, `median`, `cor`, `quantile`, `z_score` |
+| Distributions | 24 | Normal, t, Chi-squared, F, Beta, Gamma (PDF/CDF/PPF) |
+| Hypothesis Tests | 24 | `t_test`, `anova_oneway`, `chi_squared_test`, `tukey_hsd` |
+| Linear Algebra | 9+ | `matmul`, `det`, `solve`, `lstsq`, `eigh` |
+| ML / Deep Learning | 40+ | `relu`, `gelu`, `attention`, `conv2d`, `Adam.new` |
+| Signal Processing | 14+ | FFT, RFFT, IFFT, PSD, window functions |
+| Data Wrangling | 73+ | `filter`, `group_by`, `join`, `pivot_longer`, `window_sum` |
 
 ---
 
 ## Architecture
 
-CJC is built as 17 Rust crates with a clean compilation pipeline:
-
 ```
-Source Code
-    |
-    v
-[Lexer] ──> Tokens
-    |
-    v
-[Parser] ──> AST (Abstract Syntax Tree)
-    |
-    v
-[Type Checker] ──> Typed AST
-    |
-    ├──> [Eval] ──> Direct interpretation (v1)
-    |
-    └──> [HIR Lowering] ──> HIR (desugaring, capture analysis)
-              |
-              v
-         [MIR Lowering] ──> MIR (lambda-lifting, pattern compilation)
-              |
-              v
-         [Optimizer] ──> Optimized MIR (constant folding, DCE)
-              |
-              v
-         [MIR-Exec] ──> Execution (v2, with TCO + arena allocation)
+Source → [Lexer] → Tokens → [Parser] → AST → [TypeChecker] → Typed AST
+                                                    |
+                              ┌─────────────────────┼──────────────────────┐
+                              v                                            v
+                         [Eval] (v1)                              [HIR Lowering]
+                    Tree-walk interpreter                               |
+                                                                        v
+                                                                  [MIR Lowering]
+                                                                        |
+                                                                        v
+                                                                  [Optimizer]
+                                                                 CF + DCE passes
+                                                                        |
+                                                                        v
+                                                                  [MIR-Exec] (v2)
+                                                               Register machine
 ```
 
-### Workspace Crates
+### Workspace Crates (20)
 
 | Crate | Purpose |
 |-------|---------|
-| `cjc-lexer` | Tokenization (59 token kinds) |
-| `cjc-parser` | Pratt parser (13-level precedence) |
-| `cjc-ast` | Abstract syntax tree definitions |
-| `cjc-types` | Type checking and unification |
-| `cjc-dispatch` | Multi-method dispatch with coherence |
-| `cjc-eval` | Tree-walk interpreter (v1 engine) |
-| `cjc-hir` | High-level IR with desugaring |
-| `cjc-mir` | Mid-level IR, optimizer, NoGC verifier |
-| `cjc-mir-exec` | MIR executor with TCO (v2 engine) |
-| `cjc-runtime` | 221+ builtins, tensor system |
-| `cjc-data` | TidyView data manipulation layer |
-| `cjc-ad` | Automatic differentiation |
-| `cjc-repro` | Deterministic RNG and accumulation |
-| `cjc-diag` | Diagnostic rendering with ANSI color |
-| `cjc-regex` | Regular expression support |
-| `cjc-module` | Multi-file module resolution |
-| `cjc-cli` | Command-line interface and REPL |
+| `cjc-lexer` | Tokenization |
+| `cjc-parser` | Pratt parser |
+| `cjc-ast` | AST node definitions |
+| `cjc-types` | Type system and inference |
+| `cjc-diag` | Diagnostic infrastructure |
+| `cjc-hir` | AST → HIR lowering, capture analysis |
+| `cjc-mir` | HIR → MIR lowering, optimizer, NoGC verifier |
+| `cjc-eval` | AST tree-walk interpreter (v1) |
+| `cjc-mir-exec` | MIR register-machine executor (v2) |
+| `cjc-dispatch` | Operator dispatch layer |
+| `cjc-runtime` | 221+ builtins, tensor system, COW buffers |
+| `cjc-ad` | Automatic differentiation (forward + reverse) |
+| `cjc-data` | DataFrame DSL (filter, group_by, join) |
+| `cjc-repro` | Deterministic RNG, Kahan/Binned accumulators |
+| `cjc-regex` | NFA-based regex engine |
+| `cjc-snap` | Binary serialization |
+| `cjc-vizor` | Grammar-of-graphics visualization |
+| `cjc-module` | Module system (incomplete) |
+| `cjc-cli` | CLI frontend and REPL |
+| `cjc-analyzer` | Language server (experimental) |
 
 ---
 
 ## Memory Model
 
-CJC uses a **deterministic, GC-free memory model**:
-
-- **Copy-on-Write Buffers** — Tensors share backing storage via reference counting. Mutation triggers a deep copy only when shared.
-- **No Garbage Collector** — RC-based memory with explicit lifecycle. No GC pauses or non-determinism.
-- **Arena Allocation** — Per-stack-frame arenas for fast allocation and bulk deallocation.
-- **NoGC Verification** — Static analysis proves that `nogc` functions never trigger allocation, verified through transitive call graph analysis.
-
----
+- **Copy-on-Write Buffers** — Tensors share backing storage via reference counting. Mutation triggers a copy only when shared.
+- **No Garbage Collector** — RC-based memory with explicit lifecycle. No GC pauses.
+- **Arena Allocation** — Per-frame arenas in the MIR executor for fast allocation.
+- **NoGC Verification** — Static analysis proves that `nogc`-marked functions never trigger allocation.
 
 ## Numerical Guarantees
 
-- **Kahan Summation** — All floating-point reductions use compensated summation to prevent catastrophic cancellation.
-- **Seeded RNG** — SplitMix64 random number generator produces identical sequences from the same seed.
-- **Deterministic Ordering** — All collections use `BTreeMap`/`BTreeSet` (no hash randomization).
-- **IEEE 754 Compliance** — `total_cmp()` ensures deterministic NaN ordering across platforms.
+- **Kahan Summation** — All floating-point reductions use compensated summation.
+- **Seeded RNG** — SplitMix64 produces identical sequences from the same seed.
+- **Deterministic Ordering** — `BTreeMap`/`BTreeSet` everywhere, no hash randomization.
+- **IEEE 754 Compliance** — `total_cmp()` for deterministic NaN ordering.
 
 ---
 
-## Test Suite
+## CLI Usage
 
-CJC has a comprehensive test suite with 3,118 passing tests:
+```
+cjc run <file.cjc>     Run a CJC program
+cjc repl                Start the interactive REPL
+cjc lex <file.cjc>     Tokenize and print tokens
+cjc parse <file.cjc>   Parse and pretty-print AST
+cjc check <file.cjc>   Type-check without running
+```
+
+| Flag | Description |
+|------|-------------|
+| `--seed N` | Set RNG seed (default: 42) |
+| `--mir-opt` | Enable MIR optimizations |
+| `--time` | Print execution time |
+| `--color` / `--no-color` | Control color output |
+
+---
+
+## Building
 
 ```bash
-cargo test                    # Run all tests
-cargo test --test test_eval   # Run interpreter tests
-cargo test --test test_mir_exec  # Run MIR executor tests
+git clone <repo-url>
+cd CJC
+cargo build --workspace
+cargo test --workspace
+```
+
+Requires a Rust toolchain (rustc, cargo). No other dependencies.
+
+## Project Structure
+
+```
+crates/                  — 20 Rust crates (language implementation)
+tests/                   — 318 test files, 3,700+ tests
+  chess_rl_project/      — Chess RL CJC tests (150 tests)
+  chess_rl_advanced/     — ML upgrade tests (66 tests)
+examples/
+  chess_rl_platform.html — Interactive browser demo (self-contained)
+docs/                    — Design documents and specifications
+gallery/                 — 80 Vizor-generated SVG visualizations
+```
+
+## Test Suite
+
+```bash
+cargo test --workspace         # Run everything
+cargo test -p cjc-runtime      # Run a specific crate's tests
+cargo test --test test_eval    # Run interpreter tests
 ```
 
 | Suite | Tests | Description |
 |-------|-------|-------------|
-| Language Hardening | 83 | Syntax extensions, operators, ML builtins |
-| Mathematics | 120 | Stats, linalg, distributions |
-| Chess RL Benchmark | 49 | End-to-end reinforcement learning |
-| Data Science | 100+ | Tidy operations, CSV, joins |
+| Workspace Total | **3,700+** | All crates + integration tests |
+| Chess RL | 216 | Engine, training, determinism, fuzz |
+| Language Hardening | 83 | Syntax, operators, ML builtins |
 | Parity Gates | 50+ | Eval vs MIR-exec equivalence |
-| Full Workspace | **3,118** | All tests passing, 0 failures |
-
----
-
-## Documentation
-
-| Document | Description |
-|----------|-------------|
-| [`docs/CJC_GRADE_REPORT.md`](docs/CJC_GRADE_REPORT.md) | Comprehensive grading and analysis |
-| [`docs/CJC_Syntax_V0.1.md`](docs/CJC_Syntax_V0.1.md) | Complete syntax reference |
-| [`docs/CJC_Feature_Capabilities.md`](docs/CJC_Feature_Capabilities.md) | Feature matrix and status |
-| [`docs/SYNTAX.md`](docs/SYNTAX.md) | Detailed grammar specification |
-| [`docs/CJC_STAGE2_SPEC.md`](docs/CJC_STAGE2_SPEC.md) | Stage 2 language specification |
-| [`docs/adr/`](docs/adr/) | Architecture Decision Records (12 ADRs) |
+| Data Science | 100+ | Tidy operations, CSV, joins |
+| Mathematics | 120 | Stats, linalg, distributions |
 
 ---
 
