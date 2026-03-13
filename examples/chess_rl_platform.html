@@ -808,7 +808,7 @@ class SplitMix64 {
     nextF64() {
         // Convert to [0, 1) double
         const u = this.nextU64();
-        return Number(u >> 11n) / (1 << 53);
+        return Number(u >> 11n) / 9007199254740992; // 2^53
     }
     // Randn using Box-Muller (matches cjc-repro behavior)
     nextGaussian() {
@@ -1108,11 +1108,11 @@ function trainFromGame() {
         W2: new Float64Array(game.weights.W2)
     };
 
-    // Persist weights to localStorage
-    saveTrainedWeights();
-
     // Track training progress
     game.trainingEpisodes = (game.trainingEpisodes || 0) + 1;
+
+    // Persist weights to localStorage
+    saveTrainedWeights();
     console.log(`REINFORCE training: episode ${game.trainingEpisodes}, lr=${lr.toFixed(4)}, reward=${agentReward}, baseline=${rewardBaseline.toFixed(3)}, steps=${agentSteps.length}`);
 }
 
@@ -2304,6 +2304,10 @@ function switchTab(id, evt) {
     document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
     if (evt && evt.target) evt.target.classList.add('active');
     document.getElementById('tab-' + id).classList.add('active');
+    // Refresh tab content on switch
+    if (id === 'review') updateReviewTab();
+    if (id === 'opening') updateOpeningTab();
+    if (id === 'profile') updateProfileTab();
 }
 
 // =====================================================================
