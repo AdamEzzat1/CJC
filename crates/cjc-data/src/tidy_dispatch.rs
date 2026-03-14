@@ -640,7 +640,7 @@ fn column_to_value(col: &Column) -> Value {
 /// Convert a `DataFrame` to the legacy `Value::Struct { name: "DataFrame" }`
 /// representation used by existing CJC code.
 pub fn dataframe_to_value(df: DataFrame) -> Value {
-    let mut fields = std::collections::HashMap::new();
+    let mut fields = std::collections::BTreeMap::new();
     let mut col_names: Vec<Value> = Vec::new();
     let nrows = df.nrows();
     for (name, col) in &df.columns {
@@ -712,7 +712,7 @@ fn format_dataframe(df: &DataFrame) -> String {
 
 /// Build a `Value::Struct { name: "DExpr", kind: "col", ... }` from a column name.
 pub fn build_col_expr(name: &str) -> Value {
-    let mut fields = std::collections::HashMap::new();
+    let mut fields = std::collections::BTreeMap::new();
     fields.insert("kind".to_string(), Value::String(Rc::new("col".to_string())));
     fields.insert("value".to_string(), Value::String(Rc::new(name.to_string())));
     Value::Struct { name: "DExpr".to_string(), fields }
@@ -720,7 +720,7 @@ pub fn build_col_expr(name: &str) -> Value {
 
 /// Build a DExpr binary operation.
 pub fn build_binop_expr(op: &str, left: Value, right: Value) -> Value {
-    let mut fields = std::collections::HashMap::new();
+    let mut fields = std::collections::BTreeMap::new();
     fields.insert("kind".to_string(), Value::String(Rc::new("binop".to_string())));
     fields.insert("op".to_string(), Value::String(Rc::new(op.to_string())));
     fields.insert("left".to_string(), left);
@@ -730,7 +730,7 @@ pub fn build_binop_expr(op: &str, left: Value, right: Value) -> Value {
 
 /// Build a TidyAgg struct value.
 pub fn build_tidy_agg(kind: &str, col: Option<&str>) -> Value {
-    let mut fields = std::collections::HashMap::new();
+    let mut fields = std::collections::BTreeMap::new();
     fields.insert("kind".to_string(), Value::String(Rc::new(kind.to_string())));
     if let Some(c) = col {
         fields.insert("col".to_string(), Value::String(Rc::new(c.to_string())));
@@ -740,7 +740,7 @@ pub fn build_tidy_agg(kind: &str, col: Option<&str>) -> Value {
 
 /// Build an ArrangeKey struct value.
 pub fn build_arrange_key(col: &str, descending: bool) -> Value {
-    let mut fields = std::collections::HashMap::new();
+    let mut fields = std::collections::BTreeMap::new();
     fields.insert("col".to_string(), Value::String(Rc::new(col.to_string())));
     fields.insert("desc".to_string(), Value::Bool(descending));
     Value::Struct { name: "ArrangeKey".to_string(), fields }

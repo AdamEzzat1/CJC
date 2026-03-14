@@ -301,7 +301,7 @@ fn json_to_value(json: JsonValue) -> Value {
             Value::Array(Rc::new(vals))
         }
         JsonValue::Object(map) => {
-            let mut fields = std::collections::HashMap::new();
+            let mut fields = std::collections::BTreeMap::new();
             for (key, val) in map {
                 fields.insert(key, json_to_value(val));
             }

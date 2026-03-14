@@ -8,7 +8,7 @@
 
 use cjc_repro::kahan_sum_f64;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
 
@@ -654,16 +654,17 @@ fn execute_aggregate(
 ) -> Result<DataFrame, DataError> {
     // Build groups
     let nrows = df.nrows();
-    let mut groups: HashMap<Vec<String>, Vec<usize>> = HashMap::new();
+    let mut groups: BTreeMap<Vec<String>, Vec<usize>> = BTreeMap::new();
 
     for row in 0..nrows {
         let key: Vec<String> = keys
             .iter()
             .map(|k| {
-                let col = df.get_column(k).unwrap();
-                col.get_display(row)
+                df.get_column(k)
+                    .map(|col| col.get_display(row))
+                    .ok_or_else(|| DataError::ColumnNotFound(k.to_string()))
             })
-            .collect();
+            .collect::<Result<Vec<String>, DataError>>()?;
         groups.entry(key).or_default().push(row);
     }
 
@@ -1031,7 +1032,7 @@ fn execute_inner_join(
 
     // Build hash index on right table
     let right_nrows = right.nrows();
-    let mut index: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+    let mut index: std::collections::BTreeMap<String, Vec<usize>> = std::collections::BTreeMap::new();
     for i in 0..right_nrows {
         let key = column_value_str(right_col, i);
         index.entry(key).or_default().push(i);
@@ -1066,7 +1067,7 @@ fn execute_left_join(
         .ok_or_else(|| DataError::InvalidOperation(format!("join key `{}` not found in right", right_on)))?;
 
     let right_nrows = right.nrows();
-    let mut index: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+    let mut index: std::collections::BTreeMap<String, Vec<usize>> = std::collections::BTreeMap::new();
     for i in 0..right_nrows {
         let key = column_value_str(right_col, i);
         index.entry(key).or_default().push(i);
@@ -1756,7 +1757,7 @@ impl TidyView {
     pub fn select(&self, cols: &[&str]) -> Result<TidyView, TidyError> {
         // Check for duplicates in the requested list
         {
-            let mut seen = std::collections::HashSet::new();
+            let mut seen = std::collections::BTreeSet::new();
             for &name in cols {
                 if !seen.insert(name) {
                     return Err(TidyError::DuplicateColumn(name.to_string()));
@@ -1805,7 +1806,7 @@ impl TidyView {
     pub fn mutate(&self, assignments: &[(&str, DExpr)]) -> Result<TidyFrame, TidyError> {
         // Check for duplicate targets within this call
         {
-            let mut seen = std::collections::HashSet::new();
+            let mut seen = std::collections::BTreeSet::new();
             for &(name, _) in assignments {
                 if !seen.insert(name) {
                     return Err(TidyError::DuplicateColumn(name.to_string()));
@@ -1936,7 +1937,7 @@ impl TidyFrame {
 
         // Check for duplicate targets
         {
-            let mut seen = std::collections::HashSet::new();
+            let mut seen = std::collections::BTreeSet::new();
             for &(name, _) in assignments {
                 if !seen.insert(name) {
                     return Err(TidyError::DuplicateColumn(name.to_string()));
@@ -2411,7 +2412,7 @@ impl GroupedTidyView {
     ) -> Result<TidyFrame, TidyError> {
         // Validate: no duplicate output names
         {
-            let mut seen = std::collections::HashSet::new();
+            let mut seen = std::collections::BTreeSet::new();
             for &(name, _) in assignments {
                 if !seen.insert(name) {
                     return Err(TidyError::DuplicateColumn(name.to_string()));
@@ -3071,7 +3072,7 @@ fn build_join_frame(
     on: &[(&str, &str)],
     _include_unmatched: bool,
 ) -> Result<TidyFrame, TidyError> {
-    let right_key_names: std::collections::HashSet<&str> =
+    let right_key_names: std::collections::BTreeSet<&str> =
         on.iter().map(|(_, rk)| *rk).collect();
 
     let n = left_rows.len();
@@ -3106,7 +3107,7 @@ fn build_left_join_frame(
     right_rows_opt: &[Option<usize>],
     on: &[(&str, &str)],
 ) -> Result<TidyFrame, TidyError> {
-    let right_key_names: std::collections::HashSet<&str> =
+    let right_key_names: std::collections::BTreeSet<&str> =
         on.iter().map(|(_, rk)| *rk).collect();
 
     let mut columns: Vec<(String, Column)> = Vec::new();
@@ -3885,7 +3886,7 @@ impl TidyView {
         }
 
         // id_cols = projected columns excluding value_cols
-        let vc_set: std::collections::HashSet<usize> = vc_indices.iter().copied().collect();
+        let vc_set: std::collections::BTreeSet<usize> = vc_indices.iter().copied().collect();
         let id_col_indices: Vec<usize> = self.proj.indices().iter()
             .copied()
             .filter(|i| !vc_set.contains(i))
@@ -4184,7 +4185,7 @@ impl TidyView {
         }
 
         // Build new column order in the projection
-        let moved_set: std::collections::HashSet<&str> = cols.iter().copied().collect();
+        let moved_set: std::collections::BTreeSet<&str> = cols.iter().copied().collect();
         let remaining: Vec<&str> = proj_names.iter()
             .copied()
             .filter(|n| !moved_set.contains(n))
@@ -4259,7 +4260,7 @@ impl TidyView {
                 return Err(TidyError::ColumnNotFound(name.to_string()));
             }
         }
-        let drop_set: std::collections::HashSet<&str> = cols.iter().copied().collect();
+        let drop_set: std::collections::BTreeSet<&str> = cols.iter().copied().collect();
         let keep: Vec<&str> = proj_names.iter()
             .copied()
             .filter(|n| !drop_set.contains(n))
@@ -4564,7 +4565,7 @@ fn build_join_frame_with_suffix(
     suffix: &JoinSuffix,
     _include_unmatched: bool,
 ) -> Result<TidyFrame, TidyError> {
-    let right_key_names: std::collections::HashSet<&str> =
+    let right_key_names: std::collections::BTreeSet<&str> =
         on.iter().map(|(_, rk)| *rk).collect();
 
     // Collect left projected column names
@@ -4616,7 +4617,7 @@ fn build_left_join_frame_with_suffix(
     on: &[(&str, &str)],
     suffix: &JoinSuffix,
 ) -> Result<TidyFrame, TidyError> {
-    let right_key_names: std::collections::HashSet<&str> =
+    let right_key_names: std::collections::BTreeSet<&str> =
         on.iter().map(|(_, rk)| *rk).collect();
 
     let left_col_names: Vec<String> = left.proj.indices().iter()
@@ -4662,9 +4663,9 @@ fn build_right_join_frame(
     on: &[(&str, &str)],
     suffix: &JoinSuffix,
 ) -> Result<NullableFrame, TidyError> {
-    let right_key_names: std::collections::HashSet<&str> =
+    let right_key_names: std::collections::BTreeSet<&str> =
         on.iter().map(|(_, rk)| *rk).collect();
-    let left_key_names: std::collections::HashSet<&str> =
+    let left_key_names: std::collections::BTreeSet<&str> =
         on.iter().map(|(lk, _)| *lk).collect();
 
     let right_col_names: Vec<String> = right.proj.indices().iter()
@@ -4742,9 +4743,9 @@ fn build_full_join_frame(
         }
     }
 
-    let right_key_names: std::collections::HashSet<&str> =
+    let right_key_names: std::collections::BTreeSet<&str> =
         on.iter().map(|(_, rk)| *rk).collect();
-    let left_key_names: std::collections::HashSet<&str> =
+    let left_key_names: std::collections::BTreeSet<&str> =
         on.iter().map(|(lk, _)| *lk).collect();
     let right_col_names: Vec<String> = right.proj.indices().iter()
         .map(|&ci| right.base.columns[ci].0.clone())

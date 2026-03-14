@@ -8,7 +8,7 @@
 //! (Parity Gate G-1 / G-2).
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
 use std::time::Instant;
@@ -72,9 +72,9 @@ pub type MirExecResult = Result<Value, MirExecError>;
 /// Recursive structural equality for struct/record values.
 fn structural_eq(
     n1: &str,
-    f1: &HashMap<String, Value>,
+    f1: &BTreeMap<String, Value>,
     n2: &str,
-    f2: &HashMap<String, Value>,
+    f2: &BTreeMap<String, Value>,
 ) -> bool {
     if n1 != n2 || f1.len() != f2.len() {
         return false;
@@ -120,9 +120,9 @@ fn value_eq(a: &Value, b: &Value) -> bool {
 
 pub struct MirExecutor {
     /// P1-5: Function bodies stored as Rc to avoid cloning on every call.
-    functions: HashMap<String, Rc<MirFunction>>,
-    struct_defs: HashMap<String, MirStructDef>,
-    scopes: Vec<HashMap<String, Value>>,
+    functions: BTreeMap<String, Rc<MirFunction>>,
+    struct_defs: BTreeMap<String, MirStructDef>,
+    scopes: Vec<BTreeMap<String, Value>>,
     pub gc_heap: GcHeap,
     pub rng: Rng,
     pub output: Vec<String>,
@@ -136,17 +136,17 @@ pub struct MirExecutor {
     /// Running count of arena allocations (for diagnostics/testing).
     pub arena_alloc_count: u64,
     /// Snap memoization cache: SHA-256 hash of (fn_name, args) → cached result.
-    memo_cache: HashMap<[u8; 32], Value>,
+    memo_cache: BTreeMap<[u8; 32], Value>,
     /// Import-gated library set (e.g. "vizor").
-    libraries_enabled: std::collections::HashSet<String>,
+    libraries_enabled: std::collections::BTreeSet<String>,
 }
 
 impl MirExecutor {
     pub fn new(seed: u64) -> Self {
         Self {
-            functions: HashMap::new(),
-            struct_defs: HashMap::new(),
-            scopes: vec![HashMap::new()],
+            functions: BTreeMap::new(),
+            struct_defs: BTreeMap::new(),
+            scopes: vec![BTreeMap::new()],
             gc_heap: GcHeap::new(1024),
             rng: Rng::seeded(seed),
             output: Vec::new(),
@@ -155,8 +155,8 @@ impl MirExecutor {
             current_fn: None,
             arena_stack: Vec::new(),
             arena_alloc_count: 0,
-            memo_cache: HashMap::new(),
-            libraries_enabled: std::collections::HashSet::new(),
+            memo_cache: BTreeMap::new(),
+            libraries_enabled: std::collections::BTreeSet::new(),
         }
     }
 
@@ -176,7 +176,7 @@ impl MirExecutor {
     // -- Scope management ---------------------------------------------------
 
     fn push_scope(&mut self) {
-        self.scopes.push(HashMap::new());
+        self.scopes.push(BTreeMap::new());
     }
 
     fn pop_scope(&mut self) {
@@ -445,7 +445,7 @@ impl MirExecutor {
             }
             MirExprKind::Block(body) => self.exec_body_scoped(body),
             MirExprKind::StructLit { name, fields } => {
-                let mut field_map = HashMap::new();
+                let mut field_map = BTreeMap::new();
                 for (fname, fexpr) in fields {
                     let val = self.eval_expr(fexpr)?;
                     field_map.insert(fname.clone(), val);
@@ -1511,7 +1511,7 @@ impl MirExecutor {
                 let blob = cjc_snap::snap(&args[0]);
                 let hash_hex = cjc_snap::hash::hex_string(&blob.content_hash);
                 let size = blob.data.len() as i64;
-                let mut fields = HashMap::new();
+                let mut fields = BTreeMap::new();
                 fields.insert("hash".to_string(), Value::String(Rc::new(hash_hex)));
                 fields.insert("data".to_string(), Value::Bytes(Rc::new(RefCell::new(blob.data))));
                 fields.insert("size".to_string(), Value::Int(size));
@@ -1662,7 +1662,7 @@ impl MirExecutor {
                 let (names, sums, count) = StreamingCsvProcessor::new(config)
                     .sum_columns(&bytes)
                     .map_err(|e| MirExecError::Runtime(format!("Csv.stream_sum error: {}", e)))?;
-                let mut fields = std::collections::HashMap::new();
+                let mut fields = std::collections::BTreeMap::new();
                 for (name, sum) in names.iter().zip(sums.iter()) {
                     fields.insert(name.clone(), Value::Float(*sum));
                 }
@@ -1681,7 +1681,7 @@ impl MirExecutor {
                 let (names, mins, maxs, count) = StreamingCsvProcessor::new(config)
                     .minmax_columns(&bytes)
                     .map_err(|e| MirExecError::Runtime(format!("Csv.stream_minmax error: {}", e)))?;
-                let mut fields = std::collections::HashMap::new();
+                let mut fields = std::collections::BTreeMap::new();
                 for i in 0..names.len() {
                     fields.insert(format!("{}_min", names[i]), Value::Float(mins[i]));
                     fields.insert(format!("{}_max", names[i]), Value::Float(maxs[i]));
@@ -2347,7 +2347,7 @@ impl MirExecutor {
                         fields: vec![Value::Struct {
                             name: "Utf8Error".into(),
                             fields: {
-                                let mut m = HashMap::new();
+                                let mut m = BTreeMap::new();
                                 m.insert("valid_up_to".into(), Value::Int(e.valid_up_to() as i64));
                                 m.insert("error_len".into(), Value::Int(e.error_len().unwrap_or(0) as i64));
                                 m
@@ -3668,7 +3668,7 @@ fn dataframe_to_value(df: DataFrame) -> Value {
         .map(|&n| Value::String(Rc::new(n.to_string())))
         .collect();
 
-    let mut fields = std::collections::HashMap::new();
+    let mut fields = std::collections::BTreeMap::new();
     fields.insert("__columns".to_string(), Value::Array(Rc::new(col_names)));
     fields.insert("__nrows".to_string(), Value::Int(df.nrows() as i64));
 

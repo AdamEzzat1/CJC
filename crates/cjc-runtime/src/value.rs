@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
 use std::cell::RefCell;
@@ -97,7 +97,7 @@ pub enum Value {
     Array(Rc<Vec<Value>>),
     Struct {
         name: String,
-        fields: HashMap<String, Value>,
+        fields: BTreeMap<String, Value>,
     },
     /// Copy-on-write tuple. Same COW semantics as Array.
     Tuple(Rc<Vec<Value>>),
@@ -398,7 +398,7 @@ mod tests {
 
     #[test]
     fn struct_value_display() {
-        let mut fields = std::collections::HashMap::new();
+        let mut fields = std::collections::BTreeMap::new();
         fields.insert("x".to_string(), Value::Int(1));
         fields.insert("y".to_string(), Value::Int(2));
         let sv = Value::Struct {

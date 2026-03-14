@@ -143,7 +143,7 @@ pub fn is_snappable(value: &Value) -> bool {
 mod tests {
     use super::*;
     use cjc_runtime::Tensor;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
     use std::rc::Rc;
 
     #[test]
@@ -185,7 +185,7 @@ mod tests {
 
     #[test]
     fn test_snap_restore_nested() {
-        let mut fields = HashMap::new();
+        let mut fields = BTreeMap::new();
         fields.insert("x".to_string(), Value::Int(1));
         fields.insert("data".to_string(), Value::Array(Rc::new(vec![
             Value::Float(1.0),
@@ -228,12 +228,12 @@ mod tests {
     #[test]
     fn test_struct_determinism() {
         // Two structs with same fields inserted in different order
-        let mut f1 = HashMap::new();
+        let mut f1 = BTreeMap::new();
         f1.insert("b".to_string(), Value::Int(2));
         f1.insert("a".to_string(), Value::Int(1));
         f1.insert("c".to_string(), Value::Int(3));
 
-        let mut f2 = HashMap::new();
+        let mut f2 = BTreeMap::new();
         f2.insert("c".to_string(), Value::Int(3));
         f2.insert("a".to_string(), Value::Int(1));
         f2.insert("b".to_string(), Value::Int(2));

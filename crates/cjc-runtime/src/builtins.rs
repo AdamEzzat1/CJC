@@ -1305,7 +1305,7 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let data = value_to_f64_vec(&args[0])?;
             let mu = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("t_test: mu must be a number".into()) };
             let r = crate::hypothesis::t_test(&data, mu)?;
-            let mut fields = std::collections::HashMap::new();
+            let mut fields = std::collections::BTreeMap::new();
             fields.insert("t_statistic".into(), Value::Float(r.t_statistic));
             fields.insert("p_value".into(), Value::Float(r.p_value));
             fields.insert("df".into(), Value::Float(r.df));
@@ -1318,7 +1318,7 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let x = value_to_f64_vec(&args[0])?;
             let y = value_to_f64_vec(&args[1])?;
             let r = crate::hypothesis::t_test_two_sample(&x, &y)?;
-            let mut fields = std::collections::HashMap::new();
+            let mut fields = std::collections::BTreeMap::new();
             fields.insert("t_statistic".into(), Value::Float(r.t_statistic));
             fields.insert("p_value".into(), Value::Float(r.p_value));
             fields.insert("df".into(), Value::Float(r.df));
@@ -1329,7 +1329,7 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let obs = value_to_f64_vec(&args[0])?;
             let exp = value_to_f64_vec(&args[1])?;
             let r = crate::hypothesis::chi_squared_test(&obs, &exp)?;
-            let mut fields = std::collections::HashMap::new();
+            let mut fields = std::collections::BTreeMap::new();
             fields.insert("chi2".into(), Value::Float(r.chi2));
             fields.insert("p_value".into(), Value::Float(r.p_value));
             fields.insert("df".into(), Value::Float(r.df));
@@ -1552,7 +1552,7 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let x = value_to_f64_vec(&args[0])?;
             let y = value_to_f64_vec(&args[1])?;
             let r = crate::hypothesis::t_test_paired(&x, &y)?;
-            let mut fields = std::collections::HashMap::new();
+            let mut fields = std::collections::BTreeMap::new();
             fields.insert("t_statistic".into(), Value::Float(r.t_statistic));
             fields.insert("p_value".into(), Value::Float(r.p_value));
             fields.insert("df".into(), Value::Float(r.df));
@@ -1569,7 +1569,7 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 groups.push(gv.as_slice());
             }
             let r = crate::hypothesis::anova_oneway(&groups)?;
-            let mut fields = std::collections::HashMap::new();
+            let mut fields = std::collections::BTreeMap::new();
             fields.insert("f_statistic".into(), Value::Float(r.f_statistic));
             fields.insert("p_value".into(), Value::Float(r.p_value));
             fields.insert("df_between".into(), Value::Float(r.df_between));
@@ -1583,7 +1583,7 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let x = value_to_f64_vec(&args[0])?;
             let y = value_to_f64_vec(&args[1])?;
             let (f_stat, p_val) = crate::hypothesis::f_test(&x, &y)?;
-            let mut fields = std::collections::HashMap::new();
+            let mut fields = std::collections::BTreeMap::new();
             fields.insert("f_statistic".into(), Value::Float(f_stat));
             fields.insert("p_value".into(), Value::Float(p_val));
             Ok(Some(Value::Struct { name: "FTestResult".into(), fields }))
@@ -1601,7 +1601,7 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let t_values: Vec<Value> = r.t_values.into_iter().map(Value::Float).collect();
             let p_values: Vec<Value> = r.p_values.into_iter().map(Value::Float).collect();
             let resid_values: Vec<Value> = r.residuals.into_iter().map(Value::Float).collect();
-            let mut fields = std::collections::HashMap::new();
+            let mut fields = std::collections::BTreeMap::new();
             fields.insert("coefficients".into(), Value::Array(Rc::new(coef_values)));
             fields.insert("std_errors".into(), Value::Array(Rc::new(se_values)));
             fields.insert("t_values".into(), Value::Array(Rc::new(t_values)));
@@ -1632,7 +1632,7 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let pred_bool: Vec<bool> = pred.iter().map(|&x| x > 0.5).collect();
             let actual_bool: Vec<bool> = actual.iter().map(|&x| x > 0.5).collect();
             let cm = crate::ml::confusion_matrix(&pred_bool, &actual_bool);
-            let mut fields = std::collections::HashMap::new();
+            let mut fields = std::collections::BTreeMap::new();
             fields.insert("tp".into(), Value::Int(cm.tp as i64));
             fields.insert("fp".into(), Value::Int(cm.fp as i64));
             fields.insert("tn".into(), Value::Int(cm.tn as i64));
@@ -2064,7 +2064,7 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let n = match &args[3] { Value::Int(i) => *i as usize, _ => return Err("wls: n must be an integer".into()) };
             let p = match &args[4] { Value::Int(i) => *i as usize, _ => return Err("wls: p must be an integer".into()) };
             let r = crate::hypothesis::wls(&x, &y, &w, n, p)?;
-            let fields = std::collections::HashMap::from([
+            let fields = std::collections::BTreeMap::from([
                 ("coefficients".to_string(), Value::Array(Rc::new(r.coefficients.into_iter().map(Value::Float).collect()))),
                 ("r_squared".to_string(), Value::Float(r.r_squared)),
                 ("residuals".to_string(), Value::Array(Rc::new(r.residuals.into_iter().map(Value::Float).collect()))),
@@ -2080,7 +2080,7 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let group_refs: Vec<&[f64]> = groups.iter().map(|g| g.as_slice()).collect();
             let results = crate::hypothesis::tukey_hsd(&group_refs)?;
             let result_values: Vec<Value> = results.iter().map(|pair| {
-                let mut fields = std::collections::HashMap::new();
+                let mut fields = std::collections::BTreeMap::new();
                 fields.insert("group_i".into(), Value::Int(pair.group_i as i64));
                 fields.insert("group_j".into(), Value::Int(pair.group_j as i64));
                 fields.insert("mean_diff".into(), Value::Float(pair.mean_diff));
@@ -2095,7 +2095,7 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let x = value_to_f64_vec(&args[0])?;
             let y = value_to_f64_vec(&args[1])?;
             let r = crate::hypothesis::mann_whitney(&x, &y)?;
-            let mut fields = std::collections::HashMap::new();
+            let mut fields = std::collections::BTreeMap::new();
             fields.insert("u_statistic".into(), Value::Float(r.u_statistic));
             fields.insert("z_score".into(), Value::Float(r.z_score));
             fields.insert("p_value".into(), Value::Float(r.p_value));
@@ -2107,7 +2107,7 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 .collect::<Result<Vec<_>, _>>()?;
             let group_refs: Vec<&[f64]> = groups.iter().map(|g| g.as_slice()).collect();
             let r = crate::hypothesis::kruskal_wallis(&group_refs)?;
-            let mut fields = std::collections::HashMap::new();
+            let mut fields = std::collections::BTreeMap::new();
             fields.insert("h_statistic".into(), Value::Float(r.h_statistic));
             fields.insert("p_value".into(), Value::Float(r.p_value));
             fields.insert("df".into(), Value::Float(r.df));
@@ -2118,7 +2118,7 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let x = value_to_f64_vec(&args[0])?;
             let y = value_to_f64_vec(&args[1])?;
             let r = crate::hypothesis::wilcoxon_signed_rank(&x, &y)?;
-            let mut fields = std::collections::HashMap::new();
+            let mut fields = std::collections::BTreeMap::new();
             fields.insert("w_statistic".into(), Value::Float(r.w_statistic));
             fields.insert("z_score".into(), Value::Float(r.z_score));
             fields.insert("p_value".into(), Value::Float(r.p_value));
@@ -2143,7 +2143,7 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let n = match &args[2] { Value::Int(i) => *i as usize, _ => return Err("logistic_regression: n must be an integer".into()) };
             let p = match &args[3] { Value::Int(i) => *i as usize, _ => return Err("logistic_regression: p must be an integer".into()) };
             let r = crate::hypothesis::logistic_regression(&x, &y, n, p)?;
-            let mut fields = std::collections::HashMap::new();
+            let mut fields = std::collections::BTreeMap::new();
             fields.insert("coefficients".into(), Value::Array(Rc::new(r.coefficients.into_iter().map(Value::Float).collect())));
             fields.insert("std_errors".into(), Value::Array(Rc::new(r.std_errors.into_iter().map(Value::Float).collect())));
             fields.insert("z_values".into(), Value::Array(Rc::new(r.z_values.into_iter().map(Value::Float).collect())));
@@ -2159,7 +2159,7 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             if args.len() != 1 { return Err("adf_test requires 1 argument: data".into()); }
             let data = value_to_f64_vec(&args[0])?;
             let (t_stat, p_val) = crate::stationarity::adf_test(&data)?;
-            let mut fields = std::collections::HashMap::new();
+            let mut fields = std::collections::BTreeMap::new();
             fields.insert("statistic".into(), Value::Float(t_stat));
             fields.insert("p_value".into(), Value::Float(p_val));
             Ok(Some(Value::Struct { name: "AdfResult".into(), fields }))
@@ -2168,7 +2168,7 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             if args.len() != 1 { return Err("kpss_test requires 1 argument: data".into()); }
             let data = value_to_f64_vec(&args[0])?;
             let (stat, p_val) = crate::stationarity::kpss_test(&data)?;
-            let mut fields = std::collections::HashMap::new();
+            let mut fields = std::collections::BTreeMap::new();
             fields.insert("statistic".into(), Value::Float(stat));
             fields.insert("p_value".into(), Value::Float(p_val));
             Ok(Some(Value::Struct { name: "KpssResult".into(), fields }))
@@ -2177,7 +2177,7 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             if args.len() != 1 { return Err("pp_test requires 1 argument: data".into()); }
             let data = value_to_f64_vec(&args[0])?;
             let (z_t, p_val) = crate::stationarity::pp_test(&data)?;
-            let mut fields = std::collections::HashMap::new();
+            let mut fields = std::collections::BTreeMap::new();
             fields.insert("statistic".into(), Value::Float(z_t));
             fields.insert("p_value".into(), Value::Float(p_val));
             Ok(Some(Value::Struct { name: "PpResult".into(), fields }))

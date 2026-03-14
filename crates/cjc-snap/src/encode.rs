@@ -248,7 +248,7 @@ fn encode_string(s: &str, buf: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
     use std::rc::Rc;
 
     #[test]
@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn test_encode_struct_sorted_fields() {
         // Fields in HashMap may come in any order, but encoding must be sorted
-        let mut fields = HashMap::new();
+        let mut fields = BTreeMap::new();
         fields.insert("z".to_string(), Value::Int(3));
         fields.insert("a".to_string(), Value::Int(1));
         fields.insert("m".to_string(), Value::Int(2));
@@ -333,7 +333,7 @@ mod tests {
         let bytes1 = snap_encode(&val);
 
         // Encode again -- must produce identical bytes
-        let mut fields2 = HashMap::new();
+        let mut fields2 = BTreeMap::new();
         fields2.insert("m".to_string(), Value::Int(2));
         fields2.insert("a".to_string(), Value::Int(1));
         fields2.insert("z".to_string(), Value::Int(3));

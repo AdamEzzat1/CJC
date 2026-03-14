@@ -3,7 +3,7 @@
 //! Tests for the `snap` and `restore` functions, SHA-256 hashing,
 //! deterministic round-trip encoding, and hash mismatch detection.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use cjc_runtime::Value;
 use cjc_snap::{snap, restore, snap_encode, snap_decode, sha256, SnapError};
@@ -101,7 +101,7 @@ fn test_roundtrip_tuple() {
 
 #[test]
 fn test_roundtrip_struct() {
-    let mut fields = HashMap::new();
+    let mut fields = BTreeMap::new();
     fields.insert("x".to_string(), Value::Float(1.0));
     fields.insert("y".to_string(), Value::Float(2.0));
     let v = Value::Struct {
@@ -145,12 +145,12 @@ fn test_different_values_different_hash() {
 #[test]
 fn test_struct_deterministic_encoding() {
     // Create structs with fields inserted in different order — encoding must match.
-    let mut f1 = HashMap::new();
+    let mut f1 = BTreeMap::new();
     f1.insert("b".to_string(), Value::Int(2));
     f1.insert("a".to_string(), Value::Int(1));
     let v1 = Value::Struct { name: "S".to_string(), fields: f1 };
 
-    let mut f2 = HashMap::new();
+    let mut f2 = BTreeMap::new();
     f2.insert("a".to_string(), Value::Int(1));
     f2.insert("b".to_string(), Value::Int(2));
     let v2 = Value::Struct { name: "S".to_string(), fields: f2 };

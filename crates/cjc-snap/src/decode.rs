@@ -3,7 +3,7 @@
 //! Reads the binary format produced by `encode::snap_encode` and reconstructs
 //! a `Value`. Returns `SnapError` on malformed input.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::cell::RefCell;
 
@@ -169,7 +169,7 @@ fn decode_value(cursor: &mut Cursor<'_>) -> Result<Value, SnapError> {
         TAG_STRUCT => {
             let name = cursor.read_string()?;
             let count = cursor.read_u64_le()? as usize;
-            let mut fields = HashMap::with_capacity(count);
+            let mut fields = BTreeMap::new();
             for _ in 0..count {
                 let key = cursor.read_string()?;
                 let val = decode_value(cursor)?;
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip_struct() {
-        let mut fields = HashMap::new();
+        let mut fields = BTreeMap::new();
         fields.insert("x".to_string(), Value::Int(1));
         fields.insert("y".to_string(), Value::Float(2.0));
         let orig = Value::Struct {

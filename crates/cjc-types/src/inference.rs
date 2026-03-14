@@ -10,7 +10,6 @@
 //! Uses constraint-based unification: constraints are generated during
 //! type checking and solved at the end of each function body.
 
-use std::collections::BTreeMap;
 use cjc_diag::{Diagnostic, Span};
 use super::{Type, TypeVarId, TypeSubst, unify};
 

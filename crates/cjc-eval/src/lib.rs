@@ -10,7 +10,7 @@
 //! - Reproducible RNG via `cjc_repro::Rng`
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::rc::Rc;
 use std::time::Instant;
@@ -79,9 +79,9 @@ pub type EvalResult = Result<Value, EvalError>;
 /// Recursive structural equality for struct/record values.
 fn value_structural_eq(
     n1: &str,
-    f1: &HashMap<String, Value>,
+    f1: &BTreeMap<String, Value>,
     n2: &str,
-    f2: &HashMap<String, Value>,
+    f2: &BTreeMap<String, Value>,
 ) -> bool {
     if n1 != n2 || f1.len() != f2.len() {
         return false;
@@ -128,16 +128,16 @@ fn value_deep_eq(a: &Value, b: &Value) -> bool {
 /// Tree-walk interpreter for CJC programs.
 pub struct Interpreter {
     /// User-defined functions indexed by name.
-    functions: HashMap<String, FnDecl>,
+    functions: BTreeMap<String, FnDecl>,
 
     /// User-defined struct declarations indexed by name.
-    struct_defs: HashMap<String, cjc_ast::StructDecl>,
+    struct_defs: BTreeMap<String, cjc_ast::StructDecl>,
 
     /// Maps variant name → enum name for variant resolution.
-    variant_to_enum: HashMap<String, String>,
+    variant_to_enum: BTreeMap<String, String>,
 
     /// Scope stack. The last entry is the innermost scope.
-    scopes: Vec<HashMap<String, Value>>,
+    scopes: Vec<BTreeMap<String, Value>>,
 
     /// GC heap for class instances.
     pub gc_heap: GcHeap,
@@ -155,19 +155,19 @@ pub struct Interpreter {
     pub gc_collections: u64,
 
     /// Names of record types (immutable value types).
-    record_names: HashSet<String>,
+    record_names: BTreeSet<String>,
 
     /// Snap memoization cache: SHA-256 hash of (fn_name, args) → cached result.
-    memo_cache: HashMap<[u8; 32], Value>,
+    memo_cache: BTreeMap<[u8; 32], Value>,
 
     /// Libraries enabled via `import <lib>` declarations.
-    libraries_enabled: HashSet<String>,
+    libraries_enabled: BTreeSet<String>,
 }
 
 impl Interpreter {
     /// Create a new interpreter with the given RNG seed.
     pub fn new(seed: u64) -> Self {
-        let mut variant_to_enum = HashMap::new();
+        let mut variant_to_enum = BTreeMap::new();
         // Register prelude variant names
         variant_to_enum.insert("Some".into(), "Option".into());
         variant_to_enum.insert("None".into(), "Option".into());
@@ -175,25 +175,25 @@ impl Interpreter {
         variant_to_enum.insert("Err".into(), "Result".into());
 
         Self {
-            functions: HashMap::new(),
-            struct_defs: HashMap::new(),
+            functions: BTreeMap::new(),
+            struct_defs: BTreeMap::new(),
             variant_to_enum,
-            scopes: vec![HashMap::new()],
+            scopes: vec![BTreeMap::new()],
             gc_heap: GcHeap::new(1024),
             rng: Rng::seeded(seed),
             output: Vec::new(),
             start_time: Instant::now(),
             gc_collections: 0,
-            record_names: HashSet::new(),
-            memo_cache: HashMap::new(),
-            libraries_enabled: HashSet::new(),
+            record_names: BTreeSet::new(),
+            memo_cache: BTreeMap::new(),
+            libraries_enabled: BTreeSet::new(),
         }
     }
 
     // -- Scope management ---------------------------------------------------
 
     fn push_scope(&mut self) {
-        self.scopes.push(HashMap::new());
+        self.scopes.push(BTreeMap::new());
     }
 
     fn pop_scope(&mut self) {
@@ -605,7 +605,7 @@ impl Interpreter {
             ExprKind::Block(block) => self.exec_block(block),
 
             ExprKind::StructLit { name, fields } => {
-                let mut field_map = HashMap::new();
+                let mut field_map = BTreeMap::new();
                 for fi in fields {
                     let val = self.eval_expr(&fi.value)?;
                     field_map.insert(fi.name.name.clone(), val);
@@ -1648,7 +1648,7 @@ impl Interpreter {
                 let blob = cjc_snap::snap(&args[0]);
                 let hash_hex = cjc_snap::hash::hex_string(&blob.content_hash);
                 let size = blob.data.len() as i64;
-                let mut fields = HashMap::new();
+                let mut fields = BTreeMap::new();
                 fields.insert("hash".to_string(), Value::String(Rc::new(hash_hex)));
                 fields.insert("data".to_string(), Value::Bytes(Rc::new(RefCell::new(blob.data))));
                 fields.insert("size".to_string(), Value::Int(size));
@@ -1802,7 +1802,7 @@ impl Interpreter {
                 let (names, sums, count) = StreamingCsvProcessor::new(config)
                     .sum_columns(&bytes)
                     .map_err(|e| EvalError::Runtime(format!("Csv.stream_sum error: {}", e)))?;
-                let mut fields = std::collections::HashMap::new();
+                let mut fields = std::collections::BTreeMap::new();
                 for (name, sum) in names.iter().zip(sums.iter()) {
                     fields.insert(name.clone(), Value::Float(*sum));
                 }
@@ -1821,7 +1821,7 @@ impl Interpreter {
                 let (names, mins, maxs, count) = StreamingCsvProcessor::new(config)
                     .minmax_columns(&bytes)
                     .map_err(|e| EvalError::Runtime(format!("Csv.stream_minmax error: {}", e)))?;
-                let mut fields = std::collections::HashMap::new();
+                let mut fields = std::collections::BTreeMap::new();
                 for i in 0..names.len() {
                     fields.insert(format!("{}_min", names[i]), Value::Float(mins[i]));
                     fields.insert(format!("{}_max", names[i]), Value::Float(maxs[i]));
@@ -2533,7 +2533,7 @@ impl Interpreter {
                         fields: vec![Value::Struct {
                             name: "Utf8Error".into(),
                             fields: {
-                                let mut m = HashMap::new();
+                                let mut m = BTreeMap::new();
                                 m.insert("valid_up_to".into(), Value::Int(e.valid_up_to() as i64));
                                 m.insert("error_len".into(), Value::Int(e.error_len().unwrap_or(0) as i64));
                                 m
@@ -3375,7 +3375,7 @@ fn dataframe_to_value(df: DataFrame) -> Value {
         .map(|&n| Value::String(Rc::new(n.to_string())))
         .collect();
 
-    let mut fields = std::collections::HashMap::new();
+    let mut fields = std::collections::BTreeMap::new();
     fields.insert("__columns".to_string(), Value::Array(Rc::new(col_names)));
     fields.insert("__nrows".to_string(), Value::Int(df.nrows() as i64));
 
@@ -3400,7 +3400,7 @@ fn dataframe_to_value(df: DataFrame) -> Value {
 /// back into a `Column`. Used by `DataFrame.view()` to bridge the legacy
 /// Struct-encoded representation into the typed TidyView layer.
 fn rebuild_dataframe_from_struct(
-    fields: &std::collections::HashMap<String, Value>,
+    fields: &std::collections::BTreeMap<String, Value>,
 ) -> Result<DataFrame, EvalError> {
     let col_names: Vec<String> = match fields.get("__columns") {
         Some(Value::Array(arr)) => arr

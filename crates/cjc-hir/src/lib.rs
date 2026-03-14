@@ -405,7 +405,7 @@ pub enum HirElseBranch {
 // AST -> HIR Lowering
 // ===========================================================================
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use cjc_ast;
 
@@ -424,20 +424,20 @@ struct ScopeVar {
 pub struct AstLowering {
     next_id: u32,
     /// Stack of scopes. Each scope maps variable names to their info.
-    scopes: Vec<HashMap<String, ScopeVar>>,
+    scopes: Vec<BTreeMap<String, ScopeVar>>,
     /// Set of known function names (direct calls, not captures).
-    known_functions: HashSet<String>,
+    known_functions: BTreeSet<String>,
     /// Whether we are currently inside a `nogc` context.
     in_nogc: bool,
     /// Maps variant name → enum name for variant resolution.
-    variant_names: HashMap<String, String>,
+    variant_names: BTreeMap<String, String>,
 }
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 impl AstLowering {
     pub fn new() -> Self {
-        let mut variant_names = HashMap::new();
+        let mut variant_names = BTreeMap::new();
         // Register prelude variant names
         variant_names.insert("Some".into(), "Option".into());
         variant_names.insert("None".into(), "Option".into());
@@ -446,8 +446,8 @@ impl AstLowering {
 
         Self {
             next_id: 0,
-            scopes: vec![HashMap::new()],
-            known_functions: HashSet::new(),
+            scopes: vec![BTreeMap::new()],
+            known_functions: BTreeSet::new(),
             in_nogc: false,
             variant_names,
         }
@@ -462,7 +462,7 @@ impl AstLowering {
     // -- Scope tracking for capture analysis --
 
     fn push_scope(&mut self) {
-        self.scopes.push(HashMap::new());
+        self.scopes.push(BTreeMap::new());
     }
 
     fn pop_scope(&mut self) {
@@ -1390,15 +1390,15 @@ impl AstLowering {
                 Self::collect_var_refs(body, &mut var_refs);
 
                 // 2. Build set of lambda params (these are local, not captured)
-                let param_names: HashSet<&str> =
+                let param_names: BTreeSet<&str> =
                     params.iter().map(|p| p.name.name.as_str()).collect();
 
                 // 3. Collect all locals defined inside the body
-                let mut body_locals = HashSet::new();
+                let mut body_locals = BTreeSet::new();
                 Self::collect_body_locals(body, &mut body_locals);
 
                 // 4. Determine which variables are captured
-                let mut seen = HashSet::new();
+                let mut seen = BTreeSet::new();
                 let mut captures = Vec::new();
                 for var_name in &var_refs {
                     // Skip if already seen
@@ -1808,7 +1808,7 @@ impl AstLowering {
     }
 
     /// Collect all variable names defined (via `let`) inside the body expression.
-    fn collect_body_locals<'a>(expr: &'a cjc_ast::Expr, out: &mut HashSet<&'a str>) {
+    fn collect_body_locals<'a>(expr: &'a cjc_ast::Expr, out: &mut BTreeSet<&'a str>) {
         match &expr.kind {
             cjc_ast::ExprKind::Block(block) => {
                 for stmt in &block.stmts {

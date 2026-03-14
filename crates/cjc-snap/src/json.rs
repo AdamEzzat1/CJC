@@ -210,7 +210,7 @@ fn write_json_string(s: &str, buf: &mut String) {
 mod tests {
     use super::*;
     use cjc_runtime::Tensor;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
     use std::rc::Rc;
 
     #[test]
@@ -257,7 +257,7 @@ mod tests {
 
     #[test]
     fn test_json_struct() {
-        let mut fields = HashMap::new();
+        let mut fields = BTreeMap::new();
         fields.insert("x".to_string(), Value::Float(1.0));
         fields.insert("y".to_string(), Value::Float(2.0));
         let val = Value::Struct { name: "Point".to_string(), fields };
@@ -288,12 +288,12 @@ mod tests {
     #[test]
     fn test_json_struct_sorted() {
         // Fields must be sorted by name regardless of insertion order
-        let mut f1 = HashMap::new();
+        let mut f1 = BTreeMap::new();
         f1.insert("z".to_string(), Value::Int(3));
         f1.insert("a".to_string(), Value::Int(1));
         let json1 = snap_to_json(&Value::Struct { name: "S".into(), fields: f1 }).unwrap();
 
-        let mut f2 = HashMap::new();
+        let mut f2 = BTreeMap::new();
         f2.insert("a".to_string(), Value::Int(1));
         f2.insert("z".to_string(), Value::Int(3));
         let json2 = snap_to_json(&Value::Struct { name: "S".into(), fields: f2 }).unwrap();

@@ -1,6 +1,6 @@
 pub mod inference;
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 // ── Core Type Representation ────────────────────────────────────
@@ -9,10 +9,10 @@ use std::fmt;
 pub type TypeId = usize;
 
 /// Substitution map: TypeVarId -> concrete Type.
-pub type TypeSubst = HashMap<TypeVarId, Type>;
+pub type TypeSubst = BTreeMap<TypeVarId, Type>;
 
 /// Substitution map for symbolic shape variables.
-pub type ShapeSubst = HashMap<String, usize>;
+pub type ShapeSubst = BTreeMap<String, usize>;
 
 /// The CJC type system representation.
 #[derive(Debug, Clone, PartialEq)]
@@ -817,7 +817,7 @@ pub struct EnumVariant {
 
 // ── Type Variables ──────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TypeVarId(pub usize);
 
 // ── Traits / Typeclasses ────────────────────────────────────────
@@ -983,18 +983,18 @@ pub fn builtin_trait_impls() -> Vec<TraitImpl> {
 /// Type checking environment.
 pub struct TypeEnv {
     /// Named type definitions.
-    pub type_defs: HashMap<String, Type>,
+    pub type_defs: BTreeMap<String, Type>,
     /// Trait definitions.
-    pub trait_defs: HashMap<String, TraitDef>,
+    pub trait_defs: BTreeMap<String, TraitDef>,
     /// Trait implementations.
     pub trait_impls: Vec<TraitImpl>,
     /// Variable scopes (stack of scope frames).
     /// Each entry stores (type, is_mutable).
-    scopes: Vec<HashMap<String, (Type, bool)>>,
+    scopes: Vec<BTreeMap<String, (Type, bool)>>,
     /// Const definitions (name -> value type). Always immutable.
-    pub const_defs: HashMap<String, Type>,
+    pub const_defs: BTreeMap<String, Type>,
     /// Function signatures.
-    pub fn_sigs: HashMap<String, Vec<FnSigEntry>>,
+    pub fn_sigs: BTreeMap<String, Vec<FnSigEntry>>,
     /// Next type variable ID.
     next_var: usize,
 }
@@ -1126,13 +1126,13 @@ pub struct FnSigEntry {
 impl TypeEnv {
     pub fn new() -> Self {
         let mut env = Self {
-            type_defs: HashMap::new(),
-            trait_defs: HashMap::new(),
+            type_defs: BTreeMap::new(),
+            trait_defs: BTreeMap::new(),
             trait_impls: Vec::new(),
-            scopes: vec![HashMap::new()],
-            fn_sigs: HashMap::new(),
+            scopes: vec![BTreeMap::new()],
+            fn_sigs: BTreeMap::new(),
             next_var: 0,
-            const_defs: HashMap::new(),
+            const_defs: BTreeMap::new(),
         };
 
         // Register built-in types
@@ -1303,7 +1303,7 @@ impl TypeEnv {
     }
 
     pub fn push_scope(&mut self) {
-        self.scopes.push(HashMap::new());
+        self.scopes.push(BTreeMap::new());
     }
 
     pub fn pop_scope(&mut self) {
@@ -3177,7 +3177,7 @@ impl TypeChecker {
                     let mut subst = TypeSubst::new();
 
                     // Create fresh type variables for each type parameter
-                    let mut param_var_map: HashMap<String, TypeVarId> = HashMap::new();
+                    let mut param_var_map: BTreeMap<String, TypeVarId> = BTreeMap::new();
                     for (tp_name, _bounds) in &sig.type_params {
                         let var_id = self.env.fresh_var();
                         param_var_map.insert(tp_name.clone(), var_id);
@@ -3306,7 +3306,7 @@ impl TypeChecker {
     }
 
     /// Replace type parameter names (like "T") with fresh type variables in a type.
-    fn substitute_type_params(&self, ty: &Type, map: &HashMap<String, TypeVarId>) -> Type {
+    fn substitute_type_params(&self, ty: &Type, map: &BTreeMap<String, TypeVarId>) -> Type {
         match ty {
             Type::Unresolved(name) => {
                 if let Some(&var_id) = map.get(name) {

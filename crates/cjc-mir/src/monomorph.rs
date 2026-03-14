@@ -11,7 +11,7 @@
 //! static typing / codegen. Generic functions already work without
 //! it due to dynamic dispatch.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     MirBody, MirExpr, MirExprKind, MirFnId, MirFunction, MirMatchArm, MirParam, MirPattern,
@@ -32,7 +32,7 @@ pub struct MonomorphReport {
 }
 
 /// An instantiation request: a generic function with concrete type args.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct Instantiation {
     fn_name: String,
     type_args: Vec<String>,
@@ -67,25 +67,25 @@ pub fn monomorphize_program(program: &MirProgram) -> (MirProgram, MonomorphRepor
 struct Monomorphizer<'a> {
     original: &'a MirProgram,
     /// Map from function name to its definition.
-    fn_map: HashMap<String, &'a MirFunction>,
+    fn_map: BTreeMap<String, &'a MirFunction>,
     /// Set of generic function names (those with non-empty type_params).
-    generic_fns: HashSet<String>,
+    generic_fns: BTreeSet<String>,
     /// Collected instantiation requests.
-    instantiations: HashSet<Instantiation>,
+    instantiations: BTreeSet<Instantiation>,
     /// Specialized (cloned) functions.
     specialized: Vec<MirFunction>,
     /// Next function ID for new specializations.
     next_fn_id: u32,
     /// Count of instantiations per generic function name.
-    fanout: HashMap<String, usize>,
+    fanout: BTreeMap<String, usize>,
     /// Whether budget was exceeded.
     budget_exceeded: bool,
 }
 
 impl<'a> Monomorphizer<'a> {
     fn new(program: &'a MirProgram) -> Self {
-        let mut fn_map = HashMap::new();
-        let mut generic_fns = HashSet::new();
+        let mut fn_map = BTreeMap::new();
+        let mut generic_fns = BTreeSet::new();
         let mut max_id = 0u32;
 
         for f in &program.functions {
@@ -102,10 +102,10 @@ impl<'a> Monomorphizer<'a> {
             original: program,
             fn_map,
             generic_fns,
-            instantiations: HashSet::new(),
+            instantiations: BTreeSet::new(),
             specialized: Vec::new(),
             next_fn_id: max_id,
-            fanout: HashMap::new(),
+            fanout: BTreeMap::new(),
             budget_exceeded: false,
         }
     }
@@ -308,7 +308,7 @@ impl<'a> Monomorphizer<'a> {
         }
 
         // Build a mapping from type param name to concrete type
-        let mut param_map: HashMap<String, String> = HashMap::new();
+        let mut param_map: BTreeMap<String, String> = BTreeMap::new();
 
         // Try to infer from argument values
         for (i, (arg, param)) in args.iter().zip(func.params.iter()).enumerate() {
@@ -354,7 +354,7 @@ impl<'a> Monomorphizer<'a> {
             };
 
         // Build substitution map: type_param_name -> concrete_type
-        let subst: HashMap<String, String> = type_params
+        let subst: BTreeMap<String, String> = type_params
             .iter()
             .zip(inst.type_args.iter())
             .map(|((name, _), concrete)| (name.clone(), concrete.clone()))
@@ -397,7 +397,7 @@ impl<'a> Monomorphizer<'a> {
     /// Build the final program with specialized functions and rewritten call sites.
     fn into_program(self) -> MirProgram {
         // Build the instantiation lookup: (fn_name, type_args) -> mangled_name
-        let mut inst_lookup: HashMap<String, Vec<(Vec<String>, String)>> = HashMap::new();
+        let mut inst_lookup: BTreeMap<String, Vec<(Vec<String>, String)>> = BTreeMap::new();
         for inst in &self.instantiations {
             inst_lookup
                 .entry(inst.fn_name.clone())
@@ -477,14 +477,14 @@ fn infer_type_from_expr(expr: &MirExpr) -> Option<String> {
 }
 
 /// Substitute type param strings in a body.
-fn substitute_body(body: &MirBody, subst: &HashMap<String, String>) -> MirBody {
+fn substitute_body(body: &MirBody, subst: &BTreeMap<String, String>) -> MirBody {
     MirBody {
         stmts: body.stmts.iter().map(|s| substitute_stmt(s, subst)).collect(),
         result: body.result.as_ref().map(|e| Box::new(substitute_expr(e, subst))),
     }
 }
 
-fn substitute_stmt(stmt: &MirStmt, subst: &HashMap<String, String>) -> MirStmt {
+fn substitute_stmt(stmt: &MirStmt, subst: &BTreeMap<String, String>) -> MirStmt {
     match stmt {
         MirStmt::Let { name, mutable, init, alloc_hint } => MirStmt::Let {
             name: name.clone(),
@@ -514,7 +514,7 @@ fn substitute_stmt(stmt: &MirStmt, subst: &HashMap<String, String>) -> MirStmt {
     }
 }
 
-fn substitute_expr(expr: &MirExpr, subst: &HashMap<String, String>) -> MirExpr {
+fn substitute_expr(expr: &MirExpr, subst: &BTreeMap<String, String>) -> MirExpr {
     let kind = match &expr.kind {
         // Most expressions just recurse — type substitution mainly affects
         // StructLit/VariantLit type names and param type annotations
@@ -648,7 +648,7 @@ fn substitute_expr(expr: &MirExpr, subst: &HashMap<String, String>) -> MirExpr {
     MirExpr { kind }
 }
 
-fn substitute_pattern(pat: &MirPattern, subst: &HashMap<String, String>) -> MirPattern {
+fn substitute_pattern(pat: &MirPattern, subst: &BTreeMap<String, String>) -> MirPattern {
     match pat {
         MirPattern::Variant {
             enum_name,
@@ -677,8 +677,8 @@ fn substitute_pattern(pat: &MirPattern, subst: &HashMap<String, String>) -> MirP
 /// Rewrite call sites in a body: if calling a generic fn, redirect to mangled name.
 fn rewrite_calls_in_body(
     body: &mut MirBody,
-    inst_lookup: &HashMap<String, Vec<(Vec<String>, String)>>,
-    fn_map: &HashMap<String, &MirFunction>,
+    inst_lookup: &BTreeMap<String, Vec<(Vec<String>, String)>>,
+    fn_map: &BTreeMap<String, &MirFunction>,
 ) {
     for stmt in &mut body.stmts {
         rewrite_calls_in_stmt(stmt, inst_lookup, fn_map);
@@ -690,8 +690,8 @@ fn rewrite_calls_in_body(
 
 fn rewrite_calls_in_stmt(
     stmt: &mut MirStmt,
-    inst_lookup: &HashMap<String, Vec<(Vec<String>, String)>>,
-    fn_map: &HashMap<String, &MirFunction>,
+    inst_lookup: &BTreeMap<String, Vec<(Vec<String>, String)>>,
+    fn_map: &BTreeMap<String, &MirFunction>,
 ) {
     match stmt {
         MirStmt::Let { init, .. } => rewrite_calls_in_expr(init, inst_lookup, fn_map),
@@ -720,8 +720,8 @@ fn rewrite_calls_in_stmt(
 
 fn rewrite_calls_in_expr(
     expr: &mut MirExpr,
-    inst_lookup: &HashMap<String, Vec<(Vec<String>, String)>>,
-    fn_map: &HashMap<String, &MirFunction>,
+    inst_lookup: &BTreeMap<String, Vec<(Vec<String>, String)>>,
+    fn_map: &BTreeMap<String, &MirFunction>,
 ) {
     match &mut expr.kind {
         MirExprKind::Call { callee, args } => {
@@ -858,7 +858,7 @@ fn rewrite_calls_in_expr(
 
 /// Infer type args from a call to a generic function.
 fn infer_type_args_from_call(func: &MirFunction, args: &[MirExpr]) -> Vec<String> {
-    let mut param_map: HashMap<String, String> = HashMap::new();
+    let mut param_map: BTreeMap<String, String> = BTreeMap::new();
 
     for (arg, param) in args.iter().zip(func.params.iter()) {
         for (tp_name, _) in &func.type_params {
