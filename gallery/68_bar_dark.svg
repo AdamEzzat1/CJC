@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 800 600">
+  <rect x="0.00" y="0.00" width="800.00" height="600.00" fill="#202020"/>
+  <rect x="70.00" y="40.00" width="710.00" height="500.00" fill="#282828"/>
+  <line x1="70.00" y1="540.00" x2="780.00" y2="540.00" stroke="#3c3c3c" stroke-width="0.50"/>
+  <line x1="70.00" y1="440.00" x2="780.00" y2="440.00" stroke="#3c3c3c" stroke-width="0.50"/>
+  <line x1="70.00" y1="340.00" x2="780.00" y2="340.00" stroke="#3c3c3c" stroke-width="0.50"/>
+  <line x1="70.00" y1="240.00" x2="780.00" y2="240.00" stroke="#3c3c3c" stroke-width="0.50"/>
+  <line x1="70.00" y1="140.00" x2="780.00" y2="140.00" stroke="#3c3c3c" stroke-width="0.50"/>
+  <line x1="70.00" y1="40.00" x2="780.00" y2="40.00" stroke="#3c3c3c" stroke-width="0.50"/>
+  <line x1="141.00" y1="40.00" x2="141.00" y2="540.00" stroke="#3c3c3c" stroke-width="0.50"/>
+  <line x1="283.00" y1="40.00" x2="283.00" y2="540.00" stroke="#3c3c3c" stroke-width="0.50"/>
+  <line x1="425.00" y1="40.00" x2="425.00" y2="540.00" stroke="#3c3c3c" stroke-width="0.50"/>
+  <line x1="567.00" y1="40.00" x2="567.00" y2="540.00" stroke="#3c3c3c" stroke-width="0.50"/>
+  <line x1="709.00" y1="40.00" x2="709.00" y2="540.00" stroke="#3c3c3c" stroke-width="0.50"/>
+  <line x1="70.00" y1="540.00" x2="780.00" y2="540.00" stroke="#b4b4b4" stroke-width="1.00"/>
+  <line x1="70.00" y1="40.00" x2="70.00" y2="540.00" stroke="#b4b4b4" stroke-width="1.00"/>
+  <line x1="141.00" y1="540.00" x2="141.00" y2="545.00" stroke="#b4b4b4" stroke-width="1.00"/>
+  <text x="141.00" y="557.00" font-size="10.0" fill="#c8c8c8" text-anchor="middle" font-family="sans-serif">Rent</text>
+  <line x1="283.00" y1="540.00" x2="283.00" y2="545.00" stroke="#b4b4b4" stroke-width="1.00"/>
+  <text x="283.00" y="557.00" font-size="10.0" fill="#c8c8c8" text-anchor="middle" font-family="sans-serif">Food</text>
+  <line x1="425.00" y1="540.00" x2="425.00" y2="545.00" stroke="#b4b4b4" stroke-width="1.00"/>
+  <text x="425.00" y="557.00" font-size="10.0" fill="#c8c8c8" text-anchor="middle" font-family="sans-serif">Transport</text>
+  <line x1="567.00" y1="540.00" x2="567.00" y2="545.00" stroke="#b4b4b4" stroke-width="1.00"/>
+  <text x="567.00" y="557.00" font-size="10.0" fill="#c8c8c8" text-anchor="middle" font-family="sans-serif">Savings</text>
+  <line x1="709.00" y1="540.00" x2="709.00" y2="545.00" stroke="#b4b4b4" stroke-width="1.00"/>
+  <text x="709.00" y="557.00" font-size="10.0" fill="#c8c8c8" text-anchor="middle" font-family="sans-serif">Entertainment</text>
+  <line x1="65.00" y1="540.00" x2="70.00" y2="540.00" stroke="#b4b4b4" stroke-width="1.00"/>
+  <text x="61.00" y="543.50" font-size="10.0" fill="#c8c8c8" text-anchor="end" font-family="sans-serif">10</text>
+  <line x1="65.00" y1="440.00" x2="70.00" y2="440.00" stroke="#b4b4b4" stroke-width="1.00"/>
+  <text x="61.00" y="443.50" font-size="10.0" fill="#c8c8c8" text-anchor="end" font-family="sans-serif">15</text>
+  <line x1="65.00" y1="340.00" x2="70.00" y2="340.00" stroke="#b4b4b4" stroke-width="1.00"/>
+  <text x="61.00" y="343.50" font-size="10.0" fill="#c8c8c8" text-anchor="end" font-family="sans-serif">20</text>
+  <line x1="65.00" y1="240.00" x2="70.00" y2="240.00" stroke="#b4b4b4" stroke-width="1.00"/>
+  <text x="61.00" y="243.50" font-size="10.0" fill="#c8c8c8" text-anchor="end" font-family="sans-serif">25</text>
+  <line x1="65.00" y1="140.00" x2="70.00" y2="140.00" stroke="#b4b4b4" stroke-width="1.00"/>
+  <text x="61.00" y="143.50" font-size="10.0" fill="#c8c8c8" text-anchor="end" font-family="sans-serif">30</text>
+  <line x1="65.00" y1="40.00" x2="70.00" y2="40.00" stroke="#b4b4b4" stroke-width="1.00"/>
+  <text x="61.00" y="43.50" font-size="10.0" fill="#c8c8c8" text-anchor="end" font-family="sans-serif">35</text>
+  <rect x="84.20" y="40.00" width="113.60" height="500.00" fill="#1f77b4" stroke="#ffffff" stroke-width="1.00"/>
+  <rect x="226.20" y="240.00" width="113.60" height="300.00" fill="#1f77b4" stroke="#ffffff" stroke-width="1.00"/>
+  <rect x="368.20" y="440.00" width="113.60" height="100.00" fill="#1f77b4" stroke="#ffffff" stroke-width="1.00"/>
+  <rect x="510.20" y="440.00" width="113.60" height="100.00" fill="#1f77b4" stroke="#ffffff" stroke-width="1.00"/>
+  <rect x="652.20" y="540.00" width="113.60" height="0.00" fill="#1f77b4" stroke="#ffffff" stroke-width="1.00"/>
+  <text x="425.00" y="30.00" font-size="16.0" fill="#c8c8c8" text-anchor="middle" font-family="sans-serif">Bar Chart â Dark Theme</text>
+  <text x="425.00" y="595.00" font-size="12.0" fill="#c8c8c8" text-anchor="middle" font-family="sans-serif">Category</text>
+  <text x="15.00" y="290.00" font-size="12.0" fill="#c8c8c8" text-anchor="middle" font-family="sans-serif" transform="rotate(-90.0,15.00,290.00)">Amount</text>
+</svg>

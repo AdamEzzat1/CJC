@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 800 600">
+  <rect x="0.00" y="0.00" width="800.00" height="600.00" fill="#ffffff"/>
+  <rect x="70.00" y="45.00" width="705.00" height="495.00" fill="#fcfcfc"/>
+  <line x1="70.00" y1="540.00" x2="70.00" y2="311.54" stroke="#1f77b4" stroke-width="1.50"/>
+  <line x1="422.50" y1="540.00" x2="422.50" y2="311.54" stroke="#1f77b4" stroke-width="1.50"/>
+  <line x1="70.00" y1="311.54" x2="422.50" y2="311.54" stroke="#1f77b4" stroke-width="1.50"/>
+  <line x1="246.25" y1="311.54" x2="246.25" y2="45.00" stroke="#1f77b4" stroke-width="1.50"/>
+  <line x1="775.00" y1="540.00" x2="775.00" y2="45.00" stroke="#1f77b4" stroke-width="1.50"/>
+  <line x1="246.25" y1="45.00" x2="775.00" y2="45.00" stroke="#1f77b4" stroke-width="1.50"/>
+  <text x="70.00" y="552.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">Alpha</text>
+  <text x="422.50" y="552.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">Gamma</text>
+  <text x="775.00" y="552.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">Beta</text>
+  <text x="422.50" y="35.00" font-size="16.0" fill="#323232" text-anchor="middle" font-family="sans-serif">17. Dendrogram (geom_dendrogram)</text>
+</svg>

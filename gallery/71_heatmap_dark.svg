@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 800 600">
+  <rect x="0.00" y="0.00" width="800.00" height="600.00" fill="#202020"/>
+  <rect x="70.00" y="40.00" width="710.00" height="500.00" fill="#282828"/>
+  <rect x="70.00" y="40.00" width="236.67" height="166.67" fill="#b2182b" stroke="#ffffff" stroke-width="0.50"/>
+  <text x="188.33" y="127.33" font-size="12.0" fill="#ffffff" text-anchor="middle" font-family="sans-serif">1.00</text>
+  <rect x="306.67" y="40.00" width="236.67" height="166.67" fill="#de9ba4" stroke="#ffffff" stroke-width="0.50"/>
+  <text x="425.00" y="127.33" font-size="12.0" fill="#000000" text-anchor="middle" font-family="sans-serif">0.80</text>
+  <rect x="543.33" y="40.00" width="236.67" height="166.67" fill="#2166ac" stroke="#ffffff" stroke-width="0.50"/>
+  <text x="661.67" y="127.33" font-size="12.0" fill="#ffffff" text-anchor="middle" font-family="sans-serif">0.30</text>
+  <rect x="70.00" y="206.67" width="236.67" height="166.67" fill="#de9ba4" stroke="#ffffff" stroke-width="0.50"/>
+  <text x="188.33" y="294.00" font-size="12.0" fill="#000000" text-anchor="middle" font-family="sans-serif">0.80</text>
+  <rect x="306.67" y="206.67" width="236.67" height="166.67" fill="#b2182b" stroke="#ffffff" stroke-width="0.50"/>
+  <text x="425.00" y="294.00" font-size="12.0" fill="#ffffff" text-anchor="middle" font-family="sans-serif">1.00</text>
+  <rect x="543.33" y="206.67" width="236.67" height="166.67" fill="#9fbddb" stroke="#ffffff" stroke-width="0.50"/>
+  <text x="661.67" y="294.00" font-size="12.0" fill="#000000" text-anchor="middle" font-family="sans-serif">0.50</text>
+  <rect x="70.00" y="373.33" width="236.67" height="166.67" fill="#2166ac" stroke="#ffffff" stroke-width="0.50"/>
+  <text x="188.33" y="460.67" font-size="12.0" fill="#ffffff" text-anchor="middle" font-family="sans-serif">0.30</text>
+  <rect x="306.67" y="373.33" width="236.67" height="166.67" fill="#9fbddb" stroke="#ffffff" stroke-width="0.50"/>
+  <text x="425.00" y="460.67" font-size="12.0" fill="#000000" text-anchor="middle" font-family="sans-serif">0.50</text>
+  <rect x="543.33" y="373.33" width="236.67" height="166.67" fill="#b2182b" stroke="#ffffff" stroke-width="0.50"/>
+  <text x="661.67" y="460.67" font-size="12.0" fill="#ffffff" text-anchor="middle" font-family="sans-serif">1.00</text>
+  <text x="65.00" y="127.33" font-size="10.0" fill="#c8c8c8" text-anchor="end" font-family="sans-serif">Alpha</text>
+  <text x="65.00" y="294.00" font-size="10.0" fill="#c8c8c8" text-anchor="end" font-family="sans-serif">Beta</text>
+  <text x="65.00" y="460.67" font-size="10.0" fill="#c8c8c8" text-anchor="end" font-family="sans-serif">Gamma</text>
+  <text x="188.33" y="35.00" font-size="10.0" fill="#c8c8c8" text-anchor="middle" font-family="sans-serif">Alpha</text>
+  <text x="425.00" y="35.00" font-size="10.0" fill="#c8c8c8" text-anchor="middle" font-family="sans-serif">Beta</text>
+  <text x="661.67" y="35.00" font-size="10.0" fill="#c8c8c8" text-anchor="middle" font-family="sans-serif">Gamma</text>
+  <text x="425.00" y="30.00" font-size="16.0" fill="#c8c8c8" text-anchor="middle" font-family="sans-serif">Heatmap â Dark Theme</text>
+</svg>

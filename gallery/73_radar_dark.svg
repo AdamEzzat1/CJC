@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 800 600">
+  <rect x="0.00" y="0.00" width="800.00" height="600.00" fill="#202020"/>
+  <rect x="70.00" y="40.00" width="710.00" height="500.00" fill="#282828"/>
+  <polyline points="425.00,227.50 484.44,270.69 461.74,340.56 388.26,340.56 365.56,270.69 425.00,227.50" stroke="#3c3c3c" stroke-width="0.50" fill="none"/>
+  <polyline points="425.00,165.00 543.88,251.37 498.47,391.13 351.53,391.13 306.12,251.37 425.00,165.00" stroke="#3c3c3c" stroke-width="0.50" fill="none"/>
+  <polyline points="425.00,102.50 603.32,232.06 535.21,441.69 314.79,441.69 246.68,232.06 425.00,102.50" stroke="#3c3c3c" stroke-width="0.50" fill="none"/>
+  <line x1="425.00" y1="290.00" x2="425.00" y2="102.50" stroke="#3c3c3c" stroke-width="0.50"/>
+  <line x1="425.00" y1="290.00" x2="603.32" y2="232.06" stroke="#3c3c3c" stroke-width="0.50"/>
+  <line x1="425.00" y1="290.00" x2="535.21" y2="441.69" stroke="#3c3c3c" stroke-width="0.50"/>
+  <line x1="425.00" y1="290.00" x2="314.79" y2="441.69" stroke="#3c3c3c" stroke-width="0.50"/>
+  <line x1="425.00" y1="290.00" x2="246.68" y2="232.06" stroke="#3c3c3c" stroke-width="0.50"/>
+  <polyline points="425.00,123.33 543.88,251.37 535.21,441.69 376.02,357.42 286.30,244.94 425.00,123.33" stroke="#1f77b4" stroke-width="2.00" fill="rgba(31,119,180,0.20)"/>
+  <circle cx="425.00" cy="123.33" r="4.00" fill="#1f77b4" stroke="#ffffff"/>
+  <circle cx="543.88" cy="251.37" r="4.00" fill="#1f77b4" stroke="#ffffff"/>
+  <circle cx="535.21" cy="441.69" r="4.00" fill="#1f77b4" stroke="#ffffff"/>
+  <circle cx="376.02" cy="357.42" r="4.00" fill="#1f77b4" stroke="#ffffff"/>
+  <circle cx="286.30" cy="244.94" r="4.00" fill="#1f77b4" stroke="#ffffff"/>
+  <text x="425.00" y="84.50" font-size="10.0" fill="#c8c8c8" text-anchor="middle" font-family="sans-serif">Speed</text>
+  <text x="620.44" y="226.50" font-size="10.0" fill="#c8c8c8" text-anchor="middle" font-family="sans-serif">Power</text>
+  <text x="545.79" y="456.25" font-size="10.0" fill="#c8c8c8" text-anchor="middle" font-family="sans-serif">Range</text>
+  <text x="304.21" y="456.25" font-size="10.0" fill="#c8c8c8" text-anchor="middle" font-family="sans-serif">Stealth</text>
+  <text x="229.56" y="226.50" font-size="10.0" fill="#c8c8c8" text-anchor="middle" font-family="sans-serif">Accuracy</text>
+  <text x="425.00" y="30.00" font-size="16.0" fill="#c8c8c8" text-anchor="middle" font-family="sans-serif">Radar â Dark Theme</text>
+</svg>

@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 800 600">
+  <rect x="0.00" y="0.00" width="800.00" height="600.00" fill="#ffffff"/>
+  <rect x="70.00" y="45.00" width="705.00" height="495.00" fill="#fcfcfc"/>
+  <line x1="70.00" y1="540.00" x2="775.00" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="469.29" x2="775.00" y2="469.29" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="398.57" x2="775.00" y2="398.57" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="327.86" x2="775.00" y2="327.86" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="257.14" x2="775.00" y2="257.14" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="186.43" x2="775.00" y2="186.43" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="115.71" x2="775.00" y2="115.71" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="45.00" x2="775.00" y2="45.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="45.00" x2="70.00" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="148.33" y1="45.00" x2="148.33" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="226.67" y1="45.00" x2="226.67" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="305.00" y1="45.00" x2="305.00" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="383.33" y1="45.00" x2="383.33" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="461.67" y1="45.00" x2="461.67" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="540.00" y1="45.00" x2="540.00" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="618.33" y1="45.00" x2="618.33" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="696.67" y1="45.00" x2="696.67" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="775.00" y1="45.00" x2="775.00" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="540.00" x2="775.00" y2="540.00" stroke="#505050" stroke-width="1.00"/>
+  <line x1="70.00" y1="45.00" x2="70.00" y2="540.00" stroke="#505050" stroke-width="1.00"/>
+  <line x1="70.00" y1="540.00" x2="70.00" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="70.00" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">1</text>
+  <line x1="148.33" y1="540.00" x2="148.33" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="148.33" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">2</text>
+  <line x1="226.67" y1="540.00" x2="226.67" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="226.67" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">3</text>
+  <line x1="305.00" y1="540.00" x2="305.00" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="305.00" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">4</text>
+  <line x1="383.33" y1="540.00" x2="383.33" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="383.33" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">5</text>
+  <line x1="461.67" y1="540.00" x2="461.67" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="461.67" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">6</text>
+  <line x1="540.00" y1="540.00" x2="540.00" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="540.00" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">7</text>
+  <line x1="618.33" y1="540.00" x2="618.33" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="618.33" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">8</text>
+  <line x1="696.67" y1="540.00" x2="696.67" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="696.67" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">9</text>
+  <line x1="775.00" y1="540.00" x2="775.00" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="775.00" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">10</text>
+  <line x1="65.00" y1="540.00" x2="70.00" y2="540.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="543.50" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">-1.50</text>
+  <line x1="65.00" y1="469.29" x2="70.00" y2="469.29" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="472.79" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">-1</text>
+  <line x1="65.00" y1="398.57" x2="70.00" y2="398.57" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="402.07" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">-0.500</text>
+  <line x1="65.00" y1="327.86" x2="70.00" y2="327.86" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="331.36" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">0</text>
+  <line x1="65.00" y1="257.14" x2="70.00" y2="257.14" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="260.64" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">0.500</text>
+  <line x1="65.00" y1="186.43" x2="70.00" y2="186.43" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="189.93" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">1</text>
+  <line x1="65.00" y1="115.71" x2="70.00" y2="115.71" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="119.21" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">1.50</text>
+  <line x1="65.00" y1="45.00" x2="70.00" y2="45.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="48.50" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">2</text>
+  <line x1="70.00" y1="327.86" x2="775.00" y2="327.86" stroke="#808080" stroke-width="1.00"/>
+  <circle cx="70.00" cy="417.86" r="3.50" fill="#1f77b4"/>
+  <circle cx="148.33" cy="295.71" r="3.50" fill="#1f77b4"/>
+  <circle cx="226.67" cy="470.57" r="3.50" fill="#1f77b4"/>
+  <circle cx="305.00" cy="122.14" r="3.50" fill="#1f77b4"/>
+  <circle cx="383.33" cy="353.57" r="3.50" fill="#1f77b4"/>
+  <circle cx="461.67" cy="146.57" r="3.50" fill="#1f77b4"/>
+  <circle cx="540.00" cy="434.57" r="3.50" fill="#1f77b4"/>
+  <circle cx="618.33" cy="241.71" r="3.50" fill="#1f77b4"/>
+  <circle cx="696.67" cy="459.00" r="3.50" fill="#1f77b4"/>
+  <circle cx="775.00" cy="336.86" r="3.50" fill="#1f77b4"/>
+  <text x="422.50" y="35.00" font-size="16.0" fill="#323232" text-anchor="middle" font-family="sans-serif">16. Residual Plot (geom_residplot)</text>
+  <text x="422.50" y="595.00" font-size="12.0" fill="#323232" text-anchor="middle" font-family="sans-serif">X</text>
+  <text x="15.00" y="292.50" font-size="12.0" fill="#323232" text-anchor="middle" font-family="sans-serif" transform="rotate(-90.0,15.00,292.50)">Residual</text>
+</svg>

@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 800 600">
+  <rect x="0.00" y="0.00" width="800.00" height="600.00" fill="#ffffff"/>
+  <rect x="70.00" y="45.00" width="705.00" height="495.00" fill="#fcfcfc"/>
+  <line x1="70.00" y1="540.00" x2="775.00" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="490.50" x2="775.00" y2="490.50" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="441.00" x2="775.00" y2="441.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="391.50" x2="775.00" y2="391.50" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="342.00" x2="775.00" y2="342.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="292.50" x2="775.00" y2="292.50" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="243.00" x2="775.00" y2="243.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="193.50" x2="775.00" y2="193.50" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="144.00" x2="775.00" y2="144.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="94.50" x2="775.00" y2="94.50" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="45.00" x2="775.00" y2="45.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="45.00" x2="70.00" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="170.71" y1="45.00" x2="170.71" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="271.43" y1="45.00" x2="271.43" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="372.14" y1="45.00" x2="372.14" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="472.86" y1="45.00" x2="472.86" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="573.57" y1="45.00" x2="573.57" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="674.29" y1="45.00" x2="674.29" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="775.00" y1="45.00" x2="775.00" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="540.00" x2="775.00" y2="540.00" stroke="#505050" stroke-width="1.00"/>
+  <line x1="70.00" y1="45.00" x2="70.00" y2="540.00" stroke="#505050" stroke-width="1.00"/>
+  <line x1="70.00" y1="540.00" x2="70.00" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="70.00" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">1</text>
+  <line x1="170.71" y1="540.00" x2="170.71" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="170.71" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">2</text>
+  <line x1="271.43" y1="540.00" x2="271.43" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="271.43" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">3</text>
+  <line x1="372.14" y1="540.00" x2="372.14" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="372.14" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">4</text>
+  <line x1="472.86" y1="540.00" x2="472.86" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="472.86" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">5</text>
+  <line x1="573.57" y1="540.00" x2="573.57" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="573.57" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">6</text>
+  <line x1="674.29" y1="540.00" x2="674.29" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="674.29" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">7</text>
+  <line x1="775.00" y1="540.00" x2="775.00" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="775.00" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">8</text>
+  <line x1="65.00" y1="540.00" x2="70.00" y2="540.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="543.50" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">1</text>
+  <line x1="65.00" y1="490.50" x2="70.00" y2="490.50" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="494.00" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">1.20</text>
+  <line x1="65.00" y1="441.00" x2="70.00" y2="441.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="444.50" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">1.40</text>
+  <line x1="65.00" y1="391.50" x2="70.00" y2="391.50" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="395.00" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">1.60</text>
+  <line x1="65.00" y1="342.00" x2="70.00" y2="342.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="345.50" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">1.80</text>
+  <line x1="65.00" y1="292.50" x2="70.00" y2="292.50" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="296.00" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">2</text>
+  <line x1="65.00" y1="243.00" x2="70.00" y2="243.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="246.50" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">2.20</text>
+  <line x1="65.00" y1="193.50" x2="70.00" y2="193.50" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="197.00" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">2.40</text>
+  <line x1="65.00" y1="144.00" x2="70.00" y2="144.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="147.50" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">2.60</text>
+  <line x1="65.00" y1="94.50" x2="70.00" y2="94.50" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="98.00" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">2.80</text>
+  <line x1="65.00" y1="45.00" x2="70.00" y2="45.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="48.50" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">3</text>
+  <polyline points="70.00,540.00 170.71,540.00 170.71,540.00 271.43,540.00 271.43,292.50 372.14,292.50 372.14,292.50 472.86,292.50 472.86,45.00 573.57,45.00 573.57,45.00 674.29,45.00 674.29,292.50 775.00,292.50 775.00,540.00" stroke="#1f77b4" stroke-width="2.00" fill="none"/>
+  <text x="422.50" y="35.00" font-size="16.0" fill="#323232" text-anchor="middle" font-family="sans-serif">25. Step Line (geom_step)</text>
+  <text x="422.50" y="595.00" font-size="12.0" fill="#323232" text-anchor="middle" font-family="sans-serif">X</text>
+  <text x="15.00" y="292.50" font-size="12.0" fill="#323232" text-anchor="middle" font-family="sans-serif" transform="rotate(-90.0,15.00,292.50)">Level</text>
+</svg>

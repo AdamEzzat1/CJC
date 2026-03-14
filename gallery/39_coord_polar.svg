@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 800 600">
+  <rect x="0.00" y="0.00" width="800.00" height="600.00" fill="#ffffff"/>
+  <rect x="70.00" y="45.00" width="705.00" height="495.00" fill="#fcfcfc"/>
+  <polyline points="422.50,292.50 422.50,82.12 444.49,83.28 466.24,86.72 487.51,92.42 508.07,100.31 527.69,110.31 546.16,122.30 563.27,136.16 578.84,151.73 592.70,168.84 604.69,187.31 614.69,206.93 622.58,227.49 628.28,248.76 631.72,270.51 632.88,292.50 631.72,314.49 628.28,336.24 622.58,357.51 614.69,378.07 604.69,397.69 592.70,416.16 422.50,292.50" stroke="#ffffff" stroke-width="1.50" fill="#1f77b4"/>
+  <text x="544.34" y="230.42" font-size="10.0" fill="#404040" text-anchor="middle" font-family="sans-serif">Rent (35.0%)</text>
+  <polyline points="422.50,292.50 592.70,416.16 578.84,433.27 563.27,448.84 546.16,462.70 527.69,474.69 508.07,484.69 487.51,492.58 466.24,498.28 444.49,501.72 422.50,502.88 400.51,501.72 378.76,498.28 357.49,492.58 336.93,484.69 317.31,474.69 298.84,462.70 422.50,292.50" stroke="#ffffff" stroke-width="1.50" fill="#ff7f0e"/>
+  <text x="443.89" y="427.56" font-size="10.0" fill="#404040" text-anchor="middle" font-family="sans-serif">Food (25.0%)</text>
+  <polyline points="422.50,292.50 298.84,462.70 281.73,448.84 266.16,433.27 252.30,416.16 240.31,397.69 230.31,378.07 222.42,357.51 216.72,336.24 213.28,314.49 212.12,292.50 422.50,292.50" stroke="#ffffff" stroke-width="1.50" fill="#2ca02c"/>
+  <text x="300.66" y="354.58" font-size="10.0" fill="#404040" text-anchor="middle" font-family="sans-serif">Transport (15.0%)</text>
+  <polyline points="422.50,292.50 212.12,292.50 213.28,270.51 216.72,248.76 222.42,227.49 230.31,206.93 240.31,187.31 252.30,168.84 266.16,151.73 281.73,136.16 298.84,122.30 422.50,292.50" stroke="#ffffff" stroke-width="1.50" fill="#d62728"/>
+  <text x="300.66" y="230.42" font-size="10.0" fill="#404040" text-anchor="middle" font-family="sans-serif">Savings (15.0%)</text>
+  <polyline points="422.50,292.50 298.84,122.30 317.31,110.31 336.93,100.31 357.49,92.42 378.76,86.72 400.51,83.28 422.50,82.12 422.50,292.50" stroke="#ffffff" stroke-width="1.50" fill="#9467bd"/>
+  <text x="380.24" y="162.45" font-size="10.0" fill="#404040" text-anchor="middle" font-family="sans-serif">Entertainment (10.0%)</text>
+  <text x="422.50" y="35.00" font-size="16.0" fill="#323232" text-anchor="middle" font-family="sans-serif">Coord Polar</text>
+</svg>

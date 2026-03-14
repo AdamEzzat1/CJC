@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 800 600">
+  <rect x="0.00" y="0.00" width="800.00" height="600.00" fill="#ffffff"/>
+  <rect x="70.00" y="45.00" width="705.00" height="495.00" fill="#fcfcfc"/>
+  <rect x="70.00" y="45.00" width="235.00" height="165.00" fill="#08306b" stroke="#ffffff" stroke-width="0.50"/>
+  <text x="187.50" y="131.50" font-size="12.0" fill="#ffffff" text-anchor="middle" font-family="sans-serif">1.00</text>
+  <rect x="305.00" y="45.00" width="235.00" height="165.00" fill="#4e6b95" stroke="#ffffff" stroke-width="0.50"/>
+  <text x="422.50" y="131.50" font-size="12.0" fill="#ffffff" text-anchor="middle" font-family="sans-serif">0.80</text>
+  <rect x="540.00" y="45.00" width="235.00" height="165.00" fill="#ffffff" stroke="#ffffff" stroke-width="0.50"/>
+  <text x="657.50" y="131.50" font-size="12.0" fill="#000000" text-anchor="middle" font-family="sans-serif">0.30</text>
+  <rect x="70.00" y="210.00" width="235.00" height="165.00" fill="#4e6b95" stroke="#ffffff" stroke-width="0.50"/>
+  <text x="187.50" y="296.50" font-size="12.0" fill="#ffffff" text-anchor="middle" font-family="sans-serif">0.80</text>
+  <rect x="305.00" y="210.00" width="235.00" height="165.00" fill="#08306b" stroke="#ffffff" stroke-width="0.50"/>
+  <text x="422.50" y="296.50" font-size="12.0" fill="#ffffff" text-anchor="middle" font-family="sans-serif">1.00</text>
+  <rect x="540.00" y="210.00" width="235.00" height="165.00" fill="rgba(184,195,212,1.00)" stroke="#ffffff" stroke-width="0.50"/>
+  <text x="657.50" y="296.50" font-size="12.0" fill="#000000" text-anchor="middle" font-family="sans-serif">0.50</text>
+  <rect x="70.00" y="375.00" width="235.00" height="165.00" fill="#ffffff" stroke="#ffffff" stroke-width="0.50"/>
+  <text x="187.50" y="461.50" font-size="12.0" fill="#000000" text-anchor="middle" font-family="sans-serif">0.30</text>
+  <rect x="305.00" y="375.00" width="235.00" height="165.00" fill="rgba(184,195,212,1.00)" stroke="#ffffff" stroke-width="0.50"/>
+  <text x="422.50" y="461.50" font-size="12.0" fill="#000000" text-anchor="middle" font-family="sans-serif">0.50</text>
+  <rect x="540.00" y="375.00" width="235.00" height="165.00" fill="#08306b" stroke="#ffffff" stroke-width="0.50"/>
+  <text x="657.50" y="461.50" font-size="12.0" fill="#ffffff" text-anchor="middle" font-family="sans-serif">1.00</text>
+  <text x="65.00" y="131.50" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">Alpha</text>
+  <text x="65.00" y="296.50" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">Beta</text>
+  <text x="65.00" y="461.50" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">Gamma</text>
+  <text x="187.50" y="40.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">Alpha</text>
+  <text x="422.50" y="40.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">Beta</text>
+  <text x="657.50" y="40.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">Gamma</text>
+  <text x="422.50" y="35.00" font-size="16.0" fill="#323232" text-anchor="middle" font-family="sans-serif">14. Heatmap (geom_tile + show_values)</text>
+</svg>

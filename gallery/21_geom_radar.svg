@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 800 600">
+  <rect x="0.00" y="0.00" width="800.00" height="600.00" fill="#ffffff"/>
+  <rect x="70.00" y="45.00" width="705.00" height="495.00" fill="#fcfcfc"/>
+  <polyline points="422.50,230.62 481.35,273.38 458.87,342.56 386.13,342.56 363.65,273.38 422.50,230.62" stroke="#e6e6e6" stroke-width="0.50" fill="none"/>
+  <polyline points="422.50,168.75 540.19,254.26 495.24,392.62 349.76,392.62 304.81,254.26 422.50,168.75" stroke="#e6e6e6" stroke-width="0.50" fill="none"/>
+  <polyline points="422.50,106.88 599.04,235.14 531.61,442.67 313.39,442.67 245.96,235.14 422.50,106.88" stroke="#e6e6e6" stroke-width="0.50" fill="none"/>
+  <line x1="422.50" y1="292.50" x2="422.50" y2="106.88" stroke="#e6e6e6" stroke-width="0.50"/>
+  <line x1="422.50" y1="292.50" x2="599.04" y2="235.14" stroke="#e6e6e6" stroke-width="0.50"/>
+  <line x1="422.50" y1="292.50" x2="531.61" y2="442.67" stroke="#e6e6e6" stroke-width="0.50"/>
+  <line x1="422.50" y1="292.50" x2="313.39" y2="442.67" stroke="#e6e6e6" stroke-width="0.50"/>
+  <line x1="422.50" y1="292.50" x2="245.96" y2="235.14" stroke="#e6e6e6" stroke-width="0.50"/>
+  <polyline points="422.50,127.50 540.19,254.26 531.61,442.67 374.01,359.24 285.19,247.89 422.50,127.50" stroke="#1f77b4" stroke-width="2.00" fill="rgba(31,119,180,0.20)"/>
+  <circle cx="422.50" cy="127.50" r="4.00" fill="#1f77b4" stroke="#ffffff"/>
+  <circle cx="540.19" cy="254.26" r="4.00" fill="#1f77b4" stroke="#ffffff"/>
+  <circle cx="531.61" cy="442.67" r="4.00" fill="#1f77b4" stroke="#ffffff"/>
+  <circle cx="374.01" cy="359.24" r="4.00" fill="#1f77b4" stroke="#ffffff"/>
+  <circle cx="285.19" cy="247.89" r="4.00" fill="#1f77b4" stroke="#ffffff"/>
+  <text x="422.50" y="88.88" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">Speed</text>
+  <text x="616.16" y="229.58" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">Power</text>
+  <text x="542.19" y="457.24" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">Range</text>
+  <text x="302.81" y="457.24" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">Stealth</text>
+  <text x="228.84" y="229.58" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">Accuracy</text>
+  <text x="422.50" y="35.00" font-size="16.0" fill="#323232" text-anchor="middle" font-family="sans-serif">21. Radar Chart (geom_radar)</text>
+</svg>
