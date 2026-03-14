@@ -1,3 +1,4 @@
+use crate::accumulator::BinnedAccumulatorF64;
 use crate::error::RuntimeError;
 use crate::tensor::Tensor;
 
@@ -94,14 +95,22 @@ impl Tensor {
         for j in 0..n {
             // Orthogonalize against previous columns
             for i in 0..j {
-                let dot: f64 = (0..m).map(|k| q_cols[i][k] * q_cols[j][k]).collect::<Vec<f64>>().iter().sum();
+                let dot: f64 = {
+                    let mut acc = BinnedAccumulatorF64::new();
+                    for k in 0..m { acc.add(q_cols[i][k] * q_cols[j][k]); }
+                    acc.finalize()
+                };
                 r_data[i * n + j] = dot;
                 for k in 0..m {
                     q_cols[j][k] -= dot * q_cols[i][k];
                 }
             }
             // Normalize
-            let norm: f64 = (0..m).map(|k| q_cols[j][k] * q_cols[j][k]).collect::<Vec<f64>>().iter().sum::<f64>().sqrt();
+            let norm: f64 = {
+                let mut acc = BinnedAccumulatorF64::new();
+                for k in 0..m { acc.add(q_cols[j][k] * q_cols[j][k]); }
+                acc.finalize()
+            }.sqrt();
             r_data[j * n + j] = norm;
             if norm > 1e-15 {
                 for k in 0..m {
@@ -314,7 +323,7 @@ impl Tensor {
         }
         let n = self.shape[0];
         let data = self.to_vec();
-        let mut acc = cjc_repro::KahanAccumulatorF64::new();
+        let mut acc = BinnedAccumulatorF64::new();
         for i in 0..n {
             acc.add(data[i * n + i]);
         }
@@ -329,7 +338,7 @@ impl Tensor {
             ));
         }
         let data = self.to_vec();
-        let mut acc = cjc_repro::KahanAccumulatorF64::new();
+        let mut acc = BinnedAccumulatorF64::new();
         for &v in &data {
             acc.add(v * v);
         }
@@ -546,7 +555,7 @@ impl Tensor {
         let data = self.to_vec();
         let mut max_col_sum = 0.0_f64;
         for j in 0..n {
-            let mut acc = cjc_repro::KahanAccumulatorF64::new();
+            let mut acc = BinnedAccumulatorF64::new();
             for i in 0..m {
                 acc.add(data[i * n + j].abs());
             }
@@ -569,7 +578,7 @@ impl Tensor {
         let data = self.to_vec();
         let mut max_row_sum = 0.0_f64;
         for i in 0..m {
-            let mut acc = cjc_repro::KahanAccumulatorF64::new();
+            let mut acc = BinnedAccumulatorF64::new();
             for j in 0..n {
                 acc.add(data[i * n + j].abs());
             }

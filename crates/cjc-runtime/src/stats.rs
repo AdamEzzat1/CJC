@@ -3,20 +3,24 @@
 //!
 //! # Determinism Contract
 //!
-//! - All reductions use `KahanAccumulatorF64` from `cjc_repro`.
+//! - Unordered reductions use `BinnedAccumulatorF64` for order-invariant,
+//!   bit-identical results regardless of input order.
+//! - Cumulative (ordered) operations use `KahanAccumulatorF64` where the
+//!   addition order IS the semantics.
 //! - Sorting uses `f64::total_cmp` for deterministic NaN handling.
 //! - No `HashMap`, no `par_iter`, no OS randomness.
-//! - Same input order => bit-identical output.
+//! - Same input => bit-identical output.
 
+use crate::accumulator::BinnedAccumulatorF64;
 use cjc_repro::KahanAccumulatorF64;
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Kahan-stable mean of a slice.
-fn kahan_mean(data: &[f64]) -> f64 {
-    let mut acc = KahanAccumulatorF64::new();
+/// Order-invariant mean of a slice using binned accumulation.
+fn binned_mean(data: &[f64]) -> f64 {
+    let mut acc = BinnedAccumulatorF64::new();
     for &x in data {
         acc.add(x);
     }
@@ -34,9 +38,8 @@ fn sorted_copy(data: &[f64]) -> Vec<f64> {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Population variance: sum((xi - mean)^2) / n.
-/// Two-pass: first Kahan mean, then Kahan sum of squared deviations.
 /// Variance (sample, N-1 denominator — R/pandas default).
+/// Two-pass: first binned mean, then binned sum of squared deviations.
 /// For single element, returns 0.
 pub fn variance(data: &[f64]) -> Result<f64, String> {
     if data.is_empty() {
@@ -45,8 +48,8 @@ pub fn variance(data: &[f64]) -> Result<f64, String> {
     if data.len() == 1 {
         return Ok(0.0);
     }
-    let mean = kahan_mean(data);
-    let mut acc = KahanAccumulatorF64::new();
+    let mean = binned_mean(data);
+    let mut acc = BinnedAccumulatorF64::new();
     for &x in data {
         let d = x - mean;
         acc.add(d * d);
@@ -64,8 +67,8 @@ pub fn pop_variance(data: &[f64]) -> Result<f64, String> {
     if data.is_empty() {
         return Err("pop_variance: empty data".into());
     }
-    let mean = kahan_mean(data);
-    let mut acc = KahanAccumulatorF64::new();
+    let mean = binned_mean(data);
+    let mut acc = BinnedAccumulatorF64::new();
     for &x in data {
         let d = x - mean;
         acc.add(d * d);
@@ -148,10 +151,10 @@ pub fn skewness(data: &[f64]) -> Result<f64, String> {
     if data.len() < 3 {
         return Err("skewness: need at least 3 elements".into());
     }
-    let mean = kahan_mean(data);
+    let mean = binned_mean(data);
     let n = data.len() as f64;
-    let mut m2_acc = KahanAccumulatorF64::new();
-    let mut m3_acc = KahanAccumulatorF64::new();
+    let mut m2_acc = BinnedAccumulatorF64::new();
+    let mut m3_acc = BinnedAccumulatorF64::new();
     for &x in data {
         let d = x - mean;
         m2_acc.add(d * d);
@@ -171,10 +174,10 @@ pub fn kurtosis(data: &[f64]) -> Result<f64, String> {
     if data.len() < 4 {
         return Err("kurtosis: need at least 4 elements".into());
     }
-    let mean = kahan_mean(data);
+    let mean = binned_mean(data);
     let n = data.len() as f64;
-    let mut m2_acc = KahanAccumulatorF64::new();
-    let mut m4_acc = KahanAccumulatorF64::new();
+    let mut m2_acc = BinnedAccumulatorF64::new();
+    let mut m4_acc = BinnedAccumulatorF64::new();
     for &x in data {
         let d = x - mean;
         let d2 = d * d;
@@ -194,7 +197,7 @@ pub fn z_score(data: &[f64]) -> Result<Vec<f64>, String> {
     if data.is_empty() {
         return Err("z_score: empty data".into());
     }
-    let mean = kahan_mean(data);
+    let mean = binned_mean(data);
     let s = sd(data)?;
     if s == 0.0 {
         return Err("z_score: zero standard deviation".into());
@@ -249,11 +252,11 @@ pub fn cor(x: &[f64], y: &[f64]) -> Result<f64, String> {
     if x.len() < 2 {
         return Err("cor: need at least 2 elements".into());
     }
-    let mean_x = kahan_mean(x);
-    let mean_y = kahan_mean(y);
-    let mut cov_acc = KahanAccumulatorF64::new();
-    let mut var_x_acc = KahanAccumulatorF64::new();
-    let mut var_y_acc = KahanAccumulatorF64::new();
+    let mean_x = binned_mean(x);
+    let mean_y = binned_mean(y);
+    let mut cov_acc = BinnedAccumulatorF64::new();
+    let mut var_x_acc = BinnedAccumulatorF64::new();
+    let mut var_y_acc = BinnedAccumulatorF64::new();
     for i in 0..x.len() {
         let dx = x[i] - mean_x;
         let dy = y[i] - mean_y;
@@ -276,9 +279,9 @@ pub fn cov(x: &[f64], y: &[f64]) -> Result<f64, String> {
     if x.is_empty() {
         return Err("cov: empty data".into());
     }
-    let mean_x = kahan_mean(x);
-    let mean_y = kahan_mean(y);
-    let mut acc = KahanAccumulatorF64::new();
+    let mean_x = binned_mean(x);
+    let mean_y = binned_mean(y);
+    let mut acc = BinnedAccumulatorF64::new();
     for i in 0..x.len() {
         acc.add((x[i] - mean_x) * (y[i] - mean_y));
     }
@@ -293,9 +296,9 @@ pub fn sample_cov(x: &[f64], y: &[f64]) -> Result<f64, String> {
     if x.len() < 2 {
         return Err("sample_cov: need at least 2 elements".into());
     }
-    let mean_x = kahan_mean(x);
-    let mean_y = kahan_mean(y);
-    let mut acc = KahanAccumulatorF64::new();
+    let mean_x = binned_mean(x);
+    let mean_y = binned_mean(y);
+    let mut acc = BinnedAccumulatorF64::new();
     for i in 0..x.len() {
         acc.add((x[i] - mean_x) * (y[i] - mean_y));
     }
@@ -515,7 +518,7 @@ pub fn histogram(data: &[f64], n_bins: usize) -> Result<(Vec<f64>, Vec<usize>), 
 // ---------------------------------------------------------------------------
 
 /// Weighted mean: sum(data[i] * weights[i]) / sum(weights).
-/// Uses Kahan summation for both numerator and denominator.
+/// Uses binned accumulation for both numerator and denominator.
 pub fn weighted_mean(data: &[f64], weights: &[f64]) -> Result<f64, String> {
     if data.len() != weights.len() {
         return Err("weighted_mean: data and weights must have same length".into());
@@ -523,8 +526,8 @@ pub fn weighted_mean(data: &[f64], weights: &[f64]) -> Result<f64, String> {
     if data.is_empty() {
         return Err("weighted_mean: empty data".into());
     }
-    let mut num_acc = KahanAccumulatorF64::new();
-    let mut den_acc = KahanAccumulatorF64::new();
+    let mut num_acc = BinnedAccumulatorF64::new();
+    let mut den_acc = BinnedAccumulatorF64::new();
     for i in 0..data.len() {
         num_acc.add(data[i] * weights[i]);
         den_acc.add(weights[i]);
@@ -537,7 +540,7 @@ pub fn weighted_mean(data: &[f64], weights: &[f64]) -> Result<f64, String> {
 }
 
 /// Weighted variance: sum(w[i] * (x[i] - weighted_mean)^2) / sum(w).
-/// Two-pass: first weighted mean (Kahan), then weighted sum of squared deviations.
+/// Two-pass: first weighted mean (binned), then binned sum of squared deviations.
 pub fn weighted_var(data: &[f64], weights: &[f64]) -> Result<f64, String> {
     if data.len() != weights.len() {
         return Err("weighted_var: data and weights must have same length".into());
@@ -546,8 +549,8 @@ pub fn weighted_var(data: &[f64], weights: &[f64]) -> Result<f64, String> {
         return Err("weighted_var: empty data".into());
     }
     let wm = weighted_mean(data, weights)?;
-    let mut num_acc = KahanAccumulatorF64::new();
-    let mut den_acc = KahanAccumulatorF64::new();
+    let mut num_acc = BinnedAccumulatorF64::new();
+    let mut den_acc = BinnedAccumulatorF64::new();
     for i in 0..data.len() {
         let d = data[i] - wm;
         num_acc.add(weights[i] * d * d);
@@ -576,7 +579,7 @@ pub fn trimmed_mean(data: &[f64], proportion: f64) -> Result<f64, String> {
     if trimmed.is_empty() {
         return Err("trimmed_mean: all data trimmed".into());
     }
-    Ok(kahan_mean(trimmed))
+    Ok(binned_mean(trimmed))
 }
 
 /// Winsorize: replace values below the `proportion` quantile with the lower
@@ -1186,7 +1189,7 @@ mod tests {
         let data = [100.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, -50.0];
         let tm = trimmed_mean(&data, 0.1).unwrap();
         // After sorting: [-50, 2, 3, 4, 5, 6, 7, 8, 9, 100], trim 1 each → [2,3,4,5,6,7,8,9]
-        let expected = kahan_mean(&[2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]);
+        let expected = binned_mean(&[2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]);
         assert!((tm - expected).abs() < 1e-12);
     }
 

@@ -1,5 +1,7 @@
 
-use cjc_repro::{kahan_sum_f64, KahanAccumulatorF64, Rng};
+use cjc_repro::Rng;
+
+use crate::accumulator::{binned_sum_f64, BinnedAccumulatorF64};
 
 use crate::accumulator;
 use crate::buffer::Buffer;
@@ -16,7 +18,7 @@ use crate::tensor_tiled::TiledMatmul;
 /// An N-dimensional tensor backed by a `Buffer<f64>`.
 ///
 /// Supports element-wise arithmetic, matrix multiplication (2-D), and
-/// numerically-stable reductions via Kahan summation.
+/// numerically-stable reductions via BinnedAccumulator summation.
 #[derive(Debug, Clone)]
 pub struct Tensor {
     pub buffer: Buffer<f64>,
@@ -517,12 +519,12 @@ impl Tensor {
         }
     }
 
-    // -- Reductions (using Kahan summation) ---------------------------------
+    // -- Reductions (using BinnedAccumulator) --------------------------------
 
-    /// Sum of all elements (Kahan-compensated).
+    /// Sum of all elements (binned accumulation — order-invariant, deterministic).
     pub fn sum(&self) -> f64 {
         let data = self.buffer.borrow_data();
-        kahan_sum_f64(&data)
+        binned_sum_f64(&data)
     }
 
     /// Sum of all elements using BinnedAccumulator (order-invariant, deterministic).
@@ -541,7 +543,7 @@ impl Tensor {
         dispatch::dispatch_sum_f64(&data, ctx)
     }
 
-    /// Mean of all elements (Kahan-compensated sum / count).
+    /// Mean of all elements (binned sum / count).
     pub fn mean(&self) -> f64 {
         let n = self.len();
         if n == 0 {
@@ -562,7 +564,7 @@ impl Tensor {
     /// Sum along a specific axis, returning a tensor with that dimension reduced.
     ///
     /// Supports N-D tensors. The reduced axis becomes size 1 in the output.
-    /// Uses Kahan summation for numerical stability.
+    /// Uses BinnedAccumulator for order-invariant, deterministic summation.
     ///
     /// Examples:
     /// - 2D [M, N] with axis=0: result [1, N] (sum columns)
@@ -587,7 +589,7 @@ impl Tensor {
         let axis_len = self.shape[axis];
         let mut result = vec![0.0f64; out_numel];
 
-        // For each output position, sum over the reduced axis with Kahan accumulation.
+        // For each output position, sum over the reduced axis with binned accumulation.
         let mut indices = vec![0usize; ndim];
         for out_idx in 0..out_numel {
             // Compute the N-D index from flat output index
@@ -599,7 +601,7 @@ impl Tensor {
                 }
             }
 
-            let mut acc = KahanAccumulatorF64::new();
+            let mut acc = BinnedAccumulatorF64::new();
             for k in 0..axis_len {
                 // Compute input flat index with indices[axis] = k
                 let mut flat = self.offset;
@@ -747,13 +749,13 @@ impl Tensor {
 
         // Tiled path: use L2-friendly tiled matmul for medium-to-large matrices.
         // Threshold: any dimension >= 64 (the default tile size).
-        // NOTE: tiled path uses naive accumulation (not Kahan) — different
+        // NOTE: tiled path uses naive accumulation (not binned) — different
         // numerical path for large matrices, but better cache locality.
         if m >= 64 || n >= 64 || k >= 64 {
             return Self::matmul_tiled(&a, &b, m, n, k);
         }
 
-        // Sequential path: single-threaded with Kahan summation.
+        // Sequential path: single-threaded with binned accumulation.
         Self::matmul_sequential(&a, &b, m, n, k)
     }
 
@@ -764,7 +766,7 @@ impl Tensor {
         let mut result = vec![0.0f64; m * n];
         for i in 0..m {
             for j in 0..n {
-                let mut acc = KahanAccumulatorF64::new();
+                let mut acc = BinnedAccumulatorF64::new();
                 for p in 0..k {
                     acc.add(a[i * k + p] * b[p * n + j]);
                 }
@@ -778,7 +780,7 @@ impl Tensor {
     ///
     /// Used for medium matrices (any dimension >= 64) where cache locality
     /// matters but parallel overhead isn't justified. The tiled path uses
-    /// naive accumulation (not Kahan summation), trading a small amount of
+    /// naive accumulation (not binned accumulation), trading a small amount of
     /// floating-point precision for better cache behavior.
     fn matmul_tiled(
         a: &[f64], b: &[f64], m: usize, n: usize, k: usize,
@@ -788,12 +790,12 @@ impl Tensor {
         Tensor::from_vec(result, &[m, n])
     }
 
-    /// Parallel matmul Mode A: parallelize over output rows, sequential k-reduction.
+    /// Parallel matmul Mode A: parallelize over output rows, deterministic k-reduction.
     ///
     /// Deterministic because:
     /// - Each output element C[i,j] is computed by exactly one thread.
-    /// - The k-reduction within each element uses sequential Kahan summation
-    ///   in the same fixed order (p = 0..k-1).
+    /// - The k-reduction within each element uses BinnedAccumulator
+    ///   (order-invariant, bit-identical regardless of accumulation order).
     /// - No cross-thread reduction or merge of partial sums.
     ///
     /// This is the mandatory baseline for reproducibility mode.
@@ -811,7 +813,7 @@ impl Tensor {
             .enumerate()
             .for_each(|(i, row)| {
                 for j in 0..n {
-                    let mut acc = KahanAccumulatorF64::new();
+                    let mut acc = BinnedAccumulatorF64::new();
                     for p in 0..k {
                         acc.add(a[i * k + p] * b[p * n + j]);
                     }
@@ -883,8 +885,8 @@ impl Tensor {
             let c_off = batch * mat_c_stride;
             for i in 0..m {
                 for j in 0..n {
-                    // In-place accumulation — zero heap allocation per dot product.
-                    let mut acc = KahanAccumulatorF64::new();
+                    // Binned accumulation — deterministic, order-invariant dot product.
+                    let mut acc = BinnedAccumulatorF64::new();
                     for p in 0..k {
                         acc.add(a[a_off + i * k + p] * b[b_off + p * n + j]);
                     }
@@ -964,8 +966,8 @@ impl Tensor {
     /// Layer normalization over the last dimension.
     ///
     /// For each length-D slice along the last axis:
-    ///   1. mean = Σx / D  (Kahan)
-    ///   2. var  = Σ(x - mean)² / D  (Kahan)
+    ///   1. mean = Σx / D  (BinnedAccumulator)
+    ///   2. var  = Σ(x - mean)² / D  (BinnedAccumulator)
     ///   3. normalized = (x - mean) / √(var + eps)
     ///   4. output = gamma * normalized + beta
     ///
@@ -1003,15 +1005,15 @@ impl Tensor {
             let start = row * d;
             let slice = &data[start..start + d];
 
-            // Pass 1: compute mean via Kahan
-            let mean = kahan_sum_f64(slice) / d as f64;
+            // Pass 1: compute mean via BinnedAccumulator
+            let mean = binned_sum_f64(slice) / d as f64;
 
-            // Pass 2: compute variance via Kahan
+            // Pass 2: compute variance via BinnedAccumulator
             let diffs: Vec<f64> = slice.iter().map(|&x| {
                 let diff = x - mean;
                 diff * diff
             }).collect();
-            let variance = kahan_sum_f64(&diffs) / d as f64;
+            let variance = binned_sum_f64(&diffs) / d as f64;
 
             // Normalize, scale, shift
             let inv_std = 1.0 / (variance + eps).sqrt();
@@ -1301,7 +1303,7 @@ impl Tensor {
             let y_start = row * out_features;
             for j in 0..out_features {
                 let w_start = j * in_features;
-                let mut acc = KahanAccumulatorF64::new();
+                let mut acc = BinnedAccumulatorF64::new();
                 for p in 0..in_features {
                     acc.add(x_slice[p] * w[w_start + p]);
                 }
