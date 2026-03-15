@@ -16,7 +16,7 @@
 
 use crate::{MirBody, MirExpr, MirExprKind, MirFunction, MirProgram, MirStmt};
 use cjc_ast::{BinOp, UnaryOp};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 // ===========================================================================
 // Public API
@@ -412,7 +412,7 @@ fn dce_fn(func: &mut MirFunction) {
 
 fn dce_body(body: &mut MirBody) {
     // Collect variables that are read in the body.
-    let mut used_vars = HashSet::new();
+    let mut used_vars = BTreeSet::new();
     for stmt in &body.stmts {
         collect_used_vars_stmt(stmt, &mut used_vars);
     }
@@ -557,7 +557,7 @@ fn is_pure_expr(expr: &MirExpr) -> bool {
 }
 
 /// Collect all variable names that are READ in a statement.
-fn collect_used_vars_stmt(stmt: &MirStmt, used: &mut HashSet<String>) {
+fn collect_used_vars_stmt(stmt: &MirStmt, used: &mut BTreeSet<String>) {
     match stmt {
         MirStmt::Let { init, .. } => {
             collect_used_vars_expr(init, used);
@@ -592,7 +592,7 @@ fn collect_used_vars_stmt(stmt: &MirStmt, used: &mut HashSet<String>) {
     }
 }
 
-fn collect_used_vars_body(body: &MirBody, used: &mut HashSet<String>) {
+fn collect_used_vars_body(body: &MirBody, used: &mut BTreeSet<String>) {
     for stmt in &body.stmts {
         collect_used_vars_stmt(stmt, used);
     }
@@ -601,7 +601,7 @@ fn collect_used_vars_body(body: &MirBody, used: &mut HashSet<String>) {
     }
 }
 
-fn collect_used_vars_expr(expr: &MirExpr, used: &mut HashSet<String>) {
+fn collect_used_vars_expr(expr: &MirExpr, used: &mut BTreeSet<String>) {
     match &expr.kind {
         MirExprKind::Var(name) => {
             used.insert(name.clone());
@@ -858,8 +858,8 @@ fn cse_fn(func: &mut MirFunction) {
 fn cse_body(body: &mut MirBody) {
     // Build a map from expression hash to the first variable name bound to it.
     // We use a simple structural string representation as the hash key.
-    let mut expr_to_var: HashMap<String, String> = HashMap::new();
-    let mut replacements: HashMap<String, String> = HashMap::new();
+    let mut expr_to_var: BTreeMap<String, String> = BTreeMap::new();
+    let mut replacements: BTreeMap<String, String> = BTreeMap::new();
 
     for stmt in &body.stmts {
         if let MirStmt::Let { name, init, mutable, .. } = stmt {
@@ -923,7 +923,7 @@ fn expr_key(expr: &MirExpr) -> String {
     }
 }
 
-fn apply_cse_replacements_stmt(stmt: &mut MirStmt, replacements: &HashMap<String, String>) {
+fn apply_cse_replacements_stmt(stmt: &mut MirStmt, replacements: &BTreeMap<String, String>) {
     match stmt {
         MirStmt::Let { init, .. } => apply_cse_replacements_expr(init, replacements),
         MirStmt::Expr(expr) => apply_cse_replacements_expr(expr, replacements),
@@ -952,7 +952,7 @@ fn apply_cse_replacements_stmt(stmt: &mut MirStmt, replacements: &HashMap<String
     }
 }
 
-fn apply_cse_replacements_expr(expr: &mut MirExpr, replacements: &HashMap<String, String>) {
+fn apply_cse_replacements_expr(expr: &mut MirExpr, replacements: &BTreeMap<String, String>) {
     match &mut expr.kind {
         MirExprKind::Var(name) => {
             if let Some(replacement) = replacements.get(name.as_str()) {
@@ -1028,7 +1028,7 @@ fn licm_body(body: &mut MirBody) {
 /// - It does not reference any variable that is assigned inside the loop
 fn hoist_invariants(loop_body: MirBody) -> (Vec<MirStmt>, MirBody) {
     // Collect variables that are modified (assigned to) inside the loop.
-    let mut modified_vars = HashSet::new();
+    let mut modified_vars = BTreeSet::new();
     collect_modified_vars_body(&loop_body, &mut modified_vars);
 
     let mut hoisted = Vec::new();
@@ -1053,13 +1053,13 @@ fn hoist_invariants(loop_body: MirBody) -> (Vec<MirStmt>, MirBody) {
 }
 
 /// Collect all variable names that are modified (written to) in a body.
-fn collect_modified_vars_body(body: &MirBody, modified: &mut HashSet<String>) {
+fn collect_modified_vars_body(body: &MirBody, modified: &mut BTreeSet<String>) {
     for stmt in &body.stmts {
         collect_modified_vars_stmt(stmt, modified);
     }
 }
 
-fn collect_modified_vars_stmt(stmt: &MirStmt, modified: &mut HashSet<String>) {
+fn collect_modified_vars_stmt(stmt: &MirStmt, modified: &mut BTreeSet<String>) {
     match stmt {
         MirStmt::Let { name, init, .. } => {
             modified.insert(name.clone());
@@ -1081,7 +1081,7 @@ fn collect_modified_vars_stmt(stmt: &MirStmt, modified: &mut HashSet<String>) {
     }
 }
 
-fn collect_modified_vars_expr(expr: &MirExpr, modified: &mut HashSet<String>) {
+fn collect_modified_vars_expr(expr: &MirExpr, modified: &mut BTreeSet<String>) {
     match &expr.kind {
         MirExprKind::Assign { target, value } => {
             if let MirExprKind::Var(name) = &target.kind {
@@ -1102,7 +1102,7 @@ fn collect_modified_vars_expr(expr: &MirExpr, modified: &mut HashSet<String>) {
 }
 
 /// Check if an expression references any variable in the given set.
-fn references_any(expr: &MirExpr, vars: &HashSet<String>) -> bool {
+fn references_any(expr: &MirExpr, vars: &BTreeSet<String>) -> bool {
     match &expr.kind {
         MirExprKind::Var(name) => vars.contains(name.as_str()),
         MirExprKind::Binary { left, right, .. } => {

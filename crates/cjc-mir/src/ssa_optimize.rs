@@ -21,7 +21,7 @@
 //! - Side-effecting operations (calls, index, field access) are never removed.
 //! - All passes are deterministic.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::cfg::{CfgStmt, MirCfg, Terminator};
 use crate::ssa::SsaForm;
@@ -247,7 +247,7 @@ fn sccp_pass(cfg: &mut MirCfg, params: &[String]) {
     let ssa = SsaForm::construct(cfg, params);
 
     // Initialize lattice for all variables.
-    let mut lattice: HashMap<String, Lattice> = HashMap::new();
+    let mut lattice: BTreeMap<String, Lattice> = BTreeMap::new();
 
     // Parameters are non-constant.
     for p in params {
@@ -413,7 +413,7 @@ fn sccp_pass(cfg: &mut MirCfg, params: &[String]) {
 }
 
 /// Evaluate an expression in the lattice domain.
-fn eval_lattice(expr: &MirExpr, lattice: &HashMap<String, Lattice>) -> Lattice {
+fn eval_lattice(expr: &MirExpr, lattice: &BTreeMap<String, Lattice>) -> Lattice {
     match &expr.kind {
         MirExprKind::IntLit(v) => Lattice::Constant(ConstVal::Int(*v)),
         MirExprKind::FloatLit(v) => Lattice::Constant(ConstVal::Float(*v)),
@@ -503,7 +503,7 @@ fn eval_unary_const(op: UnaryOp, val: &ConstVal) -> Lattice {
 }
 
 /// Replace Var references with constant values where known.
-fn replace_constants(expr: &mut MirExpr, lattice: &HashMap<String, Lattice>) {
+fn replace_constants(expr: &mut MirExpr, lattice: &BTreeMap<String, Lattice>) {
     match &mut expr.kind {
         MirExprKind::Var(name) => {
             if let Some(Lattice::Constant(cv)) = lattice.get(name.as_str()) {
@@ -700,7 +700,7 @@ fn try_strength_reduce(expr: &MirExpr) -> Option<MirExpr> {
 /// has no side effects.
 fn ssa_dce(cfg: &mut MirCfg, params: &[String]) {
     // Count uses of each variable name across the CFG.
-    let mut use_counts: HashMap<String, usize> = HashMap::new();
+    let mut use_counts: BTreeMap<String, usize> = BTreeMap::new();
 
     for block in &cfg.basic_blocks {
         for stmt in &block.statements {
@@ -738,7 +738,7 @@ fn ssa_dce(cfg: &mut MirCfg, params: &[String]) {
 }
 
 /// Count variable uses in a statement (excluding the def itself).
-fn count_uses_in_stmt(stmt: &CfgStmt, counts: &mut HashMap<String, usize>) {
+fn count_uses_in_stmt(stmt: &CfgStmt, counts: &mut BTreeMap<String, usize>) {
     match stmt {
         CfgStmt::Let { init, .. } => {
             count_uses_in_expr(init, counts);
@@ -761,7 +761,7 @@ fn count_uses_in_stmt(stmt: &CfgStmt, counts: &mut HashMap<String, usize>) {
     }
 }
 
-fn count_uses_in_expr(expr: &MirExpr, counts: &mut HashMap<String, usize>) {
+fn count_uses_in_expr(expr: &MirExpr, counts: &mut BTreeMap<String, usize>) {
     match &expr.kind {
         MirExprKind::Var(name) => {
             *counts.entry(name.clone()).or_insert(0) += 1;
@@ -809,7 +809,7 @@ fn count_uses_in_expr(expr: &MirExpr, counts: &mut HashMap<String, usize>) {
     }
 }
 
-fn count_uses_in_terminator(term: &Terminator, counts: &mut HashMap<String, usize>) {
+fn count_uses_in_terminator(term: &Terminator, counts: &mut BTreeMap<String, usize>) {
     match term {
         Terminator::Branch { cond, .. } => count_uses_in_expr(cond, counts),
         Terminator::Return(Some(expr)) => count_uses_in_expr(expr, counts),

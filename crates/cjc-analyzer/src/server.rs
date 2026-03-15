@@ -7,7 +7,7 @@
 //! - textDocument/completion
 //! - textDocument/publishDiagnostics (on edit)
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _};
@@ -60,7 +60,7 @@ pub fn run_server() -> Result<(), Box<dyn std::error::Error>> {
 
 /// The main message loop.
 fn main_loop(conn: &Connection) -> Result<(), Box<dyn std::error::Error>> {
-    let mut documents: HashMap<Uri, DocumentState> = HashMap::new();
+    let mut documents: BTreeMap<Uri, DocumentState> = BTreeMap::new();
     let mut index = SymbolIndex::new();
     index.populate_builtins();
 
@@ -85,7 +85,7 @@ fn main_loop(conn: &Connection) -> Result<(), Box<dyn std::error::Error>> {
 fn handle_request(
     req: Request,
     conn: &Connection,
-    documents: &HashMap<Uri, DocumentState>,
+    documents: &BTreeMap<Uri, DocumentState>,
     index: &SymbolIndex,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match req.method.as_str() {
@@ -150,7 +150,7 @@ fn handle_request(
 fn handle_notification(
     notif: Notification,
     conn: &Connection,
-    documents: &mut HashMap<Uri, DocumentState>,
+    documents: &mut BTreeMap<Uri, DocumentState>,
     index: &mut SymbolIndex,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match notif.method.as_str() {

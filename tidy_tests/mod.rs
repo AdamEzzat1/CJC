@@ -435,7 +435,7 @@ fn main() -> i64 {
 /// Measure wall-clock time for each fixture through both engines.
 /// Outputs a markdown table to stdout for easy copy-paste into audit docs.
 #[test]
-#[ignore]
+#[ignore] // Perf benchmark — run manually: cargo test perf_tidy_fixtures -- --ignored
 fn perf_tidy_fixtures() {
     use std::time::Instant;
 

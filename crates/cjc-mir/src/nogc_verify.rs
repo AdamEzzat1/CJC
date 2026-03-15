@@ -10,7 +10,7 @@
 //! flag for each function via fixpoint iteration, and then checks that no
 //! `is_nogc` function calls anything with `may_gc == true`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{MirBody, MirExpr, MirExprKind, MirProgram, MirStmt};
 
@@ -66,7 +66,7 @@ fn is_safe_builtin(name: &str) -> bool {
 /// Collected information about calls in a function body.
 struct FnCallInfo {
     /// Direct calls by name.
-    direct_calls: HashSet<String>,
+    direct_calls: BTreeSet<String>,
     /// Whether the function has any indirect calls (closures, higher-order).
     has_indirect_call: bool,
     /// Whether the function directly calls a GC builtin.
@@ -281,15 +281,15 @@ fn collect_calls_expr(expr: &MirExpr, in_nogc_block: bool, info: &mut FnCallInfo
 fn compute_may_gc(
     program: &MirProgram,
 ) -> (
-    HashMap<String, bool>,
-    HashMap<String, FnCallInfo>,
+    BTreeMap<String, bool>,
+    BTreeMap<String, FnCallInfo>,
 ) {
     // Step 1: Collect call info for each function.
-    let mut call_infos: HashMap<String, FnCallInfo> = HashMap::new();
+    let mut call_infos: BTreeMap<String, FnCallInfo> = BTreeMap::new();
 
     for func in &program.functions {
         let mut info = FnCallInfo {
-            direct_calls: HashSet::new(),
+            direct_calls: BTreeSet::new(),
             has_indirect_call: false,
             has_gc_builtin: false,
             nogc_block_calls: Vec::new(),
@@ -301,7 +301,7 @@ fn compute_may_gc(
     }
 
     // Step 2: Seed may_gc from the effect registry (single source of truth).
-    let mut may_gc: HashMap<String, bool> = HashMap::new();
+    let mut may_gc: BTreeMap<String, bool> = BTreeMap::new();
 
     // Seed ALL known builtins from the registry.
     for (name, effects) in cjc_types::effect_registry::builtin_effects() {
@@ -346,9 +346,9 @@ fn compute_may_gc(
 
 fn find_gc_chain(
     fn_name: &str,
-    may_gc_map: &HashMap<String, bool>,
-    call_infos: &HashMap<String, FnCallInfo>,
-    visited: &mut HashSet<String>,
+    may_gc_map: &BTreeMap<String, bool>,
+    call_infos: &BTreeMap<String, FnCallInfo>,
+    visited: &mut BTreeSet<String>,
 ) -> Vec<String> {
     if visited.contains(fn_name) {
         return vec![];
@@ -405,7 +405,7 @@ pub fn verify_nogc(program: &MirProgram) -> Result<(), Vec<NoGcError>> {
                     }
                     let callee_may_gc = may_gc_map.get(callee).copied().unwrap_or(true);
                     if callee_may_gc {
-                        let mut visited = HashSet::new();
+                        let mut visited = BTreeSet::new();
                         let chain = find_gc_chain(callee, &may_gc_map, &call_infos, &mut visited);
                         errors.push(NoGcError {
                             function: func.name.clone(),
@@ -467,7 +467,7 @@ pub fn verify_nogc(program: &MirProgram) -> Result<(), Vec<NoGcError>> {
             }
             let callee_may_gc = may_gc_map.get(callee).copied().unwrap_or(true);
             if callee_may_gc {
-                let mut visited = HashSet::new();
+                let mut visited = BTreeSet::new();
                 let chain = find_gc_chain(callee, &may_gc_map, &call_infos, &mut visited);
                 errors.push(NoGcError {
                     function: func.name.clone(),

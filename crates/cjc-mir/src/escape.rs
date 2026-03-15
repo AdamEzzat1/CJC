@@ -32,7 +32,7 @@
 //! escape info. Then call `annotate_program()` to write `AllocHint` values
 //! into `MirStmt::Let` nodes.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::{MirBody, MirExpr, MirExprKind, MirFunction, MirProgram, MirStmt, MirPattern};
 
@@ -79,7 +79,7 @@ pub enum EscapeReason {
 #[derive(Debug, Clone)]
 pub struct EscapeInfo {
     /// Maps binding name → (AllocHint, EscapeReason).
-    pub bindings: HashMap<String, (AllocHint, EscapeReason)>,
+    pub bindings: BTreeMap<String, (AllocHint, EscapeReason)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -103,7 +103,7 @@ pub fn analyze_function(func: &MirFunction) -> EscapeInfo {
     classify_primitives(&func.body, &mut ctx);
 
     // Build result.
-    let mut bindings = HashMap::new();
+    let mut bindings = BTreeMap::new();
     for (name, info) in &ctx.bindings {
         let hint = match info.reason {
             EscapeReason::Primitive => AllocHint::Stack,
@@ -123,8 +123,8 @@ pub fn analyze_function(func: &MirFunction) -> EscapeInfo {
 }
 
 /// Analyze all functions in a MIR program.
-pub fn analyze_program(program: &MirProgram) -> HashMap<String, EscapeInfo> {
-    let mut result = HashMap::new();
+pub fn analyze_program(program: &MirProgram) -> BTreeMap<String, EscapeInfo> {
+    let mut result = BTreeMap::new();
     for func in &program.functions {
         let info = analyze_function(func);
         result.insert(func.name.clone(), info);
@@ -175,13 +175,13 @@ struct BindingInfo {
 }
 
 struct AnalysisCtx {
-    bindings: HashMap<String, BindingInfo>,
+    bindings: BTreeMap<String, BindingInfo>,
 }
 
 impl AnalysisCtx {
     fn new() -> Self {
         AnalysisCtx {
-            bindings: HashMap::new(),
+            bindings: BTreeMap::new(),
         }
     }
 

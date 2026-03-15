@@ -31,7 +31,7 @@ fn bench<F: FnOnce() -> usize>(name: &'static str, f: F) -> PerfResult {
 }
 
 #[test]
-#[ignore]
+#[ignore] // Perf benchmark — run manually: cargo test memory_model_perf_harness -- --ignored
 fn memory_model_perf_harness() {
     let mut results = Vec::new();
 

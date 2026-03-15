@@ -14,15 +14,15 @@
 //! - ARENA_OK: result can safely live on a FrameArena (non-escaping)
 //! - CAPTURES: may store/capture argument references beyond the call
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use super::EffectSet;
 
 /// Build the complete builtin effect registry.
 ///
 /// Returns a map from builtin name (as used in dispatch) to its effect flags.
-pub fn builtin_effects() -> HashMap<&'static str, EffectSet> {
-    let mut m = HashMap::new();
+pub fn builtin_effects() -> BTreeMap<&'static str, EffectSet> {
+    let mut m = BTreeMap::new();
 
     // Helper constants for common patterns.
     let pure = EffectSet::PURE;
@@ -680,7 +680,7 @@ pub fn lookup(name: &str) -> Option<EffectSet> {
     // Use a thread-local cache to avoid rebuilding the map every time.
     // In a single-threaded interpreter this is fine.
     thread_local! {
-        static REGISTRY: HashMap<&'static str, EffectSet> = builtin_effects();
+        static REGISTRY: BTreeMap<&'static str, EffectSet> = builtin_effects();
     }
     REGISTRY.with(|r| r.get(name).copied())
 }

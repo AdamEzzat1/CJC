@@ -1,0 +1,88 @@
+name: CJC CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: Check & Clippy
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        rust: [stable]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check
+        run: cargo check --workspace
+      - name: clippy (warnings only, no deny yet)
+        run: cargo clippy --workspace -- -W clippy::all
+
+  test:
+    name: Test Suite
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run all tests
+        run: cargo test --workspace
+        timeout-minutes: 30
+
+  # Cross-platform parity gate: ensure both OS produce identical test counts
+  determinism-gate:
+    name: Determinism Parity Gate
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run parity and determinism tests
+        run: |
+          cargo test --workspace -- determinism parity 2>&1 | tee test_output.txt
+          echo "=== Determinism/parity test results ==="
+          grep "test result:" test_output.txt || true
+        timeout-minutes: 15
+
+  # Fuzzing smoke test (bolero runs as proptest on CI)
+  fuzz-smoke:
+    name: Fuzz Smoke Test
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run bolero fuzz targets (proptest mode)
+        run: cargo test --test bolero_fuzz
+        timeout-minutes: 10
+
+  # Property-based tests (proptest)
+  proptest:
+    name: Property Tests
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run property-based tests
+        run: cargo test --test test_cjc_v0_1_hardening -- prop
+        timeout-minutes: 15

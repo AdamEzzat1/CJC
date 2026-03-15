@@ -1,6 +1,6 @@
 //! Performance benchmarks for hardening council features.
 //!
-//! All benchmarks are #[ignore] by default — run with:
+//! All benchmarks are #[ignore] // Perf benchmark — run with: cargo test h12_perf -- --ignored by default — run with:
 //! `cargo test --test test_hardening h12_perf -- --ignored`
 
 use std::time::Instant;
@@ -8,7 +8,7 @@ use std::time::Instant;
 // ── TiledMatmul performance ─────────────────────────────────────────
 
 #[test]
-#[ignore]
+#[ignore] // Perf benchmark — run with: cargo test h12_perf -- --ignored
 fn h12_perf_tiled_matmul_64x64() {
     use cjc_runtime::tensor::Tensor;
     let n = 64;
@@ -31,7 +31,7 @@ fn h12_perf_tiled_matmul_64x64() {
 }
 
 #[test]
-#[ignore]
+#[ignore] // Perf benchmark — run with: cargo test h12_perf -- --ignored
 fn h12_perf_tiled_matmul_128x128() {
     use cjc_runtime::tensor::Tensor;
     let n = 128;
@@ -56,7 +56,7 @@ fn h12_perf_tiled_matmul_128x128() {
 // ── Window function performance ─────────────────────────────────────
 
 #[test]
-#[ignore]
+#[ignore] // Perf benchmark — run with: cargo test h12_perf -- --ignored
 fn h12_perf_window_sum_10k() {
     use cjc_runtime::window;
     let data: Vec<f64> = (0..10_000).map(|i| i as f64 * 0.1).collect();
@@ -77,7 +77,7 @@ fn h12_perf_window_sum_10k() {
 // ── JSON performance ────────────────────────────────────────────────
 
 #[test]
-#[ignore]
+#[ignore] // Perf benchmark — run with: cargo test h12_perf -- --ignored
 fn h12_perf_json_roundtrip() {
     use cjc_runtime::json;
     use cjc_runtime::Value;
@@ -101,7 +101,7 @@ fn h12_perf_json_roundtrip() {
 // ── DateTime performance ────────────────────────────────────────────
 
 #[test]
-#[ignore]
+#[ignore] // Perf benchmark — run with: cargo test h12_perf -- --ignored
 fn h12_perf_datetime_operations() {
     use cjc_runtime::datetime;
 
@@ -125,7 +125,7 @@ fn h12_perf_datetime_operations() {
 // ── Module system performance ───────────────────────────────────────
 
 #[test]
-#[ignore]
+#[ignore] // Perf benchmark — run with: cargo test h12_perf -- --ignored
 fn h12_perf_module_graph_build() {
     use std::fs;
 

@@ -9,6 +9,11 @@ use crate::tensor::Tensor;
 impl Tensor {
     /// LU decomposition with partial pivoting. Returns (L, U, pivot_indices).
     /// Input must be square 2D.
+    ///
+    /// **Determinism contract:** Pivot selection uses strict `>` comparison on
+    /// absolute values. When two candidates have identical absolute values, the
+    /// first (lowest row index) is chosen. This is deterministic given identical
+    /// input bits.
     pub fn lu_decompose(&self) -> Result<(Tensor, Tensor, Vec<usize>), RuntimeError> {
         if self.ndim() != 2 || self.shape[0] != self.shape[1] {
             return Err(RuntimeError::InvalidOperation(
@@ -146,11 +151,12 @@ impl Tensor {
         let mut l = vec![0.0f64; n * n];
 
         for j in 0..n {
-            let mut sum = 0.0;
+            // Use BinnedAccumulator for deterministic summation across platforms.
+            let mut acc = BinnedAccumulatorF64::new();
             for k in 0..j {
-                sum += l[j * n + k] * l[j * n + k];
+                acc.add(l[j * n + k] * l[j * n + k]);
             }
-            let diag = a[j * n + j] - sum;
+            let diag = a[j * n + j] - acc.finalize();
             if diag <= 0.0 {
                 return Err(RuntimeError::InvalidOperation(
                     "Cholesky: matrix is not positive definite".to_string(),
@@ -159,11 +165,12 @@ impl Tensor {
             l[j * n + j] = diag.sqrt();
 
             for i in (j + 1)..n {
-                let mut sum = 0.0;
+                // Use BinnedAccumulator for deterministic summation across platforms.
+                let mut acc = BinnedAccumulatorF64::new();
                 for k in 0..j {
-                    sum += l[i * n + k] * l[j * n + k];
+                    acc.add(l[i * n + k] * l[j * n + k]);
                 }
-                l[i * n + j] = (a[i * n + j] - sum) / l[j * n + j];
+                l[i * n + j] = (a[i * n + j] - acc.finalize()) / l[j * n + j];
             }
         }
 
@@ -289,11 +296,14 @@ impl Tensor {
         let b_data = b.to_vec();
 
         // Q^T * b (Q is m x n, so Q^T * b gives n-vector)
+        // Use BinnedAccumulator for deterministic dot products.
         let mut qtb = vec![0.0; n];
         for j in 0..n {
+            let mut acc = BinnedAccumulatorF64::new();
             for i in 0..m {
-                qtb[j] += q_data[i * n + j] * b_data[i];
+                acc.add(q_data[i * n + j] * b_data[i]);
             }
+            qtb[j] = acc.finalize();
         }
 
         // Back substitution: R * x = Q^T * b
@@ -664,22 +674,22 @@ impl Tensor {
             for i in 0..col.len() {
                 col[i] = h[(k + 1 + i) * n + k];
             }
-            let mut norm_col = 0.0;
-            for &v in &col {
-                norm_col += v * v;
-            }
-            norm_col = norm_col.sqrt();
+            let norm_col = {
+                let mut acc = BinnedAccumulatorF64::new();
+                for &v in &col { acc.add(v * v); }
+                acc.finalize().sqrt()
+            };
             if norm_col < 1e-15 {
                 continue;
             }
             // Sign convention: positive diagonal
             let sign = if col[0] >= 0.0 { 1.0 } else { -1.0 };
             col[0] += sign * norm_col;
-            let mut norm_v = 0.0;
-            for &v in &col {
-                norm_v += v * v;
-            }
-            norm_v = norm_v.sqrt();
+            let norm_v = {
+                let mut acc = BinnedAccumulatorF64::new();
+                for &v in &col { acc.add(v * v); }
+                acc.finalize().sqrt()
+            };
             if norm_v < 1e-15 {
                 continue;
             }
@@ -688,30 +698,33 @@ impl Tensor {
             }
             // Apply H = (I - 2vv^T) * H from left
             for j in 0..n {
-                let mut dot = 0.0;
+                let mut acc = BinnedAccumulatorF64::new();
                 for i in 0..col.len() {
-                    dot += col[i] * h[(k + 1 + i) * n + j];
+                    acc.add(col[i] * h[(k + 1 + i) * n + j]);
                 }
+                let dot = acc.finalize();
                 for i in 0..col.len() {
                     h[(k + 1 + i) * n + j] -= 2.0 * col[i] * dot;
                 }
             }
             // Apply H = H * (I - 2vv^T) from right
             for i in 0..n {
-                let mut dot = 0.0;
+                let mut acc = BinnedAccumulatorF64::new();
                 for j in 0..col.len() {
-                    dot += col[j] * h[i * n + (k + 1 + j)];
+                    acc.add(col[j] * h[i * n + (k + 1 + j)]);
                 }
+                let dot = acc.finalize();
                 for j in 0..col.len() {
                     h[i * n + (k + 1 + j)] -= 2.0 * col[j] * dot;
                 }
             }
             // Accumulate Q
             for i in 0..n {
-                let mut dot = 0.0;
+                let mut acc = BinnedAccumulatorF64::new();
                 for j in 0..col.len() {
-                    dot += col[j] * q[i * n + (k + 1 + j)];
+                    acc.add(col[j] * q[i * n + (k + 1 + j)]);
                 }
+                let dot = acc.finalize();
                 for j in 0..col.len() {
                     q[i * n + (k + 1 + j)] -= 2.0 * col[j] * dot;
                 }

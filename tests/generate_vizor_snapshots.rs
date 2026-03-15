@@ -35,7 +35,7 @@ fn run(src: &str) -> Vec<String> {
 // ─── Scatter plot ────────────────────────────────────────────────────
 
 #[test]
-#[ignore]
+#[ignore] // Snapshot generator — run manually: cargo test --test generate_vizor_snapshots -- --ignored
 fn snapshot_scatter_svg() {
     let path = snap_dir().join("scatter.svg");
     let path_str = path.to_string_lossy().replace('\\', "/");
@@ -61,7 +61,7 @@ p.save("{}");"#,
 // ─── Line plot ───────────────────────────────────────────────────────
 
 #[test]
-#[ignore]
+#[ignore] // Snapshot generator — run manually: cargo test --test generate_vizor_snapshots -- --ignored
 fn snapshot_line_svg() {
     let path = snap_dir().join("line.svg");
     let path_str = path.to_string_lossy().replace('\\', "/");
@@ -87,7 +87,7 @@ p.save("{}");"#,
 // ─── Bar chart ───────────────────────────────────────────────────────
 
 #[test]
-#[ignore]
+#[ignore] // Snapshot generator — run manually: cargo test --test generate_vizor_snapshots -- --ignored
 fn snapshot_bar_svg() {
     let path = snap_dir().join("bar.svg");
     let path_str = path.to_string_lossy().replace('\\', "/");
@@ -114,7 +114,7 @@ p.save("{}");"#,
 // ─── Histogram ───────────────────────────────────────────────────────
 
 #[test]
-#[ignore]
+#[ignore] // Snapshot generator — run manually: cargo test --test generate_vizor_snapshots -- --ignored
 fn snapshot_histogram_svg() {
     let path = snap_dir().join("histogram.svg");
     let path_str = path.to_string_lossy().replace('\\', "/");
@@ -138,7 +138,7 @@ p.save("{}");"#,
 // ─── Annotated scatter ───────────────────────────────────────────────
 
 #[test]
-#[ignore]
+#[ignore] // Snapshot generator — run manually: cargo test --test generate_vizor_snapshots -- --ignored
 fn snapshot_annotated_svg() {
     let path = snap_dir().join("annotated.svg");
     let path_str = path.to_string_lossy().replace('\\', "/");
@@ -166,7 +166,7 @@ p.save("{}");"#,
 // ─── Scatter + line overlay ──────────────────────────────────────────
 
 #[test]
-#[ignore]
+#[ignore] // Snapshot generator — run manually: cargo test --test generate_vizor_snapshots -- --ignored
 fn snapshot_scatter_line_svg() {
     let path = snap_dir().join("scatter_line.svg");
     let path_str = path.to_string_lossy().replace('\\', "/");
@@ -194,7 +194,7 @@ p.save("{}");"#,
 // ─── Styled wide plot ────────────────────────────────────────────────
 
 #[test]
-#[ignore]
+#[ignore] // Snapshot generator — run manually: cargo test --test generate_vizor_snapshots -- --ignored
 fn snapshot_wide_svg() {
     let path = snap_dir().join("wide.svg");
     let path_str = path.to_string_lossy().replace('\\', "/");
@@ -220,7 +220,7 @@ p.save("{}");"#,
 // ─── Coord-flip bar ──────────────────────────────────────────────────
 
 #[test]
-#[ignore]
+#[ignore] // Snapshot generator — run manually: cargo test --test generate_vizor_snapshots -- --ignored
 fn snapshot_flipped_svg() {
     let path = snap_dir().join("flipped.svg");
     let path_str = path.to_string_lossy().replace('\\', "/");
@@ -243,7 +243,7 @@ p.save("{}");"#,
 // ─── BMP scatter ─────────────────────────────────────────────────────
 
 #[test]
-#[ignore]
+#[ignore] // Snapshot generator — run manually: cargo test --test generate_vizor_snapshots -- --ignored
 fn snapshot_scatter_bmp() {
     let path = snap_dir().join("scatter.bmp");
     let path_str = path.to_string_lossy().replace('\\', "/");
@@ -267,7 +267,7 @@ p.save("{}");"#,
 // ─── BMP bar ─────────────────────────────────────────────────────────
 
 #[test]
-#[ignore]
+#[ignore] // Snapshot generator — run manually: cargo test --test generate_vizor_snapshots -- --ignored
 fn snapshot_bar_bmp() {
     let path = snap_dir().join("bar.bmp");
     let path_str = path.to_string_lossy().replace('\\', "/");
@@ -291,7 +291,7 @@ p.save("{}");"#,
 // ─── Determinism check: re-generate and compare ─────────────────────
 
 #[test]
-#[ignore]
+#[ignore] // Snapshot generator — run manually: cargo test --test generate_vizor_snapshots -- --ignored
 fn snapshot_determinism_scatter_svg() {
     let path1 = snap_dir().join("det_scatter_1.svg");
     let path2 = snap_dir().join("det_scatter_2.svg");
