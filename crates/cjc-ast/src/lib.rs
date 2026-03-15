@@ -26,6 +26,24 @@ impl Span {
     }
 }
 
+// ── Visibility ──────────────────────────────────────────────────
+
+/// Visibility qualifier for declarations and fields.
+/// `pub` makes an item publicly visible; the default is private.
+/// NOTE: Enforcement is deferred — single-file programs treat all items as
+/// public regardless of annotation. This enum is stored but not checked yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Visibility {
+    Public,
+    Private,
+}
+
+impl Default for Visibility {
+    fn default() -> Self {
+        Visibility::Private
+    }
+}
+
 // ── AST Node Types ──────────────────────────────────────────────
 
 /// Top-level program: a sequence of declarations.
@@ -74,6 +92,7 @@ pub struct StructDecl {
     pub name: Ident,
     pub type_params: Vec<TypeParam>,
     pub fields: Vec<FieldDecl>,
+    pub vis: Visibility,
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +100,7 @@ pub struct ClassDecl {
     pub name: Ident,
     pub type_params: Vec<TypeParam>,
     pub fields: Vec<FieldDecl>,
+    pub vis: Visibility,
 }
 
 /// Record declaration: immutable value type.
@@ -91,6 +111,7 @@ pub struct RecordDecl {
     pub name: Ident,
     pub type_params: Vec<TypeParam>,
     pub fields: Vec<FieldDecl>,
+    pub vis: Visibility,
 }
 
 // ── Enums ───────────────────────────────────────────────────
@@ -115,6 +136,7 @@ pub struct FieldDecl {
     pub name: Ident,
     pub ty: TypeExpr,
     pub default: Option<Expr>,
+    pub vis: Visibility,
     pub span: Span,
 }
 
@@ -143,6 +165,7 @@ pub struct FnDecl {
     pub effect_annotation: Option<Vec<String>>,
     /// Decorators applied to this function (e.g., `@log`, `@timed`).
     pub decorators: Vec<Decorator>,
+    pub vis: Visibility,
 }
 
 #[derive(Debug, Clone)]
@@ -160,6 +183,9 @@ pub struct Param {
     pub ty: TypeExpr,
     /// Optional default value expression (e.g., `fn f(x: f64 = 1.0)`).
     pub default: Option<Expr>,
+    /// Variadic parameter: `fn f(...args: f64)` collects remaining args into an array.
+    /// Only the last parameter may be variadic.
+    pub is_variadic: bool,
     pub span: Span,
 }
 
@@ -725,6 +751,9 @@ impl PrettyPrinter {
         for (i, param) in f.params.iter().enumerate() {
             if i > 0 {
                 self.output.push_str(", ");
+            }
+            if param.is_variadic {
+                self.output.push_str("...");
             }
             self.output.push_str(&format!("{}: ", param.name));
             self.print_type_expr(&param.ty);

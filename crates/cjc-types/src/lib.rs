@@ -1496,6 +1496,40 @@ impl TypeEnv {
         bounds.iter().all(|b| self.satisfies_trait(ty, b))
     }
 
+    /// Check trait bounds for all type parameters at a generic function call site.
+    ///
+    /// After unification resolves type variables to concrete types, this method
+    /// verifies that each inferred type satisfies the trait bounds declared on
+    /// the corresponding type parameter.
+    ///
+    /// Returns a list of violations as `(type_param_name, inferred_type, bounds)`.
+    /// An empty list means all bounds are satisfied. Unresolved type variables
+    /// (`Type::Var`) are skipped (non-breaking: the check is conservative).
+    pub fn check_generic_call_bounds(
+        &self,
+        type_params: &[(String, Vec<String>)],
+        param_var_map: &BTreeMap<String, TypeVarId>,
+        subst: &TypeSubst,
+    ) -> Vec<(String, Type, Vec<String>)> {
+        let mut violations = Vec::new();
+        for (tp_name, bounds) in type_params {
+            if bounds.is_empty() {
+                continue;
+            }
+            if let Some(&var_id) = param_var_map.get(tp_name) {
+                let inferred = apply_subst(&Type::Var(var_id), subst);
+                // Skip unresolved type variables — can't check bounds yet
+                if matches!(inferred, Type::Var(_)) {
+                    continue;
+                }
+                if !self.check_bounds(&inferred, bounds) {
+                    violations.push((tp_name.clone(), inferred, bounds.clone()));
+                }
+            }
+        }
+        violations
+    }
+
     /// Register a function signature.
     pub fn register_fn(&mut self, entry: FnSigEntry) {
         self.fn_sigs
@@ -3201,38 +3235,33 @@ impl TypeChecker {
                     }
 
                     if ok {
-                        // P0-2: Check that all inferred types satisfy their trait bounds.
-                        // Emits E0300: trait bound not satisfied (call-site enforcement).
-                        let mut bounds_ok = true;
-                        for (tp_name, bounds) in &sig.type_params {
-                            if let Some(&var_id) = param_var_map.get(tp_name) {
-                                let inferred = apply_subst(&Type::Var(var_id), &subst);
-                                if !matches!(inferred, Type::Var(_)) {
-                                    if !self.env.check_bounds(&inferred, bounds) {
-                                        self.diagnostics.emit(
-                                            Diagnostic::error(
-                                                "E0300",
-                                                format!(
-                                                    "trait bound not satisfied: type `{}` does not implement `{}` (required by type parameter `{}`)",
-                                                    inferred,
-                                                    bounds.join(" + "),
-                                                    tp_name
-                                                ),
-                                                to_diag_span(span),
-                                            )
-                                            .with_hint(format!(
-                                                "type parameter `{}` requires: `{}`",
-                                                tp_name,
-                                                bounds.join(" + ")
-                                            )),
-                                        );
-                                        bounds_ok = false;
-                                    }
-                                }
-                            }
-                        }
-                        if bounds_ok {
+                        // Check that all inferred types satisfy their trait bounds.
+                        let violations = self.env.check_generic_call_bounds(
+                            &sig.type_params,
+                            &param_var_map,
+                            &subst,
+                        );
+                        if violations.is_empty() {
                             return apply_subst(&sig_ret, &subst);
+                        }
+                        for (tp_name, inferred, bounds) in &violations {
+                            self.diagnostics.emit(
+                                Diagnostic::error(
+                                    "E6001",
+                                    format!(
+                                        "trait bound not satisfied: type `{}` does not implement `{}` (required by type parameter `{}`)",
+                                        inferred,
+                                        bounds.join(" + "),
+                                        tp_name
+                                    ),
+                                    to_diag_span(span),
+                                )
+                                .with_hint(format!(
+                                    "type parameter `{}` requires: `{}`",
+                                    tp_name,
+                                    bounds.join(" + ")
+                                )),
+                            );
                         }
                     }
                 } else {

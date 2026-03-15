@@ -479,6 +479,7 @@ impl MirExecutor {
                     is_nogc: false,
                     cfg_body: None,
                     decorators: vec![],
+                    vis: cjc_ast::Visibility::Private,
                 };
                 self.functions.insert(lambda_name.clone(), Rc::new(mir_fn));
                 Ok(Value::Fn(cjc_runtime::FnValue {
@@ -2957,15 +2958,26 @@ impl MirExecutor {
                 MirExecError::Runtime(format!("undefined function `{}`", current_name))
             })?;
 
-            // Count required params (those without defaults).
-            let required = func.params.iter().filter(|p| p.default.is_none()).count();
-            if current_args.len() < required || current_args.len() > func.params.len() {
+            // Check if the function has a variadic parameter (must be last).
+            let has_variadic = func.params.last().map_or(false, |p| p.is_variadic);
+            // Count required params (those without defaults, excluding variadic which accepts 0+).
+            let required = func.params.iter()
+                .filter(|p| p.default.is_none() && !p.is_variadic)
+                .count();
+            let max_positional = if has_variadic {
+                usize::MAX
+            } else {
+                func.params.len()
+            };
+            if current_args.len() < required || current_args.len() > max_positional {
                 return Err(MirExecError::Runtime(format!(
                     "function `{}` expects {}{} arguments, got {}",
                     current_name,
                     required,
-                    if required < func.params.len() {
+                    if !has_variadic && required < func.params.len() {
                         format!("-{}", func.params.len())
+                    } else if has_variadic {
+                        "+".to_string()
                     } else {
                         String::new()
                     },
@@ -2998,8 +3010,13 @@ impl MirExecutor {
             self.push_scope();
             self.arena_stack.push(cjc_runtime::ArenaStore::new());
             // Bind parameters: use provided args, then fall back to defaults.
+            // Variadic params collect remaining args into an array.
             for (i, param) in func.params.iter().enumerate() {
-                let val = if i < current_args.len() {
+                let val = if param.is_variadic {
+                    // Pack all remaining args into a deterministic array.
+                    let rest: Vec<Value> = current_args[i..].to_vec();
+                    Value::Array(Rc::new(rest))
+                } else if i < current_args.len() {
                     current_args[i].clone()
                 } else if let Some(ref default_expr) = param.default {
                     self.eval_expr(default_expr)?
@@ -3819,7 +3836,7 @@ mod tests {
     }
 
     fn make_param(name: &str) -> Param {
-        Param { name: ident(name), ty: dummy_type_expr(), default: None, span: span() }
+        Param { name: ident(name), ty: dummy_type_expr(), default: None, is_variadic: false, span: span() }
     }
 
     fn make_fn_decl(name: &str, params: Vec<&str>, body: Block) -> Decl {
@@ -3833,6 +3850,7 @@ mod tests {
                 is_nogc: false,
                 effect_annotation: None,
                 decorators: vec![],
+                vis: cjc_ast::Visibility::Private,
             }),
             span: span(),
         }

@@ -141,8 +141,8 @@ fn test_lower_fn_decl() {
         name: ident("add"),
         type_params: vec![],
         params: vec![
-            Param { name: ident("a"), ty: type_expr("i64"), default: None, span: span() },
-            Param { name: ident("b"), ty: type_expr("i64"), default: None, span: span() },
+            Param { name: ident("a"), ty: type_expr("i64"), default: None, is_variadic: false, span: span() },
+            Param { name: ident("b"), ty: type_expr("i64"), default: None, is_variadic: false, span: span() },
         ],
         return_type: Some(type_expr("i64")),
         body: Block {
@@ -160,6 +160,7 @@ fn test_lower_fn_decl() {
         is_nogc: false,
         effect_annotation: None,
         decorators: vec![],
+        vis: cjc_ast::Visibility::Private,
     };
     let hir_fn = lowering.lower_fn_decl(&fn_decl);
     assert_eq!(hir_fn.name, "add");
@@ -281,6 +282,7 @@ fn test_lower_full_program() {
                     is_nogc: false,
                     effect_annotation: None,
                     decorators: vec![],
+                    vis: cjc_ast::Visibility::Private,
                 }),
                 span: span(),
             },
@@ -372,6 +374,7 @@ fn test_lower_lambda() {
                 name: ident("x"),
                 ty: type_expr("f64"),
                 default: None,
+                is_variadic: false,
                 span: span(),
             }],
             body: Box::new(ident_expr("x")),

@@ -54,13 +54,13 @@ fn let_mut_stmt(name: &str, init: Expr) -> Stmt {
 fn expr_stmt(expr: Expr) -> Stmt { Stmt { kind: StmtKind::Expr(expr), span: span() } }
 fn return_stmt(expr: Option<Expr>) -> Stmt { Stmt { kind: StmtKind::Return(expr), span: span() } }
 fn dummy_type_expr() -> TypeExpr { TypeExpr { kind: TypeExprKind::Named { name: ident("i64"), args: vec![] }, span: span() } }
-fn make_param(name: &str) -> Param { Param { name: ident(name), ty: dummy_type_expr(), default: None, span: span() } }
+fn make_param(name: &str) -> Param { Param { name: ident(name), ty: dummy_type_expr(), default: None, is_variadic: false, span: span() } }
 fn make_fn_decl(name: &str, params: Vec<&str>, body: Block) -> Decl {
-    Decl { kind: DeclKind::Fn(FnDecl { name: ident(name), type_params: vec![], params: params.into_iter().map(|n| make_param(n)).collect(), return_type: None, body, is_nogc: false, effect_annotation: None, decorators: vec![] }), span: span() }
+    Decl { kind: DeclKind::Fn(FnDecl { name: ident(name), type_params: vec![], params: params.into_iter().map(|n| make_param(n)).collect(), return_type: None, body, is_nogc: false, effect_annotation: None, decorators: vec![], vis: cjc_ast::Visibility::Private }), span: span() }
 }
 fn make_block(stmts: Vec<Stmt>, expr: Option<Expr>) -> Block { Block { stmts, expr: expr.map(Box::new), span: span() } }
 fn make_struct_decl(name: &str, fields: Vec<&str>) -> Decl {
-    Decl { kind: DeclKind::Struct(StructDecl { name: ident(name), type_params: vec![], fields: fields.into_iter().map(|f| FieldDecl { name: ident(f), ty: dummy_type_expr(), default: None, span: span() }).collect() }), span: span() }
+    Decl { kind: DeclKind::Struct(StructDecl { name: ident(name), type_params: vec![], fields: fields.into_iter().map(|f| FieldDecl { name: ident(f), ty: dummy_type_expr(), default: None, vis: cjc_ast::Visibility::Private, span: span() }).collect(), vis: cjc_ast::Visibility::Private }), span: span() }
 }
 
 // -- Tests --------------------------------------------------------------

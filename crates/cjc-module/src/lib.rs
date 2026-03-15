@@ -628,6 +628,7 @@ pub fn merge_programs(graph: &ModuleGraph) -> Result<cjc_mir::MirProgram, Module
         is_nogc: false,
         cfg_body: None,
         decorators: vec![],
+        vis: cjc_ast::Visibility::Private,
     });
 
     Ok(cjc_mir::MirProgram {

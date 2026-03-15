@@ -295,6 +295,7 @@ impl Interpreter {
                         name: r.name.clone(),
                         type_params: r.type_params.clone(),
                         fields: r.fields.clone(),
+                        vis: r.vis,
                     },
                 );
                 self.record_names.insert(r.name.name.clone());
@@ -647,6 +648,7 @@ impl Interpreter {
                     is_nogc: false,
                     effect_annotation: None,
                     decorators: vec![],
+                    vis: cjc_ast::Visibility::Private,
                 };
                 self.functions.insert(lambda_name.clone(), fn_decl);
                 Ok(Value::Fn(cjc_runtime::FnValue {
@@ -2983,14 +2985,25 @@ impl Interpreter {
             EvalError::Runtime(format!("undefined function `{name}`"))
         })?;
 
-        // Count required params (those without defaults).
-        let required = func.params.iter().filter(|p| p.default.is_none()).count();
-        if args.len() < required || args.len() > func.params.len() {
+        // Check if the function has a variadic parameter (must be last).
+        let has_variadic = func.params.last().map_or(false, |p| p.is_variadic);
+        // Count required params (those without defaults, excluding variadic which accepts 0+).
+        let required = func.params.iter()
+            .filter(|p| p.default.is_none() && !p.is_variadic)
+            .count();
+        let max_positional = if has_variadic {
+            usize::MAX // variadic accepts unlimited args
+        } else {
+            func.params.len()
+        };
+        if args.len() < required || args.len() > max_positional {
             return Err(EvalError::Runtime(format!(
                 "function `{name}` expects {}{} arguments, got {}",
                 required,
-                if required < func.params.len() {
+                if !has_variadic && required < func.params.len() {
                     format!("-{}", func.params.len())
+                } else if has_variadic {
+                    "+".to_string()
                 } else {
                     String::new()
                 },
@@ -3023,8 +3036,13 @@ impl Interpreter {
         self.push_scope();
 
         // Bind parameters: use provided args, then fall back to defaults.
+        // Variadic params collect remaining args into an array.
         for (i, param) in func.params.iter().enumerate() {
-            let val = if i < args.len() {
+            let val = if param.is_variadic {
+                // Pack all remaining args into a deterministic array.
+                let rest: Vec<Value> = args[i..].to_vec();
+                Value::Array(Rc::new(rest))
+            } else if i < args.len() {
                 args[i].clone()
             } else if let Some(ref default_expr) = param.default {
                 self.eval_expr(default_expr)?
@@ -3708,6 +3726,7 @@ mod tests {
             name: ident(name),
             ty: dummy_type_expr(),
             default: None,
+            is_variadic: false,
             span: span(),
         }
     }
@@ -3723,6 +3742,7 @@ mod tests {
                 is_nogc: false,
                 effect_annotation: None,
                 decorators: vec![],
+                vis: cjc_ast::Visibility::Private,
             }),
             span: span(),
         }
@@ -3759,9 +3779,11 @@ mod tests {
                         name: ident(f),
                         ty: dummy_type_expr(),
                         default: None,
+                        vis: cjc_ast::Visibility::Private,
                         span: span(),
                     })
                     .collect(),
+                vis: cjc_ast::Visibility::Private,
             }),
             span: span(),
         }

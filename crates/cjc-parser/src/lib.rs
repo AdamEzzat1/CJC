@@ -3,7 +3,7 @@ use cjc_ast::{
     Expr, ExprKind, FieldDecl, FieldInit, FnDecl, FnSig, ForIter, ForStmt, Ident, IfStmt,
     ImplDecl, ImportDecl, LetStmt, MatchArm, Param, Pattern, PatternField, PatternKind, Program,
     RecordDecl, ShapeDim, Stmt, StmtKind, StructDecl, TraitDecl, TypeArg, TypeExpr, TypeExprKind,
-    TypeParam, UnaryOp, VariantDecl, WhileStmt,
+    TypeParam, UnaryOp, VariantDecl, Visibility, WhileStmt,
 };
 use cjc_diag::{Diagnostic, DiagnosticBag};
 use cjc_lexer::{Token, TokenKind};
@@ -74,6 +74,10 @@ pub struct Parser {
     /// Used to resolve the ambiguity between struct literals and block
     /// bodies in `if`/`while` conditions.
     allow_struct_lit: bool,
+    /// When `false`, `|` is NOT consumed as a union-type operator in type
+    /// expressions.  Used inside lambda parameter lists where `|` delimits
+    /// the parameter list, not a type union.
+    allow_pipe_in_type: bool,
     /// Nesting depth of while/for loops. Used to validate break/continue.
     loop_depth: usize,
 }
@@ -91,6 +95,7 @@ impl Parser {
             pos: 0,
             diagnostics: DiagnosticBag::new(),
             allow_struct_lit: true,
+            allow_pipe_in_type: true,
             loop_depth: 0,
         }
     }
@@ -241,22 +246,36 @@ impl Parser {
     // ── Declarations ───────────────────────────────────────────────
 
     fn parse_decl(&mut self) -> PResult<Decl> {
+        // Handle optional `pub` visibility prefix
+        if self.peek_kind() == TokenKind::Pub {
+            return self.parse_pub_decl();
+        }
+        self.parse_decl_with_vis(Visibility::Private)
+    }
+
+    /// Parse a declaration preceded by `pub`.
+    fn parse_pub_decl(&mut self) -> PResult<Decl> {
+        self.advance(); // consume `pub`
+        self.parse_decl_with_vis(Visibility::Public)
+    }
+
+    fn parse_decl_with_vis(&mut self, vis: Visibility) -> PResult<Decl> {
         match self.peek_kind() {
-            TokenKind::Struct => self.parse_struct_decl(),
-            TokenKind::Class => self.parse_class_decl(),
-            TokenKind::Record => self.parse_record_decl(),
+            TokenKind::Struct => self.parse_struct_decl_with_vis(vis),
+            TokenKind::Class => self.parse_class_decl_with_vis(vis),
+            TokenKind::Record => self.parse_record_decl_with_vis(vis),
             TokenKind::Enum => self.parse_enum_decl(),
             TokenKind::At => {
                 let decorators = self.parse_decorator_list()?;
                 if self.peek_kind() == TokenKind::NoGc && self.peek_ahead(1) == TokenKind::Fn {
                     self.advance(); // nogc
-                    self.parse_fn_decl_with(true, decorators)
+                    self.parse_fn_decl_with_vis(true, decorators, vis)
                 } else {
-                    self.parse_fn_decl_with(false, decorators)
+                    self.parse_fn_decl_with_vis(false, decorators, vis)
                 }
             }
-            TokenKind::Fn => self.parse_fn_decl_with(false, vec![]),
-            TokenKind::NoGc if self.peek_ahead(1) == TokenKind::Fn => self.parse_nogc_fn_decl(),
+            TokenKind::Fn => self.parse_fn_decl_with_vis(false, vec![], vis),
+            TokenKind::NoGc if self.peek_ahead(1) == TokenKind::Fn => self.parse_nogc_fn_decl_with_vis(vis),
             TokenKind::Trait => self.parse_trait_decl(),
             TokenKind::Impl => self.parse_impl_decl(),
             TokenKind::Import => self.parse_import_decl(),
@@ -337,7 +356,7 @@ impl Parser {
 
     // ── struct ─────────────────────────────────────────────────────
 
-    fn parse_struct_decl(&mut self) -> PResult<Decl> {
+    fn parse_struct_decl_with_vis(&mut self, vis: Visibility) -> PResult<Decl> {
         let start = self.expect(TokenKind::Struct)?.span;
         let name = self.parse_ident()?;
         let type_params = self.parse_optional_type_params()?;
@@ -349,6 +368,7 @@ impl Parser {
                 name,
                 type_params,
                 fields,
+                vis,
             }),
             span: to_ast_span(start.merge(end)),
         })
@@ -356,7 +376,7 @@ impl Parser {
 
     // ── class ──────────────────────────────────────────────────────
 
-    fn parse_class_decl(&mut self) -> PResult<Decl> {
+    fn parse_class_decl_with_vis(&mut self, vis: Visibility) -> PResult<Decl> {
         let start = self.expect(TokenKind::Class)?.span;
         let name = self.parse_ident()?;
         let type_params = self.parse_optional_type_params()?;
@@ -368,6 +388,7 @@ impl Parser {
                 name,
                 type_params,
                 fields,
+                vis,
             }),
             span: to_ast_span(start.merge(end)),
         })
@@ -375,7 +396,7 @@ impl Parser {
 
     // ── record ─────────────────────────────────────────────────────
 
-    fn parse_record_decl(&mut self) -> PResult<Decl> {
+    fn parse_record_decl_with_vis(&mut self, vis: Visibility) -> PResult<Decl> {
         let start = self.expect(TokenKind::Record)?.span;
         let name = self.parse_ident()?;
         let type_params = self.parse_optional_type_params()?;
@@ -387,6 +408,7 @@ impl Parser {
                 name,
                 type_params,
                 fields,
+                vis,
             }),
             span: to_ast_span(start.merge(end)),
         })
@@ -462,6 +484,12 @@ impl Parser {
     }
 
     fn parse_field_decl(&mut self) -> PResult<FieldDecl> {
+        // Check for optional `pub` visibility on field
+        let vis = if self.eat(TokenKind::Pub).is_some() {
+            Visibility::Public
+        } else {
+            Visibility::Private
+        };
         let name = self.parse_ident()?;
         self.expect(TokenKind::Colon)?;
         let ty = self.parse_type_expr()?;
@@ -475,13 +503,14 @@ impl Parser {
             name,
             ty,
             default,
+            vis,
             span,
         })
     }
 
     // ── fn ─────────────────────────────────────────────────────────
 
-    fn parse_fn_decl_with(&mut self, is_nogc: bool, decorators: Vec<cjc_ast::Decorator>) -> PResult<Decl> {
+    fn parse_fn_decl_with_vis(&mut self, is_nogc: bool, decorators: Vec<cjc_ast::Decorator>, vis: Visibility) -> PResult<Decl> {
         let start = self.expect(TokenKind::Fn)?.span;
         let name = self.parse_ident()?;
         let type_params = self.parse_optional_type_params()?;
@@ -506,15 +535,15 @@ impl Parser {
                 is_nogc,
                 effect_annotation,
                 decorators,
+                vis,
             }),
             span,
         })
     }
 
-    fn parse_nogc_fn_decl(&mut self) -> PResult<Decl> {
-        // consume `nogc`, then delegate to parse_fn_decl_with
+    fn parse_nogc_fn_decl_with_vis(&mut self, vis: Visibility) -> PResult<Decl> {
         self.advance(); // nogc
-        self.parse_fn_decl_with(true, vec![])
+        self.parse_fn_decl_with_vis(true, vec![], vis)
     }
 
     /// Parse a list of decorators: `@name` or `@name(arg1, arg2)`, one per line.
@@ -569,7 +598,12 @@ impl Parser {
         }
         loop {
             let param = self.parse_param()?;
+            let is_variadic = param.is_variadic;
             params.push(param);
+            if is_variadic {
+                // Variadic must be the last parameter — no more params after it.
+                break;
+            }
             if self.eat(TokenKind::Comma).is_none() {
                 break;
             }
@@ -582,18 +616,24 @@ impl Parser {
     }
 
     fn parse_param(&mut self) -> PResult<Param> {
+        // Variadic prefix: `...name: Type`
+        let is_variadic = self.eat(TokenKind::DotDotDot).is_some();
         let name = self.parse_ident()?;
         self.expect(TokenKind::Colon)?;
         let ty = self.parse_type_expr()?;
         // Optional default value: `param: Type = expr`
         let default = if self.eat(TokenKind::Eq).is_some() {
+            if is_variadic {
+                self.error("variadic parameters cannot have default values", self.current_span());
+                return Err(());
+            }
             Some(self.parse_expr()?)
         } else {
             None
         };
         let end_span = default.as_ref().map(|d| d.span).unwrap_or(ty.span);
         let span = merge_spans(name.span, end_span);
-        Ok(Param { name, ty, default, span })
+        Ok(Param { name, ty, default, is_variadic, span })
     }
 
     // ── trait ──────────────────────────────────────────────────────
@@ -713,6 +753,7 @@ impl Parser {
                 is_nogc,
                 effect_annotation,
                 decorators: vec![],
+                vis: Visibility::Private,
             });
             let _ = fn_span; // span used for method
         }
@@ -876,20 +917,51 @@ impl Parser {
     // ── Type expressions ───────────────────────────────────────────
 
     fn parse_type_expr(&mut self) -> PResult<TypeExpr> {
-        match self.peek_kind() {
-            TokenKind::Ident => self.parse_named_type(),
-            TokenKind::LParen => self.parse_tuple_type(),
-            TokenKind::LBracket => self.parse_array_or_shape_type(),
-            TokenKind::Fn => self.parse_fn_type(),
+        let base = match self.peek_kind() {
+            TokenKind::Ident => self.parse_named_type()?,
+            TokenKind::LParen => self.parse_tuple_type()?,
+            TokenKind::LBracket => self.parse_array_or_shape_type()?,
+            TokenKind::Fn => self.parse_fn_type()?,
             _ => {
                 let tok = self.peek().clone();
                 self.error(
                     format!("expected type, found {}", tok.kind.describe()),
                     tok.span,
                 );
-                Err(())
+                return Err(());
+            }
+        };
+
+        // Desugar `T | null` to `Option<T>`
+        // Skip this when inside lambda param lists where `|` closes the params.
+        if self.allow_pipe_in_type && self.at(TokenKind::Pipe) {
+            let pipe_span = self.advance().span;
+            if self.at(TokenKind::Null) {
+                let null_tok = self.advance();
+                let base_span = base.span;
+                let end_span = to_ast_span(null_tok.span);
+                let option_name = cjc_ast::Ident::new("Option", base_span);
+                return Ok(TypeExpr {
+                    kind: TypeExprKind::Named {
+                        name: option_name,
+                        args: vec![TypeArg::Type(base)],
+                    },
+                    span: merge_spans(base_span, end_span),
+                });
+            } else {
+                let tok = self.peek().clone();
+                self.error(
+                    format!(
+                        "expected `null` after `|` in type expression (full union types are not yet supported), found {}",
+                        tok.kind.describe()
+                    ),
+                    pipe_span,
+                );
+                return Err(());
             }
         }
+
+        Ok(base)
     }
 
     fn parse_named_type(&mut self) -> PResult<TypeExpr> {
@@ -1777,6 +1849,11 @@ impl Parser {
     fn parse_lambda(&mut self) -> PResult<Expr> {
         let start = to_ast_span(self.expect(TokenKind::Pipe)?.span);
 
+        // Disable pipe-in-type so that `|x: i64|` doesn't try to parse
+        // the closing `|` as a union type operator.
+        let prev_pipe = self.allow_pipe_in_type;
+        self.allow_pipe_in_type = false;
+
         // Parse parameter list (comma-separated, like fn params but delimited by `|`)
         let mut params = Vec::new();
         if !self.at(TokenKind::Pipe) {
@@ -1792,6 +1869,8 @@ impl Parser {
                 }
             }
         }
+
+        self.allow_pipe_in_type = prev_pipe;
         self.expect(TokenKind::Pipe)?;
 
         // Parse the body expression

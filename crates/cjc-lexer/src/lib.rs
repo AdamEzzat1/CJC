@@ -33,7 +33,8 @@ pub enum TokenKind {
     While,
     For,
     In,
-    DotDot, // ..
+    DotDot,    // ..
+    DotDotDot, // ...
     NoGc,
     Col,
     Import,
@@ -43,6 +44,8 @@ pub enum TokenKind {
     Match,
     Enum,
     Const,
+    Pub,
+    Null,
     Underscore,
 
     // Operators
@@ -138,6 +141,7 @@ impl TokenKind {
                 | TokenKind::Sealed
                 | TokenKind::Match
                 | TokenKind::Enum
+                | TokenKind::Pub
                 | TokenKind::True
                 | TokenKind::False
         )
@@ -174,6 +178,7 @@ impl TokenKind {
             TokenKind::For => "`for`",
             TokenKind::In => "`in`",
             TokenKind::DotDot => "`..`",
+            TokenKind::DotDotDot => "`...`",
             TokenKind::NoGc => "`nogc`",
             TokenKind::Col => "`col`",
             TokenKind::Import => "`import`",
@@ -183,6 +188,8 @@ impl TokenKind {
             TokenKind::Match => "`match`",
             TokenKind::Enum => "`enum`",
             TokenKind::Const => "`const`",
+            TokenKind::Pub => "`pub`",
+            TokenKind::Null => "`null`",
             TokenKind::Underscore => "`_`",
             TokenKind::Plus => "`+`",
             TokenKind::Minus => "`-`",
@@ -434,7 +441,12 @@ impl<'a> Lexer<'a> {
             b'.' => {
                 if self.peek() == b'.' {
                     self.advance();
-                    Token::new(TokenKind::DotDot, Span::new(start, self.pos), "..")
+                    if self.peek() == b'.' {
+                        self.advance();
+                        Token::new(TokenKind::DotDotDot, Span::new(start, self.pos), "...")
+                    } else {
+                        Token::new(TokenKind::DotDot, Span::new(start, self.pos), "..")
+                    }
                 } else {
                     Token::new(TokenKind::Dot, Span::new(start, self.pos), ".")
                 }
@@ -1268,6 +1280,8 @@ impl<'a> Lexer<'a> {
             "match" => TokenKind::Match,
             "enum" => TokenKind::Enum,
             "const" => TokenKind::Const,
+            "pub" => TokenKind::Pub,
+            "null" => TokenKind::Null,
             "true" => TokenKind::True,
             "false" => TokenKind::False,
             "_" => TokenKind::Underscore,

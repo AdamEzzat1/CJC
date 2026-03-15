@@ -94,7 +94,7 @@ fn i64_type() -> TypeExpr {
 }
 
 fn make_param(name: &str, ty: TypeExpr) -> Param {
-    Param { name: ident(name), ty, default: None, span: span() }
+    Param { name: ident(name), ty, default: None, is_variadic: false, span: span() }
 }
 
 fn make_fn_decl(name: &str, params: Vec<Param>, body: Block) -> Decl {
@@ -108,6 +108,7 @@ fn make_fn_decl(name: &str, params: Vec<Param>, body: Block) -> Decl {
             is_nogc: false,
             effect_annotation: None,
             decorators: vec![],
+            vis: cjc_ast::Visibility::Private,
         }),
         span: span(),
     }

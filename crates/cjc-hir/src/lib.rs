@@ -10,7 +10,7 @@
 //! - If/While/Return are expressions (not statements)
 //! - All names are resolved strings (no Ident wrappers)
 
-use cjc_ast::{BinOp, UnaryOp};
+use cjc_ast::{BinOp, UnaryOp, Visibility};
 
 // ---------------------------------------------------------------------------
 // HIR Node IDs
@@ -59,6 +59,7 @@ pub struct HirFn {
     pub hir_id: HirId,
     /// Decorator names applied to this function (e.g., `@memoize`, `@trace`).
     pub decorators: Vec<String>,
+    pub vis: Visibility,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +68,8 @@ pub struct HirParam {
     pub ty_name: String,
     /// Optional default value expression for this parameter.
     pub default: Option<HirExpr>,
+    /// Variadic parameter: collects remaining args into an array.
+    pub is_variadic: bool,
     pub hir_id: HirId,
 }
 
@@ -79,6 +82,7 @@ pub struct HirStructDef {
     pub name: String,
     pub fields: Vec<(String, String)>, // (field_name, type_name)
     pub hir_id: HirId,
+    pub vis: Visibility,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +90,7 @@ pub struct HirClassDef {
     pub name: String,
     pub fields: Vec<(String, String)>,
     pub hir_id: HirId,
+    pub vis: Visibility,
 }
 
 /// Record: immutable value type.
@@ -94,6 +99,7 @@ pub struct HirRecordDef {
     pub name: String,
     pub fields: Vec<(String, String)>,
     pub hir_id: HirId,
+    pub vis: Visibility,
 }
 
 #[derive(Debug, Clone)]
@@ -629,6 +635,7 @@ impl AstLowering {
             is_nogc: f.is_nogc,
             hir_id,
             decorators: f.decorators.iter().map(|d| d.name.name.clone()).collect(),
+            vis: f.vis,
         }
     }
 
@@ -658,6 +665,7 @@ impl AstLowering {
             name: p.name.name.clone(),
             ty_name: self.type_expr_to_string(&p.ty),
             default,
+            is_variadic: p.is_variadic,
             hir_id,
         }
     }
@@ -673,6 +681,7 @@ impl AstLowering {
             name: s.name.name.clone(),
             fields,
             hir_id,
+            vis: s.vis,
         }
     }
 
@@ -687,6 +696,7 @@ impl AstLowering {
             name: c.name.name.clone(),
             fields,
             hir_id,
+            vis: c.vis,
         }
     }
 
@@ -701,6 +711,7 @@ impl AstLowering {
             name: r.name.name.clone(),
             fields,
             hir_id,
+            vis: r.vis,
         }
     }
 
@@ -2100,12 +2111,14 @@ mod tests {
                     name: ident("a"),
                     ty: type_expr("i64"),
                     default: None,
+                    is_variadic: false,
                     span: span(),
                 },
                 Param {
                     name: ident("b"),
                     ty: type_expr("i64"),
                     default: None,
+                    is_variadic: false,
                     span: span(),
                 },
             ],
@@ -2125,6 +2138,7 @@ mod tests {
             is_nogc: false,
             effect_annotation: None,
             decorators: vec![],
+            vis: Visibility::Private,
         };
         let hir_fn = lowering.lower_fn_decl(&fn_decl);
         assert_eq!(hir_fn.name, "add");
@@ -2264,6 +2278,7 @@ mod tests {
                         is_nogc: false,
                         effect_annotation: None,
                         decorators: vec![],
+                        vis: Visibility::Private,
                     }),
                     span: span(),
                 },
@@ -2355,6 +2370,7 @@ mod tests {
                     name: ident("x"),
                     ty: type_expr("f64"),
                     default: None,
+                    is_variadic: false,
                     span: span(),
                 }],
                 body: Box::new(ident_expr("x")),

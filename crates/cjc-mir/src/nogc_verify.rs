@@ -565,6 +565,7 @@ mod tests {
             is_nogc,
             cfg_body: None,
             decorators: vec![],
+            vis: cjc_ast::Visibility::Private,
         }
     }
 

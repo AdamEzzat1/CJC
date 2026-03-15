@@ -20,7 +20,7 @@ pub mod optimize;
 pub mod ssa;
 pub mod ssa_optimize;
 
-use cjc_ast::{BinOp, UnaryOp};
+use cjc_ast::{BinOp, UnaryOp, Visibility};
 pub use escape::AllocHint;
 
 // ---------------------------------------------------------------------------
@@ -57,6 +57,7 @@ pub struct MirStructDef {
     pub fields: Vec<(String, String)>, // (name, type_name)
     /// True if this is a record (immutable value type).
     pub is_record: bool,
+    pub vis: Visibility,
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +91,7 @@ pub struct MirFunction {
     pub cfg_body: Option<cfg::MirCfg>,
     /// Decorator names applied to this function (e.g., `@memoize`, `@trace`).
     pub decorators: Vec<String>,
+    pub vis: Visibility,
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +100,8 @@ pub struct MirParam {
     pub ty_name: String,
     /// Optional default value expression for this parameter.
     pub default: Option<MirExpr>,
+    /// Variadic parameter: collects remaining args into an array.
+    pub is_variadic: bool,
 }
 
 impl MirFunction {
@@ -361,6 +365,7 @@ impl HirToMir {
                         name: s.name.clone(),
                         fields: s.fields.clone(),
                         is_record: false,
+                        vis: s.vis,
                     });
                 }
                 HirItem::Class(c) => {
@@ -368,6 +373,7 @@ impl HirToMir {
                         name: c.name.clone(),
                         fields: c.fields.clone(),
                         is_record: false,
+                        vis: c.vis,
                     });
                 }
                 HirItem::Record(r) => {
@@ -375,6 +381,7 @@ impl HirToMir {
                         name: r.name.clone(),
                         fields: r.fields.clone(),
                         is_record: true,
+                        vis: r.vis,
                     });
                 }
                 HirItem::Enum(e) => {
@@ -430,6 +437,7 @@ impl HirToMir {
             is_nogc: false,
             cfg_body: None,
             decorators: vec![],
+            vis: Visibility::Private,
         });
 
         // Append all lambda-lifted functions
@@ -452,6 +460,7 @@ impl HirToMir {
                 name: p.name.clone(),
                 ty_name: p.ty_name.clone(),
                 default: p.default.as_ref().map(|d| self.lower_expr(d)),
+                is_variadic: p.is_variadic,
             })
             .collect();
         let body = self.lower_block(&f.body);
@@ -465,6 +474,7 @@ impl HirToMir {
             is_nogc: f.is_nogc,
             cfg_body: None,
             decorators: f.decorators.clone(),
+            vis: f.vis,
         }
     }
 
@@ -589,6 +599,7 @@ impl HirToMir {
                         name: p.name.clone(),
                         ty_name: p.ty_name.clone(),
                         default: p.default.as_ref().map(|d| self.lower_expr(d)),
+                        is_variadic: p.is_variadic,
                     })
                     .collect(),
                 body: Box::new(self.lower_expr(body)),
@@ -610,6 +621,7 @@ impl HirToMir {
                         name: c.name.clone(),
                         ty_name: "any".to_string(), // Type erasure at MIR level
                         default: None,
+                        is_variadic: false,
                     })
                     .collect();
                 for p in params {
@@ -617,6 +629,7 @@ impl HirToMir {
                         name: p.name.clone(),
                         ty_name: p.ty_name.clone(),
                         default: p.default.as_ref().map(|d| self.lower_expr(d)),
+                        is_variadic: p.is_variadic,
                     });
                 }
 
@@ -635,6 +648,7 @@ impl HirToMir {
                     is_nogc: false,
                     cfg_body: None,
                     decorators: vec![],
+                    vis: Visibility::Private,
                 });
 
                 // At the call site, emit MakeClosure with the capture
@@ -807,12 +821,14 @@ mod tests {
                     name: "a".to_string(),
                     ty_name: "i64".to_string(),
                     default: None,
+                    is_variadic: false,
                     hir_id: hir_id(1),
                 },
                 HirParam {
                     name: "b".to_string(),
                     ty_name: "i64".to_string(),
                     default: None,
+                    is_variadic: false,
                     hir_id: hir_id(2),
                 },
             ],
@@ -832,6 +848,7 @@ mod tests {
             is_nogc: false,
             hir_id: hir_id(5),
             decorators: vec![],
+            vis: cjc_ast::Visibility::Private,
         };
         let mir_fn = lowering.lower_fn(&hir_fn);
         assert_eq!(mir_fn.name, "add");
@@ -864,6 +881,7 @@ mod tests {
                     is_nogc: false,
                     hir_id: hir_id(2),
                     decorators: vec![],
+                    vis: cjc_ast::Visibility::Private,
                 }),
             ],
         };
@@ -920,6 +938,7 @@ mod tests {
                     ("y".to_string(), "f64".to_string()),
                 ],
                 hir_id: hir_id(0),
+                vis: cjc_ast::Visibility::Private,
             })],
         };
         let mir = lowering.lower_program(&hir);

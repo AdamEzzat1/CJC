@@ -55,8 +55,14 @@ impl KahanAccumulatorF64 {
     }
 
     /// Add a single value.
+    ///
+    /// Adding zero is a no-op (preserves bit-identical sum).
     #[inline]
     pub fn add(&mut self, value: f64) {
+        if value == 0.0 {
+            self.count += 1;
+            return;
+        }
         let y = value - self.compensation;
         let t = self.sum + y;
         self.compensation = (t - self.sum) - y;
@@ -109,8 +115,13 @@ impl KahanAccumulatorF32 {
         }
     }
 
+    /// Adding zero is a no-op (preserves bit-identical sum).
     #[inline]
     pub fn add(&mut self, value: f32) {
+        if value == 0.0 {
+            self.count += 1;
+            return;
+        }
         let y = value - self.compensation;
         let t = self.sum + y;
         self.compensation = (t - self.sum) - y;

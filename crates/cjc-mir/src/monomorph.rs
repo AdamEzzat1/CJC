@@ -370,6 +370,7 @@ impl<'a> Monomorphizer<'a> {
                 name: p.name.clone(),
                 ty_name: subst.get(&p.ty_name).unwrap_or(&p.ty_name).clone(),
                 default: p.default.as_ref().map(|d| substitute_expr(d, &subst)),
+                is_variadic: p.is_variadic,
             })
             .collect();
 
@@ -391,6 +392,7 @@ impl<'a> Monomorphizer<'a> {
             is_nogc,
             cfg_body: None,
             decorators: vec![],
+            vis: cjc_ast::Visibility::Private,
         });
     }
 
@@ -577,6 +579,7 @@ fn substitute_expr(expr: &MirExpr, subst: &BTreeMap<String, String>) -> MirExpr 
                     name: p.name.clone(),
                     ty_name: subst.get(&p.ty_name).unwrap_or(&p.ty_name).clone(),
                     default: p.default.as_ref().map(|d| substitute_expr(d, &subst)),
+                    is_variadic: p.is_variadic,
                 })
                 .collect(),
             body: Box::new(substitute_expr(body, subst)),
@@ -928,6 +931,7 @@ mod tests {
                 is_nogc: false,
                 cfg_body: None,
                 decorators: vec![],
+                vis: cjc_ast::Visibility::Private,
             }],
             struct_defs: vec![],
             enum_defs: vec![],
@@ -952,6 +956,7 @@ mod tests {
                 name: "x".to_string(),
                 ty_name: "T".to_string(),
                 default: None,
+                is_variadic: false,
             }],
             return_type: Some("T".to_string()),
             body: MirBody {
@@ -961,6 +966,7 @@ mod tests {
             is_nogc: false,
             cfg_body: None,
             decorators: vec![],
+            vis: cjc_ast::Visibility::Private,
         };
 
         let main_fn = MirFunction {
@@ -976,6 +982,7 @@ mod tests {
             is_nogc: false,
             cfg_body: None,
             decorators: vec![],
+            vis: cjc_ast::Visibility::Private,
         };
 
         let program = MirProgram {
