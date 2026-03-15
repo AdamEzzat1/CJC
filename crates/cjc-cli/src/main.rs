@@ -247,6 +247,23 @@ fn cmd_run(
                 process::exit(1);
             });
 
+        // Check visibility constraints before execution
+        match cjc_module::build_module_graph(&entry_path) {
+            Ok(graph) => {
+                let violations = cjc_module::check_visibility(&graph);
+                if !violations.is_empty() {
+                    for v in &violations {
+                        eprintln!("error: {}", v);
+                    }
+                    process::exit(1);
+                }
+            }
+            Err(e) => {
+                eprintln!("error: {}", e);
+                process::exit(1);
+            }
+        }
+
         match cjc_mir_exec::run_program_with_modules(&entry_path, seed) {
             Ok(_) => {}
             Err(e) => {

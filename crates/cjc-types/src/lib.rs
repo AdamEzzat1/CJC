@@ -1842,6 +1842,9 @@ fn is_const_expr(expr: &cjc_ast::Expr) -> bool {
 pub struct TypeChecker {
     pub env: TypeEnv,
     pub diagnostics: DiagnosticBag,
+    /// Current source filename for multi-file diagnostics.
+    /// When set, all emitted diagnostics will include this filename.
+    pub current_filename: Option<String>,
 }
 
 impl TypeChecker {
@@ -1849,6 +1852,16 @@ impl TypeChecker {
         Self {
             env: TypeEnv::new(),
             diagnostics: DiagnosticBag::new(),
+            current_filename: None,
+        }
+    }
+
+    /// Create a type checker for a specific source file (multi-file mode).
+    pub fn new_with_filename(filename: impl Into<String>) -> Self {
+        Self {
+            env: TypeEnv::new(),
+            diagnostics: DiagnosticBag::new(),
+            current_filename: Some(filename.into()),
         }
     }
 
@@ -2458,17 +2471,24 @@ impl TypeChecker {
         }
     }
 
-    /// Static exhaustiveness checking for match over enum types.
-    /// Emits a diagnostic if not all variants are covered and no wildcard/binding exists.
+    /// Static exhaustiveness checking for match expressions.
+    /// Supports: enum types, bool types.
+    /// Emits a diagnostic if not all cases are covered and no wildcard/binding exists.
     fn check_match_exhaustiveness(
         &mut self,
         scrutinee_type: &Type,
         arms: &[MatchArm],
         span: cjc_ast::Span,
     ) {
+        // Check for bool exhaustiveness
+        if matches!(scrutinee_type, Type::Bool) {
+            self.check_bool_exhaustiveness(arms, span);
+            return;
+        }
+
         let enum_type = match scrutinee_type {
             Type::Enum(e) => e,
-            _ => return, // Only check exhaustiveness for enum types
+            _ => return, // Only check exhaustiveness for enum and bool types
         };
 
         // Collect all variant names for the enum under scrutiny
@@ -2538,6 +2558,53 @@ impl TypeChecker {
                     to_diag_span(span),
                 )
                 .with_hint("add the missing variant(s) or a wildcard `_` arm"),
+            );
+        }
+    }
+
+    /// Exhaustiveness checking for match on bool.
+    fn check_bool_exhaustiveness(
+        &mut self,
+        arms: &[MatchArm],
+        span: cjc_ast::Span,
+    ) {
+        let mut has_true = false;
+        let mut has_false = false;
+        let mut has_wildcard = false;
+
+        for arm in arms {
+            match &arm.pattern.kind {
+                PatternKind::Wildcard => { has_wildcard = true; }
+                PatternKind::Binding(_) => { has_wildcard = true; }
+                PatternKind::LitBool(true) => {
+                    has_true = true;
+                }
+                PatternKind::LitBool(false) => {
+                    has_false = true;
+                }
+                _ => {}
+            }
+        }
+
+        if has_wildcard || (has_true && has_false) {
+            return;
+        }
+
+        let mut missing = Vec::new();
+        if !has_true { missing.push("`true`"); }
+        if !has_false { missing.push("`false`"); }
+
+        if !missing.is_empty() {
+            self.diagnostics.emit(
+                Diagnostic::error(
+                    "E0131",
+                    format!(
+                        "non-exhaustive match on `bool`: missing {}",
+                        missing.join(" and ")
+                    ),
+                    to_diag_span(span),
+                )
+                .with_hint("add the missing arm(s) or a wildcard `_` arm"),
             );
         }
     }

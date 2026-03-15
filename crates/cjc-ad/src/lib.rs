@@ -514,6 +514,55 @@ impl GradGraph {
         }
     }
 
+    /// Clip all gradients to `[-max_norm, max_norm]` (element-wise).
+    /// This prevents gradient explosion during backpropagation.
+    pub fn clip_grad(&self, max_norm: f64) {
+        for node in &self.nodes {
+            let mut n = node.borrow_mut();
+            if let Some(ref mut grad) = n.grad {
+                let data = grad.to_vec();
+                let clipped: Vec<f64> = data.iter()
+                    .map(|&x| x.max(-max_norm).min(max_norm))
+                    .collect();
+                let shape = grad.shape().to_vec();
+                *grad = Tensor::from_vec_unchecked(clipped, &shape);
+            }
+        }
+    }
+
+    /// Clip gradients by global norm: if ||grads||_2 > max_norm, scale all
+    /// gradients so the global norm equals max_norm. Deterministic via
+    /// sequential accumulation.
+    pub fn clip_grad_norm(&self, max_norm: f64) -> f64 {
+        use cjc_repro::KahanAccumulatorF64;
+        // Compute global norm
+        let mut acc = KahanAccumulatorF64::new();
+        for node in &self.nodes {
+            let n = node.borrow();
+            if let Some(ref grad) = n.grad {
+                for &v in &grad.to_vec() {
+                    acc.add(v * v);
+                }
+            }
+        }
+        let global_norm = acc.finalize().sqrt();
+
+        if global_norm > max_norm && global_norm > 0.0 {
+            let scale = max_norm / global_norm;
+            for node in &self.nodes {
+                let mut n = node.borrow_mut();
+                if let Some(ref mut grad) = n.grad {
+                    let data = grad.to_vec();
+                    let scaled: Vec<f64> = data.iter().map(|&x| x * scale).collect();
+                    let shape = grad.shape().to_vec();
+                    *grad = Tensor::from_vec_unchecked(scaled, &shape);
+                }
+            }
+        }
+
+        global_norm
+    }
+
     /// Run backward pass from a loss node.
     pub fn backward(&self, loss_idx: usize) {
         let n = self.nodes.len();

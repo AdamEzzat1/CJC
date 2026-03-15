@@ -328,6 +328,126 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             }
             Ok(Some(Value::String(Rc::new(format!("{}", args[0])))))
         }
+
+        // ── String manipulation builtins ────────────────────────────────
+        "str_upper" => {
+            if args.len() != 1 { return Err("str_upper requires 1 argument".into()); }
+            match &args[0] {
+                Value::String(s) => Ok(Some(Value::String(Rc::new(s.to_uppercase())))),
+                _ => Err("str_upper: argument must be a string".into()),
+            }
+        }
+        "str_lower" => {
+            if args.len() != 1 { return Err("str_lower requires 1 argument".into()); }
+            match &args[0] {
+                Value::String(s) => Ok(Some(Value::String(Rc::new(s.to_lowercase())))),
+                _ => Err("str_lower: argument must be a string".into()),
+            }
+        }
+        "str_trim" => {
+            if args.len() != 1 { return Err("str_trim requires 1 argument".into()); }
+            match &args[0] {
+                Value::String(s) => Ok(Some(Value::String(Rc::new(s.trim().to_string())))),
+                _ => Err("str_trim: argument must be a string".into()),
+            }
+        }
+        "str_contains" => {
+            if args.len() != 2 { return Err("str_contains requires 2 arguments".into()); }
+            match (&args[0], &args[1]) {
+                (Value::String(haystack), Value::String(needle)) => {
+                    Ok(Some(Value::Bool(haystack.contains(needle.as_str()))))
+                }
+                _ => Err("str_contains: both arguments must be strings".into()),
+            }
+        }
+        "str_replace" => {
+            if args.len() != 3 { return Err("str_replace requires 3 arguments (str, from, to)".into()); }
+            match (&args[0], &args[1], &args[2]) {
+                (Value::String(s), Value::String(from), Value::String(to)) => {
+                    // Replace first occurrence only (matches tidy/stringr semantics).
+                    // Use str_replace_all for global replacement.
+                    Ok(Some(Value::String(Rc::new(s.replacen(from.as_str(), to.as_str(), 1)))))
+                }
+                _ => Err("str_replace: all arguments must be strings".into()),
+            }
+        }
+        "str_split" => {
+            if args.len() != 2 { return Err("str_split requires 2 arguments (str, delimiter)".into()); }
+            match (&args[0], &args[1]) {
+                (Value::String(s), Value::String(delim)) => {
+                    let parts: Vec<Value> = s.split(delim.as_str())
+                        .map(|p| Value::String(Rc::new(p.to_string())))
+                        .collect();
+                    Ok(Some(Value::Array(Rc::new(parts))))
+                }
+                _ => Err("str_split: both arguments must be strings".into()),
+            }
+        }
+        "str_join" => {
+            if args.len() != 2 { return Err("str_join requires 2 arguments (array, delimiter)".into()); }
+            match (&args[0], &args[1]) {
+                (Value::Array(arr), Value::String(delim)) => {
+                    let parts: Vec<String> = arr.iter()
+                        .map(|v| format!("{}", v))
+                        .collect();
+                    Ok(Some(Value::String(Rc::new(parts.join(delim.as_str())))))
+                }
+                _ => Err("str_join: first arg must be array, second must be string".into()),
+            }
+        }
+        "str_starts_with" => {
+            if args.len() != 2 { return Err("str_starts_with requires 2 arguments".into()); }
+            match (&args[0], &args[1]) {
+                (Value::String(s), Value::String(prefix)) => {
+                    Ok(Some(Value::Bool(s.starts_with(prefix.as_str()))))
+                }
+                _ => Err("str_starts_with: both arguments must be strings".into()),
+            }
+        }
+        "str_ends_with" => {
+            if args.len() != 2 { return Err("str_ends_with requires 2 arguments".into()); }
+            match (&args[0], &args[1]) {
+                (Value::String(s), Value::String(suffix)) => {
+                    Ok(Some(Value::Bool(s.ends_with(suffix.as_str()))))
+                }
+                _ => Err("str_ends_with: both arguments must be strings".into()),
+            }
+        }
+        "str_repeat" => {
+            if args.len() != 2 { return Err("str_repeat requires 2 arguments (str, count)".into()); }
+            match (&args[0], &args[1]) {
+                (Value::String(s), Value::Int(n)) => {
+                    if *n < 0 { return Err("str_repeat: count must be non-negative".into()); }
+                    Ok(Some(Value::String(Rc::new(s.repeat(*n as usize)))))
+                }
+                _ => Err("str_repeat: first arg must be string, second must be integer".into()),
+            }
+        }
+        "str_chars" => {
+            if args.len() != 1 { return Err("str_chars requires 1 argument".into()); }
+            match &args[0] {
+                Value::String(s) => {
+                    let chars: Vec<Value> = s.chars()
+                        .map(|c| Value::String(Rc::new(c.to_string())))
+                        .collect();
+                    Ok(Some(Value::Array(Rc::new(chars))))
+                }
+                _ => Err("str_chars: argument must be a string".into()),
+            }
+        }
+        "str_substr" => {
+            if args.len() != 3 { return Err("str_substr requires 3 arguments (str, start, len)".into()); }
+            match (&args[0], &args[1], &args[2]) {
+                (Value::String(s), Value::Int(start), Value::Int(len)) => {
+                    let start = (*start).max(0) as usize;
+                    let len = (*len).max(0) as usize;
+                    let result: String = s.chars().skip(start).take(len).collect();
+                    Ok(Some(Value::String(Rc::new(result))))
+                }
+                _ => Err("str_substr: (str, int, int) expected".into()),
+            }
+        }
+
         "len" => {
             if args.len() != 1 {
                 return Err("len requires exactly 1 argument".into());

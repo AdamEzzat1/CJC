@@ -56,6 +56,8 @@ pub struct Diagnostic {
     pub labels: Vec<Label>,
     pub hints: Vec<String>,
     pub fix_suggestions: Vec<FixSuggestion>,
+    /// Source filename for multi-file diagnostics. None = single-file context.
+    pub filename: Option<String>,
 }
 
 impl Diagnostic {
@@ -68,6 +70,7 @@ impl Diagnostic {
             labels: Vec::new(),
             hints: Vec::new(),
             fix_suggestions: Vec::new(),
+            filename: None,
         }
     }
 
@@ -80,7 +83,14 @@ impl Diagnostic {
             labels: Vec::new(),
             hints: Vec::new(),
             fix_suggestions: Vec::new(),
+            filename: None,
         }
+    }
+
+    /// Attach a source filename for multi-file diagnostics.
+    pub fn with_filename(mut self, name: impl Into<String>) -> Self {
+        self.filename = Some(name.into());
+        self
     }
 
     pub fn with_label(mut self, span: Span, message: impl Into<String>) -> Self {
@@ -116,6 +126,7 @@ pub struct DiagnosticBuilder {
     labels: Vec<Label>,
     hints: Vec<String>,
     fix_suggestions: Vec<FixSuggestion>,
+    filename: Option<String>,
 }
 
 impl DiagnosticBuilder {
@@ -128,6 +139,7 @@ impl DiagnosticBuilder {
             labels: Vec::new(),
             hints: Vec::new(),
             fix_suggestions: Vec::new(),
+            filename: None,
         }
     }
 
@@ -162,6 +174,12 @@ impl DiagnosticBuilder {
         self
     }
 
+    /// Attach a source filename for multi-file diagnostics.
+    pub fn filename(mut self, name: impl Into<String>) -> Self {
+        self.filename = Some(name.into());
+        self
+    }
+
     /// Build the final Diagnostic.
     pub fn build(self) -> Diagnostic {
         let message = self.message.unwrap_or_else(|| self.code.message_template().to_string());
@@ -173,6 +191,7 @@ impl DiagnosticBuilder {
             labels: self.labels,
             hints: self.hints,
             fix_suggestions: self.fix_suggestions,
+            filename: self.filename,
         }
     }
 }
@@ -245,6 +264,10 @@ impl<'a> DiagnosticRenderer<'a> {
         let (line, col) = self.offset_to_line_col(diag.span.start);
         let (end_line, _end_col) = self.offset_to_line_col(diag.span.end);
 
+        // Use the diagnostic's per-file filename if present, otherwise fall back
+        // to the renderer's default filename.
+        let display_filename = diag.filename.as_deref().unwrap_or(self.filename);
+
         let severity_str = match diag.severity {
             Severity::Error => "error",
             Severity::Warning => "warning",
@@ -269,7 +292,7 @@ impl<'a> DiagnosticRenderer<'a> {
         out.push_str(&format!(
             "  {} {}:{}:{}\n",
             self.colorize(BOLD_BLUE, "-->"),
-            self.filename, line, col
+            display_filename, line, col
         ));
 
         // Determine max line number width for alignment
@@ -638,5 +661,60 @@ mod tests {
         );
         assert!(bag.has_errors());
         assert_eq!(bag.diagnostics[0].code, "E4001");
+    }
+
+    #[test]
+    fn test_diagnostic_filename_default_none() {
+        let diag = Diagnostic::error("E0001", "test", Span::new(0, 1));
+        assert!(diag.filename.is_none());
+
+        let diag = Diagnostic::warning("W0001", "test", Span::new(0, 1));
+        assert!(diag.filename.is_none());
+    }
+
+    #[test]
+    fn test_diagnostic_with_filename() {
+        let diag = Diagnostic::error("E0001", "test", Span::new(0, 1))
+            .with_filename("math.cjc");
+        assert_eq!(diag.filename.as_deref(), Some("math.cjc"));
+    }
+
+    #[test]
+    fn test_render_uses_diagnostic_filename() {
+        let source = "let x = 1;\n";
+        let diag = Diagnostic::error("E0001", "test error", Span::new(0, 3))
+            .with_filename("other_file.cjc");
+
+        // Renderer has "main.cjc" but the diagnostic overrides to "other_file.cjc"
+        let renderer = DiagnosticRenderer::new(source, "main.cjc");
+        let output = renderer.render(&diag);
+        assert!(output.contains("other_file.cjc:1:1"));
+        assert!(!output.contains("main.cjc"));
+    }
+
+    #[test]
+    fn test_render_falls_back_to_renderer_filename() {
+        let source = "let x = 1;\n";
+        let diag = Diagnostic::error("E0001", "test error", Span::new(0, 3));
+        // No filename on diagnostic => falls back to renderer's filename
+        assert!(diag.filename.is_none());
+
+        let renderer = DiagnosticRenderer::new(source, "main.cjc");
+        let output = renderer.render(&diag);
+        assert!(output.contains("main.cjc:1:1"));
+    }
+
+    #[test]
+    fn test_builder_filename() {
+        let diag = DiagnosticBuilder::new(ErrorCode::E1000, Span::new(0, 1))
+            .filename("module.cjc")
+            .build();
+        assert_eq!(diag.filename.as_deref(), Some("module.cjc"));
+    }
+
+    #[test]
+    fn test_builder_default_no_filename() {
+        let diag = DiagnosticBuilder::new(ErrorCode::E1000, Span::new(0, 1)).build();
+        assert!(diag.filename.is_none());
     }
 }

@@ -5,3 +5,4 @@ edition.workspace = true
 
 [dependencies]
 cjc-runtime = { workspace = true }
+cjc-repro = { workspace = true }

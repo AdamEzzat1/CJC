@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use cjc_ast::{
     BinOp, Block, CallArg, Decl, DeclKind, ElseBranch, Expr, ExprKind, FnDecl, ForIter, ForStmt,
-    IfStmt, LetStmt, Program, Stmt, StmtKind, StructDecl, UnaryOp, WhileStmt,
+    IfStmt, LetStmt, Program, Stmt, StmtKind, StructDecl, TraitDecl, UnaryOp, WhileStmt,
 };
 use cjc_data::{Column, CsvConfig, CsvReader, DataFrame, StreamingCsvProcessor, TidyView};
 use cjc_data::tidy_dispatch;
@@ -162,6 +162,9 @@ pub struct Interpreter {
 
     /// Libraries enabled via `import <lib>` declarations.
     libraries_enabled: BTreeSet<String>,
+
+    /// Trait definitions indexed by name, for validating impl blocks.
+    trait_defs: BTreeMap<String, TraitDecl>,
 }
 
 impl Interpreter {
@@ -187,6 +190,7 @@ impl Interpreter {
             record_names: BTreeSet::new(),
             memo_cache: BTreeMap::new(),
             libraries_enabled: BTreeSet::new(),
+            trait_defs: BTreeMap::new(),
         }
     }
 
@@ -278,6 +282,48 @@ impl Interpreter {
         Ok(last)
     }
 
+    /// Execute a dependency module: register declarations, enable imported
+    /// libraries, and run top-level let/const/stmt bindings. Does NOT call
+    /// `main()` and does NOT clear `libraries_enabled`.
+    ///
+    /// Used by `run_program_with_modules_eval` to load dependency modules
+    /// into the interpreter scope before executing the entry module.
+    pub fn exec_module(&mut self, program: &Program) -> EvalResult {
+        // Register all function, struct, enum, record, impl declarations.
+        for decl in &program.declarations {
+            self.register_decl(decl);
+        }
+
+        // Enable libraries referenced by this module's imports.
+        for decl in &program.declarations {
+            if let DeclKind::Import(imp) = &decl.kind {
+                if let Some(first) = imp.path.first() {
+                    self.libraries_enabled.insert(first.name.clone());
+                }
+            }
+        }
+
+        // Execute top-level let/const/stmt declarations.
+        let mut last = Value::Void;
+        for decl in &program.declarations {
+            match &decl.kind {
+                DeclKind::Let(let_stmt) => {
+                    self.exec_let(let_stmt)?;
+                }
+                DeclKind::Stmt(stmt) => {
+                    last = self.exec_stmt(stmt)?;
+                }
+                DeclKind::Const(c) => {
+                    let val = self.eval_expr(&c.value)?;
+                    self.define(&c.name.name, val);
+                }
+                _ => { /* already registered or not needed */ }
+            }
+        }
+
+        Ok(last)
+    }
+
     fn register_decl(&mut self, decl: &Decl) {
         match &decl.kind {
             DeclKind::Fn(f) => {
@@ -300,6 +346,9 @@ impl Interpreter {
                 );
                 self.record_names.insert(r.name.name.clone());
             }
+            DeclKind::Trait(trait_decl) => {
+                self.trait_defs.insert(trait_decl.name.name.clone(), trait_decl.clone());
+            }
             DeclKind::Impl(impl_decl) => {
                 // Register methods with qualified names: `TypeName.method_name`
                 let type_name = match &impl_decl.target.kind {
@@ -309,6 +358,26 @@ impl Interpreter {
                 for method in &impl_decl.methods {
                     let qualified = format!("{}.{}", type_name, method.name.name);
                     self.functions.insert(qualified, method.clone());
+                }
+                // If this is a trait impl, validate all required methods are present.
+                if let Some(ref trait_ref) = impl_decl.trait_ref {
+                    if let cjc_ast::TypeExprKind::Named { name: trait_name, .. } = &trait_ref.kind {
+                        if let Some(trait_def) = self.trait_defs.get(&trait_name.name) {
+                            let impl_method_names: BTreeSet<String> = impl_decl.methods.iter()
+                                .map(|m| m.name.name.clone())
+                                .collect();
+                            for required in &trait_def.methods {
+                                if !impl_method_names.contains(&required.name.name) {
+                                    // Note: This is a soft warning for now; a type checker
+                                    // should catch this earlier. We still register what we have.
+                                    eprintln!(
+                                        "warning: impl {} for {} is missing required method `{}`",
+                                        trait_name.name, type_name, required.name.name
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
             }
             DeclKind::Enum(e) => {
@@ -3504,6 +3573,60 @@ impl Default for Interpreter {
     fn default() -> Self {
         Self::new(0)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-file module execution (AST evaluator)
+// ---------------------------------------------------------------------------
+
+/// Run a multi-file CJC program through the AST evaluator.
+///
+/// Parses all modules via `cjc_module::build_module_graph`, retrieves the
+/// deterministic topological ordering, and executes each module's AST in
+/// dependency order using a single [`Interpreter`] instance whose scope
+/// persists across modules.
+///
+/// Non-entry modules have their declarations registered and top-level
+/// statements executed (via [`Interpreter::exec_module`]). The entry module
+/// is executed last via [`Interpreter::exec`], which also invokes `main()`
+/// if present.
+pub fn run_program_with_modules_eval(
+    entry_path: &std::path::Path,
+    seed: u64,
+) -> Result<Value, EvalError> {
+    let graph = cjc_module::build_module_graph(entry_path)
+        .map_err(|e| EvalError::Runtime(format!("module error: {}", e)))?;
+
+    let order = graph
+        .topological_order()
+        .map_err(|e| EvalError::Runtime(format!("module error: {}", e)))?;
+
+    let mut interp = Interpreter::new(seed);
+
+    for mod_id in &order {
+        let module = graph
+            .modules
+            .get(mod_id)
+            .expect("module in topo order must exist in graph");
+
+        let ast = match &module.ast {
+            Some(ast) => ast,
+            None => continue,
+        };
+
+        if module.is_entry {
+            // Entry module: full execution including main() call and
+            // library-enable scanning from its imports.
+            return interp.exec(ast);
+        }
+
+        // Non-entry (dependency) module: register declarations and run
+        // top-level statements without calling main().
+        interp.exec_module(ast)?;
+    }
+
+    // Fallback: if the graph had no entry module (shouldn't happen).
+    Ok(Value::Void)
 }
 
 // ---------------------------------------------------------------------------
