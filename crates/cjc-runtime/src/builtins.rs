@@ -11,6 +11,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::accumulator::BinnedAccumulatorF64;
 use crate::complex::ComplexF64;
 use crate::scratchpad::Scratchpad;
 use crate::paged_kv::PagedKvCache;
@@ -832,7 +833,8 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             }
             let av = a.to_vec();
             let bv = b.to_vec();
-            let sum: f64 = av.iter().zip(bv.iter()).map(|(x, y)| x * y).sum();
+            let products: Vec<f64> = av.iter().zip(bv.iter()).map(|(x, y)| x * y).collect();
+            let sum = crate::accumulator::binned_sum_f64(&products);
             Ok(Some(Value::Float(sum)))
         }
         "outer" => {
@@ -899,11 +901,18 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             };
             let data = t.to_vec();
             let result = match ord {
-                1 => data.iter().map(|x| x.abs()).sum(),
-                2 => data.iter().map(|x| x * x).sum::<f64>().sqrt(),
+                1 => {
+                    let abs_vals: Vec<f64> = data.iter().map(|x| x.abs()).collect();
+                    crate::accumulator::binned_sum_f64(&abs_vals)
+                }
+                2 => {
+                    let sq_vals: Vec<f64> = data.iter().map(|x| x * x).collect();
+                    crate::accumulator::binned_sum_f64(&sq_vals).sqrt()
+                }
                 _ => {
                     let p = ord as f64;
-                    data.iter().map(|x| x.abs().powf(p)).sum::<f64>().powf(1.0 / p)
+                    let pow_vals: Vec<f64> = data.iter().map(|x| x.abs().powf(p)).collect();
+                    crate::accumulator::binned_sum_f64(&pow_vals).powf(1.0 / p)
                 }
             };
             Ok(Some(Value::Float(result)))
