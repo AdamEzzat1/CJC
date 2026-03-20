@@ -2,6 +2,8 @@ use cjc_runtime::Tensor;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+pub mod pinn;
+
 // ── Forward-Mode AD (Dual Numbers) ──────────────────────────────
 
 /// Dual number for forward-mode automatic differentiation.
