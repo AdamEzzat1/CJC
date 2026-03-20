@@ -16,20 +16,20 @@ fn main() {
     println!("PDE:    u_xx + u = 0  on [0, π]");
     println!("BCs:    u(0) = 0, u(π) = 0");
     println!("Exact:  u(x) = sin(x)");
-    println!("Model:  MLP [1 → 16 → 16 → 1] with tanh activations");
+    println!("Model:  MLP [1 → 32 → 32 → 1] with tanh activations");
     println!();
 
-    // --- Configuration ---
+    // --- Configuration (hardened defaults) ---
     let config = PinnConfig {
-        layer_sizes: vec![1, 16, 16, 1],
-        epochs: 200,
+        layer_sizes: vec![1, 32, 32, 1],
+        epochs: 2000,
         lr: 1e-3,
         physics_weight: 1.0,
-        boundary_weight: 10.0,
+        boundary_weight: 50.0,
         seed: 42,
-        n_collocation: 30,
-        n_data: 20,
-        fd_eps: 1e-4,
+        n_collocation: 50,
+        n_data: 30,
+        fd_eps: 1e-3,
     };
 
     println!("Configuration:");

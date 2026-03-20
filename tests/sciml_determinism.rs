@@ -96,11 +96,11 @@ fn test_pinn_determinism_params_bit_identical() {
         epochs: 30,
         lr: 1e-3,
         physics_weight: 1.0,
-        boundary_weight: 10.0,
+        boundary_weight: 50.0,
         seed: 42,
         n_collocation: 10,
         n_data: 8,
-        fd_eps: 1e-4,
+        fd_eps: 1e-3,
     };
 
     let r1 = pinn_harmonic_train(&config);
@@ -126,11 +126,11 @@ fn test_pinn_determinism_loss_trajectory() {
         epochs: 30,
         lr: 1e-3,
         physics_weight: 1.0,
-        boundary_weight: 10.0,
+        boundary_weight: 50.0,
         seed: 42,
         n_collocation: 10,
         n_data: 8,
-        fd_eps: 1e-4,
+        fd_eps: 1e-3,
     };
 
     let r1 = pinn_harmonic_train(&config);

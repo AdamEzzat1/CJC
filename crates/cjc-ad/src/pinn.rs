@@ -227,14 +227,14 @@ impl Default for PinnConfig {
     fn default() -> Self {
         Self {
             layer_sizes: vec![1, 32, 32, 1],
-            epochs: 500,
+            epochs: 2000,
             lr: 1e-3,
             physics_weight: 1.0,
-            boundary_weight: 10.0,
+            boundary_weight: 50.0,
             seed: 42,
             n_collocation: 50,
             n_data: 20,
-            fd_eps: 1e-4,
+            fd_eps: 1e-3,
         }
     }
 }
@@ -521,8 +521,13 @@ pub fn pinn_harmonic_train(config: &PinnConfig) -> PinnResult {
     let mut history = Vec::with_capacity(config.epochs);
 
     let eps = config.fd_eps;
+    let base_bnd_weight = config.boundary_weight;
 
     for epoch in 0..config.epochs {
+        // Cosine LR annealing: lr(t) = lr_min + 0.5*(lr_max - lr_min)*(1 + cos(π*t/T))
+        let lr_min = config.lr * 0.01;
+        let cos_decay = 0.5 * (1.0 + (std::f64::consts::PI * epoch as f64 / config.epochs as f64).cos());
+        adam.lr = lr_min + (config.lr - lr_min) * cos_decay;
         // Build fresh graph with current params
         let mut graph = crate::GradGraph::new();
         let mut p_indices = Vec::new();
@@ -627,13 +632,17 @@ pub fn pinn_harmonic_train(config: &PinnConfig) -> PinnResult {
 
         let bnd_loss_node = graph.add(u0_sq, upi_sq);
 
-        // ===== TOTAL LOSS =====
+        // ===== TOTAL LOSS (with adaptive boundary weighting) =====
+        // Ramp boundary weight: start at base, increase linearly over first 20% of training
+        let ramp = ((epoch as f64 + 1.0) / (config.epochs as f64 * 0.2)).min(1.0);
+        let effective_bnd_weight = base_bnd_weight * ramp;
+
         let pw = graph.input(Tensor::from_vec_unchecked(
             vec![config.physics_weight],
             &[1],
         ));
         let bw = graph.input(Tensor::from_vec_unchecked(
-            vec![config.boundary_weight],
+            vec![effective_bnd_weight],
             &[1],
         ));
         let weighted_phys = graph.mul(pw, phys_loss_node);
@@ -1064,11 +1073,11 @@ mod tests {
             epochs: 100,
             lr: 1e-3,
             physics_weight: 1.0,
-            boundary_weight: 10.0,
+            boundary_weight: 50.0,
             seed: 42,
             n_collocation: 20,
             n_data: 15,
-            fd_eps: 1e-4,
+            fd_eps: 1e-3,
         };
 
         let result = pinn_harmonic_train(&config);
@@ -1091,11 +1100,11 @@ mod tests {
             epochs: 50,
             lr: 1e-3,
             physics_weight: 1.0,
-            boundary_weight: 10.0,
+            boundary_weight: 50.0,
             seed: 42,
             n_collocation: 10,
             n_data: 10,
-            fd_eps: 1e-4,
+            fd_eps: 1e-3,
         };
 
         let r1 = pinn_harmonic_train(&config);

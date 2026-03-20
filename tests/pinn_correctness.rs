@@ -19,24 +19,25 @@ use cjc_runtime::Tensor;
 
 #[test]
 fn test_piml_heat_solution_accuracy() {
+    // Hardened: degree 6 (avoids noise overfitting), stronger physics + boundary
     let result = piml_heat_1d_train(
-        10,      // degree (high enough for good fit)
+        6,       // degree (lower to prevent overfitting)
         40,      // n_data
         60,      // n_colloc
         0.005,   // low noise
         5000,    // epochs
         1e-3,    // lr
-        1.0,     // physics_weight
-        10.0,    // boundary_weight
+        5.0,     // physics_weight (hardened)
+        50.0,    // boundary_weight (hardened)
         42,      // seed
     );
 
     let l2 = result.l2_error.unwrap();
     let max_err = result.max_error.unwrap();
 
-    // Polynomial should approximate sin(πx) reasonably well
-    assert!(l2 < 1.0, "L2 error too large: {}", l2);
-    assert!(max_err < 2.0, "Max error too large: {}", max_err);
+    // With hardened params, L2 should be tight
+    assert!(l2 < 0.1, "L2 error too large: {}", l2);
+    assert!(max_err < 0.2, "Max error too large: {}", max_err);
 }
 
 #[test]
@@ -60,21 +61,22 @@ fn test_piml_heat_loss_decreases_monotonically_overall() {
 
 #[test]
 fn test_piml_heat_boundary_conditions() {
-    let result = piml_heat_1d_train(8, 30, 50, 0.01, 3000, 1e-3, 1.0, 50.0, 42);
+    // Hardened: boundary_weight=50 anchors boundaries strongly
+    let result = piml_heat_1d_train(6, 40, 60, 0.01, 5000, 1e-3, 5.0, 50.0, 42);
 
     // Evaluate polynomial at boundaries
     let coeffs = &result.final_params;
     let u0 = poly_eval_public(coeffs, 0.0);
     let u1 = poly_eval_public(coeffs, 1.0);
 
-    // With boundary weight = 50, boundaries should be close to zero
+    // With boundary weight = 50 and 5000 epochs, boundaries should be very close to zero
     assert!(
-        u0.abs() < 0.5,
+        u0.abs() < 0.1,
         "u(0) should be near 0, got {}",
         u0,
     );
     assert!(
-        u1.abs() < 0.5,
+        u1.abs() < 0.1,
         "u(1) should be near 0, got {}",
         u1,
     );
@@ -100,11 +102,11 @@ fn test_pinn_harmonic_loss_components_all_tracked() {
         epochs: 50,
         lr: 1e-3,
         physics_weight: 1.0,
-        boundary_weight: 10.0,
+        boundary_weight: 50.0,
         seed: 42,
         n_collocation: 15,
         n_data: 10,
-        fd_eps: 1e-4,
+        fd_eps: 1e-3,
     };
 
     let result = pinn_harmonic_train(&config);
@@ -129,11 +131,11 @@ fn test_pinn_harmonic_gradient_nonzero() {
         epochs: 10,
         lr: 1e-3,
         physics_weight: 1.0,
-        boundary_weight: 10.0,
+        boundary_weight: 50.0,
         seed: 42,
         n_collocation: 10,
         n_data: 10,
-        fd_eps: 1e-4,
+        fd_eps: 1e-3,
     };
 
     let result = pinn_harmonic_train(&config);

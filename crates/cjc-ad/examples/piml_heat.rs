@@ -19,14 +19,15 @@ fn main() {
     println!();
 
     // --- Configuration ---
-    let degree = 8;
-    let n_data = 30;
-    let n_colloc = 50;
+    // Hardened: degree 6 prevents overfitting to noise, stronger physics penalty
+    let degree = 6;
+    let n_data = 40;
+    let n_colloc = 60;
     let noise_std = 0.01;
     let epochs = 5000;
     let lr = 1e-3;
-    let physics_weight = 1.0;
-    let boundary_weight = 10.0;
+    let physics_weight = 5.0;
+    let boundary_weight = 50.0;
     let seed = 42u64;
 
     println!("Configuration:");
