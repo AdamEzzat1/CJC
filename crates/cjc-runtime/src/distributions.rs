@@ -887,6 +887,107 @@ pub fn multinomial_sample(probs: &[f64], n: usize, rng: &mut cjc_repro::Rng) -> 
 }
 
 // ---------------------------------------------------------------------------
+// Latin Hypercube Sampling
+// ---------------------------------------------------------------------------
+
+/// Latin Hypercube Sampling — generates n samples in `dims` dimensions.
+///
+/// Each dimension is divided into n equal strata. Exactly one sample
+/// is drawn from each stratum per dimension, then columns are shuffled
+/// independently using the provided seed for deterministic output.
+///
+/// Returns a Tensor of shape [n, dims] with values in [0, 1).
+pub fn latin_hypercube_sample(n: usize, dims: usize, seed: u64) -> crate::tensor::Tensor {
+    if n == 0 || dims == 0 {
+        return crate::tensor::Tensor::from_vec_unchecked(Vec::new(), &[0, dims.max(1)]);
+    }
+
+    // We use separate RNG streams per dimension to ensure independence.
+    // Seed for dimension d is derived deterministically from the base seed.
+    let mut data = vec![0.0f64; n * dims];
+
+    for d in 0..dims {
+        // Derive a deterministic per-dimension seed using a simple mixing function.
+        let dim_seed = seed
+            .wrapping_add(d as u64)
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let mut rng = cjc_repro::Rng::seeded(dim_seed);
+
+        // Build strata indices [0, 1, ..., n-1].
+        let mut strata: Vec<usize> = (0..n).collect();
+
+        // Fisher-Yates shuffle of strata indices.
+        for i in (1..n).rev() {
+            // Generate a uniform integer in [0, i] using next_f64.
+            let j = (rng.next_f64() * (i + 1) as f64) as usize;
+            let j = j.min(i); // guard against rounding to i+1
+            strata.swap(i, j);
+        }
+
+        // Place one random point within each assigned stratum.
+        for i in 0..n {
+            let stratum = strata[i];
+            let offset = rng.next_f64(); // uniform in [0, 1)
+            let value = (stratum as f64 + offset) / n as f64;
+            data[i * dims + d] = value;
+        }
+    }
+
+    crate::tensor::Tensor::from_vec_unchecked(data, &[n, dims])
+}
+
+// ---------------------------------------------------------------------------
+// Sobol-like low-discrepancy sequence (Van der Corput)
+// ---------------------------------------------------------------------------
+
+/// Generate a Sobol-like low-discrepancy sequence.
+///
+/// Uses a simple bit-reversal approach (Van der Corput sequence)
+/// for each dimension with different bases. Not a true Sobol sequence
+/// but provides good space-filling properties for moderate dimensions.
+///
+/// Returns a Tensor of shape [n, dims] with values in [0, 1).
+pub fn sobol_sequence(n: usize, dims: usize) -> crate::tensor::Tensor {
+    if n == 0 || dims == 0 {
+        return crate::tensor::Tensor::from_vec_unchecked(Vec::new(), &[0, dims.max(1)]);
+    }
+
+    // First 30 primes used as bases for successive dimensions.
+    const PRIMES: [u64; 30] = [
+        2, 3, 5, 7, 11, 13, 17, 19, 23, 29,
+        31, 37, 41, 43, 47, 53, 59, 61, 67, 71,
+        73, 79, 83, 89, 97, 101, 103, 107, 109, 113,
+    ];
+
+    let mut data = vec![0.0f64; n * dims];
+
+    for d in 0..dims {
+        let base = PRIMES[d % PRIMES.len()];
+        for i in 0..n {
+            data[i * dims + d] = van_der_corput(i as u64, base);
+        }
+    }
+
+    crate::tensor::Tensor::from_vec_unchecked(data, &[n, dims])
+}
+
+/// Compute the Van der Corput radical-inverse of `index` in the given `base`.
+///
+/// Returns a value in [0, 1) by reflecting the base-`base` digits of `index`
+/// about the decimal point.
+fn van_der_corput(mut index: u64, base: u64) -> f64 {
+    let mut result = 0.0f64;
+    let mut denominator = 1.0f64;
+    while index > 0 {
+        denominator *= base as f64;
+        result += (index % base) as f64 / denominator;
+        index /= base;
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1332,6 +1433,73 @@ mod sampling_tests {
                 "multinomial category {i}: empirical={empirical_p}, expected={expected_p}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Latin Hypercube Sampling tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_lhs_shape() {
+        let samples = latin_hypercube_sample(100, 3, 42);
+        assert_eq!(samples.shape(), &[100, 3]);
+    }
+
+    #[test]
+    fn test_lhs_bounds() {
+        let samples = latin_hypercube_sample(50, 2, 123);
+        for &v in samples.to_vec().iter() {
+            assert!(v >= 0.0 && v < 1.0);
+        }
+    }
+
+    #[test]
+    fn test_lhs_stratification() {
+        // Each dimension should have exactly one sample per stratum
+        let n = 20;
+        let samples = latin_hypercube_sample(n, 2, 42);
+        let data = samples.to_vec();
+        for dim in 0..2 {
+            let mut strata = vec![false; n];
+            for i in 0..n {
+                let val = data[i * 2 + dim];
+                let stratum = (val * n as f64) as usize;
+                assert!(!strata[stratum], "Stratum {} used twice in dim {}", stratum, dim);
+                strata[stratum] = true;
+            }
+        }
+    }
+
+    #[test]
+    fn test_lhs_determinism() {
+        let s1 = latin_hypercube_sample(50, 3, 42);
+        let s2 = latin_hypercube_sample(50, 3, 42);
+        assert_eq!(s1.to_vec(), s2.to_vec(), "LHS must be deterministic");
+    }
+
+    // -----------------------------------------------------------------------
+    // Sobol sequence tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sobol_shape() {
+        let seq = sobol_sequence(100, 4);
+        assert_eq!(seq.shape(), &[100, 4]);
+    }
+
+    #[test]
+    fn test_sobol_bounds() {
+        let seq = sobol_sequence(50, 3);
+        for &v in seq.to_vec().iter() {
+            assert!(v >= 0.0 && v < 1.0);
+        }
+    }
+
+    #[test]
+    fn test_sobol_determinism() {
+        let s1 = sobol_sequence(50, 3);
+        let s2 = sobol_sequence(50, 3);
+        assert_eq!(s1.to_vec(), s2.to_vec());
     }
 }
 

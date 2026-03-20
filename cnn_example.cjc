@@ -1,0 +1,32 @@
+// 1. Setup Data
+let x_val = Tensor.randn([1, 1, 28, 28]);
+let y_true = Tensor.from_vec([1.0, 0.0, 0.0, 0.0], [1, 4]);
+
+// 2. Initialize Gradient Graph using proper namespacing
+let g = GradGraph.new(); 
+let input_node = GradGraph.input(g, x_val);
+
+// 3. Define Convolutional Layer
+// Note: In v0.1, weights must be registered as parameters
+let k_val = Tensor.randn([4, 1, 3, 3]);
+let kernel_node = GradGraph.parameter(g, k_val);
+
+// 4. Forward Pass
+// We use the broadcast "relu" for activations
+let conv_out = Tensor.conv2d(x_val, k_val, 1, 1);
+let pooled = Tensor.maxpool2d(conv_out, 2, 2);
+
+// 5. Flatten and Linear
+let flattened = Tensor.reshape(pooled, [1, 4 * 14 * 14]);
+let W_val = Tensor.randn([4, 784]);
+let b_val = Tensor.zeros([4]);
+
+// Output and Loss
+let logits = Tensor.linear(flattened, W_val, b_val);
+let probs = Tensor.softmax(logits);
+let loss_val = mse_loss(probs, y_true);
+
+// 6. Confirm execution
+print("CNN Forward Pass Successful!");
+print(f"Loss: {loss_val}");
+print(f"Probabilities: {probs}");

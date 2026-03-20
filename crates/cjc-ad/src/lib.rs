@@ -1473,6 +1473,476 @@ impl GradGraph {
         Tensor::from_vec_unchecked(hess_diag, &param_shape)
     }
 
+    /// Compute the full Hessian matrix of a scalar loss with respect to a parameter node.
+    ///
+    /// Returns a 2D tensor of shape [param_dim, param_dim] where H[i, j] = d²loss / (dp_i dp_j).
+    ///
+    /// Strategy: For each parameter element i, perturb param[i] by +eps and -eps, re-run
+    /// the forward pass to update intermediate node values, then run backward() to get the
+    /// gradient vector. The i-th row of the Hessian is (grad_plus - grad_minus) / (2 * eps).
+    /// Uses eps = 1e-5 for accurate central differences.
+    pub fn hessian(&mut self, loss_idx: usize, param_idx: usize) -> Tensor {
+        let eps = 1e-5;
+        let param_shape = self.nodes[param_idx].borrow().tensor.shape().to_vec();
+        let param_dim: usize = param_shape.iter().product();
+        let original = self.nodes[param_idx].borrow().tensor.to_vec();
+        let mut hess_data = vec![0.0_f64; param_dim * param_dim];
+
+        for i in 0..param_dim {
+            // Perturb +eps at index i, re-forward so intermediate nodes are up-to-date
+            let mut plus = original.clone();
+            plus[i] += eps;
+            self.nodes[param_idx].borrow_mut().tensor =
+                Tensor::from_vec_unchecked(plus, &param_shape);
+            self.reforward(param_idx + 1, loss_idx);
+            self.zero_grad();
+            self.backward(loss_idx);
+            let grad_plus: Vec<f64> = self.nodes[param_idx]
+                .borrow()
+                .grad
+                .as_ref()
+                .map(|g| g.to_vec())
+                .unwrap_or_else(|| vec![0.0; param_dim]);
+
+            // Perturb -eps at index i, re-forward
+            let mut minus = original.clone();
+            minus[i] -= eps;
+            self.nodes[param_idx].borrow_mut().tensor =
+                Tensor::from_vec_unchecked(minus, &param_shape);
+            self.reforward(param_idx + 1, loss_idx);
+            self.zero_grad();
+            self.backward(loss_idx);
+            let grad_minus: Vec<f64> = self.nodes[param_idx]
+                .borrow()
+                .grad
+                .as_ref()
+                .map(|g| g.to_vec())
+                .unwrap_or_else(|| vec![0.0; param_dim]);
+
+            // Row i of the Hessian: (grad_plus[j] - grad_minus[j]) / (2 * eps) for each j
+            for j in 0..param_dim {
+                hess_data[i * param_dim + j] = (grad_plus[j] - grad_minus[j]) / (2.0 * eps);
+            }
+        }
+
+        // Restore original parameter and re-forward to clean state
+        self.nodes[param_idx].borrow_mut().tensor =
+            Tensor::from_vec_unchecked(original, &param_shape);
+        self.reforward(param_idx + 1, loss_idx);
+
+        Tensor::from_vec_unchecked(hess_data, &[param_dim, param_dim])
+    }
+
+    /// Re-run the forward pass for all nodes from `start` up to and including `end`.
+    ///
+    /// This is needed before backward when a parameter has been perturbed, so that
+    /// intermediate computation nodes hold updated tensor values.
+    fn reforward(&mut self, start: usize, end: usize) {
+        for node_i in start..=end {
+            let new_tensor = {
+                let node = self.nodes[node_i].borrow();
+                match &node.op {
+                    GradOp::Input | GradOp::Parameter => continue,
+                    GradOp::Add(a, b) => {
+                        let at = self.nodes[*a].borrow().tensor.clone();
+                        let bt = self.nodes[*b].borrow().tensor.clone();
+                        at.add_unchecked(&bt)
+                    }
+                    GradOp::Sub(a, b) => {
+                        let at = self.nodes[*a].borrow().tensor.clone();
+                        let bt = self.nodes[*b].borrow().tensor.clone();
+                        at.sub_unchecked(&bt)
+                    }
+                    GradOp::Mul(a, b) => {
+                        let at = self.nodes[*a].borrow().tensor.clone();
+                        let bt = self.nodes[*b].borrow().tensor.clone();
+                        at.mul_elem_unchecked(&bt)
+                    }
+                    GradOp::Div(a, b) => {
+                        let at = self.nodes[*a].borrow().tensor.clone();
+                        let bt = self.nodes[*b].borrow().tensor.clone();
+                        at.div_elem_unchecked(&bt)
+                    }
+                    GradOp::Neg(a) => {
+                        self.nodes[*a].borrow().tensor.neg()
+                    }
+                    GradOp::ScalarMul(a, s) => {
+                        let s = *s;
+                        self.nodes[*a].borrow().tensor.scalar_mul(s)
+                    }
+                    GradOp::MatMul(a, b) => {
+                        let at = self.nodes[*a].borrow().tensor.clone();
+                        let bt = self.nodes[*b].borrow().tensor.clone();
+                        at.matmul_unchecked(&bt)
+                    }
+                    GradOp::Sum(a) => {
+                        let s = self.nodes[*a].borrow().tensor.sum();
+                        Tensor::from_vec_unchecked(vec![s], &[1])
+                    }
+                    GradOp::Mean(a) => {
+                        let m = self.nodes[*a].borrow().tensor.mean();
+                        Tensor::from_vec_unchecked(vec![m], &[1])
+                    }
+                    GradOp::Exp(a) => {
+                        let (data, shape) = {
+                            let t = self.nodes[*a].borrow();
+                            (t.tensor.to_vec(), t.tensor.shape().to_vec())
+                        };
+                        Tensor::from_vec_unchecked(data.iter().map(|x| x.exp()).collect(), &shape)
+                    }
+                    GradOp::Ln(a) => {
+                        let (data, shape) = {
+                            let t = self.nodes[*a].borrow();
+                            (t.tensor.to_vec(), t.tensor.shape().to_vec())
+                        };
+                        Tensor::from_vec_unchecked(data.iter().map(|x| x.ln()).collect(), &shape)
+                    }
+                    GradOp::Sin(a) => {
+                        let (data, shape) = {
+                            let t = self.nodes[*a].borrow();
+                            (t.tensor.to_vec(), t.tensor.shape().to_vec())
+                        };
+                        Tensor::from_vec_unchecked(data.iter().map(|x| x.sin()).collect(), &shape)
+                    }
+                    GradOp::Cos(a) => {
+                        let (data, shape) = {
+                            let t = self.nodes[*a].borrow();
+                            (t.tensor.to_vec(), t.tensor.shape().to_vec())
+                        };
+                        Tensor::from_vec_unchecked(data.iter().map(|x| x.cos()).collect(), &shape)
+                    }
+                    GradOp::Sqrt(a) => {
+                        let (data, shape) = {
+                            let t = self.nodes[*a].borrow();
+                            (t.tensor.to_vec(), t.tensor.shape().to_vec())
+                        };
+                        Tensor::from_vec_unchecked(data.iter().map(|x| x.sqrt()).collect(), &shape)
+                    }
+                    GradOp::Pow(a, n) => {
+                        let n = *n;
+                        let (data, shape) = {
+                            let t = self.nodes[*a].borrow();
+                            (t.tensor.to_vec(), t.tensor.shape().to_vec())
+                        };
+                        Tensor::from_vec_unchecked(data.iter().map(|x| x.powf(n)).collect(), &shape)
+                    }
+                    GradOp::Sigmoid(a) => {
+                        let (data, shape) = {
+                            let t = self.nodes[*a].borrow();
+                            (t.tensor.to_vec(), t.tensor.shape().to_vec())
+                        };
+                        Tensor::from_vec_unchecked(
+                            data.iter().map(|&x| 1.0 / (1.0 + (-x).exp())).collect(),
+                            &shape,
+                        )
+                    }
+                    GradOp::Relu(a) => {
+                        let (data, shape) = {
+                            let t = self.nodes[*a].borrow();
+                            (t.tensor.to_vec(), t.tensor.shape().to_vec())
+                        };
+                        Tensor::from_vec_unchecked(
+                            data.iter().map(|&x| if x > 0.0 { x } else { 0.0 }).collect(),
+                            &shape,
+                        )
+                    }
+                    GradOp::TanhAct(a) => {
+                        let (data, shape) = {
+                            let t = self.nodes[*a].borrow();
+                            (t.tensor.to_vec(), t.tensor.shape().to_vec())
+                        };
+                        Tensor::from_vec_unchecked(data.iter().map(|x| x.tanh()).collect(), &shape)
+                    }
+                    GradOp::Abs(a) => {
+                        let (data, shape) = {
+                            let t = self.nodes[*a].borrow();
+                            (t.tensor.to_vec(), t.tensor.shape().to_vec())
+                        };
+                        Tensor::from_vec_unchecked(data.iter().map(|x| x.abs()).collect(), &shape)
+                    }
+                    GradOp::Clamp { input, min, max } => {
+                        let min = *min;
+                        let max = *max;
+                        let (data, shape) = {
+                            let t = self.nodes[*input].borrow();
+                            (t.tensor.to_vec(), t.tensor.shape().to_vec())
+                        };
+                        Tensor::from_vec_unchecked(
+                            data.iter().map(|&x| x.max(min).min(max)).collect(),
+                            &shape,
+                        )
+                    }
+                    GradOp::Reshape { input, .. } => {
+                        let current_shape = node.tensor.shape().to_vec();
+                        let data = self.nodes[*input].borrow().tensor.to_vec();
+                        Tensor::from_vec_unchecked(data, &current_shape)
+                    }
+                    GradOp::TransposeOp(a) => {
+                        self.nodes[*a].borrow().tensor.transpose()
+                    }
+                    // For complex ops (softmax, layernorm, etc.), keep existing tensor.
+                    // These are not typically used in simple Hessian computations.
+                    _ => node.tensor.clone(),
+                }
+            };
+            self.nodes[node_i].borrow_mut().tensor = new_tensor;
+        }
+    }
+
+    /// Compute the second derivative of a scalar loss with respect to a parameter node.
+    ///
+    /// Implements double_backward via finite differences on the backward pass:
+    /// perturbs the parameter by +eps/-eps, re-runs the forward and backward pass,
+    /// and computes d(grad)/d(param) numerically. For a scalar param this gives the
+    /// exact second derivative d²loss/dparam².
+    ///
+    /// Returns a tensor of the same shape as the parameter containing second derivatives.
+    pub fn double_backward(&mut self, loss_idx: usize, param_idx: usize) -> Tensor {
+        let eps = 1e-5;
+        let param_shape = self.nodes[param_idx].borrow().tensor.shape().to_vec();
+        let param_dim: usize = param_shape.iter().product();
+        let original = self.nodes[param_idx].borrow().tensor.to_vec();
+        let mut diag = vec![0.0_f64; param_dim];
+
+        for i in 0..param_dim {
+            // Perturb +eps, re-forward, backward
+            let mut plus = original.clone();
+            plus[i] += eps;
+            self.nodes[param_idx].borrow_mut().tensor =
+                Tensor::from_vec_unchecked(plus, &param_shape);
+            self.reforward(param_idx + 1, loss_idx);
+            self.zero_grad();
+            self.backward(loss_idx);
+            let grad_plus = self.nodes[param_idx]
+                .borrow()
+                .grad
+                .as_ref()
+                .map(|g| g.to_vec()[i])
+                .unwrap_or(0.0);
+
+            // Perturb -eps, re-forward, backward
+            let mut minus = original.clone();
+            minus[i] -= eps;
+            self.nodes[param_idx].borrow_mut().tensor =
+                Tensor::from_vec_unchecked(minus, &param_shape);
+            self.reforward(param_idx + 1, loss_idx);
+            self.zero_grad();
+            self.backward(loss_idx);
+            let grad_minus = self.nodes[param_idx]
+                .borrow()
+                .grad
+                .as_ref()
+                .map(|g| g.to_vec()[i])
+                .unwrap_or(0.0);
+
+            diag[i] = (grad_plus - grad_minus) / (2.0 * eps);
+        }
+
+        // Restore original parameter and re-forward to clean state
+        self.nodes[param_idx].borrow_mut().tensor =
+            Tensor::from_vec_unchecked(original, &param_shape);
+        self.reforward(param_idx + 1, loss_idx);
+
+        Tensor::from_vec_unchecked(diag, &param_shape)
+    }
+
+    /// Vectorized map (batched evaluation) over a batch dimension.
+    ///
+    /// For each tensor in `batch_data`, sets the input node `input_idx` to that tensor,
+    /// re-evaluates all downstream nodes by re-running the forward pass (recomputing
+    /// tensor values from the graph structure), and records the output node index
+    /// after each evaluation.
+    ///
+    /// Returns a `Vec<usize>` of output node indices (one per batch element). After
+    /// calling this, `g.value(results[k])` returns the output for batch element k.
+    ///
+    /// Note: This is a simple batched evaluation helper. It mutates node tensors
+    /// in-place. After calling vmap_forward, the graph holds the values for the
+    /// LAST batch element. Use `g.value(results[k])` to read individual results
+    /// (stored in snapshot tensors inside each returned node).
+    ///
+    /// Implementation: For each batch element, set the input tensor, re-forward the
+    /// subgraph from input_idx..=loss_idx by replaying each op, and record the final
+    /// node's value in a fresh parameter node.
+    pub fn vmap_forward(&mut self, input_idx: usize, batch_data: &[Tensor]) -> Vec<usize> {
+        let mut result_indices = Vec::with_capacity(batch_data.len());
+
+        // Identify the topological range: nodes from input_idx onward that depend on it.
+        // We re-evaluate all nodes from input_idx to the end of the current graph.
+        let graph_len = self.nodes.len();
+
+        for batch_tensor in batch_data {
+            // Set input node to batch element
+            self.nodes[input_idx].borrow_mut().tensor = batch_tensor.clone();
+
+            // Re-run forward pass for all nodes after input_idx by replaying their ops
+            for node_i in (input_idx + 1)..graph_len {
+                let (op, new_tensor) = {
+                    let node = self.nodes[node_i].borrow();
+                    let op = node.op.clone();
+                    let new_tensor = match &op {
+                        GradOp::Add(a, b) => {
+                            let at = self.nodes[*a].borrow().tensor.clone();
+                            let bt = self.nodes[*b].borrow().tensor.clone();
+                            at.add_unchecked(&bt)
+                        }
+                        GradOp::Sub(a, b) => {
+                            let at = self.nodes[*a].borrow().tensor.clone();
+                            let bt = self.nodes[*b].borrow().tensor.clone();
+                            at.sub_unchecked(&bt)
+                        }
+                        GradOp::Mul(a, b) => {
+                            let at = self.nodes[*a].borrow().tensor.clone();
+                            let bt = self.nodes[*b].borrow().tensor.clone();
+                            at.mul_elem_unchecked(&bt)
+                        }
+                        GradOp::Div(a, b) => {
+                            let at = self.nodes[*a].borrow().tensor.clone();
+                            let bt = self.nodes[*b].borrow().tensor.clone();
+                            at.div_elem_unchecked(&bt)
+                        }
+                        GradOp::Neg(a) => {
+                            self.nodes[*a].borrow().tensor.neg()
+                        }
+                        GradOp::ScalarMul(a, s) => {
+                            self.nodes[*a].borrow().tensor.scalar_mul(*s)
+                        }
+                        GradOp::MatMul(a, b) => {
+                            let at = self.nodes[*a].borrow().tensor.clone();
+                            let bt = self.nodes[*b].borrow().tensor.clone();
+                            at.matmul_unchecked(&bt)
+                        }
+                        GradOp::Sum(a) => {
+                            let s = self.nodes[*a].borrow().tensor.sum();
+                            let shape = vec![1usize];
+                            Tensor::from_vec_unchecked(vec![s], &shape)
+                        }
+                        GradOp::Mean(a) => {
+                            let m = self.nodes[*a].borrow().tensor.mean();
+                            Tensor::from_vec_unchecked(vec![m], &[1])
+                        }
+                        GradOp::Exp(a) => {
+                            let data = self.nodes[*a].borrow().tensor.to_vec();
+                            let shape = self.nodes[*a].borrow().tensor.shape().to_vec();
+                            Tensor::from_vec_unchecked(
+                                data.iter().map(|x| x.exp()).collect(),
+                                &shape,
+                            )
+                        }
+                        GradOp::Ln(a) => {
+                            let data = self.nodes[*a].borrow().tensor.to_vec();
+                            let shape = self.nodes[*a].borrow().tensor.shape().to_vec();
+                            Tensor::from_vec_unchecked(
+                                data.iter().map(|x| x.ln()).collect(),
+                                &shape,
+                            )
+                        }
+                        GradOp::Sin(a) => {
+                            let data = self.nodes[*a].borrow().tensor.to_vec();
+                            let shape = self.nodes[*a].borrow().tensor.shape().to_vec();
+                            Tensor::from_vec_unchecked(
+                                data.iter().map(|x| x.sin()).collect(),
+                                &shape,
+                            )
+                        }
+                        GradOp::Cos(a) => {
+                            let data = self.nodes[*a].borrow().tensor.to_vec();
+                            let shape = self.nodes[*a].borrow().tensor.shape().to_vec();
+                            Tensor::from_vec_unchecked(
+                                data.iter().map(|x| x.cos()).collect(),
+                                &shape,
+                            )
+                        }
+                        GradOp::Sqrt(a) => {
+                            let data = self.nodes[*a].borrow().tensor.to_vec();
+                            let shape = self.nodes[*a].borrow().tensor.shape().to_vec();
+                            Tensor::from_vec_unchecked(
+                                data.iter().map(|x| x.sqrt()).collect(),
+                                &shape,
+                            )
+                        }
+                        GradOp::Pow(a, n) => {
+                            let data = self.nodes[*a].borrow().tensor.to_vec();
+                            let shape = self.nodes[*a].borrow().tensor.shape().to_vec();
+                            Tensor::from_vec_unchecked(
+                                data.iter().map(|x| x.powf(*n)).collect(),
+                                &shape,
+                            )
+                        }
+                        GradOp::Sigmoid(a) => {
+                            let data = self.nodes[*a].borrow().tensor.to_vec();
+                            let shape = self.nodes[*a].borrow().tensor.shape().to_vec();
+                            Tensor::from_vec_unchecked(
+                                data.iter().map(|&x| 1.0 / (1.0 + (-x).exp())).collect(),
+                                &shape,
+                            )
+                        }
+                        GradOp::Relu(a) => {
+                            let data = self.nodes[*a].borrow().tensor.to_vec();
+                            let shape = self.nodes[*a].borrow().tensor.shape().to_vec();
+                            Tensor::from_vec_unchecked(
+                                data.iter().map(|&x| if x > 0.0 { x } else { 0.0 }).collect(),
+                                &shape,
+                            )
+                        }
+                        GradOp::TanhAct(a) => {
+                            let data = self.nodes[*a].borrow().tensor.to_vec();
+                            let shape = self.nodes[*a].borrow().tensor.shape().to_vec();
+                            Tensor::from_vec_unchecked(
+                                data.iter().map(|x| x.tanh()).collect(),
+                                &shape,
+                            )
+                        }
+                        GradOp::Abs(a) => {
+                            let data = self.nodes[*a].borrow().tensor.to_vec();
+                            let shape = self.nodes[*a].borrow().tensor.shape().to_vec();
+                            Tensor::from_vec_unchecked(
+                                data.iter().map(|x| x.abs()).collect(),
+                                &shape,
+                            )
+                        }
+                        GradOp::Clamp { input, min, max } => {
+                            let data = self.nodes[*input].borrow().tensor.to_vec();
+                            let shape = self.nodes[*input].borrow().tensor.shape().to_vec();
+                            Tensor::from_vec_unchecked(
+                                data.iter().map(|&x| x.max(*min).min(*max)).collect(),
+                                &shape,
+                            )
+                        }
+                        GradOp::Reshape { input, .. } => {
+                            // Keep same data, use current node's shape
+                            let data = self.nodes[*input].borrow().tensor.to_vec();
+                            let shape = node.tensor.shape().to_vec();
+                            Tensor::from_vec_unchecked(data, &shape)
+                        }
+                        GradOp::TransposeOp(a) => {
+                            self.nodes[*a].borrow().tensor.transpose()
+                        }
+                        // For complex ops and ops without direct input dependency on input_idx,
+                        // keep the existing tensor value (no re-computation needed).
+                        _ => node.tensor.clone(),
+                    };
+                    (op, new_tensor)
+                };
+                let _ = op; // op already moved/used above
+                self.nodes[node_i].borrow_mut().tensor = new_tensor;
+            }
+
+            // Record the output value from the last node (graph_len - 1) by creating
+            // a snapshot input node with the current output value.
+            let output_tensor = self.nodes[graph_len - 1].borrow().tensor.clone();
+            let snapshot_idx = self.nodes.len();
+            self.nodes.push(Rc::new(RefCell::new(GradNode {
+                op: GradOp::Input,
+                tensor: output_tensor,
+                grad: None,
+            })));
+            result_indices.push(snapshot_idx);
+        }
+
+        result_indices
+    }
+
     /// Backward pass with a custom gradient seed tensor (for Jacobian computation).
     pub fn backward_with_seed(&mut self, loss_idx: usize, seed: &Tensor) {
         let n = self.nodes.len();
@@ -2697,5 +3167,69 @@ mod tests {
         }
         // CE grad for correct class (index 2) should be negative (softmax - 1)
         assert!(ga[2] < 0.0, "CE grad for correct class should be negative");
+    }
+
+    // ── Sprint 1 SciML Hardening: hessian, double_backward, vmap_forward ──
+
+    #[test]
+    fn test_double_backward_cubic() {
+        // f(x) = x^3, f'(x) = 3x^2, f''(x) = 6x
+        let mut g = GradGraph::new();
+        let x = g.parameter(Tensor::from_vec_unchecked(vec![2.0], &[1]));
+        let x2 = g.mul(x, x);
+        let x3 = g.mul(x2, x);
+        let loss = g.sum(x3);
+        let hess = g.double_backward(loss, x);
+        // f''(2) = 6*2 = 12
+        assert!((hess.to_vec()[0] - 12.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_full_hessian_quadratic() {
+        // f(x, y) = x^2 + y^2 using p = [x, y]
+        // H = [[2, 0], [0, 2]]
+        let mut g = GradGraph::new();
+        let p = g.parameter(Tensor::from_vec_unchecked(vec![1.0, 1.0], &[2]));
+        let p2 = g.mul(p, p); // [x^2, y^2]
+        let s = g.sum(p2); // x^2 + y^2
+        let hess = g.hessian(s, p);
+        let h = hess.to_vec();
+        assert!((h[0] - 2.0).abs() < 1e-3); // d2f/dx2 = 2
+        assert!((h[1] - 0.0).abs() < 1e-3); // d2f/dxdy = 0
+        assert!((h[2] - 0.0).abs() < 1e-3); // d2f/dydx = 0
+        assert!((h[3] - 2.0).abs() < 1e-3); // d2f/dy2 = 2
+    }
+
+    #[test]
+    fn test_vmap_forward() {
+        let mut g = GradGraph::new();
+        let x = g.parameter(Tensor::from_vec_unchecked(vec![1.0], &[1]));
+        let x2 = g.mul(x, x);
+        let loss = g.sum(x2);
+
+        // vmap over batch [1.0, 2.0, 3.0]
+        let batch = vec![
+            Tensor::from_vec_unchecked(vec![1.0], &[1]),
+            Tensor::from_vec_unchecked(vec![2.0], &[1]),
+            Tensor::from_vec_unchecked(vec![3.0], &[1]),
+        ];
+        let results = g.vmap_forward(x, &batch);
+        // Results should be [1.0, 4.0, 9.0]
+        assert!((g.value(results[0]) - 1.0).abs() < 1e-10);
+        assert!((g.value(results[1]) - 4.0).abs() < 1e-10);
+        assert!((g.value(results[2]) - 9.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_hessian_determinism() {
+        let mut g = GradGraph::new();
+        let p = g.parameter(Tensor::from_vec_unchecked(vec![3.0, 4.0], &[2]));
+        let p2 = g.mul(p, p);
+        let s = g.sum(p2);
+        let h1 = g.hessian(s, p);
+        // Reset and redo
+        g.nodes[p].borrow_mut().tensor = Tensor::from_vec_unchecked(vec![3.0, 4.0], &[2]);
+        let h2 = g.hessian(s, p);
+        assert_eq!(h1.to_vec(), h2.to_vec(), "Hessian must be deterministic");
     }
 }
