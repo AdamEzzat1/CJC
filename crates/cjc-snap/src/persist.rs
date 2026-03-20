@@ -1,6 +1,6 @@
 //! File persistence for CJC Snap — save/load values to disk.
 //!
-//! ## File Format (.snap)
+//! ## File Format (.snap) — v1
 //!
 //! ```text
 //! Offset  Size  Description
@@ -8,42 +8,77 @@
 //! 4       4     Version: 1 (u32 LE)
 //! 8       32    SHA-256 content hash
 //! 40      8     Data length (u64 LE)
-//! 48      N     Snap-encoded data bytes
+//! 48      N     Snap-encoded data bytes (v1 tag+data)
+//! ```
+//!
+//! ## File Format (.snap) — v2
+//!
+//! ```text
+//! Offset  Size  Description
+//! 0       4     Magic: "CJCS" (0x43, 0x4A, 0x43, 0x53)
+//! 4       4     Version: 2 (u32 LE)
+//! 8       32    SHA-256 content hash
+//! 40      8     Data length (u64 LE)
+//! 48      N     Snap-encoded data bytes (v2: CJS\x01 + version + flags + payload)
 //! ```
 
 use cjc_runtime::Value;
-use crate::{snap, restore};
+use crate::{snap, snap_v2, restore_v2};
 
 /// Magic bytes identifying a CJC Snap file.
 pub const MAGIC: [u8; 4] = [0x43, 0x4A, 0x43, 0x53]; // "CJCS"
 
+/// File format version 1 (legacy).
+pub const VERSION_V1: u32 = 1;
+
+/// File format version 2 (new tags, v2 header).
+pub const VERSION_V2: u32 = 2;
+
 /// Current file format version.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = VERSION_V1;
 
 /// Header size: magic(4) + version(4) + hash(32) + data_len(8) = 48 bytes.
 const HEADER_SIZE: usize = 48;
 
-/// Save a CJC value to a `.snap` file.
+/// Save a CJC value to a `.snap` file (v1 format).
 ///
 /// The file contains a self-describing header with the SHA-256 hash,
 /// followed by the canonical snap encoding. The file can be loaded
 /// back with `snap_load()`, or parsed by external tools (e.g., Python).
 pub fn snap_save(value: &Value, path: &str) -> Result<(), String> {
     let blob = snap(value);
+    write_snap_file(&blob.content_hash, &blob.data, VERSION_V1, path)
+}
 
-    let data_len = blob.data.len() as u64;
-    let mut file_bytes = Vec::with_capacity(HEADER_SIZE + blob.data.len());
+/// Save a CJC value to a `.snap` file (v2 format).
+///
+/// Uses the v2 binary encoding with magic header, supporting all new
+/// tags (typed tensors, sparse CSR, chunked tensors, etc.).
+pub fn snap_save_v2(value: &Value, path: &str) -> Result<(), String> {
+    let blob = snap_v2(value);
+    write_snap_file(&blob.content_hash, &blob.data, VERSION_V2, path)
+}
+
+/// Write a snap file with the given header fields.
+fn write_snap_file(
+    content_hash: &[u8; 32],
+    data: &[u8],
+    version: u32,
+    path: &str,
+) -> Result<(), String> {
+    let data_len = data.len() as u64;
+    let mut file_bytes = Vec::with_capacity(HEADER_SIZE + data.len());
 
     // Magic
     file_bytes.extend_from_slice(&MAGIC);
     // Version
-    file_bytes.extend_from_slice(&VERSION.to_le_bytes());
+    file_bytes.extend_from_slice(&version.to_le_bytes());
     // Content hash
-    file_bytes.extend_from_slice(&blob.content_hash);
+    file_bytes.extend_from_slice(content_hash);
     // Data length
     file_bytes.extend_from_slice(&data_len.to_le_bytes());
     // Data
-    file_bytes.extend_from_slice(&blob.data);
+    file_bytes.extend_from_slice(data);
 
     std::fs::write(path, &file_bytes)
         .map_err(|e| format!("snap_save: {}", e))
@@ -51,7 +86,8 @@ pub fn snap_save(value: &Value, path: &str) -> Result<(), String> {
 
 /// Load a CJC value from a `.snap` file.
 ///
-/// Validates the magic bytes, version, and SHA-256 hash integrity.
+/// Auto-detects v1 and v2 file format versions.
+/// Validates magic bytes, version, and SHA-256 hash integrity.
 /// Returns the decoded value or a descriptive error.
 pub fn snap_load(path: &str) -> Result<Value, String> {
     let file_bytes = std::fs::read(path)
@@ -73,12 +109,12 @@ pub fn snap_load(path: &str) -> Result<Value, String> {
         ));
     }
 
-    // Validate version
+    // Read version
     let version = u32::from_le_bytes(file_bytes[4..8].try_into().unwrap());
-    if version != VERSION {
+    if version != VERSION_V1 && version != VERSION_V2 {
         return Err(format!(
-            "snap_load: unsupported version {} (expected {})",
-            version, VERSION
+            "snap_load: unsupported version {} (expected {} or {})",
+            version, VERSION_V1, VERSION_V2
         ));
     }
 
@@ -98,15 +134,15 @@ pub fn snap_load(path: &str) -> Result<Value, String> {
 
     let data = file_bytes[HEADER_SIZE..HEADER_SIZE + data_len].to_vec();
 
-    // Reconstruct blob and restore (verifies hash)
+    // Reconstruct blob and restore (auto-detects v1/v2 payload format)
     let blob = crate::SnapBlob { content_hash, data };
-    restore(&blob).map_err(|e| format!("snap_load: {}", e))
+    restore_v2(&blob).map_err(|e| format!("snap_load: {}", e))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cjc_runtime::Tensor;
+    use cjc_runtime::{Tensor, SparseCsr};
     use std::rc::Rc;
 
     fn test_file(name: &str) -> String {
@@ -155,11 +191,58 @@ mod tests {
     }
 
     #[test]
+    fn test_save_load_v2_int() {
+        let path = test_file("v2_int");
+        snap_save_v2(&Value::Int(99), &path).unwrap();
+        let loaded = snap_load(&path).unwrap();
+        assert!(matches!(loaded, Value::Int(99)));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_save_load_v2_tensor() {
+        let path = test_file("v2_tensor");
+        let t = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+        snap_save_v2(&Value::Tensor(t), &path).unwrap();
+        let loaded = snap_load(&path).unwrap();
+        match loaded {
+            Value::Tensor(t) => {
+                assert_eq!(t.shape(), &[3]);
+                assert_eq!(t.to_vec(), vec![1.0, 2.0, 3.0]);
+            }
+            _ => panic!("expected Tensor"),
+        }
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_save_load_v2_sparse() {
+        let path = test_file("v2_sparse");
+        let sparse = SparseCsr {
+            nrows: 2,
+            ncols: 3,
+            row_offsets: vec![0, 1, 3],
+            col_indices: vec![0, 1, 2],
+            values: vec![1.0, 2.0, 3.0],
+        };
+        snap_save_v2(&Value::SparseTensor(sparse), &path).unwrap();
+        let loaded = snap_load(&path).unwrap();
+        match loaded {
+            Value::SparseTensor(s) => {
+                assert_eq!(s.nrows, 2);
+                assert_eq!(s.ncols, 3);
+                assert_eq!(s.values, vec![1.0, 2.0, 3.0]);
+            }
+            _ => panic!("expected SparseTensor"),
+        }
+        cleanup(&path);
+    }
+
+    #[test]
     fn test_bad_magic() {
         let path = test_file("bad_magic");
-        // Write a file with invalid magic but large enough to pass size check
         let mut bytes = vec![0u8; 48];
-        bytes[0..4].copy_from_slice(b"XXXX"); // bad magic
+        bytes[0..4].copy_from_slice(b"XXXX");
         std::fs::write(&path, &bytes).unwrap();
         let result = snap_load(&path);
         assert!(result.is_err());
@@ -170,7 +253,7 @@ mod tests {
     #[test]
     fn test_truncated_file() {
         let path = test_file("truncated");
-        std::fs::write(&path, b"CJC").unwrap(); // too short
+        std::fs::write(&path, b"CJC").unwrap();
         let result = snap_load(&path);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("too small"));
@@ -182,8 +265,8 @@ mod tests {
         let path = test_file("bad_version");
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&MAGIC);
-        bytes.extend_from_slice(&99u32.to_le_bytes()); // bad version
-        bytes.extend_from_slice(&[0u8; 40]); // hash + data_len
+        bytes.extend_from_slice(&99u32.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 40]);
         std::fs::write(&path, &bytes).unwrap();
         let result = snap_load(&path);
         assert!(result.is_err());

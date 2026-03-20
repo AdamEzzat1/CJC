@@ -629,6 +629,11 @@ fn column_to_value(col: &Column) -> Value {
             .map(|s| Value::String(Rc::new(s.clone())))
             .collect(),
         Column::Bool(v) => v.iter().map(|b| Value::Bool(*b)).collect(),
+        Column::Categorical { levels, codes } => codes
+            .iter()
+            .map(|&c| Value::String(Rc::new(levels[c as usize].clone())))
+            .collect(),
+        Column::DateTime(v) => v.iter().map(|i| Value::Int(*i)).collect(),
     };
     Value::Array(Rc::new(vals))
 }

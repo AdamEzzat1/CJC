@@ -28,6 +28,16 @@ pub const TAG_BF16: u8 = 0x0E;
 pub const TAG_F16: u8 = 0x0F;
 pub const TAG_COMPLEX: u8 = 0x10;
 pub const TAG_MAP: u8 = 0x11;
+pub const TAG_TYPED_TENSOR: u8 = 0x12;
+pub const TAG_CHUNKED_TENSOR: u8 = 0x13;
+pub const TAG_SPARSE_CSR: u8 = 0x14;
+pub const TAG_CATEGORICAL: u8 = 0x15;
+pub const TAG_SCHEMA: u8 = 0x16;
+pub const TAG_DATAFRAME: u8 = 0x17;
+
+/// Snap format magic bytes and version.
+pub const SNAP_MAGIC: &[u8; 4] = b"CJS\x01";
+pub const SNAP_VERSION: u8 = 2;
 
 /// Canonical NaN representation for f64 (quiet NaN with no payload).
 const CANONICAL_NAN_BITS: u64 = 0x7FF8_0000_0000_0000;
@@ -215,9 +225,12 @@ fn encode_value(value: &Value, buf: &mut Vec<u8>) {
             }
         }
 
+        Value::SparseTensor(s) => {
+            encode_sparse_csr(s.nrows, s.ncols, &s.row_offsets, &s.col_indices, &s.values, buf);
+        }
+
         // Runtime-only variants that cannot be meaningfully serialized:
-        Value::SparseTensor(_)
-        | Value::ClassRef(_)
+        Value::ClassRef(_)
         | Value::Fn(_)
         | Value::Closure { .. }
         | Value::Regex { .. }
@@ -235,6 +248,245 @@ fn encode_value(value: &Value, buf: &mut Vec<u8>) {
             );
         }
     }
+}
+
+/// Encode a CJC `Value` into the v2 snap format with magic header and version byte.
+///
+/// Format: [MAGIC: "CJS\x01"][version: u8][flags: u8][payload...]
+/// Flags: 0x00 = uncompressed, no special features
+pub fn snap_encode_v2(value: &Value) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(256);
+    buf.extend_from_slice(SNAP_MAGIC);
+    buf.push(SNAP_VERSION);
+    buf.push(0x00); // flags: uncompressed
+    encode_value(value, &mut buf);
+    buf
+}
+
+/// Encode a typed tensor (DType + raw bytes).
+/// Format: [TAG_TYPED_TENSOR][dtype: u8][ndim: u64][shape...][raw_bytes]
+pub fn encode_typed_tensor(
+    dtype_tag: u8,
+    shape: &[usize],
+    raw_bytes: &[u8],
+    buf: &mut Vec<u8>,
+) {
+    buf.push(TAG_TYPED_TENSOR);
+    buf.push(dtype_tag);
+    let ndim = shape.len() as u64;
+    buf.extend_from_slice(&ndim.to_le_bytes());
+    for &dim in shape {
+        buf.extend_from_slice(&(dim as u64).to_le_bytes());
+    }
+    let byte_len = raw_bytes.len() as u64;
+    buf.extend_from_slice(&byte_len.to_le_bytes());
+    buf.extend_from_slice(raw_bytes);
+}
+
+/// Encode a sparse CSR matrix.
+/// Format: [TAG_SPARSE_CSR][dtype: u8][nrows: u64][ncols: u64][nnz: u64]
+///         [row_ptr bytes][col_idx bytes][values bytes]
+pub fn encode_sparse_csr(
+    nrows: usize,
+    ncols: usize,
+    row_ptr: &[usize],
+    col_idx: &[usize],
+    values: &[f64],
+    buf: &mut Vec<u8>,
+) {
+    buf.push(TAG_SPARSE_CSR);
+    buf.push(0x00); // dtype = f64
+    buf.extend_from_slice(&(nrows as u64).to_le_bytes());
+    buf.extend_from_slice(&(ncols as u64).to_le_bytes());
+    let nnz = values.len() as u64;
+    buf.extend_from_slice(&nnz.to_le_bytes());
+    // row_ptr: (nrows+1) entries
+    for &rp in row_ptr {
+        buf.extend_from_slice(&(rp as u64).to_le_bytes());
+    }
+    // col_idx: nnz entries
+    for &ci in col_idx {
+        buf.extend_from_slice(&(ci as u64).to_le_bytes());
+    }
+    // values: nnz f64s
+    for &v in values {
+        let bits = if v.is_nan() { CANONICAL_NAN_BITS } else { v.to_bits() };
+        buf.extend_from_slice(&bits.to_le_bytes());
+    }
+}
+
+/// Encode a categorical column.
+/// Format: [TAG_CATEGORICAL][n_levels: u32][level_strings...][n_rows: u64][codes: n_rows × u32]
+pub fn encode_categorical(
+    levels: &[String],
+    codes: &[u32],
+    buf: &mut Vec<u8>,
+) {
+    buf.push(TAG_CATEGORICAL);
+    let n_levels = levels.len() as u32;
+    buf.extend_from_slice(&n_levels.to_le_bytes());
+    for level in levels {
+        encode_string(level, buf);
+    }
+    let n_rows = codes.len() as u64;
+    buf.extend_from_slice(&n_rows.to_le_bytes());
+    for &c in codes {
+        buf.extend_from_slice(&c.to_le_bytes());
+    }
+}
+
+/// Encode a schema (field names + types).
+/// Format: [TAG_SCHEMA][n_fields: u32][name: str, type_tag: u8]...
+pub fn encode_schema(
+    fields: &[(String, u8)],
+    buf: &mut Vec<u8>,
+) {
+    buf.push(TAG_SCHEMA);
+    let n_fields = fields.len() as u32;
+    buf.extend_from_slice(&n_fields.to_le_bytes());
+    for (name, type_tag) in fields {
+        encode_string(name, buf);
+        buf.push(*type_tag);
+    }
+}
+
+/// Default chunk size for chunked tensor encoding: 4 MB.
+pub const DEFAULT_CHUNK_SIZE: usize = 4 * 1024 * 1024;
+
+/// Column type tags for DataFrame encoding.
+pub const COL_TYPE_INT: u8 = 0;
+pub const COL_TYPE_FLOAT: u8 = 1;
+pub const COL_TYPE_STR: u8 = 2;
+pub const COL_TYPE_BOOL: u8 = 3;
+pub const COL_TYPE_CATEGORICAL: u8 = 4;
+pub const COL_TYPE_DATETIME: u8 = 5;
+
+/// Encode a tensor as chunked format with per-chunk SHA-256 hashes.
+///
+/// Format: [TAG_CHUNKED_TENSOR][dtype: u8][ndim: u64][shape...]
+///         [chunk_size: u64][n_chunks: u64]
+///         [chunk_0_len: u64][chunk_0_hash: 32 bytes][chunk_0_bytes...]
+///         [chunk_1_len: u64][chunk_1_hash: 32 bytes][chunk_1_bytes...]
+///         ...
+///
+/// This enables streaming, content-addressable chunks, and resumable I/O.
+pub fn encode_chunked_tensor(
+    dtype_tag: u8,
+    shape: &[usize],
+    raw_bytes: &[u8],
+    chunk_size: usize,
+    buf: &mut Vec<u8>,
+) {
+    buf.push(TAG_CHUNKED_TENSOR);
+    buf.push(dtype_tag);
+    let ndim = shape.len() as u64;
+    buf.extend_from_slice(&ndim.to_le_bytes());
+    for &dim in shape {
+        buf.extend_from_slice(&(dim as u64).to_le_bytes());
+    }
+
+    let cs = if chunk_size == 0 { DEFAULT_CHUNK_SIZE } else { chunk_size };
+    buf.extend_from_slice(&(cs as u64).to_le_bytes());
+
+    // Calculate number of chunks
+    let n_chunks = if raw_bytes.is_empty() {
+        0usize
+    } else {
+        (raw_bytes.len() + cs - 1) / cs
+    };
+    buf.extend_from_slice(&(n_chunks as u64).to_le_bytes());
+
+    // Encode each chunk: [len][sha256][bytes]
+    for i in 0..n_chunks {
+        let start = i * cs;
+        let end = (start + cs).min(raw_bytes.len());
+        let chunk = &raw_bytes[start..end];
+        let chunk_len = chunk.len() as u64;
+        let chunk_hash = crate::sha256(chunk);
+
+        buf.extend_from_slice(&chunk_len.to_le_bytes());
+        buf.extend_from_slice(&chunk_hash);
+        buf.extend_from_slice(chunk);
+    }
+}
+
+/// Encode a DataFrame as columnar binary format.
+///
+/// Format: [TAG_DATAFRAME][n_cols: u32][n_rows: u64]
+///         [col_name: str][col_type: u8][col_data...]...
+///
+/// Column data formats:
+/// - Int:         [i64 × n_rows]
+/// - Float:       [f64 bits × n_rows] (NaN canonicalized)
+/// - Str:         [string × n_rows]
+/// - Bool:        [u8 × n_rows] (0x00/0x01)
+/// - Categorical: [n_levels: u32][level_strings...][codes: u32 × n_rows]
+/// - DateTime:    [i64 × n_rows] (epoch millis)
+pub fn encode_dataframe(
+    column_names: &[&str],
+    column_types: &[u8],
+    column_data: &[DataFrameColumnData<'_>],
+    n_rows: usize,
+    buf: &mut Vec<u8>,
+) {
+    buf.push(TAG_DATAFRAME);
+    let n_cols = column_names.len() as u32;
+    buf.extend_from_slice(&n_cols.to_le_bytes());
+    buf.extend_from_slice(&(n_rows as u64).to_le_bytes());
+
+    for i in 0..column_names.len() {
+        encode_string(column_names[i], buf);
+        buf.push(column_types[i]);
+
+        match &column_data[i] {
+            DataFrameColumnData::Int(vals) => {
+                for &v in vals.iter() {
+                    buf.extend_from_slice(&v.to_le_bytes());
+                }
+            }
+            DataFrameColumnData::Float(vals) => {
+                for &v in vals.iter() {
+                    let bits = if v.is_nan() { CANONICAL_NAN_BITS } else { v.to_bits() };
+                    buf.extend_from_slice(&bits.to_le_bytes());
+                }
+            }
+            DataFrameColumnData::Str(vals) => {
+                for s in vals.iter() {
+                    encode_string(s, buf);
+                }
+            }
+            DataFrameColumnData::Bool(vals) => {
+                for &b in vals.iter() {
+                    buf.push(if b { 0x01 } else { 0x00 });
+                }
+            }
+            DataFrameColumnData::Categorical { levels, codes } => {
+                let n_levels = levels.len() as u32;
+                buf.extend_from_slice(&n_levels.to_le_bytes());
+                for level in levels.iter() {
+                    encode_string(level, buf);
+                }
+                for &c in codes.iter() {
+                    buf.extend_from_slice(&c.to_le_bytes());
+                }
+            }
+            DataFrameColumnData::DateTime(vals) => {
+                for &v in vals.iter() {
+                    buf.extend_from_slice(&v.to_le_bytes());
+                }
+            }
+        }
+    }
+}
+
+/// Typed column data for DataFrame encoding.
+pub enum DataFrameColumnData<'a> {
+    Int(&'a [i64]),
+    Float(&'a [f64]),
+    Str(&'a [String]),
+    Bool(&'a [bool]),
+    Categorical { levels: &'a [String], codes: &'a [u32] },
+    DateTime(&'a [i64]),
 }
 
 /// Encode a string as 8-byte little-endian length + UTF-8 bytes.

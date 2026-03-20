@@ -1891,5 +1891,726 @@ impl Tensor {
             ))
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Phase 2: Boolean / Masking Ops
+    // -----------------------------------------------------------------------
+
+    /// Element-wise conditional select: `where(condition, other)`.
+    /// For each element, returns `self[i]` if `condition[i] != 0.0`, else `other[i]`.
+    pub fn tensor_where(&self, condition: &Tensor, other: &Tensor) -> Result<Tensor, RuntimeError> {
+        if self.shape() != condition.shape() || self.shape() != other.shape() {
+            return Err(RuntimeError::InvalidOperation(
+                format!("where: shape mismatch self={:?} cond={:?} other={:?}",
+                    self.shape(), condition.shape(), other.shape()),
+            ));
+        }
+        let s = self.to_vec();
+        let c = condition.to_vec();
+        let o = other.to_vec();
+        let result: Vec<f64> = s.iter().zip(c.iter()).zip(o.iter())
+            .map(|((&sv, &cv), &ov)| if cv != 0.0 { sv } else { ov })
+            .collect();
+        Tensor::from_vec(result, self.shape())
+    }
+
+    /// Returns `true` if any element is non-zero.
+    pub fn any(&self) -> bool {
+        let data = self.to_vec();
+        data.iter().any(|&x| x != 0.0)
+    }
+
+    /// Returns `true` if all elements are non-zero.
+    pub fn all(&self) -> bool {
+        let data = self.to_vec();
+        data.iter().all(|&x| x != 0.0)
+    }
+
+    /// Returns a 1-D tensor of flat indices where elements are non-zero.
+    pub fn nonzero(&self) -> Tensor {
+        let data = self.to_vec();
+        let indices: Vec<f64> = data.iter().enumerate()
+            .filter(|(_, &v)| v != 0.0)
+            .map(|(i, _)| i as f64)
+            .collect();
+        let len = indices.len();
+        if len == 0 {
+            Tensor::from_vec(vec![], &[0]).unwrap()
+        } else {
+            Tensor::from_vec(indices, &[len]).unwrap()
+        }
+    }
+
+    /// Fill elements where `mask` is non-zero with `value`.
+    pub fn masked_fill(&self, mask: &Tensor, value: f64) -> Result<Tensor, RuntimeError> {
+        if self.shape() != mask.shape() {
+            return Err(RuntimeError::InvalidOperation(
+                format!("masked_fill: shape mismatch self={:?} mask={:?}",
+                    self.shape(), mask.shape()),
+            ));
+        }
+        let data = self.to_vec();
+        let m = mask.to_vec();
+        let result: Vec<f64> = data.iter().zip(m.iter())
+            .map(|(&d, &mv)| if mv != 0.0 { value } else { d })
+            .collect();
+        Tensor::from_vec(result, self.shape())
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 2: Axis Reductions with keepdim
+    // -----------------------------------------------------------------------
+
+    /// Helper: generic axis reduction using BinnedAccumulator.
+    /// `reduce_fn` takes a slice of values and returns the reduced value.
+    fn reduce_axis<F>(&self, axis: usize, keepdim: bool, reduce_fn: F)
+        -> Result<Tensor, RuntimeError>
+    where
+        F: Fn(&[f64]) -> f64,
+    {
+        let ndim = self.ndim();
+        if axis >= ndim {
+            return Err(RuntimeError::IndexOutOfBounds {
+                index: axis,
+                length: ndim,
+            });
+        }
+
+        let axis_len = self.shape[axis];
+        // Build output shape
+        let mut out_shape: Vec<usize> = self.shape.clone();
+        out_shape[axis] = 1;
+        let out_numel = Self::shape_numel(&out_shape);
+        let out_strides = Self::compute_strides(&out_shape);
+
+        let data = self.to_vec();
+        let mut result = Vec::with_capacity(out_numel);
+        let mut indices = vec![0usize; ndim];
+
+        for out_idx in 0..out_numel {
+            // Compute N-D index from flat output index
+            {
+                let mut remaining = out_idx;
+                for d in 0..ndim {
+                    indices[d] = remaining / out_strides[d];
+                    remaining %= out_strides[d];
+                }
+            }
+
+            // Gather values along the reduction axis
+            let mut vals = Vec::with_capacity(axis_len);
+            for k in 0..axis_len {
+                let mut flat = self.offset;
+                for d in 0..ndim {
+                    let idx = if d == axis { k } else { indices[d] };
+                    flat += idx * self.strides[d];
+                }
+                vals.push(data[flat]);
+            }
+            result.push(reduce_fn(&vals));
+        }
+
+        let final_shape = if keepdim {
+            out_shape
+        } else {
+            // Remove the axis dimension
+            let mut s: Vec<usize> = self.shape.iter().enumerate()
+                .filter(|&(i, _)| i != axis)
+                .map(|(_, &v)| v)
+                .collect();
+            if s.is_empty() {
+                s.push(1); // scalar result
+            }
+            s
+        };
+
+        Tensor::from_vec(result, &final_shape)
+    }
+
+    /// Mean along an axis with optional keepdim.
+    pub fn mean_axis(&self, axis: usize, keepdim: bool) -> Result<Tensor, RuntimeError> {
+        self.reduce_axis(axis, keepdim, |vals| {
+            let mut acc = BinnedAccumulatorF64::new();
+            for &v in vals { acc.add(v); }
+            acc.finalize() / vals.len() as f64
+        })
+    }
+
+    /// Max along an axis with optional keepdim. Returns (values, indices).
+    pub fn max_axis(&self, axis: usize, keepdim: bool) -> Result<(Tensor, Tensor), RuntimeError> {
+        let ndim = self.ndim();
+        if axis >= ndim {
+            return Err(RuntimeError::IndexOutOfBounds { index: axis, length: ndim });
+        }
+        let axis_len = self.shape[axis];
+        let mut out_shape = self.shape.clone();
+        out_shape[axis] = 1;
+        let out_numel = Self::shape_numel(&out_shape);
+        let out_strides = Self::compute_strides(&out_shape);
+        let data = self.to_vec();
+        let mut values = Vec::with_capacity(out_numel);
+        let mut idx_vals = Vec::with_capacity(out_numel);
+        let mut indices = vec![0usize; ndim];
+
+        for out_idx in 0..out_numel {
+            let mut remaining = out_idx;
+            for d in 0..ndim {
+                indices[d] = remaining / out_strides[d];
+                remaining %= out_strides[d];
+            }
+            let mut best_val = f64::NEG_INFINITY;
+            let mut best_idx = 0usize;
+            for k in 0..axis_len {
+                let mut flat = self.offset;
+                for d in 0..ndim {
+                    let idx = if d == axis { k } else { indices[d] };
+                    flat += idx * self.strides[d];
+                }
+                let v = data[flat];
+                if v > best_val {
+                    best_val = v;
+                    best_idx = k;
+                }
+            }
+            values.push(best_val);
+            idx_vals.push(best_idx as f64);
+        }
+
+        let final_shape = if keepdim {
+            out_shape
+        } else {
+            let mut s: Vec<usize> = self.shape.iter().enumerate()
+                .filter(|&(i, _)| i != axis).map(|(_, &v)| v).collect();
+            if s.is_empty() { s.push(1); }
+            s
+        };
+        Ok((
+            Tensor::from_vec(values, &final_shape)?,
+            Tensor::from_vec(idx_vals, &final_shape)?,
+        ))
+    }
+
+    /// Min along an axis with optional keepdim. Returns (values, indices).
+    pub fn min_axis(&self, axis: usize, keepdim: bool) -> Result<(Tensor, Tensor), RuntimeError> {
+        let ndim = self.ndim();
+        if axis >= ndim {
+            return Err(RuntimeError::IndexOutOfBounds { index: axis, length: ndim });
+        }
+        let axis_len = self.shape[axis];
+        let mut out_shape = self.shape.clone();
+        out_shape[axis] = 1;
+        let out_numel = Self::shape_numel(&out_shape);
+        let out_strides = Self::compute_strides(&out_shape);
+        let data = self.to_vec();
+        let mut values = Vec::with_capacity(out_numel);
+        let mut idx_vals = Vec::with_capacity(out_numel);
+        let mut indices = vec![0usize; ndim];
+
+        for out_idx in 0..out_numel {
+            let mut remaining = out_idx;
+            for d in 0..ndim {
+                indices[d] = remaining / out_strides[d];
+                remaining %= out_strides[d];
+            }
+            let mut best_val = f64::INFINITY;
+            let mut best_idx = 0usize;
+            for k in 0..axis_len {
+                let mut flat = self.offset;
+                for d in 0..ndim {
+                    let idx = if d == axis { k } else { indices[d] };
+                    flat += idx * self.strides[d];
+                }
+                let v = data[flat];
+                if v < best_val {
+                    best_val = v;
+                    best_idx = k;
+                }
+            }
+            values.push(best_val);
+            idx_vals.push(best_idx as f64);
+        }
+
+        let final_shape = if keepdim {
+            out_shape
+        } else {
+            let mut s: Vec<usize> = self.shape.iter().enumerate()
+                .filter(|&(i, _)| i != axis).map(|(_, &v)| v).collect();
+            if s.is_empty() { s.push(1); }
+            s
+        };
+        Ok((
+            Tensor::from_vec(values, &final_shape)?,
+            Tensor::from_vec(idx_vals, &final_shape)?,
+        ))
+    }
+
+    /// Variance along an axis with optional keepdim.
+    pub fn var_axis(&self, axis: usize, keepdim: bool) -> Result<Tensor, RuntimeError> {
+        let mean_t = self.mean_axis(axis, true)?;
+        let ndim = self.ndim();
+        if axis >= ndim {
+            return Err(RuntimeError::IndexOutOfBounds { index: axis, length: ndim });
+        }
+        let axis_len = self.shape[axis];
+        let mut out_shape = self.shape.clone();
+        out_shape[axis] = 1;
+        let out_numel = Self::shape_numel(&out_shape);
+        let out_strides = Self::compute_strides(&out_shape);
+        let data = self.to_vec();
+        let mean_data = mean_t.to_vec();
+        let mut result = Vec::with_capacity(out_numel);
+        let mut indices = vec![0usize; ndim];
+
+        for out_idx in 0..out_numel {
+            let mut remaining = out_idx;
+            for d in 0..ndim {
+                indices[d] = remaining / out_strides[d];
+                remaining %= out_strides[d];
+            }
+            let mu = mean_data[out_idx];
+            let mut acc = BinnedAccumulatorF64::new();
+            for k in 0..axis_len {
+                let mut flat = self.offset;
+                for d in 0..ndim {
+                    let idx = if d == axis { k } else { indices[d] };
+                    flat += idx * self.strides[d];
+                }
+                let diff = data[flat] - mu;
+                acc.add(diff * diff);
+            }
+            result.push(acc.finalize() / axis_len as f64);
+        }
+
+        let final_shape = if keepdim {
+            out_shape
+        } else {
+            let mut s: Vec<usize> = self.shape.iter().enumerate()
+                .filter(|&(i, _)| i != axis).map(|(_, &v)| v).collect();
+            if s.is_empty() { s.push(1); }
+            s
+        };
+        Tensor::from_vec(result, &final_shape)
+    }
+
+    /// Standard deviation along an axis with optional keepdim.
+    pub fn std_axis(&self, axis: usize, keepdim: bool) -> Result<Tensor, RuntimeError> {
+        let var = self.var_axis(axis, keepdim)?;
+        Ok(var.map(|x| x.sqrt()))
+    }
+
+    /// Product along an axis with optional keepdim.
+    pub fn prod_axis(&self, axis: usize, keepdim: bool) -> Result<Tensor, RuntimeError> {
+        self.reduce_axis(axis, keepdim, |vals| {
+            // Product via exp(sum(ln(abs))) for numerical stability is overkill here;
+            // simple product is deterministic and exact for integer-like values.
+            let mut product = 1.0f64;
+            for &v in vals { product *= v; }
+            product
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 2: Sort Operations
+    // -----------------------------------------------------------------------
+
+    /// Sort along an axis (stable sort). Returns the sorted tensor.
+    /// For N-D tensors, sorts slices along the specified axis.
+    pub fn sort_axis(&self, axis: usize, descending: bool) -> Result<Tensor, RuntimeError> {
+        let ndim = self.ndim();
+        if axis >= ndim {
+            return Err(RuntimeError::IndexOutOfBounds { index: axis, length: ndim });
+        }
+        let data = self.to_vec();
+        let axis_len = self.shape[axis];
+        let out_shape = self.shape.clone();
+        let out_numel = Self::shape_numel(&out_shape);
+
+        // Build strides for iterating over all non-axis positions
+        let mut iter_shape: Vec<usize> = Vec::new();
+        for (i, &s) in self.shape.iter().enumerate() {
+            if i != axis { iter_shape.push(s); }
+        }
+        let n_slices: usize = iter_shape.iter().product::<usize>().max(1);
+
+        let mut result = vec![0.0f64; out_numel];
+
+        // We iterate over all positions with axis index = 0
+        let mut pos = vec![0usize; ndim];
+        for slice_idx in 0..n_slices {
+            // Compute the N-D position (with axis dim = 0)
+            let mut remaining = slice_idx;
+            let mut dim_idx = 0;
+            for d in 0..ndim {
+                if d == axis {
+                    pos[d] = 0;
+                } else {
+                    let stride = {
+                        let mut s = 1usize;
+                        let mut di = 0;
+                        for d2 in 0..ndim {
+                            if d2 == axis { continue; }
+                            if di > dim_idx { s *= self.shape[d2]; }
+                            di += 1;
+                        }
+                        s
+                    };
+                    pos[d] = remaining / stride;
+                    remaining %= stride;
+                    dim_idx += 1;
+                }
+            }
+
+            // Gather values along axis
+            let mut vals: Vec<(f64, usize)> = Vec::with_capacity(axis_len);
+            for k in 0..axis_len {
+                let mut flat = self.offset;
+                for d in 0..ndim {
+                    let idx = if d == axis { k } else { pos[d] };
+                    flat += idx * self.strides[d];
+                }
+                vals.push((data[flat], k));
+            }
+
+            // Stable sort with deterministic tie-breaking by original index
+            if descending {
+                vals.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.1.cmp(&b.1)));
+            } else {
+                vals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.1.cmp(&b.1)));
+            }
+
+            // Scatter back
+            for (k, &(v, _)) in vals.iter().enumerate() {
+                let mut flat = 0;
+                let out_strides_local = Self::compute_strides(&out_shape);
+                for d in 0..ndim {
+                    let idx = if d == axis { k } else { pos[d] };
+                    flat += idx * out_strides_local[d];
+                }
+                result[flat] = v;
+            }
+        }
+
+        Tensor::from_vec(result, &out_shape)
+    }
+
+    /// N-D argsort along an axis. Returns indices tensor.
+    pub fn argsort_axis(&self, axis: usize, descending: bool) -> Result<Tensor, RuntimeError> {
+        let ndim = self.ndim();
+        if axis >= ndim {
+            return Err(RuntimeError::IndexOutOfBounds { index: axis, length: ndim });
+        }
+        let data = self.to_vec();
+        let axis_len = self.shape[axis];
+        let out_shape = self.shape.clone();
+        let out_numel = Self::shape_numel(&out_shape);
+
+        let mut iter_shape: Vec<usize> = Vec::new();
+        for (i, &s) in self.shape.iter().enumerate() {
+            if i != axis { iter_shape.push(s); }
+        }
+        let n_slices: usize = iter_shape.iter().product::<usize>().max(1);
+
+        let mut result = vec![0.0f64; out_numel];
+        let mut pos = vec![0usize; ndim];
+
+        for slice_idx in 0..n_slices {
+            let mut remaining = slice_idx;
+            let mut dim_idx = 0;
+            for d in 0..ndim {
+                if d == axis {
+                    pos[d] = 0;
+                } else {
+                    let stride = {
+                        let mut s = 1usize;
+                        let mut di = 0;
+                        for d2 in 0..ndim {
+                            if d2 == axis { continue; }
+                            if di > dim_idx { s *= self.shape[d2]; }
+                            di += 1;
+                        }
+                        s
+                    };
+                    pos[d] = remaining / stride;
+                    remaining %= stride;
+                    dim_idx += 1;
+                }
+            }
+
+            let mut vals: Vec<(f64, usize)> = Vec::with_capacity(axis_len);
+            for k in 0..axis_len {
+                let mut flat = self.offset;
+                for d in 0..ndim {
+                    let idx = if d == axis { k } else { pos[d] };
+                    flat += idx * self.strides[d];
+                }
+                vals.push((data[flat], k));
+            }
+
+            if descending {
+                vals.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.1.cmp(&b.1)));
+            } else {
+                vals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.1.cmp(&b.1)));
+            }
+
+            for (k, &(_, orig_idx)) in vals.iter().enumerate() {
+                let out_strides_local = Self::compute_strides(&out_shape);
+                let mut flat = 0;
+                for d in 0..ndim {
+                    let idx = if d == axis { k } else { pos[d] };
+                    flat += idx * out_strides_local[d];
+                }
+                result[flat] = orig_idx as f64;
+            }
+        }
+
+        Tensor::from_vec(result, &out_shape)
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 2: Einsum
+    // -----------------------------------------------------------------------
+
+    /// Einstein summation notation.
+    /// Supports patterns like "ij,jk->ik" (matmul), "ii->i" (diagonal),
+    /// "ij->ji" (transpose), "ijk,ikl->ijl" (batched matmul).
+    /// Uses BinnedAccumulator for all reductions.
+    pub fn einsum(notation: &str, inputs: &[&Tensor]) -> Result<Tensor, RuntimeError> {
+        // Parse notation: "subscripts->output" or just "subscripts" (implicit)
+        let parts: Vec<&str> = notation.split("->").collect();
+        if parts.len() != 2 {
+            return Err(RuntimeError::InvalidOperation(
+                format!("einsum: expected 'subscripts->output' notation, got '{}'", notation),
+            ));
+        }
+        let input_specs: Vec<&str> = parts[0].split(',').collect();
+        let output_spec = parts[1];
+
+        if input_specs.len() != inputs.len() {
+            return Err(RuntimeError::InvalidOperation(
+                format!("einsum: {} input specs but {} tensors", input_specs.len(), inputs.len()),
+            ));
+        }
+
+        // Build label → size mapping
+        let mut label_size = std::collections::BTreeMap::new();
+        for (i, &spec) in input_specs.iter().enumerate() {
+            let chars: Vec<char> = spec.chars().collect();
+            if chars.len() != inputs[i].ndim() {
+                return Err(RuntimeError::InvalidOperation(
+                    format!("einsum: spec '{}' has {} dims but tensor has {}", spec, chars.len(), inputs[i].ndim()),
+                ));
+            }
+            for (d, &c) in chars.iter().enumerate() {
+                let sz = inputs[i].shape()[d];
+                if let Some(&prev) = label_size.get(&c) {
+                    if prev != sz {
+                        return Err(RuntimeError::InvalidOperation(
+                            format!("einsum: label '{}' has conflicting sizes {} vs {}", c, prev, sz),
+                        ));
+                    }
+                } else {
+                    label_size.insert(c, sz);
+                }
+            }
+        }
+
+        // Determine output shape
+        let output_chars: Vec<char> = output_spec.chars().collect();
+        let output_shape: Vec<usize> = output_chars.iter()
+            .map(|c| label_size.get(c).copied().ok_or_else(||
+                RuntimeError::InvalidOperation(format!("einsum: unknown label '{}' in output", c))))
+            .collect::<Result<_, _>>()?;
+        let out_numel = Self::shape_numel(&output_shape);
+
+        // Determine contraction labels (in input but not output)
+        let output_set: std::collections::BTreeSet<char> = output_chars.iter().copied().collect();
+        let contract_labels: Vec<char> = label_size.keys()
+            .filter(|c| !output_set.contains(c))
+            .copied()
+            .collect();
+        let contract_sizes: Vec<usize> = contract_labels.iter()
+            .map(|c| label_size[c])
+            .collect();
+        let contract_numel: usize = contract_sizes.iter().product::<usize>().max(1);
+
+        // Precompute input spec chars
+        let input_chars: Vec<Vec<char>> = input_specs.iter().map(|s| s.chars().collect()).collect();
+
+        // For each output position, iterate over contraction indices
+        let out_strides = Self::compute_strides(&output_shape);
+        let mut result = vec![0.0f64; out_numel];
+
+        // Pre-read input data
+        let input_data: Vec<Vec<f64>> = inputs.iter().map(|t| t.to_vec()).collect();
+        let input_strides: Vec<Vec<usize>> = inputs.iter().map(|t| t.strides.clone()).collect();
+        let input_offsets: Vec<usize> = inputs.iter().map(|t| t.offset).collect();
+
+        for out_idx in 0..out_numel {
+            // Compute output label values
+            let mut label_vals = std::collections::BTreeMap::new();
+            let mut remaining = out_idx;
+            for (d, &c) in output_chars.iter().enumerate() {
+                let stride = if d < out_strides.len() { out_strides[d] } else { 1 };
+                label_vals.insert(c, remaining / stride);
+                remaining %= stride;
+            }
+
+            let mut acc = BinnedAccumulatorF64::new();
+            // Iterate over all contraction index combinations
+            for cidx in 0..contract_numel {
+                // Compute contraction label values
+                let mut cr = cidx;
+                for (ci, &cl) in contract_labels.iter().enumerate() {
+                    let stride: usize = contract_sizes[ci+1..].iter().product::<usize>().max(1);
+                    label_vals.insert(cl, cr / stride);
+                    cr %= stride;
+                }
+
+                // Compute product of input elements
+                let mut product = 1.0f64;
+                for (inp_idx, chars) in input_chars.iter().enumerate() {
+                    let mut flat = input_offsets[inp_idx];
+                    for (d, &c) in chars.iter().enumerate() {
+                        flat += label_vals[&c] * input_strides[inp_idx][d];
+                    }
+                    product *= input_data[inp_idx][flat];
+                }
+                acc.add(product);
+            }
+            result[out_idx] = acc.finalize();
+        }
+
+        if output_shape.is_empty() {
+            Tensor::from_vec(result, &[1])
+        } else {
+            Tensor::from_vec(result, &output_shape)
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 2: Reshape / View Enhancements
+    // -----------------------------------------------------------------------
+
+    /// Add a dimension of size 1 at position `dim`.
+    pub fn unsqueeze(&self, dim: usize) -> Result<Tensor, RuntimeError> {
+        let ndim = self.ndim();
+        if dim > ndim {
+            return Err(RuntimeError::IndexOutOfBounds { index: dim, length: ndim + 1 });
+        }
+        let mut new_shape = self.shape.clone();
+        new_shape.insert(dim, 1);
+        self.reshape(&new_shape)
+    }
+
+    /// Remove a dimension of size 1 at position `dim`.
+    /// If `dim` is `None`, removes all dimensions of size 1.
+    pub fn squeeze(&self, dim: Option<usize>) -> Result<Tensor, RuntimeError> {
+        match dim {
+            Some(d) => {
+                if d >= self.ndim() {
+                    return Err(RuntimeError::IndexOutOfBounds { index: d, length: self.ndim() });
+                }
+                if self.shape[d] != 1 {
+                    return Err(RuntimeError::InvalidOperation(
+                        format!("squeeze: dimension {} has size {}, not 1", d, self.shape[d]),
+                    ));
+                }
+                let mut new_shape = self.shape.clone();
+                new_shape.remove(d);
+                if new_shape.is_empty() {
+                    new_shape.push(1); // scalar
+                }
+                self.reshape(&new_shape)
+            }
+            None => {
+                let new_shape: Vec<usize> = self.shape.iter()
+                    .filter(|&&s| s != 1)
+                    .copied()
+                    .collect();
+                let new_shape = if new_shape.is_empty() { vec![1] } else { new_shape };
+                self.reshape(&new_shape)
+            }
+        }
+    }
+
+    /// Broadcast without copying. Returns a view with stride=0 for broadcasted dims.
+    /// Same as `broadcast_to` but named for consistency with the gap-fix plan.
+    pub fn expand(&self, target_shape: &[usize]) -> Result<Tensor, RuntimeError> {
+        self.broadcast_to(target_shape)
+    }
+
+    /// Flatten a range of dimensions [start_dim, end_dim] into a single dimension.
+    pub fn flatten(&self, start_dim: usize, end_dim: usize) -> Result<Tensor, RuntimeError> {
+        if start_dim > end_dim || end_dim >= self.ndim() {
+            return Err(RuntimeError::InvalidOperation(
+                format!("flatten: invalid dim range [{}, {}] for {}D tensor", start_dim, end_dim, self.ndim()),
+            ));
+        }
+        let mut new_shape = Vec::new();
+        for i in 0..start_dim {
+            new_shape.push(self.shape[i]);
+        }
+        let flat_size: usize = self.shape[start_dim..=end_dim].iter().product();
+        new_shape.push(flat_size);
+        for i in (end_dim + 1)..self.ndim() {
+            new_shape.push(self.shape[i]);
+        }
+        self.reshape(&new_shape)
+    }
+
+    /// Split tensor into `n` roughly equal chunks along dimension `dim`.
+    pub fn chunk(&self, n: usize, dim: usize) -> Result<Vec<Tensor>, RuntimeError> {
+        if dim >= self.ndim() {
+            return Err(RuntimeError::IndexOutOfBounds { index: dim, length: self.ndim() });
+        }
+        if n == 0 {
+            return Err(RuntimeError::InvalidOperation("chunk: n must be > 0".into()));
+        }
+        let dim_size = self.shape[dim];
+        let chunk_size = (dim_size + n - 1) / n;
+        let mut sizes = Vec::new();
+        let mut remaining = dim_size;
+        while remaining > 0 {
+            let s = remaining.min(chunk_size);
+            sizes.push(s);
+            remaining -= s;
+        }
+        self.split(&sizes, dim)
+    }
+
+    /// Split tensor along dimension `dim` according to the given sizes.
+    pub fn split(&self, sizes: &[usize], dim: usize) -> Result<Vec<Tensor>, RuntimeError> {
+        if dim >= self.ndim() {
+            return Err(RuntimeError::IndexOutOfBounds { index: dim, length: self.ndim() });
+        }
+        let total: usize = sizes.iter().sum();
+        if total != self.shape[dim] {
+            return Err(RuntimeError::InvalidOperation(
+                format!("split: sizes sum {} != dim size {}", total, self.shape[dim]),
+            ));
+        }
+
+        let mut results = Vec::new();
+        let mut offset = 0;
+
+        for &sz in sizes {
+            let ranges: Vec<(usize, usize)> = self.shape.iter()
+                .enumerate()
+                .map(|(i, &s)| {
+                    if i == dim { (offset, offset + sz) } else { (0, s) }
+                })
+                .collect();
+            let chunk = self.slice(&ranges)?;
+            // Materialize as contiguous
+            results.push(chunk.to_contiguous());
+            offset += sz;
+        }
+
+        Ok(results)
+    }
 }
 

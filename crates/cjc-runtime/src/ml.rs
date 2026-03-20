@@ -7,6 +7,10 @@
 
 use cjc_repro::KahanAccumulatorF64;
 
+use crate::accumulator::BinnedAccumulatorF64;
+use crate::error::RuntimeError;
+use crate::tensor::Tensor;
+
 // ---------------------------------------------------------------------------
 // Loss functions
 // ---------------------------------------------------------------------------
@@ -431,6 +435,121 @@ impl EarlyStoppingState {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 3C: PCA (Principal Component Analysis)
+// ---------------------------------------------------------------------------
+
+/// Principal Component Analysis via SVD of centered data.
+///
+/// `data` is a 2D Tensor of shape (n_samples, n_features).
+/// `n_components` is the number of principal components to keep.
+///
+/// Returns (transformed_data, components, explained_variance_ratio):
+/// - `transformed_data`: (n_samples, n_components) — data projected onto principal components
+/// - `components`: (n_components, n_features) — principal component directions (rows)
+/// - `explained_variance_ratio`: Vec<f64> of length n_components — fraction of variance per component
+///
+/// **Determinism contract:** All reductions use `BinnedAccumulatorF64`.
+pub fn pca(
+    data: &Tensor,
+    n_components: usize,
+) -> Result<(Tensor, Tensor, Vec<f64>), RuntimeError> {
+    if data.ndim() != 2 {
+        return Err(RuntimeError::InvalidOperation(
+            "PCA requires a 2D data matrix".to_string(),
+        ));
+    }
+    let n_samples = data.shape()[0];
+    let n_features = data.shape()[1];
+
+    if n_samples == 0 || n_features == 0 {
+        return Err(RuntimeError::InvalidOperation(
+            "PCA: empty data matrix".to_string(),
+        ));
+    }
+    if n_components == 0 || n_components > n_features.min(n_samples) {
+        return Err(RuntimeError::InvalidOperation(format!(
+            "PCA: n_components ({}) must be in [1, min(n_samples, n_features) = {}]",
+            n_components,
+            n_features.min(n_samples)
+        )));
+    }
+
+    let raw = data.to_vec();
+
+    // Step 1: Compute column means using BinnedAccumulatorF64
+    let mut means = vec![0.0f64; n_features];
+    for j in 0..n_features {
+        let mut acc = BinnedAccumulatorF64::new();
+        for i in 0..n_samples {
+            acc.add(raw[i * n_features + j]);
+        }
+        means[j] = acc.finalize() / n_samples as f64;
+    }
+
+    // Step 2: Center the data
+    let mut centered = vec![0.0f64; n_samples * n_features];
+    for i in 0..n_samples {
+        for j in 0..n_features {
+            centered[i * n_features + j] = raw[i * n_features + j] - means[j];
+        }
+    }
+    let centered_tensor = Tensor::from_vec(centered, &[n_samples, n_features])?;
+
+    // Step 3: SVD of centered data
+    let (u, s, vt) = centered_tensor.svd()?;
+    let k = n_components.min(s.len());
+
+    // Step 4: Components = first k rows of Vt
+    let vt_data = vt.to_vec();
+    let vt_cols = vt.shape()[1]; // n_features
+    let mut components = vec![0.0f64; k * n_features];
+    for i in 0..k {
+        for j in 0..n_features {
+            components[i * n_features + j] = vt_data[i * vt_cols + j];
+        }
+    }
+
+    // Step 5: Explained variance = s_i^2 / (n_samples - 1)
+    // Total variance = sum of all s_i^2 / (n_samples - 1)
+    let denom = if n_samples > 1 {
+        (n_samples - 1) as f64
+    } else {
+        1.0
+    };
+
+    let mut total_var_acc = BinnedAccumulatorF64::new();
+    for &si in &s {
+        total_var_acc.add(si * si / denom);
+    }
+    let total_var = total_var_acc.finalize();
+
+    let explained_variance_ratio: Vec<f64> = if total_var > 1e-15 {
+        s[..k]
+            .iter()
+            .map(|&si| (si * si / denom) / total_var)
+            .collect()
+    } else {
+        vec![0.0; k]
+    };
+
+    // Step 6: Transformed data = U_k @ diag(S_k)
+    let u_data = u.to_vec();
+    let u_cols = u.shape()[1];
+    let mut transformed = vec![0.0f64; n_samples * k];
+    for i in 0..n_samples {
+        for j in 0..k {
+            transformed[i * k + j] = u_data[i * u_cols + j] * s[j];
+        }
+    }
+
+    Ok((
+        Tensor::from_vec(transformed, &[n_samples, k])?,
+        Tensor::from_vec(components, &[k, n_features])?,
+        explained_variance_ratio,
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -625,5 +744,99 @@ mod tests {
         es.check(1.0); // wait=1
         assert!(!es.check(0.5)); // improvement, wait=0
         assert!(!es.check(0.5)); // wait=1
+    }
+
+    // --- Phase 3C: PCA tests ---
+
+    #[test]
+    fn test_pca_basic_2d() {
+        // 4 samples, 2 features — data lies mostly along first axis
+        let data = Tensor::from_vec(
+            vec![
+                1.0, 0.1,
+                2.0, 0.2,
+                3.0, 0.3,
+                4.0, 0.4,
+            ],
+            &[4, 2],
+        )
+        .unwrap();
+        let (transformed, components, evr) = pca(&data, 2).unwrap();
+        assert_eq!(transformed.shape(), &[4, 2]);
+        assert_eq!(components.shape(), &[2, 2]);
+        assert_eq!(evr.len(), 2);
+        // Explained variance ratios should sum to ~1.0
+        let total: f64 = evr.iter().sum();
+        assert!(
+            (total - 1.0).abs() < 1e-8,
+            "explained variance ratios sum to {} (expected ~1.0)",
+            total
+        );
+        // First component should explain most variance
+        assert!(evr[0] > 0.9, "first component explains {} of variance", evr[0]);
+    }
+
+    #[test]
+    fn test_pca_single_component() {
+        let data = Tensor::from_vec(
+            vec![
+                1.0, 2.0, 3.0,
+                4.0, 5.0, 6.0,
+                7.0, 8.0, 9.0,
+            ],
+            &[3, 3],
+        )
+        .unwrap();
+        let (transformed, components, evr) = pca(&data, 1).unwrap();
+        assert_eq!(transformed.shape(), &[3, 1]);
+        assert_eq!(components.shape(), &[1, 3]);
+        assert_eq!(evr.len(), 1);
+        assert!(evr[0] > 0.0 && evr[0] <= 1.0);
+    }
+
+    #[test]
+    fn test_pca_explained_variance_ratio_bounded() {
+        let data = Tensor::from_vec(
+            vec![
+                1.0, 0.0, 0.5,
+                0.0, 1.0, 0.5,
+                1.0, 1.0, 1.0,
+                2.0, 0.0, 1.0,
+                0.0, 2.0, 1.0,
+            ],
+            &[5, 3],
+        )
+        .unwrap();
+        let (_, _, evr) = pca(&data, 3).unwrap();
+        let total: f64 = evr.iter().sum();
+        assert!(
+            total <= 1.0 + 1e-10,
+            "explained variance ratios sum to {} (should be <= 1.0)",
+            total
+        );
+        for &r in &evr {
+            assert!(r >= -1e-10, "negative explained variance ratio: {}", r);
+        }
+    }
+
+    #[test]
+    fn test_pca_deterministic() {
+        let data = Tensor::from_vec(
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            &[2, 3],
+        )
+        .unwrap();
+        let (t1, c1, e1) = pca(&data, 2).unwrap();
+        let (t2, c2, e2) = pca(&data, 2).unwrap();
+        assert_eq!(t1.to_vec(), t2.to_vec(), "PCA transformed not deterministic");
+        assert_eq!(c1.to_vec(), c2.to_vec(), "PCA components not deterministic");
+        assert_eq!(e1, e2, "PCA explained variance not deterministic");
+    }
+
+    #[test]
+    fn test_pca_invalid_n_components() {
+        let data = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        assert!(pca(&data, 0).is_err(), "n_components=0 should fail");
+        assert!(pca(&data, 3).is_err(), "n_components > min(n,p) should fail");
     }
 }

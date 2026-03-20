@@ -239,7 +239,320 @@ fn decode_value(cursor: &mut Cursor<'_>) -> Result<Value, SnapError> {
             Ok(Value::Map(map_ref))
         }
 
+        TAG_TYPED_TENSOR => {
+            let dtype_tag = cursor.read_byte()?;
+            let ndim = cursor.read_u64_le()? as usize;
+            let mut shape = Vec::with_capacity(ndim);
+            for _ in 0..ndim {
+                shape.push(cursor.read_u64_le()? as usize);
+            }
+            let byte_len = cursor.read_u64_le()? as usize;
+            let raw_bytes = cursor.read_bytes(byte_len)?;
+
+            // Convert typed tensor back to f64 Tensor based on dtype_tag
+            let numel: usize = shape.iter().product();
+            let data: Vec<f64> = match dtype_tag {
+                0 => { // F64
+                    let mut vals = Vec::with_capacity(numel);
+                    for i in 0..numel {
+                        let off = i * 8;
+                        if off + 8 > raw_bytes.len() { return Err(SnapError::UnexpectedEof); }
+                        let bits = u64::from_le_bytes(raw_bytes[off..off+8].try_into().unwrap());
+                        vals.push(f64::from_bits(bits));
+                    }
+                    vals
+                }
+                1 => { // F32
+                    let mut vals = Vec::with_capacity(numel);
+                    for i in 0..numel {
+                        let off = i * 4;
+                        if off + 4 > raw_bytes.len() { return Err(SnapError::UnexpectedEof); }
+                        let bits = u32::from_le_bytes(raw_bytes[off..off+4].try_into().unwrap());
+                        vals.push(f32::from_bits(bits) as f64);
+                    }
+                    vals
+                }
+                2 => { // I64
+                    let mut vals = Vec::with_capacity(numel);
+                    for i in 0..numel {
+                        let off = i * 8;
+                        if off + 8 > raw_bytes.len() { return Err(SnapError::UnexpectedEof); }
+                        let v = i64::from_le_bytes(raw_bytes[off..off+8].try_into().unwrap());
+                        vals.push(v as f64);
+                    }
+                    vals
+                }
+                3 => { // I32
+                    let mut vals = Vec::with_capacity(numel);
+                    for i in 0..numel {
+                        let off = i * 4;
+                        if off + 4 > raw_bytes.len() { return Err(SnapError::UnexpectedEof); }
+                        let v = i32::from_le_bytes(raw_bytes[off..off+4].try_into().unwrap());
+                        vals.push(v as f64);
+                    }
+                    vals
+                }
+                4 => { // U8
+                    raw_bytes.iter().take(numel).map(|&b| b as f64).collect()
+                }
+                _ => {
+                    // For other dtypes (Bool, Bf16, F16, Complex), fall back to f64 zeros
+                    vec![0.0f64; numel]
+                }
+            };
+            let tensor = Tensor::from_vec(data, &shape)
+                .map_err(|_| SnapError::UnexpectedEof)?;
+            Ok(Value::Tensor(tensor))
+        }
+
+        TAG_SPARSE_CSR => {
+            let _dtype_tag = cursor.read_byte()?;
+            let nrows = cursor.read_u64_le()? as usize;
+            let ncols = cursor.read_u64_le()? as usize;
+            let nnz = cursor.read_u64_le()? as usize;
+            // Read row_ptr
+            let mut row_ptr = Vec::with_capacity(nrows + 1);
+            for _ in 0..=nrows {
+                row_ptr.push(cursor.read_u64_le()? as usize);
+            }
+            // Read col_idx
+            let mut col_idx = Vec::with_capacity(nnz);
+            for _ in 0..nnz {
+                col_idx.push(cursor.read_u64_le()? as usize);
+            }
+            // Read values
+            let mut values = Vec::with_capacity(nnz);
+            for _ in 0..nnz {
+                values.push(cursor.read_f64_le()?);
+            }
+            let sparse = cjc_runtime::SparseCsr { nrows, ncols, row_offsets: row_ptr, col_indices: col_idx, values };
+            Ok(Value::SparseTensor(sparse))
+        }
+
+        TAG_CATEGORICAL => {
+            // Decode categorical as an array of strings (mapping codes back to levels)
+            let n_levels = {
+                let bytes = cursor.read_bytes(4)?;
+                u32::from_le_bytes(bytes.try_into().unwrap()) as usize
+            };
+            let mut levels = Vec::with_capacity(n_levels);
+            for _ in 0..n_levels {
+                levels.push(cursor.read_string()?);
+            }
+            let n_rows = cursor.read_u64_le()? as usize;
+            let mut strings = Vec::with_capacity(n_rows);
+            for _ in 0..n_rows {
+                let bytes = cursor.read_bytes(4)?;
+                let code = u32::from_le_bytes(bytes.try_into().unwrap()) as usize;
+                let s = levels.get(code).cloned().unwrap_or_default();
+                strings.push(Value::String(Rc::new(s)));
+            }
+            Ok(Value::Array(Rc::new(strings)))
+        }
+
+        TAG_SCHEMA => {
+            // Decode schema as a struct with field descriptions
+            let n_fields = {
+                let bytes = cursor.read_bytes(4)?;
+                u32::from_le_bytes(bytes.try_into().unwrap()) as usize
+            };
+            let mut fields = BTreeMap::new();
+            for _ in 0..n_fields {
+                let name = cursor.read_string()?;
+                let type_tag = cursor.read_byte()?;
+                fields.insert(name, Value::Int(type_tag as i64));
+            }
+            Ok(Value::Struct { name: "Schema".to_string(), fields })
+        }
+
+        TAG_CHUNKED_TENSOR => {
+            let dtype_tag = cursor.read_byte()?;
+            let ndim = cursor.read_u64_le()? as usize;
+            let mut shape = Vec::with_capacity(ndim);
+            for _ in 0..ndim {
+                shape.push(cursor.read_u64_le()? as usize);
+            }
+            let _chunk_size = cursor.read_u64_le()? as usize;
+            let n_chunks = cursor.read_u64_le()? as usize;
+
+            // Reassemble raw bytes from chunks, verifying per-chunk hashes
+            let mut raw_bytes = Vec::new();
+            for _ in 0..n_chunks {
+                let chunk_len = cursor.read_u64_le()? as usize;
+                let expected_hash_bytes = cursor.read_bytes(32)?;
+                let mut expected_hash = [0u8; 32];
+                expected_hash.copy_from_slice(expected_hash_bytes);
+                let chunk_data = cursor.read_bytes(chunk_len)?;
+
+                // Verify chunk integrity
+                let actual_hash = crate::sha256(chunk_data);
+                if actual_hash != expected_hash {
+                    return Err(SnapError::HashMismatch {
+                        expected: expected_hash,
+                        actual: actual_hash,
+                    });
+                }
+                raw_bytes.extend_from_slice(chunk_data);
+            }
+
+            // Convert raw bytes to f64 Tensor (same logic as TAG_TYPED_TENSOR)
+            let numel: usize = shape.iter().product();
+            let data: Vec<f64> = match dtype_tag {
+                0 => { // F64
+                    let mut vals = Vec::with_capacity(numel);
+                    for i in 0..numel {
+                        let off = i * 8;
+                        if off + 8 > raw_bytes.len() { return Err(SnapError::UnexpectedEof); }
+                        let bits = u64::from_le_bytes(raw_bytes[off..off+8].try_into().unwrap());
+                        vals.push(f64::from_bits(bits));
+                    }
+                    vals
+                }
+                1 => { // F32
+                    let mut vals = Vec::with_capacity(numel);
+                    for i in 0..numel {
+                        let off = i * 4;
+                        if off + 4 > raw_bytes.len() { return Err(SnapError::UnexpectedEof); }
+                        let bits = u32::from_le_bytes(raw_bytes[off..off+4].try_into().unwrap());
+                        vals.push(f32::from_bits(bits) as f64);
+                    }
+                    vals
+                }
+                2 => { // I64
+                    let mut vals = Vec::with_capacity(numel);
+                    for i in 0..numel {
+                        let off = i * 8;
+                        if off + 8 > raw_bytes.len() { return Err(SnapError::UnexpectedEof); }
+                        let v = i64::from_le_bytes(raw_bytes[off..off+8].try_into().unwrap());
+                        vals.push(v as f64);
+                    }
+                    vals
+                }
+                3 => { // I32
+                    let mut vals = Vec::with_capacity(numel);
+                    for i in 0..numel {
+                        let off = i * 4;
+                        if off + 4 > raw_bytes.len() { return Err(SnapError::UnexpectedEof); }
+                        let v = i32::from_le_bytes(raw_bytes[off..off+4].try_into().unwrap());
+                        vals.push(v as f64);
+                    }
+                    vals
+                }
+                4 => { // U8
+                    raw_bytes.iter().take(numel).map(|&b| b as f64).collect()
+                }
+                _ => {
+                    vec![0.0f64; numel]
+                }
+            };
+            let tensor = Tensor::from_vec(data, &shape)
+                .map_err(|_| SnapError::UnexpectedEof)?;
+            Ok(Value::Tensor(tensor))
+        }
+
+        TAG_DATAFRAME => {
+            let n_cols = {
+                let bytes = cursor.read_bytes(4)?;
+                u32::from_le_bytes(bytes.try_into().unwrap()) as usize
+            };
+            let n_rows = cursor.read_u64_le()? as usize;
+
+            // Decode each column into a Value::Array, then build a struct
+            let mut col_entries = Vec::with_capacity(n_cols);
+            for _ in 0..n_cols {
+                let col_name = cursor.read_string()?;
+                let col_type = cursor.read_byte()?;
+
+                let col_value = match col_type {
+                    0 => { // Int
+                        let mut vals = Vec::with_capacity(n_rows);
+                        for _ in 0..n_rows {
+                            vals.push(Value::Int(cursor.read_i64_le()?));
+                        }
+                        Value::Array(Rc::new(vals))
+                    }
+                    1 => { // Float
+                        let mut vals = Vec::with_capacity(n_rows);
+                        for _ in 0..n_rows {
+                            vals.push(Value::Float(cursor.read_f64_le()?));
+                        }
+                        Value::Array(Rc::new(vals))
+                    }
+                    2 => { // Str
+                        let mut vals = Vec::with_capacity(n_rows);
+                        for _ in 0..n_rows {
+                            vals.push(Value::String(Rc::new(cursor.read_string()?)));
+                        }
+                        Value::Array(Rc::new(vals))
+                    }
+                    3 => { // Bool
+                        let mut vals = Vec::with_capacity(n_rows);
+                        for _ in 0..n_rows {
+                            vals.push(Value::Bool(cursor.read_byte()? != 0));
+                        }
+                        Value::Array(Rc::new(vals))
+                    }
+                    4 => { // Categorical — decode back to string array
+                        let n_levels = {
+                            let bytes = cursor.read_bytes(4)?;
+                            u32::from_le_bytes(bytes.try_into().unwrap()) as usize
+                        };
+                        let mut levels = Vec::with_capacity(n_levels);
+                        for _ in 0..n_levels {
+                            levels.push(cursor.read_string()?);
+                        }
+                        let mut vals = Vec::with_capacity(n_rows);
+                        for _ in 0..n_rows {
+                            let bytes = cursor.read_bytes(4)?;
+                            let code = u32::from_le_bytes(bytes.try_into().unwrap()) as usize;
+                            let s = levels.get(code).cloned().unwrap_or_default();
+                            vals.push(Value::String(Rc::new(s)));
+                        }
+                        Value::Array(Rc::new(vals))
+                    }
+                    5 => { // DateTime (epoch millis)
+                        let mut vals = Vec::with_capacity(n_rows);
+                        for _ in 0..n_rows {
+                            vals.push(Value::Int(cursor.read_i64_le()?));
+                        }
+                        Value::Array(Rc::new(vals))
+                    }
+                    _ => {
+                        return Err(SnapError::InvalidTag(col_type));
+                    }
+                };
+
+                col_entries.push((col_name, col_value));
+            }
+
+            // Build as a Struct with column names as fields
+            let mut fields = BTreeMap::new();
+            let mut col_names_arr = Vec::with_capacity(n_cols);
+            for (name, data) in col_entries {
+                col_names_arr.push(Value::String(Rc::new(name.clone())));
+                fields.insert(name, data);
+            }
+            fields.insert("__columns".to_string(), Value::Array(Rc::new(col_names_arr)));
+            fields.insert("__nrows".to_string(), Value::Int(n_rows as i64));
+            Ok(Value::Struct { name: "DataFrame".to_string(), fields })
+        }
+
         other => Err(SnapError::InvalidTag(other)),
+    }
+}
+
+/// Decode a v2 snap format (with magic header and version).
+/// Falls back to v1 (no header) if magic is not present.
+pub fn snap_decode_v2(data: &[u8]) -> Result<Value, SnapError> {
+    if data.len() >= 6 && &data[0..4] == SNAP_MAGIC {
+        let _version = data[4];
+        let _flags = data[5];
+        // Decode payload after header
+        let mut cursor = Cursor::new(&data[6..]);
+        decode_value(&mut cursor)
+    } else {
+        // Fall back to v1 format (no header)
+        snap_decode(data)
     }
 }
 

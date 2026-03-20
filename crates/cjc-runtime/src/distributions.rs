@@ -520,8 +520,823 @@ pub fn weibull_cdf(x: f64, k: f64, lambda: f64) -> f64 {
     1.0 - (-(x / lambda).powf(k)).exp()
 }
 
+// ===========================================================================
+// Phase 4: Distribution Sampling Functions
+// ===========================================================================
+//
+// All sampling functions are deterministic given the same RNG state.
+// They consume RNG draws in a fixed, predictable order.
+// Floating-point reductions use Kahan summation where applicable.
+
+// ---------------------------------------------------------------------------
+// Normal sampling
+// ---------------------------------------------------------------------------
+
+/// Sample `n` values from Normal(mu, sigma) using Box-Muller via `rng.next_normal_f64()`.
+///
+/// # Determinism Contract
+/// Same RNG state => identical output vector, bit-for-bit.
+pub fn normal_sample(mu: f64, sigma: f64, n: usize, rng: &mut cjc_repro::Rng) -> Vec<f64> {
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        out.push(mu + sigma * rng.next_normal_f64());
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Uniform sampling
+// ---------------------------------------------------------------------------
+
+/// Sample `n` values from Uniform(a, b).
+///
+/// Each sample: a + (b - a) * U where U ~ Uniform[0, 1).
+pub fn uniform_sample(a: f64, b: f64, n: usize, rng: &mut cjc_repro::Rng) -> Vec<f64> {
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        out.push(a + (b - a) * rng.next_f64());
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Exponential sampling
+// ---------------------------------------------------------------------------
+
+/// Sample `n` values from Exponential(lambda) using inverse CDF: -ln(1 - U) / lambda.
+///
+/// Uses `1.0 - rng.next_f64()` to avoid ln(0).
+pub fn exponential_sample(lambda: f64, n: usize, rng: &mut cjc_repro::Rng) -> Vec<f64> {
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        // 1.0 - next_f64() gives (0, 1] which avoids ln(0)
+        let u = 1.0 - rng.next_f64();
+        out.push(-u.ln() / lambda);
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Gamma sampling — Marsaglia-Tsang method
+// ---------------------------------------------------------------------------
+
+/// Sample a single Gamma(shape, 1) value using Marsaglia-Tsang's method.
+///
+/// For shape >= 1: direct Marsaglia-Tsang.
+/// For shape < 1: sample Gamma(shape + 1, 1) then multiply by U^(1/shape)
+/// where U ~ Uniform(0,1).
+///
+/// Reference: Marsaglia & Tsang, "A Simple Method for Generating Gamma Variables" (2000).
+fn gamma_sample_single(shape: f64, rng: &mut cjc_repro::Rng) -> f64 {
+    if shape < 1.0 {
+        // Shape augmentation trick: Gamma(a, 1) = Gamma(a+1, 1) * U^(1/a)
+        let g = gamma_sample_single(shape + 1.0, rng);
+        let u = rng.next_f64();
+        // Use 1.0 - u to avoid u = 0 (which would give 0^(1/a) = 0 always)
+        return g * (1.0 - u).powf(1.0 / shape);
+    }
+
+    let d = shape - 1.0 / 3.0;
+    let c = 1.0 / (9.0 * d).sqrt();
+
+    loop {
+        let x = rng.next_normal_f64();
+        let v_base = 1.0 + c * x;
+        if v_base <= 0.0 {
+            continue;
+        }
+        let v = v_base * v_base * v_base;
+        let u = rng.next_f64();
+
+        // Squeeze test
+        if u < 1.0 - 0.0331 * (x * x) * (x * x) {
+            return d * v;
+        }
+        // Full test
+        if u.ln() < 0.5 * x * x + d * (1.0 - v + v.ln()) {
+            return d * v;
+        }
+    }
+}
+
+/// Sample `n` values from Gamma(shape_k, scale_theta).
+///
+/// Uses Marsaglia-Tsang method (shape >= 1) with shape augmentation for shape < 1.
+/// Result = Gamma(shape, 1) * scale.
+pub fn gamma_sample(
+    shape_k: f64,
+    scale_theta: f64,
+    n: usize,
+    rng: &mut cjc_repro::Rng,
+) -> Vec<f64> {
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        out.push(gamma_sample_single(shape_k, rng) * scale_theta);
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Beta sampling — via Gamma
+// ---------------------------------------------------------------------------
+
+/// Sample `n` values from Beta(a, b) using the gamma ratio method.
+///
+/// X ~ Gamma(a, 1), Y ~ Gamma(b, 1), then X / (X + Y) ~ Beta(a, b).
+pub fn beta_sample(a: f64, b: f64, n: usize, rng: &mut cjc_repro::Rng) -> Vec<f64> {
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let x = gamma_sample_single(a, rng);
+        let y = gamma_sample_single(b, rng);
+        out.push(x / (x + y));
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Chi-squared sampling — via Gamma
+// ---------------------------------------------------------------------------
+
+/// Sample `n` values from Chi-squared(df).
+///
+/// Chi-squared(df) = Gamma(df/2, 2).
+pub fn chi2_sample(df: f64, n: usize, rng: &mut cjc_repro::Rng) -> Vec<f64> {
+    gamma_sample(df / 2.0, 2.0, n, rng)
+}
+
+// ---------------------------------------------------------------------------
+// Student's t sampling
+// ---------------------------------------------------------------------------
+
+/// Sample `n` values from Student's t(df).
+///
+/// t = Z / sqrt(V / df) where Z ~ Normal(0,1), V ~ Chi-squared(df).
+pub fn t_sample(df: f64, n: usize, rng: &mut cjc_repro::Rng) -> Vec<f64> {
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let z = rng.next_normal_f64();
+        let v = gamma_sample_single(df / 2.0, rng) * 2.0; // Chi-squared(df)
+        out.push(z / (v / df).sqrt());
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Poisson sampling
+// ---------------------------------------------------------------------------
+
+/// Sample a single Poisson(lambda) value using Knuth's algorithm (lambda < 30)
+/// or the transformed rejection method (lambda >= 30).
+fn poisson_sample_single(lambda: f64, rng: &mut cjc_repro::Rng) -> i64 {
+    if lambda < 30.0 {
+        // Knuth's algorithm
+        let l = (-lambda).exp();
+        let mut k: i64 = 0;
+        let mut p = 1.0;
+        loop {
+            k += 1;
+            p *= rng.next_f64();
+            if p <= l {
+                return k - 1;
+            }
+        }
+    } else {
+        // Transformed rejection method (Hoermann, "The Transformed Rejection Method")
+        // Approximation: Poisson ~ floor(Normal(lambda, sqrt(lambda)) + 0.5) with
+        // acceptance-rejection correction.
+        let sqrt_lam = lambda.sqrt();
+        let log_lam = lambda.ln();
+        let b = 0.931 + 2.53 * sqrt_lam;
+        let a = -0.059 + 0.02483 * b;
+        let inv_alpha = 1.1239 + 1.1328 / (b - 3.4);
+        let v_r = 0.9277 - 3.6224 / (b - 2.0);
+
+        loop {
+            let u = rng.next_f64() - 0.5;
+            let v = rng.next_f64();
+            let us = 0.5 - u.abs();
+            let k = ((2.0 * a / us + b) * u + lambda + 0.43).floor() as i64;
+
+            if k < 0 {
+                continue;
+            }
+
+            // Squeeze acceptance
+            if us >= 0.07 && v <= v_r {
+                return k;
+            }
+
+            // Full acceptance check
+            let kf = k as f64;
+            let log_fk = ln_gamma(kf + 1.0);
+            let log_prob = kf * log_lam - lambda - log_fk;
+
+            if (us >= 0.013 || v <= us)
+                && v.ln() + inv_alpha.ln() - (a / (us * us) + b).ln()
+                    <= log_prob
+            {
+                return k;
+            }
+        }
+    }
+}
+
+/// Sample `n` values from Poisson(lambda).
+///
+/// Uses Knuth's algorithm for lambda < 30 and transformed rejection for lambda >= 30.
+pub fn poisson_sample(lambda: f64, n: usize, rng: &mut cjc_repro::Rng) -> Vec<i64> {
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        out.push(poisson_sample_single(lambda, rng));
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Binomial sampling
+// ---------------------------------------------------------------------------
+
+/// Sample a single Binomial(n_trials, p) value.
+///
+/// For small n_trials (< 25): direct simulation (sum of Bernoulli trials).
+/// For large n_trials: normal approximation with continuity correction,
+/// clamped to [0, n_trials].
+fn binomial_sample_single(n_trials: usize, p: f64, rng: &mut cjc_repro::Rng) -> i64 {
+    if n_trials < 25 {
+        // Direct simulation
+        let mut count: i64 = 0;
+        for _ in 0..n_trials {
+            if rng.next_f64() < p {
+                count += 1;
+            }
+        }
+        count
+    } else {
+        // Normal approximation: X ~ round(Normal(np, sqrt(np(1-p))))
+        let np = n_trials as f64 * p;
+        let sigma = (np * (1.0 - p)).sqrt();
+        let z = rng.next_normal_f64();
+        let x = (np + sigma * z).round() as i64;
+        // Clamp to valid range
+        x.max(0).min(n_trials as i64)
+    }
+}
+
+/// Sample `n` values from Binomial(n_trials, p).
+///
+/// Uses direct simulation for small n_trials (< 25) and normal approximation
+/// for larger values.
+pub fn binomial_sample(
+    n_trials: usize,
+    p: f64,
+    n: usize,
+    rng: &mut cjc_repro::Rng,
+) -> Vec<i64> {
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        out.push(binomial_sample_single(n_trials, p, rng));
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Bernoulli sampling
+// ---------------------------------------------------------------------------
+
+/// Sample `n` Bernoulli(p) values.
+///
+/// Returns `true` with probability `p`, `false` with probability `1-p`.
+pub fn bernoulli_sample(p: f64, n: usize, rng: &mut cjc_repro::Rng) -> Vec<bool> {
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        out.push(rng.next_f64() < p);
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Dirichlet sampling
+// ---------------------------------------------------------------------------
+
+/// Sample a single Dirichlet(alpha) vector.
+///
+/// Each component X_i ~ Gamma(alpha_i, 1), then normalize: X_i / sum(X).
+/// Normalization uses Kahan summation for deterministic stability.
+pub fn dirichlet_sample(alpha: &[f64], rng: &mut cjc_repro::Rng) -> Vec<f64> {
+    let k = alpha.len();
+    let mut raw = Vec::with_capacity(k);
+    let mut sum = cjc_repro::KahanAccumulatorF64::new();
+
+    for &a in alpha {
+        let g = gamma_sample_single(a, rng);
+        raw.push(g);
+        sum.add(g);
+    }
+
+    let total = sum.finalize();
+    for x in &mut raw {
+        *x /= total;
+    }
+    raw
+}
+
+// ---------------------------------------------------------------------------
+// Multinomial (categorical) sampling
+// ---------------------------------------------------------------------------
+
+/// Sample `n` categorical draws from the given probability vector.
+///
+/// Returns indices 0..probs.len()-1 sampled according to probabilities.
+/// Probabilities are normalized internally using Kahan summation.
+/// Uses CDF search for each draw.
+pub fn multinomial_sample(probs: &[f64], n: usize, rng: &mut cjc_repro::Rng) -> Vec<usize> {
+    if probs.is_empty() {
+        return Vec::new();
+    }
+
+    // Build normalized CDF using Kahan summation
+    let mut total_acc = cjc_repro::KahanAccumulatorF64::new();
+    for &p in probs {
+        total_acc.add(p);
+    }
+    let total = total_acc.finalize();
+
+    let k = probs.len();
+    let mut cdf = Vec::with_capacity(k);
+    let mut cum_acc = cjc_repro::KahanAccumulatorF64::new();
+    for &p in probs {
+        cum_acc.add(p / total);
+        cdf.push(cum_acc.finalize());
+    }
+    // Ensure last entry is exactly 1.0 to avoid floating-point edge cases
+    if let Some(last) = cdf.last_mut() {
+        *last = 1.0;
+    }
+
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let u = rng.next_f64();
+        // Linear search through CDF (deterministic ordering)
+        let mut idx = 0;
+        while idx < k - 1 && u >= cdf[idx] {
+            idx += 1;
+        }
+        out.push(idx);
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod sampling_tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // Helper: compute sample mean using Kahan summation
+    // -----------------------------------------------------------------------
+    fn kahan_mean(data: &[f64]) -> f64 {
+        let mut acc = cjc_repro::KahanAccumulatorF64::new();
+        for &x in data {
+            acc.add(x);
+        }
+        acc.finalize() / data.len() as f64
+    }
+
+    // -----------------------------------------------------------------------
+    // Determinism tests: same seed => same output
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_normal_sample_determinism() {
+        let mut r1 = cjc_repro::Rng::seeded(42);
+        let mut r2 = cjc_repro::Rng::seeded(42);
+        let a = normal_sample(0.0, 1.0, 100, &mut r1);
+        let b = normal_sample(0.0, 1.0, 100, &mut r2);
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert_eq!(x.to_bits(), y.to_bits());
+        }
+    }
+
+    #[test]
+    fn test_uniform_sample_determinism() {
+        let mut r1 = cjc_repro::Rng::seeded(7);
+        let mut r2 = cjc_repro::Rng::seeded(7);
+        let a = uniform_sample(0.0, 1.0, 100, &mut r1);
+        let b = uniform_sample(0.0, 1.0, 100, &mut r2);
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert_eq!(x.to_bits(), y.to_bits());
+        }
+    }
+
+    #[test]
+    fn test_exponential_sample_determinism() {
+        let mut r1 = cjc_repro::Rng::seeded(99);
+        let mut r2 = cjc_repro::Rng::seeded(99);
+        let a = exponential_sample(2.0, 100, &mut r1);
+        let b = exponential_sample(2.0, 100, &mut r2);
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert_eq!(x.to_bits(), y.to_bits());
+        }
+    }
+
+    #[test]
+    fn test_gamma_sample_determinism() {
+        let mut r1 = cjc_repro::Rng::seeded(13);
+        let mut r2 = cjc_repro::Rng::seeded(13);
+        let a = gamma_sample(2.5, 1.0, 100, &mut r1);
+        let b = gamma_sample(2.5, 1.0, 100, &mut r2);
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert_eq!(x.to_bits(), y.to_bits());
+        }
+    }
+
+    #[test]
+    fn test_beta_sample_determinism() {
+        let mut r1 = cjc_repro::Rng::seeded(55);
+        let mut r2 = cjc_repro::Rng::seeded(55);
+        let a = beta_sample(2.0, 5.0, 100, &mut r1);
+        let b = beta_sample(2.0, 5.0, 100, &mut r2);
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert_eq!(x.to_bits(), y.to_bits());
+        }
+    }
+
+    #[test]
+    fn test_chi2_sample_determinism() {
+        let mut r1 = cjc_repro::Rng::seeded(77);
+        let mut r2 = cjc_repro::Rng::seeded(77);
+        let a = chi2_sample(5.0, 100, &mut r1);
+        let b = chi2_sample(5.0, 100, &mut r2);
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert_eq!(x.to_bits(), y.to_bits());
+        }
+    }
+
+    #[test]
+    fn test_t_sample_determinism() {
+        let mut r1 = cjc_repro::Rng::seeded(111);
+        let mut r2 = cjc_repro::Rng::seeded(111);
+        let a = t_sample(10.0, 100, &mut r1);
+        let b = t_sample(10.0, 100, &mut r2);
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert_eq!(x.to_bits(), y.to_bits());
+        }
+    }
+
+    #[test]
+    fn test_poisson_sample_determinism() {
+        let mut r1 = cjc_repro::Rng::seeded(33);
+        let mut r2 = cjc_repro::Rng::seeded(33);
+        let a = poisson_sample(5.0, 100, &mut r1);
+        let b = poisson_sample(5.0, 100, &mut r2);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_poisson_large_lambda_determinism() {
+        let mut r1 = cjc_repro::Rng::seeded(44);
+        let mut r2 = cjc_repro::Rng::seeded(44);
+        let a = poisson_sample(50.0, 100, &mut r1);
+        let b = poisson_sample(50.0, 100, &mut r2);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_binomial_sample_determinism() {
+        let mut r1 = cjc_repro::Rng::seeded(88);
+        let mut r2 = cjc_repro::Rng::seeded(88);
+        let a = binomial_sample(20, 0.4, 100, &mut r1);
+        let b = binomial_sample(20, 0.4, 100, &mut r2);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_bernoulli_sample_determinism() {
+        let mut r1 = cjc_repro::Rng::seeded(22);
+        let mut r2 = cjc_repro::Rng::seeded(22);
+        let a = bernoulli_sample(0.7, 100, &mut r1);
+        let b = bernoulli_sample(0.7, 100, &mut r2);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_dirichlet_sample_determinism() {
+        let mut r1 = cjc_repro::Rng::seeded(66);
+        let mut r2 = cjc_repro::Rng::seeded(66);
+        let a = dirichlet_sample(&[1.0, 2.0, 3.0], &mut r1);
+        let b = dirichlet_sample(&[1.0, 2.0, 3.0], &mut r2);
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert_eq!(x.to_bits(), y.to_bits());
+        }
+    }
+
+    #[test]
+    fn test_multinomial_sample_determinism() {
+        let mut r1 = cjc_repro::Rng::seeded(101);
+        let mut r2 = cjc_repro::Rng::seeded(101);
+        let a = multinomial_sample(&[0.2, 0.3, 0.5], 100, &mut r1);
+        let b = multinomial_sample(&[0.2, 0.3, 0.5], 100, &mut r2);
+        assert_eq!(a, b);
+    }
+
+    // -----------------------------------------------------------------------
+    // Range correctness tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_uniform_range() {
+        let mut rng = cjc_repro::Rng::seeded(1);
+        let samples = uniform_sample(2.0, 5.0, 1000, &mut rng);
+        for &x in &samples {
+            assert!(x >= 2.0 && x < 5.0, "uniform out of range: {x}");
+        }
+    }
+
+    #[test]
+    fn test_exponential_positive() {
+        let mut rng = cjc_repro::Rng::seeded(2);
+        let samples = exponential_sample(1.5, 1000, &mut rng);
+        for &x in &samples {
+            assert!(x > 0.0, "exponential not positive: {x}");
+        }
+    }
+
+    #[test]
+    fn test_gamma_positive() {
+        let mut rng = cjc_repro::Rng::seeded(3);
+        // Test both shape < 1 and shape > 1
+        let samples_small = gamma_sample(0.5, 2.0, 500, &mut rng);
+        let samples_large = gamma_sample(5.0, 1.0, 500, &mut rng);
+        for &x in samples_small.iter().chain(samples_large.iter()) {
+            assert!(x > 0.0, "gamma not positive: {x}");
+        }
+    }
+
+    #[test]
+    fn test_beta_unit_interval() {
+        let mut rng = cjc_repro::Rng::seeded(4);
+        let samples = beta_sample(2.0, 5.0, 1000, &mut rng);
+        for &x in &samples {
+            assert!(x >= 0.0 && x <= 1.0, "beta out of [0,1]: {x}");
+        }
+    }
+
+    #[test]
+    fn test_chi2_positive() {
+        let mut rng = cjc_repro::Rng::seeded(5);
+        let samples = chi2_sample(3.0, 1000, &mut rng);
+        for &x in &samples {
+            assert!(x > 0.0, "chi2 not positive: {x}");
+        }
+    }
+
+    #[test]
+    fn test_poisson_non_negative() {
+        let mut rng = cjc_repro::Rng::seeded(6);
+        let samples = poisson_sample(4.0, 1000, &mut rng);
+        for &x in &samples {
+            assert!(x >= 0, "poisson negative: {x}");
+        }
+    }
+
+    #[test]
+    fn test_poisson_large_non_negative() {
+        let mut rng = cjc_repro::Rng::seeded(60);
+        let samples = poisson_sample(50.0, 1000, &mut rng);
+        for &x in &samples {
+            assert!(x >= 0, "poisson(50) negative: {x}");
+        }
+    }
+
+    #[test]
+    fn test_binomial_range() {
+        let mut rng = cjc_repro::Rng::seeded(7);
+        let samples = binomial_sample(10, 0.5, 1000, &mut rng);
+        for &x in &samples {
+            assert!(x >= 0 && x <= 10, "binomial out of range: {x}");
+        }
+    }
+
+    #[test]
+    fn test_bernoulli_values() {
+        let mut rng = cjc_repro::Rng::seeded(8);
+        let samples = bernoulli_sample(0.5, 1000, &mut rng);
+        // Just check they are booleans (always true) and have both values
+        let trues = samples.iter().filter(|&&x| x).count();
+        let falses = samples.len() - trues;
+        assert!(trues > 0, "no true values");
+        assert!(falses > 0, "no false values");
+    }
+
+    #[test]
+    fn test_dirichlet_simplex() {
+        let mut rng = cjc_repro::Rng::seeded(9);
+        let sample = dirichlet_sample(&[1.0, 2.0, 3.0, 4.0], &mut rng);
+        assert_eq!(sample.len(), 4);
+        for &x in &sample {
+            assert!(x >= 0.0 && x <= 1.0, "dirichlet component out of [0,1]: {x}");
+        }
+        let mut sum_acc = cjc_repro::KahanAccumulatorF64::new();
+        for &x in &sample {
+            sum_acc.add(x);
+        }
+        let sum = sum_acc.finalize();
+        assert!((sum - 1.0).abs() < 1e-12, "dirichlet does not sum to 1: {sum}");
+    }
+
+    #[test]
+    fn test_multinomial_valid_indices() {
+        let mut rng = cjc_repro::Rng::seeded(10);
+        let probs = vec![0.1, 0.2, 0.3, 0.4];
+        let samples = multinomial_sample(&probs, 1000, &mut rng);
+        for &idx in &samples {
+            assert!(idx < probs.len(), "multinomial index out of range: {idx}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Mean convergence tests (large n, loose tolerance)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_normal_mean_convergence() {
+        let mut rng = cjc_repro::Rng::seeded(1000);
+        let mu = 3.0;
+        let samples = normal_sample(mu, 1.0, 50_000, &mut rng);
+        let mean = kahan_mean(&samples);
+        assert!(
+            (mean - mu).abs() < 0.05,
+            "normal mean {mean} not close to {mu}"
+        );
+    }
+
+    #[test]
+    fn test_uniform_mean_convergence() {
+        let mut rng = cjc_repro::Rng::seeded(1001);
+        let (a, b) = (2.0, 8.0);
+        let expected = (a + b) / 2.0;
+        let samples = uniform_sample(a, b, 50_000, &mut rng);
+        let mean = kahan_mean(&samples);
+        assert!(
+            (mean - expected).abs() < 0.05,
+            "uniform mean {mean} not close to {expected}"
+        );
+    }
+
+    #[test]
+    fn test_exponential_mean_convergence() {
+        let mut rng = cjc_repro::Rng::seeded(1002);
+        let lambda = 2.0;
+        let expected = 1.0 / lambda;
+        let samples = exponential_sample(lambda, 50_000, &mut rng);
+        let mean = kahan_mean(&samples);
+        assert!(
+            (mean - expected).abs() < 0.02,
+            "exponential mean {mean} not close to {expected}"
+        );
+    }
+
+    #[test]
+    fn test_gamma_mean_convergence() {
+        let mut rng = cjc_repro::Rng::seeded(1003);
+        let (shape, scale) = (3.0, 2.0);
+        let expected = shape * scale;
+        let samples = gamma_sample(shape, scale, 50_000, &mut rng);
+        let mean = kahan_mean(&samples);
+        assert!(
+            (mean - expected).abs() < 0.1,
+            "gamma mean {mean} not close to {expected}"
+        );
+    }
+
+    #[test]
+    fn test_gamma_small_shape_mean() {
+        let mut rng = cjc_repro::Rng::seeded(1004);
+        let (shape, scale) = (0.5, 2.0);
+        let expected = shape * scale;
+        let samples = gamma_sample(shape, scale, 50_000, &mut rng);
+        let mean = kahan_mean(&samples);
+        assert!(
+            (mean - expected).abs() < 0.1,
+            "gamma(0.5) mean {mean} not close to {expected}"
+        );
+    }
+
+    #[test]
+    fn test_beta_mean_convergence() {
+        let mut rng = cjc_repro::Rng::seeded(1005);
+        let (a, b) = (2.0, 5.0);
+        let expected = a / (a + b);
+        let samples = beta_sample(a, b, 50_000, &mut rng);
+        let mean = kahan_mean(&samples);
+        assert!(
+            (mean - expected).abs() < 0.02,
+            "beta mean {mean} not close to {expected}"
+        );
+    }
+
+    #[test]
+    fn test_chi2_mean_convergence() {
+        let mut rng = cjc_repro::Rng::seeded(1006);
+        let df = 5.0;
+        let samples = chi2_sample(df, 50_000, &mut rng);
+        let mean = kahan_mean(&samples);
+        assert!(
+            (mean - df).abs() < 0.1,
+            "chi2 mean {mean} not close to df={df}"
+        );
+    }
+
+    #[test]
+    fn test_t_mean_convergence() {
+        let mut rng = cjc_repro::Rng::seeded(1007);
+        let df = 10.0; // mean is 0 for df > 1
+        let samples = t_sample(df, 50_000, &mut rng);
+        let mean = kahan_mean(&samples);
+        assert!(
+            mean.abs() < 0.05,
+            "t mean {mean} not close to 0"
+        );
+    }
+
+    #[test]
+    fn test_poisson_mean_convergence() {
+        let mut rng = cjc_repro::Rng::seeded(1008);
+        let lambda = 7.0;
+        let samples = poisson_sample(lambda, 50_000, &mut rng);
+        let fsamples: Vec<f64> = samples.iter().map(|&x| x as f64).collect();
+        let mean = kahan_mean(&fsamples);
+        assert!(
+            (mean - lambda).abs() < 0.1,
+            "poisson mean {mean} not close to {lambda}"
+        );
+    }
+
+    #[test]
+    fn test_poisson_large_lambda_mean() {
+        let mut rng = cjc_repro::Rng::seeded(1009);
+        let lambda = 50.0;
+        let samples = poisson_sample(lambda, 50_000, &mut rng);
+        let fsamples: Vec<f64> = samples.iter().map(|&x| x as f64).collect();
+        let mean = kahan_mean(&fsamples);
+        assert!(
+            (mean - lambda).abs() < 0.5,
+            "poisson(50) mean {mean} not close to {lambda}"
+        );
+    }
+
+    #[test]
+    fn test_binomial_mean_convergence() {
+        let mut rng = cjc_repro::Rng::seeded(1010);
+        let (n_trials, p) = (20, 0.3);
+        let expected = n_trials as f64 * p;
+        let samples = binomial_sample(n_trials, p, 50_000, &mut rng);
+        let fsamples: Vec<f64> = samples.iter().map(|&x| x as f64).collect();
+        let mean = kahan_mean(&fsamples);
+        assert!(
+            (mean - expected).abs() < 0.1,
+            "binomial mean {mean} not close to {expected}"
+        );
+    }
+
+    #[test]
+    fn test_bernoulli_mean_convergence() {
+        let mut rng = cjc_repro::Rng::seeded(1011);
+        let p = 0.7;
+        let samples = bernoulli_sample(p, 50_000, &mut rng);
+        let fsamples: Vec<f64> = samples.iter().map(|&x| if x { 1.0 } else { 0.0 }).collect();
+        let mean = kahan_mean(&fsamples);
+        assert!(
+            (mean - p).abs() < 0.02,
+            "bernoulli mean {mean} not close to {p}"
+        );
+    }
+
+    #[test]
+    fn test_multinomial_frequency_convergence() {
+        let mut rng = cjc_repro::Rng::seeded(1012);
+        let probs = vec![0.1, 0.2, 0.3, 0.4];
+        let n = 50_000;
+        let samples = multinomial_sample(&probs, n, &mut rng);
+        let mut counts = vec![0usize; probs.len()];
+        for &idx in &samples {
+            counts[idx] += 1;
+        }
+        for (i, (&expected_p, &count)) in probs.iter().zip(counts.iter()).enumerate() {
+            let empirical_p = count as f64 / n as f64;
+            assert!(
+                (empirical_p - expected_p).abs() < 0.02,
+                "multinomial category {i}: empirical={empirical_p}, expected={expected_p}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Existing tests (PDF/CDF/PPF)
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]

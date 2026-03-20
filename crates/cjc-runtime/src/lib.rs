@@ -32,6 +32,7 @@ pub mod frame_arena;
 pub mod object_slab;
 pub mod gc;
 pub mod sparse;
+pub mod sparse_solvers;
 pub mod tensor_tiled;
 pub mod tensor_simd;
 pub mod tensor_pool;
@@ -51,6 +52,11 @@ pub mod fft;
 pub mod stationarity;
 pub mod ode;
 pub mod sparse_eigen;
+pub mod interpolate;
+pub mod optimize;
+pub mod clustering;
+pub mod tensor_dtype;
+pub mod timeseries;
 
 // --- Re-exports for backward compatibility ---
 // All downstream crates that were doing `use cjc_runtime::Tensor` etc. continue to work.
@@ -68,6 +74,7 @@ pub use tensor_tiled::TiledMatmul;
 pub use det_map::{DetMap, murmurhash3, murmurhash3_finalize, value_hash, values_equal_static};
 pub use value::{Value, Bf16, FnValue};
 pub use error::RuntimeError;
+pub use tensor_dtype::{DType, TypedStorage};
 
 // ---------------------------------------------------------------------------
 // Tests — remain here so they can use `super::*` to access all re-exports.

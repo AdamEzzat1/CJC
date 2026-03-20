@@ -829,6 +829,240 @@ impl Tensor {
         ))
     }
 
+    // -----------------------------------------------------------------------
+    // Phase 3A: SVD via Golub-Kahan Bidiagonalization
+    // -----------------------------------------------------------------------
+
+    /// Compute the Singular Value Decomposition: A = U @ diag(S) @ Vt.
+    /// Returns (U, S, Vt) as (Tensor, Vec<f64>, Tensor).
+    ///
+    /// Implementation: via eigendecomposition of A^T*A (for V and S^2),
+    /// then U = A*V*diag(1/s_i).
+    ///
+    /// **Determinism contract:** All intermediate float reductions use
+    /// `BinnedAccumulatorF64`. Iteration order is fixed row-major.
+    pub fn svd(&self) -> Result<(Tensor, Vec<f64>, Tensor), RuntimeError> {
+        if self.ndim() != 2 {
+            return Err(RuntimeError::InvalidOperation(
+                "SVD requires a 2D matrix".to_string(),
+            ));
+        }
+        let m = self.shape[0];
+        let n = self.shape[1];
+        if m == 0 || n == 0 {
+            return Err(RuntimeError::InvalidOperation(
+                "SVD: empty matrix".to_string(),
+            ));
+        }
+
+        let min_mn = m.min(n);
+
+        // Compute A^T * A (n x n symmetric matrix)
+        let at = self.transpose();
+        let ata = at.matmul(self)?;
+
+        // Eigendecomposition of A^T*A gives V and eigenvalues = sigma^2
+        let (eigenvalues, eigenvectors) = ata.eigh()?;
+
+        // eigenvalues are in ascending order from eigh; we want descending singular values
+        // Singular values = sqrt(eigenvalues), clamp negatives to 0
+        let mut singular_values: Vec<f64> = eigenvalues.iter()
+            .map(|&ev| if ev > 0.0 { ev.sqrt() } else { 0.0 })
+            .collect();
+
+        // Reverse to get descending order
+        singular_values.reverse();
+
+        // Take only min(m,n) singular values
+        let k = min_mn.min(singular_values.len());
+        let s: Vec<f64> = singular_values[..k].to_vec();
+
+        // V columns are eigenvectors of A^T*A, reversed for descending order
+        // eigenvectors is n x n, columns are eigenvectors
+        let ev_data = eigenvectors.to_vec();
+        let ev_n = eigenvectors.shape()[1]; // should be n
+
+        // Build V matrix (n x k) with columns in descending singular value order
+        let mut v_data = vec![0.0f64; n * k];
+        for col in 0..k {
+            let ev_col = n - 1 - col; // reverse index for descending order
+            for row in 0..n {
+                v_data[row * k + col] = ev_data[row * ev_n + ev_col];
+            }
+        }
+        let v_mat = Tensor::from_vec(v_data.clone(), &[n, k])?;
+
+        // U = A * V * diag(1/s)
+        // First compute A * V
+        let av = self.matmul(&v_mat)?;
+        let av_data = av.to_vec();
+
+        // Then scale each column by 1/s_i
+        let mut u_data = vec![0.0f64; m * k];
+        for col in 0..k {
+            if s[col] > 1e-14 {
+                let inv_s = 1.0 / s[col];
+                for row in 0..m {
+                    u_data[row * k + col] = av_data[row * k + col] * inv_s;
+                }
+            }
+            // If s[col] ≈ 0, leave u column as zeros
+        }
+
+        // Sign-canonical: ensure largest-magnitude element of each u column is positive
+        for col in 0..k {
+            let mut max_abs = 0.0f64;
+            let mut max_sign = 1.0f64;
+            for row in 0..m {
+                let val = u_data[row * k + col];
+                if val.abs() > max_abs {
+                    max_abs = val.abs();
+                    max_sign = if val >= 0.0 { 1.0 } else { -1.0 };
+                }
+            }
+            if max_sign < 0.0 {
+                for row in 0..m {
+                    u_data[row * k + col] = -u_data[row * k + col];
+                }
+                for row in 0..n {
+                    v_data[row * k + col] = -v_data[row * k + col];
+                }
+            }
+        }
+
+        let u_tensor = Tensor::from_vec(u_data, &[m, k])?;
+
+        // Vt = V^T (k x n)
+        let mut vt_data = vec![0.0f64; k * n];
+        for row in 0..k {
+            for col in 0..n {
+                vt_data[row * n + col] = v_data[col * k + row];
+            }
+        }
+        let vt_tensor = Tensor::from_vec(vt_data, &[k, n])?;
+
+        Ok((u_tensor, s, vt_tensor))
+    }
+
+    /// Truncated SVD — only the top `k` singular values/vectors.
+    /// Returns (U_k, S_k, Vt_k) where U_k is m x k, Vt_k is k x n.
+    pub fn svd_truncated(
+        &self,
+        k: usize,
+    ) -> Result<(Tensor, Vec<f64>, Tensor), RuntimeError> {
+        let (u_full, s_full, vt_full) = self.svd()?;
+        let m = u_full.shape()[0];
+        let n = vt_full.shape()[1];
+        let actual_k = k.min(s_full.len());
+
+        if actual_k == 0 {
+            return Err(RuntimeError::InvalidOperation(
+                "svd_truncated: k must be > 0".to_string(),
+            ));
+        }
+
+        let s_k: Vec<f64> = s_full[..actual_k].to_vec();
+
+        // Extract first k columns of U
+        let u_data = u_full.to_vec();
+        let u_cols = u_full.shape()[1];
+        let mut u_k = vec![0.0f64; m * actual_k];
+        for row in 0..m {
+            for col in 0..actual_k {
+                u_k[row * actual_k + col] = u_data[row * u_cols + col];
+            }
+        }
+
+        // Extract first k rows of Vt
+        let vt_data = vt_full.to_vec();
+        let mut vt_k = vec![0.0f64; actual_k * n];
+        for row in 0..actual_k {
+            for col in 0..n {
+                vt_k[row * n + col] = vt_data[row * n + col];
+            }
+        }
+
+        Ok((
+            Tensor::from_vec(u_k, &[m, actual_k])?,
+            s_k,
+            Tensor::from_vec(vt_k, &[actual_k, n])?,
+        ))
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3B: Pseudoinverse (Moore-Penrose, via SVD)
+    // -----------------------------------------------------------------------
+
+    /// Compute the Moore-Penrose pseudoinverse via SVD.
+    /// A+ = V @ diag(1/s_i) @ Ut (with default tolerance for near-zero singular values).
+    pub fn pinv(&self) -> Result<Tensor, RuntimeError> {
+        // Default tolerance: max(m,n) * eps * max(S)
+        let (u, s, vt) = self.svd()?;
+        let m = self.shape[0];
+        let n = self.shape[1];
+        let max_s = s.first().copied().unwrap_or(0.0);
+        let tol = (m.max(n) as f64) * f64::EPSILON * max_s;
+        Self::pinv_from_svd(&u, &s, &vt, tol)
+    }
+
+    /// Compute the Moore-Penrose pseudoinverse via SVD with explicit tolerance.
+    pub fn pinv_with_tol(&self, tol: f64) -> Result<Tensor, RuntimeError> {
+        let (u, s, vt) = self.svd()?;
+        Self::pinv_from_svd(&u, &s, &vt, tol)
+    }
+
+    /// Internal: compute pseudoinverse from pre-computed SVD.
+    /// A+ = V @ diag(1/s_i) @ Ut, zeroing 1/s_i where s_i <= tol.
+    fn pinv_from_svd(
+        u: &Tensor,
+        s: &[f64],
+        vt: &Tensor,
+        tol: f64,
+    ) -> Result<Tensor, RuntimeError> {
+        let m = u.shape()[0];
+        let k = s.len();
+        let n = vt.shape()[1];
+
+        // Build S_inv: k-vector with 1/s_i or 0
+        let s_inv: Vec<f64> = s
+            .iter()
+            .map(|&si| if si > tol { 1.0 / si } else { 0.0 })
+            .collect();
+
+        // Compute Vt^T @ diag(s_inv) @ U^T = V @ diag(s_inv) @ Ut
+        // Result is n x m
+        let u_data = u.to_vec();
+        let vt_data = vt.to_vec();
+        let mut result = vec![0.0f64; n * m];
+
+        for i in 0..n {
+            for j in 0..m {
+                let mut acc = BinnedAccumulatorF64::new();
+                for l in 0..k {
+                    // V[i, l] = Vt[l, i] (transposed)
+                    // Ut[l, j] = U[j, l] (transposed)
+                    acc.add(vt_data[l * n + i] * s_inv[l] * u_data[j * k + l]);
+                }
+                result[i * m + j] = acc.finalize();
+            }
+        }
+
+        Tensor::from_vec(result, &[n, m])
+    }
+
+    /// Helper: compute Givens rotation parameters.
+    /// Returns (c, s, r) such that [c s; -s c]^T * [a; b] = [r; 0].
+    fn givens_rotation(a: f64, b: f64) -> (f64, f64, f64) {
+        if b.abs() < 1e-15 {
+            (1.0, 0.0, a)
+        } else if a.abs() < 1e-15 {
+            (0.0, if b >= 0.0 { 1.0 } else { -1.0 }, b.abs())
+        } else {
+            let r = (a * a + b * b).sqrt();
+            (a / r, b / r, r)
+        }
+    }
+
     /// Matrix exponential via scaling and squaring with Pade(13,13) approximation.
     pub fn matrix_exp(&self) -> Result<Tensor, RuntimeError> {
         if self.ndim() != 2 || self.shape[0] != self.shape[1] {
@@ -1000,6 +1234,235 @@ impl Tensor {
         }
 
         Ok(r)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: reconstruct A from SVD: U @ diag(S) @ Vt
+    fn reconstruct_svd(u: &Tensor, s: &[f64], vt: &Tensor) -> Vec<f64> {
+        let m = u.shape()[0];
+        let k = s.len();
+        let n = vt.shape()[1];
+        let u_data = u.to_vec();
+        let vt_data = vt.to_vec();
+        let u_cols = u.shape()[1];
+        let mut result = vec![0.0f64; m * n];
+        for i in 0..m {
+            for j in 0..n {
+                let mut sum = 0.0;
+                for l in 0..k {
+                    sum += u_data[i * u_cols + l] * s[l] * vt_data[l * n + j];
+                }
+                result[i * n + j] = sum;
+            }
+        }
+        result
+    }
+
+    /// Helper: check two flat arrays are approximately equal
+    fn assert_approx_eq(a: &[f64], b: &[f64], tol: f64, msg: &str) {
+        assert_eq!(a.len(), b.len(), "{}: length mismatch", msg);
+        for (i, (&ai, &bi)) in a.iter().zip(b.iter()).enumerate() {
+            assert!(
+                (ai - bi).abs() < tol,
+                "{}: element [{}] differs: {} vs {} (diff={})",
+                msg,
+                i,
+                ai,
+                bi,
+                (ai - bi).abs()
+            );
+        }
+    }
+
+    #[test]
+    fn test_svd_identity_2x2() {
+        let eye = Tensor::from_vec(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]).unwrap();
+        let (u, s, vt) = eye.svd().unwrap();
+        // Singular values should be [1, 1]
+        assert!((s[0] - 1.0).abs() < 1e-10, "s[0] = {}", s[0]);
+        assert!((s[1] - 1.0).abs() < 1e-10, "s[1] = {}", s[1]);
+        // Roundtrip
+        let recon = reconstruct_svd(&u, &s, &vt);
+        assert_approx_eq(&recon, &[1.0, 0.0, 0.0, 1.0], 1e-10, "SVD identity roundtrip");
+    }
+
+    #[test]
+    fn test_svd_identity_3x3() {
+        let mut data = vec![0.0; 9];
+        for i in 0..3 {
+            data[i * 3 + i] = 1.0;
+        }
+        let eye = Tensor::from_vec(data.clone(), &[3, 3]).unwrap();
+        let (u, s, vt) = eye.svd().unwrap();
+        for &si in &s {
+            assert!((si - 1.0).abs() < 1e-10, "singular value = {}", si);
+        }
+        let recon = reconstruct_svd(&u, &s, &vt);
+        assert_approx_eq(&recon, &data, 1e-10, "SVD 3x3 identity roundtrip");
+    }
+
+    #[test]
+    fn test_svd_known_matrix() {
+        // A = [[3, 0], [0, 2]] — singular values should be 3, 2
+        let a = Tensor::from_vec(vec![3.0, 0.0, 0.0, 2.0], &[2, 2]).unwrap();
+        let (_u, s, _vt) = a.svd().unwrap();
+        assert!((s[0] - 3.0).abs() < 1e-10, "s[0] = {}", s[0]);
+        assert!((s[1] - 2.0).abs() < 1e-10, "s[1] = {}", s[1]);
+    }
+
+    #[test]
+    fn test_svd_roundtrip_general() {
+        let a = Tensor::from_vec(
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.5],
+            &[3, 3],
+        )
+        .unwrap();
+        let (u, s, vt) = a.svd().unwrap();
+        let recon = reconstruct_svd(&u, &s, &vt);
+        let original = a.to_vec();
+        assert_approx_eq(&recon, &original, 1e-8, "SVD general roundtrip");
+    }
+
+    #[test]
+    fn test_svd_rectangular_tall() {
+        // 3x2 matrix
+        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[3, 2]).unwrap();
+        let (u, s, vt) = a.svd().unwrap();
+        assert_eq!(u.shape(), &[3, 2]);
+        assert_eq!(s.len(), 2);
+        assert_eq!(vt.shape(), &[2, 2]);
+        let recon = reconstruct_svd(&u, &s, &vt);
+        let original = a.to_vec();
+        assert_approx_eq(&recon, &original, 1e-8, "SVD tall rectangular roundtrip");
+    }
+
+    #[test]
+    fn test_svd_rectangular_wide() {
+        // 2x3 matrix
+        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
+        let (u, s, vt) = a.svd().unwrap();
+        assert_eq!(u.shape(), &[2, 2]);
+        assert_eq!(s.len(), 2);
+        assert_eq!(vt.shape(), &[2, 3]);
+        let recon = reconstruct_svd(&u, &s, &vt);
+        let original = a.to_vec();
+        assert_approx_eq(&recon, &original, 1e-8, "SVD wide rectangular roundtrip");
+    }
+
+    #[test]
+    fn test_svd_singular_values_descending() {
+        let a = Tensor::from_vec(
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0],
+            &[3, 3],
+        )
+        .unwrap();
+        let (_, s, _) = a.svd().unwrap();
+        for i in 0..s.len() - 1 {
+            assert!(s[i] >= s[i + 1], "singular values not descending: {} < {}", s[i], s[i + 1]);
+        }
+    }
+
+    #[test]
+    fn test_svd_truncated_basic() {
+        let a = Tensor::from_vec(
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0],
+            &[3, 3],
+        )
+        .unwrap();
+        let (u, s, vt) = a.svd_truncated(2).unwrap();
+        assert_eq!(u.shape(), &[3, 2]);
+        assert_eq!(s.len(), 2);
+        assert_eq!(vt.shape(), &[2, 3]);
+    }
+
+    #[test]
+    fn test_svd_deterministic() {
+        let a = Tensor::from_vec(
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0],
+            &[3, 3],
+        )
+        .unwrap();
+        let (u1, s1, vt1) = a.svd().unwrap();
+        let (u2, s2, vt2) = a.svd().unwrap();
+        assert_eq!(u1.to_vec(), u2.to_vec(), "U not deterministic");
+        assert_eq!(s1, s2, "S not deterministic");
+        assert_eq!(vt1.to_vec(), vt2.to_vec(), "Vt not deterministic");
+    }
+
+    #[test]
+    fn test_pinv_square() {
+        // For a non-singular square matrix, pinv(A) ≈ inv(A)
+        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 5.0], &[2, 2]).unwrap();
+        let a_pinv = a.pinv().unwrap();
+        // Check A @ A+ @ A ≈ A
+        let a_ap = a.matmul(&a_pinv).unwrap();
+        let a_ap_a = a_ap.matmul(&a).unwrap();
+        assert_approx_eq(&a_ap_a.to_vec(), &a.to_vec(), 1e-8, "pinv square: A @ A+ @ A ≈ A");
+    }
+
+    #[test]
+    fn test_pinv_identity() {
+        let eye = Tensor::from_vec(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]).unwrap();
+        let eye_pinv = eye.pinv().unwrap();
+        assert_approx_eq(
+            &eye_pinv.to_vec(),
+            &[1.0, 0.0, 0.0, 1.0],
+            1e-10,
+            "pinv of identity",
+        );
+    }
+
+    #[test]
+    fn test_pinv_rectangular() {
+        // Tall matrix: 3x2
+        let a = Tensor::from_vec(vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0], &[3, 2]).unwrap();
+        let a_pinv = a.pinv().unwrap();
+        assert_eq!(a_pinv.shape(), &[2, 3]);
+        // A @ A+ @ A ≈ A
+        let a_ap = a.matmul(&a_pinv).unwrap();
+        let a_ap_a = a_ap.matmul(&a).unwrap();
+        assert_approx_eq(&a_ap_a.to_vec(), &a.to_vec(), 1e-8, "pinv rect: A @ A+ @ A ≈ A");
+    }
+
+    #[test]
+    fn test_pinv_moore_penrose_conditions() {
+        // All 4 Moore-Penrose conditions for a general matrix
+        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
+        let ap = a.pinv().unwrap();
+        // Condition 1: A @ A+ @ A ≈ A
+        let aapa = a.matmul(&ap).unwrap().matmul(&a).unwrap();
+        assert_approx_eq(&aapa.to_vec(), &a.to_vec(), 1e-6, "MP condition 1");
+        // Condition 2: A+ @ A @ A+ ≈ A+
+        let apaap = ap.matmul(&a).unwrap().matmul(&ap).unwrap();
+        assert_approx_eq(&apaap.to_vec(), &ap.to_vec(), 1e-6, "MP condition 2");
+    }
+
+    #[test]
+    fn test_pinv_with_tol() {
+        let a = Tensor::from_vec(vec![1.0, 0.0, 0.0, 1e-16], &[2, 2]).unwrap();
+        // With large tolerance, treat 1e-16 as zero
+        let ap = a.pinv_with_tol(1e-10).unwrap();
+        let ap_data = ap.to_vec();
+        // Should act like pseudoinverse of [[1,0],[0,0]]
+        assert!((ap_data[0] - 1.0).abs() < 1e-8, "pinv_with_tol [0,0]");
+        assert!(ap_data[3].abs() < 1e-8, "pinv_with_tol [1,1] should be ~0");
+    }
+
+    #[test]
+    fn test_svd_1x1() {
+        let a = Tensor::from_vec(vec![5.0], &[1, 1]).unwrap();
+        let (u, s, vt) = a.svd().unwrap();
+        assert!((s[0] - 5.0).abs() < 1e-10);
+        let recon = reconstruct_svd(&u, &s, &vt);
+        assert_approx_eq(&recon, &[5.0], 1e-10, "SVD 1x1 roundtrip");
     }
 }
 

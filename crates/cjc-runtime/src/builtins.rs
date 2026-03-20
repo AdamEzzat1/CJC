@@ -117,6 +117,15 @@ pub fn value_to_tensor(val: &Value) -> Result<&Tensor, String> {
     }
 }
 
+/// Convert a `Value::Float` or `Value::Int` to `f64`.
+pub fn value_to_f64(val: &Value) -> Result<f64, String> {
+    match val {
+        Value::Float(v) => Ok(*v),
+        Value::Int(v) => Ok(*v as f64),
+        _ => Err(format!("expected Float or Int, got {}", val.type_name())),
+    }
+}
+
 /// Extract bytes from a `ByteSlice`, `Bytes`, or `String` value.
 pub fn value_to_bytes(val: &Value) -> Result<Vec<u8>, String> {
     match val {
@@ -2624,7 +2633,251 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             Ok(Some(Value::Tensor(result)))
         }
 
+        // -- Phase 2: Tensor boolean/masking ops --------------------------------
+        "tensor_where" => {
+            let a = value_to_tensor(&args[0])?;
+            let cond = value_to_tensor(&args[1])?;
+            let other = value_to_tensor(&args[2])?;
+            Ok(Some(Value::Tensor(a.tensor_where(cond, other).map_err(|e| format!("{e}"))?)))
+        }
+        "tensor_any" => {
+            let t = value_to_tensor(&args[0])?;
+            Ok(Some(Value::Bool(t.any())))
+        }
+        "tensor_all" => {
+            let t = value_to_tensor(&args[0])?;
+            Ok(Some(Value::Bool(t.all())))
+        }
+        "tensor_nonzero" => {
+            let t = value_to_tensor(&args[0])?;
+            Ok(Some(Value::Tensor(t.nonzero())))
+        }
+        "tensor_masked_fill" => {
+            let t = value_to_tensor(&args[0])?;
+            let mask = value_to_tensor(&args[1])?;
+            let val = value_to_f64(&args[2])?;
+            Ok(Some(Value::Tensor(t.masked_fill(mask, val).map_err(|e| format!("{e}"))?)))
+        }
+        // -- Phase 2: Axis reductions ------------------------------------------
+        "tensor_mean_axis" => {
+            let t = value_to_tensor(&args[0])?;
+            let axis = value_to_usize(&args[1])?;
+            let keepdim = matches!(args.get(2), Some(Value::Bool(true)));
+            Ok(Some(Value::Tensor(t.mean_axis(axis, keepdim).map_err(|e| format!("{e}"))?)))
+        }
+        "tensor_var_axis" => {
+            let t = value_to_tensor(&args[0])?;
+            let axis = value_to_usize(&args[1])?;
+            let keepdim = matches!(args.get(2), Some(Value::Bool(true)));
+            Ok(Some(Value::Tensor(t.var_axis(axis, keepdim).map_err(|e| format!("{e}"))?)))
+        }
+        "tensor_std_axis" => {
+            let t = value_to_tensor(&args[0])?;
+            let axis = value_to_usize(&args[1])?;
+            let keepdim = matches!(args.get(2), Some(Value::Bool(true)));
+            Ok(Some(Value::Tensor(t.std_axis(axis, keepdim).map_err(|e| format!("{e}"))?)))
+        }
+        "tensor_prod_axis" => {
+            let t = value_to_tensor(&args[0])?;
+            let axis = value_to_usize(&args[1])?;
+            let keepdim = matches!(args.get(2), Some(Value::Bool(true)));
+            Ok(Some(Value::Tensor(t.prod_axis(axis, keepdim).map_err(|e| format!("{e}"))?)))
+        }
+        // -- Phase 2: Sort ops -------------------------------------------------
+        "tensor_sort" => {
+            let t = value_to_tensor(&args[0])?;
+            let axis = value_to_usize(&args[1])?;
+            let desc = matches!(args.get(2), Some(Value::Bool(true)));
+            Ok(Some(Value::Tensor(t.sort_axis(axis, desc).map_err(|e| format!("{e}"))?)))
+        }
+        "tensor_argsort_axis" => {
+            let t = value_to_tensor(&args[0])?;
+            let axis = value_to_usize(&args[1])?;
+            let desc = matches!(args.get(2), Some(Value::Bool(true)));
+            Ok(Some(Value::Tensor(t.argsort_axis(axis, desc).map_err(|e| format!("{e}"))?)))
+        }
+        // -- Phase 2: Einsum ---------------------------------------------------
+        "einsum" => {
+            let notation = match &args[0] {
+                Value::String(s) => s.as_str().to_string(),
+                _ => return Err("einsum: first arg must be notation string".into()),
+            };
+            let tensors: Vec<&Tensor> = args[1..].iter()
+                .map(value_to_tensor)
+                .collect::<Result<_, _>>()?;
+            let result = Tensor::einsum(&notation, &tensors).map_err(|e| format!("{e}"))?;
+            Ok(Some(Value::Tensor(result)))
+        }
+        // -- Phase 2: Reshape enhancements -------------------------------------
+        "tensor_unsqueeze" => {
+            let t = value_to_tensor(&args[0])?;
+            let dim = value_to_usize(&args[1])?;
+            Ok(Some(Value::Tensor(t.unsqueeze(dim).map_err(|e| format!("{e}"))?)))
+        }
+        "tensor_squeeze" => {
+            let t = value_to_tensor(&args[0])?;
+            let dim = args.get(1).map(|v| value_to_usize(v)).transpose()?;
+            Ok(Some(Value::Tensor(t.squeeze(dim).map_err(|e| format!("{e}"))?)))
+        }
+        "tensor_flatten" => {
+            let t = value_to_tensor(&args[0])?;
+            let start = value_to_usize(&args[1])?;
+            let end = value_to_usize(&args[2])?;
+            Ok(Some(Value::Tensor(t.flatten(start, end).map_err(|e| format!("{e}"))?)))
+        }
+        "tensor_chunk" => {
+            let t = value_to_tensor(&args[0])?;
+            let n = value_to_usize(&args[1])?;
+            let dim = value_to_usize(&args[2])?;
+            let chunks = t.chunk(n, dim).map_err(|e| format!("{e}"))?;
+            Ok(Some(Value::Array(Rc::new(chunks.into_iter().map(Value::Tensor).collect()))))
+        }
+        // -- Phase 3: SVD, PCA, Pseudoinverse ----------------------------------
+        "svd" => {
+            let t = value_to_tensor(&args[0])?;
+            let (u, s, vt) = t.svd().map_err(|e| format!("{e}"))?;
+            let s_tensor = Tensor::from_vec(s, &[u.shape()[1]]).map_err(|e| format!("{e}"))?;
+            Ok(Some(Value::Tuple(Rc::new(vec![
+                Value::Tensor(u),
+                Value::Tensor(s_tensor),
+                Value::Tensor(vt),
+            ]))))
+        }
+        "pinv" => {
+            let t = value_to_tensor(&args[0])?;
+            Ok(Some(Value::Tensor(t.pinv().map_err(|e| format!("{e}"))?)))
+        }
+        "pca" => {
+            let t = value_to_tensor(&args[0])?;
+            let n_components = value_to_usize(&args[1])?;
+            let (transformed, components, variance) = crate::ml::pca(&t, n_components).map_err(|e| format!("{e}"))?;
+            let vlen = variance.len();
+            let var_tensor = Tensor::from_vec(variance, &[vlen]).map_err(|e| format!("{e}"))?;
+            Ok(Some(Value::Tuple(Rc::new(vec![
+                Value::Tensor(transformed),
+                Value::Tensor(components),
+                Value::Tensor(var_tensor),
+            ]))))
+        }
+        // -- Phase 7: Sparse operations ----------------------------------------
+        "sparse_add" => {
+            let a = value_to_sparse(&args[0])?;
+            let b = value_to_sparse(&args[1])?;
+            Ok(Some(Value::SparseTensor(crate::sparse::sparse_add(a, b).map_err(|e| e)?)))
+        }
+        "sparse_sub" => {
+            let a = value_to_sparse(&args[0])?;
+            let b = value_to_sparse(&args[1])?;
+            Ok(Some(Value::SparseTensor(crate::sparse::sparse_sub(a, b).map_err(|e| e)?)))
+        }
+        "sparse_matmul" => {
+            let a = value_to_sparse(&args[0])?;
+            let b = value_to_sparse(&args[1])?;
+            Ok(Some(Value::SparseTensor(crate::sparse::sparse_matmul(a, b).map_err(|e| e)?)))
+        }
+        "sparse_transpose" => {
+            let a = value_to_sparse(&args[0])?;
+            Ok(Some(Value::SparseTensor(crate::sparse::sparse_transpose(a))))
+        }
+        // -- Phase 9: Clustering -----------------------------------------------
+        "kmeans" => {
+            let data = value_to_f64_vec(&args[0])?;
+            let n_samples = value_to_usize(&args[1])?;
+            let n_features = value_to_usize(&args[2])?;
+            let k = value_to_usize(&args[3])?;
+            let max_iter = value_to_usize(&args[4])?;
+            let seed = match &args[5] { Value::Int(v) => *v as u64, _ => 42 };
+            let (centroids, labels, inertia) = crate::clustering::kmeans(&data, n_samples, n_features, k, max_iter, seed);
+            let label_vals: Vec<Value> = labels.iter().map(|&l| Value::Int(l as i64)).collect();
+            let centroid_t = Tensor::from_vec(centroids, &[k, n_features]).map_err(|e| format!("{e}"))?;
+            Ok(Some(Value::Tuple(Rc::new(vec![
+                Value::Tensor(centroid_t),
+                Value::Array(Rc::new(label_vals)),
+                Value::Float(inertia),
+            ]))))
+        }
+        "dbscan" => {
+            let data = value_to_f64_vec(&args[0])?;
+            let n_samples = value_to_usize(&args[1])?;
+            let n_features = value_to_usize(&args[2])?;
+            let eps = value_to_f64(&args[3])?;
+            let min_samples = value_to_usize(&args[4])?;
+            let labels = crate::clustering::dbscan(&data, n_samples, n_features, eps, min_samples);
+            let label_vals: Vec<Value> = labels.iter().map(|&l| Value::Int(l)).collect();
+            Ok(Some(Value::Array(Rc::new(label_vals))))
+        }
+        // -- Phase 10: Categorical encoding ------------------------------------
+        "label_encode" => {
+            // label_encode: convert array of strings to (sorted_levels, codes)
+            // Uses BTreeSet for deterministic sorted order
+            let strs: Vec<String> = match &args[0] {
+                Value::Array(arr) => arr.iter().map(|v| match v {
+                    Value::String(s) => Ok(s.as_str().to_string()),
+                    _ => Err("label_encode: expected array of strings".to_string()),
+                }).collect::<Result<_, _>>()?,
+                _ => return Err("label_encode: expected array".into()),
+            };
+            let mut level_set = std::collections::BTreeSet::new();
+            for s in &strs { level_set.insert(s.clone()); }
+            let levels: Vec<String> = level_set.into_iter().collect();
+            let level_map: std::collections::BTreeMap<&str, u32> = levels.iter().enumerate()
+                .map(|(i, s)| (s.as_str(), i as u32)).collect();
+            let codes: Vec<u32> = strs.iter().map(|s| level_map[s.as_str()]).collect();
+            let level_vals: Vec<Value> = levels.iter().map(|s| Value::String(Rc::new(s.clone()))).collect();
+            let code_vals: Vec<Value> = codes.iter().map(|&c| Value::Int(c as i64)).collect();
+            Ok(Some(Value::Tuple(Rc::new(vec![
+                Value::Array(Rc::new(level_vals)),
+                Value::Array(Rc::new(code_vals)),
+            ]))))
+        }
+        // -- Phase 11: Time series ---------------------------------------------
+        "acf" => {
+            let data = value_to_f64_vec(&args[0])?;
+            let max_lag = value_to_usize(&args[1])?;
+            let result = crate::timeseries::acf(&data, max_lag);
+            Ok(Some(Value::Array(Rc::new(result.into_iter().map(Value::Float).collect()))))
+        }
+        "ewma" => {
+            let data = value_to_f64_vec(&args[0])?;
+            let alpha = value_to_f64(&args[1])?;
+            let result = crate::timeseries::ewma(&data, alpha);
+            Ok(Some(Value::Array(Rc::new(result.into_iter().map(Value::Float).collect()))))
+        }
+        "diff" => {
+            let data = value_to_f64_vec(&args[0])?;
+            let periods = value_to_usize(&args[1])?;
+            let result = crate::timeseries::diff(&data, periods);
+            Ok(Some(Value::Array(Rc::new(result.into_iter().map(Value::Float).collect()))))
+        }
+        // -- Phase 5: Optimization root finding --------------------------------
+        "bisect" => {
+            // bisect expects a closure as first arg — handled by executor, not here
+            Ok(None)
+        }
+        // -- Phase 6: Interpolation --------------------------------------------
+        "polyfit" => {
+            let x = value_to_f64_vec(&args[0])?;
+            let y = value_to_f64_vec(&args[1])?;
+            let degree = value_to_usize(&args[2])?;
+            let coeffs = crate::interpolate::polyfit(&x, &y, degree).map_err(|e| e)?;
+            Ok(Some(Value::Array(Rc::new(coeffs.into_iter().map(Value::Float).collect()))))
+        }
+        "polyval" => {
+            let coeffs = value_to_f64_vec(&args[0])?;
+            let x = value_to_f64_vec(&args[1])?;
+            let result = crate::interpolate::polyval(&coeffs, &x);
+            Ok(Some(Value::Array(Rc::new(result.into_iter().map(Value::Float).collect()))))
+        }
+
         _ => Ok(None), // Not a shared builtin
+    }
+}
+
+/// Extract a SparseCsr reference from a Value.
+fn value_to_sparse(val: &Value) -> Result<&crate::sparse::SparseCsr, String> {
+    match val {
+        Value::SparseTensor(s) => Ok(s),
+        _ => Err(format!("expected SparseTensor, got {}", val.type_name())),
     }
 }
 

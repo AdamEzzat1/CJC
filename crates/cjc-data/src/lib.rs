@@ -8,7 +8,7 @@
 
 use cjc_repro::kahan_sum_f64;
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::rc::Rc;
 
@@ -26,6 +26,13 @@ pub enum Column {
     Float(Vec<f64>),
     Str(Vec<String>),
     Bool(Vec<bool>),
+    /// Categorical column: sorted unique level names + per-row index into levels.
+    Categorical {
+        levels: Vec<String>,
+        codes: Vec<u32>,
+    },
+    /// DateTime column: epoch milliseconds.
+    DateTime(Vec<i64>),
 }
 
 impl Column {
@@ -35,6 +42,8 @@ impl Column {
             Column::Float(v) => v.len(),
             Column::Str(v) => v.len(),
             Column::Bool(v) => v.len(),
+            Column::Categorical { codes, .. } => codes.len(),
+            Column::DateTime(v) => v.len(),
         }
     }
 
@@ -48,6 +57,8 @@ impl Column {
             Column::Float(_) => "Float",
             Column::Str(_) => "Str",
             Column::Bool(_) => "Bool",
+            Column::Categorical { .. } => "Categorical",
+            Column::DateTime(_) => "DateTime",
         }
     }
 
@@ -58,6 +69,8 @@ impl Column {
             Column::Float(v) => format!("{}", v[idx]),
             Column::Str(v) => v[idx].clone(),
             Column::Bool(v) => format!("{}", v[idx]),
+            Column::Categorical { levels, codes } => levels[codes[idx] as usize].clone(),
+            Column::DateTime(v) => format!("{}ms", v[idx]),
         }
     }
 }
@@ -644,6 +657,22 @@ fn filter_column(col: &Column, mask: &[bool]) -> Column {
                 .map(|(v, _)| *v)
                 .collect(),
         ),
+        Column::Categorical { levels, codes } => Column::Categorical {
+            levels: levels.clone(),
+            codes: codes
+                .iter()
+                .zip(mask)
+                .filter(|(_, &m)| m)
+                .map(|(v, _)| *v)
+                .collect(),
+        },
+        Column::DateTime(v) => Column::DateTime(
+            v.iter()
+                .zip(mask)
+                .filter(|(_, &m)| m)
+                .map(|(v, _)| *v)
+                .collect(),
+        ),
     }
 }
 
@@ -735,6 +764,10 @@ fn eval_expr_row(df: &DataFrame, expr: &DExpr, row: usize) -> Result<ExprValue, 
                 Column::Float(v) => Ok(ExprValue::Float(v[row])),
                 Column::Str(v) => Ok(ExprValue::Str(v[row].clone())),
                 Column::Bool(v) => Ok(ExprValue::Bool(v[row])),
+                Column::Categorical { levels, codes } => {
+                    Ok(ExprValue::Str(levels[codes[row] as usize].clone()))
+                }
+                Column::DateTime(v) => Ok(ExprValue::Int(v[row])),
             }
         }
         DExpr::LitInt(v) => Ok(ExprValue::Int(*v)),
@@ -1016,6 +1049,8 @@ fn column_value_str(col: &Column, row: usize) -> String {
         Column::Float(v) => v[row].to_string(),
         Column::Str(v) => v[row].clone(),
         Column::Bool(v) => v[row].to_string(),
+        Column::Categorical { levels, codes } => levels[codes[row] as usize].clone(),
+        Column::DateTime(v) => v[row].to_string(),
     }
 }
 
@@ -1173,6 +1208,11 @@ fn gather_column(col: &Column, indices: &[usize]) -> Column {
         Column::Float(v) => Column::Float(indices.iter().map(|&i| v[i]).collect()),
         Column::Str(v) => Column::Str(indices.iter().map(|&i| v[i].clone()).collect()),
         Column::Bool(v) => Column::Bool(indices.iter().map(|&i| v[i]).collect()),
+        Column::Categorical { levels, codes } => Column::Categorical {
+            levels: levels.clone(),
+            codes: indices.iter().map(|&i| codes[i]).collect(),
+        },
+        Column::DateTime(v) => Column::DateTime(indices.iter().map(|&i| v[i]).collect()),
     }
 }
 
@@ -1182,6 +1222,11 @@ fn gather_column_nullable(col: &Column, indices: &[Option<usize>]) -> Column {
         Column::Float(v) => Column::Float(indices.iter().map(|opt| opt.map_or(f64::NAN, |i| v[i])).collect()),
         Column::Str(v) => Column::Str(indices.iter().map(|opt| opt.map_or_else(String::new, |i| v[i].clone())).collect()),
         Column::Bool(v) => Column::Bool(indices.iter().map(|opt| opt.map_or(false, |i| v[i])).collect()),
+        Column::Categorical { levels, codes } => Column::Categorical {
+            levels: levels.clone(),
+            codes: indices.iter().map(|opt| opt.map_or(0, |i| codes[i])).collect(),
+        },
+        Column::DateTime(v) => Column::DateTime(indices.iter().map(|opt| opt.map_or(0, |i| v[i])).collect()),
     }
 }
 
@@ -1435,6 +1480,152 @@ mod tests {
         };
         assert_eq!(format!("{}", expr), "(col(\"age\") > 18)");
     }
+
+    // ── Categorical Column and Encoding Tests ──────────────────────────────
+
+    #[test]
+    fn test_categorical_column_basics() {
+        let col = Column::Categorical {
+            levels: vec!["bird".into(), "cat".into(), "dog".into()],
+            codes: vec![1, 2, 1, 0],
+        };
+        assert_eq!(col.len(), 4);
+        assert_eq!(col.type_name(), "Categorical");
+        assert_eq!(col.get_display(0), "cat");
+        assert_eq!(col.get_display(1), "dog");
+        assert_eq!(col.get_display(2), "cat");
+        assert_eq!(col.get_display(3), "bird");
+    }
+
+    #[test]
+    fn test_datetime_column_basics() {
+        let col = Column::DateTime(vec![1000, 2000, 3000]);
+        assert_eq!(col.len(), 3);
+        assert_eq!(col.type_name(), "DateTime");
+        assert_eq!(col.get_display(0), "1000ms");
+        assert_eq!(col.get_display(1), "2000ms");
+    }
+
+    #[test]
+    fn test_label_encode() {
+        let data: Vec<String> = vec!["cat".into(), "dog".into(), "cat".into(), "bird".into()];
+        let (levels, codes) = label_encode(&data);
+        assert_eq!(levels, vec!["bird", "cat", "dog"]);
+        assert_eq!(codes, vec![1, 2, 1, 0]);
+    }
+
+    #[test]
+    fn test_label_encode_empty() {
+        let data: Vec<String> = vec![];
+        let (levels, codes) = label_encode(&data);
+        assert!(levels.is_empty());
+        assert!(codes.is_empty());
+    }
+
+    #[test]
+    fn test_label_encode_single_level() {
+        let data: Vec<String> = vec!["x".into(), "x".into(), "x".into()];
+        let (levels, codes) = label_encode(&data);
+        assert_eq!(levels, vec!["x"]);
+        assert_eq!(codes, vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn test_label_encode_deterministic() {
+        // Run twice, must produce identical results (determinism)
+        let data: Vec<String> = vec!["z".into(), "a".into(), "m".into(), "a".into(), "z".into()];
+        let (levels1, codes1) = label_encode(&data);
+        let (levels2, codes2) = label_encode(&data);
+        assert_eq!(levels1, levels2);
+        assert_eq!(codes1, codes2);
+        // Sorted order
+        assert_eq!(levels1, vec!["a", "m", "z"]);
+    }
+
+    #[test]
+    fn test_ordinal_encode() {
+        let data: Vec<String> = vec!["low".into(), "high".into(), "medium".into(), "low".into()];
+        let order: Vec<String> = vec!["low".into(), "medium".into(), "high".into()];
+        let (levels, codes) = ordinal_encode(&data, &order).unwrap();
+        assert_eq!(levels, vec!["low", "medium", "high"]);
+        assert_eq!(codes, vec![0, 2, 1, 0]);
+    }
+
+    #[test]
+    fn test_ordinal_encode_missing_value() {
+        let data: Vec<String> = vec!["low".into(), "unknown".into()];
+        let order: Vec<String> = vec!["low".into(), "medium".into(), "high".into()];
+        let result = ordinal_encode(&data, &order);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unknown"));
+    }
+
+    #[test]
+    fn test_one_hot_encode() {
+        let levels = vec!["bird".to_string(), "cat".to_string(), "dog".to_string()];
+        let codes = vec![1u32, 2, 1, 0];
+        let (names, cols) = one_hot_encode(&levels, &codes);
+        assert_eq!(names, vec!["bird", "cat", "dog"]);
+        assert_eq!(cols.len(), 3);
+        // bird column: [false, false, false, true]
+        assert_eq!(cols[0], vec![false, false, false, true]);
+        // cat column: [true, false, true, false]
+        assert_eq!(cols[1], vec![true, false, true, false]);
+        // dog column: [false, true, false, false]
+        assert_eq!(cols[2], vec![false, true, false, false]);
+
+        // Each row has exactly one true
+        for row in 0..4 {
+            let count: usize = cols.iter().map(|c| if c[row] { 1 } else { 0 }).sum();
+            assert_eq!(count, 1, "row {} should have exactly one true", row);
+        }
+    }
+
+    #[test]
+    fn test_one_hot_encode_empty() {
+        let levels = vec!["a".to_string(), "b".to_string()];
+        let codes: Vec<u32> = vec![];
+        let (names, cols) = one_hot_encode(&levels, &codes);
+        assert_eq!(names.len(), 2);
+        assert!(cols[0].is_empty());
+        assert!(cols[1].is_empty());
+    }
+
+    #[test]
+    fn test_categorical_column_in_dataframe() {
+        let data: Vec<String> = vec!["cat".into(), "dog".into(), "cat".into()];
+        let (levels, codes) = label_encode(&data);
+        let df = DataFrame::from_columns(vec![
+            ("animal".into(), Column::Categorical { levels, codes }),
+            ("score".into(), Column::Float(vec![1.0, 2.0, 3.0])),
+        ])
+        .unwrap();
+        assert_eq!(df.nrows(), 3);
+        assert_eq!(df.ncols(), 2);
+        assert_eq!(df.get_column("animal").unwrap().type_name(), "Categorical");
+    }
+
+    #[test]
+    fn test_datetime_column_in_dataframe() {
+        let df = DataFrame::from_columns(vec![
+            ("ts".into(), Column::DateTime(vec![1000, 2000, 3000])),
+            ("val".into(), Column::Float(vec![1.0, 2.0, 3.0])),
+        ])
+        .unwrap();
+        assert_eq!(df.nrows(), 3);
+        assert_eq!(df.get_column("ts").unwrap().type_name(), "DateTime");
+    }
+
+    #[test]
+    fn test_label_encode_to_column_roundtrip() {
+        let data: Vec<String> = vec!["cat".into(), "dog".into(), "cat".into(), "bird".into()];
+        let (levels, codes) = label_encode(&data);
+        let col = Column::Categorical { levels: levels.clone(), codes: codes.clone() };
+        // Verify roundtrip: display values match originals
+        for (i, original) in data.iter().enumerate() {
+            assert_eq!(col.get_display(i), *original);
+        }
+    }
 }
 
 // â”€â”€ Phase 8: CSV Ingestion & Tensor Bridge â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1479,6 +1670,10 @@ impl DataFrame {
                 Column::Int(v)   => v.push(s.trim().parse::<i64>().unwrap_or(0)),
                 Column::Str(v)   => v.push(s.to_string()),
                 Column::Bool(v)  => v.push(matches!(s.trim(), "true" | "1")),
+                Column::Categorical { .. } => {
+                    // Categorical columns are not populated via push_row
+                }
+                Column::DateTime(v) => v.push(s.trim().parse::<i64>().unwrap_or(0)),
             }
         }
         Ok(())
@@ -3154,6 +3349,11 @@ fn compare_column_rows(col: &Column, a: usize, b: usize) -> std::cmp::Ordering {
         }
         Column::Bool(v) => v[a].cmp(&v[b]),
         Column::Str(v) => v[a].cmp(&v[b]),
+        Column::Categorical { levels, codes } => {
+            // Compare by the level string, not the code
+            levels[codes[a] as usize].cmp(&levels[codes[b] as usize])
+        }
+        Column::DateTime(v) => v[a].cmp(&v[b]),
     }
 }
 
@@ -3526,6 +3726,12 @@ impl NullCol {
             Column::Float(v) => NullCol::Float(NullableColumn::from_values(v.clone())),
             Column::Str(v) => NullCol::Str(NullableColumn::from_values(v.clone())),
             Column::Bool(v) => NullCol::Bool(NullableColumn::from_values(v.clone())),
+            // Categorical is stored as its string representation for nullable contexts
+            Column::Categorical { levels, codes } => {
+                let strings: Vec<String> = codes.iter().map(|&c| levels[c as usize].clone()).collect();
+                NullCol::Str(NullableColumn::from_values(strings))
+            }
+            Column::DateTime(v) => NullCol::Int(NullableColumn::from_values(v.clone())),
         }
     }
 
@@ -3728,6 +3934,28 @@ fn gather_column_nullable_null(col: &Column, indices: &[Option<usize>]) -> NullC
             }
             NullCol::Bool(NullableColumn::new(vals, BitMask::from_bools(&valid)))
         }
+        Column::Categorical { levels, codes } => {
+            let mut vals = Vec::with_capacity(indices.len());
+            let mut valid = Vec::with_capacity(indices.len());
+            for &idx in indices {
+                match idx {
+                    Some(i) => { vals.push(levels[codes[i] as usize].clone()); valid.push(true); }
+                    None => { vals.push(String::new()); valid.push(false); }
+                }
+            }
+            NullCol::Str(NullableColumn::new(vals, BitMask::from_bools(&valid)))
+        }
+        Column::DateTime(v) => {
+            let mut vals = Vec::with_capacity(indices.len());
+            let mut valid = Vec::with_capacity(indices.len());
+            for &idx in indices {
+                match idx {
+                    Some(i) => { vals.push(v[i]); valid.push(true); }
+                    None => { vals.push(0); valid.push(false); }
+                }
+            }
+            NullCol::Int(NullableColumn::new(vals, BitMask::from_bools(&valid)))
+        }
     }
 }
 
@@ -3928,6 +4156,20 @@ impl TidyView {
                     }
                     Column::Bool(out)
                 }
+                Column::Categorical { levels, codes } => {
+                    let mut out = Vec::with_capacity(n_out);
+                    for &r in &visible_rows {
+                        for _ in 0..value_cols.len() { out.push(codes[r]); }
+                    }
+                    Column::Categorical { levels: levels.clone(), codes: out }
+                }
+                Column::DateTime(v) => {
+                    let mut out = Vec::with_capacity(n_out);
+                    for &r in &visible_rows {
+                        for _ in 0..value_cols.len() { out.push(v[r]); }
+                    }
+                    Column::DateTime(out)
+                }
             };
             out_cols.push((name.clone(), new_col));
         }
@@ -3983,6 +4225,16 @@ impl TidyView {
                     }
                 }
                 out_cols.push((values_to.to_string(), Column::Bool(vals)));
+            }
+            Column::Categorical { .. } | Column::DateTime(_) => {
+                // For pivot_longer, fall back to string representation
+                let mut vals: Vec<String> = Vec::with_capacity(n_out);
+                for &r in &visible_rows {
+                    for &vci in &vc_indices {
+                        vals.push(self.base.columns[vci].1.get_display(r));
+                    }
+                }
+                out_cols.push((values_to.to_string(), Column::Str(vals)));
             }
         }
 
@@ -5494,6 +5746,64 @@ impl TidyView {
             .map(|(&s, &c)| if c == 0 { f64::NAN } else { s / c as f64 })
             .collect())
     }
+}
+
+// ── Categorical Encoding Functions ──────────────────────────────────────────
+
+/// Convert a string slice into a categorical encoding with sorted unique levels
+/// and integer codes.
+///
+/// Uses `BTreeSet` for deterministic sorted level discovery.
+pub fn label_encode(col: &[String]) -> (Vec<String>, Vec<u32>) {
+    let unique: BTreeSet<&str> = col.iter().map(|s| s.as_str()).collect();
+    let levels: Vec<String> = unique.into_iter().map(|s| s.to_string()).collect();
+
+    let lookup: BTreeMap<&str, u32> = levels
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.as_str(), i as u32))
+        .collect();
+
+    let codes: Vec<u32> = col.iter().map(|s| lookup[s.as_str()]).collect();
+    (levels, codes)
+}
+
+/// Convert a string slice into a categorical encoding with a user-specified
+/// level order.
+///
+/// Returns an error if any value in `col` is not found in `order`.
+pub fn ordinal_encode(col: &[String], order: &[String]) -> Result<(Vec<String>, Vec<u32>), String> {
+    let lookup: BTreeMap<&str, u32> = order
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.as_str(), i as u32))
+        .collect();
+
+    let mut codes = Vec::with_capacity(col.len());
+    for s in col {
+        match lookup.get(s.as_str()) {
+            Some(&idx) => codes.push(idx),
+            None => return Err(format!("value {:?} not found in specified order", s)),
+        }
+    }
+    Ok((order.to_vec(), codes))
+}
+
+/// One-hot encode a categorical column into multiple boolean columns.
+///
+/// Returns `(column_names, columns)` where each column is `Vec<bool>` and
+/// each row has exactly one `true` across all columns.
+pub fn one_hot_encode(levels: &[String], codes: &[u32]) -> (Vec<String>, Vec<Vec<bool>>) {
+    let n_levels = levels.len();
+    let n_rows = codes.len();
+
+    let mut columns: Vec<Vec<bool>> = vec![vec![false; n_rows]; n_levels];
+    for (row, &code) in codes.iter().enumerate() {
+        columns[code as usize][row] = true;
+    }
+
+    let names: Vec<String> = levels.to_vec();
+    (names, columns)
 }
 
 // â”€â”€ Phase 17 NoGC audit notes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

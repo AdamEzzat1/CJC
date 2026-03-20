@@ -3697,6 +3697,12 @@ fn dataframe_to_value(df: DataFrame) -> Value {
                 v.iter().map(|s| Value::String(Rc::new(s.clone()))).collect(),
             )),
             Column::Bool(v)  => Value::Array(Rc::new(v.iter().map(|&x| Value::Bool(x)).collect())),
+            Column::Categorical { ref levels, ref codes } => {
+                Value::Array(Rc::new(codes.iter().map(|&c| {
+                    Value::String(Rc::new(levels.get(c as usize).cloned().unwrap_or_default()))
+                }).collect()))
+            }
+            Column::DateTime(v) => Value::Array(Rc::new(v.iter().map(|&x| Value::Int(x)).collect())),
         };
         fields.insert(name.clone(), arr);
     }
