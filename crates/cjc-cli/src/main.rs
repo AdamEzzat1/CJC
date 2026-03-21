@@ -1,5 +1,8 @@
 //! CJC CLI — Entry point for the CJC programming language.
 //!
+//! Zero-dependency argument parsing via manual `std::env::args()` iteration.
+//! All CLI logic lives in this file — no external parsing crates.
+//!
 //! Usage:
 //!   cjc run <file.cjc>           Run a CJC program
 //!   cjc check <file.cjc>         Type-check without running
@@ -12,13 +15,17 @@
 //!   --seed <N>                   Set RNG seed (default: 42)
 //!   --time                       Print execution time after running
 //!   --mir-opt                    Enable MIR optimizations (CF + DCE)
+//!   --mir-mono                   Enable MIR monomorphization
 //!   --multi-file                 Enable multi-file module resolution
 //!   --color                      Force color output
 //!   --no-color                   Disable color output
-//!   --help                       Print usage and exit
-//!   --version                    Print version and exit
+//!   --diagnostic-format <fmt>    Diagnostic format: rich (default) or short
+//!   --help, -h                   Print usage and exit
+//!   --version, -V                Print version and exit
 
+mod highlight;
 mod line_editor;
+mod table;
 
 use std::env;
 use std::fs;
@@ -26,116 +33,265 @@ use std::path::Path;
 use std::process;
 use std::time::Instant;
 
-fn main() {
-    let args: Vec<String> = env::args().collect();
+const VERSION: &str = "0.1.0";
 
-    // Pre-scan for --help and --version before anything else
-    for arg in &args[1..] {
-        match arg.as_str() {
-            "--help" | "-h" => {
-                print_usage();
-                return;
+// ── Typed CLI configuration ──────────────────────────────────────────
+
+/// The subcommand to execute.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Command {
+    Lex,
+    Parse,
+    Check,
+    Run,
+    Repl,
+}
+
+/// Fully parsed CLI configuration. Produced by `Config::from_args()`.
+#[derive(Debug)]
+struct Config {
+    command: Command,
+    filename: Option<String>,
+    seed: u64,
+    reproducible: bool,
+    time: bool,
+    mir_opt: bool,
+    mir_mono: bool,
+    multi_file: bool,
+    use_color: bool,
+    diag_format: cjc_diag::DiagnosticFormat,
+}
+
+/// Known flags for typo suggestions.
+const KNOWN_FLAGS: &[&str] = &[
+    "--reproducible",
+    "--seed",
+    "--time",
+    "--mir-opt",
+    "--mir-mono",
+    "--multi-file",
+    "--color",
+    "--no-color",
+    "--diagnostic-format",
+    "--help",
+    "--version",
+    "-h",
+    "-V",
+];
+
+/// Known commands for typo suggestions.
+const KNOWN_COMMANDS: &[&str] = &["lex", "parse", "check", "run", "repl"];
+
+impl Config {
+    /// Parse CLI arguments from `std::env::args()`. Exits on error.
+    fn from_args() -> Self {
+        let args: Vec<String> = env::args().collect();
+
+        // Pre-scan for --help and --version (handled before full parse)
+        for arg in &args[1..] {
+            match arg.as_str() {
+                "--help" | "-h" => {
+                    print_usage();
+                    process::exit(0);
+                }
+                "--version" | "-V" => {
+                    println!("cjc {}", VERSION);
+                    process::exit(0);
+                }
+                _ => {}
             }
-            "--version" | "-V" => {
-                println!("cjc 0.1.0");
-                return;
-            }
-            _ => {}
         }
-    }
 
-    // Parse global flags (can appear anywhere)
-    let mut _reproducible = false;
-    let mut seed: u64 = 42;
-    let mut time_execution = false;
-    let mut mir_opt = false;
-    let mut mir_mono = false;
-    let mut multi_file = false;
-    let mut force_color: Option<bool> = None; // None = auto-detect
+        let mut reproducible = false;
+        let mut seed: u64 = 42;
+        let mut time = false;
+        let mut mir_opt = false;
+        let mut mir_mono = false;
+        let mut multi_file = false;
+        let mut force_color: Option<bool> = None;
+        let mut diag_format = cjc_diag::DiagnosticFormat::Rich;
+        let mut positional: Vec<String> = Vec::new();
 
-    // Collect positional args (command and filename)
-    let mut positional: Vec<String> = Vec::new();
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--reproducible" => _reproducible = true,
-            "--time" => time_execution = true,
-            "--mir-opt" => mir_opt = true,
-            "--mir-mono" => mir_mono = true,
-            "--multi-file" => multi_file = true,
-            "--color" => force_color = Some(true),
-            "--no-color" => force_color = Some(false),
-            "--seed" => {
-                i += 1;
-                if i < args.len() {
+        let mut i = 1;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--reproducible" => reproducible = true,
+                "--time" => time = true,
+                "--mir-opt" => mir_opt = true,
+                "--mir-mono" => mir_mono = true,
+                "--multi-file" => multi_file = true,
+                "--color" => force_color = Some(true),
+                "--no-color" => force_color = Some(false),
+                "--diagnostic-format" => {
+                    i += 1;
+                    if i >= args.len() {
+                        cli_error("--diagnostic-format requires an argument (short or rich)");
+                    }
+                    match args[i].as_str() {
+                        "short" => diag_format = cjc_diag::DiagnosticFormat::Short,
+                        "rich" => diag_format = cjc_diag::DiagnosticFormat::Rich,
+                        other => cli_error(&format!(
+                            "unknown diagnostic format `{}` (expected `short` or `rich`)", other
+                        )),
+                    }
+                }
+                "--seed" => {
+                    i += 1;
+                    if i >= args.len() {
+                        cli_error("--seed requires a numeric argument");
+                    }
                     seed = args[i].parse().unwrap_or_else(|_| {
-                        eprintln!("error: --seed requires a numeric argument");
-                        process::exit(1);
+                        cli_error(&format!("invalid seed value `{}`", args[i]));
                     });
                 }
+                "--help" | "-h" | "--version" | "-V" => { /* already handled */ }
+                other if other.starts_with("--") || other.starts_with('-') && other.len() > 1 => {
+                    let suggestion = suggest_flag(other);
+                    if let Some(s) = suggestion {
+                        eprintln!("error: unknown flag `{}`\n  hint: did you mean `{}`?", other, s);
+                    } else {
+                        eprintln!("error: unknown flag `{}`", other);
+                    }
+                    process::exit(1);
+                }
+                _ => positional.push(args[i].clone()),
             }
-            "--help" | "-h" | "--version" | "-V" => {
-                // Already handled above
-            }
-            other if other.starts_with("--") => {
-                eprintln!("warning: unknown flag `{}`", other);
-            }
-            _ => {
-                positional.push(args[i].clone());
-            }
+            i += 1;
         }
-        i += 1;
-    }
 
-    // Resolve color: explicit flag overrides, otherwise default to true
-    let use_color = force_color.unwrap_or(true);
+        let use_color = force_color.unwrap_or(true);
 
-    if positional.is_empty() {
-        print_usage();
-        process::exit(1);
-    }
-
-    let command = &positional[0];
-
-    // REPL command does not require a filename
-    if command == "repl" {
-        cmd_repl(seed, use_color);
-        return;
-    }
-
-    if positional.len() < 2 {
-        eprintln!("error: command `{}` requires a filename argument", command);
-        print_usage();
-        process::exit(1);
-    }
-
-    let filename = &positional[1];
-
-    // Read source file
-    let source = match fs::read_to_string(filename) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: could not read `{}`: {}", filename, e);
-            process::exit(1);
-        }
-    };
-
-    match command.as_str() {
-        "lex" => cmd_lex(&source, filename, use_color),
-        "parse" => cmd_parse(&source, filename, use_color),
-        "check" => cmd_check(&source, filename, use_color),
-        "run" => cmd_run(&source, filename, seed, time_execution, mir_opt, mir_mono, multi_file, use_color),
-        _ => {
-            eprintln!("error: unknown command `{}`", command);
+        if positional.is_empty() {
             print_usage();
             process::exit(1);
+        }
+
+        let command = match positional[0].as_str() {
+            "lex" => Command::Lex,
+            "parse" => Command::Parse,
+            "check" => Command::Check,
+            "run" => Command::Run,
+            "repl" => Command::Repl,
+            other => {
+                let suggestion = suggest_command(other);
+                if let Some(s) = suggestion {
+                    eprintln!("error: unknown command `{}`\n  hint: did you mean `{}`?", other, s);
+                } else {
+                    eprintln!("error: unknown command `{}`", other);
+                }
+                print_usage();
+                process::exit(1);
+            }
+        };
+
+        // Commands other than `repl` require a filename
+        let filename = if command != Command::Repl {
+            if positional.len() < 2 {
+                cli_error(&format!("command `{}` requires a filename argument", positional[0]));
+            }
+            Some(positional[1].clone())
+        } else {
+            None
+        };
+
+        Config {
+            command,
+            filename,
+            seed,
+            reproducible,
+            time,
+            mir_opt,
+            mir_mono,
+            multi_file,
+            use_color,
+            diag_format,
         }
     }
 }
 
+// ── Error helpers ────────────────────────────────────────────────────
+
+/// Print an error message and exit with code 1.
+fn cli_error(msg: &str) -> ! {
+    eprintln!("error: {}", msg);
+    process::exit(1);
+}
+
+/// Suggest the closest known flag using edit distance (Levenshtein).
+fn suggest_flag(input: &str) -> Option<&'static str> {
+    suggest_closest(input, KNOWN_FLAGS, 3)
+}
+
+/// Suggest the closest known command using edit distance.
+fn suggest_command(input: &str) -> Option<&'static str> {
+    suggest_closest(input, KNOWN_COMMANDS, 3)
+}
+
+/// Find the closest match within `max_distance` using Levenshtein distance.
+fn suggest_closest(input: &str, candidates: &[&'static str], max_distance: usize) -> Option<&'static str> {
+    let mut best: Option<&str> = None;
+    let mut best_dist = max_distance + 1;
+    for &candidate in candidates {
+        let d = levenshtein(input, candidate);
+        if d < best_dist {
+            best_dist = d;
+            best = Some(candidate);
+        }
+    }
+    best
+}
+
+/// Simple Levenshtein distance (no allocation beyond two rows).
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let m = a_chars.len();
+    let n = b_chars.len();
+    if m == 0 { return n; }
+    if n == 0 { return m; }
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut curr = vec![0usize; n + 1];
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1)
+                .min(curr[j - 1] + 1)
+                .min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[n]
+}
+
+// ── Entry point ──────────────────────────────────────────────────────
+
+fn main() {
+    let config = Config::from_args();
+
+    match config.command {
+        Command::Repl => cmd_repl(config.seed, config.use_color),
+        _ => {
+            let filename = config.filename.as_deref().unwrap();
+            let source = match fs::read_to_string(filename) {
+                Ok(s) => s,
+                Err(e) => cli_error(&format!("could not read `{}`: {}", filename, e)),
+            };
+            match config.command {
+                Command::Lex => cmd_lex(&source, filename, config.use_color, config.diag_format),
+                Command::Parse => cmd_parse(&source, filename, config.use_color, config.diag_format),
+                Command::Check => cmd_check(&source, filename, config.use_color, config.diag_format),
+                Command::Run => cmd_run(&source, filename, &config),
+                Command::Repl => unreachable!(),
+            }
+        }
+    }
+}
+
+// ── Usage ────────────────────────────────────────────────────────────
+
 fn print_usage() {
-    eprintln!("CJC Programming Language v0.1.0");
+    eprintln!("CJC Programming Language v{}", VERSION);
     eprintln!();
     eprintln!("Usage:");
     eprintln!("  cjc lex <file.cjc>              Tokenize and print tokens");
@@ -153,11 +309,18 @@ fn print_usage() {
     eprintln!("  --multi-file                    Enable multi-file module resolution");
     eprintln!("  --color                         Force color output");
     eprintln!("  --no-color                      Disable color output");
+    eprintln!("  --diagnostic-format <fmt>       Diagnostic format: rich (default) or short");
     eprintln!("  --help, -h                      Print this help message");
     eprintln!("  --version, -V                   Print version information");
 }
 
-fn cmd_lex(source: &str, filename: &str, use_color: bool) {
+// ── Command implementations ──────────────────────────────────────────
+
+fn render_diags(diags: &cjc_diag::DiagnosticBag, source: &str, filename: &str, use_color: bool, diag_format: cjc_diag::DiagnosticFormat) {
+    eprintln!("{}", diags.render_all_with_options(source, filename, use_color, diag_format));
+}
+
+fn cmd_lex(source: &str, filename: &str, use_color: bool, diag_format: cjc_diag::DiagnosticFormat) {
     let lexer = cjc_lexer::Lexer::new(source);
     let (tokens, diags) = lexer.tokenize();
 
@@ -172,17 +335,18 @@ fn cmd_lex(source: &str, filename: &str, use_color: bool) {
     }
 
     if diags.has_errors() {
-        eprintln!("\n{}", diags.render_all_color(source, filename, use_color));
+        eprintln!();
+        render_diags(&diags, source, filename, use_color, diag_format);
         process::exit(1);
     }
 }
 
-fn cmd_parse(source: &str, filename: &str, use_color: bool) {
+fn cmd_parse(source: &str, filename: &str, use_color: bool, diag_format: cjc_diag::DiagnosticFormat) {
     let lexer = cjc_lexer::Lexer::new(source);
     let (tokens, lex_diags) = lexer.tokenize();
 
     if lex_diags.has_errors() {
-        eprintln!("{}", lex_diags.render_all_color(source, filename, use_color));
+        render_diags(&lex_diags, source, filename, use_color, diag_format);
         process::exit(1);
     }
 
@@ -190,7 +354,7 @@ fn cmd_parse(source: &str, filename: &str, use_color: bool) {
     let (program, parse_diags) = parser.parse_program();
 
     if parse_diags.has_errors() {
-        eprintln!("{}", parse_diags.render_all_color(source, filename, use_color));
+        render_diags(&parse_diags, source, filename, use_color, diag_format);
         process::exit(1);
     }
 
@@ -198,12 +362,12 @@ fn cmd_parse(source: &str, filename: &str, use_color: bool) {
     println!("{}", pretty);
 }
 
-fn cmd_check(source: &str, filename: &str, use_color: bool) {
+fn cmd_check(source: &str, filename: &str, use_color: bool, diag_format: cjc_diag::DiagnosticFormat) {
     let lexer = cjc_lexer::Lexer::new(source);
     let (tokens, lex_diags) = lexer.tokenize();
 
     if lex_diags.has_errors() {
-        eprintln!("{}", lex_diags.render_all_color(source, filename, use_color));
+        render_diags(&lex_diags, source, filename, use_color, diag_format);
         process::exit(1);
     }
 
@@ -211,7 +375,7 @@ fn cmd_check(source: &str, filename: &str, use_color: bool) {
     let (program, parse_diags) = parser.parse_program();
 
     if parse_diags.has_errors() {
-        eprintln!("{}", parse_diags.render_all_color(source, filename, use_color));
+        render_diags(&parse_diags, source, filename, use_color, diag_format);
         process::exit(1);
     }
 
@@ -219,35 +383,21 @@ fn cmd_check(source: &str, filename: &str, use_color: bool) {
     checker.check_program(&program);
 
     if checker.diagnostics.has_errors() {
-        eprintln!("{}", checker.diagnostics.render_all_color(source, filename, use_color));
+        render_diags(&checker.diagnostics, source, filename, use_color, diag_format);
         process::exit(1);
     }
 
     println!("OK — no errors found in `{}`", filename);
 }
 
-fn cmd_run(
-    source: &str,
-    filename: &str,
-    seed: u64,
-    time_execution: bool,
-    mir_opt: bool,
-    mir_mono: bool,
-    multi_file: bool,
-    use_color: bool,
-) {
+fn cmd_run(source: &str, filename: &str, config: &Config) {
     let start = Instant::now();
 
-    if multi_file {
-        // Multi-file module system: resolve imports, merge, execute
+    if config.multi_file {
         let entry_path = Path::new(filename)
             .canonicalize()
-            .unwrap_or_else(|e| {
-                eprintln!("error: could not resolve path `{}`: {}", filename, e);
-                process::exit(1);
-            });
+            .unwrap_or_else(|e| cli_error(&format!("could not resolve path `{}`: {}", filename, e)));
 
-        // Check visibility constraints before execution
         match cjc_module::build_module_graph(&entry_path) {
             Ok(graph) => {
                 let violations = cjc_module::check_visibility(&graph);
@@ -258,26 +408,19 @@ fn cmd_run(
                     process::exit(1);
                 }
             }
-            Err(e) => {
-                eprintln!("error: {}", e);
-                process::exit(1);
-            }
+            Err(e) => cli_error(&format!("{}", e)),
         }
 
-        match cjc_mir_exec::run_program_with_modules(&entry_path, seed) {
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("{}", e);
-                process::exit(1);
-            }
+        if let Err(e) = cjc_mir_exec::run_program_with_modules(&entry_path, config.seed) {
+            eprintln!("{}", e);
+            process::exit(1);
         }
     } else {
-        // Single-file mode (default)
         let lexer = cjc_lexer::Lexer::new(source);
         let (tokens, lex_diags) = lexer.tokenize();
 
         if lex_diags.has_errors() {
-            eprintln!("{}", lex_diags.render_all_color(source, filename, use_color));
+            render_diags(&lex_diags, source, filename, config.use_color, config.diag_format);
             process::exit(1);
         }
 
@@ -285,50 +428,36 @@ fn cmd_run(
         let (program, parse_diags) = parser.parse_program();
 
         if parse_diags.has_errors() {
-            eprintln!("{}", parse_diags.render_all_color(source, filename, use_color));
+            render_diags(&parse_diags, source, filename, config.use_color, config.diag_format);
             process::exit(1);
         }
 
-        // Run NoGC verification unconditionally (only errors on is_nogc fns)
         if let Err(e) = cjc_mir_exec::verify_nogc(&program) {
             eprintln!("NoGC verification failed:\n{}", e);
             process::exit(1);
         }
 
-        if mir_mono {
-            // Run with MIR monomorphization + optimization
-            match cjc_mir_exec::run_program_monomorphized(&program, seed) {
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("{}", e);
-                    process::exit(1);
-                }
+        if config.mir_mono {
+            if let Err(e) = cjc_mir_exec::run_program_monomorphized(&program, config.seed) {
+                eprintln!("{}", e);
+                process::exit(1);
             }
-        } else if mir_opt {
-            // Run with MIR optimizations enabled
-            match cjc_mir_exec::run_program_optimized(&program, seed) {
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("{}", e);
-                    process::exit(1);
-                }
+        } else if config.mir_opt {
+            if let Err(e) = cjc_mir_exec::run_program_optimized(&program, config.seed) {
+                eprintln!("{}", e);
+                process::exit(1);
             }
         } else {
-            // Run the program via AST interpreter (default)
-            let mut interpreter = cjc_eval::Interpreter::new(seed);
-            match interpreter.exec(&program) {
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("{}", e);
-                    process::exit(1);
-                }
+            let mut interpreter = cjc_eval::Interpreter::new(config.seed);
+            if let Err(e) = interpreter.exec(&program) {
+                eprintln!("{}", e);
+                process::exit(1);
             }
         }
     }
 
-    let elapsed = start.elapsed();
-
-    if time_execution {
+    if config.time {
+        let elapsed = start.elapsed();
         eprintln!(
             "[cjc --time] Execution took {:.6} seconds ({} us)",
             elapsed.as_secs_f64(),
@@ -339,10 +468,10 @@ fn cmd_run(
 
 fn cmd_repl(seed: u64, use_color: bool) {
     let mut interpreter = cjc_eval::Interpreter::new(seed);
-    let mut editor = line_editor::LineEditor::new();
+    let mut editor = line_editor::LineEditor::new_with_color(use_color);
     let mut line_num = 0u64;
 
-    eprintln!("CJC REPL v0.1.0  (type :help for commands, :quit to exit)");
+    eprintln!("CJC REPL v{}  (type :help for commands, :quit to exit)", VERSION);
 
     loop {
         let input = match editor.read_line("cjc> ") {
@@ -388,13 +517,11 @@ fn cmd_repl(seed: u64, use_color: bool) {
 
         match interpreter.exec(&program) {
             Ok(val) => {
-                // Print any output lines captured by the interpreter
                 for out_line in &interpreter.output {
                     println!("{}", out_line);
                 }
                 interpreter.output.clear();
 
-                // Print the result value if it is not Void
                 match &val {
                     cjc_runtime::Value::Void => {}
                     other => println!("{}", other),
@@ -415,7 +542,7 @@ enum MetaResult {
 
 fn handle_meta_command(
     cmd: &str,
-    _interpreter: &cjc_eval::Interpreter,
+    interpreter: &cjc_eval::Interpreter,
     use_color: bool,
     seed: u64,
 ) -> MetaResult {
@@ -449,17 +576,12 @@ fn handle_meta_command(
                 } else {
                     let mut checker = cjc_types::TypeChecker::new();
                     checker.check_program(&program);
-                    // Try to infer the type of the last expression
                     if let Some(last) = program.declarations.last() {
                         match &last.kind {
                             cjc_ast::DeclKind::Fn(_) => eprintln!("fn"),
-                            _ => {
-                                // For expressions wrapped in decls, just show what we can
-                                eprintln!("(type checking complete, no errors)")
-                            }
+                            _ => eprintln!("(type checking complete, no errors)"),
                         }
                     }
-                    // Show any diagnostics
                     if !checker.diagnostics.diagnostics.is_empty() {
                         for d in &checker.diagnostics.diagnostics {
                             eprintln!("[{}] {}", d.code, d.message);
@@ -502,9 +624,41 @@ fn handle_meta_command(
             MetaResult::Continue
         }
         ":env" => {
-            eprintln!("Current REPL environment:");
-            eprintln!("  (environment introspection for eval interpreter)");
-            eprintln!("  seed = {}", seed);
+            // Variable bindings
+            let bindings = interpreter.list_bindings();
+            if bindings.is_empty() {
+                eprintln!("No variable bindings.");
+            } else {
+                let mut t = table::Table::new(vec!["Name", "Type", "Value"]);
+                for (name, ty, val) in &bindings {
+                    t.add_row_owned(vec![name.clone(), ty.clone(), val.clone()]);
+                }
+                eprint!("{}", t.render());
+            }
+
+            // Functions
+            let fns = interpreter.list_functions();
+            if !fns.is_empty() {
+                eprintln!();
+                let mut t = table::Table::new(vec!["Function"]);
+                for name in &fns {
+                    t.add_row(vec![name]);
+                }
+                eprint!("{}", t.render());
+            }
+
+            // Structs
+            let structs = interpreter.list_structs();
+            if !structs.is_empty() {
+                eprintln!();
+                let mut t = table::Table::new(vec!["Struct"]);
+                for name in &structs {
+                    t.add_row(vec![name]);
+                }
+                eprint!("{}", t.render());
+            }
+
+            eprintln!("\nseed = {}", seed);
             MetaResult::Continue
         }
         ":seed" => {
@@ -515,5 +669,61 @@ fn handle_meta_command(
             eprintln!("Unknown command: {}. Type :help for available commands.", command);
             MetaResult::Continue
         }
+    }
+}
+
+// ── Unit tests ───────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_levenshtein_identical() {
+        assert_eq!(levenshtein("hello", "hello"), 0);
+    }
+
+    #[test]
+    fn test_levenshtein_empty() {
+        assert_eq!(levenshtein("", "abc"), 3);
+        assert_eq!(levenshtein("abc", ""), 3);
+        assert_eq!(levenshtein("", ""), 0);
+    }
+
+    #[test]
+    fn test_levenshtein_substitution() {
+        assert_eq!(levenshtein("cat", "car"), 1);
+    }
+
+    #[test]
+    fn test_levenshtein_insertion_deletion() {
+        assert_eq!(levenshtein("abc", "abcd"), 1);
+        assert_eq!(levenshtein("abcd", "abc"), 1);
+    }
+
+    #[test]
+    fn test_suggest_flag_close_match() {
+        // --colr -> --color (distance 1)
+        assert_eq!(suggest_flag("--colr"), Some("--color"));
+        // --mir-op -> --mir-opt (distance 1)
+        assert_eq!(suggest_flag("--mir-op"), Some("--mir-opt"));
+    }
+
+    #[test]
+    fn test_suggest_flag_no_match() {
+        // Very far from any known flag
+        assert_eq!(suggest_flag("--zzzzzzzzzzz"), None);
+    }
+
+    #[test]
+    fn test_suggest_command_close_match() {
+        assert_eq!(suggest_command("rn"), Some("run"));
+        assert_eq!(suggest_command("chck"), Some("check"));
+        assert_eq!(suggest_command("lx"), Some("lex"));
+    }
+
+    #[test]
+    fn test_suggest_command_no_match() {
+        assert_eq!(suggest_command("foobarquux"), None);
     }
 }

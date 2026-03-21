@@ -210,6 +210,39 @@ impl Interpreter {
         }
     }
 
+    /// Return all variable bindings visible in the current scope stack.
+    /// Each entry is (name, type_tag, value_preview). Ordered by name (BTreeMap).
+    pub fn list_bindings(&self) -> Vec<(String, String, String)> {
+        let mut seen = std::collections::BTreeMap::new();
+        // Walk from innermost to outermost; first wins (shadowing)
+        for scope in self.scopes.iter().rev() {
+            for (name, val) in scope {
+                seen.entry(name.clone()).or_insert_with(|| {
+                    let ty = val.type_name().to_string();
+                    let preview = format!("{}", val);
+                    // Truncate long previews
+                    let preview = if preview.len() > 60 {
+                        format!("{}...", &preview[..57])
+                    } else {
+                        preview
+                    };
+                    (ty, preview)
+                });
+            }
+        }
+        seen.into_iter().map(|(name, (ty, preview))| (name, ty, preview)).collect()
+    }
+
+    /// Return the names of all user-defined functions.
+    pub fn list_functions(&self) -> Vec<&str> {
+        self.functions.keys().map(|s| s.as_str()).collect()
+    }
+
+    /// Return the names of all user-defined structs.
+    pub fn list_structs(&self) -> Vec<&str> {
+        self.struct_defs.keys().map(|s| s.as_str()).collect()
+    }
+
     fn lookup(&self, name: &str) -> Option<&Value> {
         for scope in self.scopes.iter().rev() {
             if let Some(v) = scope.get(name) {

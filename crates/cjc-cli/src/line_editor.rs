@@ -19,6 +19,7 @@ pub struct LineEditor {
     history: Vec<String>,
     history_file: Option<String>,
     max_history: usize,
+    use_color: bool,
 }
 
 /// Result of a single line read operation.
@@ -31,6 +32,10 @@ pub enum ReadResult {
 
 impl LineEditor {
     pub fn new() -> Self {
+        Self::new_with_color(true)
+    }
+
+    pub fn new_with_color(use_color: bool) -> Self {
         let history_file = dirs_home().map(|h| {
             let mut p = h;
             p.push_str("/.cjc_history");
@@ -41,6 +46,7 @@ impl LineEditor {
             history: Vec::new(),
             history_file,
             max_history: 1000,
+            use_color,
         };
         editor.load_history();
         editor
@@ -110,7 +116,7 @@ impl LineEditor {
     }
 
     fn try_raw_line(&self, prompt: &str) -> Option<ReadResult> {
-        let mut state = RawLineState::new(prompt, &self.history)?;
+        let mut state = RawLineState::new(prompt, &self.history, self.use_color)?;
         let result = state.run();
         Some(result)
     }
@@ -172,11 +178,12 @@ struct RawLineState<'a> {
     history: &'a [String],
     history_idx: usize,     // points past end = current input
     saved_input: String,    // what user typed before navigating history
+    use_color: bool,
     _guard: RawModeGuard,
 }
 
 impl<'a> RawLineState<'a> {
-    fn new(prompt: &'a str, history: &'a [String]) -> Option<Self> {
+    fn new(prompt: &'a str, history: &'a [String], use_color: bool) -> Option<Self> {
         let guard = RawModeGuard::enter()?;
         Some(Self {
             buf: Vec::new(),
@@ -185,6 +192,7 @@ impl<'a> RawLineState<'a> {
             history,
             history_idx: history.len(),
             saved_input: String::new(),
+            use_color,
             _guard: guard,
         })
     }
@@ -316,9 +324,14 @@ impl<'a> RawLineState<'a> {
 
     fn draw_line(&self) {
         let line: String = self.buf.iter().collect();
-        // Move to start of line, clear it, redraw
-        eprint!("\r\x1b[K{}{}", self.prompt, line);
-        // Position cursor
+        // Move to start of line, clear it, redraw with optional syntax highlighting
+        let display = if self.use_color {
+            crate::highlight::highlight(&line)
+        } else {
+            line
+        };
+        eprint!("\r\x1b[K{}{}", self.prompt, display);
+        // Position cursor (use plain char count, not ANSI-inflated length)
         let cursor_pos = self.prompt.len() + self.cursor;
         eprint!("\r\x1b[{}C", cursor_pos);
         io::stderr().flush().ok();

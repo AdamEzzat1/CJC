@@ -26,6 +26,73 @@ impl Span {
     }
 }
 
+// ── SourceMap: precomputed line-start table for O(log n) lookups ─────
+
+/// Maps byte offsets to (line, column) positions using precomputed line starts.
+/// All line/column numbers are 1-based.
+#[derive(Debug, Clone)]
+pub struct SourceMap<'a> {
+    source: &'a str,
+    /// Byte offset of each line start. `line_starts[0]` is always 0.
+    line_starts: Vec<usize>,
+}
+
+impl<'a> SourceMap<'a> {
+    /// Build a SourceMap by scanning the source once for newline positions.
+    pub fn new(source: &'a str) -> Self {
+        let mut line_starts = vec![0usize];
+        for (i, b) in source.bytes().enumerate() {
+            if b == b'\n' {
+                line_starts.push(i + 1);
+            }
+        }
+        Self { source, line_starts }
+    }
+
+    /// Convert a byte offset to (line, column), both 1-based.
+    /// Uses binary search over precomputed line starts — O(log n).
+    pub fn offset_to_line_col(&self, offset: usize) -> (usize, usize) {
+        let offset = offset.min(self.source.len());
+        // binary search: find the last line_start <= offset
+        let line_idx = match self.line_starts.binary_search(&offset) {
+            Ok(exact) => exact,
+            Err(insert) => insert.saturating_sub(1),
+        };
+        let line = line_idx + 1; // 1-based
+        let line_start = self.line_starts[line_idx];
+        // Column = count characters (not bytes) from line start to offset
+        let col = self.source[line_start..offset].chars().count() + 1;
+        (line, col)
+    }
+
+    /// Get a source line by 1-based line number.
+    pub fn get_line(&self, line_num: usize) -> &str {
+        if line_num == 0 || line_num > self.line_starts.len() {
+            return "";
+        }
+        let start = self.line_starts[line_num - 1];
+        let end = if line_num < self.line_starts.len() {
+            // strip the trailing newline
+            self.line_starts[line_num].saturating_sub(1)
+        } else {
+            self.source.len()
+        };
+        // Handle \r\n line endings
+        let slice = &self.source[start..end];
+        slice.strip_suffix('\r').unwrap_or(slice)
+    }
+
+    /// Total number of lines in the source.
+    pub fn line_count(&self) -> usize {
+        self.line_starts.len()
+    }
+
+    /// The underlying source text.
+    pub fn source(&self) -> &str {
+        self.source
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Error,
@@ -207,24 +274,40 @@ const BOLD_BLUE: &str = "\x1b[1;34m";
 const BOLD_GREEN: &str = "\x1b[1;32m";
 const BOLD_MAGENTA: &str = "\x1b[1;35m";
 
+/// Diagnostic output format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticFormat {
+    /// Rich output with source context, underlines, labels, hints, and fixes.
+    Rich,
+    /// Machine-readable one-liner: `file:line:col: severity[CODE]: message`
+    /// Parseable by VS Code, grep, and other tools.
+    Short,
+}
+
 /// Renders diagnostics to a human-readable string with source context.
 /// Supports Rust+Elm hybrid style: multi-line spans, fix suggestions,
 /// and rich secondary labels.
 pub struct DiagnosticRenderer<'a> {
-    source: &'a str,
+    smap: SourceMap<'a>,
     filename: &'a str,
     use_color: bool,
+    format: DiagnosticFormat,
 }
 
 impl<'a> DiagnosticRenderer<'a> {
     /// Create a new renderer with color disabled (backward compatible).
     pub fn new(source: &'a str, filename: &'a str) -> Self {
-        Self { source, filename, use_color: false }
+        Self { smap: SourceMap::new(source), filename, use_color: false, format: DiagnosticFormat::Rich }
     }
 
     /// Create a new renderer with explicit color control.
     pub fn new_with_color(source: &'a str, filename: &'a str, use_color: bool) -> Self {
-        Self { source, filename, use_color }
+        Self { smap: SourceMap::new(source), filename, use_color, format: DiagnosticFormat::Rich }
+    }
+
+    /// Create a new renderer with full configuration.
+    pub fn new_with_options(source: &'a str, filename: &'a str, use_color: bool, format: DiagnosticFormat) -> Self {
+        Self { smap: SourceMap::new(source), filename, use_color, format }
     }
 
     /// Wrap `text` with ANSI color codes if color is enabled.
@@ -236,33 +319,30 @@ impl<'a> DiagnosticRenderer<'a> {
         }
     }
 
-    /// Convert a byte offset to (line, column), both 1-based.
-    fn offset_to_line_col(&self, offset: usize) -> (usize, usize) {
-        let mut line = 1;
-        let mut col = 1;
-        for (i, ch) in self.source.char_indices() {
-            if i >= offset {
-                break;
-            }
-            if ch == '\n' {
-                line += 1;
-                col = 1;
-            } else {
-                col += 1;
-            }
-        }
-        (line, col)
-    }
-
-    /// Get the source line (1-based).
-    fn get_line(&self, line_num: usize) -> &str {
-        self.source.lines().nth(line_num - 1).unwrap_or("")
+    /// Render a single diagnostic in machine-readable short format.
+    /// Output: `file:line:col: severity[CODE]: message`
+    pub fn render_short(&self, diag: &Diagnostic) -> String {
+        let (line, col) = self.smap.offset_to_line_col(diag.span.start);
+        let display_filename = diag.filename.as_deref().unwrap_or(self.filename);
+        let severity_str = match diag.severity {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+            Severity::Hint => "hint",
+        };
+        format!(
+            "{}:{}:{}: {}[{}]: {}\n",
+            display_filename, line, col, severity_str, diag.code, diag.message
+        )
     }
 
     pub fn render(&self, diag: &Diagnostic) -> String {
+        if self.format == DiagnosticFormat::Short {
+            return self.render_short(diag);
+        }
+
         let mut out = String::new();
-        let (line, col) = self.offset_to_line_col(diag.span.start);
-        let (end_line, _end_col) = self.offset_to_line_col(diag.span.end);
+        let (line, col) = self.smap.offset_to_line_col(diag.span.start);
+        let (end_line, _end_col) = self.smap.offset_to_line_col(diag.span.end);
 
         // Use the diagnostic's per-file filename if present, otherwise fall back
         // to the renderer's default filename.
@@ -280,9 +360,11 @@ impl<'a> DiagnosticRenderer<'a> {
             Severity::Hint => BOLD_CYAN,
         };
 
-        // Header: error[E0001]: message
+        // Machine-readable first line (VS Code / terminal link compatible)
+        // Format: file:line:col: severity[CODE]: message
         out.push_str(&format!(
-            "{}[{}]: {}\n",
+            "{}:{}:{}: {}[{}]: {}\n",
+            display_filename, line, col,
             self.colorize(severity_color, severity_str),
             self.colorize(BOLD, &diag.code),
             diag.message
@@ -306,7 +388,7 @@ impl<'a> DiagnosticRenderer<'a> {
             out.push_str(&format!("{} {}\n", padding, self.colorize(BOLD_BLUE, "|")));
 
             // Start line
-            let start_source = self.get_line(line);
+            let start_source = self.smap.get_line(line);
             out.push_str(&format!(
                 "{} {} {}\n",
                 self.colorize(BOLD_BLUE, &format!("{:>width$}", line, width = line_num_width)),
@@ -329,7 +411,7 @@ impl<'a> DiagnosticRenderer<'a> {
                 let show = middle_lines.min(3);
                 for i in 0..show {
                     let ml = line + 1 + i;
-                    let ml_source = self.get_line(ml);
+                    let ml_source = self.smap.get_line(ml);
                     out.push_str(&format!(
                         "{} {} {}\n",
                         self.colorize(BOLD_BLUE, &format!("{:>width$}", ml, width = line_num_width)),
@@ -348,7 +430,7 @@ impl<'a> DiagnosticRenderer<'a> {
 
             // End line
             if end_line != line {
-                let end_source = self.get_line(end_line);
+                let end_source = self.smap.get_line(end_line);
                 out.push_str(&format!(
                     "{} {} {}\n",
                     self.colorize(BOLD_BLUE, &format!("{:>width$}", end_line, width = line_num_width)),
@@ -358,7 +440,7 @@ impl<'a> DiagnosticRenderer<'a> {
             }
         } else {
             // Single-line span rendering (original logic)
-            let source_line = self.get_line(line);
+            let source_line = self.smap.get_line(line);
 
             out.push_str(&format!("{} {}\n", padding, self.colorize(BOLD_BLUE, "|")));
             out.push_str(&format!(
@@ -389,8 +471,8 @@ impl<'a> DiagnosticRenderer<'a> {
 
         // Additional labels
         for label in diag.labels.iter().skip(if end_line > line { 0 } else { 1 }) {
-            let (l_line, l_col) = self.offset_to_line_col(label.span.start);
-            let l_source = self.get_line(l_line);
+            let (l_line, l_col) = self.smap.offset_to_line_col(label.span.start);
+            let l_source = self.smap.get_line(l_line);
             let l_len = (label.span.end - label.span.start).max(1);
             let l_carets = "^".repeat(l_len);
             out.push_str(&format!("{} {}\n", padding, self.colorize(BOLD_BLUE, "|")));
@@ -412,7 +494,7 @@ impl<'a> DiagnosticRenderer<'a> {
 
         // Fix suggestions (Elm-style)
         for fix in &diag.fix_suggestions {
-            let (f_line, f_col) = self.offset_to_line_col(fix.span.start);
+            let (f_line, f_col) = self.smap.offset_to_line_col(fix.span.start);
             out.push_str(&format!("{} {}\n", padding, self.colorize(BOLD_BLUE, "|")));
             out.push_str(&format!(
                 "{} = {}: {}\n",
@@ -420,7 +502,7 @@ impl<'a> DiagnosticRenderer<'a> {
                 self.colorize(BOLD_MAGENTA, "fix"),
                 self.colorize(BOLD_MAGENTA, &fix.message)
             ));
-            let fix_source = self.get_line(f_line);
+            let fix_source = self.smap.get_line(f_line);
             // Show the original line
             let fix_start = f_col - 1;
             let fix_end = fix_start + (fix.span.end - fix.span.start);
@@ -496,29 +578,73 @@ impl DiagnosticBag {
         self.diagnostics.truncate(len);
     }
 
+    pub fn warning_count(&self) -> usize {
+        self.diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Warning)
+            .count()
+    }
+
     pub fn render_all(&self, source: &str, filename: &str) -> String {
         self.render_all_color(source, filename, false)
     }
 
     pub fn render_all_color(&self, source: &str, filename: &str, use_color: bool) -> String {
-        let renderer = DiagnosticRenderer::new_with_color(source, filename, use_color);
+        self.render_all_with_options(source, filename, use_color, DiagnosticFormat::Rich)
+    }
+
+    pub fn render_all_short(&self, source: &str, filename: &str) -> String {
+        self.render_all_with_options(source, filename, false, DiagnosticFormat::Short)
+    }
+
+    pub fn render_all_with_options(
+        &self,
+        source: &str,
+        filename: &str,
+        use_color: bool,
+        format: DiagnosticFormat,
+    ) -> String {
+        let renderer = DiagnosticRenderer::new_with_options(source, filename, use_color, format);
         let mut out = String::new();
         for diag in &self.diagnostics {
             out.push_str(&renderer.render(diag));
-            out.push('\n');
+            if format == DiagnosticFormat::Rich {
+                out.push('\n');
+            }
         }
-        if self.has_errors() {
-            let prefix = if use_color {
-                format!("{}{}{}", BOLD_RED, "error", RESET)
-            } else {
-                "error".to_string()
+        // Summary footer
+        let errs = self.error_count();
+        let warns = self.warning_count();
+        if errs > 0 || warns > 0 {
+            let colorize = |color: &str, text: &str| -> String {
+                if use_color { format!("{}{}{}", color, text, RESET) } else { text.to_string() }
             };
-            out.push_str(&format!(
-                "{}: aborting due to {} previous error{}\n",
-                prefix,
-                self.error_count(),
-                if self.error_count() == 1 { "" } else { "s" }
-            ));
+            let mut parts = Vec::new();
+            if errs > 0 {
+                parts.push(format!(
+                    "{} error{}",
+                    errs, if errs == 1 { "" } else { "s" }
+                ));
+            }
+            if warns > 0 {
+                parts.push(format!(
+                    "{} warning{}",
+                    warns, if warns == 1 { "" } else { "s" }
+                ));
+            }
+            if errs > 0 {
+                out.push_str(&format!(
+                    "{}: aborting due to {}\n",
+                    colorize(BOLD_RED, "error"),
+                    parts.join("; ")
+                ));
+            } else {
+                out.push_str(&format!(
+                    "{}: generated {}\n",
+                    colorize(BOLD_YELLOW, "warning"),
+                    parts.join("; ")
+                ));
+            }
         }
         out
     }
@@ -716,5 +842,164 @@ mod tests {
     fn test_builder_default_no_filename() {
         let diag = DiagnosticBuilder::new(ErrorCode::E1000, Span::new(0, 1)).build();
         assert!(diag.filename.is_none());
+    }
+
+    // ── SourceMap tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_source_map_single_line() {
+        let smap = SourceMap::new("hello world");
+        assert_eq!(smap.line_count(), 1);
+        assert_eq!(smap.offset_to_line_col(0), (1, 1));
+        assert_eq!(smap.offset_to_line_col(5), (1, 6));
+        assert_eq!(smap.get_line(1), "hello world");
+    }
+
+    #[test]
+    fn test_source_map_multi_line() {
+        let src = "line one\nline two\nline three\n";
+        let smap = SourceMap::new(src);
+        assert_eq!(smap.line_count(), 4); // trailing \n creates a 4th empty line start
+        assert_eq!(smap.offset_to_line_col(0), (1, 1));
+        assert_eq!(smap.offset_to_line_col(9), (2, 1)); // 'l' of "line two"
+        assert_eq!(smap.offset_to_line_col(14), (2, 6)); // 't' of "two"
+        assert_eq!(smap.get_line(1), "line one");
+        assert_eq!(smap.get_line(2), "line two");
+        assert_eq!(smap.get_line(3), "line three");
+    }
+
+    #[test]
+    fn test_source_map_empty_source() {
+        let smap = SourceMap::new("");
+        assert_eq!(smap.line_count(), 1);
+        assert_eq!(smap.offset_to_line_col(0), (1, 1));
+        assert_eq!(smap.get_line(1), "");
+    }
+
+    #[test]
+    fn test_source_map_offset_at_newline() {
+        let src = "ab\ncd\n";
+        let smap = SourceMap::new(src);
+        // offset 2 is '\n' — still line 1
+        assert_eq!(smap.offset_to_line_col(2), (1, 3));
+        // offset 3 is 'c' — line 2
+        assert_eq!(smap.offset_to_line_col(3), (2, 1));
+    }
+
+    #[test]
+    fn test_source_map_crlf() {
+        let src = "abc\r\ndef\r\n";
+        let smap = SourceMap::new(src);
+        assert_eq!(smap.get_line(1), "abc");
+        assert_eq!(smap.get_line(2), "def");
+    }
+
+    #[test]
+    fn test_source_map_out_of_bounds_line() {
+        let smap = SourceMap::new("hello");
+        assert_eq!(smap.get_line(0), ""); // 0 is out of range
+        assert_eq!(smap.get_line(99), ""); // way out of range
+    }
+
+    // ── Machine-readable (short) format tests ────────────────────────
+
+    #[test]
+    fn test_render_short_format() {
+        let source = "let x = 42 +;\n";
+        let diag = Diagnostic::error("E0001", "unexpected token", Span::new(13, 14));
+
+        let renderer = DiagnosticRenderer::new_with_options(
+            source, "test.cjc", false, DiagnosticFormat::Short
+        );
+        let output = renderer.render(&diag);
+        assert_eq!(output, "test.cjc:1:14: error[E0001]: unexpected token\n");
+    }
+
+    #[test]
+    fn test_render_short_warning() {
+        let source = "let x = 1;\n";
+        let diag = Diagnostic::warning("W0001", "unused variable", Span::new(4, 5));
+
+        let renderer = DiagnosticRenderer::new_with_options(
+            source, "test.cjc", false, DiagnosticFormat::Short
+        );
+        let output = renderer.render(&diag);
+        assert_eq!(output, "test.cjc:1:5: warning[W0001]: unused variable\n");
+    }
+
+    #[test]
+    fn test_render_short_multi_file() {
+        let source = "let x = 1;\n";
+        let diag = Diagnostic::error("E0001", "test", Span::new(0, 3))
+            .with_filename("other.cjc");
+
+        let renderer = DiagnosticRenderer::new_with_options(
+            source, "main.cjc", false, DiagnosticFormat::Short
+        );
+        let output = renderer.render(&diag);
+        assert!(output.starts_with("other.cjc:"));
+        assert!(!output.contains("main.cjc"));
+    }
+
+    #[test]
+    fn test_render_all_short() {
+        let mut bag = DiagnosticBag::new();
+        bag.emit(Diagnostic::error("E0001", "bad token", Span::new(0, 1)));
+        bag.emit(Diagnostic::error("E1000", "unexpected", Span::new(5, 6)));
+
+        let output = bag.render_all_short("abcdefgh", "test.cjc");
+        assert!(output.contains("test.cjc:1:1: error[E0001]: bad token\n"));
+        assert!(output.contains("test.cjc:1:6: error[E1000]: unexpected\n"));
+        assert!(output.contains("aborting due to 2 errors"));
+    }
+
+    // ── Rich format machine-readable first line tests ────────────────
+
+    #[test]
+    fn test_rich_format_has_machine_line() {
+        let source = "let x = 42 +;\n";
+        let diag = Diagnostic::error("E0001", "unexpected token", Span::new(13, 14));
+
+        let renderer = DiagnosticRenderer::new(source, "test.cjc");
+        let output = renderer.render(&diag);
+        let first_line = output.lines().next().unwrap();
+        // First line should be: test.cjc:1:14: error[E0001]: unexpected token
+        assert!(first_line.starts_with("test.cjc:1:14:"), "first line: {}", first_line);
+        assert!(first_line.contains("error[E0001]"));
+        assert!(first_line.contains("unexpected token"));
+    }
+
+    // ── Footer tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_footer_errors_and_warnings() {
+        let mut bag = DiagnosticBag::new();
+        bag.emit(Diagnostic::error("E0001", "err", Span::new(0, 1)));
+        bag.emit(Diagnostic::warning("W0001", "warn", Span::new(0, 1)));
+
+        let output = bag.render_all("x", "test.cjc");
+        assert!(output.contains("aborting due to 1 error; 1 warning"));
+    }
+
+    #[test]
+    fn test_footer_warnings_only() {
+        let mut bag = DiagnosticBag::new();
+        bag.emit(Diagnostic::warning("W0001", "warn1", Span::new(0, 1)));
+        bag.emit(Diagnostic::warning("W0002", "warn2", Span::new(0, 1)));
+
+        let output = bag.render_all("x", "test.cjc");
+        assert!(output.contains("warning: generated 2 warnings"));
+        assert!(!output.contains("aborting"));
+    }
+
+    #[test]
+    fn test_warning_count() {
+        let mut bag = DiagnosticBag::new();
+        assert_eq!(bag.warning_count(), 0);
+        bag.emit(Diagnostic::warning("W0001", "w", Span::new(0, 1)));
+        bag.emit(Diagnostic::warning("W0002", "w", Span::new(0, 1)));
+        bag.emit(Diagnostic::error("E0001", "e", Span::new(0, 1)));
+        assert_eq!(bag.warning_count(), 2);
+        assert_eq!(bag.error_count(), 1);
     }
 }
