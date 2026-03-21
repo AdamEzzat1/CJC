@@ -77,11 +77,12 @@ fn test_parse_command() {
 
 #[test]
 fn test_check_command_valid() {
-    let (stdout, _stderr, code) = run_cjc(&["check", "tests/fixtures/hello.cjc"]);
+    let (stdout, stderr, code) = run_cjc(&["check", "tests/fixtures/hello.cjc"]);
     assert_eq!(code, 0, "check command should succeed on valid program");
+    let combined = format!("{}{}", stdout, stderr);
     assert!(
-        stdout.contains("OK"),
-        "expected check output to contain 'OK', got: {stdout}"
+        combined.contains("OK"),
+        "expected check output to contain 'OK', got stdout: {stdout}, stderr: {stderr}"
     );
 }
 

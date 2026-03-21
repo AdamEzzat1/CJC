@@ -47,7 +47,7 @@ enum Command {
     Check,
     Run,
     Repl,
-    // CLI suite subcommands
+    // Phase 1 CLI suite subcommands
     View,
     Proof,
     Flow,
@@ -55,6 +55,14 @@ enum Command {
     Seek,
     Drift,
     Forge,
+    // Phase 2 CLI suite subcommands
+    Inspect,
+    Schema,
+    Trace,
+    Mem,
+    Bench,
+    Pack,
+    Doctor,
 }
 
 /// Fully parsed CLI configuration. Produced by `Config::from_args()`.
@@ -93,11 +101,15 @@ const KNOWN_FLAGS: &[&str] = &[
 const KNOWN_COMMANDS: &[&str] = &[
     "lex", "parse", "check", "run", "repl",
     "view", "proof", "flow", "patch", "seek", "drift", "forge",
+    "inspect", "schema", "trace", "mem", "bench", "pack", "doctor",
 ];
 
 impl Config {
     /// CLI suite command names that handle their own argument parsing.
-    const CLI_SUITE: &[&str] = &["view", "proof", "flow", "patch", "seek", "drift", "forge"];
+    const CLI_SUITE: &[&str] = &[
+        "view", "proof", "flow", "patch", "seek", "drift", "forge",
+        "inspect", "schema", "check", "trace", "mem", "bench", "pack", "doctor",
+    ];
 
     /// Parse CLI arguments from `std::env::args()`. Exits on error.
     fn from_args() -> Self {
@@ -148,6 +160,14 @@ impl Config {
                     "seek" => Command::Seek,
                     "drift" => Command::Drift,
                     "forge" => Command::Forge,
+                    "inspect" => Command::Inspect,
+                    "schema" => Command::Schema,
+                    "check" => Command::Check,
+                    "trace" => Command::Trace,
+                    "mem" => Command::Mem,
+                    "bench" => Command::Bench,
+                    "pack" => Command::Pack,
+                    "doctor" => Command::Doctor,
                     _ => unreachable!(),
                 };
                 return Config {
@@ -336,7 +356,9 @@ fn main() {
     // CLI suite commands: pass all args after the command name
     match config.command {
         Command::View | Command::Proof | Command::Flow | Command::Patch |
-        Command::Seek | Command::Drift | Command::Forge => {
+        Command::Seek | Command::Drift | Command::Forge |
+        Command::Inspect | Command::Schema | Command::Check | Command::Trace |
+        Command::Mem | Command::Bench | Command::Pack | Command::Doctor => {
             // Find the command name in args, pass everything after it
             let cmd_name = match config.command {
                 Command::View => "view",
@@ -346,6 +368,14 @@ fn main() {
                 Command::Seek => "seek",
                 Command::Drift => "drift",
                 Command::Forge => "forge",
+                Command::Inspect => "inspect",
+                Command::Schema => "schema",
+                Command::Check => "check",
+                Command::Trace => "trace",
+                Command::Mem => "mem",
+                Command::Bench => "bench",
+                Command::Pack => "pack",
+                Command::Doctor => "doctor",
                 _ => unreachable!(),
             };
             let cmd_idx = all_args.iter().position(|a| a == cmd_name).unwrap_or(1);
@@ -361,6 +391,14 @@ fn main() {
                     Command::Seek => commands::seek::print_help(),
                     Command::Drift => commands::drift::print_help(),
                     Command::Forge => commands::forge::print_help(),
+                    Command::Inspect => commands::inspect::print_help(),
+                    Command::Schema => commands::schema::print_help(),
+                    Command::Check => commands::check2::print_help(),
+                    Command::Trace => commands::trace::print_help(),
+                    Command::Mem => commands::mem::print_help(),
+                    Command::Bench => commands::bench::print_help(),
+                    Command::Pack => commands::pack::print_help(),
+                    Command::Doctor => commands::doctor::print_help(),
                     _ => unreachable!(),
                 }
                 return;
@@ -374,6 +412,14 @@ fn main() {
                 Command::Seek => commands::seek::run(&sub_args),
                 Command::Drift => commands::drift::run(&sub_args),
                 Command::Forge => commands::forge::run(&sub_args),
+                Command::Inspect => commands::inspect::run(&sub_args),
+                Command::Schema => commands::schema::run(&sub_args),
+                Command::Check => commands::check2::run(&sub_args),
+                Command::Trace => commands::trace::run(&sub_args),
+                Command::Mem => commands::mem::run(&sub_args),
+                Command::Bench => commands::bench::run(&sub_args),
+                Command::Pack => commands::pack::run(&sub_args),
+                Command::Doctor => commands::doctor::run(&sub_args),
                 _ => unreachable!(),
             }
             return;
@@ -392,7 +438,6 @@ fn main() {
             match config.command {
                 Command::Lex => cmd_lex(&source, filename, config.use_color, config.diag_format),
                 Command::Parse => cmd_parse(&source, filename, config.use_color, config.diag_format),
-                Command::Check => cmd_check(&source, filename, config.use_color, config.diag_format),
                 Command::Run => cmd_run(&source, filename, &config),
                 _ => unreachable!(),
             }
@@ -420,6 +465,16 @@ fn print_usage() {
     eprintln!("  cjc seek [path] [pattern]       Deterministic file discovery");
     eprintln!("  cjc drift <a> <b>               Mathematical & data diff engine");
     eprintln!("  cjc forge <action>              Content-addressable pipeline runner");
+    eprintln!();
+    eprintln!("Inspection & Diagnostics:");
+    eprintln!("  cjc inspect <file>              Deep file inspection (.cjc, .snap, .csv)");
+    eprintln!("  cjc schema <file.csv>           CSV/TSV schema inference");
+    eprintln!("  cjc check <file> [flags]        Type-check or validate output");
+    eprintln!("  cjc trace <file.cjc>            Execution tracing & profiling");
+    eprintln!("  cjc mem <file.cjc>              Memory profiling");
+    eprintln!("  cjc bench <file.cjc>            Performance benchmarking");
+    eprintln!("  cjc pack <file.cjc>             Reproducible packaging");
+    eprintln!("  cjc doctor [path]               Project diagnostics");
     eprintln!();
     eprintln!("Flags:");
     eprintln!("  --reproducible                  Enable reproducibility mode");
