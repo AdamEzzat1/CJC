@@ -25,7 +25,9 @@
 
 mod highlight;
 mod line_editor;
+mod output;
 mod table;
+mod commands;
 
 use std::env;
 use std::fs;
@@ -45,6 +47,14 @@ enum Command {
     Check,
     Run,
     Repl,
+    // CLI suite subcommands
+    View,
+    Proof,
+    Flow,
+    Patch,
+    Seek,
+    Drift,
+    Forge,
 }
 
 /// Fully parsed CLI configuration. Produced by `Config::from_args()`.
@@ -80,25 +90,78 @@ const KNOWN_FLAGS: &[&str] = &[
 ];
 
 /// Known commands for typo suggestions.
-const KNOWN_COMMANDS: &[&str] = &["lex", "parse", "check", "run", "repl"];
+const KNOWN_COMMANDS: &[&str] = &[
+    "lex", "parse", "check", "run", "repl",
+    "view", "proof", "flow", "patch", "seek", "drift", "forge",
+];
 
 impl Config {
+    /// CLI suite command names that handle their own argument parsing.
+    const CLI_SUITE: &[&str] = &["view", "proof", "flow", "patch", "seek", "drift", "forge"];
+
     /// Parse CLI arguments from `std::env::args()`. Exits on error.
     fn from_args() -> Self {
         let args: Vec<String> = env::args().collect();
 
-        // Pre-scan for --help and --version (handled before full parse)
-        for arg in &args[1..] {
-            match arg.as_str() {
-                "--help" | "-h" => {
-                    print_usage();
-                    process::exit(0);
+        // Pre-scan for top-level --help and --version (only if no CLI suite command present)
+        // For CLI suite commands, --help is handled by the subcommand itself.
+        let has_cli_suite_cmd = args.iter().skip(1).any(|a| Self::CLI_SUITE.contains(&a.as_str()));
+
+        if !has_cli_suite_cmd {
+            for arg in &args[1..] {
+                match arg.as_str() {
+                    "--help" | "-h" => {
+                        print_usage();
+                        process::exit(0);
+                    }
+                    "--version" | "-V" => {
+                        println!("cjc {}", VERSION);
+                        process::exit(0);
+                    }
+                    _ => {}
                 }
-                "--version" | "-V" => {
-                    println!("cjc {}", VERSION);
-                    process::exit(0);
-                }
-                _ => {}
+            }
+        }
+
+        // Find the first positional (command name) — scan for non-flag tokens
+        let mut command_idx = None;
+        for (idx, arg) in args.iter().enumerate().skip(1) {
+            if !arg.starts_with('-') {
+                command_idx = Some(idx);
+                break;
+            }
+            // Skip value arguments for known flags
+            if arg == "--seed" || arg == "--diagnostic-format" {
+                // The next arg is consumed as a value, handled below
+            }
+        }
+
+        // If the command is a CLI suite command, stop parsing flags after it
+        // and let the subcommand handle everything.
+        if let Some(ci) = command_idx {
+            if Self::CLI_SUITE.contains(&args[ci].as_str()) {
+                let command = match args[ci].as_str() {
+                    "view" => Command::View,
+                    "proof" => Command::Proof,
+                    "flow" => Command::Flow,
+                    "patch" => Command::Patch,
+                    "seek" => Command::Seek,
+                    "drift" => Command::Drift,
+                    "forge" => Command::Forge,
+                    _ => unreachable!(),
+                };
+                return Config {
+                    command,
+                    filename: None,
+                    seed: 42,
+                    reproducible: false,
+                    time: false,
+                    mir_opt: false,
+                    mir_mono: false,
+                    multi_file: false,
+                    use_color: true,
+                    diag_format: cjc_diag::DiagnosticFormat::Rich,
+                };
             }
         }
 
@@ -185,13 +248,13 @@ impl Config {
         };
 
         // Commands other than `repl` require a filename
-        let filename = if command != Command::Repl {
+        let filename = if command == Command::Repl {
+            None
+        } else {
             if positional.len() < 2 {
                 cli_error(&format!("command `{}` requires a filename argument", positional[0]));
             }
             Some(positional[1].clone())
-        } else {
-            None
         };
 
         Config {
@@ -267,7 +330,56 @@ fn levenshtein(a: &str, b: &str) -> usize {
 // ── Entry point ──────────────────────────────────────────────────────
 
 fn main() {
+    let all_args: Vec<String> = env::args().collect();
     let config = Config::from_args();
+
+    // CLI suite commands: pass all args after the command name
+    match config.command {
+        Command::View | Command::Proof | Command::Flow | Command::Patch |
+        Command::Seek | Command::Drift | Command::Forge => {
+            // Find the command name in args, pass everything after it
+            let cmd_name = match config.command {
+                Command::View => "view",
+                Command::Proof => "proof",
+                Command::Flow => "flow",
+                Command::Patch => "patch",
+                Command::Seek => "seek",
+                Command::Drift => "drift",
+                Command::Forge => "forge",
+                _ => unreachable!(),
+            };
+            let cmd_idx = all_args.iter().position(|a| a == cmd_name).unwrap_or(1);
+            let sub_args: Vec<String> = all_args[cmd_idx + 1..].to_vec();
+
+            // Check for --help
+            if sub_args.iter().any(|a| a == "--help" || a == "-h") {
+                match config.command {
+                    Command::View => commands::view::print_help(),
+                    Command::Proof => commands::proof::print_help(),
+                    Command::Flow => commands::flow::print_help(),
+                    Command::Patch => commands::patch::print_help(),
+                    Command::Seek => commands::seek::print_help(),
+                    Command::Drift => commands::drift::print_help(),
+                    Command::Forge => commands::forge::print_help(),
+                    _ => unreachable!(),
+                }
+                return;
+            }
+
+            match config.command {
+                Command::View => commands::view::run(&sub_args),
+                Command::Proof => commands::proof::run(&sub_args),
+                Command::Flow => commands::flow::run(&sub_args),
+                Command::Patch => commands::patch::run(&sub_args),
+                Command::Seek => commands::seek::run(&sub_args),
+                Command::Drift => commands::drift::run(&sub_args),
+                Command::Forge => commands::forge::run(&sub_args),
+                _ => unreachable!(),
+            }
+            return;
+        }
+        _ => {}
+    }
 
     match config.command {
         Command::Repl => cmd_repl(config.seed, config.use_color),
@@ -282,7 +394,7 @@ fn main() {
                 Command::Parse => cmd_parse(&source, filename, config.use_color, config.diag_format),
                 Command::Check => cmd_check(&source, filename, config.use_color, config.diag_format),
                 Command::Run => cmd_run(&source, filename, &config),
-                Command::Repl => unreachable!(),
+                _ => unreachable!(),
             }
         }
     }
@@ -300,6 +412,15 @@ fn print_usage() {
     eprintln!("  cjc run <file.cjc>              Run a CJC program");
     eprintln!("  cjc repl                        Start an interactive REPL");
     eprintln!();
+    eprintln!("Data & Pipeline Commands:");
+    eprintln!("  cjc view [path]                 Deterministic directory listing");
+    eprintln!("  cjc proof <file.cjc>            Determinism & reproducibility profiler");
+    eprintln!("  cjc flow [file.csv]             Streaming computation engine");
+    eprintln!("  cjc patch <file.csv> [ops]      Type-aware data transformation");
+    eprintln!("  cjc seek [path] [pattern]       Deterministic file discovery");
+    eprintln!("  cjc drift <a> <b>               Mathematical & data diff engine");
+    eprintln!("  cjc forge <action>              Content-addressable pipeline runner");
+    eprintln!();
     eprintln!("Flags:");
     eprintln!("  --reproducible                  Enable reproducibility mode");
     eprintln!("  --seed <N>                      Set RNG seed (default: 42)");
@@ -312,6 +433,8 @@ fn print_usage() {
     eprintln!("  --diagnostic-format <fmt>       Diagnostic format: rich (default) or short");
     eprintln!("  --help, -h                      Print this help message");
     eprintln!("  --version, -V                   Print version information");
+    eprintln!();
+    eprintln!("Run `cjc <command> --help` for command-specific help.");
 }
 
 // ── Command implementations ──────────────────────────────────────────
