@@ -1,4 +1,4 @@
-﻿//! CJC Data DSL â€” Typed expression trees, logical plans, plan optimizer, and
+//! CJC Data DSL â€" Typed expression trees, logical plans, plan optimizer, and
 //! column-buffer kernel execution.
 //!
 //! This implements the tidyverse-inspired data pipeline:
@@ -8,7 +8,7 @@
 
 use cjc_repro::kahan_sum_f64;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::rc::Rc;
 
@@ -16,10 +16,12 @@ mod csv;
 pub use csv::{CsvConfig, CsvReader, StreamingCsvProcessor};
 
 pub mod agg_kernels;
+pub mod column_meta;
 pub mod dict_encoding;
+pub mod lazy;
 pub mod tidy_dispatch;
 
-// â”€â”€ Column Storage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Column Storage â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// A single column in a DataFrame.
 #[derive(Debug, Clone)]
@@ -77,7 +79,7 @@ impl Column {
     }
 }
 
-// â”€â”€ DataFrame â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ DataFrame â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// A columnar DataFrame.
 #[derive(Debug, Clone)]
@@ -216,7 +218,7 @@ impl fmt::Display for DataFrame {
     }
 }
 
-// â”€â”€ Data DSL Expression Trees â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Data DSL Expression Trees â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// An expression in the Data DSL.
 #[derive(Debug, Clone)]
@@ -261,6 +263,18 @@ pub enum DExpr {
     DenseRank(Box<DExpr>),
     /// Row number (1-indexed sequential)
     RowNumber,
+    /// Rolling sum over a fixed-size window (Kahan-compensated removable accumulation)
+    RollingSum(String, usize),
+    /// Rolling mean over a fixed-size window
+    RollingMean(String, usize),
+    /// Rolling minimum over a fixed-size window (monotonic deque, O(n) amortized)
+    RollingMin(String, usize),
+    /// Rolling maximum over a fixed-size window (monotonic deque, O(n) amortized)
+    RollingMax(String, usize),
+    /// Rolling variance over a fixed-size window (Welford's online with removal)
+    RollingVar(String, usize),
+    /// Rolling standard deviation over a fixed-size window
+    RollingSd(String, usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -337,11 +351,17 @@ impl fmt::Display for DExpr {
             DExpr::Rank(e) => write!(f, "rank({})", e),
             DExpr::DenseRank(e) => write!(f, "dense_rank({})", e),
             DExpr::RowNumber => write!(f, "row_number()"),
+            DExpr::RollingSum(col, w) => write!(f, "rolling_sum(\"{}\", {})", col, w),
+            DExpr::RollingMean(col, w) => write!(f, "rolling_mean(\"{}\", {})", col, w),
+            DExpr::RollingMin(col, w) => write!(f, "rolling_min(\"{}\", {})", col, w),
+            DExpr::RollingMax(col, w) => write!(f, "rolling_max(\"{}\", {})", col, w),
+            DExpr::RollingVar(col, w) => write!(f, "rolling_var(\"{}\", {})", col, w),
+            DExpr::RollingSd(col, w) => write!(f, "rolling_sd(\"{}\", {})", col, w),
         }
     }
 }
 
-// â”€â”€ Logical Plan â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Logical Plan â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// A logical query plan node.
 #[derive(Debug, Clone)]
@@ -468,11 +488,16 @@ fn collect_expr_columns(expr: &DExpr, cols: &mut Vec<String>) {
         | DExpr::Lag(e, _) | DExpr::Lead(e, _) | DExpr::Rank(e) | DExpr::DenseRank(e) => {
             collect_expr_columns(e, cols);
         }
+        DExpr::RollingSum(col, _) | DExpr::RollingMean(col, _)
+        | DExpr::RollingMin(col, _) | DExpr::RollingMax(col, _)
+        | DExpr::RollingVar(col, _) | DExpr::RollingSd(col, _) => {
+            cols.push(col.clone());
+        }
         _ => {}
     }
 }
 
-// â”€â”€ Plan Optimizer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Plan Optimizer â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// Optimize a logical plan.
 pub fn optimize(plan: LogicalPlan) -> LogicalPlan {
@@ -584,7 +609,7 @@ fn prune_columns(plan: LogicalPlan) -> LogicalPlan {
     plan
 }
 
-// â”€â”€ Plan Executor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Plan Executor â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// Execute a logical plan against in-memory data.
 pub fn execute(plan: &LogicalPlan) -> Result<DataFrame, DataError> {
@@ -787,7 +812,7 @@ fn execute_aggregate(
     })
 }
 
-// â”€â”€ Expression Evaluation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Expression Evaluation â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 #[derive(Debug, Clone)]
 enum ExprValue {
@@ -859,9 +884,13 @@ fn eval_expr_row(df: &DataFrame, expr: &DExpr, row: usize) -> Result<ExprValue, 
         }
         DExpr::CumSum(_) | DExpr::CumProd(_) | DExpr::CumMax(_) | DExpr::CumMin(_)
         | DExpr::Lag(_, _) | DExpr::Lead(_, _) | DExpr::Rank(_) | DExpr::DenseRank(_)
-        | DExpr::RowNumber => Err(DataError::InvalidOperation(
-            "window function not allowed in row context; use eval_expr_column".into(),
-        )),
+        | DExpr::RowNumber
+        | DExpr::RollingSum(..) | DExpr::RollingMean(..) | DExpr::RollingMin(..)
+        | DExpr::RollingMax(..) | DExpr::RollingVar(..) | DExpr::RollingSd(..) => {
+            Err(DataError::InvalidOperation(
+                "window function not allowed in row context; use eval_expr_column".into(),
+            ))
+        }
     }
 }
 
@@ -993,7 +1022,7 @@ fn extract_float_values(
     }
 }
 
-// â”€â”€ Pipeline Builder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Pipeline Builder â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// Fluent builder for data pipelines.
 pub struct Pipeline {
@@ -1087,7 +1116,7 @@ impl Pipeline {
     }
 }
 
-// â”€â”€ Errors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Errors â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 #[derive(Debug, Clone)]
 pub enum DataError {
@@ -1120,7 +1149,7 @@ impl fmt::Display for DataError {
 
 impl std::error::Error for DataError {}
 
-// â”€â”€ Join Execution â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Join Execution â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// Get a column value as a string for join key comparison.
 fn column_value_str(col: &Column, row: usize) -> String {
@@ -1310,7 +1339,7 @@ fn gather_column_nullable(col: &Column, indices: &[Option<usize>]) -> Column {
     }
 }
 
-// â”€â”€ Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Tests â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 #[cfg(test)]
 mod tests {
@@ -1708,9 +1737,9 @@ mod tests {
     }
 }
 
-// â”€â”€ Phase 8: CSV Ingestion & Tensor Bridge â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Phase 8: CSV Ingestion & Tensor Bridge â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
-// â”€â”€ DataFrame â†” Tensor bridge â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ DataFrame â†" Tensor bridge â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 impl DataFrame {
     /// Convert selected numeric columns to a `cjc_runtime::Tensor` with shape
@@ -1768,7 +1797,7 @@ impl DataFrame {
 //   - mutate()  -> new column buffers only, copy-on-write on alias, @nogc-safe
 //   - All operations are bit-deterministic with stable iteration/column order.
 
-// â”€â”€ BitMask â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ BitMask â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// A compact, word-aligned bitmask over `nrows` rows.
 ///
@@ -1830,7 +1859,7 @@ impl BitMask {
 
     /// Merge two masks with AND semantics (chain of filter().filter()).
     ///
-    /// Panics if `nrows` differs â€” this is a programming error (same base df).
+    /// Panics if `nrows` differs â€" this is a programming error (same base df).
     pub fn and(&self, other: &BitMask) -> BitMask {
         assert_eq!(
             self.nrows, other.nrows,
@@ -1869,12 +1898,12 @@ fn nwords_for(nrows: usize) -> usize {
     (nrows + 63) / 64
 }
 
-// â”€â”€ ProjectionMap â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ ProjectionMap â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// A stable ordered list of column indices into the base DataFrame.
 ///
 /// Selecting 0 columns yields an empty projection (valid empty view).
-/// Duplicate names are rejected at construction time â€” callers must deduplicate.
+/// Duplicate names are rejected at construction time â€" callers must deduplicate.
 /// Column ordering is exactly the order supplied by the caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectionMap {
@@ -1908,14 +1937,14 @@ impl ProjectionMap {
     }
 }
 
-// â”€â”€ TidyView â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ TidyView â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// A lazy, zero-allocation view over a base `DataFrame`.
 ///
 /// Holds:
-///   â€¢ `base`   â€” shared reference to the underlying columnar data
-///   â€¢ `mask`   â€” bitmask of which rows are visible
-///   â€¢ `proj`   â€” ordered list of visible column indices
+///   â€¢ `base`   â€" shared reference to the underlying columnar data
+///   â€¢ `mask`   â€" bitmask of which rows are visible
+///   â€¢ `proj`   â€" ordered list of visible column indices
 ///
 /// No column buffers are copied until `materialize()` / `to_tensor()` is called.
 #[derive(Debug, Clone)]
@@ -1925,8 +1954,186 @@ pub struct TidyView {
     proj: ProjectionMap,
 }
 
+// ── O3: columnar predicate evaluation ────────────────────────────────────────
+
+/// Try to evaluate a filter predicate column-at-a-time for simple `Col op Literal`
+/// patterns. Returns `Some(new_mask)` on success, `None` if the predicate shape
+/// is unsupported (caller falls back to row-wise evaluation).
+///
+/// Supported patterns:
+///   - `Col op LitFloat` / `LitFloat op Col` (Float columns)
+///   - `Col op LitInt`   / `LitInt op Col`   (Int columns, or Float columns with i64→f64 promotion)
+///   - `pred And pred` / `pred Or pred`       (compound, recursively tries both sides)
+///
+/// The returned mask is the AND of the predicate result with `existing_mask`.
+/// NaN comparisons follow IEEE 754 (deterministic).
+fn try_eval_predicate_columnar(
+    base: &DataFrame,
+    predicate: &DExpr,
+    existing_mask: &BitMask,
+) -> Option<BitMask> {
+    match predicate {
+        // Compound: And — try columnar on both sides, AND the results
+        DExpr::BinOp {
+            op: DBinOp::And,
+            left,
+            right,
+        } => {
+            let lmask = try_eval_predicate_columnar(base, left, existing_mask)?;
+            let rmask = try_eval_predicate_columnar(base, right, &lmask)?;
+            Some(rmask)
+        }
+        // Compound: Or — try columnar on both sides, OR the predicate bits
+        // then AND with existing mask
+        DExpr::BinOp {
+            op: DBinOp::Or,
+            left,
+            right,
+        } => {
+            // Evaluate each side against a full mask to get raw predicate results,
+            // then OR them, then AND with existing mask.
+            let all_mask = BitMask::all_true(existing_mask.nrows);
+            let lmask = try_eval_predicate_columnar(base, left, &all_mask)?;
+            let rmask = try_eval_predicate_columnar(base, right, &all_mask)?;
+            // OR the two predicate masks
+            let nrows = existing_mask.nrows;
+            let or_words: Vec<u64> = lmask
+                .words
+                .iter()
+                .zip(rmask.words.iter())
+                .map(|(a, b)| a | b)
+                .collect();
+            // AND with existing mask
+            let final_words: Vec<u64> = or_words
+                .iter()
+                .zip(existing_mask.words.iter())
+                .map(|(a, b)| a & b)
+                .collect();
+            Some(BitMask {
+                words: final_words,
+                nrows,
+            })
+        }
+        // Simple comparison: Col op Literal (or Literal op Col)
+        DExpr::BinOp { op, left, right } => {
+            // Only handle comparison operators
+            if !matches!(
+                op,
+                DBinOp::Gt | DBinOp::Lt | DBinOp::Ge | DBinOp::Le | DBinOp::Eq | DBinOp::Ne
+            ) {
+                return None;
+            }
+
+            // Extract (column_name, literal_value_as_f64_or_i64, is_reversed)
+            // "reversed" means Literal op Col, so we flip the comparison direction
+            enum LitVal {
+                F(f64),
+                I(i64),
+            }
+
+            let (col_name, lit, reversed) = match (left.as_ref(), right.as_ref()) {
+                (DExpr::Col(name), DExpr::LitFloat(v)) => (name.as_str(), LitVal::F(*v), false),
+                (DExpr::LitFloat(v), DExpr::Col(name)) => (name.as_str(), LitVal::F(*v), true),
+                (DExpr::Col(name), DExpr::LitInt(v)) => (name.as_str(), LitVal::I(*v), false),
+                (DExpr::LitInt(v), DExpr::Col(name)) => (name.as_str(), LitVal::I(*v), true),
+                _ => return None,
+            };
+
+            let column = base.get_column(col_name)?;
+
+            // Flip operator when literal is on the left: `5 > col` becomes `col < 5`
+            let effective_op = if reversed {
+                match op {
+                    DBinOp::Gt => DBinOp::Lt,
+                    DBinOp::Lt => DBinOp::Gt,
+                    DBinOp::Ge => DBinOp::Le,
+                    DBinOp::Le => DBinOp::Ge,
+                    other => *other, // Eq, Ne are symmetric
+                }
+            } else {
+                *op
+            };
+
+            let nrows = existing_mask.nrows;
+            let nwords = nwords_for(nrows);
+            let mut words = vec![0u64; nwords];
+
+            match (column, &lit) {
+                // Float column, float literal
+                (Column::Float(data), LitVal::F(v)) => {
+                    columnar_cmp_f64(data, *v, effective_op, &mut words);
+                }
+                // Float column, int literal (promote i64 → f64)
+                (Column::Float(data), LitVal::I(v)) => {
+                    columnar_cmp_f64(data, *v as f64, effective_op, &mut words);
+                }
+                // Int column, int literal
+                (Column::Int(data), LitVal::I(v)) => {
+                    columnar_cmp_i64(data, *v, effective_op, &mut words);
+                }
+                // Int column, float literal (promote each i64 → f64)
+                (Column::Int(data), LitVal::F(v)) => {
+                    // Compare as f64 to match row-wise semantics
+                    let floats: Vec<f64> = data.iter().map(|&x| x as f64).collect();
+                    columnar_cmp_f64(&floats, *v, effective_op, &mut words);
+                }
+                _ => return None,
+            }
+
+            // AND with existing mask
+            for (w, ew) in words.iter_mut().zip(existing_mask.words.iter()) {
+                *w &= *ew;
+            }
+
+            Some(BitMask { words, nrows })
+        }
+        _ => None,
+    }
+}
+
+/// Columnar comparison of f64 slice against a scalar.
+/// Sets bits in `out_words` for rows where the comparison is true.
+/// NaN follows IEEE 754: NaN != NaN, NaN < x is false, NaN > x is false, etc.
+#[inline]
+fn columnar_cmp_f64(data: &[f64], lit: f64, op: DBinOp, out_words: &mut [u64]) {
+    for (i, &val) in data.iter().enumerate() {
+        let pass = match op {
+            DBinOp::Gt => val > lit,
+            DBinOp::Lt => val < lit,
+            DBinOp::Ge => val >= lit,
+            DBinOp::Le => val <= lit,
+            DBinOp::Eq => val == lit,
+            DBinOp::Ne => val != lit,
+            _ => false,
+        };
+        if pass {
+            out_words[i / 64] |= 1u64 << (i % 64);
+        }
+    }
+}
+
+/// Columnar comparison of i64 slice against a scalar.
+/// Sets bits in `out_words` for rows where the comparison is true.
+#[inline]
+fn columnar_cmp_i64(data: &[i64], lit: i64, op: DBinOp, out_words: &mut [u64]) {
+    for (i, &val) in data.iter().enumerate() {
+        let pass = match op {
+            DBinOp::Gt => val > lit,
+            DBinOp::Lt => val < lit,
+            DBinOp::Ge => val >= lit,
+            DBinOp::Le => val <= lit,
+            DBinOp::Eq => val == lit,
+            DBinOp::Ne => val != lit,
+            _ => false,
+        };
+        if pass {
+            out_words[i / 64] |= 1u64 << (i % 64);
+        }
+    }
+}
+
 impl TidyView {
-    // â”€â”€ constructors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── constructors ────────────────────────────────────────────────────
 
     /// Wrap a `DataFrame` as a full view (all rows, all columns).
     pub fn from_df(df: DataFrame) -> Self {
@@ -1950,7 +2157,7 @@ impl TidyView {
         }
     }
 
-    // â”€â”€ shape â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ shape â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Number of visible rows (set bits in mask).
     pub fn nrows(&self) -> usize {
@@ -1971,7 +2178,7 @@ impl TidyView {
             .collect()
     }
 
-    // â”€â”€ filter â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ filter â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Filter rows by a `DExpr` predicate.
     ///
@@ -1987,6 +2194,16 @@ impl TidyView {
         // Validate predicate type references known projected columns
         validate_expr_columns_proj(predicate, &self.base, &self.proj)?;
 
+        // O3: try columnar fast path for simple predicates (Col op Literal)
+        if let Some(new_mask) = try_eval_predicate_columnar(&self.base, predicate, &self.mask) {
+            return Ok(TidyView {
+                base: Rc::clone(&self.base),
+                mask: new_mask,
+                proj: self.proj.clone(),
+            });
+        }
+
+        // Fallback: row-wise evaluation
         let nrows_base = self.base.nrows();
         let mut new_words = self.mask.words.clone();
 
@@ -2017,7 +2234,7 @@ impl TidyView {
         })
     }
 
-    // â”€â”€ select â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ select â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Project to a subset of named columns (in the given order).
     ///
@@ -2059,13 +2276,13 @@ impl TidyView {
         })
     }
 
-    // â”€â”€ mutate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ mutate â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Apply column-wise assignments and return a materialized `TidyFrame`.
     ///
     /// `assignments` is an ordered list of `(col_name, expr)` pairs evaluated
     /// left-to-right. Each assignment sees the *snapshot* of columns at entry
-    /// to the mutate call (snapshot semantics â€” new columns created in earlier
+    /// to the mutate call (snapshot semantics â€" new columns created in earlier
     /// assignments are NOT visible to later assignments within the same call).
     ///
     /// Semantics decisions:
@@ -2116,7 +2333,7 @@ impl TidyView {
         })
     }
 
-    // â”€â”€ materialize â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ materialize â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Materialize the view into a new `DataFrame` (applies mask + projection).
     ///
@@ -2162,7 +2379,7 @@ impl TidyView {
 
     /// Access a column from the underlying base DataFrame by name.
     ///
-    /// Returns the raw `Column` (full length, unmasked) â€” callers must apply
+    /// Returns the raw `Column` (full length, unmasked) â€" callers must apply
     /// the mask themselves if needed.  Used by `fct_summary_means` and similar.
     pub fn base_column(&self, name: &str) -> Option<&Column> {
         self.base.columns.iter()
@@ -2171,7 +2388,7 @@ impl TidyView {
     }
 }
 
-// â”€â”€ TidyFrame â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ TidyFrame â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// A materialized, mutable DataFrame with copy-on-write alias safety.
 ///
@@ -2242,7 +2459,7 @@ impl TidyFrame {
     }
 }
 
-// â”€â”€ TidyError â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ TidyError â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// Errors produced by Phase 10 tidy operations.
 #[derive(Debug, Clone, PartialEq)]
@@ -2294,7 +2511,7 @@ impl fmt::Display for TidyError {
 
 impl std::error::Error for TidyError {}
 
-// â”€â”€ Internal helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Internal helpers â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 // Note: tidy uses the existing `gather_column(col, indices)` defined earlier in
 // this file (line ~1160). No duplicate needed.
@@ -2433,7 +2650,327 @@ fn eval_window_column(
             }
             Ok(Some(Column::Int(ranks)))
         }
+        DExpr::RollingSum(col_name, window) => {
+            let vals = rolling_get_floats(df, col_name)?;
+            let n = vals.len();
+            let w = *window;
+            let mut result = Vec::with_capacity(n);
+            let mut sum = 0.0_f64;
+            let mut comp = 0.0_f64;
+            for i in 0..n {
+                // Kahan add entering element
+                let y = vals[i] - comp;
+                let t = sum + y;
+                comp = (t - sum) - y;
+                sum = t;
+                // Remove leaving element if window is full
+                if i >= w {
+                    let y2 = -vals[i - w] - comp;
+                    let t2 = sum + y2;
+                    comp = (t2 - sum) - y2;
+                    sum = t2;
+                }
+                result.push(sum);
+            }
+            Ok(Some(Column::Float(result)))
+        }
+        DExpr::RollingMean(col_name, window) => {
+            let vals = rolling_get_floats(df, col_name)?;
+            let n = vals.len();
+            let w = *window;
+            let mut result = Vec::with_capacity(n);
+            let mut sum = 0.0_f64;
+            let mut comp = 0.0_f64;
+            for i in 0..n {
+                let y = vals[i] - comp;
+                let t = sum + y;
+                comp = (t - sum) - y;
+                sum = t;
+                if i >= w {
+                    let y2 = -vals[i - w] - comp;
+                    let t2 = sum + y2;
+                    comp = (t2 - sum) - y2;
+                    sum = t2;
+                }
+                let count = if i < w { i + 1 } else { w };
+                result.push(sum / count as f64);
+            }
+            Ok(Some(Column::Float(result)))
+        }
+        DExpr::RollingMin(col_name, window) => {
+            let vals = rolling_get_floats(df, col_name)?;
+            let n = vals.len();
+            let w = *window;
+            let mut result = Vec::with_capacity(n);
+            let mut deque: VecDeque<usize> = VecDeque::new();
+            for i in 0..n {
+                // Remove elements outside window
+                while !deque.is_empty() && *deque.front().unwrap() + w <= i {
+                    deque.pop_front();
+                }
+                // Remove elements >= current (maintain increasing monotonic deque)
+                while !deque.is_empty() && vals[*deque.back().unwrap()] >= vals[i] {
+                    deque.pop_back();
+                }
+                deque.push_back(i);
+                result.push(vals[*deque.front().unwrap()]);
+            }
+            Ok(Some(Column::Float(result)))
+        }
+        DExpr::RollingMax(col_name, window) => {
+            let vals = rolling_get_floats(df, col_name)?;
+            let n = vals.len();
+            let w = *window;
+            let mut result = Vec::with_capacity(n);
+            let mut deque: VecDeque<usize> = VecDeque::new();
+            for i in 0..n {
+                while !deque.is_empty() && *deque.front().unwrap() + w <= i {
+                    deque.pop_front();
+                }
+                // Remove elements <= current (maintain decreasing monotonic deque)
+                while !deque.is_empty() && vals[*deque.back().unwrap()] <= vals[i] {
+                    deque.pop_back();
+                }
+                deque.push_back(i);
+                result.push(vals[*deque.front().unwrap()]);
+            }
+            Ok(Some(Column::Float(result)))
+        }
+        DExpr::RollingVar(col_name, window) => {
+            let vals = rolling_get_floats(df, col_name)?;
+            let n = vals.len();
+            let w = *window;
+            let mut result = Vec::with_capacity(n);
+            // Welford's online algorithm with removal
+            let mut count = 0_usize;
+            let mut mean = 0.0_f64;
+            let mut m2 = 0.0_f64;
+            for i in 0..n {
+                // Add entering element
+                count += 1;
+                let delta = vals[i] - mean;
+                mean += delta / count as f64;
+                let delta2 = vals[i] - mean;
+                m2 += delta * delta2;
+                // Remove leaving element if window is full
+                if i >= w {
+                    let old = vals[i - w];
+                    count -= 1;
+                    if count == 0 {
+                        mean = 0.0;
+                        m2 = 0.0;
+                    } else {
+                        let delta_old = old - mean;
+                        mean -= delta_old / count as f64;
+                        let delta_old2 = old - mean;
+                        m2 -= delta_old * delta_old2;
+                    }
+                }
+                if count < 2 {
+                    result.push(0.0);
+                } else {
+                    // Population variance (not sample): m2 / count
+                    // Use sample variance (Bessel's correction): m2 / (count - 1)
+                    result.push(m2 / (count - 1) as f64);
+                }
+            }
+            Ok(Some(Column::Float(result)))
+        }
+        DExpr::RollingSd(col_name, window) => {
+            let vals = rolling_get_floats(df, col_name)?;
+            let n = vals.len();
+            let w = *window;
+            let mut result = Vec::with_capacity(n);
+            let mut count = 0_usize;
+            let mut mean = 0.0_f64;
+            let mut m2 = 0.0_f64;
+            for i in 0..n {
+                count += 1;
+                let delta = vals[i] - mean;
+                mean += delta / count as f64;
+                let delta2 = vals[i] - mean;
+                m2 += delta * delta2;
+                if i >= w {
+                    let old = vals[i - w];
+                    count -= 1;
+                    if count == 0 {
+                        mean = 0.0;
+                        m2 = 0.0;
+                    } else {
+                        let delta_old = old - mean;
+                        mean -= delta_old / count as f64;
+                        let delta_old2 = old - mean;
+                        m2 -= delta_old * delta_old2;
+                    }
+                }
+                if count < 2 {
+                    result.push(0.0);
+                } else {
+                    result.push((m2 / (count - 1) as f64).sqrt());
+                }
+            }
+            Ok(Some(Column::Float(result)))
+        }
         _ => Ok(None),
+    }
+}
+
+/// Extract a float column from a DataFrame by name (for rolling window functions).
+fn rolling_get_floats(df: &DataFrame, col_name: &str) -> Result<Vec<f64>, TidyError> {
+    let col = df
+        .get_column(col_name)
+        .ok_or_else(|| TidyError::ColumnNotFound(col_name.to_string()))?;
+    match col {
+        Column::Float(v) => Ok(v.clone()),
+        Column::Int(v) => Ok(v.iter().map(|&i| i as f64).collect()),
+        _ => Err(TidyError::TypeMismatch {
+            expected: "numeric".into(),
+            got: "non-numeric".into(),
+        }),
+    }
+}
+
+// -- O7: Vectorized column-level DExpr evaluation --------------------------------
+
+/// Apply a binary operation element-wise on two columns.
+/// Mirrors the semantics of `eval_binop` exactly for bit-identical results.
+fn vectorized_binop(op: DBinOp, left: &Column, right: &Column) -> Result<Column, TidyError> {
+    match (left, right) {
+        (Column::Int(a), Column::Int(b)) => {
+            let n = a.len();
+            match op {
+                DBinOp::Add => { let mut r = vec![0i64; n]; for i in 0..n { r[i] = a[i] + b[i]; } Ok(Column::Int(r)) }
+                DBinOp::Sub => { let mut r = vec![0i64; n]; for i in 0..n { r[i] = a[i] - b[i]; } Ok(Column::Int(r)) }
+                DBinOp::Mul => { let mut r = vec![0i64; n]; for i in 0..n { r[i] = a[i] * b[i]; } Ok(Column::Int(r)) }
+                DBinOp::Div => { let mut r = vec![0i64; n]; for i in 0..n { r[i] = a[i] / b[i]; } Ok(Column::Int(r)) }
+                DBinOp::Gt => { let mut r = vec![false; n]; for i in 0..n { r[i] = a[i] > b[i]; } Ok(Column::Bool(r)) }
+                DBinOp::Lt => { let mut r = vec![false; n]; for i in 0..n { r[i] = a[i] < b[i]; } Ok(Column::Bool(r)) }
+                DBinOp::Ge => { let mut r = vec![false; n]; for i in 0..n { r[i] = a[i] >= b[i]; } Ok(Column::Bool(r)) }
+                DBinOp::Le => { let mut r = vec![false; n]; for i in 0..n { r[i] = a[i] <= b[i]; } Ok(Column::Bool(r)) }
+                DBinOp::Eq => { let mut r = vec![false; n]; for i in 0..n { r[i] = a[i] == b[i]; } Ok(Column::Bool(r)) }
+                DBinOp::Ne => { let mut r = vec![false; n]; for i in 0..n { r[i] = a[i] != b[i]; } Ok(Column::Bool(r)) }
+                _ => Err(TidyError::Internal(format!("unsupported op {:?} on Int", op))),
+            }
+        }
+        (Column::Float(a), Column::Float(b)) => {
+            let n = a.len();
+            match op {
+                DBinOp::Add => { let mut r = vec![0.0f64; n]; for i in 0..n { r[i] = a[i] + b[i]; } Ok(Column::Float(r)) }
+                DBinOp::Sub => { let mut r = vec![0.0f64; n]; for i in 0..n { r[i] = a[i] - b[i]; } Ok(Column::Float(r)) }
+                DBinOp::Mul => { let mut r = vec![0.0f64; n]; for i in 0..n { r[i] = a[i] * b[i]; } Ok(Column::Float(r)) }
+                DBinOp::Div => { let mut r = vec![0.0f64; n]; for i in 0..n { r[i] = a[i] / b[i]; } Ok(Column::Float(r)) }
+                DBinOp::Gt => { let mut r = vec![false; n]; for i in 0..n { r[i] = a[i] > b[i]; } Ok(Column::Bool(r)) }
+                DBinOp::Lt => { let mut r = vec![false; n]; for i in 0..n { r[i] = a[i] < b[i]; } Ok(Column::Bool(r)) }
+                DBinOp::Ge => { let mut r = vec![false; n]; for i in 0..n { r[i] = a[i] >= b[i]; } Ok(Column::Bool(r)) }
+                DBinOp::Le => { let mut r = vec![false; n]; for i in 0..n { r[i] = a[i] <= b[i]; } Ok(Column::Bool(r)) }
+                DBinOp::Eq => { let mut r = vec![false; n]; for i in 0..n { r[i] = a[i] == b[i]; } Ok(Column::Bool(r)) }
+                DBinOp::Ne => { let mut r = vec![false; n]; for i in 0..n { r[i] = a[i] != b[i]; } Ok(Column::Bool(r)) }
+                _ => Err(TidyError::Internal(format!("unsupported op {:?} on Float", op))),
+            }
+        }
+        (Column::Int(a), Column::Float(_b)) => {
+            let promoted: Vec<f64> = a.iter().map(|&v| v as f64).collect();
+            vectorized_binop(op, &Column::Float(promoted), right)
+        }
+        (Column::Float(_a), Column::Int(b)) => {
+            let promoted: Vec<f64> = b.iter().map(|&v| v as f64).collect();
+            vectorized_binop(op, left, &Column::Float(promoted))
+        }
+        (Column::Bool(a), Column::Bool(b)) => {
+            let n = a.len();
+            match op {
+                DBinOp::And => { let mut r = vec![false; n]; for i in 0..n { r[i] = a[i] && b[i]; } Ok(Column::Bool(r)) }
+                DBinOp::Or  => { let mut r = vec![false; n]; for i in 0..n { r[i] = a[i] || b[i]; } Ok(Column::Bool(r)) }
+                DBinOp::Eq  => { let mut r = vec![false; n]; for i in 0..n { r[i] = a[i] == b[i]; } Ok(Column::Bool(r)) }
+                DBinOp::Ne  => { let mut r = vec![false; n]; for i in 0..n { r[i] = a[i] != b[i]; } Ok(Column::Bool(r)) }
+                _ => Err(TidyError::Internal(format!("unsupported op {:?} on Bool", op))),
+            }
+        }
+        (Column::Str(a), Column::Str(b)) => {
+            let n = a.len();
+            match op {
+                DBinOp::Eq => { let mut r = vec![false; n]; for i in 0..n { r[i] = a[i] == b[i]; } Ok(Column::Bool(r)) }
+                DBinOp::Ne => { let mut r = vec![false; n]; for i in 0..n { r[i] = a[i] != b[i]; } Ok(Column::Bool(r)) }
+                _ => Err(TidyError::Internal(format!("unsupported op {:?} on String", op))),
+            }
+        }
+        _ => Err(TidyError::Internal("type mismatch in binary operation".into())),
+    }
+}
+
+/// Apply a unary math function element-wise to a column.
+/// Mirrors the semantics of the FnCall arm in `eval_expr_row` exactly.
+fn vectorized_fn_call(name: &str, arg: &Column) -> Result<Column, TidyError> {
+    let floats: Vec<f64> = match arg {
+        Column::Float(v) => v.clone(),
+        Column::Int(v) => v.iter().map(|&i| i as f64).collect(),
+        _ => return Err(TidyError::Internal(format!(
+            "FnCall '{}' requires numeric argument", name
+        ))),
+    };
+    let f: fn(f64) -> f64 = match name {
+        "log"   => f64::ln,
+        "exp"   => f64::exp,
+        "sqrt"  => f64::sqrt,
+        "abs"   => f64::abs,
+        "ceil"  => f64::ceil,
+        "floor" => f64::floor,
+        "round" => f64::round,
+        "sin"   => f64::sin,
+        "cos"   => f64::cos,
+        "tan"   => f64::tan,
+        _ => return Err(TidyError::Internal(format!(
+            "unknown DExpr function: {}", name
+        ))),
+    };
+    let mut result = vec![0.0f64; floats.len()];
+    for i in 0..floats.len() {
+        result[i] = f(floats[i]);
+    }
+    Ok(Column::Float(result))
+}
+
+/// O7: Try vectorized column-level evaluation of a DExpr.
+/// Returns `None` if the expression is too complex for the fast path,
+/// causing the caller to fall back to the row-by-row evaluator.
+fn try_eval_expr_column_vectorized(
+    df: &DataFrame,
+    expr: &DExpr,
+    nrows: usize,
+) -> Option<Result<Column, TidyError>> {
+    match expr {
+        DExpr::Col(name) => {
+            let col = df.get_column(name)?;
+            let result = match col {
+                Column::Int(v) => Column::Int(v[..nrows].to_vec()),
+                Column::Float(v) => Column::Float(v[..nrows].to_vec()),
+                Column::Str(v) => Column::Str(v[..nrows].to_vec()),
+                Column::Bool(v) => Column::Bool(v[..nrows].to_vec()),
+                Column::Categorical { levels, codes } => {
+                    let strs: Vec<String> = codes[..nrows]
+                        .iter()
+                        .map(|&c| levels[c as usize].clone())
+                        .collect();
+                    Column::Str(strs)
+                }
+                Column::DateTime(v) => Column::Int(v[..nrows].to_vec()),
+            };
+            Some(Ok(result))
+        }
+        DExpr::LitFloat(v) => Some(Ok(Column::Float(vec![*v; nrows]))),
+        DExpr::LitInt(v) => Some(Ok(Column::Int(vec![*v; nrows]))),
+        DExpr::LitBool(b) => Some(Ok(Column::Bool(vec![*b; nrows]))),
+        DExpr::LitStr(s) => Some(Ok(Column::Str(vec![s.clone(); nrows]))),
+        DExpr::BinOp { op, left, right } => {
+            let left_col = try_eval_expr_column_vectorized(df, left, nrows)?.ok()?;
+            let right_col = try_eval_expr_column_vectorized(df, right, nrows)?.ok()?;
+            Some(vectorized_binop(*op, &left_col, &right_col))
+        }
+        DExpr::FnCall(name, args) if args.len() == 1 => {
+            let arg_col = try_eval_expr_column_vectorized(df, &args[0], nrows)?.ok()?;
+            Some(vectorized_fn_call(name, &arg_col))
+        }
+        _ => None,
     }
 }
 
@@ -2446,6 +2983,11 @@ fn eval_expr_column(df: &DataFrame, expr: &DExpr, nrows: usize) -> Result<Column
     // Handle window functions at column level
     if let Some(col) = eval_window_column(df, expr, nrows)? {
         return Ok(col);
+    }
+
+    // O7: try vectorized fast path before falling back to row-by-row
+    if let Some(result) = try_eval_expr_column_vectorized(df, expr, nrows) {
+        return result;
     }
 
     // Evaluate row 0 to determine result type
@@ -2531,7 +3073,7 @@ fn eval_expr_row_proj(
 }
 
 /// Validate that all column references in `expr` exist in `base` (via projection
-/// columns â€” filter predicates may reference any base column visible in proj).
+/// columns â€" filter predicates may reference any base column visible in proj).
 ///
 /// For simplicity: filter predicates may reference ANY column in `base` because
 /// the view is a window over the same base DataFrame. This is analogous to SQL
@@ -2577,12 +3119,12 @@ impl ExprValue {
     }
 }
 
-// â”€â”€ DataFrame::tidy() convenience entry point â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ DataFrame::tidy() convenience entry point â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 impl DataFrame {
     /// Wrap this DataFrame as a `TidyView` for Phase 10 tidy operations.
     ///
-    /// Consumes `self` (zero-copy â€” moves into an `Rc`).
+    /// Consumes `self` (zero-copy â€" moves into an `Rc`).
     pub fn tidy(self) -> TidyView {
         TidyView::from_df(self)
     }
@@ -2593,14 +3135,14 @@ impl DataFrame {
     }
 }
 
-// â”€â”€ NoGC annotation gate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ NoGC annotation gate â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 //
 // The @nogc verifier in cjc-mir/src/nogc_verify.rs tracks "safe builtins" that
 // are known not to trigger GC. Phase 10 tidy operations on the Rust side are
 // outside the CJC language runtime (they are library calls), so @nogc
 // annotation at the CJC language level means: the CJC function body does not
 // call gc_alloc. The Rust implementation of filter/select produces a TidyView
-// that holds Rc references â€” no GC heap involvement.
+// that holds Rc references â€" no GC heap involvement.
 //
 // For the NoGC verifier to accept tidy calls inside @nogc CJC functions, the
 // builtins "tidy_filter", "tidy_select", "tidy_materialize" must be added to
@@ -2610,15 +3152,15 @@ impl DataFrame {
 // Allocation budget per operation (no GC heap, only Rust stack/heap via alloc):
 //   filter  : O(N/64) u64 words for new mask   (â‰ˆ 8 bytes / 64 rows)
 //   select  : O(K) usize indices (K = ncols selected)
-//   mutate  : O(N) per new column buffer (allowed â€” one allocation per column)
+//   mutate  : O(N) per new column buffer (allowed â€" one allocation per column)
 //   materialize: O(N * K) total for visible data
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-// Phase 11â€“12: Grouping, Summarise, Arrange, Slice, Distinct, Joins
+// Phase 11â€"12: Grouping, Summarise, Arrange, Slice, Distinct, Joins
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 //
 // Spec-Lock Table
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 // | Decision point            | Choice                                           |
 // |---------------------------|--------------------------------------------------|
 // | Group ordering            | First-occurrence order of keys in visible rows   |
@@ -2631,18 +3173,18 @@ impl DataFrame {
 // | arrange tie-breaking      | Stable sort (Rust's slice::sort_by is stable);   |
 // |                           | equal-key rows preserve original row order       |
 // | NaN ordering in arrange   | NaN sorts LAST (greater than any finite value)   |
-// | null ordering             | N/A â€” no null type in CJC                       |
+// | null ordering             | N/A â€" no null type in CJC                       |
 // | slice_sample seed         | Deterministic LCG with caller-supplied u64 seed  |
 // | slice_sample n > nrows    | Clamp to nrows (no error)                        |
 // | distinct ordering         | First-occurrence order of distinct key combos    |
-// | Join left order           | Preserved â€” output rows follow left row order    |
+// | Join left order           | Preserved â€" output rows follow left row order    |
 // | Join right match order    | Stable: sorted by right-side row index ascending  |
-// | Null matching in joins    | N/A â€” no null type in CJC                       |
+// | Null matching in joins    | N/A â€" no null type in CJC                       |
 // | Join duplicate keys       | All matches included, deterministic order        |
 // | many-many explosion order | Left outer loop, right inner loop (stable)       |
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
-// â”€â”€ RowIndexMap â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ RowIndexMap â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// A permutation / selection vector over base-frame row indices.
 ///
@@ -2675,7 +3217,7 @@ impl RowIndexMap {
     }
 }
 
-// â”€â”€ GroupMeta â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ GroupMeta â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// Metadata for one group in a `GroupIndex`.
 #[derive(Debug, Clone)]
@@ -2686,7 +3228,7 @@ pub struct GroupMeta {
     pub row_indices: Vec<usize>,
 }
 
-// â”€â”€ GroupIndex â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ GroupIndex â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// A deterministic group index built from a `TidyView`.
 ///
@@ -2726,7 +3268,7 @@ impl GroupIndex {
                 .map(|&ci| base.columns[ci].1.get_display(row))
                 .collect();
 
-            // Linear scan for existing key â€” preserves insertion order, no hash
+            // Linear scan for existing key â€" preserves insertion order, no hash
             let slot = group_map
                 .iter()
                 .position(|(k, _)| k == &key)
@@ -2770,7 +3312,7 @@ impl GroupIndex {
     }
 }
 
-// â”€â”€ GroupedTidyView â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ GroupedTidyView â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// A grouped view produced by `TidyView::group_by(...)`.
 ///
@@ -2801,7 +3343,7 @@ impl GroupedTidyView {
         &self.index
     }
 
-    // â”€â”€ summarise â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ summarise â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Collapse each group to one summary row using named aggregators.
     ///
@@ -2902,9 +3444,9 @@ impl GroupedTidyView {
             result_columns.push((key_name.clone(), col));
         }
 
-        // Build aggregator columns
+        // Build aggregator columns (O5+O9: use fast path)
         for &(out_name, ref agg) in assignments {
-            let col_vals = self.eval_agg_over_groups(agg, n_groups, base)?;
+            let col_vals = self.eval_agg_over_groups_fast(agg, n_groups, base)?;
             result_columns.push((out_name.to_string(), col_vals));
         }
 
@@ -2914,6 +3456,7 @@ impl GroupedTidyView {
     }
 
     /// Evaluate an aggregator over all groups, return a typed `Column`.
+    #[allow(dead_code)]
     fn eval_agg_over_groups(
         &self,
         agg: &TidyAgg,
@@ -2950,9 +3493,282 @@ impl GroupedTidyView {
             }
         }
     }
+
+    /// O5+O9: Fast aggregation using direct index iteration and arena buffer.
+    /// Produces bit-identical results to `eval_agg_over_groups`.
+    fn eval_agg_over_groups_fast(
+        &self,
+        agg: &TidyAgg,
+        n_groups: usize,
+        base: &DataFrame,
+    ) -> Result<Column, TidyError> {
+        match agg {
+            TidyAgg::Count => {
+                let counts: Vec<i64> = self
+                    .index
+                    .groups
+                    .iter()
+                    .map(|g| g.row_indices.len() as i64)
+                    .collect();
+                Ok(Column::Int(counts))
+            }
+            TidyAgg::Sum(col_name) => {
+                let src = base.get_column(col_name)
+                    .ok_or_else(|| TidyError::ColumnNotFound(col_name.clone()))?;
+                Ok(Column::Float(fast_agg_sum(&self.index.groups, src)?))
+            }
+            TidyAgg::Mean(col_name) => {
+                let src = base.get_column(col_name)
+                    .ok_or_else(|| TidyError::ColumnNotFound(col_name.clone()))?;
+                Ok(Column::Float(fast_agg_mean(&self.index.groups, src)?))
+            }
+            TidyAgg::Min(col_name) => {
+                let src = base.get_column(col_name)
+                    .ok_or_else(|| TidyError::ColumnNotFound(col_name.clone()))?;
+                Ok(Column::Float(fast_agg_min(&self.index.groups, src)?))
+            }
+            TidyAgg::Max(col_name) => {
+                let src = base.get_column(col_name)
+                    .ok_or_else(|| TidyError::ColumnNotFound(col_name.clone()))?;
+                Ok(Column::Float(fast_agg_max(&self.index.groups, src)?))
+            }
+            TidyAgg::First(col_name) => {
+                let src = base.get_column(col_name)
+                    .ok_or_else(|| TidyError::ColumnNotFound(col_name.clone()))?;
+                Ok(Column::Float(fast_agg_first(&self.index.groups, src)?))
+            }
+            TidyAgg::Last(col_name) => {
+                let src = base.get_column(col_name)
+                    .ok_or_else(|| TidyError::ColumnNotFound(col_name.clone()))?;
+                Ok(Column::Float(fast_agg_last(&self.index.groups, src)?))
+            }
+            TidyAgg::Var(col_name)
+            | TidyAgg::Sd(col_name)
+            | TidyAgg::Median(col_name)
+            | TidyAgg::Quantile(col_name, _)
+            | TidyAgg::NDistinct(col_name)
+            | TidyAgg::Iqr(col_name) => {
+                let src = base.get_column(col_name)
+                    .ok_or_else(|| TidyError::ColumnNotFound(col_name.clone()))?;
+                Ok(Column::Float(fast_agg_arena(
+                    agg, &self.index.groups, src, n_groups,
+                )?))
+            }
+        }
+    }
+}
+
+// -- O5: Direct index-based aggregation (no per-group Vec) --------------------
+
+enum ColRef<'a> {
+    Float(&'a [f64]),
+    Int(&'a [i64]),
+}
+
+fn col_to_ref(col: &Column) -> Result<ColRef<'_>, TidyError> {
+    match col {
+        Column::Float(v) => Ok(ColRef::Float(v)),
+        Column::Int(v) => Ok(ColRef::Int(v)),
+        _ => Err(TidyError::TypeMismatch {
+            expected: "numeric (Int or Float)".into(),
+            got: col.type_name().into(),
+        }),
+    }
+}
+
+fn fast_agg_sum(groups: &[GroupMeta], col: &Column) -> Result<Vec<f64>, TidyError> {
+    use cjc_repro::kahan::KahanAccumulatorF64;
+    let cr = col_to_ref(col)?;
+    Ok(groups.iter().map(|g| {
+        let mut acc = KahanAccumulatorF64::new();
+        match cr {
+            ColRef::Float(d) => { for &i in &g.row_indices { acc.add(d[i]); } }
+            ColRef::Int(d) => { for &i in &g.row_indices { acc.add(d[i] as f64); } }
+        }
+        acc.finalize()
+    }).collect())
+}
+
+fn fast_agg_mean(groups: &[GroupMeta], col: &Column) -> Result<Vec<f64>, TidyError> {
+    use cjc_repro::kahan::KahanAccumulatorF64;
+    let cr = col_to_ref(col)?;
+    Ok(groups.iter().map(|g| {
+        if g.row_indices.is_empty() { return f64::NAN; }
+        let mut acc = KahanAccumulatorF64::new();
+        match cr {
+            ColRef::Float(d) => { for &i in &g.row_indices { acc.add(d[i]); } }
+            ColRef::Int(d) => { for &i in &g.row_indices { acc.add(d[i] as f64); } }
+        }
+        acc.finalize() / g.row_indices.len() as f64
+    }).collect())
+}
+
+fn fast_agg_min(groups: &[GroupMeta], col: &Column) -> Result<Vec<f64>, TidyError> {
+    let cr = col_to_ref(col)?;
+    Ok(groups.iter().map(|g| {
+        if g.row_indices.is_empty() { return f64::NAN; }
+        match cr {
+            ColRef::Float(d) => g.row_indices.iter().fold(f64::INFINITY, |a, &i| {
+                let b = d[i]; if b.is_nan() || b < a { b } else { a }
+            }),
+            ColRef::Int(d) => g.row_indices.iter().fold(f64::INFINITY, |a, &i| {
+                let b = d[i] as f64; if b.is_nan() || b < a { b } else { a }
+            }),
+        }
+    }).collect())
+}
+
+fn fast_agg_max(groups: &[GroupMeta], col: &Column) -> Result<Vec<f64>, TidyError> {
+    let cr = col_to_ref(col)?;
+    Ok(groups.iter().map(|g| {
+        if g.row_indices.is_empty() { return f64::NAN; }
+        match cr {
+            ColRef::Float(d) => g.row_indices.iter().fold(f64::NEG_INFINITY, |a, &i| {
+                let b = d[i]; if b.is_nan() || b > a { b } else { a }
+            }),
+            ColRef::Int(d) => g.row_indices.iter().fold(f64::NEG_INFINITY, |a, &i| {
+                let b = d[i] as f64; if b.is_nan() || b > a { b } else { a }
+            }),
+        }
+    }).collect())
+}
+
+fn fast_agg_first(groups: &[GroupMeta], col: &Column) -> Result<Vec<f64>, TidyError> {
+    let cr = col_to_ref(col)?;
+    let mut vals = Vec::with_capacity(groups.len());
+    for g in groups {
+        if g.row_indices.is_empty() { return Err(TidyError::EmptyGroup); }
+        match cr {
+            ColRef::Float(d) => vals.push(d[g.row_indices[0]]),
+            ColRef::Int(d) => vals.push(d[g.row_indices[0]] as f64),
+        }
+    }
+    Ok(vals)
+}
+
+fn fast_agg_last(groups: &[GroupMeta], col: &Column) -> Result<Vec<f64>, TidyError> {
+    let cr = col_to_ref(col)?;
+    let mut vals = Vec::with_capacity(groups.len());
+    for g in groups {
+        if g.row_indices.is_empty() { return Err(TidyError::EmptyGroup); }
+        let last = *g.row_indices.last().unwrap();
+        match cr {
+            ColRef::Float(d) => vals.push(d[last]),
+            ColRef::Int(d) => vals.push(d[last] as f64),
+        }
+    }
+    Ok(vals)
+}
+
+// -- O9: Arena-based aggregation for sort-dependent ops -----------------------
+
+fn fast_agg_arena(
+    agg: &TidyAgg,
+    groups: &[GroupMeta],
+    col: &Column,
+    n_groups: usize,
+) -> Result<Vec<f64>, TidyError> {
+    let cr = col_to_ref(col)?;
+    let max_size = groups.iter().map(|g| g.row_indices.len()).max().unwrap_or(0);
+    let mut arena: Vec<f64> = Vec::with_capacity(max_size);
+    let mut results = Vec::with_capacity(n_groups);
+    for group in groups {
+        arena.clear();
+        match cr {
+            ColRef::Float(d) => { for &i in &group.row_indices { arena.push(d[i]); } }
+            ColRef::Int(d) => { for &i in &group.row_indices { arena.push(d[i] as f64); } }
+        }
+        let val = agg_reduce_slice(agg, &mut arena)?;
+        results.push(val);
+    }
+    Ok(results)
+}
+
+/// Reduce a pre-gathered f64 slice for sort-dependent aggregators (O9).
+/// Bit-identical to `agg_reduce`.
+fn agg_reduce_slice(agg: &TidyAgg, values: &mut [f64]) -> Result<f64, TidyError> {
+    match agg {
+        TidyAgg::Var(_) => {
+            if values.len() < 2 {
+                Ok(f64::NAN)
+            } else {
+                let n = values.len() as f64;
+                let mean = kahan_sum_f64(values) / n;
+                let sq_diffs: Vec<f64> = values.iter().map(|v| (v - mean) * (v - mean)).collect();
+                Ok(kahan_sum_f64(&sq_diffs) / (n - 1.0))
+            }
+        }
+        TidyAgg::Sd(_) => {
+            if values.len() < 2 {
+                Ok(f64::NAN)
+            } else {
+                let n = values.len() as f64;
+                let mean = kahan_sum_f64(values) / n;
+                let sq_diffs: Vec<f64> = values.iter().map(|v| (v - mean) * (v - mean)).collect();
+                Ok((kahan_sum_f64(&sq_diffs) / (n - 1.0)).sqrt())
+            }
+        }
+        TidyAgg::Median(_) => {
+            if values.is_empty() {
+                Ok(f64::NAN)
+            } else {
+                values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let n = values.len();
+                if n % 2 == 1 { Ok(values[n / 2]) }
+                else { Ok((values[n / 2 - 1] + values[n / 2]) / 2.0) }
+            }
+        }
+        TidyAgg::Quantile(_, p) => {
+            if values.is_empty() {
+                Ok(f64::NAN)
+            } else {
+                values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let n = values.len();
+                if n == 1 { return Ok(values[0]); }
+                let pos = p * (n as f64 - 1.0);
+                let lo = pos.floor() as usize;
+                let hi = pos.ceil() as usize;
+                let frac = pos - lo as f64;
+                if lo == hi || hi >= n { Ok(values[lo.min(n - 1)]) }
+                else { Ok(values[lo] + frac * (values[hi] - values[lo])) }
+            }
+        }
+        TidyAgg::NDistinct(_) => {
+            let distinct: std::collections::BTreeSet<u64> = values.iter().map(|v| v.to_bits()).collect();
+            Ok(distinct.len() as f64)
+        }
+        TidyAgg::Iqr(_) => {
+            if values.is_empty() {
+                Ok(f64::NAN)
+            } else {
+                values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let n = values.len();
+                if n == 1 { return Ok(0.0); }
+                let q1 = {
+                    let pos = 0.25 * (n as f64 - 1.0);
+                    let lo = pos.floor() as usize;
+                    let hi = pos.ceil() as usize;
+                    let frac = pos - lo as f64;
+                    if lo == hi || hi >= n { values[lo.min(n - 1)] }
+                    else { values[lo] + frac * (values[hi] - values[lo]) }
+                };
+                let q3 = {
+                    let pos = 0.75 * (n as f64 - 1.0);
+                    let lo = pos.floor() as usize;
+                    let hi = pos.ceil() as usize;
+                    let frac = pos - lo as f64;
+                    if lo == hi || hi >= n { values[lo.min(n - 1)] }
+                    else { values[lo] + frac * (values[hi] - values[lo]) }
+                };
+                Ok(q3 - q1)
+            }
+        }
+        _ => unreachable!("agg_reduce_slice called for non-arena aggregator"),
+    }
 }
 
 /// Reduce one group's rows for a numeric aggregator. Returns f64.
+#[allow(dead_code)]
 fn agg_reduce(
     agg: &TidyAgg,
     col: &Column,
@@ -3104,7 +3920,7 @@ fn agg_reduce(
     }
 }
 
-// â”€â”€ TidyAgg â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ TidyAgg â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// An aggregator expression for use in `summarise`.
 #[derive(Debug, Clone)]
@@ -3137,7 +3953,7 @@ pub enum TidyAgg {
     Iqr(String),
 }
 
-// â”€â”€ ArrangeKey â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ ArrangeKey â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// One sorting key for `arrange`.
 #[derive(Debug, Clone)]
@@ -3157,11 +3973,11 @@ impl ArrangeKey {
     }
 }
 
-// â”€â”€ TidyView: group_by, arrange, slice, distinct, joins â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ TidyView: group_by, arrange, slice, distinct, joins â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 impl TidyView {
 
-    // â”€â”€ group_by â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ group_by â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Group the view by one or more column names.
     ///
@@ -3190,7 +4006,8 @@ impl TidyView {
         let visible_rows: Vec<usize> = self.mask.iter_set().collect();
         let key_names: Vec<String> = keys.iter().map(|s| s.to_string()).collect();
 
-        let index = GroupIndex::build(&self.base, &key_col_indices, &visible_rows, key_names);
+        // O1 optimization: use BTree-accelerated build_fast for O(N log G) instead of O(N × G)
+        let index = GroupIndex::build_fast(&self.base, &key_col_indices, &visible_rows, key_names);
 
         Ok(GroupedTidyView {
             view: self.clone(),
@@ -3198,7 +4015,7 @@ impl TidyView {
         })
     }
 
-    // â”€â”€ arrange â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ arrange â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Sort visible rows by one or more `ArrangeKey`s.
     ///
@@ -3267,7 +4084,7 @@ impl TidyView {
         })
     }
 
-    // â”€â”€ slice â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ slice â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Select rows by a half-open range `[start, end)` of visible-row positions.
     ///
@@ -3319,7 +4136,7 @@ impl TidyView {
         self.view_from_row_indices(visible)
     }
 
-    // â”€â”€ distinct â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ distinct â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Return rows with unique combinations of the specified columns.
     ///
@@ -3343,7 +4160,8 @@ impl TidyView {
             col_indices.push(idx);
         }
 
-        let mut seen_keys: Vec<Vec<String>> = Vec::new();
+        // O8 optimization: BTreeSet gives O(N log D) instead of O(N × D) linear scan
+        let mut seen_keys: BTreeSet<Vec<String>> = BTreeSet::new();
         let mut selected_rows: Vec<usize> = Vec::new();
 
         for row in self.mask.iter_set() {
@@ -3356,8 +4174,7 @@ impl TidyView {
                     .collect()
             };
 
-            if !seen_keys.contains(&key) {
-                seen_keys.push(key);
+            if seen_keys.insert(key) {
                 selected_rows.push(row);
             }
         }
@@ -3365,7 +4182,7 @@ impl TidyView {
         Ok(self.view_from_row_indices(selected_rows))
     }
 
-    // â”€â”€ joins â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ joins â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Inner join: rows where all `on` key columns match.
     ///
@@ -3423,7 +4240,7 @@ impl TidyView {
         Ok(self.view_from_row_indices(included))
     }
 
-    // â”€â”€ internal helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ internal helpers â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Build a new `TidyView` over the same base using explicit row indices.
     /// The row indices must be valid base-frame indices.
@@ -3441,7 +4258,7 @@ impl TidyView {
     }
 }
 
-// â”€â”€ Join internals â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Join internals â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 #[derive(Clone, Copy)]
 enum JoinKind { Inner, Left }
@@ -3474,7 +4291,7 @@ fn row_key(base: &DataFrame, col_indices: &[usize], row: usize) -> Vec<String> {
 }
 
 /// Build a deterministic right-side lookup: sorted Vec of (key_tuple, right_row_idx).
-/// Sorted by key tuple first, then by row index â€” guarantees determinism.
+/// Sorted by key tuple first, then by row index â€" guarantees determinism.
 fn build_right_lookup(
     right: &TidyView,
     right_key_cols: &[usize],
@@ -3505,6 +4322,22 @@ fn find_matches(lookup: &[(Vec<String>, usize)], key: &[String]) -> Vec<usize> {
     matches
 }
 
+/// O6: BTreeMap-accelerated right-side lookup for joins.
+/// Groups right rows by their key tuple, enabling O(log K) lookup per left row
+/// (where K = unique keys) instead of O(log N) binary search on a flat sorted list.
+/// Right rows within each key are in ascending order (iter_set() guarantee).
+fn build_right_lookup_btree(
+    right: &TidyView,
+    right_key_cols: &[usize],
+) -> BTreeMap<Vec<String>, Vec<usize>> {
+    let mut lookup: BTreeMap<Vec<String>, Vec<usize>> = BTreeMap::new();
+    for r in right.mask.iter_set() {
+        let key = row_key(&right.base, right_key_cols, r);
+        lookup.entry(key).or_default().push(r);
+    }
+    lookup
+}
+
 /// Inner join: collect (left_row, right_row) pairs.
 fn join_match_rows(
     left: &TidyView,
@@ -3513,17 +4346,19 @@ fn join_match_rows(
     _kind: JoinKind,
 ) -> Result<(Vec<usize>, Vec<usize>), TidyError> {
     let (left_key_cols, right_key_cols) = resolve_join_keys(left, right, on)?;
-    let lookup = build_right_lookup(right, &right_key_cols);
+    // O6: use BTreeMap for O(log K) lookup instead of sorted-Vec binary search
+    let lookup = build_right_lookup_btree(right, &right_key_cols);
 
     let mut out_left = Vec::new();
     let mut out_right = Vec::new();
 
     for l_row in left.mask.iter_set() {
         let key = row_key(&left.base, &left_key_cols, l_row);
-        let matches = find_matches(&lookup, &key);
-        for r_row in matches {
-            out_left.push(l_row);
-            out_right.push(r_row);
+        if let Some(matches) = lookup.get(&key) {
+            for &r_row in matches {
+                out_left.push(l_row);
+                out_right.push(r_row);
+            }
         }
     }
     Ok((out_left, out_right))
@@ -3537,21 +4372,24 @@ fn join_match_rows_optional(
     _kind: JoinKind,
 ) -> Result<(Vec<usize>, Vec<Option<usize>>), TidyError> {
     let (left_key_cols, right_key_cols) = resolve_join_keys(left, right, on)?;
-    let lookup = build_right_lookup(right, &right_key_cols);
+    // O6: use BTreeMap for O(log K) lookup
+    let lookup = build_right_lookup_btree(right, &right_key_cols);
 
     let mut out_left = Vec::new();
     let mut out_right: Vec<Option<usize>> = Vec::new();
 
     for l_row in left.mask.iter_set() {
         let key = row_key(&left.base, &left_key_cols, l_row);
-        let matches = find_matches(&lookup, &key);
-        if matches.is_empty() {
-            out_left.push(l_row);
-            out_right.push(None);
-        } else {
-            for r_row in matches {
+        match lookup.get(&key) {
+            Some(matches) if !matches.is_empty() => {
+                for &r_row in matches {
+                    out_left.push(l_row);
+                    out_right.push(Some(r_row));
+                }
+            }
+            _ => {
                 out_left.push(l_row);
-                out_right.push(Some(r_row));
+                out_right.push(None);
             }
         }
     }
@@ -3566,12 +4404,13 @@ fn semi_anti_match_rows(
     semi: bool,
 ) -> Result<Vec<usize>, TidyError> {
     let (left_key_cols, right_key_cols) = resolve_join_keys(left, right, on)?;
-    let lookup = build_right_lookup(right, &right_key_cols);
+    // O6: use BTreeMap for O(log K) lookup
+    let lookup = build_right_lookup_btree(right, &right_key_cols);
 
     let mut out = Vec::new();
     for l_row in left.mask.iter_set() {
         let key = row_key(&left.base, &left_key_cols, l_row);
-        let has_match = !find_matches(&lookup, &key).is_empty();
+        let has_match = lookup.contains_key(&key);
         if has_match == semi {
             out.push(l_row);
         }
@@ -3650,7 +4489,7 @@ fn build_left_join_frame(
     Ok(TidyFrame::from_df(df))
 }
 
-// â”€â”€ Column comparison for arrange â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Column comparison for arrange â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// Compare two rows of a `Column` for use in `arrange`.
 ///
@@ -3681,19 +4520,19 @@ fn compare_column_rows(col: &Column, a: usize, b: usize) -> std::cmp::Ordering {
 
 // (TidyError::EmptyGroup is defined in the TidyError enum above.)
 
-// â”€â”€ NoGC safe-builtin registrations (Phase 11â€“12) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ NoGC safe-builtin registrations (Phase 11â€"12) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 //
 // Ops that only update metadata (no column buffer alloc):
-//   tidy_group_by      : builds GroupIndex (Vec of Vec<usize>) â€” no column alloc
-//   tidy_ungroup       : drops GroupIndex â€” no alloc
+//   tidy_group_by      : builds GroupIndex (Vec of Vec<usize>) â€" no column alloc
+//   tidy_ungroup       : drops GroupIndex â€" no alloc
 //   tidy_arrange       : materialises sorted base (ALLOCATES) â†’ NOT @nogc safe
-//   tidy_slice         : updates RowIndexMap â€” O(N) usize alloc, safe
-//   tidy_distinct      : builds RowIndexMap â€” O(N) usize alloc, safe
-//   tidy_semi_join     : builds RowIndexMap â€” O(N) usize alloc, safe
-//   tidy_anti_join     : builds RowIndexMap â€” O(N) usize alloc, safe
-//   tidy_inner_join    : materialises result â€” ALLOCATES â†’ NOT @nogc safe
-//   tidy_left_join     : materialises result â€” ALLOCATES â†’ NOT @nogc safe
-//   tidy_summarise     : materialises result â€” ALLOCATES â†’ NOT @nogc safe
+//   tidy_slice         : updates RowIndexMap â€" O(N) usize alloc, safe
+//   tidy_distinct      : builds RowIndexMap â€" O(N) usize alloc, safe
+//   tidy_semi_join     : builds RowIndexMap â€" O(N) usize alloc, safe
+//   tidy_anti_join     : builds RowIndexMap â€" O(N) usize alloc, safe
+//   tidy_inner_join    : materialises result â€" ALLOCATES â†’ NOT @nogc safe
+//   tidy_left_join     : materialises result â€" ALLOCATES â†’ NOT @nogc safe
+//   tidy_summarise     : materialises result â€" ALLOCATES â†’ NOT @nogc safe
 //
 // Safe (registered in nogc_verify.rs):
 //   tidy_group_by, tidy_ungroup, tidy_slice, tidy_distinct,
@@ -3726,7 +4565,7 @@ mod phase10_unit_tests {
 
     #[test]
     fn bitmask_tail_bits_clean() {
-        // 65 rows â€” two words; tail must not bleed into unset bits
+        // 65 rows â€" two words; tail must not bleed into unset bits
         let m = BitMask::all_true(65);
         assert_eq!(m.count_ones(), 65);
         assert_eq!(m.words.len(), 2);
@@ -3857,7 +4696,7 @@ mod phase10_unit_tests {
 }
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-// Phase 13â€“16: Tidy Completion
+// Phase 13â€"16: Tidy Completion
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 //
 // Spec-Lock Table (invariants that tests must not regress):
@@ -3897,15 +4736,15 @@ mod phase10_unit_tests {
 // | across expansion order        | Stable column iteration (projection order).
 // | across generated names        | "{col}_{fn_name}" or user template. |
 // | across name collision         | TidyError::DuplicateColumn. |
-// | join type validation          | Comparable types only (Intâ†”Int, Floatâ†”Float,
-// |                               | Strâ†”Str, Boolâ†”Bool, Intâ†”Float widened).
+// | join type validation          | Comparable types only (Intâ†"Int, Floatâ†"Float,
+// |                               | Strâ†"Str, Boolâ†"Bool, Intâ†"Float widened).
 // |                               | TidyError::TypeMismatch otherwise. |
 // | join suffix handling          | Default ".x"/".y"; user may override. |
 // | right_join / full_join        | Defined; row order: see semantics section. |
 // | group perf upgrade            | First-occurrence order preserved; identical
 // |                               | output to Phase 11 implementation. |
 
-// â”€â”€ New TidyError variants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ New TidyError variants â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 impl TidyError {
     /// Construct a schema mismatch error.
@@ -3929,7 +4768,7 @@ impl TidyError {
     }
 }
 
-// â”€â”€ Nullable column layer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Nullable column layer â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// A nullable column: values buffer + validity bitmap.
 ///
@@ -3996,7 +4835,7 @@ impl<T: Clone + Default> NullableColumn<T> {
 /// A typed nullable column variant stored in a DataFrame column slot.
 ///
 /// Phase 13-16 does not replace `Column` (which has no nulls) with `NullCol`
-/// everywhere â€” that would be a breaking change across the whole codebase.
+/// everywhere â€" that would be a breaking change across the whole codebase.
 /// Instead, `NullCol` is used as the result type of operations that can
 /// introduce nulls (left_join fills, pivot_wider missing combinations,
 /// bind_rows on mismatched schemas, full_join unmatched rows).
@@ -4206,7 +5045,7 @@ impl Default for NullableFrame {
     fn default() -> Self { Self::new() }
 }
 
-// â”€â”€ Helpers for nullable-aware gather â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Helpers for nullable-aware gather â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// Gather column rows with optional indices (None â†’ null).
 /// Used in left/right/full join output where some rows have no match.
@@ -4281,7 +5120,7 @@ fn gather_column_nullable_null(col: &Column, indices: &[Option<usize>]) -> NullC
     }
 }
 
-// â”€â”€ Across support types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Across support types â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// A scalar transformation function for `across()`.
 ///
@@ -4342,7 +5181,7 @@ impl AcrossSpec {
     }
 }
 
-// â”€â”€ Join maturity types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Join maturity types â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// Join suffix options for handling column name collisions in inner/left/right/full joins.
 #[derive(Debug, Clone)]
@@ -4363,7 +5202,7 @@ impl JoinSuffix {
     }
 }
 
-// â”€â”€ Column type comparison for join validation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Column type comparison for join validation â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// Check whether two Column types are join-compatible.
 /// Int and Float are mutually compatible (numeric widening).
@@ -4379,11 +5218,11 @@ fn join_types_compatible(left: &Column, right: &Column) -> bool {
     }
 }
 
-// â”€â”€ Phase 13-16 TidyView extensions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Phase 13-16 TidyView extensions â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 impl TidyView {
 
-    // â”€â”€ pivot_longer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ pivot_longer â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Pivot selected columns from wide to long format.
     ///
@@ -4565,7 +5404,7 @@ impl TidyView {
         Ok(TidyFrame::from_df(df))
     }
 
-    // â”€â”€ pivot_wider â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ pivot_wider â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Pivot long-format data to wide format.
     ///
@@ -4688,7 +5527,7 @@ impl TidyView {
         Ok(NullableFrame { columns: out_cols })
     }
 
-    // â”€â”€ rename â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ rename â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Rename columns: `renames` is a slice of `(old_name, new_name)`.
     ///
@@ -4735,7 +5574,7 @@ impl TidyView {
         })
     }
 
-    // â”€â”€ relocate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ relocate â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Reorder columns so that `cols` appear at position `before` or `after`
     /// another column, or at the front/back.
@@ -4818,7 +5657,7 @@ impl TidyView {
         })
     }
 
-    // â”€â”€ drop_cols â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ drop_cols â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Drop specified columns from the view (select-minus semantics).
     ///
@@ -4842,7 +5681,7 @@ impl TidyView {
         self.select(&keep)
     }
 
-    // â”€â”€ bind_rows â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ bind_rows â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Concatenate rows from `other` onto `self` (strict schema match).
     ///
@@ -4884,7 +5723,7 @@ impl TidyView {
         Ok(TidyFrame::from_df(df))
     }
 
-    // â”€â”€ bind_cols â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ bind_cols â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Concatenate columns from `other` onto `self` (strict row count match).
     ///
@@ -4932,7 +5771,7 @@ impl TidyView {
         Ok(TidyFrame::from_df(df))
     }
 
-    // â”€â”€ mutate_across â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ mutate_across â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Apply a transformation across multiple columns, adding/replacing each
     /// with a generated name `{col}_{fn}` (or a user-specified template).
@@ -4978,7 +5817,7 @@ impl TidyView {
         Ok(TidyFrame::from_df(df))
     }
 
-    // â”€â”€ right_join â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ right_join â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Right join: all rows from `right`, matched rows from `self` (left).
     ///
@@ -5000,7 +5839,7 @@ impl TidyView {
         build_right_join_frame(self, right, &left_rows_opt, &right_rows, on, suffix)
     }
 
-    // â”€â”€ full_join â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ full_join â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Full outer join: all rows from both sides; null-fill for unmatched.
     ///
@@ -5015,7 +5854,7 @@ impl TidyView {
         build_full_join_frame(self, right, on, suffix)
     }
 
-    // â”€â”€ inner_join_typed (join maturity upgrade) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ inner_join_typed (join maturity upgrade) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Inner join with type validation and collision suffix support.
     ///
@@ -5033,7 +5872,7 @@ impl TidyView {
         build_join_frame_with_suffix(self, right, &left_rows, &right_rows, on, suffix, false)
     }
 
-    // â”€â”€ left_join_typed (join maturity upgrade) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ left_join_typed (join maturity upgrade) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Left join with type validation and collision suffix support.
     pub fn left_join_typed(
@@ -5049,7 +5888,7 @@ impl TidyView {
     }
 }
 
-// â”€â”€ Position enum for relocate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Position enum for relocate â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// Position specifier for `TidyView::relocate`.
 pub enum RelocatePos<'a> {
@@ -5063,7 +5902,7 @@ pub enum RelocatePos<'a> {
     After(&'a str),
 }
 
-// â”€â”€ Column concatenation helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Column concatenation helper â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 fn concat_columns(
     left: &Column,
@@ -5109,7 +5948,7 @@ fn concat_columns(
     }
 }
 
-// â”€â”€ Join key type validation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Join key type validation â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 fn validate_join_key_types(
     left: &TidyView,
@@ -5128,7 +5967,7 @@ fn validate_join_key_types(
     Ok(())
 }
 
-// â”€â”€ Join frames with suffix collision handling â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Join frames with suffix collision handling â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 fn build_join_frame_with_suffix(
     left: &TidyView,
@@ -5248,7 +6087,7 @@ fn build_right_join_frame(
 
     let mut columns: Vec<(String, NullCol)> = Vec::new();
 
-    // Left projected columns (nullable â€” unmatched = null)
+    // Left projected columns (nullable â€" unmatched = null)
     for &ci in left.proj.indices() {
         let (name, col) = &left.base.columns[ci];
         if left_key_names.contains(name.as_str()) { continue; }
@@ -5375,7 +6214,7 @@ fn build_full_join_frame(
     Ok(NullableFrame { columns })
 }
 
-// â”€â”€ GroupedTidyView: mutate_across + summarise_across â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ GroupedTidyView: mutate_across + summarise_across â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 impl GroupedTidyView {
 
@@ -5403,7 +6242,7 @@ impl GroupedTidyView {
         let key_names = &self.index.key_names;
         let mut out_cols: Vec<(String, Column)> = Vec::new();
 
-        // Key columns (String typed â€” group key values)
+        // Key columns (String typed â€" group key values)
         for ki in 0..key_names.len() {
             let col_vals: Vec<String> = self.index.groups.iter()
                 .map(|g| g.key_values[ki].clone())
@@ -5454,7 +6293,7 @@ impl GroupedTidyView {
     }
 }
 
-// â”€â”€ Simple IndexMap for mutate_across column merging â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Simple IndexMap for mutate_across column merging â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 // We need ordered insertion with overwrite semantics. Rather than pulling in
 // a dependency, implement a minimal ordered map over (String, Column).
 
@@ -5489,7 +6328,7 @@ mod indexmap_simple {
     }
 }
 
-// â”€â”€ Group perf upgrade (deterministic hash accelerator) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Group perf upgrade (deterministic hash accelerator) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 //
 // The Phase 11 GroupIndex::build() uses a linear scan (Vec<(key, slot)>)
 // which is O(N Ã— G). For large N with small G, we add a hash-accelerated
@@ -5502,7 +6341,7 @@ mod indexmap_simple {
 // The BTreeMap is ONLY used for fast lookup; the output order is still
 // driven by first-occurrence of groups as they appear in the scan.
 //
-// This is a pure internal change â€” the external API and output semantics
+// This is a pure internal change â€" the external API and output semantics
 // are identical to Phase 11.
 
 impl GroupIndex {
@@ -5540,7 +6379,7 @@ impl GroupIndex {
     }
 }
 
-// â”€â”€ TidyView: group_by_fast (uses BTree-accelerated GroupIndex) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ TidyView: group_by_fast (uses BTree-accelerated GroupIndex) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 impl TidyView {
     /// Like `group_by` but uses the BTree-accelerated `GroupIndex::build_fast`.
@@ -5561,15 +6400,15 @@ impl TidyView {
     }
 }
 
-// â”€â”€ NoGC safe-builtin registrations (Phase 13â€“16) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ NoGC safe-builtin registrations (Phase 13â€"16) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 //
 // New safe (view/metadata-only, no column buffer alloc):
-//   tidy_rename          : builds new DataFrame with renamed cols â€” O(NÃ—K) clone
-//                          BUT this is a metadata rebuild, not a hot-path â€” listed as ALLOC
+//   tidy_rename          : builds new DataFrame with renamed cols â€" O(NÃ—K) clone
+//                          BUT this is a metadata rebuild, not a hot-path â€" listed as ALLOC
 //                          â†’ NOT @nogc safe (rebuilds base)
-//   tidy_relocate        : updates ProjectionMap only â€” O(K) â€” SAFE
-//   tidy_drop_cols       : updates ProjectionMap only â€” O(K) â€” SAFE
-//   tidy_group_by_fast   : BTree lookup + GroupIndex â€” no column alloc â€” SAFE
+//   tidy_relocate        : updates ProjectionMap only â€" O(K) â€" SAFE
+//   tidy_drop_cols       : updates ProjectionMap only â€" O(K) â€" SAFE
+//   tidy_group_by_fast   : BTree lookup + GroupIndex â€" no column alloc â€" SAFE
 //
 // New materialising (NOT @nogc safe):
 //   tidy_pivot_longer    : allocates new column buffers
@@ -5588,7 +6427,7 @@ impl TidyView {
 //   tidy_relocate, tidy_drop_cols, tidy_group_by_fast
 
 // ============================================================================
-// PHASE 17: CATEGORICAL FOUNDATIONS â€” fct_encode, fct_lump, fct_reorder,
+// PHASE 17: CATEGORICAL FOUNDATIONS â€" fct_encode, fct_lump, fct_reorder,
 //           fct_collapse, NullableFactor
 // ============================================================================
 //
@@ -5606,7 +6445,7 @@ impl TidyView {
 //         renamed "Other_" (iterated until unique).
 //  [S-6]  fct_reorder: stable sort (preserve first-occurrence within ties); NaN
 //         values in the numeric summary column sort LAST (same rule as arrange).
-//  [S-7]  fct_collapse: metadata-only â€” never rewrites data buffer; O(L) pass over
+//  [S-7]  fct_collapse: metadata-only â€" never rewrites data buffer; O(L) pass over
 //         levels Vec only.  Re-indexes in O(N) only when compacting dead indices.
 //  [S-8]  fct_collapse duplicate level output: if two OLD levels collapse to the
 //         SAME NEW name that new name appears once; index remapping is canonical.
@@ -5620,12 +6459,12 @@ impl TidyView {
 //         data buffer but bitmap bit is clear; any op that reads the data MUST check
 //         the bitmap first.
 
-// â”€â”€ FctColumn â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ FctColumn â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// A compact categorical column: stores u16 indices into a levels table.
 ///
 /// Invariant: `data[i] < levels.len()` for all i where bitmap is set.
-/// Null rows (in NullableFactor) may carry index 0 â€” callers must check bitmap.
+/// Null rows (in NullableFactor) may carry index 0 â€" callers must check bitmap.
 #[derive(Clone, Debug)]
 pub struct FctColumn {
     /// Mapping from index â†’ level string.  Order = first-occurrence of each string
@@ -5636,7 +6475,7 @@ pub struct FctColumn {
 }
 
 impl FctColumn {
-    // â”€â”€ Constructors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ Constructors â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Encode a string column into a FctColumn.
     ///
@@ -5646,7 +6485,7 @@ impl FctColumn {
         use std::collections::BTreeMap;
         let mut levels: Vec<String> = Vec::new();
         // BTreeMap for O(log L) lookup; key ordering is string-lexicographic
-        // (deterministic across runs â€” no hash randomness).
+        // (deterministic across runs â€" no hash randomness).
         // First-occurrence ORDER is maintained separately by `levels` Vec.
         let mut level_map: BTreeMap<String, u16> = BTreeMap::new();
         let mut data: Vec<u16> = Vec::with_capacity(strings.len());
@@ -5689,7 +6528,7 @@ impl FctColumn {
         Self::encode(&strings)
     }
 
-    // â”€â”€ Shape â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ Shape â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     pub fn nrows(&self) -> usize { self.data.len() }
     pub fn nlevels(&self) -> usize { self.levels.len() }
@@ -5699,7 +6538,7 @@ impl FctColumn {
         &self.levels[self.data[i] as usize]
     }
 
-    // â”€â”€ fct_lump â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ fct_lump â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Lump all but the top-`n` most frequent levels into "Other".
     ///
@@ -5751,7 +6590,7 @@ impl FctColumn {
         Ok(FctColumn { levels: new_levels, data: new_data })
     }
 
-    // â”€â”€ fct_reorder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ fct_reorder â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Reorder levels by a numeric summary column from the same frame.
     ///
@@ -5838,7 +6677,7 @@ impl FctColumn {
         self.fct_reorder(&means, descending)
     }
 
-    // â”€â”€ fct_collapse â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ fct_collapse â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Collapse multiple old levels into single new level names.
     ///
@@ -5896,7 +6735,7 @@ impl FctColumn {
         Ok(FctColumn { levels: new_levels, data: new_data })
     }
 
-    // â”€â”€ Materialise back to Column::Str â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ Materialise back to Column::Str â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Decode all rows back into a `Column::Str`.
     pub fn to_str_column(&self) -> Column {
@@ -5912,7 +6751,7 @@ impl FctColumn {
     }
 }
 
-// â”€â”€ TidyError extensions for Phase 17 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ TidyError extensions for Phase 17 â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 impl TidyError {
     pub fn capacity_exceeded(limit: usize, got: usize) -> Self {
@@ -5920,7 +6759,7 @@ impl TidyError {
     }
 }
 
-// â”€â”€ NullableFactor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ NullableFactor â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 /// A FctColumn with a validity bitmap.  Null cells have validity=false.
 /// Null is NOT a level; `data[i]` for a null row is 0 (sentinel, must not be used).
@@ -6010,7 +6849,7 @@ impl NullableFactor {
     }
 }
 
-// â”€â”€ TidyView: fct_encode integration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ TidyView: fct_encode integration â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 impl TidyView {
     /// Encode a string column in this view into an `FctColumn`.
@@ -6128,10 +6967,233 @@ pub fn one_hot_encode(levels: &[String], codes: &[u32]) -> (Vec<String>, Vec<Vec
     (names, columns)
 }
 
-// â”€â”€ Phase 17 NoGC audit notes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+#[cfg(test)]
+mod rolling_window_tests {
+    use super::*;
+
+    /// Helper: build a simple DataFrame with a single float column.
+    fn make_df(col_name: &str, vals: Vec<f64>) -> DataFrame {
+        DataFrame {
+            columns: vec![(col_name.to_string(), Column::Float(vals))],
+        }
+    }
+
+    #[test]
+    fn rolling_sum_basic() {
+        // [1,2,3,4,5] with window=3
+        // Expected: [1, 3, 6, 9, 12]
+        let df = make_df("x", vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+        let expr = DExpr::RollingSum("x".into(), 3);
+        let col = eval_expr_column(&df, &expr, 5).unwrap();
+        match col {
+            Column::Float(v) => {
+                assert_eq!(v.len(), 5);
+                assert!((v[0] - 1.0).abs() < 1e-12);
+                assert!((v[1] - 3.0).abs() < 1e-12);
+                assert!((v[2] - 6.0).abs() < 1e-12);
+                assert!((v[3] - 9.0).abs() < 1e-12);
+                assert!((v[4] - 12.0).abs() < 1e-12);
+            }
+            _ => panic!("expected Float column"),
+        }
+    }
+
+    #[test]
+    fn rolling_mean_basic() {
+        // [1,2,3,4,5] with window=3
+        // Expected: [1/1, 3/2, 6/3, 9/3, 12/3] = [1, 1.5, 2, 3, 4]
+        let df = make_df("x", vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+        let expr = DExpr::RollingMean("x".into(), 3);
+        let col = eval_expr_column(&df, &expr, 5).unwrap();
+        match col {
+            Column::Float(v) => {
+                assert_eq!(v.len(), 5);
+                assert!((v[0] - 1.0).abs() < 1e-12);
+                assert!((v[1] - 1.5).abs() < 1e-12);
+                assert!((v[2] - 2.0).abs() < 1e-12);
+                assert!((v[3] - 3.0).abs() < 1e-12);
+                assert!((v[4] - 4.0).abs() < 1e-12);
+            }
+            _ => panic!("expected Float column"),
+        }
+    }
+
+    #[test]
+    fn rolling_min_basic() {
+        // [5,3,4,1,2] with window=3
+        // Expected: [5, 3, 3, 1, 1]
+        let df = make_df("x", vec![5.0, 3.0, 4.0, 1.0, 2.0]);
+        let expr = DExpr::RollingMin("x".into(), 3);
+        let col = eval_expr_column(&df, &expr, 5).unwrap();
+        match col {
+            Column::Float(v) => {
+                assert_eq!(v.len(), 5);
+                assert!((v[0] - 5.0).abs() < 1e-12);
+                assert!((v[1] - 3.0).abs() < 1e-12);
+                assert!((v[2] - 3.0).abs() < 1e-12);
+                assert!((v[3] - 1.0).abs() < 1e-12);
+                assert!((v[4] - 1.0).abs() < 1e-12);
+            }
+            _ => panic!("expected Float column"),
+        }
+    }
+
+    #[test]
+    fn rolling_max_basic() {
+        // [1,5,3,2,4] with window=3
+        // Expected: [1, 5, 5, 5, 4]
+        let df = make_df("x", vec![1.0, 5.0, 3.0, 2.0, 4.0]);
+        let expr = DExpr::RollingMax("x".into(), 3);
+        let col = eval_expr_column(&df, &expr, 5).unwrap();
+        match col {
+            Column::Float(v) => {
+                assert_eq!(v.len(), 5);
+                assert!((v[0] - 1.0).abs() < 1e-12);
+                assert!((v[1] - 5.0).abs() < 1e-12);
+                assert!((v[2] - 5.0).abs() < 1e-12);
+                assert!((v[3] - 5.0).abs() < 1e-12);
+                assert!((v[4] - 4.0).abs() < 1e-12);
+            }
+            _ => panic!("expected Float column"),
+        }
+    }
+
+    #[test]
+    fn rolling_var_basic() {
+        // [2,4,6,8] with window=3
+        let df = make_df("x", vec![2.0, 4.0, 6.0, 8.0]);
+        let expr = DExpr::RollingVar("x".into(), 3);
+        let col = eval_expr_column(&df, &expr, 4).unwrap();
+        match col {
+            Column::Float(v) => {
+                assert_eq!(v.len(), 4);
+                // i=0: count=1, var=0
+                assert!((v[0] - 0.0).abs() < 1e-12);
+                // i=1: count=2, sample var of [2,4] = 2.0
+                assert!((v[1] - 2.0).abs() < 1e-10);
+                // i=2: count=3, sample var of [2,4,6] = 4.0
+                assert!((v[2] - 4.0).abs() < 1e-10);
+                // i=3: count=3, sample var of [4,6,8] = 4.0
+                assert!((v[3] - 4.0).abs() < 1e-10);
+            }
+            _ => panic!("expected Float column"),
+        }
+    }
+
+    #[test]
+    fn rolling_sd_basic() {
+        let df = make_df("x", vec![2.0, 4.0, 6.0, 8.0]);
+        let expr = DExpr::RollingSd("x".into(), 3);
+        let col = eval_expr_column(&df, &expr, 4).unwrap();
+        match col {
+            Column::Float(v) => {
+                assert_eq!(v.len(), 4);
+                assert!((v[0] - 0.0).abs() < 1e-12);
+                assert!((v[1] - 2.0_f64.sqrt()).abs() < 1e-10);
+                assert!((v[2] - 2.0).abs() < 1e-10);
+                assert!((v[3] - 2.0).abs() < 1e-10);
+            }
+            _ => panic!("expected Float column"),
+        }
+    }
+
+    #[test]
+    fn rolling_window_larger_than_data() {
+        let df = make_df("x", vec![1.0, 2.0, 3.0]);
+        let expr = DExpr::RollingSum("x".into(), 10);
+        let col = eval_expr_column(&df, &expr, 3).unwrap();
+        match col {
+            Column::Float(v) => {
+                assert_eq!(v.len(), 3);
+                assert!((v[0] - 1.0).abs() < 1e-12);
+                assert!((v[1] - 3.0).abs() < 1e-12);
+                assert!((v[2] - 6.0).abs() < 1e-12);
+            }
+            _ => panic!("expected Float column"),
+        }
+    }
+
+    #[test]
+    fn rolling_window_of_one() {
+        let df = make_df("x", vec![3.0, 1.0, 4.0, 1.0, 5.0]);
+        let expr_min = DExpr::RollingMin("x".into(), 1);
+        let expr_max = DExpr::RollingMax("x".into(), 1);
+        let col_min = eval_expr_column(&df, &expr_min, 5).unwrap();
+        let col_max = eval_expr_column(&df, &expr_max, 5).unwrap();
+        match (col_min, col_max) {
+            (Column::Float(mins), Column::Float(maxs)) => {
+                let expected = [3.0, 1.0, 4.0, 1.0, 5.0];
+                for i in 0..5 {
+                    assert!((mins[i] - expected[i]).abs() < 1e-12, "min[{}]", i);
+                    assert!((maxs[i] - expected[i]).abs() < 1e-12, "max[{}]", i);
+                }
+            }
+            _ => panic!("expected Float columns"),
+        }
+    }
+
+    #[test]
+    fn rolling_sum_with_nan() {
+        let df = make_df("x", vec![1.0, f64::NAN, 3.0, 4.0]);
+        let expr = DExpr::RollingSum("x".into(), 2);
+        let col = eval_expr_column(&df, &expr, 4).unwrap();
+        match col {
+            Column::Float(v) => {
+                assert_eq!(v.len(), 4);
+                assert!((v[0] - 1.0).abs() < 1e-12);
+                assert!(v[1].is_nan());
+                assert!(v[2].is_nan());
+                assert!(v[3].is_nan()); // NaN poisons Kahan accumulator
+            }
+            _ => panic!("expected Float column"),
+        }
+    }
+
+    #[test]
+    fn rolling_determinism() {
+        let df = make_df("x", vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
+        let expr = DExpr::RollingSum("x".into(), 4);
+        let mut runs: Vec<Vec<f64>> = Vec::new();
+        for _ in 0..3 {
+            let col = eval_expr_column(&df, &expr, 10).unwrap();
+            match col {
+                Column::Float(v) => runs.push(v),
+                _ => panic!("expected Float column"),
+            }
+        }
+        assert_eq!(runs[0], runs[1]);
+        assert_eq!(runs[1], runs[2]);
+    }
+
+    #[test]
+    fn rolling_display() {
+        let expr = DExpr::RollingSum("val".into(), 5);
+        assert_eq!(format!("{}", expr), "rolling_sum(\"val\", 5)");
+        let expr2 = DExpr::RollingMean("col".into(), 3);
+        assert_eq!(format!("{}", expr2), "rolling_mean(\"col\", 3)");
+    }
+
+    #[test]
+    fn rolling_collect_columns() {
+        let expr = DExpr::RollingSum("revenue".into(), 7);
+        let mut cols = Vec::new();
+        collect_expr_columns(&expr, &mut cols);
+        assert_eq!(cols, vec!["revenue".to_string()]);
+    }
+
+    #[test]
+    fn rolling_not_allowed_in_row_context() {
+        let df = make_df("x", vec![1.0, 2.0, 3.0]);
+        let expr = DExpr::RollingSum("x".into(), 2);
+        let result = eval_expr_row(&df, &expr, 0);
+        assert!(result.is_err());
+    }
+}
+
+// â"€â"€ Phase 17 NoGC audit notes â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 //
-// Safe (@nogc â€” metadata only, O(L) or O(N) over Rust-heap Vec only):
-//   fct_collapse    : rewrites levels Vec + remap data Vec â€” both are Rust heap,
+// Safe (@nogc â€" metadata only, O(L) or O(N) over Rust-heap Vec only):
+//   fct_collapse    : rewrites levels Vec + remap data Vec â€" both are Rust heap,
 //                     no GC heap involved.  SAFE.
 //
 // NOT safe (materialising, allocates new Rust heap buffers proportional to N or L):

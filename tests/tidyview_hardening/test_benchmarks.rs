@@ -2,6 +2,7 @@
 //! Tests correctness AND measures wall-clock time for key operations.
 
 use cjc_data::{Column, DataFrame, DExpr, TidyAgg, ArrangeKey};
+use cjc_data::lazy::LazyView;
 use std::time::Instant;
 
 /// Build a large DataFrame with N rows, 3 groups, and numeric columns.
@@ -509,4 +510,455 @@ fn bench_full_pipeline_1m() {
         elapsed
     );
     assert!(elapsed.as_millis() < 120_000); // generous for debug mode
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// OPTIMIZATION-SPECIFIC BENCHMARKS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── O1: Fast group_by with BTreeMap ─────────────────────────────────────
+
+#[test]
+fn bench_o1_group_by_5000_groups_500k() {
+    let df = make_many_groups_df(500_000, 5000);
+    let view = df.tidy();
+
+    let start = Instant::now();
+    let grouped = view.group_by(&["group"]).unwrap();
+    let result = grouped.summarise(&[
+        ("total", TidyAgg::Sum("value".into())),
+        ("cnt", TidyAgg::Count),
+    ]).unwrap();
+    let elapsed = start.elapsed();
+
+    let df_out = result.borrow();
+    assert_eq!(df_out.nrows(), 5000);
+
+    eprintln!("[bench_o1_group_5000g_500k] total: {:?}", elapsed);
+    assert!(elapsed.as_secs() < 120);
+}
+
+// ── O3: Columnar predicate evaluation ───────────────────────────────────
+
+#[test]
+fn bench_o3_columnar_filter_1m() {
+    let df = make_large_df(1_000_000);
+    let view = df.tidy();
+
+    let start = Instant::now();
+    let filtered = view.filter(&DExpr::BinOp {
+        op: cjc_data::DBinOp::Gt,
+        left: Box::new(DExpr::Col("value".into())),
+        right: Box::new(DExpr::LitFloat(500_000.0)),
+    }).unwrap();
+    let mat = filtered.materialize().unwrap();
+    let elapsed = start.elapsed();
+
+    assert!(mat.nrows() > 0);
+    assert!(mat.nrows() < 1_000_000);
+
+    eprintln!(
+        "[bench_o3_columnar_filter_1m] total: {:?}, rows: 1M -> {}",
+        elapsed, mat.nrows()
+    );
+    assert!(elapsed.as_secs() < 120);
+}
+
+#[test]
+fn bench_o3_compound_filter_and_500k() {
+    let df = make_large_df(500_000);
+    let view = df.tidy();
+
+    let pred = DExpr::BinOp {
+        op: cjc_data::DBinOp::And,
+        left: Box::new(DExpr::BinOp {
+            op: cjc_data::DBinOp::Gt,
+            left: Box::new(DExpr::Col("value".into())),
+            right: Box::new(DExpr::LitFloat(100_000.0)),
+        }),
+        right: Box::new(DExpr::BinOp {
+            op: cjc_data::DBinOp::Lt,
+            left: Box::new(DExpr::Col("id".into())),
+            right: Box::new(DExpr::LitInt(400_000)),
+        }),
+    };
+
+    let start = Instant::now();
+    let filtered = view.filter(&pred).unwrap();
+    let mat = filtered.materialize().unwrap();
+    let elapsed = start.elapsed();
+
+    assert!(mat.nrows() > 0);
+    eprintln!(
+        "[bench_o3_compound_and_500k] total: {:?}, rows: 500K -> {}",
+        elapsed, mat.nrows()
+    );
+    assert!(elapsed.as_secs() < 120);
+}
+
+// ── O5+O9: Fast segment aggregation + arena ─────────────────────────────
+
+#[test]
+fn bench_o5_fast_agg_median_sd_500k() {
+    let df = make_many_groups_df(500_000, 100);
+    let view = df.tidy();
+
+    let start = Instant::now();
+    let grouped = view.group_by(&["group"]).unwrap();
+    let result = grouped.summarise(&[
+        ("med", TidyAgg::Median("value".into())),
+        ("sd_val", TidyAgg::Sd("value".into())),
+        ("var_val", TidyAgg::Var("value".into())),
+        ("iqr_val", TidyAgg::Iqr("value".into())),
+    ]).unwrap();
+    let elapsed = start.elapsed();
+
+    let df_out = result.borrow();
+    assert_eq!(df_out.nrows(), 100);
+
+    eprintln!("[bench_o5_fast_agg_median_sd_500k] total: {:?}", elapsed);
+    assert!(elapsed.as_secs() < 120);
+}
+
+// ── O6: Join key caching ────────────────────────────────────────────────
+
+#[test]
+fn bench_o6_join_100k_x_1k() {
+    let mut lk = Vec::with_capacity(100_000);
+    let mut lv = Vec::with_capacity(100_000);
+    for i in 0..100_000usize {
+        lk.push(format!("k{}", i % 1000));
+        lv.push(i as f64);
+    }
+    let left = DataFrame::from_columns(vec![
+        ("key".into(), Column::Str(lk)),
+        ("lval".into(), Column::Float(lv)),
+    ]).unwrap();
+
+    let mut rk = Vec::with_capacity(1000);
+    let mut rv = Vec::with_capacity(1000);
+    for i in 0..1000usize {
+        rk.push(format!("k{}", i));
+        rv.push(i as f64 * 100.0);
+    }
+    let right = DataFrame::from_columns(vec![
+        ("key".into(), Column::Str(rk)),
+        ("rval".into(), Column::Float(rv)),
+    ]).unwrap();
+
+    let left_view = left.tidy();
+    let right_view = right.tidy();
+
+    let start = Instant::now();
+    let joined = left_view.inner_join(&right_view, &[("key", "key")]).unwrap();
+    let mat_frame = joined.borrow();
+    let elapsed = start.elapsed();
+
+    assert!(mat_frame.nrows() > 0);
+    eprintln!(
+        "[bench_o6_join_100k_x_1k] total: {:?}, result rows: {}",
+        elapsed, mat_frame.nrows()
+    );
+    assert!(elapsed.as_secs() < 120);
+}
+
+// ── O7: Vectorized DExpr ────────────────────────────────────────────────
+
+#[test]
+fn bench_o7_vectorized_mutate_500k() {
+    let df = make_large_df(500_000);
+    let view = df.tidy();
+
+    let expr = DExpr::BinOp {
+        op: cjc_data::DBinOp::Add,
+        left: Box::new(DExpr::BinOp {
+            op: cjc_data::DBinOp::Mul,
+            left: Box::new(DExpr::Col("value".into())),
+            right: Box::new(DExpr::LitFloat(2.0)),
+        }),
+        right: Box::new(DExpr::LitFloat(1.0)),
+    };
+
+    let start = Instant::now();
+    let result = view.mutate(&[("doubled", expr)]).unwrap();
+    let elapsed = start.elapsed();
+
+    let df_out = result.borrow();
+    assert_eq!(df_out.nrows(), 500_000);
+    assert!(df_out.get_column("doubled").is_some());
+
+    eprintln!("[bench_o7_vectorized_mutate_500k] total: {:?}", elapsed);
+    assert!(elapsed.as_secs() < 120);
+}
+
+// ── O8: BTreeSet distinct ───────────────────────────────────────────────
+
+#[test]
+fn bench_o8_distinct_500k_1000_unique() {
+    let df = make_many_groups_df(500_000, 1000);
+    let view = df.tidy();
+
+    let start = Instant::now();
+    let result = view.distinct(&["group"]).unwrap();
+    let mat = result.materialize().unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(mat.nrows(), 1000);
+    eprintln!("[bench_o8_distinct_500k_1000u] total: {:?}", elapsed);
+    assert!(elapsed.as_secs() < 120);
+}
+
+// ── SQL-1+2: Lazy plan with optimizer ───────────────────────────────────
+
+#[test]
+fn bench_lazy_pipeline_100k() {
+    let df = make_large_df(100_000);
+
+    let start = Instant::now();
+    let result = LazyView::from_df(df)
+        .filter(DExpr::BinOp {
+            op: cjc_data::DBinOp::Gt,
+            left: Box::new(DExpr::Col("value".into())),
+            right: Box::new(DExpr::LitFloat(25_000.0)),
+        })
+        .select(vec!["group".into(), "value".into()])
+        .collect()
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    let df_out = result.borrow();
+    assert!(df_out.nrows() > 0);
+    assert_eq!(df_out.ncols(), 2);
+
+    eprintln!(
+        "[bench_lazy_pipeline_100k] filter->select: {:?}, rows: {}",
+        elapsed, df_out.nrows()
+    );
+    assert!(elapsed.as_secs() < 120);
+}
+
+#[test]
+fn bench_lazy_vs_eager_1m() {
+    let df1 = make_large_df(1_000_000);
+    let df2 = make_large_df(1_000_000);
+
+    // Eager path
+    let start_eager = Instant::now();
+    let view = df1.tidy();
+    let filtered = view.filter(&DExpr::BinOp {
+        op: cjc_data::DBinOp::Gt,
+        left: Box::new(DExpr::Col("value".into())),
+        right: Box::new(DExpr::LitFloat(500_000.0)),
+    }).unwrap();
+    let selected = filtered.select(&["group", "value"]).unwrap();
+    let _eager_result = selected.materialize().unwrap();
+    let elapsed_eager = start_eager.elapsed();
+
+    // Lazy path
+    let start_lazy = Instant::now();
+    let lazy_result = LazyView::from_df(df2)
+        .filter(DExpr::BinOp {
+            op: cjc_data::DBinOp::Gt,
+            left: Box::new(DExpr::Col("value".into())),
+            right: Box::new(DExpr::LitFloat(500_000.0)),
+        })
+        .select(vec!["group".into(), "value".into()])
+        .collect()
+        .unwrap();
+    let elapsed_lazy = start_lazy.elapsed();
+
+    let lazy_df = lazy_result.borrow();
+    assert!(lazy_df.nrows() > 0);
+
+    eprintln!(
+        "[bench_lazy_vs_eager_1m] eager: {:?}, lazy: {:?}, ratio: {:.2}x",
+        elapsed_eager, elapsed_lazy,
+        elapsed_eager.as_micros() as f64 / elapsed_lazy.as_micros().max(1) as f64
+    );
+}
+
+// ── SQL-3: Batch execution ──────────────────────────────────────────────
+
+#[test]
+fn bench_batch_vs_standard_500k() {
+    let df1 = make_large_df(500_000);
+    let df2 = make_large_df(500_000);
+
+    let start_std = Instant::now();
+    let std_result = LazyView::from_df(df1)
+        .filter(DExpr::BinOp {
+            op: cjc_data::DBinOp::Gt,
+            left: Box::new(DExpr::Col("value".into())),
+            right: Box::new(DExpr::LitFloat(250_000.0)),
+        })
+        .select(vec!["group".into(), "value".into()])
+        .collect()
+        .unwrap();
+    let elapsed_std = start_std.elapsed();
+
+    let start_batch = Instant::now();
+    let batch_result = LazyView::from_df(df2)
+        .filter(DExpr::BinOp {
+            op: cjc_data::DBinOp::Gt,
+            left: Box::new(DExpr::Col("value".into())),
+            right: Box::new(DExpr::LitFloat(250_000.0)),
+        })
+        .select(vec!["group".into(), "value".into()])
+        .collect_batched()
+        .unwrap();
+    let elapsed_batch = start_batch.elapsed();
+
+    let std_df = std_result.borrow();
+    let batch_df = batch_result.borrow();
+    assert_eq!(std_df.nrows(), batch_df.nrows());
+
+    eprintln!(
+        "[bench_batch_vs_standard_500k] standard: {:?}, batched: {:?}, ratio: {:.2}x",
+        elapsed_std, elapsed_batch,
+        elapsed_std.as_micros() as f64 / elapsed_batch.as_micros().max(1) as f64
+    );
+}
+
+// ── SQL-4+5: Zone maps + sorted column detection ────────────────────────
+
+#[test]
+fn bench_zone_maps_1m() {
+    use cjc_data::column_meta::DataFrameStats;
+
+    let df = make_large_df(1_000_000);
+
+    let start = Instant::now();
+    let stats = DataFrameStats::compute(&df);
+    let elapsed_compute = start.elapsed();
+
+    let val_stats = stats.get("value").unwrap();
+    assert!(!val_stats.can_skip_gt(0.0));
+    assert!(val_stats.can_skip_gt(2_000_000.0));
+
+    let id_stats = stats.get("id").unwrap();
+    assert!(id_stats.sorted_asc, "id column should be detected as sorted ascending");
+
+    eprintln!(
+        "[bench_zone_maps_1m] compute stats for 1M rows: {:?}",
+        elapsed_compute
+    );
+    assert!(elapsed_compute.as_secs() < 120);
+}
+
+// ── SQL-6: Rolling window aggregation ───────────────────────────────────
+
+#[test]
+fn bench_rolling_sum_500k() {
+    let df = make_large_df(500_000);
+    let view = df.tidy();
+
+    let start = Instant::now();
+    let result = view.mutate(&[
+        ("roll_sum", DExpr::RollingSum("value".into(), 100)),
+    ]).unwrap();
+    let elapsed = start.elapsed();
+
+    let df_out = result.borrow();
+    assert_eq!(df_out.nrows(), 500_000);
+    assert!(df_out.get_column("roll_sum").is_some());
+
+    eprintln!("[bench_rolling_sum_500k_w100] total: {:?}", elapsed);
+    assert!(elapsed.as_secs() < 120);
+}
+
+#[test]
+fn bench_rolling_min_max_500k() {
+    let df = make_large_df(500_000);
+    let view = df.tidy();
+
+    let start = Instant::now();
+    let result = view.mutate(&[
+        ("roll_min", DExpr::RollingMin("value".into(), 50)),
+        ("roll_max", DExpr::RollingMax("value".into(), 50)),
+    ]).unwrap();
+    let elapsed = start.elapsed();
+
+    let df_out = result.borrow();
+    assert_eq!(df_out.nrows(), 500_000);
+
+    eprintln!("[bench_rolling_min_max_500k_w50] total: {:?}", elapsed);
+    assert!(elapsed.as_secs() < 120);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EXTREME SCALE BENCHMARKS (5M rows)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn bench_extreme_filter_5m() {
+    let df = make_large_df(5_000_000);
+    let view = df.tidy();
+
+    let start = Instant::now();
+    let filtered = view.filter(&DExpr::BinOp {
+        op: cjc_data::DBinOp::Gt,
+        left: Box::new(DExpr::Col("value".into())),
+        right: Box::new(DExpr::LitFloat(2_750_000.0)),
+    }).unwrap();
+    let mat = filtered.materialize().unwrap();
+    let elapsed = start.elapsed();
+
+    assert!(mat.nrows() > 0);
+    eprintln!(
+        "[bench_extreme_filter_5m] total: {:?}, rows: 5M -> {}",
+        elapsed, mat.nrows()
+    );
+    assert!(elapsed.as_secs() < 300);
+}
+
+#[test]
+fn bench_extreme_group_5m_1000g() {
+    let df = make_many_groups_df(5_000_000, 1000);
+    let view = df.tidy();
+
+    let start = Instant::now();
+    let grouped = view.group_by(&["group"]).unwrap();
+    let result = grouped.summarise(&[
+        ("total", TidyAgg::Sum("value".into())),
+        ("avg", TidyAgg::Mean("value".into())),
+        ("cnt", TidyAgg::Count),
+    ]).unwrap();
+    let elapsed = start.elapsed();
+
+    let df_out = result.borrow();
+    assert_eq!(df_out.nrows(), 1000);
+
+    eprintln!("[bench_extreme_group_5m_1000g] total: {:?}", elapsed);
+    assert!(elapsed.as_secs() < 300);
+}
+
+#[test]
+fn bench_extreme_full_pipeline_5m() {
+    let df = make_large_df(5_000_000);
+    let view = df.tidy();
+
+    let start = Instant::now();
+    let filtered = view.filter(&DExpr::BinOp {
+        op: cjc_data::DBinOp::Gt,
+        left: Box::new(DExpr::Col("value".into())),
+        right: Box::new(DExpr::LitFloat(1_000_000.0)),
+    }).unwrap();
+    let mat = filtered.materialize().unwrap();
+    let view2 = mat.tidy();
+    let grouped = view2.group_by(&["group"]).unwrap();
+    let result = grouped.summarise(&[
+        ("total", TidyAgg::Sum("value".into())),
+        ("avg", TidyAgg::Mean("value".into())),
+        ("cnt", TidyAgg::Count),
+    ]).unwrap();
+    let elapsed = start.elapsed();
+
+    let df_out = result.borrow();
+    assert_eq!(df_out.nrows(), 3);
+
+    eprintln!(
+        "[bench_extreme_pipeline_5m] filter->group->summarise: {:?}",
+        elapsed
+    );
+    assert!(elapsed.as_secs() < 300);
 }
