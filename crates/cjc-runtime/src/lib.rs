@@ -57,6 +57,8 @@ pub mod optimize;
 pub mod clustering;
 pub mod tensor_dtype;
 pub mod timeseries;
+pub mod integrate;
+pub mod differentiate;
 
 // --- Re-exports for backward compatibility ---
 // All downstream crates that were doing `use cjc_runtime::Tensor` etc. continue to work.

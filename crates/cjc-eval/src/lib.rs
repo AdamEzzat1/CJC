@@ -1653,6 +1653,15 @@ impl Interpreter {
                 | "SparseCsr.matvec" | "SparseCsr.to_dense" | "SparseCoo.to_csr"
                 // v0.1: Broadcasting builtins
                 | "broadcast" | "broadcast2"
+                // Phase 2 Beta Hardening: I/O & Map builtins
+                | "args" | "getenv"
+                | "map_new" | "map_set" | "map_get" | "map_keys" | "map_values" | "map_contains"
+                // TidyView Phase 1: Data I/O
+                | "read_csv" | "write_csv"
+                | "dir_list" | "path_join"
+                // TidyView Phase 5: Preprocessing builtins
+                | "fillna" | "is_not_null" | "interpolate_linear" | "coalesce"
+                | "cut" | "qcut" | "min_max_scale" | "robust_scale"
         ) || (self.libraries_enabled.contains("vizor") && matches!(name,
                 "vizor_plot" | "vizor_plot_xy"
         ))
@@ -1705,6 +1714,38 @@ impl Interpreter {
                     .map_err(EvalError::Runtime)?;
                 return Ok(Value::Int(idx));
             }
+            "sample_indices" => {
+                // sample_indices(n, k, replace, seed) — uses interpreter RNG
+                if args.len() < 2 || args.len() > 4 {
+                    return Err(EvalError::Runtime("sample_indices requires 2-4 arguments: n, k, [replace], [seed]".into()));
+                }
+                let n = match &args[0] {
+                    Value::Int(i) => *i as usize,
+                    _ => return Err(EvalError::Runtime("sample_indices: n must be an integer".into())),
+                };
+                let k = match &args[1] {
+                    Value::Int(i) => *i as usize,
+                    _ => return Err(EvalError::Runtime("sample_indices: k must be an integer".into())),
+                };
+                let replace = if args.len() >= 3 {
+                    match &args[2] {
+                        Value::Bool(b) => *b,
+                        _ => return Err(EvalError::Runtime("sample_indices: replace must be a bool".into())),
+                    }
+                } else { false };
+                let seed = if args.len() >= 4 {
+                    match &args[3] {
+                        Value::Int(i) => *i as u64,
+                        _ => return Err(EvalError::Runtime("sample_indices: seed must be an integer".into())),
+                    }
+                } else {
+                    self.rng.next_u64()
+                };
+                let indices = cjc_runtime::stats::sample_indices(n, k, replace, seed)
+                    .map_err(EvalError::Runtime)?;
+                let values: Vec<Value> = indices.into_iter().map(|i| Value::Int(i as i64)).collect();
+                return Ok(Value::Array(Rc::new(values)));
+            }
             "clock" => {
                 let elapsed = self.start_time.elapsed().as_secs_f64();
                 return Ok(Value::Float(elapsed));
@@ -1737,6 +1778,14 @@ impl Interpreter {
                 if line.ends_with('\n') { line.pop(); }
                 if line.ends_with('\r') { line.pop(); }
                 return Ok(Value::String(Rc::new(line)));
+            }
+            // Phase 2 Beta Hardening: args() — returns command-line arguments
+            "args" => {
+                let argv: Vec<Value> = std::env::args()
+                    .skip(1)
+                    .map(|s| Value::String(Rc::new(s)))
+                    .collect();
+                return Ok(Value::Array(Rc::new(argv)));
             }
             // ── CJC Snap builtins ─────────────────────────────────────
             "snap" => {
@@ -1848,6 +1897,93 @@ impl Interpreter {
                 let result = self.dispatch_call(&fn_name, fn_args)?;
                 self.memo_cache.insert(key_hash, result.clone());
                 return Ok(result);
+            }
+            // TidyView Phase 1: read_csv / write_csv
+            "read_csv" => {
+                if args.len() != 1 {
+                    return Err(EvalError::Runtime("read_csv requires 1 argument (path)".into()));
+                }
+                let path = match &args[0] {
+                    Value::String(s) => s.as_str().to_string(),
+                    _ => return Err(EvalError::Runtime("read_csv: argument must be String path".into())),
+                };
+                let bytes = std::fs::read(&path)
+                    .map_err(|e| EvalError::Runtime(format!("read_csv: {}", e)))?;
+                let df = CsvReader::new(CsvConfig::default())
+                    .parse(&bytes)
+                    .map_err(|e| EvalError::Runtime(format!("read_csv: {}", e)))?;
+                // Convert DataFrame to Value::Struct with column arrays
+                let mut fields = BTreeMap::new();
+                let mut col_names = Vec::new();
+                let nrows = if df.columns.is_empty() { 0 } else { df.columns[0].1.len() };
+                for (name, col) in &df.columns {
+                    col_names.push(Value::String(Rc::new(name.clone())));
+                    let arr: Vec<Value> = match col {
+                        Column::Int(v) => v.iter().map(|x| Value::Int(*x)).collect(),
+                        Column::Float(v) => v.iter().map(|x| Value::Float(*x)).collect(),
+                        Column::Str(v) => v.iter().map(|x| Value::String(Rc::new(x.clone()))).collect(),
+                        Column::Bool(v) => v.iter().map(|x| Value::Bool(*x)).collect(),
+                        Column::Categorical { levels, codes } => {
+                            codes.iter().map(|c| Value::String(Rc::new(levels[*c as usize].clone()))).collect()
+                        }
+                        Column::DateTime(v) => v.iter().map(|x| Value::Int(*x)).collect(),
+                    };
+                    fields.insert(name.clone(), Value::Array(Rc::new(arr)));
+                }
+                fields.insert("__nrows".to_string(), Value::Int(nrows as i64));
+                fields.insert("__columns".to_string(), Value::Array(Rc::new(col_names)));
+                return Ok(Value::Struct { name: "DataFrame".to_string(), fields });
+            }
+            "write_csv" => {
+                if args.len() != 2 {
+                    return Err(EvalError::Runtime("write_csv requires 2 arguments (path, data)".into()));
+                }
+                let path = match &args[0] {
+                    Value::String(s) => s.as_str().to_string(),
+                    _ => return Err(EvalError::Runtime("write_csv: first argument must be String path".into())),
+                };
+                let (col_names, fields) = match &args[1] {
+                    Value::Struct { fields, .. } => {
+                        let names = match fields.get("__columns") {
+                            Some(Value::Array(arr)) => arr.iter().map(|v| match v {
+                                Value::String(s) => s.as_str().to_string(),
+                                _ => format!("{}", v),
+                            }).collect::<Vec<_>>(),
+                            _ => {
+                                // Fallback: use field keys excluding __ prefixed
+                                fields.keys().filter(|k| !k.starts_with("__")).cloned().collect()
+                            }
+                        };
+                        (names, fields.clone())
+                    }
+                    _ => return Err(EvalError::Runtime("write_csv: second argument must be a DataFrame struct".into())),
+                };
+                let mut csv = String::new();
+                // Header
+                csv.push_str(&col_names.join(","));
+                csv.push('\n');
+                // Determine number of rows
+                let nrows = if let Some(Value::Array(arr)) = fields.get(col_names.first().unwrap_or(&String::new())) {
+                    arr.len()
+                } else { 0 };
+                // Data rows
+                for i in 0..nrows {
+                    for (ci, cname) in col_names.iter().enumerate() {
+                        if ci > 0 { csv.push(','); }
+                        if let Some(Value::Array(arr)) = fields.get(cname) {
+                            if i < arr.len() {
+                                match &arr[i] {
+                                    Value::String(s) => csv.push_str(s.as_str()),
+                                    v => csv.push_str(&format!("{}", v)),
+                                }
+                            }
+                        }
+                    }
+                    csv.push('\n');
+                }
+                std::fs::write(&path, &csv)
+                    .map_err(|e| EvalError::Runtime(format!("write_csv: {}", e)))?;
+                return Ok(Value::Bool(true));
             }
             _ => {}
         }

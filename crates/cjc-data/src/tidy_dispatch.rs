@@ -494,7 +494,8 @@ fn value_to_tidy_agg(v: &Value) -> Result<TidyAgg, String> {
                 .ok_or("TidyAgg struct missing 'kind' string")?;
             match kind {
                 "count" => Ok(TidyAgg::Count),
-                "sum" | "mean" | "min" | "max" | "first" | "last" => {
+                "sum" | "mean" | "min" | "max" | "first" | "last"
+                | "median" | "sd" | "var" | "n_distinct" | "iqr" => {
                     let col = fields
                         .get("col")
                         .and_then(|v| if let Value::String(s) = v { Some(s.as_ref().clone()) } else { None })
@@ -506,8 +507,28 @@ fn value_to_tidy_agg(v: &Value) -> Result<TidyAgg, String> {
                         "max" => Ok(TidyAgg::Max(col)),
                         "first" => Ok(TidyAgg::First(col)),
                         "last" => Ok(TidyAgg::Last(col)),
+                        "median" => Ok(TidyAgg::Median(col)),
+                        "sd" => Ok(TidyAgg::Sd(col)),
+                        "var" => Ok(TidyAgg::Var(col)),
+                        "n_distinct" => Ok(TidyAgg::NDistinct(col)),
+                        "iqr" => Ok(TidyAgg::Iqr(col)),
                         _ => unreachable!(),
                     }
+                }
+                "quantile" => {
+                    let col = fields
+                        .get("col")
+                        .and_then(|v| if let Value::String(s) = v { Some(s.as_ref().clone()) } else { None })
+                        .ok_or("TidyAgg quantile missing 'col' string")?;
+                    let p = fields
+                        .get("p")
+                        .and_then(|v| match v {
+                            Value::Float(f) => Some(*f),
+                            Value::Int(i) => Some(*i as f64),
+                            _ => None,
+                        })
+                        .ok_or("TidyAgg quantile missing 'p' float")?;
+                    Ok(TidyAgg::Quantile(col, p))
                 }
                 other => Err(format!("unknown TidyAgg kind: {other}")),
             }

@@ -347,6 +347,113 @@ pub fn diff(data: &[f64], periods: usize) -> Vec<f64> {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// ARIMA primitives
+// ---------------------------------------------------------------------------
+
+/// ARIMA(p,d,q) differencing step.
+///
+/// Applies first-order differencing `d` times to produce a stationary series.
+/// Returns the d-th order differenced series.
+/// After one round: result\[i\] = data\[i+1\] - data\[i\], length n-1.
+/// After d rounds: length n-d.
+pub fn arima_diff(data: &[f64], d: usize) -> Vec<f64> {
+    let mut current = data.to_vec();
+    for _ in 0..d {
+        if current.len() <= 1 {
+            return Vec::new();
+        }
+        current = diff(&current, 1);
+    }
+    current
+}
+
+/// Fit an AR(p) model using the Yule-Walker method.
+///
+/// 1. Compute autocorrelation r\[0..=p\] using `acf`.
+/// 2. Build the p x p Toeplitz matrix R where R\[i,j\] = r\[|i-j|\].
+/// 3. Solve R * phi = r\[1..=p\] using LU decomposition (via `Tensor::solve`).
+///
+/// Returns the AR coefficients phi\[1..p\] as a `Vec<f64>`.
+///
+/// **Determinism:** ACF uses `BinnedAccumulatorF64`; solve uses deterministic LU.
+pub fn ar_fit(data: &[f64], p: usize) -> Result<Vec<f64>, String> {
+    if p == 0 {
+        return Err("ar_fit: p must be > 0".into());
+    }
+    if data.len() <= p {
+        return Err(format!(
+            "ar_fit: need at least {} observations for AR({}), got {}",
+            p + 1,
+            p,
+            data.len()
+        ));
+    }
+
+    let r = acf(data, p);
+
+    // Build Toeplitz matrix R: R[i][j] = r[|i-j|]
+    let mut mat_data = vec![0.0f64; p * p];
+    for i in 0..p {
+        for j in 0..p {
+            let lag = if i >= j { i - j } else { j - i };
+            mat_data[i * p + j] = r[lag];
+        }
+    }
+
+    // RHS: r[1..=p]
+    let rhs: Vec<f64> = (1..=p).map(|k| r[k]).collect();
+
+    use crate::tensor::Tensor;
+    let r_matrix =
+        Tensor::from_vec(mat_data, &[p, p]).map_err(|e| format!("ar_fit: {e}"))?;
+    let r_vec = Tensor::from_vec(rhs, &[p]).map_err(|e| format!("ar_fit: {e}"))?;
+    let phi_tensor = r_matrix.solve(&r_vec).map_err(|e| format!("ar_fit: {e}"))?;
+
+    Ok(phi_tensor.to_vec())
+}
+
+/// AR forecast: given fitted AR coefficients and recent history, predict the
+/// next `steps` values.
+///
+/// `coeffs`: AR coefficients \[phi_1, phi_2, ..., phi_p\] (length p).
+/// `history`: recent observations, at least p values.
+/// `steps`: number of future values to predict.
+///
+/// Each prediction is: y_hat = sum(phi_i * y\[t-i\]) for i=1..p.
+/// Uses Kahan summation for determinism.
+pub fn ar_forecast(coeffs: &[f64], history: &[f64], steps: usize) -> Result<Vec<f64>, String> {
+    let p = coeffs.len();
+    if p == 0 {
+        return Err("ar_forecast: need at least one coefficient".into());
+    }
+    if history.len() < p {
+        return Err(format!(
+            "ar_forecast: need at least {} history values for AR({}), got {}",
+            p,
+            p,
+            history.len()
+        ));
+    }
+
+    // Work buffer: copy the tail of history + space for predictions
+    let mut buf: Vec<f64> = history.to_vec();
+    let mut predictions = Vec::with_capacity(steps);
+
+    for _ in 0..steps {
+        let n = buf.len();
+        let mut acc = BinnedAccumulatorF64::new();
+        for i in 0..p {
+            acc.add(coeffs[i] * buf[n - 1 - i]);
+        }
+        let val = acc.finalize();
+        predictions.push(val);
+        buf.push(val);
+    }
+
+    Ok(predictions)
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════

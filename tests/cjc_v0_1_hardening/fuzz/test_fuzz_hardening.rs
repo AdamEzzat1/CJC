@@ -35,6 +35,8 @@ fn fuzz_parser_utf8() {
 #[test]
 fn fuzz_mir_pipeline_no_crash() {
     bolero::check!().with_type::<Vec<u8>>().for_each(|input: &Vec<u8>| {
+        // Cap input size to avoid pathological allocations from random length prefixes
+        if input.len() > 4096 { return; }
         if let Ok(s) = std::str::from_utf8(input) {
             let s = s.to_string();
             let _ = panic::catch_unwind(|| {
@@ -51,6 +53,7 @@ fn fuzz_mir_pipeline_no_crash() {
 #[test]
 fn fuzz_eval_pipeline_no_crash() {
     bolero::check!().with_type::<Vec<u8>>().for_each(|input: &Vec<u8>| {
+        if input.len() > 4096 { return; }
         if let Ok(s) = std::str::from_utf8(input) {
             let s = s.to_string();
             let _ = panic::catch_unwind(|| {

@@ -102,6 +102,24 @@ pub enum ErrorCode {
     /// Missing field in struct literal
     E2015,
 
+    // ── Borrow/Ownership errors (E3xxx) ───────────────────────────────
+    /// Move of borrowed value
+    E3001,
+    /// Use after move
+    E3002,
+    /// Cannot borrow as mutable
+    E3003,
+    /// Cannot assign to immutable variable (ownership)
+    E3004,
+    /// Value does not live long enough
+    E3005,
+    /// Cannot move out of borrowed content
+    E3006,
+    /// Mutable borrow while immutable borrow exists
+    E3007,
+    /// Double mutable borrow
+    E3008,
+
     // ── Effect errors (E4xxx) ─────────────────────────────────────────
     /// GC operation in nogc context
     E4001,
@@ -219,6 +237,15 @@ impl ErrorCode {
             ErrorCode::E1011 => "E1011",
             ErrorCode::E1012 => "E1012",
             ErrorCode::E1013 => "E1013",
+            // Borrow/Ownership
+            ErrorCode::E3001 => "E3001",
+            ErrorCode::E3002 => "E3002",
+            ErrorCode::E3003 => "E3003",
+            ErrorCode::E3004 => "E3004",
+            ErrorCode::E3005 => "E3005",
+            ErrorCode::E3006 => "E3006",
+            ErrorCode::E3007 => "E3007",
+            ErrorCode::E3008 => "E3008",
             // Type
             ErrorCode::E2001 => "E2001",
             ErrorCode::E2002 => "E2002",
@@ -310,6 +337,15 @@ impl ErrorCode {
             ErrorCode::E1011 => "invalid top-level declaration",
             ErrorCode::E1012 => "empty match expression",
             ErrorCode::E1013 => "missing effect annotation after `/`",
+            // Borrow/Ownership
+            ErrorCode::E3001 => "move of borrowed value",
+            ErrorCode::E3002 => "use after move",
+            ErrorCode::E3003 => "cannot borrow as mutable",
+            ErrorCode::E3004 => "cannot assign to immutable variable",
+            ErrorCode::E3005 => "value does not live long enough",
+            ErrorCode::E3006 => "cannot move out of borrowed content",
+            ErrorCode::E3007 => "mutable borrow while immutable borrow exists",
+            ErrorCode::E3008 => "double mutable borrow",
             // Type
             ErrorCode::E2001 => "type mismatch",
             ErrorCode::E2002 => "cannot infer type",
@@ -444,10 +480,32 @@ mod tests {
         assert_eq!(ErrorCode::E0001.category(), "lexer");
         assert_eq!(ErrorCode::E1000.category(), "parser");
         assert_eq!(ErrorCode::E2001.category(), "type");
+        assert_eq!(ErrorCode::E3001.category(), "ownership");
         assert_eq!(ErrorCode::E4001.category(), "effect");
         assert_eq!(ErrorCode::E6001.category(), "generics/trait");
         assert_eq!(ErrorCode::E0601.category(), "snap");
         assert_eq!(ErrorCode::W0001.category(), "warning");
+    }
+
+    #[test]
+    fn test_borrow_ownership_codes() {
+        // Verify all E3xxx codes are defined and have correct properties
+        let borrow_codes = [
+            (ErrorCode::E3001, "E3001", "move of borrowed value"),
+            (ErrorCode::E3002, "E3002", "use after move"),
+            (ErrorCode::E3003, "E3003", "cannot borrow as mutable"),
+            (ErrorCode::E3004, "E3004", "cannot assign to immutable variable"),
+            (ErrorCode::E3005, "E3005", "value does not live long enough"),
+            (ErrorCode::E3006, "E3006", "cannot move out of borrowed content"),
+            (ErrorCode::E3007, "E3007", "mutable borrow while immutable borrow exists"),
+            (ErrorCode::E3008, "E3008", "double mutable borrow"),
+        ];
+        for (code, expected_str, expected_msg) in &borrow_codes {
+            assert_eq!(code.code_str(), *expected_str);
+            assert_eq!(code.message_template(), *expected_msg);
+            assert_eq!(code.severity(), Severity::Error);
+            assert_eq!(code.category(), "ownership");
+        }
     }
 
     #[test]

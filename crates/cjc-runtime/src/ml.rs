@@ -879,6 +879,258 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// LSTM cell forward pass
+// ---------------------------------------------------------------------------
+
+/// LSTM cell forward pass.
+///
+/// * `x`:      `[batch, input_size]`
+/// * `h_prev`: `[batch, hidden_size]`
+/// * `c_prev`: `[batch, hidden_size]`
+/// * `w_ih`:   `[4*hidden_size, input_size]`
+/// * `w_hh`:   `[4*hidden_size, hidden_size]`
+/// * `b_ih`:   `[4*hidden_size]`
+/// * `b_hh`:   `[4*hidden_size]`
+///
+/// Returns `(h_new, c_new)`.
+///
+/// Gate layout (PyTorch convention): i, f, g, o — each of size `hidden_size`.
+/// All reductions use Kahan summation via the existing `Tensor::linear` method.
+pub fn lstm_cell(
+    x: &Tensor,
+    h_prev: &Tensor,
+    c_prev: &Tensor,
+    w_ih: &Tensor,
+    w_hh: &Tensor,
+    b_ih: &Tensor,
+    b_hh: &Tensor,
+) -> Result<(Tensor, Tensor), String> {
+    let map_err = |e: crate::error::RuntimeError| format!("{e}");
+
+    // Validate shapes
+    if x.ndim() != 2 {
+        return Err("lstm_cell: x must be 2-D [batch, input_size]".into());
+    }
+    if h_prev.ndim() != 2 {
+        return Err("lstm_cell: h_prev must be 2-D [batch, hidden_size]".into());
+    }
+    if c_prev.ndim() != 2 {
+        return Err("lstm_cell: c_prev must be 2-D [batch, hidden_size]".into());
+    }
+    let hidden_size = h_prev.shape()[1];
+    if w_ih.ndim() != 2 || w_ih.shape()[0] != 4 * hidden_size {
+        return Err(format!(
+            "lstm_cell: w_ih must be [4*hidden_size, input_size], got {:?}",
+            w_ih.shape()
+        ));
+    }
+    if w_hh.ndim() != 2 || w_hh.shape()[0] != 4 * hidden_size {
+        return Err(format!(
+            "lstm_cell: w_hh must be [4*hidden_size, hidden_size], got {:?}",
+            w_hh.shape()
+        ));
+    }
+    if b_ih.len() != 4 * hidden_size {
+        return Err(format!(
+            "lstm_cell: b_ih must have length 4*hidden_size={}, got {}",
+            4 * hidden_size,
+            b_ih.len()
+        ));
+    }
+    if b_hh.len() != 4 * hidden_size {
+        return Err(format!(
+            "lstm_cell: b_hh must have length 4*hidden_size={}, got {}",
+            4 * hidden_size,
+            b_hh.len()
+        ));
+    }
+
+    // gates = x @ w_ih^T + b_ih + h_prev @ w_hh^T + b_hh
+    // Use linear which does: input @ weight^T + bias
+    let gates_ih = x.linear(w_ih, b_ih).map_err(map_err)?;
+    let gates_hh = h_prev.linear(w_hh, b_hh).map_err(map_err)?;
+    let gates = gates_ih.add(&gates_hh).map_err(map_err)?;
+
+    // gates is [batch, 4*hidden_size]. Split into 4 chunks along dim 1.
+    let chunks = gates.chunk(4, 1).map_err(map_err)?;
+    let gates_i = &chunks[0];
+    let gates_f = &chunks[1];
+    let gates_g = &chunks[2];
+    let gates_o = &chunks[3];
+
+    // Apply activations
+    let i = gates_i.sigmoid();
+    let f = gates_f.sigmoid();
+    let g = gates_g.tanh_activation();
+    let o = gates_o.sigmoid();
+
+    // c_new = f * c_prev + i * g
+    let fc = f.mul_elem(c_prev).map_err(map_err)?;
+    let ig = i.mul_elem(&g).map_err(map_err)?;
+    let c_new = fc.add(&ig).map_err(map_err)?;
+
+    // h_new = o * tanh(c_new)
+    let c_tanh = c_new.tanh_activation();
+    let h_new = o.mul_elem(&c_tanh).map_err(map_err)?;
+
+    Ok((h_new, c_new))
+}
+
+// ---------------------------------------------------------------------------
+// GRU cell forward pass
+// ---------------------------------------------------------------------------
+
+/// GRU cell forward pass.
+///
+/// * `x`:      `[batch, input_size]`
+/// * `h_prev`: `[batch, hidden_size]`
+/// * `w_ih`:   `[3*hidden_size, input_size]`
+/// * `w_hh`:   `[3*hidden_size, hidden_size]`
+/// * `b_ih`:   `[3*hidden_size]`
+/// * `b_hh`:   `[3*hidden_size]`
+///
+/// Returns `h_new` tensor of shape `[batch, hidden_size]`.
+///
+/// Gate layout: r (reset), z (update), n (new) — each of size `hidden_size`.
+/// All reductions use Kahan summation via the existing `Tensor::linear` method.
+pub fn gru_cell(
+    x: &Tensor,
+    h_prev: &Tensor,
+    w_ih: &Tensor,
+    w_hh: &Tensor,
+    b_ih: &Tensor,
+    b_hh: &Tensor,
+) -> Result<Tensor, String> {
+    let map_err = |e: crate::error::RuntimeError| format!("{e}");
+
+    // Validate shapes
+    if x.ndim() != 2 {
+        return Err("gru_cell: x must be 2-D [batch, input_size]".into());
+    }
+    if h_prev.ndim() != 2 {
+        return Err("gru_cell: h_prev must be 2-D [batch, hidden_size]".into());
+    }
+    let hidden_size = h_prev.shape()[1];
+    if w_ih.ndim() != 2 || w_ih.shape()[0] != 3 * hidden_size {
+        return Err(format!(
+            "gru_cell: w_ih must be [3*hidden_size, input_size], got {:?}",
+            w_ih.shape()
+        ));
+    }
+    if w_hh.ndim() != 2 || w_hh.shape()[0] != 3 * hidden_size {
+        return Err(format!(
+            "gru_cell: w_hh must be [3*hidden_size, hidden_size], got {:?}",
+            w_hh.shape()
+        ));
+    }
+    if b_ih.len() != 3 * hidden_size {
+        return Err(format!(
+            "gru_cell: b_ih must have length 3*hidden_size={}, got {}",
+            3 * hidden_size,
+            b_ih.len()
+        ));
+    }
+    if b_hh.len() != 3 * hidden_size {
+        return Err(format!(
+            "gru_cell: b_hh must have length 3*hidden_size={}, got {}",
+            3 * hidden_size,
+            b_hh.len()
+        ));
+    }
+
+    // gates_ih = x @ w_ih^T + b_ih   → [batch, 3*hidden_size]
+    // gates_hh = h_prev @ w_hh^T + b_hh → [batch, 3*hidden_size]
+    let gates_ih = x.linear(w_ih, b_ih).map_err(map_err)?;
+    let gates_hh = h_prev.linear(w_hh, b_hh).map_err(map_err)?;
+
+    // Split into r, z, n portions
+    let ih_chunks = gates_ih.chunk(3, 1).map_err(map_err)?;
+    let hh_chunks = gates_hh.chunk(3, 1).map_err(map_err)?;
+    let r_ih = &ih_chunks[0];
+    let z_ih = &ih_chunks[1];
+    let n_ih = &ih_chunks[2];
+    let r_hh = &hh_chunks[0];
+    let z_hh = &hh_chunks[1];
+    let n_hh = &hh_chunks[2];
+
+    // r = sigmoid(r_ih + r_hh)
+    let r = r_ih.add(r_hh).map_err(map_err)?.sigmoid();
+    // z = sigmoid(z_ih + z_hh)
+    let z = z_ih.add(z_hh).map_err(map_err)?.sigmoid();
+    // n = tanh(n_ih + r * n_hh)
+    let r_n_hh = r.mul_elem(n_hh).map_err(map_err)?;
+    let n = n_ih.add(&r_n_hh).map_err(map_err)?.tanh_activation();
+
+    // h_new = (1 - z) * n + z * h_prev
+    // Build (1 - z): negate z then add ones
+    let ones = Tensor::ones(z.shape());
+    let one_minus_z = ones.sub(&z).map_err(map_err)?;
+    let term1 = one_minus_z.mul_elem(&n).map_err(map_err)?;
+    let term2 = z.mul_elem(h_prev).map_err(map_err)?;
+    let h_new = term1.add(&term2).map_err(map_err)?;
+
+    Ok(h_new)
+}
+
+// ---------------------------------------------------------------------------
+// Multi-Head Attention
+// ---------------------------------------------------------------------------
+
+/// Multi-head attention: Q, K, V projections + scaled dot-product attention + output projection.
+///
+/// * `q`, `k`, `v`: `[batch, seq, model_dim]`
+/// * `w_q`, `w_k`, `w_v`, `w_o`: `[model_dim, model_dim]`
+/// * `b_q`, `b_k`, `b_v`, `b_o`: `[model_dim]`
+/// * `num_heads`: number of attention heads (`model_dim` must be divisible by `num_heads`)
+///
+/// Returns `[batch, seq, model_dim]`.
+///
+/// All reductions use Kahan summation via the existing `Tensor::linear` and
+/// `Tensor::scaled_dot_product_attention` methods.
+pub fn multi_head_attention(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    w_q: &Tensor,
+    w_k: &Tensor,
+    w_v: &Tensor,
+    w_o: &Tensor,
+    b_q: &Tensor,
+    b_k: &Tensor,
+    b_v: &Tensor,
+    b_o: &Tensor,
+    num_heads: usize,
+) -> Result<Tensor, String> {
+    let map_err = |e: crate::error::RuntimeError| format!("{e}");
+
+    if q.ndim() != 3 {
+        return Err("multi_head_attention: q must be 3-D [batch, seq, model_dim]".into());
+    }
+
+    // Linear projections: Q = q.linear(w_q, b_q), etc.
+    let q_proj = q.linear(w_q, b_q).map_err(map_err)?;
+    let k_proj = k.linear(w_k, b_k).map_err(map_err)?;
+    let v_proj = v.linear(w_v, b_v).map_err(map_err)?;
+
+    // Split heads: [batch, seq, model_dim] -> [batch, num_heads, seq, head_dim]
+    let q_heads = q_proj.split_heads(num_heads).map_err(map_err)?;
+    let k_heads = k_proj.split_heads(num_heads).map_err(map_err)?;
+    let v_heads = v_proj.split_heads(num_heads).map_err(map_err)?;
+
+    // Scaled dot-product attention: works on [..., seq, head_dim]
+    let attn = Tensor::scaled_dot_product_attention(&q_heads, &k_heads, &v_heads)
+        .map_err(map_err)?;
+
+    // Merge heads back: [batch, num_heads, seq, head_dim] -> [batch, seq, model_dim]
+    let merged = attn.merge_heads().map_err(map_err)?;
+
+    // Output projection
+    let output = merged.linear(w_o, b_o).map_err(map_err)?;
+
+    Ok(output)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

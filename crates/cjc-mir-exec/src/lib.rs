@@ -14,7 +14,8 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use cjc_ast::{BinOp, UnaryOp};
-use cjc_data::{Column, CsvConfig, CsvReader, DataFrame, StreamingCsvProcessor};
+use cjc_data::{Column, CsvConfig, CsvReader, DataFrame, StreamingCsvProcessor, TidyView};
+use cjc_data::tidy_dispatch;
 use cjc_mir::*;
 use cjc_repro::Rng;
 use cjc_runtime::{GcHeap, Tensor, Value};
@@ -462,7 +463,13 @@ impl MirExecutor {
                 }
                 Ok(Value::Array(Rc::new(vals)))
             }
-            MirExprKind::Col(name) => Ok(Value::String(Rc::new(format!("col:{name}")))),
+            MirExprKind::Col(name) => {
+                // Produce a DExpr struct identical to what eval's col() builtin creates
+                let mut fields = std::collections::BTreeMap::new();
+                fields.insert("kind".to_string(), Value::String(Rc::new("col".to_string())));
+                fields.insert("value".to_string(), Value::String(Rc::new(name.clone())));
+                Ok(Value::Struct { name: "DExpr".to_string(), fields })
+            }
             MirExprKind::Lambda { params, body } => {
                 let lambda_name = format!("<mir_lambda@{}>", params.len());
                 // Create a MIR function for the lambda
@@ -1360,6 +1367,15 @@ impl MirExecutor {
                 | "erf" | "erfc"
                 // Stationarity tests
                 | "adf_test" | "kpss_test" | "pp_test"
+                // Phase 2 Beta Hardening: I/O & Map builtins
+                | "args" | "getenv"
+                | "map_new" | "map_set" | "map_get" | "map_keys" | "map_values" | "map_contains"
+                // TidyView Phase 1: Data I/O
+                | "read_csv" | "write_csv"
+                | "dir_list" | "path_join"
+                // TidyView Phase 5: Preprocessing builtins
+                | "fillna" | "is_not_null" | "interpolate_linear" | "coalesce"
+                | "cut" | "qcut" | "min_max_scale" | "robust_scale"
         ) || (self.libraries_enabled.contains("vizor") && matches!(name,
                 "vizor_plot" | "vizor_plot_xy"
         ))
@@ -1498,6 +1514,14 @@ impl MirExecutor {
                 if line.ends_with('\r') { line.pop(); }
                 return Ok(Value::String(Rc::new(line)));
             }
+            // Phase 2 Beta Hardening: args() — returns command-line arguments
+            "args" => {
+                let argv: Vec<Value> = std::env::args()
+                    .skip(1)
+                    .map(|s| Value::String(Rc::new(s)))
+                    .collect();
+                return Ok(Value::Array(Rc::new(argv)));
+            }
             // ── CJC Snap builtins ─────────────────────────────────────
             "snap" => {
                 if args.len() != 1 {
@@ -1605,6 +1629,88 @@ impl MirExecutor {
                 let result = self.dispatch_call(&fn_name, fn_args)?;
                 self.memo_cache.insert(key_hash, result.clone());
                 return Ok(result);
+            }
+            // TidyView Phase 1: read_csv / write_csv
+            "read_csv" => {
+                if args.len() != 1 {
+                    return Err(MirExecError::Runtime("read_csv requires 1 argument (path)".into()));
+                }
+                let path = match &args[0] {
+                    Value::String(s) => s.as_str().to_string(),
+                    _ => return Err(MirExecError::Runtime("read_csv: argument must be String path".into())),
+                };
+                let bytes = std::fs::read(&path)
+                    .map_err(|e| MirExecError::Runtime(format!("read_csv: {}", e)))?;
+                let df = CsvReader::new(CsvConfig::default())
+                    .parse(&bytes)
+                    .map_err(|e| MirExecError::Runtime(format!("read_csv: {}", e)))?;
+                let mut fields = std::collections::BTreeMap::new();
+                let mut col_names = Vec::new();
+                let nrows = if df.columns.is_empty() { 0 } else { df.columns[0].1.len() };
+                for (name, col) in &df.columns {
+                    col_names.push(Value::String(Rc::new(name.clone())));
+                    let arr: Vec<Value> = match col {
+                        Column::Int(v) => v.iter().map(|x| Value::Int(*x)).collect(),
+                        Column::Float(v) => v.iter().map(|x| Value::Float(*x)).collect(),
+                        Column::Str(v) => v.iter().map(|x| Value::String(Rc::new(x.clone()))).collect(),
+                        Column::Bool(v) => v.iter().map(|x| Value::Bool(*x)).collect(),
+                        Column::Categorical { levels, codes } => {
+                            codes.iter().map(|c| Value::String(Rc::new(levels[*c as usize].clone()))).collect()
+                        }
+                        Column::DateTime(v) => v.iter().map(|x| Value::Int(*x)).collect(),
+                    };
+                    fields.insert(name.clone(), Value::Array(Rc::new(arr)));
+                }
+                fields.insert("__nrows".to_string(), Value::Int(nrows as i64));
+                fields.insert("__columns".to_string(), Value::Array(Rc::new(col_names)));
+                return Ok(Value::Struct { name: "DataFrame".to_string(), fields });
+            }
+            "write_csv" => {
+                if args.len() != 2 {
+                    return Err(MirExecError::Runtime("write_csv requires 2 arguments (path, data)".into()));
+                }
+                let path = match &args[0] {
+                    Value::String(s) => s.as_str().to_string(),
+                    _ => return Err(MirExecError::Runtime("write_csv: first argument must be String path".into())),
+                };
+                let (col_names, fields) = match &args[1] {
+                    Value::Struct { fields, .. } => {
+                        let names = match fields.get("__columns") {
+                            Some(Value::Array(arr)) => arr.iter().map(|v| match v {
+                                Value::String(s) => s.as_str().to_string(),
+                                _ => format!("{}", v),
+                            }).collect::<Vec<_>>(),
+                            _ => {
+                                fields.keys().filter(|k| !k.starts_with("__")).cloned().collect()
+                            }
+                        };
+                        (names, fields.clone())
+                    }
+                    _ => return Err(MirExecError::Runtime("write_csv: second argument must be a DataFrame struct".into())),
+                };
+                let mut csv = String::new();
+                csv.push_str(&col_names.join(","));
+                csv.push('\n');
+                let nrows = if let Some(Value::Array(arr)) = fields.get(col_names.first().unwrap_or(&String::new())) {
+                    arr.len()
+                } else { 0 };
+                for i in 0..nrows {
+                    for (ci, cname) in col_names.iter().enumerate() {
+                        if ci > 0 { csv.push(','); }
+                        if let Some(Value::Array(arr)) = fields.get(cname) {
+                            if i < arr.len() {
+                                match &arr[i] {
+                                    Value::String(s) => csv.push_str(s.as_str()),
+                                    v => csv.push_str(&format!("{}", v)),
+                                }
+                            }
+                        }
+                    }
+                    csv.push('\n');
+                }
+                std::fs::write(&path, &csv)
+                    .map_err(|e| MirExecError::Runtime(format!("write_csv: {}", e)))?;
+                return Ok(Value::Bool(true));
             }
             _ => {}
         }
@@ -2435,6 +2541,11 @@ impl MirExecutor {
                             MirExecError::Runtime(format!("column '{}' not found", col_name))
                         })
                     }
+                    "view" => {
+                        // df.view() → TidyView
+                        let df = rebuild_dataframe_from_struct(fields)?;
+                        Ok(tidy_dispatch::wrap_view(TidyView::from_df(df)))
+                    }
                     "to_tensor" => {
                         // df.to_tensor(["x", "y"]) → Tensor[nrows, ncols]
                         if args.len() != 1 {
@@ -2938,6 +3049,34 @@ impl MirExecutor {
                     )))
                 }
             }
+            // -- TidyView dispatch (all tidy verbs) --
+            (Value::TidyView(inner), _) => {
+                match tidy_dispatch::dispatch_tidy_method(inner, method, &args) {
+                    Ok(Some(Value::String(s))) if method == "print" => {
+                        let line = s.as_ref().clone();
+                        println!("{line}");
+                        self.output.push(line);
+                        Ok(Value::Void)
+                    }
+                    Ok(Some(val)) => Ok(val),
+                    Ok(None) => Err(MirExecError::Runtime(format!(
+                        "no method `{method}` on TidyView"
+                    ))),
+                    Err(msg) => Err(MirExecError::Runtime(msg)),
+                }
+            }
+
+            // -- GroupedTidyView dispatch --
+            (Value::GroupedTidyView(inner), _) => {
+                match tidy_dispatch::dispatch_grouped_method(inner, method, &args) {
+                    Ok(Some(val)) => Ok(val),
+                    Ok(None) => Err(MirExecError::Runtime(format!(
+                        "no method `{method}` on GroupedTidyView"
+                    ))),
+                    Err(msg) => Err(MirExecError::Runtime(msg)),
+                }
+            }
+
             _ => Err(MirExecError::Runtime(format!(
                 "no method `{method}` on type {}",
                 receiver.type_name()
@@ -4092,5 +4231,93 @@ mod tests {
         };
         let (_, executor) = run_program_with_executor(&program, 0).unwrap();
         assert_eq!(executor.output, vec!["hello world"]);
+    }
+}
+
+/// Rebuild a `DataFrame` from a Struct-encoded representation for the TidyView layer.
+fn rebuild_dataframe_from_struct(
+    fields: &std::collections::BTreeMap<String, Value>,
+) -> Result<DataFrame, MirExecError> {
+    let col_names: Vec<String> = match fields.get("__columns") {
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| {
+                if let Value::String(s) = v { Some(s.as_ref().clone()) } else { None }
+            })
+            .collect(),
+        _ => {
+            // fallback: use all non-meta keys
+            fields
+                .keys()
+                .filter(|k| !k.starts_with("__"))
+                .cloned()
+                .collect()
+        }
+    };
+    let mut df_cols: Vec<(String, Column)> = Vec::new();
+    for name in &col_names {
+        let arr_val = fields.get(name).ok_or_else(|| {
+            MirExecError::Runtime(format!("column '{}' not found in DataFrame struct", name))
+        })?;
+        let col = value_array_to_column(arr_val, name)?;
+        df_cols.push((name.clone(), col));
+    }
+    DataFrame::from_columns(df_cols)
+        .map_err(|e| MirExecError::Runtime(format!("DataFrame rebuild: {e}")))
+}
+
+/// Convert a `Value::Array` to a `Column`, inferring the type from the first element.
+fn value_array_to_column(v: &Value, col_name: &str) -> Result<Column, MirExecError> {
+    match v {
+        Value::Array(arr) => {
+            if arr.is_empty() {
+                return Ok(Column::Float(vec![]));
+            }
+            match &arr[0] {
+                Value::Float(_) | Value::Int(_) => {
+                    let mut floats = Vec::with_capacity(arr.len());
+                    for v in arr.iter() {
+                        match v {
+                            Value::Float(f) => floats.push(*f),
+                            Value::Int(i) => floats.push(*i as f64),
+                            _ => return Err(MirExecError::Runtime(format!(
+                                "column '{}' has mixed types", col_name
+                            ))),
+                        }
+                    }
+                    Ok(Column::Float(floats))
+                }
+                Value::String(_) => {
+                    let strs: Vec<String> = arr
+                        .iter()
+                        .map(|v| match v {
+                            Value::String(s) => Ok(s.as_ref().clone()),
+                            _ => Err(MirExecError::Runtime(format!(
+                                "column '{}' has mixed types", col_name
+                            ))),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(Column::Str(strs))
+                }
+                Value::Bool(_) => {
+                    let bools: Vec<bool> = arr
+                        .iter()
+                        .map(|v| match v {
+                            Value::Bool(b) => Ok(*b),
+                            _ => Err(MirExecError::Runtime(format!(
+                                "column '{}' has mixed types", col_name
+                            ))),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(Column::Bool(bools))
+                }
+                _ => Err(MirExecError::Runtime(format!(
+                    "unsupported column type for '{}'", col_name
+                ))),
+            }
+        }
+        _ => Err(MirExecError::Runtime(format!(
+            "column '{}' must be an array", col_name
+        ))),
     }
 }

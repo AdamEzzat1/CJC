@@ -734,6 +734,82 @@ pub fn minimize_nelder_mead(
 }
 
 // ===========================================================================
+// Constrained Optimization Utilities
+// ===========================================================================
+
+/// Penalty method for constrained optimization.
+///
+/// Given an objective function value `f_val` and an array of constraint
+/// violation values `constraint_violations` (where positive values indicate
+/// violation), returns the penalized objective:
+///
+///   f_val + penalty * sum(max(0, g_i)^2)
+///
+/// Uses Kahan summation for the penalty term accumulation.
+pub fn penalty_objective(f_val: f64, constraint_violations: &[f64], penalty: f64) -> f64 {
+    use cjc_repro::KahanAccumulatorF64;
+
+    let mut acc = KahanAccumulatorF64::new();
+    for &g in constraint_violations {
+        if g > 0.0 {
+            acc.add(g * g);
+        }
+    }
+    f_val + penalty * acc.finalize()
+}
+
+/// Project a point onto a box constraint [lower, upper].
+///
+/// For each component i, returns `x[i].clamp(lower[i], upper[i])`.
+/// All arrays must have the same length.
+pub fn project_box(x: &[f64], lower: &[f64], upper: &[f64]) -> Result<Vec<f64>, String> {
+    let n = x.len();
+    if lower.len() != n || upper.len() != n {
+        return Err(format!(
+            "project_box: all arrays must have same length, got x={}, lower={}, upper={}",
+            n,
+            lower.len(),
+            upper.len()
+        ));
+    }
+    let mut result = Vec::with_capacity(n);
+    for i in 0..n {
+        result.push(x[i].clamp(lower[i], upper[i]));
+    }
+    Ok(result)
+}
+
+/// Projected gradient descent step with box constraints.
+///
+/// Computes: project(x - lr * grad, lower, upper)
+///
+/// All arrays must have the same length.
+pub fn projected_gd_step(
+    x: &[f64],
+    grad: &[f64],
+    lr: f64,
+    lower: &[f64],
+    upper: &[f64],
+) -> Result<Vec<f64>, String> {
+    let n = x.len();
+    if grad.len() != n || lower.len() != n || upper.len() != n {
+        return Err(format!(
+            "projected_gd_step: all arrays must have same length, got x={}, grad={}, lower={}, upper={}",
+            n,
+            grad.len(),
+            lower.len(),
+            upper.len()
+        ));
+    }
+    let mut result = Vec::with_capacity(n);
+    for i in 0..n {
+        let step = x[i] - lr * grad[i];
+        result.push(step.clamp(lower[i], upper[i]));
+    }
+    Ok(result)
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 

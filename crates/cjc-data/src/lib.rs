@@ -15,6 +15,8 @@ use std::rc::Rc;
 mod csv;
 pub use csv::{CsvConfig, CsvReader, StreamingCsvProcessor};
 
+pub mod agg_kernels;
+pub mod dict_encoding;
 pub mod tidy_dispatch;
 
 // â”€â”€ Column Storage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -239,6 +241,26 @@ pub enum DExpr {
     Agg(AggFunc, Box<DExpr>),
     /// Count (no argument)
     Count,
+    /// Named function call: FnCall("log", vec![Col("x")])
+    FnCall(String, Vec<DExpr>),
+    /// Cumulative sum (window)
+    CumSum(Box<DExpr>),
+    /// Cumulative product (window)
+    CumProd(Box<DExpr>),
+    /// Cumulative max (window)
+    CumMax(Box<DExpr>),
+    /// Cumulative min (window)
+    CumMin(Box<DExpr>),
+    /// Lag(expr, k): value at row i-k, or NaN if i < k
+    Lag(Box<DExpr>, usize),
+    /// Lead(expr, k): value at row i+k, or NaN if i+k >= n
+    Lead(Box<DExpr>, usize),
+    /// Rank of values (1-based, average ties)
+    Rank(Box<DExpr>),
+    /// Dense rank (1-based, no gaps)
+    DenseRank(Box<DExpr>),
+    /// Row number (1-indexed sequential)
+    RowNumber,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,6 +324,19 @@ impl fmt::Display for DExpr {
                 write!(f, "{}({})", name, expr)
             }
             DExpr::Count => write!(f, "count()"),
+            DExpr::FnCall(name, args) => {
+                let args_str: Vec<String> = args.iter().map(|a| format!("{}", a)).collect();
+                write!(f, "{}({})", name, args_str.join(", "))
+            }
+            DExpr::CumSum(e) => write!(f, "cumsum({})", e),
+            DExpr::CumProd(e) => write!(f, "cumprod({})", e),
+            DExpr::CumMax(e) => write!(f, "cummax({})", e),
+            DExpr::CumMin(e) => write!(f, "cummin({})", e),
+            DExpr::Lag(e, k) => write!(f, "lag({}, {})", e, k),
+            DExpr::Lead(e, k) => write!(f, "lead({}, {})", e, k),
+            DExpr::Rank(e) => write!(f, "rank({})", e),
+            DExpr::DenseRank(e) => write!(f, "dense_rank({})", e),
+            DExpr::RowNumber => write!(f, "row_number()"),
         }
     }
 }
@@ -424,6 +459,15 @@ fn collect_expr_columns(expr: &DExpr, cols: &mut Vec<String>) {
             collect_expr_columns(right, cols);
         }
         DExpr::Agg(_, inner) => collect_expr_columns(inner, cols),
+        DExpr::FnCall(_, args) => {
+            for arg in args {
+                collect_expr_columns(arg, cols);
+            }
+        }
+        DExpr::CumSum(e) | DExpr::CumProd(e) | DExpr::CumMax(e) | DExpr::CumMin(e)
+        | DExpr::Lag(e, _) | DExpr::Lead(e, _) | DExpr::Rank(e) | DExpr::DenseRank(e) => {
+            collect_expr_columns(e, cols);
+        }
         _ => {}
     }
 }
@@ -781,6 +825,42 @@ fn eval_expr_row(df: &DataFrame, expr: &DExpr, row: usize) -> Result<ExprValue, 
         }
         DExpr::Agg(_, _) | DExpr::Count => Err(DataError::InvalidOperation(
             "aggregation not allowed in row context".into(),
+        )),
+        DExpr::FnCall(name, args) => {
+            if args.len() != 1 {
+                return Err(DataError::InvalidOperation(
+                    format!("FnCall '{}' requires exactly 1 argument, got {}", name, args.len()),
+                ));
+            }
+            let val = eval_expr_row(df, &args[0], row)?;
+            let x = match val {
+                ExprValue::Float(f) => f,
+                ExprValue::Int(i) => i as f64,
+                _ => return Err(DataError::InvalidOperation(
+                    format!("FnCall '{}' requires numeric argument", name),
+                )),
+            };
+            let result = match name.as_str() {
+                "log" => x.ln(),
+                "exp" => x.exp(),
+                "sqrt" => x.sqrt(),
+                "abs" => x.abs(),
+                "ceil" => x.ceil(),
+                "floor" => x.floor(),
+                "round" => x.round(),
+                "sin" => x.sin(),
+                "cos" => x.cos(),
+                "tan" => x.tan(),
+                other => return Err(DataError::InvalidOperation(
+                    format!("unknown DExpr function: {}", other),
+                )),
+            };
+            Ok(ExprValue::Float(result))
+        }
+        DExpr::CumSum(_) | DExpr::CumProd(_) | DExpr::CumMax(_) | DExpr::CumMin(_)
+        | DExpr::Lag(_, _) | DExpr::Lead(_, _) | DExpr::Rank(_) | DExpr::DenseRank(_)
+        | DExpr::RowNumber => Err(DataError::InvalidOperation(
+            "window function not allowed in row context; use eval_expr_column".into(),
         )),
     }
 }
@@ -2224,10 +2304,148 @@ impl std::error::Error for TidyError {}
 /// Int + Float â†’ Float promotion.
 /// Int overflow â†’ wrapping (i64 wrapping_add/mul etc.).
 /// Scalar expression â†’ broadcast to all rows.
+/// Extract f64 values for all rows from a sub-expression.
+fn extract_f64_column(df: &DataFrame, expr: &DExpr, nrows: usize) -> Result<Vec<f64>, TidyError> {
+    let col = eval_expr_column(df, expr, nrows)?;
+    match col {
+        Column::Float(v) => Ok(v),
+        Column::Int(v) => Ok(v.into_iter().map(|i| i as f64).collect()),
+        _ => Err(TidyError::TypeMismatch {
+            expected: "numeric".into(),
+            got: "non-numeric".into(),
+        }),
+    }
+}
+
+/// Evaluate window DExpr variants that need full-column context.
+/// Returns `Ok(Some(column))` if expr is a window function, `Ok(None)` otherwise.
+fn eval_window_column(
+    df: &DataFrame,
+    expr: &DExpr,
+    nrows: usize,
+) -> Result<Option<Column>, TidyError> {
+    match expr {
+        DExpr::RowNumber => {
+            let vals: Vec<i64> = (1..=nrows as i64).collect();
+            Ok(Some(Column::Int(vals)))
+        }
+        DExpr::CumSum(inner) => {
+            let src = extract_f64_column(df, inner, nrows)?;
+            let mut result = Vec::with_capacity(nrows);
+            let mut sum = 0.0_f64;
+            let mut comp = 0.0_f64; // Kahan compensation
+            for &v in &src {
+                let y = v - comp;
+                let t = sum + y;
+                comp = (t - sum) - y;
+                sum = t;
+                result.push(sum);
+            }
+            Ok(Some(Column::Float(result)))
+        }
+        DExpr::CumProd(inner) => {
+            let src = extract_f64_column(df, inner, nrows)?;
+            let mut result = Vec::with_capacity(nrows);
+            let mut prod = 1.0_f64;
+            for &v in &src {
+                prod *= v;
+                result.push(prod);
+            }
+            Ok(Some(Column::Float(result)))
+        }
+        DExpr::CumMax(inner) => {
+            let src = extract_f64_column(df, inner, nrows)?;
+            let mut result = Vec::with_capacity(nrows);
+            let mut max = f64::NEG_INFINITY;
+            for &v in &src {
+                if v > max { max = v; }
+                result.push(max);
+            }
+            Ok(Some(Column::Float(result)))
+        }
+        DExpr::CumMin(inner) => {
+            let src = extract_f64_column(df, inner, nrows)?;
+            let mut result = Vec::with_capacity(nrows);
+            let mut min = f64::INFINITY;
+            for &v in &src {
+                if v < min { min = v; }
+                result.push(min);
+            }
+            Ok(Some(Column::Float(result)))
+        }
+        DExpr::Lag(inner, k) => {
+            let src = extract_f64_column(df, inner, nrows)?;
+            let mut result = Vec::with_capacity(nrows);
+            for i in 0..nrows {
+                if i < *k {
+                    result.push(f64::NAN);
+                } else {
+                    result.push(src[i - k]);
+                }
+            }
+            Ok(Some(Column::Float(result)))
+        }
+        DExpr::Lead(inner, k) => {
+            let src = extract_f64_column(df, inner, nrows)?;
+            let mut result = Vec::with_capacity(nrows);
+            for i in 0..nrows {
+                if i + k >= nrows {
+                    result.push(f64::NAN);
+                } else {
+                    result.push(src[i + k]);
+                }
+            }
+            Ok(Some(Column::Float(result)))
+        }
+        DExpr::Rank(inner) => {
+            let src = extract_f64_column(df, inner, nrows)?;
+            // Average rank (1-based): sort indices, assign ranks, average ties
+            let mut indexed: Vec<(usize, f64)> = src.iter().cloned().enumerate().collect();
+            indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            let mut ranks = vec![0.0_f64; nrows];
+            let mut i = 0;
+            while i < nrows {
+                let mut j = i;
+                while j < nrows && indexed[j].1 == indexed[i].1 {
+                    j += 1;
+                }
+                let avg_rank = (i + 1 + j) as f64 / 2.0; // 1-based average
+                for idx in i..j {
+                    ranks[indexed[idx].0] = avg_rank;
+                }
+                i = j;
+            }
+            Ok(Some(Column::Float(ranks)))
+        }
+        DExpr::DenseRank(inner) => {
+            let src = extract_f64_column(df, inner, nrows)?;
+            let mut indexed: Vec<(usize, f64)> = src.iter().cloned().enumerate().collect();
+            indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            let mut ranks = vec![0_i64; nrows];
+            let mut rank = 0_i64;
+            let mut prev: Option<f64> = None;
+            for &(orig_idx, val) in &indexed {
+                if prev.is_none() || prev.unwrap() != val {
+                    rank += 1;
+                }
+                ranks[orig_idx] = rank;
+                prev = Some(val);
+            }
+            Ok(Some(Column::Int(ranks)))
+        }
+        _ => Ok(None),
+    }
+}
+
 fn eval_expr_column(df: &DataFrame, expr: &DExpr, nrows: usize) -> Result<Column, TidyError> {
     if nrows == 0 {
         // Infer column type from a dry-run on nothing; default to Float for empty
         return Ok(Column::Float(vec![]));
+    }
+
+    // Handle window functions at column level
+    if let Some(col) = eval_window_column(df, expr, nrows)? {
+        return Ok(col);
     }
 
     // Evaluate row 0 to determine result type
@@ -2715,7 +2933,10 @@ impl GroupedTidyView {
 
             TidyAgg::Sum(col_name) | TidyAgg::Mean(col_name)
             | TidyAgg::Min(col_name) | TidyAgg::Max(col_name)
-            | TidyAgg::First(col_name) | TidyAgg::Last(col_name) => {
+            | TidyAgg::First(col_name) | TidyAgg::Last(col_name)
+            | TidyAgg::Median(col_name) | TidyAgg::Sd(col_name)
+            | TidyAgg::Var(col_name) | TidyAgg::Quantile(col_name, _)
+            | TidyAgg::NDistinct(col_name) | TidyAgg::Iqr(col_name) => {
                 let src = base
                     .get_column(col_name)
                     .ok_or_else(|| TidyError::ColumnNotFound(col_name.clone()))?;
@@ -2791,6 +3012,95 @@ fn agg_reduce(
             }
         }
         TidyAgg::Count => Ok(values.len() as f64),
+        TidyAgg::Median(_) => {
+            if values.is_empty() {
+                Ok(f64::NAN)
+            } else {
+                let mut sorted = values.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let n = sorted.len();
+                if n % 2 == 1 {
+                    Ok(sorted[n / 2])
+                } else {
+                    Ok((sorted[n / 2 - 1] + sorted[n / 2]) / 2.0)
+                }
+            }
+        }
+        TidyAgg::Var(_) => {
+            if values.len() < 2 {
+                Ok(f64::NAN)
+            } else {
+                let n = values.len() as f64;
+                let mean = kahan_sum_f64(&values) / n;
+                let sq_diffs: Vec<f64> = values.iter().map(|v| (v - mean) * (v - mean)).collect();
+                Ok(kahan_sum_f64(&sq_diffs) / (n - 1.0))
+            }
+        }
+        TidyAgg::Sd(_) => {
+            if values.len() < 2 {
+                Ok(f64::NAN)
+            } else {
+                let n = values.len() as f64;
+                let mean = kahan_sum_f64(&values) / n;
+                let sq_diffs: Vec<f64> = values.iter().map(|v| (v - mean) * (v - mean)).collect();
+                Ok((kahan_sum_f64(&sq_diffs) / (n - 1.0)).sqrt())
+            }
+        }
+        TidyAgg::Quantile(_, p) => {
+            if values.is_empty() {
+                Ok(f64::NAN)
+            } else {
+                let mut sorted = values.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let n = sorted.len();
+                if n == 1 {
+                    return Ok(sorted[0]);
+                }
+                let pos = p * (n as f64 - 1.0);
+                let lo = pos.floor() as usize;
+                let hi = pos.ceil() as usize;
+                let frac = pos - lo as f64;
+                if lo == hi || hi >= n {
+                    Ok(sorted[lo.min(n - 1)])
+                } else {
+                    Ok(sorted[lo] + frac * (sorted[hi] - sorted[lo]))
+                }
+            }
+        }
+        TidyAgg::NDistinct(_) => {
+            use std::collections::BTreeSet;
+            let distinct: BTreeSet<u64> = values.iter().map(|v| v.to_bits()).collect();
+            Ok(distinct.len() as f64)
+        }
+        TidyAgg::Iqr(_) => {
+            if values.is_empty() {
+                Ok(f64::NAN)
+            } else {
+                let mut sorted = values.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let n = sorted.len();
+                if n == 1 {
+                    return Ok(0.0);
+                }
+                let q1 = {
+                    let pos = 0.25 * (n as f64 - 1.0);
+                    let lo = pos.floor() as usize;
+                    let hi = pos.ceil() as usize;
+                    let frac = pos - lo as f64;
+                    if lo == hi || hi >= n { sorted[lo.min(n - 1)] }
+                    else { sorted[lo] + frac * (sorted[hi] - sorted[lo]) }
+                };
+                let q3 = {
+                    let pos = 0.75 * (n as f64 - 1.0);
+                    let lo = pos.floor() as usize;
+                    let hi = pos.ceil() as usize;
+                    let frac = pos - lo as f64;
+                    if lo == hi || hi >= n { sorted[lo.min(n - 1)] }
+                    else { sorted[lo] + frac * (sorted[hi] - sorted[lo]) }
+                };
+                Ok(q3 - q1)
+            }
+        }
     }
 }
 
@@ -2813,6 +3123,18 @@ pub enum TidyAgg {
     First(String),
     /// Last row's value (error for empty groups).
     Last(String),
+    /// Median of a numeric column.
+    Median(String),
+    /// Sample standard deviation (Kahan-based).
+    Sd(String),
+    /// Sample variance (Kahan-based).
+    Var(String),
+    /// Quantile at probability p ∈ [0, 1], using linear interpolation.
+    Quantile(String, f64),
+    /// Count of distinct values (uses BTreeSet).
+    NDistinct(String),
+    /// Interquartile range (Q3 − Q1).
+    Iqr(String),
 }
 
 // â”€â”€ ArrangeKey â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

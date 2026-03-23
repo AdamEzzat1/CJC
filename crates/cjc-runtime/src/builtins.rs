@@ -1224,6 +1224,45 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 _ => Err(format!("file_lines requires String path, got {}", args[0].type_name())),
             }
         }
+        // ── TidyView Phase 1: Data I/O builtins ──────────────────────
+        "dir_list" => {
+            if args.len() != 1 { return Err("dir_list requires 1 argument (path)".into()); }
+            match &args[0] {
+                Value::String(path) => {
+                    let entries = std::fs::read_dir(path.as_str())
+                        .map_err(|e| format!("dir_list error: {}", e))?;
+                    // Collect into BTreeSet for deterministic ordering
+                    let mut sorted = std::collections::BTreeSet::new();
+                    for entry in entries {
+                        let entry = entry.map_err(|e| format!("dir_list error: {}", e))?;
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        sorted.insert(name);
+                    }
+                    let values: Vec<Value> = sorted
+                        .into_iter()
+                        .map(|s| Value::String(Rc::new(s)))
+                        .collect();
+                    Ok(Some(Value::Array(Rc::new(values))))
+                }
+                _ => Err(format!("dir_list requires String path, got {}", args[0].type_name())),
+            }
+        }
+        "path_join" => {
+            if args.len() != 2 { return Err("path_join requires 2 arguments (base, segment)".into()); }
+            match (&args[0], &args[1]) {
+                (Value::String(a), Value::String(b)) => {
+                    let joined = std::path::Path::new(a.as_str())
+                        .join(b.as_str())
+                        .to_string_lossy()
+                        .to_string();
+                    Ok(Some(Value::String(Rc::new(joined))))
+                }
+                _ => Err(format!(
+                    "path_join requires (String, String) arguments, got ({}, {})",
+                    args[0].type_name(), args[1].type_name()
+                )),
+            }
+        }
 
         // ── Window function builtins ──────────────────────────────────
         "window_sum" | "window_mean" | "window_min" | "window_max" => {
@@ -2867,6 +2906,505 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let x = value_to_f64_vec(&args[1])?;
             let result = crate::interpolate::polyval(&coeffs, &x);
             Ok(Some(Value::Array(Rc::new(result.into_iter().map(Value::Float).collect()))))
+        }
+
+        // ── Phase 2 Beta Hardening: getenv ──────────────────────────────
+        "getenv" => {
+            if args.len() != 1 { return Err("getenv requires 1 argument (name)".into()); }
+            let name = match &args[0] {
+                Value::String(s) => s.as_str().to_string(),
+                _ => return Err("getenv: argument must be String".into()),
+            };
+            let val = std::env::var(&name).unwrap_or_default();
+            Ok(Some(Value::String(Rc::new(val))))
+        }
+
+        // ── Phase 2 Beta Hardening: Functional map builtins ─────────────
+        "map_new" => {
+            if !args.is_empty() { return Err("map_new takes 0 arguments".into()); }
+            Ok(Some(Value::Map(Rc::new(RefCell::new(crate::det_map::DetMap::new())))))
+        }
+        "map_set" => {
+            if args.len() != 3 { return Err("map_set requires 3 args: map, key, value".into()); }
+            let m = match &args[0] {
+                Value::Map(m) => m,
+                _ => return Err("map_set: first argument must be Map".into()),
+            };
+            let mut new_map = m.borrow().clone();
+            new_map.insert(args[1].clone(), args[2].clone());
+            Ok(Some(Value::Map(Rc::new(RefCell::new(new_map)))))
+        }
+        "map_get" => {
+            if args.len() != 2 { return Err("map_get requires 2 args: map, key".into()); }
+            let m = match &args[0] {
+                Value::Map(m) => m,
+                _ => return Err("map_get: first argument must be Map".into()),
+            };
+            match m.borrow().get(&args[1]) {
+                Some(v) => Ok(Some(v.clone())),
+                None => Ok(Some(Value::Void)),
+            }
+        }
+        "map_keys" => {
+            if args.len() != 1 { return Err("map_keys requires 1 arg: map".into()); }
+            let m = match &args[0] {
+                Value::Map(m) => m,
+                _ => return Err("map_keys: argument must be Map".into()),
+            };
+            Ok(Some(Value::Array(Rc::new(m.borrow().keys()))))
+        }
+        "map_values" => {
+            if args.len() != 1 { return Err("map_values requires 1 arg: map".into()); }
+            let m = match &args[0] {
+                Value::Map(m) => m,
+                _ => return Err("map_values: argument must be Map".into()),
+            };
+            Ok(Some(Value::Array(Rc::new(m.borrow().values_vec()))))
+        }
+        "map_contains" => {
+            if args.len() != 2 { return Err("map_contains requires 2 args: map, key".into()); }
+            let m = match &args[0] {
+                Value::Map(m) => m,
+                _ => return Err("map_contains: first argument must be Map".into()),
+            };
+            Ok(Some(Value::Bool(m.borrow().contains_key(&args[1]))))
+        }
+
+        // -- Phase 3: Numerical integration ------------------------------------
+        "trapezoid" | "trapz" => {
+            if args.len() != 2 {
+                return Err("trapezoid requires 2 arguments (xs, ys)".into());
+            }
+            let xs = value_to_f64_vec(&args[0])?;
+            let ys = value_to_f64_vec(&args[1])?;
+            let result = crate::integrate::trapezoid(&xs, &ys)?;
+            Ok(Some(Value::Float(result)))
+        }
+        "simpson" | "simps" => {
+            if args.len() != 2 {
+                return Err("simpson requires 2 arguments (xs, ys)".into());
+            }
+            let xs = value_to_f64_vec(&args[0])?;
+            let ys = value_to_f64_vec(&args[1])?;
+            let result = crate::integrate::simpson(&xs, &ys)?;
+            Ok(Some(Value::Float(result)))
+        }
+        "cumtrapz" => {
+            if args.len() != 2 {
+                return Err("cumtrapz requires 2 arguments (xs, ys)".into());
+            }
+            let xs = value_to_f64_vec(&args[0])?;
+            let ys = value_to_f64_vec(&args[1])?;
+            let result = crate::integrate::cumtrapz(&xs, &ys)?;
+            Ok(Some(Value::Array(Rc::new(
+                result.into_iter().map(Value::Float).collect(),
+            ))))
+        }
+        // -- Phase 3: Numerical differentiation --------------------------------
+        "diff_central" => {
+            if args.len() != 2 {
+                return Err("diff_central requires 2 arguments (xs, ys)".into());
+            }
+            let xs = value_to_f64_vec(&args[0])?;
+            let ys = value_to_f64_vec(&args[1])?;
+            let result = crate::differentiate::diff_central(&xs, &ys)?;
+            Ok(Some(Value::Array(Rc::new(
+                result.into_iter().map(Value::Float).collect(),
+            ))))
+        }
+        "diff_forward" => {
+            if args.len() != 2 {
+                return Err("diff_forward requires 2 arguments (xs, ys)".into());
+            }
+            let xs = value_to_f64_vec(&args[0])?;
+            let ys = value_to_f64_vec(&args[1])?;
+            let result = crate::differentiate::diff_forward(&xs, &ys)?;
+            Ok(Some(Value::Array(Rc::new(
+                result.into_iter().map(Value::Float).collect(),
+            ))))
+        }
+        "gradient_1d" => {
+            if args.len() != 2 {
+                return Err("gradient_1d requires 2 arguments (ys, dx)".into());
+            }
+            let ys = value_to_f64_vec(&args[0])?;
+            let dx = value_to_f64(&args[1])?;
+            let result = crate::differentiate::gradient_1d(&ys, dx);
+            Ok(Some(Value::Array(Rc::new(
+                result.into_iter().map(Value::Float).collect(),
+            ))))
+        }
+        // -- Phase 3: Constrained optimization ---------------------------------
+        "penalty_objective" => {
+            if args.len() != 3 {
+                return Err(
+                    "penalty_objective requires 3 arguments (f_val, constraint_violations, penalty)"
+                        .into(),
+                );
+            }
+            let f_val = value_to_f64(&args[0])?;
+            let violations = value_to_f64_vec(&args[1])?;
+            let penalty = value_to_f64(&args[2])?;
+            let result = crate::optimize::penalty_objective(f_val, &violations, penalty);
+            Ok(Some(Value::Float(result)))
+        }
+        "project_box" => {
+            if args.len() != 3 {
+                return Err("project_box requires 3 arguments (x, lower, upper)".into());
+            }
+            let x = value_to_f64_vec(&args[0])?;
+            let lower = value_to_f64_vec(&args[1])?;
+            let upper = value_to_f64_vec(&args[2])?;
+            let result = crate::optimize::project_box(&x, &lower, &upper)?;
+            Ok(Some(Value::Array(Rc::new(
+                result.into_iter().map(Value::Float).collect(),
+            ))))
+        }
+        "projected_gd_step" => {
+            if args.len() != 5 {
+                return Err(
+                    "projected_gd_step requires 5 arguments (x, grad, lr, lower, upper)".into(),
+                );
+            }
+            let x = value_to_f64_vec(&args[0])?;
+            let grad = value_to_f64_vec(&args[1])?;
+            let lr = value_to_f64(&args[2])?;
+            let lower = value_to_f64_vec(&args[3])?;
+            let upper = value_to_f64_vec(&args[4])?;
+            let result = crate::optimize::projected_gd_step(&x, &grad, lr, &lower, &upper)?;
+            Ok(Some(Value::Array(Rc::new(
+                result.into_iter().map(Value::Float).collect(),
+            ))))
+        }
+
+        // ── LSTM cell ───────────────────────────────────────────────
+        "lstm_cell" => {
+            if args.len() != 7 {
+                return Err("lstm_cell requires 7 Tensor arguments: x, h_prev, c_prev, w_ih, w_hh, b_ih, b_hh".into());
+            }
+            let x = value_to_tensor(&args[0])?;
+            let h_prev = value_to_tensor(&args[1])?;
+            let c_prev = value_to_tensor(&args[2])?;
+            let w_ih = value_to_tensor(&args[3])?;
+            let w_hh = value_to_tensor(&args[4])?;
+            let b_ih = value_to_tensor(&args[5])?;
+            let b_hh = value_to_tensor(&args[6])?;
+            let (h_new, c_new) = crate::ml::lstm_cell(x, h_prev, c_prev, w_ih, w_hh, b_ih, b_hh)?;
+            Ok(Some(Value::Tuple(Rc::new(vec![
+                Value::Tensor(h_new),
+                Value::Tensor(c_new),
+            ]))))
+        }
+
+        // ── GRU cell ────────────────────────────────────────────────
+        "gru_cell" => {
+            if args.len() != 6 {
+                return Err("gru_cell requires 6 Tensor arguments: x, h_prev, w_ih, w_hh, b_ih, b_hh".into());
+            }
+            let x = value_to_tensor(&args[0])?;
+            let h_prev = value_to_tensor(&args[1])?;
+            let w_ih = value_to_tensor(&args[2])?;
+            let w_hh = value_to_tensor(&args[3])?;
+            let b_ih = value_to_tensor(&args[4])?;
+            let b_hh = value_to_tensor(&args[5])?;
+            let h_new = crate::ml::gru_cell(x, h_prev, w_ih, w_hh, b_ih, b_hh)?;
+            Ok(Some(Value::Tensor(h_new)))
+        }
+
+        // ── Multi-Head Attention ────────────────────────────────────
+        "multi_head_attention" => {
+            if args.len() != 12 {
+                return Err("multi_head_attention requires 12 arguments: q, k, v, w_q, w_k, w_v, w_o, b_q, b_k, b_v, b_o, num_heads".into());
+            }
+            let q = value_to_tensor(&args[0])?;
+            let k = value_to_tensor(&args[1])?;
+            let v = value_to_tensor(&args[2])?;
+            let w_q = value_to_tensor(&args[3])?;
+            let w_k = value_to_tensor(&args[4])?;
+            let w_v = value_to_tensor(&args[5])?;
+            let w_o = value_to_tensor(&args[6])?;
+            let b_q = value_to_tensor(&args[7])?;
+            let b_k = value_to_tensor(&args[8])?;
+            let b_v = value_to_tensor(&args[9])?;
+            let b_o = value_to_tensor(&args[10])?;
+            let num_heads = value_to_usize(&args[11])?;
+            let out = crate::ml::multi_head_attention(
+                q, k, v, w_q, w_k, w_v, w_o, b_q, b_k, b_v, b_o, num_heads,
+            )?;
+            Ok(Some(Value::Tensor(out)))
+        }
+
+        // ── AR fit (Yule-Walker) ────────────────────────────────────
+        "ar_fit" => {
+            if args.len() != 2 {
+                return Err("ar_fit requires 2 arguments: data (array), p (int)".into());
+            }
+            let data = value_to_f64_vec(&args[0])?;
+            let p = value_to_usize(&args[1])?;
+            let coeffs = crate::timeseries::ar_fit(&data, p)?;
+            Ok(Some(Value::Array(Rc::new(
+                coeffs.into_iter().map(Value::Float).collect(),
+            ))))
+        }
+
+        // ── ARIMA differencing ──────────────────────────────────────
+        "arima_diff" => {
+            if args.len() != 2 {
+                return Err("arima_diff requires 2 arguments: data (array), d (int)".into());
+            }
+            let data = value_to_f64_vec(&args[0])?;
+            let d = value_to_usize(&args[1])?;
+            let result = crate::timeseries::arima_diff(&data, d);
+            Ok(Some(Value::Array(Rc::new(
+                result.into_iter().map(Value::Float).collect(),
+            ))))
+        }
+
+        // ── AR forecast ─────────────────────────────────────────────
+        "ar_forecast" => {
+            if args.len() != 3 {
+                return Err("ar_forecast requires 3 arguments: coeffs (array), history (array), steps (int)".into());
+            }
+            let coeffs = value_to_f64_vec(&args[0])?;
+            let history = value_to_f64_vec(&args[1])?;
+            let steps = value_to_usize(&args[2])?;
+            let result = crate::timeseries::ar_forecast(&coeffs, &history, steps)?;
+            Ok(Some(Value::Array(Rc::new(
+                result.into_iter().map(Value::Float).collect(),
+            ))))
+        }
+
+        // ── Phase 5: Preprocessing builtins ─────────────────────────────
+        "fillna" => {
+            if args.len() != 2 { return Err("fillna requires 2 arguments (array, fill_value)".into()); }
+            let arr = match &args[0] {
+                Value::Array(a) => a.as_ref().clone(),
+                _ => return Err(format!("fillna: first argument must be Array, got {}", args[0].type_name())),
+            };
+            let fill = &args[1];
+            let result: Vec<Value> = arr.iter().map(|v| {
+                match v {
+                    Value::Void => fill.clone(),
+                    Value::Float(f) if f.is_nan() => fill.clone(),
+                    other => other.clone(),
+                }
+            }).collect();
+            Ok(Some(Value::Array(Rc::new(result))))
+        }
+
+        "is_not_null" => {
+            if args.len() != 1 { return Err("is_not_null requires 1 argument".into()); }
+            let result = match &args[0] {
+                Value::Void => false,
+                Value::Float(f) => !f.is_nan(),
+                _ => true,
+            };
+            Ok(Some(Value::Bool(result)))
+        }
+
+        "interpolate_linear" => {
+            if args.len() != 1 { return Err("interpolate_linear requires 1 argument (array of f64)".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let n = data.len();
+            if n == 0 {
+                return Ok(Some(Value::Array(Rc::new(vec![]))));
+            }
+            let mut result = data.clone();
+
+            // Find first and last non-NaN for edge fill
+            let first_valid = result.iter().position(|x| !x.is_nan());
+            let last_valid = result.iter().rposition(|x| !x.is_nan());
+
+            if let (Some(fv), Some(lv)) = (first_valid, last_valid) {
+                // Backward-fill leading NaNs
+                for i in 0..fv {
+                    result[i] = result[fv];
+                }
+                // Forward-fill trailing NaNs
+                for i in (lv + 1)..n {
+                    result[i] = result[lv];
+                }
+                // Linearly interpolate interior NaNs
+                let mut i = fv + 1;
+                while i < lv {
+                    if result[i].is_nan() {
+                        // Find the next non-NaN
+                        let start = i - 1;
+                        let mut end = i + 1;
+                        while end < n && result[end].is_nan() {
+                            end += 1;
+                        }
+                        let v0 = result[start];
+                        let v1 = result[end];
+                        let span = (end - start) as f64;
+                        for j in (start + 1)..end {
+                            let t = (j - start) as f64 / span;
+                            // Linear interpolation: v0 + t * (v1 - v0)
+                            // Using Kahan-style: compute as v0*(1-t) + v1*t
+                            use cjc_repro::KahanAccumulatorF64;
+                            let mut acc = KahanAccumulatorF64::new();
+                            acc.add(v0 * (1.0 - t));
+                            acc.add(v1 * t);
+                            result[j] = acc.finalize();
+                        }
+                        i = end + 1;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            // If no valid values, result stays all NaN
+
+            Ok(Some(Value::Array(Rc::new(
+                result.into_iter().map(Value::Float).collect(),
+            ))))
+        }
+
+        "coalesce" => {
+            if args.len() != 2 { return Err("coalesce requires 2 arguments (array_a, array_b)".into()); }
+            let a = match &args[0] {
+                Value::Array(a) => a.as_ref().clone(),
+                _ => return Err(format!("coalesce: first argument must be Array, got {}", args[0].type_name())),
+            };
+            let b = match &args[1] {
+                Value::Array(b) => b.as_ref().clone(),
+                _ => return Err(format!("coalesce: second argument must be Array, got {}", args[1].type_name())),
+            };
+            if a.len() != b.len() {
+                return Err(format!("coalesce: arrays must have equal length, got {} and {}", a.len(), b.len()));
+            }
+            let result: Vec<Value> = a.iter().zip(b.iter()).map(|(va, vb)| {
+                let is_null_a = matches!(va, Value::Void) || matches!(va, Value::Float(f) if f.is_nan());
+                if is_null_a { vb.clone() } else { va.clone() }
+            }).collect();
+            Ok(Some(Value::Array(Rc::new(result))))
+        }
+
+        "cut" => {
+            if args.len() != 2 { return Err("cut requires 2 arguments (array, breaks)".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let breaks = value_to_f64_vec(&args[1])?;
+            if breaks.is_empty() {
+                return Err("cut: breaks array must not be empty".into());
+            }
+            let mut sorted_breaks = breaks.clone();
+            sorted_breaks.sort_by(f64::total_cmp);
+            let labels: Vec<Value> = data.iter().map(|&x| {
+                // Find the bin
+                let label = if x <= sorted_breaks[0] {
+                    format!("(-inf,{}]", sorted_breaks[0])
+                } else if x > sorted_breaks[sorted_breaks.len() - 1] {
+                    format!("({},inf)", sorted_breaks[sorted_breaks.len() - 1])
+                } else {
+                    let mut found = String::new();
+                    for i in 1..sorted_breaks.len() {
+                        if x <= sorted_breaks[i] {
+                            found = format!("({},{}]", sorted_breaks[i - 1], sorted_breaks[i]);
+                            break;
+                        }
+                    }
+                    if found.is_empty() {
+                        // x is exactly at the last break
+                        format!("({},inf)", sorted_breaks[sorted_breaks.len() - 1])
+                    } else {
+                        found
+                    }
+                };
+                Value::String(Rc::new(label))
+            }).collect();
+            Ok(Some(Value::Array(Rc::new(labels))))
+        }
+
+        "qcut" => {
+            if args.len() != 2 { return Err("qcut requires 2 arguments (array, n_bins)".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let n = value_to_usize(&args[1])?;
+            if n == 0 {
+                return Err("qcut: n_bins must be > 0".into());
+            }
+            // Compute quantile break points
+            let mut breaks = Vec::with_capacity(n - 1);
+            for i in 1..n {
+                let p = i as f64 / n as f64;
+                let q = crate::stats::quantile(&data, p)?;
+                breaks.push(q);
+            }
+            // Deduplicate breaks (can happen with repeated values)
+            breaks.dedup_by(|a, b| *a == *b);
+
+            // Re-dispatch to cut logic
+            let mut sorted_breaks = breaks.clone();
+            sorted_breaks.sort_by(f64::total_cmp);
+            let labels: Vec<Value> = data.iter().map(|&x| {
+                let label = if sorted_breaks.is_empty() || x <= sorted_breaks[0] {
+                    format!("(-inf,{}]", sorted_breaks.first().copied().unwrap_or(x))
+                } else if x > sorted_breaks[sorted_breaks.len() - 1] {
+                    format!("({},inf)", sorted_breaks[sorted_breaks.len() - 1])
+                } else {
+                    let mut found = String::new();
+                    for i in 1..sorted_breaks.len() {
+                        if x <= sorted_breaks[i] {
+                            found = format!("({},{}]", sorted_breaks[i - 1], sorted_breaks[i]);
+                            break;
+                        }
+                    }
+                    if found.is_empty() {
+                        format!("({},inf)", sorted_breaks[sorted_breaks.len() - 1])
+                    } else {
+                        found
+                    }
+                };
+                Value::String(Rc::new(label))
+            }).collect();
+            Ok(Some(Value::Array(Rc::new(labels))))
+        }
+
+        "min_max_scale" => {
+            if args.len() != 3 { return Err("min_max_scale requires 3 arguments (array, low, high)".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let low = value_to_f64(&args[1])?;
+            let high = value_to_f64(&args[2])?;
+            if data.is_empty() {
+                return Ok(Some(Value::Array(Rc::new(vec![]))));
+            }
+            let mut min_val = f64::INFINITY;
+            let mut max_val = f64::NEG_INFINITY;
+            for &x in &data {
+                if x < min_val { min_val = x; }
+                if x > max_val { max_val = x; }
+            }
+            let range = max_val - min_val;
+            let result: Vec<Value> = if range == 0.0 {
+                // All values are the same — map to midpoint
+                let mid = (low + high) / 2.0;
+                data.iter().map(|_| Value::Float(mid)).collect()
+            } else {
+                data.iter().map(|&x| {
+                    use cjc_repro::KahanAccumulatorF64;
+                    let t = (x - min_val) / range;
+                    let mut acc = KahanAccumulatorF64::new();
+                    acc.add(low * (1.0 - t));
+                    acc.add(high * t);
+                    Value::Float(acc.finalize())
+                }).collect()
+            };
+            Ok(Some(Value::Array(Rc::new(result))))
+        }
+
+        "robust_scale" => {
+            if args.len() != 1 { return Err("robust_scale requires 1 argument (array)".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            if data.is_empty() {
+                return Ok(Some(Value::Array(Rc::new(vec![]))));
+            }
+            let med = crate::stats::median(&data)?;
+            let iqr_val = crate::stats::iqr(&data)?;
+            let result: Vec<Value> = if iqr_val == 0.0 {
+                data.iter().map(|&x| Value::Float(x - med)).collect()
+            } else {
+                data.iter().map(|&x| Value::Float((x - med) / iqr_val)).collect()
+            };
+            Ok(Some(Value::Array(Rc::new(result))))
         }
 
         _ => Ok(None), // Not a shared builtin
