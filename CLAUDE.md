@@ -112,7 +112,7 @@ Every new operator/expression must work in BOTH executors with identical semanti
 
 - Function params REQUIRE type annotations: `fn f(x: i64)` not `fn f(x)`
 - NO semicolons after `while {}`/`if {}`/`for {}` blocks inside function bodies
-- `if` is currently a statement, NOT an expression (converting this is a priority feature)
+- `if` works as BOTH a statement AND an expression: `let x = if cond { a } else { b };`
 - `array_push(arr, val)` RETURNS new array; must use `arr = array_push(arr, val)`
 - Use `Any` as type annotation for dynamic/polymorphic types
 - `FieldDecl` has a `default: Option<Expr>` field

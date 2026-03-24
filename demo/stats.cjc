@@ -1,0 +1,14 @@
+@pure
+fn mean(vals: Any) -> f64 {
+    let sum = 0.0;
+    let i = 0;
+    while i < array_len(vals) {
+        sum = sum + vals[i];
+        i = i + 1;
+    }
+    return sum / array_len(vals);
+}
+
+let data = [10.0, 20.0, 30.0, 40.0, 50.0];
+let m = mean(data);
+print(m);

@@ -1,0 +1,11 @@
+name,age,score,grade
+Alice,30,95.5,A
+Bob,25,87.3,B
+Carol,28,NaN,A
+Dave,35,72.1,C
+Eve,,91.0,A
+Frank,42,NaN,B
+Grace,29,88.7,A
+Hank,31,76.4,C
+Ivy,27,93.2,A
+Jack,33,81.9,B

@@ -89,52 +89,121 @@ impl Tensor {
         }
         let m = self.shape[0];
         let n = self.shape[1];
-        let a = self.to_vec();
+        let min_mn = m.min(n);
 
-        // Work column-major for convenience
-        let mut q_cols: Vec<Vec<f64>> = (0..n)
-            .map(|j| (0..m).map(|i| a[i * n + j]).collect())
-            .collect();
-        let mut r_data = vec![0.0f64; n * n];
+        // Work on a column-major copy for better locality in Householder reflections.
+        let row_major = self.to_vec();
+        let mut cm = vec![0.0f64; m * n]; // column-major
+        for i in 0..m {
+            for j in 0..n {
+                cm[j * m + i] = row_major[i * n + j];
+            }
+        }
 
-        for j in 0..n {
-            // Orthogonalize against previous columns
-            for i in 0..j {
-                let dot: f64 = {
-                    let mut acc = BinnedAccumulatorF64::new();
-                    for k in 0..m { acc.add(q_cols[i][k] * q_cols[j][k]); }
-                    acc.finalize()
-                };
-                r_data[i * n + j] = dot;
-                for k in 0..m {
-                    q_cols[j][k] -= dot * q_cols[i][k];
+        // Store Householder vectors and tau values
+        let mut tau = vec![0.0f64; min_mn];
+
+        for k in 0..min_mn {
+            // Compute norm of column k below diagonal
+            let mut sigma = 0.0f64;
+            for i in (k + 1)..m {
+                sigma += cm[k * m + i] * cm[k * m + i];
+            }
+            let x0 = cm[k * m + k];
+            let norm_x = (x0 * x0 + sigma).sqrt();
+
+            if norm_x < 1e-15 {
+                tau[k] = 0.0;
+                continue;
+            }
+
+            // Householder vector: v[k] = x[k] - alpha, v[k+1:] = x[k+1:]
+            let alpha = if x0 >= 0.0 { -norm_x } else { norm_x };
+            cm[k * m + k] -= alpha;
+            let v_norm_sq = cm[k * m + k] * cm[k * m + k] + sigma;
+            tau[k] = if v_norm_sq > 1e-30 { 2.0 / v_norm_sq } else { 0.0 };
+
+            // Apply H = I - tau * v * v^T to columns k+1..n
+            for j in (k + 1)..n {
+                let mut dot = 0.0f64;
+                for i in k..m {
+                    dot += cm[k * m + i] * cm[j * m + i];
+                }
+                let scale = tau[k] * dot;
+                for i in k..m {
+                    cm[j * m + i] -= scale * cm[k * m + i];
                 }
             }
-            // Normalize
-            let norm: f64 = {
-                let mut acc = BinnedAccumulatorF64::new();
-                for k in 0..m { acc.add(q_cols[j][k] * q_cols[j][k]); }
-                acc.finalize()
-            }.sqrt();
-            r_data[j * n + j] = norm;
-            if norm > 1e-15 {
-                for k in 0..m {
-                    q_cols[j][k] /= norm;
+
+            // Store alpha on the diagonal (R[k,k])
+            cm[k * m + k] = alpha;
+        }
+
+        // Extract R (min_mn × n) from upper triangle of cm (column-major)
+        let mut r_data = vec![0.0f64; min_mn * n];
+        for j in 0..n {
+            for i in 0..min_mn.min(j + 1) {
+                r_data[i * n + j] = cm[j * m + i];
+            }
+        }
+
+        // Reconstruct Q (m × min_mn) from Householder vectors
+        // Start with identity, apply reflectors in reverse order
+        let mut q_cm = vec![0.0f64; m * min_mn]; // column-major
+        for i in 0..min_mn { q_cm[i * m + i] = 1.0; }
+
+        for k in (0..min_mn).rev() {
+            if tau[k] == 0.0 { continue; }
+            // Reconstruct v from stored values
+            // v[k] was overwritten with alpha, but we need the original v[k].
+            // Since alpha = x[k] - v[k], and R[k,k] = alpha is in cm[k*m+k]...
+            // We stored the Householder vector in cm[k*m+k:k*m+m] AFTER
+            // setting cm[k*m+k] = alpha. So the v is lost for the diagonal.
+            // Instead, let's use the standard approach: v[k] = 1 (normalize).
+            // Actually, we need to reconstruct properly. Let me just use
+            // the explicit Q accumulation approach.
+
+            // v = [0..0, 1, cm[k*m+k+1], cm[k*m+k+2], ..., cm[k*m+m-1]]
+            // But cm[k*m+k] was overwritten. We need to recover v[k].
+            // Since tau[k] = 2 / v_norm_sq, and v[k+1:] are stored in cm,
+            // we can recover: v_norm_sq = 2/tau[k], v[k]^2 = v_norm_sq - sigma
+            // where sigma = sum(cm[k*m+i]^2 for i in k+1..m)
+            let mut sigma2 = 0.0f64;
+            for i in (k + 1)..m {
+                sigma2 += cm[k * m + i] * cm[k * m + i];
+            }
+            let v_norm_sq = 2.0 / tau[k];
+            let vk_sq = v_norm_sq - sigma2;
+            let vk = if vk_sq > 0.0 { vk_sq.sqrt() } else { 0.0 };
+            // Determine sign: v[k] = x[k] - alpha, both known at construction.
+            // Since we set v[k] = x[k] - alpha and alpha has opposite sign to x[k],
+            // v[k] is always positive (|x[k]| + |alpha| > 0).
+
+            // Apply H_k to Q columns
+            for j in k..min_mn {
+                let mut dot = vk * q_cm[j * m + k];
+                for i in (k + 1)..m {
+                    dot += cm[k * m + i] * q_cm[j * m + i];
+                }
+                let scale = tau[k] * dot;
+                q_cm[j * m + k] -= scale * vk;
+                for i in (k + 1)..m {
+                    q_cm[j * m + i] -= scale * cm[k * m + i];
                 }
             }
         }
 
-        // Assemble Q (m x n)
-        let mut q_data = vec![0.0f64; m * n];
-        for j in 0..n {
-            for i in 0..m {
-                q_data[i * n + j] = q_cols[j][i];
+        // Convert Q from column-major to row-major
+        let mut q_data = vec![0.0f64; m * min_mn];
+        for i in 0..m {
+            for j in 0..min_mn {
+                q_data[i * min_mn + j] = q_cm[j * m + i];
             }
         }
 
         Ok((
-            Tensor::from_vec(q_data, &[m, n])?,
-            Tensor::from_vec(r_data, &[n, n])?,
+            Tensor::from_vec(q_data, &[m, min_mn])?,
+            Tensor::from_vec(r_data, &[min_mn, n])?,
         ))
     }
 
@@ -151,12 +220,17 @@ impl Tensor {
         let mut l = vec![0.0f64; n * n];
 
         for j in 0..n {
-            // Use BinnedAccumulator for deterministic summation across platforms.
-            let mut acc = BinnedAccumulatorF64::new();
+            // Kahan summation: lightweight (16 bytes) vs BinnedAccumulator (32KB).
+            // Deterministic because iteration order is fixed (0..j).
+            let mut sum = 0.0f64;
+            let mut comp = 0.0f64;
             for k in 0..j {
-                acc.add(l[j * n + k] * l[j * n + k]);
+                let y = l[j * n + k] * l[j * n + k] - comp;
+                let t = sum + y;
+                comp = (t - sum) - y;
+                sum = t;
             }
-            let diag = a[j * n + j] - acc.finalize();
+            let diag = a[j * n + j] - sum;
             if diag <= 0.0 {
                 return Err(RuntimeError::InvalidOperation(
                     "Cholesky: matrix is not positive definite".to_string(),
@@ -165,12 +239,15 @@ impl Tensor {
             l[j * n + j] = diag.sqrt();
 
             for i in (j + 1)..n {
-                // Use BinnedAccumulator for deterministic summation across platforms.
-                let mut acc = BinnedAccumulatorF64::new();
+                let mut s = 0.0f64;
+                let mut c = 0.0f64;
                 for k in 0..j {
-                    acc.add(l[i * n + k] * l[j * n + k]);
+                    let y = l[i * n + k] * l[j * n + k] - c;
+                    let t = s + y;
+                    c = (t - s) - y;
+                    s = t;
                 }
-                l[i * n + j] = (a[i * n + j] - acc.finalize()) / l[j * n + j];
+                l[i * n + j] = (a[i * n + j] - s) / l[j * n + j];
             }
         }
 
@@ -365,77 +442,204 @@ impl Tensor {
             ));
         }
         let n = self.shape[0];
-        let mut a = self.to_vec();
-        // V = identity (eigenvectors)
-        let mut v = vec![0.0; n * n];
-        for i in 0..n {
-            v[i * n + i] = 1.0;
+
+        if n <= 1 {
+            let val = if n == 1 { self.to_vec()[0] } else { 0.0 };
+            let v_data = if n == 1 { vec![1.0] } else { vec![] };
+            return Ok((vec![val], Tensor::from_vec(v_data, &[n, n])?));
         }
-        let max_iter = 100 * n * n;
-        for _ in 0..max_iter {
-            // Find largest off-diagonal element (row-major for determinism)
-            let mut max_val = 0.0;
-            let mut p = 0;
-            let mut q = 1;
-            for i in 0..n {
-                for j in (i + 1)..n {
-                    let v_abs = a[i * n + j].abs();
-                    if v_abs > max_val {
-                        max_val = v_abs;
-                        p = i;
-                        q = j;
-                    }
+
+        // ── Step 1: Householder tridiagonalization ──────────────────────
+        // Reduce symmetric A to tridiagonal form T = Q^T A Q.
+        // Q is accumulated as a product of Householder reflectors.
+        // This is O(n^3) — far better than Jacobi's O(n^4) worst case.
+
+        let mut a = self.to_vec();
+        let mut q = vec![0.0f64; n * n];
+        for i in 0..n { q[i * n + i] = 1.0; }
+
+        // diag[i] = T[i,i], offd[i] = T[i,i+1]
+        let mut diag = vec![0.0f64; n];
+        let mut offd = vec![0.0f64; n]; // offd[0..n-1], offd[n-1] unused
+
+        for k in 0..n.saturating_sub(2) {
+            // Compute Householder vector for column k, rows k+1..n
+            let mut sigma = 0.0f64;
+            for i in (k + 1)..n {
+                sigma += a[i * n + k] * a[i * n + k];
+            }
+            let sigma_sqrt = sigma.sqrt();
+
+            if sigma_sqrt < 1e-15 {
+                // Column already zero below diagonal
+                offd[k] = a[(k + 1) * n + k];
+                continue;
+            }
+
+            let alpha = if a[(k + 1) * n + k] >= 0.0 { -sigma_sqrt } else { sigma_sqrt };
+            offd[k] = alpha;
+
+            // Householder vector v stored in a[k+1..n, k]
+            a[(k + 1) * n + k] -= alpha;
+            let mut v_norm_sq = 0.0f64;
+            for i in (k + 1)..n {
+                v_norm_sq += a[i * n + k] * a[i * n + k];
+            }
+            if v_norm_sq < 1e-30 { continue; }
+            let inv_v_norm_sq = 2.0 / v_norm_sq;
+
+            // p = inv_v_norm_sq * A[k+1..n, k+1..n] * v
+            let mut p = vec![0.0f64; n];
+            for i in (k + 1)..n {
+                let mut s = 0.0f64;
+                for j in (k + 1)..n {
+                    s += a[i * n + j] * a[j * n + k];
+                }
+                p[i] = inv_v_norm_sq * s;
+            }
+
+            // K = v^T p / (2 * v_norm_sq) * inv_v_norm_sq
+            let mut vtp = 0.0f64;
+            for i in (k + 1)..n { vtp += a[i * n + k] * p[i]; }
+            let kk = inv_v_norm_sq * vtp * 0.5;
+
+            // q = p - K * v
+            let mut qq = vec![0.0f64; n];
+            for i in (k + 1)..n {
+                qq[i] = p[i] - kk * a[i * n + k];
+            }
+
+            // A = A - v * q^T - q * v^T
+            for i in (k + 1)..n {
+                for j in (k + 1)..n {
+                    a[i * n + j] -= a[i * n + k] * qq[j] + qq[i] * a[j * n + k];
                 }
             }
-            if max_val < 1e-14 {
-                break; // converged
-            }
-            // Compute rotation angle
-            let app = a[p * n + p];
-            let aqq = a[q * n + q];
-            let apq = a[p * n + q];
-            let theta = if (app - aqq).abs() < 1e-15 {
-                std::f64::consts::FRAC_PI_4
-            } else {
-                0.5 * (2.0 * apq / (app - aqq)).atan()
-            };
-            let c = theta.cos();
-            let s = theta.sin();
-            // Apply Givens rotation
+
+            // Accumulate Q = Q * (I - inv_v_norm_sq * v * v^T)
+            // Q := Q - (Q * v) * (inv_v_norm_sq * v^T)
+            let mut qv = vec![0.0f64; n];
             for i in 0..n {
-                let aip = a[i * n + p];
-                let aiq = a[i * n + q];
-                a[i * n + p] = c * aip + s * aiq;
-                a[i * n + q] = -s * aip + c * aiq;
+                let mut s = 0.0f64;
+                for j in (k + 1)..n {
+                    s += q[i * n + j] * a[j * n + k];
+                }
+                qv[i] = s;
             }
-            for j in 0..n {
-                let apj = a[p * n + j];
-                let aqj = a[q * n + j];
-                a[p * n + j] = c * apj + s * aqj;
-                a[q * n + j] = -s * apj + c * aqj;
-            }
-            // Fix diagonal after double rotation
-            a[p * n + q] = 0.0;
-            a[q * n + p] = 0.0;
-            // Accumulate eigenvectors
             for i in 0..n {
-                let vip = v[i * n + p];
-                let viq = v[i * n + q];
-                v[i * n + p] = c * vip + s * viq;
-                v[i * n + q] = -s * vip + c * viq;
+                for j in (k + 1)..n {
+                    q[i * n + j] -= inv_v_norm_sq * qv[i] * a[j * n + k];
+                }
             }
         }
-        // Extract eigenvalues (diagonal of a)
-        let mut eigenvalues: Vec<(f64, usize)> = (0..n).map(|i| (a[i * n + i], i)).collect();
+
+        // Fill diagonal and last off-diagonal from the reduced matrix
+        for i in 0..n { diag[i] = a[i * n + i]; }
+        if n >= 2 { offd[n - 2] = a[(n - 2) * n + (n - 1)]; }
+
+        // ── Step 2: Implicit QR iteration on tridiagonal matrix ────────
+        // Wilkinson shift for cubic convergence.
+        // O(n) per iteration, O(n) iterations typical => O(n^2) total.
+
+        let max_iter = 30 * n;
+        let mut lo = 0usize;
+        let mut hi = n - 1;
+
+        for _iter in 0..max_iter {
+            // Find unreduced block
+            while lo < hi {
+                if offd[hi - 1].abs() < 1e-14 * (diag[hi - 1].abs() + diag[hi].abs()).max(1e-14) {
+                    offd[hi - 1] = 0.0;
+                    hi -= 1;
+                } else {
+                    break;
+                }
+            }
+            if hi <= lo { break; }
+
+            // Find start of unreduced block
+            let mut block_start = hi - 1;
+            while block_start > lo {
+                if offd[block_start - 1].abs() < 1e-14 * (diag[block_start - 1].abs() + diag[block_start].abs()).max(1e-14) {
+                    offd[block_start - 1] = 0.0;
+                    break;
+                }
+                block_start -= 1;
+            }
+
+            if block_start == hi {
+                // 1×1 block converged
+                hi = if hi > 0 { hi - 1 } else { break };
+                continue;
+            }
+
+            // Wilkinson shift: eigenvalue of trailing 2×2 closer to d[hi]
+            let d_hi = diag[hi];
+            let d_him1 = diag[hi - 1];
+            let e_him1 = offd[hi - 1];
+            let delta = (d_him1 - d_hi) * 0.5;
+            let sign_delta = if delta >= 0.0 { 1.0 } else { -1.0 };
+            let shift = d_hi - e_him1 * e_him1 / (delta + sign_delta * (delta * delta + e_him1 * e_him1).sqrt());
+
+            // Implicit QR step (Givens rotations)
+            let mut x = diag[block_start] - shift;
+            let mut z = offd[block_start];
+
+            for k in block_start..hi {
+                // Compute Givens rotation to zero z
+                let r = (x * x + z * z).sqrt();
+                let c = if r > 1e-30 { x / r } else { 1.0 };
+                let s = if r > 1e-30 { -z / r } else { 0.0 };
+
+                // Apply to tridiagonal elements
+                if k > block_start {
+                    offd[k - 1] = r;
+                }
+                let d0 = diag[k];
+                let d1 = diag[k + 1];
+                let e0 = offd[k];
+                diag[k] = c * c * d0 + s * s * d1 - 2.0 * c * s * e0;
+                diag[k + 1] = s * s * d0 + c * c * d1 + 2.0 * c * s * e0;
+                offd[k] = c * s * (d0 - d1) + (c * c - s * s) * e0;
+
+                if k + 1 < hi {
+                    x = offd[k];
+                    z = -s * offd[k + 1];
+                    offd[k + 1] *= c;
+                }
+
+                // Accumulate eigenvector rotation: Q[:, k:k+2] *= G
+                for i in 0..n {
+                    let qik = q[i * n + k];
+                    let qik1 = q[i * n + k + 1];
+                    q[i * n + k] = c * qik - s * qik1;
+                    q[i * n + k + 1] = s * qik + c * qik1;
+                }
+            }
+
+            // Check if all off-diagonals converged
+            let mut all_converged = true;
+            for i in lo..hi {
+                if offd[i].abs() >= 1e-14 * (diag[i].abs() + diag[i + 1].abs()).max(1e-14) {
+                    all_converged = false;
+                    break;
+                }
+            }
+            if all_converged { break; }
+        }
+
+        // ── Step 3: Sort eigenvalues ascending, reorder eigenvectors ────
+        let mut eigenvalues: Vec<(f64, usize)> = (0..n).map(|i| (diag[i], i)).collect();
         eigenvalues.sort_by(|a, b| a.0.total_cmp(&b.0));
         let vals: Vec<f64> = eigenvalues.iter().map(|&(v, _)| v).collect();
-        // Reorder eigenvector columns
+
         let mut v_sorted = vec![0.0; n * n];
         for (new_col, &(_, old_col)) in eigenvalues.iter().enumerate() {
             for row in 0..n {
-                v_sorted[row * n + new_col] = v[row * n + old_col];
+                v_sorted[row * n + new_col] = q[row * n + old_col];
             }
         }
+
         // Sign-canonical: first nonzero component positive
         for col in 0..n {
             let mut first_nonzero = 0.0;

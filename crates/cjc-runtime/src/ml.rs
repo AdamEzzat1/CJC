@@ -1073,6 +1073,206 @@ pub fn gru_cell(
 }
 
 // ---------------------------------------------------------------------------
+// Fused LSTM cell forward pass (allocation-optimized)
+// ---------------------------------------------------------------------------
+
+/// Fused LSTM cell: minimizes intermediate tensor allocations.
+///
+/// Produces bit-identical results to [`lstm_cell`] but reduces tensor
+/// allocations from 13 to 4 (2 matmuls via `linear`, 2 output `from_vec`).
+/// After the two `linear` calls the gate combination, activations, and cell /
+/// hidden-state updates are computed element-wise in a single scalar loop
+/// with no additional tensor temporaries.
+///
+/// Shape requirements are identical to [`lstm_cell`].
+pub fn lstm_cell_fused(
+    x: &Tensor,
+    h_prev: &Tensor,
+    c_prev: &Tensor,
+    w_ih: &Tensor,
+    w_hh: &Tensor,
+    b_ih: &Tensor,
+    b_hh: &Tensor,
+) -> Result<(Tensor, Tensor), String> {
+    let map_err = |e: crate::error::RuntimeError| format!("{e}");
+
+    // --- Validate shapes (same checks as lstm_cell) --------------------------
+    if x.ndim() != 2 {
+        return Err("lstm_cell_fused: x must be 2-D [batch, input_size]".into());
+    }
+    if h_prev.ndim() != 2 {
+        return Err("lstm_cell_fused: h_prev must be 2-D [batch, hidden_size]".into());
+    }
+    if c_prev.ndim() != 2 {
+        return Err("lstm_cell_fused: c_prev must be 2-D [batch, hidden_size]".into());
+    }
+    let batch = x.shape()[0];
+    let hidden_size = h_prev.shape()[1];
+    if w_ih.ndim() != 2 || w_ih.shape()[0] != 4 * hidden_size {
+        return Err(format!(
+            "lstm_cell_fused: w_ih must be [4*hidden_size, input_size], got {:?}",
+            w_ih.shape()
+        ));
+    }
+    if w_hh.ndim() != 2 || w_hh.shape()[0] != 4 * hidden_size {
+        return Err(format!(
+            "lstm_cell_fused: w_hh must be [4*hidden_size, hidden_size], got {:?}",
+            w_hh.shape()
+        ));
+    }
+    if b_ih.len() != 4 * hidden_size {
+        return Err(format!(
+            "lstm_cell_fused: b_ih must have length 4*hidden_size={}, got {}",
+            4 * hidden_size,
+            b_ih.len()
+        ));
+    }
+    if b_hh.len() != 4 * hidden_size {
+        return Err(format!(
+            "lstm_cell_fused: b_hh must have length 4*hidden_size={}, got {}",
+            4 * hidden_size,
+            b_hh.len()
+        ));
+    }
+
+    // --- Step 1: two matmuls (reuse existing Kahan-summation linear) ---------
+    let gates_ih = x.linear(w_ih, b_ih).map_err(map_err)?;
+    let gates_hh = h_prev.linear(w_hh, b_hh).map_err(map_err)?;
+
+    // --- Step 2: fused gate combination + activations + state update ---------
+    let gih = gates_ih.to_vec();
+    let ghh = gates_hh.to_vec();
+    let cprev = c_prev.to_vec();
+
+    let mut h_new_data = vec![0.0f64; batch * hidden_size];
+    let mut c_new_data = vec![0.0f64; batch * hidden_size];
+
+    for b_idx in 0..batch {
+        let base = b_idx * 4 * hidden_size;
+        for h in 0..hidden_size {
+            // Combine ih + hh for each gate (i, f, g, o)
+            let gi = gih[base + h] + ghh[base + h];
+            let gf = gih[base + hidden_size + h] + ghh[base + hidden_size + h];
+            let gg = gih[base + 2 * hidden_size + h] + ghh[base + 2 * hidden_size + h];
+            let go = gih[base + 3 * hidden_size + h] + ghh[base + 3 * hidden_size + h];
+
+            // Activations (scalar, no tensor allocation)
+            let i_val = 1.0 / (1.0 + (-gi).exp()); // sigmoid
+            let f_val = 1.0 / (1.0 + (-gf).exp()); // sigmoid
+            let g_val = gg.tanh();                   // tanh
+            let o_val = 1.0 / (1.0 + (-go).exp()); // sigmoid
+
+            // Cell and hidden state update
+            let c_idx = b_idx * hidden_size + h;
+            let c_val = f_val * cprev[c_idx] + i_val * g_val;
+            c_new_data[c_idx] = c_val;
+            h_new_data[c_idx] = o_val * c_val.tanh();
+        }
+    }
+
+    let h_new = Tensor::from_vec(h_new_data, &[batch, hidden_size]).map_err(map_err)?;
+    let c_new = Tensor::from_vec(c_new_data, &[batch, hidden_size]).map_err(map_err)?;
+
+    Ok((h_new, c_new))
+}
+
+// ---------------------------------------------------------------------------
+// Fused GRU cell forward pass (allocation-optimized)
+// ---------------------------------------------------------------------------
+
+/// Fused GRU cell: minimizes intermediate tensor allocations.
+///
+/// Produces bit-identical results to [`gru_cell`] but reduces tensor
+/// allocations from ~12 to 3 (2 matmuls via `linear`, 1 output `from_vec`).
+/// After the two `linear` calls the gate combination, activations, and
+/// hidden-state update are computed element-wise in a single scalar loop.
+///
+/// Shape requirements are identical to [`gru_cell`].
+pub fn gru_cell_fused(
+    x: &Tensor,
+    h_prev: &Tensor,
+    w_ih: &Tensor,
+    w_hh: &Tensor,
+    b_ih: &Tensor,
+    b_hh: &Tensor,
+) -> Result<Tensor, String> {
+    let map_err = |e: crate::error::RuntimeError| format!("{e}");
+
+    // --- Validate shapes (same checks as gru_cell) ---------------------------
+    if x.ndim() != 2 {
+        return Err("gru_cell_fused: x must be 2-D [batch, input_size]".into());
+    }
+    if h_prev.ndim() != 2 {
+        return Err("gru_cell_fused: h_prev must be 2-D [batch, hidden_size]".into());
+    }
+    let batch = x.shape()[0];
+    let hidden_size = h_prev.shape()[1];
+    if w_ih.ndim() != 2 || w_ih.shape()[0] != 3 * hidden_size {
+        return Err(format!(
+            "gru_cell_fused: w_ih must be [3*hidden_size, input_size], got {:?}",
+            w_ih.shape()
+        ));
+    }
+    if w_hh.ndim() != 2 || w_hh.shape()[0] != 3 * hidden_size {
+        return Err(format!(
+            "gru_cell_fused: w_hh must be [3*hidden_size, hidden_size], got {:?}",
+            w_hh.shape()
+        ));
+    }
+    if b_ih.len() != 3 * hidden_size {
+        return Err(format!(
+            "gru_cell_fused: b_ih must have length 3*hidden_size={}, got {}",
+            3 * hidden_size,
+            b_ih.len()
+        ));
+    }
+    if b_hh.len() != 3 * hidden_size {
+        return Err(format!(
+            "gru_cell_fused: b_hh must have length 3*hidden_size={}, got {}",
+            3 * hidden_size,
+            b_hh.len()
+        ));
+    }
+
+    // --- Step 1: two matmuls (reuse existing Kahan-summation linear) ---------
+    let gates_ih = x.linear(w_ih, b_ih).map_err(map_err)?;
+    let gates_hh = h_prev.linear(w_hh, b_hh).map_err(map_err)?;
+
+    // --- Step 2: fused gate combination + activations + state update ---------
+    let gih = gates_ih.to_vec();
+    let ghh = gates_hh.to_vec();
+    let hp = h_prev.to_vec();
+
+    let mut h_new_data = vec![0.0f64; batch * hidden_size];
+
+    for b_idx in 0..batch {
+        let base = b_idx * 3 * hidden_size;
+        for h in 0..hidden_size {
+            // r = sigmoid(ih_r + hh_r)
+            let r_val =
+                1.0 / (1.0 + (-(gih[base + h] + ghh[base + h])).exp());
+            // z = sigmoid(ih_z + hh_z)
+            let z_val = 1.0
+                / (1.0
+                    + (-(gih[base + hidden_size + h]
+                        + ghh[base + hidden_size + h]))
+                        .exp());
+            // n = tanh(ih_n + r * hh_n)
+            let n_val = (gih[base + 2 * hidden_size + h]
+                + r_val * ghh[base + 2 * hidden_size + h])
+                .tanh();
+
+            // h_new = (1 - z) * n + z * h_prev
+            let h_idx = b_idx * hidden_size + h;
+            h_new_data[h_idx] = (1.0 - z_val) * n_val + z_val * hp[h_idx];
+        }
+    }
+
+    Tensor::from_vec(h_new_data, &[batch, hidden_size])
+        .map_err(|e| format!("{e}"))
+}
+
+// ---------------------------------------------------------------------------
 // Multi-Head Attention
 // ---------------------------------------------------------------------------
 
