@@ -14,11 +14,14 @@
 pub mod cfg;
 pub mod dominators;
 pub mod escape;
+pub mod loop_analysis;
 pub mod monomorph;
 pub mod nogc_verify;
 pub mod optimize;
+pub mod reduction;
 pub mod ssa;
 pub mod ssa_optimize;
+pub mod verify;
 
 use cjc_ast::{BinOp, UnaryOp, Visibility};
 pub use escape::AllocHint;
