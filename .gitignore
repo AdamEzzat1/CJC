@@ -1,6 +1,5 @@
 /target
 fuzz/target/
-Cargo.lock
 *.exe
 *.pdb
 .claude/
