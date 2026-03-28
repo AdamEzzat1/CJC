@@ -1,3 +1,9 @@
+//! Tokenizer for the CJC programming language.
+//!
+//! Usage: `let (tokens, diags) = Lexer::new(src).tokenize();`
+//!
+//! Produces a flat token stream consumed by the parser.
+
 use cjc_diag::{Diagnostic, DiagnosticBag, Span};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,3 +1,9 @@
+//! Deterministic computation primitives for CJC.
+//!
+//! Provides `SplitMix64` RNG (identical sequences across platforms),
+//! `KahanAccumulator` for compensated summation, and `BinnedAccumulator`
+//! for order-independent floating-point reductions.
+
 pub mod kahan;
 pub use kahan::{KahanAccumulatorF32, KahanAccumulatorF64};
 

@@ -1,3 +1,8 @@
+//! Diagnostic infrastructure for the CJC compiler.
+//!
+//! Provides `DiagnosticBag` for collecting errors and warnings, `Span` for
+//! source locations, and structured error codes (E0xxx through E8xxx).
+
 pub mod error_codes;
 
 pub use error_codes::ErrorCode;

@@ -1,3 +1,8 @@
+//! Type system and inference engine for CJC.
+//!
+//! Defines the `Type` enum, type environment, function signature registry,
+//! and Hindley-Milner style type inference with support for generics.
+
 pub mod inference;
 
 use std::collections::BTreeMap;

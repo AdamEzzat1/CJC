@@ -1,3 +1,8 @@
+//! Operator dispatch layer for the CJC runtime.
+//!
+//! Resolves overloaded operators and function signatures by matching argument
+//! types against registered signatures with specificity-based ranking.
+
 use cjc_types::{FnSigEntry, Type, TypeEnv};
 use cjc_diag::{Diagnostic, DiagnosticBag, Span};
 

@@ -1,3 +1,9 @@
+//! Automatic differentiation for CJC.
+//!
+//! Provides forward-mode differentiation via dual numbers and reverse-mode
+//! differentiation via a computation tape. Supports `grad()`, `jacobian()`,
+//! and gradient graph construction for ML training loops.
+
 use cjc_runtime::Tensor;
 use std::cell::RefCell;
 use std::rc::Rc;

@@ -1,3 +1,8 @@
+//! Abstract syntax tree definitions for CJC.
+//!
+//! Defines `Program`, `Stmt`, `Expr`, `Decl`, and all AST node variants
+//! produced by the parser. This is a leaf crate with no internal dependencies.
+
 use std::fmt;
 
 /// Source span: byte offset range in source code.
