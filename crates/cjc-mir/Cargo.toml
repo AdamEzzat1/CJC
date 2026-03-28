@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-cjc-hir = { path = "../cjc-hir" }
-cjc-ast = { path = "../cjc-ast" }
-cjc-types = { path = "../cjc-types" }
-cjc-diag = { path = "../cjc-diag" }
+cjc-hir.workspace = true
+cjc-ast.workspace = true
+cjc-types.workspace = true
+cjc-diag.workspace = true

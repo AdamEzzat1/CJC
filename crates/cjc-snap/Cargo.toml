@@ -4,4 +4,4 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-cjc-runtime = { path = "../cjc-runtime" }
+cjc-runtime.workspace = true

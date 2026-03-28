@@ -5,19 +5,19 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-cjc-mir = { path = "../cjc-mir" }
-cjc-hir = { path = "../cjc-hir" }
-cjc-ast = { path = "../cjc-ast" }
-cjc-types = { path = "../cjc-types" }
-cjc-runtime = { path = "../cjc-runtime" }
-cjc-dispatch = { path = "../cjc-dispatch" }
-cjc-diag = { path = "../cjc-diag" }
-cjc-repro = { path = "../cjc-repro" }
-cjc-ad = { path = "../cjc-ad" }
-cjc-data = { path = "../cjc-data" }
-cjc-regex = { path = "../cjc-regex" }
-cjc-module = { path = "../cjc-module" }
-cjc-lexer = { path = "../cjc-lexer" }
-cjc-parser = { path = "../cjc-parser" }
-cjc-snap = { path = "../cjc-snap" }
-cjc-vizor = { path = "../cjc-vizor" }
+cjc-mir.workspace = true
+cjc-hir.workspace = true
+cjc-ast.workspace = true
+cjc-types.workspace = true
+cjc-runtime.workspace = true
+cjc-dispatch.workspace = true
+cjc-diag.workspace = true
+cjc-repro.workspace = true
+cjc-ad.workspace = true
+cjc-data.workspace = true
+cjc-regex.workspace = true
+cjc-module.workspace = true
+cjc-lexer.workspace = true
+cjc-parser.workspace = true
+cjc-snap.workspace = true
+cjc-vizor.workspace = true

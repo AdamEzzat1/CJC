@@ -8,9 +8,9 @@ cjc-ast = { workspace = true }
 cjc-parser = { workspace = true }
 cjc-diag = { workspace = true }
 cjc-lexer = { workspace = true }
-cjc-hir = { path = "../cjc-hir" }
-cjc-mir = { path = "../cjc-mir" }
-cjc-types = { path = "../cjc-types" }
+cjc-hir.workspace = true
+cjc-mir.workspace = true
+cjc-types.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

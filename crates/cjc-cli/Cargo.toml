@@ -15,8 +15,8 @@ cjc-parser = { workspace = true }
 cjc-types = { workspace = true }
 cjc-runtime = { workspace = true }
 cjc-eval = { workspace = true }
-cjc-hir = { path = "../cjc-hir" }
-cjc-mir = { path = "../cjc-mir" }
-cjc-mir-exec = { path = "../cjc-mir-exec" }
-cjc-module = { path = "../cjc-module" }
-cjc-snap = { path = "../cjc-snap" }
+cjc-hir.workspace = true
+cjc-mir.workspace = true
+cjc-mir-exec.workspace = true
+cjc-module.workspace = true
+cjc-snap.workspace = true

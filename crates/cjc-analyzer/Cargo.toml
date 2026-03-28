@@ -1,8 +1,8 @@
 [package]
 name = "cjc-analyzer"
-version = "0.1.0"
-edition = "2021"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "CJC Language Server — LSP skeleton for IDE integration"
 
 [dependencies]
@@ -13,9 +13,9 @@ serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 
 # CJC workspace crates
-cjc-ast = { path = "../cjc-ast" }
-cjc-diag = { path = "../cjc-diag" }
-cjc-lexer = { path = "../cjc-lexer" }
-cjc-parser = { path = "../cjc-parser" }
-cjc-runtime = { path = "../cjc-runtime" }
-cjc-vizor = { path = "../cjc-vizor" }
+cjc-ast.workspace = true
+cjc-diag.workspace = true
+cjc-lexer.workspace = true
+cjc-parser.workspace = true
+cjc-runtime.workspace = true
+cjc-vizor.workspace = true

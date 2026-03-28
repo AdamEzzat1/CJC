@@ -39,24 +39,24 @@ license = "MIT"
 
 # Root package dependencies — enables integration tests in tests/
 [dependencies]
-cjc-ast = { path = "crates/cjc-ast" }
-cjc-diag = { path = "crates/cjc-diag" }
-cjc-lexer = { path = "crates/cjc-lexer" }
-cjc-parser = { path = "crates/cjc-parser" }
-cjc-types = { path = "crates/cjc-types" }
-cjc-dispatch = { path = "crates/cjc-dispatch" }
-cjc-runtime = { path = "crates/cjc-runtime" }
-cjc-eval = { path = "crates/cjc-eval" }
-cjc-ad = { path = "crates/cjc-ad" }
-cjc-data = { path = "crates/cjc-data" }
-cjc-repro = { path = "crates/cjc-repro" }
-cjc-hir = { path = "crates/cjc-hir" }
-cjc-mir = { path = "crates/cjc-mir" }
-cjc-mir-exec = { path = "crates/cjc-mir-exec" }
-cjc-regex = { path = "crates/cjc-regex" }
-cjc-module = { path = "crates/cjc-module" }
-cjc-snap = { path = "crates/cjc-snap" }
-cjc-vizor = { path = "crates/cjc-vizor" }
+cjc-ast.workspace = true
+cjc-diag.workspace = true
+cjc-lexer.workspace = true
+cjc-parser.workspace = true
+cjc-types.workspace = true
+cjc-dispatch.workspace = true
+cjc-runtime.workspace = true
+cjc-eval.workspace = true
+cjc-ad.workspace = true
+cjc-data.workspace = true
+cjc-repro.workspace = true
+cjc-hir.workspace = true
+cjc-mir.workspace = true
+cjc-mir-exec.workspace = true
+cjc-regex.workspace = true
+cjc-module.workspace = true
+cjc-snap.workspace = true
+cjc-vizor.workspace = true
 
 [dev-dependencies]
 bolero = "0.13.4"
@@ -64,21 +64,26 @@ proptest = "1"
 tempfile = "3"
 
 [workspace.dependencies]
-cjc-ast = { path = "crates/cjc-ast" }
-cjc-diag = { path = "crates/cjc-diag" }
-cjc-lexer = { path = "crates/cjc-lexer" }
-cjc-parser = { path = "crates/cjc-parser" }
-cjc-types = { path = "crates/cjc-types" }
-cjc-dispatch = { path = "crates/cjc-dispatch" }
-cjc-runtime = { path = "crates/cjc-runtime" }
-cjc-eval = { path = "crates/cjc-eval" }
-cjc-ad = { path = "crates/cjc-ad" }
-cjc-data = { path = "crates/cjc-data" }
-cjc-repro = { path = "crates/cjc-repro" }
-cjc-cli = { path = "crates/cjc-cli" }
-cjc-module = { path = "crates/cjc-module" }
-cjc-snap = { path = "crates/cjc-snap" }
-cjc-vizor = { path = "crates/cjc-vizor" }
+cjc-ast = { path = "crates/cjc-ast", version = "0.1.0" }
+cjc-diag = { path = "crates/cjc-diag", version = "0.1.0" }
+cjc-lexer = { path = "crates/cjc-lexer", version = "0.1.0" }
+cjc-parser = { path = "crates/cjc-parser", version = "0.1.0" }
+cjc-types = { path = "crates/cjc-types", version = "0.1.0" }
+cjc-dispatch = { path = "crates/cjc-dispatch", version = "0.1.0" }
+cjc-runtime = { path = "crates/cjc-runtime", version = "0.1.0" }
+cjc-eval = { path = "crates/cjc-eval", version = "0.1.0" }
+cjc-ad = { path = "crates/cjc-ad", version = "0.1.0" }
+cjc-data = { path = "crates/cjc-data", version = "0.1.0" }
+cjc-repro = { path = "crates/cjc-repro", version = "0.1.0" }
+cjc-cli = { path = "crates/cjc-cli", version = "0.1.0" }
+cjc-module = { path = "crates/cjc-module", version = "0.1.0" }
+cjc-snap = { path = "crates/cjc-snap", version = "0.1.0" }
+cjc-vizor = { path = "crates/cjc-vizor", version = "0.1.0" }
+cjc-hir = { path = "crates/cjc-hir", version = "0.1.0" }
+cjc-mir = { path = "crates/cjc-mir", version = "0.1.0" }
+cjc-mir-exec = { path = "crates/cjc-mir-exec", version = "0.1.0" }
+cjc-regex = { path = "crates/cjc-regex", version = "0.1.0" }
+cjc-analyzer = { path = "crates/cjc-analyzer", version = "0.1.0" }
 
 [[test]]
 name = "fixtures"

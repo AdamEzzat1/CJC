@@ -12,7 +12,7 @@ cjc-diag = { workspace = true }
 cjc-ad = { workspace = true }
 cjc-data = { workspace = true }
 cjc-repro = { workspace = true }
-cjc-regex = { path = "../cjc-regex" }
-cjc-snap = { path = "../cjc-snap" }
-cjc-vizor = { path = "../cjc-vizor" }
+cjc-regex.workspace = true
+cjc-snap.workspace = true
+cjc-vizor.workspace = true
 cjc-module = { workspace = true }
