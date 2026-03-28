@@ -1662,6 +1662,13 @@ impl Interpreter {
                 // TidyView Phase 5: Preprocessing builtins
                 | "fillna" | "is_not_null" | "interpolate_linear" | "coalesce"
                 | "cut" | "qcut" | "min_max_scale" | "robust_scale"
+                // Parity: Bastion primitives (present in MIR-exec)
+                | "mean"
+                | "nth_element" | "median_fast" | "quantile_fast"
+                | "filter_mask" | "sample_indices"
+                | "erf" | "erfc"
+                // Parity: Stationarity tests (present in MIR-exec)
+                | "adf_test" | "kpss_test" | "pp_test"
         ) || (self.libraries_enabled.contains("vizor") && matches!(name,
                 "vizor_plot" | "vizor_plot_xy"
         ))
