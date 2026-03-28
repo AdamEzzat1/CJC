@@ -1,0 +1,107 @@
+---
+title: "Projects"
+---
+
+## CJC — Computation Jacobian Core [Beta]{.badge-beta}
+
+A deterministic programming language for scientific computing, built from scratch in Rust with nearly zero external dependencies.
+
+CJC covers the full stack: lexer, parser, type checker, two intermediate representations (HIR and MIR), an optimizer, two execution engines, and a runtime with ~300 built-in functions spanning math, statistics, linear algebra, signal processing, machine learning, and data manipulation.
+
+**Key technical facts:**
+
+- **6.4 MB single binary** — the entire language in one file
+- 20 Rust crates, nearly zero external dependencies
+- 5,300+ passing tests across 55 test binaries
+- Deterministic execution: same seed = bit-identical results
+
+---
+
+### Compiler and Runtime
+
+::: {.project-card}
+### Dual-Engine Compiler Pipeline
+
+CJC has two execution paths that must always agree:
+
+1. **AST Interpreter** (`cjc-eval`) — direct tree-walk execution for rapid prototyping and debugging
+2. **MIR Executor** (`cjc-mir-exec`) — register-machine execution through HIR → MIR lowering with optimization
+
+Parity tests verify that both engines produce identical results for every program. The MIR path supports constant folding and dead code elimination (`--mir-opt`), and a NoGC static verifier proves that annotated code paths never trigger garbage collection.
+:::
+
+::: {.project-card}
+### Type System and Diagnostics
+
+Unification-based type checker with explicit annotations. Comprehensive diagnostic engine with structured error codes (E0xxx–E8xxx) and rich terminal output. Language features include closures with capture analysis, match expressions with structural destructuring, for-loops, structs, enums, and tuples.
+:::
+
+---
+
+### Scientific Computing
+
+::: {.project-card}
+### Tensor and Linear Algebra Runtime
+
+N-dimensional tensors with zero-copy COW (copy-on-write) buffers. Operations include matrix multiplication (sequential, tiled, and parallel), SVD, QR, Cholesky, eigenvalue decomposition, determinant, inverse, and norm computation.
+
+All floating-point reductions use Kahan or binned summation to maintain numerical stability. SIMD kernels avoid FMA instructions to preserve cross-platform bit-identical results.
+:::
+
+::: {.project-card}
+### Automatic Differentiation
+
+Forward-mode AD via dual numbers and reverse-mode AD via tape-based gradient computation. Supports standard operations (arithmetic, trigonometric, exponential, logarithmic, power) with automatic derivative propagation.
+
+Used in practice for physics-informed neural networks (PINNs) and physics-informed machine learning (PIML) — demonstrated on heat equation and harmonic oscillator problems with verified convergence.
+:::
+
+::: {.project-card}
+### Statistics and Distributions
+
+35+ statistical functions (mean, std, variance, correlation, covariance, percentile) and 13 probability distributions (normal, uniform, beta, gamma, binomial, chi-squared, t, Weibull). 15 hypothesis tests (t-test, chi-squared, ANOVA, Wilcoxon, Mann-Whitney). All seeded and deterministic.
+:::
+
+---
+
+### Data Science
+
+::: {.project-card}
+### Tidyverse-Inspired Data DSL
+
+73+ DataFrame operations modeled on R's tidyverse: `filter`, `select`, `mutate`, `group_by`, `summarize`, `arrange`, `pivot_longer`, `pivot_wider`, joins (inner, left, right, anti, semi), and window functions (`lag`, `lead`, `cumsum`, `ntile`).
+
+Supports typed columns (int, float, string, boolean, categorical, datetime), CSV ingestion, and lazy evaluation with COW semantics.
+:::
+
+---
+
+### Benchmarks and Demonstrations
+
+::: {.project-card}
+### Chess RL Benchmark
+
+A full chess environment and REINFORCE reinforcement learning agent written entirely in CJC. 49 tests covering board invariants, legal move generation, policy gradient updates, and training determinism. Validates that CJC can express a complete ML workflow end-to-end.
+:::
+
+::: {.project-card}
+### Physics-Informed ML (SciML)
+
+PIML demonstration: 1D heat equation solved via polynomial regression with physics residual penalty. PINN demonstration: harmonic oscillator solved with a neural network surrogate. Both verified for solution accuracy, PDE residual convergence, gradient correctness, boundary condition satisfaction, and bit-identical determinism across runs.
+:::
+
+---
+
+### Tooling
+
+::: {.project-card}
+### CLI Toolchain
+
+15+ subcommands: `run`, `check`, `parse`, `lex`, `repl`, plus inspection (`inspect`, `schema`), analysis (`trace`, `flow`, `drift`), performance (`bench`, `mem`), and utility (`pack`, `doctor`, `forge`, `patch`). Supports `--reproducible` mode, `--seed` control, `--mir-opt` optimization, and rich diagnostic formatting.
+:::
+
+::: {.project-card}
+### Visualization (Vizor)
+
+Grammar-of-graphics visualization library built into the CJC ecosystem. Declarative plot specification following principles similar to ggplot2. Currently integrated at the library level within the CJC runtime.
+:::

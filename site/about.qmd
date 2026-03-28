@@ -1,0 +1,69 @@
+---
+title: "About"
+---
+
+## Who I Am
+
+I'm **Adam Ezzat** — a Data Scientist and Data Analyst based in Cupertino, CA, with a background that spans economics, business analytics, and deep learning. I build machine learning models, design data pipelines, and — in my own time — build programming languages from scratch.
+
+My professional work focuses on forecasting, statistical modeling, and turning messy real-world data into systems that actually make decisions better. My personal work is where I push further: CJC, a deterministic scientific computing language written entirely in Rust, is the project where everything I've learned converges.
+
+## Professional Experience
+
+::: {.value-card}
+#### Big Data Insights — Data Scientist
+*Cupertino, CA | 2023 -- Present*
+
+Building and deploying ML and statistical models for sales forecasting. I designed forecasting systems using ARIMA, SARIMA, LSTM, and N-BEATS architectures, and developed the company's core forecasting product around the N-BEATS neural network. I also apply k-NN for historical analog pattern matching and automate end-to-end data pipelines in Python.
+:::
+
+::: {.value-card}
+#### Amazon, Lab 126 — Data Collection Specialist, Lab Engineer
+*Sunnyvale, CA | 2021 -- 2023*
+
+This is where I learned how much data quality matters — and how hard it is to get right. I ran experiments with audio recording devices and spent as much time diagnosing the data as collecting it. When results looked off, the first question was always: is this an environment issue, a script issue, or genuinely bad data? Tracing problems back through the pipeline — from raw recordings to processed outputs — taught me that clean data isn't a preprocessing step, it's the foundation everything else depends on.
+:::
+
+::: {.value-card}
+#### Sangu — Data Scientist (Part-Time)
+*Sunnyvale, CA | 2023*
+
+Coordinated data engineering and analytics initiatives. Built PostgreSQL data pipelines, automated log extraction from Linux servers using Perl, and contributed to enterprise CRM data migration projects.
+:::
+
+::: {.value-card}
+#### Big Data Insights — Data Analyst
+*Sunnyvale, CA | 2019 -- 2023*
+
+Analyzed complex datasets to support product optimization and strategic decisions. Built a K-means clustering model for event location optimization, enhanced data migration with ML techniques, and conducted performance analysis in distributed system environments.
+:::
+
+## Technical Skills
+
+| Category | Tools |
+|---|---|
+| **Languages** | Python, SQL, R, Perl, JavaScript, Bash, Rust |
+| **ML / Deep Learning** | Scikit-learn, TensorFlow, Pandas, ARIMA, SARIMA, LSTM, N-BEATS |
+| **Cloud & Big Data** | Amazon QuickSight, Amazon Redshift, Amazon Glue, Databricks, Spark |
+| **Analysis & Viz** | Tableau, Jupyter Notebook, Microsoft Excel |
+| **Systems** | PostgreSQL, Linux, Git, Rust (compiler engineering) |
+
+## Education
+
+- **M.B.A. in Business Analytics and Technical Marketing** — St. Mary's College of California, 2018
+- **B.S. in Economics** — Santa Clara University, 2013
+- **Data Science Certificate** (Specialization in Machine and Deep Learning), 2021
+
+## The CJC Project
+
+Outside of my professional work, I'm building **CJC** — a deterministic scientific computing language implemented as a 20-crate Rust workspace. It's where my data science background meets systems programming: a language with built-in tensors, automatic differentiation, statistical distributions, and guaranteed reproducibility. The compiler, runtime, and all core libraries are built from scratch with nearly zero external dependencies.
+
+CJC is in active beta — the full compiler pipeline, dual execution engines, ~300 builtins, and end-to-end ML benchmarks are all working. It's a serious technical project, not a toy, but it's not yet production-ready.
+
+You can read more about it in [the blog post](/blog/posts/introducing-cjc/index.html) or on the [projects page](/projects.html).
+
+## Get in Touch
+
+- [GitHub](https://github.com/AdamEzzat1)
+- [LinkedIn](https://linkedin.com/in/adamezzat)
+- Email: adamezzat24@gmail.com

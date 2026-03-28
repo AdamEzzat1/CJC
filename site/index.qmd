@@ -1,0 +1,73 @@
+---
+title: "Adam Ezzat"
+page-layout: full
+toc: false
+---
+
+::: {.hero}
+# Adam Ezzat {.unlisted}
+
+::: {.lead}
+Data Scientist. Language Designer. Builder of things from scratch.
+:::
+:::
+
+---
+
+## The Path Here
+
+I didn't start in computer science. I started in economics — studying systems, incentives, and how decisions get made under uncertainty. That curiosity about modeling the real world pulled me toward data, and data pulled me toward code.
+
+My first real technical work was in operations analytics — SQL queries, Excel models, the kind of work where you learn that most business problems are really data problems in disguise. From there I moved into data science proper: building forecasting models, automating pipelines, and learning that the gap between "a model that works in a notebook" and "a system that works in production" is where most of the real engineering lives.
+
+At **Amazon Lab 126**, I ran experiments with audio recording devices and quickly learned that the hardest part of data work isn't the modeling — it's figuring out why your data looks wrong. Is it an environment issue? A script bug? A device misconfiguration? Tracing problems through the full pipeline taught me that clean data isn't a preprocessing step — it's the foundation everything else depends on.
+
+At **Big Data Insights**, I went deeper into ML — designing and deploying forecasting systems using ARIMA, SARIMA, LSTM, and eventually N-BEATS neural architectures. I built the company's core forecasting product and learned firsthand how much of "data science" is really about building reliable, reproducible pipelines that other people can trust.
+
+---
+
+## The Question That Led to CJC
+
+Somewhere along the way, a question started bothering me: *why is reproducibility so hard?*
+
+Every data scientist knows the feeling. You train a model, get great results, and then can't reproduce them three days later. Different library versions, different floating-point behavior across platforms, hash map iteration order changing between runs. The tools we use are powerful, but they weren't designed with determinism as a priority.
+
+I wanted to understand what it would take to build a computing environment where the same program with the same seed produces *exactly* the same output — not approximately, not within tolerance, but bit-identical — every single time.
+
+That question became **CJC**: a programming language I'm building from scratch in Rust, designed from the ground up for deterministic scientific computing. No external dependencies for core functionality. No hidden sources of non-determinism. Every floating-point reduction uses compensated summation. Every collection is ordered. Every random number comes from a seeded, splittable generator.
+
+---
+
+## What I Bring Together
+
+::: {.value-card}
+#### Data Science & ML
+Time-series forecasting, clustering, predictive modeling, neural network architectures (LSTM, N-BEATS, REINFORCE). Professional experience building and deploying models that actually ship.
+:::
+
+::: {.value-card}
+#### Systems & Infrastructure
+Data pipelines, automation, validation frameworks, database engineering. The unsexy work that makes everything else possible.
+:::
+
+::: {.value-card}
+#### Language & Compiler Engineering
+Lexer, parser, type system, HIR/MIR lowering, optimization passes, dual execution engines — all built from scratch in Rust. 20 crates, 5,300+ tests, 6.4 MB single binary.
+:::
+
+::: {.value-card}
+#### The Full Stack of Understanding
+Economics gave me the "why." Data science gave me the "what." Systems engineering gave me the "how." CJC is where all three meet.
+:::
+
+---
+
+## Where I Am Now
+
+Professionally, I'm a Data Scientist at Big Data Insights, building production forecasting systems. Personally, I'm deep in the CJC compiler — pushing toward a stable module system, improving type inference, and writing about the process along the way.
+
+I believe the best way to understand a system is to build it yourself. That's true for forecasting models, data pipelines, and — it turns out — entire programming languages.
+
+---
+
+[Read the blog](blog/index.html){.btn .btn-primary} [View projects](projects.html){.btn .btn-outline-primary} [About me](about.html){.btn .btn-outline-primary}

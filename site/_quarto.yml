@@ -1,0 +1,44 @@
+project:
+  type: website
+  output-dir: _site
+
+website:
+  title: "Adam Ezzat"
+  description: "Systems engineer building CJC — a deterministic scientific computing language"
+  site-url: https://adamezzat.dev
+  navbar:
+    background: dark
+    left:
+      - href: index.qmd
+        text: Home
+      - href: about.qmd
+        text: About
+      - href: projects.qmd
+        text: Projects
+      - href: blog/index.qmd
+        text: Blog
+    right:
+      - icon: github
+        href: https://github.com/adamezzat
+        aria-label: GitHub
+      - icon: linkedin
+        href: https://linkedin.com/in/adamezzat
+        aria-label: LinkedIn
+  page-footer:
+    center: "&copy; 2026 Adam Ezzat. Built with [Quarto](https://quarto.org/)."
+
+format:
+  html:
+    theme:
+      light: [cosmo, styles.css]
+      dark: [darkly, styles.css]
+    toc: true
+    toc-depth: 3
+    code-copy: true
+    code-overflow: scroll
+    highlight-style:
+      light: github
+      dark: monokai
+    smooth-scroll: true
+    anchor-sections: true
+    mainfont: "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
