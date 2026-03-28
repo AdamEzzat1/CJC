@@ -3,6 +3,9 @@ name = "cjc-mir-exec"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "MIR register-machine executor for CJC"
 
 [dependencies]
 cjc-mir.workspace = true

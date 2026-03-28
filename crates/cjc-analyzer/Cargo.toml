@@ -3,7 +3,9 @@ name = "cjc-analyzer"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "CJC Language Server — LSP skeleton for IDE integration"
+authors.workspace = true
+repository.workspace = true
+description = "Experimental language server for CJC"
 
 [dependencies]
 # LSP protocol

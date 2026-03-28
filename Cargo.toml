@@ -36,6 +36,9 @@ resolver = "2"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+authors = ["Adam Ezzat"]
+repository = "https://github.com/AdamEzzat1/CJC"
+homepage = "https://github.com/AdamEzzat1/CJC"
 
 # Root package dependencies — enables integration tests in tests/
 [dependencies]

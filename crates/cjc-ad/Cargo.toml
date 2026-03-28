@@ -2,6 +2,10 @@
 name = "cjc-ad"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Automatic differentiation: forward-mode dual numbers and reverse-mode tape"
 
 [dependencies]
 cjc-runtime = { workspace = true }

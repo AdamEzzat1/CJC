@@ -2,5 +2,9 @@
 name = "cjc-repro"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Deterministic RNG, Kahan summation, and binned accumulators"
 
 [dependencies]

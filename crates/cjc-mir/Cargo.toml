@@ -3,6 +3,9 @@ name = "cjc-mir"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Mid-level IR with CFG, SSA, dominators, and optimization passes"
 
 [dependencies]
 cjc-hir.workspace = true

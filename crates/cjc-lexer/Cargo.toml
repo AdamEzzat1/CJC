@@ -2,6 +2,10 @@
 name = "cjc-lexer"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Tokenizer for the CJC programming language"
 
 [dependencies]
 cjc-diag = { workspace = true }

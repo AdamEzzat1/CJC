@@ -2,6 +2,10 @@
 name = "cjc-cli"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Command-line interface for the CJC compiler and runtime"
 
 [[bin]]
 name = "cjc"

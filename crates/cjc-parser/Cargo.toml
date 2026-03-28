@@ -2,6 +2,10 @@
 name = "cjc-parser"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Pratt parser for CJC source code"
 
 [dependencies]
 cjc-ast = { workspace = true }
