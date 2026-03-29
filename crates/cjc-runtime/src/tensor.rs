@@ -343,8 +343,20 @@ impl Tensor {
                 off_a += indices[d] * a_broadcast.strides[d];
                 off_b += indices[d] * b_broadcast.strides[d];
             }
-            let va = a_broadcast.buffer.get(off_a).unwrap_or(0.0);
-            let vb = b_broadcast.buffer.get(off_b).unwrap_or(0.0);
+            let va = a_broadcast.buffer.get(off_a).ok_or_else(|| {
+                RuntimeError::InvalidOperation(format!(
+                    "broadcast binop: left operand index {} out of bounds (buffer len {})",
+                    off_a,
+                    a_broadcast.buffer.len()
+                ))
+            })?;
+            let vb = b_broadcast.buffer.get(off_b).ok_or_else(|| {
+                RuntimeError::InvalidOperation(format!(
+                    "broadcast binop: right operand index {} out of bounds (buffer len {})",
+                    off_b,
+                    b_broadcast.buffer.len()
+                ))
+            })?;
             data.push(op(va, vb));
 
             for d in (0..ndim).rev() {

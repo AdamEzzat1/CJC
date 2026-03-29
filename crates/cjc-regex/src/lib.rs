@@ -177,6 +177,8 @@ impl ByteClass {
 struct Nfa {
     nodes: Vec<NfaNode>,
     start: usize,
+    /// True if any quantifier in the pattern is non-greedy (lazy).
+    has_lazy: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -188,6 +190,7 @@ struct Compiler<'a> {
     pos: usize,
     nodes: Vec<NfaNode>,
     flags: Flags,
+    has_lazy: bool,
 }
 
 impl<'a> Compiler<'a> {
@@ -197,6 +200,7 @@ impl<'a> Compiler<'a> {
             pos: 0,
             nodes: Vec::new(),
             flags: flags.clone(),
+            has_lazy: false,
         }
     }
 
@@ -232,6 +236,7 @@ impl<'a> Compiler<'a> {
         Ok(Nfa {
             nodes: self.nodes,
             start,
+            has_lazy: self.has_lazy,
         })
     }
 
@@ -312,33 +317,70 @@ impl<'a> Compiler<'a> {
         match self.peek() {
             Some(b'*') => {
                 self.advance();
+                let lazy = self.peek() == Some(b'?');
+                if lazy {
+                    self.advance();
+                    self.has_lazy = true;
+                }
                 // Split → (body → back to split) | (skip)
                 let split = self.emit(NfaNode::Split(s, usize::MAX));
                 self.patch(e, split);
                 let out = self.emit(NfaNode::Epsilon(usize::MAX));
-                // Make split's second path go to out
-                if let NfaNode::Split(_, ref mut b) = self.nodes[split] {
-                    *b = out;
+                if lazy {
+                    // Non-greedy: try skip (out) first, body (s) second
+                    if let NfaNode::Split(ref mut a, ref mut b) = self.nodes[split] {
+                        *a = out;
+                        *b = s;
+                    }
+                } else {
+                    // Greedy: try body (s) first, skip (out) second
+                    if let NfaNode::Split(_, ref mut b) = self.nodes[split] {
+                        *b = out;
+                    }
                 }
                 Ok((split, out))
             }
             Some(b'+') => {
                 self.advance();
+                let lazy = self.peek() == Some(b'?');
+                if lazy {
+                    self.advance();
+                    self.has_lazy = true;
+                }
                 // body → split(body, out)
                 let split = self.emit(NfaNode::Split(s, usize::MAX));
                 self.patch(e, split);
                 let out = self.emit(NfaNode::Epsilon(usize::MAX));
-                if let NfaNode::Split(_, ref mut b) = self.nodes[split] {
-                    *b = out;
+                if lazy {
+                    // Non-greedy: try exit (out) first, repeat (s) second
+                    if let NfaNode::Split(ref mut a, ref mut b) = self.nodes[split] {
+                        *a = out;
+                        *b = s;
+                    }
+                } else {
+                    // Greedy: try repeat (s) first, exit (out) second
+                    if let NfaNode::Split(_, ref mut b) = self.nodes[split] {
+                        *b = out;
+                    }
                 }
                 Ok((s, out))
             }
             Some(b'?') => {
                 self.advance();
-                // Split → (body → out) | (out)
+                let lazy = self.peek() == Some(b'?');
+                if lazy {
+                    self.advance();
+                    self.has_lazy = true;
+                }
+                // Greedy: Split(body, out) — prefer consuming
+                // Lazy:   Split(out, body) — prefer skipping
                 let out = self.emit(NfaNode::Epsilon(usize::MAX));
                 self.patch(e, out);
-                let split = self.emit(NfaNode::Split(s, out));
+                let split = if lazy {
+                    self.emit(NfaNode::Split(out, s))
+                } else {
+                    self.emit(NfaNode::Split(s, out))
+                };
                 Ok((split, out))
             }
             _ => Ok((s, e)),
@@ -641,6 +683,8 @@ fn nfa_search_from(nfa: &Nfa, haystack: &[u8], opts: &Flags, from: usize) -> Opt
 
 /// Try to match the NFA starting at position `start` in the haystack.
 /// Returns the end position if a match is found.
+/// When the NFA contains lazy quantifiers (`has_lazy`), returns the shortest
+/// (leftmost-first) match rather than the longest (leftmost-longest).
 fn nfa_match_at(nfa: &Nfa, haystack: &[u8], opts: &Flags, start: usize) -> Option<usize> {
     let mut current = Vec::new();
     let mut next = Vec::new();
@@ -655,6 +699,10 @@ fn nfa_match_at(nfa: &Nfa, haystack: &[u8], opts: &Flags, start: usize) -> Optio
     for &state in &current {
         if matches!(nfa.nodes[state], NfaNode::Accept) {
             last_match = Some(start);
+            // Lazy: shortest match — return immediately on first Accept
+            if nfa.has_lazy {
+                return last_match;
+            }
         }
     }
 
@@ -695,6 +743,10 @@ fn nfa_match_at(nfa: &Nfa, haystack: &[u8], opts: &Flags, start: usize) -> Optio
         for &state in &next {
             if matches!(nfa.nodes[state], NfaNode::Accept) {
                 last_match = Some(pos + 1);
+                // Lazy: shortest match — return immediately on first Accept
+                if nfa.has_lazy {
+                    return last_match;
+                }
             }
         }
 
@@ -956,5 +1008,101 @@ mod tests {
     fn test_negated_digit() {
         assert!(is_match("\\D", "", b"a"));
         assert!(!is_match("\\D", "", b"5"));
+    }
+
+    // -- Non-greedy (lazy) quantifier tests --
+
+    #[test]
+    fn test_lazy_star() {
+        // Debug: dump NFA for lazy pattern
+        let opts = Flags::parse("");
+        let nfa = compile("a.*?b", &opts).unwrap();
+        for (i, node) in nfa.nodes.iter().enumerate() {
+            eprintln!("  [{i}] {:?}", node);
+        }
+        eprintln!("  start={} has_lazy={}", nfa.start, nfa.has_lazy);
+
+        // Also dump greedy for comparison
+        let nfa2 = compile("a.*b", &opts).unwrap();
+        eprintln!("GREEDY:");
+        for (i, node) in nfa2.nodes.iter().enumerate() {
+            eprintln!("  [{i}] {:?}", node);
+        }
+        eprintln!("  start={} has_lazy={}", nfa2.start, nfa2.has_lazy);
+
+        // Greedy: .* matches as much as possible
+        let greedy = find("a.*b", "", b"aXbYb");
+        assert_eq!(greedy, Some((0, 5))); // matches "aXbYb"
+
+        // Lazy: .*? matches as little as possible
+        let lazy = find("a.*?b", "", b"aXbYb");
+        assert_eq!(lazy, Some((0, 3))); // matches "aXb"
+    }
+
+    #[test]
+    fn test_lazy_plus() {
+        // Greedy: .+ matches as much as possible
+        let greedy = find("a.+b", "", b"aXYZb");
+        assert_eq!(greedy, Some((0, 5)));
+
+        // Lazy: .+? matches as little as possible
+        let lazy = find("a.+?b", "", b"aXbYb");
+        assert_eq!(lazy, Some((0, 3))); // matches "aXb"
+    }
+
+    #[test]
+    fn test_lazy_question() {
+        // Greedy: a? prefers to match 'a'
+        let greedy = find("a?b", "", b"ab");
+        assert_eq!(greedy, Some((0, 2))); // matches "ab"
+
+        // Lazy: a?? prefers to skip 'a'
+        let lazy = find("a??b", "", b"ab");
+        assert_eq!(lazy, Some((0, 2))); // still matches "ab" (must match b)
+    }
+
+    #[test]
+    fn test_lazy_star_find_all() {
+        // Greedy: <.+> matches the longest span
+        let greedy = find_all("<.+>", "", b"<a><b>");
+        assert_eq!(greedy, vec![(0, 6)]); // one match: "<a><b>"
+
+        // Lazy: <.+?> matches the shortest spans
+        let lazy = find_all("<.+?>", "", b"<a><b>");
+        assert_eq!(lazy, vec![(0, 3), (3, 6)]); // two matches: "<a>", "<b>"
+    }
+
+    #[test]
+    fn test_lazy_star_zero_length() {
+        // Lazy star can match zero characters
+        let lazy = find("a*?", "", b"aaa");
+        assert_eq!(lazy, Some((0, 0))); // matches empty string at start
+    }
+
+    #[test]
+    fn test_lazy_still_matches() {
+        // Non-greedy must still find a match even if it prefers shorter
+        assert!(is_match("a+?", "", b"aaa"));
+        assert!(is_match("a*?b", "", b"aaab"));
+    }
+
+    #[test]
+    fn test_lazy_plus_minimum() {
+        // +? must match at least one
+        let lazy = find("a+?", "", b"aaa");
+        assert_eq!(lazy, Some((0, 1))); // matches just one "a"
+    }
+
+    #[test]
+    fn test_greedy_unchanged() {
+        // Ensure greedy behavior is unchanged
+        let greedy = find("a+", "", b"aaa");
+        assert_eq!(greedy, Some((0, 3))); // matches all three
+
+        let greedy2 = find("a*", "", b"aaa");
+        assert_eq!(greedy2, Some((0, 3))); // matches all three
+
+        let greedy3 = find("<.+>", "", b"<a><b>");
+        assert_eq!(greedy3, Some((0, 6))); // greedy matches whole thing
     }
 }

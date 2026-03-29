@@ -544,22 +544,33 @@ impl<'a> DiagnosticRenderer<'a> {
 /// Collects diagnostics during compilation.
 pub struct DiagnosticBag {
     pub diagnostics: Vec<Diagnostic>,
+    /// Maximum number of error-severity diagnostics before further errors are suppressed.
+    /// Default: 50. Set to 0 for unlimited.
+    pub error_limit: usize,
 }
 
 impl DiagnosticBag {
     pub fn new() -> Self {
         Self {
             diagnostics: Vec::new(),
+            error_limit: 50,
         }
     }
 
     pub fn emit(&mut self, diag: Diagnostic) {
+        if diag.severity == Severity::Error && self.error_limit > 0 {
+            let current_errors = self.error_count();
+            if current_errors >= self.error_limit {
+                return; // suppress cascading errors beyond limit
+            }
+        }
         self.diagnostics.push(diag);
     }
 
     /// Emit a diagnostic built from a typed ErrorCode.
     pub fn emit_coded(&mut self, builder: DiagnosticBuilder) {
-        self.diagnostics.push(builder.build());
+        let diag = builder.build();
+        self.emit(diag);
     }
 
     pub fn has_errors(&self) -> bool {

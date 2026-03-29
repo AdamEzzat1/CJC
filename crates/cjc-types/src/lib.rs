@@ -627,6 +627,111 @@ pub fn apply_subst(ty: &Type, subst: &TypeSubst) -> Type {
     }
 }
 
+/// Substitute `Type::Unresolved` names with concrete types based on a mapping.
+///
+/// This is used after inferring concrete types for generic type parameters
+/// (e.g., T=i64 from `Some(42)`) to rewrite the return type so that
+/// `Option<T>` becomes `Option<i64>`.
+pub fn substitute_type_params_concrete(ty: &Type, subst: &BTreeMap<String, Type>) -> Type {
+    match ty {
+        Type::Unresolved(name) => {
+            subst.get(name).cloned().unwrap_or_else(|| ty.clone())
+        }
+        Type::Enum(et) => Type::Enum(EnumType {
+            name: et.name.clone(),
+            type_params: et.type_params.clone(),
+            variants: et
+                .variants
+                .iter()
+                .map(|v| EnumVariant {
+                    name: v.name.clone(),
+                    fields: v
+                        .fields
+                        .iter()
+                        .map(|f| substitute_type_params_concrete(f, subst))
+                        .collect(),
+                })
+                .collect(),
+        }),
+        Type::Tuple(ts) => {
+            Type::Tuple(ts.iter().map(|t| substitute_type_params_concrete(t, subst)).collect())
+        }
+        Type::Array { elem, len } => Type::Array {
+            elem: Box::new(substitute_type_params_concrete(elem, subst)),
+            len: *len,
+        },
+        Type::Fn { params, ret } => Type::Fn {
+            params: params.iter().map(|p| substitute_type_params_concrete(p, subst)).collect(),
+            ret: Box::new(substitute_type_params_concrete(ret, subst)),
+        },
+        Type::Tensor { elem, shape } => Type::Tensor {
+            elem: Box::new(substitute_type_params_concrete(elem, subst)),
+            shape: shape.clone(),
+        },
+        Type::Buffer { elem } => Type::Buffer {
+            elem: Box::new(substitute_type_params_concrete(elem, subst)),
+        },
+        Type::Map { key, value } => Type::Map {
+            key: Box::new(substitute_type_params_concrete(key, subst)),
+            value: Box::new(substitute_type_params_concrete(value, subst)),
+        },
+        Type::Range { elem } => Type::Range {
+            elem: Box::new(substitute_type_params_concrete(elem, subst)),
+        },
+        Type::Slice { elem } => Type::Slice {
+            elem: Box::new(substitute_type_params_concrete(elem, subst)),
+        },
+        Type::SparseTensor { elem } => Type::SparseTensor {
+            elem: Box::new(substitute_type_params_concrete(elem, subst)),
+        },
+        _ => ty.clone(),
+    }
+}
+
+/// Walk a declared type (which may contain `Unresolved` type-param names) in
+/// parallel with a concrete type inferred from an argument expression. When a
+/// leaf `Unresolved("T")` is paired with a concrete type, record the binding
+/// in `subst`.  This is a best-effort structural walk -- mismatches are silently
+/// ignored (the type checker will catch them separately).
+fn collect_unresolved_bindings(declared: &Type, concrete: &Type, subst: &mut BTreeMap<String, Type>) {
+    match (declared, concrete) {
+        (Type::Unresolved(name), _) if !concrete.is_error() => {
+            subst.entry(name.clone()).or_insert_with(|| concrete.clone());
+        }
+        (Type::Tuple(ds), Type::Tuple(cs)) if ds.len() == cs.len() => {
+            for (d, c) in ds.iter().zip(cs.iter()) {
+                collect_unresolved_bindings(d, c, subst);
+            }
+        }
+        (Type::Array { elem: d, .. }, Type::Array { elem: c, .. })
+        | (Type::Buffer { elem: d }, Type::Buffer { elem: c })
+        | (Type::Tensor { elem: d, .. }, Type::Tensor { elem: c, .. })
+        | (Type::Range { elem: d }, Type::Range { elem: c })
+        | (Type::Slice { elem: d }, Type::Slice { elem: c })
+        | (Type::SparseTensor { elem: d }, Type::SparseTensor { elem: c }) => {
+            collect_unresolved_bindings(d, c, subst);
+        }
+        (Type::Map { key: dk, value: dv }, Type::Map { key: ck, value: cv }) => {
+            collect_unresolved_bindings(dk, ck, subst);
+            collect_unresolved_bindings(dv, cv, subst);
+        }
+        (Type::Fn { params: dp, ret: dr }, Type::Fn { params: cp, ret: cr }) if dp.len() == cp.len() => {
+            for (d, c) in dp.iter().zip(cp.iter()) {
+                collect_unresolved_bindings(d, c, subst);
+            }
+            collect_unresolved_bindings(dr, cr, subst);
+        }
+        (Type::Enum(de), Type::Enum(ce)) if de.name == ce.name => {
+            for (dv, cv) in de.variants.iter().zip(ce.variants.iter()) {
+                for (df, cf) in dv.fields.iter().zip(cv.fields.iter()) {
+                    collect_unresolved_bindings(df, cf, subst);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 // ── Shape Unification ──────────────────────────────────────────
 
 /// Unify two shape dimensions.
@@ -1596,9 +1701,33 @@ fn to_diag_span(span: cjc_ast::Span) -> cjc_diag::Span {
 /// Only literal values are accepted as const initializers.
 // ── Effect Typing Helpers ─────────────────────────────────────────
 
+/// Valid effect annotation names.
+const VALID_EFFECTS: &[&str] = &["pure", "io", "alloc", "gc", "nondet", "mutates", "arena_ok", "captures"];
+
+/// Simple Levenshtein distance for suggesting closest valid effect name.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let m = a.len();
+    let n = b.len();
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut curr = vec![0; n + 1];
+    for (i, ca) in a.chars().enumerate() {
+        curr[0] = i + 1;
+        for (j, cb) in b.chars().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            curr[j + 1] = (prev[j] + cost)
+                .min(prev[j + 1] + 1)
+                .min(curr[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[n]
+}
+
 /// Convert effect annotation names (e.g. "pure", "io", "alloc") to an EffectSet.
-fn effects_from_names(names: &[String]) -> EffectSet {
+/// Returns the EffectSet and a list of error messages for unknown effect names.
+fn effects_from_names(names: &[String]) -> (EffectSet, Vec<String>) {
     let mut bits: u16 = 0;
+    let mut unknown = Vec::new();
     for name in names {
         match name.as_str() {
             "pure" => {} // pure = no flags
@@ -1609,10 +1738,25 @@ fn effects_from_names(names: &[String]) -> EffectSet {
             "mutates" => bits |= EffectSet::MUTATES,
             "arena_ok" => bits |= EffectSet::ARENA_OK,
             "captures" => bits |= EffectSet::CAPTURES,
-            _ => {} // Unknown effect names are silently ignored (caught by tests)
+            _ => {
+                // Find closest valid effect for suggestion
+                let mut best = ("", usize::MAX);
+                for &valid in VALID_EFFECTS {
+                    let d = levenshtein(name, valid);
+                    if d < best.1 {
+                        best = (valid, d);
+                    }
+                }
+                let msg = if best.1 <= 2 {
+                    format!("unknown effect `{name}`, did you mean `{}`?", best.0)
+                } else {
+                    format!("unknown effect `{name}`; valid effects: {}", VALID_EFFECTS.join(", "))
+                };
+                unknown.push(msg);
+            }
         }
     }
-    EffectSet::new(bits)
+    (EffectSet::new(bits), unknown)
 }
 
 /// Return the name of an effect flag constant.
@@ -1945,7 +2089,13 @@ impl TypeChecker {
                     })
                     .collect();
                 let effects = if let Some(ref ann) = f.effect_annotation {
-                    effects_from_names(ann)
+                    let (eset, unknowns) = effects_from_names(ann);
+                    for msg in unknowns {
+                        self.diagnostics.emit(
+                            Diagnostic::error("E0410", msg, to_diag_span(decl.span))
+                        );
+                    }
+                    eset
                 } else {
                     EffectSet::default()
                 };
@@ -2005,7 +2155,13 @@ impl TypeChecker {
                         .unwrap_or(Type::Void);
                     let qualified_name = format!("{}.{}", target_name, method.name.name);
                     let effects = if let Some(ref ann) = method.effect_annotation {
-                        effects_from_names(ann)
+                        let (eset, unknowns) = effects_from_names(ann);
+                        for msg in unknowns {
+                            self.diagnostics.emit(
+                                Diagnostic::error("E0410", msg, to_diag_span(decl.span))
+                            );
+                        }
+                        eset
                     } else {
                         EffectSet::default()
                     };
@@ -2278,7 +2434,12 @@ impl TypeChecker {
     fn check_effect_annotation(&mut self, f: &FnDecl, declared_effects: &[String]) {
         use crate::effect_registry::builtin_effects;
 
-        let declared_set = effects_from_names(declared_effects);
+        let (declared_set, unknowns) = effects_from_names(declared_effects);
+        for msg in unknowns {
+            self.diagnostics.emit(
+                Diagnostic::error("E0410", msg, to_diag_span(f.name.span))
+            );
+        }
 
         // Collect all function calls in the body
         let mut called_fns = Vec::new();
@@ -3077,7 +3238,19 @@ impl TypeChecker {
                             ));
                             Type::Error
                         } else {
-                            Type::Enum(et)
+                            // Build a substitution map from type params to concrete
+                            // types by matching variant field types against argument
+                            // types.  For example, `Some(42)` matches field
+                            // `Unresolved("T")` against `i64`, producing {T -> i64}.
+                            if et.type_params.is_empty() {
+                                Type::Enum(et)
+                            } else {
+                                let mut subst: BTreeMap<String, Type> = BTreeMap::new();
+                                for (field_ty, arg_ty) in v.fields.iter().zip(field_types.iter()) {
+                                    collect_unresolved_bindings(field_ty, arg_ty, &mut subst);
+                                }
+                                substitute_type_params_concrete(&Type::Enum(et), &subst)
+                            }
                         }
                     } else {
                         self.diagnostics.emit(Diagnostic::error(

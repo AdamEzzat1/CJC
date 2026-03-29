@@ -59,6 +59,23 @@ fn is_safe_builtin(name: &str) -> bool {
     cjc_types::effect_registry::is_safe_builtin(name)
 }
 
+/// Check if a method name is a known safe builtin when called on any object.
+/// This reduces false positives for method calls on computed objects like
+/// `some_fn().len()` where `.len()` is known safe regardless of receiver.
+fn is_known_safe_method(method_name: &str) -> bool {
+    // Check the method name against all "Type.method" entries in the registry
+    let registry = cjc_types::effect_registry::builtin_effects();
+    for (name, effects) in &registry {
+        if let Some((_prefix, method)) = name.split_once('.') {
+            if method == method_name && !effects.has(cjc_types::EffectSet::GC) {
+                return true;
+            }
+        }
+    }
+    // Also check bare builtin names (e.g., "len", "shape")
+    is_safe_builtin(method_name)
+}
+
 // ---------------------------------------------------------------------------
 // Call graph construction
 // ---------------------------------------------------------------------------
@@ -146,8 +163,16 @@ fn collect_calls_expr(expr: &MirExpr, in_nogc_block: bool, info: &mut FnCallInfo
                         if in_nogc_block {
                             info.nogc_block_calls.push(qualified);
                         }
+                    } else if is_known_safe_method(name) {
+                        // Method is a known safe builtin (e.g., .len(), .shape())
+                        // regardless of receiver — treat as direct safe call, not indirect.
+                        let method_key = format!("_.{name}");
+                        info.direct_calls.insert(method_key.clone());
+                        if in_nogc_block {
+                            info.nogc_block_calls.push(method_key);
+                        }
                     } else {
-                        // Method on computed object - conservative as indirect
+                        // Method on computed object with unknown method - conservative
                         info.has_indirect_call = true;
                         if in_nogc_block {
                             info.nogc_block_has_indirect = true;
