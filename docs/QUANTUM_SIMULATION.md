@@ -1,8 +1,8 @@
 # CJC Quantum Simulation Module
 
 **Crate**: `cjc-quantum`
-**Date**: 2026-03-29
-**Status**: v0.2 Beta Phase 1
+**Date**: 2026-03-30
+**Status**: v0.2 Beta Phase 2 (Quantum Extensions)
 
 ## Overview
 
@@ -23,6 +23,16 @@ cjc-quantum/
     measure.rs      — Measurement with probabilistic collapse
     circuit.rs      — Circuit builder + execution
     dispatch.rs     — Builtin function dispatch (wired into eval + mir-exec)
+    wirtinger.rs    — Wirtinger calculus (complex AD)
+    adjoint.rs      — Adjoint differentiation + HybridCircuit
+    simd_kernel.rs  — AVX2 SIMD kernels + cache blocking
+    mps.rs          — Matrix Product States (tensor-train SVD)
+    vqe.rs          — VQE optimizer (Ising + full Heisenberg)
+    qaoa.rs         — QAOA for MaxCut optimization
+    stabilizer.rs   — Clifford/Stabilizer tableau simulator
+    density.rs      — Density matrix simulator (mixed states + noise)
+    dmrg.rs         — DMRG ground-state solver (variational Lanczos)
+    qec.rs          — Quantum error correction (repetition + surface code)
 ```
 
 ### Determinism Guarantees
@@ -203,16 +213,147 @@ let sv = mps.to_statevector();  // only for small verification!
 - Memory: O(N × χ²) where χ = max bond dimension
 - GHZ states: χ=2 regardless of N
 
+## v0.2 Quantum Extensions
+
+### Extension 1: Full Heisenberg Hamiltonian (`vqe.rs`)
+
+XX + YY + ZZ nearest-neighbor interactions for the isotropic Heisenberg model:
+
+```rust
+use cjc_quantum::vqe::*;
+
+// Compute full Heisenberg energy: sum of XX + YY + ZZ per bond
+let mps = build_mps_ansatz(4, &thetas, 64);
+let energy = mps_full_heisenberg_energy(&mps);
+
+// VQE optimization with full Heisenberg
+let result = vqe_full_heisenberg_1d(4, 16, 0.15, 20, 42);
+
+// Hamiltonian selector for generic dispatch
+let e = mps_energy(&mps, Hamiltonian::Heisenberg);
+```
+
+### Extension 2: QAOA for MaxCut (`qaoa.rs`)
+
+Quantum Approximate Optimization Algorithm for graph MaxCut problems:
+
+```rust
+use cjc_quantum::qaoa::*;
+
+let graph = Graph::cycle(5);
+let result = qaoa_maxcut(&graph, 2, 20, 0.1, 42);  // p=2, 20 iters
+println!("Best cut: {}", result.best_cut);
+println!("Cut value: {}", result.best_cut_value);
+```
+
+- MPS-based simulation (50+ qubit graphs for low-entanglement states)
+- General ZZ expectation values for non-adjacent qubits via SWAP networks
+- Deterministic parameter optimization with explicit seed threading
+
+### Extension 3: Clifford/Stabilizer Simulator (`stabilizer.rs`)
+
+Aaronson-Gottesman CHP algorithm for efficient simulation of Clifford circuits:
+
+```rust
+use cjc_quantum::stabilizer::StabilizerState;
+
+let mut s = StabilizerState::new(1000);  // 1000 qubits!
+s.h(0);
+for q in 0..999 { s.cnot(q, q + 1); }   // GHZ state
+let outcome = s.measure(0, &mut rng);     // O(n^2) per gate
+let sv = s.to_statevector();              // only for n <= 12
+```
+
+- Bitpacked u64 rows for Pauli tableau (X, Z, phase)
+- Gates: H, S, X, Y, Z, CNOT — O(n) per gate operation
+- Measurement: O(n^2), handles both deterministic and random outcomes
+- Scales to 1000+ qubits (O(n^2) memory vs 2^n for statevector)
+
+### Extension 4: Density Matrix Simulator (`density.rs`)
+
+Mixed quantum states and noise channels via Kraus operator formalism:
+
+```rust
+use cjc_quantum::density::*;
+use cjc_quantum::gates::Gate;
+
+let mut rho = DensityMatrix::new(2);
+rho.apply_gate(&Gate::H(0));
+rho.apply_gate(&Gate::Cx(0, 1));
+
+// Apply noise channels
+rho.apply_depolarizing(0, 0.01);    // 1% depolarizing noise
+rho.apply_dephasing(1, 0.05);       // 5% dephasing
+rho.apply_amplitude_damping(0, 0.02); // 2% amplitude damping
+
+let purity = rho.purity();           // Tr(rho^2) < 1 for mixed states
+let probs = rho.probabilities();     // measurement probabilities
+let entropy = rho.von_neumann_entropy(); // -Tr(rho log rho)
+let fidelity = rho.fidelity(&pure_rho); // state fidelity
+```
+
+- Max ~13-14 qubits (2^2N matrix entries)
+- Partial trace for subsystem analysis
+- Von Neumann entropy via sign-stabilized SVD eigenvalues
+
+### Extension 5: DMRG Ground-State Solver (`dmrg.rs`)
+
+Density Matrix Renormalization Group for 1D quantum lattice models:
+
+```rust
+use cjc_quantum::dmrg::*;
+
+// Ising model: -sum Z_i Z_{i+1}
+let result = dmrg_heisenberg_1d(8, 16, 20, 1e-8);
+// result.energy converges to exact ground state
+
+// Full Heisenberg: -sum (X_i X_{i+1} + Y_i Y_{i+1} + Z_i Z_{i+1})
+let result = dmrg_full_heisenberg_1d(8, 16, 20, 1e-8);
+```
+
+- Two-site variational DMRG with Lanczos eigensolver
+- MPO-style operator-weighted environments (identity, Hamiltonian, dangling operators)
+- Effective Hamiltonian includes all 5 term types per bond
+- SVD bond truncation with configurable max bond dimension
+- Supports Ising and full Heisenberg Hamiltonians
+
+### Extension 6: Quantum Error Correction (`qec.rs`)
+
+Repetition codes and surface codes with syndrome extraction:
+
+```rust
+use cjc_quantum::qec::*;
+use cjc_quantum::stabilizer::StabilizerState;
+
+// Repetition code (distance 3)
+let code = build_repetition_code(3);
+let mut state = StabilizerState::new(code.total_qubits);
+encode_repetition(&mut state, &code);
+
+// Surface code (distance 3)
+let surface = build_surface_code(3);
+let mut state = StabilizerState::new(surface.total_qubits);
+let syndrome = extract_z_syndrome(&mut state, &surface, &mut rng);
+let correction = decode_minimum_weight(&surface, &syndrome);
+```
+
+- Repetition code: encode, syndrome extraction, minimum-weight decoding
+- Surface code: 2D lattice with X and Z stabilizers
+- Decoder: minimum-weight matching (greedy approximation)
+- Built on top of the Clifford/Stabilizer simulator for efficiency
+
 ## Limitations
 
 - **Classical simulation**: ~25-26 qubits with statevector (50+ with MPS for low-entanglement)
-- **No noise model**: Pure unitary evolution only
+- **Density matrix**: ~13-14 qubits (2^2N scaling)
+- **Stabilizer**: Clifford gates only (no T gate or arbitrary rotations)
+- **DMRG**: 1D nearest-neighbor Hamiltonians only
 - **No hardware backend**: Simulation only
 - **MPS**: Adjacent-qubit 2-qubit gates only (SWAP network needed for non-adjacent)
 
 ## Test Coverage
 
-### Unit Tests (93 in cjc-quantum)
+### Unit Tests (203 in cjc-quantum)
 
 - Statevector: construction, normalization, probabilities (6 tests)
 - Gates: all 13 gate types, involutions, unitarity, error handling (22 tests)
@@ -223,13 +364,23 @@ let sv = mps.to_statevector();  // only for small verification!
 - Adjoint: expectation value, gradients (Ry/Rz), finite-diff parity, multi-param (10 tests)
 - Adjoint/Hybrid: teleportation, determinism, feed-forward correlation (4 tests)
 - SIMD: scalar/cached/SIMD parity, batch multiply determinism (6 tests)
-- MPS: initial state, single-qubit, Bell, GHZ, SVD identity/reconstruction/stability, memory, bond dim (11 tests)
+- MPS: initial state, single-qubit, Bell, GHZ, SVD, memory, bond dim (11 tests)
+- VQE: convergence, determinism, Heisenberg energy, XX/YY/ZZ expectations (16 tests)
+- QAOA: graph construction, MaxCut energy, optimization, determinism (15 tests)
+- Stabilizer: initial state, gates (H/S/X/Y/Z/CNOT), Bell/GHZ, 1000-qubit scaling (23 tests)
+- Density Matrix: construction, gates, noise channels, purity, entropy, fidelity (23 tests)
+- DMRG: 2/4/6-qubit Ising + Heisenberg, convergence, determinism (13 tests)
+- QEC: repetition code, surface code, syndrome extraction, decoding (20 tests)
 
-### Integration Tests (17 in beta_tests/quantum/)
+### Integration Tests (211 in beta_tests/)
 
-- Eval + MIR-exec for: constructor, Bell state, measurement, sampling, GHZ, rotation
-- Parity tests: eval vs mir-exec produce identical results for all operations
-- Error handling: out-of-range qubit produces runtime error
+- Quantum circuit parity (eval vs mir-exec): constructor, Bell, GHZ, sampling, rotation
+- Full Heisenberg: XX/YY/ZZ expectations, MPS vs statevector cross-validation, VQE convergence
+- QAOA: graph construction, MaxCut energy bounds, determinism, optimization quality
+- Stabilizer: initial state, H/+state, Bell/GHZ, statevector extraction, 128-500 qubit scaling
+- Density Matrix: construction, gates, noise channels, purity, entropy, partial trace
+- DMRG: 2/4/6-qubit ground state energy, Ising vs Heisenberg, convergence, determinism
+- QEC: repetition code structure, encoding, syndrome extraction, surface code decoding
 
 ### Property Tests (8 in beta_tests/quantum_prop/)
 
@@ -248,17 +399,21 @@ let sv = mps.to_statevector();  // only for small verification!
 
 | File | Change |
 |------|--------|
-| `crates/cjc-quantum/` | Quantum crate (9 source files) |
+| `crates/cjc-quantum/` | Quantum crate (15 source files) |
 | `crates/cjc-quantum/src/wirtinger.rs` | Wirtinger calculus (complex AD) |
 | `crates/cjc-quantum/src/adjoint.rs` | Adjoint differentiation + HybridCircuit |
 | `crates/cjc-quantum/src/simd_kernel.rs` | AVX2 SIMD kernels + cache blocking |
 | `crates/cjc-quantum/src/mps.rs` | MPS/Tensor-Train + sign-stabilized SVD |
+| `crates/cjc-quantum/src/vqe.rs` | VQE optimizer (Ising + full Heisenberg) |
+| `crates/cjc-quantum/src/qaoa.rs` | QAOA for MaxCut optimization |
+| `crates/cjc-quantum/src/stabilizer.rs` | Clifford/Stabilizer CHP simulator |
+| `crates/cjc-quantum/src/density.rs` | Density matrix + noise channels |
+| `crates/cjc-quantum/src/dmrg.rs` | DMRG variational ground-state solver |
+| `crates/cjc-quantum/src/qec.rs` | QEC repetition + surface code |
 | `crates/cjc-runtime/src/value.rs` | Added `Value::QuantumState` variant |
 | `crates/cjc-snap/src/encode.rs` | Added QuantumState to non-serializable list |
 | `crates/cjc-eval/src/lib.rs` | Wired `dispatch_quantum` |
-| `crates/cjc-eval/Cargo.toml` | Added cjc-quantum dependency |
 | `crates/cjc-mir-exec/src/lib.rs` | Wired `dispatch_quantum` |
-| `crates/cjc-mir-exec/Cargo.toml` | Added cjc-quantum dependency |
 | `Cargo.toml` | Added cjc-quantum to workspace |
-| `tests/beta_tests/quantum/` | 17 integration tests |
+| `tests/beta_tests/quantum/` | 211 integration tests (10 test files) |
 | `tests/beta_tests/quantum_prop/` | 8 property tests |

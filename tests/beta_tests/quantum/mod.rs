@@ -1,1 +1,10 @@
 pub mod test_quantum_integration;
+pub mod test_quantum_hardening;
+pub mod test_vqe;
+pub mod test_quantum_determinism;
+pub mod test_full_heisenberg;
+pub mod test_qaoa;
+pub mod test_stabilizer;
+pub mod test_density_matrix;
+pub mod test_dmrg;
+pub mod test_qec;

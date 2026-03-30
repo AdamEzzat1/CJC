@@ -27,6 +27,11 @@ pub mod adjoint;
 pub mod simd_kernel;
 pub mod mps;
 pub mod vqe;
+pub mod qaoa;
+pub mod stabilizer;
+pub mod density;
+pub mod qec;
+pub mod dmrg;
 
 pub use gates::Gate;
 pub use statevector::Statevector;

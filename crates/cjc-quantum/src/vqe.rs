@@ -5,11 +5,13 @@
 //! - Adjoint differentiation for O(1) gradient memory (small circuits)
 //! - Parameter-shift gradients for MPS-backed circuits
 //!
-//! # Heisenberg 1D Model
+//! # Hamiltonians
 //!
-//! H = Σ_i Z_i Z_{i+1} (nearest-neighbor ZZ interaction)
+//! - **Ising**: H = Σ_i Z_i Z_{i+1}
+//! - **Full Heisenberg**: H = Σ_i (X_i X_{i+1} + Y_i Y_{i+1} + Z_i Z_{i+1})
 //!
-//! The ground state energy per site approaches -1 in the thermodynamic limit.
+//! The full Heisenberg ground state energy per site approaches -1.77 (ln2 - 1/4)
+//! in the thermodynamic limit.
 //!
 //! # Determinism
 //!
@@ -156,6 +158,248 @@ fn transfer_matrix_z(
     }
 
     result
+}
+
+/// Transfer matrix contraction with X operator.
+///
+/// X is off-diagonal: X|0⟩=|1⟩, X|1⟩=|0⟩.
+/// Matrix elements: ⟨0|X|1⟩ = 1, ⟨1|X|0⟩ = 1, others = 0.
+/// So the contraction sums over s≠s' cross-terms.
+fn transfer_matrix_x(
+    tensor: &crate::mps::MpsTensor,
+    env: &[Vec<ComplexF64>],
+) -> Vec<Vec<ComplexF64>> {
+    let bl = tensor.bond_left;
+    let br = tensor.bond_right;
+    assert_eq!(env.len(), bl);
+    assert_eq!(env[0].len(), bl);
+
+    let mut result = vec![vec![ComplexF64::ZERO; br]; br];
+
+    // X flips: bra=0,ket=1 gives factor 1; bra=1,ket=0 gives factor 1
+    // T[a,b] = Σ_{j,j'} env[j,j'] * (conj(A^0[j,a]) * A^1[j',b] + conj(A^1[j,a]) * A^0[j',b])
+    for j in 0..bl {
+        for jp in 0..bl {
+            let e = env[j][jp];
+            if e.re == 0.0 && e.im == 0.0 {
+                continue;
+            }
+            for a in 0..br {
+                // bra=0, ket=1
+                let conj_a0 = tensor.a[0].get(j, a).conj();
+                let ea0 = e.mul_fixed(conj_a0);
+                // bra=1, ket=0
+                let conj_a1 = tensor.a[1].get(j, a).conj();
+                let ea1 = e.mul_fixed(conj_a1);
+                for b in 0..br {
+                    let a1b = tensor.a[1].get(jp, b);
+                    let a0b = tensor.a[0].get(jp, b);
+                    result[a][b] = result[a][b].add(ea0.mul_fixed(a1b));
+                    result[a][b] = result[a][b].add(ea1.mul_fixed(a0b));
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Transfer matrix contraction with Y operator.
+///
+/// Y|0⟩ = i|1⟩, Y|1⟩ = -i|0⟩.
+/// Matrix elements: ⟨0|Y|1⟩ = -i, ⟨1|Y|0⟩ = i.
+fn transfer_matrix_y(
+    tensor: &crate::mps::MpsTensor,
+    env: &[Vec<ComplexF64>],
+) -> Vec<Vec<ComplexF64>> {
+    let bl = tensor.bond_left;
+    let br = tensor.bond_right;
+    assert_eq!(env.len(), bl);
+    assert_eq!(env[0].len(), bl);
+
+    let mut result = vec![vec![ComplexF64::ZERO; br]; br];
+
+    let y_01 = ComplexF64::new(0.0, -1.0); // ⟨0|Y|1⟩ = -i
+    let y_10 = ComplexF64::new(0.0, 1.0);  // ⟨1|Y|0⟩ = +i
+
+    for j in 0..bl {
+        for jp in 0..bl {
+            let e = env[j][jp];
+            if e.re == 0.0 && e.im == 0.0 {
+                continue;
+            }
+            for a in 0..br {
+                // bra=0, ket=1, factor = -i
+                let conj_a0 = tensor.a[0].get(j, a).conj();
+                let ea0 = e.mul_fixed(conj_a0).mul_fixed(y_01);
+                // bra=1, ket=0, factor = +i
+                let conj_a1 = tensor.a[1].get(j, a).conj();
+                let ea1 = e.mul_fixed(conj_a1).mul_fixed(y_10);
+                for b in 0..br {
+                    let a1b = tensor.a[1].get(jp, b);
+                    let a0b = tensor.a[0].get(jp, b);
+                    result[a][b] = result[a][b].add(ea0.mul_fixed(a1b));
+                    result[a][b] = result[a][b].add(ea1.mul_fixed(a0b));
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Compute ⟨ψ|X_i X_{i+1}|ψ⟩ for an MPS state.
+pub fn mps_xx_expectation(mps: &Mps, site_i: usize) -> f64 {
+    let n = mps.n_qubits;
+    assert!(site_i + 1 < n, "XX site out of range");
+
+    let mut env = vec![vec![ComplexF64::ZERO; 1]; 1];
+    env[0][0] = ComplexF64::ONE;
+
+    for k in 0..site_i {
+        env = transfer_matrix_identity(&mps.tensors[k], &env);
+    }
+    env = transfer_matrix_x(&mps.tensors[site_i], &env);
+    env = transfer_matrix_x(&mps.tensors[site_i + 1], &env);
+    for k in (site_i + 2)..n {
+        env = transfer_matrix_identity(&mps.tensors[k], &env);
+    }
+
+    env[0][0].re
+}
+
+/// Compute ⟨ψ|Y_i Y_{i+1}|ψ⟩ for an MPS state.
+pub fn mps_yy_expectation(mps: &Mps, site_i: usize) -> f64 {
+    let n = mps.n_qubits;
+    assert!(site_i + 1 < n, "YY site out of range");
+
+    let mut env = vec![vec![ComplexF64::ZERO; 1]; 1];
+    env[0][0] = ComplexF64::ONE;
+
+    for k in 0..site_i {
+        env = transfer_matrix_identity(&mps.tensors[k], &env);
+    }
+    env = transfer_matrix_y(&mps.tensors[site_i], &env);
+    env = transfer_matrix_y(&mps.tensors[site_i + 1], &env);
+    for k in (site_i + 2)..n {
+        env = transfer_matrix_identity(&mps.tensors[k], &env);
+    }
+
+    env[0][0].re
+}
+
+/// Compute the full Heisenberg energy E = Σ_i (XX + YY + ZZ)_{i,i+1}.
+pub fn mps_full_heisenberg_energy(mps: &Mps) -> f64 {
+    let mut energy = 0.0;
+    for i in 0..(mps.n_qubits - 1) {
+        energy += mps_xx_expectation(mps, i);
+        energy += mps_yy_expectation(mps, i);
+        energy += mps_zz_expectation(mps, i);
+    }
+    energy
+}
+
+/// Hamiltonian selector for VQE optimization.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Hamiltonian {
+    /// Ising model: H = Σ Z_i Z_{i+1}
+    Ising,
+    /// Full Heisenberg: H = Σ (XX + YY + ZZ)_{i,i+1}
+    Heisenberg,
+}
+
+/// Compute energy for the selected Hamiltonian.
+pub fn mps_energy(mps: &Mps, hamiltonian: Hamiltonian) -> f64 {
+    match hamiltonian {
+        Hamiltonian::Ising => mps_heisenberg_energy(mps),
+        Hamiltonian::Heisenberg => mps_full_heisenberg_energy(mps),
+    }
+}
+
+/// Compute energy gradient via parameter-shift rule for the selected Hamiltonian.
+pub fn mps_parameter_shift_gradient_h(
+    n_qubits: usize,
+    thetas: &[f64],
+    max_bond: usize,
+    hamiltonian: Hamiltonian,
+) -> Vec<f64> {
+    let shift = std::f64::consts::FRAC_PI_2;
+    let mut grads = vec![0.0; thetas.len()];
+
+    for k in 0..thetas.len() {
+        let mut thetas_plus = thetas.to_vec();
+        let mut thetas_minus = thetas.to_vec();
+        thetas_plus[k] += shift;
+        thetas_minus[k] -= shift;
+
+        let mps_plus = build_mps_ansatz(n_qubits, &thetas_plus, max_bond);
+        let mps_minus = build_mps_ansatz(n_qubits, &thetas_minus, max_bond);
+
+        let e_plus = mps_energy(&mps_plus, hamiltonian);
+        let e_minus = mps_energy(&mps_minus, hamiltonian);
+
+        grads[k] = (e_plus - e_minus) / 2.0;
+    }
+
+    grads
+}
+
+/// Run VQE for the full Heisenberg model (XX + YY + ZZ).
+pub fn vqe_full_heisenberg_1d(
+    n_qubits: usize,
+    max_bond: usize,
+    learning_rate: f64,
+    max_iters: usize,
+    seed: u64,
+) -> VqeResult {
+    vqe_with_hamiltonian(n_qubits, max_bond, learning_rate, max_iters, seed, Hamiltonian::Heisenberg)
+}
+
+/// Generic VQE optimizer for any supported Hamiltonian.
+pub fn vqe_with_hamiltonian(
+    n_qubits: usize,
+    max_bond: usize,
+    learning_rate: f64,
+    max_iters: usize,
+    seed: u64,
+    hamiltonian: Hamiltonian,
+) -> VqeResult {
+    let mut rng_state = seed;
+    let mut thetas: Vec<f64> = (0..n_qubits)
+        .map(|_| {
+            let r = crate::rand_f64(&mut rng_state);
+            (r - 0.5) * 0.1
+        })
+        .collect();
+
+    let mut energy_history = Vec::with_capacity(max_iters);
+
+    let mps = build_mps_ansatz(n_qubits, &thetas, max_bond);
+    let mut best_energy = mps_energy(&mps, hamiltonian);
+    energy_history.push(best_energy);
+
+    for _iter in 0..max_iters {
+        let grads = mps_parameter_shift_gradient_h(n_qubits, &thetas, max_bond, hamiltonian);
+
+        for k in 0..thetas.len() {
+            thetas[k] -= learning_rate * grads[k];
+        }
+
+        let mps = build_mps_ansatz(n_qubits, &thetas, max_bond);
+        let energy = mps_energy(&mps, hamiltonian);
+        energy_history.push(energy);
+
+        if energy < best_energy {
+            best_energy = energy;
+        }
+    }
+
+    VqeResult {
+        thetas,
+        energy: best_energy,
+        energy_history,
+        iterations: max_iters,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -487,6 +731,76 @@ mod tests {
         // Energy should be computable
         let e = mps_heisenberg_energy(&mps);
         assert!(e.is_finite(), "Energy should be finite");
+    }
+
+    #[test]
+    fn test_xx_expectation_product_state() {
+        // |0...0⟩: X has no diagonal element, XX expectation = 0 for product state
+        // Actually for |00⟩: ⟨00|XX|00⟩ = ⟨00|11⟩ = 0
+        let mps = Mps::new(4);
+        for i in 0..3 {
+            let xx = mps_xx_expectation(&mps, i);
+            assert!(xx.abs() < TOL, "XX({},{}) = {}, expected 0.0", i, i + 1, xx);
+        }
+    }
+
+    #[test]
+    fn test_yy_expectation_product_state() {
+        let mps = Mps::new(4);
+        for i in 0..3 {
+            let yy = mps_yy_expectation(&mps, i);
+            assert!(yy.abs() < TOL, "YY({},{}) = {}, expected 0.0", i, i + 1, yy);
+        }
+    }
+
+    #[test]
+    fn test_full_heisenberg_product_state() {
+        // |0...0⟩: ZZ=+1 for all bonds, XX=0, YY=0
+        // Full Heisenberg = Σ(0 + 0 + 1) = N-1
+        let mps = Mps::new(5);
+        let e = mps_full_heisenberg_energy(&mps);
+        assert!((e - 4.0).abs() < TOL, "Full Heisenberg E = {}, expected 4.0", e);
+    }
+
+    #[test]
+    fn test_xx_yy_bell_state() {
+        // Bell state (|00⟩ + |11⟩)/√2 via H + CNOT
+        let mut mps = Mps::new(2);
+        let isq2 = 1.0 / 2.0f64.sqrt();
+        let h = [[ComplexF64::real(isq2), ComplexF64::real(isq2)],
+                  [ComplexF64::real(isq2), ComplexF64::real(-isq2)]];
+        mps.apply_single_qubit(0, h);
+        mps.apply_cnot_adjacent(0, 1);
+
+        // For Bell |Φ+⟩ = (|00⟩+|11⟩)/√2:
+        // ⟨XX⟩ = 1, ⟨YY⟩ = -1, ⟨ZZ⟩ = 1
+        let xx = mps_xx_expectation(&mps, 0);
+        let yy = mps_yy_expectation(&mps, 0);
+        let zz = mps_zz_expectation(&mps, 0);
+        assert!((xx - 1.0).abs() < TOL, "Bell XX = {}, expected 1.0", xx);
+        assert!((yy - (-1.0)).abs() < TOL, "Bell YY = {}, expected -1.0", yy);
+        assert!((zz - 1.0).abs() < TOL, "Bell ZZ = {}, expected 1.0", zz);
+        // Full Heisenberg for Bell: 1 + (-1) + 1 = 1
+        assert!((xx + yy + zz - 1.0).abs() < TOL, "Bell H = {}", xx + yy + zz);
+    }
+
+    #[test]
+    fn test_vqe_full_heisenberg_converges() {
+        let result = vqe_full_heisenberg_1d(4, 16, 0.1, 10, 42);
+        let initial = result.energy_history[0];
+        let final_e = result.energy;
+        assert!(final_e <= initial + 1e-8,
+            "Full Heisenberg energy should decrease: initial={}, final={}", initial, final_e);
+    }
+
+    #[test]
+    fn test_vqe_full_heisenberg_deterministic() {
+        let r1 = vqe_full_heisenberg_1d(4, 16, 0.1, 3, 42);
+        let r2 = vqe_full_heisenberg_1d(4, 16, 0.1, 3, 42);
+        for k in 0..r1.thetas.len() {
+            assert_eq!(r1.thetas[k].to_bits(), r2.thetas[k].to_bits(),
+                "Full Heisenberg theta[{}] not bit-identical", k);
+        }
     }
 
     #[test]
