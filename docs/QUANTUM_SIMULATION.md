@@ -378,6 +378,96 @@ println!("Final accuracy: {:.1}%", result.final_accuracy * 100.0);
 - **Data preprocessing**: Snake (boustrophedon) ordering + average pooling for images
 - Memory: O(N * chi^2) per forward pass, well under 1MB for 50 qubits at chi=16
 
+## CJC Builtin Functions — Quantum Extensions
+
+All quantum extensions are callable from CJC programs through the builtin dispatch layer.
+Both `cjc-eval` (AST interpreter) and `cjc-mir-exec` (MIR executor) produce identical results.
+
+### MPS (Matrix Product States)
+
+```cjc
+let m = mps_new(n_qubits, max_bond);     // Create n-qubit MPS with bond dimension limit
+let m = mps_h(m, qubit);                  // Apply Hadamard gate
+let m = mps_x(m, qubit);                  // Apply Pauli-X gate
+let m = mps_ry(m, qubit, theta);          // Apply Ry rotation
+let m = mps_cnot(m, control, target);     // Apply CNOT (adjacent qubits only)
+mps_z_expectation(m, qubit)               // ⟨Z⟩ expectation value (float)
+mps_energy(m, "heisenberg")               // Energy for Hamiltonian type (float)
+mps_memory(m)                             // Memory usage in bytes (integer)
+```
+
+### VQE (Variational Quantum Eigensolver)
+
+```cjc
+vqe_heisenberg(n_qubits, max_bond, lr, iterations, seed)       // ZZ-only Heisenberg energy (float)
+vqe_full_heisenberg(n_qubits, max_bond, lr, iterations, seed)  // XX+YY+ZZ Heisenberg energy (float)
+```
+
+### QAOA (Quantum Approximate Optimization)
+
+```cjc
+let g = qaoa_graph_cycle(n_vertices);                           // Create cycle graph
+qaoa_maxcut(graph, max_bond, p_layers, lr, iterations, seed)    // Returns [energy, cut_value]
+```
+
+### Stabilizer (Clifford/CHP Simulator)
+
+```cjc
+let s = stabilizer_new(n_qubits);         // Create n-qubit stabilizer state |0...0⟩
+let s = stabilizer_h(s, qubit);           // Hadamard gate
+let s = stabilizer_s(s, qubit);           // S (phase) gate
+let s = stabilizer_x(s, qubit);           // Pauli-X gate
+let s = stabilizer_y(s, qubit);           // Pauli-Y gate
+let s = stabilizer_z(s, qubit);           // Pauli-Z gate
+let s = stabilizer_cnot(s, ctrl, tgt);    // CNOT gate
+stabilizer_measure(s, qubit, seed)        // Measure qubit (returns 0 or 1)
+stabilizer_n_qubits(s)                    // Number of qubits (integer)
+```
+
+### Density Matrix (Mixed States + Noise)
+
+```cjc
+let d = density_new(n_qubits);            // Create n-qubit density matrix |0...0⟩⟨0...0|
+let d = density_gate(d, "H", qubit);      // Apply gate ("H", "X", "Y", "Z", "S", "T")
+let d = density_cnot(d, ctrl, tgt);       // CNOT gate
+let d = density_depolarize(d, qubit, p);  // Depolarizing noise channel
+let d = density_dephase(d, qubit, p);     // Dephasing noise channel
+let d = density_amplitude_damp(d, qubit, gamma);  // Amplitude damping
+density_trace(d)                          // Trace (should be 1.0)
+density_purity(d)                         // Tr(ρ²) — 1.0 for pure states
+density_entropy(d)                        // Von Neumann entropy
+density_probs(d)                          // Probability array
+```
+
+### DMRG (Density Matrix Renormalization Group)
+
+```cjc
+dmrg_ising(n_qubits, max_bond, sweeps, tolerance)       // Ising ground state energy (float)
+dmrg_heisenberg(n_qubits, max_bond, sweeps, tolerance)  // Heisenberg ground state energy (float)
+```
+
+### QEC (Quantum Error Correction)
+
+```cjc
+let code = qec_repetition_code(distance);                // Build repetition code
+let code = qec_surface_code(distance);                   // Build surface code
+qec_syndrome(stabilizer_state, code, seed)               // Extract syndrome (array of 0/1)
+qec_decode(syndrome_array, code)                         // Decode syndrome → corrections
+qec_logical_error_rate(distance, phys_err, rounds, seed) // Estimate logical error rate
+```
+
+### QML (Quantum Machine Learning)
+
+```cjc
+// Train a QC-REUP classifier
+qml_train(n_qubits, layers, n_classes, max_bond, lr, epochs, seed, samples, labels)
+// Returns [final_accuracy, loss_history_array]
+
+// Predict with trained parameters
+qml_predict(n_qubits, layers, n_classes, max_bond, params, input)
+// Returns predicted class (integer)
+```
+
 ## Limitations
 
 - **Classical simulation**: ~25-26 qubits with statevector (50+ with MPS for low-entanglement)
@@ -409,7 +499,7 @@ println!("Final accuracy: {:.1}%", result.final_accuracy * 100.0);
 - QEC: repetition code, surface code, syndrome extraction, decoding (20 tests)
 - QML: rotations, snake order, preprocessing, Z expectations, circuit, classify, gradient, training, determinism, memory (21 tests)
 
-### Integration Tests (236 in beta_tests/)
+### Integration Tests (271 in beta_tests/)
 
 - Quantum circuit parity (eval vs mir-exec): constructor, Bell, GHZ, sampling, rotation
 - Full Heisenberg: XX/YY/ZZ expectations, MPS vs statevector cross-validation, VQE convergence
@@ -419,6 +509,7 @@ println!("Final accuracy: {:.1}%", result.final_accuracy * 100.0);
 - DMRG: 2/4/6-qubit ground state energy, Ising vs Heisenberg, convergence, determinism
 - QEC: repetition code structure, encoding, syndrome extraction, surface code decoding
 - QML: circuit construction, classification, gradients, training, determinism, preprocessing, memory scaling
+- **CJC dispatch integration** (35 new tests): MPS, VQE, QAOA, Stabilizer, Density Matrix, DMRG, QEC, QML builtins through eval + mir-exec with parity gates
 
 ### Property Tests (8 in beta_tests/quantum_prop/)
 

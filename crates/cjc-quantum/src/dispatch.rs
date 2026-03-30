@@ -15,6 +15,11 @@ use crate::circuit::Circuit;
 use crate::gates::Gate;
 use crate::statevector::Statevector;
 
+// Extension imports
+use crate::mps::Mps;
+use crate::stabilizer::StabilizerState;
+use crate::density::DensityMatrix;
+
 /// Dispatch a quantum builtin function call by name.
 ///
 /// Returns `Ok(Some(value))` if handled, `Ok(None)` if not a quantum builtin.
@@ -159,6 +164,489 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 .map(Some)
         }
 
+        // =======================================================================
+        // MPS (Matrix Product States) — 50+ qubit simulation
+        // =======================================================================
+
+        "mps_new" => {
+            let n = extract_int(&args, 0, "n_qubits")?;
+            let mps = if args.len() > 1 {
+                let bond = extract_int(&args, 1, "max_bond")?;
+                Mps::with_max_bond(n as usize, bond as usize)
+            } else {
+                Mps::new(n as usize)
+            };
+            Ok(Some(wrap_any(mps)))
+        }
+
+        "mps_h" | "mps_x" => {
+            let q = extract_int(&args, 1, "qubit")? as usize;
+            let isq2 = 1.0 / 2.0f64.sqrt();
+            let mat = if name == "mps_h" {
+                [[ComplexF64::real(isq2), ComplexF64::real(isq2)],
+                 [ComplexF64::real(isq2), ComplexF64::real(-isq2)]]
+            } else {
+                [[ComplexF64::ZERO, ComplexF64::ONE],
+                 [ComplexF64::ONE, ComplexF64::ZERO]]
+            };
+            with_any_mut::<Mps>(&args[0], "MPS", |mps| {
+                mps.apply_single_qubit(q, mat);
+                Ok(())
+            })?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "mps_ry" => {
+            let q = extract_int(&args, 1, "qubit")? as usize;
+            let theta = extract_angle(&args[2], "theta")?;
+            let c = ComplexF64::real((theta / 2.0).cos());
+            let s = ComplexF64::real((theta / 2.0).sin());
+            let mat = [[c, ComplexF64::real(-s.re)], [s, c]];
+            with_any_mut::<Mps>(&args[0], "MPS", |mps| {
+                mps.apply_single_qubit(q, mat);
+                Ok(())
+            })?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "mps_cnot" => {
+            let q1 = extract_int(&args, 1, "control")? as usize;
+            let q2 = extract_int(&args, 2, "target")? as usize;
+            with_any_mut::<Mps>(&args[0], "MPS", |mps| {
+                mps.apply_cnot_adjacent(q1, q2);
+                Ok(())
+            })?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "mps_z_expectation" => {
+            let q = extract_int(&args, 1, "qubit")? as usize;
+            let z = read_f64::<Mps>(&args[0], "MPS", |mps| {
+                crate::qml::mps_single_z_expectation(mps, q)
+            })?;
+            Ok(Some(Value::Float(z)))
+        }
+
+        "mps_energy" => {
+            let ham = match args.get(1) {
+                Some(Value::String(s)) if s.as_ref() == "heisenberg" =>
+                    crate::vqe::Hamiltonian::Heisenberg,
+                _ => crate::vqe::Hamiltonian::Ising,
+            };
+            let e = read_f64::<Mps>(&args[0], "MPS", |mps| {
+                crate::vqe::mps_energy(mps, ham)
+            })?;
+            Ok(Some(Value::Float(e)))
+        }
+
+        "mps_memory" => {
+            let mem = read_i64::<Mps>(&args[0], "MPS", |mps| {
+                mps.memory_bytes() as i64
+            })?;
+            Ok(Some(Value::Int(mem)))
+        }
+
+        // =======================================================================
+        // VQE — Variational Quantum Eigensolver
+        // =======================================================================
+
+        "vqe_heisenberg" => {
+            let n = extract_int(&args, 0, "n_qubits")? as usize;
+            let chi = extract_int(&args, 1, "max_bond")? as usize;
+            let lr = extract_angle(&args[2], "learning_rate")?;
+            let iters = extract_int(&args, 3, "iterations")? as usize;
+            let seed = extract_int(&args, 4, "seed")? as u64;
+            let result = crate::vqe::vqe_heisenberg_1d(n, chi, lr, iters, seed);
+            Ok(Some(Value::Float(result.energy)))
+        }
+
+        "vqe_full_heisenberg" => {
+            let n = extract_int(&args, 0, "n_qubits")? as usize;
+            let chi = extract_int(&args, 1, "max_bond")? as usize;
+            let lr = extract_angle(&args[2], "learning_rate")?;
+            let iters = extract_int(&args, 3, "iterations")? as usize;
+            let seed = extract_int(&args, 4, "seed")? as u64;
+            let result = crate::vqe::vqe_full_heisenberg_1d(n, chi, lr, iters, seed);
+            Ok(Some(Value::Float(result.energy)))
+        }
+
+        // =======================================================================
+        // QAOA — Quantum Approximate Optimization
+        // =======================================================================
+
+        "qaoa_graph_cycle" => {
+            let n = extract_int(&args, 0, "n_vertices")? as usize;
+            let g = crate::qaoa::Graph::cycle(n);
+            Ok(Some(wrap_any(g)))
+        }
+
+        "qaoa_maxcut" => {
+            let max_bond = extract_int(&args, 1, "max_bond")? as usize;
+            let layers = extract_int(&args, 2, "p_layers")? as usize;
+            let lr = extract_angle(&args[3], "learning_rate")?;
+            let iters = extract_int(&args, 4, "iterations")? as usize;
+            let seed = extract_int(&args, 5, "seed")? as u64;
+            let result = match &args[0] {
+                Value::QuantumState(rc) => {
+                    let borrow = rc.borrow();
+                    let g = borrow.downcast_ref::<crate::qaoa::Graph>()
+                        .ok_or_else(|| "expected Graph".to_string())?;
+                    crate::qaoa::qaoa_maxcut(g, layers, max_bond, lr, iters, seed)
+                }
+                _ => return Err("qaoa_maxcut: first arg must be a Graph".into()),
+            };
+            let arr = vec![
+                Value::Float(result.energy),
+                Value::Int(result.cut_value as i64),
+            ];
+            Ok(Some(Value::Array(Rc::new(arr))))
+        }
+
+        // =======================================================================
+        // Stabilizer — Clifford/CHP simulator (1000+ qubits)
+        // =======================================================================
+
+        "stabilizer_new" => {
+            let n = extract_int(&args, 0, "n_qubits")? as usize;
+            Ok(Some(wrap_any(StabilizerState::new(n))))
+        }
+
+        "stabilizer_h" | "stabilizer_s" | "stabilizer_x" |
+        "stabilizer_y" | "stabilizer_z" => {
+            let q = extract_int(&args, 1, "qubit")? as usize;
+            with_any_mut::<StabilizerState>(&args[0], "StabilizerState", |s| {
+                match name {
+                    "stabilizer_h" => s.h(q),
+                    "stabilizer_s" => s.s(q),
+                    "stabilizer_x" => s.x(q),
+                    "stabilizer_y" => s.y(q),
+                    "stabilizer_z" => s.z(q),
+                    _ => unreachable!(),
+                }
+                Ok(())
+            })?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "stabilizer_cnot" => {
+            let ctrl = extract_int(&args, 1, "control")? as usize;
+            let tgt = extract_int(&args, 2, "target")? as usize;
+            with_any_mut::<StabilizerState>(&args[0], "StabilizerState", |s| {
+                s.cnot(ctrl, tgt);
+                Ok(())
+            })?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "stabilizer_measure" => {
+            let q = extract_int(&args, 1, "qubit")? as usize;
+            let seed = extract_int(&args, 2, "seed")? as u64;
+            let mut rng = seed;
+            let outcome = match &args[0] {
+                Value::QuantumState(rc) => {
+                    let mut borrow = rc.borrow_mut();
+                    let s = borrow.downcast_mut::<StabilizerState>()
+                        .ok_or_else(|| "expected StabilizerState".to_string())?;
+                    s.measure(q, &mut rng) as i64
+                }
+                _ => return Err("stabilizer_measure: expected StabilizerState".into()),
+            };
+            Ok(Some(Value::Int(outcome)))
+        }
+
+        "stabilizer_n_qubits" => {
+            let n = read_i64::<StabilizerState>(&args[0], "StabilizerState", |s| {
+                s.num_qubits() as i64
+            })?;
+            Ok(Some(Value::Int(n)))
+        }
+
+        // =======================================================================
+        // Density Matrix — Mixed states + noise
+        // =======================================================================
+
+        "density_new" => {
+            let n = extract_int(&args, 0, "n_qubits")? as usize;
+            Ok(Some(wrap_any(DensityMatrix::new(n))))
+        }
+
+        "density_gate" => {
+            let gate_name = match &args[1] {
+                Value::String(s) => s.to_string(),
+                _ => return Err("density_gate: gate name must be a string".into()),
+            };
+            let q = extract_int(&args, 2, "qubit")? as usize;
+            let gate = match gate_name.as_str() {
+                "H" => Gate::H(q),
+                "X" => Gate::X(q),
+                "Y" => Gate::Y(q),
+                "Z" => Gate::Z(q),
+                "S" => Gate::S(q),
+                "T" => Gate::T(q),
+                _ => return Err(format!("density_gate: unknown gate '{}'", gate_name)),
+            };
+            with_any_mut::<DensityMatrix>(&args[0], "DensityMatrix", |dm| {
+                dm.apply_gate(&gate);
+                Ok(())
+            })?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "density_cnot" => {
+            let ctrl = extract_int(&args, 1, "control")? as usize;
+            let tgt = extract_int(&args, 2, "target")? as usize;
+            with_any_mut::<DensityMatrix>(&args[0], "DensityMatrix", |dm| {
+                dm.apply_gate(&Gate::CNOT(ctrl, tgt));
+                Ok(())
+            })?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "density_depolarize" => {
+            let q = extract_int(&args, 1, "qubit")? as usize;
+            let p = extract_angle(&args[2], "probability")?;
+            let ch = crate::density::depolarizing_channel(p);
+            with_any_mut::<DensityMatrix>(&args[0], "DensityMatrix", |dm| {
+                dm.apply_single_qubit_channel(q, &ch);
+                Ok(())
+            })?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "density_dephase" => {
+            let q = extract_int(&args, 1, "qubit")? as usize;
+            let p = extract_angle(&args[2], "probability")?;
+            let ch = crate::density::dephasing_channel(p);
+            with_any_mut::<DensityMatrix>(&args[0], "DensityMatrix", |dm| {
+                dm.apply_single_qubit_channel(q, &ch);
+                Ok(())
+            })?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "density_amplitude_damp" => {
+            let q = extract_int(&args, 1, "qubit")? as usize;
+            let gamma = extract_angle(&args[2], "gamma")?;
+            let ch = crate::density::amplitude_damping_channel(gamma);
+            with_any_mut::<DensityMatrix>(&args[0], "DensityMatrix", |dm| {
+                dm.apply_single_qubit_channel(q, &ch);
+                Ok(())
+            })?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "density_trace" => {
+            let tr = read_f64::<DensityMatrix>(&args[0], "DensityMatrix", |dm| dm.trace())?;
+            Ok(Some(Value::Float(tr)))
+        }
+
+        "density_purity" => {
+            let p = read_f64::<DensityMatrix>(&args[0], "DensityMatrix", |dm| dm.purity())?;
+            Ok(Some(Value::Float(p)))
+        }
+
+        "density_entropy" => {
+            let e = read_f64::<DensityMatrix>(&args[0], "DensityMatrix", |dm| dm.von_neumann_entropy())?;
+            Ok(Some(Value::Float(e)))
+        }
+
+        "density_probs" => {
+            let probs = read_vec_f64::<DensityMatrix>(&args[0], "DensityMatrix", |dm| dm.probabilities())?;
+            let arr: Vec<Value> = probs.into_iter().map(Value::Float).collect();
+            Ok(Some(Value::Array(Rc::new(arr))))
+        }
+
+        // =======================================================================
+        // DMRG — Density Matrix Renormalization Group
+        // =======================================================================
+
+        "dmrg_ising" => {
+            let n = extract_int(&args, 0, "n_qubits")? as usize;
+            let chi = extract_int(&args, 1, "max_bond")? as usize;
+            let sweeps = extract_int(&args, 2, "sweeps")? as usize;
+            let tol = extract_angle(&args[3], "tolerance")?;
+            let result = crate::dmrg::dmrg_heisenberg_1d(n, chi, sweeps, tol);
+            Ok(Some(Value::Float(result.energy)))
+        }
+
+        "dmrg_heisenberg" => {
+            let n = extract_int(&args, 0, "n_qubits")? as usize;
+            let chi = extract_int(&args, 1, "max_bond")? as usize;
+            let sweeps = extract_int(&args, 2, "sweeps")? as usize;
+            let tol = extract_angle(&args[3], "tolerance")?;
+            let result = crate::dmrg::dmrg_full_heisenberg_1d(n, chi, sweeps, tol);
+            Ok(Some(Value::Float(result.energy)))
+        }
+
+        // =======================================================================
+        // QEC — Quantum Error Correction
+        // =======================================================================
+
+        "qec_repetition_code" => {
+            let d = extract_int(&args, 0, "distance")? as usize;
+            let code = crate::qec::build_repetition_code(d);
+            Ok(Some(wrap_any(code)))
+        }
+
+        "qec_surface_code" => {
+            let d = extract_int(&args, 0, "distance")? as usize;
+            let code = crate::qec::build_surface_code(d);
+            Ok(Some(wrap_any(code)))
+        }
+
+        "qec_syndrome" => {
+            let seed = extract_int(&args, 2, "seed")? as u64;
+            let mut rng = seed;
+            // We need both a mutable StabilizerState and an immutable SurfaceCode.
+            // Extract both from QuantumState wrappers, being careful with borrows.
+            match (&args[0], &args[1]) {
+                (Value::QuantumState(state_rc), Value::QuantumState(code_rc)) => {
+                    let code_borrow = code_rc.borrow();
+                    let code = code_borrow.downcast_ref::<crate::qec::SurfaceCode>()
+                        .ok_or_else(|| "expected SurfaceCode".to_string())?;
+                    let mut state_borrow = state_rc.borrow_mut();
+                    let state = state_borrow.downcast_mut::<StabilizerState>()
+                        .ok_or_else(|| "expected StabilizerState".to_string())?;
+                    let syndrome = crate::qec::syndrome_extraction(state, code, &mut rng);
+                    let arr: Vec<Value> = syndrome.into_iter().map(|b| Value::Int(b as i64)).collect();
+                    Ok(Some(Value::Array(Rc::new(arr))))
+                }
+                _ => Err("qec_syndrome(state, code, seed): expected QuantumState args".into()),
+            }
+        }
+
+        "qec_decode" => {
+            let syndrome = match &args[0] {
+                Value::Array(arr) => arr.iter().map(|v| match v {
+                    Value::Int(i) => *i as u8,
+                    _ => 0,
+                }).collect::<Vec<u8>>(),
+                _ => return Err("qec_decode: first arg must be syndrome array".into()),
+            };
+            let corrections = match &args[1] {
+                Value::QuantumState(rc) => {
+                    let borrow = rc.borrow();
+                    let code = borrow.downcast_ref::<crate::qec::SurfaceCode>()
+                        .ok_or_else(|| "expected SurfaceCode".to_string())?;
+                    crate::qec::decode_repetition_code(&syndrome, code)
+                }
+                _ => return Err("qec_decode: second arg must be SurfaceCode".into()),
+            };
+            let arr: Vec<Value> = corrections.into_iter().map(|c| Value::Int(c as i64)).collect();
+            Ok(Some(Value::Array(Rc::new(arr))))
+        }
+
+        "qec_logical_error_rate" => {
+            let distance = extract_int(&args, 0, "distance")? as usize;
+            let p = extract_angle(&args[1], "error_rate")?;
+            let rounds = extract_int(&args, 2, "rounds")? as usize;
+            let seed = extract_int(&args, 3, "seed")? as u64;
+            let rate = crate::qec::estimate_logical_error_rate(distance, p, rounds, seed);
+            Ok(Some(Value::Float(rate)))
+        }
+
+        // =======================================================================
+        // QML — Quantum Machine Learning
+        // =======================================================================
+
+        "qml_train" => {
+            let n_qubits = extract_int(&args, 0, "n_qubits")? as usize;
+            let layers = extract_int(&args, 1, "layers")? as usize;
+            let n_classes = extract_int(&args, 2, "n_classes")? as usize;
+            let chi = extract_int(&args, 3, "max_bond")? as usize;
+            let lr = extract_angle(&args[4], "learning_rate")?;
+            let epochs = extract_int(&args, 5, "epochs")? as usize;
+            let seed = extract_int(&args, 6, "seed")? as u64;
+
+            // Build config with readout qubits = first n_classes qubits
+            let config = crate::qml::QmlConfig {
+                n_qubits,
+                n_reupload_passes: layers,
+                n_classes,
+                max_bond: chi,
+                readout_qubits: (0..n_classes).collect(),
+                learning_rate: lr,
+                epochs,
+                batch_size: 4,
+                loss: crate::qml::QmlLoss::CrossEntropy,
+                seed,
+            };
+
+            // Build dataset from args[7] (samples array) and args[8] (labels array)
+            let samples = match args.get(7) {
+                Some(Value::Array(arr)) => {
+                    arr.iter().map(|row| match row {
+                        Value::Array(inner) => inner.iter().map(|v| match v {
+                            Value::Float(f) => *f,
+                            Value::Int(i) => *i as f64,
+                            _ => 0.0,
+                        }).collect(),
+                        _ => vec![],
+                    }).collect::<Vec<Vec<f64>>>()
+                }
+                _ => return Err("qml_train: arg 7 must be samples array".into()),
+            };
+            let labels = match args.get(8) {
+                Some(Value::Array(arr)) => {
+                    arr.iter().map(|v| match v {
+                        Value::Int(i) => *i as usize,
+                        _ => 0,
+                    }).collect::<Vec<usize>>()
+                }
+                _ => return Err("qml_train: arg 8 must be labels array".into()),
+            };
+
+            let dataset = crate::qml::QmlDataset { samples, labels, n_classes };
+            let result = crate::qml::qml_train(&config, &dataset);
+
+            let loss_arr: Vec<Value> = result.loss_history.into_iter().map(Value::Float).collect();
+            let out = vec![
+                Value::Float(result.final_accuracy),
+                Value::Array(Rc::new(loss_arr)),
+            ];
+            Ok(Some(Value::Array(Rc::new(out))))
+        }
+
+        "qml_predict" => {
+            let n_qubits = extract_int(&args, 0, "n_qubits")? as usize;
+            let layers = extract_int(&args, 1, "layers")? as usize;
+            let n_classes = extract_int(&args, 2, "n_classes")? as usize;
+            let chi = extract_int(&args, 3, "max_bond")? as usize;
+
+            let config = crate::qml::QmlConfig {
+                n_qubits,
+                n_reupload_passes: layers,
+                n_classes,
+                max_bond: chi,
+                readout_qubits: (0..n_classes).collect(),
+                learning_rate: 0.0,
+                epochs: 0,
+                batch_size: 1,
+                loss: crate::qml::QmlLoss::CrossEntropy,
+                seed: 0,
+            };
+
+            let params = match args.get(4) {
+                Some(Value::Array(arr)) => arr.iter().map(|v| match v {
+                    Value::Float(f) => *f,
+                    Value::Int(i) => *i as f64,
+                    _ => 0.0,
+                }).collect::<Vec<f64>>(),
+                _ => return Err("qml_predict: arg 4 must be params array".into()),
+            };
+            let input = match args.get(5) {
+                Some(Value::Array(arr)) => arr.iter().map(|v| match v {
+                    Value::Float(f) => *f,
+                    Value::Int(i) => *i as f64,
+                    _ => 0.0,
+                }).collect::<Vec<f64>>(),
+                _ => return Err("qml_predict: arg 5 must be input array".into()),
+            };
+
+            let class = crate::qml::predict(&config, &params, &input);
+            Ok(Some(Value::Int(class as i64)))
+        }
+
         _ => Ok(None),
     }
 }
@@ -173,6 +661,72 @@ fn wrap_circuit(circ: Circuit) -> Value {
 
 fn wrap_statevector(sv: Statevector) -> Value {
     Value::QuantumState(Rc::new(RefCell::new(sv)))
+}
+
+/// Wrap any type as a QuantumState value.
+fn wrap_any<T: Any + 'static>(val: T) -> Value {
+    Value::QuantumState(Rc::new(RefCell::new(val)))
+}
+
+/// Borrow a typed value immutably and extract a float.
+fn read_f64<T: Any + 'static>(val: &Value, type_name: &str, f: impl FnOnce(&T) -> f64) -> Result<f64, String> {
+    match val {
+        Value::QuantumState(rc) => {
+            let borrow = rc.borrow();
+            let obj = borrow.downcast_ref::<T>()
+                .ok_or_else(|| format!("expected {}", type_name))?;
+            Ok(f(obj))
+        }
+        _ => Err(format!("expected QuantumState({}), got {}", type_name, val.type_name())),
+    }
+}
+
+/// Borrow a typed value immutably and extract an i64.
+fn read_i64<T: Any + 'static>(val: &Value, type_name: &str, f: impl FnOnce(&T) -> i64) -> Result<i64, String> {
+    match val {
+        Value::QuantumState(rc) => {
+            let borrow = rc.borrow();
+            let obj = borrow.downcast_ref::<T>()
+                .ok_or_else(|| format!("expected {}", type_name))?;
+            Ok(f(obj))
+        }
+        _ => Err(format!("expected QuantumState({}), got {}", type_name, val.type_name())),
+    }
+}
+
+/// Borrow a typed value immutably and extract a Vec<f64>.
+fn read_vec_f64<T: Any + 'static>(val: &Value, type_name: &str, f: impl FnOnce(&T) -> Vec<f64>) -> Result<Vec<f64>, String> {
+    match val {
+        Value::QuantumState(rc) => {
+            let borrow = rc.borrow();
+            let obj = borrow.downcast_ref::<T>()
+                .ok_or_else(|| format!("expected {}", type_name))?;
+            Ok(f(obj))
+        }
+        _ => Err(format!("expected QuantumState({}), got {}", type_name, val.type_name())),
+    }
+}
+
+/// Borrow a typed value mutably from a QuantumState.
+fn with_any_mut<T: Any + 'static>(val: &Value, type_name: &str, f: impl FnOnce(&mut T) -> Result<(), String>) -> Result<(), String> {
+    match val {
+        Value::QuantumState(rc) => {
+            let mut borrow = rc.borrow_mut();
+            let obj = borrow.downcast_mut::<T>()
+                .ok_or_else(|| format!("expected {}", type_name))?;
+            f(obj)
+        }
+        _ => Err(format!("expected QuantumState({}), got {}", type_name, val.type_name())),
+    }
+}
+
+fn extract_int(args: &[Value], idx: usize, name: &str) -> Result<i64, String> {
+    match args.get(idx) {
+        Some(Value::Int(i)) => Ok(*i),
+        Some(Value::Float(f)) => Ok(*f as i64),
+        Some(other) => Err(format!("{} must be an integer, got {}", name, other.type_name())),
+        None => Err(format!("missing argument: {}", name)),
+    }
 }
 
 fn extract_qubit_index(val: &Value, name: &str) -> Result<usize, String> {
