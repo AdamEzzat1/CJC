@@ -85,7 +85,7 @@ pub fn mps_heisenberg_energy(mps: &Mps) -> f64 {
 ///
 /// T_identity[j_left, j'_left] → T_new[j_right, j'_right]
 /// T_new[a,b] = Σ_{j,j'} Σ_s env[j,j'] * conj(A^s[j,a]) * A^s[j',b]
-fn transfer_matrix_identity(
+pub(crate) fn transfer_matrix_identity(
     tensor: &crate::mps::MpsTensor,
     env: &[Vec<ComplexF64>],
 ) -> Vec<Vec<ComplexF64>> {
@@ -123,7 +123,7 @@ fn transfer_matrix_identity(
 /// Transfer matrix contraction with Z operator.
 ///
 /// Z eigenvalues: o_0 = +1, o_1 = -1
-fn transfer_matrix_z(
+pub(crate) fn transfer_matrix_z(
     tensor: &crate::mps::MpsTensor,
     env: &[Vec<ComplexF64>],
 ) -> Vec<Vec<ComplexF64>> {

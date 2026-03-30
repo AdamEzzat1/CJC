@@ -8,3 +8,4 @@ pub mod test_stabilizer;
 pub mod test_density_matrix;
 pub mod test_dmrg;
 pub mod test_qec;
+pub mod test_qml;

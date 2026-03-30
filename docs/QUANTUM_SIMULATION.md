@@ -342,6 +342,42 @@ let correction = decode_minimum_weight(&surface, &syndrome);
 - Decoder: minimum-weight matching (greedy approximation)
 - Built on top of the Clifford/Stabilizer simulator for efficiency
 
+### Extension 7: Quantum Machine Learning (`qml.rs`)
+
+Data Re-Uploading (QC-REUP) quantum neural network for classification:
+
+```rust
+use cjc_quantum::qml::*;
+
+let config = QmlConfig {
+    n_qubits: 16,
+    n_reupload_passes: 3,
+    n_classes: 2,
+    max_bond: 16,
+    readout_qubits: vec![0, 1],
+    learning_rate: 0.05,
+    epochs: 20,
+    batch_size: 32,
+    loss: QmlLoss::CrossEntropy,
+    seed: 42,
+};
+
+// Load and preprocess image data
+let dataset = load_dataset(&image_bytes, &labels, 28, 28, 1000, 16, 2);
+
+// Train
+let result = qml_train(&config, &dataset);
+println!("Final accuracy: {:.1}%", result.final_accuracy * 100.0);
+```
+
+- **QC-REUP architecture**: Data re-encoded at every layer via parameterized Rx/Ry/Rz rotations
+- **MPS-friendly**: Adjacent CNOT entanglement only, scales to 50+ qubits
+- **6 params per qubit per layer**: 3 data weights + 3 trainable biases
+- **Softmax classification**: Z expectation values mapped to class probabilities
+- **Finite-difference gradient**: Works correctly for all parameter types (weights and biases)
+- **Data preprocessing**: Snake (boustrophedon) ordering + average pooling for images
+- Memory: O(N * chi^2) per forward pass, well under 1MB for 50 qubits at chi=16
+
 ## Limitations
 
 - **Classical simulation**: ~25-26 qubits with statevector (50+ with MPS for low-entanglement)
@@ -353,7 +389,7 @@ let correction = decode_minimum_weight(&surface, &syndrome);
 
 ## Test Coverage
 
-### Unit Tests (203 in cjc-quantum)
+### Unit Tests (224 in cjc-quantum)
 
 - Statevector: construction, normalization, probabilities (6 tests)
 - Gates: all 13 gate types, involutions, unitarity, error handling (22 tests)
@@ -371,8 +407,9 @@ let correction = decode_minimum_weight(&surface, &syndrome);
 - Density Matrix: construction, gates, noise channels, purity, entropy, fidelity (23 tests)
 - DMRG: 2/4/6-qubit Ising + Heisenberg, convergence, determinism (13 tests)
 - QEC: repetition code, surface code, syndrome extraction, decoding (20 tests)
+- QML: rotations, snake order, preprocessing, Z expectations, circuit, classify, gradient, training, determinism, memory (21 tests)
 
-### Integration Tests (211 in beta_tests/)
+### Integration Tests (236 in beta_tests/)
 
 - Quantum circuit parity (eval vs mir-exec): constructor, Bell, GHZ, sampling, rotation
 - Full Heisenberg: XX/YY/ZZ expectations, MPS vs statevector cross-validation, VQE convergence
@@ -381,6 +418,7 @@ let correction = decode_minimum_weight(&surface, &syndrome);
 - Density Matrix: construction, gates, noise channels, purity, entropy, partial trace
 - DMRG: 2/4/6-qubit ground state energy, Ising vs Heisenberg, convergence, determinism
 - QEC: repetition code structure, encoding, syndrome extraction, surface code decoding
+- QML: circuit construction, classification, gradients, training, determinism, preprocessing, memory scaling
 
 ### Property Tests (8 in beta_tests/quantum_prop/)
 
@@ -399,7 +437,7 @@ let correction = decode_minimum_weight(&surface, &syndrome);
 
 | File | Change |
 |------|--------|
-| `crates/cjc-quantum/` | Quantum crate (15 source files) |
+| `crates/cjc-quantum/` | Quantum crate (16 source files) |
 | `crates/cjc-quantum/src/wirtinger.rs` | Wirtinger calculus (complex AD) |
 | `crates/cjc-quantum/src/adjoint.rs` | Adjoint differentiation + HybridCircuit |
 | `crates/cjc-quantum/src/simd_kernel.rs` | AVX2 SIMD kernels + cache blocking |
@@ -410,10 +448,11 @@ let correction = decode_minimum_weight(&surface, &syndrome);
 | `crates/cjc-quantum/src/density.rs` | Density matrix + noise channels |
 | `crates/cjc-quantum/src/dmrg.rs` | DMRG variational ground-state solver |
 | `crates/cjc-quantum/src/qec.rs` | QEC repetition + surface code |
+| `crates/cjc-quantum/src/qml.rs` | QML data re-uploading neural network |
 | `crates/cjc-runtime/src/value.rs` | Added `Value::QuantumState` variant |
 | `crates/cjc-snap/src/encode.rs` | Added QuantumState to non-serializable list |
 | `crates/cjc-eval/src/lib.rs` | Wired `dispatch_quantum` |
 | `crates/cjc-mir-exec/src/lib.rs` | Wired `dispatch_quantum` |
 | `Cargo.toml` | Added cjc-quantum to workspace |
-| `tests/beta_tests/quantum/` | 211 integration tests (10 test files) |
+| `tests/beta_tests/quantum/` | 236 integration tests (11 test files) |
 | `tests/beta_tests/quantum_prop/` | 8 property tests |
