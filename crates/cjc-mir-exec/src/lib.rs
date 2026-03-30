@@ -1722,6 +1722,13 @@ impl MirExecutor {
             Ok(None) => {} // not a shared builtin, fall through
         }
 
+        // Quantum builtins (qubits, q_h, q_cx, q_measure, etc.)
+        match cjc_quantum::dispatch_quantum(name, &args) {
+            Ok(Some(value)) => return Ok(value),
+            Err(msg) => return Err(MirExecError::Runtime(msg)),
+            Ok(None) => {} // not a quantum builtin, fall through
+        }
+
         // Phase C1: GradGraph constructor (bypasses builtins.rs — cjc-ad dep)
         if name == "GradGraph.new" {
             use std::any::Any;

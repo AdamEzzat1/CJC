@@ -161,6 +161,11 @@ pub enum Value {
     ///
     /// Dispatch is handled by `cjc_vizor::dispatch::dispatch_vizor_method`.
     VizorPlot(Rc<dyn Any>),
+    /// Type-erased quantum state (circuit or statevector).
+    /// Concrete type: `cjc_quantum::Circuit` or `cjc_quantum::Statevector`.
+    /// Uses `Rc<RefCell<dyn Any>>` for interior mutability (measurement collapses state).
+    /// Construction and method dispatch happen in cjc-eval and cjc-mir-exec.
+    QuantumState(Rc<RefCell<dyn Any>>),
     Void,
 }
 
@@ -198,6 +203,7 @@ impl Value {
             Value::TidyView(_) => "TidyView",
             Value::GroupedTidyView(_) => "GroupedTidyView",
             Value::VizorPlot(_) => "VizorPlot",
+            Value::QuantumState(_) => "QuantumState",
             Value::Void => "Void",
         }
     }
@@ -326,6 +332,7 @@ impl fmt::Display for Value {
             Value::TidyView(_) => write!(f, "<TidyView>"),
             Value::GroupedTidyView(_) => write!(f, "<GroupedTidyView>"),
             Value::VizorPlot(_) => write!(f, "<VizorPlot>"),
+            Value::QuantumState(_) => write!(f, "<QuantumState>"),
             Value::Void => write!(f, "void"),
         }
     }

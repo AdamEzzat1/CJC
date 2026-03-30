@@ -182,6 +182,7 @@ dependencies = [
  "cjc-mir-exec",
  "cjc-module",
  "cjc-parser",
+ "cjc-quantum",
  "cjc-regex",
  "cjc-repro",
  "cjc-runtime",
@@ -270,6 +271,7 @@ dependencies = [
  "cjc-diag",
  "cjc-dispatch",
  "cjc-module",
+ "cjc-quantum",
  "cjc-regex",
  "cjc-repro",
  "cjc-runtime",
@@ -318,6 +320,7 @@ dependencies = [
  "cjc-mir",
  "cjc-module",
  "cjc-parser",
+ "cjc-quantum",
  "cjc-regex",
  "cjc-repro",
  "cjc-runtime",
@@ -347,6 +350,14 @@ dependencies = [
  "cjc-ast",
  "cjc-diag",
  "cjc-lexer",
+]
+
+[[package]]
+name = "cjc-quantum"
+version = "0.1.0"
+dependencies = [
+ "cjc-repro",
+ "cjc-runtime",
 ]
 
 [[package]]

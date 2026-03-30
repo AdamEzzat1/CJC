@@ -24,3 +24,4 @@ cjc-lexer.workspace = true
 cjc-parser.workspace = true
 cjc-snap.workspace = true
 cjc-vizor.workspace = true
+cjc-quantum.workspace = true

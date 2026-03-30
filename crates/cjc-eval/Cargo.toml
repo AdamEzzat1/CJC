@@ -20,3 +20,4 @@ cjc-regex.workspace = true
 cjc-snap.workspace = true
 cjc-vizor.workspace = true
 cjc-module = { workspace = true }
+cjc-quantum.workspace = true

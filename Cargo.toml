@@ -26,6 +26,7 @@ members = [
     "crates/cjc-snap",
     "crates/cjc-vizor",
     "crates/cjc-analyzer",
+    "crates/cjc-quantum",
     "bench/ad_bench",
     "bench/nlp_preprocess_bench",
 ]
@@ -60,6 +61,7 @@ cjc-regex.workspace = true
 cjc-module.workspace = true
 cjc-snap.workspace = true
 cjc-vizor.workspace = true
+cjc-quantum.workspace = true
 
 [dev-dependencies]
 bolero = "0.13.4"
@@ -87,6 +89,7 @@ cjc-mir = { path = "crates/cjc-mir", version = "0.1.0" }
 cjc-mir-exec = { path = "crates/cjc-mir-exec", version = "0.1.0" }
 cjc-regex = { path = "crates/cjc-regex", version = "0.1.0" }
 cjc-analyzer = { path = "crates/cjc-analyzer", version = "0.1.0" }
+cjc-quantum = { path = "crates/cjc-quantum", version = "0.1.0" }
 
 [[test]]
 name = "fixtures"
