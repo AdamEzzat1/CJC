@@ -20,10 +20,33 @@ use crate::mps::Mps;
 use crate::stabilizer::StabilizerState;
 use crate::density::DensityMatrix;
 
+// Pure backend imports
+use crate::pure::{
+    PureMps, PureStabilizer, PureDensity, PureCircuit, PureGate,
+    has_pure_flag, is_pure, wrap_pure,
+};
+
 /// Dispatch a quantum builtin function call by name.
 ///
 /// Returns `Ok(Some(value))` if handled, `Ok(None)` if not a quantum builtin.
+///
+/// # Dual-mode backend
+///
+/// Pass `"pure"` as the last argument to constructor functions to use the
+/// pure CJC backend (inspectable state, modifiable algorithms):
+///
+/// ```cjc
+/// let m = mps_new(50, 16, "pure");    // Pure CJC backend
+/// let m = mps_new(50, 16);            // Rust backend (default, faster)
+/// ```
+///
+/// Subsequent operations auto-detect the backend from the state value.
 pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, String> {
+    // Try pure backend dispatch first
+    if let Some(result) = dispatch_pure(name, args)? {
+        return Ok(Some(result));
+    }
+
     match name {
         // --- Constructor: create quantum circuit ---
         "qubits" => {
@@ -647,13 +670,391 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             Ok(Some(Value::Int(class as i64)))
         }
 
+        // --- Inspect pure backend state ---
+        "quantum_inspect" => {
+            if args.is_empty() {
+                return Err("quantum_inspect(state) requires 1 arg".into());
+            }
+            let map = crate::pure::quantum_inspect(&args[0])?;
+            Ok(Some(map))
+        }
+
         _ => Ok(None),
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+// ═══════════════════════════════════════════════════════════════════
+// Pure backend dispatch
+// ═══════════════════════════════════════════════════════════════════
+//
+// Routes to pure CJC implementations when:
+// 1. Constructor called with "pure" flag: mps_new(50, 16, "pure")
+// 2. Operation called on pure-backend state: mps_h(pure_mps, 0)
+
+fn dispatch_pure(name: &str, args: &[Value]) -> Result<Option<Value>, String> {
+    use crate::pure::*;
+
+    match name {
+        // === Pure constructors (triggered by "pure" flag) ===
+
+        "qubits" if has_pure_flag(args) => {
+            let n = extract_int(args, 0, "n_qubits")? as usize;
+            if n < 1 || n > 26 {
+                return Err(format!("qubits() requires 1-26 qubits, got {}", n));
+            }
+            Ok(Some(wrap_pure(PureCircuit::new(n))))
+        }
+
+        "mps_new" if has_pure_flag(args) => {
+            let n = extract_int(args, 0, "n_qubits")? as usize;
+            let chi = if args.len() > 2 { extract_int(args, 1, "max_bond")? as usize } else { 32 };
+            Ok(Some(wrap_pure(PureMps::new(n, chi))))
+        }
+
+        "stabilizer_new" if has_pure_flag(args) => {
+            let n = extract_int(args, 0, "n_qubits")? as usize;
+            Ok(Some(wrap_pure(PureStabilizer::new(n))))
+        }
+
+        "density_new" if has_pure_flag(args) => {
+            let n = extract_int(args, 0, "n_qubits")? as usize;
+            Ok(Some(wrap_pure(PureDensity::new(n))))
+        }
+
+        // === Pure MPS operations (auto-detected) ===
+
+        "mps_h" | "mps_x" if is_pure::<PureMps>(&args[0]) => {
+            let q = extract_int(args, 1, "qubit")? as usize;
+            let mat = if name == "mps_h" { h_matrix() } else { x_matrix() };
+            pure_mps_mut(&args[0], |mps| mps.apply_single_qubit(q, mat))?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "mps_ry" if is_pure::<PureMps>(&args[0]) => {
+            let q = extract_int(args, 1, "qubit")? as usize;
+            let theta = extract_angle(&args[2], "theta")?;
+            pure_mps_mut(&args[0], |mps| mps.apply_single_qubit(q, ry_matrix(theta)))?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "mps_cnot" if is_pure::<PureMps>(&args[0]) => {
+            let ctrl = extract_int(args, 1, "control")? as usize;
+            let targ = extract_int(args, 2, "target")? as usize;
+            pure_mps_mut(&args[0], |mps| mps.apply_cnot(ctrl, targ))?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "mps_z_expectation" if is_pure::<PureMps>(&args[0]) => {
+            let q = extract_int(args, 1, "qubit")? as usize;
+            let z = pure_mps_ref(&args[0], |mps| mps.z_expectation(q))?;
+            Ok(Some(Value::Float(z)))
+        }
+
+        "mps_memory" if is_pure::<PureMps>(&args[0]) => {
+            let mem = pure_mps_ref(&args[0], |mps| mps.memory_bytes() as f64)?;
+            Ok(Some(Value::Int(mem as i64)))
+        }
+
+        // === Pure Stabilizer operations ===
+
+        "stabilizer_h" | "stabilizer_s" | "stabilizer_x" |
+        "stabilizer_y" | "stabilizer_z" if is_pure::<PureStabilizer>(&args[0]) => {
+            let q = extract_int(args, 1, "qubit")? as usize;
+            pure_stab_mut(&args[0], |s| {
+                match name {
+                    "stabilizer_h" => s.h(q),
+                    "stabilizer_s" => s.s(q),
+                    "stabilizer_x" => s.x(q),
+                    "stabilizer_y" => s.y(q),
+                    "stabilizer_z" => s.z(q),
+                    _ => unreachable!(),
+                }
+            })?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "stabilizer_cnot" if is_pure::<PureStabilizer>(&args[0]) => {
+            let ctrl = extract_int(args, 1, "control")? as usize;
+            let tgt = extract_int(args, 2, "target")? as usize;
+            pure_stab_mut(&args[0], |s| s.cnot(ctrl, tgt))?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "stabilizer_measure" if is_pure::<PureStabilizer>(&args[0]) => {
+            let q = extract_int(args, 1, "qubit")? as usize;
+            let seed = extract_int(args, 2, "seed")? as u64;
+            let outcome = match &args[0] {
+                Value::QuantumState(rc) => {
+                    let mut borrow = rc.borrow_mut();
+                    let s = borrow.downcast_mut::<PureStabilizer>()
+                        .ok_or_else(|| "expected PureStabilizer".to_string())?;
+                    let mut rng = seed;
+                    s.measure(q, &mut rng) as i64
+                }
+                _ => return Err("stabilizer_measure: expected PureStabilizer".into()),
+            };
+            Ok(Some(Value::Int(outcome)))
+        }
+
+        "stabilizer_n_qubits" if is_pure::<PureStabilizer>(&args[0]) => {
+            let n = pure_stab_ref(&args[0], |s| s.num_qubits() as f64)?;
+            Ok(Some(Value::Int(n as i64)))
+        }
+
+        // === Pure Density Matrix operations ===
+
+        "density_gate" if is_pure::<PureDensity>(&args[0]) => {
+            let gate_name = match &args[1] {
+                Value::String(s) => s.to_string(),
+                _ => return Err("density_gate: gate name must be a string".into()),
+            };
+            let q = extract_int(args, 2, "qubit")? as usize;
+            let mat = match gate_name.as_str() {
+                "H" => h_matrix(), "X" => x_matrix(), "Y" => y_matrix(),
+                "Z" => z_matrix(), "S" => s_matrix(), "T" => t_matrix(),
+                _ => return Err(format!("density_gate: unknown gate '{}'", gate_name)),
+            };
+            pure_density_mut(&args[0], |dm| dm.apply_gate_2x2(q, mat))?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "density_cnot" if is_pure::<PureDensity>(&args[0]) => {
+            let ctrl = extract_int(args, 1, "control")? as usize;
+            let tgt = extract_int(args, 2, "target")? as usize;
+            pure_density_mut(&args[0], |dm| dm.apply_cnot(ctrl, tgt))?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "density_depolarize" if is_pure::<PureDensity>(&args[0]) => {
+            let q = extract_int(args, 1, "qubit")? as usize;
+            let p = extract_angle(&args[2], "probability")?;
+            pure_density_mut(&args[0], |dm| dm.apply_depolarize(q, p))?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "density_dephase" if is_pure::<PureDensity>(&args[0]) => {
+            let q = extract_int(args, 1, "qubit")? as usize;
+            let p = extract_angle(&args[2], "probability")?;
+            pure_density_mut(&args[0], |dm| dm.apply_dephase(q, p))?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "density_amplitude_damp" if is_pure::<PureDensity>(&args[0]) => {
+            let q = extract_int(args, 1, "qubit")? as usize;
+            let gamma = extract_angle(&args[2], "gamma")?;
+            pure_density_mut(&args[0], |dm| dm.apply_amplitude_damp(q, gamma))?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "density_trace" if is_pure::<PureDensity>(&args[0]) => {
+            let tr = pure_density_ref(&args[0], |dm| dm.trace())?;
+            Ok(Some(Value::Float(tr)))
+        }
+
+        "density_purity" if is_pure::<PureDensity>(&args[0]) => {
+            let p = pure_density_ref(&args[0], |dm| dm.purity())?;
+            Ok(Some(Value::Float(p)))
+        }
+
+        "density_entropy" if is_pure::<PureDensity>(&args[0]) => {
+            let e = pure_density_ref(&args[0], |dm| dm.von_neumann_entropy())?;
+            Ok(Some(Value::Float(e)))
+        }
+
+        "density_probs" if is_pure::<PureDensity>(&args[0]) => {
+            let probs = pure_density_ref_vec(&args[0], |dm| dm.probabilities())?;
+            let arr: Vec<Value> = probs.into_iter().map(Value::Float).collect();
+            Ok(Some(Value::Array(Rc::new(arr))))
+        }
+
+        // === Pure Circuit operations ===
+
+        "q_h" | "q_x" | "q_y" | "q_z" | "q_s" | "q_t" if is_pure::<PureCircuit>(&args[0]) => {
+            let q = extract_qubit_index(&args[1], "qubit")?;
+            let gate = match name {
+                "q_h" => PureGate::H(q), "q_x" => PureGate::X(q),
+                "q_y" => PureGate::Y(q), "q_z" => PureGate::Z(q),
+                "q_s" => PureGate::S(q), "q_t" => PureGate::T(q),
+                _ => unreachable!(),
+            };
+            pure_circuit_mut(&args[0], |c| c.add(gate))?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "q_rx" | "q_ry" | "q_rz" if is_pure::<PureCircuit>(&args[0]) => {
+            let q = extract_qubit_index(&args[1], "qubit")?;
+            let theta = extract_angle(&args[2], "angle")?;
+            let gate = match name {
+                "q_rx" => PureGate::Rx(q, theta),
+                "q_ry" => PureGate::Ry(q, theta),
+                "q_rz" => PureGate::Rz(q, theta),
+                _ => unreachable!(),
+            };
+            pure_circuit_mut(&args[0], |c| c.add(gate))?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "q_cx" | "q_cnot" if is_pure::<PureCircuit>(&args[0]) => {
+            let a = extract_qubit_index(&args[1], "a")?;
+            let b = extract_qubit_index(&args[2], "b")?;
+            pure_circuit_mut(&args[0], |c| c.add(PureGate::CNOT(a, b)))?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "q_cz" if is_pure::<PureCircuit>(&args[0]) => {
+            let a = extract_qubit_index(&args[1], "a")?;
+            let b = extract_qubit_index(&args[2], "b")?;
+            pure_circuit_mut(&args[0], |c| c.add(PureGate::CZ(a, b)))?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "q_swap" if is_pure::<PureCircuit>(&args[0]) => {
+            let a = extract_qubit_index(&args[1], "a")?;
+            let b = extract_qubit_index(&args[2], "b")?;
+            pure_circuit_mut(&args[0], |c| c.add(PureGate::SWAP(a, b)))?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "q_run" if is_pure::<PureCircuit>(&args[0]) => {
+            let sv = pure_circuit_ref(&args[0], |c| c.execute())?;
+            Ok(Some(wrap_pure(sv)))
+        }
+
+        "q_probs" if is_pure::<PureCircuit>(&args[0]) => {
+            let sv = pure_circuit_ref(&args[0], |c| c.execute())?;
+            let probs = sv.probabilities();
+            let arr: Vec<Value> = probs.into_iter().map(Value::Float).collect();
+            Ok(Some(Value::Array(Rc::new(arr))))
+        }
+
+        "q_measure" if is_pure::<PureCircuit>(&args[0]) => {
+            let seed = match &args[1] {
+                Value::Int(s) => *s as u64,
+                _ => return Err("q_measure seed must be an integer".into()),
+            };
+            let mut rng = seed;
+            let outcomes = pure_circuit_ref(&args[0], |c| c.execute_and_measure(&mut rng))?;
+            let arr: Vec<Value> = outcomes.into_iter().map(|b| Value::Int(b as i64)).collect();
+            Ok(Some(Value::Array(Rc::new(arr))))
+        }
+
+        "q_n_qubits" if is_pure::<PureCircuit>(&args[0]) => {
+            let n = pure_circuit_ref(&args[0], |c| c.n_qubits)?;
+            Ok(Some(Value::Int(n as i64)))
+        }
+
+        "q_n_gates" if is_pure::<PureCircuit>(&args[0]) => {
+            let n = pure_circuit_ref(&args[0], |c| c.n_gates())?;
+            Ok(Some(Value::Int(n as i64)))
+        }
+
+        _ => Ok(None),
+    }
+}
+
+// Pure backend helper functions
+fn pure_mps_mut(val: &Value, f: impl FnOnce(&mut PureMps)) -> Result<(), String> {
+    match val {
+        Value::QuantumState(rc) => {
+            let mut b = rc.borrow_mut();
+            let mps = b.downcast_mut::<PureMps>().ok_or("expected PureMps")?;
+            f(mps);
+            Ok(())
+        }
+        _ => Err("expected PureMps".into()),
+    }
+}
+
+fn pure_mps_ref(val: &Value, f: impl FnOnce(&PureMps) -> f64) -> Result<f64, String> {
+    match val {
+        Value::QuantumState(rc) => {
+            let b = rc.borrow();
+            let mps = b.downcast_ref::<PureMps>().ok_or("expected PureMps")?;
+            Ok(f(mps))
+        }
+        _ => Err("expected PureMps".into()),
+    }
+}
+
+fn pure_stab_mut(val: &Value, f: impl FnOnce(&mut PureStabilizer)) -> Result<(), String> {
+    match val {
+        Value::QuantumState(rc) => {
+            let mut b = rc.borrow_mut();
+            let s = b.downcast_mut::<PureStabilizer>().ok_or("expected PureStabilizer")?;
+            f(s);
+            Ok(())
+        }
+        _ => Err("expected PureStabilizer".into()),
+    }
+}
+
+fn pure_stab_ref(val: &Value, f: impl FnOnce(&PureStabilizer) -> f64) -> Result<f64, String> {
+    match val {
+        Value::QuantumState(rc) => {
+            let b = rc.borrow();
+            let s = b.downcast_ref::<PureStabilizer>().ok_or("expected PureStabilizer")?;
+            Ok(f(s))
+        }
+        _ => Err("expected PureStabilizer".into()),
+    }
+}
+
+fn pure_density_mut(val: &Value, f: impl FnOnce(&mut PureDensity)) -> Result<(), String> {
+    match val {
+        Value::QuantumState(rc) => {
+            let mut b = rc.borrow_mut();
+            let dm = b.downcast_mut::<PureDensity>().ok_or("expected PureDensity")?;
+            f(dm);
+            Ok(())
+        }
+        _ => Err("expected PureDensity".into()),
+    }
+}
+
+fn pure_density_ref(val: &Value, f: impl FnOnce(&PureDensity) -> f64) -> Result<f64, String> {
+    match val {
+        Value::QuantumState(rc) => {
+            let b = rc.borrow();
+            let dm = b.downcast_ref::<PureDensity>().ok_or("expected PureDensity")?;
+            Ok(f(dm))
+        }
+        _ => Err("expected PureDensity".into()),
+    }
+}
+
+fn pure_density_ref_vec(val: &Value, f: impl FnOnce(&PureDensity) -> Vec<f64>) -> Result<Vec<f64>, String> {
+    match val {
+        Value::QuantumState(rc) => {
+            let b = rc.borrow();
+            let dm = b.downcast_ref::<PureDensity>().ok_or("expected PureDensity")?;
+            Ok(f(dm))
+        }
+        _ => Err("expected PureDensity".into()),
+    }
+}
+
+fn pure_circuit_mut(val: &Value, f: impl FnOnce(&mut PureCircuit)) -> Result<(), String> {
+    match val {
+        Value::QuantumState(rc) => {
+            let mut b = rc.borrow_mut();
+            let c = b.downcast_mut::<PureCircuit>().ok_or("expected PureCircuit")?;
+            f(c);
+            Ok(())
+        }
+        _ => Err("expected PureCircuit".into()),
+    }
+}
+
+fn pure_circuit_ref<T>(val: &Value, f: impl FnOnce(&PureCircuit) -> T) -> Result<T, String> {
+    match val {
+        Value::QuantumState(rc) => {
+            let b = rc.borrow();
+            let c = b.downcast_ref::<PureCircuit>().ok_or("expected PureCircuit")?;
+            Ok(f(c))
+        }
+        _ => Err("expected PureCircuit".into()),
+    }
+}
 
 fn wrap_circuit(circ: Circuit) -> Value {
     Value::QuantumState(Rc::new(RefCell::new(circ)))

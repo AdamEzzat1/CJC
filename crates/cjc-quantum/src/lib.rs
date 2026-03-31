@@ -33,6 +33,7 @@ pub mod density;
 pub mod qec;
 pub mod dmrg;
 pub mod qml;
+pub mod pure;
 
 pub use gates::Gate;
 pub use statevector::Statevector;

@@ -73,12 +73,98 @@ pub fn mps_zz_expectation(mps: &Mps, site_i: usize) -> f64 {
 }
 
 /// Compute the total Heisenberg energy E = Σ_i ⟨Z_i Z_{i+1}⟩.
+///
+/// Optimized: pre-computes and caches left/right identity environments to avoid
+/// redundant O(N) contractions per term. Reduces total cost from O(N² χ⁴) to O(N χ⁴).
 pub fn mps_heisenberg_energy(mps: &Mps) -> f64 {
+    let n = mps.n_qubits;
+    if n < 2 { return 0.0; }
+
+    // Pre-compute left identity environments: left_envs[k] = env after contracting sites 0..k
+    let mut left_envs = Vec::with_capacity(n);
+    let mut env = vec![vec![ComplexF64::ZERO; 1]; 1];
+    env[0][0] = ComplexF64::ONE;
+    left_envs.push(env.clone());
+    for k in 0..(n - 1) {
+        env = transfer_matrix_identity(&mps.tensors[k], &env);
+        left_envs.push(env.clone());
+    }
+
+    // Pre-compute right identity environments: right_envs[k] = env after contracting sites k+1..n from right
+    let mut right_envs = vec![Vec::new(); n];
+    let mut env = vec![vec![ComplexF64::ZERO; 1]; 1];
+    env[0][0] = ComplexF64::ONE;
+    right_envs[n - 1] = env.clone();
+    for k in (2..n).rev() {
+        env = transfer_matrix_identity_right(&mps.tensors[k], &env);
+        right_envs[k - 1] = env.clone();
+    }
+
+    // Compute each ZZ term using cached environments
     let mut energy = 0.0;
-    for i in 0..(mps.n_qubits - 1) {
-        energy += mps_zz_expectation(mps, i);
+    for i in 0..(n - 1) {
+        // ⟨Z_i Z_{i+1}⟩ = left_envs[i] · Z_i · Z_{i+1} · right_envs[i+1]
+        let mut env = left_envs[i].clone();
+        env = transfer_matrix_z(&mps.tensors[i], &env);
+        env = transfer_matrix_z(&mps.tensors[i + 1], &env);
+        // Contract with right environment
+        if i + 2 < n {
+            env = contract_with_right_env(&env, &right_envs[i + 1]);
+        }
+        energy += env[0][0].re;
     }
     energy
+}
+
+/// Right-to-left transfer matrix contraction with identity.
+/// T_new[a,b] = Σ_{j,j'} Σ_s conj(A^s[a,j]) * A^s[b,j'] * env[j,j']
+fn transfer_matrix_identity_right(
+    tensor: &crate::mps::MpsTensor,
+    env: &[Vec<ComplexF64>],
+) -> Vec<Vec<ComplexF64>> {
+    let bl = tensor.bond_left;
+    let br = tensor.bond_right;
+    let env_rows = env.len();
+    let env_cols = env[0].len();
+    assert_eq!(env_rows, br);
+    assert_eq!(env_cols, br);
+
+    let mut result = vec![vec![ComplexF64::ZERO; bl]; bl];
+
+    for s in 0..2 {
+        for j in 0..br {
+            for jp in 0..br {
+                let e = env[j][jp];
+                if e.re == 0.0 && e.im == 0.0 { continue; }
+                for a in 0..bl {
+                    let conj_a = tensor.a[s].get(a, j).conj();
+                    let ea = e.mul_fixed(conj_a);
+                    for b in 0..bl {
+                        let asb = tensor.a[s].get(b, jp);
+                        result[a][b] = result[a][b].add(ea.mul_fixed(asb));
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
+/// Contract a left environment with a right environment to produce a scalar-like result.
+fn contract_with_right_env(
+    left: &[Vec<ComplexF64>],
+    right: &[Vec<ComplexF64>],
+) -> Vec<Vec<ComplexF64>> {
+    let dim = left.len();
+    assert_eq!(dim, right.len());
+
+    let mut result = vec![vec![ComplexF64::ZERO; 1]; 1];
+    for i in 0..dim {
+        for j in 0..dim {
+            result[0][0] = result[0][0].add(left[i][j].mul_fixed(right[i][j]));
+        }
+    }
+    result
 }
 
 /// Transfer matrix contraction with identity operator.
@@ -289,12 +375,55 @@ pub fn mps_yy_expectation(mps: &Mps, site_i: usize) -> f64 {
 }
 
 /// Compute the full Heisenberg energy E = Σ_i (XX + YY + ZZ)_{i,i+1}.
+/// Optimized: caches left/right identity environments to avoid O(N²) redundant contractions.
 pub fn mps_full_heisenberg_energy(mps: &Mps) -> f64 {
+    let n = mps.n_qubits;
+    if n < 2 { return 0.0; }
+
+    // Pre-compute left identity environments
+    let mut left_envs = Vec::with_capacity(n);
+    let mut env = vec![vec![ComplexF64::ZERO; 1]; 1];
+    env[0][0] = ComplexF64::ONE;
+    left_envs.push(env.clone());
+    for k in 0..(n - 1) {
+        env = transfer_matrix_identity(&mps.tensors[k], &env);
+        left_envs.push(env.clone());
+    }
+
+    // Pre-compute right identity environments
+    let mut right_envs = vec![Vec::new(); n];
+    let mut env = vec![vec![ComplexF64::ZERO; 1]; 1];
+    env[0][0] = ComplexF64::ONE;
+    right_envs[n - 1] = env.clone();
+    for k in (2..n).rev() {
+        env = transfer_matrix_identity_right(&mps.tensors[k], &env);
+        right_envs[k - 1] = env.clone();
+    }
+
     let mut energy = 0.0;
-    for i in 0..(mps.n_qubits - 1) {
-        energy += mps_xx_expectation(mps, i);
-        energy += mps_yy_expectation(mps, i);
-        energy += mps_zz_expectation(mps, i);
+    for i in 0..(n - 1) {
+        // Compute XX, YY, ZZ expectations for bond (i, i+1)
+        for op in &["xx", "yy", "zz"] {
+            let mut env = left_envs[i].clone();
+            match *op {
+                "xx" => {
+                    env = transfer_matrix_x(&mps.tensors[i], &env);
+                    env = transfer_matrix_x(&mps.tensors[i + 1], &env);
+                }
+                "yy" => {
+                    env = transfer_matrix_y(&mps.tensors[i], &env);
+                    env = transfer_matrix_y(&mps.tensors[i + 1], &env);
+                }
+                _ => {
+                    env = transfer_matrix_z(&mps.tensors[i], &env);
+                    env = transfer_matrix_z(&mps.tensors[i + 1], &env);
+                }
+            }
+            if i + 2 < n {
+                env = contract_with_right_env(&env, &right_envs[i + 1]);
+            }
+            energy += env[0][0].re;
+        }
     }
     energy
 }

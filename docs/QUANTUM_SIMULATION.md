@@ -378,6 +378,98 @@ println!("Final accuracy: {:.1}%", result.final_accuracy * 100.0);
 - **Data preprocessing**: Snake (boustrophedon) ordering + average pooling for images
 - Memory: O(N * chi^2) per forward pass, well under 1MB for 50 qubits at chi=16
 
+## Dual-Mode Architecture — Rust Backend + Pure CJC Backend
+
+CJC offers two quantum backends, selectable per-operation:
+
+### Rust Backend (default)
+Fast, optimized Rust implementations. Used when no `"pure"` flag is passed.
+```cjc
+let m = mps_new(50, 16);          // Rust backend (default)
+let s = stabilizer_new(1000);     // Rust backend
+let d = density_new(8);           // Rust backend
+```
+
+### Pure CJC Backend
+Inspectable, modifiable implementations using CJC-native data structures.
+Activated by passing `"pure"` as the last constructor argument.
+```cjc
+let m = mps_new(50, 16, "pure");       // Pure CJC backend
+let s = stabilizer_new(1000, "pure");  // Pure CJC backend
+let d = density_new(8, "pure");        // Pure CJC backend
+
+// Subsequent operations auto-detect the backend:
+let m = mps_h(m, 0);                  // Uses pure backend (auto-detected)
+let z = mps_z_expectation(m, 0);      // Uses pure backend (auto-detected)
+
+// Inspect internal state (pure backend only):
+let state_map = quantum_inspect(m);    // Returns CJC Map with all state data
+```
+
+### What the Pure Backend Gives You
+
+| Feature | Description |
+|---------|-------------|
+| **Inspectability** | `quantum_inspect(state)` returns a CJC Map with all internal data |
+| **Modifiability** | Researchers can study the data format and write custom operations |
+| **Educational value** | Algorithms are transparent — SVD, tableau updates, density matrices |
+| **AD integration** | Future: CJC autodiff can differentiate through the pure backend |
+| **Determinism** | Both backends guarantee bit-identical output for same seed |
+
+### State Representation (Pure Backend)
+
+| Type | CJC Representation |
+|------|-------------------|
+| MPS | `Map { n_qubits, max_bond, tensors: [Map { bond_left, bond_right, data_re, data_im }] }` |
+| Stabilizer | `Map { n, x: [[Int]], z: [[Int]], phase: [Int] }` (tableau as u64 word arrays) |
+| Density | `Map { n_qubits, dim, data_re: [Float], data_im: [Float] }` (row-major flat) |
+
+### Cross-Backend Compatibility
+
+Both backends produce physically equivalent results:
+- Z-expectations match to 1e-10
+- Measurement outcomes are identical for deterministic cases
+- Probabilities match to numerical precision
+- All prop/fuzz/determinism tests pass for both backends
+
+## Native Quantum Type System
+
+As of v0.2, CJC's quantum operations are **first-class primitives** with dedicated types
+in the type system. The type checker validates quantum programs statically, catching
+type errors at compile time rather than runtime.
+
+### Quantum Types
+
+| Type                 | Description                                          | Qubit Scale |
+|----------------------|------------------------------------------------------|-------------|
+| `QuantumCircuit`     | Gate-level circuit description                       | 1-26        |
+| `QuantumStatevector` | Full 2^N amplitude vector (from circuit execution)   | 1-26        |
+| `QuantumMps`         | Matrix Product State (tensor-train SVD)              | 50+         |
+| `QuantumStabilizer`  | Stabilizer/CHP state for Clifford circuits           | 1000+       |
+| `QuantumDensity`     | Density matrix for mixed states + noise channels     | 1-12        |
+| `QuantumGraph`       | Graph structure for QAOA optimization problems       | any         |
+| `QuantumSurfaceCode` | Surface/repetition code for quantum error correction | any         |
+
+All types are registered in `cjc-types` alongside the core primitives (`i64`, `f64`, `bool`, etc.)
+and participate in type unification, pattern matching, and the NoGC verifier.
+
+### Type-Checked Signatures
+
+Every quantum builtin has a registered type signature. For example:
+
+```
+qubits(n: i64) -> QuantumCircuit
+mps_new(n_qubits: i64, max_bond: i64) -> QuantumMps
+stabilizer_new(n_qubits: i64) -> QuantumStabilizer
+density_new(n_qubits: i64) -> QuantumDensity
+mps_h(mps: QuantumMps, qubit: i64) -> QuantumMps
+stabilizer_measure(state: QuantumStabilizer, qubit: i64, seed: i64) -> i64
+density_purity(dm: QuantumDensity) -> f64
+```
+
+The type checker enforces that, e.g., `mps_h` receives a `QuantumMps` not a `QuantumCircuit`,
+and that `stabilizer_measure` returns `i64`.
+
 ## CJC Builtin Functions — Quantum Extensions
 
 All quantum extensions are callable from CJC programs through the builtin dispatch layer.
@@ -468,6 +560,84 @@ qml_predict(n_qubits, layers, n_classes, max_bond, params, input)
 // Returns predicted class (integer)
 ```
 
+## Performance Optimizations
+
+The quantum stack has been optimized for speed and memory on CPU-only systems with
+zero external dependencies. All optimizations preserve determinism and bit-identical results.
+
+### 1. MPS In-Place Single-Qubit Gates
+
+**File**: `mps.rs` — `apply_single_qubit()`
+
+Before: Allocated 2 new `DenseMatrix` objects per gate, then discarded the old ones.
+After: Computes in-place using only stack temporaries. **Zero heap allocations per gate.**
+
+| Metric | Before | After |
+|--------|--------|-------|
+| Heap allocations per gate | 2 matrices | 0 |
+| 50q MPS create+5 gates | ~2.0ms | ~0.7ms |
+
+### 2. MPS CNOT Fused Gate Permutation
+
+**File**: `mps.rs` — `apply_cnot_adjacent()`
+
+Before: Built 4 theta matrices, cloned all 4 for CNOT permutation, then copied into combined
+matrix — 9 matrix allocations total (4 theta + 4 clones + 1 combined).
+After: Fuses gate permutation into the contraction step. Writes directly to combined matrix
+via a lookup table. **Eliminates 8 of 9 allocations.**
+
+### 3. Stabilizer Word-Level Phase Accumulation
+
+**File**: `stabilizer.rs` — `rowmult()`
+
+Before: Per-bit `g_phase()` called once per qubit per row multiplication — N iterations
+for N qubits, each extracting individual bits from packed words.
+After: Word-level bitwise operations process 64 qubits simultaneously using `count_ones()`
+(popcount) on u64 words. Decomposes the Pauli commutation relation into positive/negative
+contribution bitmasks.
+
+| System | Before (per-bit) | After (word-level) |
+|--------|-------------------|---------------------|
+| 64 qubits | 64 g_phase calls | 1 word iteration |
+| 500 qubits | 500 g_phase calls | 8 word iterations |
+| 1000 qubits | 1000 g_phase calls | 16 word iterations |
+
+### 4. VQE Cached Transfer Matrices
+
+**File**: `vqe.rs` — `mps_heisenberg_energy()`, `mps_full_heisenberg_energy()`
+
+Before: Each ZZ/XX/YY expectation value did a full left-to-right sweep of N transfer matrix
+contractions. For N-1 bond terms, total cost was O(N^2 chi^4).
+After: Pre-computes and caches left and right identity environments. Each term only needs
+the 2 operator contractions + 1 environment join. **Reduces total cost from O(N^2 chi^4) to O(N chi^4).**
+
+### 5. Density Matrix In-Place Permutation
+
+**File**: `density.rs` — `apply_permutation_gate()`
+
+Before: Allocated a full dim x dim temporary matrix (O(4^N) complex numbers), copied with
+permutation, then replaced original.
+After: Uses cycle-following permutation algorithm to permute in-place. Only allocates O(dim^2)
+bits for visited tracking instead of O(dim^2) complex numbers.
+
+| N qubits | Before (temp alloc) | After (in-place) |
+|----------|---------------------|-------------------|
+| 8 | 1 MB | 64 KB visited bits |
+| 10 | 16 MB | 1 MB visited bits |
+| 12 | 256 MB | 16 MB visited bits |
+
+### Memory Budget
+
+| System | Memory |
+|--------|--------|
+| Statevector 50q | 16,384 TB (infeasible) |
+| MPS 50q (chi=16) | < 1 MB |
+| MPS 50q (chi=64) | < 10 MB |
+| Stabilizer 500q | ~129 KB |
+| Stabilizer 1000q | ~482 KB |
+| Density 8q | ~1 MB |
+| Density 13q | ~1 GB |
+
 ## Limitations
 
 - **Classical simulation**: ~25-26 qubits with statevector (50+ with MPS for low-entanglement)
@@ -499,7 +669,7 @@ qml_predict(n_qubits, layers, n_classes, max_bond, params, input)
 - QEC: repetition code, surface code, syndrome extraction, decoding (20 tests)
 - QML: rotations, snake order, preprocessing, Z expectations, circuit, classify, gradient, training, determinism, memory (21 tests)
 
-### Integration Tests (271 in beta_tests/)
+### Integration Tests (342 in beta_tests/)
 
 - Quantum circuit parity (eval vs mir-exec): constructor, Bell, GHZ, sampling, rotation
 - Full Heisenberg: XX/YY/ZZ expectations, MPS vs statevector cross-validation, VQE convergence
@@ -509,7 +679,9 @@ qml_predict(n_qubits, layers, n_classes, max_bond, params, input)
 - DMRG: 2/4/6-qubit ground state energy, Ising vs Heisenberg, convergence, determinism
 - QEC: repetition code structure, encoding, syndrome extraction, surface code decoding
 - QML: circuit construction, classification, gradients, training, determinism, preprocessing, memory scaling
-- **CJC dispatch integration** (35 new tests): MPS, VQE, QAOA, Stabilizer, Density Matrix, DMRG, QEC, QML builtins through eval + mir-exec with parity gates
+- **CJC dispatch integration** (35 tests): MPS, VQE, QAOA, Stabilizer, Density Matrix, DMRG, QEC, QML builtins through eval + mir-exec with parity gates
+- **Native quantum type system** (35 tests): Type registration, Display, unification, types_match, function signature validation, return/param type correctness, NoGC safety, eval+mir parity for all 7 quantum primitives, determinism, cross-type composition
+- **Pure CJC backend** (28 tests): Dual-mode dispatch for MPS/Stabilizer/Density/Circuit, 50q MPS and 1000q Stabilizer in pure mode, cross-backend equivalence, determinism for all 4 pure simulators, state inspection
 
 ### Property Tests (8 in beta_tests/quantum_prop/)
 
@@ -545,5 +717,7 @@ qml_predict(n_qubits, layers, n_classes, max_bond, params, input)
 | `crates/cjc-eval/src/lib.rs` | Wired `dispatch_quantum` |
 | `crates/cjc-mir-exec/src/lib.rs` | Wired `dispatch_quantum` |
 | `Cargo.toml` | Added cjc-quantum to workspace |
-| `tests/beta_tests/quantum/` | 236 integration tests (11 test files) |
+| `crates/cjc-types/src/lib.rs` | Added 7 quantum type variants + 60+ builtin fn signatures |
+| `crates/cjc-quantum/src/pure.rs` | Pure CJC backend (MPS, Stabilizer, Density, Circuit + Jacobi SVD) |
+| `tests/beta_tests/quantum/` | 342 integration tests (14 test files) |
 | `tests/beta_tests/quantum_prop/` | 8 property tests |

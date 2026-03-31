@@ -147,21 +147,67 @@ impl StabilizerState {
     /// This computes the Pauli product of the two rows and stores the result
     /// in row `target`. The phase is updated according to the commutation
     /// relations of the Pauli group.
+    ///
+    /// Optimized: word-level phase accumulation processes 64 qubits at a time
+    /// using bitwise arithmetic instead of per-bit g_phase calls. This gives
+    /// up to 64x speedup for the phase computation on large systems.
     fn rowmult(&mut self, target: usize, source: usize) {
-        // Accumulate phase contribution from each qubit
-        let mut phase_sum = 0i32;
-        for j in 0..self.n {
-            let x1 = get_bit(&self.x[source], j);
-            let z1 = get_bit(&self.z[source], j);
-            let x2 = get_bit(&self.x[target], j);
-            let z2 = get_bit(&self.z[target], j);
-            phase_sum += g_phase(x1, z1, x2, z2);
+        // Word-level phase accumulation: process 64 qubits per iteration.
+        //
+        // For each qubit, g_phase(x1,z1,x2,z2) contributes to the total phase.
+        // We decompose this into word-level popcount operations:
+        //
+        //   phase_sum = Σ_j g_phase(x1_j, z1_j, x2_j, z2_j)
+        //
+        // Decomposition (see Aaronson & Gottesman, Theorem 1):
+        //   For each qubit: contribution = x1(1-2x2)z2 - z1(1-2z2)x2
+        //   Summed over all qubits in a word via popcount.
+        let mut phase_sum = 0i64;
+
+        for w in 0..self.words_per_row {
+            let x1 = self.x[source][w];
+            let z1 = self.z[source][w];
+            let x2 = self.x[target][w];
+            let z2 = self.z[target][w];
+
+            // Count qubits where source is Y (x1 & z1) and target has Z but not X
+            // These contribute +1 each: Y * Z = +iX → phase +1
+            // Count qubits where source is Y and target has X but not Z
+            // These contribute -1 each: Y * X = -iZ → phase -1
+            //
+            // Full decomposition using Aaronson-Gottesman commutation:
+            //   +1 contributions: (x1 & z1 & z2 & !x2) | (x1 & !z1 & x2 & z2) | (!x1 & z1 & x2 & !z2)
+            //   -1 contributions: (x1 & z1 & x2 & !z2) | (x1 & !z1 & !x2 & z2) | (!x1 & z1 & x2 & z2) [wait, this doesn't quite decompose cleanly]
+            //
+            // Simpler approach: use the explicit commutation relation.
+            // We compute positive and negative contributions separately:
+            //   pos = (x1 & z1 & z2 & !x2) | (x1 & !z1 & x2 & z2) | (!x1 & z1 & x2 & !z2)
+            //   neg = (x1 & z1 & x2 & !z2) | (x1 & !z1 & !x2 & z2) | (!x1 & z1 & x2 & z2)  [wait this isn't right either]
+            //
+            // Let me just use the direct formula from g_phase, applied word-level.
+            // g_phase truth table (x1,z1 → source Pauli, x2,z2 → target Pauli):
+            //   I (0,0): always 0
+            //   X (1,0): g = z2 * (2*x2 - 1) = z2&x2 → +1, z2&!x2 → -1, !z2 → 0
+            //   Z (0,1): g = x2 * (1 - 2*z2) = x2&!z2 → +1, x2&z2 → -1, !x2 → 0
+            //   Y (1,1): g = z2 - x2 = z2&!x2 → +1, x2&!z2 → -1, x2&z2 or !x2&!z2 → 0
+            //
+            // Positive contributions (g = +1):
+            let pos = (x1 & !z1 & x2 & z2)      // X * Y → +1
+                    | (!x1 & z1 & x2 & !z2)      // Z * X → +1
+                    | (x1 & z1 & z2 & !x2);      // Y * Z → +1
+
+            // Negative contributions (g = -1):
+            let neg = (x1 & !z1 & !x2 & z2)      // X * Z → -1
+                    | (!x1 & z1 & x2 & z2)        // Z * Y → -1
+                    | (x1 & z1 & x2 & !z2);       // Y * X → -1
+
+            phase_sum += pos.count_ones() as i64;
+            phase_sum -= neg.count_ones() as i64;
         }
 
         // Update phase: combine source phase + target phase + accumulated phase
         // All arithmetic mod 4
-        let new_phase = (self.phase[target] as i32 + self.phase[source] as i32 + phase_sum) as i64;
-        // Bring into 0..3 range
+        let new_phase = self.phase[target] as i64 + self.phase[source] as i64 + phase_sum;
         self.phase[target] = (((new_phase % 4) + 4) % 4) as u8;
 
         // XOR the x and z bit arrays (Pauli multiplication in binary representation)

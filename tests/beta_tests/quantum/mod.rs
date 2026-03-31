@@ -9,3 +9,5 @@ pub mod test_density_matrix;
 pub mod test_dmrg;
 pub mod test_qec;
 pub mod test_qml;
+pub mod test_quantum_native_types;
+pub mod test_quantum_pure_backend;

@@ -387,41 +387,39 @@ impl Mps {
     ///
     /// For single-qubit gates, MPS application is exact (no truncation needed):
     /// new_A[s'] = sum_s U[s',s] * A[s]
+    ///
+    /// Optimized: in-place computation with zero heap allocations.
     pub fn apply_single_qubit(&mut self, q: usize, u: [[ComplexF64; 2]; 2]) {
         assert!(q < self.n_qubits, "Qubit index out of range");
 
-        let t = &self.tensors[q];
+        let t = &mut self.tensors[q];
         let bl = t.bond_left;
         let br = t.bond_right;
 
-        let mut new_a0 = DenseMatrix::zeros(bl, br);
-        let mut new_a1 = DenseMatrix::zeros(bl, br);
-
+        // In-place update: read both old values, compute both new values, write back.
+        // No heap allocations — just stack temporaries.
         for r in 0..bl {
             for c in 0..br {
-                let old0 = t.a[0].get(r, c);
-                let old1 = t.a[1].get(r, c);
+                let idx = r * br + c;
+                let old0 = t.a[0].data[idx];
+                let old1 = t.a[1].data[idx];
 
-                // new[0] = U[0][0]*old[0] + U[0][1]*old[1]
-                new_a0.set(r, c,
-                    u[0][0].mul_fixed(old0).add(u[0][1].mul_fixed(old1)));
-                // new[1] = U[1][0]*old[0] + U[1][1]*old[1]
-                new_a1.set(r, c,
-                    u[1][0].mul_fixed(old0).add(u[1][1].mul_fixed(old1)));
+                t.a[0].data[idx] = u[0][0].mul_fixed(old0).add(u[0][1].mul_fixed(old1));
+                t.a[1].data[idx] = u[1][0].mul_fixed(old0).add(u[1][1].mul_fixed(old1));
             }
         }
-
-        self.tensors[q].a[0] = new_a0;
-        self.tensors[q].a[1] = new_a1;
     }
 
     /// Apply a CNOT gate between adjacent qubits (control=q, target=q+1).
     ///
     /// For two-qubit gates on adjacent sites, we:
     /// 1. Contract tensors at sites q and q+1 into a single 4-index tensor
-    /// 2. Apply the gate
+    /// 2. Apply the gate (CNOT permutation fused into contraction)
     /// 3. Reshape into matrix and SVD to split back into two tensors
     /// 4. Truncate bond dimension if needed
+    ///
+    /// Optimized: gate permutation is fused into the contraction step, eliminating
+    /// 4 intermediate matrix clones. Combined matrix is built directly from theta.
     pub fn apply_cnot_adjacent(&mut self, ctrl: usize, targ: usize) {
         assert!(targ == ctrl + 1 || ctrl == targ + 1,
             "CNOT requires adjacent qubits for MPS");
@@ -435,55 +433,38 @@ impl Mps {
         let bm = tl.bond_right; // = tr.bond_left
         let br = tr.bond_right;
 
-        // Theta[s_l, s_r] is a bl × br matrix
-        // Theta[s_l, s_r](i, k) = sum_j A_left[s_l](i,j) * A_right[s_r](j,k)
-        let mut theta_00 = DenseMatrix::zeros(bl, br);
-        let mut theta_01 = DenseMatrix::zeros(bl, br);
-        let mut theta_10 = DenseMatrix::zeros(bl, br);
-        let mut theta_11 = DenseMatrix::zeros(bl, br);
-
-        for i in 0..bl {
-            for k in 0..br {
-                for j in 0..bm {
-                    let al0 = tl.a[0].get(i, j);
-                    let al1 = tl.a[1].get(i, j);
-                    let ar0 = tr.a[0].get(j, k);
-                    let ar1 = tr.a[1].get(j, k);
-
-                    // theta[sl][sr] += A_left[sl](i,j) * A_right[sr](j,k)
-                    theta_00.set(i, k, theta_00.get(i, k).add(al0.mul_fixed(ar0)));
-                    theta_01.set(i, k, theta_01.get(i, k).add(al0.mul_fixed(ar1)));
-                    theta_10.set(i, k, theta_10.get(i, k).add(al1.mul_fixed(ar0)));
-                    theta_11.set(i, k, theta_11.get(i, k).add(al1.mul_fixed(ar1)));
-                }
-            }
-        }
-
-        // Apply CNOT: |c,t⟩ → |c, c⊕t⟩
-        // If ctrl < targ: left=ctrl, right=targ
-        //   |00⟩→|00⟩, |01⟩→|01⟩, |10⟩→|11⟩, |11⟩→|10⟩
-        // If ctrl > targ: left=targ, right=ctrl
-        //   |00⟩→|00⟩, |01⟩→|11⟩, |10⟩→|10⟩, |11⟩→|01⟩
-        let (new_00, new_01, new_10, new_11) = if ctrl < targ {
-            // ctrl=left: |00⟩→|00⟩, |01⟩→|01⟩, |10⟩→|11⟩, |11⟩→|10⟩
-            (theta_00.clone(), theta_01.clone(), theta_11.clone(), theta_10.clone())
+        // CNOT permutation lookup: gate_map[sl][sr] = (new_sl, new_sr)
+        // ctrl < targ (ctrl=left):  |00⟩→|00⟩, |01⟩→|01⟩, |10⟩→|11⟩, |11⟩→|10⟩
+        // ctrl > targ (ctrl=right): |00⟩→|00⟩, |01⟩→|11⟩, |10⟩→|10⟩, |11⟩→|01⟩
+        let gate_map: [[usize; 2]; 4] = if ctrl < targ {
+            [[0, 0], [0, 1], [1, 1], [1, 0]]  // (sl,sr) → (new_sl, new_sr)
         } else {
-            // ctrl=right: |00⟩→|00⟩, |01⟩→|11⟩, |10⟩→|10⟩, |11⟩→|01⟩
-            (theta_00.clone(), theta_11.clone(), theta_10.clone(), theta_01.clone())
+            [[0, 0], [1, 1], [1, 0], [0, 1]]
         };
 
-        // Reshape into (bl*2) × (2*br) matrix for SVD
+        // Build combined (2*bl) × (2*br) matrix directly, fusing contraction + gate
         let m = bl * 2;
         let n = 2 * br;
         let mut combined = DenseMatrix::zeros(m, n);
 
-        // Row index: (s_left * bl + i), col index: (s_right * br + k)
         for i in 0..bl {
             for k in 0..br {
-                combined.set(0 * bl + i, 0 * br + k, new_00.get(i, k));
-                combined.set(0 * bl + i, 1 * br + k, new_01.get(i, k));
-                combined.set(1 * bl + i, 0 * br + k, new_10.get(i, k));
-                combined.set(1 * bl + i, 1 * br + k, new_11.get(i, k));
+                // Accumulate theta[sl][sr](i,k) and write directly to permuted position
+                for sl in 0..2usize {
+                    for sr in 0..2usize {
+                        let mut acc = ComplexF64::ZERO;
+                        for j in 0..bm {
+                            let al = tl.a[sl].get(i, j);
+                            let ar = tr.a[sr].get(j, k);
+                            acc = acc.add(al.mul_fixed(ar));
+                        }
+                        // Write to gate-permuted position in combined matrix
+                        let [new_sl, new_sr] = gate_map[sl * 2 + sr];
+                        let row = new_sl * bl + i;
+                        let col = new_sr * br + k;
+                        combined.set(row, col, combined.get(row, col).add(acc));
+                    }
+                }
             }
         }
 

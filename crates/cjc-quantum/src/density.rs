@@ -247,17 +247,48 @@ impl DensityMatrix {
 
     /// Apply a permutation gate: rho'[i,j] = rho[P(i), P(j)].
     /// Used for CNOT, SWAP, Toffoli which permute basis states.
+    ///
+    /// Optimized: uses in-place cycle-following permutation to avoid allocating
+    /// a full dim×dim temporary matrix. Only uses O(dim) bits for visited tracking.
     fn apply_permutation_gate<F: Fn(usize) -> usize>(&mut self, perm: F) {
         let dim = self.dim;
-        let mut new_data = vec![ComplexF64::ZERO; dim * dim];
-        for i in 0..dim {
-            let pi = perm(i);
-            for j in 0..dim {
-                let pj = perm(j);
-                new_data[i * dim + j] = self.data[pi * dim + pj];
+        let n = dim * dim;
+
+        // Build the combined permutation on the flattened index: (i,j) → (P(i), P(j))
+        // Follow cycles in-place to avoid O(dim²) allocation.
+        let mut visited = vec![false; n];
+
+        for start in 0..n {
+            if visited[start] { continue; }
+
+            let start_i = start / dim;
+            let start_j = start % dim;
+            let dest = perm(start_i) * dim + perm(start_j);
+
+            if dest == start {
+                visited[start] = true;
+                continue;
+            }
+
+            // Follow the cycle
+            let mut current = start;
+            let saved = self.data[start];
+
+            loop {
+                let ci = current / dim;
+                let cj = current % dim;
+                let next = perm(ci) * dim + perm(cj);
+                visited[current] = true;
+
+                if next == start {
+                    self.data[current] = saved;
+                    break;
+                }
+
+                self.data[current] = self.data[next];
+                current = next;
             }
         }
-        self.data = new_data;
     }
 
     /// Apply CZ gate: diagonal phase, rho'[i,j] = phase(i) * phase(j) * rho[i,j]

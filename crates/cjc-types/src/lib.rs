@@ -126,6 +126,33 @@ pub enum Type {
     /// Grouped tidy data view (TidyView partitioned by key columns).
     GroupedTidyView,
 
+    // ── Quantum Primitives ──────────────────────────────────────
+    //
+    // These are first-class types for CJC's built-in quantum simulation
+    // stack. Each maps to a concrete Rust type in `cjc-quantum`, wrapped
+    // at runtime as `Value::QuantumState(Rc<RefCell<dyn Any>>)`.
+
+    /// Quantum circuit (gate-level description, ≤ 26 qubits).
+    QuantumCircuit,
+
+    /// Statevector (full 2^n amplitude vector from circuit execution).
+    QuantumStatevector,
+
+    /// Matrix Product State (MPS) for 50+ qubit simulation.
+    QuantumMps,
+
+    /// Stabilizer / CHP state for Clifford circuits (1000+ qubits).
+    QuantumStabilizer,
+
+    /// Density matrix for mixed states and noise channels.
+    QuantumDensity,
+
+    /// Graph structure for QAOA optimization problems.
+    QuantumGraph,
+
+    /// Surface code / repetition code for quantum error correction.
+    QuantumSurfaceCode,
+
     /// Type variable (for generics).
     Var(TypeVarId),
 
@@ -273,6 +300,13 @@ impl fmt::Display for Type {
             Type::SparseTensor { elem } => write!(f, "SparseTensor<{}>", elem),
             Type::TidyView => write!(f, "TidyView"),
             Type::GroupedTidyView => write!(f, "GroupedTidyView"),
+            Type::QuantumCircuit => write!(f, "QuantumCircuit"),
+            Type::QuantumStatevector => write!(f, "QuantumStatevector"),
+            Type::QuantumMps => write!(f, "QuantumMps"),
+            Type::QuantumStabilizer => write!(f, "QuantumStabilizer"),
+            Type::QuantumDensity => write!(f, "QuantumDensity"),
+            Type::QuantumGraph => write!(f, "QuantumGraph"),
+            Type::QuantumSurfaceCode => write!(f, "QuantumSurfaceCode"),
             Type::Var(id) => write!(f, "T{}", id.0),
             Type::Unresolved(name) => write!(f, "?{}", name),
             Type::Error => write!(f, "<error>"),
@@ -346,7 +380,14 @@ pub fn unify(a: &Type, b: &Type, subst: &mut TypeSubst) -> Result<Type, String> 
         | (Type::Complex, Type::Complex)
         | (Type::Bool, Type::Bool)
         | (Type::Str, Type::Str)
-        | (Type::Void, Type::Void) => Ok(a.clone()),
+        | (Type::Void, Type::Void)
+        | (Type::QuantumCircuit, Type::QuantumCircuit)
+        | (Type::QuantumStatevector, Type::QuantumStatevector)
+        | (Type::QuantumMps, Type::QuantumMps)
+        | (Type::QuantumStabilizer, Type::QuantumStabilizer)
+        | (Type::QuantumDensity, Type::QuantumDensity)
+        | (Type::QuantumGraph, Type::QuantumGraph)
+        | (Type::QuantumSurfaceCode, Type::QuantumSurfaceCode) => Ok(a.clone()),
 
         // Range: unify element types
         (Type::Range { elem: e1 }, Type::Range { elem: e2 }) => {
@@ -1403,6 +1444,18 @@ impl TypeEnv {
             effects: EffectSet::default(),
         });
 
+        // ── Quantum Primitive Types ─────────────────────────────────
+        env.type_defs.insert("QuantumCircuit".into(), Type::QuantumCircuit);
+        env.type_defs.insert("QuantumStatevector".into(), Type::QuantumStatevector);
+        env.type_defs.insert("QuantumMps".into(), Type::QuantumMps);
+        env.type_defs.insert("QuantumStabilizer".into(), Type::QuantumStabilizer);
+        env.type_defs.insert("QuantumDensity".into(), Type::QuantumDensity);
+        env.type_defs.insert("QuantumGraph".into(), Type::QuantumGraph);
+        env.type_defs.insert("QuantumSurfaceCode".into(), Type::QuantumSurfaceCode);
+
+        // ── Quantum Builtin Function Signatures ─────────────────────
+        register_quantum_builtins(&mut env);
+
         env
     }
 
@@ -1555,6 +1608,13 @@ impl TypeEnv {
             (Type::SparseTensor { elem: e1 }, Type::SparseTensor { elem: e2 }) => {
                 self.types_match(e1, e2)
             }
+            (Type::QuantumCircuit, Type::QuantumCircuit)
+            | (Type::QuantumStatevector, Type::QuantumStatevector)
+            | (Type::QuantumMps, Type::QuantumMps)
+            | (Type::QuantumStabilizer, Type::QuantumStabilizer)
+            | (Type::QuantumDensity, Type::QuantumDensity)
+            | (Type::QuantumGraph, Type::QuantumGraph)
+            | (Type::QuantumSurfaceCode, Type::QuantumSurfaceCode) => true,
             (Type::Var(a), Type::Var(b)) => a == b,
             _ => false,
         }
@@ -1686,6 +1746,156 @@ impl Default for TypeEnv {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ── Quantum Builtin Registration ────────────────────────────────
+
+/// Helper: register a single quantum builtin signature.
+fn q_sig(env: &mut TypeEnv, name: &str, params: Vec<(&str, Type)>, ret: Type) {
+    let alloc_effects = EffectSet::new(EffectSet::ALLOC);
+    env.fn_sigs.entry(name.into()).or_default().push(FnSigEntry {
+        name: name.into(),
+        type_params: vec![],
+        params: params.into_iter().map(|(n, t)| (n.to_string(), t)).collect(),
+        ret,
+        is_nogc: true,
+        effects: alloc_effects,
+    });
+}
+
+/// Register all quantum builtin function signatures so the type checker
+/// can validate quantum programs without requiring `Any` annotations.
+fn register_quantum_builtins(env: &mut TypeEnv) {
+    use Type::*;
+
+    // === Circuit (≤ 26 qubits) ===
+    q_sig(env, "qubits", vec![("n", I64)], QuantumCircuit);
+    // Single-qubit gates: (circuit, qubit) -> circuit
+    for name in &["q_h", "q_x", "q_y", "q_z", "q_s", "q_t"] {
+        q_sig(env, name, vec![("circuit", QuantumCircuit), ("qubit", I64)], QuantumCircuit);
+    }
+    // Parameterized single-qubit gates: (circuit, qubit, angle) -> circuit
+    for name in &["q_rx", "q_ry", "q_rz"] {
+        q_sig(env, name, vec![("circuit", QuantumCircuit), ("qubit", I64), ("theta", F64)], QuantumCircuit);
+    }
+    // Two-qubit gates: (circuit, q1, q2) -> circuit
+    for name in &["q_cx", "q_cnot", "q_cz", "q_swap"] {
+        q_sig(env, name, vec![("circuit", QuantumCircuit), ("a", I64), ("b", I64)], QuantumCircuit);
+    }
+    // Three-qubit: (circuit, c1, c2, target) -> circuit
+    for name in &["q_toffoli", "q_ccx"] {
+        q_sig(env, name, vec![
+            ("circuit", QuantumCircuit), ("c1", I64), ("c2", I64), ("target", I64),
+        ], QuantumCircuit);
+    }
+    // Execute / measure
+    q_sig(env, "q_run", vec![("circuit", QuantumCircuit)], QuantumStatevector);
+    q_sig(env, "q_measure", vec![("circuit", QuantumCircuit), ("seed", I64)],
+        Array { elem: Box::new(I64), len: 0 });
+    q_sig(env, "q_probs", vec![("circuit", QuantumCircuit)],
+        Array { elem: Box::new(F64), len: 0 });
+    q_sig(env, "q_sample", vec![("circuit", QuantumCircuit), ("n_shots", I64), ("seed", I64)],
+        Array { elem: Box::new(I64), len: 0 });
+    q_sig(env, "q_amplitudes", vec![("circuit", QuantumCircuit)],
+        Array { elem: Box::new(Complex), len: 0 });
+    q_sig(env, "q_n_qubits", vec![("circuit", QuantumCircuit)], I64);
+    q_sig(env, "q_n_gates", vec![("circuit", QuantumCircuit)], I64);
+
+    // === MPS (Matrix Product States, 50+ qubits) ===
+    q_sig(env, "mps_new", vec![("n_qubits", I64), ("max_bond", I64)], QuantumMps);
+    // Single-qubit MPS gates: (mps, qubit) -> mps
+    for name in &["mps_h", "mps_x"] {
+        q_sig(env, name, vec![("mps", QuantumMps), ("qubit", I64)], QuantumMps);
+    }
+    q_sig(env, "mps_ry", vec![("mps", QuantumMps), ("qubit", I64), ("theta", F64)], QuantumMps);
+    q_sig(env, "mps_cnot", vec![("mps", QuantumMps), ("control", I64), ("target", I64)], QuantumMps);
+    q_sig(env, "mps_z_expectation", vec![("mps", QuantumMps), ("qubit", I64)], F64);
+    q_sig(env, "mps_energy", vec![("mps", QuantumMps), ("hamiltonian", Str)], F64);
+    q_sig(env, "mps_memory", vec![("mps", QuantumMps)], I64);
+
+    // === VQE ===
+    q_sig(env, "vqe_heisenberg", vec![
+        ("n_qubits", I64), ("max_bond", I64), ("lr", F64),
+        ("iters", I64), ("seed", I64),
+    ], F64);
+    q_sig(env, "vqe_full_heisenberg", vec![
+        ("n_qubits", I64), ("max_bond", I64), ("lr", F64),
+        ("iters", I64), ("seed", I64),
+    ], F64);
+
+    // === QAOA ===
+    q_sig(env, "qaoa_graph_cycle", vec![("n_vertices", I64)], QuantumGraph);
+    q_sig(env, "qaoa_maxcut", vec![
+        ("graph", QuantumGraph), ("max_bond", I64), ("p_layers", I64),
+        ("lr", F64), ("iters", I64), ("seed", I64),
+    ], Array { elem: Box::new(F64), len: 0 }); // returns [energy, cut_value]
+
+    // === Stabilizer (1000+ qubits) ===
+    q_sig(env, "stabilizer_new", vec![("n_qubits", I64)], QuantumStabilizer);
+    for name in &["stabilizer_h", "stabilizer_s", "stabilizer_x", "stabilizer_y", "stabilizer_z"] {
+        q_sig(env, name, vec![("state", QuantumStabilizer), ("qubit", I64)], QuantumStabilizer);
+    }
+    q_sig(env, "stabilizer_cnot", vec![
+        ("state", QuantumStabilizer), ("control", I64), ("target", I64),
+    ], QuantumStabilizer);
+    q_sig(env, "stabilizer_measure", vec![
+        ("state", QuantumStabilizer), ("qubit", I64), ("seed", I64),
+    ], I64);
+    q_sig(env, "stabilizer_n_qubits", vec![("state", QuantumStabilizer)], I64);
+
+    // === Density Matrix ===
+    q_sig(env, "density_new", vec![("n_qubits", I64)], QuantumDensity);
+    q_sig(env, "density_gate", vec![
+        ("dm", QuantumDensity), ("gate_name", Str), ("qubit", I64),
+    ], QuantumDensity);
+    q_sig(env, "density_cnot", vec![
+        ("dm", QuantumDensity), ("control", I64), ("target", I64),
+    ], QuantumDensity);
+    q_sig(env, "density_depolarize", vec![
+        ("dm", QuantumDensity), ("qubit", I64), ("p", F64),
+    ], QuantumDensity);
+    q_sig(env, "density_dephase", vec![
+        ("dm", QuantumDensity), ("qubit", I64), ("p", F64),
+    ], QuantumDensity);
+    q_sig(env, "density_amplitude_damp", vec![
+        ("dm", QuantumDensity), ("qubit", I64), ("gamma", F64),
+    ], QuantumDensity);
+    q_sig(env, "density_trace", vec![("dm", QuantumDensity)], F64);
+    q_sig(env, "density_purity", vec![("dm", QuantumDensity)], F64);
+    q_sig(env, "density_entropy", vec![("dm", QuantumDensity)], F64);
+    q_sig(env, "density_probs", vec![("dm", QuantumDensity)],
+        Array { elem: Box::new(F64), len: 0 });
+
+    // === DMRG ===
+    q_sig(env, "dmrg_ising", vec![
+        ("n_qubits", I64), ("max_bond", I64), ("sweeps", I64), ("tol", F64),
+    ], F64);
+    q_sig(env, "dmrg_heisenberg", vec![
+        ("n_qubits", I64), ("max_bond", I64), ("sweeps", I64), ("tol", F64),
+    ], F64);
+
+    // === QEC (Quantum Error Correction) ===
+    q_sig(env, "qec_repetition_code", vec![("distance", I64)], QuantumSurfaceCode);
+    q_sig(env, "qec_surface_code", vec![("distance", I64)], QuantumSurfaceCode);
+    q_sig(env, "qec_syndrome", vec![
+        ("state", QuantumStabilizer), ("code", QuantumSurfaceCode), ("seed", I64),
+    ], Array { elem: Box::new(I64), len: 0 });
+    q_sig(env, "qec_decode", vec![
+        ("syndrome", Array { elem: Box::new(I64), len: 0 }),
+        ("code", QuantumSurfaceCode),
+    ], Array { elem: Box::new(I64), len: 0 });
+    q_sig(env, "qec_logical_error_rate", vec![
+        ("distance", I64), ("error_rate", F64), ("rounds", I64), ("seed", I64),
+    ], F64);
+
+    // === QML (Quantum Machine Learning) ===
+    // qml_train has complex args — registered with Any-like flexible types
+    // qml_predict similarly — both use array args
+    q_sig(env, "qml_predict", vec![
+        ("n_qubits", I64), ("layers", I64), ("n_classes", I64), ("max_bond", I64),
+        ("params", Array { elem: Box::new(F64), len: 0 }),
+        ("input", Array { elem: Box::new(F64), len: 0 }),
+    ], I64);
 }
 
 // ── Type Checker ────────────────────────────────────────────────
