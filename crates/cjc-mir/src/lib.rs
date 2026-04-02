@@ -14,12 +14,14 @@
 pub mod cfg;
 pub mod dominators;
 pub mod escape;
+pub mod inspect;
 pub mod loop_analysis;
 pub mod monomorph;
 pub mod nogc_verify;
 pub mod optimize;
 pub mod reduction;
 pub mod ssa;
+pub mod ssa_loop_overlay;
 pub mod ssa_optimize;
 pub mod verify;
 

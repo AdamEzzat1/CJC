@@ -143,6 +143,33 @@ pub enum ReductionOp {
 // Reduction info
 // ---------------------------------------------------------------------------
 
+/// Specifies the required accumulator semantics for a reduction.
+///
+/// This metadata helps the verifier and future lowering passes select
+/// the correct accumulator implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccumulatorSemantics {
+    /// Plain sequential accumulation.  No special numerical handling.
+    Plain,
+    /// Kahan compensated summation required (carries a compensation term).
+    Kahan,
+    /// Binned accumulation required (reproducible across parallelism).
+    Binned,
+    /// Implementation-defined (for builtins — runtime chooses).
+    RuntimeDefined,
+}
+
+impl std::fmt::Display for AccumulatorSemantics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AccumulatorSemantics::Plain => write!(f, "plain"),
+            AccumulatorSemantics::Kahan => write!(f, "kahan"),
+            AccumulatorSemantics::Binned => write!(f, "binned"),
+            AccumulatorSemantics::RuntimeDefined => write!(f, "runtime_defined"),
+        }
+    }
+}
+
 /// Information about a single detected reduction.
 #[derive(Debug, Clone)]
 pub struct ReductionInfo {
@@ -160,6 +187,18 @@ pub struct ReductionInfo {
     pub function_name: String,
     /// For builtin reductions, the function name (e.g., "sum", "mean").
     pub builtin_name: Option<String>,
+
+    // ── Evolution v0.3: enriched reduction metadata ─────────────
+
+    /// Whether reassociation of this reduction's operands is forbidden.
+    /// `true` for all strict/Kahan folds and unknown reductions.
+    /// `false` only for BinnedFold (within bin capacity).
+    pub reassociation_forbidden: bool,
+    /// Whether strict sequential execution order is required.
+    /// `true` means no reordering of iteration steps is legal.
+    pub strict_order_required: bool,
+    /// The required accumulator semantics for this reduction.
+    pub accumulator_semantics: AccumulatorSemantics,
 }
 
 // ---------------------------------------------------------------------------
@@ -370,6 +409,9 @@ fn scan_body_for_accumulations(
                         loop_id: None, // Could be refined with loop tree
                         function_name: fn_name.to_string(),
                         builtin_name: None,
+                        reassociation_forbidden: true,
+                        strict_order_required: true,
+                        accumulator_semantics: AccumulatorSemantics::Plain,
                     });
                     *next_id += 1;
                 }
@@ -462,6 +504,7 @@ fn detect_builtin_reductions_expr(
         MirExprKind::Call { callee, args } => {
             if let MirExprKind::Var(callee_name) = &callee.kind {
                 if BUILTIN_REDUCTIONS.contains(&callee_name.as_str()) {
+                    let (reassoc, strict, semantics) = classify_builtin_reduction(callee_name);
                     reductions.push(ReductionInfo {
                         id: ReductionId(*next_id),
                         accumulator_var: String::new(), // N/A for builtins
@@ -470,6 +513,9 @@ fn detect_builtin_reductions_expr(
                         loop_id: None,
                         function_name: fn_name.to_string(),
                         builtin_name: Some(callee_name.clone()),
+                        reassociation_forbidden: reassoc,
+                        strict_order_required: strict,
+                        accumulator_semantics: semantics,
                     });
                     *next_id += 1;
                 }
@@ -495,6 +541,26 @@ fn detect_builtin_reductions_expr(
             detect_builtin_reductions_expr(index, fn_name, loop_tree, reductions, next_id);
         }
         _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Builtin reduction classification
+// ---------------------------------------------------------------------------
+
+/// Classify a builtin reduction function's reassociation and accumulator semantics.
+///
+/// Returns `(reassociation_forbidden, strict_order_required, accumulator_semantics)`.
+fn classify_builtin_reduction(name: &str) -> (bool, bool, AccumulatorSemantics) {
+    match name {
+        // Kahan summation — order-dependent, Kahan accumulator
+        "kahan_sum" => (true, true, AccumulatorSemantics::Kahan),
+        // Binned summation — order-independent within bins
+        "binned_sum" => (false, false, AccumulatorSemantics::Binned),
+        // Integration rules — order-dependent (positional weights)
+        "trapz" | "simps" => (true, true, AccumulatorSemantics::Plain),
+        // All other builtins — runtime-defined accumulator, conservative
+        _ => (true, true, AccumulatorSemantics::RuntimeDefined),
     }
 }
 

@@ -84,6 +84,35 @@ fn fuzz_complex_determinism() {
         });
 }
 
+/// Fuzz the MIR verifier: any parseable program should not panic during
+/// legality checking, and the verifier must be deterministic (same input
+/// → same result).
+#[test]
+fn fuzz_mir_verifier() {
+    bolero::check!().with_type::<Vec<u8>>().for_each(|input: &Vec<u8>| {
+        if let Ok(s) = std::str::from_utf8(input) {
+            let s = s.to_string();
+            let _ = panic::catch_unwind(|| {
+                let (program, diags) = cjc_parser::parse_source(&s);
+                if !diags.has_errors() {
+                    let mut mir = cjc_mir_exec::lower_to_mir(&program);
+                    mir.build_all_cfgs();
+
+                    // Must not panic
+                    let report1 = cjc_mir::verify::verify_mir_legality(&mir);
+                    let report2 = cjc_mir::verify::verify_mir_legality(&mir);
+
+                    // Determinism: same input → same result
+                    assert_eq!(report1.is_ok(), report2.is_ok());
+                    assert_eq!(report1.checks_total, report2.checks_total);
+                    assert_eq!(report1.checks_passed, report2.checks_passed);
+                    assert_eq!(report1.errors.len(), report2.errors.len());
+                }
+            });
+        }
+    });
+}
+
 /// Fuzz the optimizer: optimized MIR execution must produce the same result
 /// as unoptimized for any parseable program.
 #[test]

@@ -72,6 +72,12 @@ pub enum LegalityCheck {
     NoGcContract,
     /// Infinite recursion or unbounded nesting detected.
     StructuralBound,
+    /// Schedule metadata is inconsistent with loop/reduction properties.
+    ScheduleMetadataConsistency,
+    /// Schedule metadata has leaked into execution semantics (must be non-semantic).
+    ScheduleMetadataNonSemantic,
+    /// General metadata cross-check failure.
+    MetadataConsistency,
 }
 
 // ---------------------------------------------------------------------------
@@ -161,6 +167,31 @@ pub fn verify_mir_legality(program: &MirProgram) -> LegalityReport {
         checks_passed += 1;
     } else {
         errors.extend(reduction_errors);
+    }
+
+    // Check 5: Reduction metadata consistency (program-wide).
+    checks_total += 1;
+    let meta_errors = check_reduction_metadata_consistency(&reduction_report);
+    if meta_errors.is_empty() {
+        checks_passed += 1;
+    } else {
+        errors.extend(meta_errors);
+    }
+
+    // Check 6: Schedule metadata consistency (per-function, requires CFG).
+    for func in &program.functions {
+        if let Some(ref cfg) = func.cfg_body {
+            checks_total += 1;
+            let domtree = DominatorTree::compute(cfg);
+            let loop_tree = loop_analysis::compute_loop_tree(cfg, &domtree);
+            let sched_errors =
+                check_schedule_metadata(&loop_tree, &reduction_report, &func.name);
+            if sched_errors.is_empty() {
+                checks_passed += 1;
+            } else {
+                errors.extend(sched_errors);
+            }
+        }
     }
 
     LegalityReport {
@@ -462,6 +493,150 @@ fn check_body_depth(
 }
 
 // ---------------------------------------------------------------------------
+// Check 5: Schedule metadata consistency
+// ---------------------------------------------------------------------------
+
+/// Verify that schedule metadata is consistent with loop and reduction properties.
+///
+/// Rules:
+/// - A loop containing strict reductions must have SequentialStrict schedule
+/// - DescriptiveStaticPartition is only valid for countable loops
+/// - DescriptiveVectorized width must be a power of 2
+/// - All schedules must be valid enum variants (structural — always true in Rust)
+fn check_schedule_metadata(
+    loop_tree: &LoopTree,
+    reduction_report: &ReductionReport,
+    fn_name: &str,
+) -> Vec<LegalityError> {
+    use crate::loop_analysis::SchedulePlan;
+    let mut errors = Vec::new();
+
+    for info in &loop_tree.loops {
+        // A loop with strict reductions must be SequentialStrict.
+        let strict_reds: Vec<_> = reduction_report
+            .reductions
+            .iter()
+            .filter(|r| r.loop_id == Some(info.id) && r.strict_order_required)
+            .collect();
+
+        if !strict_reds.is_empty() && info.schedule != SchedulePlan::SequentialStrict {
+            errors.push(LegalityError {
+                check: LegalityCheck::ScheduleMetadataConsistency,
+                message: format!(
+                    "loop {:?} has {} strict reduction(s) but schedule is {} (must be sequential_strict)",
+                    info.id,
+                    strict_reds.len(),
+                    info.schedule,
+                ),
+                function: fn_name.to_string(),
+            });
+        }
+
+        // DescriptiveVectorized width must be a power of 2.
+        if let SchedulePlan::DescriptiveVectorized { width } = info.schedule {
+            if width == 0 || (width & (width - 1)) != 0 {
+                errors.push(LegalityError {
+                    check: LegalityCheck::ScheduleMetadataConsistency,
+                    message: format!(
+                        "loop {:?} has DescriptiveVectorized width {} which is not a power of 2",
+                        info.id, width,
+                    ),
+                    function: fn_name.to_string(),
+                });
+            }
+        }
+
+        // DescriptiveStaticPartition chunk_size must be > 0.
+        if let SchedulePlan::DescriptiveStaticPartition { chunk_size } = info.schedule {
+            if chunk_size == 0 {
+                errors.push(LegalityError {
+                    check: LegalityCheck::ScheduleMetadataConsistency,
+                    message: format!(
+                        "loop {:?} has DescriptiveStaticPartition with chunk_size 0",
+                        info.id,
+                    ),
+                    function: fn_name.to_string(),
+                });
+            }
+        }
+
+        // DescriptiveTiled tile_size must be > 0.
+        if let SchedulePlan::DescriptiveTiled { tile_size } = info.schedule {
+            if tile_size == 0 {
+                errors.push(LegalityError {
+                    check: LegalityCheck::ScheduleMetadataConsistency,
+                    message: format!(
+                        "loop {:?} has DescriptiveTiled with tile_size 0",
+                        info.id,
+                    ),
+                    function: fn_name.to_string(),
+                });
+            }
+        }
+    }
+
+    errors
+}
+
+// ---------------------------------------------------------------------------
+// Check 6: Reduction metadata consistency
+// ---------------------------------------------------------------------------
+
+/// Verify that reduction metadata fields are self-consistent.
+///
+/// Rules:
+/// - StrictFold must have reassociation_forbidden=true
+/// - StrictFold must have strict_order_required=true
+/// - BinnedFold should have accumulator_semantics=Binned
+/// - KahanFold should have accumulator_semantics=Kahan
+/// - Unknown must have reassociation_forbidden=true
+fn check_reduction_metadata_consistency(report: &ReductionReport) -> Vec<LegalityError> {
+    let mut errors = Vec::new();
+
+    for r in &report.reductions {
+        match r.kind {
+            ReductionKind::StrictFold => {
+                if !r.reassociation_forbidden {
+                    errors.push(LegalityError {
+                        check: LegalityCheck::MetadataConsistency,
+                        message: format!(
+                            "StrictFold reduction on `{}` has reassociation_forbidden=false",
+                            r.accumulator_var,
+                        ),
+                        function: r.function_name.clone(),
+                    });
+                }
+                if !r.strict_order_required {
+                    errors.push(LegalityError {
+                        check: LegalityCheck::MetadataConsistency,
+                        message: format!(
+                            "StrictFold reduction on `{}` has strict_order_required=false",
+                            r.accumulator_var,
+                        ),
+                        function: r.function_name.clone(),
+                    });
+                }
+            }
+            ReductionKind::Unknown => {
+                if !r.reassociation_forbidden {
+                    errors.push(LegalityError {
+                        check: LegalityCheck::MetadataConsistency,
+                        message: format!(
+                            "Unknown reduction on `{}` has reassociation_forbidden=false",
+                            r.accumulator_var,
+                        ),
+                        function: r.function_name.clone(),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    errors
+}
+
+// ---------------------------------------------------------------------------
 // Convenience: verify a single function
 // ---------------------------------------------------------------------------
 
@@ -639,6 +814,9 @@ mod tests {
                 loop_id: None,
                 function_name: "test".to_string(),
                 builtin_name: None,
+                reassociation_forbidden: true,
+                strict_order_required: true,
+                accumulator_semantics: reduction::AccumulatorSemantics::Plain,
             }],
         };
         let errors = check_reduction_contracts(&report);

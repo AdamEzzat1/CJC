@@ -70,6 +70,87 @@ pub struct LoopInfo {
     pub children: Vec<LoopId>,
     /// Nesting depth: 0 = outermost loop.
     pub depth: u32,
+
+    // ── Evolution v0.3: enriched loop metadata ──────────────────
+
+    /// Whether the loop has a statically countable trip count
+    /// (e.g., `for i in range(0, n)` desugars to a while with known bounds).
+    pub is_countable: bool,
+    /// Optional trip count hint.  `Some(n)` if the loop iterates exactly `n`
+    /// times (statically known).  `None` if unknown or data-dependent.
+    pub trip_count_hint: Option<u64>,
+    /// Number of exit edges from this loop.  Useful for loop simplification:
+    /// single-exit loops are easier to reason about.
+    pub num_exits: u32,
+    /// Descriptive execution schedule for this loop.
+    /// This is **metadata only** — it does NOT change execution behavior.
+    /// See `SchedulePlan` documentation.
+    pub schedule: SchedulePlan,
+}
+
+// ---------------------------------------------------------------------------
+// Schedule metadata (descriptive only, non-semantic)
+// ---------------------------------------------------------------------------
+
+/// Descriptive execution schedule metadata for a loop.
+///
+/// **IMPORTANT**: This is metadata only.  It does NOT change execution
+/// behavior.  The tree-MIR executor ignores this field entirely.  Its
+/// purpose is to:
+///
+/// 1. Record the *intended* schedule for future lowering passes
+/// 2. Allow the verifier to check schedule/reduction consistency
+/// 3. Provide inspect/diagnostics tooling with useful information
+/// 4. Build a future runway for deterministic parallel scheduling
+///
+/// In this pass, `SchedulePlan` is purely descriptive.  It must never
+/// affect code generation, optimization legality, or runtime behavior.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SchedulePlan {
+    /// Strict sequential execution.  The default for all loops.
+    /// Elements are processed in iteration order with no reordering.
+    SequentialStrict,
+    /// Descriptive hint that this loop could be tiled.
+    /// `tile_size` is the suggested tile dimension.
+    /// Does NOT cause tiling — future passes may act on this.
+    DescriptiveTiled { tile_size: u32 },
+    /// Descriptive hint that this loop body could be vectorized.
+    /// `width` is the suggested vector width (e.g., 4 for SSE, 8 for AVX).
+    /// Does NOT cause vectorization.
+    DescriptiveVectorized { width: u32 },
+    /// Descriptive hint that results should be materialized at a boundary.
+    /// Useful for staging intermediate results in multi-pass pipelines.
+    DescriptiveMaterializeBoundary,
+    /// Descriptive hint that the loop iteration space could be statically
+    /// partitioned into `chunk_size` pieces.
+    /// Does NOT cause partitioning — metadata only.
+    DescriptiveStaticPartition { chunk_size: u32 },
+}
+
+impl Default for SchedulePlan {
+    fn default() -> Self {
+        SchedulePlan::SequentialStrict
+    }
+}
+
+impl std::fmt::Display for SchedulePlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SchedulePlan::SequentialStrict => write!(f, "sequential_strict"),
+            SchedulePlan::DescriptiveTiled { tile_size } => {
+                write!(f, "descriptive_tiled({})", tile_size)
+            }
+            SchedulePlan::DescriptiveVectorized { width } => {
+                write!(f, "descriptive_vectorized({})", width)
+            }
+            SchedulePlan::DescriptiveMaterializeBoundary => {
+                write!(f, "descriptive_materialize_boundary")
+            }
+            SchedulePlan::DescriptiveStaticPartition { chunk_size } => {
+                write!(f, "descriptive_static_partition({})", chunk_size)
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +306,11 @@ pub fn compute_loop_tree(cfg: &MirCfg, domtree: &DominatorTree) -> LoopTree {
             parent: None,              // filled in step 3
             children: Vec::new(),      // filled in step 3
             depth: 0,                  // filled in step 3
+            // v0.3 enrichments — filled in step 4
+            is_countable: false,
+            trip_count_hint: None,
+            num_exits: 0,
+            schedule: SchedulePlan::default(),
         });
     }
 
@@ -303,6 +389,7 @@ pub fn compute_loop_tree(cfg: &MirCfg, domtree: &DominatorTree) -> LoopTree {
             }
         }
         exits.sort();
+        loop_infos[i].num_exits = exits.len() as u32;
         loop_infos[i].exit_blocks = exits;
 
         // Preheader: the unique predecessor of the header that is NOT a

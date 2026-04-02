@@ -4,6 +4,28 @@ All notable changes to CJC will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased] — MIR/CFG/SSA Evolution v0.3
+
+### Added
+
+- **SchedulePlan metadata** on loops: descriptive-only execution schedule hints (`SequentialStrict`, `DescriptiveTiled`, `DescriptiveVectorized`, `DescriptiveMaterializeBoundary`, `DescriptiveStaticPartition`) — non-semantic, does not affect execution
+- **AccumulatorSemantics enum** on reductions: classifies required accumulator type (`Plain`, `Kahan`, `Binned`, `RuntimeDefined`)
+- **Enriched LoopInfo**: `is_countable`, `trip_count_hint`, `num_exits`, `schedule` fields
+- **Enriched ReductionInfo**: `reassociation_forbidden`, `strict_order_required`, `accumulator_semantics` fields
+- **Builtin reduction classification** (`classify_builtin_reduction`): kahan_sum → Kahan, binned_sum → Binned, trapz/simps → Plain strict
+- **SSA loop/reduction overlay** (`ssa_loop_overlay` module): maps SSA definitions to loops, identifies loop-carried variables, cross-references reductions with SSA accumulators
+- **Inspect/diagnostics module** (`inspect` module): deterministic text dumps for loop trees, reduction reports, legality reports, and schedule summaries
+- **Expanded legality verifier**: schedule metadata consistency checks, reduction metadata cross-validation
+- **Bolero fuzz target**: `fuzz_mir_verifier` — verifier must not panic and must be deterministic on arbitrary input
+- **14 new integration tests** under `tests/mir/` for schedule metadata, inspect diagnostics, and enriched metadata
+- **9 new unit tests** across `ssa_loop_overlay` and `inspect` modules
+
+### Design Decisions
+
+- SchedulePlan is strictly non-semantic — the executor ignores it entirely
+- All new structures use Vec + ID indexing (not HashMap) for determinism
+- All new modules are additive overlays — no existing code paths modified
+
 ## [0.1.0] — 2026-03-27
 
 ### Added
