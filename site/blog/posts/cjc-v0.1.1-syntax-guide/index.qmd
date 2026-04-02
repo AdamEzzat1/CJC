@@ -1,0 +1,1079 @@
+---
+title: "Syntax Guide for CJC Version 0.1.1"
+subtitle: "A comprehensive reference for CJC's language features, compiler infrastructure, and quantum computing extensions."
+author: "Adam Ezzat"
+date: "2026-04-02"
+date-modified: "2026-04-02"
+categories: [CJC, syntax, compilers, scientific-computing, quantum]
+description: "The complete syntax guide for CJC v0.1.1 — covering core language constructs, 287+ builtins, the dual-engine compiler pipeline, quantum simulation extensions, and deterministic numerical computing."
+---
+
+<div class="reading-time">&#128337; ~45 min read</div>
+
+<div class="stats-row">
+<div class="stat"><span class="number">21</span><span class="stat-label">Rust crates</span></div>
+<div class="stat"><span class="number">123K</span><span class="stat-label">lines of code</span></div>
+<div class="stat"><span class="number">287+</span><span class="stat-label">builtins</span></div>
+<div class="stat"><span class="number">1,847</span><span class="stat-label">tests passing</span></div>
+</div>
+
+::: {.callout-tip appearance="minimal"}
+## What's New in v0.1.1
+CJC v0.1.1 adds **Quantum Hardening Phase 3** (Jordan-Wigner, Suzuki-Trotter, Zero-Noise Extrapolation), **AST Evolution v0.3** (visitor trait, metrics, validation), **MIR Evolution v0.3** (schedule metadata, reduction analysis, SSA loop overlay), and **MPS enhancements** (canonical forms, SWAP networks). This guide covers every language feature and builtin available as of this release.
+:::
+
+---
+
+## Part 1 — The Language
+
+CJC is a statically-aware, dynamically-typed language for deterministic scientific computing. If you've written Rust, Python, or R, the syntax will feel familiar. This section covers every construct the language supports.
+
+### Functions
+
+Every function parameter requires a type annotation. Return types are optional but recommended.
+
+```
+fn add(a: i64, b: i64) -> i64 {
+    a + b
+}
+
+fn greet(name: String) {
+    print("Hello, " + name);
+}
+```
+
+Functions are first-class values. You can pass them as arguments:
+
+```
+fn apply(f: fn(i64) -> i64, x: i64) -> i64 {
+    f(x)
+}
+
+fn double(x: i64) -> i64 { x * 2 }
+
+fn main() -> i64 {
+    apply(double, 21)
+}
+```
+
+Recursive functions work as expected:
+
+```
+fn factorial(n: i64) -> i64 {
+    if n <= 1 { return 1; }
+    n * factorial(n - 1)
+}
+
+fn main() -> i64 { factorial(10) }
+```
+
+Generic functions use angle-bracket syntax with optional trait bounds:
+
+```
+fn identity<T>(x: T) -> T { x }
+
+fn my_max<T>(a: T, b: T) -> T {
+    if a > b { a } else { b }
+}
+
+fn wrap<T>(x: T) -> T { x }
+fn apply_generic<T>(x: T) -> T { wrap(x) }
+```
+
+### Variables
+
+Immutable by default. Use `let mut` for mutation.
+
+```
+let x: i64 = 42
+let pi = 3.14159
+let name = "CJC"
+
+let mut count = 0
+count = count + 1
+```
+
+CJC supports type inference, but you can always be explicit:
+
+```
+let a: f64 = 1.0
+let b: bool = true
+let c: String = "hello"
+let d: i64 = 99
+```
+
+### Primitive Types
+
+| Type | Description | Example |
+|------|-------------|---------|
+| `i64` | 64-bit signed integer | `42`, `-7` |
+| `f64` | 64-bit floating point | `3.14`, `1e-6` |
+| `bool` | Boolean | `true`, `false` |
+| `String` | UTF-8 string | `"hello"` |
+| `ByteSlice` | Raw byte sequence | `b"hello"` |
+| `Any` | Dynamic/polymorphic type | Used for generic dispatch |
+
+### Control Flow
+
+#### if/else
+
+`if` works as both a statement and an expression:
+
+```
+// Statement form
+if x > 0 {
+    print("positive");
+} else {
+    print("non-positive");
+}
+
+// Expression form — both branches must return compatible types
+let abs_x = if x >= 0 { x } else { -x };
+```
+
+Note: no parentheses around the condition. Braces are always required.
+
+#### while loops
+
+```
+let mut sum = 0;
+let mut i = 1;
+while i <= 100 {
+    sum = sum + i;
+    i = i + 1;
+}
+```
+
+#### for loops
+
+`for` iterates over ranges using `start..end` (exclusive upper bound):
+
+```
+let mut total = 0;
+for i in 1..11 {
+    total = total + i;
+}
+```
+
+#### break and continue
+
+Both work inside `while` and `for` loops:
+
+```
+for i in 0..10 {
+    if i == 4 { break; }
+    print(i);
+}
+
+let mut i = 0;
+while i < 5 {
+    i = i + 1;
+    if i == 3 { continue; }
+    print(i);
+}
+```
+
+### Pattern Matching
+
+CJC has full structural pattern matching with `match` expressions:
+
+```
+// Match on integers
+let x = 99;
+let label = match x {
+    1 => "one",
+    2 => "two",
+    _ => "other",
+};
+
+// Match on enums
+enum Color { Red, Green, Blue }
+
+fn classify(c: Color) -> i64 {
+    match c {
+        Red   => 1,
+        Green => 2,
+        _     => 3,
+    }
+}
+```
+
+Pattern matching supports destructuring:
+
+```
+// Option type
+let x = Some(42);
+let val = match x {
+    Some(v) => v,
+    None    => 0,
+};
+
+// Result type
+let r = Ok(3.14);
+match r {
+    Ok(v)  => print(v),
+    Err(e) => print("error"),
+}
+```
+
+### Structs
+
+```
+struct Point { x: f64, y: f64 }
+
+let p = Point { x: 1.5, y: 2.5 };
+print(p.x + p.y);
+```
+
+Structs can have methods via `impl` blocks:
+
+```
+struct Circle { radius: f64 }
+
+impl Circle {
+    fn area(c: Circle) -> f64 {
+        3.14159 * c.radius * c.radius
+    }
+}
+
+let c = Circle { radius: 5.0 };
+print(Circle::area(c));
+```
+
+Generic structs:
+
+```
+struct Pair<T, U> { first: T, second: U }
+```
+
+### Enums
+
+```
+enum Shape {
+    Circle(f64),
+    Rectangle(f64, f64),
+    Triangle(f64, f64, f64),
+}
+
+enum Option<T> { None, Some(T) }
+```
+
+### Traits
+
+```
+trait Numeric: Add + Mul {
+    fn zero() -> Self;
+    fn one() -> Self;
+}
+
+impl<T> Vec<T> : Iterable {
+    fn len(self: Vec<T>) -> i64 { 0 }
+}
+```
+
+### Closures
+
+Closures use `|args| body` syntax with mandatory type annotations on parameters:
+
+```
+let f = |x: f64| x * x;
+let add = |x: f64, y: f64| x + y;
+
+print(f(3.0));
+print(add(1.0, 2.0));
+```
+
+Closures capture variables from their enclosing scope. CJC performs capture analysis during HIR lowering to determine what each closure needs.
+
+### Arrays
+
+Arrays are ordered, dynamically-typed collections:
+
+```
+let nums = [1, 2, 3, 4, 5];
+let mixed = [1, "hello", 3.14, true];
+
+// Array operations — note: array_push returns a NEW array
+let extended = array_push(nums, 6);
+let length = array_len(extended);
+let first = array_get(nums, 0);
+let sliced = array_slice(nums, 1, 3);
+```
+
+::: {.callout-warning appearance="minimal"}
+`array_push(arr, val)` does **not** mutate `arr`. It returns a new array. Always reassign: `arr = array_push(arr, val);`
+:::
+
+### Strings
+
+```
+let s = "hello world";
+let upper = str_upper(s);
+let lower = str_lower(s);
+let trimmed = str_trim("  padded  ");
+let parts = str_split("a,b,c", ",");
+let joined = str_join(["a", "b", "c"], "-");
+let sub = str_contains(s, "world");
+```
+
+Formatted strings use `f"..."` syntax:
+
+```
+let name = "CJC";
+let version = "0.1.1";
+print(f"Welcome to {name} v{version}");
+```
+
+### Byte Slices
+
+For low-level data processing:
+
+```
+let data: ByteSlice = b"name,age,score\nAlice,30,95.5";
+let rows = data.split_byte(b'\n');
+let header = rows[0];
+let fields = header.split_byte(b',');
+```
+
+### Compound Assignments
+
+CJC recognizes `+=`, `-=`, `*=`, `/=` operators:
+
+```
+let mut x = 10;
+x += 5;
+x -= 3;
+x *= 2;
+x /= 4;
+```
+
+### Pipe Operator
+
+The `|>` operator chains function calls left-to-right:
+
+```
+data |> filter(predicate) |> map(transform)
+```
+
+### nogc Blocks
+
+Mark functions as allocation-free for performance-critical paths. The NoGC verifier statically checks that no GC-triggering operations occur inside:
+
+```
+nogc fn fast_multiply(x: f64, y: f64) -> f64 {
+    x * y
+}
+```
+
+The MIR pipeline includes a NoGC verification pass that performs call-graph analysis with a `may_gc` fixpoint computation. If any reachable function allocates, the verifier rejects the program.
+
+---
+
+## Part 2 — The Compiler Pipeline
+
+CJC compiles through a multi-stage pipeline. Understanding it helps you reason about error messages, optimization, and the dual-engine execution model.
+
+```
+Source → Lexer → Parser → AST → [TypeChecker] → HIR → MIR → [Optimize] → Exec
+```
+
+### Stage 1: Lexer
+
+The lexer (`cjc-lexer`) converts source text into a flat token stream. It recognizes all CJC keywords, operators (including `|>`, `+=`, `@`), literals (integers, floats, strings, byte strings), and identifiers.
+
+```rust
+let (tokens, diags) = Lexer::new(src).tokenize();
+```
+
+### Stage 2: Parser
+
+A Pratt parser (`cjc-parser`) builds the AST from tokens. It handles operator precedence, expression vs. statement disambiguation, and produces structured error diagnostics.
+
+```rust
+let (program, diags) = cjc_parser::parse_source(src);
+```
+
+The parser recognizes 35 expression kinds, 9 statement kinds, 11 declaration kinds, and 9 pattern kinds.
+
+### Stage 3: AST
+
+The AST (`cjc-ast`) is a tree of typed nodes. As of v0.1.1, the AST layer includes:
+
+- **Visitor trait** (`visit` module) — read-only traversal covering all node variants with `walk_*` functions
+- **Metrics** (`metrics` module) — single-pass structural statistics: node counts, depth, operator frequencies, feature flags
+- **Validation** (`validate` module) — structural checks: break/continue outside loops, duplicate params, empty match, unreachable code after return, nesting depth limits
+- **Inspect** (`inspect` module) — deterministic text dumps: `dump_ast_summary`, `dump_ast_metrics`, `dump_validation_report`, `dump_expr_tree`
+- **Node utilities** (`node_utils` module) — helper methods like `Expr::child_count`, `is_literal`, `Block::is_empty`, `Program::has_main_function`
+
+### Stage 4: HIR (High-level IR)
+
+HIR lowering (`cjc-hir`) desugars the AST. `for` loops become `while` loops over ranges. Closures get capture analysis. The HIR is closer to the execution model while still being readable.
+
+### Stage 5: MIR (Mid-level IR)
+
+MIR (`cjc-mir`) is a register-based intermediate representation. HIR lowers to MIR instructions that operate on virtual registers.
+
+The MIR layer in v0.1.1 includes:
+
+- **Optimizer** — constant folding, strength reduction, dead code elimination (DCE), common subexpression elimination (CSE), loop-invariant code motion (LICM)
+- **SSA construction** — Cytron's minimal SSA algorithm with 6 optimization passes
+- **Loop analysis** — enriched `LoopInfo` with `is_countable`, `trip_count_hint`, `num_exits`, schedule metadata
+- **Reduction analysis** — enriched `ReductionInfo` with `accumulator_semantics` (Plain, Kahan, Binned, RuntimeDefined)
+- **Schedule metadata** — descriptive execution hints (`SequentialStrict`, `DescriptiveTiled`, `DescriptiveVectorized`, etc.) that are non-semantic
+- **SSA loop overlay** — maps SSA definitions to loops, identifies loop-carried variables, cross-references reductions with SSA accumulators
+- **Legality verifier** — schedule consistency checks, reduction metadata cross-validation
+- **NoGC verifier** — call-graph may_gc fixpoint analysis
+
+### Stage 6: Execution (Dual Engine)
+
+CJC has two execution engines that must produce identical results:
+
+| Engine | Module | Entry Point | Description |
+|--------|--------|------------|-------------|
+| **v1** | `cjc-eval` | `Interpreter::new(seed).exec(&program)` | AST tree-walk interpreter |
+| **v2** | `cjc-mir-exec` | `run_program_with_executor(&program, seed)` | MIR register-machine executor |
+
+The MIR executor also supports an optimized mode:
+
+```
+cjc run program.cjc --mir-opt
+```
+
+Parity tests in the test suite verify that both engines produce bit-identical output for every supported program.
+
+### Diagnostics
+
+CJC uses structured error codes (`E0xxx`-`E8xxx`) via the `cjc-diag` crate. Diagnostics carry source spans, severity levels, and optional fix suggestions.
+
+---
+
+## Part 3 — Determinism Architecture
+
+Determinism is CJC's defining architectural constraint. Every design decision flows from one requirement: **same seed in, same bits out, every time, on every platform.**
+
+### How CJC Achieves Determinism
+
+| Component | Mechanism |
+|-----------|-----------|
+| **RNG** | SplitMix64 with explicit seed threading — no global state |
+| **Collections** | `BTreeMap`/`BTreeSet` everywhere — never `HashMap`/`HashSet` |
+| **Floating-point sums** | Kahan summation or BinnedAccumulator — never naive reduction |
+| **SIMD** | No FMA (fused multiply-add) — `mul_fixed` throughout |
+| **Complex arithmetic** | `mul_fixed` for all complex multiplications |
+| **Iteration** | `Vec`-based storage with deterministic ordering |
+| **Parallelism** | Results identical regardless of thread count |
+
+### Kahan Summation
+
+Naive floating-point addition loses precision as terms accumulate. CJC uses compensated summation everywhere:
+
+```
+// Under the hood, CJC's runtime uses Kahan summation:
+// sum = 0.0, compensation = 0.0
+// for each term:
+//   y = term - compensation
+//   t = sum + y
+//   compensation = (t - sum) - y
+//   sum = t
+```
+
+This matters for scientific workloads where you're summing millions of terms. The result is the same whether you sum them on a laptop or a cluster.
+
+### BinnedAccumulator
+
+For even higher-precision requirements, CJC provides binned accumulators that partition the floating-point range into bins, accumulate within each bin, then combine — guaranteeing reproducible results even under reordering.
+
+### SplitMix64
+
+All randomness in CJC flows through a seeded SplitMix64 generator. There is no global RNG state. Every function that needs randomness takes an explicit seed parameter:
+
+```
+let samples = q_sample(circuit, 1000, 42);
+let measurement = q_measure(circuit, 42);
+```
+
+---
+
+## Part 4 — Builtin Functions
+
+CJC ships with 287+ builtin functions registered in `cjc-runtime`. These are available without imports in every CJC program.
+
+### Mathematics
+
+| Function | Description |
+|----------|-------------|
+| `abs(x)` | Absolute value |
+| `sqrt(x)` | Square root |
+| `pow(base, exp)` | Exponentiation |
+| `log(x)` | Natural logarithm |
+| `log2(x)`, `log10(x)` | Base-2 and base-10 logarithm |
+| `exp(x)` | Euler's number raised to x |
+| `sin(x)`, `cos(x)`, `tan(x)` | Trigonometric functions |
+| `asin(x)`, `acos(x)`, `atan(x)` | Inverse trigonometric |
+| `sinh(x)`, `cosh(x)`, `tanh(x)` | Hyperbolic functions |
+| `floor(x)`, `ceil(x)`, `round(x)` | Rounding |
+| `min(a, b)`, `max(a, b)` | Minimum and maximum |
+| `clamp(x, lo, hi)` | Clamp to range |
+| `gcd(a, b)`, `lcm(a, b)` | Greatest common divisor, least common multiple |
+| `factorial(n)` | Factorial |
+| `fibonacci(n)` | Fibonacci number |
+
+### Statistics
+
+| Function | Description |
+|----------|-------------|
+| `mean(arr)` | Arithmetic mean |
+| `median(arr)` | Median |
+| `variance(arr)` | Sample variance |
+| `std_dev(arr)` | Standard deviation |
+| `percentile(arr, p)` | p-th percentile |
+| `quantile(arr, q)` | Quantile |
+| `correlation(x, y)` | Pearson correlation |
+| `covariance(x, y)` | Covariance |
+| `skewness(arr)` | Skewness |
+| `kurtosis(arr)` | Kurtosis |
+| `zscore(arr)` | Z-score normalization |
+| `mann_whitney(x, y)` | Mann-Whitney U test |
+| `percent_rank(arr)` | Percent rank |
+| `ntile(arr, n)` | N-tile grouping |
+| `case_when(conds, vals, default)` | Conditional value selection |
+
+### Arrays
+
+| Function | Description |
+|----------|-------------|
+| `array_len(arr)` | Length |
+| `array_push(arr, val)` | Append (returns new array) |
+| `array_pop(arr)` | Remove last element (returns new array) |
+| `array_get(arr, idx)` | Get element at index |
+| `array_set(arr, idx, val)` | Set element (returns new array) |
+| `array_slice(arr, start, end)` | Subsequence |
+| `array_contains(arr, val)` | Membership test |
+| `array_reverse(arr)` | Reverse |
+| `array_sort(arr)` | Sort (deterministic) |
+| `array_map(arr, f)` | Map function over elements |
+| `array_filter(arr, f)` | Filter by predicate |
+| `array_reduce(arr, f, init)` | Left fold |
+| `array_flatten(arr)` | Flatten nested arrays |
+| `array_zip(a, b)` | Zip two arrays |
+| `array_unique(arr)` | Remove duplicates (deterministic) |
+
+### Strings
+
+| Function | Description |
+|----------|-------------|
+| `str_len(s)` | Length |
+| `str_upper(s)`, `str_lower(s)` | Case conversion |
+| `str_trim(s)` | Strip whitespace |
+| `str_split(s, delim)` | Split by delimiter |
+| `str_join(arr, delim)` | Join array with delimiter |
+| `str_contains(s, sub)` | Substring test |
+| `str_replace(s, old, new)` | Replace occurrences |
+| `str_starts_with(s, prefix)` | Prefix test |
+| `str_ends_with(s, suffix)` | Suffix test |
+| `str_char_at(s, idx)` | Character at index |
+| `str_substring(s, start, end)` | Substring extraction |
+
+### Tensor Operations
+
+| Function | Description |
+|----------|-------------|
+| `Tensor.from_vec(data, shape)` | Create tensor from flat data + shape |
+| `t.shape()` | Get shape |
+| `t.sum()` | Sum all elements |
+| `t.mean()` | Mean of all elements |
+| `t.transpose()` | Transpose |
+| `t.matmul(other)` | Matrix multiplication |
+| `t.layer_norm(gamma, beta)` | Layer normalization |
+| `t.linear(weights, bias)` | Linear transform |
+| `t.split_heads(n)` | Split into attention heads |
+| `t.merge_heads()` | Merge attention heads |
+| `t.softmax()` | Softmax activation |
+| `t.relu()` | ReLU activation |
+
+Tensor operations use SIMD acceleration internally but never use FMA, preserving bit-identical results.
+
+### I/O
+
+| Function | Description |
+|----------|-------------|
+| `print(val)` | Print to stdout |
+| `read_file(path)` | Read file contents |
+| `write_file(path, content)` | Write file |
+| `to_string(val)` | Convert to string representation |
+
+### Automatic Differentiation
+
+CJC has built-in AD support via `cjc-ad`:
+
+| Function | Description |
+|----------|-------------|
+| `dual(value, derivative)` | Create forward-mode dual number |
+| `grad(f, x)` | Compute gradient |
+| `jacobian(f, x)` | Compute Jacobian matrix |
+
+Forward-mode uses dual numbers; reverse-mode uses a deterministic tape with gradient graphs.
+
+---
+
+## Part 5 — DataFrame Operations
+
+CJC includes a tidyverse-inspired DataFrame library (`cjc-data`) for tabular data manipulation:
+
+```
+let df = dataframe([
+    column("name", ["Alice", "Bob", "Charlie"]),
+    column("age", [30, 25, 35]),
+    column("score", [95.5, 87.3, 91.2]),
+]);
+
+// Filter, transform, aggregate
+df |> filter(col("age") > 25)
+   |> mutate("grade", col("score") / 10.0)
+   |> group_by(col("grade"))
+   |> summarize("avg_age", mean(col("age")))
+```
+
+Key operations:
+
+| Operation | Description |
+|-----------|-------------|
+| `filter(predicate)` | Row selection |
+| `select(columns...)` | Column selection |
+| `mutate(name, expr)` | Add/transform column |
+| `group_by(column)` | Group rows |
+| `summarize(name, agg)` | Aggregate within groups |
+| `join(other, on)` | Join two DataFrames |
+| `arrange(column)` | Sort by column |
+
+---
+
+## Part 6 — Visualization
+
+The `cjc-vizor` crate provides grammar-of-graphics visualization:
+
+```
+let p = vizor_plot(categories, values);
+let p = p.geom_bar();
+let p = p.title("Quarterly Results");
+let p = p.size(800, 500);
+p.render();
+```
+
+Vizor supports bar charts, line plots, scatter plots, histograms, and heatmaps with configurable aesthetics (color, size, shape, faceting).
+
+---
+
+## Part 7 — Quantum Computing Extensions
+
+CJC v0.1.1 includes a comprehensive quantum simulation framework (`cjc-quantum`) with 45+ quantum builtins. The framework spans five simulation backends, each suited to different qubit scales and circuit types.
+
+### Circuit Simulation (Statevector, up to ~26 qubits)
+
+Full statevector simulation for small circuits:
+
+```
+// Create a Bell state
+let c = qubits(2);
+let c = q_h(c, 0);
+let c = q_cx(c, 0, 1);
+
+// Measure
+let probs = q_probs(c);
+print(probs);
+
+// Sample 1000 shots
+let results = q_sample(c, 1000, 42);
+```
+
+Available gates:
+
+| Gate | Function | Description |
+|------|----------|-------------|
+| H | `q_h(c, qubit)` | Hadamard |
+| X, Y, Z | `q_x`, `q_y`, `q_z` | Pauli gates |
+| S, T | `q_s`, `q_t` | Phase gates |
+| Rx, Ry, Rz | `q_rx(c, q, angle)` | Rotation gates |
+| CNOT | `q_cx(c, ctrl, tgt)` | Controlled-NOT |
+| CZ | `q_cz(c, ctrl, tgt)` | Controlled-Z |
+| SWAP | `q_swap(c, q1, q2)` | SWAP |
+| Toffoli | `q_toffoli(c, c1, c2, tgt)` | Three-qubit controlled-controlled-NOT |
+
+### MPS Simulation (up to 50+ qubits)
+
+Matrix Product State simulation trades exactness for scalability via bond dimension truncation:
+
+```
+// 50-qubit GHZ state
+let mps = mps_new(50, 16);
+let mps = mps_h(mps, 0);
+for i in 0..49 {
+    mps = mps_cnot(mps, i, i + 1);
+}
+
+// Measure Z expectation on qubit 25
+let z = mps_z_expectation(mps, 25);
+
+// Compute Heisenberg energy
+let energy = mps_energy(mps, "heisenberg");
+```
+
+**New in v0.1.1** — MPS canonical forms and SWAP networks:
+
+| Function | Description |
+|----------|-------------|
+| `mps_left_canonicalize(mps)` | Left-canonical form via SVD sweep |
+| `mps_right_canonicalize(mps)` | Right-canonical form via SVD sweep |
+| `mps_mixed_canonicalize(mps, center)` | Mixed-canonical form with orthogonality center |
+| `mps_swap(mps, q1, q2)` | Arbitrary-distance 2-qubit gates via SWAP network |
+
+Canonical forms use sign-stabilized SVD to preserve bit-identical determinism.
+
+### Stabilizer Simulation (up to 1000+ qubits)
+
+The CHP (Clifford) simulator efficiently handles Clifford circuits:
+
+```
+let s = stabilizer_new(100);
+let s = stabilizer_h(s, 0);
+for i in 0..99 {
+    s = stabilizer_cnot(s, i, i + 1);
+}
+let outcome = stabilizer_measure(s, 50, 42);
+```
+
+Stabilizer simulation runs in O(n^2) time and O(n^2) memory for n qubits — enabling circuits that are impossible with statevector simulation.
+
+### Density Matrix (Mixed States and Noise)
+
+For simulating open quantum systems with decoherence:
+
+```
+let dm = density_new(2);
+let dm = density_gate(dm, "H", 0);
+let dm = density_cnot(dm, 0, 1);
+
+// Apply noise
+let dm = density_depolarize(dm, 0, 0.01);
+let dm = density_dephase(dm, 1, 0.02);
+
+// Diagnostics
+print(density_purity(dm));
+print(density_entropy(dm));
+```
+
+### Jordan-Wigner Fermion Hamiltonians (New in v0.1.1)
+
+Map fermionic creation/annihilation operators to qubit Pauli strings. Pre-built molecular Hamiltonians for quantum chemistry:
+
+```
+// H2 molecule Hamiltonian
+let h = q_fermion_h2();
+print(q_fermion_n_terms(h));
+
+// LiH molecule Hamiltonian
+let h = q_fermion_lih();
+
+// Compute expectation value against a circuit
+let c = qubits(4);
+let c = q_h(c, 0);
+let c = q_cx(c, 0, 1);
+let energy = q_fermion_expectation(h, c);
+```
+
+The Jordan-Wigner transformation maps: $a^\dagger_j = \frac{X_j - iY_j}{2} \otimes Z_{j-1} \otimes \cdots \otimes Z_0$
+
+All Pauli terms are stored in `Vec` (not HashMap) for deterministic iteration. Expectation values use Kahan summation.
+
+### Suzuki-Trotter Time Evolution (New in v0.1.1)
+
+Simulate quantum dynamics via product formula decomposition:
+
+```
+// Time-evolve a state under H2 Hamiltonian
+let h = q_fermion_h2();
+let c = qubits(4);
+let c = q_h(c, 0);
+
+// 2nd-order Trotter with 100 steps, evolving for time=1.0
+let final_state = q_trotter_evolve(h, c, 1.0, 100, 2);
+
+// Error bound for the approximation
+let error = q_trotter_error(h, 1.0, 100, 2);
+```
+
+- **Order 1**: Lie-Trotter — $e^{-i(A+B)t} \approx (e^{-iAt/n} e^{-iBt/n})^n$
+- **Order 2**: Strang splitting — symmetric product formula with $O(\Delta t^3)$ local error
+
+Diagonal Pauli strings (containing only I and Z) are optimized to O(N) phase rotations, skipping the O(N^2) general path.
+
+### Zero-Noise Extrapolation (New in v0.1.1)
+
+Mitigate quantum hardware noise by extrapolating to the zero-noise limit:
+
+```
+// Richardson extrapolation from noisy measurements
+let scales = [1.0, 2.0, 3.0];
+let noisy_values = [-0.95, -0.82, -0.61];
+
+let result = q_zne_mitigate(scales, noisy_values);
+// result[0] = mitigated value (extrapolated to zero noise)
+// result[1] = Richardson coefficients
+
+// Simple linear extrapolation (2 points)
+let clean = q_zne_linear(1.0, -0.95, 2.0, -0.82);
+
+// Noise scaling
+let scaled_p = q_scale_noise(0.01, 3.0, "depolarizing");
+```
+
+Richardson extrapolation solves a Vandermonde system with partial pivoting. For polynomial noise models of degree $d$, using $d+1$ scale factors gives exact recovery.
+
+### VQE (Variational Quantum Eigensolver)
+
+```
+let energy = vqe_heisenberg(8, 16, 0.01, 100, 42);
+```
+
+### QAOA (Quantum Approximate Optimization)
+
+```
+let graph = qaoa_graph_cycle(6);
+let result = qaoa_maxcut(graph, 16, 2, 0.05, 50, 42);
+```
+
+### DMRG (Density Matrix Renormalization Group)
+
+```
+let energy = dmrg_heisenberg(20, 32, 10, 1e-8);
+```
+
+### QEC (Quantum Error Correction)
+
+```
+let rate = qec_logical_error_rate(3, 0.01, 1000, 42);
+```
+
+### QML (Quantum Machine Learning)
+
+Data re-uploading quantum neural network:
+
+```
+let result = qml_train(4, 3, 2, 16, 0.01, 50, 42, samples, labels);
+let accuracy = result[0];
+let loss_history = result[1];
+```
+
+### Dual-Mode Backend
+
+Every quantum feature has two backends:
+
+1. **Rust backend** — optimized, compiled, fast
+2. **Pure CJC backend** — inspectable, AD-compatible, modifiable
+
+Pass `"pure"` to constructor functions to use the pure backend. Operations automatically detect which backend a state uses.
+
+---
+
+## Part 8 — Complete Examples
+
+### Example 1: Numerical Integration
+
+```
+fn trapz(f: fn(f64) -> f64, a: f64, b: f64, n: i64) -> f64 {
+    let h = (b - a) / n;
+    let mut sum = (f(a) + f(b)) / 2.0;
+    for i in 1..n {
+        sum = sum + f(a + i * h);
+    }
+    sum * h
+}
+
+fn main() -> f64 {
+    let area = trapz(|x: f64| x * x, 0.0, 1.0, 1000);
+    print(f"Integral of x^2 from 0 to 1 = {area}");
+    area
+}
+```
+
+### Example 2: Transformer Forward Pass
+
+```
+let batch    = 1;
+let seq_len  = 4;
+let model_dim = 8;
+let num_heads = 2;
+let head_dim  = model_dim / num_heads;
+
+let input_data = [
+    0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8,
+    0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9,
+    0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0,
+    0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1
+];
+let x = Tensor.from_vec(input_data, [1, 4, 8]);
+
+let x_norm = x.layer_norm(gamma, beta);
+let Q = x_norm.linear(Wq, bias_zero);
+let K = x_norm.linear(Wk, bias_zero);
+let V = x_norm.linear(Wv, bias_zero);
+
+let Q_heads = Q.split_heads(num_heads);
+let K_heads = K.split_heads(num_heads);
+let V_heads = V.split_heads(num_heads);
+
+let attn_out = attention(Q_heads, K_heads, V_heads);
+let attn_merged = attn_out.merge_heads();
+let attn_proj = attn_merged.linear(Wo, bias_zero);
+
+let x2 = x + attn_proj;
+print("Transformer block output shape:", x2.shape());
+```
+
+### Example 3: CSV ETL Pipeline
+
+```
+let csv_data: ByteSlice = b"name,age,score\nAlice,30,95.5\nBob,25,87.3\nCharlie,35,91.2";
+
+let rows = csv_data.split_byte(b'\n');
+let header = rows[0];
+let header_fields = header.split_byte(b',');
+print(header_fields);
+
+let mut total_score = 0.0;
+let mut count = 0;
+for i in 1..rows.len() {
+    let fields = rows[i].split_byte(b',');
+    let name = fields[0];
+    let score = fields[2];
+    total_score = total_score + score;
+    count = count + 1;
+}
+print(f"Average score: {total_score / count}");
+```
+
+### Example 4: Quantum Chemistry
+
+```
+// Build H2 Hamiltonian and compute ground state energy estimate
+let h = q_fermion_h2();
+print(f"H2 Hamiltonian has {q_fermion_n_terms(h)} Pauli terms");
+
+// Prepare a trial state
+let c = qubits(4);
+let c = q_ry(c, 0, 0.5);
+let c = q_ry(c, 1, -0.3);
+let c = q_cx(c, 0, 2);
+let c = q_cx(c, 1, 3);
+
+// Compute energy
+let energy = q_fermion_expectation(h, c);
+print(f"Trial energy: {energy}");
+
+// Time evolution
+let evolved = q_trotter_evolve(h, c, 0.5, 50, 2);
+print("Evolution complete");
+
+// Mitigate noise from hypothetical hardware
+let scales = [1.0, 1.5, 2.0];
+let noisy = [-1.05, -0.92, -0.71];
+let mitigated = q_zne_mitigate(scales, noisy);
+print(f"Mitigated energy: {mitigated[0]}");
+```
+
+### Example 5: Statistical Analysis
+
+```
+let data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+
+print(f"Mean: {mean(data)}");
+print(f"Std Dev: {std_dev(data)}");
+print(f"Median: {median(data)}");
+print(f"Skewness: {skewness(data)}");
+print(f"Kurtosis: {kurtosis(data)}");
+
+let groups = ntile(data, 4);
+print(f"Quartile groups: {groups}");
+
+let ranks = percent_rank(data);
+print(f"Percent ranks: {ranks}");
+
+// Non-parametric test
+let x = [1.0, 2.0, 3.0, 4.0, 5.0];
+let y = [2.0, 3.0, 4.0, 5.0, 6.0];
+let test = mann_whitney(x, y);
+print(f"p-value: {test.p_value}");
+```
+
+---
+
+## Part 9 — CLI Reference
+
+CJC ships as a single binary with multiple subcommands:
+
+| Command | Description |
+|---------|-------------|
+| `cjc run file.cjc` | Execute a program (AST interpreter) |
+| `cjc run file.cjc --mir` | Execute via MIR engine |
+| `cjc run file.cjc --mir-opt` | Execute via MIR engine with optimizations |
+| `cjc check file.cjc` | Type-check without executing |
+| `cjc lex file.cjc` | Show token stream |
+| `cjc parse file.cjc` | Show parse tree |
+| `cjc ast file.cjc` | Dump AST |
+| `cjc hir file.cjc` | Dump HIR |
+| `cjc mir file.cjc` | Dump MIR |
+| `cjc inspect file.cjc` | Show AST metrics + validation |
+| `cjc repl` | Interactive REPL |
+| `cjc bench file.cjc` | Benchmark execution |
+
+---
+
+## Part 10 — Design Decisions and Trade-offs
+
+### Why No HashMap?
+
+`HashMap` uses random iteration order in Rust (and most languages). This means any code that iterates over a hash map produces non-deterministic results. CJC uses `BTreeMap` and `BTreeSet` exclusively, trading some average-case performance for guaranteed deterministic iteration.
+
+### Why No FMA?
+
+Fused multiply-add (FMA) computes `a * b + c` in a single instruction with one rounding step instead of two. This is faster and more accurate — but it produces different results depending on whether the hardware has FMA support. CJC uses `mul_fixed` (separate multiply and add) to guarantee identical results across all platforms.
+
+### Why Two Execution Engines?
+
+The AST interpreter (`cjc-eval`) is simpler and easier to debug. The MIR executor (`cjc-mir-exec`) is faster and supports optimization. Having both means:
+
+- New features can be prototyped in the interpreter first
+- Parity tests catch subtle lowering bugs
+- Users can choose the right trade-off for their workload
+
+### Why Vec-Based Pauli Terms?
+
+Quantum Hamiltonians are sums of Pauli terms. A natural representation is a hash map from Pauli string to coefficient. CJC uses `Vec<PauliTerm>` instead, because:
+
+- Iteration order is deterministic
+- No hashing overhead for small Hamiltonians
+- Summation order is fixed, so Kahan compensation works reliably
+
+### Why Sign-Stabilized SVD?
+
+SVD is ambiguous in the signs of singular vectors. Two runs of the same SVD can produce vectors that differ by a sign flip. CJC's MPS canonical form uses a sign convention (largest-magnitude element is positive) to eliminate this ambiguity. This is critical for deterministic tensor network simulations.
+
+---
+
+## What's Next
+
+CJC v0.1.1 lays the groundwork for quantum-classical hybrid algorithms, noise-aware quantum simulation, and tensor network methods. Upcoming work includes:
+
+- **Multi-file module system** — programs that span multiple files with deterministic resolution
+- **Default parameters and variadic functions** — `fn solve(x: f64, tol: f64 = 1e-6)`
+- **Decorator syntax** — `@log @timed fn train(x: Tensor)`
+- **Sparse eigensolvers** — Lanczos and Arnoldi with deterministic iteration
+- **MIR autodiff integration** — gradients flowing through the MIR optimization pipeline
+
+The language is growing, but the invariants remain fixed: no hidden allocations, no non-deterministic operations, no silent precision loss. Same seed, same bits, always.
+
+---
+
+::: {.callout-note appearance="minimal"}
+**CJC is open source and under active development.** The codebase is roughly 123,000 lines of Rust across 21 crates, with zero external runtime dependencies. If deterministic numerical computing interests you, check out the [introductory post](../introducing-cjc/index.qmd) or the [v0.1.0 release notes](../cjc-v0.1-released/index.qmd).
+:::
