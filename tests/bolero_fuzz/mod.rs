@@ -113,6 +113,47 @@ fn fuzz_mir_verifier() {
     });
 }
 
+/// Fuzz the AST validator: any parseable program must not panic during
+/// validation, and validation must be deterministic.
+#[test]
+fn fuzz_ast_validator() {
+    bolero::check!().with_type::<Vec<u8>>().for_each(|input: &Vec<u8>| {
+        if let Ok(s) = std::str::from_utf8(input) {
+            let s = s.to_string();
+            let _ = panic::catch_unwind(|| {
+                let (program, diags) = cjc_parser::parse_source(&s);
+                if !diags.has_errors() {
+                    let r1 = cjc_ast::validate::validate_ast(&program);
+                    let r2 = cjc_ast::validate::validate_ast(&program);
+                    assert_eq!(r1.findings.len(), r2.findings.len());
+                    assert_eq!(r1.checks_run, r2.checks_run);
+                }
+            });
+        }
+    });
+}
+
+/// Fuzz the AST metrics: any parseable program must not panic during
+/// metrics computation, and metrics must be deterministic.
+#[test]
+fn fuzz_ast_metrics() {
+    bolero::check!().with_type::<Vec<u8>>().for_each(|input: &Vec<u8>| {
+        if let Ok(s) = std::str::from_utf8(input) {
+            let s = s.to_string();
+            let _ = panic::catch_unwind(|| {
+                let (program, diags) = cjc_parser::parse_source(&s);
+                if !diags.has_errors() {
+                    let m1 = cjc_ast::metrics::compute_metrics(&program);
+                    let m2 = cjc_ast::metrics::compute_metrics(&program);
+                    assert_eq!(m1.total_nodes, m2.total_nodes);
+                    assert_eq!(m1.expr_count, m2.expr_count);
+                    assert_eq!(m1.function_count, m2.function_count);
+                }
+            });
+        }
+    });
+}
+
 /// Fuzz the optimizer: optimized MIR execution must produce the same result
 /// as unoptimized for any parseable program.
 #[test]

@@ -1,3 +1,7 @@
+mod test_ast_inspect;
+mod test_ast_metrics;
+mod test_ast_validation;
+mod test_ast_visitor;
 mod test_inspect;
 mod test_loop_analysis;
 mod test_reduction_analysis;

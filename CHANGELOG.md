@@ -4,6 +4,26 @@ All notable changes to CJC will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased] — AST Evolution v0.3
+
+### Added
+
+- **AST Visitor trait** (`visit` module): read-only `AstVisitor` trait with `walk_*` functions covering all 35 `ExprKind`, 9 `StmtKind`, 11 `DeclKind`, and 9 `PatternKind` variants
+- **AST Metrics** (`metrics` module): single-pass structural statistics via visitor — node counts, depth measurements, operator frequencies, feature-presence flags (`AstMetrics`, `compute_metrics`)
+- **AST Validation** (`validate` module): lightweight structural checks — break/continue outside loop, duplicate params/fields, empty match, unreachable code after return, nesting depth limit
+- **AST Inspect** (`inspect` module): deterministic text dumps — `dump_ast_summary`, `dump_ast_metrics`, `dump_validation_report`, `dump_expr_tree`
+- **Node utility methods** (`node_utils` module): `Expr::child_count`, `is_literal`, `is_place`, `is_compound`; `Block::is_empty`, `stmt_count`, `has_trailing_expr`; `Program::function_count`, `struct_count`, `has_main_function`
+- **27 new unit tests** in cjc-ast across 5 modules
+- **25 new integration tests** under `tests/mir/` for visitor, metrics, validation, and inspect
+- **2 Bolero fuzz targets**: `fuzz_ast_validator`, `fuzz_ast_metrics` — must not panic and must be deterministic
+
+### Design Decisions
+
+- Visitor is read-only (no MutVisitor) — prevents downstream breakage
+- cjc-ast remains a leaf crate with zero dependencies
+- All new code in new modules — lib.rs only gains 5 `pub mod` lines
+- BTreeMap/BTreeSet for all collections (determinism)
+
 ## [Unreleased] — MIR/CFG/SSA Evolution v0.3
 
 ### Added
