@@ -547,6 +547,311 @@ impl Mps {
         }
         total
     }
+
+    // -----------------------------------------------------------------------
+    // Canonical Form Normalization
+    // -----------------------------------------------------------------------
+
+    /// Left-canonicalize the MPS: sweep left-to-right, performing QR/SVD at
+    /// each bond to ensure each tensor is a left-isometry (A†A = I).
+    ///
+    /// After this, contracting from the left gives identity matrices,
+    /// which is needed for efficient expectation value computation and
+    /// proper DMRG initialization.
+    pub fn left_canonicalize(&mut self) {
+        for i in 0..(self.n_qubits - 1) {
+            self.canonicalize_bond_left(i);
+        }
+    }
+
+    /// Right-canonicalize the MPS: sweep right-to-left, ensuring each tensor
+    /// is a right-isometry (AA† = I).
+    pub fn right_canonicalize(&mut self) {
+        for i in (1..self.n_qubits).rev() {
+            self.canonicalize_bond_right(i);
+        }
+    }
+
+    /// Mixed-canonical form: left-canonicalize sites 0..center-1 and
+    /// right-canonicalize sites center+1..N-1. The center site holds
+    /// all non-trivial information (the "orthogonality center").
+    pub fn mixed_canonicalize(&mut self, center: usize) {
+        assert!(center < self.n_qubits, "center must be < n_qubits");
+        for i in 0..center {
+            self.canonicalize_bond_left(i);
+        }
+        for i in (center + 1..self.n_qubits).rev() {
+            self.canonicalize_bond_right(i);
+        }
+    }
+
+    /// Left-canonicalize site i: reshape A[i] into a tall matrix, SVD,
+    /// absorb S*V† into A[i+1].
+    fn canonicalize_bond_left(&mut self, i: usize) {
+        let bl = self.tensors[i].bond_left;
+        let br = self.tensors[i].bond_right;
+
+        // Reshape: (bl, 2, br) → (2*bl, br) matrix
+        let rows = 2 * bl;
+        let cols = br;
+        let mut mat = DenseMatrix::zeros(rows, cols);
+        for s in 0..2 {
+            for r in 0..bl {
+                for c in 0..br {
+                    mat.set(s * bl + r, c, self.tensors[i].a[s].get(r, c));
+                }
+            }
+        }
+
+        let svd = svd_sign_stabilized(&mat);
+        let k = svd.s.len().min(self.max_bond);
+
+        // New tensor i: reshape U[:, :k] back to (bl, 2, k)
+        let mut new_t = MpsTensor::new(bl, k);
+        for s in 0..2 {
+            for r in 0..bl {
+                for c in 0..k {
+                    new_t.a[s].set(r, c, svd.u.get(s * bl + r, c));
+                }
+            }
+        }
+        self.tensors[i] = new_t;
+
+        // Absorb S*V† into tensor i+1
+        // SV†: k × br matrix
+        let next_bl = self.tensors[i + 1].bond_left;
+        let next_br = self.tensors[i + 1].bond_right;
+        assert_eq!(next_bl, br, "bond dimension mismatch");
+
+        let mut sv_mat = DenseMatrix::zeros(k, br);
+        for r in 0..k {
+            for c in 0..br {
+                sv_mat.set(r, c, svd.vh.get(r, c).scale(svd.s[r]));
+            }
+        }
+
+        // new_A[i+1][s] = SV† * A[i+1][s]
+        let mut new_next = MpsTensor::new(k, next_br);
+        for s in 0..2 {
+            for r in 0..k {
+                for c in 0..next_br {
+                    let mut val = ComplexF64::ZERO;
+                    for m in 0..br {
+                        val = val.add(sv_mat.get(r, m).mul_fixed(self.tensors[i + 1].a[s].get(m, c)));
+                    }
+                    new_next.a[s].set(r, c, val);
+                }
+            }
+        }
+        self.tensors[i + 1] = new_next;
+    }
+
+    /// Right-canonicalize site i: reshape, SVD, absorb U*S into A[i-1].
+    fn canonicalize_bond_right(&mut self, i: usize) {
+        let bl = self.tensors[i].bond_left;
+        let br = self.tensors[i].bond_right;
+
+        // Reshape: (bl, 2, br) → (bl, 2*br) matrix
+        let rows = bl;
+        let cols = 2 * br;
+        let mut mat = DenseMatrix::zeros(rows, cols);
+        for s in 0..2 {
+            for r in 0..bl {
+                for c in 0..br {
+                    mat.set(r, s * br + c, self.tensors[i].a[s].get(r, c));
+                }
+            }
+        }
+
+        let svd = svd_sign_stabilized(&mat);
+        let k = svd.s.len().min(self.max_bond);
+
+        // New tensor i: reshape V†[:k, :] back to (k, 2, br)
+        let mut new_t = MpsTensor::new(k, br);
+        for s in 0..2 {
+            for r in 0..k {
+                for c in 0..br {
+                    new_t.a[s].set(r, c, svd.vh.get(r, s * br + c));
+                }
+            }
+        }
+        self.tensors[i] = new_t;
+
+        // Absorb U*S into tensor i-1
+        let prev_bl = self.tensors[i - 1].bond_left;
+        let prev_br = self.tensors[i - 1].bond_right;
+        assert_eq!(prev_br, bl, "bond dimension mismatch");
+
+        let mut us_mat = DenseMatrix::zeros(bl, k);
+        for r in 0..bl {
+            for c in 0..k {
+                us_mat.set(r, c, svd.u.get(r, c).scale(svd.s[c]));
+            }
+        }
+
+        // new_A[i-1][s] = A[i-1][s] * US
+        let mut new_prev = MpsTensor::new(prev_bl, k);
+        for s in 0..2 {
+            for r in 0..prev_bl {
+                for c in 0..k {
+                    let mut val = ComplexF64::ZERO;
+                    for m in 0..bl {
+                        val = val.add(self.tensors[i - 1].a[s].get(r, m).mul_fixed(us_mat.get(m, c)));
+                    }
+                    new_prev.a[s].set(r, c, val);
+                }
+            }
+        }
+        self.tensors[i - 1] = new_prev;
+    }
+
+    // -----------------------------------------------------------------------
+    // SWAP Network for Non-Adjacent Gates
+    // -----------------------------------------------------------------------
+
+    /// Apply a two-qubit gate between arbitrary (possibly non-adjacent) qubits
+    /// using SWAP decomposition.
+    ///
+    /// Strategy: SWAP qubits closer together, apply the gate on adjacent sites,
+    /// then SWAP back. This is exact but may increase bond dimension.
+    pub fn apply_gate_swap_network(
+        &mut self,
+        q1: usize,
+        q2: usize,
+        gate: [[ComplexF64; 4]; 4],
+    ) {
+        assert!(q1 < self.n_qubits && q2 < self.n_qubits && q1 != q2,
+            "invalid qubit indices for SWAP network");
+
+        let (lo, hi) = if q1 < q2 { (q1, q2) } else { (q2, q1) };
+
+        if hi - lo == 1 {
+            // Already adjacent: apply directly
+            self.apply_two_qubit_gate(lo, gate);
+            return;
+        }
+
+        // SWAP q_hi down to lo+1
+        for i in (lo + 1..hi).rev() {
+            self.apply_swap_adjacent(i, i + 1);
+        }
+
+        // Now the qubits are at positions lo and lo+1
+        // But we need to account for whether q1 < q2 or not
+        self.apply_two_qubit_gate(lo, gate);
+
+        // SWAP back
+        for i in (lo + 1)..hi {
+            self.apply_swap_adjacent(i, i + 1);
+        }
+    }
+
+    /// Apply a SWAP gate between adjacent qubits i and i+1.
+    fn apply_swap_adjacent(&mut self, i: usize, j: usize) {
+        assert_eq!(j, i + 1, "SWAP requires adjacent qubits");
+        // SWAP matrix in computational basis {|00⟩, |01⟩, |10⟩, |11⟩}:
+        // [[1,0,0,0], [0,0,1,0], [0,1,0,0], [0,0,0,1]]
+        let zero = ComplexF64::ZERO;
+        let one = ComplexF64::ONE;
+        let swap_mat = [
+            [one,  zero, zero, zero],
+            [zero, zero, one,  zero],
+            [zero, one,  zero, zero],
+            [zero, zero, zero, one],
+        ];
+        self.apply_two_qubit_gate(i, swap_mat);
+    }
+
+    /// Apply a 4×4 two-qubit gate on adjacent sites (i, i+1).
+    /// Contracts both tensors, applies the gate, then decomposes via SVD.
+    fn apply_two_qubit_gate(&mut self, i: usize, gate: [[ComplexF64; 4]; 4]) {
+        let bl = self.tensors[i].bond_left;
+        let br = self.tensors[i + 1].bond_right;
+        let bond_mid = self.tensors[i].bond_right;
+
+        // Contract tensors i and i+1 into a (4*bl, br) matrix:
+        // Theta[s1*s2][bl_idx][br_idx] = Σ_m A[i][s1][bl_idx,m] * A[i+1][s2][m,br_idx]
+        let mut theta = DenseMatrix::zeros(4 * bl, br);
+        for s1 in 0..2 {
+            for s2 in 0..2 {
+                let s = s1 * 2 + s2;
+                for r in 0..bl {
+                    for c in 0..br {
+                        let mut val = ComplexF64::ZERO;
+                        for m in 0..bond_mid {
+                            val = val.add(
+                                self.tensors[i].a[s1].get(r, m)
+                                    .mul_fixed(self.tensors[i + 1].a[s2].get(m, c))
+                            );
+                        }
+                        theta.set(s * bl + r, c, val);
+                    }
+                }
+            }
+        }
+
+        // Apply gate: new_theta[s'][bl_idx][br_idx] = Σ_s gate[s'][s] * theta[s][bl_idx][br_idx]
+        let mut new_theta = DenseMatrix::zeros(4 * bl, br);
+        for sp in 0..4 {
+            for s in 0..4 {
+                if gate[sp][s].re.abs() < 1e-20 && gate[sp][s].im.abs() < 1e-20 {
+                    continue;
+                }
+                for r in 0..bl {
+                    for c in 0..br {
+                        let old = new_theta.get(sp * bl + r, c);
+                        new_theta.set(
+                            sp * bl + r, c,
+                            old.add(gate[sp][s].mul_fixed(theta.get(s * bl + r, c))),
+                        );
+                    }
+                }
+            }
+        }
+
+        // SVD to split back into two tensors
+        // Reshape: (4*bl, br) → (2*bl, 2*br) for SVD
+        let svd_rows = 2 * bl;
+        let svd_cols = 2 * br;
+        let mut svd_mat = DenseMatrix::zeros(svd_rows, svd_cols);
+        for s1 in 0..2 {
+            for s2 in 0..2 {
+                let s = s1 * 2 + s2;
+                for r in 0..bl {
+                    for c in 0..br {
+                        svd_mat.set(s1 * bl + r, s2 * br + c, new_theta.get(s * bl + r, c));
+                    }
+                }
+            }
+        }
+
+        let svd = svd_sign_stabilized(&svd_mat);
+        let k = svd.s.iter().filter(|&&s| s > SVD_TOL).count().min(self.max_bond);
+        let k = k.max(1);
+
+        // New tensor i: U[:, :k] reshaped to (bl, 2, k)
+        let mut new_i = MpsTensor::new(bl, k);
+        for s1 in 0..2 {
+            for r in 0..bl {
+                for c in 0..k {
+                    new_i.a[s1].set(r, c, svd.u.get(s1 * bl + r, c));
+                }
+            }
+        }
+
+        // New tensor i+1: S*V†[:k, :] reshaped to (k, 2, br)
+        let mut new_ip1 = MpsTensor::new(k, br);
+        for s2 in 0..2 {
+            for r in 0..k {
+                for c in 0..br {
+                    new_ip1.a[s2].set(r, c, svd.vh.get(r, s2 * br + c).scale(svd.s[r]));
+                }
+            }
+        }
+
+        self.tensors[i] = new_i;
+        self.tensors[i + 1] = new_ip1;
+    }
 }
 
 // ---------------------------------------------------------------------------

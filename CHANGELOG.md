@@ -4,6 +4,30 @@ All notable changes to CJC will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased] — Quantum Hardening Phase 3
+
+### Added
+
+- **Jordan-Wigner transformation** (`fermion` module): Pauli algebra, `PauliTerm` with multiply/weight, `jw_one_body`/`jw_two_body` transforms, pre-built H₂ and LiH molecular Hamiltonians, Kahan-summed expectation values
+- **Suzuki-Trotter time evolution** (`trotter` module): 1st-order (Lie-Trotter) and 2nd-order (Strang splitting) product formulas, diagonal Pauli rotation optimization, Trotter error bounds
+- **Zero-Noise Extrapolation** (`mitigation` module): Richardson extrapolation with Vandermonde solve (partial pivoting), linear 2-point extrapolation, noise scaling for depolarizing/dephasing/amplitude-damping channels, `run_zne` workflow helper
+- **MPS canonical form**: `left_canonicalize`, `right_canonicalize`, `mixed_canonicalize` via SVD-based orthogonalization with sign stabilization
+- **MPS SWAP networks**: `apply_gate_swap_network` for arbitrary-distance 2-qubit gates, `apply_two_qubit_gate` for 4×4 unitary on adjacent sites
+- **Pure CJC backends**: `PureFermionicHamiltonian`, `pure_h2_hamiltonian`, `pure_trotter_evolve`, `pure_richardson_extrapolate` — all inspectable, AD-compatible
+- **Dispatch wiring**: `q_fermion_h2`, `q_fermion_lih`, `q_fermion_expectation`, `q_trotter_evolve`, `q_trotter_error`, `q_zne_mitigate`, `q_zne_linear`, `q_scale_noise`, `mps_left_canonicalize`, `mps_right_canonicalize`, `mps_mixed_canonicalize`, `mps_swap`
+- **52 new unit tests** across fermion, trotter, and mitigation modules
+- **46 new integration tests** in `tests/beta_tests/hardening/` (fermion, trotter, mitigation, dual-mode parity)
+- **2 new Bolero fuzz targets**: `fuzz_fermion_expectation_determinism`, `fuzz_zne_richardson_determinism`
+
+### Design Decisions
+
+- All Pauli terms stored in `Vec` (not HashMap) for deterministic iteration
+- Complex arithmetic via `mul_fixed` (no FMA) throughout
+- Kahan summation for all floating-point reductions (expectation values, Richardson coefficients)
+- Trotter diagonal case optimized to O(N) phase rotation (skips O(N²) general path)
+- MPS canonical form via sign-stabilized SVD preserves bit-identical determinism
+- SWAP network uses exact decomposition (no approximation) with automatic bond truncation
+
 ## [Unreleased] — AST Evolution v0.3
 
 ### Added

@@ -679,6 +679,199 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             Ok(Some(map))
         }
 
+        // =======================================================================
+        // Fermion — Jordan-Wigner Hamiltonians
+        // =======================================================================
+
+        "q_fermion_h2" => {
+            let h = crate::fermion::h2_hamiltonian();
+            Ok(Some(wrap_any(h)))
+        }
+
+        "q_fermion_lih" => {
+            let h = crate::fermion::lih_hamiltonian();
+            Ok(Some(wrap_any(h)))
+        }
+
+        "q_fermion_new" => {
+            let n = extract_int(&args, 0, "n_qubits")? as usize;
+            Ok(Some(wrap_any(crate::fermion::FermionicHamiltonian::new(n))))
+        }
+
+        "q_fermion_n_terms" => {
+            let n = read_i64::<crate::fermion::FermionicHamiltonian>(
+                &args[0], "FermionicHamiltonian", |h| h.n_terms() as i64,
+            )?;
+            Ok(Some(Value::Int(n)))
+        }
+
+        "q_fermion_expectation" => {
+            // q_fermion_expectation(hamiltonian, circuit)
+            // Execute the circuit to get a statevector, then compute ⟨ψ|H|ψ⟩
+            let sv = with_circuit(&args[1], |circ| circ.execute())?;
+            let e = match &args[0] {
+                Value::QuantumState(rc) => {
+                    let borrow = rc.borrow();
+                    let h = borrow.downcast_ref::<crate::fermion::FermionicHamiltonian>()
+                        .ok_or_else(|| "expected FermionicHamiltonian".to_string())?;
+                    h.expectation(&sv)
+                }
+                _ => return Err("q_fermion_expectation: first arg must be a FermionicHamiltonian".into()),
+            };
+            Ok(Some(Value::Float(e)))
+        }
+
+        // =======================================================================
+        // Trotter — Time Evolution
+        // =======================================================================
+
+        "q_trotter_evolve" => {
+            // q_trotter_evolve(hamiltonian, circuit, time, n_steps, order)
+            // order: 1 or 2
+            let time = extract_angle(&args[2], "time")?;
+            let n_steps = extract_int(&args, 3, "n_steps")? as usize;
+            let order = match args.get(4) {
+                Some(Value::Int(2)) => crate::trotter::TrotterOrder::Second,
+                _ => crate::trotter::TrotterOrder::First,
+            };
+
+            let mut sv = with_circuit(&args[1], |circ| circ.execute())?;
+
+            match &args[0] {
+                Value::QuantumState(rc) => {
+                    let borrow = rc.borrow();
+                    let h = borrow.downcast_ref::<crate::fermion::FermionicHamiltonian>()
+                        .ok_or_else(|| "expected FermionicHamiltonian".to_string())?;
+                    crate::trotter::trotter_evolve(&mut sv, h, time, n_steps, order);
+                }
+                _ => return Err("q_trotter_evolve: first arg must be a FermionicHamiltonian".into()),
+            }
+
+            Ok(Some(wrap_statevector(sv)))
+        }
+
+        "q_trotter_error" => {
+            // q_trotter_error(hamiltonian, time, n_steps, order)
+            let time = extract_angle(&args[1], "time")?;
+            let n_steps = extract_int(&args, 2, "n_steps")? as usize;
+            let order = match args.get(3) {
+                Some(Value::Int(2)) => crate::trotter::TrotterOrder::Second,
+                _ => crate::trotter::TrotterOrder::First,
+            };
+            let bound = match &args[0] {
+                Value::QuantumState(rc) => {
+                    let borrow = rc.borrow();
+                    let h = borrow.downcast_ref::<crate::fermion::FermionicHamiltonian>()
+                        .ok_or_else(|| "expected FermionicHamiltonian".to_string())?;
+                    crate::trotter::trotter_error_bound(h, time, n_steps, order)
+                }
+                _ => return Err("q_trotter_error: first arg must be a FermionicHamiltonian".into()),
+            };
+            Ok(Some(Value::Float(bound)))
+        }
+
+        // =======================================================================
+        // ZNE — Zero-Noise Extrapolation
+        // =======================================================================
+
+        "q_zne_mitigate" => {
+            // q_zne_mitigate(scale_factors_array, measured_values_array)
+            let scales = match &args[0] {
+                Value::Array(arr) => arr.iter().map(|v| match v {
+                    Value::Float(f) => *f,
+                    Value::Int(i) => *i as f64,
+                    _ => 0.0,
+                }).collect::<Vec<f64>>(),
+                _ => return Err("q_zne_mitigate: arg 0 must be scale factors array".into()),
+            };
+            let values = match &args[1] {
+                Value::Array(arr) => arr.iter().map(|v| match v {
+                    Value::Float(f) => *f,
+                    Value::Int(i) => *i as f64,
+                    _ => 0.0,
+                }).collect::<Vec<f64>>(),
+                _ => return Err("q_zne_mitigate: arg 1 must be measured values array".into()),
+            };
+
+            let result = crate::mitigation::richardson_extrapolate(&scales, &values)?;
+            let out = vec![
+                Value::Float(result.mitigated_value),
+                Value::Array(Rc::new(result.coefficients.into_iter().map(Value::Float).collect())),
+            ];
+            Ok(Some(Value::Array(Rc::new(out))))
+        }
+
+        "q_zne_linear" => {
+            // q_zne_linear(lambda1, value1, lambda2, value2)
+            let l1 = extract_angle(&args[0], "lambda1")?;
+            let v1 = extract_angle(&args[1], "value1")?;
+            let l2 = extract_angle(&args[2], "lambda2")?;
+            let v2 = extract_angle(&args[3], "value2")?;
+            let result = crate::mitigation::linear_extrapolate(l1, v1, l2, v2)?;
+            Ok(Some(Value::Float(result)))
+        }
+
+        "q_scale_noise" => {
+            // q_scale_noise(base_p, scale_factor, noise_type)
+            let base_p = extract_angle(&args[0], "base_p")?;
+            let scale = extract_angle(&args[1], "scale_factor")?;
+            let result = match args.get(2) {
+                Some(Value::String(s)) if s.as_ref() == "amplitude_damping" =>
+                    crate::mitigation::scale_amplitude_damping(base_p, scale),
+                Some(Value::String(s)) if s.as_ref() == "dephasing" =>
+                    crate::mitigation::scale_dephasing_noise(base_p, scale),
+                _ => crate::mitigation::scale_depolarizing_noise(base_p, scale),
+            };
+            Ok(Some(Value::Float(result)))
+        }
+
+        // =======================================================================
+        // MPS — Canonical Form & SWAP Network
+        // =======================================================================
+
+        "mps_left_canonicalize" => {
+            with_any_mut::<Mps>(&args[0], "MPS", |mps| {
+                mps.left_canonicalize();
+                Ok(())
+            })?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "mps_right_canonicalize" => {
+            with_any_mut::<Mps>(&args[0], "MPS", |mps| {
+                mps.right_canonicalize();
+                Ok(())
+            })?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "mps_mixed_canonicalize" => {
+            let center = extract_int(&args, 1, "center")? as usize;
+            with_any_mut::<Mps>(&args[0], "MPS", |mps| {
+                mps.mixed_canonicalize(center);
+                Ok(())
+            })?;
+            Ok(Some(args[0].clone()))
+        }
+
+        "mps_swap" => {
+            let q1 = extract_int(&args, 1, "qubit1")? as usize;
+            let q2 = extract_int(&args, 2, "qubit2")? as usize;
+            let zero = ComplexF64::ZERO;
+            let one = ComplexF64::ONE;
+            let swap_gate = [
+                [one, zero, zero, zero],
+                [zero, zero, one, zero],
+                [zero, one, zero, zero],
+                [zero, zero, zero, one],
+            ];
+            with_any_mut::<Mps>(&args[0], "MPS", |mps| {
+                mps.apply_gate_swap_network(q1, q2, swap_gate);
+                Ok(())
+            })?;
+            Ok(Some(args[0].clone()))
+        }
+
         _ => Ok(None),
     }
 }
@@ -946,6 +1139,57 @@ fn dispatch_pure(name: &str, args: &[Value]) -> Result<Option<Value>, String> {
         "q_n_gates" if is_pure::<PureCircuit>(&args[0]) => {
             let n = pure_circuit_ref(&args[0], |c| c.n_gates())?;
             Ok(Some(Value::Int(n as i64)))
+        }
+
+        // === Pure Fermion/Trotter/ZNE (triggered by "pure" flag) ===
+
+        "q_fermion_h2" if has_pure_flag(args) => {
+            Ok(Some(wrap_pure(pure_h2_hamiltonian())))
+        }
+
+        "q_fermion_expectation" if is_pure::<PureFermionicHamiltonian>(&args[0]) => {
+            // Expects a PureStatevector as second arg
+            match &args[1] {
+                Value::QuantumState(rc) => {
+                    let borrow = rc.borrow();
+                    let psv = borrow.downcast_ref::<PureStatevector>()
+                        .ok_or_else(|| "expected PureStatevector".to_string())?;
+                    let h_borrow = match &args[0] {
+                        Value::QuantumState(hrc) => hrc.borrow(),
+                        _ => return Err("expected PureFermionicHamiltonian".into()),
+                    };
+                    let h = h_borrow.downcast_ref::<PureFermionicHamiltonian>()
+                        .ok_or_else(|| "expected PureFermionicHamiltonian".to_string())?;
+                    let e = h.expectation(&psv.amplitudes, psv.n_qubits);
+                    Ok(Some(Value::Float(e)))
+                }
+                _ => Err("q_fermion_expectation: second arg must be PureStatevector".into()),
+            }
+        }
+
+        "q_zne_mitigate" if has_pure_flag(args) => {
+            let scales = match &args[0] {
+                Value::Array(arr) => arr.iter().map(|v| match v {
+                    Value::Float(f) => *f,
+                    Value::Int(i) => *i as f64,
+                    _ => 0.0,
+                }).collect::<Vec<f64>>(),
+                _ => return Err("q_zne_mitigate: arg 0 must be scale factors array".into()),
+            };
+            let values = match &args[1] {
+                Value::Array(arr) => arr.iter().map(|v| match v {
+                    Value::Float(f) => *f,
+                    Value::Int(i) => *i as f64,
+                    _ => 0.0,
+                }).collect::<Vec<f64>>(),
+                _ => return Err("q_zne_mitigate: arg 1 must be measured values array".into()),
+            };
+            let result = pure_richardson_extrapolate(&scales, &values)?;
+            let out = vec![
+                Value::Float(result.mitigated_value),
+                Value::Array(Rc::new(result.coefficients.into_iter().map(Value::Float).collect())),
+            ];
+            Ok(Some(Value::Array(Rc::new(out))))
         }
 
         _ => Ok(None),

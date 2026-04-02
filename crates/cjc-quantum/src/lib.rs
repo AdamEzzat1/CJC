@@ -33,6 +33,9 @@ pub mod density;
 pub mod qec;
 pub mod dmrg;
 pub mod qml;
+pub mod fermion;
+pub mod trotter;
+pub mod mitigation;
 pub mod pure;
 
 pub use gates::Gate;

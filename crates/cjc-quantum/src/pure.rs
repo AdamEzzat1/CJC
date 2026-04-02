@@ -1252,6 +1252,301 @@ fn splitmix64_f64(state: &mut u64) -> f64 {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// Pure Fermionic Hamiltonian — Jordan-Wigner in Pure CJC
+// ═══════════════════════════════════════════════════════════════════
+
+/// Pure CJC representation of a Pauli operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PurePauli {
+    I,
+    X,
+    Y,
+    Z,
+}
+
+/// Pure CJC Pauli term: coeff * P_0 ⊗ P_1 ⊗ ... ⊗ P_{n-1}.
+#[derive(Debug, Clone)]
+pub struct PurePauliTerm {
+    pub coeff_re: f64,
+    pub coeff_im: f64,
+    pub ops: Vec<PurePauli>,
+}
+
+/// Pure CJC Fermionic Hamiltonian (sum of Pauli terms).
+#[derive(Debug, Clone)]
+pub struct PureFermionicHamiltonian {
+    pub n_qubits: usize,
+    pub terms: Vec<PurePauliTerm>,
+}
+
+impl PureFermionicHamiltonian {
+    pub fn new(n: usize) -> Self {
+        PureFermionicHamiltonian { n_qubits: n, terms: Vec::new() }
+    }
+
+    pub fn add_term(&mut self, term: PurePauliTerm) {
+        self.terms.push(term);
+    }
+
+    pub fn n_terms(&self) -> usize {
+        self.terms.len()
+    }
+
+    /// Compute ⟨ψ|H|ψ⟩ on a pure statevector (Vec<C>).
+    pub fn expectation(&self, amplitudes: &[C], n_qubits: usize) -> f64 {
+        let n = 1usize << n_qubits;
+        let mut acc = 0.0f64;
+        let mut comp = 0.0f64;
+
+        for term in &self.terms {
+            let mut sum_re = 0.0f64;
+            let mut sum_im = 0.0f64;
+            for k in 0..n {
+                let (k_prime, phase) = pure_apply_pauli(&term.ops, k);
+                // conj(ψ_k) * phase * ψ_{k'}
+                let psi_k = amplitudes[k];
+                let psi_kp = amplitudes[k_prime];
+                let conj_k = c_conj(psi_k);
+                let contrib = c_mul(c_mul(conj_k, phase), psi_kp);
+                sum_re += contrib.0;
+                sum_im += contrib.1;
+            }
+            // coeff * sum
+            let val = term.coeff_re * sum_re - term.coeff_im * sum_im;
+            // Kahan accumulation
+            let y = val - comp;
+            let t = acc + y;
+            comp = (t - acc) - y;
+            acc = t;
+        }
+        acc
+    }
+}
+
+/// Apply a pure Pauli string to a basis state.
+fn pure_apply_pauli(ops: &[PurePauli], k: usize) -> (usize, C) {
+    let mut k_new = k;
+    let mut phase = CONE;
+
+    for (q, &op) in ops.iter().enumerate() {
+        let bit = (k >> q) & 1;
+        match op {
+            PurePauli::I => {}
+            PurePauli::X => { k_new ^= 1 << q; }
+            PurePauli::Y => {
+                k_new ^= 1 << q;
+                if bit == 0 {
+                    phase = c_mul(phase, (0.0, 1.0)); // i
+                } else {
+                    phase = c_mul(phase, (0.0, -1.0)); // -i
+                }
+            }
+            PurePauli::Z => {
+                if bit == 1 { phase = c_neg(phase); }
+            }
+        }
+    }
+    (k_new, phase)
+}
+
+/// Pure CJC H₂ Hamiltonian (same coefficients as Rust backend).
+pub fn pure_h2_hamiltonian() -> PureFermionicHamiltonian {
+    let mut h = PureFermionicHamiltonian::new(2);
+    let mk = |re: f64, ops: Vec<PurePauli>| PurePauliTerm { coeff_re: re, coeff_im: 0.0, ops };
+    h.add_term(mk(-0.4804, vec![PurePauli::I, PurePauli::I]));
+    h.add_term(mk(0.3435,  vec![PurePauli::Z, PurePauli::I]));
+    h.add_term(mk(-0.4347, vec![PurePauli::I, PurePauli::Z]));
+    h.add_term(mk(0.5716,  vec![PurePauli::Z, PurePauli::Z]));
+    h.add_term(mk(0.0910,  vec![PurePauli::X, PurePauli::X]));
+    h.add_term(mk(0.0910,  vec![PurePauli::Y, PurePauli::Y]));
+    h
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Pure Trotter — Suzuki-Trotter in Pure CJC
+// ═══════════════════════════════════════════════════════════════════
+
+/// Apply Trotter evolution on a pure statevector.
+///
+/// 1st order: e^{-iHdt} ≈ Π_k e^{-i c_k P_k dt}
+pub fn pure_trotter_evolve(
+    amplitudes: &mut Vec<C>,
+    n_qubits: usize,
+    hamiltonian: &PureFermionicHamiltonian,
+    time: f64,
+    n_steps: usize,
+    second_order: bool,
+) {
+    let dt = time / n_steps as f64;
+    let n = 1usize << n_qubits;
+
+    if !second_order {
+        // 1st order
+        for _step in 0..n_steps {
+            for term in &hamiltonian.terms {
+                let theta = term.coeff_re * dt;
+                if theta.abs() > 1e-20 {
+                    pure_pauli_rotation(amplitudes, n, &term.ops, theta);
+                }
+            }
+        }
+    } else {
+        // 2nd order (symmetric)
+        let n_terms = hamiltonian.terms.len();
+        for _step in 0..n_steps {
+            for (i, term) in hamiltonian.terms.iter().enumerate() {
+                let theta = if i == 0 || i == n_terms - 1 {
+                    term.coeff_re * dt * 0.5
+                } else {
+                    term.coeff_re * dt
+                };
+                if theta.abs() > 1e-20 {
+                    pure_pauli_rotation(amplitudes, n, &term.ops, theta);
+                }
+            }
+            for i in (0..n_terms).rev() {
+                let term = &hamiltonian.terms[i];
+                let theta = if i == 0 || i == n_terms - 1 {
+                    term.coeff_re * dt * 0.5
+                } else {
+                    0.0
+                };
+                if theta.abs() > 1e-20 {
+                    pure_pauli_rotation(amplitudes, n, &term.ops, theta);
+                }
+            }
+        }
+    }
+}
+
+/// Apply e^{-iθP} on a pure amplitudes vector.
+fn pure_pauli_rotation(amplitudes: &mut Vec<C>, n: usize, ops: &[PurePauli], theta: f64) {
+    let all_diagonal = ops.iter().all(|&p| p == PurePauli::I || p == PurePauli::Z);
+
+    if all_diagonal {
+        for k in 0..n {
+            let eigenvalue = pure_z_eigenvalue(ops, k);
+            let angle = -theta * eigenvalue;
+            let phase = (angle.cos(), angle.sin());
+            amplitudes[k] = c_mul(amplitudes[k], phase);
+        }
+    } else {
+        let cos_t = theta.cos();
+        let sin_t = theta.sin();
+        let mut new_amps = vec![CZERO; n];
+        for k in 0..n {
+            new_amps[k] = c_scale(cos_t, amplitudes[k]);
+        }
+        let neg_i_sin = (0.0, -sin_t);
+        for k in 0..n {
+            let (k_prime, pauli_phase) = pure_apply_pauli(ops, k);
+            let contrib = c_mul(c_mul(neg_i_sin, pauli_phase), amplitudes[k]);
+            new_amps[k_prime] = c_add(new_amps[k_prime], contrib);
+        }
+        *amplitudes = new_amps;
+    }
+}
+
+fn pure_z_eigenvalue(ops: &[PurePauli], k: usize) -> f64 {
+    let mut e = 1.0f64;
+    for (q, &op) in ops.iter().enumerate() {
+        if op == PurePauli::Z && (k >> q) & 1 == 1 {
+            e = -e;
+        }
+    }
+    e
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Pure ZNE — Richardson Extrapolation in Pure CJC
+// ═══════════════════════════════════════════════════════════════════
+
+/// Pure CJC Richardson extrapolation result.
+#[derive(Debug, Clone)]
+pub struct PureZneResult {
+    pub mitigated_value: f64,
+    pub scale_factors: Vec<f64>,
+    pub measured_values: Vec<f64>,
+    pub coefficients: Vec<f64>,
+}
+
+/// Pure CJC Richardson extrapolation.
+pub fn pure_richardson_extrapolate(
+    scale_factors: &[f64],
+    measured_values: &[f64],
+) -> Result<PureZneResult, String> {
+    let n = scale_factors.len();
+    if n == 0 {
+        return Err("at least one scale factor required".into());
+    }
+    if n != measured_values.len() {
+        return Err("scale_factors and measured_values must have same length".into());
+    }
+    if n == 1 {
+        return Ok(PureZneResult {
+            mitigated_value: measured_values[0],
+            scale_factors: scale_factors.to_vec(),
+            measured_values: measured_values.to_vec(),
+            coefficients: vec![1.0],
+        });
+    }
+
+    // Vandermonde solve
+    let mut mat = vec![vec![0.0f64; n]; n];
+    let mut rhs = vec![0.0f64; n];
+    rhs[0] = 1.0;
+    for k in 0..n {
+        for i in 0..n {
+            mat[k][i] = scale_factors[i].powi(k as i32);
+        }
+    }
+    // Gaussian elimination with partial pivoting
+    for col in 0..n {
+        let mut max_val = mat[col][col].abs();
+        let mut max_row = col;
+        for row in (col + 1)..n {
+            let v = mat[row][col].abs();
+            if v > max_val { max_val = v; max_row = row; }
+        }
+        if max_val < 1e-15 {
+            return Err("singular Vandermonde system".into());
+        }
+        if max_row != col {
+            mat.swap(col, max_row);
+            rhs.swap(col, max_row);
+        }
+        for row in (col + 1)..n {
+            let factor = mat[row][col] / mat[col][col];
+            for j in col..n { mat[row][j] -= factor * mat[col][j]; }
+            rhs[row] -= factor * rhs[col];
+        }
+    }
+    let mut coefficients = vec![0.0f64; n];
+    for i in (0..n).rev() {
+        let mut sum = rhs[i];
+        for j in (i + 1)..n { sum -= mat[i][j] * coefficients[j]; }
+        coefficients[i] = sum / mat[i][i];
+    }
+
+    // Kahan sum for mitigated value
+    let mut acc = 0.0f64;
+    let mut comp = 0.0f64;
+    for i in 0..n {
+        let y = coefficients[i] * measured_values[i] - comp;
+        let t = acc + y;
+        comp = (t - acc) - y;
+        acc = t;
+    }
+
+    Ok(PureZneResult {
+        mitigated_value: acc,
+        scale_factors: scale_factors.to_vec(),
+        measured_values: measured_values.to_vec(),
+        coefficients,
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // Inspect helper — extract CJC-inspectable map from QuantumState
 // ═══════════════════════════════════════════════════════════════════
 

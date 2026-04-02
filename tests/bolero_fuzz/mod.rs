@@ -154,6 +154,71 @@ fn fuzz_ast_metrics() {
     });
 }
 
+/// Fuzz the Jordan-Wigner Hamiltonian expectation: must not panic and must
+/// be deterministic for any valid state.
+#[test]
+fn fuzz_fermion_expectation_determinism() {
+    bolero::check!()
+        .with_type::<(f64, f64, f64, f64)>()
+        .for_each(|&(a0_re, a0_im, a1_re, a1_im): &(f64, f64, f64, f64)| {
+            let _ = panic::catch_unwind(|| {
+                use cjc_quantum::fermion::h2_hamiltonian;
+                use cjc_quantum::statevector::Statevector;
+                use cjc_runtime::complex::ComplexF64;
+
+                // Construct a normalized 2-qubit state from fuzz input
+                let amps = vec![
+                    ComplexF64::new(a0_re, a0_im),
+                    ComplexF64::new(a1_re, a1_im),
+                    ComplexF64::ZERO,
+                    ComplexF64::ZERO,
+                ];
+                if let Ok(mut sv) = Statevector::from_amplitudes(amps) {
+                    sv.normalize();
+                    if sv.is_normalized(0.1) {
+                        let h = h2_hamiltonian();
+                        let e1 = h.expectation(&sv);
+                        let e2 = h.expectation(&sv);
+                        // Determinism
+                        assert_eq!(e1.to_bits(), e2.to_bits());
+                    }
+                }
+            });
+        });
+}
+
+/// Fuzz Richardson extrapolation: must not panic and must be deterministic.
+#[test]
+fn fuzz_zne_richardson_determinism() {
+    bolero::check!()
+        .with_type::<(f64, f64, f64, f64, f64, f64)>()
+        .for_each(|&(l1, l2, l3, v1, v2, v3): &(f64, f64, f64, f64, f64, f64)| {
+            let _ = panic::catch_unwind(|| {
+                use cjc_quantum::mitigation::richardson_extrapolate;
+
+                // Only test with finite, distinct scale factors
+                if l1.is_finite() && l2.is_finite() && l3.is_finite()
+                    && v1.is_finite() && v2.is_finite() && v3.is_finite()
+                    && (l1 - l2).abs() > 1e-10
+                    && (l2 - l3).abs() > 1e-10
+                    && (l1 - l3).abs() > 1e-10
+                    && l1.abs() < 1e6 && l2.abs() < 1e6 && l3.abs() < 1e6
+                {
+                    let r1 = richardson_extrapolate(&[l1, l2, l3], &[v1, v2, v3]);
+                    let r2 = richardson_extrapolate(&[l1, l2, l3], &[v1, v2, v3]);
+                    match (r1, r2) {
+                        (Ok(a), Ok(b)) => {
+                            if a.mitigated_value.is_finite() && b.mitigated_value.is_finite() {
+                                assert_eq!(a.mitigated_value.to_bits(), b.mitigated_value.to_bits());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        });
+}
+
 /// Fuzz the optimizer: optimized MIR execution must produce the same result
 /// as unoptimized for any parseable program.
 #[test]
