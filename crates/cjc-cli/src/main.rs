@@ -35,7 +35,7 @@ use std::path::Path;
 use std::process;
 use std::time::Instant;
 
-const VERSION: &str = "0.1.0";
+const VERSION: &str = "0.1.1";
 
 // ── Typed CLI configuration ──────────────────────────────────────────
 

@@ -1,6 +1,6 @@
 [package]
 name = "cjc"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 
@@ -34,7 +34,7 @@ exclude = ["fuzz"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 authors = ["Adam Ezzat"]
@@ -69,27 +69,27 @@ proptest = "1"
 tempfile = "3"
 
 [workspace.dependencies]
-cjc-ast = { path = "crates/cjc-ast", version = "0.1.0" }
-cjc-diag = { path = "crates/cjc-diag", version = "0.1.0" }
-cjc-lexer = { path = "crates/cjc-lexer", version = "0.1.0" }
-cjc-parser = { path = "crates/cjc-parser", version = "0.1.0" }
-cjc-types = { path = "crates/cjc-types", version = "0.1.0" }
-cjc-dispatch = { path = "crates/cjc-dispatch", version = "0.1.0" }
-cjc-runtime = { path = "crates/cjc-runtime", version = "0.1.0" }
-cjc-eval = { path = "crates/cjc-eval", version = "0.1.0" }
-cjc-ad = { path = "crates/cjc-ad", version = "0.1.0" }
-cjc-data = { path = "crates/cjc-data", version = "0.1.0" }
-cjc-repro = { path = "crates/cjc-repro", version = "0.1.0" }
-cjc-cli = { path = "crates/cjc-cli", version = "0.1.0" }
-cjc-module = { path = "crates/cjc-module", version = "0.1.0" }
-cjc-snap = { path = "crates/cjc-snap", version = "0.1.0" }
-cjc-vizor = { path = "crates/cjc-vizor", version = "0.1.0" }
-cjc-hir = { path = "crates/cjc-hir", version = "0.1.0" }
-cjc-mir = { path = "crates/cjc-mir", version = "0.1.0" }
-cjc-mir-exec = { path = "crates/cjc-mir-exec", version = "0.1.0" }
-cjc-regex = { path = "crates/cjc-regex", version = "0.1.0" }
-cjc-analyzer = { path = "crates/cjc-analyzer", version = "0.1.0" }
-cjc-quantum = { path = "crates/cjc-quantum", version = "0.1.0" }
+cjc-ast = { path = "crates/cjc-ast", version = "0.1.1" }
+cjc-diag = { path = "crates/cjc-diag", version = "0.1.1" }
+cjc-lexer = { path = "crates/cjc-lexer", version = "0.1.1" }
+cjc-parser = { path = "crates/cjc-parser", version = "0.1.1" }
+cjc-types = { path = "crates/cjc-types", version = "0.1.1" }
+cjc-dispatch = { path = "crates/cjc-dispatch", version = "0.1.1" }
+cjc-runtime = { path = "crates/cjc-runtime", version = "0.1.1" }
+cjc-eval = { path = "crates/cjc-eval", version = "0.1.1" }
+cjc-ad = { path = "crates/cjc-ad", version = "0.1.1" }
+cjc-data = { path = "crates/cjc-data", version = "0.1.1" }
+cjc-repro = { path = "crates/cjc-repro", version = "0.1.1" }
+cjc-cli = { path = "crates/cjc-cli", version = "0.1.1" }
+cjc-module = { path = "crates/cjc-module", version = "0.1.1" }
+cjc-snap = { path = "crates/cjc-snap", version = "0.1.1" }
+cjc-vizor = { path = "crates/cjc-vizor", version = "0.1.1" }
+cjc-hir = { path = "crates/cjc-hir", version = "0.1.1" }
+cjc-mir = { path = "crates/cjc-mir", version = "0.1.1" }
+cjc-mir-exec = { path = "crates/cjc-mir-exec", version = "0.1.1" }
+cjc-regex = { path = "crates/cjc-regex", version = "0.1.1" }
+cjc-analyzer = { path = "crates/cjc-analyzer", version = "0.1.1" }
+cjc-quantum = { path = "crates/cjc-quantum", version = "0.1.1" }
 
 [[test]]
 name = "fixtures"

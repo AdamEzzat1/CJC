@@ -4,9 +4,9 @@ All notable changes to CJC will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased] — Quantum Hardening Phase 3
+## [0.1.1] — 2026-04-02
 
-### Added
+### Quantum Hardening Phase 3
 
 - **Jordan-Wigner transformation** (`fermion` module): Pauli algebra, `PauliTerm` with multiply/weight, `jw_one_body`/`jw_two_body` transforms, pre-built H₂ and LiH molecular Hamiltonians, Kahan-summed expectation values
 - **Suzuki-Trotter time evolution** (`trotter` module): 1st-order (Lie-Trotter) and 2nd-order (Strang splitting) product formulas, diagonal Pauli rotation optimization, Trotter error bounds
@@ -19,56 +19,59 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **46 new integration tests** in `tests/beta_tests/hardening/` (fermion, trotter, mitigation, dual-mode parity)
 - **2 new Bolero fuzz targets**: `fuzz_fermion_expectation_determinism`, `fuzz_zne_richardson_determinism`
 
-### Design Decisions
-
-- All Pauli terms stored in `Vec` (not HashMap) for deterministic iteration
-- Complex arithmetic via `mul_fixed` (no FMA) throughout
-- Kahan summation for all floating-point reductions (expectation values, Richardson coefficients)
-- Trotter diagonal case optimized to O(N) phase rotation (skips O(N²) general path)
-- MPS canonical form via sign-stabilized SVD preserves bit-identical determinism
-- SWAP network uses exact decomposition (no approximation) with automatic bond truncation
-
-## [Unreleased] — AST Evolution v0.3
-
-### Added
+### AST Evolution v0.3
 
 - **AST Visitor trait** (`visit` module): read-only `AstVisitor` trait with `walk_*` functions covering all 35 `ExprKind`, 9 `StmtKind`, 11 `DeclKind`, and 9 `PatternKind` variants
-- **AST Metrics** (`metrics` module): single-pass structural statistics via visitor — node counts, depth measurements, operator frequencies, feature-presence flags (`AstMetrics`, `compute_metrics`)
+- **AST Metrics** (`metrics` module): single-pass structural statistics via visitor — node counts, depth measurements, operator frequencies, feature-presence flags
 - **AST Validation** (`validate` module): lightweight structural checks — break/continue outside loop, duplicate params/fields, empty match, unreachable code after return, nesting depth limit
 - **AST Inspect** (`inspect` module): deterministic text dumps — `dump_ast_summary`, `dump_ast_metrics`, `dump_validation_report`, `dump_expr_tree`
 - **Node utility methods** (`node_utils` module): `Expr::child_count`, `is_literal`, `is_place`, `is_compound`; `Block::is_empty`, `stmt_count`, `has_trailing_expr`; `Program::function_count`, `struct_count`, `has_main_function`
 - **27 new unit tests** in cjc-ast across 5 modules
-- **25 new integration tests** under `tests/mir/` for visitor, metrics, validation, and inspect
-- **2 Bolero fuzz targets**: `fuzz_ast_validator`, `fuzz_ast_metrics` — must not panic and must be deterministic
+- **25 new integration tests** for visitor, metrics, validation, and inspect
+- **2 Bolero fuzz targets**: `fuzz_ast_validator`, `fuzz_ast_metrics`
 
-### Design Decisions
+### MIR/CFG/SSA Evolution v0.3
 
-- Visitor is read-only (no MutVisitor) — prevents downstream breakage
-- cjc-ast remains a leaf crate with zero dependencies
-- All new code in new modules — lib.rs only gains 5 `pub mod` lines
-- BTreeMap/BTreeSet for all collections (determinism)
-
-## [Unreleased] — MIR/CFG/SSA Evolution v0.3
-
-### Added
-
-- **SchedulePlan metadata** on loops: descriptive-only execution schedule hints (`SequentialStrict`, `DescriptiveTiled`, `DescriptiveVectorized`, `DescriptiveMaterializeBoundary`, `DescriptiveStaticPartition`) — non-semantic, does not affect execution
+- **SchedulePlan metadata** on loops: descriptive-only execution schedule hints (`SequentialStrict`, `DescriptiveTiled`, `DescriptiveVectorized`, `DescriptiveMaterializeBoundary`, `DescriptiveStaticPartition`) — non-semantic
 - **AccumulatorSemantics enum** on reductions: classifies required accumulator type (`Plain`, `Kahan`, `Binned`, `RuntimeDefined`)
 - **Enriched LoopInfo**: `is_countable`, `trip_count_hint`, `num_exits`, `schedule` fields
 - **Enriched ReductionInfo**: `reassociation_forbidden`, `strict_order_required`, `accumulator_semantics` fields
-- **Builtin reduction classification** (`classify_builtin_reduction`): kahan_sum → Kahan, binned_sum → Binned, trapz/simps → Plain strict
 - **SSA loop/reduction overlay** (`ssa_loop_overlay` module): maps SSA definitions to loops, identifies loop-carried variables, cross-references reductions with SSA accumulators
 - **Inspect/diagnostics module** (`inspect` module): deterministic text dumps for loop trees, reduction reports, legality reports, and schedule summaries
 - **Expanded legality verifier**: schedule metadata consistency checks, reduction metadata cross-validation
-- **Bolero fuzz target**: `fuzz_mir_verifier` — verifier must not panic and must be deterministic on arbitrary input
-- **14 new integration tests** under `tests/mir/` for schedule metadata, inspect diagnostics, and enriched metadata
+- **14 new integration tests** for schedule metadata, inspect diagnostics, and enriched metadata
 - **9 new unit tests** across `ssa_loop_overlay` and `inspect` modules
+
+### CLI Phase 3 — Compiler Visibility & Verification (10 new commands)
+
+- `cjc emit` — dump AST/HIR/MIR intermediate representations with `--opt` and `--diff`
+- `cjc explain` — show desugared HIR forms with function signatures and NoGC annotations
+- `cjc gc` — GC analysis with allocation timeline and stability checks
+- `cjc nogc` — static NoGC verification per function
+- `cjc audit` — numerical hygiene analysis (naive summation, float equality, division-by-zero)
+- `cjc precision` — f64 vs f32 precision analysis with relative error reporting
+- `cjc lock` — deterministic lockfile generation and cross-platform verification
+- `cjc parity` — dual-executor parity checker (eval vs mir-exec)
+- `cjc test` — native test runner discovering `test_` functions and `@test` decorators
+- `cjc ci` — full CI diagnostic suite (doctor + proof + parity + test + nogc)
+
+### Enhanced CLI Commands
+
+- `cjc mem` — added `--nogc`, `--mir`, `--eval` flags
+- `cjc bench` — added `--nogc`, `--mir`, `--eval` flags
+- `cjc proof` — added `--seeds` multi-seed mode
+- `cjc doctor` — added `--strict` flag for CI pipelines
+- `cjc view` — hash display now opt-in via `--hash`
 
 ### Design Decisions
 
+- All Pauli terms stored in `Vec` (not HashMap) for deterministic iteration
+- Complex arithmetic via `mul_fixed` (no FMA) throughout
+- Kahan summation for all floating-point reductions
+- MPS canonical form via sign-stabilized SVD preserves bit-identical determinism
 - SchedulePlan is strictly non-semantic — the executor ignores it entirely
-- All new structures use Vec + ID indexing (not HashMap) for determinism
-- All new modules are additive overlays — no existing code paths modified
+- All new AST/MIR modules are additive overlays — no existing code paths modified
+- Phase 3 CLI commands are read-only analysis tools — they do not modify source files
 
 ## [0.1.0] — 2026-03-27
 
