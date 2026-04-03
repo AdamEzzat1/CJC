@@ -1010,6 +1010,32 @@ print(f"p-value: {test.p_value}");
 
 CJC ships as a single binary with 29 subcommands across three tiers.
 
+### File Format Compatibility
+
+Not every command operates on `.cjc` source files. Here's what each command reads:
+
+**CJC source only** (`.cjc`):
+`run`, `proof`, `emit`, `explain`, `gc`, `nogc`, `audit`, `precision`, `parity`, `test`, `bench`, `mem`, `trace`, `lock`, `check`
+
+**CJC + other formats** (read-only):
+
+| Command | Formats |
+|---------|---------|
+| `doctor` | `.cjc`, `.snap` (binary), `.csv`/`.tsv`, plus metadata on all files for size warnings |
+| `ci` | `.cjc` only (reimplements parse + type checks, does not run full `doctor`) |
+| `view` | Directory metadata, `.cjc` source for effect annotations, `.snap` binary for hashes |
+| `inspect` | Dispatches on extension: `.snap` (binary decode), `.csv`/`.tsv` (schema), `.cjc` (source), anything else (generic: size + hash) |
+| `seek` | Traverses any directory; reads any file's content for `--contains` |
+
+**Non-CJC formats exclusively:**
+
+| Command | Formats |
+|---------|---------|
+| `flow` | `.csv`/`.tsv` or stdin |
+| `schema` | `.csv`/`.tsv` |
+| `patch` | `.csv`/`.tsv` or stdin |
+| `drift` | Any two files (auto-detects `.csv`/`.tsv` for structured diff, otherwise text diff) |
+
 ### Core Commands
 
 | Command | Description |
