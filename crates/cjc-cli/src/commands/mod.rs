@@ -21,3 +21,15 @@ pub mod mem;
 pub mod bench;
 pub mod pack;
 pub mod doctor;
+
+// Phase 3: compiler visibility + runtime analysis + numerical + reproducibility + CI
+pub mod emit;
+pub mod explain;
+pub mod gc;
+pub mod nogc;
+pub mod audit;
+pub mod precision;
+pub mod lock;
+pub mod parity;
+pub mod test_cmd;
+pub mod ci;

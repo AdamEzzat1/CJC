@@ -29,7 +29,7 @@ impl Default for ViewArgs {
             recursive: false,
             no_header: false,
             output: OutputMode::Color,
-            show_hash: true,
+            show_hash: false,
             show_effects: true,
             show_size: true,
         }
@@ -43,6 +43,7 @@ pub fn parse_args(args: &[String]) -> ViewArgs {
         match args[i].as_str() {
             "-r" | "--recursive" => va.recursive = true,
             "--no-header" => va.no_header = true,
+            "--hash" => va.show_hash = true,
             "--no-hash" => va.show_hash = false,
             "--no-effects" => va.show_effects = false,
             "--no-size" => va.show_size = false,

@@ -19,6 +19,14 @@ pub struct MemArgs {
     pub runs: usize,
     pub output: OutputMode,
     pub verbose: bool,
+    pub nogc_check: bool,
+    pub executor: Executor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Executor {
+    Eval,
+    Mir,
 }
 
 impl Default for MemArgs {
@@ -29,6 +37,8 @@ impl Default for MemArgs {
             runs: 1,
             output: OutputMode::Color,
             verbose: false,
+            nogc_check: false,
+            executor: Executor::Eval,
         }
     }
 }
@@ -46,6 +56,9 @@ pub fn parse_args(args: &[String]) -> MemArgs {
                 i += 1;
                 if i < args.len() { ma.runs = args[i].parse().unwrap_or(1); }
             }
+            "--nogc" => ma.nogc_check = true,
+            "--mir" => ma.executor = Executor::Mir,
+            "--eval" => ma.executor = Executor::Eval,
             "-v" | "--verbose" => ma.verbose = true,
             "--plain" => ma.output = OutputMode::Plain,
             "--json" => ma.output = OutputMode::Json,
@@ -89,6 +102,15 @@ pub fn run(args: &[String]) {
         let rendered = diags.render_all_color(&source, &filename, ma.output.use_color());
         eprint!("{}", rendered);
         process::exit(1);
+    }
+
+    // NoGC pre-check
+    if ma.nogc_check {
+        if let Err(e) = cjc_mir_exec::verify_nogc(&program) {
+            eprintln!("error: NoGC verification failed — refusing to profile");
+            eprintln!("{}", e);
+            process::exit(1);
+        }
     }
 
     let mut runs: Vec<MemRun> = Vec::new();

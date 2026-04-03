@@ -22,6 +22,7 @@ pub struct DoctorArgs {
     pub output: OutputMode,
     pub verbose: bool,
     pub fix: bool,
+    pub strict: bool,
 }
 
 impl Default for DoctorArgs {
@@ -31,6 +32,7 @@ impl Default for DoctorArgs {
             output: OutputMode::Color,
             verbose: false,
             fix: false,
+            strict: false,
         }
     }
 }
@@ -42,6 +44,7 @@ pub fn parse_args(args: &[String]) -> DoctorArgs {
         match args[i].as_str() {
             "-v" | "--verbose" => da.verbose = true,
             "--fix" => da.fix = true,
+            "--strict" => da.strict = true,
             "--plain" => da.output = OutputMode::Plain,
             "--json" => da.output = OutputMode::Json,
             "--color" => da.output = OutputMode::Color,
@@ -198,6 +201,9 @@ pub fn run(args: &[String]) {
                 } else {
                     eprintln!("\n{} — warnings only, no blocking issues",
                         output::colorize(da.output, output::BOLD_YELLOW, "OK (with warnings)"));
+                    if da.strict {
+                        process::exit(1);
+                    }
                 }
             }
         }

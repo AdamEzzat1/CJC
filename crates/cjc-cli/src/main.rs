@@ -63,6 +63,17 @@ enum Command {
     Bench,
     Pack,
     Doctor,
+    // Phase 3 CLI suite subcommands
+    Emit,
+    Explain,
+    Gc,
+    Nogc,
+    Audit,
+    Precision,
+    Lock,
+    Parity,
+    Test,
+    Ci,
 }
 
 /// Fully parsed CLI configuration. Produced by `Config::from_args()`.
@@ -102,6 +113,7 @@ const KNOWN_COMMANDS: &[&str] = &[
     "lex", "parse", "check", "run", "repl",
     "view", "proof", "flow", "patch", "seek", "drift", "forge",
     "inspect", "schema", "trace", "mem", "bench", "pack", "doctor",
+    "emit", "explain", "gc", "nogc", "audit", "precision", "lock", "parity", "test", "ci",
 ];
 
 impl Config {
@@ -109,6 +121,7 @@ impl Config {
     const CLI_SUITE: &[&str] = &[
         "view", "proof", "flow", "patch", "seek", "drift", "forge",
         "inspect", "schema", "check", "trace", "mem", "bench", "pack", "doctor",
+        "emit", "explain", "gc", "nogc", "audit", "precision", "lock", "parity", "test", "ci",
     ];
 
     /// Parse CLI arguments from `std::env::args()`. Exits on error.
@@ -168,6 +181,16 @@ impl Config {
                     "bench" => Command::Bench,
                     "pack" => Command::Pack,
                     "doctor" => Command::Doctor,
+                    "emit" => Command::Emit,
+                    "explain" => Command::Explain,
+                    "gc" => Command::Gc,
+                    "nogc" => Command::Nogc,
+                    "audit" => Command::Audit,
+                    "precision" => Command::Precision,
+                    "lock" => Command::Lock,
+                    "parity" => Command::Parity,
+                    "test" => Command::Test,
+                    "ci" => Command::Ci,
                     _ => unreachable!(),
                 };
                 return Config {
@@ -358,7 +381,10 @@ fn main() {
         Command::View | Command::Proof | Command::Flow | Command::Patch |
         Command::Seek | Command::Drift | Command::Forge |
         Command::Inspect | Command::Schema | Command::Check | Command::Trace |
-        Command::Mem | Command::Bench | Command::Pack | Command::Doctor => {
+        Command::Mem | Command::Bench | Command::Pack | Command::Doctor |
+        Command::Emit | Command::Explain | Command::Gc | Command::Nogc |
+        Command::Audit | Command::Precision | Command::Lock | Command::Parity |
+        Command::Test | Command::Ci => {
             // Find the command name in args, pass everything after it
             let cmd_name = match config.command {
                 Command::View => "view",
@@ -376,6 +402,16 @@ fn main() {
                 Command::Bench => "bench",
                 Command::Pack => "pack",
                 Command::Doctor => "doctor",
+                Command::Emit => "emit",
+                Command::Explain => "explain",
+                Command::Gc => "gc",
+                Command::Nogc => "nogc",
+                Command::Audit => "audit",
+                Command::Precision => "precision",
+                Command::Lock => "lock",
+                Command::Parity => "parity",
+                Command::Test => "test",
+                Command::Ci => "ci",
                 _ => unreachable!(),
             };
             let cmd_idx = all_args.iter().position(|a| a == cmd_name).unwrap_or(1);
@@ -399,6 +435,16 @@ fn main() {
                     Command::Bench => commands::bench::print_help(),
                     Command::Pack => commands::pack::print_help(),
                     Command::Doctor => commands::doctor::print_help(),
+                    Command::Emit => commands::emit::print_help(),
+                    Command::Explain => commands::explain::print_help(),
+                    Command::Gc => commands::gc::print_help(),
+                    Command::Nogc => commands::nogc::print_help(),
+                    Command::Audit => commands::audit::print_help(),
+                    Command::Precision => commands::precision::print_help(),
+                    Command::Lock => commands::lock::print_help(),
+                    Command::Parity => commands::parity::print_help(),
+                    Command::Test => commands::test_cmd::print_help(),
+                    Command::Ci => commands::ci::print_help(),
                     _ => unreachable!(),
                 }
                 return;
@@ -420,6 +466,16 @@ fn main() {
                 Command::Bench => commands::bench::run(&sub_args),
                 Command::Pack => commands::pack::run(&sub_args),
                 Command::Doctor => commands::doctor::run(&sub_args),
+                Command::Emit => commands::emit::run(&sub_args),
+                Command::Explain => commands::explain::run(&sub_args),
+                Command::Gc => commands::gc::run(&sub_args),
+                Command::Nogc => commands::nogc::run(&sub_args),
+                Command::Audit => commands::audit::run(&sub_args),
+                Command::Precision => commands::precision::run(&sub_args),
+                Command::Lock => commands::lock::run(&sub_args),
+                Command::Parity => commands::parity::run(&sub_args),
+                Command::Test => commands::test_cmd::run(&sub_args),
+                Command::Ci => commands::ci::run(&sub_args),
                 _ => unreachable!(),
             }
             return;
@@ -475,6 +531,18 @@ fn print_usage() {
     eprintln!("  cjc bench <file.cjc>            Performance benchmarking");
     eprintln!("  cjc pack <file.cjc>             Reproducible packaging");
     eprintln!("  cjc doctor [path]               Project diagnostics");
+    eprintln!();
+    eprintln!("Compiler Visibility & Analysis:");
+    eprintln!("  cjc emit <file.cjc>             Dump IR (--stage ast|hir|mir)");
+    eprintln!("  cjc explain <file.cjc>          Show desugared/lowered forms");
+    eprintln!("  cjc gc <file.cjc>               GC analysis & allocation timeline");
+    eprintln!("  cjc nogc <file.cjc>             NoGC static verification");
+    eprintln!("  cjc audit <file.cjc>            Numerical hygiene analysis");
+    eprintln!("  cjc precision <file.cjc>        Precision analysis (f64 vs f32)");
+    eprintln!("  cjc lock <file.cjc>             Generate/verify lockfiles");
+    eprintln!("  cjc parity <file.cjc>           Dual-executor parity check");
+    eprintln!("  cjc test <file.cjc>             Native test runner");
+    eprintln!("  cjc ci [path]                   Full CI diagnostic suite");
     eprintln!();
     eprintln!("Flags:");
     eprintln!("  --reproducible                  Enable reproducibility mode");

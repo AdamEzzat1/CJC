@@ -20,6 +20,8 @@ pub struct BenchArgs {
     pub warmup: usize,
     pub output: OutputMode,
     pub verbose: bool,
+    pub nogc_check: bool,
+    pub use_mir: bool,
 }
 
 impl Default for BenchArgs {
@@ -31,6 +33,8 @@ impl Default for BenchArgs {
             warmup: 1,
             output: OutputMode::Color,
             verbose: false,
+            nogc_check: false,
+            use_mir: false,
         }
     }
 }
@@ -52,6 +56,9 @@ pub fn parse_args(args: &[String]) -> BenchArgs {
                 i += 1;
                 if i < args.len() { ba.warmup = args[i].parse().unwrap_or(1); }
             }
+            "--nogc" => ba.nogc_check = true,
+            "--mir" => ba.use_mir = true,
+            "--eval" => ba.use_mir = false,
             "-v" | "--verbose" => ba.verbose = true,
             "--plain" => ba.output = OutputMode::Plain,
             "--json" => ba.output = OutputMode::Json,
@@ -91,6 +98,15 @@ pub fn run(args: &[String]) {
         let rendered = diags.render_all_color(&source, &filename, ba.output.use_color());
         eprint!("{}", rendered);
         process::exit(1);
+    }
+
+    // NoGC pre-check
+    if ba.nogc_check {
+        if let Err(e) = cjc_mir_exec::verify_nogc(&program) {
+            eprintln!("error: NoGC verification failed — refusing to benchmark");
+            eprintln!("{}", e);
+            process::exit(1);
+        }
     }
 
     eprintln!("{} Benchmarking `{}` ({} warmup + {} measured runs, seed={})",

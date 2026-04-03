@@ -18,6 +18,7 @@ pub struct ProofArgs {
     pub file: PathBuf,
     pub runs: usize,
     pub seed: u64,
+    pub seeds: Vec<u64>,
     pub output: OutputMode,
     pub verbose: bool,
 }
@@ -28,6 +29,7 @@ impl Default for ProofArgs {
             file: PathBuf::new(),
             runs: 3,
             seed: 42,
+            seeds: Vec::new(),
             output: OutputMode::Color,
             verbose: false,
         }
@@ -55,6 +57,14 @@ pub fn parse_args(args: &[String]) -> ProofArgs {
                         eprintln!("error: --seed requires a numeric argument");
                         process::exit(1);
                     });
+                }
+            }
+            "--seeds" => {
+                i += 1;
+                if i < args.len() {
+                    pa.seeds = args[i].split(',')
+                        .filter_map(|s| s.trim().parse::<u64>().ok())
+                        .collect();
                 }
             }
             "-v" | "--verbose" => pa.verbose = true,
@@ -97,14 +107,23 @@ pub fn run(args: &[String]) {
 
     let filename = pa.file.display().to_string();
 
-    eprintln!("{} Running {} iterations with seed {}...",
+    // Determine which seeds to test
+    let seeds = if pa.seeds.is_empty() {
+        vec![pa.seed]
+    } else {
+        pa.seeds.clone()
+    };
+
+    eprintln!("{} Running {} iterations with seed{} {}...",
         output::colorize(pa.output, output::BOLD_CYAN, "[proof]"),
         pa.runs,
-        pa.seed
+        if seeds.len() > 1 { "s" } else { "" },
+        seeds.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(",")
     );
 
     let mut results: Vec<RunResult> = Vec::new();
 
+    for &current_seed in &seeds {
     for run_idx in 0..pa.runs {
         let (program, diags) = cjc_parser::parse_source(&source);
         if diags.has_errors() {
@@ -114,7 +133,7 @@ pub fn run(args: &[String]) {
             process::exit(1);
         }
 
-        let mut interpreter = cjc_eval::Interpreter::new(pa.seed);
+        let mut interpreter = cjc_eval::Interpreter::new(current_seed);
         let exit_ok = match interpreter.exec(&program) {
             Ok(_) => true,
             Err(e) => {
@@ -139,7 +158,8 @@ pub fn run(args: &[String]) {
                 exit_ok
             );
         }
-    }
+    } // end for run_idx
+    } // end for current_seed in seeds
 
     // Compare all runs against the first
     let mut stdout_identical = true;
@@ -236,6 +256,7 @@ pub fn print_help() {
     eprintln!("Flags:");
     eprintln!("  -n, --runs <N>      Number of iterations (default: 3)");
     eprintln!("  --seed <N>          RNG seed (default: 42)");
+    eprintln!("  --seeds <N,M,...>   Test multiple seeds (comma-separated)");
     eprintln!("  -v, --verbose       Show per-run details and divergence info");
     eprintln!("  --plain             Plain text output");
     eprintln!("  --json              JSON output");

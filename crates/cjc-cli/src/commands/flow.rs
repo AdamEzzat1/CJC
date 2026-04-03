@@ -51,7 +51,7 @@ impl AggOp {
 
     fn label(&self) -> &'static str {
         match self {
-            AggOp::Sum => "sum",
+            AggOp::Sum => "sum (Kahan)",
             AggOp::Mean => "mean",
             AggOp::Min => "min",
             AggOp::Max => "max",
