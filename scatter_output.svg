@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 800 600">
+  <rect x="0.00" y="0.00" width="800.00" height="600.00" fill="#ffffff"/>
+  <rect x="70.00" y="45.00" width="705.00" height="495.00" fill="#fcfcfc"/>
+  <line x1="70.00" y1="540.00" x2="775.00" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="469.29" x2="775.00" y2="469.29" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="398.57" x2="775.00" y2="398.57" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="327.86" x2="775.00" y2="327.86" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="257.14" x2="775.00" y2="257.14" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="186.43" x2="775.00" y2="186.43" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="115.71" x2="775.00" y2="115.71" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="45.00" x2="775.00" y2="45.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="45.00" x2="70.00" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="170.71" y1="45.00" x2="170.71" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="271.43" y1="45.00" x2="271.43" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="372.14" y1="45.00" x2="372.14" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="472.86" y1="45.00" x2="472.86" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="573.57" y1="45.00" x2="573.57" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="674.29" y1="45.00" x2="674.29" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="775.00" y1="45.00" x2="775.00" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="540.00" x2="775.00" y2="540.00" stroke="#505050" stroke-width="1.00"/>
+  <line x1="70.00" y1="45.00" x2="70.00" y2="540.00" stroke="#505050" stroke-width="1.00"/>
+  <line x1="70.00" y1="540.00" x2="70.00" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="70.00" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">1</text>
+  <line x1="170.71" y1="540.00" x2="170.71" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="170.71" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">2</text>
+  <line x1="271.43" y1="540.00" x2="271.43" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="271.43" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">3</text>
+  <line x1="372.14" y1="540.00" x2="372.14" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="372.14" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">4</text>
+  <line x1="472.86" y1="540.00" x2="472.86" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="472.86" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">5</text>
+  <line x1="573.57" y1="540.00" x2="573.57" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="573.57" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">6</text>
+  <line x1="674.29" y1="540.00" x2="674.29" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="674.29" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">7</text>
+  <line x1="775.00" y1="540.00" x2="775.00" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="775.00" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">8</text>
+  <line x1="65.00" y1="540.00" x2="70.00" y2="540.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="543.50" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">2</text>
+  <line x1="65.00" y1="469.29" x2="70.00" y2="469.29" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="472.79" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">4</text>
+  <line x1="65.00" y1="398.57" x2="70.00" y2="398.57" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="402.07" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">6</text>
+  <line x1="65.00" y1="327.86" x2="70.00" y2="327.86" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="331.36" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">8</text>
+  <line x1="65.00" y1="257.14" x2="70.00" y2="257.14" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="260.64" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">10</text>
+  <line x1="65.00" y1="186.43" x2="70.00" y2="186.43" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="189.93" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">12</text>
+  <line x1="65.00" y1="115.71" x2="70.00" y2="115.71" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="119.21" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">14</text>
+  <line x1="65.00" y1="45.00" x2="70.00" y2="45.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="48.50" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">16</text>
+  <circle cx="70.00" cy="529.39" r="4.00" fill="#1f77b4"/>
+  <circle cx="170.71" cy="465.75" r="4.00" fill="#1f77b4"/>
+  <circle cx="271.43" cy="405.64" r="4.00" fill="#1f77b4"/>
+  <circle cx="372.14" cy="320.79" r="4.00" fill="#1f77b4"/>
+  <circle cx="472.86" cy="267.75" r="4.00" fill="#1f77b4"/>
+  <circle cx="573.57" cy="182.89" r="4.00" fill="#1f77b4"/>
+  <circle cx="674.29" cy="115.71" r="4.00" fill="#1f77b4"/>
+  <circle cx="775.00" cy="52.07" r="4.00" fill="#1f77b4"/>
+  <rect x="677.00" y="51.00" width="92.00" height="31.00" fill="rgba(252,252,252,0.85)"/>
+  <text x="765.00" y="65.00" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">y = 2.0x + 0.2</text>
+  <text x="765.00" y="79.00" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">R² = 0.9980</text>
+  <text x="422.50" y="35.00" font-size="16.0" fill="#323232" text-anchor="middle" font-family="sans-serif">Linear Growth</text>
+  <text x="422.50" y="595.00" font-size="12.0" fill="#323232" text-anchor="middle" font-family="sans-serif">Time (days)</text>
+  <text x="15.00" y="292.50" font-size="12.0" fill="#323232" text-anchor="middle" font-family="sans-serif" transform="rotate(-90.0,15.00,292.50)">Measurement</text>
+</svg>

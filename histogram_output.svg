@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 800 600">
+  <rect x="0.00" y="0.00" width="800.00" height="600.00" fill="#ffffff"/>
+  <rect x="70.00" y="45.00" width="705.00" height="495.00" fill="#fcfcfc"/>
+  <line x1="70.00" y1="540.00" x2="775.00" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="478.12" x2="775.00" y2="478.12" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="416.25" x2="775.00" y2="416.25" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="354.38" x2="775.00" y2="354.38" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="292.50" x2="775.00" y2="292.50" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="230.62" x2="775.00" y2="230.62" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="168.75" x2="775.00" y2="168.75" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="106.88" x2="775.00" y2="106.88" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="45.00" x2="775.00" y2="45.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="45.00" x2="70.00" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="148.33" y1="45.00" x2="148.33" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="226.67" y1="45.00" x2="226.67" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="305.00" y1="45.00" x2="305.00" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="383.33" y1="45.00" x2="383.33" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="461.67" y1="45.00" x2="461.67" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="540.00" y1="45.00" x2="540.00" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="618.33" y1="45.00" x2="618.33" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="696.67" y1="45.00" x2="696.67" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="775.00" y1="45.00" x2="775.00" y2="540.00" stroke="#e6e6e6" stroke-width="0.40"/>
+  <line x1="70.00" y1="540.00" x2="775.00" y2="540.00" stroke="#505050" stroke-width="1.00"/>
+  <line x1="70.00" y1="45.00" x2="70.00" y2="540.00" stroke="#505050" stroke-width="1.00"/>
+  <line x1="70.00" y1="540.00" x2="70.00" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="70.00" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">1</text>
+  <line x1="148.33" y1="540.00" x2="148.33" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="148.33" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">2</text>
+  <line x1="226.67" y1="540.00" x2="226.67" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="226.67" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">3</text>
+  <line x1="305.00" y1="540.00" x2="305.00" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="305.00" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">4</text>
+  <line x1="383.33" y1="540.00" x2="383.33" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="383.33" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">5</text>
+  <line x1="461.67" y1="540.00" x2="461.67" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="461.67" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">6</text>
+  <line x1="540.00" y1="540.00" x2="540.00" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="540.00" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">7</text>
+  <line x1="618.33" y1="540.00" x2="618.33" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="618.33" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">8</text>
+  <line x1="696.67" y1="540.00" x2="696.67" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="696.67" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">9</text>
+  <line x1="775.00" y1="540.00" x2="775.00" y2="545.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="775.00" y="557.00" font-size="10.0" fill="#323232" text-anchor="middle" font-family="sans-serif">10</text>
+  <line x1="65.00" y1="540.00" x2="70.00" y2="540.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="543.50" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">0</text>
+  <line x1="65.00" y1="478.12" x2="70.00" y2="478.12" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="481.62" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">0.500</text>
+  <line x1="65.00" y1="416.25" x2="70.00" y2="416.25" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="419.75" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">1</text>
+  <line x1="65.00" y1="354.38" x2="70.00" y2="354.38" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="357.88" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">1.50</text>
+  <line x1="65.00" y1="292.50" x2="70.00" y2="292.50" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="296.00" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">2</text>
+  <line x1="65.00" y1="230.62" x2="70.00" y2="230.62" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="234.12" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">2.50</text>
+  <line x1="65.00" y1="168.75" x2="70.00" y2="168.75" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="172.25" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">3</text>
+  <line x1="65.00" y1="106.88" x2="70.00" y2="106.88" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="110.38" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">3.50</text>
+  <line x1="65.00" y1="45.00" x2="70.00" y2="45.00" stroke="#505050" stroke-width="1.00"/>
+  <text x="61.00" y="48.50" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">4</text>
+  <rect x="85.67" y="416.25" width="78.33" height="123.75" fill="#1f77b4" stroke="#ffffff" stroke-width="1.00"/>
+  <rect x="164.00" y="168.75" width="78.33" height="371.25" fill="#1f77b4" stroke="#ffffff" stroke-width="1.00"/>
+  <rect x="242.33" y="168.75" width="78.33" height="371.25" fill="#1f77b4" stroke="#ffffff" stroke-width="1.00"/>
+  <rect x="320.67" y="45.00" width="78.33" height="495.00" fill="#1f77b4" stroke="#ffffff" stroke-width="1.00"/>
+  <rect x="399.00" y="45.00" width="78.33" height="495.00" fill="#1f77b4" stroke="#ffffff" stroke-width="1.00"/>
+  <rect x="477.33" y="168.75" width="78.33" height="371.25" fill="#1f77b4" stroke="#ffffff" stroke-width="1.00"/>
+  <rect x="555.67" y="416.25" width="78.33" height="123.75" fill="#1f77b4" stroke="#ffffff" stroke-width="1.00"/>
+  <rect x="634.00" y="416.25" width="78.33" height="123.75" fill="#1f77b4" stroke="#ffffff" stroke-width="1.00"/>
+  <rect x="707.00" y="51.00" width="62.00" height="18.00" fill="rgba(252,252,252,0.85)"/>
+  <text x="765.00" y="65.00" font-size="10.0" fill="#323232" text-anchor="end" font-family="sans-serif">p = 0.042</text>
+  <text x="422.50" y="35.00" font-size="16.0" fill="#323232" text-anchor="middle" font-family="sans-serif">Sample Distribution</text>
+  <text x="422.50" y="595.00" font-size="12.0" fill="#323232" text-anchor="middle" font-family="sans-serif">Value</text>
+  <text x="15.00" y="292.50" font-size="12.0" fill="#323232" text-anchor="middle" font-family="sans-serif" transform="rotate(-90.0,15.00,292.50)">Count</text>
+</svg>
