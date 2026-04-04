@@ -205,6 +205,7 @@ fn constant_fold_expr(expr: &mut MirExpr) {
         MirExprKind::IntLit(_)
         | MirExprKind::FloatLit(_)
         | MirExprKind::BoolLit(_)
+        | MirExprKind::NaLit
         | MirExprKind::StringLit(_)
         | MirExprKind::ByteStringLit(_)
         | MirExprKind::ByteCharLit(_)
@@ -513,6 +514,7 @@ fn is_pure_expr(expr: &MirExpr) -> bool {
         MirExprKind::IntLit(_)
         | MirExprKind::FloatLit(_)
         | MirExprKind::BoolLit(_)
+        | MirExprKind::NaLit
         | MirExprKind::StringLit(_)
         | MirExprKind::ByteStringLit(_)
         | MirExprKind::ByteCharLit(_)
@@ -694,6 +696,7 @@ fn collect_used_vars_expr(expr: &MirExpr, used: &mut BTreeSet<String>) {
         MirExprKind::IntLit(_)
         | MirExprKind::FloatLit(_)
         | MirExprKind::BoolLit(_)
+        | MirExprKind::NaLit
         | MirExprKind::StringLit(_)
         | MirExprKind::ByteStringLit(_)
         | MirExprKind::ByteCharLit(_)
@@ -907,6 +910,7 @@ fn expr_key(expr: &MirExpr) -> String {
         MirExprKind::IntLit(v) => format!("int:{v}"),
         MirExprKind::FloatLit(v) => format!("float:{}", v.to_bits()),
         MirExprKind::BoolLit(v) => format!("bool:{v}"),
+        MirExprKind::NaLit => "na".to_string(),
         MirExprKind::StringLit(s) => format!("str:{s}"),
         MirExprKind::Var(name) => format!("var:{name}"),
         MirExprKind::Binary { op, left, right } => {

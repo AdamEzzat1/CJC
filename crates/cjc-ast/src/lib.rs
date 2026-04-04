@@ -387,6 +387,8 @@ pub enum ExprKind {
     TensorLit { rows: Vec<Vec<Expr>> },
     /// Bool literal: `true`, `false`
     BoolLit(bool),
+    /// Missing value literal: `NA`
+    NaLit,
     /// Identifier: `x`, `foo`
     Ident(Ident),
     /// Binary operation: `a + b`
@@ -1150,6 +1152,7 @@ impl PrettyPrinter {
                 self.output.push_str(" |]");
             }
             ExprKind::BoolLit(b) => self.output.push_str(if *b { "true" } else { "false" }),
+            ExprKind::NaLit => self.output.push_str("NA"),
             ExprKind::Ident(id) => self.output.push_str(&id.name),
             ExprKind::Binary { op, left, right } => {
                 self.output.push('(');

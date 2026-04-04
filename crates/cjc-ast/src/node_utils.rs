@@ -28,6 +28,7 @@ impl Expr {
             | ExprKind::RawByteStringLit(_)
             | ExprKind::RegexLit { .. }
             | ExprKind::BoolLit(_)
+            | ExprKind::NaLit
             | ExprKind::Ident(_)
             | ExprKind::Col(_) => 0,
 
@@ -65,6 +66,7 @@ impl Expr {
                 | ExprKind::RawStringLit(_)
                 | ExprKind::RawByteStringLit(_)
                 | ExprKind::BoolLit(_)
+                | ExprKind::NaLit
                 | ExprKind::RegexLit { .. }
         )
     }

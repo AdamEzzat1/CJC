@@ -2178,7 +2178,7 @@ fn collect_calls_in_expr(expr: &cjc_ast::Expr, calls: &mut Vec<(String, cjc_ast:
         }
         // Literals and identifiers — no calls to collect
         ExprKind::IntLit(_) | ExprKind::FloatLit(_) | ExprKind::StringLit(_)
-        | ExprKind::BoolLit(_) | ExprKind::Ident(_) | ExprKind::ByteStringLit(_)
+        | ExprKind::BoolLit(_) | ExprKind::NaLit | ExprKind::Ident(_) | ExprKind::ByteStringLit(_)
         | ExprKind::ByteCharLit(_) | ExprKind::RawStringLit(_) | ExprKind::RawByteStringLit(_)
         | ExprKind::RegexLit { .. } | ExprKind::Col(_) => {}
     }
@@ -2190,6 +2190,7 @@ fn is_const_expr(expr: &cjc_ast::Expr) -> bool {
         ExprKind::IntLit(_)
         | ExprKind::FloatLit(_)
         | ExprKind::BoolLit(_)
+        | ExprKind::NaLit
         | ExprKind::StringLit(_)
         | ExprKind::RawStringLit(_)
         | ExprKind::ByteCharLit(_) => true,
@@ -3017,6 +3018,8 @@ impl TypeChecker {
                 }
             }
             ExprKind::BoolLit(_) => Type::Bool,
+            // NA has no concrete type — treat as Void (compatible with any nullable context)
+            ExprKind::NaLit => Type::Void,
             ExprKind::Ident(id) => {
                 if let Some(ty) = self.env.lookup_var(&id.name) {
                     ty.clone()

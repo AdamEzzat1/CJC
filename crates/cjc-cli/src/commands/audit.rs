@@ -425,7 +425,8 @@ impl<'s> AuditVisitor<'s> {
             | cjc_ast::ExprKind::ByteStringLit(_) | cjc_ast::ExprKind::ByteCharLit(_)
             | cjc_ast::ExprKind::RawStringLit(_) | cjc_ast::ExprKind::RawByteStringLit(_)
             | cjc_ast::ExprKind::RegexLit { .. } | cjc_ast::ExprKind::Ident(_)
-            | cjc_ast::ExprKind::Col(_) => {}
+            | cjc_ast::ExprKind::Col(_)
+            | cjc_ast::ExprKind::NaLit => {}
         }
     }
 

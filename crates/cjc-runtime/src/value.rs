@@ -166,6 +166,10 @@ pub enum Value {
     /// Uses `Rc<RefCell<dyn Any>>` for interior mutability (measurement collapses state).
     /// Construction and method dispatch happen in cjc-eval and cjc-mir-exec.
     QuantumState(Rc<RefCell<dyn Any>>),
+    /// Missing value sentinel. Propagates through arithmetic (NA + x → NA),
+    /// compares unequal to everything including itself (NA == NA → false).
+    /// Test with `is_na()`. This is the only way to detect NA.
+    Na,
     Void,
 }
 
@@ -204,6 +208,7 @@ impl Value {
             Value::GroupedTidyView(_) => "GroupedTidyView",
             Value::VizorPlot(_) => "VizorPlot",
             Value::QuantumState(_) => "QuantumState",
+            Value::Na => "Na",
             Value::Void => "Void",
         }
     }
@@ -333,6 +338,7 @@ impl fmt::Display for Value {
             Value::GroupedTidyView(_) => write!(f, "<GroupedTidyView>"),
             Value::VizorPlot(_) => write!(f, "<VizorPlot>"),
             Value::QuantumState(_) => write!(f, "<QuantumState>"),
+            Value::Na => write!(f, "NA"),
             Value::Void => write!(f, "void"),
         }
     }

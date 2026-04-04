@@ -21,6 +21,7 @@ pub fn snap_to_json(value: &Value) -> Result<String, String> {
 fn write_json(value: &Value, buf: &mut String) -> Result<(), String> {
     match value {
         Value::Void => buf.push_str("null"),
+        Value::Na => buf.push_str("null"),
         Value::Bool(b) => buf.push_str(if *b { "true" } else { "false" }),
         Value::Int(n) => buf.push_str(&n.to_string()),
         Value::Float(f) => {

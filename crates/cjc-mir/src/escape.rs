@@ -207,6 +207,7 @@ fn classify_init_expr(expr: &MirExpr) -> InitKind {
         MirExprKind::IntLit(_)
         | MirExprKind::FloatLit(_)
         | MirExprKind::BoolLit(_)
+        | MirExprKind::NaLit
         | MirExprKind::ByteCharLit(_)
         | MirExprKind::Void => InitKind::Primitive,
 
@@ -397,6 +398,7 @@ fn collect_bindings_expr(expr: &MirExpr, ctx: &mut AnalysisCtx) {
         MirExprKind::IntLit(_)
         | MirExprKind::FloatLit(_)
         | MirExprKind::BoolLit(_)
+        | MirExprKind::NaLit
         | MirExprKind::StringLit(_)
         | MirExprKind::ByteStringLit(_)
         | MirExprKind::ByteCharLit(_)
@@ -643,6 +645,7 @@ fn walk_expr_for_escapes(expr: &MirExpr, ctx: &mut AnalysisCtx) {
         MirExprKind::IntLit(_)
         | MirExprKind::FloatLit(_)
         | MirExprKind::BoolLit(_)
+        | MirExprKind::NaLit
         | MirExprKind::StringLit(_)
         | MirExprKind::ByteStringLit(_)
         | MirExprKind::ByteCharLit(_)
@@ -822,6 +825,7 @@ fn collect_var_refs_inner(expr: &MirExpr, vars: &mut Vec<String>) {
         MirExprKind::IntLit(_)
         | MirExprKind::FloatLit(_)
         | MirExprKind::BoolLit(_)
+        | MirExprKind::NaLit
         | MirExprKind::StringLit(_)
         | MirExprKind::ByteStringLit(_)
         | MirExprKind::ByteCharLit(_)

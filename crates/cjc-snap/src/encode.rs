@@ -34,6 +34,7 @@ pub const TAG_SPARSE_CSR: u8 = 0x14;
 pub const TAG_CATEGORICAL: u8 = 0x15;
 pub const TAG_SCHEMA: u8 = 0x16;
 pub const TAG_DATAFRAME: u8 = 0x17;
+pub const TAG_NA: u8 = 0x18;
 
 /// Snap format magic bytes and version.
 pub const SNAP_MAGIC: &[u8; 4] = b"CJS\x01";
@@ -67,6 +68,9 @@ fn encode_value(value: &Value, buf: &mut Vec<u8>) {
     match value {
         Value::Void => {
             buf.push(TAG_VOID);
+        }
+        Value::Na => {
+            buf.push(TAG_NA);
         }
         Value::Int(v) => {
             buf.push(TAG_INT);

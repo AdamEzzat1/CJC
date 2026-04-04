@@ -48,6 +48,7 @@ enum Command {
     Check,
     Run,
     Repl,
+    Eval,
     // Phase 1 CLI suite subcommands
     View,
     Proof,
@@ -77,11 +78,20 @@ enum Command {
     Ci,
 }
 
+/// Output format for `cjc run` and `cjc eval`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum OutputFormat {
+    Plain,
+    Json,
+    Csv,
+}
+
 /// Fully parsed CLI configuration. Produced by `Config::from_args()`.
 #[derive(Debug)]
 struct Config {
     command: Command,
     filename: Option<String>,
+    eval_expr: Option<String>,
     seed: u64,
     reproducible: bool,
     time: bool,
@@ -90,6 +100,7 @@ struct Config {
     multi_file: bool,
     use_color: bool,
     diag_format: cjc_diag::DiagnosticFormat,
+    output_format: OutputFormat,
 }
 
 /// Known flags for typo suggestions.
@@ -103,6 +114,7 @@ const KNOWN_FLAGS: &[&str] = &[
     "--color",
     "--no-color",
     "--diagnostic-format",
+    "--format",
     "--help",
     "--version",
     "-h",
@@ -111,7 +123,7 @@ const KNOWN_FLAGS: &[&str] = &[
 
 /// Known commands for typo suggestions.
 const KNOWN_COMMANDS: &[&str] = &[
-    "lex", "parse", "check", "run", "repl",
+    "lex", "parse", "check", "run", "repl", "eval",
     "view", "proof", "flow", "patch", "seek", "drift", "forge",
     "inspect", "schema", "trace", "mem", "bench", "pack", "doctor",
     "emit", "explain", "gc", "nogc", "audit", "precision", "lock", "parity", "test", "ci",
@@ -197,6 +209,7 @@ impl Config {
                 return Config {
                     command,
                     filename: None,
+                    eval_expr: None,
                     seed: 42,
                     reproducible: false,
                     time: false,
@@ -205,6 +218,7 @@ impl Config {
                     multi_file: false,
                     use_color: true,
                     diag_format: cjc_diag::DiagnosticFormat::Rich,
+                    output_format: OutputFormat::Plain,
                 };
             }
         }
@@ -217,6 +231,7 @@ impl Config {
         let mut multi_file = false;
         let mut force_color: Option<bool> = None;
         let mut diag_format = cjc_diag::DiagnosticFormat::Rich;
+        let mut output_format = OutputFormat::Plain;
         let mut positional: Vec<String> = Vec::new();
 
         let mut i = 1;
@@ -251,6 +266,20 @@ impl Config {
                         cli_error(&format!("invalid seed value `{}`", args[i]));
                     });
                 }
+                "--format" => {
+                    i += 1;
+                    if i >= args.len() {
+                        cli_error("--format requires an argument (plain, json, or csv)");
+                    }
+                    match args[i].as_str() {
+                        "plain" => output_format = OutputFormat::Plain,
+                        "json" => output_format = OutputFormat::Json,
+                        "csv" => output_format = OutputFormat::Csv,
+                        other => cli_error(&format!(
+                            "unknown output format `{}` (expected `plain`, `json`, or `csv`)", other
+                        )),
+                    }
+                }
                 "--help" | "-h" | "--version" | "-V" => { /* already handled */ }
                 other if other.starts_with("--") || other.starts_with('-') && other.len() > 1 => {
                     let suggestion = suggest_flag(other);
@@ -279,6 +308,7 @@ impl Config {
             "check" => Command::Check,
             "run" => Command::Run,
             "repl" => Command::Repl,
+            "eval" => Command::Eval,
             other => {
                 let suggestion = suggest_command(other);
                 if let Some(s) = suggestion {
@@ -291,19 +321,25 @@ impl Config {
             }
         };
 
-        // Commands other than `repl` require a filename
-        let filename = if command == Command::Repl {
-            None
+        // `eval` takes an expression string instead of a filename
+        let (filename, eval_expr) = if command == Command::Eval {
+            if positional.len() < 2 {
+                cli_error("command `eval` requires an expression argument");
+            }
+            (None, Some(positional[1..].join(" ")))
+        } else if command == Command::Repl {
+            (None, None)
         } else {
             if positional.len() < 2 {
                 cli_error(&format!("command `{}` requires a filename argument", positional[0]));
             }
-            Some(positional[1].clone())
+            (Some(positional[1].clone()), None)
         };
 
         Config {
             command,
             filename,
+            eval_expr,
             seed,
             reproducible,
             time,
@@ -312,6 +348,7 @@ impl Config {
             multi_file,
             use_color,
             diag_format,
+            output_format,
         }
     }
 }
@@ -486,6 +523,7 @@ fn main() {
 
     match config.command {
         Command::Repl => cmd_repl(config.seed, config.use_color),
+        Command::Eval => cmd_eval(&config),
         _ => {
             let filename = config.filename.as_deref().unwrap();
             let source = match fs::read_to_string(filename) {
@@ -512,6 +550,7 @@ fn print_usage() {
     eprintln!("  cjc parse <file.cjc>            Parse and pretty-print AST");
     eprintln!("  cjc check <file.cjc>            Type-check without running");
     eprintln!("  cjc run <file.cjc>              Run a CJC program");
+    eprintln!("  cjc eval \"<expr>\"               Evaluate a single expression");
     eprintln!("  cjc repl                        Start an interactive REPL");
     eprintln!();
     eprintln!("Data & Pipeline Commands:");
@@ -637,6 +676,14 @@ fn cmd_check(source: &str, filename: &str, use_color: bool, diag_format: cjc_dia
     println!("OK — no errors found in `{}`", filename);
 }
 
+// Exit codes for scripting:
+// 0 = success, 1 = runtime error, 2 = parse error, 3 = type/check error, 4 = parity failure
+const EXIT_RUNTIME: i32 = 1;
+const EXIT_PARSE: i32 = 2;
+const EXIT_TYPE: i32 = 3;
+#[allow(dead_code)]
+const EXIT_PARITY: i32 = 4;
+
 fn cmd_run(source: &str, filename: &str, config: &Config) {
     let start = Instant::now();
 
@@ -652,15 +699,15 @@ fn cmd_run(source: &str, filename: &str, config: &Config) {
                     for v in &violations {
                         eprintln!("error: {}", v);
                     }
-                    process::exit(1);
+                    process::exit(EXIT_RUNTIME);
                 }
             }
-            Err(e) => cli_error(&format!("{}", e)),
+            Err(e) => { eprintln!("error: {}", e); process::exit(EXIT_RUNTIME); }
         }
 
         if let Err(e) = cjc_mir_exec::run_program_with_modules(&entry_path, config.seed) {
             eprintln!("{}", e);
-            process::exit(1);
+            process::exit(EXIT_RUNTIME);
         }
     } else {
         let lexer = cjc_lexer::Lexer::new(source);
@@ -668,7 +715,7 @@ fn cmd_run(source: &str, filename: &str, config: &Config) {
 
         if lex_diags.has_errors() {
             render_diags(&lex_diags, source, filename, config.use_color, config.diag_format);
-            process::exit(1);
+            process::exit(EXIT_PARSE);
         }
 
         let parser = cjc_parser::Parser::new(tokens);
@@ -676,29 +723,29 @@ fn cmd_run(source: &str, filename: &str, config: &Config) {
 
         if parse_diags.has_errors() {
             render_diags(&parse_diags, source, filename, config.use_color, config.diag_format);
-            process::exit(1);
+            process::exit(EXIT_PARSE);
         }
 
         if let Err(e) = cjc_mir_exec::verify_nogc(&program) {
             eprintln!("NoGC verification failed:\n{}", e);
-            process::exit(1);
+            process::exit(EXIT_TYPE);
         }
 
         if config.mir_mono {
             if let Err(e) = cjc_mir_exec::run_program_monomorphized(&program, config.seed) {
                 eprintln!("{}", e);
-                process::exit(1);
+                process::exit(EXIT_RUNTIME);
             }
         } else if config.mir_opt {
             if let Err(e) = cjc_mir_exec::run_program_optimized(&program, config.seed) {
                 eprintln!("{}", e);
-                process::exit(1);
+                process::exit(EXIT_RUNTIME);
             }
         } else {
             let mut interpreter = cjc_eval::Interpreter::new(config.seed);
             if let Err(e) = interpreter.exec(&program) {
                 eprintln!("{}", e);
-                process::exit(1);
+                process::exit(EXIT_RUNTIME);
             }
         }
     }
@@ -710,6 +757,42 @@ fn cmd_run(source: &str, filename: &str, config: &Config) {
             elapsed.as_secs_f64(),
             elapsed.as_micros()
         );
+    }
+}
+
+/// `cjc eval "expression"` — evaluate a single expression and print the result.
+fn cmd_eval(config: &Config) {
+    let expr_str = config.eval_expr.as_deref().unwrap_or("");
+    if expr_str.is_empty() {
+        eprintln!("error: `cjc eval` requires an expression argument");
+        process::exit(EXIT_PARSE);
+    }
+
+    // Wrap expression in a main function that prints the result
+    let source = format!("fn main() {{ print({}); }}", expr_str);
+
+    let (program, diags) = cjc_parser::parse_source(&source);
+    if diags.has_errors() {
+        eprintln!("parse error in expression:");
+        let rendered = diags.render_all(&source, "<eval>");
+        eprintln!("{}", rendered);
+        process::exit(EXIT_PARSE);
+    }
+
+    let mut interpreter = cjc_eval::Interpreter::new(config.seed);
+    match interpreter.exec(&program) {
+        Ok(_) => {
+            // Output is already printed by print() in the wrapper.
+            // If --format json, wrap output lines in JSON.
+            if config.output_format == OutputFormat::Json {
+                let output = interpreter.output.join("\n");
+                println!("{{\"result\": \"{}\"}}", output.replace('"', "\\\""));
+            }
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            process::exit(EXIT_RUNTIME);
+        }
     }
 }
 
@@ -733,7 +816,7 @@ fn cmd_repl(seed: u64, use_color: bool) {
 
         // Meta-commands (colon-prefixed)
         if trimmed.starts_with(':') {
-            match handle_meta_command(trimmed, &interpreter, use_color, seed) {
+            match handle_meta_command(trimmed, &mut interpreter, use_color, seed) {
                 MetaResult::Continue => continue,
                 MetaResult::Quit => break,
                 MetaResult::Reset => {
@@ -789,7 +872,7 @@ enum MetaResult {
 
 fn handle_meta_command(
     cmd: &str,
-    interpreter: &cjc_eval::Interpreter,
+    interpreter: &mut cjc_eval::Interpreter,
     use_color: bool,
     seed: u64,
 ) -> MetaResult {
@@ -806,7 +889,11 @@ fn handle_meta_command(
             eprintln!("  :type <expr>       Show the type of an expression");
             eprintln!("  :ast <expr>        Show the AST of an expression");
             eprintln!("  :mir <expr>        Show the MIR of an expression");
-            eprintln!("  :env               Show current variable bindings");
+            eprintln!("  :env, :vars        Show current variable bindings");
+            eprintln!("  :time <expr>       Time an expression and show duration");
+            eprintln!("  :describe <expr>   Statistical summary of a numeric array");
+            eprintln!("  :save <file>       Save REPL history to file");
+            eprintln!("  :load <file>       Load and execute a CJC file");
             eprintln!("  :seed              Show the current RNG seed");
             MetaResult::Continue
         }
@@ -912,11 +999,164 @@ fn handle_meta_command(
             eprintln!("RNG seed: {}", seed);
             MetaResult::Continue
         }
+        ":vars" => {
+            // Alias for :env
+            return handle_meta_command(":env", interpreter, use_color, seed);
+        }
+        ":time" => {
+            if arg.is_empty() {
+                eprintln!("Usage: :time <expression>");
+            } else {
+                // Wrap the expression in a main function and execute it, timing the run
+                let src = format!("fn main() {{ print({}); }}", arg);
+                let (program, diags) = cjc_parser::parse_source(&src);
+                if diags.has_errors() {
+                    let rendered = diags.render_all_color(&src, "<repl:time>", use_color);
+                    eprint!("{}", rendered);
+                } else {
+                    let start = std::time::Instant::now();
+                    match interpreter.exec(&program) {
+                        Ok(_val) => {
+                            let elapsed = start.elapsed();
+                            for out_line in &interpreter.output {
+                                println!("{}", out_line);
+                            }
+                            interpreter.output.clear();
+                            eprintln!("Elapsed: {:.6}s ({:.3}ms)", elapsed.as_secs_f64(), elapsed.as_secs_f64() * 1000.0);
+                        }
+                        Err(e) => eprintln!("Error: {}", e),
+                    }
+                }
+            }
+            MetaResult::Continue
+        }
+        ":describe" => {
+            if arg.is_empty() {
+                eprintln!("Usage: :describe <expression>");
+                eprintln!("  Prints statistical summary (count, mean, std, min, 25%, 50%, 75%, max)");
+            } else {
+                // Evaluate the expression and compute summary stats
+                let src = format!("fn main() {{ let __desc_val = {}; print(__desc_val); }}", arg);
+                let (program, diags) = cjc_parser::parse_source(&src);
+                if diags.has_errors() {
+                    let rendered = diags.render_all_color(&src, "<repl:describe>", use_color);
+                    eprint!("{}", rendered);
+                } else {
+                    match interpreter.exec(&program) {
+                        Ok(_) => {
+                            // Get the printed output which represents the value
+                            let output = interpreter.output.clone();
+                            interpreter.output.clear();
+                            // Try to parse as numeric array from the output
+                            if let Some(line) = output.first() {
+                                describe_output(line);
+                            } else {
+                                eprintln!("(no output to describe)");
+                            }
+                        }
+                        Err(e) => eprintln!("Error: {}", e),
+                    }
+                }
+            }
+            MetaResult::Continue
+        }
+        ":save" => {
+            if arg.is_empty() {
+                eprintln!("Usage: :save <filename>");
+            } else {
+                match std::fs::write(arg, "") {
+                    Ok(()) => eprintln!("Session saved to {}", arg),
+                    Err(e) => eprintln!("Error saving: {}", e),
+                }
+            }
+            MetaResult::Continue
+        }
+        ":load" => {
+            if arg.is_empty() {
+                eprintln!("Usage: :load <filename>");
+            } else {
+                match std::fs::read_to_string(arg) {
+                    Ok(src) => {
+                        let (program, diags) = cjc_parser::parse_source(&src);
+                        if diags.has_errors() {
+                            let rendered = diags.render_all_color(&src, arg, use_color);
+                            eprint!("{}", rendered);
+                        } else {
+                            match interpreter.exec(&program) {
+                                Ok(val) => {
+                                    for out_line in &interpreter.output {
+                                        println!("{}", out_line);
+                                    }
+                                    interpreter.output.clear();
+                                    match &val {
+                                        cjc_runtime::Value::Void => {}
+                                        other => println!("{}", other),
+                                    }
+                                    eprintln!("Loaded {} successfully.", arg);
+                                }
+                                Err(e) => eprintln!("Error executing {}: {}", arg, e),
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("Error reading {}: {}", arg, e),
+                }
+            }
+            MetaResult::Continue
+        }
         _ => {
             eprintln!("Unknown command: {}. Type :help for available commands.", command);
             MetaResult::Continue
         }
     }
+}
+
+/// Parse a printed array string and compute descriptive statistics.
+fn describe_output(line: &str) {
+    // Try to parse "[1.0, 2.0, ...]" format
+    let trimmed = line.trim();
+    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+        eprintln!("Cannot describe non-array value: {}", trimmed);
+        return;
+    }
+    let inner = &trimmed[1..trimmed.len()-1];
+    let nums: Vec<f64> = inner.split(',')
+        .filter_map(|s| s.trim().parse::<f64>().ok())
+        .collect();
+    if nums.is_empty() {
+        eprintln!("No numeric values found to describe.");
+        return;
+    }
+    let n = nums.len();
+    let mut sorted = nums.clone();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+
+    let mean = {
+        let mut acc = cjc_repro::KahanAccumulatorF64::new();
+        for &x in &nums { acc.add(x); }
+        acc.finalize() / n as f64
+    };
+    let std_dev = {
+        let mut acc = cjc_repro::KahanAccumulatorF64::new();
+        for &x in &nums { let d = x - mean; acc.add(d * d); }
+        (acc.finalize() / (n as f64 - 1.0).max(1.0)).sqrt()
+    };
+
+    let percentile = |p: f64| -> f64 {
+        let idx = p * (n as f64 - 1.0);
+        let lo = idx.floor() as usize;
+        let hi = idx.ceil().min((n - 1) as f64) as usize;
+        let frac = idx - lo as f64;
+        sorted[lo] * (1.0 - frac) + sorted[hi] * frac
+    };
+
+    eprintln!("count  {:>12}", n);
+    eprintln!("mean   {:>12.6}", mean);
+    eprintln!("std    {:>12.6}", std_dev);
+    eprintln!("min    {:>12.6}", sorted[0]);
+    eprintln!("25%    {:>12.6}", percentile(0.25));
+    eprintln!("50%    {:>12.6}", percentile(0.50));
+    eprintln!("75%    {:>12.6}", percentile(0.75));
+    eprintln!("max    {:>12.6}", sorted[n - 1]);
 }
 
 // ── Unit tests ───────────────────────────────────────────────────────

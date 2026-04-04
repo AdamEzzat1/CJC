@@ -1694,6 +1694,13 @@ impl Parser {
                     span: to_ast_span(tok.span),
                 })
             }
+            TokenKind::Na => {
+                let tok = self.advance().clone();
+                Ok(Expr {
+                    kind: ExprKind::NaLit,
+                    span: to_ast_span(tok.span),
+                })
+            }
             TokenKind::Ident => {
                 let ident = self.parse_ident()?;
                 Ok(Expr {

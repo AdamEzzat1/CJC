@@ -234,6 +234,7 @@ dependencies = [
  "cjc-mir-exec",
  "cjc-module",
  "cjc-parser",
+ "cjc-repro",
  "cjc-runtime",
  "cjc-snap",
  "cjc-types",

@@ -180,6 +180,7 @@ fn dump_expr_recursive(expr: &Expr, indent: usize, out: &mut String) {
         ExprKind::FloatLit(v) => out.push_str(&format!("{}FloatLit({})\n", pad, v)),
         ExprKind::StringLit(s) => out.push_str(&format!("{}StringLit(\"{}\")\n", pad, s)),
         ExprKind::BoolLit(b) => out.push_str(&format!("{}BoolLit({})\n", pad, b)),
+        ExprKind::NaLit => out.push_str(&format!("{}NaLit\n", pad)),
         ExprKind::Ident(id) => out.push_str(&format!("{}Ident({})\n", pad, id.name)),
         ExprKind::Binary { op, left, right } => {
             out.push_str(&format!("{}Binary({})\n", pad, op));

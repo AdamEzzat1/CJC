@@ -274,6 +274,7 @@ impl<'a> Monomorphizer<'a> {
             MirExprKind::IntLit(_)
             | MirExprKind::FloatLit(_)
             | MirExprKind::BoolLit(_)
+            | MirExprKind::NaLit
             | MirExprKind::StringLit(_)
             | MirExprKind::ByteStringLit(_)
             | MirExprKind::ByteCharLit(_)
@@ -449,6 +450,7 @@ fn infer_type_from_expr(expr: &MirExpr) -> Option<String> {
         MirExprKind::IntLit(_) => Some("i64".to_string()),
         MirExprKind::FloatLit(_) => Some("f64".to_string()),
         MirExprKind::BoolLit(_) => Some("bool".to_string()),
+        MirExprKind::NaLit => Some("Na".to_string()),
         MirExprKind::StringLit(_) => Some("String".to_string()),
         MirExprKind::ByteStringLit(_) => Some("ByteSlice".to_string()),
         MirExprKind::ByteCharLit(_) => Some("u8".to_string()),
@@ -638,6 +640,7 @@ fn substitute_expr(expr: &MirExpr, subst: &BTreeMap<String, String>) -> MirExpr 
         MirExprKind::IntLit(_)
         | MirExprKind::FloatLit(_)
         | MirExprKind::BoolLit(_)
+        | MirExprKind::NaLit
         | MirExprKind::StringLit(_)
         | MirExprKind::ByteStringLit(_)
         | MirExprKind::ByteCharLit(_)
@@ -847,6 +850,7 @@ fn rewrite_calls_in_expr(
         MirExprKind::IntLit(_)
         | MirExprKind::FloatLit(_)
         | MirExprKind::BoolLit(_)
+        | MirExprKind::NaLit
         | MirExprKind::StringLit(_)
         | MirExprKind::ByteStringLit(_)
         | MirExprKind::ByteCharLit(_)

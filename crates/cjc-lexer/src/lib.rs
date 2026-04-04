@@ -52,6 +52,7 @@ pub enum TokenKind {
     Const,
     Pub,
     Null,
+    Na,
     Underscore,
 
     // Operators
@@ -150,6 +151,7 @@ impl TokenKind {
                 | TokenKind::Pub
                 | TokenKind::True
                 | TokenKind::False
+                | TokenKind::Na
         )
     }
 
@@ -196,6 +198,7 @@ impl TokenKind {
             TokenKind::Const => "`const`",
             TokenKind::Pub => "`pub`",
             TokenKind::Null => "`null`",
+            TokenKind::Na => "`NA`",
             TokenKind::Underscore => "`_`",
             TokenKind::Plus => "`+`",
             TokenKind::Minus => "`-`",
@@ -1288,6 +1291,7 @@ impl<'a> Lexer<'a> {
             "const" => TokenKind::Const,
             "pub" => TokenKind::Pub,
             "null" => TokenKind::Null,
+            "NA" => TokenKind::Na,
             "true" => TokenKind::True,
             "false" => TokenKind::False,
             "_" => TokenKind::Underscore,

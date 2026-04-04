@@ -297,6 +297,150 @@ pub fn train_test_split(n: usize, test_fraction: f64, seed: u64) -> (Vec<usize>,
 }
 
 // ---------------------------------------------------------------------------
+// Bootstrap Resampling
+// ---------------------------------------------------------------------------
+
+/// Bootstrap confidence interval for a statistic (e.g., mean).
+/// Returns (point_estimate, ci_lower, ci_upper, standard_error).
+/// `stat_fn` is 0=mean, 1=median.
+pub fn bootstrap(data: &[f64], n_resamples: usize, stat_fn: usize, seed: u64) -> Result<(f64, f64, f64, f64), String> {
+    if data.is_empty() { return Err("bootstrap: empty data".into()); }
+    let n = data.len();
+
+    // Compute the statistic on original data
+    let point = compute_stat(data, stat_fn)?;
+
+    // Bootstrap resampling
+    let mut rng = cjc_repro::Rng::seeded(seed);
+    let mut stats = Vec::with_capacity(n_resamples);
+    let mut resample = Vec::with_capacity(n);
+
+    for _ in 0..n_resamples {
+        resample.clear();
+        for _ in 0..n {
+            let idx = (rng.next_u64() as usize) % n;
+            resample.push(data[idx]);
+        }
+        stats.push(compute_stat(&resample, stat_fn)?);
+    }
+
+    // Sort for percentile CI
+    stats.sort_by(|a, b| a.total_cmp(b));
+
+    let ci_lower = stats[(n_resamples as f64 * 0.025) as usize];
+    let ci_upper = stats[(n_resamples as f64 * 0.975).min((n_resamples - 1) as f64) as usize];
+
+    // Standard error
+    let mean_stats: f64 = {
+        let mut acc = cjc_repro::KahanAccumulatorF64::new();
+        for &s in &stats { acc.add(s); }
+        acc.finalize() / n_resamples as f64
+    };
+    let se = {
+        let mut acc = cjc_repro::KahanAccumulatorF64::new();
+        for &s in &stats { let d = s - mean_stats; acc.add(d * d); }
+        (acc.finalize() / (n_resamples as f64 - 1.0)).sqrt()
+    };
+
+    Ok((point, ci_lower, ci_upper, se))
+}
+
+fn compute_stat(data: &[f64], stat_fn: usize) -> Result<f64, String> {
+    match stat_fn {
+        0 => {
+            // Mean
+            let mut acc = cjc_repro::KahanAccumulatorF64::new();
+            for &x in data { acc.add(x); }
+            Ok(acc.finalize() / data.len() as f64)
+        }
+        1 => {
+            // Median
+            let mut sorted = data.to_vec();
+            sorted.sort_by(|a, b| a.total_cmp(b));
+            let n = sorted.len();
+            if n % 2 == 0 {
+                Ok((sorted[n/2 - 1] + sorted[n/2]) / 2.0)
+            } else {
+                Ok(sorted[n/2])
+            }
+        }
+        _ => Err(format!("bootstrap: unknown stat_fn {}", stat_fn)),
+    }
+}
+
+/// Permutation test: test whether two groups differ on a statistic.
+/// Returns (observed_diff, p_value).
+pub fn permutation_test(x: &[f64], y: &[f64], n_perms: usize, seed: u64) -> Result<(f64, f64), String> {
+    if x.is_empty() || y.is_empty() { return Err("permutation_test: empty group".into()); }
+
+    let nx = x.len();
+    let combined: Vec<f64> = x.iter().chain(y.iter()).copied().collect();
+    let n = combined.len();
+
+    // Observed difference of means
+    let mean_x = compute_stat(x, 0)?;
+    let mean_y = compute_stat(y, 0)?;
+    let observed = (mean_x - mean_y).abs();
+
+    // Permutation
+    let mut rng = cjc_repro::Rng::seeded(seed);
+    let mut count_extreme = 0usize;
+    let mut perm = combined.clone();
+
+    for _ in 0..n_perms {
+        // Fisher-Yates shuffle
+        for i in (1..n).rev() {
+            let j = (rng.next_u64() as usize) % (i + 1);
+            perm.swap(i, j);
+        }
+        let perm_mean_x = compute_stat(&perm[..nx], 0)?;
+        let perm_mean_y = compute_stat(&perm[nx..], 0)?;
+        if (perm_mean_x - perm_mean_y).abs() >= observed {
+            count_extreme += 1;
+        }
+    }
+
+    let p_value = count_extreme as f64 / n_perms as f64;
+    Ok((observed, p_value))
+}
+
+/// Stratified train/test split: maintains class proportions in both sets.
+/// `labels` is an array of integer class labels, `test_frac` is fraction for test set.
+/// Returns (train_indices, test_indices).
+pub fn stratified_split(labels: &[i64], test_frac: f64, seed: u64) -> (Vec<usize>, Vec<usize>) {
+    use std::collections::BTreeMap;
+
+    let n = labels.len();
+    // Group indices by label
+    let mut groups: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
+    for (i, &label) in labels.iter().enumerate() {
+        groups.entry(label).or_default().push(i);
+    }
+
+    let mut train = Vec::with_capacity(n);
+    let mut test = Vec::with_capacity(n);
+    let mut rng = cjc_repro::Rng::seeded(seed);
+
+    for (_label, mut indices) in groups {
+        // Shuffle indices within each stratum
+        let m = indices.len();
+        for i in (1..m).rev() {
+            let j = (rng.next_u64() as usize) % (i + 1);
+            indices.swap(i, j);
+        }
+        let n_test = ((m as f64 * test_frac).round() as usize).max(if m > 1 { 1 } else { 0 });
+        let n_test = n_test.min(m);
+        test.extend_from_slice(&indices[..n_test]);
+        train.extend_from_slice(&indices[n_test..]);
+    }
+
+    // Sort both for deterministic output order
+    train.sort();
+    test.sort();
+    (train, test)
+}
+
+// ---------------------------------------------------------------------------
 // Phase B4: ML Training Extensions
 // ---------------------------------------------------------------------------
 

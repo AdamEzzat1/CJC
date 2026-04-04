@@ -195,6 +195,7 @@ pub enum MirExprKind {
     RawByteStringLit(Vec<u8>),
     RegexLit { pattern: String, flags: String },
     TensorLit { rows: Vec<Vec<MirExpr>> },
+    NaLit,
     Var(String),
     Binary {
         op: BinOp,
@@ -543,6 +544,7 @@ impl HirToMir {
             HirExprKind::IntLit(v) => MirExprKind::IntLit(*v),
             HirExprKind::FloatLit(v) => MirExprKind::FloatLit(*v),
             HirExprKind::BoolLit(b) => MirExprKind::BoolLit(*b),
+            HirExprKind::NaLit => MirExprKind::NaLit,
             HirExprKind::StringLit(s) => MirExprKind::StringLit(s.clone()),
             HirExprKind::ByteStringLit(bytes) => MirExprKind::ByteStringLit(bytes.clone()),
             HirExprKind::ByteCharLit(b) => MirExprKind::ByteCharLit(*b),

@@ -909,6 +909,424 @@ fn invert_symmetric(a: &[f64], n: usize) -> Result<Vec<f64>, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Normality Tests
+// ---------------------------------------------------------------------------
+
+/// Result of a normality test.
+pub struct NormalityResult {
+    pub statistic: f64,
+    pub p_value: f64,
+}
+
+/// Jarque-Bera normality test.
+/// Tests whether data has skewness and kurtosis matching a normal distribution.
+/// JB = (n/6) * (S² + (K-3)²/4)
+pub fn jarque_bera(data: &[f64]) -> Result<NormalityResult, String> {
+    let n = data.len();
+    if n < 3 { return Err("jarque_bera: need at least 3 observations".into()); }
+    let nf = n as f64;
+
+    // Mean
+    let mut acc = KahanAccumulatorF64::new();
+    for &x in data { acc.add(x); }
+    let mean = acc.finalize() / nf;
+
+    // Central moments via Kahan
+    let mut m2_acc = KahanAccumulatorF64::new();
+    let mut m3_acc = KahanAccumulatorF64::new();
+    let mut m4_acc = KahanAccumulatorF64::new();
+    for &x in data {
+        let d = x - mean;
+        let d2 = d * d;
+        m2_acc.add(d2);
+        m3_acc.add(d2 * d);
+        m4_acc.add(d2 * d2);
+    }
+    let m2 = m2_acc.finalize() / nf;
+    let m3 = m3_acc.finalize() / nf;
+    let m4 = m4_acc.finalize() / nf;
+
+    if m2 == 0.0 { return Err("jarque_bera: zero variance".into()); }
+
+    let skewness = m3 / m2.powf(1.5);
+    let kurtosis = m4 / (m2 * m2);
+
+    let jb = (nf / 6.0) * (skewness * skewness + (kurtosis - 3.0).powi(2) / 4.0);
+
+    // p-value from chi-squared distribution with 2 degrees of freedom
+    // P(X > jb) = exp(-jb/2) for chi2(2)
+    let p_value = (-jb / 2.0).exp();
+
+    Ok(NormalityResult { statistic: jb, p_value })
+}
+
+/// Anderson-Darling test for normality.
+/// Compares the empirical CDF to a normal CDF.
+pub fn anderson_darling(data: &[f64]) -> Result<NormalityResult, String> {
+    let n = data.len();
+    if n < 8 { return Err("anderson_darling: need at least 8 observations".into()); }
+    let nf = n as f64;
+
+    // Mean and std
+    let mut acc = KahanAccumulatorF64::new();
+    for &x in data { acc.add(x); }
+    let mean = acc.finalize() / nf;
+    let mut var_acc = KahanAccumulatorF64::new();
+    for &x in data { let d = x - mean; var_acc.add(d * d); }
+    let std = (var_acc.finalize() / (nf - 1.0)).sqrt();
+    if std == 0.0 { return Err("anderson_darling: zero standard deviation".into()); }
+
+    // Sort and standardize
+    let mut sorted = data.to_vec();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let z: Vec<f64> = sorted.iter().map(|&x| (x - mean) / std).collect();
+
+    // A² statistic
+    let mut a2_acc = KahanAccumulatorF64::new();
+    for i in 0..n {
+        let phi_zi = normal_cdf(z[i]);
+        let phi_zn = normal_cdf(z[n - 1 - i]);
+        // Clamp to avoid log(0)
+        let p1 = phi_zi.max(1e-15).min(1.0 - 1e-15);
+        let p2 = phi_zn.max(1e-15).min(1.0 - 1e-15);
+        let term = (2.0 * (i as f64) + 1.0) * (p1.ln() + (1.0 - p2).ln());
+        a2_acc.add(term);
+    }
+    let a2 = -nf - a2_acc.finalize() / nf;
+
+    // Adjusted statistic
+    let a2_star = a2 * (1.0 + 0.75 / nf + 2.25 / (nf * nf));
+
+    // Approximate p-value using D'Agostino & Stephens (1986) table
+    let p_value = if a2_star >= 1.0359 { 0.0 }      // < 0.005
+        else if a2_star >= 0.8737 { 0.01 }
+        else if a2_star >= 0.6305 { 0.025 }
+        else if a2_star >= 0.5091 { 0.05 }
+        else if a2_star >= 0.3565 { 0.10 }
+        else if a2_star >= 0.2006 { 0.25 }
+        else { 0.50 };  // > 0.25
+
+    Ok(NormalityResult { statistic: a2_star, p_value })
+}
+
+// normal_cdf is already imported from crate::distributions at the top of this file.
+
+/// Kolmogorov-Smirnov one-sample test for normality.
+/// Compares empirical distribution to a standard normal.
+pub fn ks_test_normal(data: &[f64]) -> Result<NormalityResult, String> {
+    let n = data.len();
+    if n < 5 { return Err("ks_test: need at least 5 observations".into()); }
+    let nf = n as f64;
+
+    // Standardize
+    let mut acc = KahanAccumulatorF64::new();
+    for &x in data { acc.add(x); }
+    let mean = acc.finalize() / nf;
+    let mut var_acc = KahanAccumulatorF64::new();
+    for &x in data { let d = x - mean; var_acc.add(d * d); }
+    let std = (var_acc.finalize() / (nf - 1.0)).sqrt();
+    if std == 0.0 { return Err("ks_test: zero standard deviation".into()); }
+
+    let mut sorted = data.to_vec();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+
+    let mut d_max = 0.0f64;
+    for i in 0..n {
+        let z = (sorted[i] - mean) / std;
+        let f_z = normal_cdf(z);
+        let d_plus = ((i + 1) as f64 / nf - f_z).abs();
+        let d_minus = (f_z - i as f64 / nf).abs();
+        d_max = d_max.max(d_plus).max(d_minus);
+    }
+
+    // Approximate p-value using Kolmogorov distribution
+    // P(D > d) ≈ 2 * sum_{k=1}^{inf} (-1)^{k+1} * exp(-2k²n*d²)
+    let nd2 = nf * d_max * d_max;
+    let mut p_value = 0.0;
+    for k in 1..=100 {
+        let kf = k as f64;
+        let sign = if k % 2 == 1 { 1.0 } else { -1.0 };
+        let term = sign * (-2.0 * kf * kf * nd2).exp();
+        p_value += term;
+        if term.abs() < 1e-15 { break; }
+    }
+    let p_value = (2.0 * p_value).max(0.0).min(1.0);
+
+    Ok(NormalityResult { statistic: d_max, p_value })
+}
+
+// ---------------------------------------------------------------------------
+// Effect Sizes
+// ---------------------------------------------------------------------------
+
+/// Cohen's d: standardized difference between two group means.
+pub fn cohens_d(x: &[f64], y: &[f64]) -> Result<f64, String> {
+    if x.len() < 2 || y.len() < 2 {
+        return Err("cohens_d: need at least 2 observations per group".into());
+    }
+
+    let mean_x = kahan_mean(x);
+    let mean_y = kahan_mean(y);
+    let var_x = kahan_var(x, mean_x);
+    let var_y = kahan_var(y, mean_y);
+
+    let nx = x.len() as f64;
+    let ny = y.len() as f64;
+
+    // Pooled standard deviation
+    let sp = (((nx - 1.0) * var_x + (ny - 1.0) * var_y) / (nx + ny - 2.0)).sqrt();
+    if sp == 0.0 { return Ok(0.0); }
+
+    Ok((mean_x - mean_y) / sp)
+}
+
+/// Eta-squared: proportion of variance explained by group membership.
+/// Input: array of groups (each is a slice of f64).
+pub fn eta_squared(groups: &[&[f64]]) -> Result<f64, String> {
+    if groups.len() < 2 { return Err("eta_squared: need at least 2 groups".into()); }
+
+    let mut grand_acc = KahanAccumulatorF64::new();
+    let mut total_n = 0usize;
+    for g in groups {
+        for &x in *g { grand_acc.add(x); total_n += 1; }
+    }
+    if total_n == 0 { return Err("eta_squared: no observations".into()); }
+    let grand_mean = grand_acc.finalize() / total_n as f64;
+
+    // SS_between and SS_total
+    let mut ss_between = KahanAccumulatorF64::new();
+    let mut ss_total = KahanAccumulatorF64::new();
+    for g in groups {
+        let gm = kahan_mean(g);
+        let ni = g.len() as f64;
+        ss_between.add(ni * (gm - grand_mean).powi(2));
+        for &x in *g {
+            ss_total.add((x - grand_mean).powi(2));
+        }
+    }
+
+    let ss_t = ss_total.finalize();
+    if ss_t == 0.0 { return Ok(0.0); }
+
+    Ok(ss_between.finalize() / ss_t)
+}
+
+/// Cramér's V: association between two categorical variables.
+/// Input: contingency table as flat row-major array with dimensions r x c.
+pub fn cramers_v(table: &[f64], nrows: usize, ncols: usize) -> Result<f64, String> {
+    if table.len() != nrows * ncols {
+        return Err(format!("cramers_v: table size {} != {}x{}", table.len(), nrows, ncols));
+    }
+    if nrows < 2 || ncols < 2 {
+        return Err("cramers_v: need at least 2x2 table".into());
+    }
+
+    // Row sums, col sums, total
+    let mut row_sums = vec![0.0; nrows];
+    let mut col_sums = vec![0.0; ncols];
+    let mut total = 0.0;
+    for r in 0..nrows {
+        for c in 0..ncols {
+            let v = table[r * ncols + c];
+            row_sums[r] += v;
+            col_sums[c] += v;
+            total += v;
+        }
+    }
+    if total == 0.0 { return Err("cramers_v: empty table".into()); }
+
+    // Chi-squared statistic
+    let mut chi2 = KahanAccumulatorF64::new();
+    for r in 0..nrows {
+        for c in 0..ncols {
+            let expected = row_sums[r] * col_sums[c] / total;
+            if expected > 0.0 {
+                let diff = table[r * ncols + c] - expected;
+                chi2.add(diff * diff / expected);
+            }
+        }
+    }
+
+    let k = (nrows.min(ncols) - 1) as f64;
+    if k == 0.0 { return Ok(0.0); }
+
+    Ok((chi2.finalize() / (total * k)).sqrt())
+}
+
+/// Levene's test for equality of variances across groups.
+pub fn levene_test(groups: &[&[f64]]) -> Result<(f64, f64), String> {
+    if groups.len() < 2 { return Err("levene_test: need at least 2 groups".into()); }
+    let k = groups.len();
+    let mut total_n = 0usize;
+
+    // Compute |x_ij - median_i| for each group
+    let mut z_groups: Vec<Vec<f64>> = Vec::with_capacity(k);
+    for g in groups {
+        if g.is_empty() { return Err("levene_test: empty group".into()); }
+        let mut sorted = g.to_vec();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        let med = if sorted.len() % 2 == 0 {
+            (sorted[sorted.len()/2 - 1] + sorted[sorted.len()/2]) / 2.0
+        } else {
+            sorted[sorted.len()/2]
+        };
+        let z: Vec<f64> = g.iter().map(|&x| (x - med).abs()).collect();
+        total_n += z.len();
+        z_groups.push(z);
+    }
+
+    // Now do one-way ANOVA on the z values
+    let z_refs: Vec<&[f64]> = z_groups.iter().map(|v| v.as_slice()).collect();
+    let anova = anova_oneway(&z_refs)?;
+    Ok((anova.f_statistic, anova.p_value))
+}
+
+/// Bartlett's test for equality of variances.
+pub fn bartlett_test(groups: &[&[f64]]) -> Result<(f64, f64), String> {
+    if groups.len() < 2 { return Err("bartlett_test: need at least 2 groups".into()); }
+    let k = groups.len();
+
+    let mut vars = Vec::with_capacity(k);
+    let mut ns = Vec::with_capacity(k);
+    let mut total_n = 0usize;
+
+    for g in groups {
+        let n = g.len();
+        if n < 2 { return Err("bartlett_test: each group needs at least 2 observations".into()); }
+        let m = kahan_mean(g);
+        let v = kahan_var(g, m);
+        vars.push(v);
+        ns.push(n);
+        total_n += n;
+    }
+
+    let nk = total_n - k; // total df
+    let nkf = nk as f64;
+
+    // Pooled variance
+    let mut sp2_acc = KahanAccumulatorF64::new();
+    for i in 0..k {
+        sp2_acc.add((ns[i] as f64 - 1.0) * vars[i]);
+    }
+    let sp2 = sp2_acc.finalize() / nkf;
+    if sp2 == 0.0 { return Err("bartlett_test: zero pooled variance".into()); }
+
+    // Bartlett statistic
+    let mut num_acc = KahanAccumulatorF64::new();
+    let mut denom_acc = KahanAccumulatorF64::new();
+    for i in 0..k {
+        let ni_m1 = ns[i] as f64 - 1.0;
+        num_acc.add(ni_m1 * (vars[i] / sp2).max(1e-300).ln());
+        denom_acc.add(1.0 / ni_m1);
+    }
+    let t = nkf * sp2.ln() - num_acc.finalize();
+    let c = 1.0 + (1.0 / (3.0 * (k as f64 - 1.0))) * (denom_acc.finalize() - 1.0 / nkf);
+    let bartlett = t / c;
+
+    // p-value from chi2 with k-1 df (approximate using gamma)
+    let df = (k - 1) as f64;
+    let p_value = chi2_survival(bartlett, df);
+
+    Ok((bartlett, p_value))
+}
+
+// Helper: chi-squared survival function P(X > x) for given df.
+// Uses the regularized incomplete gamma function approximation.
+fn chi2_survival(x: f64, df: f64) -> f64 {
+    if x <= 0.0 { return 1.0; }
+    // For integer df, use series expansion of lower incomplete gamma
+    let a = df / 2.0;
+    let z = x / 2.0;
+    // P(X <= x) = regularized_gamma_p(a, z)
+    // P(X > x) = 1 - P(X <= x)
+    1.0 - regularized_gamma_p(a, z)
+}
+
+fn regularized_gamma_p(a: f64, x: f64) -> f64 {
+    if x < a + 1.0 {
+        // Series expansion
+        gamma_series(a, x)
+    } else {
+        // Continued fraction
+        1.0 - gamma_cf(a, x)
+    }
+}
+
+fn gamma_series(a: f64, x: f64) -> f64 {
+    let ln_gamma_a = ln_gamma(a);
+    let mut sum = 1.0 / a;
+    let mut term = 1.0 / a;
+    for n in 1..200 {
+        term *= x / (a + n as f64);
+        sum += term;
+        if term.abs() < sum.abs() * 1e-15 { break; }
+    }
+    sum * (-x + a * x.ln() - ln_gamma_a).exp()
+}
+
+fn gamma_cf(a: f64, x: f64) -> f64 {
+    let ln_gamma_a = ln_gamma(a);
+    let mut f = 1e-30;
+    let mut c = 1e-30;
+    let mut d = 1.0 / (x + 1.0 - a);
+    f = d;
+    for n in 1..200 {
+        let an = -(n as f64) * (n as f64 - a);
+        let bn = x + 2.0 * n as f64 + 1.0 - a;
+        d = bn + an * d;
+        if d.abs() < 1e-30 { d = 1e-30; }
+        c = bn + an / c;
+        if c.abs() < 1e-30 { c = 1e-30; }
+        d = 1.0 / d;
+        let delta = d * c;
+        f *= delta;
+        if (delta - 1.0).abs() < 1e-15 { break; }
+    }
+    f * (-x + a * x.ln() - ln_gamma_a).exp()
+}
+
+/// Stirling's approximation for ln(Gamma(x)).
+fn ln_gamma(x: f64) -> f64 {
+    // Lanczos approximation (g=7, n=9)
+    let coeffs = [
+        0.99999999999980993,
+        676.5203681218851,
+        -1259.1392167224028,
+        771.32342877765313,
+        -176.61502916214059,
+        12.507343278686905,
+        -0.13857109526572012,
+        9.9843695780195716e-6,
+        1.5056327351493116e-7,
+    ];
+    if x < 0.5 {
+        let s = std::f64::consts::PI / (std::f64::consts::PI * x).sin();
+        return s.abs().ln() - ln_gamma(1.0 - x);
+    }
+    let x = x - 1.0;
+    let mut ag = coeffs[0];
+    for i in 1..9 {
+        ag += coeffs[i] / (x + i as f64);
+    }
+    let t = x + 7.5;
+    0.5 * (2.0 * std::f64::consts::PI).ln() + (x + 0.5) * t.ln() - t + ag.ln()
+}
+
+// Kahan-mean helper (used by effect size functions).
+fn kahan_mean(data: &[f64]) -> f64 {
+    let mut acc = KahanAccumulatorF64::new();
+    for &x in data { acc.add(x); }
+    acc.finalize() / data.len() as f64
+}
+
+// Kahan-variance helper (given mean).
+fn kahan_var(data: &[f64], mean: f64) -> f64 {
+    let mut acc = KahanAccumulatorF64::new();
+    for &x in data { let d = x - mean; acc.add(d * d); }
+    acc.finalize() / (data.len() as f64 - 1.0)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

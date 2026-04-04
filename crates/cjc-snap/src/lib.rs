@@ -156,7 +156,7 @@ pub fn restore_v2(blob: &SnapBlob) -> Result<Value, SnapError> {
 /// GradGraph, OptimizerState, etc.) that cannot be meaningfully serialized.
 pub fn is_snappable(value: &Value) -> bool {
     match value {
-        Value::Void | Value::Int(_) | Value::Float(_) | Value::Bool(_)
+        Value::Void | Value::Na | Value::Int(_) | Value::Float(_) | Value::Bool(_)
         | Value::String(_) | Value::U8(_) | Value::Bytes(_)
         | Value::ByteSlice(_) | Value::StrView(_) | Value::Bf16(_)
         | Value::F16(_) | Value::Complex(_) | Value::Tensor(_)

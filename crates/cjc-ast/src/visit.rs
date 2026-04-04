@@ -348,6 +348,7 @@ pub fn walk_expr<V: AstVisitor>(v: &mut V, expr: &Expr) {
             }
         }
         ExprKind::BoolLit(_) => {}
+        ExprKind::NaLit => {}
         ExprKind::Ident(ident) => v.visit_ident(ident),
         ExprKind::Binary { left, right, .. } => {
             v.visit_expr(left);

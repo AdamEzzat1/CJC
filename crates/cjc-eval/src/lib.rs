@@ -671,6 +671,7 @@ impl Interpreter {
                 Ok(Value::Tensor(Tensor::from_vec(data, &shape)?))
             }
             ExprKind::BoolLit(b) => Ok(Value::Bool(*b)),
+            ExprKind::NaLit => Ok(Value::Na),
 
             ExprKind::Ident(id) => {
                 // First check if it's a local variable
@@ -684,6 +685,14 @@ impl Interpreter {
                         variant: id.name.clone(),
                         fields: vec![],
                     });
+                }
+                // Check if it's a named function (function-as-value)
+                if let Some(fn_decl) = self.functions.get(&id.name) {
+                    return Ok(Value::Fn(cjc_runtime::FnValue {
+                        name: id.name.clone(),
+                        arity: fn_decl.params.len(),
+                        body_id: 0,
+                    }));
                 }
                 Err(EvalError::Runtime(format!(
                     "undefined variable `{}`",
@@ -985,10 +994,12 @@ impl Interpreter {
             let lv = self.eval_expr(left)?;
             return match lv {
                 Value::Bool(false) => Ok(Value::Bool(false)),
+                Value::Na => Ok(Value::Na),
                 Value::Bool(true) => {
                     let rv = self.eval_expr(right)?;
                     match rv {
                         Value::Bool(b) => Ok(Value::Bool(b)),
+                        Value::Na => Ok(Value::Na),
                         _ => Err(EvalError::Runtime(
                             "`&&` requires Bool operands".to_string(),
                         )),
@@ -1003,10 +1014,12 @@ impl Interpreter {
             let lv = self.eval_expr(left)?;
             return match lv {
                 Value::Bool(true) => Ok(Value::Bool(true)),
+                Value::Na => Ok(Value::Na),
                 Value::Bool(false) => {
                     let rv = self.eval_expr(right)?;
                     match rv {
                         Value::Bool(b) => Ok(Value::Bool(b)),
+                        Value::Na => Ok(Value::Na),
                         _ => Err(EvalError::Runtime(
                             "`||` requires Bool operands".to_string(),
                         )),
@@ -1051,6 +1064,13 @@ impl Interpreter {
         let rv = self.eval_expr(right)?;
 
         match (&lv, &rv) {
+            // NA propagation: any operation involving NA returns NA,
+            // except == and != which return false/true respectively (SQL semantics).
+            (Value::Na, _) | (_, Value::Na) => match op {
+                BinOp::Eq => Ok(Value::Bool(false)),
+                BinOp::Ne => Ok(Value::Bool(true)),
+                _ => Ok(Value::Na),
+            },
             // Int x Int
             (Value::Int(a), Value::Int(b)) => self.binop_int(op, *a, *b),
             // Float x Float
@@ -1172,6 +1192,13 @@ impl Interpreter {
     /// Used by CompoundAssign desugaring.
     fn eval_binary_values(&mut self, op: BinOp, lv: Value, rv: Value) -> EvalResult {
         match (&lv, &rv) {
+            // NA propagation: any operation involving NA returns NA,
+            // except == and != which return false/true respectively (SQL semantics).
+            (Value::Na, _) | (_, Value::Na) => match op {
+                BinOp::Eq => Ok(Value::Bool(false)),
+                BinOp::Ne => Ok(Value::Bool(true)),
+                _ => Ok(Value::Na),
+            },
             (Value::Int(a), Value::Int(b)) => self.binop_int(op, *a, *b),
             (Value::Float(a), Value::Float(b)) => self.binop_float(op, *a, *b),
             (Value::Int(a), Value::Float(b)) => self.binop_float(op, *a as f64, *b),
@@ -1609,6 +1636,17 @@ impl Interpreter {
                 | "array_flatten"
                 | "array_len"
                 | "array_slice"
+                | "array_map"
+                | "array_filter"
+                | "array_reduce"
+                | "array_any"
+                | "array_all"
+                | "array_find"
+                | "array_enumerate"
+                | "array_zip"
+                | "array_sort_by"
+                | "array_unique"
+                | "range"
                 // Phase C5: Map & Set constructors
                 | "Map.new"
                 | "Set.new"
@@ -1660,8 +1698,20 @@ impl Interpreter {
                 | "read_csv" | "write_csv"
                 | "dir_list" | "path_join"
                 // TidyView Phase 5: Preprocessing builtins
-                | "fillna" | "is_not_null" | "interpolate_linear" | "coalesce"
+                | "fillna" | "is_na" | "drop_na" | "is_not_null" | "interpolate_linear" | "coalesce"
                 | "cut" | "qcut" | "min_max_scale" | "robust_scale"
+                // Categorical / Factor builtins
+                | "as_factor" | "factor_levels" | "factor_codes"
+                | "fct_relevel" | "fct_lump" | "fct_count"
+                // Sampling & cross-validation
+                // Normality tests & effect sizes
+                | "jarque_bera" | "anderson_darling" | "ks_test"
+                | "cohens_d" | "eta_squared" | "cramers_v"
+                | "levene_test" | "bartlett_test"
+                // Sampling & cross-validation
+                | "latin_hypercube" | "sobol_sequence"
+                | "train_test_split" | "kfold_indices"
+                | "bootstrap" | "permutation_test" | "stratified_split"
                 // Parity: Bastion primitives (present in MIR-exec)
                 | "mean"
                 | "nth_element" | "median_fast" | "quantile_fast"
@@ -1991,6 +2041,180 @@ impl Interpreter {
                 std::fs::write(&path, &csv)
                     .map_err(|e| EvalError::Runtime(format!("write_csv: {}", e)))?;
                 return Ok(Value::Bool(true));
+            }
+            _ => {}
+        }
+
+        // ── Array higher-order functions (need interpreter to call closures) ──
+        match name {
+            "range" => {
+                let (start, end, step) = match args.len() {
+                    1 => (0i64, match &args[0] { Value::Int(n) => *n, _ => return Err(EvalError::Runtime("range: argument must be Int".into())) }, 1i64),
+                    2 => (match &args[0] { Value::Int(n) => *n, _ => return Err(EvalError::Runtime("range: start must be Int".into())) },
+                          match &args[1] { Value::Int(n) => *n, _ => return Err(EvalError::Runtime("range: end must be Int".into())) }, 1i64),
+                    3 => (match &args[0] { Value::Int(n) => *n, _ => return Err(EvalError::Runtime("range: start must be Int".into())) },
+                          match &args[1] { Value::Int(n) => *n, _ => return Err(EvalError::Runtime("range: end must be Int".into())) },
+                          match &args[2] { Value::Int(n) => *n, _ => return Err(EvalError::Runtime("range: step must be Int".into())) }),
+                    _ => return Err(EvalError::Runtime("range requires 1-3 arguments (end) or (start, end) or (start, end, step)".into())),
+                };
+                if step == 0 { return Err(EvalError::Runtime("range: step cannot be 0".into())); }
+                let mut result = Vec::new();
+                let mut i = start;
+                if step > 0 { while i < end { result.push(Value::Int(i)); i += step; } }
+                else { while i > end { result.push(Value::Int(i)); i += step; } }
+                return Ok(Value::Array(Rc::new(result)));
+            }
+            "array_map" => {
+                if args.len() != 2 { return Err(EvalError::Runtime("array_map requires 2 arguments (array, fn)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(EvalError::Runtime("array_map: first arg must be Array".into())) };
+                let f = args[1].clone();
+                let mut result = Vec::with_capacity(arr.len());
+                for item in arr.iter() {
+                    let mapped = match &f {
+                        Value::Fn(fv) => self.call_function(&fv.name, &[item.clone()])?,
+                        Value::Closure { fn_name, env, .. } => {
+                            let mut full = env.clone();
+                            full.push(item.clone());
+                            self.call_function(fn_name, &full)?
+                        }
+                        _ => return Err(EvalError::Runtime("array_map: second arg must be a function".into())),
+                    };
+                    result.push(mapped);
+                }
+                return Ok(Value::Array(Rc::new(result)));
+            }
+            "array_filter" => {
+                if args.len() != 2 { return Err(EvalError::Runtime("array_filter requires 2 arguments (array, fn)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(EvalError::Runtime("array_filter: first arg must be Array".into())) };
+                let f = args[1].clone();
+                let mut result = Vec::new();
+                for item in arr.iter() {
+                    let keep = match &f {
+                        Value::Fn(fv) => self.call_function(&fv.name, &[item.clone()])?,
+                        Value::Closure { fn_name, env, .. } => {
+                            let mut full = env.clone();
+                            full.push(item.clone());
+                            self.call_function(fn_name, &full)?
+                        }
+                        _ => return Err(EvalError::Runtime("array_filter: second arg must be a function".into())),
+                    };
+                    if matches!(keep, Value::Bool(true)) { result.push(item.clone()); }
+                }
+                return Ok(Value::Array(Rc::new(result)));
+            }
+            "array_reduce" => {
+                if args.len() != 3 { return Err(EvalError::Runtime("array_reduce requires 3 arguments (array, init, fn)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(EvalError::Runtime("array_reduce: first arg must be Array".into())) };
+                let mut acc = args[1].clone();
+                let f = args[2].clone();
+                for item in arr.iter() {
+                    acc = match &f {
+                        Value::Fn(fv) => self.call_function(&fv.name, &[acc, item.clone()])?,
+                        Value::Closure { fn_name, env, .. } => {
+                            let mut full = env.clone();
+                            full.push(acc);
+                            full.push(item.clone());
+                            self.call_function(fn_name, &full)?
+                        }
+                        _ => return Err(EvalError::Runtime("array_reduce: third arg must be a function".into())),
+                    };
+                }
+                return Ok(acc);
+            }
+            "array_any" => {
+                if args.len() != 2 { return Err(EvalError::Runtime("array_any requires 2 arguments (array, fn)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(EvalError::Runtime("array_any: first arg must be Array".into())) };
+                let f = args[1].clone();
+                for item in arr.iter() {
+                    let result = match &f {
+                        Value::Fn(fv) => self.call_function(&fv.name, &[item.clone()])?,
+                        Value::Closure { fn_name, env, .. } => { let mut full = env.clone(); full.push(item.clone()); self.call_function(fn_name, &full)? }
+                        _ => return Err(EvalError::Runtime("array_any: second arg must be a function".into())),
+                    };
+                    if matches!(result, Value::Bool(true)) { return Ok(Value::Bool(true)); }
+                }
+                return Ok(Value::Bool(false));
+            }
+            "array_all" => {
+                if args.len() != 2 { return Err(EvalError::Runtime("array_all requires 2 arguments (array, fn)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(EvalError::Runtime("array_all: first arg must be Array".into())) };
+                let f = args[1].clone();
+                for item in arr.iter() {
+                    let result = match &f {
+                        Value::Fn(fv) => self.call_function(&fv.name, &[item.clone()])?,
+                        Value::Closure { fn_name, env, .. } => { let mut full = env.clone(); full.push(item.clone()); self.call_function(fn_name, &full)? }
+                        _ => return Err(EvalError::Runtime("array_all: second arg must be a function".into())),
+                    };
+                    if matches!(result, Value::Bool(false)) { return Ok(Value::Bool(false)); }
+                }
+                return Ok(Value::Bool(true));
+            }
+            "array_find" => {
+                if args.len() != 2 { return Err(EvalError::Runtime("array_find requires 2 arguments (array, fn)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(EvalError::Runtime("array_find: first arg must be Array".into())) };
+                let f = args[1].clone();
+                for item in arr.iter() {
+                    let result = match &f {
+                        Value::Fn(fv) => self.call_function(&fv.name, &[item.clone()])?,
+                        Value::Closure { fn_name, env, .. } => { let mut full = env.clone(); full.push(item.clone()); self.call_function(fn_name, &full)? }
+                        _ => return Err(EvalError::Runtime("array_find: second arg must be a function".into())),
+                    };
+                    if matches!(result, Value::Bool(true)) { return Ok(item.clone()); }
+                }
+                return Ok(Value::Na);
+            }
+            "array_enumerate" => {
+                if args.len() != 1 { return Err(EvalError::Runtime("array_enumerate requires 1 argument (array)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(EvalError::Runtime("array_enumerate: arg must be Array".into())) };
+                let result: Vec<Value> = arr.iter().enumerate().map(|(i, v)| {
+                    Value::Tuple(Rc::new(vec![Value::Int(i as i64), v.clone()]))
+                }).collect();
+                return Ok(Value::Array(Rc::new(result)));
+            }
+            "array_zip" => {
+                if args.len() != 2 { return Err(EvalError::Runtime("array_zip requires 2 arguments (array_a, array_b)".into())); }
+                let a = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(EvalError::Runtime("array_zip: first arg must be Array".into())) };
+                let b = match &args[1] { Value::Array(b) => b.as_ref().clone(), _ => return Err(EvalError::Runtime("array_zip: second arg must be Array".into())) };
+                let len = a.len().min(b.len());
+                let result: Vec<Value> = (0..len).map(|i| {
+                    Value::Tuple(Rc::new(vec![a[i].clone(), b[i].clone()]))
+                }).collect();
+                return Ok(Value::Array(Rc::new(result)));
+            }
+            "array_sort_by" => {
+                if args.len() != 2 { return Err(EvalError::Runtime("array_sort_by requires 2 arguments (array, key_fn)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(EvalError::Runtime("array_sort_by: first arg must be Array".into())) };
+                let f = args[1].clone();
+                let mut keyed: Vec<(Value, Value)> = Vec::with_capacity(arr.len());
+                for item in arr.iter() {
+                    let key = match &f {
+                        Value::Fn(fv) => self.call_function(&fv.name, &[item.clone()])?,
+                        Value::Closure { fn_name, env, .. } => { let mut full = env.clone(); full.push(item.clone()); self.call_function(fn_name, &full)? }
+                        _ => return Err(EvalError::Runtime("array_sort_by: second arg must be a function".into())),
+                    };
+                    keyed.push((key, item.clone()));
+                }
+                keyed.sort_by(|(a, _), (b, _)| {
+                    match (a, b) {
+                        (Value::Int(x), Value::Int(y)) => x.cmp(y),
+                        (Value::Float(x), Value::Float(y)) => x.total_cmp(y),
+                        (Value::String(x), Value::String(y)) => x.cmp(y),
+                        _ => std::cmp::Ordering::Equal,
+                    }
+                });
+                let result: Vec<Value> = keyed.into_iter().map(|(_, v)| v).collect();
+                return Ok(Value::Array(Rc::new(result)));
+            }
+            "array_unique" => {
+                if args.len() != 1 { return Err(EvalError::Runtime("array_unique requires 1 argument (array)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(EvalError::Runtime("array_unique: arg must be Array".into())) };
+                let mut seen = std::collections::BTreeSet::new();
+                let mut result = Vec::new();
+                for item in arr.iter() {
+                    let key = format!("{}", item);
+                    if seen.insert(key) { result.push(item.clone()); }
+                }
+                return Ok(Value::Array(Rc::new(result)));
             }
             _ => {}
         }

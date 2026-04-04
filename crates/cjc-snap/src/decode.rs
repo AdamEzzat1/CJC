@@ -103,6 +103,7 @@ fn decode_value(cursor: &mut Cursor<'_>) -> Result<Value, SnapError> {
     let tag = cursor.read_byte()?;
     match tag {
         TAG_VOID => Ok(Value::Void),
+        TAG_NA => Ok(Value::Na),
 
         TAG_INT => {
             let v = cursor.read_i64_le()?;

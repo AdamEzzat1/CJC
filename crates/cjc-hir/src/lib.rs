@@ -215,6 +215,7 @@ pub enum HirExprKind {
     RawByteStringLit(Vec<u8>),
     RegexLit { pattern: String, flags: String },
     TensorLit { rows: Vec<Vec<HirExpr>> },
+    NaLit,
 
     // -- Variable reference --
     Var(String),
@@ -1235,6 +1236,7 @@ impl AstLowering {
                 HirExprKind::TensorLit { rows: hir_rows }
             }
             cjc_ast::ExprKind::BoolLit(b) => HirExprKind::BoolLit(*b),
+            cjc_ast::ExprKind::NaLit => HirExprKind::NaLit,
             cjc_ast::ExprKind::Ident(id) => {
                 // Check if this identifier is a unit variant (like None)
                 if let Some(enum_name) = self.variant_names.get(&id.name).cloned() {
@@ -1703,6 +1705,7 @@ impl AstLowering {
             | cjc_ast::ExprKind::RawByteStringLit(_)
             | cjc_ast::ExprKind::RegexLit { .. }
             | cjc_ast::ExprKind::BoolLit(_)
+            | cjc_ast::ExprKind::NaLit
             | cjc_ast::ExprKind::Col(_) => {}
             cjc_ast::ExprKind::TensorLit { rows } => {
                 for row in rows {
