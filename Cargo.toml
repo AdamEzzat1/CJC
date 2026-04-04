@@ -118,3 +118,11 @@ path = "tests/test_math_hardening.rs"
 [[test]]
 name = "test_reinforcement_learning"
 path = "tests/test_reinforcement_learning.rs"
+
+[[test]]
+name = "test_cli_expansion"
+path = "tests/test_cli_expansion.rs"
+
+[[test]]
+name = "test_cli_hardening"
+path = "tests/test_cli_hardening.rs"

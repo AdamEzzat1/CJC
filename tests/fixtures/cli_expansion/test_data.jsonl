@@ -1,0 +1,5 @@
+{"name":"Alice","age":30,"score":95.5,"active":true,"city":"NYC"}
+{"name":"Bob","age":25,"score":null,"active":false,"city":"LA"}
+{"name":"Charlie","age":null,"score":88.0,"active":true,"city":"NYC"}
+{"name":"Diana","age":35,"score":92.3,"active":true,"city":"Chicago"}
+{"name":"Eve","age":28,"score":null,"active":false,"city":"LA"}

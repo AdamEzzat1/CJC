@@ -1,0 +1,6 @@
+id,name,value,active
+1,alice,10.5,true
+2,bob,20.3,false
+3,charlie,30.1,True
+4,diana,40.7,FALSE
+5,eve,50.0,true

@@ -1,0 +1,4 @@
+{"name":"Alice","age":30}
+not json at all
+{"name":"Bob"}
+{"unterminated": "value

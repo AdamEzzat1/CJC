@@ -23,11 +23,12 @@
 //!   --help, -h                   Print usage and exit
 //!   --version, -V                Print version and exit
 
+mod commands;
+mod formats;
 mod highlight;
 mod line_editor;
 mod output;
 mod table;
-mod commands;
 
 use std::env;
 use std::fs;
