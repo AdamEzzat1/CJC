@@ -18,16 +18,20 @@ use crate::{
     MirProgram, MirStmt,
 };
 
-/// Hard limit on specializations per program.
+/// Hard limit on specializations per program to prevent combinatorial explosion.
 const MAX_SPECIALIZATIONS: usize = 1000;
 
-/// Result of monomorphization.
+/// Report produced by the monomorphization pass.
+///
+/// Contains statistics about how many specializations were generated,
+/// which generic functions had the highest fanout, and whether the
+/// specialization budget was exceeded.
 pub struct MonomorphReport {
     /// Number of specializations generated.
     pub specialization_count: usize,
-    /// Top fanout functions: (name, instantiation_count).
+    /// Top fanout functions sorted by instantiation count (descending), capped at 10.
     pub top_fanout: Vec<(String, usize)>,
-    /// Whether the budget was exceeded.
+    /// Whether the specialization budget ([`MAX_SPECIALIZATIONS`]) was exceeded.
     pub budget_exceeded: bool,
 }
 

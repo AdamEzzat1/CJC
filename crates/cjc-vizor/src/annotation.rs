@@ -102,6 +102,7 @@ pub enum Annotation {
 impl Annotation {
     // ── Constructors ─────────────────────────────────────────────
 
+    /// Create a text annotation at the given data coordinates.
     pub fn text(text: &str, x: f64, y: f64) -> Self {
         Annotation::Text {
             text: text.to_string(),
@@ -110,6 +111,7 @@ impl Annotation {
         }
     }
 
+    /// Create a small note annotation at the given position.
     pub fn note(text: &str, position: Position) -> Self {
         Annotation::Note {
             text: text.to_string(),
@@ -117,6 +119,7 @@ impl Annotation {
         }
     }
 
+    /// Create a regression summary annotation (equation + R-squared).
     pub fn regression(equation: &str, r_squared: f64) -> Self {
         Annotation::RegressionSummary {
             equation: equation.to_string(),
@@ -125,6 +128,7 @@ impl Annotation {
         }
     }
 
+    /// Create a confidence interval annotation at the default position.
     pub fn ci(level: f64, lower: f64, upper: f64) -> Self {
         Annotation::ConfidenceInterval {
             level,
@@ -134,6 +138,7 @@ impl Annotation {
         }
     }
 
+    /// Create a p-value annotation with default significance level (0.05).
     pub fn pvalue(value: f64) -> Self {
         Annotation::PValue {
             value,
@@ -142,6 +147,7 @@ impl Annotation {
         }
     }
 
+    /// Create a model metrics box with key-value pairs.
     pub fn model_metrics(metrics: Vec<(String, f64)>) -> Self {
         Annotation::ModelMetrics {
             metrics,
@@ -149,6 +155,7 @@ impl Annotation {
         }
     }
 
+    /// Create a vertical event marker at the given x-value.
     pub fn event_marker(x: f64, label: &str) -> Self {
         Annotation::EventMarker {
             x,
@@ -156,6 +163,7 @@ impl Annotation {
         }
     }
 
+    /// Create a data provenance / source note at bottom-left.
     pub fn data_note(text: &str) -> Self {
         Annotation::DataNote {
             text: text.to_string(),
@@ -163,6 +171,7 @@ impl Annotation {
         }
     }
 
+    /// Create an inline label positioned near a specific data point.
     pub fn inline_label(text: &str, x: f64, y: f64) -> Self {
         Annotation::InlineLabel {
             text: text.to_string(),

@@ -1,14 +1,28 @@
 //! Bidirectional type inference engine for CJC.
 //!
-//! Design: local inference within function bodies. Function parameter types
-//! are always required. `let` bindings and return types can be inferred.
+//! # Design
 //!
-//! Modes:
-//! - Synthesis: compute the type of an expression bottom-up
-//! - Checking: verify an expression has an expected type top-down
+//! Inference is **local** -- it operates within a single function body.
+//! Function parameter types are always required by the grammar; `let`
+//! bindings and return types can be inferred.
 //!
-//! Uses constraint-based unification: constraints are generated during
-//! type checking and solved at the end of each function body.
+//! Two modes cooperate during type checking:
+//!
+//! - **Synthesis** (bottom-up): compute the type of an expression from its
+//!   sub-expressions.
+//! - **Checking** (top-down): verify an expression has an expected type
+//!   propagated from its context.
+//!
+//! # Constraint workflow
+//!
+//! 1. Create an [`InferCtx`] at the start of each function body.
+//! 2. Generate fresh type variables with [`InferCtx::fresh_var`] wherever a
+//!    type is unknown.
+//! 3. Record equality constraints with [`InferCtx::constrain`] as the type
+//!    checker walks the AST.
+//! 4. Call [`InferCtx::solve`] to unify all constraints at once.
+//! 5. Use [`InferCtx::resolve_final`] to replace remaining unresolved
+//!    variables with sensible defaults (`i64` for integers, `f64` for floats).
 
 use cjc_diag::{Diagnostic, Span};
 use super::{Type, TypeVarId, TypeSubst, unify};
@@ -16,7 +30,23 @@ use super::{Type, TypeVarId, TypeSubst, unify};
 /// Inference context for a single function body.
 ///
 /// Collects type constraints during type checking and solves them
-/// via unification at the end.
+/// via unification at the end. Each function body gets its own
+/// `InferCtx`, ensuring inference stays local and deterministic.
+///
+/// # Usage
+///
+/// ```
+/// use cjc_types::inference::InferCtx;
+/// use cjc_types::Type;
+/// use cjc_diag::Span;
+///
+/// let mut ctx = InferCtx::new(0);
+/// let tv = ctx.fresh_var();           // ?0
+/// ctx.constrain(tv.clone(), Type::I64, Span::new(0, 1));
+/// let errors = ctx.solve();
+/// assert!(errors.is_empty());
+/// assert_eq!(ctx.apply(&tv), Type::I64);
+/// ```
 pub struct InferCtx {
     /// Counter for generating fresh type variables.
     next_var: usize,
@@ -28,6 +58,12 @@ pub struct InferCtx {
 
 impl InferCtx {
     /// Create a new inference context with a starting variable counter.
+    ///
+    /// # Arguments
+    ///
+    /// * `start_var` -- The initial type-variable counter. Pass the current
+    ///   counter from [`TypeEnv`](super::TypeEnv) so that fresh variables do
+    ///   not collide with those already in scope.
     pub fn new(start_var: usize) -> Self {
         Self {
             next_var: start_var,
@@ -37,18 +73,36 @@ impl InferCtx {
     }
 
     /// Generate a fresh type variable.
+    ///
+    /// Each call increments the internal counter and returns a unique
+    /// `Type::Var(TypeVarId(n))`. The variable is initially unconstrained.
+    ///
+    /// # Returns
+    ///
+    /// A `Type::Var` with a globally unique (within this context) identifier.
     pub fn fresh_var(&mut self) -> Type {
         let id = TypeVarId(self.next_var);
         self.next_var += 1;
         Type::Var(id)
     }
 
-    /// Get the current variable counter (for passing back to TypeEnv).
+    /// Get the current variable counter so it can be passed back to
+    /// [`TypeEnv`](super::TypeEnv) after inference completes.
     pub fn next_var_counter(&self) -> usize {
         self.next_var
     }
 
-    /// Add a constraint: `lhs` must unify with `rhs`.
+    /// Add a constraint requiring `lhs` to unify with `rhs`.
+    ///
+    /// Constraints are accumulated and solved together by [`solve`](Self::solve).
+    /// The `span` is attached to any diagnostic emitted if the constraint
+    /// turns out to be unsatisfiable.
+    ///
+    /// # Arguments
+    ///
+    /// * `lhs` -- Left-hand type (often an inferred variable).
+    /// * `rhs` -- Right-hand type (often a concrete or expected type).
+    /// * `span` -- Source span for error reporting.
     pub fn constrain(&mut self, lhs: Type, rhs: Type, span: Span) {
         self.constraints.push((lhs, rhs, span));
     }

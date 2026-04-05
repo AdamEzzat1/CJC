@@ -119,13 +119,16 @@ pub fn datetime_format(millis: i64) -> String {
 // Civil date algorithms (adapted from Howard Hinnant's algorithms)
 // ---------------------------------------------------------------------------
 
-/// Returns true if `year` is a leap year.
+/// Return `true` if `year` is a leap year under the Gregorian calendar.
 fn is_leap_year(year: i64) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
-/// Convert year/month/day to days since Unix epoch (1970-01-01).
-/// Month is 1-12, day is 1-31.
+/// Convert a Gregorian date to days since the Unix epoch (1970-01-01).
+///
+/// Uses Howard Hinnant's civil date algorithm with a March-based year
+/// shift for simplified leap-year handling. Month is 1-based (1 = January),
+/// day is 1-based.
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     // Shift March to month 1 for easier calculation
     let (y, m) = if month <= 2 {
@@ -140,7 +143,9 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146097 + doe - 719468 // shift to Unix epoch
 }
 
-/// Convert days since Unix epoch to (year, month, day).
+/// Convert days since the Unix epoch to a `(year, month, day)` triple.
+///
+/// Inverse of [`days_from_civil`]. Month is 1-based, day is 1-based.
 fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let z = days + 719468;
     let era = z.div_euclid(146097);
@@ -155,7 +160,9 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     (y, m, d)
 }
 
-/// Days in the given month (1-12) of the given year.
+/// Return the number of days in the given month (1-12) of the given year.
+///
+/// Accounts for leap years in February. Returns `0` for out-of-range months.
 pub fn days_in_month(year: i64, month: i64) -> i64 {
     if month == 2 && is_leap_year(year) {
         29

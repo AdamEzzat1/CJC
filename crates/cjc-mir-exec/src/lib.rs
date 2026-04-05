@@ -1,11 +1,33 @@
-//! CJC MIR Executor (Reference Interpreter)
+//! CJC MIR Executor (v2 register-machine interpreter).
 //!
-//! Executes a MIR program by interpreting it directly. This replaces the
-//! tree-walk AST interpreter (`cjc-eval`) with one that operates on the
-//! lowered MIR representation.
+//! Execute a lowered MIR program by interpreting it directly. This is the v2
+//! executor that operates on the [`cjc_mir::MirProgram`] representation produced
+//! by the AST -> HIR -> MIR lowering pipeline.
 //!
-//! The behavior must be **identical** to `cjc-eval` for all existing programs
-//! (Parity Gate G-1 / G-2).
+//! # Parity requirement
+//!
+//! The behavior must be **bit-identical** to the tree-walk AST interpreter
+//! ([`cjc_eval`]) for every program+seed pair (Parity Gate G-1 / G-2).
+//!
+//! # Pipeline
+//!
+//! ```text
+//! AST -> HIR (cjc_hir) -> MIR (cjc_mir) -> [Optimize] -> MirExecutor
+//! ```
+//!
+//! # Entry points
+//!
+//! | Function | Description |
+//! |---|---|
+//! | [`run_program`] | Basic AST -> MIR -> exec |
+//! | [`run_program_with_executor`] | Same, but returns the executor for inspection |
+//! | [`run_program_optimized`] | With MIR optimization (CF + DCE) |
+//! | [`run_program_type_checked`] | With compile-time type checking gate |
+//! | [`run_program_monomorphized`] | With monomorphization + optimization |
+//! | [`run_program_with_modules`] | Multi-file module support |
+//! | [`run_program_cfg`] | CFG-based block-walking executor |
+//! | [`verify_nogc`] | Static NoGC verification |
+//! | [`lower_to_mir`] | Lower AST to MIR for inspection |
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -25,21 +47,37 @@ use cjc_vizor::dispatch as vizor_dispatch;
 // Error type
 // ---------------------------------------------------------------------------
 
+/// Runtime errors produced by the MIR executor.
+///
+/// Mirrors [`cjc_eval::EvalError`] for parity, with additional variants for
+/// compile-time type errors ([`MirExecError::TypeErrors`]) and tail-call
+/// optimization signaling ([`MirExecError::TailCall`]).
 #[derive(Debug)]
 pub enum MirExecError {
+    /// A `return` statement was executed. The executor unwinds the call stack
+    /// until a function boundary catches this variant.
     Return(Value),
-    /// A `break` statement — caught by the innermost loop.
+    /// A `break` statement -- caught by the innermost loop.
     Break,
-    /// A `continue` statement — caught by the innermost loop.
+    /// A `continue` statement -- caught by the innermost loop.
     Continue,
+    /// A runtime error with a human-readable message.
     Runtime(String),
+    /// An error propagated from the runtime crate.
     RuntimeError(cjc_runtime::RuntimeError),
-    /// Compile-time type errors — collected by the type checker before execution.
-    /// Each entry is a rendered diagnostic message.
+    /// Compile-time type errors collected by [`type_check_program`].
+    /// Each entry is a rendered diagnostic message with span information.
     TypeErrors(Vec<String>),
-    /// P1-2: Tail-call trampoline signal.
-    /// Used internally by call_function — never propagates to the user.
-    TailCall { name: String, args: Vec<Value> },
+    /// Tail-call trampoline signal (internal, never propagates to the user).
+    ///
+    /// Emitted by `exec_body` when a direct recursive call is detected in
+    /// tail position, allowing `call_function` to loop instead of recursing.
+    TailCall {
+        /// Name of the function to tail-call.
+        name: String,
+        /// Pre-evaluated arguments for the tail call.
+        args: Vec<Value>,
+    },
 }
 
 impl fmt::Display for MirExecError {
@@ -68,6 +106,11 @@ impl From<cjc_runtime::RuntimeError> for MirExecError {
     }
 }
 
+/// Result type alias for MIR executor operations.
+///
+/// Returns a [`Value`] on success or a [`MirExecError`] on failure. Control-flow
+/// signals (`Return`, `Break`, `Continue`, `TailCall`) propagate as `Err`
+/// variants and are caught at function and loop boundaries.
 pub type MirExecResult = Result<Value, MirExecError>;
 
 /// Recursive structural equality for struct/record values.
@@ -119,8 +162,31 @@ fn value_eq(a: &Value, b: &Value) -> bool {
 // MIR Executor
 // ---------------------------------------------------------------------------
 
+/// MIR register-machine executor for CJC programs (v2 executor).
+///
+/// Interpret a lowered [`MirProgram`] by walking MIR statements and
+/// expressions. Maintains a scope stack, GC heap, deterministic RNG, and
+/// per-call-frame arena storage for tail-call optimization.
+///
+/// Must produce **bit-identical** results to [`cjc_eval::Interpreter`] for
+/// every program+seed pair (parity gate G-1 / G-2).
+///
+/// # Determinism
+///
+/// All random state is threaded through a [`cjc_repro::Rng`] (SplitMix64)
+/// seeded at construction time. Collections use [`BTreeMap`] to guarantee
+/// deterministic iteration order.
+///
+/// # Usage
+///
+/// ```ignore
+/// let mir = lower_to_mir(&program);
+/// let mut exec = MirExecutor::new(42);
+/// exec.scan_ast_imports(&program);
+/// let result = exec.exec(&mir)?;
+/// ```
 pub struct MirExecutor {
-    /// P1-5: Function bodies stored as Rc to avoid cloning on every call.
+    /// Function bodies stored as `Rc` to avoid cloning on every call.
     functions: BTreeMap<String, Rc<MirFunction>>,
     struct_defs: BTreeMap<String, MirStructDef>,
     scopes: Vec<BTreeMap<String, Value>>,
@@ -143,6 +209,15 @@ pub struct MirExecutor {
 }
 
 impl MirExecutor {
+    /// Create a new MIR executor with the given deterministic RNG seed.
+    ///
+    /// The seed is forwarded to [`cjc_repro::Rng::seeded`] and determines all
+    /// pseudo-random behavior. Two executors created with the same seed will
+    /// produce bit-identical output for the same MIR program.
+    ///
+    /// # Arguments
+    ///
+    /// * `seed` - A 64-bit seed for the deterministic SplitMix64 RNG.
     pub fn new(seed: u64) -> Self {
         Self {
             functions: BTreeMap::new(),
@@ -184,6 +259,15 @@ impl MirExecutor {
         self.scopes.pop();
     }
 
+    /// Bind a variable in the innermost (current) scope.
+    ///
+    /// If a variable with the same name already exists in the current scope it
+    /// is overwritten. Variables in outer scopes are not affected.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Variable name.
+    /// * `val`  - Value to bind.
     pub fn define(&mut self, name: &str, val: Value) {
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string(), val);
@@ -213,6 +297,26 @@ impl MirExecutor {
 
     // -- Program execution --------------------------------------------------
 
+    /// Execute a lowered [`MirProgram`].
+    ///
+    /// Register all function and struct definitions, then execute the
+    /// `__main` function body (which contains top-level let/const/stmt
+    /// declarations). If a user-defined `main()` function exists it is
+    /// called afterward and its return value becomes the program result.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The lowered MIR program to execute.
+    ///
+    /// # Returns
+    ///
+    /// The final [`Value`] produced by the program, or a [`MirExecError`]
+    /// if execution fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MirExecError::Runtime`] on type mismatches, undefined
+    /// variables, division by zero, or other runtime failures.
     pub fn exec(&mut self, program: &MirProgram) -> MirExecResult {
         // Register all functions and struct defs
         // P1-5: Store as Rc to avoid cloning bodies on every call.
@@ -372,6 +476,23 @@ impl MirExecutor {
 
     // -- Expression evaluation ----------------------------------------------
 
+    /// Evaluate a single MIR expression and return its [`Value`].
+    ///
+    /// This is the core dispatch for MIR expression evaluation. It handles all
+    /// [`MirExprKind`] variants including literals, binary/unary ops, variable
+    /// lookups, function calls, field access, indexing, match expressions,
+    /// closures, tensor literals, and more.
+    ///
+    /// Built-in function calls are dispatched via
+    /// [`cjc_runtime::builtins`] to ensure parity with the AST interpreter.
+    ///
+    /// # Arguments
+    ///
+    /// * `expr` - The MIR expression to evaluate.
+    ///
+    /// # Returns
+    ///
+    /// The resulting [`Value`], or a [`MirExecError`] on failure.
     pub fn eval_expr(&mut self, expr: &MirExpr) -> MirExecResult {
         match &expr.kind {
             MirExprKind::IntLit(v) => Ok(Value::Int(*v)),
@@ -3703,7 +3824,6 @@ impl Default for MirExecutor {
 // Convenience: full pipeline AST -> HIR -> MIR -> Execute
 // ---------------------------------------------------------------------------
 
-/// Run a full AST program through the HIR -> MIR -> MIR-Exec pipeline.
 // ---------------------------------------------------------------------------
 // Type-checking gate
 // ---------------------------------------------------------------------------
@@ -3740,6 +3860,24 @@ pub fn type_check_program(program: &cjc_ast::Program) -> Result<(), MirExecError
     Ok(())
 }
 
+/// Run a full AST program through the HIR -> MIR -> MIR-Exec pipeline.
+///
+/// Lower the AST to HIR, then to MIR, annotate escape information, and
+/// execute the resulting MIR program. This is the simplest entry point for
+/// single-file programs that do not require optimization or type checking.
+///
+/// # Arguments
+///
+/// * `program` - The parsed AST program.
+/// * `seed`    - Deterministic RNG seed for reproducible execution.
+///
+/// # Returns
+///
+/// The final [`Value`] produced by the program.
+///
+/// # Errors
+///
+/// Returns [`MirExecError::Runtime`] on execution failures.
 pub fn run_program(program: &cjc_ast::Program, seed: u64) -> MirExecResult {
     let mut ast_lowering = cjc_hir::AstLowering::new();
     let hir = ast_lowering.lower_program(program);
@@ -3753,7 +3891,20 @@ pub fn run_program(program: &cjc_ast::Program, seed: u64) -> MirExecResult {
     executor.exec(&mir)
 }
 
-/// Run a full AST program and return the executor (for inspecting output, etc.)
+/// Run a full AST program and return both the result and the executor.
+///
+/// Same pipeline as [`run_program`] but also returns the [`MirExecutor`],
+/// allowing callers to inspect captured output (`executor.output`), GC
+/// statistics, arena allocation counts, and other internal state.
+///
+/// # Arguments
+///
+/// * `program` - The parsed AST program.
+/// * `seed`    - Deterministic RNG seed for reproducible execution.
+///
+/// # Returns
+///
+/// A tuple of `(Value, MirExecutor)` on success.
 pub fn run_program_with_executor(
     program: &cjc_ast::Program,
     seed: u64,
@@ -3772,6 +3923,19 @@ pub fn run_program_with_executor(
 }
 
 /// Run a full AST program through the optimized MIR pipeline.
+///
+/// Apply constant folding (CF) and dead code elimination (DCE) via
+/// [`cjc_mir::optimize::optimize_program`] before execution. Enabled by the
+/// `--mir-opt` CLI flag.
+///
+/// # Arguments
+///
+/// * `program` - The parsed AST program.
+/// * `seed`    - Deterministic RNG seed for reproducible execution.
+///
+/// # Returns
+///
+/// The final [`Value`] produced by the optimized program.
 pub fn run_program_optimized(program: &cjc_ast::Program, seed: u64) -> MirExecResult {
     let mut ast_lowering = cjc_hir::AstLowering::new();
     let hir = ast_lowering.lower_program(program);
@@ -3787,7 +3951,19 @@ pub fn run_program_optimized(program: &cjc_ast::Program, seed: u64) -> MirExecRe
     executor.exec(&optimized)
 }
 
-/// Run a full AST program through the optimized MIR pipeline, returning executor.
+/// Run a full AST program through the optimized MIR pipeline, returning the executor.
+///
+/// Same as [`run_program_optimized`] but also returns the [`MirExecutor`]
+/// for post-execution inspection of output, GC stats, and arena counts.
+///
+/// # Arguments
+///
+/// * `program` - The parsed AST program.
+/// * `seed`    - Deterministic RNG seed for reproducible execution.
+///
+/// # Returns
+///
+/// A tuple of `(Value, MirExecutor)` on success.
 pub fn run_program_optimized_with_executor(
     program: &cjc_ast::Program,
     seed: u64,
@@ -3832,7 +4008,20 @@ pub fn run_program_type_checked(program: &cjc_ast::Program, seed: u64) -> MirExe
     executor.exec(&mir)
 }
 
-/// Run a full AST program through the MIR pipeline with monomorphization + optimization.
+/// Run a full AST program through the MIR pipeline with monomorphization and optimization.
+///
+/// Apply [`cjc_mir::monomorph::monomorphize_program`] to specialize generic
+/// functions, then optimize with CF + DCE before execution. This is the
+/// most aggressive compilation pipeline.
+///
+/// # Arguments
+///
+/// * `program` - The parsed AST program.
+/// * `seed`    - Deterministic RNG seed for reproducible execution.
+///
+/// # Returns
+///
+/// The final [`Value`] produced by the monomorphized and optimized program.
 pub fn run_program_monomorphized(program: &cjc_ast::Program, seed: u64) -> MirExecResult {
     let mut ast_lowering = cjc_hir::AstLowering::new();
     let hir = ast_lowering.lower_program(program);

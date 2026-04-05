@@ -1,3 +1,18 @@
+//! Aligned memory pool -- 16-byte aligned allocation for SIMD readiness.
+//!
+//! Provides [`AlignedPool`] for raw 16-byte-aligned byte storage, and
+//! [`AlignedByteSlice`] for transparent alignment of tensor weight data.
+//! When source bytes are already aligned, no copy is performed; when
+//! misaligned, a one-time aligned copy is made into the pool.
+//!
+//! # SIMD relevance
+//!
+//! AVX2 `_mm256_load_pd` requires 32-byte alignment for optimal performance,
+//! but 16-byte alignment avoids page-split penalties on all x86-64 CPUs.
+//! The [`tensor_simd`](crate::tensor_simd) module uses unaligned loads
+//! (`_mm256_loadu_pd`) so alignment is not strictly required, but aligned
+//! data is faster on older microarchitectures.
+
 use std::fmt;
 use std::rc::Rc;
 

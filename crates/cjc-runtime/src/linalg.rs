@@ -1,3 +1,18 @@
+//! Dense linear algebra operations on [`Tensor`].
+//!
+//! Provides matrix decompositions (LU, QR, Cholesky, Schur, SVD), solvers
+//! (direct and least-squares), eigenvalue routines, norms, and related
+//! utilities. All floating-point reductions use [`BinnedAccumulatorF64`] or
+//! Kahan summation for deterministic, order-invariant results.
+//!
+//! # Determinism Contract
+//!
+//! - Pivot selection uses strict `>` on absolute values with lowest-index
+//!   tie-breaking.
+//! - Eigenvalue / SVD sign-canonical: the first nonzero element of each
+//!   eigenvector / singular vector is forced positive.
+//! - No `HashMap`, no parallel iteration, no OS randomness.
+
 use crate::accumulator::BinnedAccumulatorF64;
 use crate::error::RuntimeError;
 use crate::tensor::Tensor;
@@ -7,8 +22,30 @@ use crate::tensor::Tensor;
 // ---------------------------------------------------------------------------
 
 impl Tensor {
-    /// LU decomposition with partial pivoting. Returns (L, U, pivot_indices).
-    /// Input must be square 2D.
+    /// Compute the LU decomposition with partial pivoting.
+    ///
+    /// Returns `(L, U, pivot_indices)` where `P * A = L * U` and `pivot_indices`
+    /// encodes the row permutation `P`.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` - A square 2-D [`Tensor`] (n x n).
+    ///
+    /// # Returns
+    ///
+    /// * `L` - Lower-triangular matrix with unit diagonal.
+    /// * `U` - Upper-triangular matrix.
+    /// * `pivot_indices` - Permutation vector of length n.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::InvalidOperation`] if the matrix is not square
+    /// 2-D or is singular.
+    ///
+    /// # Determinism
+    ///
+    /// Pivot selection uses strict `>` comparison on absolute values; ties are
+    /// broken by choosing the lowest row index.
     ///
     /// **Determinism contract:** Pivot selection uses strict `>` comparison on
     /// absolute values. When two candidates have identical absolute values, the
@@ -79,8 +116,14 @@ impl Tensor {
         ))
     }
 
-    /// QR decomposition via Modified Gram-Schmidt. Returns (Q, R).
-    /// Input must be 2D with rows >= cols.
+    /// Compute the QR decomposition via Householder reflections.
+    ///
+    /// Returns `(Q, R)` where `A = Q * R`, `Q` is orthogonal (m x min(m,n)),
+    /// and `R` is upper-triangular (min(m,n) x n).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::InvalidOperation`] if the tensor is not 2-D.
     pub fn qr_decompose(&self) -> Result<(Tensor, Tensor), RuntimeError> {
         if self.ndim() != 2 {
             return Err(RuntimeError::InvalidOperation(
@@ -207,8 +250,18 @@ impl Tensor {
         ))
     }
 
-    /// Cholesky decomposition: A = L * L^T.
-    /// Input must be symmetric positive definite 2D.
+    /// Compute the Cholesky decomposition: `A = L * L^T`.
+    ///
+    /// Returns the lower-triangular factor `L`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::InvalidOperation`] if the matrix is not square
+    /// 2-D or is not positive definite.
+    ///
+    /// # Determinism
+    ///
+    /// Inner-loop summation uses Kahan compensation with fixed iteration order.
     pub fn cholesky(&self) -> Result<Tensor, RuntimeError> {
         if self.ndim() != 2 || self.shape[0] != self.shape[1] {
             return Err(RuntimeError::InvalidOperation(
@@ -254,7 +307,10 @@ impl Tensor {
         Tensor::from_vec(l, &[n, n])
     }
 
-    /// Determinant via LU decomposition: product of U diagonal * parity.
+    /// Compute the determinant via LU decomposition.
+    ///
+    /// Returns the product of the `U` diagonal elements multiplied by the
+    /// permutation parity sign. Returns `0.0` for singular matrices.
     pub fn det(&self) -> Result<f64, RuntimeError> {
         if self.ndim() != 2 || self.shape[0] != self.shape[1] {
             return Err(RuntimeError::InvalidOperation(
@@ -299,8 +355,16 @@ impl Tensor {
         Ok(det)
     }
 
-    /// Solve Ax = b via LU decomposition.
-    /// self = A (n x n), b = vector (n).
+    /// Solve the linear system `A * x = b` via LU decomposition with partial pivoting.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` - Coefficient matrix `A` (n x n).
+    /// * `b` - Right-hand side vector (length n).
+    ///
+    /// # Returns
+    ///
+    /// Solution vector `x` as a 1-D [`Tensor`].
     pub fn solve(&self, b: &Tensor) -> Result<Tensor, RuntimeError> {
         if self.ndim() != 2 || self.shape[0] != self.shape[1] {
             return Err(RuntimeError::InvalidOperation(
@@ -347,8 +411,19 @@ impl Tensor {
         Tensor::from_vec(x, &[n])
     }
 
-    /// Least squares solution: min ||Ax - b||_2 via QR decomposition.
-    /// self = A (m x n, m >= n), b = vector (m).
+    /// Compute the ordinary least-squares solution minimizing `||A*x - b||_2`.
+    ///
+    /// Uses QR decomposition for numerical stability. The dot products for
+    /// `Q^T * b` use [`BinnedAccumulatorF64`] for determinism.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` - Design matrix `A` (m x n, m >= n).
+    /// * `b` - Observation vector (length m).
+    ///
+    /// # Returns
+    ///
+    /// Solution vector `x` as a 1-D [`Tensor`] of length n.
     pub fn lstsq(&self, b: &Tensor) -> Result<Tensor, RuntimeError> {
         if self.ndim() != 2 {
             return Err(RuntimeError::InvalidOperation(
@@ -401,7 +476,7 @@ impl Tensor {
         Tensor::from_vec(x, &[n])
     }
 
-    /// Matrix trace: sum of diagonal elements.
+    /// Compute the matrix trace (sum of diagonal elements) using [`BinnedAccumulatorF64`].
     pub fn trace(&self) -> Result<f64, RuntimeError> {
         if self.ndim() != 2 || self.shape[0] != self.shape[1] {
             return Err(RuntimeError::InvalidOperation(
@@ -417,7 +492,7 @@ impl Tensor {
         Ok(acc.finalize())
     }
 
-    /// Frobenius norm: sqrt(sum(aij^2)).
+    /// Compute the Frobenius norm: `sqrt(sum(a_ij^2))` using [`BinnedAccumulatorF64`].
     pub fn norm_frobenius(&self) -> Result<f64, RuntimeError> {
         if self.ndim() != 2 {
             return Err(RuntimeError::InvalidOperation(
@@ -432,9 +507,22 @@ impl Tensor {
         Ok(acc.finalize().sqrt())
     }
 
-    /// Eigenvalue decomposition for symmetric matrices (Jacobi method).
-    /// Returns (eigenvalues sorted ascending, eigenvectors n x n).
-    /// DETERMINISM: fixed row-major sweep order, smallest (i,j) tie-breaking.
+    /// Compute the symmetric eigenvalue decomposition via Householder
+    /// tridiagonalization followed by implicit QR iteration with Wilkinson shift.
+    ///
+    /// Returns `(eigenvalues, eigenvectors)` where eigenvalues are sorted in
+    /// ascending order and eigenvectors form the columns of an n x n [`Tensor`].
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Householder reduction to tridiagonal form -- O(n^3).
+    /// 2. Implicit QR iteration on the tridiagonal matrix -- O(n^2) total.
+    /// 3. Eigenvectors are sign-canonicalized (first nonzero element positive).
+    ///
+    /// # Determinism
+    ///
+    /// Fixed row-major sweep order with smallest `(i, j)` tie-breaking.
+    /// All reductions use fixed iteration order.
     pub fn eigh(&self) -> Result<(Vec<f64>, Tensor), RuntimeError> {
         if self.ndim() != 2 || self.shape[0] != self.shape[1] {
             return Err(RuntimeError::InvalidOperation(
@@ -659,7 +747,8 @@ impl Tensor {
         Ok((vals, Tensor::from_vec(v_sorted, &[n, n])?))
     }
 
-    /// Matrix rank via SVD: count singular values > tolerance.
+    /// Estimate the matrix rank by counting nonzero diagonal elements of `R`
+    /// from a QR decomposition (tolerance `1e-10`).
     pub fn matrix_rank(&self) -> Result<usize, RuntimeError> {
         if self.ndim() != 2 {
             return Err(RuntimeError::InvalidOperation(
@@ -680,7 +769,10 @@ impl Tensor {
         Ok(rank)
     }
 
-    /// Kronecker product: A ⊗ B.
+    /// Compute the Kronecker product `A (x) B`.
+    ///
+    /// For `A` of shape (m, n) and `B` of shape (p, q), the result has
+    /// shape (m*p, n*q).
     pub fn kron(&self, other: &Tensor) -> Result<Tensor, RuntimeError> {
         if self.ndim() != 2 || other.ndim() != 2 {
             return Err(RuntimeError::InvalidOperation(
@@ -706,7 +798,8 @@ impl Tensor {
         Tensor::from_vec(result, &[m * p, n * q])
     }
 
-    /// Matrix inverse via LU decomposition + back-substitution.
+    /// Compute the matrix inverse via LU decomposition and column-wise
+    /// forward/back substitution.
     pub fn inverse(&self) -> Result<Tensor, RuntimeError> {
         if self.ndim() != 2 || self.shape[0] != self.shape[1] {
             return Err(RuntimeError::InvalidOperation(
@@ -758,7 +851,8 @@ impl Tensor {
     // Phase B3: Linear algebra extensions
     // -----------------------------------------------------------------------
 
-    /// 1-norm: maximum absolute column sum.
+    /// Compute the matrix 1-norm (maximum absolute column sum) using
+    /// [`BinnedAccumulatorF64`].
     pub fn norm_1(&self) -> Result<f64, RuntimeError> {
         if self.ndim() != 2 {
             return Err(RuntimeError::InvalidOperation(
@@ -781,7 +875,8 @@ impl Tensor {
         Ok(max_col_sum)
     }
 
-    /// Infinity norm: maximum absolute row sum.
+    /// Compute the matrix infinity-norm (maximum absolute row sum) using
+    /// [`BinnedAccumulatorF64`].
     pub fn norm_inf(&self) -> Result<f64, RuntimeError> {
         if self.ndim() != 2 {
             return Err(RuntimeError::InvalidOperation(
@@ -804,8 +899,11 @@ impl Tensor {
         Ok(max_row_sum)
     }
 
-    /// Condition number via eigenvalue ratio.
-    /// For symmetric: |lambda_max| / |lambda_min|. For general: sqrt(sigma_max/sigma_min).
+    /// Estimate the 2-norm condition number of the matrix.
+    ///
+    /// For symmetric matrices, computes `|lambda_max| / |lambda_min|` via [`eigh`](Tensor::eigh).
+    /// For general matrices, computes `sqrt(sigma_max / sigma_min)` via the
+    /// eigenvalues of `A^T * A`.
     pub fn cond(&self) -> Result<f64, RuntimeError> {
         if self.ndim() != 2 || self.shape[0] != self.shape[1] {
             return Err(RuntimeError::InvalidOperation(
@@ -846,8 +944,16 @@ impl Tensor {
         }
     }
 
-    /// Real Schur decomposition: A = Q * T * Q^T.
-    /// Uses Hessenberg reduction + implicit double-shift QR.
+    /// Compute the real Schur decomposition: `A = Q * T * Q^T`.
+    ///
+    /// `T` is quasi-upper-triangular (upper triangular with possible 2x2 blocks
+    /// on the diagonal for complex eigenvalue pairs) and `Q` is orthogonal.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Householder reduction to upper Hessenberg form.
+    /// 2. Implicit single-shift QR iteration with Wilkinson shift and Givens
+    ///    rotations.
     pub fn schur(&self) -> Result<(Tensor, Tensor), RuntimeError> {
         if self.ndim() != 2 || self.shape[0] != self.shape[1] {
             return Err(RuntimeError::InvalidOperation(
@@ -1037,14 +1143,21 @@ impl Tensor {
     // Phase 3A: SVD via Golub-Kahan Bidiagonalization
     // -----------------------------------------------------------------------
 
-    /// Compute the Singular Value Decomposition: A = U @ diag(S) @ Vt.
-    /// Returns (U, S, Vt) as (Tensor, Vec<f64>, Tensor).
+    /// Compute the Singular Value Decomposition: `A = U * diag(S) * Vt`.
     ///
-    /// Implementation: via eigendecomposition of A^T*A (for V and S^2),
-    /// then U = A*V*diag(1/s_i).
+    /// Returns `(U, S, Vt)` where `S` is a `Vec<f64>` of singular values in
+    /// descending order, `U` is m x k, and `Vt` is k x n (k = min(m, n)).
     ///
-    /// **Determinism contract:** All intermediate float reductions use
-    /// `BinnedAccumulatorF64`. Iteration order is fixed row-major.
+    /// # Algorithm
+    ///
+    /// Eigendecomposition of `A^T * A` yields `V` and `sigma^2`. Then
+    /// `U = A * V * diag(1 / sigma_i)`. Sign-canonical: largest-magnitude
+    /// element of each `U` column is positive.
+    ///
+    /// # Determinism
+    ///
+    /// All intermediate floating-point reductions use [`BinnedAccumulatorF64`].
+    /// Iteration order is fixed row-major.
     pub fn svd(&self) -> Result<(Tensor, Vec<f64>, Tensor), RuntimeError> {
         if self.ndim() != 2 {
             return Err(RuntimeError::InvalidOperation(
@@ -1148,8 +1261,9 @@ impl Tensor {
         Ok((u_tensor, s, vt_tensor))
     }
 
-    /// Truncated SVD — only the top `k` singular values/vectors.
-    /// Returns (U_k, S_k, Vt_k) where U_k is m x k, Vt_k is k x n.
+    /// Compute a truncated SVD retaining only the top `k` singular triplets.
+    ///
+    /// Returns `(U_k, S_k, Vt_k)` where `U_k` is m x k and `Vt_k` is k x n.
     pub fn svd_truncated(
         &self,
         k: usize,
@@ -1198,7 +1312,9 @@ impl Tensor {
     // -----------------------------------------------------------------------
 
     /// Compute the Moore-Penrose pseudoinverse via SVD.
-    /// A+ = V @ diag(1/s_i) @ Ut (with default tolerance for near-zero singular values).
+    ///
+    /// `A+ = V * diag(1/s_i) * U^T`, with default tolerance
+    /// `max(m, n) * eps * max(S)` for near-zero singular values.
     pub fn pinv(&self) -> Result<Tensor, RuntimeError> {
         // Default tolerance: max(m,n) * eps * max(S)
         let (u, s, vt) = self.svd()?;
@@ -1209,7 +1325,8 @@ impl Tensor {
         Self::pinv_from_svd(&u, &s, &vt, tol)
     }
 
-    /// Compute the Moore-Penrose pseudoinverse via SVD with explicit tolerance.
+    /// Compute the Moore-Penrose pseudoinverse via SVD with an explicit
+    /// singular-value cutoff tolerance.
     pub fn pinv_with_tol(&self, tol: f64) -> Result<Tensor, RuntimeError> {
         let (u, s, vt) = self.svd()?;
         Self::pinv_from_svd(&u, &s, &vt, tol)
@@ -1267,7 +1384,12 @@ impl Tensor {
         }
     }
 
-    /// Matrix exponential via scaling and squaring with Pade(13,13) approximation.
+    /// Compute the matrix exponential `exp(A)` via scaling-and-squaring with a
+    /// Pade(13,13) rational approximation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::InvalidOperation`] if the matrix is not square 2-D.
     pub fn matrix_exp(&self) -> Result<Tensor, RuntimeError> {
         if self.ndim() != 2 || self.shape[0] != self.shape[1] {
             return Err(RuntimeError::InvalidOperation(

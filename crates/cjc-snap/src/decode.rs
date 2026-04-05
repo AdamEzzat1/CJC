@@ -89,10 +89,22 @@ impl<'a> Cursor<'a> {
 // Public decoder
 // ---------------------------------------------------------------------------
 
-/// Decode a byte slice back into a CJC `Value`.
+/// Decode a byte slice produced by [`snap_encode`](crate::snap_encode) back
+/// into a CJC [`Value`] (v1 format).
 ///
-/// Returns `SnapError` if the data is malformed, truncated, or contains an
-/// invalid tag byte.
+/// Reads the tag byte at the start of `data` and recursively reconstructs
+/// the value tree. All container types (arrays, structs, maps, etc.) are
+/// decoded depth-first.
+///
+/// # Arguments
+///
+/// * `data` - A byte slice containing a v1-encoded snap payload.
+///
+/// # Errors
+///
+/// Returns [`SnapError::InvalidTag`] for unrecognized tag bytes,
+/// [`SnapError::UnexpectedEof`] when the stream is truncated, or
+/// [`SnapError::Utf8Error`] for invalid string data.
 pub fn snap_decode(data: &[u8]) -> Result<Value, SnapError> {
     let mut cursor = Cursor::new(data);
     let value = decode_value(&mut cursor)?;
@@ -542,8 +554,21 @@ fn decode_value(cursor: &mut Cursor<'_>) -> Result<Value, SnapError> {
     }
 }
 
-/// Decode a v2 snap format (with magic header and version).
-/// Falls back to v1 (no header) if magic is not present.
+/// Decode a v2 snap payload (with magic header and version byte).
+///
+/// Inspects the first 4 bytes for the [`SNAP_MAGIC`] header. If present,
+/// skips the 6-byte header and decodes the inner payload. Falls back to
+/// [`snap_decode`] (v1) when the magic is absent, enabling transparent
+/// handling of both format versions.
+///
+/// # Arguments
+///
+/// * `data` - A byte slice containing either a v1 or v2 snap payload.
+///
+/// # Errors
+///
+/// Returns a [`SnapError`](crate::SnapError) on malformed input or
+/// hash mismatches in chunked tensors.
 pub fn snap_decode_v2(data: &[u8]) -> Result<Value, SnapError> {
     if data.len() >= 6 && &data[0..4] == SNAP_MAGIC {
         let _version = data[4];

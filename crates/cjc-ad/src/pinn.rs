@@ -27,33 +27,60 @@ pub struct DenseLayer {
     pub bias_idx: usize,
     /// Activation to apply after affine transform.
     pub activation: Activation,
+    /// Number of input features (columns of weight matrix).
     pub in_features: usize,
+    /// Number of output features (rows of weight matrix).
     pub out_features: usize,
 }
 
 /// Supported activation functions (all differentiable in GradGraph).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Activation {
+    /// Hyperbolic tangent activation, maps inputs to (-1, 1).
     Tanh,
+    /// Sigmoid (logistic) activation, maps inputs to (0, 1).
     Sigmoid,
+    /// Rectified linear unit, returns max(0, x).
     Relu,
+    /// Identity (no activation), passes the value through unchanged.
     None,
 }
 
 /// Multi-layer perceptron specification.
+///
+/// Stores an ordered sequence of [`DenseLayer`]s that together define the
+/// network architecture. Layer weights and biases live on an external
+/// [`GradGraph`](crate::GradGraph) and are referenced by index.
 #[derive(Debug, Clone)]
 pub struct Mlp {
+    /// Ordered dense layers from input to output.
     pub layers: Vec<DenseLayer>,
 }
 
-/// Initialize an MLP on a GradGraph. Returns (Mlp, Vec<param_indices>).
+/// Initialize an MLP on a [`GradGraph`](crate::GradGraph) with Xavier-uniform weights.
 ///
-/// `layer_sizes`: e.g. [1, 32, 32, 1] means input_dim=1, two hidden layers of 32, output_dim=1.
-/// `hidden_activation`: activation for hidden layers.
-/// `output_activation`: activation for the output layer (typically Activation::None for regression).
-/// `seed`: for deterministic Xavier initialization.
+/// Register weight and bias parameter nodes on the graph for every layer and
+/// return the resulting [`Mlp`] specification together with the flat list of
+/// parameter node indices (alternating weight, bias for each layer).
 ///
-/// All weights are registered as `parameter()` nodes; biases initialized to zero.
+/// # Arguments
+///
+/// * `graph` - Mutable reference to the computation graph where parameters are registered.
+/// * `layer_sizes` - Sequence of layer widths, e.g. `[1, 32, 32, 1]` for
+///   input dim 1, two hidden layers of 32, and output dim 1.
+/// * `hidden_activation` - Activation applied after every hidden layer.
+/// * `output_activation` - Activation applied after the final layer
+///   (typically [`Activation::None`] for regression tasks).
+/// * `seed` - RNG seed for deterministic Xavier-uniform initialization.
+///
+/// # Returns
+///
+/// A tuple `(Mlp, Vec<usize>)` where the second element contains the
+/// GradGraph parameter indices (weights and biases interleaved per layer).
+///
+/// # Panics
+///
+/// Panics if `layer_sizes` contains fewer than two entries.
 pub fn mlp_init(
     graph: &mut crate::GradGraph,
     layer_sizes: &[usize],
@@ -102,11 +129,21 @@ pub fn mlp_init(
     (Mlp { layers }, param_indices)
 }
 
-/// Forward pass of an MLP through the GradGraph.
+/// Execute a forward pass of an MLP through the GradGraph.
 ///
-/// `input_idx`: GradGraph node index for the input tensor (shape [batch, in_features] or [in_features]).
+/// For each layer the function computes `activation(x @ W^T + b)` and chains
+/// the result into the next layer.
 ///
-/// Returns the GradGraph node index of the output.
+/// # Arguments
+///
+/// * `graph` - Mutable reference to the computation graph.
+/// * `mlp` - MLP specification whose layer indices must already exist on `graph`.
+/// * `input_idx` - GradGraph node index for the input tensor
+///   (shape `[batch, in_features]` or `[in_features]`).
+///
+/// # Returns
+///
+/// The GradGraph node index of the final output tensor.
 pub fn mlp_forward(
     graph: &mut crate::GradGraph,
     mlp: &Mlp,
@@ -138,10 +175,20 @@ pub fn mlp_forward(
 // Physics Loss Components
 // ---------------------------------------------------------------------------
 
-/// Compute the data loss (MSE) between predicted and target values on the graph.
+/// Compute the mean-squared-error data loss between predicted and target values.
 ///
-/// `pred_idx`, `target_idx`: GradGraph node indices.
-/// Returns node index of the scalar MSE loss.
+/// Builds `mean((pred - target)^2)` on the graph and returns the resulting
+/// scalar loss node.
+///
+/// # Arguments
+///
+/// * `graph` - Mutable reference to the computation graph.
+/// * `pred_idx` - GradGraph node index for the predicted values.
+/// * `target_idx` - GradGraph node index for the target (ground-truth) values.
+///
+/// # Returns
+///
+/// GradGraph node index of the scalar MSE loss.
 pub fn data_loss_mse(
     graph: &mut crate::GradGraph,
     pred_idx: usize,
@@ -152,17 +199,23 @@ pub fn data_loss_mse(
     graph.mean(sq)
 }
 
-/// Compute the physics residual for the ODE:  u_xx + u = 0
-/// (simple harmonic oscillator PDE).
+/// Compute the physics residual for the simple harmonic ODE `u_xx + u = 0`.
 ///
-/// Strategy: Given a network output u(x) at collocation points, compute:
-///   residual = u_xx + u
-/// where u_xx is obtained via double-backward through the graph.
+/// Build the mean-squared residual `mean(r^2)` on the graph, where
+/// `r = u_xx + u`. In the current implementation this is a placeholder that
+/// squares and averages `u` directly; the full finite-difference workflow is
+/// implemented inside [`pinn_harmonic_train`].
 ///
-/// `u_idx`: graph node for network output u(x).
-/// `x_idx`: graph node for input x coordinates.
+/// # Arguments
 ///
-/// Returns node index of the mean squared residual.
+/// * `graph` - Mutable reference to the computation graph.
+/// * `u_idx` - GradGraph node index for the network output `u(x)`.
+/// * `x_idx` - GradGraph node index for the input `x` coordinates (currently unused).
+/// * `n_points` - Number of collocation points (currently unused).
+///
+/// # Returns
+///
+/// GradGraph node index of the scalar mean-squared residual.
 pub fn physics_residual_harmonic(
     graph: &mut crate::GradGraph,
     u_idx: usize,
@@ -201,6 +254,10 @@ pub fn physics_residual_harmonic(
 // ---------------------------------------------------------------------------
 
 /// Configuration for a PINN training run.
+///
+/// Collect all hyper-parameters (network shape, learning rate, loss weights,
+/// sampling counts, and finite-difference step size) into a single struct so
+/// that training functions accept one argument instead of many.
 #[derive(Debug, Clone)]
 pub struct PinnConfig {
     /// MLP layer sizes, e.g. [1, 32, 32, 1].
@@ -239,18 +296,27 @@ impl Default for PinnConfig {
     }
 }
 
-/// Training log entry.
+/// Single training log entry recorded at the end of each epoch.
 #[derive(Debug, Clone)]
 pub struct TrainLog {
+    /// Zero-based epoch index.
     pub epoch: usize,
+    /// Weighted sum of data, physics, and boundary losses.
     pub total_loss: f64,
+    /// Mean-squared-error between network predictions and observed data.
     pub data_loss: f64,
+    /// Mean-squared PDE/ODE residual at collocation points.
     pub physics_loss: f64,
+    /// Squared violation of boundary conditions.
     pub boundary_loss: f64,
+    /// L2 norm of the total gradient vector.
     pub grad_norm: f64,
 }
 
-/// Result of a PINN training run.
+/// Aggregate result of a PINN or PIML training run.
+///
+/// Contains final parameter values, the complete loss history, and optional
+/// accuracy metrics computed against an analytical solution.
 #[derive(Debug, Clone)]
 pub struct PinnResult {
     /// Final parameter values (flattened).

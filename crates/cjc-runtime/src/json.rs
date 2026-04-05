@@ -283,6 +283,12 @@ pub fn json_stringify(value: &Value) -> Result<String, String> {
 // Conversions: JsonValue ↔ CJC Value
 // ---------------------------------------------------------------------------
 
+/// Convert a [`JsonValue`] into a CJC [`Value`].
+///
+/// JSON objects become `Value::Struct` with name `"Json"` and [`BTreeMap`]
+/// fields (sorted keys). JSON arrays become `Value::Array`. Integer-valued
+/// numbers (no fractional part, within `i64` range) become `Value::Int`;
+/// all others become `Value::Float`.
 fn json_to_value(json: JsonValue) -> Value {
     match json {
         JsonValue::Null => Value::Void,

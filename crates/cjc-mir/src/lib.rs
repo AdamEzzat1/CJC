@@ -32,12 +32,24 @@ pub use escape::AllocHint;
 // IDs
 // ---------------------------------------------------------------------------
 
+/// Unique identifier for a MIR function within a [`MirProgram`].
+///
+/// Assigned sequentially during HIR-to-MIR lowering. The synthetic `__main`
+/// entry function and lambda-lifted closures each receive their own ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MirFnId(pub u32);
 
+/// Unique identifier for a basic block within a [`cfg::MirCfg`].
+///
+/// Block IDs are dense indices into `MirCfg::basic_blocks`. `BlockId(0)` is
+/// always the entry block. IDs are assigned deterministically in creation order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BlockId(pub u32);
 
+/// Unique identifier for a temporary value in the MIR.
+///
+/// Reserved for future use when MIR transitions to explicit temporaries
+/// instead of named variables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TempId(pub u32);
 
@@ -56,39 +68,76 @@ pub struct MirProgram {
     pub entry: MirFnId,
 }
 
+/// A struct (or record/class) type definition at the MIR level.
+///
+/// Struct definitions carry through from HIR without modification.
+/// The [`is_record`](MirStructDef::is_record) flag distinguishes immutable
+/// value-type records from mutable class-style structs.
 #[derive(Debug, Clone)]
 pub struct MirStructDef {
+    /// Name of the struct type.
     pub name: String,
-    pub fields: Vec<(String, String)>, // (name, type_name)
+    /// Fields as `(field_name, type_name)` pairs, in declaration order.
+    pub fields: Vec<(String, String)>,
     /// True if this is a record (immutable value type).
     pub is_record: bool,
+    /// Visibility of this struct definition.
     pub vis: Visibility,
 }
 
+/// An enum type definition at the MIR level.
+///
+/// Contains the enum name and its ordered list of variant definitions.
 #[derive(Debug, Clone)]
 pub struct MirEnumDef {
+    /// Name of the enum type.
     pub name: String,
+    /// Variant definitions in declaration order.
     pub variants: Vec<MirVariantDef>,
 }
 
+/// A single variant of a [`MirEnumDef`].
+///
+/// Each variant can carry zero or more positional fields identified by
+/// their type names.
 #[derive(Debug, Clone)]
 pub struct MirVariantDef {
+    /// Name of this variant.
     pub name: String,
-    pub fields: Vec<String>, // type names
+    /// Positional field type names.
+    pub fields: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
 // Functions
 // ---------------------------------------------------------------------------
 
+/// A MIR function definition.
+///
+/// Contains both the tree-form [`MirBody`] and an optional CFG representation.
+/// The tree-form body is canonical after lowering; the CFG is built on demand
+/// via [`build_cfg`](MirFunction::build_cfg) for analyses that require
+/// explicit control-flow edges (SSA, dominators, loop analysis).
+///
+/// Lambda-lifted closures and the synthetic `__main` entry function are
+/// represented as regular `MirFunction` instances.
 #[derive(Debug, Clone)]
 pub struct MirFunction {
+    /// Unique function ID within the program.
     pub id: MirFnId,
+    /// Function name. Lambda-lifted closures use `__closure_N` names.
+    /// Impl methods use `Target.method` qualified names.
     pub name: String,
-    pub type_params: Vec<(String, Vec<String>)>, // (param_name, bounds)
+    /// Generic type parameters as `(param_name, trait_bounds)` pairs.
+    pub type_params: Vec<(String, Vec<String>)>,
+    /// Function parameters in declaration order.
     pub params: Vec<MirParam>,
+    /// Return type name, if explicitly annotated.
     pub return_type: Option<String>,
+    /// Tree-form function body (statements + optional tail expression).
     pub body: MirBody,
+    /// Whether this function is annotated with `@nogc`.
+    /// When true, the [`nogc_verify`] module rejects any GC-triggering operations.
     pub is_nogc: bool,
     /// CFG representation of this function's body.
     /// Built lazily from tree-form `body` via `build_cfg()`.
@@ -96,12 +145,20 @@ pub struct MirFunction {
     pub cfg_body: Option<cfg::MirCfg>,
     /// Decorator names applied to this function (e.g., `@memoize`, `@trace`).
     pub decorators: Vec<String>,
+    /// Visibility of this function definition.
     pub vis: Visibility,
 }
 
+/// A function parameter at the MIR level.
+///
+/// Parameters carry their type annotation name and optional default value.
+/// For lambda-lifted closures, capture parameters appear first with type
+/// `"any"` (type-erased at MIR level).
 #[derive(Debug, Clone)]
 pub struct MirParam {
+    /// Parameter name.
     pub name: String,
+    /// Type annotation name (e.g., `"i64"`, `"f64"`, `"any"`).
     pub ty_name: String,
     /// Optional default value expression for this parameter.
     pub default: Option<MirExpr>,
@@ -118,6 +175,9 @@ impl MirFunction {
     }
 
     /// Return a reference to the CFG body, building it on demand if needed.
+    ///
+    /// Subsequent calls reuse the cached CFG. Prefer [`build_cfg`](Self::build_cfg)
+    /// if you need to force a rebuild.
     pub fn cfg(&mut self) -> &cfg::MirCfg {
         if self.cfg_body.is_none() {
             self.build_cfg();
@@ -149,28 +209,55 @@ pub struct MirBody {
 // Statements
 // ---------------------------------------------------------------------------
 
+/// A MIR statement.
+///
+/// Statements represent side-effecting or control-flow operations in the
+/// tree-form MIR body. In the CFG representation, control-flow statements
+/// (`If`, `While`, `Break`, `Continue`) are compiled into basic block
+/// terminators and edges.
 #[derive(Debug, Clone)]
 pub enum MirStmt {
+    /// Variable binding: `let [mut] name = init;`
+    ///
+    /// The [`alloc_hint`](AllocHint) is populated by escape analysis after
+    /// lowering to guide allocation strategy.
     Let {
+        /// Binding name.
         name: String,
+        /// Whether the binding is mutable.
         mutable: bool,
+        /// Initializer expression.
         init: MirExpr,
         /// Escape analysis annotation. `None` before analysis runs.
         alloc_hint: Option<AllocHint>,
     },
+    /// A standalone expression statement (e.g., function call, assignment).
     Expr(MirExpr),
+    /// Conditional statement: `if cond { then } [else { else_ }]`.
     If {
+        /// Condition expression (must evaluate to a boolean).
         cond: MirExpr,
+        /// Body executed when the condition is true.
         then_body: MirBody,
+        /// Optional body executed when the condition is false.
         else_body: Option<MirBody>,
     },
+    /// While loop: `while cond { body }`.
     While {
+        /// Loop condition expression.
         cond: MirExpr,
+        /// Loop body.
         body: MirBody,
     },
+    /// Return from the current function with an optional value.
     Return(Option<MirExpr>),
+    /// Break out of the innermost enclosing loop.
     Break,
+    /// Continue to the next iteration of the innermost enclosing loop.
     Continue,
+    /// A `nogc { ... }` block where GC-triggering operations are forbidden.
+    ///
+    /// Verified by [`nogc_verify::verify_nogc`].
     NoGcBlock(MirBody),
 }
 
@@ -178,63 +265,127 @@ pub enum MirStmt {
 // Expressions
 // ---------------------------------------------------------------------------
 
+/// A MIR expression node.
+///
+/// Wraps a [`MirExprKind`] discriminant. All MIR expressions are trees
+/// (no sharing / DAG structure).
 #[derive(Debug, Clone)]
 pub struct MirExpr {
+    /// The kind of this expression.
     pub kind: MirExprKind,
 }
 
+/// The discriminant for a MIR expression.
+///
+/// Covers literals, variables, operators, control flow, pattern matching,
+/// closures, linalg opcodes, and container constructors. Each variant
+/// corresponds to a distinct runtime operation in both the tree-walk
+/// interpreter (`cjc-eval`) and the MIR executor (`cjc-mir-exec`).
 #[derive(Debug, Clone)]
 pub enum MirExprKind {
+    /// 64-bit signed integer literal.
     IntLit(i64),
+    /// 64-bit IEEE 754 floating-point literal.
     FloatLit(f64),
+    /// Boolean literal (`true` or `false`).
     BoolLit(bool),
+    /// UTF-8 string literal.
     StringLit(String),
+    /// Byte string literal (`b"..."`).
     ByteStringLit(Vec<u8>),
+    /// Single byte character literal (`b'x'`).
     ByteCharLit(u8),
+    /// Raw string literal (`r"..."`).
     RawStringLit(String),
+    /// Raw byte string literal (`rb"..."`).
     RawByteStringLit(Vec<u8>),
-    RegexLit { pattern: String, flags: String },
-    TensorLit { rows: Vec<Vec<MirExpr>> },
+    /// Regex literal with pattern and flags.
+    RegexLit {
+        /// The regex pattern string.
+        pattern: String,
+        /// Regex flags (e.g., `"gi"`).
+        flags: String,
+    },
+    /// Tensor literal: a 2D grid of expressions (rows x columns).
+    TensorLit {
+        /// Each inner `Vec` is one row of the tensor.
+        rows: Vec<Vec<MirExpr>>,
+    },
+    /// NA (missing value) literal.
     NaLit,
+    /// Variable reference by name.
     Var(String),
+    /// Binary operation.
+    /// Binary operation.
     Binary {
+        /// The binary operator.
         op: BinOp,
+        /// Left-hand operand.
         left: Box<MirExpr>,
+        /// Right-hand operand.
         right: Box<MirExpr>,
     },
+    /// Unary operation (negation, logical not, bitwise not).
     Unary {
+        /// The unary operator.
         op: UnaryOp,
+        /// The operand.
         operand: Box<MirExpr>,
     },
+    /// Function or closure call.
     Call {
+        /// The callee expression (usually a [`Var`](MirExprKind::Var) or
+        /// [`Field`](MirExprKind::Field) for method calls).
         callee: Box<MirExpr>,
+        /// Positional arguments.
         args: Vec<MirExpr>,
     },
+    /// Field access: `object.name`.
     Field {
+        /// The object being accessed.
         object: Box<MirExpr>,
+        /// Field name.
         name: String,
     },
+    /// Single-index access: `object[index]`.
     Index {
+        /// The collection being indexed.
         object: Box<MirExpr>,
+        /// The index expression.
         index: Box<MirExpr>,
     },
+    /// Multi-dimensional index access: `object[i, j, ...]`.
     MultiIndex {
+        /// The collection being indexed.
         object: Box<MirExpr>,
+        /// Index expressions for each dimension.
         indices: Vec<MirExpr>,
     },
+    /// Assignment: `target = value`.
     Assign {
+        /// Assignment target (variable, field, or index expression).
         target: Box<MirExpr>,
+        /// Value being assigned.
         value: Box<MirExpr>,
     },
+    /// Block expression: evaluates a [`MirBody`] and returns its result.
     Block(MirBody),
+    /// Struct literal: `Name { field1: expr1, field2: expr2, ... }`.
     StructLit {
+        /// Struct type name.
         name: String,
+        /// Field initializers as `(name, value)` pairs.
         fields: Vec<(String, MirExpr)>,
     },
+    /// Array literal: `[expr1, expr2, ...]`.
     ArrayLit(Vec<MirExpr>),
+    /// Column reference in a data DSL context (e.g., `col("name")`).
     Col(String),
+    /// Lambda expression (non-capturing).
     Lambda {
+        /// Lambda parameters.
         params: Vec<MirParam>,
+        /// Lambda body expression.
         body: Box<MirExpr>,
     },
     /// Create a closure: captures + a reference to the lifted function.
@@ -248,35 +399,65 @@ pub enum MirExprKind {
         /// lifted function.
         captures: Vec<MirExpr>,
     },
+    /// If expression: `if cond { then } [else { else_ }]`.
+    ///
+    /// Used as both a statement and an expression (the branch bodies can
+    /// produce values).
     If {
+        /// Condition expression.
         cond: Box<MirExpr>,
+        /// Body evaluated when the condition is true.
         then_body: MirBody,
+        /// Optional body evaluated when the condition is false.
         else_body: Option<MirBody>,
     },
     /// Match expression compiled as a decision tree.
     /// Each arm is tried in order; first matching arm's body is evaluated.
     Match {
+        /// The value being matched against.
         scrutinee: Box<MirExpr>,
+        /// Match arms in order of priority.
         arms: Vec<MirMatchArm>,
     },
-    /// Enum variant literal
+    /// Enum variant literal constructor: `EnumName::Variant(fields...)`.
     VariantLit {
+        /// Enum type name.
         enum_name: String,
+        /// Variant name.
         variant: String,
+        /// Positional field values.
         fields: Vec<MirExpr>,
     },
-    /// Tuple literal
+    /// Tuple literal: `(expr1, expr2, ...)`.
     TupleLit(Vec<MirExpr>),
-    /// Linalg opcodes — dedicated MIR nodes for matrix decompositions.
-    LinalgLU { operand: Box<MirExpr> },
-    LinalgQR { operand: Box<MirExpr> },
-    LinalgCholesky { operand: Box<MirExpr> },
-    LinalgInv { operand: Box<MirExpr> },
+    /// LU decomposition opcode.
+    LinalgLU {
+        /// Matrix operand.
+        operand: Box<MirExpr>,
+    },
+    /// QR decomposition opcode.
+    LinalgQR {
+        /// Matrix operand.
+        operand: Box<MirExpr>,
+    },
+    /// Cholesky decomposition opcode.
+    LinalgCholesky {
+        /// Matrix operand (must be symmetric positive-definite).
+        operand: Box<MirExpr>,
+    },
+    /// Matrix inverse opcode.
+    LinalgInv {
+        /// Matrix operand.
+        operand: Box<MirExpr>,
+    },
     /// Broadcast a tensor to a target shape (zero-copy view with stride=0).
     Broadcast {
+        /// Tensor operand to broadcast.
         operand: Box<MirExpr>,
+        /// Target shape dimensions.
         target_shape: Vec<MirExpr>,
     },
+    /// Unit/void value (no meaningful result).
     Void,
 }
 
@@ -325,6 +506,22 @@ pub enum MirPattern {
 use cjc_hir::*;
 
 /// Lowers HIR into MIR.
+///
+/// Performs a single-pass traversal of the [`HirProgram`], converting each
+/// HIR item into its MIR equivalent. During lowering:
+///
+/// - Top-level statements are collected into a synthetic `__main` function.
+/// - Closures are lambda-lifted into top-level functions with extra leading
+///   parameters for captured values, and replaced with [`MirExprKind::MakeClosure`].
+/// - Impl methods are flattened to qualified `Target.method` names.
+/// - Traits produce no MIR output (metadata only).
+///
+/// # Usage
+///
+/// ```rust,ignore
+/// let mut lowering = HirToMir::new();
+/// let mir_program = lowering.lower_program(&hir_program);
+/// ```
 pub struct HirToMir {
     next_fn_id: u32,
     next_lambda_id: u32,
@@ -334,6 +531,7 @@ pub struct HirToMir {
 }
 
 impl HirToMir {
+    /// Create a new HIR-to-MIR lowering pass with fresh ID counters.
     pub fn new() -> Self {
         Self {
             next_fn_id: 0,
@@ -457,6 +655,11 @@ impl HirToMir {
         }
     }
 
+    /// Lower a single HIR function definition to a [`MirFunction`].
+    ///
+    /// Assigns a fresh [`MirFnId`] and recursively lowers parameters, body
+    /// statements, and the tail expression. Closures encountered within the
+    /// body are lambda-lifted and accumulated in `self.lifted_functions`.
     pub fn lower_fn(&mut self, f: &HirFn) -> MirFunction {
         let id = self.fresh_fn_id();
         let params = f
@@ -518,6 +721,10 @@ impl HirToMir {
         }
     }
 
+    /// Lower a HIR `if` expression to a [`MirStmt::If`].
+    ///
+    /// Nested `else if` chains are recursively lowered into nested
+    /// [`MirStmt::If`] nodes wrapped in a [`MirBody`].
     pub fn lower_if_stmt(&mut self, if_expr: &HirIfExpr) -> MirStmt {
         let cond = self.lower_expr(&if_expr.cond);
         let then_body = self.lower_block(&if_expr.then_block);
@@ -539,6 +746,11 @@ impl HirToMir {
         }
     }
 
+    /// Lower a HIR expression to a [`MirExpr`].
+    ///
+    /// Handles all HIR expression kinds including closures (lambda-lifted),
+    /// match expressions (compiled to [`MirExprKind::Match`] decision trees),
+    /// and if-expressions.
     pub fn lower_expr(&mut self, expr: &HirExpr) -> MirExpr {
         let kind = match &expr.kind {
             HirExprKind::IntLit(v) => MirExprKind::IntLit(*v),

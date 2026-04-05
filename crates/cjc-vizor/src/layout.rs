@@ -5,28 +5,34 @@
 use crate::spec::{PlotSpec, Scale, CoordSystem};
 use crate::text::format_tick;
 
-/// Result of layout computation.
+/// Result of layout computation: plot area bounds, data ranges, and ticks.
 #[derive(Debug, Clone)]
 pub struct LayoutResult {
-    /// Plot area bounding box (in pixel coordinates).
+    /// Plot area left edge (pixels).
     pub plot_x: f64,
+    /// Plot area top edge (pixels).
     pub plot_y: f64,
+    /// Plot area width (pixels).
     pub plot_w: f64,
+    /// Plot area height (pixels).
     pub plot_h: f64,
-    /// X-axis data range.
+    /// Minimum x data value (after scale/padding).
     pub x_min: f64,
+    /// Maximum x data value (after scale/padding).
     pub x_max: f64,
-    /// Y-axis data range.
+    /// Minimum y data value (after scale/padding).
     pub y_min: f64,
+    /// Maximum y data value (after scale/padding).
     pub y_max: f64,
-    /// Tick positions and labels.
+    /// X-axis tick positions (data value) and labels.
     pub x_ticks: Vec<(f64, String)>,
+    /// Y-axis tick positions (data value) and labels.
     pub y_ticks: Vec<(f64, String)>,
-    /// Whether x-axis is discrete.
+    /// Whether the x-axis is discrete (categorical).
     pub x_discrete: bool,
-    /// Whether x-axis uses log scale.
+    /// Log base for x-axis, if log scale is active.
     pub x_log: Option<f64>,
-    /// Whether y-axis uses log scale.
+    /// Log base for y-axis, if log scale is active.
     pub y_log: Option<f64>,
 }
 

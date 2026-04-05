@@ -8,10 +8,34 @@
 
 use cjc_runtime::Value;
 
-/// Convert a CJC `Value` to a JSON string.
+/// Convert a CJC [`Value`] to a deterministic JSON string.
 ///
-/// Handles all snap-encodable types. Non-JSON-native types are wrapped in
-/// objects with a `"__type"` discriminator so consumers can reconstruct them.
+/// Handle all snap-encodable types. Non-JSON-native types are wrapped in
+/// tagged objects with a `"__type"` discriminator field so consumers (e.g.,
+/// Python's `json.loads()`) can reconstruct the original type:
+///
+/// | CJC type | JSON representation |
+/// |----------|---------------------|
+/// | Tensor | `{"__type":"Tensor","shape":[...],"data":[...]}` |
+/// | Complex | `{"__type":"Complex","re":...,"im":...}` |
+/// | Struct | `{"__type":"Struct","name":"...","fields":{...}}` |
+/// | Enum | `{"__type":"Enum","enum":"...","variant":"...","fields":[...]}` |
+/// | Map | `{"__type":"Map","entries":[{"key":...,"value":...},...]}` |
+/// | Bytes | `{"__type":"Bytes","hex":"..."}` |
+/// | Bf16 | `{"__type":"Bf16","value":...}` |
+/// | F16 | `{"__type":"F16","value":...}` |
+///
+/// Struct fields and Map entries are sorted for deterministic output.
+/// NaN is encoded as `"NaN"`, infinity as `"Infinity"` / `"-Infinity"`.
+///
+/// # Arguments
+///
+/// * `value` - The [`Value`] to convert. Must be snap-encodable.
+///
+/// # Errors
+///
+/// Returns an error message for runtime-only variants (`Fn`, `Closure`,
+/// etc.) that cannot be represented as JSON.
 pub fn snap_to_json(value: &Value) -> Result<String, String> {
     let mut buf = String::with_capacity(256);
     write_json(value, &mut buf)?;

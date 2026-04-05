@@ -24,23 +24,39 @@ pub struct HirId(pub u32);
 // Top-level Program
 // ---------------------------------------------------------------------------
 
-/// A complete HIR program.
+/// A complete HIR program after AST lowering.
+///
+/// Contains all top-level items (functions, structs, enums, etc.) in their
+/// desugared HIR form, ready for downstream MIR lowering.
 #[derive(Debug, Clone)]
 pub struct HirProgram {
+    /// Top-level items in declaration order.
     pub items: Vec<HirItem>,
 }
 
 /// Top-level item after desugaring.
+///
+/// Each variant corresponds to a distinct kind of declaration that can appear
+/// at the top level of a CJC program.
 #[derive(Debug, Clone)]
 pub enum HirItem {
+    /// A function declaration (including decorated functions).
     Fn(HirFn),
+    /// A struct type definition with named fields.
     Struct(HirStructDef),
+    /// A class type definition with named fields.
     Class(HirClassDef),
+    /// A record (immutable value type) definition.
     Record(HirRecordDef),
+    /// A trait definition with method signatures.
     Trait(HirTraitDef),
+    /// An `impl` block providing method implementations for a type.
     Impl(HirImplDef),
+    /// An enum type definition with variants.
     Enum(HirEnumDef),
+    /// A top-level `let` binding.
     Let(HirLetDecl),
+    /// A bare statement at the top level (e.g., expression statements, imports lowered to void).
     Stmt(HirStmt),
 }
 
@@ -48,28 +64,47 @@ pub enum HirItem {
 // Functions
 // ---------------------------------------------------------------------------
 
+/// A function definition in HIR.
+///
+/// Represents both plain functions and decorated functions after lowering.
+/// Parameters, return type, and body have all been desugared from AST form.
 #[derive(Debug, Clone)]
 pub struct HirFn {
+    /// The function name.
     pub name: String,
-    pub type_params: Vec<(String, Vec<String>)>, // (param_name, bounds)
+    /// Generic type parameters as `(param_name, trait_bounds)` pairs.
+    pub type_params: Vec<(String, Vec<String>)>,
+    /// Positional parameters (may include defaults and variadics).
     pub params: Vec<HirParam>,
+    /// Optional return type annotation as a string.
     pub return_type: Option<String>,
+    /// The function body block.
     pub body: HirBlock,
+    /// Whether this function is annotated `nogc` (no garbage-collected allocations allowed).
     pub is_nogc: bool,
+    /// Unique HIR node identifier.
     pub hir_id: HirId,
     /// Decorator names applied to this function (e.g., `@memoize`, `@trace`).
     pub decorators: Vec<String>,
+    /// Visibility of this function (`pub` or private).
     pub vis: Visibility,
 }
 
+/// A function parameter in HIR.
+///
+/// Carries the parameter name, type annotation, optional default value,
+/// and whether it is variadic.
 #[derive(Debug, Clone)]
 pub struct HirParam {
+    /// The parameter name.
     pub name: String,
+    /// Type annotation as a string (e.g., `"f64"`, `"Tensor"`).
     pub ty_name: String,
     /// Optional default value expression for this parameter.
     pub default: Option<HirExpr>,
     /// Variadic parameter: collects remaining args into an array.
     pub is_variadic: bool,
+    /// Unique HIR node identifier.
     pub hir_id: HirId,
 }
 
@@ -77,19 +112,34 @@ pub struct HirParam {
 // Struct / Class / Trait / Impl
 // ---------------------------------------------------------------------------
 
+/// A struct type definition in HIR.
+///
+/// Structs are mutable product types with named fields.
 #[derive(Debug, Clone)]
 pub struct HirStructDef {
+    /// The struct name.
     pub name: String,
-    pub fields: Vec<(String, String)>, // (field_name, type_name)
+    /// Fields as `(field_name, type_name)` pairs.
+    pub fields: Vec<(String, String)>,
+    /// Unique HIR node identifier.
     pub hir_id: HirId,
+    /// Visibility of this struct (`pub` or private).
     pub vis: Visibility,
 }
 
+/// A class type definition in HIR.
+///
+/// Classes are similar to structs but follow class semantics with
+/// reference identity.
 #[derive(Debug, Clone)]
 pub struct HirClassDef {
+    /// The class name.
     pub name: String,
+    /// Fields as `(field_name, type_name)` pairs.
     pub fields: Vec<(String, String)>,
+    /// Unique HIR node identifier.
     pub hir_id: HirId,
+    /// Visibility of this class (`pub` or private).
     pub vis: Visibility,
 }
 
@@ -102,52 +152,92 @@ pub struct HirRecordDef {
     pub vis: Visibility,
 }
 
+/// A trait definition in HIR.
+///
+/// Defines a set of method signatures that implementors must provide.
 #[derive(Debug, Clone)]
 pub struct HirTraitDef {
+    /// The trait name.
     pub name: String,
+    /// Method signatures declared in this trait.
     pub methods: Vec<HirFnSig>,
+    /// Unique HIR node identifier.
     pub hir_id: HirId,
 }
 
+/// A function signature (without body) in HIR.
+///
+/// Used inside trait definitions to declare method contracts.
 #[derive(Debug, Clone)]
 pub struct HirFnSig {
+    /// The method name.
     pub name: String,
+    /// Parameters of this method signature.
     pub params: Vec<HirParam>,
+    /// Optional return type annotation as a string.
     pub return_type: Option<String>,
 }
 
+/// An `impl` block in HIR.
+///
+/// Provides method implementations for a target type, optionally satisfying
+/// a trait reference.
 #[derive(Debug, Clone)]
 pub struct HirImplDef {
+    /// The type being implemented (e.g., `"Matrix"`).
     pub target: String,
+    /// Optional trait being implemented (e.g., `"Display"`).
     pub trait_ref: Option<String>,
+    /// Method implementations.
     pub methods: Vec<HirFn>,
+    /// Unique HIR node identifier.
     pub hir_id: HirId,
 }
 
+/// An enum type definition in HIR.
+///
+/// Enums are sum types with named variants, optionally parameterized by
+/// generic type parameters.
 #[derive(Debug, Clone)]
 pub struct HirEnumDef {
+    /// The enum name.
     pub name: String,
+    /// Generic type parameter names (e.g., `["T"]` for `Option<T>`).
     pub type_params: Vec<String>,
+    /// Variant definitions for this enum.
     pub variants: Vec<HirVariantDef>,
+    /// Unique HIR node identifier.
     pub hir_id: HirId,
 }
 
+/// A single variant of an enum definition in HIR.
 #[derive(Debug, Clone)]
 pub struct HirVariantDef {
+    /// The variant name.
     pub name: String,
-    pub fields: Vec<String>, // type names as strings
+    /// Positional field types as strings (empty for unit variants).
+    pub fields: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
 // Let declaration (top-level)
 // ---------------------------------------------------------------------------
 
+/// A top-level `let` binding in HIR.
+///
+/// Represents a variable declaration with an initializer expression.
+/// May be mutable or immutable, and may carry an explicit type annotation.
 #[derive(Debug, Clone)]
 pub struct HirLetDecl {
+    /// The variable name.
     pub name: String,
+    /// Whether this binding is mutable (`let mut`).
     pub mutable: bool,
+    /// Optional explicit type annotation as a string.
     pub ty_name: Option<String>,
+    /// The initializer expression.
     pub init: HirExpr,
+    /// Unique HIR node identifier.
     pub hir_id: HirId,
 }
 
@@ -155,10 +245,17 @@ pub struct HirLetDecl {
 // Blocks
 // ---------------------------------------------------------------------------
 
+/// A block of statements in HIR, optionally terminated by a tail expression.
+///
+/// The tail expression (if present) determines the value produced by the block.
+/// This is the HIR equivalent of `{ stmt; stmt; expr }`.
 #[derive(Debug, Clone)]
 pub struct HirBlock {
+    /// Statements in this block, in order.
     pub stmts: Vec<HirStmt>,
+    /// Optional tail expression whose value becomes the block's value.
     pub expr: Option<Box<HirExpr>>,
+    /// Unique HIR node identifier.
     pub hir_id: HirId,
 }
 
@@ -166,29 +263,53 @@ pub struct HirBlock {
 // Statements
 // ---------------------------------------------------------------------------
 
+/// A statement in HIR.
+///
+/// Wraps a [`HirStmtKind`] with a unique [`HirId`] for diagnostics and tracing.
 #[derive(Debug, Clone)]
 pub struct HirStmt {
+    /// The kind of statement.
     pub kind: HirStmtKind,
+    /// Unique HIR node identifier.
     pub hir_id: HirId,
 }
 
+/// The kind of a HIR statement.
+///
+/// Statements do not produce values (unlike expressions). Control flow
+/// constructs like `if` and `while` appear here when used in statement
+/// position.
 #[derive(Debug, Clone)]
 pub enum HirStmtKind {
+    /// A local variable binding: `let [mut] name [: ty] = init;`.
     Let {
+        /// The variable name.
         name: String,
+        /// Whether this binding is mutable.
         mutable: bool,
+        /// Optional type annotation as a string.
         ty_name: Option<String>,
+        /// The initializer expression.
         init: HirExpr,
     },
+    /// A bare expression statement.
     Expr(HirExpr),
+    /// An `if`/`else if`/`else` chain in statement position.
     If(HirIfExpr),
+    /// A `while` loop with condition and body.
     While {
+        /// Loop condition expression.
         cond: HirExpr,
+        /// Loop body block.
         body: HirBlock,
     },
+    /// A `return` statement with an optional value.
     Return(Option<HirExpr>),
+    /// A `break` statement (exits the innermost loop).
     Break,
+    /// A `continue` statement (skips to the next loop iteration).
     Continue,
+    /// A `nogc { ... }` block that disallows GC allocations inside.
     NoGcBlock(HirBlock),
 }
 
@@ -196,123 +317,214 @@ pub enum HirStmtKind {
 // Expressions
 // ---------------------------------------------------------------------------
 
+/// An expression node in HIR.
+///
+/// Wraps a [`HirExprKind`] with a unique [`HirId`] for diagnostics and tracing.
 #[derive(Debug, Clone)]
 pub struct HirExpr {
+    /// The kind of expression.
     pub kind: HirExprKind,
+    /// Unique HIR node identifier.
     pub hir_id: HirId,
 }
 
+/// The kind of a HIR expression.
+///
+/// After lowering, syntactic sugar has been removed: pipes become calls,
+/// `for` loops become `while` loops, `as` casts become builtin calls,
+/// compound assignments become plain assignments, and f-strings become
+/// string concatenation chains.
 #[derive(Debug, Clone)]
 pub enum HirExprKind {
     // -- Literals --
+    /// An integer literal (e.g., `42`).
     IntLit(i64),
+    /// A floating-point literal (e.g., `3.14`).
     FloatLit(f64),
+    /// A boolean literal (`true` or `false`).
     BoolLit(bool),
+    /// A string literal (e.g., `"hello"`).
     StringLit(String),
+    /// A byte string literal (e.g., `b"hello"`).
     ByteStringLit(Vec<u8>),
+    /// A byte character literal (e.g., `b'x'`).
     ByteCharLit(u8),
+    /// A raw string literal (e.g., `r"no\escapes"`).
     RawStringLit(String),
+    /// A raw byte string literal (e.g., `rb"raw\bytes"`).
     RawByteStringLit(Vec<u8>),
-    RegexLit { pattern: String, flags: String },
-    TensorLit { rows: Vec<Vec<HirExpr>> },
+    /// A regex literal with pattern and flags (e.g., `/pattern/gi`).
+    RegexLit {
+        /// The regex pattern string.
+        pattern: String,
+        /// Regex flags (e.g., `"gi"`).
+        flags: String,
+    },
+    /// A tensor literal with rows of expressions (e.g., `[[1, 2], [3, 4]]`).
+    TensorLit {
+        /// Rows of element expressions.
+        rows: Vec<Vec<HirExpr>>,
+    },
+    /// The `NA` (not available) literal for missing values.
     NaLit,
 
     // -- Variable reference --
+    /// A variable reference by name.
     Var(String),
 
     // -- Operations --
+    /// A binary operation (e.g., `a + b`, `x < y`).
     Binary {
+        /// The binary operator.
         op: BinOp,
+        /// The left-hand operand.
         left: Box<HirExpr>,
+        /// The right-hand operand.
         right: Box<HirExpr>,
     },
+    /// A unary operation (e.g., `-x`, `!flag`).
     Unary {
+        /// The unary operator.
         op: UnaryOp,
+        /// The operand expression.
         operand: Box<HirExpr>,
     },
 
     // -- Call (unified: pipe lowered into this) --
+    /// A function call. Pipe expressions (`a |> f(b)`) are desugared into
+    /// calls with the left-hand side prepended as the first argument.
     Call {
+        /// The callee expression (typically a [`Var`](HirExprKind::Var)).
         callee: Box<HirExpr>,
+        /// Positional arguments.
         args: Vec<HirExpr>,
     },
 
     // -- Field access --
+    /// Field access on an object (e.g., `point.x`).
     Field {
+        /// The object being accessed.
         object: Box<HirExpr>,
+        /// The field name.
         name: String,
     },
 
     // -- Index --
+    /// Single-index access (e.g., `arr[i]`).
     Index {
+        /// The object being indexed.
         object: Box<HirExpr>,
+        /// The index expression.
         index: Box<HirExpr>,
     },
 
     // -- Multi-index (preserved for tensor indexing) --
+    /// Multi-index access for tensors (e.g., `t[i, j]`).
     MultiIndex {
+        /// The tensor or object being indexed.
         object: Box<HirExpr>,
+        /// Index expressions for each dimension.
         indices: Vec<HirExpr>,
     },
 
     // -- Assign --
+    /// Assignment expression (e.g., `x = 42`). Compound assignments like
+    /// `x += 1` are desugared to `x = x + 1` during lowering.
     Assign {
+        /// The assignment target (variable, field, or index).
         target: Box<HirExpr>,
+        /// The value being assigned.
         value: Box<HirExpr>,
     },
 
     // -- Block --
+    /// A block expression that evaluates to the value of its tail expression.
     Block(HirBlock),
 
     // -- Struct literal --
+    /// A struct literal (e.g., `Point { x: 1, y: 2 }`).
     StructLit {
+        /// The struct type name.
         name: String,
+        /// Field initializers as `(field_name, value)` pairs.
         fields: Vec<(String, HirExpr)>,
     },
 
     // -- Array literal --
+    /// An array literal (e.g., `[1, 2, 3]`).
     ArrayLit(Vec<HirExpr>),
 
     // -- Col DSL --
+    /// A column reference in the data DSL (e.g., `$col_name`).
     Col(String),
 
-    // -- Lambda (no captures — kept for backward compat) --
+    // -- Lambda (no captures -- kept for backward compat) --
+    /// A lambda expression with no captured variables.
+    ///
+    /// Lambdas that capture outer variables are represented as
+    /// [`Closure`](HirExprKind::Closure) instead.
     Lambda {
+        /// Lambda parameters.
         params: Vec<HirParam>,
+        /// Lambda body expression.
         body: Box<HirExpr>,
     },
 
     // -- Closure (lambda with analyzed captures) --
+    /// A closure: a lambda that captures variables from enclosing scopes.
+    ///
+    /// Capture analysis determines which outer variables are referenced and
+    /// whether they are captured by reference or by clone (inside `nogc` blocks).
     Closure {
+        /// Closure parameters.
         params: Vec<HirParam>,
+        /// Closure body expression.
         body: Box<HirExpr>,
+        /// Variables captured from enclosing scopes.
         captures: Vec<HirCapture>,
     },
 
     // -- Match expression --
+    /// A `match` expression with a scrutinee and pattern-guarded arms.
     Match {
+        /// The expression being matched against.
         scrutinee: Box<HirExpr>,
+        /// Match arms, each with a pattern and body.
         arms: Vec<HirMatchArm>,
     },
 
     // -- Tuple literal --
+    /// A tuple literal (e.g., `(1, "hello", true)`).
     TupleLit(Vec<HirExpr>),
 
     // -- Enum variant literal --
+    /// An enum variant constructor (e.g., `Some(42)`, `None`).
     VariantLit {
+        /// The enum type name (e.g., `"Option"`).
         enum_name: String,
+        /// The variant name (e.g., `"Some"`).
         variant: String,
+        /// Positional field values (empty for unit variants).
         fields: Vec<HirExpr>,
     },
 
     // -- If expression (produces a value) --
+    /// An `if` expression that produces a value from the taken branch.
+    ///
+    /// Used when `if` appears in expression position (e.g.,
+    /// `let x = if cond { a } else { b };`).
     If {
+        /// The condition expression.
         cond: Box<HirExpr>,
+        /// The `then` branch block.
         then_block: HirBlock,
+        /// Optional `else`/`else if` branch.
         else_branch: Option<HirElseBranch>,
     },
 
     // -- Void (for empty else branches, etc.) --
+    /// A void expression representing no value (used for empty branches
+    /// and lowered import statements).
     Void,
 }
 
@@ -320,52 +532,77 @@ pub enum HirExprKind {
 // Match / Pattern types
 // ---------------------------------------------------------------------------
 
-/// A single arm of a match expression in HIR.
+/// A single arm of a `match` expression in HIR.
+///
+/// Each arm consists of a pattern to match against the scrutinee and a body
+/// expression to evaluate if the pattern matches.
 #[derive(Debug, Clone)]
 pub struct HirMatchArm {
+    /// The pattern to match against.
     pub pattern: HirPattern,
+    /// The body expression evaluated when this arm matches.
     pub body: HirExpr,
+    /// Unique HIR node identifier.
     pub hir_id: HirId,
 }
 
-/// A pattern in HIR for use in match arms.
+/// A pattern in HIR for use in match arms and destructuring.
+///
+/// Wraps a [`HirPatternKind`] with a unique [`HirId`].
 #[derive(Debug, Clone)]
 pub struct HirPattern {
+    /// The kind of pattern.
     pub kind: HirPatternKind,
+    /// Unique HIR node identifier.
     pub hir_id: HirId,
 }
 
+/// The kind of a HIR pattern, used in match arms and destructuring.
 #[derive(Debug, Clone)]
 pub enum HirPatternKind {
-    /// Wildcard: `_`
+    /// Wildcard pattern `_`: matches any value without binding.
     Wildcard,
-    /// Binding: `x` (binds the matched value)
+    /// Binding pattern `x`: matches any value and binds it to the given name.
     Binding(String),
-    /// Literal patterns
+    /// Integer literal pattern (e.g., `42`).
     LitInt(i64),
+    /// Float literal pattern (e.g., `3.14`).
     LitFloat(f64),
+    /// Boolean literal pattern (`true` or `false`).
     LitBool(bool),
+    /// String literal pattern (e.g., `"hello"`).
     LitString(String),
-    /// Tuple destructuring: `(a, b, c)`
+    /// Tuple destructuring pattern (e.g., `(a, b, c)`).
     Tuple(Vec<HirPattern>),
-    /// Struct destructuring: `Point { x, y }`
+    /// Struct destructuring pattern (e.g., `Point { x, y }`).
     Struct {
+        /// The struct type name.
         name: String,
+        /// Field patterns for destructuring.
         fields: Vec<HirPatternField>,
     },
-    /// Enum variant pattern: `Some(x)`, `None`, `Ok(v)`, `Err(e)`
+    /// Enum variant pattern (e.g., `Some(x)`, `None`, `Ok(v)`, `Err(e)`).
     Variant {
+        /// The enum type name (e.g., `"Option"`, `"Result"`).
         enum_name: String,
+        /// The variant name (e.g., `"Some"`, `"None"`).
         variant: String,
+        /// Sub-patterns for the variant's fields (empty for unit variants).
         fields: Vec<HirPattern>,
     },
 }
 
-/// A field inside a struct pattern in HIR.
+/// A field inside a struct destructuring pattern in HIR.
+///
+/// Supports both explicit patterns (`Point { x: px }`) and shorthand
+/// (`Point { x }`, which desugars to `Point { x: x }`).
 #[derive(Debug, Clone)]
 pub struct HirPatternField {
+    /// The field name being matched.
     pub name: String,
+    /// The sub-pattern to match against this field's value.
     pub pattern: HirPattern,
+    /// Unique HIR node identifier.
     pub hir_id: HirId,
 }
 
@@ -383,10 +620,15 @@ pub enum CaptureMode {
 }
 
 /// A single captured variable with its name and capture mode.
+///
+/// Produced during closure capture analysis in [`AstLowering`].
 #[derive(Debug, Clone)]
 pub struct HirCapture {
+    /// The name of the captured variable.
     pub name: String,
+    /// How this variable is captured (by reference or by clone).
     pub mode: CaptureMode,
+    /// Unique HIR node identifier.
     pub hir_id: HirId,
 }
 
@@ -394,17 +636,28 @@ pub struct HirCapture {
 // If expression
 // ---------------------------------------------------------------------------
 
+/// An `if`/`else if`/`else` chain in statement position.
+///
+/// Used by [`HirStmtKind::If`]. For `if` in expression position, see
+/// [`HirExprKind::If`].
 #[derive(Debug, Clone)]
 pub struct HirIfExpr {
+    /// The condition expression.
     pub cond: Box<HirExpr>,
+    /// The `then` branch block.
     pub then_block: HirBlock,
+    /// Optional `else` or `else if` continuation.
     pub else_branch: Option<HirElseBranch>,
+    /// Unique HIR node identifier.
     pub hir_id: HirId,
 }
 
+/// The else branch of an `if` statement or expression.
 #[derive(Debug, Clone)]
 pub enum HirElseBranch {
+    /// An `else if` continuation, chaining another conditional.
     ElseIf(Box<HirIfExpr>),
+    /// A terminal `else` block.
     Else(HirBlock),
 }
 
@@ -443,6 +696,8 @@ pub struct AstLowering {
 use std::collections::BTreeMap;
 
 impl AstLowering {
+    /// Creates a new [`AstLowering`] instance with prelude variant names
+    /// (`Some`, `None`, `Ok`, `Err`) pre-registered for enum variant resolution.
     pub fn new() -> Self {
         let mut variant_names = BTreeMap::new();
         // Register prelude variant names
@@ -528,7 +783,20 @@ impl AstLowering {
         )
     }
 
-    /// Lower a complete AST program to HIR.
+    /// Lowers a complete AST [`Program`](cjc_ast::Program) into a [`HirProgram`].
+    ///
+    /// Performs a pre-scan to register all top-level function names and enum
+    /// variant names, then lowers each declaration in order. This ensures that
+    /// function names are not mistakenly treated as captured variables inside
+    /// closures, and that variant names resolve correctly.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The AST program to lower.
+    ///
+    /// # Returns
+    ///
+    /// A fully lowered [`HirProgram`] with all syntactic sugar removed.
     pub fn lower_program(&mut self, program: &cjc_ast::Program) -> HirProgram {
         // Pre-scan: register all top-level function names so they aren't
         // treated as captured variables inside closures.
@@ -601,6 +869,19 @@ impl AstLowering {
         }
     }
 
+    /// Lowers an AST function declaration into a [`HirFn`].
+    ///
+    /// Pushes a new scope for the function body, registers parameters as
+    /// local variables, lowers the body block, and restores the `nogc` context
+    /// afterward.
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The AST function declaration to lower.
+    ///
+    /// # Returns
+    ///
+    /// A lowered [`HirFn`] with desugared body, parameters, and decorators.
     pub fn lower_fn_decl(&mut self, f: &cjc_ast::FnDecl) -> HirFn {
         let hir_id = self.fresh_id();
         let old_nogc = self.in_nogc;
@@ -773,6 +1054,19 @@ impl AstLowering {
         }
     }
 
+    /// Lowers an AST statement into a [`HirStmt`].
+    ///
+    /// Handles all statement kinds including `let`, `if`, `while`, `for`,
+    /// `return`, `break`, `continue`, and `nogc` blocks. For-loops are
+    /// desugared into while-loops via [`desugar_for`](Self::desugar_for).
+    ///
+    /// # Arguments
+    ///
+    /// * `stmt` - The AST statement to lower.
+    ///
+    /// # Returns
+    ///
+    /// A lowered [`HirStmt`] with all syntactic sugar removed.
     pub fn lower_stmt(&mut self, stmt: &cjc_ast::Stmt) -> HirStmt {
         let hir_id = self.fresh_id();
         let kind = match &stmt.kind {
@@ -1158,6 +1452,17 @@ impl AstLowering {
         }
     }
 
+    /// Lowers an AST `if` statement into a [`HirIfExpr`].
+    ///
+    /// Recursively lowers `else if` chains and terminal `else` blocks.
+    ///
+    /// # Arguments
+    ///
+    /// * `if_stmt` - The AST if-statement to lower.
+    ///
+    /// # Returns
+    ///
+    /// A lowered [`HirIfExpr`] with condition, then-block, and optional else branch.
     pub fn lower_if(&mut self, if_stmt: &cjc_ast::IfStmt) -> HirIfExpr {
         let hir_id = self.fresh_id();
         let cond = Box::new(self.lower_expr(&if_stmt.condition));
@@ -1176,6 +1481,26 @@ impl AstLowering {
         }
     }
 
+    /// Lowers an AST expression into a [`HirExpr`].
+    ///
+    /// Performs all expression-level desugaring:
+    /// - Pipe `a |> f(b)` becomes `Call(f, [a, b])`
+    /// - Compound assignment `x += 1` becomes `x = x + 1`
+    /// - Cast `expr as f64` becomes a builtin function call
+    /// - F-string `f"...{expr}..."` becomes string concatenation
+    /// - `expr?` (try) becomes a match on `Ok`/`Err`
+    /// - Lambda expressions undergo capture analysis to produce
+    ///   [`Lambda`](HirExprKind::Lambda) or [`Closure`](HirExprKind::Closure)
+    /// - Identifiers matching known enum variants resolve to
+    ///   [`VariantLit`](HirExprKind::VariantLit)
+    ///
+    /// # Arguments
+    ///
+    /// * `expr` - The AST expression to lower.
+    ///
+    /// # Returns
+    ///
+    /// A lowered [`HirExpr`] with all syntactic sugar removed.
     pub fn lower_expr(&mut self, expr: &cjc_ast::Expr) -> HirExpr {
         let hir_id = self.fresh_id();
         let kind = match &expr.kind {
@@ -1984,6 +2309,7 @@ impl AstLowering {
 }
 
 impl Default for AstLowering {
+    /// Creates a default [`AstLowering`] instance, equivalent to [`AstLowering::new()`].
     fn default() -> Self {
         Self::new()
     }

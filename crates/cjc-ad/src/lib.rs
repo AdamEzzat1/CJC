@@ -13,25 +13,60 @@ pub mod pinn;
 // ── Forward-Mode AD (Dual Numbers) ──────────────────────────────
 
 /// Dual number for forward-mode automatic differentiation.
+///
+/// Carries a primal value and its derivative (tangent) through arithmetic
+/// operations so that `f(Dual::variable(x))` yields both `f(x)` and `f'(x)`
+/// in a single forward pass.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // Compute f(x) = x^2 and f'(x) at x = 3
+/// let x = Dual::variable(3.0);
+/// let y = x.clone() * x;
+/// assert_eq!(y.value, 9.0);
+/// assert_eq!(y.deriv, 6.0);
+/// ```
 #[derive(Debug, Clone)]
 pub struct Dual {
+    /// The primal (function) value.
     pub value: f64,
+    /// The tangent (derivative) value.
     pub deriv: f64,
 }
 
 impl Dual {
+    /// Create a dual number with an explicit value and derivative.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The primal value.
+    /// * `deriv` - The tangent (derivative) seed.
     pub fn new(value: f64, deriv: f64) -> Self {
         Self { value, deriv }
     }
 
+    /// Create a dual number representing a constant (derivative = 0).
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The constant value.
     pub fn constant(value: f64) -> Self {
         Self { value, deriv: 0.0 }
     }
 
+    /// Create a dual number representing the independent variable (derivative = 1).
+    ///
+    /// Use this for the variable with respect to which you are differentiating.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The point at which to evaluate.
     pub fn variable(value: f64) -> Self {
         Self { value, deriv: 1.0 }
     }
 
+    /// Return the additive identity dual number (value = 0, derivative = 0).
     pub fn zero() -> Self {
         Self {
             value: 0.0,
@@ -39,6 +74,7 @@ impl Dual {
         }
     }
 
+    /// Return the multiplicative identity dual number (value = 1, derivative = 0).
     pub fn one() -> Self {
         Self {
             value: 1.0,
@@ -99,6 +135,7 @@ impl std::ops::Neg for Dual {
 }
 
 impl Dual {
+    /// Compute the sine, propagating the derivative via the chain rule: `d/dx sin(x) = cos(x)`.
     pub fn sin(self) -> Dual {
         Dual {
             value: self.value.sin(),
@@ -106,6 +143,7 @@ impl Dual {
         }
     }
 
+    /// Compute the cosine, propagating the derivative via the chain rule: `d/dx cos(x) = -sin(x)`.
     pub fn cos(self) -> Dual {
         Dual {
             value: self.value.cos(),
@@ -113,6 +151,7 @@ impl Dual {
         }
     }
 
+    /// Compute the exponential, propagating the derivative: `d/dx exp(x) = exp(x)`.
     pub fn exp(self) -> Dual {
         let e = self.value.exp();
         Dual {
@@ -121,6 +160,7 @@ impl Dual {
         }
     }
 
+    /// Compute the natural logarithm, propagating the derivative: `d/dx ln(x) = 1/x`.
     pub fn ln(self) -> Dual {
         Dual {
             value: self.value.ln(),
@@ -128,6 +168,7 @@ impl Dual {
         }
     }
 
+    /// Compute the square root, propagating the derivative: `d/dx sqrt(x) = 1/(2*sqrt(x))`.
     pub fn sqrt(self) -> Dual {
         let s = self.value.sqrt();
         Dual {
@@ -136,6 +177,11 @@ impl Dual {
         }
     }
 
+    /// Raise to a constant power `n`, propagating the derivative: `d/dx x^n = n * x^(n-1)`.
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - The exponent (constant, not differentiated).
     pub fn pow(self, n: f64) -> Dual {
         Dual {
             value: self.value.powf(n),
@@ -146,21 +192,37 @@ impl Dual {
 
 // ── Reverse-Mode AD (Computational Graph) ───────────────────────
 
-/// Operation recorded in the computation graph.
+/// Operation recorded in the reverse-mode AD computation graph.
+///
+/// Each variant stores the node indices of its operands so the backward pass
+/// can look up parent tensors and propagate gradients.
 #[derive(Debug, Clone)]
 pub enum GradOp {
+    /// External input data (no gradient accumulated).
     Input,
+    /// Trainable parameter (gradients are accumulated here during backward).
     Parameter,
+    /// Element-wise addition of two nodes.
     Add(usize, usize),
+    /// Element-wise subtraction of two nodes.
     Sub(usize, usize),
+    /// Element-wise (Hadamard) multiplication of two nodes.
     Mul(usize, usize),
+    /// Element-wise division of two nodes.
     Div(usize, usize),
+    /// Element-wise negation.
     Neg(usize),
+    /// Matrix multiplication of two 2-D nodes.
     MatMul(usize, usize),
+    /// Sum all elements to a scalar `[1]` tensor.
     Sum(usize),
+    /// Mean of all elements to a scalar `[1]` tensor.
     Mean(usize),
+    /// Multiply every element by a constant scalar.
     ScalarMul(usize, f64),
+    /// Element-wise exponential.
     Exp(usize),
+    /// Element-wise natural logarithm.
     Ln(usize),
     /// Gradient through struct field access: parent node, field index.
     StructField {
@@ -174,37 +236,82 @@ pub enum GradOp {
         key_index: usize,
         total_keys: usize,
     },
-    // Phase B8: Transcendental & activation ops
+    /// Element-wise sine: `d/dx sin(x) = cos(x)`.
     Sin(usize),
+    /// Element-wise cosine: `d/dx cos(x) = -sin(x)`.
     Cos(usize),
+    /// Element-wise square root: `d/dx sqrt(x) = 1/(2*sqrt(x))`.
     Sqrt(usize),
+    /// Element-wise power with a constant exponent: `d/dx x^n = n * x^(n-1)`.
     Pow(usize, f64),
+    /// Logistic sigmoid activation: `sigma(x) = 1 / (1 + exp(-x))`.
     Sigmoid(usize),
+    /// Rectified linear unit activation: `max(0, x)`.
     Relu(usize),
+    /// Hyperbolic tangent activation: `tanh(x)`.
     TanhAct(usize),
-    // Phase 8: Extended AD ops
+    /// Element-wise absolute value with sub-gradient `sign(x)` at zero.
     Abs(usize),
+    /// Base-2 logarithm: `d/dx log2(x) = 1/(x * ln(2))`.
     Log2(usize),
+    /// Softmax over the last axis, producing a probability distribution.
     Softmax(usize),
-    /// Cross-entropy loss: CrossEntropy(logits, targets)
-    CrossEntropy { logits: usize, targets: usize },
-    /// Layer normalization: LayerNorm(input); stores normalized output and std for backward
+    /// Cross-entropy loss between predicted logits and target labels.
+    CrossEntropy {
+        /// Node index of the raw logit tensor.
+        logits: usize,
+        /// Node index of the target (one-hot or class-index) tensor.
+        targets: usize,
+    },
+    /// Layer normalization over the last axis; stores statistics for backward.
     LayerNorm(usize),
-    /// Batch normalization: BatchNorm(input); stores normalized output and std for backward
+    /// Batch normalization over the first axis; stores statistics for backward.
     BatchNorm(usize),
-    /// Clamp to [min, max]
-    Clamp { input: usize, min: f64, max: f64 },
-    /// Conditional select: Where(condition, on_true, on_false)
-    /// condition is a tensor of 0.0/1.0 masks
-    Where { cond: usize, on_true: usize, on_false: usize },
-    /// Reshape with stored original shape for backward
-    Reshape { input: usize, original_shape: Vec<usize> },
-    /// Transpose (2-D)
+    /// Element-wise clamping to the range `[min, max]`.
+    Clamp {
+        /// Node index of the input tensor.
+        input: usize,
+        /// Lower bound.
+        min: f64,
+        /// Upper bound.
+        max: f64,
+    },
+    /// Element-wise conditional select using a `{0.0, 1.0}` mask tensor.
+    Where {
+        /// Node index of the condition mask.
+        cond: usize,
+        /// Node index selected where condition is `1.0`.
+        on_true: usize,
+        /// Node index selected where condition is `0.0`.
+        on_false: usize,
+    },
+    /// Reshape a tensor, storing the original shape for backward reconstruction.
+    Reshape {
+        /// Node index of the input tensor.
+        input: usize,
+        /// Shape before the reshape (used during backward).
+        original_shape: Vec<usize>,
+    },
+    /// Transpose a 2-D tensor (swap rows and columns).
     TransposeOp(usize),
-    /// Concatenation along axis with sizes for splitting on backward
-    CatOp { inputs: Vec<usize>, axis: usize, sizes: Vec<usize> },
-    /// Gather along axis: GatherOp { input, indices, axis }
-    GatherOp { input: usize, indices: Vec<usize>, axis: usize },
+    /// Concatenate tensors along an axis, storing per-input sizes for backward splitting.
+    CatOp {
+        /// Node indices of the tensors to concatenate.
+        inputs: Vec<usize>,
+        /// Axis along which to concatenate.
+        axis: usize,
+        /// Size of each input along the concatenation axis.
+        sizes: Vec<usize>,
+    },
+    /// Gather elements along an axis by index.
+    GatherOp {
+        /// Node index of the source tensor.
+        input: usize,
+        /// Indices to gather.
+        indices: Vec<usize>,
+        /// Axis along which to gather.
+        axis: usize,
+    },
 }
 
 /// A node in the reverse-mode AD graph.

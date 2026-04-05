@@ -3,26 +3,46 @@
 use crate::color::Color;
 
 /// Visual theme for plot rendering.
+///
+/// Controls margins, colors, font sizes, line widths, and other
+/// visual properties that apply globally to a plot.
 #[derive(Debug, Clone)]
 pub struct Theme {
+    /// Top margin in pixels.
     pub margin_top: f64,
+    /// Right margin in pixels.
     pub margin_right: f64,
+    /// Bottom margin in pixels.
     pub margin_bottom: f64,
+    /// Left margin in pixels.
     pub margin_left: f64,
+    /// Outer background color (behind the plot area).
     pub background: Color,
+    /// Inner plot area background color.
     pub plot_background: Color,
+    /// Color for axis lines and tick marks.
     pub axis_color: Color,
+    /// Color for grid lines.
     pub grid_color: Color,
+    /// Color for title, axis labels, and tick labels.
     pub text_color: Color,
+    /// Font size for the plot title (pixels).
     pub title_font_size: f64,
+    /// Font size for axis labels (pixels).
     pub axis_label_font_size: f64,
+    /// Font size for tick labels (pixels).
     pub tick_label_font_size: f64,
     /// Fixed-width text measurement ratio: char_width = font_size * ratio.
     pub font_width_ratio: f64,
+    /// Default radius for scatter plot points (pixels).
     pub point_size: f64,
+    /// Default stroke width for line geoms (pixels).
     pub line_width: f64,
+    /// Stroke width for grid lines (pixels).
     pub grid_line_width: f64,
+    /// Stroke width for axis lines (pixels).
     pub axis_line_width: f64,
+    /// Length of axis tick marks (pixels).
     pub tick_length: f64,
 }
 

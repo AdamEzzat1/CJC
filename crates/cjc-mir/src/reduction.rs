@@ -128,12 +128,19 @@ impl ReductionKind {
 /// The mathematical operator used in the reduction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReductionOp {
+    /// Addition (`acc + x`).
     Add,
+    /// Multiplication (`acc * x`).
     Mul,
+    /// Subtraction (`acc - x`).
     Sub,
+    /// Minimum reduction.
     Min,
+    /// Maximum reduction.
     Max,
+    /// Bitwise OR reduction.
     BitwiseOr,
+    /// Bitwise AND reduction.
     BitwiseAnd,
     /// A builtin function call (e.g., `sum`, `mean`).
     BuiltinCall,
@@ -213,14 +220,17 @@ pub struct ReductionReport {
 }
 
 impl ReductionReport {
+    /// Return the number of detected reductions.
     pub fn len(&self) -> usize {
         self.reductions.len()
     }
 
+    /// Return true if no reductions were detected.
     pub fn is_empty(&self) -> bool {
         self.reductions.is_empty()
     }
 
+    /// Look up a reduction by its ID.
     pub fn get(&self, id: ReductionId) -> &ReductionInfo {
         &self.reductions[id.0 as usize]
     }

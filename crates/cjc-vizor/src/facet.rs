@@ -28,25 +28,35 @@ impl Default for FacetSpec {
     }
 }
 
-/// Layout result for faceted plot.
+/// Layout result for a faceted plot, containing positioned panels.
 #[derive(Debug, Clone)]
 pub struct FacetLayout {
+    /// Ordered list of panels in the facet grid.
     pub panels: Vec<FacetPanel>,
+    /// Number of rows in the grid.
     pub n_rows: usize,
+    /// Number of columns in the grid.
     pub n_cols: usize,
 }
 
-/// A single facet panel.
+/// A single facet panel with position and data subset information.
 #[derive(Debug, Clone)]
 pub struct FacetPanel {
+    /// Row index in the facet grid (0-based).
     pub row_idx: usize,
+    /// Column index in the facet grid (0-based).
     pub col_idx: usize,
+    /// Display label for this panel (e.g., group name).
     pub label: String,
+    /// Indices into the original data that belong to this panel.
     pub data_indices: Vec<usize>,
-    /// Panel bounding box in pixels.
+    /// Panel left edge in pixels.
     pub plot_x: f64,
+    /// Panel top edge in pixels.
     pub plot_y: f64,
+    /// Panel width in pixels.
     pub plot_w: f64,
+    /// Panel height in pixels.
     pub plot_h: f64,
 }
 

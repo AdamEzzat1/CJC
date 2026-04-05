@@ -78,11 +78,17 @@ impl Color {
     }
 
     // Named colors.
+    /// Pure white (#ffffff).
     pub const WHITE: Color = Color::rgb(255, 255, 255);
+    /// Pure black (#000000).
     pub const BLACK: Color = Color::rgb(0, 0, 0);
+    /// Fully transparent black.
     pub const TRANSPARENT: Color = Color::rgba(0, 0, 0, 0);
+    /// Light gray (#e5e5e5).
     pub const LIGHT_GRAY: Color = Color::rgb(229, 229, 229);
+    /// Medium gray (#808080).
     pub const GRAY: Color = Color::rgb(128, 128, 128);
+    /// Dark gray (#404040).
     pub const DARK_GRAY: Color = Color::rgb(64, 64, 64);
 }
 

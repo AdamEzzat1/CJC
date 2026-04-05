@@ -1,13 +1,31 @@
-//! CJC Tree-Walk Interpreter
+//! CJC Tree-Walk Interpreter (v1 executor).
 //!
-//! Evaluates a CJC `Program` AST by walking the tree directly. Supports:
+//! This crate provides the AST tree-walk interpreter for CJC programs.
+//! It evaluates a [`cjc_ast::Program`] by recursively walking the AST nodes.
+//!
+//! # Supported features
+//!
 //! - Arithmetic on integers, floats, booleans, and tensors
-//! - User-defined functions with lexical scoping
-//! - Structs (value types) and field access
-//! - Built-in functions: print, Tensor constructors, matmul, Buffer.alloc
+//! - User-defined functions with lexical scoping and closures
+//! - Structs, records, enums (value types) and field access
+//! - Built-in functions: `print`, `Tensor` constructors, `matmul`, `Buffer.alloc`
 //! - Pipe operator (`|>`)
-//! - If/else, while loops, early return
-//! - Reproducible RNG via `cjc_repro::Rng`
+//! - If/else, while loops, for loops, early return, break, continue
+//! - Match expressions with structural destructuring
+//! - Reproducible RNG via [`cjc_repro::Rng`] (deterministic seed threading)
+//! - DataFrame / tidy DSL operations via [`cjc_data`]
+//! - Snap memoization cache for pure-function results
+//!
+//! # Parity requirement
+//!
+//! Every program must produce **bit-identical** results whether executed by this
+//! tree-walk interpreter or by the MIR register-machine executor
+//! ([`cjc_mir_exec`]). This is enforced by parity gate tests (G-1 / G-2).
+//!
+//! # Entry points
+//!
+//! - [`Interpreter::new`] + [`Interpreter::exec`] for single-file programs.
+//! - [`run_program_with_modules_eval`] for multi-file module programs.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -29,7 +47,11 @@ use cjc_vizor::dispatch as vizor_dispatch;
 // Error type
 // ---------------------------------------------------------------------------
 
-/// Evaluation errors, including a `Return` variant used for control flow.
+/// Runtime errors produced by the tree-walk interpreter.
+///
+/// Includes control-flow signals ([`EvalError::Return`], [`EvalError::Break`],
+/// [`EvalError::Continue`]) that are caught internally by function and loop
+/// boundaries, as well as genuine runtime failures ([`EvalError::Runtime`]).
 #[derive(Debug)]
 pub enum EvalError {
     /// A `return` statement was executed. The interpreter unwinds the call
@@ -69,7 +91,11 @@ impl From<cjc_runtime::RuntimeError> for EvalError {
     }
 }
 
-/// Convenience type alias.
+/// Result type alias for interpreter operations.
+///
+/// Returns a [`Value`] on success or an [`EvalError`] on failure. Control-flow
+/// signals (`Return`, `Break`, `Continue`) propagate as `Err` variants and are
+/// caught at function and loop boundaries.
 pub type EvalResult = Result<Value, EvalError>;
 
 // ---------------------------------------------------------------------------
@@ -125,7 +151,26 @@ fn value_deep_eq(a: &Value, b: &Value) -> bool {
 // Interpreter
 // ---------------------------------------------------------------------------
 
-/// Tree-walk interpreter for CJC programs.
+/// Tree-walk interpreter for CJC programs (v1 executor).
+///
+/// Walk the AST directly, evaluating expressions and executing statements in
+/// a scope-stack environment. This is the reference executor that the MIR
+/// executor ([`cjc_mir_exec::MirExecutor`]) must match bit-for-bit on every
+/// program+seed pair (parity gate G-1 / G-2).
+///
+/// # Determinism
+///
+/// All random state is threaded through a [`cjc_repro::Rng`] (SplitMix64)
+/// seeded at construction time. Floating-point reductions use Kahan or
+/// binned accumulators. Collections use [`BTreeMap`] / [`BTreeSet`] to
+/// guarantee deterministic iteration order.
+///
+/// # Usage
+///
+/// ```ignore
+/// let mut interp = Interpreter::new(42);
+/// let result = interp.exec(&program)?;
+/// ```
 pub struct Interpreter {
     /// User-defined functions indexed by name.
     functions: BTreeMap<String, FnDecl>,
@@ -168,7 +213,16 @@ pub struct Interpreter {
 }
 
 impl Interpreter {
-    /// Create a new interpreter with the given RNG seed.
+    /// Create a new interpreter with the given deterministic RNG seed.
+    ///
+    /// The seed is forwarded to [`cjc_repro::Rng::seeded`] and determines all
+    /// pseudo-random behavior (e.g. `rand()`, `categorical_sample`). Two
+    /// interpreters created with the same seed will produce bit-identical
+    /// output for the same program.
+    ///
+    /// # Arguments
+    ///
+    /// * `seed` - A 64-bit seed for the deterministic SplitMix64 RNG.
     pub fn new(seed: u64) -> Self {
         let mut variant_to_enum = BTreeMap::new();
         // Register prelude variant names
@@ -204,6 +258,16 @@ impl Interpreter {
         self.scopes.pop();
     }
 
+    /// Bind a variable in the innermost (current) scope.
+    ///
+    /// If a variable with the same name already exists in the current scope it
+    /// is overwritten. Variables in outer scopes are not affected (use
+    /// [`Interpreter::assign`](Self) for mutation of existing bindings).
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Variable name.
+    /// * `val`  - Value to bind.
     pub fn define(&mut self, name: &str, val: Value) {
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string(), val);
@@ -266,7 +330,32 @@ impl Interpreter {
 
     // -- Program execution --------------------------------------------------
 
-    /// Execute a full program.
+    /// Execute a full [`Program`] AST.
+    ///
+    /// Performs two passes over the top-level declarations:
+    ///
+    /// 1. **Registration pass** -- register all function, struct, enum, record,
+    ///    trait, and impl declarations so they are available during execution.
+    /// 2. **Execution pass** -- evaluate top-level `let`, `const`, and
+    ///    statement declarations in source order.
+    ///
+    /// After both passes, if a user-defined `main()` function exists it is
+    /// called and its return value becomes the program result. Otherwise the
+    /// value of the last top-level statement is returned.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The parsed AST program to execute.
+    ///
+    /// # Returns
+    ///
+    /// The final [`Value`] produced by the program, or an [`EvalError`] if a
+    /// runtime error occurs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvalError::Runtime`] on type mismatches, undefined variables,
+    /// division by zero, or other runtime failures.
     pub fn exec(&mut self, program: &Program) -> EvalResult {
         // First pass: register all function and struct declarations.
         for decl in &program.declarations {
@@ -480,6 +569,20 @@ impl Interpreter {
         Ok(())
     }
 
+    /// Execute an if/else-if/else statement.
+    ///
+    /// Evaluate the condition expression and execute the matching branch. If no
+    /// branch matches and there is no `else`, return [`Value::Void`].
+    ///
+    /// # Arguments
+    ///
+    /// * `if_stmt` - The [`IfStmt`] AST node containing the condition,
+    ///   then-block, and optional else branch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvalError::Runtime`] if the condition does not evaluate to a
+    /// boolean.
     pub fn exec_if(&mut self, if_stmt: &IfStmt) -> EvalResult {
         let cond = self.eval_expr(&if_stmt.condition)?;
         let cond_bool = match cond {
@@ -615,6 +718,23 @@ impl Interpreter {
 
     // -- Expression evaluation ----------------------------------------------
 
+    /// Evaluate a single AST expression and return its [`Value`].
+    ///
+    /// This is the core dispatch for expression evaluation. It handles all
+    /// [`ExprKind`] variants including literals, binary/unary ops, variable
+    /// lookups, function calls, field access, indexing, match expressions,
+    /// closures, tensor literals, and more.
+    ///
+    /// Built-in function calls are dispatched via
+    /// [`cjc_runtime::builtins`] to ensure parity with the MIR executor.
+    ///
+    /// # Arguments
+    ///
+    /// * `expr` - The AST expression to evaluate.
+    ///
+    /// # Returns
+    ///
+    /// The resulting [`Value`], or an [`EvalError`] on failure.
     pub fn eval_expr(&mut self, expr: &Expr) -> EvalResult {
         match &expr.kind {
             ExprKind::IntLit(v) => Ok(Value::Int(*v)),
@@ -4054,8 +4174,8 @@ impl Default for Interpreter {
 
 /// Run a multi-file CJC program through the AST evaluator.
 ///
-/// Parses all modules via `cjc_module::build_module_graph`, retrieves the
-/// deterministic topological ordering, and executes each module's AST in
+/// Parse all modules via `cjc_module::build_module_graph`, retrieve the
+/// deterministic topological ordering, and execute each module's AST in
 /// dependency order using a single [`Interpreter`] instance whose scope
 /// persists across modules.
 ///
@@ -4063,6 +4183,21 @@ impl Default for Interpreter {
 /// statements executed (via [`Interpreter::exec_module`]). The entry module
 /// is executed last via [`Interpreter::exec`], which also invokes `main()`
 /// if present.
+///
+/// # Arguments
+///
+/// * `entry_path` - Filesystem path to the entry `.cjc` source file.
+/// * `seed` - Deterministic RNG seed forwarded to the [`Interpreter`].
+///
+/// # Returns
+///
+/// The final [`Value`] produced by the entry module, or an [`EvalError`]
+/// if module resolution or execution fails.
+///
+/// # Errors
+///
+/// Returns [`EvalError::Runtime`] if the module graph cannot be built
+/// (e.g. circular dependencies, missing files) or if execution fails.
 pub fn run_program_with_modules_eval(
     entry_path: &std::path::Path,
     seed: u64,

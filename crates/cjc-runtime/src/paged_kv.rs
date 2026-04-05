@@ -1,3 +1,22 @@
+//! Block-paged KV-cache -- vLLM-style block paging for transformer inference.
+//!
+//! Instead of a single contiguous pre-allocated tensor (which may fragment
+//! or require reallocation), this module manages KV-cache memory in
+//! fixed-size 16-token blocks via a logical-to-physical block table.
+//!
+//! # Benefits
+//!
+//! - No single large allocation -- blocks are page-sized (16 tokens each).
+//! - Zero reallocation on append -- new blocks are pre-allocated at construction.
+//! - Logical-to-physical mapping via block table enables flexible memory reuse.
+//! - Each block is independently cache-line friendly.
+//!
+//! # NoGC guarantee
+//!
+//! All blocks are pre-allocated at construction time. [`PagedKvCache::append`]
+//! performs zero heap allocations -- it only copies token data into existing
+//! block storage.
+
 use std::fmt;
 
 use crate::error::RuntimeError;
@@ -7,11 +26,15 @@ use crate::tensor::Tensor;
 // 2e. BlockPaged KV-Cache — vLLM-style block paging
 // ---------------------------------------------------------------------------
 
-/// Fixed-size block for the paged KV-cache. Each block holds up to
-/// `BLOCK_TOKEN_COUNT` tokens of a fixed hidden dimension.
+/// Number of tokens stored per block in the paged KV-cache.
 const BLOCK_TOKEN_COUNT: usize = 16;
 
-/// A single page/block in the KV-cache. Pre-allocated, fixed-size.
+/// A single page/block in the KV-cache.
+///
+/// Pre-allocated at construction with capacity for [`BLOCK_TOKEN_COUNT`]
+/// tokens. Data is stored as a flat `Vec<f64>` of shape
+/// `[BLOCK_TOKEN_COUNT, dim]`, with a `used` cursor tracking how many
+/// token slots have been written.
 #[derive(Debug, Clone)]
 pub struct KvBlock {
     /// Data storage: [BLOCK_TOKEN_COUNT, dim]. Pre-allocated and zeroed.
@@ -23,6 +46,7 @@ pub struct KvBlock {
 }
 
 impl KvBlock {
+    /// Create a new zeroed block for tokens of the given hidden dimension.
     fn new(dim: usize) -> Self {
         KvBlock {
             data: vec![0.0; BLOCK_TOKEN_COUNT * dim],
@@ -31,10 +55,12 @@ impl KvBlock {
         }
     }
 
+    /// Return `true` if all token slots in this block have been written.
     fn is_full(&self) -> bool {
         self.used >= BLOCK_TOKEN_COUNT
     }
 
+    /// Return the number of unused token slots remaining in this block.
     #[allow(dead_code)]
     fn remaining(&self) -> usize {
         BLOCK_TOKEN_COUNT - self.used

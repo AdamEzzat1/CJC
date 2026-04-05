@@ -7,11 +7,14 @@ use crate::color::{self, Color};
 use crate::scene::{Scene, SceneElement, TextAnchor};
 use crate::spec::PlotSpec;
 
-/// A single legend entry.
+/// A single legend entry with a label, color swatch, and symbol shape.
 #[derive(Debug, Clone)]
 pub struct LegendEntry {
+    /// Display label for this entry.
     pub label: String,
+    /// Color swatch for the entry.
     pub color: Color,
+    /// Symbol shape drawn beside the label text.
     pub kind: LegendSymbol,
 }
 

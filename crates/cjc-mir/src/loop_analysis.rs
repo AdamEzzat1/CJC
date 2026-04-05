@@ -185,6 +185,10 @@ impl LoopTree {
     }
 
     /// Get loop info by ID.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `id` is out of bounds.
     pub fn get(&self, id: LoopId) -> &LoopInfo {
         &self.loops[id.0 as usize]
     }

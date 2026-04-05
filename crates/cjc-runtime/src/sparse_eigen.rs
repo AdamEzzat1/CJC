@@ -104,12 +104,13 @@ pub fn lanczos_eigsh(matrix: &SparseCsr, k: usize, max_iter: usize) -> LanczosRe
 // Arnoldi Algorithm (General Matrices)
 // ---------------------------------------------------------------------------
 
-/// Result of an Arnoldi eigenvalue computation.
+/// Result of an Arnoldi eigenvalue computation for a general (non-symmetric)
+/// sparse matrix.
 #[derive(Debug, Clone)]
 pub struct ArnoldiResult {
-    /// Eigenvalue approximations (real parts).
+    /// Real parts of the Ritz eigenvalue approximations.
     pub eigenvalues_real: Vec<f64>,
-    /// Eigenvalue approximations (imaginary parts).
+    /// Imaginary parts of the Ritz eigenvalue approximations.
     pub eigenvalues_imag: Vec<f64>,
 }
 

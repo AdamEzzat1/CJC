@@ -3,11 +3,33 @@
 //! Deterministic module resolution, dependency graph construction,
 //! and program merging for multi-file CJC programs.
 //!
-//! Design principles:
-//! - All internal maps use `BTreeMap` for deterministic ordering
-//! - Symbol mangling: `module_path::fn_name` (e.g., `math::linalg::solve`)
-//! - Cycle detection via DFS with proper error reporting
-//! - Single merged `MirProgram` output for the executor
+//! This crate provides the infrastructure for splitting CJC programs across
+//! multiple source files. It handles file resolution, import parsing,
+//! dependency-graph construction with cycle detection, symbol mangling,
+//! visibility enforcement, and final merging of per-module MIR into a
+//! single [`cjc_mir::MirProgram`] suitable for execution.
+//!
+//! # Design principles
+//!
+//! - All internal maps use [`BTreeMap`] / [`BTreeSet`] for deterministic
+//!   iteration order, ensuring reproducible compilation regardless of
+//!   filesystem enumeration order.
+//! - Symbol mangling uses a `module_path::fn_name` convention
+//!   (e.g., `math::linalg::solve`).
+//! - Cycle detection is performed via DFS with a `BTreeSet`-backed
+//!   recursion stack and produces clear error messages.
+//! - The final output is a single merged [`cjc_mir::MirProgram`] with
+//!   module-init statements prepended in topological order.
+//!
+//! # Typical workflow
+//!
+//! ```text
+//! entry.cjc ─► build_module_graph() ─► ModuleGraph
+//!                                         │
+//!                      merge_programs() ◄─┘
+//!                           │
+//!                      MirProgram (ready for cjc-mir-exec)
+//! ```
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -19,15 +41,49 @@ use std::path::{Path, PathBuf};
 /// A unique, deterministic identifier for a module derived from its
 /// path relative to the project root.
 ///
-/// Examples:
-/// - `"main"` for the entry file
-/// - `"math"` for `math.cjc`
-/// - `"math::linalg"` for `math/linalg.cjc`
+/// The identifier is a `"::"` -separated string that mirrors the
+/// directory structure of the source tree.
+///
+/// # Examples
+///
+/// | Source file (relative)  | `ModuleId` value  |
+/// |-------------------------|-------------------|
+/// | `main.cjc`             | `"main"`          |
+/// | `math.cjc`             | `"math"`          |
+/// | `math/linalg.cjc`      | `"math::linalg"`  |
+/// | `math/linalg/mod.cjc`  | `"math::linalg"`  |
+///
+/// The inner `String` is public so that callers can inspect the raw
+/// identifier when necessary, but prefer using the provided methods
+/// ([`from_relative_path`](Self::from_relative_path),
+/// [`from_import_path`](Self::from_import_path),
+/// [`symbol_prefix`](Self::symbol_prefix)) for construction and
+/// formatting.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ModuleId(pub String);
 
 impl ModuleId {
-    /// Create a ModuleId from a relative path (e.g., `math/linalg.cjc` → `math::linalg`).
+    /// Create a [`ModuleId`] from a filesystem path relative to the project root.
+    ///
+    /// Strip the file extension and convert path separators to `"::"`.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - A path relative to the project root (e.g., `math/linalg.cjc`).
+    ///
+    /// # Returns
+    ///
+    /// A [`ModuleId`] whose inner string is the `"::"` -joined stem
+    /// (e.g., `"math::linalg"`).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::path::Path;
+    /// # use cjc_module::ModuleId;
+    /// let id = ModuleId::from_relative_path(Path::new("math/linalg.cjc"));
+    /// assert_eq!(id.0, "math::linalg");
+    /// ```
     pub fn from_relative_path(path: &Path) -> Self {
         let stem = path.with_extension("");
         let parts: Vec<&str> = stem
@@ -37,13 +93,48 @@ impl ModuleId {
         ModuleId(parts.join("::"))
     }
 
-    /// Convert an import path (e.g., `["math", "linalg"]`) to a ModuleId.
+    /// Convert an import-path segment list into a [`ModuleId`].
+    ///
+    /// The segments are joined with `"::"` to form the identifier string.
+    ///
+    /// # Arguments
+    ///
+    /// * `segments` - The import path segments (e.g., `["math", "linalg"]`).
+    ///
+    /// # Returns
+    ///
+    /// A [`ModuleId`] whose inner string is `"math::linalg"`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use cjc_module::ModuleId;
+    /// let id = ModuleId::from_import_path(&["math".into(), "linalg".into()]);
+    /// assert_eq!(id.0, "math::linalg");
+    /// ```
     pub fn from_import_path(segments: &[String]) -> Self {
         ModuleId(segments.join("::"))
     }
 
-    /// Return the mangled prefix for symbols in this module.
-    /// The entry module returns empty string (no prefix for top-level).
+    /// Return the mangled prefix used for symbols defined in this module.
+    ///
+    /// The entry module (`"main"` or empty) returns an empty string so
+    /// that top-level symbols keep their original names. All other
+    /// modules return `"<module_id>::"`.
+    ///
+    /// # Returns
+    ///
+    /// An empty [`String`] for the entry module, or the module path
+    /// followed by `"::"` for all other modules.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use cjc_module::ModuleId;
+    /// assert_eq!(ModuleId("main".into()).symbol_prefix(), "");
+    /// assert_eq!(ModuleId("math".into()).symbol_prefix(), "math::");
+    /// assert_eq!(ModuleId("math::linalg".into()).symbol_prefix(), "math::linalg::");
+    /// ```
     pub fn symbol_prefix(&self) -> String {
         if self.0 == "main" || self.0.is_empty() {
             String::new()
@@ -63,18 +154,25 @@ impl std::fmt::Display for ModuleId {
 // Module info
 // ---------------------------------------------------------------------------
 
-/// Information about a single module (source file).
+/// Metadata and parsed content for a single CJC source module.
+///
+/// Each source file that participates in a multi-file build is
+/// represented by one `ModuleInfo` inside the [`ModuleGraph`]. It
+/// carries the parsed AST, the list of import declarations, and
+/// bookkeeping flags used during graph construction and merging.
 #[derive(Debug, Clone)]
 pub struct ModuleInfo {
-    /// Unique module identifier.
+    /// Unique identifier for this module (derived from its file path).
     pub id: ModuleId,
-    /// Absolute path to the source file.
+    /// Absolute filesystem path to the `.cjc` source file.
     pub file_path: PathBuf,
-    /// Import declarations found in this module.
+    /// Import declarations extracted from this module's AST.
     pub imports: Vec<ImportInfo>,
-    /// Parsed AST program for this module.
+    /// Parsed AST program. [`None`] only if the AST was consumed or
+    /// the module was stubbed for testing.
     pub ast: Option<cjc_ast::Program>,
-    /// Whether this is the entry module.
+    /// `true` if this is the entry-point module (the file passed to
+    /// [`build_module_graph`]).
     pub is_entry: bool,
 }
 

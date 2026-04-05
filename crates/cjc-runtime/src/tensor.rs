@@ -1,3 +1,43 @@
+//! N-dimensional tensor with element-wise, reduction, linalg, and NN operations.
+//!
+//! [`Tensor`] is the primary numerical type in CJC. It is backed by a
+//! [`Buffer<f64>`] with COW (copy-on-write) semantics, so cloning a tensor
+//! is O(1) and mutation triggers a deep copy only when the buffer is shared.
+//!
+//! # Determinism Guarantees
+//!
+//! - **Reductions** (`sum`, `mean`, `sum_axis`) use [`BinnedAccumulatorF64`]
+//!   for order-invariant, bit-identical results.
+//! - **Matmul** uses Kahan-compensated accumulation (sequential path) or
+//!   tiled + parallel strategies (large matrices) with deterministic per-row
+//!   thread assignment.
+//! - **SIMD** kernels (via [`tensor_simd`]) avoid hardware FMA to preserve
+//!   cross-platform bit-identity.
+//! - **No** `HashMap`/`HashSet` anywhere -- all ordering is deterministic.
+//!
+//! # Layout
+//!
+//! Tensors use row-major (C-order) layout with explicit strides. Non-contiguous
+//! views (from `slice`, `transpose`, `broadcast_to`) share the underlying
+//! buffer with adjusted strides and offset. Call [`Tensor::to_contiguous`] to
+//! materialize a contiguous copy when needed.
+//!
+//! # Operation Categories
+//!
+//! | Category | Methods |
+//! |----------|---------|
+//! | Construction | `zeros`, `ones`, `randn`, `from_vec`, `from_bytes` |
+//! | Shape | `shape`, `ndim`, `len`, `reshape`, `transpose`, `slice`, `unsqueeze`, `squeeze`, `flatten` |
+//! | Element-wise | `add`, `sub`, `mul_elem`, `div_elem`, `elem_pow`, `map`, `map_simd` |
+//! | Reductions | `sum`, `mean`, `sum_axis`, `mean_axis`, `var_axis`, `std_axis` |
+//! | Linalg | `matmul`, `bmm`, `linear`, `einsum` |
+//! | NN | `softmax`, `layer_norm`, `relu`, `sigmoid`, `gelu`, `conv1d`, `conv2d`, `maxpool2d` |
+//! | Indexing | `get`, `set`, `gather`, `scatter`, `index_select`, `argsort` |
+//! | Attention | `scaled_dot_product_attention`, `split_heads`, `merge_heads` |
+//!
+//! [`Buffer<f64>`]: crate::buffer::Buffer
+//! [`BinnedAccumulatorF64`]: crate::accumulator::BinnedAccumulatorF64
+//! [`tensor_simd`]: crate::tensor_simd
 
 use cjc_repro::Rng;
 
@@ -16,15 +56,31 @@ use crate::tensor_tiled::TiledMatmul;
 // 2. Tensor Runtime
 // ---------------------------------------------------------------------------
 
-/// An N-dimensional tensor backed by a `Buffer<f64>`.
+/// An N-dimensional tensor backed by a [`Buffer<f64>`](crate::buffer::Buffer).
 ///
-/// Supports element-wise arithmetic, matrix multiplication (2-D), and
-/// numerically-stable reductions via BinnedAccumulator summation.
+/// Supports element-wise arithmetic (SIMD-accelerated), matrix multiplication
+/// (tiled + parallel), numerically-stable reductions via
+/// [`BinnedAccumulatorF64`](crate::accumulator::BinnedAccumulatorF64),
+/// and neural network operations (softmax, layer norm, attention).
+///
+/// # Memory
+///
+/// The underlying [`Buffer<f64>`](crate::buffer::Buffer) uses copy-on-write
+/// semantics. Cloning a `Tensor` is O(1). Operations like `reshape` and
+/// `transpose` return zero-copy views when possible. Mutation via `set`
+/// triggers a deep copy only when the buffer is shared.
 #[derive(Debug, Clone)]
 pub struct Tensor {
+    /// The underlying COW data buffer.
     pub buffer: Buffer<f64>,
+    /// Dimensions of the tensor (e.g., `[3, 4]` for a 3x4 matrix).
     pub(crate) shape: Vec<usize>,
+    /// Row-major strides for each dimension. Non-contiguous views may have
+    /// strides that differ from the standard row-major pattern (e.g., stride=0
+    /// for broadcast dimensions).
     pub(crate) strides: Vec<usize>,
+    /// Byte offset into the buffer where this tensor's data begins.
+    /// Non-zero for slice views.
     pub(crate) offset: usize,
 }
 
@@ -1107,10 +1163,11 @@ impl Tensor {
         Tensor::from_vec(result, &self.shape)
     }
 
-    /// ReLU activation: max(0, x) element-wise.
     /// Apply a function element-wise, reusing the buffer when possible (COW).
-    /// If refcount == 1, mutates in place (zero allocations).
-    /// Otherwise, allocates a new buffer.
+    ///
+    /// If the tensor is contiguous, starts at offset 0, and has refcount == 1,
+    /// the data is mutated in place (zero allocations). Otherwise, allocates
+    /// a new buffer.
     fn map_elementwise(&self, f: impl Fn(f64) -> f64) -> Tensor {
         if self.is_contiguous() && self.offset == 0 && self.buffer.refcount() == 1 {
             // Fast path: mutate in place (COW — we're the sole owner)
@@ -1127,6 +1184,7 @@ impl Tensor {
         }
     }
 
+    /// ReLU activation: `max(0, x)` element-wise.
     pub fn relu(&self) -> Tensor {
         self.map_elementwise(|x| if x > 0.0 { x } else { 0.0 })
     }
@@ -2006,19 +2064,21 @@ impl Tensor {
         Tensor::from_vec(result, self.shape())
     }
 
-    /// Returns `true` if any element is non-zero.
+    /// Return `true` if any element is non-zero.
     pub fn any(&self) -> bool {
         let data = self.to_vec();
         data.iter().any(|&x| x != 0.0)
     }
 
-    /// Returns `true` if all elements are non-zero.
+    /// Return `true` if all elements are non-zero.
     pub fn all(&self) -> bool {
         let data = self.to_vec();
         data.iter().all(|&x| x != 0.0)
     }
 
-    /// Returns a 1-D tensor of flat indices where elements are non-zero.
+    /// Return a 1-D tensor of flat indices where elements are non-zero.
+    ///
+    /// If no elements are non-zero, returns an empty tensor of shape `[0]`.
     pub fn nonzero(&self) -> Tensor {
         let data = self.to_vec();
         let indices: Vec<f64> = data.iter().enumerate()
@@ -2053,8 +2113,11 @@ impl Tensor {
     // Phase 2: Axis Reductions with keepdim
     // -----------------------------------------------------------------------
 
-    /// Helper: generic axis reduction using BinnedAccumulator.
-    /// `reduce_fn` takes a slice of values and returns the reduced value.
+    /// Generic axis reduction using a caller-provided reduction function.
+    ///
+    /// Gathers values along the specified axis for each output position
+    /// and applies `reduce_fn`. If `keepdim` is `true`, the reduced axis
+    /// retains size 1; otherwise it is removed from the output shape.
     fn reduce_axis<F>(&self, axis: usize, keepdim: bool, reduce_fn: F)
         -> Result<Tensor, RuntimeError>
     where
@@ -2120,6 +2183,9 @@ impl Tensor {
     }
 
     /// Mean along an axis with optional keepdim.
+    ///
+    /// Uses [`BinnedAccumulatorF64`](crate::accumulator::BinnedAccumulatorF64)
+    /// for deterministic summation before dividing by the axis length.
     pub fn mean_axis(&self, axis: usize, keepdim: bool) -> Result<Tensor, RuntimeError> {
         self.reduce_axis(axis, keepdim, |vals| {
             let mut acc = BinnedAccumulatorF64::new();
@@ -2128,7 +2194,9 @@ impl Tensor {
         })
     }
 
-    /// Max along an axis with optional keepdim. Returns (values, indices).
+    /// Max along an axis with optional keepdim. Return `(values, indices)`.
+    ///
+    /// Ties are broken by choosing the first occurrence (smallest index).
     pub fn max_axis(&self, axis: usize, keepdim: bool) -> Result<(Tensor, Tensor), RuntimeError> {
         let ndim = self.ndim();
         if axis >= ndim {
@@ -2182,7 +2250,9 @@ impl Tensor {
         ))
     }
 
-    /// Min along an axis with optional keepdim. Returns (values, indices).
+    /// Min along an axis with optional keepdim. Return `(values, indices)`.
+    ///
+    /// Ties are broken by choosing the first occurrence (smallest index).
     pub fn min_axis(&self, axis: usize, keepdim: bool) -> Result<(Tensor, Tensor), RuntimeError> {
         let ndim = self.ndim();
         if axis >= ndim {
@@ -2237,6 +2307,10 @@ impl Tensor {
     }
 
     /// Variance along an axis with optional keepdim.
+    ///
+    /// Computes population variance: `Var = sum((x - mean)^2) / N`.
+    /// Uses [`BinnedAccumulatorF64`](crate::accumulator::BinnedAccumulatorF64)
+    /// for the squared-differences summation.
     pub fn var_axis(&self, axis: usize, keepdim: bool) -> Result<Tensor, RuntimeError> {
         let mean_t = self.mean_axis(axis, true)?;
         let ndim = self.ndim();
@@ -2285,12 +2359,16 @@ impl Tensor {
     }
 
     /// Standard deviation along an axis with optional keepdim.
+    ///
+    /// Computed as `sqrt(var_axis(axis, keepdim))`.
     pub fn std_axis(&self, axis: usize, keepdim: bool) -> Result<Tensor, RuntimeError> {
         let var = self.var_axis(axis, keepdim)?;
         Ok(var.map(|x| x.sqrt()))
     }
 
     /// Product along an axis with optional keepdim.
+    ///
+    /// Computes a simple sequential product (exact for integer-like values).
     pub fn prod_axis(&self, axis: usize, keepdim: bool) -> Result<Tensor, RuntimeError> {
         self.reduce_axis(axis, keepdim, |vals| {
             // Product via exp(sum(ln(abs))) for numerical stability is overkill here;
@@ -2305,8 +2383,11 @@ impl Tensor {
     // Phase 2: Sort Operations
     // -----------------------------------------------------------------------
 
-    /// Sort along an axis (stable sort). Returns the sorted tensor.
-    /// For N-D tensors, sorts slices along the specified axis.
+    /// Sort along an axis (stable sort). Return the sorted tensor.
+    ///
+    /// For N-D tensors, independently sorts each 1-D slice along the specified
+    /// axis. Uses `f64::partial_cmp` with deterministic tie-breaking by
+    /// original index position.
     pub fn sort_axis(&self, axis: usize, descending: bool) -> Result<Tensor, RuntimeError> {
         let ndim = self.ndim();
         if axis >= ndim {
@@ -2387,7 +2468,10 @@ impl Tensor {
         Tensor::from_vec(result, &out_shape)
     }
 
-    /// N-D argsort along an axis. Returns indices tensor.
+    /// N-D argsort along an axis. Return a tensor of indices that would sort
+    /// each slice along the given axis.
+    ///
+    /// Deterministic tie-breaking: ties are resolved by original index order.
     pub fn argsort_axis(&self, axis: usize, descending: bool) -> Result<Tensor, RuntimeError> {
         let ndim = self.ndim();
         if axis >= ndim {
@@ -2588,6 +2672,9 @@ impl Tensor {
     // -----------------------------------------------------------------------
 
     /// Add a dimension of size 1 at position `dim`.
+    ///
+    /// For a tensor of shape `[A, B]`, `unsqueeze(0)` yields `[1, A, B]`,
+    /// `unsqueeze(1)` yields `[A, 1, B]`, etc.
     pub fn unsqueeze(&self, dim: usize) -> Result<Tensor, RuntimeError> {
         let ndim = self.ndim();
         if dim > ndim {
@@ -2629,8 +2716,9 @@ impl Tensor {
         }
     }
 
-    /// Broadcast without copying. Returns a view with stride=0 for broadcasted dims.
-    /// Same as `broadcast_to` but named for consistency with the gap-fix plan.
+    /// Broadcast without copying. Return a view with `stride=0` for broadcasted dims.
+    ///
+    /// Alias for [`broadcast_to`](Tensor::broadcast_to).
     pub fn expand(&self, target_shape: &[usize]) -> Result<Tensor, RuntimeError> {
         self.broadcast_to(target_shape)
     }

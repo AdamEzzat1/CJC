@@ -40,45 +40,60 @@ use crate::{MirBody, MirExpr, MirExprKind, MirFunction, MirProgram, MirStmt, Mir
 // Public types
 // ---------------------------------------------------------------------------
 
-/// Allocation strategy hint for a let-binding.
+/// Allocation strategy hint for a `let`-binding, determined by escape analysis.
+///
+/// Used by the MIR executor and future codegen backends to select the
+/// optimal allocation strategy for each local variable.
+///
+/// See [`analyze_function`] for how these hints are computed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AllocHint {
-    /// Primitive type — lives on the stack, no heap allocation.
+    /// Primitive type -- lives on the stack, no heap allocation needed.
     Stack,
-    /// Non-escaping heap value — eligible for frame-arena allocation
-    /// (bulk-freed at function return).
+    /// Non-escaping heap value -- eligible for frame-arena allocation
+    /// (bulk-freed at function return, no GC involvement).
     Arena,
-    /// Escaping value — requires Rc (reference counting).
+    /// Escaping value -- requires reference counting (Rc).
     Rc,
 }
 
-/// Why a binding was classified as escaping (or not).
+/// The reason a binding was classified with a particular [`AllocHint`].
+///
+/// Provides diagnostic information for understanding allocation decisions.
+/// The analysis is conservative: any unknown pattern defaults to escaping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EscapeReason {
-    /// Value does not escape the function.
+    /// Value does not escape the function scope.
     NonEscaping,
-    /// Primitive type — always stack-allocated.
+    /// Primitive type (int, float, bool, u8, void) -- always stack-allocated.
     Primitive,
-    /// Value is returned from the function.
+    /// Value is returned from the function, making it visible to the caller.
     ReturnedFromFn,
-    /// Value is captured by a closure.
+    /// Value is captured by a closure's environment.
     CapturedByClosure,
-    /// Value is stored inside a container (array, tuple, struct, enum).
+    /// Value is stored inside a container (array, tuple, struct, or enum variant).
     StoredInContainer,
-    /// Value is passed to a function whose parameter escape behavior is unknown.
+    /// Value is passed as an argument to a function whose escape behavior is unknown.
     PassedToUnknownFn,
     /// Value is assigned to a field or index of another object.
     AssignedToFieldOrIndex,
-    /// Binding is mutable — conservative escape (value may be aliased).
+    /// Binding is mutable -- conservatively treated as escaping because the
+    /// value may be aliased or reassigned to an escaping context.
     Mutable,
-    /// Init expression is a call whose return value may allocate (conservative).
+    /// Init expression is a function call whose return value may allocate.
     CallResult,
 }
 
 /// Per-function escape analysis results.
+///
+/// Contains the allocation hint and escape reason for every `let`-binding
+/// in the function body. Use [`analyze_function`] or [`analyze_program`]
+/// to compute these results.
 #[derive(Debug, Clone)]
 pub struct EscapeInfo {
-    /// Maps binding name → (AllocHint, EscapeReason).
+    /// Maps binding name to `(AllocHint, EscapeReason)`.
+    ///
+    /// Uses [`BTreeMap`] for deterministic iteration order.
     pub bindings: BTreeMap<String, (AllocHint, EscapeReason)>,
 }
 
@@ -86,7 +101,19 @@ pub struct EscapeInfo {
 // Analysis entry points
 // ---------------------------------------------------------------------------
 
-/// Analyze a single MIR function, returning escape info for its let-bindings.
+/// Analyze a single MIR function, returning escape info for its `let`-bindings.
+///
+/// Runs the four-phase analysis described in the module documentation:
+/// binding collection, escape point detection, mutable marking, and
+/// primitive classification.
+///
+/// # Arguments
+///
+/// * `func` - The MIR function to analyze.
+///
+/// # Returns
+///
+/// An [`EscapeInfo`] mapping each binding name to its allocation hint.
 pub fn analyze_function(func: &MirFunction) -> EscapeInfo {
     let mut ctx = AnalysisCtx::new();
 
@@ -123,6 +150,11 @@ pub fn analyze_function(func: &MirFunction) -> EscapeInfo {
 }
 
 /// Analyze all functions in a MIR program.
+///
+/// # Returns
+///
+/// A map from function name to its [`EscapeInfo`]. Uses [`BTreeMap`] for
+/// deterministic iteration order.
 pub fn analyze_program(program: &MirProgram) -> BTreeMap<String, EscapeInfo> {
     let mut result = BTreeMap::new();
     for func in &program.functions {

@@ -44,6 +44,7 @@ pub struct DenseMatrix {
 }
 
 impl DenseMatrix {
+    /// Create a zero-filled matrix with the given dimensions.
     pub fn zeros(rows: usize, cols: usize) -> Self {
         Self {
             rows,
@@ -52,6 +53,7 @@ impl DenseMatrix {
         }
     }
 
+    /// Create an n×n identity matrix.
     pub fn identity(n: usize) -> Self {
         let mut m = Self::zeros(n, n);
         for i in 0..n {
@@ -60,11 +62,13 @@ impl DenseMatrix {
         m
     }
 
+    /// Get the element at row `r`, column `c`.
     #[inline]
     pub fn get(&self, r: usize, c: usize) -> ComplexF64 {
         self.data[r * self.cols + c]
     }
 
+    /// Set the element at row `r`, column `c` to `v`.
     #[inline]
     pub fn set(&mut self, r: usize, c: usize, v: ComplexF64) {
         self.data[r * self.cols + c] = v;
@@ -96,8 +100,11 @@ impl DenseMatrix {
 /// Result of a sign-stabilized SVD: A = U * diag(S) * V^H
 #[derive(Clone, Debug)]
 pub struct SvdResult {
+    /// Left singular vectors (m×k matrix).
     pub u: DenseMatrix,
+    /// Singular values in descending order.
     pub s: Vec<f64>,
+    /// Conjugate-transposed right singular vectors (k×n matrix).
     pub vh: DenseMatrix,
 }
 
@@ -329,6 +336,7 @@ pub struct MpsTensor {
 }
 
 impl MpsTensor {
+    /// Create a zero-initialized tensor with the given bond dimensions.
     pub fn new(bond_left: usize, bond_right: usize) -> Self {
         Self {
             bond_left,

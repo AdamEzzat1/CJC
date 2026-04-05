@@ -24,17 +24,32 @@
 //! `cjc_repro::kahan_sum_f32` (the parent crate's `lib.rs`). This module
 //! provides the `KahanAccumulator` struct for incremental accumulation.
 
-/// Incremental Kahan accumulator for f64.
+/// Incremental Kahan compensated-summation accumulator for `f64`.
 ///
-/// Stack-allocated. No heap allocation.
+/// Maintains a running sum and a compensation term on the stack -- no heap
+/// allocation is ever performed.  The error bound is O(epsilon) for *n*
+/// additions, compared to O(*n* * epsilon) for naive summation.
 ///
-/// # Usage
-/// ```ignore
-/// let mut k = KahanAccumulatorF64::new();
-/// for &x in data {
-///     k.add(x);
+/// Use this when values arrive one at a time or in variable-length batches.
+/// For a one-shot slice reduction, see [`crate::kahan_sum_f64`].
+///
+/// # Determinism
+///
+/// The accumulator is deterministic for a given sequence of [`add`](Self::add)
+/// calls in a fixed order.  It is **not** order-invariant -- permuting the
+/// input may produce a different (but equally stable) result.
+///
+/// # Examples
+///
+/// ```
+/// use cjc_repro::KahanAccumulatorF64;
+///
+/// let mut acc = KahanAccumulatorF64::new();
+/// for _ in 0..10_000 {
+///     acc.add(0.0001);
 /// }
-/// let result = k.finalize();
+/// assert!((acc.finalize() - 1.0).abs() < 1e-10);
+/// assert_eq!(acc.count(), 10_000);
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub struct KahanAccumulatorF64 {
@@ -44,7 +59,10 @@ pub struct KahanAccumulatorF64 {
 }
 
 impl KahanAccumulatorF64 {
-    /// Create a new zero accumulator.
+    /// Creates a new accumulator initialized to zero.
+    ///
+    /// Both the running sum and the compensation term start at `0.0`, and the
+    /// count starts at `0`.
     #[inline]
     pub fn new() -> Self {
         KahanAccumulatorF64 {
@@ -54,9 +72,15 @@ impl KahanAccumulatorF64 {
         }
     }
 
-    /// Add a single value.
+    /// Adds a single `f64` value to the running sum.
     ///
-    /// Adding zero is a no-op (preserves bit-identical sum).
+    /// If `value` is exactly `0.0`, the compensation term is left untouched so
+    /// that the accumulated sum remains bit-identical to what it would be
+    /// without the zero.  The count is still incremented.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` -- The value to accumulate.
     #[inline]
     pub fn add(&mut self, value: f64) {
         if value == 0.0 {
@@ -70,7 +94,13 @@ impl KahanAccumulatorF64 {
         self.count += 1;
     }
 
-    /// Add a slice of values.
+    /// Adds every element of `values` to the running sum in order.
+    ///
+    /// Equivalent to calling [`add`](Self::add) for each element.
+    ///
+    /// # Arguments
+    ///
+    /// * `values` -- The slice of `f64` values to accumulate.
     #[inline]
     pub fn add_slice(&mut self, values: &[f64]) {
         for &v in values {
@@ -78,13 +108,22 @@ impl KahanAccumulatorF64 {
         }
     }
 
-    /// Return the accumulated sum.
+    /// Returns the accumulated compensated sum.
+    ///
+    /// This does **not** consume the accumulator -- you may continue adding
+    /// values after calling `finalize`.
+    ///
+    /// # Returns
+    ///
+    /// The current compensated sum as `f64`.
     #[inline]
     pub fn finalize(&self) -> f64 {
         self.sum
     }
 
-    /// Number of values added.
+    /// Returns the number of values that have been added so far.
+    ///
+    /// Includes zero-valued additions.
     #[inline]
     pub fn count(&self) -> u64 {
         self.count
@@ -92,12 +131,33 @@ impl KahanAccumulatorF64 {
 }
 
 impl Default for KahanAccumulatorF64 {
+    /// Returns a zero-initialized accumulator (equivalent to [`KahanAccumulatorF64::new`]).
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// Incremental Kahan accumulator for f32.
+/// Incremental Kahan compensated-summation accumulator for `f32`.
+///
+/// Single-precision counterpart to [`KahanAccumulatorF64`].  Maintains a
+/// running sum and compensation term on the stack with no heap allocation.
+/// The error bound is O(epsilon) relative to `f32` machine epsilon.
+///
+/// # Determinism
+///
+/// Deterministic for a given sequence of additions in a fixed order.
+///
+/// # Examples
+///
+/// ```
+/// use cjc_repro::KahanAccumulatorF32;
+///
+/// let mut acc = KahanAccumulatorF32::new();
+/// for _ in 0..10_000 {
+///     acc.add(0.0001_f32);
+/// }
+/// assert!((acc.finalize() - 1.0).abs() < 1e-4);
+/// ```
 #[derive(Debug, Clone, Copy)]
 pub struct KahanAccumulatorF32 {
     sum: f32,
@@ -106,6 +166,7 @@ pub struct KahanAccumulatorF32 {
 }
 
 impl KahanAccumulatorF32 {
+    /// Creates a new accumulator initialized to zero.
     #[inline]
     pub fn new() -> Self {
         KahanAccumulatorF32 {
@@ -115,7 +176,14 @@ impl KahanAccumulatorF32 {
         }
     }
 
-    /// Adding zero is a no-op (preserves bit-identical sum).
+    /// Adds a single `f32` value to the running sum.
+    ///
+    /// If `value` is exactly `0.0`, the compensation term is left untouched
+    /// to preserve bit-identical results.  The count is still incremented.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` -- The value to accumulate.
     #[inline]
     pub fn add(&mut self, value: f32) {
         if value == 0.0 {
@@ -129,6 +197,13 @@ impl KahanAccumulatorF32 {
         self.count += 1;
     }
 
+    /// Adds every element of `values` to the running sum in order.
+    ///
+    /// Equivalent to calling [`add`](Self::add) for each element.
+    ///
+    /// # Arguments
+    ///
+    /// * `values` -- The slice of `f32` values to accumulate.
     #[inline]
     pub fn add_slice(&mut self, values: &[f32]) {
         for &v in values {
@@ -136,11 +211,21 @@ impl KahanAccumulatorF32 {
         }
     }
 
+    /// Returns the accumulated compensated sum.
+    ///
+    /// Does **not** consume the accumulator.
+    ///
+    /// # Returns
+    ///
+    /// The current compensated sum as `f32`.
     #[inline]
     pub fn finalize(&self) -> f32 {
         self.sum
     }
 
+    /// Returns the number of values that have been added so far.
+    ///
+    /// Includes zero-valued additions.
     #[inline]
     pub fn count(&self) -> u64 {
         self.count
@@ -148,6 +233,7 @@ impl KahanAccumulatorF32 {
 }
 
 impl Default for KahanAccumulatorF32 {
+    /// Returns a zero-initialized accumulator (equivalent to [`KahanAccumulatorF32::new`]).
     fn default() -> Self {
         Self::new()
     }

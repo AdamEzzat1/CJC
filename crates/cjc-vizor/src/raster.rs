@@ -8,13 +8,16 @@ use crate::scene::{Scene, SceneElement, TextAnchor};
 
 /// A pixel buffer (RGBA, row-major, top-to-bottom).
 pub struct PixelBuffer {
+    /// Image width in pixels.
     pub width: u32,
+    /// Image height in pixels.
     pub height: u32,
     /// RGBA pixels, row-major, length = width * height * 4.
     pub data: Vec<u8>,
 }
 
 impl PixelBuffer {
+    /// Create a new pixel buffer filled with the given background color.
     pub fn new(width: u32, height: u32, bg: Color) -> Self {
         let len = (width as usize) * (height as usize) * 4;
         let mut data = vec![0u8; len];
@@ -71,7 +74,7 @@ impl PixelBuffer {
         }
     }
 
-    /// Draw a line using Bresenham's algorithm.
+    /// Draw a line using Bresenham's algorithm. Supports variable width.
     pub fn draw_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: Color, width: i32) {
         if width <= 1 {
             self.bresenham(x0, y0, x1, y1, color);

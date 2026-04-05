@@ -18,7 +18,7 @@ use cjc_repro::KahanAccumulatorF64;
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Order-invariant mean of a slice using binned accumulation.
+/// Order-invariant mean of a slice using [`BinnedAccumulatorF64`].
 fn binned_mean(data: &[f64]) -> f64 {
     let mut acc = BinnedAccumulatorF64::new();
     for &x in data {

@@ -25,39 +25,57 @@ use crate::vqe::{transfer_matrix_identity, transfer_matrix_z};
 /// Loss function for QML training.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum QmlLoss {
-    /// Mean squared error: sum_c (p[c] - one_hot[c])^2 / n_classes
+    /// Mean squared error: sum_c (p[c] - one_hot[c])^2 / n_classes.
     Mse,
-    /// Cross-entropy: -log(p[true_class])
+    /// Cross-entropy: -log(p[true_class]).
     CrossEntropy,
 }
 
 /// Configuration for a QC-REUP model.
 pub struct QmlConfig {
+    /// Number of qubits (must equal input feature dimension).
     pub n_qubits: usize,
+    /// Number of data re-upload passes (circuit depth).
     pub n_reupload_passes: usize,
+    /// Number of classification classes.
     pub n_classes: usize,
+    /// Maximum MPS bond dimension (controls accuracy vs. memory).
     pub max_bond: usize,
+    /// Qubit indices used for Z-expectation readout.
     pub readout_qubits: Vec<usize>,
+    /// Gradient descent step size.
     pub learning_rate: f64,
+    /// Number of training epochs.
     pub epochs: usize,
+    /// Mini-batch size for gradient computation.
     pub batch_size: usize,
+    /// Loss function to optimize.
     pub loss: QmlLoss,
+    /// Seed for deterministic parameter initialization and shuffling.
     pub seed: u64,
 }
 
 /// Result of QML training.
 pub struct QmlResult {
+    /// Optimized trainable parameters.
     pub params: Vec<f64>,
+    /// Loss value at each epoch (including initial).
     pub loss_history: Vec<f64>,
+    /// Classification accuracy at each epoch (including initial).
     pub accuracy_history: Vec<f64>,
+    /// Accuracy after the final epoch.
     pub final_accuracy: f64,
+    /// Number of training epochs completed.
     pub epochs_completed: usize,
 }
 
 /// A labeled dataset for classification.
 pub struct QmlDataset {
+    /// Input feature vectors (one per sample, length = n_qubits).
     pub samples: Vec<Vec<f64>>,
+    /// Class labels for each sample.
     pub labels: Vec<usize>,
+    /// Total number of distinct classes.
     pub n_classes: usize,
 }
 
@@ -184,7 +202,7 @@ pub fn build_qml_circuit(
 // Classification Head
 // ---------------------------------------------------------------------------
 
-/// Compute class probabilities from MPS state via softmax over Z expectations.
+/// Compute class probabilities from MPS state via softmax over Z expectation values.
 pub fn classify(
     mps: &Mps,
     readout_qubits: &[usize],
@@ -237,7 +255,7 @@ fn sample_loss(config: &QmlConfig, params: &[f64], input: &[f64], label: usize) 
     }
 }
 
-/// Compute average loss over a batch of samples.
+/// Compute average loss over a batch of samples using the configured loss function.
 pub fn batch_loss(
     config: &QmlConfig,
     params: &[f64],
@@ -255,7 +273,7 @@ pub fn batch_loss(
     total / samples.len() as f64
 }
 
-/// Compute prediction (argmax of class probabilities) for a single sample.
+/// Predict the class label (argmax of probabilities) for a single input sample.
 pub fn predict(config: &QmlConfig, params: &[f64], input: &[f64]) -> usize {
     let mps = build_qml_circuit(config, params, input);
     let probs = classify(&mps, &config.readout_qubits, config.n_classes);
@@ -270,7 +288,7 @@ pub fn predict(config: &QmlConfig, params: &[f64], input: &[f64]) -> usize {
     best
 }
 
-/// Compute accuracy over a dataset.
+/// Compute classification accuracy (fraction correct) over a dataset.
 pub fn compute_accuracy(config: &QmlConfig, params: &[f64], dataset: &QmlDataset) -> f64 {
     if dataset.samples.is_empty() {
         return 0.0;
@@ -382,7 +400,9 @@ pub fn preprocess_image(
     bins
 }
 
-/// Build a QmlDataset from raw image bytes and labels.
+/// Build a `QmlDataset` from raw grayscale image bytes and labels.
+///
+/// Images are preprocessed via snake ordering and average pooling to `n_qubits` features.
 pub fn load_dataset(
     image_data: &[u8],
     labels: &[u8],
@@ -425,7 +445,10 @@ fn shuffle_indices(indices: &mut [usize], rng_state: &mut u64) {
     }
 }
 
-/// Train the QML model using parameter-shift gradients.
+/// Train the QML model using mini-batch gradient descent with finite-difference gradients.
+///
+/// Returns a `QmlResult` with optimized parameters and training history.
+/// Same seed produces bit-identical training trajectories.
 pub fn qml_train(config: &QmlConfig, dataset: &QmlDataset) -> QmlResult {
     let n_params = total_params(config);
     let mut rng_state = config.seed;

@@ -8,17 +8,32 @@ use crate::color::Color;
 use crate::theme::Theme;
 
 /// The top-level plot specification.
+///
+/// A `PlotSpec` describes a complete plot declaratively: data, geometry
+/// layers, scales, labels, theme, coordinate system, annotations, faceting,
+/// and output dimensions. Every builder method consumes `self` and returns
+/// a new `PlotSpec`, making the type immutable-by-convention.
 #[derive(Debug, Clone)]
 pub struct PlotSpec {
+    /// Column-oriented data backing this plot.
     pub data: PlotData,
+    /// Ordered list of geometry layers to render.
     pub layers: Vec<Layer>,
+    /// Axis and color scale configuration.
     pub scales: ScaleSet,
+    /// Title, subtitle, and axis labels.
     pub labels: Labels,
+    /// Visual theme (margins, colors, fonts).
     pub theme: Theme,
+    /// Coordinate system (Cartesian, flipped, or polar).
     pub coord: CoordSystem,
+    /// Semantic annotations overlaid on the plot.
     pub annotations: Vec<Annotation>,
+    /// Faceting specification for multi-panel layouts.
     pub facet: crate::facet::FacetSpec,
+    /// Output width in pixels.
     pub width: u32,
+    /// Output height in pixels.
     pub height: u32,
     /// Whether to show the legend (auto-enabled for 2+ layers).
     pub show_legend: bool,
@@ -600,8 +615,12 @@ impl PlotSpec {
 }
 
 /// Column-oriented data for a plot.
+///
+/// Each column is a `(name, DataColumn)` pair. Columns are looked up by
+/// name during layout and rendering.
 #[derive(Debug, Clone)]
 pub struct PlotData {
+    /// Named data columns in insertion order.
     pub columns: Vec<(String, DataColumn)>,
 }
 
@@ -618,10 +637,15 @@ impl PlotData {
 }
 
 /// A data column: typed array of values.
+///
+/// Supports floating-point, integer, and string (categorical) data.
 #[derive(Debug, Clone)]
 pub enum DataColumn {
+    /// Floating-point column (continuous numeric data).
     Float(Vec<f64>),
+    /// Integer column (discrete numeric data).
     Int(Vec<i64>),
+    /// String column (categorical / discrete label data).
     Str(Vec<String>),
 }
 

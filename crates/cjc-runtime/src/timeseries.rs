@@ -1,5 +1,15 @@
-//! Time series analysis functions: ACF, PACF, EWMA, EMA, seasonal decomposition, differencing.
-//! All floating-point reductions use `BinnedAccumulatorF64` for deterministic results.
+//! Time series analysis functions.
+//!
+//! Provides autocorrelation (ACF), partial autocorrelation (PACF),
+//! exponential smoothing (EWMA, EMA), seasonal decomposition (additive
+//! and multiplicative), differencing, and AR model fitting/forecasting.
+//!
+//! # Determinism
+//!
+//! All floating-point reductions use [`BinnedAccumulatorF64`] for
+//! order-insensitive, bit-identical results across runs and platforms.
+//! The Yule-Walker AR fit delegates to [`Tensor::solve`](crate::tensor::Tensor::solve)
+//! which uses deterministic LU decomposition.
 
 use crate::accumulator::BinnedAccumulatorF64;
 
@@ -7,6 +17,7 @@ use crate::accumulator::BinnedAccumulatorF64;
 // Helper: deterministic sum of a slice
 // ---------------------------------------------------------------------------
 
+/// Compute the sum of `data` using [`BinnedAccumulatorF64`] for determinism.
 fn binned_sum(data: &[f64]) -> f64 {
     let mut acc = BinnedAccumulatorF64::new();
     acc.add_slice(data);
@@ -17,6 +28,9 @@ fn binned_sum(data: &[f64]) -> f64 {
 // Helper: deterministic mean
 // ---------------------------------------------------------------------------
 
+/// Compute the arithmetic mean of `data` using [`BinnedAccumulatorF64`].
+///
+/// Returns `0.0` for empty slices.
 fn binned_mean(data: &[f64]) -> f64 {
     if data.is_empty() {
         return 0.0;
@@ -295,8 +309,13 @@ pub fn seasonal_decompose(
     Ok((trend, seasonal, residual))
 }
 
-/// Compute centered moving average of length `period`.
-/// For even periods, uses a 2x`period` convolution (period MA then 2-MA).
+/// Compute the centered moving average of length `period`.
+///
+/// For odd periods, uses a simple symmetric window of `period` elements.
+/// For even periods, applies a two-pass convolution: first a trailing
+/// `period`-length MA, then averages adjacent pairs to center the result.
+/// Boundary positions where the full window cannot be placed are set to
+/// [`f64::NAN`].
 fn centered_moving_average(data: &[f64], period: usize) -> Vec<f64> {
     let n = data.len();
     let mut result = vec![f64::NAN; n];

@@ -1,4 +1,27 @@
-
+//! Raw-pointer kernel bridge -- bypass interpreter overhead for hot loops.
+//!
+//! Provides zero-overhead numerical kernels that operate directly on
+//! contiguous `&[f64]` slices, avoiding the per-element dispatch cost of
+//! the `Value::Tensor` wrapper. The interpreter resolves tensor pointers
+//! once at call entry, then dispatches to these kernels for the inner loop.
+//!
+//! # Determinism
+//!
+//! Every reduction (dot product, summation, normalization) uses either
+//! [`KahanAccumulatorF64`] or [`BinnedAccumulatorF64`] to guarantee
+//! deterministic floating-point results regardless of thread count or
+//! input ordering.
+//!
+//! # NoGC guarantee
+//!
+//! All kernels operate on caller-provided buffers with no heap allocation
+//! in the hot path. Output buffers are always pre-allocated by the caller.
+//!
+//! # Dispatched variants
+//!
+//! Each kernel has a `_dispatched` variant that accepts a
+//! [`ReductionContext`](crate::dispatch::ReductionContext) to select
+//! between Kahan and Binned accumulation strategies at runtime.
 
 // ---------------------------------------------------------------------------
 // 2d. Raw-Pointer Kernel Bridge — bypass interpreter overhead for hot loops
@@ -10,7 +33,7 @@
 /// data. The interpreter resolves tensor pointers once at call entry, then
 /// dispatches to these zero-overhead kernels.
 ///
-/// All functions here are safe Rust — they accept slices, not raw pointers.
+/// All functions here are safe Rust -- they accept slices, not raw pointers.
 /// The "raw pointer" concept means: the interpreter does one `to_vec()` or
 /// `buffer.borrow()` at entry, then passes the contiguous slice through.
 pub mod kernel {
@@ -221,7 +244,7 @@ pub mod kernel {
 
     // -- Phase 7: 2D Spatial Kernels ------------------------------------------
 
-    /// 2D convolution — NCHW layout, valid mode (no padding), configurable stride.
+    /// 2D convolution -- NCHW layout, valid mode (no padding), configurable stride.
     ///
     /// # Layout
     /// - `input`:   `[N, C_in, H_in, W_in]`  row-major contiguous
@@ -413,7 +436,14 @@ pub mod kernel {
         }
     }
 
-    /// Max-pooling over 1D signal, stride = pool_size.
+    /// 1D max-pooling with stride equal to `pool_size` (non-overlapping windows).
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - Input signal of length `data_len`.
+    /// * `out` - Pre-allocated output buffer of length `data_len / pool_size`.
+    /// * `data_len` - Length of the input signal.
+    /// * `pool_size` - Window (and stride) size for pooling.
     pub fn maxpool1d_raw(data: &[f64], out: &mut [f64], data_len: usize, pool_size: usize) {
         debug_assert_eq!(data.len(), data_len);
         let out_len = data_len / pool_size;

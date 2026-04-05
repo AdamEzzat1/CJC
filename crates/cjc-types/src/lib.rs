@@ -1,7 +1,35 @@
 //! Type system and inference engine for CJC.
 //!
-//! Defines the `Type` enum, type environment, function signature registry,
-//! and Hindley-Milner style type inference with support for generics.
+//! This crate provides the core type representation ([`Type`]), the type
+//! environment ([`TypeEnv`]), Hindley-Milner style unification ([`unify`]),
+//! constraint-based inference ([`inference::InferCtx`]), and a full type
+//! checker ([`TypeChecker`]) that validates CJC programs.
+//!
+//! # Architecture
+//!
+//! The type system is organized around several key components:
+//!
+//! - **[`Type`]** -- The union of all CJC types, from primitives (`i32`, `f64`)
+//!   through composites (`Tensor`, `Array`, `Tuple`) to user-defined aggregates
+//!   (`Struct`, `Class`, `Record`, `Enum`) and quantum primitives.
+//! - **[`TypeEnv`]** -- Scoped environment that tracks variable bindings,
+//!   type definitions, trait implementations, and function signatures.
+//! - **[`unify`] / [`unify_spanned`]** -- Robinson-style unification with
+//!   occurs check, producing type variable bindings in a [`TypeSubst`] map.
+//! - **[`inference::InferCtx`]** -- Constraint-based inference context that
+//!   collects constraints during type checking and solves them via unification.
+//! - **[`TypeChecker`]** -- Two-pass checker (register declarations, then
+//!   type-check bodies) that drives the full pipeline.
+//! - **[`EffectSet`]** -- Bitflag classification of function side effects
+//!   (IO, allocation, GC, nondeterminism, mutation, capture).
+//! - **[`effect_registry`]** -- Exhaustive registry mapping every builtin
+//!   function name to its [`EffectSet`] flags.
+//!
+//! # Determinism Guarantees
+//!
+//! All internal collections use [`BTreeMap`] and [`BTreeSet`] rather than
+//! hash-based containers, ensuring iteration order is deterministic across
+//! runs and platforms.
 
 pub mod inference;
 
@@ -10,67 +38,102 @@ use std::fmt;
 
 // ── Core Type Representation ────────────────────────────────────
 
-/// Unique type identifier.
+/// Unique type identifier used for internal type numbering.
 pub type TypeId = usize;
 
-/// Substitution map: TypeVarId -> concrete Type.
+/// Substitution map from type variable IDs to their resolved concrete types.
+///
+/// Built incrementally during [`unify`] calls. Uses [`BTreeMap`] for
+/// deterministic iteration order.
 pub type TypeSubst = BTreeMap<TypeVarId, Type>;
 
-/// Substitution map for symbolic shape variables.
+/// Substitution map from symbolic shape variable names to their resolved
+/// concrete dimensions.
+///
+/// Built during [`unify_shape_dim`] and [`unify_shapes`] calls.
+/// Uses [`BTreeMap`] for deterministic iteration order.
 pub type ShapeSubst = BTreeMap<String, usize>;
 
 /// The CJC type system representation.
+///
+/// Every CJC value has a corresponding `Type`. Types range from numeric
+/// primitives through parameterized composites (tensors, arrays, tuples,
+/// functions) to user-defined aggregates (structs, classes, records, enums)
+/// and quantum simulation primitives.
+///
+/// Special variants:
+/// - [`Type::Var`] -- Unresolved type variable used during inference.
+/// - [`Type::Unresolved`] -- Named type not yet resolved (e.g., generic `T`).
+/// - [`Type::Error`] -- Sentinel for error recovery; unifies with everything.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
-    /// Primitive types.
+    /// 32-bit signed integer.
     I32,
+    /// 64-bit signed integer (default integer type in CJC).
     I64,
+    /// Unsigned 8-bit byte.
     U8,
+    /// 32-bit IEEE 754 floating-point number.
     F32,
+    /// 64-bit IEEE 754 floating-point number (default float type in CJC).
     F64,
+    /// Boolean (`true` / `false`).
     Bool,
+    /// Heap-allocated UTF-8 string.
     Str,
+    /// Unit type representing no value (e.g., from statements or `print`).
     Void,
 
-    /// Owning byte buffer.
+    /// Owning byte buffer (heap-allocated `Vec<u8>` semantics).
     Bytes,
 
-    /// Non-owning byte slice view (zero-copy).
+    /// Non-owning byte slice view (zero-copy, borrowed from a [`Bytes`](Type::Bytes) or literal).
     ByteSlice,
 
-    /// Validated UTF-8 string view (zero-copy).
+    /// Validated UTF-8 string view (zero-copy, borrowed from a [`Str`](Type::Str)).
     StrView,
 
-    /// Tensor type with element type and optional shape.
+    /// Dense tensor with a typed element and optional static shape.
+    ///
+    /// When `shape` is `Some`, dimension sizes may be [`ShapeDim::Known`]
+    /// (compile-time constant) or [`ShapeDim::Symbolic`] (resolved at runtime).
     Tensor {
+        /// Element type (e.g., [`Type::F64`]).
         elem: Box<Type>,
+        /// Optional static shape for compile-time shape checking.
         shape: Option<Vec<ShapeDim>>,
     },
 
-    /// Buffer type.
+    /// Typed buffer (COW-backed contiguous memory region).
     Buffer {
+        /// Element type stored in the buffer.
         elem: Box<Type>,
     },
 
-    /// Array type with element type and length.
+    /// Fixed-length array with a typed element and compile-time length.
+    ///
+    /// A `len` of `0` indicates a dynamically-sized array (length unknown
+    /// at type-check time).
     Array {
+        /// Element type of the array.
         elem: Box<Type>,
+        /// Static length (`0` = dynamic).
         len: usize,
     },
 
-    /// Tuple type.
+    /// Heterogeneous, fixed-length tuple.
     Tuple(Vec<Type>),
 
-    /// User-defined struct (mutable value type).
+    /// User-defined struct -- mutable value type with named fields.
     Struct(StructType),
 
-    /// User-defined class (GC reference type).
+    /// User-defined class -- GC-managed reference type with named fields.
     Class(ClassType),
 
-    /// User-defined record (immutable value type).
+    /// User-defined record -- immutable value type with named fields and structural equality.
     Record(RecordType),
 
-    /// User-defined enum / ADT (value type, stack-allocatable).
+    /// User-defined enum / algebraic data type (value type, stack-allocatable).
     Enum(EnumType),
 
     /// Brain float 16-bit type.
@@ -103,27 +166,39 @@ pub enum Type {
     /// Compiled regex pattern type.
     Regex,
 
-    /// Function type.
+    /// Function type with typed parameter list and return type.
     Fn {
+        /// Positional parameter types.
         params: Vec<Type>,
+        /// Return type.
         ret: Box<Type>,
     },
 
-    /// Map type with key and value types.
+    /// Deterministic ordered map from keys to values.
+    ///
+    /// Backed by [`BTreeMap`] at runtime for deterministic iteration.
     Map {
+        /// Key type.
         key: Box<Type>,
+        /// Value type.
         value: Box<Type>,
     },
 
-    /// Sparse tensor type.
+    /// Sparse tensor in CSR/COO format.
     SparseTensor {
+        /// Element type stored in the sparse tensor.
         elem: Box<Type>,
     },
 
-    /// Tidy data view (lazy bitmask + projection over a DataFrame).
+    /// Tidy data view -- a lazy bitmask + column projection over a DataFrame.
+    ///
+    /// Operations on `TidyView` are deferred until materialization, allowing
+    /// predicate pushdown and efficient chaining.
     TidyView,
 
-    /// Grouped tidy data view (TidyView partitioned by key columns).
+    /// Grouped tidy data view -- a [`TidyView`](Type::TidyView) partitioned by key columns.
+    ///
+    /// Produced by `tidy_group_by`. Aggregation functions operate per-group.
     GroupedTidyView,
 
     // ── Quantum Primitives ──────────────────────────────────────
@@ -153,29 +228,48 @@ pub enum Type {
     /// Surface code / repetition code for quantum error correction.
     QuantumSurfaceCode,
 
-    /// Type variable (for generics).
+    /// Unresolved type variable introduced during inference.
+    ///
+    /// Fresh variables are created by [`TypeEnv::fresh_var`] or
+    /// [`inference::InferCtx::fresh_var`] and resolved to concrete types
+    /// through [`unify`].
     Var(TypeVarId),
 
-    /// A named type that hasn't been resolved yet.
+    /// A named type that has not yet been resolved against the type environment.
+    ///
+    /// Produced when the parser encounters a type parameter name like `T` in
+    /// a generic definition. Resolved to a concrete type by
+    /// [`substitute_type_params_concrete`] after inference.
     Unresolved(String),
 
-    /// Error type (for error recovery — unifies with everything).
+    /// Error sentinel type used for error recovery during type checking.
+    ///
+    /// Unifies with every other type (see [`unify`]), preventing cascading
+    /// errors after a single type mismatch.
     Error,
 }
 
 impl Type {
+    /// Returns `true` if this type is a numeric type (integer, float, bf16, f16, or complex).
     pub fn is_numeric(&self) -> bool {
         matches!(self, Type::I32 | Type::I64 | Type::U8 | Type::F32 | Type::F64 | Type::Bf16 | Type::F16 | Type::Complex)
     }
 
+    /// Returns `true` if this type is a floating-point type (`f32`, `f64`, `bf16`, or `f16`).
     pub fn is_float(&self) -> bool {
         matches!(self, Type::F32 | Type::F64 | Type::Bf16 | Type::F16)
     }
 
+    /// Returns `true` if this type is an integer type (`i32`, `i64`, or `u8`).
     pub fn is_int(&self) -> bool {
         matches!(self, Type::I32 | Type::I64 | Type::U8)
     }
 
+    /// Returns `true` if this type is a value type (stack-allocatable, no GC needed).
+    ///
+    /// Value types include all primitives, tensors, buffers, arrays, tuples,
+    /// structs, records, enums, maps, ranges, slices, and sparse tensors.
+    /// The only non-value type is [`Type::Class`], which requires GC.
     pub fn is_value_type(&self) -> bool {
         matches!(
             self,
@@ -227,10 +321,14 @@ impl Type {
         )
     }
 
+    /// Returns `true` if this type is a GC-managed reference type.
+    ///
+    /// Currently only [`Type::Class`] requires garbage collection.
     pub fn is_gc_type(&self) -> bool {
         matches!(self, Type::Class(_))
     }
 
+    /// Returns `true` if this is the [`Type::Error`] sentinel.
     pub fn is_error(&self) -> bool {
         matches!(self, Type::Error)
     }
@@ -316,9 +414,16 @@ impl fmt::Display for Type {
 
 // ── Shape Dimensions ────────────────────────────────────────────
 
+/// A single dimension in a tensor shape, either statically known or symbolic.
+///
+/// Used within [`Type::Tensor`] shape vectors to enable compile-time shape
+/// checking and symbolic shape unification.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ShapeDim {
+    /// A concrete, compile-time-known dimension size.
     Known(usize),
+    /// A symbolic dimension variable (e.g., `N`, `batch`) resolved at runtime
+    /// or unified with other symbolic/known dimensions via [`unify_shape_dim`].
     Symbolic(String),
 }
 
@@ -333,8 +438,31 @@ impl fmt::Display for ShapeDim {
 
 // ── Type Unification ────────────────────────────────────────────
 
-/// Unify two types, producing bindings for type variables.
-/// Returns the unified (most specific) type, or an error message.
+/// Unify two types using Robinson-style unification, producing bindings for
+/// type variables in `subst`.
+///
+/// Returns the unified (most specific) type on success, or an error message
+/// describing the mismatch on failure.
+///
+/// # Behavior
+///
+/// - [`Type::Error`] unifies with everything (error recovery).
+/// - [`Type::Var`] on either side is bound in `subst` (with occurs check).
+/// - Composite types (Tensor, Array, Tuple, Fn, Enum, etc.) are unified
+///   structurally by recursing into their components.
+/// - Nominal types (Struct, Class, Record, Enum) require matching names.
+///
+/// # Arguments
+///
+/// * `a` -- Left-hand type.
+/// * `b` -- Right-hand type.
+/// * `subst` -- Mutable substitution map accumulating variable bindings.
+///
+/// # Errors
+///
+/// Returns `Err(String)` when types are incompatible (e.g., `i32` vs `f64`,
+/// array length mismatch, function arity mismatch, or infinite type via
+/// occurs check).
 pub fn unify(a: &Type, b: &Type, subst: &mut TypeSubst) -> Result<Type, String> {
     // Error type unifies with everything (error recovery)
     if a.is_error() {
@@ -625,7 +753,21 @@ fn occurs_in(id: TypeVarId, ty: &Type, subst: &TypeSubst) -> bool {
     }
 }
 
-/// Apply a type substitution, replacing all bound Var(id) with their concrete types.
+/// Apply a type substitution, replacing all bound [`Type::Var`] occurrences
+/// with their concrete types from `subst`.
+///
+/// Recursively follows chains of substitutions (e.g., `T0 -> T1 -> i64`
+/// resolves `T0` to `i64`). Non-variable types and unbound variables are
+/// returned unchanged.
+///
+/// # Arguments
+///
+/// * `ty` -- The type to resolve.
+/// * `subst` -- Substitution map from [`unify`] or manual construction.
+///
+/// # Returns
+///
+/// The fully resolved type with all known variables replaced.
 pub fn apply_subst(ty: &Type, subst: &TypeSubst) -> Type {
     match ty {
         Type::Var(id) => {
@@ -668,11 +810,25 @@ pub fn apply_subst(ty: &Type, subst: &TypeSubst) -> Type {
     }
 }
 
-/// Substitute `Type::Unresolved` names with concrete types based on a mapping.
+/// Substitute [`Type::Unresolved`] names with concrete types based on a
+/// name-to-type mapping.
 ///
-/// This is used after inferring concrete types for generic type parameters
-/// (e.g., T=i64 from `Some(42)`) to rewrite the return type so that
-/// `Option<T>` becomes `Option<i64>`.
+/// After inferring concrete types for generic type parameters (e.g., `T=i64`
+/// from `Some(42)`), this function rewrites the type so that `Option<T>`
+/// becomes `Option<i64>`.
+///
+/// Recursively walks into composite types (Enum, Tuple, Array, Fn, Tensor,
+/// Buffer, Map, Range, Slice, SparseTensor). Non-`Unresolved` leaf types
+/// are returned unchanged.
+///
+/// # Arguments
+///
+/// * `ty` -- The type potentially containing [`Type::Unresolved`] leaves.
+/// * `subst` -- Mapping from type parameter names to their inferred concrete types.
+///
+/// # Returns
+///
+/// A new type with all matching [`Type::Unresolved`] names replaced.
 pub fn substitute_type_params_concrete(ty: &Type, subst: &BTreeMap<String, Type>) -> Type {
     match ty {
         Type::Unresolved(name) => {
@@ -775,7 +931,18 @@ fn collect_unresolved_bindings(declared: &Type, concrete: &Type, subst: &mut BTr
 
 // ── Shape Unification ──────────────────────────────────────────
 
-/// Unify two shape dimensions.
+/// Unify two shape dimensions, producing bindings for symbolic variables.
+///
+/// - Two [`ShapeDim::Known`] values must be equal.
+/// - A [`ShapeDim::Symbolic`] paired with a [`ShapeDim::Known`] binds the
+///   symbol to the concrete value in `subst` (or verifies consistency if
+///   already bound).
+/// - Two distinct [`ShapeDim::Symbolic`] variables are equated if both are
+///   unbound.
+///
+/// # Errors
+///
+/// Returns `Err` on dimension mismatch or conflicting bindings.
 pub fn unify_shape_dim(
     a: &ShapeDim,
     b: &ShapeDim,
@@ -842,6 +1009,13 @@ pub fn unify_shape_dim(
 }
 
 /// Unify two shape vectors dimension by dimension.
+///
+/// Both shapes must have the same rank (number of dimensions). Each
+/// dimension pair is unified via [`unify_shape_dim`].
+///
+/// # Errors
+///
+/// Returns `Err` on rank mismatch or any individual dimension mismatch.
 pub fn unify_shapes(
     a: &[ShapeDim],
     b: &[ShapeDim],
@@ -863,8 +1037,16 @@ pub fn unify_shapes(
         .collect()
 }
 
-/// Compute broadcast-compatible shape from two shapes (NumPy rules).
-/// Returns the broadcast result shape, or an error if incompatible.
+/// Compute the broadcast-compatible shape from two shapes following NumPy
+/// broadcasting rules.
+///
+/// Shapes are right-aligned and padded with `Known(1)` on the left for the
+/// shorter shape. Each dimension pair must either be equal or one of them
+/// must be `1`. If either input is `None`, returns `None` (unknown shape).
+///
+/// # Errors
+///
+/// Returns `Err` if any dimension pair is incompatible for broadcasting.
 pub fn broadcast_shapes(
     a: &Option<Vec<ShapeDim>>,
     b: &Option<Vec<ShapeDim>>,
@@ -931,86 +1113,163 @@ fn broadcast_dim(a: &ShapeDim, b: &ShapeDim, dim_idx: usize) -> Result<ShapeDim,
 
 // ── Struct, Class, and Enum Type Info ────────────────────────────
 
+/// User-defined struct type -- a mutable value type with named fields.
+///
+/// Structs are stack-allocatable and support field mutation. They use
+/// nominal typing: two structs with the same fields but different names
+/// are distinct types.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StructType {
+    /// The struct's declared name (e.g., `"Point"`).
     pub name: String,
+    /// Generic type parameter names (e.g., `["T", "U"]`).
     pub type_params: Vec<String>,
+    /// Ordered list of `(field_name, field_type)` pairs.
     pub fields: Vec<(String, Type)>,
 }
 
+/// User-defined class type -- a GC-managed reference type with named fields.
+///
+/// Classes are heap-allocated and garbage-collected. They are the only type
+/// that returns `true` from [`Type::is_gc_type`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassType {
+    /// The class's declared name.
     pub name: String,
+    /// Generic type parameter names.
     pub type_params: Vec<String>,
+    /// Ordered list of `(field_name, field_type)` pairs.
     pub fields: Vec<(String, Type)>,
 }
 
-/// Record type: immutable value type with structural equality.
+/// User-defined record type -- an immutable value type with structural equality.
+///
+/// Records differ from structs in two ways: their fields cannot be mutated
+/// after construction, and assigning to a record field produces a type error
+/// (E0160).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordType {
+    /// The record's declared name.
     pub name: String,
+    /// Generic type parameter names.
     pub type_params: Vec<String>,
+    /// Ordered list of `(field_name, field_type)` pairs.
     pub fields: Vec<(String, Type)>,
 }
 
+/// User-defined enum type -- an algebraic data type (ADT) with named variants.
+///
+/// Enums are value types (stack-allocatable) and support pattern matching
+/// via `match` expressions. Variant fields can contain generic type
+/// parameters represented as [`Type::Unresolved`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumType {
+    /// The enum's declared name (e.g., `"Option"`).
     pub name: String,
+    /// Generic type parameter names (e.g., `["T"]` for `Option<T>`).
     pub type_params: Vec<String>,
+    /// The enum's variants in declaration order.
     pub variants: Vec<EnumVariant>,
 }
 
+/// A single variant within an [`EnumType`].
+///
+/// Variants may carry zero or more positional fields (like tuple structs).
+/// For example, `Some(T)` has one field, while `None` has zero.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumVariant {
+    /// The variant's name (e.g., `"Some"`, `"None"`).
     pub name: String,
+    /// Positional field types (empty for unit variants like `None`).
     pub fields: Vec<Type>,
 }
 
 // ── Type Variables ──────────────────────────────────────────────
 
+/// Unique identifier for a type variable, used during type inference.
+///
+/// Fresh IDs are allocated sequentially by [`TypeEnv::fresh_var`] and
+/// [`inference::InferCtx::fresh_var`]. The inner `usize` is a monotonically
+/// increasing counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TypeVarId(pub usize);
 
 // ── Traits / Typeclasses ────────────────────────────────────────
 
+/// Definition of a trait (typeclass) with optional supertrait hierarchy and methods.
+///
+/// CJC has a built-in trait hierarchy (see [`builtin_trait_defs`]):
+/// `Numeric` -> `Int` / `Float` -> `Differentiable`. User-defined traits
+/// extend this system.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraitDef {
+    /// The trait's name (e.g., `"Numeric"`, `"Float"`).
     pub name: String,
+    /// Generic type parameter names for the trait itself.
     pub type_params: Vec<String>,
+    /// Names of supertraits that implementors must also satisfy.
     pub super_traits: Vec<String>,
+    /// Required method signatures.
     pub methods: Vec<MethodSig>,
 }
 
+/// Signature of a single method within a [`TraitDef`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct MethodSig {
+    /// Method name (e.g., `"zero"`, `"sqrt"`).
     pub name: String,
+    /// Positional parameter types. `Type::Var(TypeVarId(0))` represents `Self`.
     pub params: Vec<Type>,
+    /// Return type.
     pub ret: Type,
 }
 
-/// A trait implementation: "Type implements Trait".
+/// A trait implementation declaring that a concrete type satisfies a trait.
+///
+/// Registered in [`TypeEnv::trait_impls`] and queried by
+/// [`TypeEnv::satisfies_trait`] during generic bound checking.
 #[derive(Debug, Clone)]
 pub struct TraitImpl {
+    /// The trait being implemented (e.g., `"Numeric"`).
     pub trait_name: String,
+    /// The concrete type implementing the trait (e.g., [`Type::F64`]).
     pub target_type: Type,
+    /// Type arguments for parameterized traits (currently unused).
     pub type_args: Vec<Type>,
 }
 
 // ── Built-in Trait Hierarchy ────────────────────────────────────
 
+/// Built-in trait name: all numeric types (`i32`, `i64`, `u8`, `f32`, `f64`, `bf16`, `f16`).
 pub const TRAIT_NUMERIC: &str = "Numeric";
+/// Built-in trait name: floating-point types (`f32`, `f64`, `bf16`, `f16`). Subtrait of `Numeric`.
 pub const TRAIT_FLOAT: &str = "Float";
+/// Built-in trait name: integer types (`i32`, `i64`, `u8`). Subtrait of `Numeric`.
 pub const TRAIT_INT: &str = "Int";
+/// Built-in trait name: types supporting automatic differentiation (`f32`, `f64`). Subtrait of `Float`.
 pub const TRAIT_DIFFERENTIABLE: &str = "Differentiable";
+/// Built-in trait name: types supporting ordering comparisons.
 pub const TRAIT_ORD: &str = "Ord";
+/// Built-in trait name: types that can be formatted for display.
 pub const TRAIT_DISPLAY: &str = "Display";
+/// Built-in trait name: types that support binary serialization via `cjc-snap`.
 pub const TRAIT_SNAP: &str = "Snap";
 
-/// Built-in trait hierarchy:
+/// Return the built-in trait definitions forming the CJC trait hierarchy.
+///
+/// ```text
 ///   Numeric
 ///   ├── Int
 ///   └── Float
 ///       └── Differentiable
+///   Ord
+///   Display
+///   Snap
+/// ```
+///
+/// Each [`TraitDef`] includes its supertrait relationships and required
+/// method signatures. These are registered into [`TypeEnv::trait_defs`]
+/// during [`TypeEnv::new`].
 pub fn builtin_trait_defs() -> Vec<TraitDef> {
     vec![
         TraitDef {
@@ -1085,7 +1344,11 @@ pub fn builtin_trait_defs() -> Vec<TraitDef> {
     ]
 }
 
-/// Built-in trait implementations.
+/// Return the built-in trait implementations mapping primitive types to
+/// their satisfied traits.
+///
+/// Includes implementations of `Numeric`, `Int`, `Float`, `Differentiable`,
+/// `Ord`, `Display`, and `Snap` for the appropriate primitive types.
 pub fn builtin_trait_impls() -> Vec<TraitImpl> {
     vec![
         // i32: Numeric, Int
@@ -1131,22 +1394,34 @@ pub fn builtin_trait_impls() -> Vec<TraitImpl> {
 
 // ── Type Environment ────────────────────────────────────────────
 
-/// Type checking environment.
+/// Type checking environment -- the central registry for types, traits,
+/// variables, and function signatures.
+///
+/// [`TypeEnv`] is a scoped environment that supports nested lexical scopes
+/// via [`push_scope`](TypeEnv::push_scope) / [`pop_scope`](TypeEnv::pop_scope).
+/// It is created with [`TypeEnv::new`], which pre-registers all built-in
+/// types, traits, and quantum function signatures.
+///
+/// All internal maps use [`BTreeMap`] for deterministic iteration order.
 pub struct TypeEnv {
-    /// Named type definitions.
+    /// Named type definitions (e.g., `"i32" -> Type::I32`, `"Option" -> Type::Enum(...)`).
     pub type_defs: BTreeMap<String, Type>,
-    /// Trait definitions.
+    /// Trait definitions keyed by trait name.
     pub trait_defs: BTreeMap<String, TraitDef>,
-    /// Trait implementations.
+    /// All registered trait implementations.
     pub trait_impls: Vec<TraitImpl>,
-    /// Variable scopes (stack of scope frames).
-    /// Each entry stores (type, is_mutable).
+    /// Variable scopes as a stack of scope frames.
+    ///
+    /// Each frame is a map from variable name to `(type, is_mutable)`.
+    /// The innermost (last) frame is the current scope.
     scopes: Vec<BTreeMap<String, (Type, bool)>>,
-    /// Const definitions (name -> value type). Always immutable.
+    /// Compile-time constant definitions (name -> value type). Always immutable.
     pub const_defs: BTreeMap<String, Type>,
-    /// Function signatures.
+    /// Function signature table supporting multiple dispatch (overloading).
+    ///
+    /// Each function name maps to a list of [`FnSigEntry`] overloads.
     pub fn_sigs: BTreeMap<String, Vec<FnSigEntry>>,
-    /// Next type variable ID.
+    /// Monotonically increasing counter for generating fresh [`TypeVarId`]s.
     next_var: usize,
 }
 
@@ -1261,16 +1536,30 @@ pub mod effect_registry;
 // Function Signature Entry
 // ---------------------------------------------------------------------------
 
-/// Entry in the function signature table (for multiple dispatch).
+/// Entry in the function signature table, supporting generic type parameters
+/// and multiple dispatch (overloading by arity/type).
+///
+/// Registered via [`TypeEnv::register_fn`] and looked up during
+/// [`TypeChecker::check_fn_call`] for overload resolution.
 #[derive(Debug, Clone)]
 pub struct FnSigEntry {
+    /// Function name (or qualified name like `"Tensor.zeros"`).
     pub name: String,
-    pub type_params: Vec<(String, Vec<String>)>, // (name, trait bounds)
+    /// Generic type parameters as `(name, trait_bounds)` pairs.
+    ///
+    /// For example, `[("T", ["Numeric", "Float"])]` means type parameter `T`
+    /// must implement both `Numeric` and `Float`.
+    pub type_params: Vec<(String, Vec<String>)>,
+    /// Positional parameters as `(param_name, param_type)` pairs.
     pub params: Vec<(String, Type)>,
+    /// Return type.
     pub ret: Type,
+    /// Whether this function is declared as `@nogc` (no GC allocations allowed).
     pub is_nogc: bool,
-    /// Effect classification for this function. Used by the nogc verifier,
-    /// escape analysis, and optimizer to reason about side effects.
+    /// Effect classification for this function.
+    ///
+    /// Used by the NoGC verifier (`cjc-mir/nogc_verify`), escape analysis
+    /// (`cjc-mir/escape`), and the optimizer to reason about side effects.
     pub effects: EffectSet,
 }
 

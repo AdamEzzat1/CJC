@@ -91,6 +91,10 @@ pub fn compute_metrics(program: &Program) -> AstMetrics {
     }
 }
 
+/// Internal visitor that accumulates metrics during a single AST traversal.
+///
+/// Tracks running counts, current/max depths, and feature-presence flags.
+/// After the traversal completes, its fields are copied into an [`AstMetrics`].
 struct MetricsCollector {
     expr_count: u32,
     stmt_count: u32,
@@ -111,6 +115,7 @@ struct MetricsCollector {
 }
 
 impl MetricsCollector {
+    /// Create a new collector with all counters zeroed.
     fn new() -> Self {
         Self {
             expr_count: 0,

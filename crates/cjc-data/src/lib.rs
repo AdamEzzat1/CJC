@@ -26,9 +26,13 @@ pub mod tidy_dispatch;
 /// A single column in a DataFrame.
 #[derive(Debug, Clone)]
 pub enum Column {
+    /// 64-bit signed integer column.
     Int(Vec<i64>),
+    /// 64-bit floating-point column.
     Float(Vec<f64>),
+    /// UTF-8 string column.
     Str(Vec<String>),
+    /// Boolean column.
     Bool(Vec<bool>),
     /// Categorical column: sorted unique level names + per-row index into levels.
     Categorical {
@@ -40,6 +44,7 @@ pub enum Column {
 }
 
 impl Column {
+    /// Returns the number of rows in this column.
     pub fn len(&self) -> usize {
         match self {
             Column::Int(v) => v.len(),
@@ -51,10 +56,12 @@ impl Column {
         }
     }
 
+    /// Returns `true` if the column has zero rows.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    /// Returns the human-readable type name of this column variant.
     pub fn type_name(&self) -> &'static str {
         match self {
             Column::Int(_) => "Int",
@@ -88,12 +95,16 @@ pub struct DataFrame {
 }
 
 impl DataFrame {
+    /// Create an empty DataFrame with no columns.
     pub fn new() -> Self {
         Self {
             columns: Vec::new(),
         }
     }
 
+    /// Create a DataFrame from a list of named columns.
+    ///
+    /// Returns an error if column lengths are not all equal.
     pub fn from_columns(columns: Vec<(String, Column)>) -> Result<Self, DataError> {
         if columns.is_empty() {
             return Ok(Self { columns });
@@ -111,18 +122,22 @@ impl DataFrame {
         Ok(Self { columns })
     }
 
+    /// Returns the number of rows (determined from the first column, or 0 if empty).
     pub fn nrows(&self) -> usize {
         self.columns.first().map(|(_, c)| c.len()).unwrap_or(0)
     }
 
+    /// Returns the number of columns.
     pub fn ncols(&self) -> usize {
         self.columns.len()
     }
 
+    /// Returns the column names in order.
     pub fn column_names(&self) -> Vec<&str> {
         self.columns.iter().map(|(n, _)| n.as_str()).collect()
     }
 
+    /// Look up a column by name, returning a reference if found.
     pub fn get_column(&self, name: &str) -> Option<&Column> {
         self.columns
             .iter()
@@ -277,28 +292,47 @@ pub enum DExpr {
     RollingSd(String, usize),
 }
 
+/// Binary operator for Data DSL expressions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DBinOp {
+    /// Addition (`+`).
     Add,
+    /// Subtraction (`-`).
     Sub,
+    /// Multiplication (`*`).
     Mul,
+    /// Division (`/`).
     Div,
+    /// Greater than (`>`).
     Gt,
+    /// Less than (`<`).
     Lt,
+    /// Greater than or equal (`>=`).
     Ge,
+    /// Less than or equal (`<=`).
     Le,
+    /// Equality (`==`).
     Eq,
+    /// Not equal (`!=`).
     Ne,
+    /// Logical AND (`&&`).
     And,
+    /// Logical OR (`||`).
     Or,
 }
 
+/// Aggregation function for use in `summarize` expressions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AggFunc {
+    /// Kahan-compensated sum.
     Sum,
+    /// Arithmetic mean.
     Mean,
+    /// Minimum value.
     Min,
+    /// Maximum value.
     Max,
+    /// Row count.
     Count,
 }
 
@@ -1030,12 +1064,14 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
+    /// Start a pipeline by scanning a source DataFrame.
     pub fn scan(df: DataFrame) -> Self {
         Self {
             plan: LogicalPlan::Scan { source: df },
         }
     }
 
+    /// Add a filter step to the pipeline.
     pub fn filter(self, predicate: DExpr) -> Self {
         Self {
             plan: LogicalPlan::Filter {
@@ -1045,6 +1081,7 @@ impl Pipeline {
         }
     }
 
+    /// Add a group-by step to the pipeline.
     pub fn group_by(self, keys: Vec<String>) -> Self {
         Self {
             plan: LogicalPlan::GroupBy {
@@ -1054,6 +1091,7 @@ impl Pipeline {
         }
     }
 
+    /// Add a summarize (aggregate) step to the pipeline.
     pub fn summarize(self, keys: Vec<String>, aggs: Vec<(String, DExpr)>) -> Self {
         Self {
             plan: LogicalPlan::Aggregate {
@@ -1064,6 +1102,7 @@ impl Pipeline {
         }
     }
 
+    /// Add a column projection step to the pipeline.
     pub fn select(self, columns: Vec<String>) -> Self {
         Self {
             plan: LogicalPlan::Project {
@@ -1073,6 +1112,7 @@ impl Pipeline {
         }
     }
 
+    /// Add an inner join step to the pipeline.
     pub fn inner_join(self, right: DataFrame, left_on: &str, right_on: &str) -> Self {
         Self {
             plan: LogicalPlan::InnerJoin {
@@ -1084,6 +1124,7 @@ impl Pipeline {
         }
     }
 
+    /// Add a left join step to the pipeline.
     pub fn left_join(self, right: DataFrame, left_on: &str, right_on: &str) -> Self {
         Self {
             plan: LogicalPlan::LeftJoin {
@@ -1095,6 +1136,7 @@ impl Pipeline {
         }
     }
 
+    /// Add a cross (cartesian) join step to the pipeline.
     pub fn cross_join(self, right: DataFrame) -> Self {
         Self {
             plan: LogicalPlan::CrossJoin {
@@ -1118,14 +1160,21 @@ impl Pipeline {
 
 // â"€â"€ Errors â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
+/// Errors from DataFrame operations (plan execution, joins, tensor conversion).
 #[derive(Debug, Clone)]
 pub enum DataError {
+    /// A referenced column name does not exist in the DataFrame.
     ColumnNotFound(String),
+    /// A column has a different row count than expected.
     ColumnLengthMismatch {
+        /// Expected row count.
         expected: usize,
+        /// Actual row count.
         got: usize,
+        /// Name of the mismatched column.
         column: String,
     },
+    /// A generic invalid-operation error with a descriptive message.
     InvalidOperation(String),
 }
 
@@ -1747,6 +1796,7 @@ impl DataFrame {
     ///
     /// All selected columns must be `Float` or `Int`; `Str` and `Bool` columns
     /// will return `DataError::InvalidOperation`.
+    /// Convert selected numeric columns into a `Tensor` with shape `[nrows, ncols]`.
     pub fn to_tensor(
         &self,
         col_names: &[&str],
@@ -1883,6 +1933,7 @@ impl BitMask {
         (0..self.nrows).filter(move |&i| self.get(i))
     }
 
+    /// Returns the total number of rows this mask covers.
     pub fn nrows(&self) -> usize {
         self.nrows
     }
@@ -1924,14 +1975,17 @@ impl ProjectionMap {
         ProjectionMap { indices }
     }
 
+    /// Returns the number of projected columns.
     pub fn len(&self) -> usize {
         self.indices.len()
     }
 
+    /// Returns `true` if no columns are projected.
     pub fn is_empty(&self) -> bool {
         self.indices.is_empty()
     }
 
+    /// Returns the underlying column-index slice.
     pub fn indices(&self) -> &[usize] {
         &self.indices
     }
@@ -3200,18 +3254,22 @@ pub struct RowIndexMap {
 }
 
 impl RowIndexMap {
+    /// Create a new row index map from explicit indices.
     pub fn new(indices: Vec<usize>) -> Self {
         RowIndexMap { indices }
     }
 
+    /// Returns the number of visible rows.
     pub fn len(&self) -> usize {
         self.indices.len()
     }
 
+    /// Returns `true` if no rows are selected.
     pub fn is_empty(&self) -> bool {
         self.indices.is_empty()
     }
 
+    /// Borrow the underlying indices as a slice.
     pub fn as_slice(&self) -> &[usize] {
         &self.indices
     }
@@ -3322,6 +3380,11 @@ impl GroupIndex {
 /// After grouping, `ungroup()` restores the plain `TidyView`.
 /// `summarise()` collapses each group into one summary row.
 #[derive(Debug, Clone)]
+/// A TidyView that has been grouped by one or more columns.
+///
+/// Created by [`TidyView::group_by`]. Holds the original view plus a
+/// [`GroupIndex`] that maps rows to groups. Call [`summarise`](Self::summarise)
+/// to aggregate or [`ungroup`](Self::ungroup) to return to a flat view.
 pub struct GroupedTidyView {
     view: TidyView,
     index: GroupIndex,
@@ -3965,9 +4028,11 @@ pub struct ArrangeKey {
 }
 
 impl ArrangeKey {
+    /// Create an ascending sort key for the given column.
     pub fn asc(col_name: &str) -> Self {
         ArrangeKey { col_name: col_name.to_string(), descending: false }
     }
+    /// Create a descending sort key for the given column.
     pub fn desc(col_name: &str) -> Self {
         ArrangeKey { col_name: col_name.to_string(), descending: true }
     }
@@ -4846,13 +4911,18 @@ impl<T: Clone + Default> NullableColumn<T> {
 /// explicitly).
 #[derive(Debug, Clone)]
 pub enum NullCol {
+    /// Nullable 64-bit signed integer column.
     Int(NullableColumn<i64>),
+    /// Nullable 64-bit floating-point column.
     Float(NullableColumn<f64>),
+    /// Nullable UTF-8 string column.
     Str(NullableColumn<String>),
+    /// Nullable boolean column.
     Bool(NullableColumn<bool>),
 }
 
 impl NullCol {
+    /// Returns the number of rows (including nulls).
     pub fn len(&self) -> usize {
         match self {
             NullCol::Int(c) => c.len(),
@@ -4862,6 +4932,7 @@ impl NullCol {
         }
     }
 
+    /// Returns `true` if row `i` is null.
     pub fn is_null(&self, i: usize) -> bool {
         match self {
             NullCol::Int(c) => c.is_null(i),
@@ -4871,6 +4942,7 @@ impl NullCol {
         }
     }
 
+    /// Returns the human-readable type name of this nullable column variant.
     pub fn type_name(&self) -> &'static str {
         match self {
             NullCol::Int(_) => "Int",
@@ -5001,22 +5073,27 @@ pub struct NullableFrame {
 }
 
 impl NullableFrame {
+    /// Create an empty NullableFrame with no columns.
     pub fn new() -> Self {
         Self { columns: Vec::new() }
     }
 
+    /// Returns the number of rows.
     pub fn nrows(&self) -> usize {
         self.columns.first().map(|(_, c)| c.len()).unwrap_or(0)
     }
 
+    /// Returns the number of columns.
     pub fn ncols(&self) -> usize {
         self.columns.len()
     }
 
+    /// Returns column names in order.
     pub fn column_names(&self) -> Vec<&str> {
         self.columns.iter().map(|(n, _)| n.as_str()).collect()
     }
 
+    /// Look up a nullable column by name.
     pub fn get_column(&self, name: &str) -> Option<&NullCol> {
         self.columns.iter().find(|(n, _)| n == name).map(|(_, c)| c)
     }
@@ -5137,6 +5214,7 @@ pub struct AcrossTransform {
 }
 
 impl AcrossTransform {
+    /// Create a new across transformation with the given name and column-mapping function.
     pub fn new(fn_name: impl Into<String>, func: impl Fn(&str, &Column) -> Result<Column, TidyError> + 'static) -> Self {
         Self {
             fn_name: fn_name.into(),
@@ -5157,6 +5235,7 @@ pub struct AcrossSpec {
 }
 
 impl AcrossSpec {
+    /// Create a new across specification targeting the given columns with one transform.
     pub fn new(cols: impl IntoIterator<Item = impl Into<String>>, transform: AcrossTransform) -> Self {
         Self {
             cols: cols.into_iter().map(|c| c.into()).collect(),
@@ -5165,6 +5244,7 @@ impl AcrossSpec {
         }
     }
 
+    /// Set a custom output-name template (use `{col}` and `{fn}` as placeholders).
     pub fn with_template(mut self, tmpl: impl Into<String>) -> Self {
         self.name_template = Some(tmpl.into());
         self
@@ -5197,6 +5277,7 @@ impl Default for JoinSuffix {
 }
 
 impl JoinSuffix {
+    /// Create custom suffixes for left and right table columns on name collision.
     pub fn new(left: impl Into<String>, right: impl Into<String>) -> Self {
         Self { left: left.into(), right: right.into() }
     }
@@ -6530,7 +6611,9 @@ impl FctColumn {
 
     // â"€â"€ Shape â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
+    /// Returns the number of rows in this factor column.
     pub fn nrows(&self) -> usize { self.data.len() }
+    /// Returns the number of distinct levels.
     pub fn nlevels(&self) -> usize { self.levels.len() }
 
     /// Decode row i back to its string value.
@@ -6754,6 +6837,7 @@ impl FctColumn {
 // â"€â"€ TidyError extensions for Phase 17 â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 impl TidyError {
+    /// Convenience constructor for a capacity-exceeded error.
     pub fn capacity_exceeded(limit: usize, got: usize) -> Self {
         TidyError::CapacityExceeded { limit, got }
     }
@@ -6820,9 +6904,13 @@ impl NullableFactor {
         Ok(NullableFactor { fct, validity })
     }
 
+    /// Returns the total number of rows (including nulls).
     pub fn nrows(&self) -> usize { self.fct.nrows() }
+    /// Returns the number of distinct factor levels.
     pub fn nlevels(&self) -> usize { self.fct.nlevels() }
+    /// Returns `true` if row `i` is null.
     pub fn is_null(&self, i: usize) -> bool { !self.validity.get(i) }
+    /// Returns the count of non-null rows.
     pub fn count_valid(&self) -> usize { self.validity.count_ones() }
 
     /// Decode row i, or None if null.

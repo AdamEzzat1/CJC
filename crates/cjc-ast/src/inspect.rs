@@ -78,6 +78,10 @@ pub fn dump_ast_summary(program: &Program) -> String {
     out
 }
 
+/// Convert a [`TypeExpr`](crate::TypeExpr) to a compact display string.
+///
+/// Produces abbreviated representations for complex types (e.g. `fn(...)`,
+/// `[T; N]`, `[shape]`) to keep summary output concise.
 fn type_expr_to_str(ty: &crate::TypeExpr) -> String {
     match &ty.kind {
         crate::TypeExprKind::Named { name, args } => {
@@ -101,7 +105,18 @@ fn type_expr_to_str(ty: &crate::TypeExpr) -> String {
 // Metrics dump
 // ---------------------------------------------------------------------------
 
-/// Formatted metrics dump.
+/// Format an [`AstMetrics`] as a human-readable, multi-line text dump.
+///
+/// The output includes total node counts, per-category counts, depth
+/// measurements, feature-presence flags, and binary operator frequencies.
+///
+/// # Arguments
+///
+/// * `metrics` - The metrics struct to format.
+///
+/// # Returns
+///
+/// A deterministic multi-line string suitable for logging or snapshot tests.
 pub fn dump_ast_metrics(metrics: &AstMetrics) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -137,7 +152,18 @@ pub fn dump_ast_metrics(metrics: &AstMetrics) -> String {
 // Validation report dump
 // ---------------------------------------------------------------------------
 
-/// Formatted validation report.
+/// Format a [`ValidationReport`] as a human-readable text dump.
+///
+/// Prints the pass/fail summary line followed by each finding (if any).
+/// A clean report with no findings appends `(clean)` to the summary.
+///
+/// # Arguments
+///
+/// * `report` - The validation report to format.
+///
+/// # Returns
+///
+/// A deterministic multi-line string suitable for logging or snapshot tests.
 pub fn dump_validation_report(report: &ValidationReport) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -173,6 +199,11 @@ pub fn dump_expr_tree(expr: &Expr) -> String {
     out
 }
 
+/// Recursively append the indented tree representation of `expr` to `out`.
+///
+/// Each nesting level adds two spaces of indentation. Compound nodes
+/// (binary, unary, call, etc.) recurse into their children; unrecognized
+/// variants fall back to a `Expr(discriminant)` placeholder.
 fn dump_expr_recursive(expr: &Expr, indent: usize, out: &mut String) {
     let pad = "  ".repeat(indent);
     match &expr.kind {
