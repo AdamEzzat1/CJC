@@ -1320,6 +1320,8 @@ impl MirExecutor {
                 // Phase C2: Optimizer constructors
                 | "Adam.new"
                 | "Sgd.new"
+                // RNN cells
+                | "lstm_cell" | "gru_cell"
                 // Phase C3: Bitwise operations
                 // Phase C6: I/O & Collection Utilities
                 | "read_line"

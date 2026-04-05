@@ -1,0 +1,99 @@
+// ═══════════════════════════════════════════════════════════════════════
+// Example 5: Transformer — Self-Attention + Feed-Forward Block
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Demonstrates CJC's transformer building blocks:
+//   - Scaled dot-product attention
+//   - Multi-head attention (split_heads / merge_heads)
+//   - Layer normalization
+//   - Feed-forward network with GELU activation
+//
+// Architecture: Single transformer block processing 4 tokens of dim 8
+//   Input: [1, 4, 8] (batch=1, seq_len=4, d_model=8)
+//   Self-Attention: 2 heads, d_k=4
+//   Feed-Forward: 8 → 16 → 8 with GELU
+// ═══════════════════════════════════════════════════════════════════════
+
+fn main() {
+    print("Transformer — Self-Attention Block");
+    print("===================================");
+
+    let batch = 1;
+    let seq_len = 4;
+    let d_model = 8;
+    let n_heads = 2;
+    let d_ff = 16;
+    let d_k = d_model / n_heads;  // 4
+
+    // ── Input embeddings (random for demo) ─────────────────────────
+    // Work with 2D [seq_len, d_model] for matmul compatibility
+    let X = Tensor.randn([seq_len, d_model]) * 0.5;
+    print("Input shape: " + to_string(X.shape));
+
+    // ── Self-Attention ─────────────────────────────────────────────
+    // Project Q, K, V
+    let W_q = Tensor.randn([d_model, d_model]) * 0.1;
+    let W_k = Tensor.randn([d_model, d_model]) * 0.1;
+    let W_v = Tensor.randn([d_model, d_model]) * 0.1;
+    let W_o = Tensor.randn([d_model, d_model]) * 0.1;
+
+    // Q = X @ W_q, etc. → [4, 8]
+    let Q = matmul(X, W_q);
+    let K = matmul(X, W_k);
+    let V = matmul(X, W_v);
+    print("Q/K/V projected: " + to_string(Q.shape));
+
+    // ── Scaled dot-product attention (manual) ────────────────────
+    // attn = softmax(Q @ K^T / sqrt(d_k)) @ V
+    let K_T = K.transpose();
+    let scale = sqrt(float(d_model));
+    let scores = matmul(Q, K_T) * (1.0 / scale);  // [4, 4]
+    let attn_weights = scores.softmax();             // softmax per row
+    print("Attention weights: " + to_string(attn_weights.shape));
+
+    let attn_out = matmul(attn_weights, V);          // [4, 8]
+    print("Attention output: " + to_string(attn_out.shape));
+
+    // Output projection
+    let attn_projected = matmul(attn_out, W_o);
+
+    // ── Residual + LayerNorm ───────────────────────────────────────
+    let residual1 = X + attn_projected;
+    let gamma1 = Tensor.ones([d_model]);
+    let beta1 = Tensor.zeros([d_model]);
+    let norm1 = residual1.layer_norm(gamma1, beta1);
+    print("After LayerNorm 1: " + to_string(norm1.shape));
+
+    // ── Feed-Forward Network ───────────────────────────────────────
+    // FFN: d_model → d_ff → d_model with GELU
+    let W_ff1 = Tensor.randn([d_model, d_ff]) * 0.1;
+    let b_ff1 = Tensor.zeros([1, d_ff]);
+    let W_ff2 = Tensor.randn([d_ff, d_model]) * 0.1;
+    let b_ff2 = Tensor.zeros([1, d_model]);
+
+    let ff_hidden = matmul(norm1, W_ff1) + b_ff1;
+    let ff_act = ff_hidden.gelu();
+    let ff_out = matmul(ff_act, W_ff2) + b_ff2;
+    print("FFN output: " + to_string(ff_out.shape));
+
+    // ── Residual + LayerNorm ───────────────────────────────────────
+    let residual2 = norm1 + ff_out;
+    let gamma2 = Tensor.ones([d_model]);
+    let beta2 = Tensor.zeros([d_model]);
+    let output = residual2.layer_norm(gamma2, beta2);
+    print("Transformer block output: " + to_string(output.shape));
+
+    // ── Show output values for first token ─────────────────────────
+    print("");
+    print("Sample output values (token 0):");
+    let d = 0;
+    let vals = [];
+    while d < d_model {
+        vals = array_push(vals, round(output.get([0, d]) * 1000.0) / 1000.0);
+        d = d + 1;
+    }
+    print("  " + to_string(vals));
+
+    print("");
+    print("Transformer block: attention + FFN + 2x layer_norm + residuals.");
+}

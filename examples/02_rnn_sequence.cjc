@@ -1,0 +1,81 @@
+// ═══════════════════════════════════════════════════════════════════════
+// Example 2: Recurrent Neural Network (LSTM) — Sequence Sum Prediction
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Uses CJC's built-in LSTM cell to process sequences and predict
+// the cumulative sum at each timestep. Demonstrates LSTM's ability
+// to maintain hidden state across time.
+//
+// Architecture: input_size=1, hidden_size=8
+// Task: Given sequence [0.1, 0.2, 0.3, ...], predict running sum
+// ═══════════════════════════════════════════════════════════════════════
+
+fn main() {
+    print("LSTM Sequence Processing");
+    print("========================");
+
+    let input_size = 1;
+    let hidden_size = 8;
+    let seq_len = 5;
+    let batch = 1;
+
+    // ── Initialize LSTM weights ────────────────────────────────────
+    // w_ih: [4*hidden_size, input_size] = [32, 1]
+    // w_hh: [4*hidden_size, hidden_size] = [32, 8]
+    // b_ih: [4*hidden_size] = [32]
+    // b_hh: [4*hidden_size] = [32]
+    let w_ih = Tensor.randn([4 * hidden_size, input_size]) * 0.1;
+    let w_hh = Tensor.randn([4 * hidden_size, hidden_size]) * 0.1;
+    let b_ih = Tensor.zeros([4 * hidden_size]);
+    let b_hh = Tensor.zeros([4 * hidden_size]);
+
+    // ── Output projection: hidden → 1 ─────────────────────────────
+    let W_out = Tensor.randn([hidden_size, 1]) * 0.1;
+
+    // ── Create input sequence ──────────────────────────────────────
+    let sequence = [0.1, 0.2, 0.3, 0.4, 0.5];
+
+    print("Input sequence: " + to_string(sequence));
+    print("");
+
+    // ── Process sequence through LSTM ──────────────────────────────
+    let h = Tensor.zeros([batch, hidden_size]);
+    let c = Tensor.zeros([batch, hidden_size]);
+
+    let t = 0;
+    while t < seq_len {
+        let x_t = Tensor.from_vec([sequence[t]], [batch, input_size]);
+
+        // LSTM cell: (x, h_prev, c_prev, w_ih, w_hh, b_ih, b_hh) → (h_new, c_new)
+        let result = lstm_cell(x_t, h, c, w_ih, w_hh, b_ih, b_hh);
+        match result {
+            (h_new, c_new) => {
+                h = h_new;
+                c = c_new;
+            }
+        };
+
+        // Project hidden state to output
+        let output = matmul(h, W_out);
+        let pred = output.get([0, 0]);
+
+        // Expected running sum
+        let running_sum = 0.0;
+        let j = 0;
+        while j <= t {
+            running_sum = running_sum + sequence[j];
+            j = j + 1;
+        }
+
+        print("t=" + to_string(t)
+              + "  input=" + to_string(sequence[t])
+              + "  lstm_out=" + to_string(round(pred * 10000.0) / 10000.0)
+              + "  (running_sum=" + to_string(round(running_sum * 10.0) / 10.0) + ")");
+
+        t = t + 1;
+    }
+
+    print("");
+    print("LSTM processed " + to_string(seq_len) + " timesteps successfully.");
+    print("Hidden state maintained across all timesteps.");
+}

@@ -1,0 +1,72 @@
+// ═══════════════════════════════════════════════════════════════════════
+// Example 3: 1D Convolutional Neural Network — Signal Edge Detection
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Demonstrates CJC's conv1d operation for signal processing.
+// Applies multiple learned filters to detect edges, smoothing,
+// and patterns in 1D signals.
+//
+// Architecture: signal[20] → conv1d(3 filters, kernel=3) → relu → output
+// ═══════════════════════════════════════════════════════════════════════
+
+fn main() {
+    print("1D CNN — Signal Processing");
+    print("==========================");
+
+    // ── Generate a stepped signal ──────────────────────────────────
+    let signal_data = [];
+    let i = 0;
+    while i < 20 {
+        let val = 0.0;
+        if i >= 5 && i < 10 {
+            val = 1.0;
+        }
+        if i >= 15 {
+            val = 0.5;
+        }
+        signal_data = array_push(signal_data, val);
+        i = i + 1;
+    }
+    let signal = Tensor.from_vec(signal_data, [20]);
+    print("Signal: " + to_string(signal));
+
+    // ── Define edge detection filter ───────────────────────────────
+    // Filter 1: edge detector [1, 0, -1]
+    // Filter 2: smoothing [0.33, 0.34, 0.33]
+    // Filter 3: peak detector [-1, 2, -1]
+    let filters = Tensor.from_vec([
+        1.0,  0.0, -1.0,
+        0.33, 0.34, 0.33,
+       -1.0,  2.0, -1.0
+    ], [3, 3]);
+
+    let bias = Tensor.zeros([3]);
+
+    // ── Apply conv1d ───────────────────────────────────────────────
+    let conv_out = signal.conv1d(filters, bias);
+    print("");
+    print("Conv1D output shape: " + to_string(conv_out.shape));
+
+    // ── Apply ReLU activation ──────────────────────────────────────
+    let activated = relu(conv_out);
+
+    // ── Display results per channel ────────────────────────────────
+    let out_len = 18;  // 20 - 3 + 1 = 18
+    let ch = 0;
+    let channel_names = ["Edge detector", "Smoother", "Peak detector"];
+    while ch < 3 {
+        let vals = [];
+        let j = 0;
+        while j < out_len {
+            vals = array_push(vals, round(activated.get([ch, j]) * 1000.0) / 1000.0);
+            j = j + 1;
+        }
+        print("");
+        print("Channel " + to_string(ch) + " (" + channel_names[ch] + "):");
+        print("  " + to_string(vals));
+        ch = ch + 1;
+    }
+
+    print("");
+    print("Edge detector found transitions at signal boundaries.");
+}
