@@ -1591,6 +1591,29 @@ impl AstLowering {
                 }
             }
 
+            // Cast: `expr as f64` desugars to builtin call
+            cjc_ast::ExprKind::Cast { expr, target_type } => {
+                let hir_inner = self.lower_expr(expr);
+                let builtin = match target_type.name.as_str() {
+                    "f64" | "float" | "Float" => "float",
+                    "i64" | "int" | "Int" => "int",
+                    "String" | "string" => "to_string",
+                    "bool" | "Bool" => "float", // bool cast: nonzero → true (desugar to float then compare)
+                    other => {
+                        // Unknown cast target — emit as a call to the target name
+                        // (will produce a runtime error if invalid)
+                        other
+                    }
+                };
+                HirExprKind::Call {
+                    callee: Box::new(HirExpr {
+                        kind: HirExprKind::Var(builtin.to_string()),
+                        hir_id: self.fresh_id(),
+                    }),
+                    args: vec![hir_inner],
+                }
+            }
+
             // IfExpr: `if cond { a } else { b }` used as a value expression.
             // Lowered directly to HirExprKind::If — a first-class expression
             // that produces the value of the taken branch.
@@ -1725,6 +1748,9 @@ impl AstLowering {
             cjc_ast::ExprKind::CompoundAssign { target, value, .. } => {
                 Self::collect_var_refs(target, out);
                 Self::collect_var_refs(value, out);
+            }
+            cjc_ast::ExprKind::Cast { expr, .. } => {
+                Self::collect_var_refs(expr, out);
             }
             cjc_ast::ExprKind::IfExpr { condition, then_block, else_branch } => {
                 Self::collect_var_refs(condition, out);

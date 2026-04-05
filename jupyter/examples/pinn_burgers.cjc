@@ -1,0 +1,220 @@
+// ═══════════════════════════════════════════════════════════════════════
+// Physics-Informed Neural Network (PINN) — Burgers' Equation
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Solves the 1D viscous Burgers' equation:
+//   du/dt + u * du/dx = nu * d^2u/dx^2
+//
+// Domain: x in [-1, 1], t in [0, 1]
+// IC: u(x, 0) = -sin(pi*x)
+// BCs: u(-1, t) = 0, u(1, t) = 0
+// nu = 0.01/pi (viscosity)
+//
+// Architecture: 2 inputs (x, t) -> 16 hidden (tanh) -> 16 hidden (tanh) -> 1 output
+// Uses manual dot products with 1D weight arrays for portability.
+// Physics residual via finite differences on the network output.
+// ═══════════════════════════════════════════════════════════════════════
+
+fn main() {
+    let pi = 3.14159265358979323846;
+    let nu = 0.01 / pi;
+
+    // ── Network dimensions ──────────────────────────────────────────
+    let n_hidden = 16;
+
+    // ── Initialize weights (Xavier-like via LHS, deterministic) ─────
+    let seed = 42;
+    let scale1 = sqrt(6.0 / float(2 + n_hidden));
+    let scale2 = sqrt(6.0 / float(n_hidden + n_hidden));
+    let scale3 = sqrt(6.0 / float(n_hidden + 1));
+
+    // W1: [n_hidden * 2] flattened (row-major: neuron i reads W1[i*2], W1[i*2+1])
+    let W1 = init_weights(n_hidden * 2, scale1, seed);
+    let B1 = Tensor.zeros([n_hidden]);
+
+    // W2: [n_hidden * n_hidden] flattened
+    let W2 = init_weights(n_hidden * n_hidden, scale2, seed + 1);
+    let B2 = Tensor.zeros([n_hidden]);
+
+    // W3: [n_hidden] (single output neuron)
+    let W3 = init_weights(n_hidden, scale3, seed + 2);
+    let B3 = 0.0;
+
+    // ── Training parameters ─────────────────────────────────────────
+    let n_ic = 40;
+    let n_bc = 20;
+    let n_interior = 50;
+    let lr = 0.0001;
+    let n_epochs = 100;
+
+    print("PINN Training: 1D Burgers Equation");
+    print("===================================");
+    print("nu = " + to_string(nu));
+    print("Architecture: 2 -> " + to_string(n_hidden) + " -> " + to_string(n_hidden) + " -> 1");
+    print("IC pts: " + to_string(n_ic) + " | BC pts: " + to_string(n_bc) + " | Interior pts: " + to_string(n_interior));
+    print("Learning rate: " + to_string(lr) + " | Epochs: " + to_string(n_epochs));
+    print("");
+
+    // ── Training loop ───────────────────────────────────────────────
+    let epoch = 0;
+    let eps = 1e-4;
+
+    while epoch < n_epochs {
+        let loss_data = 0.0;
+        let loss_bc = 0.0;
+        let loss_physics = 0.0;
+
+        // ── IC loss: u(x, 0) = -sin(pi*x) ──────────────────────────
+        let ic_idx = 0;
+        while ic_idx < n_ic {
+            let x = -1.0 + 2.0 * float(ic_idx) / float(n_ic - 1);
+            let u_pred = nn_forward(x, 0.0, W1, B1, W2, B2, W3, B3, n_hidden);
+            let u_exact = 0.0 - sin(pi * x);
+            let diff = u_pred - u_exact;
+            loss_data = loss_data + diff * diff;
+            ic_idx = ic_idx + 1;
+        }
+        loss_data = loss_data / float(n_ic);
+
+        // ── BC loss: u(-1, t) = u(1, t) = 0 ────────────────────────
+        let bc_idx = 0;
+        while bc_idx < n_bc {
+            let t = float(bc_idx) / float(n_bc - 1);
+            let u_left = nn_forward(-1.0, t, W1, B1, W2, B2, W3, B3, n_hidden);
+            let u_right = nn_forward(1.0, t, W1, B1, W2, B2, W3, B3, n_hidden);
+            loss_bc = loss_bc + u_left * u_left + u_right * u_right;
+            bc_idx = bc_idx + 1;
+        }
+        loss_bc = loss_bc / float(2 * n_bc);
+
+        // ── Physics residual ────────────────────────────────────────
+        let p_idx = 0;
+        while p_idx < n_interior {
+            let x = -1.0 + 2.0 * float(p_idx) / float(n_interior - 1);
+            let t = 0.01 + 0.98 * float((p_idx * 7 + 3) % n_interior) / float(n_interior);
+
+            let u = nn_forward(x, t, W1, B1, W2, B2, W3, B3, n_hidden);
+            let u_xp = nn_forward(x + eps, t, W1, B1, W2, B2, W3, B3, n_hidden);
+            let u_xm = nn_forward(x - eps, t, W1, B1, W2, B2, W3, B3, n_hidden);
+            let u_tp = nn_forward(x, t + eps, W1, B1, W2, B2, W3, B3, n_hidden);
+
+            let du_dx = (u_xp - u_xm) / (2.0 * eps);
+            let du_dt = (u_tp - u) / eps;
+            let d2u_dx2 = (u_xp - 2.0 * u + u_xm) / (eps * eps);
+
+            let residual = du_dt + u * du_dx - nu * d2u_dx2;
+            loss_physics = loss_physics + residual * residual;
+            p_idx = p_idx + 1;
+        }
+        loss_physics = loss_physics / float(n_interior);
+
+        let total_loss = loss_data + loss_bc + 0.1 * loss_physics;
+
+        if epoch % 10 == 0 {
+            print("Epoch " + to_string(epoch)
+                  + "  |  L_data=" + to_string(round(loss_data * 100000.0) / 100000.0)
+                  + "  L_bc=" + to_string(round(loss_bc * 100000.0) / 100000.0)
+                  + "  L_phys=" + to_string(round(loss_physics * 1000.0) / 1000.0)
+                  + "  L_total=" + to_string(round(total_loss * 100000.0) / 100000.0));
+        }
+
+        // ── Gradient-free weight perturbation ───────────────────────
+        W1 = perturb_1d(W1, lr, total_loss, 100 + epoch);
+        W2 = perturb_1d(W2, lr, total_loss, 200 + epoch);
+        W3 = perturb_1d(W3, lr, total_loss, 300 + epoch);
+
+        epoch = epoch + 1;
+    }
+
+    print("");
+    print("Training complete.");
+    print("");
+
+    // ── Evaluate at test points (t=0) ───────────────────────────────
+    print("Test predictions at t=0 (should match -sin(pi*x)):");
+    let test_xs = [-0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75];
+    let ti = 0;
+    while ti < 7 {
+        let x = test_xs[ti];
+        let u_pred = nn_forward(x, 0.0, W1, B1, W2, B2, W3, B3, n_hidden);
+        let u_exact = 0.0 - sin(pi * x);
+        print("  x=" + to_string(x)
+              + "  pred=" + to_string(round(u_pred * 10000.0) / 10000.0)
+              + "  exact=" + to_string(round(u_exact * 10000.0) / 10000.0));
+        ti = ti + 1;
+    }
+}
+
+// ── Forward pass using 1D weight arrays ─────────────────────────────
+// W1: flat [n_hidden*2], B1: [n_hidden], W2: flat [n_hidden*n_hidden], etc.
+fn nn_forward(x: f64, t: f64, W1: Any, B1: Any, W2: Any, B2: Any, W3: Any, B3: f64, nh: i64) -> f64 {
+    // Layer 1: a1[j] = tanh(W1[j*2]*x + W1[j*2+1]*t + B1[j])
+    let a1 = [];
+    let j = 0;
+    while j < nh {
+        let z = W1[j * 2] * x + W1[j * 2 + 1] * t + B1[j];
+        a1 = array_push(a1, my_tanh(z));
+        j = j + 1;
+    }
+
+    // Layer 2: a2[j] = tanh(sum_k(W2[j*nh+k]*a1[k]) + B2[j])
+    let a2 = [];
+    let j = 0;
+    while j < nh {
+        let z = 0.0;
+        let k = 0;
+        while k < nh {
+            z = z + W2[j * nh + k] * a1[k];
+            k = k + 1;
+        }
+        z = z + B2[j];
+        a2 = array_push(a2, my_tanh(z));
+        j = j + 1;
+    }
+
+    // Output: sum_k(W3[k]*a2[k]) + B3
+    let out = 0.0;
+    let k = 0;
+    while k < nh {
+        out = out + W3[k] * a2[k];
+        k = k + 1;
+    }
+    return out + B3;
+}
+
+// tanh via sinh/cosh (CJC has sinh/cosh builtins)
+fn my_tanh(x: f64) -> f64 {
+    return sinh(x) / cosh(x);
+}
+
+// Initialize weights using deterministic LCG, scaled to [-scale, +scale]
+fn init_weights(n: i64, scale: f64, seed: i64) -> Any {
+    let data = [];
+    let i = 0;
+    let state = seed + 12345;
+    while i < n {
+        state = (state * 6364136223846793 + 1442695040888963) % 2147483647;
+        let val = (float(state) / 2147483647.0 - 0.5) * 2.0 * scale;
+        data = array_push(data, val);
+        i = i + 1;
+    }
+    return Tensor.from_vec(data, [n]);
+}
+
+// Deterministic weight perturbation with gradient clipping
+fn perturb_1d(W: Any, lr: f64, loss: f64, seed: i64) -> Any {
+    let n = len(W);
+    let data = [];
+    let i = 0;
+    let state = seed;
+    // Clamp loss contribution to prevent NaN explosion
+    let clipped_loss = min(loss, 100.0);
+    while i < n {
+        state = (state * 6364136223846793 + 1442695040888963) % 1000000007;
+        let direction = (float(state % 201) - 100.0) / 100.0;
+        let delta = lr * direction * clipped_loss;
+        data = array_push(data, W[i] - delta);
+        i = i + 1;
+    }
+    return Tensor.from_vec(data, [n]);
+}

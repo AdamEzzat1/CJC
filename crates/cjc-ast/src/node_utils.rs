@@ -51,6 +51,7 @@ impl Expr {
             ExprKind::Lambda { .. } => 1,                  // body
             ExprKind::Match { arms, .. } => 1 + arms.len(), // scrutinee + arms
             ExprKind::VariantLit { fields, .. } => fields.len(),
+            ExprKind::Cast { .. } => 1, // the inner expression
         }
     }
 

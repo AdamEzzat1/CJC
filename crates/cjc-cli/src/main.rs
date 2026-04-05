@@ -533,7 +533,13 @@ fn main() {
             match config.command {
                 Command::Lex => cmd_lex(&source, filename, config.use_color, config.diag_format),
                 Command::Parse => cmd_parse(&source, filename, config.use_color, config.diag_format),
-                Command::Run => cmd_run(&source, filename, &config),
+                Command::Run => {
+                    if config.output_format != OutputFormat::Plain {
+                        cmd_run_formatted(&source, filename, &config);
+                    } else {
+                        cmd_run(&source, filename, &config);
+                    }
+                }
                 _ => unreachable!(),
             }
         }
@@ -760,6 +766,71 @@ fn cmd_run(source: &str, filename: &str, config: &Config) {
     }
 }
 
+/// `cjc run` variant that captures output for --format json/csv.
+/// Called when config.output_format != Plain to wrap interpreter output.
+fn cmd_run_formatted(source: &str, filename: &str, config: &Config) {
+    let (program, diags) = cjc_parser::parse_source(source);
+
+    if diags.has_errors() {
+        if config.output_format == OutputFormat::Json {
+            let rendered = diags.render_all(source, filename);
+            println!("{{\"ok\":false,\"error\":{}}}", json_escape(&rendered));
+        } else {
+            render_diags(&diags, source, filename, config.use_color, config.diag_format);
+        }
+        process::exit(EXIT_PARSE);
+    }
+
+    let mut interpreter = cjc_eval::Interpreter::new(config.seed);
+    match interpreter.exec(&program) {
+        Ok(_) => {
+            let lines = &interpreter.output;
+            match config.output_format {
+                OutputFormat::Json => {
+                    // Emit JSON array of output lines
+                    let items: Vec<String> = lines.iter().map(|l| json_escape(l)).collect();
+                    println!("{{\"ok\":true,\"output\":[{}]}}", items.join(","));
+                }
+                OutputFormat::Csv => {
+                    for line in lines {
+                        println!("{}", line);
+                    }
+                }
+                OutputFormat::Plain => unreachable!(),
+            }
+        }
+        Err(e) => {
+            if config.output_format == OutputFormat::Json {
+                println!("{{\"ok\":false,\"error\":{}}}", json_escape(&format!("{}", e)));
+            } else {
+                eprintln!("{}", e);
+            }
+            process::exit(EXIT_RUNTIME);
+        }
+    }
+}
+
+/// JSON-safe string escaping (wraps in double quotes).
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// `cjc eval "expression"` — evaluate a single expression and print the result.
 fn cmd_eval(config: &Config) {
     let expr_str = config.eval_expr.as_deref().unwrap_or("");
@@ -773,24 +844,35 @@ fn cmd_eval(config: &Config) {
 
     let (program, diags) = cjc_parser::parse_source(&source);
     if diags.has_errors() {
-        eprintln!("parse error in expression:");
-        let rendered = diags.render_all(&source, "<eval>");
-        eprintln!("{}", rendered);
+        if config.output_format == OutputFormat::Json {
+            let rendered = diags.render_all(&source, "<eval>");
+            println!("{{\"ok\":false,\"error\":{}}}", json_escape(&rendered));
+        } else {
+            eprintln!("parse error in expression:");
+            let rendered = diags.render_all(&source, "<eval>");
+            eprintln!("{}", rendered);
+        }
         process::exit(EXIT_PARSE);
     }
 
     let mut interpreter = cjc_eval::Interpreter::new(config.seed);
     match interpreter.exec(&program) {
         Ok(_) => {
-            // Output is already printed by print() in the wrapper.
-            // If --format json, wrap output lines in JSON.
             if config.output_format == OutputFormat::Json {
-                let output = interpreter.output.join("\n");
-                println!("{{\"result\": \"{}\"}}", output.replace('"', "\\\""));
+                let items: Vec<String> = interpreter.output.iter().map(|l| json_escape(l)).collect();
+                println!("{{\"ok\":true,\"output\":[{}]}}", items.join(","));
+            } else {
+                for line in &interpreter.output {
+                    println!("{}", line);
+                }
             }
         }
         Err(e) => {
-            eprintln!("{}", e);
+            if config.output_format == OutputFormat::Json {
+                println!("{{\"ok\":false,\"error\":{}}}", json_escape(&format!("{}", e)));
+            } else {
+                eprintln!("{}", e);
+            }
             process::exit(EXIT_RUNTIME);
         }
     }

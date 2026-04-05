@@ -65,6 +65,8 @@ mod prec {
     pub const MUL: u8 = 20;
     /// Exponentiation `**` — right-associative.
     pub const POW: u8 = 22;
+    /// Type cast `as` — left-associative, high precedence (like Rust).
+    pub const AS_CAST: u8 = 23;
     /// Unary prefix `-` `!` `~`.
     pub const UNARY: u8 = 24;
     /// Postfix `.` `[` `(`.
@@ -1518,6 +1520,9 @@ impl Parser {
                 // Power (right-associative)
                 TokenKind::StarStar => (Some((prec::POW, prec::POW)), false),
 
+                // Type cast `as` — left-associative
+                TokenKind::As => (Some((prec::AS_CAST, prec::AS_CAST + 1)), false),
+
                 _ => break,
             };
 
@@ -2137,6 +2142,21 @@ impl Parser {
         match self.peek_kind() {
             TokenKind::Dot => {
                 self.advance(); // `.`
+                // Check for tuple field access: `expr.0`, `expr.1`, etc.
+                if let TokenKind::IntLit = self.peek_kind() {
+                    let tok = self.advance();
+                    let idx_str = tok.text.clone();
+                    let idx_span = to_ast_span(tok.span);
+                    let name = Ident { name: idx_str, span: idx_span };
+                    let span = merge_spans(lhs.span, idx_span);
+                    return Ok(Expr {
+                        kind: ExprKind::Field {
+                            object: Box::new(lhs),
+                            name,
+                        },
+                        span,
+                    });
+                }
                 let name = self.parse_ident()?;
                 let span = merge_spans(lhs.span, name.span);
                 Ok(Expr {
@@ -2318,6 +2338,18 @@ impl Parser {
                     kind: ExprKind::Pipe {
                         left: Box::new(lhs),
                         right: Box::new(rhs),
+                    },
+                    span,
+                })
+            }
+            TokenKind::As => {
+                // Type cast: `expr as f64`, `expr as i64`, `expr as bool`, `expr as String`
+                let target = self.parse_ident()?;
+                let span = merge_spans(lhs.span, target.span);
+                Ok(Expr {
+                    kind: ExprKind::Cast {
+                        expr: Box::new(lhs),
+                        target_type: target,
                     },
                     span,
                 })

@@ -795,6 +795,42 @@ impl Interpreter {
                 Ok(Value::Tuple(Rc::new(vals)))
             }
 
+            ExprKind::Cast { expr, target_type } => {
+                let val = self.eval_expr(expr)?;
+                match target_type.name.as_str() {
+                    "f64" | "float" | "Float" => match &val {
+                        Value::Float(_) => Ok(val),
+                        Value::Int(i) => Ok(Value::Float(*i as f64)),
+                        Value::Bool(b) => Ok(Value::Float(if *b { 1.0 } else { 0.0 })),
+                        _ => Err(EvalError::Runtime(format!(
+                            "cannot cast {} to f64", val.type_name()
+                        ))),
+                    },
+                    "i64" | "int" | "Int" => match &val {
+                        Value::Int(_) => Ok(val),
+                        Value::Float(f) => Ok(Value::Int(*f as i64)),
+                        Value::Bool(b) => Ok(Value::Int(if *b { 1 } else { 0 })),
+                        _ => Err(EvalError::Runtime(format!(
+                            "cannot cast {} to i64", val.type_name()
+                        ))),
+                    },
+                    "bool" | "Bool" => match &val {
+                        Value::Bool(_) => Ok(val),
+                        Value::Int(i) => Ok(Value::Bool(*i != 0)),
+                        Value::Float(f) => Ok(Value::Bool(*f != 0.0)),
+                        _ => Err(EvalError::Runtime(format!(
+                            "cannot cast {} to bool", val.type_name()
+                        ))),
+                    },
+                    "String" | "string" => {
+                        Ok(Value::String(Rc::new(format!("{}", val))))
+                    },
+                    other => Err(EvalError::Runtime(format!(
+                        "unknown cast target type: {other}"
+                    ))),
+                }
+            }
+
             ExprKind::Try(inner) => {
                 // `expr?` desugars to: match on Result, Ok(v) => v, Err(e) => return Err(e)
                 let inner_val = self.eval_expr(inner)?;
@@ -1557,12 +1593,17 @@ impl Interpreter {
                 | "sigmoid"
                 | "tanh_activation"
                 | "leaky_relu"
+                | "relu"
                 | "silu"
                 | "mish"
                 | "argmax"
                 | "argmin"
                 | "clamp"
                 | "one_hot"
+                // Tensor shape & slicing
+                | "reshape"
+                | "tensor_slice"
+                | "slice"
                 // Phase B1: Weighted & robust statistics
                 | "weighted_mean"
                 | "weighted_var"
@@ -1669,7 +1710,7 @@ impl Interpreter {
                 | "categorical_sample"
                 // Phase E: Mathematics Hardening
                 | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2"
-                | "sinh" | "cosh" | "tanh_scalar"
+                | "sinh" | "cosh" | "tanh" | "tanh_scalar"
                 | "pow" | "log2" | "log10" | "log1p" | "expm1"
                 | "ceil" | "round"
                 | "min" | "max" | "sign"
@@ -3582,6 +3623,23 @@ impl Interpreter {
                 _ => Err(EvalError::Runtime(format!(
                     "no field `{field}` on Array"
                 ))),
+            },
+            Value::Tuple(elems) => {
+                // Tuple field access: t.0, t.1, etc.
+                if let Ok(idx) = field.parse::<usize>() {
+                    if idx < elems.len() {
+                        Ok(elems[idx].clone())
+                    } else {
+                        Err(EvalError::Runtime(format!(
+                            "tuple index {idx} out of bounds for tuple of length {}",
+                            elems.len()
+                        )))
+                    }
+                } else {
+                    Err(EvalError::Runtime(format!(
+                        "no field `{field}` on Tuple"
+                    )))
+                }
             },
             _ => Err(EvalError::Runtime(format!(
                 "cannot access field `{field}` on {}",

@@ -2176,6 +2176,9 @@ fn collect_calls_in_expr(expr: &cjc_ast::Expr, calls: &mut Vec<(String, cjc_ast:
                 collect_calls_in_expr(e, calls);
             }
         }
+        ExprKind::Cast { expr, .. } => {
+            collect_calls_in_expr(expr, calls);
+        }
         // Literals and identifiers — no calls to collect
         ExprKind::IntLit(_) | ExprKind::FloatLit(_) | ExprKind::StringLit(_)
         | ExprKind::BoolLit(_) | ExprKind::NaLit | ExprKind::Ident(_) | ExprKind::ByteStringLit(_)
@@ -3531,6 +3534,17 @@ impl TypeChecker {
                     }
                 }
                 then_ty
+            }
+            ExprKind::Cast { expr, target_type } => {
+                self.check_expr(expr);
+                // Return the target type
+                match target_type.name.as_str() {
+                    "f64" | "float" | "Float" => Type::F64,
+                    "i64" | "int" | "Int" => Type::I64,
+                    "bool" | "Bool" => Type::Bool,
+                    "String" | "string" => Type::Str,
+                    _ => Type::Void,
+                }
             }
         }
     }

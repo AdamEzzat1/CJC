@@ -620,12 +620,13 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 _ => Err(format!("cosh requires a number, got {}", args[0].type_name())),
             }
         }
-        "tanh_scalar" => {
-            if args.len() != 1 { return Err("tanh_scalar requires exactly 1 argument".into()); }
+        "tanh" | "tanh_scalar" => {
+            if args.len() != 1 { return Err("tanh requires exactly 1 argument".into()); }
             match &args[0] {
                 Value::Float(f) => Ok(Some(Value::Float(f.tanh()))),
                 Value::Int(i) => Ok(Some(Value::Float((*i as f64).tanh()))),
-                _ => Err(format!("tanh_scalar requires a number, got {}", args[0].type_name())),
+                Value::Tensor(t) => Ok(Some(Value::Tensor(t.tanh_activation()))),
+                _ => Err(format!("tanh requires a number or Tensor, got {}", args[0].type_name())),
             }
         }
         // ---- Mathematics Hardening Phase: Exponentiation & Logarithms ----
@@ -709,6 +710,7 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             match &args[0] {
                 Value::Float(f) => Ok(Some(Value::Int(*f as i64))),
                 Value::Int(i) => Ok(Some(Value::Int(*i))),
+                Value::Bool(b) => Ok(Some(Value::Int(if *b { 1 } else { 0 }))),
                 _ => Err(format!("int requires a number, got {}", args[0].type_name())),
             }
         }
@@ -719,6 +721,7 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             match &args[0] {
                 Value::Int(i) => Ok(Some(Value::Float(*i as f64))),
                 Value::Float(f) => Ok(Some(Value::Float(*f))),
+                Value::Bool(b) => Ok(Some(Value::Float(if *b { 1.0 } else { 0.0 }))),
                 _ => Err(format!("float requires a number, got {}", args[0].type_name())),
             }
         }
@@ -1855,6 +1858,52 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             if args.len() != 1 { return Err("mish requires 1 argument".into()); }
             let t = value_to_tensor(&args[0])?;
             Ok(Some(Value::Tensor(t.mish())))
+        }
+        // ── relu: scalar + tensor unified ──────────────────────────────
+        "relu" => {
+            if args.len() != 1 { return Err("relu requires 1 argument".into()); }
+            match &args[0] {
+                Value::Float(f) => Ok(Some(Value::Float(f.max(0.0)))),
+                Value::Int(i) => Ok(Some(Value::Int((*i).max(0)))),
+                Value::Tensor(t) => Ok(Some(Value::Tensor(t.relu()))),
+                _ => Err(format!("relu requires a number or Tensor, got {}", args[0].type_name())),
+            }
+        }
+        // ── reshape: reshape a tensor ──────────────────────────────────
+        "reshape" => {
+            if args.len() != 2 { return Err("reshape requires 2 arguments (tensor, shape)".into()); }
+            let t = value_to_tensor(&args[0])?;
+            let shape = value_to_shape(&args[1])?;
+            let result = t.reshape(&shape).map_err(|e| format!("{e}"))?;
+            Ok(Some(Value::Tensor(result)))
+        }
+        // ── tensor_slice: slice a tensor along all dims ────────────────
+        "tensor_slice" => {
+            if args.len() != 3 { return Err("tensor_slice requires 3 arguments (tensor, starts, ends)".into()); }
+            let t = value_to_tensor(&args[0])?;
+            let starts = value_to_usize_vec(&args[1])?;
+            let ends = value_to_usize_vec(&args[2])?;
+            if starts.len() != ends.len() {
+                return Err("tensor_slice: starts and ends must have same length".into());
+            }
+            let ranges: Vec<(usize, usize)> = starts.into_iter().zip(ends).collect();
+            let result = t.slice(&ranges).map_err(|e| format!("{e}"))?;
+            Ok(Some(Value::Tensor(result)))
+        }
+        // ── slice: slice tensor along one dim ──────────────────────────
+        "slice" => {
+            if args.len() != 4 { return Err("slice requires 4 arguments (tensor, dim, start, end)".into()); }
+            let t = value_to_tensor(&args[0])?;
+            let dim = match &args[1] { Value::Int(i) => *i as usize, _ => return Err("slice: dim must be an integer".into()) };
+            let start = match &args[2] { Value::Int(i) => *i as usize, _ => return Err("slice: start must be an integer".into()) };
+            let end = match &args[3] { Value::Int(i) => *i as usize, _ => return Err("slice: end must be an integer".into()) };
+            if dim >= t.ndim() {
+                return Err(format!("slice: dim {} out of bounds for tensor with {} dimensions", dim, t.ndim()));
+            }
+            let mut ranges: Vec<(usize, usize)> = t.shape().iter().map(|&s| (0, s)).collect();
+            ranges[dim] = (start, end);
+            let result = t.slice(&ranges).map_err(|e| format!("{e}"))?;
+            Ok(Some(Value::Tensor(result)))
         }
         "argmax" => {
             if args.len() != 1 { return Err("argmax requires 1 argument".into()); }

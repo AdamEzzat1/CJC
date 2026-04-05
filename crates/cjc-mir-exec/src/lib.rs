@@ -1245,12 +1245,17 @@ impl MirExecutor {
                 | "sigmoid"
                 | "tanh_activation"
                 | "leaky_relu"
+                | "relu"
                 | "silu"
                 | "mish"
                 | "argmax"
                 | "argmin"
                 | "clamp"
                 | "one_hot"
+                // Tensor shape & slicing
+                | "reshape"
+                | "tensor_slice"
+                | "slice"
                 // Phase B1: Weighted & robust statistics
                 | "weighted_mean"
                 | "weighted_var"
@@ -1345,7 +1350,7 @@ impl MirExecutor {
                 | "categorical_sample"
                 // Phase E: Mathematics Hardening
                 | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2"
-                | "sinh" | "cosh" | "tanh_scalar"
+                | "sinh" | "cosh" | "tanh" | "tanh_scalar"
                 | "pow" | "log2" | "log10" | "log1p" | "expm1"
                 | "ceil" | "round"
                 | "min" | "max" | "sign"
@@ -3445,6 +3450,23 @@ impl MirExecutor {
                 _ => Err(MirExecError::Runtime(format!(
                     "no field `{field}` on Array"
                 ))),
+            },
+            Value::Tuple(elems) => {
+                // Tuple field access: t.0, t.1, etc.
+                if let Ok(idx) = field.parse::<usize>() {
+                    if idx < elems.len() {
+                        Ok(elems[idx].clone())
+                    } else {
+                        Err(MirExecError::Runtime(format!(
+                            "tuple index {idx} out of bounds for tuple of length {}",
+                            elems.len()
+                        )))
+                    }
+                } else {
+                    Err(MirExecError::Runtime(format!(
+                        "no field `{field}` on Tuple"
+                    )))
+                }
             },
             _ => Err(MirExecError::Runtime(format!(
                 "cannot access field `{field}` on {}",

@@ -1,0 +1,7 @@
+{
+  "argv": ["python", "-m", "cjc_kernel", "-f", "{connection_file}"],
+  "display_name": "CJC",
+  "language": "cjc",
+  "codemirror_mode": "rust",
+  "file_extension": ".cjc"
+}

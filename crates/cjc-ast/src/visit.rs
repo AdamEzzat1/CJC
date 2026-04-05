@@ -444,6 +444,10 @@ pub fn walk_expr<V: AstVisitor>(v: &mut V, expr: &Expr) {
                 v.visit_expr(field);
             }
         }
+        ExprKind::Cast { expr, target_type } => {
+            v.visit_expr(expr);
+            v.visit_ident(target_type);
+        }
     }
 }
 

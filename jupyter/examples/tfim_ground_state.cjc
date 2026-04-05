@@ -1,0 +1,122 @@
+// ═══════════════════════════════════════════════════════════════════════
+// Transverse Field Ising Model (TFIM) — Ground State via Exact Diag.
+// ═══════════════════════════════════════════════════════════════════════
+//
+// H = -J Σ σ_z^i σ_z^j  -  h Σ σ_x^i
+//
+// For N spins, the Hilbert space is 2^N dimensional.
+// We build the full Hamiltonian matrix via Kronecker products
+// and find the ground state energy using eigh().
+//
+// This is a "heavy" test case for the Jupyter sidecar: it exercises
+// tensor construction, Kronecker products, eigendecomposition, and
+// iterative output for convergence tracking.
+// ═══════════════════════════════════════════════════════════════════════
+
+fn main() {
+    // ── Parameters ──────────────────────────────────────────────────
+    let n_spins = 6;        // Number of spins (Hilbert space = 2^6 = 64)
+    let j_coupling = 1.0;   // Ising coupling strength
+    let n_h_steps = 20;     // Number of field strengths to sweep
+
+    // ── Pauli matrices (2x2) ────────────────────────────────────────
+    let sigma_z = Tensor.from_vec([1.0, 0.0, 0.0, -1.0], [2, 2]);
+    let sigma_x = Tensor.from_vec([0.0, 1.0, 1.0, 0.0], [2, 2]);
+    let id2 = Tensor.from_vec([1.0, 0.0, 0.0, 1.0], [2, 2]);
+
+    print("TFIM Ground State Energy Sweep");
+    print("===============================");
+    print("N_spins = " + to_string(n_spins));
+    print("Hilbert space dim = " + to_string(int(pow(2, n_spins))));
+    print("");
+
+    // ── Sweep transverse field h from 0 to 3 ───────────────────────
+    let h_min = 0.0;
+    let h_max = 3.0;
+
+    let i = 0;
+    while i < n_h_steps + 1 {
+        let h_field = h_min + (h_max - h_min) * float(i) / float(n_h_steps);
+
+        // Build Hamiltonian
+        let dim = int(pow(2, n_spins));
+        let ham = Tensor.zeros([dim, dim]);
+
+        // ZZ interaction: -J * sigma_z^i (x) sigma_z^{i+1}
+        let site = 0;
+        while site < n_spins - 1 {
+            let zz_op = build_two_site_op(sigma_z, sigma_z, site, site + 1, n_spins, id2);
+            ham = ham - zz_op * j_coupling;
+            site = site + 1;
+        }
+
+        // Transverse field: -h * sigma_x^i
+        let site = 0;
+        while site < n_spins {
+            let x_op = build_single_site_op(sigma_x, site, n_spins, id2);
+            ham = ham - x_op * h_field;
+            site = site + 1;
+        }
+
+        // Diagonalize — eigh returns (eigenvalues_array, eigenvectors_tensor)
+        let eig_result = eigh(ham);
+        let ground_energy = 0.0;
+        match eig_result {
+            (eigenvalues, eigvecs) => {
+                ground_energy = eigenvalues[0];
+            }
+        };
+        let e_per_spin = ground_energy / float(n_spins);
+
+        print("h/J = " + to_string(round(h_field * 100.0) / 100.0)
+              + "  |  E0 = " + to_string(round(ground_energy * 10000.0) / 10000.0)
+              + "  |  E0/N = " + to_string(round(e_per_spin * 10000.0) / 10000.0));
+
+        i = i + 1;
+    }
+
+    print("");
+    print("Phase transition expected near h/J = 1.0");
+    print("(Ground state changes from ordered to paramagnetic)");
+}
+
+// Build I (x) ... (x) op (x) ... (x) I  (operator at single site)
+fn build_single_site_op(op: Any, site: i64, n: i64, id2: Any) -> Any {
+    let result = id2;
+    if site == 0 {
+        result = op;
+    }
+    let k = 1;
+    while k < n {
+        if k == site {
+            result = kron(result, op);
+        } else {
+            result = kron(result, id2);
+        }
+        k = k + 1;
+    }
+    return result;
+}
+
+// Build two-site operator: op_a at site_a, op_b at site_b
+fn build_two_site_op(op_a: Any, op_b: Any, site_a: i64, site_b: i64, n: i64, id2: Any) -> Any {
+    let result = id2;
+    if site_a == 0 {
+        result = op_a;
+    }
+    if site_b == 0 {
+        result = op_b;
+    }
+    let k = 1;
+    while k < n {
+        if k == site_a {
+            result = kron(result, op_a);
+        } else if k == site_b {
+            result = kron(result, op_b);
+        } else {
+            result = kron(result, id2);
+        }
+        k = k + 1;
+    }
+    return result;
+}

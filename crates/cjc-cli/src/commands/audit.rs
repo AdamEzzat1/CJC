@@ -411,6 +411,7 @@ impl<'s> AuditVisitor<'s> {
                 }
             }
             cjc_ast::ExprKind::Try(inner) => self.visit_expr(inner),
+            cjc_ast::ExprKind::Cast { expr, .. } => self.visit_expr(expr),
             cjc_ast::ExprKind::VariantLit { fields, .. } => {
                 for f in fields { self.visit_expr(f); }
             }

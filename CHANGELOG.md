@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Data Science Foundation & Statistical Completeness Phase
 
+#### Language Ergonomic Gaps (6 features)
+- **`tanh(x)` standalone builtin** — unified scalar (Float/Int) and Tensor support; `tanh_scalar` retained as alias
+- **`relu(x)` standalone builtin** — scalar (Float returns max(0,x), Int returns max(0,x)) and Tensor support
+- **`reshape(tensor, shape)` builtin** — reshape tensors to new dimensions (uses existing `Tensor::reshape`)
+- **`as` type casting** — `x as f64`, `x as i64`, `x as bool`, `x as String`; desugars to builtin calls in HIR; high precedence (like Rust); supports chained casts (`x as i64 as f64`)
+- **Tuple field access** — `t.0`, `t.1`, etc. for direct tuple element access without `match` destructuring; works in both eval and mir-exec
+- **`tensor_slice(t, starts, ends)` and `slice(t, dim, start, end)` builtins** — zero-copy tensor slicing along all dims or a single dim
+- **`int()` / `float()` accept Bool** — `int(true) → 1`, `float(false) → 0.0` (enables `as` casting from bool)
+- **40 new integration tests** in `test_feature_gaps.rs` — all with eval/mir-exec parity verification and determinism checks
+
 #### NA Type (Missing Values)
 - **`NA` literal** across full compiler pipeline (lexer, parser, AST, HIR, MIR, eval, mir-exec, snap, types)
 - **SQL-style NA semantics:** `NA == NA → false`, `NA != NA → true`, arithmetic propagation (`NA + x → NA`)

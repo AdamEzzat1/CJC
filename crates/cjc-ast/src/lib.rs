@@ -468,6 +468,11 @@ pub enum ExprKind {
     },
     /// Tuple literal: `(a, b, c)`
     TupleLit(Vec<Expr>),
+    /// Type cast expression: `x as f64`, `y as i64`
+    Cast {
+        expr: Box<Expr>,
+        target_type: Ident,
+    },
     /// Try operator: `expr?` — desugars to match on Result
     Try(Box<Expr>),
     /// Enum variant constructor: `Some(42)` or `None`
@@ -1322,6 +1327,11 @@ impl PrettyPrinter {
                     }
                     self.output.push(')');
                 }
+            }
+            ExprKind::Cast { expr, target_type } => {
+                self.print_expr(expr);
+                self.output.push_str(" as ");
+                self.output.push_str(&target_type.name);
             }
         }
     }
