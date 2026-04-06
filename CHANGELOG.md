@@ -4,6 +4,12 @@ All notable changes to CJC will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.3] — 2026-04-05
+
+### Install Fix
+- **`cargo install cjc` now works** — root package now includes binary entry point (v0.1.2 was library-only on crates.io)
+- `cjc-cli` refactored to mixed lib+bin crate, exposing `cli_main()` for the root binary
+
 ## [0.1.2] — 2026-04-05
 
 ### Data Science Foundation, Statistical Completeness & Hardening Phase
