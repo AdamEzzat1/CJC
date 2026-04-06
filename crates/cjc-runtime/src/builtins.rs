@@ -1832,6 +1832,33 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let labels: Vec<bool> = labels_f.iter().map(|&x| x > 0.5).collect();
             Ok(Some(Value::Float(crate::ml::auc_roc(&scores, &labels)?)))
         }
+        // ── Embedding layer ─────────────────────────────────────────
+        "embedding" => {
+            if args.len() != 2 { return Err("embedding requires 2 arguments (weight, indices)".into()); }
+            let weight = value_to_tensor(&args[0])?;
+            let indices: Vec<i64> = match &args[1] {
+                Value::Array(arr) => arr.iter().map(|v| match v {
+                    Value::Int(i) => Ok(*i),
+                    _ => Err("embedding: indices must be integers".to_string()),
+                }).collect::<Result<Vec<_>, _>>()?,
+                Value::Tensor(t) => t.to_vec().iter().map(|f| Ok::<i64, String>(*f as i64)).collect::<Result<Vec<_>, _>>()?,
+                _ => return Err("embedding: indices must be an array or tensor".into()),
+            };
+            let result = crate::ml::embedding(weight, &indices)?;
+            Ok(Some(Value::Tensor(result)))
+        }
+        // ── Deterministic batch indices ─────────────────────────────
+        "batch_indices" => {
+            if args.len() != 3 { return Err("batch_indices requires 3 arguments (dataset_size, batch_size, seed)".into()); }
+            let ds = match &args[0] { Value::Int(i) => *i as usize, _ => return Err("batch_indices: dataset_size must be int".into()) };
+            let bs = match &args[1] { Value::Int(i) => *i as usize, _ => return Err("batch_indices: batch_size must be int".into()) };
+            let seed = match &args[2] { Value::Int(i) => *i as u64, _ => return Err("batch_indices: seed must be int".into()) };
+            let result = crate::ml::batch_indices(ds, bs, seed);
+            let arr: Vec<Value> = result.into_iter().map(|(s, e)| {
+                Value::Array(Rc::new(vec![Value::Int(s as i64), Value::Int(e as i64)]))
+            }).collect();
+            Ok(Some(Value::Array(Rc::new(arr))))
+        }
         // ── Tensor activation builtins ──────────────────────────────
         "sigmoid" => {
             if args.len() != 1 { return Err("sigmoid requires 1 argument".into()); }

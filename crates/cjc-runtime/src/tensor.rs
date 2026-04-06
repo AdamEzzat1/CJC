@@ -1631,6 +1631,53 @@ impl Tensor {
         Tensor::from_vec(result, &[n, c, h_out, w_out])
     }
 
+    /// Applies 2-D average pooling over a `[C, H, W]` tensor.
+    ///
+    /// # Arguments
+    ///
+    /// * `kernel_h` / `kernel_w` - Pooling window size
+    /// * `stride_h` / `stride_w` - Stride for the pooling window
+    ///
+    /// # Returns
+    ///
+    /// Tensor of shape `[C, out_h, out_w]` where `out_h = (H - kernel_h) / stride_h + 1`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the tensor is not 3-D or if kernel/stride produce invalid output dimensions.
+    pub fn avgpool2d(&self, kernel_h: usize, kernel_w: usize, stride_h: usize, stride_w: usize) -> Result<Tensor, RuntimeError> {
+        let shape = self.shape();
+        if shape.len() != 3 {
+            return Err(RuntimeError::InvalidOperation(format!("avgpool2d requires 3-D [C,H,W], got {:?}", shape)));
+        }
+        let (c, h, w) = (shape[0], shape[1], shape[2]);
+        if kernel_h > h || kernel_w > w {
+            return Err(RuntimeError::InvalidOperation("avgpool2d: kernel larger than input".into()));
+        }
+        let out_h = (h - kernel_h) / stride_h + 1;
+        let out_w = (w - kernel_w) / stride_w + 1;
+        let data = self.to_vec();
+        let mut out = Vec::with_capacity(c * out_h * out_w);
+        let pool_size = (kernel_h * kernel_w) as f64;
+
+        for ch in 0..c {
+            for oh in 0..out_h {
+                for ow in 0..out_w {
+                    let mut sum = 0.0f64;
+                    for kh in 0..kernel_h {
+                        for kw in 0..kernel_w {
+                            let ih = oh * stride_h + kh;
+                            let iw = ow * stride_w + kw;
+                            sum += data[ch * h * w + ih * w + iw];
+                        }
+                    }
+                    out.push(sum / pool_size);
+                }
+            }
+        }
+        Tensor::from_vec(out, &[c, out_h, out_w])
+    }
+
     /// Scaled dot-product attention (single head).
     ///
     /// `queries` is `[..., T, d_k]`

@@ -1467,6 +1467,9 @@ impl MirExecutor {
                 | "bit_shl"
                 | "bit_shr"
                 | "popcount"
+                // ML primitives: embedding & batch
+                | "embedding"
+                | "batch_indices"
                 // Phase D: RL primitives
                 | "log"
                 | "exp"
@@ -2434,6 +2437,14 @@ impl MirExecutor {
                 let pw = self.value_to_usize(&args[1])?;
                 Ok(Value::Tensor(t.maxpool2d(ph, pw)?))
             }
+            (Value::Tensor(t), "avgpool2d") => {
+                if args.len() != 4 { return Err(MirExecError::Runtime("avgpool2d requires 4 args: kernel_h, kernel_w, stride_h, stride_w".into())); }
+                let kh = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("avgpool2d: kernel_h must be int".into())) };
+                let kw = match &args[1] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("avgpool2d: kernel_w must be int".into())) };
+                let sh = match &args[2] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("avgpool2d: stride_h must be int".into())) };
+                let sw = match &args[3] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("avgpool2d: stride_w must be int".into())) };
+                Ok(Value::Tensor(t.avgpool2d(kh, kw, sh, sw).map_err(|e| MirExecError::Runtime(e.to_string()))?))
+            }
             (Value::Tensor(t), "bmm") => {
                 if args.len() != 1 {
                     return Err(MirExecError::Runtime(
@@ -3187,14 +3198,14 @@ impl MirExecutor {
                         if args.len() != 1 { return Err(MirExecError::Runtime("parameter requires 1 arg: Tensor".into())); }
                         let t = match &args[0] { Value::Tensor(t) => t.clone(), _ => return Err(MirExecError::Runtime("expected Tensor".into())) };
                         let mut borrow = inner.borrow_mut();
-                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         Ok(Value::Int(graph.parameter(t) as i64))
                     }
                     "input" => {
                         if args.len() != 1 { return Err(MirExecError::Runtime("input requires 1 arg: Tensor".into())); }
                         let t = match &args[0] { Value::Tensor(t) => t.clone(), _ => return Err(MirExecError::Runtime("expected Tensor".into())) };
                         let mut borrow = inner.borrow_mut();
-                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         Ok(Value::Int(graph.input(t) as i64))
                     }
                     "add" | "sub" | "mul" | "div" | "matmul" => {
@@ -3202,7 +3213,7 @@ impl MirExecutor {
                         let a = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int (node index)".into())) };
                         let b = match &args[1] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int (node index)".into())) };
                         let mut borrow = inner.borrow_mut();
-                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         let idx = match method {
                             "add" => graph.add(a, b),
                             "sub" => graph.sub(a, b),
@@ -3217,7 +3228,7 @@ impl MirExecutor {
                         if args.len() != 1 { return Err(MirExecError::Runtime(format!("{method} requires 1 arg: node_index"))); }
                         let a = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int (node index)".into())) };
                         let mut borrow = inner.borrow_mut();
-                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         let idx = match method {
                             "neg" => graph.neg(a),
                             "sum" => graph.sum(a),
@@ -3239,7 +3250,7 @@ impl MirExecutor {
                         let a = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int".into())) };
                         let n = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err(MirExecError::Runtime("expected number".into())) };
                         let mut borrow = inner.borrow_mut();
-                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         Ok(Value::Int(graph.pow(a, n) as i64))
                     }
                     "scalar_mul" => {
@@ -3247,14 +3258,14 @@ impl MirExecutor {
                         let a = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int".into())) };
                         let s = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err(MirExecError::Runtime("expected number".into())) };
                         let mut borrow = inner.borrow_mut();
-                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         Ok(Value::Int(graph.scalar_mul(a, s) as i64))
                     }
                     "backward" => {
                         if args.len() != 1 { return Err(MirExecError::Runtime("backward requires 1 arg: loss_node_index".into())); }
                         let loss_idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int".into())) };
                         let borrow = inner.borrow();
-                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         graph.backward(loss_idx);
                         Ok(Value::Void)
                     }
@@ -3262,21 +3273,21 @@ impl MirExecutor {
                         if args.len() != 1 { return Err(MirExecError::Runtime("value requires 1 arg: node_index".into())); }
                         let idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int".into())) };
                         let borrow = inner.borrow();
-                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         Ok(Value::Float(graph.value(idx)))
                     }
                     "tensor" => {
                         if args.len() != 1 { return Err(MirExecError::Runtime("tensor requires 1 arg: node_index".into())); }
                         let idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int".into())) };
                         let borrow = inner.borrow();
-                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         Ok(Value::Tensor(graph.tensor(idx)))
                     }
                     "grad" => {
                         if args.len() != 1 { return Err(MirExecError::Runtime("grad requires 1 arg: node_index".into())); }
                         let idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int".into())) };
                         let borrow = inner.borrow();
-                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         match graph.grad(idx) {
                             Some(t) => Ok(Value::Tensor(t)),
                             None => Ok(Value::Void),
@@ -3287,14 +3298,14 @@ impl MirExecutor {
                         let idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int".into())) };
                         let t = match &args[1] { Value::Tensor(t) => t.clone(), _ => return Err(MirExecError::Runtime("expected Tensor".into())) };
                         let borrow = inner.borrow();
-                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         graph.set_tensor(idx, t);
                         Ok(Value::Void)
                     }
                     "zero_grad" => {
                         if !args.is_empty() { return Err(MirExecError::Runtime("zero_grad takes 0 arguments".into())); }
                         let borrow = inner.borrow();
-                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         graph.zero_grad();
                         Ok(Value::Void)
                     }
@@ -3303,7 +3314,7 @@ impl MirExecutor {
                         let output_idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int".into())) };
                         let param_idx = match &args[1] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int".into())) };
                         let mut borrow = inner.borrow_mut();
-                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         let jac = graph.jacobian(output_idx, param_idx);
                         Ok(Value::Tensor(jac))
                     }
@@ -3315,7 +3326,7 @@ impl MirExecutor {
                             match &args[2] { Value::Float(f) => *f, _ => return Err(MirExecError::Runtime("expected Float for eps".into())) }
                         } else { 1e-5 };
                         let mut borrow = inner.borrow_mut();
-                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         let hd = graph.hessian_diag(loss_idx, param_idx, eps);
                         Ok(Value::Tensor(hd))
                     }

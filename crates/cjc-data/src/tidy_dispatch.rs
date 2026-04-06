@@ -1234,7 +1234,7 @@ pub fn dispatch_tidy_builtin(name: &str, args: &[Value]) -> Result<Option<Value>
             if args.len() != 1 { return Err("n_distinct requires 1 arg: array".into()); }
             match &args[0] {
                 Value::Array(arr) => {
-                    let mut seen = std::collections::HashSet::new();
+                    let mut seen = std::collections::BTreeSet::new();
                     for v in arr.iter() {
                         seen.insert(format!("{v}"));
                     }

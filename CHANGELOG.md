@@ -4,9 +4,25 @@ All notable changes to CJC will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [0.1.2] — 2026-04-04
+## [0.1.2] — 2026-04-05
 
-### Data Science Foundation & Statistical Completeness Phase
+### Data Science Foundation, Statistical Completeness & Hardening Phase
+
+#### Hardening & Safety Fixes
+- **Eliminated 28 `.unwrap()` calls on GradGraph downcasts** — 14 in `cjc-eval`, 14 in `cjc-mir-exec`; all converted to proper `ok_or_else` error propagation with descriptive `EvalError::Runtime` / `MirExecError` messages
+- **Replaced `HashSet` with `BTreeSet`** in `cjc-data/tidy_dispatch.rs` — eliminates last non-deterministic iteration order in the codebase
+
+#### ML Infrastructure (3 new primitives)
+- **`embedding(weights, indices)` builtin** — lookup rows from a weight matrix by index; wired in all three places (runtime, eval, mir-exec)
+- **`avgpool2d(kh, kw, sh, sw)` tensor method** — 2D average pooling with configurable kernel and stride; complementary to existing `maxpool2d`
+- **`batch_indices(dataset_size, batch_size, seed)` builtin** — deterministic mini-batch index generation using SplitMix64; returns array of `[start, end]` pairs
+
+#### New Test Suites (5 files)
+- **`test_mir_exec_coverage.rs`** — 20+ parity tests covering MIR executor edge cases
+- **`test_parity_stress.rs`** — 50-seed stress tests across program templates
+- **`test_ml_infrastructure.rs`** — embedding, avgpool2d, and batch_indices tests with parity verification
+- **`test_type_system_props.rs`** — property-based tests (proptest) for type system invariants
+- **`test_mir_fuzz.rs`** — fuzz testing for MIR pipeline robustness
 
 #### Language Ergonomic Gaps (6 features)
 - **`tanh(x)` standalone builtin** — unified scalar (Float/Int) and Tensor support; `tanh_scalar` retained as alias

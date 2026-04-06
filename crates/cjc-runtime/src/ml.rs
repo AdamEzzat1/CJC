@@ -1475,6 +1475,86 @@ pub fn multi_head_attention(
 }
 
 // ---------------------------------------------------------------------------
+// Embedding layer
+// ---------------------------------------------------------------------------
+
+/// Embedding lookup: maps integer indices to dense vectors.
+///
+/// Performs a table lookup in the weight matrix, selecting rows
+/// corresponding to the given indices.
+///
+/// # Arguments
+///
+/// * `weight` - Embedding matrix of shape `[vocab_size, embed_dim]`
+/// * `indices` - 1-D tensor of integer indices
+///
+/// # Returns
+///
+/// Tensor of shape `[len(indices), embed_dim]`
+///
+/// # Errors
+///
+/// Returns an error if any index is out of bounds for the vocabulary size.
+pub fn embedding(weight: &crate::tensor::Tensor, indices: &[i64]) -> Result<crate::tensor::Tensor, String> {
+    let shape = weight.shape();
+    if shape.len() != 2 {
+        return Err(format!("embedding: weight must be 2-D [vocab_size, embed_dim], got {:?}", shape));
+    }
+    let vocab_size = shape[0];
+    let embed_dim = shape[1];
+    let weight_data = weight.to_vec();
+
+    let mut out = Vec::with_capacity(indices.len() * embed_dim);
+    for &idx in indices {
+        let i = idx as usize;
+        if i >= vocab_size {
+            return Err(format!("embedding: index {} out of bounds for vocab_size {}", idx, vocab_size));
+        }
+        let start = i * embed_dim;
+        out.extend_from_slice(&weight_data[start..start + embed_dim]);
+    }
+    crate::tensor::Tensor::from_vec(out, &[indices.len(), embed_dim])
+        .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Deterministic mini-batch indices
+// ---------------------------------------------------------------------------
+
+/// Creates deterministic batch index ranges for mini-batch training.
+///
+/// Generates `(start, end)` pairs that cover the entire dataset, shuffled
+/// deterministically using the provided seed via [`SplitMix64`].
+///
+/// # Arguments
+///
+/// * `dataset_size` - Total number of samples
+/// * `batch_size` - Number of samples per batch (last batch may be smaller)
+/// * `seed` - RNG seed for deterministic shuffling
+///
+/// # Returns
+///
+/// A vector of `(start, end)` index pairs covering all samples.
+pub fn batch_indices(dataset_size: usize, batch_size: usize, seed: u64) -> Vec<(usize, usize)> {
+    use cjc_repro::Rng;
+    let mut rng = Rng::seeded(seed);
+    // Fisher-Yates shuffle with deterministic RNG
+    let mut indices: Vec<usize> = (0..dataset_size).collect();
+    for i in (1..dataset_size).rev() {
+        let j = (rng.next_u64() as usize) % (i + 1);
+        indices.swap(i, j);
+    }
+    let mut batches = Vec::new();
+    let mut i = 0;
+    while i < dataset_size {
+        let end = (i + batch_size).min(dataset_size);
+        batches.push((i, end));
+        i = end;
+    }
+    batches
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1852,6 +1932,41 @@ mod tests {
             "L-BFGS should minimize x^2 to ~0, got {}",
             params[0]
         );
+    }
+
+    #[test]
+    fn test_embedding_basic() {
+        let weight = crate::tensor::Tensor::from_vec(
+            vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+            &[3, 2],
+        ).unwrap();
+        let indices = vec![0, 2, 1];
+        let result = super::embedding(&weight, &indices).unwrap();
+        assert_eq!(result.shape(), &[3, 2]);
+        let data = result.to_vec();
+        assert!((data[0] - 0.1).abs() < 1e-12);
+        assert!((data[1] - 0.2).abs() < 1e-12);
+        assert!((data[2] - 0.5).abs() < 1e-12);
+        assert!((data[3] - 0.6).abs() < 1e-12);
+        assert!((data[4] - 0.3).abs() < 1e-12);
+        assert!((data[5] - 0.4).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_embedding_out_of_bounds() {
+        let weight = crate::tensor::Tensor::from_vec(vec![1.0, 2.0], &[1, 2]).unwrap();
+        let result = super::embedding(&weight, &[1]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_batch_indices_deterministic() {
+        let b1 = super::batch_indices(10, 3, 42);
+        let b2 = super::batch_indices(10, 3, 42);
+        assert_eq!(b1, b2);
+        // Should cover all indices
+        let total: usize = b1.iter().map(|(s, e)| e - s).sum();
+        assert_eq!(total, 10);
     }
 
     #[test]
