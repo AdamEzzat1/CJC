@@ -7,3 +7,5 @@ fuzz/Cargo.lock
 nul
 functions_temp.txt
 *_output.txt
+*.pack/
+*.proptest-regressions
