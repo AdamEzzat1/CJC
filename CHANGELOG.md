@@ -1,8 +1,18 @@
 # Changelog
 
-All notable changes to CJC will be documented in this file.
+All notable changes to CJC-Lang (Computational Jacobian Core) will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
+
+## [0.1.4] — 2026-04-06
+
+### Rebrand: CJC → CJC-Lang
+- **Project renamed from CJC to CJC-Lang** — the acronym still stands for Computational Jacobian Core
+- **CLI command changed from `cjc` to `cjcl`** — all 30 commands now use `cjcl` prefix (e.g., `cjcl run`, `cjcl flow`)
+- **File extension changed from `.cjc` to `.cjcl`** — source files, test fixtures, and examples all updated
+- **Install command: `cargo install cjc-lang`** — installs the `cjcl` binary
+- **Package name on crates.io: `cjc-lang`** (previously `cjc`)
+- All documentation, blog posts, and help text updated to reflect the new name
 
 ## [0.1.3] — 2026-04-05
 

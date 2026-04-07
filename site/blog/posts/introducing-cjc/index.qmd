@@ -1,11 +1,11 @@
 ---
-title: "Introducing CJC: Why I'm Building a Deterministic Scientific Computing Language"
-subtitle: "What CJC is, why it exists, what it can already do, and where it stands today."
+title: "Introducing CJC-Lang: Why I'm Building a Deterministic Scientific Computing Language"
+subtitle: "What CJC-Lang is, why it exists, what it can already do, and where it stands today."
 author: "Adam Ezzat"
 date: "2026-03-21"
 date-modified: "2026-03-21"
-categories: [CJC, compilers, scientific-computing]
-description: "A deep dive into CJC — a zero-dependency, deterministic scientific computing language built from scratch in Rust."
+categories: [CJC-Lang, compilers, scientific-computing]
+description: "A deep dive into CJC-Lang — a zero-dependency, deterministic scientific computing language built from scratch in Rust."
 ---
 
 <div class="reading-time">&#128337; ~25 min read</div>
@@ -19,20 +19,20 @@ description: "A deep dive into CJC — a zero-dependency, deterministic scientif
 
 ::: {.callout-tip appearance="minimal"}
 ## Key Takeaways
-- CJC guarantees **bit-identical** numerical results across runs — same seed, same output, always
+- CJC-Lang guarantees **bit-identical** numerical results across runs — same seed, same output, always
 - The entire language ships as a **6.4 MB zero-dependency binary** — no pip, no npm, nothing
-- Real ML architectures (REINFORCE, PINNs, CNNs, attention) work end-to-end in pure CJC
+- Real ML architectures (REINFORCE, PINNs, CNNs, attention) work end-to-end in pure CJC-Lang
 - 5,300+ tests enforce determinism, dual-engine parity, and correctness
 :::
 
-## What Is CJC?
+## What Is CJC-Lang?
 
-CJC — **Computation Jacobian Core** — is a programming language I'm building from scratch for deterministic scientific computing. It's written in Rust, organized as a 20-crate workspace, with nearly all functionality implemented from scratch using only the Rust standard library.
+CJC-Lang — **Computational Jacobian Core** — is a programming language I'm building from scratch for deterministic scientific computing. It's written in Rust, organized as a 20-crate workspace, with nearly all functionality implemented from scratch using only the Rust standard library.
 
 The language covers the full execution stack: a lexer, recursive descent parser, type checker, two intermediate representations (HIR and MIR), an optimizer, two execution engines, and a runtime with over 300 built-in functions for math, statistics, linear algebra, machine learning, signal processing, and data manipulation.
 
 ::: {.callout-note appearance="minimal"}
-**CJC is currently in beta.** The core compiler pipeline and runtime are functional and backed by 5,300+ passing tests, but the language is still under active development and is not production-ready. I'm sharing it now because the ideas behind it are worth discussing even before everything is polished.
+**CJC-Lang is currently in beta.** The core compiler pipeline and runtime are functional and backed by 5,300+ passing tests, but the language is still under active development and is not production-ready. I'm sharing it now because the ideas behind it are worth discussing even before everything is polished.
 :::
 
 ## Why Build a New Language?
@@ -49,11 +49,11 @@ That constraint turned out to touch everything: memory layout, collection types,
 
 ### Determinism as Architecture
 
-CJC enforces determinism at every layer:
+CJC-Lang enforces determinism at every layer:
 
 - **Ordered collections everywhere.** `BTreeMap` and `BTreeSet` instead of hash-based containers. Iteration order is always defined.
 - **Stable floating-point reductions.** All summations use Kahan or binned accumulators. No naive left-folds that depend on evaluation order.
-- **No FMA in SIMD kernels.** Fused multiply-add produces different rounding than separate multiply and add. CJC avoids FMA to keep results identical across CPU architectures.
+- **No FMA in SIMD kernels.** Fused multiply-add produces different rounding than separate multiply and add. CJC-Lang avoids FMA to keep results identical across CPU architectures.
 - **Seeded, explicit RNG.** The random number generator is SplitMix64 with explicit seed threading. No global state, no entropy sources.
 - **Deterministic parallelism.** Parallel operations are structured so that results don't depend on thread count or scheduling.
 
@@ -77,13 +77,13 @@ Not approximately equal. Bit-identical. `to_bits()` compares the raw IEEE 754 re
 
 The entire system — 20 Rust crates, nearly zero external dependencies — compiles to a **6.4 MB single binary**. That one file contains everything: lexer, parser, type checker, two execution engines, optimizer, ~300 builtins, tensor library, linear algebra kernels, regex engine, AD engine, data manipulation DSL, serialization, visualization, and 15+ CLI subcommands. Nearly all built from scratch using only the Rust standard library.
 
-For comparison: Python is ~50 MB (before packages), Node.js is ~70 MB, R is ~30 MB, Julia is ~300 MB. CJC ships the entire scientific computing stack in a binary smaller than a typical JPEG photo collection.
+For comparison: Python is ~50 MB (before packages), Node.js is ~70 MB, R is ~30 MB, Julia is ~300 MB. CJC-Lang ships the entire scientific computing stack in a binary smaller than a typical JPEG photo collection.
 
 This is a deliberate choice. External dependencies introduce version churn, platform variance, and complexity that's hard to audit. For a system that promises bit-identical results, every component needs to be under direct control. And for deployment — whether to a server, a CI runner, or eventually an embedded device — a single small binary with no runtime dependencies is hard to beat.
 
 ### Dual Execution Engines
 
-CJC has two execution paths:
+CJC-Lang has two execution paths:
 
 1. **AST interpreter** (`cjc-eval`): walks the syntax tree directly. Simple, easy to debug, good for prototyping.
 2. **MIR executor** (`cjc-mir-exec`): lowers through HIR → MIR, applies optimization passes (constant folding, dead code elimination), and runs on a register machine.
@@ -92,17 +92,17 @@ Both engines must produce identical results for every program. Parity tests enfo
 
 ### NoGC Verification
 
-CJC includes a static verifier that can prove code paths are free of garbage collection. The NoGC verifier performs transitive call-graph analysis to ensure that annotated functions — and everything they call — operate within reference-counted, copy-on-write memory without triggering GC.
+CJC-Lang includes a static verifier that can prove code paths are free of garbage collection. The NoGC verifier performs transitive call-graph analysis to ensure that annotated functions — and everything they call — operate within reference-counted, copy-on-write memory without triggering GC.
 
 This matters for latency-sensitive workloads where GC pauses are unacceptable.
 
-## What CJC Can Do Today
+## What CJC-Lang Can Do Today
 
 Rather than listing capabilities in the abstract, here's what the language actually looks like. Every example below comes from real files in the repository — demo programs, test fixtures, or integration tests.
 
 ### Functions, Recursion, and Control Flow
 
-CJC has the core building blocks you'd expect: typed functions, recursion, `if`/`else`, `while` loops, `for` loops with range iteration, and `break`/`continue`:
+CJC-Lang has the core building blocks you'd expect: typed functions, recursion, `if`/`else`, `while` loops, `for` loops with range iteration, and `break`/`continue`:
 
 <div class="code-label">Recursion, loops, and break</div>
 
@@ -132,7 +132,7 @@ Function parameters require type annotations — this is intentional. In a langu
 
 ### Closures and Higher-Order Functions
 
-CJC supports lambda expressions with capture analysis. The compiler performs lambda lifting during HIR lowering, converting closures into top-level functions with explicit environment parameters:
+CJC-Lang supports lambda expressions with capture analysis. The compiler performs lambda lifting during HIR lowering, converting closures into top-level functions with explicit environment parameters:
 
 <div class="code-label">Lambda with capture, passed as higher-order function</div>
 
@@ -153,7 +153,7 @@ This isn't just syntactic sugar — the capture analysis feeds into the NoGC ver
 
 ### Structs, Enums, and Pattern Matching
 
-CJC supports algebraic data types with structural destructuring:
+CJC-Lang supports algebraic data types with structural destructuring:
 
 ```
 struct Point {
@@ -215,7 +215,7 @@ print(z.norm_sq());   // 25.0
 
 ### Byte Strings and Regex
 
-CJC includes a zero-dependency NFA-based regex engine and byte-level string operations:
+CJC-Lang includes a zero-dependency NFA-based regex engine and byte-level string operations:
 
 ```
 print("hello world" ~= /world/);       // true
@@ -230,7 +230,7 @@ print(parts.len());                     // 2
 
 ### Tensors and Linear Algebra
 
-This is where CJC starts to show its numerical computing focus. Tensors are N-dimensional arrays with zero-copy COW (copy-on-write) buffers:
+This is where CJC-Lang starts to show its numerical computing focus. Tensors are N-dimensional arrays with zero-copy COW (copy-on-write) buffers:
 
 <div class="code-label">Matrix multiplication with shape verification</div>
 
@@ -272,7 +272,7 @@ Additional operations include SVD, QR, Cholesky, eigenvalue decomposition, matri
 
 ### Neural Network Forward Pass
 
-CJC can express multi-layer neural networks with struct-based layer definitions and a pipe operator (`|>`) for readable data flow:
+CJC-Lang can express multi-layer neural networks with struct-based layer definitions and a pipe operator (`|>`) for readable data flow:
 
 ```
 struct Layer {
@@ -347,7 +347,7 @@ assert(f(x) < 0.000001);
 print("Gradient descent converged!");
 ```
 
-For more complex cases, CJC has a full automatic differentiation engine — forward-mode via dual numbers and reverse-mode via tape-based gradient computation — that handles `sin`, `cos`, `exp`, `log`, `pow`, `sigmoid`, `relu`, and all standard arithmetic automatically.
+For more complex cases, CJC-Lang has a full automatic differentiation engine — forward-mode via dual numbers and reverse-mode via tape-based gradient computation — that handles `sin`, `cos`, `exp`, `log`, `pow`, `sigmoid`, `relu`, and all standard arithmetic automatically.
 
 ### Statistics and Distributions
 
@@ -382,7 +382,7 @@ Distributions include normal, beta, gamma, exponential, Weibull, Poisson, binomi
 
 ### Data Manipulation
 
-CJC includes a tidyverse-inspired data DSL with 73+ operations:
+CJC-Lang includes a tidyverse-inspired data DSL with 73+ operations:
 
 ```
 let csv_data = "name,age,city\nAlice,30,NYC\nBob,25,LA\nCharlie,35,NYC\nDiana,28,LA\n";
@@ -441,13 +441,13 @@ print(coeffs);
 
 Additional modeling tools include `lm` (OLS), `logistic_regression`, `polyfit`/`polyval`, `kmeans`, `dbscan`, `pca`, `auc_roc`, and `confusion_matrix`.
 
-## Neural Networks Proven in CJC
+## Neural Networks Proven in CJC-Lang
 
-One of CJC's design goals is to express real machine learning architectures — not through bindings to PyTorch or TensorFlow, but in base CJC using the language's own tensor operations, automatic differentiation, and training utilities. Here's what has been built and verified.
+One of CJC-Lang's design goals is to express real machine learning architectures — not through bindings to PyTorch or TensorFlow, but in base CJC-Lang using the language's own tensor operations, automatic differentiation, and training utilities. Here's what has been built and verified.
 
 ### Feedforward MLP (Multi-Layer Perceptron)
 
-The most fundamental neural network — and the one used across multiple CJC demonstrations.
+The most fundamental neural network — and the one used across multiple CJC-Lang demonstrations.
 
 ```{mermaid}
 %%| fig-width: 6
@@ -462,7 +462,7 @@ The benchmarks push this further: a **50-layer deep network** (width 64, batch 4
 
 ### REINFORCE Policy Network (Reinforcement Learning)
 
-The chess RL benchmark implements a full policy gradient agent in pure CJC — not a toy example, but an agent that actually plays chess, selects moves via softmax sampling, and updates weights via REINFORCE.
+The chess RL benchmark implements a full policy gradient agent in pure CJC-Lang — not a toy example, but an agent that actually plays chess, selects moves via softmax sampling, and updates weights via REINFORCE.
 
 ```{mermaid}
 %%| fig-width: 7
@@ -516,13 +516,13 @@ fn select_action(W1: Tensor, b1: Tensor, W2: Tensor,
 
 :::
 
-**Why this matters in CJC:** This is a complete RL pipeline — feature construction, forward pass, softmax action selection, log-probability tracking, and gradient computation — written entirely in CJC with no framework. The agent manually computes `d(log_prob)/d(theta)` through softmax, ReLU, and matmul, including ReLU mask construction and chain rule through two layers.
+**Why this matters in CJC-Lang:** This is a complete RL pipeline — feature construction, forward pass, softmax action selection, log-probability tracking, and gradient computation — written entirely in CJC-Lang with no framework. The agent manually computes `d(log_prob)/d(theta)` through softmax, ReLU, and matmul, including ReLU mask construction and chain rule through two layers.
 
-The key difference from doing this in Python: **reproducibility is guaranteed**. `categorical_sample()` uses CJC's seeded SplitMix64 RNG. The softmax goes through Kahan summation. Running `cjc run chess_agent.cjc --seed 42` produces the exact same game, the exact same moves, the exact same weight updates, every time. 49 tests verify this. In PyTorch, achieving this level of reproducibility requires `torch.manual_seed()`, `torch.use_deterministic_algorithms(True)`, disabling CUDA non-determinism, and even then floating-point reduction order may vary.
+The key difference from doing this in Python: **reproducibility is guaranteed**. `categorical_sample()` uses CJC-Lang's seeded SplitMix64 RNG. The softmax goes through Kahan summation. Running `cjcl run chess_agent.cjcl --seed 42` produces the exact same game, the exact same moves, the exact same weight updates, every time. 49 tests verify this. In PyTorch, achieving this level of reproducibility requires `torch.manual_seed()`, `torch.use_deterministic_algorithms(True)`, disabling CUDA non-determinism, and even then floating-point reduction order may vary.
 
 ### Physics-Informed Neural Network (PINN)
 
-CJC's AD engine supports PINNs — neural networks that learn to satisfy differential equations, not just fit data.
+CJC-Lang's AD engine supports PINNs — neural networks that learn to satisfy differential equations, not just fit data.
 
 ```{mermaid}
 %%| fig-width: 6
@@ -548,7 +548,7 @@ The harmonic oscillator example uses a `[1, 32, 32, 1]` MLP with tanh activation
 
 The exact solution is `sin(x)`, and the trained network converges to it with verified L2 error below tolerance.
 
-**Why this matters in CJC:** PINNs are a case where determinism isn't just nice — it's scientifically necessary. When you're claiming a network satisfies a PDE, you need to reproduce the training run exactly to verify the claim. CJC's deterministic AD engine, seeded RNG, and Kahan-summed loss computations mean the verification is airtight. The test suite trains the same PINN twice with seed 42 and asserts that every parameter is bit-identical using `to_bits()` comparison on the raw IEEE 754 representation.
+**Why this matters in CJC-Lang:** PINNs are a case where determinism isn't just nice — it's scientifically necessary. When you're claiming a network satisfies a PDE, you need to reproduce the training run exactly to verify the claim. CJC-Lang's deterministic AD engine, seeded RNG, and Kahan-summed loss computations mean the verification is airtight. The test suite trains the same PINN twice with seed 42 and asserts that every parameter is bit-identical using `to_bits()` comparison on the raw IEEE 754 representation.
 
 ### Physics-Informed ML (PIML)
 
@@ -567,11 +567,11 @@ The model learns polynomial coefficients that simultaneously fit noisy observati
 
 ### Convolutional Neural Networks (CNN)
 
-CJC's tensor runtime includes native 1D and 2D convolution, maxpooling, and the full pipeline for building convolutional architectures.
+CJC-Lang's tensor runtime includes native 1D and 2D convolution, maxpooling, and the full pipeline for building convolutional architectures.
 
 ```{mermaid}
 %%| fig-width: 7
-%%| fig-cap: "CNN pipeline in CJC. Native conv2d, ReLU, batch normalization, and maxpooling — all deterministic."
+%%| fig-cap: "CNN pipeline in CJC-Lang. Native conv2d, ReLU, batch normalization, and maxpooling — all deterministic."
 flowchart LR
     I["Input\n[4,3,28,28]"] --> C["Conv2D\n32 filters 3x3"] --> R["ReLU"] --> BN["BatchNorm"] --> MP["MaxPool2D\n2x2"] --> O["Output\n[4,32,13,13]"]
 ```
@@ -588,9 +588,9 @@ let activated = conv_out.relu();
 let pooled = activated.maxpool2d(2, 2);          // -> [4, 32, 13, 13]
 ```
 
-CJC also supports 1D convolution with circular padding (`conv1d_circular`) for signal processing, and the full set of CNN building blocks: `batch_norm`, `dropout_mask`, arbitrary strides, and multi-channel operations.
+CJC-Lang also supports 1D convolution with circular padding (`conv1d_circular`) for signal processing, and the full set of CNN building blocks: `batch_norm`, `dropout_mask`, arbitrary strides, and multi-channel operations.
 
-**Why this matters in CJC:** Convolutions are one of the most numerically sensitive operations in deep learning — small floating-point differences in the kernel computation compound across spatial dimensions. CJC's convolution implementation uses the same deterministic accumulation as everything else (Kahan summation over the kernel window), which means a CNN forward pass produces identical feature maps on every run. In frameworks like PyTorch, `torch.nn.Conv2d` on CUDA can produce different results between runs unless you explicitly opt into deterministic mode — and even then, performance suffers.
+**Why this matters in CJC-Lang:** Convolutions are one of the most numerically sensitive operations in deep learning — small floating-point differences in the kernel computation compound across spatial dimensions. CJC-Lang's convolution implementation uses the same deterministic accumulation as everything else (Kahan summation over the kernel window), which means a CNN forward pass produces identical feature maps on every run. In frameworks like PyTorch, `torch.nn.Conv2d` on CUDA can produce different results between runs unless you explicitly opt into deterministic mode — and even then, performance suffers.
 
 ### Attention Mechanism (Transformer Building Block)
 
@@ -598,7 +598,7 @@ Scaled dot-product attention — the core primitive of transformer architectures
 
 ```{mermaid}
 %%| fig-width: 7
-%%| fig-cap: "Scaled dot-product attention — softmax(QK^T / sqrt(d_k)) * V — as a single native CJC operation."
+%%| fig-cap: "Scaled dot-product attention — softmax(QK^T / sqrt(d_k)) * V — as a single native CJC-Lang operation."
 flowchart LR
     Q["Q [batch, seq, d_k]"] --> MM["Q · K^T"]
     K["K [batch, seq, d_k]"] --> MM
@@ -617,11 +617,11 @@ let output = attention(Q, K, V);      // -> [2, 8, 64]
 
 This computes `softmax(QK^T / sqrt(d_k)) * V` with batch matrix multiplication and deterministic softmax. It's the core primitive you'd need to build transformer-style architectures.
 
-**Why this matters in CJC:** Attention involves two matrix multiplications and a softmax — three operations where floating-point non-determinism typically creeps in. The softmax denominator is a sum over exponentials that's sensitive to evaluation order. CJC's implementation uses Kahan-summed softmax and deterministic batch matmul, producing identical attention weights on every run. For research applications where you need to compare attention patterns between model variants, this level of reproducibility is essential.
+**Why this matters in CJC-Lang:** Attention involves two matrix multiplications and a softmax — three operations where floating-point non-determinism typically creeps in. The softmax denominator is a sum over exponentials that's sensitive to evaluation order. CJC-Lang's implementation uses Kahan-summed softmax and deterministic batch matmul, producing identical attention weights on every run. For research applications where you need to compare attention patterns between model variants, this level of reproducibility is essential.
 
 ### Deep Network Stress Tests
 
-Beyond the architecture-specific examples above, CJC includes benchmark programs that push neural network forward passes to realistic scale:
+Beyond the architecture-specific examples above, CJC-Lang includes benchmark programs that push neural network forward passes to realistic scale:
 
 | Benchmark | Depth | Width | Batch | Parameters per Layer | Verified |
 |-----------|-------|-------|-------|---------------------|----------|
@@ -634,11 +634,11 @@ Both benchmarks insert `snap_hash()` checkpoints every few layers, producing cry
 
 These aren't theoretical capabilities. Each architecture has been implemented, run through both execution engines, and verified with assertions. The REINFORCE agent plays chess. The PINN converges to the analytical solution. The CNN processes real tensor shapes. The deep network benchmarks verify hash-level determinism through 50 sequential layers.
 
-And all of them produce **bit-identical results** across runs — something no mainstream ML framework guarantees without significant configuration overhead and performance trade-offs. In CJC, determinism isn't an opt-in mode. It's how computation works.
+And all of them produce **bit-identical results** across runs — something no mainstream ML framework guarantees without significant configuration overhead and performance trade-offs. In CJC-Lang, determinism isn't an opt-in mode. It's how computation works.
 
 ## Beyond Neural Networks
 
-CJC isn't just a machine learning language. The numerical infrastructure supports a much broader range of scientific computing work — all with the same determinism guarantees.
+CJC-Lang isn't just a machine learning language. The numerical infrastructure supports a much broader range of scientific computing work — all with the same determinism guarantees.
 
 | Domain | Key Capabilities |
 |--------|-----------------|
@@ -677,15 +677,15 @@ Everything mentioned above runs inside a single 6.4 MB binary with nearly zero e
 | **Visualization** (`cjc-vizor`) | Grammar-of-graphics with SVG/BMP output | No subprocess, no JS engine, no network calls |
 | **DataFrame** (`cjc-data`) | 73+ tidyverse-style ops, lazy eval, typed columns | Grouping and aggregation inherit determinism automatically |
 
-Two components deserve deeper explanation because they're foundational to CJC's determinism guarantee:
+Two components deserve deeper explanation because they're foundational to CJC-Lang's determinism guarantee:
 
 ### Native Serialization with Content Hashing
 
-CJC's serialization format (`cjc-snap`) produces canonical binary representations with **SHA-256 content hashing** — hand-rolled, zero dependencies. The same value always produces the same bytes, regardless of insertion order or reference identity. If you checkpoint a model and restore it, the restore is exact. This is what makes `snap_hash()` verification possible throughout the test suite.
+CJC-Lang's serialization format (`cjc-snap`) produces canonical binary representations with **SHA-256 content hashing** — hand-rolled, zero dependencies. The same value always produces the same bytes, regardless of insertion order or reference identity. If you checkpoint a model and restore it, the restore is exact. This is what makes `snap_hash()` verification possible throughout the test suite.
 
 ### Native Accumulation (Kahan and Binned Summation)
 
-Every floating-point reduction in CJC goes through either Kahan compensated summation or binned accumulators — tensor reductions, statistical functions, loss computations, gradient accumulation, all of it. Naive `sum += x` loses precision as arrays grow and produces different results depending on evaluation order. Kahan summation maintains accuracy to near full IEEE 754 precision. Binned accumulators go further, providing reproducible results *independent of summation order*. This is the mechanism that makes bit-identical determinism possible at the floating-point level.
+Every floating-point reduction in CJC-Lang goes through either Kahan compensated summation or binned accumulators — tensor reductions, statistical functions, loss computations, gradient accumulation, all of it. Naive `sum += x` loses precision as arrays grow and produces different results depending on evaluation order. Kahan summation maintains accuracy to near full IEEE 754 precision. Binned accumulators go further, providing reproducible results *independent of summation order*. This is the mechanism that makes bit-identical determinism possible at the floating-point level.
 
 ### The Compound Benefit
 
@@ -695,22 +695,22 @@ No `pip install`. No `npm install`. No version conflicts. No "works on my machin
 
 ## The CLI Toolchain
 
-CJC ships with 15+ CLI subcommands:
+CJC-Lang ships with 15+ CLI subcommands:
 
 ```bash
-cjc run program.cjc              # execute a program
-cjc run program.cjc --seed 42    # explicit RNG seed
-cjc run program.cjc --mir-opt    # MIR-optimized execution
-cjc check program.cjc            # type-check without running
-cjc repl                         # interactive REPL
-cjc trace program.cjc            # execution tracing
-cjc bench program.cjc            # benchmarking
-cjc doctor                       # health/validation checks
+cjcl run program.cjcl              # execute a program
+cjcl run program.cjcl --seed 42    # explicit RNG seed
+cjcl run program.cjcl --mir-opt    # MIR-optimized execution
+cjcl check program.cjcl            # type-check without running
+cjcl repl                          # interactive REPL
+cjcl trace program.cjcl            # execution tracing
+cjcl bench program.cjcl            # benchmarking
+cjcl doctor                        # health/validation checks
 ```
 
-Additional commands include `inspect`, `schema`, `flow` (control flow graphs), `drift` (determinism drift detection), `mem` (memory profiling), `pack` (binary serialization), and `forge` (code generation).
+Additional commands include `inspect`, `schema`, `flow` (control flow graphs), `drift` (determinism drift detection), `mem` (memory profiling), `pack` (binary serialization), and `forge` (code generation). All are accessed via the `cjcl` command.
 
-## Why CJC Is Still in Beta
+## Why CJC-Lang Is Still in Beta
 
 The core is solid: the compiler pipeline works end-to-end, both execution engines agree, the test suite is extensive, and the runtime covers a wide surface area. But several areas need more work:
 
@@ -721,7 +721,7 @@ The core is solid: the compiler pipeline works end-to-end, both execution engine
 - **Optimizer** has room for more passes beyond constant folding and DCE
 - **Documentation** is sparse outside of test coverage
 
-I'm not rushing to call this production-ready. The point is to build something correct first, then make it convenient. CJC is in a state where it can express real programs and produce trustworthy results, but the developer experience still has rough edges.
+I'm not rushing to call this production-ready. The point is to build something correct first, then make it convenient. CJC-Lang is in a state where it can express real programs and produce trustworthy results, but the developer experience still has rough edges.
 
 ## What Comes Next
 
@@ -738,7 +738,7 @@ Longer term, I'm interested in what it means to run a fully deterministic, zero-
 
 ## Why Share This Now?
 
-CJC isn't finished, but the ideas behind it are clear enough to discuss. Deterministic scientific computing is a real problem. Building the entire stack from scratch is an unusual approach. And the results so far — a 6.4 MB binary containing an entire scientific computing language, 5,300+ tests passing, end-to-end ML benchmarks, bit-identical execution — suggest the approach is viable.
+CJC-Lang isn't finished, but the ideas behind it are clear enough to discuss. Deterministic scientific computing is a real problem. Building the entire stack from scratch is an unusual approach. And the results so far — a 6.4 MB binary containing an entire scientific computing language, 5,300+ tests passing, end-to-end ML benchmarks, bit-identical execution — suggest the approach is viable.
 
 If you're interested in compiler design, numerical methods, reproducible computing, or just the experience of building a language from the ground up, I'll be writing more here as the project develops.
 
@@ -746,5 +746,5 @@ Next up: I'll write about what it took to build a dual-engine compiler pipeline 
 
 ::: {.callout-tip appearance="minimal"}
 ## Follow the project
-CJC is open source and under active development. The project is in beta — functional and tested, but not yet production-ready. Follow [@adamezzat](https://linkedin.com/in/adamezzat) for updates as new features land.
+CJC-Lang is open source and under active development. The project is in beta — functional and tested, but not yet production-ready. Follow [@adamezzat](https://linkedin.com/in/adamezzat) for updates as new features land.
 :::

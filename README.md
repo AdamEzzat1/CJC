@@ -1,10 +1,14 @@
-# CJC — A Deterministic Numerical Programming Language
+# CJC-Lang — A Deterministic Numerical Programming Language
 
-**Version 0.1.0** | **Rust** | **Zero External Dependencies** | **MIT License**
+*Computational Jacobian Core*
 
-CJC is a programming language being built for reproducible numerical computation, machine learning, and data analysis. It is implemented entirely in Rust across 20 workspace crates (~75K lines), with zero external runtime dependencies. The language is under active development — it works, but it is not production-ready.
+**Version 0.1.4** | **Rust** | **Zero External Dependencies** | **MIT License**
 
-```cjc
+> **Note:** Starting with v0.1.4, the project is now **CJC-Lang** and the CLI command has changed from `cjc` to `cjcl`. Install with `cargo install cjc-lang`.
+
+CJC-Lang is a programming language being built for reproducible numerical computation, machine learning, and data analysis. It is implemented entirely in Rust across 21 workspace crates (~96K lines), with zero external runtime dependencies. The language is under active development — it works, but it is not production-ready.
+
+```cjcl
 fn main() -> i64 {
     let data = [| 1.0, 2.0, 3.0, 4.0, 5.0 |];
     let mean_val: f64 = mean(data);
@@ -16,9 +20,9 @@ fn main() -> i64 {
 
 ---
 
-## What CJC Is Trying to Do
+## What CJC-Lang Is Trying to Do
 
-CJC exists to answer a specific question: *can a single language handle numerical computing, machine learning, and data analysis with guaranteed reproducibility — without depending on any external libraries?*
+CJC-Lang exists to answer a specific question: *can a single language handle numerical computing, machine learning, and data analysis with guaranteed reproducibility — without depending on any external libraries?*
 
 The design priorities are:
 
@@ -31,7 +35,7 @@ These are goals being worked toward, not finished claims.
 
 ---
 
-## What CJC Has Proven So Far
+## What CJC-Lang Has Proven So Far
 
 The test suite currently has **3,700+ tests** across the workspace, covering:
 
@@ -75,11 +79,11 @@ The test suite currently has **3,700+ tests** across the workspace, covering:
 
 ## The Chess RL Demo
 
-The chess reinforcement learning demo is a capability benchmark — it stress-tests CJC's ability to handle a non-trivial numerical computing workload end-to-end.
+The chess reinforcement learning demo is a capability benchmark — it stress-tests CJC-Lang's ability to handle a non-trivial numerical computing workload end-to-end.
 
 ### Which Parts Are Written in CJC
 
-The **CJC backend** (`tests/chess_rl_project/`, `tests/chess_rl_advanced/`) implements:
+The **CJC-Lang backend** (`tests/chess_rl_project/`, `tests/chess_rl_advanced/`) implements:
 
 - **Complete chess engine** — Board representation, legal move generation for all piece types, castling, en passant, pawn promotion, check and checkmate detection, draw rules (stalemate, 50-move rule, insufficient material, threefold repetition)
 - **Neural network forward pass** — `forward_move()` computing linear layers with tanh activation through CJC's tensor and arithmetic primitives
@@ -87,7 +91,7 @@ The **CJC backend** (`tests/chess_rl_project/`, `tests/chess_rl_advanced/`) impl
 - **Board encoding** — Board state to feature tensor conversion
 - **Action selection** — Softmax probability distribution over legal moves with temperature-based exploration
 
-All of the above runs through both CJC execution backends (AST interpreter and MIR executor) and produces identical results. This is verified by **216 dedicated tests** including:
+All of the above runs through both CJC-Lang execution backends (AST interpreter and MIR executor) and produces identical results. This is verified by **216 dedicated tests** including:
 - Move generation correctness (all piece types, all special moves)
 - Training determinism (same seed → identical weights after N episodes)
 - Network output validity (no NaN, bounded values)
@@ -98,7 +102,7 @@ All of the above runs through both CJC execution backends (AST interpreter and M
 
 The **browser frontend** (`examples/chess_rl_platform.html`, ~3,800 lines) is a self-contained HTML file that mirrors the CJC chess engine in JavaScript to provide an interactive experience. CJC does not yet compile to WebAssembly or have a GUI toolkit, so the browser UI is written in plain JavaScript with no frameworks or libraries.
 
-The JS frontend includes a more advanced version of the agent:
+The JS frontend includes a more advanced version of the agent (CJC-Lang does not yet compile to WebAssembly):
 
 - **Actor-Critic network** — Residual blocks, GELU activation, He initialization, dual policy + value heads (~110K parameters)
 - **A2C with GAE** — Advantage Actor-Critic with Generalized Advantage Estimation (γ=0.99, λ=0.95), entropy regularization, gradient clipping
@@ -108,7 +112,7 @@ The JS frontend includes a more advanced version of the agent:
 - **4 baseline opponents** — Random, Heuristic (greedy material), 1-ply Minimax, Untrained network
 - **Tactical puzzle suite** — 5 predefined positions with known best moves
 
-The JS frontend demonstrates what CJC will eventually support natively. The neural network math is hand-written — no TensorFlow, no PyTorch, no ML libraries. Every gradient is derived manually.
+The JS frontend demonstrates what CJC-Lang will eventually support natively. The neural network math is hand-written — no TensorFlow, no PyTorch, no ML libraries. Every gradient is derived manually.
 
 ### Training Results (500 Episodes)
 
@@ -123,25 +127,25 @@ The JS frontend demonstrates what CJC will eventually support natively. The neur
 
 These results are modest. The agent learns basic material awareness and consistently beats a random player, but does not play strong chess. 110K parameters with 500 episodes of policy gradient training is not enough for expert play. The demo proves the training pipeline works end-to-end, not that it produces a grandmaster.
 
-### What This Demo Proves About CJC
+### What This Demo Proves About CJC-Lang
 
-1. **CJC can express non-trivial algorithms** — A complete chess engine with all standard rules runs correctly through both execution backends
-2. **CJC can do numerical computing** — Neural network forward passes, gradient computation, and weight updates work through CJC's runtime
+1. **CJC-Lang can express non-trivial algorithms** — A complete chess engine with all standard rules runs correctly through both execution backends
+2. **CJC-Lang can do numerical computing** — Neural network forward passes, gradient computation, and weight updates work through CJC-Lang's runtime
 3. **Determinism holds under load** — Training with the same seed produces identical results across runs, verified by dedicated tests
 4. **Both backends agree** — Every chess RL test produces identical output from the AST interpreter and MIR executor
 5. **The test infrastructure scales** — 216 chess RL tests including fuzz testing and multi-episode training sequences
 
 ### What This Demo Does Not Prove
 
-- CJC is not ready for production use
+- CJC-Lang is not ready for production use
 - The language still lacks features expected for real ML work (module system, variadic functions, browser target)
 - The JS frontend does the heavy lifting for the interactive experience
 - 500 episodes of A2C is not enough to produce competitive chess play
-- The CJC-native network (V1) is simpler than the JS network (V2)
+- The CJC-Lang-native network (V1) is simpler than the JS network (V2)
 
 ### Running the Demo
 
-**CJC Tests:**
+**CJC-Lang Tests:**
 ```bash
 cargo test --workspace                    # All 3,700+ tests
 cargo test --test test_chess_rl_project   # Chess engine + V1 RL (150 tests)
@@ -160,10 +164,10 @@ Open `examples/chess_rl_platform.html` in any browser. No server, no build step,
 
 ### Variables and Types
 
-```cjc
+```cjcl
 let x: i64 = 42;
 let pi: f64 = 3.14159;
-let name: str = "CJC";
+let name: str = "CJC-Lang";
 let flag: bool = true;
 let mut counter: i64 = 0;
 counter += 1;
@@ -171,7 +175,7 @@ counter += 1;
 
 ### Functions
 
-```cjc
+```cjcl
 fn add(a: i64, b: i64) -> i64 {
     a + b
 }
@@ -183,7 +187,7 @@ fn greet(name: str) {
 
 ### Structs
 
-```cjc
+```cjcl
 struct Point {
     x: f64,
     y: f64,
@@ -196,7 +200,7 @@ fn distance(p: Point) -> f64 {
 
 ### Enums and Pattern Matching
 
-```cjc
+```cjcl
 enum Shape {
     Circle(f64),
     Rect(f64, f64),
@@ -213,7 +217,7 @@ fn area(s: Shape) -> f64 {
 
 ### Closures
 
-```cjc
+```cjcl
 fn apply(f: fn(i64) -> i64, x: i64) -> i64 {
     f(x)
 }
@@ -226,7 +230,7 @@ fn main() -> i64 {
 
 ### Control Flow
 
-```cjc
+```cjcl
 if x > 0 {
     print("positive");
 } else {
@@ -244,7 +248,7 @@ for i in 0..10 {
 
 ### Operators
 
-```cjc
+```cjcl
 // Arithmetic: + - * / % **
 // Comparison: == != < > <= >=
 // Logical: && || !
@@ -256,7 +260,7 @@ for i in 0..10 {
 
 ## Tensor Operations
 
-```cjc
+```cjcl
 let a = Tensor.zeros([3, 3]);
 let b = Tensor.ones([3, 3]);
 let c = Tensor.randn([2, 4]);
@@ -352,11 +356,11 @@ Source → [Lexer] → Tokens → [Parser] → AST → [TypeChecker] → Typed A
 ## CLI Usage
 
 ```
-cjc run <file.cjc>     Run a CJC program
-cjc repl                Start the interactive REPL
-cjc lex <file.cjc>     Tokenize and print tokens
-cjc parse <file.cjc>   Parse and pretty-print AST
-cjc check <file.cjc>   Type-check without running
+cjcl run <file.cjcl>    Run a CJC-Lang program
+cjcl repl               Start the interactive REPL
+cjcl lex <file.cjcl>    Tokenize and print tokens
+cjcl parse <file.cjcl>  Parse and pretty-print AST
+cjcl check <file.cjcl>  Type-check without running
 ```
 
 | Flag | Description |

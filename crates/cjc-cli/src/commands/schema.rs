@@ -1,4 +1,4 @@
-//! `cjc schema` — Schema inference and reporting for datasets.
+//! `cjcl schema` — Schema inference and reporting for datasets.
 //!
 //! Infers column types, null counts, unique value counts, and basic statistics
 //! from CSV/TSV data. Output is always deterministic with stable column ordering.
@@ -120,14 +120,14 @@ pub fn parse_args(args: &[String]) -> SchemaArgs {
             }
             other if !other.starts_with('-') => sa.file = other.to_string(),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc schema`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl schema`", other);
                 process::exit(1);
             }
         }
         i += 1;
     }
     if sa.file.is_empty() {
-        eprintln!("error: `cjc schema` requires a file argument");
+        eprintln!("error: `cjcl schema` requires a file argument");
         process::exit(1);
     }
     sa
@@ -934,9 +934,9 @@ fn do_diff(sa: &SchemaArgs, columns: &[ColumnSchema], schema_file: &str) {
 // ── Help ────────────────────────────────────────────────────────────
 
 pub fn print_help() {
-    eprintln!("cjc schema — Schema inference and reporting");
+    eprintln!("cjcl schema — Schema inference and reporting");
     eprintln!();
-    eprintln!("Usage: cjc schema <file> [flags]");
+    eprintln!("Usage: cjcl schema <file> [flags]");
     eprintln!();
     eprintln!("Supported formats:");
     eprintln!("  .csv                  CSV (comma-separated)");

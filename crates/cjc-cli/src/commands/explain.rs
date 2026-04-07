@@ -1,4 +1,4 @@
-//! `cjc explain` — Show desugared/lowered form of a CJC program.
+//! `cjcl explain` — Show desugared/lowered form of a CJC program.
 //!
 //! Lowers the source to HIR and presents the desugared forms:
 //! for→while, match→branches, closure captures. Useful for understanding
@@ -35,14 +35,14 @@ pub fn parse_args(args: &[String]) -> ExplainArgs {
             "--color" => ea.output = OutputMode::Color,
             other if !other.starts_with('-') => ea.file = other.to_string(),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc explain`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl explain`", other);
                 process::exit(1);
             }
         }
         i += 1;
     }
     if ea.file.is_empty() {
-        eprintln!("error: `cjc explain` requires a .cjc file argument");
+        eprintln!("error: `cjcl explain` requires a .cjcl file argument");
         process::exit(1);
     }
     ea
@@ -181,9 +181,9 @@ pub fn run(args: &[String]) {
 }
 
 pub fn print_help() {
-    eprintln!("cjc explain — Show desugared/lowered form of a CJC program");
+    eprintln!("cjcl explain — Show desugared/lowered form of a CJC program");
     eprintln!();
-    eprintln!("Usage: cjc explain <file.cjc> [flags]");
+    eprintln!("Usage: cjcl explain <file.cjcl> [flags]");
     eprintln!();
     eprintln!("Shows:");
     eprintln!("  - Function signatures after lowering");

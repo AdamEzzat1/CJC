@@ -1,6 +1,6 @@
-//! `cjc inspect` — Deep inspection of structured computational artifacts.
+//! `cjcl inspect` — Deep inspection of structured computational artifacts.
 //!
-//! Inspects .snap files, .csv/.tsv datasets, .jsonl/.ndjson files, .cjc source
+//! Inspects .snap files, .csv/.tsv datasets, .jsonl/.ndjson files, .cjcl source
 //! files, binary metadata formats (parquet, arrow, sqlite), safe model file
 //! inspection (.pkl, .onnx, .joblib), and generic files.
 //!
@@ -200,19 +200,19 @@ pub fn parse_args(args: &[String]) -> InspectArgs {
                 if ia.file.is_empty() {
                     ia.file = other.to_string();
                 } else {
-                    eprintln!("error: unexpected argument `{}` for `cjc inspect`", other);
+                    eprintln!("error: unexpected argument `{}` for `cjcl inspect`", other);
                     process::exit(1);
                 }
             }
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc inspect`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl inspect`", other);
                 process::exit(1);
             }
         }
         i += 1;
     }
     if ia.file.is_empty() {
-        eprintln!("error: `cjc inspect` requires a file argument");
+        eprintln!("error: `cjcl inspect` requires a file argument");
         process::exit(1);
     }
     ia
@@ -256,7 +256,7 @@ pub fn run(args: &[String]) {
             inspect_binary_metadata(&ia, path)
         }
         "pkl" | "pickle" | "onnx" | "joblib" => inspect_model(&ia, path),
-        "cjc" => inspect_cjc(&ia, path),
+        "cjcl" => inspect_cjc(&ia, path),
         _ => inspect_generic(&ia, path),
     }
 }
@@ -803,7 +803,7 @@ fn inspect_cjc(ia: &InspectArgs, path: &Path) {
         _ => {
             let mut t = crate::table::Table::new(vec!["Property", "Value"]);
             t.add_row_owned(vec!["File".into(), path.display().to_string().replace('\\', "/")]);
-            t.add_row_owned(vec!["Type".into(), "cjc source".into()]);
+            t.add_row_owned(vec!["Type".into(), "cjcl source".into()]);
             t.add_row_owned(vec!["Size".into(), output::format_size(file_size)]);
             t.add_row_owned(vec!["Lines".into(), format!("{}", line_count)]);
             t.add_row_owned(vec!["Parse errors".into(), format!("{}", diags.diagnostics.len())]);
@@ -975,9 +975,9 @@ fn is_likely_text(path: &Path) -> bool {
 }
 
 pub fn print_help() {
-    eprintln!("cjc inspect — Deep inspection of structured computational artifacts");
+    eprintln!("cjcl inspect — Deep inspection of structured computational artifacts");
     eprintln!();
-    eprintln!("Usage: cjc inspect <file> [flags]");
+    eprintln!("Usage: cjcl inspect <file> [flags]");
     eprintln!();
     eprintln!("Supported file types:");
     eprintln!("  .snap                Snap binary artifacts (decode + stats)");
@@ -988,7 +988,7 @@ pub fn print_help() {
     eprintln!("  .sqlite / .db        SQLite metadata inspection");
     eprintln!("  .pkl / .onnx         Safe model file inspection (no deserialization)");
     eprintln!("  .joblib              Safe model file inspection (no deserialization)");
-    eprintln!("  .cjc                 Source file analysis (functions, structs, effects)");
+    eprintln!("  .cjcl                Source file analysis (functions, structs, effects)");
     eprintln!("  (other)              Generic file inspection (size, hash)");
     eprintln!();
     eprintln!("Flags:");

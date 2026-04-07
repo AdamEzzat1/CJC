@@ -517,7 +517,7 @@ fn test_stress_10k_full_cnn_pipeline() {
 
 #[test]
 fn test_cjc_bench_cnn_signal() {
-    let src = include_str!("../bench/bench_cnn_signal.cjc");
+    let src = include_str!("../bench/bench_cnn_signal.cjcl");
 
     let wall_start = Instant::now();
     let out = eval_output(src);
@@ -550,7 +550,7 @@ fn test_cjc_bench_cnn_signal() {
 
 #[test]
 fn test_cjc_bench_cnn_determinism() {
-    let src = include_str!("../bench/bench_cnn_signal.cjc");
+    let src = include_str!("../bench/bench_cnn_signal.cjcl");
     let out1 = eval_output(src);
     let out2 = eval_output(src);
     let accum1 = out1.iter().find(|l| l.starts_with("accum:")).unwrap();

@@ -72,7 +72,7 @@ fn parse_import_with_alias() {
 fn module_graph_single_file() {
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
-    let entry = dir.path().join("main.cjc");
+    let entry = dir.path().join("main.cjcl");
     std::fs::write(&entry, "let x = 42;").unwrap();
 
     let graph = cjc_module::build_module_graph(&entry).unwrap();
@@ -83,19 +83,19 @@ fn module_graph_single_file() {
 fn module_graph_with_import() {
     let dir = tempfile::tempdir().unwrap();
 
-    // math.cjc
-    std::fs::write(dir.path().join("math.cjc"), r#"
+    // math.cjcl
+    std::fs::write(dir.path().join("math.cjcl"), r#"
 fn add(a: i64, b: i64) -> i64 {
     a + b
 }
 "#).unwrap();
 
-    // main.cjc imports math
-    std::fs::write(dir.path().join("main.cjc"), r#"
+    // main.cjcl imports math
+    std::fs::write(dir.path().join("main.cjcl"), r#"
 import math
 "#).unwrap();
 
-    let entry = dir.path().join("main.cjc");
+    let entry = dir.path().join("main.cjcl");
     let graph = cjc_module::build_module_graph(&entry).unwrap();
     assert_eq!(graph.module_count(), 2);
 }
@@ -104,10 +104,10 @@ import math
 fn module_graph_cyclic_dependency_detected() {
     let dir = tempfile::tempdir().unwrap();
 
-    std::fs::write(dir.path().join("a.cjc"), "import b").unwrap();
-    std::fs::write(dir.path().join("b.cjc"), "import a").unwrap();
+    std::fs::write(dir.path().join("a.cjcl"), "import b").unwrap();
+    std::fs::write(dir.path().join("b.cjcl"), "import a").unwrap();
 
-    let entry = dir.path().join("a.cjc");
+    let entry = dir.path().join("a.cjcl");
     let result = cjc_module::build_module_graph(&entry);
     assert!(result.is_err(), "should detect cycle");
     let err_msg = format!("{}", result.unwrap_err());
@@ -119,11 +119,11 @@ fn module_graph_cyclic_dependency_detected() {
 fn module_graph_deterministic_order() {
     let dir = tempfile::tempdir().unwrap();
 
-    std::fs::write(dir.path().join("alpha.cjc"), "fn alpha_fn() -> i64 { 1 }").unwrap();
-    std::fs::write(dir.path().join("beta.cjc"), "fn beta_fn() -> i64 { 2 }").unwrap();
-    std::fs::write(dir.path().join("main.cjc"), "import alpha\nimport beta").unwrap();
+    std::fs::write(dir.path().join("alpha.cjcl"), "fn alpha_fn() -> i64 { 1 }").unwrap();
+    std::fs::write(dir.path().join("beta.cjcl"), "fn beta_fn() -> i64 { 2 }").unwrap();
+    std::fs::write(dir.path().join("main.cjcl"), "import alpha\nimport beta").unwrap();
 
-    let entry = dir.path().join("main.cjc");
+    let entry = dir.path().join("main.cjcl");
 
     // Build graph twice — must produce identical topological order
     let g1 = cjc_module::build_module_graph(&entry).unwrap();
@@ -142,14 +142,14 @@ fn module_graph_deterministic_order() {
 #[test]
 fn module_exec_single_file() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("main.cjc"), r#"
+    std::fs::write(dir.path().join("main.cjcl"), r#"
 fn square(x: i64) -> i64 {
     x * x
 }
 print(square(7));
 "#).unwrap();
 
-    let entry = dir.path().join("main.cjc");
+    let entry = dir.path().join("main.cjcl");
     let (val, exec) = cjc_mir_exec::run_program_with_modules_executor(&entry, 42).unwrap();
     assert!(exec.output.iter().any(|s| s.contains("49")),
             "expected 49 in output, got {:?}", exec.output);
@@ -159,18 +159,18 @@ print(square(7));
 fn module_exec_two_files() {
     let dir = tempfile::tempdir().unwrap();
 
-    std::fs::write(dir.path().join("mathlib.cjc"), r#"
+    std::fs::write(dir.path().join("mathlib.cjcl"), r#"
 fn double(x: i64) -> i64 {
     x * 2
 }
 "#).unwrap();
 
-    std::fs::write(dir.path().join("main.cjc"), r#"
+    std::fs::write(dir.path().join("main.cjcl"), r#"
 import mathlib
 print(double(21));
 "#).unwrap();
 
-    let entry = dir.path().join("main.cjc");
+    let entry = dir.path().join("main.cjcl");
     let (_val, exec) = cjc_mir_exec::run_program_with_modules_executor(&entry, 42).unwrap();
     assert!(exec.output.iter().any(|s| s.contains("42")),
             "expected 42 in output, got {:?}", exec.output);

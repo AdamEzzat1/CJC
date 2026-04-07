@@ -1,6 +1,6 @@
 //! CJC CLI subcommands.
 //!
-//! Each module implements a single `cjc <command>` subcommand.
+//! Each module implements a single `cjcl <command>` subcommand.
 //! All commands share the output formatting from `crate::output`.
 
 // Phase 1: execution + data + reproducibility

@@ -4,7 +4,7 @@ project:
 
 website:
   title: "Adam Ezzat"
-  description: "Systems engineer building CJC — a deterministic scientific computing language"
+  description: "Systems engineer building CJC-Lang — a deterministic scientific computing language"
   site-url: https://adamezzat.dev
   navbar:
     background: dark

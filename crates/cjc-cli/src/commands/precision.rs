@@ -1,4 +1,4 @@
-//! `cjc precision` — Precision analysis for numeric output.
+//! `cjcl precision` — Precision analysis for numeric output.
 //!
 //! Runs a CJC program, captures numeric output lines, and analyzes
 //! the precision characteristics by comparing f64 values against
@@ -72,14 +72,14 @@ pub fn parse_args(args: &[String]) -> PrecisionArgs {
             "--summary-only" => pa.summary_only = true,
             other if !other.starts_with('-') => pa.file = other.to_string(),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc precision`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl precision`", other);
                 process::exit(1);
             }
         }
         i += 1;
     }
     if pa.file.is_empty() {
-        eprintln!("error: `cjc precision` requires a .cjc file argument");
+        eprintln!("error: `cjcl precision` requires a .cjcl file argument");
         process::exit(1);
     }
     pa
@@ -281,9 +281,9 @@ fn format_sci(v: f64) -> String {
 }
 
 pub fn print_help() {
-    eprintln!("cjc precision — Precision analysis for numeric output");
+    eprintln!("cjcl precision — Precision analysis for numeric output");
     eprintln!();
-    eprintln!("Usage: cjc precision <file.cjc> [flags]");
+    eprintln!("Usage: cjcl precision <file.cjcl> [flags]");
     eprintln!();
     eprintln!("Runs the program, captures numeric output, and compares f64");
     eprintln!("values against f32-truncated approximations.");

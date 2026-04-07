@@ -1,8 +1,8 @@
-//! `cjc gc` — Dedicated GC analysis.
+//! `cjcl gc` — Dedicated GC analysis.
 //!
 //! Executes a CJC script multiple times and reports granular GC behavior:
 //! allocation timeline, peak heap objects, GC pause count, COW copies,
-//! and GC stability across runs. More detailed than `cjc mem`.
+//! and GC stability across runs. More detailed than `cjcl mem`.
 
 use std::fs;
 use std::path::Path;
@@ -59,14 +59,14 @@ pub fn parse_args(args: &[String]) -> GcArgs {
             "--color" => ga.output = OutputMode::Color,
             other if !other.starts_with('-') => ga.file = other.to_string(),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc gc`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl gc`", other);
                 process::exit(1);
             }
         }
         i += 1;
     }
     if ga.file.is_empty() {
-        eprintln!("error: `cjc gc` requires a .cjc file argument");
+        eprintln!("error: `cjcl gc` requires a .cjcl file argument");
         process::exit(1);
     }
     ga
@@ -234,9 +234,9 @@ pub fn run(args: &[String]) {
 }
 
 pub fn print_help() {
-    eprintln!("cjc gc — Dedicated GC analysis");
+    eprintln!("cjcl gc — Dedicated GC analysis");
     eprintln!();
-    eprintln!("Usage: cjc gc <file.cjc> [flags]");
+    eprintln!("Usage: cjcl gc <file.cjcl> [flags]");
     eprintln!();
     eprintln!("Reports:");
     eprintln!("  - GC pause count (total collections)");

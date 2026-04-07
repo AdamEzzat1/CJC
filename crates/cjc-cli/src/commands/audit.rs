@@ -1,4 +1,4 @@
-//! `cjc audit` — Numerical hygiene analysis.
+//! `cjcl audit` — Numerical hygiene analysis.
 //!
 //! Static analysis pass over the AST looking for floating-point anti-patterns:
 //! naive summation in loops, float equality comparison, unguarded division,
@@ -140,14 +140,14 @@ pub fn parse_args(args: &[String]) -> AuditArgs {
             }
             other if !other.starts_with('-') => aa.file = other.to_string(),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc audit`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl audit`", other);
                 process::exit(1);
             }
         }
         i += 1;
     }
     if aa.file.is_empty() {
-        eprintln!("error: `cjc audit` requires a .cjc file argument");
+        eprintln!("error: `cjcl audit` requires a .cjcl file argument");
         process::exit(1);
     }
     aa
@@ -756,9 +756,9 @@ pub fn run(args: &[String]) {
 }
 
 pub fn print_help() {
-    eprintln!("cjc audit — Numerical hygiene analysis");
+    eprintln!("cjcl audit — Numerical hygiene analysis");
     eprintln!();
-    eprintln!("Usage: cjc audit <file.cjc> [flags]");
+    eprintln!("Usage: cjcl audit <file.cjcl> [flags]");
     eprintln!();
     eprintln!("Performs static analysis of CJC source for floating-point anti-patterns:");
     eprintln!("  - Naive summation in loops (suggest kahan_sum / binned_sum)");

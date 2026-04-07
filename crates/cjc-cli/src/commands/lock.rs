@@ -1,4 +1,4 @@
-//! `cjc lock` — Deterministic lockfile generator & verifier.
+//! `cjcl lock` — Deterministic lockfile generator & verifier.
 //!
 //! Generates a lockfile recording source hash, seed, executor version,
 //! platform, and expected output hash. With `--verify`, checks that the
@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process;
 use crate::output::{self, OutputMode};
 
-/// Parsed arguments for `cjc lock`.
+/// Parsed arguments for `cjcl lock`.
 pub struct LockArgs {
     pub file: PathBuf,
     pub seed: u64,
@@ -81,14 +81,14 @@ pub fn parse_args(args: &[String]) -> LockArgs {
             }
             other if !other.starts_with('-') => la.file = PathBuf::from(other),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc lock`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl lock`", other);
                 process::exit(1);
             }
         }
         i += 1;
     }
     if la.file.as_os_str().is_empty() {
-        eprintln!("error: `cjc lock` requires a .cjc file argument");
+        eprintln!("error: `cjcl lock` requires a .cjcl file argument");
         process::exit(1);
     }
     la
@@ -141,7 +141,7 @@ fn execute_program(program: &cjc_ast::Program, seed: u64, executor: LockExecutor
     }
 }
 
-/// Entry point for `cjc lock`.
+/// Entry point for `cjcl lock`.
 pub fn run(args: &[String]) {
     let la = parse_args(args);
 
@@ -475,9 +475,9 @@ fn verdict_str(mode: OutputMode, pass: bool) -> String {
 }
 
 pub fn print_help() {
-    eprintln!("cjc lock — Deterministic lockfile generator & verifier");
+    eprintln!("cjcl lock — Deterministic lockfile generator & verifier");
     eprintln!();
-    eprintln!("Usage: cjc lock <file.cjc> [flags]");
+    eprintln!("Usage: cjcl lock <file.cjcl> [flags]");
     eprintln!();
     eprintln!("Generates a lockfile recording source hash, seed, executor version,");
     eprintln!("platform, and expected output hash. Use --verify to check against it.");

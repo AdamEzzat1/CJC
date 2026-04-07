@@ -6,7 +6,7 @@ use super::helpers;
 
 #[test]
 fn pipeline_mir_opt_parity() {
-    let src = helpers::load_cjc("bench_pipeline.cjc");
+    let src = helpers::load_cjc("bench_pipeline.cjcl");
     let mir_out = helpers::run_mir(&src, 42);
     let mir_opt_out = helpers::run_mir_optimized(&src, 42);
     helpers::assert_parity(&mir_out, &mir_opt_out);
@@ -14,7 +14,7 @@ fn pipeline_mir_opt_parity() {
 
 #[test]
 fn nn_deep_mir_opt_parity() {
-    let src = helpers::load_cjc("bench_nn_deep.cjc");
+    let src = helpers::load_cjc("bench_nn_deep.cjcl");
     let mir_out = helpers::run_mir(&src, 42);
     let mir_opt_out = helpers::run_mir_optimized(&src, 42);
     helpers::assert_parity(&mir_out, &mir_opt_out);
@@ -22,7 +22,7 @@ fn nn_deep_mir_opt_parity() {
 
 #[test]
 fn seed_stress_mir_opt_parity() {
-    let src = helpers::load_cjc("bench_seed_stress.cjc");
+    let src = helpers::load_cjc("bench_seed_stress.cjcl");
     let mir_out = helpers::run_mir(&src, 42);
     let mir_opt_out = helpers::run_mir_optimized(&src, 42);
     helpers::assert_parity(&mir_out, &mir_opt_out);
@@ -30,7 +30,7 @@ fn seed_stress_mir_opt_parity() {
 
 #[test]
 fn primitives_mir_opt_parity() {
-    let src = helpers::load_cjc("bench_primitive_coverage.cjc");
+    let src = helpers::load_cjc("bench_primitive_coverage.cjcl");
     let mir_out = helpers::run_mir(&src, 42);
     let mir_opt_out = helpers::run_mir_optimized(&src, 42);
     helpers::assert_parity(&mir_out, &mir_opt_out);
@@ -38,7 +38,7 @@ fn primitives_mir_opt_parity() {
 
 #[test]
 fn reorder_mir_opt_parity() {
-    let src = helpers::load_cjc("bench_reorder_det.cjc");
+    let src = helpers::load_cjc("bench_reorder_det.cjcl");
     let mir_out = helpers::run_mir(&src, 42);
     let mir_opt_out = helpers::run_mir_optimized(&src, 42);
     helpers::assert_parity(&mir_out, &mir_opt_out);
@@ -46,7 +46,7 @@ fn reorder_mir_opt_parity() {
 
 #[test]
 fn broadcast_chain_mir_opt_parity() {
-    let src = helpers::load_cjc("bench_broadcast_chain.cjc");
+    let src = helpers::load_cjc("bench_broadcast_chain.cjcl");
     let mir_out = helpers::run_mir(&src, 42);
     let mir_opt_out = helpers::run_mir_optimized(&src, 42);
     helpers::assert_parity(&mir_out, &mir_opt_out);

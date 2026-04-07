@@ -41,7 +41,7 @@ fn mir_output(src: &str) -> Vec<String> {
 
 #[test]
 fn test_bench_rnn_latency() {
-    let src = include_str!("../bench/bench_rnn_latency.cjc");
+    let src = include_str!("../bench/bench_rnn_latency.cjcl");
 
     // Wall-clock timing from Rust side
     let wall_start = Instant::now();
@@ -87,7 +87,7 @@ fn test_bench_rnn_latency() {
 #[test]
 fn test_bench_rnn_latency_determinism() {
     // Run the RNN twice and verify final state is identical
-    let src = include_str!("../bench/bench_rnn_latency.cjc");
+    let src = include_str!("../bench/bench_rnn_latency.cjcl");
     let out1 = eval_output(src);
     let out2 = eval_output(src);
 

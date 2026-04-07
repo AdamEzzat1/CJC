@@ -2,11 +2,11 @@
 title: "Projects"
 ---
 
-## CJC — Computation Jacobian Core [Beta]{.badge-beta}
+## CJC-Lang — Computational Jacobian Core [Beta]{.badge-beta}
 
 A deterministic programming language for scientific computing, built from scratch in Rust with nearly zero external dependencies.
 
-CJC covers the full stack: lexer, parser, type checker, two intermediate representations (HIR and MIR), an optimizer, two execution engines, and a runtime with ~300 built-in functions spanning math, statistics, linear algebra, signal processing, machine learning, and data manipulation.
+CJC-Lang covers the full stack: lexer, parser, type checker, two intermediate representations (HIR and MIR), an optimizer, two execution engines, and a runtime with ~300 built-in functions spanning math, statistics, linear algebra, signal processing, machine learning, and data manipulation.
 
 **Key technical facts:**
 
@@ -22,7 +22,7 @@ CJC covers the full stack: lexer, parser, type checker, two intermediate represe
 ::: {.project-card}
 ### Dual-Engine Compiler Pipeline
 
-CJC has two execution paths that must always agree:
+CJC-Lang has two execution paths that must always agree:
 
 1. **AST Interpreter** (`cjc-eval`) — direct tree-walk execution for rapid prototyping and debugging
 2. **MIR Executor** (`cjc-mir-exec`) — register-machine execution through HIR → MIR lowering with optimization
@@ -81,7 +81,7 @@ Supports typed columns (int, float, string, boolean, categorical, datetime), CSV
 ::: {.project-card}
 ### Chess RL Benchmark
 
-A full chess environment and REINFORCE reinforcement learning agent written entirely in CJC. 49 tests covering board invariants, legal move generation, policy gradient updates, and training determinism. Validates that CJC can express a complete ML workflow end-to-end.
+A full chess environment and REINFORCE reinforcement learning agent written entirely in CJC-Lang. 49 tests covering board invariants, legal move generation, policy gradient updates, and training determinism. Validates that CJC-Lang can express a complete ML workflow end-to-end.
 :::
 
 ::: {.project-card}
@@ -103,5 +103,5 @@ PIML demonstration: 1D heat equation solved via polynomial regression with physi
 ::: {.project-card}
 ### Visualization (Vizor)
 
-Grammar-of-graphics visualization library built into the CJC ecosystem. Declarative plot specification following principles similar to ggplot2. Currently integrated at the library level within the CJC runtime.
+Grammar-of-graphics visualization library built into the CJC-Lang ecosystem. Declarative plot specification following principles similar to ggplot2. Currently integrated at the library level within the CJC-Lang runtime.
 :::

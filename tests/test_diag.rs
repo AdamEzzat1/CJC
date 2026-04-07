@@ -20,12 +20,12 @@ fn test_diagnostic_render() {
         .with_label(Span::new(13, 14), "expected expression")
         .with_hint("remove the trailing `+` or add an expression after it");
 
-    let renderer = DiagnosticRenderer::new(source, "test.cjc");
+    let renderer = DiagnosticRenderer::new(source, "test.cjcl");
     let output = renderer.render(&diag);
 
     assert!(output.contains("error[E0001]"));
     assert!(output.contains("unexpected token"));
-    assert!(output.contains("test.cjc:1:14"));
+    assert!(output.contains("test.cjcl:1:14"));
     assert!(output.contains("expected expression"));
     assert!(output.contains("hint:"));
 }

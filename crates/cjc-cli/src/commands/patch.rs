@@ -1,4 +1,4 @@
-//! `cjc patch` — Type-aware data transformation.
+//! `cjcl patch` — Type-aware data transformation.
 //!
 //! Streams CSV/TSV/JSONL files and applies column-aware transformations:
 //! - NaN replacement (--nan-fill <value>)
@@ -31,7 +31,7 @@ enum PatchFormat {
     Jsonl,
 }
 
-/// Parsed arguments for `cjc patch`.
+/// Parsed arguments for `cjcl patch`.
 pub struct PatchArgs {
     pub file: Option<PathBuf>,
     pub output_file: Option<PathBuf>,
@@ -182,7 +182,7 @@ pub fn parse_args(args: &[String]) -> PatchArgs {
             "--check" => pa.check = true,
             other if !other.starts_with('-') => pa.file = Some(PathBuf::from(other)),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc patch`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl patch`", other);
                 process::exit(1);
             }
         }
@@ -574,7 +574,7 @@ fn validate_transforms(pa: &PatchArgs, header_names: &[String]) -> bool {
 
 // ── Entry point ─────────────────────────────────────────────────────
 
-/// Entry point for `cjc patch`.
+/// Entry point for `cjcl patch`.
 pub fn run(args: &[String]) {
     let pa = parse_args(args);
 
@@ -1133,9 +1133,9 @@ fn run_jsonl(pa: &PatchArgs) {
 // ── Help ────────────────────────────────────────────────────────────
 
 pub fn print_help() {
-    eprintln!("cjc patch -- Type-aware data transformation");
+    eprintln!("cjcl patch -- Type-aware data transformation");
     eprintln!();
-    eprintln!("Usage: cjc patch <file> [transforms] [flags]");
+    eprintln!("Usage: cjcl patch <file> [transforms] [flags]");
     eprintln!("       cat data.csv | cjc patch [transforms] [flags]");
     eprintln!();
     eprintln!("Supported formats: CSV, TSV, JSONL (detected by extension)");

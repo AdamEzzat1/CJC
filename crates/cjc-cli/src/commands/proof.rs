@@ -1,4 +1,4 @@
-//! `cjc proof` — Determinism & reproducibility profiler.
+//! `cjcl proof` — Determinism & reproducibility profiler.
 //!
 //! Runs a CJC program multiple times with the same seed and verifies:
 //! - stdout is identical across runs
@@ -21,7 +21,7 @@ pub enum ExecutorMode {
     Both,
 }
 
-/// Parsed arguments for `cjc proof`.
+/// Parsed arguments for `cjcl proof`.
 pub struct ProofArgs {
     pub file: PathBuf,
     pub runs: usize,
@@ -120,14 +120,14 @@ pub fn parse_args(args: &[String]) -> ProofArgs {
             }
             other if !other.starts_with('-') => pa.file = PathBuf::from(other),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc proof`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl proof`", other);
                 process::exit(1);
             }
         }
         i += 1;
     }
     if pa.file.as_os_str().is_empty() {
-        eprintln!("error: `cjc proof` requires a .cjc file argument");
+        eprintln!("error: `cjcl proof` requires a .cjcl file argument");
         process::exit(1);
     }
     pa
@@ -200,7 +200,7 @@ fn compare_results(baseline: &RunResult, other: &RunResult, stdout_only: bool) -
     (stdout_match, exit_match, gc_match)
 }
 
-/// Entry point for `cjc proof`.
+/// Entry point for `cjcl proof`.
 pub fn run(args: &[String]) {
     let pa = parse_args(args);
 
@@ -522,9 +522,9 @@ fn verdict_str(mode: OutputMode, pass: bool) -> String {
 }
 
 pub fn print_help() {
-    eprintln!("cjc proof — Determinism & reproducibility profiler");
+    eprintln!("cjcl proof — Determinism & reproducibility profiler");
     eprintln!();
-    eprintln!("Usage: cjc proof <file.cjc> [flags]");
+    eprintln!("Usage: cjcl proof <file.cjcl> [flags]");
     eprintln!();
     eprintln!("Flags:");
     eprintln!("  -n, --runs <N>        Number of iterations (default: 3)");

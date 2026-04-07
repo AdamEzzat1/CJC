@@ -1,6 +1,6 @@
-//! `cjc bench` — Performance and stability benchmarking.
+//! `cjcl bench` — Performance and stability benchmarking.
 //!
-//! Complements `cjc proof` (which verifies determinism) by focusing on
+//! Complements `cjcl proof` (which verifies determinism) by focusing on
 //! performance: runtime timing, throughput, and run-to-run stability.
 //!
 //! Distinction from `proof`:
@@ -248,14 +248,14 @@ pub fn parse_args(args: &[String]) -> BenchArgs {
             }
             other if !other.starts_with('-') => ba.file = other.to_string(),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc bench`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl bench`", other);
                 process::exit(1);
             }
         }
         i += 1;
     }
     if ba.file.is_empty() {
-        eprintln!("error: `cjc bench` requires a .cjc file argument");
+        eprintln!("error: `cjcl bench` requires a .cjcl file argument");
         process::exit(1);
     }
     // --fail-if-slower-than requires --baseline
@@ -1019,13 +1019,13 @@ fn format_time(us: f64) -> String {
 }
 
 pub fn print_help() {
-    eprintln!("cjc bench — Performance and stability benchmarking");
+    eprintln!("cjcl bench — Performance and stability benchmarking");
     eprintln!();
-    eprintln!("Usage: cjc bench <file.cjc> [flags]");
+    eprintln!("Usage: cjcl bench <file.cjcl> [flags]");
     eprintln!();
     eprintln!("Reports: mean, median, min, max, stddev, CV, P95, throughput");
     eprintln!();
-    eprintln!("Distinction from `cjc proof`:");
+    eprintln!("Distinction from `cjcl proof`:");
     eprintln!("  proof = \"Is the output deterministic?\"");
     eprintln!("  bench = \"How fast and stable is the execution?\"");
     eprintln!();

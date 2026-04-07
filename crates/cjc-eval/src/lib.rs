@@ -4197,7 +4197,7 @@ impl Default for Interpreter {
 ///
 /// # Arguments
 ///
-/// * `entry_path` - Filesystem path to the entry `.cjc` source file.
+/// * `entry_path` - Filesystem path to the entry `.cjcl` source file.
 /// * `seed` - Deterministic RNG seed forwarded to the [`Interpreter`].
 ///
 /// # Returns

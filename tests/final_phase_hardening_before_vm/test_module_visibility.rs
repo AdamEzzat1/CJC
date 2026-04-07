@@ -18,10 +18,10 @@ fn setup_test_dir(files: &[(&str, &str)]) -> tempfile::TempDir {
 #[test]
 fn test_pub_fn_aliased_in_merged_program() {
     let dir = setup_test_dir(&[
-        ("main.cjc", "import utils\nlet x = double(21);"),
-        ("utils.cjc", "pub fn double(n: i64) -> i64 { n * 2 }"),
+        ("main.cjcl", "import utils\nlet x = double(21);"),
+        ("utils.cjcl", "pub fn double(n: i64) -> i64 { n * 2 }"),
     ]);
-    let entry = dir.path().join("main.cjc");
+    let entry = dir.path().join("main.cjcl");
     let graph = cjc_module::build_module_graph(&entry).unwrap();
     let merged = cjc_module::merge_programs(&graph).unwrap();
     let names: Vec<&str> = merged.functions.iter().map(|f| f.name.as_str()).collect();
@@ -31,10 +31,10 @@ fn test_pub_fn_aliased_in_merged_program() {
 #[test]
 fn test_private_fn_not_aliased() {
     let dir = setup_test_dir(&[
-        ("main.cjc", "import utils\nlet x = 1;"),
-        ("utils.cjc", "pub fn public_fn() -> i64 { 1 }\nfn private_fn() -> i64 { 2 }"),
+        ("main.cjcl", "import utils\nlet x = 1;"),
+        ("utils.cjcl", "pub fn public_fn() -> i64 { 1 }\nfn private_fn() -> i64 { 2 }"),
     ]);
-    let entry = dir.path().join("main.cjc");
+    let entry = dir.path().join("main.cjcl");
     let graph = cjc_module::build_module_graph(&entry).unwrap();
     let merged = cjc_module::merge_programs(&graph).unwrap();
     let names: Vec<&str> = merged.functions.iter().map(|f| f.name.as_str()).collect();
@@ -46,10 +46,10 @@ fn test_private_fn_not_aliased() {
 #[test]
 fn test_visibility_violation_detected() {
     let dir = setup_test_dir(&[
-        ("main.cjc", "import math.Matrix\nlet x = 1;"),
-        ("math.cjc", "struct Matrix { x: f64 }"),
+        ("main.cjcl", "import math.Matrix\nlet x = 1;"),
+        ("math.cjcl", "struct Matrix { x: f64 }"),
     ]);
-    let entry = dir.path().join("main.cjc");
+    let entry = dir.path().join("main.cjcl");
     let graph = cjc_module::build_module_graph(&entry).unwrap();
     let violations = cjc_module::check_visibility(&graph);
     assert!(!violations.is_empty(), "should detect visibility violation");
@@ -59,10 +59,10 @@ fn test_visibility_violation_detected() {
 #[test]
 fn test_pub_struct_no_violation() {
     let dir = setup_test_dir(&[
-        ("main.cjc", "import math.Matrix\nlet x = 1;"),
-        ("math.cjc", "pub struct Matrix { x: f64 }"),
+        ("main.cjcl", "import math.Matrix\nlet x = 1;"),
+        ("math.cjcl", "pub struct Matrix { x: f64 }"),
     ]);
-    let entry = dir.path().join("main.cjc");
+    let entry = dir.path().join("main.cjcl");
     let graph = cjc_module::build_module_graph(&entry).unwrap();
     let violations = cjc_module::check_visibility(&graph);
     assert!(violations.is_empty(), "pub struct should not violate: {:?}", violations.iter().map(|v| v.to_string()).collect::<Vec<_>>());
@@ -71,11 +71,11 @@ fn test_pub_struct_no_violation() {
 #[test]
 fn test_multi_module_topological_order() {
     let dir = setup_test_dir(&[
-        ("main.cjc", "import alpha\nimport beta\nlet x = 1;"),
-        ("alpha.cjc", "pub fn a() -> i64 { 1 }"),
-        ("beta.cjc", "import alpha\npub fn b() -> i64 { 2 }"),
+        ("main.cjcl", "import alpha\nimport beta\nlet x = 1;"),
+        ("alpha.cjcl", "pub fn a() -> i64 { 1 }"),
+        ("beta.cjcl", "import alpha\npub fn b() -> i64 { 2 }"),
     ]);
-    let entry = dir.path().join("main.cjc");
+    let entry = dir.path().join("main.cjcl");
     let graph = cjc_module::build_module_graph(&entry).unwrap();
     let order = graph.topological_order().unwrap();
     // alpha must come before beta (beta depends on alpha)
@@ -87,11 +87,11 @@ fn test_multi_module_topological_order() {
 #[test]
 fn test_cyclic_dependency_detected() {
     let dir = setup_test_dir(&[
-        ("main.cjc", "import a\nlet x = 1;"),
-        ("a.cjc", "import b\npub fn fa() -> i64 { 1 }"),
-        ("b.cjc", "import a\npub fn fb() -> i64 { 2 }"),
+        ("main.cjcl", "import a\nlet x = 1;"),
+        ("a.cjcl", "import b\npub fn fa() -> i64 { 1 }"),
+        ("b.cjcl", "import a\npub fn fb() -> i64 { 2 }"),
     ]);
-    let entry = dir.path().join("main.cjc");
+    let entry = dir.path().join("main.cjcl");
     let result = cjc_module::build_module_graph(&entry);
     assert!(result.is_err(), "cyclic dependency should be detected");
 }
@@ -99,10 +99,10 @@ fn test_cyclic_dependency_detected() {
 #[test]
 fn test_module_merge_deterministic() {
     let dir = setup_test_dir(&[
-        ("main.cjc", "import utils\nlet x = 1;"),
-        ("utils.cjc", "pub fn helper() -> i64 { 42 }"),
+        ("main.cjcl", "import utils\nlet x = 1;"),
+        ("utils.cjcl", "pub fn helper() -> i64 { 42 }"),
     ]);
-    let entry = dir.path().join("main.cjc");
+    let entry = dir.path().join("main.cjcl");
     // Build twice and compare
     let graph1 = cjc_module::build_module_graph(&entry).unwrap();
     let merged1 = cjc_module::merge_programs(&graph1).unwrap();

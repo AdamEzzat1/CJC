@@ -1,8 +1,8 @@
-//! `cjc seek` — Deterministic file and data discovery.
+//! `cjcl seek` — Deterministic file and data discovery.
 //!
 //! Recursively searches for files matching patterns with stable, sorted output.
 //! Supports:
-//! - Glob patterns (*.cjc, **/*.snap)
+//! - Glob patterns (*.cjcl, **/*.snap)
 //! - Content search within files (--contains)
 //! - Type filtering (--type cjc, snap, csv)
 //! - Size filtering (--min-size, --max-size)
@@ -125,7 +125,7 @@ pub fn parse_args(args: &[String]) -> SeekArgs {
             "--color" => sa.output = OutputMode::Color,
             other if !other.starts_with('-') => positionals.push(other.to_string()),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc seek`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl seek`", other);
                 process::exit(1);
             }
         }
@@ -243,7 +243,7 @@ pub fn run(args: &[String]) {
                 let display = if sa.output.use_color() {
                     let ext = Path::new(&r.path).extension().and_then(|e| e.to_str()).unwrap_or("");
                     let color = match ext {
-                        "cjc" => output::GREEN,
+                        "cjcl" => output::GREEN,
                         "snap" => output::CYAN,
                         "csv" | "tsv" | "json" => output::YELLOW,
                         _ => "",
@@ -395,9 +395,9 @@ fn find_in_file(path: &Path, needle: &str) -> Option<(usize, String)> {
 }
 
 pub fn print_help() {
-    eprintln!("cjc seek — Deterministic file and data discovery");
+    eprintln!("cjcl seek — Deterministic file and data discovery");
     eprintln!();
-    eprintln!("Usage: cjc seek [path] [pattern] [flags]");
+    eprintln!("Usage: cjcl seek [path] [pattern] [flags]");
     eprintln!();
     eprintln!("Flags:");
     eprintln!("  -t, --type <ext>       Filter by extension (cjc, snap, csv, etc.)");

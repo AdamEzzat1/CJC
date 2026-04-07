@@ -1,4 +1,4 @@
-//! `cjc mem` — Runtime memory visibility.
+//! `cjcl mem` — Runtime memory visibility.
 //!
 //! Executes a CJC script and reports memory behavior: GC collections,
 //! output size, allocation patterns. Reports are deterministic.
@@ -102,14 +102,14 @@ pub fn parse_args(args: &[String]) -> MemArgs {
             }
             other if !other.starts_with('-') => ma.file = other.to_string(),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc mem`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl mem`", other);
                 process::exit(1);
             }
         }
         i += 1;
     }
     if ma.file.is_empty() {
-        eprintln!("error: `cjc mem` requires a .cjc file argument");
+        eprintln!("error: `cjcl mem` requires a .cjcl file argument");
         process::exit(1);
     }
     ma
@@ -409,9 +409,9 @@ fn run_compare(ma: &MemArgs, program: &cjc_ast::Program, filename: &str) {
 }
 
 pub fn print_help() {
-    eprintln!("cjc mem — Runtime memory visibility");
+    eprintln!("cjcl mem — Runtime memory visibility");
     eprintln!();
-    eprintln!("Usage: cjc mem <file.cjc> [flags]");
+    eprintln!("Usage: cjcl mem <file.cjcl> [flags]");
     eprintln!();
     eprintln!("Reports:");
     eprintln!("  - GC collection counts");

@@ -1,4 +1,4 @@
-//! `cjc parity` — Dual-executor parity checker.
+//! `cjcl parity` — Dual-executor parity checker.
 //!
 //! Runs both the AST tree-walk interpreter (eval) and the MIR register-machine
 //! executor (mir-exec) and compares their output. Verifies that both backends
@@ -66,14 +66,14 @@ pub fn parse_args(args: &[String]) -> ParityArgs {
             }
             other if !other.starts_with('-') => pa.file = other.to_string(),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc parity`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl parity`", other);
                 process::exit(1);
             }
         }
         i += 1;
     }
     if pa.file.is_empty() {
-        eprintln!("error: `cjc parity` requires a .cjc file argument");
+        eprintln!("error: `cjcl parity` requires a .cjcl file argument");
         process::exit(1);
     }
     pa
@@ -338,9 +338,9 @@ pub fn run(args: &[String]) {
 }
 
 pub fn print_help() {
-    eprintln!("cjc parity — Dual-executor parity checker");
+    eprintln!("cjcl parity — Dual-executor parity checker");
     eprintln!();
-    eprintln!("Usage: cjc parity <file.cjc> [flags]");
+    eprintln!("Usage: cjcl parity <file.cjcl> [flags]");
     eprintln!();
     eprintln!("Runs both eval (v1) and mir-exec (v2) and compares output.");
     eprintln!("Verifies that both backends produce identical results.");

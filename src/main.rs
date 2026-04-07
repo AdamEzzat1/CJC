@@ -1,4 +1,4 @@
-//! CJC binary — enables `cargo install cjc`.
+//! CJC-Lang binary — enables `cargo install cjc-lang`.
 //!
 //! Delegates to the CLI implementation in `cjc-cli`.
 

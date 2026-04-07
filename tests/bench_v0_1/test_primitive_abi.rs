@@ -7,7 +7,7 @@ const GOLDEN_MASTER: &str = "7c2e0248d8e50c7a58d9e8c64afb9b8c31db43e81835673eac2
 
 #[test]
 fn primitive_master_hash_golden() {
-    let src = helpers::load_cjc("bench_primitive_coverage.cjc");
+    let src = helpers::load_cjc("bench_primitive_coverage.cjcl");
     let out = helpers::run_eval(&src, 42);
 
     let bench = helpers::parse_bench_lines(&out);
@@ -32,7 +32,7 @@ fn primitive_master_hash_golden() {
 
 #[test]
 fn primitive_coverage_count() {
-    let src = helpers::load_cjc("bench_primitive_coverage.cjc");
+    let src = helpers::load_cjc("bench_primitive_coverage.cjcl");
     let out = helpers::run_eval(&src, 42);
 
     let bench = helpers::parse_bench_lines(&out);
@@ -53,7 +53,7 @@ fn primitive_coverage_count() {
 
 #[test]
 fn primitive_eval_mir_parity() {
-    let src = helpers::load_cjc("bench_primitive_coverage.cjc");
+    let src = helpers::load_cjc("bench_primitive_coverage.cjcl");
     let eval_out = helpers::run_eval(&src, 42);
     let mir_out = helpers::run_mir(&src, 42);
     helpers::assert_parity(&eval_out, &mir_out);

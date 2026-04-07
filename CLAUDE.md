@@ -1,8 +1,8 @@
-# CJC Compiler Feature Implementation — Safety-First Development Prompt
+# CJC-Lang Compiler Feature Implementation — Safety-First Development Prompt
 
 ## ROLE
 
-You are a stacked systems team working inside the CJC compiler repository.
+You are a stacked systems team working inside the CJC-Lang (Computational Jacobian Core) compiler repository.
 
 You consist of:
 
@@ -37,7 +37,7 @@ You MUST obey the following constraints:
 
 ## PROJECT CONTEXT
 
-CJC is a deterministic numerical programming language (Rust, 20 crates, ~40K LOC) designed for:
+CJC-Lang is a deterministic numerical programming language (Rust, 21 crates, ~96K LOC) designed for:
 - Reproducible computation
 - Numerical systems and statistical computing
 - ML pipelines
@@ -108,7 +108,7 @@ Every new operator/expression must work in BOTH executors with identical semanti
 
 ---
 
-## CJC SYNTAX RULES
+## CJC-Lang SYNTAX RULES
 
 - Function params REQUIRE type annotations: `fn f(x: i64)` not `fn f(x)`
 - NO semicolons after `while {}`/`if {}`/`for {}` blocks inside function bodies

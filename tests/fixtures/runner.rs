@@ -1,6 +1,6 @@
 //! CJC End-to-End Fixture Runner
 //!
-//! This test runner discovers `.cjc` source files under `tests/fixtures/`,
+//! This test runner discovers `.cjcl` source files under `tests/fixtures/`,
 //! compiles and executes each one via the MIR executor, and compares the
 //! captured output against golden `.stdout` files.
 //!
@@ -9,7 +9,7 @@
 //! ```text
 //! tests/fixtures/
 //!   <category>/
-//!     <name>.cjc        — CJC source file
+//!     <name>.cjcl       — CJC source file
 //!     <name>.stdout     — expected stdout lines (one per line)
 //!     <name>.stderr     — (optional) expected error substring
 //!     <name>.exitcode   — (optional) expected exit code, default 0
@@ -29,7 +29,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Collect all `.cjc` files under `dir` recursively.
+/// Collect all `.cjcl` files under `dir` recursively.
 fn discover_fixtures(dir: &Path) -> Vec<PathBuf> {
     let mut result = Vec::new();
     if !dir.is_dir() {
@@ -40,7 +40,7 @@ fn discover_fixtures(dir: &Path) -> Vec<PathBuf> {
         let path = entry.path();
         if path.is_dir() {
             result.extend(discover_fixtures(&path));
-        } else if path.extension().map(|e| e == "cjc").unwrap_or(false) {
+        } else if path.extension().map(|e| e == "cjcl").unwrap_or(false) {
             result.push(path);
         }
     }
@@ -135,7 +135,7 @@ fn run_all_fixtures() {
     let fixtures = discover_fixtures(&fixture_dir);
 
     if fixtures.is_empty() {
-        panic!("No .cjc fixture files found under {:?}", fixture_dir);
+        panic!("No .cjcl fixture files found under {:?}", fixture_dir);
     }
 
     let update_mode = std::env::var("CJC_FIXTURE_UPDATE").unwrap_or_default() == "1";

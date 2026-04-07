@@ -25,7 +25,7 @@ fn run_cjc(args: &[&str]) -> (String, String, i32) {
 fn test_run_valid_program() {
     let (stdout, _stderr, code) = run_cjc(&[
         "run",
-        "tests/fixtures/hello.cjc",
+        "tests/fixtures/hello.cjcl",
     ]);
     assert_eq!(code, 0, "expected exit code 0 for valid program");
     assert!(
@@ -36,7 +36,7 @@ fn test_run_valid_program() {
 
 #[test]
 fn test_error_exit_code_missing_file() {
-    let (_stdout, stderr, code) = run_cjc(&["run", "nonexistent_file.cjc"]);
+    let (_stdout, stderr, code) = run_cjc(&["run", "nonexistent_file.cjcl"]);
     assert_ne!(code, 0, "expected non-zero exit code for missing file");
     assert!(
         stderr.contains("error"),
@@ -56,7 +56,7 @@ fn test_no_args_shows_usage() {
 
 #[test]
 fn test_lex_command() {
-    let (stdout, _stderr, code) = run_cjc(&["lex", "tests/fixtures/hello.cjc"]);
+    let (stdout, _stderr, code) = run_cjc(&["lex", "tests/fixtures/hello.cjcl"]);
     assert_eq!(code, 0, "lex command should succeed");
     // Should contain token output
     assert!(
@@ -67,7 +67,7 @@ fn test_lex_command() {
 
 #[test]
 fn test_parse_command() {
-    let (stdout, _stderr, code) = run_cjc(&["parse", "tests/fixtures/hello.cjc"]);
+    let (stdout, _stderr, code) = run_cjc(&["parse", "tests/fixtures/hello.cjcl"]);
     assert_eq!(code, 0, "parse command should succeed");
     assert!(
         stdout.contains("main"),
@@ -77,7 +77,7 @@ fn test_parse_command() {
 
 #[test]
 fn test_check_command_valid() {
-    let (stdout, stderr, code) = run_cjc(&["check", "tests/fixtures/hello.cjc"]);
+    let (stdout, stderr, code) = run_cjc(&["check", "tests/fixtures/hello.cjcl"]);
     assert_eq!(code, 0, "check command should succeed on valid program");
     let combined = format!("{}{}", stdout, stderr);
     assert!(
@@ -88,8 +88,8 @@ fn test_check_command_valid() {
 
 #[test]
 fn test_deterministic_output() {
-    let (stdout1, _, code1) = run_cjc(&["run", "tests/fixtures/deterministic.cjc"]);
-    let (stdout2, _, code2) = run_cjc(&["run", "tests/fixtures/deterministic.cjc"]);
+    let (stdout1, _, code1) = run_cjc(&["run", "tests/fixtures/deterministic.cjcl"]);
+    let (stdout2, _, code2) = run_cjc(&["run", "tests/fixtures/deterministic.cjcl"]);
     assert_eq!(code1, 0);
     assert_eq!(code2, 0);
     assert_eq!(
@@ -100,7 +100,7 @@ fn test_deterministic_output() {
 
 #[test]
 fn test_unknown_command_error() {
-    let (_stdout, stderr, code) = run_cjc(&["frobnicate", "tests/fixtures/hello.cjc"]);
+    let (_stdout, stderr, code) = run_cjc(&["frobnicate", "tests/fixtures/hello.cjcl"]);
     assert_ne!(code, 0, "expected non-zero exit for unknown command");
     assert!(
         stderr.contains("unknown command"),
@@ -113,7 +113,7 @@ fn test_seed_flag() {
     // Running with explicit seed should succeed
     let (stdout1, _, code) = run_cjc(&[
         "run",
-        "tests/fixtures/deterministic.cjc",
+        "tests/fixtures/deterministic.cjcl",
         "--seed",
         "123",
     ]);
@@ -121,7 +121,7 @@ fn test_seed_flag() {
     // Same seed should produce same output
     let (stdout2, _, _) = run_cjc(&[
         "run",
-        "tests/fixtures/deterministic.cjc",
+        "tests/fixtures/deterministic.cjcl",
         "--seed",
         "123",
     ]);

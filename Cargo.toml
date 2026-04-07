@@ -1,12 +1,16 @@
 [package]
-name = "cjc"
-version = "0.1.3"
+name = "cjc-lang"
+version = "0.1.4"
 edition = "2021"
 license = "MIT"
-description = "A deterministic numerical programming language for reproducible computation, ML pipelines, and scientific computing"
+description = "CJC-Lang (Computational Jacobian Core) — a deterministic numerical programming language for reproducible computation, ML pipelines, and scientific computing"
 authors = ["Adam Ezzat"]
 repository = "https://github.com/AdamEzzat1/CJC"
-homepage = "https://github.com/AdamEzzat1/CJC"
+homepage = "https://adamezzat.dev"
+
+[[bin]]
+name = "cjcl"
+path = "src/main.rs"
 
 [workspace]
 members = [
@@ -38,7 +42,7 @@ exclude = ["fuzz"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 license = "MIT"
 authors = ["Adam Ezzat"]

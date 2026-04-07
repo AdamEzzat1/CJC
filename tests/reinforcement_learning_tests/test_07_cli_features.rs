@@ -11,7 +11,7 @@ fn color_diagnostic_contains_ansi() {
         .with_label(Span::new(13, 14), "expected expression")
         .with_hint("remove the trailing `+` or add an expression after it");
 
-    let renderer = DiagnosticRenderer::new_with_color(source, "test.cjc", true);
+    let renderer = DiagnosticRenderer::new_with_color(source, "test.cjcl", true);
     let output = renderer.render(&diag);
 
     // Should contain ANSI escape codes
@@ -27,7 +27,7 @@ fn plain_diagnostic_no_ansi() {
     let source = "let x = 42 +;\n";
     let diag = Diagnostic::error("E0001", "unexpected token", Span::new(13, 14));
 
-    let renderer = DiagnosticRenderer::new(source, "test.cjc");
+    let renderer = DiagnosticRenderer::new(source, "test.cjcl");
     let output = renderer.render(&diag);
 
     // Should NOT contain ANSI escape codes
@@ -43,7 +43,7 @@ fn color_render_all_has_ansi() {
     bag.emit(Diagnostic::error("E0001", "test error", Span::new(0, 1)));
 
     let source = "x";
-    let output = bag.render_all_color(source, "test.cjc", true);
+    let output = bag.render_all_color(source, "test.cjcl", true);
     assert!(output.contains("\x1b["), "color render_all should contain ANSI codes");
 }
 
@@ -55,6 +55,6 @@ fn plain_render_all_no_ansi() {
     bag.emit(Diagnostic::error("E0001", "test error", Span::new(0, 1)));
 
     let source = "x";
-    let output = bag.render_all(source, "test.cjc");
+    let output = bag.render_all(source, "test.cjcl");
     assert!(!output.contains("\x1b["), "plain render_all should not contain ANSI codes");
 }

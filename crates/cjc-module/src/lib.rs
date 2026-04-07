@@ -24,7 +24,7 @@
 //! # Typical workflow
 //!
 //! ```text
-//! entry.cjc ─► build_module_graph() ─► ModuleGraph
+//! entry.cjcl ─► build_module_graph() ─► ModuleGraph
 //!                                         │
 //!                      merge_programs() ◄─┘
 //!                           │
@@ -48,10 +48,10 @@ use std::path::{Path, PathBuf};
 ///
 /// | Source file (relative)  | `ModuleId` value  |
 /// |-------------------------|-------------------|
-/// | `main.cjc`             | `"main"`          |
-/// | `math.cjc`             | `"math"`          |
-/// | `math/linalg.cjc`      | `"math::linalg"`  |
-/// | `math/linalg/mod.cjc`  | `"math::linalg"`  |
+/// | `main.cjcl`             | `"main"`          |
+/// | `math.cjcl`             | `"math"`          |
+/// | `math/linalg.cjcl`      | `"math::linalg"`  |
+/// | `math/linalg/mod.cjcl`  | `"math::linalg"`  |
 ///
 /// The inner `String` is public so that callers can inspect the raw
 /// identifier when necessary, but prefer using the provided methods
@@ -69,7 +69,7 @@ impl ModuleId {
     ///
     /// # Arguments
     ///
-    /// * `path` - A path relative to the project root (e.g., `math/linalg.cjc`).
+    /// * `path` - A path relative to the project root (e.g., `math/linalg.cjcl`).
     ///
     /// # Returns
     ///
@@ -81,7 +81,7 @@ impl ModuleId {
     /// ```
     /// # use std::path::Path;
     /// # use cjc_module::ModuleId;
-    /// let id = ModuleId::from_relative_path(Path::new("math/linalg.cjc"));
+    /// let id = ModuleId::from_relative_path(Path::new("math/linalg.cjcl"));
     /// assert_eq!(id.0, "math::linalg");
     /// ```
     pub fn from_relative_path(path: &Path) -> Self {
@@ -164,7 +164,7 @@ impl std::fmt::Display for ModuleId {
 pub struct ModuleInfo {
     /// Unique identifier for this module (derived from its file path).
     pub id: ModuleId,
-    /// Absolute filesystem path to the `.cjc` source file.
+    /// Absolute filesystem path to the `.cjcl` source file.
     pub file_path: PathBuf,
     /// Import declarations extracted from this module's AST.
     pub imports: Vec<ImportInfo>,
@@ -373,31 +373,31 @@ impl std::error::Error for ModuleError {}
 /// Resolve an import path to a source file, searching from the given root directory.
 ///
 /// Search order:
-/// 1. `<root>/<path_joined_by_slash>.cjc` (e.g., `math/linalg.cjc`)
-/// 2. `<root>/<path_joined_by_slash>/mod.cjc` (e.g., `math/linalg/mod.cjc`)
+/// 1. `<root>/<path_joined_by_slash>.cjcl` (e.g., `math/linalg.cjcl`)
+/// 2. `<root>/<path_joined_by_slash>/mod.cjcl` (e.g., `math/linalg/mod.cjcl`)
 ///
 /// Returns the absolute path if found, or `ModuleError::FileNotFound`.
 pub fn resolve_file(root: &Path, import_path: &[String]) -> Result<PathBuf, ModuleError> {
     let mut searched = Vec::new();
 
-    // Strategy 1: <root>/a/b/c.cjc
+    // Strategy 1: <root>/a/b/c.cjcl
     let mut file_path = root.to_path_buf();
     for segment in import_path {
         file_path.push(segment);
     }
-    file_path.set_extension("cjc");
+    file_path.set_extension("cjcl");
     searched.push(file_path.clone());
 
     if file_path.is_file() {
         return Ok(file_path);
     }
 
-    // Strategy 2: <root>/a/b/c/mod.cjc
+    // Strategy 2: <root>/a/b/c/mod.cjcl
     let mut dir_path = root.to_path_buf();
     for segment in import_path {
         dir_path.push(segment);
     }
-    dir_path.push("mod.cjc");
+    dir_path.push("mod.cjcl");
     searched.push(dir_path.clone());
 
     if dir_path.is_file() {
@@ -902,7 +902,7 @@ mod tests {
 
     #[test]
     fn test_module_id_from_relative_path() {
-        let id = ModuleId::from_relative_path(Path::new("math/linalg.cjc"));
+        let id = ModuleId::from_relative_path(Path::new("math/linalg.cjcl"));
         assert_eq!(id.0, "math::linalg");
     }
 
@@ -926,15 +926,15 @@ mod tests {
 
     #[test]
     fn test_resolve_file_direct() {
-        let dir = setup_test_dir(&[("math.cjc", "fn add(a: f64, b: f64) -> f64 { a + b }")]);
+        let dir = setup_test_dir(&[("math.cjcl", "fn add(a: f64, b: f64) -> f64 { a + b }")]);
         let result = resolve_file(dir.path(), &["math".to_string()]);
         assert!(result.is_ok());
-        assert!(result.unwrap().ends_with("math.cjc"));
+        assert!(result.unwrap().ends_with("math.cjcl"));
     }
 
     #[test]
     fn test_resolve_file_nested() {
-        let dir = setup_test_dir(&[("math/linalg.cjc", "fn dot() -> f64 { 0.0 }")]);
+        let dir = setup_test_dir(&[("math/linalg.cjcl", "fn dot() -> f64 { 0.0 }")]);
         let result = resolve_file(
             dir.path(),
             &["math".to_string(), "linalg".to_string()],
@@ -944,10 +944,10 @@ mod tests {
 
     #[test]
     fn test_resolve_file_mod_cjc() {
-        let dir = setup_test_dir(&[("math/mod.cjc", "fn pi() -> f64 { 3.14 }")]);
+        let dir = setup_test_dir(&[("math/mod.cjcl", "fn pi() -> f64 { 3.14 }")]);
         let result = resolve_file(dir.path(), &["math".to_string()]);
         assert!(result.is_ok());
-        assert!(result.unwrap().to_string_lossy().contains("mod.cjc"));
+        assert!(result.unwrap().to_string_lossy().contains("mod.cjcl"));
     }
 
     #[test]
@@ -961,7 +961,7 @@ mod tests {
                 searched_paths,
             } => {
                 assert_eq!(import_path, vec!["nonexistent".to_string()]);
-                assert_eq!(searched_paths.len(), 2); // tried .cjc and mod.cjc
+                assert_eq!(searched_paths.len(), 2); // tried .cjcl and mod.cjcl
             }
             other => panic!("expected FileNotFound, got: {:?}", other),
         }
@@ -971,8 +971,8 @@ mod tests {
 
     #[test]
     fn test_build_graph_single_file() {
-        let dir = setup_test_dir(&[("main.cjc", "let x = 42;")]);
-        let entry = dir.path().join("main.cjc");
+        let dir = setup_test_dir(&[("main.cjcl", "let x = 42;")]);
+        let entry = dir.path().join("main.cjcl");
         let graph = build_module_graph(&entry).unwrap();
         assert_eq!(graph.module_count(), 1);
         assert_eq!(graph.entry, ModuleId("main".to_string()));
@@ -981,10 +981,10 @@ mod tests {
     #[test]
     fn test_build_graph_with_import() {
         let dir = setup_test_dir(&[
-            ("main.cjc", "import math\nlet x = 1;"),
-            ("math.cjc", "fn add(a: f64, b: f64) -> f64 { a + b }"),
+            ("main.cjcl", "import math\nlet x = 1;"),
+            ("math.cjcl", "fn add(a: f64, b: f64) -> f64 { a + b }"),
         ]);
-        let entry = dir.path().join("main.cjc");
+        let entry = dir.path().join("main.cjcl");
         let graph = build_module_graph(&entry).unwrap();
         assert_eq!(graph.module_count(), 2);
         assert!(graph.modules.contains_key(&ModuleId("math".to_string())));
@@ -1005,11 +1005,11 @@ mod tests {
     #[test]
     fn test_detect_cyclic_dependency() {
         let dir = setup_test_dir(&[
-            ("main.cjc", "import a\nlet x = 1;"),
-            ("a.cjc", "import b\nfn fa() -> i64 { 1 }"),
-            ("b.cjc", "import a\nfn fb() -> i64 { 2 }"),
+            ("main.cjcl", "import a\nlet x = 1;"),
+            ("a.cjcl", "import b\nfn fa() -> i64 { 1 }"),
+            ("b.cjcl", "import a\nfn fb() -> i64 { 2 }"),
         ]);
-        let entry = dir.path().join("main.cjc");
+        let entry = dir.path().join("main.cjcl");
         let result = build_module_graph(&entry);
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -1023,10 +1023,10 @@ mod tests {
     #[test]
     fn test_merge_programs_single_module() {
         let dir = setup_test_dir(&[(
-            "main.cjc",
+            "main.cjcl",
             "fn greet() -> str { \"hello\" }\nlet msg = greet();",
         )]);
-        let entry = dir.path().join("main.cjc");
+        let entry = dir.path().join("main.cjcl");
         let graph = build_module_graph(&entry).unwrap();
         let merged = merge_programs(&graph).unwrap();
 
@@ -1040,10 +1040,10 @@ mod tests {
     #[test]
     fn test_merge_programs_prefixes_non_entry() {
         let dir = setup_test_dir(&[
-            ("main.cjc", "import math\nlet x = 1;"),
-            ("math.cjc", "fn add(a: f64, b: f64) -> f64 { a + b }"),
+            ("main.cjcl", "import math\nlet x = 1;"),
+            ("math.cjcl", "fn add(a: f64, b: f64) -> f64 { a + b }"),
         ]);
-        let entry = dir.path().join("main.cjc");
+        let entry = dir.path().join("main.cjcl");
         let graph = build_module_graph(&entry).unwrap();
         let merged = merge_programs(&graph).unwrap();
 
@@ -1061,10 +1061,10 @@ mod tests {
         // Two modules exporting same-named function (after prefixing they differ,
         // but if both are entry-like, they'd collide)
         let dir = setup_test_dir(&[(
-            "main.cjc",
+            "main.cjcl",
             "fn add(a: f64) -> f64 { a }\nfn add(b: f64) -> f64 { b }",
         )]);
-        let entry = dir.path().join("main.cjc");
+        let entry = dir.path().join("main.cjcl");
         let graph = build_module_graph(&entry).unwrap();
         let merged = merge_programs(&graph);
         // Duplicate function definitions should be caught
@@ -1106,7 +1106,7 @@ mod tests {
     fn test_build_import_aliases() {
         let module = ModuleInfo {
             id: ModuleId("main".to_string()),
-            file_path: PathBuf::from("main.cjc"),
+            file_path: PathBuf::from("main.cjcl"),
             imports: vec![ImportInfo {
                 path: vec!["math".to_string(), "Matrix".to_string()],
                 alias: Some("M".to_string()),
@@ -1126,10 +1126,10 @@ mod tests {
     #[test]
     fn test_visibility_pub_functions_aliased() {
         let dir = setup_test_dir(&[
-            ("main.cjc", "import math\nlet x = 1;"),
-            ("math.cjc", "pub fn add(a: f64, b: f64) -> f64 { a + b }\nfn private_helper() -> f64 { 0.0 }"),
+            ("main.cjcl", "import math\nlet x = 1;"),
+            ("math.cjcl", "pub fn add(a: f64, b: f64) -> f64 { a + b }\nfn private_helper() -> f64 { 0.0 }"),
         ]);
-        let entry = dir.path().join("main.cjc");
+        let entry = dir.path().join("main.cjcl");
         let graph = build_module_graph(&entry).unwrap();
         let merged = merge_programs(&graph).unwrap();
 
@@ -1146,10 +1146,10 @@ mod tests {
     #[test]
     fn test_check_visibility_violations() {
         let dir = setup_test_dir(&[
-            ("main.cjc", "import math.Matrix\nlet x = 1;"),
-            ("math.cjc", "struct Matrix { x: f64 }"),
+            ("main.cjcl", "import math.Matrix\nlet x = 1;"),
+            ("math.cjcl", "struct Matrix { x: f64 }"),
         ]);
-        let entry = dir.path().join("main.cjc");
+        let entry = dir.path().join("main.cjcl");
         let graph = build_module_graph(&entry).unwrap();
         let violations = check_visibility(&graph);
         // Matrix is private (no `pub`), so importing it should be a violation
@@ -1163,11 +1163,11 @@ mod tests {
     #[test]
     fn test_topological_order_deterministic() {
         let dir = setup_test_dir(&[
-            ("main.cjc", "import alpha\nimport beta\nlet x = 1;"),
-            ("alpha.cjc", "fn a_fn() -> i64 { 1 }"),
-            ("beta.cjc", "fn b_fn() -> i64 { 2 }"),
+            ("main.cjcl", "import alpha\nimport beta\nlet x = 1;"),
+            ("alpha.cjcl", "fn a_fn() -> i64 { 1 }"),
+            ("beta.cjcl", "fn b_fn() -> i64 { 2 }"),
         ]);
-        let entry = dir.path().join("main.cjc");
+        let entry = dir.path().join("main.cjcl");
 
         // Build graph multiple times — order must be identical
         let order1 = build_module_graph(&entry)

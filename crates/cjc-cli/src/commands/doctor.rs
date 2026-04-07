@@ -1,11 +1,11 @@
-//! `cjc doctor` — Project diagnostics.
+//! `cjcl doctor` — Project diagnostics.
 //!
 //! Scans a project directory for common reproducibility, schema, and
 //! runtime issues. Produces a structured diagnostic report.
 //!
 //! Checks performed:
-//! - Parse errors in .cjc files
-//! - Type errors in .cjc files
+//! - Parse errors in .cjcl files
+//! - Type errors in .cjcl files
 //! - Corrupt or malformed .snap files
 //! - CSV schema inconsistencies
 //! - Missing referenced files
@@ -99,7 +99,7 @@ pub fn parse_args(args: &[String]) -> DoctorArgs {
             }
             other if !other.starts_with('-') => da.path = PathBuf::from(other),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc doctor`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl doctor`", other);
                 process::exit(1);
             }
         }
@@ -174,12 +174,12 @@ pub fn run(args: &[String]) {
     pf.model_files.sort();
     pf.all_files.sort();
 
-    // Check 1: Parse errors in .cjc files
+    // Check 1: Parse errors in .cjcl files
     for file in &pf.cjc_files {
         check_cjc_parse(file, &mut findings);
     }
 
-    // Check 2: Type errors in .cjc files
+    // Check 2: Type errors in .cjcl files
     for file in &pf.cjc_files {
         check_cjc_types(file, &mut findings);
     }
@@ -219,7 +219,7 @@ pub fn run(args: &[String]) {
         check_model_file(file, &mut findings);
     }
 
-    // --fix: trailing whitespace and trailing newlines for .cjc files
+    // --fix: trailing whitespace and trailing newlines for .cjcl files
     if da.fix {
         for file in &pf.cjc_files {
             fix_cjc_whitespace(file, &mut findings, da.dry_run);
@@ -352,7 +352,7 @@ fn collect_files(dir: &Path, pf: &mut ProjectFiles) {
         pf.all_files.push(path.clone());
 
         match path.extension().and_then(|e| e.to_str()) {
-            Some("cjc") => pf.cjc_files.push(path),
+            Some("cjcl") => pf.cjc_files.push(path),
             Some("snap") => pf.snap_files.push(path),
             Some("csv") | Some("tsv") => pf.csv_files.push(path),
             Some("jsonl") | Some("ndjson") => pf.jsonl_files.push(path),
@@ -839,13 +839,13 @@ fn write_report(path: &Path, da: &DoctorArgs, pf: &ProjectFiles, findings: &[Fin
 }
 
 pub fn print_help() {
-    eprintln!("cjc doctor — Project diagnostics");
+    eprintln!("cjcl doctor — Project diagnostics");
     eprintln!();
-    eprintln!("Usage: cjc doctor [path] [flags]");
+    eprintln!("Usage: cjcl doctor [path] [flags]");
     eprintln!();
     eprintln!("Checks:");
-    eprintln!("  - Parse errors in .cjc files");
-    eprintln!("  - Type errors in .cjc files");
+    eprintln!("  - Parse errors in .cjcl files");
+    eprintln!("  - Type errors in .cjcl files");
     eprintln!("  - Corrupt .snap files");
     eprintln!("  - CSV schema issues (ragged rows)");
     eprintln!("  - Nondeterministic patterns");

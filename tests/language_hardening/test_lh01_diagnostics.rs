@@ -141,12 +141,12 @@ fn test_render_single_line_error() {
         .label(Span::new(13, 20), "this is a string")
         .build();
 
-    let renderer = cjc_diag::DiagnosticRenderer::new(source, "test.cjc");
+    let renderer = cjc_diag::DiagnosticRenderer::new(source, "test.cjcl");
     let output = renderer.render(&diag);
 
     assert!(output.contains("error[E2001]"));
     assert!(output.contains("expected `i64`, found `str`"));
-    assert!(output.contains("test.cjc:1:14"));
+    assert!(output.contains("test.cjcl:1:14"));
     assert!(output.contains("^^^^^^^"));
 }
 
@@ -157,7 +157,7 @@ fn test_render_fix_suggestion() {
         .with_label(Span::new(7, 10), "expected `i64`")
         .with_fix(Span::new(7, 10), "i64", "change type annotation to `i64`");
 
-    let renderer = cjc_diag::DiagnosticRenderer::new(source, "test.cjc");
+    let renderer = cjc_diag::DiagnosticRenderer::new(source, "test.cjcl");
     let output = renderer.render(&diag);
 
     assert!(output.contains("fix:"));
@@ -170,7 +170,7 @@ fn test_render_multiline_span() {
     // Span covering lines 1-4
     let diag = Diagnostic::error("E7001", "internal error in function", Span::new(0, source.len() - 1));
 
-    let renderer = cjc_diag::DiagnosticRenderer::new(source, "test.cjc");
+    let renderer = cjc_diag::DiagnosticRenderer::new(source, "test.cjcl");
     let output = renderer.render(&diag);
 
     assert!(output.contains("error[E7001]"));
@@ -186,7 +186,7 @@ fn test_render_warning() {
         .message("unused variable `_unused`")
         .build();
 
-    let renderer = cjc_diag::DiagnosticRenderer::new(source, "test.cjc");
+    let renderer = cjc_diag::DiagnosticRenderer::new(source, "test.cjcl");
     let output = renderer.render(&diag);
 
     assert!(output.contains("warning[W0001]"));
@@ -266,7 +266,7 @@ fn test_parse_error_uses_diagnostics() {
     assert!(diags.has_errors());
 
     // Verify rendering doesn't panic
-    let output = diags.render_all(src, "test.cjc");
+    let output = diags.render_all(src, "test.cjcl");
     assert!(!output.is_empty());
     assert!(output.contains("error"));
 }
@@ -278,6 +278,6 @@ fn test_lexer_error_uses_diagnostics() {
     let (_tokens, diags) = lexer.tokenize();
     assert!(diags.has_errors());
 
-    let output = diags.render_all(src, "test.cjc");
+    let output = diags.render_all(src, "test.cjcl");
     assert!(!output.is_empty());
 }

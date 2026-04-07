@@ -22,7 +22,7 @@ fn cjc_binary() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.push("target");
     path.push("debug");
-    path.push(if cfg!(windows) { "cjc.exe" } else { "cjc" });
+    path.push(if cfg!(windows) { "cjcl.exe" } else { "cjcl" });
     path
 }
 
@@ -311,7 +311,7 @@ mod second_mode_flags {
     #[test]
     fn proof_fail_fast() {
         let (stdout, stderr, code) = run_cjc(&[
-            "proof", &fixture("compute.cjc"),
+            "proof", &fixture("compute.cjcl"),
             "--fail-fast", "--plain",
         ]);
         assert_eq!(code, 0, "proof --fail-fast on deterministic program should pass: {}", stderr);
@@ -328,7 +328,7 @@ mod second_mode_flags {
     #[test]
     fn proof_hash_output() {
         let (stdout, stderr, code) = run_cjc(&[
-            "proof", &fixture("compute.cjc"),
+            "proof", &fixture("compute.cjcl"),
             "--hash-output", "--plain",
         ]);
         assert_eq!(code, 0, "proof --hash-output failed: {}", stderr);
@@ -350,7 +350,7 @@ mod second_mode_flags {
         let report_str = report_path.to_string_lossy().to_string();
 
         let (_, stderr, code) = run_cjc(&[
-            "proof", &fixture("compute.cjc"),
+            "proof", &fixture("compute.cjcl"),
             "--save-report", &report_str, "--plain",
         ]);
         assert_eq!(code, 0, "proof --save-report failed: {}", stderr);
@@ -369,7 +369,7 @@ mod second_mode_flags {
 
         // Save baseline
         let (_, stderr, code) = run_cjc(&[
-            "bench", &fixture("compute.cjc"),
+            "bench", &fixture("compute.cjcl"),
             "--save-baseline", &baseline_str, "--plain", "--runs", "2",
         ]);
         assert_eq!(code, 0, "bench --save-baseline failed: {}", stderr);
@@ -377,7 +377,7 @@ mod second_mode_flags {
 
         // Load baseline and compare
         let (stdout, stderr2, code2) = run_cjc(&[
-            "bench", &fixture("compute.cjc"),
+            "bench", &fixture("compute.cjcl"),
             "--baseline", &baseline_str, "--plain", "--runs", "2",
         ]);
         assert_eq!(code2, 0, "bench --baseline failed: {}", stderr2);
@@ -434,7 +434,7 @@ mod second_mode_flags {
     #[test]
     fn pack_dry_run() {
         let (stdout, stderr, code) = run_cjc(&[
-            "pack", &fixture("compute.cjc"), "--dry-run", "--plain",
+            "pack", &fixture("compute.cjcl"), "--dry-run", "--plain",
         ]);
         assert_eq!(code, 0, "pack --dry-run failed: {}", stderr);
         let combined = format!("{}{}", stdout, stderr);
@@ -450,7 +450,7 @@ mod second_mode_flags {
     #[test]
     fn pack_manifest_only() {
         let (stdout, stderr, code) = run_cjc(&[
-            "pack", &fixture("compute.cjc"), "--manifest-only", "--plain",
+            "pack", &fixture("compute.cjcl"), "--manifest-only", "--plain",
         ]);
         assert_eq!(code, 0, "pack --manifest-only failed: {}", stderr);
         let combined = format!("{}{}", stdout, stderr);
@@ -598,7 +598,7 @@ mod determinism {
     #[test]
     fn proof_meta_determinism() {
         // Running proof itself twice should produce the same verdict
-        let f = fixture("compute.cjc");
+        let f = fixture("compute.cjcl");
         let (out1, _err1, c1) = run_cjc(&["proof", &f, "--plain", "--runs", "2"]);
         let (out2, _err2, c2) = run_cjc(&["proof", &f, "--plain", "--runs", "2"]);
         assert_eq!(c1, c2, "proof exit codes should match");

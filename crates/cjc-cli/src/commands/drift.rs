@@ -1,4 +1,4 @@
-//! `cjc drift` — Mathematical and data diff engine.
+//! `cjcl drift` — Mathematical and data diff engine.
 //!
 //! Compares two files or data sources and computes:
 //! - Text diff (line-by-line)
@@ -117,14 +117,14 @@ pub fn parse_args(args: &[String]) -> DriftArgs {
             }
             other if !other.starts_with('-') => positionals.push(other.to_string()),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc drift`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl drift`", other);
                 process::exit(1);
             }
         }
         i += 1;
     }
     if positionals.len() < 2 {
-        eprintln!("error: `cjc drift` requires two file arguments");
+        eprintln!("error: `cjcl drift` requires two file arguments");
         process::exit(1);
     }
     da.file_a = PathBuf::from(&positionals[0]);
@@ -646,9 +646,9 @@ fn diff_numeric(da: &DriftArgs, a: &str, b: &str) {
 // ── Help ────────────────────────────────────────────────────────────
 
 pub fn print_help() {
-    eprintln!("cjc drift -- Mathematical and data diff engine");
+    eprintln!("cjcl drift -- Mathematical and data diff engine");
     eprintln!();
-    eprintln!("Usage: cjc drift <file_a> <file_b> [flags]");
+    eprintln!("Usage: cjcl drift <file_a> <file_b> [flags]");
     eprintln!();
     eprintln!("Modes:");
     eprintln!("  --text                Line-by-line text diff");

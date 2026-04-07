@@ -342,7 +342,7 @@ impl Diagnostic {
     ///
     /// # Arguments
     ///
-    /// * `name` — the filename to display (e.g., `"math.cjc"`).
+    /// * `name` — the filename to display (e.g., `"math.cjcl"`).
     pub fn with_filename(mut self, name: impl Into<String>) -> Self {
         self.filename = Some(name.into());
         self
@@ -1083,12 +1083,12 @@ mod tests {
             .with_label(Span::new(13, 14), "expected expression")
             .with_hint("remove the trailing `+` or add an expression after it");
 
-        let renderer = DiagnosticRenderer::new(source, "test.cjc");
+        let renderer = DiagnosticRenderer::new(source, "test.cjcl");
         let output = renderer.render(&diag);
 
         assert!(output.contains("error[E0001]"));
         assert!(output.contains("unexpected token"));
-        assert!(output.contains("test.cjc:1:14"));
+        assert!(output.contains("test.cjcl:1:14"));
         assert!(output.contains("expected expression"));
         assert!(output.contains("hint:"));
     }
@@ -1113,7 +1113,7 @@ mod tests {
             .with_label(Span::new(13, 14), "expected expression")
             .with_hint("remove the trailing `+` or add an expression after it");
 
-        let renderer = DiagnosticRenderer::new_with_color(source, "test.cjc", true);
+        let renderer = DiagnosticRenderer::new_with_color(source, "test.cjcl", true);
         let output = renderer.render(&diag);
 
         // Should contain ANSI escape codes
@@ -1121,7 +1121,7 @@ mod tests {
         // Should still contain the essential text
         assert!(output.contains("E0001"));
         assert!(output.contains("unexpected token"));
-        assert!(output.contains("test.cjc:1:14"));
+        assert!(output.contains("test.cjcl:1:14"));
         assert!(output.contains("expected expression"));
         assert!(output.contains("hint"));
     }
@@ -1132,8 +1132,8 @@ mod tests {
         bag.emit(Diagnostic::error("E0001", "test error", Span::new(0, 1)));
 
         let source = "x";
-        let plain = bag.render_all(source, "test.cjc");
-        let colored = bag.render_all_color(source, "test.cjc", true);
+        let plain = bag.render_all(source, "test.cjcl");
+        let colored = bag.render_all_color(source, "test.cjcl", true);
 
         // Plain should not contain ANSI escapes
         assert!(!plain.contains("\x1b["));
@@ -1170,7 +1170,7 @@ mod tests {
             .with_label(Span::new(14, 21), "expected `i32`, found `str`")
             .with_fix(Span::new(7, 10), "str", "change type annotation to `str`");
 
-        let renderer = DiagnosticRenderer::new(source, "test.cjc");
+        let renderer = DiagnosticRenderer::new(source, "test.cjcl");
         let output = renderer.render(&diag);
 
         assert!(output.contains("fix:"));
@@ -1208,21 +1208,21 @@ mod tests {
     #[test]
     fn test_diagnostic_with_filename() {
         let diag = Diagnostic::error("E0001", "test", Span::new(0, 1))
-            .with_filename("math.cjc");
-        assert_eq!(diag.filename.as_deref(), Some("math.cjc"));
+            .with_filename("math.cjcl");
+        assert_eq!(diag.filename.as_deref(), Some("math.cjcl"));
     }
 
     #[test]
     fn test_render_uses_diagnostic_filename() {
         let source = "let x = 1;\n";
         let diag = Diagnostic::error("E0001", "test error", Span::new(0, 3))
-            .with_filename("other_file.cjc");
+            .with_filename("other_file.cjcl");
 
-        // Renderer has "main.cjc" but the diagnostic overrides to "other_file.cjc"
-        let renderer = DiagnosticRenderer::new(source, "main.cjc");
+        // Renderer has "main.cjcl" but the diagnostic overrides to "other_file.cjcl"
+        let renderer = DiagnosticRenderer::new(source, "main.cjcl");
         let output = renderer.render(&diag);
-        assert!(output.contains("other_file.cjc:1:1"));
-        assert!(!output.contains("main.cjc"));
+        assert!(output.contains("other_file.cjcl:1:1"));
+        assert!(!output.contains("main.cjcl"));
     }
 
     #[test]
@@ -1232,17 +1232,17 @@ mod tests {
         // No filename on diagnostic => falls back to renderer's filename
         assert!(diag.filename.is_none());
 
-        let renderer = DiagnosticRenderer::new(source, "main.cjc");
+        let renderer = DiagnosticRenderer::new(source, "main.cjcl");
         let output = renderer.render(&diag);
-        assert!(output.contains("main.cjc:1:1"));
+        assert!(output.contains("main.cjcl:1:1"));
     }
 
     #[test]
     fn test_builder_filename() {
         let diag = DiagnosticBuilder::new(ErrorCode::E1000, Span::new(0, 1))
-            .filename("module.cjc")
+            .filename("module.cjcl")
             .build();
-        assert_eq!(diag.filename.as_deref(), Some("module.cjc"));
+        assert_eq!(diag.filename.as_deref(), Some("module.cjcl"));
     }
 
     #[test]
@@ -1316,10 +1316,10 @@ mod tests {
         let diag = Diagnostic::error("E0001", "unexpected token", Span::new(13, 14));
 
         let renderer = DiagnosticRenderer::new_with_options(
-            source, "test.cjc", false, DiagnosticFormat::Short
+            source, "test.cjcl", false, DiagnosticFormat::Short
         );
         let output = renderer.render(&diag);
-        assert_eq!(output, "test.cjc:1:14: error[E0001]: unexpected token\n");
+        assert_eq!(output, "test.cjcl:1:14: error[E0001]: unexpected token\n");
     }
 
     #[test]
@@ -1328,24 +1328,24 @@ mod tests {
         let diag = Diagnostic::warning("W0001", "unused variable", Span::new(4, 5));
 
         let renderer = DiagnosticRenderer::new_with_options(
-            source, "test.cjc", false, DiagnosticFormat::Short
+            source, "test.cjcl", false, DiagnosticFormat::Short
         );
         let output = renderer.render(&diag);
-        assert_eq!(output, "test.cjc:1:5: warning[W0001]: unused variable\n");
+        assert_eq!(output, "test.cjcl:1:5: warning[W0001]: unused variable\n");
     }
 
     #[test]
     fn test_render_short_multi_file() {
         let source = "let x = 1;\n";
         let diag = Diagnostic::error("E0001", "test", Span::new(0, 3))
-            .with_filename("other.cjc");
+            .with_filename("other.cjcl");
 
         let renderer = DiagnosticRenderer::new_with_options(
-            source, "main.cjc", false, DiagnosticFormat::Short
+            source, "main.cjcl", false, DiagnosticFormat::Short
         );
         let output = renderer.render(&diag);
-        assert!(output.starts_with("other.cjc:"));
-        assert!(!output.contains("main.cjc"));
+        assert!(output.starts_with("other.cjcl:"));
+        assert!(!output.contains("main.cjcl"));
     }
 
     #[test]
@@ -1354,9 +1354,9 @@ mod tests {
         bag.emit(Diagnostic::error("E0001", "bad token", Span::new(0, 1)));
         bag.emit(Diagnostic::error("E1000", "unexpected", Span::new(5, 6)));
 
-        let output = bag.render_all_short("abcdefgh", "test.cjc");
-        assert!(output.contains("test.cjc:1:1: error[E0001]: bad token\n"));
-        assert!(output.contains("test.cjc:1:6: error[E1000]: unexpected\n"));
+        let output = bag.render_all_short("abcdefgh", "test.cjcl");
+        assert!(output.contains("test.cjcl:1:1: error[E0001]: bad token\n"));
+        assert!(output.contains("test.cjcl:1:6: error[E1000]: unexpected\n"));
         assert!(output.contains("aborting due to 2 errors"));
     }
 
@@ -1367,11 +1367,11 @@ mod tests {
         let source = "let x = 42 +;\n";
         let diag = Diagnostic::error("E0001", "unexpected token", Span::new(13, 14));
 
-        let renderer = DiagnosticRenderer::new(source, "test.cjc");
+        let renderer = DiagnosticRenderer::new(source, "test.cjcl");
         let output = renderer.render(&diag);
         let first_line = output.lines().next().unwrap();
-        // First line should be: test.cjc:1:14: error[E0001]: unexpected token
-        assert!(first_line.starts_with("test.cjc:1:14:"), "first line: {}", first_line);
+        // First line should be: test.cjcl:1:14: error[E0001]: unexpected token
+        assert!(first_line.starts_with("test.cjcl:1:14:"), "first line: {}", first_line);
         assert!(first_line.contains("error[E0001]"));
         assert!(first_line.contains("unexpected token"));
     }
@@ -1384,7 +1384,7 @@ mod tests {
         bag.emit(Diagnostic::error("E0001", "err", Span::new(0, 1)));
         bag.emit(Diagnostic::warning("W0001", "warn", Span::new(0, 1)));
 
-        let output = bag.render_all("x", "test.cjc");
+        let output = bag.render_all("x", "test.cjcl");
         assert!(output.contains("aborting due to 1 error; 1 warning"));
     }
 
@@ -1394,7 +1394,7 @@ mod tests {
         bag.emit(Diagnostic::warning("W0001", "warn1", Span::new(0, 1)));
         bag.emit(Diagnostic::warning("W0002", "warn2", Span::new(0, 1)));
 
-        let output = bag.render_all("x", "test.cjc");
+        let output = bag.render_all("x", "test.cjcl");
         assert!(output.contains("warning: generated 2 warnings"));
         assert!(!output.contains("aborting"));
     }

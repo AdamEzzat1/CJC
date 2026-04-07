@@ -18,7 +18,7 @@ fn cjc_binary() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.push("target");
     path.push("debug");
-    path.push(if cfg!(windows) { "cjc.exe" } else { "cjc" });
+    path.push(if cfg!(windows) { "cjcl.exe" } else { "cjcl" });
     path
 }
 
@@ -78,7 +78,7 @@ fn ensure_fixtures() {
     // Pack test directory
     let pack_dir = dir.join("pack_test");
     fs::create_dir_all(&pack_dir).unwrap();
-    fs::write(pack_dir.join("main.cjc"), "fn main() { print(42); }\n").unwrap();
+    fs::write(pack_dir.join("main.cjcl"), "fn main() { print(42); }\n").unwrap();
     fs::write(pack_dir.join("data.csv"), "a,b\n1,2\n3,4\n").unwrap();
     fs::write(pack_dir.join("records.jsonl"), "{\"x\":1}\n{\"x\":2}\n").unwrap();
 
@@ -92,7 +92,7 @@ fn ensure_fixtures() {
     fs::write(unsup.join("image.png"), &[0x89, 0x50, 0x4E, 0x47]).unwrap();
 
     // CJC source for audit/bench
-    fs::write(dir.join("simple.cjc"), "fn main() {\n    let x: i64 = 42;\n    print(x);\n}\n").unwrap();
+    fs::write(dir.join("simple.cjcl"), "fn main() {\n    let x: i64 = 42;\n    print(x);\n}\n").unwrap();
 }
 
 // ── A. pack directory discovery (BUG-1) ────────────────────────────────
@@ -106,7 +106,7 @@ mod pack_discovery {
         let pack_dir = fixtures_dir().join("pack_test");
         let (_, stderr, code) = run_cjc(&["pack", pack_dir.to_str().unwrap(), "--dry-run"]);
         // Should find 3 files
-        assert!(stderr.contains("main.cjc"), "should find .cjc file: {}", stderr);
+        assert!(stderr.contains("main.cjcl"), "should find .cjcl file: {}", stderr);
         assert!(stderr.contains("data.csv"), "should find .csv file: {}", stderr);
         assert!(stderr.contains("records.jsonl"), "should find .jsonl file: {}", stderr);
         assert_eq!(code, 0);
@@ -285,7 +285,7 @@ mod cross_command_consistency {
     #[test]
     fn all_report_flags_produce_valid_json() {
         ensure_fixtures();
-        let f = fixtures_dir().join("simple.cjc");
+        let f = fixtures_dir().join("simple.cjcl");
         let dir = fixtures_dir();
 
         // proof --save-report
@@ -326,7 +326,7 @@ mod cross_command_consistency {
     #[test]
     fn bench_csv_output_is_valid_csv() {
         ensure_fixtures();
-        let f = fixtures_dir().join("simple.cjc");
+        let f = fixtures_dir().join("simple.cjcl");
         let (stdout, _, _) = run_cjc(&["bench", f.to_str().unwrap(), "--csv"]);
         // Should have a header line and a data line
         let lines: Vec<&str> = stdout.lines().filter(|l| l.contains(',')).collect();

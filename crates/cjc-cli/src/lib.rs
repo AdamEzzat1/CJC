@@ -1,14 +1,14 @@
-//! CJC CLI — Library crate exposing `cli_main()` for the root `cjc` binary.
+//! CJC-Lang CLI — Library crate exposing `cli_main()` for the root `cjc-lang` binary.
 //!
 //! Zero-dependency argument parsing via manual `std::env::args()` iteration.
 //! All CLI logic lives in this file — no external parsing crates.
 //!
 //! Usage:
-//!   cjc run <file.cjc>           Run a CJC program
-//!   cjc check <file.cjc>         Type-check without running
-//!   cjc parse <file.cjc>         Parse and pretty-print
-//!   cjc lex <file.cjc>           Tokenize and print tokens
-//!   cjc repl                     Start an interactive REPL
+//!   cjcl run <file.cjcl>          Run a CJC-Lang program
+//!   cjcl check <file.cjcl>        Type-check without running
+//!   cjcl parse <file.cjcl>        Parse and pretty-print
+//!   cjcl lex <file.cjcl>          Tokenize and print tokens
+//!   cjcl repl                     Start an interactive REPL
 //!
 //! Flags:
 //!   --reproducible               Enable reproducibility mode
@@ -36,7 +36,7 @@ use std::path::Path;
 use std::process;
 use std::time::Instant;
 
-const VERSION: &str = "0.1.3";
+const VERSION: &str = "0.1.4";
 
 // ── Typed CLI configuration ──────────────────────────────────────────
 
@@ -153,7 +153,7 @@ impl Config {
                         process::exit(0);
                     }
                     "--version" | "-V" => {
-                        println!("cjc {}", VERSION);
+                        println!("cjcl {}", VERSION);
                         process::exit(0);
                     }
                     _ => {}
@@ -549,61 +549,61 @@ pub fn cli_main() {
 // ── Usage ────────────────────────────────────────────────────────────
 
 fn print_usage() {
-    eprintln!("CJC Programming Language v{}", VERSION);
+    eprintln!("CJC-Lang (Computational Jacobian Core) v{}", VERSION);
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  cjc lex <file.cjc>              Tokenize and print tokens");
-    eprintln!("  cjc parse <file.cjc>            Parse and pretty-print AST");
-    eprintln!("  cjc check <file.cjc>            Type-check without running");
-    eprintln!("  cjc run <file.cjc>              Run a CJC program");
-    eprintln!("  cjc eval \"<expr>\"               Evaluate a single expression");
-    eprintln!("  cjc repl                        Start an interactive REPL");
+    eprintln!("  cjcl lex <file.cjcl>             Tokenize and print tokens");
+    eprintln!("  cjcl parse <file.cjcl>           Parse and pretty-print AST");
+    eprintln!("  cjcl check <file.cjcl>           Type-check without running");
+    eprintln!("  cjcl run <file.cjcl>             Run a CJC-Lang program");
+    eprintln!("  cjcl eval \"<expr>\"               Evaluate a single expression");
+    eprintln!("  cjcl repl                        Start an interactive REPL");
     eprintln!();
     eprintln!("Data & Pipeline Commands:");
-    eprintln!("  cjc view [path]                 Deterministic directory listing");
-    eprintln!("  cjc proof <file.cjc>            Determinism & reproducibility profiler");
-    eprintln!("  cjc flow [file.csv]             Streaming computation engine");
-    eprintln!("  cjc patch <file.csv> [ops]      Type-aware data transformation");
-    eprintln!("  cjc seek [path] [pattern]       Deterministic file discovery");
-    eprintln!("  cjc drift <a> <b>               Mathematical & data diff engine");
-    eprintln!("  cjc forge <action>              Content-addressable pipeline runner");
+    eprintln!("  cjcl view [path]                 Deterministic directory listing");
+    eprintln!("  cjcl proof <file.cjcl>           Determinism & reproducibility profiler");
+    eprintln!("  cjcl flow [file.csv]             Streaming computation engine");
+    eprintln!("  cjcl patch <file.csv> [ops]      Type-aware data transformation");
+    eprintln!("  cjcl seek [path] [pattern]       Deterministic file discovery");
+    eprintln!("  cjcl drift <a> <b>               Mathematical & data diff engine");
+    eprintln!("  cjcl forge <action>              Content-addressable pipeline runner");
     eprintln!();
     eprintln!("Inspection & Diagnostics:");
-    eprintln!("  cjc inspect <file>              Deep file inspection (.cjc, .snap, .csv)");
-    eprintln!("  cjc schema <file.csv>           CSV/TSV schema inference");
-    eprintln!("  cjc check <file> [flags]        Type-check or validate output");
-    eprintln!("  cjc trace <file.cjc>            Execution tracing & profiling");
-    eprintln!("  cjc mem <file.cjc>              Memory profiling");
-    eprintln!("  cjc bench <file.cjc>            Performance benchmarking");
-    eprintln!("  cjc pack <file.cjc>             Reproducible packaging");
-    eprintln!("  cjc doctor [path]               Project diagnostics");
+    eprintln!("  cjcl inspect <file>              Deep file inspection (.cjcl, .snap, .csv)");
+    eprintln!("  cjcl schema <file.csv>           CSV/TSV schema inference");
+    eprintln!("  cjcl check <file> [flags]        Type-check or validate output");
+    eprintln!("  cjcl trace <file.cjcl>           Execution tracing & profiling");
+    eprintln!("  cjcl mem <file.cjcl>             Memory profiling");
+    eprintln!("  cjcl bench <file.cjcl>           Performance benchmarking");
+    eprintln!("  cjcl pack <file.cjcl>            Reproducible packaging");
+    eprintln!("  cjcl doctor [path]               Project diagnostics");
     eprintln!();
     eprintln!("Compiler Visibility & Analysis:");
-    eprintln!("  cjc emit <file.cjc>             Dump IR (--stage ast|hir|mir)");
-    eprintln!("  cjc explain <file.cjc>          Show desugared/lowered forms");
-    eprintln!("  cjc gc <file.cjc>               GC analysis & allocation timeline");
-    eprintln!("  cjc nogc <file.cjc>             NoGC static verification");
-    eprintln!("  cjc audit <file.cjc>            Numerical hygiene analysis");
-    eprintln!("  cjc precision <file.cjc>        Precision analysis (f64 vs f32)");
-    eprintln!("  cjc lock <file.cjc>             Generate/verify lockfiles");
-    eprintln!("  cjc parity <file.cjc>           Dual-executor parity check");
-    eprintln!("  cjc test <file.cjc>             Native test runner");
-    eprintln!("  cjc ci [path]                   Full CI diagnostic suite");
+    eprintln!("  cjcl emit <file.cjcl>            Dump IR (--stage ast|hir|mir)");
+    eprintln!("  cjcl explain <file.cjcl>         Show desugared/lowered forms");
+    eprintln!("  cjcl gc <file.cjcl>              GC analysis & allocation timeline");
+    eprintln!("  cjcl nogc <file.cjcl>            NoGC static verification");
+    eprintln!("  cjcl audit <file.cjcl>           Numerical hygiene analysis");
+    eprintln!("  cjcl precision <file.cjcl>       Precision analysis (f64 vs f32)");
+    eprintln!("  cjcl lock <file.cjcl>            Generate/verify lockfiles");
+    eprintln!("  cjcl parity <file.cjcl>          Dual-executor parity check");
+    eprintln!("  cjcl test <file.cjcl>            Native test runner");
+    eprintln!("  cjcl ci [path]                   Full CI diagnostic suite");
     eprintln!();
     eprintln!("Flags:");
-    eprintln!("  --reproducible                  Enable reproducibility mode");
-    eprintln!("  --seed <N>                      Set RNG seed (default: 42)");
-    eprintln!("  --time                          Print execution time after running");
-    eprintln!("  --mir-opt                       Enable MIR optimizations (CF + DCE)");
-    eprintln!("  --mir-mono                      Enable MIR monomorphization");
-    eprintln!("  --multi-file                    Enable multi-file module resolution");
-    eprintln!("  --color                         Force color output");
-    eprintln!("  --no-color                      Disable color output");
-    eprintln!("  --diagnostic-format <fmt>       Diagnostic format: rich (default) or short");
-    eprintln!("  --help, -h                      Print this help message");
-    eprintln!("  --version, -V                   Print version information");
+    eprintln!("  --reproducible                   Enable reproducibility mode");
+    eprintln!("  --seed <N>                       Set RNG seed (default: 42)");
+    eprintln!("  --time                           Print execution time after running");
+    eprintln!("  --mir-opt                        Enable MIR optimizations (CF + DCE)");
+    eprintln!("  --mir-mono                       Enable MIR monomorphization");
+    eprintln!("  --multi-file                     Enable multi-file module resolution");
+    eprintln!("  --color                          Force color output");
+    eprintln!("  --no-color                       Disable color output");
+    eprintln!("  --diagnostic-format <fmt>        Diagnostic format: rich (default) or short");
+    eprintln!("  --help, -h                       Print this help message");
+    eprintln!("  --version, -V                    Print version information");
     eprintln!();
-    eprintln!("Run `cjc <command> --help` for command-specific help.");
+    eprintln!("Run `cjcl <command> --help` for command-specific help.");
 }
 
 // ── Command implementations ──────────────────────────────────────────
@@ -883,7 +883,7 @@ fn cmd_repl(seed: u64, use_color: bool) {
     let mut editor = line_editor::LineEditor::new_with_color(use_color);
     let mut line_num = 0u64;
 
-    eprintln!("CJC REPL v{}  (type :help for commands, :quit to exit)", VERSION);
+    eprintln!("CJC-Lang REPL v{}  (type :help for commands, :quit to exit)", VERSION);
 
     loop {
         let input = match editor.read_line("cjc> ") {

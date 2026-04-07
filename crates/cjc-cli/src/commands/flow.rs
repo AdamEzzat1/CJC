@@ -1,4 +1,4 @@
-//! `cjc flow` — Streaming computation engine.
+//! `cjcl flow` — Streaming computation engine.
 //!
 //! Processes CSV/TSV/JSONL data streams with O(ncols) memory using:
 //! - Kahan summation for numeric stability
@@ -16,7 +16,7 @@ use std::process;
 use crate::formats::{self, DataFormat};
 use crate::output::{self, OutputMode};
 
-/// Parsed arguments for `cjc flow`.
+/// Parsed arguments for `cjcl flow`.
 pub struct FlowArgs {
     pub file: Option<PathBuf>,
     pub delimiter: char,
@@ -181,7 +181,7 @@ pub fn parse_args(args: &[String]) -> FlowArgs {
             }
             other if !other.starts_with('-') => fa.file = Some(PathBuf::from(other)),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc flow`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl flow`", other);
                 process::exit(1);
             }
         }
@@ -304,7 +304,7 @@ impl ColumnAccum {
     }
 }
 
-/// Entry point for `cjc flow`.
+/// Entry point for `cjcl flow`.
 pub fn run(args: &[String]) {
     let fa = parse_args(args);
 
@@ -325,7 +325,7 @@ pub fn run(args: &[String]) {
             DataFormat::Pickle | DataFormat::Onnx | DataFormat::Joblib => {
                 eprintln!("error: `{}` is a {} model file — cannot aggregate", path.display(), format.label());
                 eprintln!("  Model files are never deserialized for safety reasons.");
-                eprintln!("  Use `cjc schema {}` for metadata inspection.", path.display());
+                eprintln!("  Use `cjcl schema {}` for metadata inspection.", path.display());
                 process::exit(1);
             }
             DataFormat::Jsonl => {
@@ -637,7 +637,7 @@ fn run_binary_metadata(path: &PathBuf, format: DataFormat, fa: &FlowArgs) {
             }
         }
         _ => {
-            eprintln!("cjc flow — {} metadata (aggregation not available)", format.label());
+            eprintln!("cjcl flow — {} metadata (aggregation not available)", format.label());
             eprintln!();
 
             let mut t = crate::table::Table::new(vec!["Property", "Value"]);
@@ -688,9 +688,9 @@ fn write_to_file(path: &PathBuf, content: &str) {
 }
 
 pub fn print_help() {
-    eprintln!("cjc flow — Streaming computation engine");
+    eprintln!("cjcl flow — Streaming computation engine");
     eprintln!();
-    eprintln!("Usage: cjc flow [file] [flags]");
+    eprintln!("Usage: cjcl flow [file] [flags]");
     eprintln!("       cat data.csv | cjc flow [flags]");
     eprintln!();
     eprintln!("Supported formats:");

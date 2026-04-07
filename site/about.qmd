@@ -6,7 +6,7 @@ title: "About"
 
 I'm **Adam Ezzat** — a Data Scientist and Data Analyst based in Cupertino, CA, with a background that spans economics, business analytics, and deep learning. I build machine learning models, design data pipelines, and — in my own time — build programming languages from scratch.
 
-My professional work focuses on forecasting, statistical modeling, and turning messy real-world data into systems that actually make decisions better. My personal work is where I push further: CJC, a deterministic scientific computing language written entirely in Rust, is the project where everything I've learned converges.
+My professional work focuses on forecasting, statistical modeling, and turning messy real-world data into systems that actually make decisions better. My personal work is where I push further: CJC-Lang (Computational Jacobian Core), a deterministic scientific computing language written entirely in Rust, is the project where everything I've learned converges.
 
 ## Professional Experience
 
@@ -54,11 +54,11 @@ Analyzed complex datasets to support product optimization and strategic decision
 - **B.S. in Economics** — Santa Clara University, 2013
 - **Data Science Certificate** (Specialization in Machine and Deep Learning), 2021
 
-## The CJC Project
+## The CJC-Lang Project
 
-Outside of my professional work, I'm building **CJC** — a deterministic scientific computing language implemented as a 20-crate Rust workspace. It's where my data science background meets systems programming: a language with built-in tensors, automatic differentiation, statistical distributions, and guaranteed reproducibility. The compiler, runtime, and all core libraries are built from scratch with nearly zero external dependencies.
+Outside of my professional work, I'm building **CJC-Lang** (Computational Jacobian Core) — a deterministic scientific computing language implemented as a 20-crate Rust workspace. It's where my data science background meets systems programming: a language with built-in tensors, automatic differentiation, statistical distributions, and guaranteed reproducibility. The compiler, runtime, and all core libraries are built from scratch with nearly zero external dependencies.
 
-CJC is in active beta — the full compiler pipeline, dual execution engines, ~300 builtins, and end-to-end ML benchmarks are all working. It's a serious technical project, not a toy, but it's not yet production-ready.
+CJC-Lang is in active beta — the full compiler pipeline, dual execution engines, ~300 builtins, and end-to-end ML benchmarks are all working. It's a serious technical project, not a toy, but it's not yet production-ready.
 
 You can read more about it in [the blog post](/blog/posts/introducing-cjc/index.html) or on the [projects page](/projects.html).
 

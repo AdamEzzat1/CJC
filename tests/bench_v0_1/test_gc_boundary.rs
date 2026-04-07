@@ -3,7 +3,7 @@ use super::helpers;
 
 #[test]
 fn gc_boundary_all_match() {
-    let src = helpers::load_cjc("bench_gc_boundary.cjc");
+    let src = helpers::load_cjc("bench_gc_boundary.cjcl");
     let out = helpers::run_eval(&src, 42);
 
     // The BENCH line's hash should be the snap_hash of "ALL_MATCH"
@@ -19,7 +19,7 @@ fn gc_boundary_all_match() {
 
 #[test]
 fn gc_boundary_120_rounds_has_4_stages() {
-    let src = helpers::load_cjc("bench_gc_boundary.cjc");
+    let src = helpers::load_cjc("bench_gc_boundary.cjcl");
     let out = helpers::run_eval(&src, 42);
 
     // Stages at rounds 29, 59, 89, 119 → indices 0, 1, 2, 3
@@ -46,7 +46,7 @@ fn gc_boundary_120_rounds_has_4_stages() {
 
 #[test]
 fn gc_boundary_eval_mir_parity() {
-    let src = helpers::load_cjc("bench_gc_boundary.cjc");
+    let src = helpers::load_cjc("bench_gc_boundary.cjcl");
     let eval_out = helpers::run_eval(&src, 42);
     let mir_out = helpers::run_mir(&src, 42);
     helpers::assert_parity(&eval_out, &mir_out);

@@ -1,4 +1,4 @@
-//! `cjc pack` — Reproducible packaging.
+//! `cjcl pack` — Reproducible packaging.
 //!
 //! Bundles a CJC script and its referenced artifacts (.snap files, data files)
 //! into a self-contained package directory with a deterministic manifest.
@@ -62,7 +62,7 @@ pub fn parse_args(args: &[String]) -> PackArgs {
             "--color" => pa.output = OutputMode::Color,
             other if !other.starts_with('-') => pa.file = other.to_string(),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc pack`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl pack`", other);
                 process::exit(1);
             }
         }
@@ -71,7 +71,7 @@ pub fn parse_args(args: &[String]) -> PackArgs {
     // --list operates on an existing .pack directory, file can be the dir itself
     if pa.list {
         if pa.file.is_empty() {
-            eprintln!("error: `cjc pack --list` requires a .pack directory argument");
+            eprintln!("error: `cjcl pack --list` requires a .pack directory argument");
             process::exit(1);
         }
         return pa;
@@ -79,13 +79,13 @@ pub fn parse_args(args: &[String]) -> PackArgs {
     // --repro-check operates on an existing .pack directory
     if pa.repro_check {
         if pa.file.is_empty() {
-            eprintln!("error: `cjc pack --repro-check` requires a .pack directory argument");
+            eprintln!("error: `cjcl pack --repro-check` requires a .pack directory argument");
             process::exit(1);
         }
         return pa;
     }
     if pa.file.is_empty() {
-        eprintln!("error: `cjc pack` requires a .cjc file argument");
+        eprintln!("error: `cjcl pack` requires a .cjcl file argument");
         process::exit(1);
     }
     pa
@@ -554,7 +554,7 @@ fn run_repro_check(pa: &PackArgs) {
 
 /// Extensions considered packable when walking a directory.
 const PACKABLE_EXTENSIONS: &[&str] = &[
-    "cjc", "csv", "tsv", "jsonl", "ndjson", "json", "snap", "lock", "toml",
+    "cjcl", "csv", "tsv", "jsonl", "ndjson", "json", "snap", "lock", "toml",
 ];
 
 /// Recursively discover packable files in a directory.
@@ -607,9 +607,9 @@ fn add_entry(entries: &mut Vec<PackEntry>, path: &Path, base: &Path) {
 }
 
 pub fn print_help() {
-    eprintln!("cjc pack — Reproducible packaging");
+    eprintln!("cjcl pack — Reproducible packaging");
     eprintln!();
-    eprintln!("Usage: cjc pack <file.cjc> [flags]");
+    eprintln!("Usage: cjcl pack <file.cjcl> [flags]");
     eprintln!();
     eprintln!("Bundles a script and its referenced artifacts into a package.");
     eprintln!("Auto-discovers .snap, .csv, .tsv, .json references in source.");

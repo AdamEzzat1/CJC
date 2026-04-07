@@ -3,7 +3,7 @@
 //! Tests the multi-file module pipeline: source files → module graph →
 //! merged MIR program → execution.
 //!
-//! Current model: `import foo` brings all of `foo.cjc`'s declarations into
+//! Current model: `import foo` brings all of `foo.cjcl`'s declarations into
 //! the merged program with `foo::` prefix. Calls use the mangled name directly.
 //! A future step will add source-level qualified call rewriting.
 
@@ -27,10 +27,10 @@ fn setup_test_dir(files: &[(&str, &str)]) -> tempfile::TempDir {
 #[test]
 fn h8_build_graph_with_import() {
     let dir = setup_test_dir(&[
-        ("main.cjc", "import math\nlet x = 1;"),
-        ("math.cjc", "fn add(a: f64, b: f64) -> f64 { a + b }"),
+        ("main.cjcl", "import math\nlet x = 1;"),
+        ("math.cjcl", "fn add(a: f64, b: f64) -> f64 { a + b }"),
     ]);
-    let entry = dir.path().join("main.cjc");
+    let entry = dir.path().join("main.cjcl");
     let graph = cjc_module::build_module_graph(&entry).unwrap();
     assert_eq!(graph.module_count(), 2);
 }
@@ -38,10 +38,10 @@ fn h8_build_graph_with_import() {
 #[test]
 fn h8_topo_order_deps_first() {
     let dir = setup_test_dir(&[
-        ("main.cjc", "import alpha\nlet x = 1;"),
-        ("alpha.cjc", "fn a_fn() -> i64 { 1 }"),
+        ("main.cjcl", "import alpha\nlet x = 1;"),
+        ("alpha.cjcl", "fn a_fn() -> i64 { 1 }"),
     ]);
-    let entry = dir.path().join("main.cjc");
+    let entry = dir.path().join("main.cjcl");
     let graph = cjc_module::build_module_graph(&entry).unwrap();
     let order = graph.topological_order().unwrap();
 
@@ -55,10 +55,10 @@ fn h8_topo_order_deps_first() {
 #[test]
 fn h8_merge_prefixes_non_entry_functions() {
     let dir = setup_test_dir(&[
-        ("main.cjc", "import math\nlet x = 1;"),
-        ("math.cjc", "fn add(a: f64, b: f64) -> f64 { a + b }"),
+        ("main.cjcl", "import math\nlet x = 1;"),
+        ("math.cjcl", "fn add(a: f64, b: f64) -> f64 { a + b }"),
     ]);
-    let entry = dir.path().join("main.cjc");
+    let entry = dir.path().join("main.cjcl");
     let graph = cjc_module::build_module_graph(&entry).unwrap();
     let merged = cjc_module::merge_programs(&graph).unwrap();
 
@@ -76,10 +76,10 @@ fn h8_merge_prefixes_non_entry_functions() {
 fn h8_single_file_module_pipeline() {
     // Even a single file works through the module pipeline
     let dir = setup_test_dir(&[(
-        "main.cjc",
+        "main.cjcl",
         "fn square(x: i64) -> i64 { x * x }\nprint(square(7));",
     )]);
-    let entry = dir.path().join("main.cjc");
+    let entry = dir.path().join("main.cjcl");
     let (_val, executor) =
         cjc_mir_exec::run_program_with_modules_executor(&entry, 42).unwrap();
     assert_eq!(executor.output, vec!["49"]);
@@ -89,11 +89,11 @@ fn h8_single_file_module_pipeline() {
 fn h8_deterministic_merge_order() {
     // Build module graph multiple times — merged output must be identical
     let dir = setup_test_dir(&[
-        ("main.cjc", "import alpha\nimport beta\nlet x = 1;"),
-        ("alpha.cjc", "fn a_fn() -> i64 { 1 }"),
-        ("beta.cjc", "fn b_fn() -> i64 { 2 }"),
+        ("main.cjcl", "import alpha\nimport beta\nlet x = 1;"),
+        ("alpha.cjcl", "fn a_fn() -> i64 { 1 }"),
+        ("beta.cjcl", "fn b_fn() -> i64 { 2 }"),
     ]);
-    let entry = dir.path().join("main.cjc");
+    let entry = dir.path().join("main.cjcl");
 
     let graph1 = cjc_module::build_module_graph(&entry).unwrap();
     let merged1 = cjc_module::merge_programs(&graph1).unwrap();

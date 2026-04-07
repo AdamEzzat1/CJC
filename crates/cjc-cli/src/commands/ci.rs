@@ -1,4 +1,4 @@
-//! `cjc ci` — Comprehensive CI diagnostic suite.
+//! `cjcl ci` — Comprehensive CI diagnostic suite.
 //!
 //! Orchestrates multiple diagnostic checks in a single command:
 //! doctor (parse/type errors), proof (determinism), parity (eval ≡ mir-exec),
@@ -44,7 +44,7 @@ pub fn parse_args(args: &[String]) -> CiArgs {
             "--color" => ca.output = OutputMode::Color,
             other if !other.starts_with('-') => ca.path = PathBuf::from(other),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc ci`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl ci`", other);
                 process::exit(1);
             }
         }
@@ -69,16 +69,16 @@ pub fn run(args: &[String]) {
         eprintln!();
     }
 
-    // Collect .cjc files
+    // Collect .cjcl files
     let mut cjc_files: Vec<PathBuf> = Vec::new();
     collect_cjc_files(&ca.path, &mut cjc_files);
     cjc_files.sort();
 
     if cjc_files.is_empty() {
         if ca.output == OutputMode::Json {
-            println!("{{\"error\": \"no .cjc files found\"}}");
+            println!("{{\"error\": \"no .cjcl files found\"}}");
         } else {
-            eprintln!("No .cjc files found in `{}`", ca.path.display());
+            eprintln!("No .cjcl files found in `{}`", ca.path.display());
         }
         process::exit(1);
     }
@@ -290,7 +290,7 @@ fn collect_cjc_files(dir: &Path, out: &mut Vec<PathBuf>) {
         Ok(rd) => rd,
         Err(_) => {
             // Might be a single file
-            if dir.is_file() && dir.extension().and_then(|e| e.to_str()) == Some("cjc") {
+            if dir.is_file() && dir.extension().and_then(|e| e.to_str()) == Some("cjcl") {
                 out.push(dir.to_path_buf());
             }
             return;
@@ -308,7 +308,7 @@ fn collect_cjc_files(dir: &Path, out: &mut Vec<PathBuf>) {
                 continue;
             }
             collect_cjc_files(&path, out);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("cjc") {
+        } else if path.extension().and_then(|e| e.to_str()) == Some("cjcl") {
             out.push(path);
         }
     }
@@ -321,9 +321,9 @@ fn dots(label: &str, total_width: usize) -> String {
 }
 
 pub fn print_help() {
-    eprintln!("cjc ci — Comprehensive CI diagnostic suite");
+    eprintln!("cjcl ci — Comprehensive CI diagnostic suite");
     eprintln!();
-    eprintln!("Usage: cjc ci [path] [flags]");
+    eprintln!("Usage: cjcl ci [path] [flags]");
     eprintln!();
     eprintln!("Runs: doctor + proof + parity + test + nogc");
     eprintln!("Exit code 0 = all pass. Non-zero = failure.");
