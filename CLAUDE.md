@@ -64,7 +64,7 @@ crates/
   cjc-regex/        — NFA-based regex engine
   cjc-snap/         — Binary serialization
   cjc-vizor/        — Grammar-of-graphics visualization library
-  cjc-module/       — Module system (incomplete)
+  cjc-module/       — Multi-file module system (1,183 LOC, wired via `cjcl run --multi-file`)
   cjc-cli/          — CLI frontend
   cjc-analyzer/     — Language server (experimental)
 ```
@@ -123,32 +123,7 @@ Every new operator/expression must work in BOTH executors with identical semanti
 
 Implement the following features in a safe and incremental order.
 
-### 1. `if` AS AN EXPRESSION
-
-Convert `if` from statement-only to expression-capable.
-
-```
-let x = if cond {
-    a
-} else {
-    b
-};
-```
-
-**Requirements:**
-- Both branches must return compatible types
-- Type inference must resolve correctly
-- MIR must support branching expressions
-- Expression must produce a value
-
-**Work required:**
-- AST update (`ExprKind::IfExpr`)
-- Type checker update
-- HIR lowering update
-- MIR lowering update
-- Both interpreter execution paths
-
-### 2. MIR INTEGRATION FOR AUTODIFF
+### 1. MIR INTEGRATION FOR AUTODIFF
 
 Ensure Automatic Differentiation (AD) integrates with MIR execution.
 
@@ -160,23 +135,16 @@ Ensure Automatic Differentiation (AD) integrates with MIR execution.
 
 **Focus areas:** `cjc-ad`, `cjc-mir`, runtime gradient execution
 
-### 3. FUNCTION SIGNATURE EXTENSIONS
+### 2. DEFAULT PARAMETERS
 
-**Default Parameters:**
 ```
 fn solve(x: f64, tol: f64 = 1e-6)
 ```
 - Parser support, signature representation update, call-site lowering, MIR default argument insertion
+- `Param::default: Option<Expr>` already exists in `cjc-ast`; parser path does not yet accept `=` after a type annotation
+- Variadic functions (`fn sum(...values: f64)`) are already shipped — see `tests/test_variadic.rs` (11 tests, all passing) and `Param::is_variadic` in `cjc-ast/src/lib.rs:298`
 
-**Variadic Functions:**
-```
-fn sum(...values: f64)
-```
-- Variadics must lower to deterministic arrays
-- No dynamic allocation surprises
-- MIR representation must be stable
-
-### 4. NUMERICAL SOLVER INFRASTRUCTURE
+### 3. NUMERICAL SOLVER INFRASTRUCTURE
 
 Add initial infrastructure/stubs only (NOT full implementations):
 - `ode_step()` — ODE solver primitive
@@ -185,7 +153,7 @@ Add initial infrastructure/stubs only (NOT full implementations):
 
 **Goal:** Allow future libraries (like Bastion) to build on them.
 
-### 5. SPARSE LINEAR ALGEBRA EXPANSION
+### 4. SPARSE LINEAR ALGEBRA EXPANSION
 
 Add support for sparse eigenvalue solvers (Lanczos, Arnoldi).
 
@@ -193,23 +161,7 @@ Add support for sparse eigenvalue solvers (Lanczos, Arnoldi).
 - Deterministic iteration ordering
 - Stable floating-point reductions (BinnedAccumulator)
 
-### 6. MULTI-FILE MODULE SYSTEM
-
-Fix module resolution so programs can span multiple files.
-
-```
-mod math;
-mod stats;
-// or
-import stats.linear
-```
-
-**Ensure:**
-- Deterministic module resolution order
-- Clear compile errors for circular dependencies
-- No ambiguous name resolution
-
-### 7. DECORATORS AS A LANGUAGE FEATURE
+### 5. DECORATORS AS A LANGUAGE FEATURE
 
 ```
 @log

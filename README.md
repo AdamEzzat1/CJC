@@ -37,7 +37,7 @@ These are goals being worked toward, not finished claims.
 
 ## What CJC-Lang Has Proven So Far
 
-The test suite currently has **3,700+ tests** across the workspace, covering:
+The test suite currently has **6,715+ tests** across the workspace — 1,913 unit tests in `crates/*/src/` plus 4,802 integration tests in `tests/`, with 22 `proptest!` property-test macros and 38 `bolero` fuzz targets on top. **5,353 pass in the default `cargo test --workspace --release` build**; the remainder are feature-gated (parallel, quantum backends, etc.). Coverage includes:
 
 ### Language Fundamentals (Passing)
 - Lexer, parser, and type system correctness
@@ -59,7 +59,7 @@ The test suite currently has **3,700+ tests** across the workspace, covering:
 - Automatic differentiation (forward-mode dual numbers, reverse-mode tape)
 - Tensor operations (create, reshape, element access, arithmetic)
 - Deterministic linear algebra operations
-- 221+ built-in functions (math, statistics, ML, signal processing, data wrangling)
+- 440+ built-in functions (363 in `cjc-runtime` + 83 in `cjc-quantum`) covering math, statistics, ML, signal processing, data wrangling, linear algebra, and quantum simulation
 
 ### Data and Visualization (Passing)
 - 73+ DataFrame operations (filter, group_by, join, select, pivot, window functions)
@@ -68,9 +68,7 @@ The test suite currently has **3,700+ tests** across the workspace, covering:
 - Binary serialization
 
 ### What Is Not Yet Working
-- Multi-file module system (incomplete)
 - Default function parameters
-- Variadic functions
 - Decorators
 - MIR-level autodiff integration
 - Browser compilation target
@@ -147,7 +145,7 @@ These results are modest. The agent learns basic material awareness and consiste
 
 **CJC-Lang Tests:**
 ```bash
-cargo test --workspace                    # All 3,700+ tests
+cargo test --workspace                    # 5,353 default-build tests (6,715+ markers incl. feature-gated)
 cargo test --test test_chess_rl_project   # Chess engine + V1 RL (150 tests)
 cargo test --test test_chess_rl_advanced  # ML upgrade tests (66 tests)
 ```
@@ -324,14 +322,14 @@ Source → [Lexer] → Tokens → [Parser] → AST → [TypeChecker] → Typed A
 | `cjc-eval` | AST tree-walk interpreter (v1) |
 | `cjc-mir-exec` | MIR register-machine executor (v2) |
 | `cjc-dispatch` | Operator dispatch layer |
-| `cjc-runtime` | 221+ builtins, tensor system, COW buffers |
+| `cjc-runtime` | 363 builtins, tensor system, COW buffers |
 | `cjc-ad` | Automatic differentiation (forward + reverse) |
 | `cjc-data` | DataFrame DSL (filter, group_by, join) |
 | `cjc-repro` | Deterministic RNG, Kahan/Binned accumulators |
 | `cjc-regex` | NFA-based regex engine |
 | `cjc-snap` | Binary serialization |
 | `cjc-vizor` | Grammar-of-graphics visualization |
-| `cjc-module` | Module system (incomplete) |
+| `cjc-module` | Multi-file module system (wired via `cjcl run --multi-file`) |
 | `cjc-cli` | CLI frontend and REPL |
 | `cjc-analyzer` | Language server (experimental) |
 
@@ -387,9 +385,11 @@ Requires a Rust toolchain (rustc, cargo). No other dependencies.
 
 ```
 crates/                  — 20 Rust crates (language implementation)
-tests/                   — 318 test files, 3,700+ tests
-  chess_rl_project/      — Chess RL CJC tests (150 tests)
-  chess_rl_advanced/     — ML upgrade tests (66 tests)
+tests/                   — 4,802 integration-test markers across 118 test binaries
+  chess_rl_project/      — Chess RL CJC tests (69 tests)
+  chess_rl_advanced/     — ML upgrade tests (84 tests)
+  chess_rl_hardening/    — Robustness tests (104 tests)
+  chess_rl_playability/  — End-to-end gameplay (62 tests)
 examples/
   chess_rl_platform.html — Interactive browser demo (self-contained)
 docs/                    — Design documents and specifications
@@ -406,10 +406,13 @@ cargo test --test test_eval    # Run interpreter tests
 
 | Suite | Tests | Description |
 |-------|-------|-------------|
-| Workspace Total | **3,700+** | All crates + integration tests |
-| Chess RL | 216 | Engine, training, determinism, fuzz |
+| Raw `#[test]` markers | **6,715** | 1,913 unit + 4,802 integration |
+| Default build passing | **5,353** | `cargo test --workspace --release` (118 binaries, 0 failures) |
+| Property tests | 22 `proptest!` macros | Each generates hundreds of random cases per run |
+| Fuzz targets | 38 `bolero::check` | Structure-aware fuzzing |
+| Chess RL | 319 | Engine, training, determinism, fuzz (across 4 suites) |
+| Dedicated parity files | 179 across 13 files | Eval vs MIR-exec bit-identity |
 | Language Hardening | 83 | Syntax, operators, ML builtins |
-| Parity Gates | 50+ | Eval vs MIR-exec equivalence |
 | Data Science | 100+ | Tidy operations, CSV, joins |
 | Mathematics | 120 | Stats, linalg, distributions |
 

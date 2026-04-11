@@ -3457,11 +3457,28 @@ impl Interpreter {
                         let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| EvalError::Runtime("expected GradGraph object".into()))?;
                         Ok(Value::Int(graph.scalar_mul(a, s) as i64))
                     }
+                    "mlp_layer" => {
+                        if args.len() != 4 { return Err(EvalError::Runtime("mlp_layer requires 4 args: input, weight, bias, activation_str".into())); }
+                        let input = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
+                        let weight = match &args[1] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
+                        let bias = match &args[2] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
+                        let act_str = match &args[3] { Value::String(s) => s.as_str(), _ => return Err(EvalError::Runtime("expected String for activation".into())) };
+                        let activation = match act_str {
+                            "tanh" => cjc_ad::pinn::Activation::Tanh,
+                            "sigmoid" => cjc_ad::pinn::Activation::Sigmoid,
+                            "relu" => cjc_ad::pinn::Activation::Relu,
+                            "none" | "" => cjc_ad::pinn::Activation::None,
+                            _ => return Err(EvalError::Runtime(format!("unknown activation: {act_str}"))),
+                        };
+                        let mut borrow = inner.borrow_mut();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| EvalError::Runtime("expected GradGraph object".into()))?;
+                        Ok(Value::Int(graph.mlp_layer(input, weight, bias, activation) as i64))
+                    }
                     "backward" => {
                         if args.len() != 1 { return Err(EvalError::Runtime("backward requires 1 arg: loss_node_index".into())); }
                         let loss_idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
-                        let borrow = inner.borrow();
-                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().ok_or_else(|| EvalError::Runtime("expected GradGraph object".into()))?;
+                        let mut borrow = inner.borrow_mut();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| EvalError::Runtime("expected GradGraph object".into()))?;
                         graph.backward(loss_idx);
                         Ok(Value::Void)
                     }
@@ -3493,17 +3510,34 @@ impl Interpreter {
                         if args.len() != 2 { return Err(EvalError::Runtime("set_tensor requires 2 args: node_index, tensor".into())); }
                         let idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
                         let t = match &args[1] { Value::Tensor(t) => t.clone(), _ => return Err(EvalError::Runtime("expected Tensor".into())) };
-                        let borrow = inner.borrow();
-                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().ok_or_else(|| EvalError::Runtime("expected GradGraph object".into()))?;
+                        let mut borrow = inner.borrow_mut();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| EvalError::Runtime("expected GradGraph object".into()))?;
                         graph.set_tensor(idx, t);
                         Ok(Value::Void)
                     }
                     "zero_grad" => {
                         if !args.is_empty() { return Err(EvalError::Runtime("zero_grad takes 0 arguments".into())); }
-                        let borrow = inner.borrow();
-                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().ok_or_else(|| EvalError::Runtime("expected GradGraph object".into()))?;
+                        let mut borrow = inner.borrow_mut();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| EvalError::Runtime("expected GradGraph object".into()))?;
                         graph.zero_grad();
                         Ok(Value::Void)
+                    }
+                    "backward_collect" => {
+                        // backward_collect(loss_idx, param_indices_array) → Array of Tensors
+                        if args.len() != 2 { return Err(EvalError::Runtime("backward_collect requires 2 args: loss_idx, param_indices".into())); }
+                        let loss_idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
+                        let indices: Vec<usize> = match &args[1] {
+                            Value::Array(arr) => arr.iter().map(|v| match v { Value::Int(i) => Ok(*i as usize), _ => Err(EvalError::Runtime("expected Int in indices array".into())) }).collect::<Result<Vec<_>, _>>()?,
+                            _ => return Err(EvalError::Runtime("expected Array of param indices".into())),
+                        };
+                        let mut borrow = inner.borrow_mut();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| EvalError::Runtime("expected GradGraph object".into()))?;
+                        let grads = graph.backward_collect(loss_idx, &indices);
+                        let values: Vec<Value> = grads.into_iter().map(|opt| match opt {
+                            Some(t) => Value::Tensor(t),
+                            None => Value::Void,
+                        }).collect();
+                        Ok(Value::Array(std::rc::Rc::new(values)))
                     }
                     "jacobian" => {
                         if args.len() != 2 { return Err(EvalError::Runtime("jacobian requires 2 args: output_idx, param_idx".into())); }

@@ -219,8 +219,8 @@ fn bench_reverse_mode_ad() {
         let loss2 = graph2.sum(sum_id2);
         graph2.backward(loss2);
 
-        let grad1 = graph.nodes[param_ids[0]].borrow().grad.as_ref().unwrap().to_vec();
-        let grad2 = graph2.nodes[param_ids2[0]].borrow().grad.as_ref().unwrap().to_vec();
+        let grad1 = graph.grad(param_ids[0]).unwrap().to_vec();
+        let grad2 = graph2.grad(param_ids2[0]).unwrap().to_vec();
         assert_eq!(grad1, grad2, "Reverse AD not deterministic");
     }
 }

@@ -80,6 +80,8 @@ pub mod builtins;
 pub mod buffer;
 /// N-dimensional tensor with element-wise, reduction, linalg, and NN operations.
 pub mod tensor;
+/// Deterministic binary serialization for tensors and tensor lists.
+pub mod tensor_snap;
 /// Pre-allocated KV-cache scratchpad for zero-allocation transformer inference.
 pub mod scratchpad;
 /// 16-byte-aligned memory pool for SIMD-friendly byte buffers.
@@ -153,6 +155,9 @@ pub mod timeseries;
 pub mod integrate;
 /// Numerical differentiation (finite differences).
 pub mod differentiate;
+/// Deterministic profile counters (Tier 2 of Chess RL v2.3). Write-only
+/// timing sink that does not perturb program state, RNG, or weight hashes.
+pub mod profile;
 
 // --- Re-exports for backward compatibility ---
 // All downstream crates that were doing `use cjc_runtime::Tensor` etc. continue to work.

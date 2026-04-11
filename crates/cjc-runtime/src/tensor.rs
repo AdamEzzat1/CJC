@@ -764,6 +764,20 @@ impl Tensor {
         self.add(other).expect("Tensor::add shape mismatch")
     }
 
+    /// In-place element-wise addition. **Panics** on shape mismatch.
+    ///
+    /// Mutates `self` instead of allocating a new tensor. Uses COW: if the
+    /// underlying buffer is shared, `make_unique()` deep-copies first.
+    pub fn add_assign_unchecked(&mut self, other: &Tensor) {
+        assert_eq!(self.shape, other.shape, "Tensor::add_assign shape mismatch");
+        self.buffer.make_unique();
+        let other_data = other.buffer.borrow_data();
+        let mut self_data = self.buffer.borrow_data_mut();
+        for (a, b) in self_data.iter_mut().zip(other_data.iter()) {
+            *a += b;
+        }
+    }
+
     /// Element-wise subtraction. **Panics** on shape mismatch.
     pub fn sub_unchecked(&self, other: &Tensor) -> Tensor {
         self.sub(other).expect("Tensor::sub shape mismatch")

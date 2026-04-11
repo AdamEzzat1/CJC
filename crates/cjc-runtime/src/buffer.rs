@@ -14,7 +14,7 @@
 //!
 //! [`Tensor`]: crate::tensor::Tensor
 
-use std::cell::{Ref, RefCell};
+use std::cell::{Ref, RefCell, RefMut};
 use std::rc::Rc;
 
 use crate::error::RuntimeError;
@@ -88,6 +88,12 @@ impl<T: Clone> Buffer<T> {
     /// The returned `Ref` guard keeps the borrow alive.
     pub fn borrow_data(&self) -> Ref<Vec<T>> {
         self.inner.borrow()
+    }
+
+    /// Mutably borrow the underlying Vec without cloning.
+    /// Call `make_unique()` first if the buffer may be shared.
+    pub fn borrow_data_mut(&self) -> RefMut<Vec<T>> {
+        self.inner.borrow_mut()
     }
 
     /// Force a deep copy, returning a new `Buffer` that does not share

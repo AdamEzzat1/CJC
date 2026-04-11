@@ -1,3 +1,5 @@
+> **Pre-v0.1.4 document.** Uses legacy naming: CJC (now CJC-Lang), `cjc` (now `cjcl`), `.cjc` (now `.cjcl`). Kept unmodified for historical accuracy. See [../REBRAND_NOTICE.md](../REBRAND_NOTICE.md) for the full mapping.
+
 # Gap Closure: Parallel Matmul, Vec COW, F16, Range/Slice, Fixtures
 
 **Date:** 2026-02-23

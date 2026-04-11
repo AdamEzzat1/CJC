@@ -1,0 +1,406 @@
+warning: unused imports: `BinOp`, `Block`, and `DeclKind`
+  --> crates\cjc-ast\src\metrics.rs:17:5
+   |
+17 |     BinOp, Block, DeclKind, Expr, ExprKind, FnDecl, Param, Pattern, Program, Stmt, StmtKind,
+   |     ^^^^^  ^^^^^  ^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `Ident`, `PatternKind`, and `Pattern`
+  --> crates\cjc-ast\src\validate.rs:16:52
+   |
+16 |     Block, Decl, DeclKind, Expr, ExprKind, FnDecl, Ident, Pattern, PatternKind, Program, Stmt,
+   |                                                    ^^^^^  ^^^^^^^  ^^^^^^^^^^^
+
+warning: unused variable: `span`
+   --> crates\cjc-ast\src\validate.rs:181:83
+    |
+181 |     fn check_duplicate_fields(&mut self, fields: &[crate::FieldDecl], kind: &str, span: crate::Span) {
+    |                                                                                   ^^^^ help: if this is intentional, prefix it with an underscore: `_span`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `elif`
+    --> crates\cjc-ast\src\lib.rs:1510:44
+     |
+1510 |                         ElseBranch::ElseIf(elif) => {
+     |                                            ^^^^ help: if this is intentional, prefix it with an underscore: `_elif`
+
+warning: `cjc-ast` (lib) generated 4 warnings (run `cargo fix --lib -p cjc-ast` to apply 2 suggestions)
+warning: unused variable: `m`
+    --> crates\cjc-types\src\lib.rs:2208:9
+     |
+2208 |     let m = a.len();
+     |         ^ help: if this is intentional, prefix it with an underscore: `_m`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `cjc-types` (lib) generated 1 warning
+warning: unused import: `MirFunction`
+  --> crates\cjc-mir\src\reduction.rs:49:44
+   |
+49 | use crate::{MirBody, MirExpr, MirExprKind, MirFunction, MirProgram, MirStmt};
+   |                                            ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `SsaVar`
+  --> crates\cjc-mir\src\ssa_loop_overlay.rs:28:27
+   |
+28 | use crate::ssa::{SsaForm, SsaVar};
+   |                           ^^^^^^
+
+warning: unused imports: `MirExprKind` and `MirExpr`
+  --> crates\cjc-mir\src\verify.rs:33:31
+   |
+33 | use crate::{BlockId, MirBody, MirExpr, MirExprKind, MirFunction, MirProgram, MirStmt};
+   |                               ^^^^^^^  ^^^^^^^^^^^
+
+warning: unused variable: `params`
+   --> crates\cjc-mir\src\ssa_optimize.rs:719:30
+    |
+719 | fn ssa_dce(cfg: &mut MirCfg, params: &[String]) {
+    |                              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_params`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `mutable` is never read
+   --> crates\cjc-mir\src\escape.rs:206:5
+    |
+203 | struct BindingInfo {
+    |        ----------- field in this struct
+...
+206 |     mutable: bool,
+    |     ^^^^^^^
+    |
+    = note: `BindingInfo` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `is_constant` is never used
+   --> crates\cjc-mir\src\ssa_optimize.rs:252:8
+    |
+231 | impl Lattice {
+    | ------------ method in this implementation
+...
+252 |     fn is_constant(&self) -> bool {
+    |        ^^^^^^^^^^^
+
+warning: `cjc-mir` (lib) generated 6 warnings (run `cargo fix --lib -p cjc-mir` to apply 3 suggestions)
+warning: unused import: `crate::accumulator::BinnedAccumulatorF64`
+  --> crates\cjc-runtime\src\builtins.rs:14:5
+   |
+14 | use crate::accumulator::BinnedAccumulatorF64;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates\cjc-runtime\src\linalg.rs:633:13
+    |
+633 |         let mut lo = 0usize;
+    |             ----^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `f` is never read
+  --> crates\cjc-runtime\src\distributions.rs:70:13
+   |
+70 |     let mut f = 1.0;
+   |             ^
+   |
+   = help: maybe it is overwritten before being read?
+   = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable `total_n` is assigned to, but never used
+    --> crates\cjc-runtime\src\hypothesis.rs:1160:13
+     |
+1160 |     let mut total_n = 0usize;
+     |             ^^^^^^^
+     |
+     = note: consider using `_total_n` instead
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+help: you might have meant to pattern match on the similarly named constant `MAX_TOTAL_CACHED`
+     |
+1160 -     let mut total_n = 0usize;
+1160 +     let mut tensor_pool::MAX_TOTAL_CACHED = 0usize;
+     |
+
+warning: value assigned to `f` is never read
+    --> crates\cjc-runtime\src\hypothesis.rs:1269:13
+     |
+1269 |     let mut f = 1e-30;
+     |             ^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: associated function `givens_rotation` is never used
+    --> crates\cjc-runtime\src\linalg.rs:1376:8
+     |
+  24 | impl Tensor {
+     | ----------- associated function in this implementation
+...
+1376 |     fn givens_rotation(a: f64, b: f64) -> (f64, f64, f64) {
+     |        ^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `DF_CV_TREND` is never used
+  --> crates\cjc-runtime\src\stationarity.rs:29:7
+   |
+29 | const DF_CV_TREND: &[(f64, f64)] = &[
+   |       ^^^^^^^^^^^
+
+warning: constant `KPSS_CV_TREND` is never used
+  --> crates\cjc-runtime\src\stationarity.rs:81:7
+   |
+81 | const KPSS_CV_TREND: &[(f64, f64)] = &[
+   |       ^^^^^^^^^^^^^
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+  --> crates\cjc-runtime\src\buffer.rs:89:24
+   |
+89 |     pub fn borrow_data(&self) -> Ref<Vec<T>> {
+   |                        ^^^^^     ^^^^^^^^^^^ the same lifetime is hidden here
+   |                        |
+   |                        the lifetime is elided here
+   |
+   = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+   = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+   |
+89 |     pub fn borrow_data(&self) -> Ref<'_, Vec<T>> {
+   |                                      +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> crates\cjc-runtime\src\tensor_dtype.rs:319:25
+    |
+319 |     pub fn borrow_bytes(&self) -> Ref<Vec<u8>> {
+    |                         ^^^^^     ^^^^^^^^^^^^ the same lifetime is hidden here
+    |                         |
+    |                         the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+319 |     pub fn borrow_bytes(&self) -> Ref<'_, Vec<u8>> {
+    |                                       +++
+
+warning: `cjc-runtime` (lib) generated 10 warnings (run `cargo fix --lib -p cjc-runtime` to apply 5 suggestions)
+warning: unused imports: `PureGate`, `has_pure_flag`, `is_pure`, and `wrap_pure`
+  --> crates\cjc-quantum\src\dispatch.rs:25:56
+   |
+25 |     PureMps, PureStabilizer, PureDensity, PureCircuit, PureGate,
+   |                                                        ^^^^^^^^
+26 |     has_pure_flag, is_pure, wrap_pure,
+   |     ^^^^^^^^^^^^^  ^^^^^^^  ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates\cjc-quantum\src\fermion.rs:173:38
+    |
+173 | fn apply_pauli_string(ops: &[Pauli], mut k: usize) -> (usize, ComplexF64) {
+    |                                      ----^
+    |                                      |
+    |                                      help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `sg`
+   --> crates\cjc-quantum\src\pure.rs:900:13
+    |
+900 |         let sg = gamma.sqrt();
+    |             ^^
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+help: if this is intentional, prefix it with an underscore
+    |
+900 |         let _sg = gamma.sqrt();
+    |             +
+help: you might have meant to pattern match on the similarly named constant `INV_SQRT2`
+    |
+900 -         let sg = gamma.sqrt();
+900 +         let density::INV_SQRT2 = gamma.sqrt();
+    |
+
+warning: function `flip_bit` is never used
+  --> crates\cjc-quantum\src\stabilizer.rs:58:4
+   |
+58 | fn flip_bit(words: &mut [u64], idx: usize) {
+   |    ^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `c_im` is never used
+  --> crates\cjc-quantum\src\pure.rs:51:4
+   |
+51 | fn c_im(a: C) -> f64 { a.1 }
+   |    ^^^^
+
+warning: function `c_sub` is never used
+  --> crates\cjc-quantum\src\pure.rs:57:4
+   |
+57 | fn c_sub(a: C, b: C) -> C { (a.0 - b.0, a.1 - b.1) }
+   |    ^^^^^
+
+warning: `cjc-quantum` (lib) generated 6 warnings (run `cargo fix --lib -p cjc-quantum` to apply 3 suggestions)
+warning: unused import: `BufReader`
+  --> crates\cjc-cli\src\formats.rs:15:30
+   |
+15 | use std::io::{self, BufRead, BufReader, Read};
+   |                              ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `path`
+   --> crates\cjc-cli\src\commands\patch.rs:957:29
+    |
+957 |             if let Some(ref path) = pa.file {
+    |                             ^^^^ help: if this is intentional, prefix it with an underscore: `_path`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `verbose`
+   --> crates\cjc-cli\src\commands\doctor.rs:555:67
+    |
+555 | fn check_nondeterminism(file: &Path, findings: &mut Vec<Finding>, verbose: bool) {
+    |                                                                   ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_verbose`
+
+warning: type `Stage` is more private than the item `EmitArgs::stage`
+  --> crates\cjc-cli\src\commands\emit.rs:43:5
+   |
+43 |     pub stage: Stage,
+   |     ^^^^^^^^^^^^^^^^ field `EmitArgs::stage` is reachable at visibility `pub`
+   |
+note: but type `Stage` is only usable at visibility `pub(self)`
+  --> crates\cjc-cli\src\commands\emit.rs:15:1
+   |
+15 | enum Stage {
+   | ^^^^^^^^^^
+   = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `Category` is more private than the item `AuditArgs::category`
+  --> crates\cjc-cli\src\commands\audit.rs:77:5
+   |
+77 |     pub category: Option<Category>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `AuditArgs::category` is reachable at visibility `pub`
+   |
+note: but type `Category` is only usable at visibility `pub(self)`
+  --> crates\cjc-cli\src\commands\audit.rs:32:1
+   |
+32 | enum Category {
+   | ^^^^^^^^^^^^^
+
+warning: field `reproducible` is never read
+  --> crates\cjc-cli\src\lib.rs:96:5
+   |
+91 | struct Config {
+   |        ------ field in this struct
+...
+96 |     reproducible: bool,
+   |     ^^^^^^^^^^^^
+   |
+   = note: `Config` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `cmd_check` is never used
+   --> crates\cjc-cli\src\lib.rs:657:4
+    |
+657 | fn cmd_check(source: &str, filename: &str, use_color: bool, diag_format: cjc_diag::DiagnosticFormat) {
+    |    ^^^^^^^^^
+
+warning: function `rebuild_jsonl_object` is never used
+   --> crates\cjc-cli\src\commands\patch.rs:357:4
+    |
+357 | fn rebuild_jsonl_object(pairs: &[(String, String)]) -> String {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: method `mean` is never used
+  --> crates\cjc-cli\src\commands\inspect.rs:98:8
+   |
+39 | impl ColStats {
+   | ------------- method in this implementation
+...
+98 |     fn mean(&self) -> Option<f64> {
+   |        ^^^^
+
+warning: method `name` is never used
+  --> crates\cjc-cli\src\commands\emit.rs:31:8
+   |
+21 | impl Stage {
+   | ---------- method in this implementation
+...
+31 |     fn name(&self) -> &'static str {
+   |        ^^^^
+
+warning: `cjc-cli` (lib) generated 10 warnings (run `cargo fix --lib -p cjc-cli` to apply 1 suggestion)
+   Compiling cjc-lang v0.1.4 (C:\Users\adame\CJC)
+    Finished `release` profile [optimized] target(s) in 4.01s
+     Running tests\test_chess_rl_v2_2_phase_d.rs (target\release\deps\test_chess_rl_v2_2_phase_d-9d5f2a263b77bb46.exe)
+
+running 1 test
+test phase_d_v22_training_run has been running for over 60 seconds
+0
+20
+0
+0
+9
+1
+1000
+0
+8
+0
+3194409110565838047
+2
+0
+
+CJC-Lang Chess RL v2.2 — Phase D training summary
+=====================================================
+episodes:              60
+max_moves:             80
+lr:                    0.001
+temp_start:            1.2
+temp_end:              0.8
+penalty_per_ply:       0.001
+eval_temp:             0.15
+backend:               cjc-eval (tree-walk)
+wall clock:            4387.0s (73.12 min)
+
+vs random (20 games, stochastic eval):
+wins/draws/losses: 0/20/0
+win rate:          0.500
+
+vs material-greedy (10 games, stochastic eval):
+wins/draws/losses: 0/9/1
+win rate:          0.450
+
+snapshot gauntlet (2 snapshots, 4 games each, K=32):
+wins/draws/losses: 0/8/0
+final Elo:         1000.0
+Elo gain:          +0.0
+
+training signal:
+non-zero terminals: 2/60
+repetition draws:   0/60
+
+final weight hash:     3194409110565838047
+
+Tier 1 gate check:
+[MISS] ≥60%% vs random     (measured: 0.500)
+[MISS] ≥55%% vs greedy     (measured: 0.450)
+[MISS] Elo gain ≥ +25      (measured: +0.0)
+[MISS] ≥20/60 non-zero     (measured: 2/60)
+[MISS] ≤45 min wall clock  (measured: 73.12 min)
+
+--- Tier 1 gate summary ---
+  random  ≥60%:  false (0.500)
+  greedy  ≥55%:  false (0.450)
+  elo     ≥+25:  false (+0.0)
+  nonzero ≥20:   false (2/60)
+  time    ≤45m:  false (73.12 min)
+test phase_d_v22_training_run ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 85 filtered out; finished in 4387.05s
+

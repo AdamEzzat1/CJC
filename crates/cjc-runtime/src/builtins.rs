@@ -1207,6 +1207,23 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 _ => Err("file_write requires (String, String) arguments".into()),
             }
         }
+        "file_append" => {
+            if args.len() != 2 { return Err("file_append requires 2 arguments (path, content)".into()); }
+            match (&args[0], &args[1]) {
+                (Value::String(path), Value::String(content)) => {
+                    use std::io::Write;
+                    let mut f = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(path.as_str())
+                        .map_err(|e| format!("file_append error: {}", e))?;
+                    f.write_all(content.as_bytes())
+                        .map_err(|e| format!("file_append error: {}", e))?;
+                    Ok(Some(Value::Void))
+                }
+                _ => Err("file_append requires (String, String) arguments".into()),
+            }
+        }
         "file_exists" => {
             if args.len() != 1 { return Err("file_exists requires 1 argument".into()); }
             match &args[0] {
@@ -1228,6 +1245,545 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 }
                 _ => Err(format!("file_lines requires String path, got {}", args[0].type_name())),
             }
+        }
+
+        // ── Profile counters (Tier 2, Chess RL v2.3) ─────────────────
+        // Thread-local write-only sink. The handle returned by
+        // profile_zone_start is an opaque token for profile_zone_stop;
+        // program logic must not branch on its integer value. See
+        // `docs/chess_rl_v2/PROFILE_DESIGN.md` for the full determinism
+        // story.
+        "profile_zone_start" => {
+            if args.len() != 1 {
+                return Err("profile_zone_start requires 1 argument (name: String)".into());
+            }
+            match &args[0] {
+                Value::String(name) => {
+                    let h = crate::profile::zone_start(name.as_str());
+                    Ok(Some(Value::Int(h)))
+                }
+                _ => Err(format!(
+                    "profile_zone_start requires String name, got {}",
+                    args[0].type_name()
+                )),
+            }
+        }
+        "profile_zone_stop" => {
+            if args.len() != 1 {
+                return Err("profile_zone_stop requires 1 argument (handle: Int)".into());
+            }
+            match &args[0] {
+                Value::Int(h) => {
+                    let elapsed = crate::profile::zone_stop(*h);
+                    Ok(Some(Value::Float(elapsed)))
+                }
+                _ => Err(format!(
+                    "profile_zone_stop requires Int handle, got {}",
+                    args[0].type_name()
+                )),
+            }
+        }
+        "profile_dump" => {
+            if args.len() != 1 {
+                return Err("profile_dump requires 1 argument (path: String)".into());
+            }
+            match &args[0] {
+                Value::String(path) => {
+                    let rows = crate::profile::dump_to_path(path.as_str())?;
+                    Ok(Some(Value::Int(rows)))
+                }
+                _ => Err(format!(
+                    "profile_dump requires String path, got {}",
+                    args[0].type_name()
+                )),
+            }
+        }
+
+        // ── Chess RL v2.3 native hot-path kernels (Tier 3) ────────────
+        // These replace O(n²) CJC-Lang loops with tight Rust implementations.
+        // They must produce **bit-identical** output to the pure-CJC-Lang
+        // equivalents for every legal chess position.
+
+        // encode_state_fast(board, side, castling, ep_sq, halfmove) -> Tensor[1,774]
+        //
+        // Native replacement for the CJC-Lang `encode_state` function.
+        // The pure-CJC version calls `arr_set` ~38 times, each copying the
+        // entire 774-element array (quadratic). This version fills a
+        // pre-allocated buffer in a single pass: O(774).
+        //
+        // Determinism story: pure arithmetic on integer inputs. No RNG, no
+        // FMA, no iteration-order dependence. The output is a fresh tensor
+        // with exactly the same f64 values that the CJC-Lang version would
+        // produce. Tested via bit-identical parity on ≥100 random boards.
+        "encode_state_fast" => {
+            if args.len() != 5 {
+                return Err(
+                    "encode_state_fast requires 5 arguments: board(Array[64]), side(Int), castling(Array[4]), ep_sq(Int), halfmove(Int)"
+                        .into(),
+                );
+            }
+            let board = match &args[0] {
+                Value::Array(arr) => {
+                    if arr.len() != 64 {
+                        return Err(format!(
+                            "encode_state_fast: board must have 64 elements, got {}",
+                            arr.len()
+                        ));
+                    }
+                    let mut b = [0i64; 64];
+                    for (i, v) in arr.iter().enumerate() {
+                        b[i] = match v {
+                            Value::Int(n) => *n,
+                            _ => {
+                                return Err(format!(
+                                    "encode_state_fast: board[{i}] must be Int, got {}",
+                                    v.type_name()
+                                ))
+                            }
+                        };
+                    }
+                    b
+                }
+                _ => {
+                    return Err(format!(
+                        "encode_state_fast: board must be Array, got {}",
+                        args[0].type_name()
+                    ))
+                }
+            };
+            let side = match &args[1] {
+                Value::Int(n) => *n,
+                _ => {
+                    return Err(format!(
+                        "encode_state_fast: side must be Int, got {}",
+                        args[1].type_name()
+                    ))
+                }
+            };
+            let castling = match &args[2] {
+                Value::Array(arr) => {
+                    if arr.len() != 4 {
+                        return Err(format!(
+                            "encode_state_fast: castling must have 4 elements, got {}",
+                            arr.len()
+                        ));
+                    }
+                    let mut c = [0i64; 4];
+                    for (i, v) in arr.iter().enumerate() {
+                        c[i] = match v {
+                            Value::Int(n) => *n,
+                            _ => {
+                                return Err(format!(
+                                    "encode_state_fast: castling[{i}] must be Int, got {}",
+                                    v.type_name()
+                                ))
+                            }
+                        };
+                    }
+                    c
+                }
+                _ => {
+                    return Err(format!(
+                        "encode_state_fast: castling must be Array, got {}",
+                        args[2].type_name()
+                    ))
+                }
+            };
+            let ep_sq = match &args[3] {
+                Value::Int(n) => *n,
+                _ => {
+                    return Err(format!(
+                        "encode_state_fast: ep_sq must be Int, got {}",
+                        args[3].type_name()
+                    ))
+                }
+            };
+            let halfmove = match &args[4] {
+                Value::Int(n) => *n,
+                _ => {
+                    return Err(format!(
+                        "encode_state_fast: halfmove must be Int, got {}",
+                        args[4].type_name()
+                    ))
+                }
+            };
+
+            // --- Compute the 774-dim feature vector ---
+            let mut data = vec![0.0f64; 774];
+
+            // Helper: feat_sq — flip for black.
+            let feat_sq = |sq: i64, s: i64| -> usize {
+                if s == 1 {
+                    sq as usize
+                } else {
+                    let r = sq / 8;
+                    let f = sq % 8;
+                    ((7 - r) * 8 + f) as usize
+                }
+            };
+
+            // Fill piece planes.
+            for i in 0..64 {
+                let p = board[i];
+                if p != 0 {
+                    let abs_p = p.unsigned_abs() as i64;
+                    if abs_p < 1 || abs_p > 6 {
+                        return Err(format!(
+                            "encode_state_fast: invalid piece value {} at square {}",
+                            p, i
+                        ));
+                    }
+                    let piece_idx = abs_p - 1; // 0..5
+                    let owner = if p > 0 { 1i64 } else { -1i64 };
+                    let plane = if owner == side {
+                        piece_idx
+                    } else {
+                        piece_idx + 6
+                    };
+                    let mapped = feat_sq(i as i64, side);
+                    let idx = (plane as usize) * 64 + mapped;
+                    data[idx] = 1.0;
+                }
+            }
+
+            // Castling rights (flipped if black to move).
+            let (my_k, my_q, op_k, op_q) = if side == 1 {
+                (castling[0], castling[1], castling[2], castling[3])
+            } else {
+                (castling[2], castling[3], castling[0], castling[1])
+            };
+            data[768] = my_k as f64;
+            data[769] = my_q as f64;
+            data[770] = op_k as f64;
+            data[771] = op_q as f64;
+
+            // Halfmove clock fraction.
+            data[772] = (halfmove as f64) / 100.0;
+
+            // Has en passant target.
+            data[773] = if ep_sq >= 0 { 1.0 } else { 0.0 };
+
+            let tensor = Tensor::from_vec(data, &[1, 774]).map_err(|e| format!("{e}"))?;
+            Ok(Some(Value::Tensor(tensor)))
+        }
+
+        // score_moves_batch(weights_list, feature, legal_move_pairs) -> [scores_tensor, value]
+        //
+        // Native replacement for the CJC-Lang `score_moves` function.
+        // The pure-CJC version loops over legal moves, doing per-move
+        // `tensor.get()` + `array_push()` (O(num_moves²) due to COW copies).
+        // This version does a single forward pass and gathers scores from
+        // the logit tensors by index.
+        //
+        // Arguments:
+        //   weights_list: Array of 11 values [W1, b1, W2, b2, _, Wpf, bpf, Wpt, bpt, Wv, bv]
+        //   feature:      Tensor [1, 774]
+        //   legal_move_pairs: Array of [from_sq, to_sq, from_sq, to_sq, ...] (flat i64 pairs)
+        //   side: Int (1 for white, -1 for black)
+        //
+        // Returns: Array [scores_tensor([num_moves]), value_f64]
+        //
+        // Determinism story: uses the same matmul + element-wise ops already
+        // in cjc-runtime (Kahan-accumulated, no FMA). The only change is
+        // replacing the per-move interpreter loop with a Rust loop over
+        // the legal move indices + direct f64 reads from the logit tensors.
+        "score_moves_batch" => {
+            if args.len() != 4 {
+                return Err(
+                    "score_moves_batch requires 4 arguments: weights(Array[11]), feature(Tensor[1,774]), legal_moves(Array), side(Int)"
+                        .into(),
+                );
+            }
+            // Parse weights.
+            let weights = match &args[0] {
+                Value::Array(arr) => {
+                    if arr.len() < 11 {
+                        return Err(format!(
+                            "score_moves_batch: weights must have ≥11 elements, got {}",
+                            arr.len()
+                        ));
+                    }
+                    arr.clone()
+                }
+                _ => {
+                    return Err(format!(
+                        "score_moves_batch: weights must be Array, got {}",
+                        args[0].type_name()
+                    ))
+                }
+            };
+            let feature = value_to_tensor(&args[1])?;
+            let moves = match &args[2] {
+                Value::Array(arr) => {
+                    let mut mv = Vec::with_capacity(arr.len());
+                    for (i, v) in arr.iter().enumerate() {
+                        mv.push(match v {
+                            Value::Int(n) => *n,
+                            _ => {
+                                return Err(format!(
+                                    "score_moves_batch: legal_moves[{i}] must be Int, got {}",
+                                    v.type_name()
+                                ))
+                            }
+                        });
+                    }
+                    mv
+                }
+                _ => {
+                    return Err(format!(
+                        "score_moves_batch: legal_moves must be Array, got {}",
+                        args[2].type_name()
+                    ))
+                }
+            };
+            let side = match &args[3] {
+                Value::Int(n) => *n,
+                _ => {
+                    return Err(format!(
+                        "score_moves_batch: side must be Int, got {}",
+                        args[3].type_name()
+                    ))
+                }
+            };
+
+            let num_moves = moves.len() / 2;
+
+            // Extract weight tensors.
+            let w1 = value_to_tensor(&weights[0])?;
+            let b1 = value_to_tensor(&weights[1])?;
+            let w2 = value_to_tensor(&weights[2])?;
+            let b2 = value_to_tensor(&weights[3])?;
+            // weights[4] is reserved (placeholder 0)
+            let wpf = value_to_tensor(&weights[5])?;
+            let bpf = value_to_tensor(&weights[6])?;
+            let wpt = value_to_tensor(&weights[7])?;
+            let bpt = value_to_tensor(&weights[8])?;
+            let wv = value_to_tensor(&weights[9])?;
+            let bv = value_to_tensor(&weights[10])?;
+
+            // Forward pass: identical to forward_eager in the CJC-Lang PRELUDE.
+            // z1 = feature @ W1 + b1
+            let z1 = feature.matmul(&w1).map_err(|e| format!("{e}"))?
+                .add(&b1).map_err(|e| format!("{e}"))?;
+            let h1 = z1.relu();
+            // z2 = h1 @ W2 + b2
+            let z2 = h1.matmul(&w2).map_err(|e| format!("{e}"))?
+                .add(&b2).map_err(|e| format!("{e}"))?;
+            let h2 = z2.relu();
+            // from_logits = h2 @ Wpf + bpf  [1, 64]
+            let from_logits = h2.matmul(&wpf).map_err(|e| format!("{e}"))?
+                .add(&bpf).map_err(|e| format!("{e}"))?;
+            // to_logits = h2 @ Wpt + bpt  [1, 64]
+            let to_logits = h2.matmul(&wpt).map_err(|e| format!("{e}"))?
+                .add(&bpt).map_err(|e| format!("{e}"))?;
+            // value = tanh(h2 @ Wv + bv)[0, 0]
+            let v_pre = h2.matmul(&wv).map_err(|e| format!("{e}"))?
+                .add(&bv).map_err(|e| format!("{e}"))?;
+            let v_tanh = v_pre.tanh_activation();
+            let value = v_tanh.get(&[0, 0]).map_err(|e| format!("{e}"))?;
+
+            // Gather scores for legal moves.
+            // feat_sq: flip for black.
+            let feat_sq = |sq: i64, s: i64| -> usize {
+                if s == 1 {
+                    sq as usize
+                } else {
+                    let r = sq / 8;
+                    let f = sq % 8;
+                    ((7 - r) * 8 + f) as usize
+                }
+            };
+
+            let mut scores = Vec::with_capacity(num_moves);
+            for i in 0..num_moves {
+                let from_sq = moves[i * 2];
+                let to_sq = moves[i * 2 + 1];
+                let from_mapped = feat_sq(from_sq, side);
+                let to_mapped = feat_sq(to_sq, side);
+                let fs = from_logits.get(&[0, from_mapped]).map_err(|e| format!("{e}"))?;
+                let ts = to_logits.get(&[0, to_mapped]).map_err(|e| format!("{e}"))?;
+                scores.push(fs + ts);
+            }
+
+            let scores_tensor = Tensor::from_vec(scores, &[num_moves]).map_err(|e| format!("{e}"))?;
+            let result = vec![
+                Value::Tensor(scores_tensor),
+                Value::Float(value),
+            ];
+            Ok(Some(Value::Array(Rc::new(result))))
+        }
+
+        // ── Tensor snap (deterministic binary serialization) ─────────
+        "tensor_save" => {
+            if args.len() != 2 {
+                return Err("tensor_save requires 2 arguments: path, tensor".into());
+            }
+            let path = match &args[0] {
+                Value::String(p) => p.as_str().to_string(),
+                _ => return Err("tensor_save: first argument must be String path".into()),
+            };
+            let tensor = value_to_tensor(&args[1])?;
+            let bytes = crate::tensor_snap::encode_one(tensor);
+            std::fs::write(&path, &bytes)
+                .map_err(|e| format!("tensor_save error: {}", e))?;
+            Ok(Some(Value::Void))
+        }
+        "tensor_load" => {
+            if args.len() != 1 {
+                return Err("tensor_load requires 1 argument: path".into());
+            }
+            let path = match &args[0] {
+                Value::String(p) => p.as_str().to_string(),
+                _ => return Err("tensor_load: argument must be String path".into()),
+            };
+            let bytes = std::fs::read(&path)
+                .map_err(|e| format!("tensor_load error: {}", e))?;
+            let tensor = crate::tensor_snap::decode_one(&bytes)
+                .map_err(|e| format!("tensor_load error: {}", e))?;
+            Ok(Some(Value::Tensor(tensor)))
+        }
+        "tensor_list_save" => {
+            if args.len() != 2 {
+                return Err("tensor_list_save requires 2 arguments: path, [tensors]".into());
+            }
+            let path = match &args[0] {
+                Value::String(p) => p.as_str().to_string(),
+                _ => return Err("tensor_list_save: first argument must be String path".into()),
+            };
+            let tensors = match &args[1] {
+                Value::Array(arr) => {
+                    let mut out = Vec::with_capacity(arr.len());
+                    for v in arr.iter() {
+                        out.push(value_to_tensor(v)?.clone());
+                    }
+                    out
+                }
+                _ => return Err("tensor_list_save: second argument must be Array of Tensors".into()),
+            };
+            let bytes = crate::tensor_snap::encode_list(&tensors);
+            std::fs::write(&path, &bytes)
+                .map_err(|e| format!("tensor_list_save error: {}", e))?;
+            Ok(Some(Value::Void))
+        }
+        "tensor_list_load" => {
+            if args.len() != 1 {
+                return Err("tensor_list_load requires 1 argument: path".into());
+            }
+            let path = match &args[0] {
+                Value::String(p) => p.as_str().to_string(),
+                _ => return Err("tensor_list_load: argument must be String path".into()),
+            };
+            let bytes = std::fs::read(&path)
+                .map_err(|e| format!("tensor_list_load error: {}", e))?;
+            let tensors = crate::tensor_snap::decode_list(&bytes)
+                .map_err(|e| format!("tensor_list_load error: {}", e))?;
+            let arr: Vec<Value> = tensors.into_iter().map(Value::Tensor).collect();
+            Ok(Some(Value::Array(Rc::new(arr))))
+        }
+        "tensor_list_hash" => {
+            if args.len() != 1 {
+                return Err("tensor_list_hash requires 1 argument: [tensors]".into());
+            }
+            let tensors = match &args[0] {
+                Value::Array(arr) => {
+                    let mut out = Vec::with_capacity(arr.len());
+                    for v in arr.iter() {
+                        out.push(value_to_tensor(v)?.clone());
+                    }
+                    out
+                }
+                _ => return Err("tensor_list_hash: argument must be Array of Tensors".into()),
+            };
+            let h = crate::tensor_snap::hash_list(&tensors);
+            // Return as a signed i64 so CJC-Lang code can print/compare it
+            // without unsigned support. Cast via `as` preserves bit pattern.
+            Ok(Some(Value::Int(h as i64)))
+        }
+        // ── Adam optimizer fused step (Phase B1) ─────────────────────
+        // Signature: adam_step(w, g, m, v, lr, b1, b2, eps, t) -> [new_w, new_m, new_v]
+        // Applies one bias-corrected Adam update across the whole tensor in
+        // native code. Present in cjc-runtime so both cjc-eval and
+        // cjc-mir-exec dispatch through the same deterministic path —
+        // byte-identical by construction.
+        "adam_step" => {
+            if args.len() != 9 {
+                return Err("adam_step requires 9 arguments: w, g, m, v, lr, b1, b2, eps, t".into());
+            }
+            let w = value_to_tensor(&args[0])?;
+            let g = value_to_tensor(&args[1])?;
+            let m = value_to_tensor(&args[2])?;
+            let v = value_to_tensor(&args[3])?;
+            let lr = match &args[4] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err(format!("adam_step lr must be number, got {}", args[4].type_name())),
+            };
+            let b1 = match &args[5] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err(format!("adam_step b1 must be number, got {}", args[5].type_name())),
+            };
+            let b2 = match &args[6] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err(format!("adam_step b2 must be number, got {}", args[6].type_name())),
+            };
+            let eps = match &args[7] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err(format!("adam_step eps must be number, got {}", args[7].type_name())),
+            };
+            let t = match &args[8] {
+                Value::Int(i) => *i,
+                Value::Float(f) => *f as i64,
+                _ => return Err(format!("adam_step t must be integer, got {}", args[8].type_name())),
+            };
+            if t < 1 {
+                return Err(format!("adam_step t must be >= 1, got {}", t));
+            }
+            let shape = w.shape();
+            if g.shape() != shape || m.shape() != shape || v.shape() != shape {
+                return Err(format!(
+                    "adam_step: w/g/m/v shapes must match; got w={:?} g={:?} m={:?} v={:?}",
+                    shape, g.shape(), m.shape(), v.shape()
+                ));
+            }
+            let shape_vec: Vec<usize> = shape.to_vec();
+            let w_flat = w.to_vec();
+            let g_flat = g.to_vec();
+            let m_flat = m.to_vec();
+            let v_flat = v.to_vec();
+            let n = w_flat.len();
+            // Bias correction computed once.
+            let bc1 = 1.0 - b1.powf(t as f64);
+            let bc2 = 1.0 - b2.powf(t as f64);
+            let inv_b1 = 1.0 - b1;
+            let inv_b2 = 1.0 - b2;
+            let mut new_w = Vec::with_capacity(n);
+            let mut new_m = Vec::with_capacity(n);
+            let mut new_v = Vec::with_capacity(n);
+            for i in 0..n {
+                let gi = g_flat[i];
+                let new_mi = b1 * m_flat[i] + inv_b1 * gi;
+                let new_vi = b2 * v_flat[i] + inv_b2 * gi * gi;
+                let m_hat = new_mi / bc1;
+                let v_hat = new_vi / bc2;
+                let new_wi = w_flat[i] - lr * m_hat / (v_hat.sqrt() + eps);
+                new_w.push(new_wi);
+                new_m.push(new_mi);
+                new_v.push(new_vi);
+            }
+            let new_w_t = Tensor::from_vec(new_w, &shape_vec)
+                .map_err(|e| format!("adam_step: {}", e))?;
+            let new_m_t = Tensor::from_vec(new_m, &shape_vec)
+                .map_err(|e| format!("adam_step: {}", e))?;
+            let new_v_t = Tensor::from_vec(new_v, &shape_vec)
+                .map_err(|e| format!("adam_step: {}", e))?;
+            Ok(Some(Value::Array(Rc::new(vec![
+                Value::Tensor(new_w_t),
+                Value::Tensor(new_m_t),
+                Value::Tensor(new_v_t),
+            ]))))
         }
         // ── TidyView Phase 1: Data I/O builtins ──────────────────────
         "dir_list" => {
@@ -2479,11 +3035,11 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
         }
         "array_pop" => {
             if args.len() != 1 { return Err("array_pop requires 1 arg: array".into()); }
-            let arr = match &args[0] { Value::Array(a) => (**a).clone(), _ => return Err("array_pop: expected Array".into()) };
-            if arr.is_empty() { return Err("array_pop: empty array".into()); }
-            let mut new_arr = arr;
-            let last = new_arr.pop().unwrap();
-            Ok(Some(Value::Tuple(Rc::new(vec![last, Value::Array(Rc::new(new_arr))]))))
+            let mut arr_rc = match &args[0] { Value::Array(a) => Rc::clone(a), _ => return Err("array_pop: expected Array".into()) };
+            if arr_rc.is_empty() { return Err("array_pop: empty array".into()); }
+            // COW: Rc::make_mut only clones if refcount > 1.
+            let last = Rc::make_mut(&mut arr_rc).pop().unwrap();
+            Ok(Some(Value::Tuple(Rc::new(vec![last, Value::Array(arr_rc)]))))
         }
         "array_contains" => {
             if args.len() != 2 { return Err("array_contains requires 2 args: array, value".into()); }
@@ -2494,10 +3050,10 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
         }
         "array_reverse" => {
             if args.len() != 1 { return Err("array_reverse requires 1 arg: array".into()); }
-            let arr = match &args[0] { Value::Array(a) => (**a).clone(), _ => return Err("array_reverse: expected Array".into()) };
-            let mut new_arr = arr;
-            new_arr.reverse();
-            Ok(Some(Value::Array(Rc::new(new_arr))))
+            let mut arr_rc = match &args[0] { Value::Array(a) => Rc::clone(a), _ => return Err("array_reverse: expected Array".into()) };
+            // COW: Rc::make_mut only clones if refcount > 1.
+            Rc::make_mut(&mut arr_rc).reverse();
+            Ok(Some(Value::Array(arr_rc)))
         }
         "array_flatten" => {
             if args.len() != 1 { return Err("array_flatten requires 1 arg: array".into()); }

@@ -152,20 +152,9 @@ pub fn mlp_forward(
     let mut x = input_idx;
 
     for layer in &mlp.layers {
-        // affine: W @ x^T  (we handle as x @ W^T for row-major convention)
-        // Actually: for a single sample [1, in_f], output = x @ W^T + b
-        // W is [out_f, in_f], W^T is [in_f, out_f]
-        let wt = graph.transpose_op(layer.weight_idx);
-        let z = graph.matmul(x, wt);
-        // Broadcast-add bias
-        let z_biased = graph.add(z, layer.bias_idx);
-
-        x = match layer.activation {
-            Activation::Tanh => graph.tanh_act(z_biased),
-            Activation::Sigmoid => graph.sigmoid(z_biased),
-            Activation::Relu => graph.relu(z_biased),
-            Activation::None => z_biased,
-        };
+        // Fused dense layer: activation(input @ weight^T + bias)
+        // Collapses transpose + matmul + add + activation into one graph node.
+        x = graph.mlp_layer(x, layer.weight_idx, layer.bias_idx, layer.activation);
     }
 
     x
@@ -589,135 +578,161 @@ pub fn pinn_harmonic_train(config: &PinnConfig) -> PinnResult {
     let eps = config.fd_eps;
     let base_bnd_weight = config.boundary_weight;
 
+    // ── Build graph once ──────────────────────────────────────────
+    // The graph topology is epoch-invariant: only parameter tensors and
+    // the adaptive boundary weight change between epochs.  Build the
+    // graph on the first iteration, then reuse via set_tensor + reforward.
+    let mut graph = crate::GradGraph::new();
+    let mut p_indices = Vec::new();
+    for (li, layer) in mlp_spec.layers.iter().enumerate() {
+        let w_tensor = Tensor::from_vec_unchecked(
+            params[li * 2].clone(),
+            &[layer.out_features, layer.in_features],
+        );
+        let b_tensor = Tensor::from_vec_unchecked(
+            params[li * 2 + 1].clone(),
+            &[layer.out_features],
+        );
+        p_indices.push(graph.parameter(w_tensor));
+        p_indices.push(graph.parameter(b_tensor));
+    }
+
+    let mlp = Mlp {
+        layers: mlp_spec
+            .layers
+            .iter()
+            .enumerate()
+            .map(|(li, l)| DenseLayer {
+                weight_idx: p_indices[li * 2],
+                bias_idx: p_indices[li * 2 + 1],
+                activation: l.activation,
+                in_features: l.in_features,
+                out_features: l.out_features,
+            })
+            .collect(),
+    };
+
+    // ===== DATA LOSS =====
+    let mut data_loss_nodes = Vec::new();
+    for (j, &x) in x_data.iter().enumerate() {
+        let x_in = graph.input(Tensor::from_vec_unchecked(vec![x], &[1, 1]));
+        let u_pred = mlp_forward(&mut graph, &mlp, x_in);
+        let u_target = graph.input(Tensor::from_vec_unchecked(vec![u_data[j]], &[1, 1]));
+        let diff = graph.sub(u_pred, u_target);
+        let sq = graph.mul(diff, diff);
+        data_loss_nodes.push(sq);
+    }
+
+    let mut data_sum = data_loss_nodes[0];
+    for &node in &data_loss_nodes[1..] {
+        data_sum = graph.add(data_sum, node);
+    }
+    let n_data_node = graph.input(Tensor::from_vec_unchecked(
+        vec![n_d as f64],
+        &[1],
+    ));
+    let data_loss_node = graph.div(data_sum, n_data_node);
+
+    // ===== PHYSICS LOSS (via finite differences for u_xx) =====
+    let mut phys_loss_nodes = Vec::new();
+    for &x in &x_colloc {
+        let x_in = graph.input(Tensor::from_vec_unchecked(vec![x], &[1, 1]));
+        let u_x = mlp_forward(&mut graph, &mlp, x_in);
+
+        let x_minus = graph.input(Tensor::from_vec_unchecked(vec![x - eps], &[1, 1]));
+        let u_minus = mlp_forward(&mut graph, &mlp, x_minus);
+
+        let x_plus = graph.input(Tensor::from_vec_unchecked(vec![x + eps], &[1, 1]));
+        let u_plus = mlp_forward(&mut graph, &mlp, x_plus);
+
+        let two_u = graph.scalar_mul(u_x, 2.0);
+        let sum_pm = graph.add(u_plus, u_minus);
+        let numerator = graph.sub(sum_pm, two_u);
+        let eps_sq_inv = 1.0 / (eps * eps);
+        let u_xx = graph.scalar_mul(numerator, eps_sq_inv);
+
+        let residual = graph.add(u_xx, u_x);
+        let r_sq = graph.mul(residual, residual);
+        phys_loss_nodes.push(r_sq);
+    }
+
+    let mut phys_sum = phys_loss_nodes[0];
+    for &node in &phys_loss_nodes[1..] {
+        phys_sum = graph.add(phys_sum, node);
+    }
+    let n_colloc_node = graph.input(Tensor::from_vec_unchecked(
+        vec![n_c as f64],
+        &[1],
+    ));
+    let phys_loss_node = graph.div(phys_sum, n_colloc_node);
+
+    // ===== BOUNDARY LOSS: u(0)=0, u(π)=0 =====
+    let x0_in = graph.input(Tensor::from_vec_unchecked(vec![0.0], &[1, 1]));
+    let u0 = mlp_forward(&mut graph, &mlp, x0_in);
+    let u0_sq = graph.mul(u0, u0);
+
+    let xpi_in = graph.input(Tensor::from_vec_unchecked(
+        vec![std::f64::consts::PI],
+        &[1, 1],
+    ));
+    let upi = mlp_forward(&mut graph, &mlp, xpi_in);
+    let upi_sq = graph.mul(upi, upi);
+
+    let bnd_loss_node = graph.add(u0_sq, upi_sq);
+
+    // ===== TOTAL LOSS (adaptive boundary weight is an Input node we update each epoch) =====
+    let pw = graph.input(Tensor::from_vec_unchecked(
+        vec![config.physics_weight],
+        &[1],
+    ));
+    // Boundary weight node — updated via set_tensor each epoch
+    let bw = graph.input(Tensor::from_vec_unchecked(
+        vec![base_bnd_weight],
+        &[1],
+    ));
+    let weighted_phys = graph.mul(pw, phys_loss_node);
+    let weighted_bnd = graph.mul(bw, bnd_loss_node);
+    let total_1 = graph.add(data_loss_node, weighted_phys);
+    let total_loss_node = graph.add(total_1, weighted_bnd);
+
+    // Record the first non-parameter node index for reforward range
+    let reforward_start = p_indices.last().map_or(0, |&i| i + 1);
+
     for epoch in 0..config.epochs {
-        // Cosine LR annealing: lr(t) = lr_min + 0.5*(lr_max - lr_min)*(1 + cos(π*t/T))
+        // Cosine LR annealing
         let lr_min = config.lr * 0.01;
         let cos_decay = 0.5 * (1.0 + (std::f64::consts::PI * epoch as f64 / config.epochs as f64).cos());
         adam.lr = lr_min + (config.lr - lr_min) * cos_decay;
-        // Build fresh graph with current params
-        let mut graph = crate::GradGraph::new();
-        let mut p_indices = Vec::new();
-        for (li, layer) in mlp_spec.layers.iter().enumerate() {
-            let w_tensor = Tensor::from_vec_unchecked(
-                params[li * 2].clone(),
-                &[layer.out_features, layer.in_features],
-            );
-            let b_tensor = Tensor::from_vec_unchecked(
-                params[li * 2 + 1].clone(),
-                &[layer.out_features],
-            );
-            p_indices.push(graph.parameter(w_tensor));
-            p_indices.push(graph.parameter(b_tensor));
-        }
 
-        // Rebuild MLP spec with new indices
-        let mlp = Mlp {
-            layers: mlp_spec
-                .layers
-                .iter()
-                .enumerate()
-                .map(|(li, l)| DenseLayer {
-                    weight_idx: p_indices[li * 2],
-                    bias_idx: p_indices[li * 2 + 1],
-                    activation: l.activation,
-                    in_features: l.in_features,
-                    out_features: l.out_features,
-                })
-                .collect(),
-        };
-
-        // ===== DATA LOSS =====
-        let mut data_loss_nodes = Vec::new();
-        for (j, &x) in x_data.iter().enumerate() {
-            let x_in = graph.input(Tensor::from_vec_unchecked(vec![x], &[1, 1]));
-            let u_pred = mlp_forward(&mut graph, &mlp, x_in);
-            let u_target = graph.input(Tensor::from_vec_unchecked(vec![u_data[j]], &[1, 1]));
-            let diff = graph.sub(u_pred, u_target);
-            let sq = graph.mul(diff, diff);
-            data_loss_nodes.push(sq);
-        }
-
-        // Sum data losses
-        let mut data_sum = data_loss_nodes[0];
-        for &node in &data_loss_nodes[1..] {
-            data_sum = graph.add(data_sum, node);
-        }
-        let n_data_node = graph.input(Tensor::from_vec_unchecked(
-            vec![n_d as f64],
-            &[1],
-        ));
-        let data_loss_node = graph.div(data_sum, n_data_node);
-
-        // ===== PHYSICS LOSS (via finite differences for u_xx) =====
-        let mut phys_loss_nodes = Vec::new();
-        for &x in &x_colloc {
-            // Evaluate u(x), u(x-eps), u(x+eps)
-            let x_in = graph.input(Tensor::from_vec_unchecked(vec![x], &[1, 1]));
-            let u_x = mlp_forward(&mut graph, &mlp, x_in);
-
-            let x_minus = graph.input(Tensor::from_vec_unchecked(vec![x - eps], &[1, 1]));
-            let u_minus = mlp_forward(&mut graph, &mlp, x_minus);
-
-            let x_plus = graph.input(Tensor::from_vec_unchecked(vec![x + eps], &[1, 1]));
-            let u_plus = mlp_forward(&mut graph, &mlp, x_plus);
-
-            // u_xx ≈ (u(x+ε) - 2u(x) + u(x-ε)) / ε²
-            let two_u = graph.scalar_mul(u_x, 2.0);
-            let sum_pm = graph.add(u_plus, u_minus);
-            let numerator = graph.sub(sum_pm, two_u);
-            let eps_sq_inv = 1.0 / (eps * eps);
-            let u_xx = graph.scalar_mul(numerator, eps_sq_inv);
-
-            // Residual: u_xx + u = 0  =>  r = u_xx + u
-            let residual = graph.add(u_xx, u_x);
-            let r_sq = graph.mul(residual, residual);
-            phys_loss_nodes.push(r_sq);
-        }
-
-        let mut phys_sum = phys_loss_nodes[0];
-        for &node in &phys_loss_nodes[1..] {
-            phys_sum = graph.add(phys_sum, node);
-        }
-        let n_colloc_node = graph.input(Tensor::from_vec_unchecked(
-            vec![n_c as f64],
-            &[1],
-        ));
-        let phys_loss_node = graph.div(phys_sum, n_colloc_node);
-
-        // ===== BOUNDARY LOSS: u(0)=0, u(π)=0 =====
-        let x0_in = graph.input(Tensor::from_vec_unchecked(vec![0.0], &[1, 1]));
-        let u0 = mlp_forward(&mut graph, &mlp, x0_in);
-        let u0_sq = graph.mul(u0, u0);
-
-        let xpi_in = graph.input(Tensor::from_vec_unchecked(
-            vec![std::f64::consts::PI],
-            &[1, 1],
-        ));
-        let upi = mlp_forward(&mut graph, &mlp, xpi_in);
-        let upi_sq = graph.mul(upi, upi);
-
-        let bnd_loss_node = graph.add(u0_sq, upi_sq);
-
-        // ===== TOTAL LOSS (with adaptive boundary weighting) =====
-        // Ramp boundary weight: start at base, increase linearly over first 20% of training
+        // Ramp boundary weight
         let ramp = ((epoch as f64 + 1.0) / (config.epochs as f64 * 0.2)).min(1.0);
         let effective_bnd_weight = base_bnd_weight * ramp;
 
-        let pw = graph.input(Tensor::from_vec_unchecked(
-            vec![config.physics_weight],
-            &[1],
-        ));
-        let bw = graph.input(Tensor::from_vec_unchecked(
-            vec![effective_bnd_weight],
-            &[1],
-        ));
-        let weighted_phys = graph.mul(pw, phys_loss_node);
-        let weighted_bnd = graph.mul(bw, bnd_loss_node);
-        let total_1 = graph.add(data_loss_node, weighted_phys);
-        let total_loss_node = graph.add(total_1, weighted_bnd);
+        if epoch > 0 {
+            // Update parameter tensors with latest weights
+            for (li, layer) in mlp_spec.layers.iter().enumerate() {
+                graph.set_tensor(
+                    p_indices[li * 2],
+                    Tensor::from_vec_unchecked(
+                        params[li * 2].clone(),
+                        &[layer.out_features, layer.in_features],
+                    ),
+                );
+                graph.set_tensor(
+                    p_indices[li * 2 + 1],
+                    Tensor::from_vec_unchecked(
+                        params[li * 2 + 1].clone(),
+                        &[layer.out_features],
+                    ),
+                );
+            }
+            // Update adaptive boundary weight
+            graph.set_tensor(bw, Tensor::from_vec_unchecked(vec![effective_bnd_weight], &[1]));
+            // Recompute all derived tensors
+            graph.reforward(reforward_start, total_loss_node);
+        }
 
-        // Forward is done implicitly by graph construction.
-        // Read loss values.
+        // Read loss values
         let total_loss_val = graph.value(total_loss_node);
         let data_loss_val = graph.value(data_loss_node);
         let phys_loss_val = graph.value(phys_loss_node);

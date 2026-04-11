@@ -1,3 +1,5 @@
+> **Pre-v0.1.4 document.** Uses legacy naming: CJC (now CJC-Lang), `cjc` (now `cjcl`), `.cjc` (now `.cjcl`). Kept unmodified for historical accuracy. See [../REBRAND_NOTICE.md](../REBRAND_NOTICE.md) for the full mapping.
+
 # Phase 3 — Zero-Copy Inference Engine: Progress Report
 
 ## 1. Deep Audit — Golden Baseline

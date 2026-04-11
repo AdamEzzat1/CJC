@@ -1,3 +1,5 @@
+> **Pre-v0.1.4 document.** Uses legacy naming: CJC (now CJC-Lang), `cjc` (now `cjcl`), `.cjc` (now `.cjcl`). Kept unmodified for historical accuracy. See [../REBRAND_NOTICE.md](../REBRAND_NOTICE.md) for the full mapping.
+
 # CJC v0.2 — Performance & Scale Improvement Suite
 ## Stacked Role Group: Speed + Memory + Scale (Determinism-First)
 

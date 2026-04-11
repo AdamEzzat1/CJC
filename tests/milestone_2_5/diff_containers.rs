@@ -7,10 +7,8 @@
 // - Combined forward + backward through containers
 // - Gradient accumulation from multiple container accesses
 
-use cjc_ad::{GradGraph, GradOp, GradNode};
+use cjc_ad::{GradGraph, GradOp};
 use cjc_runtime::Tensor;
-use std::cell::RefCell;
-use std::rc::Rc;
 
 const TOL: f64 = 1e-10;
 
@@ -24,16 +22,15 @@ fn diff_struct_field_gradient_flows_to_parent() {
 
     // Create a "field access" node — records that this came from parent
     let field_tensor = Tensor::from_vec(vec![3.0], &[1]).unwrap();
-    let field_idx = g.nodes.len();
-    g.nodes.push(Rc::new(RefCell::new(GradNode {
-        op: GradOp::StructField {
+    let field_idx = g.push_node(
+        GradOp::StructField {
             parent,
             field_index: 0,
             total_fields: 2,
         },
-        tensor: field_tensor,
-        grad: None,
-    })));
+        field_tensor,
+        None,
+    );
 
     // Sum the field value to get a scalar loss
     let loss = g.sum(field_idx);
@@ -57,16 +54,15 @@ fn diff_map_lookup_gradient_flows_to_map_node() {
 
     // Create a "map lookup" node for key_index=1
     let lookup_tensor = Tensor::from_vec(vec![10.0], &[1]).unwrap();
-    let lookup_idx = g.nodes.len();
-    g.nodes.push(Rc::new(RefCell::new(GradNode {
-        op: GradOp::MapLookup {
+    let lookup_idx = g.push_node(
+        GradOp::MapLookup {
             map_node,
             key_index: 1,
             total_keys: 3,
         },
-        tensor: lookup_tensor,
-        grad: None,
-    })));
+        lookup_tensor,
+        None,
+    );
 
     let loss = g.sum(lookup_idx);
     g.backward(loss);
