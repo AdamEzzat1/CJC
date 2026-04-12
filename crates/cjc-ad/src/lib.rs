@@ -310,6 +310,14 @@ pub enum GradOp {
         /// Axis along which to gather.
         axis: usize,
     },
+    /// Gaussian Error Linear Unit: `x * Φ(x)` where `Φ` is the standard normal CDF.
+    Gelu(usize),
+    /// Sigmoid Linear Unit (Swish): `x * sigmoid(x)`.
+    Silu(usize),
+    /// Exponential Linear Unit: `x if x>0 else exp(x)-1` (α=1).
+    Elu(usize),
+    /// Scaled Exponential Linear Unit: `λ*(x if x>0 else α*(exp(x)-1))`.
+    Selu(usize),
     /// Fused dense layer: `activation(input @ weight^T + bias)`.
     /// Collapses transpose + matmul + bias-add + activation into one node,
     /// reducing graph size by 3× per layer and fusing the backward pass.
@@ -572,6 +580,78 @@ impl GradGraph {
         idx
     }
 
+    // SELU constants
+    const SELU_LAMBDA: f64 = 1.0507009873554804934193349852946;
+    const SELU_ALPHA: f64 = 1.6732632423543772848170429916717;
+
+    /// GELU activation: x * Φ(x) ≈ 0.5 * x * (1 + tanh(√(2/π) * (x + 0.044715 * x³))).
+    pub fn gelu(&mut self, a: usize) -> usize {
+        let a_t = self.tensors[a].clone();
+        let data = a_t.to_vec();
+        let result = Tensor::from_vec_unchecked(
+            data.iter().map(|&x| {
+                let inner = (2.0_f64 / std::f64::consts::PI).sqrt() * (x + 0.044715 * x * x * x);
+                0.5 * x * (1.0 + inner.tanh())
+            }).collect(),
+            a_t.shape(),
+        );
+        let idx = self.ops.len();
+        self.ops.push(GradOp::Gelu(a));
+        self.tensors.push(result);
+        self.param_grads.push(None);
+        idx
+    }
+
+    /// SiLU (Swish) activation: x * sigmoid(x).
+    pub fn silu(&mut self, a: usize) -> usize {
+        let a_t = self.tensors[a].clone();
+        let data = a_t.to_vec();
+        let result = Tensor::from_vec_unchecked(
+            data.iter().map(|&x| {
+                let s = 1.0 / (1.0 + (-x).exp());
+                x * s
+            }).collect(),
+            a_t.shape(),
+        );
+        let idx = self.ops.len();
+        self.ops.push(GradOp::Silu(a));
+        self.tensors.push(result);
+        self.param_grads.push(None);
+        idx
+    }
+
+    /// ELU activation: x if x>0, else exp(x)-1 (α=1).
+    pub fn elu(&mut self, a: usize) -> usize {
+        let a_t = self.tensors[a].clone();
+        let data = a_t.to_vec();
+        let result = Tensor::from_vec_unchecked(
+            data.iter().map(|&x| if x > 0.0 { x } else { x.exp() - 1.0 }).collect(),
+            a_t.shape(),
+        );
+        let idx = self.ops.len();
+        self.ops.push(GradOp::Elu(a));
+        self.tensors.push(result);
+        self.param_grads.push(None);
+        idx
+    }
+
+    /// SELU activation: λ * (x if x>0, else α*(exp(x)-1)).
+    pub fn selu(&mut self, a: usize) -> usize {
+        let a_t = self.tensors[a].clone();
+        let data = a_t.to_vec();
+        let result = Tensor::from_vec_unchecked(
+            data.iter().map(|&x| {
+                if x > 0.0 { Self::SELU_LAMBDA * x } else { Self::SELU_LAMBDA * Self::SELU_ALPHA * (x.exp() - 1.0) }
+            }).collect(),
+            a_t.shape(),
+        );
+        let idx = self.ops.len();
+        self.ops.push(GradOp::Selu(a));
+        self.tensors.push(result);
+        self.param_grads.push(None);
+        idx
+    }
+
     // ── Phase 8: Extended AD forward ops ──
 
     /// Element-wise absolute value.
@@ -815,6 +895,36 @@ impl GradGraph {
                 Tensor::from_vec_unchecked(data.iter().map(|&x| if x > 0.0 { x } else { 0.0 }).collect(), &shape)
             }
             crate::pinn::Activation::None => z_biased,
+            crate::pinn::Activation::Gelu => {
+                let data = z_biased.to_vec();
+                let shape = z_biased.shape().to_vec();
+                Tensor::from_vec_unchecked(data.iter().map(|&x| {
+                    let inner = (2.0_f64 / std::f64::consts::PI).sqrt() * (x + 0.044715 * x * x * x);
+                    0.5 * x * (1.0 + inner.tanh())
+                }).collect(), &shape)
+            }
+            crate::pinn::Activation::Silu => {
+                let data = z_biased.to_vec();
+                let shape = z_biased.shape().to_vec();
+                Tensor::from_vec_unchecked(data.iter().map(|&x| x / (1.0 + (-x).exp())).collect(), &shape)
+            }
+            crate::pinn::Activation::Elu => {
+                let data = z_biased.to_vec();
+                let shape = z_biased.shape().to_vec();
+                Tensor::from_vec_unchecked(data.iter().map(|&x| if x > 0.0 { x } else { x.exp() - 1.0 }).collect(), &shape)
+            }
+            crate::pinn::Activation::Selu => {
+                let data = z_biased.to_vec();
+                let shape = z_biased.shape().to_vec();
+                Tensor::from_vec_unchecked(data.iter().map(|&x| {
+                    if x > 0.0 { Self::SELU_LAMBDA * x } else { Self::SELU_LAMBDA * Self::SELU_ALPHA * (x.exp() - 1.0) }
+                }).collect(), &shape)
+            }
+            crate::pinn::Activation::SinAct => {
+                let data = z_biased.to_vec();
+                let shape = z_biased.shape().to_vec();
+                Tensor::from_vec_unchecked(data.iter().map(|&x| x.sin()).collect(), &shape)
+            }
         };
 
         let idx = self.ops.len();
@@ -1088,7 +1198,9 @@ impl GradGraph {
             | GradOp::Cos(a) | GradOp::Sqrt(a) | GradOp::Sigmoid(a)
             | GradOp::Relu(a) | GradOp::TanhAct(a) | GradOp::Abs(a)
             | GradOp::Log2(a) | GradOp::Softmax(a) | GradOp::LayerNorm(a)
-            | GradOp::BatchNorm(a) | GradOp::TransposeOp(a) => {
+            | GradOp::BatchNorm(a) | GradOp::TransposeOp(a)
+            | GradOp::Gelu(a) | GradOp::Silu(a) | GradOp::Elu(a)
+            | GradOp::Selu(a) => {
                 reachable[*a] = true;
             }
             GradOp::ScalarMul(a, _) | GradOp::Pow(a, _) => {
@@ -1347,6 +1459,54 @@ impl GradGraph {
                     );
                     let grad_a = grad.mul_elem_unchecked(&one_minus_sq);
                     accumulate_grad(&mut grads, a, &grad_a);
+                }
+                GradOp::Gelu(a) => {
+                    // GELU'(x) ≈ 0.5*(1+tanh(k)) + 0.5*x*(1-tanh(k)²)*k'
+                    // where k = √(2/π)*(x + 0.044715*x³), k' = √(2/π)*(1 + 0.134145*x²)
+                    let a_val = self.tensors[a].clone();
+                    let local = Tensor::from_vec_unchecked(
+                        a_val.to_vec().iter().map(|&x| {
+                            let c = (2.0_f64 / std::f64::consts::PI).sqrt();
+                            let k = c * (x + 0.044715 * x * x * x);
+                            let tanh_k = k.tanh();
+                            let dk = c * (1.0 + 3.0 * 0.044715 * x * x);
+                            0.5 * (1.0 + tanh_k) + 0.5 * x * (1.0 - tanh_k * tanh_k) * dk
+                        }).collect(),
+                        a_val.shape(),
+                    );
+                    accumulate_grad(&mut grads, a, &grad.mul_elem_unchecked(&local));
+                }
+                GradOp::Silu(a) => {
+                    // SiLU'(x) = σ(x) + x*σ(x)*(1-σ(x)) = σ(x)*(1 + x*(1-σ(x)))
+                    let a_val = self.tensors[a].clone();
+                    let local = Tensor::from_vec_unchecked(
+                        a_val.to_vec().iter().map(|&x| {
+                            let s = 1.0 / (1.0 + (-x).exp());
+                            s * (1.0 + x * (1.0 - s))
+                        }).collect(),
+                        a_val.shape(),
+                    );
+                    accumulate_grad(&mut grads, a, &grad.mul_elem_unchecked(&local));
+                }
+                GradOp::Elu(a) => {
+                    // ELU'(x) = 1 if x>0, else exp(x) (α=1)
+                    let a_val = self.tensors[a].clone();
+                    let local = Tensor::from_vec_unchecked(
+                        a_val.to_vec().iter().map(|&x| if x > 0.0 { 1.0 } else { x.exp() }).collect(),
+                        a_val.shape(),
+                    );
+                    accumulate_grad(&mut grads, a, &grad.mul_elem_unchecked(&local));
+                }
+                GradOp::Selu(a) => {
+                    // SELU'(x) = λ if x>0, else λ*α*exp(x)
+                    let a_val = self.tensors[a].clone();
+                    let local = Tensor::from_vec_unchecked(
+                        a_val.to_vec().iter().map(|&x| {
+                            if x > 0.0 { GradGraph::SELU_LAMBDA } else { GradGraph::SELU_LAMBDA * GradGraph::SELU_ALPHA * x.exp() }
+                        }).collect(),
+                        a_val.shape(),
+                    );
+                    accumulate_grad(&mut grads, a, &grad.mul_elem_unchecked(&local));
                 }
                 // Phase 8: Extended AD backward
                 GradOp::Abs(a) => {
@@ -1664,6 +1824,65 @@ impl GradGraph {
                             )
                         }
                         crate::pinn::Activation::None => grad.clone(),
+                        crate::pinn::Activation::Gelu => {
+                            let z_data = z.to_vec();
+                            let grad_data = grad.to_vec();
+                            let shape = grad.shape().to_vec();
+                            Tensor::from_vec_unchecked(
+                                z_data.iter().zip(grad_data.iter()).map(|(&x, &g)| {
+                                    let c = (2.0_f64 / std::f64::consts::PI).sqrt();
+                                    let k = c * (x + 0.044715 * x * x * x);
+                                    let tanh_k = k.tanh();
+                                    let dk = c * (1.0 + 3.0 * 0.044715 * x * x);
+                                    g * (0.5 * (1.0 + tanh_k) + 0.5 * x * (1.0 - tanh_k * tanh_k) * dk)
+                                }).collect(),
+                                &shape,
+                            )
+                        }
+                        crate::pinn::Activation::Silu => {
+                            let z_data = z.to_vec();
+                            let grad_data = grad.to_vec();
+                            let shape = grad.shape().to_vec();
+                            Tensor::from_vec_unchecked(
+                                z_data.iter().zip(grad_data.iter()).map(|(&x, &g)| {
+                                    let s = 1.0 / (1.0 + (-x).exp());
+                                    g * s * (1.0 + x * (1.0 - s))
+                                }).collect(),
+                                &shape,
+                            )
+                        }
+                        crate::pinn::Activation::Elu => {
+                            let z_data = z.to_vec();
+                            let grad_data = grad.to_vec();
+                            let shape = grad.shape().to_vec();
+                            Tensor::from_vec_unchecked(
+                                z_data.iter().zip(grad_data.iter()).map(|(&x, &g)| {
+                                    if x > 0.0 { g } else { g * x.exp() }
+                                }).collect(),
+                                &shape,
+                            )
+                        }
+                        crate::pinn::Activation::Selu => {
+                            let z_data = z.to_vec();
+                            let grad_data = grad.to_vec();
+                            let shape = grad.shape().to_vec();
+                            Tensor::from_vec_unchecked(
+                                z_data.iter().zip(grad_data.iter()).map(|(&x, &g)| {
+                                    if x > 0.0 { g * GradGraph::SELU_LAMBDA } else { g * GradGraph::SELU_LAMBDA * GradGraph::SELU_ALPHA * x.exp() }
+                                }).collect(),
+                                &shape,
+                            )
+                        }
+                        crate::pinn::Activation::SinAct => {
+                            // d/dz sin(z) = cos(z)
+                            let z_data = z.to_vec();
+                            let grad_data = grad.to_vec();
+                            let shape = grad.shape().to_vec();
+                            Tensor::from_vec_unchecked(
+                                z_data.iter().zip(grad_data.iter()).map(|(&x, &g)| g * x.cos()).collect(),
+                                &shape,
+                            )
+                        }
                     };
 
                     // d_input = dz @ W
@@ -1936,6 +2155,31 @@ impl GradGraph {
                     let shape = self.tensors[*a].shape().to_vec();
                     Tensor::from_vec_unchecked(data.iter().map(|x| x.tanh()).collect(), &shape)
                 }
+                GradOp::Gelu(a) => {
+                    let data = self.tensors[*a].to_vec();
+                    let shape = self.tensors[*a].shape().to_vec();
+                    Tensor::from_vec_unchecked(data.iter().map(|&x| {
+                        let inner = (2.0_f64 / std::f64::consts::PI).sqrt() * (x + 0.044715 * x * x * x);
+                        0.5 * x * (1.0 + inner.tanh())
+                    }).collect(), &shape)
+                }
+                GradOp::Silu(a) => {
+                    let data = self.tensors[*a].to_vec();
+                    let shape = self.tensors[*a].shape().to_vec();
+                    Tensor::from_vec_unchecked(data.iter().map(|&x| x / (1.0 + (-x).exp())).collect(), &shape)
+                }
+                GradOp::Elu(a) => {
+                    let data = self.tensors[*a].to_vec();
+                    let shape = self.tensors[*a].shape().to_vec();
+                    Tensor::from_vec_unchecked(data.iter().map(|&x| if x > 0.0 { x } else { x.exp() - 1.0 }).collect(), &shape)
+                }
+                GradOp::Selu(a) => {
+                    let data = self.tensors[*a].to_vec();
+                    let shape = self.tensors[*a].shape().to_vec();
+                    Tensor::from_vec_unchecked(data.iter().map(|&x| {
+                        if x > 0.0 { GradGraph::SELU_LAMBDA * x } else { GradGraph::SELU_LAMBDA * GradGraph::SELU_ALPHA * (x.exp() - 1.0) }
+                    }).collect(), &shape)
+                }
                 GradOp::Abs(a) => {
                     let data = self.tensors[*a].to_vec();
                     let shape = self.tensors[*a].shape().to_vec();
@@ -1979,6 +2223,31 @@ impl GradGraph {
                             Tensor::from_vec_unchecked(data.iter().map(|&x| if x > 0.0 { x } else { 0.0 }).collect(), z.shape())
                         }
                         crate::pinn::Activation::None => z,
+                        crate::pinn::Activation::Gelu => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(data.iter().map(|&x| {
+                                let inner = (2.0_f64 / std::f64::consts::PI).sqrt() * (x + 0.044715 * x * x * x);
+                                0.5 * x * (1.0 + inner.tanh())
+                            }).collect(), z.shape())
+                        }
+                        crate::pinn::Activation::Silu => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(data.iter().map(|&x| x / (1.0 + (-x).exp())).collect(), z.shape())
+                        }
+                        crate::pinn::Activation::Elu => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(data.iter().map(|&x| if x > 0.0 { x } else { x.exp() - 1.0 }).collect(), z.shape())
+                        }
+                        crate::pinn::Activation::Selu => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(data.iter().map(|&x| {
+                                if x > 0.0 { GradGraph::SELU_LAMBDA * x } else { GradGraph::SELU_LAMBDA * GradGraph::SELU_ALPHA * (x.exp() - 1.0) }
+                            }).collect(), z.shape())
+                        }
+                        crate::pinn::Activation::SinAct => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(data.iter().map(|&x| x.sin()).collect(), z.shape())
+                        }
                     }
                 }
                 // For complex ops (softmax, layernorm, etc.), keep existing tensor.
@@ -2187,6 +2456,31 @@ impl GradGraph {
                             &shape,
                         )
                     }
+                    GradOp::Gelu(a) => {
+                        let data = self.tensors[*a].to_vec();
+                        let shape = self.tensors[*a].shape().to_vec();
+                        Tensor::from_vec_unchecked(data.iter().map(|&x| {
+                            let inner = (2.0_f64 / std::f64::consts::PI).sqrt() * (x + 0.044715 * x * x * x);
+                            0.5 * x * (1.0 + inner.tanh())
+                        }).collect(), &shape)
+                    }
+                    GradOp::Silu(a) => {
+                        let data = self.tensors[*a].to_vec();
+                        let shape = self.tensors[*a].shape().to_vec();
+                        Tensor::from_vec_unchecked(data.iter().map(|&x| x / (1.0 + (-x).exp())).collect(), &shape)
+                    }
+                    GradOp::Elu(a) => {
+                        let data = self.tensors[*a].to_vec();
+                        let shape = self.tensors[*a].shape().to_vec();
+                        Tensor::from_vec_unchecked(data.iter().map(|&x| if x > 0.0 { x } else { x.exp() - 1.0 }).collect(), &shape)
+                    }
+                    GradOp::Selu(a) => {
+                        let data = self.tensors[*a].to_vec();
+                        let shape = self.tensors[*a].shape().to_vec();
+                        Tensor::from_vec_unchecked(data.iter().map(|&x| {
+                            if x > 0.0 { GradGraph::SELU_LAMBDA * x } else { GradGraph::SELU_LAMBDA * GradGraph::SELU_ALPHA * (x.exp() - 1.0) }
+                        }).collect(), &shape)
+                    }
                     GradOp::Abs(a) => {
                         let data = self.tensors[*a].to_vec();
                         let shape = self.tensors[*a].shape().to_vec();
@@ -2361,6 +2655,49 @@ impl GradGraph {
                         node_tensor.shape(),
                     );
                     accumulate_grad(&mut grads, *a, &grad.mul_elem_unchecked(&one_minus_sq));
+                }
+                GradOp::Gelu(a) => {
+                    let a_val = self.tensors[*a].clone();
+                    let local = Tensor::from_vec_unchecked(
+                        a_val.to_vec().iter().map(|&x| {
+                            let c = (2.0_f64 / std::f64::consts::PI).sqrt();
+                            let k = c * (x + 0.044715 * x * x * x);
+                            let tanh_k = k.tanh();
+                            let dk = c * (1.0 + 3.0 * 0.044715 * x * x);
+                            0.5 * (1.0 + tanh_k) + 0.5 * x * (1.0 - tanh_k * tanh_k) * dk
+                        }).collect(),
+                        a_val.shape(),
+                    );
+                    accumulate_grad(&mut grads, *a, &grad.mul_elem_unchecked(&local));
+                }
+                GradOp::Silu(a) => {
+                    let a_val = self.tensors[*a].clone();
+                    let local = Tensor::from_vec_unchecked(
+                        a_val.to_vec().iter().map(|&x| {
+                            let s = 1.0 / (1.0 + (-x).exp());
+                            s * (1.0 + x * (1.0 - s))
+                        }).collect(),
+                        a_val.shape(),
+                    );
+                    accumulate_grad(&mut grads, *a, &grad.mul_elem_unchecked(&local));
+                }
+                GradOp::Elu(a) => {
+                    let a_val = self.tensors[*a].clone();
+                    let local = Tensor::from_vec_unchecked(
+                        a_val.to_vec().iter().map(|&x| if x > 0.0 { 1.0 } else { x.exp() }).collect(),
+                        a_val.shape(),
+                    );
+                    accumulate_grad(&mut grads, *a, &grad.mul_elem_unchecked(&local));
+                }
+                GradOp::Selu(a) => {
+                    let a_val = self.tensors[*a].clone();
+                    let local = Tensor::from_vec_unchecked(
+                        a_val.to_vec().iter().map(|&x| {
+                            if x > 0.0 { GradGraph::SELU_LAMBDA } else { GradGraph::SELU_LAMBDA * GradGraph::SELU_ALPHA * x.exp() }
+                        }).collect(),
+                        a_val.shape(),
+                    );
+                    accumulate_grad(&mut grads, *a, &grad.mul_elem_unchecked(&local));
                 }
                 GradOp::MatMul(a, b) => {
                     let a_val = self.tensors[*a].clone();
@@ -2654,6 +2991,59 @@ impl GradGraph {
                             )
                         }
                         crate::pinn::Activation::None => grad.clone(),
+                        crate::pinn::Activation::Gelu => {
+                            let z_data = z.to_vec();
+                            let grad_data = grad.to_vec();
+                            Tensor::from_vec_unchecked(
+                                z_data.iter().zip(grad_data.iter()).map(|(&x, &g)| {
+                                    let c = (2.0_f64 / std::f64::consts::PI).sqrt();
+                                    let k = c * (x + 0.044715 * x * x * x);
+                                    let tanh_k = k.tanh();
+                                    let dk = c * (1.0 + 3.0 * 0.044715 * x * x);
+                                    g * (0.5 * (1.0 + tanh_k) + 0.5 * x * (1.0 - tanh_k * tanh_k) * dk)
+                                }).collect(),
+                                grad.shape(),
+                            )
+                        }
+                        crate::pinn::Activation::Silu => {
+                            let z_data = z.to_vec();
+                            let grad_data = grad.to_vec();
+                            Tensor::from_vec_unchecked(
+                                z_data.iter().zip(grad_data.iter()).map(|(&x, &g)| {
+                                    let s = 1.0 / (1.0 + (-x).exp());
+                                    g * s * (1.0 + x * (1.0 - s))
+                                }).collect(),
+                                grad.shape(),
+                            )
+                        }
+                        crate::pinn::Activation::Elu => {
+                            let z_data = z.to_vec();
+                            let grad_data = grad.to_vec();
+                            Tensor::from_vec_unchecked(
+                                z_data.iter().zip(grad_data.iter()).map(|(&x, &g)| {
+                                    if x > 0.0 { g } else { g * x.exp() }
+                                }).collect(),
+                                grad.shape(),
+                            )
+                        }
+                        crate::pinn::Activation::Selu => {
+                            let z_data = z.to_vec();
+                            let grad_data = grad.to_vec();
+                            Tensor::from_vec_unchecked(
+                                z_data.iter().zip(grad_data.iter()).map(|(&x, &g)| {
+                                    if x > 0.0 { g * GradGraph::SELU_LAMBDA } else { g * GradGraph::SELU_LAMBDA * GradGraph::SELU_ALPHA * x.exp() }
+                                }).collect(),
+                                grad.shape(),
+                            )
+                        }
+                        crate::pinn::Activation::SinAct => {
+                            let z_data = z.to_vec();
+                            let grad_data = grad.to_vec();
+                            Tensor::from_vec_unchecked(
+                                z_data.iter().zip(grad_data.iter()).map(|(&x, &g)| g * x.cos()).collect(),
+                                grad.shape(),
+                            )
+                        }
                     };
 
                     accumulate_grad(&mut grads, *input, &dz.matmul_unchecked(weight_t));

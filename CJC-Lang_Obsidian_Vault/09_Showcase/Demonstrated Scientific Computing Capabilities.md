@@ -61,9 +61,31 @@ Advanced: VQE, QAOA, stabilizer circuits, DMRG, QEC — see [[Quantum Simulation
 
 **Needs verification**: these numbers are from past benchmarks in the manifesto. They should be re-run before being cited externally.
 
+## PINN PDE Benchmark Suite
+
+Eleven canonical PDE problems implemented as both Rust-level trainers and CJC-Lang builtins. See [[PINN Support]] and [[PINN Benchmark Results]].
+
+| Problem | PDE Type | Domain | Key Feature |
+|---|---|---|---|
+| Burgers (1D) | Hyperbolic | [-1,1]×[0,1] | Shock formation |
+| 2D Poisson | Elliptic | [0,1]² | Manufactured solution |
+| 1D Heat | Parabolic | [0,1]×[0,1] | Exponential decay |
+| 1D Wave | Hyperbolic | [0,1]×[0,1] | Standing wave |
+| Helmholtz | Elliptic | [0,1]² | Wavenumber parameter |
+| Diffusion-Reaction | Parabolic | [0,1]×[0,1] | Neumann BCs |
+| Allen-Cahn | Phase-field | [-1,1]×[0,1] | Periodic BCs |
+| KdV | Dispersive | [-5,5]×[0,1] | Soliton dynamics |
+| Schrödinger (NLS) | Complex | [-5,5]×[0,π/2] | Split real/imag |
+| Navier-Stokes 2D | Fluid | [0,1]² | Stream function |
+| Burgers (2D) | Hyperbolic | [0,1]²×[0,1] | 3D input |
+
+Plus inverse problem infrastructure (parameter discovery from observational data).
+
+113 dedicated PINN tests across 4 test files + inline unit tests.
+
 ## End-to-end: Chess RL
 
-[[Chess RL Demo]] is the largest integration test: a full RL training pipeline in pure CJC-Lang with 216 dedicated tests covering determinism, parity, and correctness.
+[[Chess RL Demo]] is the largest integration test: a full RL training pipeline in pure CJC-Lang with 319 dedicated tests covering determinism, parity, and correctness.
 
 ## Related
 

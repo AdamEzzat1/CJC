@@ -1,0 +1,320 @@
+---
+title: "TidyView: A Database Engine in Disguise"
+subtitle: "How CJC-Lang handles data manipulation — and why I couldn't just use Pandas."
+author: "Adam Ezzat"
+date: "2026-04-12"
+date-modified: "2026-04-12"
+categories: [CJC-Lang, data, databases, determinism, architecture]
+description: "TidyView is CJC-Lang's data manipulation system. It uses a tidyverse-style API backed by database-engine internals — columnar storage, bitmask filtering, predicate pushdown, and zone maps — to deliver deterministic, auditable data pipelines with zero hidden mutations."
+---
+
+<div class="reading-time">&#128337; ~20 min read</div>
+
+<div class="stats-row">
+<div class="stat"><span class="number">3</span><span class="stat-label">layers</span></div>
+<div class="stat"><span class="number">40+</span><span class="stat-label">operations</span></div>
+<div class="stat"><span class="number">0</span><span class="stat-label">HashMaps</span></div>
+<div class="stat"><span class="number">1 bit</span><span class="stat-label">per filtered row</span></div>
+</div>
+
+::: {.callout-tip appearance="minimal"}
+## TL;DR
+TidyView is CJC-Lang's data manipulation system. It looks like R's dplyr on the surface, but underneath it's a database engine: columnar storage, lazy evaluation, bitmask filtering, predicate pushdown, and zone maps. The result is a data pipeline where every intermediate state is inspectable, the original data is never mutated, and the same input always produces the same output — down to the last bit.
+:::
+
+## The Problem
+
+When I started building [CJC-Lang](../introducing-cjc/index.qmd), the core promise was simple: **same seed, same output, always.** Every part of the language enforces this — ordered collections, Kahan summation, seeded RNG, no FMA in SIMD kernels.
+
+But then I needed to handle data. Filter a table. Group rows. Compute aggregates. Join two datasets.
+
+The obvious move was to reach for an existing DataFrame library. But when I looked at what's available, I kept running into the same problems:
+
+**Hash-based grouping.** Pandas and Polars use hash maps to group rows. Hash maps are fast, but their iteration order depends on a hash seed that varies between runs. Group your data twice on the same machine and the rows might come back in a different order. That breaks determinism.
+
+**Naive floating-point reduction.** Call `sum()` on a million floats in Pandas. The result depends on the order of accumulation. Add the numbers in a different order and you get different rounding errors. Small differences, but they compound — and they mean "same data, different result" depending on implementation details.
+
+**Hidden parallelism.** Polars uses Rayon for parallel execution. Great for speed, but thread scheduling is non-deterministic. The result of a parallel aggregation can vary between runs even with identical input.
+
+**Aliasing mutations.** Pandas has an entire warning category (`SettingWithCopyWarning`) dedicated to the fact that modifying a filtered subset might or might not modify the original DataFrame. Whether it does depends on internal memory layout decisions that are invisible to the user.
+
+None of these are bugs. They're design trade-offs made by libraries that prioritize speed over reproducibility. But they break CJC-Lang's core contract. So I built something else.
+
+## What TidyView Is
+
+TidyView is a three-layer data manipulation system:
+
+| Layer | Type | What it does |
+|---|---|---|
+| **Immutable view** | `TidyView` | Zero-copy lens: bitmask + projection over shared data |
+| **Materialized frame** | `TidyFrame` | Copy-on-write buffer for mutations |
+| **Grouped view** | `GroupedTidyView` | Group index for aggregation |
+
+The API surface is modeled on R's dplyr — `filter`, `select`, `mutate`, `group_by`, `summarise`, `arrange`, `join`. If you've used the tidyverse, you already know the vocabulary.
+
+But the implementation borrows from a different tradition entirely: **analytical databases.**
+
+## The Database Connection
+
+I didn't set out to build a database engine. But the constraints I was working under — determinism, auditability, memory safety — kept pushing me toward the same solutions that database engineers arrived at decades ago.
+
+### Columnar Storage
+
+Data is stored column-major:
+
+```
+// Internally:
+columns: [
+    ("name",    Str(["Alice", "Bob", "Carol", "Dave"])),
+    ("age",     Int([30, 25, 35, 28])),
+    ("revenue", Float([150.0, 200.0, 175.0, 225.0])),
+]
+```
+
+Each column is a contiguous typed buffer. When you compute `sum(revenue)`, the runtime scans a single `Vec<f64>` — no pointer chasing, no skipping over unrelated fields. This is the same storage model used by Apache Arrow, DuckDB, and Parquet.
+
+The alternative — row-major storage — would scatter each `revenue` value across a row struct alongside `name` and `age` data. For a table with 100 columns, computing a single-column aggregate would touch 100x more memory than necessary.
+
+### Bitmask Filtering
+
+This is the design choice that makes everything else work. When you filter a TidyView, **no data is copied.** Instead, a bitmask records which rows passed the predicate:
+
+```
+// Original data: 4 rows
+base: ["Alice", "Bob", "Carol", "Dave"]  // ages: 30, 25, 35, 28
+
+// After filter(age > 28):
+mask: [1, 0, 1, 1]  // Alice (30), Carol (35), Dave (28 fails, hypothetical: > 28)
+```
+
+In practice the mask is packed into 64-bit words — one bit per row. A million-row filter costs 125 KB of bitmask memory. The original data stays exactly where it was, untouched.
+
+Chain three filters together? The bitmasks are ANDed. Still no data copied. Still 125 KB.
+
+```
+let sales: Any = read_csv("sales.csv");
+let df: Any = sales
+    |> filter(col("region") == "West")
+    |> filter(col("revenue") > 1000.0)
+    |> filter(col("year") == 2025);
+```
+
+Each `filter` call returns a new TidyView with a new bitmask. All three views share the same underlying data. The CSV is loaded once. This is the same technique used by bitmap indexes in Oracle and selection vectors in DuckDB.
+
+### Predicate Pushdown
+
+TidyView has a lazy evaluation layer where operations build a logical plan tree before executing. The optimizer rewrites this tree using three classic database passes:
+
+**Pass 1 — Filter merging.** Consecutive filters are combined into a single filter with an AND predicate.
+
+**Pass 2 — Predicate pushdown.** Filters are pushed as close to the data source as possible.
+
+**Pass 3 — Redundant select elimination.** Select nodes that project all columns are removed.
+
+Here's why this matters. Suppose you write:
+
+```
+let result: Any = df
+    |> mutate("bonus", col("salary") * 0.1)
+    |> filter(col("department") == "Engineering");
+```
+
+Without optimization, this computes `bonus` for every row, then filters. With predicate pushdown, the optimizer recognizes that `department == "Engineering"` doesn't depend on the `bonus` column, so it pushes the filter *below* the mutate. Now filtering happens first, and `bonus` is only computed for engineering rows.
+
+The pushdown rules follow standard relational algebra:
+
+- Push past `select` — always safe
+- Push past `arrange` — filtering doesn't affect sort order
+- Push past `mutate` — only if the predicate doesn't reference a mutated column
+- Push into `join` branches — if the predicate references only one side
+- Never past `group_by` + `summarise` — aggregation changes row identity
+- Never past `distinct` — uniqueness changes row identity
+
+These are the same rules taught in database systems textbooks. They apply here because TidyView's operation set *is* relational algebra — just with tidyverse names.
+
+### Zone Maps
+
+Each column tracks lightweight statistics:
+
+```
+// ColumnStats for the "revenue" column:
+min: 150.0
+max: 225.0
+sorted_ascending: false
+n_distinct: 4
+```
+
+When you write `filter(col("revenue") > 500.0)`, the zone map says: max is 225, so no row can satisfy `> 500`. The entire filter can be skipped.
+
+When a column is sorted, the system uses binary search instead of a linear scan — O(log N) instead of O(N).
+
+These are the same optimizations that Vertica, Redshift, and Parquet use at the storage layer. In TidyView they operate at the column level because the entire "database" fits in memory.
+
+## What This Prevents
+
+The architectural choices above aren't just about performance. They prevent specific classes of bugs that plague traditional DataFrame workflows.
+
+### The Aliasing Problem
+
+In Pandas:
+
+```python
+df = pd.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
+subset = df[df.x > 1]
+subset["z"] = 99      # Does this modify df? Maybe.
+```
+
+Whether `subset["z"] = 99` modifies the original `df` depends on whether Pandas chose to return a view or a copy when you wrote `df[df.x > 1]`. This is the `SettingWithCopyWarning` — one of the most common sources of confusion in data science code.
+
+In TidyView, this problem doesn't exist. The base data lives behind an `Rc` (reference-counted pointer) and is never modified. When you need to mutate, `TidyFrame` checks the reference count:
+
+- If only one reference exists, mutate in place
+- If multiple references exist, deep-clone first, then mutate the clone
+
+The check is deterministic — it's a simple integer comparison, not a heuristic. The other views are never affected.
+
+### The Order-Dependent Mutation Problem
+
+In Pandas:
+
+```python
+df = df.assign(a = df.x + 1, b = df.a * 2)
+```
+
+Does `df.a` in the second expression see the *newly computed* `a` or the *original* `a`? In Pandas, it sees the new one. The result depends on the order of the assignments. Swap `a` and `b` and you get different data.
+
+In TidyView, `mutate` uses **snapshot semantics**: all column references are validated against the column list frozen *before* any assignments execute. Every expression sees the data as it was when the `mutate` call started:
+
+```
+let result: Any = df
+    |> mutate("a", col("x") + 1)
+    |> mutate("b", col("a") * 2);
+// col("a") always reads the ORIGINAL "a" column
+// If "a" didn't exist before, this is an error — not a silent dependency
+```
+
+This is the same principle as SQL's `UPDATE SET a = b, b = a` — the SET clause reads from a snapshot, so this correctly swaps the values rather than setting both to `b`.
+
+### The Hidden Null Problem
+
+Pandas DataFrames can have `NaN` or `None` in any column at any time. You discover this at runtime, usually when an aggregation silently skips missing values and gives you a number that's subtly wrong.
+
+In TidyView, the base `Column` type has **no null representation**:
+
+```
+// Column — always fully populated:
+Int(Vec<i64>)
+Float(Vec<f64>)
+Str(Vec<String>)
+Bool(Vec<bool>)
+```
+
+There's no `Option` wrapper. No sentinel values. If you have a `TidyView`, its data is guaranteed null-free by type.
+
+Nulls exist, but they're quarantined in a separate type called `NullCol`. You only encounter `NullCol` through operations that *can* introduce nulls — left joins (unmatched rows), `pivot_wider` (missing combinations), full joins. These operations return a `NullableFrame` instead of a `TidyFrame`, and the type boundary makes the null-possibility explicit.
+
+The question "does my data have nulls?" is answered by the type, not by scanning every cell.
+
+### The Floating-Point Drift Problem
+
+```python
+# Pandas
+pd.Series([1e16, 1.0, -1e16]).sum()  # → 0.0 (wrong)
+```
+
+The mathematically correct answer is `1.0`. Pandas gives `0.0` because it uses naive left-to-right summation: `1e16 + 1.0` rounds to `1e16` (the `1.0` is lost to floating-point precision), then `1e16 - 1e16 = 0.0`.
+
+TidyView uses Kahan compensated summation for every floating-point reduction — `sum`, `mean`, `variance`, `sd`, all of them. Kahan summation tracks a correction term that captures the rounding error:
+
+```
+// Kahan summation:
+//   sum = 0, c = 0
+//   y = 1e16 - 0 = 1e16;    t = 0 + 1e16 = 1e16;    c = (1e16 - 1e16) - 1e16 = 0
+//   y = 1.0 - 0 = 1.0;      t = 1e16 + 1.0 = 1e16;   c = (1e16 - 1e16) - 1.0 = -1.0
+//   y = -1e16 - (-1.0);      ...compensates the lost 1.0
+//   Result: 1.0 (correct)
+```
+
+Same input, same result, every time. Not approximately correct — exactly correct within the limits of double precision.
+
+## How to Audit a TidyView Pipeline
+
+This is where the architecture pays off in practice. When something goes wrong in a data pipeline, the question is always: *where did the data go wrong?*
+
+In TidyView, every intermediate step is inspectable because the original data is never modified. Here's a concrete example:
+
+```
+// Load data
+let sales: Any = read_csv("quarterly_sales.csv");
+
+// Build pipeline
+let west: Any = filter(sales, col("region") == "West");
+let big: Any = filter(west, col("revenue") > 1000.0);
+let grouped: Any = group_by(big, "product");
+let summary: Any = summarise(grouped, tidy_sum(col("revenue")));
+```
+
+Suppose `summary` shows unexpected numbers. You can audit backward:
+
+**Step 1: Check the grouped view.** How many groups formed? What rows are in each group? The group index is inspectable — it stores the key values and the base-frame row indices for every group.
+
+**Step 2: Check the filtered view.** How many rows survived both filters? The bitmask tells you exactly which base-frame rows are visible. You can compare the count against your expectation.
+
+**Step 3: Check the original data.** It's still there, unchanged, behind the shared reference. The CSV was loaded once, and no operation modified it. You can re-inspect it to see if the data itself was the problem (wrong CSV encoding, unexpected column types, etc.).
+
+In a traditional mutable DataFrame workflow, step 3 is impossible — the original data was overwritten by the first mutation. In TidyView, the original is always available because it was never touched.
+
+### The Bitmask as Audit Trail
+
+The bitmask isn't just a performance optimization. It's a record of what happened.
+
+After `filter(col("region") == "West")`, the bitmask contains a 1 for every row where region is "West" and a 0 for every row where it isn't. You can:
+
+- Count the 1s to see how many rows passed
+- Iterate the set bits to see *which* rows passed (by base-frame index)
+- AND two bitmasks to see which rows passed *both* filters
+- Compare the mask against the original data to verify the filter logic
+
+This is fundamentally different from a system where `df = df[df.region == "West"]` discards the filtered-out rows. In that system, if the filter was wrong, the evidence is gone. In TidyView, the evidence is the bitmask, and the original data is still there to check against.
+
+### Error Messages That Point to the Problem
+
+When something goes wrong, TidyView's error types name the exact issue:
+
+```
+ColumnNotFound("revnue")       // Typo — you meant "revenue"
+DuplicateColumn("total")       // Two columns with the same name in select
+PredicateNotBool { got: "Int" } // filter predicate returned Int, not Bool
+TypeMismatch { expected: "Float", got: "Str" }  // arithmetic on a string column
+LengthMismatch { expected: 1000, got: 500 }     // broadcast size mismatch
+```
+
+Every error variant names the specific column, type, or value that caused the problem. You know what went wrong and where, not just that something failed.
+
+## Why Not Just Use Polars?
+
+Polars is a good library. It's fast, it has a lazy API, and it uses Arrow-backed columnar storage. If I were building a Python application, I'd probably use it.
+
+But Polars makes different trade-offs than TidyView:
+
+| | Polars | TidyView |
+|---|---|---|
+| **Grouping** | Hash-based (fast, non-deterministic order) | BTreeMap (deterministic first-occurrence order) |
+| **Summation** | Naive (fast, platform-dependent rounding) | Kahan compensated (deterministic, bit-identical) |
+| **Parallelism** | Rayon (fast, non-deterministic scheduling) | Single-threaded (deterministic, no scheduling variance) |
+| **Null model** | Nullable everywhere (Arrow validity bitmaps) | Null-free by default, `NullCol` only where needed |
+| **Sampling** | System RNG | Seeded LCG-based Fisher-Yates |
+
+None of Polars' trade-offs are wrong. They're optimizing for throughput. TidyView is optimizing for **reproducibility** — the guarantee that the same pipeline on the same data always produces the same result, bit for bit, on any machine.
+
+When your work requires an audit trail — when a regulator, a reviewer, or future-you needs to verify that a result is correct — that guarantee matters more than raw speed.
+
+## The One-Sentence Summary
+
+TidyView is a database engine wearing a tidyverse costume, designed so that **same data + same code = same result** on every machine, every run, every time.
+
+It combines familiar dplyr verbs (`filter`, `select`, `mutate`, `group_by`, `summarise`) with database-engine internals (columnar storage, bitmask filtering, predicate pushdown, zone maps) to deliver data pipelines that are deterministic by construction, auditable by design, and memory-safe without runtime surprises.
+
+::: {.callout-note appearance="minimal"}
+CJC-Lang is open source and available on [crates.io](https://crates.io/crates/cjc-lang). The TidyView implementation lives in `crates/cjc-data/` — about 11,000 lines of Rust with zero external dependencies.
+:::

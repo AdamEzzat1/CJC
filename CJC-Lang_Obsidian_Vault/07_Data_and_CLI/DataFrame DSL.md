@@ -75,6 +75,7 @@ Early design docs use "TidyView" as the name for the immutable lazy dataframe re
 
 ## Related
 
+- [[TidyView Architecture]] — three-layer design, auditability, database internals
 - [[Runtime Architecture]]
 - [[Vizor]] — output destination for many DF pipelines
 - [[Bastion]] — statistics over DFs

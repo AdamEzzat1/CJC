@@ -2399,6 +2399,164 @@ impl Interpreter {
             Ok(None) => {} // not a quantum builtin, fall through
         }
 
+        // PINN training builtins (bypass builtins.rs — cjc-ad dep)
+        match name {
+            "pinn_train_burgers" => {
+                // pinn_train_burgers(epochs, lr, n_colloc, nu, seed) → Struct
+                if args.len() != 5 {
+                    return Err(EvalError::Runtime("pinn_train_burgers requires 5 args (epochs, lr, n_colloc, nu, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("n_colloc must be Int".into())) };
+                let nu = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("nu must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(EvalError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::BurgersConfig {
+                    epochs, lr, nu, n_collocation: n_colloc, seed,
+                    ..cjc_ad::pinn::BurgersConfig::default()
+                };
+                let result = cjc_ad::pinn::pinn_burgers_train(&config);
+                return Ok(pinn_result_to_value("BurgersResult", &result));
+            }
+            "pinn_train_poisson" => {
+                // pinn_train_poisson(epochs, lr, n_colloc, seed) → Struct
+                if args.len() != 4 {
+                    return Err(EvalError::Runtime("pinn_train_poisson requires 4 args (epochs, lr, n_colloc, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("n_colloc must be Int".into())) };
+                let seed = match &args[3] { Value::Int(v) => *v as u64, _ => return Err(EvalError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::PoissonConfig {
+                    epochs, lr, n_collocation: n_colloc, seed,
+                    ..cjc_ad::pinn::PoissonConfig::default()
+                };
+                let result = cjc_ad::pinn::pinn_poisson_2d_train(&config);
+                return Ok(pinn_result_to_value("PoissonResult", &result));
+            }
+            "pinn_train_heat" => {
+                // pinn_train_heat(epochs, lr, n_colloc, alpha, seed) → Struct
+                if args.len() != 5 {
+                    return Err(EvalError::Runtime("pinn_train_heat requires 5 args (epochs, lr, n_colloc, alpha, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("n_colloc must be Int".into())) };
+                let alpha = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("alpha must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(EvalError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::HeatConfig {
+                    epochs, lr, alpha, n_collocation: n_colloc, seed,
+                    ..cjc_ad::pinn::HeatConfig::default()
+                };
+                let result = cjc_ad::pinn::pinn_heat_1d_nn_train(&config);
+                return Ok(pinn_result_to_value("HeatResult", &result));
+            }
+            "pinn_train_wave" => {
+                if args.len() != 5 {
+                    return Err(EvalError::Runtime("pinn_train_wave requires 5 args (epochs, lr, n_colloc, c, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("n_colloc must be Int".into())) };
+                let c = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("c must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(EvalError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::WaveConfig { epochs, lr, c, n_collocation: n_colloc, seed, ..Default::default() };
+                let result = cjc_ad::pinn::pinn_wave_train(&config);
+                return Ok(pinn_result_to_value("WaveResult", &result));
+            }
+            "pinn_train_helmholtz" => {
+                if args.len() != 5 {
+                    return Err(EvalError::Runtime("pinn_train_helmholtz requires 5 args (epochs, lr, n_colloc, k, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("n_colloc must be Int".into())) };
+                let k = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("k must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(EvalError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::HelmholtzConfig { epochs, lr, k, n_collocation: n_colloc, seed, ..Default::default() };
+                let result = cjc_ad::pinn::pinn_helmholtz_train(&config);
+                return Ok(pinn_result_to_value("HelmholtzResult", &result));
+            }
+            "pinn_train_diffreact" => {
+                if args.len() != 6 {
+                    return Err(EvalError::Runtime("pinn_train_diffreact requires 6 args (epochs, lr, n_colloc, diffusion, reaction, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("n_colloc must be Int".into())) };
+                let diffusion = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("diffusion must be numeric".into())) };
+                let reaction = match &args[4] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("reaction must be numeric".into())) };
+                let seed = match &args[5] { Value::Int(v) => *v as u64, _ => return Err(EvalError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::DiffReactConfig { epochs, lr, diffusion, reaction, n_collocation: n_colloc, seed, ..Default::default() };
+                let result = cjc_ad::pinn::pinn_diffreact_train(&config);
+                return Ok(pinn_result_to_value("DiffReactResult", &result));
+            }
+            "pinn_train_allen_cahn" => {
+                if args.len() != 5 {
+                    return Err(EvalError::Runtime("pinn_train_allen_cahn requires 5 args (epochs, lr, n_colloc, epsilon, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("n_colloc must be Int".into())) };
+                let epsilon = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("epsilon must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(EvalError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::AllenCahnConfig { epochs, lr, epsilon, n_collocation: n_colloc, seed, ..Default::default() };
+                let result = cjc_ad::pinn::pinn_allen_cahn_train(&config);
+                return Ok(pinn_result_to_value("AllenCahnResult", &result));
+            }
+            "pinn_train_kdv" => {
+                if args.len() != 4 {
+                    return Err(EvalError::Runtime("pinn_train_kdv requires 4 args (epochs, lr, n_colloc, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("n_colloc must be Int".into())) };
+                let seed = match &args[3] { Value::Int(v) => *v as u64, _ => return Err(EvalError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::KdvConfig { epochs, lr, n_collocation: n_colloc, seed, ..Default::default() };
+                let result = cjc_ad::pinn::pinn_kdv_train(&config);
+                return Ok(pinn_result_to_value("KdvResult", &result));
+            }
+            "pinn_train_schrodinger" => {
+                if args.len() != 4 {
+                    return Err(EvalError::Runtime("pinn_train_schrodinger requires 4 args (epochs, lr, n_colloc, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("n_colloc must be Int".into())) };
+                let seed = match &args[3] { Value::Int(v) => *v as u64, _ => return Err(EvalError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::SchrodingerConfig { epochs, lr, n_collocation: n_colloc, seed, ..Default::default() };
+                let result = cjc_ad::pinn::pinn_schrodinger_train(&config);
+                return Ok(pinn_result_to_value("SchrodingerResult", &result));
+            }
+            "pinn_train_navier_stokes" => {
+                if args.len() != 5 {
+                    return Err(EvalError::Runtime("pinn_train_navier_stokes requires 5 args (epochs, lr, n_colloc, nu, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("n_colloc must be Int".into())) };
+                let nu = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("nu must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(EvalError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::NavierStokesConfig { epochs, lr, nu, n_collocation: n_colloc, seed, ..Default::default() };
+                let result = cjc_ad::pinn::pinn_navier_stokes_train(&config);
+                return Ok(pinn_result_to_value("NavierStokesResult", &result));
+            }
+            "pinn_train_burgers_2d" => {
+                if args.len() != 5 {
+                    return Err(EvalError::Runtime("pinn_train_burgers_2d requires 5 args (epochs, lr, n_colloc, nu, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("n_colloc must be Int".into())) };
+                let nu = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("nu must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(EvalError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::Burgers2DConfig { epochs, lr, nu, n_collocation: n_colloc, seed, ..Default::default() };
+                let result = cjc_ad::pinn::pinn_burgers_2d_train(&config);
+                return Ok(pinn_result_to_value("Burgers2DResult", &result));
+            }
+            _ => {}
+        }
+
         // Phase C1: GradGraph constructor (bypasses builtins.rs — cjc-ad dep)
         if name == "GradGraph.new" {
             use std::any::Any;
@@ -4085,6 +4243,26 @@ impl Interpreter {
 /// - `Str`   column → `Value::Array` of `Value::String`
 /// - `Bool`  column → `Value::Array` of `Value::Bool`
 ///
+/// Convert a [`cjc_ad::pinn::PinnResult`] into a `Value::Struct`.
+fn pinn_result_to_value(struct_name: &str, r: &cjc_ad::pinn::PinnResult) -> Value {
+    use std::collections::BTreeMap;
+    let mut fields = BTreeMap::new();
+    fields.insert("l2_error".into(), Value::Float(r.l2_error.unwrap_or(f64::NAN)));
+    fields.insert("max_error".into(), Value::Float(r.max_error.unwrap_or(f64::NAN)));
+    fields.insert("mean_residual".into(), Value::Float(r.mean_residual));
+    fields.insert("n_epochs".into(), Value::Int(r.history.len() as i64));
+    // Loss history as array of floats
+    let loss_arr: Vec<Value> = r.history.iter().map(|h| Value::Float(h.total_loss)).collect();
+    fields.insert("loss_history".into(), Value::Array(Rc::new(loss_arr)));
+    // Final params as tensor
+    let params_tensor = cjc_runtime::tensor::Tensor::from_vec(
+        r.final_params.clone(),
+        &[r.final_params.len()],
+    ).unwrap_or_else(|_| cjc_runtime::tensor::Tensor::zeros(&[0]));
+    fields.insert("final_params".into(), Value::Tensor(params_tensor));
+    Value::Struct { name: struct_name.into(), fields }
+}
+
 /// A special `"__columns"` field holds a `Value::Array` of
 /// `Value::String` with the ordered column names (for to_tensor ordering).
 fn dataframe_to_value(df: DataFrame) -> Value {

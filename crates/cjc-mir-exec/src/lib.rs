@@ -1888,6 +1888,137 @@ impl MirExecutor {
             Ok(None) => {} // not a quantum builtin, fall through
         }
 
+        // PINN training builtins (bypass builtins.rs — cjc-ad dep)
+        match name {
+            "pinn_train_burgers" => {
+                if args.len() != 5 {
+                    return Err(MirExecError::Runtime("pinn_train_burgers requires 5 args (epochs, lr, n_colloc, nu, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("n_colloc must be Int".into())) };
+                let nu = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("nu must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(MirExecError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::BurgersConfig {
+                    epochs, lr, nu, n_collocation: n_colloc, seed,
+                    ..cjc_ad::pinn::BurgersConfig::default()
+                };
+                let result = cjc_ad::pinn::pinn_burgers_train(&config);
+                return Ok(pinn_result_to_value("BurgersResult", &result));
+            }
+            "pinn_train_poisson" => {
+                if args.len() != 4 {
+                    return Err(MirExecError::Runtime("pinn_train_poisson requires 4 args (epochs, lr, n_colloc, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("n_colloc must be Int".into())) };
+                let seed = match &args[3] { Value::Int(v) => *v as u64, _ => return Err(MirExecError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::PoissonConfig {
+                    epochs, lr, n_collocation: n_colloc, seed,
+                    ..cjc_ad::pinn::PoissonConfig::default()
+                };
+                let result = cjc_ad::pinn::pinn_poisson_2d_train(&config);
+                return Ok(pinn_result_to_value("PoissonResult", &result));
+            }
+            "pinn_train_heat" => {
+                if args.len() != 5 {
+                    return Err(MirExecError::Runtime("pinn_train_heat requires 5 args (epochs, lr, n_colloc, alpha, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("n_colloc must be Int".into())) };
+                let alpha = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("alpha must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(MirExecError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::HeatConfig {
+                    epochs, lr, alpha, n_collocation: n_colloc, seed,
+                    ..cjc_ad::pinn::HeatConfig::default()
+                };
+                let result = cjc_ad::pinn::pinn_heat_1d_nn_train(&config);
+                return Ok(pinn_result_to_value("HeatResult", &result));
+            }
+            "pinn_train_wave" => {
+                if args.len() != 5 { return Err(MirExecError::Runtime("pinn_train_wave requires 5 args".into())); }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("n_colloc must be Int".into())) };
+                let c = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("c must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(MirExecError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::WaveConfig { epochs, lr, c, n_collocation: n_colloc, seed, ..Default::default() };
+                return Ok(pinn_result_to_value("WaveResult", &cjc_ad::pinn::pinn_wave_train(&config)));
+            }
+            "pinn_train_helmholtz" => {
+                if args.len() != 5 { return Err(MirExecError::Runtime("pinn_train_helmholtz requires 5 args".into())); }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("n_colloc must be Int".into())) };
+                let k = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("k must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(MirExecError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::HelmholtzConfig { epochs, lr, k, n_collocation: n_colloc, seed, ..Default::default() };
+                return Ok(pinn_result_to_value("HelmholtzResult", &cjc_ad::pinn::pinn_helmholtz_train(&config)));
+            }
+            "pinn_train_diffreact" => {
+                if args.len() != 6 { return Err(MirExecError::Runtime("pinn_train_diffreact requires 6 args".into())); }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("n_colloc must be Int".into())) };
+                let diffusion = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("diffusion must be numeric".into())) };
+                let reaction = match &args[4] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("reaction must be numeric".into())) };
+                let seed = match &args[5] { Value::Int(v) => *v as u64, _ => return Err(MirExecError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::DiffReactConfig { epochs, lr, diffusion, reaction, n_collocation: n_colloc, seed, ..Default::default() };
+                return Ok(pinn_result_to_value("DiffReactResult", &cjc_ad::pinn::pinn_diffreact_train(&config)));
+            }
+            "pinn_train_allen_cahn" => {
+                if args.len() != 5 { return Err(MirExecError::Runtime("pinn_train_allen_cahn requires 5 args".into())); }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("n_colloc must be Int".into())) };
+                let epsilon = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("epsilon must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(MirExecError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::AllenCahnConfig { epochs, lr, epsilon, n_collocation: n_colloc, seed, ..Default::default() };
+                return Ok(pinn_result_to_value("AllenCahnResult", &cjc_ad::pinn::pinn_allen_cahn_train(&config)));
+            }
+            "pinn_train_kdv" => {
+                if args.len() != 4 { return Err(MirExecError::Runtime("pinn_train_kdv requires 4 args".into())); }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("n_colloc must be Int".into())) };
+                let seed = match &args[3] { Value::Int(v) => *v as u64, _ => return Err(MirExecError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::KdvConfig { epochs, lr, n_collocation: n_colloc, seed, ..Default::default() };
+                return Ok(pinn_result_to_value("KdvResult", &cjc_ad::pinn::pinn_kdv_train(&config)));
+            }
+            "pinn_train_schrodinger" => {
+                if args.len() != 4 { return Err(MirExecError::Runtime("pinn_train_schrodinger requires 4 args".into())); }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("n_colloc must be Int".into())) };
+                let seed = match &args[3] { Value::Int(v) => *v as u64, _ => return Err(MirExecError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::SchrodingerConfig { epochs, lr, n_collocation: n_colloc, seed, ..Default::default() };
+                return Ok(pinn_result_to_value("SchrodingerResult", &cjc_ad::pinn::pinn_schrodinger_train(&config)));
+            }
+            "pinn_train_navier_stokes" => {
+                if args.len() != 5 { return Err(MirExecError::Runtime("pinn_train_navier_stokes requires 5 args".into())); }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("n_colloc must be Int".into())) };
+                let nu = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("nu must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(MirExecError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::NavierStokesConfig { epochs, lr, nu, n_collocation: n_colloc, seed, ..Default::default() };
+                return Ok(pinn_result_to_value("NavierStokesResult", &cjc_ad::pinn::pinn_navier_stokes_train(&config)));
+            }
+            "pinn_train_burgers_2d" => {
+                if args.len() != 5 { return Err(MirExecError::Runtime("pinn_train_burgers_2d requires 5 args".into())); }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("n_colloc must be Int".into())) };
+                let nu = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("nu must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(MirExecError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::Burgers2DConfig { epochs, lr, nu, n_collocation: n_colloc, seed, ..Default::default() };
+                return Ok(pinn_result_to_value("Burgers2DResult", &cjc_ad::pinn::pinn_burgers_2d_train(&config)));
+            }
+            _ => {}
+        }
+
         // Phase C1: GradGraph constructor (bypasses builtins.rs — cjc-ad dep)
         if name == "GradGraph.new" {
             use std::any::Any;
@@ -4278,6 +4409,24 @@ pub fn run_program_cfg(
 
 /// Convert a `DataFrame` into a `Value::Struct { name: "DataFrame", fields }`.
 ///
+/// Convert a [`cjc_ad::pinn::PinnResult`] into a `Value::Struct`.
+fn pinn_result_to_value(struct_name: &str, r: &cjc_ad::pinn::PinnResult) -> Value {
+    use std::collections::BTreeMap;
+    let mut fields = BTreeMap::new();
+    fields.insert("l2_error".into(), Value::Float(r.l2_error.unwrap_or(f64::NAN)));
+    fields.insert("max_error".into(), Value::Float(r.max_error.unwrap_or(f64::NAN)));
+    fields.insert("mean_residual".into(), Value::Float(r.mean_residual));
+    fields.insert("n_epochs".into(), Value::Int(r.history.len() as i64));
+    let loss_arr: Vec<Value> = r.history.iter().map(|h| Value::Float(h.total_loss)).collect();
+    fields.insert("loss_history".into(), Value::Array(Rc::new(loss_arr)));
+    let params_tensor = cjc_runtime::tensor::Tensor::from_vec(
+        r.final_params.clone(),
+        &[r.final_params.len()],
+    ).unwrap_or_else(|_| cjc_runtime::tensor::Tensor::zeros(&[0]));
+    fields.insert("final_params".into(), Value::Tensor(params_tensor));
+    Value::Struct { name: struct_name.into(), fields }
+}
+
 /// Column data is stored as `Value::Array` keyed by column name.
 /// A special `"__columns"` field stores ordered column names.
 /// A special `"__nrows"` field stores the row count.
