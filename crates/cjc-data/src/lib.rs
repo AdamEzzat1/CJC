@@ -1929,8 +1929,22 @@ impl BitMask {
     }
 
     /// Iterate over set row indices in ascending order (deterministic).
+    ///
+    /// Uses word-level bit scanning with `trailing_zeros()` for O(popcount)
+    /// iteration instead of O(nrows). Skips entirely-zero words.
     pub fn iter_set(&self) -> impl Iterator<Item = usize> + '_ {
-        (0..self.nrows).filter(move |&i| self.get(i))
+        self.words.iter().enumerate().flat_map(|(word_idx, &word)| {
+            let base = word_idx * 64;
+            let mut w = word;
+            std::iter::from_fn(move || {
+                if w == 0 {
+                    return None;
+                }
+                let bit = w.trailing_zeros() as usize;
+                w &= w - 1; // clear lowest set bit
+                Some(base + bit)
+            })
+        })
     }
 
     /// Returns the total number of rows this mask covers.
@@ -2006,6 +2020,10 @@ pub struct TidyView {
     base: Rc<DataFrame>,
     mask: BitMask,
     proj: ProjectionMap,
+    /// Optional row ordering from `arrange()`. When present, visible rows
+    /// are iterated in this order for `materialize()` and `group_by()`.
+    /// Other methods resolve ordering by materializing first via `resolve_ordering()`.
+    ordering: Option<Rc<Vec<usize>>>,
 }
 
 // ── O3: columnar predicate evaluation ────────────────────────────────────────
@@ -2083,6 +2101,7 @@ fn try_eval_predicate_columnar(
             enum LitVal {
                 F(f64),
                 I(i64),
+                S(String),
             }
 
             let (col_name, lit, reversed) = match (left.as_ref(), right.as_ref()) {
@@ -2090,6 +2109,8 @@ fn try_eval_predicate_columnar(
                 (DExpr::LitFloat(v), DExpr::Col(name)) => (name.as_str(), LitVal::F(*v), true),
                 (DExpr::Col(name), DExpr::LitInt(v)) => (name.as_str(), LitVal::I(*v), false),
                 (DExpr::LitInt(v), DExpr::Col(name)) => (name.as_str(), LitVal::I(*v), true),
+                (DExpr::Col(name), DExpr::LitStr(v)) => (name.as_str(), LitVal::S(v.clone()), false),
+                (DExpr::LitStr(v), DExpr::Col(name)) => (name.as_str(), LitVal::S(v.clone()), true),
                 _ => return None,
             };
 
@@ -2131,6 +2152,34 @@ fn try_eval_predicate_columnar(
                     let floats: Vec<f64> = data.iter().map(|&x| x as f64).collect();
                     columnar_cmp_f64(&floats, *v, effective_op, &mut words);
                 }
+                // Str column, string literal
+                (Column::Str(data), LitVal::S(ref v)) => {
+                    columnar_cmp_str(data, v, effective_op, &mut words);
+                }
+                // Categorical column, string literal
+                (Column::Categorical { levels, codes }, LitVal::S(ref v)) => {
+                    if let Some(target_code) = levels.iter().position(|l| l == v) {
+                        columnar_cmp_u32(codes, target_code as u32, effective_op, &mut words);
+                    } else {
+                        match effective_op {
+                            DBinOp::Eq => { /* words already all-zero — no matches */ }
+                            DBinOp::Ne => {
+                                // All rows match (target not in column)
+                                for (i, w) in words.iter_mut().enumerate() {
+                                    let remaining = codes.len().saturating_sub(i * 64).min(64);
+                                    if remaining > 0 {
+                                        *w = if remaining >= 64 {
+                                            u64::MAX
+                                        } else {
+                                            (1u64 << remaining) - 1
+                                        };
+                                    }
+                                }
+                            }
+                            _ => return None, // Fall back to row-wise for ordering on missing target
+                        }
+                    }
+                }
                 _ => return None,
             }
 
@@ -2158,6 +2207,49 @@ fn columnar_cmp_f64(data: &[f64], lit: f64, op: DBinOp, out_words: &mut [u64]) {
             DBinOp::Le => val <= lit,
             DBinOp::Eq => val == lit,
             DBinOp::Ne => val != lit,
+            _ => false,
+        };
+        if pass {
+            out_words[i / 64] |= 1u64 << (i % 64);
+        }
+    }
+}
+
+/// Columnar comparison of String slice against a target string.
+/// Sets bits in `out_words` for rows where the comparison is true.
+#[inline]
+fn columnar_cmp_str(data: &[String], target: &str, op: DBinOp, out_words: &mut [u64]) {
+    for (i, val) in data.iter().enumerate() {
+        let pass = match op {
+            DBinOp::Gt => val.as_str() > target,
+            DBinOp::Lt => val.as_str() < target,
+            DBinOp::Ge => val.as_str() >= target,
+            DBinOp::Le => val.as_str() <= target,
+            DBinOp::Eq => val.as_str() == target,
+            DBinOp::Ne => val.as_str() != target,
+            _ => false,
+        };
+        if pass {
+            out_words[i / 64] |= 1u64 << (i % 64);
+        }
+    }
+}
+
+/// Columnar comparison for categorical codes (u32).
+/// Used when filtering a Categorical column by string — the target string
+/// is first looked up in `levels` to get its code, then compared as u32.
+/// Ordering comparisons are valid because DictEncoding assigns codes in
+/// sorted BTreeMap order.
+#[inline]
+fn columnar_cmp_u32(codes: &[u32], target: u32, op: DBinOp, out_words: &mut [u64]) {
+    for (i, &code) in codes.iter().enumerate() {
+        let pass = match op {
+            DBinOp::Gt => code > target,
+            DBinOp::Lt => code < target,
+            DBinOp::Ge => code >= target,
+            DBinOp::Le => code <= target,
+            DBinOp::Eq => code == target,
+            DBinOp::Ne => code != target,
             _ => false,
         };
         if pass {
@@ -2197,6 +2289,7 @@ impl TidyView {
             base: Rc::new(df),
             mask: BitMask::all_true(nrows),
             proj: ProjectionMap::identity(ncols),
+            ordering: None,
         }
     }
 
@@ -2208,6 +2301,7 @@ impl TidyView {
             base: df,
             mask: BitMask::all_true(nrows),
             proj: ProjectionMap::identity(ncols),
+            ordering: None,
         }
     }
 
@@ -2245,6 +2339,54 @@ impl TidyView {
     ///   â€¢ Float NaN comparisons â†’ deterministic: `NaN != NaN` (IEEE 754).
     ///   â€¢ Chained filters compose masks with AND without materializing.
     pub fn filter(&self, predicate: &DExpr) -> Result<TidyView, TidyError> {
+        // P4-fix: when ordering is present, filter the ordering vector directly
+        // instead of materializing the entire DataFrame.  Predicate evaluation
+        // does not depend on row order — it reads base columns at a row index.
+        if let Some(ref ord) = self.ordering {
+            // Validate predicate references known projected columns
+            validate_expr_columns_proj(predicate, &self.base, &self.proj)?;
+
+            // Build a new ordering that keeps only rows passing the predicate.
+            // Try columnar fast path first to get a predicate bitmask.
+            let pred_mask = if let Some(m) = try_eval_predicate_columnar(&self.base, predicate, &self.mask) {
+                m
+            } else {
+                // Row-wise fallback: evaluate predicate on each ordered row
+                let nrows_base = self.base.nrows();
+                let mut new_words = self.mask.words.clone();
+                for &row in ord.iter() {
+                    let b = eval_expr_row_proj(&self.base, predicate, row, &self.proj)?;
+                    let pass = match b {
+                        ExprValue::Bool(v) => v,
+                        _ => {
+                            return Err(TidyError::PredicateNotBool {
+                                got: b.type_name().to_string(),
+                            })
+                        }
+                    };
+                    if !pass {
+                        new_words[row / 64] &= !(1u64 << (row % 64));
+                    }
+                }
+                BitMask { words: new_words, nrows: nrows_base }
+            };
+
+            // Filter ordering to keep only rows that pass
+            let new_ord: Vec<usize> = ord.iter()
+                .filter(|&&row| pred_mask.get(row))
+                .copied()
+                .collect();
+
+            return Ok(TidyView {
+                base: Rc::clone(&self.base),
+                mask: pred_mask,
+                proj: self.proj.clone(),
+                ordering: Some(Rc::new(new_ord)),
+            });
+        }
+
+        // No ordering — fast mask-only path (no clone, no materialization)
+
         // Validate predicate type references known projected columns
         validate_expr_columns_proj(predicate, &self.base, &self.proj)?;
 
@@ -2254,6 +2396,7 @@ impl TidyView {
                 base: Rc::clone(&self.base),
                 mask: new_mask,
                 proj: self.proj.clone(),
+                ordering: None,
             });
         }
 
@@ -2285,6 +2428,7 @@ impl TidyView {
                 nrows: nrows_base,
             },
             proj: self.proj.clone(),
+            ordering: None,
         })
     }
 
@@ -2327,6 +2471,8 @@ impl TidyView {
             base: Rc::clone(&self.base),
             mask: self.mask.clone(),
             proj: ProjectionMap::from_indices(new_indices),
+            // P4: select only changes projection, preserve ordering
+            ordering: self.ordering.clone(),
         })
     }
 
@@ -2399,7 +2545,8 @@ impl TidyView {
     ///   â€¢ Empty cols â†’ 0-column DataFrame.
     ///   â€¢ Row-major iteration is stable.
     pub fn materialize(&self) -> Result<DataFrame, TidyError> {
-        let row_indices: Vec<usize> = self.mask.iter_set().collect();
+        // P4: use ordering-aware row iteration (sorted if arrange() was called)
+        let row_indices: Vec<usize> = self.visible_rows_ordered();
 
         let mut columns = Vec::with_capacity(self.proj.len());
         for &ci in self.proj.indices() {
@@ -2439,6 +2586,51 @@ impl TidyView {
         self.base.columns.iter()
             .find(|(n, _)| n == name)
             .map(|(_, c)| c)
+    }
+
+    // ── P4: lazy sort helpers ───────────────────────────────────────────────
+
+    /// Get visible rows in the correct order.
+    ///
+    /// If an ordering is present (from `arrange()`), returns the ordering vector.
+    /// Otherwise, returns mask-set rows in ascending index order (the default).
+    fn visible_rows_ordered(&self) -> Vec<usize> {
+        if let Some(ref ord) = self.ordering {
+            ord.as_ref().clone()
+        } else {
+            self.mask.iter_set().collect()
+        }
+    }
+
+    /// If this view has a pending ordering, resolve it by materializing the
+    /// sorted rows into a new base DataFrame. Returns a TidyView with no
+    /// ordering (ordering baked into the base).
+    ///
+    /// If no ordering is present, returns `None` — callers should use `self`.
+    fn resolve_ordering(&self) -> Option<TidyView> {
+        let ord = self.ordering.as_ref()?;
+        // Materialize with ordering applied — ALL columns (joins/group_by
+        // may need columns outside the projection).
+        let row_indices: &[usize] = ord.as_ref();
+        let mut all_cols = Vec::with_capacity(self.base.ncols());
+        for (name, col) in &self.base.columns {
+            all_cols.push((name.clone(), gather_column(col, row_indices)));
+        }
+        let new_base = DataFrame::from_columns(all_cols)
+            .expect("resolve_ordering: column length mismatch (internal bug)");
+        let nrows = new_base.nrows();
+        Some(TidyView {
+            base: Rc::new(new_base),
+            mask: BitMask::all_true(nrows),
+            proj: self.proj.clone(),
+            ordering: None,
+        })
+    }
+
+    /// Whether this view has a pending lazy sort ordering.
+    #[cfg(test)]
+    fn has_ordering(&self) -> bool {
+        self.ordering.is_some()
     }
 }
 
@@ -3280,8 +3472,9 @@ impl RowIndexMap {
 /// Metadata for one group in a `GroupIndex`.
 #[derive(Debug, Clone)]
 pub struct GroupMeta {
-    /// The rendered key strings (one per grouping column), in key order.
-    pub key_values: Vec<String>,
+    /// Typed key values (one per grouping column), in key order.
+    /// Use `GroupKey::to_display(col)` to get the string representation.
+    pub key_values: Vec<GroupKey>,
     /// Base-frame row indices belonging to this group, in first-occurrence order.
     pub row_indices: Vec<usize>,
 }
@@ -3302,6 +3495,133 @@ pub struct GroupIndex {
     pub groups: Vec<GroupMeta>,
     /// The column names used as group keys (projected names).
     pub key_names: Vec<String>,
+}
+
+// ── Typed group/join key (Phase 2 perf) ──────────────────────────────────────
+
+/// NaN-last float wrapper for deterministic BTreeMap ordering.
+/// MUST match the NaN semantics in `compare_column_rows`:
+///   NaN == NaN → Equal, NaN > finite → Greater, finite < NaN → Less.
+#[derive(Debug, Clone, Copy)]
+pub struct FloatKey(pub f64);
+
+impl PartialEq for FloatKey {
+    fn eq(&self, other: &Self) -> bool {
+        // NaN == NaN for grouping purposes
+        if self.0.is_nan() && other.0.is_nan() {
+            return true;
+        }
+        self.0 == other.0
+    }
+}
+impl Eq for FloatKey {}
+
+impl PartialOrd for FloatKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for FloatKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Exactly match compare_column_rows NaN-last logic
+        match (self.0.is_nan(), other.0.is_nan()) {
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Greater, // NaN sorts LAST
+            (false, true) => std::cmp::Ordering::Less,
+            (false, false) => self
+                .0
+                .partial_cmp(&other.0)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        }
+    }
+}
+
+/// Typed group key — avoids string conversion for non-string columns.
+/// Ordering matches `compare_column_rows` exactly so that
+/// `group_by |> arrange` pipelines produce identical results.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum GroupKey {
+    Int(i64),
+    Float(FloatKey),
+    Code(u32), // Categorical column code
+    Str(String),
+    Bool(bool),
+    DateTime(i64),
+}
+
+/// Borrowed column key — zero-copy reference into base DataFrame columns.
+///
+/// Used as BTreeMap key during group-by and join operations to avoid
+/// cloning strings for every row. Only the G unique group keys are cloned
+/// (when creating `GroupMeta::key_values`), not all N rows.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ColumnKeyRef<'a> {
+    Int(i64),
+    Float(FloatKey),
+    Code(u32),
+    Str(&'a str),
+    Bool(bool),
+    DateTime(i64),
+}
+
+impl<'a> ColumnKeyRef<'a> {
+    /// Borrow a key from a column at a given row — zero allocation.
+    #[inline]
+    fn from_column(col: &'a Column, row: usize) -> Self {
+        match col {
+            Column::Int(v) => ColumnKeyRef::Int(v[row]),
+            Column::Float(v) => ColumnKeyRef::Float(FloatKey(v[row])),
+            Column::Categorical { codes, .. } => ColumnKeyRef::Code(codes[row]),
+            Column::Str(v) => ColumnKeyRef::Str(&v[row]),
+            Column::Bool(v) => ColumnKeyRef::Bool(v[row]),
+            Column::DateTime(v) => ColumnKeyRef::DateTime(v[row]),
+        }
+    }
+
+    /// Convert to owned GroupKey (clones string if Str variant).
+    fn to_owned(&self) -> GroupKey {
+        match self {
+            ColumnKeyRef::Int(v) => GroupKey::Int(*v),
+            ColumnKeyRef::Float(v) => GroupKey::Float(*v),
+            ColumnKeyRef::Code(v) => GroupKey::Code(*v),
+            ColumnKeyRef::Str(s) => GroupKey::Str((*s).to_string()),
+            ColumnKeyRef::Bool(v) => GroupKey::Bool(*v),
+            ColumnKeyRef::DateTime(v) => GroupKey::DateTime(*v),
+        }
+    }
+}
+
+impl GroupKey {
+    /// Convert to display string (for GroupMeta::key_values reconstruction).
+    fn to_display(&self, col: &Column) -> String {
+        match self {
+            GroupKey::Int(v) => format!("{}", v),
+            GroupKey::Float(FloatKey(v)) => format!("{}", v),
+            GroupKey::Code(code) => {
+                if let Column::Categorical { levels, .. } = col {
+                    levels[*code as usize].clone()
+                } else {
+                    code.to_string()
+                }
+            }
+            GroupKey::Str(s) => s.clone(),
+            GroupKey::Bool(b) => format!("{}", b),
+            GroupKey::DateTime(v) => format!("{}ms", v),
+        }
+    }
+
+    /// Construct a GroupKey from a column at a given row.
+    fn from_column(col: &Column, row: usize) -> Self {
+        match col {
+            Column::Int(v) => GroupKey::Int(v[row]),
+            Column::Float(v) => GroupKey::Float(FloatKey(v[row])),
+            Column::Categorical { codes, .. } => GroupKey::Code(codes[row]),
+            Column::Str(v) => GroupKey::Str(v[row].clone()),
+            Column::Bool(v) => GroupKey::Bool(v[row]),
+            Column::DateTime(v) => GroupKey::DateTime(v[row]),
+        }
+    }
 }
 
 impl GroupIndex {
@@ -3344,7 +3664,7 @@ impl GroupIndex {
         let mut groups: Vec<GroupMeta> = group_order
             .iter()
             .map(|k| GroupMeta {
-                key_values: k.clone(),
+                key_values: k.iter().map(|s| GroupKey::Str(s.clone())).collect(),
                 row_indices: Vec::new(),
             })
             .collect();
@@ -3444,7 +3764,7 @@ impl GroupedTidyView {
         // Build key columns first (one value per group, repeated in type-matched form)
         let mut result_columns: Vec<(String, Column)> = Vec::new();
 
-        for key_name in &self.index.key_names {
+        for (ki, key_name) in self.index.key_names.iter().enumerate() {
             let base_col = base
                 .get_column(key_name)
                 .ok_or_else(|| TidyError::ColumnNotFound(key_name.clone()))?;
@@ -3455,51 +3775,60 @@ impl GroupedTidyView {
                         .index
                         .groups
                         .iter()
-                        .map(|g| {
-                            g.key_values[self
-                                .index
-                                .key_names
-                                .iter()
-                                .position(|k| k == key_name)
-                                .unwrap()]
-                                .parse::<i64>()
-                                .unwrap_or(0)
+                        .map(|g| match &g.key_values[ki] {
+                            GroupKey::Int(v) => *v,
+                            other => other.to_display(base_col).parse::<i64>().unwrap_or(0),
                         })
                         .collect();
                     Column::Int(vals)
+                }
+                Column::Float(_) => {
+                    let vals: Vec<f64> = self
+                        .index
+                        .groups
+                        .iter()
+                        .map(|g| match &g.key_values[ki] {
+                            GroupKey::Float(FloatKey(v)) => *v,
+                            GroupKey::Int(v) => *v as f64,
+                            other => other.to_display(base_col).parse::<f64>().unwrap_or(0.0),
+                        })
+                        .collect();
+                    Column::Float(vals)
                 }
                 Column::Bool(_) => {
                     let vals: Vec<bool> = self
                         .index
                         .groups
                         .iter()
-                        .map(|g| {
-                            let s = &g.key_values[self
-                                .index
-                                .key_names
-                                .iter()
-                                .position(|k| k == key_name)
-                                .unwrap()];
-                            matches!(s.as_str(), "true" | "1")
+                        .map(|g| match &g.key_values[ki] {
+                            GroupKey::Bool(v) => *v,
+                            other => {
+                                let s = other.to_display(base_col);
+                                matches!(s.as_str(), "true" | "1")
+                            }
                         })
                         .collect();
                     Column::Bool(vals)
                 }
-                _ => {
-                    // Float and Str: store key as Str column for the summary
+                Column::Categorical { levels, .. } => {
                     let vals: Vec<String> = self
                         .index
                         .groups
                         .iter()
-                        .map(|g| {
-                            g.key_values[self
-                                .index
-                                .key_names
-                                .iter()
-                                .position(|k| k == key_name)
-                                .unwrap()]
-                                .clone()
+                        .map(|g| match &g.key_values[ki] {
+                            GroupKey::Code(c) => levels[*c as usize].clone(),
+                            GroupKey::Str(s) => s.clone(),
+                            other => other.to_display(base_col),
                         })
+                        .collect();
+                    Column::Str(vals)
+                }
+                _ => {
+                    let vals: Vec<String> = self
+                        .index
+                        .groups
+                        .iter()
+                        .map(|g| g.key_values[ki].to_display(base_col))
                         .collect();
                     Column::Str(vals)
                 }
@@ -3565,54 +3894,41 @@ impl GroupedTidyView {
         n_groups: usize,
         base: &DataFrame,
     ) -> Result<Column, TidyError> {
+        // Handle Count separately (no column reference needed)
+        if let TidyAgg::Count = agg {
+            let counts: Vec<i64> = self
+                .index
+                .groups
+                .iter()
+                .map(|g| g.row_indices.len() as i64)
+                .collect();
+            return Ok(Column::Int(counts));
+        }
+
+        // Extract column name from all other agg types (P3: resolve once)
+        let col_name = match agg {
+            TidyAgg::Count => unreachable!(),
+            TidyAgg::Sum(c) | TidyAgg::Mean(c) | TidyAgg::Min(c) | TidyAgg::Max(c)
+            | TidyAgg::First(c) | TidyAgg::Last(c) | TidyAgg::Var(c) | TidyAgg::Sd(c)
+            | TidyAgg::Median(c) | TidyAgg::Quantile(c, _)
+            | TidyAgg::NDistinct(c) | TidyAgg::Iqr(c) => c,
+        };
+
+        // Resolve column reference ONCE (P3 perf: eliminates per-agg linear scan)
+        let src = base.get_column(col_name)
+            .ok_or_else(|| TidyError::ColumnNotFound(col_name.clone()))?;
+
+        // Dispatch by aggregation type with pre-resolved column
         match agg {
-            TidyAgg::Count => {
-                let counts: Vec<i64> = self
-                    .index
-                    .groups
-                    .iter()
-                    .map(|g| g.row_indices.len() as i64)
-                    .collect();
-                Ok(Column::Int(counts))
-            }
-            TidyAgg::Sum(col_name) => {
-                let src = base.get_column(col_name)
-                    .ok_or_else(|| TidyError::ColumnNotFound(col_name.clone()))?;
-                Ok(Column::Float(fast_agg_sum(&self.index.groups, src)?))
-            }
-            TidyAgg::Mean(col_name) => {
-                let src = base.get_column(col_name)
-                    .ok_or_else(|| TidyError::ColumnNotFound(col_name.clone()))?;
-                Ok(Column::Float(fast_agg_mean(&self.index.groups, src)?))
-            }
-            TidyAgg::Min(col_name) => {
-                let src = base.get_column(col_name)
-                    .ok_or_else(|| TidyError::ColumnNotFound(col_name.clone()))?;
-                Ok(Column::Float(fast_agg_min(&self.index.groups, src)?))
-            }
-            TidyAgg::Max(col_name) => {
-                let src = base.get_column(col_name)
-                    .ok_or_else(|| TidyError::ColumnNotFound(col_name.clone()))?;
-                Ok(Column::Float(fast_agg_max(&self.index.groups, src)?))
-            }
-            TidyAgg::First(col_name) => {
-                let src = base.get_column(col_name)
-                    .ok_or_else(|| TidyError::ColumnNotFound(col_name.clone()))?;
-                Ok(Column::Float(fast_agg_first(&self.index.groups, src)?))
-            }
-            TidyAgg::Last(col_name) => {
-                let src = base.get_column(col_name)
-                    .ok_or_else(|| TidyError::ColumnNotFound(col_name.clone()))?;
-                Ok(Column::Float(fast_agg_last(&self.index.groups, src)?))
-            }
-            TidyAgg::Var(col_name)
-            | TidyAgg::Sd(col_name)
-            | TidyAgg::Median(col_name)
-            | TidyAgg::Quantile(col_name, _)
-            | TidyAgg::NDistinct(col_name)
-            | TidyAgg::Iqr(col_name) => {
-                let src = base.get_column(col_name)
-                    .ok_or_else(|| TidyError::ColumnNotFound(col_name.clone()))?;
+            TidyAgg::Count => unreachable!(),
+            TidyAgg::Sum(_) => Ok(Column::Float(fast_agg_sum(&self.index.groups, src)?)),
+            TidyAgg::Mean(_) => Ok(Column::Float(fast_agg_mean(&self.index.groups, src)?)),
+            TidyAgg::Min(_) => Ok(Column::Float(fast_agg_min(&self.index.groups, src)?)),
+            TidyAgg::Max(_) => Ok(Column::Float(fast_agg_max(&self.index.groups, src)?)),
+            TidyAgg::First(_) => Ok(Column::Float(fast_agg_first(&self.index.groups, src)?)),
+            TidyAgg::Last(_) => Ok(Column::Float(fast_agg_last(&self.index.groups, src)?)),
+            TidyAgg::Var(_) | TidyAgg::Sd(_) | TidyAgg::Median(_)
+            | TidyAgg::Quantile(_, _) | TidyAgg::NDistinct(_) | TidyAgg::Iqr(_) => {
                 Ok(Column::Float(fast_agg_arena(
                     agg, &self.index.groups, src, n_groups,
                 )?))
@@ -4068,11 +4384,18 @@ impl TidyView {
             key_col_indices.push(idx);
         }
 
-        let visible_rows: Vec<usize> = self.mask.iter_set().collect();
         let key_names: Vec<String> = keys.iter().map(|s| s.to_string()).collect();
 
-        // O1 optimization: use BTree-accelerated build_fast for O(N log G) instead of O(N × G)
-        let index = GroupIndex::build_fast(&self.base, &key_col_indices, &visible_rows, key_names);
+        // Fast path: all rows visible + no ordering → use 0..nrows range
+        // Avoids allocating Vec<usize> of 100K+ indices.
+        let index = if self.ordering.is_none() && self.mask.count_ones() == self.base.nrows() {
+            let visible: Vec<usize> = (0..self.base.nrows()).collect();
+            GroupIndex::build_fast_typed(&self.base, &key_col_indices, &visible, key_names)
+        } else {
+            // P4: use ordering-aware row iteration (sorted if arrange() was called)
+            let visible_rows: Vec<usize> = self.visible_rows_ordered();
+            GroupIndex::build_fast_typed(&self.base, &key_col_indices, &visible_rows, key_names)
+        };
 
         Ok(GroupedTidyView {
             view: self.clone(),
@@ -4110,12 +4433,17 @@ impl TidyView {
         // Collect visible row indices in current mask order
         let mut row_indices: Vec<usize> = self.mask.iter_set().collect();
 
+        // Pre-resolve column references ONCE (P1 perf: eliminates per-comparison get_column)
+        let key_cols: Vec<(&Column, bool)> = keys.iter().map(|key| {
+            let col = self.base.get_column(&key.col_name).unwrap();
+            (col, key.descending)
+        }).collect();
+
         // Stable sort by keys left-to-right
         row_indices.sort_by(|&a, &b| {
-            for key in keys {
-                let col = self.base.get_column(&key.col_name).unwrap();
+            for &(col, desc) in &key_cols {
                 let ord = compare_column_rows(col, a, b);
-                let ord = if key.descending { ord.reverse() } else { ord };
+                let ord = if desc { ord.reverse() } else { ord };
                 if ord != std::cmp::Ordering::Equal {
                     return ord;
                 }
@@ -4123,29 +4451,14 @@ impl TidyView {
             std::cmp::Ordering::Equal
         });
 
-        // Re-materialise into a new DataFrame (sorted), wrap as a fresh TidyView
-        let mut new_columns = Vec::with_capacity(self.proj.len());
-        for &ci in self.proj.indices() {
-            let (name, col) = &self.base.columns[ci];
-            let new_col = gather_column(col, &row_indices);
-            new_columns.push((name.clone(), new_col));
-        }
-        // Also include any non-projected base columns needed for future ops
-        // Strategy: build new base from ALL original columns in sorted order
-        let mut sorted_all_cols = Vec::with_capacity(self.base.ncols());
-        for (name, col) in &self.base.columns {
-            sorted_all_cols.push((name.clone(), gather_column(col, &row_indices)));
-        }
-
-        let new_base = DataFrame::from_columns(sorted_all_cols)
-            .map_err(|e| TidyError::Internal(e.to_string()))?;
-        let nrows = new_base.nrows();
-        let new_proj = self.proj.clone();
-
+        // P4 lazy sort: store the sorted permutation instead of materializing.
+        // The ordering is resolved lazily by materialize(), group_by(), or
+        // resolve_ordering() when needed by other operations.
         Ok(TidyView {
-            base: Rc::new(new_base),
-            mask: BitMask::all_true(nrows),
-            proj: new_proj,
+            base: Rc::clone(&self.base),
+            mask: self.mask.clone(),
+            proj: self.proj.clone(),
+            ordering: Some(Rc::new(row_indices)),
         })
     }
 
@@ -4156,12 +4469,15 @@ impl TidyView {
     /// Positions are relative to the current visible rows (0-based).
     /// Out-of-bounds: clamped to `[0, nrows]`.
     pub fn slice(&self, start: usize, end: usize) -> TidyView {
-        let visible: Vec<usize> = self.mask.iter_set().collect();
+        // P4: resolve any pending ordering so positional slicing is correct
+        let resolved = self.resolve_ordering();
+        let this = resolved.as_ref().unwrap_or(self);
+        let visible: Vec<usize> = this.mask.iter_set().collect();
         let n = visible.len();
         let s = start.min(n);
         let e = end.min(n);
         let selected = if s >= e { vec![] } else { visible[s..e].to_vec() };
-        self.view_from_row_indices(selected)
+        this.view_from_row_indices(selected)
     }
 
     /// Select the first `n` visible rows (clamped to nrows).
@@ -4171,7 +4487,7 @@ impl TidyView {
 
     /// Select the last `n` visible rows (clamped to nrows).
     pub fn slice_tail(&self, n: usize) -> TidyView {
-        let total = self.mask.count_ones();
+        let total = self.nrows();
         let start = total.saturating_sub(n);
         self.slice(start, total)
     }
@@ -4181,10 +4497,13 @@ impl TidyView {
     /// If `n >= nrows`, returns all visible rows in their original order (no error).
     /// Sampling uses a Knuth shuffle variant seeded by `seed` (deterministic LCG).
     pub fn slice_sample(&self, n: usize, seed: u64) -> TidyView {
-        let mut visible: Vec<usize> = self.mask.iter_set().collect();
+        // P4: resolve any pending ordering before sampling
+        let resolved = self.resolve_ordering();
+        let this = resolved.as_ref().unwrap_or(self);
+        let mut visible: Vec<usize> = this.mask.iter_set().collect();
         let total = visible.len();
         if n >= total {
-            return self.view_from_row_indices(visible);
+            return this.view_from_row_indices(visible);
         }
         // Partial Fisher-Yates using LCG: deterministic with fixed seed
         let mut rng = seed;
@@ -4198,7 +4517,7 @@ impl TidyView {
         visible.truncate(selected_count);
         // Sort selected indices to restore ascending order (stable/deterministic)
         visible.sort_unstable();
-        self.view_from_row_indices(visible)
+        this.view_from_row_indices(visible)
     }
 
     // â"€â"€ distinct â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
@@ -4213,10 +4532,14 @@ impl TidyView {
     ///   â€¢ Unknown column â†’ `TidyError::ColumnNotFound`.
     ///   â€¢ After projection/mask: only visible columns/rows are considered.
     pub fn distinct(&self, cols: &[&str]) -> Result<TidyView, TidyError> {
+        // P4: resolve any pending ordering before dedup
+        let resolved = self.resolve_ordering();
+        let this = resolved.as_ref().unwrap_or(self);
+
         // Validate columns exist in base
         let mut col_indices = Vec::with_capacity(cols.len());
         for &name in cols {
-            let idx = self
+            let idx = this
                 .base
                 .columns
                 .iter()
@@ -4229,13 +4552,13 @@ impl TidyView {
         let mut seen_keys: BTreeSet<Vec<String>> = BTreeSet::new();
         let mut selected_rows: Vec<usize> = Vec::new();
 
-        for row in self.mask.iter_set() {
+        for row in this.mask.iter_set() {
             let key: Vec<String> = if col_indices.is_empty() {
                 vec!["__all__".into()]
             } else {
                 col_indices
                     .iter()
-                    .map(|&ci| self.base.columns[ci].1.get_display(row))
+                    .map(|&ci| this.base.columns[ci].1.get_display(row))
                     .collect()
             };
 
@@ -4244,7 +4567,7 @@ impl TidyView {
             }
         }
 
-        Ok(self.view_from_row_indices(selected_rows))
+        Ok(this.view_from_row_indices(selected_rows))
     }
 
     // â"€â"€ joins â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
@@ -4264,8 +4587,13 @@ impl TidyView {
         right: &TidyView,
         on: &[(&str, &str)],
     ) -> Result<TidyFrame, TidyError> {
-        let (left_rows, right_rows) = join_match_rows(self, right, on, JoinKind::Inner)?;
-        build_join_frame(self, right, &left_rows, &right_rows, on, false)
+        // P4: resolve any pending ordering on both sides before join
+        let l = self.resolve_ordering();
+        let lref = l.as_ref().unwrap_or(self);
+        let r = right.resolve_ordering();
+        let rref = r.as_ref().unwrap_or(right);
+        let (left_rows, right_rows) = join_match_rows(lref, rref, on, JoinKind::Inner)?;
+        build_join_frame(lref, rref, &left_rows, &right_rows, on, false)
     }
 
     /// Left join: all left rows; matched right rows or nulls (0/0.0/""/false).
@@ -4276,9 +4604,14 @@ impl TidyView {
         right: &TidyView,
         on: &[(&str, &str)],
     ) -> Result<TidyFrame, TidyError> {
+        // P4: resolve any pending ordering on both sides before join
+        let l = self.resolve_ordering();
+        let lref = l.as_ref().unwrap_or(self);
+        let r = right.resolve_ordering();
+        let rref = r.as_ref().unwrap_or(right);
         let (left_rows, right_rows_opt) =
-            join_match_rows_optional(self, right, on, JoinKind::Left)?;
-        build_left_join_frame(self, right, &left_rows, &right_rows_opt, on)
+            join_match_rows_optional(lref, rref, on, JoinKind::Left)?;
+        build_left_join_frame(lref, rref, &left_rows, &right_rows_opt, on)
     }
 
     /// Semi-join: rows in `self` that have at least one match in `right`.
@@ -4289,8 +4622,13 @@ impl TidyView {
         right: &TidyView,
         on: &[(&str, &str)],
     ) -> Result<TidyView, TidyError> {
-        let included = semi_anti_match_rows(self, right, on, /*semi=*/ true)?;
-        Ok(self.view_from_row_indices(included))
+        // P4: resolve any pending ordering on both sides before join
+        let l = self.resolve_ordering();
+        let lref = l.as_ref().unwrap_or(self);
+        let r = right.resolve_ordering();
+        let rref = r.as_ref().unwrap_or(right);
+        let included = semi_anti_match_rows(lref, rref, on, /*semi=*/ true)?;
+        Ok(lref.view_from_row_indices(included))
     }
 
     /// Anti-join: rows in `self` that have NO match in `right`.
@@ -4301,8 +4639,13 @@ impl TidyView {
         right: &TidyView,
         on: &[(&str, &str)],
     ) -> Result<TidyView, TidyError> {
-        let included = semi_anti_match_rows(self, right, on, /*semi=*/ false)?;
-        Ok(self.view_from_row_indices(included))
+        // P4: resolve any pending ordering on both sides before join
+        let l = self.resolve_ordering();
+        let lref = l.as_ref().unwrap_or(self);
+        let r = right.resolve_ordering();
+        let rref = r.as_ref().unwrap_or(right);
+        let included = semi_anti_match_rows(lref, rref, on, /*semi=*/ false)?;
+        Ok(lref.view_from_row_indices(included))
     }
 
     // â"€â"€ internal helpers â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
@@ -4319,6 +4662,7 @@ impl TidyView {
             base: Rc::clone(&self.base),
             mask: BitMask { words, nrows: nrows_base },
             proj: self.proj.clone(),
+            ordering: None,
         }
     }
 }
@@ -4352,6 +4696,152 @@ fn row_key(base: &DataFrame, col_indices: &[usize], row: usize) -> Vec<String> {
     col_indices
         .iter()
         .map(|&ci| base.columns[ci].1.get_display(row))
+        .collect()
+}
+
+/// Typed row key for joins — resolves Categorical to string since
+/// different DataFrames may have different level dictionaries.
+/// For group-by (same DataFrame), use `GroupKey::from_column` directly.
+#[allow(dead_code)] // Kept as fallback; P6 opt version is now preferred
+fn row_key_typed_for_join(base: &DataFrame, col_indices: &[usize], row: usize) -> Vec<GroupKey> {
+    col_indices
+        .iter()
+        .map(|&ci| {
+            let col = &base.columns[ci].1;
+            match col {
+                // Categorical: use level string, not code (cross-DataFrame safety)
+                Column::Categorical { levels, codes } => {
+                    GroupKey::Str(levels[codes[row] as usize].clone())
+                }
+                _ => GroupKey::from_column(col, row),
+            }
+        })
+        .collect()
+}
+
+/// P6: Typed row key for joins with shared-dictionary optimization.
+/// When `shared_dict_flags[i]` is true, Categorical columns at position i
+/// use code-based comparison (u32) instead of string cloning.
+fn row_key_typed_for_join_opt(
+    base: &DataFrame,
+    col_indices: &[usize],
+    row: usize,
+    shared_dict_flags: &[bool],
+) -> Vec<GroupKey> {
+    col_indices
+        .iter()
+        .zip(shared_dict_flags.iter())
+        .map(|(&ci, &shared)| {
+            let col = &base.columns[ci].1;
+            match col {
+                Column::Categorical { codes, .. } if shared => {
+                    GroupKey::Code(codes[row]) // Same dictionary -> code comparison is safe
+                }
+                Column::Categorical { levels, codes } => {
+                    GroupKey::Str(levels[codes[row] as usize].clone())
+                }
+                _ => GroupKey::from_column(col, row),
+            }
+        })
+        .collect()
+}
+
+/// Borrowed-key version for join lookups — avoids cloning per row.
+fn row_key_ref_for_join<'a>(
+    cols: &[&'a Column],
+    row: usize,
+    shared_dict_flags: &[bool],
+) -> Vec<ColumnKeyRef<'a>> {
+    cols.iter()
+        .zip(shared_dict_flags.iter())
+        .map(|(&col, &shared)| {
+            match col {
+                Column::Categorical { codes, .. } if shared => {
+                    ColumnKeyRef::Code(codes[row])
+                }
+                _ => ColumnKeyRef::from_column(col, row),
+            }
+        })
+        .collect()
+}
+
+/// Single-key borrowed-key version — avoids Vec allocation per row.
+#[inline]
+fn row_key_ref_single_for_join<'a>(
+    col: &'a Column,
+    row: usize,
+    shared: bool,
+) -> ColumnKeyRef<'a> {
+    match col {
+        Column::Categorical { codes, .. } if shared => ColumnKeyRef::Code(codes[row]),
+        _ => ColumnKeyRef::from_column(col, row),
+    }
+}
+
+/// P6: Build a typed right-side lookup with shared-dictionary optimization.
+/// Uses borrowed keys to avoid cloning per row.
+fn build_right_lookup_btree_typed_opt(
+    right: &TidyView,
+    right_key_cols: &[usize],
+    shared_dict_flags: &[bool],
+) -> BTreeMap<Vec<GroupKey>, Vec<usize>> {
+    // For single-key joins, use ColumnKeyRef directly (no Vec wrapper per row)
+    // Then convert to owned keys only for the G unique groups, not N rows.
+    if right_key_cols.len() == 1 {
+        let col = &right.base.columns[right_key_cols[0]].1;
+        let shared = shared_dict_flags[0];
+        let mut ref_lookup: BTreeMap<ColumnKeyRef<'_>, Vec<usize>> = BTreeMap::new();
+        for r in right.mask.iter_set() {
+            let key = row_key_ref_single_for_join(col, r, shared);
+            ref_lookup.entry(key).or_default().push(r);
+        }
+        // Convert to owned keys for the result
+        return ref_lookup
+            .into_iter()
+            .map(|(k, rows)| (vec![k.to_owned()], rows))
+            .collect();
+    }
+
+    // Multi-key path: use Vec<ColumnKeyRef> then convert
+    let cols: Vec<&Column> = right_key_cols
+        .iter()
+        .map(|&ci| &right.base.columns[ci].1)
+        .collect();
+    let mut ref_lookup: BTreeMap<Vec<ColumnKeyRef<'_>>, Vec<usize>> = BTreeMap::new();
+    for r in right.mask.iter_set() {
+        let key = row_key_ref_for_join(&cols, r, shared_dict_flags);
+        ref_lookup.entry(key).or_default().push(r);
+    }
+    ref_lookup
+        .into_iter()
+        .map(|(k, rows)| (k.iter().map(|kr| kr.to_owned()).collect(), rows))
+        .collect()
+}
+
+/// P6: Detect shared Categorical dictionaries between left and right join key columns.
+/// Returns a Vec<bool> where `true` means both sides have identical level vectors,
+/// enabling code-based comparison instead of string cloning.
+fn detect_shared_dict_flags(
+    left: &TidyView,
+    right: &TidyView,
+    left_key_cols: &[usize],
+    right_key_cols: &[usize],
+) -> Vec<bool> {
+    left_key_cols
+        .iter()
+        .zip(right_key_cols.iter())
+        .map(|(&li, &ri)| {
+            match (
+                &left.base.columns[li].1,
+                &right.base.columns[ri].1,
+            ) {
+                (
+                    Column::Categorical { levels: ll, .. },
+                    Column::Categorical { levels: rl, .. },
+                ) => ll == rl,
+                _ => false,
+            }
+        })
         .collect()
 }
 
@@ -4391,6 +4881,7 @@ fn find_matches(lookup: &[(Vec<String>, usize)], key: &[String]) -> Vec<usize> {
 /// Groups right rows by their key tuple, enabling O(log K) lookup per left row
 /// (where K = unique keys) instead of O(log N) binary search on a flat sorted list.
 /// Right rows within each key are in ascending order (iter_set() guarantee).
+#[allow(dead_code)] // Kept as fallback; typed version is now preferred
 fn build_right_lookup_btree(
     right: &TidyView,
     right_key_cols: &[usize],
@@ -4398,6 +4889,22 @@ fn build_right_lookup_btree(
     let mut lookup: BTreeMap<Vec<String>, Vec<usize>> = BTreeMap::new();
     for r in right.mask.iter_set() {
         let key = row_key(&right.base, right_key_cols, r);
+        lookup.entry(key).or_default().push(r);
+    }
+    lookup
+}
+
+/// Build a typed right-side lookup using GroupKey for O(log K) BTreeMap access
+/// without per-row string allocation. Uses `row_key_typed_for_join` to resolve
+/// Categorical columns to their level strings (cross-DataFrame safe).
+#[allow(dead_code)] // Kept as fallback; P6 opt version is now preferred
+fn build_right_lookup_btree_typed(
+    right: &TidyView,
+    right_key_cols: &[usize],
+) -> BTreeMap<Vec<GroupKey>, Vec<usize>> {
+    let mut lookup: BTreeMap<Vec<GroupKey>, Vec<usize>> = BTreeMap::new();
+    for r in right.mask.iter_set() {
+        let key = row_key_typed_for_join(&right.base, right_key_cols, r);
         lookup.entry(key).or_default().push(r);
     }
     lookup
@@ -4411,14 +4918,45 @@ fn join_match_rows(
     _kind: JoinKind,
 ) -> Result<(Vec<usize>, Vec<usize>), TidyError> {
     let (left_key_cols, right_key_cols) = resolve_join_keys(left, right, on)?;
-    // O6: use BTreeMap for O(log K) lookup instead of sorted-Vec binary search
-    let lookup = build_right_lookup_btree(right, &right_key_cols);
+    let shared_dict_flags = detect_shared_dict_flags(left, right, &left_key_cols, &right_key_cols);
 
     let mut out_left = Vec::new();
     let mut out_right = Vec::new();
 
+    // Single-key fast path: no Vec wrapper per row, uses ColumnKeyRef directly
+    if left_key_cols.len() == 1 {
+        let r_col = &right.base.columns[right_key_cols[0]].1;
+        let l_col = &left.base.columns[left_key_cols[0]].1;
+        let shared = shared_dict_flags[0];
+        // Build right lookup with borrowed keys
+        let mut lookup: BTreeMap<ColumnKeyRef<'_>, Vec<usize>> = BTreeMap::new();
+        for r in right.mask.iter_set() {
+            let key = row_key_ref_single_for_join(r_col, r, shared);
+            lookup.entry(key).or_default().push(r);
+        }
+        // Probe with borrowed left keys
+        for l_row in left.mask.iter_set() {
+            let key = row_key_ref_single_for_join(l_col, l_row, shared);
+            if let Some(matches) = lookup.get(&key) {
+                for &r_row in matches {
+                    out_left.push(l_row);
+                    out_right.push(r_row);
+                }
+            }
+        }
+        return Ok((out_left, out_right));
+    }
+
+    // Multi-key path: Vec<ColumnKeyRef> per row (borrowed, no string clones)
+    let r_cols: Vec<&Column> = right_key_cols.iter().map(|&ci| &right.base.columns[ci].1).collect();
+    let l_cols: Vec<&Column> = left_key_cols.iter().map(|&ci| &left.base.columns[ci].1).collect();
+    let mut lookup: BTreeMap<Vec<ColumnKeyRef<'_>>, Vec<usize>> = BTreeMap::new();
+    for r in right.mask.iter_set() {
+        let key = row_key_ref_for_join(&r_cols, r, &shared_dict_flags);
+        lookup.entry(key).or_default().push(r);
+    }
     for l_row in left.mask.iter_set() {
-        let key = row_key(&left.base, &left_key_cols, l_row);
+        let key = row_key_ref_for_join(&l_cols, l_row, &shared_dict_flags);
         if let Some(matches) = lookup.get(&key) {
             for &r_row in matches {
                 out_left.push(l_row);
@@ -4437,14 +4975,49 @@ fn join_match_rows_optional(
     _kind: JoinKind,
 ) -> Result<(Vec<usize>, Vec<Option<usize>>), TidyError> {
     let (left_key_cols, right_key_cols) = resolve_join_keys(left, right, on)?;
-    // O6: use BTreeMap for O(log K) lookup
-    let lookup = build_right_lookup_btree(right, &right_key_cols);
+    let shared_dict_flags = detect_shared_dict_flags(left, right, &left_key_cols, &right_key_cols);
 
     let mut out_left = Vec::new();
     let mut out_right: Vec<Option<usize>> = Vec::new();
 
+    // Single-key fast path: ColumnKeyRef directly, no Vec wrapper
+    if left_key_cols.len() == 1 {
+        let r_col = &right.base.columns[right_key_cols[0]].1;
+        let l_col = &left.base.columns[left_key_cols[0]].1;
+        let shared = shared_dict_flags[0];
+        let mut lookup: BTreeMap<ColumnKeyRef<'_>, Vec<usize>> = BTreeMap::new();
+        for r in right.mask.iter_set() {
+            let key = row_key_ref_single_for_join(r_col, r, shared);
+            lookup.entry(key).or_default().push(r);
+        }
+        for l_row in left.mask.iter_set() {
+            let key = row_key_ref_single_for_join(l_col, l_row, shared);
+            match lookup.get(&key) {
+                Some(matches) if !matches.is_empty() => {
+                    for &r_row in matches {
+                        out_left.push(l_row);
+                        out_right.push(Some(r_row));
+                    }
+                }
+                _ => {
+                    out_left.push(l_row);
+                    out_right.push(None);
+                }
+            }
+        }
+        return Ok((out_left, out_right));
+    }
+
+    // Multi-key path: Vec<ColumnKeyRef> borrowed keys
+    let r_cols: Vec<&Column> = right_key_cols.iter().map(|&ci| &right.base.columns[ci].1).collect();
+    let l_cols: Vec<&Column> = left_key_cols.iter().map(|&ci| &left.base.columns[ci].1).collect();
+    let mut lookup: BTreeMap<Vec<ColumnKeyRef<'_>>, Vec<usize>> = BTreeMap::new();
+    for r in right.mask.iter_set() {
+        let key = row_key_ref_for_join(&r_cols, r, &shared_dict_flags);
+        lookup.entry(key).or_default().push(r);
+    }
     for l_row in left.mask.iter_set() {
-        let key = row_key(&left.base, &left_key_cols, l_row);
+        let key = row_key_ref_for_join(&l_cols, l_row, &shared_dict_flags);
         match lookup.get(&key) {
             Some(matches) if !matches.is_empty() => {
                 for &r_row in matches {
@@ -4469,13 +5042,41 @@ fn semi_anti_match_rows(
     semi: bool,
 ) -> Result<Vec<usize>, TidyError> {
     let (left_key_cols, right_key_cols) = resolve_join_keys(left, right, on)?;
-    // O6: use BTreeMap for O(log K) lookup
-    let lookup = build_right_lookup_btree(right, &right_key_cols);
+    let shared_dict_flags = detect_shared_dict_flags(left, right, &left_key_cols, &right_key_cols);
 
     let mut out = Vec::new();
+
+    // Single-key fast path
+    if left_key_cols.len() == 1 {
+        let r_col = &right.base.columns[right_key_cols[0]].1;
+        let l_col = &left.base.columns[left_key_cols[0]].1;
+        let shared = shared_dict_flags[0];
+        let mut right_keys: BTreeMap<ColumnKeyRef<'_>, ()> = BTreeMap::new();
+        for r in right.mask.iter_set() {
+            let key = row_key_ref_single_for_join(r_col, r, shared);
+            right_keys.entry(key).or_default();
+        }
+        for l_row in left.mask.iter_set() {
+            let key = row_key_ref_single_for_join(l_col, l_row, shared);
+            let has_match = right_keys.contains_key(&key);
+            if has_match == semi {
+                out.push(l_row);
+            }
+        }
+        return Ok(out);
+    }
+
+    // Multi-key path
+    let r_cols: Vec<&Column> = right_key_cols.iter().map(|&ci| &right.base.columns[ci].1).collect();
+    let l_cols: Vec<&Column> = left_key_cols.iter().map(|&ci| &left.base.columns[ci].1).collect();
+    let mut right_keys: BTreeMap<Vec<ColumnKeyRef<'_>>, ()> = BTreeMap::new();
+    for r in right.mask.iter_set() {
+        let key = row_key_ref_for_join(&r_cols, r, &shared_dict_flags);
+        right_keys.entry(key).or_default();
+    }
     for l_row in left.mask.iter_set() {
-        let key = row_key(&left.base, &left_key_cols, l_row);
-        let has_match = lookup.contains_key(&key);
+        let key = row_key_ref_for_join(&l_cols, l_row, &shared_dict_flags);
+        let has_match = right_keys.contains_key(&key);
         if has_match == semi {
             out.push(l_row);
         }
@@ -4576,8 +5177,13 @@ fn compare_column_rows(col: &Column, a: usize, b: usize) -> std::cmp::Ordering {
         Column::Bool(v) => v[a].cmp(&v[b]),
         Column::Str(v) => v[a].cmp(&v[b]),
         Column::Categorical { levels, codes } => {
-            // Compare by the level string, not the code
-            levels[codes[a] as usize].cmp(&levels[codes[b] as usize])
+            // P5 perf: Compare by code directly — levels are always in sorted order
+            // (BTreeMap in DictEncoding guarantees this), so code ordering == string ordering.
+            debug_assert!(
+                levels.windows(2).all(|w| w[0] <= w[1]),
+                "Categorical levels must be sorted for code-based comparison"
+            );
+            codes[a].cmp(&codes[b])
         }
         Column::DateTime(v) => v[a].cmp(&v[b]),
     }
@@ -5326,6 +5932,9 @@ impl TidyView {
         names_to: &str,
         values_to: &str,
     ) -> Result<TidyFrame, TidyError> {
+        // P4: resolve any pending ordering before pivot
+        let resolved = self.resolve_ordering();
+        let this = resolved.as_ref().unwrap_or(self);
         if value_cols.is_empty() {
             return Err(TidyError::empty_selection("pivot_longer requires at least one value_col"));
         }
@@ -5338,15 +5947,15 @@ impl TidyView {
                 return Err(TidyError::DuplicateColumn(name.to_string()));
             }
             seen_vc.push(name);
-            let idx = self.base.columns.iter().position(|(n, _)| n == name)
+            let idx = this.base.columns.iter().position(|(n, _)| n == name)
                 .ok_or_else(|| TidyError::ColumnNotFound(name.to_string()))?;
             vc_indices.push(idx);
         }
 
         // Type consistency check: all value columns must have the same type
-        let first_type = self.base.columns[vc_indices[0]].1.type_name();
+        let first_type = this.base.columns[vc_indices[0]].1.type_name();
         for &idx in &vc_indices[1..] {
-            let t = self.base.columns[idx].1.type_name();
+            let t = this.base.columns[idx].1.type_name();
             if t != first_type {
                 return Err(TidyError::TypeMismatch {
                     expected: first_type.to_string(),
@@ -5357,18 +5966,18 @@ impl TidyView {
 
         // id_cols = projected columns excluding value_cols
         let vc_set: std::collections::BTreeSet<usize> = vc_indices.iter().copied().collect();
-        let id_col_indices: Vec<usize> = self.proj.indices().iter()
+        let id_col_indices: Vec<usize> = this.proj.indices().iter()
             .copied()
             .filter(|i| !vc_set.contains(i))
             .collect();
 
-        let visible_rows: Vec<usize> = self.mask.iter_set().collect();
+        let visible_rows: Vec<usize> = this.mask.iter_set().collect();
         let n_out = visible_rows.len() * value_cols.len();
 
         // Build id columns (repeated value_cols.len() times per source row)
         let mut out_cols: Vec<(String, Column)> = Vec::new();
         for &id_idx in &id_col_indices {
-            let (name, col) = &self.base.columns[id_idx];
+            let (name, col) = &this.base.columns[id_idx];
             let new_col = match col {
                 Column::Int(v) => {
                     let mut out = Vec::with_capacity(n_out);
@@ -5423,12 +6032,12 @@ impl TidyView {
         out_cols.push((names_to.to_string(), Column::Str(names_col)));
 
         // Build "values" column (all types already checked equal)
-        match &self.base.columns[vc_indices[0]].1 {
+        match &this.base.columns[vc_indices[0]].1 {
             Column::Int(_) => {
                 let mut vals: Vec<i64> = Vec::with_capacity(n_out);
                 for &r in &visible_rows {
                     for &vci in &vc_indices {
-                        if let Column::Int(v) = &self.base.columns[vci].1 {
+                        if let Column::Int(v) = &this.base.columns[vci].1 {
                             vals.push(v[r]);
                         }
                     }
@@ -5439,7 +6048,7 @@ impl TidyView {
                 let mut vals: Vec<f64> = Vec::with_capacity(n_out);
                 for &r in &visible_rows {
                     for &vci in &vc_indices {
-                        if let Column::Float(v) = &self.base.columns[vci].1 {
+                        if let Column::Float(v) = &this.base.columns[vci].1 {
                             vals.push(v[r]);
                         }
                     }
@@ -5450,7 +6059,7 @@ impl TidyView {
                 let mut vals: Vec<String> = Vec::with_capacity(n_out);
                 for &r in &visible_rows {
                     for &vci in &vc_indices {
-                        if let Column::Str(v) = &self.base.columns[vci].1 {
+                        if let Column::Str(v) = &this.base.columns[vci].1 {
                             vals.push(v[r].clone());
                         }
                     }
@@ -5461,7 +6070,7 @@ impl TidyView {
                 let mut vals: Vec<bool> = Vec::with_capacity(n_out);
                 for &r in &visible_rows {
                     for &vci in &vc_indices {
-                        if let Column::Bool(v) = &self.base.columns[vci].1 {
+                        if let Column::Bool(v) = &this.base.columns[vci].1 {
                             vals.push(v[r]);
                         }
                     }
@@ -5473,7 +6082,7 @@ impl TidyView {
                 let mut vals: Vec<String> = Vec::with_capacity(n_out);
                 for &r in &visible_rows {
                     for &vci in &vc_indices {
-                        vals.push(self.base.columns[vci].1.get_display(r));
+                        vals.push(this.base.columns[vci].1.get_display(r));
                     }
                 }
                 out_cols.push((values_to.to_string(), Column::Str(vals)));
@@ -5507,22 +6116,25 @@ impl TidyView {
         names_from: &str,
         values_from: &str,
     ) -> Result<NullableFrame, TidyError> {
+        // P4: resolve any pending ordering before pivot
+        let resolved = self.resolve_ordering();
+        let this = resolved.as_ref().unwrap_or(self);
         // Validate columns
         let _names_col_idx = self.base.columns.iter().position(|(n, _)| n == names_from)
             .ok_or_else(|| TidyError::ColumnNotFound(names_from.to_string()))?;
-        let _values_col_idx = self.base.columns.iter().position(|(n, _)| n == values_from)
+        let _values_col_idx = this.base.columns.iter().position(|(n, _)| n == values_from)
             .ok_or_else(|| TidyError::ColumnNotFound(values_from.to_string()))?;
         for &id in id_cols {
-            let _ = self.base.columns.iter().position(|(n, _)| n == id)
+            let _ = this.base.columns.iter().position(|(n, _)| n == id)
                 .ok_or_else(|| TidyError::ColumnNotFound(id.to_string()))?;
         }
 
-        let visible_rows: Vec<usize> = self.mask.iter_set().collect();
+        let visible_rows: Vec<usize> = this.mask.iter_set().collect();
 
         // Collect unique key values in first-occurrence order
         let mut key_values: Vec<String> = Vec::new();
         for &r in &visible_rows {
-            let kv = self.base.get_column(names_from).unwrap().get_display(r);
+            let kv = this.base.get_column(names_from).unwrap().get_display(r);
             if !key_values.contains(&kv) {
                 key_values.push(kv);
             }
@@ -5531,7 +6143,7 @@ impl TidyView {
         // Collect unique id combinations in first-occurrence order
         // Map: id_tuple â†’ output_row_slot
         let id_col_refs: Vec<&Column> = id_cols.iter()
-            .map(|&name| self.base.get_column(name).unwrap())
+            .map(|&name| this.base.get_column(name).unwrap())
             .collect();
 
         let mut id_order: Vec<Vec<String>> = Vec::new(); // first-occurrence
@@ -5561,7 +6173,7 @@ impl TidyView {
                 .collect();
             let id_slot = id_to_slot.iter().find(|(k, _)| k == &id_key).unwrap().1;
 
-            let kv = self.base.get_column(names_from).unwrap().get_display(r);
+            let kv = this.base.get_column(names_from).unwrap().get_display(r);
             let key_slot = key_values.iter().position(|v| v == &kv).unwrap();
 
             if cell_map[id_slot][key_slot].is_some() {
@@ -5577,7 +6189,7 @@ impl TidyView {
 
         // Id columns
         for (id_idx, &id_name) in id_cols.iter().enumerate() {
-            let id_col = self.base.get_column(id_name).unwrap();
+            let id_col = this.base.get_column(id_name).unwrap();
             let id_row_indices: Vec<usize> = id_order.iter()
                 .map(|id_tup| {
                     // Find the first visible row that has this id tuple
@@ -5594,7 +6206,7 @@ impl TidyView {
         }
 
         // Value columns (one per unique key value)
-        let values_col = self.base.get_column(values_from).unwrap();
+        let values_col = this.base.get_column(values_from).unwrap();
         let val_type = values_col.type_name();
         for (key_slot, key_val) in key_values.iter().enumerate() {
             let row_opts: Vec<Option<usize>> = (0..n_rows)
@@ -5652,6 +6264,8 @@ impl TidyView {
             base: Rc::new(new_base),
             mask: self.mask.clone(),
             proj: self.proj.clone(),
+            // P4: rename is metadata-only, preserve ordering
+            ordering: self.ordering.clone(),
         })
     }
 
@@ -5735,6 +6349,8 @@ impl TidyView {
             base: Rc::clone(&self.base),
             mask: self.mask.clone(),
             proj: ProjectionMap::from_indices(new_indices),
+            // P4: relocate is projection-only, preserve ordering
+            ordering: self.ordering.clone(),
         })
     }
 
@@ -5773,8 +6389,14 @@ impl TidyView {
     ///   â€¢ Column names differ â†’ `TidyError::Internal("schema mismatch: ...")`.
     ///   â€¢ `other` has zero rows â†’ returns self's rows (valid, no error).
     pub fn bind_rows(&self, other: &TidyView) -> Result<TidyFrame, TidyError> {
-        let self_names = self.column_names();
-        let other_names = other.column_names();
+        // P4: resolve any pending ordering before bind
+        let l = self.resolve_ordering();
+        let lref = l.as_ref().unwrap_or(self);
+        let r = other.resolve_ordering();
+        let rref = r.as_ref().unwrap_or(other);
+
+        let self_names = lref.column_names();
+        let other_names = rref.column_names();
 
         if self_names != other_names {
             return Err(TidyError::schema_mismatch(format!(
@@ -5783,17 +6405,17 @@ impl TidyView {
             )));
         }
 
-        let self_rows: Vec<usize> = self.mask.iter_set().collect();
-        let other_rows: Vec<usize> = other.mask.iter_set().collect();
+        let self_rows: Vec<usize> = lref.mask.iter_set().collect();
+        let other_rows: Vec<usize> = rref.mask.iter_set().collect();
 
         let mut out_cols: Vec<(String, Column)> = Vec::new();
-        for &ci in self.proj.indices() {
-            let (name, self_col) = &self.base.columns[ci];
+        for &ci in lref.proj.indices() {
+            let (name, self_col) = &lref.base.columns[ci];
             // Find matching column in other's projection
-            let other_ci = other.proj.indices().iter().copied()
-                .find(|&i| other.base.columns[i].0 == *name)
+            let other_ci = rref.proj.indices().iter().copied()
+                .find(|&i| rref.base.columns[i].0 == *name)
                 .ok_or_else(|| TidyError::ColumnNotFound(name.clone()))?;
-            let other_col = &other.base.columns[other_ci].1;
+            let other_col = &rref.base.columns[other_ci].1;
 
             let col = concat_columns(self_col, &self_rows, other_col, &other_rows)?;
             out_cols.push((name.clone(), col));
@@ -5815,8 +6437,14 @@ impl TidyView {
     ///   â€¢ Row count mismatch â†’ `TidyError::LengthMismatch`.
     ///   â€¢ Column name collision â†’ `TidyError::DuplicateColumn`.
     pub fn bind_cols(&self, other: &TidyView) -> Result<TidyFrame, TidyError> {
-        let self_nrows = self.nrows();
-        let other_nrows = other.nrows();
+        // P4: resolve any pending ordering before bind
+        let l = self.resolve_ordering();
+        let lref = l.as_ref().unwrap_or(self);
+        let r = other.resolve_ordering();
+        let rref = r.as_ref().unwrap_or(other);
+
+        let self_nrows = lref.nrows();
+        let other_nrows = rref.nrows();
 
         if self_nrows != other_nrows {
             return Err(TidyError::LengthMismatch {
@@ -5825,25 +6453,25 @@ impl TidyView {
             });
         }
 
-        let self_names = self.column_names();
-        let other_names = other.column_names();
+        let self_names = lref.column_names();
+        let other_names = rref.column_names();
         for name in &other_names {
             if self_names.contains(name) {
                 return Err(TidyError::DuplicateColumn(name.to_string()));
             }
         }
 
-        let self_rows: Vec<usize> = self.mask.iter_set().collect();
-        let other_rows: Vec<usize> = other.mask.iter_set().collect();
+        let self_rows: Vec<usize> = lref.mask.iter_set().collect();
+        let other_rows: Vec<usize> = rref.mask.iter_set().collect();
 
         let mut out_cols: Vec<(String, Column)> = Vec::new();
 
-        for &ci in self.proj.indices() {
-            let (name, col) = &self.base.columns[ci];
+        for &ci in lref.proj.indices() {
+            let (name, col) = &lref.base.columns[ci];
             out_cols.push((name.clone(), gather_column(col, &self_rows)));
         }
-        for &ci in other.proj.indices() {
-            let (name, col) = &other.base.columns[ci];
+        for &ci in rref.proj.indices() {
+            let (name, col) = &rref.base.columns[ci];
             out_cols.push((name.clone(), gather_column(col, &other_rows)));
         }
 
@@ -5911,13 +6539,18 @@ impl TidyView {
         on: &[(&str, &str)],
         suffix: &JoinSuffix,
     ) -> Result<NullableFrame, TidyError> {
+        // P4: resolve any pending ordering on both sides before join
+        let l = self.resolve_ordering();
+        let lref = l.as_ref().unwrap_or(self);
+        let r = right.resolve_ordering();
+        let rref = r.as_ref().unwrap_or(right);
         // Validate key type compatibility
-        validate_join_key_types(self, right, on)?;
+        validate_join_key_types(lref, rref, on)?;
         // Swap sides: right becomes "left" of a left join, then re-order columns
         let swapped_on: Vec<(&str, &str)> = on.iter().map(|&(l, r)| (r, l)).collect();
         let (right_rows, left_rows_opt) =
-            join_match_rows_optional(right, self, &swapped_on, JoinKind::Left)?;
-        build_right_join_frame(self, right, &left_rows_opt, &right_rows, on, suffix)
+            join_match_rows_optional(rref, lref, &swapped_on, JoinKind::Left)?;
+        build_right_join_frame(lref, rref, &left_rows_opt, &right_rows, on, suffix)
     }
 
     // â"€â"€ full_join â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
@@ -5931,8 +6564,13 @@ impl TidyView {
         on: &[(&str, &str)],
         suffix: &JoinSuffix,
     ) -> Result<NullableFrame, TidyError> {
-        validate_join_key_types(self, right, on)?;
-        build_full_join_frame(self, right, on, suffix)
+        // P4: resolve any pending ordering on both sides before join
+        let l = self.resolve_ordering();
+        let lref = l.as_ref().unwrap_or(self);
+        let r = right.resolve_ordering();
+        let rref = r.as_ref().unwrap_or(right);
+        validate_join_key_types(lref, rref, on)?;
+        build_full_join_frame(lref, rref, on, suffix)
     }
 
     // â"€â"€ inner_join_typed (join maturity upgrade) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
@@ -5948,9 +6586,14 @@ impl TidyView {
         on: &[(&str, &str)],
         suffix: &JoinSuffix,
     ) -> Result<TidyFrame, TidyError> {
-        validate_join_key_types(self, right, on)?;
-        let (left_rows, right_rows) = join_match_rows(self, right, on, JoinKind::Inner)?;
-        build_join_frame_with_suffix(self, right, &left_rows, &right_rows, on, suffix, false)
+        // P4: resolve any pending ordering on both sides before join
+        let l = self.resolve_ordering();
+        let lref = l.as_ref().unwrap_or(self);
+        let r = right.resolve_ordering();
+        let rref = r.as_ref().unwrap_or(right);
+        validate_join_key_types(lref, rref, on)?;
+        let (left_rows, right_rows) = join_match_rows(lref, rref, on, JoinKind::Inner)?;
+        build_join_frame_with_suffix(lref, rref, &left_rows, &right_rows, on, suffix, false)
     }
 
     // â"€â"€ left_join_typed (join maturity upgrade) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
@@ -5962,10 +6605,15 @@ impl TidyView {
         on: &[(&str, &str)],
         suffix: &JoinSuffix,
     ) -> Result<TidyFrame, TidyError> {
-        validate_join_key_types(self, right, on)?;
+        // P4: resolve any pending ordering on both sides before join
+        let l = self.resolve_ordering();
+        let lref = l.as_ref().unwrap_or(self);
+        let r = right.resolve_ordering();
+        let rref = r.as_ref().unwrap_or(right);
+        validate_join_key_types(lref, rref, on)?;
         let (left_rows, right_rows_opt) =
-            join_match_rows_optional(self, right, on, JoinKind::Left)?;
-        build_left_join_frame_with_suffix(self, right, &left_rows, &right_rows_opt, on, suffix)
+            join_match_rows_optional(lref, rref, on, JoinKind::Left)?;
+        build_left_join_frame_with_suffix(lref, rref, &left_rows, &right_rows_opt, on, suffix)
     }
 }
 
@@ -6323,12 +6971,61 @@ impl GroupedTidyView {
         let key_names = &self.index.key_names;
         let mut out_cols: Vec<(String, Column)> = Vec::new();
 
-        // Key columns (String typed â€" group key values)
+        // Key columns — reconstruct typed columns from GroupKey values
+        let base = &self.view.base;
         for ki in 0..key_names.len() {
-            let col_vals: Vec<String> = self.index.groups.iter()
-                .map(|g| g.key_values[ki].clone())
-                .collect();
-            out_cols.push((key_names[ki].clone(), Column::Str(col_vals)));
+            let base_col = base.get_column(&key_names[ki]);
+            let col = match base_col {
+                Some(Column::Int(_)) => {
+                    let vals: Vec<i64> = self.index.groups.iter()
+                        .map(|g| match &g.key_values[ki] {
+                            GroupKey::Int(v) => *v,
+                            other => other.to_display(base_col.unwrap()).parse::<i64>().unwrap_or(0),
+                        })
+                        .collect();
+                    Column::Int(vals)
+                }
+                Some(Column::Float(_)) => {
+                    let vals: Vec<f64> = self.index.groups.iter()
+                        .map(|g| match &g.key_values[ki] {
+                            GroupKey::Float(FloatKey(v)) => *v,
+                            GroupKey::Int(v) => *v as f64,
+                            other => other.to_display(base_col.unwrap()).parse::<f64>().unwrap_or(0.0),
+                        })
+                        .collect();
+                    Column::Float(vals)
+                }
+                Some(Column::Bool(_)) => {
+                    let vals: Vec<bool> = self.index.groups.iter()
+                        .map(|g| match &g.key_values[ki] {
+                            GroupKey::Bool(v) => *v,
+                            other => {
+                                let s = other.to_display(base_col.unwrap());
+                                matches!(s.as_str(), "true" | "1")
+                            }
+                        })
+                        .collect();
+                    Column::Bool(vals)
+                }
+                _ => {
+                    // Str, Categorical, DateTime, or missing — render as string
+                    let vals: Vec<String> = self.index.groups.iter()
+                        .map(|g| match &g.key_values[ki] {
+                            GroupKey::Str(s) => s.clone(),
+                            GroupKey::Code(c) => {
+                                if let Some(Column::Categorical { levels, .. }) = base_col {
+                                    levels[*c as usize].clone()
+                                } else {
+                                    c.to_string()
+                                }
+                            }
+                            other => other.to_display(base_col.unwrap_or(&Column::Str(vec![]))),
+                        })
+                        .collect();
+                    Column::Str(vals)
+                }
+            };
+            out_cols.push((key_names[ki].clone(), col));
         }
 
         // For each spec column Ã— transform
@@ -6450,9 +7147,98 @@ impl GroupIndex {
                 groups[slot].row_indices.push(row);
             } else {
                 let slot = groups.len();
-                let key_values = key.clone();
+                let key_values: Vec<GroupKey> = key.iter().map(|s| GroupKey::Str(s.clone())).collect();
                 key_to_slot.insert(key, slot);
                 groups.push(GroupMeta { key_values, row_indices: vec![row] });
+            }
+        }
+
+        GroupIndex { groups, key_names }
+    }
+
+    /// Build a GroupIndex using borrowed keys to avoid per-row string cloning.
+    ///
+    /// Semantics: IDENTICAL to `build_fast()`. First-occurrence group ordering
+    /// is preserved. Uses `ColumnKeyRef<'a>` (borrowed) as BTreeMap keys so
+    /// only the G unique group keys are cloned, not all N rows.
+    pub fn build_fast_typed(
+        base: &DataFrame,
+        key_col_indices: &[usize],
+        visible_rows: &[usize],
+        key_names: Vec<String>,
+    ) -> Self {
+        // Single-key fast path: avoids Vec<ColumnKeyRef> wrapper per row
+        if key_col_indices.len() == 1 {
+            return Self::build_fast_typed_single(base, key_col_indices[0], visible_rows, key_names);
+        }
+        Self::build_fast_typed_multi(base, key_col_indices, visible_rows, key_names)
+    }
+
+    /// Single-key grouping: BTreeMap<ColumnKeyRef, usize> — no Vec allocation per row.
+    fn build_fast_typed_single(
+        base: &DataFrame,
+        key_col_idx: usize,
+        visible_rows: &[usize],
+        key_names: Vec<String>,
+    ) -> Self {
+        use std::collections::BTreeMap;
+
+        let col = &base.columns[key_col_idx].1;
+        let mut groups: Vec<GroupMeta> = Vec::new();
+        let mut key_to_slot: BTreeMap<ColumnKeyRef<'_>, usize> = BTreeMap::new();
+
+        for &row in visible_rows {
+            let key = ColumnKeyRef::from_column(col, row);
+
+            if let Some(&slot) = key_to_slot.get(&key) {
+                groups[slot].row_indices.push(row);
+            } else {
+                let slot = groups.len();
+                let key_values = vec![key.to_owned()];
+                key_to_slot.insert(key, slot);
+                groups.push(GroupMeta {
+                    key_values,
+                    row_indices: vec![row],
+                });
+            }
+        }
+
+        GroupIndex { groups, key_names }
+    }
+
+    /// Multi-key grouping: BTreeMap<Vec<ColumnKeyRef>, usize>.
+    fn build_fast_typed_multi(
+        base: &DataFrame,
+        key_col_indices: &[usize],
+        visible_rows: &[usize],
+        key_names: Vec<String>,
+    ) -> Self {
+        use std::collections::BTreeMap;
+
+        let mut groups: Vec<GroupMeta> = Vec::new();
+        let mut key_to_slot: BTreeMap<Vec<ColumnKeyRef<'_>>, usize> = BTreeMap::new();
+
+        let cols: Vec<&Column> = key_col_indices
+            .iter()
+            .map(|&ci| &base.columns[ci].1)
+            .collect();
+
+        for &row in visible_rows {
+            let key: Vec<ColumnKeyRef<'_>> = cols
+                .iter()
+                .map(|col| ColumnKeyRef::from_column(col, row))
+                .collect();
+
+            if let Some(&slot) = key_to_slot.get(&key) {
+                groups[slot].row_indices.push(row);
+            } else {
+                let slot = groups.len();
+                let key_values: Vec<GroupKey> = key.iter().map(|k| k.to_owned()).collect();
+                key_to_slot.insert(key, slot);
+                groups.push(GroupMeta {
+                    key_values,
+                    row_indices: vec![row],
+                });
             }
         }
 
@@ -6474,9 +7260,10 @@ impl TidyView {
                 .ok_or_else(|| TidyError::ColumnNotFound(key.to_string()))?;
             key_col_indices.push(idx);
         }
-        let visible_rows: Vec<usize> = self.mask.iter_set().collect();
+        // P4: use ordering-aware row iteration (sorted if arrange() was called)
+        let visible_rows: Vec<usize> = self.visible_rows_ordered();
         let key_names: Vec<String> = keys.iter().map(|s| s.to_string()).collect();
-        let index = GroupIndex::build_fast(&self.base, &key_col_indices, &visible_rows, key_names);
+        let index = GroupIndex::build_fast_typed(&self.base, &key_col_indices, &visible_rows, key_names);
         Ok(GroupedTidyView { view: self.clone(), index })
     }
 }
@@ -6594,15 +7381,18 @@ impl FctColumn {
 
     /// Encode a `Column::Str` from a `TidyView` column (respects mask & projection).
     pub fn encode_from_view(view: &TidyView, col: &str) -> Result<Self, TidyError> {
-        let base_idx = view.base.columns.iter()
+        // P4: resolve any pending ordering
+        let resolved = view.resolve_ordering();
+        let v = resolved.as_ref().unwrap_or(view);
+        let base_idx = v.base.columns.iter()
             .position(|(n, _)| n == col)
             .ok_or_else(|| TidyError::ColumnNotFound(col.to_string()))?;
         // Check it is in the current projection
-        if !view.proj.indices().contains(&base_idx) {
+        if !v.proj.indices().contains(&base_idx) {
             return Err(TidyError::ColumnNotFound(col.to_string()));
         }
-        let col_data = &view.base.columns[base_idx].1;
-        let visible: Vec<usize> = view.mask.iter_set().collect();
+        let col_data = &v.base.columns[base_idx].1;
+        let visible: Vec<usize> = v.mask.iter_set().collect();
         let strings: Vec<String> = visible.iter()
             .map(|&r| col_data.get_display(r))
             .collect();
@@ -7278,6 +8068,686 @@ mod rolling_window_tests {
     }
 }
 
+#[cfg(test)]
+mod columnar_str_tests {
+    use super::*;
+
+    #[test]
+    fn test_columnar_str_filter_eq() {
+        let df = DataFrame::from_columns(vec![
+            (
+                "name".into(),
+                Column::Str(vec![
+                    "Alice".into(),
+                    "Bob".into(),
+                    "Charlie".into(),
+                    "Alice".into(),
+                ]),
+            ),
+            ("score".into(), Column::Int(vec![10, 20, 30, 40])),
+        ])
+        .unwrap();
+        let view = df.tidy();
+        let filtered = view
+            .filter(&DExpr::BinOp {
+                op: DBinOp::Eq,
+                left: Box::new(DExpr::Col("name".into())),
+                right: Box::new(DExpr::LitStr("Alice".into())),
+            })
+            .unwrap();
+        assert_eq!(filtered.nrows(), 2);
+    }
+
+    #[test]
+    fn test_columnar_str_filter_ne() {
+        let df = DataFrame::from_columns(vec![(
+            "name".into(),
+            Column::Str(vec![
+                "Alice".into(),
+                "Bob".into(),
+                "Charlie".into(),
+                "Alice".into(),
+            ]),
+        )])
+        .unwrap();
+        let view = df.tidy();
+        let filtered = view
+            .filter(&DExpr::BinOp {
+                op: DBinOp::Ne,
+                left: Box::new(DExpr::Col("name".into())),
+                right: Box::new(DExpr::LitStr("Alice".into())),
+            })
+            .unwrap();
+        assert_eq!(filtered.nrows(), 2);
+    }
+
+    #[test]
+    fn test_columnar_categorical_filter_eq() {
+        let df = DataFrame::from_columns(vec![(
+            "animal".into(),
+            Column::Categorical {
+                levels: vec!["bird".into(), "cat".into(), "dog".into()],
+                codes: vec![1, 2, 1, 0, 2],
+            },
+        )])
+        .unwrap();
+        let view = df.tidy();
+        let filtered = view
+            .filter(&DExpr::BinOp {
+                op: DBinOp::Eq,
+                left: Box::new(DExpr::Col("animal".into())),
+                right: Box::new(DExpr::LitStr("cat".into())),
+            })
+            .unwrap();
+        assert_eq!(filtered.nrows(), 2);
+    }
+
+    #[test]
+    fn test_columnar_categorical_filter_missing_target() {
+        let df = DataFrame::from_columns(vec![(
+            "animal".into(),
+            Column::Categorical {
+                levels: vec!["bird".into(), "cat".into(), "dog".into()],
+                codes: vec![1, 2, 1, 0],
+            },
+        )])
+        .unwrap();
+        let view = df.tidy();
+        // Eq with missing target -> 0 rows
+        let eq_result = view
+            .filter(&DExpr::BinOp {
+                op: DBinOp::Eq,
+                left: Box::new(DExpr::Col("animal".into())),
+                right: Box::new(DExpr::LitStr("fish".into())),
+            })
+            .unwrap();
+        assert_eq!(eq_result.nrows(), 0);
+        // Ne with missing target -> all rows
+        let ne_result = view
+            .filter(&DExpr::BinOp {
+                op: DBinOp::Ne,
+                left: Box::new(DExpr::Col("animal".into())),
+                right: Box::new(DExpr::LitStr("fish".into())),
+            })
+            .unwrap();
+        assert_eq!(ne_result.nrows(), 4);
+    }
+
+    #[test]
+    fn test_columnar_str_filter_parity_with_rowwise() {
+        let names: Vec<String> = (0..1000)
+            .map(|i| {
+                if i % 3 == 0 {
+                    "X".into()
+                } else {
+                    format!("N{}", i)
+                }
+            })
+            .collect();
+        let df = DataFrame::from_columns(vec![("name".into(), Column::Str(names))]).unwrap();
+        let view = df.tidy();
+        let filtered = view
+            .filter(&DExpr::BinOp {
+                op: DBinOp::Eq,
+                left: Box::new(DExpr::Col("name".into())),
+                right: Box::new(DExpr::LitStr("X".into())),
+            })
+            .unwrap();
+        assert_eq!(filtered.nrows(), 334); // ceil(1000/3)
+    }
+
+    #[test]
+    fn test_columnar_str_filter_determinism() {
+        let df = DataFrame::from_columns(vec![(
+            "city".into(),
+            Column::Str(vec![
+                "NYC".into(),
+                "LA".into(),
+                "NYC".into(),
+                "SF".into(),
+                "NYC".into(),
+            ]),
+        )])
+        .unwrap();
+        let pred = DExpr::BinOp {
+            op: DBinOp::Eq,
+            left: Box::new(DExpr::Col("city".into())),
+            right: Box::new(DExpr::LitStr("NYC".into())),
+        };
+        // Run 10 times, verify identical result
+        for _ in 0..10 {
+            let view = df.clone().tidy();
+            let filtered = view.filter(&pred).unwrap();
+            assert_eq!(filtered.nrows(), 3);
+        }
+    }
+}
+
+#[cfg(test)]
+mod typed_groupkey_tests {
+    use super::*;
+
+    #[test]
+    fn test_float_key_nan_last_ordering() {
+        let mut keys = vec![
+            FloatKey(f64::NAN),
+            FloatKey(1.0),
+            FloatKey(f64::NAN),
+            FloatKey(-1.0),
+            FloatKey(0.0),
+        ];
+        keys.sort();
+        assert_eq!(keys[0].0, -1.0);
+        assert_eq!(keys[1].0, 0.0);
+        assert_eq!(keys[2].0, 1.0);
+        assert!(keys[3].0.is_nan());
+        assert!(keys[4].0.is_nan());
+    }
+
+    #[test]
+    fn test_float_key_nan_equality() {
+        assert_eq!(FloatKey(f64::NAN), FloatKey(f64::NAN));
+        assert_ne!(FloatKey(1.0), FloatKey(f64::NAN));
+    }
+
+    /// Helper: compare key_values display forms between build_fast (Str-wrapped)
+    /// and build_fast_typed (natively typed) GroupMeta entries.
+    fn assert_key_display_eq(df: &DataFrame, key_indices: &[usize], og: &GroupMeta, ng: &GroupMeta) {
+        assert_eq!(og.key_values.len(), ng.key_values.len());
+        for (ki, &ci) in key_indices.iter().enumerate() {
+            let col = &df.columns[ci].1;
+            let old_display = og.key_values[ki].to_display(col);
+            let new_display = ng.key_values[ki].to_display(col);
+            assert_eq!(old_display, new_display, "key display mismatch at index {ki}");
+        }
+    }
+
+    #[test]
+    fn test_typed_groupby_int_parity() {
+        let df = DataFrame::from_columns(vec![
+            ("grp".into(), Column::Int(vec![1, 2, 1, 3, 2, 1])),
+            ("val".into(), Column::Float(vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0])),
+        ])
+        .unwrap();
+        let visible: Vec<usize> = (0..6).collect();
+        let key_indices = vec![0];
+
+        let old = GroupIndex::build_fast(&df, &key_indices, &visible, vec!["grp".into()]);
+        let new = GroupIndex::build_fast_typed(&df, &key_indices, &visible, vec!["grp".into()]);
+
+        assert_eq!(old.groups.len(), new.groups.len());
+        for (og, ng) in old.groups.iter().zip(new.groups.iter()) {
+            assert_key_display_eq(&df, &key_indices, og, ng);
+            assert_eq!(og.row_indices, ng.row_indices);
+        }
+        // Verify typed keys are actually typed
+        assert_eq!(new.groups[0].key_values, vec![GroupKey::Int(1)]);
+    }
+
+    #[test]
+    fn test_typed_groupby_float_with_nan() {
+        let df = DataFrame::from_columns(vec![
+            ("grp".into(), Column::Float(vec![1.0, f64::NAN, 2.0, f64::NAN, 1.0])),
+            ("val".into(), Column::Int(vec![10, 20, 30, 40, 50])),
+        ])
+        .unwrap();
+        let visible: Vec<usize> = (0..5).collect();
+        let key_indices = vec![0];
+
+        let old = GroupIndex::build_fast(&df, &key_indices, &visible, vec!["grp".into()]);
+        let new = GroupIndex::build_fast_typed(&df, &key_indices, &visible, vec!["grp".into()]);
+
+        assert_eq!(old.groups.len(), new.groups.len());
+        for (og, ng) in old.groups.iter().zip(new.groups.iter()) {
+            assert_key_display_eq(&df, &key_indices, og, ng);
+            assert_eq!(og.row_indices, ng.row_indices);
+        }
+    }
+
+    #[test]
+    fn test_typed_groupby_categorical() {
+        let df = DataFrame::from_columns(vec![
+            ("animal".into(), Column::Categorical {
+                levels: vec!["bird".into(), "cat".into(), "dog".into()],
+                codes: vec![1, 2, 1, 0, 2],
+            }),
+            ("count".into(), Column::Int(vec![1, 2, 3, 4, 5])),
+        ])
+        .unwrap();
+        let visible: Vec<usize> = (0..5).collect();
+        let key_indices = vec![0];
+
+        let old = GroupIndex::build_fast(&df, &key_indices, &visible, vec!["animal".into()]);
+        let new = GroupIndex::build_fast_typed(&df, &key_indices, &visible, vec!["animal".into()]);
+
+        assert_eq!(old.groups.len(), new.groups.len());
+        for (og, ng) in old.groups.iter().zip(new.groups.iter()) {
+            assert_key_display_eq(&df, &key_indices, og, ng);
+            assert_eq!(og.row_indices, ng.row_indices);
+        }
+    }
+
+    #[test]
+    fn test_typed_groupby_multikey_parity() {
+        let df = DataFrame::from_columns(vec![
+            ("dept".into(), Column::Str(vec!["A".into(), "B".into(), "A".into(), "B".into()])),
+            ("level".into(), Column::Int(vec![1, 1, 2, 1])),
+            ("val".into(), Column::Float(vec![10.0, 20.0, 30.0, 40.0])),
+        ])
+        .unwrap();
+        let visible: Vec<usize> = (0..4).collect();
+        let key_indices = vec![0, 1];
+
+        let old = GroupIndex::build_fast(
+            &df, &key_indices, &visible, vec!["dept".into(), "level".into()],
+        );
+        let new = GroupIndex::build_fast_typed(
+            &df, &key_indices, &visible, vec!["dept".into(), "level".into()],
+        );
+
+        assert_eq!(old.groups.len(), new.groups.len());
+        for (og, ng) in old.groups.iter().zip(new.groups.iter()) {
+            assert_key_display_eq(&df, &key_indices, og, ng);
+            assert_eq!(og.row_indices, ng.row_indices);
+        }
+    }
+
+    #[test]
+    fn test_typed_groupby_determinism() {
+        let df = DataFrame::from_columns(vec![
+            ("grp".into(), Column::Int(vec![3, 1, 2, 1, 3, 2])),
+            ("val".into(), Column::Float(vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0])),
+        ])
+        .unwrap();
+        let visible: Vec<usize> = (0..6).collect();
+        let key_indices = vec![0];
+
+        let baseline = GroupIndex::build_fast_typed(&df, &key_indices, &visible, vec!["grp".into()]);
+        for _ in 0..10 {
+            let result = GroupIndex::build_fast_typed(&df, &key_indices, &visible, vec!["grp".into()]);
+            assert_eq!(baseline.groups.len(), result.groups.len());
+            for (bg, rg) in baseline.groups.iter().zip(result.groups.iter()) {
+                assert_eq!(bg.key_values, rg.key_values);
+                assert_eq!(bg.row_indices, rg.row_indices);
+            }
+        }
+    }
+
+    #[test]
+    fn test_typed_groupby_first_occurrence_order() {
+        let df = DataFrame::from_columns(vec![
+            ("grp".into(), Column::Int(vec![3, 1, 2, 1, 3])),
+        ])
+        .unwrap();
+        let visible: Vec<usize> = (0..5).collect();
+        let key_indices = vec![0];
+
+        let gi = GroupIndex::build_fast_typed(&df, &key_indices, &visible, vec!["grp".into()]);
+        // First occurrence order: 3 (row 0), 1 (row 1), 2 (row 2)
+        assert_eq!(gi.groups[0].key_values, vec![GroupKey::Int(3)]);
+        assert_eq!(gi.groups[1].key_values, vec![GroupKey::Int(1)]);
+        assert_eq!(gi.groups[2].key_values, vec![GroupKey::Int(2)]);
+    }
+}
+
+#[cfg(test)]
+mod p2_typed_groupmeta_tests {
+    use super::*;
+
+    #[test]
+    fn test_groupmeta_typed_int_keys() {
+        let df = DataFrame::from_columns(vec![
+            ("grp".into(), Column::Int(vec![1, 2, 1, 3, 2, 1])),
+            ("val".into(), Column::Float(vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0])),
+        ]).unwrap();
+        let view = df.tidy();
+        let grouped = view.group_by(&["grp"]).unwrap();
+        // First-occurrence order: 1, 2, 3
+        let gi = &grouped.index;
+        assert_eq!(gi.groups.len(), 3);
+        assert_eq!(gi.groups[0].key_values, vec![GroupKey::Int(1)]);
+        assert_eq!(gi.groups[1].key_values, vec![GroupKey::Int(2)]);
+        assert_eq!(gi.groups[2].key_values, vec![GroupKey::Int(3)]);
+    }
+
+    #[test]
+    fn test_groupmeta_typed_float_nan() {
+        let df = DataFrame::from_columns(vec![
+            ("x".into(), Column::Float(vec![1.0, f64::NAN, 2.0, f64::NAN])),
+            ("v".into(), Column::Int(vec![10, 20, 30, 40])),
+        ]).unwrap();
+        let view = df.tidy();
+        let grouped = view.group_by(&["x"]).unwrap();
+        let gi = &grouped.index;
+        // Groups: 1.0, NaN, 2.0 (first-occurrence order)
+        assert_eq!(gi.groups.len(), 3);
+        match &gi.groups[0].key_values[0] {
+            GroupKey::Float(FloatKey(v)) => assert_eq!(*v, 1.0),
+            _ => panic!("expected Float key"),
+        }
+        match &gi.groups[1].key_values[0] {
+            GroupKey::Float(FloatKey(v)) => assert!(v.is_nan()),
+            _ => panic!("expected Float NaN key"),
+        }
+    }
+
+    #[test]
+    fn test_summarise_with_typed_keys() {
+        let df = DataFrame::from_columns(vec![
+            ("grp".into(), Column::Int(vec![1, 2, 1, 2])),
+            ("val".into(), Column::Float(vec![10.0, 20.0, 30.0, 40.0])),
+        ]).unwrap();
+        let view = df.tidy();
+        let grouped = view.group_by(&["grp"]).unwrap();
+        let result = grouped.summarise(&[("total", TidyAgg::Sum("val".into()))]).unwrap();
+        let result_df = result.borrow();
+        // grp column should be Int (not Str)
+        if let Column::Int(v) = result_df.get_column("grp").unwrap() {
+            assert_eq!(*v, vec![1, 2]);
+        } else { panic!("grp should be Int column"); }
+        if let Column::Float(v) = result_df.get_column("total").unwrap() {
+            assert!((v[0] - 40.0).abs() < 1e-10);
+            assert!((v[1] - 60.0).abs() < 1e-10);
+        } else { panic!("total should be Float column"); }
+    }
+
+    #[test]
+    fn test_summarise_preserves_key_type() {
+        // Float group keys should produce Float key columns in summarise output
+        let df = DataFrame::from_columns(vec![
+            ("x".into(), Column::Float(vec![1.5, 2.5, 1.5, 2.5])),
+            ("y".into(), Column::Int(vec![10, 20, 30, 40])),
+        ]).unwrap();
+        let view = df.tidy();
+        let grouped = view.group_by(&["x"]).unwrap();
+        let result = grouped.summarise(&[("s", TidyAgg::Sum("y".into()))]).unwrap();
+        let result_df = result.borrow();
+        if let Column::Float(v) = result_df.get_column("x").unwrap() {
+            assert_eq!(*v, vec![1.5, 2.5]);
+        } else { panic!("x should be Float column after summarise"); }
+    }
+}
+
+#[cfg(test)]
+mod typed_join_tests {
+    use super::*;
+
+    #[test]
+    fn test_typed_join_int_keys() {
+        let left_df = DataFrame::from_columns(vec![
+            ("id".into(), Column::Int(vec![1, 2, 3])),
+            ("name".into(), Column::Str(vec!["A".into(), "B".into(), "C".into()])),
+        ]).unwrap();
+        let right_df = DataFrame::from_columns(vec![
+            ("id".into(), Column::Int(vec![2, 3, 4])),
+            ("dept".into(), Column::Str(vec!["X".into(), "Y".into(), "Z".into()])),
+        ]).unwrap();
+        let left = left_df.tidy();
+        let right = right_df.tidy();
+        let result = left.inner_join(&right, &[("id", "id")]).unwrap();
+        assert_eq!(result.borrow().nrows(), 2); // id=2, id=3
+    }
+
+    #[test]
+    fn test_typed_join_str_keys() {
+        let left_df = DataFrame::from_columns(vec![
+            ("name".into(), Column::Str(vec!["Alice".into(), "Bob".into(), "Charlie".into()])),
+            ("score".into(), Column::Int(vec![90, 80, 70])),
+        ]).unwrap();
+        let right_df = DataFrame::from_columns(vec![
+            ("name".into(), Column::Str(vec!["Bob".into(), "Diana".into()])),
+            ("dept".into(), Column::Str(vec!["Eng".into(), "HR".into()])),
+        ]).unwrap();
+        let left = left_df.tidy();
+        let right = right_df.tidy();
+        let result = left.inner_join(&right, &[("name", "name")]).unwrap();
+        assert_eq!(result.borrow().nrows(), 1); // only Bob
+    }
+
+    #[test]
+    fn test_typed_join_float_keys_with_nan() {
+        // NaN should match NaN in joins (via FloatKey equality)
+        let left_df = DataFrame::from_columns(vec![
+            ("val".into(), Column::Float(vec![1.0, f64::NAN, 2.0])),
+            ("label".into(), Column::Str(vec!["a".into(), "b".into(), "c".into()])),
+        ]).unwrap();
+        let right_df = DataFrame::from_columns(vec![
+            ("val".into(), Column::Float(vec![f64::NAN, 2.0, 3.0])),
+            ("info".into(), Column::Str(vec!["x".into(), "y".into(), "z".into()])),
+        ]).unwrap();
+        let left = left_df.tidy();
+        let right = right_df.tidy();
+        let result = left.inner_join(&right, &[("val", "val")]).unwrap();
+        // Matches: NaN=NaN, 2.0=2.0 -> 2 rows
+        assert_eq!(result.borrow().nrows(), 2);
+    }
+
+    #[test]
+    fn test_typed_join_categorical_keys() {
+        // Categorical columns with DIFFERENT level dictionaries across DataFrames.
+        // row_key_typed_for_join resolves to level strings, not codes.
+        let left_df = DataFrame::from_columns(vec![
+            ("animal".into(), Column::Categorical {
+                levels: vec!["bird".into(), "cat".into(), "dog".into()],
+                codes: vec![1, 0, 2], // cat, bird, dog
+            }),
+            ("count".into(), Column::Int(vec![10, 20, 30])),
+        ]).unwrap();
+        let right_df = DataFrame::from_columns(vec![
+            ("animal".into(), Column::Categorical {
+                levels: vec!["bird".into(), "cat".into(), "fish".into()],
+                codes: vec![0, 1], // bird, cat
+            }),
+            ("habitat".into(), Column::Str(vec!["sky".into(), "house".into()])),
+        ]).unwrap();
+        let left = left_df.tidy();
+        let right = right_df.tidy();
+        let result = left.inner_join(&right, &[("animal", "animal")]).unwrap();
+        assert_eq!(result.borrow().nrows(), 2); // bird + cat
+    }
+
+    #[test]
+    fn test_typed_join_left_join() {
+        let left_df = DataFrame::from_columns(vec![
+            ("id".into(), Column::Int(vec![1, 2, 3])),
+            ("val".into(), Column::Str(vec!["a".into(), "b".into(), "c".into()])),
+        ]).unwrap();
+        let right_df = DataFrame::from_columns(vec![
+            ("id".into(), Column::Int(vec![2, 4])),
+            ("info".into(), Column::Str(vec!["x".into(), "y".into()])),
+        ]).unwrap();
+        let left = left_df.tidy();
+        let right = right_df.tidy();
+        let result = left.left_join(&right, &[("id", "id")]).unwrap();
+        assert_eq!(result.borrow().nrows(), 3); // all left rows
+    }
+
+    #[test]
+    fn test_typed_join_semi_anti() {
+        let left_df = DataFrame::from_columns(vec![
+            ("id".into(), Column::Int(vec![1, 2, 3, 4])),
+        ]).unwrap();
+        let right_df = DataFrame::from_columns(vec![
+            ("id".into(), Column::Int(vec![2, 4, 6])),
+        ]).unwrap();
+        let left = left_df.tidy();
+        let right = right_df.tidy();
+        let semi = left.semi_join(&right, &[("id", "id")]).unwrap();
+        assert_eq!(semi.nrows(), 2); // 2, 4
+        let anti = left.anti_join(&right, &[("id", "id")]).unwrap();
+        assert_eq!(anti.nrows(), 2); // 1, 3
+    }
+
+    #[test]
+    fn test_typed_join_determinism() {
+        let left_df = DataFrame::from_columns(vec![
+            ("id".into(), Column::Int(vec![3, 1, 2, 1, 3])),
+            ("val".into(), Column::Float(vec![10.0, 20.0, 30.0, 40.0, 50.0])),
+        ]).unwrap();
+        let right_df = DataFrame::from_columns(vec![
+            ("id".into(), Column::Int(vec![1, 3])),
+            ("label".into(), Column::Str(vec!["one".into(), "three".into()])),
+        ]).unwrap();
+        let left = left_df.tidy();
+        let right = right_df.tidy();
+        let baseline = left.inner_join(&right, &[("id", "id")]).unwrap();
+        for _ in 0..10 {
+            let result = left.inner_join(&right, &[("id", "id")]).unwrap();
+            assert_eq!(baseline.borrow().nrows(), result.borrow().nrows());
+        }
+    }
+}
+
+#[cfg(test)]
+mod p1_sort_cache_tests {
+    use super::*;
+
+    #[test]
+    fn test_arrange_int_asc() {
+        let df = DataFrame::from_columns(vec![
+            ("id".into(), Column::Int(vec![3, 1, 4, 1, 5, 9, 2, 6])),
+            ("val".into(), Column::Float(vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0])),
+        ]).unwrap();
+        let view = df.tidy();
+        let sorted = view.arrange(&[ArrangeKey { col_name: "id".into(), descending: false }]).unwrap();
+        let frame = sorted.materialize().unwrap();
+        let id_col = frame.get_column("id").unwrap();
+        if let Column::Int(v) = id_col {
+            assert_eq!(*v, vec![1, 1, 2, 3, 4, 5, 6, 9]);
+        } else { panic!("expected Int column"); }
+    }
+
+    #[test]
+    fn test_arrange_float_desc_nan_last() {
+        let df = DataFrame::from_columns(vec![
+            ("x".into(), Column::Float(vec![3.0, f64::NAN, 1.0, f64::NAN, 2.0])),
+        ]).unwrap();
+        let view = df.tidy();
+        let sorted = view.arrange(&[ArrangeKey { col_name: "x".into(), descending: true }]).unwrap();
+        let frame = sorted.materialize().unwrap();
+        if let Column::Float(v) = frame.get_column("x").unwrap() {
+            // Descending with NaN-last reversed: NaN first when desc
+            // Actually NaN is Greater, so descending puts NaN first
+            assert!(v[0].is_nan());
+            assert!(v[1].is_nan());
+            assert_eq!(v[2], 3.0);
+            assert_eq!(v[3], 2.0);
+            assert_eq!(v[4], 1.0);
+        } else { panic!("expected Float column"); }
+    }
+
+    #[test]
+    fn test_arrange_multikey() {
+        let df = DataFrame::from_columns(vec![
+            ("dept".into(), Column::Str(vec!["A".into(), "B".into(), "A".into(), "B".into()])),
+            ("score".into(), Column::Int(vec![90, 80, 70, 100])),
+        ]).unwrap();
+        let view = df.tidy();
+        let sorted = view.arrange(&[
+            ArrangeKey { col_name: "dept".into(), descending: false },
+            ArrangeKey { col_name: "score".into(), descending: true },
+        ]).unwrap();
+        let frame = sorted.materialize().unwrap();
+        if let Column::Str(v) = frame.get_column("dept").unwrap() {
+            assert_eq!(*v, vec!["A", "A", "B", "B"]);
+        } else { panic!("expected Str column"); }
+        if let Column::Int(v) = frame.get_column("score").unwrap() {
+            assert_eq!(*v, vec![90, 70, 100, 80]); // A: 90>70, B: 100>80
+        } else { panic!("expected Int column"); }
+    }
+
+    #[test]
+    fn test_arrange_stable_sort_ties() {
+        // Equal keys must preserve original row order (stable sort)
+        let df = DataFrame::from_columns(vec![
+            ("grp".into(), Column::Int(vec![1, 1, 1, 1])),
+            ("order".into(), Column::Int(vec![10, 20, 30, 40])),
+        ]).unwrap();
+        let view = df.tidy();
+        let sorted = view.arrange(&[ArrangeKey { col_name: "grp".into(), descending: false }]).unwrap();
+        let frame = sorted.materialize().unwrap();
+        if let Column::Int(v) = frame.get_column("order").unwrap() {
+            assert_eq!(*v, vec![10, 20, 30, 40]); // original order preserved
+        } else { panic!("expected Int column"); }
+    }
+
+    #[test]
+    fn test_arrange_determinism_10_runs() {
+        let df = DataFrame::from_columns(vec![
+            ("x".into(), Column::Float(vec![3.14, 2.71, 1.41, f64::NAN, 0.0, -1.0])),
+        ]).unwrap();
+        let key = ArrangeKey { col_name: "x".into(), descending: false };
+        let baseline = df.clone().tidy().arrange(&[key.clone()]).unwrap().materialize().unwrap();
+        let baseline_vals: Vec<u64> = if let Column::Float(v) = baseline.get_column("x").unwrap() {
+            v.iter().map(|f| f.to_bits()).collect()
+        } else { panic!("") };
+        for _ in 0..10 {
+            let result = df.clone().tidy().arrange(&[key.clone()]).unwrap().materialize().unwrap();
+            let result_vals: Vec<u64> = if let Column::Float(v) = result.get_column("x").unwrap() {
+                v.iter().map(|f| f.to_bits()).collect()
+            } else { panic!("") };
+            assert_eq!(baseline_vals, result_vals);
+        }
+    }
+}
+
+#[cfg(test)]
+mod p5_categorical_sort_tests {
+    use super::*;
+
+    #[test]
+    fn test_categorical_sort_by_code_matches_string_sort() {
+        // Verify that sorting Categorical by code gives same order as by level string
+        let df = DataFrame::from_columns(vec![
+            ("animal".into(), Column::Categorical {
+                levels: vec!["bird".into(), "cat".into(), "dog".into()],
+                codes: vec![2, 0, 1, 2, 0], // dog, bird, cat, dog, bird
+            }),
+            ("id".into(), Column::Int(vec![1, 2, 3, 4, 5])),
+        ]).unwrap();
+        let view = df.tidy();
+        let sorted = view.arrange(&[ArrangeKey { col_name: "animal".into(), descending: false }]).unwrap();
+        let frame = sorted.materialize().unwrap();
+        // Expected order: bird(0), bird(0), cat(1), dog(2), dog(2)
+        if let Column::Int(v) = frame.get_column("id").unwrap() {
+            assert_eq!(*v, vec![2, 5, 3, 1, 4]);
+        } else { panic!("expected Int column"); }
+    }
+
+    #[test]
+    fn test_categorical_sort_descending() {
+        let df = DataFrame::from_columns(vec![
+            ("color".into(), Column::Categorical {
+                levels: vec!["blue".into(), "green".into(), "red".into()],
+                codes: vec![2, 0, 1], // red, blue, green
+            }),
+        ]).unwrap();
+        let view = df.tidy();
+        let sorted = view.arrange(&[ArrangeKey { col_name: "color".into(), descending: true }]).unwrap();
+        let frame = sorted.materialize().unwrap();
+        if let Column::Categorical { codes, .. } = frame.get_column("color").unwrap() {
+            assert_eq!(*codes, vec![2, 1, 0]); // red(2), green(1), blue(0)
+        } else { panic!("expected Categorical column"); }
+    }
+
+    #[test]
+    fn test_categorical_sort_stable_ties() {
+        let df = DataFrame::from_columns(vec![
+            ("grp".into(), Column::Categorical {
+                levels: vec!["a".into(), "b".into()],
+                codes: vec![0, 0, 0, 1, 1],
+            }),
+            ("order".into(), Column::Int(vec![10, 20, 30, 40, 50])),
+        ]).unwrap();
+        let view = df.tidy();
+        let sorted = view.arrange(&[ArrangeKey { col_name: "grp".into(), descending: false }]).unwrap();
+        let frame = sorted.materialize().unwrap();
+        if let Column::Int(v) = frame.get_column("order").unwrap() {
+            assert_eq!(*v, vec![10, 20, 30, 40, 50]); // stable: original order preserved
+        } else { panic!("expected Int column"); }
+    }
+}
+
 // â"€â"€ Phase 17 NoGC audit notes â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 //
 // Safe (@nogc â€" metadata only, O(L) or O(N) over Rust-heap Vec only):
@@ -7292,3 +8762,500 @@ mod rolling_window_tests {
 // Registered in cjc-mir/src/nogc_verify.rs:
 //   SAFE:    fct_collapse
 //   UNSAFE:  fct_encode, fct_lump, fct_reorder  (intentionally absent)
+
+#[cfg(test)]
+mod p3_agg_tests {
+    use super::*;
+
+    #[test]
+    fn test_kahan_sum_bit_identity() {
+        use cjc_repro::kahan::KahanAccumulatorF64;
+        let values: Vec<f64> = (0..10000)
+            .map(|i| {
+                let x = i as f64 * 0.001;
+                if i % 7 == 0 { x + 1e-15 } else { x }
+            })
+            .collect();
+        let mut acc1 = KahanAccumulatorF64::new();
+        for &v in &values {
+            acc1.add(v);
+        }
+        let result1 = acc1.finalize();
+
+        for _ in 0..10 {
+            let mut acc = KahanAccumulatorF64::new();
+            for &v in &values {
+                acc.add(v);
+            }
+            assert_eq!(
+                result1.to_bits(),
+                acc.finalize().to_bits(),
+                "Kahan summation must be bit-identical across runs"
+            );
+        }
+    }
+
+    #[test]
+    fn test_agg_sum_with_subnormals_and_nan() {
+        let df = DataFrame::from_columns(vec![
+            ("grp".into(), Column::Int(vec![1, 1, 2, 2, 2])),
+            (
+                "val".into(),
+                Column::Float(vec![
+                    f64::MIN_POSITIVE * 0.5, // subnormal
+                    f64::NAN,
+                    1.0,
+                    1e-15,
+                    -1.0,
+                ]),
+            ),
+        ])
+        .unwrap();
+        let view = df.tidy();
+        let grouped = view.group_by(&["grp"]).unwrap();
+        let result = grouped
+            .summarise(&[("s", TidyAgg::Sum("val".into()))])
+            .unwrap();
+        let result_df = result.borrow();
+        if let Column::Float(v) = result_df.get_column("s").unwrap() {
+            // Group 1: subnormal + NaN = NaN
+            assert!(v[0].is_nan());
+            // Group 2: 1.0 + 1e-15 - 1.0 -- Kahan recovers ~1e-15
+            // (not exact due to f64 rounding at the 1.0 + 1e-15 boundary)
+            assert!(v[1].abs() < 1e-14, "expected near-zero sum, got {}", v[1]);
+        } else {
+            panic!("expected Float");
+        }
+    }
+
+    #[test]
+    fn test_agg_mean_preserves_type() {
+        let df = DataFrame::from_columns(vec![
+            ("grp".into(), Column::Int(vec![1, 1, 2, 2])),
+            ("val".into(), Column::Int(vec![10, 20, 30, 40])),
+        ])
+        .unwrap();
+        let view = df.tidy();
+        let grouped = view.group_by(&["grp"]).unwrap();
+        let result = grouped
+            .summarise(&[("avg", TidyAgg::Mean("val".into()))])
+            .unwrap();
+        let result_df = result.borrow();
+        if let Column::Float(v) = result_df.get_column("avg").unwrap() {
+            assert!((v[0] - 15.0).abs() < 1e-10);
+            assert!((v[1] - 35.0).abs() < 1e-10);
+        } else {
+            panic!("expected Float");
+        }
+    }
+
+    #[test]
+    fn test_agg_determinism_10_runs() {
+        let n = 5000;
+        let df = DataFrame::from_columns(vec![
+            (
+                "grp".into(),
+                Column::Int((0..n as i64).map(|i| i % 10).collect()),
+            ),
+            (
+                "val".into(),
+                Column::Float((0..n).map(|i| (i as f64) * 0.001 + 1e-15).collect()),
+            ),
+        ])
+        .unwrap();
+        let view = df.clone().tidy();
+        let grouped = view.group_by(&["grp"]).unwrap();
+        let baseline = grouped
+            .summarise(&[("s", TidyAgg::Sum("val".into()))])
+            .unwrap();
+        let baseline_df = baseline.borrow();
+        let baseline_bits: Vec<u64> =
+            if let Column::Float(v) = baseline_df.get_column("s").unwrap() {
+                v.iter().map(|f| f.to_bits()).collect()
+            } else {
+                panic!("expected Float")
+            };
+
+        for _ in 0..10 {
+            let g = df.clone().tidy().group_by(&["grp"]).unwrap();
+            let r = g
+                .summarise(&[("s", TidyAgg::Sum("val".into()))])
+                .unwrap();
+            let rdf = r.borrow();
+            let bits: Vec<u64> = if let Column::Float(v) = rdf.get_column("s").unwrap() {
+                v.iter().map(|f| f.to_bits()).collect()
+            } else {
+                panic!("expected Float")
+            };
+            assert_eq!(baseline_bits, bits, "Aggregation must be bit-identical");
+        }
+    }
+}
+
+#[cfg(test)]
+mod p6_shared_dict_join_tests {
+    use super::*;
+
+    #[test]
+    fn test_join_shared_categorical_dict() {
+        let shared_levels = vec!["bird".into(), "cat".into(), "dog".into()];
+        let left_df = DataFrame::from_columns(vec![
+            ("animal".into(), Column::Categorical {
+                levels: shared_levels.clone(),
+                codes: vec![1, 0, 2], // cat, bird, dog
+            }),
+            ("count".into(), Column::Int(vec![10, 20, 30])),
+        ]).unwrap();
+        let right_df = DataFrame::from_columns(vec![
+            ("animal".into(), Column::Categorical {
+                levels: shared_levels.clone(),
+                codes: vec![0, 2], // bird, dog
+            }),
+            ("habitat".into(), Column::Str(vec!["sky".into(), "house".into()])),
+        ]).unwrap();
+        let left = left_df.tidy();
+        let right = right_df.tidy();
+        let result = left.inner_join(&right, &[("animal", "animal")]).unwrap();
+        assert_eq!(result.borrow().nrows(), 2); // bird + dog
+    }
+
+    #[test]
+    fn test_join_different_categorical_dict() {
+        // Different dictionaries -- must NOT use code comparison
+        let left_df = DataFrame::from_columns(vec![
+            ("x".into(), Column::Categorical {
+                levels: vec!["a".into(), "b".into(), "c".into()],
+                codes: vec![0, 1, 2],
+            }),
+            ("v".into(), Column::Int(vec![1, 2, 3])),
+        ]).unwrap();
+        let right_df = DataFrame::from_columns(vec![
+            ("x".into(), Column::Categorical {
+                levels: vec!["b".into(), "c".into(), "d".into()],
+                codes: vec![0, 1], // b, c
+            }),
+            ("w".into(), Column::Int(vec![10, 20])),
+        ]).unwrap();
+        let left = left_df.tidy();
+        let right = right_df.tidy();
+        let result = left.inner_join(&right, &[("x", "x")]).unwrap();
+        // "b" and "c" match across different dictionaries
+        assert_eq!(result.borrow().nrows(), 2);
+    }
+
+    #[test]
+    fn test_join_shared_dict_determinism() {
+        let levels = vec!["alpha".into(), "beta".into(), "gamma".into()];
+        let left_df = DataFrame::from_columns(vec![
+            ("k".into(), Column::Categorical { levels: levels.clone(), codes: vec![0, 1, 2, 0, 1] }),
+            ("v".into(), Column::Int(vec![1, 2, 3, 4, 5])),
+        ]).unwrap();
+        let right_df = DataFrame::from_columns(vec![
+            ("k".into(), Column::Categorical { levels: levels.clone(), codes: vec![1, 2] }),
+            ("w".into(), Column::Int(vec![10, 20])),
+        ]).unwrap();
+        let left = left_df.tidy();
+        let right = right_df.tidy();
+        let baseline = left.inner_join(&right, &[("k", "k")]).unwrap();
+        for _ in 0..10 {
+            let result = left.inner_join(&right, &[("k", "k")]).unwrap();
+            assert_eq!(baseline.borrow().nrows(), result.borrow().nrows());
+        }
+    }
+
+    #[test]
+    fn test_left_join_shared_dict() {
+        let levels = vec!["x".into(), "y".into(), "z".into()];
+        let left_df = DataFrame::from_columns(vec![
+            ("key".into(), Column::Categorical { levels: levels.clone(), codes: vec![0, 1, 2] }),
+            ("val".into(), Column::Int(vec![1, 2, 3])),
+        ]).unwrap();
+        let right_df = DataFrame::from_columns(vec![
+            ("key".into(), Column::Categorical { levels: levels.clone(), codes: vec![1] }), // only "y"
+            ("info".into(), Column::Str(vec!["found".into()])),
+        ]).unwrap();
+        let left = left_df.tidy();
+        let right = right_df.tidy();
+        let result = left.left_join(&right, &[("key", "key")]).unwrap();
+        assert_eq!(result.borrow().nrows(), 3); // all left rows preserved
+    }
+
+    #[test]
+    fn test_semi_join_shared_dict() {
+        let levels = vec!["a".into(), "b".into(), "c".into()];
+        let left_df = DataFrame::from_columns(vec![
+            ("k".into(), Column::Categorical { levels: levels.clone(), codes: vec![0, 1, 2] }),
+        ]).unwrap();
+        let right_df = DataFrame::from_columns(vec![
+            ("k".into(), Column::Categorical { levels: levels.clone(), codes: vec![0, 2] }),
+        ]).unwrap();
+        let left = left_df.tidy();
+        let right = right_df.tidy();
+        let result = left.semi_join(&right, &[("k", "k")]).unwrap();
+        assert_eq!(result.nrows(), 2); // a, c
+    }
+
+    #[test]
+    fn test_anti_join_shared_dict() {
+        let levels = vec!["a".into(), "b".into(), "c".into()];
+        let left_df = DataFrame::from_columns(vec![
+            ("k".into(), Column::Categorical { levels: levels.clone(), codes: vec![0, 1, 2] }),
+        ]).unwrap();
+        let right_df = DataFrame::from_columns(vec![
+            ("k".into(), Column::Categorical { levels: levels.clone(), codes: vec![0, 2] }),
+        ]).unwrap();
+        let left = left_df.tidy();
+        let right = right_df.tidy();
+        let result = left.anti_join(&right, &[("k", "k")]).unwrap();
+        assert_eq!(result.nrows(), 1); // only "b"
+    }
+
+    #[test]
+    fn test_detect_shared_dict_flags() {
+        let shared = vec!["a".into(), "b".into()];
+        let left_df = DataFrame::from_columns(vec![
+            ("c1".into(), Column::Categorical { levels: shared.clone(), codes: vec![0] }),
+            ("c2".into(), Column::Categorical { levels: vec!["x".into()], codes: vec![0] }),
+            ("c3".into(), Column::Int(vec![1])),
+        ]).unwrap();
+        let right_df = DataFrame::from_columns(vec![
+            ("c1".into(), Column::Categorical { levels: shared.clone(), codes: vec![1] }),
+            ("c2".into(), Column::Categorical { levels: vec!["y".into()], codes: vec![0] }),
+            ("c3".into(), Column::Int(vec![2])),
+        ]).unwrap();
+        let left = left_df.tidy();
+        let right = right_df.tidy();
+        let flags = detect_shared_dict_flags(&left, &right, &[0, 1, 2], &[0, 1, 2]);
+        assert_eq!(flags, vec![true, false, false]);
+    }
+}
+
+// ── P4: Lazy sort via permutation vector tests ─────────────────────────────
+
+#[cfg(test)]
+mod p4_lazy_sort_tests {
+    use super::*;
+
+    #[test]
+    fn test_arrange_lazy_shares_base() {
+        let df = DataFrame::from_columns(vec![
+            ("x".into(), Column::Int(vec![3, 1, 2])),
+        ]).unwrap();
+        let view = df.tidy();
+        let sorted = view.arrange(&[ArrangeKey { col_name: "x".into(), descending: false }]).unwrap();
+        // P4: arrange should NOT materialize — base is shared
+        assert!(Rc::ptr_eq(&view.base, &sorted.base));
+        assert!(sorted.has_ordering());
+    }
+
+    #[test]
+    fn test_arrange_lazy_then_materialize() {
+        let df = DataFrame::from_columns(vec![
+            ("id".into(), Column::Int(vec![3, 1, 4, 1, 5])),
+            ("val".into(), Column::Float(vec![30.0, 10.0, 40.0, 10.0, 50.0])),
+        ]).unwrap();
+        let view = df.tidy();
+        let sorted = view.arrange(&[ArrangeKey { col_name: "id".into(), descending: false }]).unwrap();
+        // Base shared (lazy)
+        assert!(Rc::ptr_eq(&view.base, &sorted.base));
+        // Materialize
+        let frame = sorted.materialize().unwrap();
+        if let Column::Int(v) = frame.get_column("id").unwrap() {
+            assert_eq!(*v, vec![1, 1, 3, 4, 5]);
+        } else { panic!("expected Int column"); }
+        if let Column::Float(v) = frame.get_column("val").unwrap() {
+            assert_eq!(*v, vec![10.0, 10.0, 30.0, 40.0, 50.0]);
+        } else { panic!("expected Float column"); }
+    }
+
+    #[test]
+    fn test_arrange_descending_lazy() {
+        let df = DataFrame::from_columns(vec![
+            ("x".into(), Column::Int(vec![1, 5, 3, 2, 4])),
+        ]).unwrap();
+        let view = df.tidy();
+        let sorted = view.arrange(&[ArrangeKey { col_name: "x".into(), descending: true }]).unwrap();
+        let frame = sorted.materialize().unwrap();
+        if let Column::Int(v) = frame.get_column("x").unwrap() {
+            assert_eq!(*v, vec![5, 4, 3, 2, 1]);
+        } else { panic!("expected Int column"); }
+    }
+
+    #[test]
+    fn test_arrange_then_filter_correctness() {
+        let df = DataFrame::from_columns(vec![
+            ("x".into(), Column::Int(vec![5, 3, 1, 4, 2])),
+        ]).unwrap();
+        let view = df.tidy();
+        let sorted = view.arrange(&[ArrangeKey { col_name: "x".into(), descending: false }]).unwrap();
+        let filtered = sorted.filter(&DExpr::BinOp {
+            op: DBinOp::Gt,
+            left: Box::new(DExpr::Col("x".into())),
+            right: Box::new(DExpr::LitInt(2)),
+        }).unwrap();
+        let frame = filtered.materialize().unwrap();
+        if let Column::Int(v) = frame.get_column("x").unwrap() {
+            assert_eq!(*v, vec![3, 4, 5]); // sorted AND filtered
+        } else { panic!("expected Int column"); }
+    }
+
+    #[test]
+    fn test_arrange_then_group_by_sum() {
+        let df = DataFrame::from_columns(vec![
+            ("grp".into(), Column::Int(vec![2, 1, 2, 1, 2])),
+            ("val".into(), Column::Float(vec![20.0, 10.0, 40.0, 30.0, 60.0])),
+        ]).unwrap();
+        let view = df.tidy();
+        let sorted = view.arrange(&[ArrangeKey { col_name: "grp".into(), descending: false }]).unwrap();
+        let grouped = sorted.group_by(&["grp"]).unwrap();
+        let result = grouped.summarise(&[("s", TidyAgg::Sum("val".into()))]).unwrap();
+        let rdf = result.borrow();
+        if let Column::Float(v) = rdf.get_column("s").unwrap() {
+            // Group 1: 10+30=40, Group 2: 20+40+60=120
+            assert!((v[0] - 40.0).abs() < 1e-10);
+            assert!((v[1] - 120.0).abs() < 1e-10);
+        } else { panic!("expected Float column"); }
+    }
+
+    #[test]
+    fn test_arrange_then_select_preserves_ordering() {
+        let df = DataFrame::from_columns(vec![
+            ("a".into(), Column::Int(vec![3, 1, 2])),
+            ("b".into(), Column::Str(vec!["c".into(), "a".into(), "b".into()])),
+        ]).unwrap();
+        let view = df.tidy();
+        let sorted = view.arrange(&[ArrangeKey { col_name: "a".into(), descending: false }]).unwrap();
+        assert!(sorted.has_ordering());
+        let selected = sorted.select(&["b"]).unwrap();
+        // Select should preserve ordering
+        assert!(selected.has_ordering());
+        let frame = selected.materialize().unwrap();
+        if let Column::Str(v) = frame.get_column("b").unwrap() {
+            assert_eq!(*v, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        } else { panic!("expected Str column"); }
+    }
+
+    #[test]
+    fn test_arrange_then_slice_head() {
+        let df = DataFrame::from_columns(vec![
+            ("x".into(), Column::Int(vec![5, 3, 1, 4, 2])),
+        ]).unwrap();
+        let view = df.tidy();
+        let sorted = view.arrange(&[ArrangeKey { col_name: "x".into(), descending: false }]).unwrap();
+        let head = sorted.slice_head(3);
+        let frame = head.materialize().unwrap();
+        if let Column::Int(v) = frame.get_column("x").unwrap() {
+            assert_eq!(*v, vec![1, 2, 3]);
+        } else { panic!("expected Int column"); }
+    }
+
+    #[test]
+    fn test_arrange_then_distinct() {
+        let df = DataFrame::from_columns(vec![
+            ("x".into(), Column::Int(vec![3, 1, 3, 1, 2])),
+        ]).unwrap();
+        let view = df.tidy();
+        let sorted = view.arrange(&[ArrangeKey { col_name: "x".into(), descending: false }]).unwrap();
+        let distinct = sorted.distinct(&["x"]).unwrap();
+        let frame = distinct.materialize().unwrap();
+        if let Column::Int(v) = frame.get_column("x").unwrap() {
+            assert_eq!(*v, vec![1, 2, 3]);
+        } else { panic!("expected Int column"); }
+    }
+
+    #[test]
+    fn test_arrange_with_string_columns() {
+        let df = DataFrame::from_columns(vec![
+            ("name".into(), Column::Str(vec!["charlie".into(), "alice".into(), "bob".into()])),
+            ("score".into(), Column::Int(vec![80, 95, 90])),
+        ]).unwrap();
+        let view = df.tidy();
+        let sorted = view.arrange(&[ArrangeKey { col_name: "name".into(), descending: false }]).unwrap();
+        let frame = sorted.materialize().unwrap();
+        if let Column::Str(v) = frame.get_column("name").unwrap() {
+            assert_eq!(*v, vec!["alice".to_string(), "bob".to_string(), "charlie".to_string()]);
+        } else { panic!("expected Str column"); }
+        if let Column::Int(v) = frame.get_column("score").unwrap() {
+            assert_eq!(*v, vec![95, 90, 80]);
+        } else { panic!("expected Int column"); }
+    }
+
+    #[test]
+    fn test_arrange_empty_df() {
+        let df = DataFrame::from_columns(vec![
+            ("x".into(), Column::Int(vec![])),
+        ]).unwrap();
+        let view = df.tidy();
+        let sorted = view.arrange(&[ArrangeKey { col_name: "x".into(), descending: false }]).unwrap();
+        let frame = sorted.materialize().unwrap();
+        if let Column::Int(v) = frame.get_column("x").unwrap() {
+            assert!(v.is_empty());
+        } else { panic!("expected Int column"); }
+    }
+
+    #[test]
+    fn test_arrange_multi_key() {
+        let df = DataFrame::from_columns(vec![
+            ("a".into(), Column::Int(vec![2, 1, 2, 1])),
+            ("b".into(), Column::Int(vec![20, 10, 10, 20])),
+        ]).unwrap();
+        let view = df.tidy();
+        let sorted = view.arrange(&[
+            ArrangeKey { col_name: "a".into(), descending: false },
+            ArrangeKey { col_name: "b".into(), descending: false },
+        ]).unwrap();
+        let frame = sorted.materialize().unwrap();
+        if let Column::Int(va) = frame.get_column("a").unwrap() {
+            if let Column::Int(vb) = frame.get_column("b").unwrap() {
+                assert_eq!(*va, vec![1, 1, 2, 2]);
+                assert_eq!(*vb, vec![10, 20, 10, 20]);
+            } else { panic!("expected Int column"); }
+        } else { panic!("expected Int column"); }
+    }
+
+    #[test]
+    fn test_resolve_ordering_noop_without_ordering() {
+        let df = DataFrame::from_columns(vec![
+            ("x".into(), Column::Int(vec![3, 1, 2])),
+        ]).unwrap();
+        let view = df.tidy();
+        assert!(!view.has_ordering());
+        let resolved = view.resolve_ordering();
+        // Should be None (no ordering to resolve)
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn test_resolve_ordering_materializes() {
+        let df = DataFrame::from_columns(vec![
+            ("x".into(), Column::Int(vec![3, 1, 2])),
+        ]).unwrap();
+        let view = df.tidy();
+        let sorted = view.arrange(&[ArrangeKey { col_name: "x".into(), descending: false }]).unwrap();
+        assert!(sorted.has_ordering());
+        let resolved = sorted.resolve_ordering().expect("should resolve");
+        // Resolved should NOT share base (new materialized DataFrame)
+        assert!(!Rc::ptr_eq(&view.base, &resolved.base));
+        assert!(!resolved.has_ordering());
+        // Data should be sorted
+        let frame = resolved.materialize().unwrap();
+        if let Column::Int(v) = frame.get_column("x").unwrap() {
+            assert_eq!(*v, vec![1, 2, 3]);
+        } else { panic!("expected Int column"); }
+    }
+
+    #[test]
+    fn test_arrange_rename_preserves_ordering() {
+        let df = DataFrame::from_columns(vec![
+            ("x".into(), Column::Int(vec![3, 1, 2])),
+        ]).unwrap();
+        let view = df.tidy();
+        let sorted = view.arrange(&[ArrangeKey { col_name: "x".into(), descending: false }]).unwrap();
+        let renamed = sorted.rename(&[("x", "y")]).unwrap();
+        assert!(renamed.has_ordering());
+        let frame = renamed.materialize().unwrap();
+        if let Column::Int(v) = frame.get_column("y").unwrap() {
+            assert_eq!(*v, vec![1, 2, 3]);
+        } else { panic!("expected Int column"); }
+    }
+}
