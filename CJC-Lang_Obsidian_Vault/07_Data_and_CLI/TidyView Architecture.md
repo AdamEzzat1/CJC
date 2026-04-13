@@ -168,6 +168,66 @@ pub enum TidyError {
 
 Every variant names the specific column or value that caused the problem.
 
+## Performance Optimizations (P1-P6, 2026-04-12)
+
+Six optimizations applied as a coherent batch. See [[ADR-0016 TidyView Typed Keys and Lazy Sort]] for full rationale.
+
+### P1: Cached column indices in sort comparator
+
+`arrange()` pre-resolves `&Column` references before entering `sort_by`, eliminating O(N log N x K) name lookups. Sort benchmarks improved ~30x.
+
+### P2: Typed GroupKey enum
+
+`GroupMeta::key_values` changed from `Vec<String>` to `Vec<GroupKey>`:
+
+```rust
+pub enum GroupKey {
+    Int(i64), Float(FloatKey), Code(u32),
+    Str(String), Bool(bool), DateTime(i64),
+}
+```
+
+Eliminates `.to_string()` on group construction and `.parse::<T>()` on readback.
+
+### P3: Vectorized aggregation kernels
+
+Column references resolved once per group set. Type-specialized inner loops (`fast_agg_sum`, etc.) iterate row indices directly against resolved `&Column`.
+
+Kahan order preserved: all kernels iterate `row_indices` in forward order per [[ADR-0002 Kahan Accumulator]].
+
+### P4: Lazy sort via permutation vector
+
+```rust
+pub struct TidyView {
+    base: Rc<DataFrame>,
+    mask: BitMask,
+    proj: ProjectionMap,
+    ordering: Option<Rc<Vec<usize>>>,  // NEW
+}
+```
+
+`arrange()` stores permutation without materializing. `resolve_ordering()` materializes on demand. Pass-through operations (`select`, `rename`, `relocate`) propagate ordering without resolving.
+
+### P5: Code-based categorical sort
+
+BTreeMap-backed `DictEncoding` guarantees sorted levels. Sort comparator uses `u32` code comparison instead of string dereference.
+
+### P6: Shared-dictionary join optimization
+
+`detect_shared_dict_flags()` identifies when left/right Categorical columns share identical level vectors, enabling `u32` code comparison for join keys.
+
+### Representative benchmark results (release, 100K rows)
+
+| Benchmark | Category | Median |
+|---|---|---|
+| D1 sort float | Sort | ~1,700 us |
+| D2 sort int | Sort | ~1,900 us |
+| D4 multikey sort | Sort | ~112,000 us |
+| C1 group 4 count | Group | ~80,000 us |
+| F1 full pipeline | Pipeline | ~37,000 us |
+
+All 38 benchmarks passing. All determinism gates (H1-H3) pass. 5 proptest suites + 2 bolero fuzz targets cover random-input invariants.
+
 ## Integration
 
 Both executors route through `tidy_dispatch.rs`:
@@ -187,3 +247,5 @@ Type erasure via `Rc<dyn Any>` avoids circular dependency between `cjc-runtime` 
 - [[Runtime Architecture]]
 - [[Dispatch Layer]]
 - [[Vizor]]
+- [[ADR-0016 TidyView Typed Keys and Lazy Sort]]
+- [[ADR-0002 Kahan Accumulator]]

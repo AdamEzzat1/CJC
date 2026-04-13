@@ -14,6 +14,7 @@
 //! - Parser inherits lexer panics
 
 pub mod cli_expansion_fuzz;
+pub mod tidyview_fuzz;
 
 use std::panic;
 

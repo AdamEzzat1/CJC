@@ -21,6 +21,7 @@ Architecture Decision Records for CJC-Lang. Each ADR captures a single decision,
 | [[ADR-0005 Binned Accumulator]] | Exponent-binned accumulator for order-invariant summation | Accepted | 2024-01-20 | Commutative; used by parallel reductions |
 | [[ADR-0014 MIR Analysis Infrastructure]] | Loop analysis, reductions, verifier modules | Accepted | 2026-03-23 | Additive overlays on tree-form MIR |
 | [[ADR-0015 PINN PDE Problem Suite]] | FD residuals, domain geometry, hard BCs | Accepted | 2026-04-11 | Burgers/Poisson/Heat solvers with 64 tests |
+| [[ADR-0016 TidyView Typed Keys and Lazy Sort]] | Typed GroupKey, cached sort, lazy permutation | Accepted | 2026-04-12 | 6 perf optimizations preserving determinism |
 
 ## Proposed decisions (not yet implemented)
 
@@ -44,6 +45,8 @@ ADR-0005 (Binned, commutative) ┘
 ADR-0004 (SplitMix64) ────────> every deterministic RNG user
 
 ADR-0014 (MIR analysis) ──────> future optimizer passes (LICM, CSE, …)
+
+ADR-0016 (Typed keys + lazy sort) ──> constrained by ADR-0002 (Kahan order-dependence)
 ```
 
 ## Reading order for new contributors

@@ -1,7 +1,7 @@
 // Phase 16: Group performance upgrade — BTree-accelerated GroupIndex
 // Confirms identical semantics to Phase 11 group_by (first-occurrence order).
 
-use cjc_data::{Column, DataFrame, TidyAgg};
+use cjc_data::{Column, DataFrame, GroupKey, TidyAgg};
 
 fn make_groups_df() -> DataFrame {
     DataFrame::from_columns(vec![
@@ -33,9 +33,9 @@ fn test_group_by_fast_first_occurrence_order() {
     let v = df.tidy();
     let g = v.group_by_fast(&["grp"]).unwrap();
     let idx = g.group_index();
-    assert_eq!(idx.groups[0].key_values[0], "B");
-    assert_eq!(idx.groups[1].key_values[0], "A");
-    assert_eq!(idx.groups[2].key_values[0], "C");
+    assert_eq!(idx.groups[0].key_values[0], GroupKey::Str("B".into()));
+    assert_eq!(idx.groups[1].key_values[0], GroupKey::Str("A".into()));
+    assert_eq!(idx.groups[2].key_values[0], GroupKey::Str("C".into()));
 }
 
 #[test]

@@ -1,6 +1,6 @@
 // Phase 11 — arrange (stable sort)
 // Tests: stable ties, NaN ordering, multi-key, desc, after filter
-use cjc_data::{ArrangeKey, Column, DataFrame, DBinOp, DExpr, TidyError};
+use cjc_data::{ArrangeKey, Column, DataFrame, DBinOp, DExpr, GroupKey, TidyError};
 
 fn make_df() -> DataFrame {
     DataFrame::from_columns(vec![
@@ -187,5 +187,5 @@ fn test_arrange_group_by_after_arrange() {
     let gv = sorted.group_by(&["x"]).unwrap();
     // x=1(×2), 2(×1), 3(×1), 4(×1), 5(×1), 6(×1), 9(×1)
     assert_eq!(gv.ngroups(), 7);
-    assert_eq!(gv.group_index().groups[0].key_values[0], "1");
+    assert_eq!(gv.group_index().groups[0].key_values[0], GroupKey::Int(1));
 }

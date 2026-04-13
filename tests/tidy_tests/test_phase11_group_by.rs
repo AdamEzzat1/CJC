@@ -1,6 +1,6 @@
 // Phase 11 — group_by, ungroup
 // Tests: empty df, single key, multi key, ordering, after filter, after arrange, ungroup
-use cjc_data::{Column, DataFrame, DBinOp, DExpr, TidyError};
+use cjc_data::{Column, DataFrame, DBinOp, DExpr, GroupKey, TidyError};
 
 fn make_df() -> DataFrame {
     DataFrame::from_columns(vec![
@@ -27,8 +27,8 @@ fn test_group_by_single_key() {
     let gv = df.tidy().group_by(&["dept"]).unwrap();
     assert_eq!(gv.ngroups(), 2);
     // First-occurrence order: "eng" appears first
-    assert_eq!(gv.group_index().groups[0].key_values[0], "eng");
-    assert_eq!(gv.group_index().groups[1].key_values[0], "hr");
+    assert_eq!(gv.group_index().groups[0].key_values[0], GroupKey::Str("eng".into()));
+    assert_eq!(gv.group_index().groups[1].key_values[0], GroupKey::Str("hr".into()));
 }
 
 #[test]
@@ -39,9 +39,9 @@ fn test_group_by_multi_key() {
     // ("eng","senior"), ("hr","junior"), ("eng","junior"), ("hr","senior")
     assert_eq!(gv.ngroups(), 4);
     let g0 = &gv.group_index().groups[0].key_values;
-    assert_eq!(g0, &["eng", "senior"]);
+    assert_eq!(g0, &[GroupKey::Str("eng".into()), GroupKey::Str("senior".into())]);
     let g1 = &gv.group_index().groups[1].key_values;
-    assert_eq!(g1, &["hr", "junior"]);
+    assert_eq!(g1, &[GroupKey::Str("hr".into()), GroupKey::Str("junior".into())]);
 }
 
 #[test]
@@ -53,8 +53,8 @@ fn test_group_by_ordering_is_first_occurrence() {
     .unwrap();
     let gv = df.tidy().group_by(&["cat"]).unwrap();
     // "z" appears first
-    assert_eq!(gv.group_index().groups[0].key_values[0], "z");
-    assert_eq!(gv.group_index().groups[1].key_values[0], "a");
+    assert_eq!(gv.group_index().groups[0].key_values[0], GroupKey::Str("z".into()));
+    assert_eq!(gv.group_index().groups[1].key_values[0], GroupKey::Str("a".into()));
 }
 
 #[test]
@@ -91,7 +91,7 @@ fn test_group_by_after_filter() {
     let gv = view.group_by(&["dept"]).unwrap();
     // Only eng rows pass the filter
     assert_eq!(gv.ngroups(), 1);
-    assert_eq!(gv.group_index().groups[0].key_values[0], "eng");
+    assert_eq!(gv.group_index().groups[0].key_values[0], GroupKey::Str("eng".into()));
 }
 
 #[test]
@@ -116,9 +116,9 @@ fn test_group_by_int_key() {
     let gv = df.tidy().group_by(&["bucket"]).unwrap();
     // First occurrence order: 1, 2, 3
     assert_eq!(gv.ngroups(), 3);
-    assert_eq!(gv.group_index().groups[0].key_values[0], "1");
-    assert_eq!(gv.group_index().groups[1].key_values[0], "2");
-    assert_eq!(gv.group_index().groups[2].key_values[0], "3");
+    assert_eq!(gv.group_index().groups[0].key_values[0], GroupKey::Int(1));
+    assert_eq!(gv.group_index().groups[1].key_values[0], GroupKey::Int(2));
+    assert_eq!(gv.group_index().groups[2].key_values[0], GroupKey::Int(3));
 }
 
 #[test]
@@ -131,5 +131,5 @@ fn test_group_by_bool_key() {
     let gv = df.tidy().group_by(&["flag"]).unwrap();
     assert_eq!(gv.ngroups(), 2);
     // true appears first
-    assert_eq!(gv.group_index().groups[0].key_values[0], "true");
+    assert_eq!(gv.group_index().groups[0].key_values[0], GroupKey::Bool(true));
 }

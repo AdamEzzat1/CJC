@@ -697,11 +697,11 @@ fn audit_j2_group_membership() {
     let index = grouped.group_index();
 
     // First-occurrence order
-    assert_eq!(index.groups[0].key_values, vec!["Eng"]);
+    assert_eq!(index.groups[0].key_values, vec![cjc_data::GroupKey::Str("Eng".into())]);
     assert_eq!(index.groups[0].row_indices, vec![0, 2]);
-    assert_eq!(index.groups[1].key_values, vec!["Sales"]);
+    assert_eq!(index.groups[1].key_values, vec![cjc_data::GroupKey::Str("Sales".into())]);
     assert_eq!(index.groups[1].row_indices, vec![1, 4]);
-    assert_eq!(index.groups[2].key_values, vec!["HR"]);
+    assert_eq!(index.groups[2].key_values, vec![cjc_data::GroupKey::Str("HR".into())]);
     assert_eq!(index.groups[2].row_indices, vec![3, 5]);
 
     let summary = grouped.summarise(&[
@@ -792,9 +792,9 @@ fn audit_j5_full_pipeline_trace() {
     // Group by product
     let grouped = west.group_by(&["product"]).unwrap();
     let idx = grouped.group_index();
-    assert_eq!(idx.groups[0].key_values, vec!["Widget"]);
+    assert_eq!(idx.groups[0].key_values, vec![cjc_data::GroupKey::Str("Widget".into())]);
     assert_eq!(idx.groups[0].row_indices, vec![0, 4]);
-    assert_eq!(idx.groups[1].key_values, vec!["Gadget"]);
+    assert_eq!(idx.groups[1].key_values, vec![cjc_data::GroupKey::Str("Gadget".into())]);
     assert_eq!(idx.groups[1].row_indices, vec![1, 6]);
 
     // Summarise
