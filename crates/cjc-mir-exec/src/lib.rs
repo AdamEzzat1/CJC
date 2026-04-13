@@ -1,11 +1,33 @@
-//! CJC MIR Executor (Reference Interpreter)
+//! CJC MIR Executor (v2 register-machine interpreter).
 //!
-//! Executes a MIR program by interpreting it directly. This replaces the
-//! tree-walk AST interpreter (`cjc-eval`) with one that operates on the
-//! lowered MIR representation.
+//! Execute a lowered MIR program by interpreting it directly. This is the v2
+//! executor that operates on the [`cjc_mir::MirProgram`] representation produced
+//! by the AST -> HIR -> MIR lowering pipeline.
 //!
-//! The behavior must be **identical** to `cjc-eval` for all existing programs
-//! (Parity Gate G-1 / G-2).
+//! # Parity requirement
+//!
+//! The behavior must be **bit-identical** to the tree-walk AST interpreter
+//! ([`cjc_eval`]) for every program+seed pair (Parity Gate G-1 / G-2).
+//!
+//! # Pipeline
+//!
+//! ```text
+//! AST -> HIR (cjc_hir) -> MIR (cjc_mir) -> [Optimize] -> MirExecutor
+//! ```
+//!
+//! # Entry points
+//!
+//! | Function | Description |
+//! |---|---|
+//! | [`run_program`] | Basic AST -> MIR -> exec |
+//! | [`run_program_with_executor`] | Same, but returns the executor for inspection |
+//! | [`run_program_optimized`] | With MIR optimization (CF + DCE) |
+//! | [`run_program_type_checked`] | With compile-time type checking gate |
+//! | [`run_program_monomorphized`] | With monomorphization + optimization |
+//! | [`run_program_with_modules`] | Multi-file module support |
+//! | [`run_program_cfg`] | CFG-based block-walking executor |
+//! | [`verify_nogc`] | Static NoGC verification |
+//! | [`lower_to_mir`] | Lower AST to MIR for inspection |
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -25,21 +47,37 @@ use cjc_vizor::dispatch as vizor_dispatch;
 // Error type
 // ---------------------------------------------------------------------------
 
+/// Runtime errors produced by the MIR executor.
+///
+/// Mirrors [`cjc_eval::EvalError`] for parity, with additional variants for
+/// compile-time type errors ([`MirExecError::TypeErrors`]) and tail-call
+/// optimization signaling ([`MirExecError::TailCall`]).
 #[derive(Debug)]
 pub enum MirExecError {
+    /// A `return` statement was executed. The executor unwinds the call stack
+    /// until a function boundary catches this variant.
     Return(Value),
-    /// A `break` statement — caught by the innermost loop.
+    /// A `break` statement -- caught by the innermost loop.
     Break,
-    /// A `continue` statement — caught by the innermost loop.
+    /// A `continue` statement -- caught by the innermost loop.
     Continue,
+    /// A runtime error with a human-readable message.
     Runtime(String),
+    /// An error propagated from the runtime crate.
     RuntimeError(cjc_runtime::RuntimeError),
-    /// Compile-time type errors — collected by the type checker before execution.
-    /// Each entry is a rendered diagnostic message.
+    /// Compile-time type errors collected by [`type_check_program`].
+    /// Each entry is a rendered diagnostic message with span information.
     TypeErrors(Vec<String>),
-    /// P1-2: Tail-call trampoline signal.
-    /// Used internally by call_function — never propagates to the user.
-    TailCall { name: String, args: Vec<Value> },
+    /// Tail-call trampoline signal (internal, never propagates to the user).
+    ///
+    /// Emitted by `exec_body` when a direct recursive call is detected in
+    /// tail position, allowing `call_function` to loop instead of recursing.
+    TailCall {
+        /// Name of the function to tail-call.
+        name: String,
+        /// Pre-evaluated arguments for the tail call.
+        args: Vec<Value>,
+    },
 }
 
 impl fmt::Display for MirExecError {
@@ -68,6 +106,11 @@ impl From<cjc_runtime::RuntimeError> for MirExecError {
     }
 }
 
+/// Result type alias for MIR executor operations.
+///
+/// Returns a [`Value`] on success or a [`MirExecError`] on failure. Control-flow
+/// signals (`Return`, `Break`, `Continue`, `TailCall`) propagate as `Err`
+/// variants and are caught at function and loop boundaries.
 pub type MirExecResult = Result<Value, MirExecError>;
 
 /// Recursive structural equality for struct/record values.
@@ -119,8 +162,31 @@ fn value_eq(a: &Value, b: &Value) -> bool {
 // MIR Executor
 // ---------------------------------------------------------------------------
 
+/// MIR register-machine executor for CJC programs (v2 executor).
+///
+/// Interpret a lowered [`MirProgram`] by walking MIR statements and
+/// expressions. Maintains a scope stack, GC heap, deterministic RNG, and
+/// per-call-frame arena storage for tail-call optimization.
+///
+/// Must produce **bit-identical** results to [`cjc_eval::Interpreter`] for
+/// every program+seed pair (parity gate G-1 / G-2).
+///
+/// # Determinism
+///
+/// All random state is threaded through a [`cjc_repro::Rng`] (SplitMix64)
+/// seeded at construction time. Collections use [`BTreeMap`] to guarantee
+/// deterministic iteration order.
+///
+/// # Usage
+///
+/// ```ignore
+/// let mir = lower_to_mir(&program);
+/// let mut exec = MirExecutor::new(42);
+/// exec.scan_ast_imports(&program);
+/// let result = exec.exec(&mir)?;
+/// ```
 pub struct MirExecutor {
-    /// P1-5: Function bodies stored as Rc to avoid cloning on every call.
+    /// Function bodies stored as `Rc` to avoid cloning on every call.
     functions: BTreeMap<String, Rc<MirFunction>>,
     struct_defs: BTreeMap<String, MirStructDef>,
     scopes: Vec<BTreeMap<String, Value>>,
@@ -143,6 +209,15 @@ pub struct MirExecutor {
 }
 
 impl MirExecutor {
+    /// Create a new MIR executor with the given deterministic RNG seed.
+    ///
+    /// The seed is forwarded to [`cjc_repro::Rng::seeded`] and determines all
+    /// pseudo-random behavior. Two executors created with the same seed will
+    /// produce bit-identical output for the same MIR program.
+    ///
+    /// # Arguments
+    ///
+    /// * `seed` - A 64-bit seed for the deterministic SplitMix64 RNG.
     pub fn new(seed: u64) -> Self {
         Self {
             functions: BTreeMap::new(),
@@ -184,6 +259,15 @@ impl MirExecutor {
         self.scopes.pop();
     }
 
+    /// Bind a variable in the innermost (current) scope.
+    ///
+    /// If a variable with the same name already exists in the current scope it
+    /// is overwritten. Variables in outer scopes are not affected.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Variable name.
+    /// * `val`  - Value to bind.
     pub fn define(&mut self, name: &str, val: Value) {
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string(), val);
@@ -213,6 +297,26 @@ impl MirExecutor {
 
     // -- Program execution --------------------------------------------------
 
+    /// Execute a lowered [`MirProgram`].
+    ///
+    /// Register all function and struct definitions, then execute the
+    /// `__main` function body (which contains top-level let/const/stmt
+    /// declarations). If a user-defined `main()` function exists it is
+    /// called afterward and its return value becomes the program result.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The lowered MIR program to execute.
+    ///
+    /// # Returns
+    ///
+    /// The final [`Value`] produced by the program, or a [`MirExecError`]
+    /// if execution fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MirExecError::Runtime`] on type mismatches, undefined
+    /// variables, division by zero, or other runtime failures.
     pub fn exec(&mut self, program: &MirProgram) -> MirExecResult {
         // Register all functions and struct defs
         // P1-5: Store as Rc to avoid cloning bodies on every call.
@@ -372,11 +476,29 @@ impl MirExecutor {
 
     // -- Expression evaluation ----------------------------------------------
 
+    /// Evaluate a single MIR expression and return its [`Value`].
+    ///
+    /// This is the core dispatch for MIR expression evaluation. It handles all
+    /// [`MirExprKind`] variants including literals, binary/unary ops, variable
+    /// lookups, function calls, field access, indexing, match expressions,
+    /// closures, tensor literals, and more.
+    ///
+    /// Built-in function calls are dispatched via
+    /// [`cjc_runtime::builtins`] to ensure parity with the AST interpreter.
+    ///
+    /// # Arguments
+    ///
+    /// * `expr` - The MIR expression to evaluate.
+    ///
+    /// # Returns
+    ///
+    /// The resulting [`Value`], or a [`MirExecError`] on failure.
     pub fn eval_expr(&mut self, expr: &MirExpr) -> MirExecResult {
         match &expr.kind {
             MirExprKind::IntLit(v) => Ok(Value::Int(*v)),
             MirExprKind::FloatLit(v) => Ok(Value::Float(*v)),
             MirExprKind::BoolLit(b) => Ok(Value::Bool(*b)),
+            MirExprKind::NaLit => Ok(Value::Na),
             MirExprKind::StringLit(s) => Ok(Value::String(Rc::new(s.clone()))),
             MirExprKind::ByteStringLit(bytes) => Ok(Value::ByteSlice(Rc::new(bytes.clone()))),
             MirExprKind::ByteCharLit(b) => Ok(Value::U8(*b)),
@@ -777,10 +899,12 @@ impl MirExecutor {
             let lv = self.eval_expr(left)?;
             return match lv {
                 Value::Bool(false) => Ok(Value::Bool(false)),
+                Value::Na => Ok(Value::Na),
                 Value::Bool(true) => {
                     let rv = self.eval_expr(right)?;
                     match rv {
                         Value::Bool(b) => Ok(Value::Bool(b)),
+                        Value::Na => Ok(Value::Na),
                         _ => Err(MirExecError::Runtime(
                             "`&&` requires Bool operands".to_string(),
                         )),
@@ -795,10 +919,12 @@ impl MirExecutor {
             let lv = self.eval_expr(left)?;
             return match lv {
                 Value::Bool(true) => Ok(Value::Bool(true)),
+                Value::Na => Ok(Value::Na),
                 Value::Bool(false) => {
                     let rv = self.eval_expr(right)?;
                     match rv {
                         Value::Bool(b) => Ok(Value::Bool(b)),
+                        Value::Na => Ok(Value::Na),
                         _ => Err(MirExecError::Runtime(
                             "`||` requires Bool operands".to_string(),
                         )),
@@ -843,6 +969,13 @@ impl MirExecutor {
         let rv = self.eval_expr(right)?;
 
         match (&lv, &rv) {
+            // NA propagation: any operation involving NA returns NA,
+            // except == and != which return false/true respectively (SQL semantics).
+            (Value::Na, _) | (_, Value::Na) => match op {
+                BinOp::Eq => Ok(Value::Bool(false)),
+                BinOp::Ne => Ok(Value::Bool(true)),
+                _ => Ok(Value::Na),
+            },
             (Value::Int(a), Value::Int(b)) => self.binop_int(op, *a, *b),
             (Value::Float(a), Value::Float(b)) => self.binop_float(op, *a, *b),
             (Value::Int(a), Value::Float(b)) => self.binop_float(op, *a as f64, *b),
@@ -1233,12 +1366,17 @@ impl MirExecutor {
                 | "sigmoid"
                 | "tanh_activation"
                 | "leaky_relu"
+                | "relu"
                 | "silu"
                 | "mish"
                 | "argmax"
                 | "argmin"
                 | "clamp"
                 | "one_hot"
+                // Tensor shape & slicing
+                | "reshape"
+                | "tensor_slice"
+                | "slice"
                 // Phase B1: Weighted & robust statistics
                 | "weighted_mean"
                 | "weighted_var"
@@ -1303,6 +1441,8 @@ impl MirExecutor {
                 // Phase C2: Optimizer constructors
                 | "Adam.new"
                 | "Sgd.new"
+                // RNN cells
+                | "lstm_cell" | "gru_cell"
                 // Phase C3: Bitwise operations
                 // Phase C6: I/O & Collection Utilities
                 | "read_line"
@@ -1327,13 +1467,16 @@ impl MirExecutor {
                 | "bit_shl"
                 | "bit_shr"
                 | "popcount"
+                // ML primitives: embedding & batch
+                | "embedding"
+                | "batch_indices"
                 // Phase D: RL primitives
                 | "log"
                 | "exp"
                 | "categorical_sample"
                 // Phase E: Mathematics Hardening
                 | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2"
-                | "sinh" | "cosh" | "tanh_scalar"
+                | "sinh" | "cosh" | "tanh" | "tanh_scalar"
                 | "pow" | "log2" | "log10" | "log1p" | "expm1"
                 | "ceil" | "round"
                 | "min" | "max" | "sign"
@@ -1374,8 +1517,24 @@ impl MirExecutor {
                 | "read_csv" | "write_csv"
                 | "dir_list" | "path_join"
                 // TidyView Phase 5: Preprocessing builtins
-                | "fillna" | "is_not_null" | "interpolate_linear" | "coalesce"
+                | "fillna" | "is_na" | "drop_na" | "is_not_null" | "interpolate_linear" | "coalesce"
                 | "cut" | "qcut" | "min_max_scale" | "robust_scale"
+                // Array higher-order functions
+                | "range" | "array_map" | "array_filter" | "array_reduce"
+                | "array_any" | "array_all" | "array_find"
+                | "array_enumerate" | "array_zip" | "array_sort_by" | "array_unique"
+                // Categorical / Factor builtins
+                | "as_factor" | "factor_levels" | "factor_codes"
+                | "fct_relevel" | "fct_lump" | "fct_count"
+                // Sampling & cross-validation
+                // Normality tests & effect sizes
+                | "jarque_bera" | "anderson_darling" | "ks_test"
+                | "cohens_d" | "eta_squared" | "cramers_v"
+                | "levene_test" | "bartlett_test"
+                // Sampling & cross-validation
+                | "latin_hypercube" | "sobol_sequence"
+                | "train_test_split" | "kfold_indices"
+                | "bootstrap" | "permutation_test" | "stratified_split"
         ) || (self.libraries_enabled.contains("vizor") && matches!(name,
                 "vizor_plot" | "vizor_plot_xy"
         ))
@@ -1729,6 +1888,137 @@ impl MirExecutor {
             Ok(None) => {} // not a quantum builtin, fall through
         }
 
+        // PINN training builtins (bypass builtins.rs — cjc-ad dep)
+        match name {
+            "pinn_train_burgers" => {
+                if args.len() != 5 {
+                    return Err(MirExecError::Runtime("pinn_train_burgers requires 5 args (epochs, lr, n_colloc, nu, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("n_colloc must be Int".into())) };
+                let nu = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("nu must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(MirExecError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::BurgersConfig {
+                    epochs, lr, nu, n_collocation: n_colloc, seed,
+                    ..cjc_ad::pinn::BurgersConfig::default()
+                };
+                let result = cjc_ad::pinn::pinn_burgers_train(&config);
+                return Ok(pinn_result_to_value("BurgersResult", &result));
+            }
+            "pinn_train_poisson" => {
+                if args.len() != 4 {
+                    return Err(MirExecError::Runtime("pinn_train_poisson requires 4 args (epochs, lr, n_colloc, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("n_colloc must be Int".into())) };
+                let seed = match &args[3] { Value::Int(v) => *v as u64, _ => return Err(MirExecError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::PoissonConfig {
+                    epochs, lr, n_collocation: n_colloc, seed,
+                    ..cjc_ad::pinn::PoissonConfig::default()
+                };
+                let result = cjc_ad::pinn::pinn_poisson_2d_train(&config);
+                return Ok(pinn_result_to_value("PoissonResult", &result));
+            }
+            "pinn_train_heat" => {
+                if args.len() != 5 {
+                    return Err(MirExecError::Runtime("pinn_train_heat requires 5 args (epochs, lr, n_colloc, alpha, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("n_colloc must be Int".into())) };
+                let alpha = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("alpha must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(MirExecError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::HeatConfig {
+                    epochs, lr, alpha, n_collocation: n_colloc, seed,
+                    ..cjc_ad::pinn::HeatConfig::default()
+                };
+                let result = cjc_ad::pinn::pinn_heat_1d_nn_train(&config);
+                return Ok(pinn_result_to_value("HeatResult", &result));
+            }
+            "pinn_train_wave" => {
+                if args.len() != 5 { return Err(MirExecError::Runtime("pinn_train_wave requires 5 args".into())); }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("n_colloc must be Int".into())) };
+                let c = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("c must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(MirExecError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::WaveConfig { epochs, lr, c, n_collocation: n_colloc, seed, ..Default::default() };
+                return Ok(pinn_result_to_value("WaveResult", &cjc_ad::pinn::pinn_wave_train(&config)));
+            }
+            "pinn_train_helmholtz" => {
+                if args.len() != 5 { return Err(MirExecError::Runtime("pinn_train_helmholtz requires 5 args".into())); }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("n_colloc must be Int".into())) };
+                let k = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("k must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(MirExecError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::HelmholtzConfig { epochs, lr, k, n_collocation: n_colloc, seed, ..Default::default() };
+                return Ok(pinn_result_to_value("HelmholtzResult", &cjc_ad::pinn::pinn_helmholtz_train(&config)));
+            }
+            "pinn_train_diffreact" => {
+                if args.len() != 6 { return Err(MirExecError::Runtime("pinn_train_diffreact requires 6 args".into())); }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("n_colloc must be Int".into())) };
+                let diffusion = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("diffusion must be numeric".into())) };
+                let reaction = match &args[4] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("reaction must be numeric".into())) };
+                let seed = match &args[5] { Value::Int(v) => *v as u64, _ => return Err(MirExecError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::DiffReactConfig { epochs, lr, diffusion, reaction, n_collocation: n_colloc, seed, ..Default::default() };
+                return Ok(pinn_result_to_value("DiffReactResult", &cjc_ad::pinn::pinn_diffreact_train(&config)));
+            }
+            "pinn_train_allen_cahn" => {
+                if args.len() != 5 { return Err(MirExecError::Runtime("pinn_train_allen_cahn requires 5 args".into())); }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("n_colloc must be Int".into())) };
+                let epsilon = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("epsilon must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(MirExecError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::AllenCahnConfig { epochs, lr, epsilon, n_collocation: n_colloc, seed, ..Default::default() };
+                return Ok(pinn_result_to_value("AllenCahnResult", &cjc_ad::pinn::pinn_allen_cahn_train(&config)));
+            }
+            "pinn_train_kdv" => {
+                if args.len() != 4 { return Err(MirExecError::Runtime("pinn_train_kdv requires 4 args".into())); }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("n_colloc must be Int".into())) };
+                let seed = match &args[3] { Value::Int(v) => *v as u64, _ => return Err(MirExecError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::KdvConfig { epochs, lr, n_collocation: n_colloc, seed, ..Default::default() };
+                return Ok(pinn_result_to_value("KdvResult", &cjc_ad::pinn::pinn_kdv_train(&config)));
+            }
+            "pinn_train_schrodinger" => {
+                if args.len() != 4 { return Err(MirExecError::Runtime("pinn_train_schrodinger requires 4 args".into())); }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("n_colloc must be Int".into())) };
+                let seed = match &args[3] { Value::Int(v) => *v as u64, _ => return Err(MirExecError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::SchrodingerConfig { epochs, lr, n_collocation: n_colloc, seed, ..Default::default() };
+                return Ok(pinn_result_to_value("SchrodingerResult", &cjc_ad::pinn::pinn_schrodinger_train(&config)));
+            }
+            "pinn_train_navier_stokes" => {
+                if args.len() != 5 { return Err(MirExecError::Runtime("pinn_train_navier_stokes requires 5 args".into())); }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("n_colloc must be Int".into())) };
+                let nu = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("nu must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(MirExecError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::NavierStokesConfig { epochs, lr, nu, n_collocation: n_colloc, seed, ..Default::default() };
+                return Ok(pinn_result_to_value("NavierStokesResult", &cjc_ad::pinn::pinn_navier_stokes_train(&config)));
+            }
+            "pinn_train_burgers_2d" => {
+                if args.len() != 5 { return Err(MirExecError::Runtime("pinn_train_burgers_2d requires 5 args".into())); }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(MirExecError::Runtime("n_colloc must be Int".into())) };
+                let nu = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(MirExecError::Runtime("nu must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(MirExecError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::Burgers2DConfig { epochs, lr, nu, n_collocation: n_colloc, seed, ..Default::default() };
+                return Ok(pinn_result_to_value("Burgers2DResult", &cjc_ad::pinn::pinn_burgers_2d_train(&config)));
+            }
+            _ => {}
+        }
+
         // Phase C1: GradGraph constructor (bypasses builtins.rs — cjc-ad dep)
         if name == "GradGraph.new" {
             use std::any::Any;
@@ -1803,6 +2093,178 @@ impl MirExecutor {
                 fields.insert("__row_count".to_string(), Value::Int(count as i64));
                 return Ok(Value::Struct { name: "CsvMinMax".to_string(), fields });
             }
+
+            // ── Array higher-order functions (need executor to call closures) ──
+            "range" => {
+                let (start, end, step) = match args.len() {
+                    1 => (0i64, match &args[0] { Value::Int(n) => *n, _ => return Err(MirExecError::Runtime("range: argument must be Int".into())) }, 1i64),
+                    2 => (match &args[0] { Value::Int(n) => *n, _ => return Err(MirExecError::Runtime("range: start must be Int".into())) },
+                          match &args[1] { Value::Int(n) => *n, _ => return Err(MirExecError::Runtime("range: end must be Int".into())) }, 1i64),
+                    3 => (match &args[0] { Value::Int(n) => *n, _ => return Err(MirExecError::Runtime("range: start must be Int".into())) },
+                          match &args[1] { Value::Int(n) => *n, _ => return Err(MirExecError::Runtime("range: end must be Int".into())) },
+                          match &args[2] { Value::Int(n) => *n, _ => return Err(MirExecError::Runtime("range: step must be Int".into())) }),
+                    _ => return Err(MirExecError::Runtime("range requires 1-3 arguments (end) or (start, end) or (start, end, step)".into())),
+                };
+                if step == 0 { return Err(MirExecError::Runtime("range: step cannot be 0".into())); }
+                let mut result = Vec::new();
+                let mut i = start;
+                if step > 0 { while i < end { result.push(Value::Int(i)); i += step; } }
+                else { while i > end { result.push(Value::Int(i)); i += step; } }
+                return Ok(Value::Array(Rc::new(result)));
+            }
+            "array_map" => {
+                if args.len() != 2 { return Err(MirExecError::Runtime("array_map requires 2 arguments (array, fn)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(MirExecError::Runtime("array_map: first arg must be Array".into())) };
+                let f = args[1].clone();
+                let mut result = Vec::with_capacity(arr.len());
+                for item in arr.iter() {
+                    let mapped = match &f {
+                        Value::Fn(fv) => self.call_function(&fv.name, &[item.clone()])?,
+                        Value::Closure { fn_name, env, .. } => {
+                            let mut full = env.clone();
+                            full.push(item.clone());
+                            self.call_function(fn_name, &full)?
+                        }
+                        _ => return Err(MirExecError::Runtime("array_map: second arg must be a function".into())),
+                    };
+                    result.push(mapped);
+                }
+                return Ok(Value::Array(Rc::new(result)));
+            }
+            "array_filter" => {
+                if args.len() != 2 { return Err(MirExecError::Runtime("array_filter requires 2 arguments (array, fn)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(MirExecError::Runtime("array_filter: first arg must be Array".into())) };
+                let f = args[1].clone();
+                let mut result = Vec::new();
+                for item in arr.iter() {
+                    let keep = match &f {
+                        Value::Fn(fv) => self.call_function(&fv.name, &[item.clone()])?,
+                        Value::Closure { fn_name, env, .. } => {
+                            let mut full = env.clone();
+                            full.push(item.clone());
+                            self.call_function(fn_name, &full)?
+                        }
+                        _ => return Err(MirExecError::Runtime("array_filter: second arg must be a function".into())),
+                    };
+                    if matches!(keep, Value::Bool(true)) { result.push(item.clone()); }
+                }
+                return Ok(Value::Array(Rc::new(result)));
+            }
+            "array_reduce" => {
+                if args.len() != 3 { return Err(MirExecError::Runtime("array_reduce requires 3 arguments (array, init, fn)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(MirExecError::Runtime("array_reduce: first arg must be Array".into())) };
+                let mut acc = args[1].clone();
+                let f = args[2].clone();
+                for item in arr.iter() {
+                    acc = match &f {
+                        Value::Fn(fv) => self.call_function(&fv.name, &[acc, item.clone()])?,
+                        Value::Closure { fn_name, env, .. } => {
+                            let mut full = env.clone();
+                            full.push(acc);
+                            full.push(item.clone());
+                            self.call_function(fn_name, &full)?
+                        }
+                        _ => return Err(MirExecError::Runtime("array_reduce: third arg must be a function".into())),
+                    };
+                }
+                return Ok(acc);
+            }
+            "array_any" => {
+                if args.len() != 2 { return Err(MirExecError::Runtime("array_any requires 2 arguments (array, fn)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(MirExecError::Runtime("array_any: first arg must be Array".into())) };
+                let f = args[1].clone();
+                for item in arr.iter() {
+                    let result = match &f {
+                        Value::Fn(fv) => self.call_function(&fv.name, &[item.clone()])?,
+                        Value::Closure { fn_name, env, .. } => { let mut full = env.clone(); full.push(item.clone()); self.call_function(fn_name, &full)? }
+                        _ => return Err(MirExecError::Runtime("array_any: second arg must be a function".into())),
+                    };
+                    if matches!(result, Value::Bool(true)) { return Ok(Value::Bool(true)); }
+                }
+                return Ok(Value::Bool(false));
+            }
+            "array_all" => {
+                if args.len() != 2 { return Err(MirExecError::Runtime("array_all requires 2 arguments (array, fn)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(MirExecError::Runtime("array_all: first arg must be Array".into())) };
+                let f = args[1].clone();
+                for item in arr.iter() {
+                    let result = match &f {
+                        Value::Fn(fv) => self.call_function(&fv.name, &[item.clone()])?,
+                        Value::Closure { fn_name, env, .. } => { let mut full = env.clone(); full.push(item.clone()); self.call_function(fn_name, &full)? }
+                        _ => return Err(MirExecError::Runtime("array_all: second arg must be a function".into())),
+                    };
+                    if matches!(result, Value::Bool(false)) { return Ok(Value::Bool(false)); }
+                }
+                return Ok(Value::Bool(true));
+            }
+            "array_find" => {
+                if args.len() != 2 { return Err(MirExecError::Runtime("array_find requires 2 arguments (array, fn)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(MirExecError::Runtime("array_find: first arg must be Array".into())) };
+                let f = args[1].clone();
+                for item in arr.iter() {
+                    let result = match &f {
+                        Value::Fn(fv) => self.call_function(&fv.name, &[item.clone()])?,
+                        Value::Closure { fn_name, env, .. } => { let mut full = env.clone(); full.push(item.clone()); self.call_function(fn_name, &full)? }
+                        _ => return Err(MirExecError::Runtime("array_find: second arg must be a function".into())),
+                    };
+                    if matches!(result, Value::Bool(true)) { return Ok(item.clone()); }
+                }
+                return Ok(Value::Na);
+            }
+            "array_enumerate" => {
+                if args.len() != 1 { return Err(MirExecError::Runtime("array_enumerate requires 1 argument (array)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(MirExecError::Runtime("array_enumerate: arg must be Array".into())) };
+                let result: Vec<Value> = arr.iter().enumerate().map(|(i, v)| {
+                    Value::Tuple(Rc::new(vec![Value::Int(i as i64), v.clone()]))
+                }).collect();
+                return Ok(Value::Array(Rc::new(result)));
+            }
+            "array_zip" => {
+                if args.len() != 2 { return Err(MirExecError::Runtime("array_zip requires 2 arguments (array_a, array_b)".into())); }
+                let a = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(MirExecError::Runtime("array_zip: first arg must be Array".into())) };
+                let b = match &args[1] { Value::Array(b) => b.as_ref().clone(), _ => return Err(MirExecError::Runtime("array_zip: second arg must be Array".into())) };
+                let len = a.len().min(b.len());
+                let result: Vec<Value> = (0..len).map(|i| {
+                    Value::Tuple(Rc::new(vec![a[i].clone(), b[i].clone()]))
+                }).collect();
+                return Ok(Value::Array(Rc::new(result)));
+            }
+            "array_sort_by" => {
+                if args.len() != 2 { return Err(MirExecError::Runtime("array_sort_by requires 2 arguments (array, key_fn)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(MirExecError::Runtime("array_sort_by: first arg must be Array".into())) };
+                let f = args[1].clone();
+                let mut keyed: Vec<(Value, Value)> = Vec::with_capacity(arr.len());
+                for item in arr.iter() {
+                    let key = match &f {
+                        Value::Fn(fv) => self.call_function(&fv.name, &[item.clone()])?,
+                        Value::Closure { fn_name, env, .. } => { let mut full = env.clone(); full.push(item.clone()); self.call_function(fn_name, &full)? }
+                        _ => return Err(MirExecError::Runtime("array_sort_by: second arg must be a function".into())),
+                    };
+                    keyed.push((key, item.clone()));
+                }
+                keyed.sort_by(|(a, _), (b, _)| {
+                    match (a, b) {
+                        (Value::Int(x), Value::Int(y)) => x.cmp(y),
+                        (Value::Float(x), Value::Float(y)) => x.total_cmp(y),
+                        (Value::String(x), Value::String(y)) => x.cmp(y),
+                        _ => std::cmp::Ordering::Equal,
+                    }
+                });
+                let result: Vec<Value> = keyed.into_iter().map(|(_, v)| v).collect();
+                return Ok(Value::Array(Rc::new(result)));
+            }
+            "array_unique" => {
+                if args.len() != 1 { return Err(MirExecError::Runtime("array_unique requires 1 argument (array)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(MirExecError::Runtime("array_unique: arg must be Array".into())) };
+                let mut seen = std::collections::BTreeSet::new();
+                let mut result = Vec::new();
+                for item in arr.iter() {
+                    let key = format!("{}", item);
+                    if seen.insert(key) { result.push(item.clone()); }
+                }
+                return Ok(Value::Array(Rc::new(result)));
+            }
+
             _ => {}
         }
 
@@ -2105,6 +2567,14 @@ impl MirExecutor {
                 let ph = self.value_to_usize(&args[0])?;
                 let pw = self.value_to_usize(&args[1])?;
                 Ok(Value::Tensor(t.maxpool2d(ph, pw)?))
+            }
+            (Value::Tensor(t), "avgpool2d") => {
+                if args.len() != 4 { return Err(MirExecError::Runtime("avgpool2d requires 4 args: kernel_h, kernel_w, stride_h, stride_w".into())); }
+                let kh = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("avgpool2d: kernel_h must be int".into())) };
+                let kw = match &args[1] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("avgpool2d: kernel_w must be int".into())) };
+                let sh = match &args[2] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("avgpool2d: stride_h must be int".into())) };
+                let sw = match &args[3] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("avgpool2d: stride_w must be int".into())) };
+                Ok(Value::Tensor(t.avgpool2d(kh, kw, sh, sw).map_err(|e| MirExecError::Runtime(e.to_string()))?))
             }
             (Value::Tensor(t), "bmm") => {
                 if args.len() != 1 {
@@ -2859,14 +3329,14 @@ impl MirExecutor {
                         if args.len() != 1 { return Err(MirExecError::Runtime("parameter requires 1 arg: Tensor".into())); }
                         let t = match &args[0] { Value::Tensor(t) => t.clone(), _ => return Err(MirExecError::Runtime("expected Tensor".into())) };
                         let mut borrow = inner.borrow_mut();
-                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         Ok(Value::Int(graph.parameter(t) as i64))
                     }
                     "input" => {
                         if args.len() != 1 { return Err(MirExecError::Runtime("input requires 1 arg: Tensor".into())); }
                         let t = match &args[0] { Value::Tensor(t) => t.clone(), _ => return Err(MirExecError::Runtime("expected Tensor".into())) };
                         let mut borrow = inner.borrow_mut();
-                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         Ok(Value::Int(graph.input(t) as i64))
                     }
                     "add" | "sub" | "mul" | "div" | "matmul" => {
@@ -2874,7 +3344,7 @@ impl MirExecutor {
                         let a = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int (node index)".into())) };
                         let b = match &args[1] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int (node index)".into())) };
                         let mut borrow = inner.borrow_mut();
-                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         let idx = match method {
                             "add" => graph.add(a, b),
                             "sub" => graph.sub(a, b),
@@ -2889,7 +3359,7 @@ impl MirExecutor {
                         if args.len() != 1 { return Err(MirExecError::Runtime(format!("{method} requires 1 arg: node_index"))); }
                         let a = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int (node index)".into())) };
                         let mut borrow = inner.borrow_mut();
-                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         let idx = match method {
                             "neg" => graph.neg(a),
                             "sum" => graph.sum(a),
@@ -2911,7 +3381,7 @@ impl MirExecutor {
                         let a = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int".into())) };
                         let n = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err(MirExecError::Runtime("expected number".into())) };
                         let mut borrow = inner.borrow_mut();
-                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         Ok(Value::Int(graph.pow(a, n) as i64))
                     }
                     "scalar_mul" => {
@@ -2919,14 +3389,31 @@ impl MirExecutor {
                         let a = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int".into())) };
                         let s = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err(MirExecError::Runtime("expected number".into())) };
                         let mut borrow = inner.borrow_mut();
-                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         Ok(Value::Int(graph.scalar_mul(a, s) as i64))
+                    }
+                    "mlp_layer" => {
+                        if args.len() != 4 { return Err(MirExecError::Runtime("mlp_layer requires 4 args: input, weight, bias, activation_str".into())); }
+                        let input = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int".into())) };
+                        let weight = match &args[1] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int".into())) };
+                        let bias = match &args[2] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int".into())) };
+                        let act_str = match &args[3] { Value::String(s) => s.as_str(), _ => return Err(MirExecError::Runtime("expected String for activation".into())) };
+                        let activation = match act_str {
+                            "tanh" => cjc_ad::pinn::Activation::Tanh,
+                            "sigmoid" => cjc_ad::pinn::Activation::Sigmoid,
+                            "relu" => cjc_ad::pinn::Activation::Relu,
+                            "none" | "" => cjc_ad::pinn::Activation::None,
+                            _ => return Err(MirExecError::Runtime(format!("unknown activation: {act_str}"))),
+                        };
+                        let mut borrow = inner.borrow_mut();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
+                        Ok(Value::Int(graph.mlp_layer(input, weight, bias, activation) as i64))
                     }
                     "backward" => {
                         if args.len() != 1 { return Err(MirExecError::Runtime("backward requires 1 arg: loss_node_index".into())); }
                         let loss_idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int".into())) };
-                        let borrow = inner.borrow();
-                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().unwrap();
+                        let mut borrow = inner.borrow_mut();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         graph.backward(loss_idx);
                         Ok(Value::Void)
                     }
@@ -2934,21 +3421,21 @@ impl MirExecutor {
                         if args.len() != 1 { return Err(MirExecError::Runtime("value requires 1 arg: node_index".into())); }
                         let idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int".into())) };
                         let borrow = inner.borrow();
-                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         Ok(Value::Float(graph.value(idx)))
                     }
                     "tensor" => {
                         if args.len() != 1 { return Err(MirExecError::Runtime("tensor requires 1 arg: node_index".into())); }
                         let idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int".into())) };
                         let borrow = inner.borrow();
-                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         Ok(Value::Tensor(graph.tensor(idx)))
                     }
                     "grad" => {
                         if args.len() != 1 { return Err(MirExecError::Runtime("grad requires 1 arg: node_index".into())); }
                         let idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int".into())) };
                         let borrow = inner.borrow();
-                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         match graph.grad(idx) {
                             Some(t) => Ok(Value::Tensor(t)),
                             None => Ok(Value::Void),
@@ -2958,24 +3445,40 @@ impl MirExecutor {
                         if args.len() != 2 { return Err(MirExecError::Runtime("set_tensor requires 2 args: node_index, tensor".into())); }
                         let idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int".into())) };
                         let t = match &args[1] { Value::Tensor(t) => t.clone(), _ => return Err(MirExecError::Runtime("expected Tensor".into())) };
-                        let borrow = inner.borrow();
-                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().unwrap();
+                        let mut borrow = inner.borrow_mut();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         graph.set_tensor(idx, t);
                         Ok(Value::Void)
                     }
                     "zero_grad" => {
                         if !args.is_empty() { return Err(MirExecError::Runtime("zero_grad takes 0 arguments".into())); }
-                        let borrow = inner.borrow();
-                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().unwrap();
+                        let mut borrow = inner.borrow_mut();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         graph.zero_grad();
                         Ok(Value::Void)
+                    }
+                    "backward_collect" => {
+                        if args.len() != 2 { return Err(MirExecError::Runtime("backward_collect requires 2 args: loss_idx, param_indices".into())); }
+                        let loss_idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int".into())) };
+                        let indices: Vec<usize> = match &args[1] {
+                            Value::Array(arr) => arr.iter().map(|v| match v { Value::Int(i) => Ok(*i as usize), _ => Err(MirExecError::Runtime("expected Int in indices array".into())) }).collect::<Result<Vec<_>, _>>()?,
+                            _ => return Err(MirExecError::Runtime("expected Array of param indices".into())),
+                        };
+                        let mut borrow = inner.borrow_mut();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
+                        let grads = graph.backward_collect(loss_idx, &indices);
+                        let values: Vec<Value> = grads.into_iter().map(|opt| match opt {
+                            Some(t) => Value::Tensor(t),
+                            None => Value::Void,
+                        }).collect();
+                        Ok(Value::Array(std::rc::Rc::new(values)))
                     }
                     "jacobian" => {
                         if args.len() != 2 { return Err(MirExecError::Runtime("jacobian requires 2 args: output_idx, param_idx".into())); }
                         let output_idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int".into())) };
                         let param_idx = match &args[1] { Value::Int(i) => *i as usize, _ => return Err(MirExecError::Runtime("expected Int".into())) };
                         let mut borrow = inner.borrow_mut();
-                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         let jac = graph.jacobian(output_idx, param_idx);
                         Ok(Value::Tensor(jac))
                     }
@@ -2987,7 +3490,7 @@ impl MirExecutor {
                             match &args[2] { Value::Float(f) => *f, _ => return Err(MirExecError::Runtime("expected Float for eps".into())) }
                         } else { 1e-5 };
                         let mut borrow = inner.borrow_mut();
-                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
                         let hd = graph.hessian_diag(loss_idx, param_idx, eps);
                         Ok(Value::Tensor(hd))
                     }
@@ -3246,6 +3749,23 @@ impl MirExecutor {
                     "no field `{field}` on Array"
                 ))),
             },
+            Value::Tuple(elems) => {
+                // Tuple field access: t.0, t.1, etc.
+                if let Ok(idx) = field.parse::<usize>() {
+                    if idx < elems.len() {
+                        Ok(elems[idx].clone())
+                    } else {
+                        Err(MirExecError::Runtime(format!(
+                            "tuple index {idx} out of bounds for tuple of length {}",
+                            elems.len()
+                        )))
+                    }
+                } else {
+                    Err(MirExecError::Runtime(format!(
+                        "no field `{field}` on Tuple"
+                    )))
+                }
+            },
             _ => Err(MirExecError::Runtime(format!(
                 "cannot access field `{field}` on {}",
                 obj.type_name()
@@ -3479,7 +3999,6 @@ impl Default for MirExecutor {
 // Convenience: full pipeline AST -> HIR -> MIR -> Execute
 // ---------------------------------------------------------------------------
 
-/// Run a full AST program through the HIR -> MIR -> MIR-Exec pipeline.
 // ---------------------------------------------------------------------------
 // Type-checking gate
 // ---------------------------------------------------------------------------
@@ -3516,6 +4035,24 @@ pub fn type_check_program(program: &cjc_ast::Program) -> Result<(), MirExecError
     Ok(())
 }
 
+/// Run a full AST program through the HIR -> MIR -> MIR-Exec pipeline.
+///
+/// Lower the AST to HIR, then to MIR, annotate escape information, and
+/// execute the resulting MIR program. This is the simplest entry point for
+/// single-file programs that do not require optimization or type checking.
+///
+/// # Arguments
+///
+/// * `program` - The parsed AST program.
+/// * `seed`    - Deterministic RNG seed for reproducible execution.
+///
+/// # Returns
+///
+/// The final [`Value`] produced by the program.
+///
+/// # Errors
+///
+/// Returns [`MirExecError::Runtime`] on execution failures.
 pub fn run_program(program: &cjc_ast::Program, seed: u64) -> MirExecResult {
     let mut ast_lowering = cjc_hir::AstLowering::new();
     let hir = ast_lowering.lower_program(program);
@@ -3529,7 +4066,20 @@ pub fn run_program(program: &cjc_ast::Program, seed: u64) -> MirExecResult {
     executor.exec(&mir)
 }
 
-/// Run a full AST program and return the executor (for inspecting output, etc.)
+/// Run a full AST program and return both the result and the executor.
+///
+/// Same pipeline as [`run_program`] but also returns the [`MirExecutor`],
+/// allowing callers to inspect captured output (`executor.output`), GC
+/// statistics, arena allocation counts, and other internal state.
+///
+/// # Arguments
+///
+/// * `program` - The parsed AST program.
+/// * `seed`    - Deterministic RNG seed for reproducible execution.
+///
+/// # Returns
+///
+/// A tuple of `(Value, MirExecutor)` on success.
 pub fn run_program_with_executor(
     program: &cjc_ast::Program,
     seed: u64,
@@ -3548,6 +4098,19 @@ pub fn run_program_with_executor(
 }
 
 /// Run a full AST program through the optimized MIR pipeline.
+///
+/// Apply constant folding (CF) and dead code elimination (DCE) via
+/// [`cjc_mir::optimize::optimize_program`] before execution. Enabled by the
+/// `--mir-opt` CLI flag.
+///
+/// # Arguments
+///
+/// * `program` - The parsed AST program.
+/// * `seed`    - Deterministic RNG seed for reproducible execution.
+///
+/// # Returns
+///
+/// The final [`Value`] produced by the optimized program.
 pub fn run_program_optimized(program: &cjc_ast::Program, seed: u64) -> MirExecResult {
     let mut ast_lowering = cjc_hir::AstLowering::new();
     let hir = ast_lowering.lower_program(program);
@@ -3563,7 +4126,19 @@ pub fn run_program_optimized(program: &cjc_ast::Program, seed: u64) -> MirExecRe
     executor.exec(&optimized)
 }
 
-/// Run a full AST program through the optimized MIR pipeline, returning executor.
+/// Run a full AST program through the optimized MIR pipeline, returning the executor.
+///
+/// Same as [`run_program_optimized`] but also returns the [`MirExecutor`]
+/// for post-execution inspection of output, GC stats, and arena counts.
+///
+/// # Arguments
+///
+/// * `program` - The parsed AST program.
+/// * `seed`    - Deterministic RNG seed for reproducible execution.
+///
+/// # Returns
+///
+/// A tuple of `(Value, MirExecutor)` on success.
 pub fn run_program_optimized_with_executor(
     program: &cjc_ast::Program,
     seed: u64,
@@ -3608,7 +4183,20 @@ pub fn run_program_type_checked(program: &cjc_ast::Program, seed: u64) -> MirExe
     executor.exec(&mir)
 }
 
-/// Run a full AST program through the MIR pipeline with monomorphization + optimization.
+/// Run a full AST program through the MIR pipeline with monomorphization and optimization.
+///
+/// Apply [`cjc_mir::monomorph::monomorphize_program`] to specialize generic
+/// functions, then optimize with CF + DCE before execution. This is the
+/// most aggressive compilation pipeline.
+///
+/// # Arguments
+///
+/// * `program` - The parsed AST program.
+/// * `seed`    - Deterministic RNG seed for reproducible execution.
+///
+/// # Returns
+///
+/// The final [`Value`] produced by the monomorphized and optimized program.
 pub fn run_program_monomorphized(program: &cjc_ast::Program, seed: u64) -> MirExecResult {
     let mut ast_lowering = cjc_hir::AstLowering::new();
     let hir = ast_lowering.lower_program(program);
@@ -3821,6 +4409,24 @@ pub fn run_program_cfg(
 
 /// Convert a `DataFrame` into a `Value::Struct { name: "DataFrame", fields }`.
 ///
+/// Convert a [`cjc_ad::pinn::PinnResult`] into a `Value::Struct`.
+fn pinn_result_to_value(struct_name: &str, r: &cjc_ad::pinn::PinnResult) -> Value {
+    use std::collections::BTreeMap;
+    let mut fields = BTreeMap::new();
+    fields.insert("l2_error".into(), Value::Float(r.l2_error.unwrap_or(f64::NAN)));
+    fields.insert("max_error".into(), Value::Float(r.max_error.unwrap_or(f64::NAN)));
+    fields.insert("mean_residual".into(), Value::Float(r.mean_residual));
+    fields.insert("n_epochs".into(), Value::Int(r.history.len() as i64));
+    let loss_arr: Vec<Value> = r.history.iter().map(|h| Value::Float(h.total_loss)).collect();
+    fields.insert("loss_history".into(), Value::Array(Rc::new(loss_arr)));
+    let params_tensor = cjc_runtime::tensor::Tensor::from_vec(
+        r.final_params.clone(),
+        &[r.final_params.len()],
+    ).unwrap_or_else(|_| cjc_runtime::tensor::Tensor::zeros(&[0]));
+    fields.insert("final_params".into(), Value::Tensor(params_tensor));
+    Value::Struct { name: struct_name.into(), fields }
+}
+
 /// Column data is stored as `Value::Array` keyed by column name.
 /// A special `"__columns"` field stores ordered column names.
 /// A special `"__nrows"` field stores the row count.

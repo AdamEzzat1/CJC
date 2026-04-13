@@ -175,11 +175,15 @@ impl F16 {
         exp == 0 && mant != 0
     }
 
-    /// Arithmetic operations via f64 promotion.
+    /// Add two f16 values. Promotes both to f64, adds, then narrows back.
     pub fn add(self, rhs: Self) -> Self { Self::from_f64(self.to_f64() + rhs.to_f64()) }
+    /// Subtract `rhs` from `self`. Promotes both to f64, subtracts, then narrows back.
     pub fn sub(self, rhs: Self) -> Self { Self::from_f64(self.to_f64() - rhs.to_f64()) }
+    /// Multiply two f16 values. Promotes both to f64, multiplies, then narrows back.
     pub fn mul(self, rhs: Self) -> Self { Self::from_f64(self.to_f64() * rhs.to_f64()) }
+    /// Divide `self` by `rhs`. Promotes both to f64, divides, then narrows back.
     pub fn div(self, rhs: Self) -> Self { Self::from_f64(self.to_f64() / rhs.to_f64()) }
+    /// Negate by toggling the sign bit. Does not promote to f64.
     pub fn neg(self) -> Self { F16(self.0 ^ 0x8000) }
 }
 

@@ -1,0 +1,97 @@
+// ═══════════════════════════════════════════════════════════════════════
+// Example 1: Multi-Layer Perceptron (MLP) — XOR Problem with Autodiff
+// ═══════════════════════════════════════════════════════════════════════
+//
+// A 2-layer MLP trained with automatic differentiation (GradGraph)
+// to learn the XOR function: (0,0)→0, (0,1)→1, (1,0)→1, (1,1)→0.
+//
+// Architecture: 2 inputs → 4 hidden (sigmoid) → 1 output (sigmoid)
+// Loss: MSE
+// Optimizer: Manual SGD via GradGraph gradients
+// ═══════════════════════════════════════════════════════════════════════
+
+fn main() {
+    print("MLP XOR — Autodiff Training");
+    print("============================");
+
+    // ── XOR dataset (4 samples) ────────────────────────────────────
+    let X = Tensor.from_vec([0.0, 0.0,  0.0, 1.0,  1.0, 0.0,  1.0, 1.0], [4, 2]);
+    let Y = Tensor.from_vec([0.0, 1.0, 1.0, 0.0], [4, 1]);
+
+    // ── Initialize weights (small random) ──────────────────────────
+    let W1 = Tensor.randn([2, 4]) * 0.5;   // input→hidden
+    let b1 = Tensor.zeros([1, 4]);
+    let W2 = Tensor.randn([4, 1]) * 0.5;   // hidden→output
+    let b2 = Tensor.zeros([1, 1]);
+
+    let lr = 1.0;
+    let n_epochs = 200;
+
+    // ── Training loop ──────────────────────────────────────────────
+    let epoch = 0;
+    while epoch < n_epochs {
+        let g = GradGraph.new();
+
+        // Register parameters
+        let w1_id = g.parameter(W1);
+        let b1_id = g.parameter(b1);
+        let w2_id = g.parameter(W2);
+        let b2_id = g.parameter(b2);
+        let x_id = g.input(X);
+        let y_id = g.input(Y);
+
+        // Forward: hidden = sigmoid(X @ W1 + b1)
+        let z1 = g.matmul(x_id, w1_id);
+        let z1b = g.add(z1, b1_id);
+        let h = g.sigmoid(z1b);
+
+        // Output: pred = sigmoid(hidden @ W2 + b2)
+        let z2 = g.matmul(h, w2_id);
+        let z2b = g.add(z2, b2_id);
+        let pred = g.sigmoid(z2b);
+
+        // Loss: MSE = mean((pred - y)^2)
+        let diff = g.sub(pred, y_id);
+        let sq = g.mul(diff, diff);
+        let loss = g.mean(sq);
+
+        // Backprop
+        g.backward(loss);
+
+        let loss_val = g.value(loss);
+        if epoch % 40 == 0 {
+            print("Epoch " + to_string(epoch) + "  loss=" + to_string(round(loss_val * 10000.0) / 10000.0));
+        }
+
+        // SGD update
+        let gw1 = g.grad(w1_id);
+        let gb1 = g.grad(b1_id);
+        let gw2 = g.grad(w2_id);
+        let gb2 = g.grad(b2_id);
+
+        W1 = W1 - gw1 * lr;
+        b1 = b1 - gb1 * lr;
+        W2 = W2 - gw2 * lr;
+        b2 = b2 - gb2 * lr;
+
+        epoch = epoch + 1;
+    }
+
+    // ── Evaluate ───────────────────────────────────────────────────
+    print("");
+    print("Final predictions:");
+    let i = 0;
+    while i < 4 {
+        let row = Tensor.from_vec([X.get([i, 0]), X.get([i, 1])], [1, 2]);
+        let hidden = matmul(row, W1) + b1;
+        let hidden_act = sigmoid(hidden);
+        let out = matmul(hidden_act, W2) + b2;
+        let pred = sigmoid(out);
+        let p = pred.get([0, 0]);
+        let target = Y.get([i, 0]);
+        print("  (" + to_string(int(X.get([i, 0]))) + "," + to_string(int(X.get([i, 1]))) + ") → "
+              + to_string(round(p * 1000.0) / 1000.0)
+              + "  (target=" + to_string(int(target)) + ")");
+        i = i + 1;
+    }
+}

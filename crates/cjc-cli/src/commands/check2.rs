@@ -1,7 +1,7 @@
-//! `cjc check` — Dual-mode: type-checking and output validation.
+//! `cjcl check` — Dual-mode: type-checking and output validation.
 //!
-//! Mode 1 (type-check): `cjc check file.cjc` — type-checks a CJC source file.
-//! Mode 2 (validate):   `cjc check file --against expected` — validates output.
+//! Mode 1 (type-check): `cjcl check file.cjcl` — type-checks a CJC source file.
+//! Mode 2 (validate):   `cjcl check file --against expected` — validates output.
 //!
 //! Validation supports exact match, tolerance-based numeric comparison,
 //! and schema-level structural matching.
@@ -62,14 +62,14 @@ pub fn parse_args(args: &[String]) -> CheckArgs {
             "--color" => ca.output = OutputMode::Color,
             other if !other.starts_with('-') => positionals.push(other.to_string()),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc check`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl check`", other);
                 process::exit(1);
             }
         }
         i += 1;
     }
     if positionals.is_empty() {
-        eprintln!("error: `cjc check` requires a file argument");
+        eprintln!("error: `cjcl check` requires a file argument");
         process::exit(1);
     }
     ca.file = positionals[0].clone();
@@ -322,14 +322,14 @@ fn validate_schema(ca: &CheckArgs, a: &str, b: &str, b_name: &str) {
 }
 
 pub fn print_help() {
-    eprintln!("cjc check — Type-checking and output validation");
+    eprintln!("cjcl check — Type-checking and output validation");
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  cjc check <file.cjc>                        Type-check a CJC source file");
-    eprintln!("  cjc check <file> --against <expected>        Compare files for equality");
-    eprintln!("  cjc check <file> --expect <value>            Check content matches string");
-    eprintln!("  cjc check <file> --against <b> --tol <N>     Numeric tolerance comparison");
-    eprintln!("  cjc check <file> --against <b> --schema-only Compare CSV schemas only");
+    eprintln!("  cjcl check <file.cjcl>                        Type-check a CJC source file");
+    eprintln!("  cjcl check <file> --against <expected>        Compare files for equality");
+    eprintln!("  cjcl check <file> --expect <value>            Check content matches string");
+    eprintln!("  cjcl check <file> --against <b> --tol <N>     Numeric tolerance comparison");
+    eprintln!("  cjcl check <file> --against <b> --schema-only Compare CSV schemas only");
     eprintln!();
     eprintln!("Flags:");
     eprintln!("  -a, --against <file>    File to compare against");

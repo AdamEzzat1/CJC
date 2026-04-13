@@ -129,14 +129,20 @@ pub fn five_number_summary(values: &[f64]) -> (f64, f64, f64, f64, f64) {
 
 // ─── Box Stats ───────────────────────────────────────────────────────
 
-/// Box plot statistics with Tukey fences (1.5 × IQR).
+/// Box plot statistics with Tukey fences (1.5 x IQR).
 #[derive(Debug, Clone)]
 pub struct BoxStats {
+    /// Lower whisker (most extreme data point within lower fence).
     pub lower_whisker: f64,
+    /// First quartile (25th percentile).
     pub q1: f64,
+    /// Median (50th percentile).
     pub median: f64,
+    /// Third quartile (75th percentile).
     pub q3: f64,
+    /// Upper whisker (most extreme data point within upper fence).
     pub upper_whisker: f64,
+    /// Data points beyond the Tukey fences.
     pub outliers: Vec<f64>,
 }
 
@@ -385,17 +391,24 @@ pub fn correlation_matrix(columns: &[&[f64]]) -> Vec<Vec<f64>> {
 /// Linkage method for hierarchical clustering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Linkage {
+    /// Minimum distance between any pair of points across clusters.
     Single,
+    /// Maximum distance between any pair of points across clusters.
     Complete,
+    /// Weighted average distance between all pairs across clusters.
     Average,
 }
 
 /// A merge step in hierarchical clustering.
 #[derive(Debug, Clone)]
 pub struct MergeStep {
+    /// Index of the left cluster being merged.
     pub left: usize,
+    /// Index of the right cluster being merged.
     pub right: usize,
+    /// Distance at which the merge occurs.
     pub distance: f64,
+    /// Size of the resulting merged cluster.
     pub size: usize,
 }
 

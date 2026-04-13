@@ -97,9 +97,11 @@ fn kahan_sum(vals: &[f64]) -> f64 {
 // Used for MPS bond truncation. Handles matrices up to ~64x64.
 // Deterministic: fixed sweep order, no randomization.
 
-/// Compute thin SVD of an m×n complex matrix A (m >= n).
+/// Compute thin SVD of an m×n complex matrix via one-sided Jacobi rotations.
+///
 /// Returns (U: m×k, S: k, V: n×k) where k = min(m,n).
 /// A is stored column-major: A[row + col*m] = complex value.
+/// Deterministic: fixed sweep order, no random pivoting.
 pub fn jacobi_svd(a: &[C], m: usize, n: usize) -> (Vec<C>, Vec<f64>, Vec<C>) {
     let k = m.min(n);
     // Work on a copy
@@ -216,9 +218,13 @@ pub fn jacobi_svd(a: &[C], m: usize, n: usize) -> (Vec<C>, Vec<f64>, Vec<C>) {
 // Bond indices: connect adjacent qubits
 
 /// Pure MPS tensor for one qubit site.
+///
+/// Stores two bond_left × bond_right matrices (one per physical index 0, 1).
 #[derive(Clone, Debug)]
 pub struct PureMpsTensor {
+    /// Left bond dimension.
     pub bond_left: usize,
+    /// Right bond dimension.
     pub bond_right: usize,
     /// Flat storage: data[phys * bl * br + r * br + c] = complex (re, im)
     pub data: Vec<C>,
@@ -242,14 +248,20 @@ impl PureMpsTensor {
 }
 
 /// Pure MPS state — inspectable from CJC.
+///
+/// Memory scales as O(N * chi^2) where chi is the maximum bond dimension.
 #[derive(Clone, Debug)]
 pub struct PureMps {
+    /// Number of qubits in the chain.
     pub n_qubits: usize,
+    /// Maximum bond dimension before SVD truncation.
     pub max_bond: usize,
+    /// Per-site tensors indexed by qubit position.
     pub tensors: Vec<PureMpsTensor>,
 }
 
 impl PureMps {
+    /// Create a pure MPS representing |0...0⟩ with the given bond limit.
     pub fn new(n_qubits: usize, max_bond: usize) -> Self {
         let tensors: Vec<PureMpsTensor> = (0..n_qubits)
             .map(|_| PureMpsTensor::new_zero_state(1, 1))
@@ -426,7 +438,7 @@ impl PureMps {
         c_re(env[0])
     }
 
-    /// Total memory in bytes (for CJC-level reporting).
+    /// Estimate total memory usage in bytes.
     pub fn memory_bytes(&self) -> usize {
         self.tensors.iter()
             .map(|t| t.data.len() * 16) // 16 bytes per complex (2 × f64)
@@ -466,9 +478,15 @@ impl PureMps {
 // Row 2n: scratch row for measurement
 // Bits stored as u64 words for efficiency.
 
+/// Pure CJC stabilizer tableau for Clifford circuit simulation.
+///
+/// Uses the CHP (CNOT-Hadamard-Phase) algorithm with bitpacked rows.
+/// Simulates Clifford gates in O(N^2) time per gate.
 #[derive(Clone, Debug)]
 pub struct PureStabilizer {
+    /// Number of qubits.
     pub n: usize,
+    /// Number of u64 words per row: ceil(n / 64).
     pub words_per_row: usize,
     /// x-tableau: x[row][word]
     pub x: Vec<Vec<u64>>,
@@ -479,6 +497,7 @@ pub struct PureStabilizer {
 }
 
 impl PureStabilizer {
+    /// Create a stabilizer state representing |0...0⟩ on `n` qubits.
     pub fn new(n: usize) -> Self {
         let words = (n + 63) / 64;
         let rows = 2 * n + 1;
@@ -565,6 +584,7 @@ impl PureStabilizer {
         }
     }
 
+    /// Apply Hadamard gate on qubit `q`.
     pub fn h(&mut self, q: usize) {
         for row in 0..(2 * self.n + 1) {
             let xi = self.get_x(row, q);
@@ -579,6 +599,7 @@ impl PureStabilizer {
         }
     }
 
+    /// Apply S (phase) gate on qubit `q`.
     pub fn s(&mut self, q: usize) {
         for row in 0..(2 * self.n + 1) {
             let xi = self.get_x(row, q);
@@ -591,6 +612,7 @@ impl PureStabilizer {
         }
     }
 
+    /// Apply Pauli-X gate on qubit `q`.
     pub fn x(&mut self, q: usize) {
         // X gate: flips phase of any row with Z_q set (but not X_q)
         for row in 0..(2 * self.n + 1) {
@@ -600,6 +622,7 @@ impl PureStabilizer {
         }
     }
 
+    /// Apply Pauli-Y gate on qubit `q`.
     pub fn y(&mut self, q: usize) {
         for row in 0..(2 * self.n + 1) {
             let xi = self.get_x(row, q);
@@ -610,6 +633,7 @@ impl PureStabilizer {
         }
     }
 
+    /// Apply Pauli-Z gate on qubit `q`.
     pub fn z(&mut self, q: usize) {
         for row in 0..(2 * self.n + 1) {
             if self.get_x(row, q) {
@@ -618,6 +642,7 @@ impl PureStabilizer {
         }
     }
 
+    /// Apply CNOT gate with `ctrl` as control and `targ` as target.
     pub fn cnot(&mut self, ctrl: usize, targ: usize) {
         for row in 0..(2 * self.n + 1) {
             let xc = self.get_x(row, ctrl);
@@ -696,6 +721,7 @@ impl PureStabilizer {
         }
     }
 
+    /// Return the number of qubits.
     pub fn num_qubits(&self) -> usize {
         self.n
     }
@@ -725,15 +751,21 @@ impl PureStabilizer {
 // Pure Density Matrix — Mixed states + noise channels
 // ═══════════════════════════════════════════════════════════════════
 
+/// Pure CJC density matrix for mixed-state simulation with noise channels.
+///
+/// Stored as a dim x dim row-major complex matrix where dim = 2^n_qubits.
 #[derive(Clone, Debug)]
 pub struct PureDensity {
+    /// Number of qubits.
     pub n_qubits: usize,
+    /// Hilbert space dimension (2^n_qubits).
     pub dim: usize,
     /// Flat row-major: data[row * dim + col] = complex value
     pub data: Vec<C>,
 }
 
 impl PureDensity {
+    /// Create a density matrix for |0...0⟩⟨0...0| on `n_qubits` qubits.
     pub fn new(n_qubits: usize) -> Self {
         let dim = 1 << n_qubits;
         let mut data = vec![CZERO; dim * dim];
@@ -893,17 +925,20 @@ impl PureDensity {
         self.data = new_data;
     }
 
+    /// Compute Tr(rho) using Kahan summation. Should be 1.0 for valid states.
     pub fn trace(&self) -> f64 {
         let vals: Vec<f64> = (0..self.dim).map(|i| c_re(self.get(i, i))).collect();
         kahan_sum(&vals)
     }
 
+    /// Compute Tr(rho^2). Pure states have purity 1.0; maximally mixed have 1/dim.
     pub fn purity(&self) -> f64 {
         // Tr(ρ²) = sum_{i,j} |ρ_{ij}|²
         let vals: Vec<f64> = self.data.iter().map(|c| c_abs2(*c)).collect();
         kahan_sum(&vals)
     }
 
+    /// Compute von Neumann entropy S = -Tr(rho log rho) via Jacobi eigendecomposition.
     pub fn von_neumann_entropy(&self) -> f64 {
         // Eigenvalues of ρ via diagonalization, then -sum(λ log λ)
         let eigenvalues = self.eigenvalues_hermitian();
@@ -916,6 +951,7 @@ impl PureDensity {
         entropy
     }
 
+    /// Measurement probabilities: P(k) = rho[k,k].re for each basis state k.
     pub fn probabilities(&self) -> Vec<f64> {
         (0..self.dim).map(|i| c_re(self.get(i, i)).max(0.0)).collect()
     }
@@ -1011,30 +1047,58 @@ impl PureDensity {
 // Pure Circuit + Statevector
 // ═══════════════════════════════════════════════════════════════════
 
+/// Quantum gate for the pure CJC circuit backend.
 #[derive(Clone, Debug)]
 pub enum PureGate {
-    H(usize), X(usize), Y(usize), Z(usize),
-    S(usize), T(usize),
-    Rx(usize, f64), Ry(usize, f64), Rz(usize, f64),
-    CNOT(usize, usize), CZ(usize, usize), SWAP(usize, usize),
+    /// Hadamard gate on target qubit.
+    H(usize),
+    /// Pauli-X (bit flip) gate.
+    X(usize),
+    /// Pauli-Y gate.
+    Y(usize),
+    /// Pauli-Z (phase flip) gate.
+    Z(usize),
+    /// S (sqrt-Z) phase gate.
+    S(usize),
+    /// T (pi/8) gate.
+    T(usize),
+    /// X-rotation by angle theta.
+    Rx(usize, f64),
+    /// Y-rotation by angle theta.
+    Ry(usize, f64),
+    /// Z-rotation by angle theta.
+    Rz(usize, f64),
+    /// Controlled-NOT (control, target).
+    CNOT(usize, usize),
+    /// Controlled-Z (qubit_a, qubit_b).
+    CZ(usize, usize),
+    /// SWAP (qubit_a, qubit_b).
+    SWAP(usize, usize),
+    /// Toffoli (control_1, control_2, target).
     Toffoli(usize, usize, usize),
 }
 
+/// Pure CJC quantum circuit — inspectable gate sequence with statevector execution.
 #[derive(Clone, Debug)]
 pub struct PureCircuit {
+    /// Number of qubits in the circuit.
     pub n_qubits: usize,
+    /// Ordered gate sequence.
     pub gates: Vec<PureGate>,
 }
 
 impl PureCircuit {
+    /// Create an empty circuit on `n` qubits.
     pub fn new(n: usize) -> Self {
         PureCircuit { n_qubits: n, gates: vec![] }
     }
 
+    /// Append a gate to the circuit.
     pub fn add(&mut self, gate: PureGate) {
         self.gates.push(gate);
     }
 
+    /// Return the number of gates in the circuit.
     pub fn n_gates(&self) -> usize {
         self.gates.len()
     }
@@ -1139,17 +1203,22 @@ impl PureCircuit {
     }
 }
 
+/// Pure CJC statevector — complex amplitude vector with measurement support.
 #[derive(Clone, Debug)]
 pub struct PureStatevector {
+    /// Number of qubits.
     pub n_qubits: usize,
+    /// Complex amplitudes indexed by computational basis state.
     pub amplitudes: Vec<C>,
 }
 
 impl PureStatevector {
+    /// Compute Born-rule probabilities |a_k|^2 for each basis state.
     pub fn probabilities(&self) -> Vec<f64> {
         self.amplitudes.iter().map(|a| c_abs2(*a)).collect()
     }
 
+    /// Measure all qubits, collapsing to a single basis state. Uses SplitMix64 PRNG.
     pub fn measure_all(&self, rng: &mut u64) -> Vec<u8> {
         let probs = self.probabilities();
         let r = splitmix64_f64(rng);
@@ -1168,6 +1237,7 @@ impl PureStatevector {
             .collect()
     }
 
+    /// Sample `n_shots` measurement outcomes as basis-state indices.
     pub fn sample(&self, n_shots: usize, rng: &mut u64) -> Vec<usize> {
         let probs = self.probabilities();
         (0..n_shots).map(|_| {
@@ -1190,45 +1260,54 @@ impl PureStatevector {
 // Gate matrices
 // ═══════════════════════════════════════════════════════════════════
 
+/// Return the 2x2 Hadamard gate matrix.
 pub fn h_matrix() -> [[C; 2]; 2] {
     let isq2 = 1.0 / 2.0f64.sqrt();
     [[(isq2, 0.0), (isq2, 0.0)],
      [(isq2, 0.0), (-isq2, 0.0)]]
 }
 
+/// Return the 2x2 Pauli-X gate matrix.
 pub fn x_matrix() -> [[C; 2]; 2] {
     [[CZERO, CONE], [CONE, CZERO]]
 }
 
+/// Return the 2x2 Pauli-Y gate matrix.
 pub fn y_matrix() -> [[C; 2]; 2] {
     [[CZERO, (0.0, -1.0)], [(0.0, 1.0), CZERO]]
 }
 
+/// Return the 2x2 Pauli-Z gate matrix.
 pub fn z_matrix() -> [[C; 2]; 2] {
     [[CONE, CZERO], [CZERO, (-1.0, 0.0)]]
 }
 
+/// Return the 2x2 S (sqrt-Z) gate matrix.
 pub fn s_matrix() -> [[C; 2]; 2] {
     [[CONE, CZERO], [CZERO, (0.0, 1.0)]]
 }
 
+/// Return the 2x2 T (pi/8) gate matrix.
 pub fn t_matrix() -> [[C; 2]; 2] {
     let v = 1.0 / 2.0f64.sqrt();
     [[CONE, CZERO], [CZERO, (v, v)]]
 }
 
+/// Return the 2x2 Rx(theta) rotation matrix.
 pub fn rx_matrix(theta: f64) -> [[C; 2]; 2] {
     let c = (theta / 2.0).cos();
     let s = (theta / 2.0).sin();
     [[(c, 0.0), (0.0, -s)], [(0.0, -s), (c, 0.0)]]
 }
 
+/// Return the 2x2 Ry(theta) rotation matrix.
 pub fn ry_matrix(theta: f64) -> [[C; 2]; 2] {
     let c = (theta / 2.0).cos();
     let s = (theta / 2.0).sin();
     [[(c, 0.0), (-s, 0.0)], [(s, 0.0), (c, 0.0)]]
 }
 
+/// Return the 2x2 Rz(theta) rotation matrix.
 pub fn rz_matrix(theta: f64) -> [[C; 2]; 2] {
     let c = (theta / 2.0).cos();
     let s = (theta / 2.0).sin();
@@ -1258,36 +1337,48 @@ fn splitmix64_f64(state: &mut u64) -> f64 {
 /// Pure CJC representation of a Pauli operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PurePauli {
+    /// Identity operator.
     I,
+    /// Pauli-X (bit flip).
     X,
+    /// Pauli-Y.
     Y,
+    /// Pauli-Z (phase flip).
     Z,
 }
 
 /// Pure CJC Pauli term: coeff * P_0 ⊗ P_1 ⊗ ... ⊗ P_{n-1}.
 #[derive(Debug, Clone)]
 pub struct PurePauliTerm {
+    /// Real part of the complex coefficient.
     pub coeff_re: f64,
+    /// Imaginary part of the complex coefficient.
     pub coeff_im: f64,
+    /// Per-qubit Pauli operators, indexed by qubit position.
     pub ops: Vec<PurePauli>,
 }
 
-/// Pure CJC Fermionic Hamiltonian (sum of Pauli terms).
+/// Pure CJC Fermionic Hamiltonian (sum of Pauli terms after Jordan-Wigner mapping).
 #[derive(Debug, Clone)]
 pub struct PureFermionicHamiltonian {
+    /// Number of qubits in the system.
     pub n_qubits: usize,
+    /// Pauli terms comprising the Hamiltonian sum.
     pub terms: Vec<PurePauliTerm>,
 }
 
 impl PureFermionicHamiltonian {
+    /// Create an empty Hamiltonian on `n` qubits.
     pub fn new(n: usize) -> Self {
         PureFermionicHamiltonian { n_qubits: n, terms: Vec::new() }
     }
 
+    /// Add a Pauli term to the Hamiltonian.
     pub fn add_term(&mut self, term: PurePauliTerm) {
         self.terms.push(term);
     }
 
+    /// Return the number of Pauli terms.
     pub fn n_terms(&self) -> usize {
         self.terms.len()
     }
@@ -1464,9 +1555,13 @@ fn pure_z_eigenvalue(ops: &[PurePauli], k: usize) -> f64 {
 /// Pure CJC Richardson extrapolation result.
 #[derive(Debug, Clone)]
 pub struct PureZneResult {
+    /// Zero-noise extrapolated value.
     pub mitigated_value: f64,
+    /// Noise scale factors used.
     pub scale_factors: Vec<f64>,
+    /// Expectation values measured at each scale factor.
     pub measured_values: Vec<f64>,
+    /// Richardson extrapolation coefficients.
     pub coefficients: Vec<f64>,
 }
 
@@ -1550,6 +1645,7 @@ pub fn pure_richardson_extrapolate(
 // Inspect helper — extract CJC-inspectable map from QuantumState
 // ═══════════════════════════════════════════════════════════════════
 
+/// Extract a CJC-inspectable Value::Map from a pure backend QuantumState.
 pub fn quantum_inspect(val: &Value) -> Result<Value, String> {
     match val {
         Value::QuantumState(rc) => {
@@ -1572,6 +1668,7 @@ pub fn quantum_inspect(val: &Value) -> Result<Value, String> {
 // Wrap helpers
 // ═══════════════════════════════════════════════════════════════════
 
+/// Wrap a pure backend state as a `Value::QuantumState`.
 pub fn wrap_pure<T: Any + 'static>(val: T) -> Value {
     Value::QuantumState(Rc::new(RefCell::new(val)))
 }

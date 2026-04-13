@@ -1,7 +1,7 @@
-//! `cjc view` — Deterministic, effect-aware directory listing.
+//! `cjcl view` — Deterministic, effect-aware directory listing.
 //!
 //! Lists files with stable ordering, color-coded by type, and annotates:
-//! - `.cjc` files with effect flags (nogc, pure, etc.)
+//! - `.cjcl` files with effect flags (nogc, pure, etc.)
 //! - `.snap` files with content hashes
 //! - Directories, executables, and data files
 //!
@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use crate::output::{self, OutputMode};
 
-/// Parsed arguments for `cjc view`.
+/// Parsed arguments for `cjcl view`.
 pub struct ViewArgs {
     pub path: PathBuf,
     pub recursive: bool,
@@ -62,7 +62,7 @@ pub fn parse_args(args: &[String]) -> ViewArgs {
             "--color" => va.output = OutputMode::Color,
             other if !other.starts_with('-') => va.path = PathBuf::from(other),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc view`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl view`", other);
                 std::process::exit(1);
             }
         }
@@ -71,7 +71,7 @@ pub fn parse_args(args: &[String]) -> ViewArgs {
     va
 }
 
-/// Entry point for `cjc view`.
+/// Entry point for `cjcl view`.
 pub fn run(args: &[String]) {
     let va = parse_args(args);
     let entries = collect_entries(&va.path, va.recursive);
@@ -113,7 +113,7 @@ impl FileKind {
     fn label(&self) -> &'static str {
         match self {
             FileKind::Directory => "dir",
-            FileKind::CjcSource => "cjc",
+            FileKind::CjcSource => "cjcl",
             FileKind::SnapFile => "snap",
             FileKind::DataFile => "data",
             FileKind::Other => "file",
@@ -136,7 +136,7 @@ fn classify(path: &Path) -> FileKind {
         return FileKind::Directory;
     }
     match path.extension().and_then(|e| e.to_str()) {
-        Some("cjc") => FileKind::CjcSource,
+        Some("cjcl") => FileKind::CjcSource,
         Some("snap") => FileKind::SnapFile,
         Some("csv") | Some("tsv") | Some("json") => FileKind::DataFile,
         _ => FileKind::Other,
@@ -200,7 +200,7 @@ fn collect_recursive(dir: &Path, recursive: bool, entries: &mut Vec<FileEntry>) 
     }
 }
 
-/// Extract effect annotations from a .cjc file by scanning for fn declarations.
+/// Extract effect annotations from a .cjcl file by scanning for fn declarations.
 fn extract_effects(path: &Path) -> Vec<String> {
     let source = match fs::read_to_string(path) {
         Ok(s) => s,
@@ -329,9 +329,9 @@ fn print_json(entries: &[FileEntry], va: &ViewArgs) {
 }
 
 pub fn print_help() {
-    eprintln!("cjc view — Deterministic, effect-aware directory listing");
+    eprintln!("cjcl view — Deterministic, effect-aware directory listing");
     eprintln!();
-    eprintln!("Usage: cjc view [path] [flags]");
+    eprintln!("Usage: cjcl view [path] [flags]");
     eprintln!();
     eprintln!("Flags:");
     eprintln!("  -r, --recursive     Recurse into subdirectories");

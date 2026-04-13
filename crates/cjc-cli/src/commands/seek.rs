@@ -1,17 +1,32 @@
-//! `cjc seek` — Deterministic file and data discovery.
+//! `cjcl seek` — Deterministic file and data discovery.
 //!
 //! Recursively searches for files matching patterns with stable, sorted output.
 //! Supports:
-//! - Glob patterns (*.cjc, **/*.snap)
+//! - Glob patterns (*.cjcl, **/*.snap)
 //! - Content search within files (--contains)
 //! - Type filtering (--type cjc, snap, csv)
 //! - Size filtering (--min-size, --max-size)
+//! - Exclude patterns (--exclude)
+//! - Build artifact skipping (--ignore-build-artifacts)
+//! - Result limiting (--first N)
+//! - Sort modes (--sort size|name|modified)
+//! - SHA-256 hashing (--hash)
+//! - Manifest output (--manifest)
 //! - Deterministic output ordering (always sorted by path)
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::time::SystemTime;
 use crate::output::{self, OutputMode};
+
+/// Sort mode for seek results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortMode {
+    Name,
+    Size,
+    Modified,
+}
 
 pub struct SeekArgs {
     pub root: PathBuf,
@@ -23,6 +38,12 @@ pub struct SeekArgs {
     pub output: OutputMode,
     pub count_only: bool,
     pub max_depth: Option<usize>,
+    pub exclude: Vec<String>,
+    pub ignore_build_artifacts: bool,
+    pub first: Option<usize>,
+    pub sort: SortMode,
+    pub hash: bool,
+    pub manifest: bool,
 }
 
 impl Default for SeekArgs {
@@ -37,6 +58,12 @@ impl Default for SeekArgs {
             output: OutputMode::Color,
             count_only: false,
             max_depth: None,
+            exclude: Vec::new(),
+            ignore_build_artifacts: false,
+            first: None,
+            sort: SortMode::Name,
+            hash: false,
+            manifest: false,
         }
     }
 }
@@ -67,13 +94,38 @@ pub fn parse_args(args: &[String]) -> SeekArgs {
                 i += 1;
                 if i < args.len() { sa.max_depth = args[i].parse().ok(); }
             }
+            "--exclude" => {
+                i += 1;
+                if i < args.len() { sa.exclude.push(args[i].clone()); }
+            }
+            "--ignore-build-artifacts" => sa.ignore_build_artifacts = true,
+            "--first" => {
+                i += 1;
+                if i < args.len() { sa.first = args[i].parse().ok(); }
+            }
+            "--sort" => {
+                i += 1;
+                if i < args.len() {
+                    sa.sort = match args[i].as_str() {
+                        "size" => SortMode::Size,
+                        "modified" => SortMode::Modified,
+                        "name" => SortMode::Name,
+                        other => {
+                            eprintln!("error: unknown sort mode `{}` (expected: name, size, modified)", other);
+                            process::exit(1);
+                        }
+                    };
+                }
+            }
+            "--hash" => sa.hash = true,
+            "--manifest" => { sa.manifest = true; sa.hash = true; }
             "--count" => sa.count_only = true,
             "--plain" => sa.output = OutputMode::Plain,
             "--json" => sa.output = OutputMode::Json,
             "--color" => sa.output = OutputMode::Color,
             other if !other.starts_with('-') => positionals.push(other.to_string()),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc seek`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl seek`", other);
                 process::exit(1);
             }
         }
@@ -107,10 +159,15 @@ fn parse_size(s: &str) -> u64 {
     }
 }
 
+/// Directories to skip when --ignore-build-artifacts is set.
+const BUILD_ARTIFACT_DIRS: &[&str] = &["target", "node_modules", "__pycache__", ".git", "build"];
+
 struct SeekResult {
     path: String,
     size: u64,
+    modified: u64, // seconds since UNIX_EPOCH, 0 if unavailable
     match_line: Option<(usize, String)>, // line number + content for --contains
+    hash: Option<String>, // SHA-256 hex, computed when --hash is set
 }
 
 pub fn run(args: &[String]) {
@@ -119,11 +176,46 @@ pub fn run(args: &[String]) {
 
     seek_recursive(&sa.root, &sa, 0, &mut results);
 
-    // Deterministic sort by path
-    results.sort_by(|a, b| a.path.cmp(&b.path));
+    // Sort according to --sort mode (deterministic: secondary sort by path)
+    match sa.sort {
+        SortMode::Name => {
+            results.sort_by(|a, b| a.path.cmp(&b.path));
+        }
+        SortMode::Size => {
+            results.sort_by(|a, b| a.size.cmp(&b.size).then_with(|| a.path.cmp(&b.path)));
+        }
+        SortMode::Modified => {
+            results.sort_by(|a, b| a.modified.cmp(&b.modified).then_with(|| a.path.cmp(&b.path)));
+        }
+    }
+
+    // Apply --first limit BEFORE computing hashes (performance: only hash displayed files)
+    if let Some(n) = sa.first {
+        results.truncate(n);
+    }
+
+    // Compute hashes only for files that will be displayed
+    if sa.hash {
+        for r in results.iter_mut() {
+            let file_path = r.path.replace('/', std::path::MAIN_SEPARATOR_STR);
+            r.hash = fs::read(&file_path).ok().map(|data| {
+                let h = cjc_snap::hash::sha256(&data);
+                h.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+            });
+        }
+    }
 
     if sa.count_only {
         println!("{}", results.len());
+        return;
+    }
+
+    // --manifest mode: <hash> <size> <path> per line
+    if sa.manifest {
+        for r in &results {
+            let h = r.hash.as_deref().unwrap_or("????????????????????????????????????????????????????????????????");
+            println!("{} {} {}", h, r.size, r.path);
+        }
         return;
     }
 
@@ -133,6 +225,9 @@ pub fn run(args: &[String]) {
             for (i, r) in results.iter().enumerate() {
                 print!("  {{\"path\": \"{}\"", r.path);
                 print!(", \"size\": {}", r.size);
+                if let Some(ref h) = r.hash {
+                    print!(", \"hash\": \"{}\"", h);
+                }
                 if let Some((line, content)) = &r.match_line {
                     print!(", \"match_line\": {}, \"match_content\": \"{}\"",
                         line, content.replace('\\', "\\\\").replace('"', "\\\""));
@@ -148,7 +243,7 @@ pub fn run(args: &[String]) {
                 let display = if sa.output.use_color() {
                     let ext = Path::new(&r.path).extension().and_then(|e| e.to_str()).unwrap_or("");
                     let color = match ext {
-                        "cjc" => output::GREEN,
+                        "cjcl" => output::GREEN,
                         "snap" => output::CYAN,
                         "csv" | "tsv" | "json" => output::YELLOW,
                         _ => "",
@@ -158,7 +253,13 @@ pub fn run(args: &[String]) {
                     r.path.clone()
                 };
 
-                if let Some((line, content)) = &r.match_line {
+                if let Some(ref h) = r.hash {
+                    if let Some((line, content)) = &r.match_line {
+                        println!("{} {}:{}:{}", &h[..16], display, line, content.trim());
+                    } else {
+                        println!("{} {}", &h[..16], display);
+                    }
+                } else if let Some((line, content)) = &r.match_line {
                     println!("{}:{}:{}", display, line, content.trim());
                 } else {
                     println!("{}", display);
@@ -185,12 +286,37 @@ fn seek_recursive(dir: &Path, sa: &SeekArgs, depth: usize, results: &mut Vec<See
     for entry in entries {
         let path = entry.path();
         if path.is_dir() {
+            let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+            // --ignore-build-artifacts: skip known build directories
+            if sa.ignore_build_artifacts && BUILD_ARTIFACT_DIRS.contains(&dir_name) {
+                continue;
+            }
+
+            // --exclude: skip directories matching exclude patterns
+            if sa.exclude.iter().any(|pat| glob_match(pat, dir_name)) {
+                continue;
+            }
+
             seek_recursive(&path, sa, depth + 1, results);
             continue;
         }
 
         let meta = entry.metadata().ok();
         let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+
+        let modified = meta.as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+        // --exclude: skip files matching exclude patterns
+        if sa.exclude.iter().any(|pat| glob_match(pat, file_name)) {
+            continue;
+        }
 
         // Filter by type
         if let Some(ref ft) = sa.file_type {
@@ -226,7 +352,8 @@ fn seek_recursive(dir: &Path, sa: &SeekArgs, depth: usize, results: &mut Vec<See
             continue;
         }
 
-        results.push(SeekResult { path: display_path, size, match_line });
+        // Hash is computed lazily after --first limit is applied (see run())
+        results.push(SeekResult { path: display_path, size, modified, match_line, hash: None });
     }
 }
 
@@ -268,9 +395,9 @@ fn find_in_file(path: &Path, needle: &str) -> Option<(usize, String)> {
 }
 
 pub fn print_help() {
-    eprintln!("cjc seek — Deterministic file and data discovery");
+    eprintln!("cjcl seek — Deterministic file and data discovery");
     eprintln!();
-    eprintln!("Usage: cjc seek [path] [pattern] [flags]");
+    eprintln!("Usage: cjcl seek [path] [pattern] [flags]");
     eprintln!();
     eprintln!("Flags:");
     eprintln!("  -t, --type <ext>       Filter by extension (cjc, snap, csv, etc.)");
@@ -278,6 +405,12 @@ pub fn print_help() {
     eprintln!("  --min-size <size>      Minimum file size (e.g., 1kb, 10mb)");
     eprintln!("  --max-size <size>      Maximum file size");
     eprintln!("  --max-depth <N>        Maximum recursion depth");
+    eprintln!("  --exclude <glob>       Exclude files/dirs matching glob (repeatable)");
+    eprintln!("  --ignore-build-artifacts  Skip target/, node_modules/, __pycache__/, .git/, build/");
+    eprintln!("  --first <N>            Only return the first N results");
+    eprintln!("  --sort <mode>          Sort by: name (default), size, modified");
+    eprintln!("  --hash                 Compute and display SHA-256 hash per file");
+    eprintln!("  --manifest             Output manifest format: <hash> <size> <path>");
     eprintln!("  --count                Only print match count");
     eprintln!("  --plain                Plain text output");
     eprintln!("  --json                 JSON output");

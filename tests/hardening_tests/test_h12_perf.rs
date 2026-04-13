@@ -133,15 +133,15 @@ fn h12_perf_module_graph_build() {
     // Create 10 modules with imports
     let mut main_imports = String::new();
     for i in 0..10 {
-        let name = format!("mod{}.cjc", i);
+        let name = format!("mod{}.cjcl", i);
         let content = format!("fn mod{}_fn() -> i64 {{ {} }}", i, i);
         fs::write(dir.path().join(&name), content).unwrap();
         main_imports.push_str(&format!("import mod{}\n", i));
     }
     main_imports.push_str("let x = 1;");
-    fs::write(dir.path().join("main.cjc"), &main_imports).unwrap();
+    fs::write(dir.path().join("main.cjcl"), &main_imports).unwrap();
 
-    let entry = dir.path().join("main.cjc");
+    let entry = dir.path().join("main.cjcl");
     let start = Instant::now();
     let iters = 50;
     for _ in 0..iters {

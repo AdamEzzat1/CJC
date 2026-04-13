@@ -1,4 +1,4 @@
-//! `cjc emit` -- Dump intermediate representations at any pipeline stage.
+//! `cjcl emit` -- Dump intermediate representations at any pipeline stage.
 //!
 //! Emits AST, HIR, or MIR for a CJC source file. Useful for debugging
 //! compiler internals, understanding lowering transformations, and
@@ -37,7 +37,7 @@ impl Stage {
     }
 }
 
-/// Parsed arguments for `cjc emit`.
+/// Parsed arguments for `cjcl emit`.
 pub struct EmitArgs {
     pub file: String,
     pub stage: Stage,
@@ -82,20 +82,20 @@ pub fn parse_args(args: &[String]) -> EmitArgs {
             "--color" => ea.output = OutputMode::Color,
             other if !other.starts_with('-') => ea.file = other.to_string(),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc emit`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl emit`", other);
                 process::exit(1);
             }
         }
         i += 1;
     }
     if ea.file.is_empty() {
-        eprintln!("error: `cjc emit` requires a .cjc file argument");
+        eprintln!("error: `cjcl emit` requires a .cjcl file argument");
         process::exit(1);
     }
     ea
 }
 
-/// Entry point for `cjc emit`.
+/// Entry point for `cjcl emit`.
 pub fn run(args: &[String]) {
     let ea = parse_args(args);
 
@@ -523,9 +523,9 @@ fn format_mir_expr(expr: &cjc_mir::MirExpr) -> String {
 }
 
 pub fn print_help() {
-    eprintln!("cjc emit -- Dump intermediate representations at any pipeline stage");
+    eprintln!("cjcl emit -- Dump intermediate representations at any pipeline stage");
     eprintln!();
-    eprintln!("Usage: cjc emit <file.cjc> [flags]");
+    eprintln!("Usage: cjcl emit <file.cjcl> [flags]");
     eprintln!();
     eprintln!("Stages:");
     eprintln!("  --stage ast        Pretty-print the AST");

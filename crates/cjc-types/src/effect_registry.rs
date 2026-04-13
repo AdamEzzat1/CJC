@@ -1,18 +1,32 @@
-//! Effect Registry — Single source of truth for builtin function effects.
+//! Effect Registry -- single source of truth for builtin function effects.
 //!
-//! Maps every known builtin function name to its `EffectSet` flags. This
+//! Maps every known builtin function name to its [`EffectSet`] flags. This
 //! replaces the hardcoded allowlists in `nogc_verify.rs` and `escape.rs`
 //! with a single queryable registry.
 //!
-//! Classification rules:
-//! - PURE: no side effects, no allocation, deterministic
-//! - IO: prints to stdout, reads/writes files
-//! - ALLOC: creates new heap objects (String, Vec, Tensor, etc.)
-//! - GC: triggers garbage collection (gc_alloc, gc_collect)
-//! - NONDET: nondeterministic (random, clock, hash-order)
-//! - MUTATES: modifies its arguments in place
-//! - ARENA_OK: result can safely live on a FrameArena (non-escaping)
-//! - CAPTURES: may store/capture argument references beyond the call
+//! # Architecture
+//!
+//! The registry is built once via [`builtin_effects`] and cached in a
+//! thread-local for fast repeated lookups through [`lookup`]. The NoGC
+//! verifier, escape analyser, and optimiser all query this registry
+//! instead of maintaining their own lists.
+//!
+//! Builtins that are **not** registered are treated conservatively by
+//! consumers -- the NoGC verifier rejects them and the escape analyser
+//! assumes they may capture arguments.
+//!
+//! # Classification rules
+//!
+//! | Flag | Meaning |
+//! |------|---------|
+//! | `PURE` | No side effects, no allocation, deterministic |
+//! | `IO` | Prints to stdout, reads/writes files |
+//! | `ALLOC` | Creates new heap objects (String, Vec, Tensor, etc.) |
+//! | `GC` | Triggers garbage collection (`gc_alloc`, `gc_collect`) |
+//! | `NONDET` | Nondeterministic (random, clock, hash-order) |
+//! | `MUTATES` | Modifies its arguments in place |
+//! | `ARENA_OK` | Result can safely live on a `FrameArena` (non-escaping) |
+//! | `CAPTURES` | May store/capture argument references beyond the call |
 
 use std::collections::BTreeMap;
 
@@ -20,7 +34,27 @@ use super::EffectSet;
 
 /// Build the complete builtin effect registry.
 ///
-/// Returns a map from builtin name (as used in dispatch) to its effect flags.
+/// Construct a [`BTreeMap`] mapping every known builtin function name
+/// (as used in dispatch) to its [`EffectSet`] flags. The map is ordered
+/// deterministically (BTree, not Hash) to guarantee stable iteration.
+///
+/// # Returns
+///
+/// A `BTreeMap<&'static str, EffectSet>` covering all registered builtins.
+/// Builtins intentionally omitted (e.g. tidy materializing ops) are treated
+/// as unknown by consumers, which triggers conservative rejection in the
+/// NoGC verifier.
+///
+/// # Examples
+///
+/// ```
+/// use cjc_types::effect_registry::builtin_effects;
+/// use cjc_types::EffectSet;
+///
+/// let reg = builtin_effects();
+/// assert!(reg["sqrt"].is_pure());
+/// assert!(reg["gc_alloc"].has(EffectSet::GC));
+/// ```
 pub fn builtin_effects() -> BTreeMap<&'static str, EffectSet> {
     let mut m = BTreeMap::new();
 
@@ -674,8 +708,30 @@ pub fn builtin_effects() -> BTreeMap<&'static str, EffectSet> {
     m
 }
 
-/// Look up the effect set for a builtin. Returns `None` for unknown builtins
-/// (which should be treated conservatively).
+/// Look up the effect set for a builtin by name.
+///
+/// Use a thread-local cache of [`builtin_effects`] so the full registry is
+/// built only once per thread. Returns `None` for unknown builtins, which
+/// callers should treat conservatively (e.g. the NoGC verifier rejects them).
+///
+/// # Arguments
+///
+/// * `name` -- The builtin function name as it appears in dispatch (e.g.
+///   `"sqrt"`, `"Tensor.zeros"`, `"gc_alloc"`).
+///
+/// # Returns
+///
+/// `Some(EffectSet)` if the builtin is registered, `None` otherwise.
+///
+/// # Examples
+///
+/// ```
+/// use cjc_types::effect_registry::lookup;
+/// use cjc_types::EffectSet;
+///
+/// assert!(lookup("sqrt").unwrap().is_pure());
+/// assert!(lookup("unknown_fn").is_none());
+/// ```
 pub fn lookup(name: &str) -> Option<EffectSet> {
     // Use a thread-local cache to avoid rebuilding the map every time.
     // In a single-threaded interpreter this is fine.
@@ -685,23 +741,57 @@ pub fn lookup(name: &str) -> Option<EffectSet> {
     REGISTRY.with(|r| r.get(name).copied())
 }
 
-/// Returns true if the given builtin is known to trigger GC.
+/// Return `true` if the given builtin is known to trigger garbage collection.
+///
+/// Only `gc_alloc` and `gc_collect` carry the `GC` flag. Unknown builtins
+/// return `false` (i.e. this is **not** conservative -- use [`is_safe_builtin`]
+/// when you need a conservative "safe for NoGC" check).
+///
+/// # Arguments
+///
+/// * `name` -- Builtin function name.
 pub fn is_gc_builtin(name: &str) -> bool {
     lookup(name).map_or(false, |e| e.has(EffectSet::GC))
 }
 
-/// Returns true if the given builtin is known and does NOT trigger GC.
-/// Unknown builtins return false (conservative).
+/// Return `true` if the given builtin is known **and** does NOT trigger GC.
+///
+/// Unknown builtins return `false`, making this the conservative choice for
+/// the NoGC verifier: if a builtin is not in the registry, it is assumed
+/// unsafe.
+///
+/// # Arguments
+///
+/// * `name` -- Builtin function name.
 pub fn is_safe_builtin(name: &str) -> bool {
     lookup(name).map_or(false, |e| !e.has(EffectSet::GC))
 }
 
-/// Returns true if the given builtin may capture/store its arguments.
+/// Return `true` if the given builtin may capture or store references to its
+/// arguments beyond the lifetime of the call.
+///
+/// Unknown builtins return `true` (conservative), because the escape analyser
+/// must assume the worst when it cannot prove otherwise.
+///
+/// # Arguments
+///
+/// * `name` -- Builtin function name.
 pub fn may_capture(name: &str) -> bool {
     lookup(name).map_or(true, |e| e.has(EffectSet::CAPTURES))
 }
 
-/// Returns true if the given builtin is nondeterministic.
+/// Return `true` if the given builtin is nondeterministic.
+///
+/// Nondeterministic builtins include RNG-based functions (`Tensor.randn`,
+/// `categorical_sample`), wall-clock queries (`clock`, `datetime_now`), and
+/// hash-order-dependent operations (`n_distinct`).
+///
+/// Unknown builtins return `false` -- callers that need conservative
+/// nondeterminism tracking should check `lookup(name).is_none()` separately.
+///
+/// # Arguments
+///
+/// * `name` -- Builtin function name.
 pub fn is_nondeterministic(name: &str) -> bool {
     lookup(name).map_or(false, |e| e.has(EffectSet::NONDET))
 }

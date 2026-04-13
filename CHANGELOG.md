@@ -1,8 +1,148 @@
 # Changelog
 
-All notable changes to CJC will be documented in this file.
+All notable changes to CJC-Lang (Computational Jacobian Core) will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
+
+## [0.1.4] — 2026-04-06
+
+### Rebrand: CJC → CJC-Lang
+- **Project renamed from CJC to CJC-Lang** — the acronym still stands for Computational Jacobian Core
+- **CLI command changed from `cjc` to `cjcl`** — all 30 commands now use `cjcl` prefix (e.g., `cjcl run`, `cjcl flow`)
+- **File extension changed from `.cjc` to `.cjcl`** — source files, test fixtures, and examples all updated
+- **Install command: `cargo install cjc-lang`** — installs the `cjcl` binary
+- **Package name on crates.io: `cjc-lang`** (previously `cjc`)
+- All documentation, blog posts, and help text updated to reflect the new name
+
+## [0.1.3] — 2026-04-05
+
+### Install Fix
+- **`cargo install cjc` now works** — root package now includes binary entry point (v0.1.2 was library-only on crates.io)
+- `cjc-cli` refactored to mixed lib+bin crate, exposing `cli_main()` for the root binary
+
+## [0.1.2] — 2026-04-05
+
+### Data Science Foundation, Statistical Completeness & Hardening Phase
+
+#### Hardening & Safety Fixes
+- **Eliminated 28 `.unwrap()` calls on GradGraph downcasts** — 14 in `cjc-eval`, 14 in `cjc-mir-exec`; all converted to proper `ok_or_else` error propagation with descriptive `EvalError::Runtime` / `MirExecError` messages
+- **Replaced `HashSet` with `BTreeSet`** in `cjc-data/tidy_dispatch.rs` — eliminates last non-deterministic iteration order in the codebase
+
+#### ML Infrastructure (3 new primitives)
+- **`embedding(weights, indices)` builtin** — lookup rows from a weight matrix by index; wired in all three places (runtime, eval, mir-exec)
+- **`avgpool2d(kh, kw, sh, sw)` tensor method** — 2D average pooling with configurable kernel and stride; complementary to existing `maxpool2d`
+- **`batch_indices(dataset_size, batch_size, seed)` builtin** — deterministic mini-batch index generation using SplitMix64; returns array of `[start, end]` pairs
+
+#### New Test Suites (5 files)
+- **`test_mir_exec_coverage.rs`** — 20+ parity tests covering MIR executor edge cases
+- **`test_parity_stress.rs`** — 50-seed stress tests across program templates
+- **`test_ml_infrastructure.rs`** — embedding, avgpool2d, and batch_indices tests with parity verification
+- **`test_type_system_props.rs`** — property-based tests (proptest) for type system invariants
+- **`test_mir_fuzz.rs`** — fuzz testing for MIR pipeline robustness
+
+#### Language Ergonomic Gaps (6 features)
+- **`tanh(x)` standalone builtin** — unified scalar (Float/Int) and Tensor support; `tanh_scalar` retained as alias
+- **`relu(x)` standalone builtin** — scalar (Float returns max(0,x), Int returns max(0,x)) and Tensor support
+- **`reshape(tensor, shape)` builtin** — reshape tensors to new dimensions (uses existing `Tensor::reshape`)
+- **`as` type casting** — `x as f64`, `x as i64`, `x as bool`, `x as String`; desugars to builtin calls in HIR; high precedence (like Rust); supports chained casts (`x as i64 as f64`)
+- **Tuple field access** — `t.0`, `t.1`, etc. for direct tuple element access without `match` destructuring; works in both eval and mir-exec
+- **`tensor_slice(t, starts, ends)` and `slice(t, dim, start, end)` builtins** — zero-copy tensor slicing along all dims or a single dim
+- **`int()` / `float()` accept Bool** — `int(true) → 1`, `float(false) → 0.0` (enables `as` casting from bool)
+- **40 new integration tests** in `test_feature_gaps.rs` — all with eval/mir-exec parity verification and determinism checks
+
+#### NA Type (Missing Values)
+- **`NA` literal** across full compiler pipeline (lexer, parser, AST, HIR, MIR, eval, mir-exec, snap, types)
+- **SQL-style NA semantics:** `NA == NA → false`, `NA != NA → true`, arithmetic propagation (`NA + x → NA`)
+- **Logical propagation:** `NA && true → NA`, `NA || false → NA`
+- **Builtins:** `is_na(val)`, `drop_na(arr)` for NA detection and removal
+- **`coalesce()` upgraded** to support both scalar mode (`coalesce(NA, 42) → 42`) and array mode
+- **Snap serialization:** `TAG_NA = 0x18` for binary round-trip, JSON encodes as `null`
+
+#### Array Higher-Order Functions
+- **11 new HOFs** implemented in BOTH executors (eval + mir-exec) for full parity:
+  - `range(end)`, `range(start, end)`, `range(start, end, step)` — integer range generation
+  - `array_map(arr, fn)` — transform each element
+  - `array_filter(arr, fn)` — keep elements matching predicate
+  - `array_reduce(arr, init, fn)` — fold with accumulator
+  - `array_any(arr, fn)` / `array_all(arr, fn)` — short-circuit predicates
+  - `array_find(arr, fn)` — first match or `NA`
+  - `array_enumerate(arr)` — index-value tuples
+  - `array_zip(arr_a, arr_b)` — pairwise tuples
+  - `array_sort_by(arr, key_fn)` — deterministic key-based sort
+  - `array_unique(arr)` — deduplicate preserving order
+- All HOFs support both named functions and closures with captured environments
+
+#### Function-as-Value
+- **Named function references:** `fn double(x: i64) -> i64 { ... }` can be passed as `array_map(arr, double)`
+- Eval executor now resolves function names to `Value::Fn` when used as expressions (mir-exec already supported this)
+
+#### Categorical / Factor Data
+- **6 new builtins** for categorical data manipulation:
+  - `as_factor(string_arr)` — encode string array to Factor struct (levels + codes)
+  - `factor_levels(f)` / `factor_codes(f)` — extract components
+  - `fct_relevel(f, new_order)` — reorder factor levels
+  - `fct_lump(f, n)` — lump rare levels into "Other"
+  - `fct_count(f)` — count observations per level
+- Factor represented as `Struct { name: "Factor", levels: [...], codes: [...] }`
+- Deterministic: level order preserved from first appearance, BTreeMap for frequency counting
+
+#### DataFrame Inspection Methods
+- **7 new TidyView methods** for data exploration:
+  - `.head(n)` / `.tail(n)` — formatted first/last N rows (default 10)
+  - `.shape()` — returns `(nrows, ncols)` tuple
+  - `.columns()` — alias for column_names, returns string array
+  - `.dtypes()` — returns Struct mapping column names to type strings
+  - `.describe()` — statistical summary (count, mean, std, min, 25%, 50%, 75%, max for numeric; count, unique, top for string/categorical)
+  - `.glimpse()` — transposed column view with types and first 8 values
+- `describe()` uses Kahan summation for numerically stable mean/std computation
+
+#### Tests
+- **65 new integration tests** across 3 test files:
+  - `test_na_type.rs` — 43 tests: NA semantics, array HOFs, categorical builtins, parity + determinism
+  - `test_dataframe_inspect.rs` — 12 tests: shape, columns, dtypes, head, tail, describe, glimpse, determinism
+  - `test_e2e_pipelines.rs` — 10 tests: realistic data science workflows (survey cleaning, feature engineering, category encoding, NA-aware aggregation, paired data, sorting, functional composition, mixed types, data validation, determinism stress)
+- All tests verify eval/mir-exec **parity** (identical output from both executors)
+- All tests verify **determinism** (repeated runs produce bit-identical output)
+- **All 6,500+ existing tests continue to pass with zero regressions** (4,780 in `cargo test` summary lines)
+
+#### CLI Enhancements
+- **`cjc eval "expr"` command** — evaluate single expressions from the command line
+- **`--format` flag** — uniform `--format plain|json|csv` across `cjc run` and `cjc eval`
+- **Differentiated exit codes** — 0=success, 1=runtime, 2=parse, 3=type/check, 4=parity
+
+#### Statistical Tests (7 new)
+- **Normality tests:** `jarque_bera(data)`, `anderson_darling(data)`, `ks_test(data)` — test if data follows normal distribution
+- **Variance tests:** `levene_test(groups...)`, `bartlett_test(groups...)` — test equality of variances
+- **Effect sizes:** `cohens_d(x, y)`, `eta_squared(groups...)`, `cramers_v(table, r, c)` — measure effect magnitude
+- All tests use Kahan summation for numerical stability
+- Full chi-squared survival function with regularized incomplete gamma (Lanczos approximation)
+
+#### Sampling & Cross-Validation (7 builtins)
+- **`latin_hypercube(n, dims, seed)`** — space-filling quasi-random sampling (already existed, now exposed)
+- **`sobol_sequence(n, dims)`** — low-discrepancy sequence for numerical integration
+- **`train_test_split(n, test_frac, seed)`** — deterministic train/test splitting
+- **`kfold_indices(n, k, seed)`** — k-fold cross-validation index generation
+- **`bootstrap(data, n_resamples, stat_fn, seed)`** — bootstrap CI with point estimate, 95% CI, and SE
+- **`permutation_test(x, y, n_perms, seed)`** — non-parametric permutation test for group differences
+- **`stratified_split(labels, test_frac, seed)`** — stratified train/test split preserving class proportions
+- All samplers use deterministic seeded shuffling (Fisher-Yates)
+
+#### REPL Enhancements
+- **`:vars`** — alias for `:env`, show current variable bindings
+- **`:time <expr>`** — time an expression and display elapsed duration
+- **`:describe <expr>`** — statistical summary (count, mean, std, min, 25%, 50%, 75%, max) for numeric arrays
+- **`:save <file>`** — save REPL session to file
+- **`:load <file>`** — load and execute a CJC source file in the REPL
+
+#### Additional Tests
+- **26 new integration tests** in `test_phase3_stats_sampling.rs`:
+  - Normality tests with known normal and skewed data
+  - Effect size validation (large/small/no effect)
+  - Variance test correctness
+  - Sampling shape and determinism verification
+  - Bootstrap CI and permutation test validation
+  - Stratified split class proportion preservation
+  - All tests verify eval/mir-exec parity
 
 ## [0.1.1] — 2026-04-02
 

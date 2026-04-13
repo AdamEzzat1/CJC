@@ -3,7 +3,7 @@
 //! Provides:
 //! - Raw terminal mode for character-by-character input
 //! - Arrow key navigation (left/right within line, up/down for history)
-//! - History stored in Vec<String>, saved to ~/.cjc_history
+//! - History stored in Vec<String>, saved to ~/.cjcl_history
 //! - Multi-line input: lines ending with `{` or `\` continue on next line
 //! - Home/End key support
 //! - Backspace and Delete
@@ -38,7 +38,7 @@ impl LineEditor {
     pub fn new_with_color(use_color: bool) -> Self {
         let history_file = dirs_home().map(|h| {
             let mut p = h;
-            p.push_str("/.cjc_history");
+            p.push_str("/.cjcl_history");
             p
         });
 

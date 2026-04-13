@@ -1,0 +1,111 @@
+// ═══════════════════════════════════════════════════════════════════════
+// Example 4: 2D Convolutional Neural Network — Image Feature Extraction
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Demonstrates CJC's conv2d + maxpool2d for image-like feature extraction.
+// Processes a 1×1×8×8 "image" through conv → relu → maxpool pipeline.
+//
+// Architecture:
+//   Input: [1, 1, 8, 8] (batch=1, channels=1, 8×8)
+//   Conv2D: 2 filters of size 3×3, stride=1 → [1, 2, 6, 6]
+//   ReLU activation
+//   MaxPool2D: 2×2 → [1, 2, 3, 3]
+//   Flatten → [1, 18]
+//   Dense → [1, 2] (2-class scores)
+// ═══════════════════════════════════════════════════════════════════════
+
+fn main() {
+    print("2D CNN — Image Feature Extraction");
+    print("==================================");
+
+    // ── Create a simple 8×8 "image" with a cross pattern ──────────
+    let img_data = [];
+    let r = 0;
+    while r < 8 {
+        let c = 0;
+        while c < 8 {
+            let val = 0.0;
+            if r == 3 || r == 4 {
+                val = 1.0;  // horizontal bar
+            }
+            if c == 3 || c == 4 {
+                val = 1.0;  // vertical bar
+            }
+            img_data = array_push(img_data, val);
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    let input = Tensor.from_vec(img_data, [1, 1, 8, 8]);  // NCHW
+    print("Input shape: " + to_string(input.shape) + " (NCHW)");
+
+    // ── Conv2D: 2 filters of 3×3 ──────────────────────────────────
+    // Filter 1: horizontal edge detector
+    // Filter 2: vertical edge detector
+    let filter_data = [
+         1.0,  1.0,  1.0,
+         0.0,  0.0,  0.0,
+        -1.0, -1.0, -1.0,
+
+         1.0,  0.0, -1.0,
+         1.0,  0.0, -1.0,
+         1.0,  0.0, -1.0
+    ];
+    let filters = Tensor.from_vec(filter_data, [2, 1, 3, 3]);  // [C_out, C_in, kH, kW]
+    let conv_bias = Tensor.zeros([2]);
+
+    let conv_out = input.conv2d(filters, conv_bias);
+    print("After Conv2D: " + to_string(conv_out.shape));
+
+    // ── ReLU ───────────────────────────────────────────────────────
+    let relu_out = conv_out.relu();
+    print("After ReLU: " + to_string(relu_out.shape));
+
+    // ── MaxPool2D: 2×2 ────────────────────────────────────────────
+    let pool_out = relu_out.maxpool2d(2, 2);
+    print("After MaxPool2D(2,2): " + to_string(pool_out.shape));
+
+    // ── Flatten for dense layer ────────────────────────────────────
+    // pool_out is [1, 2, 3, 3] → flatten to [1, 18]
+    let flat = reshape(pool_out, [1, 18]);
+    print("After Flatten: " + to_string(flat.shape));
+
+    // ── Dense layer: 18 → 2 (classification scores) ───────────────
+    let W_fc = Tensor.randn([18, 2]) * 0.1;
+    let b_fc = Tensor.zeros([1, 2]);
+    let logits = matmul(flat, W_fc) + b_fc;
+    let probs = logits.softmax();
+
+    print("");
+    print("Classification logits: ["
+          + to_string(round(logits.get([0, 0]) * 1000.0) / 1000.0) + ", "
+          + to_string(round(logits.get([0, 1]) * 1000.0) / 1000.0) + "]");
+    print("Softmax probabilities: ["
+          + to_string(round(probs.get([0, 0]) * 1000.0) / 1000.0) + ", "
+          + to_string(round(probs.get([0, 1]) * 1000.0) / 1000.0) + "]");
+
+    // ── Print feature map statistics ───────────────────────────────
+    print("");
+    print("Feature map statistics:");
+    let ch = 0;
+    while ch < 2 {
+        let sum = 0.0;
+        let max_val = -999.0;
+        let r = 0;
+        while r < 3 {
+            let c = 0;
+            while c < 3 {
+                let v = pool_out.get([0, ch, r, c]);
+                sum = sum + v;
+                if v > max_val { max_val = v; }
+                c = c + 1;
+            }
+            r = r + 1;
+        }
+        let filter_names = ["Horizontal edges", "Vertical edges"];
+        print("  Channel " + to_string(ch) + " (" + filter_names[ch] + "): "
+              + "mean=" + to_string(round(sum / 9.0 * 100.0) / 100.0)
+              + "  max=" + to_string(round(max_val * 100.0) / 100.0));
+        ch = ch + 1;
+    }
+}

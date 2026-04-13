@@ -1,8 +1,8 @@
-//! `cjc forge` — Content-addressable pipeline runner.
+//! `cjcl forge` — Content-addressable pipeline runner.
 //!
 //! Executes a CJC program and captures its output as a content-addressable
 //! artifact identified by a SHA-256 hash. Supports:
-//! - Running .cjc files with deterministic seed
+//! - Running .cjcl files with deterministic seed
 //! - Capturing stdout as an artifact
 //! - Computing SHA-256 hash of output
 //! - Storing artifacts in a local cache directory (.cjc-forge/)
@@ -20,7 +20,7 @@ use crate::output::{self, OutputMode};
 
 const FORGE_DIR: &str = ".cjc-forge";
 
-/// Parsed arguments for `cjc forge`.
+/// Parsed arguments for `cjcl forge`.
 pub struct ForgeArgs {
     pub action: ForgeAction,
     pub seed: u64,
@@ -31,7 +31,7 @@ pub struct ForgeArgs {
 
 #[derive(Debug, Clone)]
 pub enum ForgeAction {
-    /// Run a .cjc file and store its output as a content-addressed artifact.
+    /// Run a .cjcl file and store its output as a content-addressed artifact.
     Run { file: PathBuf },
     /// Verify that running a file produces the expected hash.
     Verify { file: PathBuf, expected_hash: String },
@@ -87,7 +87,7 @@ pub fn parse_args(args: &[String]) -> ForgeArgs {
             "clean" if positionals.is_empty() => positionals.push("clean".to_string()),
             other if !other.starts_with('-') => positionals.push(other.to_string()),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc forge`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl forge`", other);
                 process::exit(1);
             }
         }
@@ -102,14 +102,14 @@ pub fn parse_args(args: &[String]) -> ForgeArgs {
     match positionals[0].as_str() {
         "run" => {
             if positionals.len() < 2 {
-                eprintln!("error: `cjc forge run` requires a .cjc file argument");
+                eprintln!("error: `cjcl forge run` requires a .cjcl file argument");
                 process::exit(1);
             }
             fa.action = ForgeAction::Run { file: PathBuf::from(&positionals[1]) };
         }
         "verify" => {
             if positionals.len() < 3 {
-                eprintln!("error: `cjc forge verify` requires <file> <expected_hash>");
+                eprintln!("error: `cjcl forge verify` requires <file> <expected_hash>");
                 process::exit(1);
             }
             fa.action = ForgeAction::Verify {
@@ -120,7 +120,7 @@ pub fn parse_args(args: &[String]) -> ForgeArgs {
         "list" => fa.action = ForgeAction::List,
         "show" => {
             if positionals.len() < 2 {
-                eprintln!("error: `cjc forge show` requires a hash prefix");
+                eprintln!("error: `cjcl forge show` requires a hash prefix");
                 process::exit(1);
             }
             fa.action = ForgeAction::Show { hash_prefix: positionals[1].clone() };
@@ -144,7 +144,7 @@ struct Artifact {
     size: u64,
 }
 
-/// Entry point for `cjc forge`.
+/// Entry point for `cjcl forge`.
 pub fn run(args: &[String]) {
     let fa = parse_args(args);
 
@@ -453,14 +453,14 @@ fn parse_artifact_meta(path: &Path) -> Option<Artifact> {
 }
 
 pub fn print_help() {
-    eprintln!("cjc forge — Content-addressable pipeline runner");
+    eprintln!("cjcl forge — Content-addressable pipeline runner");
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  cjc forge run <file.cjc>              Run and store output artifact");
-    eprintln!("  cjc forge verify <file.cjc> <hash>    Verify output matches expected hash");
-    eprintln!("  cjc forge list                        List cached artifacts");
-    eprintln!("  cjc forge show <hash-prefix>          Show artifact details");
-    eprintln!("  cjc forge clean                       Remove all cached artifacts");
+    eprintln!("  cjcl forge run <file.cjcl>              Run and store output artifact");
+    eprintln!("  cjcl forge verify <file.cjcl> <hash>    Verify output matches expected hash");
+    eprintln!("  cjcl forge list                        List cached artifacts");
+    eprintln!("  cjcl forge show <hash-prefix>          Show artifact details");
+    eprintln!("  cjcl forge clean                       Remove all cached artifacts");
     eprintln!();
     eprintln!("Flags:");
     eprintln!("  --seed <N>            RNG seed (default: 42)");

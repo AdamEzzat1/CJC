@@ -1,0 +1,9 @@
+fn main() {
+    let x: i64 = 0;
+    let i: i64 = 0;
+    while i < 100 {
+        x = x + i;
+        i = i + 1;
+    }
+    print(x);
+}

@@ -1,21 +1,48 @@
 //! Comprehensive error code taxonomy for CJC diagnostics.
 //!
-//! Error code scheme (Rust+Elm inspired):
-//! - E0xxx: Lexer errors
-//! - E1xxx: Parser errors
-//! - E2xxx: Type errors
-//! - E3xxx: Borrow/Ownership errors
-//! - E4xxx: Effect errors (NoGC violations, purity violations)
-//! - E5xxx: Name resolution errors
-//! - E6xxx: Generics/Trait errors
-//! - E7xxx: MIR/Internal compiler errors
-//! - E8xxx: Runtime errors
-//! - E9xxx: Module system errors
-//! - W0xxx: Warnings
+//! Every diagnostic emitted by the CJC compiler carries a typed [`ErrorCode`]
+//! that identifies the error category and specific condition. Codes follow a
+//! Rust+Elm-inspired numbering scheme:
+//!
+//! | Range    | Category                                  |
+//! |----------|-------------------------------------------|
+//! | E0xxx    | Lexer errors                              |
+//! | E06xx    | Snap (serialization) errors                |
+//! | E1xxx    | Parser errors                             |
+//! | E2xxx    | Type errors                               |
+//! | E3xxx    | Borrow / ownership errors                 |
+//! | E4xxx    | Effect errors (NoGC, purity violations)   |
+//! | E5xxx    | Name resolution errors                    |
+//! | E6xxx    | Generics / trait errors                   |
+//! | E7xxx    | MIR / internal compiler errors            |
+//! | E8xxx    | Runtime errors                            |
+//! | E9xxx    | Module system errors                      |
+//! | W0xxx    | Warnings                                  |
+//!
+//! Each variant carries a default message template (via
+//! [`ErrorCode::message_template`]), a [`Severity`] (via
+//! [`ErrorCode::severity`]), and a human-readable category name (via
+//! [`ErrorCode::category`]).
 
 use super::Severity;
 
 /// A typed error code covering the entire CJC compiler pipeline.
+///
+/// Each variant maps to a unique string representation (e.g., `"E0001"`),
+/// a default message template, a [`Severity`], and a category name.
+/// Use [`DiagnosticBuilder::new`](super::DiagnosticBuilder::new) to construct
+/// diagnostics from an `ErrorCode`.
+///
+/// # Examples
+///
+/// ```
+/// use cjc_diag::ErrorCode;
+///
+/// let code = ErrorCode::E2001;
+/// assert_eq!(code.code_str(), "E2001");
+/// assert_eq!(code.message_template(), "type mismatch");
+/// assert_eq!(code.category(), "type");
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorCode {
     // ── Lexer errors (E0xxx) ──────────────────────────────────────────
@@ -208,7 +235,19 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
-    /// Returns the string representation (e.g., "E0001", "W0001").
+    /// Returns the canonical string representation of this error code.
+    ///
+    /// The format is a one-letter prefix (`E` for errors, `W` for warnings)
+    /// followed by a four-digit number (e.g., `"E0001"`, `"W0001"`).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cjc_diag::ErrorCode;
+    ///
+    /// assert_eq!(ErrorCode::E0001.code_str(), "E0001");
+    /// assert_eq!(ErrorCode::W0001.code_str(), "W0001");
+    /// ```
     pub fn code_str(&self) -> &'static str {
         match self {
             // Lexer
@@ -308,7 +347,19 @@ impl ErrorCode {
         }
     }
 
-    /// Returns the default message template for this error code.
+    /// Returns the default human-readable message template for this error code.
+    ///
+    /// [`DiagnosticBuilder`](super::DiagnosticBuilder) uses this as the
+    /// diagnostic message unless overridden via
+    /// [`DiagnosticBuilder::message`](super::DiagnosticBuilder::message).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cjc_diag::ErrorCode;
+    ///
+    /// assert_eq!(ErrorCode::E0002.message_template(), "unterminated string literal");
+    /// ```
     pub fn message_template(&self) -> &'static str {
         match self {
             // Lexer
@@ -408,7 +459,19 @@ impl ErrorCode {
         }
     }
 
-    /// Returns the severity for this error code.
+    /// Returns the [`Severity`] for this error code.
+    ///
+    /// All `W0xxx` codes map to [`Severity::Warning`]; every other code maps
+    /// to [`Severity::Error`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cjc_diag::{ErrorCode, Severity};
+    ///
+    /// assert_eq!(ErrorCode::E0001.severity(), Severity::Error);
+    /// assert_eq!(ErrorCode::W0001.severity(), Severity::Warning);
+    /// ```
     pub fn severity(&self) -> Severity {
         match self {
             ErrorCode::W0001
@@ -420,7 +483,22 @@ impl ErrorCode {
         }
     }
 
-    /// Returns the category name for this error code.
+    /// Returns a human-readable category name for this error code.
+    ///
+    /// Categories are derived from the numeric prefix of the code string
+    /// (e.g., `"lexer"` for E0xxx, `"parser"` for E1xxx). Snap errors
+    /// (E06xx) are distinguished from other E0xxx codes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cjc_diag::ErrorCode;
+    ///
+    /// assert_eq!(ErrorCode::E0001.category(), "lexer");
+    /// assert_eq!(ErrorCode::E0601.category(), "snap");
+    /// assert_eq!(ErrorCode::E2001.category(), "type");
+    /// assert_eq!(ErrorCode::W0003.category(), "warning");
+    /// ```
     pub fn category(&self) -> &'static str {
         let code = self.code_str();
         if code.starts_with("W") {

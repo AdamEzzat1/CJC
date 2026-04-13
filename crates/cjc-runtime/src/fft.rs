@@ -7,8 +7,24 @@
 
 use std::f64::consts::PI;
 
-/// Cooley-Tukey radix-2 FFT. Input length must be power of 2.
-/// Returns Vec of (re, im) pairs.
+/// Compute the Cooley-Tukey radix-2 FFT in-place.
+///
+/// # Arguments
+///
+/// * `data` - Input signal as `(re, im)` pairs. Length **must** be a power of 2.
+///
+/// # Returns
+///
+/// Frequency-domain representation as `Vec<(f64, f64)>` of `(re, im)` pairs.
+///
+/// # Panics
+///
+/// Panics if `data.len()` is not a power of 2.
+///
+/// # Algorithm
+///
+/// Iterative radix-2 decimation-in-time with bit-reversal permutation followed
+/// by butterfly stages. All twiddle factors are computed in fixed order.
 pub fn fft(data: &[(f64, f64)]) -> Vec<(f64, f64)> {
     let n = data.len();
     assert!(n.is_power_of_two(), "FFT: input length must be power of 2, got {n}");
@@ -46,7 +62,8 @@ pub fn fft(data: &[(f64, f64)]) -> Vec<(f64, f64)> {
     buf
 }
 
-/// Inverse FFT.
+/// Compute the inverse FFT by conjugating, applying [`fft`], then conjugating
+/// and scaling by `1/N`.
 pub fn ifft(data: &[(f64, f64)]) -> Vec<(f64, f64)> {
     let n = data.len();
     // Conjugate input
@@ -62,8 +79,10 @@ pub fn ifft(data: &[(f64, f64)]) -> Vec<(f64, f64)> {
     result
 }
 
-/// Real-valued FFT: input is real, output is complex.
-/// Zero-pads to next power of 2 if needed.
+/// Compute the FFT of a real-valued signal.
+///
+/// Automatically zero-pads to the next power of 2 if `data.len()` is not
+/// already a power of 2.
 pub fn rfft(data: &[f64]) -> Vec<(f64, f64)> {
     let n = next_power_of_2(data.len());
     let mut complex_data: Vec<(f64, f64)> = Vec::with_capacity(n);
@@ -74,7 +93,7 @@ pub fn rfft(data: &[f64]) -> Vec<(f64, f64)> {
     fft(&complex_data)
 }
 
-/// Power spectral density: |FFT(x)|^2.
+/// Compute the power spectral density: `|FFT(x)|^2` for each frequency bin.
 pub fn psd(data: &[f64]) -> Vec<f64> {
     let spectrum = rfft(data);
     spectrum.iter().map(|&(r, i)| r * r + i * i).collect()
@@ -84,6 +103,7 @@ pub fn psd(data: &[f64]) -> Vec<f64> {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Reverse the lowest `bits` bits of `x`.
 fn bit_reverse(mut x: usize, bits: usize) -> usize {
     let mut result = 0;
     for _ in 0..bits {
@@ -93,10 +113,12 @@ fn bit_reverse(mut x: usize, bits: usize) -> usize {
     result
 }
 
+/// Multiply two complex numbers represented as `(re, im)` tuples.
 fn complex_mul(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
     (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0)
 }
 
+/// Return the smallest power of 2 that is >= `n`.
 fn next_power_of_2(n: usize) -> usize {
     let mut p = 1;
     while p < n { p <<= 1; }
@@ -135,8 +157,12 @@ pub fn blackman_window(n: usize) -> Vec<f64> {
 // Phase B6: Arbitrary-length FFT (Bluestein's algorithm)
 // ---------------------------------------------------------------------------
 
-/// Arbitrary-length FFT using Bluestein's algorithm (chirp-z transform).
-/// Works for ANY input length N (not just powers of 2).
+/// Compute the FFT for an arbitrary-length signal using Bluestein's chirp-z
+/// algorithm.
+///
+/// Delegates to [`fft`] when the input length is already a power of 2.
+/// For non-power-of-2 lengths, the signal is convolved with a chirp sequence
+/// via zero-padded radix-2 FFTs.
 pub fn fft_arbitrary(data: &[(f64, f64)]) -> Vec<(f64, f64)> {
     let n = data.len();
     if n == 0 { return vec![]; }
@@ -189,8 +215,14 @@ pub fn fft_arbitrary(data: &[(f64, f64)]) -> Vec<(f64, f64)> {
 // Phase B6: 2D FFT
 // ---------------------------------------------------------------------------
 
-/// 2D FFT: apply 1D FFT along rows, then along columns.
-/// Both rows and cols must be powers of 2.
+/// Compute the 2-D FFT by applying 1-D [`fft`] along rows then along columns.
+///
+/// Both `rows` and `cols` must be powers of 2.
+///
+/// # Errors
+///
+/// Returns `Err` if `data.len() != rows * cols` or dimensions are not powers
+/// of 2.
 pub fn fft_2d(data: &[(f64, f64)], rows: usize, cols: usize) -> Result<Vec<(f64, f64)>, String> {
     if data.len() != rows * cols {
         return Err(format!("fft_2d: expected {} elements, got {}", rows * cols, data.len()));
@@ -219,7 +251,7 @@ pub fn fft_2d(data: &[(f64, f64)], rows: usize, cols: usize) -> Result<Vec<(f64,
     Ok(result)
 }
 
-/// 2D inverse FFT.
+/// Compute the 2-D inverse FFT by applying 1-D [`ifft`] along rows then columns.
 pub fn ifft_2d(data: &[(f64, f64)], rows: usize, cols: usize) -> Result<Vec<(f64, f64)>, String> {
     if data.len() != rows * cols {
         return Err(format!("ifft_2d: expected {} elements, got {}", rows * cols, data.len()));

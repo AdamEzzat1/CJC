@@ -21,10 +21,16 @@ use crate::{
 // Report types
 // ---------------------------------------------------------------------------
 
-/// Severity of a validation finding.
+/// Severity level of a validation finding.
+///
+/// Errors indicate structurally invalid ASTs that would cause downstream
+/// compilation failures. Warnings indicate suspicious but technically valid
+/// patterns (e.g. unreachable code).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValidationSeverity {
+    /// A suspicious pattern that does not prevent compilation.
     Warning,
+    /// A structural error that must be fixed before lowering.
     Error,
 }
 

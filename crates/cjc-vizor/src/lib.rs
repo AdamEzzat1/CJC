@@ -25,22 +25,39 @@
 //! p.save("plot.svg")
 //! ```
 
+/// Semantic annotations (text, regression, CI, p-value, etc.).
 pub mod annotation;
+/// BMP raster export (uncompressed, zero-dependency).
 pub mod bmp;
+/// RGBA color types, hex parsing, and categorical palette.
 pub mod color;
+/// CJC language dispatch: maps builtin/method calls to Vizor API.
 pub mod dispatch;
+/// IDE/LSP documentation metadata for builtins and methods.
 pub mod docs;
+/// Faceting: multi-panel grid layouts split by a grouping variable.
 pub mod facet;
+/// Layout engine: coordinate mapping, tick generation, axis computation.
 pub mod layout;
+/// Legend rendering for multi-layer plots.
 pub mod legend;
+/// PNG export (behind the `png` feature flag).
 pub mod png_export;
+/// Shared rasterizer: scene to pixel buffer (used by BMP and PNG).
 pub mod raster;
+/// Render pipeline: PlotSpec to Scene conversion.
 pub mod render;
+/// Scene graph: flat list of positioned visual primitives.
 pub mod scene;
+/// Plot specification: data, layers, scales, labels, and themes.
 pub mod spec;
+/// Statistical computations: KDE, regression, clustering, quantiles.
 pub mod stats;
+/// SVG serializer: Scene to SVG string.
 pub mod svg;
+/// Text measurement and tick label formatting.
 pub mod text;
+/// Theme definitions: margins, colors, font sizes, line widths.
 pub mod theme;
 
 // Re-export key types for convenience.

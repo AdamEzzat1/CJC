@@ -275,6 +275,61 @@ pub fn dispatch_tidy_method(
             Ok(Some(Value::String(Rc::new(s))))
         }
 
+        // -- DataFrame inspection builtins -----------------------------------
+        "head" => {
+            let n = if args.is_empty() { 10 } else {
+                match &args[0] { Value::Int(n) => *n as usize, _ => return Err("head: argument must be Int".into()) }
+            };
+            let sliced = view.slice_head(n);
+            let df = sliced.materialize().map_err(|e| format!("{e}"))?;
+            let s = format_dataframe(&df);
+            Ok(Some(Value::String(Rc::new(s))))
+        }
+        "tail" => {
+            let n = if args.is_empty() { 10 } else {
+                match &args[0] { Value::Int(n) => *n as usize, _ => return Err("tail: argument must be Int".into()) }
+            };
+            let sliced = view.slice_tail(n);
+            let df = sliced.materialize().map_err(|e| format!("{e}"))?;
+            let s = format_dataframe(&df);
+            Ok(Some(Value::String(Rc::new(s))))
+        }
+        "shape" => {
+            let result = Value::Tuple(Rc::new(vec![
+                Value::Int(view.nrows() as i64),
+                Value::Int(view.ncols() as i64),
+            ]));
+            Ok(Some(result))
+        }
+        "columns" => {
+            // Alias for column_names — returns array of column name strings
+            let names: Vec<Value> = view
+                .column_names()
+                .into_iter()
+                .map(|s| Value::String(Rc::new(s.to_string())))
+                .collect();
+            Ok(Some(Value::Array(Rc::new(names))))
+        }
+        "dtypes" => {
+            // Returns a Struct mapping column_name → type_name
+            let df = view.materialize().map_err(|e| format!("{e}"))?;
+            let mut fields = std::collections::BTreeMap::new();
+            for (name, col) in &df.columns {
+                fields.insert(name.clone(), Value::String(Rc::new(col.type_name().to_string())));
+            }
+            Ok(Some(Value::Struct { name: "Dtypes".to_string(), fields }))
+        }
+        "describe" => {
+            let df = view.materialize().map_err(|e| format!("{e}"))?;
+            let s = format_describe(&df);
+            Ok(Some(Value::String(Rc::new(s))))
+        }
+        "glimpse" => {
+            let df = view.materialize().map_err(|e| format!("{e}"))?;
+            let s = format_glimpse(&df);
+            Ok(Some(Value::String(Rc::new(s))))
+        }
+
         _ => Ok(None), // unknown method — caller falls through
     }
 }
@@ -732,6 +787,136 @@ fn format_dataframe(df: &DataFrame) -> String {
     out
 }
 
+/// Produce a statistical summary (like R's `summary()` or pandas `.describe()`).
+///
+/// For numeric columns: count, mean, std, min, 25%, 50%, 75%, max.
+/// For string/bool columns: count, unique, top (most frequent).
+fn format_describe(df: &DataFrame) -> String {
+    use cjc_repro::KahanAccumulatorF64;
+    let nrows = df.nrows();
+    let mut out = String::new();
+    out.push_str(&format!("DataFrame: {} rows x {} columns\n\n", nrows, df.ncols()));
+
+    for (name, col) in &df.columns {
+        out.push_str(&format!("── {} ({}) ──\n", name, col.type_name()));
+        match col {
+            Column::Int(v) => {
+                if v.is_empty() {
+                    out.push_str("  (empty)\n");
+                    continue;
+                }
+                let mut sorted = v.clone();
+                sorted.sort();
+                let mut acc = KahanAccumulatorF64::new();
+                for &x in v { acc.add(x as f64); }
+                let mean = acc.finalize() / nrows as f64;
+                // Variance via second pass (Welford-like but simple two-pass for determinism)
+                let mut var_acc = KahanAccumulatorF64::new();
+                for &x in v { let d = x as f64 - mean; var_acc.add(d * d); }
+                let std = if nrows > 1 { (var_acc.finalize() / (nrows - 1) as f64).sqrt() } else { 0.0 };
+                out.push_str(&format!("  count: {}\n", nrows));
+                out.push_str(&format!("  mean:  {:.4}\n", mean));
+                out.push_str(&format!("  std:   {:.4}\n", std));
+                out.push_str(&format!("  min:   {}\n", sorted[0]));
+                out.push_str(&format!("  25%:   {}\n", sorted[nrows / 4]));
+                out.push_str(&format!("  50%:   {}\n", sorted[nrows / 2]));
+                out.push_str(&format!("  75%:   {}\n", sorted[3 * nrows / 4]));
+                out.push_str(&format!("  max:   {}\n", sorted[nrows - 1]));
+            }
+            Column::Float(v) => {
+                if v.is_empty() {
+                    out.push_str("  (empty)\n");
+                    continue;
+                }
+                let mut sorted = v.clone();
+                sorted.sort_by(|a, b| a.total_cmp(b));
+                let mut acc = KahanAccumulatorF64::new();
+                for &x in v { acc.add(x); }
+                let mean = acc.finalize() / nrows as f64;
+                let mut var_acc = KahanAccumulatorF64::new();
+                for &x in v { let d = x - mean; var_acc.add(d * d); }
+                let std = if nrows > 1 { (var_acc.finalize() / (nrows - 1) as f64).sqrt() } else { 0.0 };
+                out.push_str(&format!("  count: {}\n", nrows));
+                out.push_str(&format!("  mean:  {:.4}\n", mean));
+                out.push_str(&format!("  std:   {:.4}\n", std));
+                out.push_str(&format!("  min:   {:.4}\n", sorted[0]));
+                out.push_str(&format!("  25%:   {:.4}\n", sorted[nrows / 4]));
+                out.push_str(&format!("  50%:   {:.4}\n", sorted[nrows / 2]));
+                out.push_str(&format!("  75%:   {:.4}\n", sorted[3 * nrows / 4]));
+                out.push_str(&format!("  max:   {:.4}\n", sorted[nrows - 1]));
+            }
+            Column::Str(v) => {
+                let mut freq = std::collections::BTreeMap::new();
+                for s in v { *freq.entry(s.as_str()).or_insert(0usize) += 1; }
+                let unique = freq.len();
+                let top = freq.iter().max_by_key(|(_, &c)| c).map(|(s, _)| *s).unwrap_or("");
+                out.push_str(&format!("  count:  {}\n", nrows));
+                out.push_str(&format!("  unique: {}\n", unique));
+                out.push_str(&format!("  top:    {}\n", top));
+            }
+            Column::Bool(v) => {
+                let trues = v.iter().filter(|&&b| b).count();
+                out.push_str(&format!("  count: {}\n", nrows));
+                out.push_str(&format!("  true:  {}\n", trues));
+                out.push_str(&format!("  false: {}\n", nrows - trues));
+            }
+            Column::Categorical { levels, codes } => {
+                let n_levels = levels.len();
+                let mut freq = std::collections::BTreeMap::new();
+                for &c in codes { *freq.entry(c).or_insert(0usize) += 1; }
+                let top_code = freq.iter().max_by_key(|(_, &c)| c).map(|(&k, _)| k).unwrap_or(0);
+                let top = if (top_code as usize) < levels.len() { &levels[top_code as usize] } else { "?" };
+                out.push_str(&format!("  count:  {}\n", nrows));
+                out.push_str(&format!("  levels: {}\n", n_levels));
+                out.push_str(&format!("  top:    {}\n", top));
+            }
+            Column::DateTime(v) => {
+                if v.is_empty() {
+                    out.push_str("  (empty)\n");
+                    continue;
+                }
+                let mut sorted = v.clone();
+                sorted.sort();
+                out.push_str(&format!("  count: {}\n", nrows));
+                out.push_str(&format!("  min:   {} (epoch ms)\n", sorted[0]));
+                out.push_str(&format!("  max:   {} (epoch ms)\n", sorted[nrows - 1]));
+            }
+        }
+    }
+    out
+}
+
+/// Produce a transposed glimpse (like dplyr::glimpse() or tibble printing).
+///
+/// Shows each column as a row: name, type, and first few values.
+fn format_glimpse(df: &DataFrame) -> String {
+    let nrows = df.nrows();
+    let ncols = df.ncols();
+    let mut out = String::new();
+    out.push_str(&format!("Rows: {}\nColumns: {}\n", nrows, ncols));
+
+    // Find max column name width for alignment
+    let max_name_w = df.columns.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+    let max_type_w = df.columns.iter().map(|(_, c)| c.type_name().len()).max().unwrap_or(0);
+
+    let preview_count = nrows.min(8);
+    for (name, col) in &df.columns {
+        out.push_str(&format!("$ {:width_n$} <{:width_t$}>  ",
+            name, col.type_name(),
+            width_n = max_name_w, width_t = max_type_w));
+        let mut vals = Vec::with_capacity(preview_count);
+        for i in 0..preview_count {
+            vals.push(col.get_display(i));
+        }
+        out.push_str(&vals.join(", "));
+        if nrows > preview_count {
+            out.push_str(", ...");
+        }
+        out.push('\n');
+    }
+    out
+}
+
 // ============================================================================
 //  DExpr builder builtins (col, binop, agg, etc.)
 // ============================================================================
@@ -1049,7 +1234,7 @@ pub fn dispatch_tidy_builtin(name: &str, args: &[Value]) -> Result<Option<Value>
             if args.len() != 1 { return Err("n_distinct requires 1 arg: array".into()); }
             match &args[0] {
                 Value::Array(arr) => {
-                    let mut seen = std::collections::HashSet::new();
+                    let mut seen = std::collections::BTreeSet::new();
                     for v in arr.iter() {
                         seen.insert(format!("{v}"));
                     }

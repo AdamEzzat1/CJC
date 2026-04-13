@@ -1,3 +1,26 @@
+//! The universal runtime value type for the CJC interpreter.
+//!
+//! This module defines [`Value`], the tagged union that represents every
+//! runtime value in both the AST interpreter (`cjc-eval`) and the MIR
+//! executor (`cjc-mir-exec`). It also provides the [`Bf16`] brain-float
+//! type and [`FnValue`] for function references.
+//!
+//! # Memory Model
+//!
+//! - **Scalars** (`Int`, `Float`, `Bool`, `U8`, `Bf16`, `F16`, `Complex`) are
+//!   stored inline -- no heap allocation.
+//! - **Heap types** (`String`, `Array`, `Tuple`, `Map`, `Bytes`, `Tensor`)
+//!   use `Rc<...>` for O(1) clone with copy-on-write mutation semantics.
+//! - **Type-erased objects** (`GradGraph`, `OptimizerState`, `TidyView`,
+//!   `VizorPlot`, `QuantumState`) use `Rc<dyn Any>` or `Rc<RefCell<dyn Any>>`
+//!   to avoid circular crate dependencies.
+//!
+//! # NA Semantics
+//!
+//! [`Value::Na`] is the missing-value sentinel. It propagates through
+//! arithmetic (`NA + x -> NA`) and compares unequal to everything including
+//! itself (`NA == NA -> false`). Test with `is_na()`.
+
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -17,8 +40,17 @@ use crate::tensor::Tensor;
 // 7. Value enum for the interpreter
 // ---------------------------------------------------------------------------
 
-/// bf16 brain-float: u16-backed storage, deterministic f32 conversions.
-/// Arithmetic is performed by widening to f32, computing, then narrowing back.
+/// Brain-float 16-bit floating-point type (bf16).
+///
+/// Stores a `u16` that represents the upper 16 bits of an IEEE 754 `f32`.
+/// All arithmetic is performed by widening to `f32`, computing, then
+/// narrowing back -- this ensures deterministic results regardless of
+/// hardware bf16 support.
+///
+/// # Determinism
+///
+/// Conversion uses truncation (not rounding) of the lower 16 mantissa bits,
+/// guaranteeing identical results across all platforms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Bf16(pub u16);
 
@@ -33,22 +65,27 @@ impl Bf16 {
         f32::from_bits((self.0 as u32) << 16)
     }
 
+    /// Add two bf16 values (widen to f32, add, narrow back).
     pub fn add(self, rhs: Self) -> Self {
         Self::from_f32(self.to_f32() + rhs.to_f32())
     }
 
+    /// Subtract two bf16 values (widen to f32, subtract, narrow back).
     pub fn sub(self, rhs: Self) -> Self {
         Self::from_f32(self.to_f32() - rhs.to_f32())
     }
 
+    /// Multiply two bf16 values (widen to f32, multiply, narrow back).
     pub fn mul(self, rhs: Self) -> Self {
         Self::from_f32(self.to_f32() * rhs.to_f32())
     }
 
+    /// Divide two bf16 values (widen to f32, divide, narrow back).
     pub fn div(self, rhs: Self) -> Self {
         Self::from_f32(self.to_f32() / rhs.to_f32())
     }
 
+    /// Negate a bf16 value (widen to f32, negate, narrow back).
     pub fn neg(self) -> Self {
         Self::from_f32(-self.to_f32())
     }
@@ -72,11 +109,32 @@ pub struct FnValue {
 }
 
 /// The universal value type for the CJC interpreter.
+///
+/// Every runtime value -- from scalars to tensors to closures -- is
+/// represented as a variant of this enum. Both the AST interpreter
+/// (`cjc-eval`) and the MIR executor (`cjc-mir-exec`) operate on `Value`.
+///
+/// # Clone Semantics
+///
+/// Cloning a `Value` is cheap for heap-backed variants: `String`, `Array`,
+/// `Tuple`, `Map`, `Bytes`, `ByteSlice`, and `Tensor` all use `Rc`
+/// internally, so `clone()` increments a refcount without copying data.
+/// Mutation (e.g., `array_push`) returns a *new* `Value` (functional
+/// immutability), or triggers COW when the `Rc` refcount is 1.
+///
+/// # Display
+///
+/// All variants implement [`fmt::Display`] for user-facing output.
+/// The format matches CJC's `print()` builtin behavior.
 #[derive(Debug, Clone)]
 pub enum Value {
+    /// 64-bit signed integer.
     Int(i64),
+    /// 64-bit IEEE 754 float.
     Float(f64),
+    /// Boolean value.
     Bool(bool),
+    /// Heap-allocated string with COW sharing via `Rc`.
     String(Rc<String>),
     /// Owning byte buffer.
     Bytes(Rc<RefCell<Vec<u8>>>),
@@ -89,19 +147,29 @@ pub enum Value {
     StrView(Rc<Vec<u8>>),
     /// Single byte value (u8).
     U8(u8),
+    /// N-dimensional tensor backed by [`Buffer<f64>`](crate::buffer::Buffer).
     Tensor(Tensor),
+    /// Sparse matrix in CSR (Compressed Sparse Row) format.
     SparseTensor(SparseCsr),
+    /// Deterministic hash map with interior mutability. Iteration order is
+    /// fixed by [`DetMap`]'s MurmurHash3-based bucket ordering.
     Map(Rc<RefCell<DetMap>>),
     /// Copy-on-write array. `Rc` provides O(1) clone; `Rc::make_mut()`
     /// triggers a deep copy only when the array is mutated and shared.
     Array(Rc<Vec<Value>>),
+    /// Named struct with ordered fields. Field order is deterministic
+    /// because fields are stored in a [`BTreeMap`].
     Struct {
+        /// The struct type name (e.g., `"Point"`).
         name: String,
+        /// Field name -> value mapping, ordered alphabetically.
         fields: BTreeMap<String, Value>,
     },
     /// Copy-on-write tuple. Same COW semantics as Array.
     Tuple(Rc<Vec<Value>>),
+    /// Reference to a GC-managed class instance in the [`GcHeap`](crate::gc::GcHeap).
     ClassRef(GcRef),
+    /// A named function reference (not a closure -- no captured environment).
     Fn(FnValue),
     /// A closure: a function name + captured environment values.
     Closure {
@@ -166,11 +234,18 @@ pub enum Value {
     /// Uses `Rc<RefCell<dyn Any>>` for interior mutability (measurement collapses state).
     /// Construction and method dispatch happen in cjc-eval and cjc-mir-exec.
     QuantumState(Rc<RefCell<dyn Any>>),
+    /// Missing value sentinel. Propagates through arithmetic (NA + x → NA),
+    /// compares unequal to everything including itself (NA == NA → false).
+    /// Test with `is_na()`. This is the only way to detect NA.
+    Na,
     Void,
 }
 
 impl Value {
-    /// Returns a human-readable type name for error messages.
+    /// Return a human-readable type name string for error messages and debugging.
+    ///
+    /// The returned string matches the CJC type system names (e.g., `"Int"`,
+    /// `"Float"`, `"Tensor"`, `"Array"`, `"Struct"`, `"Closure"`).
     pub fn type_name(&self) -> &str {
         match self {
             Value::Int(_) => "Int",
@@ -204,6 +279,7 @@ impl Value {
             Value::GroupedTidyView(_) => "GroupedTidyView",
             Value::VizorPlot(_) => "VizorPlot",
             Value::QuantumState(_) => "QuantumState",
+            Value::Na => "Na",
             Value::Void => "Void",
         }
     }
@@ -333,6 +409,7 @@ impl fmt::Display for Value {
             Value::GroupedTidyView(_) => write!(f, "<GroupedTidyView>"),
             Value::VizorPlot(_) => write!(f, "<VizorPlot>"),
             Value::QuantumState(_) => write!(f, "<QuantumState>"),
+            Value::Na => write!(f, "NA"),
             Value::Void => write!(f, "void"),
         }
     }

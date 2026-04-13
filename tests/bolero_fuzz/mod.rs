@@ -13,6 +13,8 @@
 //! - Lexer panics on multi-byte UTF-8 characters at string slice boundaries
 //! - Parser inherits lexer panics
 
+pub mod cli_expansion_fuzz;
+
 use std::panic;
 
 /// Fuzz the CJC lexer: arbitrary byte input should not panic.

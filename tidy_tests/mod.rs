@@ -82,7 +82,7 @@ fn run_parity(source: &str) -> Vec<String> {
 /// Run a tidy fixture test — golden + parity.
 fn run_fixture(name: &str) {
     let dir = fixtures_dir();
-    let cjc_path = dir.join(format!("{name}.cjc"));
+    let cjc_path = dir.join(format!("{name}.cjcl"));
     let source = fs::read_to_string(&cjc_path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", cjc_path.display()));
 
@@ -454,7 +454,7 @@ fn perf_tidy_fixtures() {
     let mut results: Vec<(String, f64, f64)> = Vec::new();
 
     for name in &fixtures {
-        let cjc_path = dir.join(format!("{name}.cjc"));
+        let cjc_path = dir.join(format!("{name}.cjcl"));
         let source = fs::read_to_string(&cjc_path)
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", cjc_path.display()));
 

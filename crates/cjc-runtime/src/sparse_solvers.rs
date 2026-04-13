@@ -7,14 +7,16 @@
 use crate::accumulator::binned_sum_f64;
 use crate::sparse::SparseCsr;
 
-/// Result of an iterative solver.
+/// Result of an iterative sparse linear solver.
+///
+/// Returned by [`cg_solve`], [`gmres_solve`], and [`bicgstab_solve`].
 #[derive(Debug, Clone)]
 pub struct SolverResult {
-    /// Solution vector.
+    /// Solution vector `x` satisfying `A * x ~ b`.
     pub x: Vec<f64>,
-    /// Number of iterations used.
+    /// Number of iterations performed.
     pub iterations: usize,
-    /// Final residual norm (L2).
+    /// Final relative residual norm (`||r|| / ||b||`).
     pub residual: f64,
     /// Whether the solver converged to within the requested tolerance.
     pub converged: bool,

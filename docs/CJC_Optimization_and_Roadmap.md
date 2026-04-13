@@ -1,3 +1,5 @@
+> **Pre-v0.1.4 document.** Uses legacy naming: CJC (now CJC-Lang), `cjc` (now `cjcl`), `.cjc` (now `.cjcl`). Kept unmodified for historical accuracy. See [REBRAND_NOTICE.md](REBRAND_NOTICE.md) for the full mapping.
+
 # CJC Language — Optimization Analysis & Roadmap
 
 > **Audit revision:** Post-Hardening (Phase 5) — 2025 tests passing, 0 failures

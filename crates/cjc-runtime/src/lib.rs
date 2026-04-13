@@ -1,81 +1,196 @@
 //! CJC Runtime System
 //!
-//! Provides the core runtime infrastructure for the CJC programming language:
-//! - `Buffer<T>`: Deterministic memory allocation with COW (Copy-On-Write) semantics
-//! - `Tensor`: N-dimensional tensor with element-wise ops, matmul, and stable reductions
-//! - `ObjectSlab` / `GcRef`: Deterministic RC-backed object slab (replaces mark-sweep GC)
-//! - `FrameArena` / `ArenaStore`: Bump-arena per function frame for non-escaping values
-//! - `Value`: Tagged union for the CJC interpreter
-//! - `accumulator`: BinnedAccumulator for order-invariant deterministic summation
-//! - `dispatch`: Hybrid summation strategy dispatch (Kahan vs Binned)
+//! This crate provides the core runtime infrastructure for the CJC deterministic
+//! numerical programming language. It is the largest crate in the workspace and
+//! underpins both the AST tree-walk interpreter (`cjc-eval`) and the MIR register
+//! machine executor (`cjc-mir-exec`).
+//!
+//! # Core Abstractions
+//!
+//! - [`Buffer<T>`] -- Deterministic memory allocation with COW (copy-on-write)
+//!   semantics. Cloning is O(1); mutation triggers a deep copy only when shared.
+//! - [`Tensor`] -- N-dimensional tensor backed by `Buffer<f64>`. Supports
+//!   element-wise arithmetic (SIMD-accelerated), matrix multiplication (tiled +
+//!   parallel), and numerically-stable reductions via [`BinnedAccumulatorF64`].
+//! - [`Value`] -- The universal tagged-union value type that flows through both
+//!   interpreters. Covers scalars, strings, tensors, closures, structs, enums,
+//!   and opaque type-erased objects (AD graphs, tidy views, quantum states).
+//! - [`RuntimeError`] -- Error type for all fallible runtime operations.
+//!
+//! # Determinism Guarantees
+//!
+//! - All floating-point reductions use Kahan or [`BinnedAccumulatorF64`] summation.
+//! - Ordered containers only ([`BTreeMap`]/[`BTreeSet`]) -- no `HashMap`/`HashSet`.
+//! - [`DetMap`] provides a deterministic hash map with [`murmurhash3`] hashing.
+//! - SIMD kernels avoid hardware FMA for bit-identical cross-platform results.
+//! - RNG is SplitMix64 with explicit seed threading (`cjc-repro`).
+//!
+//! # Memory Model
+//!
+//! - **NoGC tier:** [`Buffer<T>`], [`Tensor`], [`AlignedByteSlice`] -- zero GC
+//!   overhead, COW semantics.
+//! - **GC tier:** [`GcHeap`] / [`GcRef`] -- RC-backed object slab for class
+//!   instances.
+//! - **Arena tier:** [`FrameArena`] / [`ArenaStore`] -- bump allocation per
+//!   function frame for non-escaping temporaries.
+//!
+//! # Module Organization
+//!
+//! | Layer | Modules |
+//! |-------|---------|
+//! | Core types | [`value`], [`error`], [`buffer`], [`tensor`], [`tensor_dtype`] |
+//! | Builtins | [`builtins`] -- shared stateless dispatch for both executors |
+//! | Accumulation | [`accumulator`], [`dispatch`] |
+//! | Linear algebra | [`linalg`], [`sparse`], [`sparse_solvers`], [`sparse_eigen`] |
+//! | Statistics | [`stats`], [`distributions`], [`hypothesis`] |
+//! | Data | [`json`], [`datetime`], [`window`], [`timeseries`] |
+//! | ML / NN | [`ml`], [`fft`], [`clustering`], [`optimize`], [`interpolate`] |
+//! | Memory | [`gc`], [`object_slab`], [`frame_arena`], [`binned_alloc`], [`aligned_pool`] |
+//! | SIMD / Perf | [`tensor_simd`], [`tensor_tiled`], [`tensor_pool`] |
+//!
+//! [`BinnedAccumulatorF64`]: accumulator::BinnedAccumulatorF64
+//! [`BTreeMap`]: std::collections::BTreeMap
+//! [`BTreeSet`]: std::collections::BTreeSet
 
-// --- Existing standalone modules ---
+// --- Core standalone modules ---
+
+/// BinnedAccumulator for order-invariant deterministic floating-point summation.
 pub mod accumulator;
+/// Complex number arithmetic with deterministic fixed-sequence operations.
 pub mod complex;
+/// Hybrid summation strategy dispatch (Kahan vs Binned) based on execution context.
 pub mod dispatch;
+/// IEEE 754 half-precision (f16) floating-point type.
 pub mod f16;
+/// Quantized tensor storage (4-bit, 8-bit) for memory-efficient inference.
 pub mod quantized;
 
 // --- Shared builtin dispatch (used by both cjc-eval and cjc-mir-exec) ---
+
+/// Stateless builtin function dispatch shared by both interpreters.
+///
+/// Every builtin registered here is callable from CJC source code. Functions
+/// that require interpreter state (print, GC, clock, RNG) stay in the
+/// individual executors.
 pub mod builtins;
 
-// --- Newly extracted modules (from the former monolithic lib.rs) ---
+// --- Core data structures ---
+
+/// COW (copy-on-write) buffer -- the memory primitive under [`Tensor`].
 pub mod buffer;
+/// N-dimensional tensor with element-wise, reduction, linalg, and NN operations.
 pub mod tensor;
+/// Deterministic binary serialization for tensors and tensor lists.
+pub mod tensor_snap;
+/// Pre-allocated KV-cache scratchpad for zero-allocation transformer inference.
 pub mod scratchpad;
+/// 16-byte-aligned memory pool for SIMD-friendly byte buffers.
 pub mod aligned_pool;
+/// Internal bridge to compiled SIMD/tiled kernel functions.
 mod kernel_bridge;
 pub use kernel_bridge::kernel;
+/// Block-paged KV-cache (vLLM-style) for efficient autoregressive decoding.
 pub mod paged_kv;
+/// Size-class binned allocator for deterministic memory management.
 pub mod binned_alloc;
+/// Bump-arena per function frame for non-escaping temporaries.
 pub mod frame_arena;
+/// RC-backed object slab for class instances (replaces mark-sweep GC).
 pub mod object_slab;
+/// GC heap abstraction wrapping the RC-backed object slab.
 pub mod gc;
+/// Sparse matrix types: CSR and COO representations.
 pub mod sparse;
+/// Direct sparse solvers (LU factorization, triangular solve).
 pub mod sparse_solvers;
+/// L2-cache-friendly tiled matrix multiplication engine.
 pub mod tensor_tiled;
+/// AVX2 SIMD kernels for element-wise and unary tensor operations.
 pub mod tensor_simd;
+/// Tensor memory pool for reducing allocation pressure in hot loops.
 pub mod tensor_pool;
+/// Deterministic hash map using MurmurHash3 -- iteration order is fixed.
 pub mod det_map;
+/// Dense linear algebra: determinant, solve, eigenvalues, SVD, QR, LU.
 pub mod linalg;
+/// The universal [`Value`] tagged union and supporting types ([`Bf16`], [`FnValue`]).
 pub mod value;
+/// [`RuntimeError`] enum for all fallible runtime operations.
 pub mod error;
+/// Library registry for module-system symbol lookup.
 pub mod lib_registry;
+/// JSON parse/stringify builtins for CJC values.
 pub mod json;
+/// Pure-arithmetic datetime manipulation (epoch-based, no system clock).
 pub mod datetime;
+/// Rolling window aggregations (sum, mean, min, max).
 pub mod window;
+/// Descriptive and inferential statistics functions.
 pub mod stats;
+/// Probability distribution functions (CDF, PDF, PPF) for Normal, t, chi2, F.
 pub mod distributions;
+/// Hypothesis testing: t-test, chi-squared test, paired t-test.
 pub mod hypothesis;
+/// Machine learning loss functions and optimizer state types.
 pub mod ml;
+/// Fast Fourier Transform (radix-2 Cooley-Tukey).
 pub mod fft;
+/// Time-series stationarity tests (ADF).
 pub mod stationarity;
+/// ODE solver primitives (Euler, RK4 step functions).
 pub mod ode;
+/// Sparse eigenvalue solvers (Lanczos, Arnoldi).
 pub mod sparse_eigen;
+/// Interpolation primitives (linear, cubic spline).
 pub mod interpolate;
+/// Numerical optimization (gradient descent, L-BFGS, Nelder-Mead).
 pub mod optimize;
+/// Clustering algorithms (k-means, DBSCAN).
 pub mod clustering;
+/// Typed tensor storage: [`DType`] enum and byte-first [`TypedStorage`].
 pub mod tensor_dtype;
+/// Time-series analysis utilities (autocorrelation, differencing).
 pub mod timeseries;
+/// Numerical integration (trapezoidal, Simpson's rule).
 pub mod integrate;
+/// Numerical differentiation (finite differences).
 pub mod differentiate;
+/// Deterministic profile counters (Tier 2 of Chess RL v2.3). Write-only
+/// timing sink that does not perturb program state, RNG, or weight hashes.
+pub mod profile;
 
 // --- Re-exports for backward compatibility ---
 // All downstream crates that were doing `use cjc_runtime::Tensor` etc. continue to work.
+
+/// Re-export: COW buffer with deterministic copy-on-write semantics.
 pub use buffer::Buffer;
+/// Re-export: N-dimensional tensor -- the primary numerical type.
 pub use tensor::Tensor;
+/// Re-export: Pre-allocated KV-cache scratchpad.
 pub use scratchpad::Scratchpad;
+/// Re-export: 16-byte-aligned memory pool and byte slice.
 pub use aligned_pool::{AlignedPool, AlignedByteSlice};
+/// Re-export: Block-paged KV-cache types.
 pub use paged_kv::{KvBlock, PagedKvCache};
+/// Re-export: GC heap and reference types.
 pub use gc::{GcRef, GcHeap};
+/// Re-export: Size-class binned allocator.
 pub use binned_alloc::BinnedAllocator;
+/// Re-export: Bump-arena and arena store types.
 pub use frame_arena::{FrameArena, ArenaStore};
+/// Re-export: Object slab and slab reference types.
 pub use object_slab::{ObjectSlab, SlabRef};
+/// Re-export: Sparse matrix types (CSR and COO).
 pub use sparse::{SparseCsr, SparseCoo};
+/// Re-export: Tiled matrix multiplication engine.
 pub use tensor_tiled::TiledMatmul;
+/// Re-export: Deterministic map, MurmurHash3, and value hashing utilities.
 pub use det_map::{DetMap, murmurhash3, murmurhash3_finalize, value_hash, values_equal_static};
+/// Re-export: Universal value type and supporting types.
 pub use value::{Value, Bf16, FnValue};
+/// Re-export: Runtime error type.
 pub use error::RuntimeError;
+/// Re-export: Typed tensor storage types.
 pub use tensor_dtype::{DType, TypedStorage};
 
 // ---------------------------------------------------------------------------

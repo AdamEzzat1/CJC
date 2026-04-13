@@ -60,6 +60,8 @@ pub fn value_to_f64_vec(val: &Value) -> Result<Vec<f64>, String> {
                 match v {
                     Value::Float(f) => data.push(*f),
                     Value::Int(i) => data.push(*i as f64),
+                    // NA values are silently skipped in aggregations (na_rm=true default)
+                    Value::Na => {}
                     _ => {
                         return Err(format!(
                             "expected numeric values in array, got {}",
@@ -618,12 +620,13 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 _ => Err(format!("cosh requires a number, got {}", args[0].type_name())),
             }
         }
-        "tanh_scalar" => {
-            if args.len() != 1 { return Err("tanh_scalar requires exactly 1 argument".into()); }
+        "tanh" | "tanh_scalar" => {
+            if args.len() != 1 { return Err("tanh requires exactly 1 argument".into()); }
             match &args[0] {
                 Value::Float(f) => Ok(Some(Value::Float(f.tanh()))),
                 Value::Int(i) => Ok(Some(Value::Float((*i as f64).tanh()))),
-                _ => Err(format!("tanh_scalar requires a number, got {}", args[0].type_name())),
+                Value::Tensor(t) => Ok(Some(Value::Tensor(t.tanh_activation()))),
+                _ => Err(format!("tanh requires a number or Tensor, got {}", args[0].type_name())),
             }
         }
         // ---- Mathematics Hardening Phase: Exponentiation & Logarithms ----
@@ -707,6 +710,7 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             match &args[0] {
                 Value::Float(f) => Ok(Some(Value::Int(*f as i64))),
                 Value::Int(i) => Ok(Some(Value::Int(*i))),
+                Value::Bool(b) => Ok(Some(Value::Int(if *b { 1 } else { 0 }))),
                 _ => Err(format!("int requires a number, got {}", args[0].type_name())),
             }
         }
@@ -717,6 +721,7 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             match &args[0] {
                 Value::Int(i) => Ok(Some(Value::Float(*i as f64))),
                 Value::Float(f) => Ok(Some(Value::Float(*f))),
+                Value::Bool(b) => Ok(Some(Value::Float(if *b { 1.0 } else { 0.0 }))),
                 _ => Err(format!("float requires a number, got {}", args[0].type_name())),
             }
         }
@@ -1202,6 +1207,23 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 _ => Err("file_write requires (String, String) arguments".into()),
             }
         }
+        "file_append" => {
+            if args.len() != 2 { return Err("file_append requires 2 arguments (path, content)".into()); }
+            match (&args[0], &args[1]) {
+                (Value::String(path), Value::String(content)) => {
+                    use std::io::Write;
+                    let mut f = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(path.as_str())
+                        .map_err(|e| format!("file_append error: {}", e))?;
+                    f.write_all(content.as_bytes())
+                        .map_err(|e| format!("file_append error: {}", e))?;
+                    Ok(Some(Value::Void))
+                }
+                _ => Err("file_append requires (String, String) arguments".into()),
+            }
+        }
         "file_exists" => {
             if args.len() != 1 { return Err("file_exists requires 1 argument".into()); }
             match &args[0] {
@@ -1223,6 +1245,545 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 }
                 _ => Err(format!("file_lines requires String path, got {}", args[0].type_name())),
             }
+        }
+
+        // ── Profile counters (Tier 2, Chess RL v2.3) ─────────────────
+        // Thread-local write-only sink. The handle returned by
+        // profile_zone_start is an opaque token for profile_zone_stop;
+        // program logic must not branch on its integer value. See
+        // `docs/chess_rl_v2/PROFILE_DESIGN.md` for the full determinism
+        // story.
+        "profile_zone_start" => {
+            if args.len() != 1 {
+                return Err("profile_zone_start requires 1 argument (name: String)".into());
+            }
+            match &args[0] {
+                Value::String(name) => {
+                    let h = crate::profile::zone_start(name.as_str());
+                    Ok(Some(Value::Int(h)))
+                }
+                _ => Err(format!(
+                    "profile_zone_start requires String name, got {}",
+                    args[0].type_name()
+                )),
+            }
+        }
+        "profile_zone_stop" => {
+            if args.len() != 1 {
+                return Err("profile_zone_stop requires 1 argument (handle: Int)".into());
+            }
+            match &args[0] {
+                Value::Int(h) => {
+                    let elapsed = crate::profile::zone_stop(*h);
+                    Ok(Some(Value::Float(elapsed)))
+                }
+                _ => Err(format!(
+                    "profile_zone_stop requires Int handle, got {}",
+                    args[0].type_name()
+                )),
+            }
+        }
+        "profile_dump" => {
+            if args.len() != 1 {
+                return Err("profile_dump requires 1 argument (path: String)".into());
+            }
+            match &args[0] {
+                Value::String(path) => {
+                    let rows = crate::profile::dump_to_path(path.as_str())?;
+                    Ok(Some(Value::Int(rows)))
+                }
+                _ => Err(format!(
+                    "profile_dump requires String path, got {}",
+                    args[0].type_name()
+                )),
+            }
+        }
+
+        // ── Chess RL v2.3 native hot-path kernels (Tier 3) ────────────
+        // These replace O(n²) CJC-Lang loops with tight Rust implementations.
+        // They must produce **bit-identical** output to the pure-CJC-Lang
+        // equivalents for every legal chess position.
+
+        // encode_state_fast(board, side, castling, ep_sq, halfmove) -> Tensor[1,774]
+        //
+        // Native replacement for the CJC-Lang `encode_state` function.
+        // The pure-CJC version calls `arr_set` ~38 times, each copying the
+        // entire 774-element array (quadratic). This version fills a
+        // pre-allocated buffer in a single pass: O(774).
+        //
+        // Determinism story: pure arithmetic on integer inputs. No RNG, no
+        // FMA, no iteration-order dependence. The output is a fresh tensor
+        // with exactly the same f64 values that the CJC-Lang version would
+        // produce. Tested via bit-identical parity on ≥100 random boards.
+        "encode_state_fast" => {
+            if args.len() != 5 {
+                return Err(
+                    "encode_state_fast requires 5 arguments: board(Array[64]), side(Int), castling(Array[4]), ep_sq(Int), halfmove(Int)"
+                        .into(),
+                );
+            }
+            let board = match &args[0] {
+                Value::Array(arr) => {
+                    if arr.len() != 64 {
+                        return Err(format!(
+                            "encode_state_fast: board must have 64 elements, got {}",
+                            arr.len()
+                        ));
+                    }
+                    let mut b = [0i64; 64];
+                    for (i, v) in arr.iter().enumerate() {
+                        b[i] = match v {
+                            Value::Int(n) => *n,
+                            _ => {
+                                return Err(format!(
+                                    "encode_state_fast: board[{i}] must be Int, got {}",
+                                    v.type_name()
+                                ))
+                            }
+                        };
+                    }
+                    b
+                }
+                _ => {
+                    return Err(format!(
+                        "encode_state_fast: board must be Array, got {}",
+                        args[0].type_name()
+                    ))
+                }
+            };
+            let side = match &args[1] {
+                Value::Int(n) => *n,
+                _ => {
+                    return Err(format!(
+                        "encode_state_fast: side must be Int, got {}",
+                        args[1].type_name()
+                    ))
+                }
+            };
+            let castling = match &args[2] {
+                Value::Array(arr) => {
+                    if arr.len() != 4 {
+                        return Err(format!(
+                            "encode_state_fast: castling must have 4 elements, got {}",
+                            arr.len()
+                        ));
+                    }
+                    let mut c = [0i64; 4];
+                    for (i, v) in arr.iter().enumerate() {
+                        c[i] = match v {
+                            Value::Int(n) => *n,
+                            _ => {
+                                return Err(format!(
+                                    "encode_state_fast: castling[{i}] must be Int, got {}",
+                                    v.type_name()
+                                ))
+                            }
+                        };
+                    }
+                    c
+                }
+                _ => {
+                    return Err(format!(
+                        "encode_state_fast: castling must be Array, got {}",
+                        args[2].type_name()
+                    ))
+                }
+            };
+            let ep_sq = match &args[3] {
+                Value::Int(n) => *n,
+                _ => {
+                    return Err(format!(
+                        "encode_state_fast: ep_sq must be Int, got {}",
+                        args[3].type_name()
+                    ))
+                }
+            };
+            let halfmove = match &args[4] {
+                Value::Int(n) => *n,
+                _ => {
+                    return Err(format!(
+                        "encode_state_fast: halfmove must be Int, got {}",
+                        args[4].type_name()
+                    ))
+                }
+            };
+
+            // --- Compute the 774-dim feature vector ---
+            let mut data = vec![0.0f64; 774];
+
+            // Helper: feat_sq — flip for black.
+            let feat_sq = |sq: i64, s: i64| -> usize {
+                if s == 1 {
+                    sq as usize
+                } else {
+                    let r = sq / 8;
+                    let f = sq % 8;
+                    ((7 - r) * 8 + f) as usize
+                }
+            };
+
+            // Fill piece planes.
+            for i in 0..64 {
+                let p = board[i];
+                if p != 0 {
+                    let abs_p = p.unsigned_abs() as i64;
+                    if abs_p < 1 || abs_p > 6 {
+                        return Err(format!(
+                            "encode_state_fast: invalid piece value {} at square {}",
+                            p, i
+                        ));
+                    }
+                    let piece_idx = abs_p - 1; // 0..5
+                    let owner = if p > 0 { 1i64 } else { -1i64 };
+                    let plane = if owner == side {
+                        piece_idx
+                    } else {
+                        piece_idx + 6
+                    };
+                    let mapped = feat_sq(i as i64, side);
+                    let idx = (plane as usize) * 64 + mapped;
+                    data[idx] = 1.0;
+                }
+            }
+
+            // Castling rights (flipped if black to move).
+            let (my_k, my_q, op_k, op_q) = if side == 1 {
+                (castling[0], castling[1], castling[2], castling[3])
+            } else {
+                (castling[2], castling[3], castling[0], castling[1])
+            };
+            data[768] = my_k as f64;
+            data[769] = my_q as f64;
+            data[770] = op_k as f64;
+            data[771] = op_q as f64;
+
+            // Halfmove clock fraction.
+            data[772] = (halfmove as f64) / 100.0;
+
+            // Has en passant target.
+            data[773] = if ep_sq >= 0 { 1.0 } else { 0.0 };
+
+            let tensor = Tensor::from_vec(data, &[1, 774]).map_err(|e| format!("{e}"))?;
+            Ok(Some(Value::Tensor(tensor)))
+        }
+
+        // score_moves_batch(weights_list, feature, legal_move_pairs) -> [scores_tensor, value]
+        //
+        // Native replacement for the CJC-Lang `score_moves` function.
+        // The pure-CJC version loops over legal moves, doing per-move
+        // `tensor.get()` + `array_push()` (O(num_moves²) due to COW copies).
+        // This version does a single forward pass and gathers scores from
+        // the logit tensors by index.
+        //
+        // Arguments:
+        //   weights_list: Array of 11 values [W1, b1, W2, b2, _, Wpf, bpf, Wpt, bpt, Wv, bv]
+        //   feature:      Tensor [1, 774]
+        //   legal_move_pairs: Array of [from_sq, to_sq, from_sq, to_sq, ...] (flat i64 pairs)
+        //   side: Int (1 for white, -1 for black)
+        //
+        // Returns: Array [scores_tensor([num_moves]), value_f64]
+        //
+        // Determinism story: uses the same matmul + element-wise ops already
+        // in cjc-runtime (Kahan-accumulated, no FMA). The only change is
+        // replacing the per-move interpreter loop with a Rust loop over
+        // the legal move indices + direct f64 reads from the logit tensors.
+        "score_moves_batch" => {
+            if args.len() != 4 {
+                return Err(
+                    "score_moves_batch requires 4 arguments: weights(Array[11]), feature(Tensor[1,774]), legal_moves(Array), side(Int)"
+                        .into(),
+                );
+            }
+            // Parse weights.
+            let weights = match &args[0] {
+                Value::Array(arr) => {
+                    if arr.len() < 11 {
+                        return Err(format!(
+                            "score_moves_batch: weights must have ≥11 elements, got {}",
+                            arr.len()
+                        ));
+                    }
+                    arr.clone()
+                }
+                _ => {
+                    return Err(format!(
+                        "score_moves_batch: weights must be Array, got {}",
+                        args[0].type_name()
+                    ))
+                }
+            };
+            let feature = value_to_tensor(&args[1])?;
+            let moves = match &args[2] {
+                Value::Array(arr) => {
+                    let mut mv = Vec::with_capacity(arr.len());
+                    for (i, v) in arr.iter().enumerate() {
+                        mv.push(match v {
+                            Value::Int(n) => *n,
+                            _ => {
+                                return Err(format!(
+                                    "score_moves_batch: legal_moves[{i}] must be Int, got {}",
+                                    v.type_name()
+                                ))
+                            }
+                        });
+                    }
+                    mv
+                }
+                _ => {
+                    return Err(format!(
+                        "score_moves_batch: legal_moves must be Array, got {}",
+                        args[2].type_name()
+                    ))
+                }
+            };
+            let side = match &args[3] {
+                Value::Int(n) => *n,
+                _ => {
+                    return Err(format!(
+                        "score_moves_batch: side must be Int, got {}",
+                        args[3].type_name()
+                    ))
+                }
+            };
+
+            let num_moves = moves.len() / 2;
+
+            // Extract weight tensors.
+            let w1 = value_to_tensor(&weights[0])?;
+            let b1 = value_to_tensor(&weights[1])?;
+            let w2 = value_to_tensor(&weights[2])?;
+            let b2 = value_to_tensor(&weights[3])?;
+            // weights[4] is reserved (placeholder 0)
+            let wpf = value_to_tensor(&weights[5])?;
+            let bpf = value_to_tensor(&weights[6])?;
+            let wpt = value_to_tensor(&weights[7])?;
+            let bpt = value_to_tensor(&weights[8])?;
+            let wv = value_to_tensor(&weights[9])?;
+            let bv = value_to_tensor(&weights[10])?;
+
+            // Forward pass: identical to forward_eager in the CJC-Lang PRELUDE.
+            // z1 = feature @ W1 + b1
+            let z1 = feature.matmul(&w1).map_err(|e| format!("{e}"))?
+                .add(&b1).map_err(|e| format!("{e}"))?;
+            let h1 = z1.relu();
+            // z2 = h1 @ W2 + b2
+            let z2 = h1.matmul(&w2).map_err(|e| format!("{e}"))?
+                .add(&b2).map_err(|e| format!("{e}"))?;
+            let h2 = z2.relu();
+            // from_logits = h2 @ Wpf + bpf  [1, 64]
+            let from_logits = h2.matmul(&wpf).map_err(|e| format!("{e}"))?
+                .add(&bpf).map_err(|e| format!("{e}"))?;
+            // to_logits = h2 @ Wpt + bpt  [1, 64]
+            let to_logits = h2.matmul(&wpt).map_err(|e| format!("{e}"))?
+                .add(&bpt).map_err(|e| format!("{e}"))?;
+            // value = tanh(h2 @ Wv + bv)[0, 0]
+            let v_pre = h2.matmul(&wv).map_err(|e| format!("{e}"))?
+                .add(&bv).map_err(|e| format!("{e}"))?;
+            let v_tanh = v_pre.tanh_activation();
+            let value = v_tanh.get(&[0, 0]).map_err(|e| format!("{e}"))?;
+
+            // Gather scores for legal moves.
+            // feat_sq: flip for black.
+            let feat_sq = |sq: i64, s: i64| -> usize {
+                if s == 1 {
+                    sq as usize
+                } else {
+                    let r = sq / 8;
+                    let f = sq % 8;
+                    ((7 - r) * 8 + f) as usize
+                }
+            };
+
+            let mut scores = Vec::with_capacity(num_moves);
+            for i in 0..num_moves {
+                let from_sq = moves[i * 2];
+                let to_sq = moves[i * 2 + 1];
+                let from_mapped = feat_sq(from_sq, side);
+                let to_mapped = feat_sq(to_sq, side);
+                let fs = from_logits.get(&[0, from_mapped]).map_err(|e| format!("{e}"))?;
+                let ts = to_logits.get(&[0, to_mapped]).map_err(|e| format!("{e}"))?;
+                scores.push(fs + ts);
+            }
+
+            let scores_tensor = Tensor::from_vec(scores, &[num_moves]).map_err(|e| format!("{e}"))?;
+            let result = vec![
+                Value::Tensor(scores_tensor),
+                Value::Float(value),
+            ];
+            Ok(Some(Value::Array(Rc::new(result))))
+        }
+
+        // ── Tensor snap (deterministic binary serialization) ─────────
+        "tensor_save" => {
+            if args.len() != 2 {
+                return Err("tensor_save requires 2 arguments: path, tensor".into());
+            }
+            let path = match &args[0] {
+                Value::String(p) => p.as_str().to_string(),
+                _ => return Err("tensor_save: first argument must be String path".into()),
+            };
+            let tensor = value_to_tensor(&args[1])?;
+            let bytes = crate::tensor_snap::encode_one(tensor);
+            std::fs::write(&path, &bytes)
+                .map_err(|e| format!("tensor_save error: {}", e))?;
+            Ok(Some(Value::Void))
+        }
+        "tensor_load" => {
+            if args.len() != 1 {
+                return Err("tensor_load requires 1 argument: path".into());
+            }
+            let path = match &args[0] {
+                Value::String(p) => p.as_str().to_string(),
+                _ => return Err("tensor_load: argument must be String path".into()),
+            };
+            let bytes = std::fs::read(&path)
+                .map_err(|e| format!("tensor_load error: {}", e))?;
+            let tensor = crate::tensor_snap::decode_one(&bytes)
+                .map_err(|e| format!("tensor_load error: {}", e))?;
+            Ok(Some(Value::Tensor(tensor)))
+        }
+        "tensor_list_save" => {
+            if args.len() != 2 {
+                return Err("tensor_list_save requires 2 arguments: path, [tensors]".into());
+            }
+            let path = match &args[0] {
+                Value::String(p) => p.as_str().to_string(),
+                _ => return Err("tensor_list_save: first argument must be String path".into()),
+            };
+            let tensors = match &args[1] {
+                Value::Array(arr) => {
+                    let mut out = Vec::with_capacity(arr.len());
+                    for v in arr.iter() {
+                        out.push(value_to_tensor(v)?.clone());
+                    }
+                    out
+                }
+                _ => return Err("tensor_list_save: second argument must be Array of Tensors".into()),
+            };
+            let bytes = crate::tensor_snap::encode_list(&tensors);
+            std::fs::write(&path, &bytes)
+                .map_err(|e| format!("tensor_list_save error: {}", e))?;
+            Ok(Some(Value::Void))
+        }
+        "tensor_list_load" => {
+            if args.len() != 1 {
+                return Err("tensor_list_load requires 1 argument: path".into());
+            }
+            let path = match &args[0] {
+                Value::String(p) => p.as_str().to_string(),
+                _ => return Err("tensor_list_load: argument must be String path".into()),
+            };
+            let bytes = std::fs::read(&path)
+                .map_err(|e| format!("tensor_list_load error: {}", e))?;
+            let tensors = crate::tensor_snap::decode_list(&bytes)
+                .map_err(|e| format!("tensor_list_load error: {}", e))?;
+            let arr: Vec<Value> = tensors.into_iter().map(Value::Tensor).collect();
+            Ok(Some(Value::Array(Rc::new(arr))))
+        }
+        "tensor_list_hash" => {
+            if args.len() != 1 {
+                return Err("tensor_list_hash requires 1 argument: [tensors]".into());
+            }
+            let tensors = match &args[0] {
+                Value::Array(arr) => {
+                    let mut out = Vec::with_capacity(arr.len());
+                    for v in arr.iter() {
+                        out.push(value_to_tensor(v)?.clone());
+                    }
+                    out
+                }
+                _ => return Err("tensor_list_hash: argument must be Array of Tensors".into()),
+            };
+            let h = crate::tensor_snap::hash_list(&tensors);
+            // Return as a signed i64 so CJC-Lang code can print/compare it
+            // without unsigned support. Cast via `as` preserves bit pattern.
+            Ok(Some(Value::Int(h as i64)))
+        }
+        // ── Adam optimizer fused step (Phase B1) ─────────────────────
+        // Signature: adam_step(w, g, m, v, lr, b1, b2, eps, t) -> [new_w, new_m, new_v]
+        // Applies one bias-corrected Adam update across the whole tensor in
+        // native code. Present in cjc-runtime so both cjc-eval and
+        // cjc-mir-exec dispatch through the same deterministic path —
+        // byte-identical by construction.
+        "adam_step" => {
+            if args.len() != 9 {
+                return Err("adam_step requires 9 arguments: w, g, m, v, lr, b1, b2, eps, t".into());
+            }
+            let w = value_to_tensor(&args[0])?;
+            let g = value_to_tensor(&args[1])?;
+            let m = value_to_tensor(&args[2])?;
+            let v = value_to_tensor(&args[3])?;
+            let lr = match &args[4] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err(format!("adam_step lr must be number, got {}", args[4].type_name())),
+            };
+            let b1 = match &args[5] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err(format!("adam_step b1 must be number, got {}", args[5].type_name())),
+            };
+            let b2 = match &args[6] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err(format!("adam_step b2 must be number, got {}", args[6].type_name())),
+            };
+            let eps = match &args[7] {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => return Err(format!("adam_step eps must be number, got {}", args[7].type_name())),
+            };
+            let t = match &args[8] {
+                Value::Int(i) => *i,
+                Value::Float(f) => *f as i64,
+                _ => return Err(format!("adam_step t must be integer, got {}", args[8].type_name())),
+            };
+            if t < 1 {
+                return Err(format!("adam_step t must be >= 1, got {}", t));
+            }
+            let shape = w.shape();
+            if g.shape() != shape || m.shape() != shape || v.shape() != shape {
+                return Err(format!(
+                    "adam_step: w/g/m/v shapes must match; got w={:?} g={:?} m={:?} v={:?}",
+                    shape, g.shape(), m.shape(), v.shape()
+                ));
+            }
+            let shape_vec: Vec<usize> = shape.to_vec();
+            let w_flat = w.to_vec();
+            let g_flat = g.to_vec();
+            let m_flat = m.to_vec();
+            let v_flat = v.to_vec();
+            let n = w_flat.len();
+            // Bias correction computed once.
+            let bc1 = 1.0 - b1.powf(t as f64);
+            let bc2 = 1.0 - b2.powf(t as f64);
+            let inv_b1 = 1.0 - b1;
+            let inv_b2 = 1.0 - b2;
+            let mut new_w = Vec::with_capacity(n);
+            let mut new_m = Vec::with_capacity(n);
+            let mut new_v = Vec::with_capacity(n);
+            for i in 0..n {
+                let gi = g_flat[i];
+                let new_mi = b1 * m_flat[i] + inv_b1 * gi;
+                let new_vi = b2 * v_flat[i] + inv_b2 * gi * gi;
+                let m_hat = new_mi / bc1;
+                let v_hat = new_vi / bc2;
+                let new_wi = w_flat[i] - lr * m_hat / (v_hat.sqrt() + eps);
+                new_w.push(new_wi);
+                new_m.push(new_mi);
+                new_v.push(new_vi);
+            }
+            let new_w_t = Tensor::from_vec(new_w, &shape_vec)
+                .map_err(|e| format!("adam_step: {}", e))?;
+            let new_m_t = Tensor::from_vec(new_m, &shape_vec)
+                .map_err(|e| format!("adam_step: {}", e))?;
+            let new_v_t = Tensor::from_vec(new_v, &shape_vec)
+                .map_err(|e| format!("adam_step: {}", e))?;
+            Ok(Some(Value::Array(Rc::new(vec![
+                Value::Tensor(new_w_t),
+                Value::Tensor(new_m_t),
+                Value::Tensor(new_v_t),
+            ]))))
         }
         // ── TidyView Phase 1: Data I/O builtins ──────────────────────
         "dir_list" => {
@@ -1827,6 +2388,33 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let labels: Vec<bool> = labels_f.iter().map(|&x| x > 0.5).collect();
             Ok(Some(Value::Float(crate::ml::auc_roc(&scores, &labels)?)))
         }
+        // ── Embedding layer ─────────────────────────────────────────
+        "embedding" => {
+            if args.len() != 2 { return Err("embedding requires 2 arguments (weight, indices)".into()); }
+            let weight = value_to_tensor(&args[0])?;
+            let indices: Vec<i64> = match &args[1] {
+                Value::Array(arr) => arr.iter().map(|v| match v {
+                    Value::Int(i) => Ok(*i),
+                    _ => Err("embedding: indices must be integers".to_string()),
+                }).collect::<Result<Vec<_>, _>>()?,
+                Value::Tensor(t) => t.to_vec().iter().map(|f| Ok::<i64, String>(*f as i64)).collect::<Result<Vec<_>, _>>()?,
+                _ => return Err("embedding: indices must be an array or tensor".into()),
+            };
+            let result = crate::ml::embedding(weight, &indices)?;
+            Ok(Some(Value::Tensor(result)))
+        }
+        // ── Deterministic batch indices ─────────────────────────────
+        "batch_indices" => {
+            if args.len() != 3 { return Err("batch_indices requires 3 arguments (dataset_size, batch_size, seed)".into()); }
+            let ds = match &args[0] { Value::Int(i) => *i as usize, _ => return Err("batch_indices: dataset_size must be int".into()) };
+            let bs = match &args[1] { Value::Int(i) => *i as usize, _ => return Err("batch_indices: batch_size must be int".into()) };
+            let seed = match &args[2] { Value::Int(i) => *i as u64, _ => return Err("batch_indices: seed must be int".into()) };
+            let result = crate::ml::batch_indices(ds, bs, seed);
+            let arr: Vec<Value> = result.into_iter().map(|(s, e)| {
+                Value::Array(Rc::new(vec![Value::Int(s as i64), Value::Int(e as i64)]))
+            }).collect();
+            Ok(Some(Value::Array(Rc::new(arr))))
+        }
         // ── Tensor activation builtins ──────────────────────────────
         "sigmoid" => {
             if args.len() != 1 { return Err("sigmoid requires 1 argument".into()); }
@@ -1853,6 +2441,52 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             if args.len() != 1 { return Err("mish requires 1 argument".into()); }
             let t = value_to_tensor(&args[0])?;
             Ok(Some(Value::Tensor(t.mish())))
+        }
+        // ── relu: scalar + tensor unified ──────────────────────────────
+        "relu" => {
+            if args.len() != 1 { return Err("relu requires 1 argument".into()); }
+            match &args[0] {
+                Value::Float(f) => Ok(Some(Value::Float(f.max(0.0)))),
+                Value::Int(i) => Ok(Some(Value::Int((*i).max(0)))),
+                Value::Tensor(t) => Ok(Some(Value::Tensor(t.relu()))),
+                _ => Err(format!("relu requires a number or Tensor, got {}", args[0].type_name())),
+            }
+        }
+        // ── reshape: reshape a tensor ──────────────────────────────────
+        "reshape" => {
+            if args.len() != 2 { return Err("reshape requires 2 arguments (tensor, shape)".into()); }
+            let t = value_to_tensor(&args[0])?;
+            let shape = value_to_shape(&args[1])?;
+            let result = t.reshape(&shape).map_err(|e| format!("{e}"))?;
+            Ok(Some(Value::Tensor(result)))
+        }
+        // ── tensor_slice: slice a tensor along all dims ────────────────
+        "tensor_slice" => {
+            if args.len() != 3 { return Err("tensor_slice requires 3 arguments (tensor, starts, ends)".into()); }
+            let t = value_to_tensor(&args[0])?;
+            let starts = value_to_usize_vec(&args[1])?;
+            let ends = value_to_usize_vec(&args[2])?;
+            if starts.len() != ends.len() {
+                return Err("tensor_slice: starts and ends must have same length".into());
+            }
+            let ranges: Vec<(usize, usize)> = starts.into_iter().zip(ends).collect();
+            let result = t.slice(&ranges).map_err(|e| format!("{e}"))?;
+            Ok(Some(Value::Tensor(result)))
+        }
+        // ── slice: slice tensor along one dim ──────────────────────────
+        "slice" => {
+            if args.len() != 4 { return Err("slice requires 4 arguments (tensor, dim, start, end)".into()); }
+            let t = value_to_tensor(&args[0])?;
+            let dim = match &args[1] { Value::Int(i) => *i as usize, _ => return Err("slice: dim must be an integer".into()) };
+            let start = match &args[2] { Value::Int(i) => *i as usize, _ => return Err("slice: start must be an integer".into()) };
+            let end = match &args[3] { Value::Int(i) => *i as usize, _ => return Err("slice: end must be an integer".into()) };
+            if dim >= t.ndim() {
+                return Err(format!("slice: dim {} out of bounds for tensor with {} dimensions", dim, t.ndim()));
+            }
+            let mut ranges: Vec<(usize, usize)> = t.shape().iter().map(|&s| (0, s)).collect();
+            ranges[dim] = (start, end);
+            let result = t.slice(&ranges).map_err(|e| format!("{e}"))?;
+            Ok(Some(Value::Tensor(result)))
         }
         "argmax" => {
             if args.len() != 1 { return Err("argmax requires 1 argument".into()); }
@@ -2401,11 +3035,11 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
         }
         "array_pop" => {
             if args.len() != 1 { return Err("array_pop requires 1 arg: array".into()); }
-            let arr = match &args[0] { Value::Array(a) => (**a).clone(), _ => return Err("array_pop: expected Array".into()) };
-            if arr.is_empty() { return Err("array_pop: empty array".into()); }
-            let mut new_arr = arr;
-            let last = new_arr.pop().unwrap();
-            Ok(Some(Value::Tuple(Rc::new(vec![last, Value::Array(Rc::new(new_arr))]))))
+            let mut arr_rc = match &args[0] { Value::Array(a) => Rc::clone(a), _ => return Err("array_pop: expected Array".into()) };
+            if arr_rc.is_empty() { return Err("array_pop: empty array".into()); }
+            // COW: Rc::make_mut only clones if refcount > 1.
+            let last = Rc::make_mut(&mut arr_rc).pop().unwrap();
+            Ok(Some(Value::Tuple(Rc::new(vec![last, Value::Array(arr_rc)]))))
         }
         "array_contains" => {
             if args.len() != 2 { return Err("array_contains requires 2 args: array, value".into()); }
@@ -2416,10 +3050,10 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
         }
         "array_reverse" => {
             if args.len() != 1 { return Err("array_reverse requires 1 arg: array".into()); }
-            let arr = match &args[0] { Value::Array(a) => (**a).clone(), _ => return Err("array_reverse: expected Array".into()) };
-            let mut new_arr = arr;
-            new_arr.reverse();
-            Ok(Some(Value::Array(Rc::new(new_arr))))
+            let mut arr_rc = match &args[0] { Value::Array(a) => Rc::clone(a), _ => return Err("array_reverse: expected Array".into()) };
+            // COW: Rc::make_mut only clones if refcount > 1.
+            Rc::make_mut(&mut arr_rc).reverse();
+            Ok(Some(Value::Array(arr_rc)))
         }
         "array_flatten" => {
             if args.len() != 1 { return Err("array_flatten requires 1 arg: array".into()); }
@@ -3184,6 +3818,7 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let fill = &args[1];
             let result: Vec<Value> = arr.iter().map(|v| {
                 match v {
+                    Value::Na => fill.clone(),
                     Value::Void => fill.clone(),
                     Value::Float(f) if f.is_nan() => fill.clone(),
                     other => other.clone(),
@@ -3192,14 +3827,31 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             Ok(Some(Value::Array(Rc::new(result))))
         }
 
+        "is_na" => {
+            if args.len() != 1 { return Err("is_na requires 1 argument".into()); }
+            let result = matches!(&args[0], Value::Na);
+            Ok(Some(Value::Bool(result)))
+        }
+
         "is_not_null" => {
             if args.len() != 1 { return Err("is_not_null requires 1 argument".into()); }
             let result = match &args[0] {
+                Value::Na => false,
                 Value::Void => false,
                 Value::Float(f) => !f.is_nan(),
                 _ => true,
             };
             Ok(Some(Value::Bool(result)))
+        }
+
+        "drop_na" => {
+            if args.len() != 1 { return Err("drop_na requires 1 argument (array)".into()); }
+            let arr = match &args[0] {
+                Value::Array(a) => a.as_ref().clone(),
+                _ => return Err(format!("drop_na: first argument must be Array, got {}", args[0].type_name())),
+            };
+            let result: Vec<Value> = arr.into_iter().filter(|v| !matches!(v, Value::Na)).collect();
+            Ok(Some(Value::Array(Rc::new(result))))
         }
 
         "interpolate_linear" => {
@@ -3261,23 +3913,36 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
         }
 
         "coalesce" => {
-            if args.len() != 2 { return Err("coalesce requires 2 arguments (array_a, array_b)".into()); }
-            let a = match &args[0] {
-                Value::Array(a) => a.as_ref().clone(),
-                _ => return Err(format!("coalesce: first argument must be Array, got {}", args[0].type_name())),
-            };
-            let b = match &args[1] {
-                Value::Array(b) => b.as_ref().clone(),
-                _ => return Err(format!("coalesce: second argument must be Array, got {}", args[1].type_name())),
-            };
-            if a.len() != b.len() {
-                return Err(format!("coalesce: arrays must have equal length, got {} and {}", a.len(), b.len()));
+            if args.is_empty() { return Err("coalesce requires at least 1 argument".into()); }
+            // Scalar mode: coalesce(val1, val2, ...) → first non-NA/non-Void
+            let first_is_array = matches!(&args[0], Value::Array(_));
+            if args.len() == 2 && first_is_array {
+                // Array mode: coalesce(array_a, array_b) → element-wise
+                let a = match &args[0] {
+                    Value::Array(a) => a.as_ref().clone(),
+                    _ => unreachable!(),
+                };
+                let b = match &args[1] {
+                    Value::Array(b) => b.as_ref().clone(),
+                    _ => return Err(format!("coalesce: second argument must be Array, got {}", args[1].type_name())),
+                };
+                if a.len() != b.len() {
+                    return Err(format!("coalesce: arrays must have equal length, got {} and {}", a.len(), b.len()));
+                }
+                let result: Vec<Value> = a.iter().zip(b.iter()).map(|(va, vb)| {
+                    let is_null_a = matches!(va, Value::Na) || matches!(va, Value::Void) || matches!(va, Value::Float(f) if f.is_nan());
+                    if is_null_a { vb.clone() } else { va.clone() }
+                }).collect();
+                Ok(Some(Value::Array(Rc::new(result))))
+            } else {
+                // Scalar mode: return first non-NA, non-Void value
+                for arg in args {
+                    let is_null = matches!(arg, Value::Na) || matches!(arg, Value::Void) || matches!(arg, Value::Float(f) if f.is_nan());
+                    if !is_null { return Ok(Some(arg.clone())); }
+                }
+                // All null → return last arg (or NA)
+                Ok(Some(args.last().cloned().unwrap_or(Value::Na)))
             }
-            let result: Vec<Value> = a.iter().zip(b.iter()).map(|(va, vb)| {
-                let is_null_a = matches!(va, Value::Void) || matches!(va, Value::Float(f) if f.is_nan());
-                if is_null_a { vb.clone() } else { va.clone() }
-            }).collect();
-            Ok(Some(Value::Array(Rc::new(result))))
         }
 
         "cut" => {
@@ -3405,6 +4070,443 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 data.iter().map(|&x| Value::Float((x - med) / iqr_val)).collect()
             };
             Ok(Some(Value::Array(Rc::new(result))))
+        }
+
+        // ── Categorical / Factor builtins ───────────────────────────────────
+        "as_factor" => {
+            // Convert a string array to a Factor struct: { levels: [String], codes: [Int] }
+            if args.len() != 1 { return Err("as_factor requires 1 argument (string array)".into()); }
+            let arr = match &args[0] {
+                Value::Array(a) => a.as_ref().clone(),
+                _ => return Err("as_factor: argument must be Array of strings".into()),
+            };
+            // Build levels in order of first appearance (deterministic)
+            let mut levels: Vec<String> = Vec::new();
+            let mut level_index = std::collections::BTreeMap::new();
+            let mut codes: Vec<Value> = Vec::with_capacity(arr.len());
+            for item in &arr {
+                let s = match item {
+                    Value::String(s) => s.as_str().to_string(),
+                    _ => format!("{}", item),
+                };
+                let idx = if let Some(&idx) = level_index.get(&s) {
+                    idx
+                } else {
+                    let idx = levels.len() as i64;
+                    level_index.insert(s.clone(), idx);
+                    levels.push(s);
+                    idx
+                };
+                codes.push(Value::Int(idx));
+            }
+            let level_values: Vec<Value> = levels.into_iter()
+                .map(|s| Value::String(Rc::new(s)))
+                .collect();
+            let mut fields = std::collections::BTreeMap::new();
+            fields.insert("__type".to_string(), Value::String(Rc::new("Factor".to_string())));
+            fields.insert("levels".to_string(), Value::Array(Rc::new(level_values)));
+            fields.insert("codes".to_string(), Value::Array(Rc::new(codes)));
+            Ok(Some(Value::Struct { name: "Factor".to_string(), fields }))
+        }
+
+        "factor_levels" => {
+            // Extract the levels array from a Factor struct
+            if args.len() != 1 { return Err("factor_levels requires 1 argument (Factor)".into()); }
+            match &args[0] {
+                Value::Struct { name, fields } if name == "Factor" => {
+                    match fields.get("levels") {
+                        Some(v) => Ok(Some(v.clone())),
+                        None => Err("factor_levels: Factor missing 'levels' field".into()),
+                    }
+                }
+                _ => Err("factor_levels: argument must be a Factor".into()),
+            }
+        }
+
+        "factor_codes" => {
+            // Extract the codes array from a Factor struct
+            if args.len() != 1 { return Err("factor_codes requires 1 argument (Factor)".into()); }
+            match &args[0] {
+                Value::Struct { name, fields } if name == "Factor" => {
+                    match fields.get("codes") {
+                        Some(v) => Ok(Some(v.clone())),
+                        None => Err("factor_codes: Factor missing 'codes' field".into()),
+                    }
+                }
+                _ => Err("factor_codes: argument must be a Factor".into()),
+            }
+        }
+
+        "fct_relevel" => {
+            // Reorder factor levels: fct_relevel(factor, new_order_array)
+            if args.len() != 2 { return Err("fct_relevel requires 2 arguments (Factor, new_level_order)".into()); }
+            let (old_levels, old_codes) = match &args[0] {
+                Value::Struct { name, fields } if name == "Factor" => {
+                    let levels = match fields.get("levels") {
+                        Some(Value::Array(a)) => a.as_ref().clone(),
+                        _ => return Err("fct_relevel: Factor missing 'levels'".into()),
+                    };
+                    let codes = match fields.get("codes") {
+                        Some(Value::Array(a)) => a.as_ref().clone(),
+                        _ => return Err("fct_relevel: Factor missing 'codes'".into()),
+                    };
+                    (levels, codes)
+                }
+                _ => return Err("fct_relevel: first argument must be a Factor".into()),
+            };
+            let new_order = match &args[1] {
+                Value::Array(a) => a.as_ref().clone(),
+                _ => return Err("fct_relevel: second argument must be array of level strings".into()),
+            };
+            // Build old level strings
+            let old_strs: Vec<String> = old_levels.iter().map(|v| match v {
+                Value::String(s) => s.as_str().to_string(),
+                _ => format!("{}", v),
+            }).collect();
+            // Build new order strings
+            let new_strs: Vec<String> = new_order.iter().map(|v| match v {
+                Value::String(s) => s.as_str().to_string(),
+                _ => format!("{}", v),
+            }).collect();
+            // Build mapping: old_index → new_index
+            let mut remap = std::collections::BTreeMap::new();
+            for (old_idx, s) in old_strs.iter().enumerate() {
+                if let Some(new_idx) = new_strs.iter().position(|ns| ns == s) {
+                    remap.insert(old_idx as i64, new_idx as i64);
+                }
+            }
+            // Recode
+            let new_codes: Vec<Value> = old_codes.iter().map(|v| {
+                if let Value::Int(c) = v {
+                    Value::Int(remap.get(c).copied().unwrap_or(*c))
+                } else { v.clone() }
+            }).collect();
+            let new_level_values: Vec<Value> = new_strs.into_iter()
+                .map(|s| Value::String(Rc::new(s)))
+                .collect();
+            let mut fields = std::collections::BTreeMap::new();
+            fields.insert("__type".to_string(), Value::String(Rc::new("Factor".to_string())));
+            fields.insert("levels".to_string(), Value::Array(Rc::new(new_level_values)));
+            fields.insert("codes".to_string(), Value::Array(Rc::new(new_codes)));
+            Ok(Some(Value::Struct { name: "Factor".to_string(), fields }))
+        }
+
+        "fct_lump" => {
+            // Lump rare factor levels into "Other": fct_lump(factor, n)
+            // Keeps the top `n` most frequent levels, lumps rest into "Other"
+            if args.len() != 2 { return Err("fct_lump requires 2 arguments (Factor, n)".into()); }
+            let (old_levels, old_codes) = match &args[0] {
+                Value::Struct { name, fields } if name == "Factor" => {
+                    let levels = match fields.get("levels") {
+                        Some(Value::Array(a)) => a.as_ref().clone(),
+                        _ => return Err("fct_lump: Factor missing 'levels'".into()),
+                    };
+                    let codes = match fields.get("codes") {
+                        Some(Value::Array(a)) => a.as_ref().clone(),
+                        _ => return Err("fct_lump: Factor missing 'codes'".into()),
+                    };
+                    (levels, codes)
+                }
+                _ => return Err("fct_lump: first argument must be a Factor".into()),
+            };
+            let n = match &args[1] {
+                Value::Int(n) => *n as usize,
+                _ => return Err("fct_lump: second argument must be Int".into()),
+            };
+            // Count frequency of each code
+            let mut freq = std::collections::BTreeMap::new();
+            for v in &old_codes {
+                if let Value::Int(c) = v { *freq.entry(*c).or_insert(0usize) += 1; }
+            }
+            // Sort by frequency descending (then by code for determinism)
+            let mut freq_vec: Vec<(i64, usize)> = freq.into_iter().collect();
+            freq_vec.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            // Top n codes to keep
+            let keep_codes: std::collections::BTreeSet<i64> = freq_vec.iter().take(n).map(|(c, _)| *c).collect();
+            // Build new levels: kept levels + "Other"
+            let old_strs: Vec<String> = old_levels.iter().map(|v| match v {
+                Value::String(s) => s.as_str().to_string(),
+                _ => format!("{}", v),
+            }).collect();
+            let mut new_levels: Vec<String> = Vec::new();
+            let mut code_remap = std::collections::BTreeMap::new();
+            for (old_idx, s) in old_strs.iter().enumerate() {
+                if keep_codes.contains(&(old_idx as i64)) {
+                    let new_idx = new_levels.len() as i64;
+                    code_remap.insert(old_idx as i64, new_idx);
+                    new_levels.push(s.clone());
+                }
+            }
+            let other_idx = new_levels.len() as i64;
+            new_levels.push("Other".to_string());
+            // Recode
+            let new_codes: Vec<Value> = old_codes.iter().map(|v| {
+                if let Value::Int(c) = v {
+                    Value::Int(*code_remap.get(c).unwrap_or(&other_idx))
+                } else { v.clone() }
+            }).collect();
+            let new_level_values: Vec<Value> = new_levels.into_iter()
+                .map(|s| Value::String(Rc::new(s)))
+                .collect();
+            let mut fields = std::collections::BTreeMap::new();
+            fields.insert("__type".to_string(), Value::String(Rc::new("Factor".to_string())));
+            fields.insert("levels".to_string(), Value::Array(Rc::new(new_level_values)));
+            fields.insert("codes".to_string(), Value::Array(Rc::new(new_codes)));
+            Ok(Some(Value::Struct { name: "Factor".to_string(), fields }))
+        }
+
+        "fct_count" => {
+            // Count observations per level: returns array of (level, count) tuples
+            if args.len() != 1 { return Err("fct_count requires 1 argument (Factor)".into()); }
+            let (levels, codes) = match &args[0] {
+                Value::Struct { name, fields } if name == "Factor" => {
+                    let levels = match fields.get("levels") {
+                        Some(Value::Array(a)) => a.as_ref().clone(),
+                        _ => return Err("fct_count: Factor missing 'levels'".into()),
+                    };
+                    let codes = match fields.get("codes") {
+                        Some(Value::Array(a)) => a.as_ref().clone(),
+                        _ => return Err("fct_count: Factor missing 'codes'".into()),
+                    };
+                    (levels, codes)
+                }
+                _ => return Err("fct_count: argument must be a Factor".into()),
+            };
+            let mut freq = std::collections::BTreeMap::new();
+            for v in &codes {
+                if let Value::Int(c) = v { *freq.entry(*c).or_insert(0i64) += 1; }
+            }
+            let result: Vec<Value> = levels.iter().enumerate().map(|(i, lev)| {
+                let count = freq.get(&(i as i64)).copied().unwrap_or(0);
+                Value::Tuple(Rc::new(vec![lev.clone(), Value::Int(count)]))
+            }).collect();
+            Ok(Some(Value::Array(Rc::new(result))))
+        }
+
+        // ── Normality Tests ──────────────────────────────────────────────────
+        "jarque_bera" => {
+            if args.len() != 1 { return Err("jarque_bera requires 1 argument (data array)".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let r = crate::hypothesis::jarque_bera(&data)?;
+            let mut fields = std::collections::BTreeMap::new();
+            fields.insert("statistic".to_string(), Value::Float(r.statistic));
+            fields.insert("p_value".to_string(), Value::Float(r.p_value));
+            Ok(Some(Value::Struct { name: "JarqueBeraResult".to_string(), fields }))
+        }
+
+        "anderson_darling" => {
+            if args.len() != 1 { return Err("anderson_darling requires 1 argument (data array)".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let r = crate::hypothesis::anderson_darling(&data)?;
+            let mut fields = std::collections::BTreeMap::new();
+            fields.insert("statistic".to_string(), Value::Float(r.statistic));
+            fields.insert("p_value".to_string(), Value::Float(r.p_value));
+            Ok(Some(Value::Struct { name: "AndersonDarlingResult".to_string(), fields }))
+        }
+
+        "ks_test" => {
+            if args.len() != 1 { return Err("ks_test requires 1 argument (data array)".into()); }
+            let data = value_to_f64_vec(&args[0])?;
+            let r = crate::hypothesis::ks_test_normal(&data)?;
+            let mut fields = std::collections::BTreeMap::new();
+            fields.insert("statistic".to_string(), Value::Float(r.statistic));
+            fields.insert("p_value".to_string(), Value::Float(r.p_value));
+            Ok(Some(Value::Struct { name: "KSResult".to_string(), fields }))
+        }
+
+        // ── Effect Sizes ────────────────────────────────────────────────────
+        "cohens_d" => {
+            if args.len() != 2 { return Err("cohens_d requires 2 arguments (x, y)".into()); }
+            let x = value_to_f64_vec(&args[0])?;
+            let y = value_to_f64_vec(&args[1])?;
+            let d = crate::hypothesis::cohens_d(&x, &y)?;
+            Ok(Some(Value::Float(d)))
+        }
+
+        "eta_squared" => {
+            if args.len() < 2 { return Err("eta_squared requires at least 2 group arguments".into()); }
+            let groups: Vec<Vec<f64>> = args.iter().map(|a| value_to_f64_vec(a)).collect::<Result<Vec<_>, _>>()?;
+            let refs: Vec<&[f64]> = groups.iter().map(|g| g.as_slice()).collect();
+            let es = crate::hypothesis::eta_squared(&refs)?;
+            Ok(Some(Value::Float(es)))
+        }
+
+        "cramers_v" => {
+            // cramers_v(table_flat, nrows, ncols)
+            if args.len() != 3 { return Err("cramers_v requires 3 arguments (table, nrows, ncols)".into()); }
+            let table = value_to_f64_vec(&args[0])?;
+            let nrows = match &args[1] { Value::Int(n) => *n as usize, _ => return Err("cramers_v: nrows must be Int".into()) };
+            let ncols = match &args[2] { Value::Int(n) => *n as usize, _ => return Err("cramers_v: ncols must be Int".into()) };
+            let v = crate::hypothesis::cramers_v(&table, nrows, ncols)?;
+            Ok(Some(Value::Float(v)))
+        }
+
+        // ── Variance Tests ──────────────────────────────────────────────────
+        "levene_test" => {
+            if args.len() < 2 { return Err("levene_test requires at least 2 group arguments".into()); }
+            let groups: Vec<Vec<f64>> = args.iter().map(|a| value_to_f64_vec(a)).collect::<Result<Vec<_>, _>>()?;
+            let refs: Vec<&[f64]> = groups.iter().map(|g| g.as_slice()).collect();
+            let (w, p) = crate::hypothesis::levene_test(&refs)?;
+            let mut fields = std::collections::BTreeMap::new();
+            fields.insert("statistic".to_string(), Value::Float(w));
+            fields.insert("p_value".to_string(), Value::Float(p));
+            Ok(Some(Value::Struct { name: "LeveneResult".to_string(), fields }))
+        }
+
+        "bartlett_test" => {
+            if args.len() < 2 { return Err("bartlett_test requires at least 2 group arguments".into()); }
+            let groups: Vec<Vec<f64>> = args.iter().map(|a| value_to_f64_vec(a)).collect::<Result<Vec<_>, _>>()?;
+            let refs: Vec<&[f64]> = groups.iter().map(|g| g.as_slice()).collect();
+            let (t, p) = crate::hypothesis::bartlett_test(&refs)?;
+            let mut fields = std::collections::BTreeMap::new();
+            fields.insert("statistic".to_string(), Value::Float(t));
+            fields.insert("p_value".to_string(), Value::Float(p));
+            Ok(Some(Value::Struct { name: "BartlettResult".to_string(), fields }))
+        }
+
+        // ── Sampling & Cross-Validation builtins ────────────────────────────
+        "latin_hypercube" => {
+            // latin_hypercube(n, dims, seed) → Tensor [n, dims]
+            if args.len() != 3 { return Err("latin_hypercube requires 3 arguments (n, dims, seed)".into()); }
+            let n = match &args[0] { Value::Int(n) => *n as usize, _ => return Err("latin_hypercube: n must be Int".into()) };
+            let dims = match &args[1] { Value::Int(d) => *d as usize, _ => return Err("latin_hypercube: dims must be Int".into()) };
+            let seed = match &args[2] { Value::Int(s) => *s as u64, _ => return Err("latin_hypercube: seed must be Int".into()) };
+            let t = crate::distributions::latin_hypercube_sample(n, dims, seed);
+            Ok(Some(Value::Tensor(t)))
+        }
+
+        "sobol_sequence" => {
+            // sobol_sequence(n, dims) → Tensor [n, dims]
+            if args.len() != 2 { return Err("sobol_sequence requires 2 arguments (n, dims)".into()); }
+            let n = match &args[0] { Value::Int(n) => *n as usize, _ => return Err("sobol_sequence: n must be Int".into()) };
+            let dims = match &args[1] { Value::Int(d) => *d as usize, _ => return Err("sobol_sequence: dims must be Int".into()) };
+            let t = crate::distributions::sobol_sequence(n, dims);
+            Ok(Some(Value::Tensor(t)))
+        }
+
+        "train_test_split" => {
+            // train_test_split(n, test_fraction, seed) → (train_indices, test_indices)
+            if args.len() != 3 { return Err("train_test_split requires 3 arguments (n, test_fraction, seed)".into()); }
+            let n = match &args[0] { Value::Int(n) => *n as usize, _ => return Err("train_test_split: n must be Int".into()) };
+            let frac = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("train_test_split: test_fraction must be Float".into()) };
+            let seed = match &args[2] { Value::Int(s) => *s as u64, _ => return Err("train_test_split: seed must be Int".into()) };
+            let (train, test) = crate::ml::train_test_split(n, frac, seed);
+            let train_vals: Vec<Value> = train.into_iter().map(|i| Value::Int(i as i64)).collect();
+            let test_vals: Vec<Value> = test.into_iter().map(|i| Value::Int(i as i64)).collect();
+            Ok(Some(Value::Tuple(Rc::new(vec![
+                Value::Array(Rc::new(train_vals)),
+                Value::Array(Rc::new(test_vals)),
+            ]))))
+        }
+
+        "kfold_indices" => {
+            // kfold_indices(n, k, seed) → array of (train_indices, test_indices) tuples
+            if args.len() != 3 { return Err("kfold_indices requires 3 arguments (n, k, seed)".into()); }
+            let n = match &args[0] { Value::Int(n) => *n as usize, _ => return Err("kfold_indices: n must be Int".into()) };
+            let k = match &args[1] { Value::Int(k) => *k as usize, _ => return Err("kfold_indices: k must be Int".into()) };
+            let seed = match &args[2] { Value::Int(s) => *s as u64, _ => return Err("kfold_indices: seed must be Int".into()) };
+            let folds = crate::ml::kfold_indices(n, k, seed);
+            let result: Vec<Value> = folds.into_iter().map(|(train, test)| {
+                let train_vals: Vec<Value> = train.into_iter().map(|i| Value::Int(i as i64)).collect();
+                let test_vals: Vec<Value> = test.into_iter().map(|i| Value::Int(i as i64)).collect();
+                Value::Tuple(Rc::new(vec![
+                    Value::Array(Rc::new(train_vals)),
+                    Value::Array(Rc::new(test_vals)),
+                ]))
+            }).collect();
+            Ok(Some(Value::Array(Rc::new(result))))
+        }
+
+        "bootstrap" => {
+            // bootstrap(data, n_resamples, stat_fn, seed) → Struct { point, ci_lower, ci_upper, se }
+            // stat_fn: 0=mean, 1=median
+            if args.len() != 4 { return Err("bootstrap requires 4 arguments (data, n_resamples, stat_fn, seed)".into()); }
+            let data = match &args[0] {
+                Value::Array(a) => {
+                    let mut v = Vec::with_capacity(a.len());
+                    for val in a.iter() {
+                        match val {
+                            Value::Float(f) => v.push(*f),
+                            Value::Int(i) => v.push(*i as f64),
+                            _ => return Err("bootstrap: data elements must be numeric".into()),
+                        }
+                    }
+                    v
+                }
+                _ => return Err("bootstrap: data must be an array".into()),
+            };
+            let n_resamples = match &args[1] { Value::Int(n) => *n as usize, _ => return Err("bootstrap: n_resamples must be Int".into()) };
+            let stat_fn = match &args[2] { Value::Int(s) => *s as usize, _ => return Err("bootstrap: stat_fn must be Int (0=mean, 1=median)".into()) };
+            let seed = match &args[3] { Value::Int(s) => *s as u64, _ => return Err("bootstrap: seed must be Int".into()) };
+            let (point, ci_lower, ci_upper, se) = crate::ml::bootstrap(&data, n_resamples, stat_fn, seed)?;
+            let mut fields = std::collections::BTreeMap::new();
+            fields.insert("point".to_string(), Value::Float(point));
+            fields.insert("ci_lower".to_string(), Value::Float(ci_lower));
+            fields.insert("ci_upper".to_string(), Value::Float(ci_upper));
+            fields.insert("se".to_string(), Value::Float(se));
+            Ok(Some(Value::Struct {
+                name: "BootstrapResult".into(),
+                fields,
+            }))
+        }
+        "permutation_test" => {
+            // permutation_test(x, y, n_perms, seed) → Struct { observed_diff, p_value }
+            if args.len() != 4 { return Err("permutation_test requires 4 arguments (x, y, n_perms, seed)".into()); }
+            let extract_floats = |val: &Value, name: &str| -> Result<Vec<f64>, String> {
+                match val {
+                    Value::Array(a) => {
+                        let mut v = Vec::with_capacity(a.len());
+                        for el in a.iter() {
+                            match el {
+                                Value::Float(f) => v.push(*f),
+                                Value::Int(i) => v.push(*i as f64),
+                                _ => return Err(format!("permutation_test: {} elements must be numeric", name)),
+                            }
+                        }
+                        Ok(v)
+                    }
+                    _ => Err(format!("permutation_test: {} must be an array", name)),
+                }
+            };
+            let x = extract_floats(&args[0], "x")?;
+            let y = extract_floats(&args[1], "y")?;
+            let n_perms = match &args[2] { Value::Int(n) => *n as usize, _ => return Err("permutation_test: n_perms must be Int".into()) };
+            let seed = match &args[3] { Value::Int(s) => *s as u64, _ => return Err("permutation_test: seed must be Int".into()) };
+            let (observed, p_value) = crate::ml::permutation_test(&x, &y, n_perms, seed)?;
+            let mut fields = std::collections::BTreeMap::new();
+            fields.insert("observed_diff".to_string(), Value::Float(observed));
+            fields.insert("p_value".to_string(), Value::Float(p_value));
+            Ok(Some(Value::Struct {
+                name: "PermutationResult".into(),
+                fields,
+            }))
+        }
+
+        "stratified_split" => {
+            // stratified_split(labels, test_fraction, seed) → (train_indices, test_indices)
+            if args.len() != 3 { return Err("stratified_split requires 3 arguments (labels, test_fraction, seed)".into()); }
+            let labels = match &args[0] {
+                Value::Array(a) => {
+                    let mut v = Vec::with_capacity(a.len());
+                    for val in a.iter() {
+                        match val {
+                            Value::Int(i) => v.push(*i),
+                            _ => return Err("stratified_split: labels must be integer array".into()),
+                        }
+                    }
+                    v
+                }
+                _ => return Err("stratified_split: labels must be an array".into()),
+            };
+            let frac = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err("stratified_split: test_fraction must be Float".into()) };
+            let seed = match &args[2] { Value::Int(s) => *s as u64, _ => return Err("stratified_split: seed must be Int".into()) };
+            let (train, test) = crate::ml::stratified_split(&labels, frac, seed);
+            let train_vals: Vec<Value> = train.into_iter().map(|i| Value::Int(i as i64)).collect();
+            let test_vals: Vec<Value> = test.into_iter().map(|i| Value::Int(i as i64)).collect();
+            Ok(Some(Value::Tuple(Rc::new(vec![
+                Value::Array(Rc::new(train_vals)),
+                Value::Array(Rc::new(test_vals)),
+            ]))))
         }
 
         _ => Ok(None), // Not a shared builtin

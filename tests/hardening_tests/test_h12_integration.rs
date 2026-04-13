@@ -249,10 +249,10 @@ fn main() {
 #[test]
 fn h12_module_single_file_pipeline() {
     let dir = setup_test_dir(&[(
-        "main.cjc",
+        "main.cjcl",
         "fn double(x: i64) -> i64 { x * 2 }\nprint(double(21));",
     )]);
-    let entry = dir.path().join("main.cjc");
+    let entry = dir.path().join("main.cjcl");
     let (_val, executor) =
         cjc_mir_exec::run_program_with_modules_executor(&entry, 42).unwrap();
     assert_eq!(executor.output, vec!["42"]);
@@ -261,11 +261,11 @@ fn h12_module_single_file_pipeline() {
 #[test]
 fn h12_module_graph_deterministic() {
     let dir = setup_test_dir(&[
-        ("main.cjc", "import alpha\nimport beta\nlet x = 1;"),
-        ("alpha.cjc", "fn a_fn() -> i64 { 1 }"),
-        ("beta.cjc", "fn b_fn() -> i64 { 2 }"),
+        ("main.cjcl", "import alpha\nimport beta\nlet x = 1;"),
+        ("alpha.cjcl", "fn a_fn() -> i64 { 1 }"),
+        ("beta.cjcl", "fn b_fn() -> i64 { 2 }"),
     ]);
-    let entry = dir.path().join("main.cjc");
+    let entry = dir.path().join("main.cjcl");
 
     let g1 = cjc_module::build_module_graph(&entry).unwrap();
     let g2 = cjc_module::build_module_graph(&entry).unwrap();
@@ -279,10 +279,10 @@ fn h12_module_graph_deterministic() {
 #[test]
 fn h12_module_topo_order() {
     let dir = setup_test_dir(&[
-        ("main.cjc", "import lib\nlet x = 1;"),
-        ("lib.cjc", "fn helper() -> i64 { 42 }"),
+        ("main.cjcl", "import lib\nlet x = 1;"),
+        ("lib.cjcl", "fn helper() -> i64 { 42 }"),
     ]);
-    let entry = dir.path().join("main.cjc");
+    let entry = dir.path().join("main.cjcl");
     let graph = cjc_module::build_module_graph(&entry).unwrap();
     let order = graph.topological_order().unwrap();
     let lib_pos = order.iter().position(|m| m.0 == "lib").unwrap();
@@ -293,10 +293,10 @@ fn h12_module_topo_order() {
 #[test]
 fn h12_module_prefix_mangling() {
     let dir = setup_test_dir(&[
-        ("main.cjc", "import utils\nlet x = 1;"),
-        ("utils.cjc", "fn format_number(n: i64) -> i64 { n }"),
+        ("main.cjcl", "import utils\nlet x = 1;"),
+        ("utils.cjcl", "fn format_number(n: i64) -> i64 { n }"),
     ]);
-    let entry = dir.path().join("main.cjc");
+    let entry = dir.path().join("main.cjcl");
     let graph = cjc_module::build_module_graph(&entry).unwrap();
     let merged = cjc_module::merge_programs(&graph).unwrap();
     let names: Vec<&str> = merged.functions.iter().map(|f| f.name.as_str()).collect();

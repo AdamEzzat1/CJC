@@ -6,15 +6,22 @@
 /// A documentation entry for a Vizor builtin or method.
 #[derive(Debug, Clone)]
 pub struct DocEntry {
+    /// Function or method name (e.g., `"vizor_plot"`, `"geom_point"`).
     pub name: &'static str,
+    /// Type signature string for display (e.g., `".geom_point() -> VizorPlot"`).
     pub signature: &'static str,
+    /// Human-readable description of the function's purpose.
     pub description: &'static str,
+    /// Whether this entry is a free function or a method.
     pub kind: DocKind,
 }
 
+/// Whether a documentation entry describes a free function or a method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocKind {
+    /// A free-standing builtin function (e.g., `vizor_plot`).
     Function,
+    /// A method on `VizorPlot` (e.g., `.geom_point()`).
     Method,
 }
 

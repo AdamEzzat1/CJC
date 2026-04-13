@@ -1,0 +1,37 @@
+CJC-Lang Chess RL v2.2 — Phase D training summary
+=====================================================
+episodes:              60
+max_moves:             80
+lr:                    0.001
+temp_start:            1.2
+temp_end:              0.8
+penalty_per_ply:       0.001
+eval_temp:             0.15
+backend:               cjc-eval (tree-walk)
+wall clock:            4387.0s (73.12 min)
+
+vs random (20 games, stochastic eval):
+wins/draws/losses: 0/20/0
+win rate:          0.500
+
+vs material-greedy (10 games, stochastic eval):
+wins/draws/losses: 0/9/1
+win rate:          0.450
+
+snapshot gauntlet (2 snapshots, 4 games each, K=32):
+wins/draws/losses: 0/8/0
+final Elo:         1000.0
+Elo gain:          +0.0
+
+training signal:
+non-zero terminals: 2/60
+repetition draws:   0/60
+
+final weight hash:     3194409110565838047
+
+Tier 1 gate check:
+[MISS] ≥60%% vs random     (measured: 0.500)
+[MISS] ≥55%% vs greedy     (measured: 0.450)
+[MISS] Elo gain ≥ +25      (measured: +0.0)
+[MISS] ≥20/60 non-zero     (measured: 2/60)
+[MISS] ≤45 min wall clock  (measured: 73.12 min)

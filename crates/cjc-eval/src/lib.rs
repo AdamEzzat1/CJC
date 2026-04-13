@@ -1,13 +1,31 @@
-//! CJC Tree-Walk Interpreter
+//! CJC Tree-Walk Interpreter (v1 executor).
 //!
-//! Evaluates a CJC `Program` AST by walking the tree directly. Supports:
+//! This crate provides the AST tree-walk interpreter for CJC programs.
+//! It evaluates a [`cjc_ast::Program`] by recursively walking the AST nodes.
+//!
+//! # Supported features
+//!
 //! - Arithmetic on integers, floats, booleans, and tensors
-//! - User-defined functions with lexical scoping
-//! - Structs (value types) and field access
-//! - Built-in functions: print, Tensor constructors, matmul, Buffer.alloc
+//! - User-defined functions with lexical scoping and closures
+//! - Structs, records, enums (value types) and field access
+//! - Built-in functions: `print`, `Tensor` constructors, `matmul`, `Buffer.alloc`
 //! - Pipe operator (`|>`)
-//! - If/else, while loops, early return
-//! - Reproducible RNG via `cjc_repro::Rng`
+//! - If/else, while loops, for loops, early return, break, continue
+//! - Match expressions with structural destructuring
+//! - Reproducible RNG via [`cjc_repro::Rng`] (deterministic seed threading)
+//! - DataFrame / tidy DSL operations via [`cjc_data`]
+//! - Snap memoization cache for pure-function results
+//!
+//! # Parity requirement
+//!
+//! Every program must produce **bit-identical** results whether executed by this
+//! tree-walk interpreter or by the MIR register-machine executor
+//! ([`cjc_mir_exec`]). This is enforced by parity gate tests (G-1 / G-2).
+//!
+//! # Entry points
+//!
+//! - [`Interpreter::new`] + [`Interpreter::exec`] for single-file programs.
+//! - [`run_program_with_modules_eval`] for multi-file module programs.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -29,7 +47,11 @@ use cjc_vizor::dispatch as vizor_dispatch;
 // Error type
 // ---------------------------------------------------------------------------
 
-/// Evaluation errors, including a `Return` variant used for control flow.
+/// Runtime errors produced by the tree-walk interpreter.
+///
+/// Includes control-flow signals ([`EvalError::Return`], [`EvalError::Break`],
+/// [`EvalError::Continue`]) that are caught internally by function and loop
+/// boundaries, as well as genuine runtime failures ([`EvalError::Runtime`]).
 #[derive(Debug)]
 pub enum EvalError {
     /// A `return` statement was executed. The interpreter unwinds the call
@@ -69,7 +91,11 @@ impl From<cjc_runtime::RuntimeError> for EvalError {
     }
 }
 
-/// Convenience type alias.
+/// Result type alias for interpreter operations.
+///
+/// Returns a [`Value`] on success or an [`EvalError`] on failure. Control-flow
+/// signals (`Return`, `Break`, `Continue`) propagate as `Err` variants and are
+/// caught at function and loop boundaries.
 pub type EvalResult = Result<Value, EvalError>;
 
 // ---------------------------------------------------------------------------
@@ -125,7 +151,26 @@ fn value_deep_eq(a: &Value, b: &Value) -> bool {
 // Interpreter
 // ---------------------------------------------------------------------------
 
-/// Tree-walk interpreter for CJC programs.
+/// Tree-walk interpreter for CJC programs (v1 executor).
+///
+/// Walk the AST directly, evaluating expressions and executing statements in
+/// a scope-stack environment. This is the reference executor that the MIR
+/// executor ([`cjc_mir_exec::MirExecutor`]) must match bit-for-bit on every
+/// program+seed pair (parity gate G-1 / G-2).
+///
+/// # Determinism
+///
+/// All random state is threaded through a [`cjc_repro::Rng`] (SplitMix64)
+/// seeded at construction time. Floating-point reductions use Kahan or
+/// binned accumulators. Collections use [`BTreeMap`] / [`BTreeSet`] to
+/// guarantee deterministic iteration order.
+///
+/// # Usage
+///
+/// ```ignore
+/// let mut interp = Interpreter::new(42);
+/// let result = interp.exec(&program)?;
+/// ```
 pub struct Interpreter {
     /// User-defined functions indexed by name.
     functions: BTreeMap<String, FnDecl>,
@@ -168,7 +213,16 @@ pub struct Interpreter {
 }
 
 impl Interpreter {
-    /// Create a new interpreter with the given RNG seed.
+    /// Create a new interpreter with the given deterministic RNG seed.
+    ///
+    /// The seed is forwarded to [`cjc_repro::Rng::seeded`] and determines all
+    /// pseudo-random behavior (e.g. `rand()`, `categorical_sample`). Two
+    /// interpreters created with the same seed will produce bit-identical
+    /// output for the same program.
+    ///
+    /// # Arguments
+    ///
+    /// * `seed` - A 64-bit seed for the deterministic SplitMix64 RNG.
     pub fn new(seed: u64) -> Self {
         let mut variant_to_enum = BTreeMap::new();
         // Register prelude variant names
@@ -204,6 +258,16 @@ impl Interpreter {
         self.scopes.pop();
     }
 
+    /// Bind a variable in the innermost (current) scope.
+    ///
+    /// If a variable with the same name already exists in the current scope it
+    /// is overwritten. Variables in outer scopes are not affected (use
+    /// [`Interpreter::assign`](Self) for mutation of existing bindings).
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Variable name.
+    /// * `val`  - Value to bind.
     pub fn define(&mut self, name: &str, val: Value) {
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string(), val);
@@ -266,7 +330,32 @@ impl Interpreter {
 
     // -- Program execution --------------------------------------------------
 
-    /// Execute a full program.
+    /// Execute a full [`Program`] AST.
+    ///
+    /// Performs two passes over the top-level declarations:
+    ///
+    /// 1. **Registration pass** -- register all function, struct, enum, record,
+    ///    trait, and impl declarations so they are available during execution.
+    /// 2. **Execution pass** -- evaluate top-level `let`, `const`, and
+    ///    statement declarations in source order.
+    ///
+    /// After both passes, if a user-defined `main()` function exists it is
+    /// called and its return value becomes the program result. Otherwise the
+    /// value of the last top-level statement is returned.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The parsed AST program to execute.
+    ///
+    /// # Returns
+    ///
+    /// The final [`Value`] produced by the program, or an [`EvalError`] if a
+    /// runtime error occurs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvalError::Runtime`] on type mismatches, undefined variables,
+    /// division by zero, or other runtime failures.
     pub fn exec(&mut self, program: &Program) -> EvalResult {
         // First pass: register all function and struct declarations.
         for decl in &program.declarations {
@@ -480,6 +569,20 @@ impl Interpreter {
         Ok(())
     }
 
+    /// Execute an if/else-if/else statement.
+    ///
+    /// Evaluate the condition expression and execute the matching branch. If no
+    /// branch matches and there is no `else`, return [`Value::Void`].
+    ///
+    /// # Arguments
+    ///
+    /// * `if_stmt` - The [`IfStmt`] AST node containing the condition,
+    ///   then-block, and optional else branch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvalError::Runtime`] if the condition does not evaluate to a
+    /// boolean.
     pub fn exec_if(&mut self, if_stmt: &IfStmt) -> EvalResult {
         let cond = self.eval_expr(&if_stmt.condition)?;
         let cond_bool = match cond {
@@ -615,6 +718,23 @@ impl Interpreter {
 
     // -- Expression evaluation ----------------------------------------------
 
+    /// Evaluate a single AST expression and return its [`Value`].
+    ///
+    /// This is the core dispatch for expression evaluation. It handles all
+    /// [`ExprKind`] variants including literals, binary/unary ops, variable
+    /// lookups, function calls, field access, indexing, match expressions,
+    /// closures, tensor literals, and more.
+    ///
+    /// Built-in function calls are dispatched via
+    /// [`cjc_runtime::builtins`] to ensure parity with the MIR executor.
+    ///
+    /// # Arguments
+    ///
+    /// * `expr` - The AST expression to evaluate.
+    ///
+    /// # Returns
+    ///
+    /// The resulting [`Value`], or an [`EvalError`] on failure.
     pub fn eval_expr(&mut self, expr: &Expr) -> EvalResult {
         match &expr.kind {
             ExprKind::IntLit(v) => Ok(Value::Int(*v)),
@@ -671,6 +791,7 @@ impl Interpreter {
                 Ok(Value::Tensor(Tensor::from_vec(data, &shape)?))
             }
             ExprKind::BoolLit(b) => Ok(Value::Bool(*b)),
+            ExprKind::NaLit => Ok(Value::Na),
 
             ExprKind::Ident(id) => {
                 // First check if it's a local variable
@@ -684,6 +805,14 @@ impl Interpreter {
                         variant: id.name.clone(),
                         fields: vec![],
                     });
+                }
+                // Check if it's a named function (function-as-value)
+                if let Some(fn_decl) = self.functions.get(&id.name) {
+                    return Ok(Value::Fn(cjc_runtime::FnValue {
+                        name: id.name.clone(),
+                        arity: fn_decl.params.len(),
+                        body_id: 0,
+                    }));
                 }
                 Err(EvalError::Runtime(format!(
                     "undefined variable `{}`",
@@ -784,6 +913,42 @@ impl Interpreter {
                     vals.push(self.eval_expr(e)?);
                 }
                 Ok(Value::Tuple(Rc::new(vals)))
+            }
+
+            ExprKind::Cast { expr, target_type } => {
+                let val = self.eval_expr(expr)?;
+                match target_type.name.as_str() {
+                    "f64" | "float" | "Float" => match &val {
+                        Value::Float(_) => Ok(val),
+                        Value::Int(i) => Ok(Value::Float(*i as f64)),
+                        Value::Bool(b) => Ok(Value::Float(if *b { 1.0 } else { 0.0 })),
+                        _ => Err(EvalError::Runtime(format!(
+                            "cannot cast {} to f64", val.type_name()
+                        ))),
+                    },
+                    "i64" | "int" | "Int" => match &val {
+                        Value::Int(_) => Ok(val),
+                        Value::Float(f) => Ok(Value::Int(*f as i64)),
+                        Value::Bool(b) => Ok(Value::Int(if *b { 1 } else { 0 })),
+                        _ => Err(EvalError::Runtime(format!(
+                            "cannot cast {} to i64", val.type_name()
+                        ))),
+                    },
+                    "bool" | "Bool" => match &val {
+                        Value::Bool(_) => Ok(val),
+                        Value::Int(i) => Ok(Value::Bool(*i != 0)),
+                        Value::Float(f) => Ok(Value::Bool(*f != 0.0)),
+                        _ => Err(EvalError::Runtime(format!(
+                            "cannot cast {} to bool", val.type_name()
+                        ))),
+                    },
+                    "String" | "string" => {
+                        Ok(Value::String(Rc::new(format!("{}", val))))
+                    },
+                    other => Err(EvalError::Runtime(format!(
+                        "unknown cast target type: {other}"
+                    ))),
+                }
             }
 
             ExprKind::Try(inner) => {
@@ -985,10 +1150,12 @@ impl Interpreter {
             let lv = self.eval_expr(left)?;
             return match lv {
                 Value::Bool(false) => Ok(Value::Bool(false)),
+                Value::Na => Ok(Value::Na),
                 Value::Bool(true) => {
                     let rv = self.eval_expr(right)?;
                     match rv {
                         Value::Bool(b) => Ok(Value::Bool(b)),
+                        Value::Na => Ok(Value::Na),
                         _ => Err(EvalError::Runtime(
                             "`&&` requires Bool operands".to_string(),
                         )),
@@ -1003,10 +1170,12 @@ impl Interpreter {
             let lv = self.eval_expr(left)?;
             return match lv {
                 Value::Bool(true) => Ok(Value::Bool(true)),
+                Value::Na => Ok(Value::Na),
                 Value::Bool(false) => {
                     let rv = self.eval_expr(right)?;
                     match rv {
                         Value::Bool(b) => Ok(Value::Bool(b)),
+                        Value::Na => Ok(Value::Na),
                         _ => Err(EvalError::Runtime(
                             "`||` requires Bool operands".to_string(),
                         )),
@@ -1051,6 +1220,13 @@ impl Interpreter {
         let rv = self.eval_expr(right)?;
 
         match (&lv, &rv) {
+            // NA propagation: any operation involving NA returns NA,
+            // except == and != which return false/true respectively (SQL semantics).
+            (Value::Na, _) | (_, Value::Na) => match op {
+                BinOp::Eq => Ok(Value::Bool(false)),
+                BinOp::Ne => Ok(Value::Bool(true)),
+                _ => Ok(Value::Na),
+            },
             // Int x Int
             (Value::Int(a), Value::Int(b)) => self.binop_int(op, *a, *b),
             // Float x Float
@@ -1172,6 +1348,13 @@ impl Interpreter {
     /// Used by CompoundAssign desugaring.
     fn eval_binary_values(&mut self, op: BinOp, lv: Value, rv: Value) -> EvalResult {
         match (&lv, &rv) {
+            // NA propagation: any operation involving NA returns NA,
+            // except == and != which return false/true respectively (SQL semantics).
+            (Value::Na, _) | (_, Value::Na) => match op {
+                BinOp::Eq => Ok(Value::Bool(false)),
+                BinOp::Ne => Ok(Value::Bool(true)),
+                _ => Ok(Value::Na),
+            },
             (Value::Int(a), Value::Int(b)) => self.binop_int(op, *a, *b),
             (Value::Float(a), Value::Float(b)) => self.binop_float(op, *a, *b),
             (Value::Int(a), Value::Float(b)) => self.binop_float(op, *a as f64, *b),
@@ -1530,12 +1713,17 @@ impl Interpreter {
                 | "sigmoid"
                 | "tanh_activation"
                 | "leaky_relu"
+                | "relu"
                 | "silu"
                 | "mish"
                 | "argmax"
                 | "argmin"
                 | "clamp"
                 | "one_hot"
+                // Tensor shape & slicing
+                | "reshape"
+                | "tensor_slice"
+                | "slice"
                 // Phase B1: Weighted & robust statistics
                 | "weighted_mean"
                 | "weighted_var"
@@ -1600,6 +1788,8 @@ impl Interpreter {
                 // Phase C2: Optimizer constructors
                 | "Adam.new"
                 | "Sgd.new"
+                // RNN cells
+                | "lstm_cell" | "gru_cell"
                 // Phase C6: I/O & Collection Utilities
                 | "read_line"
                 | "array_push"
@@ -1609,6 +1799,17 @@ impl Interpreter {
                 | "array_flatten"
                 | "array_len"
                 | "array_slice"
+                | "array_map"
+                | "array_filter"
+                | "array_reduce"
+                | "array_any"
+                | "array_all"
+                | "array_find"
+                | "array_enumerate"
+                | "array_zip"
+                | "array_sort_by"
+                | "array_unique"
+                | "range"
                 // Phase C5: Map & Set constructors
                 | "Map.new"
                 | "Set.new"
@@ -1625,13 +1826,16 @@ impl Interpreter {
                 | "bit_shl"
                 | "bit_shr"
                 | "popcount"
+                // ML primitives: embedding & batch
+                | "embedding"
+                | "batch_indices"
                 // Phase D: RL primitives
                 | "log"
                 | "exp"
                 | "categorical_sample"
                 // Phase E: Mathematics Hardening
                 | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2"
-                | "sinh" | "cosh" | "tanh_scalar"
+                | "sinh" | "cosh" | "tanh" | "tanh_scalar"
                 | "pow" | "log2" | "log10" | "log1p" | "expm1"
                 | "ceil" | "round"
                 | "min" | "max" | "sign"
@@ -1660,8 +1864,20 @@ impl Interpreter {
                 | "read_csv" | "write_csv"
                 | "dir_list" | "path_join"
                 // TidyView Phase 5: Preprocessing builtins
-                | "fillna" | "is_not_null" | "interpolate_linear" | "coalesce"
+                | "fillna" | "is_na" | "drop_na" | "is_not_null" | "interpolate_linear" | "coalesce"
                 | "cut" | "qcut" | "min_max_scale" | "robust_scale"
+                // Categorical / Factor builtins
+                | "as_factor" | "factor_levels" | "factor_codes"
+                | "fct_relevel" | "fct_lump" | "fct_count"
+                // Sampling & cross-validation
+                // Normality tests & effect sizes
+                | "jarque_bera" | "anderson_darling" | "ks_test"
+                | "cohens_d" | "eta_squared" | "cramers_v"
+                | "levene_test" | "bartlett_test"
+                // Sampling & cross-validation
+                | "latin_hypercube" | "sobol_sequence"
+                | "train_test_split" | "kfold_indices"
+                | "bootstrap" | "permutation_test" | "stratified_split"
                 // Parity: Bastion primitives (present in MIR-exec)
                 | "mean"
                 | "nth_element" | "median_fast" | "quantile_fast"
@@ -1995,6 +2211,180 @@ impl Interpreter {
             _ => {}
         }
 
+        // ── Array higher-order functions (need interpreter to call closures) ──
+        match name {
+            "range" => {
+                let (start, end, step) = match args.len() {
+                    1 => (0i64, match &args[0] { Value::Int(n) => *n, _ => return Err(EvalError::Runtime("range: argument must be Int".into())) }, 1i64),
+                    2 => (match &args[0] { Value::Int(n) => *n, _ => return Err(EvalError::Runtime("range: start must be Int".into())) },
+                          match &args[1] { Value::Int(n) => *n, _ => return Err(EvalError::Runtime("range: end must be Int".into())) }, 1i64),
+                    3 => (match &args[0] { Value::Int(n) => *n, _ => return Err(EvalError::Runtime("range: start must be Int".into())) },
+                          match &args[1] { Value::Int(n) => *n, _ => return Err(EvalError::Runtime("range: end must be Int".into())) },
+                          match &args[2] { Value::Int(n) => *n, _ => return Err(EvalError::Runtime("range: step must be Int".into())) }),
+                    _ => return Err(EvalError::Runtime("range requires 1-3 arguments (end) or (start, end) or (start, end, step)".into())),
+                };
+                if step == 0 { return Err(EvalError::Runtime("range: step cannot be 0".into())); }
+                let mut result = Vec::new();
+                let mut i = start;
+                if step > 0 { while i < end { result.push(Value::Int(i)); i += step; } }
+                else { while i > end { result.push(Value::Int(i)); i += step; } }
+                return Ok(Value::Array(Rc::new(result)));
+            }
+            "array_map" => {
+                if args.len() != 2 { return Err(EvalError::Runtime("array_map requires 2 arguments (array, fn)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(EvalError::Runtime("array_map: first arg must be Array".into())) };
+                let f = args[1].clone();
+                let mut result = Vec::with_capacity(arr.len());
+                for item in arr.iter() {
+                    let mapped = match &f {
+                        Value::Fn(fv) => self.call_function(&fv.name, &[item.clone()])?,
+                        Value::Closure { fn_name, env, .. } => {
+                            let mut full = env.clone();
+                            full.push(item.clone());
+                            self.call_function(fn_name, &full)?
+                        }
+                        _ => return Err(EvalError::Runtime("array_map: second arg must be a function".into())),
+                    };
+                    result.push(mapped);
+                }
+                return Ok(Value::Array(Rc::new(result)));
+            }
+            "array_filter" => {
+                if args.len() != 2 { return Err(EvalError::Runtime("array_filter requires 2 arguments (array, fn)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(EvalError::Runtime("array_filter: first arg must be Array".into())) };
+                let f = args[1].clone();
+                let mut result = Vec::new();
+                for item in arr.iter() {
+                    let keep = match &f {
+                        Value::Fn(fv) => self.call_function(&fv.name, &[item.clone()])?,
+                        Value::Closure { fn_name, env, .. } => {
+                            let mut full = env.clone();
+                            full.push(item.clone());
+                            self.call_function(fn_name, &full)?
+                        }
+                        _ => return Err(EvalError::Runtime("array_filter: second arg must be a function".into())),
+                    };
+                    if matches!(keep, Value::Bool(true)) { result.push(item.clone()); }
+                }
+                return Ok(Value::Array(Rc::new(result)));
+            }
+            "array_reduce" => {
+                if args.len() != 3 { return Err(EvalError::Runtime("array_reduce requires 3 arguments (array, init, fn)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(EvalError::Runtime("array_reduce: first arg must be Array".into())) };
+                let mut acc = args[1].clone();
+                let f = args[2].clone();
+                for item in arr.iter() {
+                    acc = match &f {
+                        Value::Fn(fv) => self.call_function(&fv.name, &[acc, item.clone()])?,
+                        Value::Closure { fn_name, env, .. } => {
+                            let mut full = env.clone();
+                            full.push(acc);
+                            full.push(item.clone());
+                            self.call_function(fn_name, &full)?
+                        }
+                        _ => return Err(EvalError::Runtime("array_reduce: third arg must be a function".into())),
+                    };
+                }
+                return Ok(acc);
+            }
+            "array_any" => {
+                if args.len() != 2 { return Err(EvalError::Runtime("array_any requires 2 arguments (array, fn)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(EvalError::Runtime("array_any: first arg must be Array".into())) };
+                let f = args[1].clone();
+                for item in arr.iter() {
+                    let result = match &f {
+                        Value::Fn(fv) => self.call_function(&fv.name, &[item.clone()])?,
+                        Value::Closure { fn_name, env, .. } => { let mut full = env.clone(); full.push(item.clone()); self.call_function(fn_name, &full)? }
+                        _ => return Err(EvalError::Runtime("array_any: second arg must be a function".into())),
+                    };
+                    if matches!(result, Value::Bool(true)) { return Ok(Value::Bool(true)); }
+                }
+                return Ok(Value::Bool(false));
+            }
+            "array_all" => {
+                if args.len() != 2 { return Err(EvalError::Runtime("array_all requires 2 arguments (array, fn)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(EvalError::Runtime("array_all: first arg must be Array".into())) };
+                let f = args[1].clone();
+                for item in arr.iter() {
+                    let result = match &f {
+                        Value::Fn(fv) => self.call_function(&fv.name, &[item.clone()])?,
+                        Value::Closure { fn_name, env, .. } => { let mut full = env.clone(); full.push(item.clone()); self.call_function(fn_name, &full)? }
+                        _ => return Err(EvalError::Runtime("array_all: second arg must be a function".into())),
+                    };
+                    if matches!(result, Value::Bool(false)) { return Ok(Value::Bool(false)); }
+                }
+                return Ok(Value::Bool(true));
+            }
+            "array_find" => {
+                if args.len() != 2 { return Err(EvalError::Runtime("array_find requires 2 arguments (array, fn)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(EvalError::Runtime("array_find: first arg must be Array".into())) };
+                let f = args[1].clone();
+                for item in arr.iter() {
+                    let result = match &f {
+                        Value::Fn(fv) => self.call_function(&fv.name, &[item.clone()])?,
+                        Value::Closure { fn_name, env, .. } => { let mut full = env.clone(); full.push(item.clone()); self.call_function(fn_name, &full)? }
+                        _ => return Err(EvalError::Runtime("array_find: second arg must be a function".into())),
+                    };
+                    if matches!(result, Value::Bool(true)) { return Ok(item.clone()); }
+                }
+                return Ok(Value::Na);
+            }
+            "array_enumerate" => {
+                if args.len() != 1 { return Err(EvalError::Runtime("array_enumerate requires 1 argument (array)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(EvalError::Runtime("array_enumerate: arg must be Array".into())) };
+                let result: Vec<Value> = arr.iter().enumerate().map(|(i, v)| {
+                    Value::Tuple(Rc::new(vec![Value::Int(i as i64), v.clone()]))
+                }).collect();
+                return Ok(Value::Array(Rc::new(result)));
+            }
+            "array_zip" => {
+                if args.len() != 2 { return Err(EvalError::Runtime("array_zip requires 2 arguments (array_a, array_b)".into())); }
+                let a = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(EvalError::Runtime("array_zip: first arg must be Array".into())) };
+                let b = match &args[1] { Value::Array(b) => b.as_ref().clone(), _ => return Err(EvalError::Runtime("array_zip: second arg must be Array".into())) };
+                let len = a.len().min(b.len());
+                let result: Vec<Value> = (0..len).map(|i| {
+                    Value::Tuple(Rc::new(vec![a[i].clone(), b[i].clone()]))
+                }).collect();
+                return Ok(Value::Array(Rc::new(result)));
+            }
+            "array_sort_by" => {
+                if args.len() != 2 { return Err(EvalError::Runtime("array_sort_by requires 2 arguments (array, key_fn)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(EvalError::Runtime("array_sort_by: first arg must be Array".into())) };
+                let f = args[1].clone();
+                let mut keyed: Vec<(Value, Value)> = Vec::with_capacity(arr.len());
+                for item in arr.iter() {
+                    let key = match &f {
+                        Value::Fn(fv) => self.call_function(&fv.name, &[item.clone()])?,
+                        Value::Closure { fn_name, env, .. } => { let mut full = env.clone(); full.push(item.clone()); self.call_function(fn_name, &full)? }
+                        _ => return Err(EvalError::Runtime("array_sort_by: second arg must be a function".into())),
+                    };
+                    keyed.push((key, item.clone()));
+                }
+                keyed.sort_by(|(a, _), (b, _)| {
+                    match (a, b) {
+                        (Value::Int(x), Value::Int(y)) => x.cmp(y),
+                        (Value::Float(x), Value::Float(y)) => x.total_cmp(y),
+                        (Value::String(x), Value::String(y)) => x.cmp(y),
+                        _ => std::cmp::Ordering::Equal,
+                    }
+                });
+                let result: Vec<Value> = keyed.into_iter().map(|(_, v)| v).collect();
+                return Ok(Value::Array(Rc::new(result)));
+            }
+            "array_unique" => {
+                if args.len() != 1 { return Err(EvalError::Runtime("array_unique requires 1 argument (array)".into())); }
+                let arr = match &args[0] { Value::Array(a) => a.as_ref().clone(), _ => return Err(EvalError::Runtime("array_unique: arg must be Array".into())) };
+                let mut seen = std::collections::BTreeSet::new();
+                let mut result = Vec::new();
+                for item in arr.iter() {
+                    let key = format!("{}", item);
+                    if seen.insert(key) { result.push(item.clone()); }
+                }
+                return Ok(Value::Array(Rc::new(result)));
+            }
+            _ => {}
+        }
+
         // Try shared (stateless) builtins
         match cjc_runtime::builtins::dispatch_builtin(name, &args) {
             Ok(Some(value)) => return Ok(value),
@@ -2007,6 +2397,164 @@ impl Interpreter {
             Ok(Some(value)) => return Ok(value),
             Err(msg) => return Err(EvalError::Runtime(msg)),
             Ok(None) => {} // not a quantum builtin, fall through
+        }
+
+        // PINN training builtins (bypass builtins.rs — cjc-ad dep)
+        match name {
+            "pinn_train_burgers" => {
+                // pinn_train_burgers(epochs, lr, n_colloc, nu, seed) → Struct
+                if args.len() != 5 {
+                    return Err(EvalError::Runtime("pinn_train_burgers requires 5 args (epochs, lr, n_colloc, nu, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("n_colloc must be Int".into())) };
+                let nu = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("nu must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(EvalError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::BurgersConfig {
+                    epochs, lr, nu, n_collocation: n_colloc, seed,
+                    ..cjc_ad::pinn::BurgersConfig::default()
+                };
+                let result = cjc_ad::pinn::pinn_burgers_train(&config);
+                return Ok(pinn_result_to_value("BurgersResult", &result));
+            }
+            "pinn_train_poisson" => {
+                // pinn_train_poisson(epochs, lr, n_colloc, seed) → Struct
+                if args.len() != 4 {
+                    return Err(EvalError::Runtime("pinn_train_poisson requires 4 args (epochs, lr, n_colloc, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("n_colloc must be Int".into())) };
+                let seed = match &args[3] { Value::Int(v) => *v as u64, _ => return Err(EvalError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::PoissonConfig {
+                    epochs, lr, n_collocation: n_colloc, seed,
+                    ..cjc_ad::pinn::PoissonConfig::default()
+                };
+                let result = cjc_ad::pinn::pinn_poisson_2d_train(&config);
+                return Ok(pinn_result_to_value("PoissonResult", &result));
+            }
+            "pinn_train_heat" => {
+                // pinn_train_heat(epochs, lr, n_colloc, alpha, seed) → Struct
+                if args.len() != 5 {
+                    return Err(EvalError::Runtime("pinn_train_heat requires 5 args (epochs, lr, n_colloc, alpha, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("n_colloc must be Int".into())) };
+                let alpha = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("alpha must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(EvalError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::HeatConfig {
+                    epochs, lr, alpha, n_collocation: n_colloc, seed,
+                    ..cjc_ad::pinn::HeatConfig::default()
+                };
+                let result = cjc_ad::pinn::pinn_heat_1d_nn_train(&config);
+                return Ok(pinn_result_to_value("HeatResult", &result));
+            }
+            "pinn_train_wave" => {
+                if args.len() != 5 {
+                    return Err(EvalError::Runtime("pinn_train_wave requires 5 args (epochs, lr, n_colloc, c, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("n_colloc must be Int".into())) };
+                let c = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("c must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(EvalError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::WaveConfig { epochs, lr, c, n_collocation: n_colloc, seed, ..Default::default() };
+                let result = cjc_ad::pinn::pinn_wave_train(&config);
+                return Ok(pinn_result_to_value("WaveResult", &result));
+            }
+            "pinn_train_helmholtz" => {
+                if args.len() != 5 {
+                    return Err(EvalError::Runtime("pinn_train_helmholtz requires 5 args (epochs, lr, n_colloc, k, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("n_colloc must be Int".into())) };
+                let k = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("k must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(EvalError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::HelmholtzConfig { epochs, lr, k, n_collocation: n_colloc, seed, ..Default::default() };
+                let result = cjc_ad::pinn::pinn_helmholtz_train(&config);
+                return Ok(pinn_result_to_value("HelmholtzResult", &result));
+            }
+            "pinn_train_diffreact" => {
+                if args.len() != 6 {
+                    return Err(EvalError::Runtime("pinn_train_diffreact requires 6 args (epochs, lr, n_colloc, diffusion, reaction, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("n_colloc must be Int".into())) };
+                let diffusion = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("diffusion must be numeric".into())) };
+                let reaction = match &args[4] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("reaction must be numeric".into())) };
+                let seed = match &args[5] { Value::Int(v) => *v as u64, _ => return Err(EvalError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::DiffReactConfig { epochs, lr, diffusion, reaction, n_collocation: n_colloc, seed, ..Default::default() };
+                let result = cjc_ad::pinn::pinn_diffreact_train(&config);
+                return Ok(pinn_result_to_value("DiffReactResult", &result));
+            }
+            "pinn_train_allen_cahn" => {
+                if args.len() != 5 {
+                    return Err(EvalError::Runtime("pinn_train_allen_cahn requires 5 args (epochs, lr, n_colloc, epsilon, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("n_colloc must be Int".into())) };
+                let epsilon = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("epsilon must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(EvalError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::AllenCahnConfig { epochs, lr, epsilon, n_collocation: n_colloc, seed, ..Default::default() };
+                let result = cjc_ad::pinn::pinn_allen_cahn_train(&config);
+                return Ok(pinn_result_to_value("AllenCahnResult", &result));
+            }
+            "pinn_train_kdv" => {
+                if args.len() != 4 {
+                    return Err(EvalError::Runtime("pinn_train_kdv requires 4 args (epochs, lr, n_colloc, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("n_colloc must be Int".into())) };
+                let seed = match &args[3] { Value::Int(v) => *v as u64, _ => return Err(EvalError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::KdvConfig { epochs, lr, n_collocation: n_colloc, seed, ..Default::default() };
+                let result = cjc_ad::pinn::pinn_kdv_train(&config);
+                return Ok(pinn_result_to_value("KdvResult", &result));
+            }
+            "pinn_train_schrodinger" => {
+                if args.len() != 4 {
+                    return Err(EvalError::Runtime("pinn_train_schrodinger requires 4 args (epochs, lr, n_colloc, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("n_colloc must be Int".into())) };
+                let seed = match &args[3] { Value::Int(v) => *v as u64, _ => return Err(EvalError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::SchrodingerConfig { epochs, lr, n_collocation: n_colloc, seed, ..Default::default() };
+                let result = cjc_ad::pinn::pinn_schrodinger_train(&config);
+                return Ok(pinn_result_to_value("SchrodingerResult", &result));
+            }
+            "pinn_train_navier_stokes" => {
+                if args.len() != 5 {
+                    return Err(EvalError::Runtime("pinn_train_navier_stokes requires 5 args (epochs, lr, n_colloc, nu, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("n_colloc must be Int".into())) };
+                let nu = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("nu must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(EvalError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::NavierStokesConfig { epochs, lr, nu, n_collocation: n_colloc, seed, ..Default::default() };
+                let result = cjc_ad::pinn::pinn_navier_stokes_train(&config);
+                return Ok(pinn_result_to_value("NavierStokesResult", &result));
+            }
+            "pinn_train_burgers_2d" => {
+                if args.len() != 5 {
+                    return Err(EvalError::Runtime("pinn_train_burgers_2d requires 5 args (epochs, lr, n_colloc, nu, seed)".into()));
+                }
+                let epochs = match &args[0] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("epochs must be Int".into())) };
+                let lr = match &args[1] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("lr must be numeric".into())) };
+                let n_colloc = match &args[2] { Value::Int(v) => *v as usize, _ => return Err(EvalError::Runtime("n_colloc must be Int".into())) };
+                let nu = match &args[3] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => return Err(EvalError::Runtime("nu must be numeric".into())) };
+                let seed = match &args[4] { Value::Int(v) => *v as u64, _ => return Err(EvalError::Runtime("seed must be Int".into())) };
+                let config = cjc_ad::pinn::Burgers2DConfig { epochs, lr, nu, n_collocation: n_colloc, seed, ..Default::default() };
+                let result = cjc_ad::pinn::pinn_burgers_2d_train(&config);
+                return Ok(pinn_result_to_value("Burgers2DResult", &result));
+            }
+            _ => {}
         }
 
         // Phase C1: GradGraph constructor (bypasses builtins.rs — cjc-ad dep)
@@ -2435,6 +2983,14 @@ impl Interpreter {
                 let ph = self.value_to_usize(&args[0])?;
                 let pw = self.value_to_usize(&args[1])?;
                 Ok(Value::Tensor(t.maxpool2d(ph, pw)?))
+            }
+            (Value::Tensor(t), "avgpool2d") => {
+                if args.len() != 4 { return Err(EvalError::Runtime("avgpool2d requires 4 args: kernel_h, kernel_w, stride_h, stride_w".into())); }
+                let kh = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("avgpool2d: kernel_h must be int".into())) };
+                let kw = match &args[1] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("avgpool2d: kernel_w must be int".into())) };
+                let sh = match &args[2] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("avgpool2d: stride_h must be int".into())) };
+                let sw = match &args[3] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("avgpool2d: stride_w must be int".into())) };
+                Ok(Value::Tensor(t.avgpool2d(kh, kw, sh, sw).map_err(|e| EvalError::Runtime(e.to_string()))?))
             }
             (Value::Tensor(t), "bmm") => {
                 if args.len() != 1 {
@@ -2996,14 +3552,14 @@ impl Interpreter {
                         if args.len() != 1 { return Err(EvalError::Runtime("parameter requires 1 arg: Tensor".into())); }
                         let t = match &args[0] { Value::Tensor(t) => t.clone(), _ => return Err(EvalError::Runtime("expected Tensor".into())) };
                         let mut borrow = inner.borrow_mut();
-                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| EvalError::Runtime("expected GradGraph object".into()))?;
                         Ok(Value::Int(graph.parameter(t) as i64))
                     }
                     "input" => {
                         if args.len() != 1 { return Err(EvalError::Runtime("input requires 1 arg: Tensor".into())); }
                         let t = match &args[0] { Value::Tensor(t) => t.clone(), _ => return Err(EvalError::Runtime("expected Tensor".into())) };
                         let mut borrow = inner.borrow_mut();
-                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| EvalError::Runtime("expected GradGraph object".into()))?;
                         Ok(Value::Int(graph.input(t) as i64))
                     }
                     "add" | "sub" | "mul" | "div" | "matmul" => {
@@ -3011,7 +3567,7 @@ impl Interpreter {
                         let a = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int (node index)".into())) };
                         let b = match &args[1] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int (node index)".into())) };
                         let mut borrow = inner.borrow_mut();
-                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| EvalError::Runtime("expected GradGraph object".into()))?;
                         let idx = match method {
                             "add" => graph.add(a, b),
                             "sub" => graph.sub(a, b),
@@ -3026,7 +3582,7 @@ impl Interpreter {
                         if args.len() != 1 { return Err(EvalError::Runtime(format!("{method} requires 1 arg: node_index"))); }
                         let a = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int (node index)".into())) };
                         let mut borrow = inner.borrow_mut();
-                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| EvalError::Runtime("expected GradGraph object".into()))?;
                         let idx = match method {
                             "neg" => graph.neg(a),
                             "sum" => graph.sum(a),
@@ -3048,7 +3604,7 @@ impl Interpreter {
                         let a = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
                         let n = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err(EvalError::Runtime("expected number".into())) };
                         let mut borrow = inner.borrow_mut();
-                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| EvalError::Runtime("expected GradGraph object".into()))?;
                         Ok(Value::Int(graph.pow(a, n) as i64))
                     }
                     "scalar_mul" => {
@@ -3056,14 +3612,31 @@ impl Interpreter {
                         let a = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
                         let s = match &args[1] { Value::Float(f) => *f, Value::Int(i) => *i as f64, _ => return Err(EvalError::Runtime("expected number".into())) };
                         let mut borrow = inner.borrow_mut();
-                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| EvalError::Runtime("expected GradGraph object".into()))?;
                         Ok(Value::Int(graph.scalar_mul(a, s) as i64))
+                    }
+                    "mlp_layer" => {
+                        if args.len() != 4 { return Err(EvalError::Runtime("mlp_layer requires 4 args: input, weight, bias, activation_str".into())); }
+                        let input = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
+                        let weight = match &args[1] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
+                        let bias = match &args[2] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
+                        let act_str = match &args[3] { Value::String(s) => s.as_str(), _ => return Err(EvalError::Runtime("expected String for activation".into())) };
+                        let activation = match act_str {
+                            "tanh" => cjc_ad::pinn::Activation::Tanh,
+                            "sigmoid" => cjc_ad::pinn::Activation::Sigmoid,
+                            "relu" => cjc_ad::pinn::Activation::Relu,
+                            "none" | "" => cjc_ad::pinn::Activation::None,
+                            _ => return Err(EvalError::Runtime(format!("unknown activation: {act_str}"))),
+                        };
+                        let mut borrow = inner.borrow_mut();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| EvalError::Runtime("expected GradGraph object".into()))?;
+                        Ok(Value::Int(graph.mlp_layer(input, weight, bias, activation) as i64))
                     }
                     "backward" => {
                         if args.len() != 1 { return Err(EvalError::Runtime("backward requires 1 arg: loss_node_index".into())); }
                         let loss_idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
-                        let borrow = inner.borrow();
-                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().unwrap();
+                        let mut borrow = inner.borrow_mut();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| EvalError::Runtime("expected GradGraph object".into()))?;
                         graph.backward(loss_idx);
                         Ok(Value::Void)
                     }
@@ -3071,21 +3644,21 @@ impl Interpreter {
                         if args.len() != 1 { return Err(EvalError::Runtime("value requires 1 arg: node_index".into())); }
                         let idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
                         let borrow = inner.borrow();
-                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().ok_or_else(|| EvalError::Runtime("expected GradGraph object".into()))?;
                         Ok(Value::Float(graph.value(idx)))
                     }
                     "tensor" => {
                         if args.len() != 1 { return Err(EvalError::Runtime("tensor requires 1 arg: node_index".into())); }
                         let idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
                         let borrow = inner.borrow();
-                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().ok_or_else(|| EvalError::Runtime("expected GradGraph object".into()))?;
                         Ok(Value::Tensor(graph.tensor(idx)))
                     }
                     "grad" => {
                         if args.len() != 1 { return Err(EvalError::Runtime("grad requires 1 arg: node_index".into())); }
                         let idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
                         let borrow = inner.borrow();
-                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().ok_or_else(|| EvalError::Runtime("expected GradGraph object".into()))?;
                         match graph.grad(idx) {
                             Some(t) => Ok(Value::Tensor(t)),
                             None => Ok(Value::Void),
@@ -3095,24 +3668,41 @@ impl Interpreter {
                         if args.len() != 2 { return Err(EvalError::Runtime("set_tensor requires 2 args: node_index, tensor".into())); }
                         let idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
                         let t = match &args[1] { Value::Tensor(t) => t.clone(), _ => return Err(EvalError::Runtime("expected Tensor".into())) };
-                        let borrow = inner.borrow();
-                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().unwrap();
+                        let mut borrow = inner.borrow_mut();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| EvalError::Runtime("expected GradGraph object".into()))?;
                         graph.set_tensor(idx, t);
                         Ok(Value::Void)
                     }
                     "zero_grad" => {
                         if !args.is_empty() { return Err(EvalError::Runtime("zero_grad takes 0 arguments".into())); }
-                        let borrow = inner.borrow();
-                        let graph = borrow.downcast_ref::<cjc_ad::GradGraph>().unwrap();
+                        let mut borrow = inner.borrow_mut();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| EvalError::Runtime("expected GradGraph object".into()))?;
                         graph.zero_grad();
                         Ok(Value::Void)
+                    }
+                    "backward_collect" => {
+                        // backward_collect(loss_idx, param_indices_array) → Array of Tensors
+                        if args.len() != 2 { return Err(EvalError::Runtime("backward_collect requires 2 args: loss_idx, param_indices".into())); }
+                        let loss_idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
+                        let indices: Vec<usize> = match &args[1] {
+                            Value::Array(arr) => arr.iter().map(|v| match v { Value::Int(i) => Ok(*i as usize), _ => Err(EvalError::Runtime("expected Int in indices array".into())) }).collect::<Result<Vec<_>, _>>()?,
+                            _ => return Err(EvalError::Runtime("expected Array of param indices".into())),
+                        };
+                        let mut borrow = inner.borrow_mut();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| EvalError::Runtime("expected GradGraph object".into()))?;
+                        let grads = graph.backward_collect(loss_idx, &indices);
+                        let values: Vec<Value> = grads.into_iter().map(|opt| match opt {
+                            Some(t) => Value::Tensor(t),
+                            None => Value::Void,
+                        }).collect();
+                        Ok(Value::Array(std::rc::Rc::new(values)))
                     }
                     "jacobian" => {
                         if args.len() != 2 { return Err(EvalError::Runtime("jacobian requires 2 args: output_idx, param_idx".into())); }
                         let output_idx = match &args[0] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
                         let param_idx = match &args[1] { Value::Int(i) => *i as usize, _ => return Err(EvalError::Runtime("expected Int".into())) };
                         let mut borrow = inner.borrow_mut();
-                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| EvalError::Runtime("expected GradGraph object".into()))?;
                         let jac = graph.jacobian(output_idx, param_idx);
                         Ok(Value::Tensor(jac))
                     }
@@ -3124,7 +3714,7 @@ impl Interpreter {
                             match &args[2] { Value::Float(f) => *f, _ => return Err(EvalError::Runtime("expected Float for eps".into())) }
                         } else { 1e-5 };
                         let mut borrow = inner.borrow_mut();
-                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().unwrap();
+                        let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| EvalError::Runtime("expected GradGraph object".into()))?;
                         let hd = graph.hessian_diag(loss_idx, param_idx, eps);
                         Ok(Value::Tensor(hd))
                     }
@@ -3358,6 +3948,23 @@ impl Interpreter {
                 _ => Err(EvalError::Runtime(format!(
                     "no field `{field}` on Array"
                 ))),
+            },
+            Value::Tuple(elems) => {
+                // Tuple field access: t.0, t.1, etc.
+                if let Ok(idx) = field.parse::<usize>() {
+                    if idx < elems.len() {
+                        Ok(elems[idx].clone())
+                    } else {
+                        Err(EvalError::Runtime(format!(
+                            "tuple index {idx} out of bounds for tuple of length {}",
+                            elems.len()
+                        )))
+                    }
+                } else {
+                    Err(EvalError::Runtime(format!(
+                        "no field `{field}` on Tuple"
+                    )))
+                }
             },
             _ => Err(EvalError::Runtime(format!(
                 "cannot access field `{field}` on {}",
@@ -3636,6 +4243,26 @@ impl Interpreter {
 /// - `Str`   column → `Value::Array` of `Value::String`
 /// - `Bool`  column → `Value::Array` of `Value::Bool`
 ///
+/// Convert a [`cjc_ad::pinn::PinnResult`] into a `Value::Struct`.
+fn pinn_result_to_value(struct_name: &str, r: &cjc_ad::pinn::PinnResult) -> Value {
+    use std::collections::BTreeMap;
+    let mut fields = BTreeMap::new();
+    fields.insert("l2_error".into(), Value::Float(r.l2_error.unwrap_or(f64::NAN)));
+    fields.insert("max_error".into(), Value::Float(r.max_error.unwrap_or(f64::NAN)));
+    fields.insert("mean_residual".into(), Value::Float(r.mean_residual));
+    fields.insert("n_epochs".into(), Value::Int(r.history.len() as i64));
+    // Loss history as array of floats
+    let loss_arr: Vec<Value> = r.history.iter().map(|h| Value::Float(h.total_loss)).collect();
+    fields.insert("loss_history".into(), Value::Array(Rc::new(loss_arr)));
+    // Final params as tensor
+    let params_tensor = cjc_runtime::tensor::Tensor::from_vec(
+        r.final_params.clone(),
+        &[r.final_params.len()],
+    ).unwrap_or_else(|_| cjc_runtime::tensor::Tensor::zeros(&[0]));
+    fields.insert("final_params".into(), Value::Tensor(params_tensor));
+    Value::Struct { name: struct_name.into(), fields }
+}
+
 /// A special `"__columns"` field holds a `Value::Array` of
 /// `Value::String` with the ordered column names (for to_tensor ordering).
 fn dataframe_to_value(df: DataFrame) -> Value {
@@ -3770,8 +4397,8 @@ impl Default for Interpreter {
 
 /// Run a multi-file CJC program through the AST evaluator.
 ///
-/// Parses all modules via `cjc_module::build_module_graph`, retrieves the
-/// deterministic topological ordering, and executes each module's AST in
+/// Parse all modules via `cjc_module::build_module_graph`, retrieve the
+/// deterministic topological ordering, and execute each module's AST in
 /// dependency order using a single [`Interpreter`] instance whose scope
 /// persists across modules.
 ///
@@ -3779,6 +4406,21 @@ impl Default for Interpreter {
 /// statements executed (via [`Interpreter::exec_module`]). The entry module
 /// is executed last via [`Interpreter::exec`], which also invokes `main()`
 /// if present.
+///
+/// # Arguments
+///
+/// * `entry_path` - Filesystem path to the entry `.cjcl` source file.
+/// * `seed` - Deterministic RNG seed forwarded to the [`Interpreter`].
+///
+/// # Returns
+///
+/// The final [`Value`] produced by the entry module, or an [`EvalError`]
+/// if module resolution or execution fails.
+///
+/// # Errors
+///
+/// Returns [`EvalError::Runtime`] if the module graph cannot be built
+/// (e.g. circular dependencies, missing files) or if execution fails.
 pub fn run_program_with_modules_eval(
     entry_path: &std::path::Path,
     seed: u64,

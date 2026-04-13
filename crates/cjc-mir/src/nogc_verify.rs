@@ -278,6 +278,7 @@ fn collect_calls_expr(expr: &MirExpr, in_nogc_block: bool, info: &mut FnCallInfo
         MirExprKind::IntLit(_)
         | MirExprKind::FloatLit(_)
         | MirExprKind::BoolLit(_)
+        | MirExprKind::NaLit
         | MirExprKind::StringLit(_)
         | MirExprKind::ByteStringLit(_)
         | MirExprKind::ByteCharLit(_)

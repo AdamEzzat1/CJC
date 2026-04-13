@@ -1,3 +1,16 @@
+//! Sparse matrix representations and arithmetic.
+//!
+//! Provides Compressed Sparse Row ([`SparseCsr`]) and Coordinate ([`SparseCoo`])
+//! formats, plus element-wise and matrix-matrix operations.
+//!
+//! # Determinism Contract
+//!
+//! - Row-wise reductions use [`kahan_sum_f64`] or [`binned_sum_f64`].
+//! - [`sparse_matmul`] accumulates column contributions in a [`BTreeMap`] for
+//!   deterministic iteration order, then reduces each column with
+//!   [`binned_sum_f64`].
+//! - No `HashMap`, no parallel iteration.
+
 use std::collections::BTreeMap;
 
 use cjc_repro::kahan_sum_f64;
@@ -11,6 +24,10 @@ use crate::tensor::Tensor;
 // ---------------------------------------------------------------------------
 
 /// Compressed Sparse Row (CSR) matrix representation.
+///
+/// Stores non-zero values in three arrays: `values`, `col_indices`, and
+/// `row_offsets` (of length `nrows + 1`). This layout enables fast row-wise
+/// access and sparse matrix-vector products.
 #[derive(Debug, Clone)]
 pub struct SparseCsr {
     pub values: Vec<f64>,
@@ -41,7 +58,13 @@ impl SparseCsr {
         0.0
     }
 
-    /// Sparse matrix-vector multiplication: y = A * x.
+    /// Compute sparse matrix-vector multiplication: `y = A * x`.
+    ///
+    /// Each row dot product uses [`kahan_sum_f64`] for deterministic results.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::DimensionMismatch`] if `x.len() != self.ncols`.
     pub fn matvec(&self, x: &[f64]) -> Result<Vec<f64>, RuntimeError> {
         if x.len() != self.ncols {
             return Err(RuntimeError::DimensionMismatch {
@@ -106,7 +129,11 @@ impl SparseCsr {
     }
 }
 
-/// Coordinate (COO) sparse matrix representation.
+/// Coordinate (COO / triplet) sparse matrix representation.
+///
+/// Stores non-zero entries as parallel `(row_indices, col_indices, values)`
+/// vectors. Efficient for incremental construction; convert to [`SparseCsr`]
+/// via [`to_csr`](SparseCoo::to_csr) for arithmetic.
 #[derive(Debug, Clone)]
 pub struct SparseCoo {
     pub values: Vec<f64>,
@@ -117,6 +144,7 @@ pub struct SparseCoo {
 }
 
 impl SparseCoo {
+    /// Create a new COO matrix from raw triplet arrays.
     pub fn new(
         values: Vec<f64>,
         row_indices: Vec<usize>,
@@ -133,14 +161,17 @@ impl SparseCoo {
         }
     }
 
+    /// Return the number of stored (non-zero) entries.
     pub fn nnz(&self) -> usize {
         self.values.len()
     }
 
+    /// Convert to [`SparseCsr`] format. Delegates to [`SparseCsr::from_coo`].
     pub fn to_csr(&self) -> SparseCsr {
         SparseCsr::from_coo(self)
     }
 
+    /// Sum all stored values using [`kahan_sum_f64`].
     pub fn sum(&self) -> f64 {
         kahan_sum_f64(&self.values)
     }

@@ -1,0 +1,132 @@
+// ═══════════════════════════════════════════════════════════════════════
+// Example 6: Reinforcement Learning — REINFORCE on Gridworld
+// ═══════════════════════════════════════════════════════════════════════
+//
+// A simple 5×5 gridworld where an agent learns to reach the goal
+// using policy gradient (REINFORCE) with weight perturbation.
+//
+// State: (row, cc) encoded as one-hot [25]
+// Actions: 0=up, 1=down, 2=left, 3=right
+// Reward: +1 at goal (4,4), -0.01 per step
+// ═══════════════════════════════════════════════════════════════════════
+
+fn main() {
+    print("REINFORCE — Gridworld Navigation");
+    print("=================================");
+
+    let grid_size = 5;
+    let n_states = grid_size * grid_size;
+    let n_actions = 4;
+    let n_episodes = 80;
+    let lr = 0.01;
+    let gamma = 0.99;
+    let max_steps = 30;
+
+    // Policy: linear softmax W: [25, 4]
+    let W = Tensor.randn([n_states, n_actions]) * 0.01;
+
+    print("Grid: " + to_string(grid_size) + "x" + to_string(grid_size)
+          + " | Start: (0,0) | Goal: (4,4)");
+    print("");
+
+    let episode = 0;
+    while episode < n_episodes {
+        let row = 0;
+        let cc = 0;
+        let rewards = [];
+        let step = 0;
+        let done = false;
+
+        while step < max_steps && done == false {
+            // One-hot state
+            let state_idx = row * grid_size + cc;
+            let state_data = [];
+            let s = 0;
+            while s < n_states {
+                if s == state_idx {
+                    state_data = array_push(state_data, 1.0);
+                } else {
+                    state_data = array_push(state_data, 0.0);
+                }
+                s = s + 1;
+            }
+            let state = Tensor.from_vec(state_data, [1, n_states]);
+
+            // Action probs via softmax
+            let logits = matmul(state, W);
+            let probs = logits.softmax();
+            let probs_1d = reshape(probs, [n_actions]);
+            let action = categorical_sample(probs_1d);
+
+            // Execute action
+            let new_row = row;
+            let new_cc = cc;
+            if action == 0 {
+                if row > 0 {
+                    new_row = row - 1;
+                }
+            }
+            if action == 1 {
+                if row < grid_size - 1 {
+                    new_row = row + 1;
+                }
+            }
+            if action == 2 {
+                if cc > 0 {
+                    new_cc = cc - 1;
+                }
+            }
+            if action == 3 {
+                if cc < grid_size - 1 {
+                    new_cc = cc + 1;
+                }
+            }
+            row = new_row;
+            cc = new_cc;
+
+            // Reward
+            let reward = -0.01;
+            if row == grid_size - 1 {
+                if cc == grid_size - 1 {
+                    reward = 1.0;
+                    done = true;
+                }
+            }
+            rewards = array_push(rewards, reward);
+            step = step + 1;
+        }
+
+        // Compute episode return
+        let n_steps = len(rewards);
+        let ep_return = 0.0;
+        let discount = 1.0;
+        let ri = 0;
+        while ri < n_steps {
+            ep_return = ep_return + discount * rewards[ri];
+            discount = discount * gamma;
+            ri = ri + 1;
+        }
+
+        // Weight perturbation scaled by return
+        let perturbation = Tensor.randn([n_states, n_actions]) * (lr * ep_return);
+        W = W + perturbation;
+
+        if episode % 16 == 0 {
+            let raw_return = 0.0;
+            let ri = 0;
+            while ri < n_steps {
+                raw_return = raw_return + rewards[ri];
+                ri = ri + 1;
+            }
+            print("Episode " + to_string(episode)
+                  + "  steps=" + to_string(n_steps)
+                  + "  return=" + to_string(round(raw_return * 100.0) / 100.0)
+                  + "  reached_goal=" + to_string(done));
+        }
+
+        episode = episode + 1;
+    }
+
+    print("");
+    print("Training complete. Agent learned gridworld navigation.");
+}

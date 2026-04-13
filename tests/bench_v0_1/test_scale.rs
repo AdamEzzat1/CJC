@@ -9,7 +9,7 @@ use super::helpers;
 
 #[test]
 fn matmul_sizes_deterministic() {
-    let src = helpers::load_cjc("bench_matmul_sizes.cjc");
+    let src = helpers::load_cjc("bench_matmul_sizes.cjcl");
     let out1 = helpers::run_eval(&src, 42);
     let out2 = helpers::run_eval(&src, 42);
     helpers::assert_deterministic(&out1, &out2);
@@ -17,7 +17,7 @@ fn matmul_sizes_deterministic() {
 
 #[test]
 fn matmul_sizes_eval_mir_parity() {
-    let src = helpers::load_cjc("bench_matmul_sizes.cjc");
+    let src = helpers::load_cjc("bench_matmul_sizes.cjcl");
     let eval_out = helpers::run_eval(&src, 42);
     let mir_out = helpers::run_mir(&src, 42);
     helpers::assert_parity(&eval_out, &mir_out);
@@ -25,7 +25,7 @@ fn matmul_sizes_eval_mir_parity() {
 
 #[test]
 fn matmul_sizes_has_6_stages() {
-    let src = helpers::load_cjc("bench_matmul_sizes.cjc");
+    let src = helpers::load_cjc("bench_matmul_sizes.cjcl");
     let out = helpers::run_eval(&src, 42);
     let stages = helpers::parse_stage_lines(&out);
     assert_eq!(stages.len(), 6, "Expected 6 stage hashes (one per matmul size)");
@@ -35,7 +35,7 @@ fn matmul_sizes_has_6_stages() {
 
 #[test]
 fn nn_wide_deterministic() {
-    let src = helpers::load_cjc("bench_nn_wide.cjc");
+    let src = helpers::load_cjc("bench_nn_wide.cjcl");
     let out1 = helpers::run_eval(&src, 42);
     let out2 = helpers::run_eval(&src, 42);
     helpers::assert_deterministic(&out1, &out2);
@@ -43,7 +43,7 @@ fn nn_wide_deterministic() {
 
 #[test]
 fn nn_wide_eval_mir_parity() {
-    let src = helpers::load_cjc("bench_nn_wide.cjc");
+    let src = helpers::load_cjc("bench_nn_wide.cjcl");
     let eval_out = helpers::run_eval(&src, 42);
     let mir_out = helpers::run_mir(&src, 42);
     helpers::assert_parity(&eval_out, &mir_out);
@@ -53,7 +53,7 @@ fn nn_wide_eval_mir_parity() {
 
 #[test]
 fn broadcast_chain_deterministic() {
-    let src = helpers::load_cjc("bench_broadcast_chain.cjc");
+    let src = helpers::load_cjc("bench_broadcast_chain.cjcl");
     let out1 = helpers::run_eval(&src, 42);
     let out2 = helpers::run_eval(&src, 42);
     helpers::assert_deterministic(&out1, &out2);
@@ -61,7 +61,7 @@ fn broadcast_chain_deterministic() {
 
 #[test]
 fn broadcast_chain_eval_mir_parity() {
-    let src = helpers::load_cjc("bench_broadcast_chain.cjc");
+    let src = helpers::load_cjc("bench_broadcast_chain.cjcl");
     let eval_out = helpers::run_eval(&src, 42);
     let mir_out = helpers::run_mir(&src, 42);
     helpers::assert_parity(&eval_out, &mir_out);

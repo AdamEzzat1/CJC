@@ -1,0 +1,6 @@
+name,age,score,active,city
+Alice,30,95.5,true,NYC
+Bob,25,NaN,false,LA
+Charlie,,88.0,true,NYC
+Diana,35,92.3,true,Chicago
+Eve,28,null,false,LA

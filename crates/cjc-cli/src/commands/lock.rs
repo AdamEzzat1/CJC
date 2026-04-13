@@ -1,4 +1,4 @@
-//! `cjc lock` — Deterministic lockfile generator & verifier.
+//! `cjcl lock` — Deterministic lockfile generator & verifier.
 //!
 //! Generates a lockfile recording source hash, seed, executor version,
 //! platform, and expected output hash. With `--verify`, checks that the
@@ -9,12 +9,22 @@ use std::path::PathBuf;
 use std::process;
 use crate::output::{self, OutputMode};
 
-/// Parsed arguments for `cjc lock`.
+/// Parsed arguments for `cjcl lock`.
 pub struct LockArgs {
     pub file: PathBuf,
     pub seed: u64,
     pub verify: bool,
     pub output: OutputMode,
+    pub update: bool,
+    pub show: bool,
+    pub diff: bool,
+    pub executor: LockExecutor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockExecutor {
+    Eval,
+    Mir,
 }
 
 impl Default for LockArgs {
@@ -24,6 +34,10 @@ impl Default for LockArgs {
             seed: 42,
             verify: false,
             output: OutputMode::Color,
+            update: false,
+            show: false,
+            diff: false,
+            executor: LockExecutor::Eval,
         }
     }
 }
@@ -46,16 +60,35 @@ pub fn parse_args(args: &[String]) -> LockArgs {
             "--plain" => la.output = OutputMode::Plain,
             "--json" => la.output = OutputMode::Json,
             "--color" => la.output = OutputMode::Color,
+            "--update" => la.update = true,
+            "--show" => la.show = true,
+            "--diff" => la.diff = true,
+            "--executor" => {
+                i += 1;
+                if i < args.len() {
+                    match args[i].as_str() {
+                        "eval" => la.executor = LockExecutor::Eval,
+                        "mir" => la.executor = LockExecutor::Mir,
+                        other => {
+                            eprintln!("error: --executor expects `eval` or `mir`, got `{}`", other);
+                            process::exit(1);
+                        }
+                    }
+                } else {
+                    eprintln!("error: --executor requires an argument (eval or mir)");
+                    process::exit(1);
+                }
+            }
             other if !other.starts_with('-') => la.file = PathBuf::from(other),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc lock`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl lock`", other);
                 process::exit(1);
             }
         }
         i += 1;
     }
     if la.file.as_os_str().is_empty() {
-        eprintln!("error: `cjc lock` requires a .cjc file argument");
+        eprintln!("error: `cjcl lock` requires a .cjcl file argument");
         process::exit(1);
     }
     la
@@ -78,9 +111,45 @@ fn parse_lockfile(content: &str) -> std::collections::BTreeMap<String, String> {
     map
 }
 
-/// Entry point for `cjc lock`.
+/// Execute the program with the selected executor and return (output_text, executor_label).
+fn execute_program(program: &cjc_ast::Program, seed: u64, executor: LockExecutor) -> (String, &'static str) {
+    match executor {
+        LockExecutor::Eval => {
+            let mut interpreter = cjc_eval::Interpreter::new(seed);
+            match interpreter.exec(program) {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("error: execution failed: {}", e);
+                    process::exit(1);
+                }
+            }
+            let output_text = interpreter.output.join("\n");
+            (output_text, "eval v0.1.0")
+        }
+        LockExecutor::Mir => {
+            match cjc_mir_exec::run_program_with_executor(program, seed) {
+                Ok((_val, exec)) => {
+                    let output_text = exec.output.join("\n");
+                    (output_text, "mir-exec v0.1.0")
+                }
+                Err(e) => {
+                    eprintln!("error: MIR execution failed: {}", e);
+                    process::exit(1);
+                }
+            }
+        }
+    }
+}
+
+/// Entry point for `cjcl lock`.
 pub fn run(args: &[String]) {
     let la = parse_args(args);
+
+    // --show: display lockfile contents without executing
+    if la.show {
+        run_show(&la);
+        return;
+    }
 
     let source = match fs::read_to_string(&la.file) {
         Ok(s) => s,
@@ -102,27 +171,57 @@ pub fn run(args: &[String]) {
         process::exit(1);
     }
 
-    // Execute with eval interpreter
-    let mut interpreter = cjc_eval::Interpreter::new(la.seed);
-    let exec_ok = match interpreter.exec(&program) {
-        Ok(_) => true,
-        Err(e) => {
-            eprintln!("error: execution failed: {}", e);
-            process::exit(1);
-        }
-    };
-    let _ = exec_ok;
-
-    let output_text = interpreter.output.join("\n");
+    // Execute with selected executor
+    let (output_text, executor_str) = execute_program(&program, la.seed, la.executor);
     let output_hash = sha256_hex(output_text.as_bytes());
 
     let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
-    let executor_str = "eval v0.1.0";
 
-    if la.verify {
+    if la.diff {
+        run_diff(&la, &filename, &source_hash, &output_hash, &platform, executor_str);
+    } else if la.verify {
         run_verify(&la, &filename, &source_hash, &output_hash);
     } else {
+        // --update or default generate
         run_generate(&la, &filename, &source_hash, &output_hash, &platform, executor_str);
+    }
+}
+
+fn run_show(la: &LockArgs) {
+    let lockfile_path = format!("{}.lock", la.file.display());
+
+    let lockfile_content = match fs::read_to_string(&lockfile_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: could not read lockfile `{}`: {}", lockfile_path, e);
+            process::exit(1);
+        }
+    };
+
+    let fields = parse_lockfile(&lockfile_content);
+
+    match la.output {
+        OutputMode::Json => {
+            println!("{{");
+            let entries: Vec<_> = fields.iter().collect();
+            for (i, (k, v)) in entries.iter().enumerate() {
+                print!("  \"{}\": \"{}\"", k, v);
+                if i + 1 < entries.len() { print!(","); }
+                println!();
+            }
+            println!("}}");
+        }
+        _ => {
+            let label = output::colorize(la.output, output::BOLD_CYAN, "[lock]");
+            eprintln!("{} Contents of {}", label, lockfile_path);
+            eprintln!();
+
+            let mut t = crate::table::Table::new(vec!["Field", "Value"]);
+            for (k, v) in &fields {
+                t.add_row_owned(vec![k.clone(), v.clone()]);
+            }
+            eprint!("{}", t.render());
+        }
     }
 }
 
@@ -135,6 +234,9 @@ fn run_generate(
     executor: &str,
 ) {
     let lockfile_path = format!("{}.lock", la.file.display());
+
+    // If --update is not set and lockfile already exists, generate anyway (original behavior).
+    // --update explicitly means "overwrite existing".
 
     let lockfile_content = format!(
         "source_sha256: {}\nseed: {}\nexecutor: {}\nplatform: {}\noutput_sha256: {}\n",
@@ -159,12 +261,13 @@ fn run_generate(
                 ("executor", executor),
                 ("platform", platform),
                 ("output_sha256", output_hash),
-                ("status", "generated"),
+                ("status", if la.update { "updated" } else { "generated" }),
             ]));
         }
         _ => {
             let label = output::colorize(la.output, output::BOLD_CYAN, "[lock]");
-            eprintln!("{} Generated lockfile: {}", label, lockfile_path);
+            let action = if la.update { "Updated" } else { "Generated" };
+            eprintln!("{} {} lockfile: {}", label, action, lockfile_path);
 
             let mut t = crate::table::Table::new(vec!["Field", "Value"]);
             t.add_row_owned(vec!["source_sha256".to_string(), source_hash.to_string()]);
@@ -173,6 +276,105 @@ fn run_generate(
             t.add_row_owned(vec!["platform".to_string(), platform.to_string()]);
             t.add_row_owned(vec!["output_sha256".to_string(), output_hash.to_string()]);
             eprint!("{}", t.render());
+        }
+    }
+}
+
+fn run_diff(
+    la: &LockArgs,
+    filename: &str,
+    current_source_hash: &str,
+    current_output_hash: &str,
+    current_platform: &str,
+    current_executor: &str,
+) {
+    let lockfile_path = format!("{}.lock", la.file.display());
+
+    let lockfile_content = match fs::read_to_string(&lockfile_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: could not read lockfile `{}`: {}", lockfile_path, e);
+            process::exit(1);
+        }
+    };
+
+    let fields = parse_lockfile(&lockfile_content);
+
+    let locked_source = fields.get("source_sha256").cloned().unwrap_or_default();
+    let locked_output = fields.get("output_sha256").cloned().unwrap_or_default();
+    let locked_seed = fields.get("seed").cloned().unwrap_or_default();
+    let locked_executor = fields.get("executor").cloned().unwrap_or_default();
+    let locked_platform = fields.get("platform").cloned().unwrap_or_default();
+
+    match la.output {
+        OutputMode::Json => {
+            println!("{{");
+            println!("  \"file\": \"{}\",", filename.replace('\\', "/"));
+            println!("  \"lockfile\": \"{}\",", lockfile_path.replace('\\', "/"));
+            println!("  \"diffs\": {{");
+            let mut diffs = Vec::new();
+            if locked_source != current_source_hash {
+                diffs.push(format!("    \"source_sha256\": {{\"locked\": \"{}\", \"current\": \"{}\"}}", locked_source, current_source_hash));
+            }
+            if locked_seed != la.seed.to_string() {
+                diffs.push(format!("    \"seed\": {{\"locked\": \"{}\", \"current\": \"{}\"}}", locked_seed, la.seed));
+            }
+            if locked_executor != current_executor {
+                diffs.push(format!("    \"executor\": {{\"locked\": \"{}\", \"current\": \"{}\"}}", locked_executor, current_executor));
+            }
+            if locked_platform != current_platform {
+                diffs.push(format!("    \"platform\": {{\"locked\": \"{}\", \"current\": \"{}\"}}", locked_platform, current_platform));
+            }
+            if locked_output != current_output_hash {
+                diffs.push(format!("    \"output_sha256\": {{\"locked\": \"{}\", \"current\": \"{}\"}}", locked_output, current_output_hash));
+            }
+            for (i, d) in diffs.iter().enumerate() {
+                print!("{}", d);
+                if i + 1 < diffs.len() { print!(","); }
+                println!();
+            }
+            println!("  }}");
+            println!("}}");
+        }
+        _ => {
+            let label = output::colorize(la.output, output::BOLD_CYAN, "[lock]");
+            eprintln!("{} Diff against {}", label, lockfile_path);
+            eprintln!();
+
+            let mut t = crate::table::Table::new(vec!["Field", "Locked", "Current", "Status"]);
+
+            let seed_str = la.seed.to_string();
+            let fields_to_check: Vec<(&str, &str, &str)> = vec![
+                ("source_sha256", &locked_source, current_source_hash),
+                ("seed", &locked_seed, &seed_str),
+                ("executor", &locked_executor, current_executor),
+                ("platform", &locked_platform, current_platform),
+                ("output_sha256", &locked_output, current_output_hash),
+            ];
+
+            let mut any_diff = false;
+            for (name, locked, current) in &fields_to_check {
+                let is_hash = name.contains("sha256");
+                let locked_display = if is_hash { short_hash(locked) } else { locked.to_string() };
+                let current_display = if is_hash { short_hash(current) } else { current.to_string() };
+                let matches = *locked == *current;
+                if !matches { any_diff = true; }
+                t.add_row_owned(vec![
+                    name.to_string(),
+                    locked_display,
+                    current_display,
+                    if matches {
+                        output::colorize(la.output, output::BOLD_GREEN, "same")
+                    } else {
+                        output::colorize(la.output, output::BOLD_YELLOW, "CHANGED")
+                    },
+                ]);
+            }
+            eprint!("{}", t.render());
+
+            if !any_diff {
+                eprintln!("\nNo differences found.");
+            }
         }
     }
 }
@@ -273,17 +475,21 @@ fn verdict_str(mode: OutputMode, pass: bool) -> String {
 }
 
 pub fn print_help() {
-    eprintln!("cjc lock — Deterministic lockfile generator & verifier");
+    eprintln!("cjcl lock — Deterministic lockfile generator & verifier");
     eprintln!();
-    eprintln!("Usage: cjc lock <file.cjc> [flags]");
+    eprintln!("Usage: cjcl lock <file.cjcl> [flags]");
     eprintln!();
     eprintln!("Generates a lockfile recording source hash, seed, executor version,");
     eprintln!("platform, and expected output hash. Use --verify to check against it.");
     eprintln!();
     eprintln!("Flags:");
-    eprintln!("  --seed <N>          RNG seed (default: 42)");
-    eprintln!("  --verify            Verify current run against existing lockfile");
-    eprintln!("  --plain             Plain text output");
-    eprintln!("  --json              JSON output");
-    eprintln!("  --color             Color output (default)");
+    eprintln!("  --seed <N>            RNG seed (default: 42)");
+    eprintln!("  --verify              Verify current run against existing lockfile");
+    eprintln!("  --update              Regenerate the lockfile (overwrite existing)");
+    eprintln!("  --show                Display the contents of an existing lockfile");
+    eprintln!("  --diff                Show differences between current run and lockfile");
+    eprintln!("  --executor eval|mir   Specify which executor to use (default: eval)");
+    eprintln!("  --plain               Plain text output");
+    eprintln!("  --json                JSON output");
+    eprintln!("  --color               Color output (default)");
 }

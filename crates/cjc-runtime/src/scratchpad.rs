@@ -1,3 +1,23 @@
+//! KV-cache scratchpad -- zero-allocation state persistence for transformer inference.
+//!
+//! Provides [`Scratchpad`], a pre-allocated linear buffer for appending
+//! key/value token vectors without per-token heap allocation. The entire
+//! `[max_seq_len, dim]` storage is allocated once at construction; subsequent
+//! [`append`](Scratchpad::append) calls copy data into existing storage.
+//!
+//! # NoGC guarantee
+//!
+//! After construction, `append` performs no heap allocation -- it writes
+//! directly into the pre-allocated [`Buffer`]. The [`as_tensor`](Scratchpad::as_tensor)
+//! method returns a zero-copy view via `Rc` clone of the underlying buffer.
+//!
+//! # Relationship to [`PagedKvCache`](crate::paged_kv::PagedKvCache)
+//!
+//! `Scratchpad` uses a single contiguous buffer (simpler, better for small
+//! sequences). [`PagedKvCache`](crate::paged_kv::PagedKvCache) uses block
+//! paging (better for large sequences where contiguous allocation may
+//! fragment).
+
 use std::fmt;
 
 use crate::buffer::Buffer;

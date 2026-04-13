@@ -1,4 +1,4 @@
-//! `cjc audit` — Numerical hygiene analysis.
+//! `cjcl audit` — Numerical hygiene analysis.
 //!
 //! Static analysis pass over the AST looking for floating-point anti-patterns:
 //! naive summation in loops, float equality comparison, unguarded division,
@@ -28,12 +28,42 @@ impl Severity {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Category {
+    Summation,
+    FloatEq,
+    Division,
+    Cancellation,
+}
+
+impl Category {
+    fn label(&self) -> &'static str {
+        match self {
+            Category::Summation => "summation",
+            Category::FloatEq => "float-eq",
+            Category::Division => "division",
+            Category::Cancellation => "cancellation",
+        }
+    }
+
+    fn from_str(s: &str) -> Option<Category> {
+        match s {
+            "summation" => Some(Category::Summation),
+            "float-eq" => Some(Category::FloatEq),
+            "division" => Some(Category::Division),
+            "cancellation" => Some(Category::Cancellation),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Finding {
     severity: Severity,
     line: usize,
     message: String,
     suggestion: String,
+    category: Category,
 }
 
 // ── Args ────────────────────────────────────────────────────────────
@@ -42,6 +72,11 @@ pub struct AuditArgs {
     pub file: String,
     pub output: OutputMode,
     pub verbose: bool,
+    pub strict: bool,
+    pub report: Option<String>,
+    pub category: Option<Category>,
+    pub suggest_only: bool,
+    pub baseline: Option<String>,
 }
 
 impl Default for AuditArgs {
@@ -50,6 +85,11 @@ impl Default for AuditArgs {
             file: String::new(),
             output: OutputMode::Color,
             verbose: false,
+            strict: false,
+            report: None,
+            category: None,
+            suggest_only: false,
+            baseline: None,
         }
     }
 }
@@ -63,16 +103,51 @@ pub fn parse_args(args: &[String]) -> AuditArgs {
             "--plain" => aa.output = OutputMode::Plain,
             "--json" => aa.output = OutputMode::Json,
             "--color" => aa.output = OutputMode::Color,
+            "--strict" => aa.strict = true,
+            "--report" => {
+                i += 1;
+                if i < args.len() {
+                    aa.report = Some(args[i].clone());
+                } else {
+                    eprintln!("error: --report requires a file argument");
+                    process::exit(1);
+                }
+            }
+            "--category" => {
+                i += 1;
+                if i < args.len() {
+                    match Category::from_str(&args[i]) {
+                        Some(cat) => aa.category = Some(cat),
+                        None => {
+                            eprintln!("error: unknown category `{}`. Valid: summation, float-eq, division, cancellation", args[i]);
+                            process::exit(1);
+                        }
+                    }
+                } else {
+                    eprintln!("error: --category requires a type argument");
+                    process::exit(1);
+                }
+            }
+            "--suggest-only" => aa.suggest_only = true,
+            "--baseline" => {
+                i += 1;
+                if i < args.len() {
+                    aa.baseline = Some(args[i].clone());
+                } else {
+                    eprintln!("error: --baseline requires a file argument");
+                    process::exit(1);
+                }
+            }
             other if !other.starts_with('-') => aa.file = other.to_string(),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc audit`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl audit`", other);
                 process::exit(1);
             }
         }
         i += 1;
     }
     if aa.file.is_empty() {
-        eprintln!("error: `cjc audit` requires a .cjc file argument");
+        eprintln!("error: `cjcl audit` requires a .cjcl file argument");
         process::exit(1);
     }
     aa
@@ -84,6 +159,72 @@ pub fn parse_args(args: &[String]) -> AuditArgs {
 fn offset_to_line(source: &str, offset: usize) -> usize {
     let capped = offset.min(source.len());
     source[..capped].bytes().filter(|&b| b == b'\n').count() + 1
+}
+
+// ── Baseline support ────────────────────────────────────────────────
+
+/// A baseline finding key used for comparison. We use (line, category, message)
+/// to identify a finding uniquely in a deterministic way.
+fn finding_key(f: &Finding) -> String {
+    format!("{}:{}:{}", f.line, f.category.label(), f.message)
+}
+
+fn load_baseline(path: &str) -> std::collections::BTreeSet<String> {
+    let mut set = std::collections::BTreeSet::new();
+    if let Ok(content) = fs::read_to_string(path) {
+        // Baseline is a JSON file with a "findings" array. Parse minimally.
+        // Each finding has "line", "category", "message" fields.
+        // We do a simple line-by-line extraction to avoid external deps.
+        let mut in_findings = false;
+        let mut current_line: Option<String> = None;
+        let mut current_category: Option<String> = None;
+        let mut current_message: Option<String> = None;
+        for text_line in content.lines() {
+            let trimmed = text_line.trim();
+            if trimmed.contains("\"findings\"") {
+                in_findings = true;
+                continue;
+            }
+            if !in_findings {
+                continue;
+            }
+            if trimmed == "}," || trimmed == "}" {
+                if let (Some(l), Some(c), Some(m)) = (current_line.take(), current_category.take(), current_message.take()) {
+                    set.insert(format!("{}:{}:{}", l, c, m));
+                }
+                continue;
+            }
+            if let Some(val) = extract_json_str_value(trimmed, "\"line\"") {
+                current_line = Some(val);
+            } else if let Some(val) = extract_json_str_value(trimmed, "\"category\"") {
+                current_category = Some(val);
+            } else if let Some(val) = extract_json_str_value(trimmed, "\"message\"") {
+                current_message = Some(val);
+            }
+        }
+    }
+    set
+}
+
+fn extract_json_str_value(line: &str, key: &str) -> Option<String> {
+    if !line.contains(key) {
+        return None;
+    }
+    // Handle both "key": "value" and "key": number
+    if let Some(pos) = line.find(key) {
+        let after_key = &line[pos + key.len()..];
+        // Skip ": "
+        let after_colon = after_key.trim_start().strip_prefix(':')?;
+        let val = after_colon.trim().trim_end_matches(',');
+        // If quoted, strip quotes
+        if val.starts_with('"') && val.ends_with('"') {
+            Some(val[1..val.len()-1].to_string())
+        } else {
+            Some(val.to_string())
+        }
+    } else {
+        None
+    }
 }
 
 // ── AST visitor ─────────────────────────────────────────────────────
@@ -113,8 +254,8 @@ impl<'s> AuditVisitor<'s> {
         offset_to_line(self.source, span.start)
     }
 
-    fn add(&mut self, severity: Severity, line: usize, message: String, suggestion: String) {
-        self.findings.push(Finding { severity, line, message, suggestion });
+    fn add(&mut self, severity: Severity, line: usize, message: String, suggestion: String, category: Category) {
+        self.findings.push(Finding { severity, line, message, suggestion, category });
     }
 
     // ── Top-level walk ──────────────────────────────────────────────
@@ -226,6 +367,7 @@ impl<'s> AuditVisitor<'s> {
                             line,
                             format!("naive summation: `{}` accumulated with `+=` in loop", ident.name),
                             "use `kahan_sum()` or `binned_sum()` for numerically stable accumulation".into(),
+                            Category::Summation,
                         );
                     }
                 }
@@ -269,6 +411,7 @@ impl<'s> AuditVisitor<'s> {
                 }
             }
             cjc_ast::ExprKind::Try(inner) => self.visit_expr(inner),
+            cjc_ast::ExprKind::Cast { expr, .. } => self.visit_expr(expr),
             cjc_ast::ExprKind::VariantLit { fields, .. } => {
                 for f in fields { self.visit_expr(f); }
             }
@@ -283,7 +426,8 @@ impl<'s> AuditVisitor<'s> {
             | cjc_ast::ExprKind::ByteStringLit(_) | cjc_ast::ExprKind::ByteCharLit(_)
             | cjc_ast::ExprKind::RawStringLit(_) | cjc_ast::ExprKind::RawByteStringLit(_)
             | cjc_ast::ExprKind::RegexLit { .. } | cjc_ast::ExprKind::Ident(_)
-            | cjc_ast::ExprKind::Col(_) => {}
+            | cjc_ast::ExprKind::Col(_)
+            | cjc_ast::ExprKind::NaLit => {}
         }
     }
 
@@ -305,6 +449,7 @@ impl<'s> AuditVisitor<'s> {
                         line,
                         format!("naive summation: `{}` accumulated with `+` in loop", name),
                         "use `kahan_sum()` or `binned_sum()` for numerically stable accumulation".into(),
+                        Category::Summation,
                     );
                 }
             }
@@ -318,6 +463,7 @@ impl<'s> AuditVisitor<'s> {
                         line,
                         format!("float equality: comparing with `{}` may fail due to rounding", cmp),
                         "use `approx_eq(a, b, tol)` for tolerance-based comparison".into(),
+                        Category::FloatEq,
                     );
                 }
             }
@@ -331,6 +477,7 @@ impl<'s> AuditVisitor<'s> {
                         line,
                         format!("unguarded division: `{}` could be zero", name),
                         "add a zero-check before dividing, or use a safe division helper".into(),
+                        Category::Division,
                     );
                 } else if self.verbose {
                     self.add(
@@ -338,6 +485,7 @@ impl<'s> AuditVisitor<'s> {
                         line,
                         "division operation".into(),
                         "ensure divisor cannot be zero at runtime".into(),
+                        Category::Division,
                     );
                 }
             }
@@ -350,6 +498,7 @@ impl<'s> AuditVisitor<'s> {
                         line,
                         "potential catastrophic cancellation: subtraction of two complex expressions".into(),
                         "if operands are of similar magnitude, consider algebraic reformulation".into(),
+                        Category::Cancellation,
                     );
                 }
             }
@@ -372,6 +521,7 @@ impl<'s> AuditVisitor<'s> {
                                 line,
                                 format!("naive summation: `{} = {} + ...` in loop", tgt_name.name, tgt_name.name),
                                 "use `kahan_sum()` or `binned_sum()` for numerically stable accumulation".into(),
+                                Category::Summation,
                             );
                         }
                     }
@@ -455,6 +605,36 @@ impl<'s> AuditVisitor<'s> {
     }
 }
 
+// ── JSON report generation ──────────────────────────────────────────
+
+fn write_json_report(path: &str, filename: &str, findings: &[Finding]) {
+    let warn_count = findings.iter().filter(|f| f.severity == Severity::Warn).count();
+    let info_count = findings.iter().filter(|f| f.severity == Severity::Info).count();
+
+    let mut json = String::new();
+    json.push_str("{\n");
+    json.push_str(&format!("  \"file\": \"{}\",\n", filename));
+    json.push_str(&format!("  \"warnings\": {},\n", warn_count));
+    json.push_str(&format!("  \"info\": {},\n", info_count));
+    json.push_str("  \"findings\": [\n");
+    for (i, f) in findings.iter().enumerate() {
+        json.push_str(&format!(
+            "    {{\"severity\": \"{}\", \"line\": {}, \"category\": \"{}\", \"message\": \"{}\", \"suggestion\": \"{}\"}}",
+            f.severity.label(), f.line, f.category.label(),
+            f.message.replace('"', "\\\""),
+            f.suggestion.replace('"', "\\\"")));
+        if i + 1 < findings.len() { json.push(','); }
+        json.push('\n');
+    }
+    json.push_str("  ]\n");
+    json.push_str("}\n");
+
+    if let Err(e) = fs::write(path, &json) {
+        eprintln!("error: could not write report to `{}`: {}", path, e);
+        process::exit(1);
+    }
+}
+
 // ── Entry point ─────────────────────────────────────────────────────
 
 pub fn run(args: &[String]) {
@@ -482,9 +662,42 @@ pub fn run(args: &[String]) {
     // Sort findings by line number for deterministic output
     visitor.findings.sort_by_key(|f| (f.line, f.severity as u8));
 
-    let findings = visitor.findings;
+    let mut findings = visitor.findings;
+
+    // Filter by category if requested
+    if let Some(cat) = aa.category {
+        findings.retain(|f| f.category == cat);
+    }
+
+    // Apply --strict: promote INFO -> WARN, WARN -> error-level
+    // For --strict: we track whether any warnings exist (they become errors)
+    let has_strict_errors;
+    if aa.strict {
+        for f in &mut findings {
+            match f.severity {
+                Severity::Info => f.severity = Severity::Warn,
+                Severity::Warn => {} // stays Warn, but we treat it as error for exit code
+            }
+        }
+        // In strict mode, any original WARN (now still WARN) is an error
+        has_strict_errors = findings.iter().any(|f| f.severity == Severity::Warn);
+    } else {
+        has_strict_errors = false;
+    }
+
+    // Filter against baseline if provided
+    if let Some(ref baseline_path) = aa.baseline {
+        let baseline_keys = load_baseline(baseline_path);
+        findings.retain(|f| !baseline_keys.contains(&finding_key(f)));
+    }
+
     let warn_count = findings.iter().filter(|f| f.severity == Severity::Warn).count();
     let info_count = findings.iter().filter(|f| f.severity == Severity::Info).count();
+
+    // Save report if requested
+    if let Some(ref report_path) = aa.report {
+        write_json_report(report_path, &filename, &findings);
+    }
 
     match aa.output {
         OutputMode::Json => {
@@ -494,8 +707,8 @@ pub fn run(args: &[String]) {
             println!("  \"info\": {},", info_count);
             println!("  \"findings\": [");
             for (i, f) in findings.iter().enumerate() {
-                print!("    {{\"severity\": \"{}\", \"line\": {}, \"message\": \"{}\", \"suggestion\": \"{}\"}}",
-                    f.severity.label(), f.line,
+                print!("    {{\"severity\": \"{}\", \"line\": {}, \"category\": \"{}\", \"message\": \"{}\", \"suggestion\": \"{}\"}}",
+                    f.severity.label(), f.line, f.category.label(),
                     f.message.replace('"', "\\\""),
                     f.suggestion.replace('"', "\\\""));
                 if i + 1 < findings.len() { print!(","); }
@@ -518,8 +731,12 @@ pub fn run(args: &[String]) {
                         Severity::Warn => output::colorize(aa.output, output::BOLD_YELLOW, "[WARN]"),
                         Severity::Info => output::colorize(aa.output, output::BOLD_BLUE, "[INFO]"),
                     };
-                    eprintln!("  {} line {}: {}", sev_str, f.line, f.message);
-                    eprintln!("         suggestion: {}", f.suggestion);
+                    if aa.suggest_only {
+                        eprintln!("  {} line {}: {}", sev_str, f.line, f.suggestion);
+                    } else {
+                        eprintln!("  {} line {}: {}", sev_str, f.line, f.message);
+                        eprintln!("         suggestion: {}", f.suggestion);
+                    }
                 }
 
                 eprintln!();
@@ -531,12 +748,17 @@ pub fn run(args: &[String]) {
             }
         }
     }
+
+    // In strict mode, exit 1 if there were warnings (treated as errors)
+    if aa.strict && has_strict_errors {
+        process::exit(1);
+    }
 }
 
 pub fn print_help() {
-    eprintln!("cjc audit — Numerical hygiene analysis");
+    eprintln!("cjcl audit — Numerical hygiene analysis");
     eprintln!();
-    eprintln!("Usage: cjc audit <file.cjc> [flags]");
+    eprintln!("Usage: cjcl audit <file.cjcl> [flags]");
     eprintln!();
     eprintln!("Performs static analysis of CJC source for floating-point anti-patterns:");
     eprintln!("  - Naive summation in loops (suggest kahan_sum / binned_sum)");
@@ -545,8 +767,13 @@ pub fn print_help() {
     eprintln!("  - Catastrophic cancellation (subtraction of complex expressions)");
     eprintln!();
     eprintln!("Flags:");
-    eprintln!("  -v, --verbose    Show additional info-level findings");
-    eprintln!("  --plain          Plain text output");
-    eprintln!("  --json           JSON output");
-    eprintln!("  --color          Color output (default)");
+    eprintln!("  -v, --verbose          Show additional info-level findings");
+    eprintln!("  --strict               Treat INFO as warnings, warnings as errors (exit 1)");
+    eprintln!("  --report <file>        Save findings as JSON to a file");
+    eprintln!("  --category <type>      Filter by category: summation, float-eq, division, cancellation");
+    eprintln!("  --suggest-only         Only show suggestions, not code context messages");
+    eprintln!("  --baseline <file>      Compare against a saved baseline; only report NEW findings");
+    eprintln!("  --plain                Plain text output");
+    eprintln!("  --json                 JSON output");
+    eprintln!("  --color                Color output (default)");
 }

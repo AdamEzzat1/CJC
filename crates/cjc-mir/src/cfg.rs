@@ -58,22 +58,32 @@ pub struct MirCfg {
 }
 
 impl MirCfg {
-    /// Return the entry basic block.
+    /// Return a reference to the entry basic block (always `BlockId(0)`).
     pub fn entry_block(&self) -> &BasicBlock {
         &self.basic_blocks[self.entry.0 as usize]
     }
 
-    /// Return the block with the given ID.
+    /// Return a reference to the block with the given ID.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `id` is out of bounds.
     pub fn block(&self, id: BlockId) -> &BasicBlock {
         &self.basic_blocks[id.0 as usize]
     }
 
-    /// Collect all successor IDs of a given block.
+    /// Collect all successor block IDs for the given block by inspecting
+    /// its terminator.
     pub fn successors(&self, id: BlockId) -> Vec<BlockId> {
         self.block(id).terminator.successors()
     }
 
-    /// Collect all predecessor IDs for every block (inverted adjacency list).
+    /// Compute the predecessor list for every block (inverted adjacency list).
+    ///
+    /// Returns a `Vec` indexed by block index, where each entry is the list
+    /// of blocks that have an edge leading to that block. Deterministic
+    /// ordering: predecessors appear in the order they are discovered by
+    /// iterating blocks in ID order.
     pub fn predecessors(&self) -> Vec<Vec<BlockId>> {
         let n = self.basic_blocks.len();
         let mut preds: Vec<Vec<BlockId>> = vec![Vec::new(); n];

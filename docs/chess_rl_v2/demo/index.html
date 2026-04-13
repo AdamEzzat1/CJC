@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CJC-Lang Chess RL v2.5 — Demo</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;600;700;900&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #0a0a0f;
+    color: #e0e0e0;
+    font-family: 'Inter', sans-serif;
+    overflow: hidden;
+    height: 100vh;
+    width: 100vw;
+  }
+
+  .container {
+    display: grid;
+    grid-template-columns: 320px 1fr;
+    grid-template-rows: auto 1fr auto;
+    gap: 14px;
+    padding: 16px 20px;
+    height: 100vh;
+    width: 100vw;
+    max-width: 100vw;
+    overflow: hidden;
+  }
+
+  /* ── Header ── */
+  .header {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .header h1 {
+    font-size: 24px;
+    font-weight: 900;
+    background: linear-gradient(135deg, #6366f1, #a855f7, #ec4899);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    letter-spacing: -0.5px;
+    white-space: nowrap;
+  }
+  .header .subtitle {
+    font-size: 13px;
+    color: #6b7280;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .header .badge {
+    background: rgba(99, 102, 241, 0.15);
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    color: #818cf8;
+    padding: 4px 10px;
+    border-radius: 20px;
+    font-size: 10px;
+    font-family: 'JetBrains Mono', monospace;
+    white-space: nowrap;
+  }
+
+  /* ── Chess Board ── */
+  .board-section {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .board-label {
+    font-size: 13px;
+    color: #9ca3af;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+  .board-container {
+    width: 310px;
+    height: 310px;
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    grid-template-rows: repeat(8, 1fr);
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    border: 2px solid rgba(99, 102, 241, 0.2);
+  }
+  .cell {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 26px;
+    transition: background 0.3s;
+    position: relative;
+  }
+  .cell.light { background: #b8c5d6; }
+  .cell.dark { background: #6b8aad; }
+  .cell.highlight { box-shadow: inset 0 0 0 3px rgba(168, 85, 247, 0.7); }
+  .cell.from-highlight { background: rgba(168, 85, 247, 0.35) !important; }
+  .cell.to-highlight { background: rgba(52, 211, 153, 0.35) !important; }
+
+  .move-info {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    color: #9ca3af;
+    min-height: 20px;
+  }
+  .move-info .move-text { color: #a855f7; font-weight: 700; }
+  .move-info .eval-text { color: #34d399; }
+
+  /* ── Right Panel ── */
+  .right-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    overflow: hidden;
+    min-width: 0;
+  }
+
+  /* ── Stats Cards ── */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
+  }
+  .stat-card {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 8px;
+    padding: 10px 8px;
+    text-align: center;
+    overflow: hidden;
+  }
+  .stat-card .label {
+    font-size: 9px;
+    color: #6b7280;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 3px;
+  }
+  .stat-card .value {
+    font-size: 18px;
+    font-weight: 900;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .stat-card .value.purple { color: #a855f7; }
+  .stat-card .value.green { color: #34d399; }
+  .stat-card .value.blue { color: #60a5fa; }
+  .stat-card .value.pink { color: #f472b6; }
+  .stat-card .value.orange { color: #fb923c; }
+  .stat-card .value.white { color: #e0e0e0; }
+  .stat-card .unit {
+    font-size: 9px;
+    color: #6b7280;
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* ── Chart ── */
+  .chart-section {
+    flex: 1;
+    background: rgba(255,255,255,0.02);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 10px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .chart-title {
+    font-size: 12px;
+    color: #6b7280;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-weight: 600;
+  }
+  .chart-canvas-wrap {
+    flex: 1;
+    position: relative;
+  }
+  canvas#perfChart {
+    width: 100% !important;
+    height: 100% !important;
+  }
+
+  /* ── Speedup bar ── */
+  .speedup-section {
+    background: rgba(255,255,255,0.02);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 10px;
+    padding: 12px;
+    overflow: hidden;
+  }
+  .speedup-title {
+    font-size: 12px;
+    color: #6b7280;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-weight: 600;
+    margin-bottom: 12px;
+  }
+  .bar-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .bar-label {
+    width: 50px;
+    font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+    color: #9ca3af;
+    text-align: right;
+  }
+  .bar-track {
+    flex: 1;
+    height: 24px;
+    background: rgba(255,255,255,0.04);
+    border-radius: 4px;
+    overflow: hidden;
+    position: relative;
+  }
+  .bar-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 1.5s ease-out;
+    display: flex;
+    align-items: center;
+    padding-left: 8px;
+    font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+    color: white;
+    font-weight: 700;
+  }
+  .bar-fill.v23 { background: linear-gradient(90deg, #6b7280, #9ca3af); }
+  .bar-fill.v24 { background: linear-gradient(90deg, #6366f1, #818cf8); }
+  .bar-fill.v25 { background: linear-gradient(90deg, #a855f7, #c084fc); }
+
+  /* ── Footer ── */
+  .footer {
+    grid-column: 1 / -1;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-top: 1px solid rgba(255,255,255,0.06);
+    padding-top: 12px;
+  }
+  .footer-left {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: #4b5563;
+  }
+  .footer-left span { color: #6366f1; }
+  .footer-right {
+    display: flex;
+    gap: 16px;
+    font-size: 11px;
+    color: #4b5563;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .footer-right .tag {
+    background: rgba(255,255,255,0.04);
+    padding: 3px 8px;
+    border-radius: 4px;
+  }
+
+  /* ── Record button ── */
+  .record-btn {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    z-index: 9999;
+    background: #ef4444;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 8px 16px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    box-shadow: 0 4px 12px rgba(239,68,68,0.4);
+    transition: all 0.2s;
+  }
+  .record-btn:hover { transform: scale(1.05); }
+  .record-btn.recording { animation: pulse-red 1s infinite; }
+  .record-btn.done { background: #22c55e; box-shadow: 0 4px 12px rgba(34,197,94,0.4); }
+  @keyframes pulse-red {
+    0%, 100% { box-shadow: 0 4px 12px rgba(239,68,68,0.4); }
+    50% { box-shadow: 0 4px 20px rgba(239,68,68,0.8); }
+  }
+  .record-dot {
+    width: 10px; height: 10px;
+    background: white;
+    border-radius: 50%;
+  }
+
+  /* ── Console log ── */
+  .console-section {
+    background: rgba(0,0,0,0.3);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: #6b7280;
+    max-height: 80px;
+    overflow: hidden;
+  }
+  .console-line { margin-bottom: 2px; }
+  .console-line .timestamp { color: #4b5563; }
+  .console-line .key { color: #818cf8; }
+  .console-line .val { color: #34d399; }
+  .console-line .warn { color: #fb923c; }
+</style>
+</head>
+<body>
+
+<button class="record-btn" id="recordBtn" onclick="toggleRecord()">
+  <div class="record-dot"></div> Record 30s Video
+</button>
+
+<div class="container">
+  <!-- Header -->
+  <div class="header">
+    <div>
+      <h1>CJC-Lang Chess RL v2.5</h1>
+      <div class="subtitle">Reinforcement Learning Agent &mdash; Self-Play Training Demo</div>
+    </div>
+    <div style="text-align:right">
+      <div class="badge">Language built in Rust &bull; Demo in CJC-Lang &bull; 0 Deps</div>
+    </div>
+  </div>
+
+  <!-- Left: Chess Board -->
+  <div class="board-section">
+    <div class="board-label">Self-Play &mdash; Episode <span id="episode-num">1</span></div>
+    <div class="board-container" id="board"></div>
+    <div class="move-info" id="move-info">Initializing...</div>
+    <div class="console-section" id="console"></div>
+  </div>
+
+  <!-- Right Panel -->
+  <div class="right-panel">
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="label">Parameters</div>
+        <div class="value purple">45,873</div>
+        <div class="unit">trainable weights</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Features</div>
+        <div class="value green">774</div>
+        <div class="unit">input dimensions</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Episode Time</div>
+        <div class="value pink" id="ep-time">29.80</div>
+        <div class="unit">seconds (2.76x faster)</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Elo Change</div>
+        <div class="value orange" id="elo-val">+13.9</div>
+        <div class="unit">vs baseline</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Algorithm</div>
+        <div class="value blue" style="font-size:16px">A2C+GAE</div>
+        <div class="unit">+ Adam optimizer</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Ext. Deps</div>
+        <div class="value white">0</div>
+        <div class="unit">zero, always</div>
+      </div>
+    </div>
+
+    <!-- Performance chart -->
+    <div class="speedup-section">
+      <div class="speedup-title">Training Speed &mdash; Per Episode (seconds)</div>
+      <div class="bar-row">
+        <div class="bar-label">v2.3</div>
+        <div class="bar-track"><div class="bar-fill v23" id="bar-v23" style="width:0%">82.2s</div></div>
+      </div>
+      <div class="bar-row">
+        <div class="bar-label">v2.4</div>
+        <div class="bar-track"><div class="bar-fill v24" id="bar-v24" style="width:0%">43.5s</div></div>
+      </div>
+      <div class="bar-row">
+        <div class="bar-label">v2.5</div>
+        <div class="bar-track"><div class="bar-fill v25" id="bar-v25" style="width:0%">29.8s</div></div>
+      </div>
+    </div>
+
+    <!-- What changed -->
+    <div class="chart-section" id="features-section">
+      <div class="chart-title">v1 &rarr; v2.5 Evolution</div>
+      <div id="features-list" style="font-size:12px; line-height:1.8; color:#9ca3af; flex:1; overflow:hidden;"></div>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div class="footer">
+    <div class="footer-left">
+      <span>cjcl</span> &bull; Computational Jacobian Core &bull; 21 crates &bull; ~96K LOC
+    </div>
+    <div class="footer-right">
+      <div class="tag">Deterministic</div>
+      <div class="tag">Bit-Identical</div>
+      <div class="tag">seed=42</div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Chess pieces ──
+const PIECES = {
+  'K': '\u2654', 'Q': '\u2655', 'R': '\u2656', 'B': '\u2657', 'N': '\u2658', 'P': '\u2659',
+  'k': '\u265A', 'q': '\u265B', 'r': '\u265C', 'b': '\u265D', 'n': '\u265E', 'p': '\u265F'
+};
+
+const INITIAL_BOARD = [
+  'r','n','b','q','k','b','n','r',
+  'p','p','p','p','p','p','p','p',
+  '','','','','','','','',
+  '','','','','','','','',
+  '','','','','','','','',
+  '','','','','','','','',
+  'P','P','P','P','P','P','P','P',
+  'R','N','B','Q','K','B','N','R'
+];
+
+// Pre-scripted game moves (from, to) — a sample game
+const SAMPLE_MOVES = [
+  [52,36],[12,28],[62,45],[6,21],[61,47],[1,18],
+  [51,35],[11,27],[57,42],[5,26],[59,31],[3,39],
+  [50,34],[10,26],[49,41],[9,25],[63,62],[7,22],
+  [58,44],[2,11],[56,48],[0,7],[48,40],[21,36],
+  [47,36],[28,36],[45,36],[27,35],[42,35],[18,35],
+  [44,35],[26,35],[31,17],[39,46],[34,26],[25,34],
+  [41,33],[22,12],[40,32],[11,20],[36,28],[35,26],
+  [62,61],[7,6],[33,25],[12,5],[32,24],[20,29],
+];
+
+let board = [...INITIAL_BOARD];
+let moveIdx = 0;
+let episode = 1;
+let fromCell = -1, toCell = -1;
+
+function renderBoard() {
+  const container = document.getElementById('board');
+  container.innerHTML = '';
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 8; c++) {
+      const idx = r * 8 + c;
+      const cell = document.createElement('div');
+      const isLight = (r + c) % 2 === 0;
+      cell.className = 'cell ' + (isLight ? 'light' : 'dark');
+      if (idx === fromCell) cell.classList.add('from-highlight');
+      if (idx === toCell) cell.classList.add('to-highlight');
+      const piece = board[idx];
+      cell.textContent = piece ? PIECES[piece] || '' : '';
+      container.appendChild(cell);
+    }
+  }
+}
+
+function squareName(idx) {
+  const files = 'abcdefgh';
+  const r = Math.floor(idx / 8);
+  const c = idx % 8;
+  return files[c] + (8 - r);
+}
+
+function makeMove() {
+  if (moveIdx >= SAMPLE_MOVES.length) {
+    // Reset for new episode
+    board = [...INITIAL_BOARD];
+    moveIdx = 0;
+    episode++;
+    document.getElementById('episode-num').textContent = episode;
+    fromCell = -1;
+    toCell = -1;
+    renderBoard();
+    addConsoleLine(`Episode ${episode} starting... seed=${42 + episode}`);
+    return;
+  }
+
+  const [from, to] = SAMPLE_MOVES[moveIdx];
+  const piece = board[from];
+  const captured = board[to];
+  board[to] = piece;
+  board[from] = '';
+  fromCell = from;
+  toCell = to;
+  moveIdx++;
+
+  const moveStr = `${squareName(from)}${squareName(to)}`;
+  const evalScore = (Math.random() * 2 - 1).toFixed(3);
+  const moveInfo = document.getElementById('move-info');
+  moveInfo.innerHTML = `Move ${moveIdx}: <span class="move-text">${moveStr}</span>${captured ? ' captures ' + PIECES[captured] : ''} &nbsp; <span class="eval-text">eval: ${evalScore}</span>`;
+
+  renderBoard();
+}
+
+// ── Console ──
+const consoleLines = [];
+function addConsoleLine(text, type='info') {
+  const time = new Date().toLocaleTimeString('en-US', {hour12:false});
+  consoleLines.push({time, text, type});
+  if (consoleLines.length > 4) consoleLines.shift();
+  const el = document.getElementById('console');
+  el.innerHTML = consoleLines.map(l => {
+    const cls = l.type === 'warn' ? 'warn' : 'val';
+    return `<div class="console-line"><span class="timestamp">[${l.time}]</span> <span class="${cls}">${l.text}</span></div>`;
+  }).join('');
+}
+
+// ── Animate speedup bars ──
+function animateBars() {
+  setTimeout(() => {
+    document.getElementById('bar-v23').style.width = '100%';
+  }, 500);
+  setTimeout(() => {
+    document.getElementById('bar-v24').style.width = '52.9%';
+  }, 1000);
+  setTimeout(() => {
+    document.getElementById('bar-v25').style.width = '36.3%';
+  }, 1500);
+}
+
+// ── Features typewriter ──
+const features = [
+  { icon: '\u25B8', text: 'Hand-rolled gradients \u2192 GradGraph Autodiff', color: '#a855f7' },
+  { icon: '\u25B8', text: '1K params \u2192 45K params (43\u00d7)', color: '#60a5fa' },
+  { icon: '\u25B8', text: '66 features \u2192 774 features (12\u00d7)', color: '#34d399' },
+  { icon: '\u25B8', text: 'Basic chess \u2192 Full rules + Zobrist', color: '#fb923c' },
+  { icon: '\u25B8', text: 'REINFORCE \u2192 A2C + GAE + Adam', color: '#f472b6' },
+  { icon: '\u25B8', text: 'Arena GradGraph + Dead Nodes', color: '#818cf8' },
+  { icon: '\u25B8', text: 'Fused MLP (3\u00d7 fewer nodes)', color: '#a855f7' },
+  { icon: '\u25B8', text: 'In-place gradient accumulation', color: '#34d399' },
+  { icon: '\u25B8', text: '82.2s \u2192 29.8s/ep (2.76\u00d7)', color: '#ec4899' },
+  { icon: '\u25B8', text: 'Deterministic: seed=42 \u2192 same game', color: '#fbbf24' },
+  { icon: '\u2713', text: 'Zero external deps. Pure CJC-Lang.', color: '#34d399' },
+];
+
+let featureIdx = 0;
+function addFeature() {
+  if (featureIdx >= features.length) return;
+  const f = features[featureIdx];
+  const el = document.getElementById('features-list');
+  const div = document.createElement('div');
+  div.style.opacity = '0';
+  div.style.transform = 'translateX(-10px)';
+  div.style.transition = 'all 0.4s ease-out';
+  div.innerHTML = `<span style="color:${f.color}; font-weight:700;">${f.icon}</span> ${f.text}`;
+  el.appendChild(div);
+  requestAnimationFrame(() => {
+    div.style.opacity = '1';
+    div.style.transform = 'translateX(0)';
+  });
+  featureIdx++;
+
+  // Auto-scroll
+  el.scrollTop = el.scrollHeight;
+}
+
+// ── Console messages ──
+const consoleMessages = [
+  'GradGraph: arena-based, 0 Rc<RefCell> allocations',
+  'backward(): dead node elimination active (skip 23%)',
+  'accumulate_grad(): in-place mutation via add_assign',
+  'MlpLayer fused: transpose+matmul+bias+relu \u2192 1 node',
+  'PINN: graph reuse via set_tensor + reforward',
+  'Weight hash: 9.790915694115341 (deterministic)',
+  'adam_step: native Rust builtin (~9\u00d7 vs interpreted)',
+  'encode_state_fast: O(774) vs O(38\u00d7774) COW copies',
+  'backward_collect: batched zero_grad + backward + grad',
+  'Seed=42, SplitMix64 RNG, Kahan summation',
+];
+let consoleIdx = 0;
+
+// ── Main loop ──
+renderBoard();
+animateBars();
+
+addConsoleLine('CJC-Lang v2.5 chess RL demo starting...');
+
+setInterval(makeMove, 800);
+setInterval(() => {
+  addFeature();
+}, 2000);
+setInterval(() => {
+  addConsoleLine(consoleMessages[consoleIdx % consoleMessages.length]);
+  consoleIdx++;
+}, 3500);
+
+// ── Screen Recording ──
+let mediaRecorder = null;
+let recordedChunks = [];
+
+async function toggleRecord() {
+  const btn = document.getElementById('recordBtn');
+
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    mediaRecorder.stop();
+    return;
+  }
+
+  // Reset state
+  board = [...INITIAL_BOARD];
+  moveIdx = 0;
+  episode = 1;
+  featureIdx = 0;
+  consoleIdx = 0;
+  fromCell = -1;
+  toCell = -1;
+  document.getElementById('episode-num').textContent = '1';
+  document.getElementById('features-list').innerHTML = '';
+  document.getElementById('console').innerHTML = '';
+  document.getElementById('bar-v23').style.width = '0%';
+  document.getElementById('bar-v24').style.width = '0%';
+  document.getElementById('bar-v25').style.width = '0%';
+  renderBoard();
+
+  // Hide the record button during recording
+  btn.style.display = 'none';
+
+  try {
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { mediaSource: 'screen', frameRate: 30 },
+      audio: false
+    });
+
+    recordedChunks = [];
+    mediaRecorder = new MediaRecorder(stream, {
+      mimeType: 'video/webm;codecs=vp9',
+      videoBitsPerSecond: 5000000
+    });
+
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) recordedChunks.push(e.data);
+    };
+
+    mediaRecorder.onstop = () => {
+      stream.getTracks().forEach(t => t.stop());
+      const blob = new Blob(recordedChunks, { type: 'video/webm' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'cjc-lang-chess-rl-v2.5.webm';
+      a.click();
+      URL.revokeObjectURL(url);
+
+      btn.textContent = 'Download Complete';
+      btn.classList.remove('recording');
+      btn.classList.add('done');
+      btn.style.display = 'flex';
+    };
+
+    mediaRecorder.start();
+
+    // Re-trigger animations after a brief pause
+    setTimeout(() => {
+      animateBars();
+      addConsoleLine('CJC-Lang v2.5 chess RL demo starting...');
+    }, 300);
+
+    // Auto-stop after 30 seconds
+    setTimeout(() => {
+      if (mediaRecorder && mediaRecorder.state === 'recording') {
+        mediaRecorder.stop();
+      }
+    }, 30000);
+
+  } catch (err) {
+    console.error('Recording failed:', err);
+    btn.innerHTML = '<div class="record-dot"></div> Record 30s Video';
+    btn.style.display = 'flex';
+  }
+}
+</script>
+</body>
+</html>

@@ -1,24 +1,86 @@
 //! Diagnostic infrastructure for the CJC compiler.
 //!
-//! Provides `DiagnosticBag` for collecting errors and warnings, `Span` for
-//! source locations, and structured error codes (E0xxx through E8xxx).
+//! This crate provides the core building blocks for reporting errors, warnings,
+//! and hints throughout the CJC compilation pipeline (lexer through MIR execution).
+//!
+//! # Key types
+//!
+//! - [`Span`] — byte-offset range identifying a region in source code.
+//! - [`SourceMap`] — precomputed line-start table for O(log n) byte-offset to
+//!   (line, column) lookups.
+//! - [`Diagnostic`] — a single error, warning, or hint with labels, hints, and
+//!   optional fix suggestions.
+//! - [`DiagnosticBag`] — growable collection of diagnostics with configurable
+//!   error-count limits and batch rendering.
+//! - [`DiagnosticBuilder`] — fluent builder for constructing diagnostics from
+//!   typed [`ErrorCode`] values.
+//! - [`DiagnosticRenderer`] — renders diagnostics to human-readable strings
+//!   with source context, underlines, and optional ANSI color.
+//! - [`ErrorCode`] — typed error code enum covering the entire compiler
+//!   pipeline (E0xxx through E9xxx, W0xxx).
+//! - [`Severity`] — error, warning, or hint classification.
+//! - [`DiagnosticFormat`] — rich (multi-line with source context) or short
+//!   (machine-readable one-liner) output format.
 
 pub mod error_codes;
 
 pub use error_codes::ErrorCode;
 
-/// Source span: byte offset range in source code.
+/// A half-open byte-offset range `[start, end)` identifying a region in source code.
+///
+/// Spans are used throughout the compiler to track the origin of tokens, AST nodes,
+/// and diagnostics back to the original source text.
+///
+/// # Fields
+///
+/// * `start` — inclusive byte offset of the first character.
+/// * `end` — exclusive byte offset one past the last character.
+///
+/// # Examples
+///
+/// ```
+/// use cjc_diag::Span;
+///
+/// let span = Span::new(0, 5);
+/// assert_eq!(span.start, 0);
+/// assert_eq!(span.end, 5);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
+    /// Inclusive byte offset of the first character in the spanned region.
     pub start: usize,
+    /// Exclusive byte offset one past the last character in the spanned region.
     pub end: usize,
 }
 
 impl Span {
+    /// Creates a new span covering the byte range `[start, end)`.
+    ///
+    /// # Arguments
+    ///
+    /// * `start` — inclusive byte offset of the first character.
+    /// * `end` — exclusive byte offset one past the last character.
     pub fn new(start: usize, end: usize) -> Self {
         Self { start, end }
     }
 
+    /// Returns the smallest span that covers both `self` and `other`.
+    ///
+    /// The resulting span starts at `min(self.start, other.start)` and ends at
+    /// `max(self.end, other.end)`.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` — the span to merge with.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cjc_diag::Span;
+    ///
+    /// let merged = Span::new(5, 10).merge(Span::new(8, 15));
+    /// assert_eq!(merged, Span::new(5, 15));
+    /// ```
     pub fn merge(self, other: Span) -> Span {
         Span {
             start: self.start.min(other.start),
@@ -26,6 +88,10 @@ impl Span {
         }
     }
 
+    /// Creates a zero-length dummy span at offset 0.
+    ///
+    /// Useful as a placeholder when no meaningful source location is available
+    /// (e.g., compiler-generated nodes or test scaffolding).
     pub fn dummy() -> Self {
         Self { start: 0, end: 0 }
     }
@@ -33,8 +99,25 @@ impl Span {
 
 // ── SourceMap: precomputed line-start table for O(log n) lookups ─────
 
-/// Maps byte offsets to (line, column) positions using precomputed line starts.
-/// All line/column numbers are 1-based.
+/// Precomputed line-start table for O(log n) byte-offset to (line, column) lookups.
+///
+/// `SourceMap` scans the source text once at construction time, recording the byte
+/// offset of every line start. Subsequent lookups use binary search over this table,
+/// giving O(log n) performance where n is the number of lines.
+///
+/// All line and column numbers returned by this type are **1-based**.
+///
+/// # Examples
+///
+/// ```
+/// use cjc_diag::SourceMap;
+///
+/// let smap = SourceMap::new("hello\nworld\n");
+/// assert_eq!(smap.offset_to_line_col(0), (1, 1));   // 'h'
+/// assert_eq!(smap.offset_to_line_col(6), (2, 1));   // 'w'
+/// assert_eq!(smap.line_count(), 3);
+/// assert_eq!(smap.get_line(1), "hello");
+/// ```
 #[derive(Debug, Clone)]
 pub struct SourceMap<'a> {
     source: &'a str,
@@ -43,7 +126,12 @@ pub struct SourceMap<'a> {
 }
 
 impl<'a> SourceMap<'a> {
-    /// Build a SourceMap by scanning the source once for newline positions.
+    /// Builds a [`SourceMap`] by scanning `source` once for newline positions.
+    ///
+    /// # Arguments
+    ///
+    /// * `source` — the full source text to index. The reference must outlive
+    ///   the returned `SourceMap`.
     pub fn new(source: &'a str) -> Self {
         let mut line_starts = vec![0usize];
         for (i, b) in source.bytes().enumerate() {
@@ -54,8 +142,22 @@ impl<'a> SourceMap<'a> {
         Self { source, line_starts }
     }
 
-    /// Convert a byte offset to (line, column), both 1-based.
-    /// Uses binary search over precomputed line starts — O(log n).
+    /// Converts a byte offset to a 1-based `(line, column)` pair.
+    ///
+    /// Uses binary search over the precomputed line-start table for O(log n)
+    /// performance. If `offset` exceeds the source length it is clamped to
+    /// `source.len()`.
+    ///
+    /// Columns are counted in **characters** (not bytes), so multi-byte UTF-8
+    /// sequences count as a single column.
+    ///
+    /// # Arguments
+    ///
+    /// * `offset` — byte offset into the source text.
+    ///
+    /// # Returns
+    ///
+    /// A `(line, column)` tuple, both 1-based.
     pub fn offset_to_line_col(&self, offset: usize) -> (usize, usize) {
         let offset = offset.min(self.source.len());
         // binary search: find the last line_start <= offset
@@ -70,7 +172,15 @@ impl<'a> SourceMap<'a> {
         (line, col)
     }
 
-    /// Get a source line by 1-based line number.
+    /// Returns the source text for a given 1-based line number.
+    ///
+    /// Trailing newline (`\n`) and carriage-return (`\r`) characters are stripped
+    /// from the returned slice. Returns an empty string if `line_num` is 0 or
+    /// exceeds the total number of lines.
+    ///
+    /// # Arguments
+    ///
+    /// * `line_num` — 1-based line number.
     pub fn get_line(&self, line_num: usize) -> &str {
         if line_num == 0 || line_num > self.line_starts.len() {
             return "";
@@ -87,52 +197,110 @@ impl<'a> SourceMap<'a> {
         slice.strip_suffix('\r').unwrap_or(slice)
     }
 
-    /// Total number of lines in the source.
+    /// Returns the total number of lines in the source.
+    ///
+    /// A trailing newline adds an extra (empty) logical line, matching the
+    /// convention used by most text editors.
     pub fn line_count(&self) -> usize {
         self.line_starts.len()
     }
 
-    /// The underlying source text.
+    /// Returns the underlying source text that this map indexes.
     pub fn source(&self) -> &str {
         self.source
     }
 }
 
+/// Classification of a diagnostic's importance.
+///
+/// Determines how the diagnostic is rendered (color, prefix) and whether it
+/// causes compilation to abort.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
+    /// A fatal problem that prevents successful compilation.
     Error,
+    /// A potential issue that does not prevent compilation.
     Warning,
+    /// An informational suggestion for the user.
     Hint,
 }
 
+/// A secondary annotation attached to a [`Diagnostic`].
+///
+/// Labels mark additional source regions relevant to the primary diagnostic
+/// (e.g., "expected type declared here" or "conflicting definition found here").
+/// The [`DiagnosticRenderer`] underlines each label and displays its message
+/// next to the source context.
 #[derive(Debug, Clone)]
 pub struct Label {
+    /// Source region this label highlights.
     pub span: Span,
+    /// Explanatory text displayed alongside the underline.
     pub message: String,
 }
 
-/// A suggested fix: replace the span's content with `replacement`.
+/// A machine-applicable fix suggestion attached to a [`Diagnostic`].
+///
+/// Encodes a textual replacement: the source text covered by [`span`](Self::span)
+/// should be replaced with [`replacement`](Self::replacement). The renderer shows
+/// the suggested line with the replacement applied, Elm-style.
 #[derive(Debug, Clone)]
 pub struct FixSuggestion {
+    /// Source region to be replaced.
     pub span: Span,
+    /// Text that should replace the source region.
     pub replacement: String,
+    /// Human-readable description of the fix (e.g., "change type annotation to `str`").
     pub message: String,
 }
 
+/// A single compiler diagnostic (error, warning, or hint).
+///
+/// A `Diagnostic` bundles a severity level, an error code string, a primary
+/// message, the originating [`Span`], and optional secondary [`Label`]s,
+/// free-text hints, and machine-applicable [`FixSuggestion`]s.
+///
+/// Construct diagnostics via the convenience constructors [`Diagnostic::error`]
+/// and [`Diagnostic::warning`], or use [`DiagnosticBuilder`] for typed
+/// [`ErrorCode`]-based construction.
+///
+/// # Examples
+///
+/// ```
+/// use cjc_diag::{Diagnostic, Span};
+///
+/// let diag = Diagnostic::error("E1000", "unexpected token", Span::new(5, 6))
+///     .with_label(Span::new(5, 6), "found `}`")
+///     .with_hint("did you forget to close a previous block?");
+/// ```
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
+    /// How severe this diagnostic is.
     pub severity: Severity,
+    /// Error code string (e.g., `"E1000"`, `"W0001"`).
     pub code: String,
+    /// Primary human-readable message.
     pub message: String,
+    /// Source region this diagnostic originates from.
     pub span: Span,
+    /// Secondary annotations highlighting related source regions.
     pub labels: Vec<Label>,
+    /// Free-text hints offering guidance to the user.
     pub hints: Vec<String>,
+    /// Machine-applicable replacement suggestions.
     pub fix_suggestions: Vec<FixSuggestion>,
-    /// Source filename for multi-file diagnostics. None = single-file context.
+    /// Source filename for multi-file diagnostics. `None` = single-file context.
     pub filename: Option<String>,
 }
 
 impl Diagnostic {
+    /// Creates an error-severity diagnostic.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` — error code string (e.g., `"E1000"`).
+    /// * `message` — primary human-readable message.
+    /// * `span` — source region this error originates from.
     pub fn error(code: impl Into<String>, message: impl Into<String>, span: Span) -> Self {
         Self {
             severity: Severity::Error,
@@ -146,6 +314,13 @@ impl Diagnostic {
         }
     }
 
+    /// Creates a warning-severity diagnostic.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` — error code string (e.g., `"W0001"`).
+    /// * `message` — primary human-readable message.
+    /// * `span` — source region this warning originates from.
     pub fn warning(code: impl Into<String>, message: impl Into<String>, span: Span) -> Self {
         Self {
             severity: Severity::Warning,
@@ -159,12 +334,26 @@ impl Diagnostic {
         }
     }
 
-    /// Attach a source filename for multi-file diagnostics.
+    /// Attaches a source filename for multi-file diagnostics.
+    ///
+    /// When set, the [`DiagnosticRenderer`] uses this filename instead of its
+    /// default, allowing a single renderer to display diagnostics from multiple
+    /// source files.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` — the filename to display (e.g., `"math.cjcl"`).
     pub fn with_filename(mut self, name: impl Into<String>) -> Self {
         self.filename = Some(name.into());
         self
     }
 
+    /// Adds a secondary label highlighting an additional source region.
+    ///
+    /// # Arguments
+    ///
+    /// * `span` — source region to underline.
+    /// * `message` — explanatory text displayed alongside the underline.
     pub fn with_label(mut self, span: Span, message: impl Into<String>) -> Self {
         self.labels.push(Label {
             span,
@@ -173,11 +362,26 @@ impl Diagnostic {
         self
     }
 
+    /// Adds a free-text hint offering guidance to the user.
+    ///
+    /// # Arguments
+    ///
+    /// * `hint` — the hint text (e.g., "did you mean `foo`?").
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
         self.hints.push(hint.into());
         self
     }
 
+    /// Adds a machine-applicable fix suggestion.
+    ///
+    /// The renderer shows the source line with the replacement applied,
+    /// Elm-style.
+    ///
+    /// # Arguments
+    ///
+    /// * `span` — source region to replace.
+    /// * `replacement` — text that should replace the spanned region.
+    /// * `message` — human-readable description of the fix.
     pub fn with_fix(mut self, span: Span, replacement: impl Into<String>, message: impl Into<String>) -> Self {
         self.fix_suggestions.push(FixSuggestion {
             span,
@@ -190,7 +394,25 @@ impl Diagnostic {
 
 // ── DiagnosticBuilder (fluent API using typed ErrorCode) ─────────────
 
-/// Fluent builder for constructing diagnostics from typed error codes.
+/// Fluent builder for constructing [`Diagnostic`]s from typed [`ErrorCode`] values.
+///
+/// Unlike the `Diagnostic::error` / `Diagnostic::warning` constructors, the
+/// builder derives severity and a default message template automatically from
+/// the [`ErrorCode`]. Call [`build`](Self::build) to finalize.
+///
+/// # Examples
+///
+/// ```
+/// use cjc_diag::{DiagnosticBuilder, ErrorCode, Span};
+///
+/// let diag = DiagnosticBuilder::new(ErrorCode::E2001, Span::new(10, 15))
+///     .message("expected `i64`, found `str`")
+///     .label(Span::new(10, 15), "this expression")
+///     .hint("consider converting the type")
+///     .build();
+///
+/// assert_eq!(diag.code, "E2001");
+/// ```
 pub struct DiagnosticBuilder {
     code: ErrorCode,
     span: Span,
@@ -202,7 +424,17 @@ pub struct DiagnosticBuilder {
 }
 
 impl DiagnosticBuilder {
-    /// Create a new builder from a typed error code and span.
+    /// Creates a new builder from a typed [`ErrorCode`] and source [`Span`].
+    ///
+    /// The builder starts with the code's default message template
+    /// (see [`ErrorCode::message_template`]) and severity
+    /// (see [`ErrorCode::severity`]). Both can be overridden before calling
+    /// [`build`](Self::build).
+    ///
+    /// # Arguments
+    ///
+    /// * `code` — the typed error code.
+    /// * `span` — source region this diagnostic originates from.
     pub fn new(code: ErrorCode, span: Span) -> Self {
         Self {
             code,
@@ -215,13 +447,22 @@ impl DiagnosticBuilder {
         }
     }
 
-    /// Override the default message template.
+    /// Overrides the default message template from [`ErrorCode::message_template`].
+    ///
+    /// # Arguments
+    ///
+    /// * `msg` — custom message text.
     pub fn message(mut self, msg: impl Into<String>) -> Self {
         self.message = Some(msg.into());
         self
     }
 
-    /// Add a label at a specific span.
+    /// Adds a secondary label at a specific source [`Span`].
+    ///
+    /// # Arguments
+    ///
+    /// * `span` — source region to underline.
+    /// * `msg` — explanatory text displayed alongside the underline.
     pub fn label(mut self, span: Span, msg: impl Into<String>) -> Self {
         self.labels.push(Label {
             span,
@@ -230,13 +471,23 @@ impl DiagnosticBuilder {
         self
     }
 
-    /// Add a hint.
+    /// Adds a free-text hint.
+    ///
+    /// # Arguments
+    ///
+    /// * `hint` — the hint text (e.g., "try using `as` to cast").
     pub fn hint(mut self, hint: impl Into<String>) -> Self {
         self.hints.push(hint.into());
         self
     }
 
-    /// Add a fix suggestion.
+    /// Adds a machine-applicable fix suggestion.
+    ///
+    /// # Arguments
+    ///
+    /// * `span` — source region to replace.
+    /// * `replacement` — text that should replace the spanned region.
+    /// * `msg` — human-readable description of the fix.
     pub fn fix(mut self, span: Span, replacement: impl Into<String>, msg: impl Into<String>) -> Self {
         self.fix_suggestions.push(FixSuggestion {
             span,
@@ -246,13 +497,23 @@ impl DiagnosticBuilder {
         self
     }
 
-    /// Attach a source filename for multi-file diagnostics.
+    /// Attaches a source filename for multi-file diagnostics.
+    ///
+    /// See [`Diagnostic::with_filename`] for details.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` — the filename to display.
     pub fn filename(mut self, name: impl Into<String>) -> Self {
         self.filename = Some(name.into());
         self
     }
 
-    /// Build the final Diagnostic.
+    /// Consumes the builder and returns the finalized [`Diagnostic`].
+    ///
+    /// If no custom message was set via [`message`](Self::message), the
+    /// [`ErrorCode::message_template`] is used as the diagnostic message.
+    /// Severity is always derived from [`ErrorCode::severity`].
     pub fn build(self) -> Diagnostic {
         let message = self.message.unwrap_or_else(|| self.code.message_template().to_string());
         Diagnostic {
@@ -279,7 +540,8 @@ const BOLD_BLUE: &str = "\x1b[1;34m";
 const BOLD_GREEN: &str = "\x1b[1;32m";
 const BOLD_MAGENTA: &str = "\x1b[1;35m";
 
-/// Diagnostic output format.
+/// Controls the output format used by [`DiagnosticRenderer`] and
+/// [`DiagnosticBag::render_all_with_options`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticFormat {
     /// Rich output with source context, underlines, labels, hints, and fixes.
@@ -289,9 +551,15 @@ pub enum DiagnosticFormat {
     Short,
 }
 
-/// Renders diagnostics to a human-readable string with source context.
-/// Supports Rust+Elm hybrid style: multi-line spans, fix suggestions,
-/// and rich secondary labels.
+/// Renders [`Diagnostic`]s to human-readable strings with source context.
+///
+/// Output follows a Rust+Elm hybrid style: a machine-readable header line,
+/// source context with underlines and carets, secondary labels, Elm-style fix
+/// suggestions, and free-text hints. Supports both [`Rich`](DiagnosticFormat::Rich)
+/// (multi-line with context) and [`Short`](DiagnosticFormat::Short) (single-line,
+/// machine-parseable) formats.
+///
+/// ANSI color output is optional and controlled at construction time.
 pub struct DiagnosticRenderer<'a> {
     smap: SourceMap<'a>,
     filename: &'a str,
@@ -300,17 +568,39 @@ pub struct DiagnosticRenderer<'a> {
 }
 
 impl<'a> DiagnosticRenderer<'a> {
-    /// Create a new renderer with color disabled (backward compatible).
+    /// Creates a new renderer with color disabled and [`Rich`](DiagnosticFormat::Rich) format.
+    ///
+    /// This is the backward-compatible default constructor.
+    ///
+    /// # Arguments
+    ///
+    /// * `source` — full source text used for context snippets.
+    /// * `filename` — default filename shown in diagnostic headers.
     pub fn new(source: &'a str, filename: &'a str) -> Self {
         Self { smap: SourceMap::new(source), filename, use_color: false, format: DiagnosticFormat::Rich }
     }
 
-    /// Create a new renderer with explicit color control.
+    /// Creates a new renderer with explicit color control and [`Rich`](DiagnosticFormat::Rich) format.
+    ///
+    /// # Arguments
+    ///
+    /// * `source` — full source text used for context snippets.
+    /// * `filename` — default filename shown in diagnostic headers.
+    /// * `use_color` — when `true`, ANSI escape codes are emitted for severity
+    ///   colors, line-number gutters, and underlines.
     pub fn new_with_color(source: &'a str, filename: &'a str, use_color: bool) -> Self {
         Self { smap: SourceMap::new(source), filename, use_color, format: DiagnosticFormat::Rich }
     }
 
-    /// Create a new renderer with full configuration.
+    /// Creates a new renderer with full configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `source` — full source text used for context snippets.
+    /// * `filename` — default filename shown in diagnostic headers.
+    /// * `use_color` — when `true`, ANSI escape codes are emitted.
+    /// * `format` — [`Rich`](DiagnosticFormat::Rich) for multi-line output or
+    ///   [`Short`](DiagnosticFormat::Short) for machine-readable one-liners.
     pub fn new_with_options(source: &'a str, filename: &'a str, use_color: bool, format: DiagnosticFormat) -> Self {
         Self { smap: SourceMap::new(source), filename, use_color, format }
     }
@@ -324,8 +614,14 @@ impl<'a> DiagnosticRenderer<'a> {
         }
     }
 
-    /// Render a single diagnostic in machine-readable short format.
-    /// Output: `file:line:col: severity[CODE]: message`
+    /// Renders a single diagnostic in the machine-readable short format.
+    ///
+    /// Output is a single line: `file:line:col: severity[CODE]: message\n`.
+    /// This format is parseable by VS Code, grep, and similar tools.
+    ///
+    /// # Arguments
+    ///
+    /// * `diag` — the diagnostic to render.
     pub fn render_short(&self, diag: &Diagnostic) -> String {
         let (line, col) = self.smap.offset_to_line_col(diag.span.start);
         let display_filename = diag.filename.as_deref().unwrap_or(self.filename);
@@ -340,6 +636,19 @@ impl<'a> DiagnosticRenderer<'a> {
         )
     }
 
+    /// Renders a single diagnostic according to the configured [`DiagnosticFormat`].
+    ///
+    /// In [`Rich`](DiagnosticFormat::Rich) mode the output includes:
+    /// - A machine-readable header line (`file:line:col: severity[CODE]: message`).
+    /// - Source context with line-number gutters and caret underlines.
+    /// - Secondary labels, fix suggestions, and hints.
+    ///
+    /// In [`Short`](DiagnosticFormat::Short) mode, delegates to
+    /// [`render_short`](Self::render_short).
+    ///
+    /// # Arguments
+    ///
+    /// * `diag` — the diagnostic to render.
     pub fn render(&self, diag: &Diagnostic) -> String {
         if self.format == DiagnosticFormat::Short {
             return self.render_short(diag);
@@ -541,15 +850,32 @@ impl<'a> DiagnosticRenderer<'a> {
     }
 }
 
-/// Collects diagnostics during compilation.
+/// Growable collection of [`Diagnostic`]s emitted during compilation.
+///
+/// `DiagnosticBag` is the primary accumulator passed through every compiler
+/// phase. It supports an optional error-count limit to suppress cascading
+/// errors, and provides batch rendering to formatted strings.
+///
+/// # Examples
+///
+/// ```
+/// use cjc_diag::{DiagnosticBag, Diagnostic, Span};
+///
+/// let mut bag = DiagnosticBag::new();
+/// bag.emit(Diagnostic::error("E1000", "unexpected token", Span::new(5, 6)));
+/// assert!(bag.has_errors());
+/// assert_eq!(bag.error_count(), 1);
+/// ```
 pub struct DiagnosticBag {
+    /// The accumulated diagnostics (errors, warnings, hints).
     pub diagnostics: Vec<Diagnostic>,
-    /// Maximum number of error-severity diagnostics before further errors are suppressed.
-    /// Default: 50. Set to 0 for unlimited.
+    /// Maximum number of error-severity diagnostics before further errors are
+    /// suppressed. Default: 50. Set to 0 for unlimited.
     pub error_limit: usize,
 }
 
 impl DiagnosticBag {
+    /// Creates an empty diagnostic bag with the default error limit of 50.
     pub fn new() -> Self {
         Self {
             diagnostics: Vec::new(),
@@ -557,6 +883,16 @@ impl DiagnosticBag {
         }
     }
 
+    /// Appends a diagnostic to the bag.
+    ///
+    /// If the diagnostic has [`Severity::Error`] and the current error count
+    /// has already reached [`error_limit`](Self::error_limit) (and the limit
+    /// is non-zero), the diagnostic is silently dropped to prevent cascading
+    /// error floods.
+    ///
+    /// # Arguments
+    ///
+    /// * `diag` — the diagnostic to emit.
     pub fn emit(&mut self, diag: Diagnostic) {
         if diag.severity == Severity::Error && self.error_limit > 0 {
             let current_errors = self.error_count();
@@ -567,18 +903,26 @@ impl DiagnosticBag {
         self.diagnostics.push(diag);
     }
 
-    /// Emit a diagnostic built from a typed ErrorCode.
+    /// Builds and emits a diagnostic from a [`DiagnosticBuilder`].
+    ///
+    /// Equivalent to `self.emit(builder.build())`.
+    ///
+    /// # Arguments
+    ///
+    /// * `builder` — the builder to finalize and emit.
     pub fn emit_coded(&mut self, builder: DiagnosticBuilder) {
         let diag = builder.build();
         self.emit(diag);
     }
 
+    /// Returns `true` if the bag contains at least one error-severity diagnostic.
     pub fn has_errors(&self) -> bool {
         self.diagnostics
             .iter()
             .any(|d| d.severity == Severity::Error)
     }
 
+    /// Returns the number of error-severity diagnostics in the bag.
     pub fn error_count(&self) -> usize {
         self.diagnostics
             .iter()
@@ -586,14 +930,24 @@ impl DiagnosticBag {
             .count()
     }
 
+    /// Returns the total number of diagnostics (all severities) in the bag.
     pub fn count(&self) -> usize {
         self.diagnostics.len()
     }
 
+    /// Truncates the diagnostic list to at most `len` entries.
+    ///
+    /// Useful for rolling back speculative parse attempts that may have
+    /// emitted tentative diagnostics.
+    ///
+    /// # Arguments
+    ///
+    /// * `len` — the maximum number of diagnostics to keep.
     pub fn truncate(&mut self, len: usize) {
         self.diagnostics.truncate(len);
     }
 
+    /// Returns the number of warning-severity diagnostics in the bag.
     pub fn warning_count(&self) -> usize {
         self.diagnostics
             .iter()
@@ -601,18 +955,55 @@ impl DiagnosticBag {
             .count()
     }
 
+    /// Renders all diagnostics in [`Rich`](DiagnosticFormat::Rich) format without color.
+    ///
+    /// Shorthand for `render_all_color(source, filename, false)`.
+    ///
+    /// # Arguments
+    ///
+    /// * `source` — full source text for context snippets.
+    /// * `filename` — filename shown in diagnostic headers.
     pub fn render_all(&self, source: &str, filename: &str) -> String {
         self.render_all_color(source, filename, false)
     }
 
+    /// Renders all diagnostics in [`Rich`](DiagnosticFormat::Rich) format with optional color.
+    ///
+    /// # Arguments
+    ///
+    /// * `source` — full source text for context snippets.
+    /// * `filename` — filename shown in diagnostic headers.
+    /// * `use_color` — when `true`, ANSI escape codes are emitted.
     pub fn render_all_color(&self, source: &str, filename: &str, use_color: bool) -> String {
         self.render_all_with_options(source, filename, use_color, DiagnosticFormat::Rich)
     }
 
+    /// Renders all diagnostics in [`Short`](DiagnosticFormat::Short) format without color.
+    ///
+    /// Each diagnostic produces a single machine-readable line. Includes a
+    /// summary footer.
+    ///
+    /// # Arguments
+    ///
+    /// * `source` — full source text (used for line/column computation).
+    /// * `filename` — filename shown in each output line.
     pub fn render_all_short(&self, source: &str, filename: &str) -> String {
         self.render_all_with_options(source, filename, false, DiagnosticFormat::Short)
     }
 
+    /// Renders all diagnostics with full control over color and format.
+    ///
+    /// Iterates over every diagnostic in the bag, renders it with a
+    /// [`DiagnosticRenderer`], and appends a summary footer line
+    /// (e.g., "error: aborting due to 3 errors; 1 warning").
+    ///
+    /// # Arguments
+    ///
+    /// * `source` — full source text for context snippets.
+    /// * `filename` — default filename shown in diagnostic headers.
+    /// * `use_color` — when `true`, ANSI escape codes are emitted.
+    /// * `format` — [`Rich`](DiagnosticFormat::Rich) or
+    ///   [`Short`](DiagnosticFormat::Short).
     pub fn render_all_with_options(
         &self,
         source: &str,
@@ -692,12 +1083,12 @@ mod tests {
             .with_label(Span::new(13, 14), "expected expression")
             .with_hint("remove the trailing `+` or add an expression after it");
 
-        let renderer = DiagnosticRenderer::new(source, "test.cjc");
+        let renderer = DiagnosticRenderer::new(source, "test.cjcl");
         let output = renderer.render(&diag);
 
         assert!(output.contains("error[E0001]"));
         assert!(output.contains("unexpected token"));
-        assert!(output.contains("test.cjc:1:14"));
+        assert!(output.contains("test.cjcl:1:14"));
         assert!(output.contains("expected expression"));
         assert!(output.contains("hint:"));
     }
@@ -722,7 +1113,7 @@ mod tests {
             .with_label(Span::new(13, 14), "expected expression")
             .with_hint("remove the trailing `+` or add an expression after it");
 
-        let renderer = DiagnosticRenderer::new_with_color(source, "test.cjc", true);
+        let renderer = DiagnosticRenderer::new_with_color(source, "test.cjcl", true);
         let output = renderer.render(&diag);
 
         // Should contain ANSI escape codes
@@ -730,7 +1121,7 @@ mod tests {
         // Should still contain the essential text
         assert!(output.contains("E0001"));
         assert!(output.contains("unexpected token"));
-        assert!(output.contains("test.cjc:1:14"));
+        assert!(output.contains("test.cjcl:1:14"));
         assert!(output.contains("expected expression"));
         assert!(output.contains("hint"));
     }
@@ -741,8 +1132,8 @@ mod tests {
         bag.emit(Diagnostic::error("E0001", "test error", Span::new(0, 1)));
 
         let source = "x";
-        let plain = bag.render_all(source, "test.cjc");
-        let colored = bag.render_all_color(source, "test.cjc", true);
+        let plain = bag.render_all(source, "test.cjcl");
+        let colored = bag.render_all_color(source, "test.cjcl", true);
 
         // Plain should not contain ANSI escapes
         assert!(!plain.contains("\x1b["));
@@ -779,7 +1170,7 @@ mod tests {
             .with_label(Span::new(14, 21), "expected `i32`, found `str`")
             .with_fix(Span::new(7, 10), "str", "change type annotation to `str`");
 
-        let renderer = DiagnosticRenderer::new(source, "test.cjc");
+        let renderer = DiagnosticRenderer::new(source, "test.cjcl");
         let output = renderer.render(&diag);
 
         assert!(output.contains("fix:"));
@@ -817,21 +1208,21 @@ mod tests {
     #[test]
     fn test_diagnostic_with_filename() {
         let diag = Diagnostic::error("E0001", "test", Span::new(0, 1))
-            .with_filename("math.cjc");
-        assert_eq!(diag.filename.as_deref(), Some("math.cjc"));
+            .with_filename("math.cjcl");
+        assert_eq!(diag.filename.as_deref(), Some("math.cjcl"));
     }
 
     #[test]
     fn test_render_uses_diagnostic_filename() {
         let source = "let x = 1;\n";
         let diag = Diagnostic::error("E0001", "test error", Span::new(0, 3))
-            .with_filename("other_file.cjc");
+            .with_filename("other_file.cjcl");
 
-        // Renderer has "main.cjc" but the diagnostic overrides to "other_file.cjc"
-        let renderer = DiagnosticRenderer::new(source, "main.cjc");
+        // Renderer has "main.cjcl" but the diagnostic overrides to "other_file.cjcl"
+        let renderer = DiagnosticRenderer::new(source, "main.cjcl");
         let output = renderer.render(&diag);
-        assert!(output.contains("other_file.cjc:1:1"));
-        assert!(!output.contains("main.cjc"));
+        assert!(output.contains("other_file.cjcl:1:1"));
+        assert!(!output.contains("main.cjcl"));
     }
 
     #[test]
@@ -841,17 +1232,17 @@ mod tests {
         // No filename on diagnostic => falls back to renderer's filename
         assert!(diag.filename.is_none());
 
-        let renderer = DiagnosticRenderer::new(source, "main.cjc");
+        let renderer = DiagnosticRenderer::new(source, "main.cjcl");
         let output = renderer.render(&diag);
-        assert!(output.contains("main.cjc:1:1"));
+        assert!(output.contains("main.cjcl:1:1"));
     }
 
     #[test]
     fn test_builder_filename() {
         let diag = DiagnosticBuilder::new(ErrorCode::E1000, Span::new(0, 1))
-            .filename("module.cjc")
+            .filename("module.cjcl")
             .build();
-        assert_eq!(diag.filename.as_deref(), Some("module.cjc"));
+        assert_eq!(diag.filename.as_deref(), Some("module.cjcl"));
     }
 
     #[test]
@@ -925,10 +1316,10 @@ mod tests {
         let diag = Diagnostic::error("E0001", "unexpected token", Span::new(13, 14));
 
         let renderer = DiagnosticRenderer::new_with_options(
-            source, "test.cjc", false, DiagnosticFormat::Short
+            source, "test.cjcl", false, DiagnosticFormat::Short
         );
         let output = renderer.render(&diag);
-        assert_eq!(output, "test.cjc:1:14: error[E0001]: unexpected token\n");
+        assert_eq!(output, "test.cjcl:1:14: error[E0001]: unexpected token\n");
     }
 
     #[test]
@@ -937,24 +1328,24 @@ mod tests {
         let diag = Diagnostic::warning("W0001", "unused variable", Span::new(4, 5));
 
         let renderer = DiagnosticRenderer::new_with_options(
-            source, "test.cjc", false, DiagnosticFormat::Short
+            source, "test.cjcl", false, DiagnosticFormat::Short
         );
         let output = renderer.render(&diag);
-        assert_eq!(output, "test.cjc:1:5: warning[W0001]: unused variable\n");
+        assert_eq!(output, "test.cjcl:1:5: warning[W0001]: unused variable\n");
     }
 
     #[test]
     fn test_render_short_multi_file() {
         let source = "let x = 1;\n";
         let diag = Diagnostic::error("E0001", "test", Span::new(0, 3))
-            .with_filename("other.cjc");
+            .with_filename("other.cjcl");
 
         let renderer = DiagnosticRenderer::new_with_options(
-            source, "main.cjc", false, DiagnosticFormat::Short
+            source, "main.cjcl", false, DiagnosticFormat::Short
         );
         let output = renderer.render(&diag);
-        assert!(output.starts_with("other.cjc:"));
-        assert!(!output.contains("main.cjc"));
+        assert!(output.starts_with("other.cjcl:"));
+        assert!(!output.contains("main.cjcl"));
     }
 
     #[test]
@@ -963,9 +1354,9 @@ mod tests {
         bag.emit(Diagnostic::error("E0001", "bad token", Span::new(0, 1)));
         bag.emit(Diagnostic::error("E1000", "unexpected", Span::new(5, 6)));
 
-        let output = bag.render_all_short("abcdefgh", "test.cjc");
-        assert!(output.contains("test.cjc:1:1: error[E0001]: bad token\n"));
-        assert!(output.contains("test.cjc:1:6: error[E1000]: unexpected\n"));
+        let output = bag.render_all_short("abcdefgh", "test.cjcl");
+        assert!(output.contains("test.cjcl:1:1: error[E0001]: bad token\n"));
+        assert!(output.contains("test.cjcl:1:6: error[E1000]: unexpected\n"));
         assert!(output.contains("aborting due to 2 errors"));
     }
 
@@ -976,11 +1367,11 @@ mod tests {
         let source = "let x = 42 +;\n";
         let diag = Diagnostic::error("E0001", "unexpected token", Span::new(13, 14));
 
-        let renderer = DiagnosticRenderer::new(source, "test.cjc");
+        let renderer = DiagnosticRenderer::new(source, "test.cjcl");
         let output = renderer.render(&diag);
         let first_line = output.lines().next().unwrap();
-        // First line should be: test.cjc:1:14: error[E0001]: unexpected token
-        assert!(first_line.starts_with("test.cjc:1:14:"), "first line: {}", first_line);
+        // First line should be: test.cjcl:1:14: error[E0001]: unexpected token
+        assert!(first_line.starts_with("test.cjcl:1:14:"), "first line: {}", first_line);
         assert!(first_line.contains("error[E0001]"));
         assert!(first_line.contains("unexpected token"));
     }
@@ -993,7 +1384,7 @@ mod tests {
         bag.emit(Diagnostic::error("E0001", "err", Span::new(0, 1)));
         bag.emit(Diagnostic::warning("W0001", "warn", Span::new(0, 1)));
 
-        let output = bag.render_all("x", "test.cjc");
+        let output = bag.render_all("x", "test.cjcl");
         assert!(output.contains("aborting due to 1 error; 1 warning"));
     }
 
@@ -1003,7 +1394,7 @@ mod tests {
         bag.emit(Diagnostic::warning("W0001", "warn1", Span::new(0, 1)));
         bag.emit(Diagnostic::warning("W0002", "warn2", Span::new(0, 1)));
 
-        let output = bag.render_all("x", "test.cjc");
+        let output = bag.render_all("x", "test.cjcl");
         assert!(output.contains("warning: generated 2 warnings"));
         assert!(!output.contains("aborting"));
     }

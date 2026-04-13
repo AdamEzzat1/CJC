@@ -18,16 +18,20 @@ use crate::{
     MirProgram, MirStmt,
 };
 
-/// Hard limit on specializations per program.
+/// Hard limit on specializations per program to prevent combinatorial explosion.
 const MAX_SPECIALIZATIONS: usize = 1000;
 
-/// Result of monomorphization.
+/// Report produced by the monomorphization pass.
+///
+/// Contains statistics about how many specializations were generated,
+/// which generic functions had the highest fanout, and whether the
+/// specialization budget was exceeded.
 pub struct MonomorphReport {
     /// Number of specializations generated.
     pub specialization_count: usize,
-    /// Top fanout functions: (name, instantiation_count).
+    /// Top fanout functions sorted by instantiation count (descending), capped at 10.
     pub top_fanout: Vec<(String, usize)>,
-    /// Whether the budget was exceeded.
+    /// Whether the specialization budget ([`MAX_SPECIALIZATIONS`]) was exceeded.
     pub budget_exceeded: bool,
 }
 
@@ -274,6 +278,7 @@ impl<'a> Monomorphizer<'a> {
             MirExprKind::IntLit(_)
             | MirExprKind::FloatLit(_)
             | MirExprKind::BoolLit(_)
+            | MirExprKind::NaLit
             | MirExprKind::StringLit(_)
             | MirExprKind::ByteStringLit(_)
             | MirExprKind::ByteCharLit(_)
@@ -449,6 +454,7 @@ fn infer_type_from_expr(expr: &MirExpr) -> Option<String> {
         MirExprKind::IntLit(_) => Some("i64".to_string()),
         MirExprKind::FloatLit(_) => Some("f64".to_string()),
         MirExprKind::BoolLit(_) => Some("bool".to_string()),
+        MirExprKind::NaLit => Some("Na".to_string()),
         MirExprKind::StringLit(_) => Some("String".to_string()),
         MirExprKind::ByteStringLit(_) => Some("ByteSlice".to_string()),
         MirExprKind::ByteCharLit(_) => Some("u8".to_string()),
@@ -638,6 +644,7 @@ fn substitute_expr(expr: &MirExpr, subst: &BTreeMap<String, String>) -> MirExpr 
         MirExprKind::IntLit(_)
         | MirExprKind::FloatLit(_)
         | MirExprKind::BoolLit(_)
+        | MirExprKind::NaLit
         | MirExprKind::StringLit(_)
         | MirExprKind::ByteStringLit(_)
         | MirExprKind::ByteCharLit(_)
@@ -847,6 +854,7 @@ fn rewrite_calls_in_expr(
         MirExprKind::IntLit(_)
         | MirExprKind::FloatLit(_)
         | MirExprKind::BoolLit(_)
+        | MirExprKind::NaLit
         | MirExprKind::StringLit(_)
         | MirExprKind::ByteStringLit(_)
         | MirExprKind::ByteCharLit(_)

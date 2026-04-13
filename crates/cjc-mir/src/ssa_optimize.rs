@@ -196,27 +196,44 @@ fn fold_unary(op: UnaryOp, operand: &MirExpr) -> Option<MirExpr> {
 // Pass 2: SCCP (Sparse Conditional Constant Propagation)
 // ===========================================================================
 
-/// Lattice value for SCCP.
+/// Lattice value for Sparse Conditional Constant Propagation (SCCP).
+///
+/// The lattice is ordered Top > Constant(v) > Bottom, where:
+/// - `Top` means the value has not been determined yet (optimistic).
+/// - `Constant(v)` means the value is known to be exactly `v`.
+/// - `Bottom` means the value is not a compile-time constant.
 #[derive(Debug, Clone, PartialEq)]
 enum Lattice {
-    /// Not yet determined.
+    /// Not yet determined (optimistic: may still be constant).
     Top,
-    /// Known constant.
+    /// Known constant value.
     Constant(ConstVal),
-    /// Definitely not a constant.
+    /// Definitely not a constant (multiple reaching values or unknown).
     Bottom,
 }
 
 /// Constant values tracked by SCCP.
+///
+/// Only primitive types are tracked; compound values (arrays, structs, etc.)
+/// are conservatively treated as non-constant.
 #[derive(Debug, Clone, PartialEq)]
 enum ConstVal {
+    /// A 64-bit signed integer constant.
     Int(i64),
+    /// A 64-bit floating-point constant.
     Float(f64),
+    /// A boolean constant.
     Bool(bool),
+    /// A string constant.
     Str(String),
 }
 
 impl Lattice {
+    /// Compute the lattice meet (greatest lower bound) of two values.
+    ///
+    /// - Top meets X = X  (optimistic, adopt the other)
+    /// - Bottom meets X = Bottom  (non-constant dominates)
+    /// - Constant(a) meets Constant(b) = Constant(a) if a == b, else Bottom
     fn meet(&self, other: &Lattice) -> Lattice {
         match (self, other) {
             (Lattice::Top, x) | (x, Lattice::Top) => x.clone(),
@@ -231,6 +248,7 @@ impl Lattice {
         }
     }
 
+    /// Return true if this lattice value is a known constant.
     fn is_constant(&self) -> bool {
         matches!(self, Lattice::Constant(_))
     }

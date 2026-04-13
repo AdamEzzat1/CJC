@@ -8,7 +8,7 @@ use super::helpers;
 
 #[test]
 fn pipeline_deterministic() {
-    let src = helpers::load_cjc("bench_pipeline.cjc");
+    let src = helpers::load_cjc("bench_pipeline.cjcl");
     let out1 = helpers::run_eval(&src, 42);
     let out2 = helpers::run_eval(&src, 42);
     helpers::assert_deterministic(&out1, &out2);
@@ -16,7 +16,7 @@ fn pipeline_deterministic() {
 
 #[test]
 fn nn_deep_deterministic() {
-    let src = helpers::load_cjc("bench_nn_deep.cjc");
+    let src = helpers::load_cjc("bench_nn_deep.cjcl");
     let out1 = helpers::run_eval(&src, 42);
     let out2 = helpers::run_eval(&src, 42);
     helpers::assert_deterministic(&out1, &out2);
@@ -24,7 +24,7 @@ fn nn_deep_deterministic() {
 
 #[test]
 fn seed_stress_deterministic() {
-    let src = helpers::load_cjc("bench_seed_stress.cjc");
+    let src = helpers::load_cjc("bench_seed_stress.cjcl");
     let out1 = helpers::run_eval(&src, 42);
     let out2 = helpers::run_eval(&src, 42);
     helpers::assert_deterministic(&out1, &out2);
@@ -32,7 +32,7 @@ fn seed_stress_deterministic() {
 
 #[test]
 fn reorder_deterministic() {
-    let src = helpers::load_cjc("bench_reorder_det.cjc");
+    let src = helpers::load_cjc("bench_reorder_det.cjcl");
     let out1 = helpers::run_eval(&src, 42);
     let out2 = helpers::run_eval(&src, 42);
     helpers::assert_deterministic(&out1, &out2);
@@ -40,7 +40,7 @@ fn reorder_deterministic() {
 
 #[test]
 fn primitives_deterministic() {
-    let src = helpers::load_cjc("bench_primitive_coverage.cjc");
+    let src = helpers::load_cjc("bench_primitive_coverage.cjcl");
     let out1 = helpers::run_eval(&src, 42);
     let out2 = helpers::run_eval(&src, 42);
     helpers::assert_deterministic(&out1, &out2);
@@ -48,7 +48,7 @@ fn primitives_deterministic() {
 
 #[test]
 fn gc_boundary_deterministic() {
-    let src = helpers::load_cjc("bench_gc_boundary.cjc");
+    let src = helpers::load_cjc("bench_gc_boundary.cjcl");
     let out1 = helpers::run_eval(&src, 42);
     let out2 = helpers::run_eval(&src, 42);
     helpers::assert_deterministic(&out1, &out2);
@@ -60,7 +60,7 @@ fn gc_boundary_deterministic() {
 
 #[test]
 fn pipeline_parity_eval_mir() {
-    let src = helpers::load_cjc("bench_pipeline.cjc");
+    let src = helpers::load_cjc("bench_pipeline.cjcl");
     let eval_out = helpers::run_eval(&src, 42);
     let mir_out = helpers::run_mir(&src, 42);
     helpers::assert_parity(&eval_out, &mir_out);
@@ -68,7 +68,7 @@ fn pipeline_parity_eval_mir() {
 
 #[test]
 fn nn_deep_parity_eval_mir() {
-    let src = helpers::load_cjc("bench_nn_deep.cjc");
+    let src = helpers::load_cjc("bench_nn_deep.cjcl");
     let eval_out = helpers::run_eval(&src, 42);
     let mir_out = helpers::run_mir(&src, 42);
     helpers::assert_parity(&eval_out, &mir_out);
@@ -76,7 +76,7 @@ fn nn_deep_parity_eval_mir() {
 
 #[test]
 fn seed_stress_parity() {
-    let src = helpers::load_cjc("bench_seed_stress.cjc");
+    let src = helpers::load_cjc("bench_seed_stress.cjcl");
     let eval_out = helpers::run_eval(&src, 42);
     let mir_out = helpers::run_mir(&src, 42);
     helpers::assert_parity(&eval_out, &mir_out);
@@ -84,7 +84,7 @@ fn seed_stress_parity() {
 
 #[test]
 fn reorder_parity() {
-    let src = helpers::load_cjc("bench_reorder_det.cjc");
+    let src = helpers::load_cjc("bench_reorder_det.cjcl");
     let eval_out = helpers::run_eval(&src, 42);
     let mir_out = helpers::run_mir(&src, 42);
     helpers::assert_parity(&eval_out, &mir_out);
@@ -92,7 +92,7 @@ fn reorder_parity() {
 
 #[test]
 fn primitives_parity() {
-    let src = helpers::load_cjc("bench_primitive_coverage.cjc");
+    let src = helpers::load_cjc("bench_primitive_coverage.cjcl");
     let eval_out = helpers::run_eval(&src, 42);
     let mir_out = helpers::run_mir(&src, 42);
     helpers::assert_parity(&eval_out, &mir_out);
@@ -100,7 +100,7 @@ fn primitives_parity() {
 
 #[test]
 fn gc_boundary_parity() {
-    let src = helpers::load_cjc("bench_gc_boundary.cjc");
+    let src = helpers::load_cjc("bench_gc_boundary.cjcl");
     let eval_out = helpers::run_eval(&src, 42);
     let mir_out = helpers::run_mir(&src, 42);
     helpers::assert_parity(&eval_out, &mir_out);

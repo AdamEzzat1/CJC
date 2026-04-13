@@ -1,10 +1,26 @@
-use std::cell::{Ref, RefCell};
+//! COW (Copy-on-Write) buffer -- the fundamental memory primitive under [`Tensor`].
+//!
+//! [`Buffer<T>`] provides reference-counted storage with lazy deep-copy
+//! semantics. Cloning a buffer increments the refcount (O(1)); mutation
+//! via [`Buffer::set`] or [`Buffer::make_unique`] triggers a deep copy
+//! only when the buffer is shared (`refcount > 1`).
+//!
+//! # Determinism
+//!
+//! Buffer operations are fully deterministic. No randomized hashing,
+//! no platform-dependent allocation strategies. The COW mechanism
+//! ensures that mutation of shared data always produces a fresh,
+//! independent copy.
+//!
+//! [`Tensor`]: crate::tensor::Tensor
+
+use std::cell::{Ref, RefCell, RefMut};
 use std::rc::Rc;
 
 use crate::error::RuntimeError;
 
 // ---------------------------------------------------------------------------
-// 1. Buffer<T> — Deterministic memory allocation with COW semantics
+// 1. Buffer<T> -- Deterministic memory allocation with COW semantics
 // ---------------------------------------------------------------------------
 
 /// A reference-counted buffer with copy-on-write semantics.
@@ -72,6 +88,12 @@ impl<T: Clone> Buffer<T> {
     /// The returned `Ref` guard keeps the borrow alive.
     pub fn borrow_data(&self) -> Ref<Vec<T>> {
         self.inner.borrow()
+    }
+
+    /// Mutably borrow the underlying Vec without cloning.
+    /// Call `make_unique()` first if the buffer may be shared.
+    pub fn borrow_data_mut(&self) -> RefMut<Vec<T>> {
+        self.inner.borrow_mut()
     }
 
     /// Force a deep copy, returning a new `Buffer` that does not share

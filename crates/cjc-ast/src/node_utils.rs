@@ -16,7 +16,15 @@ use crate::{Block, DeclKind, Expr, ExprKind, Program};
 // ---------------------------------------------------------------------------
 
 impl Expr {
-    /// Number of direct child expressions.
+    /// Return the number of direct child expressions.
+    ///
+    /// Only counts immediate children, not transitive descendants.
+    /// Leaf nodes (literals, identifiers, `NaLit`) return 0.
+    /// For `Call` expressions the count includes both the callee and all arguments.
+    ///
+    /// # Returns
+    ///
+    /// The number of direct child expression sub-trees.
     pub fn child_count(&self) -> usize {
         match &self.kind {
             ExprKind::IntLit(_)
@@ -28,6 +36,7 @@ impl Expr {
             | ExprKind::RawByteStringLit(_)
             | ExprKind::RegexLit { .. }
             | ExprKind::BoolLit(_)
+            | ExprKind::NaLit
             | ExprKind::Ident(_)
             | ExprKind::Col(_) => 0,
 
@@ -50,10 +59,16 @@ impl Expr {
             ExprKind::Lambda { .. } => 1,                  // body
             ExprKind::Match { arms, .. } => 1 + arms.len(), // scrutinee + arms
             ExprKind::VariantLit { fields, .. } => fields.len(),
+            ExprKind::Cast { .. } => 1, // the inner expression
         }
     }
 
-    /// Returns true if this expression is a literal value.
+    /// Return `true` if this expression is a literal value.
+    ///
+    /// Covers integer, float, string (including byte-string, raw-string, and
+    /// raw-byte-string variants), boolean, `NA`, and regex literals.
+    /// Collection literals (`ArrayLit`, `TupleLit`, `TensorLit`) are **not**
+    /// considered literals by this method because they contain sub-expressions.
     pub fn is_literal(&self) -> bool {
         matches!(
             &self.kind,
@@ -65,11 +80,16 @@ impl Expr {
                 | ExprKind::RawStringLit(_)
                 | ExprKind::RawByteStringLit(_)
                 | ExprKind::BoolLit(_)
+                | ExprKind::NaLit
                 | ExprKind::RegexLit { .. }
         )
     }
 
-    /// Returns true if this expression is a valid assignment target (place expression).
+    /// Return `true` if this expression is a valid assignment target (place expression).
+    ///
+    /// Place expressions are identifiers, field accesses, and index accesses.
+    /// These are the only forms that may appear on the left-hand side of an
+    /// assignment.
     pub fn is_place(&self) -> bool {
         matches!(
             &self.kind,
@@ -77,7 +97,11 @@ impl Expr {
         )
     }
 
-    /// Returns true if this expression is a compound (non-leaf) expression.
+    /// Return `true` if this expression is a compound (non-leaf) expression.
+    ///
+    /// Compound expressions contain sub-expressions that require recursive
+    /// evaluation: binary/unary operations, calls, matches, if-expressions,
+    /// blocks, pipes, and lambdas.
     pub fn is_compound(&self) -> bool {
         matches!(
             &self.kind,
@@ -98,17 +122,26 @@ impl Expr {
 // ---------------------------------------------------------------------------
 
 impl Block {
-    /// Returns true if the block has no statements and no trailing expression.
+    /// Return `true` if the block has no statements and no trailing expression.
+    ///
+    /// An empty block `{}` contributes nothing to the program and may be
+    /// flagged as a warning by the validator.
     pub fn is_empty(&self) -> bool {
         self.stmts.is_empty() && self.expr.is_none()
     }
 
-    /// Number of statements in this block.
+    /// Return the number of statements in this block.
+    ///
+    /// Does not count the trailing expression (if any). Use
+    /// [`has_trailing_expr`](Block::has_trailing_expr) to check for that separately.
     pub fn stmt_count(&self) -> usize {
         self.stmts.len()
     }
 
-    /// Returns true if the block has a trailing expression.
+    /// Return `true` if the block has a trailing expression.
+    ///
+    /// A trailing expression (the final expression without a semicolon)
+    /// determines the block's value when used in expression position.
     pub fn has_trailing_expr(&self) -> bool {
         self.expr.is_some()
     }
@@ -119,7 +152,10 @@ impl Block {
 // ---------------------------------------------------------------------------
 
 impl Program {
-    /// Number of function declarations (including nested in impls).
+    /// Return the number of function declarations in the program.
+    ///
+    /// Counts top-level `fn` declarations plus methods inside `impl` blocks.
+    /// Does not count lambdas or closures.
     pub fn function_count(&self) -> usize {
         let mut count = 0;
         for decl in &self.declarations {
@@ -132,7 +168,7 @@ impl Program {
         count
     }
 
-    /// Number of struct declarations.
+    /// Return the number of `struct` declarations in the program.
     pub fn struct_count(&self) -> usize {
         self.declarations
             .iter()
@@ -140,7 +176,10 @@ impl Program {
             .count()
     }
 
-    /// Returns true if there is a function named "main".
+    /// Return `true` if there is a top-level function named `"main"`.
+    ///
+    /// The CJC runtime uses the presence of a `main` function to determine
+    /// the program entry point.
     pub fn has_main_function(&self) -> bool {
         self.declarations.iter().any(|d| {
             if let DeclKind::Fn(f) = &d.kind {

@@ -1,126 +1,271 @@
 //! Tokenizer for the CJC programming language.
 //!
-//! Usage: `let (tokens, diags) = Lexer::new(src).tokenize();`
+//! This crate converts raw CJC source text into a flat stream of [`Token`]s
+//! that is consumed by [`cjc_parser`]. The lexer handles all literal forms
+//! (integers, floats, strings, byte strings, raw strings, format strings,
+//! regex literals), keywords, operators, punctuation, and comments (line `//`
+//! and nested block `/* */`).
 //!
-//! Produces a flat token stream consumed by the parser.
+//! # Usage
+//!
+//! ```ignore
+//! use cjc_lexer::Lexer;
+//!
+//! let (tokens, diagnostics) = Lexer::new(src).tokenize();
+//! ```
+//!
+//! The returned [`DiagnosticBag`] collects any lexer-level errors (unterminated
+//! strings, invalid escape sequences, unexpected characters, etc.).
 
 use cjc_diag::{Diagnostic, DiagnosticBag, Span};
 
+/// Classifies the kind of a [`Token`].
+///
+/// Variants are grouped into literals, keywords/identifiers, operators
+/// (including compound-assignment and bitwise), delimiters, punctuation,
+/// and special sentinel kinds ([`Eof`](TokenKind::Eof),
+/// [`Error`](TokenKind::Error)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
-    // Literals
+    // ── Literals ──────────────────────────────────────────────────────
+
+    /// Integer literal (`42`, `1_000`, `0xFF`, `0b1010`, `0o77`, `100i64`).
     IntLit,
+    /// Floating-point literal (`3.14`, `2.5e10`, `1f32`).
     FloatLit,
+    /// Double-quoted string literal (`"hello"`), with escape processing.
     StringLit,
-    ByteStringLit,   // b"..."
-    ByteCharLit,     // b'c'
-    RawStringLit,    // r"..." or r#"..."#
-    RawByteStringLit,// br"..." or br#"..."#
-    FStringLit,      // f"...{expr}..."  (string interpolation)
-    RegexLit,        // /pattern/flags
+    /// Byte string literal (`b"..."`), stored as Latin-1 character values.
+    ByteStringLit,
+    /// Byte character literal (`b'c'`), stored as a decimal byte value.
+    ByteCharLit,
+    /// Raw string literal (`r"..."` or `r#"..."#`), no escape processing.
+    RawStringLit,
+    /// Raw byte string literal (`br"..."` or `br#"..."#`), no escape processing.
+    RawByteStringLit,
+    /// Format string literal (`f"...{expr}..."`), with interpolation holes.
+    FStringLit,
+    /// Regex literal (`/pattern/flags`). Token text stores `pattern\0flags`.
+    RegexLit,
+    /// Boolean literal `true`.
     True,
+    /// Boolean literal `false`.
     False,
 
-    // Identifiers & keywords
+    // ── Identifiers & keywords ───────────────────────────────────────
+
+    /// User-defined identifier (variable, function, or type name).
     Ident,
+    /// Keyword `struct`.
     Struct,
+    /// Keyword `class`.
     Class,
+    /// Keyword `record`.
     Record,
+    /// Keyword `fn`.
     Fn,
+    /// Keyword `trait`.
     Trait,
+    /// Keyword `impl`.
     Impl,
+    /// Keyword `let`.
     Let,
+    /// Keyword `mut`.
     Mut,
+    /// Keyword `return`.
     Return,
+    /// Keyword `break`.
     Break,
+    /// Keyword `continue`.
     Continue,
+    /// Keyword `if`.
     If,
+    /// Keyword `else`.
     Else,
+    /// Keyword `while`.
     While,
+    /// Keyword `for`.
     For,
+    /// Keyword `in`.
     In,
-    DotDot,    // ..
-    DotDotDot, // ...
+    /// Range operator `..`.
+    DotDot,
+    /// Spread / rest operator `...`.
+    DotDotDot,
+    /// Keyword `nogc` (marks no-garbage-collection regions).
     NoGc,
+    /// Keyword `col` (column reference in the data DSL).
     Col,
+    /// Keyword `import`.
     Import,
+    /// Keyword `mod`.
     Mod,
+    /// Keyword `as` (type cast / alias).
     As,
+    /// Keyword `sealed`.
     Sealed,
+    /// Keyword `match`.
     Match,
+    /// Keyword `enum`.
     Enum,
+    /// Keyword `const`.
     Const,
+    /// Keyword `pub`.
     Pub,
+    /// Keyword `null`.
     Null,
+    /// Statistical missing-value sentinel `NA`.
+    Na,
+    /// Wildcard pattern `_`.
     Underscore,
 
-    // Operators
+    // ── Arithmetic operators ─────────────────────────────────────────
+
+    /// Addition operator `+`.
     Plus,
+    /// Subtraction / unary negation operator `-`.
     Minus,
+    /// Multiplication operator `*`.
     Star,
+    /// Division operator `/`.
     Slash,
+    /// Remainder operator `%`.
     Percent,
-    StarStar,   // ** (power)
+    /// Exponentiation operator `**`.
+    StarStar,
+
+    // ── Comparison operators ─────────────────────────────────────────
+
+    /// Equality operator `==`.
     EqEq,
+    /// Inequality operator `!=`.
     BangEq,
+    /// Less-than operator `<`.
     Lt,
+    /// Greater-than operator `>`.
     Gt,
+    /// Less-than-or-equal operator `<=`.
     LtEq,
+    /// Greater-than-or-equal operator `>=`.
     GtEq,
+
+    // ── Logical operators ────────────────────────────────────────────
+
+    /// Logical AND operator `&&`.
     AmpAmp,
+    /// Logical OR operator `||`.
     PipePipe,
+    /// Logical NOT operator `!`.
     Bang,
+
+    // ── Assignment & pipe ────────────────────────────────────────────
+
+    /// Assignment operator `=`.
     Eq,
-    Pipe,   // |
-    PipeGt, // |>
-    Question, // ?
-    Tilde,     // ~
-    TildeEq,   // ~=
-    BangTilde, // !~
-    // Compound assignment
-    PlusEq,    // +=
-    MinusEq,   // -=
-    StarEq,    // *=
-    SlashEq,   // /=
-    PercentEq, // %=
-    StarStarEq,// **=
-    // Bitwise operators
-    Amp,       // &  (bitwise AND)
-    Caret,     // ^  (bitwise XOR)
-    LtLt,      // << (left shift)
-    GtGt,      // >> (right shift)
-    // Bitwise compound assignment
-    AmpEq,     // &=
-    PipeEq,    // |=
-    CaretEq,   // ^=
-    LtLtEq,    // <<=
-    GtGtEq,    // >>=
+    /// Pipe / bitwise OR operator `|` (also lambda param delimiter).
+    Pipe,
+    /// Pipe-forward operator `|>`.
+    PipeGt,
+    /// Optional / error-propagation operator `?`.
+    Question,
 
-    // Delimiters
+    // ── Pattern / regex operators ────────────────────────────────────
+
+    /// Formula / tilde operator `~`.
+    Tilde,
+    /// Approximate-match operator `~=`.
+    TildeEq,
+    /// Negated-match operator `!~`.
+    BangTilde,
+
+    // ── Compound assignment ──────────────────────────────────────────
+
+    /// Add-assign operator `+=`.
+    PlusEq,
+    /// Subtract-assign operator `-=`.
+    MinusEq,
+    /// Multiply-assign operator `*=`.
+    StarEq,
+    /// Divide-assign operator `/=`.
+    SlashEq,
+    /// Remainder-assign operator `%=`.
+    PercentEq,
+    /// Power-assign operator `**=`.
+    StarStarEq,
+
+    // ── Bitwise operators ────────────────────────────────────────────
+
+    /// Bitwise AND operator `&`.
+    Amp,
+    /// Bitwise XOR operator `^`.
+    Caret,
+    /// Left-shift operator `<<`.
+    LtLt,
+    /// Right-shift operator `>>`.
+    GtGt,
+
+    // ── Bitwise compound assignment ──────────────────────────────────
+
+    /// Bitwise AND-assign operator `&=`.
+    AmpEq,
+    /// Bitwise OR-assign operator `|=`.
+    PipeEq,
+    /// Bitwise XOR-assign operator `^=`.
+    CaretEq,
+    /// Left-shift-assign operator `<<=`.
+    LtLtEq,
+    /// Right-shift-assign operator `>>=`.
+    GtGtEq,
+
+    // ── Delimiters ───────────────────────────────────────────────────
+
+    /// Opening parenthesis `(`.
     LParen,
+    /// Closing parenthesis `)`.
     RParen,
+    /// Opening brace `{`.
     LBrace,
+    /// Closing brace `}`.
     RBrace,
+    /// Opening bracket `[`.
     LBracket,
+    /// Closing bracket `]`.
     RBracket,
-    LBracketPipe, // [|
-    PipeRBracket, // |]
+    /// Opening typed-array bracket `[|`.
+    LBracketPipe,
+    /// Closing typed-array bracket `|]`.
+    PipeRBracket,
 
-    // Punctuation
+    // ── Punctuation ──────────────────────────────────────────────────
+
+    /// Comma separator `,`.
     Comma,
+    /// Dot / member-access operator `.`.
     Dot,
+    /// Colon `:` (type annotations, struct fields).
     Colon,
+    /// Semicolon `;` (statement terminator).
     Semicolon,
-    Arrow, // ->
-    FatArrow, // =>
-    At,    // @
+    /// Thin-arrow `->` (return type annotation).
+    Arrow,
+    /// Fat-arrow `=>` (match arms, lambdas).
+    FatArrow,
+    /// At sign `@` (decorator prefix).
+    At,
 
-    // Special
+    // ── Special ──────────────────────────────────────────────────────
+
+    /// End-of-file sentinel. Always the last token in a stream.
     Eof,
+    /// Placeholder emitted when the lexer encounters an unrecoverable error.
     Error,
 }
 
 impl TokenKind {
+    /// Returns `true` if this token kind is a language keyword (e.g. `fn`,
+    /// `let`, `struct`, `if`, `true`, `false`, `NA`).
+    ///
+    /// Identifiers and operator tokens return `false`.
     pub fn is_keyword(&self) -> bool {
         matches!(
             self,
@@ -150,9 +295,13 @@ impl TokenKind {
                 | TokenKind::Pub
                 | TokenKind::True
                 | TokenKind::False
+                | TokenKind::Na
         )
     }
 
+    /// Returns a human-readable description of this token kind, suitable for
+    /// use in diagnostic messages (e.g. `"integer literal"`, `` `fn` ``,
+    /// `` `+` ``).
     pub fn describe(&self) -> &'static str {
         match self {
             TokenKind::IntLit => "integer literal",
@@ -196,6 +345,7 @@ impl TokenKind {
             TokenKind::Const => "`const`",
             TokenKind::Pub => "`pub`",
             TokenKind::Null => "`null`",
+            TokenKind::Na => "`NA`",
             TokenKind::Underscore => "`_`",
             TokenKind::Plus => "`+`",
             TokenKind::Minus => "`-`",
@@ -257,14 +407,30 @@ impl TokenKind {
     }
 }
 
+/// A single token produced by the [`Lexer`].
+///
+/// Each token carries its [`TokenKind`], source [`Span`], and the lexeme text.
+/// For string-family literals the `text` field holds the *processed* content
+/// (escapes resolved), not the raw source. For regex literals the text is
+/// `"pattern\0flags"`.
 #[derive(Debug, Clone)]
 pub struct Token {
+    /// Discriminant that classifies this token.
     pub kind: TokenKind,
+    /// Byte-offset span in the original source text.
     pub span: Span,
+    /// Lexeme text (processed for string literals, raw for everything else).
     pub text: String,
 }
 
 impl Token {
+    /// Creates a new [`Token`] with the given kind, span, and lexeme text.
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - The [`TokenKind`] discriminant for this token.
+    /// * `span` - The byte-offset [`Span`] in the original source.
+    /// * `text` - The lexeme text (anything convertible to [`String`]).
     pub fn new(kind: TokenKind, span: Span, text: impl Into<String>) -> Self {
         Self {
             kind,
@@ -273,6 +439,15 @@ impl Token {
         }
     }
 
+    /// Parses the token text as an `i64` integer value.
+    ///
+    /// Handles decimal, hexadecimal (`0x`/`0X`), binary (`0b`/`0B`), and
+    /// octal (`0o`/`0O`) prefixes. Underscores in the text are stripped
+    /// before parsing. Returns `0` if parsing fails.
+    ///
+    /// # Panics
+    ///
+    /// Does not panic; returns `0` on invalid input.
     pub fn int_value(&self) -> i64 {
         let clean = self.text.replace('_', "");
         if clean.starts_with("0x") || clean.starts_with("0X") {
@@ -286,20 +461,49 @@ impl Token {
         }
     }
 
+    /// Parses the token text as an `f64` floating-point value.
+    ///
+    /// Underscores in the text are stripped before parsing. Returns `0.0` if
+    /// parsing fails.
     pub fn float_value(&self) -> f64 {
         self.text.replace('_', "").parse().unwrap_or(0.0)
     }
 }
 
+/// Tokenizer that converts CJC source text into a sequence of [`Token`]s.
+///
+/// Create a lexer with [`Lexer::new`], then call [`Lexer::tokenize`] to
+/// consume it and obtain the token stream together with any accumulated
+/// diagnostics.
+///
+/// # Examples
+///
+/// ```ignore
+/// use cjc_lexer::Lexer;
+///
+/// let (tokens, diags) = Lexer::new("let x = 42;").tokenize();
+/// assert_eq!(tokens.last().unwrap().kind, cjc_lexer::TokenKind::Eof);
+/// ```
 pub struct Lexer<'a> {
+    /// The original source text being tokenized.
     source: &'a str,
+    /// Byte view of `source` for fast single-byte lookahead.
     bytes: &'a [u8],
+    /// Current read position (byte offset) into `source`.
     pos: usize,
+    /// Kind of the most recently emitted token, used for disambiguation
+    /// (e.g. deciding whether `/` starts a regex or is division).
     prev_kind: TokenKind,
+    /// Accumulated lexer diagnostics (errors, warnings).
     pub diagnostics: DiagnosticBag,
 }
 
 impl<'a> Lexer<'a> {
+    /// Creates a new [`Lexer`] for the given source string.
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - The CJC source text to tokenize.
     pub fn new(source: &'a str) -> Self {
         Self {
             source,
@@ -310,6 +514,14 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Consumes the lexer and produces the complete token stream.
+    ///
+    /// # Returns
+    ///
+    /// A tuple of:
+    /// - `Vec<Token>` -- all tokens, always ending with [`TokenKind::Eof`].
+    /// - [`DiagnosticBag`] -- any errors encountered during tokenization
+    ///   (unterminated strings, invalid escapes, unexpected characters, etc.).
     pub fn tokenize(mut self) -> (Vec<Token>, DiagnosticBag) {
         let mut tokens = Vec::new();
         loop {
@@ -1288,6 +1500,7 @@ impl<'a> Lexer<'a> {
             "const" => TokenKind::Const,
             "pub" => TokenKind::Pub,
             "null" => TokenKind::Null,
+            "NA" => TokenKind::Na,
             "true" => TokenKind::True,
             "false" => TokenKind::False,
             "_" => TokenKind::Underscore,

@@ -1,3 +1,5 @@
+### Pre-v0.1.4 demo output. Legacy naming: CJC/cjc/.cjc -> CJC-Lang/cjcl/.cjcl. See REBRAND_NOTICE.md
+
 ================================================================================
   CJC PROGRAMMING LANGUAGE - DEMO EXECUTION OUTPUT
 ================================================================================

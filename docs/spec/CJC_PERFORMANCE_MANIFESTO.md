@@ -1,5 +1,15 @@
 # CJC Performance Manifesto
 
+> ## HISTORICAL DOCUMENT
+>
+> **Status:** Historical — captured at a specific build and not updated since.
+> **Original dates:** 2025-07-15 (Phases 5–6), with Phase 7 (2025-07-15) and Phase 8 later additions.
+> **Last stamped test count:** 1,553 (Phase 8 totals).
+> **Last stamped binary:** 1.8 MB release, named `cjc.exe` (Windows).
+> **Rebrand note:** All references to `cjc.exe`, `.cjc`, `cjc run`, etc. below are **pre-v0.1.4**. The current CLI is `cjcl`, the extension is `.cjcl`, and the crate is published as `cjc-lang`.
+> **Re-verification:** Numbers in this document should be **re-measured against HEAD** before being cited externally. There is no commit SHA attached to these benchmarks; assume they are stale.
+> **Replacement:** A fresh manifesto should accompany any release that rebuilds the RNN / Transformer / CNN kernels, and should carry a `commit:`, `rustc:`, and machine-description header.
+
 ## Phase 5: The Benchmark Gauntlet
 
 **Date:** 2025-07-15 (updated Phase 6: 2025-07-15)

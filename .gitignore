@@ -7,3 +7,14 @@ fuzz/Cargo.lock
 nul
 functions_temp.txt
 *_output.txt
+*.pack/
+*.proptest-regressions
+
+# Benchmark data (too large for git)
+bench_results/data_1m.csv
+bench_results/data_100k.csv
+bench_results/data_100k_b.csv
+bench_results/data_100k_half.csv
+bench_results/**/*.bin
+bench_results/*.lock
+

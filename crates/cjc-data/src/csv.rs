@@ -289,6 +289,7 @@ pub struct StreamingCsvProcessor {
 }
 
 impl StreamingCsvProcessor {
+    /// Create a new streaming CSV processor with the given configuration.
     pub fn new(config: CsvConfig) -> Self {
         StreamingCsvProcessor { config }
     }

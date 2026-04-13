@@ -1,0 +1,65 @@
+// CJC Benchmark — 1M operations
+// Tests: arithmetic, tensor ops, array manipulation, control flow
+
+fn main() {
+    let n = 1000000;
+
+    // Phase 1: Kahan-accurate summation over 1M floats
+    let sum = 0.0;
+    let i = 0;
+    while i < n {
+        sum = sum + 1.0 / float(i + 1);
+        i = i + 1;
+    }
+    print("harmonic_sum=" + to_string(sum));
+
+    // Phase 2: Large tensor operations
+    let t = Tensor.randn([500, 500]);
+    let t2 = t * t;
+    let mean_val = t2.mean();
+    print("tensor_sq_mean=" + to_string(mean_val));
+
+    // Phase 3: Array building + sorting
+    let arr = [];
+    let i = 0;
+    while i < 5000 {
+        arr = array_push(arr, n - i * 7);
+        i = i + 1;
+    }
+    let sorted = array_sort_by(arr, identity);
+    print("sorted_first=" + to_string(sorted[0]));
+    print("sorted_last=" + to_string(sorted[4999]));
+
+    // Phase 4: Recursive Fibonacci
+    let fib_val = fib(30);
+    print("fib_30=" + to_string(fib_val));
+
+    // Phase 5: Matrix multiply (larger)
+    let a = Tensor.randn([200, 200]);
+    let b = Tensor.randn([200, 200]);
+    let c = matmul(a, b);
+    print("matmul_200x200=" + to_string(c.mean()));
+
+    // Phase 6: ML forward pass (deeper)
+    let W1 = Tensor.randn([50, 100]) * 0.1;
+    let W2 = Tensor.randn([100, 100]) * 0.1;
+    let W3 = Tensor.randn([100, 10]) * 0.1;
+    let x = Tensor.randn([1, 50]);
+    let h1 = tanh_activation(matmul(x, W1));
+    let h2 = tanh_activation(matmul(h1, W2));
+    let out = matmul(h2, W3);
+    print("ml_output=" + to_string(out.mean()));
+
+    print("benchmark_complete=true");
+}
+
+fn identity(x: Any) -> Any {
+    return x;
+}
+
+fn fib(n: i64) -> i64 {
+    if n <= 1 {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}

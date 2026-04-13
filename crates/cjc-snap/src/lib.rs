@@ -47,18 +47,28 @@ use std::fmt;
 // SnapError
 // ---------------------------------------------------------------------------
 
-/// Errors that can occur during decoding or integrity verification.
+/// Errors that can occur during snap decoding or integrity verification.
+///
+/// Returned by [`snap_decode`], [`snap_decode_v2`], [`restore`], and
+/// [`restore_v2`] when the binary payload is malformed or tampered with.
 #[derive(Debug)]
 pub enum SnapError {
-    /// The tag byte does not correspond to any known `Value` variant.
+    /// The tag byte does not correspond to any known [`Value`] variant.
+    ///
+    /// Contains the unrecognized tag byte.
     InvalidTag(u8),
     /// The byte stream ended before the value was fully decoded.
     UnexpectedEof,
     /// A string field contained invalid UTF-8.
     Utf8Error,
     /// The SHA-256 hash of the data does not match the stored content hash.
+    ///
+    /// Indicates data corruption or tampering. Contains both the expected
+    /// and actual 32-byte digests.
     HashMismatch {
+        /// The hash stored in the [`SnapBlob`] header or chunk header.
         expected: [u8; 32],
+        /// The hash recomputed from the actual data bytes.
         actual: [u8; 32],
     },
 }
@@ -85,13 +95,20 @@ impl fmt::Display for SnapError {
 // SnapBlob
 // ---------------------------------------------------------------------------
 
-/// A content-addressable blob: the canonical binary encoding of a `Value`
+/// A content-addressable blob: the canonical binary encoding of a [`Value`]
 /// together with its SHA-256 digest.
+///
+/// Two logically equal values always produce identical `SnapBlob`s, making
+/// `content_hash` usable as a cache key or deduplication fingerprint.
+///
+/// Construct via [`snap`] (v1) or [`snap_v2`] (v2 format), and decode back
+/// via [`restore`] or [`restore_v2`].
 #[derive(Debug, Clone)]
 pub struct SnapBlob {
-    /// SHA-256 hash of `data`.
+    /// SHA-256 hash of [`data`](Self::data), used for integrity verification
+    /// and content-addressing.
     pub content_hash: [u8; 32],
-    /// Canonical binary encoding of the value.
+    /// Canonical binary encoding of the value (v1 or v2 format).
     pub data: Vec<u8>,
 }
 
@@ -99,31 +116,64 @@ pub struct SnapBlob {
 // High-level API
 // ---------------------------------------------------------------------------
 
-/// Encode a `Value` into a content-addressable `SnapBlob` (v1 format).
+/// Encode a [`Value`] into a content-addressable [`SnapBlob`] (v1 format).
 ///
-/// The blob contains the canonical binary encoding and its SHA-256 hash.
+/// The blob contains the canonical binary encoding produced by
+/// [`snap_encode`] and its SHA-256 hash computed by [`sha256`].
 /// Two values that are logically equal will always produce blobs with the
-/// same `content_hash`, regardless of HashMap iteration order or Rc identity.
+/// same `content_hash`, regardless of `HashMap` iteration order or `Rc`
+/// identity.
+///
+/// # Arguments
+///
+/// * `value` - The [`Value`] to encode. Must be snap-encodable (see
+///   [`is_snappable`]).
+///
+/// # Panics
+///
+/// Panics if `value` contains a runtime-only variant that cannot be
+/// serialized (e.g., `Fn`, `Closure`).
 pub fn snap(value: &Value) -> SnapBlob {
     let data = snap_encode(value);
     let content_hash = sha256(&data);
     SnapBlob { content_hash, data }
 }
 
-/// Encode a `Value` into a content-addressable `SnapBlob` (v2 format with header).
+/// Encode a [`Value`] into a content-addressable [`SnapBlob`] (v2 format with header).
 ///
-/// Uses the v2 format: [MAGIC][version][flags][payload...].
-/// Supports all new tags (typed tensors, sparse CSR, categorical, etc.).
+/// Uses the v2 format: `[MAGIC][version][flags][payload...]`.
+/// Supports all new tags (typed tensors, sparse CSR, categorical, chunked
+/// tensors, DataFrames, etc.).
+///
+/// # Arguments
+///
+/// * `value` - The [`Value`] to encode. Must be snap-encodable (see
+///   [`is_snappable`]).
+///
+/// # Panics
+///
+/// Panics if `value` contains a runtime-only variant that cannot be
+/// serialized.
 pub fn snap_v2(value: &Value) -> SnapBlob {
     let data = snap_encode_v2(value);
     let content_hash = sha256(&data);
     SnapBlob { content_hash, data }
 }
 
-/// Restore a `Value` from a `SnapBlob`, verifying data integrity.
+/// Restore a [`Value`] from a [`SnapBlob`], verifying data integrity.
 ///
-/// Returns `SnapError::HashMismatch` if the SHA-256 of `blob.data` does not
-/// match `blob.content_hash`.
+/// Recomputes the SHA-256 of `blob.data` and compares it against the
+/// stored `blob.content_hash` before decoding. Uses the v1 decoder.
+///
+/// # Arguments
+///
+/// * `blob` - The [`SnapBlob`] to decode.
+///
+/// # Errors
+///
+/// Returns [`SnapError::HashMismatch`] if the SHA-256 of `blob.data` does
+/// not match `blob.content_hash`, or a decoding error if the payload is
+/// malformed.
 pub fn restore(blob: &SnapBlob) -> Result<Value, SnapError> {
     // Verify integrity
     let actual_hash = sha256(&blob.data);
@@ -136,9 +186,17 @@ pub fn restore(blob: &SnapBlob) -> Result<Value, SnapError> {
     snap_decode(&blob.data)
 }
 
-/// Restore a `Value` from a `SnapBlob`, auto-detecting v1 or v2 format.
+/// Restore a [`Value`] from a [`SnapBlob`], auto-detecting v1 or v2 format.
 ///
-/// Verifies SHA-256 integrity, then detects format version from magic bytes.
+/// Verifies SHA-256 integrity first, then inspects the payload for the v2
+/// magic header (`CJS\x01`). Falls back to v1 decoding when the magic is
+/// absent.
+///
+/// # Errors
+///
+/// Returns [`SnapError::HashMismatch`] if the SHA-256 of `blob.data` does
+/// not match `blob.content_hash`, or a decoding error if the payload is
+/// malformed.
 pub fn restore_v2(blob: &SnapBlob) -> Result<Value, SnapError> {
     let actual_hash = sha256(&blob.data);
     if actual_hash != blob.content_hash {
@@ -150,13 +208,25 @@ pub fn restore_v2(blob: &SnapBlob) -> Result<Value, SnapError> {
     snap_decode_v2(&blob.data)
 }
 
-/// Check whether a value can be snap-encoded without panicking.
+/// Check whether a [`Value`] can be snap-encoded without panicking.
 ///
-/// Returns `false` for runtime-only variants (Fn, Closure, ClassRef,
-/// GradGraph, OptimizerState, etc.) that cannot be meaningfully serialized.
+/// Returns `true` for data-bearing variants (scalars, tensors, arrays,
+/// structs, enums, maps, bytes, and sparse tensors) and recursively
+/// checks container contents. Returns `false` for runtime-only variants
+/// (`Fn`, `Closure`, `ClassRef`, `GradGraph`, `OptimizerState`, etc.)
+/// that cannot be meaningfully serialized.
+///
+/// # Arguments
+///
+/// * `value` - The [`Value`] to test for serializability.
+///
+/// # Returns
+///
+/// `true` when [`snap`] or [`snap_v2`] can encode the value without
+/// panicking; `false` otherwise.
 pub fn is_snappable(value: &Value) -> bool {
     match value {
-        Value::Void | Value::Int(_) | Value::Float(_) | Value::Bool(_)
+        Value::Void | Value::Na | Value::Int(_) | Value::Float(_) | Value::Bool(_)
         | Value::String(_) | Value::U8(_) | Value::Bytes(_)
         | Value::ByteSlice(_) | Value::StrView(_) | Value::Bf16(_)
         | Value::F16(_) | Value::Complex(_) | Value::Tensor(_)

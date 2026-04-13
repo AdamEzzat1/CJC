@@ -44,34 +44,45 @@ use crate::{
 /// corresponding `walk_*` function inside your override to continue the
 /// default traversal into children.
 pub trait AstVisitor: Sized {
+    /// Visit a top-level [`Program`]. Default: delegates to [`walk_program`].
     fn visit_program(&mut self, program: &Program) {
         walk_program(self, program);
     }
+    /// Visit a [`Decl`] node. Default: delegates to [`walk_decl`].
     fn visit_decl(&mut self, decl: &Decl) {
         walk_decl(self, decl);
     }
+    /// Visit a [`Stmt`] node. Default: delegates to [`walk_stmt`].
     fn visit_stmt(&mut self, stmt: &Stmt) {
         walk_stmt(self, stmt);
     }
+    /// Visit an [`Expr`] node. Default: delegates to [`walk_expr`].
     fn visit_expr(&mut self, expr: &Expr) {
         walk_expr(self, expr);
     }
+    /// Visit a [`Pattern`] node. Default: delegates to [`walk_pattern`].
     fn visit_pattern(&mut self, pattern: &Pattern) {
         walk_pattern(self, pattern);
     }
+    /// Visit a [`TypeExpr`] node. Default: delegates to [`walk_type_expr`].
     fn visit_type_expr(&mut self, ty: &TypeExpr) {
         walk_type_expr(self, ty);
     }
+    /// Visit a [`Block`]. Default: delegates to [`walk_block`].
     fn visit_block(&mut self, block: &Block) {
         walk_block(self, block);
     }
+    /// Visit a [`FnDecl`] node. Default: delegates to [`walk_fn_decl`].
     fn visit_fn_decl(&mut self, f: &FnDecl) {
         walk_fn_decl(self, f);
     }
+    /// Visit an [`Ident`]. Default: no-op (leaf node).
     fn visit_ident(&mut self, _ident: &Ident) {}
+    /// Visit a function [`Param`]. Default: delegates to [`walk_param`].
     fn visit_param(&mut self, param: &Param) {
         walk_param(self, param);
     }
+    /// Visit a [`MatchArm`]. Default: delegates to [`walk_match_arm`].
     fn visit_match_arm(&mut self, arm: &MatchArm) {
         walk_match_arm(self, arm);
     }
@@ -81,12 +92,14 @@ pub trait AstVisitor: Sized {
 // Walk functions — default traversals
 // ---------------------------------------------------------------------------
 
+/// Walk a [`Program`] by visiting each declaration in order.
 pub fn walk_program<V: AstVisitor>(v: &mut V, program: &Program) {
     for decl in &program.declarations {
         v.visit_decl(decl);
     }
 }
 
+/// Walk a [`Decl`] by dispatching on its [`DeclKind`] variant.
 pub fn walk_decl<V: AstVisitor>(v: &mut V, decl: &Decl) {
     match &decl.kind {
         DeclKind::Struct(s) => walk_struct_decl(v, s),
@@ -103,6 +116,7 @@ pub fn walk_decl<V: AstVisitor>(v: &mut V, decl: &Decl) {
     }
 }
 
+/// Walk a [`StructDecl`]: visit name, type params, and fields.
 pub fn walk_struct_decl<V: AstVisitor>(v: &mut V, s: &StructDecl) {
     v.visit_ident(&s.name);
     for tp in &s.type_params {
@@ -113,6 +127,7 @@ pub fn walk_struct_decl<V: AstVisitor>(v: &mut V, s: &StructDecl) {
     }
 }
 
+/// Walk a [`ClassDecl`]: visit name, type params, and fields.
 pub fn walk_class_decl<V: AstVisitor>(v: &mut V, c: &ClassDecl) {
     v.visit_ident(&c.name);
     for tp in &c.type_params {
@@ -123,6 +138,7 @@ pub fn walk_class_decl<V: AstVisitor>(v: &mut V, c: &ClassDecl) {
     }
 }
 
+/// Walk a [`RecordDecl`]: visit name, type params, and fields.
 pub fn walk_record_decl<V: AstVisitor>(v: &mut V, r: &RecordDecl) {
     v.visit_ident(&r.name);
     for tp in &r.type_params {
@@ -133,6 +149,7 @@ pub fn walk_record_decl<V: AstVisitor>(v: &mut V, r: &RecordDecl) {
     }
 }
 
+/// Walk an [`EnumDecl`]: visit name, type params, and each variant.
 pub fn walk_enum_decl<V: AstVisitor>(v: &mut V, e: &EnumDecl) {
     v.visit_ident(&e.name);
     for tp in &e.type_params {
@@ -143,6 +160,7 @@ pub fn walk_enum_decl<V: AstVisitor>(v: &mut V, e: &EnumDecl) {
     }
 }
 
+/// Walk a [`VariantDecl`]: visit name and payload type expressions.
 pub fn walk_variant_decl<V: AstVisitor>(v: &mut V, variant: &VariantDecl) {
     v.visit_ident(&variant.name);
     for ty in &variant.fields {
@@ -150,6 +168,7 @@ pub fn walk_variant_decl<V: AstVisitor>(v: &mut V, variant: &VariantDecl) {
     }
 }
 
+/// Walk a [`FieldDecl`]: visit name, type, and optional default expression.
 pub fn walk_field_decl<V: AstVisitor>(v: &mut V, field: &FieldDecl) {
     v.visit_ident(&field.name);
     v.visit_type_expr(&field.ty);
@@ -158,6 +177,7 @@ pub fn walk_field_decl<V: AstVisitor>(v: &mut V, field: &FieldDecl) {
     }
 }
 
+/// Walk a [`TraitDecl`]: visit name, type params, super-traits, and method signatures.
 pub fn walk_trait_decl<V: AstVisitor>(v: &mut V, t: &TraitDecl) {
     v.visit_ident(&t.name);
     for tp in &t.type_params {
@@ -171,6 +191,7 @@ pub fn walk_trait_decl<V: AstVisitor>(v: &mut V, t: &TraitDecl) {
     }
 }
 
+/// Walk an [`ImplDecl`]: visit type params, target type, optional trait ref, and methods.
 pub fn walk_impl_decl<V: AstVisitor>(v: &mut V, i: &ImplDecl) {
     for tp in &i.type_params {
         walk_type_param(v, tp);
@@ -184,6 +205,7 @@ pub fn walk_impl_decl<V: AstVisitor>(v: &mut V, i: &ImplDecl) {
     }
 }
 
+/// Walk an [`ImportDecl`]: visit path segments and optional alias.
 pub fn walk_import_decl<V: AstVisitor>(v: &mut V, i: &ImportDecl) {
     for ident in &i.path {
         v.visit_ident(ident);
@@ -193,12 +215,14 @@ pub fn walk_import_decl<V: AstVisitor>(v: &mut V, i: &ImportDecl) {
     }
 }
 
+/// Walk a [`ConstDecl`]: visit name, type, and value expression.
 pub fn walk_const_decl<V: AstVisitor>(v: &mut V, c: &ConstDecl) {
     v.visit_ident(&c.name);
     v.visit_type_expr(&c.ty);
     v.visit_expr(&c.value);
 }
 
+/// Walk a [`FnDecl`]: visit name, type params, params, return type, decorators, and body.
 pub fn walk_fn_decl<V: AstVisitor>(v: &mut V, f: &FnDecl) {
     v.visit_ident(&f.name);
     for tp in &f.type_params {
@@ -216,6 +240,7 @@ pub fn walk_fn_decl<V: AstVisitor>(v: &mut V, f: &FnDecl) {
     v.visit_block(&f.body);
 }
 
+/// Walk a [`FnSig`]: visit name, type params, params, and return type.
 pub fn walk_fn_sig<V: AstVisitor>(v: &mut V, sig: &FnSig) {
     v.visit_ident(&sig.name);
     for tp in &sig.type_params {
@@ -229,6 +254,7 @@ pub fn walk_fn_sig<V: AstVisitor>(v: &mut V, sig: &FnSig) {
     }
 }
 
+/// Walk a [`Param`]: visit name, type, and optional default expression.
 pub fn walk_param<V: AstVisitor>(v: &mut V, param: &Param) {
     v.visit_ident(&param.name);
     v.visit_type_expr(&param.ty);
@@ -237,6 +263,7 @@ pub fn walk_param<V: AstVisitor>(v: &mut V, param: &Param) {
     }
 }
 
+/// Walk a [`Decorator`]: visit name and argument expressions.
 pub fn walk_decorator<V: AstVisitor>(v: &mut V, dec: &Decorator) {
     v.visit_ident(&dec.name);
     for arg in &dec.args {
@@ -244,6 +271,7 @@ pub fn walk_decorator<V: AstVisitor>(v: &mut V, dec: &Decorator) {
     }
 }
 
+/// Walk a [`TypeParam`]: visit name and trait bounds.
 pub fn walk_type_param<V: AstVisitor>(v: &mut V, tp: &TypeParam) {
     v.visit_ident(&tp.name);
     for bound in &tp.bounds {
@@ -255,6 +283,7 @@ pub fn walk_type_param<V: AstVisitor>(v: &mut V, tp: &TypeParam) {
 // Block & Statement walkers
 // ---------------------------------------------------------------------------
 
+/// Walk a [`Block`]: visit each statement and the optional trailing expression.
 pub fn walk_block<V: AstVisitor>(v: &mut V, block: &Block) {
     for stmt in &block.stmts {
         v.visit_stmt(stmt);
@@ -264,6 +293,7 @@ pub fn walk_block<V: AstVisitor>(v: &mut V, block: &Block) {
     }
 }
 
+/// Walk a [`Stmt`] by dispatching on its [`StmtKind`] variant.
 pub fn walk_stmt<V: AstVisitor>(v: &mut V, stmt: &Stmt) {
     match &stmt.kind {
         StmtKind::Let(l) => walk_let_stmt(v, l),
@@ -279,6 +309,7 @@ pub fn walk_stmt<V: AstVisitor>(v: &mut V, stmt: &Stmt) {
     }
 }
 
+/// Walk a [`LetStmt`]: visit name, optional type annotation, and initializer.
 pub fn walk_let_stmt<V: AstVisitor>(v: &mut V, l: &LetStmt) {
     v.visit_ident(&l.name);
     if let Some(ref ty) = l.ty {
@@ -287,6 +318,7 @@ pub fn walk_let_stmt<V: AstVisitor>(v: &mut V, l: &LetStmt) {
     v.visit_expr(&l.init);
 }
 
+/// Walk an [`IfStmt`]: visit condition, then-block, and optional else branch.
 pub fn walk_if_stmt<V: AstVisitor>(v: &mut V, i: &IfStmt) {
     v.visit_expr(&i.condition);
     v.visit_block(&i.then_block);
@@ -295,6 +327,7 @@ pub fn walk_if_stmt<V: AstVisitor>(v: &mut V, i: &IfStmt) {
     }
 }
 
+/// Walk an [`ElseBranch`]: dispatch to either an else-if or a terminal else block.
 pub fn walk_else_branch<V: AstVisitor>(v: &mut V, eb: &ElseBranch) {
     match eb {
         ElseBranch::ElseIf(elif) => walk_if_stmt(v, elif),
@@ -302,11 +335,13 @@ pub fn walk_else_branch<V: AstVisitor>(v: &mut V, eb: &ElseBranch) {
     }
 }
 
+/// Walk a [`WhileStmt`]: visit condition and body block.
 pub fn walk_while_stmt<V: AstVisitor>(v: &mut V, w: &WhileStmt) {
     v.visit_expr(&w.condition);
     v.visit_block(&w.body);
 }
 
+/// Walk a [`ForStmt`]: visit loop variable, iterator (range or expr), and body.
 pub fn walk_for_stmt<V: AstVisitor>(v: &mut V, f: &ForStmt) {
     v.visit_ident(&f.ident);
     match &f.iter {
@@ -323,6 +358,10 @@ pub fn walk_for_stmt<V: AstVisitor>(v: &mut V, f: &ForStmt) {
 // Expression walker — covers all 35 ExprKind variants
 // ---------------------------------------------------------------------------
 
+/// Walk an [`Expr`] by dispatching on all [`ExprKind`] variants.
+///
+/// Visits child expressions, identifiers, blocks, and patterns in
+/// left-to-right, depth-first order.
 pub fn walk_expr<V: AstVisitor>(v: &mut V, expr: &Expr) {
     match &expr.kind {
         ExprKind::IntLit(_) => {}
@@ -348,6 +387,7 @@ pub fn walk_expr<V: AstVisitor>(v: &mut V, expr: &Expr) {
             }
         }
         ExprKind::BoolLit(_) => {}
+        ExprKind::NaLit => {}
         ExprKind::Ident(ident) => v.visit_ident(ident),
         ExprKind::Binary { left, right, .. } => {
             v.visit_expr(left);
@@ -443,9 +483,14 @@ pub fn walk_expr<V: AstVisitor>(v: &mut V, expr: &Expr) {
                 v.visit_expr(field);
             }
         }
+        ExprKind::Cast { expr, target_type } => {
+            v.visit_expr(expr);
+            v.visit_ident(target_type);
+        }
     }
 }
 
+/// Walk a [`CallArg`]: visit optional name and value expression.
 pub fn walk_call_arg<V: AstVisitor>(v: &mut V, arg: &CallArg) {
     if let Some(ref name) = arg.name {
         v.visit_ident(name);
@@ -453,11 +498,13 @@ pub fn walk_call_arg<V: AstVisitor>(v: &mut V, arg: &CallArg) {
     v.visit_expr(&arg.value);
 }
 
+/// Walk a [`FieldInit`]: visit field name and value expression.
 pub fn walk_field_init<V: AstVisitor>(v: &mut V, fi: &FieldInit) {
     v.visit_ident(&fi.name);
     v.visit_expr(&fi.value);
 }
 
+/// Walk a [`MatchArm`]: visit pattern and body expression.
 pub fn walk_match_arm<V: AstVisitor>(v: &mut V, arm: &MatchArm) {
     v.visit_pattern(&arm.pattern);
     v.visit_expr(&arm.body);
@@ -467,6 +514,9 @@ pub fn walk_match_arm<V: AstVisitor>(v: &mut V, arm: &MatchArm) {
 // Pattern walker — covers all 9 PatternKind variants
 // ---------------------------------------------------------------------------
 
+/// Walk a [`Pattern`] by dispatching on all [`PatternKind`] variants.
+///
+/// Visits nested patterns, identifiers, and fields in declaration order.
 pub fn walk_pattern<V: AstVisitor>(v: &mut V, pattern: &Pattern) {
     match &pattern.kind {
         PatternKind::Wildcard => {}
@@ -502,6 +552,7 @@ pub fn walk_pattern<V: AstVisitor>(v: &mut V, pattern: &Pattern) {
     }
 }
 
+/// Walk a [`PatternField`]: visit field name and optional nested pattern.
 pub fn walk_pattern_field<V: AstVisitor>(v: &mut V, field: &PatternField) {
     v.visit_ident(&field.name);
     if let Some(ref pat) = field.pattern {
@@ -513,6 +564,10 @@ pub fn walk_pattern_field<V: AstVisitor>(v: &mut V, field: &PatternField) {
 // Type expression walker — covers all 5 TypeExprKind variants
 // ---------------------------------------------------------------------------
 
+/// Walk a [`TypeExpr`] by dispatching on all [`TypeExprKind`] variants.
+///
+/// Visits named types, array elements/sizes, tuple members, function
+/// parameter/return types, and shape dimensions.
 pub fn walk_type_expr<V: AstVisitor>(v: &mut V, ty: &TypeExpr) {
     match &ty.kind {
         TypeExprKind::Named { name, args } => {
@@ -546,6 +601,7 @@ pub fn walk_type_expr<V: AstVisitor>(v: &mut V, ty: &TypeExpr) {
     }
 }
 
+/// Walk a [`TypeArg`]: dispatch to type, expression, or shape variant.
 pub fn walk_type_arg<V: AstVisitor>(v: &mut V, arg: &TypeArg) {
     match arg {
         TypeArg::Type(ty) => v.visit_type_expr(ty),

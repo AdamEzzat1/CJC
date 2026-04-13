@@ -1,7 +1,20 @@
-//! Abstract syntax tree definitions for CJC.
+//! Abstract Syntax Tree definitions for the CJC compiler.
 //!
-//! Defines `Program`, `Stmt`, `Expr`, `Decl`, and all AST node variants
-//! produced by the parser. This is a leaf crate with no internal dependencies.
+//! This crate defines the complete AST node taxonomy produced by [`cjc_parser`]:
+//! [`Program`], [`Stmt`]/[`StmtKind`], [`Expr`]/[`ExprKind`], [`Decl`]/[`DeclKind`],
+//! type expressions ([`TypeExpr`]/[`TypeExprKind`]), patterns ([`Pattern`]/[`PatternKind`]),
+//! and all supporting structures (identifiers, spans, operators, etc.).
+//!
+//! This is a **leaf crate** with zero internal dependencies, ensuring it can be
+//! consumed by every downstream stage of the compiler pipeline without cycles.
+//!
+//! # Submodules
+//!
+//! - [`visit`] — Read-only visitor trait and walk functions for AST traversal
+//! - [`metrics`] — Structural statistics (node counts, depths, feature flags)
+//! - [`validate`] — Lightweight structural validation before HIR lowering
+//! - [`inspect`] — Deterministic text dumps for debugging and testing
+//! - [`node_utils`] — Pure query methods on [`Expr`], [`Block`], and [`Program`]
 
 pub mod inspect;
 pub mod metrics;
@@ -21,10 +34,14 @@ pub struct Span {
 }
 
 impl Span {
+    /// Create a new span from a start and end byte offset.
     pub fn new(start: usize, end: usize) -> Self {
         Self { start, end }
     }
 
+    /// Merge two spans into the smallest span that covers both.
+    ///
+    /// Takes the minimum start and maximum end of the two spans.
     pub fn merge(self, other: Span) -> Span {
         Span {
             start: self.start.min(other.start),
@@ -32,6 +49,7 @@ impl Span {
         }
     }
 
+    /// Create a dummy span at position `0..0` for use in tests and synthetic nodes.
     pub fn dummy() -> Self {
         Self { start: 0, end: 0 }
     }
@@ -45,7 +63,9 @@ impl Span {
 /// public regardless of annotation. This enum is stored but not checked yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Visibility {
+    /// Item is visible outside its defining scope (`pub` keyword).
     Public,
+    /// Item is visible only within its defining scope (default).
     Private,
 }
 
@@ -70,16 +90,29 @@ pub struct Decl {
     pub span: Span,
 }
 
+/// The kind of a top-level declaration.
+///
+/// Each variant wraps a dedicated declaration struct that carries the
+/// variant-specific fields.
 #[derive(Debug, Clone)]
 pub enum DeclKind {
+    /// Struct declaration: `struct Foo { ... }`
     Struct(StructDecl),
+    /// Class declaration: `class Foo { ... }` (mutable fields, heap-allocated)
     Class(ClassDecl),
+    /// Record declaration: `record Foo { ... }` (immutable value type)
     Record(RecordDecl),
+    /// Function declaration: `fn foo(...) { ... }`
     Fn(FnDecl),
+    /// Trait declaration: `trait Foo { ... }`
     Trait(TraitDecl),
+    /// Impl block: `impl Foo { ... }` or `impl Trait for Foo { ... }`
     Impl(ImplDecl),
+    /// Enum declaration: `enum Foo { A, B(i64) }`
     Enum(EnumDecl),
+    /// Top-level let binding: `let x = expr;`
     Let(LetStmt),
+    /// Import declaration: `import path.to.module`
     Import(ImportDecl),
     /// Compile-time constant: `const NAME: Type = expr;`
     Const(ConstDecl),
@@ -87,30 +120,53 @@ pub enum DeclKind {
     Stmt(Stmt),
 }
 
-/// A compile-time constant declaration: `const NAME: Type = expr;`
+/// A compile-time constant declaration: `const PI: f64 = 3.14159;`
+///
+/// Constants must have an explicit type annotation and a value expression
+/// that can be evaluated at compile time.
 #[derive(Debug, Clone)]
 pub struct ConstDecl {
+    /// Constant name.
     pub name: Ident,
+    /// Type annotation (required).
     pub ty: TypeExpr,
+    /// Value expression (must be compile-time evaluable).
     pub value: Box<Expr>,
+    /// Source span of the full declaration.
     pub span: Span,
 }
 
 // ── Struct & Class ──────────────────────────────────────────────
 
+/// Struct declaration: `struct Point { x: f64, y: f64 }`
+///
+/// Structs are product types with named fields. By default, fields are
+/// mutable unless the binding is immutable.
 #[derive(Debug, Clone)]
 pub struct StructDecl {
+    /// Name of the struct.
     pub name: Ident,
+    /// Generic type parameters (e.g., `<T>`).
     pub type_params: Vec<TypeParam>,
+    /// Named fields with types and optional defaults.
     pub fields: Vec<FieldDecl>,
+    /// Visibility qualifier (`pub` or private).
     pub vis: Visibility,
 }
 
+/// Class declaration: `class Widget { ... }`
+///
+/// Classes are heap-allocated types with mutable fields, similar to structs
+/// but semantically intended for reference-identity objects.
 #[derive(Debug, Clone)]
 pub struct ClassDecl {
+    /// Name of the class.
     pub name: Ident,
+    /// Generic type parameters.
     pub type_params: Vec<TypeParam>,
+    /// Named fields with types and optional defaults.
     pub fields: Vec<FieldDecl>,
+    /// Visibility qualifier.
     pub vis: Visibility,
 }
 
@@ -127,27 +183,48 @@ pub struct RecordDecl {
 
 // ── Enums ───────────────────────────────────────────────────
 
+/// Enum declaration: `enum Color { Red, Green, Blue(i64) }`
+///
+/// Enums are sum types with named variants. Each variant may carry
+/// zero or more positional payload types.
 #[derive(Debug, Clone)]
 pub struct EnumDecl {
+    /// Name of the enum.
     pub name: Ident,
+    /// Generic type parameters.
     pub type_params: Vec<TypeParam>,
+    /// Ordered list of variants.
     pub variants: Vec<VariantDecl>,
 }
 
+/// A single variant within an [`EnumDecl`].
+///
+/// Unit variants have an empty `fields` vec; tuple-like variants list
+/// their payload types positionally.
 #[derive(Debug, Clone)]
 pub struct VariantDecl {
+    /// Name of the variant.
     pub name: Ident,
     /// Payload types for tuple-like variants. Empty for unit variants.
     pub fields: Vec<TypeExpr>,
+    /// Source span of the variant declaration.
     pub span: Span,
 }
 
+/// A named field within a struct, class, or record declaration.
+///
+/// Fields carry a type annotation and an optional default-value expression.
 #[derive(Debug, Clone)]
 pub struct FieldDecl {
+    /// Field name.
     pub name: Ident,
+    /// Type annotation for the field.
     pub ty: TypeExpr,
+    /// Optional default value expression.
     pub default: Option<Expr>,
+    /// Visibility qualifier.
     pub vis: Visibility,
+    /// Source span of the field declaration.
     pub span: Span,
 }
 
@@ -163,28 +240,50 @@ pub struct Decorator {
     pub span: Span,
 }
 
+/// Function declaration: `fn solve(x: f64, tol: f64 = 1e-6) -> f64 { ... }`
+///
+/// Represents a complete function definition including its signature, body,
+/// and metadata (NoGC flag, decorators, visibility).
+///
+/// Every new builtin must be registered in [`cjc_runtime::builtins`],
+/// [`cjc_eval`], and [`cjc_mir_exec`] (the "wiring pattern").
 #[derive(Debug, Clone)]
 pub struct FnDecl {
+    /// Function name.
     pub name: Ident,
+    /// Generic type parameters.
     pub type_params: Vec<TypeParam>,
+    /// Positional parameters with types, optional defaults, and variadic flag.
     pub params: Vec<Param>,
+    /// Optional return-type annotation. `None` means the return type is inferred.
     pub return_type: Option<TypeExpr>,
+    /// Function body block.
     pub body: Block,
+    /// Whether this function is marked `@nogc` (no GC allocations allowed).
     pub is_nogc: bool,
     /// Effect annotation: `fn foo() -> i64 / pure { ... }`
-    /// None means "any effect" (backward compatible).
+    /// `None` means "any effect" (backward compatible).
     pub effect_annotation: Option<Vec<String>>,
     /// Decorators applied to this function (e.g., `@log`, `@timed`).
     pub decorators: Vec<Decorator>,
+    /// Visibility qualifier.
     pub vis: Visibility,
 }
 
+/// Function signature without a body, used in [`TraitDecl`] method declarations.
+///
+/// Contains everything [`FnDecl`] has except the body block and metadata.
 #[derive(Debug, Clone)]
 pub struct FnSig {
+    /// Function name.
     pub name: Ident,
+    /// Generic type parameters.
     pub type_params: Vec<TypeParam>,
+    /// Positional parameters.
     pub params: Vec<Param>,
+    /// Optional return-type annotation.
     pub return_type: Option<TypeExpr>,
+    /// Source span of the signature.
     pub span: Span,
 }
 
@@ -202,143 +301,246 @@ pub struct Param {
 
 // ── Traits & Impls ──────────────────────────────────────────────
 
+/// Trait declaration: `trait Numeric { fn zero() -> Self; }`
+///
+/// Traits define abstract interfaces via method signatures.
+/// Implementors provide concrete method bodies via [`ImplDecl`].
 #[derive(Debug, Clone)]
 pub struct TraitDecl {
+    /// Trait name.
     pub name: Ident,
+    /// Generic type parameters.
     pub type_params: Vec<TypeParam>,
+    /// Super-trait bounds this trait extends.
     pub super_traits: Vec<TypeExpr>,
+    /// Method signatures (no bodies).
     pub methods: Vec<FnSig>,
 }
 
+/// Impl block: `impl Foo { ... }` or `impl Trait for Foo { ... }`
+///
+/// Associates method implementations with a target type, optionally
+/// satisfying a trait contract.
 #[derive(Debug, Clone)]
 pub struct ImplDecl {
+    /// Generic type parameters on the impl.
     pub type_params: Vec<TypeParam>,
+    /// The type being implemented (e.g., `Foo<T>`).
     pub target: TypeExpr,
+    /// Optional trait being implemented for the target type.
     pub trait_ref: Option<TypeExpr>,
+    /// Method implementations.
     pub methods: Vec<FnDecl>,
+    /// Source span of the impl block.
     pub span: Span,
 }
 
 // ── Import ──────────────────────────────────────────────────────
 
+/// Import declaration: `import math.linalg` or `import stats as s`.
+///
+/// Brings names from other modules into scope. The `path` field contains
+/// the dot-separated segments and `alias` is an optional rename.
 #[derive(Debug, Clone)]
 pub struct ImportDecl {
+    /// Module path segments (e.g., `["math", "linalg"]`).
     pub path: Vec<Ident>,
+    /// Optional alias (`as name`).
     pub alias: Option<Ident>,
 }
 
 // ── Type Expressions ────────────────────────────────────────────
 
+/// A type expression in source code.
+///
+/// Wraps a [`TypeExprKind`] discriminant with a source [`Span`].
+/// Used in parameter types, return types, field annotations, and
+/// generic arguments.
 #[derive(Debug, Clone)]
 pub struct TypeExpr {
+    /// The kind of type expression.
     pub kind: TypeExprKind,
+    /// Source span.
     pub span: Span,
 }
 
+/// The kind of a type expression.
+///
+/// Covers named types, arrays, tuples, function types, and shape literals
+/// used in CJC's tensor type system.
 #[derive(Debug, Clone)]
 pub enum TypeExprKind {
-    /// Named type: `f64`, `Tensor<f32>`, etc.
+    /// Named type with optional generic arguments: `f64`, `Tensor<f32>`, `Vec<T>`.
     Named {
+        /// The type name identifier.
         name: Ident,
+        /// Generic type arguments (empty for non-generic types).
         args: Vec<TypeArg>,
     },
-    /// Array type: `[T; N]`
+    /// Fixed-size array type: `[T; N]`.
     Array {
+        /// Element type.
         elem: Box<TypeExpr>,
+        /// Array size expression (must be a compile-time constant).
         size: Box<Expr>,
     },
-    /// Tuple type: `(T, U)`
+    /// Tuple type: `(T, U, V)`.
     Tuple(Vec<TypeExpr>),
-    /// Function type: `fn(T, U) -> V`
+    /// Function type: `fn(T, U) -> V`.
     Fn {
+        /// Parameter types.
         params: Vec<TypeExpr>,
+        /// Return type.
         ret: Box<TypeExpr>,
     },
-    /// Shape literal in type position: `[M, N]`
+    /// Shape literal in type position: `[M, N]` for tensor dimensions.
     ShapeLit(Vec<ShapeDim>),
 }
 
-/// A type argument can be a type or an expression (for shape params).
+/// A type argument in a generic instantiation.
+///
+/// Generic parameters can accept types, expressions (for const generics),
+/// or shape dimensions (for tensor shapes).
 #[derive(Debug, Clone)]
 pub enum TypeArg {
+    /// A type argument: `Tensor<f64>`.
     Type(TypeExpr),
+    /// An expression argument (const generic): `Matrix<3>`.
     Expr(Expr),
+    /// A shape argument: `Tensor<[M, N]>`.
     Shape(Vec<ShapeDim>),
 }
 
-/// A shape dimension: either a symbolic name or a literal integer.
+/// A single dimension in a tensor shape specification.
+///
+/// Dimensions are either symbolic names resolved at compile time or
+/// literal integer constants.
 #[derive(Debug, Clone)]
 pub enum ShapeDim {
+    /// Symbolic dimension name (e.g., `M`, `batch`).
     Name(Ident),
+    /// Literal integer dimension (e.g., `3`, `128`).
     Lit(i64),
 }
 
+/// A generic type parameter declaration: `<T: Numeric>`.
+///
+/// Appears in function, struct, enum, trait, and impl declarations.
 #[derive(Debug, Clone)]
 pub struct TypeParam {
+    /// Parameter name (e.g., `T`).
     pub name: Ident,
+    /// Trait bounds on the parameter.
     pub bounds: Vec<TypeExpr>,
+    /// Source span.
     pub span: Span,
 }
 
 // ── Statements ──────────────────────────────────────────────────
 
+/// A block of statements with an optional trailing expression.
+///
+/// Blocks are the body of functions, loops, and if-branches. The optional
+/// trailing `expr` is the block's value when used as an expression
+/// (e.g., `{ let x = 1; x + 1 }` evaluates to the trailing expression).
 #[derive(Debug, Clone)]
 pub struct Block {
+    /// Ordered list of statements in the block.
     pub stmts: Vec<Stmt>,
+    /// Optional trailing expression (the block's value).
     pub expr: Option<Box<Expr>>,
+    /// Source span of the entire block including braces.
     pub span: Span,
 }
 
+/// A statement node in the AST.
+///
+/// Wraps a [`StmtKind`] discriminant with a source [`Span`].
 #[derive(Debug, Clone)]
 pub struct Stmt {
+    /// The kind of statement.
     pub kind: StmtKind,
+    /// Source span.
     pub span: Span,
 }
 
+/// The kind of a statement.
 #[derive(Debug, Clone)]
 pub enum StmtKind {
+    /// Variable binding: `let x = expr;` or `let mut x: T = expr;`
     Let(LetStmt),
+    /// Expression statement: `foo();` (result discarded).
     Expr(Expr),
+    /// Return statement: `return expr;` or bare `return;`.
     Return(Option<Expr>),
+    /// Break out of the innermost loop.
     Break,
+    /// Continue to the next iteration of the innermost loop.
     Continue,
+    /// If statement (not to be confused with [`ExprKind::IfExpr`]).
     If(IfStmt),
+    /// While loop: `while cond { ... }`
     While(WhileStmt),
+    /// For loop: `for i in 0..n { ... }` or `for x in arr { ... }`
     For(ForStmt),
+    /// NoGC block: `nogc { ... }` (disallows GC allocations inside).
     NoGcBlock(Block),
 }
 
+/// Let binding statement: `let x = 1;` or `let mut y: f64 = 3.14;`
 #[derive(Debug, Clone)]
 pub struct LetStmt {
+    /// Binding name.
     pub name: Ident,
+    /// Whether the binding is mutable (`let mut`).
     pub mutable: bool,
+    /// Optional explicit type annotation.
     pub ty: Option<TypeExpr>,
+    /// Initializer expression (required in CJC).
     pub init: Box<Expr>,
 }
 
+/// If statement: `if cond { ... } else { ... }`
+///
+/// See also [`ExprKind::IfExpr`] for the expression form.
 #[derive(Debug, Clone)]
 pub struct IfStmt {
+    /// Condition expression (must evaluate to bool).
     pub condition: Expr,
+    /// Then-branch block.
     pub then_block: Block,
+    /// Optional else or else-if branch.
     pub else_branch: Option<ElseBranch>,
 }
 
+/// The else clause of an if statement or expression.
 #[derive(Debug, Clone)]
 pub enum ElseBranch {
+    /// Chained else-if: `else if cond { ... }`
     ElseIf(Box<IfStmt>),
+    /// Terminal else: `else { ... }`
     Else(Block),
 }
 
+/// While loop statement: `while cond { ... }`
 #[derive(Debug, Clone)]
 pub struct WhileStmt {
+    /// Loop condition (re-evaluated each iteration).
     pub condition: Expr,
+    /// Loop body.
     pub body: Block,
 }
 
+/// For loop statement: `for i in 0..n { ... }` or `for x in arr { ... }`
+///
+/// Desugared to a while loop during HIR lowering.
 #[derive(Debug, Clone)]
 pub struct ForStmt {
+    /// Loop variable name.
     pub ident: Ident,
+    /// Iteration source (range or expression).
     pub iter: ForIter,
+    /// Loop body.
     pub body: Block,
 }
 
@@ -353,12 +555,23 @@ pub enum ForIter {
 
 // ── Expressions ─────────────────────────────────────────────────
 
+/// An expression node in the AST.
+///
+/// Wraps an [`ExprKind`] discriminant with a source [`Span`].
+/// Expressions produce values and can appear in statement position,
+/// as function arguments, in let initializers, etc.
 #[derive(Debug, Clone)]
 pub struct Expr {
+    /// The kind of expression.
     pub kind: ExprKind,
+    /// Source span.
     pub span: Span,
 }
 
+/// The kind of an expression.
+///
+/// CJC supports 35+ expression variants covering literals, operators,
+/// control flow, data constructors, and pattern matching.
 #[derive(Debug, Clone)]
 pub enum ExprKind {
     /// Integer literal: `42`
@@ -387,6 +600,8 @@ pub enum ExprKind {
     TensorLit { rows: Vec<Vec<Expr>> },
     /// Bool literal: `true`, `false`
     BoolLit(bool),
+    /// Missing value literal: `NA`
+    NaLit,
     /// Identifier: `x`, `foo`
     Ident(Ident),
     /// Binary operation: `a + b`
@@ -466,6 +681,11 @@ pub enum ExprKind {
     },
     /// Tuple literal: `(a, b, c)`
     TupleLit(Vec<Expr>),
+    /// Type cast expression: `x as f64`, `y as i64`
+    Cast {
+        expr: Box<Expr>,
+        target_type: Ident,
+    },
     /// Try operator: `expr?` — desugars to match on Result
     Try(Box<Expr>),
     /// Enum variant constructor: `Some(42)` or `None`
@@ -528,46 +748,80 @@ pub struct PatternField {
     pub span: Span,
 }
 
+/// A function call argument, optionally named.
+///
+/// Positional: `f(42)`. Named: `f(x: 42)`.
 #[derive(Debug, Clone)]
 pub struct CallArg {
+    /// Optional argument name for named/keyword arguments.
     pub name: Option<Ident>,
+    /// The argument value expression.
     pub value: Expr,
+    /// Source span.
     pub span: Span,
 }
 
+/// A field initializer in a struct literal: `x: expr`.
 #[derive(Debug, Clone)]
 pub struct FieldInit {
+    /// Field name.
     pub name: Ident,
+    /// Field value expression.
     pub value: Expr,
+    /// Source span.
     pub span: Span,
 }
 
 // ── Operators ───────────────────────────────────────────────────
 
+/// Binary operator.
+///
+/// Covers arithmetic, comparison, logical, bitwise, and regex-match operators.
+/// Displayed via [`fmt::Display`] as the source-level symbol (e.g., `+`, `==`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
+    /// Addition: `+`
     Add,
+    /// Subtraction: `-`
     Sub,
+    /// Multiplication: `*`
     Mul,
+    /// Division: `/`
     Div,
+    /// Modulo: `%`
     Mod,
-    Pow,       // **
+    /// Exponentiation: `**`
+    Pow,
+    /// Equality: `==`
     Eq,
+    /// Inequality: `!=`
     Ne,
+    /// Less than: `<`
     Lt,
+    /// Greater than: `>`
     Gt,
+    /// Less than or equal: `<=`
     Le,
+    /// Greater than or equal: `>=`
     Ge,
+    /// Logical and: `&&`
     And,
+    /// Logical or: `||`
     Or,
-    Match,     // ~=  (regex binding)
-    NotMatch,  // !~  (negative regex binding)
-    // Bitwise operators
-    BitAnd,    // &
-    BitOr,     // |
-    BitXor,    // ^
-    Shl,       // <<
-    Shr,       // >>
+    /// Regex match: `~=`
+    Match,
+    /// Negative regex match: `!~`
+    NotMatch,
+    /// Bitwise and: `&`
+    BitAnd,
+    /// Bitwise or: `|`
+    BitOr,
+    /// Bitwise xor: `^`
+    BitXor,
+    /// Left shift: `<<`
+    Shl,
+    /// Right shift: `>>`
+    Shr,
 }
 
 impl fmt::Display for BinOp {
@@ -598,11 +852,17 @@ impl fmt::Display for BinOp {
     }
 }
 
+/// Unary operator.
+///
+/// Displayed via [`fmt::Display`] as the source-level symbol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
+    /// Arithmetic negation: `-x`
     Neg,
+    /// Logical not: `!b`
     Not,
-    BitNot,  // ~ (bitwise NOT)
+    /// Bitwise not: `~x`
+    BitNot,
 }
 
 impl fmt::Display for UnaryOp {
@@ -617,13 +877,19 @@ impl fmt::Display for UnaryOp {
 
 // ── Identifier ──────────────────────────────────────────────────
 
+/// An identifier with its source span.
+///
+/// Used for variable names, function names, type names, field names, etc.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Ident {
+    /// The identifier text.
     pub name: String,
+    /// Source span where this identifier appears.
     pub span: Span,
 }
 
 impl Ident {
+    /// Create a new identifier with an explicit source span.
     pub fn new(name: impl Into<String>, span: Span) -> Self {
         Self {
             name: name.into(),
@@ -631,6 +897,7 @@ impl Ident {
         }
     }
 
+    /// Create a dummy identifier with a zero span, for use in tests and synthetic AST nodes.
     pub fn dummy(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -647,12 +914,26 @@ impl fmt::Display for Ident {
 
 // ── Pretty Printer ──────────────────────────────────────────────
 
+/// Pretty-printer that converts an AST back into human-readable CJC source.
+///
+/// Produces deterministic, indented output suitable for debugging and
+/// round-trip verification.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use cjc_ast::PrettyPrinter;
+///
+/// let source = PrettyPrinter::new().print_program(&program);
+/// println!("{}", source);
+/// ```
 pub struct PrettyPrinter {
     indent: usize,
     output: String,
 }
 
 impl PrettyPrinter {
+    /// Create a new pretty-printer with zero indentation.
     pub fn new() -> Self {
         Self {
             indent: 0,
@@ -660,6 +941,15 @@ impl PrettyPrinter {
         }
     }
 
+    /// Consume the printer and return the pretty-printed source for an entire program.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The AST program to pretty-print.
+    ///
+    /// # Returns
+    ///
+    /// A `String` containing the formatted CJC source code.
     pub fn print_program(mut self, program: &Program) -> String {
         for decl in &program.declarations {
             self.print_decl(decl);
@@ -1150,6 +1440,7 @@ impl PrettyPrinter {
                 self.output.push_str(" |]");
             }
             ExprKind::BoolLit(b) => self.output.push_str(if *b { "true" } else { "false" }),
+            ExprKind::NaLit => self.output.push_str("NA"),
             ExprKind::Ident(id) => self.output.push_str(&id.name),
             ExprKind::Binary { op, left, right } => {
                 self.output.push('(');
@@ -1319,6 +1610,11 @@ impl PrettyPrinter {
                     }
                     self.output.push(')');
                 }
+            }
+            ExprKind::Cast { expr, target_type } => {
+                self.print_expr(expr);
+                self.output.push_str(" as ");
+                self.output.push_str(&target_type.name);
             }
         }
     }

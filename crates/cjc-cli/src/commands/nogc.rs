@@ -1,4 +1,4 @@
-//! `cjc nogc` — NoGC static verification command.
+//! `cjcl nogc` — NoGC static verification command.
 //!
 //! Promotes `cjc_mir_exec::verify_nogc` from a library call to a first-class
 //! CLI command. Parses a CJC source file, lists all functions with their
@@ -37,14 +37,14 @@ pub fn parse_args(args: &[String]) -> NogcArgs {
             "--color" => na.output = OutputMode::Color,
             other if !other.starts_with('-') => na.file = other.to_string(),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc nogc`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl nogc`", other);
                 process::exit(1);
             }
         }
         i += 1;
     }
     if na.file.is_empty() {
-        eprintln!("error: `cjc nogc` requires a .cjc file argument");
+        eprintln!("error: `cjcl nogc` requires a .cjcl file argument");
         process::exit(1);
     }
     na
@@ -219,9 +219,9 @@ pub fn run(args: &[String]) {
 }
 
 pub fn print_help() {
-    eprintln!("cjc nogc — NoGC static verification");
+    eprintln!("cjcl nogc — NoGC static verification");
     eprintln!();
-    eprintln!("Usage: cjc nogc <file.cjc> [flags]");
+    eprintln!("Usage: cjcl nogc <file.cjcl> [flags]");
     eprintln!();
     eprintln!("Verifies that all #[nogc] functions in the program are free of");
     eprintln!("GC allocations. Lists all functions with their annotation status");

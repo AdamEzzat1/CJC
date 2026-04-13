@@ -1,4 +1,4 @@
-//! `cjc trace` — Deterministic execution tracing.
+//! `cjcl trace` — Deterministic execution tracing.
 //!
 //! Traces execution of a CJC script, reporting function definitions,
 //! execution events, output, GC behavior, and timing. All event
@@ -49,14 +49,14 @@ pub fn parse_args(args: &[String]) -> TraceArgs {
             "--color" => ta.output = OutputMode::Color,
             other if !other.starts_with('-') => ta.file = other.to_string(),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc trace`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl trace`", other);
                 process::exit(1);
             }
         }
         i += 1;
     }
     if ta.file.is_empty() {
-        eprintln!("error: `cjc trace` requires a .cjc file argument");
+        eprintln!("error: `cjcl trace` requires a .cjcl file argument");
         process::exit(1);
     }
     ta
@@ -199,9 +199,9 @@ pub fn run(args: &[String]) {
 }
 
 pub fn print_help() {
-    eprintln!("cjc trace — Deterministic execution tracing");
+    eprintln!("cjcl trace — Deterministic execution tracing");
     eprintln!();
-    eprintln!("Usage: cjc trace <file.cjc> [flags]");
+    eprintln!("Usage: cjcl trace <file.cjcl> [flags]");
     eprintln!();
     eprintln!("Reports:");
     eprintln!("  - Parse and execution timing");

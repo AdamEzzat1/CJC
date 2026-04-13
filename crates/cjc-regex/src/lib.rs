@@ -1,10 +1,33 @@
-//! CJC Regex Engine — NoGC-safe, zero-dependency, DFA-based ByteSlice matcher.
+//! CJC Regex Engine -- NoGC-safe, zero-dependency, NFA-based byte-slice matcher.
 //!
-//! Compiles regex patterns into NFA states, then executes via Thompson NFA
-//! simulation (equivalent to lazy DFA). No backtracking. No per-match allocations
-//! beyond the initial NFA state set swap buffers.
+//! Compile regex patterns into NFA states, then execute via Thompson NFA
+//! simulation (equivalent to a lazy DFA). There is no backtracking and no
+//! per-match heap allocation beyond the initial NFA state-set swap buffers.
+//! This makes the engine safe for use in NoGC-verified code paths and
+//! guarantees deterministic, linear-time matching regardless of input.
 //!
-//! Supported syntax (Perl-spirit subset):
+//! # Architecture
+//!
+//! 1. **Compile** -- the [`Compiler`] translates a pattern string into an [`Nfa`]
+//!    (a vector of [`NfaNode`] states) using a fragment-based construction.
+//! 2. **Execute** -- the Thompson NFA simulator walks the state set in lockstep
+//!    with the input bytes, tracking epsilon closures at each step. Greedy
+//!    quantifiers record the *longest* match; lazy quantifiers (e.g. `*?`)
+//!    return the *shortest* match by accepting on the first `Accept` state
+//!    reached.
+//!
+//! # Public API
+//!
+//! | Function     | Purpose                                          |
+//! |--------------|--------------------------------------------------|
+//! | [`is_match`] | Test whether the pattern matches anywhere         |
+//! | [`find`]     | Return the first match span `(start, end)`       |
+//! | [`find_all`] | Return all non-overlapping match spans            |
+//! | [`split`]    | Split input by pattern, returning segment spans   |
+//!
+//! All four functions accept the pattern, a flags string, and a `&[u8]` haystack.
+//!
+//! # Supported syntax (Perl-spirit subset)
 //!
 //! ```text
 //!   .         any byte (or any byte except \n without `s` flag)
@@ -20,6 +43,7 @@
 //!   *         zero or more (greedy)
 //!   +         one or more (greedy)
 //!   ?         zero or one (greedy)
+//!   *? +? ??  non-greedy (lazy) variants
 //!   ^         start of input (or line in `m` mode)
 //!   $         end of input (or line in `m` mode)
 //!   \b        word boundary
@@ -27,18 +51,53 @@
 //!   \xNN      hex byte
 //! ```
 //!
-//! Flags:
-//!   i   case-insensitive (ASCII only)
-//!   m   multiline (^ and $ match line boundaries)
-//!   s   dotall (. matches \n)
-//!   x   extended (whitespace in pattern ignored, # comments)
-//!   g   global (for split/replace — find all matches)
+//! # Flags
+//!
+//! Pass flags as a string (e.g. `"im"` for case-insensitive multiline):
+//!
+//! | Flag | Meaning                                          |
+//! |------|--------------------------------------------------|
+//! | `i`  | Case-insensitive (ASCII only)                    |
+//! | `m`  | Multiline (`^`/`$` match line boundaries)        |
+//! | `s`  | Dotall (`.` matches `\n`)                        |
+//! | `x`  | Extended (whitespace ignored, `#` comments)      |
+//! | `g`  | Global (for split/replace -- find all matches)   |
+//!
+//! # Determinism
+//!
+//! The engine is fully deterministic: identical pattern, flags, and haystack
+//! always produce bit-identical results regardless of platform or invocation
+//! count. No `HashMap`, no random iteration, no FMA.
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Returns true if the pattern matches anywhere in `haystack`.
+/// Test whether `pattern` matches anywhere inside `haystack`.
+///
+/// Compile the pattern into an NFA and run an unanchored Thompson simulation
+/// over the haystack. Return `true` on the first match found, `false`
+/// otherwise. An invalid pattern silently returns `false` (no panic).
+///
+/// # Arguments
+///
+/// * `pattern` -- Regular expression pattern string (see [module docs](self) for syntax).
+/// * `flags` -- Flag characters as a string (e.g. `"i"`, `"ms"`, or `""` for defaults).
+/// * `haystack` -- Input bytes to search.
+///
+/// # Returns
+///
+/// `true` if any substring of `haystack` matches the compiled pattern.
+///
+/// # Examples
+///
+/// ```
+/// use cjc_regex::is_match;
+///
+/// assert!(is_match("\\d+", "", b"abc123"));
+/// assert!(!is_match("^\\d+$", "", b"abc123"));
+/// assert!(is_match("hello", "i", b"Hello World"));
+/// ```
 pub fn is_match(pattern: &str, flags: &str, haystack: &[u8]) -> bool {
     let opts = Flags::parse(flags);
     let nfa = match compile(pattern, &opts) {
@@ -48,14 +107,67 @@ pub fn is_match(pattern: &str, flags: &str, haystack: &[u8]) -> bool {
     nfa_search(&nfa, haystack, &opts).is_some()
 }
 
-/// Find the first match span (start, end) in `haystack`, or None.
+/// Find the byte-offset span of the first match in `haystack`.
+///
+/// Compile the pattern and scan from the beginning of `haystack`. Return the
+/// half-open byte range `(start, end)` of the leftmost match, or `None` if no
+/// match exists. When lazy quantifiers are present the shortest leftmost match
+/// is returned; otherwise the longest leftmost match wins.
+///
+/// An invalid pattern returns `None` (no panic).
+///
+/// # Arguments
+///
+/// * `pattern` -- Regular expression pattern string.
+/// * `flags` -- Flag characters (e.g. `"i"`, `"ms"`, `""`).
+/// * `haystack` -- Input bytes to search.
+///
+/// # Returns
+///
+/// `Some((start, end))` where `haystack[start..end]` is the matched region,
+/// or `None` if the pattern does not match.
+///
+/// # Examples
+///
+/// ```
+/// use cjc_regex::find;
+///
+/// assert_eq!(find("\\d+", "", b"abc123def"), Some((3, 6)));
+/// assert_eq!(find("xyz", "", b"hello"), None);
+/// ```
 pub fn find(pattern: &str, flags: &str, haystack: &[u8]) -> Option<(usize, usize)> {
     let opts = Flags::parse(flags);
     let nfa = compile(pattern, &opts).ok()?;
     nfa_search(&nfa, haystack, &opts)
 }
 
-/// Find all non-overlapping match spans.
+/// Find all non-overlapping match spans in `haystack`.
+///
+/// Scan from left to right, collecting every non-overlapping `(start, end)`
+/// match span. After each match the search resumes at the end of the previous
+/// match (or one byte past it for zero-length matches to guarantee progress).
+///
+/// An invalid pattern returns an empty vector (no panic).
+///
+/// # Arguments
+///
+/// * `pattern` -- Regular expression pattern string.
+/// * `flags` -- Flag characters (e.g. `"i"`, `"ms"`, `""`).
+/// * `haystack` -- Input bytes to search.
+///
+/// # Returns
+///
+/// A `Vec` of `(start, end)` half-open byte ranges for every non-overlapping
+/// match, in left-to-right order.
+///
+/// # Examples
+///
+/// ```
+/// use cjc_regex::find_all;
+///
+/// let spans = find_all("\\d+", "", b"a1b22c333");
+/// assert_eq!(spans, vec![(1, 2), (3, 5), (6, 9)]);
+/// ```
 pub fn find_all(pattern: &str, flags: &str, haystack: &[u8]) -> Vec<(usize, usize)> {
     let opts = Flags::parse(flags);
     let nfa = match compile(pattern, &opts) {
@@ -75,7 +187,37 @@ pub fn find_all(pattern: &str, flags: &str, haystack: &[u8]) -> Vec<(usize, usiz
     results
 }
 
-/// Split `haystack` by regex pattern. Returns byte-ranges of non-matching segments.
+/// Split `haystack` by a regex pattern, returning byte-ranges of non-matching segments.
+///
+/// Find all non-overlapping matches via [`find_all`], then return the gaps
+/// between (and around) those matches as `(start, end)` spans. The result
+/// always contains one more segment than the number of matches. Empty segments
+/// are included when matches are adjacent or at the edges of the haystack.
+///
+/// An invalid pattern returns a single segment spanning the entire haystack.
+///
+/// # Arguments
+///
+/// * `pattern` -- Regular expression pattern used as the delimiter.
+/// * `flags` -- Flag characters (e.g. `"i"`, `"ms"`, `""`).
+/// * `haystack` -- Input bytes to split.
+///
+/// # Returns
+///
+/// A `Vec` of `(start, end)` half-open byte ranges representing the
+/// non-matching segments between (and surrounding) matches.
+///
+/// # Examples
+///
+/// ```
+/// use cjc_regex::split;
+///
+/// let segs = split(",", "", b"a,b,c");
+/// assert_eq!(segs, vec![(0, 1), (2, 3), (4, 5)]);
+///
+/// let segs = split("\\s+", "", b"hello  world");
+/// assert_eq!(segs, vec![(0, 5), (7, 12)]);
+/// ```
 pub fn split(pattern: &str, flags: &str, haystack: &[u8]) -> Vec<(usize, usize)> {
     let matches = find_all(pattern, flags, haystack);
     let mut segments = Vec::new();

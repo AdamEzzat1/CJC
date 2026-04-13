@@ -87,6 +87,11 @@ pub struct SsaForm {
 // ---------------------------------------------------------------------------
 
 /// Collect all variable names that are defined (via `let` or assignment) in the CFG.
+///
+/// Scan every basic block's statements for `CfgStmt::Let` and
+/// `CfgStmt::Expr(Assign { target: Var(name), .. })` patterns and return
+/// the deduplicated set of variable names.  The result is a `BTreeSet` for
+/// deterministic iteration order.
 fn collect_defined_vars(cfg: &MirCfg) -> BTreeSet<String> {
     let mut vars = BTreeSet::new();
     for block in &cfg.basic_blocks {
@@ -109,6 +114,10 @@ fn collect_defined_vars(cfg: &MirCfg) -> BTreeSet<String> {
 }
 
 /// For each variable, collect which blocks contain a definition of it.
+///
+/// Return a map from variable name to the set of `BlockId`s where that
+/// variable is defined (via `let` or assignment).  Uses `BTreeMap` and
+/// `BTreeSet` for deterministic iteration.
 fn collect_def_blocks(
     cfg: &MirCfg,
     variables: &BTreeSet<String>,
@@ -146,6 +155,10 @@ fn collect_def_blocks(
 // SSA rename helpers (free functions for borrow-checker friendliness)
 // ---------------------------------------------------------------------------
 
+/// Allocate a fresh SSA version number for the given variable.
+///
+/// Increment the version counter and push the new version onto the
+/// variable's rename stack.  Return the newly allocated version.
 fn fresh_version(
     name: &str,
     counters: &mut BTreeMap<String, u32>,
@@ -158,6 +171,8 @@ fn fresh_version(
     ver
 }
 
+/// Return the current (top-of-stack) SSA version for a variable, or `None`
+/// if the variable has no version on the stack yet.
 fn current_version(name: &str, stacks: &BTreeMap<String, Vec<u32>>) -> Option<u32> {
     stacks.get(name).and_then(|s| s.last().copied())
 }
@@ -436,6 +451,9 @@ impl SsaForm {
 // ---------------------------------------------------------------------------
 
 /// An error found during SSA verification.
+///
+/// Each variant describes a specific invariant violation detected by
+/// [`verify_ssa`].
 #[derive(Debug, Clone)]
 pub enum SsaError {
     /// A variable is defined more than once (violates single-assignment).

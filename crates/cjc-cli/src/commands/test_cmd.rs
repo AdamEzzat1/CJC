@@ -1,4 +1,4 @@
-//! `cjc test` — Native test runner for CJC source files.
+//! `cjcl test` — Native test runner for CJC source files.
 //!
 //! Discovers and runs test functions from a CJC source file.
 //! Test functions are those whose name starts with `test_` or
@@ -49,14 +49,14 @@ pub fn parse_args(args: &[String]) -> TestArgs {
             "--color" => ta.output = OutputMode::Color,
             other if !other.starts_with('-') => ta.file = other.to_string(),
             other => {
-                eprintln!("error: unknown flag `{}` for `cjc test`", other);
+                eprintln!("error: unknown flag `{}` for `cjcl test`", other);
                 process::exit(1);
             }
         }
         i += 1;
     }
     if ta.file.is_empty() {
-        eprintln!("error: `cjc test` requires a .cjc file argument");
+        eprintln!("error: `cjcl test` requires a .cjcl file argument");
         process::exit(1);
     }
     ta
@@ -232,9 +232,9 @@ fn dots(name: &str, total_width: usize) -> String {
 }
 
 pub fn print_help() {
-    eprintln!("cjc test — Native test runner for CJC source files");
+    eprintln!("cjcl test — Native test runner for CJC source files");
     eprintln!();
-    eprintln!("Usage: cjc test <file.cjc> [flags]");
+    eprintln!("Usage: cjcl test <file.cjcl> [flags]");
     eprintln!();
     eprintln!("Discovers functions starting with `test_` or decorated with @test.");
     eprintln!("Tests run in alphabetical order with a fresh interpreter each.");

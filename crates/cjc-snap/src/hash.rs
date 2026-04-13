@@ -156,11 +156,22 @@ fn process_block(state: &mut [u32; 8], block: &[u8]) {
     state[7] = state[7].wrapping_add(h);
 }
 
-/// Compute the SHA-256 hash of the input data.
+/// Compute the SHA-256 hash of the input data (FIPS 180-4).
 ///
-/// Returns a 32-byte array containing the hash digest.
+/// This is a zero-dependency, hand-rolled implementation used throughout
+/// `cjc-snap` for content-addressable hashing. The output is deterministic
+/// and platform-independent.
 ///
-/// # Example
+/// # Arguments
+///
+/// * `data` - Arbitrary byte slice to hash.
+///
+/// # Returns
+///
+/// A 32-byte array containing the 256-bit digest.
+///
+/// # Examples
+///
 /// ```
 /// let digest = cjc_snap::hash::sha256(b"abc");
 /// assert_eq!(
@@ -191,7 +202,23 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 
 /// Parse a 64-character hex string into a 32-byte hash array.
 ///
-/// Returns an error if the string is not exactly 64 hex characters.
+/// # Arguments
+///
+/// * `hex` - A string of exactly 64 lowercase or uppercase hex characters.
+///
+/// # Errors
+///
+/// Returns an error message if `hex` is not exactly 64 characters or
+/// contains non-hex characters.
+///
+/// # Examples
+///
+/// ```
+/// let hash = cjc_snap::hash::hex_to_hash(
+///     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+/// ).unwrap();
+/// assert_eq!(hash, cjc_snap::hash::sha256(b""));
+/// ```
 pub fn hex_to_hash(hex: &str) -> Result<[u8; 32], String> {
     if hex.len() != 64 {
         return Err(format!("expected 64 hex chars, got {}", hex.len()));
@@ -204,7 +231,17 @@ pub fn hex_to_hash(hex: &str) -> Result<[u8; 32], String> {
     Ok(hash)
 }
 
-/// Convert a 32-byte hash to a lowercase hex string (for tests/display).
+/// Convert a 32-byte hash to a 64-character lowercase hex string.
+///
+/// Useful for logging, display, and test assertions.
+///
+/// # Arguments
+///
+/// * `hash` - A 32-byte SHA-256 digest.
+///
+/// # Returns
+///
+/// A 64-character `String` of lowercase hexadecimal digits.
 pub fn hex_string(hash: &[u8; 32]) -> String {
     let mut s = String::with_capacity(64);
     for &byte in hash {

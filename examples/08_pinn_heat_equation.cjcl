@@ -1,0 +1,183 @@
+// ═══════════════════════════════════════════════════════════════════════
+// Example 8: Physics-Informed Neural Network — 1D Heat Equation
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Solves the 1D heat equation using a PINN:
+//   du/dt = α * d²u/dx²
+//
+// Domain: x ∈ [0, 1], t ∈ [0, 0.5]
+// IC: u(x, 0) = sin(πx)
+// BCs: u(0, t) = 0, u(1, t) = 0
+// Exact: u(x, t) = sin(πx) * exp(-α*π²*t)
+//
+// Architecture: 2 inputs (x, t) → 16 → 16 → 1 output with tanh
+// Loss = L_data (IC) + L_bc + L_pde (physics residual)
+// ═══════════════════════════════════════════════════════════════════════
+
+fn main() {
+    let pi = 3.14159265358979;
+    let alpha = 0.01;  // thermal diffusivity
+
+    print("PINN — 1D Heat Equation");
+    print("=======================");
+    print("du/dt = " + to_string(alpha) + " * d^2u/dx^2");
+    print("IC: u(x,0) = sin(pi*x)");
+    print("Architecture: 2 -> 16 -> 16 -> 1");
+    print("");
+
+    // ── Network weights ────────────────────────────────────────────
+    let nh = 16;
+    let W1 = init_weights(nh * 2, 0.5, 42);
+    let B1 = Tensor.zeros([nh]);
+    let W2 = init_weights(nh * nh, 0.3, 43);
+    let B2 = Tensor.zeros([nh]);
+    let W3 = init_weights(nh, 0.3, 44);
+    let B3 = 0.0;
+
+    let lr = 0.0002;
+    let n_epochs = 80;
+    let eps = 1e-4;
+
+    let epoch = 0;
+    while epoch < n_epochs {
+        let loss_ic = 0.0;
+        let loss_bc = 0.0;
+        let loss_pde = 0.0;
+
+        // ── IC loss: u(x, 0) = sin(πx) ────────────────────────────
+        let n_ic = 30;
+        let i = 0;
+        while i < n_ic {
+            let x = float(i) / float(n_ic - 1);
+            let u_pred = forward(x, 0.0, W1, B1, W2, B2, W3, B3, nh);
+            let u_exact = sin(pi * x);
+            let diff = u_pred - u_exact;
+            loss_ic = loss_ic + diff * diff;
+            i = i + 1;
+        }
+        loss_ic = loss_ic / float(n_ic);
+
+        // ── BC loss: u(0,t) = u(1,t) = 0 ──────────────────────────
+        let n_bc = 15;
+        let i = 0;
+        while i < n_bc {
+            let t = 0.5 * float(i) / float(n_bc - 1);
+            let u0 = forward(0.0, t, W1, B1, W2, B2, W3, B3, nh);
+            let u1 = forward(1.0, t, W1, B1, W2, B2, W3, B3, nh);
+            loss_bc = loss_bc + u0 * u0 + u1 * u1;
+            i = i + 1;
+        }
+        loss_bc = loss_bc / float(2 * n_bc);
+
+        // ── PDE residual: du/dt - α*d²u/dx² = 0 ──────────────────
+        let n_pde = 25;
+        let i = 0;
+        while i < n_pde {
+            let x = 0.1 + 0.8 * float(i) / float(n_pde - 1);
+            let t = 0.01 + 0.48 * float((i * 7 + 3) % n_pde) / float(n_pde);
+
+            let u = forward(x, t, W1, B1, W2, B2, W3, B3, nh);
+            let u_xp = forward(x + eps, t, W1, B1, W2, B2, W3, B3, nh);
+            let u_xm = forward(x - eps, t, W1, B1, W2, B2, W3, B3, nh);
+            let u_tp = forward(x, t + eps, W1, B1, W2, B2, W3, B3, nh);
+
+            let du_dt = (u_tp - u) / eps;
+            let d2u_dx2 = (u_xp - 2.0 * u + u_xm) / (eps * eps);
+            let residual = du_dt - alpha * d2u_dx2;
+            loss_pde = loss_pde + residual * residual;
+            i = i + 1;
+        }
+        loss_pde = loss_pde / float(n_pde);
+
+        let total = loss_ic + loss_bc + 0.1 * loss_pde;
+
+        if epoch % 16 == 0 {
+            print("Epoch " + to_string(epoch)
+                  + "  L_ic=" + to_string(round(loss_ic * 100000.0) / 100000.0)
+                  + "  L_bc=" + to_string(round(loss_bc * 100000.0) / 100000.0)
+                  + "  L_pde=" + to_string(round(loss_pde * 100.0) / 100.0)
+                  + "  Total=" + to_string(round(total * 10000.0) / 10000.0));
+        }
+
+        // ── Weight perturbation update ─────────────────────────────
+        let clipped = min(total, 50.0);
+        W1 = perturb(W1, lr, clipped, 100 + epoch);
+        W2 = perturb(W2, lr, clipped, 200 + epoch);
+        W3 = perturb(W3, lr, clipped, 300 + epoch);
+
+        epoch = epoch + 1;
+    }
+
+    // ── Evaluate at t=0 ────────────────────────────────────────────
+    print("");
+    print("Predictions at t=0 (should match sin(pi*x)):");
+    let test_xs = [0.1, 0.25, 0.5, 0.75, 0.9];
+    let ti = 0;
+    while ti < 5 {
+        let x = test_xs[ti];
+        let pred = forward(x, 0.0, W1, B1, W2, B2, W3, B3, nh);
+        let exact = sin(pi * x);
+        print("  x=" + to_string(x)
+              + "  pred=" + to_string(round(pred * 10000.0) / 10000.0)
+              + "  exact=" + to_string(round(exact * 10000.0) / 10000.0));
+        ti = ti + 1;
+    }
+}
+
+fn forward(x: f64, t: f64, W1: Any, B1: Any, W2: Any, B2: Any, W3: Any, B3: f64, nh: i64) -> f64 {
+    let a1 = [];
+    let j = 0;
+    while j < nh {
+        let z = W1[j * 2] * x + W1[j * 2 + 1] * t + B1[j];
+        a1 = array_push(a1, tanh(z));
+        j = j + 1;
+    }
+    let a2 = [];
+    let j = 0;
+    while j < nh {
+        let z = 0.0;
+        let k = 0;
+        while k < nh {
+            z = z + W2[j * nh + k] * a1[k];
+            k = k + 1;
+        }
+        z = z + B2[j];
+        a2 = array_push(a2, tanh(z));
+        j = j + 1;
+    }
+    let out = 0.0;
+    let k = 0;
+    while k < nh {
+        out = out + W3[k] * a2[k];
+        k = k + 1;
+    }
+    return out + B3;
+}
+
+fn init_weights(n: i64, scale: f64, seed: i64) -> Any {
+    let data = [];
+    let i = 0;
+    let state = seed + 12345;
+    while i < n {
+        state = (state * 6364136223846793 + 1442695040888963) % 2147483647;
+        let val = (float(state) / 2147483647.0 - 0.5) * 2.0 * scale;
+        data = array_push(data, val);
+        i = i + 1;
+    }
+    return Tensor.from_vec(data, [n]);
+}
+
+fn perturb(W: Any, lr: f64, loss: f64, seed: i64) -> Any {
+    let n = len(W);
+    let data = [];
+    let i = 0;
+    let state = seed;
+    let cl = min(loss, 100.0);
+    while i < n {
+        state = (state * 6364136223846793 + 1442695040888963) % 1000000007;
+        let dir = (float(state % 201) - 100.0) / 100.0;
+        data = array_push(data, W[i] - lr * dir * cl);
+        i = i + 1;
+    }
+    return Tensor.from_vec(data, [n]);
+}

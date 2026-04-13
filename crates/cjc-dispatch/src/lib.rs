@@ -1,46 +1,157 @@
-//! Operator dispatch layer for the CJC runtime.
+//! Operator and function dispatch layer for the CJC runtime.
 //!
-//! Resolves overloaded operators and function signatures by matching argument
-//! types against registered signatures with specificity-based ranking.
+//! This crate provides multiple dispatch resolution for overloaded functions
+//! and operators. It matches call-site argument types against registered
+//! [`FnSigEntry`] signatures in the [`TypeEnv`], ranking candidates by
+//! per-parameter [`Specificity`] to select the most precise overload.
+//!
+//! # Architecture
+//!
+//! The dispatch pipeline works in two phases:
+//!
+//! 1. **Applicability filtering** -- each registered signature is checked
+//!    against the call-site argument types. Signatures whose arity or types
+//!    do not match are discarded.
+//! 2. **Specificity ranking** -- remaining candidates are compared
+//!    lexicographically by their per-parameter [`Specificity`] vectors.
+//!    The candidate with the highest specificity wins. Ties produce an
+//!    [`DispatchResult::Ambiguous`] error.
+//!
+//! # Key types
+//!
+//! | Type | Purpose |
+//! |------|---------|
+//! | [`Specificity`] | Ranks how precisely a parameter matches |
+//! | [`DispatchResult`] | Outcome of a dispatch attempt |
+//! | [`Dispatcher`] | Performs resolution against a [`TypeEnv`] |
+//! | [`CoherenceChecker`] | Detects overlapping function definitions |
+//!
+//! [`FnSigEntry`]: cjc_types::FnSigEntry
+//! [`TypeEnv`]: cjc_types::TypeEnv
 
 use cjc_types::{FnSigEntry, Type, TypeEnv};
 use cjc_diag::{Diagnostic, DiagnosticBag, Span};
 
-/// Specificity level of a parameter match.
+/// Specificity level of a single parameter match during dispatch resolution.
+///
+/// Variants are ordered from least specific ([`None`](Specificity::None)) to
+/// most specific ([`Concrete`](Specificity::Concrete)). The derived [`Ord`]
+/// implementation reflects this ordering, so higher specificity compares
+/// greater.
+///
+/// During resolution, [`Dispatcher::resolve`] computes a [`Specificity`] for
+/// every parameter of every candidate signature. The candidate whose
+/// specificity vector is lexicographically greatest wins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Specificity {
-    /// No match.
+    /// The parameter type does not match the argument type at all.
+    ///
+    /// A signature containing any `None` specificity is not applicable and
+    /// is discarded during the filtering phase.
     None,
-    /// Matches via unconstrained generic.
+    /// The parameter is an unconstrained generic type variable (no trait
+    /// bounds).
+    ///
+    /// Matches any argument type but ranks below [`Constrained`](Specificity::Constrained)
+    /// and [`Concrete`](Specificity::Concrete).
     Generic,
-    /// Matches via constrained generic (trait bound).
+    /// The parameter is a generic type variable with one or more trait bounds,
+    /// all of which the argument type satisfies.
+    ///
+    /// Ranks above [`Generic`](Specificity::Generic) because the bounds
+    /// narrow the set of acceptable types.
     Constrained,
-    /// Exact concrete type match.
+    /// The parameter type matches the argument type exactly (concrete type
+    /// equality via [`TypeEnv::types_match`]).
+    ///
+    /// This is the highest specificity level and always wins over generic
+    /// matches.
     Concrete,
 }
 
-/// Result of dispatch resolution.
+/// Outcome of a dispatch resolution attempt by [`Dispatcher::resolve`].
+///
+/// Callers should match on this enum to determine whether the call can
+/// proceed, needs disambiguation, or should be reported as an error via
+/// [`Dispatcher::dispatch_error_diagnostic`].
 #[derive(Debug)]
 pub enum DispatchResult {
-    /// Single best match found.
+    /// Exactly one best-matching signature was found.
+    ///
+    /// The contained [`FnSigEntry`] is the resolved overload that should be
+    /// used for code generation or interpretation.
     Resolved(FnSigEntry),
-    /// Multiple equally-specific matches (ambiguity).
+    /// Two or more signatures tied for the highest specificity.
+    ///
+    /// The contained vector holds all equally-specific candidates. The caller
+    /// should emit an ambiguity diagnostic (error code `E0301`).
     Ambiguous(Vec<FnSigEntry>),
-    /// No matching method found.
+    /// No registered signature matched the call-site argument types.
+    ///
+    /// `candidates` contains every signature registered under the queried
+    /// name (may be empty if the function is entirely undefined). The caller
+    /// should emit a "no match" diagnostic (error code `E0302`).
     NoMatch { candidates: Vec<FnSigEntry> },
 }
 
-/// Multiple dispatch resolver.
+/// Multiple dispatch resolver for overloaded functions and operators.
+///
+/// A `Dispatcher` borrows a [`TypeEnv`] and uses its registered function
+/// signatures ([`TypeEnv::fn_sigs`]) to resolve calls by argument type.
+///
+/// # Lifetime
+///
+/// The `'a` lifetime ties the dispatcher to the borrowed [`TypeEnv`]. The
+/// dispatcher performs no mutation and can be used for multiple resolutions
+/// against the same environment.
+///
+/// # Examples
+///
+/// ```ignore
+/// let env: TypeEnv = /* ... */;
+/// let dispatcher = Dispatcher::new(&env);
+///
+/// match dispatcher.resolve("add", &[Type::F64, Type::F64]) {
+///     DispatchResult::Resolved(sig) => { /* use sig */ }
+///     DispatchResult::Ambiguous(sigs) => { /* report ambiguity */ }
+///     DispatchResult::NoMatch { .. } => { /* report missing function */ }
+/// }
+/// ```
 pub struct Dispatcher<'a> {
+    /// Reference to the type environment containing registered function
+    /// signatures and trait implementations.
     env: &'a TypeEnv,
 }
 
 impl<'a> Dispatcher<'a> {
+    /// Create a new dispatcher backed by the given [`TypeEnv`].
+    ///
+    /// # Arguments
+    ///
+    /// * `env` -- Type environment whose [`fn_sigs`](TypeEnv::fn_sigs) map
+    ///   will be queried during resolution.
     pub fn new(env: &'a TypeEnv) -> Self {
         Self { env }
     }
 
     /// Resolve a function call to the most specific matching overload.
+    ///
+    /// Walk all signatures registered under `name` in the [`TypeEnv`],
+    /// discard those whose arity or parameter types are incompatible with
+    /// `arg_types`, then select the candidate with the lexicographically
+    /// highest per-parameter [`Specificity`] vector.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` -- Function or operator name to look up.
+    /// * `arg_types` -- Concrete types of the call-site arguments, in order.
+    ///
+    /// # Returns
+    ///
+    /// * [`DispatchResult::Resolved`] -- exactly one best match.
+    /// * [`DispatchResult::Ambiguous`] -- multiple equally-specific matches.
+    /// * [`DispatchResult::NoMatch`] -- no applicable signature (or the name
+    ///   is not registered at all).
     pub fn resolve(
         &self,
         name: &str,
@@ -99,8 +210,11 @@ impl<'a> Dispatcher<'a> {
         }
     }
 
-    /// Check if a signature is applicable for the given argument types.
-    /// Returns per-parameter specificity if applicable, None if not.
+    /// Check whether a signature is applicable for the given argument types.
+    ///
+    /// Return a per-parameter [`Specificity`] vector if every parameter
+    /// matches, or [`None`] if the signature is not applicable (wrong arity
+    /// or any parameter fails to match).
     fn check_applicability(
         &self,
         sig: &FnSigEntry,
@@ -123,7 +237,21 @@ impl<'a> Dispatcher<'a> {
         Some(specificities)
     }
 
-    /// Determine specificity of a single parameter match.
+    /// Determine the [`Specificity`] of a single parameter-to-argument match.
+    ///
+    /// The matching rules, in priority order:
+    ///
+    /// 1. If either type is an error sentinel, return [`Specificity::Concrete`]
+    ///    (error recovery -- let later phases report the real issue).
+    /// 2. If the types are equal via [`TypeEnv::types_match`], return
+    ///    [`Specificity::Concrete`].
+    /// 3. If the parameter is a [`Type::Var`] (inference variable), return
+    ///    [`Specificity::Generic`].
+    /// 4. If the parameter is a [`Type::Unresolved`] name that corresponds to
+    ///    a type parameter in `type_params`, check trait bounds:
+    ///    - All bounds satisfied and non-empty: [`Specificity::Constrained`].
+    ///    - All bounds satisfied and empty: [`Specificity::Generic`].
+    /// 5. Otherwise return [`Specificity::None`] (no match).
     fn match_param(
         &self,
         param_type: &Type,
@@ -168,7 +296,12 @@ impl<'a> Dispatcher<'a> {
         Specificity::None
     }
 
-    /// Compare two specificity vectors. Returns ordering of second vs first.
+    /// Compare two per-parameter specificity vectors lexicographically.
+    ///
+    /// Return [`Ordering::Less`](std::cmp::Ordering::Less) when `b` is more
+    /// specific than `a`, [`Ordering::Greater`](std::cmp::Ordering::Greater)
+    /// when `a` is more specific, and [`Ordering::Equal`](std::cmp::Ordering::Equal)
+    /// when they are tied.
     fn compare_specificity(
         &self,
         a: &[Specificity],
@@ -185,7 +318,30 @@ impl<'a> Dispatcher<'a> {
         std::cmp::Ordering::Equal
     }
 
-    /// Generate a diagnostic for dispatch errors.
+    /// Generate a [`Diagnostic`] describing a dispatch failure.
+    ///
+    /// Call this after [`resolve`](Dispatcher::resolve) returns
+    /// [`Ambiguous`](DispatchResult::Ambiguous) or
+    /// [`NoMatch`](DispatchResult::NoMatch) to produce a user-facing error
+    /// with candidate hints.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` -- Name of the function or operator that was being resolved.
+    /// * `arg_types` -- Call-site argument types (used in the error message).
+    /// * `result` -- The [`DispatchResult`] returned by [`resolve`](Dispatcher::resolve).
+    /// * `span` -- Source location of the call expression, attached to the
+    ///   diagnostic for IDE integration.
+    ///
+    /// # Returns
+    ///
+    /// A [`Diagnostic`] with one of the following error codes:
+    ///
+    /// | Code | Condition |
+    /// |------|-----------|
+    /// | `E0301` | Ambiguous resolution -- multiple equally-specific candidates |
+    /// | `E0302` | No matching function for the given argument types |
+    /// | `E0300` | Internal error (called on a [`Resolved`](DispatchResult::Resolved) result) |
     pub fn dispatch_error_diagnostic(
         &self,
         name: &str,
@@ -267,17 +423,55 @@ impl<'a> Dispatcher<'a> {
     }
 }
 
-/// Coherence checker: validates that no overlapping implementations exist.
+/// Coherence checker that detects overlapping (ambiguous) function definitions.
+///
+/// Two signatures for the same function name "overlap" when they have
+/// identical arity and pairwise-matching parameter types (as determined by
+/// [`TypeEnv::types_match`]). Overlapping definitions are reported as error
+/// `E0303` because they would always be ambiguous at call sites.
+///
+/// # Lifetime
+///
+/// The `'a` lifetime ties the checker to the borrowed [`TypeEnv`].
+///
+/// # Examples
+///
+/// ```ignore
+/// let env: TypeEnv = /* ... */;
+/// let mut diags = DiagnosticBag::new();
+/// CoherenceChecker::new(&env).check_overlaps(&mut diags);
+///
+/// if diags.has_errors() {
+///     // report overlapping definitions to the user
+/// }
+/// ```
 pub struct CoherenceChecker<'a> {
+    /// Reference to the type environment containing registered function
+    /// signatures to check for overlap.
     env: &'a TypeEnv,
 }
 
 impl<'a> CoherenceChecker<'a> {
+    /// Create a new coherence checker backed by the given [`TypeEnv`].
+    ///
+    /// # Arguments
+    ///
+    /// * `env` -- Type environment whose [`fn_sigs`](TypeEnv::fn_sigs) map
+    ///   will be inspected for overlapping definitions.
     pub fn new(env: &'a TypeEnv) -> Self {
         Self { env }
     }
 
-    /// Check for overlapping function definitions (same name, same parameter types).
+    /// Check all registered function signatures for overlapping definitions.
+    ///
+    /// For every function name, compare each pair of signatures. If two
+    /// signatures have the same arity and pairwise-matching parameter types,
+    /// emit an `E0303` diagnostic into `diagnostics`.
+    ///
+    /// # Arguments
+    ///
+    /// * `diagnostics` -- Mutable reference to a [`DiagnosticBag`] where
+    ///   overlap errors will be emitted.
     pub fn check_overlaps(&self, diagnostics: &mut DiagnosticBag) {
         for (name, sigs) in &self.env.fn_sigs {
             for i in 0..sigs.len() {
@@ -303,6 +497,8 @@ impl<'a> CoherenceChecker<'a> {
         }
     }
 
+    /// Return `true` if two signatures overlap (same arity and pairwise-matching
+    /// parameter types).
     fn signatures_overlap(&self, a: &FnSigEntry, b: &FnSigEntry) -> bool {
         if a.params.len() != b.params.len() {
             return false;

@@ -24,6 +24,18 @@ pub struct DominatorTree {
 
 impl DominatorTree {
     /// Compute the dominator tree for a CFG using the iterative algorithm.
+    ///
+    /// Uses the Cooper-Harvey-Kennedy (2001) algorithm which converges in
+    /// linear time for reducible CFGs (the only kind produced by CJC's
+    /// structured control flow).
+    ///
+    /// # Arguments
+    ///
+    /// * `cfg` - The control-flow graph to analyze.
+    ///
+    /// # Returns
+    ///
+    /// A [`DominatorTree`] where `idom[i]` is the immediate dominator of block `i`.
     pub fn compute(cfg: &MirCfg) -> Self {
         let n = cfg.basic_blocks.len();
         let entry = cfg.entry;
@@ -86,7 +98,11 @@ impl DominatorTree {
         }
     }
 
-    /// Returns true if `a` dominates `b`.
+    /// Return true if block `a` dominates block `b`.
+    ///
+    /// A block dominates itself. The check walks up the immediate dominator
+    /// chain from `b` toward the entry block, returning true if `a` is
+    /// encountered.
     pub fn dominates(&self, a: BlockId, b: BlockId) -> bool {
         let mut current = b;
         loop {
@@ -141,7 +157,9 @@ impl DominatorTree {
         df
     }
 
-    /// Get the children of a node in the dominator tree.
+    /// Get the immediate children of a node in the dominator tree.
+    ///
+    /// Returns all blocks whose immediate dominator is `block`.
     pub fn children(&self, block: BlockId) -> Vec<BlockId> {
         let mut result = Vec::new();
         for i in 0..self.num_blocks {

@@ -28,9 +28,13 @@ use crate::statevector::Statevector;
 /// Single Pauli operator on one qubit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Pauli {
+    /// Identity operator.
     I,
+    /// Pauli-X (bit flip).
     X,
+    /// Pauli-Y.
     Y,
+    /// Pauli-Z (phase flip).
     Z,
 }
 
@@ -38,7 +42,9 @@ pub enum Pauli {
 /// complex coefficient. Represents coeff * P_0 ⊗ P_1 ⊗ ... ⊗ P_{n-1}.
 #[derive(Debug, Clone)]
 pub struct PauliTerm {
+    /// Complex coefficient multiplying this Pauli string.
     pub coeff: ComplexF64,
+    /// Per-qubit Pauli operators, indexed by qubit position.
     pub ops: Vec<Pauli>,
 }
 
@@ -103,7 +109,9 @@ fn pauli_mul(a: Pauli, b: Pauli) -> (Pauli, ComplexF64) {
 /// A fermionic Hamiltonian expressed as a sum of Pauli terms (after JW transform).
 #[derive(Debug, Clone)]
 pub struct FermionicHamiltonian {
+    /// Number of qubits in the system.
     pub n_qubits: usize,
+    /// Pauli terms comprising the Hamiltonian sum.
     pub terms: Vec<PauliTerm>,
 }
 
