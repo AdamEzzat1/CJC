@@ -287,9 +287,13 @@ DuplicateColumn("total")       // Two columns with the same name in select
 PredicateNotBool { got: "Int" } // filter predicate returned Int, not Bool
 TypeMismatch { expected: "Float", got: "Str" }  // arithmetic on a string column
 LengthMismatch { expected: 1000, got: 500 }     // broadcast size mismatch
+EmptyGroup                     // first() or last() called on a group with zero rows
+CapacityExceeded { limit: 65535, got: 70000 }   // too many distinct levels for a categorical column
 ```
 
 Every error variant names the specific column, type, or value that caused the problem. You know what went wrong and where, not just that something failed.
+
+`EmptyGroup` catches a subtle bug: if an aggressive filter removes all rows from a group and you then call `first()` or `last()` in your summarise, you get a clear error instead of a silent null or a crash. `CapacityExceeded` guards the categorical column type — CJC-Lang's factor columns use `u16` codes (max 65,535 distinct levels) for cache efficiency, and this error tells you exactly when your data exceeds that budget.
 
 ## Why Not Just Use Polars?
 
