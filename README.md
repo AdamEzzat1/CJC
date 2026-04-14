@@ -2,11 +2,11 @@
 
 *Computational Jacobian Core*
 
-**Version 0.1.4** | **Rust** | **Zero External Dependencies** | **MIT License**
+**Version 0.1.5** | **Rust** | **Zero External Dependencies** | **MIT License**
 
 > **Note:** Starting with v0.1.4, the project is now **CJC-Lang** and the CLI command has changed from `cjc` to `cjcl`. Install with `cargo install cjc-lang`.
 
-CJC-Lang is a programming language being built for reproducible numerical computation, machine learning, and data analysis. It is implemented entirely in Rust across 21 workspace crates (~96K lines), with zero external runtime dependencies. The language is under active development — it works, but it is not production-ready.
+CJC-Lang is a programming language being built for reproducible numerical computation, machine learning, and scientific computing. It is implemented entirely in Rust across 22 workspace crates (~100K lines), with zero external runtime dependencies. The language includes a full PINN (Physics-Informed Neural Network) framework for solving PDEs, and a companion columnar data engine (TidyView). Under active development — it works, but it is not production-ready.
 
 ```cjcl
 fn main() -> i64 {
@@ -59,7 +59,15 @@ The test suite currently has **6,715+ tests** across the workspace — 1,913 uni
 - Automatic differentiation (forward-mode dual numbers, reverse-mode tape)
 - Tensor operations (create, reshape, element access, arithmetic)
 - Deterministic linear algebra operations
-- 440+ built-in functions (363 in `cjc-runtime` + 83 in `cjc-quantum`) covering math, statistics, ML, signal processing, data wrangling, linear algebra, and quantum simulation
+- 451+ built-in functions (368 in `cjc-runtime` + 83 in `cjc-quantum`) covering math, statistics, ML, signal processing, data wrangling, linear algebra, and quantum simulation
+
+### Physics-Informed Neural Networks (PINNs) (Passing)
+- **12 PDE solvers** — Harmonic Oscillator, Heat, Burgers, Poisson, Wave, Helmholtz, Diffusion-Reaction, Allen-Cahn, KdV, Schrodinger, Navier-Stokes 2D, Burgers 2D
+- Full MLP architecture with 8 activation functions (Tanh, Sigmoid, ReLU, GELU, SiLU, ELU, SELU, SinAct)
+- Adam + L-BFGS + two-stage optimization (Adam 80% → L-BFGS 20%)
+- Graph reuse via `reforward()` — builds graph once, updates collocation points per epoch
+- Arena-based GradGraph with fused MLP layers (2.76× backward pass speedup)
+- 1,346 dedicated PINN tests (correctness, expansion, parity, PDE validation)
 
 ### Data and Visualization (Passing)
 - 73+ DataFrame operations (filter, group_by, join, select, pivot, window functions)
@@ -67,10 +75,16 @@ The test suite currently has **6,715+ tests** across the workspace — 1,913 uni
 - NFA-based regex engine
 - Binary serialization
 
+### TidyView Columnar Engine (Companion: `virtual-frame` crate)
+- **23 modules** — columnar storage, bitmask views, dictionary encoding, vectorized kernels, zone maps, null-aware engine, streaming, parallel execution, row lineage, join planner
+- **Adaptive dictionary encoding** — automatic encoding decisions (4.3× filter speedup for low-cardinality columns)
+- **Vectorized predicate evaluation** — word-level (64-row) processing, expression-to-kernel gap of 1.71× (down from 4.7×)
+- **Deterministic join planner** — SortMerge / BTreeMapHash / NestedLoop selection based on data characteristics
+- **Columnar compression** — RLE, Delta, BitPack (up to 5,000× compression for run-length data)
+
 ### What Is Not Yet Working
 - Default function parameters
 - Decorators
-- MIR-level autodiff integration
 - Browser compilation target
 
 ---
@@ -281,7 +295,8 @@ let total: f64 = e.sum();       // Kahan-stable
 | Distributions | 24 | Normal, t, Chi-squared, F, Beta, Gamma (PDF/CDF/PPF) |
 | Hypothesis Tests | 24 | `t_test`, `anova_oneway`, `chi_squared_test`, `tukey_hsd` |
 | Linear Algebra | 9+ | `matmul`, `det`, `solve`, `lstsq`, `eigh` |
-| ML / Deep Learning | 40+ | `relu`, `gelu`, `attention`, `conv2d`, `Adam.new` |
+| ML / Deep Learning | 40+ | `relu`, `gelu`, `attention`, `conv2d`, `adam_step` |
+| Physics-Informed ML | 12+ | `mlp_forward`, `pinn_train`, `data_loss_mse`, `reforward` |
 | Signal Processing | 14+ | FFT, RFFT, IFFT, PSD, window functions |
 | Data Wrangling | 73+ | `filter`, `group_by`, `join`, `pivot_longer`, `window_sum` |
 
@@ -308,7 +323,7 @@ Source → [Lexer] → Tokens → [Parser] → AST → [TypeChecker] → Typed A
                                                                Register machine
 ```
 
-### Workspace Crates (20)
+### Workspace Crates (22)
 
 | Crate | Purpose |
 |-------|---------|
@@ -322,8 +337,8 @@ Source → [Lexer] → Tokens → [Parser] → AST → [TypeChecker] → Typed A
 | `cjc-eval` | AST tree-walk interpreter (v1) |
 | `cjc-mir-exec` | MIR register-machine executor (v2) |
 | `cjc-dispatch` | Operator dispatch layer |
-| `cjc-runtime` | 363 builtins, tensor system, COW buffers |
-| `cjc-ad` | Automatic differentiation (forward + reverse) |
+| `cjc-runtime` | 368 builtins, tensor system, COW buffers |
+| `cjc-ad` | Automatic differentiation (forward + reverse) + PINN framework |
 | `cjc-data` | DataFrame DSL (filter, group_by, join) |
 | `cjc-repro` | Deterministic RNG, Kahan/Binned accumulators |
 | `cjc-regex` | NFA-based regex engine |

@@ -4,6 +4,91 @@ All notable changes to CJC-Lang (Computational Jacobian Core) will be documented
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.5] — 2026-04-14
+
+### Physics-Informed Neural Networks (PINNs) & Scientific Machine Learning
+
+CJC-Lang can now solve partial differential equations using neural networks — entirely from scratch, zero external dependencies.
+
+#### PINN Infrastructure (`cjc-ad`)
+- **Full MLP architecture** — `DenseLayer`, `Mlp` struct with Xavier-uniform initialization, deterministic forward pass on `GradGraph`
+- **8 activation functions** — `Tanh`, `Sigmoid`, `ReLU`, `GELU`, `SiLU`, `ELU`, `SELU`, `SinAct` (sinusoidal activation for periodic PDEs)
+- **Physics loss components** — `data_loss_mse()`, `physics_residual_harmonic()`, central finite differences for spatial derivatives
+- **`PinnConfig` + `PinnResult` + `TrainLog`** — full training configuration, convergence history, and error metrics
+
+#### 12 PDE Problem Solvers
+Each solver trains a neural network to satisfy both boundary conditions and the governing PDE:
+
+| Problem | Type | Domain |
+|---------|------|--------|
+| Harmonic Oscillator | 1D ODE | Time domain |
+| Heat Equation | 1D Parabolic | Spatial |
+| Burgers Equation | 1D Hyperbolic | Spatial-temporal |
+| Poisson Equation | 2D Elliptic | Spatial |
+| Wave Equation | 2D Hyperbolic | Spatial-temporal |
+| Helmholtz Equation | 2D Helmholtz | Spatial |
+| Diffusion-Reaction | 2D Coupled | Spatial |
+| Allen-Cahn | Reaction-diffusion | Phase field |
+| Korteweg-de Vries | 1D Dispersive | Soliton dynamics |
+| Schrodinger (NLS) | Quantum wave | Complex field |
+| Navier-Stokes 2D | Fluid dynamics | Velocity-pressure |
+| Burgers 2D | 2D Extension | Multi-dimensional |
+
+#### Optimization Methods
+- **Adam optimizer** — β1=0.9, β2=0.999, element-wise with native `adam_step` builtin
+- **L-BFGS** — Two-loop recursion for second-order convergence
+- **TwoStageOptimizer** — Adam (80% of epochs) → L-BFGS (final 20%) for fast convergence + fine-tuning
+
+#### Graph Reuse for Multi-Epoch Training
+- **`reforward()` method** — re-evaluate computation graph with updated inputs without rebuilding
+- **`set_tensor()` + `reforward()`** — PINN training builds graph once, updates collocation points per epoch
+- Eliminates O(epochs × graph_size) allocations
+
+#### Tests
+- **`pinn_correctness.rs`** — L2 error bounds, residual convergence, gradient flow
+- **`pinn_expansion_tests.rs`** — 537 tests across all 12 PDE solvers
+- **`pinn_parity.rs`** — 188 tests verifying eval/mir-exec produce identical PINN results
+- **`pinn_pde_problems.rs`** — 621 tests for PDE-specific validation
+
+### Autodiff Engine Rewrite (v2.4–v2.5)
+
+Major performance overhaul of the reverse-mode automatic differentiation engine:
+
+#### Arena-Based GradGraph (v2.4)
+- **Replaced `Vec<Rc<RefCell<GradNode>>>` with flat arrays** — `ops: Vec<GradOp>`, `tensors: Vec<Tensor>`, `param_grads: Vec<Option<Tensor>>`
+- **Dead node elimination** — reachability analysis before backward pass; unreachable nodes skipped (20-30% for multi-head networks)
+- **Result:** 1.89× backward pass speedup (47% time reduction)
+
+#### In-Place Gradient Accumulation (v2.5)
+- **`Tensor::add_assign_unchecked`** — mutates gradient tensors in-place, eliminating ~N/2 tensor allocations per backward pass
+- **`backward_collect()`** — batches zero_grad + backward + gradient collection into one call
+- **Fused MLP layer** — `GradOp::MlpLayer` collapses transpose + matmul + bias-add + activation into one graph node (3× fewer nodes per layer)
+- **Result:** 2.76× total speedup from v2.3 baseline
+
+### Chess RL v2.1–v2.5
+
+In-place upgrade of the chess reinforcement learning benchmark with advanced training infrastructure:
+
+- **Adam optimizer** — native `adam_step` builtin (9× speedup over CJC-Lang scalar loop)
+- **A2C with GAE** — Advantage Actor-Critic with Generalized Advantage Estimation
+- **Advantage/return whitening, temperature annealing, resignation threshold**
+- **31-tensor checkpoint bundle** + CSV training log + Elo-lite rating system
+- **PGN export** (long-algebraic notation) + Vizor training curve SVGs
+- **Native hot-path kernels** — `encode_state_fast`, `score_moves_batch` (7.7× rollout speedup)
+- **Profiling infrastructure** — `profile_zone_start`/`profile_zone_stop`/`profile_dump` builtins
+- **10 new builtins:** `adam_step`, `file_append`, `profile_zone_start`, `profile_zone_stop`, `profile_dump`, `encode_state_fast`, `score_moves_batch`, `categorical_sample`, `log`, `exp`
+
+### virtual-frame / TidyView Engine (companion crate)
+
+The TidyView columnar data engine (`virtual-frame` on crates.io) was expanded from 7 modules to 23:
+
+- **Adaptive Dictionary Encoding** — automatic encoding decisions based on cardinality thresholds (4.3× filter speedup, 7.2× memory reduction for low-cardinality columns)
+- **Vectorized Expression Kernels** — word-level (64-row) predicate evaluation with AND/OR/NOT fast paths; expression-to-kernel gap reduced from 4.7× to 1.71×
+- **Deterministic Join Planner** — automatic strategy selection (SortMerge / BTreeMapHash / NestedLoop) based on sortedness and column types
+- **11 new subsystems:** Query Plan Optimizer, Columnar Compression (RLE/Delta/BitPack), Zone Maps, Null-Aware Engine, Parallel Deterministic Execution, .tvf Storage Format, Streaming/Out-of-Core, Advanced Joins (sort-merge/semi/anti/cross), Row Lineage/Provenance
+
+---
+
 ## [0.1.4] — 2026-04-06
 
 ### Rebrand: CJC → CJC-Lang
