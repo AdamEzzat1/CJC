@@ -3,23 +3,23 @@ title: "TidyView: A Database Engine in Disguise"
 subtitle: "How CJC-Lang handles data manipulation — and why I couldn't just use Pandas."
 author: "Adam Ezzat"
 date: "2026-04-12"
-date-modified: "2026-04-12"
+date-modified: "2026-04-14"
 categories: [CJC-Lang, data, databases, determinism, architecture, benchmarks]
-description: "TidyView is CJC-Lang's data manipulation system. It uses a tidyverse-style API backed by database-engine internals — columnar storage, bitmask filtering, predicate pushdown, and zone maps — to deliver deterministic, auditable data pipelines with zero hidden mutations. Includes worked examples, audit walkthroughs, and a 38-test benchmark suite proving every architectural claim."
+description: "TidyView is CJC-Lang's data manipulation system. It uses a tidyverse-style API backed by database-engine internals — columnar storage, bitmask filtering, predicate pushdown, and zone maps — to deliver deterministic, auditable data pipelines with zero hidden mutations. Now expanded with 11 engine subsystems, adaptive dictionary encoding, vectorized expression kernels, and a deterministic join planner. Includes worked examples, audit walkthroughs, and comprehensive benchmarks."
 ---
 
 <div class="reading-time">&#128337; ~35 min read</div>
 
 <div class="stats-row">
-<div class="stat"><span class="number">3</span><span class="stat-label">layers</span></div>
-<div class="stat"><span class="number">40+</span><span class="stat-label">operations</span></div>
+<div class="stat"><span class="number">23</span><span class="stat-label">modules</span></div>
+<div class="stat"><span class="number">11</span><span class="stat-label">engine subsystems</span></div>
 <div class="stat"><span class="number">0</span><span class="stat-label">HashMaps</span></div>
-<div class="stat"><span class="number">38</span><span class="stat-label">benchmark tests</span></div>
+<div class="stat"><span class="number">276</span><span class="stat-label">tests</span></div>
 </div>
 
 ::: {.callout-tip appearance="minimal"}
 ## TL;DR
-TidyView is CJC-Lang's data manipulation system. It looks like R's dplyr on the surface, but underneath it's a database engine: columnar storage, lazy evaluation, bitmask filtering, predicate pushdown, and zone maps. The result is a data pipeline where every intermediate state is inspectable, the original data is never mutated, and the same input always produces the same output — down to the last bit.
+TidyView is CJC-Lang's data manipulation system. It looks like R's dplyr on the surface, but underneath it's a database engine: columnar storage, lazy evaluation, bitmask filtering, predicate pushdown, and zone maps. Now expanded to 23 modules and 11 engine subsystems — including adaptive dictionary encoding, vectorized expression kernels, a deterministic join planner, columnar compression, null-aware columns, streaming aggregation, and row-level provenance tracking. The result is a data pipeline where every intermediate state is inspectable, the original data is never mutated, and the same input always produces the same output — down to the last bit.
 :::
 
 ## The Problem
@@ -605,12 +605,180 @@ These are not performance benchmarks — they're correctness proofs that verify 
 
 **What this proves:** Every intermediate state in a TidyView pipeline is inspectable. Bitmasks tell you which rows survived. Group indices tell you which rows belong to each group. Projection maps tell you which columns are visible. The original data is always intact. And the type system prevents the most common data pipeline mistakes — typos in column names, order-dependent mutations, aliasing bugs — before they produce wrong numbers.
 
+## The Engine Expands: 11 Subsystems (v0.1.5 Update)
+
+::: {.callout-note appearance="minimal"}
+**Updated April 14, 2026.** Since the original post, TidyView has grown from a bitmask-filtered view layer into a 23-module columnar engine with 11 dedicated subsystems. This section covers the major additions.
+:::
+
+The original TidyView had four components: bitmask filtering, predicate pushdown, zone maps, and Kahan summation. Those were enough to prove the architecture worked. But as I used TidyView on larger datasets, I kept running into performance cliffs and missing capabilities. So I built the engine layer underneath.
+
+### The 11 Subsystems
+
+| # | Subsystem | What it does | Key metric |
+|---|-----------|-------------|------------|
+| 1 | **Query Plan Optimizer** | Predicate pushdown + filter fusion via `LogicalPlan` | 2-pass optimization |
+| 2 | **Dictionary Encoding** | Maps low-cardinality strings to integer codes | 7.2x memory reduction, 4.5x filter speedup |
+| 3 | **Columnar Compression** | RLE, Delta, BitPack with automatic analysis | Up to 5,000x compression (RLE) |
+| 4 | **Vectorized Kernels** | Word-level (64-row) comparison operators | 1.26 ms for 1M-row `gt_i64` |
+| 5 | **Parallel Execution** | Deterministic partitioning with integrity verification | 25.0% balance across 4 buckets |
+| 6 | **`.tvf` Storage** | Binary serialization with exact size estimation | Round-trip verified |
+| 7 | **Zone Maps** | Block-level predicate skipping (1024 rows/block) | 50% block skip rate |
+| 8 | **Null-Aware Engine** | Validity bitmask with three-valued equality | 1.56% memory overhead |
+| 9 | **Streaming** | Chunk-based aggregation in O(ncols) memory | Sum, mean, grouped agg |
+| 10 | **Advanced Joins** | Sort-merge, semi, anti, cross joins | Sort-merge: 29x faster than BTreeMap |
+| 11 | **Row Lineage** | Provenance tracking through all operations | `trace_row()` through join chains |
+
+Each subsystem follows the same determinism contract as the original TidyView: BTreeMap everywhere, Kahan summation for all reductions, no hash randomization, same inputs always produce identical outputs.
+
+### Adaptive Dictionary Encoding
+
+This was the first optimization that came from benchmarking. I noticed that filtering a 100K-row string column with 5 unique values (`"North"`, `"South"`, `"East"`, `"West"`, `"Central"`) took 440 microseconds. After dictionary-encoding it — replacing each string with a u32 index into a lookup table — the same filter took 98 microseconds. That's a **4.5x speedup** just from changing the representation.
+
+But not all string columns benefit from dictionary encoding. A column with 100K unique values (one per row) gets *slower* with dictionary encoding because the lookup table is as large as the original data.
+
+The crossover is at about 50% cardinality ratio (unique values / total rows). Below 50%, dictionary encoding wins. Above 50%, flat strings win.
+
+So I built an adaptive system: `auto_encode()` analyzes each string column by counting unique values in a deterministic sample (first N rows, not random), compares the cardinality ratio against a configurable threshold, and applies dictionary encoding only when it's beneficial. The analysis is fully explainable — every decision comes with a reason:
+
+```
+region → DICTIONARY: cardinality ratio 0.05% < threshold
+         (unique=5/10000, flat=2.77MB, dict=391KB, sampled)
+
+label  → FLAT: cardinality ratio 100.00% >= threshold
+         (unique=10000/10000, flat=3.23MB, dict=1.15MB)
+```
+
+The decision is deterministic: same data + same policy = same encoding choice, always.
+
+### Closing the Expression Gap
+
+The original TidyView filter evaluated predicates row-by-row: iterate the bitmask, check each row, set or clear the bit. This worked, but it was 4.7x slower than calling the raw vectorized kernel directly.
+
+The problem was overhead per row: bitmask iteration, column lookup, type dispatch, comparison, bit-set — all repeated for every single row.
+
+The fix was to route predicate evaluation through the vectorized kernels directly. Instead of:
+
+```
+for row in mask.iter_set() {
+    if column[row] > threshold {
+        result.set(row);
+    }
+}
+```
+
+The optimized path calls:
+
+```
+kernel::gt_i64(column_data, threshold, current_mask)
+```
+
+This processes 64 rows per iteration — one word of the bitmask at a time. Zero words (no visible rows in that block) are skipped in O(1).
+
+The same optimization was extended to handle compound predicates. `AND` evaluates the left predicate, then passes the resulting mask as input to the right predicate — the right side only examines rows that passed the left. `OR` evaluates both sides independently and unions the results. `NOT` inverts the inner mask within the current visibility window.
+
+A reversed comparison like `50000 > id` (literal on the left) is handled by flipping the operator: `Gt` becomes `Lt`, so the kernel receives `id < 50000` — no per-row operand swap needed.
+
+**Result: the expression-to-kernel gap dropped from 4.7x to 1.71x.** The remaining 1.71x is the inherent cost of expression tree dispatch (matching the AST node, resolving the column, checking types) — overhead that exists exactly once per filter call, not per row.
+
+### Deterministic Join Planner
+
+Joins are the most expensive TidyView operation. The original implementation used BTreeMap-based hash joins for everything — deterministic and correct, but 41 ms for a 100K x 100K join.
+
+For pre-sorted integer keys (a common case — sequential IDs, timestamps), a sort-merge join is dramatically faster: 1.4 ms for the same workload. That's a **29x improvement** — but only when both inputs are already sorted.
+
+The join planner inspects the data before choosing a strategy:
+
+1. **Check key count.** Multi-key joins always use BTreeMap (sort-merge only supports single keys).
+2. **Check key type.** Non-integer keys always use BTreeMap (sort-merge only supports i64).
+3. **Check input size.** If both inputs have fewer than 64 rows, use nested loop (no hash table overhead).
+4. **Check sortedness.** Scan the first 10,000 visible rows of each key column. If both are ascending, use sort-merge. Otherwise, use BTreeMap.
+
+Every check is deterministic: same inputs produce the same strategy, and every decision is explainable via `plan.explain()`:
+
+```
+SORT-MERGE → both inputs sorted on key: O(L+R) scan
+  (left=100000, right=100000, keys=1, left_sorted=Ascending,
+   right_sorted=Ascending, left_card~100000, right_card~100000)
+```
+
+The planner doesn't just pick a strategy — it executes through the same interface. `execute_planned_join()` takes the plan and dispatches to the chosen algorithm. The result is identical regardless of which strategy was selected — the planner only affects performance, never correctness.
+
+### Null-Aware Columns
+
+The original post described TidyView's null-free column model as a feature. It still is — null-free columns are simpler, faster, and less error-prone. But real data has missing values, and pretending otherwise limits usefulness.
+
+The `NullableColumn` type wraps a dense column with a validity bitmask — one bit per row, just like the filter bitmask. A null value occupies zero extra storage beyond that single bit. For a million-row column, the validity bitmask costs 122 KB — **1.56% memory overhead**.
+
+Null-aware aggregations (sum, mean, min, max) skip null values by checking the validity bit before each accumulation. Three-valued equality follows SQL semantics: `NULL == NULL` returns `NULL`, not `true`. The `eq_scalar_i64` operation produces a three-valued result that distinguishes "matched", "didn't match", and "was null".
+
+The key design choice: `NullableColumn` is a *separate type*, not an `Option` wrapper on every value. Regular `Column` data is guaranteed null-free by the type system. You only deal with nulls when you explicitly opt in.
+
+### Row Lineage
+
+Every TidyView operation can now produce a provenance trace. The `Lineage` type records what happened to each row through a chain of operations:
+
+- `Lineage::scan("source_table", n)` — data entered from an external source
+- `Lineage::filter(parent, surviving_indices, predicate_desc)` — which rows survived a filter
+- `Lineage::sort(parent, permutation)` — how rows were reordered
+- `Lineage::join(left, right, left_indices, right_indices)` — which rows matched across tables
+- `Lineage::aggregate(parent, group_membership)` — which rows contributed to each aggregate
+
+Given any row in the final output, `trace_row(idx)` walks backward through the lineage chain and returns the original source row(s) that produced it. For a join, this means identifying both the left and right source rows. For an aggregate, it means listing every row that was grouped together.
+
+This is the audit trail taken to its logical conclusion. The bitmask tells you *which* rows survived a filter. The lineage tells you *where every row came from* through an arbitrary chain of operations.
+
+### Updated Benchmark Results (v0.1.5)
+
+The 11 subsystems were benchmarked comprehensively — speed and memory for every component. Here are the highlights:
+
+**Filter performance (100K rows):**
+
+| Scenario | Time |
+|----------|------|
+| Raw `kernel::gt_i64` | 184 us |
+| TidyView filter `id > 50K` (optimized) | 175 us |
+| DictStr filter Eq "North" | 98 us |
+| Flat Str filter Eq "North" | 440 us |
+| Compound AND (id > 20K AND id < 80K) | 429 us |
+| Compound OR (id < 10K OR id > 90K) | 606 us |
+| Reversed operand (50000 > id, flip_op) | 311 us |
+
+**Join performance (100K x 100K):**
+
+| Strategy | Time |
+|----------|------|
+| Sort-merge (pre-sorted i64 keys) | 1.4 ms |
+| BTreeMap hash (general) | 73 ms |
+| Semi join | 50 ms |
+| Anti join | 36 ms |
+
+**Compression ratios:**
+
+| Technique | Ratio |
+|-----------|-------|
+| RLE (10 runs, 100K) | 5,000x |
+| BitPack (8-bit range, 100K) | 8x |
+| Dictionary (5 unique, 100K strings) | 7.2x |
+
+**Memory overhead:**
+
+| Component | Cost |
+|-----------|------|
+| Null validity bitmask (1M rows) | 122 KB (1.56%) |
+| Filter bitmask (1M rows) | 122 KB |
+| Zone map (1M floats) | 15.3 KB |
+| JoinPlan struct | 48 bytes |
+| Partition balance (4 buckets) | 25.0% +/- 0.04% |
+
+The full benchmark suite runs via `cargo bench --bench bench_all` in the [virtual-frame](https://crates.io/crates/virtual-frame) crate.
+
 ## The One-Sentence Summary
 
 TidyView is a database engine wearing a tidyverse costume, designed so that **same data + same code = same result** on every machine, every run, every time.
 
-It combines familiar dplyr verbs (`filter`, `select`, `mutate`, `group_by`, `summarise`) with database-engine internals (columnar storage, bitmask filtering, predicate pushdown, zone maps) to deliver data pipelines that are deterministic by construction, auditable by design, and memory-safe without runtime surprises.
+It combines familiar dplyr verbs (`filter`, `select`, `mutate`, `group_by`, `summarise`) with database-engine internals (columnar storage, bitmask filtering, predicate pushdown, zone maps, dictionary encoding, vectorized kernels, sort-merge joins, null-aware columns, row-level provenance) to deliver data pipelines that are deterministic by construction, auditable by design, and memory-safe without runtime surprises.
 
 ::: {.callout-note appearance="minimal"}
-CJC-Lang is open source and available on [crates.io](https://crates.io/crates/cjc-lang). The TidyView implementation lives in `crates/cjc-data/` — about 11,000 lines of Rust with zero external dependencies. The full benchmark suite (38 tests, 10 categories) is in `tests/tidyview_benchmarks.rs`.
+CJC-Lang is open source and available on [crates.io](https://crates.io/crates/cjc-lang). The TidyView core lives in `crates/cjc-data/` (~11,000 lines of Rust). The expanded engine with 23 modules is available as a standalone crate: [virtual-frame](https://crates.io/crates/virtual-frame) on crates.io (`cargo add virtual-frame` or `pip install virtual-frame` for Python bindings). The full benchmark suite (276 tests, 11 subsystems + 3 optimization priorities) runs via `cargo bench --bench bench_all`.
 :::
