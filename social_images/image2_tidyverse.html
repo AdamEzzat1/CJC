@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1200, initial-scale=1.0">
+<title>CJC-Lang: Tidyverse Operations</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 1200px;
+    min-height: 1200px;
+    background: linear-gradient(135deg, #0a1628 0%, #1a2744 50%, #0d1f3c 100%);
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    color: #e0e0e0;
+    padding: 48px;
+  }
+
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 36px;
+  }
+
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .logo-icon {
+    width: 56px;
+    height: 56px;
+    background: linear-gradient(135deg, #00d2ff, #7b2ff7);
+    border-radius: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 28px;
+    font-weight: 900;
+    color: #fff;
+  }
+
+  .logo-text { font-size: 32px; font-weight: 700; color: #fff; }
+
+  .badge {
+    background: rgba(0, 210, 255, 0.15);
+    border: 1px solid rgba(0, 210, 255, 0.4);
+    border-radius: 20px;
+    padding: 8px 20px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #00d2ff;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+
+  h1 { font-size: 42px; font-weight: 800; color: #fff; margin-bottom: 8px; }
+
+  .subtitle {
+    font-size: 20px;
+    color: #8ba4c7;
+    margin-bottom: 32px;
+    line-height: 1.5;
+  }
+
+  .ops-grid {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 8px;
+    margin-bottom: 32px;
+  }
+
+  .op-tag {
+    background: rgba(0, 210, 255, 0.08);
+    border: 1px solid rgba(0, 210, 255, 0.2);
+    border-radius: 8px;
+    padding: 8px 4px;
+    text-align: center;
+    font-family: 'Cascadia Code', monospace;
+    font-size: 13px;
+    color: #58a6ff;
+  }
+
+  .op-tag.highlight {
+    background: rgba(123, 47, 247, 0.15);
+    border-color: rgba(123, 47, 247, 0.4);
+    color: #c4a0ff;
+  }
+
+  .code-panel {
+    background: #0d1117;
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 16px;
+    margin-bottom: 24px;
+    overflow: hidden;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+  }
+
+  .code-header {
+    background: rgba(255,255,255,0.04);
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+
+  .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .dot-red { background: #ff5f57; }
+  .dot-yellow { background: #ffbd2e; }
+  .dot-green { background: #28c840; }
+  .code-title { margin-left: 12px; font-size: 14px; color: #6e7681; }
+
+  .code-body {
+    padding: 24px 28px;
+    display: flex;
+    gap: 32px;
+  }
+
+  .code-section { flex: 1; }
+
+  .section-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: #00d2ff;
+    margin-bottom: 12px;
+  }
+
+  pre {
+    font-family: 'Cascadia Code', 'JetBrains Mono', monospace;
+    font-size: 14px;
+    line-height: 1.6;
+  }
+
+  .kw { color: #ff7b72; }
+  .fn-name { color: #d2a8ff; }
+  .str { color: #a5d6ff; }
+  .comment { color: #6e7681; font-style: italic; }
+  .num { color: #79c0ff; }
+  .bool { color: #ffa657; }
+  .type { color: #ff7b72; }
+
+  .output-panel {
+    background: #161b22;
+    border: 1px solid rgba(126, 231, 135, 0.2);
+    border-radius: 16px;
+    margin-bottom: 24px;
+    overflow: hidden;
+  }
+
+  .output-header {
+    background: rgba(126, 231, 135, 0.06);
+    padding: 10px 20px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #7ee787;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    border-bottom: 1px solid rgba(126, 231, 135, 0.12);
+  }
+
+  .output-body {
+    padding: 20px 28px;
+    display: flex;
+    gap: 32px;
+  }
+
+  .output-section { flex: 1; }
+
+  .output-section pre {
+    font-size: 13.5px;
+    line-height: 1.55;
+  }
+
+  .out-val { color: #7ee787; }
+  .out-label { color: #58a6ff; font-weight: 600; }
+  .out-dim { color: #484f58; }
+
+  .features-row {
+    display: flex;
+    gap: 16px;
+  }
+
+  .feature-chip {
+    background: rgba(0, 210, 255, 0.08);
+    border: 1px solid rgba(0, 210, 255, 0.2);
+    border-radius: 12px;
+    padding: 14px 18px;
+    flex: 1;
+    text-align: center;
+  }
+
+  .feature-chip .num-val {
+    font-size: 26px;
+    font-weight: 800;
+    color: #00d2ff;
+  }
+
+  .feature-chip .num-label {
+    font-size: 11px;
+    color: #6e7681;
+    margin-top: 4px;
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">
+    <div class="logo-icon">CJC</div>
+    <div class="logo-text">CJC-Lang</div>
+  </div>
+  <div class="badge">Tidyverse-style Ops</div>
+</div>
+
+<h1>80+ Data Operations, R-style API</h1>
+<p class="subtitle">Every operation R&rsquo;s dplyr users expect &mdash; filter, cumsum, rank, lag, lead, sort, mean, median &mdash;<br>all backed by Kahan-compensated summation and deterministic BTreeMap ordering.</p>
+
+<div class="ops-grid">
+  <div class="op-tag highlight">filter_mask</div>
+  <div class="op-tag highlight">cumsum</div>
+  <div class="op-tag highlight">cumprod</div>
+  <div class="op-tag highlight">rank</div>
+  <div class="op-tag highlight">lag</div>
+  <div class="op-tag highlight">lead</div>
+  <div class="op-tag">dense_rank</div>
+  <div class="op-tag">row_number</div>
+  <div class="op-tag">sort</div>
+  <div class="op-tag">mean</div>
+  <div class="op-tag">median</div>
+  <div class="op-tag">quantile</div>
+  <div class="op-tag">cummax</div>
+  <div class="op-tag">cummin</div>
+  <div class="op-tag">ntile</div>
+  <div class="op-tag">sample_variance</div>
+  <div class="op-tag">str_detect</div>
+  <div class="op-tag">str_replace</div>
+  <div class="op-tag">fillna</div>
+  <div class="op-tag">coalesce</div>
+  <div class="op-tag">as_factor</div>
+  <div class="op-tag">min_max_scale</div>
+  <div class="op-tag">standardize</div>
+  <div class="op-tag">iqr</div>
+</div>
+
+<div class="code-panel">
+  <div class="code-header">
+    <span class="dot dot-red"></span>
+    <span class="dot dot-yellow"></span>
+    <span class="dot dot-green"></span>
+    <span class="code-title">tidy_ops_demo.cjcl</span>
+  </div>
+  <div class="code-body">
+    <div class="code-section">
+      <div class="section-label">Filter + Cumulative</div>
+      <pre><span class="comment">// Employee salary data</span>
+<span class="kw">let</span> salaries = [<span class="num">95000.0</span>, <span class="num">87000.0</span>,
+  <span class="num">72000.0</span>, <span class="num">68000.0</span>, <span class="num">105000.0</span>, <span class="num">78000.0</span>];
+
+<span class="comment">// filter_mask: like dplyr::filter()</span>
+<span class="kw">let</span> mask = [<span class="bool">true</span>,<span class="bool">true</span>,<span class="bool">false</span>,<span class="bool">false</span>,<span class="bool">true</span>,<span class="bool">false</span>];
+<span class="kw">let</span> top = <span class="fn-name">filter_mask</span>(salaries, mask);
+<span class="fn-name">print</span>(top);
+<span class="comment">// → [95000, 87000, 105000]</span>
+
+<span class="comment">// cumsum: running revenue totals</span>
+<span class="kw">let</span> monthly = [<span class="num">1200.0</span>, <span class="num">1500.0</span>,
+  <span class="num">1100.0</span>, <span class="num">1800.0</span>, <span class="num">1300.0</span>, <span class="num">1600.0</span>];
+<span class="fn-name">print</span>(<span class="fn-name">cumsum</span>(monthly));
+<span class="comment">// → [1200, 2700, 3800, 5600, 6900, 8500]</span>
+
+<span class="comment">// cumprod: compound growth rates</span>
+<span class="kw">let</span> growth = [<span class="num">1.05</span>, <span class="num">1.03</span>, <span class="num">0.98</span>, <span class="num">1.07</span>, <span class="num">1.02</span>];
+<span class="fn-name">print</span>(<span class="fn-name">cumprod</span>(growth));
+<span class="comment">// → [1.05, 1.0815, 1.0599, ...]</span></pre>
+    </div>
+    <div class="code-section">
+      <div class="section-label">Windows + Statistics</div>
+      <pre><span class="comment">// rank: ordinal salary ranking</span>
+<span class="fn-name">print</span>(<span class="fn-name">rank</span>(salaries));
+<span class="comment">// → [5, 4, 2, 1, 6, 3]</span>
+
+<span class="comment">// lag / lead: window functions</span>
+<span class="kw">let</span> vals = [<span class="num">10</span>, <span class="num">20</span>, <span class="num">30</span>, <span class="num">40</span>, <span class="num">50</span>];
+<span class="fn-name">print</span>(<span class="fn-name">lag</span>(vals, <span class="num">1</span>));
+<span class="comment">// → [NaN, 10, 20, 30, 40]</span>
+<span class="fn-name">print</span>(<span class="fn-name">lead</span>(vals, <span class="num">1</span>));
+<span class="comment">// → [20, 30, 40, 50, NaN]</span>
+
+<span class="comment">// Statistical aggregates</span>
+<span class="kw">let</span> data = [<span class="num">3.0</span>,<span class="num">1.0</span>,<span class="num">4.0</span>,<span class="num">1.0</span>,<span class="num">5.0</span>,<span class="num">9.0</span>,<span class="num">2.0</span>,<span class="num">6.0</span>];
+<span class="fn-name">print</span>(<span class="fn-name">sort</span>(data));
+<span class="comment">// → [1, 1, 2, 3, 4, 5, 6, 9]</span>
+<span class="fn-name">print</span>(<span class="fn-name">median</span>(data));
+<span class="comment">// → 3.5</span>
+<span class="fn-name">print</span>(<span class="fn-name">mean</span>(data));
+<span class="comment">// → 3.875</span>
+
+<span class="comment">// Stringr: text processing</span>
+<span class="fn-name">print</span>(<span class="fn-name">str_replace</span>(<span class="str">"hello"</span>,<span class="str">"lo"</span>,<span class="str">"CJC"</span>));
+<span class="comment">// → helCJC</span></pre>
+    </div>
+  </div>
+</div>
+
+<div class="output-panel">
+  <div class="output-header">▶ Verified Output &mdash; cjcl run tidy_ops_demo.cjcl</div>
+  <div class="output-body">
+    <div class="output-section">
+      <pre><span class="out-label">filter_mask:</span>  <span class="out-val">[95000, 87000, 105000]</span>
+<span class="out-label">cumsum:</span>       <span class="out-val">[1200, 2700, 3800, 5600, 6900, 8500]</span>
+<span class="out-label">cumprod:</span>      <span class="out-val">[1.05, 1.0815, 1.0599, 1.1341, 1.1567]</span>
+<span class="out-label">rank:</span>         <span class="out-val">[5, 4, 2, 1, 6, 3]</span></pre>
+    </div>
+    <div class="output-section">
+      <pre><span class="out-label">lag(1):</span>       <span class="out-val">[NaN, 10, 20, 30, 40]</span>
+<span class="out-label">lead(1):</span>      <span class="out-val">[20, 30, 40, 50, NaN]</span>
+<span class="out-label">sort:</span>         <span class="out-val">[1, 1, 2, 3, 4, 5, 6, 9]</span>
+<span class="out-label">median:</span>       <span class="out-val">3.5</span>  &nbsp; <span class="out-label">mean:</span> <span class="out-val">3.875</span></pre>
+    </div>
+  </div>
+</div>
+
+<div class="features-row">
+  <div class="feature-chip">
+    <span class="num-val">80+</span>
+    <span class="num-label">DataFrame Operations</span>
+  </div>
+  <div class="feature-chip">
+    <span class="num-val">7</span>
+    <span class="num-label">Aggregation Builtins</span>
+  </div>
+  <div class="feature-chip">
+    <span class="num-val">Kahan</span>
+    <span class="num-label">Compensated Sums</span>
+  </div>
+  <div class="feature-chip">
+    <span class="num-val">BTreeMap</span>
+    <span class="num-label">Deterministic Order</span>
+  </div>
+  <div class="feature-chip">
+    <span class="num-val">0</span>
+    <span class="num-label">External Dependencies</span>
+  </div>
+</div>
+
+</body>
+</html>

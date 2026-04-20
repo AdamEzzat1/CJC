@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1200, initial-scale=1.0">
+<title>CJC-Lang: Full Audit Pipeline</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 1200px;
+    min-height: 1500px;
+    background: linear-gradient(160deg, #0c0c1d 0%, #1a1136 40%, #0d1525 100%);
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    color: #e0e0e0;
+    padding: 48px;
+  }
+  .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 32px; }
+  .logo { display: flex; align-items: center; gap: 16px; }
+  .logo-icon { width: 56px; height: 56px; background: linear-gradient(135deg, #00d2ff, #7b2ff7); border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 28px; font-weight: 900; color: #fff; }
+  .logo-text { font-size: 32px; font-weight: 700; color: #fff; }
+  .badge { background: rgba(210, 168, 255, 0.12); border: 1px solid rgba(210, 168, 255, 0.4); border-radius: 20px; padding: 8px 20px; font-size: 14px; font-weight: 600; color: #d2a8ff; letter-spacing: 1px; text-transform: uppercase; }
+
+  h1 { font-size: 40px; font-weight: 800; color: #fff; margin-bottom: 8px; }
+  .subtitle { font-size: 19px; color: #8b9cc0; margin-bottom: 36px; line-height: 1.5; }
+
+  .pipeline {
+    display: flex; align-items: stretch; gap: 0; margin-bottom: 32px;
+  }
+  .pipe-step {
+    flex: 1; text-align: center; padding: 20px 12px;
+    background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);
+    position: relative;
+  }
+  .pipe-step:first-child { border-radius: 14px 0 0 14px; }
+  .pipe-step:last-child { border-radius: 0 14px 14px 0; }
+  .pipe-step .ps-cmd {
+    font-family: 'Cascadia Code', monospace; font-size: 16px;
+    font-weight: 700; display: block; margin-bottom: 4px;
+  }
+  .pipe-step .ps-desc { font-size: 11px; color: #6e7681; }
+  .pipe-step:nth-child(1) .ps-cmd { color: #79c0ff; }
+  .pipe-step:nth-child(2) .ps-cmd { color: #7ee787; }
+  .pipe-step:nth-child(3) .ps-cmd { color: #ffa657; }
+  .pipe-step:nth-child(4) .ps-cmd { color: #d2a8ff; }
+  .pipe-step:nth-child(5) .ps-cmd { color: #ff7b72; }
+  .pipe-step:nth-child(6) .ps-cmd { color: #79c0ff; }
+  .pipe-arrow { display: flex; align-items: center; color: #30363d; font-size: 20px; padding: 0 2px; }
+
+  .terminal {
+    background: #0d1117; border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 16px; margin-bottom: 20px; overflow: hidden;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+  }
+  .term-header {
+    background: rgba(255,255,255,0.04); padding: 10px 20px;
+    display: flex; align-items: center; gap: 8px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+  .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .dot-red { background: #ff5f57; } .dot-yellow { background: #ffbd2e; } .dot-green { background: #28c840; }
+  .term-title { margin-left: 12px; font-size: 13px; color: #6e7681; }
+  .term-body { padding: 20px 24px; font-family: 'Cascadia Code', 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.6; white-space: pre; overflow: hidden; }
+
+  .prompt { color: #7ee787; } .cmd { color: #fff; font-weight: 600; }
+  .flag { color: #79c0ff; } .file { color: #ffa657; }
+  .out { color: #8b949e; } .pass { color: #7ee787; font-weight: 700; }
+  .warn { color: #d29922; font-weight: 700; } .info { color: #58a6ff; }
+  .dim { color: #484f58; } .hash { color: #d2a8ff; font-size: 12px; }
+  .table-border { color: #30363d; }
+  .metric-label { color: #8b949e; } .metric-val { color: #e6edf3; }
+
+  .use-case-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin-bottom: 24px; }
+  .use-case {
+    background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 14px; padding: 22px;
+  }
+  .use-case h3 { font-size: 16px; font-weight: 700; color: #fff; margin-bottom: 6px; }
+  .use-case .uc-scenario { font-size: 13px; color: #8b949e; margin-bottom: 10px; line-height: 1.4; }
+  .use-case .uc-cmd {
+    font-family: 'Cascadia Code', monospace; font-size: 12.5px;
+    background: rgba(0,0,0,0.3); border-radius: 8px; padding: 10px 14px;
+    color: #e6edf3;
+  }
+  .use-case .uc-cmd .cmd { color: #79c0ff; }
+
+  .hybrid-box {
+    background: #0d1117; border: 1px solid rgba(0, 210, 255, 0.2);
+    border-radius: 16px; padding: 28px 32px; margin-bottom: 24px;
+  }
+  .hybrid-title {
+    font-size: 12px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 2px; color: #00d2ff; margin-bottom: 16px;
+  }
+  .hybrid-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
+  .hybrid-item { display: flex; gap: 12px; }
+  .hybrid-num {
+    width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0;
+    background: rgba(0, 210, 255, 0.12); display: flex; align-items: center;
+    justify-content: center; font-size: 14px; font-weight: 800; color: #00d2ff;
+  }
+  .hybrid-item h4 { font-size: 14px; color: #fff; font-weight: 700; margin-bottom: 3px; }
+  .hybrid-item p { font-size: 12.5px; color: #6e7681; line-height: 1.4; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo"><div class="logo-icon">CJC</div><div class="logo-text">CJC-Lang</div></div>
+  <div class="badge">30 CLI Commands</div>
+</div>
+
+<h1>Full Audit Pipeline in One CLI</h1>
+<p class="subtitle">From source code to proven deterministic output. Every stage inspectable.<br>No black boxes. No guessing. No "it works on my machine."</p>
+
+<div class="pipeline">
+  <div class="pipe-step"><span class="ps-cmd">emit</span><span class="ps-desc">See your IR</span></div>
+  <div class="pipe-arrow">&rarr;</div>
+  <div class="pipe-step"><span class="ps-cmd">trace</span><span class="ps-desc">Step-by-step</span></div>
+  <div class="pipe-arrow">&rarr;</div>
+  <div class="pipe-step"><span class="ps-cmd">audit</span><span class="ps-desc">Find anti-patterns</span></div>
+  <div class="pipe-arrow">&rarr;</div>
+  <div class="pipe-step"><span class="ps-cmd">bench</span><span class="ps-desc">Measure stability</span></div>
+  <div class="pipe-arrow">&rarr;</div>
+  <div class="pipe-step"><span class="ps-cmd">proof</span><span class="ps-desc">Verify determinism</span></div>
+  <div class="pipe-arrow">&rarr;</div>
+  <div class="pipe-step"><span class="ps-cmd">parity</span><span class="ps-desc">Dual executor</span></div>
+</div>
+
+<!-- Scenario 1: Fraud detection -->
+<div class="terminal">
+  <div class="term-header">
+    <span class="dot dot-red"></span><span class="dot dot-yellow"></span><span class="dot dot-green"></span>
+    <span class="term-title">Scenario: Fraud Detection Model &mdash; "Why did the score spike?"</span>
+  </div>
+  <div class="term-body">
+<span class="prompt">$</span> <span class="cmd">cjcl audit</span> <span class="file">fraud_model.cjcl</span>
+<span class="info">[audit]</span> <span class="out">Auditing `fraud_model.cjcl`...</span>
+  <span class="warn">[WARN]</span> <span class="out">line 47: naive summation: `score` accumulated with `+` in loop</span>
+  <span class="warn">[WARN]</span> <span class="out">line 63: naive summation: `loss = loss + ...` in loop</span>
+<span class="dim">  Fix: floating-point drift detected. Use kahan_sum() for stable accumulation.</span>
+
+<span class="prompt">$</span> <span class="cmd">cjcl emit</span> <span class="file">fraud_model.cjcl</span> <span class="flag">--stage mir</span>
+<span class="out">fn score_transaction(features: Any) -> f64:</span>
+<span class="out">  let score = 0.000000</span>
+<span class="out">  while (i < len(features)):</span>
+<span class="out">    score = (score + (weights[i] * features[i]))</span>  <span class="dim">&larr; drift source</span>
+
+<span class="prompt">$</span> <span class="cmd">cjcl proof</span> <span class="file">fraud_model.cjcl</span> <span class="flag">--runs 5 --hash-output</span>
+<span class="out">Verdict:</span> <span class="pass">PASS</span> <span class="dim">(5 runs, seed=42, executor=eval)</span>
+<span class="dim">  All SHA-256 hashes identical despite naive summation.</span>
+<span class="dim">  (CJC is deterministic even with suboptimal code &mdash; audit warns, proof confirms)</span>
+  </div>
+</div>
+
+<!-- Scenario 2: Training stability -->
+<div class="terminal">
+  <div class="term-header">
+    <span class="dot dot-red"></span><span class="dot dot-yellow"></span><span class="dot dot-green"></span>
+    <span class="term-title">Scenario: Training Stability &mdash; "Is my training reproducible?"</span>
+  </div>
+  <div class="term-body">
+<span class="prompt">$</span> <span class="cmd">cjcl bench</span> <span class="file">train_rl.cjcl</span> <span class="flag">--runs 20 --compare eval</span>
+<span class="table-border">┌──────────────┬──────────────────┐</span>
+<span class="table-border">│</span> <span class="metric-label">Mean</span>         <span class="table-border">│</span> <span class="metric-val">29.8 s/episode</span>   <span class="table-border">│</span>
+<span class="table-border">│</span> <span class="metric-label">CV</span>           <span class="table-border">│</span> <span class="pass">2.1%</span>             <span class="table-border">│</span>
+<span class="table-border">│</span> <span class="metric-label">Throughput</span>   <span class="table-border">│</span> <span class="metric-val">0.034 runs/sec</span>   <span class="table-border">│</span>
+<span class="table-border">└──────────────┴──────────────────┘</span>
+<span class="out">Stability:</span> <span class="pass">STABLE</span> <span class="dim">(CV = 2.1%)</span>
+
+<span class="prompt">$</span> <span class="cmd">cjcl mem</span> <span class="file">train_rl.cjcl</span>
+<span class="table-border">│</span> <span class="metric-label">GC collections (avg)</span>  <span class="table-border">│</span> <span class="metric-val">0.00</span>     <span class="table-border">│</span>
+<span class="table-border">│</span> <span class="metric-label">GC stable across runs</span> <span class="table-border">│</span> <span class="pass">true</span>     <span class="table-border">│</span>
+
+<span class="prompt">$</span> <span class="cmd">cjcl parity</span> <span class="file">train_rl.cjcl</span> <span class="flag">--seed 42</span>
+<span class="out">Verdict:</span> <span class="pass">IDENTICAL</span> <span class="dim">(eval vs mir-exec agree on all outputs)</span>
+  </div>
+</div>
+
+<div class="use-case-grid">
+  <div class="use-case">
+    <h3>Regulatory Compliance</h3>
+    <div class="uc-scenario">Prove to auditors that your model produces the same output given the same input. Every time. With cryptographic evidence.</div>
+    <div class="uc-cmd"><span class="cmd">cjcl proof</span> model.cjcl <span class="flag">--runs 100 --save-report audit.json</span></div>
+  </div>
+  <div class="use-case">
+    <h3>Benchmark Reproducibility</h3>
+    <div class="uc-scenario">Establish a baseline before scaling. Compare against it after every change. Detect regressions before they ship.</div>
+    <div class="uc-cmd"><span class="cmd">cjcl bench</span> model.cjcl <span class="flag">--save-baseline v1.json</span><br><span class="cmd">cjcl bench</span> model.cjcl <span class="flag">--baseline v1.json --fail-if-slower-than 10%</span></div>
+  </div>
+  <div class="use-case">
+    <h3>Numerical Hygiene</h3>
+    <div class="uc-scenario">Find floating-point anti-patterns before they cause drift. Naive summation, unchecked accumulation, precision loss.</div>
+    <div class="uc-cmd"><span class="cmd">cjcl audit</span> pipeline.cjcl</div>
+  </div>
+  <div class="use-case">
+    <h3>CI/CD Gate</h3>
+    <div class="uc-scenario">Add determinism checks to your CI pipeline. Fail the build if outputs diverge or performance regresses.</div>
+    <div class="uc-cmd"><span class="cmd">cjcl proof</span> model.cjcl <span class="flag">--runs 3</span> && <span class="cmd">cjcl parity</span> model.cjcl</div>
+  </div>
+</div>
+
+<div class="hybrid-box">
+  <div class="hybrid-title">Hybrid Workflows &mdash; CJC alongside Python/PyTorch</div>
+  <div class="hybrid-grid">
+    <div class="hybrid-item">
+      <div class="hybrid-num">1</div>
+      <div>
+        <h4>Reference Engine</h4>
+        <p>Implement a small deterministic inference kernel in CJC. Compare its output against PyTorch. CJC becomes the ground truth for numerical correctness.</p>
+      </div>
+    </div>
+    <div class="hybrid-item">
+      <div class="hybrid-num">2</div>
+      <div>
+        <h4>Preprocessing Validator</h4>
+        <p>Clean and normalize your dataset in CJC with full auditability. Export to Python. Use <code>cjcl proof</code> to verify the preprocessing is deterministic.</p>
+      </div>
+    </div>
+    <div class="hybrid-item">
+      <div class="hybrid-num">3</div>
+      <div>
+        <h4>Deterministic Baseline</h4>
+        <p>Before scaling to GPU clusters, establish a CPU baseline in CJC. Same seed, same result, always. Then compare against distributed outputs to detect nondeterminism.</p>
+      </div>
+    </div>
+    <div class="hybrid-item">
+      <div class="hybrid-num">4</div>
+      <div>
+        <h4>Benchmark Oracle</h4>
+        <p>Use <code>cjcl bench --save-baseline</code> to lock in performance before scaling. After any change, <code>--fail-if-slower-than 10%</code> catches regressions automatically.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

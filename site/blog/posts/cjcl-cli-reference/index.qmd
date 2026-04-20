@@ -1,0 +1,766 @@
+---
+title: "The cjcl CLI: 31 Commands for Deterministic Computing"
+subtitle: "A complete reference for every command in CJC-Lang's CLI toolkit."
+author: "Adam Ezzat"
+date: "2026-04-13"
+date-modified: "2026-04-13"
+categories: [CJC-Lang, CLI, reference, tools, data-engineering]
+description: "A practical reference for every command in the cjcl CLI — from basic compilation through data pipeline tooling to deep compiler introspection. Includes flags, examples, and real workflows."
+---
+
+<div class="reading-time">&#128337; ~20 min read</div>
+
+<div class="stats-row">
+<div class="stat"><span class="number">31</span><span class="stat-label">commands</span></div>
+<div class="stat"><span class="number">4</span><span class="stat-label">categories</span></div>
+<div class="stat"><span class="number">0</span><span class="stat-label">external deps</span></div>
+<div class="stat"><span class="number">42</span><span class="stat-label">default seed</span></div>
+</div>
+
+::: {.callout-tip appearance="minimal"}
+## TL;DR
+`cjcl` is a single binary with 31 commands. Install with `cargo install cjc-lang`, then `cjcl run your_file.cjcl`. Every command produces deterministic output — same input, same flags, same result, every time.
+:::
+
+## What Is cjcl?
+
+`cjcl` is the CLI frontend for [CJC-Lang](../introducing-cjc/index.qmd), a deterministic numerical programming language. One binary, zero external dependencies, 31 commands that span compilation, data engineering, profiling, and reproducibility verification.
+
+```bash
+cargo install cjc-lang
+cjcl --version   # CJC-Lang v0.1.4
+```
+
+Every command that produces output supports three output modes: `--color` (default, human-readable), `--plain` (no ANSI escapes, pipe-friendly), and `--json` (machine-readable). Most commands that execute code accept `--seed <N>` for deterministic RNG seeding (default: 42).
+
+## Quick Reference
+
+| Category | Commands |
+|---|---|
+| **Core Compiler** | `lex`, `parse`, `check`, `run`, `eval`, `repl` |
+| **Data & Pipeline** | `view`, `proof`, `flow`, `patch`, `seek`, `drift`, `forge` |
+| **Inspection & Diagnostics** | `inspect`, `schema`, `trace`, `mem`, `bench`, `pack`, `doctor` |
+| **Compiler Visibility** | `emit`, `explain`, `gc`, `nogc`, `audit`, `precision`, `lock`, `parity`, `test`, `ci` |
+
+---
+
+## Core Compiler Commands
+
+These six commands are the foundation — tokenize, parse, type-check, run, evaluate, and interact.
+
+### lex
+
+Tokenize a source file and print the token stream.
+
+```bash
+cjcl lex program.cjcl
+```
+
+Output shows each token's span, kind, and text. Useful for debugging parser issues or understanding how CJC-Lang sees your source code.
+
+### parse
+
+Parse a source file and pretty-print the AST.
+
+```bash
+cjcl parse program.cjcl
+```
+
+Shows the full abstract syntax tree after parsing. Use this when you suspect a precedence or grouping issue — the AST reveals exactly how the parser interpreted your expressions.
+
+### check
+
+Type-check a source file without running it.
+
+```bash
+cjcl check program.cjcl
+```
+
+Runs the full compilation pipeline (lex, parse, type-check) and reports errors and warnings. Exit code 0 means the program is well-typed.
+
+When used with validation flags, `check` becomes an output validator:
+
+```bash
+cjcl check output.csv --against expected.csv --tolerance 1e-6
+cjcl check output.csv --against expected.csv --schema-only
+cjcl check output.txt --expect "Hello, world!"
+```
+
+| Flag | What it does |
+|---|---|
+| `--against <file>` | Compare file against a reference |
+| `--tolerance <N>` | Numeric tolerance for comparison (default: 0.0) |
+| `--schema-only` | Compare only column structure, not values |
+| `--expect <string>` | Check file contents match a literal string |
+
+**When to use it:** Run `cjcl check` before committing to catch type errors early. Use the validation mode in CI to verify pipeline outputs haven't drifted.
+
+### run
+
+Execute a CJC-Lang program.
+
+```bash
+cjcl run program.cjcl
+cjcl run program.cjcl --seed 123
+cjcl run program.cjcl --mir-opt
+cjcl run program.cjcl --multi-file
+```
+
+This is the command you'll use most. By default it uses the AST tree-walk interpreter. Add `--mir-opt` to use the MIR register-machine executor with optimizations (control flow simplification + dead code elimination).
+
+| Flag | What it does |
+|---|---|
+| `--seed <N>` | RNG seed (default: 42) |
+| `--mir-opt` | MIR executor with optimizations |
+| `--mir-mono` | MIR executor with monomorphization |
+| `--multi-file` | Enable multi-file module resolution |
+| `--time` | Print execution time to stderr |
+| `--format json` | Wrap output in `{"ok":true,"output":[...]}` |
+
+**Exit codes:** 0 = success, 1 = runtime error, 2 = parse error, 3 = type error, 4 = parity failure.
+
+**When to use it:** This is your daily driver. Use `--mir-opt` for performance-sensitive code, `--multi-file` for projects split across modules.
+
+### eval
+
+Evaluate a single expression without creating a file.
+
+```bash
+cjcl eval "42 + 8"           # → 50
+cjcl eval "sqrt(2.0)"        # → 1.4142135623730951
+cjcl eval "42 + 8" --format json  # → {"ok":true,"output":["50"]}
+```
+
+The expression is wrapped in `fn main() { print(<expr>); }` and executed. Supports `--seed` and `--format`.
+
+**When to use it:** Quick calculations, testing builtins, scripting one-liners.
+
+### repl
+
+Start an interactive read-eval-print loop.
+
+```bash
+cjcl repl
+cjcl repl --seed 123
+```
+
+The REPL preserves variable bindings across lines and supports meta-commands:
+
+| Command | What it does |
+|---|---|
+| `:help` | Show all meta-commands |
+| `:type <expr>` | Show inferred type |
+| `:ast <expr>` | Pretty-print the AST |
+| `:mir <expr>` | Show MIR representation |
+| `:env` | Show current variable bindings |
+| `:time <expr>` | Time expression execution |
+| `:describe <expr>` | Statistical summary of a numeric array |
+| `:save <file>` | Save session history |
+| `:load <file>` | Load and execute a file |
+| `:reset` | Clear all bindings |
+| `:seed` | Show current RNG seed |
+| `:quit` | Exit |
+
+**When to use it:** Exploratory data analysis, testing ideas, learning the language.
+
+---
+
+## Data & Pipeline Commands
+
+Seven commands for working with data files, verifying reproducibility, and building deterministic pipelines.
+
+### view
+
+Deterministic directory listing with type-aware annotations.
+
+```bash
+cjcl view
+cjcl view ./data/ --recursive --hash
+```
+
+Lists files sorted lexicographically with color-coded types: `.cjcl` files show effect annotations (`#[nogc]`, `@pure`, `@timed`), `.snap` files show content hashes, data files (`.csv`, `.json`) are highlighted. Output is deterministic — same directory, same listing, every time.
+
+| Flag | What it does |
+|---|---|
+| `-r, --recursive` | Recurse into subdirectories |
+| `--hash` | Show SHA-256 hashes |
+| `--no-effects` | Hide effect annotations |
+| `--no-size` | Hide file sizes |
+
+**When to use it:** Quickly inventory a project's data files and verify effect annotations.
+
+### proof
+
+Verify that a program produces identical output across multiple runs.
+
+```bash
+cjcl proof program.cjcl
+cjcl proof program.cjcl --runs 10 --seeds 42,123,999
+cjcl proof program.cjcl --executor both --hash-output
+```
+
+Runs the program N times (default: 3) and checks that stdout, exit status, and GC behavior are identical. With `--seeds`, tests multiple seeds. With `--executor both`, verifies both the AST interpreter and MIR executor.
+
+| Flag | What it does |
+|---|---|
+| `-n, --runs <N>` | Number of iterations (default: 3) |
+| `--seed <N>` | Single seed to test (default: 42) |
+| `--seeds <N,M,...>` | Test multiple seeds |
+| `--executor eval\|mir\|both` | Which executor(s) to use |
+| `--fail-fast` | Stop on first divergence |
+| `--hash-output` | Show SHA-256 of stdout per run |
+| `--save-report <file>` | Save report as JSON |
+
+**When to use it:** Before publishing results. Before merging a PR that touches numerical code. In CI as a gate.
+
+### flow
+
+Streaming computation over CSV/TSV/JSONL data with O(ncols) memory.
+
+```bash
+cjcl flow sales.csv --op sum,mean,min,max
+cjcl flow sales.csv --op mean --columns revenue,cost --sort-by mean
+cjcl flow --tsv < data.tsv --top 5 --json
+```
+
+Processes data in a single pass without loading the entire file into memory. Uses Kahan summation for numeric stability and Welford's online algorithm for variance/stddev.
+
+| Flag | What it does |
+|---|---|
+| `--op <ops>` | Operations: `sum`, `mean`, `min`, `max`, `count`, `var`, `std` |
+| `-c, --columns <cols>` | Only process named columns |
+| `--sort-by <metric>` | Sort output by a metric |
+| `--top <N>` | Show only top N columns |
+| `--verify` | Run twice, confirm identical output |
+| `--tsv` | Tab-delimited input |
+| `-d, --delimiter <c>` | Custom delimiter |
+
+**When to use it:** Quick summary statistics on large CSVs without loading into a DataFrame. Verifying that a pipeline's output statistics match expectations.
+
+### patch
+
+Type-aware data transformation for CSV/TSV/JSONL files.
+
+```bash
+cjcl patch data.csv --nan-fill 0.0
+cjcl patch data.csv --impute salary --drop temp_col --rename old_name new_name
+cjcl patch data.csv --replace status "NA" "unknown" --plan
+```
+
+Streams the file and applies transformations: NaN replacement, mean imputation, column dropping, renaming, value replacement. With `--plan`, shows the transformation sequence without executing. With `--dry-run`, previews changes.
+
+| Flag | What it does |
+|---|---|
+| `--nan-fill <value>` | Replace NaN/NA/null with a value |
+| `--impute <column>` | Mean imputation for a column |
+| `--drop <column>` | Drop a column |
+| `--rename <from> <to>` | Rename a column |
+| `--replace <col> <from> <to>` | Replace exact values |
+| `--fill-empty <col> <value>` | Fill empty cells |
+| `--plan` | Show transformation plan |
+| `--dry-run` | Preview without writing |
+| `--in-place` | Modify file directly |
+| `-o, --output <file>` | Output file (default: stdout) |
+
+**When to use it:** Quick data cleaning before feeding into a CJC-Lang pipeline. Fixing nulls and renaming columns without writing a script.
+
+### seek
+
+Deterministic file discovery with content search.
+
+```bash
+cjcl seek . "*.cjcl"
+cjcl seek ./data --type csv --contains "revenue" --hash
+cjcl seek . --min-size 1MB --sort size --manifest
+```
+
+Recursively finds files matching patterns with stable, sorted output. With `--contains`, searches file contents. With `--manifest`, outputs `<hash> <size> <path>` per line — useful for reproducibility manifests.
+
+| Flag | What it does |
+|---|---|
+| `-t, --type <type>` | Filter by extension (cjcl, csv, snap, etc.) |
+| `--contains <pattern>` | Content search |
+| `--min-size <size>` | Minimum file size (supports KB/MB) |
+| `--max-size <size>` | Maximum file size |
+| `--max-depth <N>` | Recursion depth limit |
+| `--hash` | Show SHA-256 per file |
+| `--manifest` | Output hash, size, path per line |
+| `--sort name\|size\|modified` | Sort mode |
+| `--first <N>` | Limit results |
+| `--ignore-build-artifacts` | Skip target/, node_modules/, etc. |
+
+**When to use it:** Building reproducibility manifests. Finding all data files in a project. Content search across a codebase.
+
+### drift
+
+Compare two files with mathematical precision.
+
+```bash
+cjcl drift output_v1.csv output_v2.csv --tolerance 1e-6
+cjcl drift model_a.csv model_b.csv --stats-only --json
+cjcl drift old.txt new.txt --text --fail-on-diff
+```
+
+Supports text (line-by-line), numeric (element-wise), CSV (cell-by-cell), and JSONL diff modes. Reports max deviation, mean deviation, Frobenius norm, and per-cell differences.
+
+| Flag | What it does |
+|---|---|
+| `--tolerance <N>` | Numeric tolerance (default: 0.0) |
+| `--text, --numeric, --csv, --jsonl` | Diff mode (auto-detected from extension) |
+| `--max-diffs <N>` | Maximum differences to show (default: 50) |
+| `--fail-on-diff` | Exit 1 if any differences found |
+| `--fail-on-schema-diff` | Exit 1 if column names differ |
+| `--summary-only` | Only show summary metrics |
+| `--stats-only` | Only show statistical metrics |
+| `--report <file>` | Write full diff report to JSON |
+
+**When to use it:** Comparing model outputs between versions. Verifying that a code change didn't alter numerical results. Regression testing in CI.
+
+### forge
+
+Content-addressable pipeline runner.
+
+```bash
+cjcl forge run pipeline.cjcl
+cjcl forge verify pipeline.cjcl abc123def
+cjcl forge list
+cjcl forge show abc123
+cjcl forge clean
+```
+
+Executes a program, captures its output, and stores the result as a SHA-256 content-addressable artifact. With `verify`, checks that the current output matches an expected hash. Artifacts are stored in `.cjc-forge/`.
+
+| Subcommand | What it does |
+|---|---|
+| `run <file>` | Execute and store artifact |
+| `verify <file> <hash>` | Verify output matches hash |
+| `list` | List cached artifacts |
+| `show <hash-prefix>` | Show artifact details |
+| `clean` | Remove all cached artifacts |
+
+| Flag | What it does |
+|---|---|
+| `--seed <N>` | RNG seed (default: 42) |
+| `--cache-dir <path>` | Cache directory (default: `.cjc-forge/`) |
+
+**When to use it:** Pinning pipeline outputs for reproducibility. Verifying that a computation produces the exact same output on a different machine.
+
+---
+
+## Inspection & Diagnostics
+
+Seven commands for understanding what your code does, how fast it runs, and whether your project is healthy.
+
+### inspect
+
+Deep inspection of structured files without execution.
+
+```bash
+cjcl inspect data.csv
+cjcl inspect model.snap --deep
+cjcl inspect results.csv --compare expected.csv
+cjcl inspect data.parquet --schema-only
+```
+
+Inspects `.snap`, CSV/TSV, JSONL, `.cjcl`, Parquet, Arrow, SQLite, and model files. Reports structure, shape, column types, null counts, and basic statistics. With `--deep`, computes variance, standard deviation, and unique value counts.
+
+| Flag | What it does |
+|---|---|
+| `--deep` | Compute variance, unique values |
+| `--preview <N>` | Max preview lines (default: 5) |
+| `--header-only` | Show header/schema only |
+| `--compare <file>` | Compare schemas/hashes with another file |
+| `--hash` | Show SHA-256 hash |
+| `--manifest` | Output manifest format |
+
+**When to use it:** Understanding unfamiliar datasets. Verifying schema before piping into a pipeline. Quick sanity checks on model checkpoints.
+
+### schema
+
+Infer and validate data schemas.
+
+```bash
+cjcl schema data.csv
+cjcl schema data.csv --full --save schema.json
+cjcl schema data.csv --check schema.json
+cjcl schema data.csv --diff old_schema.json
+```
+
+Infers column types (null, bool, int, float, string, mixed), null counts, and unique value counts from CSV/TSV/JSONL/Parquet/Arrow/SQLite data. With `--save`, persists the schema. With `--check`, validates data against a saved schema. With `--diff`, shows schema drift.
+
+| Flag | What it does |
+|---|---|
+| `--full` | Show type distributions and sample values |
+| `--save <file>` | Save schema to JSON |
+| `--check <file>` | Validate against saved schema (exit 1 on mismatch) |
+| `--diff <file>` | Compare current vs saved schema |
+| `--sample <N>` | Limit to first N rows |
+| `--strict` | Treat warnings as errors |
+
+**When to use it:** Detecting schema drift between pipeline runs. Validating incoming data before processing. Documenting dataset structure.
+
+### trace
+
+Execution tracing across four phases: parse, static analysis, execution, and reporting.
+
+```bash
+cjcl trace program.cjcl
+cjcl trace program.cjcl --ast --verbose
+```
+
+Reports parse time, execution time, AST structure (function/struct/statement counts), effect annotations, and runtime behavior (output lines, GC collections).
+
+| Flag | What it does |
+|---|---|
+| `--ast` | Show AST details |
+| `--no-output` | Suppress program output |
+| `-v, --verbose` | Show function list |
+
+**When to use it:** Understanding the structure of a program. Getting a quick overview of parse and execution cost.
+
+### mem
+
+Runtime memory profiling.
+
+```bash
+cjcl mem program.cjcl
+cjcl mem program.cjcl --runs 5 --timeline --compare eval|mir
+```
+
+Executes a program and reports GC collection counts, heap object counts, output size, and execution time. With `--runs`, aggregates statistics across multiple executions. With `--compare`, runs both executors and shows side-by-side GC behavior.
+
+| Flag | What it does |
+|---|---|
+| `-n, --runs <N>` | Number of runs (default: 1) |
+| `--nogc` | Run NoGC verification first |
+| `--eval` / `--mir` | Choose executor |
+| `--peak-only` | Only report peak metrics |
+| `--timeline` | Show GC collections per run |
+| `--compare eval\|mir` | Compare executor GC behavior |
+| `--fail-on-gc` | Exit 1 if any GC collections occurred |
+| `--save-report <file>` | Save report as JSON |
+
+**When to use it:** Identifying GC pressure. Verifying that a `#[nogc]` function truly avoids allocations. Comparing memory behavior between executors.
+
+### bench
+
+Performance benchmarking with statistical rigor.
+
+```bash
+cjcl bench program.cjcl --runs 20 --warmup 5
+cjcl bench program.cjcl --compare eval|mir --markdown
+cjcl bench program.cjcl --baseline baseline.json --fail-if-slower-than 10
+```
+
+Runs the program N times with warmup iterations and reports mean, median, min, max, stddev, coefficient of variation, P95, and throughput.
+
+| Flag | What it does |
+|---|---|
+| `-n, --runs <N>` | Measured runs (default: 10) |
+| `--warmup <N>` | Warmup runs (default: 1) |
+| `--mir` / `--eval` | Choose executor |
+| `--compare eval\|mir` | Side-by-side executor comparison |
+| `--baseline <file>` | Load baseline for comparison |
+| `--save-baseline <file>` | Save results as baseline |
+| `--fail-if-slower-than <N>` | Exit 1 if >N% slower than baseline |
+| `--csv` / `--markdown` | Output as CSV or Markdown table |
+| `-v, --verbose` | Show per-run times |
+
+**When to use it:** Measuring performance before and after a change. Comparing executor backends. Setting up CI performance gates.
+
+### pack
+
+Bundle a program and its dependencies into a reproducible package.
+
+```bash
+cjcl pack pipeline.cjcl
+cjcl pack pipeline.cjcl --include extra_data.csv --verify
+cjcl pack --list pipeline.pack
+cjcl pack --repro-check pipeline.pack
+```
+
+Auto-discovers dependencies by scanning source for string literals matching packable extensions (`.snap`, `.csv`, `.tsv`, `.json`, `.lock`, `.toml`). Creates a directory with a MANIFEST containing per-file SHA-256 hashes.
+
+| Flag | What it does |
+|---|---|
+| `-o, --output <dir>` | Output directory |
+| `--include <file>` | Additional file to include (repeatable) |
+| `--verify` | Verify manifest after packing |
+| `--dry-run` | Preview without writing |
+| `--list <dir.pack>` | List package contents |
+| `--repro-check <dir>` | Re-hash and verify against manifest |
+| `--manifest-only` | Output MANIFEST only |
+
+**When to use it:** Sharing reproducible computations. Archiving pipeline artifacts. Verifying that a package hasn't been tampered with.
+
+### doctor
+
+Project-wide diagnostics.
+
+```bash
+cjcl doctor
+cjcl doctor ./my_project --fix --dry-run
+cjcl doctor --strict --report findings.json
+```
+
+Scans a directory for: parse errors, type errors, corrupt `.snap` files, ragged CSV rows, nondeterministic patterns (`HashMap`, `HashSet`, `rand()`, `time()`), large files, malformed JSONL, and invalid Parquet files.
+
+| Flag | What it does |
+|---|---|
+| `--fix` | Attempt automatic fixes |
+| `--dry-run` | Preview fixes without applying |
+| `--strict` | Exit 1 on warnings |
+| `--category <type>` | Filter by finding category |
+| `--report <file>` | Save findings to JSON |
+| `--summary-only` | Only show summary counts |
+| `--fail-on <level>` | Exit 1 at severity threshold |
+
+**When to use it:** Pre-commit health check. CI gate for project hygiene. Onboarding — run `doctor` to understand a new project's state.
+
+---
+
+## Compiler Visibility & Analysis
+
+Ten commands that expose the compiler's internals — intermediate representations, memory verification, numerical analysis, and dual-executor parity.
+
+### emit
+
+Dump intermediate representations at any pipeline stage.
+
+```bash
+cjcl emit program.cjcl --stage ast
+cjcl emit program.cjcl --stage hir
+cjcl emit program.cjcl --stage mir
+cjcl emit program.cjcl --stage mir --opt --diff
+```
+
+| Flag | What it does |
+|---|---|
+| `-s, --stage ast\|hir\|mir` | Pipeline stage (default: `mir`) |
+| `--opt` | Show optimized MIR |
+| `--diff` | Show both unoptimized and optimized MIR |
+
+**When to use it:** Understanding what the compiler does to your code. Debugging unexpected behavior by inspecting the IR. Verifying that optimizations preserve semantics.
+
+### explain
+
+Show the desugared form of a program after HIR lowering.
+
+```bash
+cjcl explain program.cjcl
+cjcl explain program.cjcl --verbose
+```
+
+Shows function signatures, effect annotations, struct definitions, and a summary table. With `--verbose`, shows full HIR bodies. Useful for understanding what syntactic sugar (for-loops, match expressions, closures) compiles down to.
+
+### gc
+
+Dedicated GC analysis with allocation timeline.
+
+```bash
+cjcl gc program.cjcl --runs 5 --verbose
+```
+
+Executes the program multiple times and reports GC pause count, collections per run, heap object peaks, COW copies, and execution time. Shows whether GC behavior is stable across runs.
+
+| Flag | What it does |
+|---|---|
+| `-n, --runs <N>` | Number of runs (default: 3) |
+| `-v, --verbose` | Show allocation timeline |
+
+**When to use it:** Identifying allocation hotspots. Verifying GC stability for determinism.
+
+### nogc
+
+Static verification that `#[nogc]` functions don't allocate.
+
+```bash
+cjcl nogc program.cjcl
+cjcl nogc program.cjcl --verbose
+```
+
+Lists all functions with their `#[nogc]` annotation status and runs the NoGC verifier. Reports per-function PASS/FAIL with violation details. Exit code 1 if any violations found.
+
+**When to use it:** Verifying that performance-critical functions avoid GC. Required for functions that will run in the NoGC execution mode.
+
+### audit
+
+Static analysis for floating-point anti-patterns.
+
+```bash
+cjcl audit program.cjcl
+cjcl audit program.cjcl --strict --category summation
+cjcl audit program.cjcl --baseline baseline.json --report findings.json
+```
+
+Detects: naive summation in loops (suggests `kahan_sum()`), float equality comparisons (suggests `approx_eq()`), unguarded division, and potential catastrophic cancellation. No execution required — purely static analysis.
+
+| Flag | What it does |
+|---|---|
+| `--strict` | Treat INFO as warnings, warnings as errors |
+| `--category <type>` | Filter: `summation`, `float-eq`, `division`, `cancellation` |
+| `--baseline <file>` | Only report new findings |
+| `--report <file>` | Save findings as JSON |
+| `--suggest-only` | Only show suggestions |
+
+**When to use it:** Code review for numerical code. CI gate for floating-point hygiene. Onboarding — audit unfamiliar numerical code before trusting its output.
+
+### precision
+
+Analyze whether f64 precision matters for your output.
+
+```bash
+cjcl precision program.cjcl
+cjcl precision program.cjcl --epsilon 1e-10 --fail-on-instability
+```
+
+Executes the program, extracts numeric values from output, compares f64 against f32-truncated values, and reports relative error per value. Verdict: STABLE (within epsilon) or SENSITIVE (exceeds epsilon).
+
+| Flag | What it does |
+|---|---|
+| `--epsilon <N>` | Comparison threshold (default: ~1.19e-7, f32 epsilon) |
+| `--fail-on-instability` | Exit 1 if any value exceeds epsilon |
+| `--summary-only` | Only show pass/fail |
+| `--report <file>` | Save report as JSON |
+
+**When to use it:** Deciding whether f32 is sufficient for a workload. Identifying precision-sensitive computations. CI gate for numerical stability.
+
+### lock
+
+Generate and verify deterministic lockfiles.
+
+```bash
+cjcl lock program.cjcl
+cjcl lock program.cjcl --verify
+cjcl lock program.cjcl --show
+cjcl lock program.cjcl --diff
+cjcl lock program.cjcl --executor mir --update
+```
+
+Creates a lockfile containing: source SHA-256 hash, seed, executor version, platform, and expected output SHA-256 hash. With `--verify`, checks that the current execution matches the recorded lockfile.
+
+| Flag | What it does |
+|---|---|
+| `--verify` | Verify current run against lockfile |
+| `--update` | Regenerate lockfile |
+| `--show` | Display lockfile contents |
+| `--diff` | Show field-by-field differences |
+| `--executor eval\|mir` | Which executor (default: eval) |
+
+**When to use it:** Pinning expected output for CI. Detecting when a code or platform change alters results. Cross-platform reproducibility verification.
+
+### parity
+
+Verify that both executors produce identical results.
+
+```bash
+cjcl parity program.cjcl
+cjcl parity program.cjcl --verbose --explain-mismatch
+cjcl parity program.cjcl --function my_function --save-report parity.json
+```
+
+Runs both the AST interpreter (v1) and MIR executor (v2) with the same seed and compares stdout, exit status, return value, and GC collections.
+
+| Flag | What it does |
+|---|---|
+| `-v, --verbose` | Show output from both executors |
+| `--explain-mismatch` | Show first divergent line with context |
+| `--function <name>` | Only test a specific function |
+| `--save-report <file>` | Save report as JSON |
+
+**When to use it:** After implementing a new language feature. Before shipping a compiler change. CI gate for executor equivalence.
+
+### test
+
+Native test runner for CJC-Lang test functions.
+
+```bash
+cjcl test program.cjcl
+cjcl test program.cjcl --filter "matrix"
+cjcl test program.cjcl --verbose
+```
+
+Discovers functions whose name starts with `test_` (or decorated with `@test`), runs them in alphabetical order with a fresh interpreter per test, and reports pass/fail with timing.
+
+| Flag | What it does |
+|---|---|
+| `--filter <pattern>` | Only run matching tests |
+| `-v, --verbose` | Show test output and errors |
+
+**When to use it:** Running tests written in CJC-Lang itself. Quick smoke tests without a Rust test harness.
+
+### ci
+
+Full CI diagnostic suite — runs five checks in sequence.
+
+```bash
+cjcl ci
+cjcl ci ./my_project --strict --json
+```
+
+Orchestrates: `doctor` (parse/type errors) → `proof` (determinism) → `parity` (dual-executor) → `test` (test functions) → `nogc` (static verification). Reports per-step pass/fail.
+
+| Flag | What it does |
+|---|---|
+| `--seed <N>` | Base RNG seed (default: 42) |
+| `--strict` | Exit 1 on warnings |
+
+**When to use it:** One command in your CI pipeline that checks everything. The nuclear option for project health.
+
+---
+
+## Putting It Together
+
+The real power of the CLI is in composition. Here are four workflows I use regularly:
+
+### "I just wrote new code"
+
+```bash
+cjcl check program.cjcl          # Type errors?
+cjcl run program.cjcl             # Does it work?
+cjcl parity program.cjcl          # Same result on both executors?
+```
+
+### "My pipeline is slow"
+
+```bash
+cjcl trace program.cjcl           # Where does time go?
+cjcl mem program.cjcl --timeline  # GC pressure?
+cjcl bench program.cjcl --runs 20 --compare eval|mir  # Which executor is faster?
+```
+
+### "I'm shipping a reproducible artifact"
+
+```bash
+cjcl lock program.cjcl            # Pin expected output
+cjcl pack program.cjcl --verify   # Bundle with manifest
+cjcl proof program.cjcl --runs 10 --seeds 42,123,999  # Determinism across seeds
+```
+
+### "The numbers don't look right"
+
+```bash
+cjcl audit program.cjcl           # Float anti-patterns?
+cjcl precision program.cjcl       # f64 vs f32 sensitivity?
+cjcl drift output_v1.csv output_v2.csv --tolerance 1e-6  # What changed?
+```
+
+---
+
+## Global Flags
+
+These flags work with any command:
+
+| Flag | What it does |
+|---|---|
+| `--seed <N>` | RNG seed (default: 42) |
+| `--reproducible` | Enable reproducibility mode |
+| `--time` | Print execution time to stderr |
+| `--color` / `--no-color` | Control ANSI color output |
+| `--diagnostic-format rich\|short` | Error display format |
+| `--help, -h` | Print help |
+| `--version, -V` | Print version |
+
+::: {.callout-note appearance="minimal"}
+CJC-Lang is open source and available on [crates.io](https://crates.io/crates/cjc-lang). All 31 commands are included in the single `cjcl` binary. Run `cjcl <command> --help` for command-specific help.
+:::

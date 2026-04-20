@@ -27,9 +27,20 @@ fn add(a: i64, b: i64) -> i64 {
 
 Without a return type, the function is implicitly `()` (unit). The last expression in a block is the return value — see [[Expressions and Statements]].
 
+**Default parameters** (shipped v0.1.7):
+
+```cjcl
+fn solve(x: f64, tol: f64 = 1e-6) -> f64 { ... }
+
+solve(3.0);        // tol defaults to 1e-6
+solve(3.0, 1e-9);  // tol overridden
+```
+
+Defaults are evaluated in the caller's scope on each call and lower through AST → HIR → MIR into a default-insertion step at the call site. Variadic parameters **cannot** have a default value — `fn bad(...args: f64 = 1.0)` is a parse error. See [[Default Parameters]].
+
+**Variadic parameters** (`fn f(...args: f64)`) — shipped. See [[Variadic Functions]].
+
 **Not yet supported:**
-- Default parameters (`fn f(x: f64, tol: f64 = 1e-6)`) — [[Roadmap]].
-- Variadic parameters (`fn f(...args: f64)`) — [[Roadmap]].
 - Decorators (`@log fn train(...)`) — [[Roadmap]].
 
 ## Variables
@@ -68,7 +79,13 @@ while count < 100 { count += 1; }
 for i in 0..10 { print(i); }
 ```
 
-**Important subtlety**: `if` is currently a **statement**, not an expression. You cannot write `let x = if cond { a } else { b };` — that is on the [[Roadmap]] as one of the priority features. Note: the CLAUDE.md prompt tells contributors that `if` should *become* an expression.
+`if` works as **both a statement and an expression** (verified in both executors):
+
+```cjcl
+let x: i64 = if 1 < 2 { 10 } else { 20 };
+```
+
+See [[If as Expression]].
 
 **Syntactic rule**: no semicolons after `while {}`, `if {}`, or `for {}` blocks inside function bodies.
 

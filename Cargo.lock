@@ -374,6 +374,7 @@ version = "0.1.5"
 name = "cjc-runtime"
 version = "0.1.5"
 dependencies = [
+ "cjc-regex",
  "cjc-repro",
  "rayon",
 ]

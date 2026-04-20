@@ -970,6 +970,13 @@ impl Parser {
                     }
                     j += 1;
                 }
+                // If we ran out of bytes without finding a closing `}`,
+                // treat the `{` as a literal character (it came from `{{` escape).
+                if depth > 0 {
+                    literal.push('{');
+                    i += 1;
+                    continue;
+                }
                 let hole_end = j - 1; // index of the closing `}`
                 let expr_src = &raw[hole_start..hole_end];
 

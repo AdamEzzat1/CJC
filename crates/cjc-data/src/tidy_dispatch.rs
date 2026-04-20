@@ -16,7 +16,7 @@ use std::any::Any;
 use cjc_runtime::value::Value;
 
 use crate::{
-    ArrangeKey, Column, DExpr, DBinOp, DataFrame, GroupedTidyView,
+    ArrangeKey, Column, CsvConfig, CsvReader, DExpr, DBinOp, DataFrame, GroupedTidyView,
     TidyAgg, TidyView,
 };
 
@@ -151,7 +151,7 @@ pub fn dispatch_tidy_method(
         }
 
         // -- joins ----------------------------------------------------------
-        "inner_join" | "left_join" | "semi_join" | "anti_join" => {
+        "inner_join" | "left_join" | "semi_join" | "anti_join" | "full_join" => {
             dispatch_join(view, args, method)
         }
 
@@ -686,6 +686,11 @@ fn dispatch_join(
         "anti_join" => {
             let new_view = view.anti_join(other, &on_pairs).map_err(|e| format!("{e}"))?;
             Ok(Some(wrap_view(new_view)))
+        }
+        "full_join" => {
+            let suffix = crate::JoinSuffix::default();
+            let nullable_frame = view.full_join(other, &on_pairs, &suffix).map_err(|e| format!("{e}"))?;
+            Ok(Some(wrap_view(nullable_frame.to_tidy_view_filled())))
         }
         _ => Ok(None),
     }
@@ -1244,7 +1249,309 @@ pub fn dispatch_tidy_builtin(name: &str, args: &[Value]) -> Result<Option<Value>
             }
         }
 
+        // =====================================================================
+        //  DataFrame free-standing builtins (ITEM 1)
+        //
+        //  These wrap TidyView method calls so CJC code can write:
+        //    pivot_wider(df, ["id"], "measure", "value")
+        //  instead of (or in addition to) the method form:
+        //    df.pivot_wider(["id"], "measure", "value")
+        //
+        //  All take a `Value::TidyView` as their first argument and re-use the
+        //  existing method dispatch internally. This keeps the implementation a
+        //  single source of truth.
+        // =====================================================================
+
+        // ------------------------------------------------------------------
+        // df_read_csv(path) or df_read_csv(path, delimiter) → TidyView
+        // ------------------------------------------------------------------
+        "df_read_csv" => {
+            if args.len() < 1 || args.len() > 2 {
+                return Err("df_read_csv requires 1-2 arguments (path[, delimiter])".into());
+            }
+            let path = match &args[0] {
+                Value::String(s) => s.as_ref().clone(),
+                _ => return Err(format!("df_read_csv: path must be String, got {}", args[0].type_name())),
+            };
+            let delim: u8 = if args.len() == 2 {
+                match &args[1] {
+                    Value::String(s) if !s.is_empty() => s.as_bytes()[0],
+                    _ => return Err("df_read_csv: delimiter must be a non-empty String".into()),
+                }
+            } else {
+                b','
+            };
+            let bytes = std::fs::read(&path)
+                .map_err(|e| format!("df_read_csv: {}", e))?;
+            let config = CsvConfig { delimiter: delim, ..CsvConfig::default() };
+            let df = CsvReader::new(config)
+                .parse(&bytes)
+                .map_err(|e| format!("df_read_csv: {}", e))?;
+            Ok(Some(wrap_view(TidyView::from_df(df))))
+        }
+
+        // ------------------------------------------------------------------
+        // pivot_wider(df, id_cols, names_from, values_from) → TidyView
+        // ------------------------------------------------------------------
+        "pivot_wider" => {
+            if args.len() != 4 {
+                return Err(
+                    "pivot_wider requires 4 arguments (df, id_cols, names_from, values_from)".into(),
+                );
+            }
+            let view = value_to_tidy_view(&args[0])?;
+            let id_cols = value_to_str_vec(&args[1])?;
+            let id_refs: Vec<&str> = id_cols.iter().map(|s| s.as_str()).collect();
+            let names_from = value_to_string(&args[2])?;
+            let values_from = value_to_string(&args[3])?;
+            let nullable_frame = view
+                .pivot_wider(&id_refs, &names_from, &values_from)
+                .map_err(|e| format!("{e}"))?;
+            Ok(Some(wrap_view(nullable_frame.to_tidy_view_filled())))
+        }
+
+        // ------------------------------------------------------------------
+        // pivot_longer(df, cols, names_to, values_to) → TidyView
+        // ------------------------------------------------------------------
+        "pivot_longer" => {
+            if args.len() < 3 || args.len() > 4 {
+                return Err(
+                    "pivot_longer requires 3-4 arguments (df, cols, names_to[, values_to])".into(),
+                );
+            }
+            let view = value_to_tidy_view(&args[0])?;
+            let cols = value_to_str_vec(&args[1])?;
+            let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
+            let names_to = value_to_string(&args[2])?;
+            let values_to = if args.len() == 4 {
+                value_to_string(&args[3])?
+            } else {
+                "value".to_string()
+            };
+            let frame = view
+                .pivot_longer(&col_refs, &names_to, &values_to)
+                .map_err(|e| format!("{e}"))?;
+            Ok(Some(wrap_view(frame.view())))
+        }
+
+        // ------------------------------------------------------------------
+        // df_distinct(df) or df_distinct(df, cols) → TidyView
+        // ------------------------------------------------------------------
+        "df_distinct" => {
+            if args.is_empty() || args.len() > 2 {
+                return Err("df_distinct requires 1-2 arguments (df[, cols])".into());
+            }
+            let view = value_to_tidy_view(&args[0])?;
+            let cols = if args.len() == 2 {
+                value_to_str_vec(&args[1])?
+            } else {
+                view.column_names().iter().map(|s| s.to_string()).collect()
+            };
+            let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
+            let new_view = view.distinct(&col_refs).map_err(|e| format!("{e}"))?;
+            Ok(Some(wrap_view(new_view)))
+        }
+
+        // ------------------------------------------------------------------
+        // df_rename(df, old_name, new_name) → TidyView
+        // ------------------------------------------------------------------
+        "df_rename" => {
+            if args.len() != 3 {
+                return Err("df_rename requires 3 arguments (df, old_name, new_name)".into());
+            }
+            let view = value_to_tidy_view(&args[0])?;
+            let old = value_to_string(&args[1])?;
+            let new = value_to_string(&args[2])?;
+            let pair_refs: Vec<(&str, &str)> = vec![(&old, &new)];
+            let new_view = view.rename(&pair_refs).map_err(|e| format!("{e}"))?;
+            Ok(Some(wrap_view(new_view)))
+        }
+
+        // ------------------------------------------------------------------
+        // df_anti_join(df1, df2, on) → TidyView
+        // df_semi_join(df1, df2, on) → TidyView
+        // df_full_join(df1, df2, on) → TidyView
+        //
+        // `on` = String (single key, same name in both) or
+        //        Array of Strings (multi-key, same names in both).
+        // ------------------------------------------------------------------
+        "df_anti_join" | "df_semi_join" | "df_full_join" => {
+            if args.len() != 3 {
+                return Err(format!(
+                    "{name} requires 3 arguments (df1, df2, on)"
+                ));
+            }
+            let left = value_to_tidy_view(&args[0])?;
+            let right_rc = match &args[1] {
+                Value::TidyView(rc) => rc,
+                _ => return Err(format!("{name}: second argument must be a TidyView")),
+            };
+            let right_inner: &Rc<dyn std::any::Any> = right_rc;
+            let right = right_inner
+                .downcast_ref::<TidyView>()
+                .ok_or_else(|| "internal: TidyView downcast failed".to_string())?;
+            // Parse `on`: single string or array of strings
+            let on_keys: Vec<String> = match &args[2] {
+                Value::String(s) => vec![s.as_ref().clone()],
+                Value::Array(arr) => arr
+                    .iter()
+                    .map(|v| match v {
+                        Value::String(s) => Ok(s.as_ref().clone()),
+                        _ => Err(format!("on: expected String keys, got {}", v.type_name())),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                _ => return Err(format!("{name}: `on` must be String or Array of Strings")),
+            };
+            let on_pairs: Vec<(&str, &str)> = on_keys.iter().map(|k| (k.as_str(), k.as_str())).collect();
+            match name {
+                "df_anti_join" => {
+                    let new_view = left.anti_join(right, &on_pairs).map_err(|e| format!("{e}"))?;
+                    Ok(Some(wrap_view(new_view)))
+                }
+                "df_semi_join" => {
+                    let new_view = left.semi_join(right, &on_pairs).map_err(|e| format!("{e}"))?;
+                    Ok(Some(wrap_view(new_view)))
+                }
+                "df_full_join" => {
+                    let suffix = crate::JoinSuffix::default();
+                    let nullable_frame = left.full_join(right, &on_pairs, &suffix)
+                        .map_err(|e| format!("{e}"))?;
+                    Ok(Some(wrap_view(nullable_frame.to_tidy_view_filled())))
+                }
+                _ => Ok(None),
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // df_fill_na(df, col_name, fill_val) → TidyView
+        //
+        // Fills NA/null values in the specified column with `fill_val`.
+        // Works by materializing, patching the column, and re-wrapping.
+        // ------------------------------------------------------------------
+        "df_fill_na" => {
+            if args.len() != 3 {
+                return Err("df_fill_na requires 3 arguments (df, col_name, fill_val)".into());
+            }
+            let view = value_to_tidy_view(&args[0])?;
+            let col_name = value_to_string(&args[1])?;
+            let fill_val = &args[2];
+
+            let mut df = view.materialize().map_err(|e| format!("{e}"))?;
+            let col_idx = df.columns.iter().position(|(n, _)| n == &col_name)
+                .ok_or_else(|| format!("df_fill_na: column '{}' not found", col_name))?;
+
+            let filled_col = match &df.columns[col_idx].1 {
+                Column::Int(v) => {
+                    // Int columns have no inline NA representation in the
+                    // dense storage; NullableColumn nulls are materialised as 0
+                    // by to_tidy_view_filled.  Accept the argument for API
+                    // consistency but leave the column unchanged.
+                    let _fill = match fill_val {
+                        Value::Int(i) => *i,
+                        Value::Float(f) => *f as i64,
+                        _ => return Err("df_fill_na: fill value must be numeric for Int column".into()),
+                    };
+                    Column::Int(v.clone())
+                }
+                Column::Float(v) => {
+                    let fill = match fill_val {
+                        Value::Float(f) => *f,
+                        Value::Int(i) => *i as f64,
+                        _ => return Err("df_fill_na: fill value must be numeric for Float column".into()),
+                    };
+                    Column::Float(v.iter().map(|&x| if x.is_nan() { fill } else { x }).collect())
+                }
+                Column::Str(v) => {
+                    let fill = match fill_val {
+                        Value::String(s) => s.as_ref().clone(),
+                        other => format!("{other}"),
+                    };
+                    Column::Str(v.iter().map(|s| {
+                        if s == "NA" || s.is_empty() { fill.clone() } else { s.clone() }
+                    }).collect())
+                }
+                Column::Bool(v) => Column::Bool(v.clone()),
+                Column::Categorical { levels, codes } => Column::Categorical { levels: levels.clone(), codes: codes.clone() },
+                Column::DateTime(v) => Column::DateTime(v.clone()),
+            };
+            df.columns[col_idx].1 = filled_col;
+            Ok(Some(wrap_view(TidyView::from_df(df))))
+        }
+
+        // ------------------------------------------------------------------
+        // df_drop_na(df) or df_drop_na(df, cols) → TidyView
+        //
+        // Drops rows that contain NA in the specified columns (all by default).
+        // Uses a filter predicate over the visible rows.
+        // ------------------------------------------------------------------
+        "df_drop_na" => {
+            if args.is_empty() || args.len() > 2 {
+                return Err("df_drop_na requires 1-2 arguments (df[, cols])".into());
+            }
+            let view = value_to_tidy_view(&args[0])?;
+            let target_cols: Vec<String> = if args.len() == 2 {
+                value_to_str_vec(&args[1])?
+            } else {
+                view.column_names().iter().map(|s| s.to_string()).collect()
+            };
+
+            // Materialise once, then filter row by row
+            let df = view.materialize().map_err(|e| format!("{e}"))?;
+            let nrows = df.nrows();
+
+            // For each target column, find which rows are NA
+            let mut keep = vec![true; nrows];
+            for col_name in &target_cols {
+                if let Some(col) = df.get_column(col_name) {
+                    for r in 0..nrows {
+                        if !keep[r] { continue; }
+                        let na = match col {
+                            Column::Float(v) => v[r].is_nan(),
+                            Column::Str(v) => v[r] == "NA" || v[r].is_empty(),
+                            _ => false,
+                        };
+                        if na { keep[r] = false; }
+                    }
+                } else {
+                    return Err(format!("df_drop_na: column '{}' not found", col_name));
+                }
+            }
+
+            // Build new DataFrame from kept rows
+            let mut new_cols: Vec<(String, Column)> = Vec::with_capacity(df.columns.len());
+            for (name, col) in &df.columns {
+                let new_col = match col {
+                    Column::Int(v)       => Column::Int(v.iter().enumerate().filter(|(r, _)| keep[*r]).map(|(_, x)| *x).collect()),
+                    Column::Float(v)     => Column::Float(v.iter().enumerate().filter(|(r, _)| keep[*r]).map(|(_, x)| *x).collect()),
+                    Column::Str(v)       => Column::Str(v.iter().enumerate().filter(|(r, _)| keep[*r]).map(|(_, x)| x.clone()).collect()),
+                    Column::Bool(v)      => Column::Bool(v.iter().enumerate().filter(|(r, _)| keep[*r]).map(|(_, x)| *x).collect()),
+                    Column::DateTime(v)  => Column::DateTime(v.iter().enumerate().filter(|(r, _)| keep[*r]).map(|(_, x)| *x).collect()),
+                    Column::Categorical { levels, codes } => Column::Categorical {
+                        levels: levels.clone(),
+                        codes: codes.iter().enumerate().filter(|(r, _)| keep[*r]).map(|(_, x)| *x).collect(),
+                    },
+                };
+                new_cols.push((name.clone(), new_col));
+            }
+            let new_df = DataFrame::from_columns(new_cols)
+                .map_err(|e| format!("df_drop_na: {e}"))?;
+            Ok(Some(wrap_view(TidyView::from_df(new_df))))
+        }
+
         _ => Ok(None),
+    }
+}
+
+/// Helper: extract a `&TidyView` reference from a `Value::TidyView`.
+fn value_to_tidy_view(v: &Value) -> Result<&TidyView, String> {
+    match v {
+        Value::TidyView(rc) => rc
+            .downcast_ref::<TidyView>()
+            .ok_or_else(|| "internal: TidyView downcast failed".to_string()),
+        _ => Err(format!(
+            "expected TidyView (use df.view() to convert a DataFrame), got {}",
+            v.type_name()
+        )),
     }
 }
 

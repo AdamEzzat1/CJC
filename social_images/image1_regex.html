@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1200, initial-scale=1.0">
+<title>CJC-Lang: Regex + Stringr</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 1200px;
+    min-height: 1200px;
+    background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    color: #e0e0e0;
+    padding: 48px;
+  }
+
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 36px;
+  }
+
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .logo-icon {
+    width: 56px;
+    height: 56px;
+    background: linear-gradient(135deg, #00d2ff, #7b2ff7);
+    border-radius: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 28px;
+    font-weight: 900;
+    color: #fff;
+    letter-spacing: -1px;
+  }
+
+  .logo-text {
+    font-size: 32px;
+    font-weight: 700;
+    color: #fff;
+  }
+
+  .badge {
+    background: rgba(123, 47, 247, 0.3);
+    border: 1px solid rgba(123, 47, 247, 0.6);
+    border-radius: 20px;
+    padding: 8px 20px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #c4a0ff;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+
+  h1 {
+    font-size: 42px;
+    font-weight: 800;
+    color: #fff;
+    margin-bottom: 8px;
+    line-height: 1.2;
+  }
+
+  .subtitle {
+    font-size: 20px;
+    color: #a0a0c0;
+    margin-bottom: 36px;
+    line-height: 1.5;
+  }
+
+  .code-panel {
+    background: #1a1a2e;
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 16px;
+    margin-bottom: 24px;
+    overflow: hidden;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+  }
+
+  .code-header {
+    background: rgba(255,255,255,0.05);
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+
+  .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .dot-red { background: #ff5f57; }
+  .dot-yellow { background: #ffbd2e; }
+  .dot-green { background: #28c840; }
+
+  .code-title {
+    margin-left: 12px;
+    font-size: 14px;
+    color: #888;
+    font-weight: 500;
+  }
+
+  .code-body {
+    padding: 24px 28px;
+    display: flex;
+    gap: 32px;
+  }
+
+  .code-section {
+    flex: 1;
+  }
+
+  .section-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: #7b2ff7;
+    margin-bottom: 12px;
+  }
+
+  pre {
+    font-family: 'Cascadia Code', 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 14.5px;
+    line-height: 1.65;
+    white-space: pre;
+  }
+
+  .kw { color: #c678dd; }        /* keywords: let, fn, if, return */
+  .fn-name { color: #61afef; }   /* function names */
+  .str { color: #98c379; }       /* strings */
+  .regex { color: #e5c07b; }     /* regex patterns */
+  .comment { color: #5c6370; font-style: italic; }
+  .type { color: #e06c75; }      /* types */
+  .op { color: #56b6c2; }        /* operators */
+  .bool { color: #d19a66; }      /* booleans */
+  .num { color: #d19a66; }       /* numbers */
+
+  .output-panel {
+    background: #0d1117;
+    border: 1px solid rgba(0, 210, 255, 0.2);
+    border-radius: 16px;
+    margin-bottom: 24px;
+    overflow: hidden;
+  }
+
+  .output-header {
+    background: rgba(0, 210, 255, 0.08);
+    padding: 10px 20px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #00d2ff;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    border-bottom: 1px solid rgba(0, 210, 255, 0.15);
+  }
+
+  .output-body {
+    padding: 20px 28px;
+    font-family: 'Cascadia Code', 'JetBrains Mono', monospace;
+    font-size: 14px;
+    line-height: 1.6;
+    color: #7ee787;
+  }
+
+  .output-line { color: #7ee787; }
+  .output-label { color: #58a6ff; }
+  .output-dim { color: #6e7681; }
+
+  .features-row {
+    display: flex;
+    gap: 16px;
+    margin-top: 8px;
+  }
+
+  .feature-chip {
+    background: rgba(0, 210, 255, 0.1);
+    border: 1px solid rgba(0, 210, 255, 0.25);
+    border-radius: 10px;
+    padding: 12px 18px;
+    flex: 1;
+    text-align: center;
+  }
+
+  .feature-chip .num-val {
+    font-size: 28px;
+    font-weight: 800;
+    color: #00d2ff;
+    display: block;
+  }
+
+  .feature-chip .num-label {
+    font-size: 12px;
+    color: #8b949e;
+    margin-top: 4px;
+    display: block;
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">
+    <div class="logo-icon">CJC</div>
+    <div class="logo-text">CJC-Lang</div>
+  </div>
+  <div class="badge">Perl-style NFA Regex</div>
+</div>
+
+<h1>Regex + Stringr Integration</h1>
+<p class="subtitle">Thompson NFA engine with O(n&middot;m) worst-case &mdash; no catastrophic backtracking.<br>14 stringr functions, 5 regex flags (i/m/s/x/g), all integrated with TidyView.</p>
+
+<div class="code-panel">
+  <div class="code-header">
+    <span class="dot dot-red"></span>
+    <span class="dot dot-yellow"></span>
+    <span class="dot dot-green"></span>
+    <span class="code-title">regex_demo.cjcl</span>
+  </div>
+  <div class="code-body">
+    <div class="code-section">
+      <div class="section-label">Pattern Matching</div>
+      <pre><span class="comment">// Perl-style regex with ~= operator</span>
+<span class="kw">let</span> email = <span class="str">"alice@company.com"</span>;
+<span class="fn-name">print</span>(email <span class="op">~=</span> <span class="regex">/\w+@\w+\.\w+/</span>);
+<span class="comment">// → true</span>
+
+<span class="comment">// Date validation</span>
+<span class="kw">let</span> date = <span class="str">"2026-04-15"</span>;
+<span class="fn-name">print</span>(date <span class="op">~=</span> <span class="regex">/\d\d\d\d-\d\d-\d\d/</span>);
+<span class="comment">// → true</span>
+
+<span class="comment">// Case-insensitive flag</span>
+<span class="kw">let</span> text = <span class="str">"Hello World"</span>;
+<span class="fn-name">print</span>(text <span class="op">~=</span> <span class="regex">/hello/i</span>);
+<span class="comment">// → true</span>
+
+<span class="comment">// Not-match operator</span>
+<span class="kw">let</span> safe = <span class="str">"clean input"</span>;
+<span class="fn-name">print</span>(safe <span class="op">!~</span> <span class="regex">/[&lt;&gt;]/</span>);
+<span class="comment">// → true</span>
+
+<span class="comment">// Regex in conditionals</span>
+<span class="kw">let</span> log = <span class="str">"ERROR: connection timeout"</span>;
+<span class="kw">if</span> log <span class="op">~=</span> <span class="regex">/^ERROR/</span> {
+    <span class="fn-name">print</span>(<span class="str">"Error detected in log!"</span>);
+}</pre>
+    </div>
+    <div class="code-section">
+      <div class="section-label">Regex in Functions</div>
+      <pre><span class="comment">// Type-safe validation functions</span>
+<span class="kw">fn</span> <span class="fn-name">validate_email</span>(s: <span class="type">String</span>) -> <span class="type">Bool</span> {
+    <span class="kw">return</span> s <span class="op">~=</span> <span class="regex">/\w+@\w+\.\w+/</span>;
+}
+
+<span class="kw">fn</span> <span class="fn-name">is_numeric</span>(s: <span class="type">String</span>) -> <span class="type">Bool</span> {
+    <span class="kw">return</span> s <span class="op">~=</span> <span class="regex">/^\d+$/</span>;
+}
+
+<span class="fn-name">print</span>(<span class="fn-name">validate_email</span>(<span class="str">"bob@example.org"</span>));
+<span class="comment">// → true</span>
+<span class="fn-name">print</span>(<span class="fn-name">validate_email</span>(<span class="str">"not-an-email"</span>));
+<span class="comment">// → false</span>
+
+<span class="comment">// Stringr functions (tidyverse-style)</span>
+<span class="fn-name">print</span>(<span class="fn-name">str_replace</span>(<span class="str">"hello world"</span>, <span class="str">"world"</span>, <span class="str">"CJC-Lang"</span>));
+<span class="comment">// → hello CJC-Lang</span>
+
+<span class="fn-name">print</span>(<span class="fn-name">str_detect</span>(<span class="str">"data science"</span>, <span class="str">"science"</span>));
+<span class="comment">// → true</span>
+
+<span class="fn-name">print</span>(<span class="fn-name">str_count</span>(<span class="str">"abracadabra"</span>, <span class="str">"a"</span>));
+<span class="comment">// → 5</span>
+
+<span class="fn-name">print</span>(<span class="fn-name">str_sub</span>(<span class="str">"CJC-Lang"</span>, <span class="num">0</span>, <span class="num">3</span>));
+<span class="comment">// → CJC</span></pre>
+    </div>
+  </div>
+</div>
+
+<div class="output-panel">
+  <div class="output-header">▶ Terminal Output &mdash; cjcl run regex_demo.cjcl</div>
+  <div class="output-body">
+<pre><span class="output-line">true</span>                          <span class="output-dim">← email matches \w+@\w+\.\w+</span>
+<span class="output-line">true</span>                          <span class="output-dim">← date matches \d\d\d\d-\d\d-\d\d</span>
+<span class="output-line">true</span>                          <span class="output-dim">← case-insensitive /hello/i</span>
+<span class="output-line">true</span>                          <span class="output-dim">← !~ no special chars</span>
+<span class="output-line">Error detected in log!</span>        <span class="output-dim">← conditional on ^ERROR</span>
+<span class="output-line">true</span>                          <span class="output-dim">← bob@example.org valid</span>
+<span class="output-line">false</span>                         <span class="output-dim">← "not-an-email" invalid</span>
+<span class="output-line">hello CJC-Lang</span>                <span class="output-dim">← str_replace</span>
+<span class="output-line">true</span>                          <span class="output-dim">← str_detect</span>
+<span class="output-line">5</span>                             <span class="output-dim">← str_count("abracadabra","a")</span>
+<span class="output-line">CJC</span>                           <span class="output-dim">← str_sub(0..3)</span></pre>
+  </div>
+</div>
+
+<div class="features-row">
+  <div class="feature-chip">
+    <span class="num-val">14</span>
+    <span class="num-label">Stringr Functions</span>
+  </div>
+  <div class="feature-chip">
+    <span class="num-val">5</span>
+    <span class="num-label">Regex Flags</span>
+  </div>
+  <div class="feature-chip">
+    <span class="num-val">O(n&middot;m)</span>
+    <span class="num-label">Worst-Case Guarantee</span>
+  </div>
+  <div class="feature-chip">
+    <span class="num-val">0</span>
+    <span class="num-label">Backtracking Risk</span>
+  </div>
+  <div class="feature-chip">
+    <span class="num-val">2</span>
+    <span class="num-label">Executors (Parity)</span>
+  </div>
+</div>
+
+</body>
+</html>

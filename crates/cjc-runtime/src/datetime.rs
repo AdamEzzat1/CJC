@@ -174,6 +174,194 @@ pub fn days_in_month(year: i64, month: i64) -> i64 {
 }
 
 // ---------------------------------------------------------------------------
+// Extended date API: parse_date, date_format, date_diff with units, date_add
+// ---------------------------------------------------------------------------
+
+/// Parse a date string according to a format specification.
+///
+/// Supported format tokens: `%Y` (4-digit year), `%m` (month), `%d` (day),
+/// `%H` (hour), `%M` (minute), `%S` (second).
+///
+/// Returns epoch milliseconds on success, 0 on parse failure.
+pub fn parse_date(s: &str, fmt: &str) -> i64 {
+    let mut year: i64 = 1970;
+    let mut month: i64 = 1;
+    let mut day: i64 = 1;
+    let mut hour: i64 = 0;
+    let mut minute: i64 = 0;
+    let mut second: i64 = 0;
+
+    let sbytes = s.as_bytes();
+    let fbytes = fmt.as_bytes();
+    let mut si = 0usize;
+    let mut fi = 0usize;
+
+    while fi < fbytes.len() && si < sbytes.len() {
+        if fbytes[fi] == b'%' && fi + 1 < fbytes.len() {
+            let spec = fbytes[fi + 1];
+            fi += 2;
+            match spec {
+                b'Y' => {
+                    if let Some((val, consumed)) = parse_int_n(sbytes, si, 4) {
+                        year = val;
+                        si += consumed;
+                    } else {
+                        return 0;
+                    }
+                }
+                b'm' => {
+                    if let Some((val, consumed)) = parse_int_max(sbytes, si, 2) {
+                        month = val;
+                        si += consumed;
+                    } else {
+                        return 0;
+                    }
+                }
+                b'd' => {
+                    if let Some((val, consumed)) = parse_int_max(sbytes, si, 2) {
+                        day = val;
+                        si += consumed;
+                    } else {
+                        return 0;
+                    }
+                }
+                b'H' => {
+                    if let Some((val, consumed)) = parse_int_max(sbytes, si, 2) {
+                        hour = val;
+                        si += consumed;
+                    } else {
+                        return 0;
+                    }
+                }
+                b'M' => {
+                    if let Some((val, consumed)) = parse_int_max(sbytes, si, 2) {
+                        minute = val;
+                        si += consumed;
+                    } else {
+                        return 0;
+                    }
+                }
+                b'S' => {
+                    if let Some((val, consumed)) = parse_int_max(sbytes, si, 2) {
+                        second = val;
+                        si += consumed;
+                    } else {
+                        return 0;
+                    }
+                }
+                _ => {
+                    // Unknown specifier — treat as literal %X
+                    if si < sbytes.len() && sbytes[si] == spec {
+                        si += 1;
+                    } else {
+                        return 0;
+                    }
+                }
+            }
+        } else {
+            // Literal character — must match
+            if sbytes[si] == fbytes[fi] {
+                si += 1;
+                fi += 1;
+            } else {
+                return 0;
+            }
+        }
+    }
+
+    datetime_from_parts(year, month, day, hour, minute, second)
+}
+
+/// Format an epoch-millisecond timestamp according to a format specification.
+///
+/// Supported format tokens: `%Y` (4-digit year), `%m` (2-digit month),
+/// `%d` (2-digit day), `%H` (2-digit hour), `%M` (2-digit minute),
+/// `%S` (2-digit second).
+pub fn date_format_custom(ts: i64, fmt: &str) -> String {
+    let days = ts.div_euclid(MILLIS_PER_DAY);
+    let (year, month, day) = civil_from_days(days);
+    let day_millis = ts.rem_euclid(MILLIS_PER_DAY);
+    let hour = day_millis / MILLIS_PER_HOUR;
+    let minute = (day_millis % MILLIS_PER_HOUR) / MILLIS_PER_MINUTE;
+    let second = (day_millis % MILLIS_PER_MINUTE) / MILLIS_PER_SECOND;
+
+    let fbytes = fmt.as_bytes();
+    let mut result = String::new();
+    let mut i = 0;
+    while i < fbytes.len() {
+        if fbytes[i] == b'%' && i + 1 < fbytes.len() {
+            match fbytes[i + 1] {
+                b'Y' => { result.push_str(&format!("{:04}", year)); i += 2; }
+                b'm' => { result.push_str(&format!("{:02}", month)); i += 2; }
+                b'd' => { result.push_str(&format!("{:02}", day)); i += 2; }
+                b'H' => { result.push_str(&format!("{:02}", hour)); i += 2; }
+                b'M' => { result.push_str(&format!("{:02}", minute)); i += 2; }
+                b'S' => { result.push_str(&format!("{:02}", second)); i += 2; }
+                _ => { result.push('%'); i += 1; }
+            }
+        } else {
+            result.push(fbytes[i] as char);
+            i += 1;
+        }
+    }
+    result
+}
+
+/// Compute the difference `ts2 - ts1` in the specified unit.
+///
+/// Units: `"ms"` (milliseconds), `"s"` (seconds), `"min"` (minutes),
+/// `"h"` (hours), `"d"` (days).
+pub fn date_diff_units(ts1: i64, ts2: i64, unit: &str) -> Result<i64, String> {
+    let diff_ms = ts2 - ts1;
+    match unit {
+        "ms" => Ok(diff_ms),
+        "s" => Ok(diff_ms / MILLIS_PER_SECOND),
+        "min" => Ok(diff_ms / MILLIS_PER_MINUTE),
+        "h" => Ok(diff_ms / MILLIS_PER_HOUR),
+        "d" => Ok(diff_ms / MILLIS_PER_DAY),
+        _ => Err(format!("date_diff: unknown unit '{}', expected ms|s|min|h|d", unit)),
+    }
+}
+
+/// Add `amount` of the specified `unit` to a timestamp.
+///
+/// Units: `"ms"`, `"s"`, `"min"`, `"h"`, `"d"`.
+pub fn date_add_units(ts: i64, amount: i64, unit: &str) -> Result<i64, String> {
+    let millis = match unit {
+        "ms" => amount,
+        "s" => amount * MILLIS_PER_SECOND,
+        "min" => amount * MILLIS_PER_MINUTE,
+        "h" => amount * MILLIS_PER_HOUR,
+        "d" => amount * MILLIS_PER_DAY,
+        _ => return Err(format!("date_add: unknown unit '{}', expected ms|s|min|h|d", unit)),
+    };
+    Ok(ts + millis)
+}
+
+// Helper: parse exactly `n` digits from `bytes` starting at `pos`.
+fn parse_int_n(bytes: &[u8], pos: usize, n: usize) -> Option<(i64, usize)> {
+    if pos + n > bytes.len() { return None; }
+    let mut val: i64 = 0;
+    for i in 0..n {
+        let b = bytes[pos + i];
+        if !b.is_ascii_digit() { return None; }
+        val = val * 10 + (b - b'0') as i64;
+    }
+    Some((val, n))
+}
+
+// Helper: parse up to `max_digits` digits from `bytes` starting at `pos`.
+fn parse_int_max(bytes: &[u8], pos: usize, max_digits: usize) -> Option<(i64, usize)> {
+    let mut val: i64 = 0;
+    let mut count = 0;
+    while count < max_digits && pos + count < bytes.len() && bytes[pos + count].is_ascii_digit() {
+        val = val * 10 + (bytes[pos + count] - b'0') as i64;
+        count += 1;
+    }
+    if count == 0 { None } else { Some((val, count)) }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

@@ -9,6 +9,7 @@ description = "Runtime library: values, builtins, tensors, COW buffers"
 
 [dependencies]
 cjc-repro = { workspace = true }
+cjc-regex = { workspace = true }
 
 [dependencies.rayon]
 version = "1"

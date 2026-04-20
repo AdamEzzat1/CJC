@@ -42,8 +42,27 @@ A tidyverse / dplyr-inspired DataFrame library for CJC-Lang. Operations are lazy
 - `ungroup()`
 
 ### Joins and reshaping
-- `inner_join`, `left_join`, `right_join`, `full_join` (**Needs verification** of exact list)
-- `pivot_longer`, `pivot_wider`
+- `inner_join`, `left_join`, `right_join`
+- `df_full_join(df1, df2, on)` — full outer join (v0.1.7)
+- `df_anti_join(df1, df2, on)` — rows of `df1` with no match in `df2` (v0.1.7)
+- `df_semi_join(df1, df2, on)` — rows of `df1` that have a match in `df2` (v0.1.7)
+- `pivot_wider(df, id_cols, names_from, values_from)` — long → wide, 4 args (v0.1.7 dispatch-arm)
+- `pivot_longer(df, cols, names_to, values_to)` — wide → long (v0.1.7 dispatch-arm)
+
+### Deduplication and renaming (v0.1.7)
+- `df_distinct(df)` — drop duplicate rows
+- `df_rename(df, old_name, new_name)` — rename one column
+
+### Missing-value operations (v0.1.7)
+- `df_fill_na(df, col_name, fill_val)` — **per-column** NA replacement (3 args, not a global fill)
+- `df_drop_na(df)` — drop rows containing any NA
+
+See [[NA Handling]] for the underlying `Value::Na` representation and the generic `is_na` / `fill_na` / `coalesce` builtins.
+
+### CSV I/O (v0.1.7)
+- `df_read_csv(path)` — parse a CSV file into a DataFrame.
+
+**Gotcha**: the CSV reader infers `"0"` and `"1"` as `Bool`, not `Int`. If you need them as integers, cast explicitly after reading, or ensure the CSV has wider numeric ranges in the column so the inference picks `Int`.
 
 ### Window functions
 - `window_sum`, `window_mean`, rolling aggregations

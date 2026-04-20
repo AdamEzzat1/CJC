@@ -1599,6 +1599,14 @@ impl Interpreter {
                 | "tidy_max"
                 | "tidy_first"
                 | "tidy_last"
+                // regex composition helpers
+                | "regex_or"
+                | "regex_seq"
+                | "regex_explain"
+                // regex capture builtins
+                | "regex_captures"
+                | "regex_named_capture"
+                | "regex_capture_count"
                 // stringr builtins
                 | "str_detect"
                 | "str_extract"
@@ -1863,6 +1871,12 @@ impl Interpreter {
                 // TidyView Phase 1: Data I/O
                 | "read_csv" | "write_csv"
                 | "dir_list" | "path_join"
+                // DataFrame free-standing builtins (DS surface expansion)
+                | "df_read_csv"
+                | "pivot_wider" | "pivot_longer"
+                | "df_distinct" | "df_rename"
+                | "df_anti_join" | "df_semi_join" | "df_full_join"
+                | "df_fill_na" | "df_drop_na"
                 // TidyView Phase 5: Preprocessing builtins
                 | "fillna" | "is_na" | "drop_na" | "is_not_null" | "interpolate_linear" | "coalesce"
                 | "cut" | "qcut" | "min_max_scale" | "robust_scale"
@@ -1885,6 +1899,14 @@ impl Interpreter {
                 | "erf" | "erfc"
                 // Parity: Stationarity tests (present in MIR-exec)
                 | "adf_test" | "kpss_test" | "pp_test"
+                // Extended date/time builtins
+                | "parse_date" | "date_format"
+                | "year" | "month" | "day" | "hour" | "minute" | "second"
+                | "date_diff" | "date_add" | "now"
+                // NA alias
+                | "fill_na"
+                // Regularized regression
+                | "ridge_regression" | "lasso_regression" | "elastic_net"
         ) || (self.libraries_enabled.contains("vizor") && matches!(name,
                 "vizor_plot" | "vizor_plot_xy"
         ))
@@ -1973,7 +1995,7 @@ impl Interpreter {
                 let elapsed = self.start_time.elapsed().as_secs_f64();
                 return Ok(Value::Float(elapsed));
             }
-            "datetime_now" => {
+            "datetime_now" | "now" => {
                 return Ok(Value::Int(cjc_runtime::datetime::datetime_now()));
             }
             "gc_alloc" => {

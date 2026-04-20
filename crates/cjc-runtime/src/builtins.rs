@@ -11,6 +11,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use cjc_regex;
 use crate::accumulator::BinnedAccumulatorF64;
 use crate::complex::ComplexF64;
 use crate::scratchpad::Scratchpad;
@@ -425,6 +426,150 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 _ => Err("str_ends_with: both arguments must be strings".into()),
             }
         }
+        // ── Regex composition helpers ───────────────────────────────────────
+        // These operate purely on pattern strings; the composed string is then
+        // passed to the normal cjc_regex engine by the caller.
+        "regex_or" => {
+            // regex_or(p1, p2, ...) → "(?:p1)|(?:p2)|..."
+            // Combines two or more patterns with alternation.
+            if args.is_empty() { return Err("regex_or requires at least 1 argument".into()); }
+            let mut parts = Vec::with_capacity(args.len());
+            for (i, arg) in args.iter().enumerate() {
+                match arg {
+                    Value::String(s) => parts.push(format!("(?:{})", s)),
+                    _ => return Err(format!("regex_or: argument {} must be a string pattern", i)),
+                }
+            }
+            Ok(Some(Value::String(Rc::new(parts.join("|")))))
+        }
+        "regex_seq" => {
+            // regex_seq(p1, p2, ...) → "(?:p1)(?:p2)..."
+            // Concatenates patterns in sequence.
+            if args.is_empty() { return Err("regex_seq requires at least 1 argument".into()); }
+            let mut result = String::new();
+            for (i, arg) in args.iter().enumerate() {
+                match arg {
+                    Value::String(s) => result.push_str(&format!("(?:{})", s)),
+                    _ => return Err(format!("regex_seq: argument {} must be a string pattern", i)),
+                }
+            }
+            Ok(Some(Value::String(Rc::new(result))))
+        }
+        "regex_explain" => {
+            // regex_explain(pattern, flags?) → human-readable NFA description string
+            if args.is_empty() || args.len() > 2 {
+                return Err("regex_explain requires 1 or 2 arguments (pattern, flags?)".into());
+            }
+            let pattern = match &args[0] {
+                Value::String(s) => s.as_str(),
+                _ => return Err("regex_explain: first argument must be a string".into()),
+            };
+            let flags = if args.len() == 2 {
+                match &args[1] {
+                    Value::String(s) => s.as_str().to_string(),
+                    _ => return Err("regex_explain: second argument must be a string".into()),
+                }
+            } else {
+                String::new()
+            };
+            match cjc_regex::regex_explain(pattern, &flags) {
+                Ok(desc) => Ok(Some(Value::String(Rc::new(desc)))),
+                Err(e) => Err(format!("regex_explain: {}", e)),
+            }
+        }
+        // ── Regex capture builtins ────────────────────────────────────────
+        "regex_captures" => {
+            // regex_captures(pattern, flags, text) -> Array of strings
+            // Index 0 = full match, 1..n = capture groups. Unmatched -> "". No match -> [].
+            if args.len() != 3 {
+                return Err("regex_captures requires 3 arguments (pattern, flags, text)".into());
+            }
+            let pattern = match &args[0] {
+                Value::String(s) => s.as_str().to_string(),
+                _ => return Err("regex_captures: first argument must be a string".into()),
+            };
+            let flags = match &args[1] {
+                Value::String(s) => s.as_str().to_string(),
+                _ => return Err("regex_captures: second argument must be a string".into()),
+            };
+            let text = match &args[2] {
+                Value::String(s) => s.as_str().to_string(),
+                _ => return Err("regex_captures: third argument must be a string".into()),
+            };
+            match cjc_regex::find_captures(&pattern, &flags, text.as_bytes()) {
+                Some(cr) => {
+                    let mut result = Vec::with_capacity(cr.groups.len());
+                    for group in &cr.groups {
+                        match group {
+                            Some(cap) => {
+                                let s = cap.extract_str(text.as_bytes())
+                                    .unwrap_or("")
+                                    .to_string();
+                                result.push(Value::String(Rc::new(s)));
+                            }
+                            None => result.push(Value::String(Rc::new(String::new()))),
+                        }
+                    }
+                    Ok(Some(Value::Array(Rc::new(result))))
+                }
+                None => Ok(Some(Value::Array(Rc::new(Vec::new())))),
+            }
+        }
+        "regex_named_capture" => {
+            // regex_named_capture(pattern, flags, text, name) -> String
+            // Returns matched text for named group, or "" if no match.
+            if args.len() != 4 {
+                return Err("regex_named_capture requires 4 arguments (pattern, flags, text, name)".into());
+            }
+            let pattern = match &args[0] {
+                Value::String(s) => s.as_str().to_string(),
+                _ => return Err("regex_named_capture: first argument must be a string".into()),
+            };
+            let flags = match &args[1] {
+                Value::String(s) => s.as_str().to_string(),
+                _ => return Err("regex_named_capture: second argument must be a string".into()),
+            };
+            let text = match &args[2] {
+                Value::String(s) => s.as_str().to_string(),
+                _ => return Err("regex_named_capture: third argument must be a string".into()),
+            };
+            let name = match &args[3] {
+                Value::String(s) => s.as_str().to_string(),
+                _ => return Err("regex_named_capture: fourth argument must be a string".into()),
+            };
+            match cjc_regex::find_captures(&pattern, &flags, text.as_bytes()) {
+                Some(cr) => {
+                    match cr.get_named(&name) {
+                        Some(cap) => {
+                            let s = cap.extract_str(text.as_bytes())
+                                .unwrap_or("")
+                                .to_string();
+                            Ok(Some(Value::String(Rc::new(s))))
+                        }
+                        None => Ok(Some(Value::String(Rc::new(String::new())))),
+                    }
+                }
+                None => Ok(Some(Value::String(Rc::new(String::new())))),
+            }
+        }
+        "regex_capture_count" => {
+            // regex_capture_count(pattern, flags) -> i64
+            // Returns number of capture groups (0 if none or invalid).
+            if args.len() != 2 {
+                return Err("regex_capture_count requires 2 arguments (pattern, flags)".into());
+            }
+            let pattern = match &args[0] {
+                Value::String(s) => s.as_str().to_string(),
+                _ => return Err("regex_capture_count: first argument must be a string".into()),
+            };
+            let flags = match &args[1] {
+                Value::String(s) => s.as_str().to_string(),
+                _ => return Err("regex_capture_count: second argument must be a string".into()),
+            };
+            let count = cjc_regex::capture_count(&pattern, &flags) as i64;
+            Ok(Some(Value::Int(count)))
+        }
+        // ── End regex composition helpers ───────────────────────────────────
         "str_repeat" => {
             if args.len() != 2 { return Err("str_repeat requires 2 arguments (str, count)".into()); }
             match (&args[0], &args[1]) {
@@ -4509,6 +4654,94 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             ]))))
         }
 
+        // ── Extended Date/Time builtins ────────────────────────────────
+        "parse_date" => {
+            if args.len() != 2 { return Err("parse_date requires 2 arguments (string, format)".into()); }
+            let s = match &args[0] { Value::String(s) => s.as_str().to_string(), _ => return Err("parse_date: first arg must be String".into()) };
+            let fmt = match &args[1] { Value::String(s) => s.as_str().to_string(), _ => return Err("parse_date: second arg must be String".into()) };
+            Ok(Some(Value::Int(crate::datetime::parse_date(&s, &fmt))))
+        }
+        "date_format" => {
+            if args.len() != 2 { return Err("date_format requires 2 arguments (timestamp, format)".into()); }
+            let ts = match &args[0] { Value::Int(v) => *v, Value::Float(v) => *v as i64, _ => return Err("date_format: first arg must be numeric".into()) };
+            let fmt = match &args[1] { Value::String(s) => s.as_str().to_string(), _ => return Err("date_format: second arg must be String".into()) };
+            Ok(Some(Value::String(Rc::new(crate::datetime::date_format_custom(ts, &fmt)))))
+        }
+        "year" => {
+            if args.len() != 1 { return Err("year requires 1 argument (timestamp)".into()); }
+            let ts = match &args[0] { Value::Int(v) => *v, Value::Float(v) => *v as i64, _ => return Err("year: arg must be numeric".into()) };
+            Ok(Some(Value::Int(crate::datetime::datetime_year(ts))))
+        }
+        "month" => {
+            if args.len() != 1 { return Err("month requires 1 argument (timestamp)".into()); }
+            let ts = match &args[0] { Value::Int(v) => *v, Value::Float(v) => *v as i64, _ => return Err("month: arg must be numeric".into()) };
+            Ok(Some(Value::Int(crate::datetime::datetime_month(ts))))
+        }
+        "day" => {
+            if args.len() != 1 { return Err("day requires 1 argument (timestamp)".into()); }
+            let ts = match &args[0] { Value::Int(v) => *v, Value::Float(v) => *v as i64, _ => return Err("day: arg must be numeric".into()) };
+            Ok(Some(Value::Int(crate::datetime::datetime_day(ts))))
+        }
+        "hour" => {
+            if args.len() != 1 { return Err("hour requires 1 argument (timestamp)".into()); }
+            let ts = match &args[0] { Value::Int(v) => *v, Value::Float(v) => *v as i64, _ => return Err("hour: arg must be numeric".into()) };
+            Ok(Some(Value::Int(crate::datetime::datetime_hour(ts))))
+        }
+        "minute" => {
+            if args.len() != 1 { return Err("minute requires 1 argument (timestamp)".into()); }
+            let ts = match &args[0] { Value::Int(v) => *v, Value::Float(v) => *v as i64, _ => return Err("minute: arg must be numeric".into()) };
+            Ok(Some(Value::Int(crate::datetime::datetime_minute(ts))))
+        }
+        "second" => {
+            if args.len() != 1 { return Err("second requires 1 argument (timestamp)".into()); }
+            let ts = match &args[0] { Value::Int(v) => *v, Value::Float(v) => *v as i64, _ => return Err("second: arg must be numeric".into()) };
+            Ok(Some(Value::Int(crate::datetime::datetime_second(ts))))
+        }
+        "date_diff" => {
+            if args.len() != 3 { return Err("date_diff requires 3 arguments (ts1, ts2, unit)".into()); }
+            let ts1 = match &args[0] { Value::Int(v) => *v, Value::Float(v) => *v as i64, _ => return Err("date_diff: first arg must be numeric".into()) };
+            let ts2 = match &args[1] { Value::Int(v) => *v, Value::Float(v) => *v as i64, _ => return Err("date_diff: second arg must be numeric".into()) };
+            let unit = match &args[2] { Value::String(s) => s.as_str().to_string(), _ => return Err("date_diff: third arg must be String".into()) };
+            match crate::datetime::date_diff_units(ts1, ts2, &unit) {
+                Ok(v) => Ok(Some(Value::Int(v))),
+                Err(e) => Err(e),
+            }
+        }
+        "date_add" => {
+            if args.len() != 3 { return Err("date_add requires 3 arguments (ts, amount, unit)".into()); }
+            let ts = match &args[0] { Value::Int(v) => *v, Value::Float(v) => *v as i64, _ => return Err("date_add: first arg must be numeric".into()) };
+            let amount = match &args[1] { Value::Int(v) => *v, Value::Float(v) => *v as i64, _ => return Err("date_add: second arg must be numeric".into()) };
+            let unit = match &args[2] { Value::String(s) => s.as_str().to_string(), _ => return Err("date_add: third arg must be String".into()) };
+            match crate::datetime::date_add_units(ts, amount, &unit) {
+                Ok(v) => Ok(Some(Value::Int(v))),
+                Err(e) => Err(e),
+            }
+        }
+        "fill_na" => {
+            // Alias for fillna
+            if args.len() != 2 { return Err("fill_na requires 2 arguments (array, fill_value)".into()); }
+            let arr = match &args[0] {
+                Value::Array(a) => a.as_ref().clone(),
+                _ => return Err("fill_na: first arg must be Array".into()),
+            };
+            let fill = &args[1];
+            let result: Vec<Value> = arr.iter().map(|v| {
+                if matches!(v, Value::Na) { fill.clone() } else { v.clone() }
+            }).collect();
+            Ok(Some(Value::Array(Rc::new(result))))
+        }
+
+        // ── Regularized regression builtins ──────────────────────────────
+        "ridge_regression" => {
+            dispatch_ridge_regression(&args)
+        }
+        "lasso_regression" => {
+            dispatch_lasso_regression(&args)
+        }
+        "elastic_net" => {
+            dispatch_elastic_net(&args)
+        }
+
         _ => Ok(None), // Not a shared builtin
     }
 }
@@ -4636,6 +4869,423 @@ fn peak_rss_macos() -> u64 {
             0
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Regularized regression (ridge, lasso, elastic_net)
+// ---------------------------------------------------------------------------
+
+/// Extract a 2D tensor (n_samples x n_features) from a Value.
+fn regression_extract_x(val: &Value) -> Result<(Vec<f64>, usize, usize), String> {
+    let t = value_to_tensor(val)?;
+    let shape = t.shape();
+    if shape.len() != 2 {
+        return Err(format!("regression: X must be a 2D tensor, got {}D", shape.len()));
+    }
+    let n = shape[0];
+    let p = shape[1];
+    Ok((t.to_vec(), n, p))
+}
+
+/// Extract a 1D tensor (n_samples) from a Value.
+fn regression_extract_y(val: &Value) -> Result<Vec<f64>, String> {
+    let t = value_to_tensor(val)?;
+    let shape = t.shape();
+    if shape.len() != 1 {
+        return Err(format!("regression: y must be a 1D tensor, got {}D", shape.len()));
+    }
+    Ok(t.to_vec())
+}
+
+/// Standardize X columns: return (standardized_data, means, stds).
+/// Columns with std=0 get std=1 (no scaling).
+fn standardize_x(data: &[f64], n: usize, p: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let mut means = vec![0.0; p];
+    let mut stds = vec![0.0; p];
+
+    // Compute column means
+    for j in 0..p {
+        let mut acc = cjc_repro::KahanAccumulatorF64::new();
+        for i in 0..n {
+            acc.add(data[i * p + j]);
+        }
+        means[j] = acc.finalize() / n as f64;
+    }
+
+    // Compute column stds
+    for j in 0..p {
+        let mut acc = cjc_repro::KahanAccumulatorF64::new();
+        for i in 0..n {
+            let d = data[i * p + j] - means[j];
+            acc.add(d * d);
+        }
+        let variance = acc.finalize() / n as f64;
+        stds[j] = if variance > 0.0 { variance.sqrt() } else { 1.0 };
+    }
+
+    // Standardize
+    let mut standardized = vec![0.0; n * p];
+    for i in 0..n {
+        for j in 0..p {
+            standardized[i * p + j] = (data[i * p + j] - means[j]) / stds[j];
+        }
+    }
+
+    (standardized, means, stds)
+}
+
+/// Compute R-squared given y and predictions.
+fn compute_r_squared(y: &[f64], predictions: &[f64]) -> f64 {
+    let n = y.len();
+    let mut y_acc = cjc_repro::KahanAccumulatorF64::new();
+    for &v in y { y_acc.add(v); }
+    let y_mean = y_acc.finalize() / n as f64;
+
+    let mut ss_res = cjc_repro::KahanAccumulatorF64::new();
+    let mut ss_tot = cjc_repro::KahanAccumulatorF64::new();
+    for i in 0..n {
+        let r = y[i] - predictions[i];
+        ss_res.add(r * r);
+        let t = y[i] - y_mean;
+        ss_tot.add(t * t);
+    }
+    if ss_tot.finalize() == 0.0 { 1.0 } else { 1.0 - ss_res.finalize() / ss_tot.finalize() }
+}
+
+/// Build the result struct for regression.
+fn regression_result_struct(
+    name: &str,
+    coefficients: Vec<f64>,
+    intercept: f64,
+    r_squared: f64,
+    alpha: f64,
+    n_iter: Option<i64>,
+    converged: Option<bool>,
+) -> Value {
+    let p = coefficients.len();
+    let coef_tensor = Tensor::from_vec(coefficients, &[p]).unwrap();
+    let mut fields = std::collections::BTreeMap::new();
+    fields.insert("coefficients".into(), Value::Tensor(coef_tensor));
+    fields.insert("intercept".into(), Value::Float(intercept));
+    fields.insert("r_squared".into(), Value::Float(r_squared));
+    fields.insert("alpha".into(), Value::Float(alpha));
+    if let Some(ni) = n_iter {
+        fields.insert("n_iter".into(), Value::Int(ni));
+    }
+    if let Some(conv) = converged {
+        fields.insert("converged".into(), Value::Bool(conv));
+    }
+    Value::Struct { name: name.to_string(), fields }
+}
+
+/// Ridge regression: closed-form (XtX + alpha*I)^-1 Xt y.
+fn dispatch_ridge_regression(args: &[Value]) -> Result<Option<Value>, String> {
+    if args.len() != 3 {
+        return Err("ridge_regression requires 3 arguments (X, y, alpha)".into());
+    }
+    let (x_data, n, p) = regression_extract_x(&args[0])?;
+    let y = regression_extract_y(&args[1])?;
+    if y.len() != n {
+        return Err(format!("ridge_regression: X has {} rows but y has {} elements", n, y.len()));
+    }
+    let alpha = match &args[2] {
+        Value::Float(v) => *v,
+        Value::Int(v) => *v as f64,
+        _ => return Err("ridge_regression: alpha must be numeric".into()),
+    };
+
+    // Standardize X
+    let (xs, means, stds) = standardize_x(&x_data, n, p);
+
+    // Compute y_mean and center y
+    let mut y_acc = cjc_repro::KahanAccumulatorF64::new();
+    for &v in &y { y_acc.add(v); }
+    let y_mean = y_acc.finalize() / n as f64;
+    let yc: Vec<f64> = y.iter().map(|v| v - y_mean).collect();
+
+    // Compute XtX + alpha*I (p x p)
+    let mut xtx = vec![0.0; p * p];
+    for j1 in 0..p {
+        for j2 in j1..p {
+            let mut acc = cjc_repro::KahanAccumulatorF64::new();
+            for i in 0..n {
+                acc.add(xs[i * p + j1] * xs[i * p + j2]);
+            }
+            xtx[j1 * p + j2] = acc.finalize();
+            xtx[j2 * p + j1] = acc.finalize();
+        }
+        xtx[j1 * p + j1] += alpha;
+    }
+
+    // Compute Xt * yc (p x 1)
+    let mut xty = vec![0.0; p];
+    for j in 0..p {
+        let mut acc = cjc_repro::KahanAccumulatorF64::new();
+        for i in 0..n {
+            acc.add(xs[i * p + j] * yc[i]);
+        }
+        xty[j] = acc.finalize();
+    }
+
+    // Solve (XtX + alpha*I) * beta = Xty via Cholesky or direct solve
+    let beta_std = solve_linear_system(&xtx, &xty, p)?;
+
+    // Convert back to original scale
+    let mut coefficients = vec![0.0; p];
+    let mut intercept = y_mean;
+    for j in 0..p {
+        coefficients[j] = beta_std[j] / stds[j];
+        intercept -= coefficients[j] * means[j];
+    }
+
+    // Compute predictions and R-squared
+    let mut predictions = vec![0.0; n];
+    for i in 0..n {
+        let mut acc = cjc_repro::KahanAccumulatorF64::new();
+        acc.add(intercept);
+        for j in 0..p {
+            acc.add(coefficients[j] * x_data[i * p + j]);
+        }
+        predictions[i] = acc.finalize();
+    }
+    let r_squared = compute_r_squared(&y, &predictions);
+
+    Ok(Some(regression_result_struct("RidgeResult", coefficients, intercept, r_squared, alpha, None, None)))
+}
+
+/// Lasso regression via coordinate descent.
+fn dispatch_lasso_regression(args: &[Value]) -> Result<Option<Value>, String> {
+    if args.len() < 3 || args.len() > 5 {
+        return Err("lasso_regression requires 3-5 arguments (X, y, alpha, [max_iter], [tol])".into());
+    }
+    let (x_data, n, p) = regression_extract_x(&args[0])?;
+    let y = regression_extract_y(&args[1])?;
+    if y.len() != n {
+        return Err(format!("lasso_regression: X has {} rows but y has {} elements", n, y.len()));
+    }
+    let alpha = match &args[2] {
+        Value::Float(v) => *v,
+        Value::Int(v) => *v as f64,
+        _ => return Err("lasso_regression: alpha must be numeric".into()),
+    };
+    let max_iter = if args.len() > 3 {
+        match &args[3] { Value::Int(v) => *v as usize, Value::Float(v) => *v as usize, _ => 1000 }
+    } else { 1000 };
+    let tol = if args.len() > 4 {
+        match &args[4] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => 1e-4 }
+    } else { 1e-4 };
+
+    let (coefficients, intercept, n_iter, converged) =
+        coordinate_descent(&x_data, &y, n, p, alpha, 1.0, max_iter, tol);
+
+    // Compute predictions and R-squared
+    let mut predictions = vec![0.0; n];
+    for i in 0..n {
+        let mut acc = cjc_repro::KahanAccumulatorF64::new();
+        acc.add(intercept);
+        for j in 0..p {
+            acc.add(coefficients[j] * x_data[i * p + j]);
+        }
+        predictions[i] = acc.finalize();
+    }
+    let r_squared = compute_r_squared(&y, &predictions);
+
+    Ok(Some(regression_result_struct("LassoResult", coefficients, intercept, r_squared, alpha, Some(n_iter as i64), Some(converged))))
+}
+
+/// ElasticNet regression via coordinate descent.
+fn dispatch_elastic_net(args: &[Value]) -> Result<Option<Value>, String> {
+    if args.len() < 4 || args.len() > 6 {
+        return Err("elastic_net requires 4-6 arguments (X, y, alpha, l1_ratio, [max_iter], [tol])".into());
+    }
+    let (x_data, n, p) = regression_extract_x(&args[0])?;
+    let y = regression_extract_y(&args[1])?;
+    if y.len() != n {
+        return Err(format!("elastic_net: X has {} rows but y has {} elements", n, y.len()));
+    }
+    let alpha = match &args[2] {
+        Value::Float(v) => *v,
+        Value::Int(v) => *v as f64,
+        _ => return Err("elastic_net: alpha must be numeric".into()),
+    };
+    let l1_ratio = match &args[3] {
+        Value::Float(v) => *v,
+        Value::Int(v) => *v as f64,
+        _ => return Err("elastic_net: l1_ratio must be numeric".into()),
+    };
+    let max_iter = if args.len() > 4 {
+        match &args[4] { Value::Int(v) => *v as usize, Value::Float(v) => *v as usize, _ => 1000 }
+    } else { 1000 };
+    let tol = if args.len() > 5 {
+        match &args[5] { Value::Float(v) => *v, Value::Int(v) => *v as f64, _ => 1e-4 }
+    } else { 1e-4 };
+
+    let (coefficients, intercept, n_iter, converged) =
+        coordinate_descent(&x_data, &y, n, p, alpha, l1_ratio, max_iter, tol);
+
+    // Compute predictions and R-squared
+    let mut predictions = vec![0.0; n];
+    for i in 0..n {
+        let mut acc = cjc_repro::KahanAccumulatorF64::new();
+        acc.add(intercept);
+        for j in 0..p {
+            acc.add(coefficients[j] * x_data[i * p + j]);
+        }
+        predictions[i] = acc.finalize();
+    }
+    let r_squared = compute_r_squared(&y, &predictions);
+
+    let mut fields = std::collections::BTreeMap::new();
+    fields.insert("coefficients".into(), Value::Tensor(Tensor::from_vec(coefficients, &[p]).unwrap()));
+    fields.insert("intercept".into(), Value::Float(intercept));
+    fields.insert("r_squared".into(), Value::Float(r_squared));
+    fields.insert("alpha".into(), Value::Float(alpha));
+    fields.insert("l1_ratio".into(), Value::Float(l1_ratio));
+    fields.insert("n_iter".into(), Value::Int(n_iter as i64));
+    fields.insert("converged".into(), Value::Bool(converged));
+
+    Ok(Some(Value::Struct { name: "ElasticNetResult".to_string(), fields }))
+}
+
+/// Coordinate descent for Lasso / ElasticNet.
+///
+/// Minimizes: 0.5/n * ||y - Xb - b0||^2 + alpha * l1_ratio * ||b||_1
+///          + 0.5 * alpha * (1-l1_ratio) * ||b||_2^2
+///
+/// Returns (coefficients_in_original_scale, intercept, n_iter, converged).
+fn coordinate_descent(
+    x_data: &[f64], y: &[f64], n: usize, p: usize,
+    alpha: f64, l1_ratio: f64, max_iter: usize, tol: f64,
+) -> (Vec<f64>, f64, usize, bool) {
+    // Standardize X
+    let (xs, means, stds) = standardize_x(x_data, n, p);
+
+    // Center y
+    let mut y_acc = cjc_repro::KahanAccumulatorF64::new();
+    for &v in y { y_acc.add(v); }
+    let y_mean = y_acc.finalize() / n as f64;
+    let yc: Vec<f64> = y.iter().map(|v| v - y_mean).collect();
+
+    // Precompute X^T columns norms (each is n because standardized)
+    // but we still compute for correctness with numerical precision
+    let mut col_norms_sq = vec![0.0; p];
+    for j in 0..p {
+        let mut acc = cjc_repro::KahanAccumulatorF64::new();
+        for i in 0..n {
+            let v = xs[i * p + j];
+            acc.add(v * v);
+        }
+        col_norms_sq[j] = acc.finalize();
+    }
+
+    let l1_pen = alpha * l1_ratio * n as f64;
+    let l2_pen = alpha * (1.0 - l1_ratio) * n as f64;
+
+    let mut beta = vec![0.0; p];
+    let mut residual = yc.clone();
+    let mut converged = false;
+    let mut n_iter = 0usize;
+
+    for iter in 0..max_iter {
+        let mut max_delta: f64 = 0.0;
+        for j in 0..p {
+            let old_beta = beta[j];
+
+            // Compute partial residual correlation
+            let mut acc = cjc_repro::KahanAccumulatorF64::new();
+            for i in 0..n {
+                acc.add(xs[i * p + j] * residual[i]);
+            }
+            let rho = acc.finalize() + col_norms_sq[j] * old_beta;
+
+            // Soft-thresholding
+            let new_beta = soft_threshold(rho, l1_pen) / (col_norms_sq[j] + l2_pen);
+
+            // Update residual
+            let delta = new_beta - old_beta;
+            if delta != 0.0 {
+                for i in 0..n {
+                    residual[i] -= xs[i * p + j] * delta;
+                }
+            }
+            beta[j] = new_beta;
+            let abs_delta = delta.abs();
+            if abs_delta > max_delta { max_delta = abs_delta; }
+        }
+        n_iter = iter + 1;
+        if max_delta < tol {
+            converged = true;
+            break;
+        }
+    }
+
+    // Convert back to original scale
+    let mut coefficients = vec![0.0; p];
+    let mut intercept = y_mean;
+    for j in 0..p {
+        coefficients[j] = beta[j] / stds[j];
+        intercept -= coefficients[j] * means[j];
+    }
+
+    (coefficients, intercept, n_iter, converged)
+}
+
+/// Soft-thresholding operator for Lasso/ElasticNet.
+fn soft_threshold(rho: f64, lambda: f64) -> f64 {
+    if rho > lambda {
+        rho - lambda
+    } else if rho < -lambda {
+        rho + lambda
+    } else {
+        0.0
+    }
+}
+
+/// Solve a positive-definite linear system A*x = b via Cholesky decomposition.
+/// A is p x p stored row-major, b is p x 1.
+fn solve_linear_system(a: &[f64], b: &[f64], p: usize) -> Result<Vec<f64>, String> {
+    // Cholesky decomposition: A = L * L^T
+    let mut l = vec![0.0; p * p];
+    for j in 0..p {
+        let mut sum = cjc_repro::KahanAccumulatorF64::new();
+        for k in 0..j {
+            sum.add(l[j * p + k] * l[j * p + k]);
+        }
+        let diag = a[j * p + j] - sum.finalize();
+        if diag <= 0.0 {
+            return Err("ridge_regression: matrix not positive definite (try increasing alpha)".into());
+        }
+        l[j * p + j] = diag.sqrt();
+        for i in (j + 1)..p {
+            let mut sum2 = cjc_repro::KahanAccumulatorF64::new();
+            for k in 0..j {
+                sum2.add(l[i * p + k] * l[j * p + k]);
+            }
+            l[i * p + j] = (a[i * p + j] - sum2.finalize()) / l[j * p + j];
+        }
+    }
+
+    // Forward substitution: L * z = b
+    let mut z = vec![0.0; p];
+    for i in 0..p {
+        let mut acc = cjc_repro::KahanAccumulatorF64::new();
+        for k in 0..i {
+            acc.add(l[i * p + k] * z[k]);
+        }
+        z[i] = (b[i] - acc.finalize()) / l[i * p + i];
+    }
+
+    // Back substitution: L^T * x = z
+    let mut x = vec![0.0; p];
+    for i in (0..p).rev() {
+        let mut acc = cjc_repro::KahanAccumulatorF64::new();
+        for k in (i + 1)..p {
+            acc.add(l[k * p + i] * x[k]);
+        }
+        x[i] = (z[i] - acc.finalize()) / l[i * p + i];
+    }
+
+    Ok(x)
 }
 
 // ---------------------------------------------------------------------------
