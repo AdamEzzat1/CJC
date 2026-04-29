@@ -87,7 +87,7 @@ cjc-types = { path = "crates/cjc-types", version = "0.1.6" }
 cjc-dispatch = { path = "crates/cjc-dispatch", version = "0.1.6" }
 cjc-runtime = { path = "crates/cjc-runtime", version = "0.1.6" }
 cjc-eval = { path = "crates/cjc-eval", version = "0.1.7" }
-cjc-ad = { path = "crates/cjc-ad", version = "0.1.6" }
+cjc-ad = { path = "crates/cjc-ad", version = "0.1.7" }
 cjc-data = { path = "crates/cjc-data", version = "0.1.7" }
 cjc-repro = { path = "crates/cjc-repro", version = "0.1.6" }
 cjc-cli = { path = "crates/cjc-cli", version = "0.1.7" }
