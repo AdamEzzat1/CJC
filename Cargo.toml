@@ -7,6 +7,24 @@ description = "CJC-Lang (Computational Jacobian Core) — a deterministic numeri
 authors = ["Adam Ezzat"]
 repository = "https://github.com/AdamEzzat1/CJC"
 homepage = "https://adamezzat.dev"
+# Whitelist the published package surface. The `cjc-lang` crate on
+# crates.io is the umbrella + CLI shim; everything else (docs,
+# examples, social images, benchmarks, vault, jupyter integration)
+# lives in the GitHub repo only. crates.io has a 10 MB upload limit;
+# this whitelist keeps the tarball lean.
+#
+# Note: glob patterns are anchored at the package root and match
+# recursively. We deliberately avoid bare patterns like `LICENSE*`
+# or `README.md` because cargo matches them anywhere in the tree
+# (including node_modules, examples, social_images), defeating the
+# purpose of the whitelist.
+include = [
+    "/src/**",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/LICENSE",
+    "/README.md",
+]
 
 [[bin]]
 name = "cjcl"
