@@ -57,7 +57,7 @@ Items are grouped by **priority** (P0 highest). Status labels: ✅ Done · 🔄 
 These are the **feature implementation scope** items called out in the project's top-level `CLAUDE.md`. They are planned but not all scheduled into a Stage 3 task ID:
 
 1. **[[If as Expression]]** — currently `if` is a statement; lift it to `ExprKind::IfExpr` with type-unified branches. Touches AST, type checker, HIR, MIR, and both executors. ([[cjc-eval]] + [[cjc-mir-exec]])
-2. **MIR integration for autodiff** — gradients must flow through MIR operations deterministically. See [[Autodiff]].
+2. **MIR integration for autodiff** — gradients must flow through MIR operations deterministically. **Phase 3c (2026-04-26): partial — language-level `grad_graph_*` primitives now expose the GradGraph arena to user `.cjcl` source**, with byte-equal AST↔MIR parity across the full PINN training loop (see [[ADR-0016 Language-Level GradGraph Primitives]] and [[PINN in Pure CJC-Lang]]). Open: native higher-order AD (`grad_graph_grad_of`) — Phase 3d will replace the FD residual fallback. See [[Autodiff]].
 3. **Default parameters**: `fn solve(x: f64, tol: f64 = 1e-6)`. Requires parser, signature, call-site lowering, and MIR default argument insertion.
 4. **Variadic functions**: `fn sum(...values: f64)`. Lowers to a deterministic array; no dynamic allocation surprises.
 5. **Numerical solver stubs**: `ode_step()`, `pde_step()`, `symbolic_derivative()`. Not full solvers — hooks for [[Bastion]].

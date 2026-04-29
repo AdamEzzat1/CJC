@@ -21,6 +21,9 @@ Architecture Decision Records for CJC-Lang. Each ADR captures a single decision,
 | [[ADR-0005 Binned Accumulator]] | Exponent-binned accumulator for order-invariant summation | Accepted | 2024-01-20 | Commutative; used by parallel reductions |
 | [[ADR-0014 MIR Analysis Infrastructure]] | Loop analysis, reductions, verifier modules | Accepted | 2026-03-23 | Additive overlays on tree-form MIR |
 | [[ADR-0015 PINN PDE Problem Suite]] | FD residuals, domain geometry, hard BCs | Accepted | 2026-04-11 | Burgers/Poisson/Heat solvers with 64 tests |
+| [[ADR-0016 Language-Level GradGraph Primitives]] | `grad_graph_*` builtins via satellite dispatch | Accepted | 2026-04-26 | 24 new builtins; ambient thread-local graph; flips PINN to pure-CJC-Lang |
+| [[ADR-0017 Adaptive TidyView Selection]] | Five-arm `AdaptiveSelection` enum, density-classified | Accepted | 2026-04-26 | Empty/All/SelectionVector/VerbatimMask + reserved Hybrid; sparse joins no longer pay dense costs |
+| [[ADR-0018 Deterministic Adaptive Dictionary Engine]] | Byte-first categorical engine: `BytePool` + `AdaptiveCodes` + `BTreeMap` lookup | Accepted | 2026-04-28 | Phase 1 of TidyView v3; row-axis (ADR-0017) was adaptive, column-axis (categoricals) now adaptive too |
 
 ## Proposed decisions (not yet implemented)
 

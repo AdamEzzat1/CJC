@@ -1833,6 +1833,15 @@ impl MirExecutor {
                         Column::Categorical { levels, codes } => {
                             codes.iter().map(|c| Value::String(Rc::new(levels[*c as usize].clone()))).collect()
                         }
+                        Column::CategoricalAdaptive(cc) => (0..cc.len())
+                            .map(|i| {
+                                let s = match cc.get(i) {
+                                    None => String::new(),
+                                    Some(b) => String::from_utf8_lossy(b).into_owned(),
+                                };
+                                Value::String(Rc::new(s))
+                            })
+                            .collect(),
                         Column::DateTime(v) => v.iter().map(|x| Value::Int(*x)).collect(),
                     };
                     fields.insert(name.clone(), Value::Array(Rc::new(arr)));
@@ -1903,6 +1912,15 @@ impl MirExecutor {
             Ok(Some(value)) => return Ok(value),
             Err(msg) => return Err(MirExecError::Runtime(msg)),
             Ok(None) => {} // not a quantum builtin, fall through
+        }
+
+        // Phase 3c: language-level GradGraph primitives (grad_graph_*).
+        // Same dispatch as cjc-eval's path so AST and MIR observe the same
+        // ambient graph on a single thread.
+        match cjc_ad::dispatch_grad_graph(name, &args) {
+            Ok(Some(value)) => return Ok(value),
+            Err(msg) => return Err(MirExecError::Runtime(msg)),
+            Ok(None) => {} // not a grad_graph_* builtin, fall through
         }
 
         // PINN training builtins (bypass builtins.rs — cjc-ad dep)
@@ -4471,6 +4489,17 @@ fn dataframe_to_value(df: DataFrame) -> Value {
                     Value::String(Rc::new(levels.get(c as usize).cloned().unwrap_or_default()))
                 }).collect()))
             }
+            Column::CategoricalAdaptive(cc) => Value::Array(Rc::new(
+                (0..cc.len())
+                    .map(|i| {
+                        let s = match cc.get(i) {
+                            None => String::new(),
+                            Some(b) => String::from_utf8_lossy(b).into_owned(),
+                        };
+                        Value::String(Rc::new(s))
+                    })
+                    .collect(),
+            )),
             Column::DateTime(v) => Value::Array(Rc::new(v.iter().map(|&x| Value::Int(x)).collect())),
         };
         fields.insert(name.clone(), arr);

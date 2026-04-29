@@ -15,11 +15,17 @@ use std::rc::Rc;
 mod csv;
 pub use csv::{CsvConfig, CsvReader, StreamingCsvProcessor};
 
+pub mod adaptive_selection;
 pub mod agg_kernels;
+pub mod byte_dict;
 pub mod column_meta;
+pub mod detcoll;
 pub mod dict_encoding;
 pub mod lazy;
+pub mod predicate_bytecode;
 pub mod tidy_dispatch;
+
+pub use adaptive_selection::{AdaptiveSelection, SelectionIndices};
 
 // â"€â"€ Column Storage â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
@@ -39,6 +45,17 @@ pub enum Column {
         levels: Vec<String>,
         codes: Vec<u32>,
     },
+    /// Adaptive-width categorical column wrapping Phase 1's
+    /// `byte_dict::CategoricalColumn`. Backed by `AdaptiveCodes`
+    /// (U8/U16/U32/U64 auto-promoting at 256 / 65 536 / 2³² thresholds)
+    /// and a `ByteDictionary` with optional shared/frozen state.
+    ///
+    /// Coexists with `Column::Categorical` rather than replacing it —
+    /// existing column readers continue to use the simpler
+    /// `(Vec<String>, Vec<u32>)` storage; new code that needs adaptive
+    /// widths or shared dictionaries opts into this variant via
+    /// `Column::categorical_adaptive(...)`.
+    CategoricalAdaptive(Box<crate::byte_dict::CategoricalColumn>),
     /// DateTime column: epoch milliseconds.
     DateTime(Vec<i64>),
 }
@@ -52,6 +69,7 @@ impl Column {
             Column::Str(v) => v.len(),
             Column::Bool(v) => v.len(),
             Column::Categorical { codes, .. } => codes.len(),
+            Column::CategoricalAdaptive(cc) => cc.len(),
             Column::DateTime(v) => v.len(),
         }
     }
@@ -69,6 +87,7 @@ impl Column {
             Column::Str(_) => "Str",
             Column::Bool(_) => "Bool",
             Column::Categorical { .. } => "Categorical",
+            Column::CategoricalAdaptive(_) => "CategoricalAdaptive",
             Column::DateTime(_) => "DateTime",
         }
     }
@@ -81,8 +100,130 @@ impl Column {
             Column::Str(v) => v[idx].clone(),
             Column::Bool(v) => format!("{}", v[idx]),
             Column::Categorical { levels, codes } => levels[codes[idx] as usize].clone(),
+            Column::CategoricalAdaptive(cc) => match cc.get(idx) {
+                None => String::new(),
+                Some(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+            },
             Column::DateTime(v) => format!("{}ms", v[idx]),
         }
+    }
+
+    /// Construct a `Column::CategoricalAdaptive` from a `CategoricalColumn`.
+    /// New-style categorical column with adaptive code widths.
+    pub fn categorical_adaptive(cc: crate::byte_dict::CategoricalColumn) -> Self {
+        Column::CategoricalAdaptive(Box::new(cc))
+    }
+
+    /// Materialize any `Column::CategoricalAdaptive` into a
+    /// `Column::Categorical` for consumption by legacy code paths. For
+    /// non-adaptive variants this returns `self.clone()`. For adaptive
+    /// variants with non-UTF-8 levels or null values this returns
+    /// `Column::Str` (display-equivalent) — preserves the consumer's
+    /// per-row read semantics while avoiding silent data loss.
+    ///
+    /// This is the universal back-compat shim for the 19 column-reader
+    /// match sites added before the adaptive variant existed. New code
+    /// should switch on the variant directly.
+    pub fn to_legacy_categorical(&self) -> Column {
+        match self {
+            Column::CategoricalAdaptive(cc) => {
+                // Try lossless conversion to Column::Categorical.
+                if let Some(legacy) = Column::from_categorical_column(cc) {
+                    return legacy;
+                }
+                // Fallback: render as Str (handles nulls and non-UTF-8 by
+                // using lossy display).
+                let n = cc.len();
+                let mut out: Vec<String> = Vec::with_capacity(n);
+                for i in 0..n {
+                    out.push(match cc.get(i) {
+                        None => String::new(),
+                        Some(b) => String::from_utf8_lossy(b).into_owned(),
+                    });
+                }
+                Column::Str(out)
+            }
+            _ => self.clone(),
+        }
+    }
+
+    // ── v3 Phase 4: CategoricalColumn (byte_dict.rs) interop ────────────
+    //
+    // Limited-scope wiring of Phase 1's adaptive-width categorical engine
+    // into the DataFrame surface. The full replacement of
+    // `Column::Categorical` with `byte_dict::CategoricalColumn` is
+    // deferred to a future phase (every column reader would migrate). For
+    // now we expose lossless conversions in both directions so callers
+    // that need adaptive code widths or shared/frozen dictionaries can
+    // round-trip through the new type.
+    //
+    // Round-trip is byte-equal: `from_categorical_column(to_categorical_column(c))`
+    // produces the same `levels`/`codes` for any `Column::Categorical c`.
+
+    /// Convert a `Column::Categorical` to a `byte_dict::CategoricalColumn`.
+    ///
+    /// Uses `CategoryOrdering::Explicit` to pin the level→code mapping
+    /// exactly as it stands in the source column, so round-tripping back
+    /// via `from_categorical_column` yields byte-identical levels and
+    /// codes. Returns `None` for non-categorical variants.
+    pub fn to_categorical_column(&self) -> Option<crate::byte_dict::CategoricalColumn> {
+        use crate::byte_dict::{ByteDictionary, CategoricalColumn};
+        match self {
+            Column::Categorical { levels, codes } => {
+                let explicit: Vec<Vec<u8>> =
+                    levels.iter().map(|s| s.as_bytes().to_vec()).collect();
+                // `from_explicit` errors only on duplicate levels; the
+                // invariant for `Column::Categorical` is unique levels,
+                // so any error here indicates upstream corruption.
+                let dict = ByteDictionary::from_explicit(explicit).ok()?;
+                let mut col = CategoricalColumn::with_dictionary(dict);
+                // Push codes via the public surface. `levels` is the
+                // authoritative ordering, so we push by `levels[code]`
+                // bytes; `Explicit` ordering will assign back the same
+                // code value, keeping the codes byte-equal.
+                for &c in codes {
+                    let bytes = levels[c as usize].as_bytes();
+                    // `intern` on an unfrozen Explicit dictionary returns
+                    // the existing code for known values.
+                    col.push(bytes).ok()?;
+                }
+                Some(col)
+            }
+            _ => None,
+        }
+    }
+
+    /// Build a `Column::Categorical` from a `byte_dict::CategoricalColumn`.
+    ///
+    /// Iterates the dictionary in code order to reconstruct `levels`, and
+    /// the codes via `AdaptiveCodes::iter()` cast to `u32`. Returns
+    /// `None` if any level is not valid UTF-8 (the byte dictionary is
+    /// byte-keyed; `Column::Categorical` is `String`-keyed) or if
+    /// cardinality exceeds `u32::MAX` (would not fit in `Vec<u32>` codes).
+    /// Null-bearing categorical columns also return `None` for now —
+    /// `Column::Categorical` does not carry a null bitmap.
+    pub fn from_categorical_column(
+        cat: &crate::byte_dict::CategoricalColumn,
+    ) -> Option<Self> {
+        if cat.nulls().is_some() {
+            return None;
+        }
+        let dict = cat.dictionary();
+        let mut levels: Vec<String> = Vec::with_capacity(dict.len());
+        for (_, bytes) in dict.iter() {
+            match std::str::from_utf8(bytes) {
+                Ok(s) => levels.push(s.to_string()),
+                Err(_) => return None,
+            }
+        }
+        let mut codes: Vec<u32> = Vec::with_capacity(cat.len());
+        for c in cat.codes().iter() {
+            if c > u32::MAX as u64 {
+                return None;
+            }
+            codes.push(c as u32);
+        }
+        Some(Column::Categorical { levels, codes })
     }
 }
 
@@ -731,6 +872,9 @@ fn execute_filter(df: &DataFrame, predicate: &DExpr) -> Result<DataFrame, DataEr
 }
 
 fn filter_column(col: &Column, mask: &[bool]) -> Column {
+    if matches!(col, Column::CategoricalAdaptive(_)) {
+        return filter_column(&col.to_legacy_categorical(), mask);
+    }
     match col {
         Column::Int(v) => Column::Int(
             v.iter()
@@ -776,6 +920,7 @@ fn filter_column(col: &Column, mask: &[bool]) -> Column {
                 .map(|(v, _)| *v)
                 .collect(),
         ),
+        Column::CategoricalAdaptive(_) => unreachable!("handled by early return"),
     }
 }
 
@@ -870,6 +1015,10 @@ fn eval_expr_row(df: &DataFrame, expr: &DExpr, row: usize) -> Result<ExprValue, 
                 Column::Categorical { levels, codes } => {
                     Ok(ExprValue::Str(levels[codes[row] as usize].clone()))
                 }
+                Column::CategoricalAdaptive(cc) => Ok(ExprValue::Str(match cc.get(row) {
+                    None => String::new(),
+                    Some(b) => String::from_utf8_lossy(b).into_owned(),
+                })),
                 Column::DateTime(v) => Ok(ExprValue::Int(v[row])),
             }
         }
@@ -1208,6 +1357,10 @@ fn column_value_str(col: &Column, row: usize) -> String {
         Column::Str(v) => v[row].clone(),
         Column::Bool(v) => v[row].to_string(),
         Column::Categorical { levels, codes } => levels[codes[row] as usize].clone(),
+        Column::CategoricalAdaptive(cc) => match cc.get(row) {
+            None => String::new(),
+            Some(b) => String::from_utf8_lossy(b).into_owned(),
+        },
         Column::DateTime(v) => v[row].to_string(),
     }
 }
@@ -1361,6 +1514,9 @@ fn build_left_join_result(
 }
 
 fn gather_column(col: &Column, indices: &[usize]) -> Column {
+    if matches!(col, Column::CategoricalAdaptive(_)) {
+        return gather_column(&col.to_legacy_categorical(), indices);
+    }
     match col {
         Column::Int(v) => Column::Int(indices.iter().map(|&i| v[i]).collect()),
         Column::Float(v) => Column::Float(indices.iter().map(|&i| v[i]).collect()),
@@ -1371,10 +1527,14 @@ fn gather_column(col: &Column, indices: &[usize]) -> Column {
             codes: indices.iter().map(|&i| codes[i]).collect(),
         },
         Column::DateTime(v) => Column::DateTime(indices.iter().map(|&i| v[i]).collect()),
+        Column::CategoricalAdaptive(_) => unreachable!("handled by early return"),
     }
 }
 
 fn gather_column_nullable(col: &Column, indices: &[Option<usize>]) -> Column {
+    if matches!(col, Column::CategoricalAdaptive(_)) {
+        return gather_column_nullable(&col.to_legacy_categorical(), indices);
+    }
     match col {
         Column::Int(v) => Column::Int(indices.iter().map(|opt| opt.map_or(0, |i| v[i])).collect()),
         Column::Float(v) => Column::Float(indices.iter().map(|opt| opt.map_or(f64::NAN, |i| v[i])).collect()),
@@ -1385,6 +1545,7 @@ fn gather_column_nullable(col: &Column, indices: &[Option<usize>]) -> Column {
             codes: indices.iter().map(|opt| opt.map_or(0, |i| codes[i])).collect(),
         },
         Column::DateTime(v) => Column::DateTime(indices.iter().map(|opt| opt.map_or(0, |i| v[i])).collect()),
+        Column::CategoricalAdaptive(_) => unreachable!("handled by early return"),
     }
 }
 
@@ -1832,6 +1993,9 @@ impl DataFrame {
                 Column::Categorical { .. } => {
                     // Categorical columns are not populated via push_row
                 }
+                Column::CategoricalAdaptive(_) => {
+                    // CategoricalAdaptive columns are not populated via push_row
+                }
                 Column::DateTime(v) => v.push(s.trim().parse::<i64>().unwrap_or(0)),
             }
         }
@@ -1942,10 +2106,25 @@ impl BitMask {
     pub fn nwords(&self) -> usize {
         self.words.len()
     }
+
+    /// Read-only access to the backing words. Used by `AdaptiveSelection`
+    /// to perform AND/OR over raw words without re-iterating bit-by-bit.
+    pub fn words_slice(&self) -> &[u64] {
+        &self.words
+    }
+
+    /// Construct a `BitMask` directly from owned words and a row count.
+    ///
+    /// The caller must ensure tail bits past `nrows` are zero. Used by
+    /// `AdaptiveSelection::intersect`/`union` after the AND/OR step.
+    pub fn from_words_for_test(words: Vec<u64>, nrows: usize) -> Self {
+        debug_assert_eq!(words.len(), nwords_for(nrows));
+        BitMask { words, nrows }
+    }
 }
 
 #[inline]
-fn nwords_for(nrows: usize) -> usize {
+pub(crate) fn nwords_for(nrows: usize) -> usize {
     (nrows + 63) / 64
 }
 
@@ -2004,7 +2183,7 @@ impl ProjectionMap {
 #[derive(Debug, Clone)]
 pub struct TidyView {
     base: Rc<DataFrame>,
-    mask: BitMask,
+    mask: AdaptiveSelection,
     proj: ProjectionMap,
 }
 
@@ -2149,7 +2328,7 @@ fn try_eval_predicate_columnar(
 /// Sets bits in `out_words` for rows where the comparison is true.
 /// NaN follows IEEE 754: NaN != NaN, NaN < x is false, NaN > x is false, etc.
 #[inline]
-fn columnar_cmp_f64(data: &[f64], lit: f64, op: DBinOp, out_words: &mut [u64]) {
+pub(crate) fn columnar_cmp_f64(data: &[f64], lit: f64, op: DBinOp, out_words: &mut [u64]) {
     for (i, &val) in data.iter().enumerate() {
         let pass = match op {
             DBinOp::Gt => val > lit,
@@ -2169,7 +2348,7 @@ fn columnar_cmp_f64(data: &[f64], lit: f64, op: DBinOp, out_words: &mut [u64]) {
 /// Columnar comparison of i64 slice against a scalar.
 /// Sets bits in `out_words` for rows where the comparison is true.
 #[inline]
-fn columnar_cmp_i64(data: &[i64], lit: i64, op: DBinOp, out_words: &mut [u64]) {
+pub(crate) fn columnar_cmp_i64(data: &[i64], lit: i64, op: DBinOp, out_words: &mut [u64]) {
     for (i, &val) in data.iter().enumerate() {
         let pass = match op {
             DBinOp::Gt => val > lit,
@@ -2195,7 +2374,7 @@ impl TidyView {
         let ncols = df.ncols();
         TidyView {
             base: Rc::new(df),
-            mask: BitMask::all_true(nrows),
+            mask: AdaptiveSelection::all(nrows),
             proj: ProjectionMap::identity(ncols),
         }
     }
@@ -2206,16 +2385,22 @@ impl TidyView {
         let ncols = df.ncols();
         TidyView {
             base: df,
-            mask: BitMask::all_true(nrows),
+            mask: AdaptiveSelection::all(nrows),
             proj: ProjectionMap::identity(ncols),
         }
+    }
+
+    /// Stable identifier of the current selection's adaptive mode. Useful
+    /// for tests, instrumentation, and the user-visible `glimpse` output.
+    pub fn explain_selection_mode(&self) -> &'static str {
+        self.mask.explain_selection_mode()
     }
 
     // â"€â"€ shape â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     /// Number of visible rows (set bits in mask).
     pub fn nrows(&self) -> usize {
-        self.mask.count_ones()
+        self.mask.count()
     }
 
     /// Number of visible columns (length of projection).
@@ -2248,22 +2433,85 @@ impl TidyView {
         // Validate predicate type references known projected columns
         validate_expr_columns_proj(predicate, &self.base, &self.proj)?;
 
-        // O3: try columnar fast path for simple predicates (Col op Literal)
-        if let Some(new_mask) = try_eval_predicate_columnar(&self.base, predicate, &self.mask) {
+        let nrows_base = self.base.nrows();
+
+        // v2.1: lower the predicate to bytecode and interpret. Bit-identical
+        // output to the legacy AST-walk path on every shape; falls through
+        // (None) on unsupported shapes, exactly like try_eval_predicate_columnar.
+        if let Some(bc) = predicate_bytecode::PredicateBytecode::lower(predicate, &self.base) {
+            let count = self.mask.count();
+
+            // v2.2: when the existing selection has already narrowed the row
+            // set substantially, the sparse-aware path beats the full column
+            // scan — random-access gather over `iter_indices()` is bounded
+            // by O(count) per leaf instead of O(nrows). The dense path needs
+            // a full materialized BitMask; the sparse path doesn't, so we
+            // defer that allocation until we know it's needed.
+            // v3 Phase 5: when the existing selection is already Hybrid
+            // (mid-band density, large nrows), evaluate the predicate to
+            // a fresh AdaptiveSelection and route through Phase 3's
+            // per-chunk dispatch via `existing.intersect(fresh)`. Avoids
+            // the O(nrows/64) full-bitmap allocation that the dense
+            // BitMask path pays even when the predicate result itself is
+            // chunk-sparse.
+            //
+            // Hybrid activation needs nrows ≥ 8192 and mid-band density
+            // — the AdaptiveSelection classifier handles that
+            // automatically, so we only need to gate by "existing is
+            // Hybrid" to avoid building a fresh AdaptiveSelection
+            // pointlessly.
+            if matches!(self.mask, AdaptiveSelection::Hybrid { .. })
+                && !predicate_bytecode::should_use_sparse_path(count, nrows_base)
+            {
+                let fresh = bc.evaluate_to_selection(&self.base, nrows_base);
+                let intersected = self.mask.intersect(&fresh);
+                return Ok(TidyView {
+                    base: Rc::clone(&self.base),
+                    mask: intersected,
+                    proj: self.proj.clone(),
+                });
+            }
+
+            let new_mask = if predicate_bytecode::should_use_sparse_path(count, nrows_base) {
+                let existing_indices: Vec<usize> = self.mask.iter_indices().collect();
+                bc.interpret_sparse(&self.base, &existing_indices, nrows_base)
+            } else {
+                let current_mask = self.mask.materialize_mask();
+                bc.interpret(&self.base, &current_mask)
+            };
+
+            let words: Vec<u64> = new_mask.words_slice().to_vec();
             return Ok(TidyView {
                 base: Rc::clone(&self.base),
-                mask: new_mask,
+                mask: AdaptiveSelection::from_predicate_result(words, nrows_base),
+                proj: self.proj.clone(),
+            });
+        }
+
+        // Materialize once for the legacy columnar path and the row-wise
+        // fallback below. (Bytecode handles every shape these support, so
+        // we only reach here on unusual predicate trees.)
+        let current_mask = self.mask.materialize_mask();
+
+        // Legacy O3 columnar path retained as a safety net (e.g. for the
+        // parity oracle in tests/tidy_tests/test_v2_1_bytecode_parity.rs).
+        // In production, bytecode handles every shape this path handles, so
+        // execution rarely reaches here.
+        if let Some(new_mask) = try_eval_predicate_columnar(&self.base, predicate, &current_mask) {
+            let words: Vec<u64> = new_mask.words_slice().to_vec();
+            return Ok(TidyView {
+                base: Rc::clone(&self.base),
+                mask: AdaptiveSelection::from_predicate_result(words, nrows_base),
                 proj: self.proj.clone(),
             });
         }
 
         // Fallback: row-wise evaluation
-        let nrows_base = self.base.nrows();
-        let mut new_words = self.mask.words.clone();
+        let mut new_words: Vec<u64> = current_mask.words_slice().to_vec();
 
         // Evaluate predicate over every currently-masked-in row.
         // Rows masked out remain 0 (no change needed, AND semantics).
-        for row in self.mask.iter_set() {
+        for row in self.mask.iter_indices() {
             let b = eval_expr_row_proj(&self.base, predicate, row, &self.proj)?;
             let pass = match b {
                 ExprValue::Bool(v) => v,
@@ -2280,10 +2528,7 @@ impl TidyView {
 
         Ok(TidyView {
             base: Rc::clone(&self.base),
-            mask: BitMask {
-                words: new_words,
-                nrows: nrows_base,
-            },
+            mask: AdaptiveSelection::from_predicate_result(new_words, nrows_base),
             proj: self.proj.clone(),
         })
     }
@@ -2399,7 +2644,7 @@ impl TidyView {
     ///   â€¢ Empty cols â†’ 0-column DataFrame.
     ///   â€¢ Row-major iteration is stable.
     pub fn materialize(&self) -> Result<DataFrame, TidyError> {
-        let row_indices: Vec<usize> = self.mask.iter_set().collect();
+        let row_indices: Vec<usize> = self.mask.iter_indices().collect();
 
         let mut columns = Vec::with_capacity(self.proj.len());
         for &ci in self.proj.indices() {
@@ -2421,8 +2666,18 @@ impl TidyView {
             .map_err(|e| TidyError::Internal(e.to_string()))
     }
 
-    /// Access the underlying mask (for testing/inspection).
-    pub fn mask(&self) -> &BitMask {
+    /// Access a materialized `BitMask` view of the current selection (for
+    /// testing/inspection). Always returns an owned `BitMask` regardless of
+    /// the underlying adaptive arm — this preserves the pre-v2 inspection
+    /// surface without coupling test code to the adaptive enum.
+    pub fn mask(&self) -> BitMask {
+        self.mask.materialize_mask()
+    }
+
+    /// Access the underlying adaptive selection (for testing/inspection
+    /// of the chosen mode). Use `mask()` if you want a materialized
+    /// `BitMask` view.
+    pub fn selection(&self) -> &AdaptiveSelection {
         &self.mask
     }
 
@@ -3007,6 +3262,15 @@ fn try_eval_expr_column_vectorized(
                         .collect();
                     Column::Str(strs)
                 }
+                Column::CategoricalAdaptive(cc) => {
+                    let strs: Vec<String> = (0..nrows)
+                        .map(|i| match cc.get(i) {
+                            None => String::new(),
+                            Some(b) => String::from_utf8_lossy(b).into_owned(),
+                        })
+                        .collect();
+                    Column::Str(strs)
+                }
                 Column::DateTime(v) => Column::Int(v[..nrows].to_vec()),
             };
             Some(Ok(result))
@@ -3032,6 +3296,24 @@ fn eval_expr_column(df: &DataFrame, expr: &DExpr, nrows: usize) -> Result<Column
     if nrows == 0 {
         // Infer column type from a dry-run on nothing; default to Float for empty
         return Ok(Column::Float(vec![]));
+    }
+
+    // v3 Phase 6: cat-aware mutate. When the expression is a bare `Col(name)`
+    // referring to a Categorical or CategoricalAdaptive column, return that
+    // column verbatim. Pre-Phase-6 the row-by-row fallback materialized a
+    // `Vec<String>` (one per row) and built a `Column::Str` — this loses
+    // the level table and forces a downstream re-categorization to recover
+    // it. Pass-through preserves both type and (for Adaptive) the
+    // dictionary's frozen / shared / sealed state.
+    if let DExpr::Col(name) = expr {
+        if let Some(src) = df.get_column(name) {
+            match src {
+                Column::Categorical { .. } | Column::CategoricalAdaptive(_) => {
+                    return Ok(src.clone());
+                }
+                _ => {}
+            }
+        }
     }
 
     // Handle window functions at column level
@@ -4068,11 +4350,12 @@ impl TidyView {
             key_col_indices.push(idx);
         }
 
-        let visible_rows: Vec<usize> = self.mask.iter_set().collect();
         let key_names: Vec<String> = keys.iter().map(|s| s.to_string()).collect();
 
-        // O1 optimization: use BTree-accelerated build_fast for O(N log G) instead of O(N × G)
-        let index = GroupIndex::build_fast(&self.base, &key_col_indices, &visible_rows, key_names);
+        // O1 optimization: use BTree-accelerated build_fast for O(N log G) instead of O(N × G).
+        // v2.2: pass the selection iterator directly — avoids a Vec<usize> allocation that
+        // can run to millions of entries on large frames.
+        let index = GroupIndex::build_fast(&self.base, &key_col_indices, self.mask.iter_indices(), key_names);
 
         Ok(GroupedTidyView {
             view: self.clone(),
@@ -4108,14 +4391,56 @@ impl TidyView {
         }
 
         // Collect visible row indices in current mask order
-        let mut row_indices: Vec<usize> = self.mask.iter_set().collect();
+        let mut row_indices: Vec<usize> = self.mask.iter_indices().collect();
 
-        // Stable sort by keys left-to-right
-        row_indices.sort_by(|&a, &b| {
-            for key in keys {
+        // v3 Phase 5: cat-aware arrange. For each key column that is
+        // `Column::Categorical` with **lex-sorted levels** (the Phase 17
+        // `forcats` invariant), `levels[code].cmp(&levels[other_code])`
+        // is byte-equal to `code.cmp(&other_code)` — so we can sort by
+        // u32 codes directly, skipping the per-call string lookup and
+        // bytewise comparison. Mixed-type or unsorted-levels key cols
+        // fall back to the string comparator.
+        //
+        // Pre-resolve each key once to either ("sorted-cat code slice",
+        // descending) or ("legacy compare via column", descending).
+        enum ArrangeKeyResolved<'a> {
+            CatCodes { codes: &'a [u32], descending: bool },
+            Legacy { col: &'a Column, descending: bool },
+        }
+
+        fn levels_are_sorted(levels: &[String]) -> bool {
+            levels.windows(2).all(|w| w[0] <= w[1])
+        }
+
+        let resolved: Vec<ArrangeKeyResolved> = keys
+            .iter()
+            .map(|key| {
                 let col = self.base.get_column(&key.col_name).unwrap();
-                let ord = compare_column_rows(col, a, b);
-                let ord = if key.descending { ord.reverse() } else { ord };
+                match col {
+                    Column::Categorical { levels, codes } if levels_are_sorted(levels) => {
+                        ArrangeKeyResolved::CatCodes {
+                            codes: codes.as_slice(),
+                            descending: key.descending,
+                        }
+                    }
+                    _ => ArrangeKeyResolved::Legacy { col, descending: key.descending },
+                }
+            })
+            .collect();
+
+        // Stable sort by keys left-to-right.
+        row_indices.sort_by(|&a, &b| {
+            for resolved_key in &resolved {
+                let ord = match resolved_key {
+                    ArrangeKeyResolved::CatCodes { codes, descending } => {
+                        let raw = codes[a].cmp(&codes[b]);
+                        if *descending { raw.reverse() } else { raw }
+                    }
+                    ArrangeKeyResolved::Legacy { col, descending } => {
+                        let raw = compare_column_rows(col, a, b);
+                        if *descending { raw.reverse() } else { raw }
+                    }
+                };
                 if ord != std::cmp::Ordering::Equal {
                     return ord;
                 }
@@ -4144,7 +4469,7 @@ impl TidyView {
 
         Ok(TidyView {
             base: Rc::new(new_base),
-            mask: BitMask::all_true(nrows),
+            mask: AdaptiveSelection::all(nrows),
             proj: new_proj,
         })
     }
@@ -4156,7 +4481,7 @@ impl TidyView {
     /// Positions are relative to the current visible rows (0-based).
     /// Out-of-bounds: clamped to `[0, nrows]`.
     pub fn slice(&self, start: usize, end: usize) -> TidyView {
-        let visible: Vec<usize> = self.mask.iter_set().collect();
+        let visible: Vec<usize> = self.mask.iter_indices().collect();
         let n = visible.len();
         let s = start.min(n);
         let e = end.min(n);
@@ -4171,7 +4496,7 @@ impl TidyView {
 
     /// Select the last `n` visible rows (clamped to nrows).
     pub fn slice_tail(&self, n: usize) -> TidyView {
-        let total = self.mask.count_ones();
+        let total = self.mask.count();
         let start = total.saturating_sub(n);
         self.slice(start, total)
     }
@@ -4181,7 +4506,7 @@ impl TidyView {
     /// If `n >= nrows`, returns all visible rows in their original order (no error).
     /// Sampling uses a Knuth shuffle variant seeded by `seed` (deterministic LCG).
     pub fn slice_sample(&self, n: usize, seed: u64) -> TidyView {
-        let mut visible: Vec<usize> = self.mask.iter_set().collect();
+        let mut visible: Vec<usize> = self.mask.iter_indices().collect();
         let total = visible.len();
         if n >= total {
             return self.view_from_row_indices(visible);
@@ -4225,11 +4550,32 @@ impl TidyView {
             col_indices.push(idx);
         }
 
+        // Phase 2 cat-aware fast path: when every dedup column is
+        // Column::Categorical, dedup on Vec<u32> of codes instead of
+        // Vec<String> of display values. Bit-identical output: codes
+        // are in 1:1 correspondence with display strings within a single
+        // DataFrame.
+        if let Some(cat_keys) = collect_categorical_keys(&self.base, &col_indices) {
+            let mut seen_codes: BTreeSet<Vec<u32>> = BTreeSet::new();
+            let mut selected_rows: Vec<usize> = Vec::new();
+            let mut key_buf: Vec<u32> = Vec::with_capacity(cat_keys.codes.len());
+            for row in self.mask.iter_indices() {
+                key_buf.clear();
+                for c in &cat_keys.codes {
+                    key_buf.push(c[row]);
+                }
+                if seen_codes.insert(key_buf.clone()) {
+                    selected_rows.push(row);
+                }
+            }
+            return Ok(self.view_from_row_indices(selected_rows));
+        }
+
         // O8 optimization: BTreeSet gives O(N log D) instead of O(N × D) linear scan
         let mut seen_keys: BTreeSet<Vec<String>> = BTreeSet::new();
         let mut selected_rows: Vec<usize> = Vec::new();
 
-        for row in self.mask.iter_set() {
+        for row in self.mask.iter_indices() {
             let key: Vec<String> = if col_indices.is_empty() {
                 vec!["__all__".into()]
             } else {
@@ -4317,7 +4663,7 @@ impl TidyView {
         }
         TidyView {
             base: Rc::clone(&self.base),
-            mask: BitMask { words, nrows: nrows_base },
+            mask: AdaptiveSelection::from_predicate_result(words, nrows_base),
             proj: self.proj.clone(),
         }
     }
@@ -4363,7 +4709,7 @@ fn build_right_lookup(
 ) -> Vec<(Vec<String>, usize)> {
     let mut lookup: Vec<(Vec<String>, usize)> = right
         .mask
-        .iter_set()
+        .iter_indices()
         .map(|r| (row_key(&right.base, right_key_cols, r), r))
         .collect();
     // Sort by key then by row index for deterministic ordering
@@ -4396,11 +4742,128 @@ fn build_right_lookup_btree(
     right_key_cols: &[usize],
 ) -> BTreeMap<Vec<String>, Vec<usize>> {
     let mut lookup: BTreeMap<Vec<String>, Vec<usize>> = BTreeMap::new();
-    for r in right.mask.iter_set() {
+    for r in right.mask.iter_indices() {
         let key = row_key(&right.base, right_key_cols, r);
         lookup.entry(key).or_default().push(r);
     }
     lookup
+}
+
+// ── v3 Phase 4: cat-aware join key path ─────────────────────────────────
+//
+// When every join-key column is `Column::Categorical` on BOTH sides, we
+// can probe on `Vec<u32>` codes instead of `Vec<String>` displays. Each
+// DataFrame owns its own dictionary, so left-side code 3 ≠ right-side
+// code 3 in general — we build a per-key-column remap
+//   `right_to_left[ki][right_code] -> Option<u32>`
+// that translates every right code to the matching left code (or `None`
+// if the level doesn't exist on the left, in which case that right row
+// can never join).
+//
+// Bit-identity: codes ↔ levels are 1:1 within one DataFrame, so the
+// BTreeMap slot assignment, output row order, and join multiplicity are
+// byte-equal to the string-key path. Pinned by parity tests in
+// `tests/tidy_tests/test_v3_phase4_categorical_joins.rs`.
+
+/// Borrowed cat-aware join key metadata. Built only when every key column
+/// on BOTH frames is `Column::Categorical`.
+pub(crate) struct CategoricalJoinKeys<'a> {
+    /// `left_codes[ki]` = code array for left-side key column ki.
+    pub(crate) left_codes: Vec<&'a [u32]>,
+    /// `right_codes[ki]` = code array for right-side key column ki.
+    pub(crate) right_codes: Vec<&'a [u32]>,
+    /// `right_to_left[ki][right_code] = Some(left_code)` if the level
+    /// exists on the left, `None` otherwise (row cannot join).
+    pub(crate) right_to_left: Vec<Vec<Option<u32>>>,
+}
+
+/// Returns `Some(CategoricalJoinKeys)` when every column index in both
+/// `left_cols` and `right_cols` is `Column::Categorical`. Mixed-type
+/// keys, length mismatches, or empty key lists → `None` (caller falls
+/// back to the string path).
+pub(crate) fn collect_categorical_join_keys<'a>(
+    left_base: &'a DataFrame,
+    left_cols: &[usize],
+    right_base: &'a DataFrame,
+    right_cols: &[usize],
+) -> Option<CategoricalJoinKeys<'a>> {
+    if left_cols.is_empty() || left_cols.len() != right_cols.len() {
+        return None;
+    }
+    let mut left_codes = Vec::with_capacity(left_cols.len());
+    let mut right_codes = Vec::with_capacity(left_cols.len());
+    let mut right_to_left = Vec::with_capacity(left_cols.len());
+
+    for (li, ri) in left_cols.iter().zip(right_cols.iter()) {
+        match (&left_base.columns[*li].1, &right_base.columns[*ri].1) {
+            (
+                Column::Categorical { levels: ll, codes: lc },
+                Column::Categorical { levels: rl, codes: rc },
+            ) => {
+                // Build deterministic left-level→left-code lookup.
+                // BTreeMap not HashMap to keep build order stable across
+                // runs (matches the determinism contract).
+                let mut left_lookup: BTreeMap<&str, u32> = BTreeMap::new();
+                for (i, lv) in ll.iter().enumerate() {
+                    left_lookup.insert(lv.as_str(), i as u32);
+                }
+                // remap[right_code] = Some(left_code) | None
+                let remap: Vec<Option<u32>> = rl
+                    .iter()
+                    .map(|rv| left_lookup.get(rv.as_str()).copied())
+                    .collect();
+                left_codes.push(lc.as_slice());
+                right_codes.push(rc.as_slice());
+                right_to_left.push(remap);
+            }
+            _ => return None,
+        }
+    }
+    Some(CategoricalJoinKeys {
+        left_codes,
+        right_codes,
+        right_to_left,
+    })
+}
+
+/// Cat-aware right-side BTreeMap lookup. Keyed on `Vec<u32>` left-code
+/// tuples (right-side codes are remapped to left-side codes via
+/// `right_to_left`). Right rows whose remap returns `None` for any key
+/// column are skipped — they cannot join.
+fn build_right_lookup_btree_categorical<'a>(
+    cat: &CategoricalJoinKeys<'a>,
+    right_visible: impl Iterator<Item = usize>,
+) -> BTreeMap<Vec<u32>, Vec<usize>> {
+    let nkeys = cat.right_codes.len();
+    let mut lookup: BTreeMap<Vec<u32>, Vec<usize>> = BTreeMap::new();
+    let mut key_buf: Vec<u32> = Vec::with_capacity(nkeys);
+    for r in right_visible {
+        key_buf.clear();
+        let mut all_mappable = true;
+        for i in 0..nkeys {
+            let rc = cat.right_codes[i][r];
+            match cat.right_to_left[i][rc as usize] {
+                Some(lc) => key_buf.push(lc),
+                None => {
+                    all_mappable = false;
+                    break;
+                }
+            }
+        }
+        if all_mappable {
+            lookup.entry(key_buf.clone()).or_default().push(r);
+        }
+    }
+    lookup
+}
+
+/// Build the left-side join key (in left-code space) for a row.
+#[inline]
+fn left_join_key_codes(cat: &CategoricalJoinKeys<'_>, row: usize, buf: &mut Vec<u32>) {
+    buf.clear();
+    for codes in &cat.left_codes {
+        buf.push(codes[row]);
+    }
 }
 
 /// Inner join: collect (left_row, right_row) pairs.
@@ -4411,13 +4874,36 @@ fn join_match_rows(
     _kind: JoinKind,
 ) -> Result<(Vec<usize>, Vec<usize>), TidyError> {
     let (left_key_cols, right_key_cols) = resolve_join_keys(left, right, on)?;
+
+    // v3 Phase 4: cat-aware fast path when every key column is
+    // Column::Categorical on both frames. Bit-identical output to the
+    // string path; falls back automatically on mixed-type keys.
+    if let Some(cat) =
+        collect_categorical_join_keys(&left.base, &left_key_cols, &right.base, &right_key_cols)
+    {
+        let lookup = build_right_lookup_btree_categorical(&cat, right.mask.iter_indices());
+        let mut out_left = Vec::new();
+        let mut out_right = Vec::new();
+        let mut key_buf: Vec<u32> = Vec::with_capacity(cat.left_codes.len());
+        for l_row in left.mask.iter_indices() {
+            left_join_key_codes(&cat, l_row, &mut key_buf);
+            if let Some(matches) = lookup.get(&key_buf) {
+                for &r_row in matches {
+                    out_left.push(l_row);
+                    out_right.push(r_row);
+                }
+            }
+        }
+        return Ok((out_left, out_right));
+    }
+
     // O6: use BTreeMap for O(log K) lookup instead of sorted-Vec binary search
     let lookup = build_right_lookup_btree(right, &right_key_cols);
 
     let mut out_left = Vec::new();
     let mut out_right = Vec::new();
 
-    for l_row in left.mask.iter_set() {
+    for l_row in left.mask.iter_indices() {
         let key = row_key(&left.base, &left_key_cols, l_row);
         if let Some(matches) = lookup.get(&key) {
             for &r_row in matches {
@@ -4437,13 +4923,40 @@ fn join_match_rows_optional(
     _kind: JoinKind,
 ) -> Result<(Vec<usize>, Vec<Option<usize>>), TidyError> {
     let (left_key_cols, right_key_cols) = resolve_join_keys(left, right, on)?;
+
+    // v3 Phase 4: cat-aware fast path. See `join_match_rows`.
+    if let Some(cat) =
+        collect_categorical_join_keys(&left.base, &left_key_cols, &right.base, &right_key_cols)
+    {
+        let lookup = build_right_lookup_btree_categorical(&cat, right.mask.iter_indices());
+        let mut out_left = Vec::new();
+        let mut out_right: Vec<Option<usize>> = Vec::new();
+        let mut key_buf: Vec<u32> = Vec::with_capacity(cat.left_codes.len());
+        for l_row in left.mask.iter_indices() {
+            left_join_key_codes(&cat, l_row, &mut key_buf);
+            match lookup.get(&key_buf) {
+                Some(matches) if !matches.is_empty() => {
+                    for &r_row in matches {
+                        out_left.push(l_row);
+                        out_right.push(Some(r_row));
+                    }
+                }
+                _ => {
+                    out_left.push(l_row);
+                    out_right.push(None);
+                }
+            }
+        }
+        return Ok((out_left, out_right));
+    }
+
     // O6: use BTreeMap for O(log K) lookup
     let lookup = build_right_lookup_btree(right, &right_key_cols);
 
     let mut out_left = Vec::new();
     let mut out_right: Vec<Option<usize>> = Vec::new();
 
-    for l_row in left.mask.iter_set() {
+    for l_row in left.mask.iter_indices() {
         let key = row_key(&left.base, &left_key_cols, l_row);
         match lookup.get(&key) {
             Some(matches) if !matches.is_empty() => {
@@ -4469,11 +4982,29 @@ fn semi_anti_match_rows(
     semi: bool,
 ) -> Result<Vec<usize>, TidyError> {
     let (left_key_cols, right_key_cols) = resolve_join_keys(left, right, on)?;
+
+    // v3 Phase 4: cat-aware fast path. See `join_match_rows`.
+    if let Some(cat) =
+        collect_categorical_join_keys(&left.base, &left_key_cols, &right.base, &right_key_cols)
+    {
+        let lookup = build_right_lookup_btree_categorical(&cat, right.mask.iter_indices());
+        let mut out = Vec::new();
+        let mut key_buf: Vec<u32> = Vec::with_capacity(cat.left_codes.len());
+        for l_row in left.mask.iter_indices() {
+            left_join_key_codes(&cat, l_row, &mut key_buf);
+            let has_match = lookup.contains_key(&key_buf);
+            if has_match == semi {
+                out.push(l_row);
+            }
+        }
+        return Ok(out);
+    }
+
     // O6: use BTreeMap for O(log K) lookup
     let lookup = build_right_lookup_btree(right, &right_key_cols);
 
     let mut out = Vec::new();
-    for l_row in left.mask.iter_set() {
+    for l_row in left.mask.iter_indices() {
         let key = row_key(&left.base, &left_key_cols, l_row);
         let has_match = lookup.contains_key(&key);
         if has_match == semi {
@@ -4578,6 +5109,11 @@ fn compare_column_rows(col: &Column, a: usize, b: usize) -> std::cmp::Ordering {
         Column::Categorical { levels, codes } => {
             // Compare by the level string, not the code
             levels[codes[a] as usize].cmp(&levels[codes[b] as usize])
+        }
+        Column::CategoricalAdaptive(cc) => {
+            // Byte-lex comparison via dictionary lookup. Bytes are the
+            // determinism contract anchor for the byte_dict engine.
+            cc.get(a).cmp(&cc.get(b))
         }
         Column::DateTime(v) => v[a].cmp(&v[b]),
     }
@@ -4964,6 +5500,16 @@ impl NullCol {
                 let strings: Vec<String> = codes.iter().map(|&c| levels[c as usize].clone()).collect();
                 NullCol::Str(NullableColumn::from_values(strings))
             }
+            Column::CategoricalAdaptive(cc) => {
+                let n = cc.len();
+                let strings: Vec<String> = (0..n)
+                    .map(|i| match cc.get(i) {
+                        None => String::new(),
+                        Some(b) => String::from_utf8_lossy(b).into_owned(),
+                    })
+                    .collect();
+                NullCol::Str(NullableColumn::from_values(strings))
+            }
             Column::DateTime(v) => NullCol::Int(NullableColumn::from_values(v.clone())),
         }
     }
@@ -5127,6 +5673,9 @@ impl Default for NullableFrame {
 /// Gather column rows with optional indices (None â†’ null).
 /// Used in left/right/full join output where some rows have no match.
 fn gather_column_nullable_null(col: &Column, indices: &[Option<usize>]) -> NullCol {
+    if matches!(col, Column::CategoricalAdaptive(_)) {
+        return gather_column_nullable_null(&col.to_legacy_categorical(), indices);
+    }
     match col {
         Column::Int(v) => {
             let mut vals = Vec::with_capacity(indices.len());
@@ -5194,6 +5743,7 @@ fn gather_column_nullable_null(col: &Column, indices: &[Option<usize>]) -> NullC
             }
             NullCol::Int(NullableColumn::new(vals, BitMask::from_bools(&valid)))
         }
+        Column::CategoricalAdaptive(_) => unreachable!("handled by early return"),
     }
 }
 
@@ -5362,13 +5912,20 @@ impl TidyView {
             .filter(|i| !vc_set.contains(i))
             .collect();
 
-        let visible_rows: Vec<usize> = self.mask.iter_set().collect();
+        let visible_rows: Vec<usize> = self.mask.iter_indices().collect();
         let n_out = visible_rows.len() * value_cols.len();
 
         // Build id columns (repeated value_cols.len() times per source row)
         let mut out_cols: Vec<(String, Column)> = Vec::new();
         for &id_idx in &id_col_indices {
-            let (name, col) = &self.base.columns[id_idx];
+            let (name, col_orig) = &self.base.columns[id_idx];
+            let legacy_owned;
+            let col: &Column = if matches!(col_orig, Column::CategoricalAdaptive(_)) {
+                legacy_owned = col_orig.to_legacy_categorical();
+                &legacy_owned
+            } else {
+                col_orig
+            };
             let new_col = match col {
                 Column::Int(v) => {
                     let mut out = Vec::with_capacity(n_out);
@@ -5412,6 +5969,7 @@ impl TidyView {
                     }
                     Column::DateTime(out)
                 }
+                Column::CategoricalAdaptive(_) => unreachable!("converted via legacy_owned"),
             };
             out_cols.push((name.clone(), new_col));
         }
@@ -5468,7 +6026,7 @@ impl TidyView {
                 }
                 out_cols.push((values_to.to_string(), Column::Bool(vals)));
             }
-            Column::Categorical { .. } | Column::DateTime(_) => {
+            Column::Categorical { .. } | Column::CategoricalAdaptive(_) | Column::DateTime(_) => {
                 // For pivot_longer, fall back to string representation
                 let mut vals: Vec<String> = Vec::with_capacity(n_out);
                 for &r in &visible_rows {
@@ -5517,7 +6075,7 @@ impl TidyView {
                 .ok_or_else(|| TidyError::ColumnNotFound(id.to_string()))?;
         }
 
-        let visible_rows: Vec<usize> = self.mask.iter_set().collect();
+        let visible_rows: Vec<usize> = self.mask.iter_indices().collect();
 
         // Collect unique key values in first-occurrence order
         let mut key_values: Vec<String> = Vec::new();
@@ -5783,8 +6341,8 @@ impl TidyView {
             )));
         }
 
-        let self_rows: Vec<usize> = self.mask.iter_set().collect();
-        let other_rows: Vec<usize> = other.mask.iter_set().collect();
+        let self_rows: Vec<usize> = self.mask.iter_indices().collect();
+        let other_rows: Vec<usize> = other.mask.iter_indices().collect();
 
         let mut out_cols: Vec<(String, Column)> = Vec::new();
         for &ci in self.proj.indices() {
@@ -5833,8 +6391,8 @@ impl TidyView {
             }
         }
 
-        let self_rows: Vec<usize> = self.mask.iter_set().collect();
-        let other_rows: Vec<usize> = other.mask.iter_set().collect();
+        let self_rows: Vec<usize> = self.mask.iter_indices().collect();
+        let other_rows: Vec<usize> = other.mask.iter_indices().collect();
 
         let mut out_cols: Vec<(String, Column)> = Vec::new();
 
@@ -6212,7 +6770,7 @@ fn build_full_join_frame(
     let mut out_right_rows: Vec<Option<usize>> = Vec::new();
     let mut right_matched: Vec<bool> = vec![false; right.base.nrows()];
 
-    for l_row in left.mask.iter_set() {
+    for l_row in left.mask.iter_indices() {
         let key = row_key(&left.base, &left_key_cols, l_row);
         let matches = find_matches(&lookup, &key);
         if matches.is_empty() {
@@ -6231,7 +6789,7 @@ fn build_full_join_frame(
 
     // Phase 2: unmatched right rows
     let mut unmatched_right: Vec<usize> = Vec::new();
-    for r_row in right.mask.iter_set() {
+    for r_row in right.mask.iter_indices() {
         if r_row < right_matched.len() && !right_matched[r_row] {
             unmatched_right.push(r_row);
         }
@@ -6430,18 +6988,35 @@ impl GroupIndex {
     ///
     /// Semantics: identical to `GroupIndex::build()`. First-occurrence group
     /// ordering is preserved. The only difference is O(N log G) vs O(N Ã— G).
-    pub fn build_fast(
+    ///
+    /// **Phase 2 (v3) cat-aware fast path**: when every key column is
+    /// `Column::Categorical`, the lookup BTreeMap keys are
+    /// `Vec<u32>` of category codes instead of `Vec<String>` of display
+    /// values. This eliminates `levels[code].clone()` per row per key
+    /// column. The fast path is bit-identical to the string path:
+    ///   - Group slots are still assigned in first-occurrence row order.
+    ///   - `GroupMeta::key_values` is still `Vec<String>` of display
+    ///     values, computed once per group (not once per row).
+    ///   - Mixed-type keys (e.g., categorical + int) fall back to the
+    ///     string path automatically.
+    pub fn build_fast<I: IntoIterator<Item = usize>>(
         base: &DataFrame,
         key_col_indices: &[usize],
-        visible_rows: &[usize],
+        visible_rows: I,
         key_names: Vec<String>,
     ) -> Self {
         use std::collections::BTreeMap;
 
+        // Phase 2 cat-aware fast path: try categorical-only key encoding
+        // first. Returns Some(...) when every key col is categorical.
+        if let Some(cat_keys) = collect_categorical_keys(base, key_col_indices) {
+            return build_groupindex_categorical(cat_keys, visible_rows, key_names);
+        }
+
         let mut groups: Vec<GroupMeta> = Vec::new();
         let mut key_to_slot: BTreeMap<Vec<String>, usize> = BTreeMap::new();
 
-        for &row in visible_rows {
+        for row in visible_rows {
             let key: Vec<String> = key_col_indices.iter()
                 .map(|&ci| base.columns[ci].1.get_display(row))
                 .collect();
@@ -6460,6 +7035,89 @@ impl GroupIndex {
     }
 }
 
+// Phase 2 cat-aware key encoding.
+//
+// When every key column is `Column::Categorical`, group_by + distinct
+// build their lookup BTrees over `Vec<u32>` of codes instead of
+// `Vec<String>` of display values. This eliminates `String::clone()` per
+// row per key column on a hot path.
+//
+// Bit-identical to the string path:
+//   - First-occurrence group ordering is preserved (driven by row scan
+//     order, independent of key encoding).
+//   - `GroupMeta::key_values` / dedup output uses `levels[code]` lookup
+//     once per *group* (or once per *unique row*, in distinct), not per
+//     row. The display values are byte-for-byte identical.
+//
+// Mixed-type keys (e.g., one Categorical + one Int) cause
+// `collect_categorical_keys` to return `None` so callers fall back.
+
+/// Borrowed view onto the per-key categorical metadata.
+pub(crate) struct CategoricalKeys<'a> {
+    /// `levels[i]` = level table for key column i.
+    pub(crate) levels: Vec<&'a [String]>,
+    /// `codes[i]` = code array for key column i.
+    pub(crate) codes: Vec<&'a [u32]>,
+}
+
+/// Returns `Some(CategoricalKeys)` when every column index in
+/// `key_col_indices` is `Column::Categorical`. Returns `None` if any key
+/// column is a non-categorical variant (caller must fall back).
+pub(crate) fn collect_categorical_keys<'a>(
+    base: &'a DataFrame,
+    key_col_indices: &[usize],
+) -> Option<CategoricalKeys<'a>> {
+    if key_col_indices.is_empty() {
+        return None;
+    }
+    let mut levels: Vec<&[String]> = Vec::with_capacity(key_col_indices.len());
+    let mut codes: Vec<&[u32]> = Vec::with_capacity(key_col_indices.len());
+    for &ci in key_col_indices {
+        match &base.columns[ci].1 {
+            Column::Categorical { levels: l, codes: c } => {
+                levels.push(l.as_slice());
+                codes.push(c.as_slice());
+            }
+            _ => return None,
+        }
+    }
+    Some(CategoricalKeys { levels, codes })
+}
+
+/// Cat-aware GroupIndex builder. Bit-identical output to the string-key
+/// path: same slot assignment, same `key_values`, same `row_indices`.
+fn build_groupindex_categorical<I: IntoIterator<Item = usize>>(
+    cat: CategoricalKeys<'_>,
+    visible_rows: I,
+    key_names: Vec<String>,
+) -> GroupIndex {
+    use std::collections::BTreeMap;
+    let nkeys = cat.codes.len();
+    let mut groups: Vec<GroupMeta> = Vec::new();
+    let mut key_to_slot: BTreeMap<Vec<u32>, usize> = BTreeMap::new();
+    let mut key_buf: Vec<u32> = Vec::with_capacity(nkeys);
+
+    for row in visible_rows {
+        key_buf.clear();
+        for c in &cat.codes {
+            key_buf.push(c[row]);
+        }
+        if let Some(&slot) = key_to_slot.get(&key_buf) {
+            groups[slot].row_indices.push(row);
+        } else {
+            // Materialise display strings exactly once per group
+            let key_values: Vec<String> = (0..nkeys)
+                .map(|i| cat.levels[i][key_buf[i] as usize].clone())
+                .collect();
+            let slot = groups.len();
+            key_to_slot.insert(key_buf.clone(), slot);
+            groups.push(GroupMeta { key_values, row_indices: vec![row] });
+        }
+    }
+
+    GroupIndex { groups, key_names }
+}
+
 // â"€â"€ TidyView: group_by_fast (uses BTree-accelerated GroupIndex) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 impl TidyView {
@@ -6474,10 +7132,402 @@ impl TidyView {
                 .ok_or_else(|| TidyError::ColumnNotFound(key.to_string()))?;
             key_col_indices.push(idx);
         }
-        let visible_rows: Vec<usize> = self.mask.iter_set().collect();
         let key_names: Vec<String> = keys.iter().map(|s| s.to_string()).collect();
-        let index = GroupIndex::build_fast(&self.base, &key_col_indices, &visible_rows, key_names);
+        let index = GroupIndex::build_fast(&self.base, &key_col_indices, self.mask.iter_indices(), key_names);
         Ok(GroupedTidyView { view: self.clone(), index })
+    }
+}
+
+// ── v3 Phase 6: Streaming aggregations ─────────────────────────────────────
+//
+// `summarise_streaming` is a sibling of `summarise` that skips the
+// `GroupIndex` materialization step entirely. The legacy path builds
+// `Vec<usize>` row indices per group (8 bytes × N rows ≈ 800 MB for
+// 100M rows), then walks each per-group vector once per aggregation.
+// The streaming path walks visible rows ONCE, maintaining a
+// `BTreeMap<key, Vec<AccState>>` where each accumulator holds
+// running-state O(constant) memory: Kahan sum carry, count, min, max,
+// or Welford running mean+M2 for variance/stddev.
+//
+// Memory: O(K · acc_size) instead of O(N · usize). For 100M rows /
+// 1000 groups / 32-byte accumulator, that's ~32 KB vs ~800 MB —
+// roughly 25 000× less memory.
+//
+// Determinism: BTreeMap (not HashMap), Kahan / Welford (not naive
+// floating-point sum). Output row order is the BTreeMap iteration
+// order — byte-equal to the legacy path's first-occurrence ordering
+// when keys are integers/strings/sorted-Categorical (see Phase 6
+// integration test `phase6_streaming_summarise_matches_legacy`).
+//
+// Cat-aware: when every key column is `Column::Categorical`, the key
+// tuple is `Vec<u32>` codes (bit-equal to Phase 2's group_by fast
+// path). Falls back to `Vec<String>` displays on mixed-type keys.
+//
+// Aggregation surface: Count / Sum / Mean / Min / Max / Var / Sd.
+// Median / Quantile / NDistinct require the full row index list and
+// are not streaming — callers fall back to the legacy `summarise`.
+
+/// Streamable aggregation operations. Subset of `TidyAgg` that admits
+/// a constant-state per-group accumulator.
+#[derive(Debug, Clone)]
+pub enum StreamingAgg {
+    /// Row count per group.
+    Count,
+    /// Kahan-sum of a numeric column.
+    Sum(String),
+    /// Arithmetic mean of a numeric column.
+    Mean(String),
+    /// Minimum value (NaN-aware: NaN never wins).
+    Min(String),
+    /// Maximum value (NaN-aware: NaN never wins).
+    Max(String),
+    /// Sample variance via Welford's algorithm (numerically stable).
+    Var(String),
+    /// Sample standard deviation (sqrt of `Var`).
+    Sd(String),
+}
+
+/// Per-group running state. One per `(group, agg)` pair.
+#[derive(Debug, Clone)]
+enum AccState {
+    Count {
+        n: u64,
+    },
+    Sum {
+        // Kahan running sum.
+        sum: f64,
+        c: f64,
+    },
+    Mean {
+        // Kahan-stable accumulator + count.
+        sum: f64,
+        c: f64,
+        n: u64,
+    },
+    Min {
+        cur: f64,
+        any: bool,
+    },
+    Max {
+        cur: f64,
+        any: bool,
+    },
+    /// Welford running mean + sum of squared deviations from mean.
+    Welford {
+        n: u64,
+        mean: f64,
+        m2: f64,
+    },
+}
+
+impl AccState {
+    fn from_agg(agg: &StreamingAgg) -> Self {
+        match agg {
+            StreamingAgg::Count => AccState::Count { n: 0 },
+            StreamingAgg::Sum(_) => AccState::Sum { sum: 0.0, c: 0.0 },
+            StreamingAgg::Mean(_) => AccState::Mean { sum: 0.0, c: 0.0, n: 0 },
+            StreamingAgg::Min(_) => AccState::Min {
+                cur: f64::INFINITY,
+                any: false,
+            },
+            StreamingAgg::Max(_) => AccState::Max {
+                cur: f64::NEG_INFINITY,
+                any: false,
+            },
+            StreamingAgg::Var(_) | StreamingAgg::Sd(_) => AccState::Welford {
+                n: 0,
+                mean: 0.0,
+                m2: 0.0,
+            },
+        }
+    }
+
+    fn update(&mut self, x: f64) {
+        match self {
+            AccState::Count { n } => *n += 1,
+            AccState::Sum { sum, c } => {
+                // Kahan summation.
+                let y = x - *c;
+                let t = *sum + y;
+                *c = (t - *sum) - y;
+                *sum = t;
+            }
+            AccState::Mean { sum, c, n } => {
+                let y = x - *c;
+                let t = *sum + y;
+                *c = (t - *sum) - y;
+                *sum = t;
+                *n += 1;
+            }
+            AccState::Min { cur, any } => {
+                if !x.is_nan() {
+                    if !*any || x < *cur {
+                        *cur = x;
+                        *any = true;
+                    }
+                }
+            }
+            AccState::Max { cur, any } => {
+                if !x.is_nan() {
+                    if !*any || x > *cur {
+                        *cur = x;
+                        *any = true;
+                    }
+                }
+            }
+            AccState::Welford { n, mean, m2 } => {
+                // Welford's online variance.
+                *n += 1;
+                let delta = x - *mean;
+                *mean += delta / (*n as f64);
+                let delta2 = x - *mean;
+                *m2 += delta * delta2;
+            }
+        }
+    }
+
+    fn finalize(&self, agg: &StreamingAgg) -> f64 {
+        match (self, agg) {
+            (AccState::Count { n }, StreamingAgg::Count) => *n as f64,
+            (AccState::Sum { sum, .. }, StreamingAgg::Sum(_)) => *sum,
+            (AccState::Mean { sum, n, .. }, StreamingAgg::Mean(_)) => {
+                if *n == 0 {
+                    f64::NAN
+                } else {
+                    *sum / (*n as f64)
+                }
+            }
+            (AccState::Min { cur, any }, StreamingAgg::Min(_)) => {
+                if *any {
+                    *cur
+                } else {
+                    f64::NAN
+                }
+            }
+            (AccState::Max { cur, any }, StreamingAgg::Max(_)) => {
+                if *any {
+                    *cur
+                } else {
+                    f64::NAN
+                }
+            }
+            (AccState::Welford { n, m2, .. }, StreamingAgg::Var(_)) => {
+                if *n < 2 {
+                    f64::NAN
+                } else {
+                    *m2 / ((*n - 1) as f64)
+                }
+            }
+            (AccState::Welford { n, m2, .. }, StreamingAgg::Sd(_)) => {
+                if *n < 2 {
+                    f64::NAN
+                } else {
+                    (*m2 / ((*n - 1) as f64)).sqrt()
+                }
+            }
+            _ => f64::NAN,
+        }
+    }
+}
+
+/// Pull a row's value from a numeric column as f64 (NaN for non-numeric).
+fn row_as_f64(col: &Column, row: usize) -> f64 {
+    match col {
+        Column::Float(v) => v[row],
+        Column::Int(v) => v[row] as f64,
+        _ => f64::NAN,
+    }
+}
+
+impl TidyView {
+    /// v3 Phase 6: streaming summarise. Single-pass aggregation that
+    /// avoids materializing per-group row index vectors.
+    ///
+    /// Returns a `TidyFrame` with key columns followed by aggregate
+    /// columns (one per assignment). Output row order is BTreeMap
+    /// iteration over key tuples — byte-equal to the legacy path when
+    /// keys are integers / strings / sorted-Categorical.
+    pub fn summarise_streaming(
+        &self,
+        keys: &[&str],
+        aggs: &[(&str, StreamingAgg)],
+    ) -> Result<TidyFrame, TidyError> {
+        // Validate: no duplicate output names; no key/agg name collision.
+        {
+            let mut seen = std::collections::BTreeSet::new();
+            for &(name, _) in aggs {
+                if !seen.insert(name) {
+                    return Err(TidyError::DuplicateColumn(name.to_string()));
+                }
+            }
+            for &k in keys {
+                if seen.contains(k) {
+                    return Err(TidyError::DuplicateColumn(k.to_string()));
+                }
+            }
+        }
+
+        // Resolve key column indices.
+        let mut key_col_indices = Vec::with_capacity(keys.len());
+        for &key in keys {
+            let idx = self
+                .base
+                .columns
+                .iter()
+                .position(|(n, _)| n == key)
+                .ok_or_else(|| TidyError::ColumnNotFound(key.to_string()))?;
+            key_col_indices.push(idx);
+        }
+
+        // Resolve aggregation source columns once.
+        let agg_col_indices: Vec<Option<usize>> = aggs
+            .iter()
+            .map(|(_, agg)| match agg {
+                StreamingAgg::Count => None,
+                StreamingAgg::Sum(c)
+                | StreamingAgg::Mean(c)
+                | StreamingAgg::Min(c)
+                | StreamingAgg::Max(c)
+                | StreamingAgg::Var(c)
+                | StreamingAgg::Sd(c) => self.base.columns.iter().position(|(n, _)| n == c),
+            })
+            .collect();
+        for (i, (_, agg)) in aggs.iter().enumerate() {
+            if matches!(agg, StreamingAgg::Count) {
+                continue;
+            }
+            if agg_col_indices[i].is_none() {
+                let col_name = match agg {
+                    StreamingAgg::Sum(c)
+                    | StreamingAgg::Mean(c)
+                    | StreamingAgg::Min(c)
+                    | StreamingAgg::Max(c)
+                    | StreamingAgg::Var(c)
+                    | StreamingAgg::Sd(c) => c.clone(),
+                    _ => String::new(),
+                };
+                return Err(TidyError::ColumnNotFound(col_name));
+            }
+        }
+
+        // Cat-aware fast path: when every key is Categorical, key on Vec<u32>.
+        let cat = collect_categorical_keys(&self.base, &key_col_indices);
+
+        // BTreeMap keyed on Vec<u32> (cat) or Vec<String> (legacy).
+        // Both produce deterministic iteration.
+        use std::collections::BTreeMap;
+
+        let n_aggs = aggs.len();
+        let init_accs = || -> Vec<AccState> {
+            aggs.iter().map(|(_, a)| AccState::from_state(a)).collect()
+        };
+
+        // Helper inside summarise_streaming to keep AccState constructor private.
+        // (alias to make readable above)
+        fn _unused() {}
+
+        // Streaming pass.
+        let (cat_state, str_state) = if let Some(cat) = cat.as_ref() {
+            let mut state: BTreeMap<Vec<u32>, Vec<AccState>> = BTreeMap::new();
+            let mut key_buf: Vec<u32> = Vec::with_capacity(cat.codes.len());
+            for row in self.mask.iter_indices() {
+                key_buf.clear();
+                for c in &cat.codes {
+                    key_buf.push(c[row]);
+                }
+                let entry = state
+                    .entry(key_buf.clone())
+                    .or_insert_with(&init_accs);
+                for (i, (_, agg)) in aggs.iter().enumerate() {
+                    if let Some(col_idx) = agg_col_indices[i] {
+                        entry[i].update(row_as_f64(&self.base.columns[col_idx].1, row));
+                    } else {
+                        entry[i].update(0.0); // Count ignores value.
+                    }
+                }
+            }
+            (Some(state), None)
+        } else {
+            let mut state: BTreeMap<Vec<String>, Vec<AccState>> = BTreeMap::new();
+            for row in self.mask.iter_indices() {
+                let key: Vec<String> = key_col_indices
+                    .iter()
+                    .map(|&ci| self.base.columns[ci].1.get_display(row))
+                    .collect();
+                let entry = state.entry(key).or_insert_with(&init_accs);
+                for (i, (_, agg)) in aggs.iter().enumerate() {
+                    if let Some(col_idx) = agg_col_indices[i] {
+                        entry[i].update(row_as_f64(&self.base.columns[col_idx].1, row));
+                    } else {
+                        entry[i].update(0.0);
+                    }
+                }
+            }
+            (None, Some(state))
+        };
+
+        // Materialize output frame.
+        let n_groups = cat_state
+            .as_ref()
+            .map(|s| s.len())
+            .unwrap_or_else(|| str_state.as_ref().unwrap().len());
+
+        let mut result_columns: Vec<(String, Column)> = Vec::with_capacity(keys.len() + n_aggs);
+
+        // Key columns. For cat-aware: rebuild via levels[code]. For str: take strings as-is.
+        if let Some(state) = &cat_state {
+            let cat = cat.as_ref().unwrap();
+            for (ki, &key_col_idx) in key_col_indices.iter().enumerate() {
+                let mut vals: Vec<String> = Vec::with_capacity(n_groups);
+                for key_codes in state.keys() {
+                    let code = key_codes[ki] as usize;
+                    vals.push(cat.levels[ki][code].clone());
+                }
+                let key_name = self.base.columns[key_col_idx].0.clone();
+                // Materialize as Categorical to preserve type.
+                let levels: Vec<String> = cat.levels[ki].to_vec();
+                let codes: Vec<u32> = state.keys().map(|k| k[ki]).collect();
+                result_columns.push((key_name, Column::Categorical { levels, codes }));
+                let _ = vals;
+            }
+        } else {
+            let state = str_state.as_ref().unwrap();
+            for (ki, &key_col_idx) in key_col_indices.iter().enumerate() {
+                let key_name = self.base.columns[key_col_idx].0.clone();
+                let vals: Vec<String> = state.keys().map(|k| k[ki].clone()).collect();
+                result_columns.push((key_name, Column::Str(vals)));
+            }
+        }
+
+        // Aggregate columns.
+        for (i, (out_name, agg)) in aggs.iter().enumerate() {
+            let vals: Vec<f64> = if let Some(state) = &cat_state {
+                state.values().map(|accs| accs[i].finalize(agg)).collect()
+            } else {
+                str_state
+                    .as_ref()
+                    .unwrap()
+                    .values()
+                    .map(|accs| accs[i].finalize(agg))
+                    .collect()
+            };
+            let col = if matches!(agg, StreamingAgg::Count) {
+                Column::Int(vals.into_iter().map(|x| x as i64).collect())
+            } else {
+                Column::Float(vals)
+            };
+            result_columns.push((out_name.to_string(), col));
+        }
+
+        let df = DataFrame::from_columns(result_columns)
+            .map_err(|e| TidyError::Internal(e.to_string()))?;
+        Ok(TidyFrame::from_df(df))
+    }
+}
+
+impl AccState {
+    fn from_state(agg: &StreamingAgg) -> Self {
+        Self::from_agg(agg)
     }
 }
 
@@ -6602,7 +7652,7 @@ impl FctColumn {
             return Err(TidyError::ColumnNotFound(col.to_string()));
         }
         let col_data = &view.base.columns[base_idx].1;
-        let visible: Vec<usize> = view.mask.iter_set().collect();
+        let visible: Vec<usize> = view.mask.iter_indices().collect();
         let strings: Vec<String> = visible.iter()
             .map(|&r| col_data.get_display(r))
             .collect();
@@ -7275,6 +8325,106 @@ mod rolling_window_tests {
         let expr = DExpr::RollingSum("x".into(), 2);
         let result = eval_expr_row(&df, &expr, 0);
         assert!(result.is_err());
+    }
+
+    // ── v3 Phase 4 unit tests ─────────────────────────────────────────
+
+    fn cat_col(levels: &[&str], codes: &[u32]) -> Column {
+        Column::Categorical {
+            levels: levels.iter().map(|s| s.to_string()).collect(),
+            codes: codes.to_vec(),
+        }
+    }
+
+    #[test]
+    fn phase4_collect_cat_keys_returns_some_when_all_categorical() {
+        let left = DataFrame::from_columns(vec![
+            ("k".into(), cat_col(&["a", "b", "c"], &[0, 1, 2, 0])),
+        ])
+        .unwrap();
+        let right = DataFrame::from_columns(vec![
+            ("k".into(), cat_col(&["b", "a"], &[0, 1, 1])),
+        ])
+        .unwrap();
+        let cat = collect_categorical_join_keys(&left, &[0], &right, &[0]).unwrap();
+        // right_to_left for the right's "k" col: right code 0 = "b" → left code 1; right code 1 = "a" → left code 0.
+        assert_eq!(cat.right_to_left[0], vec![Some(1u32), Some(0u32)]);
+    }
+
+    #[test]
+    fn phase4_collect_cat_keys_returns_none_on_mixed_types() {
+        let left = DataFrame::from_columns(vec![
+            ("k".into(), cat_col(&["a"], &[0])),
+            ("n".into(), Column::Int(vec![1])),
+        ])
+        .unwrap();
+        let right = DataFrame::from_columns(vec![
+            ("k".into(), cat_col(&["a"], &[0])),
+            ("n".into(), Column::Int(vec![1])),
+        ])
+        .unwrap();
+        // First col cat-aware OK, second col Int → fallback.
+        assert!(collect_categorical_join_keys(&left, &[0, 1], &right, &[0, 1]).is_none());
+    }
+
+    #[test]
+    fn phase4_collect_cat_keys_unknown_right_level_yields_none_in_remap() {
+        let left = DataFrame::from_columns(vec![
+            ("k".into(), cat_col(&["a", "b"], &[0, 1])),
+        ])
+        .unwrap();
+        let right = DataFrame::from_columns(vec![
+            ("k".into(), cat_col(&["a", "z"], &[0, 1])),
+        ])
+        .unwrap();
+        let cat = collect_categorical_join_keys(&left, &[0], &right, &[0]).unwrap();
+        // "a" exists on the left → Some(0). "z" does not → None.
+        assert_eq!(cat.right_to_left[0], vec![Some(0u32), None]);
+    }
+
+    #[test]
+    fn phase4_column_to_categorical_column_roundtrip() {
+        let original = cat_col(&["red", "green", "blue"], &[0, 1, 2, 1, 0]);
+        let cc = original.to_categorical_column().unwrap();
+        let restored = Column::from_categorical_column(&cc).unwrap();
+        match (&original, &restored) {
+            (
+                Column::Categorical { levels: l1, codes: c1 },
+                Column::Categorical { levels: l2, codes: c2 },
+            ) => {
+                assert_eq!(l1, l2);
+                assert_eq!(c1, c2);
+            }
+            _ => panic!("expected Categorical"),
+        }
+    }
+
+    #[test]
+    fn phase4_column_to_categorical_column_none_for_non_categorical() {
+        assert!(Column::Int(vec![1, 2, 3]).to_categorical_column().is_none());
+        assert!(Column::Str(vec!["a".into()]).to_categorical_column().is_none());
+        assert!(Column::Float(vec![1.0]).to_categorical_column().is_none());
+    }
+
+    #[test]
+    fn phase4_column_from_categorical_column_rejects_nulls() {
+        // CategoricalColumn with a null cannot map to Column::Categorical
+        // (which has no null bitmap). Verifies the safety check.
+        use crate::byte_dict::CategoricalColumn;
+        let mut cc = CategoricalColumn::new();
+        cc.push(b"a").unwrap();
+        cc.push_null();
+        cc.push(b"b").unwrap();
+        assert!(Column::from_categorical_column(&cc).is_none());
+    }
+
+    #[test]
+    fn phase4_column_from_categorical_column_rejects_non_utf8() {
+        use crate::byte_dict::CategoricalColumn;
+        let mut cc = CategoricalColumn::new();
+        // 0xFF is invalid as a standalone UTF-8 byte.
+        cc.push(&[0xFFu8]).unwrap();
+        assert!(Column::from_categorical_column(&cc).is_none());
     }
 }
 

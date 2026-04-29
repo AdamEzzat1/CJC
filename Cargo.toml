@@ -1,6 +1,6 @@
 [package]
 name = "cjc-lang"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 license = "MIT"
 description = "CJC-Lang (Computational Jacobian Core) — a deterministic numerical programming language for reproducible computation, ML pipelines, scientific computing, and physics-informed neural networks"
@@ -37,12 +37,13 @@ members = [
     "crates/cjc-quantum",
     "bench/ad_bench",
     "bench/nlp_preprocess_bench",
+    "bench/physics_ml_bench",
 ]
 exclude = ["fuzz"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 license = "MIT"
 authors = ["Adam Ezzat"]
@@ -85,17 +86,17 @@ cjc-parser = { path = "crates/cjc-parser", version = "0.1.6" }
 cjc-types = { path = "crates/cjc-types", version = "0.1.6" }
 cjc-dispatch = { path = "crates/cjc-dispatch", version = "0.1.6" }
 cjc-runtime = { path = "crates/cjc-runtime", version = "0.1.6" }
-cjc-eval = { path = "crates/cjc-eval", version = "0.1.6" }
+cjc-eval = { path = "crates/cjc-eval", version = "0.1.7" }
 cjc-ad = { path = "crates/cjc-ad", version = "0.1.6" }
-cjc-data = { path = "crates/cjc-data", version = "0.1.6" }
+cjc-data = { path = "crates/cjc-data", version = "0.1.7" }
 cjc-repro = { path = "crates/cjc-repro", version = "0.1.6" }
-cjc-cli = { path = "crates/cjc-cli", version = "0.1.6" }
+cjc-cli = { path = "crates/cjc-cli", version = "0.1.7" }
 cjc-module = { path = "crates/cjc-module", version = "0.1.6" }
 cjc-snap = { path = "crates/cjc-snap", version = "0.1.6" }
 cjc-vizor = { path = "crates/cjc-vizor", version = "0.1.6" }
 cjc-hir = { path = "crates/cjc-hir", version = "0.1.6" }
 cjc-mir = { path = "crates/cjc-mir", version = "0.1.6" }
-cjc-mir-exec = { path = "crates/cjc-mir-exec", version = "0.1.6" }
+cjc-mir-exec = { path = "crates/cjc-mir-exec", version = "0.1.7" }
 cjc-regex = { path = "crates/cjc-regex", version = "0.1.6" }
 cjc-analyzer = { path = "crates/cjc-analyzer", version = "0.1.6" }
 cjc-quantum = { path = "crates/cjc-quantum", version = "0.1.6" }
@@ -147,3 +148,7 @@ path = "tests/test_mir_fuzz.rs"
 [[test]]
 name = "test_regex_new"
 path = "tests/regex/mod.rs"
+
+[[test]]
+name = "physics_ml"
+path = "tests/physics_ml/mod.rs"

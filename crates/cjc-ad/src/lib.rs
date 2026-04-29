@@ -7,6 +7,9 @@
 use cjc_runtime::Tensor;
 
 pub mod pinn;
+pub mod dispatch;
+
+pub use dispatch::dispatch_grad_graph;
 
 // ── Forward-Mode AD (Dual Numbers) ──────────────────────────────
 

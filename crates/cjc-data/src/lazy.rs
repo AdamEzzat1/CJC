@@ -47,6 +47,16 @@ pub enum ViewNode {
         group_keys: Vec<String>,
         aggregations: Vec<(String, TidyAgg)>,
     },
+    /// v3 Phase 6: streaming-friendly group + summarise. Produced by
+    /// the lazy optimizer (`annotate_streamable_summarise`) when every
+    /// aggregation is one of {Count, Sum, Mean, Min, Max, Var, Sd}. At
+    /// execution this dispatches to `TidyView::summarise_streaming`,
+    /// avoiding the per-group `Vec<usize>` materialisation.
+    StreamingGroupSummarise {
+        input: Box<ViewNode>,
+        group_keys: Vec<String>,
+        aggregations: Vec<(String, crate::StreamingAgg)>,
+    },
     /// Distinct on columns.
     Distinct {
         input: Box<ViewNode>,
@@ -196,7 +206,102 @@ pub fn optimize(plan: ViewNode) -> ViewNode {
     let plan = merge_filters(plan);
     let plan = push_predicates_down(plan);
     let plan = eliminate_redundant_selects(plan);
+    // v3 Phase 6: rewrite GroupSummarise → StreamingGroupSummarise when
+    // every aggregation is streaming-friendly. This avoids materialising
+    // the per-group `Vec<usize>` row index buffers (~8 bytes × N rows).
+    let plan = annotate_streamable_summarise(plan);
     plan
+}
+
+// ── v3 Phase 6: streamable-summarise annotation ─────────────────────────────
+//
+// `GroupSummarise` becomes `StreamingGroupSummarise` when every aggregation
+// is one of {Count, Sum, Mean, Min, Max, Var, Sd}. Median / Quantile /
+// NDistinct / IQR / First / Last require the full row-index list and stay
+// on the legacy path.
+//
+// Output shape: byte-equal to legacy path on the streamable subset.
+// Determinism: BTreeMap iteration order over key tuples (Vec<u32> codes
+// for cat-aware path, Vec<String> displays otherwise).
+
+fn try_streaming_agg(agg: &TidyAgg) -> Option<crate::StreamingAgg> {
+    use crate::StreamingAgg;
+    match agg {
+        TidyAgg::Count => Some(StreamingAgg::Count),
+        TidyAgg::Sum(c) => Some(StreamingAgg::Sum(c.clone())),
+        TidyAgg::Mean(c) => Some(StreamingAgg::Mean(c.clone())),
+        TidyAgg::Min(c) => Some(StreamingAgg::Min(c.clone())),
+        TidyAgg::Max(c) => Some(StreamingAgg::Max(c.clone())),
+        TidyAgg::Var(c) => Some(StreamingAgg::Var(c.clone())),
+        TidyAgg::Sd(c) => Some(StreamingAgg::Sd(c.clone())),
+        // Median / Quantile / NDistinct / Iqr / First / Last need the
+        // materialised row index list — not streaming-friendly.
+        _ => None,
+    }
+}
+
+fn annotate_streamable_summarise(plan: ViewNode) -> ViewNode {
+    match plan {
+        ViewNode::GroupSummarise {
+            input,
+            group_keys,
+            aggregations,
+        } => {
+            let input = Box::new(annotate_streamable_summarise(*input));
+            // All-or-nothing: if any aggregation is non-streaming, keep
+            // the whole node on the legacy path. Mixed dispatch would
+            // require a second walk.
+            let all_streaming: Option<Vec<(String, crate::StreamingAgg)>> = aggregations
+                .iter()
+                .map(|(name, agg)| try_streaming_agg(agg).map(|sa| (name.clone(), sa)))
+                .collect();
+            match all_streaming {
+                Some(streaming_aggs) => ViewNode::StreamingGroupSummarise {
+                    input,
+                    group_keys,
+                    aggregations: streaming_aggs,
+                },
+                None => ViewNode::GroupSummarise {
+                    input,
+                    group_keys,
+                    aggregations,
+                },
+            }
+        }
+        ViewNode::Filter { input, predicate } => ViewNode::Filter {
+            input: Box::new(annotate_streamable_summarise(*input)),
+            predicate,
+        },
+        ViewNode::Select { input, columns } => ViewNode::Select {
+            input: Box::new(annotate_streamable_summarise(*input)),
+            columns,
+        },
+        ViewNode::Mutate { input, assignments } => ViewNode::Mutate {
+            input: Box::new(annotate_streamable_summarise(*input)),
+            assignments,
+        },
+        ViewNode::Arrange { input, keys } => ViewNode::Arrange {
+            input: Box::new(annotate_streamable_summarise(*input)),
+            keys,
+        },
+        ViewNode::Distinct { input, columns } => ViewNode::Distinct {
+            input: Box::new(annotate_streamable_summarise(*input)),
+            columns,
+        },
+        ViewNode::Join {
+            left,
+            right,
+            on,
+            kind,
+        } => ViewNode::Join {
+            left: Box::new(annotate_streamable_summarise(*left)),
+            right: Box::new(annotate_streamable_summarise(*right)),
+            on,
+            kind,
+        },
+        ViewNode::StreamingGroupSummarise { .. } => plan,
+        ViewNode::Scan { .. } => plan,
+    }
 }
 
 // ── Pass 1: Filter Merging ───────────────────────────────────────────────────
@@ -563,6 +668,22 @@ fn execute(node: ViewNode) -> Result<TidyFrame, TidyError> {
             Ok(result)
         }
 
+        ViewNode::StreamingGroupSummarise {
+            input,
+            group_keys,
+            aggregations,
+        } => {
+            let frame = execute(*input)?;
+            let view = frame.view();
+            let key_refs: Vec<&str> = group_keys.iter().map(|s| s.as_str()).collect();
+            let agg_owned: Vec<(String, crate::StreamingAgg)> = aggregations;
+            let agg_refs: Vec<(&str, crate::StreamingAgg)> = agg_owned
+                .iter()
+                .map(|(name, sa)| (leaked_str(name), sa.clone()))
+                .collect();
+            view.summarise_streaming(&key_refs, &agg_refs)
+        }
+
         ViewNode::Distinct { input, columns } => {
             let frame = execute(*input)?;
             let view = frame.view();
@@ -690,6 +811,17 @@ fn node_output_columns(node: &ViewNode) -> BTreeSet<String> {
             }
             cols
         }
+        ViewNode::StreamingGroupSummarise {
+            group_keys,
+            aggregations,
+            ..
+        } => {
+            let mut cols: BTreeSet<String> = group_keys.iter().cloned().collect();
+            for (name, _) in aggregations {
+                cols.insert(name.clone());
+            }
+            cols
+        }
         ViewNode::Distinct { input, .. } => node_output_columns(input),
         ViewNode::Join {
             left, right, on, ..
@@ -731,6 +863,7 @@ impl ViewNode {
             ViewNode::Mutate { input, .. } => input.count_filters(),
             ViewNode::Arrange { input, .. } => input.count_filters(),
             ViewNode::GroupSummarise { input, .. } => input.count_filters(),
+            ViewNode::StreamingGroupSummarise { input, .. } => input.count_filters(),
             ViewNode::Distinct { input, .. } => input.count_filters(),
             ViewNode::Join { left, right, .. } => {
                 left.count_filters() + right.count_filters()
@@ -756,6 +889,7 @@ impl ViewNode {
             | ViewNode::Mutate { input, .. }
             | ViewNode::Arrange { input, .. }
             | ViewNode::GroupSummarise { input, .. }
+            | ViewNode::StreamingGroupSummarise { input, .. }
             | ViewNode::Distinct { input, .. } => input.innermost(),
             ViewNode::Join { left, .. } => left.innermost(),
             ViewNode::Scan { .. } => self,
@@ -771,6 +905,7 @@ impl ViewNode {
             ViewNode::Mutate { .. } => "Mutate",
             ViewNode::Arrange { .. } => "Arrange",
             ViewNode::GroupSummarise { .. } => "GroupSummarise",
+            ViewNode::StreamingGroupSummarise { .. } => "StreamingGroupSummarise",
             ViewNode::Distinct { .. } => "Distinct",
             ViewNode::Join { .. } => "Join",
         }
@@ -785,6 +920,7 @@ impl ViewNode {
             | ViewNode::Mutate { input, .. }
             | ViewNode::Arrange { input, .. }
             | ViewNode::GroupSummarise { input, .. }
+            | ViewNode::StreamingGroupSummarise { input, .. }
             | ViewNode::Distinct { input, .. } => {
                 out.extend(input.node_kinds());
             }
@@ -834,6 +970,9 @@ impl Batch {
 
 /// Slice a column from `start..end`.
 fn slice_column(col: &Column, start: usize, end: usize) -> Column {
+    if matches!(col, Column::CategoricalAdaptive(_)) {
+        return slice_column(&col.to_legacy_categorical(), start, end);
+    }
     match col {
         Column::Float(v) => Column::Float(v[start..end].to_vec()),
         Column::Int(v) => Column::Int(v[start..end].to_vec()),
@@ -844,6 +983,7 @@ fn slice_column(col: &Column, start: usize, end: usize) -> Column {
             codes: codes[start..end].to_vec(),
         },
         Column::DateTime(v) => Column::DateTime(v[start..end].to_vec()),
+        Column::CategoricalAdaptive(_) => unreachable!("handled by early return"),
     }
 }
 
@@ -906,6 +1046,19 @@ fn merge_batches(batches: Vec<Batch>) -> Result<DataFrame, TidyError> {
                     levels: levels.clone(),
                     codes: Vec::with_capacity(total_rows),
                 },
+                Column::CategoricalAdaptive(_) => {
+                    // Empty buffer matching legacy categorical shape.
+                    let legacy = first_col.to_legacy_categorical();
+                    if let Column::Categorical { levels, .. } = legacy {
+                        Column::Categorical {
+                            levels,
+                            codes: Vec::with_capacity(total_rows),
+                        }
+                    } else {
+                        // Non-UTF-8 / null fallback: Str buffer.
+                        Column::Str(Vec::with_capacity(total_rows))
+                    }
+                }
                 Column::DateTime(_) => Column::DateTime(Vec::with_capacity(total_rows)),
             };
             (name.clone(), empty)
@@ -962,6 +1115,7 @@ fn is_pipeline_breaker(node: &ViewNode) -> bool {
         node,
         ViewNode::Arrange { .. }
             | ViewNode::GroupSummarise { .. }
+            | ViewNode::StreamingGroupSummarise { .. }
             | ViewNode::Distinct { .. }
             | ViewNode::Join { .. }
     )
@@ -1185,6 +1339,22 @@ fn execute_breaker_batched(node: ViewNode) -> Result<TidyFrame, TidyError> {
                     .collect::<Vec<_>>(),
             )?;
             Ok(result)
+        }
+
+        ViewNode::StreamingGroupSummarise {
+            input,
+            group_keys,
+            aggregations,
+        } => {
+            let frame = execute_batched(*input)?;
+            let view = frame.view();
+            let key_refs: Vec<&str> = group_keys.iter().map(|s| s.as_str()).collect();
+            let agg_owned: Vec<(String, crate::StreamingAgg)> = aggregations;
+            let agg_refs: Vec<(&str, crate::StreamingAgg)> = agg_owned
+                .iter()
+                .map(|(name, sa)| (leaked_str(name), sa.clone()))
+                .collect();
+            view.summarise_streaming(&key_refs, &agg_refs)
         }
 
         ViewNode::Distinct { input, columns } => {
@@ -1531,9 +1701,18 @@ mod tests {
 
         let optimized = lazy.optimized_plan();
 
-        // Filter must stay above GroupSummarise.
+        // Filter must stay above the group node. v3 Phase 6: the lazy
+        // optimizer rewrites Count-only GroupSummarise to
+        // StreamingGroupSummarise; both are pipeline breakers, so the
+        // filter staying above either form is the invariant being
+        // pinned here.
         let kinds = optimized.node_kinds();
-        assert_eq!(kinds, vec!["Filter", "GroupSummarise", "Scan"]);
+        assert!(
+            kinds == vec!["Filter", "GroupSummarise", "Scan"]
+                || kinds == vec!["Filter", "StreamingGroupSummarise", "Scan"],
+            "filter must stay above the group node, got {:?}",
+            kinds
+        );
     }
 
     // ── Filter merging ───────────────────────────────────────────────────

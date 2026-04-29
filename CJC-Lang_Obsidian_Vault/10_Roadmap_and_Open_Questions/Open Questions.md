@@ -38,7 +38,7 @@ Items below are ordered: **still open** first, then **resolved** at the bottom f
 
 `CLAUDE.md` lists "MIR integration for autodiff" as feature #2 to implement. `cjc-ad` exists and is exercised by [[cjc-eval]] — but how much of AD currently survives the HIR → MIR lowering path?
 
-**Status:** Still open. Audit `cjc-ad` and `cjc-mir-exec` for which tape-building paths are MIR-reachable.
+**Status:** Phase 3c (2026-04-26) closed the user-visible part: 24 `grad_graph_*` builtins now route from both executors via `cjc_ad::dispatch_grad_graph` (satellite dispatch, mirroring `cjc-quantum`). Both backends produce byte-identical output across the full PINN training loop on the flagship demo (`examples/physics_ml/pinn_heat_1d_pure.cjcl`). What's still open: native higher-order AD (`grad_graph_grad_of`) — Phase 3c shipped a finite-difference fallback at ε=1e-3 and explicitly deferred analytical Hessians to Phase 3d. See [[ADR-0016 Language-Level GradGraph Primitives]].
 
 ### Parity gate coverage matrix
 

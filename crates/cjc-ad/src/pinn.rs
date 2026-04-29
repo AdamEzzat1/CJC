@@ -171,6 +171,200 @@ pub fn mlp_forward(
     x
 }
 
+/// Pure-Rust MLP inference that bypasses the GradGraph entirely.
+///
+/// Reproduces the same `activation(x @ W^T + b)` math as `mlp_forward` but
+/// operates directly on flat parameter slices, so callers can evaluate a
+/// trained network at arbitrary points without paying for graph allocation
+/// or autodiff. Hidden layers use Tanh, the output layer uses identity —
+/// matching the convention every PINN trainer in this file uses.
+///
+/// # Arguments
+///
+/// * `layer_sizes` - Layer widths, e.g. `[2, 20, 20, 1]`. Must have ≥ 2.
+/// * `flat_params` - Parameters laid out in `mlp_init` order: for each
+///   layer `i`, weights `[out_i, in_i]` row-major followed by bias
+///   `[out_i]`. Length must equal `Σᵢ (out_i·in_i + out_i)`.
+/// * `inputs` - Flat input batch in row-major `[batch, layer_sizes[0]]`.
+///
+/// # Returns
+///
+/// Flat output `[batch, layer_sizes[last]]` row-major.
+///
+/// # Panics
+///
+/// Panics if `layer_sizes.len() < 2`, if `flat_params` does not match the
+/// expected length, or if `inputs.len() % layer_sizes[0] != 0`.
+///
+/// # Determinism
+///
+/// Pure scalar arithmetic in canonical loop order — bit-identical across
+/// runs and threads.
+pub fn pinn_mlp_eval_grid(
+    layer_sizes: &[usize],
+    flat_params: &[f64],
+    inputs: &[f64],
+) -> Vec<f64> {
+    assert!(layer_sizes.len() >= 2, "Need at least input + output sizes");
+    let in_dim = layer_sizes[0];
+    assert!(
+        inputs.len() % in_dim == 0,
+        "inputs.len() {} not divisible by input width {}",
+        inputs.len(), in_dim,
+    );
+    let batch = inputs.len() / in_dim;
+
+    // Slice the flat parameter buffer into per-layer (W, b) views.
+    let mut offsets: Vec<(usize, usize, usize)> = Vec::with_capacity(layer_sizes.len() - 1);
+    let mut cursor = 0usize;
+    for i in 0..layer_sizes.len() - 1 {
+        let in_f = layer_sizes[i];
+        let out_f = layer_sizes[i + 1];
+        let w_start = cursor;
+        cursor += out_f * in_f;
+        let b_start = cursor;
+        cursor += out_f;
+        offsets.push((w_start, b_start, out_f * in_f + out_f));
+        let _ = b_start; // silence unused-warning shadow
+    }
+    assert_eq!(
+        cursor, flat_params.len(),
+        "flat_params length {} does not match expected {} for layer_sizes {:?}",
+        flat_params.len(), cursor, layer_sizes,
+    );
+
+    // Forward each batch row through every layer, reusing scratch buffers.
+    let max_width = *layer_sizes.iter().max().unwrap();
+    let mut x = vec![0.0; max_width];
+    let mut y = vec![0.0; max_width];
+    let out_dim = layer_sizes[layer_sizes.len() - 1];
+    let mut out = Vec::with_capacity(batch * out_dim);
+
+    for row in 0..batch {
+        let row_in = &inputs[row * in_dim..(row + 1) * in_dim];
+        x[..in_dim].copy_from_slice(row_in);
+        let mut cur_in = in_dim;
+
+        for i in 0..layer_sizes.len() - 1 {
+            let in_f = layer_sizes[i];
+            let out_f = layer_sizes[i + 1];
+            debug_assert_eq!(cur_in, in_f);
+            let (w_off, _b_off, _) = offsets[i];
+            let w = &flat_params[w_off..w_off + out_f * in_f];
+            let b = &flat_params[w_off + out_f * in_f..w_off + out_f * in_f + out_f];
+            let is_last = i == layer_sizes.len() - 2;
+
+            for o in 0..out_f {
+                // Kahan-style stable accumulation for the dot product.
+                let mut acc = KahanAccumulatorF64::new();
+                for j in 0..in_f { acc.add(w[o * in_f + j] * x[j]); }
+                let z = acc.finalize() + b[o];
+                y[o] = if is_last {
+                    z
+                } else {
+                    z.tanh()
+                };
+            }
+            x[..out_f].copy_from_slice(&y[..out_f]);
+            cur_in = out_f;
+        }
+
+        out.extend_from_slice(&x[..out_dim]);
+    }
+
+    out
+}
+
+/// Analytical 1-soliton reference solution for the KdV equation
+/// `u_t + 6·u·u_x + u_xxx = 0`.
+///
+/// Returns `u(x, t) = (c/2)·sech²(√c/2 · (x - c·t))`. With `c = 1` and
+/// IC `u(x, 0) = 0.5·sech²(x/2)` this reduces to a right-traveling wave
+/// of amplitude 0.5 and speed 1 — exactly the `pinn_kdv_train` IC, so
+/// the trained network can be gated against this expression on the full
+/// space-time domain.
+pub fn kdv_soliton_reference(x: f64, t: f64, c: f64) -> f64 {
+    let arg = (c.sqrt() * 0.5) * (x - c * t);
+    let sech = 1.0 / arg.cosh();
+    0.5 * c * sech * sech
+}
+
+/// Build a reference `[n_x · n_t]` grid for the KdV 1-soliton solution.
+///
+/// Uses uniform spacing across `x ∈ [x_min, x_max]` and `t ∈ [t_min, t_max]`.
+/// Outputs are flattened row-major in `(t, x)` order — i.e. the inner stride
+/// is `x` so callers can compute slice L2 by walking contiguous memory.
+pub fn kdv_reference_grid(
+    x_min: f64, x_max: f64, n_x: usize,
+    t_min: f64, t_max: f64, n_t: usize,
+    c: f64,
+) -> (Vec<f64>, Vec<f64>) {
+    let mut inputs = Vec::with_capacity(n_x * n_t * 2);
+    let mut targets = Vec::with_capacity(n_x * n_t);
+    for i in 0..n_t {
+        let t = if n_t > 1 {
+            t_min + (i as f64) * (t_max - t_min) / (n_t - 1) as f64
+        } else { t_min };
+        for j in 0..n_x {
+            let x = if n_x > 1 {
+                x_min + (j as f64) * (x_max - x_min) / (n_x - 1) as f64
+            } else { x_min };
+            inputs.push(x);
+            inputs.push(t);
+            targets.push(kdv_soliton_reference(x, t, c));
+        }
+    }
+    (inputs, targets)
+}
+
+/// Reference IC for the Allen-Cahn benchmark: `u(x, 0) = x²·cos(π·x)`.
+///
+/// No closed-form full space-time solution exists for Allen-Cahn at
+/// ε=0.01, so the trainer is gated on (a) IC reproduction at t=0 against
+/// this expression, and (b) `mean_residual` of the PDE residual at the
+/// final parameters. Phase 3b will add a high-resolution implicit-FD
+/// reference for full-domain comparison.
+pub fn allen_cahn_ic_reference(x: f64) -> f64 {
+    x * x * (std::f64::consts::PI * x).cos()
+}
+
+/// Build IC-reproduction inputs `(x, 0)` and target `u(x, 0)` arrays for
+/// Allen-Cahn over `x ∈ [-1, 1]` (the trainer's domain).
+pub fn allen_cahn_ic_grid(n_x: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut inputs = Vec::with_capacity(n_x * 2);
+    let mut targets = Vec::with_capacity(n_x);
+    for j in 0..n_x {
+        let x = if n_x > 1 {
+            -1.0 + (j as f64) * 2.0 / (n_x - 1) as f64
+        } else { -1.0 };
+        inputs.push(x);
+        inputs.push(0.0);
+        targets.push(allen_cahn_ic_reference(x));
+    }
+    (inputs, targets)
+}
+
+/// RMSE and max abs error for `pred` vs `target`.
+///
+/// `rmse = sqrt(mean((p-t)²))`, `max = max|p-t|`. Matches the convention
+/// used by every `pinn_*_train` function in this file (where the field
+/// `l2_error` actually carries RMSE). Uses Kahan accumulation for
+/// determinism.
+pub fn pinn_l2_max_errors(pred: &[f64], target: &[f64]) -> (f64, f64) {
+    assert_eq!(pred.len(), target.len(), "pred/target length mismatch");
+    assert!(!pred.is_empty(), "empty pred/target");
+    let mut err_acc = KahanAccumulatorF64::new();
+    let mut max_err = 0.0_f64;
+    for i in 0..pred.len() {
+        let d = pred[i] - target[i];
+        err_acc.add(d * d);
+        let ad = d.abs();
+        if ad > max_err { max_err = ad; }
+    }
+    let rmse = (err_acc.finalize() / pred.len() as f64).sqrt();
+    (rmse, max_err)
+}
+
 // ---------------------------------------------------------------------------
 // Physics Loss Components
 // ---------------------------------------------------------------------------

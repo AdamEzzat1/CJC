@@ -48,6 +48,38 @@ PDE residuals (e.g., `u_xx` in the heat equation) require second derivatives of 
 
 Each PINN training epoch evaluates the MLP at O(n_colloc) collocation points × O(5) FD stencil points. The graph is rebuilt each epoch for 2D-input problems (simpler than reforward indexing for multi-point graphs). The harmonic oscillator (1D input) uses the more efficient `set_tensor` + `reforward` path.
 
+## Language-level GradGraph primitives (Phase 3c)
+
+As of v0.1.7, the `GradGraph` arena is addressable from `.cjcl` source via 24
+`grad_graph_*` builtins (see [[ADR-0016 Language-Level GradGraph Primitives]]).
+A user can now write:
+
+```cjcl
+grad_graph_new();
+let w: i64 = grad_graph_param(Tensor.from_vec([0.1, 0.2], [2]));
+let x: i64 = grad_graph_input(Tensor.from_vec([1.0, 2.0], [2]));
+let y: i64 = grad_graph_mul(w, x);
+let loss: i64 = grad_graph_sum(y);
+grad_graph_backward(loss);
+let g: Tensor = grad_graph_param_grad(w);
+```
+
+Surface area:
+
+- **Construction:** `grad_graph_new`, `grad_graph_param`, `grad_graph_input`, `grad_graph_const`
+- **Pointwise:** `grad_graph_add/sub/mul/div/neg/scalar_mul/pow/exp/ln/sqrt/sin/cos/tanh`
+- **Reductions:** `grad_graph_sum`, `grad_graph_mean`, `grad_graph_matmul`
+- **Fused MLP:** `grad_graph_mlp_layer(input, weight, bias, "tanh")`
+- **State / backward:** `grad_graph_forward`, `grad_graph_set_tensor`, `grad_graph_param_grad`, `grad_graph_zero_grad`, `grad_graph_backward`, `grad_graph_clip_grad_norm`, `grad_graph_len`
+
+Handles cross the language boundary as `Value::Int(node_idx)`; the graph
+itself lives in a thread-local `RefCell<GradGraph>` reset by
+`grad_graph_new()`. The flagship demo
+[[PINN in Pure CJC-Lang]] (`examples/physics_ml/pinn_heat_1d_pure.cjcl`)
+trains a 2-20-20-1 tanh PINN end-to-end using only these primitives plus
+`adam_step` — every loss line is bit-identical between AST-eval and
+MIR-exec.
+
 ## Determinism
 
 - Tape traversal is deterministic (Vec order, not hash order).

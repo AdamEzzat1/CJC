@@ -42,6 +42,10 @@ pub struct ColumnStats {
 impl ColumnStats {
     /// Compute stats for a column.
     pub fn compute(col: &Column) -> Self {
+        // CategoricalAdaptive: convert to legacy Categorical and recurse.
+        if matches!(col, Column::CategoricalAdaptive(_)) {
+            return Self::compute(&col.to_legacy_categorical());
+        }
         match col {
             Column::Float(v) => Self::compute_float(v),
             Column::Int(v) => Self::compute_int(v),
@@ -49,6 +53,7 @@ impl ColumnStats {
             Column::Bool(v) => Self::compute_bool(v),
             Column::Categorical { codes, levels } => Self::compute_categorical(codes, levels),
             Column::DateTime(v) => Self::compute_datetime(v),
+            Column::CategoricalAdaptive(_) => unreachable!("handled by early return"),
         }
     }
 

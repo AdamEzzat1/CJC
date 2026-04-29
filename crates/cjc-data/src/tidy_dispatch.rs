@@ -702,6 +702,9 @@ fn dispatch_join(
 
 /// Convert a `Column` to a `Value::Array`.
 fn column_to_value(col: &Column) -> Value {
+    if matches!(col, Column::CategoricalAdaptive(_)) {
+        return column_to_value(&col.to_legacy_categorical());
+    }
     let vals: Vec<Value> = match col {
         Column::Int(v) => v.iter().map(|i| Value::Int(*i)).collect(),
         Column::Float(v) => v.iter().map(|f| Value::Float(*f)).collect(),
@@ -715,6 +718,7 @@ fn column_to_value(col: &Column) -> Value {
             .map(|&c| Value::String(Rc::new(levels[c as usize].clone())))
             .collect(),
         Column::DateTime(v) => v.iter().map(|i| Value::Int(*i)).collect(),
+        Column::CategoricalAdaptive(_) => unreachable!("handled by early return"),
     };
     Value::Array(Rc::new(vals))
 }
@@ -885,6 +889,12 @@ fn format_describe(df: &DataFrame) -> String {
                 out.push_str(&format!("  count: {}\n", nrows));
                 out.push_str(&format!("  min:   {} (epoch ms)\n", sorted[0]));
                 out.push_str(&format!("  max:   {} (epoch ms)\n", sorted[nrows - 1]));
+            }
+            Column::CategoricalAdaptive(cc) => {
+                let n_levels = cc.dictionary().len();
+                out.push_str(&format!("  count:  {}\n", nrows));
+                out.push_str(&format!("  levels: {} (adaptive, {}-byte codes)\n",
+                    n_levels, cc.codes().width_bytes()));
             }
         }
     }
@@ -1472,6 +1482,7 @@ pub fn dispatch_tidy_builtin(name: &str, args: &[Value]) -> Result<Option<Value>
                 }
                 Column::Bool(v) => Column::Bool(v.clone()),
                 Column::Categorical { levels, codes } => Column::Categorical { levels: levels.clone(), codes: codes.clone() },
+                Column::CategoricalAdaptive(_) => df.columns[col_idx].1.to_legacy_categorical(),
                 Column::DateTime(v) => Column::DateTime(v.clone()),
             };
             df.columns[col_idx].1 = filled_col;
@@ -1520,7 +1531,14 @@ pub fn dispatch_tidy_builtin(name: &str, args: &[Value]) -> Result<Option<Value>
             // Build new DataFrame from kept rows
             let mut new_cols: Vec<(String, Column)> = Vec::with_capacity(df.columns.len());
             for (name, col) in &df.columns {
-                let new_col = match col {
+                let legacy_owned;
+                let col_ref: &Column = if matches!(col, Column::CategoricalAdaptive(_)) {
+                    legacy_owned = col.to_legacy_categorical();
+                    &legacy_owned
+                } else {
+                    col
+                };
+                let new_col = match col_ref {
                     Column::Int(v)       => Column::Int(v.iter().enumerate().filter(|(r, _)| keep[*r]).map(|(_, x)| *x).collect()),
                     Column::Float(v)     => Column::Float(v.iter().enumerate().filter(|(r, _)| keep[*r]).map(|(_, x)| *x).collect()),
                     Column::Str(v)       => Column::Str(v.iter().enumerate().filter(|(r, _)| keep[*r]).map(|(_, x)| x.clone()).collect()),
@@ -1530,6 +1548,7 @@ pub fn dispatch_tidy_builtin(name: &str, args: &[Value]) -> Result<Option<Value>
                         levels: levels.clone(),
                         codes: codes.iter().enumerate().filter(|(r, _)| keep[*r]).map(|(_, x)| *x).collect(),
                     },
+                    Column::CategoricalAdaptive(_) => unreachable!("converted via legacy_owned"),
                 };
                 new_cols.push((name.clone(), new_col));
             }

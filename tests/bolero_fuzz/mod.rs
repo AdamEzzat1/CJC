@@ -13,7 +13,12 @@
 //! - Lexer panics on multi-byte UTF-8 characters at string slice boundaries
 //! - Parser inherits lexer panics
 
+pub mod adaptive_selection_fuzz;
+pub mod categorical_dictionary_fuzz;
+pub mod categorical_join_fuzz;
 pub mod cli_expansion_fuzz;
+pub mod hybrid_streaming_fuzz;
+pub mod v2_1_bytecode_fuzz;
 
 use std::panic;
 
