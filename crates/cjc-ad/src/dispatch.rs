@@ -377,6 +377,22 @@ pub fn dispatch_grad_graph(name: &str, args: &[Value]) -> Result<Option<Value>, 
             Value::Float(actual)
         }
 
+        // ── Phase 3d: native higher-order autodiff ──────────────────
+        // grad_graph_grad_of(f, x) -> NodeIdx
+        // Builds a graph node representing dF/dx as a function of the
+        // existing parameters. The result can itself be passed back
+        // into grad_of for second- and higher-order derivatives.
+        // Phase 3d ships the polynomial-arithmetic op subset only
+        // (Add/Sub/Mul/ScalarMul/Neg + Input/Parameter leaves).
+        // Other ops Err — see ADR-0023 for the deferred set.
+        "grad_graph_grad_of" => {
+            arg_count(name, args, 2)?;
+            let f = arg_idx_checked(name, &args[0])?;
+            let x = arg_idx_checked(name, &args[1])?;
+            let grad_node = with_ambient(|g| g.grad_of(f.index(), x.index()))?;
+            idx_value(NodeIdx::from_usize(grad_node))
+        }
+
         // ── Introspection ───────────────────────────────────────────
         "grad_graph_len" => {
             arg_count(name, args, 0)?;
