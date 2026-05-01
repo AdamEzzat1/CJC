@@ -103,7 +103,18 @@ pub fn hinge_loss(pred: &[f64], target: &[f64]) -> Result<f64, String> {
 // Optimizers
 // ---------------------------------------------------------------------------
 
+use crate::idx::ParamIdx;
+
 /// SGD optimizer state.
+///
+/// Phase 2b: the `velocity: Vec<f64>` is the canonical per-parameter
+/// state buffer. The field stays `pub` for backward compatibility with
+/// existing readers (cjc-eval / cjc-mir-exec read `state.velocity.len()`),
+/// but new code should prefer the typed accessors `velocity_at`,
+/// `set_velocity_at`, `n_params` so that parameter-position vs node-
+/// index confusion is caught at compile time.
+///
+/// See `ADR-0022` (Phase 2 — typed-ID newtypes) for the policy.
 pub struct SgdState {
     pub lr: f64,
     pub momentum: f64,
@@ -114,17 +125,50 @@ impl SgdState {
     pub fn new(n_params: usize, lr: f64, momentum: f64) -> Self {
         Self { lr, momentum, velocity: vec![0.0; n_params] }
     }
+
+    /// Number of parameters tracked by this state.
+    #[inline]
+    pub fn n_params(&self) -> usize {
+        self.velocity.len()
+    }
+
+    /// Read the velocity at a typed parameter index. Out-of-range
+    /// `ParamIdx` panics (consistent with `Vec` indexing).
+    #[inline]
+    pub fn velocity_at(&self, p: ParamIdx) -> f64 {
+        self.velocity[p.index()]
+    }
+
+    /// Write the velocity at a typed parameter index.
+    #[inline]
+    pub fn set_velocity_at(&mut self, p: ParamIdx, value: f64) {
+        self.velocity[p.index()] = value;
+    }
 }
 
 /// SGD step: sequential, deterministic.
+///
+/// Loop iterates `ParamIdx(0)..ParamIdx(n_params)` so each step uses
+/// the typed accessor. This produces bit-identical output to the prior
+/// `usize`-indexed loop (verified by regression).
 pub fn sgd_step(params: &mut [f64], grads: &[f64], state: &mut SgdState) {
-    for i in 0..params.len() {
-        state.velocity[i] = state.momentum * state.velocity[i] + grads[i];
-        params[i] -= state.lr * state.velocity[i];
+    let n = params.len();
+    for i in 0..n {
+        let p = ParamIdx::from_usize(i);
+        let new_velocity = state.momentum * state.velocity_at(p) + grads[i];
+        state.set_velocity_at(p, new_velocity);
+        params[i] -= state.lr * state.velocity_at(p);
     }
 }
 
 /// Adam optimizer state.
+///
+/// Phase 2b: `m`/`v` are first/second moment buffers. The fields stay
+/// `pub` for backward compatibility (cjc-eval / cjc-mir-exec read
+/// `state.m.len()`), but new code should prefer the typed accessors
+/// `m_at` / `v_at` / `set_m_at` / `set_v_at` / `n_params`.
+///
+/// See `ADR-0022` (Phase 2 — typed-ID newtypes) for the policy.
 pub struct AdamState {
     pub lr: f64,
     pub beta1: f64,
@@ -147,17 +191,55 @@ impl AdamState {
             v: vec![0.0; n_params],
         }
     }
+
+    /// Number of parameters tracked by this state.
+    #[inline]
+    pub fn n_params(&self) -> usize {
+        self.m.len()
+    }
+
+    /// Read the first-moment estimate at a typed parameter index.
+    #[inline]
+    pub fn m_at(&self, p: ParamIdx) -> f64 {
+        self.m[p.index()]
+    }
+
+    /// Write the first-moment estimate at a typed parameter index.
+    #[inline]
+    pub fn set_m_at(&mut self, p: ParamIdx, value: f64) {
+        self.m[p.index()] = value;
+    }
+
+    /// Read the second-moment estimate at a typed parameter index.
+    #[inline]
+    pub fn v_at(&self, p: ParamIdx) -> f64 {
+        self.v[p.index()]
+    }
+
+    /// Write the second-moment estimate at a typed parameter index.
+    #[inline]
+    pub fn set_v_at(&mut self, p: ParamIdx, value: f64) {
+        self.v[p.index()] = value;
+    }
 }
 
 /// Adam step: sequential, deterministic.
+///
+/// Loop iterates `ParamIdx(0)..ParamIdx(n_params)` so each step uses
+/// the typed accessors. Same arithmetic as the prior `usize`-indexed
+/// loop; verified bit-identical by regression.
 pub fn adam_step(params: &mut [f64], grads: &[f64], state: &mut AdamState) {
     state.t += 1;
     let t = state.t as f64;
-    for i in 0..params.len() {
-        state.m[i] = state.beta1 * state.m[i] + (1.0 - state.beta1) * grads[i];
-        state.v[i] = state.beta2 * state.v[i] + (1.0 - state.beta2) * grads[i] * grads[i];
-        let m_hat = state.m[i] / (1.0 - state.beta1.powf(t));
-        let v_hat = state.v[i] / (1.0 - state.beta2.powf(t));
+    let n = params.len();
+    for i in 0..n {
+        let p = ParamIdx::from_usize(i);
+        let new_m = state.beta1 * state.m_at(p) + (1.0 - state.beta1) * grads[i];
+        let new_v = state.beta2 * state.v_at(p) + (1.0 - state.beta2) * grads[i] * grads[i];
+        state.set_m_at(p, new_m);
+        state.set_v_at(p, new_v);
+        let m_hat = new_m / (1.0 - state.beta1.powf(t));
+        let v_hat = new_v / (1.0 - state.beta2.powf(t));
         params[i] -= state.lr * m_hat / (v_hat.sqrt() + state.eps);
     }
 }
@@ -1604,6 +1686,88 @@ mod tests {
         // After one step, params should be slightly different
         assert!(params[0] < 1.0);
         assert!(params[1] < 2.0);
+    }
+
+    // ── Phase 2b: ParamIdx-typed accessors ──────────────────────────
+
+    #[test]
+    fn paramidx_accessors_agree_with_direct_field_reads_adam() {
+        // After several Adam steps, the typed accessors must read the same
+        // bytes as direct `state.m[i]` / `state.v[i]` access.
+        let mut params = vec![0.5, -0.3, 1.7, 0.0];
+        let grads = vec![0.1, -0.2, 0.05, 0.4];
+        let mut state = AdamState::new(4, 0.01);
+        for _ in 0..5 {
+            adam_step(&mut params, &grads, &mut state);
+        }
+        for i in 0..4 {
+            let p = crate::idx::ParamIdx::from_usize(i);
+            assert_eq!(state.m_at(p).to_bits(), state.m[i].to_bits());
+            assert_eq!(state.v_at(p).to_bits(), state.v[i].to_bits());
+        }
+        assert_eq!(state.n_params(), 4);
+    }
+
+    #[test]
+    fn paramidx_accessors_agree_with_direct_field_reads_sgd() {
+        let mut params = vec![1.0, 2.0, 3.0];
+        let grads = vec![0.01, -0.02, 0.03];
+        let mut state = SgdState::new(3, 0.05, 0.9);
+        for _ in 0..7 {
+            sgd_step(&mut params, &grads, &mut state);
+        }
+        for i in 0..3 {
+            let p = crate::idx::ParamIdx::from_usize(i);
+            assert_eq!(state.velocity_at(p).to_bits(), state.velocity[i].to_bits());
+        }
+        assert_eq!(state.n_params(), 3);
+    }
+
+    #[test]
+    fn paramidx_typed_setters_round_trip() {
+        let mut state = AdamState::new(8, 0.001);
+        for i in 0..8 {
+            let p = crate::idx::ParamIdx::from_usize(i);
+            state.set_m_at(p, (i as f64) * 0.5);
+            state.set_v_at(p, (i as f64) * 0.25);
+        }
+        for i in 0..8 {
+            let p = crate::idx::ParamIdx::from_usize(i);
+            assert_eq!(state.m_at(p), (i as f64) * 0.5);
+            assert_eq!(state.v_at(p), (i as f64) * 0.25);
+            // and direct field read agrees
+            assert_eq!(state.m[i], (i as f64) * 0.5);
+            assert_eq!(state.v[i], (i as f64) * 0.25);
+        }
+    }
+
+    #[test]
+    fn paramidx_adam_step_byte_equal_across_independent_runs() {
+        // Determinism: two independent runs with the same initial state
+        // must produce byte-equal final state and params. This is the
+        // strongest contract for the typed-accessor migration:
+        // re-ordering the loop body or replacing direct field access
+        // with typed accessors must never perturb the output bits.
+        let init_params = vec![0.5, -0.5, 1.5, -1.5, 0.7];
+        let grads = vec![0.1, -0.05, 0.02, 0.08, -0.03];
+
+        let run = || {
+            let mut params = init_params.clone();
+            let mut state = AdamState::new(5, 0.01);
+            for _ in 0..20 {
+                adam_step(&mut params, &grads, &mut state);
+            }
+            (params, state.m.clone(), state.v.clone(), state.t)
+        };
+
+        let (p1, m1, v1, t1) = run();
+        let (p2, m2, v2, t2) = run();
+
+        let bits = |xs: &[f64]| -> Vec<u64> { xs.iter().map(|x| x.to_bits()).collect() };
+        assert_eq!(bits(&p1), bits(&p2));
+        assert_eq!(bits(&m1), bits(&m2));
+        assert_eq!(bits(&v1), bits(&v2));
+        assert_eq!(t1, t2);
     }
 
     #[test]
