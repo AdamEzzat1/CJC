@@ -129,9 +129,27 @@ fn arg_f64(name: &str, val: &Value) -> Result<f64, String> {
     }
 }
 
-/// Decode `Value::Array` of `Value::Int` (each ≥ 1) into a `Vec<usize>`.
-/// Used by shape arguments — `grad_graph_reshape` and (Phase 3b) `gather`,
-/// `cat`. Rejects negative or non-integer entries with a clean Err.
+/// Decode `Value::Array` of `Value::Int` (each non-negative) into a
+/// `Vec<usize>`, **and bound-check each entry against the ambient graph
+/// length**. This is the right helper for arrays of *node indices*
+/// (Phase 3b's `cat`, `backward_collect`); shape and gather-index arrays
+/// use the lighter `arg_usize_array` since they're not graph-relative.
+fn arg_idx_array(name: &str, val: &Value) -> Result<Vec<usize>, String> {
+    let raw = arg_usize_array(name, val)?;
+    let len = with_ambient(|g| g.len());
+    for (i, &idx) in raw.iter().enumerate() {
+        if idx >= len {
+            return Err(format!(
+                "{name}: node index [{i}]={idx} out of range (graph has {len} nodes)"
+            ));
+        }
+    }
+    Ok(raw)
+}
+
+/// Decode `Value::Array` of `Value::Int` (each ≥ 0) into a `Vec<usize>`.
+/// Used by shape and gather-index arguments where bounds are op-specific
+/// rather than graph-relative.
 fn arg_usize_array(name: &str, val: &Value) -> Result<Vec<usize>, String> {
     match val {
         Value::Array(elems) => {
@@ -458,6 +476,142 @@ pub fn dispatch_grad_graph(name: &str, args: &[Value]) -> Result<Option<Value>, 
                 ));
             }
             idx_value(with_ambient(|g| g.reshape(a, &shape)))
+        }
+
+        // ── Phase 3b: array-arg & state-recovery ops ────────────────
+        // - batch_norm: trivial 1-arg activation, completes the
+        //   normalization pair with layer_norm
+        // - gather/cat: take Array<Int>; reuse `arg_usize_array` for the
+        //   non-graph-relative shape/index array, with bounds-checking
+        //   added at this boundary so OOB doesn't panic in the kernel
+        // - reforward: takes (start, end) range; recomputes forward-pass
+        //   tensors so users can `set_tensor()` a parameter and re-run
+        //   the graph in place (the v2.5 PINN-graph-reuse path)
+        // - backward_collect: zero_grad + backward + gather grads in one
+        //   call; returns Value::Array of Tensors. None entries (i.e. a
+        //   passed index that isn't a parameter or has no gradient yet)
+        //   are surfaced as Err — the user explicitly listed which nodes
+        //   they expect gradients for, so a None means a contract bug
+
+        "grad_graph_batch_norm" => {
+            arg_count(name, args, 1)?;
+            let a = arg_idx_checked(name, &args[0])?;
+            idx_value(with_ambient(|g| g.batch_norm(a)))
+        }
+
+        // grad_graph_gather(node, indices_array, axis) -> NodeIdx
+        "grad_graph_gather" => {
+            arg_count(name, args, 3)?;
+            let a = arg_idx_checked(name, &args[0])?;
+            let indices = arg_usize_array(name, &args[1])?;
+            let axis = arg_idx(name, &args[2])?;
+            // Bounds-check axis and indices against the input tensor shape
+            // so OOB doesn't panic deep in `Tensor` indexing.
+            let (ndim, axis_dim) = with_ambient(|g| {
+                let t = g.tensor(a);
+                let s = t.shape();
+                (s.len(), if axis < s.len() { Some(s[axis]) } else { None })
+            });
+            if axis >= ndim {
+                return Err(format!(
+                    "grad_graph_gather: axis {axis} out of range (tensor has {ndim} dimensions)"
+                ));
+            }
+            let dim_size = axis_dim.unwrap();
+            for (i, &ix) in indices.iter().enumerate() {
+                if ix >= dim_size {
+                    return Err(format!(
+                        "grad_graph_gather: index [{i}]={ix} out of range for axis {axis} (size {dim_size})"
+                    ));
+                }
+            }
+            idx_value(with_ambient(|g| g.gather(a, &indices, axis)))
+        }
+
+        // grad_graph_cat(node_array, axis) -> NodeIdx
+        "grad_graph_cat" => {
+            arg_count(name, args, 2)?;
+            let inputs = arg_idx_array(name, &args[0])?;
+            let axis = arg_idx(name, &args[1])?;
+            if inputs.is_empty() {
+                return Err(
+                    "grad_graph_cat: input list must contain at least one tensor".to_string(),
+                );
+            }
+            // Validate that axis is in range for the first input, and
+            // that all inputs share the same ndim. Per-axis size mismatch
+            // is handled by the kernel.
+            let (ndim, _shape0) = with_ambient(|g| {
+                let s = g.tensor(inputs[0]).shape().to_vec();
+                (s.len(), s)
+            });
+            if axis >= ndim {
+                return Err(format!(
+                    "grad_graph_cat: axis {axis} out of range (tensors have {ndim} dimensions)"
+                ));
+            }
+            for (i, &idx) in inputs.iter().enumerate().skip(1) {
+                let other_ndim = with_ambient(|g| g.tensor(idx).shape().len());
+                if other_ndim != ndim {
+                    return Err(format!(
+                        "grad_graph_cat: input [{i}] has {other_ndim} dimensions, expected {ndim}"
+                    ));
+                }
+            }
+            idx_value(with_ambient(|g| g.cat(&inputs, axis)))
+        }
+
+        // grad_graph_reforward(start, end) -> Void
+        // Recomputes forward-pass tensors for ops in the inclusive range
+        // [start, end]. Used by PINN-style graph reuse: set_tensor() a
+        // parameter, then reforward to update intermediate values before
+        // calling backward again.
+        "grad_graph_reforward" => {
+            arg_count(name, args, 2)?;
+            let start = arg_idx_checked(name, &args[0])?;
+            let end = arg_idx_checked(name, &args[1])?;
+            if start > end {
+                return Err(format!(
+                    "grad_graph_reforward: start ({start}) must be ≤ end ({end})"
+                ));
+            }
+            with_ambient(|g| g.reforward(start, end));
+            Value::Void
+        }
+
+        // grad_graph_backward_collect(loss, param_indices_array) -> Array<Tensor>
+        "grad_graph_backward_collect" => {
+            arg_count(name, args, 2)?;
+            let loss_idx = arg_idx_checked(name, &args[0])?;
+            let param_indices = arg_idx_array(name, &args[1])?;
+            // Same scalar-shape guard as grad_graph_backward — backward
+            // requires a numel=1 leaf.
+            let shape = with_ambient(|g| g.tensor(loss_idx).shape().to_vec());
+            let total: usize = shape.iter().product();
+            if total != 1 {
+                return Err(format!(
+                    "grad_graph_backward_collect: loss node {loss_idx} has shape {shape:?} (numel={total}), but backward requires a scalar (numel=1). Apply grad_graph_sum or grad_graph_mean first."
+                ));
+            }
+            let grads = with_ambient(|g| g.backward_collect(loss_idx, &param_indices));
+            // Surface a None entry as Err — the caller explicitly named
+            // which nodes they expect gradients for, so a None means
+            // either a non-parameter was listed or backward was not run
+            // yet (the latter shouldn't happen because backward_collect
+            // calls backward internally).
+            let mut out: Vec<Value> = Vec::with_capacity(grads.len());
+            for (i, g_opt) in grads.into_iter().enumerate() {
+                match g_opt {
+                    Some(t) => out.push(Value::Tensor(t)),
+                    None => {
+                        return Err(format!(
+                            "grad_graph_backward_collect: param_indices[{i}]={} has no gradient (not a parameter, or unreachable from loss)",
+                            param_indices[i]
+                        ));
+                    }
+                }
+            }
+            Value::Array(std::rc::Rc::new(out))
         }
 
         // ── Introspection ───────────────────────────────────────────
