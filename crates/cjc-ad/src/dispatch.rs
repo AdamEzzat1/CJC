@@ -121,6 +121,38 @@ fn arg_f64(name: &str, val: &Value) -> Result<f64, String> {
     }
 }
 
+/// Decode `Value::Array` of `Value::Int` (each ≥ 1) into a `Vec<usize>`.
+/// Used by shape arguments — `grad_graph_reshape` and (Phase 3b) `gather`,
+/// `cat`. Rejects negative or non-integer entries with a clean Err.
+fn arg_usize_array(name: &str, val: &Value) -> Result<Vec<usize>, String> {
+    match val {
+        Value::Array(elems) => {
+            let mut out = Vec::with_capacity(elems.len());
+            for (i, e) in elems.iter().enumerate() {
+                match e {
+                    Value::Int(n) if *n >= 0 => out.push(*n as usize),
+                    Value::Int(n) => {
+                        return Err(format!(
+                            "{name}: shape element [{i}] must be non-negative, got {n}"
+                        ))
+                    }
+                    other => {
+                        return Err(format!(
+                            "{name}: shape element [{i}] must be Int, got {}",
+                            other.type_name()
+                        ))
+                    }
+                }
+            }
+            Ok(out)
+        }
+        other => Err(format!(
+            "{name}: expected Array of Int (shape), got {}",
+            other.type_name()
+        )),
+    }
+}
+
 fn arg_str<'a>(name: &str, val: &'a Value) -> Result<&'a str, String> {
     match val {
         Value::String(s) => Ok(s.as_str()),
@@ -357,6 +389,57 @@ pub fn dispatch_grad_graph(name: &str, args: &[Value]) -> Result<Option<Value>, 
             let max_norm = arg_f64(name, &args[0])?;
             let actual = with_ambient(|g| g.clip_grad_norm(max_norm));
             Value::Float(actual)
+        }
+
+        // ── Phase 3a: transformer-backbone activations & ops ────────
+        // All map directly to existing `cjc_ad::GradGraph` Rust methods.
+        // Determinism contract is unchanged: `softmax`, `cross_entropy`,
+        // and `layer_norm` use Kahan accumulators internally; `gelu`,
+        // `silu`, `reshape` are pointwise / shape-only and inherit the
+        // tensor kernel's bit-exact behavior.
+
+        "grad_graph_softmax" => {
+            arg_count(name, args, 1)?;
+            let a = arg_idx_checked(name, &args[0])?;
+            idx_value(with_ambient(|g| g.softmax(a)))
+        }
+        "grad_graph_cross_entropy" => {
+            arg_count(name, args, 2)?;
+            let logits = arg_idx_checked(name, &args[0])?;
+            let targets = arg_idx_checked(name, &args[1])?;
+            idx_value(with_ambient(|g| g.cross_entropy(logits, targets)))
+        }
+        "grad_graph_layer_norm" => {
+            arg_count(name, args, 1)?;
+            let a = arg_idx_checked(name, &args[0])?;
+            idx_value(with_ambient(|g| g.layer_norm(a)))
+        }
+        "grad_graph_gelu" => {
+            arg_count(name, args, 1)?;
+            let a = arg_idx_checked(name, &args[0])?;
+            idx_value(with_ambient(|g| g.gelu(a)))
+        }
+        "grad_graph_silu" => {
+            arg_count(name, args, 1)?;
+            let a = arg_idx_checked(name, &args[0])?;
+            idx_value(with_ambient(|g| g.silu(a)))
+        }
+        // grad_graph_reshape(node, shape_array) -> NodeIdx
+        // shape_array is a Value::Array of Value::Int (positive).
+        "grad_graph_reshape" => {
+            arg_count(name, args, 2)?;
+            let a = arg_idx_checked(name, &args[0])?;
+            let shape = arg_usize_array(name, &args[1])?;
+            // Materialize new tensor; shape mismatch surfaces as a clean Err
+            // rather than the inner `expect()` panic.
+            let cur_numel: usize = with_ambient(|g| g.tensor(a).shape().iter().product());
+            let new_numel: usize = shape.iter().product();
+            if new_numel != cur_numel {
+                return Err(format!(
+                    "grad_graph_reshape: cannot reshape tensor with {cur_numel} elements into shape {shape:?} ({new_numel} elements)"
+                ));
+            }
+            idx_value(with_ambient(|g| g.reshape(a, &shape)))
         }
 
         // ── Introspection ───────────────────────────────────────────
