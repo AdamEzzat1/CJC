@@ -19,6 +19,7 @@ pub mod adaptive_selection;
 pub mod agg_kernels;
 pub mod byte_dict;
 pub mod column_meta;
+pub mod dataset_plan;
 pub mod detcoll;
 pub mod dict_encoding;
 pub mod lazy;
@@ -26,6 +27,10 @@ pub mod predicate_bytecode;
 pub mod tidy_dispatch;
 
 pub use adaptive_selection::{AdaptiveSelection, SelectionIndices};
+pub use dataset_plan::{
+    BatchIterator, BatchSpec, DatasetError, DatasetPlan, EncodingSpec, MaterializedBatch,
+    Split, SplitSpec,
+};
 
 // â"€â"€ Column Storage â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
