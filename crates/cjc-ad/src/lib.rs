@@ -336,6 +336,27 @@ pub enum GradOp {
         /// Activation function applied after affine transform.
         activation: crate::pinn::Activation,
     },
+    /// Phase 3e Tier 1 — broadcast a scalar (numel=1) tensor to a target
+    /// shape. Forward fills every output element with the scalar's value.
+    /// Backward sums the upstream tensor back into the input scalar.
+    ///
+    /// Introduced to give `grad_of` a way to express the gradient of
+    /// `Sum`/`Mean` reductions in graph-node form: those ops reduce a
+    /// vector to a scalar, so their backward step needs to broadcast a
+    /// scalar gradient back to vector shape — and the broadcast must
+    /// itself be a *graph node* so higher-order derivatives compose.
+    /// `BroadcastScalar` and `Sum`/`Mean` are mutually closed under
+    /// differentiation: differentiating `BroadcastScalar` yields a
+    /// `Sum`-shaped operation; differentiating `Sum` yields a
+    /// `BroadcastScalar`. Adding them together preserves the same
+    /// closure-under-differentiation property the polynomial subset
+    /// already had (see ADR-0023).
+    BroadcastScalar {
+        /// Node index of the scalar (numel=1) input.
+        input: usize,
+        /// Output tensor shape.
+        target_shape: Vec<usize>,
+    },
 }
 
 /// A node in the reverse-mode AD graph.
@@ -1034,6 +1055,38 @@ impl GradGraph {
         idx
     }
 
+    /// Phase 3e Tier 1 — broadcast a scalar (numel=1) tensor to a target
+    /// shape by replicating the scalar value across every output element.
+    ///
+    /// The forward op is the reverse of `Sum`/`Mean`: `Sum`/`Mean` reduce
+    /// `[N]` → `[1]`; `BroadcastScalar` expands `[1]` → `target_shape`.
+    /// Adding this primitive lets `grad_of` express the gradient of
+    /// `Sum`/`Mean` as a graph node, making higher-order differentiation
+    /// of those reductions work.
+    ///
+    /// The input tensor must be scalar-shaped (numel = 1); call sites
+    /// that don't guarantee this should reduce first.
+    pub fn broadcast_scalar(&mut self, input: usize, target_shape: &[usize]) -> usize {
+        let in_t = self.tensors[input].clone();
+        let in_numel: usize = in_t.shape().iter().product();
+        debug_assert_eq!(
+            in_numel, 1,
+            "broadcast_scalar: input must be scalar (numel=1); got shape {:?}",
+            in_t.shape()
+        );
+        let v = in_t.to_vec()[0];
+        let target_n: usize = target_shape.iter().product();
+        let result = Tensor::from_vec_unchecked(vec![v; target_n], target_shape);
+        let idx = self.ops.len();
+        self.ops.push(GradOp::BroadcastScalar {
+            input,
+            target_shape: target_shape.to_vec(),
+        });
+        self.tensors.push(result);
+        self.param_grads.push(None);
+        idx
+    }
+
     // ── Phase C1: Missing forward methods ──
 
     /// Element-wise division: a / b.
@@ -1275,12 +1328,40 @@ impl GradGraph {
                     let neg_up = self.neg(upstream);
                     self.accumulate_grad_node(&mut upstream_grad, a, neg_up);
                 }
+                // ── Phase 3e Tier 1 — reductions & broadcast ────────────
+                GradOp::Sum(a) => {
+                    // Forward: f = Σ a_i, shape [1]. Backward: dF/da_i = upstream
+                    // (broadcast to a's shape). The broadcast is itself a graph
+                    // node so higher-order derivatives compose.
+                    let a_shape = self.tensors[a].shape().to_vec();
+                    let bc = self.broadcast_scalar(upstream, &a_shape);
+                    self.accumulate_grad_node(&mut upstream_grad, a, bc);
+                }
+                GradOp::Mean(a) => {
+                    // Forward: f = (Σ a_i) / N. Backward: dF/da_i = upstream / N
+                    // (broadcast). Express as scalar_mul(upstream, 1/N) → broadcast.
+                    let a_shape = self.tensors[a].shape().to_vec();
+                    let n: usize = a_shape.iter().product();
+                    let inv_n = 1.0 / (n as f64);
+                    let scaled = self.scalar_mul(upstream, inv_n);
+                    let bc = self.broadcast_scalar(scaled, &a_shape);
+                    self.accumulate_grad_node(&mut upstream_grad, a, bc);
+                }
+                GradOp::BroadcastScalar { input, .. } => {
+                    // Forward: result[i] = scalar.value() for all i (broadcast).
+                    // Backward: dF/dscalar = Σ upstream over output shape.
+                    // Express via Sum, which itself is differentiable (closed-
+                    // under-differentiation with BroadcastScalar — adding both at
+                    // once preserves the polynomial subset's closure property).
+                    let summed = self.sum(upstream);
+                    self.accumulate_grad_node(&mut upstream_grad, input, summed);
+                }
                 other => {
                     return Err(format!(
-                        "grad_of: op {other:?} not yet supported in Phase 3d. \
-                         Polynomial-arithmetic subset only (Input, Parameter, \
-                         Add, Sub, Mul, ScalarMul, Neg). Phase 3e will expand \
-                         coverage."
+                        "grad_of: op {other:?} not yet supported. Current coverage: \
+                         polynomial subset (Add, Sub, Mul, ScalarMul, Neg) + \
+                         Phase 3e Tier 1 reductions (Sum, Mean, BroadcastScalar). \
+                         Phase 3e Tier 2 will add transcendentals and activations."
                     ));
                 }
             }
@@ -1409,6 +1490,9 @@ impl GradGraph {
                 }
             }
             GradOp::GatherOp { input, .. } => {
+                reachable[*input] = true;
+            }
+            GradOp::BroadcastScalar { input, .. } => {
                 reachable[*input] = true;
             }
             GradOp::StructField { parent, .. } => {
@@ -2090,6 +2174,19 @@ impl GradGraph {
                     } else {
                         accumulate_grad(&mut grads, bias, &dz);
                     }
+                }
+                GradOp::BroadcastScalar { input, .. } => {
+                    // Forward: result[i] = scalar.value() for all i.
+                    // Backward: dF/dscalar = sum of upstream over all output elements.
+                    use cjc_repro::KahanAccumulatorF64;
+                    let upstream_data = grad.to_vec();
+                    let mut acc = KahanAccumulatorF64::new();
+                    for v in upstream_data.iter() {
+                        acc.add(*v);
+                    }
+                    let scalar_grad =
+                        Tensor::from_vec_unchecked(vec![acc.finalize()], &[1]);
+                    accumulate_grad(&mut grads, input, &scalar_grad);
                 }
             }
         }
@@ -3240,6 +3337,17 @@ impl GradGraph {
                     } else {
                         accumulate_grad(&mut grads, *bias, &dz);
                     }
+                }
+                GradOp::BroadcastScalar { input, .. } => {
+                    // Forward: result[i] = scalar.value() for all i.
+                    // Backward: dF/dscalar = sum of upstream over all output elements.
+                    use cjc_repro::KahanAccumulatorF64;
+                    let upstream_data = grad.to_vec();
+                    let mut acc = KahanAccumulatorF64::new();
+                    for v in upstream_data.iter() { acc.add(*v); }
+                    let scalar_grad =
+                        Tensor::from_vec_unchecked(vec![acc.finalize()], &[1]);
+                    accumulate_grad(&mut grads, *input, &scalar_grad);
                 }
             }
         }

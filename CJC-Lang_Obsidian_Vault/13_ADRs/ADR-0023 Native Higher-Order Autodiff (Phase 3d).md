@@ -215,18 +215,39 @@ All 18 tests pass on first run.
 - [x] This ADR documents the polynomial subset, the deferred set, and
   the closure-under-differentiation rationale.
 
-## Next steps (Phase 3e)
+## Phase 3e expansion roadmap
 
 A future PR should expand `grad_of` coverage in this order, since
 each tier's ops use the previous tier's ops in their gradient
 formulas:
 
-**Tier 1 — Reductions and broadcasts** (introduces `ScalarBroadcast`
-GradOp or equivalent):
+**Tier 1 — Reductions and broadcasts ✅ SHIPPED**
 
-- `Sum` → upstream broadcast to input shape via `ScalarMul(ones,
-  upstream_scalar_val)` or new GradOp.
-- `Mean` → `Sum / N` via `ScalarMul`.
+Status: implemented in a follow-up PR. Adds:
+
+- `GradOp::BroadcastScalar { input, target_shape }` — new variant
+  expressing "scalar value replicated to target shape." Required
+  because `Sum`/`Mean` reduce a vector to a scalar; their gradient
+  must broadcast a scalar gradient back to the input's shape, and
+  the broadcast itself must be a graph node so higher-order
+  derivatives compose.
+- `grad_of` arms for `Sum`, `Mean`, and `BroadcastScalar`. `Sum` and
+  `BroadcastScalar` are **mutually closed under differentiation**
+  (Sum's gradient uses BroadcastScalar; BroadcastScalar's gradient
+  uses Sum), preserving the polynomial subset's closure property.
+  Adding both at once was necessary — adding only one would break
+  closure.
+- 15 new tests covering wiring (eval ↔ MIR byte-equal), analytic
+  correctness vs closed-form derivatives, second-order
+  (`d²(Σ x_i²)/dx_i² = 2`), cross-check vs `backward()`, and
+  BroadcastScalar primitive forward/backward.
+
+Coverage extension after Tier 1:
+
+- Inputs: `Input`, `Parameter` (leaves)
+- Pointwise: `Add`, `Sub`, `Mul`, `ScalarMul`, `Neg`
+- Reductions: `Sum`, `Mean` ← Tier 1
+- Broadcast: `BroadcastScalar` ← Tier 1 (helper)
 
 **Tier 2 — Transcendentals and activations** (most ops, all
 pointwise):
