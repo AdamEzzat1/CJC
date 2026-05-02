@@ -6,10 +6,12 @@
 
 use cjc_runtime::Tensor;
 
+pub mod idx;
 pub mod pinn;
 pub mod dispatch;
 
 pub use dispatch::dispatch_grad_graph;
+pub use idx::{LayerIdx, NodeIdx, ParamIdx};
 
 // ── Forward-Mode AD (Dual Numbers) ──────────────────────────────
 

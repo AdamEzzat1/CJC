@@ -28,6 +28,7 @@ use std::rc::Rc;
 use cjc_runtime::value::Value;
 use cjc_runtime::tensor::Tensor;
 
+use crate::idx::NodeIdx;
 use crate::GradGraph;
 use crate::pinn::Activation;
 
@@ -70,9 +71,16 @@ fn arg_count(name: &str, args: &[Value], expected: usize) -> Result<(), String> 
     }
 }
 
-fn arg_idx(name: &str, val: &Value) -> Result<usize, String> {
+/// Decode a `Value::Int(i64)` into a typed [`NodeIdx`].
+///
+/// **Phase 2a typed boundary:** the dispatch layer speaks `NodeIdx` end
+/// to end; the underlying `GradGraph` still takes `usize`, so each arm
+/// converts via `idx.index()` at the call site. A future Phase 2b PR
+/// will migrate `GradGraph` itself, at which point this function's
+/// return type is the API the rest of the dispatch already uses.
+fn arg_idx(name: &str, val: &Value) -> Result<NodeIdx, String> {
     match val {
-        Value::Int(i) if *i >= 0 => Ok(*i as usize),
+        Value::Int(i) if *i >= 0 => Ok(NodeIdx::from_usize(*i as usize)),
         Value::Int(i) => Err(format!("{}: node index must be non-negative, got {}", name, i)),
         other => Err(format!(
             "{}: expected Int node index, got {}",
@@ -86,10 +94,10 @@ fn arg_idx(name: &str, val: &Value) -> Result<usize, String> {
 /// the current ambient graph. Returning `Err` here is what makes the
 /// dispatch layer fuzz-safe: out-of-range indices surface as language-level
 /// errors rather than panicking deep inside `GradGraph::*` index ops.
-fn arg_idx_checked(name: &str, val: &Value) -> Result<usize, String> {
+fn arg_idx_checked(name: &str, val: &Value) -> Result<NodeIdx, String> {
     let idx = arg_idx(name, val)?;
     let len = with_ambient(|g| g.len());
-    if idx >= len {
+    if idx.index() >= len {
         return Err(format!(
             "{}: node index {} out of range (graph has {} nodes)",
             name, idx, len
@@ -150,8 +158,13 @@ fn parse_activation(name: &str, s: &str) -> Result<Activation, String> {
     }
 }
 
-fn idx_value(idx: usize) -> Value {
-    Value::Int(idx as i64)
+/// Convert a typed [`NodeIdx`] back to a `Value::Int(i64)` for return
+/// across the language boundary. Construction methods on `GradGraph`
+/// currently return `usize`; arms therefore wrap with
+/// `idx_value(NodeIdx::from_usize(g.input(t)))` until the bulk
+/// `GradGraph` migration in Phase 2b.
+fn idx_value(idx: NodeIdx) -> Value {
+    Value::Int(idx.0 as i64)
 }
 
 fn tensor_value(t: Tensor) -> Value {
@@ -175,13 +188,13 @@ pub fn dispatch_grad_graph(name: &str, args: &[Value]) -> Result<Option<Value>, 
         "grad_graph_param" => {
             arg_count(name, args, 1)?;
             let t = arg_tensor(name, &args[0])?.clone();
-            let idx = with_ambient(|g| g.parameter(t));
+            let idx = NodeIdx::from_usize(with_ambient(|g| g.parameter(t)));
             idx_value(idx)
         }
         "grad_graph_input" => {
             arg_count(name, args, 1)?;
             let t = arg_tensor(name, &args[0])?.clone();
-            let idx = with_ambient(|g| g.input(t));
+            let idx = NodeIdx::from_usize(with_ambient(|g| g.input(t)));
             idx_value(idx)
         }
         // const = non-trainable input; same node behavior, kept as a separate
@@ -189,45 +202,48 @@ pub fn dispatch_grad_graph(name: &str, args: &[Value]) -> Result<Option<Value>, 
         "grad_graph_const" => {
             arg_count(name, args, 1)?;
             let t = arg_tensor(name, &args[0])?.clone();
-            let idx = with_ambient(|g| g.input(t));
+            let idx = NodeIdx::from_usize(with_ambient(|g| g.input(t)));
             idx_value(idx)
         }
 
         // ── Pointwise ops ───────────────────────────────────────────
+        // Phase 2a typed boundary: arg_idx_checked returns NodeIdx; the
+        // underlying GradGraph still takes usize, hence `.index()` at
+        // each call site. Phase 2b will migrate GradGraph itself.
         "grad_graph_add" => {
             arg_count(name, args, 2)?;
             let a = arg_idx_checked(name, &args[0])?;
             let b = arg_idx_checked(name, &args[1])?;
-            idx_value(with_ambient(|g| g.add(a, b)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.add(a.index(), b.index()))))
         }
         "grad_graph_sub" => {
             arg_count(name, args, 2)?;
             let a = arg_idx_checked(name, &args[0])?;
             let b = arg_idx_checked(name, &args[1])?;
-            idx_value(with_ambient(|g| g.sub(a, b)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.sub(a.index(), b.index()))))
         }
         "grad_graph_mul" => {
             arg_count(name, args, 2)?;
             let a = arg_idx_checked(name, &args[0])?;
             let b = arg_idx_checked(name, &args[1])?;
-            idx_value(with_ambient(|g| g.mul(a, b)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.mul(a.index(), b.index()))))
         }
         "grad_graph_div" => {
             arg_count(name, args, 2)?;
             let a = arg_idx_checked(name, &args[0])?;
             let b = arg_idx_checked(name, &args[1])?;
-            idx_value(with_ambient(|g| g.div(a, b)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.div(a.index(), b.index()))))
         }
         "grad_graph_neg" => {
             arg_count(name, args, 1)?;
             let a = arg_idx_checked(name, &args[0])?;
-            idx_value(with_ambient(|g| g.neg(a)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.neg(a.index()))))
         }
         "grad_graph_scalar_mul" => {
             arg_count(name, args, 2)?;
             let a = arg_idx_checked(name, &args[0])?;
             let s = arg_f64(name, &args[1])?;
-            idx_value(with_ambient(|g| g.scalar_mul(a, s)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.scalar_mul(a.index(), s))))
         }
         "grad_graph_pow" => {
             arg_count(name, args, 2)?;
@@ -235,55 +251,55 @@ pub fn dispatch_grad_graph(name: &str, args: &[Value]) -> Result<Option<Value>, 
             // Brief specifies integer power, but cjc-ad's `pow` takes f64.
             // Accept either i64 or f64; both narrow to the same call.
             let n = arg_f64(name, &args[1])?;
-            idx_value(with_ambient(|g| g.pow(a, n)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.pow(a.index(), n))))
         }
         "grad_graph_exp" => {
             arg_count(name, args, 1)?;
             let a = arg_idx_checked(name, &args[0])?;
-            idx_value(with_ambient(|g| g.exp(a)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.exp(a.index()))))
         }
         "grad_graph_ln" => {
             arg_count(name, args, 1)?;
             let a = arg_idx_checked(name, &args[0])?;
-            idx_value(with_ambient(|g| g.ln(a)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.ln(a.index()))))
         }
         "grad_graph_sqrt" => {
             arg_count(name, args, 1)?;
             let a = arg_idx_checked(name, &args[0])?;
-            idx_value(with_ambient(|g| g.sqrt(a)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.sqrt(a.index()))))
         }
         "grad_graph_sin" => {
             arg_count(name, args, 1)?;
             let a = arg_idx_checked(name, &args[0])?;
-            idx_value(with_ambient(|g| g.sin(a)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.sin(a.index()))))
         }
         "grad_graph_cos" => {
             arg_count(name, args, 1)?;
             let a = arg_idx_checked(name, &args[0])?;
-            idx_value(with_ambient(|g| g.cos(a)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.cos(a.index()))))
         }
         "grad_graph_tanh" => {
             arg_count(name, args, 1)?;
             let a = arg_idx_checked(name, &args[0])?;
-            idx_value(with_ambient(|g| g.tanh_act(a)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.tanh_act(a.index()))))
         }
 
         // ── Reductions / matmul ─────────────────────────────────────
         "grad_graph_sum" => {
             arg_count(name, args, 1)?;
             let a = arg_idx_checked(name, &args[0])?;
-            idx_value(with_ambient(|g| g.sum(a)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.sum(a.index()))))
         }
         "grad_graph_mean" => {
             arg_count(name, args, 1)?;
             let a = arg_idx_checked(name, &args[0])?;
-            idx_value(with_ambient(|g| g.mean(a)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.mean(a.index()))))
         }
         "grad_graph_matmul" => {
             arg_count(name, args, 2)?;
             let a = arg_idx_checked(name, &args[0])?;
             let b = arg_idx_checked(name, &args[1])?;
-            idx_value(with_ambient(|g| g.matmul(a, b)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.matmul(a.index(), b.index()))))
         }
 
         // ── Fused MLP layer ────────────────────────────────────────
@@ -295,7 +311,9 @@ pub fn dispatch_grad_graph(name: &str, args: &[Value]) -> Result<Option<Value>, 
             let b = arg_idx_checked(name, &args[2])?;
             let act_str = arg_str(name, &args[3])?;
             let act = parse_activation(name, act_str)?;
-            idx_value(with_ambient(|g| g.mlp_layer(inp, w, b, act)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| {
+                g.mlp_layer(inp.index(), w.index(), b.index(), act)
+            })))
         }
 
         // ── Forward / state read ────────────────────────────────────
@@ -305,19 +323,19 @@ pub fn dispatch_grad_graph(name: &str, args: &[Value]) -> Result<Option<Value>, 
             // for spec parity with the brief.
             arg_count(name, args, 1)?;
             let idx = arg_idx_checked(name, &args[0])?;
-            tensor_value(with_ambient(|g| g.tensor(idx)))
+            tensor_value(with_ambient(|g| g.tensor(idx.index())))
         }
         "grad_graph_set_tensor" => {
             arg_count(name, args, 2)?;
             let idx = arg_idx_checked(name, &args[0])?;
             let t = arg_tensor(name, &args[1])?.clone();
-            with_ambient(|g| g.set_tensor(idx, t));
+            with_ambient(|g| g.set_tensor(idx.index(), t));
             Value::Void
         }
         "grad_graph_param_grad" => {
             arg_count(name, args, 1)?;
             let idx = arg_idx_checked(name, &args[0])?;
-            let g_opt = with_ambient(|g| g.grad(idx));
+            let g_opt = with_ambient(|g| g.grad(idx.index()));
             match g_opt {
                 Some(t) => tensor_value(t),
                 None => {
@@ -341,7 +359,7 @@ pub fn dispatch_grad_graph(name: &str, args: &[Value]) -> Result<Option<Value>, 
             // Backward requires a scalar leaf. If the loss node is non-scalar
             // (e.g., an unreduced add/mul), the inner GradGraph would assert.
             // Surface that as a clean Err instead of unwinding.
-            let shape = with_ambient(|g| g.tensor(loss_idx).shape().to_vec());
+            let shape = with_ambient(|g| g.tensor(loss_idx.index()).shape().to_vec());
             let total: usize = shape.iter().product();
             if total != 1 {
                 return Err(format!(
@@ -349,7 +367,7 @@ pub fn dispatch_grad_graph(name: &str, args: &[Value]) -> Result<Option<Value>, 
                     loss_idx, shape, total
                 ));
             }
-            with_ambient(|g| g.backward(loss_idx));
+            with_ambient(|g| g.backward(loss_idx.index()));
             Value::Void
         }
         "grad_graph_clip_grad_norm" => {
