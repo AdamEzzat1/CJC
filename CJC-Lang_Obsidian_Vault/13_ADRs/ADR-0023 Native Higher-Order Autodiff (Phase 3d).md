@@ -249,11 +249,38 @@ Coverage extension after Tier 1:
 - Reductions: `Sum`, `Mean` ← Tier 1
 - Broadcast: `BroadcastScalar` ← Tier 1 (helper)
 
-**Tier 2 — Transcendentals and activations** (most ops, all
-pointwise):
+**Tier 2 — Smooth transcendentals and activations ✅ PARTIALLY SHIPPED**
 
-- `Exp`, `Ln`, `Sqrt`, `Sin`, `Cos`, `Pow`, `Log2`, `Abs`.
-- `Sigmoid`, `Relu`, `TanhAct`, `Gelu`, `Silu`, `Elu`, `Selu`.
+Status: 9 of the 14 originally-listed ops shipped in a follow-up PR.
+
+Shipped (smooth, derivative formula expressible via Tier 0 + Tier 1
+ops):
+
+- `Exp` — `dF/da = upstream * exp(a)`. Reuses current node's tensor
+  rather than building a fresh exp.
+- `Ln` — `dF/da = upstream / a`.
+- `Sqrt` — `dF/da = upstream / (2*sqrt(a))`. Reuses current node.
+- `Sin`, `Cos` — derivatives are each other (with sign).
+- `Pow(a, n)` — `dF/da = n * a^(n-1) * upstream`. Builds a fresh Pow
+  with reduced exponent.
+- `Log2` — `dF/da = upstream / (a * ln(2))`.
+- `Sigmoid` — `dF/da = σ(a) * (1 - σ(a)) * upstream`. Uses
+  BroadcastScalar (Tier 1) to construct a same-shape ones tensor.
+- `TanhAct` — `dF/da = (1 - tanh²(a)) * upstream`. Same shape trick.
+
+22 new tests including `d²(exp(x))/dx² = exp(x)` (self-similar
+derivative) and `d²(x³)/dx² = 6x` via Pow.
+
+Deferred to Tier 3 (need Where-like op or piecewise-tensor
+primitives the current GradGraph can't express cleanly):
+
+- `Abs` — sub-gradient `sign(x)` requires conditional.
+- `Relu` — `1[x>0]` requires conditional indicator.
+- `Elu` / `Selu` — piecewise `x>0 ? f(x) : g(x)`.
+- `Gelu` — composite formula referencing `Φ(x)` (CDF of normal); no
+  graph-level erf/erfinv yet.
+- `Silu` — `σ + a*σ*(1-σ)` is composable but requires Mul of three
+  factors and would benefit from a fused primitive.
 
 **Tier 3 — Compound ops** (each requires per-op care):
 
