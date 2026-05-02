@@ -158,6 +158,9 @@ pub mod differentiate;
 /// Deterministic profile counters (Tier 2 of Chess RL v2.3). Write-only
 /// timing sink that does not perturb program state, RNG, or weight hashes.
 pub mod profile;
+/// Phase 2b — typed-ID newtypes for ML metadata. Currently provides
+/// only `ParamIdx`, used by `crate::ml::AdamState` and `SgdState`.
+pub mod idx;
 
 // --- Re-exports for backward compatibility ---
 // All downstream crates that were doing `use cjc_runtime::Tensor` etc. continue to work.
