@@ -33,3 +33,4 @@ pub mod grad_graph_phase3b_wiring;
 pub mod grad_graph_phase3b_proptest;
 pub mod grad_graph_phase3b_fuzz;
 pub mod heat_1d_pure_cjcl_parity;
+pub mod mlp_classifier_pure_cjcl_parity;

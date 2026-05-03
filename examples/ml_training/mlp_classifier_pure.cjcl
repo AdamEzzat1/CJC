@@ -1,0 +1,164 @@
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 3a + 3b flagship demo — MLP binary classifier in pure CJC-Lang
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Demonstrates that the new transformer-backbone (Phase 3a) and array-arg
+// (Phase 3b) `grad_graph_*` builtins compose into a real end-to-end
+// training loop expressible entirely from CJC-Lang source — no Rust.
+//
+// Architecture (per-sample loop, summed into batch loss):
+//   X_full [8, 2], Y_full [8, 2]   (one Input node each, full batch)
+//   for i in 0..n_samples:
+//     X_i = grad_graph_gather(X_full, [i], 0)            (Phase 3b: gather)
+//     Y_i = grad_graph_gather(Y_full, [i], 0)
+//     h_i  = mlp_layer(X_i, W1, b1, "gelu")              (Phase 3a: gelu)
+//     z_i  = mlp_layer(h_i, W2, b2, "none")              (existing 3c)
+//     l_i  = cross_entropy(z_i, Y_i)                     (Phase 3a: cross_entropy)
+//     loss_acc = add(loss_acc, l_i)
+//   then:
+//     backward_collect(loss_acc, [W1, b1, W2, b2])       (Phase 3b: backward_collect)
+//     adam_step on each parameter                         (existing v2.1 builtin)
+//
+// Why per-sample? `grad_graph_cross_entropy` (and `grad_graph_layer_norm`)
+// treat their input as a single flat distribution, not as a batch of N
+// independent rows. That's a deliberate API simplification in Phase 3a;
+// axis-aware variants are a Phase 4 (fused kernels) follow-up. Until
+// then, batched losses are expressed as Python-style per-sample loops,
+// which is what this demo demonstrates.
+//
+// Synthetic dataset: 8 samples × 2 features, 2 classes.
+//   Class 0: lower-left quadrant points
+//   Class 1: upper-right quadrant points
+// Linearly separable; exists to validate the pipeline, not the algorithm.
+//
+// Determinism gates (verified by mlp_classifier_pure_cjcl_parity.rs):
+//   1. cjcl run                produces identical output to
+//      cjcl run --mir-opt      (eval ↔ MIR byte-equal)
+//   2. Loss is monotonically non-increasing across reported epochs
+//   3. Final loss < 0.30 (the dataset is trivial; this just catches
+//      a regression where training stops working)
+//
+// Run:
+//   cjcl run examples/ml_training/mlp_classifier_pure.cjcl
+//   cjcl run --mir-opt examples/ml_training/mlp_classifier_pure.cjcl
+// ═══════════════════════════════════════════════════════════════════════
+
+fn main() {
+    // ── hyperparameters ──────────────────────────────────────────────
+    let n_samples: i64 = 8;
+    let n_features: i64 = 2;
+    let n_hidden: i64 = 4;
+    let n_classes: i64 = 2;
+    let n_epochs: i64 = 30;
+    let lr: f64 = 0.05;
+    let beta1: f64 = 0.9;
+    let beta2: f64 = 0.999;
+    let eps: f64 = 1e-8;
+
+    print("MLP Classifier (CJC-Lang) — Phase 3a/3b demo");
+    print("=============================================");
+    print("epochs=" + to_string(n_epochs) + " lr=" + to_string(lr));
+    print("");
+
+    // ── synthetic dataset ────────────────────────────────────────────
+    // X: 8 samples × 2 features. Rows 0-3 are class 0 (negative quadrant),
+    // rows 4-7 are class 1 (positive quadrant). Linearly separable.
+    let X_data: Tensor = Tensor.from_vec(
+        [
+            -1.0, -1.0,
+            -1.0, -0.5,
+            -0.5, -1.0,
+            -0.8, -0.7,
+             1.0,  1.0,
+             1.0,  0.5,
+             0.5,  1.0,
+             0.8,  0.7,
+        ],
+        [8, 2],
+    );
+
+    // Y: 8 × 2 one-hot. First 4 rows: [1, 0]; last 4 rows: [0, 1].
+    let Y_data: Tensor = Tensor.from_vec(
+        [
+            1.0, 0.0,
+            1.0, 0.0,
+            1.0, 0.0,
+            1.0, 0.0,
+            0.0, 1.0,
+            0.0, 1.0,
+            0.0, 1.0,
+            0.0, 1.0,
+        ],
+        [8, 2],
+    );
+
+    // ── parameter init ───────────────────────────────────────────────
+    // Tensor.randn uses the program seed — same seed → same init.
+    let scale: f64 = 0.5;
+    let mut W1_t: Tensor = Tensor.randn([4, 2]) * scale;
+    let mut b1_t: Tensor = Tensor.zeros([4]);
+    let mut W2_t: Tensor = Tensor.randn([2, 4]) * scale;
+    let mut b2_t: Tensor = Tensor.zeros([2]);
+
+    // ── Adam moment buffers ──────────────────────────────────────────
+    let mut m_W1: Tensor = Tensor.zeros([4, 2]);  let mut v_W1: Tensor = Tensor.zeros([4, 2]);
+    let mut m_b1: Tensor = Tensor.zeros([4]);     let mut v_b1: Tensor = Tensor.zeros([4]);
+    let mut m_W2: Tensor = Tensor.zeros([2, 4]);  let mut v_W2: Tensor = Tensor.zeros([2, 4]);
+    let mut m_b2: Tensor = Tensor.zeros([2]);     let mut v_b2: Tensor = Tensor.zeros([2]);
+
+    // ── training loop ────────────────────────────────────────────────
+    for epoch in 1..(n_epochs + 1) {
+        // Build a fresh graph each epoch — same pattern as the PINN demo.
+        // Phase 3b's `reforward` would let us reuse one graph across
+        // epochs, but rebuild-each-epoch is the simpler reference path
+        // and matches the brief's "smallest possible end-to-end" goal.
+        grad_graph_new();
+        let X_full: i64 = grad_graph_input(X_data);
+        let Y_full: i64 = grad_graph_input(Y_data);
+        let W1: i64 = grad_graph_param(W1_t);
+        let b1: i64 = grad_graph_param(b1_t);
+        let W2: i64 = grad_graph_param(W2_t);
+        let b2: i64 = grad_graph_param(b2_t);
+
+        // Per-sample forward loop. Slice each row out of the full batch
+        // tensor with `grad_graph_gather` (Phase 3b), run it through the
+        // MLP, and accumulate cross-entropy losses. See header comment
+        // for why we don't batch-process directly.
+        let zero_loss: i64 = grad_graph_const(Tensor.from_vec([0.0], [1]));
+        let mut loss_acc: i64 = zero_loss;
+        for i in 0..n_samples {
+            let X_i: i64 = grad_graph_gather(X_full, [i], 0);
+            let Y_i: i64 = grad_graph_gather(Y_full, [i], 0);
+            let h_i: i64 = grad_graph_mlp_layer(X_i, W1, b1, "gelu");
+            let z_i: i64 = grad_graph_mlp_layer(h_i, W2, b2, "none");
+            let l_i: i64 = grad_graph_cross_entropy(z_i, Y_i);
+            loss_acc = grad_graph_add(loss_acc, l_i);
+        }
+        let loss: i64 = loss_acc;
+
+        // Backward + collect grads in one Phase-3b call.
+        let grads = grad_graph_backward_collect(loss, [W1, b1, W2, b2]);
+        let g_W1: Tensor = grads[0];
+        let g_b1: Tensor = grads[1];
+        let g_W2: Tensor = grads[2];
+        let g_b2: Tensor = grads[3];
+
+        // Adam updates.
+        let r_W1 = adam_step(W1_t, g_W1, m_W1, v_W1, lr, beta1, beta2, eps, epoch);
+        W1_t = r_W1[0]; m_W1 = r_W1[1]; v_W1 = r_W1[2];
+        let r_b1 = adam_step(b1_t, g_b1, m_b1, v_b1, lr, beta1, beta2, eps, epoch);
+        b1_t = r_b1[0]; m_b1 = r_b1[1]; v_b1 = r_b1[2];
+        let r_W2 = adam_step(W2_t, g_W2, m_W2, v_W2, lr, beta1, beta2, eps, epoch);
+        W2_t = r_W2[0]; m_W2 = r_W2[1]; v_W2 = r_W2[2];
+        let r_b2 = adam_step(b2_t, g_b2, m_b2, v_b2, lr, beta1, beta2, eps, epoch);
+        b2_t = r_b2[0]; m_b2 = r_b2[1]; v_b2 = r_b2[2];
+
+        if epoch % 5 == 0 {
+            let l_t: Tensor = grad_graph_forward(loss);
+            print("epoch=" + to_string(epoch) + "  loss=" + to_string(l_t.get([0])));
+        }
+    }
+
+    print("");
+    print("Training complete.");
+}
