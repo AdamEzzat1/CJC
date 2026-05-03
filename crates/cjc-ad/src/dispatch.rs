@@ -419,28 +419,28 @@ pub fn dispatch_grad_graph(name: &str, args: &[Value]) -> Result<Option<Value>, 
         "grad_graph_softmax" => {
             arg_count(name, args, 1)?;
             let a = arg_idx_checked(name, &args[0])?;
-            idx_value(with_ambient(|g| g.softmax(a)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.softmax(a.index()))))
         }
         "grad_graph_cross_entropy" => {
             arg_count(name, args, 2)?;
             let logits = arg_idx_checked(name, &args[0])?;
             let targets = arg_idx_checked(name, &args[1])?;
-            idx_value(with_ambient(|g| g.cross_entropy(logits, targets)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.cross_entropy(logits.index(), targets.index()))))
         }
         "grad_graph_layer_norm" => {
             arg_count(name, args, 1)?;
             let a = arg_idx_checked(name, &args[0])?;
-            idx_value(with_ambient(|g| g.layer_norm(a)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.layer_norm(a.index()))))
         }
         "grad_graph_gelu" => {
             arg_count(name, args, 1)?;
             let a = arg_idx_checked(name, &args[0])?;
-            idx_value(with_ambient(|g| g.gelu(a)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.gelu(a.index()))))
         }
         "grad_graph_silu" => {
             arg_count(name, args, 1)?;
             let a = arg_idx_checked(name, &args[0])?;
-            idx_value(with_ambient(|g| g.silu(a)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.silu(a.index()))))
         }
         // grad_graph_reshape(node, shape_array) -> NodeIdx
         // shape_array is a Value::Array of Value::Int (positive).
@@ -450,14 +450,14 @@ pub fn dispatch_grad_graph(name: &str, args: &[Value]) -> Result<Option<Value>, 
             let shape = arg_usize_array(name, &args[1])?;
             // Materialize new tensor; shape mismatch surfaces as a clean Err
             // rather than the inner `expect()` panic.
-            let cur_numel: usize = with_ambient(|g| g.tensor(a).shape().iter().product());
+            let cur_numel: usize = with_ambient(|g| g.tensor(a.index()).shape().iter().product());
             let new_numel: usize = shape.iter().product();
             if new_numel != cur_numel {
                 return Err(format!(
                     "grad_graph_reshape: cannot reshape tensor with {cur_numel} elements into shape {shape:?} ({new_numel} elements)"
                 ));
             }
-            idx_value(with_ambient(|g| g.reshape(a, &shape)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.reshape(a.index(), &shape))))
         }
 
         // ── Introspection ───────────────────────────────────────────
