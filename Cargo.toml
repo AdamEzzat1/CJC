@@ -55,7 +55,6 @@ members = [
     "crates/cjc-quantum",
     "bench/ad_bench",
     "bench/nlp_preprocess_bench",
-    "bench/physics_ml_bench",
 ]
 exclude = ["fuzz"]
 resolver = "2"
