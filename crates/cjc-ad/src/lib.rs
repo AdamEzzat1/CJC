@@ -1133,6 +1133,183 @@ impl GradGraph {
         param_indices.iter().map(|&idx| self.grad(idx)).collect()
     }
 
+    // ════════════════════════════════════════════════════════════════════
+    //  Phase 3d — native higher-order autodiff (graph-of-graphs)
+    // ════════════════════════════════════════════════════════════════════
+
+    /// Compute the gradient of `f` with respect to `x` *as a new graph
+    /// node*, not as a tensor value.
+    ///
+    /// Where `backward()` accumulates `dF/dParam` into `param_grads`
+    /// (concrete tensors), `grad_of()` builds a *sub-graph* that
+    /// represents `dF/dx` as a function of the existing parameters and
+    /// inputs. The returned node can be forward-evaluated like any
+    /// other, *and* it can itself be passed back into `grad_of()` —
+    /// giving native second- and higher-order derivatives.
+    ///
+    /// Phase 3d ships **the polynomial-arithmetic op subset** (Input,
+    /// Parameter, Add, Sub, Mul, ScalarMul, Neg). These suffice to
+    /// express any polynomial in the parameters; higher-order
+    /// derivatives of such polynomials evaluate exactly without
+    /// finite-difference truncation error.
+    ///
+    /// Other ops (Sum, Mean, Matmul, transcendentals, activations,
+    /// reductions, fused ops) return `Err`. Phase 3e will expand the
+    /// supported set; users needing those today can use the FD pattern
+    /// (`set_tensor` + `reforward` + scalar arithmetic) as in the
+    /// pre-Phase-3d PINN demos.
+    ///
+    /// ### Example
+    ///
+    /// ```ignore
+    /// let mut g = GradGraph::new();
+    /// let x = g.parameter(Tensor::from_vec(vec![2.0], &[1]).unwrap());
+    /// // f = x³
+    /// let xx = g.mul(x, x);
+    /// let f = g.mul(xx, x);
+    /// // df/dx = 3x²
+    /// let df = g.grad_of(f, x).unwrap();
+    /// assert_eq!(g.tensor(df).to_vec(), vec![12.0]); // 3·2² = 12
+    /// // d²f/dx² = 6x
+    /// let d2f = g.grad_of(df, x).unwrap();
+    /// assert_eq!(g.tensor(d2f).to_vec(), vec![12.0]); // 6·2 = 12
+    /// ```
+    pub fn grad_of(&mut self, f: usize, x: usize) -> Result<usize, String> {
+        if f >= self.ops.len() {
+            return Err(format!(
+                "grad_of: f={} out of range (graph has {} nodes)",
+                f,
+                self.ops.len()
+            ));
+        }
+        if x >= self.ops.len() {
+            return Err(format!(
+                "grad_of: x={} out of range (graph has {} nodes)",
+                x,
+                self.ops.len()
+            ));
+        }
+
+        let n = self.ops.len();
+
+        // Reachability set: which existing nodes are ancestors of f?
+        // Same algorithm as backward(): walk backward from f, marking
+        // each input as reachable.
+        let mut reachable = vec![false; n];
+        reachable[f] = true;
+        for i in (0..=f).rev() {
+            if !reachable[i] {
+                continue;
+            }
+            self.mark_children_reachable(i, &mut reachable);
+        }
+
+        if !reachable[x] {
+            return Err(format!(
+                "grad_of: x (node {}) is not reachable from f (node {})",
+                x, f
+            ));
+        }
+
+        // upstream_grad[i] holds the graph-node-index for the gradient
+        // at node `i`. Sized to the original graph length; new nodes
+        // we create during the pass have higher indices and don't
+        // need slots here.
+        let mut upstream_grad: Vec<Option<usize>> = vec![None; n];
+
+        // Initialize upstream at f to a ones-tensor matching f's shape.
+        // Lives as a regular Input node so subsequent ops can reference
+        // it just like any other graph node.
+        let f_shape = self.tensors[f].shape().to_vec();
+        let n_elems: usize = f_shape.iter().product();
+        let ones_tensor = Tensor::from_vec_unchecked(vec![1.0; n_elems], &f_shape);
+        let one_node = self.input(ones_tensor);
+        upstream_grad[f] = Some(one_node);
+
+        // Reverse-topological pass over the *original* graph nodes.
+        // Each iteration consumes the upstream gradient at node i and
+        // contributes to the upstream gradients at i's inputs.
+        for i in (0..=f).rev() {
+            if !reachable[i] {
+                continue;
+            }
+            // STOP at x — we don't propagate further. upstream_grad[x]
+            // holds the final accumulated gradient at this point.
+            if i == x {
+                continue;
+            }
+
+            let upstream = match upstream_grad[i] {
+                Some(u) => u,
+                None => continue,
+            };
+
+            let op = self.ops[i].clone();
+            match op {
+                GradOp::Input | GradOp::Parameter => {
+                    // Leaf node — gradient stops here. Already preserved
+                    // in upstream_grad[i] (we don't take it).
+                }
+                GradOp::Add(a, b) => {
+                    self.accumulate_grad_node(&mut upstream_grad, a, upstream);
+                    self.accumulate_grad_node(&mut upstream_grad, b, upstream);
+                }
+                GradOp::Sub(a, b) => {
+                    self.accumulate_grad_node(&mut upstream_grad, a, upstream);
+                    let neg_up = self.neg(upstream);
+                    self.accumulate_grad_node(&mut upstream_grad, b, neg_up);
+                }
+                GradOp::Mul(a, b) => {
+                    // d/da (a*b) = b ; d/db (a*b) = a
+                    let grad_a = self.mul(b, upstream);
+                    let grad_b = self.mul(a, upstream);
+                    self.accumulate_grad_node(&mut upstream_grad, a, grad_a);
+                    self.accumulate_grad_node(&mut upstream_grad, b, grad_b);
+                }
+                GradOp::ScalarMul(a, s) => {
+                    // d/da (s*a) = s
+                    let grad_a = self.scalar_mul(upstream, s);
+                    self.accumulate_grad_node(&mut upstream_grad, a, grad_a);
+                }
+                GradOp::Neg(a) => {
+                    let neg_up = self.neg(upstream);
+                    self.accumulate_grad_node(&mut upstream_grad, a, neg_up);
+                }
+                other => {
+                    return Err(format!(
+                        "grad_of: op {other:?} not yet supported in Phase 3d. \
+                         Polynomial-arithmetic subset only (Input, Parameter, \
+                         Add, Sub, Mul, ScalarMul, Neg). Phase 3e will expand \
+                         coverage."
+                    ));
+                }
+            }
+        }
+
+        upstream_grad[x].ok_or_else(|| {
+            format!(
+                "grad_of: gradient at x (node {}) was not computed (unreachable along visited paths)",
+                x
+            )
+        })
+    }
+
+    /// Helper for `grad_of`: append `contribution` to `upstream_grad[target]`,
+    /// building an `Add` node when there's already an existing gradient at
+    /// `target` (i.e., `target` is referenced by multiple downstream ops).
+    fn accumulate_grad_node(
+        &mut self,
+        grads: &mut [Option<usize>],
+        target: usize,
+        contribution: usize,
+    ) {
+        let new_val = match grads[target] {
+            Some(existing) => self.add(existing, contribution),
+            None => contribution,
+        };
+        grads[target] = Some(new_val);
+    }
+
     /// Zero out all gradients.
     pub fn zero_grad(&mut self) {
         for pg in &mut self.param_grads {
