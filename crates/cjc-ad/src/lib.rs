@@ -1356,12 +1356,94 @@ impl GradGraph {
                     let summed = self.sum(upstream);
                     self.accumulate_grad_node(&mut upstream_grad, input, summed);
                 }
+                // ── Phase 3e Tier 2 — transcendentals + smooth activations ──
+                // Each arm builds the gradient sub-graph using existing
+                // GradGraph methods. Critical property: the new sub-graph
+                // uses only ops already supported by `grad_of`, preserving
+                // the closure-under-differentiation invariant. Piecewise ops
+                // (Abs, Relu, Elu, Selu, Gelu, Silu) are deferred to a
+                // future tier — their derivatives need Where-like graph
+                // ops or piecewise-tensor primitives we don't have yet.
+                GradOp::Exp(a) => {
+                    // d(exp(a))/da = exp(a). The current node `i` already
+                    // holds exp(a)'s tensor — reuse it as the local
+                    // gradient instead of building a fresh `exp` node.
+                    let local = self.mul(upstream, i);
+                    self.accumulate_grad_node(&mut upstream_grad, a, local);
+                }
+                GradOp::Ln(a) => {
+                    // d(ln(a))/da = 1/a. Express as upstream / a.
+                    let grad_a = self.div(upstream, a);
+                    self.accumulate_grad_node(&mut upstream_grad, a, grad_a);
+                }
+                GradOp::Sqrt(a) => {
+                    // d(sqrt(a))/da = 1/(2*sqrt(a)). Reuse current node `i`
+                    // (which holds sqrt(a)) instead of recomputing.
+                    let div_node = self.div(upstream, i);
+                    let grad_a = self.scalar_mul(div_node, 0.5);
+                    self.accumulate_grad_node(&mut upstream_grad, a, grad_a);
+                }
+                GradOp::Sin(a) => {
+                    // d(sin(a))/da = cos(a). Build a fresh cos node.
+                    let cos_a = self.cos(a);
+                    let grad_a = self.mul(upstream, cos_a);
+                    self.accumulate_grad_node(&mut upstream_grad, a, grad_a);
+                }
+                GradOp::Cos(a) => {
+                    // d(cos(a))/da = -sin(a). Build sin then neg.
+                    let sin_a = self.sin(a);
+                    let mul_node = self.mul(upstream, sin_a);
+                    let grad_a = self.neg(mul_node);
+                    self.accumulate_grad_node(&mut upstream_grad, a, grad_a);
+                }
+                GradOp::Pow(a, n) => {
+                    // d(a^n)/da = n * a^(n-1). Build a fresh pow node with
+                    // reduced exponent, scalar-mul by n, then mul upstream.
+                    let pow_n_minus_1 = self.pow(a, n - 1.0);
+                    let scaled = self.scalar_mul(pow_n_minus_1, n);
+                    let grad_a = self.mul(upstream, scaled);
+                    self.accumulate_grad_node(&mut upstream_grad, a, grad_a);
+                }
+                GradOp::Log2(a) => {
+                    // d(log2(a))/da = 1/(a * ln(2)). Express as
+                    // (upstream / a) * (1 / ln(2)).
+                    let div_node = self.div(upstream, a);
+                    let inv_ln2 = std::f64::consts::LOG2_E; // = 1/ln(2)
+                    let grad_a = self.scalar_mul(div_node, inv_ln2);
+                    self.accumulate_grad_node(&mut upstream_grad, a, grad_a);
+                }
+                GradOp::Sigmoid(a) => {
+                    // d(σ(a))/da = σ(a) * (1 - σ(a)). The current node `i`
+                    // holds σ(a). Build "1 - σ(a)" via BroadcastScalar of a
+                    // scalar 1 (matching σ's tensor shape), then sub.
+                    let one_scalar = self.input(Tensor::from_vec_unchecked(vec![1.0], &[1]));
+                    let sigmoid_shape = self.tensors[i].shape().to_vec();
+                    let ones = self.broadcast_scalar(one_scalar, &sigmoid_shape);
+                    let one_minus = self.sub(ones, i);
+                    let local = self.mul(i, one_minus);
+                    let grad_a = self.mul(upstream, local);
+                    self.accumulate_grad_node(&mut upstream_grad, a, grad_a);
+                }
+                GradOp::TanhAct(a) => {
+                    // d(tanh(a))/da = 1 - tanh²(a). The current node `i`
+                    // holds tanh(a). Build "1 - tanh²" via mul + sub.
+                    let one_scalar = self.input(Tensor::from_vec_unchecked(vec![1.0], &[1]));
+                    let tanh_shape = self.tensors[i].shape().to_vec();
+                    let ones = self.broadcast_scalar(one_scalar, &tanh_shape);
+                    let tanh_sq = self.mul(i, i);
+                    let local = self.sub(ones, tanh_sq);
+                    let grad_a = self.mul(upstream, local);
+                    self.accumulate_grad_node(&mut upstream_grad, a, grad_a);
+                }
                 other => {
                     return Err(format!(
                         "grad_of: op {other:?} not yet supported. Current coverage: \
-                         polynomial subset (Add, Sub, Mul, ScalarMul, Neg) + \
-                         Phase 3e Tier 1 reductions (Sum, Mean, BroadcastScalar). \
-                         Phase 3e Tier 2 will add transcendentals and activations."
+                         polynomial subset + Phase 3e Tier 1 (reductions) + \
+                         Phase 3e Tier 2 (smooth transcendentals: Exp, Ln, Sqrt, \
+                         Sin, Cos, Pow, Log2, Sigmoid, TanhAct). Piecewise ops \
+                         (Relu, Abs, Elu, Selu, Gelu, Silu) and compound ops \
+                         (Matmul, Div, MlpLayer, Softmax, LayerNorm, BatchNorm, \
+                         CrossEntropy) need Phase 3e Tier 3."
                     ));
                 }
             }

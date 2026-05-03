@@ -324,13 +324,17 @@ fn grad_of_agrees_with_backward_on_polynomial() {
 
 #[test]
 fn unsupported_op_errs_not_panics() {
-    // tanh is in Phase 3a's set but NOT in Phase 3d's polynomial subset.
-    // Calling grad_of through tanh must Err with a helpful message.
+    // Originally this test used `tanh_act` to gate "unsupported op
+    // produces clean Err." Phase 3e Tier 2 added native support for
+    // `tanh_act`, so we now use `relu` — which remains deferred to
+    // Tier 3 (piecewise activations need a Where-like graph op).
+    // The test's purpose is unchanged: any *currently unsupported*
+    // op must Err cleanly, never panic.
     let mut g = GradGraph::new();
     let x = g.parameter(Tensor::from_vec(vec![0.5], &[1]).unwrap());
-    let t = g.tanh_act(x);
-    let result = g.grad_of(t, x);
-    assert!(result.is_err(), "expected Err for tanh; got {result:?}");
+    let r = g.relu(x);
+    let result = g.grad_of(r, x);
+    assert!(result.is_err(), "expected Err for relu; got {result:?}");
     let msg = result.unwrap_err();
     assert!(
         msg.contains("not yet supported"),

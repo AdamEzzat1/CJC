@@ -28,4 +28,5 @@ pub mod grad_graph_proptest;
 pub mod grad_graph_fuzz;
 pub mod grad_graph_phase3d_higher_order;
 pub mod grad_graph_phase3e_tier1;
+pub mod grad_graph_phase3e_tier2;
 pub mod heat_1d_pure_cjcl_parity;
