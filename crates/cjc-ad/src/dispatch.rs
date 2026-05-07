@@ -437,28 +437,30 @@ pub fn dispatch_grad_graph(name: &str, args: &[Value]) -> Result<Option<Value>, 
         "grad_graph_softmax" => {
             arg_count(name, args, 1)?;
             let a = arg_idx_checked(name, &args[0])?;
-            idx_value(with_ambient(|g| g.softmax(a)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.softmax(a.index()))))
         }
         "grad_graph_cross_entropy" => {
             arg_count(name, args, 2)?;
             let logits = arg_idx_checked(name, &args[0])?;
             let targets = arg_idx_checked(name, &args[1])?;
-            idx_value(with_ambient(|g| g.cross_entropy(logits, targets)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| {
+                g.cross_entropy(logits.index(), targets.index())
+            })))
         }
         "grad_graph_layer_norm" => {
             arg_count(name, args, 1)?;
             let a = arg_idx_checked(name, &args[0])?;
-            idx_value(with_ambient(|g| g.layer_norm(a)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.layer_norm(a.index()))))
         }
         "grad_graph_gelu" => {
             arg_count(name, args, 1)?;
             let a = arg_idx_checked(name, &args[0])?;
-            idx_value(with_ambient(|g| g.gelu(a)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.gelu(a.index()))))
         }
         "grad_graph_silu" => {
             arg_count(name, args, 1)?;
             let a = arg_idx_checked(name, &args[0])?;
-            idx_value(with_ambient(|g| g.silu(a)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.silu(a.index()))))
         }
         // grad_graph_reshape(node, shape_array) -> NodeIdx
         // shape_array is a Value::Array of Value::Int (positive).
@@ -468,14 +470,17 @@ pub fn dispatch_grad_graph(name: &str, args: &[Value]) -> Result<Option<Value>, 
             let shape = arg_usize_array(name, &args[1])?;
             // Materialize new tensor; shape mismatch surfaces as a clean Err
             // rather than the inner `expect()` panic.
-            let cur_numel: usize = with_ambient(|g| g.tensor(a).shape().iter().product());
+            let cur_numel: usize =
+                with_ambient(|g| g.tensor(a.index()).shape().iter().product());
             let new_numel: usize = shape.iter().product();
             if new_numel != cur_numel {
                 return Err(format!(
                     "grad_graph_reshape: cannot reshape tensor with {cur_numel} elements into shape {shape:?} ({new_numel} elements)"
                 ));
             }
-            idx_value(with_ambient(|g| g.reshape(a, &shape)))
+            idx_value(NodeIdx::from_usize(
+                with_ambient(|g| g.reshape(a.index(), &shape)),
+            ))
         }
 
         // ── Phase 3b: array-arg & state-recovery ops ────────────────
@@ -496,7 +501,7 @@ pub fn dispatch_grad_graph(name: &str, args: &[Value]) -> Result<Option<Value>, 
         "grad_graph_batch_norm" => {
             arg_count(name, args, 1)?;
             let a = arg_idx_checked(name, &args[0])?;
-            idx_value(with_ambient(|g| g.batch_norm(a)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.batch_norm(a.index()))))
         }
 
         // grad_graph_gather(node, indices_array, axis) -> NodeIdx
@@ -504,11 +509,13 @@ pub fn dispatch_grad_graph(name: &str, args: &[Value]) -> Result<Option<Value>, 
             arg_count(name, args, 3)?;
             let a = arg_idx_checked(name, &args[0])?;
             let indices = arg_usize_array(name, &args[1])?;
-            let axis = arg_idx(name, &args[2])?;
+            // axis is a tensor-axis number, not a graph-relative node id;
+            // strip the typed wrapper as soon as it crosses the boundary.
+            let axis = arg_idx(name, &args[2])?.index();
             // Bounds-check axis and indices against the input tensor shape
             // so OOB doesn't panic deep in `Tensor` indexing.
             let (ndim, axis_dim) = with_ambient(|g| {
-                let t = g.tensor(a);
+                let t = g.tensor(a.index());
                 let s = t.shape();
                 (s.len(), if axis < s.len() { Some(s[axis]) } else { None })
             });
@@ -525,14 +532,17 @@ pub fn dispatch_grad_graph(name: &str, args: &[Value]) -> Result<Option<Value>, 
                     ));
                 }
             }
-            idx_value(with_ambient(|g| g.gather(a, &indices, axis)))
+            idx_value(NodeIdx::from_usize(
+                with_ambient(|g| g.gather(a.index(), &indices, axis)),
+            ))
         }
 
         // grad_graph_cat(node_array, axis) -> NodeIdx
         "grad_graph_cat" => {
             arg_count(name, args, 2)?;
             let inputs = arg_idx_array(name, &args[0])?;
-            let axis = arg_idx(name, &args[1])?;
+            // axis is a tensor-axis number, not a graph-relative node id.
+            let axis = arg_idx(name, &args[1])?.index();
             if inputs.is_empty() {
                 return Err(
                     "grad_graph_cat: input list must contain at least one tensor".to_string(),
@@ -558,7 +568,7 @@ pub fn dispatch_grad_graph(name: &str, args: &[Value]) -> Result<Option<Value>, 
                     ));
                 }
             }
-            idx_value(with_ambient(|g| g.cat(&inputs, axis)))
+            idx_value(NodeIdx::from_usize(with_ambient(|g| g.cat(&inputs, axis))))
         }
 
         // grad_graph_reforward(start, end) -> Void
@@ -575,7 +585,7 @@ pub fn dispatch_grad_graph(name: &str, args: &[Value]) -> Result<Option<Value>, 
                     "grad_graph_reforward: start ({start}) must be ≤ end ({end})"
                 ));
             }
-            with_ambient(|g| g.reforward(start, end));
+            with_ambient(|g| g.reforward(start.index(), end.index()));
             Value::Void
         }
 
@@ -586,14 +596,14 @@ pub fn dispatch_grad_graph(name: &str, args: &[Value]) -> Result<Option<Value>, 
             let param_indices = arg_idx_array(name, &args[1])?;
             // Same scalar-shape guard as grad_graph_backward — backward
             // requires a numel=1 leaf.
-            let shape = with_ambient(|g| g.tensor(loss_idx).shape().to_vec());
+            let shape = with_ambient(|g| g.tensor(loss_idx.index()).shape().to_vec());
             let total: usize = shape.iter().product();
             if total != 1 {
                 return Err(format!(
                     "grad_graph_backward_collect: loss node {loss_idx} has shape {shape:?} (numel={total}), but backward requires a scalar (numel=1). Apply grad_graph_sum or grad_graph_mean first."
                 ));
             }
-            let grads = with_ambient(|g| g.backward_collect(loss_idx, &param_indices));
+            let grads = with_ambient(|g| g.backward_collect(loss_idx.index(), &param_indices));
             // Surface a None entry as Err — the caller explicitly named
             // which nodes they expect gradients for, so a None means
             // either a non-parameter was listed or backward was not run

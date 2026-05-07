@@ -13,6 +13,7 @@
 //! - Lexer panics on multi-byte UTF-8 characters at string slice boundaries
 //! - Parser inherits lexer panics
 
+pub mod abng_decision_fuzz;
 pub mod adaptive_selection_fuzz;
 pub mod categorical_dictionary_fuzz;
 pub mod categorical_join_fuzz;

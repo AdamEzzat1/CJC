@@ -8,3 +8,4 @@ mod type_checker_props;
 mod round_trip_props;
 mod complex_props;
 pub mod cli_expansion_props;
+mod abng_decision_props;

@@ -166,6 +166,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "cjc-abng"
+version = "0.1.7"
+dependencies = [
+ "cjc-ad",
+ "cjc-repro",
+ "cjc-runtime",
+ "cjc-snap",
+]
+
+[[package]]
 name = "cjc-ad"
 version = "0.1.7"
 dependencies = [
@@ -238,6 +248,7 @@ dependencies = [
 name = "cjc-eval"
 version = "0.1.7"
 dependencies = [
+ "cjc-abng",
  "cjc-ad",
  "cjc-ast",
  "cjc-data",
@@ -267,6 +278,7 @@ name = "cjc-lang"
 version = "0.1.7"
 dependencies = [
  "bolero",
+ "cjc-abng",
  "cjc-ad",
  "cjc-ast",
  "cjc-cli",
@@ -312,6 +324,7 @@ dependencies = [
 name = "cjc-mir-exec"
 version = "0.1.7"
 dependencies = [
+ "cjc-abng",
  "cjc-ad",
  "cjc-ast",
  "cjc-data",
@@ -686,15 +699,6 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
-
-[[package]]
-name = "physics-ml-bench"
-version = "0.1.6"
-dependencies = [
- "cjc-ad",
- "cjc-repro",
- "cjc-runtime",
-]
 
 [[package]]
 name = "png"

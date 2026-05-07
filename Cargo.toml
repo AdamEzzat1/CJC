@@ -53,6 +53,7 @@ members = [
     "crates/cjc-vizor",
     "crates/cjc-analyzer",
     "crates/cjc-quantum",
+    "crates/cjc-abng",
     "bench/ad_bench",
     "bench/nlp_preprocess_bench",
 ]
@@ -88,6 +89,7 @@ cjc-module.workspace = true
 cjc-snap.workspace = true
 cjc-vizor.workspace = true
 cjc-quantum.workspace = true
+cjc-abng.workspace = true
 cjc-cli.workspace = true
 
 [dev-dependencies]
@@ -117,6 +119,7 @@ cjc-mir-exec = { path = "crates/cjc-mir-exec", version = "0.1.7" }
 cjc-regex = { path = "crates/cjc-regex", version = "0.1.6" }
 cjc-analyzer = { path = "crates/cjc-analyzer", version = "0.1.6" }
 cjc-quantum = { path = "crates/cjc-quantum", version = "0.1.6" }
+cjc-abng = { path = "crates/cjc-abng", version = "0.1.7" }
 
 [[test]]
 name = "fixtures"
@@ -169,3 +172,7 @@ path = "tests/regex/mod.rs"
 [[test]]
 name = "physics_ml"
 path = "tests/physics_ml/mod.rs"
+
+[[test]]
+name = "abng"
+path = "tests/abng/mod.rs"
