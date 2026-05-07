@@ -52,18 +52,26 @@ it.
 
 ## Step 2 — Phase 0.4 scope
 
-Phase 0.4 has **two tracks** that can ship as separate sub-steps:
+Phase 0.4 has **three tracks** that can ship as separate sub-steps:
 
 * **Track A: User-facing CLI** — `cjcl abng …` subcommands, JSON
   snapshot, log compaction, snapshot-version negotiation.
 * **Track B: Quality refinements** — Welford-smoothed signatures,
   KL-merge, ΔNLL split, route-entropy grow, real NIG-aware merge
   math, drift-trip auto-Unfreeze.
+* **Track C: Correctness + documentation fixes from earlier-phase
+  review** (added 2026-05-07 after retrospective audit). Fixes
+  semantic / naming / hardening issues that survived 0.3d. **This
+  track is the highest-priority — it patches real bugs and API
+  confusions that affect every existing ABNG user.** See §2.4.
 
-Tracks A and B can ship in either order; pick the one that unblocks
-more user value first. Suggested ordering: **Track B first** (so the
-CLI ships reading high-quality evidence), then **Track A** (which
-freezes the format for external users).
+Tracks A, B, and C can ship in any order. Suggested ordering:
+**Track C first** (correctness before features), then **Track B**
+(quality before user-facing surface), then **Track A** (CLI ships
+on the cleaned-up engine). Track A is the natural last step because
+it freezes the snapshot format for external users — every Track-C
+or Track-B change that touches persistent state should land *before*
+the format freezes.
 
 ### 2.1 Track A — `cjcl abng …` CLI
 
@@ -169,28 +177,347 @@ one-shot, so this is a snapshot-format change.
 thresholds (snapshot bump) OR hard-code a sensible default (no bump,
 deferred-real). Choose with the user.
 
-### 2.3 New audit kinds (Track A only)
+### 2.3 Track C — Correctness + documentation fixes from earlier-phase review
 
-Track A may need:
-- `0x18 StatsSnapshot` (log compaction) — rebases N consecutive
-  `*Updated` events into one
-- `0x19 Routed { leaf, matched_prefix }` (explain mode, opt-in)
-- `0x1A ProvenanceStamped { dataset_hash, feature_transform_hash, model_hash }` (lineage — see architecture doc §6.7)
+A retrospective audit on 2026-05-07 (post-0.3d) surfaced a set of
+correctness, naming, and hardening issues that survived all prior
+phases. Track C is the patch list. **Each item is a real bug or
+real API confusion that affects existing users — none are
+quality-of-life polish.** Fix order is roughly priority-descending.
 
-Allocate `0x18..0x1A` in tag order if shipped.
+#### 2.3.1 BLR `predict()` returns dimensionless leverage, not variance contribution
+**Severity: HIGH (API correctness).** `BlrState::predict()` returns
+`(mean, epistemic_var, aleatoric_var)` where `epistemic_var =
+‖L⁻¹φ‖² = φᵀΛ⁻¹φ` is **dimensionless leverage**, not variance in
+output units. The original 0.3b design note's predictive-variance
+formula `total = aleatoric_var × (1 + epistemic_var)` treats it as
+leverage internally, but the API name strongly suggests output-unit
+variance. Any external consumer who computes `total = epi + ale`
+(plausible mental model) gets the wrong answer.
 
-### 2.4 New builtin surface (estimated)
+**0.3d-2's `expected_epistemic` capture and 0.3d-4's auto-capture
+also store the leverage value**, so the calibrated OOD ratio
+`(epi / expected).clamp(0, 1)` works on its own terms (units cancel).
+But the misnaming is load-bearing for any external use.
 
-Track A: ~12 new builtins for the CLI subcommands (each subcommand
-binds to one or more `abng_cli_*` builtins).
-Track B: ~3 new builtins:
+**Fix options (pick one):**
+- **(a)** Rename the second return value to `epistemic_leverage`
+  in the API + docs. Snapshot-stable; just a builtin-rename
+  (`abng_blr_predict` returns same `Tensor[3]`, but documented
+  fields change). Forces minor disruption but no math change.
+- **(b)** Change the math: return `aleatoric_var × ‖L⁻¹φ‖²` so the
+  middle slot is variance contribution in y-units. Requires
+  re-capturing every existing `expected_epistemic` (since auto-capture
+  formula changes), so a one-time migration step. Forces 0.3d-4 stored
+  values to be invalidated.
+- **(c)** Return both: change the API to `Tensor[4]` with `(mean,
+  leverage, epistemic_var_in_y_units, aleatoric_var)`. Breaking change
+  to the dispatch arm; clearest API.
+
+**Recommended:** (a). It's the smallest viable correctness fix and
+preserves all existing snapshots / captured `expected_epistemic`
+values. Document the rename in §6.5 of the architecture doc.
+
+#### 2.3.2 `observe()` accepts NaN/Inf — no input validation
+**Severity: HIGH (silent corruption).** `AdaptiveBeliefGraph::observe(node_id, value: f64)`
+does not validate `value`. A single `observe(0, f64::NAN)` call:
+1. Welford updates produce NaN mean and M2 forever (no recovery)
+2. NodeStats canonical bytes hash to a stable but-NaN-poisoned value
+3. Replay verification PASSES (bytes are bit-identical) but the
+   model is permanently broken
+4. Subsequent `observe()` calls on the same node propagate NaN.
+
+**Fix:** reject non-finite values at the boundary. Two options:
+- **(a) Strict reject:** `observe()` returns `GraphError::ObserveNonFinite { value }`
+  on `!value.is_finite()`. Forces user code to handle bad input.
+- **(b) Canonical NaN:** quietly substitute a single canonical
+  bit-pattern NaN (`f64::from_bits(0x7FF8000000000000)`) before
+  applying. Preserves API but admits the foot-gun.
+
+**Recommended:** (a). Reproducibility is sacred; surfacing bad
+input to the caller matches the existing `BlrError::FeatureDimMismatch`
+style. Apply the same fix to `density_observe`, `calibration_observe`,
+and `blr_update`.
+
+**Tests:** add `tests/abng/observe_validation_tests.rs` with one
+test per affected method × {NaN, +Inf, -Inf}.
+
+#### 2.3.3 Replay missing semantic invariant checks
+**Severity: HIGH (security / corruption).** `replay()` validates the
+hash chain but does NOT validate:
+- `event.seq` is monotonic (0, 1, 2, ...)
+- The first event is `Created` (and only the first)
+- `event.epoch == graph.epoch` (header field)
+- `event.stats_version` equals the live node's post-apply
+  `stats_version`
+
+An adversarial blob with consistent hashes but reordered seqs (or
+multiple Created events, or missing Created) currently passes replay
+silently. The `event.stats_version` check is the most concrete: an
+attacker can swap `Updated` events for the same node and the chain
+hashes still match because the per-event stats_hash is computed
+from the live node state at apply time.
+
+**Fix:** in `serialize.rs::replay()`'s event loop, after each
+`apply_event()`:
+```rust
+if event.seq != expected_seq { return Err(DecodeError::NonMonotonicSeq { expected: expected_seq, got: event.seq }); }
+if event.epoch != stored_epoch { return Err(DecodeError::EpochMismatch); }
+let live_version = graph.nodes[event.node_id as usize].stats_version;
+if event.stats_version != live_version { return Err(DecodeError::StatsVersionMismatch { node_id: event.node_id, at_seq: event.seq }); }
+expected_seq += 1;
+```
+
+Plus a "Created must be first" precondition before the loop:
+```rust
+if n_events == 0 || matches!(stored_first_event_kind, AuditKind::Created) is false { return Err(DecodeError::CreatedMustBeFirst); }
+```
+
+New `DecodeError` variants: `NonMonotonicSeq`, `EpochMismatch`,
+`StatsVersionMismatch`, `CreatedMustBeFirst`. All Phase 0.4 wire-format
+additions; the existing `ChainMismatch` is too generic.
+
+**Tests:** add adversarial-blob fixtures to `tests/bolero_fuzz/abng_decision_fuzz.rs`
+and `tests/abng/replay.rs` for each new invariant.
+
+#### 2.3.4 Silent `b < 0` clamp in BLR — no audit event
+**Severity: MEDIUM (reproducibility).** `blr.rs:233-235`:
+```rust
+if b_new < f64::EPSILON {
+    // Numerical floor — keep IG well-defined.
+    b_new = f64::EPSILON;
+}
+```
+This silent rescue hides where the InverseGamma posterior is
+operating outside its assumptions. A user re-running training would
+see identical bytes (great for replay) but no signal that the
+update was rescued.
+
+**Fix:** when the clamp fires, append a deterministic diagnostic
+audit event (new tag `0x18 BlrNumericalRescue { reason: u8, b_pre_clamp_bits: u64 }`).
+The event becomes part of the chain (replay still verifies). Users
+who care can filter the audit log for these events to identify
+unstable training regimes.
+
+**Alternative:** make the clamp configurable via a new
+`BlrPrior.b_floor_policy: enum { Clamp, Reject }` field (snapshot bump).
+The Clamp default preserves current behaviour; Reject errors with
+a new `BlrError::NumericalUnstable` so users opt into strict mode.
+
+**Recommended:** ship the audit event (no policy switch). It adds
+observability without breaking existing flows.
+
+#### 2.3.5 MLP feature space drift after BLR install — no contract
+**Severity: HIGH (model correctness).** `blr_features()` reads the
+**current** params on each call. So if `leaf_set_param` updates
+the MLP's penultimate-layer weights AFTER BLR posterior was trained,
+the existing BLR posterior is now in the wrong feature space — its
+`mean` and `precision` are conditional on the OLD features that
+the MLP no longer produces.
+
+There is currently NO contract enforcing one of:
+1. Freeze MLP params after BLR install (forbid `leaf_set_param`)
+2. Reset BLR posterior to prior after MLP update (auto-recover)
+3. Version the feature hash and reject `blr_update` on stale features
+
+**Fix (option 3, least disruptive):** add `feature_version_hash: [u8; 32]`
+to `BlrState` (snapshot bump). Set on `BLR install` to
+`leaf_head.params_hash`-equivalent. On `blr_update()`, recompute
+the params hash and compare; if mismatched, return a new
+`BlrError::FeatureVersionStale { stored, current }`. The user can
+then either:
+- Reset BLR to prior (`abng_reset_blr(node_id)` — new builtin) and
+  retrain on the new features
+- Re-train MLP and BLR jointly (existing pattern; just gates BLR
+  update on params being stable)
+
+**Tests:** `tests/abng/blr_feature_version_tests.rs`.
+
+#### 2.3.6 `LeafParamsUpdated` event volume — add batch builtin
+**Severity: MEDIUM (performance).** Each `leaf_set_param(node_id, k, t)`
+call appends one `LeafParamsUpdated` event. A single optimizer step
+that writes back W₁, b₁, …, W_out, b_out for an L-layer MLP fires
+`2(L+1)` events — for a 2-layer head, that's 6 events per step.
+A 100-epoch training loop on a 10-leaf graph with batched updates
+fires ~6,000 events.
+
+**Fix:** add `abng_leaf_set_params_batch(g, node_id, params: Tensor[])` —
+takes the full param vector as one tensor, writes all in one
+operation, fires ONE `LeafParamsUpdatedBatch` audit event (new tag
+`0x19`). The single witness covers the post-update params hash for
+the whole vector.
+
+Dispatch surface: 67 → 68 (after Track C).
+
+#### 2.3.7 Doc-quality: rename "per-leaf" to "per-node" throughout
+**Severity: LOW (clarity).** The architecture doc and Phase 0.3a/b
+design notes call the MLP head "per-leaf" — but the code calls
+`init_params` for the root and every `add_node` / `force_grow` /
+`force_split`. So **every node has params**, not just leaves.
+Same for BLR posterior (`set_blr_prior` initializes root, then
+every child via `add_node` / structural mutation).
+
+**Fix:** find-and-replace "per-leaf MLP head" → "per-node MLP head"
+and "per-leaf BLR head" → "per-node BLR head" in:
+- `docs/abng/ABNG_CURRENT_ARCHITECTURE.md` (§3.4, §6.4, §6.5)
+- `docs/abng/PHASE_0_3a_DESIGN.md` (title + every body mention)
+- `docs/abng/PHASE_0_3b_DESIGN.md` (title + every body mention)
+- crate-level docs in `crates/cjc-abng/src/leaf_head.rs` and `blr.rs`
+
+No code changes needed; behavior is already per-node.
+
+#### 2.3.8 Lineage belief / inherited prior — design decision
+**Severity: LOW (feature, not bug).** Each node's BLR prior is
+independent — there's no "inherit parent's posterior as my prior"
+mechanism. For a hierarchical / radix-tree shaped belief graph,
+ancestor-conditioned prediction (e.g. "if my BLR has insufficient
+evidence, fall back to my parent's") is a natural feature.
+
+**Decision needed:** is this in 0.4 scope or 0.5? Suggest:
+- 0.4: add `abng_blr_predict_with_fallback(node_id, phi, max_depth)`
+  that walks up the parent chain when `node.blr.n_seen <
+  fallback_threshold`. Pure read; no new audit kind.
+- 0.5: full lineage belief (parent posterior used as prior at
+  `add_node` time) — this requires a snapshot bump and new `BlrInitialized`
+  semantics.
+
+#### 2.3.9 `NodeStats::canonical_bytes` future-hostile for compaction
+**Severity: MEDIUM (future-proofing).** `NodeStats::canonical_bytes()`
+serializes only `m2.finalize()`, dropping the Kahan compensation
+register. **As long as replay always reconstructs from the full
+event log, this is fine** — the compensation register is rebuilt
+on each `observe`. But Phase 0.4's log-compaction goal ("squash N
+consecutive `*Updated` events into one `StatsSnapshot`") needs to
+resume from the canonical bytes, which means the compensation
+state must be canonical too.
+
+**Fix:** when log compaction lands (Track A's `StatsSnapshot` audit
+kind), also extend `NodeStats::canonical_bytes` to 32 bytes —
+appending the compensation register's bit pattern. Snapshot bump.
+
+**Alternative:** declare that compaction always re-derives a fresh
+KahanAccumulator from the finalized M2 (zero compensation), and
+documents the implied determinism gap (not bit-identical to a
+non-compacted history). Cleaner but admits a small reproducibility
+asterisk.
+
+**Recommended:** extend canonical bytes. Reproducibility is sacred.
+
+#### 2.3.10 Cholesky regularization — design-vs-code drift
+**Severity: LOW (doc-only).** PHASE_0_3b_DESIGN.md §"Numerical
+safeguards" claims Cholesky uses `f64::EPSILON` diagonal
+regularization before decomposition. The actual `cholesky()`
+function in `blr.rs` does NOT regularize — it errors with
+`BlrError::NonPositiveDefinite` on a non-positive pivot. The code
+is correct (no silent regularization → reproducibility intact);
+the design note is wrong.
+
+**Fix:** delete the regularization claim from PHASE_0_3b_DESIGN.md
+and add a "Phase 0.3b post-hoc correction" note to
+`ABNG_CURRENT_ARCHITECTURE.md` §6.5 explaining the divergence.
+
+#### 2.3.11 Empty-graph chain-head wording
+**Severity: LOW (doc clarity).** The original PHASE_0_1_DESIGN.md
+description says an "empty graph" has chain head equal to
+`genesis_hash()`. But `AdaptiveBeliefGraph::new(seed)` immediately
+constructs the root and appends a `Created` event — so a
+user-visible "fresh graph" has `audit_len == 1` and a non-genesis
+chain head. The genesis hash is only the *internal pre-creation
+state* used as the `previous_hash` of the Created event.
+
+**Fix:** add a clarification block to `ABNG_CURRENT_ARCHITECTURE.md` §2.2:
+> **Genesis vs fresh-graph head.** `genesis_hash()` is the
+> well-known constant `sha256(b"ABNG-GENESIS-v1")` used as the
+> `previous_hash` field of the very first `Created` event. After
+> `AdaptiveBeliefGraph::new(seed)` returns, the graph already has
+> one Created event applied, so `chain_head != genesis_hash()` —
+> a "fresh graph" has audit length 1 and a Created-derived chain
+> head. The genesis constant is purely an internal anchor.
+
+#### 2.3.12 Independent-audit findings (additional)
+
+The 2026-05-07 audit also surfaced these smaller items:
+
+- **`expected_epistemic` re-capture not supported.** Once captured,
+  it's frozen (one-shot per node). If the BLR posterior drifts
+  significantly later (e.g. catastrophic forgetting), the captured
+  reference becomes stale and the calibrated OOD ratio drifts with
+  it. Phase 0.4 should add either a `force_recapture_expected_epistemic`
+  builtin (test/manual) or auto-recapture inside `decide_step` when
+  drift_score exceeds a threshold.
+
+- **`Maturity` thresholds hardcoded.** `ECE_STABILITY_MAX = 0.05`
+  and `UNCERTAINTY_STABLE_MIN_SAMPLES = 100` in `maturity.rs` are
+  compile-time constants, not user-configurable. Phase 0.4's
+  `DecisionPolicy` extension should add `ece_stability_max` and
+  `uncertainty_min_samples` thresholds (12-threshold or 13-threshold
+  policy depending on whether the drift_unfreeze_threshold from
+  §2.2.7 also lands).
+
+- **`Unfreeze` doesn't bump `action_counts`.** By design (architecture
+  §7 #13), but this means there's no way to count un-freeze events
+  programmatically. If 0.4's drift-trip auto-Unfreeze fires often,
+  observability suffers. Recommend: extend `action_counts` to
+  `[u64; 7]` (snapshot bump) with index 6 = Unfreeze, OR keep `[u64; 6]`
+  and add a separate `unfreeze_count: u64` graph field.
+
+- **Auto-capture races with manual capture.** If user code calls
+  `abng_set_expected_epistemic` between two `decide_step` invocations,
+  the second `decide_step` sees `expected_epistemic.is_some()` and
+  skips its auto-capture path. This is correct (one-shot honored),
+  but worth documenting in §3.7 of the architecture doc.
+
+- **No determinism canary for `decide_step`.** The property tests
+  cover decide_step monotonicity, but a single dedicated
+  `decide_step_chain_head_canary` in-crate test would catch any
+  regression in the engine's hash-output earlier than the property
+  suite does. Recommend: add this test alongside Track B's quality
+  refinements (since those touch decide_step's internals heavily).
+
+- **`force_compress` orphans descendants** (already in §7 #12) —
+  but `decide_step`-driven Compress in 0.4 should at minimum mark
+  those orphans `is_active = false` to avoid them showing up in
+  `node_count` for graph-level metrics. Currently they stay active.
+
+### 2.4 New audit kinds (consolidated across all tracks)
+
+Tag-allocation order — Track C correctness fixes get the lowest
+tags so they don't depend on the bigger format additions in Track A.
+
+| Tag | Kind | Track | Payload | Purpose |
+|---|---|---|---|---|
+| `0x18` | `BlrNumericalRescue` | C-2.3.4 | `{ reason: u8, b_pre_clamp_bits: u64 }` (9B) | Diagnostic when `b < ε` clamp fires |
+| `0x19` | `LeafParamsUpdatedBatch` | C-2.3.6 | `{ params_hash: [u8; 32] }` (32B witness) | Single event for full-vector param writeback |
+| `0x1A` | `StatsSnapshot` | A | `{ stats_canonical: [u8; 32], window_seq_range: (u64, u64) }` | Log compaction — rebases N `*Updated` into one |
+| `0x1B` | `Routed` | A | `{ leaf: u32, matched_prefix: u8 }` | Opt-in explain mode (per-call trace) |
+| `0x1C` | `ProvenanceStamped` | A | `{ dataset_hash, feature_transform_hash, model_hash }` (96B) | Lineage; see arch doc §6.7 |
+
+`0x16` (Unfreeze) and `0x17` (ExpectedEpistemicCaptured) are already
+allocated (Phase 0.3d). Note Track-C tags `0x18..0x19` come *before*
+Track A's tags so that correctness fixes can ship independently
+without depending on Track A landing.
+
+### 2.5 New builtin surface (estimated)
+
+**Track A:** ~12 new builtins for the CLI subcommands (each
+subcommand binds to one or more `abng_cli_*` builtins).
+
+**Track B:** ~3 new builtins:
 - `abng_signature_welford_dump(g, node_id) -> Tensor` (inspect)
 - `abng_kl_divergence(g, node_a, node_b) -> Float` (BLR KL helper)
 - `abng_route_entropy(g, node_id) -> Float`
 
-Total surface after 0.4: ~80 dispatch arms.
+**Track C:** ~5 new builtins (correctness):
+- `abng_leaf_set_params_batch(g, node_id, params: Tensor[]) -> Void` (§2.3.6)
+- `abng_reset_blr(g, node_id) -> Void` — reset to prior, fires `BlrInitialized` (§2.3.5 fallback)
+- `abng_blr_predict_with_fallback(g, node_id, phi, max_depth: i64) -> Tensor[3]` (§2.3.8 — 0.4 sub-feature)
+- `abng_observe_validate(g, value) -> Bool` — pure-function probe (optional convenience)
+- `abng_force_recapture_expected_epistemic(g, node_id) -> Void` — manual override of 0.3d's one-shot (§2.3.12)
 
-### 2.5 Snapshot v9
+Total surface after 0.4: ~85 dispatch arms (65 + Track C +
+Track B + Track A).
+
+### 2.6 Snapshot v9
 
 **Goal: this should be the LAST snapshot bump for ABNG's pre-1.0
 lifecycle.** Bundle ALL of Phase 0.4's persistent-state additions
@@ -199,14 +526,26 @@ into one bump:
 ```
 magic                    "ABNG\x09"
 ... v8 layout ...
+# Track C correctness state additions:
++ NodeStats: extend canonical_bytes 24B → 32B (append Kahan
+  compensation register) — Track C-2.3.9
++ BlrState: gain `feature_version_hash: [u8; 32]` — Track C-2.3.5
++ DecodeError: new variants NonMonotonicSeq, EpochMismatch,
+  StatsVersionMismatch, CreatedMustBeFirst — Track C-2.3.3
+# Track B quality state additions:
 + per-node: Welford state for 4 NodeSignature profiles (~128 bytes)
 + per-node: ECE history [f64; 3] + σ history [f64; 3] + fill counters
 + DecisionPolicy: gain a 12th threshold (drift_unfreeze) → 96 bytes canonical
-... events gain 0x18..0x1A as needed ...
++ optional 13th threshold for ece_stability_max + 14th for
+  uncertainty_min_samples (Track C-2.3.12 audit findings)
+# Track A — events gain 0x1A..0x1C; per-node gains optional
+# `provenance_stamp_hash: [u8; 32]` (Track A — see §6.7).
+... events gain 0x18..0x1C as needed ...
 ```
 
 Once shipped, **freeze the format**. Phase 0.5+ should treat v9 as
-permanent.
+permanent. Every Track-C / Track-B persistent-state addition MUST
+land before the format freezes — no v10 in the pre-1.0 lifecycle.
 
 ## Step 3 — Testing requirements
 

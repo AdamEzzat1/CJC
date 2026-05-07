@@ -397,6 +397,71 @@ grow, real NIG-aware merge math, and 3-window ECE/σ stability. The
 *event channel* is full strength now; the *quality* of the signal
 is the 0.4 concern.
 
+### R10. BLR `predict()` returns dimensionless leverage, not variance contribution (post-0.3d audit)
+**Surfaced 2026-05-07 retrospective.** `BlrState::predict()` returns
+`(mean, epistemic_var, aleatoric_var)` where `epistemic_var =
+‖L⁻¹φ‖² = φᵀΛ⁻¹φ` is **dimensionless leverage**, not variance in
+output units. The 0.3b design note's predictive-variance formula
+`total = aleatoric_var × (1 + epistemic_var)` treats it as leverage
+internally — but the API name strongly suggests output-unit variance.
+0.3d-2's `expected_epistemic` capture and 0.3d-4's auto-capture
+also store leverage, so the calibrated OOD ratio
+`(epi / expected).clamp(0, 1)` works on its own terms (units cancel).
+External consumers who try to compute total predictive variance
+themselves get the wrong answer. **Phase 0.4 Track C-2.3.1** —
+either rename to `epistemic_leverage` or fix the math.
+
+### R11. `observe()` accepts NaN/Inf — no input validation (post-0.3d audit)
+**Surfaced 2026-05-07 retrospective.** `AdaptiveBeliefGraph::observe()`,
+`density_observe()`, `calibration_observe()`, and `blr_update()`
+accept non-finite f64 inputs without validation. A single
+`observe(node, f64::NAN)` poisons the Welford state forever, but
+replay still passes (bytes are bit-identical). **Phase 0.4 Track C-2.3.2**
+— reject non-finite values at every input boundary.
+
+### R12. Replay missing semantic invariant checks (post-0.3d audit)
+**Surfaced 2026-05-07 retrospective.** `replay()` validates the hash
+chain but does NOT validate seq monotonicity, "Created event must
+be first," `event.epoch == header.epoch`, or
+`event.stats_version == post-apply node.stats_version`. An
+adversarial blob with consistent hashes but reordered seqs / missing
+Created / forged epochs currently passes replay silently.
+**Phase 0.4 Track C-2.3.3** — add four new `DecodeError` variants
+and the corresponding checks.
+
+### R13. Silent `b < 0` clamp in BLR (post-0.3d audit)
+**Surfaced 2026-05-07 retrospective.** `blr.rs:233-235` quietly
+clamps `b_new < f64::EPSILON` to `f64::EPSILON` with no audit event.
+Reproducibility-preserving (same input → same clamped output) but
+hides where the InverseGamma posterior is operating outside its
+assumptions. **Phase 0.4 Track C-2.3.4** — emit a deterministic
+`BlrNumericalRescue` audit event (tag `0x18`) when the clamp fires.
+
+### R14. MLP feature space drift after BLR install (post-0.3d audit)
+**Surfaced 2026-05-07 retrospective.** `blr_features()` reads the
+*current* MLP params on each call. So `leaf_set_param` after a BLR
+posterior is trained leaves the BLR posterior conditioned on the
+OLD feature space — silently misaligned. There is no contract
+enforcing freeze-MLP-after-BLR or reset-BLR-after-MLP-update.
+**Phase 0.4 Track C-2.3.5** — add `feature_version_hash` to BlrState;
+gate `blr_update()` on hash match; add `abng_reset_blr` builtin.
+
+### R15. `NodeStats::canonical_bytes` future-hostile for compaction (post-0.3d audit)
+**Surfaced 2026-05-07 retrospective.** Canonical bytes serialize
+only `m2.finalize()`, dropping the Kahan compensation register.
+Replay-from-events is fine because the compensation rebuilds. But
+Phase 0.4's planned log compaction needs to resume from canonical
+bytes — that requires the compensation state too. **Phase 0.4
+Track C-2.3.9** — extend canonical bytes 24B → 32B (snapshot v9).
+
+### R16. Per-leaf vs per-node naming drift (post-0.3d audit)
+**Surfaced 2026-05-07 retrospective.** Architecture doc and design
+notes call MLP / BLR heads "per-leaf" but `init_params` and BLR
+init are called for *every* node (root + every `add_node` /
+`force_grow` / `force_split`). Code is per-node; docs are wrong.
+**Phase 0.4 Track C-2.3.7** — rename "per-leaf" to "per-node"
+throughout. No code changes required.
+
 ---
 
 ## 5. Phase Roadmap
@@ -723,6 +788,76 @@ evidence.
 `abng_unfreeze` exists as a manual builtin. The architecture-doc
 intent is that `decide_step` would auto-unfreeze on drift signals
 exceeding a threshold. Phase 0.4 wires this through.
+
+### 8.12 BLR `predict()` API name vs unit (post-0.3d audit)
+See R10. Phase 0.4 Track C-2.3.1 fixes via either rename
+(`epistemic_leverage`) or math correction (`aleatoric_var × leverage`).
+Recommended fix: rename only.
+
+### 8.13 NaN/Inf input validation (post-0.3d audit)
+See R11. Phase 0.4 Track C-2.3.2 — reject non-finite at every
+observe / update boundary.
+
+### 8.14 Replay missing semantic invariants (post-0.3d audit)
+See R12. Phase 0.4 Track C-2.3.3 — add seq monotonicity, Created-first,
+epoch match, stats_version match. New `DecodeError` variants.
+
+### 8.15 BLR silent `b<0` clamp (post-0.3d audit)
+See R13. Phase 0.4 Track C-2.3.4 — emit `BlrNumericalRescue`
+audit event (tag `0x18`) when the clamp fires.
+
+### 8.16 MLP-vs-BLR feature space contract (post-0.3d audit)
+See R14. Phase 0.4 Track C-2.3.5 — `feature_version_hash` on
+BlrState; reject `blr_update` on stale features; `abng_reset_blr`
+recovery builtin.
+
+### 8.17 LeafParamsUpdated event volume (post-0.3d audit)
+Each `leaf_set_param` writes one event per tensor — a 2-layer
+optimizer step fires 6 events. **Phase 0.4 Track C-2.3.6** — add
+`abng_leaf_set_params_batch` + `LeafParamsUpdatedBatch` audit kind
+(tag `0x19`) for one-event-per-step training.
+
+### 8.18 Per-leaf vs per-node naming (post-0.3d audit)
+See R16. Phase 0.4 Track C-2.3.7 — find-and-replace "per-leaf" →
+"per-node" in all docs. No code changes.
+
+### 8.19 Lineage belief / inherited prior (post-0.3d audit)
+Each node's BLR prior is independent — no ancestor-conditioned
+prediction or parent-as-prior on `add_node`. Phase 0.4 may add
+`abng_blr_predict_with_fallback` (read-only fallback walk up the
+parent chain); full lineage belief is 0.5.
+
+### 8.20 NodeStats canonical bytes for compaction (post-0.3d audit)
+See R15. Phase 0.4 Track C-2.3.9 — extend canonical_bytes 24B → 32B
+to include Kahan compensation register. Required for log compaction.
+
+### 8.21 Cholesky regularization design-vs-code drift (post-0.3d audit)
+PHASE_0_3b_DESIGN.md says Cholesky uses `f64::EPSILON` diagonal
+regularization. Code does NOT — it errors on non-positive pivot
+(`BlrError::NonPositiveDefinite`). Code is correct (no silent
+regularization → reproducibility intact). **Phase 0.4 Track C-2.3.10**
+— delete the regularization claim from PHASE_0_3b_DESIGN.md and
+clarify the no-regularization contract in §6.5 of this doc.
+
+### 8.22 Empty-graph chain-head wording (post-0.3d audit)
+See §2.2. **Phase 0.4 Track C-2.3.11** — clarify "internal genesis
+state" vs "post-Created chain head" distinction.
+
+### 8.23 Audit findings (independent verification, post-0.3d)
+- `expected_epistemic` re-capture not supported (one-shot per node);
+  if BLR drifts later the captured reference is stale. Phase 0.4
+  may add `abng_force_recapture_expected_epistemic`.
+- `Maturity` thresholds (`ECE_STABILITY_MAX`, `UNCERTAINTY_STABLE_MIN_SAMPLES`)
+  hardcoded as compile-time constants. Phase 0.4's `DecisionPolicy`
+  extension should make them user-configurable.
+- `Unfreeze` doesn't bump `action_counts`; if 0.4's auto-Unfreeze
+  fires often, observability suffers. Recommend: extend `action_counts`
+  to `[u64; 7]` (snapshot bump) OR add separate `unfreeze_count: u64`.
+- No determinism canary specifically for `decide_step`; property
+  tests cover monotonicity but a dedicated chain-head canary would
+  catch regressions earlier. Phase 0.4 Track B should add this.
+- `force_compress` orphans descendants stay `is_active = true`;
+  policy-driven Compress in 0.4 should mark them inactive.
 
 ---
 
