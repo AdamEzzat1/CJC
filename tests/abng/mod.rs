@@ -21,6 +21,7 @@
 
 mod blr_feature_version_tests;
 mod blr_numerical_rescue_tests;
+mod blr_predict_fallback_tests;
 mod blr_tests;
 mod decision_tests;
 mod dispatch;

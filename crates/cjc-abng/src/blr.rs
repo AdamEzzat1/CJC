@@ -75,6 +75,14 @@ pub enum BlrError {
         /// Hash of the current per-node MLP params at the call site.
         current: [u8; 32],
     },
+    /// Phase 0.4 Track C-2.3.8 — `blr_predict_with_fallback` walked
+    /// the parent chain from the requested node up to the root and
+    /// found no ancestor with `n_seen >= 1`. The graph has no
+    /// observations on the relevant path; predicting from the prior
+    /// alone would be uninformative, so the call errors instead of
+    /// silently returning prior moments. `walked` counts ancestors
+    /// visited (incl. the requested node itself and the root).
+    NoEvidence { walked: u32 },
 }
 
 impl std::fmt::Display for BlrError {
@@ -116,6 +124,12 @@ impl std::fmt::Display for BlrError {
                  initialized — feature space is stale. Call \
                  `abng_reset_blr(node_id)` to re-prime the posterior \
                  on the new MLP, then continue training."
+            ),
+            BlrError::NoEvidence { walked } => write!(
+                f,
+                "abng blr: no ancestor in {walked}-node parent chain \
+                 has any observations (n_seen == 0 everywhere); \
+                 fallback predict has no evidence to fall back to"
             ),
         }
     }

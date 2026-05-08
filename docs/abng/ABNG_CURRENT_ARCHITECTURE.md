@@ -229,7 +229,7 @@ DensityTrackerInstalled    if density was enabled
 CalibrationInstalled       if calibration n_bins was set
 ```
 
-### 3.4 Builtin surface (67 arms)
+### 3.4 Builtin surface (68 arms)
 
 Construction / lifecycle: `abng_new`, `abng_drop`, `abng_root`,
 `abng_node_count`, `abng_audit_len`, `abng_chain_head`,
@@ -256,7 +256,15 @@ BLR: `abng_set_blr_prior`, `abng_blr_features`, `abng_blr_update`,
 `abng_blr_predict`, `abng_blr_state_hash`, `abng_blr_n_seen`,
 `abng_reset_blr` (Phase 0.4 Track C-2.3.5 — clears posterior to prior
 and refreshes `feature_version_hash` to current MLP params; recovery
-from `BlrError::FeatureVersionStale`).
+from `BlrError::FeatureVersionStale`),
+`abng_blr_predict_with_fallback` (Phase 0.4 Track C-2.3.8 —
+read-only parent-walk variant of `abng_blr_predict` that returns the
+prediction at the **nearest ancestor (incl. self) with `n_seen ≥ 1`**.
+Returns `Tensor[4] = [mean, epistemic_leverage, aleatoric_var,
+source_node_id_as_f64]`. Errors with `BlrError::NoEvidence { walked }`
+when no ancestor has any observations. No audit event, no RNG —
+suitable for use inside `decide_step` if a future trigger needs a
+"likely useful prediction here" signal).
 
 Density / calibration / drift / OOD:
 `abng_set_density_tracker`, `abng_density_observe`, `abng_density_score`,
@@ -1076,11 +1084,19 @@ events to ~1,000 (6× reduction).
 See R16. Phase 0.4 Track C-2.3.7 shipped the doc-only rename. No
 code changes; behavior was always per-node.
 
-### 8.19 Lineage belief / inherited prior (post-0.3d audit)
+### 8.19 Lineage belief / inherited prior ✅ PARTIALLY RESOLVED in Phase 0.4 Track C-2.3.8
 Each node's BLR prior is independent — no ancestor-conditioned
-prediction or parent-as-prior on `add_node`. Phase 0.4 may add
-`abng_blr_predict_with_fallback` (read-only fallback walk up the
-parent chain); full lineage belief is 0.5.
+prediction or parent-as-prior on `add_node`. Phase 0.4 Track C-2.3.8
+shipped the read-only fallback variant
+`abng_blr_predict_with_fallback`: walks up the parent chain from the
+target node to the **nearest ancestor (incl. self) with `n_seen ≥ 1`**
+and returns its prediction tuple plus the source node id. Errors with
+`BlrError::NoEvidence { walked }` if no ancestor has any observations.
+This solves the "fresh leaf returns uninformative prior moments"
+problem for read paths. **Remaining 0.5 work:** full lineage belief
+(parent-as-prior on `add_node`, ancestor-conditioned posterior
+combine, lineage-aware `blr_update`) is still deferred — those touch
+the audit log and require careful scope decisions.
 
 ### 8.20 NodeStats canonical bytes for compaction (post-0.3d audit)
 See R15. Phase 0.4 Track C-2.3.9 — extend canonical_bytes 24B → 32B
@@ -1132,7 +1148,7 @@ no code or wire-format change.
 | `crates/cjc-abng/src/node.rs` | `AdaptiveBeliefNode` (per-node state) + ECE/σ ring buffers + 4 × `SignatureWelford` channels (B-2.2.{1,2}) | 0.1+ |
 | `crates/cjc-abng/src/audit.rs` | `AuditEvent`, `AuditKind` (26 variants — added `0x18 BlrNumericalRescue`, `0x19 LeafParamsUpdatedBatch`), payload-bytes | 0.1+ |
 | `crates/cjc-abng/src/serialize.rs` | snapshot v10 encode + replay + defensive bounds + 4 new C-2.3.3 `DecodeError` variants | 0.1+ |
-| `crates/cjc-abng/src/dispatch.rs` | 67 `abng_*` builtins (`+1` from C-2.3.5 `abng_reset_blr`, `+1` from C-2.3.6 `abng_leaf_set_params_batch`) | 0.1+ |
+| `crates/cjc-abng/src/dispatch.rs` | 68 `abng_*` builtins (`+1` from C-2.3.5 `abng_reset_blr`, `+1` from C-2.3.6 `abng_leaf_set_params_batch`, `+1` from C-2.3.8 `abng_blr_predict_with_fallback`) | 0.1+ |
 | `crates/cjc-abng/src/stats.rs` | `NodeStats` (Welford + Kahan M2) + `combine` (B-2.2.6 — Chan/Golub/LeVeque parallel merge) | 0.1 + 0.4 |
 | `crates/cjc-abng/src/children.rs` | `AdaptiveChildren` (Node4/16/48/256/Dense) + promotion | 0.2 + 0.3d-3 |
 | `crates/cjc-abng/src/codebook.rs` | quantile codebook + prefix encoder | 0.2 |
@@ -1173,6 +1189,7 @@ no code or wire-format change.
 | `tests/abng/replay_invariant_tests.rs` | 0.4 C-2.3.3 |
 | `tests/abng/blr_numerical_rescue_tests.rs` | 0.4 C-2.3.4 |
 | `tests/abng/blr_feature_version_tests.rs` | 0.4 C-2.3.5 |
+| `tests/abng/blr_predict_fallback_tests.rs` | 0.4 C-2.3.8 |
 | `tests/abng/leaf_params_batch_tests.rs` | 0.4 C-2.3.6 |
 | `tests/abng/merge_math_tests.rs` | 0.4 B-2.2.6 |
 | `tests/abng/route_entropy_grow_tests.rs` | 0.4 B-2.2.5 |
@@ -1180,18 +1197,18 @@ no code or wire-format change.
 | `tests/prop_tests/abng_decision_props.rs` | 0.3d-5 |
 | `tests/bolero_fuzz/abng_decision_fuzz.rs` | 0.3d-5 |
 
-## Appendix B — Most Recent Verified Test Counts (post-Phase 0.4 B+C, 2026-05-07)
+## Appendix B — Most Recent Verified Test Counts (post-Phase 0.4 B+C+polish, 2026-05-07)
 
 | Gate | Result | Δ from end-of-0.3d |
 |---|---|---|
 | `cargo test -p cjc-abng --lib` | **252 passed, 0 failed** | +25 |
-| `cargo test --test abng` | **391 passed, 0 failed** | +88 |
+| `cargo test --test abng` | **404 passed, 0 failed** | +101 (B+C: +88; +13 from C-2.3.8 fallback tests) |
 | `cargo test --test prop_tests abng_decision` | **4 passed** (× 256 cases each) | +0 |
 | `cargo test --test bolero_fuzz abng_decision` | **4 passed** | +0 |
 | `cargo test --workspace --release --lib` | (re-run before Track A merge) | — |
 | `cargo test --test physics_ml --release` | (re-run before Track A merge) | — |
 
-Total ABNG-direct `#[test]` markers: **643** (252 in-crate + 391
+Total ABNG-direct `#[test]` markers: **656** (252 in-crate + 404
 integration), plus 4 properties (× 256 cases each) and 4 fuzz targets.
 
 ---

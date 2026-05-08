@@ -814,6 +814,27 @@ pub fn dispatch_abng(name: &str, args: &[Value]) -> Result<Option<Value>, String
             })??;
             Value::Void
         }
+        "abng_blr_predict_with_fallback" => {
+            // Phase 0.4 Track C-2.3.8 — predict at the nearest ancestor
+            // (incl. self) with n_seen >= 1; walks the parent chain.
+            // Returns Tensor[4] = [mean, epistemic_leverage,
+            // aleatoric_var, source_node_id_as_f64]. The source node id
+            // is encoded as f64 (NodeId is u32, so the cast is exact for
+            // every node id < 2^53). Errors with
+            // BlrError::NoEvidence { walked } if no ancestor has any
+            // observations.
+            arg_count(name, args, 3)?;
+            let id = arg_i64(name, &args[0])?;
+            let node_id = arg_u32_node(name, &args[1])?;
+            let phi = arg_tensor_1d_f64(name, &args[2])?;
+            let (mean, lev, ale, source) = with_graph(name, id, |g| {
+                g.blr_predict_with_fallback(node_id, &phi)
+                    .map_err(|e| graph_err_to_string(name, e))
+            })??;
+            let t = Tensor::from_vec(vec![mean, lev, ale, source as f64], &[4])
+                .map_err(|e| format!("{name}: tensor build failed: {e:?}"))?;
+            Value::Tensor(t)
+        }
         "abng_blr_state_hash" => {
             arg_count(name, args, 2)?;
             let id = arg_i64(name, &args[0])?;

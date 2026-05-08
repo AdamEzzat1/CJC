@@ -1031,6 +1031,50 @@ impl AdaptiveBeliefGraph {
         Ok(blr.predict(phi)?)
     }
 
+    /// Phase 0.4 Track C-2.3.8 — predict at `phi`, walking up the
+    /// parent chain if the target node has not yet seen any
+    /// observations (`blr.n_seen == 0`). Returns the predict tuple
+    /// of the **nearest ancestor (incl. self) with `n_seen >= 1`**
+    /// plus the node id it landed on. Read-only; no audit event,
+    /// no RNG.
+    ///
+    /// Walk semantics:
+    /// 1. Start at `node_id`. If `n_seen >= 1`, predict and return.
+    /// 2. Else if the node has a parent, recurse on the parent.
+    /// 3. Else (root with `n_seen == 0`), error with
+    ///    `BlrError::NoEvidence { walked }`.
+    ///
+    /// Errors propagated from the resolved ancestor's
+    /// `BlrState::predict` (e.g. `FeatureDimMismatch`) are returned
+    /// as-is — they signal corrupt state, not lack of evidence.
+    pub fn blr_predict_with_fallback(
+        &self,
+        node_id: NodeId,
+        phi: &[f64],
+    ) -> Result<(f64, f64, f64, NodeId), GraphError> {
+        let n_nodes = self.node_count();
+        if node_id >= n_nodes {
+            return Err(GraphError::NodeOutOfRange { node_id, n_nodes });
+        }
+        // Walk up. `walked` counts visited ancestors so the error
+        // message has a useful diagnostic.
+        let mut current = node_id;
+        let mut walked: u32 = 0;
+        loop {
+            walked = walked.saturating_add(1);
+            let node = &self.nodes[current as usize];
+            let blr = node.blr.as_ref().ok_or(BlrError::NoBlrPrior)?;
+            if blr.n_seen >= 1 {
+                let (mean, leverage, ale) = blr.predict(phi)?;
+                return Ok((mean, leverage, ale, current));
+            }
+            match node.parent {
+                Some(p) => current = p,
+                None => return Err(BlrError::NoEvidence { walked }.into()),
+            }
+        }
+    }
+
     /// SHA-256 of a node's BLR state canonical bytes. Errors if no BLR.
     pub fn blr_state_hash(&self, node_id: NodeId) -> Result<[u8; 32], GraphError> {
         let n_nodes = self.node_count();
