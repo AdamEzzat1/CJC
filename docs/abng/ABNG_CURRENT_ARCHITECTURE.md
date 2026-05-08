@@ -229,7 +229,7 @@ DensityTrackerInstalled    if density was enabled
 CalibrationInstalled       if calibration n_bins was set
 ```
 
-### 3.4 Builtin surface (68 arms)
+### 3.4 Builtin surface (69 arms)
 
 Construction / lifecycle: `abng_new`, `abng_drop`, `abng_root`,
 `abng_node_count`, `abng_audit_len`, `abng_chain_head`,
@@ -278,8 +278,14 @@ Density / calibration / drift / OOD:
 Maturity / signature inspection (0.3d-1):
 `abng_node_maturity`, `abng_node_signature`.
 
-Expected epistemic σ capture (0.3d-2):
-`abng_set_expected_epistemic`, `abng_expected_epistemic`.
+Expected epistemic σ capture (0.3d-2 + 0.4 C-2.3.12):
+`abng_set_expected_epistemic`, `abng_expected_epistemic`,
+`abng_force_recapture_expected_epistemic` (Phase 0.4 Track C-2.3.12 —
+overwrites the captured value with a fresh deterministic capture from
+the current BLR posterior; required after `abng_reset_blr` to keep
+`ood_score`'s calibrated ratio aligned with the post-reset posterior
+shape; emits a fresh `0x17 ExpectedEpistemicCaptured` audit event
+each call so replay rebuilds the same sequence).
 
 Decision policy + structural mutations (0.3d-3):
 `abng_set_decision_policy`, `abng_decision_policy_hash`,
@@ -1122,20 +1128,31 @@ state" exists only as the `previous_hash` of the `Created` event —
 no code or wire-format change.
 
 ### 8.23 Audit findings (independent verification, post-0.3d)
-- `expected_epistemic` re-capture not supported (one-shot per node);
-  if BLR drifts later the captured reference is stale. Phase 0.4
-  may add `abng_force_recapture_expected_epistemic`.
-- `Maturity` thresholds (`ECE_STABILITY_MAX`, `UNCERTAINTY_STABLE_MIN_SAMPLES`)
-  hardcoded as compile-time constants. Phase 0.4's `DecisionPolicy`
-  extension should make them user-configurable.
-- `Unfreeze` doesn't bump `action_counts`; if 0.4's auto-Unfreeze
-  fires often, observability suffers. Recommend: extend `action_counts`
-  to `[u64; 7]` (snapshot bump) OR add separate `unfreeze_count: u64`.
+- ✅ RESOLVED in Phase 0.4 Track C-2.3.12 — `expected_epistemic`
+  re-capture: shipped `abng_force_recapture_expected_epistemic`. Each
+  call clears the captured field and re-runs the same deterministic
+  capture logic `decide_step` uses (`epistemic_leverage(blr.predict
+  (blr.mean))`), emitting a fresh `ExpectedEpistemicCaptured` audit
+  event. Required after `abng_reset_blr` to align `ood_score`'s
+  calibrated ratio with the post-reset posterior shape.
+- ⚠️ DEFERRED — `Maturity` thresholds (`ECE_STABILITY_MAX`,
+  `UNCERTAINTY_STABLE_MIN_SAMPLES`) hardcoded as compile-time
+  constants. Promoting them to `DecisionPolicy` thresholds would push
+  the threshold count from 12 → 14 and force snapshot v10 → v11 —
+  conflicts with the "v10 frozen for Phase 0.4" contract. Deferred
+  to Phase 0.5.
+- ⚠️ DEFERRED — `Unfreeze` doesn't bump `action_counts`; if 0.4's
+  auto-Unfreeze fires often, observability suffers. Either approach
+  (extending `action_counts` to `[u64; 7]` or adding a separate
+  `unfreeze_count: u64`) extends the snapshot header and forces
+  v10 → v11 — same magic-bump conflict as above. Deferred to Phase 0.5.
 - No determinism canary specifically for `decide_step`; property
   tests cover monotonicity but a dedicated chain-head canary would
-  catch regressions earlier. Phase 0.4 Track B should add this.
+  catch regressions earlier. Phase 0.4 Track C-2.3.12 added one;
+  see §8.24 below for the explicit entry.
 - `force_compress` orphans descendants stay `is_active = true`;
-  policy-driven Compress in 0.4 should mark them inactive.
+  policy-driven Compress in 0.4 should mark them inactive. Deferred
+  to Phase 0.5.
 
 ---
 
@@ -1148,7 +1165,7 @@ no code or wire-format change.
 | `crates/cjc-abng/src/node.rs` | `AdaptiveBeliefNode` (per-node state) + ECE/σ ring buffers + 4 × `SignatureWelford` channels (B-2.2.{1,2}) | 0.1+ |
 | `crates/cjc-abng/src/audit.rs` | `AuditEvent`, `AuditKind` (26 variants — added `0x18 BlrNumericalRescue`, `0x19 LeafParamsUpdatedBatch`), payload-bytes | 0.1+ |
 | `crates/cjc-abng/src/serialize.rs` | snapshot v10 encode + replay + defensive bounds + 4 new C-2.3.3 `DecodeError` variants | 0.1+ |
-| `crates/cjc-abng/src/dispatch.rs` | 68 `abng_*` builtins (`+1` from C-2.3.5 `abng_reset_blr`, `+1` from C-2.3.6 `abng_leaf_set_params_batch`, `+1` from C-2.3.8 `abng_blr_predict_with_fallback`) | 0.1+ |
+| `crates/cjc-abng/src/dispatch.rs` | 69 `abng_*` builtins (`+1` from C-2.3.5 `abng_reset_blr`, `+1` from C-2.3.6 `abng_leaf_set_params_batch`, `+1` from C-2.3.8 `abng_blr_predict_with_fallback`, `+1` from C-2.3.12 `abng_force_recapture_expected_epistemic`) | 0.1+ |
 | `crates/cjc-abng/src/stats.rs` | `NodeStats` (Welford + Kahan M2) + `combine` (B-2.2.6 — Chan/Golub/LeVeque parallel merge) | 0.1 + 0.4 |
 | `crates/cjc-abng/src/children.rs` | `AdaptiveChildren` (Node4/16/48/256/Dense) + promotion | 0.2 + 0.3d-3 |
 | `crates/cjc-abng/src/codebook.rs` | quantile codebook + prefix encoder | 0.2 |
@@ -1202,7 +1219,7 @@ no code or wire-format change.
 | Gate | Result | Δ from end-of-0.3d |
 |---|---|---|
 | `cargo test -p cjc-abng --lib` | **252 passed, 0 failed** | +25 |
-| `cargo test --test abng` | **404 passed, 0 failed** | +101 (B+C: +88; +13 from C-2.3.8 fallback tests) |
+| `cargo test --test abng` | **413 passed, 0 failed** | +110 (B+C: +88; +13 from C-2.3.8 fallback; +9 from C-2.3.12 recapture) |
 | `cargo test --test prop_tests abng_decision` | **4 passed** (× 256 cases each) | +0 |
 | `cargo test --test bolero_fuzz abng_decision` | **4 passed** | +0 |
 | `cargo test --workspace --release --lib` | (re-run before Track A merge) | — |

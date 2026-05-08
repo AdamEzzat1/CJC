@@ -1214,6 +1214,22 @@ pub fn dispatch_abng(name: &str, args: &[Value]) -> Result<Option<Value>, String
             })??;
             Value::Float(v.unwrap_or(-1.0))
         }
+        "abng_force_recapture_expected_epistemic" => {
+            // Phase 0.4 Track C-2.3.12 — overwrite the captured
+            // expected_epistemic with a fresh deterministic capture
+            // from the current BLR posterior. Returns the new value.
+            // Use after `abng_reset_blr` to keep `ood_score`'s
+            // calibrated ratio aligned with the post-reset posterior
+            // shape.
+            arg_count(name, args, 2)?;
+            let id = arg_i64(name, &args[0])?;
+            let node_id = arg_u32_node(name, &args[1])?;
+            let value = with_graph(name, id, |g| {
+                g.force_recapture_expected_epistemic(node_id)
+                    .map_err(|e| graph_err_to_string(name, e))
+            })??;
+            Value::Float(value)
+        }
 
         // ── Phase 0.3d-1: maturity + signature (lazy / read-only) ─
         "abng_node_maturity" => {

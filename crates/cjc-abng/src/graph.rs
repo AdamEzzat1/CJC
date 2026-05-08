@@ -1433,6 +1433,62 @@ impl AdaptiveBeliefGraph {
         Ok(self.nodes[node_id as usize].expected_epistemic)
     }
 
+    /// Phase 0.4 Track C-2.3.12 — force a fresh capture of
+    /// `expected_epistemic` from the current BLR posterior, overwriting
+    /// any previously-captured value. Required after `reset_blr` (which
+    /// reseats the posterior on a new feature space and invalidates
+    /// the previously-captured leverage reference) so `ood_score`'s
+    /// calibrated ratio doesn't drift against stale evidence.
+    ///
+    /// Unlike [`set_expected_epistemic`](Self::set_expected_epistemic),
+    /// this is NOT one-shot. Each call emits a fresh
+    /// `ExpectedEpistemicCaptured` audit event (tag `0x17`) so replay
+    /// rebuilds the same sequence of capture states.
+    ///
+    /// The captured value is
+    /// `epistemic_leverage(blr.predict(blr.mean))` — the same
+    /// deterministic capture logic [`decide_step`](Self::decide_step)
+    /// runs when `Maturity.uncertainty_stable` first holds.
+    ///
+    /// Validation:
+    /// 1. Node must exist (`GraphError::NodeOutOfRange` otherwise).
+    /// 2. Node must have a BLR posterior installed
+    ///    (`GraphError::ExpectedEpistemicNoBlr` otherwise).
+    /// 3. The posterior `predict(blr.mean)` must produce a finite,
+    ///    positive leverage value — otherwise re-capture errors with
+    ///    `GraphError::ExpectedEpistemicInvalidValue(lev)`. This
+    ///    matches `set_expected_epistemic`'s rejection contract.
+    pub fn force_recapture_expected_epistemic(
+        &mut self,
+        node_id: NodeId,
+    ) -> Result<f64, GraphError> {
+        let n_nodes = self.node_count();
+        if node_id >= n_nodes {
+            return Err(GraphError::NodeOutOfRange { node_id, n_nodes });
+        }
+        let blr = self.nodes[node_id as usize]
+            .blr
+            .as_ref()
+            .ok_or(GraphError::ExpectedEpistemicNoBlr)?;
+        let value = epistemic_leverage_at_posterior_mean(blr)
+            .ok_or_else(|| {
+                // Mirror the public-API rejection: a non-positive /
+                // non-finite leverage has the same shape as a manually-
+                // supplied bad value. Use NaN as the carried diagnostic
+                // since the actual offending value isn't useful (it was
+                // either Err from predict or non-positive).
+                GraphError::ExpectedEpistemicInvalidValue(f64::NAN)
+            })?;
+        self.nodes[node_id as usize].expected_epistemic = Some(value);
+        let state_hash =
+            cjc_snap::hash::sha256(&value.to_bits().to_be_bytes());
+        self.append_event(
+            node_id,
+            AuditKind::ExpectedEpistemicCaptured { state_hash },
+        );
+        Ok(value)
+    }
+
     // ── Phase 0.3d-1: maturity + signature (lazy / read-only) ─────
 
     /// Compute a node's [`Maturity`](crate::maturity::Maturity) snapshot
