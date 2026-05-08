@@ -33,6 +33,7 @@ pub mod leaf_head;
 pub mod maturity;
 pub mod node;
 pub mod policy;
+pub mod predict_snap;
 pub mod route;
 pub mod serialize;
 pub mod signature;

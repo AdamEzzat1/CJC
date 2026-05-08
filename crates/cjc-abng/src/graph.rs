@@ -512,7 +512,9 @@ impl AdaptiveBeliefGraph {
 
     /// Walk the radix tree from the root, matching one prefix byte per hop.
     /// Returns a [`RouteEvidence`] capturing the path taken and how many
-    /// prefix bytes were successfully matched.
+    /// prefix bytes were successfully matched. **Read-only** — emits no
+    /// audit event. Use [`descend_traced`](Self::descend_traced) when
+    /// you want every walk to land in the audit log.
     pub fn descend(&self, prefix: &[u8]) -> RouteEvidence {
         let root_id: NodeId = 0;
         let mut path = Vec::with_capacity(prefix.len() + 1);
@@ -534,6 +536,32 @@ impl AdaptiveBeliefGraph {
             leaf_id: current,
             path,
         }
+    }
+
+    /// Phase 0.4 Track A — `descend` plus an audit-chain witness.
+    /// Identical walk semantics to [`descend`](Self::descend); the
+    /// only difference is that one `Routed { leaf, matched_prefix }`
+    /// event is appended to the audit log per call (tag `0x1B`).
+    ///
+    /// Opt-in by design — emitting one event per descend call would
+    /// explode the log under heavy inference. Use this method only
+    /// when explainability requires the route to be in the chain
+    /// (e.g. `cjcl abng explain`); use plain `descend` for all hot
+    /// paths.
+    pub fn descend_traced(&mut self, prefix: &[u8]) -> RouteEvidence {
+        let evidence = self.descend(prefix);
+        // The Routed event binds to the resolved leaf for the
+        // stats-version + stats-hash slots (the leaf is the node the
+        // walk "named", and consistent with how every other audit
+        // event carries a node-context hash).
+        self.append_event(
+            evidence.leaf_id,
+            AuditKind::Routed {
+                leaf: evidence.leaf_id,
+                matched_prefix: evidence.matched_prefix,
+            },
+        );
+        evidence
     }
 
     /// Build, hash-link, and append the next audit event for `node_id`.

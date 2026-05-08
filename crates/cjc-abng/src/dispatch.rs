@@ -560,6 +560,35 @@ pub fn dispatch_abng(name: &str, args: &[Value]) -> Result<Option<Value>, String
             .map_err(|e| format!("{name}: tensor build failed: {e:?}"))?;
             Value::Tensor(t)
         }
+        "abng_descend_traced" => {
+            // Phase 0.4 Track A — descend + emit one Routed audit event
+            // (tag 0x1B) per call. Same return shape as abng_descend.
+            arg_count(name, args, 2)?;
+            let id = arg_i64(name, &args[0])?;
+            let prefix = arg_prefix_bytes(name, &args[1])?;
+            let evidence = with_graph(name, id, |g| g.descend_traced(&prefix))?;
+            let t = Tensor::from_vec(
+                vec![evidence.matched_prefix as f64, evidence.leaf_id as f64],
+                &[2],
+            )
+            .map_err(|e| format!("{name}: tensor build failed: {e:?}"))?;
+            Value::Tensor(t)
+        }
+        "abng_predict_snap" => {
+            // Phase 0.4 Track A — pack a predict + lineage tuple into a
+            // self-contained Bytes blob using the dedicated PRED_MAGIC
+            // format in `cjc_abng::predict_snap`. Drives `cjcl abng
+            // explain`.
+            arg_count(name, args, 3)?;
+            let id = arg_i64(name, &args[0])?;
+            let node_id = arg_u32_node(name, &args[1])?;
+            let phi = arg_tensor_1d_f64(name, &args[2])?;
+            let blob = with_graph(name, id, |g| {
+                crate::predict_snap::pack(g, node_id, &phi)
+                    .map_err(|e| graph_err_to_string(name, e))
+            })??;
+            bytes_value(blob)
+        }
         "abng_route_path" => {
             arg_count(name, args, 2)?;
             let id = arg_i64(name, &args[0])?;

@@ -4,8 +4,8 @@
 **Crate:** `crates/cjc-abng/`
 **Tests:** `tests/abng/` (391 integration) + `crates/cjc-abng/src/*` (252 in-crate) + `tests/prop_tests/abng_decision_props.rs` (4 properties × 256 cases) + `tests/bolero_fuzz/abng_decision_fuzz.rs` (4 fuzz targets) — all passing
 **Snapshot magic:** `ABNG\x0A` (v10 — Phase 0.4 Track B-2.2.7 bumped from `\x09` for `DecisionPolicy.drift_unfreeze` 12th threshold; v9 added `BlrState.feature_version_hash` in C-2.3.5)
-**Builtin count:** 67 user-facing `abng_*` arms in `dispatch.rs` (65 from Phase 0.3d + 1 from C-2.3.6 `abng_leaf_set_params_batch` + 1 from C-2.3.5 `abng_reset_blr`)
-**Audit kinds:** 26 (tags `0x00`..`0x19` — Phase 0.4 added `0x18 BlrNumericalRescue` and `0x19 LeafParamsUpdatedBatch`)
+**Builtin count:** 71 user-facing `abng_*` arms in `dispatch.rs` (65 from Phase 0.3d; +1 C-2.3.5 `abng_reset_blr`; +1 C-2.3.6 `abng_leaf_set_params_batch`; +1 C-2.3.8 `abng_blr_predict_with_fallback`; +1 C-2.3.12 `abng_force_recapture_expected_epistemic`; +2 Track A `abng_descend_traced`, `abng_predict_snap`)
+**Audit kinds:** 27 (tags `0x00`..`0x19` + `0x1B` — Phase 0.4 added `0x18 BlrNumericalRescue`, `0x19 LeafParamsUpdatedBatch`, and `0x1B Routed`. Tags `0x1A` and `0x1C` are reserved for `StatsSnapshot` (G3.7) and `ProvenanceStamped` (Phase 0.5).)
 
 This document is a *source-of-truth* handoff after Phase 0.3d. Where the
 phase design notes (`PHASE_0_*_DESIGN.md`) and the actual code disagree,
@@ -229,7 +229,7 @@ DensityTrackerInstalled    if density was enabled
 CalibrationInstalled       if calibration n_bins was set
 ```
 
-### 3.4 Builtin surface (69 arms)
+### 3.4 Builtin surface (71 arms)
 
 Construction / lifecycle: `abng_new`, `abng_drop`, `abng_root`,
 `abng_node_count`, `abng_audit_len`, `abng_chain_head`,
@@ -347,6 +347,7 @@ Decision engine + unfreeze (0.3d-4):
 | `0x17` | `ExpectedEpistemicCaptured` | 0.3d-2 | `state_hash: [u8; 32]` | hash witness |
 | `0x18` | `BlrNumericalRescue` | 0.4 (C-2.3.4) | `reason: u8, b_pre_clamp_bits: u64` (9B) | full payload (diagnostic) |
 | `0x19` | `LeafParamsUpdatedBatch` | 0.4 (C-2.3.6) | `params_hash: [u8; 32]` | hash witness |
+| `0x1B` | `Routed` | 0.4 (Track A G3.5) | `leaf: u32, matched_prefix: u8` (5B) | full payload (opt-in trace event from `descend_traced`) |
 
 **Witness vs full-payload rationale:** *hash witness* events keep the
 audit log compact under heavy training (`*Updated` events fire per
@@ -1209,6 +1210,7 @@ no code or wire-format change.
 | `tests/abng/blr_predict_fallback_tests.rs` | 0.4 C-2.3.8 |
 | `tests/abng/decide_step_canary_tests.rs` | 0.4 C-2.3.12 |
 | `tests/abng/leaf_params_batch_tests.rs` | 0.4 C-2.3.6 |
+| `tests/abng/route_trace_tests.rs` | 0.4 Track A G3.5 |
 | `tests/abng/merge_math_tests.rs` | 0.4 B-2.2.6 |
 | `tests/abng/route_entropy_grow_tests.rs` | 0.4 B-2.2.5 |
 | `tests/abng/split_nll_gate_tests.rs` | 0.4 B-2.2.4 |
@@ -1219,8 +1221,8 @@ no code or wire-format change.
 
 | Gate | Result | Δ from end-of-0.3d |
 |---|---|---|
-| `cargo test -p cjc-abng --lib` | **252 passed, 0 failed** | +25 |
-| `cargo test --test abng` | **419 passed, 0 failed** | +116 (B+C: +88; +13 from C-2.3.8 fallback; +9 from C-2.3.12 recapture; +6 from C-2.3.12 decide_step canary) |
+| `cargo test -p cjc-abng --lib` | **261 passed, 0 failed** | +34 (B+C: +25; +9 from G3.5 predict_snap unit) |
+| `cargo test --test abng` | **432 passed, 0 failed** | +129 (B+C: +88; +13 from C-2.3.8 fallback; +9 from C-2.3.12 recapture; +6 from C-2.3.12 decide_step canary; +13 from G3.5 route_trace) |
 | `cargo test --test prop_tests abng_decision` | **4 passed** (× 256 cases each) | +0 |
 | `cargo test --test bolero_fuzz abng_decision` | **4 passed** | +0 |
 | `cargo test --workspace --release --lib` | (re-run before Track A merge) | — |

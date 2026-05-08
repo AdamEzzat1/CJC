@@ -1839,6 +1839,12 @@ fn apply_event(
             // params_hash carried here against the reconstructed live
             // params (same path that handles `LeafParamsUpdated`).
         }
+        AuditKind::Routed { .. } => {
+            // Phase 0.4 Track A — descend trace event. Read-only
+            // origin; no graph state mutation. Replay advances the
+            // chain (the canonical-payload bytes determine new_hash)
+            // but doesn't touch graph topology, BLR, or stats.
+        }
     }
     Ok(())
 }
@@ -2011,6 +2017,12 @@ fn decode_payload(
         0x19 => {
             let params_hash = cur.hash32()?;
             AuditKind::LeafParamsUpdatedBatch { params_hash }
+        }
+        0x1B => {
+            // Phase 0.4 Track A — Routed (opt-in trace event).
+            let leaf = cur.u32_be()?;
+            let matched_prefix = cur.u8()?;
+            AuditKind::Routed { leaf, matched_prefix }
         }
         other => return Err(DecodeError::UnknownKindTag(other)),
     };

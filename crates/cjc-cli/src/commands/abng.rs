@@ -415,6 +415,7 @@ mod inspect {
             AuditKind::ExpectedEpistemicCaptured { .. } => "ExpectedEpistemicCaptured",
             AuditKind::BlrNumericalRescue { .. } => "BlrNumericalRescue",
             AuditKind::LeafParamsUpdatedBatch { .. } => "LeafParamsUpdatedBatch",
+            AuditKind::Routed { .. } => "Routed",
         }
     }
 }

@@ -250,6 +250,21 @@ pub enum AuditKind {
         /// SHA-256 of the post-update params blob (whole vector).
         params_hash: [u8; 32],
     },
+    /// Phase 0.4 Track A — emitted by `descend_traced()` when route
+    /// tracing is enabled. Records the leaf node a descend resolved
+    /// to and how many prefix bytes matched. Tag `0x1B`. Opt-in via
+    /// the explicit traced-descend method to avoid log explosion under
+    /// heavy inference; the untraced `descend` remains silent.
+    /// Replay reapplies as a no-op (descend doesn't change graph
+    /// state) — the chain witness is enough to prove the route
+    /// happened.
+    Routed {
+        /// Resolved leaf id (terminal node of the walk).
+        leaf: NodeId,
+        /// How many prefix bytes were successfully matched
+        /// (0 ≤ matched ≤ prefix.len(); prefix.len() ≤ 255 in practice).
+        matched_prefix: u8,
+    },
 }
 
 /// `AuditKind::BlrNumericalRescue::reason` value: post-update `b` would
@@ -290,6 +305,10 @@ impl AuditKind {
             AuditKind::ExpectedEpistemicCaptured { .. } => 0x17,
             AuditKind::BlrNumericalRescue { .. } => 0x18,
             AuditKind::LeafParamsUpdatedBatch { .. } => 0x19,
+            // Phase 0.4 Track A — Routed (opt-in trace event). Tag
+            // 0x1A is reserved for `StatsSnapshot` (G3.7); 0x1C is
+            // reserved for `ProvenanceStamped` (Phase 0.5).
+            AuditKind::Routed { .. } => 0x1B,
         }
     }
 }
@@ -451,6 +470,14 @@ impl AuditEvent {
             }
             AuditKind::LeafParamsUpdatedBatch { params_hash } => {
                 out.extend_from_slice(params_hash);
+            }
+            AuditKind::Routed {
+                leaf,
+                matched_prefix,
+            } => {
+                // 5-byte body: leaf u32 BE + matched_prefix u8.
+                out.extend_from_slice(&leaf.to_be_bytes());
+                out.push(*matched_prefix);
             }
         }
         out.extend_from_slice(&self.stats_version.to_be_bytes());

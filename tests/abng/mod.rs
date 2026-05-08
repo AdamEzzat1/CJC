@@ -47,6 +47,7 @@ mod parity_p3d;
 mod replay;
 mod replay_invariant_tests;
 mod route_entropy_grow_tests;
+mod route_trace_tests;
 mod split_nll_gate_tests;
 mod uncertainty_tests;
 mod unit;
