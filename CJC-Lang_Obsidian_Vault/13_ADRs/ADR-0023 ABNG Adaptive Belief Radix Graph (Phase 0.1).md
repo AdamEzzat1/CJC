@@ -784,3 +784,151 @@ snapshot magic `\x0A`** — no further bump in Phase 0.4.
 |-------|-------|
 | 0.5   | Per-node `provenance_stamp_hash` + `0x1C ProvenanceStamped` audit kind (forces v10 → v11); configurable Maturity constants (`ECE_STABILITY_MAX_DELTA`, `SIGMA_STABILITY_RATIO` → DecisionPolicy thresholds 13 + 14, also forces v11); `unfreeze_count` observability (extends `action_counts` to `[u64; 7]` OR adds a separate field, also v11). Smart-replay using `StatsSnapshot` to fast-forward; TOML config files for `cjcl abng train`; `NodeStats::canonical_bytes` 24B → 32B (Kahan compensation for full compaction support — also v11). All four v11-bump items consolidate into one magic bump. |
 | 0.5+  | Chess-RL retrofit — value head first (uncertainty-gated bootstrap), then policy head; end-to-end determinism gate against existing chess-rl-v2 weight hashes. |
+
+---
+
+## Phase 0.5 amendment (2026-05-08)
+
+Phase 0.5 shipped on the `claude/abng-phase-0-5` branch (10 commits)
+and merged into master at commit `fe0b602`. Net surface delta from
+Phase 0.4: snapshot magic bumped `\x0B → \x0C` (v12), 73 → 75
+builtins, 28 → 29 audit kinds, `NodeStats::canonical_bytes` 24B →
+32B, new prediction snapshot magic `b"ABNG-PRED\x02"`. Plus an
+extensive demo layer that proves 11 distinct ABNG capabilities at
+small scale.
+
+### What landed
+
+**Joint v12 wire-format bump (Items 1 + 4 — single commit `1c92ab0`):**
+
+* **Item 1 — Per-node `provenance_stamp_hash` + `0x1C
+  ProvenanceStamped`.** Every node carries a 32-byte caller-chosen
+  fingerprint (typically `sha256(dataset_bytes ‖ feature_version)`).
+  The `stamp_provenance` graph method writes the field and emits a
+  `ProvenanceStamped` event into the audit chain. Idempotent for
+  same-hash re-stamps. Two new builtins:
+  `abng_stamp_provenance(g, node_id, hex_string)` and
+  `abng_provenance_stamp(g, node_id) -> hex_string`. Predict snap
+  (PRED_MAGIC v2) absorbs a trailing `provenance_stamp_hash`. New
+  `DecodeError::ProvenanceMismatch` fired when the per-node section's
+  stored stamp disagrees with what event replay produces.
+* **Item 4 — `NodeStats::canonical_bytes` 24B → 32B.** Append the
+  Kahan compensation register's bit pattern so log compaction can
+  resume the full Welford state from canonical bytes alone.
+  Compensation-register bit-stable for fixed observation order. New
+  `KahanAccumulatorF64::compensation_bits()` accessor +
+  `from_components(sum, comp, count)` constructor in `cjc-repro`.
+
+**Item 2 — `smart_replay` API + StatsSnapshot consistency check
+(commit `ca2aa18`):** `smart_replay(bytes)` and
+`replay_with_options(bytes, opts)` plus a tamper-detection layer:
+the snapshot's payload `stats_hash` field must equal the event-level
+`stats_hash` (compact_log writes both from the same source). New
+`DecodeError::StatsSnapshotMismatch`. **The cycle-saving fast-forward
+layer is explicitly deferred to Phase 0.6 Item 3.**
+
+**Item 3 — TOML `--config` files for `cjcl abng train` (commit
+`b2c48bf`):** Hand-rolled minimal TOML parser in
+`crates/cjc-cli/src/toml_min.rs` (~600 LOC, 29 tests) — zero
+external deps to preserve cjc-cli's published-package contract.
+
+**Item 5 — Chess RL v2.6 ABNG retrofit scaffold (commit `9568e29`):**
+Sibling test file `tests/test_chess_rl_v2_6_abng.rs` (19 tests)
+demonstrating the API pattern. The full v2.5 PRELUDE rewrite was
+deferred — v2.5's chess RL fleet (97/97 passing) stays unchanged.
+Two locked canary hashes:
+* `V2_6_CHAIN_HEAD = 27d547b8…6847b`
+* `V2_6_BLR_STATE_HASH = 869b32bd…fabc`
+
+**Application demos (Rust API + CJC-Lang sibling for each):**
+
+| Demo | Rust tests | CJC-Lang tests | Locked Rust canary |
+|---|---:|---:|---|
+| PINN per-region uncertainty (`tests/test_abng_pinn_uncertainty*`) | 13 | 9 | `30d333f1…e468d` |
+| Tabular GP-like (`tests/test_abng_tabular_gp*`) | 10 | 9 | `cd3f5c7b…e87e6` |
+| Lineage attestation (`tests/test_abng_lineage_attestation*`) | 16 | 9 | `789acce7…06c2` |
+
+The lineage demo also locks `DATASET_A_FINGERPRINT = 3e85d52f…3634`.
+
+**Six capability-only CJC-Lang demos (close the demo gap from Phase
+0.4):**
+
+| Capability | Demo file | Tests | Locked canary |
+|---|---|---:|---|
+| OOD detection composite | `test_abng_ood_detection_cjcl.rs` | 9 | `85970ca5…533e` |
+| Adaptive structural triggers | `test_abng_adaptive_triggers_cjcl.rs` | 9 | **`d064fb08…7807` (matches Rust `decide_step_canary` byte-for-byte)** |
+| Calibration / ECE | `test_abng_calibration_cjcl.rs` | 10 | `4c625f08…5a25` |
+| Distribution-drift detection | `test_abng_drift_detection_cjcl.rs` | 9 | `a3a41c5b…8121` |
+| Log compaction | `test_abng_compact_log_cjcl.rs` | 7 | (parity-checked, no separate canary) |
+| Maturity inspection | `test_abng_maturity_inspection_cjcl.rs` | 10 | `c7b92726…928b` |
+
+### Surface
+
+* **Snapshot magic:** `b"ABNG\x0C"` (v12)
+* **Builtin count:** 75 (`abng_stamp_provenance` and
+  `abng_provenance_stamp` added in 0.5)
+* **Audit kinds:** 29 (tags `0x00..0x1C` — `0x1C ProvenanceStamped`
+  added)
+* **NodeStats::canonical_bytes:** 32 bytes (was 24)
+* **PRED_MAGIC:** `b"ABNG-PRED\x02"` (was `\x01`)
+
+### Cumulative gate movement (Phase 0.5)
+
+| Gate | Pre-0.5 | Post-0.5 | Δ |
+|---|---:|---:|---:|
+| `cargo test -p cjc-abng --lib` | 261 | **275** | +14 |
+| `cargo test --test abng` | 442 | **460** | +18 |
+| `cargo test --test prop_tests abng_decision` | 4 × 256 | 6 × 256 | +2 properties |
+| `cargo test --test bolero_fuzz abng_decision` | 4 | 8 | +4 fuzz targets |
+| `cargo test -p cjc-cli --test abng_cli_integration` | 32 | **43** | +11 |
+| `cargo test -p cjc-cli --lib toml_min` (NEW) | — | **29** | +29 |
+| 4 Rust application demos (NEW) | — | 19 + 13 + 10 + 16 = **58** | +58 |
+| 9 CJC-Lang demos (NEW) | — | 9+9+9+9+9+10+9+7+10 = **81** | +81 |
+
+**Net new tests added by Phase 0.5: ~213 across 13 new demo files
+plus the integration / unit / property / fuzz extensions. Total
+project tests on merged master: 3,683 across 13 separate suites,
+zero failures.**
+
+### Decisions worth recording (Phase 0.5)
+
+1. **The `provenance_stamp_hash` is per-node, not per-graph.**
+   Each node can carry its own fingerprint. Supports federation /
+   fine-tuning workflows where different leaves are trained against
+   different dataset slices.
+2. **`smart_replay`'s cycle-saving optimization is deferred to
+   Phase 0.6.** Phase 0.5 ships only the API + StatsSnapshot
+   consistency check. The full optimization requires relaxing the
+   per-event `stats_hash` check for fast-forwarded events; that's
+   a structural refactor better landed in its own phase.
+3. **Demos in CJC-Lang source serve dual purpose.** They validate
+   the language-level surface AND give AST↔MIR parity coverage for
+   ~30 builtins by construction.
+4. **The chess RL v2.6 retrofit is intentionally a scaffold, not
+   a benefit demonstration.** v2.5's bottleneck is interpreter
+   throughput, not ML algorithm. The retrofit's job is to lock the
+   API contract.
+5. **The adaptive demo's chain_head matches the Rust-side
+   `decide_step_canary` byte-for-byte.** Same workload, three
+   pipelines (direct Rust API, CJC-Lang AST, CJC-Lang MIR),
+   bit-identical SHA-256 over 23+ events. Strongest cross-pipeline
+   determinism gate the project supports.
+
+### Honest gaps (preserved as Phase 0.6 work items)
+
+* Cross-platform determinism CI not yet wired (canaries
+  Windows-only).
+* Performance benchmarks at scale not yet run (asymptotic claims
+  unmeasured at n > 200).
+* Smart-replay fast-forward optimization deferred.
+* Adaptive triggers — only Merge demonstrated in a workload (5/6
+  trigger types still unfired in the demo layer).
+* Real-world case study (someone using ABNG to attest a real
+  model) — not yet.
+
+### Roadmap (revised after Phase 0.5 complete)
+
+| Phase | Scope |
+|-------|-------|
+| 0.6 | Cross-platform determinism CI; performance benchmarks at scale (`bench/abng_*` family); smart-replay fast-forward optimization (Phase 0.5 Item 2 second half); native `batch_observe` + bulk BLR update (forces v13 bump); adaptive triggers — fire all 6 types in CJC-Lang demos; Phase 0.6 demos at scale + with noise (every Phase 0.5 demo gets a `_scaled` sibling); compiler / interpreter perf prep work (LICM, CSE, function inlining; native specialization for ABNG hot paths; AOT explicitly OUT OF SCOPE); TidyView-parity training pipeline foundation (profile + analysis + one demonstration kernel; multi-phase work begins here). See `docs/abng/PHASE_0_6_HANDOFF.md`. |
+| 0.7+ | AOT compilation (`cjcl compile foo.cjcl → foo.exe`); destructive log truncation (Phase 0.6's compact_log markers + smart_replay enable this); training pipeline at TidyView-parity perf; real-world case study deployment. |
