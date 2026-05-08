@@ -1207,6 +1207,7 @@ no code or wire-format change.
 | `tests/abng/blr_numerical_rescue_tests.rs` | 0.4 C-2.3.4 |
 | `tests/abng/blr_feature_version_tests.rs` | 0.4 C-2.3.5 |
 | `tests/abng/blr_predict_fallback_tests.rs` | 0.4 C-2.3.8 |
+| `tests/abng/decide_step_canary_tests.rs` | 0.4 C-2.3.12 |
 | `tests/abng/leaf_params_batch_tests.rs` | 0.4 C-2.3.6 |
 | `tests/abng/merge_math_tests.rs` | 0.4 B-2.2.6 |
 | `tests/abng/route_entropy_grow_tests.rs` | 0.4 B-2.2.5 |
@@ -1219,7 +1220,7 @@ no code or wire-format change.
 | Gate | Result | Δ from end-of-0.3d |
 |---|---|---|
 | `cargo test -p cjc-abng --lib` | **252 passed, 0 failed** | +25 |
-| `cargo test --test abng` | **413 passed, 0 failed** | +110 (B+C: +88; +13 from C-2.3.8 fallback; +9 from C-2.3.12 recapture) |
+| `cargo test --test abng` | **419 passed, 0 failed** | +116 (B+C: +88; +13 from C-2.3.8 fallback; +9 from C-2.3.12 recapture; +6 from C-2.3.12 decide_step canary) |
 | `cargo test --test prop_tests abng_decision` | **4 passed** (× 256 cases each) | +0 |
 | `cargo test --test bolero_fuzz abng_decision` | **4 passed** | +0 |
 | `cargo test --workspace --release --lib` | (re-run before Track A merge) | — |
