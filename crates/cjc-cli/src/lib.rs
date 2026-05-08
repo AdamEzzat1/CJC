@@ -29,6 +29,7 @@ pub mod highlight;
 pub mod line_editor;
 pub mod output;
 pub mod table;
+pub mod toml_min;
 
 use std::env;
 use std::fs;

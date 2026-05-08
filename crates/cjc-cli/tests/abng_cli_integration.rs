@@ -709,17 +709,251 @@ fn abng_train_missing_out_errors() {
     );
 }
 
+// ── Phase 0.5 Item 3: TOML --config files ──────────────────────────────
+
 #[test]
-fn abng_train_config_flag_explains_deferred() {
-    // --config is a Phase 0.5 placeholder.
+fn abng_train_config_missing_path_errors() {
     let (_stdout, stderr, code) = run_cjc(&[
-        "abng", "train", "--config", "x.toml", "--out", "ignored.snap",
+        "abng",
+        "train",
+        "--config",
+        "/nonexistent/path/that/does/not/exist.toml",
+        "--out",
+        "ignored.snap",
     ]);
     assert_ne!(code, 0);
     assert!(
-        stderr.contains("Phase 0.5"),
-        "expected Phase 0.5 deferral message, got: {stderr}"
+        stderr.contains("not found"),
+        "expected 'not found' message, got: {stderr}"
     );
+}
+
+#[test]
+fn abng_train_config_help_describes_toml_sections() {
+    let (stdout, _stderr, code) = run_cjc(&["abng", "train", "--help"]);
+    assert_eq!(code, 0);
+    for tok in ["--config", "[graph]", "[codebook]", "[leaf_head]", "[blr_prior]"] {
+        assert!(stdout.contains(tok), "expected `{tok}` in help, got: {stdout}");
+    }
+}
+
+#[test]
+fn abng_train_config_minimal_toml_runs() {
+    // Most minimal TOML: just sets seed. Everything else falls back
+    // to canary defaults.
+    let cfg_path = unique_temp_path("train-toml-minimal");
+    fs::write(
+        &cfg_path,
+        "[graph]\nseed = 42\n[training]\nn_observations = 10\n",
+    )
+    .unwrap();
+    let out_path = unique_temp_path("train-toml-minimal-out");
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "train",
+        "--config",
+        cfg_path.to_str().unwrap(),
+        "--out",
+        out_path.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "train --config should exit 0; stdout: {stdout}");
+    assert!(stdout.contains("ok"));
+    fs::remove_file(&cfg_path).ok();
+    fs::remove_file(&out_path).ok();
+}
+
+#[test]
+fn abng_train_config_round_trip_matches_flag_form() {
+    // The byte-equality contract: a TOML config that exactly
+    // reproduces the canary defaults should produce a snapshot
+    // byte-identical to running with explicit flags.
+    let cfg_path = unique_temp_path("train-toml-roundtrip-cfg");
+    let cfg = r#"
+[graph]
+seed = 42
+add_nodes = [[0, 1], [0, 2]]
+
+[codebook]
+n_dims = 1
+n_bins = 4
+boundaries = [-1.0, 0.0, 1.0]
+
+[leaf_head]
+input_dim = 1
+hidden_dims = [2]
+output_dim = 1
+activation = "tanh"
+
+[blr_prior]
+a = 1.0
+b = 1.5
+sigma_init = 1.0
+
+[density]
+enabled = true
+
+[calibration]
+n_bins = 15
+
+[decision_policy]
+thresholds = [0.5, 64.0, 128.0, 0.05, 0.02, 4.0, 0.1, 32.0, 10.0, 8.0, 20.0, 1.7976931348623157e308, 0.005, 1.05]
+
+[training]
+n_observations = 30
+observation_seed = 42
+decide_step_every = 25
+
+[output]
+path = "ignored-by-explicit-out-flag.snap"
+"#;
+    fs::write(&cfg_path, cfg).unwrap();
+
+    let toml_out = unique_temp_path("train-toml-out");
+    let flag_out = unique_temp_path("train-flag-out");
+    let (_, _, code_toml) = run_cjc(&[
+        "abng",
+        "train",
+        "--config",
+        cfg_path.to_str().unwrap(),
+        "--out",
+        toml_out.to_str().unwrap(),
+    ]);
+    let (_, _, code_flag) = run_cjc(&[
+        "abng",
+        "train",
+        "--seed",
+        "42",
+        "--n-obs",
+        "30",
+        "--obs-seed",
+        "42",
+        "--decide-every",
+        "25",
+        "--out",
+        flag_out.to_str().unwrap(),
+    ]);
+    assert_eq!(code_toml, 0);
+    assert_eq!(code_flag, 0);
+    let toml_bytes = fs::read(&toml_out).unwrap();
+    let flag_bytes = fs::read(&flag_out).unwrap();
+    assert_eq!(
+        toml_bytes, flag_bytes,
+        "TOML config and equivalent flag form must produce byte-identical snapshots"
+    );
+    fs::remove_file(&cfg_path).ok();
+    fs::remove_file(&toml_out).ok();
+    fs::remove_file(&flag_out).ok();
+}
+
+#[test]
+fn abng_train_config_explicit_flag_overrides_toml() {
+    // TOML says seed=42, --seed flag says 99 → flag wins.
+    let cfg_path = unique_temp_path("train-toml-override-cfg");
+    fs::write(
+        &cfg_path,
+        "[graph]\nseed = 42\n[training]\nn_observations = 10\n",
+    )
+    .unwrap();
+
+    let toml_only = unique_temp_path("train-toml-only");
+    let toml_with_override = unique_temp_path("train-toml-override");
+    let (_, _, c1) = run_cjc(&[
+        "abng",
+        "train",
+        "--config",
+        cfg_path.to_str().unwrap(),
+        "--out",
+        toml_only.to_str().unwrap(),
+    ]);
+    let (_, _, c2) = run_cjc(&[
+        "abng",
+        "train",
+        "--config",
+        cfg_path.to_str().unwrap(),
+        "--seed",
+        "99",
+        "--out",
+        toml_with_override.to_str().unwrap(),
+    ]);
+    assert_eq!(c1, 0);
+    assert_eq!(c2, 0);
+    let b1 = fs::read(&toml_only).unwrap();
+    let b2 = fs::read(&toml_with_override).unwrap();
+    assert_ne!(
+        b1, b2,
+        "explicit --seed must override the TOML seed (different bytes)"
+    );
+    fs::remove_file(&cfg_path).ok();
+    fs::remove_file(&toml_only).ok();
+    fs::remove_file(&toml_with_override).ok();
+}
+
+#[test]
+fn abng_train_config_bad_toml_errors_with_line_number() {
+    let cfg_path = unique_temp_path("train-toml-bad");
+    fs::write(&cfg_path, "[graph\nseed = 42\n").unwrap();
+    let (_stdout, stderr, code) = run_cjc(&[
+        "abng",
+        "train",
+        "--config",
+        cfg_path.to_str().unwrap(),
+        "--out",
+        "ignored.snap",
+    ]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("toml:") && stderr.contains("line"),
+        "expected line-numbered toml error, got: {stderr}"
+    );
+    fs::remove_file(&cfg_path).ok();
+}
+
+#[test]
+fn abng_train_config_wrong_thresholds_count_errors() {
+    let cfg_path = unique_temp_path("train-toml-wrong-thresholds");
+    fs::write(
+        &cfg_path,
+        "[decision_policy]\nthresholds = [0.5, 64.0]\n",
+    )
+    .unwrap();
+    let (_stdout, stderr, code) = run_cjc(&[
+        "abng",
+        "train",
+        "--config",
+        cfg_path.to_str().unwrap(),
+        "--out",
+        "ignored.snap",
+    ]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("14 elements") || stderr.contains("invalid config"),
+        "expected length-14 error, got: {stderr}"
+    );
+    fs::remove_file(&cfg_path).ok();
+}
+
+#[test]
+fn abng_train_config_unknown_activation_errors() {
+    let cfg_path = unique_temp_path("train-toml-bad-activation");
+    fs::write(
+        &cfg_path,
+        "[leaf_head]\ninput_dim = 1\nhidden_dims = [2]\noutput_dim = 1\nactivation = \"banana\"\n",
+    )
+    .unwrap();
+    let (_stdout, stderr, code) = run_cjc(&[
+        "abng",
+        "train",
+        "--config",
+        cfg_path.to_str().unwrap(),
+        "--out",
+        "ignored.snap",
+    ]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("unknown activation"),
+        "expected unknown-activation error, got: {stderr}"
+    );
+    fs::remove_file(&cfg_path).ok();
 }
 
 #[test]

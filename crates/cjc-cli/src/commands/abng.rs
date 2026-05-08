@@ -47,11 +47,15 @@ SUBCOMMANDS:
         abng_predict_snap. With --model, additionally verifies the
         prediction's chain_head + lineage hashes match the model.
 
-    train [--seed N] [--n-obs N] [--obs-seed N]
+    train [--config CFG.toml] [--seed N] [--n-obs N] [--obs-seed N]
           [--decide-every K] [--max-decide N] --out <PATH>
         Run a deterministic training driver loop (observe N times →
-        decide_step every K obs → serialize). Phase 0.4 ships flag-
-        based config; TOML --config files defer to Phase 0.5.
+        decide_step every K obs → serialize). Accepts both an
+        explicit-flag form and a TOML --config file (sections:
+        [graph], [codebook], [leaf_head], [blr_prior], [density],
+        [calibration], [decision_policy], [training], [output]).
+        Explicit flags override TOML values. Use --help for the
+        full TOML schema.
 
 GLOBAL OPTIONS:
     --help, -h    Print this help message
@@ -994,13 +998,224 @@ mod train {
     use super::*;
     use cjc_abng::graph::AdaptiveBeliefGraph;
     use cjc_abng::serialize;
+    use cjc_ad::pinn::Activation;
     use cjc_repro::Rng;
+    use crate::toml_min::{self, TomlDoc, TomlValue};
 
-    /// Defaults match the `decide_step_canary_tests` scenario so the
-    /// out-of-the-box `cjcl abng train --out model.snap` produces a
-    /// graph identical to what the canary's `chain_head` lock-in
-    /// expects (when run with the same seed). Users who need
-    /// different shapes pass `--seed`, `--n-obs`, etc. explicitly.
+    /// Phase 0.5 Item 3 — buildable graph specification. Either
+    /// constructed from the canary defaults (when no `--config` is
+    /// passed) or from a TOML config file with optional CLI flag
+    /// overlays.
+    #[derive(Clone, Debug)]
+    struct GraphSpec {
+        /// `(n_dims, n_bins, boundaries)` for `set_codebook`.
+        codebook: (usize, u16, Vec<f64>),
+        /// `(input_dim, hidden_dims, output_dim, activation)` for
+        /// `set_leaf_head`.
+        leaf_head: (u32, Vec<u32>, u32, Activation),
+        /// `(a, b, sigma_init)` for `set_blr_prior`.
+        blr_prior: (f64, f64, f64),
+        /// Whether to call `set_density_tracker`.
+        density_enabled: bool,
+        /// `n_bins` for `set_calibration`. None means skip.
+        calibration_n_bins: Option<u8>,
+        /// 14-element threshold tensor for `set_decision_policy`.
+        decision_policy_thresholds: Vec<f64>,
+        /// `(parent_id, key_byte)` pairs for `add_node`. Applied in
+        /// declaration order; the canary's default is `[(0, 1), (0, 2)]`.
+        add_nodes: Vec<(u32, u8)>,
+    }
+
+    impl GraphSpec {
+        /// Defaults match the `decide_step_canary_tests` scenario so the
+        /// out-of-the-box `cjcl abng train --out model.snap` produces a
+        /// graph identical to what the canary's `chain_head` lock-in
+        /// expects (when run with the same seed).
+        fn canary_default() -> Self {
+            Self {
+                codebook: (1, 4, vec![-1.0, 0.0, 1.0]),
+                leaf_head: (1, vec![2], 1, Activation::Tanh),
+                blr_prior: (1.0, 1.5, 1.0),
+                density_enabled: true,
+                calibration_n_bins: Some(15),
+                decision_policy_thresholds: vec![
+                    0.5, 64.0, 128.0, 0.05, 0.02, 4.0, 0.1, 32.0, 10.0, 8.0, 20.0,
+                    f64::MAX,
+                    // v11 (post-Track-A) — ECE/sigma stability thresholds.
+                    0.005, 1.05,
+                ],
+                add_nodes: vec![(0, 1), (0, 2)],
+            }
+        }
+    }
+
+    /// Phase 0.5 Item 3 — load a [`GraphSpec`] from a TOML config
+    /// file. Missing sections fall back to the canary defaults; only
+    /// keys explicitly present in the TOML override.
+    fn graph_spec_from_toml(doc: &TomlDoc) -> Result<GraphSpec, String> {
+        let mut spec = GraphSpec::canary_default();
+        // [codebook]
+        if let Some(t) = doc.table("codebook") {
+            let n_dims = lookup_int(t, "n_dims")?;
+            let n_bins = lookup_int(t, "n_bins")?;
+            let boundaries = lookup_array_f64(t, "boundaries")?;
+            spec.codebook = (
+                n_dims as usize,
+                n_bins as u16,
+                boundaries,
+            );
+        }
+        // [leaf_head]
+        if let Some(t) = doc.table("leaf_head") {
+            let input_dim = lookup_int(t, "input_dim")? as u32;
+            let hidden_dims_raw = lookup_array_int(t, "hidden_dims")?;
+            let hidden_dims: Vec<u32> = hidden_dims_raw.into_iter().map(|x| x as u32).collect();
+            let output_dim = lookup_int(t, "output_dim")? as u32;
+            let act_str = lookup_string(t, "activation")?;
+            let activation = parse_activation(&act_str)?;
+            spec.leaf_head = (input_dim, hidden_dims, output_dim, activation);
+        }
+        // [blr_prior]
+        if let Some(t) = doc.table("blr_prior") {
+            let a = lookup_f64(t, "a")?;
+            let b = lookup_f64(t, "b")?;
+            let sigma_init = lookup_f64(t, "sigma_init")?;
+            spec.blr_prior = (a, b, sigma_init);
+        }
+        // [density]
+        if let Some(t) = doc.table("density") {
+            spec.density_enabled = lookup_bool(t, "enabled")?;
+        }
+        // [calibration]
+        if let Some(t) = doc.table("calibration") {
+            let n_bins = lookup_int(t, "n_bins")?;
+            spec.calibration_n_bins = Some(n_bins as u8);
+        }
+        // [decision_policy]
+        if let Some(t) = doc.table("decision_policy") {
+            let thresholds = lookup_array_f64(t, "thresholds")?;
+            if thresholds.len() != 14 {
+                return Err(format!(
+                    "[decision_policy].thresholds must have exactly 14 elements (got {})",
+                    thresholds.len()
+                ));
+            }
+            spec.decision_policy_thresholds = thresholds;
+        }
+        // [graph] add_nodes (array of int-pair arrays).
+        if let Some(t) = doc.table("graph") {
+            if let Some(v) = t.iter().find(|(k, _)| k == "add_nodes") {
+                let outer = v
+                    .1
+                    .as_array()
+                    .ok_or_else(|| format!("[graph].add_nodes must be array, got {}", v.1.type_name()))?;
+                let mut pairs = Vec::with_capacity(outer.len());
+                for (i, pair) in outer.iter().enumerate() {
+                    let inner = pair.as_array().ok_or_else(|| {
+                        format!(
+                            "[graph].add_nodes[{i}] must be a [parent, key] pair, got {}",
+                            pair.type_name()
+                        )
+                    })?;
+                    if inner.len() != 2 {
+                        return Err(format!(
+                            "[graph].add_nodes[{i}] must have exactly 2 elements (got {})",
+                            inner.len()
+                        ));
+                    }
+                    let parent = inner[0]
+                        .as_int()
+                        .ok_or_else(|| format!("[graph].add_nodes[{i}][0] must be int"))?
+                        as u32;
+                    let key = inner[1]
+                        .as_int()
+                        .ok_or_else(|| format!("[graph].add_nodes[{i}][1] must be int"))?
+                        as u8;
+                    pairs.push((parent, key));
+                }
+                spec.add_nodes = pairs;
+            }
+        }
+        Ok(spec)
+    }
+
+    fn lookup_int(t: &toml_min::TomlTable, key: &str) -> Result<i64, String> {
+        t.iter()
+            .find_map(|(k, v)| if k == key { Some(v) } else { None })
+            .ok_or_else(|| format!("missing key `{key}` in TOML table"))?
+            .as_int()
+            .ok_or_else(|| format!("key `{key}` must be integer"))
+    }
+    fn lookup_f64(t: &toml_min::TomlTable, key: &str) -> Result<f64, String> {
+        t.iter()
+            .find_map(|(k, v)| if k == key { Some(v) } else { None })
+            .ok_or_else(|| format!("missing key `{key}` in TOML table"))?
+            .as_f64()
+            .ok_or_else(|| format!("key `{key}` must be number"))
+    }
+    fn lookup_bool(t: &toml_min::TomlTable, key: &str) -> Result<bool, String> {
+        t.iter()
+            .find_map(|(k, v)| if k == key { Some(v) } else { None })
+            .ok_or_else(|| format!("missing key `{key}` in TOML table"))?
+            .as_bool()
+            .ok_or_else(|| format!("key `{key}` must be bool"))
+    }
+    fn lookup_string(t: &toml_min::TomlTable, key: &str) -> Result<String, String> {
+        t.iter()
+            .find_map(|(k, v)| if k == key { Some(v) } else { None })
+            .ok_or_else(|| format!("missing key `{key}` in TOML table"))?
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| format!("key `{key}` must be string"))
+    }
+    fn lookup_array_f64(t: &toml_min::TomlTable, key: &str) -> Result<Vec<f64>, String> {
+        let arr = t
+            .iter()
+            .find_map(|(k, v)| if k == key { Some(v) } else { None })
+            .ok_or_else(|| format!("missing key `{key}` in TOML table"))?
+            .as_array()
+            .ok_or_else(|| format!("key `{key}` must be array"))?;
+        let mut out = Vec::with_capacity(arr.len());
+        for (i, v) in arr.iter().enumerate() {
+            out.push(
+                v.as_f64()
+                    .ok_or_else(|| format!("`{key}[{i}]` must be number, got {}", v.type_name()))?,
+            );
+        }
+        Ok(out)
+    }
+    fn lookup_array_int(t: &toml_min::TomlTable, key: &str) -> Result<Vec<i64>, String> {
+        let arr = t
+            .iter()
+            .find_map(|(k, v)| if k == key { Some(v) } else { None })
+            .ok_or_else(|| format!("missing key `{key}` in TOML table"))?
+            .as_array()
+            .ok_or_else(|| format!("key `{key}` must be array"))?;
+        let mut out = Vec::with_capacity(arr.len());
+        for (i, v) in arr.iter().enumerate() {
+            out.push(
+                v.as_int()
+                    .ok_or_else(|| format!("`{key}[{i}]` must be int, got {}", v.type_name()))?,
+            );
+        }
+        Ok(out)
+    }
+    fn parse_activation(s: &str) -> Result<Activation, String> {
+        match s.to_ascii_lowercase().as_str() {
+            "tanh" => Ok(Activation::Tanh),
+            "sigmoid" => Ok(Activation::Sigmoid),
+            "relu" => Ok(Activation::Relu),
+            "none" => Ok(Activation::None),
+            "gelu" => Ok(Activation::Gelu),
+            "silu" | "swish" => Ok(Activation::Silu),
+            "elu" => Ok(Activation::Elu),
+            "selu" => Ok(Activation::Selu),
+            other => Err(format!(
+                "unknown activation `{other}` (expected one of: tanh, sigmoid, relu, none, gelu, silu, elu, selu)"
+            )),
+        }
+    }
+
     struct TrainArgs {
         seed: u64,
         n_observations: u64,
@@ -1008,15 +1223,94 @@ mod train {
         decide_step_every: u64,
         max_decide_steps: u64,
         out_path: String,
+        spec: GraphSpec,
     }
 
     fn parse_args(args: &[String]) -> TrainArgs {
+        // First-pass: load TOML config if `--config <path>` is
+        // present. The TOML provides defaults for spec + scalar
+        // fields; subsequent CLI flags overlay on top (back-compat
+        // contract from the handoff).
+        let mut config_path: Option<String> = None;
+        {
+            let mut j = 0;
+            while j < args.len() {
+                if args[j] == "--config" {
+                    if j + 1 >= args.len() {
+                        eprintln!("error: --config requires a path argument");
+                        process::exit(2);
+                    }
+                    config_path = Some(args[j + 1].clone());
+                    j += 2;
+                } else {
+                    j += 1;
+                }
+            }
+        }
+        // Defaults — either from TOML or from canary fixtures.
         let mut seed: u64 = 42;
         let mut n_observations: u64 = 100;
         let mut observation_seed: u64 = 42;
         let mut decide_step_every: u64 = 25;
         let mut max_decide_steps: u64 = u64::MAX;
         let mut out_path: Option<String> = None;
+        let mut spec = GraphSpec::canary_default();
+        if let Some(path) = &config_path {
+            let p = Path::new(path);
+            if !p.exists() {
+                eprintln!("error: --config file `{path}` not found");
+                process::exit(1);
+            }
+            let src = match fs::read_to_string(p) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("error: read `{path}`: {e}");
+                    process::exit(1);
+                }
+            };
+            let doc = match toml_min::parse(&src) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("error: parse `{path}`: {e}");
+                    process::exit(2);
+                }
+            };
+            // Spec overrides (from [codebook], [leaf_head], etc.).
+            spec = match graph_spec_from_toml(&doc) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("error: invalid config in `{path}`: {e}");
+                    process::exit(2);
+                }
+            };
+            // Scalar overrides.
+            if let Some(v) = doc.get("graph", "seed") {
+                seed = v.as_int().unwrap_or_else(|| {
+                    eprintln!("error: [graph].seed must be int");
+                    process::exit(2);
+                }) as u64;
+            }
+            if let Some(v) = doc.get("training", "n_observations") {
+                n_observations = v.as_int().unwrap_or(0) as u64;
+            }
+            if let Some(v) = doc.get("training", "observation_seed") {
+                observation_seed = v.as_int().unwrap_or(0) as u64;
+            }
+            if let Some(v) = doc.get("training", "decide_step_every") {
+                let val = v.as_int().unwrap_or(0);
+                if val <= 0 {
+                    eprintln!("error: [training].decide_step_every must be > 0");
+                    process::exit(2);
+                }
+                decide_step_every = val as u64;
+            }
+            if let Some(v) = doc.get("training", "max_decide_steps") {
+                max_decide_steps = v.as_int().unwrap_or(0) as u64;
+            }
+            if let Some(v) = doc.get("output", "path") {
+                out_path = v.as_str().map(|s| s.to_string());
+            }
+        }
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
@@ -1088,14 +1382,14 @@ mod train {
                     out_path = Some(args[i].clone());
                 }
                 "--config" => {
-                    eprintln!(
-                        "error: --config (TOML config file) is not yet \
-                         shipped in Phase 0.4 — use the explicit flags \
-                         (--seed, --n-obs, --obs-seed, --decide-every, \
-                         --max-decide, --out) instead. TOML config support \
-                         lands in Phase 0.5."
-                    );
-                    process::exit(2);
+                    // Consumed by the pre-pass (TOML loader) above.
+                    // We just need to skip the path argument here so
+                    // it isn't re-parsed as a positional.
+                    i += 1;
+                    if i >= args.len() {
+                        eprintln!("error: --config requires a path argument");
+                        process::exit(2);
+                    }
                 }
                 "--help" | "-h" => {
                     println!("\
@@ -1104,10 +1398,19 @@ cjcl abng train [OPTIONS]
 Run a deterministic training driver loop:
   observe N times → decide_step every K observations → serialize.
 
-Phase 0.4 ships the explicit-flag form only. TOML config files
-(--config <x.toml>) are deferred to Phase 0.5.
-
 OPTIONS:
+    --config <PATH>       TOML config file. Sections (all optional):
+                          [graph] seed, add_nodes
+                          [codebook] n_dims, n_bins, boundaries
+                          [leaf_head] input_dim, hidden_dims, output_dim, activation
+                          [blr_prior] a, b, sigma_init
+                          [density] enabled
+                          [calibration] n_bins
+                          [decision_policy] thresholds (length 14)
+                          [training] n_observations, observation_seed,
+                                     decide_step_every, max_decide_steps
+                          [output] path
+                          Explicit flags below override TOML values.
     --seed <N>            graph seed (default: 42)
     --n-obs <N>           number of observations (default: 100)
     --obs-seed <N>        observation-stream seed (default: 42)
@@ -1147,58 +1450,52 @@ before observation begins.
             decide_step_every,
             max_decide_steps,
             out_path,
+            spec,
         }
     }
 
     pub fn run(args: &[String]) {
         let a = parse_args(args);
 
-        // Build the canonical default graph (matches
-        // decide_step_canary_tests fixture for seed=42 reproducibility).
+        // Build the graph from the resolved spec (canary defaults +
+        // optional [TOML] overrides + explicit flag overrides).
         let mut g = AdaptiveBeliefGraph::new(a.seed);
-        if let Err(e) = g.set_codebook(1, 4, &[-1.0, 0.0, 1.0]) {
+        let (cb_n_dims, cb_n_bins, cb_boundaries) = &a.spec.codebook;
+        if let Err(e) = g.set_codebook(*cb_n_dims, *cb_n_bins, cb_boundaries) {
             eprintln!("error: set_codebook failed: {:?}", e);
             process::exit(1);
         }
-        if let Err(e) = g.set_leaf_head(
-            1,
-            vec![2],
-            1,
-            cjc_ad::pinn::Activation::Tanh,
-        ) {
+        let (lh_in, lh_hidden, lh_out, lh_act) = &a.spec.leaf_head;
+        if let Err(e) = g.set_leaf_head(*lh_in, lh_hidden.clone(), *lh_out, *lh_act) {
             eprintln!("error: set_leaf_head failed: {:?}", e);
             process::exit(1);
         }
-        if let Err(e) = g.set_blr_prior(1.0, 1.5, 1.0) {
+        let (blr_a, blr_b, blr_sigma) = a.spec.blr_prior;
+        if let Err(e) = g.set_blr_prior(blr_a, blr_b, blr_sigma) {
             eprintln!("error: set_blr_prior failed: {:?}", e);
             process::exit(1);
         }
-        if let Err(e) = g.set_density_tracker() {
-            eprintln!("error: set_density_tracker failed: {:?}", e);
-            process::exit(1);
+        if a.spec.density_enabled {
+            if let Err(e) = g.set_density_tracker() {
+                eprintln!("error: set_density_tracker failed: {:?}", e);
+                process::exit(1);
+            }
         }
-        if let Err(e) = g.set_calibration(15u8) {
-            eprintln!("error: set_calibration failed: {:?}", e);
-            process::exit(1);
+        if let Some(n_bins) = a.spec.calibration_n_bins {
+            if let Err(e) = g.set_calibration(n_bins) {
+                eprintln!("error: set_calibration failed: {:?}", e);
+                process::exit(1);
+            }
         }
-        let thresholds = [
-            0.5, 64.0, 128.0, 0.05, 0.02, 4.0, 0.1, 32.0, 10.0, 8.0, 20.0,
-            f64::MAX,
-            // v11 (post-Track-A) — ECE/sigma stability thresholds.
-            0.005, 1.05,
-        ];
-        if let Err(e) = g.set_decision_policy(&thresholds) {
+        if let Err(e) = g.set_decision_policy(&a.spec.decision_policy_thresholds) {
             eprintln!("error: set_decision_policy failed: {:?}", e);
             process::exit(1);
         }
-        // Two children before observation begins.
-        if let Err(e) = g.add_node(0, 1) {
-            eprintln!("error: add_node 1 failed: {:?}", e);
-            process::exit(1);
-        }
-        if let Err(e) = g.add_node(0, 2) {
-            eprintln!("error: add_node 2 failed: {:?}", e);
-            process::exit(1);
+        for (parent, key) in &a.spec.add_nodes {
+            if let Err(e) = g.add_node(*parent, *key) {
+                eprintln!("error: add_node({parent}, {key}) failed: {:?}", e);
+                process::exit(1);
+            }
         }
 
         // Observation stream is a deterministic SplitMix64 sequence
@@ -1207,12 +1504,17 @@ before observation begins.
         let mut rng = Rng::seeded(a.observation_seed);
         let mut decide_calls: u64 = 0;
         let mut total_actions = [0u64; 6];
+        // Phase 0.5 Item 3 — observations now cycle across whatever
+        // number of nodes the spec produces (was a hardcoded `% 3`).
+        // For the default canary spec (root + 2 children) this is
+        // bit-identical to the v11 behavior; for TOML-customized
+        // specs with more or fewer children it round-robins through
+        // them all.
+        let n_nodes_for_obs = g.node_count();
         for k in 0..a.n_observations {
             let raw = rng.next_f64();          // [0, 1)
             let value = raw * 2.0 - 1.0;       // [-1, 1)
-            // Alternate observations between root and the two children
-            // so all three nodes accumulate evidence.
-            let target_node = (k % 3) as u32;
+            let target_node = (k % n_nodes_for_obs as u64) as u32;
             if let Err(e) = g.observe(target_node, value) {
                 eprintln!("error: observe(node={target_node}) failed: {:?}", e);
                 process::exit(1);
