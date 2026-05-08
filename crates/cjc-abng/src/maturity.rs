@@ -50,14 +50,29 @@ pub const MAX_TRUST_LEVEL: u8 = 4;
 pub const TRUST_SAMPLE_STEP: u64 = 64;
 
 /// Phase 0.3d-4 — Expected Calibration Error threshold below which
-/// `calibration_stable` flips to `true`. Single-window threshold;
-/// Phase 0.4 will replace with a 3-window |ΔECE| comparison.
+/// `calibration_stable` flips to `true` (legacy single-window — kept
+/// as a doc reference; the 3-window check ships in Phase 0.4 Track
+/// B-2.2.2 via `ECE_STABILITY_MAX_DELTA` over the per-node
+/// `ece_history` ring buffer).
 pub const ECE_STABILITY_MAX: f64 = 0.05;
+
+/// Phase 0.4 Track B-2.2.2 — maximum |ECE_t − ECE_{t-1}| per
+/// `decide_step` window for `Maturity::calibration_stable` to flip on.
+/// All three consecutive deltas in the 3-window history must be below
+/// this. Roughly 1/10th of the legacy single-window absolute
+/// threshold — "stability is stronger than just being below 0.05".
+pub const ECE_STABILITY_MAX_DELTA: f64 = 0.005;
 
 /// Phase 0.3d-4 — minimum `samples_seen` before `uncertainty_stable`
 /// can flip to `true`. Conservative default (100) — typically enough
 /// to converge a small BLR posterior.
 pub const UNCERTAINTY_STABLE_MIN_SAMPLES: u64 = 100;
+
+/// Phase 0.4 Track B-2.2.2 — maximum ratio (max/min) over the
+/// 3-window σ history for `Maturity::uncertainty_stable` to flip on.
+/// 1.05 corresponds to "σ stable to within 5% over 3 windows" per
+/// the prompt §2.2.2.
+pub const SIGMA_STABILITY_RATIO: f64 = 1.05;
 
 /// Per-node maturity summary. Recomputed on every read in 0.3d-1; gains
 /// persistent windowing state in 0.3d-3/4.
@@ -80,21 +95,52 @@ pub struct Maturity {
 
 impl Maturity {
     /// Compute a fresh maturity snapshot from a node's current state.
-    /// Phase 0.3d-4 flips the stability stubs to real thresholds:
-    /// `calibration_stable` reads ECE against [`ECE_STABILITY_MAX`];
-    /// `uncertainty_stable` requires BLR installed,
-    /// `samples_seen ≥ UNCERTAINTY_STABLE_MIN_SAMPLES`, and at least one
-    /// `decide_step` call observing an unchanged signature.
+    ///
+    /// Phase 0.4 Track B-2.2.2 — the stability flags now consult the
+    /// 3-window history buffers `node.ece_history` and
+    /// `node.sigma_history`, populated by
+    /// [`AdaptiveBeliefGraph::advance_stability_history`]
+    /// (called once per `decide_step` call per node).
+    ///
+    /// `calibration_stable`: needs at least 3 windows filled, then
+    /// requires every consecutive `|ECE_t − ECE_{t-1}|` to be below
+    /// [`ECE_STABILITY_MAX_DELTA`] = 0.005. Equivalent: the ECE
+    /// signal has settled within 0.005 over the last three
+    /// `decide_step` calls. Does NOT require ECE be small (the
+    /// node could be calibrated-stable at a high ECE — that just
+    /// means the model is consistently miscalibrated; the stability
+    /// flag is about *change*, not *quality*).
+    ///
+    /// `uncertainty_stable`: needs at least 3 σ windows filled, BLR
+    /// installed, `samples_seen ≥ UNCERTAINTY_STABLE_MIN_SAMPLES`,
+    /// `signature_stable_calls ≥ 1`, and the σ ratio
+    /// `max/min ≤ SIGMA_STABILITY_RATIO` = 1.05 over the 3-window
+    /// history. Equivalent: epistemic leverage has settled within 5%
+    /// over the last three `decide_step` calls.
     pub fn from_node(node: &AdaptiveBeliefNode) -> Self {
         let samples_seen = node.stats.n_seen;
-        let calibration_stable = node
-            .calibration
-            .as_ref()
-            .map(|c| c.ece() < ECE_STABILITY_MAX)
-            .unwrap_or(false);
+
+        // Phase 0.4 Track B-2.2.2: 3-window ECE stability.
+        let calibration_stable = node.calibration.is_some()
+            && node.ece_fill_count >= 3
+            && {
+                let h = node.ece_history;
+                (h[1] - h[0]).abs() < ECE_STABILITY_MAX_DELTA
+                    && (h[2] - h[1]).abs() < ECE_STABILITY_MAX_DELTA
+            };
+
+        // Phase 0.4 Track B-2.2.2: 3-window σ stability.
         let uncertainty_stable = node.blr.is_some()
             && samples_seen >= UNCERTAINTY_STABLE_MIN_SAMPLES
-            && node.signature_stable_calls >= 1;
+            && node.signature_stable_calls >= 1
+            && node.sigma_fill_count >= 3
+            && {
+                let h = node.sigma_history;
+                let max = h[0].max(h[1]).max(h[2]);
+                let min = h[0].min(h[1]).min(h[2]);
+                min > 0.0 && max / min <= SIGMA_STABILITY_RATIO
+            };
+
         let trust_level = trust_from_samples(samples_seen);
         Self {
             samples_seen,
@@ -183,32 +229,77 @@ mod tests {
     }
 
     #[test]
-    fn calibration_stable_flips_when_ece_low() {
+    fn calibration_stable_flips_when_ece_settles() {
+        // Phase 0.4 Track B-2.2.2 — calibration_stable now requires
+        // 3 consecutive |ΔECE| < 0.005 windows. Calibrate with
+        // perfectly-balanced predictions (ECE ≈ 0 stable across
+        // windows), then advance the history three times to fill
+        // the ring buffer.
         let mut g = AdaptiveBeliefGraph::new(0);
         g.set_calibration(15).unwrap();
-        // Calibrate with predictions exactly matching outcomes →
-        // ECE ≈ 0 → below ECE_STABILITY_MAX (0.05).
         for i in 0..50 {
             g.calibration_observe(0, 0.5, i % 2 == 0).unwrap();
         }
-        let m = Maturity::from_node(&g.nodes[0]);
-        assert!(m.calibration_stable, "ECE-low should flip flag true");
+        // First window — buffer fills [_, _, ECE], fill_count=1.
+        g.advance_stability_history(0);
+        let m1 = Maturity::from_node(&g.nodes[0]);
+        assert!(!m1.calibration_stable, "1 window not enough");
+        // Second + third windows. fill_count=3, ΔECE = 0 each time.
+        g.advance_stability_history(0);
+        g.advance_stability_history(0);
+        let m3 = Maturity::from_node(&g.nodes[0]);
+        assert!(m3.calibration_stable, "3 settled windows should flip");
     }
 
     #[test]
-    fn calibration_unstable_when_ece_high() {
+    fn calibration_unstable_when_ece_high_but_settled() {
+        // ECE high but constant across the 3 windows → ΔECE = 0 →
+        // calibration_stable = true. Stability is about *change*, not
+        // about *quality* (per from_node docstring). Pin this so a
+        // future regression doesn't conflate the two.
         let mut g = AdaptiveBeliefGraph::new(0);
         g.set_calibration(15).unwrap();
-        // Predict 0.9 always but only 10% correct → ECE ≈ 0.8.
         for i in 0..50 {
             g.calibration_observe(0, 0.9, i % 10 == 0).unwrap();
         }
+        for _ in 0..3 {
+            g.advance_stability_history(0);
+        }
         let m = Maturity::from_node(&g.nodes[0]);
-        assert!(!m.calibration_stable);
+        assert!(
+            m.calibration_stable,
+            "even high ECE flips stable when constant across 3 windows"
+        );
     }
 
     #[test]
-    fn uncertainty_stable_requires_signature_stability_call() {
+    fn calibration_unstable_when_ece_drifting() {
+        // Drift the ECE between windows → ΔECE > 0.005 → flag stays
+        // false even with the buffer fully filled.
+        let mut g = AdaptiveBeliefGraph::new(0);
+        g.set_calibration(15).unwrap();
+        // Window 1: ECE ≈ 0.0 (perfect calibration).
+        for i in 0..30 {
+            g.calibration_observe(0, 0.5, i % 2 == 0).unwrap();
+        }
+        g.advance_stability_history(0);
+        // Window 2: drift the ECE significantly (predict 0.9 always,
+        // 10% correct → ECE jumps to ~0.8). |ΔECE| ≈ 0.8, far above
+        // the 0.005 threshold.
+        for i in 0..30 {
+            g.calibration_observe(0, 0.9, i % 10 == 0).unwrap();
+        }
+        g.advance_stability_history(0);
+        g.advance_stability_history(0);
+        let m = Maturity::from_node(&g.nodes[0]);
+        assert!(
+            !m.calibration_stable,
+            "ECE drifted between windows → unstable"
+        );
+    }
+
+    #[test]
+    fn uncertainty_stable_requires_full_3_window_history() {
         use cjc_ad::pinn::Activation;
         let mut g = AdaptiveBeliefGraph::new(0);
         g.set_leaf_head(2, vec![], 1, Activation::None).unwrap();
@@ -216,13 +307,20 @@ mod tests {
         for _ in 0..150 {
             g.observe(0, 1.0).unwrap();
         }
-        // signature_stable_calls hasn't been advanced yet → flag false.
-        let m_before = Maturity::from_node(&g.nodes[0]);
-        assert!(!m_before.uncertainty_stable);
-        // Manually bump (decide_step would do this normally).
+        // Train BLR so its posterior mean is non-zero — otherwise
+        // epistemic_leverage at posterior_mean = 0 and σ history
+        // never fills.
+        g.blr_update(0, &[1.0, 0.5], &[1.0]).unwrap();
+        // Bump signature_stable_calls (decide_step would do this).
         g.nodes[0].signature_stable_calls = 1;
-        let m_after = Maturity::from_node(&g.nodes[0]);
-        assert!(m_after.uncertainty_stable);
+        // Need 3 stability windows.
+        let m_zero_windows = Maturity::from_node(&g.nodes[0]);
+        assert!(!m_zero_windows.uncertainty_stable);
+        for _ in 0..3 {
+            g.advance_stability_history(0);
+        }
+        let m_full = Maturity::from_node(&g.nodes[0]);
+        assert!(m_full.uncertainty_stable, "3 σ windows should flip flag");
     }
 
     #[test]

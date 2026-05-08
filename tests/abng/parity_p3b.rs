@@ -60,6 +60,53 @@ fn parity_set_blr_prior() {
     );
 }
 
+// Phase 0.4 Track C-2.3.5 — abng_reset_blr parity.
+
+#[test]
+fn parity_reset_blr_zeroes_n_seen() {
+    // Hidden=4 (Tensor.from_vec([4.0], [1])) → BLR feature dim = 4.
+    assert_parity(
+        "reset_blr resets posterior to prior",
+        r#"
+        let g = abng_new(0);
+        let hidden = Tensor.from_vec([4.0], [1]);
+        abng_set_leaf_head(g, 2, hidden, 1, "tanh");
+        abng_set_blr_prior(g, 1.0, 1.5, 1.0);
+        let features = Tensor.from_vec([1.0, 0.5, 0.5, 1.0, 1.0, 0.5, 0.5, 1.0], [2, 4]);
+        let y = Tensor.from_vec([1.0, 1.0], [2]);
+        abng_blr_update(g, 0, features, y);
+        print(abng_blr_n_seen(g, 0));
+        abng_reset_blr(g, 0);
+        print(abng_blr_n_seen(g, 0));
+        print(abng_chain_head(g));
+        "#,
+    );
+}
+
+#[test]
+fn parity_reset_blr_unblocks_update_after_mlp_change() {
+    // Drift MLP → blr_update would error → reset_blr → blr_update
+    // succeeds. The chain head ordering and final state hash must
+    // match across AST↔MIR.
+    assert_parity(
+        "reset_blr + blr_update recovery flow",
+        r#"
+        let g = abng_new(7);
+        let hidden = Tensor.from_vec([4.0], [1]);
+        abng_set_leaf_head(g, 2, hidden, 1, "tanh");
+        abng_set_blr_prior(g, 1.0, 1.5, 1.0);
+        let new_w = Tensor.from_vec([0.42, 0.42, 0.42, 0.42, 0.42, 0.42, 0.42, 0.42], [4, 2]);
+        abng_leaf_set_param(g, 0, 0, new_w);
+        abng_reset_blr(g, 0);
+        let features = Tensor.from_vec([1.0, 0.5, 0.5, 1.0], [1, 4]);
+        let y = Tensor.from_vec([1.0], [1]);
+        abng_blr_update(g, 0, features, y);
+        print(abng_blr_n_seen(g, 0));
+        print(abng_chain_head(g));
+        "#,
+    );
+}
+
 #[test]
 fn parity_blr_predict_initial() {
     // Before any update, prediction at uniform features should be

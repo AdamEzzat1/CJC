@@ -19,6 +19,8 @@
 //!   encode_prefix, descend, route_path, etc.) at the dispatch layer.
 //! * [`parity_p2`] — AST eval ↔ MIR exec parity for the Phase 0.2 builtins.
 
+mod blr_feature_version_tests;
+mod blr_numerical_rescue_tests;
 mod blr_tests;
 mod decision_tests;
 mod dispatch;
@@ -29,8 +31,11 @@ mod dispatch_p3c;
 mod dispatch_p3d;
 mod expected_epistemic_tests;
 mod leaf_head_tests;
+mod leaf_params_batch_tests;
 mod maturity_signature_tests;
+mod merge_math_tests;
 mod multinode;
+mod observe_validation_tests;
 mod parity;
 mod parity_p2;
 mod parity_p3a;
@@ -38,5 +43,8 @@ mod parity_p3b;
 mod parity_p3c;
 mod parity_p3d;
 mod replay;
+mod replay_invariant_tests;
+mod route_entropy_grow_tests;
+mod split_nll_gate_tests;
 mod uncertainty_tests;
 mod unit;

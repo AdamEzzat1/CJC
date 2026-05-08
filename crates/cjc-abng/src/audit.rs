@@ -65,7 +65,7 @@ pub enum AuditKind {
         /// SHA-256 of the codebook's canonical-byte encoding.
         codebook_hash: [u8; 32],
     },
-    /// The per-leaf MLP head architecture was installed and frozen
+    /// The per-node MLP head architecture was installed and frozen
     /// (Phase 0.3a). Subsequent `set_leaf_head` calls error.
     LeafHeadConfigured {
         /// SHA-256 of the head's canonical-byte encoding.
@@ -139,7 +139,7 @@ pub enum AuditKind {
         /// SHA-256 of the frozen baseline.
         state_hash: [u8; 32],
     },
-    /// A node's per-leaf training-time epistemic-σ reference was
+    /// A node's per-node training-time epistemic-σ reference was
     /// captured (Phase 0.3d-2). One-shot per node — once a node has
     /// captured this value, subsequent attempts error. The actual
     /// captured `f64` lives in the per-node section of the snapshot;
@@ -218,7 +218,44 @@ pub enum AuditKind {
         /// Node un-frozen.
         node_id: NodeId,
     },
+    /// Phase 0.4 Track C-2.3.4 — diagnostic event fired when a numerical
+    /// rescue branch inside a BLR update silently clamped a value to
+    /// keep the InverseGamma posterior well-defined. The state-changing
+    /// event for the same update is the immediately-preceding
+    /// `BlrUpdated`; this event is metadata-only (no further state
+    /// mutation). Consumers filter the audit log for this kind to
+    /// identify unstable training regimes.
+    BlrNumericalRescue {
+        /// Which numerical branch fired. Phase 0.4 ships only `0x00 =
+        /// b_below_epsilon` (post-update `b` would have fallen below
+        /// `f64::EPSILON`); future numerical-rescue branches allocate
+        /// from `0x01..` and are documented alongside the audit-kind
+        /// table in `ABNG_CURRENT_ARCHITECTURE.md` §3.6.
+        reason: u8,
+        /// `f64::to_bits()` of the pre-clamp value. Big-endian on the
+        /// wire. Recovers the original problematic computation for
+        /// post-hoc analysis.
+        b_pre_clamp_bits: u64,
+    },
+    /// Phase 0.4 Track C-2.3.6 — emitted by the batch param-writeback
+    /// builtin `abng_leaf_set_params_batch`. Replaces the per-tensor
+    /// `LeafParamsUpdated` events that fire under the
+    /// individual-`leaf_set_param`-per-tensor pattern: one optimizer
+    /// step on a 2-layer head writes 6 events under the old API
+    /// (`2(L+1)` per step) but exactly 1 under the batch API. Same
+    /// witness shape as `LeafParamsUpdated` — the per-node section
+    /// holds the actual params bytes, hashed against this witness on
+    /// replay.
+    LeafParamsUpdatedBatch {
+        /// SHA-256 of the post-update params blob (whole vector).
+        params_hash: [u8; 32],
+    },
 }
+
+/// `AuditKind::BlrNumericalRescue::reason` value: post-update `b` would
+/// have fallen below `f64::EPSILON`. The graph layer uses this when
+/// emitting the rescue event from `blr_update`.
+pub const BLR_RESCUE_B_BELOW_EPSILON: u8 = 0x00;
 
 impl AuditKind {
     /// Tag byte for canonical encoding. Frozen — new kinds must allocate
@@ -251,6 +288,8 @@ impl AuditKind {
             AuditKind::Freeze { .. } => 0x15,
             AuditKind::Unfreeze { .. } => 0x16,
             AuditKind::ExpectedEpistemicCaptured { .. } => 0x17,
+            AuditKind::BlrNumericalRescue { .. } => 0x18,
+            AuditKind::LeafParamsUpdatedBatch { .. } => 0x19,
         }
     }
 }
@@ -402,6 +441,16 @@ impl AuditEvent {
             }
             AuditKind::Unfreeze { node_id } => {
                 out.extend_from_slice(&node_id.to_be_bytes());
+            }
+            AuditKind::BlrNumericalRescue {
+                reason,
+                b_pre_clamp_bits,
+            } => {
+                out.push(*reason);
+                out.extend_from_slice(&b_pre_clamp_bits.to_be_bytes());
+            }
+            AuditKind::LeafParamsUpdatedBatch { params_hash } => {
+                out.extend_from_slice(params_hash);
             }
         }
         out.extend_from_slice(&self.stats_version.to_be_bytes());
@@ -682,6 +731,95 @@ mod tests {
             parent: 0,
             key_byte: 2,
             child: 1,
+        };
+        assert_ne!(e.recompute_new_hash(), e.new_hash);
+    }
+
+    // ── Phase 0.4 Track C-2.3.4: BlrNumericalRescue ───────────────────
+
+    #[test]
+    fn blr_numerical_rescue_tag_and_payload_size() {
+        let kind = AuditKind::BlrNumericalRescue {
+            reason: BLR_RESCUE_B_BELOW_EPSILON,
+            b_pre_clamp_bits: 0u64,
+        };
+        assert_eq!(kind.tag(), 0x18);
+        // 21 (header) + 1 (reason) + 8 (b_pre_clamp_bits)
+        //   + 8 (stats_version) + 32 (stats_hash) = 70
+        let e = dummy_event(0, kind, genesis_hash());
+        assert_eq!(e.payload_bytes().len(), 70);
+    }
+
+    #[test]
+    fn blr_numerical_rescue_payload_changes_with_pre_clamp() {
+        // Pin the wire ordering of the body fields (reason u8 then
+        // b_pre_clamp_bits u64 BE).
+        let a = AuditKind::BlrNumericalRescue {
+            reason: 0,
+            b_pre_clamp_bits: 0u64,
+        };
+        let b = AuditKind::BlrNumericalRescue {
+            reason: 0,
+            b_pre_clamp_bits: 0x0102030405060708u64,
+        };
+        let ea = dummy_event(0, a, genesis_hash());
+        let eb = dummy_event(0, b, genesis_hash());
+        assert_ne!(ea.payload_bytes(), eb.payload_bytes());
+
+        // The 8 reason+pre_clamp_bits bytes start at offset 21 (after
+        // seq u64 + epoch u64 + node_id u32 + tag u8); reason is at
+        // 21, body at 22..30 in big-endian.
+        let bytes_b = eb.payload_bytes();
+        assert_eq!(bytes_b[21], 0); // reason
+        assert_eq!(
+            &bytes_b[22..30],
+            &0x0102030405060708u64.to_be_bytes()
+        );
+    }
+
+    #[test]
+    fn blr_numerical_rescue_tamper_detection() {
+        let mut e = dummy_event(
+            5,
+            AuditKind::BlrNumericalRescue {
+                reason: 0,
+                b_pre_clamp_bits: 0x1234u64,
+            },
+            genesis_hash(),
+        );
+        // Tamper the pre-clamp bits — chain hash should diverge.
+        e.kind = AuditKind::BlrNumericalRescue {
+            reason: 0,
+            b_pre_clamp_bits: 0x5678u64,
+        };
+        assert_ne!(e.recompute_new_hash(), e.new_hash);
+    }
+
+    // ── Phase 0.4 Track C-2.3.6: LeafParamsUpdatedBatch ───────────────
+
+    #[test]
+    fn leaf_params_updated_batch_tag_and_payload_size() {
+        let kind = AuditKind::LeafParamsUpdatedBatch {
+            params_hash: [0u8; 32],
+        };
+        assert_eq!(kind.tag(), 0x19);
+        // 21 (header) + 32 (params_hash) + 8 (stats_version)
+        //   + 32 (stats_hash) = 93
+        let e = dummy_event(0, kind, genesis_hash());
+        assert_eq!(e.payload_bytes().len(), 93);
+    }
+
+    #[test]
+    fn leaf_params_updated_batch_tamper_detection() {
+        let mut e = dummy_event(
+            5,
+            AuditKind::LeafParamsUpdatedBatch {
+                params_hash: [0xAA; 32],
+            },
+            genesis_hash(),
+        );
+        e.kind = AuditKind::LeafParamsUpdatedBatch {
+            params_hash: [0xBB; 32],
         };
         assert_ne!(e.recompute_new_hash(), e.new_hash);
     }

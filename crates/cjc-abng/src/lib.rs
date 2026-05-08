@@ -18,7 +18,7 @@
 //!
 //! Phase 0.2 deliberately does **not** ship structural decision triggers
 //! (Grow/Split/Merge/Prune/Compress/Freeze) — those depend on the
-//! per-leaf neural head that arrives in Phase 0.3.
+//! per-node neural head that arrives in Phase 0.3.
 
 pub mod audit;
 pub mod blr;

@@ -571,7 +571,7 @@ pub fn dispatch_abng(name: &str, args: &[Value]) -> Result<Option<Value>, String
                 .map_err(|e| format!("{name}: tensor build failed: {e:?}"))?;
             Value::Tensor(t)
         }
-        // ── Phase 0.3a: per-leaf MLP head ─────────────────────────
+        // ── Phase 0.3a: per-node MLP head ─────────────────────────
         "abng_set_leaf_head" => {
             arg_count(name, args, 5)?;
             let id = arg_i64(name, &args[0])?;
@@ -652,6 +652,44 @@ pub fn dispatch_abng(name: &str, args: &[Value]) -> Result<Option<Value>, String
             let t = arg_tensor(name, &args[3])?.clone();
             with_graph(name, id, |g| {
                 g.leaf_set_param(node_id, k, t)
+                    .map_err(|e| graph_err_to_string(name, e))
+            })??;
+            Value::Void
+        }
+        "abng_leaf_set_params_batch" => {
+            // abng_leaf_set_params_batch(graph_id, node_id, params: Tensor[])
+            //   → Void
+            // Phase 0.4 Track C-2.3.6 — single audit event for a whole-
+            // vector param writeback (collapses 2(L+1) LeafParamsUpdated
+            // events into one LeafParamsUpdatedBatch).
+            arg_count(name, args, 3)?;
+            let id = arg_i64(name, &args[0])?;
+            let node_id = arg_u32_node(name, &args[1])?;
+            let params = match &args[2] {
+                Value::Array(arr) => {
+                    let mut out: Vec<Tensor> = Vec::with_capacity(arr.len());
+                    for (i, v) in arr.iter().enumerate() {
+                        match v {
+                            Value::Tensor(t) => out.push(t.clone()),
+                            other => {
+                                return Err(format!(
+                                    "{name}: params[{i}] must be Tensor, got {}",
+                                    other.type_name()
+                                ));
+                            }
+                        }
+                    }
+                    out
+                }
+                other => {
+                    return Err(format!(
+                        "{name}: expected Array of Tensor for params, got {}",
+                        other.type_name()
+                    ));
+                }
+            };
+            with_graph(name, id, |g| {
+                g.leaf_set_params_batch(node_id, params)
                     .map_err(|e| graph_err_to_string(name, e))
             })??;
             Value::Void
@@ -762,6 +800,19 @@ pub fn dispatch_abng(name: &str, args: &[Value]) -> Result<Option<Value>, String
             let t = Tensor::from_vec(vec![mean, epi, ale], &[3])
                 .map_err(|e| format!("{name}: tensor build failed: {e:?}"))?;
             Value::Tensor(t)
+        }
+        "abng_reset_blr" => {
+            // Phase 0.4 Track C-2.3.5 — reset BLR posterior to prior +
+            // refresh feature_version_hash to current MLP params hash.
+            // Recovers from `BlrError::FeatureVersionStale`.
+            arg_count(name, args, 2)?;
+            let id = arg_i64(name, &args[0])?;
+            let node_id = arg_u32_node(name, &args[1])?;
+            with_graph(name, id, |g| {
+                g.reset_blr(node_id)
+                    .map_err(|e| graph_err_to_string(name, e))
+            })??;
+            Value::Void
         }
         "abng_blr_state_hash" => {
             arg_count(name, args, 2)?;
@@ -1115,7 +1166,7 @@ pub fn dispatch_abng(name: &str, args: &[Value]) -> Result<Option<Value>, String
             Value::Int(count as i64)
         }
 
-        // ── Phase 0.3d-2: per-leaf expected_epistemic capture ────
+        // ── Phase 0.3d-2: per-node expected_epistemic capture ────
         "abng_set_expected_epistemic" => {
             // (graph_id, node_id, value: f64) -> Void
             arg_count(name, args, 3)?;

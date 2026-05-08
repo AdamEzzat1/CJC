@@ -26,6 +26,7 @@ use crate::calibration::CalibrationBins;
 use crate::children::AdaptiveChildren;
 use crate::density::DensityTracker;
 use crate::drift::DriftBaseline;
+use crate::signature::SignatureWelford;
 use crate::stats::NodeStats;
 
 /// Stable identifier for a node within its parent graph. Equal to the arena
@@ -55,7 +56,7 @@ pub struct AdaptiveBeliefNode {
     ///
     /// Independent of the graph's global event chain.
     pub stats_chain_head: [u8; 32],
-    /// Phase 0.3a — per-leaf MLP parameter tensors. Empty until the graph
+    /// Phase 0.3a — per-node MLP parameter tensors. Empty until the graph
     /// installs a [`LeafHead`](crate::leaf_head::LeafHead); thereafter the
     /// `Vec` contains alternating `W_i, b_i` tensors for each layer.
     ///
@@ -65,7 +66,7 @@ pub struct AdaptiveBeliefNode {
     /// updates flow back into this vec via
     /// [`AdaptiveBeliefGraph::leaf_set_param`](crate::AdaptiveBeliefGraph::leaf_set_param).
     pub params: Vec<Tensor>,
-    /// Phase 0.3b — per-leaf Bayesian linear regression posterior state.
+    /// Phase 0.3b — per-node Bayesian linear regression posterior state.
     /// `None` until `set_blr_prior` is installed; thereafter every node
     /// (including the root) carries a fresh `BlrState` initialized from
     /// the prior. NIG updates flow through
@@ -80,7 +81,7 @@ pub struct AdaptiveBeliefNode {
     /// Phase 0.3c — frozen drift baseline. `None` until
     /// `freeze_drift_baseline(node)` snapshots the density tracker.
     pub drift_baseline: Option<DriftBaseline>,
-    /// Phase 0.3d-2 — per-leaf training-time epistemic-σ reference,
+    /// Phase 0.3d-2 — per-node training-time epistemic-σ reference,
     /// captured once when the BLR posterior reaches stability. Used by
     /// [`AdaptiveBeliefGraph::ood_score`](crate::AdaptiveBeliefGraph::ood_score)
     /// to compute the calibrated `epistemic_z` ratio
@@ -110,6 +111,42 @@ pub struct AdaptiveBeliefNode {
     /// Freeze's `freeze_after`). `0` until two consecutive matching
     /// observations have happened.
     pub signature_stable_calls: u64,
+    /// Phase 0.4 Track B-2.2.2 — 3-window ECE history buffer. Each
+    /// `decide_step` call shifts the buffer left and records the
+    /// current calibration ECE in slot `[2]` (the freshest). When
+    /// [`ece_fill_count`] reaches 3, [`Maturity::calibration_stable`]
+    /// inspects the buffer for `|Δ| < ECE_STABILITY_MAX_DELTA` across
+    /// every consecutive pair. Newly-created nodes start with all
+    /// zeros and `ece_fill_count = 0`.
+    pub ece_history: [f64; 3],
+    /// Number of `decide_step` calls that have populated [`ece_history`].
+    /// Saturates at 3.
+    pub ece_fill_count: u8,
+    /// Phase 0.4 Track B-2.2.2 — 3-window epistemic σ history buffer.
+    /// Mirror of `ece_history` for `Maturity::uncertainty_stable`. The
+    /// observed value is the BLR's `epistemic_leverage` at posterior
+    /// mean (see [`crate::graph::epistemic_leverage_at_posterior_mean`]).
+    pub sigma_history: [f64; 3],
+    /// Number of `decide_step` calls that have populated [`sigma_history`].
+    /// Saturates at 3.
+    pub sigma_fill_count: u8,
+    /// Phase 0.4 Track B-2.2.1 — Welford-folded prediction profile.
+    /// Each `decide_step` call observes the running NodeStats mean
+    /// into this accumulator; the 8-byte prediction signature byte
+    /// string is `sha256(welford_prediction.canonical_bytes)[..8]`.
+    pub welford_prediction: SignatureWelford,
+    /// Phase 0.4 Track B-2.2.1 — Welford-folded uncertainty profile.
+    /// Observed metric: `epistemic_leverage` at posterior mean (BLR).
+    /// Stays at default (`n_seen=0`) when BLR is not installed.
+    pub welford_uncertainty: SignatureWelford,
+    /// Phase 0.4 Track B-2.2.1 — Welford-folded calibration profile.
+    /// Observed metric: `CalibrationBins::ece()`. Stays at default
+    /// when calibration is not installed.
+    pub welford_calibration: SignatureWelford,
+    /// Phase 0.4 Track B-2.2.1 — Welford-folded routing profile.
+    /// Observed metric: hash-derived f64 of the children layout (see
+    /// `crate::signature::routing_observation_value`).
+    pub welford_routing: SignatureWelford,
 }
 
 impl AdaptiveBeliefNode {
@@ -134,6 +171,14 @@ impl AdaptiveBeliefNode {
             is_active: true,
             last_signature: None,
             signature_stable_calls: 0,
+            ece_history: [0.0; 3],
+            ece_fill_count: 0,
+            sigma_history: [0.0; 3],
+            sigma_fill_count: 0,
+            welford_prediction: SignatureWelford::new(),
+            welford_uncertainty: SignatureWelford::new(),
+            welford_calibration: SignatureWelford::new(),
+            welford_routing: SignatureWelford::new(),
         }
     }
 

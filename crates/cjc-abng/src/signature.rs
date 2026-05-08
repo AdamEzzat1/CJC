@@ -34,7 +34,6 @@
 //! [`AdaptiveChildren::iter`](crate::children::AdaptiveChildren::iter)
 //! helper.
 
-use crate::leaf_head::params_hash;
 use crate::node::AdaptiveBeliefNode;
 
 /// Length of each individual profile field, in bytes.
@@ -43,6 +42,91 @@ pub const PROFILE_LEN: usize = 8;
 /// Total canonical-bytes length of a [`NodeSignature`]. Frozen — the
 /// structural-decision policy treats this as fixed.
 pub const SIGNATURE_LEN: usize = 4 * PROFILE_LEN;
+
+/// Phase 0.4 Track B-2.2.1 — Welford-folded summary for one
+/// `NodeSignature` profile. Each `decide_step` call adds the current
+/// metric reading; the 8-byte signature byte string is
+/// `sha256(canonical_bytes)[..8]`. Pre-0.4 the signature was a hash
+/// of *current* state — Welford-smoothing makes "stability" mean
+/// "the running summary is no longer drifting" rather than "no
+/// state has changed since last call".
+///
+/// Wire layout (24 bytes, BE — same shape as `NodeStats::canonical_bytes`
+/// but standalone since profiles aren't fungible with NodeStats):
+/// ```text
+///   n_seen      u64 BE  (8)
+///   mean        f64 BE  (8) — IEEE 754 bit pattern
+///   m2          f64 BE  (8) — running sum of squared deviations
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SignatureWelford {
+    pub n_seen: u64,
+    pub mean: f64,
+    pub m2: f64,
+}
+
+impl SignatureWelford {
+    pub const CANONICAL_LEN: usize = 24;
+
+    pub fn new() -> Self {
+        Self {
+            n_seen: 0,
+            mean: 0.0,
+            m2: 0.0,
+        }
+    }
+
+    /// Apply one observation in Welford's streaming form.
+    pub fn observe(&mut self, value: f64) {
+        self.n_seen += 1;
+        let n = self.n_seen as f64;
+        let delta = value - self.mean;
+        self.mean += delta / n;
+        let delta2 = value - self.mean;
+        self.m2 += delta * delta2;
+    }
+
+    pub fn canonical_bytes(&self) -> [u8; Self::CANONICAL_LEN] {
+        let mut out = [0u8; Self::CANONICAL_LEN];
+        out[0..8].copy_from_slice(&self.n_seen.to_be_bytes());
+        out[8..16].copy_from_slice(&self.mean.to_bits().to_be_bytes());
+        out[16..24].copy_from_slice(&self.m2.to_bits().to_be_bytes());
+        out
+    }
+
+    /// 8-byte signature: `sha256(mean.to_bits() ‖ m2.to_bits())[..8]`.
+    ///
+    /// Phase 0.4 Track B-2.2.1 — hashes ONLY `(mean, m2)`, NOT
+    /// `n_seen`. Rationale: signatures are meant to detect *trajectory
+    /// drift*, not *count-of-observations*. Including `n_seen` would
+    /// make every Welford observation drift the signature even when
+    /// the underlying data hasn't changed (e.g., a stationary stream
+    /// where the mean and M2 settle but n_seen keeps ticking),
+    /// preventing `signature_stable_calls` from ever accumulating.
+    /// `canonical_bytes` (used for serialization) still encodes the
+    /// full state so replay reconstructs correctly.
+    ///
+    /// Returns `[0u8; 8]` when no observations have been folded —
+    /// matches the pre-0.4 "subsystem not installed" sentinel.
+    pub fn profile_bytes(&self) -> [u8; PROFILE_LEN] {
+        if self.n_seen == 0 {
+            return [0u8; PROFILE_LEN];
+        }
+        let mut buf = [0u8; 16];
+        buf[0..8].copy_from_slice(&self.mean.to_bits().to_be_bytes());
+        buf[8..16].copy_from_slice(&self.m2.to_bits().to_be_bytes());
+        let h = cjc_snap::hash::sha256(&buf);
+        let mut out = [0u8; PROFILE_LEN];
+        out.copy_from_slice(&h[..PROFILE_LEN]);
+        out
+    }
+}
+
+impl Default for SignatureWelford {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Per-node fingerprint. Recomputed on every read in 0.3d-1; replaced
 /// by Welford-smoothed persistent state in 0.3d-4 without changing the
@@ -66,28 +150,20 @@ pub struct NodeSignature {
 
 impl NodeSignature {
     /// Compute a fresh signature snapshot from a node's current state.
+    /// Phase 0.4 Track B-2.2.1 — each profile is hashed from the
+    /// node's persistent Welford summary instead of the current
+    /// subsystem state. This makes the signature *smooth*: it
+    /// changes only when the running summary drifts, not on every
+    /// observation. `signature_stable_calls` therefore counts
+    /// "consecutive `decide_step` calls without significant
+    /// trajectory change", which is the original prompt's intent
+    /// (vs the 0.3d-1 lazy "any state change" semantics).
     pub fn from_node(node: &AdaptiveBeliefNode) -> Self {
-        let prediction = if node.params.is_empty() {
-            [0u8; PROFILE_LEN]
-        } else {
-            truncate8(&params_hash(&node.params))
-        };
-        let uncertainty = node
-            .blr
-            .as_ref()
-            .map(|s| truncate8(&s.state_hash()))
-            .unwrap_or([0u8; PROFILE_LEN]);
-        let calibration = node
-            .calibration
-            .as_ref()
-            .map(|c| truncate8(&c.state_hash()))
-            .unwrap_or([0u8; PROFILE_LEN]);
-        let routing = truncate8(&cjc_snap::hash::sha256(&routing_canonical_bytes(node)));
         Self {
-            prediction,
-            uncertainty,
-            calibration,
-            routing,
+            prediction: node.welford_prediction.profile_bytes(),
+            uncertainty: node.welford_uncertainty.profile_bytes(),
+            calibration: node.welford_calibration.profile_bytes(),
+            routing: node.welford_routing.profile_bytes(),
         }
     }
 
@@ -103,15 +179,11 @@ impl NodeSignature {
     }
 }
 
-fn truncate8(hash: &[u8; 32]) -> [u8; PROFILE_LEN] {
-    let mut out = [0u8; PROFILE_LEN];
-    out.copy_from_slice(&hash[..PROFILE_LEN]);
-    out
-}
-
 /// Build the canonical-bytes representation of a node's children for
-/// the routing profile. See module docs for the layout.
-fn routing_canonical_bytes(node: &AdaptiveBeliefNode) -> Vec<u8> {
+/// the routing profile observation. Phase 0.4 Track B-2.2.1 — feeds
+/// into the routing Welford accumulator each `decide_step` call. See
+/// module docs for the layout.
+pub(crate) fn routing_canonical_bytes(node: &AdaptiveBeliefNode) -> Vec<u8> {
     let mut pairs = node.children.iter();
     pairs.sort_by_key(|&(key, _)| key);
     let mut out = Vec::with_capacity(1 + 4 + pairs.len() * 5);
@@ -122,6 +194,22 @@ fn routing_canonical_bytes(node: &AdaptiveBeliefNode) -> Vec<u8> {
         out.extend_from_slice(&child_id.to_be_bytes());
     }
     out
+}
+
+/// Phase 0.4 Track B-2.2.1 — scalar metric observed into the routing
+/// Welford each `decide_step` call. Hashes the canonical-bytes
+/// representation of the children layout into a u64, then casts to
+/// f64 (`u64 as f64`) — non-finiteness-safe (avoids reinterpreting
+/// arbitrary bits as IEEE 754, which could produce NaN and poison
+/// the Welford accumulator). Loses precision for u64 > 2^53 but the
+/// Welford signature still tracks "routing layout has drifted" because
+/// the cast is deterministic.
+pub(crate) fn routing_observation_value(node: &AdaptiveBeliefNode) -> f64 {
+    let bytes = routing_canonical_bytes(node);
+    let h = cjc_snap::hash::sha256(&bytes);
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&h[..8]);
+    u64::from_be_bytes(buf) as f64
 }
 
 #[cfg(test)]
@@ -136,51 +224,62 @@ mod tests {
     }
 
     #[test]
-    fn from_node_no_subsystems_zeros_three_profiles() {
+    fn from_node_no_observations_zero_profiles() {
+        // Phase 0.4 Track B-2.2.1 — signatures are now Welford-folded
+        // summaries seeded from `decide_step` calls. A node that has
+        // never been advanced has every Welford at n_seen=0, so all
+        // four profiles are the all-zeros sentinel.
         let g = fresh_graph();
         let s = NodeSignature::from_node(&g.nodes[0]);
         assert_eq!(s.prediction, [0u8; 8]);
         assert_eq!(s.uncertainty, [0u8; 8]);
         assert_eq!(s.calibration, [0u8; 8]);
-        // Routing is always defined — empty children still hash to a
-        // well-defined value.
-        assert_ne!(s.routing, [0u8; 8]);
+        assert_eq!(s.routing, [0u8; 8]);
     }
 
     #[test]
-    fn with_head_prediction_nonzero() {
+    fn from_node_after_observe_routing_nonzero() {
+        // The prediction profile observes `NodeStats.mean` per
+        // `decide_step` call. The routing profile observes a hash of
+        // the children layout. After at least one
+        // advance_signature_stability (or a manual Welford observation),
+        // those profiles flip non-zero.
         let mut g = fresh_graph();
-        g.set_leaf_head(2, vec![], 1, Activation::None).unwrap();
+        g.nodes[0].welford_routing.observe(1.0);
+        g.nodes[0].welford_prediction.observe(2.0);
         let s = NodeSignature::from_node(&g.nodes[0]);
         assert_ne!(s.prediction, [0u8; 8]);
+        assert_ne!(s.routing, [0u8; 8]);
+        // BLR + calibration still untouched.
         assert_eq!(s.uncertainty, [0u8; 8]);
         assert_eq!(s.calibration, [0u8; 8]);
     }
 
     #[test]
-    fn with_blr_uncertainty_nonzero() {
+    fn welford_signature_stable_under_repeated_identical_observations() {
+        // Pin the "smoothed" semantics: observing the same value twice
+        // keeps mean and M2 unchanged (delta = 0), so the profile
+        // signature stays bit-identical even though n_seen advanced.
+        // This is what makes `signature_stable_calls` actually
+        // accumulate on stationary streams.
         let mut g = fresh_graph();
-        g.set_leaf_head(2, vec![], 1, Activation::None).unwrap();
-        g.set_blr_prior(1.0, 1.5, 1.0).unwrap();
-        let s = NodeSignature::from_node(&g.nodes[0]);
-        assert_ne!(s.uncertainty, [0u8; 8]);
+        g.nodes[0].welford_prediction.observe(3.14);
+        let s1 = NodeSignature::from_node(&g.nodes[0]).prediction;
+        g.nodes[0].welford_prediction.observe(3.14);
+        let s2 = NodeSignature::from_node(&g.nodes[0]).prediction;
+        assert_eq!(s1, s2, "stationary stream → stable signature");
     }
 
     #[test]
-    fn with_calibration_calibration_nonzero() {
+    fn welford_signature_drifts_when_distribution_changes() {
+        // Conversely, observing a DIFFERENT value drifts mean and M2
+        // and therefore the profile signature.
         let mut g = fresh_graph();
-        g.set_calibration(15).unwrap();
-        let s = NodeSignature::from_node(&g.nodes[0]);
-        assert_ne!(s.calibration, [0u8; 8]);
-    }
-
-    #[test]
-    fn routing_changes_with_children() {
-        let mut g = fresh_graph();
-        let s_before = NodeSignature::from_node(&g.nodes[0]).routing;
-        let _child = g.add_node(0, 7).unwrap();
-        let s_after = NodeSignature::from_node(&g.nodes[0]).routing;
-        assert_ne!(s_before, s_after);
+        g.nodes[0].welford_prediction.observe(3.14);
+        let s1 = NodeSignature::from_node(&g.nodes[0]).prediction;
+        g.nodes[0].welford_prediction.observe(2.71);
+        let s2 = NodeSignature::from_node(&g.nodes[0]).prediction;
+        assert_ne!(s1, s2);
     }
 
     #[test]
@@ -212,31 +311,44 @@ mod tests {
 
     #[test]
     fn determinism_double_run() {
+        // After identical observation history (and identical Welford
+        // observations driven by identical decide_step calls), the
+        // signature canonical bytes are bit-identical.
         let mk = || {
             let mut g = AdaptiveBeliefGraph::new(42);
             g.set_leaf_head(2, vec![], 1, Activation::None).unwrap();
             g.set_blr_prior(1.0, 1.5, 1.0).unwrap();
             g.set_calibration(15).unwrap();
             g.observe(0, 1.5).unwrap();
+            // Drive the Welfords once each so we test the non-trivial
+            // case (n_seen ≥ 1 across all 4 profiles).
+            g.nodes[0].welford_prediction.observe(0.5);
+            g.nodes[0].welford_uncertainty.observe(0.7);
+            g.nodes[0].welford_calibration.observe(0.0);
+            g.nodes[0].welford_routing.observe(1.0);
             NodeSignature::from_node(&g.nodes[0]).canonical_bytes()
         };
         assert_eq!(mk(), mk());
     }
 
     #[test]
-    fn signature_changes_after_observe_via_routing() {
-        // Routing is independent of stats, so an observation alone
-        // shouldn't change routing. But adding a child does.
+    fn signature_routing_drifts_with_children_via_welford() {
+        // Routing observation hashes the children layout; observing
+        // the layout of a 0-child root gives one Welford reading,
+        // observing the 1-child layout (after add_node) gives a
+        // different one — so subsequent advance_stability_history
+        // calls should yield different signatures.
         let mut g = fresh_graph();
-        let s0 = NodeSignature::from_node(&g.nodes[0]);
-        g.observe(0, 3.14).unwrap();
-        let s1 = NodeSignature::from_node(&g.nodes[0]);
-        // Routing unchanged by observe.
-        assert_eq!(s0.routing, s1.routing);
-        // Adding a child changes routing.
+        // Manual Welford observation matching pre-add-child state.
+        let v0 = routing_observation_value(&g.nodes[0]);
+        g.nodes[0].welford_routing.observe(v0);
+        let s_before = NodeSignature::from_node(&g.nodes[0]).routing;
         let _c = g.add_node(0, 12).unwrap();
-        let s2 = NodeSignature::from_node(&g.nodes[0]);
-        assert_ne!(s1.routing, s2.routing);
+        // Manual Welford observation matching post-add-child state.
+        let v1 = routing_observation_value(&g.nodes[0]);
+        g.nodes[0].welford_routing.observe(v1);
+        let s_after = NodeSignature::from_node(&g.nodes[0]).routing;
+        assert_ne!(s_before, s_after);
     }
 
     #[test]

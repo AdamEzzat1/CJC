@@ -34,6 +34,9 @@ use cjc_abng::serialize::{replay, serialize};
 /// thresholds in a regime that exercises real triggers without
 /// blowing up under random observation streams.
 fn arb_thresholds() -> impl Strategy<Value = Vec<f64>> {
+    // 12 thresholds since Phase 0.4 Track B-2.2.7 added drift_unfreeze.
+    // Pack as a tuple of 12 — proptest's tuple-of-twelve trait impl
+    // is sufficient.
     (
         0.1f64..1.0,                  // [0] H_grow
         16u64..256,                   // [1] grow_min
@@ -46,6 +49,7 @@ fn arb_thresholds() -> impl Strategy<Value = Vec<f64>> {
         2u64..64,                     // [8] prune_grace_epochs
         0u8..32,                      // [9] tau_compress
         2u64..64,                     // [10] freeze_after
+        0.5f64..100.0,                // [11] drift_unfreeze
     )
         .prop_map(|t| {
             vec![
@@ -60,6 +64,7 @@ fn arb_thresholds() -> impl Strategy<Value = Vec<f64>> {
                 t.8 as f64,
                 t.9 as f64,
                 t.10 as f64,
+                t.11,
             ]
         })
 }

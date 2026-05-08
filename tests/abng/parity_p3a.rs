@@ -107,6 +107,49 @@ fn parity_leaf_set_param_writes_back() {
     );
 }
 
+// Phase 0.4 Track C-2.3.6 — batch writeback parity.
+
+#[test]
+fn parity_leaf_set_params_batch_writes_back() {
+    assert_parity(
+        "leaf_set_params_batch round-trips a vector",
+        r#"
+        let g = abng_new(0);
+        let hidden = Tensor.from_vec([4.0], [1]);
+        abng_set_leaf_head(g, 2, hidden, 1, "tanh");
+        // Construct fresh-marker tensors for whole-vector writeback.
+        let w_h = Tensor.from_vec([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5], [4, 2]);
+        let b_h = Tensor.from_vec([0.1, 0.1, 0.1, 0.1], [4]);
+        let w_o = Tensor.from_vec([0.2, 0.2, 0.2, 0.2], [1, 4]);
+        let b_o = Tensor.from_vec([0.3], [1]);
+        abng_leaf_set_params_batch(g, 0, [w_h, b_h, w_o, b_o]);
+        print(abng_leaf_params_hash(g, 0));
+        print(abng_chain_head(g));
+        print(abng_leaf_param_count(g, 0));
+        "#,
+    );
+}
+
+#[test]
+fn parity_leaf_set_params_batch_emits_one_event() {
+    assert_parity(
+        "leaf_set_params_batch advances audit_len by exactly 1",
+        r#"
+        let g = abng_new(7);
+        let hidden = Tensor.from_vec([4.0], [1]);
+        abng_set_leaf_head(g, 2, hidden, 1, "tanh");
+        let n0 = abng_audit_len(g);
+        let w_h = Tensor.from_vec([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5], [4, 2]);
+        let b_h = Tensor.from_vec([0.1, 0.1, 0.1, 0.1], [4]);
+        let w_o = Tensor.from_vec([0.2, 0.2, 0.2, 0.2], [1, 4]);
+        let b_o = Tensor.from_vec([0.3], [1]);
+        abng_leaf_set_params_batch(g, 0, [w_h, b_h, w_o, b_o]);
+        let n1 = abng_audit_len(g);
+        print(n1 - n0);
+        "#,
+    );
+}
+
 #[test]
 fn parity_leaf_params_hash_changes_after_update() {
     assert_parity(

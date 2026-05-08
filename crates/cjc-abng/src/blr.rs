@@ -1,4 +1,10 @@
-//! Per-leaf Bayesian Linear Regression (BLR) head — Phase 0.3b.
+//! Per-node Bayesian Linear Regression (BLR) head — Phase 0.3b.
+//!
+//! Naming note (Phase 0.4 Track C-2.3.7): the BLR head is per-*node*,
+//! not per-*leaf*. `set_blr_prior` initializes the root's `BlrState`
+//! from the prior; every `add_node` / `force_grow` / `force_split`
+//! initializes a fresh `BlrState` on the new node. Pre-0.4 docs called
+//! this "per-leaf"; the code has always been per-node.
 //!
 //! The "Bayesian last layer" architecture: the MLP from Phase 0.3a serves
 //! as a feature extractor; this module attaches a closed-form Bayesian
@@ -51,6 +57,24 @@ pub enum BlrError {
     /// matrix is not positive definite. Should not happen with the NIG
     /// math; signals a corrupt state.
     NonPositiveDefinite,
+    /// `blr_update` was given a non-finite (NaN, +Inf, -Inf) value in
+    /// either the features matrix or the y vector. Rejected at the
+    /// boundary before any posterior update; preserves Welford-style
+    /// reproducibility across re-runs.
+    NonFiniteInput { value: f64 },
+    /// Phase 0.4 Track C-2.3.5 — `blr_update` was called when the
+    /// per-node MLP params hash no longer matches the BLR state's
+    /// `feature_version_hash`. The MLP that produced the features the
+    /// BLR was trained on has changed; continuing the update would
+    /// train the posterior on a feature space inconsistent with its
+    /// stored mean/precision. Recovery: call `abng_reset_blr` to
+    /// re-prime the posterior on the new feature space.
+    FeatureVersionStale {
+        /// Hash recorded on the BLR state (last init / reset).
+        stored: [u8; 32],
+        /// Hash of the current per-node MLP params at the call site.
+        current: [u8; 32],
+    },
 }
 
 impl std::fmt::Display for BlrError {
@@ -81,6 +105,17 @@ impl std::fmt::Display for BlrError {
             BlrError::NonPositiveDefinite => write!(
                 f,
                 "abng blr: precision matrix is not positive-definite (corrupt state)"
+            ),
+            BlrError::NonFiniteInput { value } => write!(
+                f,
+                "abng blr: input value {value} must be finite (rejected NaN/+Inf/-Inf)"
+            ),
+            BlrError::FeatureVersionStale { .. } => write!(
+                f,
+                "abng blr: MLP params changed since BLR posterior was \
+                 initialized — feature space is stale. Call \
+                 `abng_reset_blr(node_id)` to re-prime the posterior \
+                 on the new MLP, then continue training."
             ),
         }
     }
@@ -141,11 +176,27 @@ pub struct BlrState {
     pub b: f64,
     /// Total observations applied.
     pub n_seen: u64,
+    /// Phase 0.4 Track C-2.3.5 — SHA-256 of the per-node MLP params at
+    /// the moment this BLR state was initialized or reset. The graph
+    /// layer's `blr_update` rejects when the current params hash
+    /// differs (returns `BlrError::FeatureVersionStale`), preventing
+    /// the BLR posterior from training on a feature space that no
+    /// longer matches the MLP that produced it.
+    ///
+    /// Set by the graph layer on install (`set_blr_prior`), per-child
+    /// initialization (`add_node`), and explicit reset (`reset_blr`).
+    /// `BlrState::from_prior` initializes this to all-zeros (sentinel
+    /// "uninitialized features"); callers that construct a `BlrState`
+    /// without going through the graph layer must set it manually.
+    pub feature_version_hash: [u8; 32],
 }
 
 impl BlrState {
     /// Initial state from a prior: `mean = 0`, `precision = λ_0 · I`,
-    /// `a = a_0`, `b = b_0`.
+    /// `a = a_0`, `b = b_0`. `feature_version_hash` is initialized to
+    /// all-zeros (sentinel "uninitialized features"); the graph layer
+    /// sets it to the per-node `params_hash` immediately after this
+    /// constructor returns.
     pub fn from_prior(prior: &BlrPrior, d: u32) -> Self {
         let dz = d as usize;
         let mean = Tensor::from_vec(vec![0.0; dz], &[dz]).expect("blr mean tensor");
@@ -161,6 +212,7 @@ impl BlrState {
             a: prior.a,
             b: prior.b,
             n_seen: 0,
+            feature_version_hash: [0u8; 32],
         }
     }
 
@@ -168,7 +220,15 @@ impl BlrState {
     ///
     /// `features` is row-major `[n, d]`; `y` is `[n]`. Both as flat slices
     /// for callability from any dispatch path.
-    pub fn update(&mut self, features: &[f64], y: &[f64]) -> Result<(), BlrError> {
+    ///
+    /// Returns `Ok(None)` on a normal update; `Ok(Some(b_pre_clamp))`
+    /// when the post-update `b` was clamped to `f64::EPSILON` to keep
+    /// the InverseGamma posterior well-defined (Phase 0.4 Track
+    /// C-2.3.4). The graph layer uses this to emit a deterministic
+    /// `BlrNumericalRescue` audit event after the corresponding
+    /// `BlrUpdated`. The clamped `self.b` is identical with or without
+    /// observability, so determinism is preserved.
+    pub fn update(&mut self, features: &[f64], y: &[f64]) -> Result<Option<f64>, BlrError> {
         let d = self.d as usize;
         let n = y.len();
         if features.len() != n * d {
@@ -176,6 +236,23 @@ impl BlrState {
                 features_n: (features.len() / d.max(1)) as u32,
                 y_n: n as u32,
             });
+        }
+
+        // Reject non-finite inputs before any state mutation. Welford /
+        // Kahan accumulators silently propagate NaN forever once admitted,
+        // and the audit chain would still hash to a stable but-poisoned
+        // value, so silent corruption survives replay. Strict reject here
+        // matches the BlrError::FeatureDimMismatch boundary-validation
+        // style.
+        for &v in features {
+            if !v.is_finite() {
+                return Err(BlrError::NonFiniteInput { value: v });
+            }
+        }
+        for &v in y {
+            if !v.is_finite() {
+                return Err(BlrError::NonFiniteInput { value: v });
+            }
         }
 
         // X^T X (d × d) and X^T y (d): both Kahan-accumulated.
@@ -229,27 +306,42 @@ impl BlrState {
 
         let a_new = self.a + (n as f64) * 0.5;
         // b_new = b_old + 0.5 (μ_old^T Λ_old μ_old + y^T y - m_new^T Λ_new m_new)
-        let mut b_new = self.b + 0.5 * (mu_lmu_old + yty - m_lm_new);
-        if b_new < f64::EPSILON {
-            // Numerical floor — keep IG well-defined.
-            b_new = f64::EPSILON;
-        }
+        let b_pre_clamp = self.b + 0.5 * (mu_lmu_old + yty - m_lm_new);
+        // Phase 0.4 Track C-2.3.4 — clamp surfaces as a diagnostic
+        // audit event at the graph layer. The clamped value is
+        // bit-identical with or without observability, so determinism
+        // is preserved across runs whether or not callers inspect the
+        // returned `Option<f64>`.
+        let (b_new, rescue) = if b_pre_clamp < f64::EPSILON {
+            (f64::EPSILON, Some(b_pre_clamp))
+        } else {
+            (b_pre_clamp, None)
+        };
 
         self.mean = Tensor::from_vec(m_new, &[d]).expect("blr mean update");
         self.precision = Tensor::from_vec(lambda_new, &[d, d]).expect("blr precision update");
         self.a = a_new;
         self.b = b_new;
         self.n_seen = self.n_seen.saturating_add(n as u64);
-        Ok(())
+        Ok(rescue)
     }
 
     /// Predict at a single feature vector `phi` of length `d`. Returns
-    /// `(mean, epistemic_var, aleatoric_var)`.
+    /// `(mean, epistemic_leverage, aleatoric_var)`.
     ///
-    /// * `mean = μ^T φ`
-    /// * `epistemic_var = φ^T Λ^(-1) φ` (variance of the posterior mean)
-    /// * `aleatoric_var = b / (a - 1)` if `a > 1`, else `f64::INFINITY`
-    ///   (mean of the InverseGamma noise variance).
+    /// * `mean = μ^T φ` — posterior mean prediction.
+    /// * `epistemic_leverage = φ^T Λ^(-1) φ = ‖L^(-1) φ‖²` —
+    ///   **dimensionless leverage**, NOT variance in y-units. Decreases
+    ///   monotonically with evidence (more data → tighter posterior →
+    ///   lower leverage at any fixed φ). Naming corrected in Phase 0.4
+    ///   Track C-2.3.1; pre-0.4 docs called this slot `epistemic_var`,
+    ///   which was misleading because units of variance would require
+    ///   multiplying by `aleatoric_var`.
+    /// * `aleatoric_var = b / (a - 1)` if `a > 1`, else `f64::INFINITY` —
+    ///   mean of the InverseGamma noise variance, in y² units.
+    ///
+    /// To recover predictive variance in y-units a caller multiplies:
+    /// `total_var = aleatoric_var * (1.0 + epistemic_leverage)`.
     pub fn predict(&self, phi: &[f64]) -> Result<(f64, f64, f64), BlrError> {
         if phi.len() != self.d as usize {
             return Err(BlrError::FeatureDimMismatch {
@@ -264,9 +356,9 @@ impl BlrState {
         }
         let mean = mean_acc.finalize();
 
-        // epistemic_var = φ^T Λ^(-1) φ. Solve Λ x = φ via Cholesky, then
-        // φ^T x. Since Λ = L L^T, φ^T Λ^(-1) φ = φ^T L^(-T) L^(-1) φ
-        //                                       = ‖L^(-1) φ‖².
+        // epistemic_leverage = φ^T Λ^(-1) φ. Solve Λ x = φ via Cholesky,
+        // then φ^T x. Since Λ = L L^T, φ^T Λ^(-1) φ = φ^T L^(-T) L^(-1) φ
+        //                                            = ‖L^(-1) φ‖².
         let prec = self.precision.to_vec();
         let l = cholesky(&prec, self.d as usize)?;
         let z = forward_subst(&l, self.d as usize, phi);
@@ -274,28 +366,173 @@ impl BlrState {
         for &zi in &z {
             zsq.add(zi * zi);
         }
-        let epistemic_var = zsq.finalize();
+        let epistemic_leverage = zsq.finalize();
 
         let aleatoric_var = if self.a > 1.0 {
             self.b / (self.a - 1.0)
         } else {
             f64::INFINITY
         };
-        Ok((mean, epistemic_var, aleatoric_var))
+        Ok((mean, epistemic_leverage, aleatoric_var))
     }
 
-    /// Canonical bytes for hashing. Layout:
+    /// Combine `self` (the "into" posterior) with `other` (the
+    /// "absorbed" posterior) given the shared `prior`. Phase 0.4 Track
+    /// B-2.2.6 — used by `force_merge` (and the policy-driven Merge
+    /// fired from `decide_step`) so the merged node inherits absorbed's
+    /// evidence instead of dropping it.
+    ///
+    /// The combine math (per Phase 0.4 prompt §2.2.6):
+    /// - `Λ_into ← Λ_into + Λ_other` (sum precisions)
+    /// - `m_into ← Λ_new⁻¹ (Λ_into · m_into + Λ_other · m_other)`
+    ///   (precision-weighted mean of the two posterior means)
+    /// - `a_into ← a_into + a_other - a_prior` (subtract prior to avoid
+    ///   double-counting the InverseGamma prior contribution)
+    /// - `b_into ← b_into + b_other - b_prior` (same; clamped to
+    ///   `f64::EPSILON` if it would go subnormal — same numerical floor
+    ///   as `update`, but combine is internal-only so no audit event
+    ///   is emitted for the rescue here)
+    /// - `n_seen ← n_seen + other.n_seen`
+    /// - `feature_version_hash` is unchanged — the merge produces a
+    ///   posterior conditioned on `into`'s feature space (the user is
+    ///   responsible for ensuring the two MLPs are compatible; the
+    ///   `feature_version_hash` mismatch check in `blr_update` does not
+    ///   gate `combine` because the combine itself is the authority on
+    ///   what feature space the merged posterior lives in).
+    ///
+    /// Errors only on Cholesky failure (the combined precision must be
+    /// positive-definite — true by construction since both inputs were
+    /// positive-definite and we summed them).
+    pub fn combine(&mut self, other: &BlrState, prior: &BlrPrior) -> Result<(), BlrError> {
+        if self.d != other.d {
+            return Err(BlrError::FeatureDimMismatch {
+                expected: self.d,
+                got: other.d,
+            });
+        }
+        let d = self.d as usize;
+        let lambda_into_old = self.precision.to_vec();
+        let m_into_old = self.mean.to_vec();
+        let lambda_other = other.precision.to_vec();
+        let m_other = other.mean.to_vec();
+
+        // Λ_new = Λ_into + Λ_other  (per prompt — over-counts prior
+        // by one factor; documented approximation, see §2.2.6).
+        let mut lambda_new = vec![0.0; d * d];
+        for i in 0..d * d {
+            lambda_new[i] = lambda_into_old[i] + lambda_other[i];
+        }
+
+        // rhs = Λ_into · m_into + Λ_other · m_other  (Kahan-summed).
+        let mut rhs = vec![0.0f64; d];
+        for i in 0..d {
+            let mut acc = KahanAccumulatorF64::new();
+            for j in 0..d {
+                acc.add(lambda_into_old[i * d + j] * m_into_old[j]);
+                acc.add(lambda_other[i * d + j] * m_other[j]);
+            }
+            rhs[i] = acc.finalize();
+        }
+
+        // Solve Λ_new · m_new = rhs via Cholesky.
+        let l = cholesky(&lambda_new, d)?;
+        let m_new = cholesky_solve(&l, d, &rhs);
+
+        // a, b combine with prior subtract (avoids double-counting the
+        // Inverse-Gamma prior contribution).
+        let a_new = self.a + other.a - prior.a;
+        let mut b_new = self.b + other.b - prior.b;
+        if b_new < f64::EPSILON {
+            b_new = f64::EPSILON;
+        }
+
+        self.precision =
+            Tensor::from_vec(lambda_new, &[d, d]).expect("combined precision tensor");
+        self.mean = Tensor::from_vec(m_new, &[d]).expect("combined mean tensor");
+        self.a = a_new;
+        self.b = b_new;
+        self.n_seen = self.n_seen.saturating_add(other.n_seen);
+        // feature_version_hash unchanged — into's feature space wins.
+        Ok(())
+    }
+
+    /// KL divergence `KL[N(self.mean, self.precision⁻¹) ‖ N(other.mean,
+    /// other.precision⁻¹)]` — the Gaussian part of the NIG posterior
+    /// only. Used by Phase 0.4 Track B-2.2.3's KL-merge gate inside
+    /// `decide_step`. The IG noise component is intentionally omitted;
+    /// Merge gates on weight-distribution similarity, not noise-model
+    /// agreement.
+    ///
+    /// Closed form (per prompt §2.2.3, rewritten in terms of precisions
+    /// `Λ_i = Σ_i⁻¹` to match `BlrState`'s storage):
     /// ```text
-    ///   d           u32 BE                 (4)
-    ///   mean        f64 BE × d
-    ///   precision   f64 BE × d²
-    ///   a           f64 BE                 (8)
-    ///   b           f64 BE                 (8)
-    ///   n_seen      u64 BE                 (8)
+    ///   KL = ½ ( log|Λ_1| − log|Λ_2| − d
+    ///            + tr(Λ_2 · Λ_1⁻¹)
+    ///            + (m_2 − m_1)ᵀ Λ_2 (m_2 − m_1) )
     /// ```
+    ///
+    /// Errors on dim mismatch or Cholesky failure on either precision
+    /// matrix (both should always be positive-definite by NIG-update
+    /// construction; an error here signals a corrupt state).
+    pub fn kl_divergence(&self, other: &BlrState) -> Result<f64, BlrError> {
+        if self.d != other.d {
+            return Err(BlrError::FeatureDimMismatch {
+                expected: self.d,
+                got: other.d,
+            });
+        }
+        let d = self.d as usize;
+        let prec1 = self.precision.to_vec();
+        let prec2 = other.precision.to_vec();
+        let l1 = cholesky(&prec1, d)?;
+        let l2 = cholesky(&prec2, d)?;
+
+        // log|Λ_1| − log|Λ_2| = 2 ∑ (log L_1_ii − log L_2_ii)
+        let mut logdet_acc = KahanAccumulatorF64::new();
+        for i in 0..d {
+            logdet_acc.add(2.0 * l1[i * d + i].ln());
+            logdet_acc.add(-2.0 * l2[i * d + i].ln());
+        }
+        let logdet = logdet_acc.finalize();
+
+        // tr(Λ_2 · Λ_1⁻¹) — solve Λ_1 X = Λ_2 column by column, sum
+        // diagonal of X. Symmetric Λ_2 means columns == rows.
+        let mut trace_acc = KahanAccumulatorF64::new();
+        for col in 0..d {
+            let mut col_data = vec![0.0; d];
+            for row in 0..d {
+                col_data[row] = prec2[row * d + col];
+            }
+            let solved = cholesky_solve(&l1, d, &col_data);
+            trace_acc.add(solved[col]);
+        }
+        let trace = trace_acc.finalize();
+
+        // (m_2 − m_1)ᵀ Λ_2 (m_2 − m_1)
+        let m1 = self.mean.to_vec();
+        let m2 = other.mean.to_vec();
+        let dm: Vec<f64> = (0..d).map(|i| m2[i] - m1[i]).collect();
+        let quad = quadratic_form(&prec2, d, &dm);
+
+        Ok(0.5 * (logdet - d as f64 + trace + quad))
+    }
+
+    /// Canonical bytes for hashing. Layout (Phase 0.4 / snapshot v9):
+    /// ```text
+    ///   d                       u32 BE              (4)
+    ///   mean                    f64 BE × d
+    ///   precision               f64 BE × d²
+    ///   a                       f64 BE              (8)
+    ///   b                       f64 BE              (8)
+    ///   n_seen                  u64 BE              (8)
+    ///   feature_version_hash    [u8; 32]            (32)   ← v9 add (C-2.3.5)
+    /// ```
+    /// Pre-v9 layout omitted `feature_version_hash`. The new field is
+    /// part of the SHA-256 input, so any pre-0.4 `state_hash` is
+    /// distinct from its v9 equivalent — clean break, no shadowing.
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let d = self.d as usize;
-        let mut out = Vec::with_capacity(4 + d * 8 + d * d * 8 + 24);
+        let mut out = Vec::with_capacity(4 + d * 8 + d * d * 8 + 24 + 32);
         out.extend_from_slice(&self.d.to_be_bytes());
         for x in self.mean.to_vec() {
             out.extend_from_slice(&x.to_bits().to_be_bytes());
@@ -306,6 +543,7 @@ impl BlrState {
         out.extend_from_slice(&self.a.to_bits().to_be_bytes());
         out.extend_from_slice(&self.b.to_bits().to_be_bytes());
         out.extend_from_slice(&self.n_seen.to_be_bytes());
+        out.extend_from_slice(&self.feature_version_hash);
         out
     }
 
@@ -506,11 +744,11 @@ mod tests {
     }
 
     #[test]
-    fn epistemic_variance_decreases_with_evidence() {
+    fn epistemic_leverage_decreases_with_evidence() {
         let p = BlrPrior::new(0.01, 1.0, 1.0).unwrap();
         let mut s = BlrState::from_prior(&p, 2);
         let phi = [1.0, 0.5];
-        let (_m0, epi0, _) = s.predict(&phi).unwrap();
+        let (_m0, lev0, _) = s.predict(&phi).unwrap();
         // Update with 50 informative samples.
         let xs = (0..50)
             .flat_map(|i| {
@@ -521,8 +759,11 @@ mod tests {
             .collect::<Vec<f64>>();
         let ys = (0..50).map(|i| (i as f64).sin() * 2.0).collect::<Vec<f64>>();
         s.update(&xs, &ys).unwrap();
-        let (_m1, epi1, _) = s.predict(&phi).unwrap();
-        assert!(epi1 < epi0, "epistemic var didn't decrease: {epi0} → {epi1}");
+        let (_m1, lev1, _) = s.predict(&phi).unwrap();
+        assert!(
+            lev1 < lev0,
+            "epistemic leverage didn't decrease: {lev0} → {lev1}"
+        );
     }
 
     #[test]
@@ -555,8 +796,9 @@ mod tests {
     fn canonical_bytes_size() {
         let p = BlrPrior::new(1.0, 1.0, 1.0).unwrap();
         let s = BlrState::from_prior(&p, 4);
-        // 4 + 4*8 + 16*8 + 8 + 8 + 8 = 188
-        assert_eq!(s.canonical_bytes().len(), 188);
+        // v9 layout (Phase 0.4 Track C-2.3.5):
+        // 4 + 4*8 + 16*8 + 8 + 8 + 8 + 32 = 220
+        assert_eq!(s.canonical_bytes().len(), 220);
     }
 
     #[test]
@@ -592,5 +834,210 @@ mod tests {
         let a = BlrPrior::new(1.0, 1.0, 1.0).unwrap();
         let b = BlrPrior::new(1.5, 1.0, 1.0).unwrap();
         assert_ne!(a.config_hash, b.config_hash);
+    }
+
+    // ── Phase 0.4 Track C-2.3.4: numerical-rescue audit observability ──
+
+    #[test]
+    fn update_returns_none_on_normal_path() {
+        // Healthy prior + non-degenerate update → no clamp, no rescue.
+        let p = BlrPrior::new(1.0, 1.0, 1.0).unwrap();
+        let mut s = BlrState::from_prior(&p, 2);
+        let rescue = s.update(&[1.0, 2.0, 0.5, 1.5], &[1.0, 1.5]).unwrap();
+        assert!(rescue.is_none(), "normal update should not trigger rescue");
+        assert!(s.b >= f64::EPSILON);
+    }
+
+    #[test]
+    fn update_returns_some_when_b_clamps_to_epsilon() {
+        // Degenerate prior: `b = ε / 2` already below threshold. Any
+        // update with SSR == 0 keeps b_pre_clamp == b_old < ε so the
+        // clamp fires deterministically.
+        //   y = [0], X = [[1]] with prior μ = 0 ⇒ m_new = 0,
+        //   yty = 0, mu_lmu_old = 0, m_lm_new = 0 ⇒ SSR = 0.
+        let half_eps = f64::EPSILON / 2.0;
+        let p = BlrPrior::new(1.0, 1.0, half_eps).unwrap();
+        let mut s = BlrState::from_prior(&p, 1);
+        let rescue = s.update(&[1.0], &[0.0]).unwrap();
+        let pre = rescue.expect("clamp should fire on degenerate prior");
+        assert_eq!(pre.to_bits(), half_eps.to_bits());
+        assert_eq!(s.b, f64::EPSILON, "post-clamp b is ε");
+    }
+
+    #[test]
+    fn rescue_is_deterministic_across_runs() {
+        // Two independent runs with identical inputs hit the clamp with
+        // bit-identical pre-clamp values — the rescue path must
+        // preserve the determinism guarantee.
+        let half_eps = f64::EPSILON / 2.0;
+        let p = BlrPrior::new(1.0, 1.0, half_eps).unwrap();
+        let mut a = BlrState::from_prior(&p, 1);
+        let mut b = BlrState::from_prior(&p, 1);
+        let r_a = a.update(&[1.0], &[0.0]).unwrap();
+        let r_b = b.update(&[1.0], &[0.0]).unwrap();
+        assert_eq!(r_a, r_b);
+        assert_eq!(a.canonical_bytes(), b.canonical_bytes());
+    }
+
+    #[test]
+    fn audit_kind_blr_numerical_rescue_tag_is_0x18() {
+        let kind = crate::audit::AuditKind::BlrNumericalRescue {
+            reason: crate::audit::BLR_RESCUE_B_BELOW_EPSILON,
+            b_pre_clamp_bits: 0u64,
+        };
+        assert_eq!(kind.tag(), 0x18);
+    }
+
+    // ── Phase 0.4 Track B-2.2.6: NIG-aware merge math ─────────────────
+
+    #[test]
+    fn combine_dim_mismatch_errs() {
+        let p = BlrPrior::new(1.0, 1.0, 1.0).unwrap();
+        let mut a = BlrState::from_prior(&p, 2);
+        let b = BlrState::from_prior(&p, 3);
+        let err = a.combine(&b, &p).unwrap_err();
+        assert!(matches!(err, BlrError::FeatureDimMismatch { .. }));
+    }
+
+    #[test]
+    fn combine_two_priors_yields_uniform_posterior() {
+        // Two unupdated priors combined: precision sums (2 × λ I),
+        // mean stays 0, a = 2a-a = a, b = 2b-b = b.
+        let p = BlrPrior::new(1.0, 2.0, 3.0).unwrap();
+        let mut a = BlrState::from_prior(&p, 2);
+        let b = BlrState::from_prior(&p, 2);
+        a.combine(&b, &p).unwrap();
+        // Precision diagonal is 2*1.0 = 2.0; off-diagonal 0.
+        let prec = a.precision.to_vec();
+        assert_eq!(prec[0], 2.0);
+        assert_eq!(prec[1], 0.0);
+        assert_eq!(prec[2], 0.0);
+        assert_eq!(prec[3], 2.0);
+        // Mean stays at 0.
+        for &x in a.mean.to_vec().iter() {
+            assert_eq!(x, 0.0);
+        }
+        // a, b restored to prior after the +other-prior subtract.
+        assert_eq!(a.a, 2.0);
+        assert_eq!(a.b, 3.0);
+        assert_eq!(a.n_seen, 0);
+    }
+
+    #[test]
+    fn combine_increases_n_seen() {
+        // Combining two posteriors that have each been updated once
+        // (n_seen=1 each) gives n_seen=2.
+        let p = BlrPrior::new(1.0, 1.0, 1.0).unwrap();
+        let mut left = BlrState::from_prior(&p, 1);
+        let mut right = BlrState::from_prior(&p, 1);
+        left.update(&[1.0], &[2.0]).unwrap();
+        right.update(&[2.0], &[1.0]).unwrap();
+        assert_eq!(left.n_seen, 1);
+        assert_eq!(right.n_seen, 1);
+        left.combine(&right, &p).unwrap();
+        assert_eq!(left.n_seen, 2);
+    }
+
+    #[test]
+    fn combine_is_deterministic() {
+        // Two independent runs of the same combine produce
+        // bit-identical posterior bytes.
+        let p = BlrPrior::new(1.0, 1.0, 1.0).unwrap();
+        let mut a1 = BlrState::from_prior(&p, 2);
+        let mut b1 = BlrState::from_prior(&p, 2);
+        a1.update(&[1.0, 0.5, 0.5, 1.0], &[1.0, 1.0]).unwrap();
+        b1.update(&[2.0, 1.0], &[2.0]).unwrap();
+
+        let mut a2 = BlrState::from_prior(&p, 2);
+        let mut b2 = BlrState::from_prior(&p, 2);
+        a2.update(&[1.0, 0.5, 0.5, 1.0], &[1.0, 1.0]).unwrap();
+        b2.update(&[2.0, 1.0], &[2.0]).unwrap();
+
+        a1.combine(&b1, &p).unwrap();
+        a2.combine(&b2, &p).unwrap();
+        assert_eq!(a1.canonical_bytes(), a2.canonical_bytes());
+    }
+
+    // ── Phase 0.4 Track B-2.2.3: KL divergence ────────────────────────
+
+    #[test]
+    fn kl_divergence_self_is_zero() {
+        let p = BlrPrior::new(1.0, 1.0, 1.0).unwrap();
+        let s = BlrState::from_prior(&p, 3);
+        let kl = s.kl_divergence(&s).unwrap();
+        assert!(kl.abs() < 1e-10, "KL[X || X] should be 0, got {kl}");
+    }
+
+    #[test]
+    fn kl_divergence_two_priors_equal_is_zero() {
+        let p = BlrPrior::new(1.0, 1.0, 1.0).unwrap();
+        let a = BlrState::from_prior(&p, 2);
+        let b = BlrState::from_prior(&p, 2);
+        let kl = a.kl_divergence(&b).unwrap();
+        assert!(kl.abs() < 1e-10);
+    }
+
+    #[test]
+    fn kl_divergence_grows_with_mean_separation() {
+        // Two priors that have been updated differently — their
+        // posteriors now have different means and the KL should be
+        // non-zero and grow as the means diverge.
+        let p = BlrPrior::new(1.0, 1.0, 1.0).unwrap();
+        let mut a = BlrState::from_prior(&p, 2);
+        let mut b1 = BlrState::from_prior(&p, 2);
+        let mut b2 = BlrState::from_prior(&p, 2);
+        a.update(&[1.0, 0.5, 0.5, 1.0], &[1.0, 1.0]).unwrap();
+        b1.update(&[1.0, 0.5, 0.5, 1.0], &[1.0, 1.0]).unwrap();
+        b2.update(&[1.0, 0.5, 0.5, 1.0], &[100.0, 100.0]).unwrap();
+        let kl_close = a.kl_divergence(&b1).unwrap();
+        let kl_far = a.kl_divergence(&b2).unwrap();
+        assert!(kl_close.abs() < 1e-10);
+        assert!(kl_far > 0.0);
+        assert!(
+            kl_far > kl_close,
+            "KL should grow with separation: close={kl_close}, far={kl_far}"
+        );
+    }
+
+    #[test]
+    fn kl_divergence_dim_mismatch_errs() {
+        let p = BlrPrior::new(1.0, 1.0, 1.0).unwrap();
+        let a = BlrState::from_prior(&p, 2);
+        let b = BlrState::from_prior(&p, 3);
+        let err = a.kl_divergence(&b).unwrap_err();
+        assert!(matches!(err, BlrError::FeatureDimMismatch { .. }));
+    }
+
+    #[test]
+    fn kl_divergence_is_deterministic() {
+        let p = BlrPrior::new(1.0, 1.0, 1.0).unwrap();
+        let mut a1 = BlrState::from_prior(&p, 2);
+        let mut b1 = BlrState::from_prior(&p, 2);
+        a1.update(&[1.0, 0.5, 0.5, 1.0], &[1.0, 1.0]).unwrap();
+        b1.update(&[2.0, 1.0], &[2.0]).unwrap();
+        let kl1 = a1.kl_divergence(&b1).unwrap();
+
+        let mut a2 = BlrState::from_prior(&p, 2);
+        let mut b2 = BlrState::from_prior(&p, 2);
+        a2.update(&[1.0, 0.5, 0.5, 1.0], &[1.0, 1.0]).unwrap();
+        b2.update(&[2.0, 1.0], &[2.0]).unwrap();
+        let kl2 = a2.kl_divergence(&b2).unwrap();
+        assert_eq!(kl1.to_bits(), kl2.to_bits());
+    }
+
+    #[test]
+    fn combine_clamps_b_when_negative() {
+        // Construct a degenerate scenario: prior b is large, posteriors
+        // somehow have small b. Subtracting prior gives negative; clamp
+        // fires. Use direct field manipulation since the conjugate
+        // update math itself shouldn't drive b below prior.
+        let p = BlrPrior::new(1.0, 1.0, 100.0).unwrap();
+        let mut a = BlrState::from_prior(&p, 1);
+        let mut b = BlrState::from_prior(&p, 1);
+        a.b = 1.0;
+        b.b = 1.0;
+        a.combine(&b, &p).unwrap();
+        // a.b + b.b - p.b = 1 + 1 - 100 = -98; clamped to ε.
+        assert_eq!(a.b, f64::EPSILON);
     }
 }

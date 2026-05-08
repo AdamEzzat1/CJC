@@ -1,4 +1,11 @@
-# ABNG Phase 0.3a — Per-leaf MLP head (Design Note)
+# ABNG Phase 0.3a — Per-node MLP head (Design Note)
+
+> **Naming note (Phase 0.4 Track C-2.3.7):** the head is per-*node*,
+> not per-*leaf*. `init_params` is called for the root and every
+> `add_node` / `force_grow` / `force_split`, so every node in the
+> graph carries its own MLP params. Pre-0.4 this doc and the code
+> comments said "per-leaf" — the code was always per-node; only the
+> name was wrong. The body of this note has been updated to match.
 
 **Date:** 2026-05-06
 **Builds on:** [Phase 0.1](PHASE_0_1_DESIGN.md), [Phase 0.2](PHASE_0_2_DESIGN.md)
@@ -23,7 +30,7 @@ What 0.3a explicitly does **not** deliver:
 * **Structural decisions** (Grow/Split/Merge/Prune/Compress/Freeze) — Phase 0.3d.
 * **BLR head** for epistemic uncertainty — Phase 0.3b.
 * **OOD scoring, calibration bins, drift detector** — Phase 0.3c.
-* **Per-leaf forward optimizers** (e.g. wrapping `adam_step` per leaf) — user code orchestrates this with the existing `adam_step` builtin. ABNG provides storage; user code provides the training loop.
+* **Per-node forward optimizers** (e.g. wrapping `adam_step` per node) — user code orchestrates this with the existing `adam_step` builtin. ABNG provides storage; user code provides the training loop.
 
 ## Crate dependency change
 

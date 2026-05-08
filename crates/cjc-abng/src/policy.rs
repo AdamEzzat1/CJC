@@ -20,29 +20,33 @@
 //! # Canonical field order
 //!
 //! ```text
-//!   [0]  H_grow              — route entropy threshold for Grow
-//!   [1]  grow_min            — min samples_seen for Grow                (cast u64)
-//!   [2]  split_min           — min samples_seen for Split               (cast u64)
-//!   [3]  nll_split_gain      — held-out ΔNLL gain for Split
-//!   [4]  impurity_min        — impurity decrease threshold for Split
-//!   [5]  tau_merge           — Hamming distance threshold for Merge     (cast u8, ≤ 32)
-//!   [6]  kl_merge            — posterior KL threshold for Merge
-//!   [7]  prune_floor         — sample count below which Prune permitted (cast u64)
-//!   [8]  prune_grace_epochs  — signature-stable epochs before Prune     (cast u64)
-//!   [9]  tau_compress        — Hamming distance threshold for Compress  (cast u8, ≤ 32)
-//!   [10] freeze_after        — signature-stable epochs before Freeze    (cast u64)
+//!   [0]  H_grow                — route entropy threshold for Grow
+//!   [1]  grow_min              — min samples_seen for Grow                (cast u64)
+//!   [2]  split_min             — min samples_seen for Split               (cast u64)
+//!   [3]  nll_split_gain        — held-out ΔNLL gain for Split
+//!   [4]  impurity_min          — impurity decrease threshold for Split
+//!   [5]  tau_merge             — Hamming distance threshold for Merge     (cast u8, ≤ 32)
+//!   [6]  kl_merge              — posterior KL threshold for Merge
+//!   [7]  prune_floor           — sample count below which Prune permitted (cast u64)
+//!   [8]  prune_grace_epochs    — signature-stable epochs before Prune     (cast u64)
+//!   [9]  tau_compress          — Hamming distance threshold for Compress  (cast u8, ≤ 32)
+//!   [10] freeze_after          — signature-stable epochs before Freeze    (cast u64)
+//!   [11] drift_unfreeze        — drift score above which a frozen node    (Phase 0.4
+//!                                will auto-unfreeze inside `decide_step`. B-2.2.7)
+//!                                +∞ disables the auto-unfreeze ladder step.
 //! ```
 //!
-//! Canonical bytes: `11 × f64::to_bits().to_be_bytes()` = 88 bytes.
+//! Canonical bytes: `12 × f64::to_bits().to_be_bytes()` = 96 bytes (snapshot v10).
 
 use cjc_repro::KahanAccumulatorF64;
 
-/// Number of thresholds in a [`DecisionPolicy`]. Frozen — every snapshot
-/// from v7 onward expects exactly this many bytes in the policy section.
-pub const N_THRESHOLDS: usize = 11;
+/// Number of thresholds in a [`DecisionPolicy`]. Phase 0.4 Track B-2.2.7
+/// added the 12th threshold (`drift_unfreeze`) — every snapshot from v10
+/// onward expects exactly this many bytes in the policy section.
+pub const N_THRESHOLDS: usize = 12;
 
 /// Total canonical-bytes length of a [`DecisionPolicy`]:
-/// `N_THRESHOLDS * size_of::<f64>()` = 88 bytes.
+/// `N_THRESHOLDS * size_of::<f64>()` = 96 bytes (snapshot v10).
 pub const POLICY_BYTES_LEN: usize = N_THRESHOLDS * 8;
 
 /// Errors specific to [`DecisionPolicy`] construction.
@@ -201,6 +205,13 @@ impl DecisionPolicy {
     pub fn freeze_after(&self) -> u64 {
         self.thresholds[10] as u64
     }
+
+    /// `drift_unfreeze` — drift score above which a frozen node will
+    /// auto-unfreeze inside `decide_step` (Phase 0.4 Track B-2.2.7).
+    /// Set to `f64::INFINITY` to disable auto-unfreeze.
+    pub fn drift_unfreeze(&self) -> f64 {
+        self.thresholds[11]
+    }
 }
 
 /// Helper used by `new` and `canonical_bytes` so the encoding is
@@ -245,13 +256,14 @@ mod tests {
             10.0, // prune_grace_epochs
             8.0, // tau_compress (Hamming)
             20.0, // freeze_after
+            f64::MAX, // drift_unfreeze (effectively disabled — finite-validated)
         ]
     }
 
     #[test]
     fn n_thresholds_locked() {
-        assert_eq!(N_THRESHOLDS, 11);
-        assert_eq!(POLICY_BYTES_LEN, 88);
+        assert_eq!(N_THRESHOLDS, 12);
+        assert_eq!(POLICY_BYTES_LEN, 96);
     }
 
     #[test]
@@ -272,7 +284,7 @@ mod tests {
             err,
             PolicyError::WrongLength {
                 got: 10,
-                expected: 11
+                expected: 12
             }
         );
     }
@@ -312,7 +324,7 @@ mod tests {
     fn canonical_bytes_size() {
         let p = DecisionPolicy::new(&ok_thresholds()).unwrap();
         assert_eq!(p.canonical_bytes().len(), POLICY_BYTES_LEN);
-        assert_eq!(POLICY_BYTES_LEN, 88);
+        assert_eq!(POLICY_BYTES_LEN, 96);
     }
 
     #[test]
@@ -347,8 +359,8 @@ mod tests {
         let bytes = p.canonical_bytes();
         let expected = 1.0_f64.to_bits().to_be_bytes();
         assert_eq!(&bytes[0..8], &expected);
-        // Remaining 80 bytes are zero (since the rest are 0.0 and
+        // Remaining 88 bytes are zero (since the rest are 0.0 and
         // 0.0_f64.to_bits() == 0).
-        assert_eq!(&bytes[8..], &[0u8; 80]);
+        assert_eq!(&bytes[8..], &[0u8; 88]);
     }
 }

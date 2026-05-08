@@ -65,7 +65,7 @@ fn truncated_blob_rejected() {
 fn payload_tampering_caught() {
     let g = build(0, &[1.0, 2.0, 3.0]);
     let mut blob = serialize(&g);
-    // v8 layout, no optional sections, single node, no decide_step yet:
+    // v10 layout, no optional sections, single node, no decide_step yet:
     //   Header (v5 base): 5 + 8 + 8 + 32 + 1 + 1 + 1 + 1 + 1 = 58
     //   Phase 0.3d-3 additions: 1 (policy_present=0) + 48 (action_counts u64×6) = 49
     //   n_nodes u32: 4
@@ -79,10 +79,14 @@ fn payload_tampering_caught() {
     //   Phase 0.3d-3: + 2 (is_frozen + is_active) = 80
     //   Phase 0.3d-4: + 1 (last_signature_present=0)
     //                 + 8 (signature_stable_calls u64) = 89
+    //   Phase 0.4 Track B-2.2.2: + 6 × 8 (ece + sigma history)
+    //                           + 1 (ece_fill_count) + 1 (sigma_fill_count)
+    //                           = 50 → 139 cumulative
+    //   Phase 0.4 Track B-2.2.1: + 4 × 24 (Welford accumulators) = 96 → 235
     //
     //   n_events u64: 8
     //   First event: 4 (payload_len), then payload
-    let event_start = 111 + 89 + 8 + 4;
+    let event_start = 111 + 235 + 8 + 4;
     blob[event_start + 30] ^= 0xFF;
     let err = replay(&blob);
     assert!(matches!(

@@ -37,6 +37,10 @@ pub enum DensityError {
     NoDensityTracker,
     /// `density_observe` got features whose second axis didn't match `d`.
     FeatureDimMismatch { expected: u32, got: u32 },
+    /// `density_observe` was given a non-finite (NaN, +Inf, -Inf) value
+    /// in the features batch. Rejected at the boundary before any
+    /// Welford update so NaN can't poison the running mean / M2 forever.
+    NonFiniteInput { value: f64 },
 }
 
 impl std::fmt::Display for DensityError {
@@ -55,6 +59,10 @@ impl std::fmt::Display for DensityError {
             DensityError::FeatureDimMismatch { expected, got } => write!(
                 f,
                 "abng density: features dim {got} doesn't match d={expected}"
+            ),
+            DensityError::NonFiniteInput { value } => write!(
+                f,
+                "abng density: input value {value} must be finite (rejected NaN/+Inf/-Inf)"
             ),
         }
     }
@@ -86,6 +94,15 @@ impl DensityTracker {
                 expected: self.d,
                 got: features.len() as u32,
             });
+        }
+        // Reject non-finite inputs before touching Welford state. NaN /
+        // +Inf / -Inf would propagate through `mean` and `m2` forever
+        // once admitted, leaving the canonical-bytes hash stable-but-
+        // poisoned and silently passing replay.
+        for &v in features {
+            if !v.is_finite() {
+                return Err(DensityError::NonFiniteInput { value: v });
+            }
         }
         let n_obs = features.len() / dz;
         let mut mean = self.mean.to_vec();

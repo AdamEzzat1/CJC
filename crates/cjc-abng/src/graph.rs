@@ -20,7 +20,7 @@
 use cjc_ad::pinn::Activation;
 use cjc_runtime::tensor::Tensor;
 
-use crate::audit::{AuditEvent, AuditKind};
+use crate::audit::{AuditEvent, AuditKind, BLR_RESCUE_B_BELOW_EPSILON};
 use crate::blr::{BlrError, BlrPrior, BlrState};
 use crate::calibration::{CalibrationBins, CalibrationError};
 use crate::children::{AdaptiveChildren, ChildrenKind};
@@ -125,6 +125,11 @@ pub enum GraphError {
     ForceSplitNotLeaf { node_id: NodeId },
     /// `abng_action_count` was given an index outside `0..=5`.
     UnknownActionKind(u8),
+    /// `observe` was called with a non-finite value (NaN, +Inf, or -Inf).
+    /// Rejected at the boundary before any state mutation or audit append,
+    /// so a rejected call leaves the chain head and stats version
+    /// unchanged.
+    ObserveNonFinite { value: f64 },
 }
 
 impl From<PolicyError> for GraphError {
@@ -202,6 +207,10 @@ impl std::fmt::Display for GraphError {
                 f,
                 "abng action_count: unknown action kind index {i} (must be 0..=5)"
             ),
+            GraphError::ObserveNonFinite { value } => write!(
+                f,
+                "abng observe: value {value} must be finite (rejected NaN/+Inf/-Inf)"
+            ),
         }
     }
 }
@@ -261,7 +270,7 @@ pub struct AdaptiveBeliefGraph {
     /// at most once via [`set_codebook`](Self::set_codebook); subsequent
     /// installs error.
     pub codebook: Option<QuantileCodebook>,
-    /// Optional frozen per-leaf MLP architecture (Phase 0.3a). Installed
+    /// Optional frozen per-node MLP architecture (Phase 0.3a). Installed
     /// at most once via [`set_leaf_head`](Self::set_leaf_head); subsequent
     /// installs error. Must be installed before any
     /// [`add_node`](Self::add_node).
@@ -326,10 +335,18 @@ impl AdaptiveBeliefGraph {
     /// Apply one observation to the named node. Bumps the per-node
     /// `stats_version`, advances the per-node stats chain, and appends a
     /// `BeliefUpdate` event to the global chain.
+    ///
+    /// Non-finite values (NaN, +Inf, -Inf) are rejected at the boundary
+    /// with [`GraphError::ObserveNonFinite`]. The check runs before any
+    /// state mutation or audit append, so a rejected call leaves the
+    /// chain head, stats version, and audit log identical to pre-call.
     pub fn observe(&mut self, node_id: NodeId, value: f64) -> Result<(), GraphError> {
         let n_nodes = self.node_count();
         if node_id >= n_nodes {
             return Err(GraphError::NodeOutOfRange { node_id, n_nodes });
+        }
+        if !value.is_finite() {
+            return Err(GraphError::ObserveNonFinite { value });
         }
         // Apply update first; the audit event hashes the *post-update* stats.
         self.nodes[node_id as usize].observe(value);
@@ -381,17 +398,22 @@ impl AdaptiveBeliefGraph {
         }
 
         let mut child = AdaptiveBeliefNode::new(new_id, Some(parent), self.chain_head);
-        // Initialize per-leaf params if a head is configured. Done before
+        // Initialize per-node params if a head is configured. Done before
         // pushing so the audit event sequence stays consistent: NodeAdded
         // first (the structural mutation), LeafParamsInitialized after.
         if let Some(head) = &self.head {
             child.params = init_params(head, self.seed, new_id);
         }
-        // Initialize per-leaf BLR state if a prior is configured. d is
-        // determined by the leaf head's penultimate dim.
+        // Initialize per-node BLR state if a prior is configured. d is
+        // determined by the leaf head's penultimate dim. Phase 0.4 Track
+        // C-2.3.5 — stamp `feature_version_hash` from the child's freshly
+        // Xavier-init'd params so the BLR posterior is locked to that
+        // feature space until the next reset.
         if let (Some(head), Some(prior)) = (&self.head, &self.blr_prior) {
             let d = blr_feature_dim(head);
-            child.blr = Some(BlrState::from_prior(prior, d));
+            let mut blr = BlrState::from_prior(prior, d);
+            blr.feature_version_hash = params_hash(&child.params);
+            child.blr = Some(blr);
         }
         // Phase 0.3c — density tracker (uses BLR feature dim).
         if let (true, Some(head)) = (self.density_enabled, &self.head) {
@@ -560,7 +582,7 @@ impl AdaptiveBeliefGraph {
         Ok(())
     }
 
-    /// Install the per-leaf MLP head architecture (Phase 0.3a).
+    /// Install the per-node MLP head architecture (Phase 0.3a).
     ///
     /// One-shot — subsequent calls error with [`LeafHeadError::AlreadyFrozen`].
     /// **Must be called before any `add_node`** since existing children would
@@ -680,6 +702,63 @@ impl AdaptiveBeliefGraph {
         Ok(())
     }
 
+    /// Write back the entire MLP param vector for a node in one call.
+    /// Phase 0.4 Track C-2.3.6 — collapses the `2(L+1)` per-tensor
+    /// `LeafParamsUpdated` events that an optimizer step under
+    /// `leaf_set_param` would emit into a single
+    /// `LeafParamsUpdatedBatch` audit event with one hash witness for
+    /// the whole post-update vector.
+    ///
+    /// `params` must have length `head.param_count()` and each tensor's
+    /// shape must match `expected_param_shape(head, k)` for its index.
+    /// Validation is all-or-nothing — if any tensor mismatches, the
+    /// node's params are left unchanged and the corresponding
+    /// `LeafHeadError` is returned without an audit append.
+    pub fn leaf_set_params_batch(
+        &mut self,
+        node_id: NodeId,
+        params: Vec<Tensor>,
+    ) -> Result<(), GraphError> {
+        let n_nodes = self.node_count();
+        if node_id >= n_nodes {
+            return Err(GraphError::NodeOutOfRange { node_id, n_nodes });
+        }
+        let head = self.head.as_ref().ok_or(LeafHeadError::NoLeafHead)?;
+        let n_params = head.param_count();
+        if params.len() != n_params {
+            return Err(LeafHeadError::ParamIndexOutOfRange {
+                param_index: params.len() as u32,
+                n_params: n_params as u32,
+            }
+            .into());
+        }
+        // Validate every tensor's shape *before* mutating any node
+        // state — partial writes would diverge from the all-or-nothing
+        // contract that callers expect from a "batch" operation.
+        for (k, t) in params.iter().enumerate() {
+            let expected = expected_param_shape(head, k as u32);
+            if t.shape() != expected.as_slice() {
+                return Err(LeafHeadError::ShapeMismatch {
+                    node_id,
+                    param_index: k as u32,
+                    expected,
+                    got: t.shape().to_vec(),
+                }
+                .into());
+            }
+        }
+        // All params validated — write atomically.
+        self.nodes[node_id as usize].params = params;
+        let phash = params_hash(&self.nodes[node_id as usize].params);
+        self.append_event(
+            node_id,
+            AuditKind::LeafParamsUpdatedBatch {
+                params_hash: phash,
+            },
+        );
+        Ok(())
+    }
+
     /// SHA-256 of a node's full params blob (canonical bytes).
     pub fn leaf_params_hash(&self, node_id: NodeId) -> Result<[u8; 32], GraphError> {
         let n_nodes = self.node_count();
@@ -765,8 +844,12 @@ impl AdaptiveBeliefGraph {
         let config_hash = prior.config_hash;
         let d = blr_feature_dim(head);
         // Initialize root's BLR state from prior before installing so
-        // post-init hashes are computable in one pass.
-        let root_blr = BlrState::from_prior(&prior, d);
+        // post-init hashes are computable in one pass. Phase 0.4 Track
+        // C-2.3.5 — also stamp `feature_version_hash` from the root's
+        // current MLP params hash so subsequent `blr_update` calls can
+        // detect drift.
+        let mut root_blr = BlrState::from_prior(&prior, d);
+        root_blr.feature_version_hash = params_hash(&self.nodes[0].params);
         self.nodes[0].blr = Some(root_blr);
         self.blr_prior = Some(prior);
         self.append_event(0, AuditKind::BlrPriorConfigured { config_hash });
@@ -844,10 +927,23 @@ impl AdaptiveBeliefGraph {
         if node_id >= n_nodes {
             return Err(GraphError::NodeOutOfRange { node_id, n_nodes });
         }
+        // Phase 0.4 Track C-2.3.5 — feature-version stale check. Snapshot
+        // the current per-node MLP params hash *before* taking a mutable
+        // borrow on the BLR state; if the BLR was trained against a
+        // different feature space, refuse the update so the posterior
+        // never trains on inconsistent features.
+        let current_hash = params_hash(&self.nodes[node_id as usize].params);
         let blr = self.nodes[node_id as usize]
             .blr
             .as_mut()
             .ok_or(BlrError::NoBlrPrior)?;
+        if blr.feature_version_hash != current_hash {
+            return Err(BlrError::FeatureVersionStale {
+                stored: blr.feature_version_hash,
+                current: current_hash,
+            }
+            .into());
+        }
         let n = y.len();
         let expected = blr.d as usize;
         if features.len() != n * expected.max(1) || (n > 0 && features.len() % expected.max(1) != 0)
@@ -858,18 +954,67 @@ impl AdaptiveBeliefGraph {
             }
             .into());
         }
-        blr.update(features, y)?;
+        let rescue = blr.update(features, y)?;
         let shash = self.nodes[node_id as usize]
             .blr
             .as_ref()
             .expect("blr present")
             .state_hash();
         self.append_event(node_id, AuditKind::BlrUpdated { state_hash: shash });
+        // Phase 0.4 Track C-2.3.4 — diagnostic event when the b<ε
+        // numerical rescue fired. Emitted *after* BlrUpdated so the
+        // state-changing event is the canonical one and the rescue is
+        // metadata. Filtering for BlrNumericalRescue identifies which
+        // immediately-preceding update needed rescue.
+        if let Some(b_pre_clamp) = rescue {
+            self.append_event(
+                node_id,
+                AuditKind::BlrNumericalRescue {
+                    reason: BLR_RESCUE_B_BELOW_EPSILON,
+                    b_pre_clamp_bits: b_pre_clamp.to_bits(),
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// Phase 0.4 Track C-2.3.5 — reset the BLR posterior on a node back
+    /// to the configured prior, refreshing `feature_version_hash` to
+    /// the current per-node MLP params. Use this after intentionally
+    /// modifying the MLP weights (`leaf_set_param` /
+    /// `leaf_set_params_batch`) to clear the stale `BlrError::FeatureVersionStale`
+    /// guard before continuing training.
+    ///
+    /// Emits a `BlrInitialized` audit event so the chain witnesses the
+    /// reset; the apply_event path during replay handles the reset
+    /// uniformly (whether it originated at install time or here).
+    pub fn reset_blr(&mut self, node_id: NodeId) -> Result<(), GraphError> {
+        let n_nodes = self.node_count();
+        if node_id >= n_nodes {
+            return Err(GraphError::NodeOutOfRange { node_id, n_nodes });
+        }
+        let prior = self.blr_prior.as_ref().ok_or(BlrError::NoBlrPrior)?.clone();
+        if self.nodes[node_id as usize].blr.is_none() {
+            return Err(BlrError::NoBlrPrior.into());
+        }
+        let head = self.head.as_ref().ok_or(LeafHeadError::NoLeafHead)?;
+        let d = blr_feature_dim(head);
+        let new_hash = params_hash(&self.nodes[node_id as usize].params);
+        let mut fresh = BlrState::from_prior(&prior, d);
+        fresh.feature_version_hash = new_hash;
+        self.nodes[node_id as usize].blr = Some(fresh);
+        let shash = self.nodes[node_id as usize]
+            .blr
+            .as_ref()
+            .expect("just set")
+            .state_hash();
+        self.append_event(node_id, AuditKind::BlrInitialized { state_hash: shash });
         Ok(())
     }
 
     /// Predict at a single feature vector `phi`. Returns
-    /// `(mean, epistemic_var, aleatoric_var)`.
+    /// `(mean, epistemic_leverage, aleatoric_var)` — see
+    /// [`BlrState::predict`] for the leverage-vs-variance distinction.
     pub fn blr_predict(
         &self,
         node_id: NodeId,
@@ -1153,19 +1298,22 @@ impl AdaptiveBeliefGraph {
         } else {
             0.0
         };
-        // Epistemic z: BLR's epistemic variance at `phi`. When the
-        // node has captured a training-time `expected_epistemic`
-        // reference (Phase 0.3d-2), use the calibrated ratio
-        // `(epi / expected).clamp(0, 1)`. Otherwise fall back to the
-        // raw `epi.clamp(0, 1)` Phase 0.3c behavior — meaningful for
-        // nodes that haven't reached uncertainty stability yet.
+        // Epistemic z: BLR's epistemic *leverage* at `phi` (the second
+        // tuple element of `predict`; named "epistemic_var" pre-0.4 but
+        // it has always been dimensionless leverage — see Phase 0.4
+        // Track C-2.3.1). When the node has captured a training-time
+        // `expected_epistemic` reference (Phase 0.3d-2), use the
+        // calibrated ratio `(lev / expected).clamp(0, 1)`. Otherwise
+        // fall back to the raw `lev.clamp(0, 1)` Phase 0.3c behavior —
+        // meaningful for nodes that haven't reached uncertainty
+        // stability yet.
         let epistemic_z = match node.blr.as_ref() {
             Some(blr) => match blr.predict(phi) {
-                Ok((_m, epi, _ale)) => match node.expected_epistemic {
+                Ok((_m, lev, _ale)) => match node.expected_epistemic {
                     Some(expected) if expected > 0.0 => {
-                        (epi / expected).min(1.0).max(0.0)
+                        (lev / expected).min(1.0).max(0.0)
                     }
-                    _ => epi.min(1.0).max(0.0),
+                    _ => lev.min(1.0).max(0.0),
                 },
                 Err(_) => 0.0,
             },
@@ -1184,9 +1332,9 @@ impl AdaptiveBeliefGraph {
         Ok(self.nodes[node_id as usize].children.kind())
     }
 
-    // ── Phase 0.3d-2: per-leaf expected_epistemic capture ─────────
+    // ── Phase 0.3d-2: per-node expected_epistemic capture ─────────
 
-    /// Capture a per-leaf training-time epistemic-σ reference. After
+    /// Capture a per-node training-time epistemic-σ reference. After
     /// capture, [`ood_score`](Self::ood_score) uses the calibrated
     /// ratio `(epi / expected).clamp(0, 1)` instead of the raw clamp.
     ///
@@ -1393,7 +1541,12 @@ impl AdaptiveBeliefGraph {
         }
         if let (Some(head), Some(prior)) = (&self.head, &self.blr_prior) {
             let d = blr_feature_dim(head);
-            child.blr = Some(BlrState::from_prior(prior, d));
+            // Phase 0.4 Track C-2.3.5 — stamp feature_version_hash from
+            // the freshly Xavier-init'd params (force_grow / force_split
+            // paths).
+            let mut blr = BlrState::from_prior(prior, d);
+            blr.feature_version_hash = params_hash(&child.params);
+            child.blr = Some(blr);
         }
         if let (true, Some(head)) = (self.density_enabled, &self.head) {
             let d = blr_feature_dim(head);
@@ -1577,7 +1730,12 @@ impl AdaptiveBeliefGraph {
         }
         if let (Some(head), Some(prior)) = (&self.head, &self.blr_prior) {
             let d = blr_feature_dim(head);
-            child.blr = Some(BlrState::from_prior(prior, d));
+            // Phase 0.4 Track C-2.3.5 — stamp feature_version_hash from
+            // the freshly Xavier-init'd params (force_grow / force_split
+            // paths).
+            let mut blr = BlrState::from_prior(prior, d);
+            blr.feature_version_hash = params_hash(&child.params);
+            child.blr = Some(blr);
         }
         if let (true, Some(head)) = (self.density_enabled, &self.head) {
             let d = blr_feature_dim(head);
@@ -1619,8 +1777,59 @@ impl AdaptiveBeliefGraph {
         if self.nodes[absorbed as usize].is_frozen {
             return Err(GraphError::NodeFrozen { node_id: absorbed });
         }
+
+        // Phase 0.4 Track B-2.2.6 — fold absorbed's evidence into `into`
+        // before deactivation. Pre-0.4 the merge was a "lose absorbed's
+        // training history" no-op; now the BLR posteriors and Welford
+        // node stats are properly combined. Both combines are pure
+        // functions of the two states — no external entropy — so
+        // training and replay produce bit-identical results.
+
+        // 1. Combine NodeStats (parallel Welford merge).
+        let absorbed_stats = self.nodes[absorbed as usize].stats.clone();
+        self.nodes[into as usize].stats.combine(&absorbed_stats);
+        self.nodes[into as usize].stats_version = self.nodes[into as usize]
+            .stats_version
+            .saturating_add(1);
+
+        // 2. Combine BLR posteriors (NIG-aware combine).
+        if let (Some(prior), true, true) = (
+            self.blr_prior.clone(),
+            self.nodes[into as usize].blr.is_some(),
+            self.nodes[absorbed as usize].blr.is_some(),
+        ) {
+            let absorbed_blr = self.nodes[absorbed as usize]
+                .blr
+                .as_ref()
+                .expect("absorbed.blr present")
+                .clone();
+            let into_blr = self.nodes[into as usize]
+                .blr
+                .as_mut()
+                .expect("into.blr present");
+            into_blr.combine(&absorbed_blr, &prior)?;
+        }
+
+        // 3. Mark absorbed inactive and append the structural Merge
+        //    event. The event's `stats_hash` records *absorbed's*
+        //    stats (unchanged by the combine, since combine wrote into
+        //    `into`).
         self.nodes[absorbed as usize].is_active = false;
         self.append_event(absorbed, AuditKind::Merge { absorbed, into });
+
+        // 4. Phase 0.4 Track B-2.2.6 — append a `BlrUpdated` witness on
+        //    `into` carrying the post-combine state_hash. Without this,
+        //    the end-of-replay per-node BLR verifier (which walks the
+        //    audit log for the latest `BlrInitialized`/`BlrUpdated`
+        //    event on the node) would compare the snapshot's combined
+        //    state against an obsolete pre-merge witness and reject the
+        //    blob with `BlrStateHashMismatch`. The witness is emitted
+        //    only when into has a BLR posterior installed.
+        if let Some(blr) = self.nodes[into as usize].blr.as_ref() {
+            let combined_hash = blr.state_hash();
+            self.append_event(into, AuditKind::BlrUpdated { state_hash: combined_hash });
+        }
+
         self.bump_action_count(ActionKind::Merge);
         Ok(())
     }
@@ -1762,6 +1971,34 @@ impl AdaptiveBeliefGraph {
             // to use the same counter).
             self.advance_signature_stability(node_id);
 
+            // Phase 0.4 Track B-2.2.2 — advance the 3-window ECE / σ
+            // stability buffers. Like signature stability, these keep
+            // accumulating while a node is frozen so the Maturity
+            // flags reflect the latest trajectory once the node
+            // un-freezes.
+            self.advance_stability_history(node_id);
+
+            // Phase 0.4 Track B-2.2.7 — drift-trip auto-unfreeze. If a
+            // frozen node's drift score has crossed the policy's
+            // `drift_unfreeze` threshold, unfreeze it before any other
+            // trigger considers it. This single ladder step lets a
+            // frozen sub-tree return to active learning when the
+            // distribution it was trained on shifts.
+            if self.nodes[nid_idx].is_frozen
+                && self.nodes[nid_idx].drift_baseline.is_some()
+                && self.nodes[nid_idx].density.is_some()
+            {
+                let drift_score = self.nodes[nid_idx]
+                    .drift_baseline
+                    .as_ref()
+                    .unwrap()
+                    .drift_score(self.nodes[nid_idx].density.as_ref().unwrap())
+                    .unwrap_or(0.0);
+                if drift_score > policy.drift_unfreeze() {
+                    let _ = self.unfreeze(node_id);
+                }
+            }
+
             if self.nodes[nid_idx].is_frozen {
                 continue;
             }
@@ -1775,7 +2012,7 @@ impl AdaptiveBeliefGraph {
                 && self.nodes[nid_idx].expected_epistemic.is_none()
                 && self.nodes[nid_idx].blr.is_some()
             {
-                if let Some(value) = epistemic_var_at_posterior_mean(
+                if let Some(value) = epistemic_leverage_at_posterior_mean(
                     self.nodes[nid_idx].blr.as_ref().unwrap(),
                 ) {
                     // Use the public path so the audit witness fires
@@ -1830,10 +2067,108 @@ impl AdaptiveBeliefGraph {
         counts
     }
 
+    /// Phase 0.4 Track B-2.2.2 — advance the per-node 3-window
+    /// stability buffers (`ece_history`, `sigma_history`) by one
+    /// window. Each call shifts the existing values left
+    /// (`history[0] ← history[1]`, `history[1] ← history[2]`) and
+    /// records the freshest reading in `history[2]`. Fill counters
+    /// saturate at 3.
+    ///
+    /// Called from `decide_step` once per node per call. Public so
+    /// users (and tests) without a full decision policy can drive the
+    /// buffers manually.
+    pub fn advance_stability_history(&mut self, node_id: NodeId) {
+        let nid_idx = node_id as usize;
+        if nid_idx >= self.nodes.len() {
+            return;
+        }
+        // Snapshot scalars first to avoid mutable-borrow aliasing.
+        let ece_opt = self.nodes[nid_idx]
+            .calibration
+            .as_ref()
+            .map(|cal| cal.ece());
+        let sigma_opt = self.nodes[nid_idx]
+            .blr
+            .as_ref()
+            .and_then(epistemic_leverage_at_posterior_mean);
+
+        let node = &mut self.nodes[nid_idx];
+        // ECE window: only fills when calibration is installed.
+        if let Some(ece) = ece_opt {
+            let h = &mut node.ece_history;
+            h[0] = h[1];
+            h[1] = h[2];
+            h[2] = ece;
+            if node.ece_fill_count < 3 {
+                node.ece_fill_count += 1;
+            }
+        }
+        // σ window: only fills when BLR posterior is installed AND
+        // `epistemic_leverage_at_posterior_mean` produces a positive
+        // finite value (zero / non-finite means "no signal yet" —
+        // also covers singular Cholesky on a pre-Welford state).
+        if let Some(sigma) = sigma_opt {
+            let h = &mut node.sigma_history;
+            h[0] = h[1];
+            h[1] = h[2];
+            h[2] = sigma;
+            if node.sigma_fill_count < 3 {
+                node.sigma_fill_count += 1;
+            }
+        }
+    }
+
+    /// Phase 0.4 Track B-2.2.1 — fold one fresh observation into each
+    /// of the four `SignatureWelford` accumulators on `node_id`.
+    /// Called from `advance_signature_stability` so the per-call
+    /// Welford-derived signature reflects the most-recent metric
+    /// readings before the stability comparison.
+    ///
+    /// Observation rules:
+    /// - prediction:  always (uses `NodeStats.mean`)
+    /// - uncertainty: only if BLR installed AND
+    ///   `epistemic_leverage_at_posterior_mean` returns Some
+    /// - calibration: only if calibration bins installed
+    /// - routing:     always (uses `routing_observation_value` —
+    ///   even an empty children container produces a defined value)
+    fn advance_signature_welfords(&mut self, node_id: NodeId) {
+        let nid_idx = node_id as usize;
+        // Snapshot every scalar reading via immutable borrow first,
+        // then mutate the Welfords via independent mutable borrows —
+        // sidesteps `&mut self.nodes[i]` aliasing issues.
+        let mean = self.nodes[nid_idx].stats.mean;
+        let lev_opt = self.nodes[nid_idx]
+            .blr
+            .as_ref()
+            .and_then(epistemic_leverage_at_posterior_mean);
+        let ece_opt = self
+            .nodes[nid_idx]
+            .calibration
+            .as_ref()
+            .map(|cal| cal.ece());
+        let routing_value =
+            crate::signature::routing_observation_value(&self.nodes[nid_idx]);
+
+        let node = &mut self.nodes[nid_idx];
+        node.welford_prediction.observe(mean);
+        if let Some(lev) = lev_opt {
+            node.welford_uncertainty.observe(lev);
+        }
+        if let Some(ece) = ece_opt {
+            node.welford_calibration.observe(ece);
+        }
+        node.welford_routing.observe(routing_value);
+    }
+
     /// Internal — advance `last_signature` + `signature_stable_calls`
     /// for one node based on its current state. Used by `decide_step`
     /// for both active and frozen nodes.
+    ///
+    /// Phase 0.4 Track B-2.2.1 — folds one observation into each
+    /// `SignatureWelford` BEFORE computing the new signature, so the
+    /// signature is always Welford-smoothed.
     fn advance_signature_stability(&mut self, node_id: NodeId) {
+        self.advance_signature_welfords(node_id);
         let nid_idx = node_id as usize;
         let new_sig = NodeSignature::from_node(&self.nodes[nid_idx]).canonical_bytes();
         match self.nodes[nid_idx].last_signature {
@@ -1860,14 +2195,21 @@ fn hamming_byte_distance(a: &[u8; 32], b: &[u8; 32]) -> u32 {
     a.iter().zip(b.iter()).filter(|(x, y)| x != y).count() as u32
 }
 
-/// Compute the BLR's epistemic variance at the posterior mean. Used
+/// Compute the BLR's epistemic *leverage* at the posterior mean. Used
 /// as the canonical "training-time reference" when auto-capturing
 /// `expected_epistemic`. Returns `None` when `predict` errors or
 /// produces a non-positive / non-finite value.
-fn epistemic_var_at_posterior_mean(blr: &BlrState) -> Option<f64> {
+///
+/// Note: the value stored in `expected_epistemic` is leverage, not
+/// variance — Phase 0.4 Track C-2.3.1 corrected the naming. The OOD
+/// ratio `(epi / expected).clamp(0, 1)` works on its own terms because
+/// units cancel; external callers who want output-unit predictive
+/// variance should multiply by `aleatoric_var` themselves (see
+/// [`BlrState::predict`]).
+fn epistemic_leverage_at_posterior_mean(blr: &BlrState) -> Option<f64> {
     let phi = blr.mean.to_vec();
     match blr.predict(&phi) {
-        Ok((_m, epi, _ale)) if epi.is_finite() && epi > 0.0 => Some(epi),
+        Ok((_m, lev, _ale)) if lev.is_finite() && lev > 0.0 => Some(lev),
         _ => None,
     }
 }
@@ -1920,6 +2262,7 @@ fn try_merge(
         None => return false,
     };
     let tau = policy.tau_merge() as u32;
+    let kl_thresh = policy.kl_merge();
     let siblings: Vec<NodeId> = g.nodes[parent as usize]
         .children
         .iter()
@@ -1932,9 +2275,25 @@ fn try_merge(
     for sib_id in siblings {
         let sib_sig =
             NodeSignature::from_node(&g.nodes[sib_id as usize]).canonical_bytes();
-        if hamming_byte_distance(new_sig, &sib_sig) <= tau
-            && g.force_merge(node_id, sib_id).is_ok()
-        {
+        if hamming_byte_distance(new_sig, &sib_sig) > tau {
+            continue;
+        }
+        // Phase 0.4 Track B-2.2.3 — KL-divergence gate. If both nodes
+        // have BLR posteriors installed, only merge when the
+        // weight-distribution KL falls below `policy.kl_merge()`.
+        // Without BLR (graph has no prior), the gate is skipped — the
+        // pre-0.4 Hamming-only behavior is preserved for graphs that
+        // never installed a BLR head.
+        if let (Some(blr_self), Some(blr_sib)) = (
+            g.nodes[node_id as usize].blr.as_ref(),
+            g.nodes[sib_id as usize].blr.as_ref(),
+        ) {
+            match blr_self.kl_divergence(blr_sib) {
+                Ok(kl) if kl <= kl_thresh => {}
+                _ => continue, // KL too large or compute error → skip
+            }
+        }
+        if g.force_merge(node_id, sib_id).is_ok() {
             return true;
         }
     }
@@ -1942,8 +2301,12 @@ fn try_merge(
 }
 
 /// Try to fire a Split action on `node_id`. Returns `true` if fired.
-/// Criterion (simplified): node is a leaf AND `samples_seen ≥ split_min`.
-/// Phase 0.4 will gate on held-out ΔNLL gain + impurity decrease.
+/// Criterion (Phase 0.4 Track B-2.2.4):
+/// 1. node is a leaf
+/// 2. `samples_seen ≥ split_min`
+/// 3. `variance ≥ impurity_min` (impurity gate)
+/// 4. estimated held-out ΔNLL gain `≥ nll_split_gain` (deterministic
+///    bootstrap on samples drawn from the node's Gaussian model)
 fn try_split(
     g: &mut AdaptiveBeliefGraph,
     node_id: NodeId,
@@ -1956,7 +2319,121 @@ fn try_split(
     if maturity.samples_seen < policy.split_min() {
         return false;
     }
+    // Phase 0.4 Track B-2.2.4 — impurity + ΔNLL gates.
+    let stats = &g.nodes[node_id as usize].stats;
+    let var = stats.variance();
+    if var < policy.impurity_min() {
+        return false;
+    }
+    let action_count_sum: u64 = g.action_counts.iter().sum();
+    let dnll = estimate_split_nll_gain(stats, g.seed, node_id, action_count_sum);
+    if dnll < policy.nll_split_gain() {
+        return false;
+    }
     g.force_split(node_id).is_ok()
+}
+
+/// Estimate the held-out ΔNLL gain of a hypothetical 50-50 median
+/// split of the node's observed distribution. Phase 0.4 Track B-2.2.4
+/// — uses a deterministic bootstrap on samples drawn from the node's
+/// Gaussian sufficient statistics `(μ, σ²)`. Per-node observation
+/// history would let us bootstrap on real data; that's deferred to
+/// 0.5+ since adding history is a snapshot-format change beyond
+/// Phase 0.4's scope. The synthetic bootstrap uses the node's
+/// Gaussian model as the data-generating process, which is what the
+/// BLR posterior would predict at the leaf anyway.
+///
+/// Determinism: seeded from `(graph.seed, node_id, action_count_sum)`
+/// so two replays of the same audit log produce bit-identical ΔNLL
+/// estimates (and therefore bit-identical Split decisions).
+fn estimate_split_nll_gain(
+    stats: &crate::stats::NodeStats,
+    seed: u64,
+    node_id: NodeId,
+    action_count_sum: u64,
+) -> f64 {
+    const N_BOOT: usize = 32;
+    if stats.n_seen < 4 {
+        return 0.0;
+    }
+    let var = stats.variance();
+    if var <= f64::EPSILON {
+        return 0.0;
+    }
+    let mu = stats.mean;
+    let sigma = var.sqrt();
+
+    // Deterministic seed mixing all three inputs through SplitMix64
+    // multiplications so adjacent (node_id, action_count_sum) values
+    // produce well-spread streams.
+    let bootstrap_seed = seed
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add((node_id as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9))
+        .wrapping_add(action_count_sum.wrapping_mul(0x94D0_49BB_1331_11EB));
+    let mut rng = cjc_repro::Rng::seeded(bootstrap_seed);
+
+    // Draw N_BOOT samples from N(μ, σ²).
+    let mut samples = [0.0f64; N_BOOT];
+    for s in samples.iter_mut() {
+        *s = mu + sigma * rng.next_normal_f64();
+    }
+
+    // 50/50 train/test partition (deterministic order).
+    let n_train = N_BOOT / 2;
+    let train = &samples[..n_train];
+    let test = &samples[n_train..];
+
+    // Pre-split: fit single Gaussian on train, NLL on test.
+    let (mean_pre, var_pre) = fit_gaussian(train);
+    let nll_pre = nll_under_gaussian(test, mean_pre, var_pre);
+
+    // Post-split: median-partition train into two groups; NLL on test
+    // is the per-sample minimum of the two groups' NLLs (each test
+    // sample is "routed" to its better-fitting group).
+    let mut sorted = [0.0f64; N_BOOT / 2];
+    sorted.copy_from_slice(train);
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = sorted[sorted.len() / 2];
+    let group_a: Vec<f64> = train.iter().copied().filter(|&x| x < median).collect();
+    let group_b: Vec<f64> = train.iter().copied().filter(|&x| x >= median).collect();
+    if group_a.is_empty() || group_b.is_empty() {
+        return 0.0;
+    }
+    let (mean_a, var_a) = fit_gaussian(&group_a);
+    let (mean_b, var_b) = fit_gaussian(&group_b);
+    let nll_post: f64 = test
+        .iter()
+        .map(|&x| {
+            let nll_a = single_sample_nll(x, mean_a, var_a);
+            let nll_b = single_sample_nll(x, mean_b, var_b);
+            nll_a.min(nll_b)
+        })
+        .sum();
+
+    (nll_pre - nll_post).max(0.0)
+}
+
+fn fit_gaussian(data: &[f64]) -> (f64, f64) {
+    if data.is_empty() {
+        return (0.0, f64::EPSILON);
+    }
+    let n = data.len() as f64;
+    let mean = data.iter().sum::<f64>() / n;
+    let var = if data.len() > 1 {
+        data.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0)
+    } else {
+        f64::EPSILON
+    };
+    (mean, var.max(f64::EPSILON))
+}
+
+fn single_sample_nll(x: f64, mean: f64, var: f64) -> f64 {
+    let z = (x - mean).powi(2) / var;
+    0.5 * (z + var.ln() + (2.0 * std::f64::consts::PI).ln())
+}
+
+fn nll_under_gaussian(samples: &[f64], mean: f64, var: f64) -> f64 {
+    samples.iter().map(|&x| single_sample_nll(x, mean, var)).sum()
 }
 
 /// Try to fire a Prune action on `node_id`. Returns `true` if fired.
@@ -1997,12 +2474,57 @@ fn try_grow(
     if maturity.samples_seen < policy.grow_min() {
         return false;
     }
+    // Phase 0.4 Track B-2.2.5 — route-entropy gate. When a codebook is
+    // installed, the routing concept is well-defined; gate Grow on
+    // Shannon entropy of the candidate's depth being above
+    // `policy.h_grow()`. Codebook-less graphs fall back to pre-0.4
+    // Hamming-only behavior for backward compatibility (existing
+    // decide_step tests run without a codebook).
+    if g.codebook.is_some() {
+        let h = route_key_entropy_at_candidate_depth(g, node_id);
+        if h <= policy.h_grow() {
+            return false;
+        }
+    }
     let mix = g
         .seed
         .wrapping_mul(0x9E37_79B9_7F4A_7C15)
         .wrapping_add(node_id as u64);
     let key = mix as u8;
     g.force_grow(node_id, key).is_ok()
+}
+
+/// Shannon entropy of the key-byte distribution among nodes at the
+/// candidate's depth — proxied by the candidate's parent's children
+/// key bytes. Returns `f64::INFINITY` for the root (no parent →
+/// bootstrap allowed) or for parents with fewer than two children
+/// (single-child parents still warrant their first growth).
+///
+/// Phase 0.4 Track B-2.2.5 — gates `try_grow` so that nodes in
+/// low-diversity routes don't keep spawning useless children.
+fn route_key_entropy_at_candidate_depth(g: &AdaptiveBeliefGraph, node_id: NodeId) -> f64 {
+    let parent = match g.nodes[node_id as usize].parent {
+        Some(p) => p,
+        None => return f64::INFINITY,
+    };
+    let mut counts = [0u64; 256];
+    let mut total = 0u64;
+    for (key, _id) in g.nodes[parent as usize].children.iter() {
+        counts[key as usize] = counts[key as usize].saturating_add(1);
+        total = total.saturating_add(1);
+    }
+    if total < 2 {
+        return f64::INFINITY;
+    }
+    let total_f = total as f64;
+    let mut h_acc = cjc_repro::KahanAccumulatorF64::new();
+    for &c in counts.iter() {
+        if c > 0 {
+            let p = (c as f64) / total_f;
+            h_acc.add(-p * p.ln());
+        }
+    }
+    h_acc.finalize()
 }
 
 /// Try to fire a Freeze action on `node_id`. Returns `true` if fired.
@@ -2334,11 +2856,11 @@ mod tests {
 
     // ── Phase 0.3d-3: structural decisions ───────────────────────
 
-    fn ok_thresholds() -> [f64; 11] {
+    fn ok_thresholds() -> [f64; 12] {
         [
             0.5, 64.0, 128.0, 0.05, 0.02,
             4.0, 0.1, 32.0, 10.0, 8.0,
-            20.0,
+            20.0, f64::MAX, // drift_unfreeze disabled
         ]
     }
 

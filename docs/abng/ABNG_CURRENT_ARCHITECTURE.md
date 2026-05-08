@@ -1,11 +1,11 @@
-# ABNG — Current Architecture (post-Phase 0.3d)
+# ABNG — Current Architecture (post-Phase 0.4)
 
 **As of:** 2026-05-07
 **Crate:** `crates/cjc-abng/`
-**Tests:** `tests/abng/` (303 integration) + `crates/cjc-abng/src/*` (227 in-crate) + `tests/prop_tests/abng_decision_props.rs` (4 properties × 256 cases) + `tests/bolero_fuzz/abng_decision_fuzz.rs` (4 fuzz targets) — all passing
-**Snapshot magic:** `ABNG\x08` (v8)
-**Builtin count:** 65 user-facing `abng_*` arms in `dispatch.rs`
-**Audit kinds:** 24 (tags `0x00`..`0x17`)
+**Tests:** `tests/abng/` (391 integration) + `crates/cjc-abng/src/*` (252 in-crate) + `tests/prop_tests/abng_decision_props.rs` (4 properties × 256 cases) + `tests/bolero_fuzz/abng_decision_fuzz.rs` (4 fuzz targets) — all passing
+**Snapshot magic:** `ABNG\x0A` (v10 — Phase 0.4 Track B-2.2.7 bumped from `\x09` for `DecisionPolicy.drift_unfreeze` 12th threshold; v9 added `BlrState.feature_version_hash` in C-2.3.5)
+**Builtin count:** 67 user-facing `abng_*` arms in `dispatch.rs` (65 from Phase 0.3d + 1 from C-2.3.6 `abng_leaf_set_params_batch` + 1 from C-2.3.5 `abng_reset_blr`)
+**Audit kinds:** 26 (tags `0x00`..`0x19` — Phase 0.4 added `0x18 BlrNumericalRescue` and `0x19 LeafParamsUpdatedBatch`)
 
 This document is a *source-of-truth* handoff after Phase 0.3d. Where the
 phase design notes (`PHASE_0_*_DESIGN.md`) and the actual code disagree,
@@ -20,34 +20,44 @@ between design intent and implementation are listed in §8.
 |---|---|---|
 | 0.1   | DONE | Arena + audit log + SHA-256 chain + replay |
 | 0.2   | DONE | Multi-node arena, `AdaptiveChildren` (Node4/16/48/256), prefix codebook + descend routing, per-node stats chain |
-| 0.3a  | DONE | Per-leaf MLP head (Xavier init, `leaf_forward` into ambient `cjc-ad` GradGraph) |
-| 0.3b  | DONE | Per-leaf BLR (Cholesky + NIG conjugate update; `(mean, epi, ale)` predict) |
+| 0.3a  | DONE | Per-node MLP head (Xavier init, `leaf_forward` into ambient `cjc-ad` GradGraph) |
+| 0.3b  | DONE | Per-node BLR (Cholesky + NIG conjugate update; `(mean, epi, ale)` predict) |
 | 0.3c  | DONE | Density tracker (diag Mahalanobis), 15-bin ECE calibration, drift baseline + score, composite `ood_score` |
 | 0.3d-1 | DONE | `Maturity` + `NodeSignature` types (lazy), 2 read-only inspection builtins |
-| 0.3d-2 | DONE | `expected_epistemic` per-leaf capture, calibrated `ood_score` ratio formula (`epi / expected`), audit kind `0x17`, snapshot `v6` |
+| 0.3d-2 | DONE | `expected_epistemic` per-node capture, calibrated `ood_score` ratio formula (`epi / expected`), audit kind `0x17`, snapshot `v6` |
 | 0.3d-3 | DONE | `DecisionPolicy` install, 6 force-* structural mutations, `Dense` children variant (kind `5`), audit kinds `0x10..0x15`, snapshot `v7` |
 | 0.3d-4 | DONE | `decide_step` policy engine (6 triggers, fall-through order), `unfreeze` (audit `0x16`), persistent signature-stability state, real `Maturity` flags, auto-capture of `expected_epistemic`, snapshot `v8` |
 | 0.3d-5 | DONE | proptest properties + bolero fuzz targets + decoder allocation hardening + this doc |
-| 0.4   | NEXT | `cjcl abng …` CLI, JSON snapshot, log compaction, Welford-smoothed signatures, KL-merge, ΔNLL split |
-| 0.5   | LATER | Chess-RL retrofit (value head first, then policy head) |
+| 0.4 Track C | DONE | post-0.3d audit fixes (7 items): BLR predict rename, NaN/Inf input validation, replay semantic invariants, BLR clamp audit (0x18), feature_version_hash + reset_blr (snapshot v9), batched leaf-params (0x19), per-leaf → per-node doc rename |
+| 0.4 Track B | DONE | trigger refinement (7 items): NIG-aware merge math (`combine`), KL-divergence merge gate, route-entropy grow gate, bootstrap held-out ΔNLL split gate, drift-trip auto-Unfreeze (snapshot v10, 12th threshold), 3-window ECE/σ stability buffers per node, Welford-smoothed `NodeSignature` profiles |
+| 0.4 Track A | NEXT | `cjcl abng …` CLI (`train`/`inspect`/`explain`/`replay`/`diff`), JSON snapshot view, log compaction, audit tags `0x1A..0x1C` extending v10 in place |
+| 0.5   | LATER | Chess-RL retrofit (value head first, then policy head); per-node provenance_stamp_hash (deferred from 0.4 to keep v10 frozen) |
 
 ABNG is now a **Bayesian-inspired structurally-adaptive belief graph** with:
 - Topology + routing (0.2)
-- Neural per-leaf head (0.3a)
-- Per-leaf calibrated uncertainty (0.3b)
+- Neural per-node head (0.3a)
+- Per-node calibrated uncertainty (0.3b)
 - Per-node OOD/calibration/drift signals (0.3c)
 - Lazy + persistent maturity / signature evidence (0.3d-1, 0.3d-4)
+- 3-window ECE/σ stability ring buffers per node (0.4 B-2.2.2)
+- Welford-smoothed 4-channel `NodeSignature` profiles per node (0.4 B-2.2.1)
 - Calibrated OOD ratio with auto-captured training-time σ (0.3d-2, 0.3d-4)
-- Frozen-threshold `DecisionPolicy` + 6 structural-action audit kinds (0.3d-3)
+- Frozen-threshold `DecisionPolicy` (12 thresholds) + 6 structural-action audit kinds + drift-trip auto-Unfreeze (0.3d-3, 0.4 B-2.2.7)
+- KL-divergence merge gate, route-entropy grow gate, ΔNLL split gate, NIG-aware merge math (0.4 B-2.2.{3,4,5,6})
 - One-pass deterministic `decide_step` engine (0.3d-4)
 - Property-tested + fuzz-hardened replay/decoder boundary (0.3d-5)
-- A complete tamper-evident audit chain over every state mutation
+- Per-input NaN/Inf rejection at observe / density / calibration / blr_update boundaries (0.4 C-2.3.2)
+- Replay validates seq monotonicity, Created-first, epoch match, and stats_version match (0.4 C-2.3.3)
+- BLR feature-version stamping + `abng_reset_blr` recovery (0.4 C-2.3.5)
+- A complete tamper-evident audit chain over every state mutation (26 kinds, tags `0x00..0x19`)
 - Bit-deterministic snapshot round-trip across both AST and MIR backends
 
 ABNG is now structurally adaptive at runtime: install a policy, observe
 evidence, call `decide_step` to fire structural mutations whose actions
 are deterministic functions of (Maturity, NodeSignature, current
-graph topology). Phase 0.4 layers a CLI and quality refinements on top.
+graph topology). Phase 0.4 Tracks B and C shipped the trigger-refinement
++ audit-fix work; Track A (the `cjcl abng …` CLI) is the remaining
+piece and ships under v10 in place using audit tags `0x1A..0x1C`.
 
 ---
 
@@ -109,13 +119,30 @@ trade-off; Phase 0.3d may reuse via `set_tensor`+`reforward`).
 
 ### 2.6 Frozen on-disk encoding
 
-* `MAGIC = b"ABNG\x08"` — bumped on every breaking format change.
-  Old magic bytes (`\x01`..`\x07`) are explicitly rejected. Phase 0.3d
-  alone bumped through 3 versions (`\x05 → \x06 → \x07 → \x08`); each
-  was a clean break with no backward-compatibility path.
-* Audit-kind tag bytes `0x00`..`0x17` are **frozen forever**. New
+* `MAGIC = b"ABNG\x0A"` — bumped on every breaking format change.
+  Old magic bytes (`\x01`..`\x09`) are explicitly rejected. Phase 0.3d
+  alone bumped through 3 versions (`\x05 → \x06 → \x07 → \x08`); Phase
+  0.4 bumped `\x08 → \x09` (Track C-2.3.5: `BlrState.feature_version_hash`)
+  then `\x09 → \x0A` (Track B-2.2.7: `DecisionPolicy` 12th threshold
+  `drift_unfreeze`). Each transition is a clean break with no
+  backward-compatibility path.
+* Audit-kind tag bytes `0x00`..`0x19` are **frozen forever**. New
   kinds must allocate fresh tags. Phase 0.3d allocated `0x10..0x17`
-  (8 new tags); see §3.6 for the full table.
+  (8 new tags). Phase 0.4 added `0x18 BlrNumericalRescue` (C-2.3.4)
+  and `0x19 LeafParamsUpdatedBatch` (C-2.3.6); both are opt-in (`0x18`
+  fires only on numerical rescue; `0x19` fires only when callers
+  explicitly use the batch builtin). Track C-2.3.5 then bumped magic
+  `\x08 → \x09` to absorb `BlrState.feature_version_hash`, and Track
+  B-2.2.7 bumped `\x09 → \x0A` to absorb `DecisionPolicy.drift_unfreeze`
+  (12th threshold) plus the per-node B-2.2.{1,2} state additions
+  (`SignatureWelford × 4` + `ece_history` / `sigma_history` ring
+  buffers, ~146 extra bytes per node). Future audit-kind additions in
+  Track A (`0x1A..0x1C` — `StatsSnapshot`, `Routed`,
+  `ProvenanceStamped`) may extend v10 in place if they only add tag
+  bytes (no per-node state) — the planned per-node
+  `provenance_stamp_hash` is deferred to Phase 0.5 to keep v10 frozen
+  for the full Phase 0.4 lifetime.
+  See §3.6 for the full table.
 * `ChildrenKind` numeric codes `0..5` are frozen (`5 = Dense` shipped
   with Phase 0.3d-3).
 * `Activation` tag bytes `0x00`..`0x08` are frozen.
@@ -165,7 +192,7 @@ corresponding `*AlreadyFrozen` variant.
 | BLR prior | `abng_set_blr_prior(g, λ, a, b)` | leaf head | No |
 | Density tracker | `abng_set_density_tracker(g)` | leaf head | No |
 | Calibration bins | `abng_set_calibration(g, n_bins ∈ [2,100])` | (none) | No |
-| Decision policy | `abng_set_decision_policy(g, thresholds: Tensor[11])` | (none) | **Yes** (install-anytime) |
+| Decision policy | `abng_set_decision_policy(g, thresholds: Tensor[12])` | (none) | **Yes** (install-anytime) |
 
 The leaf head is required by both BLR (which needs penultimate-feature
 dim `d`) and density (which uses the same `d`). Calibration is
@@ -189,7 +216,7 @@ DensityTrackerInstalled    if density was enabled
 CalibrationInstalled       if calibration n_bins was set
 ```
 
-### 3.4 Builtin surface (65 arms)
+### 3.4 Builtin surface (67 arms)
 
 Construction / lifecycle: `abng_new`, `abng_drop`, `abng_root`,
 `abng_node_count`, `abng_audit_len`, `abng_chain_head`,
@@ -208,10 +235,15 @@ Codebook + routing: `abng_set_codebook`, `abng_codebook_dims`,
 
 Leaf head: `abng_set_leaf_head`, `abng_leaf_head_dims`,
 `abng_leaf_param_count`, `abng_leaf_param`, `abng_leaf_set_param`,
-`abng_leaf_params_hash`, `abng_leaf_forward`.
+`abng_leaf_set_params_batch` (Phase 0.4 Track C-2.3.6 — emits one
+`LeafParamsUpdatedBatch` event for the whole vector instead of `2(L+1)`
+`LeafParamsUpdated` events), `abng_leaf_params_hash`, `abng_leaf_forward`.
 
 BLR: `abng_set_blr_prior`, `abng_blr_features`, `abng_blr_update`,
-`abng_blr_predict`, `abng_blr_state_hash`, `abng_blr_n_seen`.
+`abng_blr_predict`, `abng_blr_state_hash`, `abng_blr_n_seen`,
+`abng_reset_blr` (Phase 0.4 Track C-2.3.5 — clears posterior to prior
+and refreshes `feature_version_hash` to current MLP params; recovery
+from `BlrError::FeatureVersionStale`).
 
 Density / calibration / drift / OOD:
 `abng_set_density_tracker`, `abng_density_observe`, `abng_density_score`,
@@ -286,6 +318,8 @@ Decision engine + unfreeze (0.3d-4):
 | `0x15` | `Freeze` | 0.3d-3 | (header `node_id`) | structural |
 | `0x16` | `Unfreeze` | 0.3d-4 | (header `node_id`) | structural |
 | `0x17` | `ExpectedEpistemicCaptured` | 0.3d-2 | `state_hash: [u8; 32]` | hash witness |
+| `0x18` | `BlrNumericalRescue` | 0.4 (C-2.3.4) | `reason: u8, b_pre_clamp_bits: u64` (9B) | full payload (diagnostic) |
+| `0x19` | `LeafParamsUpdatedBatch` | 0.4 (C-2.3.6) | `params_hash: [u8; 32]` | hash witness |
 
 **Witness vs full-payload rationale:** *hash witness* events keep the
 audit log compact under heavy training (`*Updated` events fire per
@@ -311,28 +345,49 @@ pass** with the following deterministic contract:
    `is_frozen == true` or `is_active == false` nodes.
 5. **Auto-capture `expected_epistemic`.** Before the trigger ladder:
    if `Maturity.uncertainty_stable && expected_epistemic.is_none() &&
-   blr.is_some()`, capture `epistemic_var(blr.predict(blr.mean))`
-   through the existing `set_expected_epistemic` path.
-6. **Trigger fall-through (at most one fires per node per call):**
+   blr.is_some()`, capture `epistemic_leverage(blr.predict(blr.mean))`
+   through the existing `set_expected_epistemic` path. (The captured
+   value is leverage, not variance in y-units — see §6.5; the field
+   name `expected_epistemic` is preserved for snapshot stability.)
+6. **Drift-trip auto-Unfreeze (Phase 0.4 Track B-2.2.7).** Before the
+   skip-if-frozen check: if the node is frozen, has both a density
+   tracker and a drift baseline, and
+   `drift_score(current_density) > drift_unfreeze`, call `unfreeze`
+   (emits `0x16 Unfreeze` audit) and let the regular ladder run on
+   the now-thawed node. Default `drift_unfreeze = f64::MAX` keeps the
+   gate disabled in policies that don't opt in.
+7. **Trigger fall-through (at most one fires per node per call):**
    1. Compress — children present + all child signatures within
       `tau_compress` Hamming of node's signature
    2. Merge — sibling with smaller `NodeId` whose signature is within
-      `tau_merge` Hamming
-   3. Split — leaf + `samples_seen ≥ split_min`
+      `tau_merge` Hamming **AND** posterior `KL ≤ kl_merge`
+      (Phase 0.4 Track B-2.2.3) — the `combine` math runs only if both
+      gates pass (B-2.2.6)
+   3. Split — leaf + `samples_seen ≥ split_min` **AND** bootstrap
+      held-out ΔNLL gain ≥ `nll_split_gain` (Phase 0.4 Track B-2.2.4)
    4. Prune — `samples_seen < prune_floor` AND
       `signature_stable_calls ≥ prune_grace_epochs` (root never pruned)
    5. Grow — leaf + `samples_seen ≥ grow_min` + deterministic-from-
-      `(seed, node_id)` key byte not bound
-   6. Freeze — `signature_stable_calls ≥ freeze_after`
-7. **Returns `[u64; 6]`** indexed by [`ActionKind`]:
-   `[Grow, Split, Merge, Prune, Compress, Freeze]`.
+      `(seed, node_id)` key byte not bound **AND** route-key entropy at
+      candidate depth > `H_grow` (Phase 0.4 Track B-2.2.5)
+   6. Freeze — `signature_stable_calls ≥ freeze_after`, where the
+      "stability" signal is now Welford-smoothed across observations
+      (Phase 0.4 Track B-2.2.1) and ECE / σ stability are gated on
+      a 3-window ring buffer (Phase 0.4 Track B-2.2.2)
+8. **Returns `[u64; 6]`** indexed by [`ActionKind`]:
+   `[Grow, Split, Merge, Prune, Compress, Freeze]`. (`Unfreeze` does
+   not bump action_counts — see §7 #13.)
 
-**Triggers are simplified.** Phase 0.3d-4 ships defensible single-
-threshold variants; Phase 0.4 will refine to: Welford-smoothed
-signatures, KL-divergence merge, bootstrap held-out ΔNLL split, route-
-entropy grow, real NIG-aware merge math. The simplifications are
-documented inline in `crates/cjc-abng/src/graph.rs` with `Phase 0.4
-will…` markers.
+**Phase 0.4 trigger refinements (DONE).** The Track B work refined
+every gate into its prompt-spec form: Welford-smoothed signatures
+(B-2.2.1), 3-window ECE/σ stability (B-2.2.2), KL-merge gate
+(B-2.2.3), ΔNLL split gate (B-2.2.4), route-entropy grow gate
+(B-2.2.5), NIG-aware merge math (B-2.2.6), drift-trip auto-Unfreeze
+(B-2.2.7). The pre-0.4 single-threshold simplifications are gone;
+all gates are now defensible against the original prompt spec.
+Compare the inline `Phase 0.4 will…` markers in
+`crates/cjc-abng/src/graph.rs` — they have all flipped to
+`// Phase 0.4 Track B-2.2.x: …`.
 
 The `Value` enum layout has not been extended for ABNG. HARD RULE #1.
 
@@ -364,22 +419,30 @@ Every batch update fires a 32-byte witness event. A million SGD steps
 on a 10-leaf graph emits 10M events ≈ 320 MB audit log. Witness-only
 (no payload) keeps the cost bounded but log compaction is Phase 0.4.
 
-### R5. Snapshot break each phase
-v1 → v2 → v3 → v4 → v5 → v6 → v7 → v8 — Phase 0.3d alone bumped
-through 3 versions (one per sub-step that added persistent state).
-Acceptable so far because ABNG had no real users, but Phase 0.4's
-CLI ships first to external users — **version 0.4 should freeze
-the format for the CLI's lifetime** (likely as v9 with all known
-0.4 additions consolidated into a single bump).
+### R5. Snapshot break each phase ⚠️ DEFERRED to Phase 0.4 Track A
+v1 → v2 → v3 → v4 → v5 → v6 → v7 → v8 → v9 (C-2.3.5) → v10 (B-2.2.7).
+Phase 0.3d alone bumped through 3 versions; Phase 0.4 added 2 more
+(C-2.3.5 added `BlrState.feature_version_hash`, B-2.2.7 added
+`DecisionPolicy.drift_unfreeze` 12th threshold and absorbed B-2.2.{1,2}
+per-node Welford + ring-buffer state in-place). The original "single
+bump per phase" goal slipped because B-2.2.{1,2} were resequenced
+*after* B-2.2.7, but the second bump did absorb both Stage B state
+additions in-place — so v10 is final for Phase 0.4 Track A. The CLI
+must NOT bump magic again — audit tags `0x1A..0x1C` extend v10 in
+place; per-node `provenance_stamp_hash` is deferred to Phase 0.5.
 
 ### R6. `leaf_forward` clones every param into the GradGraph each call
 Fine for small heads. For large heads or PINN-style high-frequency
 forward, switch to `set_tensor`+`reforward`. Phase 0.3d optimization.
 
-### R7. Drift baseline freeze policy is user-driven
-Phase 0.3c only provides the primitive. Phase 0.3d-4 ships
-`abng_unfreeze` (manual) but the **drift-trip auto-unfreeze** path
-inside `decide_step` is deferred to Phase 0.4 alongside the CLI.
+### R7. Drift baseline freeze policy is user-driven ✅ RESOLVED in Phase 0.4 Track B-2.2.7
+Phase 0.3c only provides the primitive. Phase 0.3d-4 shipped
+`abng_unfreeze` (manual). Phase 0.4 Track B-2.2.7 wired the
+**drift-trip auto-unfreeze** path inside `decide_step`: a 12th
+`DecisionPolicy.drift_unfreeze` threshold (snapshot v10) gates an
+`unfreeze` call when a frozen node's `drift_score(current_density) >
+drift_unfreeze`. Default `f64::MAX` keeps the gate disabled in
+policies that don't opt in. See §3.7 step 6 and §8.11.
 
 ### R8. `Maturity` not yet plumbed ✅ RESOLVED in Phase 0.3d
 Phase 0.3d-1 shipped lazy `Maturity { samples_seen,
@@ -389,27 +452,31 @@ to participate in `decide_step`'s triggers — `calibration_stable`
 flips on `ECE < 0.05`, `uncertainty_stable` requires BLR + samples ≥
 100 + signature-stable for ≥ 1 decide_step call.
 
-### R9. Decision-engine simplifications (Phase 0.3d-4)
-The `decide_step` engine ships with deliberately simplified triggers
-(see §3.7). Phase 0.4 will refine to: Welford-smoothed signatures,
-KL-divergence merge, bootstrap held-out ΔNLL split, route-entropy
-grow, real NIG-aware merge math, and 3-window ECE/σ stability. The
-*event channel* is full strength now; the *quality* of the signal
-is the 0.4 concern.
+### R9. Decision-engine simplifications ✅ RESOLVED in Phase 0.4 Track B
+The `decide_step` engine pre-0.4 shipped with deliberately simplified
+triggers. Phase 0.4 Track B refined every gate into its prompt-spec
+form across 7 items: Welford-smoothed signatures (B-2.2.1), 3-window
+ECE/σ stability (B-2.2.2), KL-divergence merge (B-2.2.3), bootstrap
+held-out ΔNLL split (B-2.2.4), route-entropy grow (B-2.2.5), real
+NIG-aware merge math via `combine` (B-2.2.6), and drift-trip
+auto-Unfreeze (B-2.2.7). The *event channel* was full strength
+since 0.3d-4; the *quality* of the signal now matches the original
+prompt spec. See §3.7 and §8.10.
 
-### R10. BLR `predict()` returns dimensionless leverage, not variance contribution (post-0.3d audit)
-**Surfaced 2026-05-07 retrospective.** `BlrState::predict()` returns
-`(mean, epistemic_var, aleatoric_var)` where `epistemic_var =
-‖L⁻¹φ‖² = φᵀΛ⁻¹φ` is **dimensionless leverage**, not variance in
-output units. The 0.3b design note's predictive-variance formula
-`total = aleatoric_var × (1 + epistemic_var)` treats it as leverage
-internally — but the API name strongly suggests output-unit variance.
-0.3d-2's `expected_epistemic` capture and 0.3d-4's auto-capture
-also store leverage, so the calibrated OOD ratio
-`(epi / expected).clamp(0, 1)` works on its own terms (units cancel).
-External consumers who try to compute total predictive variance
-themselves get the wrong answer. **Phase 0.4 Track C-2.3.1** —
-either rename to `epistemic_leverage` or fix the math.
+### R10. BLR `predict()` returns dimensionless leverage, not variance contribution ✅ RESOLVED in Phase 0.4 Track C-2.3.1
+**Surfaced 2026-05-07 retrospective; resolved 2026-05-07 in C-2.3.1.**
+`BlrState::predict()` returns `(mean, epistemic_leverage,
+aleatoric_var)` where `epistemic_leverage = ‖L⁻¹φ‖² = φᵀΛ⁻¹φ` is
+**dimensionless leverage**, not variance in output units. Pre-0.4 docs
+called the middle slot `epistemic_var`, which was misleading because
+units of variance would require multiplying by `aleatoric_var`. The
+0.3b design note's predictive-variance formula `total = aleatoric_var
+× (1 + epistemic_leverage)` treats it as leverage internally — and the
+API now matches. 0.3d-2's `expected_epistemic` capture and 0.3d-4's
+auto-capture store leverage (the field name is preserved for snapshot
+stability), so the calibrated OOD ratio `(lev / expected).clamp(0, 1)`
+works on its own terms (units cancel). C-2.3.1 was a rename + doc
+update only — no math change, no snapshot bump.
 
 ### R11. `observe()` accepts NaN/Inf — no input validation (post-0.3d audit)
 **Surfaced 2026-05-07 retrospective.** `AdaptiveBeliefGraph::observe()`,
@@ -429,22 +496,33 @@ Created / forged epochs currently passes replay silently.
 **Phase 0.4 Track C-2.3.3** — add four new `DecodeError` variants
 and the corresponding checks.
 
-### R13. Silent `b < 0` clamp in BLR (post-0.3d audit)
-**Surfaced 2026-05-07 retrospective.** `blr.rs:233-235` quietly
-clamps `b_new < f64::EPSILON` to `f64::EPSILON` with no audit event.
-Reproducibility-preserving (same input → same clamped output) but
-hides where the InverseGamma posterior is operating outside its
-assumptions. **Phase 0.4 Track C-2.3.4** — emit a deterministic
-`BlrNumericalRescue` audit event (tag `0x18`) when the clamp fires.
+### R13. Silent `b < 0` clamp in BLR ✅ RESOLVED in Phase 0.4 Track C-2.3.4
+**Surfaced 2026-05-07 retrospective; resolved 2026-05-07 in C-2.3.4.**
+`BlrState::update` still clamps `b_new < f64::EPSILON` to
+`f64::EPSILON` (the IG posterior must stay well-defined), but the
+event is no longer silent: the function now returns
+`Ok(Some(b_pre_clamp))` and the graph layer's `blr_update` appends a
+`BlrNumericalRescue { reason: 0x00, b_pre_clamp_bits }` audit event
+immediately after the corresponding `BlrUpdated`. Determinism is
+preserved (the clamped state is bit-identical to pre-C-2.3.4); the
+new event is purely diagnostic and `apply_event` is a no-op for it
+during replay. Existing snapshots from healthy training contain no
+0x18 events and replay byte-identically.
 
-### R14. MLP feature space drift after BLR install (post-0.3d audit)
-**Surfaced 2026-05-07 retrospective.** `blr_features()` reads the
-*current* MLP params on each call. So `leaf_set_param` after a BLR
-posterior is trained leaves the BLR posterior conditioned on the
-OLD feature space — silently misaligned. There is no contract
-enforcing freeze-MLP-after-BLR or reset-BLR-after-MLP-update.
-**Phase 0.4 Track C-2.3.5** — add `feature_version_hash` to BlrState;
-gate `blr_update()` on hash match; add `abng_reset_blr` builtin.
+### R14. MLP feature space drift after BLR install ✅ RESOLVED in Phase 0.4 Track C-2.3.5
+**Surfaced 2026-05-07 retrospective; resolved 2026-05-07 in C-2.3.5
+(snapshot v8 → v9).** `BlrState` now carries
+`feature_version_hash: [u8; 32]`, stamped from the per-node MLP
+params hash at install (`set_blr_prior`, `add_node`, `force_grow`,
+`force_split`) and on every reset. `blr_update` rejects with
+`BlrError::FeatureVersionStale { stored, current }` when current
+params hash differs. Recovery: `abng_reset_blr(node_id)` clears the
+posterior to prior and refreshes `feature_version_hash` to current
+MLP. The replay path's `BlrInitialized` apply_event was extended to
+reset live state + refresh fvh on every fire (handles install AND
+reset cases uniformly). `apply_event` is no-op for `BlrUpdated` as
+before; the post-replay per-node hash matcher already recognizes the
+extended canonical bytes.
 
 ### R15. `NodeStats::canonical_bytes` future-hostile for compaction (post-0.3d audit)
 **Surfaced 2026-05-07 retrospective.** Canonical bytes serialize
@@ -454,13 +532,16 @@ Phase 0.4's planned log compaction needs to resume from canonical
 bytes — that requires the compensation state too. **Phase 0.4
 Track C-2.3.9** — extend canonical bytes 24B → 32B (snapshot v9).
 
-### R16. Per-leaf vs per-node naming drift (post-0.3d audit)
-**Surfaced 2026-05-07 retrospective.** Architecture doc and design
-notes call MLP / BLR heads "per-leaf" but `init_params` and BLR
-init are called for *every* node (root + every `add_node` /
-`force_grow` / `force_split`). Code is per-node; docs are wrong.
-**Phase 0.4 Track C-2.3.7** — rename "per-leaf" to "per-node"
-throughout. No code changes required.
+### R16. Per-leaf vs per-node naming drift ✅ RESOLVED in Phase 0.4 Track C-2.3.7
+**Surfaced 2026-05-07 retrospective; resolved 2026-05-07 in C-2.3.7.**
+Pre-0.4 the architecture doc and design notes called MLP / BLR heads
+"per-leaf" — but `init_params` and BLR init are called for *every*
+node (root + every `add_node` / `force_grow` / `force_split`). Code
+was always per-node; docs were wrong. C-2.3.7 shipped a doc-only
+rename: "per-leaf" → "per-node" across this doc, the Phase 0.3a/0.3b
+design notes, and the crate-level docs in `leaf_head.rs`, `blr.rs`,
+`graph.rs`, `node.rs`, `audit.rs`, `serialize.rs`, `dispatch.rs`,
+and `lib.rs`. No semantics changed; no code changes required.
 
 ---
 
@@ -478,23 +559,37 @@ throughout. No code changes required.
             (snapshot v8, audit 0x16, 2 builtins)
     0.3d-5  proptest + bolero + decoder hardening + this doc
 
-0.4 (NEXT — CLI + quality refinements)
+0.4 Track C (DONE 2026-05-07) — post-0.3d audit fixes (7 items)
+  - C-2.3.1 BLR predict() rename → epistemic_leverage (no math change)
+  - C-2.3.2 NaN/Inf input validation at observe / density / calibration / blr_update
+  - C-2.3.3 Replay semantic invariants — seq monotonic, Created-first,
+            epoch match, stats_version match (4 new DecodeError variants)
+  - C-2.3.4 BLR b<ε clamp audit event (0x18 BlrNumericalRescue)
+  - C-2.3.5 BlrState.feature_version_hash + abng_reset_blr (snapshot v9)
+  - C-2.3.6 abng_leaf_set_params_batch (single 0x19 event for 2(L+1) params)
+  - C-2.3.7 per-leaf → per-node naming rename (doc only)
+
+0.4 Track B (DONE 2026-05-07) — trigger refinement (7 items)
+  - B-2.2.6 NIG-aware merge math: BlrState::combine + NodeStats::combine
+  - B-2.2.3 KL-divergence gate for Merge (BlrState::kl_divergence)
+  - B-2.2.5 Route-entropy gate for Grow (route_key_entropy_at_candidate_depth)
+  - B-2.2.4 Bootstrap held-out ΔNLL gain for Split (synthetic Gaussian sampling)
+  - B-2.2.7 Drift-trip auto-Unfreeze + DecisionPolicy.drift_unfreeze 12th
+            threshold (snapshot v10, DecisionPolicy 88B → 96B)
+  - B-2.2.2 3-window ECE/σ stability ring buffers per node (per-node +50B)
+  - B-2.2.1 Welford-smoothed NodeSignature profiles per node (per-node +96B)
+
+0.4 Track A (NEXT) — CLI + JSON view + log compaction
   - cjcl abng {train,inspect,explain,replay,diff} CLI
-  - Welford-smoothed NodeSignature profiles
-  - 3-window ECE / σ stability buffers for Maturity
-  - KL-divergence gate for Merge
-  - Bootstrap held-out ΔNLL gain for Split
-  - Route-entropy gate for Grow
-  - Real NIG-aware merge math (combine BLR posteriors)
-  - Drift-trip auto-Unfreeze inside decide_step
   - JSON-safe snapshot view via cjc_snap::snap_to_json
   - Log compaction (squash N consecutive *Updated into one Snapshot)
+  - Audit tags 0x1A..0x1C — StatsSnapshot, Routed, ProvenanceStamped
+    (extend v10 in place — no further magic bump in Phase 0.4)
   - Snapshot-version negotiation diagnostics
-  - Categorical features in codebook
-  - `Routed` audit events (opt-in trace mode)
-  - Snapshot version frozen for CLI lifetime (likely v9, single bump)
+  - Categorical features in codebook (deferred from 0.4 main work to Track A)
 
 0.5
+  - Per-node provenance_stamp_hash (deferred from 0.4 to keep v10 frozen)
   - Chess-RL retrofit: replace value head with ABNG, then policy head
   - Uncertainty-gated bootstrap in A2C/PPO
   - End-to-end determinism gate against existing chess-rl-v2 weight hashes
@@ -543,7 +638,7 @@ not change** without a version bump.
 | `QuantileCodebook` | canonical bytes (codebook.rs) | n_dims u8 ‖ n_bins u16 ‖ ∀d: n_boundaries u16 ‖ bins f64×k |
 | `LeafHead` | `canonical_bytes() -> Vec<u8>` | input_dim u32 ‖ output_dim u32 ‖ activation u8 ‖ n_hidden u16 ‖ hidden_dims u32×N |
 | `BlrPrior` | `canonical_bytes() -> [u8; 24]` | precision f64 ‖ a f64 ‖ b f64 |
-| `BlrState` | `canonical_bytes()` | d u32 ‖ mean f64×d ‖ precision f64×d² ‖ a f64 ‖ b f64 ‖ n_seen u64 |
+| `BlrState` | `canonical_bytes()` | d u32 ‖ mean f64×d ‖ precision f64×d² ‖ a f64 ‖ b f64 ‖ n_seen u64 ‖ feature_version_hash 32B (v9; Track C-2.3.5) |
 | `DensityTracker` | `canonical_bytes()` | d u32 ‖ n u64 ‖ mean f64×d ‖ M2 f64×d (76 bytes for d=4) |
 | `CalibrationBins` | `canonical_bytes()` | n_bins u8 ‖ counts u32×n ‖ correct u32×n ‖ conf_sum_bits u64×n |
 | `DriftBaseline` | `canonical_bytes()` | d u32 ‖ n_at_freeze u64 ‖ mean f64×d ‖ std f64×d ‖ frozen_hash 32B |
@@ -583,22 +678,45 @@ All multi-byte integers and f64 bit patterns are **big-endian**.
 
 ### 6.5 BLR (Bayesian linear regression)
 
-- Per-node `BlrState { d, mean, precision (d×d), a, b, n_seen }`.
+- Per-node `BlrState { d, mean, precision (d×d), a, b, n_seen,
+  feature_version_hash: [u8; 32] }` (snapshot v9; the 32-byte hash
+  was added by Phase 0.4 Track C-2.3.5 — see §6.5 "Feature-version
+  contract" below).
 - **NIG conjugate update** on `(features [n,d], y [n])`:
   - `Λ_new = Λ + Xᵀ X`
   - `m_new = Λ_new⁻¹ (Λ μ + Xᵀ y)`
   - `a_new = a + n/2`
   - `b_new = b + 0.5 (yᵀy + μᵀΛμ − m_newᵀ Λ_new m_new)`
+- **Numerical rescue (Phase 0.4 Track C-2.3.4):** if `b_new <
+  f64::EPSILON` the value is clamped to `f64::EPSILON` to keep the
+  IG posterior well-defined. `BlrState::update` returns
+  `Result<Option<f64>, BlrError>` — `Ok(Some(b_pre_clamp))` when the
+  clamp fired. The graph layer's `blr_update` then appends a
+  `BlrNumericalRescue { reason: 0x00, b_pre_clamp_bits }` audit event
+  (tag `0x18`) immediately after the corresponding `BlrUpdated`.
+  The clamped state is bit-identical with or without observability,
+  so determinism is preserved across runs whether or not callers
+  inspect the returned `Option<f64>`.
 - Λ_new⁻¹φ is computed via **hand-rolled Kahan-compensated Cholesky**
   + triangular solves. No external linear-algebra dep. No FMA.
-- `predict(phi) -> (mean, epistemic_var, aleatoric_var)`:
-  - `mean = μᵀφ`
-  - `epistemic_var = ‖L⁻¹φ‖²`
+- `predict(phi) -> (mean, epistemic_leverage, aleatoric_var)`
+  (post-Phase 0.4 Track C-2.3.1 — pre-0.4 docs called the middle slot
+  `epistemic_var`, which was misleading; see R10):
+  - `mean = μᵀφ` — posterior mean prediction.
+  - `epistemic_leverage = ‖L⁻¹φ‖² = φᵀΛ⁻¹φ` — **dimensionless
+    leverage**, NOT variance in y-units. Decreases monotonically with
+    evidence.
   - `aleatoric_var = b/(a−1)` if `a > 1` else `+∞` (i.e. unbounded
-    aleatoric pre-update)
+    aleatoric pre-update). In y² units.
+  - To recover predictive variance in y-units a caller multiplies:
+    `total_var = aleatoric_var × (1 + epistemic_leverage)`. 0.3d-2's
+    `expected_epistemic` field stores leverage too — its name is
+    preserved for snapshot stability; the `(lev / expected)` ratio
+    used in `ood_score` is a unit-cancelling division so the
+    semantics are unaffected.
 - Numerically validated: `y = 2x₁ + 3x₂` recovered to <0.01 from 200
-  deterministic samples; epistemic variance monotonically decreases
-  with evidence.
+  deterministic samples; epistemic leverage monotonically decreases
+  with evidence (see in-crate test `epistemic_leverage_decreases_with_evidence`).
 
 ### 6.6 OOD / calibration / drift
 
@@ -613,7 +731,7 @@ epistemic_z      = if node.expected_epistemic.is_some():
 OOD              = max(density_score, prefix_distance, epistemic_z)
 ```
 `max` is deliberate — any single strong signal triggers high OOD.
-The calibrated ratio formula activates per-leaf once
+The calibrated ratio formula activates per-node once
 `expected_epistemic` is captured (manual via
 `abng_set_expected_epistemic` or auto via `decide_step` at
 `Maturity.uncertainty_stable` first holding).
@@ -639,8 +757,53 @@ feature_transform_hash) — is **partially** wired:
 - `codebook_hash` (and `LeafHead.config_hash`, `BlrPrior.config_hash`)
   are exposed as builtins.
 - Dataset / feature-transform hash slots exist in design but **are not
-  yet plumbed** through the audit log. Phase 0.4 (`cjcl abng explain`)
-  is when this gets formalized.
+  yet plumbed** through the audit log. Phase 0.4 Track A
+  (`cjcl abng explain`) is when this gets formalized.
+
+### 6.8 Maturity / NodeSignature stability state (Phase 0.4 B-2.2.{1,2})
+
+Each node carries persistent stability state used by `decide_step`
+to gate `Maturity.calibration_stable` / `Maturity.uncertainty_stable`
+flags and `signature_stable_calls` increments.
+
+**3-window ECE/σ ring buffers (B-2.2.2, per-node +50B):**
+
+```rust
+pub ece_history:    [f64; 3],   // most-recent 3 ECE samples
+pub ece_fill_count: u8,         // 0..3 (saturating)
+pub sigma_history:  [f64; 3],   // most-recent 3 σ (epistemic-leverage) samples
+pub sigma_fill_count: u8,       // 0..3 (saturating)
+```
+
+`Maturity.calibration_stable` flips on iff `ece_fill_count == 3`
+AND `max(ece_history) - min(ece_history) ≤ ECE_STABILITY_MAX_DELTA`.
+`Maturity.uncertainty_stable` flips on iff `sigma_fill_count == 3`
+AND `max(sigma_history) / min(sigma_history) ≤ SIGMA_STABILITY_RATIO`.
+The constants live in `maturity.rs` and are intentionally compile-time
+(see §8.23 — Phase 0.5 may promote to `DecisionPolicy` thresholds).
+
+**4-channel Welford signatures (B-2.2.1, per-node +96B = 4 × 24B):**
+
+```rust
+pub welford_prediction:   SignatureWelford,  // posterior mean projection
+pub welford_uncertainty:  SignatureWelford,  // epistemic leverage
+pub welford_calibration:  SignatureWelford,  // running ECE
+pub welford_routing:      SignatureWelford,  // route_key signal
+```
+
+`SignatureWelford { n: u64, mean: f64, m2: f64 }` — 24 bytes per
+channel, canonical f64 bit pattern. `NodeSignature::from_node` reads
+the four Welford means (canonical bits) and packs them into a
+`[u8; 32]` (8B per channel) instead of the pre-0.4 sha256-truncate of
+subsystem state. The Welford-folded summaries change *gradually* with
+observations, so `signature_stable_calls` increments are now *lenient*
+rather than *strict*; one new sample no longer resets stability to
+zero unless the running mean shifts beyond Hamming sensitivity.
+
+The `routing_observation_value` helper in `signature.rs` projects the
+descend trace into a scalar so routing changes participate in the
+Welford fold. All four channels are advanced inside `decide_step` per
+the contract in §3.7 step 3 ("Always advances signature stability").
 
 ---
 
@@ -654,11 +817,13 @@ some are about *what's not tested yet*.
    `Value::Int(i64)`, `Value::Tensor`, `Value::String`, `Value::Bytes`,
    `Value::Array`, `Value::Bool`, or `Value::Float`. No new `Value`
    variant.
-2. **`MAGIC` is `b"ABNG\x08"` and is the *only* accepted magic.**
-   Phase 0.4 that needs a new field bumps to `b"ABNG\x09"` — never
-   adds a fallback for older versions.
-3. **Audit-kind tag bytes `0x00..0x17` keep their current semantics.**
-   Phase 0.4's new kinds use `0x18..` only. **Never** re-number.
+2. **`MAGIC` is `b"ABNG\x0A"` and is the *only* accepted magic.**
+   Phase 0.4 already bumped through `\x09` (C-2.3.5) and `\x0A`
+   (B-2.2.7); Track A must NOT bump again — audit tags `0x1A..0x1C`
+   extend v10 in place. A future field that needs a bump goes to
+   `\x0B` in Phase 0.5. Never adds a fallback for older versions.
+3. **Audit-kind tag bytes `0x00..0x19` keep their current semantics.**
+   Track A's new kinds use `0x1A..` only. **Never** re-number.
 4. **`ChildrenKind` codes `0..5` and `Activation` codes `0x00..0x08`
    are frozen.** Code `5 = Dense` was added in 0.3d-3 and is now
    permanent.
@@ -705,29 +870,46 @@ implementation simplified the design. Phase 0.4 should explicitly
 choose for each remaining gap.
 
 ### 8.1 OOD `epistemic_z` ✅ RESOLVED in Phase 0.3d-2/4
-Phase 0.3d-2 added per-leaf `expected_epistemic` capture and the
+Phase 0.3d-2 added per-node `expected_epistemic` capture and the
 calibrated `(epi / expected).clamp(0, 1)` formula (falls back to raw
 clamp when not captured). Phase 0.3d-4 added auto-capture inside
 `decide_step` when `Maturity.uncertainty_stable` first holds.
 
-### 8.2 `Maturity` struct ✅ RESOLVED in Phase 0.3d-1/4
+### 8.2 `Maturity` struct ✅ FULLY RESOLVED in Phase 0.3d-1/4 + 0.4 B-2.2.2
 Phase 0.3d-1 shipped lazy `Maturity { samples_seen,
 calibration_stable, uncertainty_stable, trust_level }` with stub
 flags. Phase 0.3d-4 promoted the flags to single-threshold variants
-(`ECE < 0.05`; BLR + samples ≥ 100 + signature-stable ≥ 1).
-**Remaining 0.4 work:** 3-window stability buffers (currently
-single-threshold), `min_required_samples` field promotion (currently
-just `samples_seen`).
+(`ECE < 0.05`; BLR + samples ≥ 100 + signature-stable ≥ 1). Phase
+0.4 Track B-2.2.2 then upgraded both flags to **3-window ring
+buffers** per node (`ece_history: [f64; 3]`, `sigma_history: [f64; 3]`
+with per-buffer `fill_count` saturating at 3). `calibration_stable`
+flips on when `max(ece_history) - min(ece_history) ≤
+ECE_STABILITY_MAX_DELTA`; `uncertainty_stable` flips on when
+`max(sigma_history) / min(sigma_history) ≤ SIGMA_STABILITY_RATIO`.
+Both constants are currently compile-time in `maturity.rs` —
+promoting them to `DecisionPolicy` thresholds is deferred to Phase
+0.5 (see §8.23). Snapshot v10 absorbs the per-node +50B in place.
+`min_required_samples` field promotion was not in Phase 0.4 scope —
+deferred to Phase 0.5.
 
-### 8.3 NodeSignature for merge ✅ PARTIALLY RESOLVED
+### 8.3 NodeSignature for merge ✅ FULLY RESOLVED in Phase 0.4 Track B-2.2.1
 Phase 0.3d-1 shipped lazy 4 × 8-byte profile hashes (prediction,
 uncertainty, calibration, routing). Phase 0.3d-3 used Hamming-byte
 distance for Compress/Merge. Phase 0.3d-4 added persistent stability
-tracking via `last_signature` + `signature_stable_calls`.
-**Remaining 0.4 work:** Welford-folded summaries (currently lazy
-sha256-truncate of subsystem state — changes on every observation,
-which makes `signature_stable_calls` strict; Welford-smoothing makes
-it lenient).
+tracking via `last_signature` + `signature_stable_calls`. Phase 0.4
+Track B-2.2.1 then replaced the sha256-truncate construction with
+**4-channel Welford-folded summaries** per node:
+`welford_{prediction,uncertainty,calibration,routing}:
+SignatureWelford { n: u64, mean: f64, m2: f64 }` (24B per channel,
++96B per node, absorbed into snapshot v10 in place). `from_node`
+reads the four Welford means and packs canonical f64 bit patterns
+into a `[u8; 32]`. The Welford fold makes `signature_stable_calls`
+**lenient** — small post-stability observations no longer reset the
+counter to zero unless the running mean shifts beyond Hamming
+sensitivity. `decide_step` advances all four channels per the
+contract in §3.7 step 3, including for frozen / inactive nodes so
+B-2.2.7's drift-trip auto-Unfreeze sees up-to-date Welford state.
+See §6.8 for the data layout.
 
 ### 8.4 Categorical features in codebook
 - **Design:** categorical = stable-hashed canonical id, missing = 0xFE.
@@ -764,62 +946,112 @@ topology-mutating event.
   upgrade" diagnostic, which means decoding the magic byte and
   branching to a friendly error rather than `BadMagic`.
 
-### 8.9 Decision-engine simplifications (Phase 0.3d-4 deferrals)
-Phase 0.3d-4 ships defensible single-threshold triggers; full
-prompt-spec triggers land in 0.4:
+### 8.9 Decision-engine simplifications ✅ RESOLVED in Phase 0.4 Track B
+Phase 0.3d-4 shipped defensible single-threshold triggers; Phase 0.4
+Track B refined every gate into its prompt-spec form:
 
-| Trigger | 0.3d-4 (current) | 0.4 (planned) |
+| Trigger | 0.3d-4 baseline | 0.4 outcome |
 |---|---|---|
-| Compress | sibling Hamming ≤ τ_compress | full sub-tree signature equivalence |
-| Merge | sibling Hamming ≤ τ_merge **only** | + posterior KL < kl_merge gate |
-| Split | leaf + samples_seen ≥ split_min | + held-out ΔNLL gain ≥ nll_split_gain + impurity ≥ impurity_min |
-| Prune | unchanged from 0.4 design | unchanged |
-| Grow | leaf + samples_seen ≥ grow_min + key unbound | + route entropy > H_grow gate |
-| Freeze | unchanged from 0.4 design | unchanged |
+| Compress | sibling Hamming ≤ τ_compress | unchanged in B; full sub-tree signature equivalence deferred to 0.5 |
+| Merge | sibling Hamming ≤ τ_merge | ✅ B-2.2.3 added posterior `KL ≤ kl_merge` gate; ✅ B-2.2.6 shipped real NIG-aware `combine` math |
+| Split | leaf + samples_seen ≥ split_min | ✅ B-2.2.4 added bootstrap held-out ΔNLL gain ≥ `nll_split_gain` (synthetic Gaussian sampling from BLR posterior) |
+| Prune | samples_seen < prune_floor + signature_stable ≥ prune_grace_epochs | unchanged |
+| Grow | leaf + samples_seen ≥ grow_min + key unbound | ✅ B-2.2.5 added route-key entropy at candidate depth > `H_grow` gate |
+| Freeze | signature_stable_calls ≥ freeze_after | ✅ stability signal upgraded by B-2.2.1 (Welford-smoothed) and B-2.2.2 (3-window ECE/σ ring buffers) |
+| (drift-trip Unfreeze) | (no auto path) | ✅ B-2.2.7 wired auto-Unfreeze rung above the regular ladder + 12th `drift_unfreeze` threshold |
 
-### 8.10 Real merge math (Phase 0.3d-4 deferral)
-`force_merge` and policy-driven Merge in 0.3d-4 only set
-`absorbed.is_active = false`. Phase 0.4 will combine BLR posteriors
-(NIG-aware mean / precision / a / b combination) and fold stats
-into the surviving node so `into` actually inherits `absorbed`'s
-evidence.
+The pre-0.4 single-threshold simplifications in `crates/cjc-abng/src/graph.rs`
+have all been replaced; `// Phase 0.4 will…` markers are gone.
 
-### 8.11 Drift-trip auto-Unfreeze (Phase 0.3d-4 deferral)
-`abng_unfreeze` exists as a manual builtin. The architecture-doc
-intent is that `decide_step` would auto-unfreeze on drift signals
-exceeding a threshold. Phase 0.4 wires this through.
+### 8.10 Real merge math ✅ RESOLVED in Phase 0.4 Track B-2.2.6
+Pre-0.4 `force_merge` and policy-driven Merge only set
+`absorbed.is_active = false`, dropping all of absorbed's training
+history. Phase 0.4 Track B-2.2.6 shipped: `BlrState::combine(&mut
+self, other: &BlrState, prior: &BlrPrior)` and `NodeStats::combine
+(&mut self, other: &NodeStats)`, both pure functions of the input
+states. `force_merge` and the replay-side `apply_event` for the
+`Merge` audit kind both fold absorbed's BLR posterior (NIG-aware:
+sum precisions, precision-weighted-mean of means, `(a, b)` with
+prior subtract) and absorbed's Welford stats (Chan/Golub/LeVeque
+parallel merge) into `into` before deactivating absorbed. No
+snapshot bump (combines existing fields). The `feature_version_hash`
+on `into` is preserved across combine — into's feature space wins.
 
-### 8.12 BLR `predict()` API name vs unit (post-0.3d audit)
-See R10. Phase 0.4 Track C-2.3.1 fixes via either rename
-(`epistemic_leverage`) or math correction (`aleatoric_var × leverage`).
-Recommended fix: rename only.
+### 8.11 Drift-trip auto-Unfreeze ✅ RESOLVED in Phase 0.4 Track B-2.2.7
+Phase 0.4 Track B-2.2.7 wired the auto-unfreeze ladder step into
+`decide_step`. A new threshold `DecisionPolicy.drift_unfreeze()` (12th
+slot, post-v10 magic bump) gates it: when a frozen node has both a
+density tracker and a drift baseline, and `drift_score(current_density)
+> drift_unfreeze`, `decide_step` calls `unfreeze` before any other
+trigger considers the node. Default `f64::MAX` keeps the gate
+disabled in policies that don't opt in. The unfreeze emits the same
+`Unfreeze` audit kind (`0x16`) as the manual builtin so replay
+treats both the same way.
 
-### 8.13 NaN/Inf input validation (post-0.3d audit)
-See R11. Phase 0.4 Track C-2.3.2 — reject non-finite at every
-observe / update boundary.
+### 8.12 BLR `predict()` API name vs unit ✅ RESOLVED in Phase 0.4 Track C-2.3.1
+See R10. Phase 0.4 Track C-2.3.1 shipped the rename: `predict()`'s
+second tuple element is now `epistemic_leverage`, the helper
+`epistemic_leverage_at_posterior_mean` matches, and the doc clarifies
+that `expected_epistemic` stores leverage (field name preserved for
+snapshot stability). No math change, no snapshot bump.
 
-### 8.14 Replay missing semantic invariants (post-0.3d audit)
-See R12. Phase 0.4 Track C-2.3.3 — add seq monotonicity, Created-first,
-epoch match, stats_version match. New `DecodeError` variants.
+### 8.13 NaN/Inf input validation ✅ RESOLVED in Phase 0.4 Track C-2.3.2
+See R11. Phase 0.4 Track C-2.3.2 shipped non-finite rejection at four
+input boundaries: `AdaptiveBeliefGraph::observe`,
+`density_observe`, `calibration_observe`, and `blr_update`. New error
+variants — `GraphError::NonFiniteInput`, `BlrError::NonFiniteInput` —
+reject NaN, +Inf, and -Inf with a clear error before any state
+mutation. Replay byte-identical for healthy training (no events fire
+for rejected inputs). Test coverage in
+`tests/abng/observe_validation_tests.rs`. No snapshot bump.
 
-### 8.15 BLR silent `b<0` clamp (post-0.3d audit)
-See R13. Phase 0.4 Track C-2.3.4 — emit `BlrNumericalRescue`
-audit event (tag `0x18`) when the clamp fires.
+### 8.14 Replay missing semantic invariants ✅ RESOLVED in Phase 0.4 Track C-2.3.3
+See R12. Phase 0.4 Track C-2.3.3 shipped four new `DecodeError`
+variants: `SeqNonMonotonic { at_seq, expected }`,
+`MissingCreatedEvent`, `EpochMismatch { event_seq, event_epoch,
+header_epoch }`, `StatsVersionMismatch { event_seq, event_version,
+post_apply_version }`. Replay now validates each event's seq
+strictly increases by 1, the first non-genesis event is `Created`,
+every event's `epoch` matches the header epoch, and every event's
+`stats_version` matches the post-apply node `stats_version`.
+Adversarial blobs with consistent hash chains but reordered seqs /
+missing Created / forged epochs now error specifically rather than
+silently passing. Test coverage in `tests/abng/replay_invariant_tests.rs`.
+No snapshot bump (new error variants only).
 
-### 8.16 MLP-vs-BLR feature space contract (post-0.3d audit)
-See R14. Phase 0.4 Track C-2.3.5 — `feature_version_hash` on
-BlrState; reject `blr_update` on stale features; `abng_reset_blr`
-recovery builtin.
+### 8.15 BLR silent `b<0` clamp ✅ RESOLVED in Phase 0.4 Track C-2.3.4
+See R13. Phase 0.4 Track C-2.3.4 shipped the audit event: tag `0x18
+BlrNumericalRescue { reason: u8, b_pre_clamp_bits: u64 }` (9-byte
+body). `BlrState::update` returns `Result<Option<f64>, BlrError>` —
+`Some(b_pre_clamp)` when the clamp fires; the graph layer's
+`blr_update` emits the event after `BlrUpdated`. `apply_event` is a
+no-op for the new kind. No magic bump (consolidated into the planned
+`\x08 → \x09` end-of-Phase-0.4 freeze).
 
-### 8.17 LeafParamsUpdated event volume (post-0.3d audit)
-Each `leaf_set_param` writes one event per tensor — a 2-layer
-optimizer step fires 6 events. **Phase 0.4 Track C-2.3.6** — add
-`abng_leaf_set_params_batch` + `LeafParamsUpdatedBatch` audit kind
-(tag `0x19`) for one-event-per-step training.
+### 8.16 MLP-vs-BLR feature space contract ✅ RESOLVED in Phase 0.4 Track C-2.3.5
+See R14. Phase 0.4 Track C-2.3.5 shipped: `feature_version_hash` on
+BlrState (snapshot v9), `BlrError::FeatureVersionStale` on stale
+update, `abng_reset_blr` recovery builtin (dispatch surface 66 → 67),
+fvh stamping at every BLR-init site (`set_blr_prior`, `add_node`,
+`force_grow`, `force_split`), and replay-side reset semantics in
+`apply_event` for `BlrInitialized`.
 
-### 8.18 Per-leaf vs per-node naming (post-0.3d audit)
-See R16. Phase 0.4 Track C-2.3.7 — find-and-replace "per-leaf" →
-"per-node" in all docs. No code changes.
+### 8.17 LeafParamsUpdated event volume ✅ RESOLVED in Phase 0.4 Track C-2.3.6
+Phase 0.4 Track C-2.3.6 shipped the batch builtin
+`abng_leaf_set_params_batch(g, node_id, params: Tensor[]) -> Void`
+(dispatch.rs +1 arm: 65 → 66) and the matching audit kind
+`LeafParamsUpdatedBatch { params_hash }` at tag `0x19`. The graph
+method validates atomically — if any tensor's count or shape is
+wrong, the node's params are unchanged and no audit event is
+appended. The post-replay per-node verify path treats `0x19` as a
+valid latest-hash source alongside `LeafParamsInitialized` and
+`LeafParamsUpdated`. A 2-layer head's optimizer step now fires one
+event instead of six; a 100-epoch / 10-leaf loop drops from ~6,000
+events to ~1,000 (6× reduction).
+
+### 8.18 Per-leaf vs per-node naming ✅ RESOLVED in Phase 0.4 Track C-2.3.7
+See R16. Phase 0.4 Track C-2.3.7 shipped the doc-only rename. No
+code changes; behavior was always per-node.
 
 ### 8.19 Lineage belief / inherited prior (post-0.3d audit)
 Each node's BLR prior is independent — no ancestor-conditioned
@@ -866,23 +1098,23 @@ state" vs "post-Created chain head" distinction.
 | File | Role | Phase |
 |---|---|---|
 | `crates/cjc-abng/src/lib.rs` | re-exports + genesis hash | 0.1+ |
-| `crates/cjc-abng/src/graph.rs` | `AdaptiveBeliefGraph`, install / observe / score / structural mutation / decide_step engine | 0.1+ |
-| `crates/cjc-abng/src/node.rs` | `AdaptiveBeliefNode` (per-node state) | 0.1+ |
-| `crates/cjc-abng/src/audit.rs` | `AuditEvent`, `AuditKind` (24 variants), payload-bytes | 0.1+ |
-| `crates/cjc-abng/src/serialize.rs` | snapshot v8 encode + replay + defensive bounds | 0.1+ |
-| `crates/cjc-abng/src/dispatch.rs` | 65 `abng_*` builtins | 0.1+ |
-| `crates/cjc-abng/src/stats.rs` | `NodeStats` (Welford + Kahan M2) | 0.1 |
+| `crates/cjc-abng/src/graph.rs` | `AdaptiveBeliefGraph`, install / observe / score / structural mutation / decide_step engine + KL-merge / ΔNLL-split / route-entropy-grow gates / drift-trip auto-Unfreeze | 0.1+ |
+| `crates/cjc-abng/src/node.rs` | `AdaptiveBeliefNode` (per-node state) + ECE/σ ring buffers + 4 × `SignatureWelford` channels (B-2.2.{1,2}) | 0.1+ |
+| `crates/cjc-abng/src/audit.rs` | `AuditEvent`, `AuditKind` (26 variants — added `0x18 BlrNumericalRescue`, `0x19 LeafParamsUpdatedBatch`), payload-bytes | 0.1+ |
+| `crates/cjc-abng/src/serialize.rs` | snapshot v10 encode + replay + defensive bounds + 4 new C-2.3.3 `DecodeError` variants | 0.1+ |
+| `crates/cjc-abng/src/dispatch.rs` | 67 `abng_*` builtins (`+1` from C-2.3.5 `abng_reset_blr`, `+1` from C-2.3.6 `abng_leaf_set_params_batch`) | 0.1+ |
+| `crates/cjc-abng/src/stats.rs` | `NodeStats` (Welford + Kahan M2) + `combine` (B-2.2.6 — Chan/Golub/LeVeque parallel merge) | 0.1 + 0.4 |
 | `crates/cjc-abng/src/children.rs` | `AdaptiveChildren` (Node4/16/48/256/Dense) + promotion | 0.2 + 0.3d-3 |
 | `crates/cjc-abng/src/codebook.rs` | quantile codebook + prefix encoder | 0.2 |
 | `crates/cjc-abng/src/route.rs` | `RouteEvidence` | 0.2 |
 | `crates/cjc-abng/src/leaf_head.rs` | `LeafHead` + Xavier init | 0.3a |
-| `crates/cjc-abng/src/blr.rs` | BLR prior + state + Cholesky + NIG + predict | 0.3b |
+| `crates/cjc-abng/src/blr.rs` | BLR prior + state + Cholesky + NIG + predict + `combine` (B-2.2.6) + `kl_divergence` (B-2.2.3) + `feature_version_hash` (C-2.3.5) + `BlrNumericalRescue` path (C-2.3.4) + `NonFiniteInput` / `FeatureVersionStale` errors | 0.3b + 0.4 |
 | `crates/cjc-abng/src/density.rs` | density tracker (diag Mahalanobis) | 0.3c |
 | `crates/cjc-abng/src/calibration.rs` | 15-bin ECE | 0.3c |
 | `crates/cjc-abng/src/drift.rs` | drift baseline + z-score | 0.3c |
-| `crates/cjc-abng/src/maturity.rs` | `Maturity` lazy + real flags | 0.3d-1 + 0.3d-4 |
-| `crates/cjc-abng/src/signature.rs` | `NodeSignature` 4 × 8B profiles | 0.3d-1 |
-| `crates/cjc-abng/src/policy.rs` | `DecisionPolicy` (11 thresholds, validators) | 0.3d-3 |
+| `crates/cjc-abng/src/maturity.rs` | `Maturity` lazy + 3-window ring buffers (B-2.2.2) + `ECE_STABILITY_MAX_DELTA` / `SIGMA_STABILITY_RATIO` constants | 0.3d-1 + 0.3d-4 + 0.4 |
+| `crates/cjc-abng/src/signature.rs` | `NodeSignature` 4 × 8B profiles (B-2.2.1: read from per-node `SignatureWelford` state) + `routing_observation_value` helper | 0.3d-1 + 0.4 |
+| `crates/cjc-abng/src/policy.rs` | `DecisionPolicy` (12 thresholds incl. `drift_unfreeze`, validators) | 0.3d-3 + 0.4 |
 
 | Test file | Phase |
 |---|---|
@@ -902,31 +1134,41 @@ state" vs "post-Created chain head" distinction.
 | `tests/abng/uncertainty_tests.rs` | 0.3c |
 | `tests/abng/dispatch_p3c.rs` | 0.3c |
 | `tests/abng/parity_p3c.rs` | 0.3c |
-| `tests/abng/maturity_signature_tests.rs` | 0.3d-1 |
+| `tests/abng/maturity_signature_tests.rs` | 0.3d-1 + 0.4 (B-2.2.{1,2} updates) |
 | `tests/abng/expected_epistemic_tests.rs` | 0.3d-2 |
-| `tests/abng/decision_tests.rs` | 0.3d-3 + 0.3d-4 |
-| `tests/abng/dispatch_p3d.rs` | 0.3d-1..4 |
-| `tests/abng/parity_p3d.rs` | 0.3d-1..4 |
+| `tests/abng/decision_tests.rs` | 0.3d-3 + 0.3d-4 + 0.4 |
+| `tests/abng/dispatch_p3d.rs` | 0.3d-1..4 + 0.4 |
+| `tests/abng/parity_p3d.rs` | 0.3d-1..4 + 0.4 |
+| `tests/abng/observe_validation_tests.rs` | 0.4 C-2.3.2 |
+| `tests/abng/replay_invariant_tests.rs` | 0.4 C-2.3.3 |
+| `tests/abng/blr_numerical_rescue_tests.rs` | 0.4 C-2.3.4 |
+| `tests/abng/blr_feature_version_tests.rs` | 0.4 C-2.3.5 |
+| `tests/abng/leaf_params_batch_tests.rs` | 0.4 C-2.3.6 |
+| `tests/abng/merge_math_tests.rs` | 0.4 B-2.2.6 |
+| `tests/abng/route_entropy_grow_tests.rs` | 0.4 B-2.2.5 |
+| `tests/abng/split_nll_gate_tests.rs` | 0.4 B-2.2.4 |
 | `tests/prop_tests/abng_decision_props.rs` | 0.3d-5 |
 | `tests/bolero_fuzz/abng_decision_fuzz.rs` | 0.3d-5 |
 
-## Appendix B — Most Recent Verified Test Counts (post-Phase 0.3d)
+## Appendix B — Most Recent Verified Test Counts (post-Phase 0.4 B+C, 2026-05-07)
 
-| Gate | Result |
-|---|---|
-| `cargo test -p cjc-abng --lib` | **227 passed, 0 failed** |
-| `cargo test --test abng` | **303 passed, 0 failed** |
-| `cargo test --test prop_tests abng_decision` | **4 passed** (× 256 cases each) |
-| `cargo test --test bolero_fuzz abng_decision` | **4 passed** |
-| `cargo test --workspace --release --lib` | **2,363 passed, 0 failed** |
-| `cargo test --test physics_ml --release` | **107 passed, 0 failed, 2 ignored** |
+| Gate | Result | Δ from end-of-0.3d |
+|---|---|---|
+| `cargo test -p cjc-abng --lib` | **252 passed, 0 failed** | +25 |
+| `cargo test --test abng` | **391 passed, 0 failed** | +88 |
+| `cargo test --test prop_tests abng_decision` | **4 passed** (× 256 cases each) | +0 |
+| `cargo test --test bolero_fuzz abng_decision` | **4 passed** | +0 |
+| `cargo test --workspace --release --lib` | (re-run before Track A merge) | — |
+| `cargo test --test physics_ml --release` | (re-run before Track A merge) | — |
 
-Total ABNG-direct `#[test]` markers: **~530** (227 in-crate + 303
+Total ABNG-direct `#[test]` markers: **643** (252 in-crate + 391
 integration), plus 4 properties (× 256 cases each) and 4 fuzz targets.
 
 ---
 
-*This document is the source of truth as of end-of-Phase-0.3d
-(2026-05-07). When the code and a phase design note disagree, this
-document — and the code it references — wins. Phase 0.4 work should
-update this doc in lockstep with the code, not after.*
+*This document is the source of truth as of end-of-Phase-0.4-B+C
+(2026-05-07). Track A (`cjcl abng …` CLI) is the remaining piece;
+when the code and a phase design note disagree, this document — and
+the code it references — wins. Track A work must update this doc in
+lockstep with the code, not after, and must NOT bump snapshot magic
+beyond `\x0A` (audit tags `0x1A..0x1C` extend v10 in place).*

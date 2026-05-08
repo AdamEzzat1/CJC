@@ -1,8 +1,15 @@
-# ABNG Phase 0.3b — Per-leaf Bayesian Linear Regression head (Design Note)
+# ABNG Phase 0.3b — Per-node Bayesian Linear Regression head (Design Note)
 
 **Date:** 2026-05-06
 **Builds on:** [Phase 0.3a](PHASE_0_3a_DESIGN.md)
-**Scope:** Attach a per-leaf Bayesian linear regression head on top of the MLP's penultimate features. Normal-Inverse-Gamma conjugate update. Epistemic + aleatoric uncertainty as separate quantities.
+**Scope:** Attach a per-node Bayesian linear regression head on top of the MLP's penultimate features. Normal-Inverse-Gamma conjugate update. Epistemic + aleatoric uncertainty as separate quantities.
+
+> **Naming note (Phase 0.4 Track C-2.3.7):** the BLR head is per-*node*,
+> not per-*leaf*. `set_blr_prior` initializes the root, and every
+> `add_node` / `force_grow` / `force_split` initializes a fresh
+> `BlrState` from the prior on the new node. Pre-0.4 this doc and the
+> code said "per-leaf" — the code was always per-node; only the name
+> was wrong. The body of this note has been updated to match.
 
 ## Why this slice
 

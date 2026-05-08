@@ -151,17 +151,19 @@ fn signature_fresh_root_is_32_bytes() {
     );
     let bytes = expect_bytes(v);
     let data = bytes.borrow();
+    // Phase 0.4 Track B-2.2.1 — signatures populate via Welford
+    // observations driven by `decide_step`. A fresh root has zero
+    // observations on every profile; all 32 bytes are the all-zeros
+    // sentinel.
     assert_eq!(data.len(), 32);
-    // Three subsystems uninstalled → zeros for prediction/uncertainty/calibration.
-    assert_eq!(&data[0..8], &[0u8; 8]);
-    assert_eq!(&data[8..16], &[0u8; 8]);
-    assert_eq!(&data[16..24], &[0u8; 8]);
-    // Routing is always defined — non-zero hash even for empty children.
-    assert_ne!(&data[24..32], &[0u8; 8]);
+    assert_eq!(&data[..], &[0u8; 32]);
 }
 
 #[test]
 fn signature_changes_with_subsystem_install() {
+    // Phase 0.4 Track B-2.2.1 — to populate signatures, drive a
+    // `decide_step` call after subsystem install. The Welfords fold
+    // one observation per profile per call.
     reset_arena();
     let g_bare = new_graph(0);
     let bare = expect_bytes(call(
@@ -173,6 +175,29 @@ fn signature_changes_with_subsystem_install() {
 
     let g_full = new_graph(0);
     install_full_stack(g_full);
+    // Train BLR so its posterior has a non-zero mean — the
+    // `epistemic_leverage_at_posterior_mean` helper returns None
+    // when leverage is zero (which it is at the prior with mean=0,
+    // since `predict([0; d])` evaluates leverage at zero), so the
+    // uncertainty Welford never observes. A single update lifts the
+    // posterior off the prior.
+    let features = Tensor::from_vec(vec![1.0, 0.5], &[1, 2]).unwrap();
+    let y = Tensor::from_vec(vec![1.0], &[1]).unwrap();
+    let _ = call(
+        "abng_blr_update",
+        &[
+            Value::Int(g_full),
+            Value::Int(0),
+            Value::Tensor(features),
+            Value::Tensor(y),
+        ],
+    );
+    // Install policy + decide_step so the Welfords observe.
+    let _ = call(
+        "abng_set_decision_policy",
+        &[Value::Int(g_full), Value::Tensor(ok_thresholds_tensor())],
+    );
+    let _ = call("abng_decide_step", &[Value::Int(g_full)]);
     let full = expect_bytes(call(
         "abng_node_signature",
         &[Value::Int(g_full), Value::Int(0)],
@@ -181,12 +206,12 @@ fn signature_changes_with_subsystem_install() {
     .clone();
 
     assert_ne!(bare, full);
-    // Prediction profile (bytes 0..8) is now non-zero because head installed.
+    // After decide_step folded one observation per profile, all four
+    // 8-byte profile fields are now non-zero.
     assert_ne!(&full[0..8], &[0u8; 8]);
-    // Uncertainty profile (bytes 8..16) is now non-zero because BLR installed.
     assert_ne!(&full[8..16], &[0u8; 8]);
-    // Calibration profile (bytes 16..24) is now non-zero because bins installed.
     assert_ne!(&full[16..24], &[0u8; 8]);
+    assert_ne!(&full[24..32], &[0u8; 8]);
 }
 
 #[test]
@@ -340,11 +365,12 @@ fn expected_epistemic_arity_check() {
 // ─── Phase 0.3d-3 — DecisionPolicy + force-* + inspection ─────
 
 fn ok_thresholds_tensor() -> Tensor {
+    // Phase 0.4 Track B-2.2.7 — drift_unfreeze added at index 11.
     Tensor::from_vec(
         vec![
-            0.5, 64.0, 128.0, 0.05, 0.02, 4.0, 0.1, 32.0, 10.0, 8.0, 20.0,
+            0.5, 64.0, 128.0, 0.05, 0.02, 4.0, 0.1, 32.0, 10.0, 8.0, 20.0, f64::MAX,
         ],
-        &[11],
+        &[12],
     )
     .unwrap()
 }

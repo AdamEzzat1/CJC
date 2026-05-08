@@ -5,11 +5,11 @@ use cjc_abng::children::{AdaptiveChildren, ChildrenKind};
 use cjc_abng::graph::{ActionKind, AdaptiveBeliefGraph, GraphError, N_ACTION_KINDS};
 use cjc_abng::AuditKind;
 
-fn ok_thresholds() -> [f64; 11] {
+fn ok_thresholds() -> [f64; 12] {
     [
         0.5, 64.0, 128.0, 0.05, 0.02,
         4.0, 0.1, 32.0, 10.0, 8.0,
-        20.0,
+        20.0, f64::MAX, // drift_unfreeze disabled
     ]
 }
 
@@ -385,16 +385,14 @@ fn decide_step_grow_after_observations() {
 
 #[test]
 fn decide_step_split_when_samples_high() {
-    // split_min = 128. Observe 130 times then decide_step. But Grow
-    // fires first (grow_min = 64) since both triggers are active and
-    // Grow comes after Split in the fall-through. Wait — re-read
-    // prompt §2.6: order is Compress, Merge, Split, Prune, Grow,
-    // Freeze. Split before Grow, so Split should fire when both are
-    // eligible. Confirm.
+    // split_min = 128. Observe 130 times with varied values so the
+    // Phase 0.4 Track B-2.2.4 impurity + ΔNLL gates pass. Order is
+    // Compress, Merge, Split, Prune, Grow, Freeze — Split before Grow,
+    // so Split fires when both are eligible.
     let mut g = AdaptiveBeliefGraph::new(0);
     g.set_decision_policy(&ok_thresholds()).unwrap();
-    for _ in 0..130 {
-        g.observe(0, 1.0).unwrap();
+    for i in 0..130 {
+        g.observe(0, (i as f64) * 0.05).unwrap(); // varied → non-zero variance
     }
     let counts = g.decide_step();
     assert_eq!(counts[ActionKind::Split as usize], 1);
@@ -468,7 +466,7 @@ fn decide_step_auto_captures_expected_epistemic_at_uncertainty_stable() {
     // Use an isolating policy: grow_min and split_min are sky-high so
     // those triggers don't fire during the stability-accumulation
     // phase; we want auto-capture to be the ONLY thing happening.
-    let isolating_thresholds: [f64; 11] = [
+    let isolating_thresholds: [f64; 12] = [
         0.5,         // H_grow
         1.0e9,       // grow_min — effectively disabled
         1.0e9,       // split_min — effectively disabled
@@ -480,23 +478,30 @@ fn decide_step_auto_captures_expected_epistemic_at_uncertainty_stable() {
         1.0e9,       // prune_grace_epochs — effectively disabled
         8.0,         // tau_compress
         1.0e9,       // freeze_after — effectively disabled
+        f64::MAX,    // drift_unfreeze — disabled
     ];
     g.set_decision_policy(&isolating_thresholds).unwrap();
     // Train BLR so its posterior mean is non-zero — otherwise
-    // epistemic_var at posterior_mean = epistemic_var at origin = 0
-    // and auto-capture rejects it as degenerate.
+    // epistemic_leverage at posterior_mean = epistemic_leverage at
+    // origin = 0 and auto-capture rejects it as degenerate.
     g.blr_update(0, &[1.0, 0.5, 2.0, 1.5, 3.0, 2.5], &[1.0, 2.0, 3.0])
         .unwrap();
     // Drive samples_seen above UNCERTAINTY_STABLE_MIN_SAMPLES (= 100).
     for _ in 0..150 {
         g.observe(0, 1.0).unwrap();
     }
-    // First call: captures last_signature, stable_calls = 0 →
-    //             uncertainty_stable still false → no auto-capture.
+    // Phase 0.4 Track B-2.2.2 — uncertainty_stable now requires 3
+    // σ history windows filled (in addition to samples_seen ≥ 100,
+    // BLR installed, signature_stable_calls ≥ 1). 3 decide_step calls
+    // produce 3 σ observations, so the buffer fills on call 3.
     g.decide_step();
     assert_eq!(g.expected_epistemic(0).unwrap(), None);
-    // Second call: stable_calls = 1 → uncertainty_stable = true →
-    //              auto-capture fires.
+    g.decide_step();
+    // After 2 calls: σ buffer has 2 readings (fill_count=2) →
+    // uncertainty_stable still false → no auto-capture.
+    assert_eq!(g.expected_epistemic(0).unwrap(), None);
+    // Third call fills the σ buffer; uncertainty_stable flips →
+    // auto-capture fires.
     g.decide_step();
     assert!(g.expected_epistemic(0).unwrap().is_some());
 }

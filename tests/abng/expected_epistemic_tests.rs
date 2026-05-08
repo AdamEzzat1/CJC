@@ -80,12 +80,13 @@ fn capture_per_node_independent() {
 fn ood_score_calibrated_branch_active() {
     // After capture, ood_score's epistemic_z component uses the ratio
     // formula. With a small captured reference (much less than the
-    // current epistemic var) the ratio saturates at 1.0.
+    // current epistemic leverage) the ratio saturates at 1.0.
     let mut g = graph_with_blr();
-    // Train BLR a bit so its predict() returns finite epistemic var.
+    // Train BLR a bit so its predict() returns finite epistemic
+    // leverage (the dimensionless `‖L⁻¹φ‖²`; see C-2.3.1).
     g.blr_update(0, &[1.0, 1.0, 2.0, 2.0, 3.0, 3.0], &[1.0, 2.0, 3.0])
         .unwrap();
-    let phi = vec![5.0, 5.0]; // far-from-training point → high epi var
+    let phi = vec![5.0, 5.0]; // far-from-training point → high leverage
     g.set_expected_epistemic(0, 1e-6).unwrap();
     let s = g.ood_score(0, &phi, 0, 0).unwrap();
     // With a tiny reference, calibrated z saturates at 1.0; OOD = max

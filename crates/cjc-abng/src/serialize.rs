@@ -36,7 +36,7 @@ use crate::node::{AdaptiveBeliefNode, NodeId};
 use crate::policy::DecisionPolicy;
 use crate::stats::NodeStats;
 
-const MAGIC: &[u8; 5] = b"ABNG\x08";
+const MAGIC: &[u8; 5] = b"ABNG\x0A";
 
 /// Errors returned by snapshot decoding.
 #[derive(Debug, PartialEq)]
@@ -95,6 +95,28 @@ pub enum DecodeError {
     /// `DecisionPolicy` did not match the stored value, or the
     /// thresholds failed validation.
     DecisionPolicyHashMismatch,
+    /// Phase 0.4 Track C-2.3.3 — an audit event's `seq` was not the
+    /// expected next monotonic value `expected_seq + 1`. Catches blobs
+    /// where the chain hashes are internally consistent (an attacker
+    /// recomputed them) but events are reordered, missing, or
+    /// duplicated.
+    NonMonotonicSeq { expected: u64, got: u64 },
+    /// Phase 0.4 Track C-2.3.3 — an audit event's `epoch` did not match
+    /// the snapshot header's `epoch`. Catches forged events injected
+    /// from a different graph epoch.
+    EpochMismatch { expected: u64, got: u64 },
+    /// Phase 0.4 Track C-2.3.3 — an audit event's recorded
+    /// `stats_version` did not match the live node's `stats_version`
+    /// after the event was applied. Catches reordered or swapped
+    /// `*Updated` events for the same node, where the chain hashes
+    /// validate but the per-event sequence numbers no longer match the
+    /// live state evolution.
+    StatsVersionMismatch { node_id: NodeId, at_seq: u64 },
+    /// Phase 0.4 Track C-2.3.3 — the audit log either contains no events
+    /// at all, has a non-`Created` event in the first slot, or contains
+    /// a `Created` event after the first slot. Every well-formed graph
+    /// has exactly one `Created` event at `seq == 0`.
+    CreatedMustBeFirst,
 }
 
 impl std::fmt::Display for DecodeError {
@@ -134,6 +156,22 @@ impl std::fmt::Display for DecodeError {
             DecodeError::DecisionPolicyHashMismatch => {
                 write!(f, "abng: decision policy hash mismatch")
             }
+            DecodeError::NonMonotonicSeq { expected, got } => write!(
+                f,
+                "abng: audit seq must be monotonic — expected {expected}, got {got}"
+            ),
+            DecodeError::EpochMismatch { expected, got } => write!(
+                f,
+                "abng: event epoch {got} does not match header epoch {expected}"
+            ),
+            DecodeError::StatsVersionMismatch { node_id, at_seq } => write!(
+                f,
+                "abng: stats_version mismatch on node {node_id} at seq {at_seq}"
+            ),
+            DecodeError::CreatedMustBeFirst => write!(
+                f,
+                "abng: audit log must start with exactly one Created event at seq 0"
+            ),
         }
     }
 }
@@ -265,6 +303,26 @@ pub fn serialize(graph: &AdaptiveBeliefGraph) -> Vec<u8> {
             }
         }
         out.extend_from_slice(&node.signature_stable_calls.to_be_bytes());
+        // Phase 0.4 Track B-2.2.2 — 3-window stability buffers
+        // (snapshot v10). 6 × f64 + 2 × u8 = 50 bytes per node.
+        for v in node.ece_history.iter() {
+            out.extend_from_slice(&v.to_bits().to_be_bytes());
+        }
+        out.push(node.ece_fill_count);
+        for v in node.sigma_history.iter() {
+            out.extend_from_slice(&v.to_bits().to_be_bytes());
+        }
+        out.push(node.sigma_fill_count);
+        // Phase 0.4 Track B-2.2.1 — Welford signature accumulators
+        // (4 × 24 = 96 bytes per node).
+        for w in [
+            &node.welford_prediction,
+            &node.welford_uncertainty,
+            &node.welford_calibration,
+            &node.welford_routing,
+        ] {
+            out.extend_from_slice(&w.canonical_bytes());
+        }
     }
 
     // Audit log.
@@ -571,6 +629,9 @@ fn decode_blr_state(cur: &mut Cursor) -> Result<BlrState, DecodeError> {
     let a = cur.f64_be()?;
     let b = cur.f64_be()?;
     let n_seen = cur.u64_be()?;
+    // Phase 0.4 Track C-2.3.5 (snapshot v9): feature_version_hash
+    // appended to BlrState canonical bytes.
+    let feature_version_hash = cur.hash32()?;
     let mean = Tensor::from_vec(mean_data, &[dz]).map_err(|_| DecodeError::UnexpectedEof)?;
     let precision =
         Tensor::from_vec(prec_data, &[dz, dz]).map_err(|_| DecodeError::UnexpectedEof)?;
@@ -581,6 +642,7 @@ fn decode_blr_state(cur: &mut Cursor) -> Result<BlrState, DecodeError> {
         a,
         b,
         n_seen,
+        feature_version_hash,
     })
 }
 
@@ -671,7 +733,7 @@ struct StoredNode {
     density: Option<DensityTracker>,
     calibration: Option<CalibrationBins>,
     drift_baseline: Option<DriftBaseline>,
-    /// Phase 0.3d-2 — per-leaf training-time epistemic-σ reference.
+    /// Phase 0.3d-2 — per-node training-time epistemic-σ reference.
     expected_epistemic: Option<f64>,
     /// Phase 0.3d-3 — per-node frozen / active flags.
     is_frozen: bool,
@@ -679,6 +741,16 @@ struct StoredNode {
     /// Phase 0.3d-4 — per-node signature stability state.
     last_signature: Option<[u8; 32]>,
     signature_stable_calls: u64,
+    /// Phase 0.4 Track B-2.2.2 — 3-window stability buffers (v10).
+    ece_history: [f64; 3],
+    ece_fill_count: u8,
+    sigma_history: [f64; 3],
+    sigma_fill_count: u8,
+    /// Phase 0.4 Track B-2.2.1 — Welford signature accumulators (v10).
+    welford_prediction: crate::signature::SignatureWelford,
+    welford_uncertainty: crate::signature::SignatureWelford,
+    welford_calibration: crate::signature::SignatureWelford,
+    welford_routing: crate::signature::SignatureWelford,
 }
 
 fn decode_children(
@@ -824,6 +896,22 @@ fn decode_stored_node(cur: &mut Cursor) -> Result<StoredNode, DecodeError> {
         other => return Err(DecodeError::UnknownChildrenKind(other)),
     };
     let signature_stable_calls = cur.u64_be()?;
+    // Phase 0.4 Track B-2.2.2 — 3-window stability buffers (v10).
+    let mut ece_history = [0.0f64; 3];
+    for h in ece_history.iter_mut() {
+        *h = cur.f64_be()?;
+    }
+    let ece_fill_count = cur.u8()?;
+    let mut sigma_history = [0.0f64; 3];
+    for h in sigma_history.iter_mut() {
+        *h = cur.f64_be()?;
+    }
+    let sigma_fill_count = cur.u8()?;
+    // Phase 0.4 Track B-2.2.1 — Welford signature accumulators (v10).
+    let welford_prediction = decode_signature_welford(cur)?;
+    let welford_uncertainty = decode_signature_welford(cur)?;
+    let welford_calibration = decode_signature_welford(cur)?;
+    let welford_routing = decode_signature_welford(cur)?;
     Ok(StoredNode {
         parent,
         children_kind,
@@ -841,7 +929,24 @@ fn decode_stored_node(cur: &mut Cursor) -> Result<StoredNode, DecodeError> {
         is_active,
         last_signature,
         signature_stable_calls,
+        ece_history,
+        ece_fill_count,
+        sigma_history,
+        sigma_fill_count,
+        welford_prediction,
+        welford_uncertainty,
+        welford_calibration,
+        welford_routing,
     })
+}
+
+fn decode_signature_welford(
+    cur: &mut Cursor,
+) -> Result<crate::signature::SignatureWelford, DecodeError> {
+    let n_seen = cur.u64_be()?;
+    let mean = cur.f64_be()?;
+    let m2 = cur.f64_be()?;
+    Ok(crate::signature::SignatureWelford { n_seen, mean, m2 })
 }
 
 /// Replay a v2 snapshot blob back into a fresh [`AdaptiveBeliefGraph`].
@@ -923,6 +1028,13 @@ pub fn replay(bytes: &[u8]) -> Result<AdaptiveBeliefGraph, DecodeError> {
 
     // Audit log.
     let n_events = cur.u64_be()?;
+    // Phase 0.4 Track C-2.3.3 — every well-formed graph has at least
+    // one event (the genesis Created). A blob with `n_events == 0` is
+    // logically inconsistent: the live root state must come from
+    // somewhere, and the only chain anchor for it is `Created`.
+    if n_events == 0 {
+        return Err(DecodeError::CreatedMustBeFirst);
+    }
 
     // Seed live graph with the root only; replay drives all subsequent
     // mutations.
@@ -946,6 +1058,14 @@ pub fn replay(bytes: &[u8]) -> Result<AdaptiveBeliefGraph, DecodeError> {
             is_active: true,
             last_signature: None,
             signature_stable_calls: 0,
+            ece_history: [0.0; 3],
+            ece_fill_count: 0,
+            sigma_history: [0.0; 3],
+            sigma_fill_count: 0,
+            welford_prediction: crate::signature::SignatureWelford::new(),
+            welford_uncertainty: crate::signature::SignatureWelford::new(),
+            welford_calibration: crate::signature::SignatureWelford::new(),
+            welford_routing: crate::signature::SignatureWelford::new(),
         }],
         // Defensive: untrusted `n_events` cannot drive a giant
         // `with_capacity` allocation; let the vec grow naturally.
@@ -961,13 +1081,45 @@ pub fn replay(bytes: &[u8]) -> Result<AdaptiveBeliefGraph, DecodeError> {
     };
 
     let mut prev_hash = genesis_hash();
-    for _ in 0..n_events {
+    let mut expected_seq: u64 = 0;
+    for event_index in 0..n_events {
         let payload_len = cur.u32_be()? as usize;
         let payload = cur.take(payload_len)?;
         let stored_previous = cur.hash32()?;
         let stored_new = cur.hash32()?;
 
         let event = decode_payload(payload, stored_previous, stored_new)?;
+
+        // Phase 0.4 Track C-2.3.3 — semantic invariants run BEFORE the
+        // chain hash check so an adversarial blob whose hashes are
+        // internally consistent (attacker recomputed) still surfaces
+        // the specific malformation rather than a generic
+        // ChainMismatch. A blob that's also chain-corrupt is malformed
+        // either way; the more specific error wins.
+
+        // First event must be Created; only the first.
+        if event_index == 0 && !matches!(event.kind, AuditKind::Created) {
+            return Err(DecodeError::CreatedMustBeFirst);
+        }
+        if event_index > 0 && matches!(event.kind, AuditKind::Created) {
+            return Err(DecodeError::CreatedMustBeFirst);
+        }
+
+        // seq must be 0, 1, 2, …
+        if event.seq != expected_seq {
+            return Err(DecodeError::NonMonotonicSeq {
+                expected: expected_seq,
+                got: event.seq,
+            });
+        }
+
+        // epoch must match the header.
+        if event.epoch != epoch {
+            return Err(DecodeError::EpochMismatch {
+                expected: epoch,
+                got: event.epoch,
+            });
+        }
 
         if event.previous_hash != prev_hash {
             return Err(DecodeError::ChainMismatch { at_seq: event.seq });
@@ -988,6 +1140,20 @@ pub fn replay(bytes: &[u8]) -> Result<AdaptiveBeliefGraph, DecodeError> {
             stored_calibration_n_bins,
         )?;
 
+        // Phase 0.4 Track C-2.3.3 — the event's recorded
+        // `stats_version` must match the live node's post-apply
+        // `stats_version`. Catches reordered or swapped *Updated
+        // events for the same node, where the chain hashes still
+        // validate but the per-event sequence numbers no longer
+        // match the live state evolution.
+        let live_stats_version = graph.nodes[event.node_id as usize].stats_version;
+        if event.stats_version != live_stats_version {
+            return Err(DecodeError::StatsVersionMismatch {
+                node_id: event.node_id,
+                at_seq: event.seq,
+            });
+        }
+
         // Verify the per-node stats hash matches what the event recorded.
         let live_stats_hash = graph.nodes[event.node_id as usize].stats.stats_hash();
         if live_stats_hash != event.stats_hash {
@@ -999,6 +1165,7 @@ pub fn replay(bytes: &[u8]) -> Result<AdaptiveBeliefGraph, DecodeError> {
         graph.chain_head = recomputed_new;
         graph.audit.push(event);
         prev_hash = recomputed_new;
+        expected_seq += 1;
     }
 
     // Verify per-node canonical bytes, chain heads, and children layouts.
@@ -1042,6 +1209,11 @@ pub fn replay(bytes: &[u8]) -> Result<AdaptiveBeliefGraph, DecodeError> {
                                 Some((e.seq, *params_hash))
                             }
                             AuditKind::LeafParamsUpdated { params_hash } => {
+                                Some((e.seq, *params_hash))
+                            }
+                            // Phase 0.4 Track C-2.3.6 — batch writeback
+                            // is also a valid latest-hash source.
+                            AuditKind::LeafParamsUpdatedBatch { params_hash } => {
                                 Some((e.seq, *params_hash))
                             }
                             _ => None,
@@ -1205,6 +1377,21 @@ pub fn replay(bytes: &[u8]) -> Result<AdaptiveBeliefGraph, DecodeError> {
         // round-trip preserves them verbatim from the snapshot.
         graph.nodes[i].last_signature = expected.last_signature;
         graph.nodes[i].signature_stable_calls = expected.signature_stable_calls;
+        // Phase 0.4 Track B-2.2.2 — install 3-window stability buffers.
+        // Same pattern: no witness event; the snapshot is authoritative
+        // and `decide_step` calls after replay continue from where the
+        // pre-snapshot decide_step calls left off.
+        graph.nodes[i].ece_history = expected.ece_history;
+        graph.nodes[i].ece_fill_count = expected.ece_fill_count;
+        graph.nodes[i].sigma_history = expected.sigma_history;
+        graph.nodes[i].sigma_fill_count = expected.sigma_fill_count;
+        // Phase 0.4 Track B-2.2.1 — install Welford signature
+        // accumulators. Same no-witness-event pattern; the snapshot
+        // is authoritative for the running summaries.
+        graph.nodes[i].welford_prediction = expected.welford_prediction;
+        graph.nodes[i].welford_uncertainty = expected.welford_uncertainty;
+        graph.nodes[i].welford_calibration = expected.welford_calibration;
+        graph.nodes[i].welford_routing = expected.welford_routing;
     }
 
     if graph.chain_head != stored_final_hash {
@@ -1388,26 +1575,26 @@ fn apply_event(
             graph.nodes[0].blr = Some(BlrState::from_prior(&prior, d));
             graph.blr_prior = Some(prior);
         }
-        AuditKind::BlrInitialized { state_hash } => {
+        AuditKind::BlrInitialized { .. } => {
             if (event.node_id as usize) >= graph.nodes.len() {
                 return Err(DecodeError::ChainMismatch { at_seq: event.seq });
             }
-            // Witness: live BLR state was set by NodeAdded (or by
-            // BlrPriorConfigured for the root); verify hash matches.
-            let live_hash = graph.nodes[event.node_id as usize]
-                .blr
-                .as_ref()
-                .ok_or(DecodeError::BlrStateHashMismatch {
-                    node_id: event.node_id,
-                    at_seq: event.seq,
-                })?
-                .state_hash();
-            if live_hash != *state_hash {
-                return Err(DecodeError::BlrStateHashMismatch {
-                    node_id: event.node_id,
-                    at_seq: event.seq,
-                });
-            }
+            // Phase 0.4 Track C-2.3.5 — `BlrInitialized` fires at install
+            // time AND at `reset_blr` time. The pre-0.4 per-event
+            // witness check used live state's `state_hash`, but during
+            // apply-event-phase the live BLR state doesn't accurately
+            // reflect mid-history mutations: `LeafParamsUpdated` is a
+            // no-op here, so `params_hash(live params)` stays at the
+            // Xavier-init hash even after subsequent leaf-param writes.
+            // Computing `feature_version_hash` from those stale params
+            // and verifying against a witness recorded at training time
+            // (when params had drifted) would always fail for reset_blr
+            // events. The pre-event chain hash and the end-of-replay
+            // per-node verify (line ~1163) together still catch all
+            // tampering: the chain hash covers every event's payload
+            // (including state_hash), and the end-of-replay verify
+            // checks the installed BLR state against the latest
+            // witness. So this branch is now witness-only no-op.
         }
         AuditKind::BlrUpdated { .. } => {
             // Same trade-off as LeafParamsUpdated: the new state lives
@@ -1555,10 +1742,46 @@ fn apply_event(
                 .action_counts[crate::graph::ActionKind::Split as usize]
                 .saturating_add(1);
         }
-        AuditKind::Merge { absorbed, into: _ } => {
-            if (*absorbed as usize) >= graph.nodes.len() {
+        AuditKind::Merge { absorbed, into } => {
+            if (*absorbed as usize) >= graph.nodes.len()
+                || (*into as usize) >= graph.nodes.len()
+            {
                 return Err(DecodeError::ChainMismatch { at_seq: event.seq });
             }
+            // Phase 0.4 Track B-2.2.6 — replay-side merge math. Mirror
+            // graph.force_merge so live state matches training-time
+            // state when subsequent events fire on `into`.
+            //
+            // 1. Combine NodeStats. The next event on `into` witnesses
+            //    `into.stats.stats_hash()`, so this combine is required
+            //    for the chain to verify.
+            let absorbed_stats = graph.nodes[*absorbed as usize].stats.clone();
+            graph.nodes[*into as usize].stats.combine(&absorbed_stats);
+            graph.nodes[*into as usize].stats_version = graph.nodes[*into as usize]
+                .stats_version
+                .saturating_add(1);
+
+            // 2. Combine BLR posteriors when both nodes carry one.
+            if let (Some(prior), true, true) = (
+                graph.blr_prior.clone(),
+                graph.nodes[*into as usize].blr.is_some(),
+                graph.nodes[*absorbed as usize].blr.is_some(),
+            ) {
+                let absorbed_blr = graph.nodes[*absorbed as usize]
+                    .blr
+                    .as_ref()
+                    .expect("absorbed blr present")
+                    .clone();
+                let into_blr = graph.nodes[*into as usize]
+                    .blr
+                    .as_mut()
+                    .expect("into blr present");
+                if into_blr.combine(&absorbed_blr, &prior).is_err() {
+                    return Err(DecodeError::ChainMismatch { at_seq: event.seq });
+                }
+            }
+
+            // 3. Deactivate absorbed and bump action counter.
             graph.nodes[*absorbed as usize].is_active = false;
             graph.action_counts[crate::graph::ActionKind::Merge as usize] = graph
                 .action_counts[crate::graph::ActionKind::Merge as usize]
@@ -1601,6 +1824,20 @@ fn apply_event(
                 return Err(DecodeError::ChainMismatch { at_seq: event.seq });
             }
             graph.nodes[*node_id as usize].is_frozen = false;
+        }
+        AuditKind::BlrNumericalRescue { .. } => {
+            // Phase 0.4 Track C-2.3.4 — diagnostic-only event. The
+            // state-changing event for the same update is the
+            // immediately-preceding `BlrUpdated`, which already
+            // advanced the BLR posterior. No state mutation here; the
+            // rescue event is metadata about the prior update.
+        }
+        AuditKind::LeafParamsUpdatedBatch { .. } => {
+            // Phase 0.4 Track C-2.3.6 — hash-witness event. The actual
+            // params blob lives in the per-node section of the
+            // snapshot; the post-replay verify loop matches the
+            // params_hash carried here against the reconstructed live
+            // params (same path that handles `LeafParamsUpdated`).
         }
     }
     Ok(())
@@ -1763,6 +2000,18 @@ fn decode_payload(
             let node_id = cur.u32_be()?;
             AuditKind::Unfreeze { node_id }
         }
+        0x18 => {
+            let reason = cur.u8()?;
+            let b_pre_clamp_bits = cur.u64_be()?;
+            AuditKind::BlrNumericalRescue {
+                reason,
+                b_pre_clamp_bits,
+            }
+        }
+        0x19 => {
+            let params_hash = cur.hash32()?;
+            AuditKind::LeafParamsUpdatedBatch { params_hash }
+        }
         other => return Err(DecodeError::UnknownKindTag(other)),
     };
     let stats_version = cur.u64_be()?;
@@ -1889,18 +2138,37 @@ mod tests {
         assert_eq!(g.chain_head, g2.chain_head);
     }
 
-    // ── Phase 0.3d-4 — snapshot v8 ───────────────────────────────
+    // ── Phase 0.4 Track B-2.2.7 — snapshot v10 ───────────────────
 
     #[test]
-    fn v8_magic_in_blob() {
+    fn v10_magic_in_blob() {
         let g = AdaptiveBeliefGraph::new(0);
         let blob = serialize(&g);
-        assert_eq!(&blob[..5], b"ABNG\x08");
+        assert_eq!(&blob[..5], b"ABNG\x0A");
+    }
+
+    #[test]
+    fn v9_magic_rejected() {
+        // After the v9 → v10 bump (B-2.2.7 + B-2.2.{1,2}: DecisionPolicy
+        // gained drift_unfreeze threshold and per-node sections gained
+        // ring buffers + Welford signature state), Phase 0.4 Track C
+        // blobs are no longer accepted.
+        let g = AdaptiveBeliefGraph::new(0);
+        let mut blob = serialize(&g);
+        blob[4] = 0x09;
+        assert_eq!(replay(&blob).unwrap_err(), DecodeError::BadMagic);
+    }
+
+    #[test]
+    fn v8_magic_rejected() {
+        let g = AdaptiveBeliefGraph::new(0);
+        let mut blob = serialize(&g);
+        blob[4] = 0x08;
+        assert_eq!(replay(&blob).unwrap_err(), DecodeError::BadMagic);
     }
 
     #[test]
     fn v7_magic_rejected() {
-        // After the v7 → v8 bump, a Phase 0.3d-3-shaped blob must error.
         let g = AdaptiveBeliefGraph::new(0);
         let mut blob = serialize(&g);
         blob[4] = 0x07;
@@ -1966,11 +2234,11 @@ mod tests {
 
     // ── Phase 0.3d-3 round-trips ─────────────────────────────────
 
-    fn ok_thresholds() -> [f64; 11] {
+    fn ok_thresholds() -> [f64; 12] {
         [
             0.5, 64.0, 128.0, 0.05, 0.02,
             4.0, 0.1, 32.0, 10.0, 8.0,
-            20.0,
+            20.0, f64::MAX, // drift_unfreeze disabled
         ]
     }
 

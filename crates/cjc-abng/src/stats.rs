@@ -75,6 +75,55 @@ impl NodeStats {
         }
     }
 
+    /// Combine two streams of observations into `self` via Chan/Golub/
+    /// LeVeque parallel Welford merge — mathematically equivalent to
+    /// having observed both streams in (their original) order, but the
+    /// merge itself only looks at the summary statistics, not the raw
+    /// values.
+    ///
+    /// ```text
+    ///   n_c    = n1 + n2
+    ///   delta  = mean2 - mean1
+    ///   mean_c = mean1 + delta * n2 / n_c
+    ///   M2_c   = M2_1 + M2_2 + delta² * n1 * n2 / n_c
+    /// ```
+    ///
+    /// Phase 0.4 Track B-2.2.6 — used by the graph layer's `force_merge`
+    /// (and the policy-driven Merge fired from `decide_step`) to fold
+    /// `absorbed`'s observation history into `into` instead of dropping
+    /// it.
+    pub fn combine(&mut self, other: &NodeStats) {
+        if other.n_seen == 0 {
+            return;
+        }
+        if self.n_seen == 0 {
+            self.n_seen = other.n_seen;
+            self.mean = other.mean;
+            // Replace the Kahan accumulator with one whose finalized
+            // value matches `other.m2.finalize()`. This preserves the
+            // canonical_bytes contract (which serializes only the
+            // finalized M2) without surfacing the compensation
+            // register cross-instance.
+            self.m2 = KahanAccumulatorF64::new();
+            self.m2.add(other.m2.finalize());
+            return;
+        }
+        let n1 = self.n_seen as f64;
+        let n2 = other.n_seen as f64;
+        let n_c = n1 + n2;
+        let delta = other.mean - self.mean;
+        let new_mean = self.mean + delta * (n2 / n_c);
+        let m2_correction = delta * delta * (n1 * n2) / n_c;
+        let m2_combined = self.m2.finalize() + other.m2.finalize() + m2_correction;
+        // Reset accumulator to the combined finalized value (canonical
+        // bytes only persist the finalized number, so this preserves
+        // determinism through serialize→replay).
+        self.m2 = KahanAccumulatorF64::new();
+        self.m2.add(m2_combined);
+        self.mean = new_mean;
+        self.n_seen = self.n_seen.saturating_add(other.n_seen);
+    }
+
     /// Sample variance (`M2 / (n − 1)`); returns `0.0` if `n < 2`.
     ///
     /// Phase 0.1 returns sample (Bessel-corrected) variance because the chess
@@ -193,5 +242,83 @@ mod tests {
         s2.observe_slice(&xs);
         assert_eq!(s1.canonical_bytes(), s2.canonical_bytes());
         assert_eq!(s1.stats_hash(), s2.stats_hash());
+    }
+
+    // ── Phase 0.4 Track B-2.2.6: parallel Welford merge ──────────────
+
+    #[test]
+    fn combine_matches_serial_observation() {
+        // The combined stats of two streams must (within FP error)
+        // equal the stats of having observed the concatenation.
+        let xs1: Vec<f64> = (0..100).map(|i| (i as f64) * 0.01).collect();
+        let xs2: Vec<f64> = (100..250).map(|i| (i as f64) * 0.01).collect();
+        let mut s1 = NodeStats::new();
+        s1.observe_slice(&xs1);
+        let mut s2 = NodeStats::new();
+        s2.observe_slice(&xs2);
+        s1.combine(&s2);
+
+        let mut serial = NodeStats::new();
+        serial.observe_slice(&xs1);
+        serial.observe_slice(&xs2);
+
+        assert_eq!(s1.n_seen, serial.n_seen);
+        assert!(
+            (s1.mean - serial.mean).abs() < 1e-12,
+            "combine mean {} vs serial mean {}",
+            s1.mean,
+            serial.mean
+        );
+        // Variance can drift slightly because the combine works on
+        // finalized M2 (not the Kahan compensation register), but for
+        // small streams the agreement should be tight.
+        assert!(
+            (s1.variance() - serial.variance()).abs() < 1e-9,
+            "combine var {} vs serial var {}",
+            s1.variance(),
+            serial.variance()
+        );
+    }
+
+    #[test]
+    fn combine_with_empty_other_is_noop() {
+        let mut s = NodeStats::new();
+        s.observe_slice(&[1.0, 2.0, 3.0]);
+        let pre = s.canonical_bytes();
+        s.combine(&NodeStats::new());
+        assert_eq!(s.canonical_bytes(), pre);
+    }
+
+    #[test]
+    fn combine_with_empty_self_takes_other() {
+        let mut self_ = NodeStats::new();
+        let mut other = NodeStats::new();
+        other.observe_slice(&[1.0, 2.0, 3.0]);
+        self_.combine(&other);
+        assert_eq!(self_.n_seen, 3);
+        assert_eq!(self_.mean, 2.0);
+    }
+
+    #[test]
+    fn combine_is_commutative_in_n_and_mean() {
+        // n_seen and mean must be identical regardless of which side is
+        // self vs other (variance can differ slightly because the
+        // dropped Kahan compensation register is summed-in
+        // non-symmetrically).
+        let xs1: Vec<f64> = (0..50).map(|i| (i as f64) * 0.1).collect();
+        let xs2: Vec<f64> = (50..120).map(|i| (i as f64) * 0.1).collect();
+        let mut a1 = NodeStats::new();
+        a1.observe_slice(&xs1);
+        let mut a2 = NodeStats::new();
+        a2.observe_slice(&xs2);
+        let mut b1 = NodeStats::new();
+        b1.observe_slice(&xs1);
+        let mut b2 = NodeStats::new();
+        b2.observe_slice(&xs2);
+
+        a1.combine(&a2);
+        b2.combine(&b1);
+        assert_eq!(a1.n_seen, b2.n_seen);
+        assert!((a1.mean - b2.mean).abs() < 1e-12);
     }
 }

@@ -1,4 +1,9 @@
-//! Per-leaf MLP head configuration + deterministic Xavier init.
+//! Per-node MLP head configuration + deterministic Xavier init.
+//!
+//! Naming note (Phase 0.4 Track C-2.3.7): the head is per-*node*, not
+//! per-*leaf*. `init_params` runs for the root and every `add_node` /
+//! `force_grow` / `force_split`. Pre-0.4 docs called this "per-leaf";
+//! the code has always been per-node.
 //!
 //! Phase 0.3a treats every node as carrying a small fused MLP whose
 //! architecture is described by a single graph-wide [`LeafHead`]. Each
@@ -23,7 +28,7 @@ use crate::node::NodeId;
 /// Parsed leaf-MLP architecture spec, frozen at first install.
 #[derive(Debug, Clone)]
 pub struct LeafHead {
-    /// Number of input features per leaf forward call.
+    /// Number of input features per forward call (one call per node).
     pub input_dim: u32,
     /// Hidden layer widths, in order. Empty = direct in→out (linear regression head).
     pub hidden_dims: Vec<u32>,
@@ -81,7 +86,7 @@ impl LeafHead {
         (fan_in, fan_out)
     }
 
-    /// Total number of param tensors per leaf (`2 * num_layers`).
+    /// Total number of param tensors per node (`2 * num_layers`).
     pub fn param_count(&self) -> usize {
         2 * self.num_layers()
     }
