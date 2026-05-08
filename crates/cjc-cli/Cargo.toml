@@ -25,3 +25,7 @@ cjc-mir-exec.workspace = true
 cjc-module.workspace = true
 cjc-snap.workspace = true
 cjc-repro.workspace = true
+cjc-abng.workspace = true
+
+[dev-dependencies]
+cjc-ad.workspace = true

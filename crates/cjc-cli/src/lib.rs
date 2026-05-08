@@ -76,6 +76,8 @@ enum Command {
     Parity,
     Test,
     Ci,
+    // Phase 0.4 Track A — ABNG CLI surface
+    Abng,
 }
 
 /// Output format for `cjc run` and `cjc eval`.
@@ -127,6 +129,7 @@ const KNOWN_COMMANDS: &[&str] = &[
     "view", "proof", "flow", "patch", "seek", "drift", "forge",
     "inspect", "schema", "trace", "mem", "bench", "pack", "doctor",
     "emit", "explain", "gc", "nogc", "audit", "precision", "lock", "parity", "test", "ci",
+    "abng",
 ];
 
 impl Config {
@@ -135,6 +138,7 @@ impl Config {
         "view", "proof", "flow", "patch", "seek", "drift", "forge",
         "inspect", "schema", "check", "trace", "mem", "bench", "pack", "doctor",
         "emit", "explain", "gc", "nogc", "audit", "precision", "lock", "parity", "test", "ci",
+        "abng",
     ];
 
     /// Parse CLI arguments from `std::env::args()`. Exits on error.
@@ -204,6 +208,7 @@ impl Config {
                     "parity" => Command::Parity,
                     "test" => Command::Test,
                     "ci" => Command::Ci,
+                    "abng" => Command::Abng,
                     _ => unreachable!(),
                 };
                 return Config {
@@ -422,7 +427,7 @@ pub fn cli_main() {
         Command::Mem | Command::Bench | Command::Pack | Command::Doctor |
         Command::Emit | Command::Explain | Command::Gc | Command::Nogc |
         Command::Audit | Command::Precision | Command::Lock | Command::Parity |
-        Command::Test | Command::Ci => {
+        Command::Test | Command::Ci | Command::Abng => {
             // Find the command name in args, pass everything after it
             let cmd_name = match config.command {
                 Command::View => "view",
@@ -450,6 +455,7 @@ pub fn cli_main() {
                 Command::Parity => "parity",
                 Command::Test => "test",
                 Command::Ci => "ci",
+                Command::Abng => "abng",
                 _ => unreachable!(),
             };
             let cmd_idx = all_args.iter().position(|a| a == cmd_name).unwrap_or(1);
@@ -483,6 +489,7 @@ pub fn cli_main() {
                     Command::Parity => commands::parity::print_help(),
                     Command::Test => commands::test_cmd::print_help(),
                     Command::Ci => commands::ci::print_help(),
+                    Command::Abng => commands::abng::print_help(),
                     _ => unreachable!(),
                 }
                 return;
@@ -514,6 +521,7 @@ pub fn cli_main() {
                 Command::Parity => commands::parity::run(&sub_args),
                 Command::Test => commands::test_cmd::run(&sub_args),
                 Command::Ci => commands::ci::run(&sub_args),
+                Command::Abng => commands::abng::run(&sub_args),
                 _ => unreachable!(),
             }
             return;

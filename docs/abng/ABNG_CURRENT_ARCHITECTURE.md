@@ -30,7 +30,7 @@ between design intent and implementation are listed in §8.
 | 0.3d-5 | DONE | proptest properties + bolero fuzz targets + decoder allocation hardening + this doc |
 | 0.4 Track C | DONE | post-0.3d audit fixes (7 items): BLR predict rename, NaN/Inf input validation, replay semantic invariants, BLR clamp audit (0x18), feature_version_hash + reset_blr (snapshot v9), batched leaf-params (0x19), per-leaf → per-node doc rename |
 | 0.4 Track B | DONE | trigger refinement (7 items): NIG-aware merge math (`combine`), KL-divergence merge gate, route-entropy grow gate, bootstrap held-out ΔNLL split gate, drift-trip auto-Unfreeze (snapshot v10, 12th threshold), 3-window ECE/σ stability buffers per node, Welford-smoothed `NodeSignature` profiles |
-| 0.4 Track A | NEXT | `cjcl abng …` CLI (`train`/`inspect`/`explain`/`replay`/`diff`), JSON snapshot view, log compaction, audit tags `0x1A..0x1C` extending v10 in place |
+| 0.4 Track A | IN PROGRESS | `cjcl abng …` CLI scaffold + `inspect`/`replay`/`diff` shipped (3/5 subcommands; `explain` and `train` stubs return informative errors). JSON snapshot view via `--json` flag on each subcommand. `explain` (needs `0x1B Routed`) and `train` driver remain. Audit tags `0x1A..0x1C` reserved for `StatsSnapshot`, `Routed`, `ProvenanceStamped`. |
 | 0.5   | LATER | Chess-RL retrofit (value head first, then policy head); per-node provenance_stamp_hash (deferred from 0.4 to keep v10 frozen) |
 
 ABNG is now a **Bayesian-inspired structurally-adaptive belief graph** with:
