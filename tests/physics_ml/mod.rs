@@ -29,4 +29,7 @@ pub mod grad_graph_fuzz;
 pub mod grad_graph_phase3a_wiring;
 pub mod grad_graph_phase3a_proptest;
 pub mod grad_graph_phase3a_fuzz;
+pub mod grad_graph_phase3b_wiring;
+pub mod grad_graph_phase3b_proptest;
+pub mod grad_graph_phase3b_fuzz;
 pub mod heat_1d_pure_cjcl_parity;

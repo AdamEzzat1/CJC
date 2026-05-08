@@ -1,0 +1,1087 @@
+//! `cjcl abng …` CLI integration tests (Phase 0.4 Track A).
+//!
+//! Each test:
+//! 1. Programmatically constructs an `AdaptiveBeliefGraph`,
+//! 2. Serialises it via `cjc_abng::serialize::serialize`,
+//! 3. Writes the bytes to a unique-per-test path under `std::env::temp_dir()`,
+//! 4. Invokes the `cjc` binary with `cjcl abng <subcommand> <path>`,
+//! 5. Asserts on the exit code and stdout/stderr.
+//!
+//! No tempfile dep — the helpers below namespace by test name + a
+//! per-process counter to avoid races inside a single `cargo test` run.
+
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use cjc_abng::graph::AdaptiveBeliefGraph;
+use cjc_abng::serialize;
+use cjc_ad::pinn::Activation;
+
+fn run_cjc(args: &[&str]) -> (String, String, i32) {
+    let output = Command::new(env!("CARGO_BIN_EXE_cjc"))
+        .args(args)
+        .output()
+        .expect("failed to execute cjc binary");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let code = output.status.code().unwrap_or(-1);
+    (stdout, stderr, code)
+}
+
+static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+fn unique_temp_path(stem: &str) -> PathBuf {
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let mut p = std::env::temp_dir();
+    p.push(format!("cjc-abng-cli-test-{}-{}-{}.snap", stem, std::process::id(), n));
+    p
+}
+
+fn build_basic_graph(seed: u64) -> AdaptiveBeliefGraph {
+    let mut g = AdaptiveBeliefGraph::new(seed);
+    g.set_codebook(1, 4, &[-1.0, 0.0, 1.0]).unwrap();
+    g.set_leaf_head(1, vec![2], 1, Activation::Tanh).unwrap();
+    g.set_blr_prior(1.0, 1.5, 1.0).unwrap();
+    let _ = g.add_node(0, 1).unwrap();
+    g.observe(0, 0.5).unwrap();
+    g.observe(0, 0.25).unwrap();
+    g
+}
+
+fn write_snapshot(g: &AdaptiveBeliefGraph, path: &std::path::Path) {
+    let bytes = serialize::serialize(g);
+    fs::write(path, bytes).expect("write snapshot");
+}
+
+// ── inspect ────────────────────────────────────────────────────────────
+
+#[test]
+fn abng_help_prints_subcommands() {
+    let (stdout, _stderr, code) = run_cjc(&["abng", "--help"]);
+    assert_eq!(code, 0, "abng --help should exit 0");
+    for sub in ["inspect", "replay", "diff", "explain", "train"] {
+        assert!(
+            stdout.contains(sub),
+            "expected `{sub}` listed in help, got: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn abng_no_subcommand_errors() {
+    let (_stdout, stderr, code) = run_cjc(&["abng"]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("requires a subcommand"),
+        "expected 'requires a subcommand' message, got: {stderr}"
+    );
+}
+
+#[test]
+fn abng_unknown_subcommand_errors() {
+    let (_stdout, stderr, code) = run_cjc(&["abng", "frobnicate"]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("unknown abng subcommand"),
+        "expected 'unknown abng subcommand', got: {stderr}"
+    );
+}
+
+#[test]
+fn abng_inspect_basic_snapshot_text_summary() {
+    let g = build_basic_graph(42);
+    let path = unique_temp_path("inspect-basic");
+    write_snapshot(&g, &path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "inspect",
+        path.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "inspect should exit 0 on a valid snapshot");
+    // Header summary lines must be present.
+    assert!(stdout.contains("ABNG snapshot:"));
+    assert!(stdout.contains("magic:"));
+    assert!(stdout.contains("seed:"));
+    assert!(stdout.contains("nodes:"));
+    assert!(stdout.contains("audit events:"));
+    assert!(stdout.contains("chain head:"));
+    assert!(stdout.contains("action_counts:"));
+    // Seed must echo the value baked into the graph.
+    assert!(
+        stdout.contains("seed:         42"),
+        "expected seed: 42, got: {stdout}"
+    );
+    // Node count must be 2 (root + one added child).
+    assert!(
+        stdout.contains("nodes:        2"),
+        "expected nodes: 2, got: {stdout}"
+    );
+    fs::remove_file(&path).ok();
+}
+
+#[test]
+fn abng_inspect_json_summary_is_parseable() {
+    let g = build_basic_graph(7);
+    let path = unique_temp_path("inspect-json");
+    write_snapshot(&g, &path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "inspect",
+        path.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(code, 0);
+    // Cheap JSON sanity (no parser dep): expect specific keys.
+    for k in [
+        "\"path\"",
+        "\"file_size\"",
+        "\"file_sha256\"",
+        "\"magic_version\": 10",
+        "\"seed\": 7",
+        "\"n_nodes\": 2",
+        "\"n_events\":",
+        "\"chain_head\":",
+        "\"action_counts\":",
+    ] {
+        assert!(stdout.contains(k), "expected `{k}` in JSON output, got: {stdout}");
+    }
+    fs::remove_file(&path).ok();
+}
+
+#[test]
+fn abng_inspect_audit_flag_prints_histogram() {
+    let g = build_basic_graph(11);
+    let path = unique_temp_path("inspect-audit");
+    write_snapshot(&g, &path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "inspect",
+        path.to_str().unwrap(),
+        "--audit",
+    ]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("audit-event histogram"));
+    // The basic graph emits at minimum Created + CodebookFrozen +
+    // LeafHeadConfigured + BlrPriorConfigured + LeafParamsInitialized
+    // (root, BLR install) + BlrInitialized + NodeAdded + LeafParamsInitialized
+    // (child) + BlrInitialized (child) + 2 BeliefUpdate.
+    assert!(stdout.contains("Created"));
+    assert!(stdout.contains("CodebookFrozen"));
+    assert!(stdout.contains("BeliefUpdate"));
+    fs::remove_file(&path).ok();
+}
+
+#[test]
+fn abng_inspect_tree_flag_prints_topology() {
+    let g = build_basic_graph(13);
+    let path = unique_temp_path("inspect-tree");
+    write_snapshot(&g, &path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "inspect",
+        path.to_str().unwrap(),
+        "--tree",
+    ]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("arena topology"));
+    assert!(stdout.contains("(root)"));
+    fs::remove_file(&path).ok();
+}
+
+#[test]
+fn abng_inspect_node_flag_prints_per_node_state() {
+    let g = build_basic_graph(15);
+    let path = unique_temp_path("inspect-node");
+    write_snapshot(&g, &path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "inspect",
+        path.to_str().unwrap(),
+        "--node",
+        "0",
+    ]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("node 0:"));
+    assert!(stdout.contains("samples_seen:"));
+    assert!(stdout.contains("expected_epistemic:"));
+    fs::remove_file(&path).ok();
+}
+
+#[test]
+fn abng_inspect_node_out_of_range_errors() {
+    let g = build_basic_graph(17);
+    let path = unique_temp_path("inspect-node-oor");
+    write_snapshot(&g, &path);
+
+    let (_stdout, stderr, code) = run_cjc(&[
+        "abng",
+        "inspect",
+        path.to_str().unwrap(),
+        "--node",
+        "99",
+    ]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("out of range"),
+        "expected 'out of range' in stderr, got: {stderr}"
+    );
+    fs::remove_file(&path).ok();
+}
+
+#[test]
+fn abng_inspect_missing_path_errors() {
+    let (_stdout, stderr, code) = run_cjc(&["abng", "inspect"]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("requires a snapshot path"),
+        "expected 'requires a snapshot path', got: {stderr}"
+    );
+}
+
+#[test]
+fn abng_inspect_nonexistent_file_errors() {
+    let (_stdout, stderr, code) = run_cjc(&[
+        "abng",
+        "inspect",
+        "definitely-does-not-exist.snap",
+    ]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("not found"),
+        "expected 'not found', got: {stderr}"
+    );
+}
+
+// ── replay ─────────────────────────────────────────────────────────────
+
+#[test]
+fn abng_replay_succeeds_on_valid_snapshot() {
+    let g = build_basic_graph(42);
+    let path = unique_temp_path("replay-valid");
+    write_snapshot(&g, &path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "replay",
+        path.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("replay ok"));
+    assert!(stdout.contains("chain head:"));
+    fs::remove_file(&path).ok();
+}
+
+#[test]
+fn abng_replay_verify_flag_reports_chain_status() {
+    let g = build_basic_graph(42);
+    let path = unique_temp_path("replay-verify");
+    write_snapshot(&g, &path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "replay",
+        path.to_str().unwrap(),
+        "--verify",
+    ]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("chain verify:"));
+    assert!(stdout.contains("OK"));
+    fs::remove_file(&path).ok();
+}
+
+#[test]
+fn abng_replay_corrupt_snapshot_errors() {
+    let g = build_basic_graph(42);
+    let path = unique_temp_path("replay-corrupt");
+    let mut bytes = serialize::serialize(&g);
+    // Flip a byte in the audit-event payload region to break the chain.
+    if bytes.len() > 100 {
+        bytes[100] = bytes[100].wrapping_add(1);
+    }
+    fs::write(&path, &bytes).unwrap();
+
+    let (_stdout, stderr, code) = run_cjc(&[
+        "abng",
+        "replay",
+        path.to_str().unwrap(),
+    ]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("replay failed"),
+        "expected 'replay failed' in stderr, got: {stderr}"
+    );
+    fs::remove_file(&path).ok();
+}
+
+// ── diff ───────────────────────────────────────────────────────────────
+
+#[test]
+fn abng_diff_identical_snapshots_match() {
+    let g = build_basic_graph(42);
+    let a = unique_temp_path("diff-a");
+    let b = unique_temp_path("diff-b");
+    write_snapshot(&g, &a);
+    write_snapshot(&g, &b);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "diff",
+        a.to_str().unwrap(),
+        b.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("chain_head equal:    yes"));
+    assert!(stdout.contains("per-node stats_chain_head: identical"));
+    fs::remove_file(&a).ok();
+    fs::remove_file(&b).ok();
+}
+
+#[test]
+fn abng_diff_different_seeds_differ() {
+    let g1 = build_basic_graph(42);
+    let g2 = build_basic_graph(43);
+    let a = unique_temp_path("diff-seed-a");
+    let b = unique_temp_path("diff-seed-b");
+    write_snapshot(&g1, &a);
+    write_snapshot(&g2, &b);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "diff",
+        a.to_str().unwrap(),
+        b.to_str().unwrap(),
+    ]);
+    // Different chain heads → exit 1.
+    assert_ne!(code, 0);
+    assert!(stdout.contains("chain_head equal:    NO"));
+    fs::remove_file(&a).ok();
+    fs::remove_file(&b).ok();
+}
+
+#[test]
+fn abng_diff_arity_check() {
+    let (_stdout, stderr, code) = run_cjc(&[
+        "abng", "diff", "only-one-path.snap",
+    ]);
+    assert_ne!(code, 0);
+    assert!(stderr.contains("requires exactly two snapshot paths"));
+}
+
+// ── explain ────────────────────────────────────────────────────────────
+
+fn build_graph_with_blr_and_observations(seed: u64, n_obs: usize) -> AdaptiveBeliefGraph {
+    let mut g = AdaptiveBeliefGraph::new(seed);
+    g.set_codebook(1, 4, &[-1.0, 0.0, 1.0]).unwrap();
+    g.set_leaf_head(2, vec![2], 1, Activation::Tanh).unwrap();
+    g.set_blr_prior(1.0, 1.5, 1.0).unwrap();
+    // Train BLR with `n_obs` observations.
+    let mut features = Vec::with_capacity(n_obs * 2);
+    let mut ys = Vec::with_capacity(n_obs);
+    for i in 0..n_obs {
+        let x1 = (i as f64) / (n_obs as f64);
+        let x2 = 1.0 - x1;
+        features.push(x1);
+        features.push(x2);
+        ys.push(2.0 * x1 + 3.0 * x2);
+    }
+    g.blr_update(0, &features, &ys).unwrap();
+    g
+}
+
+fn write_prediction_snap(
+    g: &AdaptiveBeliefGraph,
+    node_id: u32,
+    phi: &[f64],
+    path: &std::path::Path,
+) {
+    let blob = cjc_abng::predict_snap::pack(g, node_id, phi).unwrap();
+    fs::write(path, blob).unwrap();
+}
+
+#[test]
+fn abng_explain_text_summary_uncalibrated() {
+    // Graph with 50 observations but expected_epistemic uncaptured.
+    let g = build_graph_with_blr_and_observations(42, 50);
+    let pred_path = unique_temp_path("explain-uncal");
+    write_prediction_snap(&g, 0, &[1.0, 0.0], &pred_path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "explain",
+        pred_path.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("ABNG prediction snapshot"));
+    assert!(stdout.contains("ABNG-PRED"));
+    assert!(stdout.contains("UNCALIBRATED"));
+    fs::remove_file(&pred_path).ok();
+}
+
+#[test]
+fn abng_explain_text_summary_low_evidence() {
+    // Graph with only 2 observations and expected_epistemic captured.
+    let mut g = build_graph_with_blr_and_observations(43, 2);
+    let _ = g.force_recapture_expected_epistemic(0).unwrap();
+    let pred_path = unique_temp_path("explain-lowev");
+    write_prediction_snap(&g, 0, &[1.0, 0.0], &pred_path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "explain",
+        pred_path.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("LOW EVIDENCE"));
+    fs::remove_file(&pred_path).ok();
+}
+
+#[test]
+fn abng_explain_text_summary_supported() {
+    // Plenty of evidence + expected_epistemic captured. Predict at a
+    // point inside the trained distribution (similar to training
+    // points) so the OOD ratio stays below 1.0.
+    let mut g = build_graph_with_blr_and_observations(44, 100);
+    let _ = g.force_recapture_expected_epistemic(0).unwrap();
+    let pred_path = unique_temp_path("explain-supported");
+    // Use a phi very close to the BLR posterior mean so leverage is
+    // small relative to expected_epistemic at the mean.
+    let mean = g.nodes[0].blr.as_ref().unwrap().mean.to_vec();
+    write_prediction_snap(&g, 0, &mean, &pred_path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "explain",
+        pred_path.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    // Either Supported (likely) or OodSaturated (border case). Both
+    // are valid outputs; we just confirm explain completes cleanly
+    // and reports one of the categorical outcomes.
+    assert!(
+        stdout.contains("SUPPORTED") || stdout.contains("OOD SATURATED"),
+        "expected SUPPORTED or OOD SATURATED, got: {stdout}"
+    );
+    fs::remove_file(&pred_path).ok();
+}
+
+#[test]
+fn abng_explain_json_emits_required_keys() {
+    let g = build_graph_with_blr_and_observations(45, 50);
+    let pred_path = unique_temp_path("explain-json");
+    write_prediction_snap(&g, 0, &[1.0, 0.0], &pred_path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "explain",
+        pred_path.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(code, 0);
+    for k in [
+        "\"path\"",
+        "\"chain_head\"",
+        "\"node_id\"",
+        "\"codebook_hash\"",
+        "\"leaf_head_hash\"",
+        "\"blr_state_hash\"",
+        "\"blr_n_seen\"",
+        "\"phi_dim\"",
+        "\"prediction\"",
+        "\"abstain\"",
+    ] {
+        assert!(stdout.contains(k), "expected `{k}` in JSON, got: {stdout}");
+    }
+    fs::remove_file(&pred_path).ok();
+}
+
+#[test]
+fn abng_explain_with_matching_model_passes_lineage_check() {
+    let g = build_graph_with_blr_and_observations(46, 50);
+    let pred_path = unique_temp_path("explain-model-match-pred");
+    let model_path = unique_temp_path("explain-model-match-model");
+    write_prediction_snap(&g, 0, &[1.0, 0.0], &pred_path);
+    write_snapshot(&g, &model_path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "explain",
+        pred_path.to_str().unwrap(),
+        "--model",
+        model_path.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("model lineage check"));
+    assert!(stdout.contains("chain_head match:    yes"));
+    assert!(stdout.contains("codebook hash match: yes"));
+    assert!(stdout.contains("leaf head match:     yes"));
+    // Phase 0.5 Item 1 — provenance row always renders, even when
+    // unstamped. Both sides see [0u8; 32] so the match is "yes".
+    assert!(stdout.contains("provenance match:    yes"));
+    fs::remove_file(&pred_path).ok();
+    fs::remove_file(&model_path).ok();
+}
+
+#[test]
+fn abng_explain_with_mismatched_model_fails_lineage_check() {
+    // pred from one graph, model from a DIFFERENT seed → chain_head
+    // mismatch, exit 1.
+    let g_pred = build_graph_with_blr_and_observations(47, 50);
+    let g_model = build_graph_with_blr_and_observations(48, 50);
+    let pred_path = unique_temp_path("explain-model-mismatch-pred");
+    let model_path = unique_temp_path("explain-model-mismatch-model");
+    write_prediction_snap(&g_pred, 0, &[1.0, 0.0], &pred_path);
+    write_snapshot(&g_model, &model_path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "explain",
+        pred_path.to_str().unwrap(),
+        "--model",
+        model_path.to_str().unwrap(),
+    ]);
+    assert_ne!(code, 0, "mismatched lineage should exit 1");
+    assert!(stdout.contains("chain_head match:    NO"));
+    assert!(stdout.contains("WARNING"));
+    fs::remove_file(&pred_path).ok();
+    fs::remove_file(&model_path).ok();
+}
+
+#[test]
+fn abng_explain_with_stamped_provenance_renders_hex() {
+    // Phase 0.5 Item 1 — pack a prediction from a stamped node;
+    // explain renders the 64-char hex (not "<unstamped>") and
+    // matches the stored model's stamp.
+    let mut g = build_graph_with_blr_and_observations(46, 50);
+    g.stamp_provenance(0, [0xC1u8; 32]).unwrap();
+    let pred_path = unique_temp_path("explain-stamped-pred");
+    let model_path = unique_temp_path("explain-stamped-model");
+    write_prediction_snap(&g, 0, &[1.0, 0.0], &pred_path);
+    write_snapshot(&g, &model_path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "explain",
+        pred_path.to_str().unwrap(),
+        "--model",
+        model_path.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    // 64-char hex of 0xC1 repeated.
+    let expected_hex = "c1".repeat(32);
+    assert!(
+        stdout.contains(&format!("provenance stamp: {expected_hex}")),
+        "expected stamped hex in stdout: {stdout}"
+    );
+    assert!(stdout.contains("provenance match:    yes"));
+    fs::remove_file(&pred_path).ok();
+    fs::remove_file(&model_path).ok();
+}
+
+#[test]
+fn abng_explain_with_provenance_drift_fails_lineage() {
+    // Phase 0.5 Item 1 — pred made when stamp is `0xAA`, model
+    // re-stamped with `0xBB` after the fact. provenance_match: NO,
+    // exit non-zero.
+    let mut g = build_graph_with_blr_and_observations(46, 50);
+    g.stamp_provenance(0, [0xAAu8; 32]).unwrap();
+    let pred_path = unique_temp_path("explain-drift-pred");
+    write_prediction_snap(&g, 0, &[1.0, 0.0], &pred_path);
+    // Now drift the model: re-stamp with a different hash.
+    g.stamp_provenance(0, [0xBBu8; 32]).unwrap();
+    let model_path = unique_temp_path("explain-drift-model");
+    write_snapshot(&g, &model_path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "explain",
+        pred_path.to_str().unwrap(),
+        "--model",
+        model_path.to_str().unwrap(),
+    ]);
+    assert_ne!(code, 0, "provenance mismatch must exit non-zero");
+    assert!(stdout.contains("provenance match:    NO"));
+    assert!(stdout.contains("WARNING"));
+    fs::remove_file(&pred_path).ok();
+    fs::remove_file(&model_path).ok();
+}
+
+#[test]
+fn abng_explain_text_renders_unstamped_marker() {
+    // A prediction from an unstamped node renders the friendly
+    // "<unstamped>" marker rather than 64 zero hex chars.
+    let g = build_graph_with_blr_and_observations(46, 50);
+    let pred_path = unique_temp_path("explain-unstamped");
+    write_prediction_snap(&g, 0, &[1.0, 0.0], &pred_path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "explain",
+        pred_path.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("provenance stamp: <unstamped>"),
+        "expected unstamped marker, got: {stdout}"
+    );
+    fs::remove_file(&pred_path).ok();
+}
+
+#[test]
+fn abng_explain_json_emits_provenance_keys() {
+    // The --json output emits `provenance_stamp_hash` keyed correctly.
+    let mut g = build_graph_with_blr_and_observations(46, 50);
+    g.stamp_provenance(0, [0x77u8; 32]).unwrap();
+    let pred_path = unique_temp_path("explain-json-prov");
+    write_prediction_snap(&g, 0, &[1.0, 0.0], &pred_path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "explain",
+        pred_path.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("\"provenance_stamp_hash\":"),
+        "expected provenance_stamp_hash key, got: {stdout}"
+    );
+    let expected_hex = "77".repeat(32);
+    assert!(
+        stdout.contains(&expected_hex),
+        "expected stamped hex in JSON, got: {stdout}"
+    );
+    fs::remove_file(&pred_path).ok();
+}
+
+#[test]
+fn abng_explain_missing_path_errors() {
+    let (_stdout, stderr, code) = run_cjc(&["abng", "explain"]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("requires a prediction-snap path"),
+        "got: {stderr}"
+    );
+}
+
+#[test]
+fn abng_explain_bad_magic_errors() {
+    // Write a file with the wrong magic and confirm explain rejects.
+    let bad_path = unique_temp_path("explain-bad-magic");
+    fs::write(&bad_path, vec![0u8; 200]).unwrap();
+    let (_stdout, stderr, code) = run_cjc(&[
+        "abng",
+        "explain",
+        bad_path.to_str().unwrap(),
+    ]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("decode failed") || stderr.contains("BadMagic"),
+        "got: {stderr}"
+    );
+    fs::remove_file(&bad_path).ok();
+}
+
+// ── train ──────────────────────────────────────────────────────────────
+
+#[test]
+fn abng_train_help_describes_flags() {
+    let (stdout, _stderr, code) = run_cjc(&["abng", "train", "--help"]);
+    assert_eq!(code, 0);
+    for tok in ["--seed", "--n-obs", "--obs-seed", "--decide-every", "--out"] {
+        assert!(stdout.contains(tok), "expected `{tok}` in help, got: {stdout}");
+    }
+}
+
+#[test]
+fn abng_train_missing_out_errors() {
+    let (_stdout, stderr, code) = run_cjc(&["abng", "train", "--seed", "42"]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("requires --out"),
+        "expected '--out required' error, got: {stderr}"
+    );
+}
+
+// ── Phase 0.5 Item 3: TOML --config files ──────────────────────────────
+
+#[test]
+fn abng_train_config_missing_path_errors() {
+    let (_stdout, stderr, code) = run_cjc(&[
+        "abng",
+        "train",
+        "--config",
+        "/nonexistent/path/that/does/not/exist.toml",
+        "--out",
+        "ignored.snap",
+    ]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("not found"),
+        "expected 'not found' message, got: {stderr}"
+    );
+}
+
+#[test]
+fn abng_train_config_help_describes_toml_sections() {
+    let (stdout, _stderr, code) = run_cjc(&["abng", "train", "--help"]);
+    assert_eq!(code, 0);
+    for tok in ["--config", "[graph]", "[codebook]", "[leaf_head]", "[blr_prior]"] {
+        assert!(stdout.contains(tok), "expected `{tok}` in help, got: {stdout}");
+    }
+}
+
+#[test]
+fn abng_train_config_minimal_toml_runs() {
+    // Most minimal TOML: just sets seed. Everything else falls back
+    // to canary defaults.
+    let cfg_path = unique_temp_path("train-toml-minimal");
+    fs::write(
+        &cfg_path,
+        "[graph]\nseed = 42\n[training]\nn_observations = 10\n",
+    )
+    .unwrap();
+    let out_path = unique_temp_path("train-toml-minimal-out");
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "train",
+        "--config",
+        cfg_path.to_str().unwrap(),
+        "--out",
+        out_path.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "train --config should exit 0; stdout: {stdout}");
+    assert!(stdout.contains("ok"));
+    fs::remove_file(&cfg_path).ok();
+    fs::remove_file(&out_path).ok();
+}
+
+#[test]
+fn abng_train_config_round_trip_matches_flag_form() {
+    // The byte-equality contract: a TOML config that exactly
+    // reproduces the canary defaults should produce a snapshot
+    // byte-identical to running with explicit flags.
+    let cfg_path = unique_temp_path("train-toml-roundtrip-cfg");
+    let cfg = r#"
+[graph]
+seed = 42
+add_nodes = [[0, 1], [0, 2]]
+
+[codebook]
+n_dims = 1
+n_bins = 4
+boundaries = [-1.0, 0.0, 1.0]
+
+[leaf_head]
+input_dim = 1
+hidden_dims = [2]
+output_dim = 1
+activation = "tanh"
+
+[blr_prior]
+a = 1.0
+b = 1.5
+sigma_init = 1.0
+
+[density]
+enabled = true
+
+[calibration]
+n_bins = 15
+
+[decision_policy]
+thresholds = [0.5, 64.0, 128.0, 0.05, 0.02, 4.0, 0.1, 32.0, 10.0, 8.0, 20.0, 1.7976931348623157e308, 0.005, 1.05]
+
+[training]
+n_observations = 30
+observation_seed = 42
+decide_step_every = 25
+
+[output]
+path = "ignored-by-explicit-out-flag.snap"
+"#;
+    fs::write(&cfg_path, cfg).unwrap();
+
+    let toml_out = unique_temp_path("train-toml-out");
+    let flag_out = unique_temp_path("train-flag-out");
+    let (_, _, code_toml) = run_cjc(&[
+        "abng",
+        "train",
+        "--config",
+        cfg_path.to_str().unwrap(),
+        "--out",
+        toml_out.to_str().unwrap(),
+    ]);
+    let (_, _, code_flag) = run_cjc(&[
+        "abng",
+        "train",
+        "--seed",
+        "42",
+        "--n-obs",
+        "30",
+        "--obs-seed",
+        "42",
+        "--decide-every",
+        "25",
+        "--out",
+        flag_out.to_str().unwrap(),
+    ]);
+    assert_eq!(code_toml, 0);
+    assert_eq!(code_flag, 0);
+    let toml_bytes = fs::read(&toml_out).unwrap();
+    let flag_bytes = fs::read(&flag_out).unwrap();
+    assert_eq!(
+        toml_bytes, flag_bytes,
+        "TOML config and equivalent flag form must produce byte-identical snapshots"
+    );
+    fs::remove_file(&cfg_path).ok();
+    fs::remove_file(&toml_out).ok();
+    fs::remove_file(&flag_out).ok();
+}
+
+#[test]
+fn abng_train_config_explicit_flag_overrides_toml() {
+    // TOML says seed=42, --seed flag says 99 → flag wins.
+    let cfg_path = unique_temp_path("train-toml-override-cfg");
+    fs::write(
+        &cfg_path,
+        "[graph]\nseed = 42\n[training]\nn_observations = 10\n",
+    )
+    .unwrap();
+
+    let toml_only = unique_temp_path("train-toml-only");
+    let toml_with_override = unique_temp_path("train-toml-override");
+    let (_, _, c1) = run_cjc(&[
+        "abng",
+        "train",
+        "--config",
+        cfg_path.to_str().unwrap(),
+        "--out",
+        toml_only.to_str().unwrap(),
+    ]);
+    let (_, _, c2) = run_cjc(&[
+        "abng",
+        "train",
+        "--config",
+        cfg_path.to_str().unwrap(),
+        "--seed",
+        "99",
+        "--out",
+        toml_with_override.to_str().unwrap(),
+    ]);
+    assert_eq!(c1, 0);
+    assert_eq!(c2, 0);
+    let b1 = fs::read(&toml_only).unwrap();
+    let b2 = fs::read(&toml_with_override).unwrap();
+    assert_ne!(
+        b1, b2,
+        "explicit --seed must override the TOML seed (different bytes)"
+    );
+    fs::remove_file(&cfg_path).ok();
+    fs::remove_file(&toml_only).ok();
+    fs::remove_file(&toml_with_override).ok();
+}
+
+#[test]
+fn abng_train_config_bad_toml_errors_with_line_number() {
+    let cfg_path = unique_temp_path("train-toml-bad");
+    fs::write(&cfg_path, "[graph\nseed = 42\n").unwrap();
+    let (_stdout, stderr, code) = run_cjc(&[
+        "abng",
+        "train",
+        "--config",
+        cfg_path.to_str().unwrap(),
+        "--out",
+        "ignored.snap",
+    ]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("toml:") && stderr.contains("line"),
+        "expected line-numbered toml error, got: {stderr}"
+    );
+    fs::remove_file(&cfg_path).ok();
+}
+
+#[test]
+fn abng_train_config_wrong_thresholds_count_errors() {
+    let cfg_path = unique_temp_path("train-toml-wrong-thresholds");
+    fs::write(
+        &cfg_path,
+        "[decision_policy]\nthresholds = [0.5, 64.0]\n",
+    )
+    .unwrap();
+    let (_stdout, stderr, code) = run_cjc(&[
+        "abng",
+        "train",
+        "--config",
+        cfg_path.to_str().unwrap(),
+        "--out",
+        "ignored.snap",
+    ]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("14 elements") || stderr.contains("invalid config"),
+        "expected length-14 error, got: {stderr}"
+    );
+    fs::remove_file(&cfg_path).ok();
+}
+
+#[test]
+fn abng_train_config_unknown_activation_errors() {
+    let cfg_path = unique_temp_path("train-toml-bad-activation");
+    fs::write(
+        &cfg_path,
+        "[leaf_head]\ninput_dim = 1\nhidden_dims = [2]\noutput_dim = 1\nactivation = \"banana\"\n",
+    )
+    .unwrap();
+    let (_stdout, stderr, code) = run_cjc(&[
+        "abng",
+        "train",
+        "--config",
+        cfg_path.to_str().unwrap(),
+        "--out",
+        "ignored.snap",
+    ]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("unknown activation"),
+        "expected unknown-activation error, got: {stderr}"
+    );
+    fs::remove_file(&cfg_path).ok();
+}
+
+#[test]
+fn abng_train_writes_loadable_snapshot_with_default_flags() {
+    let out = unique_temp_path("train-default");
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "train",
+        "--seed",
+        "42",
+        "--n-obs",
+        "30",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "train should exit 0; stdout was: {stdout}");
+    // Summary lines we promise.
+    for k in [
+        "ok",
+        "path:",
+        "size:",
+        "seed:",
+        "n_observations:",
+        "decide_calls:",
+        "chain_head:",
+        "n_nodes:",
+        "n_events:",
+        "action_counts:",
+    ] {
+        assert!(stdout.contains(k), "expected `{k}` in summary, got: {stdout}");
+    }
+    // The output file must exist and re-load cleanly via inspect.
+    assert!(out.exists());
+    let (inspect_out, _, code2) = run_cjc(&[
+        "abng",
+        "inspect",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code2, 0);
+    assert!(inspect_out.contains("ABNG snapshot:"));
+    fs::remove_file(&out).ok();
+}
+
+#[test]
+fn abng_train_is_deterministic_for_same_seeds() {
+    // Two trains with identical (seed, obs-seed, n-obs, decide-every)
+    // must produce byte-identical snapshot files.
+    let out_a = unique_temp_path("train-det-a");
+    let out_b = unique_temp_path("train-det-b");
+    let common: Vec<String> = vec![
+        "abng".to_string(),
+        "train".to_string(),
+        "--seed".to_string(),
+        "42".to_string(),
+        "--obs-seed".to_string(),
+        "1234".to_string(),
+        "--n-obs".to_string(),
+        "20".to_string(),
+        "--decide-every".to_string(),
+        "10".to_string(),
+    ];
+    let mut args_a = common.clone();
+    args_a.push("--out".to_string());
+    args_a.push(out_a.to_str().unwrap().to_string());
+    let mut args_b = common.clone();
+    args_b.push("--out".to_string());
+    args_b.push(out_b.to_str().unwrap().to_string());
+    let arg_refs_a: Vec<&str> = args_a.iter().map(|s| s.as_str()).collect();
+    let arg_refs_b: Vec<&str> = args_b.iter().map(|s| s.as_str()).collect();
+    let (_, _, c1) = run_cjc(&arg_refs_a);
+    let (_, _, c2) = run_cjc(&arg_refs_b);
+    assert_eq!(c1, 0);
+    assert_eq!(c2, 0);
+    let bytes_a = fs::read(&out_a).unwrap();
+    let bytes_b = fs::read(&out_b).unwrap();
+    assert_eq!(
+        bytes_a, bytes_b,
+        "two trains with identical config must produce byte-identical snapshots"
+    );
+    fs::remove_file(&out_a).ok();
+    fs::remove_file(&out_b).ok();
+}
+
+#[test]
+fn abng_train_diff_with_different_seed_differs() {
+    let out_a = unique_temp_path("train-seed-a");
+    let out_b = unique_temp_path("train-seed-b");
+    for (seed, path) in [(42u64, &out_a), (43u64, &out_b)] {
+        let (_, _, code) = run_cjc(&[
+            "abng",
+            "train",
+            "--seed",
+            &seed.to_string(),
+            "--n-obs",
+            "20",
+            "--out",
+            path.to_str().unwrap(),
+        ]);
+        assert_eq!(code, 0);
+    }
+    let bytes_a = fs::read(&out_a).unwrap();
+    let bytes_b = fs::read(&out_b).unwrap();
+    assert_ne!(bytes_a, bytes_b, "different seeds must produce different snapshots");
+    // diff between them must report chain_head differs and exit 1.
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "diff",
+        out_a.to_str().unwrap(),
+        out_b.to_str().unwrap(),
+    ]);
+    assert_ne!(code, 0);
+    assert!(stdout.contains("chain_head equal:    NO"));
+    fs::remove_file(&out_a).ok();
+    fs::remove_file(&out_b).ok();
+}
+
+#[test]
+fn abng_train_decide_every_zero_errors() {
+    let out = unique_temp_path("train-zero-cadence");
+    let (_stdout, stderr, code) = run_cjc(&[
+        "abng",
+        "train",
+        "--decide-every",
+        "0",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_ne!(code, 0);
+    assert!(stderr.contains("must be > 0"));
+    fs::remove_file(&out).ok();
+}

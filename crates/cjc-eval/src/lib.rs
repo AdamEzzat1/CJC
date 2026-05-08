@@ -2440,6 +2440,15 @@ impl Interpreter {
             Ok(None) => {} // not a grad_graph_* builtin, fall through
         }
 
+        // ABNG Phase 0.1: language-level Adaptive Belief Radix Graph
+        // primitives (abng_*). Lives in cjc-abng for the same
+        // dependency-cycle reason as cjc-ad; routed identically.
+        match cjc_abng::dispatch_abng(name, &args) {
+            Ok(Some(value)) => return Ok(value),
+            Err(msg) => return Err(EvalError::Runtime(msg)),
+            Ok(None) => {} // not an abng_* builtin, fall through
+        }
+
         // PINN training builtins (bypass builtins.rs — cjc-ad dep)
         match name {
             "pinn_train_burgers" => {
