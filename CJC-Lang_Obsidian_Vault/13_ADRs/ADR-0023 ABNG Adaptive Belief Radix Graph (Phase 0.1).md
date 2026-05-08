@@ -665,3 +665,122 @@ their per-node state additions into the same v10 bump in-place.
 |-------|-------|
 | 0.4 Track A | `cjcl abng {train,inspect,explain,replay,diff}` CLI + JSON snapshot view + log compaction + audit tags `0x1A..0x1C` (StatsSnapshot, Routed, ProvenanceStamped) extending v10 in place |
 | 0.5   | Per-node `provenance_stamp_hash` (deferred from 0.4 to keep v10 frozen); audit findings polish (C-2.3.{8,9,10,11,12} if not in Track A); Chess RL retrofit (value head first, then policy head); Maturity constants promoted to `DecisionPolicy` thresholds |
+
+---
+
+## Phase 0.4 Track A amendment (2026-05-07)
+
+Phase 0.4 Track A shipped the user-facing CLI surface and the
+supporting builtins / audit kinds in 5 sequential PRs (G3.0+1+3+4 →
+G3.5 → G3.6 → G3.7 → G3.8). All extensions land **in-place under
+snapshot magic `\x0A`** — no further bump in Phase 0.4.
+
+### Surface
+
+* **CLI subcommands (5/5 shipped):**
+  * `cjcl abng inspect <model.snap> [--node ID] [--audit] [--stats]
+    [--tree] [--json]` — read-only viewer; validates audit chain on
+    load; drill-in flags for per-node detail / audit histogram /
+    Welford stats / arena topology; hand-rolled JSON output.
+  * `cjcl abng replay <model.snap> [--verify] [--json]` — wrapper
+    around `cjc_abng::serialize::replay`; reports `DecodeError`
+    cleanly with exit 1; `--verify` additionally calls
+    `verify_chain()`.
+  * `cjcl abng diff <a.snap> <b.snap> [--json]` — chain_head +
+    n_nodes + n_events + action_counts + per-node
+    `stats_chain_head` diff. Exits 1 when chain heads differ.
+  * `cjcl abng explain <prediction.snap> [--model <model.snap>]
+    [--json]` — reads prediction-snapshots produced by
+    `abng_predict_snap`, reports lineage hashes, predicting node id
+    + BLR `n_seen`, prediction tuple, and a categorical
+    abstain-or-trust verdict (UNCALIBRATED / LOW EVIDENCE /
+    OOD SATURATED / SUPPORTED). Optional `--model` verifies
+    `chain_head` + lineage hashes match the model snapshot.
+  * `cjcl abng train [OPTIONS] --out <PATH>` — deterministic
+    SplitMix64-seeded driver loop (observe N times → `decide_step`
+    every K obs → serialize). Phase 0.4 ships the explicit-flag
+    config (`--seed`, `--n-obs`, `--obs-seed`, `--decide-every`,
+    `--max-decide`); TOML `--config` files defer to Phase 0.5.
+
+* **Audit kinds added (2 new, opt-in, both extend v10 in place):**
+  * `0x1A StatsSnapshot { node_id: u32, stats_hash: [u8; 32] }` —
+    log-compaction marker. Phase 0.4 emits the marker only;
+    smart-replay (fast-forward past `*Updated` runs) defers to
+    Phase 0.5. `apply_event` is a pure no-op.
+  * `0x1B Routed { leaf: u32, matched_prefix: u8 }` — opt-in
+    descend trace event. Untraced `descend()` remains silent;
+    `descend_traced()` emits one event per call. Replay no-op.
+
+* **Builtins added (3 new, dispatch.rs surface 69 → 72):**
+  * `abng_descend_traced(g, prefix_tensor) -> Tensor[2]` — the
+    Routed-event-emitting variant of `abng_descend`.
+  * `abng_predict_snap(g, node_id, phi: Tensor[d]) -> Bytes` — pack
+    a predict + lineage tuple into a `b"ABNG-PRED\x01"`-prefixed
+    byte blob. Drives `cjcl abng explain`.
+  * `abng_compact_log(g, until_seq) -> Int` — emit one
+    `StatsSnapshot` per distinct node touched in `[0, until_seq)`,
+    in `NodeId`-ascending order. Returns count emitted.
+
+* **New module:** `cjc_abng::predict_snap`. Defines `PRED_MAGIC`
+  (`b"ABNG-PRED\x01"`), `PredictionSnap` struct, `pack`/`unpack`
+  free functions, and `PredictionSnapError` (Truncated / BadMagic /
+  ShortBody / SuspiciousPhiDim — defensive bounds-check discipline
+  matches the 0.3d-5 model-snapshot decoder hardening).
+
+### Decisions worth recording (Track A)
+
+1. **`cjcl abng` is a CLI suite command** in the existing
+   `cjc-cli/src/lib.rs` infrastructure — uses the same hand-rolled
+   argument parser as `cjcl inspect` / `cjcl trace` / etc. Zero
+   external deps; the suite handler in lib.rs forwards
+   subcommand-and-after to the abng module's own dispatcher.
+2. **Two distinct snapshot magics now coexist**: `b"ABNG\x0A"` for
+   model snapshots, `b"ABNG-PRED\x01"` for prediction snapshots.
+   Distinct length + prefix means the `serialize::replay` decoder
+   rejects prediction snapshots with `DecodeError::BadMagic` and
+   the `predict_snap::unpack` decoder rejects model snapshots with
+   `PredictionSnapError::BadMagic { got: ... }` — neither can be
+   silently confused for the other.
+3. **JSON output is hand-rolled** in every subcommand. cjc-cli has
+   zero external dependencies; adding `serde_json` for one feature
+   would break the contract. The format is intentionally simple
+   and stable — downstream tooling can rely on the field set.
+4. **`cjcl abng train` defaults match the canary fixture** — same
+   seed (42), same codebook (1×4), same head (1→[2]→1 tanh), same
+   BLR prior, same DecisionPolicy. This means a default training
+   run produces a snapshot whose `chain_head` is reproducible by
+   reading the canary's locked-in hex. Surfaces drift between the
+   canary fixture and the train default if either changes
+   independently.
+5. **TOML `--config` deferred** because cjc-cli has no TOML parser.
+   Adding one is a feature in itself; explicit flags cover the v1
+   training surface adequately. Phase 0.5 adds a hand-rolled
+   minimal TOML parser alongside the configurable Maturity
+   constants and `provenance_stamp_hash` work.
+6. **`StatsSnapshot` ships marker-only.** Smart-replay that uses
+   it to fast-forward past `*Updated` runs is significantly more
+   complex (needs a new replay state machine) and was deferred to
+   Phase 0.5. The marker emission is deterministic and replay-safe
+   today; smart-replay is purely an optimization on top.
+7. **`descend_traced` is opt-in.** A regular `descend` call must
+   not emit Routed (would explode the audit log under heavy
+   inference). Callers explicitly choose the traced variant when
+   they want a route witness in the chain — typically only
+   `cjcl abng explain` workflows need this.
+
+### Cumulative gate movement (Phase 0.4 Track A)
+
+| Gate | Pre-Track-A | Post-Track-A | Δ |
+|---|---:|---:|---:|
+| `cargo test -p cjc-abng --lib` | 252 | **261** | +9 (predict_snap unit) |
+| `cargo test --test abng` | 419 | **442** | +23 (route_trace +13, compact_log +10) |
+| `cargo test --test prop_tests abng_decision` | 4 × 256 cases | 4 × 256 cases | +0 |
+| `cargo test --test bolero_fuzz abng_decision` | 4 targets | 4 targets | +0 |
+| `cargo test -p cjc-cli --test abng_cli_integration` | (n/a) | **32 passed** | new |
+
+### Roadmap (revised after Phase 0.4 complete)
+
+| Phase | Scope |
+|-------|-------|
+| 0.5   | Per-node `provenance_stamp_hash` + `0x1C ProvenanceStamped` audit kind (forces v10 → v11); configurable Maturity constants (`ECE_STABILITY_MAX_DELTA`, `SIGMA_STABILITY_RATIO` → DecisionPolicy thresholds 13 + 14, also forces v11); `unfreeze_count` observability (extends `action_counts` to `[u64; 7]` OR adds a separate field, also v11). Smart-replay using `StatsSnapshot` to fast-forward; TOML config files for `cjcl abng train`; `NodeStats::canonical_bytes` 24B → 32B (Kahan compensation for full compaction support — also v11). All four v11-bump items consolidate into one magic bump. |
+| 0.5+  | Chess-RL retrofit — value head first (uncertainty-gated bootstrap), then policy head; end-to-end determinism gate against existing chess-rl-v2 weight hashes. |

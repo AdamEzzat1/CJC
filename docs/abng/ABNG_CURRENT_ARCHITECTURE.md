@@ -1,4 +1,4 @@
-# ABNG — Current Architecture (post-Phase 0.4)
+# ABNG — Current Architecture (post-Phase 0.4, Track A complete)
 
 **As of:** 2026-05-07
 **Crate:** `crates/cjc-abng/`
@@ -49,15 +49,22 @@ ABNG is now a **Bayesian-inspired structurally-adaptive belief graph** with:
 - Per-input NaN/Inf rejection at observe / density / calibration / blr_update boundaries (0.4 C-2.3.2)
 - Replay validates seq monotonicity, Created-first, epoch match, and stats_version match (0.4 C-2.3.3)
 - BLR feature-version stamping + `abng_reset_blr` recovery (0.4 C-2.3.5)
-- A complete tamper-evident audit chain over every state mutation (26 kinds, tags `0x00..0x19`)
+- A complete tamper-evident audit chain over every state mutation (28 kinds, tags `0x00..0x1B`)
 - Bit-deterministic snapshot round-trip across both AST and MIR backends
+- `cjcl abng {inspect, replay, diff, explain, train}` CLI surface (0.4 Track A)
+- Prediction snapshots (`abng_predict_snap` + `predict_snap` module) for explainable lineage (0.4 Track A G3.5)
+- Read-side log-compaction marker (`abng_compact_log` + `0x1A StatsSnapshot`) (0.4 Track A G3.7)
 
 ABNG is now structurally adaptive at runtime: install a policy, observe
 evidence, call `decide_step` to fire structural mutations whose actions
 are deterministic functions of (Maturity, NodeSignature, current
-graph topology). Phase 0.4 Tracks B and C shipped the trigger-refinement
-+ audit-fix work; Track A (the `cjcl abng …` CLI) is the remaining
-piece and ships under v10 in place using audit tags `0x1A..0x1C`.
+graph topology). Phase 0.4 is complete — Tracks B + C shipped the
+trigger-refinement + audit-fix work; Track A shipped the
+`cjcl abng {inspect,replay,diff,explain,train}` CLI surface, the
+`abng_predict_snap`/`abng_compact_log`/`abng_descend_traced` builtins,
+and the `predict_snap` + `Routed` (`0x1B`) + `StatsSnapshot` (`0x1A`)
+audit kinds — all extending snapshot v10 in place. Phase 0.5 picks
+up the v11-bump items deferred to consolidate magic bumps.
 
 ---
 
@@ -608,17 +615,34 @@ and `lib.rs`. No semantics changed; no code changes required.
   - B-2.2.2 3-window ECE/σ stability ring buffers per node (per-node +50B)
   - B-2.2.1 Welford-smoothed NodeSignature profiles per node (per-node +96B)
 
-0.4 Track A (NEXT) — CLI + JSON view + log compaction
-  - cjcl abng {train,inspect,explain,replay,diff} CLI
-  - JSON-safe snapshot view via cjc_snap::snap_to_json
-  - Log compaction (squash N consecutive *Updated into one Snapshot)
-  - Audit tags 0x1A..0x1C — StatsSnapshot, Routed, ProvenanceStamped
-    (extend v10 in place — no further magic bump in Phase 0.4)
-  - Snapshot-version negotiation diagnostics
-  - Categorical features in codebook (deferred from 0.4 main work to Track A)
+0.4 Track A (DONE 2026-05-07) — CLI + JSON view + log compaction
+  - cjcl abng {inspect,replay,diff,explain,train} CLI (5/5 shipped)
+  - JSON output via --json on every subcommand (hand-rolled, no
+    external dep)
+  - Log compaction marker (0x1A StatsSnapshot + abng_compact_log
+    builtin); smart-replay deferred to Phase 0.5
+  - Routed audit kind (0x1B) + descend_traced + abng_predict_snap
+    builtin + predict_snap module
+  - Audit tags 0x1A and 0x1B allocated; 0x1C reserved for
+    Phase 0.5 ProvenanceStamped
+  - cjcl abng train ships with explicit-flag config; TOML --config
+    deferred to Phase 0.5
 
 0.5
-  - Per-node provenance_stamp_hash (deferred from 0.4 to keep v10 frozen)
+  - Per-node provenance_stamp_hash + 0x1C ProvenanceStamped audit kind
+    (would force snapshot magic v10 → v11)
+  - Configurable Maturity constants (ECE_STABILITY_MAX_DELTA,
+    SIGMA_STABILITY_RATIO promoted to DecisionPolicy thresholds 13 + 14
+    — also forces v10 → v11; deferred per architecture-doc §8.23 to
+    consolidate magic bumps)
+  - unfreeze_count observability (extend action_counts to [u64; 7]
+    OR add separate field — also forces v10 → v11; same consolidation
+    rationale)
+  - TOML config files for cjcl abng train
+  - Smart-replay using StatsSnapshot to fast-forward past *Updated
+    runs (the read half of log compaction)
+  - NodeStats canonical_bytes 24B → 32B (Kahan compensation register
+    for full compaction support — also forces v10 → v11)
   - Chess-RL retrofit: replace value head with ABNG, then policy head
   - Uncertainty-gated bootstrap in A2C/PPO
   - End-to-end determinism gate against existing chess-rl-v2 weight hashes
@@ -1227,17 +1251,22 @@ no code or wire-format change.
 | `cargo test --test abng` | **442 passed, 0 failed** | +139 (B+C: +88; +13 from C-2.3.8 fallback; +9 from C-2.3.12 recapture; +6 from C-2.3.12 decide_step canary; +13 from G3.5 route_trace; +10 from G3.7 compact_log) |
 | `cargo test --test prop_tests abng_decision` | **4 passed** (× 256 cases each) | +0 |
 | `cargo test --test bolero_fuzz abng_decision` | **4 passed** | +0 |
-| `cargo test --workspace --release --lib` | (re-run before Track A merge) | — |
-| `cargo test --test physics_ml --release` | (re-run before Track A merge) | — |
+| `cargo test -p cjc-cli --test abng_cli_integration` | **32 passed** (NEW Track A gate) | +32 |
+| `cargo test --workspace --release --lib` | (re-run before Phase 0.5 merge) | — |
+| `cargo test --test physics_ml --release` | (re-run before Phase 0.5 merge) | — |
 
-Total ABNG-direct `#[test]` markers: **656** (252 in-crate + 404
-integration), plus 4 properties (× 256 cases each) and 4 fuzz targets.
+Total ABNG-direct `#[test]` markers: **703** (261 in-crate + 442
+integration), plus 4 properties (× 256 cases each), 4 fuzz targets,
+and 32 cjc-cli `cjcl abng …` integration tests.
 
 ---
 
-*This document is the source of truth as of end-of-Phase-0.4-B+C
-(2026-05-07). Track A (`cjcl abng …` CLI) is the remaining piece;
-when the code and a phase design note disagree, this document — and
-the code it references — wins. Track A work must update this doc in
-lockstep with the code, not after, and must NOT bump snapshot magic
-beyond `\x0A` (audit tags `0x1A..0x1C` extend v10 in place).*
+*This document is the source of truth as of end-of-Phase-0.4
+(2026-05-07). All three tracks (A, B, C) are shipped under snapshot
+magic `\x0A`; Phase 0.5 picks up the four magic-bump items
+consolidated into one v10 → v11 bump (per-node
+`provenance_stamp_hash` + `0x1C ProvenanceStamped`, configurable
+Maturity constants, `unfreeze_count` observability,
+`NodeStats::canonical_bytes` 24B → 32B). When the code and a phase
+design note disagree, this document — and the code it references —
+wins.*
