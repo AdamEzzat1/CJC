@@ -601,16 +601,326 @@ mod diff {
     }
 }
 
-// ── explain (stub for later G3.x) ──────────────────────────────────────
+// ── explain ────────────────────────────────────────────────────────────
 
 mod explain {
-    pub fn run(_args: &[String]) {
-        eprintln!(
-            "error: cjcl abng explain is not yet shipped — requires the \
-             0x1B Routed audit kind (Phase 0.4 Track A G3.5/G3.6). Try \
-             `cjcl abng inspect <model.snap> --node ID --audit` for now."
+    use super::*;
+    use cjc_abng::predict_snap::{self, PredictionSnap};
+
+    /// Threshold below which a prediction's evidence count is flagged
+    /// as "low evidence — consider abstaining". Conservative default;
+    /// future versions may make this configurable via DecisionPolicy.
+    const LOW_EVIDENCE_N_THRESHOLD: u64 = 30;
+
+    pub fn run(args: &[String]) {
+        let mut path: Option<String> = None;
+        let mut model_path: Option<String> = None;
+        let mut json = false;
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--json" => json = true,
+                "--model" => {
+                    i += 1;
+                    if i >= args.len() {
+                        eprintln!("error: --model requires a path argument");
+                        std::process::exit(2);
+                    }
+                    model_path = Some(args[i].clone());
+                }
+                "--help" | "-h" => {
+                    println!(
+                        "cjcl abng explain <prediction.snap> [--model <model.snap>] [--json]\n\
+                         \n\
+                         Reads a prediction snapshot produced by abng_predict_snap and \
+                         explains the lineage + abstain recommendation. With --model, \
+                         additionally verifies that the prediction's chain_head and \
+                         lineage hashes match the model snapshot."
+                    );
+                    std::process::exit(0);
+                }
+                other if other.starts_with("--") => {
+                    eprintln!("error: unknown explain flag `{}`", other);
+                    std::process::exit(2);
+                }
+                other => {
+                    if path.is_some() {
+                        eprintln!(
+                            "error: explain takes one positional prediction-snap path; \
+                             got `{}`",
+                            other
+                        );
+                        std::process::exit(2);
+                    }
+                    path = Some(other.to_string());
+                }
+            }
+            i += 1;
+        }
+        let path = path.unwrap_or_else(|| {
+            eprintln!("error: cjcl abng explain requires a prediction-snap path");
+            std::process::exit(2);
+        });
+
+        let p = Path::new(&path);
+        if !p.exists() {
+            eprintln!("error: file `{}` not found", path);
+            std::process::exit(1);
+        }
+        let bytes = match fs::read(p) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("error: read `{}`: {}", path, e);
+                std::process::exit(1);
+            }
+        };
+        let snap = match predict_snap::unpack(&bytes) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "error: prediction-snap decode failed: {:?}\n\
+                     (the file's first 10 bytes must be `ABNG-PRED\\x01`)",
+                    e
+                );
+                std::process::exit(1);
+            }
+        };
+
+        // Optional --model verification.
+        let mut model_check: Option<ModelCheck> = None;
+        if let Some(mp) = &model_path {
+            let mp_path = Path::new(mp);
+            if !mp_path.exists() {
+                eprintln!("error: --model file `{}` not found", mp);
+                std::process::exit(1);
+            }
+            let g = load_snapshot(mp_path);
+            let ok_chain = g.chain_head == snap.model_chain_head;
+            let ok_codebook = match &g.codebook {
+                Some(cb) => cb.frozen_hash == snap.codebook_hash,
+                None => snap.codebook_hash == [0u8; 32],
+            };
+            let ok_head = match &g.head {
+                Some(h) => h.config_hash == snap.leaf_head_hash,
+                None => snap.leaf_head_hash == [0u8; 32],
+            };
+            model_check = Some(ModelCheck {
+                model_path: mp.clone(),
+                chain_head_match: ok_chain,
+                codebook_match: ok_codebook,
+                leaf_head_match: ok_head,
+            });
+        }
+
+        let abstain = abstain_reason(&snap);
+        if json {
+            print_json(&path, &snap, &abstain, model_check.as_ref());
+        } else {
+            print_text(&path, &snap, &abstain, model_check.as_ref());
+        }
+        // Exit non-zero if model lineage check failed — gates scripts.
+        if let Some(mc) = &model_check {
+            if !mc.chain_head_match || !mc.codebook_match || !mc.leaf_head_match {
+                std::process::exit(1);
+            }
+        }
+    }
+
+    /// Result of an optional `--model` lineage check.
+    struct ModelCheck {
+        model_path: String,
+        chain_head_match: bool,
+        codebook_match: bool,
+        leaf_head_match: bool,
+    }
+
+    /// Categorical interpretation of the prediction's evidence /
+    /// uncertainty profile. Drives the "abstain or trust" output.
+    enum AbstainReason {
+        /// `expected_epistemic` was uncaptured — no calibrated
+        /// reference. Caller should call
+        /// `abng_force_recapture_expected_epistemic` (or wait for
+        /// auto-capture in `decide_step`) before relying on the OOD
+        /// signal.
+        Uncalibrated,
+        /// `blr_n_seen < LOW_EVIDENCE_N_THRESHOLD` — posterior is at
+        /// or near the prior; abstain is recommended.
+        LowEvidence { n: u64 },
+        /// `epistemic_leverage > expected_epistemic` — the calibrated
+        /// OOD ratio saturates at 1.0; the input lies in a region the
+        /// model has limited evidence for.
+        OodSaturated { ratio: f64 },
+        /// Posterior is well-trained and the input is within the
+        /// known distribution; the prediction is supported by the
+        /// evidence.
+        Supported {
+            n: u64,
+            ood_ratio: f64,
+        },
+    }
+
+    fn abstain_reason(snap: &PredictionSnap) -> AbstainReason {
+        if !snap.expected_epistemic.is_finite() {
+            return AbstainReason::Uncalibrated;
+        }
+        if snap.blr_n_seen < LOW_EVIDENCE_N_THRESHOLD {
+            return AbstainReason::LowEvidence { n: snap.blr_n_seen };
+        }
+        let ratio = snap.epistemic_leverage / snap.expected_epistemic;
+        if ratio >= 1.0 {
+            return AbstainReason::OodSaturated { ratio };
+        }
+        AbstainReason::Supported {
+            n: snap.blr_n_seen,
+            ood_ratio: ratio,
+        }
+    }
+
+    fn print_text(
+        path: &str,
+        snap: &PredictionSnap,
+        abstain: &AbstainReason,
+        check: Option<&ModelCheck>,
+    ) {
+        println!("ABNG prediction snapshot: {}", path);
+        println!("  format magic:    ABNG-PRED\\x01");
+        println!("  model chain_head: {}", hex_of(&snap.model_chain_head));
+        println!("  predicting node:  {}", snap.node_id);
+        println!("  codebook hash:    {}", hex_of(&snap.codebook_hash));
+        println!("  leaf head hash:   {}", hex_of(&snap.leaf_head_hash));
+        println!("  blr state hash:   {}", hex_of(&snap.blr_state_hash));
+        println!("  blr n_seen:       {}", snap.blr_n_seen);
+        println!("  phi (d={}):", snap.phi.len());
+        for (i, x) in snap.phi.iter().enumerate() {
+            println!("      phi[{:2}] = {:+e}", i, x);
+        }
+        println!();
+        println!("prediction:");
+        println!("  mean:              {:+e}", snap.mean);
+        println!("  epistemic leverage: {:+e}", snap.epistemic_leverage);
+        println!("  aleatoric variance: {:+e}", snap.aleatoric_var);
+        if snap.expected_epistemic.is_finite() {
+            println!(
+                "  expected leverage:  {:+e}  (calibrated reference)",
+                snap.expected_epistemic
+            );
+        } else {
+            println!("  expected leverage:  uncaptured (NaN sentinel)");
+        }
+
+        println!();
+        match abstain {
+            AbstainReason::Uncalibrated => {
+                println!(
+                    "abstain: UNCALIBRATED — expected_epistemic was not captured at \
+                     predict time. The OOD ratio cannot be computed; consider running \
+                     abng_force_recapture_expected_epistemic on the predicting node \
+                     and re-issuing the prediction."
+                );
+            }
+            AbstainReason::LowEvidence { n } => {
+                println!(
+                    "abstain: LOW EVIDENCE — predicting node has only {} observations \
+                     (threshold {}). Posterior is near the prior; predictions are \
+                     dominated by the prior precision and may be unreliable.",
+                    n, LOW_EVIDENCE_N_THRESHOLD
+                );
+            }
+            AbstainReason::OodSaturated { ratio } => {
+                println!(
+                    "abstain: OOD SATURATED — calibrated OOD ratio (lev/expected) = \
+                     {:.3} ≥ 1.0. The input lies outside the region the model has \
+                     trained on; predictions may be unreliable.",
+                    ratio
+                );
+            }
+            AbstainReason::Supported { n, ood_ratio } => {
+                println!(
+                    "trust:   SUPPORTED — n_seen = {}, calibrated OOD ratio = {:.3} \
+                     (< 1.0). The prediction is within the model's trained \
+                     distribution.",
+                    n, ood_ratio
+                );
+            }
+        }
+
+        if let Some(mc) = check {
+            println!();
+            println!("model lineage check (--model {}):", mc.model_path);
+            println!(
+                "  chain_head match:    {}",
+                if mc.chain_head_match { "yes" } else { "NO" }
+            );
+            println!(
+                "  codebook hash match: {}",
+                if mc.codebook_match { "yes" } else { "NO" }
+            );
+            println!(
+                "  leaf head match:     {}",
+                if mc.leaf_head_match { "yes" } else { "NO" }
+            );
+            if !mc.chain_head_match || !mc.codebook_match || !mc.leaf_head_match {
+                println!(
+                    "  WARNING: one or more lineage hashes do NOT match the \
+                     prediction snapshot. The prediction was made against a \
+                     different model state — explain output may not reflect \
+                     the model's current behaviour."
+                );
+            }
+        }
+    }
+
+    fn print_json(
+        path: &str,
+        snap: &PredictionSnap,
+        abstain: &AbstainReason,
+        check: Option<&ModelCheck>,
+    ) {
+        let abstain_kind = match abstain {
+            AbstainReason::Uncalibrated => "uncalibrated",
+            AbstainReason::LowEvidence { .. } => "low_evidence",
+            AbstainReason::OodSaturated { .. } => "ood_saturated",
+            AbstainReason::Supported { .. } => "supported",
+        };
+        let ood_ratio_str = match abstain {
+            AbstainReason::OodSaturated { ratio } => format!("{}", ratio),
+            AbstainReason::Supported { ood_ratio, .. } => format!("{}", ood_ratio),
+            _ => "null".to_string(),
+        };
+        println!("{{");
+        println!("  \"path\": \"{}\",", path);
+        println!("  \"format_magic\": \"ABNG-PRED\\u0001\",");
+        println!("  \"chain_head\": \"{}\",", hex_of(&snap.model_chain_head));
+        println!("  \"node_id\": {},", snap.node_id);
+        println!("  \"codebook_hash\": \"{}\",", hex_of(&snap.codebook_hash));
+        println!("  \"leaf_head_hash\": \"{}\",", hex_of(&snap.leaf_head_hash));
+        println!("  \"blr_state_hash\": \"{}\",", hex_of(&snap.blr_state_hash));
+        println!("  \"blr_n_seen\": {},", snap.blr_n_seen);
+        println!("  \"phi_dim\": {},", snap.phi.len());
+        println!("  \"prediction\": {{");
+        println!("    \"mean\": {},", snap.mean);
+        println!(
+            "    \"epistemic_leverage\": {},",
+            snap.epistemic_leverage
         );
-        std::process::exit(2);
+        println!("    \"aleatoric_var\": {}", snap.aleatoric_var);
+        println!("  }},");
+        if snap.expected_epistemic.is_finite() {
+            println!("  \"expected_epistemic\": {},", snap.expected_epistemic);
+        } else {
+            println!("  \"expected_epistemic\": null,");
+        }
+        println!("  \"abstain\": \"{}\",", abstain_kind);
+        println!("  \"ood_ratio\": {}", ood_ratio_str);
+        if let Some(mc) = check {
+            println!(",  \"model_check\": {{");
+            println!("    \"path\": \"{}\",", mc.model_path);
+            println!("    \"chain_head_match\": {},", mc.chain_head_match);
+            println!("    \"codebook_match\": {},", mc.codebook_match);
+            println!("    \"leaf_head_match\": {}", mc.leaf_head_match);
+            println!("  }}");
+        }
+        println!("}}");
     }
 }
 

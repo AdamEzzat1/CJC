@@ -207,6 +207,8 @@ version = "0.1.7"
 name = "cjc-cli"
 version = "0.1.7"
 dependencies = [
+ "cjc-abng",
+ "cjc-ad",
  "cjc-ast",
  "cjc-diag",
  "cjc-eval",

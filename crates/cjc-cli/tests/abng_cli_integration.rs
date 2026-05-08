@@ -374,16 +374,208 @@ fn abng_diff_arity_check() {
     assert!(stderr.contains("requires exactly two snapshot paths"));
 }
 
-// ── stub subcommands (explain, train) ──────────────────────────────────
+// ── explain ────────────────────────────────────────────────────────────
+
+fn build_graph_with_blr_and_observations(seed: u64, n_obs: usize) -> AdaptiveBeliefGraph {
+    let mut g = AdaptiveBeliefGraph::new(seed);
+    g.set_codebook(1, 4, &[-1.0, 0.0, 1.0]).unwrap();
+    g.set_leaf_head(2, vec![2], 1, Activation::Tanh).unwrap();
+    g.set_blr_prior(1.0, 1.5, 1.0).unwrap();
+    // Train BLR with `n_obs` observations.
+    let mut features = Vec::with_capacity(n_obs * 2);
+    let mut ys = Vec::with_capacity(n_obs);
+    for i in 0..n_obs {
+        let x1 = (i as f64) / (n_obs as f64);
+        let x2 = 1.0 - x1;
+        features.push(x1);
+        features.push(x2);
+        ys.push(2.0 * x1 + 3.0 * x2);
+    }
+    g.blr_update(0, &features, &ys).unwrap();
+    g
+}
+
+fn write_prediction_snap(
+    g: &AdaptiveBeliefGraph,
+    node_id: u32,
+    phi: &[f64],
+    path: &std::path::Path,
+) {
+    let blob = cjc_abng::predict_snap::pack(g, node_id, phi).unwrap();
+    fs::write(path, blob).unwrap();
+}
 
 #[test]
-fn abng_explain_stub_explains_unimplemented() {
-    let (_stdout, stderr, code) = run_cjc(&["abng", "explain", "anything.snap"]);
+fn abng_explain_text_summary_uncalibrated() {
+    // Graph with 50 observations but expected_epistemic uncaptured.
+    let g = build_graph_with_blr_and_observations(42, 50);
+    let pred_path = unique_temp_path("explain-uncal");
+    write_prediction_snap(&g, 0, &[1.0, 0.0], &pred_path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "explain",
+        pred_path.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("ABNG prediction snapshot"));
+    assert!(stdout.contains("ABNG-PRED"));
+    assert!(stdout.contains("UNCALIBRATED"));
+    fs::remove_file(&pred_path).ok();
+}
+
+#[test]
+fn abng_explain_text_summary_low_evidence() {
+    // Graph with only 2 observations and expected_epistemic captured.
+    let mut g = build_graph_with_blr_and_observations(43, 2);
+    let _ = g.force_recapture_expected_epistemic(0).unwrap();
+    let pred_path = unique_temp_path("explain-lowev");
+    write_prediction_snap(&g, 0, &[1.0, 0.0], &pred_path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "explain",
+        pred_path.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("LOW EVIDENCE"));
+    fs::remove_file(&pred_path).ok();
+}
+
+#[test]
+fn abng_explain_text_summary_supported() {
+    // Plenty of evidence + expected_epistemic captured. Predict at a
+    // point inside the trained distribution (similar to training
+    // points) so the OOD ratio stays below 1.0.
+    let mut g = build_graph_with_blr_and_observations(44, 100);
+    let _ = g.force_recapture_expected_epistemic(0).unwrap();
+    let pred_path = unique_temp_path("explain-supported");
+    // Use a phi very close to the BLR posterior mean so leverage is
+    // small relative to expected_epistemic at the mean.
+    let mean = g.nodes[0].blr.as_ref().unwrap().mean.to_vec();
+    write_prediction_snap(&g, 0, &mean, &pred_path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "explain",
+        pred_path.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    // Either Supported (likely) or OodSaturated (border case). Both
+    // are valid outputs; we just confirm explain completes cleanly
+    // and reports one of the categorical outcomes.
+    assert!(
+        stdout.contains("SUPPORTED") || stdout.contains("OOD SATURATED"),
+        "expected SUPPORTED or OOD SATURATED, got: {stdout}"
+    );
+    fs::remove_file(&pred_path).ok();
+}
+
+#[test]
+fn abng_explain_json_emits_required_keys() {
+    let g = build_graph_with_blr_and_observations(45, 50);
+    let pred_path = unique_temp_path("explain-json");
+    write_prediction_snap(&g, 0, &[1.0, 0.0], &pred_path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "explain",
+        pred_path.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(code, 0);
+    for k in [
+        "\"path\"",
+        "\"chain_head\"",
+        "\"node_id\"",
+        "\"codebook_hash\"",
+        "\"leaf_head_hash\"",
+        "\"blr_state_hash\"",
+        "\"blr_n_seen\"",
+        "\"phi_dim\"",
+        "\"prediction\"",
+        "\"abstain\"",
+    ] {
+        assert!(stdout.contains(k), "expected `{k}` in JSON, got: {stdout}");
+    }
+    fs::remove_file(&pred_path).ok();
+}
+
+#[test]
+fn abng_explain_with_matching_model_passes_lineage_check() {
+    let g = build_graph_with_blr_and_observations(46, 50);
+    let pred_path = unique_temp_path("explain-model-match-pred");
+    let model_path = unique_temp_path("explain-model-match-model");
+    write_prediction_snap(&g, 0, &[1.0, 0.0], &pred_path);
+    write_snapshot(&g, &model_path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "explain",
+        pred_path.to_str().unwrap(),
+        "--model",
+        model_path.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("model lineage check"));
+    assert!(stdout.contains("chain_head match:    yes"));
+    assert!(stdout.contains("codebook hash match: yes"));
+    assert!(stdout.contains("leaf head match:     yes"));
+    fs::remove_file(&pred_path).ok();
+    fs::remove_file(&model_path).ok();
+}
+
+#[test]
+fn abng_explain_with_mismatched_model_fails_lineage_check() {
+    // pred from one graph, model from a DIFFERENT seed → chain_head
+    // mismatch, exit 1.
+    let g_pred = build_graph_with_blr_and_observations(47, 50);
+    let g_model = build_graph_with_blr_and_observations(48, 50);
+    let pred_path = unique_temp_path("explain-model-mismatch-pred");
+    let model_path = unique_temp_path("explain-model-mismatch-model");
+    write_prediction_snap(&g_pred, 0, &[1.0, 0.0], &pred_path);
+    write_snapshot(&g_model, &model_path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "explain",
+        pred_path.to_str().unwrap(),
+        "--model",
+        model_path.to_str().unwrap(),
+    ]);
+    assert_ne!(code, 0, "mismatched lineage should exit 1");
+    assert!(stdout.contains("chain_head match:    NO"));
+    assert!(stdout.contains("WARNING"));
+    fs::remove_file(&pred_path).ok();
+    fs::remove_file(&model_path).ok();
+}
+
+#[test]
+fn abng_explain_missing_path_errors() {
+    let (_stdout, stderr, code) = run_cjc(&["abng", "explain"]);
     assert_ne!(code, 0);
     assert!(
-        stderr.contains("not yet shipped"),
-        "expected 'not yet shipped' for explain stub, got: {stderr}"
+        stderr.contains("requires a prediction-snap path"),
+        "got: {stderr}"
     );
+}
+
+#[test]
+fn abng_explain_bad_magic_errors() {
+    // Write a file with the wrong magic and confirm explain rejects.
+    let bad_path = unique_temp_path("explain-bad-magic");
+    fs::write(&bad_path, vec![0u8; 200]).unwrap();
+    let (_stdout, stderr, code) = run_cjc(&[
+        "abng",
+        "explain",
+        bad_path.to_str().unwrap(),
+    ]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("decode failed") || stderr.contains("BadMagic"),
+        "got: {stderr}"
+    );
+    fs::remove_file(&bad_path).ok();
 }
 
 #[test]
