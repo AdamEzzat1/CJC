@@ -84,8 +84,21 @@ hold across all future phases. Violating any of them is a regression.
 
 * Every state mutation appends one `AuditEvent` with
   `new_hash = sha256(previous_hash ‖ canonical_payload)`.
-* `AdaptiveBeliefGraph::verify_chain()` recomputes every event's
-  `new_hash` from genesis and asserts equality. Any tamper anywhere
+* **Genesis hash** is the constant `sha256(b"ABNG-GENESIS-v1")`,
+  exposed as `cjc_abng::genesis_hash()`. It is the `previous_hash`
+  fed into the first event in any graph (always a `Created` event at
+  `seq = 0`). It is **not** the same as `chain_head` for a freshly-
+  created graph — see next bullet.
+* **Empty-graph chain head:** `abng_new(seed)` immediately appends a
+  `Created` event, so `abng_chain_head` on a graph with no other
+  observations returns the **post-Created** hash
+  (`sha256(genesis_hash() ‖ Created.canonical_payload)`), **not**
+  genesis itself. The "internal genesis state" exists only as the
+  `previous_hash` of the `Created` event; it never equals
+  `chain_head` at any externally-observable moment.
+* `AdaptiveBeliefGraph::verify_chain()` walks the audit log from the
+  genesis hash through every event, recomputing each `new_hash` and
+  asserting equality with the stored value. Any tamper anywhere
   surfaces as `GraphError::ChainBroken { at_seq }`.
 
 ### 2.3 Replay equality
@@ -1071,9 +1084,14 @@ regularization → reproducibility intact). **Phase 0.4 Track C-2.3.10**
 — delete the regularization claim from PHASE_0_3b_DESIGN.md and
 clarify the no-regularization contract in §6.5 of this doc.
 
-### 8.22 Empty-graph chain-head wording (post-0.3d audit)
-See §2.2. **Phase 0.4 Track C-2.3.11** — clarify "internal genesis
-state" vs "post-Created chain head" distinction.
+### 8.22 Empty-graph chain-head wording ✅ RESOLVED in Phase 0.4 Track C-2.3.11
+See §2.2. Phase 0.4 Track C-2.3.11 added explicit definitions of
+genesis hash (`sha256(b"ABNG-GENESIS-v1")`, exposed as
+`cjc_abng::genesis_hash()`) and clarified that the "internal genesis
+state" exists only as the `previous_hash` of the `Created` event —
+`abng_chain_head` for a freshly-created graph is always the
+**post-Created** hash, never the genesis hash itself. Doc-only fix;
+no code or wire-format change.
 
 ### 8.23 Audit findings (independent verification, post-0.3d)
 - `expected_epistemic` re-capture not supported (one-shot per node);
