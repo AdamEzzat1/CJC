@@ -193,4 +193,29 @@ proptest! {
             g2.action_count(ActionKind::Grow)
         );
     }
+
+    /// Property 5 (Phase 0.5 Item 1): an arbitrary provenance stamp
+    /// round-trips through serialize/replay byte-identically. The
+    /// stamp's hash is randomized across the full 256-byte alphabet
+    /// per byte; replay must preserve the stamped value AND keep the
+    /// audit chain valid post-stamp.
+    #[test]
+    fn provenance_stamp_replay_byte_identical(
+        seed in 0u64..1_000_000,
+        stamp_bytes in proptest::array::uniform32(0u8..=255),
+    ) {
+        let mut g = AdaptiveBeliefGraph::new(seed);
+        // Mix in a couple observations so the chain has shape beyond
+        // just Created → ProvenanceStamped.
+        g.observe(0, 0.5).unwrap();
+        g.stamp_provenance(0, stamp_bytes).unwrap();
+        g.observe(0, -1.5).unwrap();
+        let blob1 = serialize(&g);
+        let g2 = replay(&blob1).unwrap();
+        let blob2 = serialize(&g2);
+        prop_assert_eq!(blob1, blob2);
+        prop_assert_eq!(g.chain_head, g2.chain_head);
+        prop_assert_eq!(g2.nodes[0].provenance_stamp_hash, stamp_bytes);
+        prop_assert!(g2.verify_chain().is_ok());
+    }
 }

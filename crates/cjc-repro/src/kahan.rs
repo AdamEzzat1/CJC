@@ -128,6 +128,19 @@ impl KahanAccumulatorF64 {
     pub fn count(&self) -> u64 {
         self.count
     }
+
+    /// Returns the IEEE-754 bit pattern of the compensation register.
+    ///
+    /// The compensation register captures the bits that were lost in
+    /// the running sum's last addition; it's the second half of the
+    /// Kahan invariant `sum + compensation ≈ exact`. Two accumulators
+    /// with identical addition orders produce identical compensation
+    /// bits across runs and platforms — this is the determinism
+    /// contract that callers serializing the full Welford state rely on.
+    #[inline]
+    pub fn compensation_bits(&self) -> u64 {
+        self.compensation.to_bits()
+    }
 }
 
 impl Default for KahanAccumulatorF64 {

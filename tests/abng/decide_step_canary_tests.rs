@@ -90,8 +90,12 @@ fn canary_chain_head_byte_layout_locked() {
     //   2. Confirm the change is intentional (audit payload format,
     //      Welford order, signature layout, etc.).
     //   3. Update the EXPECTED_HEX constant below.
+    // Phase 0.5 v12 — re-locked after Item 4 extended NodeStats::canonical_bytes
+    // from 24 → 32 bytes (which appended the Kahan compensation register).
+    // Every audit event's `stats_hash` re-hashes the new 32-byte canonical
+    // form, so every chain step shifted; this hex is the post-v12 canary.
     const EXPECTED_HEX: &str =
-        "3acd67fe2e2a657367603fd9f8b452386a6cc051157dadfe790035671260af18";
+        "d064fb08c546be1b9850bfa91f87f4aed95682aa4fb7f4533cf1ac4da0d87807";
 
     let g = canary_graph();
     let actual_hex = hex(&g.chain_head);

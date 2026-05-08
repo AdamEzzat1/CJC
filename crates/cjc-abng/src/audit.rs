@@ -278,6 +278,21 @@ pub enum AuditKind {
         /// SHA-256 of `NodeStats::canonical_bytes()` at emission time.
         stats_hash: [u8; 32],
     },
+    /// Phase 0.5 Item 1 — opt-in provenance stamp for one node. Binds
+    /// the node's training history to a caller-chosen 32-byte SHA-256
+    /// (typically `sha256(dataset_bytes ‖ feature_version)`) so that
+    /// `cjcl abng explain` can verify dataset / feature-transform
+    /// lineage in addition to the existing model + codebook + leaf head
+    /// + BLR coverage. Tag `0x1C`. Idempotent: repeated stamps with
+    /// the same hash are no-op (no event); only a *change* fires a new
+    /// event. Replay reapplies by writing the stored hash into the
+    /// target node's `provenance_stamp_hash` field.
+    ProvenanceStamped {
+        /// Node being stamped.
+        node_id: NodeId,
+        /// 32-byte caller-chosen provenance fingerprint.
+        hash: [u8; 32],
+    },
 }
 
 /// `AuditKind::BlrNumericalRescue::reason` value: post-update `b` would
@@ -319,10 +334,12 @@ impl AuditKind {
             AuditKind::BlrNumericalRescue { .. } => 0x18,
             AuditKind::LeafParamsUpdatedBatch { .. } => 0x19,
             // Phase 0.4 Track A — Routed (opt-in trace event) and
-            // StatsSnapshot (log-compaction marker). Tag 0x1C is
-            // reserved for `ProvenanceStamped` (Phase 0.5).
+            // StatsSnapshot (log-compaction marker).
             AuditKind::Routed { .. } => 0x1B,
             AuditKind::StatsSnapshot { .. } => 0x1A,
+            // Phase 0.5 Item 1 — opt-in provenance stamping. 36-byte
+            // canonical body (node_id u32 BE + hash [u8; 32]).
+            AuditKind::ProvenanceStamped { .. } => 0x1C,
         }
     }
 }
@@ -501,6 +518,12 @@ impl AuditEvent {
                 out.extend_from_slice(&node_id.to_be_bytes());
                 out.extend_from_slice(stats_hash);
             }
+            AuditKind::ProvenanceStamped { node_id, hash } => {
+                // Phase 0.5 Item 1 — 36-byte body: node_id u32 BE +
+                // hash [u8; 32].
+                out.extend_from_slice(&node_id.to_be_bytes());
+                out.extend_from_slice(hash);
+            }
         }
         out.extend_from_slice(&self.stats_version.to_be_bytes());
         out.extend_from_slice(&self.stats_hash);
@@ -594,6 +617,47 @@ mod tests {
             genesis_hash(),
         );
         assert_eq!(e.payload_bytes().len(), 93);
+    }
+
+    #[test]
+    fn payload_size_provenance_stamped() {
+        // Phase 0.5 Item 1 — 21 (header) + 36 (node_id u32 + hash [u8; 32])
+        // + 8 (stats_version) + 32 (stats_hash) = 97
+        let e = dummy_event(
+            0,
+            AuditKind::ProvenanceStamped {
+                node_id: 7,
+                hash: [0xABu8; 32],
+            },
+            genesis_hash(),
+        );
+        assert_eq!(e.payload_bytes().len(), 97);
+    }
+
+    #[test]
+    fn provenance_stamped_tag_is_0x1c() {
+        let k = AuditKind::ProvenanceStamped {
+            node_id: 0,
+            hash: [0u8; 32],
+        };
+        assert_eq!(k.tag(), 0x1C);
+    }
+
+    #[test]
+    fn tamper_detection_provenance_hash() {
+        let mut e = dummy_event(
+            7,
+            AuditKind::ProvenanceStamped {
+                node_id: 3,
+                hash: [0x01u8; 32],
+            },
+            genesis_hash(),
+        );
+        e.kind = AuditKind::ProvenanceStamped {
+            node_id: 3,
+            hash: [0x02u8; 32],
+        };
+        assert_ne!(e.recompute_new_hash(), e.new_hash);
     }
 
     #[test]

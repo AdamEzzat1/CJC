@@ -16,25 +16,26 @@
 //! Format (all integers and f64-bits big-endian):
 //!
 //! ```text
-//! magic              "ABNG-PRED\x01"   (10 bytes)
-//! model_chain_head   [u8; 32]
-//! node_id            u32
-//! codebook_hash      [u8; 32]          (zero if no codebook)
-//! leaf_head_hash     [u8; 32]          (zero if no head)
-//! blr_state_hash     [u8; 32]
-//! blr_n_seen         u64
-//! phi_dim            u32
-//! phi                f64 × phi_dim
-//! mean               f64
-//! epistemic_leverage f64
-//! aleatoric_var      f64
-//! expected_epistemic f64 bits          (NaN-sentinel if uncaptured)
+//! magic                  "ABNG-PRED\x02"  (10 bytes)
+//! model_chain_head       [u8; 32]
+//! node_id                u32
+//! codebook_hash          [u8; 32]         (zero if no codebook)
+//! leaf_head_hash         [u8; 32]         (zero if no head)
+//! blr_state_hash         [u8; 32]
+//! blr_n_seen             u64
+//! phi_dim                u32
+//! phi                    f64 × phi_dim
+//! mean                   f64
+//! epistemic_leverage     f64
+//! aleatoric_var          f64
+//! expected_epistemic     f64 bits         (NaN-sentinel if uncaptured)
+//! provenance_stamp_hash  [u8; 32]         (Phase 0.5 — zero if unstamped)
 //! ```
 //!
 //! The "PRED" magic distinguishes prediction snapshots from model
-//! snapshots (which use `b"ABNG\x0A"`); a v1 magic byte allows future
-//! format changes if the prediction record needs additional lineage
-//! fields.
+//! snapshots (which use `b"ABNG\x0C"` in v12); the v2 byte was bumped
+//! by Phase 0.5 Item 1 to absorb the new `provenance_stamp_hash`
+//! field.
 //!
 //! All packing is deterministic; two calls with bit-identical inputs
 //! produce bit-identical bytes across runs and platforms.
@@ -45,8 +46,9 @@ use crate::leaf_head::params_hash;
 use crate::node::NodeId;
 
 /// Magic bytes for prediction snapshots. Distinct from the model
-/// magic (`b"ABNG\x0A"`).
-pub const PRED_MAGIC: &[u8; 10] = b"ABNG-PRED\x01";
+/// magic (`b"ABNG\x0C"` in v12). Bumped to `\x02` by Phase 0.5 Item 1
+/// to absorb the per-node `provenance_stamp_hash` trailer.
+pub const PRED_MAGIC: &[u8; 10] = b"ABNG-PRED\x02";
 
 /// In-memory representation of a prediction snapshot. Produced by
 /// [`pack`] and reconstructed by [`unpack`].
@@ -66,6 +68,12 @@ pub struct PredictionSnap {
     /// reference at predict time. Otherwise this is the captured
     /// leverage reference used by the calibrated OOD ratio.
     pub expected_epistemic: f64,
+    /// Phase 0.5 Item 1 — the predicting node's provenance stamp at
+    /// the moment of prediction. `[0u8; 32]` if the node had not been
+    /// stamped via [`AdaptiveBeliefGraph::stamp_provenance`]. Allows
+    /// `cjcl abng explain` to verify dataset / feature-transform
+    /// lineage in addition to model + codebook + leaf head + BLR.
+    pub provenance_stamp_hash: [u8; 32],
 }
 
 /// Errors returned by [`unpack`]. Mirrors the discipline of the model
@@ -118,9 +126,10 @@ pub fn pack(
     let expected_epistemic = g.nodes[node_id as usize]
         .expected_epistemic
         .unwrap_or(f64::NAN);
+    let provenance_stamp_hash = g.nodes[node_id as usize].provenance_stamp_hash;
 
-    // Capacity: 10 + 32 + 4 + 32 + 32 + 32 + 8 + 4 + 8·d + 8·4
-    let mut out = Vec::with_capacity(186 + 8 * phi.len());
+    // Capacity: 10 + 32 + 4 + 32 + 32 + 32 + 8 + 4 + 8·d + 8·4 + 32 (provenance)
+    let mut out = Vec::with_capacity(218 + 8 * phi.len());
     out.extend_from_slice(PRED_MAGIC);
     out.extend_from_slice(&g.chain_head);
     out.extend_from_slice(&node_id.to_be_bytes());
@@ -136,6 +145,8 @@ pub fn pack(
     out.extend_from_slice(&lev.to_bits().to_be_bytes());
     out.extend_from_slice(&ale.to_bits().to_be_bytes());
     out.extend_from_slice(&expected_epistemic.to_bits().to_be_bytes());
+    // Phase 0.5 Item 1 — trailing provenance stamp (32 bytes).
+    out.extend_from_slice(&provenance_stamp_hash);
     Ok(out)
 }
 
@@ -183,10 +194,12 @@ pub fn unpack(bytes: &[u8]) -> Result<PredictionSnap, PredictionSnapError> {
         return Err(PredictionSnapError::SuspiciousPhiDim { phi_dim });
     }
     // ShortBody fires when the total expected length (header + phi
-    // body + trailing 4 × 8B f64s) exceeds bytes.len(). This is the
-    // common-case truncation error.
+    // body + trailing 4 × 8B f64s + 32B provenance stamp) exceeds
+    // bytes.len(). This is the common-case truncation error.
+    // Phase 0.5 Item 1 — trailing 32 bytes added for the provenance
+    // stamp (was `32` for the 4 × 8B trailing f64s; now `64`).
     let phi_bytes = (phi_dim as usize).saturating_mul(8);
-    let expected_total = HEADER_LEN.saturating_add(phi_bytes).saturating_add(32);
+    let expected_total = HEADER_LEN.saturating_add(phi_bytes).saturating_add(64);
     if bytes.len() < expected_total {
         return Err(PredictionSnapError::ShortBody {
             expected: expected_total,
@@ -210,6 +223,10 @@ pub fn unpack(bytes: &[u8]) -> Result<PredictionSnap, PredictionSnapError> {
     p += 8;
     let expected_epistemic =
         f64::from_bits(u64::from_be_bytes(bytes[p..p + 8].try_into().unwrap()));
+    p += 8;
+    // Phase 0.5 Item 1 — trailing provenance stamp.
+    let mut provenance_stamp_hash = [0u8; 32];
+    provenance_stamp_hash.copy_from_slice(&bytes[p..p + 32]);
 
     Ok(PredictionSnap {
         model_chain_head: chain_head,
@@ -223,6 +240,7 @@ pub fn unpack(bytes: &[u8]) -> Result<PredictionSnap, PredictionSnapError> {
         epistemic_leverage,
         aleatoric_var,
         expected_epistemic,
+        provenance_stamp_hash,
     })
 }
 
@@ -352,5 +370,54 @@ mod tests {
         let bytes = pack(&g, 0, &[1.0, 0.0]).unwrap();
         let snap = unpack(&bytes).unwrap();
         assert_eq!(snap.codebook_hash, [0u8; 32]);
+    }
+
+    // ── Phase 0.5 Item 1: prediction snapshot carries provenance ──
+
+    #[test]
+    fn pack_unpack_round_trip_unstamped_provenance_is_zero() {
+        // A node that has not been stamped serializes the all-zero
+        // provenance hash; round-trip preserves that.
+        let g = build_graph();
+        let bytes = pack(&g, 0, &[1.0, 0.0]).unwrap();
+        let snap = unpack(&bytes).unwrap();
+        assert_eq!(snap.provenance_stamp_hash, [0u8; 32]);
+    }
+
+    #[test]
+    fn pack_unpack_round_trip_with_provenance() {
+        let mut g = build_graph();
+        let stamp = [0xC0u8; 32];
+        g.stamp_provenance(0, stamp).unwrap();
+        let bytes = pack(&g, 0, &[1.0, 0.0]).unwrap();
+        let snap = unpack(&bytes).unwrap();
+        assert_eq!(snap.provenance_stamp_hash, stamp);
+        // chain_head reflects the stamp event.
+        assert_eq!(snap.model_chain_head, g.chain_head);
+    }
+
+    #[test]
+    fn pack_size_grew_by_32_bytes_for_provenance_trailer() {
+        // Phase 0.5 Item 1 — the v2 prediction snapshot has 32 more
+        // trailing bytes than v1. Validating this catches accidental
+        // re-shrinks if a future refactor re-stages the trailer.
+        let g = build_graph();
+        let bytes = pack(&g, 0, &[1.0, 0.0]).unwrap();
+        // v1 was 154 + 8·d + 4·8 = 154 + 16 + 32 = 202 for d=2.
+        // v2 adds a trailing [u8; 32] = 234.
+        assert_eq!(bytes.len(), 234);
+    }
+
+    #[test]
+    fn unpack_bad_magic_rejects_v1_blob() {
+        // A v1-encoded prediction snapshot must not validate against
+        // v2 unpack (the magic differs in its 10th byte).
+        let g = build_graph();
+        let mut bytes = pack(&g, 0, &[1.0, 0.0]).unwrap();
+        bytes[9] = 0x01; // simulate the legacy v1 magic byte
+        match unpack(&bytes).unwrap_err() {
+            PredictionSnapError::BadMagic { .. } => {}
+            other => panic!("expected BadMagic, got {other:?}"),
+        }
     }
 }

@@ -24,9 +24,15 @@
 //!
 //! # Canonical bytes
 //!
-//! [`NodeStats::canonical_bytes`] produces a fixed 24-byte big-endian
+//! [`NodeStats::canonical_bytes`] produces a fixed 32-byte big-endian
 //! encoding suitable for hashing. The byte layout is part of the chain
 //! hash contract — changing it breaks audit-log compatibility.
+//!
+//! Phase 0.5 Item 4 extended this from 24 → 32 bytes by appending the
+//! Kahan compensation register so log compaction can resume the full
+//! Welford state from a single canonical-bytes blob (the earlier 24B
+//! encoding silently dropped the compensation, forcing replay-from-events
+//! to reconstruct it).
 
 use cjc_repro::KahanAccumulatorF64;
 
@@ -138,21 +144,27 @@ impl NodeStats {
         }
     }
 
-    /// Canonical 24-byte encoding for hashing.
+    /// Canonical 32-byte encoding for hashing.
     ///
     /// Layout (all big-endian):
     /// ```text
-    ///   [0..8]   n_seen          u64
-    ///   [8..16]  mean.to_bits()  u64 (IEEE-754 bit pattern)
-    ///   [16..24] m2.finalize()   u64 (IEEE-754 bit pattern)
+    ///   [0..8]   n_seen                     u64
+    ///   [8..16]  mean.to_bits()             u64 (IEEE-754 bit pattern)
+    ///   [16..24] m2.finalize()              u64 (IEEE-754 bit pattern)
+    ///   [24..32] m2.compensation_bits()     u64 (Kahan compensation register)
     /// ```
     /// Using `to_bits()` instead of `to_le_bytes()` preserves signaling-NaN
     /// patterns; using big-endian keeps the canonical form platform-stable.
-    pub fn canonical_bytes(&self) -> [u8; 24] {
-        let mut out = [0u8; 24];
+    ///
+    /// The compensation register is bit-stable for a fixed observation
+    /// order, so the full 32 bytes round-trip across runs and platforms
+    /// when the per-node observation history is identical.
+    pub fn canonical_bytes(&self) -> [u8; 32] {
+        let mut out = [0u8; 32];
         out[0..8].copy_from_slice(&self.n_seen.to_be_bytes());
         out[8..16].copy_from_slice(&self.mean.to_bits().to_be_bytes());
         out[16..24].copy_from_slice(&self.m2.finalize().to_bits().to_be_bytes());
+        out[24..32].copy_from_slice(&self.m2.compensation_bits().to_be_bytes());
         out
     }
 
@@ -219,9 +231,27 @@ mod tests {
     }
 
     #[test]
-    fn canonical_bytes_size_24() {
+    fn canonical_bytes_size_32() {
+        // Phase 0.5 Item 4 — canonical_bytes grew from 24 → 32 bytes
+        // (appended the Kahan compensation register).
         let s = NodeStats::new();
-        assert_eq!(s.canonical_bytes().len(), 24);
+        assert_eq!(s.canonical_bytes().len(), 32);
+    }
+
+    #[test]
+    fn canonical_bytes_compensation_register_bit_stable() {
+        // The compensation-register byte slice (bytes 24..32) is
+        // deterministic for a fixed observation order across runs.
+        let xs: Vec<f64> = (0..256)
+            .map(|i| (i as f64).sin() * 1e-3 + (i as f64) * 0.1)
+            .collect();
+        let mut s1 = NodeStats::new();
+        let mut s2 = NodeStats::new();
+        s1.observe_slice(&xs);
+        s2.observe_slice(&xs);
+        let b1 = s1.canonical_bytes();
+        let b2 = s2.canonical_bytes();
+        assert_eq!(&b1[24..32], &b2[24..32]);
     }
 
     #[test]

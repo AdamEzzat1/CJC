@@ -59,19 +59,21 @@ fn replay_rejects_zero_events_as_created_must_be_first() {
     let g = build_with_observes(0, 1);
     let mut blob = serialize(&g);
 
-    // v11 layout, single root, no codebook/head/blr/density/calibration/policy:
+    // v12 layout, single root, no codebook/head/blr/density/calibration/policy:
     //   5 magic + 8 seed + 8 epoch + 32 final_hash
     //   + 1 codebook_present + 1 head_present + 1 blr_prior_present
     //   + 1 density_enabled + 1 calibration_present
     //   + 1 policy_present + 48 action_counts (u64 × 6) = 107
     //   + 8 unfreeze_count u64 (Phase 0.4-extended v11)    = 115
     //   + 4 n_nodes (u32)                                  = 119
-    //   + 89 per-node base + 50 (Phase 0.4 Track B-2.2.2 stability buffers)
-    //                      + 96 (Phase 0.4 Track B-2.2.1 Welford accumulators)
-    //                      = 235 per-node bytes (single root, no extras)
-    //   = 354 cumulative
-    //   n_events u64 lives at 354..362
-    let n_events_offset = 354;
+    //   + 97 per-node base (8 more than v11 — canonical_bytes 24→32)
+    //   + 50 (Phase 0.4 Track B-2.2.2 stability buffers)
+    //   + 96 (Phase 0.4 Track B-2.2.1 Welford accumulators)
+    //   + 32 (Phase 0.5 Item 1 provenance_stamp_hash trailer)
+    //                                                = 275 per-node bytes
+    //   = 394 cumulative
+    //   n_events u64 lives at 394..402
+    let n_events_offset = 394;
     blob[n_events_offset..n_events_offset + 8].copy_from_slice(&0u64.to_be_bytes());
 
     let err = replay(&blob).unwrap_err();

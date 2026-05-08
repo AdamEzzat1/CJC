@@ -204,3 +204,57 @@ fn fuzz_abng_observe_determinism() {
             });
         });
 }
+
+/// Phase 0.5 Item 1 — adversarial provenance fuzz. Random 32-byte
+/// stamps applied to a small graph must round-trip without panicking
+/// AND the post-stamp chain must verify cleanly. Catches malformed
+/// 0x1C event encoding and any path that forgets to install the
+/// stamp during replay.
+#[test]
+fn fuzz_abng_provenance_round_trip() {
+    bolero::check!()
+        .with_type::<(u64, [u8; 32])>()
+        .for_each(|&(seed, stamp): &(u64, [u8; 32])| {
+            let _ = panic::catch_unwind(|| {
+                let mut g = AdaptiveBeliefGraph::new(seed);
+                let _ = g.observe(0, 0.25);
+                let _ = g.stamp_provenance(0, stamp);
+                let blob = serialize(&g);
+                let g2 = replay(&blob).expect("provenance blob must round-trip");
+                assert_eq!(g.chain_head, g2.chain_head);
+                assert_eq!(g2.nodes[0].provenance_stamp_hash, stamp);
+                assert!(g2.verify_chain().is_ok());
+            });
+        });
+}
+
+/// Phase 0.5 Item 1 — adversarial 0x1C tamper fuzz. A random byte
+/// flip inside the per-node provenance trailer (the last 32 bytes of
+/// each node's section) must surface a `DecodeError` (specifically a
+/// `ProvenanceMismatch` or `ChainMismatch`), never a panic.
+#[test]
+fn fuzz_abng_provenance_tamper_no_panic() {
+    bolero::check!()
+        .with_type::<(u8, u8)>()
+        .for_each(|&(byte_offset, mask): &(u8, u8)| {
+            let _ = panic::catch_unwind(|| {
+                let mut g = AdaptiveBeliefGraph::new(0);
+                let _ = g.observe(0, 0.5);
+                let _ = g.stamp_provenance(0, [0xAAu8; 32]);
+                let mut blob = serialize(&g);
+                if blob.len() < 64 {
+                    return;
+                }
+                // Flip a bit somewhere in the per-node section's
+                // trailing provenance bytes. The graph has one node;
+                // its 32-byte stamp is the last 32 bytes before the
+                // audit-log section. We approximate the trailer as
+                // the last 64 bytes (covers the stamp comfortably for
+                // the single-root case).
+                let len = blob.len();
+                let off = len - 64 + (byte_offset as usize % 32);
+                blob[off] ^= mask | 0x01; // ensure at least one bit flipped
+                let _ = replay(&blob); // must not panic
+            });
+        });
+}

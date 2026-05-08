@@ -45,6 +45,7 @@ mod parity_p3a;
 mod parity_p3b;
 mod parity_p3c;
 mod parity_p3d;
+mod provenance_tests;
 mod replay;
 mod replay_invariant_tests;
 mod route_entropy_grow_tests;

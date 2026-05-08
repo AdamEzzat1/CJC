@@ -147,6 +147,18 @@ pub struct AdaptiveBeliefNode {
     /// Observed metric: hash-derived f64 of the children layout (see
     /// `crate::signature::routing_observation_value`).
     pub welford_routing: SignatureWelford,
+    /// Phase 0.5 Item 1 — opt-in provenance fingerprint binding this
+    /// node's training history to the dataset / feature transform that
+    /// produced its observations. `[0u8; 32]` (the all-zero default)
+    /// means "unstamped"; any other value is a SHA-256 chosen by the
+    /// caller (typically `sha256(dataset_bytes ‖ feature_version)`)
+    /// and recorded via [`AdaptiveBeliefGraph::stamp_provenance`].
+    /// Stamping fires an
+    /// [`AuditKind::ProvenanceStamped`](crate::audit::AuditKind::ProvenanceStamped)
+    /// event so the lineage is in the audit chain. Idempotent for
+    /// repeated stamps with the same hash — only a *change* emits a
+    /// new event.
+    pub provenance_stamp_hash: [u8; 32],
 }
 
 impl AdaptiveBeliefNode {
@@ -179,6 +191,8 @@ impl AdaptiveBeliefNode {
             welford_uncertainty: SignatureWelford::new(),
             welford_calibration: SignatureWelford::new(),
             welford_routing: SignatureWelford::new(),
+            // Phase 0.5 Item 1 — unstamped by default.
+            provenance_stamp_hash: [0u8; 32],
         }
     }
 
@@ -196,7 +210,8 @@ impl AdaptiveBeliefNode {
     /// Advance the per-node stats chain to the post-update stats hash.
     /// Internal — called from `observe`.
     fn advance_stats_chain(&mut self) {
-        let mut buf = Vec::with_capacity(32 + 24);
+        // 32 (prev chain head) + 32 (canonical_bytes, Phase 0.5 v12).
+        let mut buf = Vec::with_capacity(32 + 32);
         buf.extend_from_slice(&self.stats_chain_head);
         buf.extend_from_slice(&self.stats.canonical_bytes());
         self.stats_chain_head = cjc_snap::hash::sha256(&buf);

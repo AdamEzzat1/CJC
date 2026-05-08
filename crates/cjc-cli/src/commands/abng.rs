@@ -421,6 +421,7 @@ mod inspect {
             AuditKind::LeafParamsUpdatedBatch { .. } => "LeafParamsUpdatedBatch",
             AuditKind::Routed { .. } => "Routed",
             AuditKind::StatsSnapshot { .. } => "StatsSnapshot",
+            AuditKind::ProvenanceStamped { .. } => "ProvenanceStamped",
         }
     }
 }
@@ -684,7 +685,7 @@ mod explain {
             Err(e) => {
                 eprintln!(
                     "error: prediction-snap decode failed: {:?}\n\
-                     (the file's first 10 bytes must be `ABNG-PRED\\x01`)",
+                     (the file's first 10 bytes must be `ABNG-PRED\\x02`)",
                     e
                 );
                 std::process::exit(1);
@@ -709,11 +710,26 @@ mod explain {
                 Some(h) => h.config_hash == snap.leaf_head_hash,
                 None => snap.leaf_head_hash == [0u8; 32],
             };
+            // Phase 0.5 Item 1 — provenance lineage check. The model's
+            // current per-node `provenance_stamp_hash` for the
+            // predicting node must match the value the prediction
+            // recorded; if the prediction was unstamped (all zeros) we
+            // still surface the live model's stamp for diagnosis but
+            // count "no stamp on either side" as a match (= no claim).
+            let provenance_match = if (snap.node_id as usize) < g.nodes.len() {
+                Some(
+                    g.nodes[snap.node_id as usize].provenance_stamp_hash
+                        == snap.provenance_stamp_hash,
+                )
+            } else {
+                Some(false)
+            };
             model_check = Some(ModelCheck {
                 model_path: mp.clone(),
                 chain_head_match: ok_chain,
                 codebook_match: ok_codebook,
                 leaf_head_match: ok_head,
+                provenance_match,
             });
         }
 
@@ -725,7 +741,10 @@ mod explain {
         }
         // Exit non-zero if model lineage check failed — gates scripts.
         if let Some(mc) = &model_check {
-            if !mc.chain_head_match || !mc.codebook_match || !mc.leaf_head_match {
+            let prov_ok = mc.provenance_match.unwrap_or(true);
+            if !mc.chain_head_match || !mc.codebook_match || !mc.leaf_head_match
+                || !prov_ok
+            {
                 std::process::exit(1);
             }
         }
@@ -737,6 +756,14 @@ mod explain {
         chain_head_match: bool,
         codebook_match: bool,
         leaf_head_match: bool,
+        /// Phase 0.5 Item 1 — `Some(true)` if the prediction's
+        /// `provenance_stamp_hash` matches the live model's stored
+        /// stamp on the predicting node; `Some(false)` if they
+        /// disagree; `None` only if the predicting node is out of
+        /// range on the supplied model (an even worse mismatch — the
+        /// caller is asked to look at the chain_head divergence
+        /// first).
+        provenance_match: Option<bool>,
     }
 
     /// Categorical interpretation of the prediction's evidence /
@@ -788,13 +815,21 @@ mod explain {
         check: Option<&ModelCheck>,
     ) {
         println!("ABNG prediction snapshot: {}", path);
-        println!("  format magic:    ABNG-PRED\\x01");
+        println!("  format magic:    ABNG-PRED\\x02");
         println!("  model chain_head: {}", hex_of(&snap.model_chain_head));
         println!("  predicting node:  {}", snap.node_id);
         println!("  codebook hash:    {}", hex_of(&snap.codebook_hash));
         println!("  leaf head hash:   {}", hex_of(&snap.leaf_head_hash));
         println!("  blr state hash:   {}", hex_of(&snap.blr_state_hash));
         println!("  blr n_seen:       {}", snap.blr_n_seen);
+        if snap.provenance_stamp_hash == [0u8; 32] {
+            println!("  provenance stamp: <unstamped>");
+        } else {
+            println!(
+                "  provenance stamp: {}",
+                hex_of(&snap.provenance_stamp_hash)
+            );
+        }
         println!("  phi (d={}):", snap.phi.len());
         for (i, x) in snap.phi.iter().enumerate() {
             println!("      phi[{:2}] = {:+e}", i, x);
@@ -864,7 +899,18 @@ mod explain {
                 "  leaf head match:     {}",
                 if mc.leaf_head_match { "yes" } else { "NO" }
             );
-            if !mc.chain_head_match || !mc.codebook_match || !mc.leaf_head_match {
+            // Phase 0.5 Item 1 — provenance lineage row.
+            match mc.provenance_match {
+                Some(true) => println!("  provenance match:    yes"),
+                Some(false) => println!("  provenance match:    NO"),
+                None => println!("  provenance match:    n/a (predicting node out of range)"),
+            }
+            let prov_ok = mc.provenance_match.unwrap_or(true);
+            if !mc.chain_head_match
+                || !mc.codebook_match
+                || !mc.leaf_head_match
+                || !prov_ok
+            {
                 println!(
                     "  WARNING: one or more lineage hashes do NOT match the \
                      prediction snapshot. The prediction was made against a \
@@ -894,13 +940,22 @@ mod explain {
         };
         println!("{{");
         println!("  \"path\": \"{}\",", path);
-        println!("  \"format_magic\": \"ABNG-PRED\\u0001\",");
+        println!("  \"format_magic\": \"ABNG-PRED\\u0002\",");
         println!("  \"chain_head\": \"{}\",", hex_of(&snap.model_chain_head));
         println!("  \"node_id\": {},", snap.node_id);
         println!("  \"codebook_hash\": \"{}\",", hex_of(&snap.codebook_hash));
         println!("  \"leaf_head_hash\": \"{}\",", hex_of(&snap.leaf_head_hash));
         println!("  \"blr_state_hash\": \"{}\",", hex_of(&snap.blr_state_hash));
         println!("  \"blr_n_seen\": {},", snap.blr_n_seen);
+        // Phase 0.5 Item 1 — emit provenance stamp; null when unstamped.
+        if snap.provenance_stamp_hash == [0u8; 32] {
+            println!("  \"provenance_stamp_hash\": null,");
+        } else {
+            println!(
+                "  \"provenance_stamp_hash\": \"{}\",",
+                hex_of(&snap.provenance_stamp_hash)
+            );
+        }
         println!("  \"phi_dim\": {},", snap.phi.len());
         println!("  \"prediction\": {{");
         println!("    \"mean\": {},", snap.mean);
@@ -922,7 +977,11 @@ mod explain {
             println!("    \"path\": \"{}\",", mc.model_path);
             println!("    \"chain_head_match\": {},", mc.chain_head_match);
             println!("    \"codebook_match\": {},", mc.codebook_match);
-            println!("    \"leaf_head_match\": {}", mc.leaf_head_match);
+            println!("    \"leaf_head_match\": {},", mc.leaf_head_match);
+            match mc.provenance_match {
+                Some(b) => println!("    \"provenance_match\": {}", b),
+                None => println!("    \"provenance_match\": null"),
+            }
             println!("  }}");
         }
         println!("}}");

@@ -71,22 +71,23 @@ fn payload_tampering_caught() {
     //   n_nodes u32: 4
     //   = 111 header bytes
     //
-    //   Per node (v5 base): 4 (parent) + 1 (kind) + 24 (canonical) + 8 (version)
-    //           + 32 (chain head) + 4 (n_params=0)
+    //   Per node (v5 base): 4 (parent) + 1 (kind) + 32 (canonical, v12)
+    //           + 8 (version) + 32 (chain head) + 4 (n_params=0)
     //           + 1 (blr_present) + 1 (density_present)
-    //           + 1 (calibration_present) + 1 (drift_present) = 77
-    //   Phase 0.3d-2: + 1 (ee_present=0) = 78
-    //   Phase 0.3d-3: + 2 (is_frozen + is_active) = 80
+    //           + 1 (calibration_present) + 1 (drift_present) = 85
+    //   Phase 0.3d-2: + 1 (ee_present=0) = 86
+    //   Phase 0.3d-3: + 2 (is_frozen + is_active) = 88
     //   Phase 0.3d-4: + 1 (last_signature_present=0)
-    //                 + 8 (signature_stable_calls u64) = 89
+    //                 + 8 (signature_stable_calls u64) = 97
     //   Phase 0.4 Track B-2.2.2: + 6 × 8 (ece + sigma history)
     //                           + 1 (ece_fill_count) + 1 (sigma_fill_count)
-    //                           = 50 → 139 cumulative
-    //   Phase 0.4 Track B-2.2.1: + 4 × 24 (Welford accumulators) = 96 → 235
+    //                           = 50 → 147 cumulative
+    //   Phase 0.4 Track B-2.2.1: + 4 × 24 (Welford accumulators) = 96 → 243
+    //   Phase 0.5 Item 1 (v12): + 32 (provenance_stamp_hash) = 275 per-node
     //
     //   n_events u64: 8
     //   First event: 4 (payload_len), then payload
-    let event_start = 111 + 235 + 8 + 4;
+    let event_start = 111 + 275 + 8 + 4;
     blob[event_start + 30] ^= 0xFF;
     let err = replay(&blob);
     assert!(matches!(

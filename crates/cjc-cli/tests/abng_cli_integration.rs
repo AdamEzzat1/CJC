@@ -521,6 +521,9 @@ fn abng_explain_with_matching_model_passes_lineage_check() {
     assert!(stdout.contains("chain_head match:    yes"));
     assert!(stdout.contains("codebook hash match: yes"));
     assert!(stdout.contains("leaf head match:     yes"));
+    // Phase 0.5 Item 1 — provenance row always renders, even when
+    // unstamped. Both sides see [0u8; 32] so the match is "yes".
+    assert!(stdout.contains("provenance match:    yes"));
     fs::remove_file(&pred_path).ok();
     fs::remove_file(&model_path).ok();
 }
@@ -548,6 +551,113 @@ fn abng_explain_with_mismatched_model_fails_lineage_check() {
     assert!(stdout.contains("WARNING"));
     fs::remove_file(&pred_path).ok();
     fs::remove_file(&model_path).ok();
+}
+
+#[test]
+fn abng_explain_with_stamped_provenance_renders_hex() {
+    // Phase 0.5 Item 1 — pack a prediction from a stamped node;
+    // explain renders the 64-char hex (not "<unstamped>") and
+    // matches the stored model's stamp.
+    let mut g = build_graph_with_blr_and_observations(46, 50);
+    g.stamp_provenance(0, [0xC1u8; 32]).unwrap();
+    let pred_path = unique_temp_path("explain-stamped-pred");
+    let model_path = unique_temp_path("explain-stamped-model");
+    write_prediction_snap(&g, 0, &[1.0, 0.0], &pred_path);
+    write_snapshot(&g, &model_path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "explain",
+        pred_path.to_str().unwrap(),
+        "--model",
+        model_path.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    // 64-char hex of 0xC1 repeated.
+    let expected_hex = "c1".repeat(32);
+    assert!(
+        stdout.contains(&format!("provenance stamp: {expected_hex}")),
+        "expected stamped hex in stdout: {stdout}"
+    );
+    assert!(stdout.contains("provenance match:    yes"));
+    fs::remove_file(&pred_path).ok();
+    fs::remove_file(&model_path).ok();
+}
+
+#[test]
+fn abng_explain_with_provenance_drift_fails_lineage() {
+    // Phase 0.5 Item 1 — pred made when stamp is `0xAA`, model
+    // re-stamped with `0xBB` after the fact. provenance_match: NO,
+    // exit non-zero.
+    let mut g = build_graph_with_blr_and_observations(46, 50);
+    g.stamp_provenance(0, [0xAAu8; 32]).unwrap();
+    let pred_path = unique_temp_path("explain-drift-pred");
+    write_prediction_snap(&g, 0, &[1.0, 0.0], &pred_path);
+    // Now drift the model: re-stamp with a different hash.
+    g.stamp_provenance(0, [0xBBu8; 32]).unwrap();
+    let model_path = unique_temp_path("explain-drift-model");
+    write_snapshot(&g, &model_path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "explain",
+        pred_path.to_str().unwrap(),
+        "--model",
+        model_path.to_str().unwrap(),
+    ]);
+    assert_ne!(code, 0, "provenance mismatch must exit non-zero");
+    assert!(stdout.contains("provenance match:    NO"));
+    assert!(stdout.contains("WARNING"));
+    fs::remove_file(&pred_path).ok();
+    fs::remove_file(&model_path).ok();
+}
+
+#[test]
+fn abng_explain_text_renders_unstamped_marker() {
+    // A prediction from an unstamped node renders the friendly
+    // "<unstamped>" marker rather than 64 zero hex chars.
+    let g = build_graph_with_blr_and_observations(46, 50);
+    let pred_path = unique_temp_path("explain-unstamped");
+    write_prediction_snap(&g, 0, &[1.0, 0.0], &pred_path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "explain",
+        pred_path.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("provenance stamp: <unstamped>"),
+        "expected unstamped marker, got: {stdout}"
+    );
+    fs::remove_file(&pred_path).ok();
+}
+
+#[test]
+fn abng_explain_json_emits_provenance_keys() {
+    // The --json output emits `provenance_stamp_hash` keyed correctly.
+    let mut g = build_graph_with_blr_and_observations(46, 50);
+    g.stamp_provenance(0, [0x77u8; 32]).unwrap();
+    let pred_path = unique_temp_path("explain-json-prov");
+    write_prediction_snap(&g, 0, &[1.0, 0.0], &pred_path);
+
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "explain",
+        pred_path.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("\"provenance_stamp_hash\":"),
+        "expected provenance_stamp_hash key, got: {stdout}"
+    );
+    let expected_hex = "77".repeat(32);
+    assert!(
+        stdout.contains(&expected_hex),
+        "expected stamped hex in JSON, got: {stdout}"
+    );
+    fs::remove_file(&pred_path).ok();
 }
 
 #[test]

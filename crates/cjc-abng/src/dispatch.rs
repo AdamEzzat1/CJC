@@ -1242,6 +1242,65 @@ pub fn dispatch_abng(name: &str, args: &[Value]) -> Result<Option<Value>, String
             let count = with_graph(name, id, |g| g.unfreeze_count)?;
             Value::Int(count as i64)
         }
+        "abng_stamp_provenance" => {
+            // Phase 0.5 Item 1 — (graph_id, node_id, hex_hash: String) -> Void.
+            // hex_hash MUST be exactly 64 lowercase hex chars (the
+            // ergonomic .cjcl-side encoding of a [u8; 32]). Idempotent:
+            // re-stamping with the same hash is a no-op.
+            arg_count(name, args, 3)?;
+            let id = arg_i64(name, &args[0])?;
+            let node_id = arg_u32_node(name, &args[1])?;
+            let hex = arg_string(name, &args[2])?;
+            if hex.len() != 64 {
+                return Err(format!(
+                    "{name}: expected 64-char hex hash, got {} chars",
+                    hex.len()
+                ));
+            }
+            let mut hash = [0u8; 32];
+            for i in 0..32 {
+                let lo = hex.as_bytes()[2 * i];
+                let hi = hex.as_bytes()[2 * i + 1];
+                let nybble = |b: u8| -> Result<u8, String> {
+                    match b {
+                        b'0'..=b'9' => Ok(b - b'0'),
+                        b'a'..=b'f' => Ok(b - b'a' + 10),
+                        b'A'..=b'F' => Ok(b - b'A' + 10),
+                        other => Err(format!(
+                            "{name}: hex hash contains non-hex byte {other:#04x}"
+                        )),
+                    }
+                };
+                hash[i] = (nybble(lo)? << 4) | nybble(hi)?;
+            }
+            with_graph(name, id, |g| {
+                g.stamp_provenance(node_id, hash)
+                    .map_err(|e| graph_err_to_string(name, e))
+            })??;
+            Value::Void
+        }
+        "abng_provenance_stamp" => {
+            // Phase 0.5 Item 1 — (graph_id, node_id) -> String (64-char
+            // lowercase hex). Returns the all-zero hash for unstamped
+            // nodes. Useful for explain / verify flows from .cjcl.
+            arg_count(name, args, 2)?;
+            let id = arg_i64(name, &args[0])?;
+            let node_id = arg_u32_node(name, &args[1])?;
+            let hash = with_graph(name, id, |g| {
+                if (node_id as usize) >= g.nodes.len() {
+                    return Err(format!(
+                        "{name}: node_id {node_id} out of range (n_nodes = {})",
+                        g.nodes.len()
+                    ));
+                }
+                Ok(g.nodes[node_id as usize].provenance_stamp_hash)
+            })??;
+            let mut s = String::with_capacity(64);
+            for b in hash.iter() {
+                s.push_str(&format!("{:02x}", b));
+            }
+            Value::String(s.into())
+        }
 
         // ── Phase 0.3d-2: per-node expected_epistemic capture ────
         "abng_set_expected_epistemic" => {

@@ -2113,6 +2113,39 @@ impl AdaptiveBeliefGraph {
         Ok(())
     }
 
+    /// Phase 0.5 Item 1 — opt-in provenance stamping.
+    ///
+    /// Records a 32-byte caller-chosen SHA-256 (typically
+    /// `sha256(dataset_bytes ‖ feature_version)`) on `node_id`,
+    /// emitting an [`AuditKind::ProvenanceStamped`] event so the
+    /// stamp lives in the audit chain. `cjcl abng explain` uses
+    /// this hash to verify dataset / feature-transform lineage in
+    /// addition to the existing model + codebook + leaf-head + BLR
+    /// coverage.
+    ///
+    /// Idempotent: if the node's current `provenance_stamp_hash`
+    /// already equals `hash`, the call is a no-op (no event emitted).
+    /// A stamp with a *different* hash always fires a new event,
+    /// recording the rotation in the audit chain (so re-stamping with
+    /// fresh dataset bytes after a feature-transform change leaves
+    /// a tamper-evident trail of the prior fingerprints).
+    pub fn stamp_provenance(
+        &mut self,
+        node_id: NodeId,
+        hash: [u8; 32],
+    ) -> Result<(), GraphError> {
+        let n_nodes = self.node_count();
+        if node_id >= n_nodes {
+            return Err(GraphError::NodeOutOfRange { node_id, n_nodes });
+        }
+        if self.nodes[node_id as usize].provenance_stamp_hash == hash {
+            return Ok(()); // idempotent — same stamp, no event
+        }
+        self.nodes[node_id as usize].provenance_stamp_hash = hash;
+        self.append_event(node_id, AuditKind::ProvenanceStamped { node_id, hash });
+        Ok(())
+    }
+
     /// Phase 0.3d-4 — run one structural-decision pass.
     ///
     /// Iterates nodes in `NodeId` ascending order over the arena

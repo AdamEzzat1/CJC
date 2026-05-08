@@ -36,7 +36,7 @@ use crate::node::{AdaptiveBeliefNode, NodeId};
 use crate::policy::DecisionPolicy;
 use crate::stats::NodeStats;
 
-const MAGIC: &[u8; 5] = b"ABNG\x0B";
+const MAGIC: &[u8; 5] = b"ABNG\x0C";
 
 /// Errors returned by snapshot decoding.
 #[derive(Debug, PartialEq)]
@@ -117,6 +117,13 @@ pub enum DecodeError {
     /// a `Created` event after the first slot. Every well-formed graph
     /// has exactly one `Created` event at `seq == 0`.
     CreatedMustBeFirst,
+    /// Phase 0.5 Item 1 — the snapshot's stored per-node
+    /// `provenance_stamp_hash` did not agree with the value reproduced
+    /// by event replay. Indicates the snapshot was tampered with after
+    /// the audit chain was finalized, or the per-node section was
+    /// rewritten with a stamp that no `ProvenanceStamped` event
+    /// authorizes.
+    ProvenanceMismatch { node_id: NodeId },
 }
 
 impl std::fmt::Display for DecodeError {
@@ -171,6 +178,10 @@ impl std::fmt::Display for DecodeError {
             DecodeError::CreatedMustBeFirst => write!(
                 f,
                 "abng: audit log must start with exactly one Created event at seq 0"
+            ),
+            DecodeError::ProvenanceMismatch { node_id } => write!(
+                f,
+                "abng: provenance stamp mismatch on node {node_id}"
             ),
         }
     }
@@ -325,6 +336,10 @@ pub fn serialize(graph: &AdaptiveBeliefGraph) -> Vec<u8> {
         ] {
             out.extend_from_slice(&w.canonical_bytes());
         }
+        // Phase 0.5 Item 1 (v12) — per-node provenance stamp. 32 bytes
+        // appended at the end of the per-node section. `[0u8; 32]` for
+        // any node that has not been stamped via `stamp_provenance`.
+        out.extend_from_slice(&node.provenance_stamp_hash);
     }
 
     // Audit log.
@@ -725,7 +740,7 @@ struct StoredNode {
     /// Phase 0.3d-3 — `Some(signature)` when `children_kind == Dense`,
     /// `None` for every other kind.
     children_dense_signature: Option<[u8; 32]>,
-    canonical_bytes: [u8; 24],
+    canonical_bytes: [u8; 32],
     stats_chain_head: [u8; 32],
     /// Phase 0.3a — final per-node params blob. Empty if no head.
     params: Vec<Tensor>,
@@ -753,6 +768,10 @@ struct StoredNode {
     welford_uncertainty: crate::signature::SignatureWelford,
     welford_calibration: crate::signature::SignatureWelford,
     welford_routing: crate::signature::SignatureWelford,
+    /// Phase 0.5 Item 1 (v12) — per-node provenance stamp. `[0u8; 32]`
+    /// for unstamped nodes; otherwise the caller-chosen SHA-256 from
+    /// the most-recent `ProvenanceStamped` event for this node.
+    provenance_stamp_hash: [u8; 32],
 }
 
 fn decode_children(
@@ -829,8 +848,9 @@ fn decode_stored_node(cur: &mut Cursor) -> Result<StoredNode, DecodeError> {
         Some(parent_i32 as NodeId)
     };
     let (children_kind, children_pairs, children_dense_signature) = decode_children(cur)?;
-    let canon_slice = cur.take(24)?;
-    let mut canonical_bytes = [0u8; 24];
+    // Phase 0.5 Item 4 (v12) — canonical_bytes grew from 24 → 32 bytes.
+    let canon_slice = cur.take(32)?;
+    let mut canonical_bytes = [0u8; 32];
     canonical_bytes.copy_from_slice(canon_slice);
     let _stats_version = cur.u64_be()?;
     let stats_chain_head = cur.hash32()?;
@@ -914,6 +934,9 @@ fn decode_stored_node(cur: &mut Cursor) -> Result<StoredNode, DecodeError> {
     let welford_uncertainty = decode_signature_welford(cur)?;
     let welford_calibration = decode_signature_welford(cur)?;
     let welford_routing = decode_signature_welford(cur)?;
+    // Phase 0.5 Item 1 (v12) — per-node provenance stamp.
+    let mut provenance_stamp_hash = [0u8; 32];
+    provenance_stamp_hash.copy_from_slice(cur.take(32)?);
     Ok(StoredNode {
         parent,
         children_kind,
@@ -939,6 +962,7 @@ fn decode_stored_node(cur: &mut Cursor) -> Result<StoredNode, DecodeError> {
         welford_uncertainty,
         welford_calibration,
         welford_routing,
+        provenance_stamp_hash,
     })
 }
 
@@ -1070,6 +1094,8 @@ pub fn replay(bytes: &[u8]) -> Result<AdaptiveBeliefGraph, DecodeError> {
             welford_uncertainty: crate::signature::SignatureWelford::new(),
             welford_calibration: crate::signature::SignatureWelford::new(),
             welford_routing: crate::signature::SignatureWelford::new(),
+            // Phase 0.5 Item 1 — unstamped at replay seed.
+            provenance_stamp_hash: [0u8; 32],
         }],
         // Defensive: untrusted `n_events` cannot drive a giant
         // `with_capacity` allocation; let the vec grow naturally.
@@ -1397,6 +1423,16 @@ pub fn replay(bytes: &[u8]) -> Result<AdaptiveBeliefGraph, DecodeError> {
         graph.nodes[i].welford_uncertainty = expected.welford_uncertainty;
         graph.nodes[i].welford_calibration = expected.welford_calibration;
         graph.nodes[i].welford_routing = expected.welford_routing;
+        // Phase 0.5 Item 1 (v12) — install provenance stamp. The
+        // ProvenanceStamped audit event applied during event replay
+        // also writes this field; cross-check that the snapshot's
+        // stored value matches what replay produced.
+        if graph.nodes[i].provenance_stamp_hash != expected.provenance_stamp_hash {
+            return Err(DecodeError::ProvenanceMismatch {
+                node_id: i as NodeId,
+            });
+        }
+        graph.nodes[i].provenance_stamp_hash = expected.provenance_stamp_hash;
     }
 
     if graph.chain_head != stored_final_hash {
@@ -1872,6 +1908,15 @@ fn apply_event(
             // chain advances via the canonical-payload bytes, but no
             // graph state mutation happens.
         }
+        AuditKind::ProvenanceStamped { node_id, hash } => {
+            // Phase 0.5 Item 1 — write the stamp into the target node.
+            // The cross-check against the snapshot's stored value runs
+            // after event replay (in the per-node verification loop).
+            if (*node_id as usize) >= graph.nodes.len() {
+                return Err(DecodeError::ChainMismatch { at_seq: event.seq });
+            }
+            graph.nodes[*node_id as usize].provenance_stamp_hash = *hash;
+        }
     }
     Ok(())
 }
@@ -2057,6 +2102,12 @@ fn decode_payload(
             let stats_hash = cur.hash32()?;
             AuditKind::StatsSnapshot { node_id, stats_hash }
         }
+        0x1C => {
+            // Phase 0.5 Item 1 — ProvenanceStamped. 36-byte body.
+            let node_id = cur.u32_be()?;
+            let hash = cur.hash32()?;
+            AuditKind::ProvenanceStamped { node_id, hash }
+        }
         other => return Err(DecodeError::UnknownKindTag(other)),
     };
     let stats_version = cur.u64_be()?;
@@ -2189,7 +2240,7 @@ mod tests {
     fn v11_magic_in_blob() {
         let g = AdaptiveBeliefGraph::new(0);
         let blob = serialize(&g);
-        assert_eq!(&blob[..5], b"ABNG\x0B");
+        assert_eq!(&blob[..5], b"ABNG\x0C");
     }
 
     #[test]
