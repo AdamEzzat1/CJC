@@ -712,6 +712,16 @@ All multi-byte integers and f64 bit patterns are **big-endian**.
   inspect the returned `Option<f64>`.
 - Λ_new⁻¹φ is computed via **hand-rolled Kahan-compensated Cholesky**
   + triangular solves. No external linear-algebra dep. No FMA.
+- **No silent regularization on Cholesky.** Any non-positive pivot
+  errors with `BlrError::NonPositiveDefinite`. The earlier 0.3b
+  design note claimed an `f64::EPSILON` diagonal regularization
+  would be applied before decomposition; this was never shipped, and
+  Phase 0.4 Track C-2.3.10 corrected the design note to match the
+  code. The hard-error contract is intentional: silent regularization
+  would mask corrupt state and break bit-determinism. With the NIG
+  update `Λ_new = Λ + XᵀX`, positive-definiteness is preserved by
+  construction whenever `Λ` is PD — a non-PD pivot signals a corrupt
+  state, not a numerically-tight one.
 - `predict(phi) -> (mean, epistemic_leverage, aleatoric_var)`
   (post-Phase 0.4 Track C-2.3.1 — pre-0.4 docs called the middle slot
   `epistemic_var`, which was misleading; see R10):
@@ -1076,13 +1086,15 @@ parent chain); full lineage belief is 0.5.
 See R15. Phase 0.4 Track C-2.3.9 — extend canonical_bytes 24B → 32B
 to include Kahan compensation register. Required for log compaction.
 
-### 8.21 Cholesky regularization design-vs-code drift (post-0.3d audit)
-PHASE_0_3b_DESIGN.md says Cholesky uses `f64::EPSILON` diagonal
-regularization. Code does NOT — it errors on non-positive pivot
-(`BlrError::NonPositiveDefinite`). Code is correct (no silent
-regularization → reproducibility intact). **Phase 0.4 Track C-2.3.10**
-— delete the regularization claim from PHASE_0_3b_DESIGN.md and
-clarify the no-regularization contract in §6.5 of this doc.
+### 8.21 Cholesky regularization design-vs-code drift ✅ RESOLVED in Phase 0.4 Track C-2.3.10
+Pre-0.4 PHASE_0_3b_DESIGN.md claimed Cholesky uses `f64::EPSILON`
+diagonal regularization. Code does NOT — it errors on non-positive
+pivot (`BlrError::NonPositiveDefinite`). Code is correct (no silent
+regularization → reproducibility intact). Phase 0.4 Track C-2.3.10
+deleted the regularization claim from PHASE_0_3b_DESIGN.md
+"Numerical safeguards" and added an explicit no-regularization
+contract to §6.5 of this doc. Doc-only fix; no code or wire-format
+change.
 
 ### 8.22 Empty-graph chain-head wording ✅ RESOLVED in Phase 0.4 Track C-2.3.11
 See §2.2. Phase 0.4 Track C-2.3.11 added explicit definitions of

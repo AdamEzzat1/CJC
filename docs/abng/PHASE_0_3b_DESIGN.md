@@ -132,12 +132,27 @@ defensibly transparent about uncertainty decomposition.
 
 * `a > 1` check before computing aleatoric mean — return `+∞` (`f64::INFINITY`)
   when `a ≤ 1` rather than divide-by-zero.
-* Diagonal-only `f64::EPSILON` regularization in Cholesky (added to
-  `Λ_new[i,i]` before decomposition) so a near-singular update doesn't
-  blow up.
-* `b > 0` invariant maintained by the NIG update math; if numerical
-  drift produces `b < 0`, we clamp to a small ε and emit a warning
-  (deterministic floor, no panic).
+* **No silent Cholesky regularization.** An earlier draft of this note
+  claimed `f64::EPSILON` would be added to the diagonal of `Λ_new`
+  before decomposition. This was never shipped — the as-built code
+  errors with `BlrError::NonPositiveDefinite` on any non-positive
+  pivot (`crates/cjc-abng/src/blr.rs::cholesky`). The hard-error
+  contract is intentional: silent regularization would mask data
+  corruption and break the bit-determinism guarantee. With the
+  posterior NIG update, `Λ_new = Λ + XᵀX` is positive-definite by
+  construction whenever `Λ` is — so a non-PD pivot signals a corrupt
+  state, not a numerically-tight one. Phase 0.4 Track C-2.3.10
+  brought this note in line with the code; the architecture doc
+  (`ABNG_CURRENT_ARCHITECTURE.md` §6.5) now also calls out the
+  no-regularization contract explicitly.
+* `b > 0` invariant maintained by the NIG update math. If numerical
+  drift produces `b < f64::EPSILON`, the value is clamped to
+  `f64::EPSILON` to keep the InverseGamma posterior well-defined
+  (Phase 0.4 Track C-2.3.4); on clamp, `BlrState::update` returns
+  `Ok(Some(b_pre_clamp))` and the graph layer's `blr_update` appends
+  a `BlrNumericalRescue` audit event (tag `0x18`) immediately after
+  the corresponding `BlrUpdated`. The clamped state is bit-identical
+  with or without the audit event.
 
 ### Snapshot format v4
 
