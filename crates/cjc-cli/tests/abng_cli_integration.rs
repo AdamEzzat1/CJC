@@ -578,12 +578,166 @@ fn abng_explain_bad_magic_errors() {
     fs::remove_file(&bad_path).ok();
 }
 
+// ── train ──────────────────────────────────────────────────────────────
+
 #[test]
-fn abng_train_stub_explains_unimplemented() {
-    let (_stdout, stderr, code) = run_cjc(&["abng", "train"]);
+fn abng_train_help_describes_flags() {
+    let (stdout, _stderr, code) = run_cjc(&["abng", "train", "--help"]);
+    assert_eq!(code, 0);
+    for tok in ["--seed", "--n-obs", "--obs-seed", "--decide-every", "--out"] {
+        assert!(stdout.contains(tok), "expected `{tok}` in help, got: {stdout}");
+    }
+}
+
+#[test]
+fn abng_train_missing_out_errors() {
+    let (_stdout, stderr, code) = run_cjc(&["abng", "train", "--seed", "42"]);
     assert_ne!(code, 0);
     assert!(
-        stderr.contains("not yet shipped"),
-        "expected 'not yet shipped' for train stub, got: {stderr}"
+        stderr.contains("requires --out"),
+        "expected '--out required' error, got: {stderr}"
     );
+}
+
+#[test]
+fn abng_train_config_flag_explains_deferred() {
+    // --config is a Phase 0.5 placeholder.
+    let (_stdout, stderr, code) = run_cjc(&[
+        "abng", "train", "--config", "x.toml", "--out", "ignored.snap",
+    ]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("Phase 0.5"),
+        "expected Phase 0.5 deferral message, got: {stderr}"
+    );
+}
+
+#[test]
+fn abng_train_writes_loadable_snapshot_with_default_flags() {
+    let out = unique_temp_path("train-default");
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "train",
+        "--seed",
+        "42",
+        "--n-obs",
+        "30",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "train should exit 0; stdout was: {stdout}");
+    // Summary lines we promise.
+    for k in [
+        "ok",
+        "path:",
+        "size:",
+        "seed:",
+        "n_observations:",
+        "decide_calls:",
+        "chain_head:",
+        "n_nodes:",
+        "n_events:",
+        "action_counts:",
+    ] {
+        assert!(stdout.contains(k), "expected `{k}` in summary, got: {stdout}");
+    }
+    // The output file must exist and re-load cleanly via inspect.
+    assert!(out.exists());
+    let (inspect_out, _, code2) = run_cjc(&[
+        "abng",
+        "inspect",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code2, 0);
+    assert!(inspect_out.contains("ABNG snapshot:"));
+    fs::remove_file(&out).ok();
+}
+
+#[test]
+fn abng_train_is_deterministic_for_same_seeds() {
+    // Two trains with identical (seed, obs-seed, n-obs, decide-every)
+    // must produce byte-identical snapshot files.
+    let out_a = unique_temp_path("train-det-a");
+    let out_b = unique_temp_path("train-det-b");
+    let common: Vec<String> = vec![
+        "abng".to_string(),
+        "train".to_string(),
+        "--seed".to_string(),
+        "42".to_string(),
+        "--obs-seed".to_string(),
+        "1234".to_string(),
+        "--n-obs".to_string(),
+        "20".to_string(),
+        "--decide-every".to_string(),
+        "10".to_string(),
+    ];
+    let mut args_a = common.clone();
+    args_a.push("--out".to_string());
+    args_a.push(out_a.to_str().unwrap().to_string());
+    let mut args_b = common.clone();
+    args_b.push("--out".to_string());
+    args_b.push(out_b.to_str().unwrap().to_string());
+    let arg_refs_a: Vec<&str> = args_a.iter().map(|s| s.as_str()).collect();
+    let arg_refs_b: Vec<&str> = args_b.iter().map(|s| s.as_str()).collect();
+    let (_, _, c1) = run_cjc(&arg_refs_a);
+    let (_, _, c2) = run_cjc(&arg_refs_b);
+    assert_eq!(c1, 0);
+    assert_eq!(c2, 0);
+    let bytes_a = fs::read(&out_a).unwrap();
+    let bytes_b = fs::read(&out_b).unwrap();
+    assert_eq!(
+        bytes_a, bytes_b,
+        "two trains with identical config must produce byte-identical snapshots"
+    );
+    fs::remove_file(&out_a).ok();
+    fs::remove_file(&out_b).ok();
+}
+
+#[test]
+fn abng_train_diff_with_different_seed_differs() {
+    let out_a = unique_temp_path("train-seed-a");
+    let out_b = unique_temp_path("train-seed-b");
+    for (seed, path) in [(42u64, &out_a), (43u64, &out_b)] {
+        let (_, _, code) = run_cjc(&[
+            "abng",
+            "train",
+            "--seed",
+            &seed.to_string(),
+            "--n-obs",
+            "20",
+            "--out",
+            path.to_str().unwrap(),
+        ]);
+        assert_eq!(code, 0);
+    }
+    let bytes_a = fs::read(&out_a).unwrap();
+    let bytes_b = fs::read(&out_b).unwrap();
+    assert_ne!(bytes_a, bytes_b, "different seeds must produce different snapshots");
+    // diff between them must report chain_head differs and exit 1.
+    let (stdout, _stderr, code) = run_cjc(&[
+        "abng",
+        "diff",
+        out_a.to_str().unwrap(),
+        out_b.to_str().unwrap(),
+    ]);
+    assert_ne!(code, 0);
+    assert!(stdout.contains("chain_head equal:    NO"));
+    fs::remove_file(&out_a).ok();
+    fs::remove_file(&out_b).ok();
+}
+
+#[test]
+fn abng_train_decide_every_zero_errors() {
+    let out = unique_temp_path("train-zero-cadence");
+    let (_stdout, stderr, code) = run_cjc(&[
+        "abng",
+        "train",
+        "--decide-every",
+        "0",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_ne!(code, 0);
+    assert!(stderr.contains("must be > 0"));
+    fs::remove_file(&out).ok();
 }

@@ -42,17 +42,21 @@ SUBCOMMANDS:
     diff <a.snap> <b.snap>
         Topology and per-node fingerprint diff between two snapshots.
 
-    explain <prediction.snap>
-        Lineage + abstain reason for a prediction snapshot. Requires
-        Routed audit events (Phase 0.4 Track A — 0x1B audit kind).
+    explain <prediction.snap> [--model <model.snap>]
+        Lineage + abstain reason for a prediction snapshot produced by
+        abng_predict_snap. With --model, additionally verifies the
+        prediction's chain_head + lineage hashes match the model.
 
-    train --config <x.toml> [--seed N]
-        Run a training driver loop (observe → decide_step →
-        checkpoint). Writes <out>.snap and <out>.audit.log.
+    train [--seed N] [--n-obs N] [--obs-seed N]
+          [--decide-every K] [--max-decide N] --out <PATH>
+        Run a deterministic training driver loop (observe N times →
+        decide_step every K obs → serialize). Phase 0.4 ships flag-
+        based config; TOML --config files defer to Phase 0.5.
 
 GLOBAL OPTIONS:
     --help, -h    Print this help message
-    --json        Emit JSON output where supported (inspect, diff)
+    --json        Emit JSON output where supported (inspect, diff,
+                  explain, replay)
 ");
 }
 
@@ -925,16 +929,271 @@ mod explain {
     }
 }
 
-// ── train (stub for later G3.x) ────────────────────────────────────────
+// ── train ──────────────────────────────────────────────────────────────
 
 mod train {
-    pub fn run(_args: &[String]) {
-        eprintln!(
-            "error: cjcl abng train is not yet shipped — Phase 0.4 Track A \
-             G3.8. Build training driver loops in your own .cjcl source \
-             using abng_observe / abng_decide_step / abng_serialize for \
-             now."
+    use super::*;
+    use cjc_abng::graph::AdaptiveBeliefGraph;
+    use cjc_abng::serialize;
+    use cjc_repro::Rng;
+
+    /// Defaults match the `decide_step_canary_tests` scenario so the
+    /// out-of-the-box `cjcl abng train --out model.snap` produces a
+    /// graph identical to what the canary's `chain_head` lock-in
+    /// expects (when run with the same seed). Users who need
+    /// different shapes pass `--seed`, `--n-obs`, etc. explicitly.
+    struct TrainArgs {
+        seed: u64,
+        n_observations: u64,
+        observation_seed: u64,
+        decide_step_every: u64,
+        max_decide_steps: u64,
+        out_path: String,
+    }
+
+    fn parse_args(args: &[String]) -> TrainArgs {
+        let mut seed: u64 = 42;
+        let mut n_observations: u64 = 100;
+        let mut observation_seed: u64 = 42;
+        let mut decide_step_every: u64 = 25;
+        let mut max_decide_steps: u64 = u64::MAX;
+        let mut out_path: Option<String> = None;
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--seed" => {
+                    i += 1;
+                    if i >= args.len() {
+                        eprintln!("error: --seed requires a numeric argument");
+                        process::exit(2);
+                    }
+                    seed = args[i].parse().unwrap_or_else(|_| {
+                        eprintln!("error: invalid --seed value `{}`", args[i]);
+                        process::exit(2);
+                    });
+                }
+                "--n-obs" | "--n-observations" => {
+                    i += 1;
+                    if i >= args.len() {
+                        eprintln!("error: --n-obs requires a numeric argument");
+                        process::exit(2);
+                    }
+                    n_observations = args[i].parse().unwrap_or_else(|_| {
+                        eprintln!("error: invalid --n-obs value `{}`", args[i]);
+                        process::exit(2);
+                    });
+                }
+                "--obs-seed" | "--observation-seed" => {
+                    i += 1;
+                    if i >= args.len() {
+                        eprintln!("error: --obs-seed requires a numeric argument");
+                        process::exit(2);
+                    }
+                    observation_seed = args[i].parse().unwrap_or_else(|_| {
+                        eprintln!("error: invalid --obs-seed value `{}`", args[i]);
+                        process::exit(2);
+                    });
+                }
+                "--decide-every" => {
+                    i += 1;
+                    if i >= args.len() {
+                        eprintln!("error: --decide-every requires a numeric argument");
+                        process::exit(2);
+                    }
+                    decide_step_every = args[i].parse().unwrap_or_else(|_| {
+                        eprintln!("error: invalid --decide-every value `{}`", args[i]);
+                        process::exit(2);
+                    });
+                    if decide_step_every == 0 {
+                        eprintln!("error: --decide-every must be > 0");
+                        process::exit(2);
+                    }
+                }
+                "--max-decide" => {
+                    i += 1;
+                    if i >= args.len() {
+                        eprintln!("error: --max-decide requires a numeric argument");
+                        process::exit(2);
+                    }
+                    max_decide_steps = args[i].parse().unwrap_or_else(|_| {
+                        eprintln!("error: invalid --max-decide value `{}`", args[i]);
+                        process::exit(2);
+                    });
+                }
+                "--out" | "-o" => {
+                    i += 1;
+                    if i >= args.len() {
+                        eprintln!("error: --out requires a path argument");
+                        process::exit(2);
+                    }
+                    out_path = Some(args[i].clone());
+                }
+                "--config" => {
+                    eprintln!(
+                        "error: --config (TOML config file) is not yet \
+                         shipped in Phase 0.4 — use the explicit flags \
+                         (--seed, --n-obs, --obs-seed, --decide-every, \
+                         --max-decide, --out) instead. TOML config support \
+                         lands in Phase 0.5."
+                    );
+                    process::exit(2);
+                }
+                "--help" | "-h" => {
+                    println!("\
+cjcl abng train [OPTIONS]
+
+Run a deterministic training driver loop:
+  observe N times → decide_step every K observations → serialize.
+
+Phase 0.4 ships the explicit-flag form only. TOML config files
+(--config <x.toml>) are deferred to Phase 0.5.
+
+OPTIONS:
+    --seed <N>            graph seed (default: 42)
+    --n-obs <N>           number of observations (default: 100)
+    --obs-seed <N>        observation-stream seed (default: 42)
+    --decide-every <K>    run decide_step after every K observations
+                          (default: 25)
+    --max-decide <N>      cap on the total number of decide_step calls
+                          (default: unbounded)
+    --out, -o <PATH>      output snapshot path (REQUIRED)
+
+DEFAULTS produce a graph matching the decide_step_canary_tests
+fixture: 1-D codebook with 4 bins, 1→2→1 tanh head, BLR(1, 1.5, 1),
+density tracker + 15-bin calibration + DecisionPolicy with
+drift_unfreeze disabled, two children added with key bytes 1 and 2
+before observation begins.
+");
+                    process::exit(0);
+                }
+                other if other.starts_with("--") => {
+                    eprintln!("error: unknown train flag `{}`", other);
+                    process::exit(2);
+                }
+                other => {
+                    eprintln!("error: unexpected positional argument `{}`", other);
+                    process::exit(2);
+                }
+            }
+            i += 1;
+        }
+        let out_path = out_path.unwrap_or_else(|| {
+            eprintln!("error: cjcl abng train requires --out <PATH>");
+            process::exit(2);
+        });
+        TrainArgs {
+            seed,
+            n_observations,
+            observation_seed,
+            decide_step_every,
+            max_decide_steps,
+            out_path,
+        }
+    }
+
+    pub fn run(args: &[String]) {
+        let a = parse_args(args);
+
+        // Build the canonical default graph (matches
+        // decide_step_canary_tests fixture for seed=42 reproducibility).
+        let mut g = AdaptiveBeliefGraph::new(a.seed);
+        if let Err(e) = g.set_codebook(1, 4, &[-1.0, 0.0, 1.0]) {
+            eprintln!("error: set_codebook failed: {:?}", e);
+            process::exit(1);
+        }
+        if let Err(e) = g.set_leaf_head(
+            1,
+            vec![2],
+            1,
+            cjc_ad::pinn::Activation::Tanh,
+        ) {
+            eprintln!("error: set_leaf_head failed: {:?}", e);
+            process::exit(1);
+        }
+        if let Err(e) = g.set_blr_prior(1.0, 1.5, 1.0) {
+            eprintln!("error: set_blr_prior failed: {:?}", e);
+            process::exit(1);
+        }
+        if let Err(e) = g.set_density_tracker() {
+            eprintln!("error: set_density_tracker failed: {:?}", e);
+            process::exit(1);
+        }
+        if let Err(e) = g.set_calibration(15u8) {
+            eprintln!("error: set_calibration failed: {:?}", e);
+            process::exit(1);
+        }
+        let thresholds = [
+            0.5, 64.0, 128.0, 0.05, 0.02, 4.0, 0.1, 32.0, 10.0, 8.0, 20.0,
+            f64::MAX,
+        ];
+        if let Err(e) = g.set_decision_policy(&thresholds) {
+            eprintln!("error: set_decision_policy failed: {:?}", e);
+            process::exit(1);
+        }
+        // Two children before observation begins.
+        if let Err(e) = g.add_node(0, 1) {
+            eprintln!("error: add_node 1 failed: {:?}", e);
+            process::exit(1);
+        }
+        if let Err(e) = g.add_node(0, 2) {
+            eprintln!("error: add_node 2 failed: {:?}", e);
+            process::exit(1);
+        }
+
+        // Observation stream is a deterministic SplitMix64 sequence
+        // mapped to [-1, 1]. Every (seed, n_observations) combination
+        // produces the same byte sequence across runs and platforms.
+        let mut rng = Rng::seeded(a.observation_seed);
+        let mut decide_calls: u64 = 0;
+        let mut total_actions = [0u64; 6];
+        for k in 0..a.n_observations {
+            let raw = rng.next_f64();          // [0, 1)
+            let value = raw * 2.0 - 1.0;       // [-1, 1)
+            // Alternate observations between root and the two children
+            // so all three nodes accumulate evidence.
+            let target_node = (k % 3) as u32;
+            if let Err(e) = g.observe(target_node, value) {
+                eprintln!("error: observe(node={target_node}) failed: {:?}", e);
+                process::exit(1);
+            }
+            // Run decide_step at the configured cadence.
+            if (k + 1) % a.decide_step_every == 0
+                && decide_calls < a.max_decide_steps
+            {
+                let counts = g.decide_step();
+                for i in 0..6 {
+                    total_actions[i] = total_actions[i].saturating_add(counts[i]);
+                }
+                decide_calls += 1;
+            }
+        }
+
+        // Serialize + write.
+        let blob = serialize::serialize(&g);
+        if let Err(e) = std::fs::write(&a.out_path, &blob) {
+            eprintln!("error: write `{}` failed: {}", a.out_path, e);
+            process::exit(1);
+        }
+
+        // Summary to stdout (machine-friendly: each line is a single
+        // key: value pair so shell scripts can grep/awk).
+        println!("ok");
+        println!("path:           {}", a.out_path);
+        println!("size:           {} bytes", blob.len());
+        println!("seed:           {}", a.seed);
+        println!("n_observations: {}", a.n_observations);
+        println!("decide_calls:   {}", decide_calls);
+        println!("chain_head:     {}", hex_of(&g.chain_head));
+        println!("n_nodes:        {}", g.nodes.len());
+        println!("n_events:       {}", g.audit.len());
+        println!(
+            "action_counts:  grow={} split={} merge={} prune={} compress={} freeze={}",
+            total_actions[0],
+            total_actions[1],
+            total_actions[2],
+            total_actions[3],
+            total_actions[4],
+            total_actions[5]
         );
-        std::process::exit(2);
     }
 }
