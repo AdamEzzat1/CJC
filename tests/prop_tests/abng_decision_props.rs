@@ -218,4 +218,39 @@ proptest! {
         prop_assert_eq!(g2.nodes[0].provenance_stamp_hash, stamp_bytes);
         prop_assert!(g2.verify_chain().is_ok());
     }
+
+    /// Property 6 (Phase 0.5 Item 2): smart_replay produces a graph
+    /// whose serialized form is byte-identical to naive replay's
+    /// output, for any blob produced by serialize → optional
+    /// compact_log → serialize. This is the determinism contract
+    /// for smart-replay.
+    #[test]
+    fn smart_replay_output_equals_naive_replay(
+        seed in 0u64..1_000_000,
+        observations in arb_observation_stream(),
+        compact_at in 0usize..32,
+    ) {
+        let mut g = AdaptiveBeliefGraph::new(seed);
+        for &v in &observations {
+            if v.is_finite() {
+                g.observe(0, v).unwrap();
+            }
+        }
+        // Compact at a (clamped) seq somewhere in the middle of the
+        // log to exercise both pre- and post-snapshot ranges.
+        let until = (compact_at as u64).min(g.audit.len() as u64);
+        let _ = g.compact_log(until);
+        // A few more observes after compaction so post-snapshot
+        // events exist for the smart path's consistency check.
+        if let Some(&v) = observations.first() {
+            if v.is_finite() {
+                g.observe(0, v).unwrap();
+            }
+        }
+        let blob = serialize(&g);
+        let g_naive = replay(&blob).unwrap();
+        let g_smart = cjc_abng::serialize::smart_replay(&blob).unwrap();
+        prop_assert_eq!(g_naive.chain_head, g_smart.chain_head);
+        prop_assert_eq!(serialize(&g_naive), serialize(&g_smart));
+    }
 }

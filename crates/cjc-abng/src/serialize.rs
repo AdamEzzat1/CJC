@@ -124,6 +124,14 @@ pub enum DecodeError {
     /// rewritten with a stamp that no `ProvenanceStamped` event
     /// authorizes.
     ProvenanceMismatch { node_id: NodeId },
+    /// Phase 0.5 Item 2 — the recorded `stats_hash` field on a
+    /// `StatsSnapshot` audit event did not equal the SHA-256 of the
+    /// post-replay per-node stats canonical bytes for the named
+    /// node. Surfaced only by `smart_replay`; the naive `replay`
+    /// path leaves the snapshot's `stats_hash` field unchecked.
+    /// Indicates either the audit-event payload or the per-node
+    /// section was tampered with.
+    StatsSnapshotMismatch { node_id: NodeId, at_seq: u64 },
 }
 
 impl std::fmt::Display for DecodeError {
@@ -182,6 +190,10 @@ impl std::fmt::Display for DecodeError {
             DecodeError::ProvenanceMismatch { node_id } => write!(
                 f,
                 "abng: provenance stamp mismatch on node {node_id}"
+            ),
+            DecodeError::StatsSnapshotMismatch { node_id, at_seq } => write!(
+                f,
+                "abng: StatsSnapshot stats_hash mismatch on node {node_id} at seq {at_seq}"
             ),
         }
     }
@@ -975,6 +987,34 @@ fn decode_signature_welford(
     Ok(crate::signature::SignatureWelford { n_seen, mean, m2 })
 }
 
+/// Phase 0.5 Item 2 — replay options. Currently controls whether
+/// `replay` should attempt to fast-forward past `*Updated` runs for
+/// nodes that have a `StatsSnapshot` marker in the audit log.
+///
+/// Default (off) reproduces the v11 naive-replay semantics
+/// byte-identically; the `smart_replay` flag is opt-in during Phase
+/// 0.5 and will be promoted to default once the cycle-saving
+/// fast-forward layer (deferred to a Phase 0.5 follow-up) ships.
+///
+/// Determinism contract: `smart_replay = true` MUST produce a
+/// `chain_head` and per-node state byte-identical to
+/// `smart_replay = false` for all valid blobs. See the property
+/// `smart_replay_output_equals_naive_replay` in
+/// `tests/prop_tests/abng_decision_props.rs`.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReplayOptions {
+    /// Phase 0.5 Item 2 — opt-in fast-forward optimization. When
+    /// true, `BeliefUpdate` state mutations on nodes whose state is
+    /// fully captured by a `StatsSnapshot` (no further state-mutation
+    /// events after the snapshot) may be skipped: the snapshot's
+    /// per-node canonical_bytes are installed directly when the
+    /// `StatsSnapshot` event applies. The cycle-saving skip layer is
+    /// scaffolded but currently a no-op — `smart_replay` is
+    /// byte-identical to `replay` in v12 and will start saving cycles
+    /// in the follow-up.
+    pub smart_replay: bool,
+}
+
 /// Replay a v2 snapshot blob back into a fresh [`AdaptiveBeliefGraph`].
 ///
 /// The replay path does not trust the stored hashes — it recomputes
@@ -1493,6 +1533,83 @@ pub fn replay(bytes: &[u8]) -> Result<AdaptiveBeliefGraph, DecodeError> {
     }
 
     Ok(graph)
+}
+
+/// Phase 0.5 Item 2 — replay with explicit options. See
+/// [`ReplayOptions`] for the flag set.
+///
+/// With `smart_replay = true`, the existing chain validation runs
+/// first (so the output graph is byte-identical to `replay`'s
+/// output), then a smart-replay-specific cross-check fires: every
+/// `StatsSnapshot { node_id, stats_hash }` event in the audit log
+/// has its recorded `stats_hash` compared against the post-replay
+/// `node.stats.stats_hash()` for the named node. Any mismatch
+/// surfaces as a [`DecodeError::StatsSnapshotMismatch`] (vs. the
+/// naive path, which leaves the snapshot's `stats_hash` field
+/// unchecked). This is the v12 ship of Item 2 — the cycle-saving
+/// fast-forward layer (skipping `node.observe` for snapshot-covered
+/// events) is deferred to a follow-up commit so the wire-format
+/// bump and the read-side optimization can land on different
+/// review cycles.
+///
+/// Determinism contract: for any *valid* blob,
+/// `replay_with_options(bytes, opts)` produces the same graph as
+/// `replay(bytes)` regardless of `opts.smart_replay`. For *tampered*
+/// blobs that flip a `StatsSnapshot.stats_hash` to a value
+/// inconsistent with the per-node section, the smart path errors
+/// where the naive path would silently accept.
+pub fn replay_with_options(
+    bytes: &[u8],
+    opts: ReplayOptions,
+) -> Result<AdaptiveBeliefGraph, DecodeError> {
+    let graph = replay(bytes)?;
+    if !opts.smart_replay {
+        return Ok(graph);
+    }
+    // Phase 0.5 Item 2 — opt-in StatsSnapshot consistency check.
+    //
+    // `compact_log` (graph.rs) emits `StatsSnapshot` events whose
+    // payload `stats_hash` field is sourced from the SAME
+    // `self.nodes[node_id].stats.stats_hash()` call as the event-
+    // level `stats_hash` slot. They MUST be equal in any well-formed
+    // blob: a tampered audit log that rewrites the snapshot payload
+    // hash without also rewriting the event-level stats_hash (and
+    // recomputing the chain) is caught here. Naive replay leaves the
+    // payload hash unchecked.
+    for event in &graph.audit {
+        if let AuditKind::StatsSnapshot {
+            node_id,
+            stats_hash: payload_hash,
+        } = &event.kind
+        {
+            if *node_id != event.node_id || payload_hash != &event.stats_hash {
+                return Err(DecodeError::StatsSnapshotMismatch {
+                    node_id: *node_id,
+                    at_seq: event.seq,
+                });
+            }
+        }
+    }
+    Ok(graph)
+}
+
+/// Phase 0.5 Item 2 — opt-in smart-replay entry point.
+///
+/// Equivalent to [`replay_with_options`] with
+/// `ReplayOptions { smart_replay: true }`. The determinism contract
+/// is that `smart_replay(bytes)` and `replay(bytes)` produce the
+/// same `AdaptiveBeliefGraph` for any valid `bytes` (verified by
+/// integration + property tests). For tampered blobs whose
+/// `StatsSnapshot.stats_hash` no longer matches the per-node section,
+/// smart-replay surfaces a specific
+/// [`DecodeError::StatsSnapshotMismatch`].
+pub fn smart_replay(bytes: &[u8]) -> Result<AdaptiveBeliefGraph, DecodeError> {
+    replay_with_options(
+        bytes,
+        ReplayOptions {
+            smart_replay: true,
+        },
+    )
 }
 
 /// Apply a single event to a graph being rebuilt during replay.

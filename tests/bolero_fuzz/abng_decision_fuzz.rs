@@ -258,3 +258,64 @@ fn fuzz_abng_provenance_tamper_no_panic() {
             });
         });
 }
+
+/// Phase 0.5 Item 2 — smart_replay determinism fuzz. For an
+/// arbitrary observation stream + compact, smart_replay output must
+/// equal naive replay output. Skipped non-finite observations.
+#[test]
+fn fuzz_abng_smart_replay_equals_naive() {
+    use cjc_abng::serialize::smart_replay as sr;
+    bolero::check!()
+        .with_type::<(u64, [f64; 8], u8)>()
+        .for_each(|&(seed, obs, compact_at): &(u64, [f64; 8], u8)| {
+            let _ = panic::catch_unwind(|| {
+                let mut g = AdaptiveBeliefGraph::new(seed);
+                for &v in obs.iter() {
+                    if v.is_finite() {
+                        let _ = g.observe(0, v);
+                    }
+                }
+                let until = (compact_at as u64).min(g.audit.len() as u64);
+                let _ = g.compact_log(until);
+                let blob = serialize(&g);
+                let g_naive = match replay(&blob) {
+                    Ok(g) => g,
+                    Err(_) => return,
+                };
+                let g_smart = match sr(&blob) {
+                    Ok(g) => g,
+                    Err(_) => return,
+                };
+                assert_eq!(g_naive.chain_head, g_smart.chain_head);
+                assert_eq!(serialize(&g_naive), serialize(&g_smart));
+            });
+        });
+}
+
+/// Phase 0.5 Item 2 — smart_replay tamper fuzz. Random byte flips
+/// in a serialized blob may cause `replay` and/or `smart_replay` to
+/// surface a `DecodeError`; neither must ever panic. The smart path
+/// may surface `StatsSnapshotMismatch` for blobs that pass the chain
+/// check but have inconsistent snapshot internals.
+#[test]
+fn fuzz_abng_smart_replay_tamper_no_panic() {
+    use cjc_abng::serialize::smart_replay as sr;
+    bolero::check!()
+        .with_type::<(u32, u8)>()
+        .for_each(|&(offset, mask): &(u32, u8)| {
+            let _ = panic::catch_unwind(|| {
+                let mut g = AdaptiveBeliefGraph::new(0);
+                let _ = g.observe(0, 1.0);
+                let _ = g.observe(0, 2.0);
+                let _ = g.compact_log(g.audit.len() as u64);
+                let mut blob = serialize(&g);
+                if blob.is_empty() {
+                    return;
+                }
+                let pos = (offset as usize) % blob.len();
+                blob[pos] ^= mask | 0x01;
+                let _ = replay(&blob);
+                let _ = sr(&blob);
+            });
+        });
+}

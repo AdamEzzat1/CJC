@@ -173,6 +173,37 @@ impl NodeStats {
     pub fn stats_hash(&self) -> [u8; 32] {
         cjc_snap::hash::sha256(&self.canonical_bytes())
     }
+
+    /// Phase 0.5 Item 2 — reconstruct a [`NodeStats`] from its
+    /// 32-byte canonical encoding.
+    ///
+    /// Inverse of [`canonical_bytes`](Self::canonical_bytes). Used by
+    /// smart-replay to fast-forward a node's stats from the per-node
+    /// section's stored bytes instead of re-applying every
+    /// `BeliefUpdate` event in the audit log.
+    ///
+    /// The Kahan compensation register is restored from bytes 24..32,
+    /// so a `from_canonical_bytes(s.canonical_bytes())` round-trip
+    /// reproduces `s.canonical_bytes()` byte-identically — including
+    /// the post-update compensation that subsequent observations
+    /// would consume.
+    pub fn from_canonical_bytes(bytes: &[u8; 32]) -> Self {
+        let n_seen = u64::from_be_bytes(bytes[0..8].try_into().unwrap());
+        let mean = f64::from_bits(u64::from_be_bytes(
+            bytes[8..16].try_into().unwrap(),
+        ));
+        let m2_value = f64::from_bits(u64::from_be_bytes(
+            bytes[16..24].try_into().unwrap(),
+        ));
+        let comp = f64::from_bits(u64::from_be_bytes(
+            bytes[24..32].try_into().unwrap(),
+        ));
+        Self {
+            n_seen,
+            mean,
+            m2: KahanAccumulatorF64::from_components(m2_value, comp, n_seen),
+        }
+    }
 }
 
 impl Default for NodeStats {
