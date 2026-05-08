@@ -538,6 +538,50 @@ impl AdaptiveBeliefGraph {
         }
     }
 
+    /// Phase 0.4 Track A — emit one `StatsSnapshot` audit event per
+    /// distinct node touched by events in `[0, until_seq)`, capturing
+    /// each touched node's current `NodeStats::stats_hash()`.
+    /// Phase 0.4 ships the marker emission only; smart-replay that
+    /// uses `StatsSnapshot` to fast-forward past `*Updated` runs is
+    /// deferred to Phase 0.5.
+    ///
+    /// `until_seq` may exceed the current audit length — the call
+    /// then operates on the whole log up to `audit.len()`.
+    ///
+    /// Returns the number of `StatsSnapshot` events emitted (= the
+    /// number of distinct nodes touched in the prefix). Determinism:
+    /// nodes are visited in `NodeId`-ascending order so the resulting
+    /// chain head is a deterministic function of (graph state,
+    /// until_seq).
+    pub fn compact_log(&mut self, until_seq: u64) -> u64 {
+        let cap = (self.audit.len() as u64).min(until_seq);
+        let n_nodes = self.node_count();
+        // BTreeSet keeps node ids sorted ascending — required for
+        // deterministic event order.
+        let mut touched: std::collections::BTreeSet<NodeId> =
+            std::collections::BTreeSet::new();
+        for ev in self.audit.iter().take(cap as usize) {
+            // event.node_id is always a valid arena index at the time
+            // of emission. Defensive bound check anyway.
+            if ev.node_id < n_nodes {
+                touched.insert(ev.node_id);
+            }
+        }
+        let mut emitted = 0u64;
+        for node_id in touched {
+            let stats_hash = self.nodes[node_id as usize].stats.stats_hash();
+            self.append_event(
+                node_id,
+                AuditKind::StatsSnapshot {
+                    node_id,
+                    stats_hash,
+                },
+            );
+            emitted += 1;
+        }
+        emitted
+    }
+
     /// Phase 0.4 Track A — `descend` plus an audit-chain witness.
     /// Identical walk semantics to [`descend`](Self::descend); the
     /// only difference is that one `Routed { leaf, matched_prefix }`

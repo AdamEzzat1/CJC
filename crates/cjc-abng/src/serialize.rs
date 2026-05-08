@@ -1845,6 +1845,14 @@ fn apply_event(
             // chain (the canonical-payload bytes determine new_hash)
             // but doesn't touch graph topology, BLR, or stats.
         }
+        AuditKind::StatsSnapshot { .. } => {
+            // Phase 0.4 Track A — log-compaction marker. Phase 0.4
+            // ships only the marker; smart-replay (fast-forward past
+            // *Updated runs to the StatsSnapshot) is deferred to
+            // Phase 0.5. Apply_event is a pure no-op for now — the
+            // chain advances via the canonical-payload bytes, but no
+            // graph state mutation happens.
+        }
     }
     Ok(())
 }
@@ -2023,6 +2031,12 @@ fn decode_payload(
             let leaf = cur.u32_be()?;
             let matched_prefix = cur.u8()?;
             AuditKind::Routed { leaf, matched_prefix }
+        }
+        0x1A => {
+            // Phase 0.4 Track A — StatsSnapshot (log-compaction marker).
+            let node_id = cur.u32_be()?;
+            let stats_hash = cur.hash32()?;
+            AuditKind::StatsSnapshot { node_id, stats_hash }
         }
         other => return Err(DecodeError::UnknownKindTag(other)),
     };

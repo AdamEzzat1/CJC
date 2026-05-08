@@ -265,6 +265,19 @@ pub enum AuditKind {
         /// (0 ≤ matched ≤ prefix.len(); prefix.len() ≤ 255 in practice).
         matched_prefix: u8,
     },
+    /// Phase 0.4 Track A — log-compaction checkpoint marker. Emitted
+    /// by `compact_log` for each touched node, captures a SHA-256 of
+    /// the node's full Welford-stats state at the compaction point.
+    /// Tag `0x1A`. Phase 0.4 ships the marker only; smart-replay that
+    /// uses StatsSnapshot to fast-forward past `*Updated` runs is
+    /// deferred to Phase 0.5 (Phase 0.4's `apply_event` for this kind
+    /// is a no-op, so the chain advances but no graph state changes).
+    StatsSnapshot {
+        /// Node whose stats are checkpointed.
+        node_id: NodeId,
+        /// SHA-256 of `NodeStats::canonical_bytes()` at emission time.
+        stats_hash: [u8; 32],
+    },
 }
 
 /// `AuditKind::BlrNumericalRescue::reason` value: post-update `b` would
@@ -305,10 +318,11 @@ impl AuditKind {
             AuditKind::ExpectedEpistemicCaptured { .. } => 0x17,
             AuditKind::BlrNumericalRescue { .. } => 0x18,
             AuditKind::LeafParamsUpdatedBatch { .. } => 0x19,
-            // Phase 0.4 Track A — Routed (opt-in trace event). Tag
-            // 0x1A is reserved for `StatsSnapshot` (G3.7); 0x1C is
+            // Phase 0.4 Track A — Routed (opt-in trace event) and
+            // StatsSnapshot (log-compaction marker). Tag 0x1C is
             // reserved for `ProvenanceStamped` (Phase 0.5).
             AuditKind::Routed { .. } => 0x1B,
+            AuditKind::StatsSnapshot { .. } => 0x1A,
         }
     }
 }
@@ -478,6 +492,14 @@ impl AuditEvent {
                 // 5-byte body: leaf u32 BE + matched_prefix u8.
                 out.extend_from_slice(&leaf.to_be_bytes());
                 out.push(*matched_prefix);
+            }
+            AuditKind::StatsSnapshot {
+                node_id,
+                stats_hash,
+            } => {
+                // 36-byte body: node_id u32 BE + stats_hash [u8; 32].
+                out.extend_from_slice(&node_id.to_be_bytes());
+                out.extend_from_slice(stats_hash);
             }
         }
         out.extend_from_slice(&self.stats_version.to_be_bytes());

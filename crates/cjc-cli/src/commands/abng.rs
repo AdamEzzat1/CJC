@@ -416,6 +416,7 @@ mod inspect {
             AuditKind::BlrNumericalRescue { .. } => "BlrNumericalRescue",
             AuditKind::LeafParamsUpdatedBatch { .. } => "LeafParamsUpdatedBatch",
             AuditKind::Routed { .. } => "Routed",
+            AuditKind::StatsSnapshot { .. } => "StatsSnapshot",
         }
     }
 }

@@ -589,6 +589,23 @@ pub fn dispatch_abng(name: &str, args: &[Value]) -> Result<Option<Value>, String
             })??;
             bytes_value(blob)
         }
+        "abng_compact_log" => {
+            // Phase 0.4 Track A — emit one StatsSnapshot audit event
+            // (tag 0x1A) per distinct node touched in [0, until_seq).
+            // Returns the count emitted.
+            arg_count(name, args, 2)?;
+            let id = arg_i64(name, &args[0])?;
+            let until_seq = arg_i64(name, &args[1])?;
+            if until_seq < 0 {
+                return Err(format!(
+                    "{name}: until_seq must be non-negative, got {until_seq}"
+                ));
+            }
+            let emitted = with_graph(name, id, |g| {
+                g.compact_log(until_seq as u64)
+            })?;
+            Value::Int(emitted as i64)
+        }
         "abng_route_path" => {
             arg_count(name, args, 2)?;
             let id = arg_i64(name, &args[0])?;
