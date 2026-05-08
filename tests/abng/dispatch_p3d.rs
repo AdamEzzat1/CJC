@@ -366,11 +366,13 @@ fn expected_epistemic_arity_check() {
 
 fn ok_thresholds_tensor() -> Tensor {
     // Phase 0.4 Track B-2.2.7 — drift_unfreeze added at index 11.
+    // Phase 0.4-extended (v11) — ece_stability_max_delta + sigma_stability_ratio at 12, 13.
     Tensor::from_vec(
         vec![
             0.5, 64.0, 128.0, 0.05, 0.02, 4.0, 0.1, 32.0, 10.0, 8.0, 20.0, f64::MAX,
+            0.005, 1.05,
         ],
-        &[12],
+        &[14],
     )
     .unwrap()
 }

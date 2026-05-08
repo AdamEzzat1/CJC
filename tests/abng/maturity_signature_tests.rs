@@ -114,6 +114,7 @@ fn node_signature_distinguishes_subsystems() {
     bare_g
         .set_decision_policy(&[
             0.5, 64.0, 1.0e9, 0.05, 0.02, 0.0, 0.0, 0.0, 1.0e9, 0.0, 1.0e9, f64::MAX,
+            0.005, 1.05, // ece_stability_max_delta + sigma_stability_ratio (v11)
         ])
         .unwrap();
     let _ = bare_g.decide_step();
@@ -126,6 +127,7 @@ fn node_signature_distinguishes_subsystems() {
     with_head
         .set_decision_policy(&[
             0.5, 64.0, 1.0e9, 0.05, 0.02, 0.0, 0.0, 0.0, 1.0e9, 0.0, 1.0e9, f64::MAX,
+            0.005, 1.05, // ece_stability_max_delta + sigma_stability_ratio (v11)
         ])
         .unwrap();
     let _ = with_head.decide_step();
@@ -144,6 +146,7 @@ fn node_signature_distinguishes_subsystems() {
     with_blr
         .set_decision_policy(&[
             0.5, 64.0, 1.0e9, 0.05, 0.02, 0.0, 0.0, 0.0, 1.0e9, 0.0, 1.0e9, f64::MAX,
+            0.005, 1.05, // ece_stability_max_delta + sigma_stability_ratio (v11)
         ])
         .unwrap();
     let _ = with_blr.decide_step();
@@ -162,6 +165,7 @@ fn node_signature_changes_after_decide_step_with_added_children() {
     let mut g = AdaptiveBeliefGraph::new(0);
     g.set_decision_policy(&[
         0.5, 64.0, 1.0e9, 0.05, 0.02, 0.0, 0.0, 0.0, 1.0e9, 0.0, 1.0e9, f64::MAX,
+        0.005, 1.05, // ece_stability_max_delta + sigma_stability_ratio (v11)
     ])
     .unwrap();
     let _ = g.decide_step();
@@ -185,6 +189,7 @@ fn node_signature_routing_reflects_routing_observations_only() {
     let mut g = AdaptiveBeliefGraph::new(0);
     g.set_decision_policy(&[
         0.5, 64.0, 1.0e9, 0.05, 0.02, 0.0, 0.0, 0.0, 1.0e9, 0.0, 1.0e9, f64::MAX,
+        0.005, 1.05, // ece_stability_max_delta + sigma_stability_ratio (v11)
     ])
     .unwrap();
     let _ = g.decide_step();

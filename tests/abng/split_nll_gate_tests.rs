@@ -24,7 +24,7 @@ use cjc_abng::graph::{ActionKind, AdaptiveBeliefGraph};
 fn isolating_thresholds(
     impurity_min: f64,
     nll_split_gain: f64,
-) -> [f64; 12] {
+) -> [f64; 14] {
     [
         100.0,           // h_grow — disable Grow
         1.0e9,           // grow_min — disable Grow
@@ -38,6 +38,8 @@ fn isolating_thresholds(
         0.0,             // tau_compress
         1.0e9,           // freeze_after
         f64::MAX,        // drift_unfreeze — disabled
+        0.005,           // ece_stability_max_delta (v11)
+        1.05,            // sigma_stability_ratio (v11)
     ]
 }
 
@@ -114,7 +116,7 @@ fn split_under_too_few_samples_blocked_at_split_min() {
     // samples_seen < split_min — pre-existing gate. Pin that the new
     // ΔNLL gates don't accidentally let through too-few-sample cases.
     let mut g = AdaptiveBeliefGraph::new(0);
-    let thresholds: [f64; 12] = [
+    let thresholds: [f64; 14] = [
         100.0,
         1.0e9,
         100.0,  // split_min — high
@@ -127,6 +129,8 @@ fn split_under_too_few_samples_blocked_at_split_min() {
         0.0,
         1.0e9,
         f64::MAX, // drift_unfreeze — disabled
+        0.005,  // ece_stability_max_delta (v11)
+        1.05,   // sigma_stability_ratio (v11)
     ];
     g.set_decision_policy(&thresholds).unwrap();
     for i in 0..10 {

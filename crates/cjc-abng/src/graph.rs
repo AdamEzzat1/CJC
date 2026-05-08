@@ -295,6 +295,14 @@ pub struct AdaptiveBeliefGraph {
     /// [`ActionKind`]. Increments every time the corresponding event
     /// is appended to the audit chain.
     pub action_counts: [u64; N_ACTION_KINDS],
+    /// Phase 0.4-extended (post-Track A, v11 bump) — observability
+    /// counter for `Unfreeze` events (whether manual via
+    /// `abng_unfreeze` or automatic via `decide_step`'s drift-trip
+    /// auto-Unfreeze rung). Kept distinct from `action_counts` so the
+    /// 6-element `[Grow, Split, Merge, Prune, Compress, Freeze]`
+    /// indexing convention from §7 #13 stays valid; Unfreeze is a
+    /// flag-flip, not a structural mutation.
+    pub unfreeze_count: u64,
 }
 
 impl AdaptiveBeliefGraph {
@@ -314,6 +322,7 @@ impl AdaptiveBeliefGraph {
             calibration_n_bins: None,
             decision_policy: None,
             action_counts: [0u64; N_ACTION_KINDS],
+            unfreeze_count: 0,
         };
         let root = AdaptiveBeliefNode::new(0, None, g.chain_head);
         g.nodes.push(root);
@@ -1576,8 +1585,9 @@ impl AdaptiveBeliefGraph {
         if node_id >= n_nodes {
             return Err(GraphError::NodeOutOfRange { node_id, n_nodes });
         }
-        Ok(crate::maturity::Maturity::from_node(
+        Ok(crate::maturity::Maturity::from_node_with_policy(
             &self.nodes[node_id as usize],
+            self.decision_policy.as_ref(),
         ))
     }
 
@@ -2092,10 +2102,14 @@ impl AdaptiveBeliefGraph {
             return Err(GraphError::NodeOutOfRange { node_id, n_nodes });
         }
         if !self.nodes[node_id as usize].is_frozen {
-            return Ok(()); // idempotent
+            return Ok(()); // idempotent — no event, no counter bump
         }
         self.nodes[node_id as usize].is_frozen = false;
         self.append_event(node_id, AuditKind::Unfreeze { node_id });
+        // Phase 0.4-extended (v11): observability counter. Incremented
+        // only on actual unfreezes (not idempotent no-ops), matching
+        // the audit-event firing pattern.
+        self.unfreeze_count = self.unfreeze_count.saturating_add(1);
         Ok(())
     }
 
@@ -2176,8 +2190,13 @@ impl AdaptiveBeliefGraph {
             }
 
             // Recompute Maturity AFTER signature-stability advance so
-            // `uncertainty_stable` sees the freshest counter.
-            let maturity = crate::maturity::Maturity::from_node(&self.nodes[nid_idx]);
+            // `uncertainty_stable` sees the freshest counter. Pass the
+            // installed policy through so the v11 configurable
+            // ECE/sigma stability thresholds drive the flag flips.
+            let maturity = crate::maturity::Maturity::from_node_with_policy(
+                &self.nodes[nid_idx],
+                Some(&policy),
+            );
 
             // Auto-capture expected_epistemic.
             if maturity.uncertainty_stable
@@ -3028,11 +3047,12 @@ mod tests {
 
     // ── Phase 0.3d-3: structural decisions ───────────────────────
 
-    fn ok_thresholds() -> [f64; 12] {
+    fn ok_thresholds() -> [f64; 14] {
         [
             0.5, 64.0, 128.0, 0.05, 0.02,
             4.0, 0.1, 32.0, 10.0, 8.0,
             20.0, f64::MAX, // drift_unfreeze disabled
+            0.005, 1.05,    // ece_stability_max_delta + sigma_stability_ratio (v11)
         ]
     }
 

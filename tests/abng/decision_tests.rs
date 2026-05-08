@@ -5,11 +5,12 @@ use cjc_abng::children::{AdaptiveChildren, ChildrenKind};
 use cjc_abng::graph::{ActionKind, AdaptiveBeliefGraph, GraphError, N_ACTION_KINDS};
 use cjc_abng::AuditKind;
 
-fn ok_thresholds() -> [f64; 12] {
+fn ok_thresholds() -> [f64; 14] {
     [
         0.5, 64.0, 128.0, 0.05, 0.02,
         4.0, 0.1, 32.0, 10.0, 8.0,
         20.0, f64::MAX, // drift_unfreeze disabled
+        0.005, 1.05,    // ece_stability_max_delta + sigma_stability_ratio (v11)
     ]
 }
 
@@ -466,7 +467,7 @@ fn decide_step_auto_captures_expected_epistemic_at_uncertainty_stable() {
     // Use an isolating policy: grow_min and split_min are sky-high so
     // those triggers don't fire during the stability-accumulation
     // phase; we want auto-capture to be the ONLY thing happening.
-    let isolating_thresholds: [f64; 12] = [
+    let isolating_thresholds: [f64; 14] = [
         0.5,         // H_grow
         1.0e9,       // grow_min — effectively disabled
         1.0e9,       // split_min — effectively disabled
@@ -479,6 +480,8 @@ fn decide_step_auto_captures_expected_epistemic_at_uncertainty_stable() {
         8.0,         // tau_compress
         1.0e9,       // freeze_after — effectively disabled
         f64::MAX,    // drift_unfreeze — disabled
+        0.005,       // ece_stability_max_delta (v11)
+        1.05,        // sigma_stability_ratio (v11)
     ];
     g.set_decision_policy(&isolating_thresholds).unwrap();
     // Train BLR so its posterior mean is non-zero — otherwise

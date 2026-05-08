@@ -1,10 +1,10 @@
-# ABNG — Current Architecture (post-Phase 0.4, Track A complete)
+# ABNG — Current Architecture (post-Phase 0.4, snapshot v11)
 
 **As of:** 2026-05-07
 **Crate:** `crates/cjc-abng/`
 **Tests:** `tests/abng/` (391 integration) + `crates/cjc-abng/src/*` (252 in-crate) + `tests/prop_tests/abng_decision_props.rs` (4 properties × 256 cases) + `tests/bolero_fuzz/abng_decision_fuzz.rs` (4 fuzz targets) — all passing
-**Snapshot magic:** `ABNG\x0A` (v10 — Phase 0.4 Track B-2.2.7 bumped from `\x09` for `DecisionPolicy.drift_unfreeze` 12th threshold; v9 added `BlrState.feature_version_hash` in C-2.3.5)
-**Builtin count:** 72 user-facing `abng_*` arms in `dispatch.rs` (65 from Phase 0.3d; +1 C-2.3.5 `abng_reset_blr`; +1 C-2.3.6 `abng_leaf_set_params_batch`; +1 C-2.3.8 `abng_blr_predict_with_fallback`; +1 C-2.3.12 `abng_force_recapture_expected_epistemic`; +3 Track A `abng_descend_traced`, `abng_predict_snap`, `abng_compact_log`)
+**Snapshot magic:** `ABNG\x0B` (v11 — Phase 0.4-extended bumped from `\x0A` to absorb two consolidated v11 changes: DecisionPolicy thresholds 12 + 13 (`ece_stability_max_delta`, `sigma_stability_ratio` — Item A) and graph header `unfreeze_count: u64` (Item B). Phase 0.4 mid-track bumps were `\x08 → \x09` (C-2.3.5 `BlrState.feature_version_hash`) → `\x0A` (B-2.2.7 `DecisionPolicy.drift_unfreeze` + B-2.2.{1,2} per-node Welford state) → `\x0B` (Items A+B).)
+**Builtin count:** 73 user-facing `abng_*` arms in `dispatch.rs` (65 from Phase 0.3d; +1 C-2.3.5 `abng_reset_blr`; +1 C-2.3.6 `abng_leaf_set_params_batch`; +1 C-2.3.8 `abng_blr_predict_with_fallback`; +1 C-2.3.12 `abng_force_recapture_expected_epistemic`; +3 Track A `abng_descend_traced`, `abng_predict_snap`, `abng_compact_log`; +1 v11 `abng_unfreeze_count`)
 **Audit kinds:** 28 (tags `0x00`..`0x1B` — Phase 0.4 added `0x18 BlrNumericalRescue`, `0x19 LeafParamsUpdatedBatch`, `0x1A StatsSnapshot`, and `0x1B Routed`. Tag `0x1C` is reserved for `ProvenanceStamped` (Phase 0.5).)
 
 This document is a *source-of-truth* handoff after Phase 0.3d. Where the
@@ -30,8 +30,9 @@ between design intent and implementation are listed in §8.
 | 0.3d-5 | DONE | proptest properties + bolero fuzz targets + decoder allocation hardening + this doc |
 | 0.4 Track C | DONE | post-0.3d audit fixes (7 items): BLR predict rename, NaN/Inf input validation, replay semantic invariants, BLR clamp audit (0x18), feature_version_hash + reset_blr (snapshot v9), batched leaf-params (0x19), per-leaf → per-node doc rename |
 | 0.4 Track B | DONE | trigger refinement (7 items): NIG-aware merge math (`combine`), KL-divergence merge gate, route-entropy grow gate, bootstrap held-out ΔNLL split gate, drift-trip auto-Unfreeze (snapshot v10, 12th threshold), 3-window ECE/σ stability buffers per node, Welford-smoothed `NodeSignature` profiles |
-| 0.4 Track A | DONE | `cjcl abng …` CLI surface complete: 5/5 subcommands (`inspect`, `replay`, `diff`, `explain`, `train`). JSON output via `--json` on each. Audit kinds `0x1A StatsSnapshot` (G3.7) and `0x1B Routed` (G3.5) shipped; `0x1C ProvenanceStamped` deferred to Phase 0.5. `train` ships with explicit-flag config; TOML `--config` files defer to Phase 0.5. Snapshot magic frozen at `\x0A` for the entire Phase 0.4 lifetime. |
-| 0.5   | LATER | Chess-RL retrofit (value head first, then policy head); per-node provenance_stamp_hash (deferred from 0.4 to keep v10 frozen) |
+| 0.4 Track A | DONE | `cjcl abng …` CLI surface complete: 5/5 subcommands (`inspect`, `replay`, `diff`, `explain`, `train`). JSON output via `--json` on each. Audit kinds `0x1A StatsSnapshot` (G3.7) and `0x1B Routed` (G3.5) shipped; `0x1C ProvenanceStamped` deferred to Phase 0.5. `train` ships with explicit-flag config; TOML `--config` files defer to Phase 0.5. Track A shipped under snapshot magic `\x0A` (no further bump for the CLI surface itself). |
+| 0.4-extended (v11) | DONE | Snapshot magic `\x0A → \x0B`. **Item A:** configurable `Maturity` thresholds — `DecisionPolicy.thresholds[12]` = `ece_stability_max_delta` (replaces compile-time `ECE_STABILITY_MAX_DELTA` const), `[13]` = `sigma_stability_ratio` (replaces `SIGMA_STABILITY_RATIO` const). N_THRESHOLDS 12 → 14, POLICY_BYTES_LEN 96 → 112. `Maturity::from_node_with_policy(node, Some(policy))` reads the configurable thresholds; the legacy `Maturity::from_node(node)` falls back to the compile-time consts. **Item B:** `AdaptiveBeliefGraph.unfreeze_count: u64` field + `abng_unfreeze_count(g) -> Int` builtin — observability for the `Unfreeze` audit kind (manual + drift-trip auto-unfreeze paths). Replay verifies the field matches what `apply_event` accumulates. |
+| 0.5   | LATER | Chess-RL retrofit (value head first, then policy head); per-node provenance_stamp_hash + 0x1C ProvenanceStamped (forces v11 → v12); smart-replay using StatsSnapshot to fast-forward; TOML `--config` files for `cjcl abng train`; NodeStats canonical_bytes 24B → 32B (Kahan compensation); also v12. |
 
 ABNG is now a **Bayesian-inspired structurally-adaptive belief graph** with:
 - Topology + routing (0.2)
@@ -212,7 +213,7 @@ corresponding `*AlreadyFrozen` variant.
 | BLR prior | `abng_set_blr_prior(g, λ, a, b)` | leaf head | No |
 | Density tracker | `abng_set_density_tracker(g)` | leaf head | No |
 | Calibration bins | `abng_set_calibration(g, n_bins ∈ [2,100])` | (none) | No |
-| Decision policy | `abng_set_decision_policy(g, thresholds: Tensor[12])` | (none) | **Yes** (install-anytime) |
+| Decision policy | `abng_set_decision_policy(g, thresholds: Tensor[14])` | (none) | **Yes** (install-anytime) |
 
 The leaf head is required by both BLR (which needs penultimate-feature
 dim `d`) and density (which uses the same `d`). Calibration is
@@ -236,7 +237,7 @@ DensityTrackerInstalled    if density was enabled
 CalibrationInstalled       if calibration n_bins was set
 ```
 
-### 3.4 Builtin surface (72 arms)
+### 3.4 Builtin surface (73 arms)
 
 Construction / lifecycle: `abng_new`, `abng_drop`, `abng_root`,
 `abng_node_count`, `abng_audit_len`, `abng_chain_head`,
@@ -1247,7 +1248,7 @@ no code or wire-format change.
 
 | Gate | Result | Δ from end-of-0.3d |
 |---|---|---|
-| `cargo test -p cjc-abng --lib` | **261 passed, 0 failed** | +34 (B+C: +25; +9 from G3.5 predict_snap unit) |
+| `cargo test -p cjc-abng --lib` | **267 passed, 0 failed** | +40 (B+C: +25; +9 from G3.5 predict_snap unit; +6 from v11 policy threshold-12/13 tests) |
 | `cargo test --test abng` | **442 passed, 0 failed** | +139 (B+C: +88; +13 from C-2.3.8 fallback; +9 from C-2.3.12 recapture; +6 from C-2.3.12 decide_step canary; +13 from G3.5 route_trace; +10 from G3.7 compact_log) |
 | `cargo test --test prop_tests abng_decision` | **4 passed** (× 256 cases each) | +0 |
 | `cargo test --test bolero_fuzz abng_decision` | **4 passed** | +0 |

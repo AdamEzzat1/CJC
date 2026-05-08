@@ -34,10 +34,12 @@ use cjc_abng::serialize::{replay, serialize};
 /// thresholds in a regime that exercises real triggers without
 /// blowing up under random observation streams.
 fn arb_thresholds() -> impl Strategy<Value = Vec<f64>> {
-    // 12 thresholds since Phase 0.4 Track B-2.2.7 added drift_unfreeze.
-    // Pack as a tuple of 12 — proptest's tuple-of-twelve trait impl
-    // is sufficient.
-    (
+    // 14 thresholds: Phase 0.4 Track B-2.2.7 added drift_unfreeze at [11];
+    // Phase 0.4-extended (v11) added ece_stability_max_delta at [12] and
+    // sigma_stability_ratio at [13]. Proptest's tuple-of-twelve trait
+    // impl is the largest available, so pack the first 12 into one
+    // tuple and the last 2 into a sibling tuple, then concatenate.
+    let head = (
         0.1f64..1.0,                  // [0] H_grow
         16u64..256,                   // [1] grow_min
         32u64..512,                   // [2] split_min
@@ -50,23 +52,29 @@ fn arb_thresholds() -> impl Strategy<Value = Vec<f64>> {
         0u8..32,                      // [9] tau_compress
         2u64..64,                     // [10] freeze_after
         0.5f64..100.0,                // [11] drift_unfreeze
-    )
-        .prop_map(|t| {
-            vec![
-                t.0,
-                t.1 as f64,
-                t.2 as f64,
-                t.3,
-                t.4,
-                t.5 as f64,
-                t.6,
-                t.7 as f64,
-                t.8 as f64,
-                t.9 as f64,
-                t.10 as f64,
-                t.11,
-            ]
-        })
+    );
+    let tail = (
+        0.0001f64..0.5,               // [12] ece_stability_max_delta (> 0)
+        1.0f64..10.0,                 // [13] sigma_stability_ratio (≥ 1)
+    );
+    (head, tail).prop_map(|(t, u)| {
+        vec![
+            t.0,
+            t.1 as f64,
+            t.2 as f64,
+            t.3,
+            t.4,
+            t.5 as f64,
+            t.6,
+            t.7 as f64,
+            t.8 as f64,
+            t.9 as f64,
+            t.10 as f64,
+            t.11,
+            u.0,
+            u.1,
+        ]
+    })
 }
 
 /// Strategy generating a small observation stream — bounded in length

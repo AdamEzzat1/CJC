@@ -204,7 +204,7 @@ fn parity_double_run_expected_epistemic() {
 // ─── Phase 0.3d-3 — DecisionPolicy + force-* + Dense ─────────────
 
 const POLICY_INSTALL: &str = r#"
-let thresholds = Tensor.from_vec([0.5, 64.0, 128.0, 0.05, 0.02, 4.0, 0.1, 32.0, 10.0, 8.0, 20.0, 1.0e9], [12]);
+let thresholds = Tensor.from_vec([0.5, 64.0, 128.0, 0.05, 0.02, 4.0, 0.1, 32.0, 10.0, 8.0, 20.0, 1.0e9, 0.005, 1.05], [14]);
 abng_set_decision_policy(g, thresholds);
 "#;
 

@@ -118,15 +118,40 @@ impl Maturity {
     /// history. Equivalent: epistemic leverage has settled within 5%
     /// over the last three `decide_step` calls.
     pub fn from_node(node: &AdaptiveBeliefNode) -> Self {
+        Self::from_node_with_policy(node, None)
+    }
+
+    /// Phase 0.4-extended (v11) — `from_node` variant that reads
+    /// `ece_stability_max_delta` and `sigma_stability_ratio` from a
+    /// caller-supplied [`DecisionPolicy`] when present. Falls back to
+    /// the compile-time [`ECE_STABILITY_MAX_DELTA`] /
+    /// [`SIGMA_STABILITY_RATIO`] constants when `policy` is `None` —
+    /// preserves backward-compatible behavior for graphs without an
+    /// installed policy.
+    ///
+    /// Both `decide_step` (graph.rs) and `abng_node_maturity`
+    /// (dispatch.rs) pass the graph's installed policy through; the
+    /// no-arg `from_node` is kept as a back-compat shim.
+    pub fn from_node_with_policy(
+        node: &AdaptiveBeliefNode,
+        policy: Option<&crate::policy::DecisionPolicy>,
+    ) -> Self {
         let samples_seen = node.stats.n_seen;
+
+        let ece_delta = policy
+            .map(|p| p.ece_stability_max_delta())
+            .unwrap_or(ECE_STABILITY_MAX_DELTA);
+        let sigma_ratio = policy
+            .map(|p| p.sigma_stability_ratio())
+            .unwrap_or(SIGMA_STABILITY_RATIO);
 
         // Phase 0.4 Track B-2.2.2: 3-window ECE stability.
         let calibration_stable = node.calibration.is_some()
             && node.ece_fill_count >= 3
             && {
                 let h = node.ece_history;
-                (h[1] - h[0]).abs() < ECE_STABILITY_MAX_DELTA
-                    && (h[2] - h[1]).abs() < ECE_STABILITY_MAX_DELTA
+                (h[1] - h[0]).abs() < ece_delta
+                    && (h[2] - h[1]).abs() < ece_delta
             };
 
         // Phase 0.4 Track B-2.2.2: 3-window σ stability.
@@ -138,7 +163,7 @@ impl Maturity {
                 let h = node.sigma_history;
                 let max = h[0].max(h[1]).max(h[2]);
                 let min = h[0].min(h[1]).min(h[2]);
-                min > 0.0 && max / min <= SIGMA_STABILITY_RATIO
+                min > 0.0 && max / min <= sigma_ratio
             };
 
         let trust_level = trust_from_samples(samples_seen);

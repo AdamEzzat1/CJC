@@ -20,33 +20,43 @@
 //! # Canonical field order
 //!
 //! ```text
-//!   [0]  H_grow                — route entropy threshold for Grow
-//!   [1]  grow_min              — min samples_seen for Grow                (cast u64)
-//!   [2]  split_min             — min samples_seen for Split               (cast u64)
-//!   [3]  nll_split_gain        — held-out ΔNLL gain for Split
-//!   [4]  impurity_min          — impurity decrease threshold for Split
-//!   [5]  tau_merge             — Hamming distance threshold for Merge     (cast u8, ≤ 32)
-//!   [6]  kl_merge              — posterior KL threshold for Merge
-//!   [7]  prune_floor           — sample count below which Prune permitted (cast u64)
-//!   [8]  prune_grace_epochs    — signature-stable epochs before Prune     (cast u64)
-//!   [9]  tau_compress          — Hamming distance threshold for Compress  (cast u8, ≤ 32)
-//!   [10] freeze_after          — signature-stable epochs before Freeze    (cast u64)
-//!   [11] drift_unfreeze        — drift score above which a frozen node    (Phase 0.4
-//!                                will auto-unfreeze inside `decide_step`. B-2.2.7)
-//!                                +∞ disables the auto-unfreeze ladder step.
+//!   [0]  H_grow                  — route entropy threshold for Grow
+//!   [1]  grow_min                — min samples_seen for Grow              (cast u64)
+//!   [2]  split_min               — min samples_seen for Split             (cast u64)
+//!   [3]  nll_split_gain          — held-out ΔNLL gain for Split
+//!   [4]  impurity_min            — impurity decrease threshold for Split
+//!   [5]  tau_merge               — Hamming distance threshold for Merge   (cast u8, ≤ 32)
+//!   [6]  kl_merge                — posterior KL threshold for Merge
+//!   [7]  prune_floor             — sample count below which Prune permitted (cast u64)
+//!   [8]  prune_grace_epochs      — signature-stable epochs before Prune   (cast u64)
+//!   [9]  tau_compress            — Hamming distance threshold for Compress (cast u8, ≤ 32)
+//!   [10] freeze_after            — signature-stable epochs before Freeze  (cast u64)
+//!   [11] drift_unfreeze          — drift score above which a frozen node  (Phase 0.4
+//!                                  will auto-unfreeze inside `decide_step`. B-2.2.7)
+//!                                  +∞ disables the auto-unfreeze ladder step.
+//!   [12] ece_stability_max_delta — `Maturity.calibration_stable` flips    (Phase 0.4-extended
+//!                                  iff `max(ece_history) - min(ece_history)` ≤ this. v11)
+//!                                  Replaces the compile-time `ECE_STABILITY_MAX_DELTA`
+//!                                  constant; must be > 0 finite.
+//!   [13] sigma_stability_ratio   — `Maturity.uncertainty_stable` flips    (Phase 0.4-extended
+//!                                  iff `max(sigma_history) / min(sigma_history)` ≤ this. v11)
+//!                                  Replaces the compile-time `SIGMA_STABILITY_RATIO`
+//!                                  constant; must be ≥ 1.0 finite.
 //! ```
 //!
-//! Canonical bytes: `12 × f64::to_bits().to_be_bytes()` = 96 bytes (snapshot v10).
+//! Canonical bytes: `14 × f64::to_bits().to_be_bytes()` = 112 bytes (snapshot v11).
 
 use cjc_repro::KahanAccumulatorF64;
 
-/// Number of thresholds in a [`DecisionPolicy`]. Phase 0.4 Track B-2.2.7
-/// added the 12th threshold (`drift_unfreeze`) — every snapshot from v10
-/// onward expects exactly this many bytes in the policy section.
-pub const N_THRESHOLDS: usize = 12;
+/// Number of thresholds in a [`DecisionPolicy`]. Phase 0.4-extended
+/// added thresholds 12 and 13 (`ece_stability_max_delta` and
+/// `sigma_stability_ratio`), promoting the previously-compile-time
+/// `Maturity` stability constants into the policy. Snapshots from v11
+/// onward expect exactly this many bytes in the policy section.
+pub const N_THRESHOLDS: usize = 14;
 
 /// Total canonical-bytes length of a [`DecisionPolicy`]:
-/// `N_THRESHOLDS * size_of::<f64>()` = 96 bytes (snapshot v10).
+/// `N_THRESHOLDS * size_of::<f64>()` = 112 bytes (snapshot v11).
 pub const POLICY_BYTES_LEN: usize = N_THRESHOLDS * 8;
 
 /// Errors specific to [`DecisionPolicy`] construction.
@@ -128,6 +138,24 @@ impl DecisionPolicy {
                     value: values[i],
                 });
             }
+        }
+        // Phase 0.4-extended (v11) — Maturity stability thresholds.
+        // ece_stability_max_delta (index 12) must be strictly positive
+        // (a zero or negative window-spread threshold would always
+        // pass or always fail). sigma_stability_ratio (index 13) must
+        // be ≥ 1.0 (the ratio is max/min, which is ≥ 1.0 for any
+        // positive sequence; a threshold below 1.0 is unreachable).
+        if values[12] <= 0.0 {
+            return Err(PolicyError::NegativeThreshold {
+                index: 12,
+                value: values[12],
+            });
+        }
+        if values[13] < 1.0 {
+            return Err(PolicyError::NegativeThreshold {
+                index: 13,
+                value: values[13],
+            });
         }
         let mut thresholds = [0.0f64; N_THRESHOLDS];
         thresholds.copy_from_slice(values);
@@ -212,6 +240,26 @@ impl DecisionPolicy {
     pub fn drift_unfreeze(&self) -> f64 {
         self.thresholds[11]
     }
+
+    /// `ece_stability_max_delta` — `Maturity.calibration_stable` flips
+    /// on iff `max(ece_history) - min(ece_history) ≤ this` over the
+    /// 3-window per-node ring buffer (Phase 0.4 B-2.2.2).
+    /// Phase 0.4-extended (v11) replaces the compile-time
+    /// `maturity::ECE_STABILITY_MAX_DELTA` constant with this
+    /// per-policy field. Validated `> 0.0 && finite`.
+    pub fn ece_stability_max_delta(&self) -> f64 {
+        self.thresholds[12]
+    }
+
+    /// `sigma_stability_ratio` — `Maturity.uncertainty_stable` flips on
+    /// iff `max(sigma_history) / min(sigma_history) ≤ this` over the
+    /// 3-window per-node ring buffer (Phase 0.4 B-2.2.2).
+    /// Phase 0.4-extended (v11) replaces the compile-time
+    /// `maturity::SIGMA_STABILITY_RATIO` constant with this
+    /// per-policy field. Validated `≥ 1.0 && finite`.
+    pub fn sigma_stability_ratio(&self) -> f64 {
+        self.thresholds[13]
+    }
 }
 
 /// Helper used by `new` and `canonical_bytes` so the encoding is
@@ -257,13 +305,15 @@ mod tests {
             8.0, // tau_compress (Hamming)
             20.0, // freeze_after
             f64::MAX, // drift_unfreeze (effectively disabled — finite-validated)
+            0.005, // ece_stability_max_delta (v11; matches legacy const)
+            1.05, // sigma_stability_ratio (v11; matches legacy const)
         ]
     }
 
     #[test]
     fn n_thresholds_locked() {
-        assert_eq!(N_THRESHOLDS, 12);
-        assert_eq!(POLICY_BYTES_LEN, 96);
+        assert_eq!(N_THRESHOLDS, 14);
+        assert_eq!(POLICY_BYTES_LEN, 112);
     }
 
     #[test]
@@ -284,7 +334,7 @@ mod tests {
             err,
             PolicyError::WrongLength {
                 got: 10,
-                expected: 12
+                expected: 14
             }
         );
     }
@@ -324,7 +374,54 @@ mod tests {
     fn canonical_bytes_size() {
         let p = DecisionPolicy::new(&ok_thresholds()).unwrap();
         assert_eq!(p.canonical_bytes().len(), POLICY_BYTES_LEN);
-        assert_eq!(POLICY_BYTES_LEN, 96);
+        assert_eq!(POLICY_BYTES_LEN, 112);
+    }
+
+    #[test]
+    fn ece_stability_max_delta_accessor() {
+        let p = DecisionPolicy::new(&ok_thresholds()).unwrap();
+        assert_eq!(p.ece_stability_max_delta(), 0.005);
+    }
+
+    #[test]
+    fn sigma_stability_ratio_accessor() {
+        let p = DecisionPolicy::new(&ok_thresholds()).unwrap();
+        assert_eq!(p.sigma_stability_ratio(), 1.05);
+    }
+
+    #[test]
+    fn ece_stability_max_delta_zero_or_negative_errs() {
+        for bad in [0.0_f64, -0.001] {
+            let mut t = ok_thresholds();
+            t[12] = bad;
+            let err = DecisionPolicy::new(&t).unwrap_err();
+            assert!(
+                matches!(err, PolicyError::NegativeThreshold { index: 12, .. }),
+                "expected NegativeThreshold for ece_stability_max_delta = {bad}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sigma_stability_ratio_below_one_errs() {
+        for bad in [0.99_f64, 0.0, -1.0] {
+            let mut t = ok_thresholds();
+            t[13] = bad;
+            let err = DecisionPolicy::new(&t).unwrap_err();
+            assert!(
+                matches!(err, PolicyError::NegativeThreshold { index: 13, .. }),
+                "expected NegativeThreshold for sigma_stability_ratio = {bad}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sigma_stability_ratio_exactly_one_ok() {
+        // Boundary: max/min == 1.0 means perfectly stable; this is
+        // valid (and useful for "require flatline σ" policies).
+        let mut t = ok_thresholds();
+        t[13] = 1.0;
+        DecisionPolicy::new(&t).unwrap();
     }
 
     #[test]
@@ -352,15 +449,27 @@ mod tests {
 
     #[test]
     fn canonical_bytes_layout_first_field() {
-        // Field 0 (H_grow) lands in bytes [0..8] big-endian.
-        let mut t = [0.0; N_THRESHOLDS];
+        // Field 0 (H_grow) lands in bytes [0..8] big-endian. Build a
+        // policy with H_grow=1.0 and the other thresholds set to the
+        // smallest legal values (rather than zero, since indices
+        // 12 and 13 reject zero).
+        let mut t = ok_thresholds();
+        for slot in t.iter_mut() {
+            *slot = 0.0;
+        }
         t[0] = 1.0;
+        // Set indices 12 and 13 to their smallest legal values so
+        // canonical bytes layout depends only on index 0's contents.
+        t[12] = f64::EPSILON; // smallest > 0
+        t[13] = 1.0;          // smallest ≥ 1.0
         let p = DecisionPolicy::new(&t).unwrap();
         let bytes = p.canonical_bytes();
-        let expected = 1.0_f64.to_bits().to_be_bytes();
-        assert_eq!(&bytes[0..8], &expected);
-        // Remaining 88 bytes are zero (since the rest are 0.0 and
-        // 0.0_f64.to_bits() == 0).
-        assert_eq!(&bytes[8..], &[0u8; 88]);
+        assert_eq!(&bytes[0..8], &1.0_f64.to_bits().to_be_bytes());
+        // Bytes 8..96 are zero (indices 1..=11 all 0.0).
+        assert_eq!(&bytes[8..96], &[0u8; 88]);
+        // Bytes 96..104: index 12 = f64::EPSILON.
+        assert_eq!(&bytes[96..104], &f64::EPSILON.to_bits().to_be_bytes());
+        // Bytes 104..112: index 13 = 1.0.
+        assert_eq!(&bytes[104..112], &1.0_f64.to_bits().to_be_bytes());
     }
 }

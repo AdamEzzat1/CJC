@@ -34,7 +34,7 @@ fn install_codebook(g: &mut AdaptiveBeliefGraph) {
 fn graph_codebook_grow_policy() -> AdaptiveBeliefGraph {
     let mut g = AdaptiveBeliefGraph::new(0);
     install_codebook(&mut g);
-    let thresholds: [f64; 12] = [
+    let thresholds: [f64; 14] = [
         0.5,    // h_grow — entropy threshold
         2.0,    // grow_min
         1.0e9,  // split_min — disabled
@@ -47,6 +47,8 @@ fn graph_codebook_grow_policy() -> AdaptiveBeliefGraph {
         8.0,    // tau_compress
         1.0e9,  // freeze_after — disabled
         f64::MAX, // drift_unfreeze — disabled
+        0.005,  // ece_stability_max_delta (v11)
+        1.05,   // sigma_stability_ratio (v11)
     ];
     g.set_decision_policy(&thresholds).unwrap();
     g
@@ -103,7 +105,7 @@ fn leaf_with_single_sibling_grow_allowed_via_bootstrap() {
 /// Lets us study Grow in isolation without Compress accidentally
 /// converting root to `Dense` (which empties `iter()` and would mask
 /// the entropy gate).
-fn isolating_thresholds(h_grow: f64) -> [f64; 12] {
+fn isolating_thresholds(h_grow: f64) -> [f64; 14] {
     [
         h_grow, // h_grow
         2.0,    // grow_min — low so easy to satisfy
@@ -117,6 +119,8 @@ fn isolating_thresholds(h_grow: f64) -> [f64; 12] {
         0.0,    // tau_compress — require identical sigs (rare)
         1.0e9,  // freeze_after — disabled
         f64::MAX, // drift_unfreeze — disabled
+        0.005,  // ece_stability_max_delta (v11)
+        1.05,   // sigma_stability_ratio (v11)
     ]
 }
 
@@ -168,7 +172,7 @@ fn codebookless_graph_falls_back_to_pre_0_4_grow() {
     // Pin this so existing decide_step tests (which don't install
     // codebooks) don't regress.
     let mut g = AdaptiveBeliefGraph::new(0);
-    let thresholds: [f64; 12] = [
+    let thresholds: [f64; 14] = [
         100.0,  // h_grow — very strict (would block if gate engaged)
         2.0,    // grow_min
         1.0e9,
@@ -181,6 +185,8 @@ fn codebookless_graph_falls_back_to_pre_0_4_grow() {
         8.0,
         1.0e9,
         f64::MAX, // drift_unfreeze — disabled
+        0.005,  // ece_stability_max_delta (v11)
+        1.05,   // sigma_stability_ratio (v11)
     ];
     g.set_decision_policy(&thresholds).unwrap();
     for _ in 0..10 {

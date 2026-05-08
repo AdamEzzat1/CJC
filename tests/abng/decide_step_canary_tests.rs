@@ -48,6 +48,7 @@ fn canary_graph() -> AdaptiveBeliefGraph {
         0.5, 64.0, 128.0, 0.05, 0.02,
         4.0, 0.1, 32.0, 10.0, 8.0,
         20.0, f64::MAX,
+        0.005, 1.05, // ece_stability_max_delta + sigma_stability_ratio (v11)
     ];
     g.set_decision_policy(&thresholds).unwrap();
 

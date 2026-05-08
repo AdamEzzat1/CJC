@@ -36,7 +36,7 @@ use crate::node::{AdaptiveBeliefNode, NodeId};
 use crate::policy::DecisionPolicy;
 use crate::stats::NodeStats;
 
-const MAGIC: &[u8; 5] = b"ABNG\x0A";
+const MAGIC: &[u8; 5] = b"ABNG\x0B";
 
 /// Errors returned by snapshot decoding.
 #[derive(Debug, PartialEq)]
@@ -235,6 +235,8 @@ pub fn serialize(graph: &AdaptiveBeliefGraph) -> Vec<u8> {
     for &c in &graph.action_counts {
         out.extend_from_slice(&c.to_be_bytes());
     }
+    // Phase 0.4-extended (v11) — unfreeze_count observability.
+    out.extend_from_slice(&graph.unfreeze_count.to_be_bytes());
 
     // Nodes.
     out.extend_from_slice(&(graph.nodes.len() as u32).to_be_bytes());
@@ -1011,6 +1013,8 @@ pub fn replay(bytes: &[u8]) -> Result<AdaptiveBeliefGraph, DecodeError> {
     for slot in stored_action_counts.iter_mut() {
         *slot = cur.u64_be()?;
     }
+    // Phase 0.4-extended (v11) — unfreeze_count observability.
+    let stored_unfreeze_count = cur.u64_be()?;
 
     // Per-node stored layouts.
     let n_nodes = cur.u32_be()?;
@@ -1078,6 +1082,7 @@ pub fn replay(bytes: &[u8]) -> Result<AdaptiveBeliefGraph, DecodeError> {
         calibration_n_bins: None,
         decision_policy: None,
         action_counts: [0u64; N_ACTION_KINDS],
+        unfreeze_count: 0,
     };
 
     let mut prev_hash = genesis_hash();
@@ -1437,6 +1442,15 @@ pub fn replay(bytes: &[u8]) -> Result<AdaptiveBeliefGraph, DecodeError> {
     // exactly match what apply_event accumulated during replay.
     graph.decision_policy = stored_decision_policy;
     if graph.action_counts != stored_action_counts {
+        return Err(DecodeError::ChainMismatch {
+            at_seq: graph.audit.len() as u64,
+        });
+    }
+    // Phase 0.4-extended (v11) — verify unfreeze_count matches what
+    // apply_event accumulated. The increment site mirrors the live
+    // graph's `unfreeze` method (replay-side `apply_event` for
+    // `Unfreeze` flips `is_frozen` AND bumps `unfreeze_count`).
+    if graph.unfreeze_count != stored_unfreeze_count {
         return Err(DecodeError::ChainMismatch {
             at_seq: graph.audit.len() as u64,
         });
@@ -1824,6 +1838,11 @@ fn apply_event(
                 return Err(DecodeError::ChainMismatch { at_seq: event.seq });
             }
             graph.nodes[*node_id as usize].is_frozen = false;
+            // Phase 0.4-extended (v11) — observability counter. Mirrors
+            // the live `unfreeze` method's bump path so replay produces
+            // a graph whose `unfreeze_count` equals what was originally
+            // serialized.
+            graph.unfreeze_count = graph.unfreeze_count.saturating_add(1);
         }
         AuditKind::BlrNumericalRescue { .. } => {
             // Phase 0.4 Track C-2.3.4 — diagnostic-only event. The
@@ -2164,13 +2183,25 @@ mod tests {
         assert_eq!(g.chain_head, g2.chain_head);
     }
 
-    // ── Phase 0.4 Track B-2.2.7 — snapshot v10 ───────────────────
+    // ── Phase 0.4-extended (v11) — snapshot v11 ────────────────────
 
     #[test]
-    fn v10_magic_in_blob() {
+    fn v11_magic_in_blob() {
         let g = AdaptiveBeliefGraph::new(0);
         let blob = serialize(&g);
-        assert_eq!(&blob[..5], b"ABNG\x0A");
+        assert_eq!(&blob[..5], b"ABNG\x0B");
+    }
+
+    #[test]
+    fn v10_magic_rejected() {
+        // After the v10 → v11 bump (Items A + B: DecisionPolicy gained
+        // ece_stability_max_delta + sigma_stability_ratio thresholds;
+        // graph header gained unfreeze_count u64), v10 blobs are no
+        // longer accepted.
+        let g = AdaptiveBeliefGraph::new(0);
+        let mut blob = serialize(&g);
+        blob[4] = 0x0A;
+        assert_eq!(replay(&blob).unwrap_err(), DecodeError::BadMagic);
     }
 
     #[test]
@@ -2260,11 +2291,12 @@ mod tests {
 
     // ── Phase 0.3d-3 round-trips ─────────────────────────────────
 
-    fn ok_thresholds() -> [f64; 12] {
+    fn ok_thresholds() -> [f64; 14] {
         [
             0.5, 64.0, 128.0, 0.05, 0.02,
             4.0, 0.1, 32.0, 10.0, 8.0,
             20.0, f64::MAX, // drift_unfreeze disabled
+            0.005, 1.05,    // ece_stability_max_delta + sigma_stability_ratio (v11)
         ]
     }
 

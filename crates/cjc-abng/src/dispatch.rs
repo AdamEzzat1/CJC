@@ -1232,6 +1232,16 @@ pub fn dispatch_abng(name: &str, args: &[Value]) -> Result<Option<Value>, String
             let count = with_graph(name, id, |g| g.action_count(kind))?;
             Value::Int(count as i64)
         }
+        "abng_unfreeze_count" => {
+            // Phase 0.4-extended (v11) — observability counter for
+            // Unfreeze events (manual + drift-trip auto-Unfreeze).
+            // Distinct from action_counts to keep the 6-element
+            // ActionKind indexing convention valid.
+            arg_count(name, args, 1)?;
+            let id = arg_i64(name, &args[0])?;
+            let count = with_graph(name, id, |g| g.unfreeze_count)?;
+            Value::Int(count as i64)
+        }
 
         // ── Phase 0.3d-2: per-node expected_epistemic capture ────
         "abng_set_expected_epistemic" => {

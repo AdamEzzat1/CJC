@@ -109,16 +109,17 @@ fn replay_then_continue_keeps_chain_consistent() {
 
 #[test]
 fn empty_graph_rejected() {
-    // v8 layout: n_nodes lives after the v5 base + 0.3d-3 additions.
+    // v11 layout: n_nodes lives after the v5 base + 0.3d-3 additions
+    // + 0.4-extended unfreeze_count.
     //   v5 base: 5 magic + 8 seed + 8 epoch + 32 final_hash
     //          + 1 codebook + 1 head + 1 blr_prior
     //          + 1 density_enabled + 1 calibration_present = 58
     //   0.3d-3: + 1 policy_present + 48 action_counts (u64 × 6) = 49
-    //   → n_nodes at offset 107..111 (unchanged in v8 — header layout
-    //     is the same; v8 only added per-node fields)
+    //   v11 (0.4-extended): + 8 unfreeze_count u64 = 8
+    //   → n_nodes at offset 115..119 (was 107..111 before v11).
     let g = build(0, &[]);
     let mut blob = serialize(&g);
-    blob[107..111].copy_from_slice(&0u32.to_be_bytes());
+    blob[115..119].copy_from_slice(&0u32.to_be_bytes());
     let err = replay(&blob).unwrap_err();
     assert!(matches!(err, DecodeError::EmptyGraph));
 }

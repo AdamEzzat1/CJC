@@ -1125,6 +1125,8 @@ before observation begins.
         let thresholds = [
             0.5, 64.0, 128.0, 0.05, 0.02, 4.0, 0.1, 32.0, 10.0, 8.0, 20.0,
             f64::MAX,
+            // v11 (post-Track-A) — ECE/sigma stability thresholds.
+            0.005, 1.05,
         ];
         if let Err(e) = g.set_decision_policy(&thresholds) {
             eprintln!("error: set_decision_policy failed: {:?}", e);
