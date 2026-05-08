@@ -1,0 +1,13 @@
+[package]
+name = "abng-lineage-at-scale"
+version = "0.1.7"
+edition = "2021"
+
+[[bin]]
+name = "abng_lineage_at_scale"
+path = "main.rs"
+
+[dependencies]
+cjc-abng = { path = "../../crates/cjc-abng" }
+cjc-ad = { path = "../../crates/cjc-ad" }
+cjc-snap = { path = "../../crates/cjc-snap" }

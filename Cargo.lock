@@ -3,6 +3,41 @@
 version = 4
 
 [[package]]
+name = "abng-lineage-at-scale"
+version = "0.1.7"
+dependencies = [
+ "cjc-abng",
+ "cjc-ad",
+ "cjc-snap",
+]
+
+[[package]]
+name = "abng-micro"
+version = "0.1.7"
+dependencies = [
+ "cjc-abng",
+ "cjc-ad",
+]
+
+[[package]]
+name = "abng-pinn-scale"
+version = "0.1.7"
+dependencies = [
+ "cjc-abng",
+ "cjc-ad",
+ "cjc-repro",
+]
+
+[[package]]
+name = "abng-vs-sklearn"
+version = "0.1.7"
+dependencies = [
+ "cjc-abng",
+ "cjc-ad",
+ "cjc-repro",
+]
+
+[[package]]
 name = "ad-bench"
 version = "0.1.1"
 dependencies = [

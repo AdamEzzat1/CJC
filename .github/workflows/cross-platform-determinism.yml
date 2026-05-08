@@ -1,0 +1,105 @@
+name: ABNG Cross-Platform Determinism
+
+# Phase 0.6 Item 1 — gate every commit against the 15 locked SHA-256 canaries
+# on Linux + Windows + macOS. Canary verification is implicit: each demo file
+# contains `assert_eq!(chain_head, CANARY_HEX)`, so any platform divergence
+# from the v12 floor surfaces as a precise test failure.
+#
+# Three jobs run per platform with `fail-fast: false` so all platform
+# divergences are visible in one CI run instead of one-at-a-time.
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  abng-direct-gates:
+    name: ABNG Direct Gates (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: abng-determinism
+      - name: Gate 1 — cjc-abng lib unit tests (floor 275)
+        run: cargo test -p cjc-abng --lib
+      - name: Gate 2 — tests/abng integration (floor 460)
+        run: cargo test --test abng
+      - name: Gate 3 — proptest abng_decision (6 properties x 256 cases)
+        run: cargo test --test prop_tests abng_decision
+      - name: Gate 4 — bolero_fuzz abng_decision (8 targets)
+        run: cargo test --test bolero_fuzz abng_decision
+      - name: Gate 5 — abng_cli_integration (floor 43)
+        run: cargo test -p cjc-cli --test abng_cli_integration
+      - name: Gate 6 — toml_min (floor 29)
+        run: cargo test -p cjc-cli --lib toml_min
+
+  abng-demo-canaries:
+    name: ABNG Demo Canaries (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    needs: abng-direct-gates
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: abng-determinism
+      - name: Rust application demos (4 files, 58 tests)
+        run: |
+          cargo test --test test_abng_pinn_uncertainty
+          cargo test --test test_abng_tabular_gp
+          cargo test --test test_abng_lineage_attestation
+          cargo test --test test_chess_rl_v2_6_abng
+      - name: CJC-Lang demos (9 files, 81 tests)
+        run: |
+          cargo test --test test_abng_lineage_attestation_cjcl
+          cargo test --test test_abng_pinn_uncertainty_cjcl
+          cargo test --test test_abng_tabular_gp_cjcl
+          cargo test --test test_abng_ood_detection_cjcl
+          cargo test --test test_abng_adaptive_triggers_cjcl
+          cargo test --test test_abng_calibration_cjcl
+          cargo test --test test_abng_drift_detection_cjcl
+          cargo test --test test_abng_compact_log_cjcl
+          cargo test --test test_abng_maturity_inspection_cjcl
+
+  workspace-heavy:
+    name: Workspace Heavy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    needs: abng-direct-gates
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: abng-heavy
+      - name: cargo test --workspace --release --lib (floor 2,440)
+        run: cargo test --workspace --release --lib
+        timeout-minutes: 30
+      - name: physics_ml --release (floor 107)
+        run: cargo test --test physics_ml --release
+        timeout-minutes: 15
+      - name: chess_rl_v2 --release (floor 97, ~12 min wall-clock)
+        run: cargo test --test test_chess_rl_v2 --release
+        timeout-minutes: 30

@@ -56,6 +56,10 @@ members = [
     "crates/cjc-abng",
     "bench/ad_bench",
     "bench/nlp_preprocess_bench",
+    "bench/abng_micro",
+    "bench/abng_vs_sklearn",
+    "bench/abng_pinn_scale",
+    "bench/abng_lineage_at_scale",
 ]
 exclude = ["fuzz"]
 resolver = "2"

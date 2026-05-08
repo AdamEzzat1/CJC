@@ -15,8 +15,9 @@ jobs:
     name: Check & Clippy
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
         rust: [stable]
     steps:
       - uses: actions/checkout@v4
@@ -34,8 +35,9 @@ jobs:
     name: Test Suite
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     needs: check
     steps:
       - uses: actions/checkout@v4

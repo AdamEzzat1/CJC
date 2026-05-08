@@ -1,0 +1,12 @@
+[package]
+name = "abng-micro"
+version = "0.1.7"
+edition = "2021"
+
+[[bin]]
+name = "abng_micro"
+path = "main.rs"
+
+[dependencies]
+cjc-abng = { path = "../../crates/cjc-abng" }
+cjc-ad = { path = "../../crates/cjc-ad" }
