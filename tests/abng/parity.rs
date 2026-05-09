@@ -235,3 +235,31 @@ fn parity_double_run_chain_head_byte_identical() {
     assert_eq!(c, d, "MIR double-run chain heads differ");
     assert_eq!(a, c, "eval ↔ MIR chain heads differ");
 }
+
+// ─── Phase 0.7 Item 4: abng_train_step (fused) ─────────────────────────
+
+#[test]
+fn parity_train_step_chain_head_eval_mir_match() {
+    // Phase 0.7 Item 4 — `abng_train_step` must produce byte-identical
+    // chain heads under both AST-eval and MIR-exec. Establishes the
+    // satellite-dispatch contract for the new builtin.
+    assert_parity(
+        "abng_train_step + chain_head",
+        r#"
+        let g = abng_new(7);
+        let cb = Tensor.from_vec([0.25, 0.5, 0.75], [1, 3]);
+        abng_set_codebook(g, cb);
+        abng_set_leaf_head(g, 1, Tensor.from_vec([4.0], [1]), 1, "tanh");
+        abng_set_blr_prior(g, 2.0, 1.0, 0.5);
+        abng_add_node(g, 0, 0);
+        abng_add_node(g, 0, 1);
+        abng_add_node(g, 0, 2);
+        abng_add_node(g, 0, 3);
+        let x = Tensor.from_vec([0.45], [1]);
+        let phi = Tensor.from_vec([1.0, 0.5, 0.25, 0.125], [4]);
+        let leaf = abng_train_step(g, x, phi, 0.7);
+        print(leaf);
+        print(abng_chain_head(g));
+        "#,
+    );
+}

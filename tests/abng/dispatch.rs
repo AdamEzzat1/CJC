@@ -454,3 +454,162 @@ fn determinism_double_run_chain_head() {
     let b = make();
     assert_eq!(a, b);
 }
+
+// ── Phase 0.7 Item 4: abng_train_step (fused per-row training) ────────
+
+fn install_full_training_setup(seed: i64) -> i64 {
+    // Codebook over 1-D input with 4 bins.
+    let g = new_graph(seed);
+    let codebook = cjc_runtime::tensor::Tensor::from_vec(
+        vec![0.25, 0.5, 0.75],
+        &[1, 3],
+    )
+    .unwrap();
+    let _ = call(
+        "abng_set_codebook",
+        &[Value::Int(g), Value::Tensor(codebook)],
+    );
+    // Leaf head: input_dim=1, hidden=[4], output_dim=1, activation="tanh".
+    let hidden = cjc_runtime::tensor::Tensor::from_vec(vec![4.0_f64], &[1]).unwrap();
+    let _ = call(
+        "abng_set_leaf_head",
+        &[
+            Value::Int(g),
+            Value::Int(1),
+            Value::Tensor(hidden),
+            Value::Int(1),
+            Value::String(Rc::new("tanh".to_string())),
+        ],
+    );
+    // BLR prior: precision=2.0, a=1.0, b=0.5.
+    let _ = call(
+        "abng_set_blr_prior",
+        &[Value::Int(g), Value::Float(2.0), Value::Float(1.0), Value::Float(0.5)],
+    );
+    // Add 4 child nodes so descend can land on a non-root leaf.
+    for byte in 0..4 {
+        let _ = call(
+            "abng_add_node",
+            &[Value::Int(g), Value::Int(0), Value::Int(byte)],
+        );
+    }
+    g
+}
+
+#[test]
+fn train_step_chain_head_matches_three_call_sequence() {
+    // Phase 0.7 Item 4 — `abng_train_step` collapses route + blr_update +
+    // observe into a single dispatch, but emits the EXACT SAME audit
+    // event sequence (BlrUpdated, then BeliefUpdate). The chain_head
+    // after `abng_train_step(g, x, phi, y)` MUST equal the chain_head
+    // after the 3-call sequence on identical pre-state.
+    //
+    // Two independent graphs are built with identical setup and seed.
+    // One runs the 3-call path, the other the fused builtin. Their
+    // chain_heads must hex-equal byte-for-byte.
+    reset_arena();
+    let g_three = install_full_training_setup(42);
+    let g_fused = install_full_training_setup(42);
+
+    let xs: &[(f64, [f64; 4], f64)] = &[
+        (0.10, [1.0, 0.5, 0.25, 0.125], 0.7),
+        (0.45, [0.3, 0.6, 0.9, 1.2], 1.1),
+        (0.80, [0.8, 0.4, 0.2, 0.1], 0.4),
+        (0.55, [0.5, 0.5, 0.5, 0.5], 0.5),
+    ];
+
+    for &(x_val, phi, y_val) in xs {
+        // ── Graph A: 3-call sequence ──────────────────────────────────
+        let x_t = cjc_runtime::tensor::Tensor::from_vec(vec![x_val], &[1]).unwrap();
+        let leaf_three = match call(
+            "abng_route_to_leaf",
+            &[Value::Int(g_three), Value::Tensor(x_t)],
+        ) {
+            Value::Int(i) => i,
+            _ => panic!("expected int leaf"),
+        };
+        let phi_2d = cjc_runtime::tensor::Tensor::from_vec(phi.to_vec(), &[1, 4]).unwrap();
+        let y_1d = cjc_runtime::tensor::Tensor::from_vec(vec![y_val], &[1]).unwrap();
+        let _ = call(
+            "abng_blr_update",
+            &[
+                Value::Int(g_three),
+                Value::Int(leaf_three),
+                Value::Tensor(phi_2d),
+                Value::Tensor(y_1d),
+            ],
+        );
+        let _ = call(
+            "abng_observe",
+            &[Value::Int(g_three), Value::Int(leaf_three), Value::Float(y_val)],
+        );
+
+        // ── Graph B: fused train_step ─────────────────────────────────
+        let x_t2 = cjc_runtime::tensor::Tensor::from_vec(vec![x_val], &[1]).unwrap();
+        let phi_1d = cjc_runtime::tensor::Tensor::from_vec(phi.to_vec(), &[4]).unwrap();
+        let leaf_fused = match call(
+            "abng_train_step",
+            &[
+                Value::Int(g_fused),
+                Value::Tensor(x_t2),
+                Value::Tensor(phi_1d),
+                Value::Float(y_val),
+            ],
+        ) {
+            Value::Int(i) => i,
+            _ => panic!("expected int leaf"),
+        };
+
+        // Same leaf id and same chain head after each row.
+        assert_eq!(
+            leaf_three, leaf_fused,
+            "leaf id divergence at x={x_val}"
+        );
+        let head_three = match call("abng_chain_head", &[Value::Int(g_three)]) {
+            Value::String(s) => (*s).clone(),
+            _ => panic!(),
+        };
+        let head_fused = match call("abng_chain_head", &[Value::Int(g_fused)]) {
+            Value::String(s) => (*s).clone(),
+            _ => panic!(),
+        };
+        assert_eq!(
+            head_three, head_fused,
+            "chain_head divergence after row x={x_val}, y={y_val}"
+        );
+    }
+}
+
+#[test]
+fn train_step_arg_count_validation() {
+    reset_arena();
+    let _ = new_graph(0);
+    let err = try_call("abng_train_step", &[Value::Int(0)]).unwrap_err();
+    assert!(
+        err.contains("expected 4 arguments"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn train_step_dimension_errors_propagate() {
+    reset_arena();
+    let g = install_full_training_setup(0);
+    // Wrong x dim (codebook expects 1-D length 1; pass length 2).
+    let bad_x = cjc_runtime::tensor::Tensor::from_vec(vec![0.1, 0.2], &[2]).unwrap();
+    let phi = cjc_runtime::tensor::Tensor::from_vec(vec![1.0, 0.5, 0.25, 0.125], &[4]).unwrap();
+    let err = try_call(
+        "abng_train_step",
+        &[
+            Value::Int(g),
+            Value::Tensor(bad_x),
+            Value::Tensor(phi),
+            Value::Float(0.5),
+        ],
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("expected 1") || err.contains("arity") || err.contains("got 2"),
+        "expected arity/dim error, got: {err}"
+    );
+}

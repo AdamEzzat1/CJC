@@ -137,6 +137,57 @@ fn main() {
         emit("blr_predict", N_ITERS, elapsed.as_nanos(), per_op);
     }
 
+    // ── train_step vs 3-call (Phase 0.7 Item 4) ──────────────────────
+    //
+    // Compares the fused `Graph::train_step` Rust call against the
+    // canonical 3-call training sequence (`encode_prefix` + `descend` +
+    // `blr_update` + `observe`). This bench measures the Rust-API cost
+    // — the bigger language-level win is the ~5-10 us saved per row by
+    // collapsing 3 CJC-Lang dispatches into 1, which this bench does
+    // NOT capture (no interpreter dispatch in either path).
+    {
+        let n_iters = 5_000_usize;
+        // Fresh graph per loop iteration: training mutates state.
+        // Use the same setup pattern as `build_graph` (1-D codebook,
+        // 4-element leaf head, BLR prior).
+        let phi = [1.0_f64, 0.5, 0.25, 0.125];
+        let x = [0.5_f64];
+
+        // 3-call sequence baseline.
+        let mut g = build_graph(seed);
+        for _ in 0..N_WARMUP {
+            let prefix = g.encode_prefix(&x).unwrap();
+            let leaf = g.descend(&prefix).leaf_id;
+            g.blr_update(leaf, &phi, &[0.7]).unwrap();
+            g.observe(leaf, 0.7).unwrap();
+        }
+        let start = Instant::now();
+        for i in 0..n_iters {
+            let yi = 0.7 + (i as f64) * 0.0001;
+            let prefix = g.encode_prefix(&x).unwrap();
+            let leaf = g.descend(&prefix).leaf_id;
+            g.blr_update(leaf, &phi, &[yi]).unwrap();
+            g.observe(leaf, yi).unwrap();
+        }
+        let elapsed = start.elapsed();
+        let per_op = elapsed.as_nanos() as f64 / n_iters as f64;
+        emit("train_step_3call", n_iters, elapsed.as_nanos(), per_op);
+
+        // Fused train_step.
+        let mut g = build_graph(seed);
+        for _ in 0..N_WARMUP {
+            g.train_step(&x, &phi, 0.7).unwrap();
+        }
+        let start = Instant::now();
+        for i in 0..n_iters {
+            let yi = 0.7 + (i as f64) * 0.0001;
+            g.train_step(&x, &phi, yi).unwrap();
+        }
+        let elapsed = start.elapsed();
+        let per_op = elapsed.as_nanos() as f64 / n_iters as f64;
+        emit("train_step_fused", n_iters, elapsed.as_nanos(), per_op);
+    }
+
     // ── verify_chain (Phase 0.7 A) ────────────────────────────────────
     //
     // Builds a graph with N observations (so the audit log has ~N+5

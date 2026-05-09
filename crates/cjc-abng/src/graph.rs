@@ -1204,6 +1204,61 @@ impl AdaptiveBeliefGraph {
         Ok(())
     }
 
+    /// Phase 0.7 (Item 4) — fused per-row training step.
+    ///
+    /// Equivalent to:
+    /// ```ignore
+    ///     let leaf = g.descend(&g.encode_prefix(x)?).leaf_id;
+    ///     g.blr_update(leaf, phi, &[y_val])?;
+    ///     g.observe(leaf, y_val)?;
+    ///     Ok(leaf)
+    /// ```
+    /// but performs the route, blr_update, and observe in a single
+    /// Rust call. The savings come from collapsing three CJC-Lang
+    /// builtin dispatches into one — at the language interpreter
+    /// boundary the per-call overhead is on the order of ~5 µs each,
+    /// so a per-row training loop saves ~10 µs per row by going
+    /// through `train_step` instead.
+    ///
+    /// **Audit-chain compatibility.** This function emits the EXISTING
+    /// audit-event sequence: `BlrUpdated` (from `blr_update`) followed
+    /// by `BeliefUpdate` (from `observe`). No new `AuditKind` is
+    /// introduced — the v13 wire format and the 28 locked SHA-256
+    /// canaries are preserved. The chain_head after this call equals
+    /// the chain_head after running the 3-call sequence on identical
+    /// inputs from identical pre-state. Verified by the
+    /// `train_step_chain_head_matches_three_call_sequence` parity
+    /// test.
+    ///
+    /// Arguments:
+    /// * `x` — route input, length = `codebook.n_dims`. Used to walk
+    ///   the radix tree to a leaf node.
+    /// * `phi` — BLR feature vector, length = `blr_prior.d`. Treated
+    ///   as a single-row `[1, d]` design matrix for `blr_update`.
+    /// * `y_val` — observation value. Used both as the BLR target
+    ///   `y[0]` and as the `observe` value (matching the canonical
+    ///   3-call training pattern).
+    ///
+    /// Returns the leaf node id that received the update.
+    pub fn train_step(
+        &mut self,
+        x: &[f64],
+        phi: &[f64],
+        y_val: f64,
+    ) -> Result<NodeId, GraphError> {
+        // Step 1: route x → leaf. Same as `abng_route_to_leaf`.
+        let prefix = self.encode_prefix(x)?;
+        let leaf = self.descend(&prefix).leaf_id;
+        // Step 2: BLR update at leaf, single row. The `[y_val]` array
+        // lives on the stack; no heap allocation for this 1-element
+        // slice.
+        let y_arr = [y_val];
+        self.blr_update(leaf, phi, &y_arr)?;
+        // Step 3: observe at leaf.
+        self.observe(leaf, y_val)?;
+        Ok(leaf)
+    }
+
     /// Phase 0.4 Track C-2.3.5 — reset the BLR posterior on a node back
     /// to the configured prior, refreshing `feature_version_hash` to
     /// the current per-node MLP params. Use this after intentionally

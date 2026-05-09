@@ -918,6 +918,33 @@ pub fn dispatch_abng(name: &str, args: &[Value]) -> Result<Option<Value>, String
             })??;
             Value::Void
         }
+        "abng_train_step" => {
+            // Phase 0.7 (Item 4) — fused per-row training step.
+            // abng_train_step(graph_id, x_1d, phi_1d, y_val) -> Int (leaf)
+            //
+            // Bit-equivalent to:
+            //   let leaf = abng_route_to_leaf(g, x);
+            //   abng_blr_update(g, leaf, reshape_2d(phi), [y_val]);
+            //   abng_observe(g, leaf, y_val);
+            //   leaf
+            //
+            // Saves two interpreter dispatches + the per-call argument
+            // marshalling for the BLR features Tensor (which has to be
+            // 2-D for `abng_blr_update`; here we stay in flat-slice
+            // land). Audit events emitted are byte-identical to the
+            // 3-call sequence, so the chain witness is preserved and
+            // the 28 locked canaries verify byte-identically.
+            arg_count(name, args, 4)?;
+            let id = arg_i64(name, &args[0])?;
+            let x = arg_tensor_1d_f64(name, &args[1])?;
+            let phi = arg_tensor_1d_f64(name, &args[2])?;
+            let y_val = arg_f64(name, &args[3])?;
+            let leaf = with_graph(name, id, |g| {
+                g.train_step(&x, &phi, y_val)
+                    .map_err(|e| graph_err_to_string(name, e))
+            })??;
+            Value::Int(leaf as i64)
+        }
         "abng_blr_predict" => {
             // abng_blr_predict(graph_id, node_id, phi_1d) -> Tensor[3]
             arg_count(name, args, 3)?;
