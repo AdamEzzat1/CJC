@@ -253,4 +253,74 @@ proptest! {
         prop_assert_eq!(g_naive.chain_head, g_smart.chain_head);
         prop_assert_eq!(serialize(&g_naive), serialize(&g_smart));
     }
+
+    /// Property 7 (Phase 0.6 Item 4): for any random observation
+    /// stream, applying via N per-row `observe()` calls produces a
+    /// graph with the same `NodeStats::canonical_bytes` as one
+    /// `observe_batch(values)` call. This is the bit-identity contract
+    /// for the v13 batch path — Welford folds in row order with Kahan
+    /// compensation regardless of which API is used.
+    ///
+    /// The chain heads will differ (per-row emits N events vs batch
+    /// emits 1) — that's expected and is NOT asserted here.
+    #[test]
+    fn batch_canonical_bytes_match_per_row(
+        seed in 0u64..1_000_000,
+        observations in arb_observation_stream(),
+    ) {
+        // Filter out non-finite values; observe_batch rejects them at
+        // the boundary, and we want the property to test the math
+        // path, not error handling. Empty streams skip the property.
+        let values: Vec<f64> = observations
+            .into_iter()
+            .filter(|v| v.is_finite())
+            .collect();
+        if values.is_empty() {
+            return Ok(());
+        }
+
+        let mut g_per_row = AdaptiveBeliefGraph::new(seed);
+        for &v in &values {
+            g_per_row.observe(0, v).unwrap();
+        }
+
+        let mut g_batch = AdaptiveBeliefGraph::new(seed);
+        g_batch.observe_batch(0, &values).unwrap();
+
+        prop_assert_eq!(
+            g_per_row.nodes[0].stats.canonical_bytes(),
+            g_batch.nodes[0].stats.canonical_bytes()
+        );
+        // Final n_seen must match.
+        prop_assert_eq!(
+            g_per_row.nodes[0].stats.n_seen,
+            g_batch.nodes[0].stats.n_seen
+        );
+        prop_assert_eq!(g_batch.nodes[0].stats.n_seen, values.len() as u64);
+    }
+
+    /// Property 8 (Phase 0.6 Item 4): batch path round-trips through
+    /// serialize+replay byte-identically — a graph built via
+    /// `observe_batch` must serialize, replay, and re-serialize to the
+    /// exact same blob.
+    #[test]
+    fn batch_serialize_replay_byte_identical(
+        seed in 0u64..1_000_000,
+        observations in arb_observation_stream(),
+    ) {
+        let values: Vec<f64> = observations
+            .into_iter()
+            .filter(|v| v.is_finite())
+            .collect();
+        if values.is_empty() {
+            return Ok(());
+        }
+        let mut g = AdaptiveBeliefGraph::new(seed);
+        g.observe_batch(0, &values).unwrap();
+        let blob1 = serialize(&g);
+        let g2 = replay(&blob1).unwrap();
+        let blob2 = serialize(&g2);
+        prop_assert_eq!(blob1, blob2);
+        prop_assert_eq!(g.chain_head, g2.chain_head);
+    }
 }

@@ -141,8 +141,11 @@ fn main() {
     // ── Phase 0.6 Item 3: smart-replay fast-forward speedup ────────────
     bench_smart_replay_vs_naive(seed);
 
+    // ── Phase 0.6 Item 4: observe_batch vs per-row observe speedup ────
+    bench_observe_batch(seed);
+
     eprintln!("=== Done ===");
-    eprintln!("Phase 0.6 Item 2 baseline + Item 3 smart-replay speedup. Item 4 perf wins compare against these.");
+    eprintln!("Phase 0.6 Item 2 baseline + Item 3 smart-replay + Item 4 batch-observe speedups.");
 }
 
 /// Phase 0.6 Item 3 — measure smart-replay fast-forward speedup over
@@ -220,4 +223,63 @@ fn bench_smart_replay_vs_naive(seed: u64) {
         pre_audit_len,
         blob_size,
     );
+}
+
+/// Phase 0.6 Item 4 — measure observe_batch speedup at varying batch
+/// sizes. The handoff target was ≥10× at n=1024.
+///
+/// Compares three paths for the same N observations on the same node:
+///   - per-row N × `g.observe(node, value)` (N audit events, N
+///     stats_chain advances)
+///   - `g.observe_slice(node, values)` (legacy loop semantics — same
+///     as per-row, just a single dispatch call)
+///   - `g.observe_batch(node, values)` (1 BeliefUpdateBatch event,
+///     1 stats_chain advance — the v13 perf win)
+///
+/// All three produce bit-identical NodeStats canonical_bytes. Only the
+/// audit-chain accounting differs.
+fn bench_observe_batch(seed: u64) {
+    const N_TRIALS: usize = 5;
+
+    for &n in &[64usize, 1024usize] {
+        // Generate the same value sequence for all three paths.
+        let values: Vec<f64> = (0..n).map(|i| (i as f64) * 0.001 - 0.3).collect();
+
+        // Per-row.
+        let mut per_row_min_ns = u128::MAX;
+        for _ in 0..N_TRIALS {
+            let mut g = AdaptiveBeliefGraph::new(seed);
+            let start = Instant::now();
+            for &v in &values {
+                g.observe(0, v).unwrap();
+            }
+            let elapsed = start.elapsed().as_nanos();
+            if elapsed < per_row_min_ns {
+                per_row_min_ns = elapsed;
+            }
+        }
+
+        // Batch.
+        let mut batch_min_ns = u128::MAX;
+        for _ in 0..N_TRIALS {
+            let mut g = AdaptiveBeliefGraph::new(seed);
+            let start = Instant::now();
+            g.observe_batch(0, &values).unwrap();
+            let elapsed = start.elapsed().as_nanos();
+            if elapsed < batch_min_ns {
+                batch_min_ns = elapsed;
+            }
+        }
+
+        let speedup = per_row_min_ns as f64 / batch_min_ns as f64;
+        println!(
+            r#"{{"op":"observe_batch","n":{n},"per_row_min_ns":{per_row_min_ns},"batch_min_ns":{batch_min_ns},"speedup":{speedup:.2}}}"#
+        );
+        eprintln!(
+            "  observe_batch n={n:>4}: per_row={:>9.2}us  batch={:>7.2}us  speedup={:.2}x",
+            per_row_min_ns as f64 / 1e3,
+            batch_min_ns as f64 / 1e3,
+            speedup,
+        );
+    }
 }

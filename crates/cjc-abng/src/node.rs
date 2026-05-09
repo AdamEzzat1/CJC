@@ -207,9 +207,32 @@ impl AdaptiveBeliefNode {
         self.stats_version
     }
 
+    /// Phase 0.6 Item 4 — apply a batch of observations as a single
+    /// audit-eligible mutation. Folds N values through Welford in row
+    /// order (preserves Kahan determinism), bumps `stats_version` by
+    /// 1 (NOT N — the batch is one logical event), and advances the
+    /// per-node stats chain head ONCE at the end.
+    ///
+    /// Determinism contract: post-batch `stats.canonical_bytes()` is
+    /// bit-identical to applying the same `values` slice through N
+    /// sequential `observe()` calls. The stats_chain_head WILL differ
+    /// because per-row updates emit N chain advances vs one for a
+    /// batch — they're different audit histories of the same final
+    /// state.
+    pub fn observe_batch_apply(&mut self, values: &[f64]) -> u64 {
+        for v in values {
+            self.stats.observe(*v);
+        }
+        self.stats_version += 1;
+        self.advance_stats_chain();
+        self.stats_version
+    }
+
     /// Advance the per-node stats chain to the post-update stats hash.
-    /// Internal — called from `observe`.
-    fn advance_stats_chain(&mut self) {
+    /// `pub(crate)` so the replay path can drive batch / install
+    /// updates from outside this module without going through
+    /// `observe`.
+    pub(crate) fn advance_stats_chain(&mut self) {
         // 32 (prev chain head) + 32 (canonical_bytes, Phase 0.5 v12).
         let mut buf = Vec::with_capacity(32 + 32);
         buf.extend_from_slice(&self.stats_chain_head);

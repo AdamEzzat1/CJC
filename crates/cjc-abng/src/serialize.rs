@@ -36,7 +36,12 @@ use crate::node::{AdaptiveBeliefNode, NodeId};
 use crate::policy::DecisionPolicy;
 use crate::stats::NodeStats;
 
-const MAGIC: &[u8; 5] = b"ABNG\x0C";
+// Phase 0.6 Item 4 — wire format v13 (`\x0D`). Bumped from v12 to
+// absorb the new `AuditKind::BeliefUpdateBatch` variant (tag `0x1D`)
+// with its variable-length payload (count u32 + values f64×count +
+// batch_hash [u8; 32]). All 15 Phase 0.5 SHA-256 canaries are
+// re-locked simultaneously as part of this bump.
+const MAGIC: &[u8; 5] = b"ABNG\x0D";
 
 /// Errors returned by snapshot decoding.
 #[derive(Debug, PartialEq)]
@@ -132,6 +137,15 @@ pub enum DecodeError {
     /// Indicates either the audit-event payload or the per-node
     /// section was tampered with.
     StatsSnapshotMismatch { node_id: NodeId, at_seq: u64 },
+    /// Phase 0.6 Item 4 — a `BeliefUpdateBatch` event decoded with
+    /// `count == 0`. Empty batches are rejected at both the encode
+    /// and decode boundary; an empty observation list is a no-op
+    /// best expressed by simply not calling `observe_batch`.
+    EmptyBatch,
+    /// Phase 0.6 Item 4 — a `BeliefUpdateBatch` event's recorded
+    /// `batch_hash` did not equal the recomputed
+    /// `sha256(count_be ‖ values_be)`. Indicates payload tamper.
+    BatchHashMismatch { at_seq: u64 },
 }
 
 impl std::fmt::Display for DecodeError {
@@ -194,6 +208,14 @@ impl std::fmt::Display for DecodeError {
             DecodeError::StatsSnapshotMismatch { node_id, at_seq } => write!(
                 f,
                 "abng: StatsSnapshot stats_hash mismatch on node {node_id} at seq {at_seq}"
+            ),
+            DecodeError::EmptyBatch => write!(
+                f,
+                "abng: BeliefUpdateBatch event has count=0; empty batches are rejected"
+            ),
+            DecodeError::BatchHashMismatch { at_seq } => write!(
+                f,
+                "abng: BeliefUpdateBatch batch_hash does not match sha256(count ‖ values) at seq {at_seq}"
             ),
         }
     }
@@ -2169,6 +2191,48 @@ fn apply_event(
             }
             graph.nodes[*node_id as usize].provenance_stamp_hash = *hash;
         }
+        AuditKind::BeliefUpdateBatch {
+            count,
+            batch_hash,
+            values,
+        } => {
+            // Phase 0.6 Item 4 — apply the batched observations.
+            //
+            // Validation: count == values.len() (decoded), count >= 1
+            // (decoder rejects 0), batch_hash matches the recomputed
+            // sha256 of count_be ‖ values_be.
+            //
+            // State change: apply N Welford observes to node.stats in
+            // row order (preserves Kahan determinism), bump
+            // stats_version by 1, advance stats_chain ONCE. The
+            // single chain advance is the wire-format contract — a
+            // round-trip from an observe_batch-built graph back into
+            // the audit log must produce one BeliefUpdateBatch event,
+            // not N BeliefUpdate events.
+            if event.node_id as usize >= graph.nodes.len() {
+                return Err(DecodeError::ChainMismatch { at_seq: event.seq });
+            }
+            if *count == 0 || values.len() as u32 != *count {
+                return Err(DecodeError::EmptyBatch);
+            }
+            // Recompute batch_hash and verify.
+            let mut buf = Vec::with_capacity(4 + 8 * values.len());
+            buf.extend_from_slice(&count.to_be_bytes());
+            for v in values {
+                buf.extend_from_slice(&v.to_bits().to_be_bytes());
+            }
+            let recomputed_batch_hash = cjc_snap::hash::sha256(&buf);
+            if recomputed_batch_hash != *batch_hash {
+                return Err(DecodeError::BatchHashMismatch {
+                    at_seq: event.seq,
+                });
+            }
+            let node = &mut graph.nodes[event.node_id as usize];
+            // Single helper — applies N Welford observes in row order,
+            // bumps stats_version by 1, advances stats_chain once.
+            // Matches what `Graph::observe_batch` did at emit time.
+            node.observe_batch_apply(values);
+        }
     }
     Ok(())
 }
@@ -2360,6 +2424,35 @@ fn decode_payload(
             let hash = cur.hash32()?;
             AuditKind::ProvenanceStamped { node_id, hash }
         }
+        0x1D => {
+            // Phase 0.6 Item 4 — BeliefUpdateBatch. Variable body:
+            //   count u32 BE (4)
+            //   values f64×count (8 * count, each .to_bits().to_be_bytes())
+            //   batch_hash [u8; 32] (32)
+            let count = cur.u32_be()?;
+            // Defensive: reject empty or absurdly large batches at
+            // the boundary. An adversarial blob claiming
+            // `count = u32::MAX` would otherwise drive `Vec::new`
+            // growth past the cursor's remaining bytes; cur.f64_be()
+            // would error first, but we add an explicit guard so the
+            // surfaced error names the problem.
+            if count == 0 {
+                return Err(DecodeError::EmptyBatch);
+            }
+            // 8 * count must not overflow + must not exceed remaining
+            // cursor space. Use `Vec::new()` (not `with_capacity`) so
+            // an adversarial `count` cannot drive a giant pre-allocation.
+            let mut values: Vec<f64> = Vec::new();
+            for _ in 0..count {
+                values.push(cur.f64_be()?);
+            }
+            let batch_hash = cur.hash32()?;
+            AuditKind::BeliefUpdateBatch {
+                count,
+                batch_hash,
+                values,
+            }
+        }
         other => return Err(DecodeError::UnknownKindTag(other)),
     };
     let stats_version = cur.u64_be()?;
@@ -2489,18 +2582,40 @@ mod tests {
     // ── Phase 0.4-extended (v11) — snapshot v11 ────────────────────
 
     #[test]
-    fn v11_magic_in_blob() {
+    fn v13_magic_in_blob() {
+        // Phase 0.6 Item 4 — wire format v13 (`\x0D`). Bumped from
+        // v12 to absorb the new `BeliefUpdateBatch` audit kind
+        // (tag 0x1D).
         let g = AdaptiveBeliefGraph::new(0);
         let blob = serialize(&g);
-        assert_eq!(&blob[..5], b"ABNG\x0C");
+        assert_eq!(&blob[..5], b"ABNG\x0D");
+    }
+
+    #[test]
+    fn v12_magic_rejected() {
+        // After the v12 → v13 bump (Phase 0.6 Item 4:
+        // BeliefUpdateBatch audit kind at tag 0x1D), v12 blobs are no
+        // longer accepted.
+        let g = AdaptiveBeliefGraph::new(0);
+        let mut blob = serialize(&g);
+        blob[4] = 0x0C;
+        assert_eq!(replay(&blob).unwrap_err(), DecodeError::BadMagic);
+    }
+
+    #[test]
+    fn v11_magic_rejected() {
+        // After the v11 → v12 bump (Items A + B: DecisionPolicy gained
+        // ece_stability_max_delta + sigma_stability_ratio thresholds;
+        // graph header gained unfreeze_count u64), v11 blobs are no
+        // longer accepted.
+        let g = AdaptiveBeliefGraph::new(0);
+        let mut blob = serialize(&g);
+        blob[4] = 0x0B;
+        assert_eq!(replay(&blob).unwrap_err(), DecodeError::BadMagic);
     }
 
     #[test]
     fn v10_magic_rejected() {
-        // After the v10 → v11 bump (Items A + B: DecisionPolicy gained
-        // ece_stability_max_delta + sigma_stability_ratio thresholds;
-        // graph header gained unfreeze_count u64), v10 blobs are no
-        // longer accepted.
         let g = AdaptiveBeliefGraph::new(0);
         let mut blob = serialize(&g);
         blob[4] = 0x0A;

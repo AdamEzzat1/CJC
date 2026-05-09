@@ -122,12 +122,16 @@ fn parity_verify_chain_passes() {
     );
 }
 
-// ─── Batch observation ────────────────────────────────────────────────
+// ─── Batch observation (Phase 0.6 Item 4 / v13 semantics) ───────────
 
 #[test]
-fn parity_observe_batch_equals_individual() {
+fn parity_observe_batch_chain_differs_from_individual() {
+    // Phase 0.6 Item 4 — abng_observe_batch emits ONE
+    // BeliefUpdateBatch event vs N BeliefUpdate events. Different
+    // audit histories → different chain heads. The parity gate
+    // checks AST↔MIR agreement on the (now `false`) boolean print.
     assert_parity(
-        "batch == individual chain head",
+        "batch chain head differs from per-row chain head",
         r#"
         let g_a = abng_new(0);
         abng_observe(g_a, 0, 1.0);
@@ -136,6 +140,26 @@ fn parity_observe_batch_equals_individual() {
         let g_b = abng_new(0);
         let xs = Tensor.from_vec([1.0, 2.0, 3.0], [3]);
         abng_observe_batch(g_b, 0, xs);
+        print(abng_chain_head(g_a) == abng_chain_head(g_b));
+        "#,
+    );
+}
+
+#[test]
+fn parity_observe_slice_chain_equals_individual() {
+    // Phase 0.6 Item 4 — abng_observe_slice preserves the legacy
+    // loop-observe semantics: N BeliefUpdate events, same chain
+    // head as N per-row observe calls.
+    assert_parity(
+        "slice chain head equals per-row chain head",
+        r#"
+        let g_a = abng_new(0);
+        abng_observe(g_a, 0, 1.0);
+        abng_observe(g_a, 0, 2.0);
+        abng_observe(g_a, 0, 3.0);
+        let g_b = abng_new(0);
+        let xs = Tensor.from_vec([1.0, 2.0, 3.0], [3]);
+        abng_observe_slice(g_b, 0, xs);
         print(abng_chain_head(g_a) == abng_chain_head(g_b));
         "#,
     );

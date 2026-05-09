@@ -130,6 +130,10 @@ pub enum GraphError {
     /// so a rejected call leaves the chain head and stats version
     /// unchanged.
     ObserveNonFinite { value: f64 },
+    /// Phase 0.6 Item 4 — `observe_batch` was called with an empty
+    /// values slice. Empty batches are rejected; they would emit a
+    /// no-op event that bloats the audit log without state effect.
+    EmptyBatch,
 }
 
 impl From<PolicyError> for GraphError {
@@ -210,6 +214,10 @@ impl std::fmt::Display for GraphError {
             GraphError::ObserveNonFinite { value } => write!(
                 f,
                 "abng observe: value {value} must be finite (rejected NaN/+Inf/-Inf)"
+            ),
+            GraphError::EmptyBatch => write!(
+                f,
+                "abng observe_batch: empty values slice rejected (use observe for n=0 no-op semantics)"
             ),
         }
     }
@@ -368,6 +376,77 @@ impl AdaptiveBeliefGraph {
         for &v in values {
             self.observe(node_id, v)?;
         }
+        Ok(())
+    }
+
+    /// Phase 0.6 Item 4 — apply N observations to a single node in
+    /// row order, emitting ONE `BeliefUpdateBatch` audit event covering
+    /// the whole batch.
+    ///
+    /// Functionally equivalent to N sequential calls to
+    /// [`Self::observe`] in terms of the post-batch
+    /// [`crate::stats::NodeStats::canonical_bytes`] (Welford folds in
+    /// the same row order with the same Kahan compensation), but
+    /// emits exactly ONE chain-hash event instead of N. For
+    /// 10⁴-row training loops this is the second-largest perf win in
+    /// Phase 0.6 after smart-replay.
+    ///
+    /// # Determinism contract
+    /// - Post-batch `node.stats.canonical_bytes()` is bit-identical to
+    ///   the per-row equivalent.
+    /// - The per-node `stats_chain_head` and the global `chain_head`
+    ///   WILL differ from the per-row path (one chain entry vs N).
+    ///   `observe_batch` and `observe_slice` are therefore not
+    ///   interchangeable from a chain-witness perspective — they are
+    ///   different audit histories of the same final stats state.
+    ///
+    /// # Errors
+    /// - [`GraphError::NodeOutOfRange`] if `node_id >= n_nodes`.
+    /// - [`GraphError::EmptyBatch`] if `values.is_empty()`.
+    /// - [`GraphError::ObserveNonFinite`] if any value is NaN/+Inf/-Inf;
+    ///   rejected at the boundary before any state mutation or audit
+    ///   append.
+    pub fn observe_batch(
+        &mut self,
+        node_id: NodeId,
+        values: &[f64],
+    ) -> Result<(), GraphError> {
+        let n_nodes = self.node_count();
+        if node_id >= n_nodes {
+            return Err(GraphError::NodeOutOfRange { node_id, n_nodes });
+        }
+        if values.is_empty() {
+            return Err(GraphError::EmptyBatch);
+        }
+        for &v in values {
+            if !v.is_finite() {
+                return Err(GraphError::ObserveNonFinite { value: v });
+            }
+        }
+        // Compute the batch hash from canonical bytes BEFORE applying
+        // anything; the hash is canonical and order-sensitive, matching
+        // the encode order in `AuditKind::BeliefUpdateBatch::payload_bytes`.
+        let count = values.len() as u32;
+        let mut buf = Vec::with_capacity(4 + 8 * values.len());
+        buf.extend_from_slice(&count.to_be_bytes());
+        for &v in values {
+            buf.extend_from_slice(&v.to_bits().to_be_bytes());
+        }
+        let batch_hash = cjc_snap::hash::sha256(&buf);
+
+        // Apply the batch (single helper bumps stats_version by 1 and
+        // advances stats_chain once at the end — see docs on
+        // `AdaptiveBeliefNode::observe_batch_apply`).
+        self.nodes[node_id as usize].observe_batch_apply(values);
+
+        self.append_event(
+            node_id,
+            AuditKind::BeliefUpdateBatch {
+                count,
+                batch_hash,
+                values: values.to_vec(),
+            },
+        );
         Ok(())
     }
 

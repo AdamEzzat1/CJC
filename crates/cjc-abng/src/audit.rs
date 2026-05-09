@@ -293,6 +293,38 @@ pub enum AuditKind {
         /// 32-byte caller-chosen provenance fingerprint.
         hash: [u8; 32],
     },
+    /// Phase 0.6 Item 4 — batched `BeliefUpdate`. Collapses N
+    /// per-row observations on the same node into one audit event,
+    /// saving (N-1) chain-hash recomputations and (N-1) per-node
+    /// `stats_chain_head` SHA-256 advances. Tag `0x1D`.
+    ///
+    /// Determinism contract: the post-batch `NodeStats::canonical_bytes`
+    /// must be bit-identical to applying the same `values` slice via
+    /// N sequential `observe()` calls in row order. The stats chain
+    /// head WILL differ from the per-row path (one advance per batch
+    /// vs N advances), but per-batch and per-row are not interchangeable
+    /// from a chain-witness perspective — they are different audit
+    /// histories.
+    ///
+    /// Payload format: `count u32 BE ‖ values f64×count (each as
+    /// `.to_bits().to_be_bytes()`) ‖ batch_hash [u8; 32]`. The
+    /// `batch_hash` is `sha256(count_be ‖ values_be)`, redundant with
+    /// the audit chain hash but explicit so consumers (e.g.
+    /// `cjcl abng inspect --json`) can present a per-batch tamper
+    /// signal without rehashing the full payload.
+    BeliefUpdateBatch {
+        /// Number of observations in this batch (>= 1, > u32::MAX is
+        /// rejected at the boundary).
+        count: u32,
+        /// SHA-256 of `count_be ‖ values_be`. Redundant w.r.t. the
+        /// audit chain hash but kept for explicit per-batch tamper
+        /// inspection.
+        batch_hash: [u8; 32],
+        /// The actual observation values, in arrival order. Stored in
+        /// the kind so replay can reproduce the Welford state by
+        /// applying each value sequentially.
+        values: Vec<f64>,
+    },
 }
 
 /// `AuditKind::BlrNumericalRescue::reason` value: post-update `b` would
@@ -340,6 +372,9 @@ impl AuditKind {
             // Phase 0.5 Item 1 — opt-in provenance stamping. 36-byte
             // canonical body (node_id u32 BE + hash [u8; 32]).
             AuditKind::ProvenanceStamped { .. } => 0x1C,
+            // Phase 0.6 Item 4 — batched BeliefUpdate. Variable-size
+            // body (4 + 8*count + 32). Forces wire-format v13.
+            AuditKind::BeliefUpdateBatch { .. } => 0x1D,
         }
     }
 }
@@ -523,6 +558,21 @@ impl AuditEvent {
                 // hash [u8; 32].
                 out.extend_from_slice(&node_id.to_be_bytes());
                 out.extend_from_slice(hash);
+            }
+            AuditKind::BeliefUpdateBatch {
+                count,
+                batch_hash,
+                values,
+            } => {
+                // Phase 0.6 Item 4 — variable body:
+                //   count u32 BE (4)
+                //   values f64×count (8 * count, each .to_bits().to_be_bytes())
+                //   batch_hash [u8; 32] (32)
+                out.extend_from_slice(&count.to_be_bytes());
+                for v in values {
+                    out.extend_from_slice(&v.to_bits().to_be_bytes());
+                }
+                out.extend_from_slice(batch_hash);
             }
         }
         out.extend_from_slice(&self.stats_version.to_be_bytes());

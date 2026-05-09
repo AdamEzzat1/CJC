@@ -54,34 +54,76 @@ fn graphs_are_independent() {
 }
 
 #[test]
-fn observe_batch_matches_individual() {
+fn observe_batch_stats_match_individual_but_chain_differs() {
+    // Phase 0.6 Item 4 (v13) — `abng_observe_batch` now emits ONE
+    // BeliefUpdateBatch event instead of N BeliefUpdate events.
+    // Post-batch stats are bit-identical to N per-row observes
+    // (Welford in row order with Kahan compensation), but the chain
+    // head differs because they're different audit histories. Use
+    // `abng_observe_slice` for the legacy loop-observe semantics.
     reset_arena();
     let g_indiv = new_graph(0);
     let g_batch = new_graph(0);
+    let g_slice = new_graph(0);
     for v in [1.0, 2.0, 3.0, 4.0, 5.0] {
         let _ = call(
             "abng_observe",
             &[Value::Int(g_indiv), Value::Int(0), Value::Float(v)],
         );
     }
-    let batch = cjc_runtime::tensor::Tensor::from_vec(
+    let batch_t = cjc_runtime::tensor::Tensor::from_vec(
         vec![1.0, 2.0, 3.0, 4.0, 5.0],
         &[5],
     )
     .unwrap();
     let _ = call(
         "abng_observe_batch",
-        &[Value::Int(g_batch), Value::Int(0), Value::Tensor(batch)],
+        &[
+            Value::Int(g_batch),
+            Value::Int(0),
+            Value::Tensor(batch_t.clone()),
+        ],
     );
-    let head_a = match call("abng_chain_head", &[Value::Int(g_indiv)]) {
+    let _ = call(
+        "abng_observe_slice",
+        &[Value::Int(g_slice), Value::Int(0), Value::Tensor(batch_t)],
+    );
+
+    let head_indiv = match call("abng_chain_head", &[Value::Int(g_indiv)]) {
         Value::String(s) => (*s).clone(),
         _ => panic!(),
     };
-    let head_b = match call("abng_chain_head", &[Value::Int(g_batch)]) {
+    let head_batch = match call("abng_chain_head", &[Value::Int(g_batch)]) {
         Value::String(s) => (*s).clone(),
         _ => panic!(),
     };
-    assert_eq!(head_a, head_b);
+    let head_slice = match call("abng_chain_head", &[Value::Int(g_slice)]) {
+        Value::String(s) => (*s).clone(),
+        _ => panic!(),
+    };
+    // Per-row and slice produce the same chain (slice is N per-row
+    // events under the hood).
+    assert_eq!(head_indiv, head_slice);
+    // Batch produces a different chain (one batch event vs N).
+    assert_ne!(head_batch, head_indiv);
+
+    // But all three end up with bit-identical NodeStats canonical
+    // bytes — Welford folds in the same row order regardless of
+    // chain accounting.
+    let stats_indiv = match call("abng_node_stats", &[Value::Int(g_indiv), Value::Int(0)]) {
+        Value::Tensor(t) => t.to_vec(),
+        _ => panic!(),
+    };
+    let stats_batch = match call("abng_node_stats", &[Value::Int(g_batch), Value::Int(0)]) {
+        Value::Tensor(t) => t.to_vec(),
+        _ => panic!(),
+    };
+    let stats_slice = match call("abng_node_stats", &[Value::Int(g_slice), Value::Int(0)]) {
+        Value::Tensor(t) => t.to_vec(),
+        _ => panic!(),
+    };
+    assert_eq!(stats_indiv, stats_batch);
+    assert_eq!(stats_indiv, stats_slice);
 }
 
 fn expect_int(v: Value) -> i64 {

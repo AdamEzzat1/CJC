@@ -426,6 +426,7 @@ mod inspect {
             AuditKind::Routed { .. } => "Routed",
             AuditKind::StatsSnapshot { .. } => "StatsSnapshot",
             AuditKind::ProvenanceStamped { .. } => "ProvenanceStamped",
+            AuditKind::BeliefUpdateBatch { .. } => "BeliefUpdateBatch",
         }
     }
 }

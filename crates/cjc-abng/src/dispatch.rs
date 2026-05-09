@@ -368,6 +368,30 @@ pub fn dispatch_abng(name: &str, args: &[Value]) -> Result<Option<Value>, String
             Value::Void
         }
         "abng_observe_batch" => {
+            // Phase 0.6 Item 4 (v13) — emits ONE `BeliefUpdateBatch`
+            // audit event covering all N values, instead of N per-row
+            // `BeliefUpdate` events. Post-batch
+            // `NodeStats::canonical_bytes` is bit-identical to the
+            // per-row equivalent (Welford folds in row order with
+            // Kahan compensation); the chain head WILL differ (one
+            // chain advance vs N). For the legacy "loop observe"
+            // semantics, use `abng_observe_slice`.
+            arg_count(name, args, 3)?;
+            let id = arg_i64(name, &args[0])?;
+            let node_id = arg_u32_node(name, &args[1])?;
+            let values = arg_tensor(name, &args[2])?.to_vec();
+            with_graph(name, id, |g| {
+                g.observe_batch(node_id, &values)
+                    .map_err(|e| graph_err_to_string(name, e))
+            })??;
+            Value::Void
+        }
+        "abng_observe_slice" => {
+            // Phase 0.6 Item 4 — explicit per-row loop semantics
+            // (N `BeliefUpdate` events, N chain advances). Provided
+            // as a stable opt-in for callers that need the legacy
+            // chain history (e.g. parity comparisons against pre-v13
+            // logs).
             arg_count(name, args, 3)?;
             let id = arg_i64(name, &args[0])?;
             let node_id = arg_u32_node(name, &args[1])?;
