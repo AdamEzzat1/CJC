@@ -46,7 +46,9 @@ pub use calibration::{CalibrationBins, CalibrationError};
 pub use children::{AdaptiveChildren, ChildrenKind};
 pub use codebook::{CodebookError, QuantileCodebook};
 pub use density::{DensityError, DensityTracker};
-pub use dispatch::dispatch_abng;
+pub use dispatch::{
+    arena_graph_count, arena_next_id, dispatch_abng, reset_arena,
+};
 pub use drift::{DriftBaseline, DriftError};
 pub use graph::{ActionKind, AdaptiveBeliefGraph, GraphError};
 pub use leaf_head::{LeafHead, LeafHeadError};

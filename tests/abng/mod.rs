@@ -48,6 +48,7 @@ mod multinode;
 mod observe_validation_tests;
 mod parallel_route_tests;
 mod parity;
+mod per_thread_arena_tests;
 mod parity_p2;
 mod parity_p3a;
 mod parity_p3b;
