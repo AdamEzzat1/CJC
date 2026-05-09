@@ -336,8 +336,11 @@ fn main() {
     // ── Phase 0.8 Item C3: concurrent multi-graph training scaling ────
     bench_concurrent_training_scaling(seed);
 
+    // ── Phase 0.8 Item D1: BLR predict cache hit vs miss ──────────────
+    bench_blr_predict_cache(seed);
+
     eprintln!("=== Done ===");
-    eprintln!("Phase 0.6 baseline + Items 3/4/7/8 perf wins + Phase 0.8 B1 mmap + C1 parallel route + D2 SIMD Kahan + B2 streaming encode + B3 zstd compression + C3 arena.");
+    eprintln!("Phase 0.6 baseline + Items 3/4/7/8 perf wins + Phase 0.8 B1 mmap + C1 parallel route + D2 SIMD Kahan + B2 streaming encode + B3 zstd compression + C3 arena + D1 BLR cache.");
 }
 
 /// Phase 0.6 Item 3 — measure smart-replay fast-forward speedup over
@@ -1222,4 +1225,75 @@ fn bench_concurrent_training_scaling(seed: u64) {
         concurrent_min_ns as f64 / 1e6,
         ratio,
     );
+}
+/// Phase 0.8 Item D1 — measure `BlrState::predict` with the cached
+/// Cholesky factor (cache hit, the new D1 path) vs without (cache
+/// miss, equivalent to pre-D1 behavior). The cache-miss measurement
+/// is the honest baseline because that's what every predict call
+/// did before D1 shipped.
+///
+/// Workload: prime a `BlrState` with `n_updates` rows so its
+/// precision matrix has accumulated state, then time `predict`
+/// repeatedly. Cache-hit measurements run a tight predict loop
+/// with the cache populated. Cache-miss measurements clear the
+/// cache before each predict to force the Cholesky.
+///
+/// Sweeps `d` in {4, 8, 16, 32} so the speedup curve as a function
+/// of dimension is visible. The handoff predicted ~30% at d=4 and
+/// ~70% at d=16+; at d=32 (PINN-style features) the win compounds.
+fn bench_blr_predict_cache(seed: u64) {
+    use cjc_abng::blr::BlrState;
+    let _ = seed; // unused: BLR math is seed-agnostic
+
+    const N_ITERS: usize = 50_000;
+    const N_UPDATES_PRIMING: usize = 64;
+
+    for &d in &[4usize, 8, 16, 32] {
+        // Prime the state: feed in `N_UPDATES_PRIMING` rows so
+        // precision is well-conditioned (not the prior identity).
+        let prior = BlrPrior::new(2.0, 1.0, 0.5).unwrap();
+        let mut s = BlrState::from_prior(&prior, d as u32);
+        let phi: Vec<f64> = (0..d).map(|i| 1.0 / ((i + 1) as f64)).collect();
+        for k in 0..N_UPDATES_PRIMING {
+            let yi = [0.7 + (k as f64) * 0.0001];
+            s.update(&phi, &yi).unwrap();
+        }
+        // Cache is populated by the last update. Verify.
+        assert!(s.cached_l.borrow().is_some());
+
+        // ─ Cache-hit path (new D1 default) ────────────────────────
+        for _ in 0..N_WARMUP {
+            let _ = s.predict(&phi).unwrap();
+        }
+        let start = Instant::now();
+        for _ in 0..N_ITERS {
+            let _ = s.predict(&phi).unwrap();
+        }
+        let cached_elapsed = start.elapsed();
+        let cached_per_op = cached_elapsed.as_nanos() as f64 / N_ITERS as f64;
+
+        // ─ Cache-miss path (pre-D1 equivalent) ───────────────────
+        // Clear the cache before each predict to force fresh
+        // Cholesky on every call.
+        for _ in 0..N_WARMUP {
+            *s.cached_l.borrow_mut() = None;
+            let _ = s.predict(&phi).unwrap();
+        }
+        let start = Instant::now();
+        for _ in 0..N_ITERS {
+            *s.cached_l.borrow_mut() = None;
+            let _ = s.predict(&phi).unwrap();
+        }
+        let miss_elapsed = start.elapsed();
+        let miss_per_op = miss_elapsed.as_nanos() as f64 / N_ITERS as f64;
+
+        let speedup = miss_per_op / cached_per_op;
+        println!(
+            r#"{{"op":"blr_predict_cache","d":{d},"miss_ns":{miss_per_op:.2},"hit_ns":{cached_per_op:.2},"speedup":{speedup:.3}}}"#
+        );
+        eprintln!(
+            "  blr_predict_cache d={d:>2}: miss={:>8.0} ns/op  hit={:>8.0} ns/op  speedup={:.2}x",
+            miss_per_op, cached_per_op, speedup,
+        );
+    }
 }

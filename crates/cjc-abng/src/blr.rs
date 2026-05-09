@@ -33,6 +33,8 @@
 //! plain `+`/`-`/`*`/`/`/`sqrt` on `f64` with no FMA. Bit-deterministic
 //! for fixed input order across runs and platforms.
 
+use std::cell::RefCell;
+
 use cjc_repro::{KahanAccumulatorF64, KahanAccumulatorF64x4};
 use cjc_runtime::tensor::Tensor;
 
@@ -203,6 +205,44 @@ pub struct BlrState {
     /// "uninitialized features"); callers that construct a `BlrState`
     /// without going through the graph layer must set it manually.
     pub feature_version_hash: [u8; 32],
+    /// Phase 0.8 Item D1 — cached lower-triangular Cholesky factor
+    /// `L` of `precision`. Populated by [`BlrState::update`] and
+    /// [`BlrState::combine`] (which already compute it for their own
+    /// solves) and consumed by [`BlrState::predict`], which would
+    /// otherwise recompute Cholesky from scratch on every call
+    /// (`O(d^3 / 3)` flops).
+    ///
+    /// **NOT part of `canonical_bytes`.** This field is purely a
+    /// performance cache; the on-disk snapshot does not include it,
+    /// the SHA-256 chain does not depend on it, and any
+    /// (de)serialization round-trip leaves it as `None`. The first
+    /// `predict` after replay pays the Cholesky cost once and
+    /// repopulates the cache.
+    ///
+    /// **Determinism.** `update` and `combine` produce bit-identical
+    /// `mean` / `precision` / `a` / `b` / `n_seen` /
+    /// `feature_version_hash` to the pre-D1 code (the cache is set as
+    /// a side effect, not a math change). `predict` returns a tuple
+    /// computed from `L` — bit-identical regardless of whether `L`
+    /// came from the cache or from a fresh Cholesky on the same
+    /// `precision`, because `cholesky(precision)` is a deterministic
+    /// function.
+    ///
+    /// **Concurrency.** `RefCell` provides interior mutability so
+    /// `predict(&self, ...)` can populate the cache on miss. This is
+    /// safe in single-threaded use (which is the contract of the
+    /// per-thread arena from C3) and in the `route_to_leaf_batch_par`
+    /// path (which never touches BLR state). `BlrState` was already
+    /// `!Sync` (transitively, via `cjc_runtime::Tensor`'s `Rc`); the
+    /// `RefCell` does not change that.
+    ///
+    /// **Invariant.** `cached_l` is valid iff it equals
+    /// `cholesky(self.precision)`. Methods that mutate `precision`
+    /// (`update`, `combine`) must set `cached_l` to the freshly
+    /// computed factor. Methods that don't mutate `precision` must
+    /// not touch `cached_l` (other than to populate it on lazy
+    /// init).
+    pub cached_l: RefCell<Option<Vec<f64>>>,
 }
 
 impl BlrState {
@@ -227,6 +267,8 @@ impl BlrState {
             b: prior.b,
             n_seen: 0,
             feature_version_hash: [0u8; 32],
+            // Phase 0.8 D1 — first predict will lazy-populate.
+            cached_l: RefCell::new(None),
         }
     }
 
@@ -404,6 +446,10 @@ impl BlrState {
         self.a = a_new;
         self.b = b_new;
         self.n_seen = self.n_seen.saturating_add(n as u64);
+        // Phase 0.8 D1 — `l` is the Cholesky factor of `lambda_new`,
+        // which is now `self.precision`. Cache it so subsequent
+        // `predict` calls skip the redundant decomposition.
+        *self.cached_l.borrow_mut() = Some(l);
         Ok(rescue)
     }
 
@@ -440,8 +486,27 @@ impl BlrState {
         // epistemic_leverage = φ^T Λ^(-1) φ. Solve Λ x = φ via Cholesky,
         // then φ^T x. Since Λ = L L^T, φ^T Λ^(-1) φ = φ^T L^(-T) L^(-1) φ
         //                                            = ‖L^(-1) φ‖².
-        let prec = self.precision.to_vec();
-        let l = cholesky(&prec, self.d as usize)?;
+        //
+        // Phase 0.8 D1 — try the cached factor first. On miss
+        // (lazy init after deserialize, or first call before any
+        // update) compute fresh and populate the cache. Bit-identical
+        // either way: `cholesky(precision)` is deterministic.
+        //
+        // The two-step extract-then-match pattern is required because
+        // the outer `borrow()` and the inner `borrow_mut()` would
+        // otherwise conflict at runtime: `RefCell` panics on nested
+        // mutable-while-shared. Cloning the `Option<Vec<f64>>` ends
+        // the outer borrow before the match arm runs.
+        let cached = self.cached_l.borrow().clone();
+        let l = match cached {
+            Some(l) => l,
+            None => {
+                let prec = self.precision.to_vec();
+                let fresh = cholesky(&prec, self.d as usize)?;
+                *self.cached_l.borrow_mut() = Some(fresh.clone());
+                fresh
+            }
+        };
         let z = forward_subst(&l, self.d as usize, phi);
         let mut zsq = KahanAccumulatorF64::new();
         for &zi in &z {
@@ -534,6 +599,9 @@ impl BlrState {
         self.b = b_new;
         self.n_seen = self.n_seen.saturating_add(other.n_seen);
         // feature_version_hash unchanged — into's feature space wins.
+        // Phase 0.8 D1 — `l` is the Cholesky factor of `lambda_new`,
+        // which is now `self.precision`. Cache it for predict.
+        *self.cached_l.borrow_mut() = Some(l);
         Ok(())
     }
 

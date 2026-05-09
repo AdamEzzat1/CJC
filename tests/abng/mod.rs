@@ -25,6 +25,7 @@ mod demo_a2_fused_training;
 mod demo_a3_merkle_proof;
 mod demo_b3_zstd_snapshot;
 mod demo_c2_parallel_verify;
+mod blr_cache_tests;
 mod blr_feature_version_tests;
 mod blr_numerical_rescue_tests;
 mod blr_predict_fallback_tests;
