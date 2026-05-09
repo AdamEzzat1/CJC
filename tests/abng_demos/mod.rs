@@ -48,3 +48,7 @@ pub mod pinn_scaled_source;
 pub mod tabular_scaled_source;
 pub mod lineage_scaled_source;
 pub mod compact_scaled_source;
+pub mod ood_scaled_source;
+pub mod calibration_scaled_source;
+pub mod drift_scaled_source;
+pub mod maturity_scaled_source;
