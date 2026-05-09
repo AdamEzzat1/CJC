@@ -34,3 +34,11 @@ pub mod calibration_source;
 pub mod drift_source;
 pub mod compact_source;
 pub mod maturity_source;
+// Phase 0.6 Item 5 — five trigger-specific demos (Grow / Split /
+// Prune / Compress / Freeze). Each engineered to fire exactly that
+// trigger via `decide_step`'s policy gates.
+pub mod grow_source;
+pub mod split_source;
+pub mod prune_source;
+pub mod compress_source;
+pub mod freeze_source;
