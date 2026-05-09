@@ -23,6 +23,7 @@
 //! Invocation:
 //!     cargo run -p abng-micro --release > abng_micro.jsonl
 
+use cjc_abng::blr::{BlrPrior, BlrState};
 use cjc_abng::graph::AdaptiveBeliefGraph;
 use cjc_abng::serialize::{replay_with_outcome, serialize, ReplayOptions};
 use cjc_ad::pinn::Activation;
@@ -84,6 +85,35 @@ fn main() {
         let elapsed = start.elapsed();
         let per_op = elapsed.as_nanos() as f64 / N_ITERS as f64;
         emit("blr_update", N_ITERS, elapsed.as_nanos(), per_op);
+    }
+
+    // ── blr_state_update_direct (Phase 0.7 isolation bench) ──────────
+    //
+    // Calls `BlrState::update` directly with no graph dispatch / audit /
+    // chain-hashing. The full graph-level `blr_update` above includes
+    // ~5–8 µs of route+encode+chain-hash overhead per call, swamping
+    // any sub-µs change in the BLR math itself. This bench bypasses
+    // that scaffolding so future Phase 0.7+ work on the BlrState math
+    // (Cholesky factor caching, SIMD Kahan, packed precision matrix,
+    // etc.) can be measured against a tight noise floor (~929 ns/op,
+    // CV ~4% on Windows MSVC at d=4, n_iters=100k).
+    {
+        let n_iters = 100_000_usize;
+        let prior = BlrPrior::new(2.0, 1.0, 0.5).unwrap();
+        let mut s = BlrState::from_prior(&prior, 4);
+        let phi = [1.0_f64, 0.5, 0.25, 0.125];
+        let y = [0.7_f64];
+        for _ in 0..N_WARMUP {
+            s.update(&phi, &y).unwrap();
+        }
+        let start = Instant::now();
+        for i in 0..n_iters {
+            let yi = [0.7 + (i as f64) * 0.0001];
+            s.update(&phi, &yi).unwrap();
+        }
+        let elapsed = start.elapsed();
+        let per_op = elapsed.as_nanos() as f64 / n_iters as f64;
+        emit("blr_state_update_direct", n_iters, elapsed.as_nanos(), per_op);
     }
 
     // ── blr_predict ────────────────────────────────────────────────────
