@@ -137,6 +137,35 @@ fn main() {
         emit("blr_predict", N_ITERS, elapsed.as_nanos(), per_op);
     }
 
+    // ── verify_chain (Phase 0.7 A) ────────────────────────────────────
+    //
+    // Builds a graph with N observations (so the audit log has ~N+5
+    // entries — 4 setup + N observes), then measures `verify_chain`
+    // wall-clock. Phase 0.7 (A) replaced the per-event `payload_bytes()`
+    // Vec allocation with a single buffer reused across the verify
+    // walk; this bench captures the resulting speedup.
+    {
+        let n_events = 10_000_usize;
+        let mut g = build_graph(seed);
+        for i in 0..n_events {
+            g.observe(1, (i as f64) * 0.001).unwrap();
+        }
+        // Warm up the verify path so the first sample isn't paying
+        // page-fault / branch-predictor costs.
+        for _ in 0..3 {
+            g.verify_chain().unwrap();
+        }
+        let n_verifies = 50_usize;
+        let start = Instant::now();
+        for _ in 0..n_verifies {
+            g.verify_chain().unwrap();
+        }
+        let elapsed = start.elapsed();
+        // per-op = per chain-verify, NOT per event hash
+        let per_op = elapsed.as_nanos() as f64 / n_verifies as f64;
+        emit("verify_chain_10k", n_verifies, elapsed.as_nanos(), per_op);
+    }
+
     // ── codebook_encode_vs_encode_into (Phase 0.7 B) ──────────────────
     //
     // Direct comparison of allocating `encode` vs buffer-reuse

@@ -435,8 +435,29 @@ impl AuditEvent {
     ///   stats_hash             [u8; 32]
     /// ```
     /// The hash chain step is `new_hash = sha256(previous_hash ‖ payload)`.
+    ///
+    /// Allocates a fresh `Vec<u8>`. For hot loops (chain verification,
+    /// snapshot serialization) prefer [`write_payload`](Self::write_payload),
+    /// which writes into a caller-provided buffer reused across the
+    /// whole loop.
     pub fn payload_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(96);
+        self.write_payload(&mut out);
+        out
+    }
+
+    /// Write the payload bytes into a caller-provided `Vec<u8>` buffer.
+    ///
+    /// Phase 0.7 (A) — buffer-reuse variant of [`payload_bytes`](Self::payload_bytes).
+    /// Clears `out` at entry, then appends the same bytes that
+    /// `payload_bytes` would have returned. Used by `verify_chain` and
+    /// `serialize` to amortize the allocation across N audit events.
+    ///
+    /// Determinism: byte output is identical to `payload_bytes` —
+    /// they share this implementation. Verified by the in-crate parity
+    /// test `write_payload_matches_payload_bytes`.
+    pub fn write_payload(&self, out: &mut Vec<u8>) {
+        out.clear();
         out.extend_from_slice(&self.seq.to_be_bytes());
         out.extend_from_slice(&self.epoch.to_be_bytes());
         out.extend_from_slice(&self.node_id.to_be_bytes());
@@ -577,7 +598,6 @@ impl AuditEvent {
         }
         out.extend_from_slice(&self.stats_version.to_be_bytes());
         out.extend_from_slice(&self.stats_hash);
-        out
     }
 
     /// Compute the chain step `new_hash = sha256(previous_hash ‖ payload)`.
@@ -622,6 +642,113 @@ mod tests {
         // 8+8+4+1 (header) + 8 (value) + 8 (stats_version) + 32 (stats_hash) = 69
         let e = dummy_event(0, AuditKind::BeliefUpdate { value: 1.5 }, genesis_hash());
         assert_eq!(e.payload_bytes().len(), 69);
+    }
+
+    // ── Phase 0.7 (A) — write_payload parity + buffer-reuse semantics ─
+
+    #[test]
+    fn write_payload_matches_payload_bytes_for_every_kind() {
+        // The buffer-reuse variant must produce byte-identical output
+        // to the allocating variant; otherwise verify_chain or
+        // serialize would diverge from the chain witness, breaking the
+        // 28 SHA-256 canaries.
+        //
+        // We exercise one event of each AuditKind tag (0x00..0x1D) so
+        // any future variant that's added without mirroring its
+        // payload to write_payload is caught.
+        let prev = genesis_hash();
+        let kinds = [
+            AuditKind::Created,
+            AuditKind::BeliefUpdate { value: 1.5 },
+            AuditKind::NodeAdded { parent: 1, key_byte: 7 },
+            AuditKind::ChildrenPromoted {
+                from: ChildrenKind::None as u8,
+                to: ChildrenKind::Node4 as u8,
+            },
+            AuditKind::CodebookFrozen { codebook_hash: [9u8; 32] },
+            AuditKind::LeafHeadConfigured { config_hash: [1u8; 32] },
+            AuditKind::LeafParamsInitialized { params_hash: [2u8; 32] },
+            AuditKind::LeafParamsUpdated { params_hash: [3u8; 32] },
+            AuditKind::BlrPriorConfigured { config_hash: [4u8; 32] },
+            AuditKind::BlrInitialized { state_hash: [5u8; 32] },
+            AuditKind::BlrUpdated { state_hash: [6u8; 32] },
+            AuditKind::DensityTrackerInstalled { state_hash: [7u8; 32] },
+            AuditKind::DensityUpdated { state_hash: [8u8; 32] },
+            AuditKind::CalibrationInstalled { state_hash: [10u8; 32] },
+            AuditKind::CalibrationUpdated { state_hash: [11u8; 32] },
+            AuditKind::DriftBaselineFrozen { state_hash: [12u8; 32] },
+            AuditKind::ExpectedEpistemicCaptured { state_hash: [13u8; 32] },
+            AuditKind::Grow {
+                parent: 1,
+                key_byte: 2,
+                child: 3,
+            },
+            AuditKind::Split {
+                parent: 1,
+                child_a: 2,
+                child_b: 3,
+            },
+            AuditKind::Merge { absorbed: 1, into: 2 },
+            AuditKind::Prune { node_id: 5 },
+            AuditKind::Compress { signature: [14u8; 32] },
+            AuditKind::Freeze { node_id: 6 },
+            AuditKind::Unfreeze { node_id: 7 },
+            AuditKind::BlrNumericalRescue {
+                reason: 0,
+                b_pre_clamp_bits: 0xdeadbeefu64,
+            },
+            AuditKind::LeafParamsUpdatedBatch {
+                params_hash: [15u8; 32],
+            },
+            AuditKind::Routed {
+                leaf: 9,
+                matched_prefix: 4,
+            },
+            AuditKind::StatsSnapshot {
+                node_id: 10,
+                stats_hash: [16u8; 32],
+            },
+            AuditKind::ProvenanceStamped {
+                node_id: 11,
+                hash: [17u8; 32],
+            },
+            AuditKind::BeliefUpdateBatch {
+                count: 3,
+                batch_hash: [18u8; 32],
+                values: vec![1.5, -2.5, 3.5],
+            },
+        ];
+        let mut buf = Vec::new();
+        for (i, kind) in kinds.into_iter().enumerate() {
+            let e = dummy_event(i as u64, kind, prev);
+            let direct = e.payload_bytes();
+            e.write_payload(&mut buf);
+            assert_eq!(direct, buf, "mismatch at kind index {i}");
+        }
+    }
+
+    #[test]
+    fn write_payload_clears_existing_contents() {
+        // Buffer reuse contract: clear-on-entry, so callers can pass a
+        // dirty buffer and still get the canonical bytes out.
+        let e = dummy_event(0, AuditKind::Created, genesis_hash());
+        let direct = e.payload_bytes();
+        let mut buf = vec![99u8; 200];
+        e.write_payload(&mut buf);
+        assert_eq!(buf, direct);
+    }
+
+    #[test]
+    fn write_payload_reuse_is_byte_stable() {
+        // Two `write_payload` calls on the same buffer with the same
+        // event must produce identical bytes — proves the clear is
+        // correct (no stale bytes leak across calls).
+        let e = dummy_event(0, AuditKind::BeliefUpdate { value: 1.5 }, genesis_hash());
+        let mut buf = Vec::with_capacity(96);
+        e.write_payload(&mut buf);
+        let first = buf.clone();
+        e.write_payload(&mut buf);
+        assert_eq!(first, buf);
     }
 
     #[test]

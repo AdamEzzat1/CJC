@@ -782,11 +782,19 @@ impl AdaptiveBeliefGraph {
     /// stored chain is consistent.
     pub fn verify_chain(&self) -> Result<(), GraphError> {
         let mut prev = genesis_hash();
+        // Phase 0.7 (A): single payload buffer reused across all events.
+        // Pre-0.7 each event's `payload_bytes()` call allocated a fresh
+        // Vec<u8>, costing one heap round-trip per audit entry. With
+        // `write_payload` we keep one allocation alive for the whole
+        // verification walk and let the inner clear+extend reuse the
+        // capacity. Output bytes are byte-identical.
+        let mut payload_buf: Vec<u8> = Vec::with_capacity(96);
         for event in &self.audit {
             if event.previous_hash != prev {
                 return Err(GraphError::ChainBroken { at_seq: event.seq });
             }
-            let recomputed = AuditEvent::compute_new_hash(&prev, &event.payload_bytes());
+            event.write_payload(&mut payload_buf);
+            let recomputed = AuditEvent::compute_new_hash(&prev, &payload_buf);
             if recomputed != event.new_hash {
                 return Err(GraphError::ChainBroken { at_seq: event.seq });
             }

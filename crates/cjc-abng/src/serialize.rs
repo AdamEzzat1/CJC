@@ -376,12 +376,16 @@ pub fn serialize(graph: &AdaptiveBeliefGraph) -> Vec<u8> {
         out.extend_from_slice(&node.provenance_stamp_hash);
     }
 
-    // Audit log.
+    // Audit log. Phase 0.7 (A): single payload buffer reused across
+    // all events; `write_payload` clears+writes into it on each
+    // iteration. Pre-0.7 the loop allocated a fresh Vec<u8> per event
+    // via `payload_bytes()`. Output bytes are byte-identical.
     out.extend_from_slice(&(graph.audit.len() as u64).to_be_bytes());
+    let mut payload_buf: Vec<u8> = Vec::with_capacity(96);
     for event in &graph.audit {
-        let payload = event.payload_bytes();
-        out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-        out.extend_from_slice(&payload);
+        event.write_payload(&mut payload_buf);
+        out.extend_from_slice(&(payload_buf.len() as u32).to_be_bytes());
+        out.extend_from_slice(&payload_buf);
         out.extend_from_slice(&event.previous_hash);
         out.extend_from_slice(&event.new_hash);
     }
