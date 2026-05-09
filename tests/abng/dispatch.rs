@@ -38,6 +38,78 @@ fn arg_count_mismatch_errs() {
     assert!(err.contains("expected 1 arguments"));
 }
 
+// ── Phase 0.6 Item 7: abng_route_to_leaf native kernel ─────────────
+
+#[test]
+fn route_to_leaf_matches_three_call_sequence() {
+    // Phase 0.6 Item 7 — the fused native kernel must produce the
+    // same leaf id as the encode_prefix + descend + extract_leaf
+    // sequence it replaces.
+    reset_arena();
+    let g = new_graph(7);
+    let codebook = cjc_runtime::tensor::Tensor::from_vec(
+        vec![0.25, 0.5, 0.75],
+        &[1, 3],
+    )
+    .unwrap();
+    let _ = call(
+        "abng_set_codebook",
+        &[Value::Int(g), Value::Tensor(codebook)],
+    );
+    let _ = call(
+        "abng_add_node",
+        &[Value::Int(g), Value::Int(0), Value::Int(0)],
+    );
+    let _ = call(
+        "abng_add_node",
+        &[Value::Int(g), Value::Int(0), Value::Int(1)],
+    );
+    let _ = call(
+        "abng_add_node",
+        &[Value::Int(g), Value::Int(0), Value::Int(2)],
+    );
+
+    // Run the 3-call sequence for a probe point, then the fused
+    // single-call kernel. They must produce the same leaf id.
+    for &x in &[0.10_f64, 0.30, 0.45, 0.62, 0.85] {
+        let x_t = cjc_runtime::tensor::Tensor::from_vec(vec![x], &[1]).unwrap();
+
+        // Sequence path: encode_prefix → descend → extract index 1.
+        let prefix = call(
+            "abng_encode_prefix",
+            &[Value::Int(g), Value::Tensor(x_t.clone())],
+        );
+        let evidence = call("abng_descend", &[Value::Int(g), prefix]);
+        let leaf_seq = match evidence {
+            Value::Tensor(t) => t.to_vec()[1] as i64,
+            _ => panic!("expected tensor"),
+        };
+
+        // Fused path: abng_route_to_leaf.
+        let leaf_fused = match call(
+            "abng_route_to_leaf",
+            &[Value::Int(g), Value::Tensor(x_t)],
+        ) {
+            Value::Int(i) => i,
+            _ => panic!("expected int"),
+        };
+
+        assert_eq!(
+            leaf_seq, leaf_fused,
+            "fused route_to_leaf must match the 3-call sequence at x={x}"
+        );
+    }
+}
+
+#[test]
+fn route_to_leaf_arg_count_validation() {
+    reset_arena();
+    let _ = new_graph(0);
+    // Missing args → error.
+    let err = try_call("abng_route_to_leaf", &[Value::Int(0)]).unwrap_err();
+    assert!(err.contains("expected 2 arguments"));
+}
+
 #[test]
 fn graphs_are_independent() {
     reset_arena();

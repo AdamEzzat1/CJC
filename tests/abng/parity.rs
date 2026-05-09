@@ -165,6 +165,37 @@ fn parity_observe_slice_chain_equals_individual() {
     );
 }
 
+// ─── Phase 0.6 Item 7: abng_route_to_leaf fused native kernel ────────
+
+#[test]
+fn parity_route_to_leaf_matches_three_call_sequence() {
+    // Phase 0.6 Item 7 — the fused `abng_route_to_leaf` builtin
+    // produces the same leaf id as `encode_prefix → descend →
+    // extract index 1` across both eval and mir backends. Headline
+    // assertion: AST and MIR agree that the fused and 3-call paths
+    // produce identical leaf ids.
+    assert_parity(
+        "fused route_to_leaf == encode_prefix + descend + extract",
+        r#"
+        let g = abng_new(0);
+        let codebook = Tensor.from_vec([0.25, 0.5, 0.75], [1, 3]);
+        abng_set_codebook(g, codebook);
+        abng_add_node(g, 0, 0);
+        abng_add_node(g, 0, 1);
+        abng_add_node(g, 0, 2);
+        // Sequence path (3 dispatches + 1 Tensor alloc).
+        let x = Tensor.from_vec([0.40], [1]);
+        let prefix = abng_encode_prefix(g, x);
+        let evidence = abng_descend(g, prefix);
+        let leaf_seq = int(evidence.get([1]));
+        // Fused path (1 dispatch).
+        let x2 = Tensor.from_vec([0.40], [1]);
+        let leaf_fused = abng_route_to_leaf(g, x2);
+        print(leaf_seq == leaf_fused);
+        "#,
+    );
+}
+
 // ─── Serialize / replay round-trip ────────────────────────────────────
 
 #[test]

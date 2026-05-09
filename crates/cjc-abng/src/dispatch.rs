@@ -598,6 +598,32 @@ pub fn dispatch_abng(name: &str, args: &[Value]) -> Result<Option<Value>, String
             .map_err(|e| format!("{name}: tensor build failed: {e:?}"))?;
             Value::Tensor(t)
         }
+        "abng_route_to_leaf" => {
+            // Phase 0.6 Item 7 — fused native kernel for the
+            // `encode_prefix → descend → extract_leaf` pattern that
+            // shows up in every per-row training inner loop. The
+            // existing 3-builtin sequence pays an interpreter
+            // dispatch + Tensor allocation + extraction cost for
+            // each row. This fused builtin runs the same Rust path
+            // in one dispatch.
+            //
+            // Bit-equivalent to:
+            //   let prefix = abng_encode_prefix(g, x);
+            //   let evidence = abng_descend(g, prefix);
+            //   let leaf = int(evidence.get([1]));
+            //
+            // Returns the leaf node id directly as `Value::Int(i64)`.
+            arg_count(name, args, 2)?;
+            let id = arg_i64(name, &args[0])?;
+            let x = arg_tensor_1d_f64(name, &args[1])?;
+            let leaf = with_graph(name, id, |g| {
+                let bytes = g
+                    .encode_prefix(&x)
+                    .map_err(|e| graph_err_to_string(name, e))?;
+                Ok::<i64, String>(g.descend(&bytes).leaf_id as i64)
+            })??;
+            Value::Int(leaf)
+        }
         "abng_predict_snap" => {
             // Phase 0.4 Track A — pack a predict + lineage tuple into a
             // self-contained Bytes blob using the dedicated PRED_MAGIC

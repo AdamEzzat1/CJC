@@ -144,8 +144,11 @@ fn main() {
     // ── Phase 0.6 Item 4: observe_batch vs per-row observe speedup ────
     bench_observe_batch(seed);
 
+    // ── Phase 0.6 Item 7: route_to_leaf vs encode_prefix+descend ──────
+    bench_route_to_leaf(seed);
+
     eprintln!("=== Done ===");
-    eprintln!("Phase 0.6 Item 2 baseline + Item 3 smart-replay + Item 4 batch-observe speedups.");
+    eprintln!("Phase 0.6 Item 2 baseline + Item 3 smart-replay + Item 4 batch-observe + Item 7 route_to_leaf speedups.");
 }
 
 /// Phase 0.6 Item 3 — measure smart-replay fast-forward speedup over
@@ -282,4 +285,61 @@ fn bench_observe_batch(seed: u64) {
             speedup,
         );
     }
+}
+
+/// Phase 0.6 Item 7 — measure the cost of the route-to-leaf operation
+/// at the Rust API boundary.
+///
+/// At the **Rust API** level there is no perf difference between the
+/// 3-step pattern (`encode_prefix → descend → extract leaf_id`) and a
+/// hand-written equivalent — the work is identical. This bench just
+/// pins the absolute cost of one route operation so future kernel
+/// optimizations have a number to compare against.
+///
+/// The actual perf win of the new `abng_route_to_leaf` *builtin* is
+/// at the **CJC-Lang interpreter dispatch boundary**: it collapses 3
+/// builtin dispatches + 1 Tensor allocation + 1 get-by-index call
+/// into a single dispatch returning `Value::Int`. Each saved
+/// dispatch is ~few hundred ns of interpreter overhead through the
+/// AST tree-walk and MIR register-machine. A bench-harness measurement
+/// of this CJC-Lang-side gain belongs in a separate `.cjcl` source
+/// run, not here.
+fn bench_route_to_leaf(seed: u64) {
+    const N_ITERS: usize = 10_000;
+
+    let mut g = AdaptiveBeliefGraph::new(seed);
+    g.set_codebook(1, 4, &[0.25, 0.5, 0.75]).unwrap();
+    for byte in 0u8..4 {
+        let _ = g.add_node(0, byte).unwrap();
+    }
+
+    // Warmup so cache is hot and branch predictors are settled.
+    for i in 0..1000 {
+        let x = (i as f64) * 0.0001;
+        let bytes = g.encode_prefix(&[x]).unwrap();
+        let _ = g.descend(&bytes).leaf_id;
+    }
+
+    // Measure the absolute per-route cost.
+    let start = Instant::now();
+    let mut leaf_acc = 0u32;
+    for i in 0..N_ITERS {
+        let x = (i as f64) * 0.0001;
+        let bytes = g.encode_prefix(&[x]).unwrap();
+        let leaf = g.descend(&bytes).leaf_id;
+        leaf_acc = leaf_acc.wrapping_add(leaf);
+    }
+    let elapsed_ns = start.elapsed().as_nanos();
+    let per_op = elapsed_ns as f64 / N_ITERS as f64;
+    // Touch leaf_acc so the optimizer can't elide the loop body.
+    eprintln!(
+        "  route_to_leaf rust:  {:.2} ns/op  ({} iters; loop-acc=0x{:x})",
+        per_op, N_ITERS, leaf_acc
+    );
+    println!(
+        r#"{{"op":"route_to_leaf_rust","n":{N_ITERS},"total_ns":{elapsed_ns},"per_op_ns":{per_op:.2}}}"#
+    );
+    eprintln!(
+        "    (Rust-side cost only; the abng_route_to_leaf builtin's CJC-Lang-side win comes from collapsing 3 interpreter dispatches + 1 Tensor allocation into 1 dispatch.)"
+    );
 }
