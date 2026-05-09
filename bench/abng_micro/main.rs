@@ -24,6 +24,7 @@
 //!     cargo run -p abng-micro --release > abng_micro.jsonl
 
 use cjc_abng::blr::{BlrPrior, BlrState};
+use cjc_abng::codebook::QuantileCodebook;
 use cjc_abng::graph::AdaptiveBeliefGraph;
 use cjc_abng::serialize::{replay_with_outcome, serialize, ReplayOptions};
 use cjc_ad::pinn::Activation;
@@ -134,6 +135,55 @@ fn main() {
         let elapsed = start.elapsed();
         let per_op = elapsed.as_nanos() as f64 / N_ITERS as f64;
         emit("blr_predict", N_ITERS, elapsed.as_nanos(), per_op);
+    }
+
+    // ── codebook_encode_vs_encode_into (Phase 0.7 B) ──────────────────
+    //
+    // Direct comparison of allocating `encode` vs buffer-reuse
+    // `encode_into` at d=8, n_bins=16 (a tabular-style codebook —
+    // bigger than the d=1 graph encode_prefix bench so the per-call
+    // alloc is measurable above the noise floor). Both methods walk
+    // the same `partition_point` logic; the only difference is whether
+    // the output Vec is fresh per call (encode) or reused from the
+    // caller's buffer (encode_into).
+    {
+        let n_iters = 100_000_usize;
+        let n_dims = 8u8;
+        let n_bins = 16u16;
+        // boundaries: 0.5, 1.5, ..., n_bins-1.5 per dim
+        let mut flat = Vec::new();
+        for _ in 0..n_dims {
+            for k in 1..n_bins {
+                flat.push(k as f64 - 0.5);
+            }
+        }
+        let cb = QuantileCodebook::from_flat(n_dims as usize, n_bins, &flat).unwrap();
+        let x: Vec<f64> = (0..n_dims).map(|i| 0.5 + i as f64 * 0.7).collect();
+
+        // Allocating variant (baseline shape)
+        for _ in 0..N_WARMUP {
+            let _ = cb.encode(&x).unwrap();
+        }
+        let start = Instant::now();
+        for _ in 0..n_iters {
+            let _ = cb.encode(&x).unwrap();
+        }
+        let elapsed = start.elapsed();
+        let per_op = elapsed.as_nanos() as f64 / n_iters as f64;
+        emit("codebook_encode_alloc", n_iters, elapsed.as_nanos(), per_op);
+
+        // Buffer-reuse variant (Phase 0.7 B)
+        let mut buf: Vec<u8> = Vec::with_capacity(n_dims as usize);
+        for _ in 0..N_WARMUP {
+            cb.encode_into(&x, &mut buf).unwrap();
+        }
+        let start = Instant::now();
+        for _ in 0..n_iters {
+            cb.encode_into(&x, &mut buf).unwrap();
+        }
+        let elapsed = start.elapsed();
+        let per_op = elapsed.as_nanos() as f64 / n_iters as f64;
+        emit("codebook_encode_into", n_iters, elapsed.as_nanos(), per_op);
     }
 
     // ── encode_prefix ──────────────────────────────────────────────────

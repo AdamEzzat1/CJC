@@ -644,26 +644,18 @@ impl AdaptiveBeliefGraph {
             ));
         }
         let mut out: Vec<NodeId> = Vec::with_capacity(n);
-        // Reuse a single prefix Vec across rows — saves N
-        // allocations vs N calls to encode_prefix() each of which
-        // returns a fresh Vec<u8>. The codebook's encode_into
-        // method writes into a caller-provided buffer.
+        // Phase 0.7 (B): write directly into a single reused
+        // `prefix_buf` via `QuantileCodebook::encode_into`. Pre-0.7
+        // this loop allocated a fresh `Vec<u8>` per row inside
+        // `encode()` and then memcpy'd it into `prefix_buf`; the
+        // `encode_into` variant skips the per-row allocation entirely
+        // and writes into the caller's buffer directly.
         let mut prefix_buf: Vec<u8> = Vec::with_capacity(d);
+        let cb = self.codebook.as_ref().unwrap();
         for i in 0..n {
-            prefix_buf.clear();
             let row = &xs[i * d..(i + 1) * d];
-            // The codebook's `encode` allocates a fresh Vec<u8>;
-            // we drop it after each iteration. A future
-            // optimization (Phase 0.7+) would add a `encode_into`
-            // method to QuantileCodebook that writes into a
-            // caller-provided buffer.
-            let prefix = self
-                .codebook
-                .as_ref()
-                .unwrap()
-                .encode(row)
+            cb.encode_into(row, &mut prefix_buf)
                 .map_err(GraphError::Codebook)?;
-            prefix_buf.extend_from_slice(&prefix);
             out.push(self.descend(&prefix_buf).leaf_id);
         }
         Ok(out)

@@ -134,14 +134,41 @@ impl QuantileCodebook {
     }
 
     /// Encode an input vector to a prefix of u8 bin indices.
+    ///
+    /// Allocates a fresh `Vec<u8>` of length `n_dims`. For hot loops
+    /// over many rows (routing inside training, batch dispatch) prefer
+    /// [`encode_into`](Self::encode_into), which writes into a
+    /// caller-provided buffer and amortizes the allocation across the
+    /// whole batch.
     pub fn encode(&self, x: &[f64]) -> Result<Vec<u8>, CodebookError> {
+        let mut out = Vec::with_capacity(self.n_dims as usize);
+        self.encode_into(x, &mut out)?;
+        Ok(out)
+    }
+
+    /// Encode an input vector into a caller-provided `Vec<u8>` buffer.
+    ///
+    /// Phase 0.7 (B) — buffer-reuse variant of [`encode`](Self::encode).
+    /// Clears `out` at entry, then pushes exactly `n_dims` bytes. The
+    /// buffer's underlying allocation is reused across calls when the
+    /// caller keeps it alive between iterations (cf. the route hot
+    /// path in `Graph::route_to_leaf_batch`).
+    ///
+    /// Determinism: byte output is identical to `encode` — both call
+    /// the same `partition_point` walk over `self.bins`. Verified by
+    /// the in-crate parity test `encode_into_matches_encode`.
+    pub fn encode_into(
+        &self,
+        x: &[f64],
+        out: &mut Vec<u8>,
+    ) -> Result<(), CodebookError> {
         if x.len() != self.n_dims as usize {
             return Err(CodebookError::InputArityMismatch {
                 expected: self.n_dims,
                 got: x.len(),
             });
         }
-        let mut out = Vec::with_capacity(self.n_dims as usize);
+        out.clear();
         let max_bin = (self.n_bins - 1) as usize; // cap
         for (d, &v) in x.iter().enumerate() {
             let row = &self.bins[d];
@@ -152,7 +179,7 @@ impl QuantileCodebook {
             let bin = row.partition_point(|&b| b < v).min(max_bin);
             out.push(bin as u8);
         }
-        Ok(out)
+        Ok(())
     }
 
     /// Canonical big-endian byte encoding for hashing.
@@ -252,6 +279,71 @@ mod tests {
         let cb = QuantileCodebook::from_flat(2, 4, &flat_uniform(2, 4)).unwrap();
         let err = cb.encode(&[0.0]).unwrap_err();
         assert!(matches!(err, CodebookError::InputArityMismatch { expected: 2, got: 1 }));
+    }
+
+    // ── Phase 0.7 (B) — encode_into parity + buffer-reuse semantics ──
+
+    #[test]
+    fn encode_into_matches_encode() {
+        // The buffer-reuse variant must produce byte-identical output
+        // to the allocating variant; otherwise the route hot path
+        // (`route_to_leaf_batch`, which uses encode_into) would diverge
+        // from per-row routing (`encode_prefix`, which still uses
+        // encode), and the audit chain canaries would break.
+        let flat = flat_uniform(4, 16);
+        let cb = QuantileCodebook::from_flat(4, 16, &flat).unwrap();
+        let test_inputs: &[&[f64]] = &[
+            &[-1.0, -1.0, -1.0, -1.0],
+            &[0.0, 0.0, 0.0, 0.0],
+            &[1.0, 2.0, 3.0, 4.0],
+            &[100.0, -100.0, 7.5, 0.5],
+            &[0.5, 1.5, 2.5, 3.5],
+            &[15.0, 15.0, 15.0, 15.0],
+        ];
+        for x in test_inputs {
+            let direct = cb.encode(x).unwrap();
+            let mut buf = Vec::new();
+            cb.encode_into(x, &mut buf).unwrap();
+            assert_eq!(direct, buf, "encode/encode_into mismatch on {x:?}");
+        }
+    }
+
+    #[test]
+    fn encode_into_clears_existing_contents() {
+        // The `out.clear()` at function entry is the contract that
+        // makes buffer reuse safe — callers can keep the same Vec
+        // alive across many encode_into calls without manual cleanup.
+        let cb = QuantileCodebook::from_flat(2, 4, &flat_uniform(2, 4)).unwrap();
+        let mut buf = vec![99u8; 17]; // pre-existing junk, oversized
+        cb.encode_into(&[0.0, 0.0], &mut buf).unwrap();
+        assert_eq!(buf, vec![0, 0]);
+    }
+
+    #[test]
+    fn encode_into_arity_mismatch_errs() {
+        let cb = QuantileCodebook::from_flat(2, 4, &flat_uniform(2, 4)).unwrap();
+        let mut buf = vec![7u8; 5]; // pre-existing contents
+        let err = cb.encode_into(&[0.0], &mut buf).unwrap_err();
+        assert!(matches!(
+            err,
+            CodebookError::InputArityMismatch { expected: 2, got: 1 }
+        ));
+        // On error the buffer is *not* cleared (early return before clear).
+        assert_eq!(buf, vec![7u8; 5]);
+    }
+
+    #[test]
+    fn encode_into_buffer_reuse_is_byte_stable() {
+        // Two calls to encode_into on the same buffer with the same
+        // input must produce byte-identical output — proves the clear
+        // is correct (no stale bytes) and the partition_point walk is
+        // deterministic across calls.
+        let cb = QuantileCodebook::from_flat(3, 8, &flat_uniform(3, 8)).unwrap();
+        let mut buf = Vec::with_capacity(3);
+        cb.encode_into(&[1.0, 2.5, 4.0], &mut buf).unwrap();
+        let first = buf.clone();
+        cb.encode_into(&[1.0, 2.5, 4.0], &mut buf).unwrap();
+        assert_eq!(first, buf);
     }
 
     #[test]
