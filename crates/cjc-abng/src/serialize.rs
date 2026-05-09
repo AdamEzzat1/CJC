@@ -987,14 +987,14 @@ fn decode_signature_welford(
     Ok(crate::signature::SignatureWelford { n_seen, mean, m2 })
 }
 
-/// Phase 0.5 Item 2 — replay options. Currently controls whether
-/// `replay` should attempt to fast-forward past `*Updated` runs for
-/// nodes that have a `StatsSnapshot` marker in the audit log.
+/// Phase 0.5 Item 2 / Phase 0.6 Item 3 — replay options. Controls
+/// whether [`replay_with_options`] / [`replay_with_outcome`] should
+/// attempt to fast-forward past pre-snapshot `BeliefUpdate` events for
+/// nodes that have a [`AuditKind::StatsSnapshot`] marker in the audit
+/// log.
 ///
-/// Default (off) reproduces the v11 naive-replay semantics
-/// byte-identically; the `smart_replay` flag is opt-in during Phase
-/// 0.5 and will be promoted to default once the cycle-saving
-/// fast-forward layer (deferred to a Phase 0.5 follow-up) ships.
+/// Default (off) reproduces the original naive-replay semantics
+/// byte-identically; the `smart_replay` flag is opt-in.
 ///
 /// Determinism contract: `smart_replay = true` MUST produce a
 /// `chain_head` and per-node state byte-identical to
@@ -1003,23 +1003,72 @@ fn decode_signature_welford(
 /// `tests/prop_tests/abng_decision_props.rs`.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReplayOptions {
-    /// Phase 0.5 Item 2 — opt-in fast-forward optimization. When
-    /// true, `BeliefUpdate` state mutations on nodes whose state is
-    /// fully captured by a `StatsSnapshot` (no further state-mutation
-    /// events after the snapshot) may be skipped: the snapshot's
-    /// per-node canonical_bytes are installed directly when the
-    /// `StatsSnapshot` event applies. The cycle-saving skip layer is
-    /// scaffolded but currently a no-op — `smart_replay` is
-    /// byte-identical to `replay` in v12 and will start saving cycles
-    /// in the follow-up.
+    /// Phase 0.6 Item 3 — fast-forward optimization. When true, a
+    /// pre-pass over the audit log identifies nodes whose final state
+    /// is fully captured by a `StatsSnapshot` event (no `BeliefUpdate`
+    /// events for that node follow the snapshot). For each such node,
+    /// pre-snapshot `BeliefUpdate` events skip their per-event
+    /// `node.observe(value)` mutation and the per-event
+    /// `stats_version` / `stats_hash` checks; the snapshot's recorded
+    /// `stats_hash` becomes the consolidated tamper checkpoint for
+    /// every skipped event. When the `StatsSnapshot` event itself
+    /// applies, `node.stats` is installed directly from
+    /// [`crate::stats::NodeStats::from_canonical_bytes`] over the
+    /// per-node section's stored `canonical_bytes`.
+    ///
+    /// Determinism contract: smart-replay output MUST stay
+    /// byte-identical to naive replay. The compensating tamper signal
+    /// is the StatsSnapshot's own `stats_hash`, which is verified
+    /// against the post-install live state by the existing per-event
+    /// `stats_hash` check.
     pub smart_replay: bool,
+}
+
+/// Phase 0.6 Item 3 — outcome of a replay pass: the rebuilt graph plus
+/// the count of `BeliefUpdate` events whose `observe()` mutation was
+/// skipped because they sat under a covering `StatsSnapshot`. The
+/// count is informational — purely for tests and benchmarks that want
+/// to assert the fast-forward layer actually engaged. It is *not*
+/// part of the determinism contract.
+///
+/// `fast_forwarded_events` is always 0 when `smart_replay = false`.
+pub struct ReplayOutcome {
+    pub graph: AdaptiveBeliefGraph,
+    pub fast_forwarded_events: u64,
 }
 
 /// Replay a v2 snapshot blob back into a fresh [`AdaptiveBeliefGraph`].
 ///
 /// The replay path does not trust the stored hashes — it recomputes
 /// everything from the recorded events and asserts equality.
+///
+/// Equivalent to [`replay_with_outcome`] with default options;
+/// discards the smart-replay instrumentation counter.
 pub fn replay(bytes: &[u8]) -> Result<AdaptiveBeliefGraph, DecodeError> {
+    Ok(replay_with_outcome(bytes, ReplayOptions::default())?.graph)
+}
+
+/// Phase 0.6 Item 3 — replay with the smart-replay fast-forward
+/// optimization optionally engaged, returning both the rebuilt graph
+/// and the number of fast-forwarded `BeliefUpdate` events.
+///
+/// When `opts.smart_replay = false`, behaves identically to [`replay`]
+/// (and the returned `fast_forwarded_events` is 0). When
+/// `opts.smart_replay = true`, performs a pre-pass over the audit log
+/// to identify per-node "fast-forwardable" snapshots and skips
+/// pre-snapshot `BeliefUpdate` mutations for those nodes. The
+/// `StatsSnapshot`'s recorded `stats_hash` is the consolidated tamper
+/// checkpoint (see [`ReplayOptions::smart_replay`]).
+///
+/// Determinism contract: for any *valid* blob,
+/// `replay_with_outcome(bytes, opts).graph` produces the same graph
+/// as `replay(bytes)` regardless of `opts.smart_replay` (verified by
+/// the `smart_replay_output_equals_naive_replay` proptest in
+/// `tests/prop_tests/abng_decision_props.rs`).
+pub fn replay_with_outcome(
+    bytes: &[u8],
+    opts: ReplayOptions,
+) -> Result<ReplayOutcome, DecodeError> {
     let mut cur = Cursor::new(bytes);
 
     // Header.
@@ -1151,8 +1200,21 @@ pub fn replay(bytes: &[u8]) -> Result<AdaptiveBeliefGraph, DecodeError> {
         unfreeze_count: 0,
     };
 
+    // Phase 0.6 Item 3 — decode all events into a Vec first, then run
+    // a pre-pass (only when `opts.smart_replay`) to identify
+    // fast-forwardable nodes, then run the apply pass with skip
+    // logic. For `opts.smart_replay = false`, pass 2 is the original
+    // streaming loop's body unchanged. The memory overhead is ~150B
+    // per event (the decoded `AuditEvent` + 32-byte hash); for
+    // typical workloads (small graphs, short logs) this is
+    // negligible, and the perf win on compacted logs at scale (the
+    // Phase 0.6 motivating case) far dominates.
+    //
+    // Defensive: untrusted `n_events` cannot drive a giant
+    // `with_capacity` allocation; let the vec grow naturally.
     let mut prev_hash = genesis_hash();
     let mut expected_seq: u64 = 0;
+    let mut decoded: Vec<(AuditEvent, [u8; 32])> = Vec::new();
     for event_index in 0..n_events {
         let payload_len = cur.u32_be()? as usize;
         let payload = cur.take(payload_len)?;
@@ -1200,43 +1262,148 @@ pub fn replay(bytes: &[u8]) -> Result<AdaptiveBeliefGraph, DecodeError> {
             return Err(DecodeError::ChainMismatch { at_seq: event.seq });
         }
 
-        // Apply the event's effect on graph state.
-        apply_event(
-            &mut graph,
-            &event,
-            stored_codebook.as_ref(),
-            stored_head.as_ref(),
-            stored_blr_prior.as_ref(),
-            stored_density_enabled,
-            stored_calibration_n_bins,
-        )?;
+        decoded.push((event, recomputed_new));
+        prev_hash = recomputed_new;
+        expected_seq += 1;
+    }
 
-        // Phase 0.4 Track C-2.3.3 — the event's recorded
-        // `stats_version` must match the live node's post-apply
-        // `stats_version`. Catches reordered or swapped *Updated
-        // events for the same node, where the chain hashes still
-        // validate but the per-event sequence numbers no longer
-        // match the live state evolution.
-        let live_stats_version = graph.nodes[event.node_id as usize].stats_version;
-        if event.stats_version != live_stats_version {
-            return Err(DecodeError::StatsVersionMismatch {
-                node_id: event.node_id,
-                at_seq: event.seq,
-            });
+    // Phase 0.6 Item 3 — pre-pass: identify fast-forwardable nodes.
+    // A node N is fast-forwardable up to seq S iff:
+    //   - some `StatsSnapshot { node_id: N }` event exists at seq S, AND
+    //   - no `BeliefUpdate` event for node N exists at seq > S.
+    // For each such node, pre-snapshot `BeliefUpdate` mutations skip
+    // their `observe()` call and the per-event stats checks. Empty
+    // BTreeMap when smart_replay is off.
+    let ff_until_seq: std::collections::BTreeMap<NodeId, u64> = if opts.smart_replay {
+        let mut last_snap: std::collections::BTreeMap<NodeId, u64> =
+            std::collections::BTreeMap::new();
+        let mut latest_belief: std::collections::BTreeMap<NodeId, u64> =
+            std::collections::BTreeMap::new();
+        for (event, _) in &decoded {
+            match &event.kind {
+                AuditKind::StatsSnapshot { node_id, .. } => {
+                    last_snap.insert(*node_id, event.seq);
+                }
+                AuditKind::BeliefUpdate { .. } => {
+                    latest_belief.insert(event.node_id, event.seq);
+                }
+                _ => {}
+            }
         }
+        let mut ff = std::collections::BTreeMap::new();
+        for (node_id, snap_seq) in &last_snap {
+            if latest_belief
+                .get(node_id)
+                .map_or(true, |bu_seq| *bu_seq < *snap_seq)
+            {
+                ff.insert(*node_id, *snap_seq);
+            }
+        }
+        ff
+    } else {
+        std::collections::BTreeMap::new()
+    };
 
-        // Verify the per-node stats hash matches what the event recorded.
-        let live_stats_hash = graph.nodes[event.node_id as usize].stats.stats_hash();
-        if live_stats_hash != event.stats_hash {
-            return Err(DecodeError::StatsMismatch {
-                node_id: event.node_id,
-            });
+    // Phase 0.6 Item 3 — apply pass. For fast-forwardable
+    // BeliefUpdate events at seq < snapshot_seq we skip the observe
+    // mutation AND the per-event stats_version / stats_hash checks
+    // (the StatsSnapshot's recorded stats_hash is the consolidated
+    // tamper checkpoint). When the StatsSnapshot itself applies for a
+    // fast-forwardable node, we install the per-node section's
+    // canonical_bytes / stats_chain_head / event.stats_version BEFORE
+    // the per-event stats_hash check fires — so the existing check
+    // becomes the consolidated tamper detection automatically.
+    let mut fast_forwarded_events: u64 = 0;
+    for (event, recomputed_new) in decoded {
+        let should_skip = opts.smart_replay
+            && matches!(event.kind, AuditKind::BeliefUpdate { .. })
+            && ff_until_seq
+                .get(&event.node_id)
+                .map_or(false, |snap_seq| event.seq < *snap_seq);
+
+        if should_skip {
+            fast_forwarded_events += 1;
+        } else {
+            // Apply the event's effect on graph state.
+            apply_event(
+                &mut graph,
+                &event,
+                stored_codebook.as_ref(),
+                stored_head.as_ref(),
+                stored_blr_prior.as_ref(),
+                stored_density_enabled,
+                stored_calibration_n_bins,
+            )?;
+
+            // Phase 0.6 Item 3 — for the StatsSnapshot of a
+            // fast-forwardable node, install the consolidated state
+            // (canonical_bytes -> stats; event.stats_version;
+            // stored.stats_chain_head) BEFORE the per-event stats
+            // checks. After install, the existing
+            // `event.stats_hash != live_stats_hash` check effectively
+            // becomes the consolidated tamper check covering all
+            // skipped BeliefUpdate events under this snapshot.
+            if opts.smart_replay {
+                if let AuditKind::StatsSnapshot { node_id, .. } = &event.kind {
+                    if ff_until_seq.contains_key(node_id) {
+                        let stored = &stored_nodes[*node_id as usize];
+                        graph.nodes[*node_id as usize].stats =
+                            crate::stats::NodeStats::from_canonical_bytes(
+                                &stored.canonical_bytes,
+                            );
+                        graph.nodes[*node_id as usize].stats_version =
+                            event.stats_version;
+                        graph.nodes[*node_id as usize].stats_chain_head =
+                            stored.stats_chain_head;
+                    }
+                }
+                // Phase 0.5 Item 2 — StatsSnapshot internal-payload
+                // consistency check. The kind carries `stats_hash`
+                // inside its payload AND in the event-level slot;
+                // both come from the same graph state at compaction
+                // time and MUST be equal. Catches a tampered blob
+                // that flipped the payload hash without recomputing
+                // the chain.
+                if let AuditKind::StatsSnapshot {
+                    node_id,
+                    stats_hash: payload_hash,
+                } = &event.kind
+                {
+                    if *node_id != event.node_id || payload_hash != &event.stats_hash {
+                        return Err(DecodeError::StatsSnapshotMismatch {
+                            node_id: *node_id,
+                            at_seq: event.seq,
+                        });
+                    }
+                }
+            }
+
+            // Phase 0.4 Track C-2.3.3 — the event's recorded
+            // `stats_version` must match the live node's post-apply
+            // `stats_version`. Catches reordered or swapped *Updated
+            // events for the same node, where the chain hashes still
+            // validate but the per-event sequence numbers no longer
+            // match the live state evolution.
+            let live_stats_version =
+                graph.nodes[event.node_id as usize].stats_version;
+            if event.stats_version != live_stats_version {
+                return Err(DecodeError::StatsVersionMismatch {
+                    node_id: event.node_id,
+                    at_seq: event.seq,
+                });
+            }
+
+            // Verify the per-node stats hash matches what the event recorded.
+            let live_stats_hash = graph.nodes[event.node_id as usize].stats.stats_hash();
+            if live_stats_hash != event.stats_hash {
+                return Err(DecodeError::StatsMismatch {
+                    node_id: event.node_id,
+                });
+            }
         }
 
         graph.chain_head = recomputed_new;
         graph.audit.push(event);
-        prev_hash = recomputed_new;
-        expected_seq += 1;
     }
 
     // Verify per-node canonical bytes, chain heads, and children layouts.
@@ -1532,25 +1699,21 @@ pub fn replay(bytes: &[u8]) -> Result<AdaptiveBeliefGraph, DecodeError> {
         });
     }
 
-    Ok(graph)
+    Ok(ReplayOutcome {
+        graph,
+        fast_forwarded_events,
+    })
 }
 
-/// Phase 0.5 Item 2 — replay with explicit options. See
-/// [`ReplayOptions`] for the flag set.
+/// Phase 0.5 Item 2 / Phase 0.6 Item 3 — replay with explicit options.
+/// See [`ReplayOptions`] for the flag set.
 ///
-/// With `smart_replay = true`, the existing chain validation runs
-/// first (so the output graph is byte-identical to `replay`'s
-/// output), then a smart-replay-specific cross-check fires: every
-/// `StatsSnapshot { node_id, stats_hash }` event in the audit log
-/// has its recorded `stats_hash` compared against the post-replay
-/// `node.stats.stats_hash()` for the named node. Any mismatch
-/// surfaces as a [`DecodeError::StatsSnapshotMismatch`] (vs. the
-/// naive path, which leaves the snapshot's `stats_hash` field
-/// unchecked). This is the v12 ship of Item 2 — the cycle-saving
-/// fast-forward layer (skipping `node.observe` for snapshot-covered
-/// events) is deferred to a follow-up commit so the wire-format
-/// bump and the read-side optimization can land on different
-/// review cycles.
+/// With `smart_replay = true`, runs the Phase 0.6 Item 3 fast-forward
+/// optimization: pre-snapshot `BeliefUpdate` events on
+/// fast-forwardable nodes skip their `observe()` mutation, the
+/// StatsSnapshot's stored `stats_hash` is the consolidated tamper
+/// checkpoint, and the StatsSnapshot's payload-internal vs
+/// event-level `stats_hash` consistency cross-check fires inline.
 ///
 /// Determinism contract: for any *valid* blob,
 /// `replay_with_options(bytes, opts)` produces the same graph as
@@ -1562,35 +1725,7 @@ pub fn replay_with_options(
     bytes: &[u8],
     opts: ReplayOptions,
 ) -> Result<AdaptiveBeliefGraph, DecodeError> {
-    let graph = replay(bytes)?;
-    if !opts.smart_replay {
-        return Ok(graph);
-    }
-    // Phase 0.5 Item 2 — opt-in StatsSnapshot consistency check.
-    //
-    // `compact_log` (graph.rs) emits `StatsSnapshot` events whose
-    // payload `stats_hash` field is sourced from the SAME
-    // `self.nodes[node_id].stats.stats_hash()` call as the event-
-    // level `stats_hash` slot. They MUST be equal in any well-formed
-    // blob: a tampered audit log that rewrites the snapshot payload
-    // hash without also rewriting the event-level stats_hash (and
-    // recomputing the chain) is caught here. Naive replay leaves the
-    // payload hash unchecked.
-    for event in &graph.audit {
-        if let AuditKind::StatsSnapshot {
-            node_id,
-            stats_hash: payload_hash,
-        } = &event.kind
-        {
-            if *node_id != event.node_id || payload_hash != &event.stats_hash {
-                return Err(DecodeError::StatsSnapshotMismatch {
-                    node_id: *node_id,
-                    at_seq: event.seq,
-                });
-            }
-        }
-    }
-    Ok(graph)
+    Ok(replay_with_outcome(bytes, opts)?.graph)
 }
 
 /// Phase 0.5 Item 2 — opt-in smart-replay entry point.

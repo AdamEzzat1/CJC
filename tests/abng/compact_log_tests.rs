@@ -274,3 +274,136 @@ fn smart_replay_catches_tampered_stats_snapshot_payload_hash() {
     assert!(replay(&blob).is_ok());
     assert!(cjc_abng::serialize::smart_replay(&blob).is_ok());
 }
+
+// ── Phase 0.6 Item 3: smart-replay fast-forward instrumentation ────
+
+#[test]
+fn smart_replay_fast_forwards_pre_snapshot_belief_updates() {
+    // Phase 0.6 Item 3 — the core skip-observe assertion. After
+    // compact_log, all pre-snapshot BeliefUpdate events for
+    // fast-forwardable nodes should be skipped. The fixture has 3
+    // BeliefUpdate events (2 on root, 1 on child); after compaction
+    // both nodes are FF. Smart replay must skip all 3 and naive
+    // must skip none.
+    let mut g = graph_with_two_nodes_and_observations();
+    let _ = g.compact_log(g.audit.len() as u64);
+    let blob = serialize(&g);
+
+    let outcome_naive = cjc_abng::serialize::replay_with_outcome(
+        &blob,
+        cjc_abng::serialize::ReplayOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        outcome_naive.fast_forwarded_events, 0,
+        "naive replay must never skip observes"
+    );
+
+    let outcome_smart = cjc_abng::serialize::replay_with_outcome(
+        &blob,
+        cjc_abng::serialize::ReplayOptions { smart_replay: true },
+    )
+    .unwrap();
+    assert_eq!(
+        outcome_smart.fast_forwarded_events, 3,
+        "all 3 pre-snapshot BeliefUpdate events must be skipped"
+    );
+    // And byte-identity must still hold.
+    assert_eq!(
+        serialize(&outcome_naive.graph),
+        serialize(&outcome_smart.graph),
+        "smart-replay output must be byte-identical to naive replay"
+    );
+}
+
+#[test]
+fn smart_replay_does_not_fast_forward_post_snapshot_belief_updates() {
+    // Phase 0.6 Item 3 — a node with BeliefUpdate AFTER its snapshot
+    // is NOT fast-forwardable. The snapshot's stats_hash no longer
+    // covers the post-snapshot observations, so skipping any
+    // BeliefUpdate would lose state.
+    let mut g = graph_with_two_nodes_and_observations();
+    let _ = g.compact_log(g.audit.len() as u64);
+    // Add observations AFTER the snapshot — node 0 is no longer FF.
+    g.observe(0, 0.55).unwrap();
+    g.observe(0, 0.66).unwrap();
+    // Node 1 is still FF (no post-snapshot BeliefUpdate for it).
+    let blob = serialize(&g);
+
+    let outcome_smart = cjc_abng::serialize::replay_with_outcome(
+        &blob,
+        cjc_abng::serialize::ReplayOptions { smart_replay: true },
+    )
+    .unwrap();
+    // Node 1 had 1 pre-snapshot BeliefUpdate -> 1 skipped.
+    // Node 0 is NOT fast-forwardable -> 0 skipped (post-snapshot BUs exist).
+    assert_eq!(
+        outcome_smart.fast_forwarded_events, 1,
+        "only node 1's pre-snapshot BeliefUpdate is fast-forwardable"
+    );
+}
+
+#[test]
+fn smart_replay_no_compaction_skips_nothing() {
+    // Phase 0.6 Item 3 — without any StatsSnapshot, no node is
+    // fast-forwardable; the skip counter must be 0 even with
+    // smart_replay = true.
+    let g = graph_with_two_nodes_and_observations();
+    let blob = serialize(&g);
+    let outcome = cjc_abng::serialize::replay_with_outcome(
+        &blob,
+        cjc_abng::serialize::ReplayOptions { smart_replay: true },
+    )
+    .unwrap();
+    assert_eq!(outcome.fast_forwarded_events, 0);
+}
+
+#[test]
+fn smart_replay_byte_identity_at_n_1000() {
+    // Phase 0.6 Item 3 — quick check that the byte-equality property
+    // (already covered by 256-case proptest) holds for a larger
+    // single deterministic case (1k observations + compaction).
+    let mut g = AdaptiveBeliefGraph::new(42);
+    g.set_codebook(1, 4, &[-1.0, 0.0, 1.0]).unwrap();
+    let _ = g.add_node(0, 1).unwrap();
+    let _ = g.add_node(0, 2).unwrap();
+    for i in 0..1_000u64 {
+        let v = (i as f64 * 0.001) - 0.5;
+        let leaf = (i % 3) as u32;
+        g.observe(leaf, v).unwrap();
+    }
+    let _ = g.compact_log(g.audit.len() as u64);
+    // A few more observations after compact — keeps node 0 NOT-FF
+    // for varied coverage.
+    g.observe(0, 0.7).unwrap();
+
+    let blob = serialize(&g);
+    let outcome_naive = cjc_abng::serialize::replay_with_outcome(
+        &blob,
+        cjc_abng::serialize::ReplayOptions::default(),
+    )
+    .unwrap();
+    let outcome_smart = cjc_abng::serialize::replay_with_outcome(
+        &blob,
+        cjc_abng::serialize::ReplayOptions { smart_replay: true },
+    )
+    .unwrap();
+    assert_eq!(outcome_naive.fast_forwarded_events, 0);
+    // Nodes 1 and 2 are FF — they had pre-snapshot observations only.
+    // Node 0 is NOT FF (post-snapshot observe). So the skipped count
+    // is the per-node sum of pre-snapshot BeliefUpdates for nodes 1+2.
+    // Each node received ~333 of the 1000 observations.
+    assert!(
+        outcome_smart.fast_forwarded_events >= 600,
+        "expected >= 600 skipped events, got {}",
+        outcome_smart.fast_forwarded_events
+    );
+    assert_eq!(
+        serialize(&outcome_naive.graph),
+        serialize(&outcome_smart.graph)
+    );
+    assert_eq!(
+        outcome_naive.graph.chain_head,
+        outcome_smart.graph.chain_head
+    );
+}
