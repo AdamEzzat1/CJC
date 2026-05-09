@@ -190,10 +190,81 @@ impl AdaptiveChildren {
         }
     }
 
+    /// Iterate `(key_byte, child_id)` pairs in ascending key order
+    /// **without allocating** — Phase 0.7 (E). Returns a custom
+    /// iterator type whose state is held entirely on the stack (or as
+    /// a borrow into the variant's existing arrays). Hot paths
+    /// (`routing_observation_value`, structural-decision child walks)
+    /// should prefer this over [`iter`](Self::iter), which allocates a
+    /// fresh `Vec<(u8, NodeId)>` per call.
+    ///
+    /// Yield order is byte-sorted ascending — identical to `iter`'s
+    /// output order — so any downstream that depends on canonical
+    /// child layout (signatures, snapshots, hash chains) sees the
+    /// exact same sequence.
+    pub fn iter_sorted(&self) -> ChildrenSortedIter<'_> {
+        let state = match self {
+            AdaptiveChildren::None | AdaptiveChildren::Dense { .. } => {
+                ChildrenIterState::Empty
+            }
+            AdaptiveChildren::Node4 { keys, slots } => {
+                let mut pairs = [(0u8, 0u32); 16];
+                let mut len = 0usize;
+                for i in 0..4 {
+                    if let Some(id) = slots[i] {
+                        pairs[len] = (keys[i], id);
+                        len += 1;
+                    }
+                }
+                pairs[..len].sort_by_key(|&(k, _)| k);
+                ChildrenIterState::Small {
+                    pairs,
+                    len: len as u8,
+                    idx: 0,
+                }
+            }
+            AdaptiveChildren::Node16 { keys, slots } => {
+                let mut pairs = [(0u8, 0u32); 16];
+                let mut len = 0usize;
+                for i in 0..16 {
+                    if let Some(id) = slots[i] {
+                        pairs[len] = (keys[i], id);
+                        len += 1;
+                    }
+                }
+                pairs[..len].sort_by_key(|&(k, _)| k);
+                ChildrenIterState::Small {
+                    pairs,
+                    len: len as u8,
+                    idx: 0,
+                }
+            }
+            AdaptiveChildren::Node48 { index, slots } => {
+                ChildrenIterState::Node48 {
+                    index: &**index,
+                    slots: slots.as_slice(),
+                    byte: 0,
+                }
+            }
+            AdaptiveChildren::Node256 { slots } => {
+                ChildrenIterState::Node256 {
+                    slots: &**slots,
+                    byte: 0,
+                }
+            }
+        };
+        ChildrenSortedIter { state }
+    }
+
     /// Iterate `(key_byte, child_id)` pairs in ascending key order.
     /// Used by snapshot serialization and `abng_node_child_count`.
     /// `Dense` returns an empty iterator — the sub-tree's descendants
     /// remain in the arena but are unreachable from this node.
+    ///
+    /// Allocates a fresh `Vec<(u8, NodeId)>` per call. For hot loops
+    /// (signature observation, decide_step) prefer
+    /// [`iter_sorted`](Self::iter_sorted), which yields the same
+    /// pairs in the same order without allocating.
     pub fn iter(&self) -> Vec<(u8, NodeId)> {
         let mut out = Vec::new();
         match self {
@@ -377,6 +448,85 @@ impl Default for AdaptiveChildren {
     }
 }
 
+// ── Phase 0.7 (E) — non-allocating sorted iterator ────────────────────
+
+/// Sorted iterator over `(key_byte, child_id)` pairs of an
+/// [`AdaptiveChildren`]. Constructed by
+/// [`AdaptiveChildren::iter_sorted`].
+///
+/// Holds its state on the stack — no heap allocation per call. The
+/// `Small` variant covers `Node4`/`Node16` with a pre-sorted
+/// `[(u8, NodeId); 16]` array (Rust pads each tuple to 8 bytes, so
+/// 128 bytes on the stack). The `Node48`/`Node256` variants borrow
+/// the variant's existing index/slots arrays and walk them in byte
+/// order, which is already key-sorted.
+pub struct ChildrenSortedIter<'a> {
+    state: ChildrenIterState<'a>,
+}
+
+enum ChildrenIterState<'a> {
+    Empty,
+    Small {
+        /// Pre-sorted `(key, id)` pairs. Only the first `len` entries
+        /// are valid.
+        pairs: [(u8, NodeId); 16],
+        len: u8,
+        idx: u8,
+    },
+    Node48 {
+        index: &'a [u8; 256],
+        slots: &'a [Option<NodeId>],
+        byte: u16,
+    },
+    Node256 {
+        slots: &'a [Option<NodeId>; 256],
+        byte: u16,
+    },
+}
+
+impl<'a> Iterator for ChildrenSortedIter<'a> {
+    type Item = (u8, NodeId);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match &mut self.state {
+            ChildrenIterState::Empty => None,
+            ChildrenIterState::Small { pairs, len, idx } => {
+                if *idx < *len {
+                    let p = pairs[*idx as usize];
+                    *idx += 1;
+                    Some(p)
+                } else {
+                    None
+                }
+            }
+            ChildrenIterState::Node48 { index, slots, byte } => {
+                while *byte <= 255 {
+                    let b = *byte as u8;
+                    let slot_idx = index[*byte as usize];
+                    *byte += 1;
+                    if slot_idx != NODE48_EMPTY {
+                        if let Some(id) = slots[slot_idx as usize] {
+                            return Some((b, id));
+                        }
+                    }
+                }
+                None
+            }
+            ChildrenIterState::Node256 { slots, byte } => {
+                while *byte <= 255 {
+                    let b = *byte as u8;
+                    let s = slots[*byte as usize];
+                    *byte += 1;
+                    if let Some(id) = s {
+                        return Some((b, id));
+                    }
+                }
+                None
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,6 +704,93 @@ mod tests {
                 AdaptiveChildren::Dense { signature: sb },
             ) => assert_ne!(sa, sb),
             _ => unreachable!(),
+        }
+    }
+
+    // ── Phase 0.7 (E) — iter_sorted parity with iter ──────────────────
+
+    fn collect_iter_sorted(c: &AdaptiveChildren) -> Vec<(u8, NodeId)> {
+        c.iter_sorted().collect()
+    }
+
+    #[test]
+    fn iter_sorted_matches_iter_empty() {
+        let c = AdaptiveChildren::None;
+        assert_eq!(collect_iter_sorted(&c), c.iter());
+        assert!(c.iter_sorted().next().is_none());
+    }
+
+    #[test]
+    fn iter_sorted_matches_iter_dense() {
+        let c = AdaptiveChildren::Dense {
+            signature: [0u8; 32],
+        };
+        assert_eq!(collect_iter_sorted(&c), c.iter());
+        assert!(c.iter_sorted().next().is_none());
+    }
+
+    #[test]
+    fn iter_sorted_matches_iter_node4_unsorted_keys() {
+        // Build a Node4 by inserting keys out of byte-sort order.
+        // iter() sorts internally; iter_sorted must produce the same.
+        let mut c = AdaptiveChildren::new();
+        c.add_child(7, 100);
+        c.add_child(3, 200);
+        c.add_child(11, 300);
+        c.add_child(5, 400);
+        let from_iter = c.iter();
+        let from_iter_sorted = collect_iter_sorted(&c);
+        assert_eq!(from_iter, from_iter_sorted);
+        // And the order is genuinely sorted.
+        assert_eq!(from_iter_sorted, vec![(3, 200), (5, 400), (7, 100), (11, 300)]);
+    }
+
+    #[test]
+    fn iter_sorted_matches_iter_node16() {
+        let mut c = AdaptiveChildren::new();
+        // Insert in scrambled order.
+        let order: [u8; 12] = [13, 1, 7, 3, 11, 5, 9, 0, 2, 4, 6, 8];
+        for (i, &k) in order.iter().enumerate() {
+            c.add_child(k, 1000 + i as NodeId);
+        }
+        assert_eq!(c.kind(), ChildrenKind::Node16);
+        assert_eq!(collect_iter_sorted(&c), c.iter());
+    }
+
+    #[test]
+    fn iter_sorted_matches_iter_node48() {
+        let mut c = AdaptiveChildren::new();
+        // Insert 30 keys (forces promotion past Node16 to Node48).
+        for k in 0u8..30 {
+            c.add_child(k * 7 % 251, 5000 + k as NodeId);
+        }
+        assert_eq!(c.kind(), ChildrenKind::Node48);
+        assert_eq!(collect_iter_sorted(&c), c.iter());
+    }
+
+    #[test]
+    fn iter_sorted_matches_iter_node256() {
+        let mut c = AdaptiveChildren::new();
+        // Insert > 48 keys to trigger Node256 promotion.
+        for k in 0u8..200 {
+            c.add_child(k, 9000 + k as NodeId);
+        }
+        assert_eq!(c.kind(), ChildrenKind::Node256);
+        assert_eq!(collect_iter_sorted(&c), c.iter());
+    }
+
+    #[test]
+    fn iter_sorted_yields_in_ascending_key_order() {
+        // Across all variants, the yielded keys must be strictly
+        // ascending. This is the contract the routing canonical bytes
+        // and the audit-chain witness depend on.
+        let mut c = AdaptiveChildren::new();
+        for k in [200u8, 5, 100, 50, 250, 75, 25].iter() {
+            c.add_child(*k, *k as NodeId);
+        }
+        let pairs = collect_iter_sorted(&c);
+        for w in pairs.windows(2) {
+            assert!(w[0].0 < w[1].0, "keys not strictly ascending: {pairs:?}");
         }
     }
 }

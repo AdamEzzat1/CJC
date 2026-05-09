@@ -183,13 +183,17 @@ impl NodeSignature {
 /// the routing profile observation. Phase 0.4 Track B-2.2.1 — feeds
 /// into the routing Welford accumulator each `decide_step` call. See
 /// module docs for the layout.
+/// Phase 0.7 (E) — kept only for its test (`routing_canonical_bytes_empty_layout`)
+/// and as a reference for the canonical-bytes layout that the
+/// streaming `routing_observation_value` hashes. Production code goes
+/// through the streaming path which never materializes these bytes.
+#[cfg(test)]
 pub(crate) fn routing_canonical_bytes(node: &AdaptiveBeliefNode) -> Vec<u8> {
-    let mut pairs = node.children.iter();
-    pairs.sort_by_key(|&(key, _)| key);
-    let mut out = Vec::with_capacity(1 + 4 + pairs.len() * 5);
+    let n = node.children.len();
+    let mut out = Vec::with_capacity(1 + 4 + n * 5);
     out.push(node.children.kind() as u8);
-    out.extend_from_slice(&(pairs.len() as u32).to_be_bytes());
-    for (key, child_id) in pairs {
+    out.extend_from_slice(&(n as u32).to_be_bytes());
+    for (key, child_id) in node.children.iter_sorted() {
         out.push(key);
         out.extend_from_slice(&child_id.to_be_bytes());
     }
@@ -205,8 +209,27 @@ pub(crate) fn routing_canonical_bytes(node: &AdaptiveBeliefNode) -> Vec<u8> {
 /// Welford signature still tracks "routing layout has drifted" because
 /// the cast is deterministic.
 pub(crate) fn routing_observation_value(node: &AdaptiveBeliefNode) -> f64 {
-    let bytes = routing_canonical_bytes(node);
-    let h = cjc_snap::hash::sha256(&bytes);
+    // Phase 0.7 (E + C) — feed the canonical-bytes layout directly
+    // into the streaming SHA-256 hasher, skipping the intermediate
+    // `Vec<u8>` materialization that `routing_canonical_bytes`
+    // performs. Combined with `iter_sorted`, this whole function is
+    // now allocation-free on the hot decide_step path. The hash bytes
+    // are byte-identical to the pre-0.7 form: the streaming hasher
+    // produces the same digest as `sha256(routing_canonical_bytes(node))`,
+    // verified by the existing canary infrastructure (any drift would
+    // poison the routing Welford and break the 28 audit-chain
+    // canaries).
+    let mut hasher = cjc_snap::hash::Sha256::new();
+    let kind_byte = [node.children.kind() as u8];
+    hasher.update(&kind_byte);
+    let n_be = (node.children.len() as u32).to_be_bytes();
+    hasher.update(&n_be);
+    for (key, child_id) in node.children.iter_sorted() {
+        let key_byte = [key];
+        hasher.update(&key_byte);
+        hasher.update(&child_id.to_be_bytes());
+    }
+    let h = hasher.finalize();
     let mut buf = [0u8; 8];
     buf.copy_from_slice(&h[..8]);
     u64::from_be_bytes(buf) as f64
@@ -357,5 +380,43 @@ mod tests {
         let bytes = routing_canonical_bytes(&g.nodes[0]);
         // kind tag (None = 0) + n_children u32 BE = 0
         assert_eq!(bytes, vec![0x00, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    // ── Phase 0.7 (E) — streaming routing_observation_value parity ────
+
+    /// Reference implementation that materializes the canonical bytes
+    /// and runs the one-shot SHA-256 over them. This is what the
+    /// streaming `routing_observation_value` MUST produce — bit-equal —
+    /// otherwise the routing Welford signatures (and every downstream
+    /// chain witness that depends on them) would drift.
+    fn routing_observation_value_via_bytes(node: &AdaptiveBeliefNode) -> f64 {
+        let bytes = routing_canonical_bytes(node);
+        let h = cjc_snap::hash::sha256(&bytes);
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&h[..8]);
+        u64::from_be_bytes(buf) as f64
+    }
+
+    #[test]
+    fn streaming_routing_observation_value_matches_bytes_form_empty() {
+        let g = fresh_graph();
+        let streamed = routing_observation_value(&g.nodes[0]);
+        let via_bytes = routing_observation_value_via_bytes(&g.nodes[0]);
+        // Compare via raw bits to avoid NaN-comparison games (these
+        // are deterministic non-NaN floats from u64 cast, so bits are
+        // well-defined).
+        assert_eq!(streamed.to_bits(), via_bytes.to_bits());
+    }
+
+    #[test]
+    fn streaming_routing_observation_value_matches_bytes_form_with_children() {
+        let mut g = fresh_graph();
+        // Add a few children to exercise Node4 / Node16 sorting paths.
+        for k in [42u8, 7, 200, 99].iter() {
+            g.add_node(0, *k).unwrap();
+        }
+        let streamed = routing_observation_value(&g.nodes[0]);
+        let via_bytes = routing_observation_value_via_bytes(&g.nodes[0]);
+        assert_eq!(streamed.to_bits(), via_bytes.to_bits());
     }
 }

@@ -2599,12 +2599,14 @@ fn try_compress(
     {
         return false;
     }
-    let pairs = g.nodes[nid_idx].children.iter();
-    if pairs.is_empty() {
+    // Phase 0.7 (E) — non-allocating emptiness check + iteration. The
+    // pre-0.7 version called `iter()` to materialize a `Vec`, then
+    // checked `is_empty()` and iterated again via `iter().all(...)`.
+    if g.nodes[nid_idx].children.len() == 0 {
         return false;
     }
     let tau = policy.tau_compress() as u32;
-    let all_close = pairs.iter().all(|&(_, child_id)| {
+    let all_close = g.nodes[nid_idx].children.iter_sorted().all(|(_, child_id)| {
         let child_sig =
             NodeSignature::from_node(&g.nodes[child_id as usize]).canonical_bytes();
         hamming_byte_distance(new_sig, &child_sig) <= tau
@@ -2878,7 +2880,8 @@ fn route_key_entropy_at_candidate_depth(g: &AdaptiveBeliefGraph, node_id: NodeId
     };
     let mut counts = [0u64; 256];
     let mut total = 0u64;
-    for (key, _id) in g.nodes[parent as usize].children.iter() {
+    // Phase 0.7 (E) — non-allocating iteration over child pairs.
+    for (key, _id) in g.nodes[parent as usize].children.iter_sorted() {
         counts[key as usize] = counts[key as usize].saturating_add(1);
         total = total.saturating_add(1);
     }
