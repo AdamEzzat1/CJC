@@ -174,3 +174,115 @@ Item 8's deliverable is therefore: this analysis + the `route_to_leaf_batch` ker
 ---
 
 *This document is the Phase 0.6 Item 8 deliverable. It is not a ship gate; it is a research artifact that informs Phase 0.7+ planning.*
+
+---
+
+## 6. Broader scope — bringing ALL CJC-Lang training to TidyView's level
+
+### 6.1 The actual ask
+
+The framing the project actually needs is wider than "apply TidyView's patterns to ABNG." TidyView v3 set a bar on three pillars — determinism, performance, auditability — that **every training path in CJC-Lang** should clear, not just ABNG. The other training paths today are:
+
+- **Chess RL v2** (`tests/chess_rl_v2/`) — REINFORCE/A2C agent, ~1,715 LOC pure CJC-Lang policy + value head, MLP backbone, Adam optimizer. Phase 0.5 final weight hash: `9.790915694115341` (single deterministic Float over the post-training weights).
+- **PINN demos** (`tests/physics_ml/`, `examples/physics_ml/`) — physics-informed nets in pure CJC-Lang via `grad_graph_*` builtins, residual training over collocation points. Determinism via Kahan-folded gradients; quality via L2-error thresholds.
+- **Generic MLP / RNN / CNN / transformer examples** (`bench/nn_bench/`, `examples/`) — small networks that exercise the runtime's tensor ops + autodiff. SplitMix64-seeded init + Kahan reductions give bit-identical output across runs.
+
+This section evaluates each training path on TidyView's three pillars and identifies what would have to be built to bring them all up to the bar.
+
+### 6.2 Scoreboard — where each training path sits today
+
+| Pillar | TidyView v3 bar | ABNG | Chess RL v2 | PINN demos | Generic MLP / NN |
+|---|---|---|---|---|---|
+| **Determinism** (bit-identical output across runs + platforms) | ✅ proven via cross-platform CI on locked canaries | ✅ 28 SHA-256 canaries; cross-platform CI in place (Item 1) | 🟡 single weight hash canary at end-of-training; cross-platform untested | 🟡 numerical L2-error thresholds (not bit-exact); cross-platform untested | 🟡 Kahan + SplitMix64 give bit-identity by construction; not gated by canaries |
+| **Performance** (sub-microsecond per-op on hot path) | ✅ ~108 ns/op on sealed lookup | 🟡 13.5 µs/row training; SHA-256-bound. Items 3+4 cut chain costs (2.14× / 17.60×) | ❌ 30 s/episode; CJC-Lang interpreter dominates | ❌ ~14 µs/row; same Cholesky + SHA-256 ceiling as ABNG | ❌ interpreter-bound by 5–50×; no native kernels for forward/backward MLP layers |
+| **Auditability** (cryptographic fingerprint of training history) | ✅ frozen_hash on every pipeline node + sealed-by-construction artifacts | ✅ full SHA-256 audit chain over every observation; `cjcl abng explain` consumes it | ❌ no per-step audit; only the post-training weight hash | ❌ no per-step audit; per-epoch L2 error logged but not chained | ❌ no audit primitive at all |
+
+**The honest read:** ABNG is the only training path that meets TidyView's auditability bar. All other training paths have determinism by construction (Kahan + SplitMix64 + BTreeMap discipline already in place) but **no cryptographic per-step provenance**. Performance is universally below TidyView's bar because the CJC-Lang interpreter contributes a 5–50× overhead floor that no model-specific optimization can fully erase.
+
+### 6.3 The structural gap — and the structural fix
+
+The asymmetry above traces to one architectural decision. **ABNG's audit chain is not a service it consumes; it is a service it implements.** `crates/cjc-abng/src/audit.rs` defines its own `AuditEvent` enum, its own SHA-256 chain semantics, its own `verify_chain()`, and its own canonical-bytes encoding. Every other training path in CJC-Lang would have to re-implement this from scratch — which is why none of them did.
+
+**The structural fix is to extract ABNG's audit-chain primitive into a reusable `cjc-audit` crate.** The interface is small:
+
+```rust
+pub struct AuditChain {
+    chain_head: [u8; 32],
+    events: Vec<TrainingEvent>,
+}
+
+pub trait Auditable {
+    /// Canonical byte encoding of this event's payload. Order-sensitive.
+    fn canonical_bytes(&self) -> Vec<u8>;
+}
+
+impl AuditChain {
+    pub fn record<E: Auditable>(&mut self, event: E);
+    pub fn chain_head_hex(&self) -> String;
+    pub fn verify(&self) -> Result<(), ChainBroken>;
+}
+```
+
+Each training path then implements its own `Auditable` event types:
+
+- **Chess RL v2:** `AdamStep { episode, batch_grad_hash, weight_hash_post_step, lr, temp }` + `EpisodeEnd { reward, n_moves, terminal_state }`. Every Adam step records a chain entry; the `chain_head` after 60 episodes IS the entire training trajectory's fingerprint.
+- **PINN demos:** `EpochEnd { epoch, params_hash, residual_hash, l2_err }`. Replay would reconstruct training step-by-step; `cjcl abng explain`-style tooling would extend to PINN attestations.
+- **Generic MLP/NN:** `LayerForward { layer_idx, params_hash, output_hash }` for fine-grained provenance, OR `TrainingStep { epoch, params_hash, loss }` for coarse-grained.
+
+This is **not a multi-month commitment.** The audit-chain primitive is ~600 LOC in `cjc-abng/src/audit.rs` + `serialize.rs`. Extraction to a crate is largely mechanical: rename `cjc_abng::audit` → `cjc_audit::chain`, generalize `AuditKind` to a trait-based `Auditable`, leave ABNG's specific kinds as one impl. **Phase 0.7 candidate, ~3–5 day commitment with full test coverage.**
+
+### 6.4 Closing the performance gap — the unavoidable interpreter wall
+
+The performance gap is harder. ABNG-specific work (Items 3, 4, 7, 8) saved ~10–20× on specific hot paths, but only by adding native Rust builtins. **Every native builtin we add accelerates one operation; the interpreter overhead floor (1–5 µs per builtin dispatch) is unchanged.**
+
+Two structural options:
+
+**(a) AOT compilation** (`cjcl compile foo.cjcl → foo.exe`). The compiler-team mandate the handoff explicitly punted to Phase 0.7+ as a multi-month commitment. Done well, this would close the entire interpreter overhead gap — training loops would compile to native loops with the same per-iteration cost as direct Rust. **Cost: 6+ months, requires LLVM/Cranelift integration, ABI design, debugger support. The most expensive single item in any Phase 0.7+ roadmap.**
+
+**(b) JIT-batched specialization.** When a hot loop is detected (e.g., 10⁴ iterations of the same builtin sequence), the runtime synthesizes a fused native kernel for THAT sequence and dispatches to it for subsequent iterations. Less ambitious than full AOT; reuses the existing builtin-dispatch infrastructure. **Cost: 1–2 months. Phase 0.7 candidate.**
+
+For now, the realistic path is **more native fused kernels per training pattern**, like Items 4 and 7 did for ABNG. Each saves 5–20× on its specific operation and ships in days rather than months.
+
+### 6.5 Closing the determinism gap
+
+The determinism story is in much better shape than the auditability or performance ones, because Kahan + SplitMix64 + BTreeMap discipline is **already** project-wide policy. The remaining gap is **gating** — locking SHA-256 canaries on the per-step training state, not just the final artifact.
+
+Concretely: chess RL v2 should have 5–10 SHA-256 canaries, not 1, covering:
+- Initial weight hash (post-init, pre-training)
+- Weight hash after epoch 1 / 10 / 50 / 60 (sampled checkpoints)
+- Final weight hash (currently the only canary)
+- Adam state hash at each checkpoint
+
+Same pattern for PINN demos — lock per-epoch L2-error AND per-epoch params_hash. Cross-platform CI (Item 1) is the gate.
+
+**Cost: ~1 week per training path. Phase 0.7 candidate, no architectural risk.**
+
+### 6.6 Concrete Phase 0.7 plan to bring all training to bar
+
+In priority order, with cost estimates:
+
+| # | Item | Cost | Pillar(s) addressed | Wire format impact |
+|---|---|---|---|---|
+| 1 | Extract `cjc-audit` crate from ABNG's audit chain | 3–5 days | Auditability (chess RL, PINN, generic NN all gain it) | None |
+| 2 | Wire `cjc-audit` into chess RL v2 (per-Adam-step events) | 2 days | Auditability (chess RL specifically) + lock per-checkpoint canaries | None |
+| 3 | Wire `cjc-audit` into PINN demo training loops | 2 days | Auditability (PINN) + per-epoch canaries | None |
+| 4 | Lock 5–10 SHA-256 canaries per non-ABNG training path | 1 week total | Determinism (gates the canaries via cross-platform CI from Item 1) | None |
+| 5 | Pre-allocate accumulators in `BlrState` per §4.1 | 50 LOC | Performance (~1 µs/call savings) | None |
+| 6 | `route_and_predict_batch` for inference loops per §4.3 | ~80 LOC | Performance (chunked dispatch on inference) | None |
+| 7 | SIMD `KahanAccumulatorF64` for d≥8 per §4.4 | ~150 LOC | Performance (high-d BLR + general MLP) | None — cross-platform determinism gated by Item 1's CI |
+| 8 | JIT-batched specialization for hot CJC-Lang loops | 1–2 months | Performance (interpreter wall) | None |
+| 9 | AOT compilation (`cjcl compile`) | 6+ months | Performance (full interpreter elimination) | New `.exe` artifact format |
+
+Items 1–4 are the **broader-training auditability uplift** the user actually wants. Total cost ~2 weeks for the whole package — and after that, every training path in CJC-Lang has the same cryptographic provenance ABNG already has. Items 5–9 are pure performance work; they make the existing training paths faster but don't change their auditability story.
+
+### 6.7 Bottom line
+
+The project's training story is currently three-tiered:
+- **ABNG: meets TidyView's bar on auditability and determinism, slow on performance.**
+- **Chess RL v2 + PINN demos: meet the bar on determinism (by construction), partial on auditability (final-state canaries only), slow on performance.**
+- **Generic MLP / NN examples: deterministic by construction, no auditability primitive at all, slow on performance.**
+
+The fix that closes the auditability gap for everyone is **extracting ABNG's audit-chain primitive into a reusable crate** and threading it through chess RL, PINN, and any future training path. **That single piece of work (Items 1–3 above, ~1 week) is the highest-leverage cross-cutting investment Phase 0.7 could make.** Performance work is also necessary but it scales with native-kernel-by-native-kernel accumulation; auditability uplift is a one-shot architectural intervention.
+
+This is the framing that should drive Phase 0.7 planning.
+
