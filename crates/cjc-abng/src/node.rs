@@ -234,9 +234,16 @@ impl AdaptiveBeliefNode {
     /// `observe`.
     pub(crate) fn advance_stats_chain(&mut self) {
         // 32 (prev chain head) + 32 (canonical_bytes, Phase 0.5 v12).
-        let mut buf = Vec::with_capacity(32 + 32);
-        buf.extend_from_slice(&self.stats_chain_head);
-        buf.extend_from_slice(&self.stats.canonical_bytes());
+        // Phase 0.7 (F) — stack-allocated `[u8; 64]` instead of a fresh
+        // `Vec::with_capacity(64)` per call. Both halves are fixed-size
+        // (`stats_chain_head: [u8; 32]`, `stats.canonical_bytes() ->
+        // [u8; 32]`) so the buffer's full size is known at compile time
+        // and there's no reason to pay an allocator round-trip on every
+        // observation. SHA-256 input bytes are byte-identical to the
+        // pre-0.7 Vec form.
+        let mut buf = [0u8; 64];
+        buf[..32].copy_from_slice(&self.stats_chain_head);
+        buf[32..].copy_from_slice(&self.stats.canonical_bytes());
         self.stats_chain_head = cjc_snap::hash::sha256(&buf);
     }
 
