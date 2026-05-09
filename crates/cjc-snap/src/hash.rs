@@ -200,6 +200,137 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     digest
 }
 
+/// Streaming SHA-256 hasher.
+///
+/// Phase 0.7 (C) — adds an incremental hashing API alongside the existing
+/// one-shot [`sha256`] function. Unlike `sha256(data)`, which requires the
+/// caller to materialize the full input into a `Vec<u8>` before hashing,
+/// the streaming API processes data in chunks via [`Sha256::update`] and
+/// produces the digest with [`Sha256::finalize`]. This eliminates the
+/// per-event `Vec::with_capacity(32 + payload.len())` concat that
+/// `AuditEvent::compute_new_hash` previously paid on every chain step.
+///
+/// The output is byte-identical to one-shot `sha256` for every input — a
+/// streaming `update(prev) + update(payload) + finalize()` produces the
+/// same 32-byte digest as `sha256(prev || payload)`. Verified by the
+/// in-crate `streaming_matches_one_shot_*` tests.
+///
+/// # Example
+///
+/// ```
+/// use cjc_snap::hash::{Sha256, sha256};
+/// let one_shot = sha256(b"hello world");
+/// let streamed = {
+///     let mut h = Sha256::new();
+///     h.update(b"hello ");
+///     h.update(b"world");
+///     h.finalize()
+/// };
+/// assert_eq!(one_shot, streamed);
+/// ```
+#[derive(Debug, Clone)]
+pub struct Sha256 {
+    /// Internal SHA-256 state — 8 × u32 = 256 bits.
+    state: [u32; 8],
+    /// Partial-block buffer; holds 0..=63 bytes between `update` calls.
+    buffer: [u8; 64],
+    /// Number of bytes currently in `buffer` (0..=63 invariant).
+    buffer_len: usize,
+    /// Total bytes consumed across all `update` calls. Used to write the
+    /// 64-bit length suffix during `finalize`.
+    total_len: u64,
+}
+
+impl Default for Sha256 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Sha256 {
+    /// Construct a fresh streaming hasher initialized to the FIPS 180-4
+    /// initial hash values.
+    pub fn new() -> Self {
+        Self {
+            state: H_INIT,
+            buffer: [0u8; 64],
+            buffer_len: 0,
+            total_len: 0,
+        }
+    }
+
+    /// Feed `data` into the hasher. Can be called any number of times; the
+    /// final digest depends on the concatenation of all `data` slices in
+    /// the order they were supplied.
+    pub fn update(&mut self, data: &[u8]) {
+        self.total_len = self.total_len.wrapping_add(data.len() as u64);
+        let mut input = data;
+        // 1. Fill any pending partial block from previous calls.
+        if self.buffer_len > 0 {
+            let needed = 64 - self.buffer_len;
+            if input.len() < needed {
+                // Not enough to complete the partial block — buffer it.
+                self.buffer[self.buffer_len..self.buffer_len + input.len()]
+                    .copy_from_slice(input);
+                self.buffer_len += input.len();
+                return;
+            }
+            self.buffer[self.buffer_len..64].copy_from_slice(&input[..needed]);
+            process_block(&mut self.state, &self.buffer);
+            self.buffer_len = 0;
+            input = &input[needed..];
+        }
+        // 2. Process full 64-byte blocks directly from the input slice
+        //    without copying through `self.buffer`.
+        while input.len() >= 64 {
+            process_block(&mut self.state, &input[..64]);
+            input = &input[64..];
+        }
+        // 3. Buffer the trailing bytes for the next call (or finalize).
+        if !input.is_empty() {
+            self.buffer[..input.len()].copy_from_slice(input);
+            self.buffer_len = input.len();
+        }
+    }
+
+    /// Consume the hasher and produce the 32-byte digest. Applies FIPS
+    /// 180-4 padding (0x80 + zeros + 64-bit BE length) to the trailing
+    /// partial block.
+    pub fn finalize(mut self) -> [u8; 32] {
+        let bit_len = self.total_len.wrapping_mul(8);
+        // Append the trailing '1' bit (byte 0x80).
+        self.buffer[self.buffer_len] = 0x80;
+        self.buffer_len += 1;
+
+        if self.buffer_len > 56 {
+            // Not enough room for the 8-byte length suffix in this block.
+            // Zero-pad the rest, process it, then start a fresh block of
+            // zeros that will hold the length suffix.
+            for i in self.buffer_len..64 {
+                self.buffer[i] = 0;
+            }
+            process_block(&mut self.state, &self.buffer);
+            self.buffer = [0u8; 64];
+            self.buffer_len = 0;
+        }
+        // Zero-pad up to byte 56.
+        for i in self.buffer_len..56 {
+            self.buffer[i] = 0;
+        }
+        // Write the 64-bit big-endian total bit length at bytes 56..64.
+        self.buffer[56..64].copy_from_slice(&bit_len.to_be_bytes());
+        process_block(&mut self.state, &self.buffer);
+
+        // Convert state to 32-byte digest (4 BE bytes per u32 word).
+        let mut digest = [0u8; 32];
+        for (i, &word) in self.state.iter().enumerate() {
+            let bytes = word.to_be_bytes();
+            digest[i * 4..i * 4 + 4].copy_from_slice(&bytes);
+        }
+        digest
+    }
+}
+
 /// Parse a 64-character hex string into a 32-byte hash array.
 ///
 /// # Arguments
@@ -315,5 +446,120 @@ mod tests {
         let s = hex_string(&hash);
         assert_eq!(s.len(), 64);
         assert_eq!(s, "0000000000000000000000000000000000000000000000000000000000000000");
+    }
+
+    // ── Phase 0.7 (C) — streaming SHA-256 parity tests ────────────────
+
+    /// Helper: compute via streaming with a given chunking sequence.
+    fn streamed(chunks: &[&[u8]]) -> [u8; 32] {
+        let mut h = Sha256::new();
+        for c in chunks {
+            h.update(c);
+        }
+        h.finalize()
+    }
+
+    #[test]
+    fn streaming_matches_one_shot_empty() {
+        // SHA-256("") via streaming with no updates must equal
+        // sha256(""). This is the degenerate "all padding" case where
+        // the bit-length suffix lives in the same final block as the
+        // trailing 0x80 (since byte_len < 56).
+        assert_eq!(streamed(&[]), sha256(b""));
+        assert_eq!(streamed(&[b""]), sha256(b""));
+    }
+
+    #[test]
+    fn streaming_matches_one_shot_short() {
+        assert_eq!(streamed(&[b"abc"]), sha256(b"abc"));
+        assert_eq!(streamed(&[b"a"]), sha256(b"a"));
+        assert_eq!(streamed(&[b"hello world"]), sha256(b"hello world"));
+    }
+
+    #[test]
+    fn streaming_matches_one_shot_chunked() {
+        // The whole point of streaming: identical output regardless of
+        // how the input is split across update calls.
+        let full = b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+        let one_shot = sha256(full);
+        assert_eq!(streamed(&[full]), one_shot);
+        assert_eq!(streamed(&[&full[..3], &full[3..]]), one_shot);
+        assert_eq!(streamed(&[&full[..1], &full[1..2], &full[2..]]), one_shot);
+        assert_eq!(
+            streamed(&[&full[..16], &full[16..32], &full[32..48], &full[48..]]),
+            one_shot
+        );
+    }
+
+    #[test]
+    fn streaming_matches_one_shot_block_boundary() {
+        // Inputs at exactly 55 / 56 / 57 / 63 / 64 / 65 / 119 / 128 bytes
+        // exercise every padding case (single-block-suffix vs
+        // overflow-into-extra-block).
+        for &n in &[55usize, 56, 57, 63, 64, 65, 119, 128, 191, 192, 256, 1000] {
+            let input: Vec<u8> = (0..n).map(|i| (i & 0xff) as u8).collect();
+            let one_shot = sha256(&input);
+            // Single-update.
+            assert_eq!(streamed(&[&input]), one_shot, "len={n} single-update");
+            // Byte-by-byte.
+            let chunks: Vec<&[u8]> = (0..n).map(|i| &input[i..i + 1]).collect();
+            assert_eq!(streamed(&chunks), one_shot, "len={n} byte-by-byte");
+            // Half-and-half.
+            assert_eq!(
+                streamed(&[&input[..n / 2], &input[n / 2..]]),
+                one_shot,
+                "len={n} half-and-half"
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_matches_concat_one_shot_for_audit_pattern() {
+        // The audit chain hashing pattern: SHA-256(prev_hash || payload).
+        // Streaming form: update(prev_hash); update(payload); finalize().
+        // Must produce the same bytes as the one-shot
+        // sha256(&prev_hash[..] ++ payload), since that is what
+        // `AuditEvent::compute_new_hash` emits today.
+        let prev_hash = [0xa5u8; 32];
+        for payload_len in [0usize, 1, 16, 32, 56, 63, 64, 65, 96, 128, 257] {
+            let payload: Vec<u8> = (0..payload_len).map(|i| (i & 0xff) as u8).collect();
+            // One-shot reference.
+            let mut concat = Vec::with_capacity(32 + payload.len());
+            concat.extend_from_slice(&prev_hash);
+            concat.extend_from_slice(&payload);
+            let one_shot = sha256(&concat);
+            // Streaming.
+            let streamed = {
+                let mut h = Sha256::new();
+                h.update(&prev_hash);
+                h.update(&payload);
+                h.finalize()
+            };
+            assert_eq!(streamed, one_shot, "audit pattern, payload_len={payload_len}");
+        }
+    }
+
+    #[test]
+    fn streaming_default_equals_new() {
+        let mut a = Sha256::new();
+        let mut b = Sha256::default();
+        a.update(b"abc");
+        b.update(b"abc");
+        assert_eq!(a.finalize(), b.finalize());
+    }
+
+    #[test]
+    fn streaming_clone_independent() {
+        // Cloning the hasher mid-stream must produce two independent
+        // states; finalizing one doesn't affect the other. (Useful for
+        // future commit-and-continue patterns; verified here.)
+        let mut a = Sha256::new();
+        a.update(b"prefix");
+        let b = a.clone();
+        a.update(b"-suffix-A");
+        let mut c = b;
+        c.update(b"-suffix-B");
+        assert_eq!(a.finalize(), sha256(b"prefix-suffix-A"));
+        assert_eq!(c.finalize(), sha256(b"prefix-suffix-B"));
     }
 }

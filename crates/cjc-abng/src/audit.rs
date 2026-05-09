@@ -601,11 +601,19 @@ impl AuditEvent {
     }
 
     /// Compute the chain step `new_hash = sha256(previous_hash ‖ payload)`.
+    ///
+    /// Phase 0.7 (C) — implemented via the streaming
+    /// [`cjc_snap::hash::Sha256`] hasher, which feeds `previous_hash`
+    /// and `payload` into the SHA-256 state directly without first
+    /// concatenating them into an intermediate `Vec<u8>`. The output
+    /// digest is byte-identical to the pre-0.7 form (verified in
+    /// `cjc-snap` by `streaming_matches_concat_one_shot_for_audit_pattern`),
+    /// so the 28 locked audit chain canaries are preserved.
     pub fn compute_new_hash(previous_hash: &[u8; 32], payload: &[u8]) -> [u8; 32] {
-        let mut buf = Vec::with_capacity(32 + payload.len());
-        buf.extend_from_slice(previous_hash);
-        buf.extend_from_slice(payload);
-        cjc_snap::hash::sha256(&buf)
+        let mut hasher = cjc_snap::hash::Sha256::new();
+        hasher.update(previous_hash);
+        hasher.update(payload);
+        hasher.finalize()
     }
 
     /// Recompute `new_hash` from `previous_hash` and the current payload.
