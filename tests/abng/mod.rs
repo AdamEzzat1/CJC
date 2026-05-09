@@ -40,6 +40,7 @@ mod maturity_signature_tests;
 mod merge_math_tests;
 mod multinode;
 mod observe_validation_tests;
+mod parallel_route_tests;
 mod parity;
 mod parity_p2;
 mod parity_p3a;

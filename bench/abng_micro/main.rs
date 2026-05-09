@@ -319,8 +319,11 @@ fn main() {
     // ── Phase 0.6 Item 8: route_to_leaf_batch vs N per-row calls ──────
     bench_route_to_leaf_batch(seed);
 
+    // ── Phase 0.8 Item C1: parallel route_to_leaf_batch ───────────────
+    bench_parallel_route_to_leaf_batch(seed);
+
     eprintln!("=== Done ===");
-    eprintln!("Phase 0.6 baseline + Items 3/4/7/8 perf wins.");
+    eprintln!("Phase 0.6 baseline + Items 3/4/7/8 perf wins + Phase 0.8 B1 mmap + C1 parallel route.");
 }
 
 /// Phase 0.6 Item 3 — measure smart-replay fast-forward speedup over
@@ -738,4 +741,82 @@ fn bench_route_to_leaf_batch(seed: u64) {
         batch_min_ns as f64 / 1e3,
         speedup,
     );
+}
+/// Phase 0.8 Item C1 — measure `route_to_leaf_batch_par` against the
+/// serial `route_to_leaf_batch` across thread counts {1, 2, 4, 8} on
+/// a 10,000-row routing workload.
+///
+/// What we measure:
+///   * Speedup over serial as `n_threads` grows. Ideal is N× at no
+///     contention; real-world is bounded by physical cores, the
+///     small per-row work (~50–100 ns), and `std::thread::scope`'s
+///     spawn overhead (~10 µs per thread).
+///   * Determinism witness: the per-thread output's accumulated
+///     XOR of leaf ids matches the serial output's XOR for every
+///     thread count. (Asserted in tests; bench just emits the
+///     numbers.)
+///
+/// Caveat: at small per-row cost, thread spawn overhead can dominate
+/// for small batches. We pick n=10k specifically because it's large
+/// enough that 4 threads at ~5 µs/thread × 4 = ~20 µs spawn overhead
+/// is small relative to the ~1 ms total routing work.
+fn bench_parallel_route_to_leaf_batch(seed: u64) {
+    const N_BATCH: usize = 10_000;
+    const N_TRIALS: usize = 5;
+
+    let g = build_graph(seed);
+    // d=1 codebook from build_graph; xs of length N_BATCH * 1.
+    let xs: Vec<f64> = (0..N_BATCH)
+        .map(|i| ((i as f64) * 0.137).sin())
+        .collect();
+
+    // Warm-up: the JIT branch-predictor + L1 cache.
+    for _ in 0..3 {
+        let _ = g.route_to_leaf_batch(&xs, N_BATCH).unwrap();
+    }
+
+    // Serial baseline.
+    let mut serial_min_ns = u128::MAX;
+    let mut serial_first: Vec<u32> = Vec::new();
+    for _ in 0..N_TRIALS {
+        let start = Instant::now();
+        let leaves = g.route_to_leaf_batch(&xs, N_BATCH).unwrap();
+        let elapsed = start.elapsed().as_nanos();
+        if elapsed < serial_min_ns {
+            serial_min_ns = elapsed;
+            serial_first = leaves;
+        }
+    }
+
+    // Parallel at thread counts {1, 2, 4, 8}.
+    for &n_threads in &[1usize, 2, 4, 8] {
+        let mut par_min_ns = u128::MAX;
+        let mut par_first: Vec<u32> = Vec::new();
+        for _ in 0..N_TRIALS {
+            let start = Instant::now();
+            let leaves = g
+                .route_to_leaf_batch_par(&xs, N_BATCH, n_threads)
+                .unwrap();
+            let elapsed = start.elapsed().as_nanos();
+            if elapsed < par_min_ns {
+                par_min_ns = elapsed;
+                par_first = leaves;
+            }
+        }
+        // Determinism gate: parallel must equal serial byte-for-byte.
+        assert_eq!(
+            par_first, serial_first,
+            "route_to_leaf_batch_par at n_threads={n_threads} diverged from serial"
+        );
+        let speedup = serial_min_ns as f64 / par_min_ns as f64;
+        println!(
+            r#"{{"op":"route_to_leaf_batch_par","n":{N_BATCH},"n_threads":{n_threads},"serial_min_ns":{serial_min_ns},"par_min_ns":{par_min_ns},"speedup":{speedup:.3}}}"#
+        );
+        eprintln!(
+            "  route_to_leaf_batch_par n_threads={n_threads}: serial={:.2}ms  par={:.2}ms  speedup={:.2}x  (ideal=n at no-contention)",
+            serial_min_ns as f64 / 1e6,
+            par_min_ns as f64 / 1e6,
+            speedup,
+        );
+    }
 }

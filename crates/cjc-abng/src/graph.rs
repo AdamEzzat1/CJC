@@ -684,6 +684,123 @@ impl AdaptiveBeliefGraph {
         }
     }
 
+    /// Phase 0.8 Item C1 — parallel sibling of [`route_to_leaf_batch`].
+    ///
+    /// Splits the input into `n_threads` chunks and routes each chunk
+    /// on a `std::thread::scope` thread. Output is in row-order; the
+    /// result is byte-identical to [`route_to_leaf_batch`] for any
+    /// thread count >= 1. Each row's leaf id is a pure function of
+    /// `(graph_state, row_input)`, and writes go into disjoint output
+    /// slots, so parallelism does not introduce any reordering.
+    ///
+    /// **Determinism gate.**
+    /// `route_to_leaf_batch_par(xs, n, k) == route_to_leaf_batch(xs, n)`
+    /// for any `k >= 1`. Verified by integration tests in
+    /// `tests/abng/parallel_route_tests.rs` against thread counts
+    /// {1, 2, 4, 8}.
+    ///
+    /// **No `Graph: Sync` requirement.**
+    /// `AdaptiveBeliefGraph` is intentionally `!Sync` (it transitively
+    /// holds `Rc` via `cjc_runtime::Tensor` for BLR / leaf-head
+    /// state). To bypass that without `unsafe`, this function never
+    /// shares `&self` across threads. Instead, it shares only the
+    /// routing-relevant subset:
+    ///   - `&QuantileCodebook` — tensor-free, auto-`Sync`
+    ///   - `Vec<&AdaptiveChildren>` — tensor-free, auto-`Sync`
+    /// These are the *only* fields touched by [`descend`]'s read path.
+    /// Splitting them out is a routing-only view and avoids cloning
+    /// the whole graph.
+    ///
+    /// **Thread count.** Values larger than `n` are clamped to `n`
+    /// (no empty threads). `n_threads == 0` is treated as `1`.
+    /// `n_threads == 1` short-circuits to the serial
+    /// [`route_to_leaf_batch`].
+    ///
+    /// **No new dependencies.** Built on stable `std::thread::scope`
+    /// (Rust 1.63+), matching the workspace's zero-external-deps
+    /// property and the Phase 0.7 architectural lesson.
+    ///
+    /// Read-only: emits no audit events. Errors mirror those of
+    /// [`route_to_leaf_batch`].
+    pub fn route_to_leaf_batch_par(
+        &self,
+        xs: &[f64],
+        n: usize,
+        n_threads: usize,
+    ) -> Result<Vec<NodeId>, GraphError> {
+        let codebook = match &self.codebook {
+            Some(cb) => cb,
+            None => return Err(GraphError::NoCodebook),
+        };
+        let d = codebook.n_dims as usize;
+        if d == 0 {
+            return Err(GraphError::NoCodebook);
+        }
+        if xs.len() != n * d {
+            return Err(GraphError::Codebook(
+                CodebookError::InputArityMismatch {
+                    expected: d as u8,
+                    got: xs.len(),
+                },
+            ));
+        }
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+
+        let n_threads = n_threads.max(1).min(n);
+        if n_threads == 1 {
+            return self.route_to_leaf_batch(xs, n);
+        }
+
+        // Routing-only view: tensor-free, auto-Sync.
+        let children: Vec<&AdaptiveChildren> =
+            self.nodes.iter().map(|node| &node.children).collect();
+
+        let mut out: Vec<NodeId> = vec![0; n];
+        let chunk_size = n.div_ceil(n_threads);
+
+        // SAFETY/borrow note: `chunks_mut` produces non-overlapping
+        // `&mut [NodeId]` slices; each is moved into its own scoped
+        // thread. The borrow checker enforces that each chunk's
+        // lifetime ends when its thread joins, which `scope` does
+        // before returning. `&codebook` and `&children` outlive the
+        // scope (held in this function's stack frame) and are
+        // borrowed immutably by every thread — Sync because their
+        // contents are tensor-free.
+        std::thread::scope(|sc| -> Result<(), GraphError> {
+            let mut handles = Vec::with_capacity(n_threads);
+            let mut row_offset = 0usize;
+            for out_chunk in out.chunks_mut(chunk_size) {
+                let chunk_n = out_chunk.len();
+                let xs_chunk = &xs[row_offset * d..(row_offset + chunk_n) * d];
+                row_offset += chunk_n;
+
+                let codebook_ref = codebook;
+                let children_ref: &[&AdaptiveChildren] = &children;
+                handles.push(sc.spawn(move || -> Result<(), GraphError> {
+                    let mut prefix_buf: Vec<u8> = Vec::with_capacity(d);
+                    for (j, row) in xs_chunk.chunks(d).enumerate() {
+                        codebook_ref
+                            .encode_into(row, &mut prefix_buf)
+                            .map_err(GraphError::Codebook)?;
+                        out_chunk[j] = descend_with_children(
+                            children_ref,
+                            &prefix_buf,
+                        );
+                    }
+                    Ok(())
+                }));
+            }
+            for h in handles {
+                h.join().expect("route_to_leaf_batch_par: thread panicked")?;
+            }
+            Ok(())
+        })?;
+
+        Ok(out)
+    }
+
     /// Phase 0.4 Track A — emit one `StatsSnapshot` audit event per
     /// distinct node touched by events in `[0, until_seq)`, capturing
     /// each touched node's current `NodeStats::stats_hash()`.
@@ -2837,6 +2954,33 @@ fn estimate_split_nll_gain(
         .sum();
 
     (nll_pre - nll_post).max(0.0)
+}
+
+/// Phase 0.8 Item C1 — bare-children variant of [`AdaptiveBeliefGraph::descend`]
+/// used by [`AdaptiveBeliefGraph::route_to_leaf_batch_par`].
+///
+/// Walks root-to-leaf using only `&[&AdaptiveChildren]` (one entry per
+/// node, in `NodeId` order). This is the routing-only subset of the
+/// graph state, which is `Sync` (tensor-free) and shareable across
+/// scoped threads. Returns just the leaf id; the full `RouteEvidence`
+/// (with `path` and `matched_prefix`) is not built because the
+/// parallel batch caller only consumes `leaf_id`.
+///
+/// Determinism: byte-identical to `descend(prefix).leaf_id` for the
+/// same graph state. Verified by the parity tests in
+/// `tests/abng/parallel_route_tests.rs`.
+fn descend_with_children(
+    children_per_node: &[&AdaptiveChildren],
+    prefix: &[u8],
+) -> NodeId {
+    let mut current: NodeId = 0;
+    for &byte in prefix {
+        match children_per_node[current as usize].get(byte) {
+            Some(next) => current = next,
+            None => break,
+        }
+    }
+    current
 }
 
 fn fit_gaussian(data: &[f64]) -> (f64, f64) {
