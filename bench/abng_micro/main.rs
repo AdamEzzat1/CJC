@@ -147,8 +147,11 @@ fn main() {
     // ── Phase 0.6 Item 7: route_to_leaf vs encode_prefix+descend ──────
     bench_route_to_leaf(seed);
 
+    // ── Phase 0.6 Item 8: route_to_leaf_batch vs N per-row calls ──────
+    bench_route_to_leaf_batch(seed);
+
     eprintln!("=== Done ===");
-    eprintln!("Phase 0.6 Item 2 baseline + Item 3 smart-replay + Item 4 batch-observe + Item 7 route_to_leaf speedups.");
+    eprintln!("Phase 0.6 baseline + Items 3/4/7/8 perf wins.");
 }
 
 /// Phase 0.6 Item 3 — measure smart-replay fast-forward speedup over
@@ -341,5 +344,65 @@ fn bench_route_to_leaf(seed: u64) {
     );
     eprintln!(
         "    (Rust-side cost only; the abng_route_to_leaf builtin's CJC-Lang-side win comes from collapsing 3 interpreter dispatches + 1 Tensor allocation into 1 dispatch.)"
+    );
+}
+
+/// Phase 0.6 Item 8 — measure the chunked-dispatch (batched
+/// route_to_leaf) speedup vs N single-row calls. The math is
+/// identical row-for-row; the win comes from amortizing per-call
+/// overhead (allocation reuse for the prefix buffer + single output
+/// allocation for N leaf ids).
+fn bench_route_to_leaf_batch(seed: u64) {
+    const N_BATCH: usize = 1024;
+    const N_TRIALS: usize = 5;
+
+    let mut g = AdaptiveBeliefGraph::new(seed);
+    g.set_codebook(1, 4, &[0.25, 0.5, 0.75]).unwrap();
+    for byte in 0u8..4 {
+        let _ = g.add_node(0, byte).unwrap();
+    }
+    let xs: Vec<f64> = (0..N_BATCH).map(|i| (i as f64) * 0.0009).collect();
+
+    // Per-row: N calls of encode_prefix + descend.
+    let mut per_row_min_ns = u128::MAX;
+    let mut leaf_acc = 0u32;
+    for _ in 0..N_TRIALS {
+        let start = Instant::now();
+        for &x in &xs {
+            let bytes = g.encode_prefix(&[x]).unwrap();
+            let leaf = g.descend(&bytes).leaf_id;
+            leaf_acc = leaf_acc.wrapping_add(leaf);
+        }
+        let elapsed = start.elapsed().as_nanos();
+        if elapsed < per_row_min_ns {
+            per_row_min_ns = elapsed;
+        }
+    }
+
+    // Batched: one route_to_leaf_batch call.
+    let mut batch_min_ns = u128::MAX;
+    let mut leaf_acc_b = 0u32;
+    for _ in 0..N_TRIALS {
+        let start = Instant::now();
+        let leaves = g.route_to_leaf_batch(&xs, N_BATCH).unwrap();
+        for l in &leaves {
+            leaf_acc_b = leaf_acc_b.wrapping_add(*l);
+        }
+        let elapsed = start.elapsed().as_nanos();
+        if elapsed < batch_min_ns {
+            batch_min_ns = elapsed;
+        }
+    }
+    assert_eq!(leaf_acc, leaf_acc_b);
+
+    let speedup = per_row_min_ns as f64 / batch_min_ns as f64;
+    println!(
+        r#"{{"op":"route_to_leaf_batch","n":{N_BATCH},"per_row_min_ns":{per_row_min_ns},"batch_min_ns":{batch_min_ns},"speedup":{speedup:.2}}}"#
+    );
+    eprintln!(
+        "  route_to_leaf_batch n={N_BATCH}: per_row={:.2}us  batch={:.2}us  speedup={:.2}x  (Rust-side; CJC-Lang dispatch savings stack on top)",
+        per_row_min_ns as f64 / 1e3,
+        batch_min_ns as f64 / 1e3,
+        speedup,
     );
 }

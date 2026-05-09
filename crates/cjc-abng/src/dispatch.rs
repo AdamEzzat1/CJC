@@ -624,6 +624,41 @@ pub fn dispatch_abng(name: &str, args: &[Value]) -> Result<Option<Value>, String
             })??;
             Value::Int(leaf)
         }
+        "abng_route_to_leaf_batch" => {
+            // Phase 0.6 Item 8 — TidyView-discipline "chunked
+            // dispatch" applied to ABNG. Takes a 2-D `[n, d]` input
+            // tensor and returns a 1-D `[n]` tensor of leaf ids.
+            // Bit-equivalent to N calls of `abng_route_to_leaf` over
+            // each row, but pays ONE interpreter dispatch + ONE
+            // output allocation across the whole batch.
+            //
+            // The win comes from amortizing per-call overhead — see
+            // `Graph::route_to_leaf_batch` for the implementation
+            // details.
+            arg_count(name, args, 2)?;
+            let id = arg_i64(name, &args[0])?;
+            let xs_t = arg_tensor(name, &args[1])?;
+            if xs_t.shape().len() != 2 {
+                return Err(format!(
+                    "{name}: input must be 2-D [n, d], got shape {:?}",
+                    xs_t.shape()
+                ));
+            }
+            let n = xs_t.shape()[0];
+            let xs = xs_t.to_vec();
+            let leaf_ids = with_graph(name, id, |g| {
+                g.route_to_leaf_batch(&xs, n)
+                    .map_err(|e| graph_err_to_string(name, e))
+            })??;
+            // Wrap as a 1-D Tensor of f64 (the canonical numeric
+            // tensor type — same convention as abng_descend's
+            // [matched, leaf_id] return).
+            let data: Vec<f64> = leaf_ids.iter().map(|&l| l as f64).collect();
+            let len = data.len();
+            let t = Tensor::from_vec(data, &[len])
+                .map_err(|e| format!("{name}: tensor build failed: {e:?}"))?;
+            Value::Tensor(t)
+        }
         "abng_predict_snap" => {
             // Phase 0.4 Track A — pack a predict + lineage tuple into a
             // self-contained Bytes blob using the dedicated PRED_MAGIC

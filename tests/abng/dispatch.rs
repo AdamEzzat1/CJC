@@ -110,6 +110,84 @@ fn route_to_leaf_arg_count_validation() {
     assert!(err.contains("expected 2 arguments"));
 }
 
+// ── Phase 0.6 Item 8: abng_route_to_leaf_batch (chunked dispatch) ──
+
+#[test]
+fn route_to_leaf_batch_matches_per_row() {
+    // Phase 0.6 Item 8 — the batched native kernel must produce the
+    // same per-row leaf ids as N invocations of abng_route_to_leaf.
+    reset_arena();
+    let g = new_graph(7);
+    let codebook = cjc_runtime::tensor::Tensor::from_vec(
+        vec![0.25, 0.5, 0.75],
+        &[1, 3],
+    )
+    .unwrap();
+    let _ = call(
+        "abng_set_codebook",
+        &[Value::Int(g), Value::Tensor(codebook)],
+    );
+    for byte in 0..4 {
+        let _ = call(
+            "abng_add_node",
+            &[Value::Int(g), Value::Int(0), Value::Int(byte)],
+        );
+    }
+
+    let xs = vec![0.10_f64, 0.30, 0.45, 0.62, 0.85, 0.05, 0.55, 0.95];
+    let n = xs.len();
+
+    // Per-row leaf ids via abng_route_to_leaf.
+    let mut per_row: Vec<i64> = Vec::with_capacity(n);
+    for &x in &xs {
+        let x_t = cjc_runtime::tensor::Tensor::from_vec(vec![x], &[1]).unwrap();
+        let leaf = match call(
+            "abng_route_to_leaf",
+            &[Value::Int(g), Value::Tensor(x_t)],
+        ) {
+            Value::Int(i) => i,
+            _ => panic!(),
+        };
+        per_row.push(leaf);
+    }
+
+    // Batched leaf ids via abng_route_to_leaf_batch.
+    let xs_t = cjc_runtime::tensor::Tensor::from_vec(xs, &[n, 1]).unwrap();
+    let batch_t = match call(
+        "abng_route_to_leaf_batch",
+        &[Value::Int(g), Value::Tensor(xs_t)],
+    ) {
+        Value::Tensor(t) => t,
+        _ => panic!(),
+    };
+    let batch: Vec<i64> = batch_t.to_vec().iter().map(|f| *f as i64).collect();
+
+    assert_eq!(per_row, batch);
+}
+
+#[test]
+fn route_to_leaf_batch_rejects_non_2d_input() {
+    reset_arena();
+    let g = new_graph(0);
+    let codebook = cjc_runtime::tensor::Tensor::from_vec(
+        vec![0.25, 0.5, 0.75],
+        &[1, 3],
+    )
+    .unwrap();
+    let _ = call(
+        "abng_set_codebook",
+        &[Value::Int(g), Value::Tensor(codebook)],
+    );
+    // 1-D input — must be 2-D [n, d].
+    let bad = cjc_runtime::tensor::Tensor::from_vec(vec![0.1, 0.2], &[2]).unwrap();
+    let err = try_call(
+        "abng_route_to_leaf_batch",
+        &[Value::Int(g), Value::Tensor(bad)],
+    )
+    .unwrap_err();
+    assert!(err.contains("must be 2-D"), "got: {err}");
+}
+
 #[test]
 fn graphs_are_independent() {
     reset_arena();

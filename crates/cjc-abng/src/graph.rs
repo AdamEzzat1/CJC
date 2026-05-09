@@ -603,6 +603,72 @@ impl AdaptiveBeliefGraph {
     /// prefix bytes were successfully matched. **Read-only** — emits no
     /// audit event. Use [`descend_traced`](Self::descend_traced) when
     /// you want every walk to land in the audit log.
+    /// Phase 0.6 Item 8 — batched route-to-leaf. Takes a flat
+    /// row-major `[n, d]` input where `d == codebook.n_dims` and
+    /// returns a `Vec<NodeId>` of length `n`, one leaf id per row.
+    ///
+    /// Functionally equivalent to N calls to `encode_prefix +
+    /// descend + extract leaf_id`, but performs ONE upstream
+    /// allocation (the output Vec) and avoids the per-row Tensor +
+    /// prefix-Vec allocations that the dispatch-layer 3-call pattern
+    /// would pay. This is the TidyView-discipline "chunked dispatch"
+    /// pattern applied to ABNG: amortize per-call setup over the
+    /// batch.
+    ///
+    /// The Rust math is unchanged — same `encode_prefix` +
+    /// `descend` per row. The win is at the allocation + dispatch
+    /// boundary, NOT the math.
+    ///
+    /// Read-only: emits no audit events. Returns
+    /// `Err(GraphError::NoCodebook)` if no codebook installed,
+    /// or [`CodebookError::InputArityMismatch`] (wrapped) if
+    /// `xs.len() != n * d`.
+    pub fn route_to_leaf_batch(
+        &self,
+        xs: &[f64],
+        n: usize,
+    ) -> Result<Vec<NodeId>, GraphError> {
+        let d = match &self.codebook {
+            Some(cb) => cb.n_dims as usize,
+            None => return Err(GraphError::NoCodebook),
+        };
+        if d == 0 {
+            return Err(GraphError::NoCodebook);
+        }
+        if xs.len() != n * d {
+            return Err(GraphError::Codebook(
+                crate::codebook::CodebookError::InputArityMismatch {
+                    expected: d as u8,
+                    got: xs.len(),
+                },
+            ));
+        }
+        let mut out: Vec<NodeId> = Vec::with_capacity(n);
+        // Reuse a single prefix Vec across rows — saves N
+        // allocations vs N calls to encode_prefix() each of which
+        // returns a fresh Vec<u8>. The codebook's encode_into
+        // method writes into a caller-provided buffer.
+        let mut prefix_buf: Vec<u8> = Vec::with_capacity(d);
+        for i in 0..n {
+            prefix_buf.clear();
+            let row = &xs[i * d..(i + 1) * d];
+            // The codebook's `encode` allocates a fresh Vec<u8>;
+            // we drop it after each iteration. A future
+            // optimization (Phase 0.7+) would add a `encode_into`
+            // method to QuantileCodebook that writes into a
+            // caller-provided buffer.
+            let prefix = self
+                .codebook
+                .as_ref()
+                .unwrap()
+                .encode(row)
+                .map_err(GraphError::Codebook)?;
+            prefix_buf.extend_from_slice(&prefix);
+            out.push(self.descend(&prefix_buf).leaf_id);
+        }
+        Ok(out)
+    }
+
     pub fn descend(&self, prefix: &[u8]) -> RouteEvidence {
         let root_id: NodeId = 0;
         let mut path = Vec::with_capacity(prefix.len() + 1);
