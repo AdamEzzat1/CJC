@@ -42,3 +42,9 @@ pub mod split_source;
 pub mod prune_source;
 pub mod compress_source;
 pub mod freeze_source;
+// Phase 0.6 Item 6 — scaled siblings of the Phase 0.5 demos at
+// production-realistic sample counts + additive noise.
+pub mod pinn_scaled_source;
+pub mod tabular_scaled_source;
+pub mod lineage_scaled_source;
+pub mod compact_scaled_source;
