@@ -26,8 +26,11 @@
 use cjc_abng::blr::{BlrPrior, BlrState};
 use cjc_abng::codebook::QuantileCodebook;
 use cjc_abng::graph::AdaptiveBeliefGraph;
-use cjc_abng::serialize::{replay_with_outcome, serialize, ReplayOptions};
+use cjc_abng::serialize::{
+    replay_mmap_with_outcome, replay_with_outcome, serialize, ReplayOptions,
+};
 use cjc_ad::pinn::Activation;
+use std::io::Write;
 use std::time::Instant;
 
 const N_WARMUP: usize = 100;
@@ -301,6 +304,12 @@ fn main() {
     // ── Phase 0.6 Item 3: smart-replay fast-forward speedup ────────────
     bench_smart_replay_vs_naive(seed);
 
+    // ── Phase 0.8 Item B1: mmap-replay vs read-to-end speedup ─────────
+    bench_replay_mmap_vs_naive(seed);
+
+    // ── Phase 0.8 Item B1 (at scale): same comparison at 10^6 events ──
+    bench_replay_mmap_vs_naive_at_scale(seed);
+
     // ── Phase 0.6 Item 4: observe_batch vs per-row observe speedup ────
     bench_observe_batch(seed);
 
@@ -387,6 +396,170 @@ fn bench_smart_replay_vs_naive(seed: u64) {
         speedup,
         ff_count,
         pre_audit_len,
+        blob_size,
+    );
+}
+
+/// Phase 0.8 Item B1 — measure memory-mapped replay vs the naive
+/// `replay(&fs::read(path))` pattern on a snapshot persisted to disk.
+///
+/// The naive path allocates one heap `Vec<u8>` sized to the full blob,
+/// then hands it to the slice decoder. The mmap path maps the file via
+/// the OS page cache; pages fault in lazily as the decoder's `Cursor`
+/// advances. Both feed the *same* decoder loop, so the rebuilt graph
+/// is byte-identical between the two paths (verified by
+/// `tests/abng/serialize_mmap.rs`).
+///
+/// At n_events ≈ 10^4 the snapshot is on the order of ~1 MB, which
+/// fits comfortably in `read_to_end`'s amortized growth. The mmap
+/// path's win is primarily on the *memory-footprint* axis (working
+/// set vs full blob) rather than wall-clock; this bench records the
+/// wall-clock number honestly so we can spot regressions and so the
+/// next-stage bench at n_events ≈ 10^6 has a baseline to compare to.
+fn bench_replay_mmap_vs_naive(seed: u64) {
+    const N_OBS: usize = 10_000;
+    const N_TRIALS: usize = 5;
+
+    let mut g = AdaptiveBeliefGraph::new(seed);
+    g.set_codebook(1, 4, &[-1.0, 0.0, 1.0]).unwrap();
+    for byte in 1u8..5 {
+        let _ = g.add_node(0, byte).unwrap();
+    }
+    for i in 0..N_OBS {
+        let leaf = ((i % 4) + 1) as u32;
+        let v = (i as f64 * 0.0001) - 0.5;
+        g.observe(leaf, v).unwrap();
+    }
+    let blob = serialize(&g);
+    let blob_size = blob.len();
+    let n_events = g.audit.len();
+
+    // Persist to disk once. Keep the temp file alive across both
+    // benches — dropping it would unlink the file under us.
+    let mut tmp = tempfile::NamedTempFile::new().expect("create temp file");
+    tmp.write_all(&blob).expect("write snapshot");
+    tmp.flush().expect("flush snapshot");
+    let path = tmp.path().to_path_buf();
+
+    // Time naive replay: read_to_end → slice decoder.
+    let mut naive_min_ns = u128::MAX;
+    for _ in 0..N_TRIALS {
+        let bytes = std::fs::read(&path).expect("read snapshot");
+        let start = Instant::now();
+        let _ = replay_with_outcome(&bytes, ReplayOptions::default()).unwrap();
+        let elapsed = start.elapsed().as_nanos();
+        if elapsed < naive_min_ns {
+            naive_min_ns = elapsed;
+        }
+    }
+
+    // Time mmap replay: File::open → Mmap::map → slice decoder.
+    let mut mmap_min_ns = u128::MAX;
+    for _ in 0..N_TRIALS {
+        let start = Instant::now();
+        let _ = replay_mmap_with_outcome(&path, ReplayOptions::default()).unwrap();
+        let elapsed = start.elapsed().as_nanos();
+        if elapsed < mmap_min_ns {
+            mmap_min_ns = elapsed;
+        }
+    }
+
+    let speedup = naive_min_ns as f64 / mmap_min_ns as f64;
+    println!(
+        r#"{{"op":"replay_mmap_vs_naive","n_events":{n_events},"blob_bytes":{blob_size},"naive_min_ns":{naive_min_ns},"mmap_min_ns":{mmap_min_ns},"speedup":{speedup:.2}}}"#
+    );
+    eprintln!(
+        "  replay_mmap_vs_naive : naive={:.2}ms mmap={:.2}ms speedup={:.2}x ({} events, {} B blob)",
+        naive_min_ns as f64 / 1e6,
+        mmap_min_ns as f64 / 1e6,
+        speedup,
+        n_events,
+        blob_size,
+    );
+}
+
+/// Phase 0.8 Item B1 at scale — measure memory-mapped replay vs the
+/// naive `replay(&fs::read(path))` pattern on a **10^6-event**
+/// snapshot persisted to disk.
+///
+/// At this scale (~130 MB blob on disk) the naive path's
+/// `read_to_end` does a single ~130 MB heap allocation plus a kernel
+/// buffer copy. The mmap path skips both: `Mmap::map` returns
+/// immediately with a virtual mapping, and the kernel page-faults
+/// pages in lazily as the decoder's `Cursor` advances. The forward-
+/// sequential scan pattern is exactly what the OS read-ahead
+/// heuristics are tuned for.
+///
+/// This bench is the scale at which the design note's "100× smaller
+/// RAM peak" claim materializes; the 10^4 bench above is the
+/// noise-floor baseline. Both benches share the same code path, so
+/// any regression in the slice or mmap fast paths will show up here
+/// with much larger absolute deltas.
+///
+/// Cost: ~30 seconds wall-clock for setup + 3 trials × 2 paths.
+fn bench_replay_mmap_vs_naive_at_scale(seed: u64) {
+    const N_OBS: usize = 1_000_000;
+    const N_TRIALS: usize = 3;
+
+    let mut g = AdaptiveBeliefGraph::new(seed);
+    g.set_codebook(1, 4, &[-1.0, 0.0, 1.0]).unwrap();
+    for byte in 1u8..5 {
+        let _ = g.add_node(0, byte).unwrap();
+    }
+    for i in 0..N_OBS {
+        let leaf = ((i % 4) + 1) as u32;
+        let v = (i as f64 * 0.0000001) - 0.5;
+        g.observe(leaf, v).unwrap();
+    }
+    let blob = serialize(&g);
+    let blob_size = blob.len();
+    let n_events = g.audit.len();
+
+    let mut tmp = tempfile::NamedTempFile::new().expect("create temp file");
+    tmp.write_all(&blob).expect("write snapshot");
+    tmp.flush().expect("flush snapshot");
+    let path = tmp.path().to_path_buf();
+
+    // Drop the in-memory blob to free the working set before timing.
+    // Without this, the OS page cache for the file is essentially
+    // primed by the write, but the heap still holds the original
+    // 130 MB allocation, which would skew the second bench's
+    // perceived memory footprint.
+    drop(blob);
+
+    // Time naive replay: read_to_end → slice decoder.
+    let mut naive_min_ns = u128::MAX;
+    for _ in 0..N_TRIALS {
+        let bytes = std::fs::read(&path).expect("read snapshot");
+        let start = Instant::now();
+        let _ = replay_with_outcome(&bytes, ReplayOptions::default()).unwrap();
+        let elapsed = start.elapsed().as_nanos();
+        if elapsed < naive_min_ns {
+            naive_min_ns = elapsed;
+        }
+    }
+
+    // Time mmap replay: File::open → Mmap::map → slice decoder.
+    let mut mmap_min_ns = u128::MAX;
+    for _ in 0..N_TRIALS {
+        let start = Instant::now();
+        let _ = replay_mmap_with_outcome(&path, ReplayOptions::default()).unwrap();
+        let elapsed = start.elapsed().as_nanos();
+        if elapsed < mmap_min_ns {
+            mmap_min_ns = elapsed;
+        }
+    }
+
+    let speedup = naive_min_ns as f64 / mmap_min_ns as f64;
+    println!(
+        r#"{{"op":"replay_mmap_vs_naive_at_scale","n_events":{n_events},"blob_bytes":{blob_size},"naive_min_ns":{naive_min_ns},"mmap_min_ns":{mmap_min_ns},"speedup":{speedup:.2}}}"#
+    );
+    eprintln!(
+        "  replay_mmap_vs_naive_at_scale : naive={:.2}ms mmap={:.2}ms speedup={:.2}x ({} events, {} B blob)",
+        naive_min_ns as f64 / 1e6,
+        mmap_min_ns as f64 / 1e6,
+        speedup,
+        n_events,
         blob_size,
     );
 }

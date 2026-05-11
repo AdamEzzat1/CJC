@@ -12,3 +12,9 @@ cjc-runtime = { workspace = true }
 cjc-repro = { workspace = true }
 cjc-snap = { workspace = true }
 cjc-ad = { workspace = true }
+# Phase 0.8 Item B1 — memory-mapped snapshot replay.
+# Used by `serialize::replay_mmap` to fault snapshot pages in lazily
+# via the OS page cache rather than materializing the entire blob
+# in RAM. The crate itself remains pure CPU code; mmap is reader-side
+# only (write path is unchanged).
+memmap2 = "0.9"

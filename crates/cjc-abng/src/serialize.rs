@@ -146,6 +146,17 @@ pub enum DecodeError {
     /// `batch_hash` did not equal the recomputed
     /// `sha256(count_be ‖ values_be)`. Indicates payload tamper.
     BatchHashMismatch { at_seq: u64 },
+    /// Phase 0.8 Item B1 — opening or memory-mapping a snapshot file
+    /// failed (e.g. file not found, permission denied, mmap call
+    /// rejected by the OS). Carries the `io::ErrorKind` so callers can
+    /// branch programmatically, plus a human-readable message. This
+    /// variant is surfaced **only** by the `replay_mmap*` entry points;
+    /// `replay`/`replay_with_outcome` operate on byte slices and never
+    /// touch the filesystem.
+    Io {
+        kind: std::io::ErrorKind,
+        message: String,
+    },
 }
 
 impl std::fmt::Display for DecodeError {
@@ -216,6 +227,10 @@ impl std::fmt::Display for DecodeError {
             DecodeError::BatchHashMismatch { at_seq } => write!(
                 f,
                 "abng: BeliefUpdateBatch batch_hash does not match sha256(count ‖ values) at seq {at_seq}"
+            ),
+            DecodeError::Io { kind, message } => write!(
+                f,
+                "abng: snapshot I/O error ({kind:?}): {message}"
             ),
         }
     }
@@ -1771,6 +1786,66 @@ pub fn smart_replay(bytes: &[u8]) -> Result<AdaptiveBeliefGraph, DecodeError> {
             smart_replay: true,
         },
     )
+}
+
+/// Phase 0.8 Item B1 — memory-mapped snapshot replay.
+///
+/// Opens `path` read-only, memory-maps it via the OS page cache, and
+/// feeds the resulting `&[u8]` into the same decoder used by
+/// [`replay`]. The page cache faults pages in lazily as the decoder's
+/// `Cursor` advances, so RAM peak during replay is `O(working_set)`
+/// rather than `O(snapshot_size)` — typically two orders of magnitude
+/// smaller for GB-scale snapshots.
+///
+/// Determinism contract: for any valid snapshot file `f`,
+/// `replay_mmap(f)` returns a graph byte-identical to
+/// `replay(&std::fs::read(f)?)`. The byte stream the decoder sees is
+/// identical between the two paths; only the memory provenance
+/// differs.
+///
+/// Errors:
+/// - [`DecodeError::Io`] if the file cannot be opened or mapped.
+/// - All the usual [`DecodeError`] variants if the bytes themselves
+///   are malformed.
+///
+/// Concurrency: snapshots are produced write-once by
+/// [`serialize`] and never mutated after publication. Mapping a file
+/// that is being concurrently rewritten is undefined behaviour on
+/// every supported platform and is the caller's responsibility to
+/// avoid.
+pub fn replay_mmap(path: &std::path::Path) -> Result<AdaptiveBeliefGraph, DecodeError> {
+    Ok(replay_mmap_with_outcome(path, ReplayOptions::default())?.graph)
+}
+
+/// Phase 0.8 Item B1 — memory-mapped snapshot replay with smart-replay
+/// instrumentation.
+///
+/// Same semantics as [`replay_with_outcome`] but reads the snapshot
+/// bytes from a memory-mapped file rather than a caller-supplied
+/// slice. See [`replay_mmap`] for the determinism contract and error
+/// model.
+pub fn replay_mmap_with_outcome(
+    path: &std::path::Path,
+    opts: ReplayOptions,
+) -> Result<ReplayOutcome, DecodeError> {
+    let file = std::fs::File::open(path).map_err(|e| DecodeError::Io {
+        kind: e.kind(),
+        message: format!("open {}: {e}", path.display()),
+    })?;
+    // SAFETY: `memmap2::Mmap::map` is `unsafe` because the OS may
+    // permit other processes to mutate the underlying file while we
+    // hold the mapping, which would race with our reads. ABNG
+    // snapshots are produced write-once by `serialize()` and the
+    // contract documented on `replay_mmap` requires callers not to
+    // concurrently rewrite the file. Under that contract the mapping
+    // is sound; if the contract is violated the behaviour is
+    // undefined regardless of how we read the file. We treat any I/O
+    // failure from the syscall as a fatal `DecodeError::Io`.
+    let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| DecodeError::Io {
+        kind: e.kind(),
+        message: format!("mmap {}: {e}", path.display()),
+    })?;
+    replay_with_outcome(&mmap[..], opts)
 }
 
 /// Apply a single event to a graph being rebuilt during replay.
