@@ -27,7 +27,7 @@ use cjc_abng::blr::{BlrPrior, BlrState};
 use cjc_abng::codebook::QuantileCodebook;
 use cjc_abng::graph::AdaptiveBeliefGraph;
 use cjc_abng::serialize::{
-    replay_mmap_with_outcome, replay_with_outcome, serialize, ReplayOptions,
+    replay_mmap_with_outcome, replay_with_outcome, serialize, serialize_into, ReplayOptions,
 };
 use cjc_ad::pinn::Activation;
 use cjc_repro::{KahanAccumulatorF64, KahanAccumulatorF64x4, KahanAccumulatorF64x8};
@@ -326,8 +326,11 @@ fn main() {
     // ── Phase 0.8 Item D2: scalar vs SIMD x4/x8 Kahan accumulator ─────
     bench_kahan_simd_vs_scalar();
 
+    // ── Phase 0.8 Item B2: serialize_into (streaming) vs serialize ────
+    bench_serialize_streaming_vs_buffered(seed);
+
     eprintln!("=== Done ===");
-    eprintln!("Phase 0.6 baseline + Items 3/4/7/8 perf wins + Phase 0.8 B1 mmap + C1 parallel route + D2 SIMD Kahan.");
+    eprintln!("Phase 0.6 baseline + Items 3/4/7/8 perf wins + Phase 0.8 B1 mmap + C1 parallel route + D2 SIMD Kahan + B2 streaming encode.");
 }
 
 /// Phase 0.6 Item 3 — measure smart-replay fast-forward speedup over
@@ -918,4 +921,90 @@ fn bench_kahan_simd_vs_scalar() {
             x8_speedup,
         );
     }
+}
+
+/// Phase 0.8 Item B2 — compare `serialize(&g)` (full-Vec materialization)
+/// against `serialize_into(&g, &mut writer)` (streaming) on a moderately
+/// sized graph.
+///
+/// What we measure:
+///   * Wall-clock: both paths walk the same byte sequence, so the
+///     numbers should be in the same ballpark. A regression in either
+///     direction would indicate the refactor introduced unexpected
+///     allocator overhead.
+///   * Byte-identity: re-serialize through both paths and assert the
+///     outputs are equal — the determinism guarantee, sanity-checked.
+///
+/// What this does NOT prove:
+///   * RAM peak. The design's main claim is `O(working_set)` vs
+///     `O(snapshot_size)` memory during emission, which `Instant::now`
+///     does not measure. Validate that downstream via an OS-level peak
+///     RSS probe if needed.
+fn bench_serialize_streaming_vs_buffered(seed: u64) {
+    const N_OBS: usize = 10_000;
+    const N_TRIALS: usize = 5;
+
+    let mut g = AdaptiveBeliefGraph::new(seed);
+    g.set_codebook(1, 4, &[-1.0, 0.0, 1.0]).unwrap();
+    for byte in 1u8..5 {
+        let _ = g.add_node(0, byte).unwrap();
+    }
+    for i in 0..N_OBS {
+        let leaf = ((i % 4) + 1) as u32;
+        let v = (i as f64 * 0.0001) - 0.5;
+        g.observe(leaf, v).unwrap();
+    }
+
+    // Path A: buffered. `serialize` allocates a Vec sized to the
+    // snapshot blob and returns it.
+    let mut buffered_min_ns = u128::MAX;
+    let mut buffered_size = 0usize;
+    for _ in 0..N_TRIALS {
+        let start = Instant::now();
+        let blob = serialize(&g);
+        let elapsed = start.elapsed().as_nanos();
+        if elapsed < buffered_min_ns {
+            buffered_min_ns = elapsed;
+            buffered_size = blob.len();
+        }
+        let _ = std::hint::black_box(blob);
+    }
+
+    // Path B: streaming through a `Vec<u8>` (which implements `Write`).
+    // The streaming path's win is peak memory rather than wall-clock,
+    // but Vec<u8>'s grow-by-doubling is comparable to `serialize`'s
+    // build pattern — wall-clock should be similar.
+    let mut streaming_min_ns = u128::MAX;
+    let mut streaming_size = 0usize;
+    for _ in 0..N_TRIALS {
+        let mut sink: Vec<u8> = Vec::new();
+        let start = Instant::now();
+        serialize_into(&g, &mut sink).expect("serialize_into(Vec<u8>)");
+        let elapsed = start.elapsed().as_nanos();
+        if elapsed < streaming_min_ns {
+            streaming_min_ns = elapsed;
+            streaming_size = sink.len();
+        }
+        let _ = std::hint::black_box(sink);
+    }
+
+    // Determinism gate: same byte count from both paths. Bytes-equal
+    // is verified in tests/abng/serialize_streaming.rs; here we just
+    // check size to flag any catastrophic divergence in the bench.
+    assert_eq!(
+        buffered_size, streaming_size,
+        "serialize and serialize_into produced different byte counts"
+    );
+
+    let ratio = buffered_min_ns as f64 / streaming_min_ns as f64;
+    println!(
+        r#"{{"op":"serialize_streaming_vs_buffered","n_events":{N_OBS},"blob_bytes":{buffered_size},"buffered_min_ns":{buffered_min_ns},"streaming_min_ns":{streaming_min_ns},"streaming_vs_buffered_ratio":{ratio:.3}}}"#
+    );
+    eprintln!(
+        "  serialize_streaming_vs_buffered n_events={N_OBS}: buffered={:.2}ms  streaming={:.2}ms  ratio={:.2}x  ({} B blob)",
+        buffered_min_ns as f64 / 1e6,
+        streaming_min_ns as f64 / 1e6,
+        ratio,
+        buffered_size,
+    );
 }

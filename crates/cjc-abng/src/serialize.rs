@@ -19,6 +19,8 @@
 //!    equals the stored layout.
 //! 4. The final `chain_head` equals the stored `final_hash`.
 
+use std::io::Write;
+
 use cjc_ad::pinn::Activation;
 use cjc_runtime::tensor::Tensor;
 
@@ -241,170 +243,219 @@ impl std::fmt::Display for DecodeError {
 /// Serialize a graph into the canonical v2 binary snapshot.
 pub fn serialize(graph: &AdaptiveBeliefGraph) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&graph.seed.to_be_bytes());
-    out.extend_from_slice(&graph.epoch.to_be_bytes());
-    out.extend_from_slice(&graph.chain_head);
+    // `Vec<u8>` implements `std::io::Write` and its `write_all`
+    // implementation never fails (it just `extend_from_slice`s),
+    // so the only failure mode here is allocation OOM — which
+    // panics in stable Rust regardless of error handling shape.
+    serialize_into(graph, &mut out)
+        .expect("serialize_into: writes to Vec<u8> are infallible");
+    out
+}
+
+/// Phase 0.8 Item B2 — stream a snapshot's bytes into any
+/// [`std::io::Write`] sink without materializing the full blob.
+///
+/// Equivalent in output to `w.write_all(&serialize(g))?` but never
+/// allocates a `Vec<u8>` sized to the whole snapshot. Per-event audit
+/// payloads share a single reused scratch buffer (Phase 0.7 (A)
+/// pattern); peak memory is `O(per_event_payload + per_node_section)`
+/// rather than `O(snapshot_size)`.
+///
+/// # Determinism
+///
+/// For any graph `g`, `serialize_into(&g, w)` writes the same byte
+/// sequence as `serialize(&g)` does, regardless of how `w` chunks
+/// its underlying `write` calls. The snapshot magic, audit chain
+/// hashes, and per-node `canonical_bytes` are unchanged — only the
+/// memory pressure during emission differs.
+///
+/// # Buffering
+///
+/// Callers writing to a raw `File` should wrap it in
+/// [`std::io::BufWriter`]: each `f64` inside a per-node tensor or
+/// Welford accumulator is written as an 8-byte chunk, so an
+/// unbuffered destination pays one syscall per 8 bytes. The bench
+/// in `bench/abng_micro::bench_serialize_streaming_vs_buffered`
+/// measures the buffered-vs-Vec comparison directly.
+///
+/// # Error propagation
+///
+/// Any `Err(io::Error)` from `w.write_all` short-circuits the
+/// remaining writes via `?`. Bytes already written to `w` before
+/// the failure remain there; this function does not attempt
+/// rollback (the underlying `Write` trait has no rollback
+/// primitive).
+pub fn serialize_into(
+    graph: &AdaptiveBeliefGraph,
+    w: &mut dyn Write,
+) -> std::io::Result<()> {
+    w.write_all(MAGIC)?;
+    w.write_all(&graph.seed.to_be_bytes())?;
+    w.write_all(&graph.epoch.to_be_bytes())?;
+    w.write_all(&graph.chain_head)?;
 
     // Codebook section.
     match &graph.codebook {
-        None => out.push(0x00),
+        None => w.write_all(&[0x00])?,
         Some(cb) => {
-            out.push(0x01);
-            encode_codebook(cb, &mut out);
+            w.write_all(&[0x01])?;
+            encode_codebook(cb, w)?;
         }
     }
 
     // Phase 0.3a: leaf head section.
     match &graph.head {
-        None => out.push(0x00),
+        None => w.write_all(&[0x00])?,
         Some(head) => {
-            out.push(0x01);
-            encode_head(head, &mut out);
+            w.write_all(&[0x01])?;
+            encode_head(head, w)?;
         }
     }
 
     // Phase 0.3b: BLR prior section.
     match &graph.blr_prior {
-        None => out.push(0x00),
+        None => w.write_all(&[0x00])?,
         Some(prior) => {
-            out.push(0x01);
-            encode_blr_prior(prior, &mut out);
+            w.write_all(&[0x01])?;
+            encode_blr_prior(prior, w)?;
         }
     }
 
     // Phase 0.3c: density-tracker enable flag + calibration n_bins.
-    out.push(if graph.density_enabled { 0x01 } else { 0x00 });
+    w.write_all(&[if graph.density_enabled { 0x01 } else { 0x00 }])?;
     match graph.calibration_n_bins {
-        None => out.push(0x00),
+        None => w.write_all(&[0x00])?,
         Some(n_bins) => {
-            out.push(0x01);
-            out.push(n_bins);
+            w.write_all(&[0x01])?;
+            w.write_all(&[n_bins])?;
         }
     }
 
     // Phase 0.3d-3: decision policy section + action counts.
     match &graph.decision_policy {
-        None => out.push(0x00),
+        None => w.write_all(&[0x00])?,
         Some(policy) => {
-            out.push(0x01);
-            out.extend_from_slice(&policy.canonical_bytes());
-            out.extend_from_slice(&policy.policy_hash);
+            w.write_all(&[0x01])?;
+            w.write_all(&policy.canonical_bytes())?;
+            w.write_all(&policy.policy_hash)?;
         }
     }
     for &c in &graph.action_counts {
-        out.extend_from_slice(&c.to_be_bytes());
+        w.write_all(&c.to_be_bytes())?;
     }
     // Phase 0.4-extended (v11) — unfreeze_count observability.
-    out.extend_from_slice(&graph.unfreeze_count.to_be_bytes());
+    w.write_all(&graph.unfreeze_count.to_be_bytes())?;
 
     // Nodes.
-    out.extend_from_slice(&(graph.nodes.len() as u32).to_be_bytes());
+    w.write_all(&(graph.nodes.len() as u32).to_be_bytes())?;
     for node in &graph.nodes {
         let parent_i32: i32 = match node.parent {
             None => -1,
             Some(p) => p as i32,
         };
-        out.extend_from_slice(&parent_i32.to_be_bytes());
-        encode_children(&node.children, &mut out);
-        out.extend_from_slice(&node.stats.canonical_bytes());
-        out.extend_from_slice(&node.stats_version.to_be_bytes());
-        out.extend_from_slice(&node.stats_chain_head);
+        w.write_all(&parent_i32.to_be_bytes())?;
+        encode_children(&node.children, w)?;
+        w.write_all(&node.stats.canonical_bytes())?;
+        w.write_all(&node.stats_version.to_be_bytes())?;
+        w.write_all(&node.stats_chain_head)?;
         // Phase 0.3a: per-node params blob.
-        out.extend_from_slice(&(node.params.len() as u32).to_be_bytes());
+        w.write_all(&(node.params.len() as u32).to_be_bytes())?;
         for t in &node.params {
-            encode_tensor(t, &mut out);
+            encode_tensor(t, w)?;
         }
         // Phase 0.3b: per-node BLR state blob.
         match &node.blr {
-            None => out.push(0x00),
+            None => w.write_all(&[0x00])?,
             Some(s) => {
-                out.push(0x01);
-                encode_blr_state(s, &mut out);
+                w.write_all(&[0x01])?;
+                encode_blr_state(s, w)?;
             }
         }
         // Phase 0.3c: per-node density / calibration / drift blobs.
         match &node.density {
-            None => out.push(0x00),
+            None => w.write_all(&[0x00])?,
             Some(d) => {
-                out.push(0x01);
-                out.extend_from_slice(&d.canonical_bytes());
+                w.write_all(&[0x01])?;
+                w.write_all(&d.canonical_bytes())?;
             }
         }
         match &node.calibration {
-            None => out.push(0x00),
+            None => w.write_all(&[0x00])?,
             Some(c) => {
-                out.push(0x01);
-                out.extend_from_slice(&c.canonical_bytes());
+                w.write_all(&[0x01])?;
+                w.write_all(&c.canonical_bytes())?;
             }
         }
         match &node.drift_baseline {
-            None => out.push(0x00),
+            None => w.write_all(&[0x00])?,
             Some(b) => {
-                out.push(0x01);
-                out.extend_from_slice(&b.canonical_bytes());
+                w.write_all(&[0x01])?;
+                w.write_all(&b.canonical_bytes())?;
             }
         }
         // Phase 0.3d-2 — per-node expected_epistemic (one f64 if captured).
         match node.expected_epistemic {
-            None => out.push(0x00),
+            None => w.write_all(&[0x00])?,
             Some(value) => {
-                out.push(0x01);
-                out.extend_from_slice(&value.to_bits().to_be_bytes());
+                w.write_all(&[0x01])?;
+                w.write_all(&value.to_bits().to_be_bytes())?;
             }
         }
         // Phase 0.3d-3 — per-node frozen / active flags.
-        out.push(if node.is_frozen { 0x01 } else { 0x00 });
-        out.push(if node.is_active { 0x01 } else { 0x00 });
+        w.write_all(&[if node.is_frozen { 0x01 } else { 0x00 }])?;
+        w.write_all(&[if node.is_active { 0x01 } else { 0x00 }])?;
         // Phase 0.3d-4 — per-node signature stability state.
         match node.last_signature {
-            None => out.push(0x00),
+            None => w.write_all(&[0x00])?,
             Some(sig) => {
-                out.push(0x01);
-                out.extend_from_slice(&sig);
+                w.write_all(&[0x01])?;
+                w.write_all(&sig)?;
             }
         }
-        out.extend_from_slice(&node.signature_stable_calls.to_be_bytes());
+        w.write_all(&node.signature_stable_calls.to_be_bytes())?;
         // Phase 0.4 Track B-2.2.2 — 3-window stability buffers
         // (snapshot v10). 6 × f64 + 2 × u8 = 50 bytes per node.
         for v in node.ece_history.iter() {
-            out.extend_from_slice(&v.to_bits().to_be_bytes());
+            w.write_all(&v.to_bits().to_be_bytes())?;
         }
-        out.push(node.ece_fill_count);
+        w.write_all(&[node.ece_fill_count])?;
         for v in node.sigma_history.iter() {
-            out.extend_from_slice(&v.to_bits().to_be_bytes());
+            w.write_all(&v.to_bits().to_be_bytes())?;
         }
-        out.push(node.sigma_fill_count);
+        w.write_all(&[node.sigma_fill_count])?;
         // Phase 0.4 Track B-2.2.1 — Welford signature accumulators
         // (4 × 24 = 96 bytes per node).
-        for w in [
+        for welford in [
             &node.welford_prediction,
             &node.welford_uncertainty,
             &node.welford_calibration,
             &node.welford_routing,
         ] {
-            out.extend_from_slice(&w.canonical_bytes());
+            w.write_all(&welford.canonical_bytes())?;
         }
         // Phase 0.5 Item 1 (v12) — per-node provenance stamp. 32 bytes
         // appended at the end of the per-node section. `[0u8; 32]` for
         // any node that has not been stamped via `stamp_provenance`.
-        out.extend_from_slice(&node.provenance_stamp_hash);
+        w.write_all(&node.provenance_stamp_hash)?;
     }
 
     // Audit log. Phase 0.7 (A): single payload buffer reused across
     // all events; `write_payload` clears+writes into it on each
     // iteration. Pre-0.7 the loop allocated a fresh Vec<u8> per event
-    // via `payload_bytes()`. Output bytes are byte-identical.
-    out.extend_from_slice(&(graph.audit.len() as u64).to_be_bytes());
+    // via `payload_bytes()`. The length-prefix encoding (u32 + payload)
+    // requires knowing the payload size up front, so the scratch
+    // buffer remains. Peak memory during this loop is O(largest
+    // single event's payload) — typically ≤ 100 bytes.
+    w.write_all(&(graph.audit.len() as u64).to_be_bytes())?;
     let mut payload_buf: Vec<u8> = Vec::with_capacity(96);
     for event in &graph.audit {
         event.write_payload(&mut payload_buf);
-        out.extend_from_slice(&(payload_buf.len() as u32).to_be_bytes());
-        out.extend_from_slice(&payload_buf);
-        out.extend_from_slice(&event.previous_hash);
-        out.extend_from_slice(&event.new_hash);
+        w.write_all(&(payload_buf.len() as u32).to_be_bytes())?;
+        w.write_all(&payload_buf)?;
+        w.write_all(&event.previous_hash)?;
+        w.write_all(&event.new_hash)?;
     }
-    out
+    Ok(())
 }
 
 /// Encode a [`LeafHead`] into the snapshot header.
@@ -418,15 +469,16 @@ pub fn serialize(graph: &AdaptiveBeliefGraph) -> Vec<u8> {
 ///   hidden_dims  u32 BE × n_hidden
 ///   config_hash  [u8; 32]
 /// ```
-fn encode_head(head: &LeafHead, out: &mut Vec<u8>) {
-    out.extend_from_slice(&head.input_dim.to_be_bytes());
-    out.extend_from_slice(&head.output_dim.to_be_bytes());
-    out.push(encode_activation_tag(head.activation));
-    out.extend_from_slice(&(head.hidden_dims.len() as u16).to_be_bytes());
+fn encode_head(head: &LeafHead, w: &mut dyn Write) -> std::io::Result<()> {
+    w.write_all(&head.input_dim.to_be_bytes())?;
+    w.write_all(&head.output_dim.to_be_bytes())?;
+    w.write_all(&[encode_activation_tag(head.activation)])?;
+    w.write_all(&(head.hidden_dims.len() as u16).to_be_bytes())?;
     for &h in &head.hidden_dims {
-        out.extend_from_slice(&h.to_be_bytes());
+        w.write_all(&h.to_be_bytes())?;
     }
-    out.extend_from_slice(&head.config_hash);
+    w.write_all(&head.config_hash)?;
+    Ok(())
 }
 
 /// Encode a single param `Tensor`. Layout:
@@ -435,41 +487,45 @@ fn encode_head(head: &LeafHead, out: &mut Vec<u8>) {
 ///   shape  u32 BE × ndim
 ///   data   f64 BE × numel
 /// ```
-fn encode_tensor(t: &Tensor, out: &mut Vec<u8>) {
+fn encode_tensor(t: &Tensor, w: &mut dyn Write) -> std::io::Result<()> {
     let shape = t.shape();
     debug_assert!(shape.len() <= u8::MAX as usize, "tensor ndim overflow");
-    out.push(shape.len() as u8);
+    w.write_all(&[shape.len() as u8])?;
     for &d in shape {
-        out.extend_from_slice(&(d as u32).to_be_bytes());
+        w.write_all(&(d as u32).to_be_bytes())?;
     }
     for x in t.to_vec() {
-        out.extend_from_slice(&x.to_bits().to_be_bytes());
+        w.write_all(&x.to_bits().to_be_bytes())?;
     }
+    Ok(())
 }
 
 /// Encode a [`BlrPrior`]: 24 bytes of canonical params + 32 bytes of
 /// hash witness.
-fn encode_blr_prior(p: &BlrPrior, out: &mut Vec<u8>) {
-    out.extend_from_slice(&p.canonical_bytes());
-    out.extend_from_slice(&p.config_hash);
+fn encode_blr_prior(p: &BlrPrior, w: &mut dyn Write) -> std::io::Result<()> {
+    w.write_all(&p.canonical_bytes())?;
+    w.write_all(&p.config_hash)?;
+    Ok(())
 }
 
 /// Encode a [`BlrState`]: just the canonical bytes (which already
 /// include `d`, mean, precision, a, b, n_seen).
-fn encode_blr_state(s: &BlrState, out: &mut Vec<u8>) {
-    out.extend_from_slice(&s.canonical_bytes());
+fn encode_blr_state(s: &BlrState, w: &mut dyn Write) -> std::io::Result<()> {
+    w.write_all(&s.canonical_bytes())?;
+    Ok(())
 }
 
-fn encode_codebook(cb: &QuantileCodebook, out: &mut Vec<u8>) {
-    out.push(cb.n_dims);
-    out.extend_from_slice(&cb.n_bins.to_be_bytes());
+fn encode_codebook(cb: &QuantileCodebook, w: &mut dyn Write) -> std::io::Result<()> {
+    w.write_all(&[cb.n_dims])?;
+    w.write_all(&cb.n_bins.to_be_bytes())?;
     for row in &cb.bins {
-        out.extend_from_slice(&(row.len() as u16).to_be_bytes());
+        w.write_all(&(row.len() as u16).to_be_bytes())?;
         for &b in row {
-            out.extend_from_slice(&b.to_bits().to_be_bytes());
+            w.write_all(&b.to_bits().to_be_bytes())?;
         }
     }
-    out.extend_from_slice(&cb.frozen_hash);
+    w.write_all(&cb.frozen_hash)?;
+    Ok(())
 }
 
 /// Children-kind tag + variant payload.
@@ -483,42 +539,43 @@ fn encode_codebook(cb: &QuantileCodebook, out: &mut Vec<u8>) {
 ///                   + slots[n_slots] × i32 BE
 ///   Node256 : tag=4 + slots[256] (256 × i32 BE)
 /// ```
-fn encode_children(children: &AdaptiveChildren, out: &mut Vec<u8>) {
-    out.push(children.kind() as u8);
+fn encode_children(children: &AdaptiveChildren, w: &mut dyn Write) -> std::io::Result<()> {
+    w.write_all(&[children.kind() as u8])?;
     match children {
         AdaptiveChildren::None => {}
         AdaptiveChildren::Node4 { keys, slots } => {
-            out.extend_from_slice(keys);
+            w.write_all(keys)?;
             for slot in slots.iter() {
                 let v: i32 = slot.map(|id| id as i32).unwrap_or(-1);
-                out.extend_from_slice(&v.to_be_bytes());
+                w.write_all(&v.to_be_bytes())?;
             }
         }
         AdaptiveChildren::Node16 { keys, slots } => {
-            out.extend_from_slice(keys);
+            w.write_all(keys)?;
             for slot in slots.iter() {
                 let v: i32 = slot.map(|id| id as i32).unwrap_or(-1);
-                out.extend_from_slice(&v.to_be_bytes());
+                w.write_all(&v.to_be_bytes())?;
             }
         }
         AdaptiveChildren::Node48 { index, slots } => {
-            out.extend_from_slice(&index[..]);
-            out.push(slots.len() as u8);
+            w.write_all(&index[..])?;
+            w.write_all(&[slots.len() as u8])?;
             for slot in slots.iter() {
                 let v: i32 = slot.map(|id| id as i32).unwrap_or(-1);
-                out.extend_from_slice(&v.to_be_bytes());
+                w.write_all(&v.to_be_bytes())?;
             }
         }
         AdaptiveChildren::Node256 { slots } => {
             for slot in slots.iter() {
                 let v: i32 = slot.map(|id| id as i32).unwrap_or(-1);
-                out.extend_from_slice(&v.to_be_bytes());
+                w.write_all(&v.to_be_bytes())?;
             }
         }
         AdaptiveChildren::Dense { signature } => {
-            out.extend_from_slice(signature);
+            w.write_all(signature)?;
         }
     }
+    Ok(())
 }
 
 // ─── Decoding ────────────────────────────────────────────────────────────

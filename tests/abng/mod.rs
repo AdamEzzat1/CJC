@@ -51,6 +51,7 @@ mod provenance_tests;
 mod replay;
 mod replay_invariant_tests;
 mod serialize_mmap;
+mod serialize_streaming;
 mod route_entropy_grow_tests;
 mod route_trace_tests;
 mod split_nll_gate_tests;
