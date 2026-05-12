@@ -43,7 +43,48 @@ use crate::stats::NodeStats;
 // with its variable-length payload (count u32 + values f64×count +
 // batch_hash [u8; 32]). All 15 Phase 0.5 SHA-256 canaries are
 // re-locked simultaneously as part of this bump.
-const MAGIC: &[u8; 5] = b"ABNG\x0D";
+const MAGIC_V13: &[u8; 5] = b"ABNG\x0D";
+
+// Phase 0.8c — wire format v14 (`\x0E`). Bumped to absorb the four
+// Track A items A1+A2+A3+A4 as a single logical release per the
+// Phase 0.8 handoff's "one wire-format bump captures all" guidance:
+//
+//   A1: packed lower-triangular `BlrState.precision` (d(d+1)/2 bytes
+//       per BLR head instead of d²; symmetric matrix exploited).
+//   A2: fused `AuditKind::TrainStep` event (one chain step per row;
+//       halves audit volume + chain-hash compute for training-heavy
+//       workloads).
+//   A3: Merkle-indexed audit chain (O(log N) verify; parallel-friendly).
+//   A4: compact `AdaptiveChildren` snapshot for sparse Node48/Node256
+//       (saves ~150 bytes per sparse node).
+//
+// Forward-compatibility contract (per the handoff doc):
+//   * Snapshot writers ALWAYS emit v14. `MAGIC` is the v14 magic.
+//   * Snapshot readers (`replay_with_outcome`) ACCEPT BOTH v13 and
+//     v14 magic during the Phase 0.8c transition. v13 blobs decode
+//     through the legacy code path; v14 blobs decode through the
+//     new path. The migration is a one-time re-serialize per
+//     snapshot — v13 archives stay readable indefinitely.
+//   * The 28 SHA-256 canaries embedded in demo files are re-locked
+//     to the v14 byte sequence at the end of this phase.
+//
+// During the staged v14 work (this branch's A4 → A1 → A2 → A3
+// rollout), `MAGIC` may still write a v13-equivalent byte stream
+// until the corresponding item's content change lands. The byte-
+// level guarantee for downstream readers is: a v14 magic always
+// indicates "decode through the v14 path"; what that path does is
+// the union of whichever A-items have shipped at that point.
+const MAGIC: &[u8; 5] = b"ABNG\x0E";
+
+/// Wire-format version recognised by the decoder. Set by
+/// `detect_wire_version` based on the magic byte; passed through
+/// the decode pipeline so per-item v13-vs-v14 branches can select
+/// the right path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WireVersion {
+    V13,
+    V14,
+}
 
 // Phase 0.8 Item B3 — zstd-compressed snapshot wrapper magic. The
 // 6 bytes `ABNGZ\x01` are unambiguously distinguishable from any
@@ -1266,11 +1307,20 @@ pub fn replay_with_outcome(
     }
     let mut cur = Cursor::new(bytes);
 
-    // Header.
+    // Header. Phase 0.8c — accept either v13 or v14 magic during the
+    // transition. Writers always emit v14 (`MAGIC`); v13 archives
+    // stay readable indefinitely via this dual-acceptance check. The
+    // resolved `WireVersion` is threaded through the decode pipeline
+    // so per-item code (A1 packed precision, A2 fused TrainStep, A3
+    // Merkle, A4 sparse Node48/256) can select the right path.
     let magic = cur.take(MAGIC.len())?;
-    if magic != MAGIC {
+    let _wire_version = if magic == MAGIC {
+        WireVersion::V14
+    } else if magic == MAGIC_V13 {
+        WireVersion::V13
+    } else {
         return Err(DecodeError::BadMagic);
-    }
+    };
     let seed = cur.u64_be()?;
     let epoch = cur.u64_be()?;
     let stored_final_hash = cur.hash32()?;
@@ -2845,13 +2895,31 @@ mod tests {
     // ── Phase 0.4-extended (v11) — snapshot v11 ────────────────────
 
     #[test]
-    fn v13_magic_in_blob() {
-        // Phase 0.6 Item 4 — wire format v13 (`\x0D`). Bumped from
-        // v12 to absorb the new `BeliefUpdateBatch` audit kind
-        // (tag 0x1D).
+    fn v14_magic_in_blob() {
+        // Phase 0.8c — wire format v14 (`\x0E`). Bumped from v13 to
+        // absorb Track A items A1+A2+A3+A4 (packed BLR precision,
+        // fused TrainStep audit, Merkle audit chain, sparse Node48/
+        // 256 encoding). Writers always emit v14; readers accept
+        // both v13 and v14 during the transition.
         let g = AdaptiveBeliefGraph::new(0);
         let blob = serialize(&g);
-        assert_eq!(&blob[..5], b"ABNG\x0D");
+        assert_eq!(&blob[..5], b"ABNG\x0E");
+    }
+
+    #[test]
+    fn v13_magic_still_accepted_by_replay() {
+        // Phase 0.8c forward-compat: v13 archives must continue to
+        // load through `replay`. We forge a v13 blob by serializing
+        // a fresh graph and overwriting the magic byte; the rest of
+        // the byte sequence is identical between v13 and the current
+        // v14 (no content changes have shipped on this branch yet).
+        let g = AdaptiveBeliefGraph::new(42);
+        let mut blob = serialize(&g);
+        blob[4] = 0x0D; // overwrite v14 magic with v13 magic
+        let g2 = replay(&blob).expect("v13 blob must replay through dual-magic check");
+        assert_eq!(g.chain_head, g2.chain_head);
+        assert_eq!(g.seed, g2.seed);
+        assert_eq!(g.epoch, g2.epoch);
     }
 
     #[test]
