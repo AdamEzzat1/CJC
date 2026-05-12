@@ -658,6 +658,26 @@ fn encode_codebook(cb: &QuantileCodebook, w: &mut dyn Write) -> std::io::Result<
 ///                   + slots[n_slots] × i32 BE
 ///   Node256 : tag=4 + slots[256] (256 × i32 BE)
 /// ```
+// Phase 0.8c Item A4 — Node48 and Node256 now encode sparsely under
+// v14. The v13 dense encoding (256-byte index for Node48; 256 × 4-byte
+// slot table for Node256) wastes bytes when most slots are empty —
+// which is the common case in real workloads. v14 replaces both with
+// `count u32 BE + (byte u8, child_id i32 BE) × count`.
+//
+// Size comparison (Node48 with 25 children):
+//   v13: 1 tag + 256 index + 1 n_slots + 25 × 4 = 358 B
+//   v14: 1 tag + 4 count   + 25 × 5             = 130 B
+//   savings: 228 B per Node48 with this density
+//
+// For a fully-dense Node256 (256 children), v14 is slightly larger
+// (1 + 4 + 256 × 5 = 1285 B vs. v13's 1 + 256 × 4 = 1025 B), but the
+// 256-key case is extremely rare in ABNG routing — keys are emitted
+// from quantile-codebook outputs, so most parent nodes have ≤ 16
+// children. Optimizing for the common case is the right trade.
+//
+// Node4 and Node16 keep their v13 fixed-size layouts because they're
+// already as compact as practical (1 tag + 4 keys + 4 i32 = 21 B for
+// Node4; 1 + 16 + 16 × 4 = 81 B for Node16).
 fn encode_children(children: &AdaptiveChildren, w: &mut dyn Write) -> std::io::Result<()> {
     w.write_all(&[children.kind() as u8])?;
     match children {
@@ -677,17 +697,40 @@ fn encode_children(children: &AdaptiveChildren, w: &mut dyn Write) -> std::io::R
             }
         }
         AdaptiveChildren::Node48 { index, slots } => {
-            w.write_all(&index[..])?;
-            w.write_all(&[slots.len() as u8])?;
-            for slot in slots.iter() {
-                let v: i32 = slot.map(|id| id as i32).unwrap_or(-1);
-                w.write_all(&v.to_be_bytes())?;
+            // v14 sparse encoding. Walk the 256-byte index in
+            // ascending byte order so the (byte, child_id) pairs come
+            // out sorted by byte — required for the v13<->v14 parity
+            // contract (decode produces sorted pairs in both).
+            let mut count: u32 = 0;
+            for byte in 0u16..=255 {
+                let slot_idx = index[byte as usize];
+                if slot_idx != 0xFF {
+                    if let Some(Some(_id)) = slots.get(slot_idx as usize) {
+                        count += 1;
+                    }
+                }
+            }
+            w.write_all(&count.to_be_bytes())?;
+            for byte in 0u16..=255 {
+                let slot_idx = index[byte as usize];
+                if slot_idx != 0xFF {
+                    if let Some(Some(id)) = slots.get(slot_idx as usize) {
+                        w.write_all(&[byte as u8])?;
+                        w.write_all(&(*id as i32).to_be_bytes())?;
+                    }
+                }
             }
         }
         AdaptiveChildren::Node256 { slots } => {
-            for slot in slots.iter() {
-                let v: i32 = slot.map(|id| id as i32).unwrap_or(-1);
-                w.write_all(&v.to_be_bytes())?;
+            // v14 sparse encoding. Same `count + (byte, child_id)`
+            // shape as Node48.
+            let count: u32 = slots.iter().filter(|s| s.is_some()).count() as u32;
+            w.write_all(&count.to_be_bytes())?;
+            for byte in 0u16..=255 {
+                if let Some(Some(id)) = slots.get(byte as usize) {
+                    w.write_all(&[byte as u8])?;
+                    w.write_all(&(*id as i32).to_be_bytes())?;
+                }
             }
         }
         AdaptiveChildren::Dense { signature } => {
@@ -1005,6 +1048,7 @@ struct StoredNode {
 
 fn decode_children(
     cur: &mut Cursor,
+    wire: WireVersion,
 ) -> Result<(ChildrenKind, Vec<(u8, NodeId)>, Option<[u8; 32]>), DecodeError> {
     let tag = cur.u8()?;
     let kind = ChildrenKind::from_tag(tag).ok_or(DecodeError::UnknownChildrenKind(tag))?;
@@ -1013,6 +1057,7 @@ fn decode_children(
     match kind {
         ChildrenKind::None => {}
         ChildrenKind::Node4 => {
+            // Node4 layout is identical in v13 and v14.
             let keys = cur.take(4)?.to_vec();
             for i in 0..4 {
                 let v = cur.i32_be()?;
@@ -1022,6 +1067,7 @@ fn decode_children(
             }
         }
         ChildrenKind::Node16 => {
+            // Node16 layout is identical in v13 and v14.
             let keys = cur.take(16)?.to_vec();
             for i in 0..16 {
                 let v = cur.i32_be()?;
@@ -1030,34 +1076,65 @@ fn decode_children(
                 }
             }
         }
-        ChildrenKind::Node48 => {
-            let index_bytes = cur.take(256)?.to_vec();
-            let n_slots = cur.u8()? as usize;
-            let mut slots: Vec<i32> = Vec::with_capacity(n_slots);
-            for _ in 0..n_slots {
-                slots.push(cur.i32_be()?);
+        ChildrenKind::Node48 => match wire {
+            WireVersion::V13 => {
+                // v13 dense Node48: 256-byte index + n_slots u8 +
+                // slots × i32.
+                let index_bytes = cur.take(256)?.to_vec();
+                let n_slots = cur.u8()? as usize;
+                let mut slots: Vec<i32> = Vec::with_capacity(n_slots);
+                for _ in 0..n_slots {
+                    slots.push(cur.i32_be()?);
+                }
+                for byte in 0u16..=255 {
+                    let slot_idx = index_bytes[byte as usize];
+                    if slot_idx != 0xFF {
+                        let v = slots
+                            .get(slot_idx as usize)
+                            .copied()
+                            .ok_or(DecodeError::UnexpectedEof)?;
+                        if v >= 0 {
+                            pairs.push((byte as u8, v as NodeId));
+                        }
+                    }
+                }
             }
-            for byte in 0u16..=255 {
-                let slot_idx = index_bytes[byte as usize];
-                if slot_idx != 0xFF {
-                    let v = slots
-                        .get(slot_idx as usize)
-                        .copied()
-                        .ok_or(DecodeError::UnexpectedEof)?;
+            WireVersion::V14 => {
+                // Phase 0.8c Item A4 — v14 sparse Node48: count u32 BE
+                // + (byte u8, child_id i32 BE) × count.
+                let count = cur.u32_be()? as usize;
+                for _ in 0..count {
+                    let byte = cur.u8()?;
+                    let v = cur.i32_be()?;
+                    if v >= 0 {
+                        pairs.push((byte, v as NodeId));
+                    }
+                }
+            }
+        },
+        ChildrenKind::Node256 => match wire {
+            WireVersion::V13 => {
+                // v13 dense Node256: 256 × i32 slot table.
+                for byte in 0u16..=255 {
+                    let v = cur.i32_be()?;
                     if v >= 0 {
                         pairs.push((byte as u8, v as NodeId));
                     }
                 }
             }
-        }
-        ChildrenKind::Node256 => {
-            for byte in 0u16..=255 {
-                let v = cur.i32_be()?;
-                if v >= 0 {
-                    pairs.push((byte as u8, v as NodeId));
+            WireVersion::V14 => {
+                // Phase 0.8c Item A4 — v14 sparse Node256: count u32 BE
+                // + (byte u8, child_id i32 BE) × count.
+                let count = cur.u32_be()? as usize;
+                for _ in 0..count {
+                    let byte = cur.u8()?;
+                    let v = cur.i32_be()?;
+                    if v >= 0 {
+                        pairs.push((byte, v as NodeId));
+                    }
                 }
             }
-        }
+        },
         ChildrenKind::Dense => {
             let sig = cur.take(32)?;
             let mut s = [0u8; 32];
@@ -1069,14 +1146,14 @@ fn decode_children(
     Ok((kind, pairs, dense_sig))
 }
 
-fn decode_stored_node(cur: &mut Cursor) -> Result<StoredNode, DecodeError> {
+fn decode_stored_node(cur: &mut Cursor, wire: WireVersion) -> Result<StoredNode, DecodeError> {
     let parent_i32 = cur.i32_be()?;
     let parent = if parent_i32 < 0 {
         None
     } else {
         Some(parent_i32 as NodeId)
     };
-    let (children_kind, children_pairs, children_dense_signature) = decode_children(cur)?;
+    let (children_kind, children_pairs, children_dense_signature) = decode_children(cur, wire)?;
     // Phase 0.5 Item 4 (v12) — canonical_bytes grew from 24 → 32 bytes.
     let canon_slice = cur.take(32)?;
     let mut canonical_bytes = [0u8; 32];
@@ -1314,7 +1391,7 @@ pub fn replay_with_outcome(
     // so per-item code (A1 packed precision, A2 fused TrainStep, A3
     // Merkle, A4 sparse Node48/256) can select the right path.
     let magic = cur.take(MAGIC.len())?;
-    let _wire_version = if magic == MAGIC {
+    let wire_version = if magic == MAGIC {
         WireVersion::V14
     } else if magic == MAGIC_V13 {
         WireVersion::V13
@@ -1385,7 +1462,7 @@ pub fn replay_with_outcome(
     // unexpected EOF if the count is bogus.
     let mut stored_nodes: Vec<StoredNode> = Vec::new();
     for _ in 0..n_nodes {
-        stored_nodes.push(decode_stored_node(&mut cur)?);
+        stored_nodes.push(decode_stored_node(&mut cur, wire_version)?);
     }
 
     // Audit log.
