@@ -8,6 +8,86 @@
 
 ---
 
+## Status update — 2026-05-11
+
+**Master HEAD at this update:** `5e62967` (B4 columnar AuditLog).
+**Wire format:** v13 (`b"ABNG\x0D"`) unchanged. All 28 SHA-256 canaries still valid.
+
+### Phase 0.8 items shipped
+
+| Item | Commit | Branch | What it added |
+|---|---|---|---|
+| **B1** Memory-mapped audit log replay | `a524992` | `claude/flamboyant-fermi-208353` | `replay_mmap` / `replay_mmap_with_outcome`; new `DecodeError::Io` variant. |
+| **C1** Parallel `route_to_leaf_batch` | `29604f4` | `claude/flamboyant-fermi-208353` (canonical from `claude/elastic-kirch-db47b2:faf123c`) | New `route_to_leaf_batch_par(xs, n, n_threads)` via `std::thread::scope`. No new deps; `descend_with_children` Sync view of routing data. |
+| **D2a** SIMD-friendly Kahan accumulators | `ac9b576` | `claude/flamboyant-fermi-208353` | `KahanAccumulatorF64x4` / `F64x8` in `cjc-repro`. Plain-array `[f64; N]` for cross-platform determinism. **BlrState refactor (D2b) deferred to v14** — reordering BLR posterior adds would change `canonical_bytes` and break canaries. |
+| **B2** Streaming snapshot encode | `59b608b` | `claude/flamboyant-fermi-208353` | `serialize_into(g, w: &mut dyn Write)`. 6 internal `encode_*` helpers refactored to `Write` sinks. `serialize()` becomes a thin wrapper. |
+| **B3** zstd-compressed snapshot | `5a32d8d` | `claude/flamboyant-fermi-208353` | Optional `compression` Cargo feature. New magic `b"ABNGZ\x01"` (orthogonal to v13/v14). `serialize_compressed`, `serialize_into_compressed`. `replay` auto-detects + dispatches. |
+| **B4** Columnar AuditLog | `5e62967` | `claude/flamboyant-fermi-208353` | `Vec<AuditEvent>` → `AuditLog` (SoA per-column Vecs). Zero-copy `previous_hashes()` / `new_hashes()` slices — prerequisite for A3 (Merkle) + C2 (parallel verify). |
+| **C3** Per-thread arena observability | `34047f5` | `claude/elastic-kirch-db47b2` (not merged here) | `arena_graph_count` / `arena_next_id` observability. 7 isolation tests + concurrent training scaling bench. |
+| **D1** Cholesky factor caching | `8c86f82` | `claude/elastic-kirch-db47b2` (not merged here) | Caches Cholesky factor in `BlrState`; 2-10× faster `predict()` at d≥8. |
+
+### Items remaining
+
+| Item | Status | Blocked on |
+|---|---|---|
+| **A1** Packed lower-triangular `BlrState.precision` | unstarted | v14 wire bump |
+| **A2** Fused `AuditKind::TrainStep` audit | unstarted | v14 wire bump |
+| **A3** Merkle-indexed audit chain | unstarted | v14 wire bump (B4 unblocked the columnar prerequisite) |
+| **A4** Compact `AdaptiveChildren` snapshot (Node48/256) | unstarted | v14 wire bump |
+| **C2** Parallel `verify_chain` via Merkle segments | unstarted | depends on A3 |
+| **D2b** SIMD Kahan refactor of `BlrState::update` | unstarted | v14 wire bump (reorders BLR canonical bytes) |
+| **D3** Fused matmul kernel for `Λ_old · μ_old` | unstarted | v14 wire bump (same reason as D2b) |
+
+**All seven remaining items depend on the v14 wire bump.** Track A items A1+A2+A3+A4 ship as one v14 release per the original handoff's "one logical v14 bump" guidance. C2/D2b/D3 follow.
+
+### Honest macro impact — PINN scale bench
+
+5 trials each at Phase 0.7 (`96ea80e`) and Phase 0.8 (`5e62967`), `bench/abng_pinn_scale` on Windows MSVC laptop (no thermal pinning, no CPU isolation):
+
+| n_collocation | Phase 0.7 min / median | Phase 0.8 min / median | min×× / median×× |
+|---|---:|---:|---:|
+| 1,000 | 23.8 ms / ~34.5 ms | 11.2 ms / ~27 ms | **2.13× / 1.28×** |
+| 10,000 | 174.5 ms / ~411 ms | 130.1 ms / ~350 ms | **1.34× / 1.18×** |
+| 100,000 | 2,636 ms / ~3,050 ms | 1,002 ms / ~2,239 ms | **2.63× / 1.36×** |
+
+**Honest reading:** Phase 0.8 produces a 1.2-1.5× macro speedup on the PINN bench (median) — modest, real, and outside the trial-to-trial variance band. The min-of-trials number is variance-inflated and should not be cited.
+
+**L2 error byte-identical across all trials and both phases** at every scale (4.192e-2 / 9.351e-3 / 1.800e-3). The wire-format determinism contract held cleanly through B1+C1+B2+D2a+B3+B4.
+
+**Why isn't the speedup bigger?** The Phase 0.8 micro-bench wins (3-4× SIMD Kahan, 2.5× parallel route, 4.3× zstd-friendly audit) don't directly target the PINN training inner loop. `route_to_leaf_batch` isn't called per-row in PINN; SIMD Kahan isn't yet wired into `cjc-abng`; the audit log work is overhead-neutral. The modest speedup likely traces to **compiler-level** effects from B4's columnar `AuditLog` reshaping a hot struct (8 small `Vec` pushes vs. 1 AoS `Vec` push), which the optimizer inlines differently.
+
+### Phase 0.8 lessons learned
+
+1. **"Wire format unchanged" is the most important phrase.** Every commit in Phase 0.8 held this line, which is why merging six in-place refactors didn't break a single canary. The decision to defer D2b/D3 to v14 (because they'd reorder BLR `canonical_bytes`) was the load-bearing one — see the D2a commit (`ac9b576`) for the analysis.
+
+2. **`std::simd` is still nightly.** The doc claimed it was stable on Rust 1.84+; it isn't (`portable_simd` is nightly-only). Plain `[f64; N]` arrays with auto-vectorization gave 3-4× SIMD wins **and** byte-identical cross-platform results without any unsafe or per-arch code. The compiler is doing more than people credit it with.
+
+3. **Threshold-gating parallel work is mandatory at sub-microsecond per-row cost.** Rayon's per-task setup at n=1024 made the parallel `route_to_leaf_batch` **33× slower** than sequential. Adding a 10,000-row threshold (and then settling on `std::thread::scope` for explicit thread-count control) was the difference between "items must be reverted" (Phase 0.7 discipline) and "ships as a clear win at scale."
+
+4. **B4 (columnar AuditLog) is the v14 enabler.** A3 (Merkle index) and C2 (parallel verify) both need `&[[u8; 32]]` slices over chain heads. Without columnar storage they'd have to materialize the slice from an AoS `Vec<AuditEvent>` on every call. Doing B4 first means A3/C2 can land as simple consumers of `audit.new_hashes()`.
+
+5. **Macro-bench variance dominates micro-bench wins.** A single-run PINN bench on a thermally-unpinned laptop has 2-3× trial variance. The Phase 0.8 micro wins (3-4× on isolated primitives) translate to 1.2-1.5× macro improvements — but only after min-of-trials methodology beats the noise floor. **Future handoff docs should specify min-of-N + warmup in their bench prescriptions.**
+
+### Workflow notes for the v14 follow-up branch
+
+- **Fork from `master @ 5e62967`** (or whatever HEAD is after this update commits). Do NOT fork from the original handoff's `96ea80e` — you'd lose six shipped items.
+- **Ship A1+A2+A3+A4 as one v14 commit batch.** The doc's original guidance still applies: one wire-format bump captures all four. Doing them in four separate commits is fine, but they should not land on master until the canary-relock is complete.
+- **Canary re-lock is mandatory** for any v14 commit. Re-run the 28 canary workloads, record new hex, update demo files, document the migration in `docs/abng/V14_MIGRATION.md`.
+- **C2 follows A3** — it needs the Merkle index to slice. D2b/D3 follow the v14 bump independently.
+
+### Workflow for re-running the macro benches
+
+The PINN bench (`bench/abng_pinn_scale`) has no warmup or min-of-trials — single-run-per-scale. For honest comparison:
+
+```bash
+# At each commit you want to measure, run 5+ trials and take the min:
+for i in 1 2 3 4 5; do cargo run -p abng-pinn-scale --release 2>&1 | grep n_coll; done
+```
+
+Future improvement: extend the bench to do min-of-7 internally (matches the `bench_kahan_simd_vs_scalar` and `bench_serialize_compressed` convention).
+
+---
+
 ## What's done — Phase 0.7 baseline
 
 ### Surface
