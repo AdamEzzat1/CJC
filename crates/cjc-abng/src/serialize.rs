@@ -627,10 +627,70 @@ fn encode_blr_prior(p: &BlrPrior, w: &mut dyn Write) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Encode a [`BlrState`]: just the canonical bytes (which already
-/// include `d`, mean, precision, a, b, n_seen).
+/// Encode a [`BlrState`] for v14 with packed lower-triangular precision.
+///
+/// **Phase 0.8c Item A1.** The precision matrix is symmetric positive-
+/// definite by construction (NIG posterior). The v13 wire format stored
+/// the full `d × d` matrix; v14 stores only the lower triangle + diagonal
+/// (`d(d+1)/2` entries) in row-major order. Decode reconstructs the full
+/// matrix by mirroring `(i,j) -> (j,i)`.
+///
+/// Layout (Phase 0.8c v14):
+/// ```text
+///   d                       u32 BE              (4)
+///   mean                    f64 BE × d          (d*8)
+///   packed_precision        f64 BE × d(d+1)/2   (d(d+1)*4)  ← v14 vs v13 d*d*8
+///   a                       f64 BE              (8)
+///   b                       f64 BE              (8)
+///   n_seen                  u64 BE              (8)
+///   feature_version_hash    [u8; 32]            (32)
+/// ```
+///
+/// **Determinism:** `BlrState::canonical_bytes()` is intentionally NOT
+/// changed by A1 -- the canonical hash input still uses the full d*d
+/// matrix, so `state_hash` (and therefore every BLR-related audit-event
+/// chain step, and therefore all 28 SHA-256 canaries) verifies byte-
+/// identically. This commit shrinks the *snapshot* representation only;
+/// the in-memory `Tensor` and the hash domain are unchanged. The
+/// decoupling lets future Phase 0.8c items (or v15 work) pack/unpack
+/// the snapshot freely without ever touching the hash input.
+///
+/// **Size win:** at d=4, saves 6 floats (48 B) per BLR state per node.
+/// At d=16, saves 120 floats (960 B). Across 10⁴ BLR-enabled nodes at
+/// d=16, ~10 MB off a typical snapshot.
+///
+/// **Lane order:** strictly row-major (i, j) with `j <= i`. Cross-
+/// platform CI must verify this byte-stable order across x86_64 and
+/// aarch64.
 fn encode_blr_state(s: &BlrState, w: &mut dyn Write) -> std::io::Result<()> {
-    w.write_all(&s.canonical_bytes())?;
+    let dz = s.d as usize;
+    let prec_full = s.precision.to_vec();
+    if prec_full.len() != dz * dz {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "encode_blr_state: precision tensor length {} does not match d*d={}",
+                prec_full.len(),
+                dz * dz
+            ),
+        ));
+    }
+    w.write_all(&s.d.to_be_bytes())?;
+    for x in s.mean.to_vec() {
+        w.write_all(&x.to_bits().to_be_bytes())?;
+    }
+    // Phase 0.8c Item A1 — packed lower-triangular precision. Row-major
+    // (i, j) with `j <= i`: 1 + 2 + 3 + ... + d = d(d+1)/2 entries.
+    for i in 0..dz {
+        for j in 0..=i {
+            let v = prec_full[i * dz + j];
+            w.write_all(&v.to_bits().to_be_bytes())?;
+        }
+    }
+    w.write_all(&s.a.to_bits().to_be_bytes())?;
+    w.write_all(&s.b.to_bits().to_be_bytes())?;
+    w.write_all(&s.n_seen.to_be_bytes())?;
+    w.write_all(&s.feature_version_hash)?;
     Ok(())
 }
 
@@ -904,16 +964,38 @@ fn decode_blr_prior(cur: &mut Cursor) -> Result<BlrPrior, DecodeError> {
     Ok(prior)
 }
 
-fn decode_blr_state(cur: &mut Cursor) -> Result<BlrState, DecodeError> {
+fn decode_blr_state(cur: &mut Cursor, wire: WireVersion) -> Result<BlrState, DecodeError> {
     let d = cur.u32_be()?;
     let dz = d as usize;
     let mut mean_data = Vec::with_capacity(dz);
     for _ in 0..dz {
         mean_data.push(cur.f64_be()?);
     }
-    let mut prec_data = Vec::with_capacity(dz * dz);
-    for _ in 0..(dz * dz) {
-        prec_data.push(cur.f64_be()?);
+    // Phase 0.8c Item A1 — precision encoding branches on wire version.
+    // v13 stored the full d*d matrix; v14 stores the lower-triangle +
+    // diagonal (d(d+1)/2 entries) and we mirror to upper triangle to
+    // restore the full symmetric matrix in memory. `canonical_bytes`
+    // still hashes the full matrix, so `state_hash` -- and therefore
+    // every BLR audit-event chain step and all 28 SHA-256 canaries --
+    // is byte-identical to the v13 era.
+    let mut prec_data = vec![0.0_f64; dz * dz];
+    match wire {
+        WireVersion::V13 => {
+            for k in 0..(dz * dz) {
+                prec_data[k] = cur.f64_be()?;
+            }
+        }
+        WireVersion::V14 => {
+            for i in 0..dz {
+                for j in 0..=i {
+                    let v = cur.f64_be()?;
+                    prec_data[i * dz + j] = v;
+                    if i != j {
+                        prec_data[j * dz + i] = v;
+                    }
+                }
+            }
+        }
     }
     let a = cur.f64_be()?;
     let b = cur.f64_be()?;
@@ -1170,7 +1252,7 @@ fn decode_stored_node(cur: &mut Cursor, wire: WireVersion) -> Result<StoredNode,
     let blr_present = cur.u8()?;
     let blr = match blr_present {
         0 => None,
-        1 => Some(decode_blr_state(cur)?),
+        1 => Some(decode_blr_state(cur, wire)?),
         other => return Err(DecodeError::UnknownChildrenKind(other)),
     };
     // Phase 0.3c — three optional blobs.
