@@ -50,6 +50,7 @@ mod parity_p3d;
 mod provenance_tests;
 mod replay;
 mod replay_invariant_tests;
+mod serialize_compressed;
 mod serialize_mmap;
 mod serialize_streaming;
 mod route_entropy_grow_tests;

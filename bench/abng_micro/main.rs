@@ -27,7 +27,8 @@ use cjc_abng::blr::{BlrPrior, BlrState};
 use cjc_abng::codebook::QuantileCodebook;
 use cjc_abng::graph::AdaptiveBeliefGraph;
 use cjc_abng::serialize::{
-    replay_mmap_with_outcome, replay_with_outcome, serialize, serialize_into, ReplayOptions,
+    replay, replay_mmap_with_outcome, replay_with_outcome, serialize, serialize_compressed,
+    serialize_into, ReplayOptions,
 };
 use cjc_ad::pinn::Activation;
 use cjc_repro::{KahanAccumulatorF64, KahanAccumulatorF64x4, KahanAccumulatorF64x8};
@@ -329,8 +330,11 @@ fn main() {
     // ── Phase 0.8 Item B2: serialize_into (streaming) vs serialize ────
     bench_serialize_streaming_vs_buffered(seed);
 
+    // ── Phase 0.8 Item B3: zstd-compressed snapshot ratio + speed ─────
+    bench_serialize_compressed(seed);
+
     eprintln!("=== Done ===");
-    eprintln!("Phase 0.6 baseline + Items 3/4/7/8 perf wins + Phase 0.8 B1 mmap + C1 parallel route + D2 SIMD Kahan + B2 streaming encode.");
+    eprintln!("Phase 0.6 baseline + Items 3/4/7/8 perf wins + Phase 0.8 B1 mmap + C1 parallel route + D2 SIMD Kahan + B2 streaming encode + B3 zstd compression.");
 }
 
 /// Phase 0.6 Item 3 — measure smart-replay fast-forward speedup over
@@ -1006,5 +1010,101 @@ fn bench_serialize_streaming_vs_buffered(seed: u64) {
         streaming_min_ns as f64 / 1e6,
         ratio,
         buffered_size,
+    );
+}
+
+/// Phase 0.8 Item B3 — measure zstd compression of a snapshot at
+/// level 3 (the default).
+///
+/// What we measure:
+///   * Compression ratio (uncompressed_size / compressed_size).
+///   * Wall-clock for compress and decompress+replay, vs the
+///     uncompressed `serialize` + `replay` baseline.
+///
+/// Honest expectations:
+///   * Ratio: audit-event-heavy snapshots compress well (~2-5x)
+///     because every event has the same 21-byte header shape +
+///     repetitive hash patterns. Codebook + per-node sections are
+///     less compressible.
+///   * Wall-clock: compression is CPU-bound; decompression is
+///     fast. For replay-from-disk workflows the smaller blob can
+///     more-than-pay for the decompression cost; for in-memory
+///     workflows it's pure overhead. We report both so callers can
+///     choose.
+fn bench_serialize_compressed(seed: u64) {
+    const N_OBS: usize = 10_000;
+    const N_TRIALS: usize = 5;
+    const LEVEL: i32 = 3;
+
+    let mut g = AdaptiveBeliefGraph::new(seed);
+    g.set_codebook(1, 4, &[-1.0, 0.0, 1.0]).unwrap();
+    for byte in 1u8..5 {
+        let _ = g.add_node(0, byte).unwrap();
+    }
+    for i in 0..N_OBS {
+        let leaf = ((i % 4) + 1) as u32;
+        let v = (i as f64 * 0.0001) - 0.5;
+        g.observe(leaf, v).unwrap();
+    }
+
+    // Uncompressed sizes + baseline wall-clock.
+    let mut uncompressed_min_ns = u128::MAX;
+    let mut uncompressed_size = 0usize;
+    for _ in 0..N_TRIALS {
+        let start = Instant::now();
+        let blob = serialize(&g);
+        let elapsed = start.elapsed().as_nanos();
+        if elapsed < uncompressed_min_ns {
+            uncompressed_min_ns = elapsed;
+            uncompressed_size = blob.len();
+        }
+        let _ = std::hint::black_box(blob);
+    }
+
+    // Compressed size + wall-clock.
+    let mut compressed_min_ns = u128::MAX;
+    let mut compressed_size = 0usize;
+    let mut compressed_blob: Vec<u8> = Vec::new();
+    for _ in 0..N_TRIALS {
+        let start = Instant::now();
+        let blob = serialize_compressed(&g, LEVEL);
+        let elapsed = start.elapsed().as_nanos();
+        if elapsed < compressed_min_ns {
+            compressed_min_ns = elapsed;
+            compressed_size = blob.len();
+            compressed_blob = blob;
+        } else {
+            let _ = std::hint::black_box(blob);
+        }
+    }
+
+    // Replay-from-compressed wall-clock. The decompression cost is
+    // amortized inside `replay`.
+    let mut replay_compressed_min_ns = u128::MAX;
+    for _ in 0..N_TRIALS {
+        let start = Instant::now();
+        let g2 = replay(&compressed_blob).expect("replay(compressed)");
+        let elapsed = start.elapsed().as_nanos();
+        if elapsed < replay_compressed_min_ns {
+            replay_compressed_min_ns = elapsed;
+        }
+        let _ = std::hint::black_box(g2);
+    }
+
+    let ratio = uncompressed_size as f64 / compressed_size as f64;
+    let compress_overhead = compressed_min_ns as f64 / uncompressed_min_ns as f64;
+    println!(
+        r#"{{"op":"serialize_compressed","n_events":{N_OBS},"level":{LEVEL},"uncompressed_bytes":{uncompressed_size},"compressed_bytes":{compressed_size},"ratio":{ratio:.2},"uncompressed_min_ns":{uncompressed_min_ns},"compressed_min_ns":{compressed_min_ns},"replay_compressed_min_ns":{replay_compressed_min_ns},"compress_overhead":{compress_overhead:.2}}}"#
+    );
+    eprintln!(
+        "  serialize_compressed (level={LEVEL}, n_events={N_OBS}): \
+         uncompressed={} B  compressed={} B  ratio={:.2}x \
+         compress={:.2}ms  uncompressed_write={:.2}ms  replay_compressed={:.2}ms",
+        uncompressed_size,
+        compressed_size,
+        ratio,
+        compressed_min_ns as f64 / 1e6,
+        uncompressed_min_ns as f64 / 1e6,
+        replay_compressed_min_ns as f64 / 1e6,
     );
 }

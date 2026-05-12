@@ -18,3 +18,17 @@ cjc-ad = { workspace = true }
 # in RAM. The crate itself remains pure CPU code; mmap is reader-side
 # only (write path is unchanged).
 memmap2 = "0.9"
+
+# Phase 0.8 Item B3 — zstd-compressed snapshot wrapper.
+# Adds `serialize_compressed` / `serialize_into_compressed` and a
+# magic-detection path in `replay`. The compressed wire format wraps
+# an inner v13 stream (no v13 byte changes; 28 canaries unaffected).
+# Off by default to keep the dep tree small for callers that don't
+# need compression; opt-in via `--features compression`.
+[dependencies.zstd]
+version = "0.13"
+optional = true
+
+[features]
+default = []
+compression = ["zstd"]

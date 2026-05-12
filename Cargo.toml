@@ -101,6 +101,13 @@ bolero = "0.13.4"
 proptest = "1"
 tempfile = "3"
 
+# Phase 0.8 Item B3 — feature propagation so the test binary in
+# `tests/abng/serialize_compressed.rs` can call the gated
+# `cjc-abng::serialize::serialize_compressed` / `serialize_into_compressed`
+# entry points. Enable via `cargo test --features compression`.
+[features]
+compression = ["cjc-abng/compression"]
+
 [workspace.dependencies]
 cjc-ast = { path = "crates/cjc-ast", version = "0.1.6" }
 cjc-diag = { path = "crates/cjc-diag", version = "0.1.6" }

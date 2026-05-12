@@ -45,6 +45,17 @@ use crate::stats::NodeStats;
 // re-locked simultaneously as part of this bump.
 const MAGIC: &[u8; 5] = b"ABNG\x0D";
 
+// Phase 0.8 Item B3 — zstd-compressed snapshot wrapper magic. The
+// 6 bytes `ABNGZ\x01` are unambiguously distinguishable from any
+// v13/v14/... uncompressed magic (which all start `ABNG\x??`, where
+// `??` is the version byte and never `Z` = 0x5A). On detection,
+// `replay_with_outcome` decompresses the remaining bytes via
+// `zstd::decode_all` and recurses into the uncompressed v13 decoder.
+// Wire format of the inner stream is unchanged from v13, so all 28
+// SHA-256 canaries remain valid for compressed snapshots that wrap
+// canary-locked workloads.
+const COMPRESSED_MAGIC: &[u8; 6] = b"ABNGZ\x01";
+
 /// Errors returned by snapshot decoding.
 #[derive(Debug, PartialEq)]
 pub enum DecodeError {
@@ -159,6 +170,12 @@ pub enum DecodeError {
         kind: std::io::ErrorKind,
         message: String,
     },
+    /// Phase 0.8 Item B3 — the snapshot starts with the compressed
+    /// `ABNGZ\x01` magic but `cjc-abng` was built without the
+    /// `compression` Cargo feature, so the zstd decoder is not linked
+    /// in. Callers should rebuild with `--features compression` or
+    /// re-serialize the snapshot uncompressed.
+    CompressionFeatureDisabled,
 }
 
 impl std::fmt::Display for DecodeError {
@@ -233,6 +250,10 @@ impl std::fmt::Display for DecodeError {
             DecodeError::Io { kind, message } => write!(
                 f,
                 "abng: snapshot I/O error ({kind:?}): {message}"
+            ),
+            DecodeError::CompressionFeatureDisabled => write!(
+                f,
+                "abng: snapshot is zstd-compressed but cjc-abng was built without the `compression` feature"
             ),
         }
     }
@@ -456,6 +477,63 @@ pub fn serialize_into(
         w.write_all(&event.new_hash)?;
     }
     Ok(())
+}
+
+/// Phase 0.8 Item B3 — zstd-compressed counterpart to
+/// [`serialize_into`]. Writes the 6-byte compressed magic
+/// (`ABNGZ\x01`) followed by a zstd stream containing the same byte
+/// sequence that [`serialize_into`] would produce on its own.
+///
+/// Internally constructs a [`zstd::Encoder`] wrapping `w` and hands
+/// it to [`serialize_into`] as a [`Write`] sink. The encoder
+/// compresses on the fly; no double-materialization of the
+/// uncompressed bytes ever occurs.
+///
+/// `level` is the zstd compression level (1 = fastest, 22 = best
+/// compression). The Phase 0.8 B3 bench at level 3 produces a
+/// typical 2-5× shrink on snapshots dominated by audit-event
+/// payloads.
+///
+/// # Determinism
+///
+/// zstd is deterministic in single-thread mode (the binding's
+/// default). For a given graph + level, the compressed bytes are
+/// bit-stable across runs. Decompression via [`replay`] /
+/// [`replay_with_outcome`] is therefore byte-identical to the
+/// uncompressed path on the *replayed graph state*; the
+/// **compressed wire bytes** are themselves byte-stable per
+/// `(g, level, zstd_version)`.
+///
+/// Available only under the `compression` Cargo feature.
+#[cfg(feature = "compression")]
+pub fn serialize_into_compressed(
+    graph: &AdaptiveBeliefGraph,
+    w: &mut dyn Write,
+    level: i32,
+) -> std::io::Result<()> {
+    w.write_all(COMPRESSED_MAGIC)?;
+    let mut encoder = zstd::Encoder::new(w, level)?;
+    serialize_into(graph, &mut encoder)?;
+    // `finish` flushes any pending compressed bytes and writes the
+    // frame epilogue. Without this, the resulting blob is truncated
+    // and `zstd::decode_all` returns an error.
+    encoder.finish()?;
+    Ok(())
+}
+
+/// Phase 0.8 Item B3 — zstd-compressed counterpart to [`serialize`].
+///
+/// Convenience wrapper around [`serialize_into_compressed`] that
+/// builds a `Vec<u8>`. Use [`serialize_into_compressed`] directly
+/// when piping to a file or socket.
+///
+/// Available only under the `compression` Cargo feature.
+#[cfg(feature = "compression")]
+pub fn serialize_compressed(graph: &AdaptiveBeliefGraph, level: i32) -> Vec<u8> {
+    let mut out = Vec::new();
+    serialize_into_compressed(graph, &mut out, level)
+        .expect("serialize_into_compressed: writes to Vec<u8> are infallible");
+    out
 }
 
 /// Encode a [`LeafHead`] into the snapshot header.
@@ -1167,6 +1245,25 @@ pub fn replay_with_outcome(
     bytes: &[u8],
     opts: ReplayOptions,
 ) -> Result<ReplayOutcome, DecodeError> {
+    // Phase 0.8 Item B3 — compressed snapshot dispatch. The 6-byte
+    // `ABNGZ\x01` magic is detected here; the inner stream is
+    // zstd-decoded and fed back through this same function (the
+    // decompressed bytes start with the uncompressed v13 magic, so
+    // the recursive call falls through to the body below — no
+    // infinite recursion risk because the inner blob never carries
+    // the compressed magic by construction).
+    if bytes.len() >= COMPRESSED_MAGIC.len()
+        && &bytes[..COMPRESSED_MAGIC.len()] == COMPRESSED_MAGIC
+    {
+        #[cfg(feature = "compression")]
+        {
+            return decompress_and_replay(bytes, opts);
+        }
+        #[cfg(not(feature = "compression"))]
+        {
+            return Err(DecodeError::CompressionFeatureDisabled);
+        }
+    }
     let mut cur = Cursor::new(bytes);
 
     // Header.
@@ -1801,6 +1898,36 @@ pub fn replay_with_outcome(
         graph,
         fast_forwarded_events,
     })
+}
+
+/// Phase 0.8 Item B3 — decompress a snapshot that begins with the
+/// `ABNGZ\x01` magic and replay the inner uncompressed v13 stream.
+///
+/// Caller has already verified the magic; this function reads the
+/// compressed payload from `bytes[COMPRESSED_MAGIC.len()..]`, hands
+/// it to `zstd::decode_all`, and feeds the result back through
+/// [`replay_with_outcome`]. Because the decompressed bytes start
+/// with the uncompressed v13 magic (`ABNG\x0D`), the recursive call
+/// falls through to the existing decoder body — there is no
+/// infinite-recursion risk.
+///
+/// Determinism: zstd is deterministic in single-thread mode (the
+/// Rust binding's default). For a given input + compression level,
+/// the output bytes are bit-stable across runs and platforms. The
+/// `decompress_round_trips_uncompressed` integration test asserts
+/// the decompressed inner stream is byte-equal to the original
+/// uncompressed snapshot.
+#[cfg(feature = "compression")]
+fn decompress_and_replay(
+    bytes: &[u8],
+    opts: ReplayOptions,
+) -> Result<ReplayOutcome, DecodeError> {
+    let inner = zstd::decode_all(&bytes[COMPRESSED_MAGIC.len()..])
+        .map_err(|e| DecodeError::Io {
+            kind: e.kind(),
+            message: format!("zstd decode: {e}"),
+        })?;
+    replay_with_outcome(&inner, opts)
 }
 
 /// Phase 0.5 Item 2 / Phase 0.6 Item 3 — replay with explicit options.
