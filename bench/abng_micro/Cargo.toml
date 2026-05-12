@@ -10,6 +10,9 @@ path = "main.rs"
 [dependencies]
 cjc-abng = { path = "../../crates/cjc-abng" }
 cjc-ad = { path = "../../crates/cjc-ad" }
+# Phase 0.8 Item D2 bench — `bench_kahan_simd_vs_scalar` compares the
+# scalar Kahan accumulator against the new SIMD x4/x8 variants.
+cjc-repro = { path = "../../crates/cjc-repro" }
 # Phase 0.8 Item B1 bench — `replay_mmap_vs_naive` writes the snapshot
 # to a temp file before timing the mmap path.
 tempfile = "3"

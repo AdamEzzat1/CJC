@@ -23,7 +23,9 @@
 //! No `HashMap`, no FMA, no non-deterministic SIMD reductions.
 
 pub mod kahan;
-pub use kahan::{KahanAccumulatorF32, KahanAccumulatorF64};
+pub use kahan::{
+    KahanAccumulatorF32, KahanAccumulatorF64, KahanAccumulatorF64x4, KahanAccumulatorF64x8,
+};
 
 /// Deterministic pseudo-random number generator using the SplitMix64 algorithm.
 ///
