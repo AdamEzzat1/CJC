@@ -623,6 +623,321 @@ impl AuditEvent {
     }
 }
 
+// ─── Phase 0.8 Item B4 — columnar audit-log storage ────────────────────────
+//
+// `AuditLog` replaces `Vec<AuditEvent>` as the in-memory audit-log
+// representation on `AdaptiveBeliefGraph`. The scalar fields live in
+// per-column `Vec`s ("struct-of-arrays" / SoA), which gives:
+//
+// * **Contiguous slices for batch ops.** `previous_hashes()` /
+//   `new_hashes()` / `seqs()` return `&[..]` directly, no
+//   re-materialization. This is the prerequisite for Item A3
+//   (Merkle-indexed audit chain) and Item C2 (parallel verify_chain).
+// * **Better cache utilization on full-log scans** for callers that
+//   only need a subset of fields.
+//
+// Wire format unchanged: all 28 SHA-256 canaries remain valid because
+// `serialize_into` writes the same bytes regardless of in-memory
+// layout. The compatibility shape — `push(event)`, `iter()`, `len()`,
+// `last()` — matches `Vec<AuditEvent>` closely enough that most
+// existing call sites need no change. The one mechanical exception
+// is `audit[i]`, which has no clean SoA equivalent (Rust's `Index`
+// requires `&Output`); use `audit.get(i)` instead.
+
+/// Columnar audit-log storage (Phase 0.8 Item B4).
+///
+/// Scalar fields are stored in per-column `Vec`s so batch operations
+/// (Merkle indexing, parallel verify) can borrow contiguous slices
+/// without materializing intermediate `AuditEvent` values. The variant
+/// payload (`AuditKind`) stays AoS because it is heterogeneous.
+///
+/// Public API mirrors `Vec<AuditEvent>` where possible. `push` accepts
+/// a fully-constructed `AuditEvent` and decomposes it; `iter` /
+/// `last` / `get` materialize an owned `AuditEvent` per access (one
+/// `AuditKind::clone`). Hot-path callers that don't need the full
+/// `AuditEvent` should use the columnar accessors directly.
+#[derive(Debug, Clone, Default)]
+pub struct AuditLog {
+    seq: Vec<u64>,
+    epoch: Vec<u64>,
+    node_id: Vec<NodeId>,
+    stats_version: Vec<u64>,
+    stats_hash: Vec<[u8; 32]>,
+    previous_hash: Vec<[u8; 32]>,
+    new_hash: Vec<[u8; 32]>,
+    kind: Vec<AuditKind>,
+}
+
+impl AuditLog {
+    /// An empty audit log with no allocation.
+    #[inline]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Number of events currently in the log.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.seq.len()
+    }
+
+    /// `true` if no events have been pushed.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.seq.is_empty()
+    }
+
+    /// Append an event by decomposing into the column vectors.
+    ///
+    /// Each column gets one push; the eight `Vec`s stay length-aligned
+    /// by construction. `kind` is moved (no clone).
+    pub fn push(&mut self, event: AuditEvent) {
+        self.seq.push(event.seq);
+        self.epoch.push(event.epoch);
+        self.node_id.push(event.node_id);
+        self.stats_version.push(event.stats_version);
+        self.stats_hash.push(event.stats_hash);
+        self.previous_hash.push(event.previous_hash);
+        self.new_hash.push(event.new_hash);
+        self.kind.push(event.kind);
+    }
+
+    /// Truncate the log to `len` events. If `len` exceeds the current
+    /// length, this is a no-op.
+    pub fn truncate(&mut self, len: usize) {
+        self.seq.truncate(len);
+        self.epoch.truncate(len);
+        self.node_id.truncate(len);
+        self.stats_version.truncate(len);
+        self.stats_hash.truncate(len);
+        self.previous_hash.truncate(len);
+        self.new_hash.truncate(len);
+        self.kind.truncate(len);
+    }
+
+    /// Materialize the event at index `i` as an owned `AuditEvent`.
+    /// Returns `None` if `i >= len()`.
+    pub fn get(&self, i: usize) -> Option<AuditEvent> {
+        if i >= self.len() {
+            return None;
+        }
+        Some(AuditEvent {
+            seq: self.seq[i],
+            epoch: self.epoch[i],
+            node_id: self.node_id[i],
+            kind: self.kind[i].clone(),
+            stats_version: self.stats_version[i],
+            stats_hash: self.stats_hash[i],
+            previous_hash: self.previous_hash[i],
+            new_hash: self.new_hash[i],
+        })
+    }
+
+    /// The last event, materialized as an owned `AuditEvent`. `None`
+    /// if the log is empty.
+    pub fn last(&self) -> Option<AuditEvent> {
+        if self.is_empty() {
+            None
+        } else {
+            self.get(self.len() - 1)
+        }
+    }
+
+    /// Iterate the log, yielding owned `AuditEvent`s. Each step clones
+    /// the variant payload. The returned iterator implements
+    /// `DoubleEndedIterator` and `ExactSizeIterator`, so `.rev()`
+    /// works as a drop-in replacement for `Vec::iter().rev()`.
+    pub fn iter(&self) -> AuditLogIter<'_> {
+        AuditLogIter {
+            log: self,
+            range: 0..self.len(),
+        }
+    }
+
+    // ── Columnar accessors ────────────────────────────────────────────
+    //
+    // Zero-copy `&[..]` views into individual columns. Enables future
+    // Merkle layer construction (Item A3) and parallel verify
+    // (Item C2) to borrow contiguous slices instead of materializing
+    // intermediate `Vec`s from an AoS iter.
+
+    /// Slice of every event's pre-event chain head.
+    #[inline]
+    pub fn previous_hashes(&self) -> &[[u8; 32]] {
+        &self.previous_hash
+    }
+
+    /// Slice of every event's post-event chain head (the "new_hash"
+    /// field). This is the column Merkle indexing layers over.
+    #[inline]
+    pub fn new_hashes(&self) -> &[[u8; 32]] {
+        &self.new_hash
+    }
+
+    /// Slice of every event's monotonic global sequence number.
+    #[inline]
+    pub fn seqs(&self) -> &[u64] {
+        &self.seq
+    }
+
+    /// Slice of every event's logical epoch.
+    #[inline]
+    pub fn epochs(&self) -> &[u64] {
+        &self.epoch
+    }
+
+    /// Slice of every event's affected `NodeId`.
+    #[inline]
+    pub fn node_ids(&self) -> &[NodeId] {
+        &self.node_id
+    }
+
+    /// Slice of every event's recorded post-update `stats_version`.
+    #[inline]
+    pub fn stats_versions(&self) -> &[u64] {
+        &self.stats_version
+    }
+
+    /// Slice of every event's recorded post-update `stats_hash`.
+    #[inline]
+    pub fn stats_hashes(&self) -> &[[u8; 32]] {
+        &self.stats_hash
+    }
+
+    /// Slice of every event's variant. Heterogeneous; stays AoS.
+    #[inline]
+    pub fn kinds(&self) -> &[AuditKind] {
+        &self.kind
+    }
+
+    // ── Mutable columnar accessors ────────────────────────────────────
+    //
+    // Used by:
+    //   * Replay-invariant tests that forge tampered audit logs and
+    //     verify the new-hash chain still validates after the
+    //     `rebuild_chain` helper recomputes it.
+    //   * Future Phase 0.8c work that splices in `StatsSnapshot` events
+    //     and re-derives the chain head.
+    //
+    // The eight column `Vec`s stay length-aligned only by careful
+    // discipline at the call site. These accessors deliberately do NOT
+    // resize the column they expose; callers that need to add/remove
+    // events should go through `push` / `truncate` instead.
+
+    /// Mutable slice of every event's pre-event chain head.
+    #[inline]
+    pub fn previous_hashes_mut(&mut self) -> &mut [[u8; 32]] {
+        &mut self.previous_hash
+    }
+
+    /// Mutable slice of every event's post-event chain head.
+    #[inline]
+    pub fn new_hashes_mut(&mut self) -> &mut [[u8; 32]] {
+        &mut self.new_hash
+    }
+
+    /// Mutable slice of every event's monotonic global sequence number.
+    #[inline]
+    pub fn seqs_mut(&mut self) -> &mut [u64] {
+        &mut self.seq
+    }
+
+    /// Mutable slice of every event's logical epoch.
+    #[inline]
+    pub fn epochs_mut(&mut self) -> &mut [u64] {
+        &mut self.epoch
+    }
+
+    /// Mutable slice of every event's affected `NodeId`.
+    #[inline]
+    pub fn node_ids_mut(&mut self) -> &mut [NodeId] {
+        &mut self.node_id
+    }
+
+    /// Mutable slice of every event's `stats_version`.
+    #[inline]
+    pub fn stats_versions_mut(&mut self) -> &mut [u64] {
+        &mut self.stats_version
+    }
+
+    /// Mutable slice of every event's `stats_hash`.
+    #[inline]
+    pub fn stats_hashes_mut(&mut self) -> &mut [[u8; 32]] {
+        &mut self.stats_hash
+    }
+
+    /// Mutable slice of every event's variant.
+    #[inline]
+    pub fn kinds_mut(&mut self) -> &mut [AuditKind] {
+        &mut self.kind
+    }
+
+    /// Swap the events at indices `i` and `j` across every column.
+    /// Panics if either index is out of bounds.
+    pub fn swap(&mut self, i: usize, j: usize) {
+        self.seq.swap(i, j);
+        self.epoch.swap(i, j);
+        self.node_id.swap(i, j);
+        self.stats_version.swap(i, j);
+        self.stats_hash.swap(i, j);
+        self.previous_hash.swap(i, j);
+        self.new_hash.swap(i, j);
+        self.kind.swap(i, j);
+    }
+
+    /// Replace the event at index `i` with `event`, decomposing into
+    /// the column vectors. Panics if `i >= len()`.
+    pub fn set(&mut self, i: usize, event: AuditEvent) {
+        assert!(i < self.len(), "AuditLog::set: index {i} out of bounds (len={})", self.len());
+        self.seq[i] = event.seq;
+        self.epoch[i] = event.epoch;
+        self.node_id[i] = event.node_id;
+        self.stats_version[i] = event.stats_version;
+        self.stats_hash[i] = event.stats_hash;
+        self.previous_hash[i] = event.previous_hash;
+        self.new_hash[i] = event.new_hash;
+        self.kind[i] = event.kind;
+    }
+}
+
+/// Owned-yielding iterator over an [`AuditLog`]. Each step clones the
+/// variant payload to materialize an owned [`AuditEvent`]. Implements
+/// [`DoubleEndedIterator`] and [`ExactSizeIterator`] so `.rev()`,
+/// `.len()`, etc. work as drop-in replacements for the previous
+/// `Vec<AuditEvent>::iter()` shape.
+pub struct AuditLogIter<'a> {
+    log: &'a AuditLog,
+    range: std::ops::Range<usize>,
+}
+
+impl<'a> Iterator for AuditLogIter<'a> {
+    type Item = AuditEvent;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.range.next().and_then(|i| self.log.get(i))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.range.size_hint()
+    }
+}
+
+impl<'a> DoubleEndedIterator for AuditLogIter<'a> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.range.next_back().and_then(|i| self.log.get(i))
+    }
+}
+
+impl<'a> ExactSizeIterator for AuditLogIter<'a> {}
+
+impl<'a> IntoIterator for &'a AuditLog {
+    type Item = AuditEvent;
+    type IntoIter = AuditLogIter<'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

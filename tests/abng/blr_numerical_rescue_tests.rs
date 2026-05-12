@@ -47,8 +47,8 @@ fn rescue_event_emitted_after_blr_updated_when_clamp_fires() {
     // Two new events: BlrUpdated then BlrNumericalRescue, in that order.
     assert_eq!(g.audit.len(), pre_audit + 2);
     let n = g.audit.len();
-    assert!(matches!(g.audit[n - 2].kind, AuditKind::BlrUpdated { .. }));
-    let rescue = &g.audit[n - 1];
+    assert!(matches!(g.audit.get(n - 2).unwrap().kind, AuditKind::BlrUpdated { .. }));
+    let rescue = &g.audit.get(n - 1).unwrap();
     let (reason, b_pre_clamp_bits) = match rescue.kind {
         AuditKind::BlrNumericalRescue {
             reason,
@@ -74,7 +74,7 @@ fn no_rescue_event_on_normal_update() {
     // Healthy prior + non-zero SSR — only BlrUpdated, no rescue.
     assert_eq!(g.audit.len(), pre_audit + 1);
     assert!(matches!(
-        g.audit[pre_audit].kind,
+        g.audit.get(pre_audit).unwrap().kind,
         AuditKind::BlrUpdated { .. }
     ));
 }
@@ -115,9 +115,9 @@ fn rescue_events_paired_with_immediately_preceding_blr_updated() {
         if matches!(e.kind, AuditKind::BlrNumericalRescue { .. }) {
             assert!(i > 0, "rescue event cannot be first");
             assert!(
-                matches!(g.audit[i - 1].kind, AuditKind::BlrUpdated { .. }),
+                matches!(g.audit.get(i - 1).unwrap().kind, AuditKind::BlrUpdated { .. }),
                 "rescue event must follow BlrUpdated, got {:?}",
-                g.audit[i - 1].kind
+                g.audit.get(i - 1).unwrap().kind
             );
         }
     }

@@ -39,11 +39,11 @@ fn compact_log_visits_nodes_in_ascending_order() {
     let _ = g.compact_log(pre as u64);
     // The two new events should reference node 0 then node 1 in
     // arena order — required for deterministic chain advancement.
-    let n0 = match &g.audit[pre].kind {
+    let n0 = match &g.audit.get(pre).unwrap().kind {
         AuditKind::StatsSnapshot { node_id, .. } => *node_id,
         _ => panic!(),
     };
-    let n1 = match &g.audit[pre + 1].kind {
+    let n1 = match &g.audit.get(pre + 1).unwrap().kind {
         AuditKind::StatsSnapshot { node_id, .. } => *node_id,
         _ => panic!(),
     };
@@ -115,11 +115,11 @@ fn compact_log_stats_hash_matches_node_state_at_emission() {
     let h0 = g.nodes[0].stats.stats_hash();
     let h1 = g.nodes[1].stats.stats_hash();
     let _ = g.compact_log(g.audit.len() as u64);
-    let snap0 = match &g.audit[pre].kind {
+    let snap0 = match &g.audit.get(pre).unwrap().kind {
         AuditKind::StatsSnapshot { stats_hash, .. } => *stats_hash,
         _ => panic!(),
     };
-    let snap1 = match &g.audit[pre + 1].kind {
+    let snap1 = match &g.audit.get(pre + 1).unwrap().kind {
         AuditKind::StatsSnapshot { stats_hash, .. } => *stats_hash,
         _ => panic!(),
     };

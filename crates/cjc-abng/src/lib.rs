@@ -39,7 +39,7 @@ pub mod serialize;
 pub mod signature;
 pub mod stats;
 
-pub use audit::{AuditEvent, AuditKind};
+pub use audit::{AuditEvent, AuditKind, AuditLog, AuditLogIter};
 pub use blr::{BlrError, BlrPrior, BlrState};
 pub use calibration::{CalibrationBins, CalibrationError};
 pub use children::{AdaptiveChildren, ChildrenKind};

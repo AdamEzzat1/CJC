@@ -20,7 +20,7 @@
 use cjc_ad::pinn::Activation;
 use cjc_runtime::tensor::Tensor;
 
-use crate::audit::{AuditEvent, AuditKind, BLR_RESCUE_B_BELOW_EPSILON};
+use crate::audit::{AuditEvent, AuditKind, AuditLog, BLR_RESCUE_B_BELOW_EPSILON};
 use crate::blr::{BlrError, BlrPrior, BlrState};
 use crate::calibration::{CalibrationBins, CalibrationError};
 use crate::children::{AdaptiveChildren, ChildrenKind};
@@ -269,8 +269,11 @@ pub struct AdaptiveBeliefGraph {
     pub epoch: u64,
     /// All nodes in the graph, indexed by `node_id`.
     pub nodes: Vec<AdaptiveBeliefNode>,
-    /// Append-only audit log.
-    pub audit: Vec<AuditEvent>,
+    /// Append-only audit log. Phase 0.8 Item B4 — columnar (SoA)
+    /// storage; per-column slices via [`AuditLog::previous_hashes`],
+    /// [`AuditLog::new_hashes`], etc. are zero-copy and feed future
+    /// Merkle indexing (A3) + parallel verify (C2) work.
+    pub audit: AuditLog,
     /// Current global chain head. Equals `audit.last().new_hash` if the log
     /// is non-empty, else [`crate::genesis_hash`].
     pub chain_head: [u8; 32],
@@ -321,7 +324,7 @@ impl AdaptiveBeliefGraph {
             seed,
             epoch: 0,
             nodes: Vec::new(),
-            audit: Vec::new(),
+            audit: AuditLog::new(),
             chain_head: genesis_hash(),
             codebook: None,
             head: None,
@@ -3128,9 +3131,10 @@ mod tests {
         let g = AdaptiveBeliefGraph::new(42);
         assert_eq!(g.node_count(), 1);
         assert_eq!(g.audit_len(), 1);
-        assert_eq!(g.audit[0].kind, AuditKind::Created);
-        assert_eq!(g.audit[0].previous_hash, genesis_hash());
-        assert_eq!(g.chain_head, g.audit[0].new_hash);
+        let e0 = g.audit.get(0).unwrap();
+        assert_eq!(e0.kind, AuditKind::Created);
+        assert_eq!(e0.previous_hash, genesis_hash());
+        assert_eq!(g.chain_head, e0.new_hash);
         assert_eq!(g.nodes[0].parent, None);
     }
 
@@ -3154,11 +3158,11 @@ mod tests {
         // children promoted None -> Node4 + NodeAdded event
         assert_eq!(g.audit_len(), 3); // Created + ChildrenPromoted + NodeAdded
         assert!(matches!(
-            g.audit[1].kind,
+            g.audit.get(1).unwrap().kind,
             AuditKind::ChildrenPromoted { from: 0, to: 1 }
         ));
         assert!(matches!(
-            g.audit[2].kind,
+            g.audit.get(2).unwrap().kind,
             AuditKind::NodeAdded { parent: 0, key_byte: 7 }
         ));
     }

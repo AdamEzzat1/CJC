@@ -179,7 +179,7 @@ fn reset_blr_emits_blr_initialized_event() {
     g.reset_blr(0).unwrap();
     assert_eq!(g.audit.len(), pre_audit + 1);
     assert!(matches!(
-        g.audit[pre_audit].kind,
+        g.audit.get(pre_audit).unwrap().kind,
         AuditKind::BlrInitialized { .. }
     ));
 }

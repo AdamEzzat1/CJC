@@ -82,7 +82,9 @@ fn force_grow_emits_promoted_grow_then_subsystem_inits() {
     g.set_leaf_head(2, vec![], 1, Activation::None).unwrap();
     let pre_len = g.audit.len();
     let _ = g.force_grow(0, 7).unwrap();
-    let new_events = &g.audit[pre_len..];
+    // Phase 0.8 Item B4 — `audit` is now an `AuditLog` (columnar);
+    // materialize the tail as a Vec<AuditEvent> for indexed access.
+    let new_events: Vec<_> = g.audit.iter().skip(pre_len).collect();
     // Root's children promoted None → Node4 → ChildrenPromoted fires
     // first. Then Grow, then LeafParamsInitialized.
     assert!(matches!(

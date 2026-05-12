@@ -63,7 +63,7 @@ fn batch_writeback_emits_single_event() {
     // Exactly one new event — `LeafParamsUpdatedBatch`.
     assert_eq!(g.audit.len(), pre_audit + 1);
     assert!(matches!(
-        g.audit[pre_audit].kind,
+        g.audit.get(pre_audit).unwrap().kind,
         AuditKind::LeafParamsUpdatedBatch { .. }
     ));
 }
@@ -87,7 +87,7 @@ fn per_tensor_writeback_emits_n_events() {
     assert_eq!(g.audit.len(), pre_audit + n_params);
     for offset in 0..n_params {
         assert!(matches!(
-            g.audit[pre_audit + offset].kind,
+            g.audit.get(pre_audit + offset).unwrap().kind,
             AuditKind::LeafParamsUpdated { .. }
         ));
     }

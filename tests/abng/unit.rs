@@ -38,8 +38,8 @@ fn graph_starts_with_one_node_and_genesis_anchored_chain() {
     let g = AdaptiveBeliefGraph::new(0);
     assert_eq!(g.node_count(), 1);
     // Created event is always seq=0
-    assert_eq!(g.audit[0].seq, 0);
-    assert_eq!(g.audit[0].previous_hash, genesis_hash());
+    assert_eq!(g.audit.get(0).unwrap().seq, 0);
+    assert_eq!(g.audit.get(0).unwrap().previous_hash, genesis_hash());
     assert!(g.verify_chain().is_ok());
 }
 
@@ -69,7 +69,10 @@ fn verify_chain_catches_value_tampering() {
     let mut g = AdaptiveBeliefGraph::new(0);
     g.observe(0, 1.0).unwrap();
     g.observe(0, 2.0).unwrap();
-    if let AuditKind::BeliefUpdate { value } = &mut g.audit[2].kind {
+    // Phase 0.8 Item B4 — the audit log is columnar; tamper with the
+    // event's `kind` via `kinds_mut`, not `get(i)` (which returns an
+    // owned copy whose mutation would silently no-op).
+    if let AuditKind::BeliefUpdate { value } = &mut g.audit.kinds_mut()[2] {
         *value = 999.0;
     }
     assert!(g.verify_chain().is_err());
@@ -80,7 +83,10 @@ fn verify_chain_catches_previous_hash_tampering() {
     let mut g = AdaptiveBeliefGraph::new(0);
     g.observe(0, 1.0).unwrap();
     g.observe(0, 2.0).unwrap();
-    g.audit[1].previous_hash[0] ^= 0xFF;
+    // Phase 0.8 Item B4 — columnar mutator. The old
+    // `g.audit[1].previous_hash` pattern would tamper an owned copy
+    // under the new API and verify_chain would falsely pass.
+    g.audit.previous_hashes_mut()[1][0] ^= 0xFF;
     assert!(g.verify_chain().is_err());
 }
 
@@ -108,14 +114,14 @@ fn audit_event_payload_layout() {
     // Spot-check that payload size matches the documented layout.
     let g = AdaptiveBeliefGraph::new(0);
     // Created event: 8+8+4+1+8+32 = 61 bytes
-    assert_eq!(g.audit[0].payload_bytes().len(), 61);
+    assert_eq!(g.audit.get(0).unwrap().payload_bytes().len(), 61);
 }
 
 #[test]
 fn belief_update_payload_includes_value_bits() {
     let mut g = AdaptiveBeliefGraph::new(0);
     g.observe(0, 1.5).unwrap();
-    let payload = g.audit[1].payload_bytes();
+    let payload = g.audit.get(1).unwrap().payload_bytes();
     // BeliefUpdate event: 8+8+4+1+8(value)+8+32 = 69 bytes
     assert_eq!(payload.len(), 69);
     // Tag at offset 20 should be 0x01

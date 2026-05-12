@@ -23,11 +23,11 @@ fn set_leaf_head_initializes_root_and_emits_two_events() {
     // Three audit events: Created, LeafHeadConfigured, LeafParamsInitialized.
     assert_eq!(g.audit_len(), 3);
     assert!(matches!(
-        g.audit[1].kind,
+        g.audit.get(1).unwrap().kind,
         AuditKind::LeafHeadConfigured { .. }
     ));
     assert!(matches!(
-        g.audit[2].kind,
+        g.audit.get(2).unwrap().kind,
         AuditKind::LeafParamsInitialized { .. }
     ));
 }

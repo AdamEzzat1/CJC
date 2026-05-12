@@ -1382,8 +1382,8 @@ pub fn replay_with_outcome(
             provenance_stamp_hash: [0u8; 32],
         }],
         // Defensive: untrusted `n_events` cannot drive a giant
-        // `with_capacity` allocation; let the vec grow naturally.
-        audit: Vec::new(),
+        // `with_capacity` allocation; let the AuditLog grow naturally.
+        audit: crate::audit::AuditLog::new(),
         chain_head: genesis_hash(),
         codebook: None,
         head: None,

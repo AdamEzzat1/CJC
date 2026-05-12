@@ -23,7 +23,7 @@
 //! pass chain validation but violate the higher-level structural
 //! contract of the audit log.
 
-use cjc_abng::audit::{AuditEvent, AuditKind};
+use cjc_abng::audit::{AuditEvent, AuditKind, AuditLog};
 use cjc_abng::genesis_hash;
 use cjc_abng::graph::AdaptiveBeliefGraph;
 use cjc_abng::serialize::{replay, serialize, DecodeError};
@@ -40,12 +40,19 @@ fn build_with_observes(seed: u64, n_observes: u64) -> AdaptiveBeliefGraph {
 /// Walk the audit log, setting `previous_hash` from the running chain
 /// and recomputing each event's `new_hash` from its current payload.
 /// Returns the new final chain head.
-fn rebuild_chain(audit: &mut [AuditEvent]) -> [u8; 32] {
+///
+/// Phase 0.8 Item B4 — adapted to the columnar `AuditLog`. Mutates
+/// the previous_hash + new_hash columns via the mutable slice
+/// accessors; the per-event payload is recomputed by materializing
+/// the event once and asking it for `payload_bytes()`.
+fn rebuild_chain(audit: &mut AuditLog) -> [u8; 32] {
     let mut prev = genesis_hash();
-    for ev in audit.iter_mut() {
-        ev.previous_hash = prev;
-        ev.new_hash = ev.recompute_new_hash();
-        prev = ev.new_hash;
+    for i in 0..audit.len() {
+        audit.previous_hashes_mut()[i] = prev;
+        let event = audit.get(i).expect("rebuild_chain: index in range");
+        let new_hash = AuditEvent::compute_new_hash(&prev, &event.payload_bytes());
+        audit.new_hashes_mut()[i] = new_hash;
+        prev = new_hash;
     }
     prev
 }
@@ -99,16 +106,20 @@ fn replay_rejects_duplicate_created_event() {
     // Replace audit[1] with a second Created event. Chain stays valid
     // after recompute; semantic check fires at event_index == 1.
     let mut g = build_with_observes(0, 2);
-    g.audit[1] = AuditEvent {
-        seq: 1,
-        epoch: 0,
-        node_id: 0,
-        kind: AuditKind::Created,
-        stats_version: g.audit[0].stats_version,
-        stats_hash: g.audit[0].stats_hash,
-        previous_hash: [0u8; 32], // overwritten by rebuild_chain
-        new_hash: [0u8; 32],      // overwritten by rebuild_chain
-    };
+    let e0 = g.audit.get(0).unwrap();
+    g.audit.set(
+        1,
+        AuditEvent {
+            seq: 1,
+            epoch: 0,
+            node_id: 0,
+            kind: AuditKind::Created,
+            stats_version: e0.stats_version,
+            stats_hash: e0.stats_hash,
+            previous_hash: [0u8; 32], // overwritten by rebuild_chain
+            new_hash: [0u8; 32],      // overwritten by rebuild_chain
+        },
+    );
     g.chain_head = rebuild_chain(&mut g.audit);
 
     let blob = serialize(&g);
@@ -123,7 +134,7 @@ fn replay_rejects_non_monotonic_seq() {
     // Event[1] has seq=1 in a clean graph. Set it to 99; chain stays
     // valid after recompute; new check fires at event_index == 1.
     let mut g = build_with_observes(0, 3);
-    g.audit[1].seq = 99;
+    g.audit.seqs_mut()[1] = 99;
     g.chain_head = rebuild_chain(&mut g.audit);
 
     let blob = serialize(&g);
@@ -141,7 +152,7 @@ fn replay_rejects_non_monotonic_seq() {
 fn replay_rejects_seq_skip_at_first_event() {
     // First event must have seq=0; bumping it to 5 catches at event_index 0.
     let mut g = build_with_observes(0, 1);
-    g.audit[0].seq = 5;
+    g.audit.seqs_mut()[0] = 5;
     g.chain_head = rebuild_chain(&mut g.audit);
 
     let blob = serialize(&g);
@@ -161,7 +172,7 @@ fn replay_rejects_seq_skip_at_first_event() {
 fn replay_rejects_epoch_mismatch() {
     // Event[1] is forged to claim epoch=42 while the header records 0.
     let mut g = build_with_observes(0, 2);
-    g.audit[1].epoch = 42;
+    g.audit.epochs_mut()[1] = 42;
     g.chain_head = rebuild_chain(&mut g.audit);
 
     let blob = serialize(&g);
@@ -184,7 +195,7 @@ fn replay_rejects_stats_version_mismatch() {
     // post-apply the new check catches the mismatch before
     // StatsMismatch can fire.
     let mut g = build_with_observes(0, 2);
-    g.audit[1].stats_version = 99;
+    g.audit.stats_versions_mut()[1] = 99;
     g.chain_head = rebuild_chain(&mut g.audit);
 
     let blob = serialize(&g);

@@ -115,17 +115,17 @@ fn merge_emits_merge_event_followed_by_blr_updated_for_into() {
     g.force_merge(2, 1).unwrap();
     assert_eq!(g.audit.len(), pre_audit + 2);
     assert!(matches!(
-        g.audit[pre_audit].kind,
+        g.audit.get(pre_audit).unwrap().kind,
         AuditKind::Merge {
             absorbed: 2,
             into: 1
         }
     ));
-    let into_witness_state_hash = match g.audit[pre_audit + 1].kind {
+    let into_witness_state_hash = match g.audit.get(pre_audit + 1).unwrap().kind {
         AuditKind::BlrUpdated { state_hash } => state_hash,
         ref k => panic!("expected BlrUpdated for into after Merge, got {k:?}"),
     };
-    assert_eq!(g.audit[pre_audit + 1].node_id, 1);
+    assert_eq!(g.audit.get(pre_audit + 1).unwrap().node_id, 1);
     // The BlrUpdated witness must match the live combined state.
     assert_eq!(
         into_witness_state_hash,
@@ -147,7 +147,7 @@ fn merge_without_blr_emits_only_merge_event() {
     g.force_merge(2, 1).unwrap();
     assert_eq!(g.audit.len(), pre_audit + 1);
     assert!(matches!(
-        g.audit[pre_audit].kind,
+        g.audit.get(pre_audit).unwrap().kind,
         AuditKind::Merge { .. }
     ));
 }

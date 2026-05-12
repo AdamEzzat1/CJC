@@ -15,9 +15,9 @@ fn add_node_appends_child_with_audit() {
     assert_eq!(g.nodes[1].parent, Some(0));
     // Created (root) + ChildrenPromoted (None→Node4) + NodeAdded.
     assert_eq!(g.audit_len(), 3);
-    assert!(matches!(g.audit[1].kind, AuditKind::ChildrenPromoted { from: 0, to: 1 }));
+    assert!(matches!(g.audit.get(1).unwrap().kind, AuditKind::ChildrenPromoted { from: 0, to: 1 }));
     assert!(matches!(
-        g.audit[2].kind,
+        g.audit.get(2).unwrap().kind,
         AuditKind::NodeAdded { parent: 0, key_byte: 5 }
     ));
 }
