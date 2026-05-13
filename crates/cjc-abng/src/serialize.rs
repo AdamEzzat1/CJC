@@ -217,6 +217,17 @@ pub enum DecodeError {
     /// in. Callers should rebuild with `--features compression` or
     /// re-serialize the snapshot uncompressed.
     CompressionFeatureDisabled,
+    /// Phase 0.8c v14 Item A3 — the snapshot trailer carried an
+    /// unrecognized tag byte. Tag `0x01` is the only allocated value
+    /// (Merkle root v1). A different value indicates either a
+    /// truncated snapshot or a future trailer version that this
+    /// decoder doesn't recognize.
+    UnknownTrailerTag(u8),
+    /// Phase 0.8c v14 Item A3 — the snapshot's stored Merkle root
+    /// did not match the root recomputed from the decoded audit
+    /// chain's `new_hash` column. Indicates either the audit log
+    /// or the trailer was tampered with after serialization.
+    MerkleRootMismatch,
 }
 
 impl std::fmt::Display for DecodeError {
@@ -296,6 +307,12 @@ impl std::fmt::Display for DecodeError {
                 f,
                 "abng: snapshot is zstd-compressed but cjc-abng was built without the `compression` feature"
             ),
+            DecodeError::UnknownTrailerTag(t) => {
+                write!(f, "abng: unknown trailer tag {t:#04x}")
+            }
+            DecodeError::MerkleRootMismatch => {
+                write!(f, "abng: Merkle root in trailer does not match audit chain")
+            }
         }
     }
 }
@@ -517,8 +534,28 @@ pub fn serialize_into(
         w.write_all(&event.previous_hash)?;
         w.write_all(&event.new_hash)?;
     }
+
+    // Phase 0.8c v14 Item A3 — Merkle root trailer. Single tag byte
+    // (`0x01` = "Merkle root v1") followed by a 32-byte root. The
+    // root is computed FROM `audit.new_hashes()`, never feeds INTO
+    // any audit-event payload, so adding the trailer does not shift
+    // any chain witness.
+    //
+    // Always emitted under v14. v13 readers never reach this code
+    // (different magic, different decode path); v14 readers always
+    // expect the trailer (encode + decode are in lock-step on this
+    // branch).
+    w.write_all(&[MERKLE_TRAILER_TAG_V1])?;
+    w.write_all(&graph.merkle_root())?;
     Ok(())
 }
+
+/// Phase 0.8c v14 Item A3 — trailer tag byte for the "Merkle root
+/// v1" block (32-byte SHA-256 over the audit chain's `new_hash`
+/// column). Allocated from the top of the trailer-tag namespace; if
+/// future v14 work adds another trailer block (e.g. a serialized
+/// proof index), allocate `0x02`, `0x03`, etc.
+const MERKLE_TRAILER_TAG_V1: u8 = 0x01;
 
 /// Phase 0.8 Item B3 — zstd-compressed counterpart to
 /// [`serialize_into`]. Writes the 6-byte compressed magic
@@ -1669,6 +1706,36 @@ pub fn replay_with_outcome(
         decoded.push((event, recomputed_new));
         prev_hash = recomputed_new;
         expected_seq += 1;
+    }
+
+    // Phase 0.8c v14 Item A3 — Merkle root trailer. v14 writers
+    // always emit a `[tag 0x01][root [u8;32]]` block after the audit
+    // log; v14 readers always consume it and cross-check the stored
+    // root against the root recomputed from the decoded events'
+    // `new_hash` column. A mismatch indicates either the audit log
+    // or the trailer was tampered with after serialization (the
+    // chain-link check above catches per-event tamper; this catches
+    // the case where someone forged a coherent chain but left the
+    // trailer stale, or vice versa).
+    //
+    // v13 archives skip the trailer entirely — different magic,
+    // they never reach this code.
+    if wire_version == WireVersion::V14 {
+        let trailer_tag = cur.u8()?;
+        if trailer_tag != MERKLE_TRAILER_TAG_V1 {
+            return Err(DecodeError::UnknownTrailerTag(trailer_tag));
+        }
+        let stored_root = cur.hash32()?;
+        let recomputed_root = {
+            let new_hashes: Vec<[u8; 32]> = decoded
+                .iter()
+                .map(|(_, recomputed_new)| *recomputed_new)
+                .collect();
+            crate::merkle::MerkleTree::build(&new_hashes).root()
+        };
+        if stored_root != recomputed_root {
+            return Err(DecodeError::MerkleRootMismatch);
+        }
     }
 
     // Phase 0.6 Item 3 — pre-pass: identify fast-forwardable nodes.

@@ -38,6 +38,7 @@ mod leaf_head_tests;
 mod leaf_params_batch_tests;
 mod maturity_signature_tests;
 mod merge_math_tests;
+mod merkle_tests;
 mod multinode;
 mod observe_validation_tests;
 mod parallel_route_tests;

@@ -898,6 +898,34 @@ impl AdaptiveBeliefGraph {
         self.audit.push(event);
     }
 
+    /// Phase 0.8c v14 Item A3 — Merkle root over the audit chain's
+    /// `new_hash` column. The root is a single 32-byte attestation
+    /// that fixes the entire chain; a third party with the root and
+    /// an inclusion proof (`MerkleTree::proof`) can verify any
+    /// event's position in the chain in `O(log N)` hashes without
+    /// downloading the full audit log.
+    ///
+    /// Built freshly on every call from `audit.new_hashes()` (which
+    /// Phase 0.8 Item B4's columnar [`crate::audit::AuditLog`]
+    /// exposes as a zero-copy slice). The tree is not cached on the
+    /// graph — callers that need it repeatedly should retain the
+    /// [`crate::merkle::MerkleTree`] returned by [`merkle_tree`].
+    ///
+    /// Determinism: byte-identical across platforms (uses
+    /// `cjc_snap::hash::Sha256` for all combiner hashes, matching
+    /// the chain's own primitive).
+    pub fn merkle_root(&self) -> [u8; 32] {
+        crate::merkle::MerkleTree::build(self.audit.new_hashes()).root()
+    }
+
+    /// Build the full Merkle tree (Phase 0.8c v14 Item A3). Allows
+    /// the caller to extract inclusion proofs for arbitrary leaves
+    /// via [`crate::merkle::MerkleTree::proof`]. `O(N)` time and
+    /// memory.
+    pub fn merkle_tree(&self) -> crate::merkle::MerkleTree {
+        crate::merkle::MerkleTree::build(self.audit.new_hashes())
+    }
+
     /// Recompute every event's `new_hash` from scratch and check that the
     /// stored chain is consistent.
     pub fn verify_chain(&self) -> Result<(), GraphError> {

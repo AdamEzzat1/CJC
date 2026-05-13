@@ -31,6 +31,7 @@ pub mod drift;
 pub mod graph;
 pub mod leaf_head;
 pub mod maturity;
+pub mod merkle;
 pub mod node;
 pub mod policy;
 pub mod predict_snap;
