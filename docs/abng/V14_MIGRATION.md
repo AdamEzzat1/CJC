@@ -1,13 +1,13 @@
 # v13 → v14 ABNG Snapshot Migration
 
 **Phase:** 0.8c
-**Status:** all three v14 wire-format items shipped (A4 + A1 + A2).
+**Status:** Phase 0.8 COMPLETE. All wire-format items + perf refactors shipped (A4 + A1 + A2 + A3 + C2 + D2b + D3).
 **Magic byte:** `ABNG\x0D` (v13) → `ABNG\x0E` (v14).
 
-This doc records what changed in the on-disk and audit-chain layouts
-between v13 and v14, what's forward-compatible, and how an existing
-v13 snapshot is migrated. It accompanies the three v14 commits on
-the `claude/abng-v14-wire-format` branch:
+This doc records what changed in the on-disk, audit-chain, and BLR
+math layouts between v13 and v14, what's forward-compatible, and
+how an existing v13 snapshot is migrated. It accompanies the
+following commits on the `claude/abng-v14-wire-format` branch:
 
 | Item | Commit | What changed | Canary impact |
 |---|---|---|---|
@@ -17,6 +17,8 @@ the `claude/abng-v14-wire-format` branch:
 | A2 | [`457c3c1`](#) + [`eb18f1a`](#) | Fused `AuditKind::TrainStep` (tag `0x1E`) replaces the pre-A2 `BlrUpdated + BeliefUpdate` pair when `Graph::train_step` is called | 6 canaries re-locked (Path A — audit-event content changed) |
 | A3 | [`2a5801d`](#) | Merkle-indexed audit chain. Snapshot trailer (tag `0x01` + 32-byte root) appended after the audit-log section; `Graph::merkle_root()` + `Graph::merkle_tree()` API for inclusion proofs | none — Merkle root is a witness column, never feeds chain witnesses |
 | C2 | [`43bf29e`](#) | Parallel `Graph::verify_chain_par(n_threads)` via `std::thread::scope`; threshold-gated at 10,000 events | none — read-only verification, no state mutation |
+| D2b | [`7227e30`](#) | SIMD-friendly Kahan refactor of `BlrState::update` (xtx, xty, yty reductions use `KahanAccumulatorF64x4` over the n-axis). Bit-identical at n ≤ 4, bit-different at n ≥ 5. | 3 canaries re-locked (`*_scaled_cjcl` demos that batch BLR updates with n ≥ 5 per leaf) |
+| D3 | [`2803242`](#) | Fused matvec kernel `matvec_plus_xty_kahan` extracted for `Λ_old · μ_old + xty`. Scalar path at d ≤ 4 (bit-identical to pre-D3); F64x4 fused path at d ≥ 8 with d % 4 == 0. | none — current canaries all use d=4 (scalar path) |
 
 ## Wire-format changes summary
 
@@ -289,26 +291,34 @@ they still fire when callers use the unfused `observe(...)` or
 
 ## Going forward
 
-* **All five v14 Phase 0.8c items shipped:** A4, A1, A2, A3
-  (Merkle index), plus the read-only C2 (parallel verify) API
-  addition. The wire format is now stable; no further v14 bumps
-  are planned in this branch.
-* **D2b (SIMD `BlrState::update`)** and **D3 (fused matmul kernel
-  for `Λ_old · μ_old`)** remain as Phase 0.8 follow-ups.
-  Both would reorder `BlrState::canonical_bytes` and require a
-  separate canary re-lock cycle. They're independent of v14 wire
-  format — a future maintainer can ship them on a fresh branch
-  without touching this migration doc.
+* **Phase 0.8 is COMPLETE.** All seven items that the original
+  handoff scoped to this branch — A4, A1, A2, A3, C2, D2b, D3 —
+  have shipped. The wire format is now stable at v14; no further
+  bumps planned in this branch.
+* **D2b's canary impact was smaller than feared:** only the 3
+  `*_scaled_cjcl` demos that batch `blr_update` with n ≥ 5 per
+  leaf shifted. Post-A2 train_step demos (n=1) and trigger demos
+  (StatsSnapshot fast-forward masking) stayed byte-stable. Total
+  re-lock cost: 6 canaries from A2 + 3 from D2b = 9 of 28.
+* **D3 shipped with zero canary impact** by gating the F64x4
+  fused matvec path at d ≥ 8 — every currently locked canary
+  uses d=4, which takes the scalar fallback (bit-identical to
+  pre-D3). D3's perf value is structural readiness for d=16+
+  workloads (PINN basis expansions, tabular GP with rich
+  features).
 * **No new `Value` enum variants** were introduced. Both
   executors (`cjc-eval` + `cjc-mir-exec`) route through the same
   `g.train_step(...)` Rust API via the `abng_train_step` builtin.
   No CJC-Lang-surface builtin was added for `merkle_root` /
-  `merkle_tree` / `verify_chain_par`; those are Rust-only APIs
-  for now. A future commit can add `abng_merkle_root` etc. if
-  cjcl source needs them.
+  `merkle_tree` / `verify_chain_par` / `matvec_plus_xty_kahan`;
+  those are Rust-only APIs for now. A future commit can add
+  `abng_merkle_root` etc. if cjcl source needs them.
 * **Determinism contract is preserved.** Same inputs +
   same seed = bit-identical Welford stats + BLR state. The chain
   head reflects the v14 audit shape but the underlying numerical
   state is independent of wire format. The Merkle root is a pure
   function of the chain's `new_hashes`, so it's deterministic by
-  construction.
+  construction. `KahanAccumulatorF64x4` uses plain `[f64; 4]`
+  arrays (not `std::simd`), so cross-platform byte equality is
+  guaranteed by IEEE-754 — no `target_arch` gating, no nightly
+  features.
