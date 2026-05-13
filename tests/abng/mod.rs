@@ -60,3 +60,4 @@ mod split_nll_gate_tests;
 mod train_step_v14_tests;
 mod uncertainty_tests;
 mod unit;
+mod verify_par_tests;

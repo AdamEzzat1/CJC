@@ -926,6 +926,112 @@ impl AdaptiveBeliefGraph {
         crate::merkle::MerkleTree::build(self.audit.new_hashes())
     }
 
+    /// Phase 0.8c v14 Item C2 — parallel counterpart to
+    /// [`verify_chain`]. Splits the audit log into `n_threads` equal
+    /// (rounded up) chunks and verifies each in parallel via
+    /// `std::thread::scope` (no Rayon, no new deps — matches Phase
+    /// 0.8 Item C1's pattern). Determinism is preserved: the same
+    /// graph + same `n_threads` produces the same `Ok(())` or
+    /// `Err(ChainBroken { at_seq })` as the sequential path.
+    ///
+    /// Each chunk verifies:
+    /// 1. **Per-event integrity:** every event's stored `new_hash`
+    ///    equals `sha256(stored_previous_hash ‖ payload_bytes)`.
+    /// 2. **Intra-chunk linkage:** for `i > chunk_start`, event `i`'s
+    ///    `previous_hash` equals event `i-1`'s `new_hash`.
+    ///
+    /// After all chunks complete, the main thread runs:
+    /// 3. **Cross-chunk linkage:** the first event of each non-zero
+    ///    chunk links back to the previous chunk's last event.
+    /// 4. **Genesis anchor:** the first event's `previous_hash` is
+    ///    `genesis_hash()`.
+    /// 5. **Final chain head:** the last event's `new_hash` equals
+    ///    [`Self::chain_head`].
+    ///
+    /// **Threshold gating.** Below 10,000 events, the parallel
+    /// overhead dominates (matches the Phase 0.8 lesson learned
+    /// from the `route_to_leaf_batch_par` 33×-slowdown-at-n=1024
+    /// incident). Small chains fall through to [`verify_chain`].
+    ///
+    /// `n_threads <= 1` also falls through to the sequential path.
+    ///
+    /// The new [`Self::merkle_root`] / [`Self::merkle_tree`] API
+    /// (Phase 0.8c Item A3) is the conceptual prerequisite: a
+    /// future caller that wants to attest to a third party about a
+    /// successful parallel verification can include the Merkle root
+    /// as a single 32-byte witness alongside the `Ok(())` outcome.
+    pub fn verify_chain_par(&self, n_threads: usize) -> Result<(), GraphError> {
+        let n_events = self.audit.len();
+        const PAR_THRESHOLD: usize = 10_000;
+        if n_events < PAR_THRESHOLD || n_threads <= 1 {
+            return self.verify_chain();
+        }
+        let chunk_size = n_events.div_ceil(n_threads);
+
+        // Audit-only view: tensor-free, auto-`Sync`. Matches Phase
+        // 0.8 Item C1's pattern of extracting a `Sync` sub-view
+        // (route-only there, audit-only here) before spawning, so
+        // the thread closures don't need to capture the full
+        // `&AdaptiveBeliefGraph` (which isn't `Sync` because of
+        // tensor `Rc<RefCell>` interior on the per-node section).
+        let audit: &crate::audit::AuditLog = &self.audit;
+
+        // Each thread verifies its `[start..end)` range and returns
+        // `Ok(())` if internally consistent. The columnar slices
+        // (Phase 0.8 Item B4) are `&[[u8; 32]]` views over the
+        // audit log's `new_hash` / `previous_hash` columns —
+        // zero-copy reads inside the worker loop.
+        std::thread::scope(|s| -> Result<(), GraphError> {
+            let mut handles = Vec::with_capacity(n_threads);
+            for k in 0..n_threads {
+                let start = k * chunk_size;
+                let end = ((k + 1) * chunk_size).min(n_events);
+                if start >= end {
+                    break;
+                }
+                handles.push(s.spawn(move || verify_chain_chunk(audit, start, end)));
+            }
+            for h in handles {
+                match h.join() {
+                    Ok(r) => r?,
+                    Err(_) => {
+                        return Err(GraphError::ChainBroken { at_seq: 0 })
+                    }
+                }
+            }
+            Ok(())
+        })?;
+
+        // Cross-chunk + global anchor checks.
+        let prev_hashes = self.audit.previous_hashes();
+        let new_hashes = self.audit.new_hashes();
+        if prev_hashes[0] != genesis_hash() {
+            return Err(GraphError::ChainBroken { at_seq: 0 });
+        }
+        let mut k = 1usize;
+        loop {
+            let boundary = k * chunk_size;
+            if boundary >= n_events {
+                break;
+            }
+            if prev_hashes[boundary] != new_hashes[boundary - 1] {
+                let seq = self
+                    .audit
+                    .get(boundary)
+                    .expect("in range")
+                    .seq;
+                return Err(GraphError::ChainBroken { at_seq: seq });
+            }
+            k += 1;
+        }
+        if self.chain_head != new_hashes[n_events - 1] {
+            return Err(GraphError::ChainBroken {
+                at_seq: n_events as u64,
+            });
+        }
+        Ok(())
+    }
+
     /// Recompute every event's `new_hash` from scratch and check that the
     /// stored chain is consistent.
     pub fn verify_chain(&self) -> Result<(), GraphError> {
@@ -2817,6 +2923,52 @@ impl AdaptiveBeliefGraph {
         }
         self.nodes[nid_idx].last_signature = Some(new_sig);
     }
+}
+
+// ── Phase 0.8c v14 Item C2: parallel verify_chain helper ─────────────
+
+/// Worker function for [`AdaptiveBeliefGraph::verify_chain_par`].
+/// Verifies per-event integrity + intra-chunk linkage for the range
+/// `[start..end)` of the audit log. Cross-chunk linkage and the
+/// `chain_head` anchor are checked by the caller after thread-join.
+///
+/// Uses the columnar accessors `audit.previous_hashes()` and
+/// `audit.new_hashes()` (Phase 0.8 Item B4) to avoid materializing
+/// any AoS intermediate — every read inside the loop is a 32-byte
+/// slice indexing.
+fn verify_chain_chunk(
+    audit: &crate::audit::AuditLog,
+    start: usize,
+    end: usize,
+) -> Result<(), GraphError> {
+    let new_hashes = audit.new_hashes();
+    let prev_hashes = audit.previous_hashes();
+    // One payload scratch buffer per chunk, reused across events
+    // (matches the Phase 0.7 (A) buffer-reuse pattern in the
+    // sequential `verify_chain`).
+    let mut payload_buf: Vec<u8> = Vec::with_capacity(96);
+    for i in start..end {
+        let event = audit.get(i).expect("index in range");
+        let stored_prev = prev_hashes[i];
+
+        // Intra-chunk linkage: every non-first event in the chunk
+        // must follow on directly from its predecessor. The first
+        // event in the chunk is anchored by the caller's
+        // cross-chunk check (or by the genesis check for chunk 0).
+        if i > start && stored_prev != new_hashes[i - 1] {
+            return Err(GraphError::ChainBroken { at_seq: event.seq });
+        }
+
+        // Per-event integrity: stored `new_hash` must equal the
+        // recomputation against the stored `previous_hash` and the
+        // event's full canonical payload.
+        event.write_payload(&mut payload_buf);
+        let recomputed = AuditEvent::compute_new_hash(&stored_prev, &payload_buf);
+        if recomputed != new_hashes[i] {
+            return Err(GraphError::ChainBroken { at_seq: event.seq });
+        }
+    }
+    Ok(())
 }
 
 // ── Phase 0.3d-4: trigger helpers ───────────────────────────────────
