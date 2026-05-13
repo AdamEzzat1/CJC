@@ -68,12 +68,16 @@ fn route_leaf(g: i64, x: f64) -> i64 {
 }
 
 fn train_one(g: i64, x: f64) {
-    let leaf = route_leaf(g, x);
-    let phi = pinn_features_2d(x);
+    // Phase 0.8c v14 Item A2 — fused per-row training step. Single
+    // `AuditKind::TrainStep` event (tag 0x1E) replaces the pre-A2
+    // `BlrUpdated + BeliefUpdate` pair. Uses the 1-D phi shape
+    // `abng_train_step` requires (the 2-D variant `pinn_features_2d`
+    // stays in the file for any future caller that wants the
+    // pre-A2 path).
+    let x_t = Tensor.from_vec([x], [1]);
+    let phi = pinn_features_1d(x);
     let y_val = analytical_u(x);
-    let y = Tensor.from_vec([y_val], [1]);
-    abng_blr_update(g, leaf, phi, y);
-    abng_observe(g, leaf, y_val);
+    abng_train_step(g, x_t, phi, y_val);
 }
 
 // Probe: predict at a query point and return mean+leverage.

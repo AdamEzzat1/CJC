@@ -100,10 +100,12 @@ fn train_and_stamp(seed: u64, rows: &[Row]) -> AdaptiveBeliefGraph {
     let stamp = dataset_fingerprint(rows);
     g.stamp_provenance(0, stamp).unwrap();
     for &(_pid, dose, resp) in rows {
-        let leaf = route_leaf(&g, dose);
+        // Phase 0.8c v14 Item A2 — fused per-row training step. One
+        // `AuditKind::TrainStep` event per row instead of the pre-A2
+        // `BlrUpdated + BeliefUpdate` pair. `train_step` does its own
+        // descend, so the previous `route_leaf` indirection folds in.
         let phi = features(dose);
-        g.blr_update(leaf, &phi, &[resp]).unwrap();
-        g.observe(leaf, resp).unwrap();
+        g.train_step(&[dose], &phi, resp).unwrap();
     }
     g
 }
@@ -316,21 +318,28 @@ fn lineage_serialize_replay_round_trip_preserves_lineage() {
 
 #[test]
 fn lineage_audit_log_contains_observation_history_in_order() {
-    // Direct evidence the audit chain captures the dataset:
-    // count BeliefUpdate events in order; should match dataset
+    // Direct evidence the audit chain captures the dataset: count
+    // the per-row training events in order; should match dataset
     // size exactly. A regulator can scan the audit log and
     // reconstruct the exact training sequence.
+    //
+    // Phase 0.8c v14 Item A2 — `train_and_stamp` now uses the fused
+    // `train_step` builtin, so each training row emits one
+    // `AuditKind::TrainStep` (tag 0x1E) instead of the pre-A2
+    // `BlrUpdated + BeliefUpdate` pair. The dataset-size invariant
+    // is unchanged; the kind matched on shifts from
+    // `BeliefUpdate` to `TrainStep`.
     let rows = dataset_a();
     let g = train_and_stamp(7, &rows);
-    let n_belief_updates = g
+    let n_train_steps = g
         .audit
         .iter()
-        .filter(|e| matches!(e.kind, AuditKind::BeliefUpdate { .. }))
+        .filter(|e| matches!(e.kind, AuditKind::TrainStep { .. }))
         .count();
     assert_eq!(
-        n_belief_updates,
+        n_train_steps,
         rows.len(),
-        "audit chain must contain exactly one BeliefUpdate per training row"
+        "audit chain must contain exactly one TrainStep per training row"
     );
 }
 
@@ -382,10 +391,16 @@ fn lineage_chain_head_canary_locked() {
     let g = train_and_stamp(7, &dataset_a());
     let actual_hex = hex_of(&g.chain_head);
     println!("lineage canary chain_head = {actual_hex}");
-    // Locked at Phase 0.5 ship — fires only on lineage-training
-    // determinism breakage. Independent of all other canaries.
+    // Re-locked at Phase 0.8c v14 Item A2 — the demo's
+    // `train_and_stamp` flipped from `blr_update + observe`
+    // (pre-A2: two events / row, tags 0x0A + 0x01) to
+    // `train_step` (post-A2: one TrainStep event / row, tag
+    // 0x1E). The audit-chain payload bytes per training row
+    // therefore changed, so the chain head shifted. Pre-A2 hex
+    // was `789acce77a22241c2e3601bf958e978b24e4707874cdbb23a7fde9a98f0606c2`;
+    // V14_MIGRATION.md records the v13 → v14 mapping.
     const CANARY_HEX: &str =
-        "789acce77a22241c2e3601bf958e978b24e4707874cdbb23a7fde9a98f0606c2";
+        "7892bd9f9e2331e7729c3e973c4ae7c8db9aaf344772bedd786fd22418fddf81";
     assert_eq!(
         actual_hex, CANARY_HEX,
         "lineage chain_head canary mismatch — see comment"

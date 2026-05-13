@@ -116,8 +116,15 @@ fn lineage_cjcl_chain_head_canary_locked() {
     // training rows, different graph topology). Fires on either
     // CJC-Lang interpreter determinism breakage or a dispatch
     // routing change that alters byte-level execution.
+    // Re-locked at Phase 0.8c v14 Item A2 — `lineage_source.cjcl`'s
+    // per-row training loop flipped from `abng_blr_update +
+    // abng_observe` (pre-A2: two events / row, tags 0x0A + 0x01) to
+    // `abng_train_step` (post-A2: one TrainStep event / row, tag
+    // 0x1E). Pre-A2 hex:
+    // `20f5f977cd7dcfad536fbf4be49d4b18c6ba2430b32e510713a038c94fa39b40`.
+    // V14_MIGRATION.md records the v13 → v14 mapping.
     const CANARY_HEX: &str =
-        "20f5f977cd7dcfad536fbf4be49d4b18c6ba2430b32e510713a038c94fa39b40";
+        "223906f55c3506a5f33c43f378cd4b32ff04545af37e8c706432f5a2250617d7";
     assert_eq!(
         chain_a, CANARY_HEX,
         "cjcl lineage chain_head canary mismatch — see comment"

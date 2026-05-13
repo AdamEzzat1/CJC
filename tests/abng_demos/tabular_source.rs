@@ -59,12 +59,15 @@ fn route_for(g: i64, x1: f64) -> i64 {
 }
 
 fn train_one(g: i64, x1: f64, x2: f64) {
-    let leaf = route_for(g, x1);
-    let phi = tabular_features_2d(x1, x2);
+    // Phase 0.8c v14 Item A2 — fused per-row training step. Emits a
+    // single `AuditKind::TrainStep` event (tag 0x1E) instead of the
+    // pre-A2 `BlrUpdated + BeliefUpdate` pair. Drops the 2-D phi
+    // shape used by `abng_blr_update` in favour of the 1-D phi shape
+    // `abng_train_step` requires.
+    let x_t = Tensor.from_vec([x1], [1]);
+    let phi = tabular_features_1d(x1, x2);
     let y_val = target(x1, x2);
-    let y = Tensor.from_vec([y_val], [1]);
-    abng_blr_update(g, leaf, phi, y);
-    abng_observe(g, leaf, y_val);
+    abng_train_step(g, x_t, phi, y_val);
 }
 
 // SplitMix64-style deterministic point generator. Returns [x1, x2]

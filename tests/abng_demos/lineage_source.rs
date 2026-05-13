@@ -119,21 +119,19 @@ fn train_and_stamp(seed: i64, rows: Any, fingerprint: String) -> i64 {
         let row = rows[i];
         let dose = row[0];
         let resp = row[1];
-        // Encode the dose into a prefix, descend to the leaf.
+        // Phase 0.8c v14 Item A2 — fused per-row training step.
+        // Emits one `AuditKind::TrainStep` event (tag 0x1E) per
+        // row instead of the pre-A2 `BlrUpdated + BeliefUpdate`
+        // pair. `abng_train_step` does its own descend, so we
+        // pass the dose tensor directly and use a 1-D phi (it
+        // requires shape `[d]`, not `[1, d]`).
         let dose_t = Tensor.from_vec([dose], [1]);
-        let prefix = abng_encode_prefix(g, dose_t);
-        let evidence = abng_descend(g, prefix);
-        // evidence is a 2-element f64 Tensor [matched_prefix, leaf_id].
-        let leaf = int(evidence.get([1]));
         // Cubic basis: BLR fits y = b0 + b1*dose + b2*dose^2 + b3*dose^3.
-        // Single-row update: features must be 2-D [n=1, d=4]; y is 1-D [n=1].
         let phi = Tensor.from_vec(
             [1.0, dose, dose * dose, dose * dose * dose],
-            [1, 4]
+            [4]
         );
-        let y = Tensor.from_vec([resp], [1]);
-        abng_blr_update(g, leaf, phi, y);
-        abng_observe(g, leaf, resp);
+        abng_train_step(g, dose_t, phi, resp);
         i = i + 1;
     }
     g

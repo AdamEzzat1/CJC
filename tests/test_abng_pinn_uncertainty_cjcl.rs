@@ -80,8 +80,15 @@ fn pinn_cjcl_chain_head_canary_locked() {
     // canary (different node count, different stamp). Fires on
     // CJC-Lang interpreter determinism breakage or BLR/observe
     // arithmetic change.
+    // Re-locked at Phase 0.8c v14 Item A2 — `pinn_source.cjcl`'s
+    // `train_one` flipped from `abng_blr_update + abng_observe`
+    // (pre-A2: two events / row, tags 0x0A + 0x01) to
+    // `abng_train_step` (post-A2: one TrainStep event / row, tag
+    // 0x1E). Pre-A2 hex:
+    // `e5d6c41daeec4b34a78ddab5086f9903d3dd56b8fd995400dd190ba8d684a64a`.
+    // V14_MIGRATION.md records the v13 → v14 mapping.
     const CANARY_HEX: &str =
-        "e5d6c41daeec4b34a78ddab5086f9903d3dd56b8fd995400dd190ba8d684a64a";
+        "be14b783c16b34f6bdf944a23c4ccdfdd2039eef3fee2ad8f81242f3c766388d";
     assert_eq!(
         chain, CANARY_HEX,
         "cjcl PINN chain_head canary mismatch — see comment"
