@@ -361,23 +361,16 @@ impl BlrState {
             }
         }
 
-        // rhs = Λ_old · μ_old + X^T y     (length d). The inner
-        // `b`-loop reduction is small (typically d=4..16); a single
-        // scalar Kahan over each row is the cleanest. The xty
-        // contribution is added after the matrix-vector reduce so
-        // the dominant terms (matrix-vector products) anchor the
-        // compensation state.
+        // Phase 0.8c v14 Item D3 — fused matvec kernel for the rhs
+        // computation: `rhs = Λ_old · μ_old + xty`. Extracted to the
+        // free helper [`matvec_plus_xty_kahan`] so the SIMD path
+        // (gated at d >= 8 with d % 4 == 0) and the scalar fallback
+        // share a single test surface. At d=4 the helper takes the
+        // scalar path — bit-identical to the pre-D3 inline code.
         let lambda_old = self.precision.to_vec();
         let mu_old = self.mean.to_vec();
-        let mut rhs = vec![0.0f64; d];
-        for a in 0..d {
-            let mut acc = KahanAccumulatorF64::new();
-            for b in 0..d {
-                acc.add(lambda_old[a * d + b] * mu_old[b]);
-            }
-            acc.add(xty[a].finalize());
-            rhs[a] = acc.finalize();
-        }
+        let xty_finalized: Vec<f64> = xty.iter().map(|x| x.finalize()).collect();
+        let rhs = matvec_plus_xty_kahan(&lambda_old, &mu_old, &xty_finalized, d);
 
         // Solve Λ_new · m_new = rhs via Cholesky.
         let l = cholesky(&lambda_new, d)?;
@@ -716,6 +709,92 @@ fn quadratic_form(a: &[f64], d: usize, x: &[f64]) -> f64 {
         }
     }
     acc.finalize()
+}
+
+/// Phase 0.8c v14 Item D3 — fused matvec-plus-bias kernel for the
+/// BLR rhs computation.
+///
+/// Computes `rhs[a] = Σ_b lambda[a*d + b] · mu[b] + xty[a]` for
+/// every output index `a ∈ 0..d`, using Kahan-compensated summation
+/// throughout. Two execution paths share the same API:
+///
+/// * **Scalar path** — strict left-to-right Kahan over `(b=0, 1,
+///   ..., d-1, xty[a])`. Fires at `d ≤ 4`, at `d ≥ 5 && d % 4 != 0`,
+///   and as the regression-safety fallback for any future d shape
+///   that doesn't match the SIMD gate. **Bit-identical to the
+///   pre-D3 inline code.**
+/// * **F64x4 fused path** — lane-parallel Kahan over chunks of 4
+///   b-values via [`KahanAccumulatorF64x4::add_lanes`], then a
+///   horizontal reduce, then a single outer-Kahan add of `xty[a]`.
+///   Fires at `d ≥ 8 && d % 4 == 0`. Bit-different from scalar
+///   Kahan in this regime, but determinism is preserved (the F64x4
+///   lane assignment + finalize order is byte-stable cross-platform).
+///
+/// # Why the d=4 gate is `d ≥ 8` not `d ≥ 4`
+///
+/// At d=4 the SIMD path would introduce a second Kahan stage:
+/// `inner_simd_kahan(p0, p1, p2, p3)` produces a scalar that's then
+/// fed through an outer Kahan along with `xty[a]`. The pre-D3
+/// inline code Kahan-accumulates all five terms (`p0..p3, xty[a]`)
+/// inside a single accumulator, threading compensation across all
+/// five adds. The two paths produce mathematically equivalent
+/// results but typically different f64 bits — and the d=4 demos
+/// (every currently locked canary in the repo) would shift. Gating
+/// the SIMD path at `d ≥ 8` keeps d=4 bit-identical while still
+/// providing the headroom for PINN-scale workloads (d=16+).
+///
+/// # Inputs
+///
+/// * `lambda` — row-major `d×d` matrix.
+/// * `mu` — length-`d` vector.
+/// * `xty_finalized` — length-`d` already-Kahan-summed `X^T y`.
+/// * `d` — common dimension (≥ 0; `d=0` returns an empty vec).
+///
+/// # Panics
+///
+/// Indexing panics if `lambda.len() < d*d`, `mu.len() < d`, or
+/// `xty_finalized.len() < d`. Callers inside `BlrState::update`
+/// always satisfy these by construction.
+pub(crate) fn matvec_plus_xty_kahan(
+    lambda: &[f64],
+    mu: &[f64],
+    xty_finalized: &[f64],
+    d: usize,
+) -> Vec<f64> {
+    let mut rhs = vec![0.0f64; d];
+    let use_simd = d >= 8 && d % 4 == 0;
+    for a in 0..d {
+        let mut acc = KahanAccumulatorF64::new();
+        if use_simd {
+            // Lane-parallel Kahan over b ∈ 0..d in chunks of 4.
+            // Each chunk distributes 4 products across the F64x4's
+            // lanes; `finalize` horizontally reduces into a single
+            // scalar.
+            let mut acc_x4 = KahanAccumulatorF64x4::new();
+            let mut b = 0;
+            while b + 4 <= d {
+                acc_x4.add_lanes([
+                    lambda[a * d + b] * mu[b],
+                    lambda[a * d + b + 1] * mu[b + 1],
+                    lambda[a * d + b + 2] * mu[b + 2],
+                    lambda[a * d + b + 3] * mu[b + 3],
+                ]);
+                b += 4;
+            }
+            // No tail: the `use_simd` gate guarantees `d % 4 == 0`.
+            acc.add(acc_x4.finalize());
+        } else {
+            // Strict left-to-right Kahan, matching the pre-D3
+            // inline code byte-for-byte at d ≤ 4 and at any d that
+            // doesn't qualify for the SIMD path.
+            for b in 0..d {
+                acc.add(lambda[a * d + b] * mu[b]);
+            }
+        }
+        acc.add(xty_finalized[a]);
+        rhs[a] = acc.finalize();
+    }
+    rhs
 }
 
 #[cfg(test)]
@@ -1127,5 +1206,155 @@ mod tests {
         a.combine(&b, &p).unwrap();
         // a.b + b.b - p.b = 1 + 1 - 100 = -98; clamped to ε.
         assert_eq!(a.b, f64::EPSILON);
+    }
+
+    // ── Phase 0.8c v14 Item D3: matvec_plus_xty_kahan ────────────────
+
+    /// Scalar reference implementation: strict left-to-right Kahan,
+    /// identical to the pre-D3 inline body. Used as the bit-identity
+    /// oracle in the tests below.
+    fn matvec_plus_xty_kahan_scalar_reference(
+        lambda: &[f64],
+        mu: &[f64],
+        xty_finalized: &[f64],
+        d: usize,
+    ) -> Vec<f64> {
+        let mut rhs = vec![0.0f64; d];
+        for a in 0..d {
+            let mut acc = KahanAccumulatorF64::new();
+            for b in 0..d {
+                acc.add(lambda[a * d + b] * mu[b]);
+            }
+            acc.add(xty_finalized[a]);
+            rhs[a] = acc.finalize();
+        }
+        rhs
+    }
+
+    #[test]
+    fn matvec_plus_xty_d4_bit_identical_to_scalar() {
+        // The canary-preserving guarantee at d=4: helper output ==
+        // pre-D3 inline output, bit-for-bit, for any input.
+        let lambda = vec![
+            2.0, -1.0, 0.5, 0.25,
+            -1.0, 3.0, 0.1, -0.2,
+            0.5, 0.1, 2.5, 0.3,
+            0.25, -0.2, 0.3, 1.8,
+        ];
+        let mu = vec![0.7, -0.4, 1.1, 0.05];
+        let xty = vec![0.1, -0.2, 0.3, -0.05];
+        let got = matvec_plus_xty_kahan(&lambda, &mu, &xty, 4);
+        let want = matvec_plus_xty_kahan_scalar_reference(&lambda, &mu, &xty, 4);
+        for i in 0..4 {
+            assert_eq!(
+                got[i].to_bits(),
+                want[i].to_bits(),
+                "D3 helper at d=4 must be bit-identical to scalar at index {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn matvec_plus_xty_d1_d2_d3_bit_identical() {
+        // The full scalar regime: d ∈ {1, 2, 3} also stays
+        // bit-identical to the pre-D3 inline body.
+        for d in 1..=3usize {
+            let lambda: Vec<f64> = (0..d * d).map(|i| ((i + 1) as f64) * 0.5).collect();
+            let mu: Vec<f64> = (0..d).map(|i| ((i + 1) as f64) * 0.7).collect();
+            let xty: Vec<f64> = (0..d).map(|i| ((i + 1) as f64) * 0.05).collect();
+            let got = matvec_plus_xty_kahan(&lambda, &mu, &xty, d);
+            let want = matvec_plus_xty_kahan_scalar_reference(&lambda, &mu, &xty, d);
+            for i in 0..d {
+                assert_eq!(got[i].to_bits(), want[i].to_bits(), "d={d}, i={i}");
+            }
+        }
+    }
+
+    #[test]
+    fn matvec_plus_xty_d8_simd_path_within_kahan_tolerance() {
+        // At d=8 the SIMD path activates. Result must still match
+        // the scalar reference within Kahan-stability tolerance
+        // (the two paths thread compensation differently but should
+        // agree on the final value to many ULPs).
+        let lambda: Vec<f64> = (0..64).map(|i| ((i as f64) * 0.13).sin()).collect();
+        let mu: Vec<f64> = (0..8).map(|i| ((i as f64) * 0.31).cos()).collect();
+        let xty: Vec<f64> = (0..8).map(|i| ((i as f64) * 0.07).sin()).collect();
+        let got = matvec_plus_xty_kahan(&lambda, &mu, &xty, 8);
+        let want = matvec_plus_xty_kahan_scalar_reference(&lambda, &mu, &xty, 8);
+        for i in 0..8 {
+            let abs_err = (got[i] - want[i]).abs();
+            assert!(
+                abs_err < 1e-14,
+                "d=8 SIMD path diverged from scalar at i={i}: got={}, want={}, |diff|={abs_err:.3e}",
+                got[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    fn matvec_plus_xty_d5_d6_d7_take_scalar_fallback() {
+        // The SIMD gate is `d >= 8 && d % 4 == 0`. d ∈ {5, 6, 7}
+        // fall through to scalar, which must be bit-identical to
+        // the reference.
+        for d in 5..=7usize {
+            let lambda: Vec<f64> = (0..d * d).map(|i| ((i as f64) * 0.11).sin()).collect();
+            let mu: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.23).cos()).collect();
+            let xty: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.17).sin()).collect();
+            let got = matvec_plus_xty_kahan(&lambda, &mu, &xty, d);
+            let want = matvec_plus_xty_kahan_scalar_reference(&lambda, &mu, &xty, d);
+            for i in 0..d {
+                assert_eq!(
+                    got[i].to_bits(),
+                    want[i].to_bits(),
+                    "d={d}, i={i}: scalar fallback should be bit-identical"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn matvec_plus_xty_d10_d14_take_scalar_fallback() {
+        // d = 10 and 14: d ≥ 8 but d % 4 ≠ 0, so scalar fallback
+        // fires. Bit-identical to reference.
+        for &d in &[10usize, 14] {
+            let lambda: Vec<f64> = (0..d * d).map(|i| ((i as f64) * 0.13).cos()).collect();
+            let mu: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.29).sin()).collect();
+            let xty: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.11).cos()).collect();
+            let got = matvec_plus_xty_kahan(&lambda, &mu, &xty, d);
+            let want = matvec_plus_xty_kahan_scalar_reference(&lambda, &mu, &xty, d);
+            for i in 0..d {
+                assert_eq!(
+                    got[i].to_bits(),
+                    want[i].to_bits(),
+                    "d={d}, i={i}: d%4≠0 must take scalar fallback"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn matvec_plus_xty_d0_returns_empty() {
+        // Degenerate but well-defined: d=0 → empty vec.
+        let lambda: Vec<f64> = vec![];
+        let mu: Vec<f64> = vec![];
+        let xty: Vec<f64> = vec![];
+        let got = matvec_plus_xty_kahan(&lambda, &mu, &xty, 0);
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn matvec_plus_xty_d16_simd_deterministic_across_runs() {
+        // Same input twice → identical bytes. Pins the
+        // SIMD-path-is-deterministic contract at the largest d
+        // most likely to be exercised by PINN workloads.
+        let lambda: Vec<f64> = (0..256).map(|i| ((i as f64) * 0.019).sin()).collect();
+        let mu: Vec<f64> = (0..16).map(|i| ((i as f64) * 0.041).cos()).collect();
+        let xty: Vec<f64> = (0..16).map(|i| ((i as f64) * 0.013).sin()).collect();
+        let a = matvec_plus_xty_kahan(&lambda, &mu, &xty, 16);
+        let b = matvec_plus_xty_kahan(&lambda, &mu, &xty, 16);
+        for i in 0..16 {
+            assert_eq!(a[i].to_bits(), b[i].to_bits(), "i={i}");
+        }
     }
 }
