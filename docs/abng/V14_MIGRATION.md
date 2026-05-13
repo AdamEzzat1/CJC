@@ -15,6 +15,8 @@ the `claude/abng-v14-wire-format` branch:
 | A4 | [`d2ce894`](#) | Sparse `Node48`/`Node256` snapshot encoding (`count u32 + (byte, child_id)×count` replaces dense `index[256] + slots[]`) | none — Path B (encoding-only) |
 | A1 | [`d61a366`](#) | Packed lower-triangular BLR precision (`d(d+1)/2` entries on disk vs `d×d`) | none — Path B (encoding-only; `canonical_bytes` unchanged) |
 | A2 | [`457c3c1`](#) + [`eb18f1a`](#) | Fused `AuditKind::TrainStep` (tag `0x1E`) replaces the pre-A2 `BlrUpdated + BeliefUpdate` pair when `Graph::train_step` is called | 6 canaries re-locked (Path A — audit-event content changed) |
+| A3 | [`2a5801d`](#) | Merkle-indexed audit chain. Snapshot trailer (tag `0x01` + 32-byte root) appended after the audit-log section; `Graph::merkle_root()` + `Graph::merkle_tree()` API for inclusion proofs | none — Merkle root is a witness column, never feeds chain witnesses |
+| C2 | [`43bf29e`](#) | Parallel `Graph::verify_chain_par(n_threads)` via `std::thread::scope`; threshold-gated at 10,000 events | none — read-only verification, no state mutation |
 
 ## Wire-format changes summary
 
@@ -114,6 +116,71 @@ A v13 archive containing `0x1E` is rejected as
   loop in `serialize.rs:1881..1907` was extended to recognize
   `TrainStep { state_hash }` as an equivalent witness to
   `BlrUpdated { state_hash }`.
+
+### A3 — Merkle-indexed audit chain (trailer tag `0x01`)
+
+After the audit-log section, v14 archives carry a 33-byte
+trailer:
+
+```
+[0]     0x01          // MERKLE_TRAILER_TAG_V1
+[1..33] root          // [u8; 32] — sha256-derived Merkle root
+                      //           over audit.new_hashes()
+```
+
+The root is built bottom-up over the audit chain's `new_hash`
+column (which Phase 0.8 Item B4's columnar `AuditLog` exposes as
+a zero-copy slice). The standard "duplicate-the-last" padding
+rule applies at odd-length layers. All combiners use
+`sha256(left ‖ right)` — byte-identical to the chain's own
+hashing primitive.
+
+**Use case:** a third party who only has `(merkle_root, k)` can
+verify an inclusion proof for the first `k` events in `O(log N)`
+hashes without downloading the full audit log. The proof is
+generated via `MerkleTree::proof(i)` and verified via the
+static `MerkleTree::verify_proof(...)`.
+
+**Replay cross-check.** v14 readers always consume the trailer
+and verify the stored root against the root recomputed from the
+decoded events' `new_hashes`. A mismatch surfaces
+`DecodeError::MerkleRootMismatch`. Truncation surfaces
+`UnexpectedEof`; an unrecognized tag surfaces
+`UnknownTrailerTag(t)`. v13 archives have no trailer — they
+reach EOF after the audit-log section.
+
+**API additions:**
+* `Graph::merkle_root() -> [u8; 32]`
+* `Graph::merkle_tree() -> MerkleTree`
+* `MerkleTree::build(&[[u8; 32]]) -> Self`
+* `MerkleTree::root`, `n_leaves`, `depth`, `proof(i)`,
+  `verify_proof(leaf, i, n_leaves, proof, expected_root)`
+
+Canary impact: zero. The Merkle root is computed FROM the
+chain's `new_hash` column but never feeds INTO any event's
+`payload_bytes`, so every chain witness stays at its pre-A3 value.
+
+### C2 — Parallel `verify_chain` (API addition, not wire-format)
+
+`AdaptiveBeliefGraph::verify_chain_par(n_threads)` is a drop-in
+counterpart to `verify_chain` that splits the audit log into
+`n_threads` chunks (rounded up) and verifies each in parallel
+via `std::thread::scope`. No new deps; matches Phase 0.8 Item
+C1's pattern.
+
+Per-chunk: verify per-event integrity + intra-chunk linkage.
+Post-thread-join: verify cross-chunk linkage at boundaries +
+genesis anchor + final chain head.
+
+**Threshold-gated at 10,000 events** to avoid the
+sub-microsecond parallel-overhead regression that the Phase 0.8
+`route_to_leaf_batch_par` ran into at small N. Below the
+threshold, transparently falls through to the sequential
+`verify_chain`. `n_threads <= 1` also bypasses the parallel
+path.
+
+C2 is **not a wire-format change** — it's a read-only API
+addition. Listed here for completeness; canary impact is zero.
 
 ## Forward-compatibility
 
@@ -222,14 +289,26 @@ they still fire when callers use the unfused `observe(...)` or
 
 ## Going forward
 
-* **A3 (Merkle-indexed audit chain)** and **C2 (parallel
-  `verify_chain`)** are still planned but not in v14 yet. When
-  they land they'll append a trailer block to the v14 archive
-  layout; the audit-event encoding above remains stable.
+* **All five v14 Phase 0.8c items shipped:** A4, A1, A2, A3
+  (Merkle index), plus the read-only C2 (parallel verify) API
+  addition. The wire format is now stable; no further v14 bumps
+  are planned in this branch.
+* **D2b (SIMD `BlrState::update`)** and **D3 (fused matmul kernel
+  for `Λ_old · μ_old`)** remain as Phase 0.8 follow-ups.
+  Both would reorder `BlrState::canonical_bytes` and require a
+  separate canary re-lock cycle. They're independent of v14 wire
+  format — a future maintainer can ship them on a fresh branch
+  without touching this migration doc.
 * **No new `Value` enum variants** were introduced. Both
   executors (`cjc-eval` + `cjc-mir-exec`) route through the same
   `g.train_step(...)` Rust API via the `abng_train_step` builtin.
+  No CJC-Lang-surface builtin was added for `merkle_root` /
+  `merkle_tree` / `verify_chain_par`; those are Rust-only APIs
+  for now. A future commit can add `abng_merkle_root` etc. if
+  cjcl source needs them.
 * **Determinism contract is preserved.** Same inputs +
   same seed = bit-identical Welford stats + BLR state. The chain
   head reflects the v14 audit shape but the underlying numerical
-  state is independent of wire format.
+  state is independent of wire format. The Merkle root is a pure
+  function of the chain's `new_hashes`, so it's deterministic by
+  construction.
