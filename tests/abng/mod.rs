@@ -20,6 +20,10 @@
 //! * [`parity_p2`] — AST eval ↔ MIR exec parity for the Phase 0.2 builtins.
 
 mod batch_observe_tests;
+mod demo_a2_fused_training;
+mod demo_a3_merkle_proof;
+mod demo_b3_zstd_snapshot;
+mod demo_c2_parallel_verify;
 mod blr_feature_version_tests;
 mod blr_numerical_rescue_tests;
 mod blr_predict_fallback_tests;
