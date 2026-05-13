@@ -1625,7 +1625,7 @@ pub fn replay_with_outcome(
         let stored_previous = cur.hash32()?;
         let stored_new = cur.hash32()?;
 
-        let event = decode_payload(payload, stored_previous, stored_new)?;
+        let event = decode_payload(payload, wire_version, stored_previous, stored_new)?;
 
         // Phase 0.4 Track C-2.3.3 — semantic invariants run BEFORE the
         // chain hash check so an adversarial blob whose hashes are
@@ -1874,7 +1874,10 @@ pub fn replay_with_outcome(
             }
         }
         // Phase 0.3b: install stored BLR state (if any) and verify
-        // against most-recent BlrInitialized/BlrUpdated witness.
+        // against most-recent BlrInitialized/BlrUpdated/TrainStep
+        // witness. (Phase 0.8c v14 Item A2 — TrainStep is the fused
+        // training-step event; its `state_hash` is the post-update
+        // BLR state hash, same role as BlrUpdated's.)
         graph.nodes[i].blr = expected.blr.clone();
         if let Some(blr) = &graph.nodes[i].blr {
             let stored_shash = blr.state_hash();
@@ -1889,6 +1892,9 @@ pub fn replay_with_outcome(
                                 Some((e.seq, *state_hash))
                             }
                             AuditKind::BlrUpdated { state_hash } => {
+                                Some((e.seq, *state_hash))
+                            }
+                            AuditKind::TrainStep { state_hash, .. } => {
                                 Some((e.seq, *state_hash))
                             }
                             _ => None,
@@ -2663,6 +2669,28 @@ fn apply_event(
             }
             graph.nodes[*node_id as usize].provenance_stamp_hash = *hash;
         }
+        AuditKind::TrainStep { value, .. } => {
+            // Phase 0.8c v14 Item A2 — fused per-row training step.
+            //
+            // Mirrors the pre-A2 apply_event sequence for
+            // `BlrUpdated + BeliefUpdate`:
+            //
+            // * BLR side (witness-only). The post-update BLR state
+            //   lives in the per-node section of the snapshot; the
+            //   end-of-replay verifier checks `state_hash` against
+            //   the reconstructed BLR state. Same trade-off as
+            //   `BlrUpdated` — keeps the audit log compact under
+            //   heavy training.
+            //
+            // * Welford side (mutating). Reapply the observation
+            //   exactly as `AuditKind::BeliefUpdate { value }`
+            //   would have, so the post-replay `NodeStats` is
+            //   bit-identical to the pre-A2 sequence.
+            if event.node_id as usize >= graph.nodes.len() {
+                return Err(DecodeError::ChainMismatch { at_seq: event.seq });
+            }
+            graph.nodes[event.node_id as usize].observe(*value);
+        }
         AuditKind::BeliefUpdateBatch {
             count,
             batch_hash,
@@ -2746,6 +2774,7 @@ fn fresh_replay_child(
 
 fn decode_payload(
     payload: &[u8],
+    wire: WireVersion,
     previous_hash: [u8; 32],
     new_hash: [u8; 32],
 ) -> Result<AuditEvent, DecodeError> {
@@ -2923,6 +2952,19 @@ fn decode_payload(
                 count,
                 batch_hash,
                 values,
+            }
+        }
+        0x1E if wire == WireVersion::V14 => {
+            // Phase 0.8c v14 Item A2 — fused per-row training step.
+            // 40-byte body: value f64 BE (.to_bits()) + state_hash [u8; 32].
+            // Tag is gated by wire == V14: a v13 archive containing
+            // 0x1E is malformed (no v13 writer ever emitted this tag),
+            // so reject it via the UnknownKindTag fall-through.
+            let value_bits = cur.u64_be()?;
+            let state_hash = cur.hash32()?;
+            AuditKind::TrainStep {
+                value: f64::from_bits(value_bits),
+                state_hash,
             }
         }
         other => return Err(DecodeError::UnknownKindTag(other)),

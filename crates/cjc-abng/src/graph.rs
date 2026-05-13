@@ -1258,13 +1258,22 @@ impl AdaptiveBeliefGraph {
         Ok(result)
     }
 
-    /// Apply a Normal-Inverse-Gamma update to a node's BLR posterior.
+    /// Phase 0.8c v14 Item A2 — input-validation block extracted from
+    /// `blr_update` so `train_step` can run the identical checks before
+    /// taking a mutable borrow on the BLR state. Returns `Ok(())` only
+    /// when every check passes:
     ///
-    /// `features` is row-major `[n, d]`; `y` is `[n]`. Errors if the
-    /// node has no BLR state, the dimensions don't match, or Cholesky
-    /// of the updated precision matrix fails (corrupt state).
-    pub fn blr_update(
-        &mut self,
+    /// * `node_id` is in range
+    /// * the node has a `BlrState` (prior was configured)
+    /// * `feature_version_hash` matches the current MLP params (the
+    ///   stale-feature-space guard, Phase 0.4 Track C-2.3.5)
+    /// * `features.len()` is the expected row-major shape for `[n, d]`
+    ///   given `n = y.len()` and `d = blr.d`
+    ///
+    /// Borrows `self` immutably so the caller can take a mutable
+    /// borrow on `self.nodes[node_id].blr` immediately after.
+    fn validate_blr_inputs(
+        &self,
         node_id: NodeId,
         features: &[f64],
         y: &[f64],
@@ -1273,15 +1282,10 @@ impl AdaptiveBeliefGraph {
         if node_id >= n_nodes {
             return Err(GraphError::NodeOutOfRange { node_id, n_nodes });
         }
-        // Phase 0.4 Track C-2.3.5 — feature-version stale check. Snapshot
-        // the current per-node MLP params hash *before* taking a mutable
-        // borrow on the BLR state; if the BLR was trained against a
-        // different feature space, refuse the update so the posterior
-        // never trains on inconsistent features.
         let current_hash = params_hash(&self.nodes[node_id as usize].params);
         let blr = self.nodes[node_id as usize]
             .blr
-            .as_mut()
+            .as_ref()
             .ok_or(BlrError::NoBlrPrior)?;
         if blr.feature_version_hash != current_hash {
             return Err(BlrError::FeatureVersionStale {
@@ -1300,6 +1304,26 @@ impl AdaptiveBeliefGraph {
             }
             .into());
         }
+        Ok(())
+    }
+
+    /// Apply a Normal-Inverse-Gamma update to a node's BLR posterior.
+    ///
+    /// `features` is row-major `[n, d]`; `y` is `[n]`. Errors if the
+    /// node has no BLR state, the dimensions don't match, or Cholesky
+    /// of the updated precision matrix fails (corrupt state).
+    pub fn blr_update(
+        &mut self,
+        node_id: NodeId,
+        features: &[f64],
+        y: &[f64],
+    ) -> Result<(), GraphError> {
+        // Phase 0.4 Track C-2.3.5 — params staleness + dim checks.
+        self.validate_blr_inputs(node_id, features, y)?;
+        let blr = self.nodes[node_id as usize]
+            .blr
+            .as_mut()
+            .expect("validate_blr_inputs guarantees blr is Some");
         let rescue = blr.update(features, y)?;
         let shash = self.nodes[node_id as usize]
             .blr
@@ -1324,40 +1348,45 @@ impl AdaptiveBeliefGraph {
         Ok(())
     }
 
-    /// Phase 0.7 (Item 4) — fused per-row training step.
+    /// Phase 0.7 (Item 4) + Phase 0.8c v14 Item A2 — fused per-row
+    /// training step.
     ///
-    /// Equivalent to:
+    /// Functionally equivalent to:
     /// ```ignore
     ///     let leaf = g.descend(&g.encode_prefix(x)?).leaf_id;
     ///     g.blr_update(leaf, phi, &[y_val])?;
     ///     g.observe(leaf, y_val)?;
     ///     Ok(leaf)
     /// ```
-    /// but performs the route, blr_update, and observe in a single
-    /// Rust call. The savings come from collapsing three CJC-Lang
-    /// builtin dispatches into one — at the language interpreter
-    /// boundary the per-call overhead is on the order of ~5 µs each,
-    /// so a per-row training loop saves ~10 µs per row by going
-    /// through `train_step` instead.
+    /// at the level of post-call `NodeStats` and `BlrState` bytes,
+    /// but emits a **single** fused `AuditKind::TrainStep` chain event
+    /// (tag `0x1E`) instead of the 2-event `BlrUpdated + BeliefUpdate`
+    /// sequence. The numerical-rescue branch retains its own
+    /// `BlrNumericalRescue` (tag `0x18`) follow-up event when it
+    /// fires; in the common path one row produces exactly one chain
+    /// step.
     ///
-    /// **Audit-chain compatibility.** This function emits the EXISTING
-    /// audit-event sequence: `BlrUpdated` (from `blr_update`) followed
-    /// by `BeliefUpdate` (from `observe`). No new `AuditKind` is
-    /// introduced — the v13 wire format and the 28 locked SHA-256
-    /// canaries are preserved. The chain_head after this call equals
-    /// the chain_head after running the 3-call sequence on identical
-    /// inputs from identical pre-state. Verified by the
-    /// `train_step_chain_head_matches_three_call_sequence` parity
-    /// test.
+    /// **Audit-chain compatibility (post-A2, v14).** The chain head
+    /// after `train_step` does NOT equal the chain head of the 3-call
+    /// sequence on identical pre-state — by design (the whole point
+    /// of A2 is to collapse the two chain steps into one). What does
+    /// match, bit-for-bit, is the post-call `NodeStats.canonical_bytes()`
+    /// and `BlrState.state_hash()` at the affected leaf. Verified by
+    /// the `train_step_state_bit_equals_three_call_sequence_modulo_chain_head`
+    /// parity test.
+    ///
+    /// Validation ordering: every fallible check (route encoding, BLR
+    /// dim / staleness, value finiteness) runs BEFORE any state
+    /// mutation or audit append. A rejected call leaves chain head,
+    /// stats versions, and audit log identical to pre-call.
     ///
     /// Arguments:
-    /// * `x` — route input, length = `codebook.n_dims`. Used to walk
-    ///   the radix tree to a leaf node.
+    /// * `x` — route input, length = `codebook.n_dims`. Walks the
+    ///   radix tree to a leaf.
     /// * `phi` — BLR feature vector, length = `blr_prior.d`. Treated
-    ///   as a single-row `[1, d]` design matrix for `blr_update`.
+    ///   as a single-row `[1, d]` design matrix.
     /// * `y_val` — observation value. Used both as the BLR target
-    ///   `y[0]` and as the `observe` value (matching the canonical
-    ///   3-call training pattern).
+    ///   `y[0]` and as the Welford observation.
     ///
     /// Returns the leaf node id that received the update.
     pub fn train_step(
@@ -1366,16 +1395,49 @@ impl AdaptiveBeliefGraph {
         phi: &[f64],
         y_val: f64,
     ) -> Result<NodeId, GraphError> {
-        // Step 1: route x → leaf. Same as `abng_route_to_leaf`.
+        // ── All validation BEFORE any mutation or audit append. ──────────
+        // A rejected call must leave chain head, stats version, and audit
+        // log identical to pre-call.
         let prefix = self.encode_prefix(x)?;
         let leaf = self.descend(&prefix).leaf_id;
-        // Step 2: BLR update at leaf, single row. The `[y_val]` array
-        // lives on the stack; no heap allocation for this 1-element
-        // slice.
         let y_arr = [y_val];
-        self.blr_update(leaf, phi, &y_arr)?;
-        // Step 3: observe at leaf.
-        self.observe(leaf, y_val)?;
+        self.validate_blr_inputs(leaf, phi, &y_arr)?;
+        if !y_val.is_finite() {
+            return Err(GraphError::ObserveNonFinite { value: y_val });
+        }
+
+        // ── Mutations + single fused chain event. ────────────────────────
+        // Inline blr_update and observe so the BLR posterior, Welford
+        // stats, and chain advance all bind to ONE `TrainStep` event.
+        let rescue = self.nodes[leaf as usize]
+            .blr
+            .as_mut()
+            .expect("validate_blr_inputs guarantees blr is Some")
+            .update(phi, &y_arr)?;
+        let blr_state_hash = self.nodes[leaf as usize]
+            .blr
+            .as_ref()
+            .expect("blr present after update")
+            .state_hash();
+        self.nodes[leaf as usize].observe(y_val);
+        self.append_event(
+            leaf,
+            AuditKind::TrainStep {
+                value: y_val,
+                state_hash: blr_state_hash,
+            },
+        );
+
+        // ── Rare diagnostic: numerical rescue, mirroring blr_update. ─────
+        if let Some(b_pre_clamp) = rescue {
+            self.append_event(
+                leaf,
+                AuditKind::BlrNumericalRescue {
+                    reason: BLR_RESCUE_B_BELOW_EPSILON,
+                    b_pre_clamp_bits: b_pre_clamp.to_bits(),
+                },
+            );
+        }
         Ok(leaf)
     }
 

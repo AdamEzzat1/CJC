@@ -56,5 +56,6 @@ mod serialize_streaming;
 mod route_entropy_grow_tests;
 mod route_trace_tests;
 mod split_nll_gate_tests;
+mod train_step_v14_tests;
 mod uncertainty_tests;
 mod unit;

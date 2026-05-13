@@ -325,6 +325,43 @@ pub enum AuditKind {
         /// applying each value sequentially.
         values: Vec<f64>,
     },
+    /// Phase 0.8c v14 Item A2 — fused per-row training step. Collapses
+    /// `BlrUpdated + BeliefUpdate` (the audit events that
+    /// `Graph::train_step` previously emitted as a 3-call sequence)
+    /// into ONE chain event. Halves the audit-log size and chain-hash
+    /// compute on training-heavy workloads. Tag `0x1E`.
+    ///
+    /// Determinism contract: after applying `TrainStep { value,
+    /// state_hash }` at a node, the node's `NodeStats::canonical_bytes`
+    /// and `BlrState` are bit-identical to what the pre-A2 3-event
+    /// sequence (`BlrUpdated + BeliefUpdate`) would have produced on
+    /// the same pre-state with the same `(phi, value)` inputs. The
+    /// chain head WILL differ from the pre-A2 sequence (one chain
+    /// step vs two) — that is the entire point of the fusion. Forward
+    /// and replay paths under v14 produce the same chain head as each
+    /// other; the pre-A2 chain head is not recoverable post-fusion.
+    ///
+    /// Payload format: `value f64 (.to_bits().to_be_bytes()) ‖
+    /// state_hash [u8; 32]`. The BLR design row `phi` is NOT in the
+    /// payload (matches the pre-A2 `BlrUpdated` convention of
+    /// witness-only); the post-train-step BLR state lives in the
+    /// per-node section of the snapshot and is verified against
+    /// `state_hash` by the end-of-replay verifier.
+    ///
+    /// Wire-format gating: this tag is only valid under `WireVersion::V14`.
+    /// Decoders reading v13 archives reject `0x1E` as
+    /// `DecodeError::UnknownKindTag(0x1E)`.
+    TrainStep {
+        /// The observation value (the BLR target `y[0]` and the
+        /// Welford observation). Encoded so replay can reapply
+        /// `nodes[node_id].observe(value)` — mirrors `BeliefUpdate.value`.
+        value: f64,
+        /// SHA-256 of the post-update BLR state (= what `BlrUpdated`
+        /// would have carried). End-of-replay verifier matches this
+        /// against the snapshot's reconstructed BLR state for the
+        /// node.
+        state_hash: [u8; 32],
+    },
 }
 
 /// `AuditKind::BlrNumericalRescue::reason` value: post-update `b` would
@@ -375,6 +412,10 @@ impl AuditKind {
             // Phase 0.6 Item 4 — batched BeliefUpdate. Variable-size
             // body (4 + 8*count + 32). Forces wire-format v13.
             AuditKind::BeliefUpdateBatch { .. } => 0x1D,
+            // Phase 0.8c v14 Item A2 — fused per-row training step.
+            // 40-byte body (value u64 BE + state_hash [u8; 32]).
+            // Forces wire-format v14.
+            AuditKind::TrainStep { .. } => 0x1E,
         }
     }
 }
@@ -594,6 +635,12 @@ impl AuditEvent {
                     out.extend_from_slice(&v.to_bits().to_be_bytes());
                 }
                 out.extend_from_slice(batch_hash);
+            }
+            AuditKind::TrainStep { value, state_hash } => {
+                // Phase 0.8c v14 Item A2 — fused per-row training step.
+                // 40-byte body: value f64 BE (.to_bits()) + state_hash [u8; 32].
+                out.extend_from_slice(&value.to_bits().to_be_bytes());
+                out.extend_from_slice(state_hash);
             }
         }
         out.extend_from_slice(&self.stats_version.to_be_bytes());
@@ -1040,6 +1087,10 @@ mod tests {
                 batch_hash: [18u8; 32],
                 values: vec![1.5, -2.5, 3.5],
             },
+            AuditKind::TrainStep {
+                value: 1.5,
+                state_hash: [19u8; 32],
+            },
         ];
         let mut buf = Vec::new();
         for (i, kind) in kinds.into_iter().enumerate() {
@@ -1433,6 +1484,80 @@ mod tests {
         );
         e.kind = AuditKind::LeafParamsUpdatedBatch {
             params_hash: [0xBB; 32],
+        };
+        assert_ne!(e.recompute_new_hash(), e.new_hash);
+    }
+
+    // ── Phase 0.8c v14 Item A2: TrainStep ─────────────────────────────
+
+    #[test]
+    fn train_step_tag_is_0x1e() {
+        let k = AuditKind::TrainStep {
+            value: 0.0,
+            state_hash: [0u8; 32],
+        };
+        assert_eq!(k.tag(), 0x1E);
+    }
+
+    #[test]
+    fn train_step_payload_size() {
+        // 21 (header) + 40 (value u64 + state_hash [u8; 32])
+        //   + 8 (stats_version) + 32 (stats_hash) = 101.
+        let kind = AuditKind::TrainStep {
+            value: 1.5,
+            state_hash: [9u8; 32],
+        };
+        let e = dummy_event(0, kind, genesis_hash());
+        assert_eq!(e.payload_bytes().len(), 101);
+    }
+
+    #[test]
+    fn train_step_payload_encodes_value_then_state_hash() {
+        // Pin the wire ordering of the body fields: value bits at
+        // [21..29], state_hash at [29..61]. This is what every replay
+        // path depends on.
+        let value = 1.5f64;
+        let state_hash = [0xABu8; 32];
+        let e = dummy_event(
+            0,
+            AuditKind::TrainStep { value, state_hash },
+            genesis_hash(),
+        );
+        let bytes = e.payload_bytes();
+        assert_eq!(&bytes[21..29], &value.to_bits().to_be_bytes());
+        assert_eq!(&bytes[29..61], &state_hash);
+    }
+
+    #[test]
+    fn train_step_tamper_detection_value() {
+        let mut e = dummy_event(
+            7,
+            AuditKind::TrainStep {
+                value: 1.5,
+                state_hash: [1u8; 32],
+            },
+            genesis_hash(),
+        );
+        e.kind = AuditKind::TrainStep {
+            value: 2.5,
+            state_hash: [1u8; 32],
+        };
+        assert_ne!(e.recompute_new_hash(), e.new_hash);
+    }
+
+    #[test]
+    fn train_step_tamper_detection_state_hash() {
+        let mut e = dummy_event(
+            7,
+            AuditKind::TrainStep {
+                value: 1.5,
+                state_hash: [1u8; 32],
+            },
+            genesis_hash(),
+        );
+        e.kind = AuditKind::TrainStep {
+            value: 1.5,
+            state_hash: [2u8; 32],
         };
         assert_ne!(e.recompute_new_hash(), e.new_hash);
     }
