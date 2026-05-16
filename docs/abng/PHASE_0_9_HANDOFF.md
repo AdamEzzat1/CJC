@@ -301,6 +301,165 @@ Each follows the canonical wiring pattern (`cjc-runtime/src/builtins.rs` + `cjc-
 
 ---
 
+## TRACK V — Experimental data structures to replace parts of training
+
+Track V is a **research / experiment track**, not an implementation directive. The point is to surface candidates that could replace components of the training pipeline with new data structures, each candidate gated on the Phase 0.9 constraints (determinism, auditability, no canonical_bytes drift, both executors agree, no canary shift).
+
+Each candidate should pass a feasibility study before any code is written:
+
+1. Specify the existing component being replaced (which Rust type, which use site).
+2. Specify the new data structure (rough shape + access pattern + memory footprint).
+3. Identify the determinism gates that must hold.
+4. Bench-quantify the upside on the Track P baseline.
+5. Identify the canary-shift risk (Path A / Path B / zero).
+
+### V1 — BLR posterior representation
+
+| Candidate | What replaces | Why it might help | Risk |
+|---|---|---|---|
+| **Packed lower-triangular L (in-memory)** | The full d×d `precision: Tensor` in `BlrState` | Halves BLR memory (d=16: 2048 B → 1024 B); cache-friendlier | Path B if `canonical_bytes` stays full-matrix; trivial |
+| **Banded / sparse precision matrix** | The same | Memory win when features are approximately independent; sparse Cholesky cheaper | Determinism: zero-tolerance check on the "approximately independent" predicate; risk: features that should-be sparse but aren't trigger silent degradation |
+| **Diagonal-plus-low-rank parametrization** | `precision = D + UU^T` | O(d·k + k³) Cholesky vs O(d³); win at d ≥ 16 with low effective rank | Algorithm change → BLR posterior bits differ → full canary re-lock |
+| **Cached Cholesky factor (D1 from another branch)** | Recomputing L on every `predict()` | 2–10× on `predict()` at d ≥ 8 | Already shipped on `claude/elastic-kirch-db47b2`; merge work (Track S) |
+| **Rank-1 Cholesky updates (Givens rotations)** | Full re-factorization on `update()` | O(d²) per row vs O(d³/3) | Algorithm change → canary risk; D1 partially addresses this |
+
+### V2 — Welford / NodeStats representation
+
+| Candidate | What replaces | Why it might help | Risk |
+|---|---|---|---|
+| **Columnar `NodeStats` storage** | `Vec<NodeStats>` (one struct per node) → parallel `Vec<u64>` + `Vec<f64>` + `Vec<f64>` | Cache locality for batch operations; SIMD-friendly mean/M2 updates | Path B if `canonical_bytes` per-node stays unchanged; non-trivial refactor |
+| **Compressed Welford for low-precision tracking** | `(n: u64, mean: f64, m2: f64)` → `(n: u32, mean: f32, m2: f32)` with promotion on overflow | Halves Welford memory at the leaf | Determinism: hard. Bit-exact promotion logic must be platform-independent. **Probably not worth it.** |
+| **Approximate quantile sketch alongside Welford** | (would extend `NodeStats`) | Per-leaf median + quantile bounds for richer drift/calibration | Determinism: KLL or t-digest are deterministic if seed-fixed and merge-order is fixed |
+
+### V3 — Audit chain index variants
+
+| Candidate | What replaces | Why it might help | Risk |
+|---|---|---|---|
+| **D-HARHT-backed `seq → AuditEvent` index** | Currently O(N) walk for `audit.iter()` filter operations | O(1) random access to specific events | Zero canary (in-memory only); same shape as Q1 |
+| **Skip-list audit log** | Linear `Vec<AuditEvent>` | O(log N) random access without building a Merkle tree | Skip-list with deterministic level assignment (seed-fixed promotion test); no canary risk |
+| **Bloom filter for "has this leaf been observed recently?"** | Linear scan of `audit.iter().filter(node_id)` | Quick negative-answer for drift checks | Bloom filter parameters must be seed-fixed; no canary risk |
+
+### V4 — Trie / routing structure alternatives (beyond D-HARHT)
+
+| Candidate | What replaces | Why it might help | Risk |
+|---|---|---|---|
+| **HAT-trie (hash-array trie)** | `AdaptiveChildren` enum | Hybrid hash-bucket + radix; lower memory at sparse prefix populations | Path A if implemented at the `canonical_bytes` level; Path B if at the in-memory level only |
+| **DAWG / DAFSA (compressed deterministic automaton)** | Same | Merges suffix-shared sub-trees; massive memory win for prefix-heavy workloads | Insertion is hard; works best for read-mostly workloads. Probably not a fit for ABNG's online training. |
+| **Patricia-compressed radix** | Same | Collapses single-child paths (which Phase 0.8 doesn't yet do) | ART convention; standard implementation; possible canary impact |
+
+### V5 — Per-leaf state co-location
+
+| Candidate | What replaces | Why it might help | Risk |
+|---|---|---|---|
+| **AoS → SoA for per-leaf BLR fields** | `Vec<Option<BlrState>>` → parallel `Vec<f64>` columns for mean, precision, a, b | Cache-friendly when iterating "all leaves' BLR posterior" | Path B if disk encoding stays per-leaf; minor refactor |
+| **Bit-packed leaf-presence indicator** | `Vec<Option<BlrState>>` | Half a byte per leaf for "has BLR" check | Trivial |
+| **Versioned leaf state via copy-on-write** | Direct mutation in place | Snapshot a leaf's BLR cheaply for "compare against historical" queries | New API; no canary risk |
+
+### V6 — Routing key encoding alternatives
+
+| Candidate | What replaces | Why it might help | Risk |
+|---|---|---|---|
+| **Streaming quantile sketch for codebook** | `set_codebook(boundaries)` with pre-computed quantiles | Online refinement of bin boundaries as more data arrives | Determinism: t-digest is deterministic with seed; codebook re-fitting is structural |
+| **Lookup-table accelerated `encode_prefix`** | Per-feature binary search | O(1) bin lookup at the cost of a 256-entry table per feature | Tiny memory; no determinism risk |
+| **MinHash-style prefix sketch** | Full prefix bytes | Compress long prefixes into a fixed-length signature for fast routing | Probabilistic; not a fit for ABNG's deterministic contract |
+
+### V-level success criteria
+
+Each Track V candidate must produce, before any merge:
+
+1. **A design note** in `docs/abng/PHASE_0_9_V_<candidate>.md` covering the five feasibility questions above.
+2. **A microbench** showing the candidate's measured upside on a representative ABNG operation.
+3. **A property test** asserting the candidate produces byte-identical output to the existing component (when both are bit-compatible) or a tolerance-bounded result (when arithmetic differs).
+4. **A canary-impact prediction** with at least one demo trial-run to validate the prediction.
+
+Without these four artifacts, no V-track candidate ships.
+
+---
+
+## TRACK W — Numerical kernel research (advanced Kahan, deterministic BLAS, alternatives)
+
+Track W is a **research-only track** for now: identify candidate numerical kernel improvements, document their applicability to ABNG, and surface implementation costs. Implementation itself is gated on the Track P baseline showing the relevant inner loop as a bottleneck.
+
+### W1 — Advanced compensated-summation variants
+
+| Algorithm | Error growth | Cost vs Kahan | Determinism? | Notes |
+|---|---|---|---|---|
+| **Plain summation** | O(n·ε) | 1× | Yes (with fixed order) | Current fallback |
+| **Kahan summation** | O(ε) | 4× | Yes | Currently used everywhere in cjc-abng |
+| **Neumaier (Kahan-Babuška)** | O(ε) | 5× | Yes | Handles the case `|new| > |sum|` correctly, which Kahan loses; **likely worth adopting** for the BLR rhs `+ xty[a]` step where xty can dwarf running sum |
+| **Klein (second-order Kahan)** | O(log² n · ε²) | 8× | Yes | Tracks compensation-of-compensation. Probably overkill for d ≤ 32; worth investigating at d ≥ 64. |
+| **Pairwise summation** | O(log n · ε) | 1× plus log n overhead | Yes (with fixed tree structure) | Requires N inputs up-front; not streaming. Could replace `xty[a].finalize()` if all rows are pre-batched. |
+| **Binned summation** (current `cjc-repro::BinnedAccumulatorF64`) | O(ε) regardless of magnitude spread | 6–8× | Yes | Already in use for binned reductions; could be promoted into BLR. |
+
+**Recommendation:** investigate Neumaier as a Phase 0.9 W1 micro-experiment. The BLR rhs computation in `matvec_plus_xty_kahan` adds the matvec sum to `xty[a]`, which can be larger than the running matvec sum at small d — exactly Kahan's known failure mode. Neumaier is one extra `if .abs() > sum.abs()` branch per add.
+
+### W2 — Deterministic BLAS / GEMM kernels
+
+| Approach | Determinism | Effort | Notes |
+|---|---|---|---|
+| **ReproBLAS** (Demmel et al.) | Yes — uses binned summation | High (external dep, FFI) | Likely overkill; would require new dependency. Research mature. |
+| **Hand-rolled deterministic GEMM at d ≤ 16** | Yes — explicit accumulation order | Low (~200 LOC) | Best ROI for ABNG; current `matmul` in `cjc-runtime` is the natural integration point |
+| **CADNA** (stochastic-arithmetic audit) | Audit tool, not BLAS | Medium | Useful for *verifying* numerical reproducibility, not for computing it; tangential to ABNG |
+| **OpenBLAS / MKL with `OMP_NUM_THREADS=1`** | Deterministic single-threaded; reordering-sensitive multi-threaded | None (already excluded; cjc-runtime is pure Rust) | Not applicable: CJC-Lang is zero-external-deps |
+
+**Recommendation:** for ABNG's d ≤ 16 dominant case, hand-rolled deterministic GEMM with explicit `(i, j, k)` order pinning is the right play. Probably aligns with extending the D3 fused matvec to a full mat-mat product when D2b's SIMD path generalizes.
+
+### W3 — SIMD-without-nightly improvements
+
+Current strategy uses `[f64; N]` plain arrays for auto-vectorization. Honest assessment: it works (D2a was measured at 3–4× on isolated primitives), but is compiler-dependent.
+
+| Approach | Determinism | Notes |
+|---|---|---|
+| **Plain `[f64; N]` auto-vec** | Yes | Current strategy. Win depends on compiler. |
+| **`std::arch::*` intrinsics with feature detection** | Yes (if feature detection is build-time) | D-HARHT uses this for `find_key16_sse2`. Tractable for hotspots. |
+| **`std::simd` (portable_simd)** | Yes | Still nightly as of 2026-05. **Skip.** |
+| **`packed_simd` crate** | Yes | Unmaintained. **Skip.** |
+| **`wide` crate** | Yes (no FMA when configured) | Stable, zero unsafe. Possible drop-in for portable SIMD; adds a dependency. |
+
+**Recommendation:** stay with the current `[f64; N]` auto-vec strategy unless a specific hotspot wants explicit intrinsics (then follow D-HARHT's SSE2 pattern). Defer `std::simd` until it stabilizes.
+
+### W4 — Compilation flags
+
+| Flag | Speed impact | Notes |
+|---|---:|---|
+| `[profile.release] lto = true` | 5–15% | Currently set? Check `Cargo.toml`. |
+| `[profile.release] codegen-units = 1` | 5–10% (paired with LTO) | Single-unit codegen enables more inlining |
+| `[profile.release] opt-level = 3` | (default already) | No change |
+| `RUSTFLAGS="-C target-cpu=native"` | 5–25% on hot loops | NOT deterministic across machines unless pinned; only use in benches, not release builds |
+| **PGO (profile-guided optimization)** | 10–30% | Two-pass build; requires a representative profiling workload. Track P baseline is the natural PGO profile generator. |
+| **BOLT (post-link binary optimization)** | 5–15% | Newer; depends on Linux. Probably skip until cross-platform CI is ready. |
+
+**Recommendation:** verify LTO is on; add `codegen-units = 1` if not; investigate PGO using Track P as the profile workload (high leverage since Track P is the canonical end-to-end run).
+
+### W5 — Allocator alternatives
+
+| Allocator | Speed | Cross-platform | Notes |
+|---|---|---|---|
+| **System** (default) | Baseline | Yes | Current |
+| **MiMalloc** | 5–15% | Yes | Microsoft-maintained; small footprint; deterministic allocation order with seeded RNG |
+| **jemalloc** | 5–10% | Yes (Unix-leaning) | Mature; Rust-friendly via `tikv-jemallocator` crate |
+| **Per-arena allocators** (already C3 on another branch) | 5–10% in concurrent training | Yes | In-tree; no external dep; Phase 0.9 Track S1 |
+
+**Recommendation:** C3 (Track S1) is the lowest-risk win; defer process-wide allocator swap until the C3 lessons are absorbed.
+
+### W6 — Algorithmic / structural ideas (deferred)
+
+- **Mixed-precision training** (f32 forward + f64 reductions): breaks bit-determinism unless carefully gated. **Defer past Phase 0.9.**
+- **Quantization-aware leaf MLP weights**: int8 weights with scale factor. Cross-platform determinism is fragile. **Defer.**
+- **Coarse-grained checkpointing**: persist every K rows; replay reconstructs the gap. B2 streaming partially addresses this; can extend further. **Track R5 candidate.**
+- **Lazy Cholesky** (only factor when `predict()` is called): defer the O(d³) work until needed. **Should be folded into D1's caching, not a separate item.**
+
+### W-level success criteria
+
+For each Track W candidate to advance from "research" to "implementation":
+
+1. **A bench harness** showing the candidate's measured speedup or memory reduction on a *Track P baseline scenario*, not a synthetic benchmark.
+2. **A determinism proof**: either bit-equality to the prior path (preferred) or a tolerance bound + audit.
+3. **A canary impact prediction** with confirming demo trial.
+4. **Plus the V-level criteria** if the candidate also involves a data-structure change.
+
+---
+
 ## TRACK U — Visualizations for the baseline + post-Q1 numbers
 
 After Track P and Q1 land, generate two additional SVGs to extend the demo set:
@@ -317,7 +476,7 @@ Determinism gate: re-render twice, assert byte-equal. Same protocol as the Phase
 ```
 Phase 0.9 recommended order:
 
-  1. Track P (baseline)
+  1. Track P (baseline) ← BLOCKING. All later tracks reference this.
      └── tests/abng/baseline_wisconsin_bc.rs + bench_results/phase_0_9_baseline/
      └── COMMIT 1: baseline harness + 5-run results
 
@@ -329,23 +488,39 @@ Phase 0.9 recommended order:
      └── COMMIT 4: Cargo.toml release profile bump
      └── re-run baseline; numbers update
 
-  4. Track Q1 (route memoization)
-     └── COMMIT 5: cjc-abng::route_cache module
-     └── COMMIT 6: integration tests + property tests
+  4. Track W1 (Neumaier summation experiment) — RESEARCH SPIKE
+     └── microbench against Kahan in the BLR rhs `+ xty` add
+     └── if winning: COMMIT 5 (Track V/W bridge: replaces Kahan in matvec_plus_xty_kahan)
+     └── if not: design note only
+
+  5. Track Q1 (route memoization) — first D-HARHT integration
+     └── COMMIT 6: cjc-abng::route_cache module (Option Q1 from Track Q)
+     └── COMMIT 7: integration tests + property tests
      └── re-run baseline; SVG diff
 
-  5. (Optional, gated on Q1 winning) Track Q2 (Node32 + SSE2 Node16)
-     └── COMMIT 7-9: layout change + canary re-lock
+  6. (Optional, gated on Q1 winning) Track Q2 (Node32 + SSE2 Node16)
+     └── COMMIT 8-10: layout change + canary re-lock
      └── re-run baseline; SVG diff
 
-  6. Track U (Phase 0.9 demo SVGs)
-     └── COMMIT 10: post-baseline visualizations
+  7. (Optional) Track V experiments — RESEARCH SPIKES
+     └── V1 packed in-memory Cholesky, V2 columnar NodeStats, V3 audit index, etc.
+     └── Each spike: design note + microbench + property test BEFORE any merge
+     └── Implementation gated on baseline measuring the relevant inner loop as a bottleneck
 
-  7. Update docs/abng/CAPABILITIES.md with Phase 0.9 entries
-     └── COMMIT 11: docs update
+  8. Track U (Phase 0.9 demo SVGs)
+     └── COMMIT 11+: post-baseline visualizations (cache speedup, per-leaf explainability)
+
+  9. Update docs/abng/CAPABILITIES.md with Phase 0.9 entries
+     └── COMMIT N: docs update
 ```
 
-Total estimated commits: 6–11 depending on Q2 inclusion. Total estimated LOC: 1500–3000.
+Total estimated commits: 8–15 depending on V/W spike inclusion. Total estimated LOC: 2000–5000.
+
+**Strict ordering constraints:**
+
+* Track P MUST land before any other track's first commit. Every later commit re-runs the baseline.
+* Track V and W spikes are gated on Track P showing the targeted inner loop as a measured bottleneck. **No speculative numerical refactors.**
+* Track Q2 is gated on Q1's measured win. If Q1 doesn't win on the Track P baseline, Q2 doesn't ship.
 
 ---
 
@@ -433,15 +608,29 @@ RNG, cross-platform byte equality), plus:
 
 When all of these are checked, Phase 0.9 is done:
 
-- [ ] `tests/abng/baseline_wisconsin_bc.rs` (or chosen alternate) green at 5-run determinism + accuracy floor.
+**Required:**
+
+- [ ] `tests/abng/baseline_wisconsin_bc.rs` green at 5-run determinism + accuracy floor.
 - [ ] `bench_results/phase_0_9_baseline/` populated with CSV + summary + SVGs.
-- [ ] C3 + D1 cherry-picked from `claude/elastic-kirch-db47b2` (Track S1+S2).
-- [ ] Track Q1 (route cache) implemented + measured against baseline.
-- [ ] (Optional) Track Q2 (Node32 layer) implemented + canary re-lock cycle completed.
-- [ ] PGO + LTO Cargo profile (R4) shipped.
+- [ ] C3 + D1 cherry-picked from `claude/elastic-kirch-db47b2` (Track S1+S2) **or** explicit decision-note explaining deferral.
+- [ ] Track Q1 (route cache) implemented + measured against baseline. **At least one D-HARHT integration shipped.**
+- [ ] PGO + LTO Cargo profile (R4) verified or shipped.
 - [ ] Phase 0.9 demo SVGs (Track U) committed and byte-stable.
 - [ ] `docs/abng/CAPABILITIES.md` updated with Phase 0.9 entries.
 - [ ] Phase 0.9 handoff doc (this file) updated with final numbers + lessons learned.
+
+**Optional (gated on Track P baseline showing the relevant bottleneck):**
+
+- [ ] Track Q2 (Node32 + SSE2 Node16) implemented + canary re-lock cycle completed.
+- [ ] At least one Track V experiment shipped (V1 / V2 / V3 etc.) with full V-level criteria met.
+- [ ] At least one Track W experiment shipped (W1 Neumaier / W2 deterministic GEMM etc.) with full W-level criteria met.
+- [ ] cjcl-surface builtins for v14 Rust-only APIs (Track T).
+- [ ] Open PR for `claude/abng-v14-wire-format` on GitHub (Track S5).
+
+**Research-only (may produce design notes without code):**
+
+- [ ] Track V design notes for any structure candidate that didn't ship.
+- [ ] Track W design notes for any kernel research that didn't ship.
 
 ---
 
