@@ -1296,6 +1296,51 @@ pub(crate) fn collect_per_leaf_reports(
     reports
 }
 
+/// Collect per-leaf train sample counts for *every* leaf in the
+/// graph (populated and dead). Returned vec is sorted by NodeId
+/// ascending. Dead leaves appear with `count = 0`.
+///
+/// Useful for visualizations that need to show all leaves in
+/// fixed positions — `compute_route_utilization` only returns
+/// distribution statistics, not per-leaf data.
+pub(crate) fn collect_all_leaf_train_counts(
+    g: &AdaptiveBeliefGraph,
+    dataset: &Dataset,
+    train_idx: &[usize],
+    routing_features: &[usize],
+) -> Vec<(u32, u64)> {
+    use std::collections::BTreeMap;
+    // Discover leaf NodeIds (children = None).
+    let mut leaf_ids: Vec<u32> = Vec::new();
+    for nid in 0..g.node_count() {
+        let n = &g.nodes[nid as usize];
+        if matches!(n.children, cjc_abng::AdaptiveChildren::None) {
+            leaf_ids.push(nid);
+        }
+    }
+    leaf_ids.sort();
+
+    // Count training samples per leaf.
+    let mut counts: BTreeMap<u32, u64> = BTreeMap::new();
+    let mut routing_buf = vec![0.0f64; N_ROUTING_FEATURES];
+    for &i in train_idx {
+        let row = dataset.row(i);
+        for (out, &feat_idx) in routing_buf.iter_mut().zip(routing_features) {
+            *out = row[feat_idx];
+        }
+        let prefix = g.encode_prefix(&routing_buf).expect("encode prefix");
+        let evidence = g.descend(&prefix);
+        *counts.entry(evidence.leaf_id).or_insert(0) += 1;
+    }
+
+    // Assemble (leaf_id, count) pairs for every leaf, dead leaves
+    // appearing with count = 0.
+    leaf_ids
+        .into_iter()
+        .map(|lid| (lid, counts.get(&lid).copied().unwrap_or(0)))
+        .collect()
+}
+
 /// Compute graph-level route utilization from the train-sample
 /// counts. Pure function over `(g, dataset, train_idx,
 /// routing_features)`; deterministic from inputs.
@@ -2936,11 +2981,13 @@ fn render_accuracy_svg(
             g
         ));
     }
-    // Floor line at 0.95
+    // Floor line at 0.95. Label is text-anchor="end" so it
+    // doesn't overflow the right edge (the natural text width
+    // would otherwise extend past the viewBox).
     let floor_y = y_of(0.95);
     out.push_str(&format!(
         r##"  <line x1="120" y1="{floor_y}" x2="{}" y2="{floor_y}" class="floor" />
-  <text x="{}" y="{}" class="label" fill="#f57c00">0.95 floor (Phase 0.9 target)</text>
+  <text x="{}" y="{}" text-anchor="end" class="label" fill="#f57c00">0.95 floor (Phase 0.9 target)</text>
 "##,
         SVG_W - 80,
         SVG_W - 88,
@@ -3016,15 +3063,15 @@ fn render_accuracy_svg(
 /// Bar chart: samples per leaf for real BC seed=1. Dead leaves
 /// (zero-sample) shown as short red markers; populated as blue
 /// bars sized by sample count.
-fn render_route_utilization_svg(reports: &[PerLeafReport], total_leaves: usize) -> String {
-    // Build all-leaf vector: populated reports + zero entries for
-    // dead leaves so the x axis shows every leaf id contiguously.
-    let mut by_leaf: Vec<(u32, u64)> = (0..total_leaves as u32).map(|id| (id, 0u64)).collect();
-    for r in reports {
-        if (r.leaf_id as usize) < total_leaves {
-            by_leaf[r.leaf_id as usize].1 = r.n_train_samples;
-        }
-    }
+///
+/// Takes `Vec<(leaf_id, count)>` for ALL leaves (populated +
+/// dead), sorted by leaf_id. Position on the x axis is by the
+/// vec's enumeration order, not by leaf_id arithmetic — the
+/// labels show the *actual* `NodeId` of each leaf, which for a
+/// depth-N binary tree starts at N (not 0).
+fn render_route_utilization_svg(per_leaf_counts: &[(u32, u64)]) -> String {
+    let total_leaves = per_leaf_counts.len();
+    let by_leaf = per_leaf_counts;
     let max_n: u64 = by_leaf.iter().map(|(_, n)| *n).max().unwrap_or(1).max(1);
     let n_populated = by_leaf.iter().filter(|(_, n)| *n > 0).count();
     let n_dead = total_leaves - n_populated;
@@ -3325,8 +3372,18 @@ fn baseline_wisconsin_bc_produce_artifacts() {
         real_trials.push((seed, r, ms));
     }
 
-    // Stage 3 — per-leaf reports for real BC seed=1.
+    // Stage 3 — per-leaf reports for real BC seed=1, plus the
+    // full per-leaf train-count vector (populated + dead) for the
+    // route-utilization chart.
     let (_, real_per_leaf) = run_trial_with_reports(1, &real_dataset);
+    let (g_seed1, train_idx_seed1, _test_idx_seed1, routing_feats_seed1, _phi_feats_seed1) =
+        train_one_graph(1, &real_dataset);
+    let all_leaf_counts = collect_all_leaf_train_counts(
+        &g_seed1,
+        &real_dataset,
+        &train_idx_seed1,
+        &routing_feats_seed1,
+    );
 
     // Stage 4 — render every artifact and write to both locations.
     let real_csv = render_real_runs_csv(&real_trials);
@@ -3335,10 +3392,7 @@ fn baseline_wisconsin_bc_produce_artifacts() {
     let chain_heads = render_chain_heads_txt(&syn_trials, &real_trials);
     let summary_md = render_summary_md(&syn_trials, &real_trials, &real_per_leaf);
     let accuracy_svg = render_accuracy_svg(&syn_trials, &real_trials);
-    let route_util_svg = render_route_utilization_svg(
-        &real_per_leaf,
-        real_trials[0].1.route_utilization.total_leaves,
-    );
+    let route_util_svg = render_route_utilization_svg(&all_leaf_counts);
     let calib_svg = render_per_leaf_calibration_svg(&real_per_leaf);
     let runtime_svg = render_runtime_svg(&real_trials);
 
@@ -3362,10 +3416,7 @@ fn baseline_wisconsin_bc_produce_artifacts() {
     // each non-clock-dependent artifact and assert equality. The
     // runtime SVG is intentionally skipped (clock readings vary).
     let accuracy_svg2 = render_accuracy_svg(&syn_trials, &real_trials);
-    let route_util_svg2 = render_route_utilization_svg(
-        &real_per_leaf,
-        real_trials[0].1.route_utilization.total_leaves,
-    );
+    let route_util_svg2 = render_route_utilization_svg(&all_leaf_counts);
     let calib_svg2 = render_per_leaf_calibration_svg(&real_per_leaf);
     let real_csv2 = render_real_runs_csv(&real_trials);
     let per_leaf_csv2 = render_per_leaf_csv(&real_per_leaf);
