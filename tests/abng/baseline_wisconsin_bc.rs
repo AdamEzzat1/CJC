@@ -45,8 +45,6 @@
 //! * Per-leaf explainability report.
 //! * SVG + CSV output to `bench_results/phase_0_9_baseline/`.
 //! * Accuracy floor assertion (≥ 0.90 on real data).
-//! * Multi-level tree expansion (`add_node` calls to populate the
-//!   routing tree past the root).
 //!
 //! # Track P work already shipped
 //!
@@ -57,6 +55,11 @@
 //! * Top-K feature selection via univariate F-score (computed on
 //!   the train split; no test-set leakage). See
 //!   [`compute_f_scores_binary`] + [`select_top_k_features`].
+//! * Pre-allocated `N_BINS_PER_FEATURE^N_ROUTING_FEATURES` routing
+//!   tree (4³ = 64 leaves) — every training row routes to a
+//!   leaf at the deepest level, not to the root. Empty leaves are
+//!   handled at predict time by `blr_predict_with_fallback`. See
+//!   [`pre_allocate_full_tree`].
 
 use cjc_abng::graph::AdaptiveBeliefGraph;
 use cjc_ad::pinn::Activation;
@@ -347,6 +350,40 @@ pub(crate) fn select_routing_features(dataset: &Dataset, train_idx: &[usize]) ->
 
 // ── Graph construction ──────────────────────────────────────────────
 
+/// Pre-allocate a full `branching^depth` routing tree by BFS-expanding
+/// from the root, calling [`AdaptiveBeliefGraph::add_node`] for each
+/// `(parent, key_byte)` pair. After this call the graph has
+/// `1 + branching + branching² + … + branching^depth` total nodes;
+/// every node at depth `< depth` has exactly `branching` children.
+///
+/// Why pre-allocate?
+/// * Gives the baseline a deterministic, controllable tree shape so
+///   accuracy and per-leaf reports compare across seeds at fixed
+///   topology. With organic Grow/Split triggers, the topology
+///   itself would be a function of the seed — useful for stress
+///   tests, but noisy for a Phase 0.9 baseline.
+/// * Exposes ABNG's per-leaf specialization on the first training
+///   row (vs `a0a8266`'s root-only tree where every sample landed
+///   in the same BLR posterior).
+/// * Empty leaves are handled at predict time by
+///   [`blr_predict_with_fallback`], which walks up the parent chain
+///   to the nearest ancestor with `n_seen ≥ 1`. So pre-allocating
+///   more leaves than samples is safe — sparse leaves transparently
+///   defer to a populated ancestor.
+fn pre_allocate_full_tree(g: &mut AdaptiveBeliefGraph, branching: u8, depth: usize) {
+    let mut current_level: Vec<u32> = vec![0]; // root NodeId is always 0
+    for _ in 0..depth {
+        let mut next_level: Vec<u32> = Vec::with_capacity(current_level.len() * (branching as usize));
+        for &parent in &current_level {
+            for key_byte in 0..branching {
+                let child = g.add_node(parent, key_byte).expect("add_node");
+                next_level.push(child);
+            }
+        }
+        current_level = next_level;
+    }
+}
+
 /// Build the ABNG graph for the baseline. Configures:
 ///
 /// * **Codebook:** routes on the F-score-selected routing features
@@ -362,11 +399,11 @@ pub(crate) fn select_routing_features(dataset: &Dataset, train_idx: &[usize]) ->
 ///   sees the full feature vector as `phi`.
 /// * **BLR prior:** precision = `BLR_PRIOR_PRECISION`, a/b as
 ///   declared above.
-///
-/// **No `add_node` calls** at this stage — the tree starts as a
-/// single root node; all samples route to it. Track P later
-/// commits will grow the tree to expose ABNG's per-leaf
-/// specialization.
+/// * **Tree pre-allocation:** full `N_BINS_PER_FEATURE^N_ROUTING_FEATURES`
+///   tree (4³ = 64 leaves, 85 total nodes) via
+///   [`pre_allocate_full_tree`]. Each training row routes deterministically
+///   to one of the 64 leaves based on its F-score-selected feature
+///   subset.
 fn build_graph(seed: u64) -> AdaptiveBeliefGraph {
     let mut g = AdaptiveBeliefGraph::new(seed);
     let boundaries: Vec<f64> = (0..N_ROUTING_FEATURES)
@@ -383,6 +420,7 @@ fn build_graph(seed: u64) -> AdaptiveBeliefGraph {
     .expect("leaf head install");
     g.set_blr_prior(BLR_PRIOR_PRECISION, BLR_PRIOR_A, BLR_PRIOR_B)
         .expect("BLR prior install");
+    pre_allocate_full_tree(&mut g, N_BINS_PER_FEATURE as u8, N_ROUTING_FEATURES);
     g
 }
 
@@ -516,17 +554,25 @@ fn baseline_trial_uses_train_step_audit_events() {
     // Pin the wiring contract: every training row produces exactly
     // one TrainStep audit event (the post-A2 v14 audit shape).
     // After training, the audit log size should equal:
-    //   setup events (Created + CodebookFrozen + LeafHeadConfigured
-    //     + LeafParamsInitialized + BlrPriorConfigured + BlrInitialized)
-    //   + n_train_rows × 1 TrainStep event
+    //   * Graph-setup events: Created + CodebookFrozen
+    //       + LeafHeadConfigured + LeafParamsInitialized (root)
+    //       + BlrPriorConfigured + BlrInitialized (root) ≈ 6
+    //   * Pre-allocation events for the 4³ tree:
+    //       * 21 × ChildrenPromoted (one per non-leaf parent on
+    //         first child)
+    //       * 84 × NodeAdded
+    //       * 84 × LeafParamsInitialized
+    //       * 84 × BlrInitialized
+    //       = 273 events
+    //   * Per-row training events: n_train × 1 TrainStep
+    //
+    // The setup count is now structural (driven by tree shape), so
+    // we assert a tight bound that catches any new setup audit kind
+    // or pre-allocation drift.
     let dataset = synthetic_dataset(1);
     let (train_idx, _test_idx) = train_test_split(&dataset, 1);
     let result = run_trial(1, &dataset);
     let n_train_rows = train_idx.len();
-    // Setup events count: empirically 6 (one per `set_*` call plus
-    // Created at construction time). Pinning this number is too
-    // brittle (any new setup audit kind would shift it), so we
-    // just assert the lower bound and per-row contribution.
     assert!(
         result.audit_event_count >= n_train_rows,
         "audit log too short: {} < {}",
@@ -534,10 +580,69 @@ fn baseline_trial_uses_train_step_audit_events() {
         n_train_rows
     );
     let setup_events = result.audit_event_count - n_train_rows;
+    // 4³ tree: 6 graph-setup + 21 promotions + 252 per-node events
+    // = 279 expected. Tolerate ±10 for any future Phase 0.9 setup
+    // event addition (e.g. drift baseline install) without forcing
+    // a test rewrite.
     assert!(
-        (1..=10).contains(&setup_events),
-        "expected 1..=10 setup events, got {setup_events}"
+        (270..=290).contains(&setup_events),
+        "expected ~279 setup events (4³ pre-allocated tree); got {setup_events}"
     );
+}
+
+#[test]
+fn baseline_tree_is_pre_allocated_full_depth() {
+    // Structural contract: build_graph produces a complete
+    // N_BINS_PER_FEATURE-ary tree of depth N_ROUTING_FEATURES.
+    // Expected total node count: Σ_{d=0..=depth} branching^d.
+    // For branching=4, depth=3: 1 + 4 + 16 + 64 = 85 nodes.
+    let g = build_graph(1);
+    let branching = N_BINS_PER_FEATURE as usize;
+    let depth = N_ROUTING_FEATURES;
+    let mut expected = 0usize;
+    let mut level_size = 1usize;
+    for _ in 0..=depth {
+        expected += level_size;
+        level_size *= branching;
+    }
+    assert_eq!(
+        g.node_count() as usize,
+        expected,
+        "expected {expected} nodes in a complete {branching}^{depth} tree, got {}",
+        g.node_count()
+    );
+}
+
+#[test]
+fn baseline_train_rows_route_to_leaf_nodes_not_root() {
+    // Behavioral contract: with a pre-allocated full-depth tree,
+    // every training row's encoded prefix must match all
+    // N_ROUTING_FEATURES bytes — i.e. it descends to a leaf at the
+    // bottom level, not to a partial-match interior node and never
+    // back to the root. Exercises the pre-allocation contract
+    // jointly with the codebook + descend wiring.
+    let dataset = synthetic_dataset(1);
+    let (train_idx, _) = train_test_split(&dataset, 1);
+    let routing = select_routing_features(&dataset, &train_idx);
+    let g = build_graph(1);
+
+    let mut routing_buf = vec![0.0f64; N_ROUTING_FEATURES];
+    for &i in &train_idx[..16] {
+        // Spot-check the first 16 rows — uniform routing means the
+        // sample is representative without scanning all 455 rows.
+        let row = dataset.row(i);
+        for (out, &feat_idx) in routing_buf.iter_mut().zip(&routing) {
+            *out = row[feat_idx];
+        }
+        let prefix = g.encode_prefix(&routing_buf).expect("encode prefix");
+        let evidence = g.descend(&prefix);
+        assert_eq!(
+            evidence.matched_prefix as usize, N_ROUTING_FEATURES,
+            "row {i}: expected full-depth match, got {}",
+            evidence.matched_prefix
+        );
+        assert_ne!(evidence.leaf_id, 0, "row {i}: descended only to root");
+    }
 }
 
 #[test]
