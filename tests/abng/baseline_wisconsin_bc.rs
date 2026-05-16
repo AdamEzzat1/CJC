@@ -79,6 +79,32 @@ const N_SAMPLES: usize = 569;
 /// the chain witness shapes comparable to a real-data run.
 const N_CLASS_0: usize = 357;
 
+// ── Real-dataset bundling ────────────────────────────────────────────
+
+/// Repo-relative path to the bundled UCI Wisconsin Diagnostic Breast
+/// Cancer dataset (raw `wdbc.data` saved verbatim). When present,
+/// `load_real_dataset()` (added in a follow-up B2 commit) returns a
+/// `Dataset` view of this file; when absent, the harness falls back
+/// to the synthetic generator so determinism + accuracy gates stay
+/// operational on fresh / sparse checkouts.
+///
+/// The file is the UCI server's `wdbc.data` byte-for-byte. Parsing
+/// happens at load time, not at bundle time, so the SHA-256 below
+/// attests to the canonical UCI artifact rather than a derived
+/// pipeline output.
+const REAL_DATASET_REL_PATH: &str = "tests/data/wisconsin_bc.csv";
+
+/// SHA-256 (uppercase hex) of the bundled `wdbc.data` file. Pinned
+/// here so the harness can detect a tampered or partial copy at
+/// load time and refuse to claim "real-data accuracy" on a corrupt
+/// input.
+///
+/// Source: <https://archive.ics.uci.edu/ml/machine-learning-databases/breast-cancer-wisconsin/wdbc.data>
+/// Fetched: 2026-05-16 (Phase 0.9, B-track).
+/// Size: 124,103 bytes.
+const REAL_DATASET_SHA256_HEX: &str =
+    "D606AF411F3E5BE8A317A5A8B652B425AAF0FF38CA683D5327FFFF94C3695F4A";
+
 // ── Routing configuration ────────────────────────────────────────────
 
 /// Number of features used for ABNG's routing step. The top-K
@@ -1155,4 +1181,48 @@ fn baseline_trial_records_routing_features() {
             "seed {seed}: trial-path routing diverged from direct path"
         );
     }
+}
+
+// ── Real-dataset bundle verification ────────────────────────────────
+
+#[test]
+fn baseline_real_dataset_sha256_pinned() {
+    // Verify the bundled `tests/data/wisconsin_bc.csv` matches the
+    // SHA-256 pinned at the top of this file. This is a tamper /
+    // partial-checkout / silent-corruption gate — if the file is
+    // present at all, it must be byte-exact.
+    //
+    // If the file is absent (fresh checkout, sparse-checkout, or
+    // explicitly removed for a synthetic-only run), the test
+    // gracefully reports `not present; skip` rather than failing.
+    // The B-track loader (B2) treats absence the same way and
+    // falls back to the synthetic generator.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(REAL_DATASET_REL_PATH);
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(_) => {
+            eprintln!(
+                "[baseline] real dataset CSV not present at {}; skip",
+                path.display()
+            );
+            return;
+        }
+    };
+
+    let hash = cjc_snap::hash::sha256(&bytes);
+    let mut hex = String::with_capacity(64);
+    for b in hash.iter() {
+        write!(&mut hex, "{:02X}", b).expect("hex write");
+    }
+    assert_eq!(
+        hex, REAL_DATASET_SHA256_HEX,
+        "wisconsin_bc.csv SHA-256 mismatch:\n  bundled = {}\n  pinned  = {}\n\
+         If the UCI source file changed, re-fetch and update the pinned constant.",
+        hex, REAL_DATASET_SHA256_HEX
+    );
+    eprintln!(
+        "[baseline] real dataset verified ({} bytes, SHA-256 {})",
+        bytes.len(),
+        &hex[..16]
+    );
 }
