@@ -219,6 +219,40 @@ pub(crate) struct TrialResult {
     /// Computed via [`evaluate_accuracy`] using the same routing-
     /// and phi-feature subsets the training pass used.
     pub accuracy: f64,
+    /// Calibration metrics on the test split — Brier, NLL, and
+    /// 10-bin ECE on the leaf+root ensemble's raw posterior mean.
+    /// Together with `accuracy` these describe both *how often*
+    /// the classifier is right and *how trustworthy* its
+    /// confidences are.
+    pub calibration: CalibrationReport,
+}
+
+/// Calibration metrics for a test-set evaluation. Together with
+/// `accuracy` these describe both *how often* the classifier is
+/// right and *how trustworthy* its confidences are.
+///
+/// All three are computed from the *raw ensemble posterior mean*
+/// (clipped to `[eps, 1-eps]` where needed), not from the decision
+/// threshold's binary output — calibration is a property of the
+/// probability output, not the decision rule.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CalibrationReport {
+    /// Brier score: `mean((p - y)²)`. Range [0, 1]. Lower is better.
+    /// A perfect classifier scores 0; predicting always-class-1-prior
+    /// (0.373) on a 357/212 dataset scores `π_0 · π_1 ≈ 0.234`.
+    pub brier_score: f64,
+    /// Negative log-likelihood (log loss):
+    /// `-mean(y log p + (1-y) log(1-p))`. Unbounded; lower is better.
+    /// Probabilities clipped to `[1e-7, 1 - 1e-7]` before log.
+    pub nll: f64,
+    /// Expected Calibration Error with 10 equal-width confidence
+    /// bins. For each bin, computes `|mean_predicted - empirical
+    /// accuracy|` and weighs by bin's sample share. Range [0, 1].
+    /// Lower is better; 0 means perfect calibration.
+    pub ece_10_bins: f64,
+    /// Number of test samples evaluated. Pinned to detect any
+    /// silent loss (e.g., a parse bug that drops rows).
+    pub n_test: usize,
 }
 
 /// Per-leaf explainability snapshot for one leaf in the trained
@@ -771,6 +805,8 @@ fn build_graph(seed: u64) -> AdaptiveBeliefGraph {
 pub(crate) fn run_trial(seed: u64, dataset: &Dataset) -> TrialResult {
     let (g, train_idx, test_idx, routing_features, phi_features) = train_one_graph(seed, dataset);
     let accuracy = evaluate_accuracy(&g, dataset, &test_idx, &routing_features, &phi_features);
+    let calibration =
+        evaluate_calibration(&g, dataset, &test_idx, &routing_features, &phi_features);
     let _ = train_idx; // unused in this path; kept for parity with `run_trial_with_reports`
     TrialResult {
         chain_head_hex: hex32(&g.chain_head),
@@ -779,6 +815,7 @@ pub(crate) fn run_trial(seed: u64, dataset: &Dataset) -> TrialResult {
         routing_features,
         phi_features,
         accuracy,
+        calibration,
     }
 }
 
@@ -794,6 +831,8 @@ pub(crate) fn run_trial_with_reports(
 ) -> (TrialResult, Vec<PerLeafReport>) {
     let (g, train_idx, test_idx, routing_features, phi_features) = train_one_graph(seed, dataset);
     let accuracy = evaluate_accuracy(&g, dataset, &test_idx, &routing_features, &phi_features);
+    let calibration =
+        evaluate_calibration(&g, dataset, &test_idx, &routing_features, &phi_features);
     let reports =
         collect_per_leaf_reports(&g, dataset, &train_idx, &routing_features, &phi_features);
     let result = TrialResult {
@@ -803,6 +842,7 @@ pub(crate) fn run_trial_with_reports(
         routing_features,
         phi_features,
         accuracy,
+        calibration,
     };
     (result, reports)
 }
@@ -945,6 +985,110 @@ pub(crate) fn evaluate_accuracy_with_threshold(
         }
     }
     correct as f64 / test_idx.len() as f64
+}
+
+// ── Calibration metrics ─────────────────────────────────────────────
+
+/// Number of equal-width confidence bins for ECE computation.
+/// 10 is the standard choice (matches the original Guo et al. 2017
+/// paper); 15 is sometimes used. We pin 10 so the metric is
+/// directly comparable across published calibration literature.
+const ECE_N_BINS: usize = 10;
+
+/// Floor for predicted-probability clipping in NLL / ECE. Avoids
+/// `log(0)` and matches the convention used by scikit-learn /
+/// PyTorch log-loss implementations.
+const PROB_EPS: f64 = 1e-7;
+
+/// Evaluate Brier, NLL, and ECE over `test_idx` using the same
+/// leaf+root ensemble that drives [`evaluate_accuracy`]. All three
+/// metrics are computed from the *raw ensemble posterior mean*
+/// (clipped to `[PROB_EPS, 1 - PROB_EPS]`), not from the decision
+/// threshold's binary output — calibration is a property of the
+/// probability, not the decision rule.
+pub(crate) fn evaluate_calibration(
+    g: &AdaptiveBeliefGraph,
+    dataset: &Dataset,
+    test_idx: &[usize],
+    routing_features: &[usize],
+    phi_features: &[usize],
+) -> CalibrationReport {
+    let mut routing_buf = vec![0.0f64; N_ROUTING_FEATURES];
+    let mut phi_buf = vec![0.0f64; N_PHI_FEATURES];
+    // Collect (prediction, label) pairs in one pass.
+    let mut probs: Vec<f64> = Vec::with_capacity(test_idx.len());
+    let mut labels: Vec<f64> = Vec::with_capacity(test_idx.len());
+    for &i in test_idx {
+        let row = dataset.row(i);
+        for (out, &feat_idx) in routing_buf.iter_mut().zip(routing_features) {
+            *out = row[feat_idx];
+        }
+        for (out, &feat_idx) in phi_buf.iter_mut().zip(phi_features) {
+            *out = row[feat_idx];
+        }
+        let prefix = g.encode_prefix(&routing_buf).expect("encode prefix");
+        let evidence = g.descend(&prefix);
+        let leaf_mean = g
+            .blr_predict_with_fallback(evidence.leaf_id, &phi_buf)
+            .map(|(m, _, _, _)| m)
+            .unwrap_or(0.0);
+        let root_mean = g
+            .blr_predict_with_fallback(0, &phi_buf)
+            .map(|(m, _, _, _)| m)
+            .unwrap_or(0.0);
+        let raw = 0.5 * (leaf_mean + root_mean);
+        let p = raw.clamp(PROB_EPS, 1.0 - PROB_EPS);
+        probs.push(p);
+        labels.push(dataset.labels[i]);
+    }
+
+    let n = probs.len() as f64;
+
+    // Brier: mean((p - y)^2). Computed on unclipped prob in [0, 1]
+    // — clipping doesn't change the Brier value materially but
+    // does keep NLL finite, so we share the same clipped vector
+    // for consistency across metrics.
+    let brier: f64 =
+        probs.iter().zip(&labels).map(|(p, y)| (p - y).powi(2)).sum::<f64>() / n;
+
+    // NLL: -mean(y log p + (1-y) log(1-p)).
+    let nll: f64 = -probs
+        .iter()
+        .zip(&labels)
+        .map(|(p, y)| y * p.ln() + (1.0 - y) * (1.0 - p).ln())
+        .sum::<f64>()
+        / n;
+
+    // ECE: equal-width bins on [0, 1].
+    // For each bin, |mean_predicted - empirical_accuracy| weighted
+    // by bin's share of total samples.
+    let mut bin_sum_p = vec![0.0f64; ECE_N_BINS];
+    let mut bin_sum_y = vec![0.0f64; ECE_N_BINS];
+    let mut bin_count = vec![0usize; ECE_N_BINS];
+    for (&p, &y) in probs.iter().zip(&labels) {
+        // bin index in [0, ECE_N_BINS); cap at upper edge.
+        let bin = ((p * ECE_N_BINS as f64) as usize).min(ECE_N_BINS - 1);
+        bin_sum_p[bin] += p;
+        bin_sum_y[bin] += y;
+        bin_count[bin] += 1;
+    }
+    let mut ece = 0.0f64;
+    for b in 0..ECE_N_BINS {
+        if bin_count[b] == 0 {
+            continue;
+        }
+        let n_b = bin_count[b] as f64;
+        let mean_p = bin_sum_p[b] / n_b;
+        let mean_y = bin_sum_y[b] / n_b;
+        ece += (n_b / n) * (mean_p - mean_y).abs();
+    }
+
+    CalibrationReport {
+        brier_score: brier,
+        nll,
+        ece_10_bins: ece,
+        n_test: test_idx.len(),
+    }
 }
 
 /// Compute the per-phi-feature arithmetic mean across the rows in
@@ -1733,6 +1877,169 @@ fn baseline_real_data_accuracy_n_seeds() {
     assert!(
         mean >= 0.95,
         "real-data {N_REAL_DATA_SEEDS}-seed mean accuracy {mean} below 0.95 floor"
+    );
+}
+
+// ── Calibration metric gates (Phase 0.9 calibration extension) ─────
+
+#[test]
+fn baseline_calibration_synthetic() {
+    // Calibration on the +1.8σ synthetic separation should be
+    // very tight — the leaf+root ensemble approaches Bayes-
+    // optimal on this dataset. Floors:
+    //   * Brier ≤ 0.05 (~24% of "always-class-prior" baseline 0.234)
+    //   * NLL   ≤ 0.30
+    //   * ECE   ≤ 0.10  (10-bin equal-width)
+    // These are loose; empirical numbers should sit well below.
+    let dataset = synthetic_dataset(1);
+    let result = run_trial(1, &dataset);
+    let c = &result.calibration;
+    eprintln!(
+        "[calibration-synthetic] brier={:.4} nll={:.4} ece={:.4} (n={})",
+        c.brier_score, c.nll, c.ece_10_bins, c.n_test
+    );
+    assert!(c.brier_score >= 0.0 && c.brier_score <= 1.0);
+    assert!(c.nll >= 0.0);
+    assert!(c.ece_10_bins >= 0.0 && c.ece_10_bins <= 1.0);
+    assert!(
+        c.brier_score <= 0.05,
+        "synthetic Brier {} exceeds 0.05 floor",
+        c.brier_score
+    );
+    assert!(c.nll <= 0.30, "synthetic NLL {} exceeds 0.30 floor", c.nll);
+    assert!(
+        c.ece_10_bins <= 0.10,
+        "synthetic ECE {} exceeds 0.10 floor",
+        c.ece_10_bins
+    );
+    // Stratified split rounds each class independently
+    // (357 * 0.8 = 285.6 → 285 train + 72 test class-0;
+    //  212 * 0.8 = 169.6 → 169 train + 43 test class-1) so the
+    // total test count is 72 + 43 = 115, not the 113.8 you'd get
+    // from `(1 - TRAIN_FRAC) * N_SAMPLES`. Tolerance ±2 covers
+    // either rounding convention.
+    let expected = (((1.0 - TRAIN_FRAC) * (N_SAMPLES as f64)) as usize).saturating_sub(2);
+    assert!(
+        c.n_test >= expected && c.n_test <= expected + 4,
+        "n_test={} outside expected ~{}±2 (stratified split rounding)",
+        c.n_test,
+        (1.0 - TRAIN_FRAC) * (N_SAMPLES as f64),
+    );
+}
+
+#[test]
+fn baseline_calibration_real_data() {
+    // Real BC calibration. Looser floors than synthetic because
+    // the BLR posterior shrinks predictions toward the prior
+    // mean (0) — when the class proportion is 0.373, "always
+    // predict 0.373" is a respectable calibration baseline.
+    //
+    // Floors (deliberately conservative):
+    //   * Brier ≤ 0.20 (close to "always-prior" 0.234)
+    //   * NLL   ≤ 0.60
+    //   * ECE   ≤ 0.30
+    // The headline asserts these don't degrade catastrophically;
+    // tightening them is a Phase 0.10+ calibration-improvement
+    // exercise (Platt scaling, isotonic regression).
+    let Some(mut dataset) = load_real_dataset() else {
+        eprintln!("[baseline] real dataset not loadable; skip");
+        return;
+    };
+    standardize_in_place(&mut dataset);
+    let result = run_trial(1, &dataset);
+    let c = &result.calibration;
+    eprintln!(
+        "[calibration-real]      brier={:.4} nll={:.4} ece={:.4} (n={})",
+        c.brier_score, c.nll, c.ece_10_bins, c.n_test
+    );
+    assert!(c.brier_score >= 0.0 && c.brier_score <= 1.0);
+    assert!(c.nll >= 0.0);
+    assert!(c.ece_10_bins >= 0.0 && c.ece_10_bins <= 1.0);
+    assert!(
+        c.brier_score <= 0.20,
+        "real-data Brier {} exceeds 0.20 floor",
+        c.brier_score
+    );
+    assert!(c.nll <= 0.60, "real-data NLL {} exceeds 0.60 floor", c.nll);
+    assert!(
+        c.ece_10_bins <= 0.30,
+        "real-data ECE {} exceeds 0.30 floor",
+        c.ece_10_bins
+    );
+}
+
+#[test]
+fn baseline_calibration_is_deterministic_across_5_runs() {
+    // Same seed + same dataset → byte-equal calibration. The
+    // calibration computation is pure arithmetic (Brier, NLL,
+    // ECE) over a deterministic prediction sequence; this gate
+    // guards against any future refactor introducing non-
+    // determinism into the metric path.
+    let dataset = synthetic_dataset(1);
+    let first = run_trial(1, &dataset);
+    for run in 1..5u32 {
+        let r = run_trial(1, &dataset);
+        assert_eq!(
+            r.calibration.brier_score.to_bits(),
+            first.calibration.brier_score.to_bits(),
+            "run {run}: Brier bits diverged"
+        );
+        assert_eq!(
+            r.calibration.nll.to_bits(),
+            first.calibration.nll.to_bits(),
+            "run {run}: NLL bits diverged"
+        );
+        assert_eq!(
+            r.calibration.ece_10_bins.to_bits(),
+            first.calibration.ece_10_bins.to_bits(),
+            "run {run}: ECE bits diverged"
+        );
+        assert_eq!(r.calibration.n_test, first.calibration.n_test);
+    }
+}
+
+#[test]
+fn baseline_calibration_real_data_15_seed_mean() {
+    // Across 15 seeds, the mean Brier/NLL/ECE on real BC should
+    // be even tighter than the single-seed floor (Brier ≤ 0.18,
+    // NLL ≤ 0.55, ECE ≤ 0.25). Single-seed luck can spike one
+    // metric on a hard stratification; the 15-seed mean cancels
+    // out that variance. This is the calibration analog of the
+    // headline `baseline_real_data_accuracy_n_seeds` test.
+    let Some(mut dataset) = load_real_dataset() else {
+        eprintln!("[baseline] real dataset not loadable; skip");
+        return;
+    };
+    standardize_in_place(&mut dataset);
+
+    let mut brier_sum = 0.0f64;
+    let mut nll_sum = 0.0f64;
+    let mut ece_sum = 0.0f64;
+    for seed in 1..=(N_REAL_DATA_SEEDS as u64) {
+        let r = run_trial(seed, &dataset);
+        brier_sum += r.calibration.brier_score;
+        nll_sum += r.calibration.nll;
+        ece_sum += r.calibration.ece_10_bins;
+    }
+    let n = N_REAL_DATA_SEEDS as f64;
+    let brier_mean = brier_sum / n;
+    let nll_mean = nll_sum / n;
+    let ece_mean = ece_sum / n;
+    eprintln!(
+        "[calibration-real-15] brier_mean={:.4} nll_mean={:.4} ece_mean={:.4}",
+        brier_mean, nll_mean, ece_mean
+    );
+    assert!(
+        brier_mean <= 0.18,
+        "real-data 15-seed Brier mean {brier_mean} exceeds 0.18"
+    );
+    assert!(
+        nll_mean <= 0.55,
+        "real-data 15-seed NLL mean {nll_mean} exceeds 0.55"
+    );
+    assert!(
+        ece_mean <= 0.25,
+        "real-data 15-seed ECE mean {ece_mean} exceeds 0.25"
     );
 }
 
