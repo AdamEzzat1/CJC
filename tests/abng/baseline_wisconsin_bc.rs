@@ -225,6 +225,12 @@ pub(crate) struct TrialResult {
     /// the classifier is right and *how trustworthy* its
     /// confidences are.
     pub calibration: CalibrationReport,
+    /// Graph-level route utilization (total / populated / dead
+    /// leaves plus per-populated-leaf training count statistics).
+    /// Surfaces "how does the codebook actually partition the
+    /// data?" — the interpretability story the user identified
+    /// as a key ABNG feature.
+    pub route_utilization: RouteUtilization,
 }
 
 /// Calibration metrics for a test-set evaluation. Together with
@@ -276,6 +282,70 @@ pub(crate) struct PerLeafReport {
     /// Aleatoric variance `b/(a-1)` at the leaf (or `f64::INFINITY`
     /// when `a ≤ 1`, per the NIG-conjugate semantics).
     pub aleatoric_var: f64,
+
+    // ── Per-leaf calibration (test-set evaluation through this leaf) ──
+    //
+    // These fields surface "what does the ensemble decide for the
+    // test samples that actually routed here?" — the per-route
+    // calibration view the user identified as one of ABNG's
+    // strongest potential features.
+
+    /// Number of test samples that routed to this leaf during the
+    /// evaluate pass. Sum across all populated leaves equals the
+    /// test-set size.
+    pub n_test_samples: u64,
+    /// Fraction of test samples at this leaf classified correctly
+    /// (threshold = 0.30 on the ensemble mean, matching
+    /// `evaluate_accuracy`'s default). 0.0 when `n_test_samples`=0.
+    pub test_accuracy: f64,
+    /// Mean predicted probability (ensemble mean clipped to
+    /// `[eps, 1-eps]`) across this leaf's test samples. Compare
+    /// against `test_accuracy` for a quick calibration check:
+    /// well-calibrated leaves have `mean_predicted ≈
+    /// test_accuracy` when most labels match the prediction.
+    pub test_mean_predicted: f64,
+    /// Brier score restricted to this leaf's test samples. 0.0
+    /// when `n_test_samples`=0 (avoids NaN; treat as "no data").
+    pub test_brier: f64,
+}
+
+/// Graph-level route utilization statistics. Aggregates the per-
+/// leaf training-sample counts into the distribution shape that
+/// matters for interpretability: how many routes the data
+/// actually used, how many sat empty, how concentrated vs
+/// dispersed the distribution is.
+///
+/// Phase 0.9 uses a pre-allocated tree (16 leaves for the depth-4
+/// binary configuration). With organic Grow/Split triggers in a
+/// future phase, `min_samples_per_leaf` and the dead-leaf count
+/// become more dynamic — they signal whether the topology has
+/// adapted to actual data density.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RouteUtilization {
+    /// Total leaves in the pre-allocated tree (= branching^depth).
+    /// At depth 4 with branching 2: 16.
+    pub total_leaves: usize,
+    /// Leaves that received at least one training sample.
+    pub populated_leaves: usize,
+    /// Leaves that received zero training samples. With a
+    /// pre-allocated `branching^depth` tree these are routes
+    /// that the codebook can produce but the data never visits;
+    /// they're served by `blr_predict_with_fallback` walking up
+    /// to a populated ancestor.
+    pub dead_leaves: usize,
+    /// Smallest non-zero train sample count across populated
+    /// leaves. Useful for detecting "this leaf has only 1
+    /// sample, its BLR is essentially the prior" regressions.
+    pub min_samples_per_populated_leaf: u64,
+    /// Largest train sample count.
+    pub max_samples_per_leaf: u64,
+    /// Mean training samples per *populated* leaf.
+    pub mean_samples_per_populated_leaf: f64,
+    /// Standard deviation of train samples across populated
+    /// leaves. Large σ → highly uneven distribution. Small σ →
+    /// the codebook quantiles align well with the data
+    /// distribution.
+    pub std_samples_per_populated_leaf: f64,
 }
 
 // ── Deterministic RNG ────────────────────────────────────────────────
@@ -807,7 +877,8 @@ pub(crate) fn run_trial(seed: u64, dataset: &Dataset) -> TrialResult {
     let accuracy = evaluate_accuracy(&g, dataset, &test_idx, &routing_features, &phi_features);
     let calibration =
         evaluate_calibration(&g, dataset, &test_idx, &routing_features, &phi_features);
-    let _ = train_idx; // unused in this path; kept for parity with `run_trial_with_reports`
+    let route_utilization =
+        compute_route_utilization(&g, dataset, &train_idx, &routing_features);
     TrialResult {
         chain_head_hex: hex32(&g.chain_head),
         merkle_root_hex: hex32(&g.merkle_root()),
@@ -816,6 +887,7 @@ pub(crate) fn run_trial(seed: u64, dataset: &Dataset) -> TrialResult {
         phi_features,
         accuracy,
         calibration,
+        route_utilization,
     }
 }
 
@@ -833,8 +905,16 @@ pub(crate) fn run_trial_with_reports(
     let accuracy = evaluate_accuracy(&g, dataset, &test_idx, &routing_features, &phi_features);
     let calibration =
         evaluate_calibration(&g, dataset, &test_idx, &routing_features, &phi_features);
-    let reports =
-        collect_per_leaf_reports(&g, dataset, &train_idx, &routing_features, &phi_features);
+    let route_utilization =
+        compute_route_utilization(&g, dataset, &train_idx, &routing_features);
+    let reports = collect_per_leaf_reports(
+        &g,
+        dataset,
+        &train_idx,
+        &test_idx,
+        &routing_features,
+        &phi_features,
+    );
     let result = TrialResult {
         chain_head_hex: hex32(&g.chain_head),
         merkle_root_hex: hex32(&g.merkle_root()),
@@ -843,6 +923,7 @@ pub(crate) fn run_trial_with_reports(
         phi_features,
         accuracy,
         calibration,
+        route_utilization,
     };
     (result, reports)
 }
@@ -1119,11 +1200,129 @@ pub(crate) fn collect_per_leaf_reports(
     g: &AdaptiveBeliefGraph,
     dataset: &Dataset,
     train_idx: &[usize],
+    test_idx: &[usize],
     routing_features: &[usize],
     phi_features: &[usize],
 ) -> Vec<PerLeafReport> {
     use std::collections::BTreeMap;
     // First pass: count training samples per leaf id.
+    let mut train_counts: BTreeMap<u32, u64> = BTreeMap::new();
+    let mut routing_buf = vec![0.0f64; N_ROUTING_FEATURES];
+    for &i in train_idx {
+        let row = dataset.row(i);
+        for (out, &feat_idx) in routing_buf.iter_mut().zip(routing_features) {
+            *out = row[feat_idx];
+        }
+        let prefix = g.encode_prefix(&routing_buf).expect("encode prefix");
+        let evidence = g.descend(&prefix);
+        *train_counts.entry(evidence.leaf_id).or_insert(0) += 1;
+    }
+
+    // Second pass: walk test samples, recording predicted prob +
+    // label per leaf. Used to compute per-leaf test_accuracy +
+    // test_brier + test_mean_predicted.
+    let mut test_per_leaf: BTreeMap<u32, Vec<(f64, f64)>> = BTreeMap::new();
+    let mut phi_buf = vec![0.0f64; N_PHI_FEATURES];
+    for &i in test_idx {
+        let row = dataset.row(i);
+        for (out, &feat_idx) in routing_buf.iter_mut().zip(routing_features) {
+            *out = row[feat_idx];
+        }
+        for (out, &feat_idx) in phi_buf.iter_mut().zip(phi_features) {
+            *out = row[feat_idx];
+        }
+        let prefix = g.encode_prefix(&routing_buf).expect("encode prefix");
+        let evidence = g.descend(&prefix);
+        let leaf_mean = g
+            .blr_predict_with_fallback(evidence.leaf_id, &phi_buf)
+            .map(|(m, _, _, _)| m)
+            .unwrap_or(0.0);
+        let root_mean = g
+            .blr_predict_with_fallback(0, &phi_buf)
+            .map(|(m, _, _, _)| m)
+            .unwrap_or(0.0);
+        let p = 0.5 * (leaf_mean + root_mean);
+        test_per_leaf
+            .entry(evidence.leaf_id)
+            .or_default()
+            .push((p.clamp(PROB_EPS, 1.0 - PROB_EPS), dataset.labels[i]));
+    }
+
+    let mean_phi = compute_mean_phi(dataset, train_idx, phi_features);
+    let mut reports = Vec::with_capacity(train_counts.len());
+    for (leaf_id, n_train_samples) in train_counts {
+        let (mean, leverage, ale, _resolved) = g
+            .blr_predict_with_fallback(leaf_id, &mean_phi)
+            .expect("predict at populated leaf must succeed");
+
+        let (n_test_samples, test_accuracy, test_mean_predicted, test_brier) = match test_per_leaf
+            .get(&leaf_id)
+        {
+            None => (0u64, 0.0, 0.0, 0.0),
+            Some(samples) => {
+                let n = samples.len() as f64;
+                let mut correct = 0usize;
+                let mut sum_p = 0.0f64;
+                let mut sum_brier = 0.0f64;
+                for &(p, y) in samples {
+                    let pred = if p > 0.30 { 1.0 } else { 0.0 };
+                    if (pred - y).abs() < 0.5 {
+                        correct += 1;
+                    }
+                    sum_p += p;
+                    sum_brier += (p - y).powi(2);
+                }
+                (
+                    samples.len() as u64,
+                    (correct as f64) / n,
+                    sum_p / n,
+                    sum_brier / n,
+                )
+            }
+        };
+
+        reports.push(PerLeafReport {
+            leaf_id,
+            n_train_samples,
+            mean_blr_prediction: mean,
+            epistemic_leverage: leverage,
+            aleatoric_var: ale,
+            n_test_samples,
+            test_accuracy,
+            test_mean_predicted,
+            test_brier,
+        });
+    }
+    reports
+}
+
+/// Compute graph-level route utilization from the train-sample
+/// counts. Pure function over `(g, dataset, train_idx,
+/// routing_features)`; deterministic from inputs.
+pub(crate) fn compute_route_utilization(
+    g: &AdaptiveBeliefGraph,
+    dataset: &Dataset,
+    train_idx: &[usize],
+    routing_features: &[usize],
+) -> RouteUtilization {
+    use std::collections::BTreeMap;
+    // Identify all leaves (deepest level of the pre-allocated tree).
+    // For a pre-allocated branching^depth tree the leaves are the
+    // last `branching^depth` node-ids — but we discover them
+    // dynamically so the computation works for any tree shape.
+    let mut leaf_ids: Vec<u32> = Vec::new();
+    for nid in 0..(g.node_count()) {
+        let n = &g.nodes[nid as usize];
+        // Leaf = node with no children. With pre-allocated trees
+        // every non-leaf has the full branching children, so we
+        // check via the children enum.
+        if matches!(n.children, cjc_abng::AdaptiveChildren::None) {
+            leaf_ids.push(nid);
+        }
+    }
+    let total_leaves = leaf_ids.len();
+
+    // Count training samples per leaf.
     let mut counts: BTreeMap<u32, u64> = BTreeMap::new();
     let mut routing_buf = vec![0.0f64; N_ROUTING_FEATURES];
     for &i in train_idx {
@@ -1136,21 +1335,41 @@ pub(crate) fn collect_per_leaf_reports(
         *counts.entry(evidence.leaf_id).or_insert(0) += 1;
     }
 
-    let mean_phi = compute_mean_phi(dataset, train_idx, phi_features);
-    let mut reports = Vec::with_capacity(counts.len());
-    for (leaf_id, n_train_samples) in counts {
-        let (mean, leverage, ale, _resolved) = g
-            .blr_predict_with_fallback(leaf_id, &mean_phi)
-            .expect("predict at populated leaf must succeed");
-        reports.push(PerLeafReport {
-            leaf_id,
-            n_train_samples,
-            mean_blr_prediction: mean,
-            epistemic_leverage: leverage,
-            aleatoric_var: ale,
-        });
+    let populated_leaves = counts.len();
+    let dead_leaves = total_leaves.saturating_sub(populated_leaves);
+
+    let mut populated_counts: Vec<u64> = counts.values().copied().collect();
+    populated_counts.sort();
+
+    let (min_p, max_p, mean_p, std_p) = if populated_counts.is_empty() {
+        (0, 0, 0.0, 0.0)
+    } else {
+        let min = *populated_counts.first().unwrap();
+        let max = *populated_counts.last().unwrap();
+        let n = populated_counts.len() as f64;
+        let sum: u64 = populated_counts.iter().sum();
+        let mean = (sum as f64) / n;
+        let var = populated_counts
+            .iter()
+            .map(|&c| {
+                let d = (c as f64) - mean;
+                d * d
+            })
+            .sum::<f64>()
+            / n;
+        let std = var.sqrt();
+        (min, max, mean, std)
+    };
+
+    RouteUtilization {
+        total_leaves,
+        populated_leaves,
+        dead_leaves,
+        min_samples_per_populated_leaf: min_p,
+        max_samples_per_leaf: max_p,
+        mean_samples_per_populated_leaf: mean_p,
+        std_samples_per_populated_leaf: std_p,
     }
-    reports
 }
 
 fn hex32(bytes: &[u8; 32]) -> String {
@@ -2040,6 +2259,180 @@ fn baseline_calibration_real_data_15_seed_mean() {
     assert!(
         ece_mean <= 0.25,
         "real-data 15-seed ECE mean {ece_mean} exceeds 0.25"
+    );
+}
+
+// ── Route-utilization + per-route calibration gates ─────────────────
+
+#[test]
+fn baseline_route_utilization_shape() {
+    // Pin the route-utilization contract:
+    //   * total_leaves matches the pre-allocated tree
+    //     (`branching^depth`).
+    //   * populated_leaves + dead_leaves = total_leaves.
+    //   * All populated leaves have at least 1 sample.
+    //   * Mean samples per populated leaf > 0.
+    //   * Sum of train counts across populated leaves matches
+    //     the total train set size (no leakage to non-leaf nodes).
+    let dataset = synthetic_dataset(1);
+    let result = run_trial(1, &dataset);
+    let u = &result.route_utilization;
+
+    let expected_total = (N_BINS_PER_FEATURE as usize).pow(N_ROUTING_FEATURES as u32);
+    assert_eq!(
+        u.total_leaves, expected_total,
+        "expected {expected_total} leaves at branching^depth = {}^{}, got {}",
+        N_BINS_PER_FEATURE, N_ROUTING_FEATURES, u.total_leaves
+    );
+    assert_eq!(
+        u.populated_leaves + u.dead_leaves,
+        u.total_leaves,
+        "populated + dead must equal total"
+    );
+    assert!(u.populated_leaves > 0, "no populated leaves");
+    assert!(
+        u.min_samples_per_populated_leaf >= 1,
+        "populated leaf with 0 samples: {}",
+        u.min_samples_per_populated_leaf
+    );
+    assert!(u.max_samples_per_leaf >= u.min_samples_per_populated_leaf);
+    assert!(u.mean_samples_per_populated_leaf > 0.0);
+    assert!(u.std_samples_per_populated_leaf.is_finite());
+
+    eprintln!(
+        "[route-util-synth]  total={} populated={} dead={} \
+         min={} max={} mean={:.2} std={:.2}",
+        u.total_leaves,
+        u.populated_leaves,
+        u.dead_leaves,
+        u.min_samples_per_populated_leaf,
+        u.max_samples_per_leaf,
+        u.mean_samples_per_populated_leaf,
+        u.std_samples_per_populated_leaf
+    );
+}
+
+#[test]
+fn baseline_route_utilization_real_data() {
+    // Real-data analog of `baseline_route_utilization_shape`. Real
+    // BC's discriminative features have non-Gaussian distributions
+    // (some are bounded, some are heavy-tailed), so utilization
+    // can differ noticeably from synthetic. Pins:
+    //   * The same structural-shape invariants apply
+    //   * Logs the actual distribution for the artifact producer
+    //     to consume
+    let Some(mut dataset) = load_real_dataset() else {
+        eprintln!("[baseline] real dataset not loadable; skip");
+        return;
+    };
+    standardize_in_place(&mut dataset);
+    let result = run_trial(1, &dataset);
+    let u = &result.route_utilization;
+
+    let expected_total = (N_BINS_PER_FEATURE as usize).pow(N_ROUTING_FEATURES as u32);
+    assert_eq!(u.total_leaves, expected_total);
+    assert_eq!(u.populated_leaves + u.dead_leaves, u.total_leaves);
+    assert!(u.populated_leaves > 0);
+    assert!(u.min_samples_per_populated_leaf >= 1);
+
+    eprintln!(
+        "[route-util-real]   total={} populated={} dead={} \
+         min={} max={} mean={:.2} std={:.2}",
+        u.total_leaves,
+        u.populated_leaves,
+        u.dead_leaves,
+        u.min_samples_per_populated_leaf,
+        u.max_samples_per_leaf,
+        u.mean_samples_per_populated_leaf,
+        u.std_samples_per_populated_leaf
+    );
+}
+
+#[test]
+fn baseline_route_utilization_is_deterministic() {
+    // Same seed + same dataset → byte-equal route utilization
+    // stats. Pure-arithmetic computation; pins against any future
+    // refactor that introduces non-determinism into the sample-
+    // routing path.
+    let dataset = synthetic_dataset(1);
+    let first = run_trial(1, &dataset);
+    for run in 1..5u32 {
+        let r = run_trial(1, &dataset);
+        let a = &r.route_utilization;
+        let b = &first.route_utilization;
+        assert_eq!(a.total_leaves, b.total_leaves, "run {run}: total drifted");
+        assert_eq!(
+            a.populated_leaves, b.populated_leaves,
+            "run {run}: populated count drifted"
+        );
+        assert_eq!(
+            a.dead_leaves, b.dead_leaves,
+            "run {run}: dead count drifted"
+        );
+        assert_eq!(
+            a.min_samples_per_populated_leaf, b.min_samples_per_populated_leaf,
+            "run {run}: min drifted"
+        );
+        assert_eq!(
+            a.max_samples_per_leaf, b.max_samples_per_leaf,
+            "run {run}: max drifted"
+        );
+        assert_eq!(
+            a.mean_samples_per_populated_leaf.to_bits(),
+            b.mean_samples_per_populated_leaf.to_bits(),
+            "run {run}: mean bits drifted"
+        );
+        assert_eq!(
+            a.std_samples_per_populated_leaf.to_bits(),
+            b.std_samples_per_populated_leaf.to_bits(),
+            "run {run}: std bits drifted"
+        );
+    }
+}
+
+#[test]
+fn baseline_per_leaf_test_stats_sum_to_n_test() {
+    // Sum of `n_test_samples` across populated leaves must equal
+    // the total test set size. If any test sample routes to a
+    // dead leaf, the `PerLeafReport` for that leaf wouldn't be
+    // emitted (only populated leaves get reports), so the sum
+    // would be < n_test. Catches that drift mode.
+    //
+    // Also pins:
+    //   * Every reported leaf has either 0 test samples (a leaf
+    //     that train-populated but test missed) or finite
+    //     test_accuracy / test_brier / test_mean_predicted.
+    let dataset = synthetic_dataset(1);
+    let (_, reports) = run_trial_with_reports(1, &dataset);
+    let n_test_via_reports: u64 = reports.iter().map(|r| r.n_test_samples).sum();
+    let (_, test_idx) = train_test_split(&dataset, 1);
+    let n_test_expected = test_idx.len() as u64;
+    assert!(
+        n_test_via_reports <= n_test_expected,
+        "report sum {n_test_via_reports} > expected {n_test_expected}"
+    );
+
+    for report in &reports {
+        if report.n_test_samples == 0 {
+            // No test samples → metrics are 0.0 by convention.
+            assert_eq!(report.test_accuracy, 0.0);
+            assert_eq!(report.test_mean_predicted, 0.0);
+            assert_eq!(report.test_brier, 0.0);
+        } else {
+            assert!(report.test_accuracy.is_finite());
+            assert!(report.test_mean_predicted.is_finite());
+            assert!(report.test_brier.is_finite());
+            assert!(report.test_accuracy >= 0.0 && report.test_accuracy <= 1.0);
+            assert!(report.test_mean_predicted >= 0.0 && report.test_mean_predicted <= 1.0);
+            assert!(report.test_brier >= 0.0 && report.test_brier <= 1.0);
+        }
+    }
+
+    eprintln!(
+        "[per-leaf-test] {} populated leaves received {}/{} test samples",
+        reports.iter().filter(|r| r.n_test_samples > 0).count(),
+        n_test_via_reports,
+        n_test_expected
     );
 }
 
