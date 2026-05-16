@@ -2477,3 +2477,919 @@ fn baseline_real_data_determinism_5_runs_same_seed() {
         );
     }
 }
+
+// ════════════════════════════════════════════════════════════════════
+// Phase 0.9 artifact producer
+// ════════════════════════════════════════════════════════════════════
+//
+// Writes a bundle of Phase 0.9 baseline measurement artifacts to
+// TWO directories:
+//   1. `bench_results/phase_0_9_baseline/` — repo-tracked,
+//      byte-stable. CI / regression detection.
+//   2. `$USERPROFILE/Downloads/phase_0_9_baseline/` — personal
+//      share copy for LinkedIn / Instagram / blog posts.
+//
+// Outputs:
+//   * `wisconsin_bc_summary.md`          — human-readable headline
+//   * `wisconsin_bc_real_15runs.csv`     — 15 real-BC trial rows
+//   * `wisconsin_bc_synthetic_5runs.csv` — 5 synthetic trial rows
+//   * `wisconsin_bc_per_leaf_seed1.csv`  — per-leaf reports
+//   * `wisconsin_bc_chain_heads.txt`     — chain heads + Merkle roots
+//   * `wisconsin_bc_accuracy.svg`        — accuracy box plot
+//   * `wisconsin_bc_route_utilization.svg` — leaves bar chart
+//   * `wisconsin_bc_per_leaf_calibration.svg` — per-leaf scatter
+//   * `wisconsin_bc_runtime.svg`         — per-seed wall-clock bars
+//                                          (non-deterministic; not
+//                                          asserted byte-stable)
+//
+// Run with: cargo test --test abng --release -- --ignored \
+//                       baseline_wisconsin_bc_produce_artifacts
+
+const ARTIFACT_SUBDIR: &str = "phase_0_9_baseline";
+
+/// Return both target paths for a given filename: the canonical
+/// repo-tracked path under `bench_results/` and the user's
+/// `Downloads/` share path. Either may be unavailable; callers
+/// must use `try_write_to` which silently skips missing parents.
+fn artifact_output_paths(filename: &str) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::with_capacity(2);
+
+    // 1. bench_results/phase_0_9_baseline/<filename> — always
+    let mut bench = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    bench.push("bench_results");
+    bench.push(ARTIFACT_SUBDIR);
+    bench.push(filename);
+    out.push(bench);
+
+    // 2. ~/Downloads/phase_0_9_baseline/<filename> — best effort
+    // (env var lookup; falls back gracefully on CI / Linux)
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .ok();
+    if let Some(home) = home {
+        let mut dl = std::path::PathBuf::from(home);
+        dl.push("Downloads");
+        dl.push(ARTIFACT_SUBDIR);
+        dl.push(filename);
+        out.push(dl);
+    }
+
+    out
+}
+
+/// Write `content` to all paths returned by `artifact_output_paths`.
+/// Creates parent directories as needed. Silent skip on directory-
+/// create failures (so CI environments without `$HOME/Downloads`
+/// don't fail the artifact-producer test).
+fn write_artifact(filename: &str, content: &[u8]) {
+    for path in artifact_output_paths(filename) {
+        if let Some(parent) = path.parent() {
+            if std::fs::create_dir_all(parent).is_err() {
+                continue;
+            }
+        }
+        let _ = std::fs::write(&path, content);
+    }
+}
+
+/// Format a u64 as `1,234,567` with thousands separators. Used in
+/// summary.md numbers for human readability.
+fn fmt_thousands(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    let bytes = s.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if i > 0 && (bytes.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(b as char);
+    }
+    out
+}
+
+// ── CSV writers ─────────────────────────────────────────────────────
+
+/// Render the 15-seed real-BC trial sweep to CSV (one row per
+/// seed). Columns:
+///   seed, accuracy, brier, nll, ece, populated_leaves, dead_leaves,
+///   min_samples, max_samples, mean_samples, chain_head, merkle_root
+fn render_real_runs_csv(real_trials: &[(u64, TrialResult, u128)]) -> String {
+    let mut out = String::new();
+    out.push_str("seed,accuracy,brier,nll,ece,populated_leaves,dead_leaves,\
+                  min_samples_per_pop_leaf,max_samples_per_leaf,\
+                  mean_samples_per_pop_leaf,wall_clock_ms,chain_head_hex,merkle_root_hex\n");
+    for (seed, r, elapsed_ms) in real_trials {
+        let u = &r.route_utilization;
+        out.push_str(&format!(
+            "{seed},{:.6},{:.6},{:.6},{:.6},{},{},{},{},{:.4},{},{},{}\n",
+            r.accuracy,
+            r.calibration.brier_score,
+            r.calibration.nll,
+            r.calibration.ece_10_bins,
+            u.populated_leaves,
+            u.dead_leaves,
+            u.min_samples_per_populated_leaf,
+            u.max_samples_per_leaf,
+            u.mean_samples_per_populated_leaf,
+            elapsed_ms,
+            r.chain_head_hex,
+            r.merkle_root_hex,
+        ));
+    }
+    out
+}
+
+/// Synthetic 5-trial sweep. Same columns as real, minus the
+/// route-utilization dynamic fields (synthetic always populates
+/// every leaf, so they'd be constants).
+fn render_synthetic_csv(syn_trials: &[(u64, TrialResult, u128)]) -> String {
+    let mut out = String::new();
+    out.push_str(
+        "seed,accuracy,brier,nll,ece,populated_leaves,dead_leaves,\
+                  wall_clock_ms,chain_head_hex,merkle_root_hex\n",
+    );
+    for (seed, r, elapsed_ms) in syn_trials {
+        let u = &r.route_utilization;
+        out.push_str(&format!(
+            "{seed},{:.6},{:.6},{:.6},{:.6},{},{},{},{},{}\n",
+            r.accuracy,
+            r.calibration.brier_score,
+            r.calibration.nll,
+            r.calibration.ece_10_bins,
+            u.populated_leaves,
+            u.dead_leaves,
+            elapsed_ms,
+            r.chain_head_hex,
+            r.merkle_root_hex,
+        ));
+    }
+    out
+}
+
+/// Per-leaf report bundle for one (dataset, seed). One row per
+/// populated leaf.
+fn render_per_leaf_csv(reports: &[PerLeafReport]) -> String {
+    let mut out = String::new();
+    out.push_str(
+        "leaf_id,n_train_samples,mean_blr_prediction,epistemic_leverage,\
+                  aleatoric_var,n_test_samples,test_accuracy,test_mean_predicted,\
+                  test_brier\n",
+    );
+    for r in reports {
+        out.push_str(&format!(
+            "{},{},{:.6},{:.6},{:.6},{},{:.6},{:.6},{:.6}\n",
+            r.leaf_id,
+            r.n_train_samples,
+            r.mean_blr_prediction,
+            r.epistemic_leverage,
+            r.aleatoric_var,
+            r.n_test_samples,
+            r.test_accuracy,
+            r.test_mean_predicted,
+            r.test_brier,
+        ));
+    }
+    out
+}
+
+/// Chain heads + Merkle roots for both dataset sweeps. Plain text;
+/// easy to diff across runs.
+fn render_chain_heads_txt(
+    syn_trials: &[(u64, TrialResult, u128)],
+    real_trials: &[(u64, TrialResult, u128)],
+) -> String {
+    let mut out = String::new();
+    out.push_str(
+        "# Phase 0.9 Wisconsin BC chain heads + Merkle roots\n# Determinism contract: same seed produces byte-equal chain_head\n# and merkle_root across runs. Across seeds the heads MUST differ.\n\n",
+    );
+    out.push_str("## Synthetic (5 seeds)\n\n");
+    for (seed, r, _) in syn_trials {
+        out.push_str(&format!(
+            "  seed={seed:<3} chain_head={}\n              merkle_root={}\n",
+            r.chain_head_hex, r.merkle_root_hex
+        ));
+    }
+    out.push_str("\n## Real Wisconsin BC (15 seeds)\n\n");
+    for (seed, r, _) in real_trials {
+        out.push_str(&format!(
+            "  seed={seed:<3} chain_head={}\n              merkle_root={}\n",
+            r.chain_head_hex, r.merkle_root_hex
+        ));
+    }
+    out
+}
+
+// ── summary.md writer ───────────────────────────────────────────────
+
+fn render_summary_md(
+    syn_trials: &[(u64, TrialResult, u128)],
+    real_trials: &[(u64, TrialResult, u128)],
+    real_per_leaf: &[PerLeafReport],
+) -> String {
+    let real_accs: Vec<f64> = real_trials.iter().map(|(_, r, _)| r.accuracy).collect();
+    let real_acc_mean: f64 = real_accs.iter().sum::<f64>() / real_accs.len() as f64;
+    let real_acc_min = real_accs.iter().cloned().fold(f64::INFINITY, f64::min);
+    let real_acc_max = real_accs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
+    let real_brier_mean: f64 = real_trials
+        .iter()
+        .map(|(_, r, _)| r.calibration.brier_score)
+        .sum::<f64>()
+        / real_trials.len() as f64;
+    let real_nll_mean: f64 = real_trials
+        .iter()
+        .map(|(_, r, _)| r.calibration.nll)
+        .sum::<f64>()
+        / real_trials.len() as f64;
+    let real_ece_mean: f64 = real_trials
+        .iter()
+        .map(|(_, r, _)| r.calibration.ece_10_bins)
+        .sum::<f64>()
+        / real_trials.len() as f64;
+
+    let syn = &syn_trials[0].1;
+    let real_seed1 = &real_trials[0].1;
+
+    let mut md = String::new();
+    md.push_str("# Phase 0.9 Wisconsin Breast Cancer — Baseline Summary\n\n");
+    md.push_str("Computational Jacobian Core (CJC-Lang) — Adaptive Belief\n");
+    md.push_str("Neighborhood Graph (ABNG). Phase 0.9 Track P close-out.\n\n");
+    md.push_str("## Headline\n\n");
+    md.push_str(&format!(
+        "* **Real Wisconsin BC 15-seed mean accuracy: {:.4}** (min {:.4}, max {:.4})\n",
+        real_acc_mean, real_acc_min, real_acc_max
+    ));
+    md.push_str(&format!(
+        "* Synthetic seed=1 accuracy: {:.4} (Bayes-optimal LDA ≈ 0.998)\n",
+        syn.accuracy
+    ));
+    md.push_str(&format!(
+        "* 5-run determinism gate: ✓ byte-equal chain heads at fixed seed (both datasets)\n"
+    ));
+    md.push_str("\n## Architecture (Phase 0.9 baseline config)\n\n");
+    md.push_str("| Knob | Value | Rationale |\n");
+    md.push_str("|---|---|---|\n");
+    md.push_str(&format!(
+        "| `N_ROUTING_FEATURES` | {} | Top-K F-score features used for routing |\n",
+        N_ROUTING_FEATURES
+    ));
+    md.push_str(&format!(
+        "| `N_BINS_PER_FEATURE` | {} | Binary splits per routing feature |\n",
+        N_BINS_PER_FEATURE
+    ));
+    md.push_str(&format!(
+        "| `N_PHI_FEATURES` | {} | All standardized features in the BLR phi |\n",
+        N_PHI_FEATURES
+    ));
+    md.push_str(&format!(
+        "| Tree | 2^{} = {} leaves | Pre-allocated full-depth |\n",
+        N_ROUTING_FEATURES,
+        (N_BINS_PER_FEATURE as usize).pow(N_ROUTING_FEATURES as u32)
+    ));
+    md.push_str("| Ensemble | leaf + root | Bayesian fallback layer (the Phase 0.9 architectural insight) |\n");
+    md.push_str("| Threshold | 0.30 | Calibration-tuned for the ensemble average |\n");
+    md.push_str("| Train/test split | 80/20 stratified | Preserves 357/212 class ratio per seed |\n");
+    md.push_str("\n## Calibration (test-set, leaf+root ensemble)\n\n");
+    md.push_str("| Metric | Real BC seed=1 | Real BC 15-seed mean | Synthetic seed=1 |\n");
+    md.push_str("|---|---:|---:|---:|\n");
+    md.push_str(&format!(
+        "| Accuracy | {:.4} | {:.4} | {:.4} |\n",
+        real_seed1.accuracy, real_acc_mean, syn.accuracy
+    ));
+    md.push_str(&format!(
+        "| Brier    | {:.4} | {:.4} | {:.4} |\n",
+        real_seed1.calibration.brier_score,
+        real_brier_mean,
+        syn.calibration.brier_score
+    ));
+    md.push_str(&format!(
+        "| NLL      | {:.4} | {:.4} | {:.4} |\n",
+        real_seed1.calibration.nll, real_nll_mean, syn.calibration.nll
+    ));
+    md.push_str(&format!(
+        "| ECE (10 bins) | {:.4} | {:.4} | {:.4} |\n",
+        real_seed1.calibration.ece_10_bins, real_ece_mean, syn.calibration.ece_10_bins
+    ));
+
+    md.push_str("\n## Route utilization (real BC seed=1)\n\n");
+    let u = &real_seed1.route_utilization;
+    md.push_str(&format!(
+        "* **{}** total leaves (pre-allocated `branching^depth` tree)\n",
+        u.total_leaves
+    ));
+    md.push_str(&format!(
+        "* **{}** populated leaves (received ≥ 1 train sample)\n",
+        u.populated_leaves
+    ));
+    md.push_str(&format!(
+        "* **{}** dead leaves (routes the codebook can produce but the data never visits)\n",
+        u.dead_leaves
+    ));
+    md.push_str(&format!(
+        "* Per-populated-leaf train counts: min={}, max={}, mean={:.2}, std={:.2}\n",
+        u.min_samples_per_populated_leaf,
+        u.max_samples_per_leaf,
+        u.mean_samples_per_populated_leaf,
+        u.std_samples_per_populated_leaf
+    ));
+
+    md.push_str(&format!(
+        "\n## Audit chain (one trial, deterministic)\n\n* Total audit events: {} ({})\n",
+        real_seed1.audit_event_count,
+        fmt_thousands(real_seed1.audit_event_count as u64)
+    ));
+    md.push_str(&format!(
+        "* Chain head: `{}`\n",
+        &real_seed1.chain_head_hex[..16]
+    ));
+    md.push_str(&format!(
+        "* Merkle root: `{}`\n",
+        &real_seed1.merkle_root_hex[..16]
+    ));
+
+    md.push_str("\n## Files in this bundle\n\n");
+    md.push_str("| File | Bytes (approx) | Description |\n");
+    md.push_str("|---|---:|---|\n");
+    md.push_str("| `wisconsin_bc_summary.md` | this file | human-readable headline |\n");
+    md.push_str("| `wisconsin_bc_real_15runs.csv` | ~3 KB | 15 real-BC trial rows |\n");
+    md.push_str("| `wisconsin_bc_synthetic_5runs.csv` | ~1 KB | 5 synthetic trial rows |\n");
+    md.push_str(&format!(
+        "| `wisconsin_bc_per_leaf_seed1.csv` | ~2 KB | {} populated leaves (seed=1, real BC) |\n",
+        real_per_leaf.len()
+    ));
+    md.push_str("| `wisconsin_bc_chain_heads.txt` | ~3 KB | 20 chain heads + Merkle roots |\n");
+    md.push_str("| `wisconsin_bc_accuracy.svg` | ~5 KB | accuracy box plot (deterministic) |\n");
+    md.push_str("| `wisconsin_bc_route_utilization.svg` | ~5 KB | per-leaf sample bars (deterministic) |\n");
+    md.push_str("| `wisconsin_bc_per_leaf_calibration.svg` | ~5 KB | calibration scatter (deterministic) |\n");
+    md.push_str("| `wisconsin_bc_runtime.svg` | ~4 KB | wall-clock per seed (NOT byte-stable) |\n");
+
+    md.push_str("\n## Reproduce\n\n```bash\ncargo test --test abng --release -- --ignored \\\n  baseline_wisconsin_bc_produce_artifacts\n```\n\n");
+    md.push_str("Generated 2026-05-16 by `claude/abng-phase-0-9`.\n");
+    md
+}
+
+// ── SVG renderers ───────────────────────────────────────────────────
+
+const SVG_W: i32 = 1200;
+const SVG_H: i32 = 675;
+
+/// Common SVG header — opens the `<svg>` tag, sets viewBox, sticks
+/// a `<style>` block in for fonts + colors. All subsequent helpers
+/// emit content into the body.
+fn svg_header(title: &str, subtitle: &str) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        r##"<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {SVG_W} {SVG_H}" width="{SVG_W}" height="{SVG_H}" font-family="ui-monospace, Menlo, Consolas, monospace">
+  <style>
+    .title    {{ font-size: 24px; font-weight: bold; fill: #1a1a1a; }}
+    .subtitle {{ font-size: 13px; fill: #555; }}
+    .axis     {{ stroke: #888; stroke-width: 1.5; fill: none; }}
+    .grid     {{ stroke: #ddd; stroke-width: 1; stroke-dasharray: 2,3; }}
+    .label    {{ font-size: 12px; fill: #333; }}
+    .axis-label {{ font-size: 13px; fill: #555; font-weight: bold; }}
+    .value    {{ font-size: 11px; fill: #fff; font-weight: bold; }}
+    .bar      {{ fill: #1976d2; }}
+    .bar-dead {{ fill: #c62828; }}
+    .bar-syn  {{ fill: #66bb6a; }}
+    .floor    {{ stroke: #f57c00; stroke-width: 2; stroke-dasharray: 4,4; }}
+    .point    {{ fill: #1976d2; stroke: #0d47a1; stroke-width: 0.8; }}
+    .diagonal {{ stroke: #888; stroke-width: 1.5; stroke-dasharray: 3,3; }}
+    .footer   {{ font-size: 10px; fill: #999; }}
+  </style>
+  <rect width="100%" height="100%" fill="#fafafa" />
+  <text x="40" y="46" class="title">{title}</text>
+  <text x="40" y="68" class="subtitle">{subtitle}</text>
+"##
+    ));
+    out
+}
+
+fn svg_footer() -> String {
+    format!(
+        r##"  <text x="40" y="{}" class="footer">CJC-Lang ABNG · Phase 0.9 baseline · 2026-05-16 · github.com/sethorus30 (rendered deterministically from `cargo test --ignored baseline_wisconsin_bc_produce_artifacts`)</text>
+</svg>
+"##,
+        SVG_H - 18
+    )
+}
+
+/// Box plot of 15 real-BC accuracies + synthetic point.
+/// Y axis = accuracy in [0.85, 1.005]. Horizontal floor line at 0.95.
+fn render_accuracy_svg(
+    syn_trials: &[(u64, TrialResult, u128)],
+    real_trials: &[(u64, TrialResult, u128)],
+) -> String {
+    let real_accs: Vec<f64> = {
+        let mut a: Vec<f64> = real_trials.iter().map(|(_, r, _)| r.accuracy).collect();
+        a.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        a
+    };
+    let n = real_accs.len();
+    let q = |p: f64| -> f64 {
+        let idx = (p * (n - 1) as f64).round() as usize;
+        real_accs[idx.min(n - 1)]
+    };
+    let min_a = real_accs[0];
+    let max_a = real_accs[n - 1];
+    let q1 = q(0.25);
+    let med = q(0.50);
+    let q3 = q(0.75);
+    let mean: f64 = real_accs.iter().sum::<f64>() / n as f64;
+
+    // Y-axis: accuracy in [0.85, 1.005]
+    let y_min = 0.85;
+    let y_max = 1.005;
+    let plot_top = 130i32;
+    let plot_bot = 580i32;
+    let y_of = |a: f64| -> i32 {
+        let frac = (a - y_min) / (y_max - y_min);
+        plot_bot - ((frac * (plot_bot - plot_top) as f64) as i32)
+    };
+
+    let mut out = svg_header(
+        "Wisconsin BC accuracy — Phase 0.9 baseline",
+        &format!(
+            "15 real-BC seeds: mean {:.4}, min {:.4}, max {:.4} · synthetic seed=1: {:.4} · floor 0.95",
+            mean,
+            min_a,
+            max_a,
+            syn_trials[0].1.accuracy
+        ),
+    );
+
+    // Axes + horizontal gridlines at 0.85, 0.90, 0.95, 1.00
+    out.push_str(&format!(
+        r##"  <line x1="120" y1="{plot_top}" x2="120" y2="{plot_bot}" class="axis" />
+  <line x1="120" y1="{plot_bot}" x2="{}" y2="{plot_bot}" class="axis" />
+"##,
+        SVG_W - 80
+    ));
+    for &g in &[0.85, 0.90, 0.95, 1.00] {
+        let y = y_of(g);
+        out.push_str(&format!(
+            r##"  <line x1="120" y1="{y}" x2="{}" y2="{y}" class="grid" />
+  <text x="110" y="{}" text-anchor="end" class="label">{:.2}</text>
+"##,
+            SVG_W - 80,
+            y + 4,
+            g
+        ));
+    }
+    // Floor line at 0.95
+    let floor_y = y_of(0.95);
+    out.push_str(&format!(
+        r##"  <line x1="120" y1="{floor_y}" x2="{}" y2="{floor_y}" class="floor" />
+  <text x="{}" y="{}" class="label" fill="#f57c00">0.95 floor (Phase 0.9 target)</text>
+"##,
+        SVG_W - 80,
+        SVG_W - 88,
+        floor_y - 6,
+    ));
+
+    // Box plot for real BC, centered around x = 400
+    let cx = 400i32;
+    let half_w = 130i32;
+    let q1y = y_of(q1);
+    let q3y = y_of(q3);
+    let medy = y_of(med);
+    let miny = y_of(min_a);
+    let maxy = y_of(max_a);
+    out.push_str(&format!(
+        r##"  <!-- Box plot: real BC -->
+  <rect x="{}" y="{q3y}" width="{}" height="{}" fill="#1976d2" fill-opacity="0.18" stroke="#0d47a1" stroke-width="1.6" />
+  <line x1="{}" y1="{medy}" x2="{}" y2="{medy}" stroke="#0d47a1" stroke-width="2.4" />
+  <line x1="{cx}" y1="{q1y}" x2="{cx}" y2="{miny}" stroke="#0d47a1" stroke-width="1.4" />
+  <line x1="{cx}" y1="{q3y}" x2="{cx}" y2="{maxy}" stroke="#0d47a1" stroke-width="1.4" />
+  <line x1="{}" y1="{miny}" x2="{}" y2="{miny}" stroke="#0d47a1" stroke-width="1.4" />
+  <line x1="{}" y1="{maxy}" x2="{}" y2="{maxy}" stroke="#0d47a1" stroke-width="1.4" />
+"##,
+        cx - half_w,
+        2 * half_w,
+        q1y - q3y,
+        cx - half_w,
+        cx + half_w,
+        cx - 30,
+        cx + 30,
+        cx - 30,
+        cx + 30,
+    ));
+
+    // Individual point dots for each real-BC seed
+    for (i, &a) in real_accs.iter().enumerate() {
+        // Jitter horizontally based on rank
+        let jitter = ((i as i32) - (n as i32 / 2)) * 5;
+        out.push_str(&format!(
+            r##"  <circle cx="{}" cy="{}" r="4.2" class="point" />
+"##,
+            cx + jitter,
+            y_of(a)
+        ));
+    }
+    out.push_str(&format!(
+        r##"  <text x="{cx}" y="608" text-anchor="middle" class="axis-label">Real Wisconsin BC (15 seeds)</text>
+"##
+    ));
+
+    // Synthetic point at x = 850
+    let sx = 850i32;
+    let sy = y_of(syn_trials[0].1.accuracy);
+    out.push_str(&format!(
+        r##"  <!-- Synthetic point -->
+  <circle cx="{sx}" cy="{sy}" r="11" fill="#66bb6a" stroke="#2e7d32" stroke-width="2" />
+  <text x="{sx}" y="608" text-anchor="middle" class="axis-label">Synthetic (+1.8σ, seed=1)</text>
+"##
+    ));
+
+    // Y-axis label
+    out.push_str(&format!(
+        r##"  <text x="80" y="{}" text-anchor="middle" class="axis-label" transform="rotate(-90 80 {})">test-set accuracy</text>
+"##,
+        (plot_top + plot_bot) / 2,
+        (plot_top + plot_bot) / 2,
+    ));
+
+    out.push_str(&svg_footer());
+    out
+}
+
+/// Bar chart: samples per leaf for real BC seed=1. Dead leaves
+/// (zero-sample) shown as short red markers; populated as blue
+/// bars sized by sample count.
+fn render_route_utilization_svg(reports: &[PerLeafReport], total_leaves: usize) -> String {
+    // Build all-leaf vector: populated reports + zero entries for
+    // dead leaves so the x axis shows every leaf id contiguously.
+    let mut by_leaf: Vec<(u32, u64)> = (0..total_leaves as u32).map(|id| (id, 0u64)).collect();
+    for r in reports {
+        if (r.leaf_id as usize) < total_leaves {
+            by_leaf[r.leaf_id as usize].1 = r.n_train_samples;
+        }
+    }
+    let max_n: u64 = by_leaf.iter().map(|(_, n)| *n).max().unwrap_or(1).max(1);
+    let n_populated = by_leaf.iter().filter(|(_, n)| *n > 0).count();
+    let n_dead = total_leaves - n_populated;
+
+    let plot_top = 130i32;
+    let plot_bot = 580i32;
+    let plot_left = 120i32;
+    let plot_right = SVG_W - 80;
+    let plot_w = plot_right - plot_left;
+    let bar_slot = plot_w / total_leaves as i32;
+    let bar_w = (bar_slot * 7 / 10).max(8);
+
+    let mut out = svg_header(
+        "Wisconsin BC route utilization — Real BC seed=1",
+        &format!(
+            "{total_leaves} pre-allocated leaves · {n_populated} populated · {n_dead} dead routes · BLR fallback handles dead routes by walking up to a populated ancestor",
+        ),
+    );
+
+    // Horizontal gridlines every 50 samples up to ceiling
+    let y_ceil = ((max_n as f64 / 50.0).ceil() * 50.0) as u64;
+    let y_of = |c: u64| -> i32 {
+        let frac = c as f64 / y_ceil.max(1) as f64;
+        plot_bot - ((frac * (plot_bot - plot_top) as f64) as i32)
+    };
+    out.push_str(&format!(
+        r##"  <line x1="{plot_left}" y1="{plot_top}" x2="{plot_left}" y2="{plot_bot}" class="axis" />
+  <line x1="{plot_left}" y1="{plot_bot}" x2="{plot_right}" y2="{plot_bot}" class="axis" />
+"##
+    ));
+    let mut g = 0u64;
+    while g <= y_ceil {
+        let y = y_of(g);
+        out.push_str(&format!(
+            r##"  <line x1="{plot_left}" y1="{y}" x2="{plot_right}" y2="{y}" class="grid" />
+  <text x="{}" y="{}" text-anchor="end" class="label">{g}</text>
+"##,
+            plot_left - 8,
+            y + 4
+        ));
+        g += 50;
+    }
+
+    // Bars
+    for (i, (leaf_id, count)) in by_leaf.iter().enumerate() {
+        let x = plot_left + (i as i32) * bar_slot + (bar_slot - bar_w) / 2;
+        let bar_class = if *count == 0 { "bar-dead" } else { "bar" };
+        let h = if *count == 0 {
+            8
+        } else {
+            plot_bot - y_of(*count)
+        };
+        let y = if *count == 0 { plot_bot - 8 } else { y_of(*count) };
+        out.push_str(&format!(
+            r##"  <rect x="{x}" y="{y}" width="{bar_w}" height="{h}" class="{bar_class}" />
+  <text x="{}" y="{}" text-anchor="middle" class="label">{leaf_id}</text>
+"##,
+            x + bar_w / 2,
+            plot_bot + 16,
+        ));
+        if *count > 0 {
+            out.push_str(&format!(
+                r##"  <text x="{}" y="{}" text-anchor="middle" class="label" fill="#0d47a1">{count}</text>
+"##,
+                x + bar_w / 2,
+                y - 6,
+            ));
+        }
+    }
+
+    // Axis labels
+    out.push_str(&format!(
+        r##"  <text x="{}" y="612" text-anchor="middle" class="axis-label">leaf id (sorted by tree pre-allocation order)</text>
+  <text x="80" y="{}" text-anchor="middle" class="axis-label" transform="rotate(-90 80 {})">train samples routed to leaf</text>
+"##,
+        (plot_left + plot_right) / 2,
+        (plot_top + plot_bot) / 2,
+        (plot_top + plot_bot) / 2,
+    ));
+
+    out.push_str(&svg_footer());
+    out
+}
+
+/// Scatter plot of per-leaf test-set calibration. X axis = mean
+/// predicted probability, Y axis = empirical test accuracy. Points
+/// near the diagonal are well-calibrated. Point area ∝ n_test.
+fn render_per_leaf_calibration_svg(reports: &[PerLeafReport]) -> String {
+    let plot_top = 130i32;
+    let plot_bot = 580i32;
+    let plot_left = 160i32;
+    let plot_right = SVG_W - 80;
+
+    let x_of = |p: f64| -> i32 {
+        plot_left + ((p.clamp(0.0, 1.0)) * (plot_right - plot_left) as f64) as i32
+    };
+    let y_of = |a: f64| -> i32 {
+        plot_bot - ((a.clamp(0.0, 1.0)) * (plot_bot - plot_top) as f64) as i32
+    };
+
+    let n_with_test = reports.iter().filter(|r| r.n_test_samples > 0).count();
+    let mut out = svg_header(
+        "Wisconsin BC per-leaf calibration — Real BC seed=1",
+        &format!(
+            "{n_with_test} populated leaves with test samples · x=mean predicted prob · y=empirical accuracy · point area ∝ n_test · dashed = perfect calibration"
+        ),
+    );
+
+    // Axes + gridlines at 0.0, 0.25, 0.5, 0.75, 1.0
+    out.push_str(&format!(
+        r##"  <line x1="{plot_left}" y1="{plot_top}" x2="{plot_left}" y2="{plot_bot}" class="axis" />
+  <line x1="{plot_left}" y1="{plot_bot}" x2="{plot_right}" y2="{plot_bot}" class="axis" />
+"##
+    ));
+    for &g in &[0.0, 0.25, 0.5, 0.75, 1.0] {
+        let y = y_of(g);
+        let x = x_of(g);
+        out.push_str(&format!(
+            r##"  <line x1="{plot_left}" y1="{y}" x2="{plot_right}" y2="{y}" class="grid" />
+  <text x="{}" y="{}" text-anchor="end" class="label">{g:.2}</text>
+  <line x1="{x}" y1="{plot_top}" x2="{x}" y2="{plot_bot}" class="grid" />
+  <text x="{x}" y="{}" text-anchor="middle" class="label">{g:.2}</text>
+"##,
+            plot_left - 8,
+            y + 4,
+            plot_bot + 16,
+        ));
+    }
+
+    // Diagonal (perfect calibration line)
+    out.push_str(&format!(
+        r##"  <line x1="{}" y1="{}" x2="{}" y2="{}" class="diagonal" />
+"##,
+        x_of(0.0),
+        y_of(0.0),
+        x_of(1.0),
+        y_of(1.0),
+    ));
+
+    // Points: one per populated leaf with test samples
+    for r in reports.iter().filter(|r| r.n_test_samples > 0) {
+        let x = x_of(r.test_mean_predicted);
+        let y = y_of(r.test_accuracy);
+        // Radius scales as sqrt(n_test) so area ∝ n_test
+        let radius = (3.0 + 1.3 * (r.n_test_samples as f64).sqrt()).min(28.0);
+        // Color by miscalibration magnitude
+        let dev = (r.test_mean_predicted - r.test_accuracy).abs();
+        let fill = if dev < 0.05 {
+            "#66bb6a"
+        } else if dev < 0.15 {
+            "#1976d2"
+        } else {
+            "#f57c00"
+        };
+        out.push_str(&format!(
+            r##"  <circle cx="{x}" cy="{y}" r="{radius:.1}" fill="{fill}" fill-opacity="0.6" stroke="#1a1a1a" stroke-width="0.8" />
+  <text x="{}" y="{}" text-anchor="middle" class="label" font-size="10" fill="#1a1a1a">L{}</text>
+"##,
+            x,
+            y + 4,
+            r.leaf_id
+        ));
+    }
+
+    // Axis labels
+    out.push_str(&format!(
+        r##"  <text x="{}" y="612" text-anchor="middle" class="axis-label">mean predicted probability (ensemble)</text>
+  <text x="100" y="{}" text-anchor="middle" class="axis-label" transform="rotate(-90 100 {})">empirical test accuracy</text>
+"##,
+        (plot_left + plot_right) / 2,
+        (plot_top + plot_bot) / 2,
+        (plot_top + plot_bot) / 2,
+    ));
+
+    out.push_str(&svg_footer());
+    out
+}
+
+/// Bar chart: per-seed wall-clock for the 15 real-BC trials. NOT
+/// byte-stable across runs (clock readings vary) — the test
+/// writes it but doesn't assert byte-equality.
+fn render_runtime_svg(real_trials: &[(u64, TrialResult, u128)]) -> String {
+    let max_ms: u128 = real_trials
+        .iter()
+        .map(|(_, _, ms)| *ms)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let total_ms: u128 = real_trials.iter().map(|(_, _, ms)| *ms).sum();
+
+    let plot_top = 130i32;
+    let plot_bot = 580i32;
+    let plot_left = 120i32;
+    let plot_right = SVG_W - 80;
+    let plot_w = plot_right - plot_left;
+    let n = real_trials.len();
+    let bar_slot = plot_w / n as i32;
+    let bar_w = (bar_slot * 7 / 10).max(20);
+
+    let y_ceil = ((max_ms as f64 / 100.0).ceil() * 100.0) as u128;
+    let y_of = |ms: u128| -> i32 {
+        let frac = ms as f64 / y_ceil.max(1) as f64;
+        plot_bot - ((frac * (plot_bot - plot_top) as f64) as i32)
+    };
+
+    let mut out = svg_header(
+        "Wisconsin BC per-seed wall-clock — Real BC, leaf+root ensemble",
+        &format!(
+            "{n} seeds · total {} ms · per-seed max {} ms · NON-DETERMINISTIC (clock readings vary)",
+            total_ms, max_ms
+        ),
+    );
+
+    // Axes
+    out.push_str(&format!(
+        r##"  <line x1="{plot_left}" y1="{plot_top}" x2="{plot_left}" y2="{plot_bot}" class="axis" />
+  <line x1="{plot_left}" y1="{plot_bot}" x2="{plot_right}" y2="{plot_bot}" class="axis" />
+"##
+    ));
+    let step = (y_ceil / 5).max(1);
+    let mut g = 0u128;
+    while g <= y_ceil {
+        let y = y_of(g);
+        out.push_str(&format!(
+            r##"  <line x1="{plot_left}" y1="{y}" x2="{plot_right}" y2="{y}" class="grid" />
+  <text x="{}" y="{}" text-anchor="end" class="label">{g}</text>
+"##,
+            plot_left - 8,
+            y + 4
+        ));
+        g += step;
+    }
+
+    // Bars
+    for (i, (seed, _, ms)) in real_trials.iter().enumerate() {
+        let x = plot_left + (i as i32) * bar_slot + (bar_slot - bar_w) / 2;
+        let y = y_of(*ms);
+        let h = plot_bot - y;
+        out.push_str(&format!(
+            r##"  <rect x="{x}" y="{y}" width="{bar_w}" height="{h}" class="bar" />
+  <text x="{}" y="{}" text-anchor="middle" class="label">{seed}</text>
+  <text x="{}" y="{}" text-anchor="middle" class="label" fill="#0d47a1">{ms}</text>
+"##,
+            x + bar_w / 2,
+            plot_bot + 16,
+            x + bar_w / 2,
+            y - 6,
+        ));
+    }
+
+    // Axis labels
+    out.push_str(&format!(
+        r##"  <text x="{}" y="612" text-anchor="middle" class="axis-label">seed</text>
+  <text x="80" y="{}" text-anchor="middle" class="axis-label" transform="rotate(-90 80 {})">wall-clock per trial (ms)</text>
+"##,
+        (plot_left + plot_right) / 2,
+        (plot_top + plot_bot) / 2,
+        (plot_top + plot_bot) / 2,
+    ));
+
+    out.push_str(&svg_footer());
+    out
+}
+
+// ── The producer test ───────────────────────────────────────────────
+
+#[test]
+#[ignore = "writes bench_results/phase_0_9_baseline/ + ~/Downloads/phase_0_9_baseline/"]
+fn baseline_wisconsin_bc_produce_artifacts() {
+    // Stage 1 — synthetic (5 trials @ same dataset, varied seeds).
+    let syn_dataset = synthetic_dataset(1);
+    let mut syn_trials: Vec<(u64, TrialResult, u128)> = Vec::with_capacity(5);
+    for seed in 1..=5u64 {
+        let t0 = std::time::Instant::now();
+        let r = run_trial(seed, &syn_dataset);
+        let ms = t0.elapsed().as_millis();
+        syn_trials.push((seed, r, ms));
+    }
+
+    // Stage 2 — real BC (15 trials).
+    let Some(mut real_dataset) = load_real_dataset() else {
+        eprintln!(
+            "[producer] real dataset not loadable; producing synthetic-only artifacts."
+        );
+        // Synthetic-only fallback intentionally minimal.
+        write_artifact(
+            "wisconsin_bc_synthetic_5runs.csv",
+            render_synthetic_csv(&syn_trials).as_bytes(),
+        );
+        return;
+    };
+    standardize_in_place(&mut real_dataset);
+    let mut real_trials: Vec<(u64, TrialResult, u128)> = Vec::with_capacity(N_REAL_DATA_SEEDS);
+    for seed in 1..=(N_REAL_DATA_SEEDS as u64) {
+        let t0 = std::time::Instant::now();
+        let r = run_trial(seed, &real_dataset);
+        let ms = t0.elapsed().as_millis();
+        real_trials.push((seed, r, ms));
+    }
+
+    // Stage 3 — per-leaf reports for real BC seed=1.
+    let (_, real_per_leaf) = run_trial_with_reports(1, &real_dataset);
+
+    // Stage 4 — render every artifact and write to both locations.
+    let real_csv = render_real_runs_csv(&real_trials);
+    let syn_csv = render_synthetic_csv(&syn_trials);
+    let per_leaf_csv = render_per_leaf_csv(&real_per_leaf);
+    let chain_heads = render_chain_heads_txt(&syn_trials, &real_trials);
+    let summary_md = render_summary_md(&syn_trials, &real_trials, &real_per_leaf);
+    let accuracy_svg = render_accuracy_svg(&syn_trials, &real_trials);
+    let route_util_svg = render_route_utilization_svg(
+        &real_per_leaf,
+        real_trials[0].1.route_utilization.total_leaves,
+    );
+    let calib_svg = render_per_leaf_calibration_svg(&real_per_leaf);
+    let runtime_svg = render_runtime_svg(&real_trials);
+
+    write_artifact("wisconsin_bc_real_15runs.csv", real_csv.as_bytes());
+    write_artifact("wisconsin_bc_synthetic_5runs.csv", syn_csv.as_bytes());
+    write_artifact("wisconsin_bc_per_leaf_seed1.csv", per_leaf_csv.as_bytes());
+    write_artifact("wisconsin_bc_chain_heads.txt", chain_heads.as_bytes());
+    write_artifact("wisconsin_bc_summary.md", summary_md.as_bytes());
+    write_artifact("wisconsin_bc_accuracy.svg", accuracy_svg.as_bytes());
+    write_artifact(
+        "wisconsin_bc_route_utilization.svg",
+        route_util_svg.as_bytes(),
+    );
+    write_artifact(
+        "wisconsin_bc_per_leaf_calibration.svg",
+        calib_svg.as_bytes(),
+    );
+    write_artifact("wisconsin_bc_runtime.svg", runtime_svg.as_bytes());
+
+    // Stage 5 — determinism gates on byte-stable outputs. Re-render
+    // each non-clock-dependent artifact and assert equality. The
+    // runtime SVG is intentionally skipped (clock readings vary).
+    let accuracy_svg2 = render_accuracy_svg(&syn_trials, &real_trials);
+    let route_util_svg2 = render_route_utilization_svg(
+        &real_per_leaf,
+        real_trials[0].1.route_utilization.total_leaves,
+    );
+    let calib_svg2 = render_per_leaf_calibration_svg(&real_per_leaf);
+    let real_csv2 = render_real_runs_csv(&real_trials);
+    let per_leaf_csv2 = render_per_leaf_csv(&real_per_leaf);
+
+    assert_eq!(accuracy_svg, accuracy_svg2, "accuracy SVG not byte-stable");
+    assert_eq!(
+        route_util_svg, route_util_svg2,
+        "route utilization SVG not byte-stable"
+    );
+    assert_eq!(
+        calib_svg, calib_svg2,
+        "per-leaf calibration SVG not byte-stable"
+    );
+    assert_eq!(real_csv, real_csv2, "real 15-runs CSV not byte-stable");
+    assert_eq!(per_leaf_csv, per_leaf_csv2, "per-leaf CSV not byte-stable");
+
+    // Stage 6 — log a summary so `cargo test --ignored -- --nocapture`
+    // shows the headline numbers.
+    let mean = real_trials.iter().map(|(_, r, _)| r.accuracy).sum::<f64>()
+        / real_trials.len() as f64;
+    eprintln!("[producer] wrote 9 artifacts to bench_results/ and ~/Downloads/{ARTIFACT_SUBDIR}/");
+    eprintln!("[producer] real BC 15-seed mean accuracy = {:.4}", mean);
+    eprintln!(
+        "[producer] synthetic seed=1 accuracy = {:.4}",
+        syn_trials[0].1.accuracy
+    );
+}

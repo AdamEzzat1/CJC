@@ -1,0 +1,49 @@
+# Phase 0.9 Wisconsin BC chain heads + Merkle roots
+# Determinism contract: same seed produces byte-equal chain_head
+# and merkle_root across runs. Across seeds the heads MUST differ.
+
+## Synthetic (5 seeds)
+
+  seed=1   chain_head=e9ed695778f42a925c7bb9716fdf5a9ee84abbf45fcc518f737446c2e8406a3c
+              merkle_root=ad2f4b38253597d0d1e359d618eb65236e8b358b3e03fff3610d535dd310cd28
+  seed=2   chain_head=34cff5bc91b051b8d008c751080b251f13c0ebea5cc7b9d651e86c6c21a50a47
+              merkle_root=1bf1d3c399232ce04212688bad443c2849e709f564d9e37b931e5aac89264522
+  seed=3   chain_head=7e11838a3627ec318371142a8521a6c129cdde381f25f7d196330be030ae0b3e
+              merkle_root=f7645b3ae1e5899edb8c634306150f388f8c660a04b8e9fd335d8796f790ef0e
+  seed=4   chain_head=0903dcaa40202f2f139350811acf24343a8fac2b74bcea3ec4aa78007c803e1e
+              merkle_root=f7e0a98023c1252b77cbd611aa34a5de8403b6334b8705fb97c2dfed2ce38dfa
+  seed=5   chain_head=2d30c1827c3e8aeab1b944a9069fb737c7279756caf9c0da7751051d190c7656
+              merkle_root=55e053e5ba835b37bbbc71b9c6cf862ad9e2c0c161986c93a2def4a609139644
+
+## Real Wisconsin BC (15 seeds)
+
+  seed=1   chain_head=557bbbde077507961f673a02b51d13d7d7939dfbccf58037aa174baf0f121b09
+              merkle_root=4603a2d2b58538293799ef0d06a7d704a2956f204e2e461de77d81152ee55b02
+  seed=2   chain_head=ca20d01913a8dfd807f9884b66f3f6457d574d19076ce9f772f936792fb505f0
+              merkle_root=e17196b03227b36dff1734498f4361c048ae807c1532b8547ba12731b5991feb
+  seed=3   chain_head=3ff1121bc1951f1b5f44417a90d96b0de4bcd37a5083d26eb2c30ebcda93b520
+              merkle_root=e1f76df2b4ae1f3d91db9caeb1eec00b16dc6ffaaf4f3b73522cb1089e49070d
+  seed=4   chain_head=3b0a5422c89c9035005b22352abd292417e16fc807191ac92aa80cc3f9c2c0cd
+              merkle_root=9d463937da04c95f05347c2ceb88fa6f79bd7825e360d59bf351f1c7e6da630b
+  seed=5   chain_head=cd082ebbf18ae774e0701f6b71eec932f98581aec18825181f6201a3b5d6b50e
+              merkle_root=203bcb97c88fcc13941b1e589bb37542d5d619da73192f88d1d81b2da65ad674
+  seed=6   chain_head=270c658272d590c70275c9498f0265307c3c9e47a85544432862f183c12a68dd
+              merkle_root=272a909f47453eae84f6332fbc51c2b2d90afb187fdc920a7be9de2e58b66b59
+  seed=7   chain_head=82e6aaf064f50a05ac7f273544b51ac746774b01ee2c2ebe89e07a819e446658
+              merkle_root=ee2469b7a9b51e32938ee04132cba3d91872be77aaaf075a724d66e5a865f82c
+  seed=8   chain_head=8fe16ca0100227d58084155f8c95beafb448a5c3ed44d92bd9098683611235f2
+              merkle_root=a80bab094b41d125ae55f934162f127a36a51344e01619f8e786da134adb7e3b
+  seed=9   chain_head=669300c68bc66a4759f7e235b2279c69e2f0289228a3e22600dac2e21117c300
+              merkle_root=921e06f7f65a9ee7d9fb165ad212431e74c90c79629768e318113ac52b13cc99
+  seed=10  chain_head=e41ba0e4fe222936f949a2dae2e1333457943a74c51d0af67d16c2e07a8098b0
+              merkle_root=daf3f442455d34ac3b6a51f7d18e414b990864dd01559505b3ba26467eba6a8f
+  seed=11  chain_head=9294ee9b3428121092da41d3db4535ae0505ebc8716c82b2dca29a54d89b3110
+              merkle_root=df1e67ed5ec715265c48db5aa8e8261285ead84d550aad6b70bd0955a08d644b
+  seed=12  chain_head=5fcb6c4eb846896102035382489a5bafb8d79208482940567ff22021aa589434
+              merkle_root=8f2350abbe413b425f7df54ba934933a395d75e924fba824d5e2ea6d04eb3196
+  seed=13  chain_head=8571f81bab28d38b2d134f4402a42ad3521df0f70492ff922a23335488545477
+              merkle_root=268168d62ae0493ad487e061d9b3c2cdedccfd9c351008ad80fcfc05ba5b90b4
+  seed=14  chain_head=34b130c1c087fd67f7f6868064848412a0d599bce0c80a8c2cc34a753a4d76d2
+              merkle_root=1b61ca517c85da1cc5f8c9b1bcb0798dec8b5d7fd8aee572fbc60186807adef4
+  seed=15  chain_head=8c1d3cef8f66d5d32bc1f5100f8c3c37adb97bad8a52ebfbc763811468e21008
+              merkle_root=1505c5f1057e74a00b036598392ab09d4dae1f83b2186045e9e9841bf808b3b5

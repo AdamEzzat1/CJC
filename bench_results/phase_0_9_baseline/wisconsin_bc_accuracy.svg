@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" font-family="ui-monospace, Menlo, Consolas, monospace">
+  <style>
+    .title    { font-size: 24px; font-weight: bold; fill: #1a1a1a; }
+    .subtitle { font-size: 13px; fill: #555; }
+    .axis     { stroke: #888; stroke-width: 1.5; fill: none; }
+    .grid     { stroke: #ddd; stroke-width: 1; stroke-dasharray: 2,3; }
+    .label    { font-size: 12px; fill: #333; }
+    .axis-label { font-size: 13px; fill: #555; font-weight: bold; }
+    .value    { font-size: 11px; fill: #fff; font-weight: bold; }
+    .bar      { fill: #1976d2; }
+    .bar-dead { fill: #c62828; }
+    .bar-syn  { fill: #66bb6a; }
+    .floor    { stroke: #f57c00; stroke-width: 2; stroke-dasharray: 4,4; }
+    .point    { fill: #1976d2; stroke: #0d47a1; stroke-width: 0.8; }
+    .diagonal { stroke: #888; stroke-width: 1.5; stroke-dasharray: 3,3; }
+    .footer   { font-size: 10px; fill: #999; }
+  </style>
+  <rect width="100%" height="100%" fill="#fafafa" />
+  <text x="40" y="46" class="title">Wisconsin BC accuracy — Phase 0.9 baseline</text>
+  <text x="40" y="68" class="subtitle">15 real-BC seeds: mean 0.9519, min 0.9217, max 0.9913 · synthetic seed=1: 0.9739 · floor 0.95</text>
+  <line x1="120" y1="130" x2="120" y2="580" class="axis" />
+  <line x1="120" y1="580" x2="1120" y2="580" class="axis" />
+  <line x1="120" y1="580" x2="1120" y2="580" class="grid" />
+  <text x="110" y="584" text-anchor="end" class="label">0.85</text>
+  <line x1="120" y1="435" x2="1120" y2="435" class="grid" />
+  <text x="110" y="439" text-anchor="end" class="label">0.90</text>
+  <line x1="120" y1="290" x2="1120" y2="290" class="grid" />
+  <text x="110" y="294" text-anchor="end" class="label">0.95</text>
+  <line x1="120" y1="145" x2="1120" y2="145" class="grid" />
+  <text x="110" y="149" text-anchor="end" class="label">1.00</text>
+  <line x1="120" y1="290" x2="1120" y2="290" class="floor" />
+  <text x="1112" y="284" class="label" fill="#f57c00">0.95 floor (Phase 0.9 target)</text>
+  <!-- Box plot: real BC -->
+  <rect x="270" y="271" width="260" height="25" fill="#1976d2" fill-opacity="0.18" stroke="#0d47a1" stroke-width="1.6" />
+  <line x1="270" y1="296" x2="530" y2="296" stroke="#0d47a1" stroke-width="2.4" />
+  <line x1="400" y1="296" x2="400" y2="372" stroke="#0d47a1" stroke-width="1.4" />
+  <line x1="400" y1="271" x2="400" y2="170" stroke="#0d47a1" stroke-width="1.4" />
+  <line x1="370" y1="372" x2="430" y2="372" stroke="#0d47a1" stroke-width="1.4" />
+  <line x1="370" y1="170" x2="430" y2="170" stroke="#0d47a1" stroke-width="1.4" />
+  <circle cx="365" cy="372" r="4.2" class="point" />
+  <circle cx="370" cy="322" r="4.2" class="point" />
+  <circle cx="375" cy="322" r="4.2" class="point" />
+  <circle cx="380" cy="322" r="4.2" class="point" />
+  <circle cx="385" cy="296" r="4.2" class="point" />
+  <circle cx="390" cy="296" r="4.2" class="point" />
+  <circle cx="395" cy="296" r="4.2" class="point" />
+  <circle cx="400" cy="296" r="4.2" class="point" />
+  <circle cx="405" cy="271" r="4.2" class="point" />
+  <circle cx="410" cy="271" r="4.2" class="point" />
+  <circle cx="415" cy="271" r="4.2" class="point" />
+  <circle cx="420" cy="271" r="4.2" class="point" />
+  <circle cx="425" cy="271" r="4.2" class="point" />
+  <circle cx="430" cy="221" r="4.2" class="point" />
+  <circle cx="435" cy="170" r="4.2" class="point" />
+  <text x="400" y="608" text-anchor="middle" class="axis-label">Real Wisconsin BC (15 seeds)</text>
+  <!-- Synthetic point -->
+  <circle cx="850" cy="221" r="11" fill="#66bb6a" stroke="#2e7d32" stroke-width="2" />
+  <text x="850" y="608" text-anchor="middle" class="axis-label">Synthetic (+1.8σ, seed=1)</text>
+  <text x="80" y="355" text-anchor="middle" class="axis-label" transform="rotate(-90 80 355)">test-set accuracy</text>
+  <text x="40" y="657" class="footer">CJC-Lang ABNG · Phase 0.9 baseline · 2026-05-16 · github.com/sethorus30 (rendered deterministically from `cargo test --ignored baseline_wisconsin_bc_produce_artifacts`)</text>
+</svg>
