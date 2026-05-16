@@ -1,19 +1,24 @@
-# ABNG Phase 0.8 — Capabilities Reference
+# ABNG Phase 0.8 + 0.9 — Capabilities Reference
 
-**Last updated:** 2026-05-12 (post-D2b + D3 close-out).
-**Wire format:** v14 (`ABNG\x0E`).
+**Last updated:** 2026-05-16 (post-Phase-0.9 close-out).
+**Wire format:** v14 (`ABNG\x0E`) — unchanged through Phase 0.9.
 **Phase 0.8 status:** all 11 items shipped on `claude/abng-v14-wire-format`.
+**Phase 0.9 status:** Track P shipped + measurement layer + real-data
+integration on `claude/abng-phase-0-9` (17 commits past `a0a8266`).
 
-This doc is the single-page reference for the new ABNG
-capabilities introduced in Phase 0.8 — what each one enables,
-which API surfaces it lives behind, what the demo proves about
-it, and the concrete numbers it produced on the demo data.
+This doc is the single-page reference for ABNG capabilities
+introduced in Phase 0.8 and 0.9 — what each one enables, which
+API surfaces it lives behind, what the demo or test harness
+proves about it, and the concrete numbers it produced.
 
 For wire-format details (magic bytes, audit-event encoding,
 backward compatibility), see [`V14_MIGRATION.md`](V14_MIGRATION.md).
 For the design history and item-by-item rationale, see
-[`PHASE_0_8_HANDOFF.md`](PHASE_0_8_HANDOFF.md) and
-[`PHASE_0_8c_V14_HANDOFF.md`](PHASE_0_8c_V14_HANDOFF.md).
+[`PHASE_0_8_HANDOFF.md`](PHASE_0_8_HANDOFF.md),
+[`PHASE_0_8c_V14_HANDOFF.md`](PHASE_0_8c_V14_HANDOFF.md), and
+[`PHASE_0_9_STATUS.md`](PHASE_0_9_STATUS.md) (Phase 0.9 close-out).
+For the load-bearing Phase 0.9 architectural insights, see
+[`PHASE_0_9_ARCHITECTURE_INSIGHTS.md`](PHASE_0_9_ARCHITECTURE_INSIGHTS.md).
 
 ---
 
@@ -172,3 +177,339 @@ The headline capabilities split into "ship-ready for known consumers" and "infra
 | **B4** columnar audit | Indirectly — every A3 + C2 user benefits without knowing it. |
 
 The Phase 0.8 wins concentrate in a "future-ready" zone: the infrastructure for tamper-evident external attestation, scalable verification, and snapshot interop with the broader ecosystem is now in place. The next phase's job is bringing consumers to that infrastructure.
+
+---
+
+# Phase 0.9 — Capabilities Added
+
+Phase 0.9 was originally a baseline-validation phase. The
+in-flight scope expanded to include real-data integration, a
+calibration measurement layer, interpretability/route-utilization
+stats, an architectural insight (leaf+root ensemble), and a
+sharing-ready artifact bundle. Headline result: ABNG hits
+**0.9519 mean accuracy** across 15 seeds on UCI Wisconsin
+Breast Cancer — matching the published linear-classifier
+ceiling — with full deterministic audit, calibration metrics,
+and per-route interpretability.
+
+## Headline capability (the architectural insight)
+
+### P-Ensemble — Leaf+root Bayesian fallback
+
+**What it enables.** The graph trains the root BLR in parallel
+with the per-leaf BLRs, then averages leaf and root posterior
+means at evaluate time. The root BLR sees every training row and
+approximates the **global linear classifier** for the dataset.
+The per-leaf BLRs add local specialization for regions where the
+boundary isn't globally linear. Ensembling the two recovers
+both behaviors.
+
+**Why it's load-bearing.** On real Wisconsin BC, per-leaf BLR
+alone hit a soft ceiling at 0.944 (one point below the
+published LR ceiling of ~0.95). The leaf+root ensemble pushed
+mean accuracy to **0.9519**, closing the gap entirely. The
+insight generalizes:
+
+> **Invariant:** *Every adaptive local model must have access
+> to a calibrated global fallback unless explicitly disabled.*
+
+See [`PHASE_0_9_ARCHITECTURE_INSIGHTS.md`](PHASE_0_9_ARCHITECTURE_INSIGHTS.md)
+for the full design rationale.
+
+**API surface (test-harness level for Phase 0.9).** Implemented in
+the baseline harness via two paired calls per training row:
+
+```rust
+g.train_step(routing, phi, y)?;       // updates leaf BLR
+g.blr_update(0, phi, &[y])?;           // ALSO updates root BLR
+
+// At evaluate time:
+let leaf_mean = g.blr_predict_with_fallback(leaf_id, phi)?.0;
+let root_mean = g.blr_predict_with_fallback(0, phi)?.0;
+let ensemble = 0.5 * (leaf_mean + root_mean);
+```
+
+**Promotion path.** Phase 0.10+ will add a graph-level
+`FallbackMode` enum (`Disabled` / `RootEnsemble` /
+`AncestorChain`) so any caller can opt into the pattern without
+re-implementing the dual-train + ensemble logic.
+
+**Cost.** Doubles the per-row audit event count (1 `TrainStep`
++ 1 `BlrUpdated`). On real BC at 454 train rows, total audit
+events = 1,019 per trial.
+
+**Demo.** [`tests/abng/baseline_wisconsin_bc.rs`](../../tests/abng/baseline_wisconsin_bc.rs)
+* Workflow: train on 80% of UCI WDBC, evaluate on 20%, 15 seeds.
+* Numbers (15-seed sweep on real Wisconsin BC):
+  * Mean accuracy: **0.9519** (min 0.9217, max 0.9913) — matches LR ceiling.
+  * Without ensemble (pure per-leaf): 0.944. Ensemble delta: **+0.008**.
+  * On synthetic +1.8σ: 0.9739 (Bayes-optimal LDA ceiling ≈ 0.998).
+
+---
+
+## Measurement-layer capabilities
+
+### P-Calib — Calibration metric layer (Brier / NLL / ECE)
+
+**What it enables.** Every trial now reports trustworthiness
+metrics alongside accuracy. `CalibrationReport` is appended to
+`TrialResult`. Three metrics chosen because each catches a
+different miscalibration mode:
+
+* **Brier** = `mean((p - y)²)` — general prediction-quality MSE.
+* **NLL** = `-mean(y log p + (1-y) log(1-p))` — sensitive to
+  confidently-wrong predictions.
+* **ECE (10-bin)** = Expected Calibration Error — catches systematic
+  per-confidence-bucket miscalibration that Brier and NLL miss.
+
+**API surface (test-harness level for Phase 0.9).**
+
+```rust
+pub(crate) struct CalibrationReport {
+    pub brier_score: f64,
+    pub nll: f64,
+    pub ece_10_bins: f64,
+    pub n_test: usize,
+}
+
+pub(crate) fn evaluate_calibration(
+    g: &AdaptiveBeliefGraph,
+    dataset: &Dataset,
+    test_idx: &[usize],
+    routing_features: &[usize],
+    phi_features: &[usize],
+) -> CalibrationReport;
+```
+
+Used by `run_trial` (always computed) + the artifact producer
+(rendered in `wisconsin_bc_summary.md`).
+
+**Numbers (15-seed mean on real WDBC):**
+
+| Metric | Real BC | Synthetic +1.8σ | Notes |
+|---|---:|---:|---|
+| Brier | 0.0753 | 0.0163 | < 1/3 of "always-class-prior" baseline 0.234 |
+| NLL | 0.3603 | 0.0859 | finite, bounded |
+| ECE (10 bins) | 0.1268 | 0.0760 | tightenable via Platt scaling (Phase 0.10+) |
+
+**Determinism gate.** `baseline_calibration_is_deterministic_across_5_runs`
+asserts byte-equal Brier/NLL/ECE bits via `f64::to_bits()` across
+5 same-seed reruns.
+
+---
+
+### P-Routes — Route utilization stats
+
+**What it enables.** Graph-level visibility into how the data
+actually populates the routing tree. Distinguishes routes that
+exist (codebook can produce them) from routes that are visited
+(training data lands there).
+
+**API surface (test-harness level for Phase 0.9).**
+
+```rust
+pub(crate) struct RouteUtilization {
+    pub total_leaves: usize,
+    pub populated_leaves: usize,
+    pub dead_leaves: usize,
+    pub min_samples_per_populated_leaf: u64,
+    pub max_samples_per_leaf: u64,
+    pub mean_samples_per_populated_leaf: f64,
+    pub std_samples_per_populated_leaf: f64,
+}
+
+pub(crate) fn compute_route_utilization(
+    g: &AdaptiveBeliefGraph,
+    dataset: &Dataset,
+    train_idx: &[usize],
+    routing_features: &[usize],
+) -> RouteUtilization;
+```
+
+**Numbers (real WDBC, seed=1, 2⁴ binary tree):**
+
+* 16 total leaves, **12 populated, 4 dead**
+* Per-populated-leaf samples: min=1, max=**227 (50% of train)**, mean=37.83, std=66.99
+* The dead-routes finding is a real interpretability signal —
+  some combinations of top-4 F-score features simply don't occur
+  in real BC data, even though the codebook can produce them.
+
+**Demo.** SVG visualization at
+`bench_results/phase_0_9_baseline/wisconsin_bc_route_utilization.svg`
+(also rendered as PNG for LinkedIn/Instagram sharing).
+
+---
+
+### P-PerLeaf — Per-leaf test-set calibration
+
+**What it enables.** Every populated leaf reports its own
+test-set accuracy + mean predicted probability + Brier score,
+extending the existing `PerLeafReport` shape with test-set
+fields. The user-identified "Route 18: accuracy=96%,
+confidence=95%, ECE=0.01" pattern.
+
+**API surface (test-harness level).** `PerLeafReport` extended
+with `n_test_samples`, `test_accuracy`, `test_mean_predicted`,
+`test_brier`. Computed by `collect_per_leaf_reports(g, dataset,
+train_idx, test_idx, routing_features, phi_features)`.
+
+**Demo.** SVG scatter at
+`bench_results/phase_0_9_baseline/wisconsin_bc_per_leaf_calibration.svg`
+plots each populated leaf as a circle (x = mean predicted
+probability, y = empirical accuracy, area ∝ n_test), with a
+diagonal "perfect calibration" line.
+
+---
+
+## Infrastructure capabilities (Phase 0.9, no standalone demo)
+
+### P-Data — Bundled UCI Wisconsin BC dataset
+
+**What it enables.** Real-data baseline that works offline + is
+tamper-detectable. The UCI `wdbc.data` byte-stream is bundled at
+`tests/data/wisconsin_bc.csv` (124,103 bytes) with a pinned
+SHA-256 constant in the test source. The loader does
+hash-then-parse: soft-fail to synthetic on missing/tampered
+file, hard-panic on post-hash parse failure.
+
+**API surface.**
+
+```rust
+pub(crate) fn load_real_dataset() -> Option<Dataset>;
+pub(crate) fn standardize_in_place(dataset: &mut Dataset);
+```
+
+Pinned constants:
+
+```rust
+const REAL_DATASET_REL_PATH: &str = "tests/data/wisconsin_bc.csv";
+const REAL_DATASET_SHA256_HEX: &str =
+    "D606AF411F3E5BE8A317A5A8B652B425AAF0FF38CA683D5327FFFF94C3695F4A";
+```
+
+`.gitattributes` marks `tests/data/*` as `binary` to prevent
+cross-platform CRLF conversion from breaking the pinned hash.
+
+---
+
+### P-Harness — Phase 0.9 baseline test harness
+
+**What it enables.** Self-contained baseline rig (3,395 LOC in
+`tests/abng/baseline_wisconsin_bc.rs`) covering all Track P
+contracts: 5-run + 15-run determinism gates, F-score top-K
+selection, pre-allocated routing tree, leaf+root ensemble
+training, full evaluation surface, artifact production.
+
+**Test count.** **31 baseline tests** all green, plus 2
+`#[ignore]`'d (the artifact producer + the threshold-sweep
+diagnostic). Includes 4 distinct determinism gates:
+
+1. Synthetic 5-run gate (chain head + Merkle root + audit count + accuracy bits).
+2. Real-BC 5-run gate (same fields).
+3. Calibration metric 5-run gate (Brier + NLL + ECE bits via `to_bits()`).
+4. Route utilization 5-run gate (min/max/mean/std stat bits).
+
+---
+
+### P-Strat — Stratified train/test split
+
+**What it enables.** `train_test_split` preserves the dataset's
+class proportion (357/212 = 0.627/0.373 for WDBC) exactly in
+both train and test, by Fisher-Yates-shuffling within each
+class before taking the 80/20 cut. Without stratification,
+uniform random splits can produce test-set class-1 counts
+varying ±10 across seeds (a ~5σ hypergeometric draw), adding
+~0.05 of accuracy noise per seed.
+
+**Effect.** Empirical 15-seed accuracy variance dropped after
+stratification was added — the worst seeds improved more than
+the best seeds, tightening the distribution around the mean.
+
+---
+
+## Sharing-ready artifact bundle
+
+### P-Bundle — `bench_results/phase_0_9_baseline/`
+
+**What it enables.** Reproducible end-to-end artifact bundle
+generated by a single `#[ignore]`'d test:
+
+```bash
+cargo test --test abng --release -- --ignored \
+  baseline_wisconsin_bc_produce_artifacts
+```
+
+Writes to **two locations**:
+
+1. `bench_results/phase_0_9_baseline/` — repo-tracked, byte-stable,
+   committed alongside the source for CI regression detection.
+2. `~/Downloads/phase_0_9_baseline/` — personal share copy for
+   LinkedIn / Instagram / blog posts.
+
+**Files (9 total per bundle):**
+
+| File | Bytes | Description |
+|---|---:|---|
+| `wisconsin_bc_summary.md` | ~2.7 KB | Human-readable headline + config + metrics |
+| `wisconsin_bc_real_15runs.csv` | ~3 KB | One row per real-BC seed |
+| `wisconsin_bc_synthetic_5runs.csv` | ~1 KB | One row per synthetic seed |
+| `wisconsin_bc_per_leaf_seed1.csv` | ~1 KB | Per-leaf reports (real BC seed=1) |
+| `wisconsin_bc_chain_heads.txt` | ~4 KB | 20 chain heads + 20 Merkle roots |
+| `wisconsin_bc_accuracy.svg` | ~4 KB | Box plot + 0.95 floor line |
+| `wisconsin_bc_route_utilization.svg` | ~5 KB | Per-leaf bars, dead routes in red |
+| `wisconsin_bc_per_leaf_calibration.svg` | ~5 KB | Scatter + diagonal |
+| `wisconsin_bc_runtime.svg` | ~6 KB | Per-seed wall-clock (NOT byte-stable) |
+
+Plus PNG renders for LinkedIn (1200×675) and Instagram (1080×1080)
+in `~/Downloads/phase_0_9_baseline/social/`.
+
+`.gitattributes` forces LF line endings on `bench_results/**/*.{md,csv,txt,svg}`
+to keep the committed bytes consistent across platforms.
+
+---
+
+## Phase 0.9 gates this branch holds
+
+| Gate | Count |
+|---|---:|
+| `cargo test --test abng --release baseline_` | 31 (+ 2 #[ignore]'d) |
+| Synthetic 5-run determinism (chain head + Merkle + accuracy bits) | byte-equal ✓ |
+| Real-BC 5-run determinism (same fields) | byte-equal ✓ |
+| Synthetic accuracy floor (≥ 0.95) | 0.9739 ✓ |
+| Real-BC single-seed floor (≥ 0.90) | 0.9391 ✓ |
+| Real-BC 15-seed mean floor (≥ 0.95) | 0.9519 ✓ |
+| Real-BC per-seed floor (≥ 0.85) | min 0.9217 ✓ |
+| SHA-256 canaries (28 from Phase 0.8c, 9 re-locked) | unchanged ✓ |
+| All blog-mentioned features still present | zero regressions ✓ ([report](PHASE_0_9_BLOG_VERIFICATION.md)) |
+
+---
+
+## Honest framing (Phase 0.9 edition)
+
+| Capability | Has a current consumer? |
+|---|---|
+| **P-Ensemble** leaf+root | Yes — the baseline harness uses it today. Phase 0.10+ promotion to graph-level `FallbackMode` enum will broaden consumer surface. |
+| **P-Calib** calibration metrics | Yes — every `run_trial` call now reports them; blog / sharing material relies on the numbers. |
+| **P-Routes** route utilization | Yes — surfaces the "4 dead routes / one leaf holds 50% of train data" interpretability story directly. |
+| **P-PerLeaf** per-leaf calibration | Yes — per-route interpretability foundation; could grow into per-route abstain decisions in Phase 0.10+. |
+| **P-Data** bundled WDBC | Yes — the headline 0.9519 number depends on it. Pinning via SHA-256 means future Phase work can swap to other UCI datasets with the same hash-then-parse pattern. |
+| **P-Harness** baseline harness | Yes — every Phase 0.10+ perf/architecture change should re-run this harness as the comparison floor. |
+| **P-Strat** stratified split | Yes — tightens seed variance, makes 15-seed mean a more meaningful contract. |
+| **P-Bundle** artifact bundle | Yes — feeds the blog / LinkedIn / Instagram sharing pipeline directly. |
+
+The Phase 0.9 wins concentrate in **architectural insight +
+measurement layer + real-data validation** — they make ABNG's
+"accuracy + calibration + interpretability + determinism in one
+architecture" pitch defensible with numbers, not just claims.
+The next phase's job is to:
+
+1. Promote the leaf+root ensemble to a first-class graph feature.
+2. Tackle the Phase 0.8/0.9 perf-tracks (Q1 D-HARHT, R4 PGO+LTO,
+   S1+S2 cherry-picks) that were deferred in favor of the
+   user-driven scope expansion.
+3. Add organic Grow/Split to a Track P-like baseline so
+   cross-seed topology similarity becomes a measurable
+   interpretability metric.
+
+See [`PHASE_0_9_STATUS.md`](PHASE_0_9_STATUS.md) §5 ("Deferred
+items") for the full Phase 0.10+ candidate list.
