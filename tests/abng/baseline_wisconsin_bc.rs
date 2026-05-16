@@ -45,9 +45,18 @@
 //! * Per-leaf explainability report.
 //! * SVG + CSV output to `bench_results/phase_0_9_baseline/`.
 //! * Accuracy floor assertion (≥ 0.90 on real data).
-//! * Top-K feature selection via univariate F-score.
 //! * Multi-level tree expansion (`add_node` calls to populate the
 //!   routing tree past the root).
+//!
+//! # Track P work already shipped
+//!
+//! * Determinism gate (5 runs at the same seed produce byte-equal
+//!   chain_head + merkle_root + audit_event_count).
+//! * Seed-sensitivity gate (5 distinct seeds → 5 distinct chain
+//!   heads).
+//! * Top-K feature selection via univariate F-score (computed on
+//!   the train split; no test-set leakage). See
+//!   [`compute_f_scores_binary`] + [`select_top_k_features`].
 
 use cjc_abng::graph::AdaptiveBeliefGraph;
 use cjc_ad::pinn::Activation;
@@ -115,6 +124,11 @@ pub(crate) struct TrialResult {
     pub chain_head_hex: String,
     pub merkle_root_hex: String,
     pub audit_event_count: usize,
+    /// The `N_ROUTING_FEATURES` feature indices chosen by univariate
+    /// F-score on the training split. Pinned in the trial result so
+    /// tests can assert the selection is deterministic and that it
+    /// preferentially picks from the discriminative band.
+    pub routing_features: Vec<usize>,
 }
 
 // ── Deterministic RNG ────────────────────────────────────────────────
@@ -212,16 +226,137 @@ pub(crate) fn train_test_split(dataset: &Dataset, seed: u64) -> (Vec<usize>, Vec
     (train, test)
 }
 
+// ── Feature selection (univariate ANOVA F-score) ─────────────────────
+
+/// Compute the one-way ANOVA F-statistic per feature for a binary
+/// classification dataset. The F-statistic is the ratio of between-
+/// class variance to within-class variance (df = (1, n − 2) for two
+/// classes); larger F means a stronger univariate relationship
+/// between the feature and the class label.
+///
+/// The computation is a deterministic two-pass over the input
+/// (compute per-class means, then per-class sum-of-squares). No
+/// random number generation, no parallel reductions — every f64
+/// output is bit-stable across runs and platforms.
+///
+/// Returns a `Vec<(feature_idx, f_score)>` of length `n_features`
+/// in the natural feature order. Use [`select_top_k_features`] to
+/// extract the top-K indices in descending F-score order.
+///
+/// Degenerate cases:
+/// * Constant feature within both classes ⇒ within-class SS = 0;
+///   we return `f_score = 0.0` rather than a sentinel infinity so
+///   downstream sorts stay total-ordered.
+/// * Single class present ⇒ between-class SS = 0; F = 0.0.
+pub(crate) fn compute_f_scores_binary(
+    features: &[f64],
+    labels: &[f64],
+    n_samples: usize,
+    n_features: usize,
+) -> Vec<(usize, f64)> {
+    assert_eq!(features.len(), n_samples * n_features);
+    assert_eq!(labels.len(), n_samples);
+
+    // First pass: per-class counts and per-class sums per feature.
+    let mut n_class = [0usize; 2];
+    let mut sum_class: Vec<[f64; 2]> = vec![[0.0; 2]; n_features];
+    for i in 0..n_samples {
+        let c = if labels[i] > 0.5 { 1 } else { 0 };
+        n_class[c] += 1;
+        let row = &features[i * n_features..(i + 1) * n_features];
+        for (f, &x) in row.iter().enumerate() {
+            sum_class[f][c] += x;
+        }
+    }
+
+    // Per-class means + grand means.
+    let mut mean_class: Vec<[f64; 2]> = vec![[0.0; 2]; n_features];
+    let mut grand_mean: Vec<f64> = vec![0.0; n_features];
+    let n_total = (n_class[0] + n_class[1]) as f64;
+    for f in 0..n_features {
+        let m0 = if n_class[0] > 0 { sum_class[f][0] / (n_class[0] as f64) } else { 0.0 };
+        let m1 = if n_class[1] > 0 { sum_class[f][1] / (n_class[1] as f64) } else { 0.0 };
+        mean_class[f] = [m0, m1];
+        grand_mean[f] = (sum_class[f][0] + sum_class[f][1]) / n_total;
+    }
+
+    // Second pass: per-class within-class sum-of-squares per feature.
+    let mut ssw: Vec<f64> = vec![0.0; n_features];
+    for i in 0..n_samples {
+        let c = if labels[i] > 0.5 { 1 } else { 0 };
+        let row = &features[i * n_features..(i + 1) * n_features];
+        for (f, &x) in row.iter().enumerate() {
+            let d = x - mean_class[f][c];
+            ssw[f] += d * d;
+        }
+    }
+
+    // Compose the F-statistic per feature: F = MSB / MSW
+    //   MSB = (n_0·(m_0 − μ)² + n_1·(m_1 − μ)²) / 1
+    //   MSW = ssw / (n − 2)
+    let n_minus_2 = if n_total > 2.0 { n_total - 2.0 } else { 1.0 };
+    let n0 = n_class[0] as f64;
+    let n1 = n_class[1] as f64;
+    let mut out: Vec<(usize, f64)> = Vec::with_capacity(n_features);
+    for f in 0..n_features {
+        let d0 = mean_class[f][0] - grand_mean[f];
+        let d1 = mean_class[f][1] - grand_mean[f];
+        let ssb = n0 * d0 * d0 + n1 * d1 * d1;
+        let mse = ssw[f] / n_minus_2;
+        // Degenerate within-class variance → score floor at 0. A
+        // truly constant feature carries no information; treating it
+        // as +∞ would force it to the top of every sort despite that.
+        let f_score = if mse > 0.0 { ssb / mse } else { 0.0 };
+        out.push((f, f_score));
+    }
+    out
+}
+
+/// Return the top `k` feature indices sorted by descending F-score.
+/// Ties broken by ascending feature index — fully deterministic.
+///
+/// Panics if `k > scores.len()`.
+pub(crate) fn select_top_k_features(scores: &[(usize, f64)], k: usize) -> Vec<usize> {
+    assert!(k <= scores.len(), "k={k} exceeds n_features={}", scores.len());
+    let mut sorted: Vec<(usize, f64)> = scores.to_vec();
+    sorted.sort_by(|a, b| {
+        // Larger F-score first; tie-break by smaller index first.
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    sorted.into_iter().take(k).map(|(i, _)| i).collect()
+}
+
+/// Compute the top-`N_ROUTING_FEATURES` feature indices on the train
+/// portion of `dataset`. Used by [`run_trial`] to seed the codebook's
+/// routing dimensions. F-score is computed on **train data only** —
+/// no test-set leakage.
+pub(crate) fn select_routing_features(dataset: &Dataset, train_idx: &[usize]) -> Vec<usize> {
+    let n_train = train_idx.len();
+    let n_features = dataset.n_features;
+    let mut train_features: Vec<f64> = Vec::with_capacity(n_train * n_features);
+    let mut train_labels: Vec<f64> = Vec::with_capacity(n_train);
+    for &i in train_idx {
+        train_features.extend_from_slice(dataset.row(i));
+        train_labels.push(dataset.labels[i]);
+    }
+    let scores = compute_f_scores_binary(&train_features, &train_labels, n_train, n_features);
+    select_top_k_features(&scores, N_ROUTING_FEATURES)
+}
+
 // ── Graph construction ──────────────────────────────────────────────
 
 /// Build the ABNG graph for the baseline. Configures:
 ///
-/// * **Codebook:** routes on the first `N_ROUTING_FEATURES` features
+/// * **Codebook:** routes on the F-score-selected routing features
 ///   with `N_BINS_PER_FEATURE` bins per feature. Quantile boundaries
 ///   are fixed at `[-0.5, 0.0, 0.5]` (z-score-style) — this works
 ///   well for the synthetic generator (features are ~N(0, 1)) and
 ///   should be replaced with empirical quantiles when real data
-///   arrives.
+///   arrives. The codebook itself is feature-index-agnostic; the
+///   caller is responsible for extracting the right feature subset
+///   in the right order before calling `train_step` / `descend`.
 /// * **Leaf head:** input_dim = full feature count (30), no hidden
 ///   layers, output_dim = 1, no activation. The leaf-level BLR
 ///   sees the full feature vector as `phi`.
@@ -254,27 +389,36 @@ fn build_graph(seed: u64) -> AdaptiveBeliefGraph {
 // ── Trial harness ───────────────────────────────────────────────────
 
 /// Run one full training trial. Builds a graph from the seed, splits
-/// the dataset, trains via `train_step` over the train portion, and
-/// reports the chain head + Merkle root + audit count.
+/// the dataset, computes the F-score-selected routing features on the
+/// train portion (no test-set leakage), trains via `train_step`, and
+/// reports the chain head + Merkle root + audit count + chosen
+/// routing features.
 ///
 /// Determinism contract: same `seed` + same `dataset` ⇒ byte-equal
 /// output. This is the property the 5-run gate validates.
 pub(crate) fn run_trial(seed: u64, dataset: &Dataset) -> TrialResult {
     let mut g = build_graph(seed);
     let (train_idx, _test_idx) = train_test_split(dataset, seed);
+    let routing_features = select_routing_features(dataset, &train_idx);
 
+    // Extract the routing-feature subset into a small reusable buffer
+    // per row, then forward the full row as `phi`.
+    let mut routing_buf = vec![0.0f64; N_ROUTING_FEATURES];
     for &i in &train_idx {
         let row = dataset.row(i);
-        let routing = &row[..N_ROUTING_FEATURES];
+        for (out, &feat_idx) in routing_buf.iter_mut().zip(&routing_features) {
+            *out = row[feat_idx];
+        }
         let phi = row;
         let y = dataset.labels[i];
-        g.train_step(routing, phi, y).expect("train_step");
+        g.train_step(&routing_buf, phi, y).expect("train_step");
     }
 
     TrialResult {
         chain_head_hex: hex32(&g.chain_head),
         merkle_root_hex: hex32(&g.merkle_root()),
         audit_event_count: g.audit.len(),
+        routing_features,
     }
 }
 
@@ -394,4 +538,96 @@ fn baseline_trial_uses_train_step_audit_events() {
         (1..=10).contains(&setup_events),
         "expected 1..=10 setup events, got {setup_events}"
     );
+}
+
+#[test]
+fn baseline_f_score_picks_from_discriminative_band() {
+    // The synthetic generator shifts class 1 by +0.8σ on the first
+    // 10 features and leaves the other 20 as pure noise. The F-score
+    // top-3 selection should land in the discriminative band [0..10)
+    // with overwhelming probability for any of the 5 baseline seeds.
+    // We assert this exactly (no probabilistic slack) — if it ever
+    // misses, either the synthetic generator drifted or the F-score
+    // math regressed.
+    for seed in 1..=5u64 {
+        let dataset = synthetic_dataset(seed);
+        let (train_idx, _test_idx) = train_test_split(&dataset, seed);
+        let routing = select_routing_features(&dataset, &train_idx);
+        assert_eq!(routing.len(), N_ROUTING_FEATURES);
+        // All distinct.
+        let unique: std::collections::BTreeSet<usize> = routing.iter().copied().collect();
+        assert_eq!(unique.len(), N_ROUTING_FEATURES);
+        for &f in &routing {
+            assert!(
+                f < 10,
+                "seed {seed}: routing feature {f} is from the noise band [10..30); \
+                 F-score regression suspected"
+            );
+        }
+    }
+}
+
+#[test]
+fn baseline_f_score_is_deterministic_across_runs() {
+    // Pin the F-score computation: same seed + same dataset ⇒
+    // byte-equal F-scores AND byte-equal top-K selection. Both are
+    // pure-arithmetic two-pass reductions; this guards against any
+    // future refactor that introduces parallel reduction or
+    // unsorted iteration into the feature-selection path.
+    for seed in 1..=5u64 {
+        let dataset = synthetic_dataset(seed);
+        let (train_idx, _test_idx) = train_test_split(&dataset, seed);
+        let routing_a = select_routing_features(&dataset, &train_idx);
+        let routing_b = select_routing_features(&dataset, &train_idx);
+        assert_eq!(routing_a, routing_b, "seed {seed}: routing selection not deterministic");
+
+        // Underlying F-score vector also byte-equal.
+        let n_train = train_idx.len();
+        let mut train_features = Vec::with_capacity(n_train * N_FEATURES_TOTAL);
+        let mut train_labels = Vec::with_capacity(n_train);
+        for &i in &train_idx {
+            train_features.extend_from_slice(dataset.row(i));
+            train_labels.push(dataset.labels[i]);
+        }
+        let scores_a = compute_f_scores_binary(
+            &train_features, &train_labels, n_train, N_FEATURES_TOTAL,
+        );
+        let scores_b = compute_f_scores_binary(
+            &train_features, &train_labels, n_train, N_FEATURES_TOTAL,
+        );
+        assert_eq!(
+            scores_a.len(),
+            scores_b.len(),
+            "seed {seed}: F-score vector length unstable"
+        );
+        for (i, ((fa, sa), (fb, sb))) in scores_a.iter().zip(scores_b.iter()).enumerate() {
+            assert_eq!(fa, fb, "seed {seed}: feature index {i} mismatch");
+            assert_eq!(
+                sa.to_bits(),
+                sb.to_bits(),
+                "seed {seed}: F-score bits for feature {i} not byte-equal"
+            );
+        }
+    }
+}
+
+#[test]
+fn baseline_trial_records_routing_features() {
+    // Pin the contract that `run_trial` reports the selected routing
+    // features through `TrialResult`. Two assertions:
+    //   1. The slot is populated (length == N_ROUTING_FEATURES).
+    //   2. The selection matches what `select_routing_features`
+    //      computes independently — i.e. no hidden divergence
+    //      between the trial path and the explicit-selection path.
+    for seed in 1..=5u64 {
+        let dataset = synthetic_dataset(seed);
+        let result = run_trial(seed, &dataset);
+        assert_eq!(result.routing_features.len(), N_ROUTING_FEATURES);
+        let (train_idx, _) = train_test_split(&dataset, seed);
+        let direct = select_routing_features(&dataset, &train_idx);
+        assert_eq!(
+            result.routing_features, direct,
+            "seed {seed}: trial-path routing diverged from direct path"
+        );
+    }
 }
