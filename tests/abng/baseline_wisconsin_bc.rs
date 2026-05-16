@@ -323,6 +323,104 @@ pub(crate) fn synthetic_dataset(seed: u64) -> Dataset {
     }
 }
 
+// ── Real dataset (UCI wdbc.data) ────────────────────────────────────
+
+/// Load the bundled UCI Wisconsin Diagnostic BC dataset.
+///
+/// Returns:
+/// * `Some(Dataset)` — file present at [`REAL_DATASET_REL_PATH`],
+///   SHA-256 matches [`REAL_DATASET_SHA256_HEX`], parses cleanly.
+/// * `None` — file absent OR SHA-256 mismatch. Caller falls back
+///   to [`synthetic_dataset`] so the test suite stays operational
+///   on fresh / sparse / tampered checkouts.
+///
+/// Failure modes are split deliberately:
+/// * **Soft failures** (returned as `None`): file absent, file
+///   present but SHA-256 mismatch. These keep the suite running
+///   on synthetic data; the SHA-256 gate exists precisely so that
+///   a tampered file is treated as "no real data," not "lower-
+///   quality real data."
+/// * **Hard failures** (panic): file present, SHA-256 matches, but
+///   parsing fails. A byte-verified UCI file *must* parse — if it
+///   doesn't, the parser has a bug that needs loud surfacing.
+pub(crate) fn load_real_dataset() -> Option<Dataset> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(REAL_DATASET_REL_PATH);
+    let bytes = std::fs::read(&path).ok()?;
+
+    let hash = cjc_snap::hash::sha256(&bytes);
+    let mut hex = String::with_capacity(64);
+    for b in hash.iter() {
+        write!(&mut hex, "{:02X}", b).expect("hex write");
+    }
+    if hex != REAL_DATASET_SHA256_HEX {
+        return None;
+    }
+
+    // SHA-256 passed → parse must succeed. Panic on parse error
+    // (genuine bug, not data-integrity issue).
+    Some(parse_wdbc(&bytes).expect("post-SHA-256 wdbc.data parse must succeed"))
+}
+
+/// Parse UCI `wdbc.data` byte stream into a [`Dataset`].
+///
+/// Format (one line per sample, comma-separated, no header):
+///   `id, label(M|B), feat_0, feat_1, …, feat_29`
+///
+/// `M` (malignant) → label 1.0, `B` (benign) → label 0.0. The `id`
+/// column is discarded. Trailing empty lines are tolerated; all
+/// other malformed input returns `Err`.
+fn parse_wdbc(bytes: &[u8]) -> Result<Dataset, String> {
+    let text = std::str::from_utf8(bytes).map_err(|e| format!("utf-8 decode: {e}"))?;
+    let mut features = Vec::with_capacity(N_SAMPLES * N_FEATURES_TOTAL);
+    let mut labels = Vec::with_capacity(N_SAMPLES);
+    for (line_no, line) in text.lines().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split(',');
+        // First field: id (discard).
+        parts
+            .next()
+            .ok_or_else(|| format!("line {line_no}: missing id"))?;
+        // Second field: label.
+        let label_str = parts
+            .next()
+            .ok_or_else(|| format!("line {line_no}: missing label"))?;
+        let label: f64 = match label_str {
+            "M" => 1.0,
+            "B" => 0.0,
+            other => return Err(format!("line {line_no}: unexpected label {other:?}")),
+        };
+        labels.push(label);
+        // Remaining fields: features (must be exactly N_FEATURES_TOTAL).
+        let row_start = features.len();
+        for tok in parts {
+            let v: f64 = tok
+                .parse()
+                .map_err(|e| format!("line {line_no}: feature parse: {e}"))?;
+            features.push(v);
+        }
+        let row_len = features.len() - row_start;
+        if row_len != N_FEATURES_TOTAL {
+            return Err(format!(
+                "line {line_no}: expected {N_FEATURES_TOTAL} features, got {row_len}"
+            ));
+        }
+    }
+    if labels.len() != N_SAMPLES {
+        return Err(format!(
+            "expected {N_SAMPLES} samples, got {}",
+            labels.len()
+        ));
+    }
+    Ok(Dataset {
+        features,
+        labels,
+        n_samples: N_SAMPLES,
+        n_features: N_FEATURES_TOTAL,
+    })
+}
+
 // ── Train/test split ────────────────────────────────────────────────
 
 /// Deterministic Fisher-Yates shuffle + take-first-80%. Returns
@@ -1225,4 +1323,72 @@ fn baseline_real_dataset_sha256_pinned() {
         bytes.len(),
         &hex[..16]
     );
+}
+
+#[test]
+fn baseline_real_dataset_shape() {
+    // When the bundled CSV is present + SHA-verified, the loader
+    // returns a Dataset shaped exactly like the synthetic one:
+    // 569 samples × 30 features. Skip gracefully if the file is
+    // absent (matches the SHA-256 verification test's behavior).
+    let Some(dataset) = load_real_dataset() else {
+        eprintln!("[baseline] real dataset not loadable; skip");
+        return;
+    };
+    assert_eq!(dataset.n_samples, N_SAMPLES);
+    assert_eq!(dataset.n_features, N_FEATURES_TOTAL);
+    assert_eq!(dataset.labels.len(), N_SAMPLES);
+    assert_eq!(dataset.features.len(), N_SAMPLES * N_FEATURES_TOTAL);
+}
+
+#[test]
+fn baseline_real_dataset_class_balance() {
+    // UCI Wisconsin Diagnostic BC ships 357 benign + 212 malignant.
+    // Our `N_CLASS_0 = 357` constant is named for this real split;
+    // the synthetic generator reproduces it. This test asserts the
+    // loader correctly maps `B → 0.0` and `M → 1.0`.
+    let Some(dataset) = load_real_dataset() else {
+        eprintln!("[baseline] real dataset not loadable; skip");
+        return;
+    };
+    let n_benign = dataset.labels.iter().filter(|&&l| l == 0.0).count();
+    let n_malignant = dataset.labels.iter().filter(|&&l| l == 1.0).count();
+    assert_eq!(
+        n_benign, N_CLASS_0,
+        "expected {N_CLASS_0} benign samples, got {n_benign}"
+    );
+    assert_eq!(
+        n_malignant,
+        N_SAMPLES - N_CLASS_0,
+        "expected {} malignant samples, got {n_malignant}",
+        N_SAMPLES - N_CLASS_0
+    );
+    // Labels must be exactly 0.0 or 1.0 (no third bucket).
+    for (i, &l) in dataset.labels.iter().enumerate() {
+        assert!(
+            l == 0.0 || l == 1.0,
+            "row {i}: label is neither 0.0 nor 1.0 ({l})"
+        );
+    }
+}
+
+#[test]
+fn baseline_real_dataset_first_row_pinned_values() {
+    // Pin the parser contract to known bytes. UCI's `wdbc.data`
+    // first line is:
+    //   842302,M,17.99,10.38,122.8,1001,0.1184,…
+    // Asserting these specific values catches any future parser
+    // drift (off-by-one column shift, locale-dependent decimal
+    // parsing, header-row mishandling) BEFORE it cascades into
+    // accuracy regressions.
+    let Some(dataset) = load_real_dataset() else {
+        eprintln!("[baseline] real dataset not loadable; skip");
+        return;
+    };
+    assert_eq!(dataset.labels[0], 1.0, "row 0: expected M (=1.0)");
+    assert_eq!(dataset.features[0].to_bits(), 17.99_f64.to_bits());
+    assert_eq!(dataset.features[1].to_bits(), 10.38_f64.to_bits());
+    assert_eq!(dataset.features[2].to_bits(), 122.8_f64.to_bits());
+    assert_eq!(dataset.features[3].to_bits(), 1001.0_f64.to_bits());
+    assert_eq!(dataset.features[4].to_bits(), 0.1184_f64.to_bits());
 }
