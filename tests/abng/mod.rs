@@ -19,6 +19,7 @@
 //!   encode_prefix, descend, route_path, etc.) at the dispatch layer.
 //! * [`parity_p2`] — AST eval ↔ MIR exec parity for the Phase 0.2 builtins.
 
+mod baseline_wisconsin_bc;
 mod batch_observe_tests;
 mod demo_a2_fused_training;
 mod demo_a3_merkle_proof;
