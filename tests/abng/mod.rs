@@ -69,3 +69,7 @@ mod train_step_v14_tests;
 mod uncertainty_tests;
 mod unit;
 mod verify_par_tests;
+
+// Phase 0.9.5 COMMIT 3 — categorical subsystem property + fuzz suites.
+mod categorical_fuzz;
+mod categorical_proptest;
