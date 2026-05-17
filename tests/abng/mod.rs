@@ -61,6 +61,7 @@ mod replay_invariant_tests;
 mod serialize_compressed;
 mod serialize_mmap;
 mod serialize_streaming;
+mod route_cache_tests;
 mod route_entropy_grow_tests;
 mod route_trace_tests;
 mod split_nll_gate_tests;

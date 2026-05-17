@@ -1642,6 +1642,9 @@ pub fn replay_with_outcome(
         decision_policy: None,
         action_counts: [0u64; N_ACTION_KINDS],
         unfreeze_count: 0,
+        // Phase 0.10 Q1 — route cache is in-memory only; a replayed
+        // graph starts with it disabled.
+        route_cache: None,
     };
 
     // Phase 0.6 Item 3 — decode all events into a Vec first, then run

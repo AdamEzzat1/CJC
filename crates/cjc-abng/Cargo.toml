@@ -12,6 +12,8 @@ cjc-runtime = { workspace = true }
 cjc-repro = { workspace = true }
 cjc-snap = { workspace = true }
 cjc-ad = { workspace = true }
+# Phase 0.10 Track Q1 — D-HARHT route-memoization engine.
+cjc-dharht = { workspace = true }
 # Phase 0.8 Item B1 — memory-mapped snapshot replay.
 # Used by `serialize::replay_mmap` to fault snapshot pages in lazily
 # via the OS page cache rather than materializing the entire blob

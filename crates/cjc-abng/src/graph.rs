@@ -17,6 +17,8 @@
 //! * `verify_chain()` — recompute every event's `new_hash` and confirm
 //!   the chain is consistent.
 
+use std::cell::RefCell;
+
 use cjc_ad::pinn::Activation;
 use cjc_runtime::tensor::Tensor;
 
@@ -32,6 +34,7 @@ use crate::leaf_head::{expected_param_shape, init_params, params_hash, LeafHead,
 use crate::node::{AdaptiveBeliefNode, NodeId};
 use crate::policy::{DecisionPolicy, PolicyError};
 use crate::route::RouteEvidence;
+use crate::route_cache::RouteCache;
 use crate::signature::NodeSignature;
 
 /// Number of structural-action kinds tracked by [`AdaptiveBeliefGraph::action_counts`].
@@ -314,6 +317,15 @@ pub struct AdaptiveBeliefGraph {
     /// indexing convention from §7 #13 stays valid; Unfreeze is a
     /// flag-flip, not a structural mutation.
     pub unfreeze_count: u64,
+    /// Phase 0.10 Q1 — opt-in D-HARHT route-memoization cache. `None`
+    /// (the default) means `descend` runs the plain radix walk,
+    /// exactly as before Phase 0.10 — every pre-0.10 caller stays
+    /// byte-identical. In-memory only: never serialized, never part
+    /// of the audit chain, so a hit cannot change `descend`'s
+    /// observable output. `RefCell` because `descend` is `&self` and
+    /// populates the cache on a miss; the graph is already `!Sync`,
+    /// so this adds no new constraint.
+    pub route_cache: Option<RefCell<RouteCache>>,
 }
 
 impl AdaptiveBeliefGraph {
@@ -334,6 +346,7 @@ impl AdaptiveBeliefGraph {
             decision_policy: None,
             action_counts: [0u64; N_ACTION_KINDS],
             unfreeze_count: 0,
+            route_cache: None,
         };
         let root = AdaptiveBeliefNode::new(0, None, g.chain_head);
         g.nodes.push(root);
@@ -665,6 +678,27 @@ impl AdaptiveBeliefGraph {
     }
 
     pub fn descend(&self, prefix: &[u8]) -> RouteEvidence {
+        // Phase 0.10 Q1 — optional route memoization. The cache is
+        // outcome-transparent: a hit returns exactly the RouteEvidence
+        // `descend_walk` would compute, and topology changes clear it
+        // (see `append_event`). When `route_cache` is `None` — the
+        // default — this is byte-identical to the pre-0.10 walk.
+        if let Some(cache) = &self.route_cache {
+            let mut cache = cache.borrow_mut();
+            if let Some(evidence) = cache.lookup(prefix) {
+                return evidence;
+            }
+            let evidence = self.descend_walk(prefix);
+            cache.record(prefix, &evidence);
+            return evidence;
+        }
+        self.descend_walk(prefix)
+    }
+
+    /// The radix walk: root-to-leaf, one prefix byte per hop. This is
+    /// the pre-Phase-0.10 `descend` body, extracted so the cached and
+    /// uncached paths share a single implementation.
+    fn descend_walk(&self, prefix: &[u8]) -> RouteEvidence {
         let root_id: NodeId = 0;
         let mut path = Vec::with_capacity(prefix.len() + 1);
         path.push(root_id);
@@ -685,6 +719,35 @@ impl AdaptiveBeliefGraph {
             leaf_id: current,
             path,
         }
+    }
+
+    /// Phase 0.10 Q1 — enable the opt-in D-HARHT route-memoization
+    /// cache. Subsequent `descend` calls memoize `prefix -> RouteEvidence`;
+    /// topology-changing audit events clear the cache automatically.
+    /// Idempotent — a second call resets the cache to empty.
+    pub fn enable_route_cache(&mut self) {
+        self.route_cache = Some(RefCell::new(RouteCache::new()));
+    }
+
+    /// Disable and drop the route-memoization cache. `descend` reverts
+    /// to the plain radix walk.
+    pub fn disable_route_cache(&mut self) {
+        self.route_cache = None;
+    }
+
+    /// Whether the route cache is currently enabled.
+    pub fn route_cache_enabled(&self) -> bool {
+        self.route_cache.is_some()
+    }
+
+    /// Cumulative `(hits, misses, skips)` for the route cache, or
+    /// `None` when the cache is disabled. `skips` counts descends
+    /// whose prefix was uncacheable (length `0` or `> 7`).
+    pub fn route_cache_stats(&self) -> Option<(u64, u64, u64)> {
+        self.route_cache.as_ref().map(|cache| {
+            let cache = cache.borrow();
+            (cache.hits(), cache.misses(), cache.skips())
+        })
     }
 
     /// Phase 0.8 Item C1 — parallel sibling of [`route_to_leaf_batch`].
@@ -883,6 +946,14 @@ impl AdaptiveBeliefGraph {
         let previous_hash = self.chain_head;
         let seq = self.audit.len() as u64;
 
+        // Phase 0.10 Q1 — a topology-changing event (NodeAdded `0x02`,
+        // or one of Grow/Split/Merge/Prune/Compress `0x10..=0x14`)
+        // invalidates every memoized route. Computed before `kind` is
+        // moved into the event below. `ChildrenPromoted` (`0x03`) is
+        // deliberately excluded: promotion preserves every key→child
+        // mapping, so routing is unchanged.
+        let topology_changed = matches!(kind.tag(), 0x02 | 0x10..=0x14);
+
         let mut event = AuditEvent {
             seq,
             epoch: self.epoch,
@@ -896,6 +967,12 @@ impl AdaptiveBeliefGraph {
         event.new_hash = AuditEvent::compute_new_hash(&previous_hash, &event.payload_bytes());
         self.chain_head = event.new_hash;
         self.audit.push(event);
+
+        if topology_changed {
+            if let Some(cache) = &self.route_cache {
+                cache.borrow_mut().clear();
+            }
+        }
     }
 
     /// Phase 0.8c v14 Item A3 — Merkle root over the audit chain's

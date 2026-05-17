@@ -36,6 +36,7 @@ pub mod node;
 pub mod policy;
 pub mod predict_snap;
 pub mod route;
+pub mod route_cache;
 pub mod serialize;
 pub mod signature;
 pub mod stats;
@@ -56,6 +57,7 @@ pub use maturity::Maturity;
 pub use node::{AdaptiveBeliefNode, NodeId};
 pub use policy::{DecisionPolicy, PolicyError};
 pub use route::RouteEvidence;
+pub use route_cache::RouteCache;
 pub use signature::NodeSignature;
 pub use stats::NodeStats;
 

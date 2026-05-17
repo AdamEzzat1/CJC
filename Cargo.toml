@@ -53,6 +53,7 @@ members = [
     "crates/cjc-vizor",
     "crates/cjc-analyzer",
     "crates/cjc-quantum",
+    "crates/cjc-dharht",
     "crates/cjc-abng",
     "bench/ad_bench",
     "bench/nlp_preprocess_bench",
@@ -130,6 +131,7 @@ cjc-mir-exec = { path = "crates/cjc-mir-exec", version = "0.1.7" }
 cjc-regex = { path = "crates/cjc-regex", version = "0.1.6" }
 cjc-analyzer = { path = "crates/cjc-analyzer", version = "0.1.6" }
 cjc-quantum = { path = "crates/cjc-quantum", version = "0.1.6" }
+cjc-dharht = { path = "crates/cjc-dharht", version = "0.1.7" }
 cjc-abng = { path = "crates/cjc-abng", version = "0.1.7" }
 
 [[test]]
