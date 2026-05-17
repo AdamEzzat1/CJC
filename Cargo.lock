@@ -31,6 +31,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "abng-result-profile"
+version = "0.1.7"
+dependencies = [
+ "cjc-abng",
+ "cjc-ad",
+ "cjc-snap",
+]
+
+[[package]]
 name = "abng-vs-sklearn"
 version = "0.1.7"
 dependencies = [
