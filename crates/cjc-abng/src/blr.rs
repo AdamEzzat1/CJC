@@ -561,9 +561,54 @@ impl BlrState {
         out
     }
 
-    /// SHA-256 of canonical bytes.
+    /// SHA-256 of the canonical byte encoding.
+    ///
+    /// Phase 0.9.5 R0-2 (T1.1) — streams the canonical bytes directly
+    /// into the SHA-256 state in fixed 4 KiB chunks instead of first
+    /// materialising the whole [`canonical_bytes`](Self::canonical_bytes)
+    /// `Vec` (`4 + d·8 + d²·8 + 48` bytes — ~477 KB of `d²` precision
+    /// at d=247). Streaming SHA-256 is bit-identical to the one-shot
+    /// form, so `state_hash()` still returns exactly
+    /// `sha256(canonical_bytes())` — pinned by the
+    /// `state_hash_streams_canonical_bytes` test. The win is the
+    /// eliminated per-call ~477 KB allocation (handoff §R0.4 #3,
+    /// memory churn); the SHA-256 compression itself is unchanged, so
+    /// every BLR-related audit-event chain step — and all 28 SHA-256
+    /// canaries — verify byte-identically.
     pub fn state_hash(&self) -> [u8; 32] {
-        cjc_snap::hash::sha256(&self.canonical_bytes())
+        let mut h = cjc_snap::hash::Sha256::new();
+        h.update(&self.d.to_be_bytes());
+        hash_f64_slice_be(&mut h, &self.mean.to_vec());
+        hash_f64_slice_be(&mut h, &self.precision.to_vec());
+        h.update(&self.a.to_bits().to_be_bytes());
+        h.update(&self.b.to_bits().to_be_bytes());
+        h.update(&self.n_seen.to_be_bytes());
+        h.update(&self.feature_version_hash);
+        h.finalize()
+    }
+}
+
+/// Feed `xs` into a SHA-256 hasher as the big-endian bit patterns
+/// `x.to_bits().to_be_bytes()`, 8 bytes per element, through a fixed
+/// 4 KiB stack buffer so no `d²·8`-byte intermediate `Vec` is
+/// allocated. Byte-identical to
+/// `for &x in xs { h.update(&x.to_bits().to_be_bytes()) }` — and hence
+/// to the corresponding slice of [`BlrState::canonical_bytes`] — for
+/// any `xs`. Phase 0.9.5 R0-2 (T1.1).
+fn hash_f64_slice_be(h: &mut cjc_snap::hash::Sha256, xs: &[f64]) {
+    const CHUNK: usize = 4096; // 512 f64 flushed per `update`
+    let mut buf = [0u8; CHUNK];
+    let mut fill = 0usize;
+    for &x in xs {
+        buf[fill..fill + 8].copy_from_slice(&x.to_bits().to_be_bytes());
+        fill += 8;
+        if fill == CHUNK {
+            h.update(&buf);
+            fill = 0;
+        }
+    }
+    if fill > 0 {
+        h.update(&buf[..fill]);
     }
 }
 
@@ -823,6 +868,49 @@ mod tests {
         s.update(&[1.0], &[2.0]).unwrap();
         let h1 = s.state_hash();
         assert_ne!(h0, h1);
+    }
+
+    /// Phase 0.9.5 R0-2 (T1.1) — the streaming `state_hash` must be
+    /// bit-identical to `sha256(canonical_bytes())`, at the prior and
+    /// after updates and across several `d`, so the 28 SHA-256
+    /// canaries and every BLR audit-event chain step are untouched.
+    #[test]
+    fn state_hash_streams_canonical_bytes() {
+        let p = BlrPrior::new(1.0, 1.0, 1.0).unwrap();
+        for d in [1usize, 2, 5, 17] {
+            let mut s = BlrState::from_prior(&p, d as u32);
+            assert_eq!(
+                s.state_hash(),
+                cjc_snap::hash::sha256(&s.canonical_bytes()),
+                "d={d}: prior state"
+            );
+            for k in 0..4 {
+                let row: Vec<f64> = (0..d).map(|i| (i as f64) * 0.31 - (k as f64) * 0.7).collect();
+                s.update(&row, &[0.42 + k as f64]).unwrap();
+                assert_eq!(
+                    s.state_hash(),
+                    cjc_snap::hash::sha256(&s.canonical_bytes()),
+                    "d={d}: after update {k}"
+                );
+            }
+        }
+    }
+
+    /// The 4 KiB-chunked `hash_f64_slice_be` helper must match a naive
+    /// per-element `update` for slice lengths that straddle the chunk
+    /// boundary (511 / 512 / 513 f64 = just-under / exact / just-over).
+    #[test]
+    fn hash_f64_slice_be_matches_naive_across_chunk_boundary() {
+        for n in [0usize, 1, 511, 512, 513, 2000] {
+            let xs: Vec<f64> = (0..n).map(|i| (i as f64) * 0.123 - 7.0).collect();
+            let mut chunked = cjc_snap::hash::Sha256::new();
+            hash_f64_slice_be(&mut chunked, &xs);
+            let mut naive = cjc_snap::hash::Sha256::new();
+            for &x in &xs {
+                naive.update(&x.to_bits().to_be_bytes());
+            }
+            assert_eq!(chunked.finalize(), naive.finalize(), "n={n}");
+        }
     }
 
     #[test]
