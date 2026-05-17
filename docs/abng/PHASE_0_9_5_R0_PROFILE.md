@@ -2,7 +2,8 @@
 
 **Date:** 2026-05-17
 **Branch:** `claude/abng-phase-0-9-5`
-**Status:** profiling complete; speedup plan proposed; Tier 2 awaits sign-off.
+**Status:** COMPLETE — profiled; Tier 1 (R0-2) + Tier 2 Option C (R0-3)
+shipped and determinism-gated. §5-§8 record what was shipped.
 **Supersedes nothing** — this is the R0 deliverable required by
 [`PHASE_0_9_5_HANDOFF_V2.md`](PHASE_0_9_5_HANDOFF_V2.md) §R0.6 ("a design
 doc / ADR ranking the hotspots and proposing the changes").
@@ -130,122 +131,179 @@ Every Tier-1 change produces **bit-identical** `state_hash`,
 accuracy, and auditability are untouched by construction; the
 determinism gate is a regression check, not a re-lock.
 
-- **T1.1 — streaming `state_hash`.** Feed the canonical byte sequence
-  directly into `cjc_snap::hash::Sha256` instead of materialising a
-  477 KB `Vec` first. Streaming SHA-256 == one-shot SHA-256, so the
-  digest is identical (the precedent is Phase 0.7 C `compute_new_hash`
-  and Phase 0.8 B2 `serialize_into`). Removes the per-call 477 KB
-  allocation + the d² `extend_from_slice` churn.
-- **T1.2 — eliminate the redundant `precision.to_vec()` clones.**
-  `state_hash`→`canonical_bytes` and `update_rank1` each clone the
-  477 KB precision `Tensor` into a fresh `Vec`. Where the borrow model
-  allows, hash / read straight from the tensor buffer.
-- **Honest ceiling: ~3-5 % of the row.** The allocation is only 4.2 %
-  of `state_hash`; Tier 1 cannot touch the 91.3 % that is SHA-256
-  *compression*. Tier 1 is worth shipping — it is free and removes
-  ~1 MB/row of allocator traffic (handoff §R0.4 #3, memory churn) —
-  but it is not the win.
+- **T1.1 — streaming `state_hash` (SHIPPED, commit R0-2).** Feeds the
+  canonical byte sequence directly into `cjc_snap::hash::Sha256` in
+  4 KiB chunks (`hash_f64_slice_be`) instead of materialising a
+  ~477 KB `Vec` first. Streaming SHA-256 == one-shot SHA-256, so the
+  digest is byte-identical (precedent: Phase 0.7 C `compute_new_hash`,
+  Phase 0.8 B2 `serialize_into`); the 28 canaries verified unchanged.
+  Removes the per-call ~477 KB allocation + the d² `extend_from_slice`
+  churn.
+- **T1.2 — `precision.to_vec()` clone elimination — subsumed by
+  Tier 2.** Option C removes `state_hash` from the per-row hot path
+  entirely (a checkpoint fires only every 64th row), so the redundant
+  per-row precision clone it would have targeted no longer exists on
+  the hot path. Not shipped as a separate commit.
+- **Honest ceiling of Tier 1: ~3-5 % of the row.** The allocation is
+  only 4.2 % of `state_hash`; Tier 1 cannot touch the 91.3 % that is
+  SHA-256 *compression*. Worth shipping — free, and it drains
+  ~1 MB/row of allocator traffic (handoff §R0.4 #3) — but it is not
+  the win.
 
-### Tier 2 — the order-of-magnitude lever (requires explicit sign-off)
+### Tier 2 — the order-of-magnitude lever — SHIPPED as Option C (commit R0-3)
 
 `state_hash` is 67 % of the row and 91 % of *it* is SHA-256 compressing
 **d² bytes**. SHA-256 is a sequential hash with no incremental-edit
-property: producing `sha256(buffer)` is irreducibly O(buffer). The
-**only** way to make the per-row digest O(d) is to stop committing the
-d×d matrix into the per-row audit witness.
+property, so `sha256(buffer)` is irreducibly O(buffer): the **only**
+way to an O(d) per-row digest is to stop committing the d×d matrix
+into *every* per-row audit witness.
 
-This changes what the `TrainStep` / `BlrUpdated` event's 32-byte
-`state_hash` field *contains*. The field's **byte layout is
-unchanged** (still 32 bytes) ⇒ **no snapshot wire-format bump** (v14
-stays v14, decoders unchanged). But the field's *value* changes ⇒ the
-chain hashes change ⇒ the **28 SHA-256 canaries re-lock**, plus the
-Wisconsin BC `chain_heads.txt`. `serialize.rs:686` already frames a
-change to the hash *input* as "v15 work" — this is exactly the
-"explicit sign-off" gate the handoff names (§R0.2).
+#### A wire-format correction
 
-Three sub-options, all O(d) per row:
+The first design pass listed three O(d) options and mis-stated
+**commit-to-inputs (A)** as wire-format-neutral. That was wrong, and
+was caught and corrected before any implementation:
 
-| Option | Per-row witness | Replay model | Notes |
-|---|---|---|---|
-| **A — commit-to-inputs** | `sha256(φ ‖ y)` | re-derive state by applying (φ,y); cross-check final reconstructed state vs the snapshot (already stored in full) | standard event-sourcing audit; cleanest |
-| **B — incremental digest** | rolling per-node digest updated O(d) per rank-1 update | digest recomputed during replay | new per-node state field |
-| **C — periodic snapshot** | full `state_hash` every *k* rows; cheap link in between | unchanged, sparser | weakest tamper-localisation |
+> For replay to *re-derive* state from inputs it must *have* the
+> inputs. Today `φ` is stored nowhere (only `y`, in `TrainStep.value`).
+> Commit-to-inputs therefore requires storing the d-vector `φ` in each
+> `TrainStep` / `BlrUpdated` event — the payload grows from a fixed
+> 40 bytes to a variable ~2 KB. That **is** a genuine v14→v15 snapshot
+> wire-format bump (plus a ~50× larger audit log). A witness that
+> commits to inputs is only verifiable if replay has the inputs.
 
-**Recommendation: Option A.** It is a well-understood model, the
-snapshot *already* stores every node's full BLR state so the
-end-of-replay cross-check is free, and it localises tamper to the
-exact `(φ, y)` row. Per-row hashing drops O(d²) → O(d): `state_hash`
-2.32 ms → `sha256(φ‖y)` ≈ 9 µs.
+The corrected option set:
 
-**Projected impact (Option A):** per-row 6.88 ms → **~2.26 ms (≈3.0×)**;
-16 000 rows 110 s → **~36 s CPU**. The row is then dominated by the
-2× O(d²) rank-1 update (94 % of the new total).
+| Option | Per-row witness | Wire format | Speedup | Tamper localization |
+|---|---|---|---|---|
+| **A — commit-to-inputs** | `sha256(φ‖y)`; `φ` stored in the event | **v14→v15 bump** | ~3.0× | exact row |
+| **C — periodic checkpoint** | full `state_hash` every *k* rows; zero sentinel between | none | ~3.0× | k-row window |
+| **L — lower-triangle hash** | `sha256` of the symmetric matrix's lower triangle only | none | ~1.5× | exact row |
 
-**Why not more than ~3×.** After Tier 2 the residual cost is the
-rank-1 NIG conjugate update. A rank-1 update of a d×d precision matrix
-is *inherently* O(d²) — `φφᵀ` touches all d² entries and the
-triangular solves are O(d²). Going below O(d²)/row would require
-either (a) a diagonal-precision approximation — rejected, it changes
-the epistemic-uncertainty output and so violates "accuracy-preserving";
-or (b) batched updates — which amortise the cost but change the audit
-*granularity* (one event per batch, not per row), a separate
-audit-model decision with its own sign-off. Both are out of R0's
-byte-identical-or-cheap-sign-off scope and are noted for the team.
+**Option C was chosen** (sign-off granted): it recovers essentially
+all of A's speedup with **no wire-format bump**, and the
+tamper-localization tradeoff (a k-row window instead of the exact row)
+is acceptable for a training audit — replay still fully reconstructs
+and verifies the final state.
+
+#### Option C as shipped
+
+- **Periodic witness.** `periodic_blr_witness` (graph.rs) gives a BLR
+  update its full `state_hash` only when the post-update `n_seen` is a
+  multiple of `BLR_CHECKPOINT_INTERVAL` (**= 64**); intermediate rows
+  carry `BLR_INTERMEDIATE_WITNESS` — an all-zero sentinel. The row is
+  still fully chain-bound by the outer `new_hash = sha256(prev ‖
+  payload)`; the sentinel only signals "no independent d×d witness
+  here — the nearest checkpoint carries it." Applied to `train_step`
+  and the n=1 `blr_update` hot path. Batched (n>1) `blr_update` and
+  every structural-op `BlrUpdated` (`combine`/Merge) keep the full
+  witness.
+- **Flush contract.** `AdaptiveBeliefGraph::checkpoint_blr()` emits one
+  full-witness `BlrUpdated` for every node left mid-interval. Replay's
+  end-of-replay verifier checks each node's *latest* BLR witness
+  against the reconstructed state, so a trained graph **must** call
+  `checkpoint_blr` once before `serialize` — the flush-before-serialize
+  contract. Forgetting it is a *loud* `DecodeError::BlrStateHashMismatch`,
+  never silent corruption. The verifier itself needed **no change**:
+  after the flush every node's latest BLR event carries a real hash.
+- **No wire-format change.** `TrainStep` / `BlrUpdated` keep their
+  exact byte shapes — only the *value* in the 32-byte witness field
+  changes (a sentinel on intermediate rows). v14 stays v14; decoders
+  are untouched.
+
+#### Impact
+
+A checkpoint fires on 1/64 of rows; the rest pay a ~free sentinel.
+Per-row `state_hash` cost (4.64 ms — two updates/row) collapses ~64×.
+
+**Measured** by re-running `abng-result-profile` post-R0-3: per-row
+**6.88 ms → 2.38 ms** (median; **≈2.9×**), 16 000 rows **110 s → 38 s
+CPU**, 101 766 rows **560 s → 194 s**. The dev box's documented
+contention adds noise to absolute wall-clock; the **within-run**
+consistency check is the contention-robust read — `train_step`
+measured **82 % below** the cost of an every-row full hash
+(`update + state_hash`), which is exactly the 63/64 of `state_hash`
+that Option C elides. The residual row is dominated by the 2× O(d²)
+rank-1 NIG update.
+
+#### The canary outcome
+
+Sign-off anticipated re-locking "the 28 SHA-256 canaries." In the
+event **zero canaries re-locked.** The `decide_step` chain-head
+canaries and the Wisconsin BC baseline never train through
+`train_step` / n=1 `blr_update` — they use `observe`, `decide_step`,
+and structural ops, none of which Option C touches — so their chain
+heads are byte-identical. (`combine`'s `BlrUpdated` deliberately keeps
+the full witness, so the Merge-firing canary is unaffected.) The only
+test churn was **6 round-trip tests** that train then
+`serialize`+`replay`: each gained one `checkpoint_blr()` call — the
+contract, not a re-lock. 9 new tests pin Option C (7 integration in
+`blr_checkpoint_tests.rs` + 2 in-crate).
+
+#### Why not more than ~3×
+
+After Option C the row is the 2× O(d²) rank-1 NIG conjugate update. A
+rank-1 update of a d×d precision matrix is *inherently* O(d²) — `φφᵀ`
+touches all d² entries, the triangular solves are O(d²). Sub-O(d²)/row
+would need a diagonal-precision approximation (rejected — it changes
+the epistemic-uncertainty output, violating "accuracy-preserving") or
+batched updates (which amortise the cost but change the audit
+*granularity* to per-batch — a separate signed-off decision). Both are
+out of R0 scope and noted for the team.
 
 ### Tier 3 — deferred / out of scope for R0
 
 - **Deterministic parallelism.** Training is a sequential SHA-256 hash
-  chain — events must be totally ordered — so naïve row-parallelism
-  breaks the chain. A deterministic batch formulation may exist but is
-  high-risk and Determinism-Auditor-gated; defer.
+  chain; naïve row-parallelism breaks it. High-risk,
+  Determinism-Auditor-gated; defer.
 - **A faster portable SHA-256 in cjc-snap.** ~225 MB/s is slow even
   for no-intrinsics Rust; a faster *byte-identical* implementation
-  would speed every hash in the workspace. But it is a different
-  crate, outside R0's "result path" scope, and risky to touch under a
-  determinism contract. Note and defer.
+  would speed every hash in the workspace — but it is a different
+  crate, outside R0's "result path" scope. Note and defer.
 - **`predict` cache-miss O(d³).** Already mitigated by the D1 cache;
   amortises over an eval pass. No action.
 
-## 6. Commit plan
+## 6. Commit sequence (as shipped)
 
 | Commit | Content | Gate | Sign-off |
 |---|---|---|---|
-| **R0-1** | profiler bench crate + this doc | builds | none |
-| **R0-2** | T1.1 streaming `state_hash` | `cargo test --test abng` + canaries byte-identical | none |
-| **R0-3** | T1.2 clone elimination in the update / hash path | same | none |
-| **R0-4+** | Tier 2 Option A (commit-to-inputs) | full gate **+ deliberate 28-canary re-lock** | **required** |
+| **R0-1** | `abng-result-profile` bench crate + this doc | builds | none |
+| **R0-2** | T1.1 streaming `state_hash` — byte-identical | `cargo test --test abng` 612/0; canaries unchanged | none |
+| **R0-3** | Tier 2 Option C — periodic BLR checkpoints + `checkpoint_blr` | full gate 624/0 (1 known wall-clock flake passes in isolation); 0 canaries re-locked; 6 round-trip tests gain the contract call | Lead Architect (audit model) — granted |
 
 Every commit re-runs the determinism gate (`cargo test --test abng`,
 the 28 SHA-256 canaries, the Wisconsin BC baseline, AST↔MIR parity).
-R0-2 and R0-3 must show the canaries **unchanged**; R0-4 re-locks them
-as a deliberate, reviewed step.
 
 ## 7. Determinism / accuracy / auditability impact
 
 | Change | Determinism | Accuracy | Auditability |
 |---|---|---|---|
-| T1.1 streaming hash | identical digest | no math change | identical chain |
-| T1.2 clone elimination | identical digest | no math change | identical chain |
-| T2 Option A | deterministic post-relock (same seed+data+build → byte-identical) | no math change — same posterior, same predictions | preserved: per-row `(φ,y)` witness localises tamper; replay re-derives + cross-checks state vs snapshot |
+| R0-2 streaming hash | identical digest | no math change | identical chain |
+| R0-3 Option C | deterministic — same seed+data+build → byte-identical; `checkpoint_blr` visits nodes in `NodeId` order | no math change — same posterior, same predictions; the BLR `update` math is untouched | preserved — see below |
 
-Tier 2 preserves auditability under a *different but equally sound*
-model: the chain commits to **inputs** and replay re-derives state,
-versus committing to **post-state** directly. Both are tamper-evident;
-the input-commit model is the standard event-sourcing form. The change
-is not a *weakening* of auditability — it is a re-expression of it —
-but because it re-locks the canaries it is a Lead-Language-Architect
-decision, not an implementation detail.
+Option C does **not weaken** auditability. Every audit event is still
+chain-bound and tamper-evident via the outer `new_hash`; every node's
+final d×d state is still cryptographically verified at replay (against
+the `checkpoint_blr` flush witness); the d×d state is independently
+witnessed every 64 rows. What changes is *granularity*: a tampered
+mid-interval state is still **detected**, but **localized** to a
+64-row window rather than the exact row. That is the tradeoff the Lead
+Architect signed off — a re-expression of the audit model, not a
+reduction of it.
 
 ## 8. Verdict
 
-- The result path is **6.88 ms/row**; `state_hash` is **67 %** of it
-  and is **91 % irreducible SHA-256 compression** over the d×d
+- The result path was **6.88 ms/row**; `state_hash` was **67 %** of it
+  and **91 %** of that is irreducible SHA-256 compression over the d×d
   precision matrix.
 - The handoff's "1-2 hours" was **machine contention**, not the
-  algorithm: the true cost is ~110 s CPU for 16 000 rows.
-- **Tier 1** (byte-identical, no sign-off) ships now: ~3-5 %, and it
-  drains the per-row allocator churn.
-- **Tier 2 Option A** (commit-to-inputs) is the real lever: ~3.0×, to
-  ~36 s CPU for 16 000 rows. It needs an explicit, reviewed
-  28-canary re-lock — **no wire-format bump** — and is therefore
-  surfaced for sign-off before implementation.
+  algorithm: the true cost was ~110 s CPU for 16 000 rows.
+- **R0-2** (Tier 1, byte-identical) drained the per-row allocator
+  churn; the 28 canaries verified unchanged.
+- **R0-3** (Tier 2 Option C) is the lever: per-row hashing O(d²) →
+  amortized O(d²/64), the row **~2.9× faster** measured (6.88 →
+  2.38 ms/row; ~110 s → ~38 s CPU for 16 000 rows), **no wire-format
+  bump**, **zero canaries re-locked**.
+- The residual post-R0 row is dominated by the inherent O(d²) rank-1
+  NIG update; going further needs a model or audit-granularity change
+  outside R0's scope.

@@ -513,3 +513,61 @@ The next phase's job is to:
 
 See [`PHASE_0_9_STATUS.md`](PHASE_0_9_STATUS.md) §5 ("Deferred
 items") for the full Phase 0.10+ candidate list.
+
+---
+
+# Phase 0.9.5 — Research Phase R0: result-path performance
+
+Research Phase R0 profiled ABNG's result path on the real Diabetes-130
+categorical workload (predictive `phi` width d=247) and cut its
+dominant cost. Full detail + the speedup design: [`PHASE_0_9_5_R0_PROFILE.md`](PHASE_0_9_5_R0_PROFILE.md).
+
+## R0 — Result-path profiler (`bench/abng_result_profile`)
+
+Segment-by-segment profiler of `transform → encode_prefix → descend →
+train_step → blr_update → predict` on the real Diabetes-130 graph.
+Established empirically that `state_hash` (SHA-256 over the d×d BLR
+precision matrix) was **67 %** of the 6.88 ms/row result path and
+**91 %** of *that* is irreducible SHA-256 compression — and that the
+handoff's "1-2 hours for a 20K-row run" was machine contention, not
+the algorithm (true cost ~110 s CPU for 16 000 rows).
+
+```bash
+cargo run -p abng-result-profile --release
+```
+
+## R0-2 — Streaming `state_hash` (Tier 1, byte-identical)
+
+`BlrState::state_hash` streams the canonical bytes into SHA-256 in
+4 KiB chunks (`hash_f64_slice_be`) instead of materialising a ~477 KB
+`Vec`. Streaming SHA-256 == one-shot, so the digest is **byte-
+identical** — the 28 SHA-256 canaries verified unchanged. Drains
+~1 MB/row of allocator churn.
+
+## R0-3 — Periodic BLR audit checkpoints (Tier 2, Option C)
+
+**What it enables.** The per-row training witness hashes the full d×d
+precision matrix only every `BLR_CHECKPOINT_INTERVAL` (= 64) updates;
+intermediate rows carry an all-zero sentinel and stay fully chain-bound
+via the outer `new_hash`. `AdaptiveBeliefGraph::checkpoint_blr()`
+flushes the final state of mid-interval nodes — **call it once before
+`serialize`** (the flush-before-serialize contract; a missed flush is
+a loud `BlrStateHashMismatch` at replay, never silent corruption).
+
+* **~2.9× faster result path** (measured): per-row 6.88 → 2.38 ms;
+  16 000 training rows ~110 s → ~38 s CPU. Per-row hashing drops from
+  O(d²) every row to amortized O(d²/64).
+* **No wire-format bump** — `TrainStep` / `BlrUpdated` keep their exact
+  byte shapes; v14 stays v14, decoders untouched.
+* **Zero canaries re-locked** — the `decide_step` canaries and the
+  Wisconsin BC baseline never train through `train_step` / n=1
+  `blr_update`, so their chain heads are byte-identical. (`combine`'s
+  `BlrUpdated` keeps the full witness, so the Merge-firing canary is
+  unaffected.)
+* **Auditability:** a tampered mid-interval state is still *detected*;
+  *localization* coarsens from the exact row to a 64-row window. Signed
+  off by the Lead Architect as an audit-model re-expression, not a
+  reduction.
+
+`cargo test --test abng` 624/0 (1 known wall-clock flake passes in
+isolation); 9 new tests pin Option C.

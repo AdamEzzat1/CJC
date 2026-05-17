@@ -116,6 +116,10 @@ fn snapshot_with_train_step_events_roundtrips() {
     ] {
         g.train_step(&[x], &phi, y).unwrap();
     }
+    // Phase 0.9.5 R0-3 (Tier 2 Option C) — flush periodic-checkpoint
+    // BLR witnesses so every trained leaf's final state is
+    // chain-anchored before serialize / merkle-root capture.
+    g.checkpoint_blr();
     let pre_root = g.merkle_root();
     let blob = serialize(&g);
     let g2 = replay(&blob).expect("v14 trailer + TrainStep events must roundtrip");

@@ -568,6 +568,12 @@ fn run_trial(
         g.blr_update(0, &phi, &[y]).expect("root blr_update");
     }
 
+    // Phase 0.9.5 R0-3 (Tier 2 Option C) — flush the periodic-checkpoint
+    // BLR witnesses so every trained node's final state is anchored in
+    // the audit chain before chain_head / merkle_root are read and
+    // before any future snapshot of this trained graph.
+    g.checkpoint_blr();
+
     // Evaluate on the held-out test split.
     let mut probs: Vec<f64> = Vec::with_capacity(test_idx.len());
     let mut ys: Vec<f64> = Vec::with_capacity(test_idx.len());

@@ -41,6 +41,49 @@ use crate::signature::NodeSignature;
 /// Indexed in tag order: 0=Grow, 1=Split, 2=Merge, 3=Prune, 4=Compress, 5=Freeze.
 pub const N_ACTION_KINDS: usize = 6;
 
+/// Phase 0.9.5 R0-3 (Tier 2 Option C) — BLR audit-checkpoint interval.
+///
+/// `train_step` and the `n = 1` `blr_update` hot path SHA-256 the full
+/// `d×d` precision matrix into the `TrainStep` / `BlrUpdated` audit
+/// witness only when the node's post-update `n_seen` is a multiple of
+/// this; the intermediate rows carry the [`BLR_INTERMEDIATE_WITNESS`]
+/// sentinel. Profiling (Research Phase R0) showed that per-row
+/// `state_hash` is ~67 % of the result path and ~91 % of *that* is
+/// irreducible SHA-256 compression over the `d²` matrix; checkpointing
+/// every 64th update cuts per-row hashing ~64× while bounding
+/// state-tamper localization to a 64-row window.
+///
+/// A graph trained past a non-multiple of this **must** be flushed
+/// with [`AdaptiveBeliefGraph::checkpoint_blr`] before serialization,
+/// or replay fails with `DecodeError::BlrStateHashMismatch`.
+///
+/// This value is part of the determinism contract: changing it shifts
+/// every BLR-related audit-chain head (the `decide_step` canaries and
+/// the Wisconsin BC baseline pin the resulting hexes).
+pub const BLR_CHECKPOINT_INTERVAL: u64 = 64;
+
+/// The intermediate (non-checkpoint) BLR audit witness — an all-zero
+/// sentinel. The `TrainStep` / `BlrUpdated` event is still fully
+/// chain-bound via the outer `new_hash = sha256(prev ‖ payload)`; the
+/// sentinel only signals "this row carries no independent `d×d` state
+/// witness — the nearest checkpoint does." Phase 0.9.5 R0-3.
+pub const BLR_INTERMEDIATE_WITNESS: [u8; 32] = [0u8; 32];
+
+/// The periodic-checkpoint audit witness for one BLR update
+/// ([`BLR_CHECKPOINT_INTERVAL`], Tier 2 Option C). Returns the full
+/// `BlrState::state_hash()` when the post-update `n_seen` lands on a
+/// checkpoint boundary, else the [`BLR_INTERMEDIATE_WITNESS`]
+/// sentinel. `n_seen` is always `>= 1` at every call site (the update
+/// that produced this state incremented it), so `n_seen % k == 0`
+/// only ever fires on a genuine checkpoint, never on the prior.
+fn periodic_blr_witness(blr: &BlrState) -> [u8; 32] {
+    if blr.n_seen % BLR_CHECKPOINT_INTERVAL == 0 {
+        blr.state_hash()
+    } else {
+        BLR_INTERMEDIATE_WITNESS
+    }
+}
+
 /// Numeric index for each structural action — matches its
 /// position in [`AdaptiveBeliefGraph::action_counts`] and the offset
 /// from the audit-tag baseline `0x10`.
@@ -1523,6 +1566,16 @@ impl AdaptiveBeliefGraph {
     /// `features` is row-major `[n, d]`; `y` is `[n]`. Errors if the
     /// node has no BLR state, the dimensions don't match, or Cholesky
     /// of the updated precision matrix fails (corrupt state).
+    ///
+    /// Phase 0.9.5 R0-3 (Tier 2 Option C) — the **n = 1** call (the
+    /// per-row training hot path) takes the periodic-checkpoint audit
+    /// witness ([`periodic_blr_witness`]): the full `d×d` precision is
+    /// SHA-256'd into the `BlrUpdated` witness only every
+    /// [`BLR_CHECKPOINT_INTERVAL`] updates, intermediate rows carry the
+    /// [`BLR_INTERMEDIATE_WITNESS`] sentinel. Batched (`n > 1`) calls
+    /// are rare and always carry the full witness. See
+    /// [`checkpoint_blr`](Self::checkpoint_blr) for the
+    /// flush-before-serialize contract.
     pub fn blr_update(
         &mut self,
         node_id: NodeId,
@@ -1536,11 +1589,17 @@ impl AdaptiveBeliefGraph {
             .as_mut()
             .expect("validate_blr_inputs guarantees blr is Some");
         let rescue = blr.update(features, y)?;
-        let shash = self.nodes[node_id as usize]
+        let blr_ref = self.nodes[node_id as usize]
             .blr
             .as_ref()
-            .expect("blr present")
-            .state_hash();
+            .expect("blr present");
+        // n = 1 (the hot per-row path) takes the periodic witness;
+        // batched updates always carry the full d×d state hash.
+        let shash = if y.len() == 1 {
+            periodic_blr_witness(blr_ref)
+        } else {
+            blr_ref.state_hash()
+        };
         self.append_event(node_id, AuditKind::BlrUpdated { state_hash: shash });
         // Phase 0.4 Track C-2.3.4 — diagnostic event when the b<ε
         // numerical rescue fired. Emitted *after* BlrUpdated so the
@@ -1625,11 +1684,17 @@ impl AdaptiveBeliefGraph {
             .as_mut()
             .expect("validate_blr_inputs guarantees blr is Some")
             .update(phi, &y_arr)?;
-        let blr_state_hash = self.nodes[leaf as usize]
-            .blr
-            .as_ref()
-            .expect("blr present after update")
-            .state_hash();
+        // Phase 0.9.5 R0-3 (Tier 2 Option C) — periodic-checkpoint
+        // witness: the full d×d precision is hashed into the chain
+        // only every `BLR_CHECKPOINT_INTERVAL` updates; intermediate
+        // rows carry the `BLR_INTERMEDIATE_WITNESS` sentinel. The row
+        // is still fully chain-bound via the outer `new_hash`.
+        let blr_state_hash = periodic_blr_witness(
+            self.nodes[leaf as usize]
+                .blr
+                .as_ref()
+                .expect("blr present after update"),
+        );
         self.nodes[leaf as usize].observe(y_val);
         self.append_event(
             leaf,
@@ -1650,6 +1715,52 @@ impl AdaptiveBeliefGraph {
             );
         }
         Ok(leaf)
+    }
+
+    /// Phase 0.9.5 R0-3 (Tier 2 Option C) — flush a full-state BLR
+    /// checkpoint for every node left mid-interval by the
+    /// periodic-checkpoint witness policy.
+    ///
+    /// Under that policy ([`BLR_CHECKPOINT_INTERVAL`]) a node trained
+    /// past a non-multiple of the interval has, as its most recent BLR
+    /// audit event, a `TrainStep` / `BlrUpdated` carrying the
+    /// [`BLR_INTERMEDIATE_WITNESS`] sentinel. The end-of-replay
+    /// verifier checks each node's *latest* BLR witness against the
+    /// snapshot's reconstructed state, so such a graph would fail
+    /// replay with `DecodeError::BlrStateHashMismatch`.
+    ///
+    /// Call this **once after training and before serialization** to
+    /// re-anchor every node's final `d×d` state into the audit chain.
+    /// It emits one `BlrUpdated { state_hash }` carrying the real
+    /// [`BlrState::state_hash`] for each node with `blr.n_seen > 0 &&
+    /// n_seen % BLR_CHECKPOINT_INTERVAL != 0`; nodes already on a
+    /// checkpoint boundary, and never-trained nodes (witnessed by
+    /// `BlrInitialized`), are skipped. Nodes are visited in ascending
+    /// `NodeId` order, so the emitted events — and the resulting
+    /// chain head — are deterministic.
+    ///
+    /// Returns the number of checkpoint events emitted.
+    pub fn checkpoint_blr(&mut self) -> usize {
+        let n = self.node_count();
+        let mut emitted = 0usize;
+        for id in 0..n {
+            let needs = match &self.nodes[id as usize].blr {
+                Some(blr) => {
+                    blr.n_seen > 0 && blr.n_seen % BLR_CHECKPOINT_INTERVAL != 0
+                }
+                None => false,
+            };
+            if needs {
+                let shash = self.nodes[id as usize]
+                    .blr
+                    .as_ref()
+                    .expect("checked Some above")
+                    .state_hash();
+                self.append_event(id, AuditKind::BlrUpdated { state_hash: shash });
+                emitted += 1;
+            }
+        }
+        emitted
     }
 
     /// Phase 0.4 Track C-2.3.5 — reset the BLR posterior on a node back
@@ -3455,6 +3566,51 @@ mod tests {
         assert_eq!(e0.previous_hash, genesis_hash());
         assert_eq!(g.chain_head, e0.new_hash);
         assert_eq!(g.nodes[0].parent, None);
+    }
+
+    // ── Phase 0.9.5 R0-3 (Tier 2 Option C): periodic BLR checkpoints ──
+
+    #[test]
+    fn periodic_blr_witness_checkpoints_on_interval() {
+        // The witness is the real state hash exactly when post-update
+        // `n_seen` is a multiple of BLR_CHECKPOINT_INTERVAL, else the
+        // zero sentinel.
+        let prior = BlrPrior::new(2.0, 1.0, 0.5).unwrap();
+        let mut s = BlrState::from_prior(&prior, 3);
+        for n in [1u64, 2, 63, 65, 127] {
+            s.n_seen = n;
+            assert_eq!(
+                periodic_blr_witness(&s),
+                BLR_INTERMEDIATE_WITNESS,
+                "n_seen={n} is mid-interval -> sentinel"
+            );
+        }
+        for n in [BLR_CHECKPOINT_INTERVAL, 2 * BLR_CHECKPOINT_INTERVAL] {
+            s.n_seen = n;
+            assert_eq!(
+                periodic_blr_witness(&s),
+                s.state_hash(),
+                "n_seen={n} is a checkpoint -> real state_hash"
+            );
+            assert_ne!(periodic_blr_witness(&s), BLR_INTERMEDIATE_WITNESS);
+        }
+    }
+
+    #[test]
+    fn checkpoint_blr_emits_only_for_mid_interval_nodes() {
+        let mut g = AdaptiveBeliefGraph::new(7);
+        g.set_leaf_head(2, vec![], 1, Activation::None).unwrap();
+        g.set_blr_prior(2.0, 1.0, 0.5).unwrap();
+        // Untrained graph: every node is witnessed by BlrInitialized.
+        assert_eq!(g.checkpoint_blr(), 0, "no trained nodes -> nothing to flush");
+        // Train the root mid-interval.
+        for i in 0..5 {
+            g.blr_update(0, &[1.0, 0.5], &[0.3 + i as f64 * 1e-3]).unwrap();
+        }
+        assert_eq!(g.checkpoint_blr(), 1, "the mid-interval root needs a flush");
+        let last = g.audit.last().unwrap();
+        assert_eq!(last.node_id, 0);
+        assert!(matches!(last.kind, AuditKind::BlrUpdated { .. }));
     }
 
     #[test]

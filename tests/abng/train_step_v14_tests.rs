@@ -154,17 +154,33 @@ fn replay_roundtrip() {
     for &(x, phi, y) in rows {
         g.train_step(&[x], &phi, y).unwrap();
     }
+    // Phase 0.9.5 R0-3 (Tier 2 Option C) — train_step uses the
+    // periodic-checkpoint witness; with only 3 rows every TrainStep is
+    // an intermediate (sentinel) row, so the trained leaves must be
+    // flushed before serialize or the end-of-replay verifier rejects
+    // their un-anchored final state.
+    g.checkpoint_blr();
     let blob = serialize(&g);
     let g2 = replay(&blob).expect("v14 replay must succeed for TrainStep events");
     assert_eq!(g.chain_head, g2.chain_head, "chain_head must roundtrip");
     // Spot-check that the audit log on the replay side contains the
-    // TrainStep events (counts + last-event-kind).
+    // TrainStep events. After the `checkpoint_blr` flush the trailing
+    // events are the per-node `BlrUpdated` checkpoints; the `TrainStep`
+    // events sit earlier in the log.
     assert_eq!(g.audit.len(), g2.audit.len());
-    let last = g2.audit.last().unwrap();
     assert!(
-        matches!(last.kind, AuditKind::TrainStep { .. }),
-        "last event after replay should be TrainStep, got {:?}",
-        last.kind
+        g2.audit
+            .iter()
+            .any(|e| matches!(e.kind, AuditKind::TrainStep { .. })),
+        "replay side must contain the TrainStep events"
+    );
+    assert!(
+        matches!(
+            g2.audit.last().unwrap().kind,
+            AuditKind::BlrUpdated { .. }
+        ),
+        "after checkpoint_blr the trailing event is a BlrUpdated checkpoint, got {:?}",
+        g2.audit.last().unwrap().kind
     );
 }
 

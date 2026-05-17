@@ -46,7 +46,7 @@ use cjc_abng::blr::{cholesky, BlrPrior, BlrState};
 use cjc_abng::categorical::{
     CategoricalTransform, ColumnRole, RarePolicy, Schema, TransformConfig,
 };
-use cjc_abng::graph::AdaptiveBeliefGraph;
+use cjc_abng::graph::{AdaptiveBeliefGraph, BLR_CHECKPOINT_INTERVAL};
 use cjc_ad::pinn::Activation;
 
 // ── Configuration ───────────────────────────────────────────────────
@@ -502,22 +502,23 @@ fn main() {
     }
     eprintln!("  {:<32}: {:>10.3} us/row", "TOTAL", per_row / 1e3);
 
-    let hash_share = 2.0 * sh_med;
-    let update_share = 2.0 * upd_med;
+    // Reference component costs. Since Phase 0.9.5 R0-3 (Tier 2
+    // Option C) `train_step` does one O(d²) BLR update *every* row but
+    // a full d×d `state_hash` only every BLR_CHECKPOINT_INTERVAL rows,
+    // so these components do NOT linearly sum to the per-row total —
+    // they are reference points, not a decomposition.
     eprintln!(
-        "  -> state_hash    {:.3} ms/row  ({:.1} %)  [2x sha256 over the d*d precision]",
-        hash_share / 1e6,
-        100.0 * hash_share / per_row,
+        "  reference: full state_hash      = {:>9.3} us  (Option C: 1 row in {})",
+        sh_med / 1e3,
+        BLR_CHECKPOINT_INTERVAL,
     );
     eprintln!(
-        "  -> BLR update    {:.3} ms/row  ({:.1} %)  [2x O(d²) rank-1 conjugate update]",
-        update_share / 1e6,
-        100.0 * update_share / per_row,
+        "  reference: O(d²) rank-1 update  = {:>9.3} us  (every row)",
+        upd_med / 1e3,
     );
     eprintln!(
-        "  -> of state_hash: {:.1} % is SHA-256 compression, {:.1} % is canonical_bytes alloc",
-        100.0 * sha_med / sh_med,
-        100.0 * cb_med / sh_med,
+        "  reference: of a full state_hash, ~{:.0}% is SHA-256 compression",
+        (100.0 * sha_med / sh_med).min(100.0),
     );
 
     // ── extrapolation ─────────────────────────────────────────────────

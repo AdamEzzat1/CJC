@@ -195,6 +195,10 @@ fn snapshot_round_trip_does_not_carry_cache() {
     // Pre-serialize predict (cache hit path).
     let pred_before = g.blr_predict(0, &PHI).unwrap();
 
+    // Phase 0.9.5 R0-3 (Tier 2 Option C) — flush periodic-checkpoint
+    // BLR witnesses so the trained node's final state is chain-anchored
+    // for the end-of-replay verifier.
+    g.checkpoint_blr();
     let blob = serialize(&g);
     let g2 = replay(&blob).unwrap();
 
