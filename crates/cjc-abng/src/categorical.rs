@@ -315,6 +315,170 @@ fn write_str(buf: &mut Vec<u8>, s: &str) {
     buf.extend_from_slice(s.as_bytes());
 }
 
+// ──────────────────────────────────────────────────────────────────
+// Phase 0.9.5 COMMIT 2 — encoding modes + schema snapshot.
+// ──────────────────────────────────────────────────────────────────
+
+/// One-hot encoder for the predictive feature vector `phi`.
+///
+/// Maps a [`CategoryDictionary`] code to a slot in a one-hot vector.
+/// Slots `0/1/2` are always MISSING/UNKNOWN/RARE; slots `3..` are real
+/// categories in dictionary-code order (most-frequent first).
+///
+/// `max_real` caps how many real categories get their own slot — real
+/// codes beyond the cap collapse into the RARE slot. This bounds `phi`
+/// width for high-cardinality features (e.g. ICD-9 diagnosis codes) —
+/// the explosion guard applied on the predictive side. Effect coding
+/// is a documented Phase 1.0 alternative (`PHASE_0_9_5_HANDOFF.md` §9).
+#[derive(Debug, Clone, Copy)]
+pub struct OneHotEncoder {
+    max_real: Option<u32>,
+}
+
+impl OneHotEncoder {
+    /// An encoder with no cap — every real category gets its own slot.
+    pub fn new() -> Self {
+        Self { max_real: None }
+    }
+
+    /// An encoder that distinctly encodes at most `max_real` real
+    /// categories; lower-frequency reals collapse into the RARE slot.
+    pub fn with_max_real(max_real: u32) -> Self {
+        Self {
+            max_real: Some(max_real),
+        }
+    }
+
+    /// One-hot width for `dict`: 3 reserved slots + (capped) reals.
+    pub fn width(&self, dict: &CategoryDictionary) -> usize {
+        let reals = match self.max_real {
+            Some(m) => dict.n_real().min(m),
+            None => dict.n_real(),
+        };
+        (FIRST_REAL_CODE + reals) as usize
+    }
+
+    /// The one-hot slot for `raw`. A real category beyond the
+    /// `max_real` cap collapses into the RARE slot. Always `< width`.
+    pub fn slot(&self, dict: &CategoryDictionary, raw: &str) -> usize {
+        let code = dict.encode(raw);
+        match self.max_real {
+            Some(m) if code >= FIRST_REAL_CODE && code - FIRST_REAL_CODE >= m => {
+                CODE_RARE as usize
+            }
+            _ => code as usize,
+        }
+    }
+
+    /// Write the one-hot vector for `raw` into `out`: `out` is resized
+    /// to [`width`](Self::width), zeroed, then a single `1.0` is set at
+    /// [`slot`](Self::slot). Reuses the caller's buffer (the ABNG
+    /// buffer-reuse convention).
+    pub fn encode_into(&self, dict: &CategoryDictionary, raw: &str, out: &mut Vec<f64>) {
+        let w = self.width(dict);
+        out.clear();
+        out.resize(w, 0.0);
+        out[self.slot(dict, raw)] = 1.0;
+    }
+}
+
+impl Default for OneHotEncoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Ordinal routing bucket for a category code — the routing-side (`x`)
+/// encoding.
+///
+/// Clamps a [`CategoryDictionary`] code into `0..route_bins`: the
+/// reserved codes and the most-frequent real categories get distinct
+/// buckets; lower-frequency reals beyond `route_bins - 1` all collapse
+/// into the last bucket. Because dictionary codes are frequency-ranked,
+/// this keeps the *common* categories distinct for routing and lumps
+/// the tail — the route-explosion guard: a categorical feature
+/// contributes at most `route_bins` distinct routing values.
+pub fn route_bucket(code: u32, route_bins: u8) -> u8 {
+    let last = (route_bins as u32).saturating_sub(1);
+    code.min(last) as u8
+}
+
+/// Phase 0.9.5 feature-transform version. Bump on any change to how
+/// raw rows become `(x, phi)`; the schema snapshot embeds it so a
+/// replay detects a transform-pipeline mismatch.
+pub const FEATURE_TRANSFORM_VERSION: u32 = 1;
+
+/// The deterministic provenance bundle for one Phase 0.9.5 run.
+///
+/// Every field is a hash or a scalar fixed by the
+/// `(dataset, split seed, transform)` triple.
+/// [`snapshot_hash`](Self::snapshot_hash) over all of them is the
+/// single value a replay checks: same dataset + same seed + same build
+/// ⇒ identical snapshot hash. See `PHASE_0_9_5_HANDOFF.md` §3.6.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SchemaSnapshot {
+    /// SHA-256 of the raw source CSV bytes.
+    pub raw_dataset_hash: [u8; 32],
+    /// SHA-256 of the canonical column-name + role list.
+    pub schema_hash: [u8; 32],
+    /// Combined hash of every per-feature [`CategoryDictionary`]
+    /// (see [`hash_vocabularies`]).
+    pub categorical_vocab_hash: [u8; 32],
+    /// SHA-256 of the per-numeric-column `(mean, std)` standardization
+    /// statistics.
+    pub numeric_standardization_hash: [u8; 32],
+    /// [`FEATURE_TRANSFORM_VERSION`] at the time of the run.
+    pub feature_transform_version: u32,
+    /// The deterministic train/test split seed.
+    pub split_seed: u64,
+    /// Total dataset row count.
+    pub row_count: u64,
+    /// Human-readable target definition, e.g. `"readmitted == '<30'"`.
+    pub target_definition: String,
+}
+
+impl SchemaSnapshot {
+    /// Deterministic byte encoding — fixed field order, big-endian
+    /// integers.
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(160 + self.target_definition.len());
+        buf.extend_from_slice(&self.raw_dataset_hash);
+        buf.extend_from_slice(&self.schema_hash);
+        buf.extend_from_slice(&self.categorical_vocab_hash);
+        buf.extend_from_slice(&self.numeric_standardization_hash);
+        buf.extend_from_slice(&self.feature_transform_version.to_be_bytes());
+        buf.extend_from_slice(&self.split_seed.to_be_bytes());
+        buf.extend_from_slice(&self.row_count.to_be_bytes());
+        write_str(&mut buf, &self.target_definition);
+        buf
+    }
+
+    /// SHA-256 of [`canonical_bytes`](Self::canonical_bytes) — the
+    /// single provenance value a replay checks.
+    pub fn snapshot_hash(&self) -> [u8; 32] {
+        cjc_snap::hash::sha256(&self.canonical_bytes())
+    }
+}
+
+/// Combine the per-feature category dictionaries into one deterministic
+/// `categorical_vocab_hash` for a [`SchemaSnapshot`].
+///
+/// Features are sorted by name before hashing, so the result does not
+/// depend on the order the dictionaries were built or supplied in.
+pub fn hash_vocabularies(features: &[(&str, &CategoryDictionary)]) -> [u8; 32] {
+    let mut sorted: Vec<&(&str, &CategoryDictionary)> = features.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(b.0));
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&(sorted.len() as u32).to_be_bytes());
+    for (name, dict) in sorted {
+        write_str(&mut buf, name);
+        let cb = dict.canonical_bytes();
+        buf.extend_from_slice(&(cb.len() as u32).to_be_bytes());
+        buf.extend_from_slice(&cb);
+    }
+    cjc_snap::hash::sha256(&buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,5 +635,161 @@ mod tests {
         assert_eq!(d.n_real(), 1);
         assert_eq!(d.encode("?"), CODE_MISSING);
         assert_eq!(d.encode("a"), FIRST_REAL_CODE);
+    }
+
+    // ── COMMIT 2 — encoding modes + schema snapshot ──────────────────
+
+    fn sample_snapshot() -> SchemaSnapshot {
+        SchemaSnapshot {
+            raw_dataset_hash: [1u8; 32],
+            schema_hash: [2u8; 32],
+            categorical_vocab_hash: [3u8; 32],
+            numeric_standardization_hash: [4u8; 32],
+            feature_transform_version: FEATURE_TRANSFORM_VERSION,
+            split_seed: 42,
+            row_count: 101_766,
+            target_definition: "readmitted == '<30'".to_string(),
+        }
+    }
+
+    #[test]
+    fn one_hot_width_is_reserved_plus_reals() {
+        let d = build(&["a", "b", "c"], &[], RarePolicy::KEEP_ALL);
+        assert_eq!(
+            OneHotEncoder::new().width(&d),
+            (FIRST_REAL_CODE + 3) as usize
+        );
+    }
+
+    #[test]
+    fn one_hot_slot_equals_code_when_uncapped() {
+        let d = build(&["b", "b", "a"], &[], RarePolicy::KEEP_ALL);
+        let e = OneHotEncoder::new();
+        assert_eq!(e.slot(&d, "b"), d.encode("b") as usize);
+        assert_eq!(e.slot(&d, "a"), d.encode("a") as usize);
+    }
+
+    #[test]
+    fn one_hot_reserved_slots() {
+        let d = build(&["a", "a", "?"], &["?"], RarePolicy::KEEP_ALL);
+        let e = OneHotEncoder::new();
+        assert_eq!(e.slot(&d, "?"), CODE_MISSING as usize);
+        assert_eq!(e.slot(&d, "never-seen"), CODE_UNKNOWN as usize);
+    }
+
+    #[test]
+    fn one_hot_cap_collapses_tail_to_rare() {
+        // 4 real categories; cap at 2 -> codes 3,4 keep distinct slots,
+        // codes 5,6 collapse into the RARE slot.
+        let d = build(
+            &["a", "a", "a", "a", "b", "b", "b", "c", "c", "d"],
+            &[],
+            RarePolicy::KEEP_ALL,
+        );
+        let e = OneHotEncoder::with_max_real(2);
+        assert_eq!(e.width(&d), (FIRST_REAL_CODE + 2) as usize);
+        assert_eq!(e.slot(&d, "a"), FIRST_REAL_CODE as usize);
+        assert_eq!(e.slot(&d, "b"), (FIRST_REAL_CODE + 1) as usize);
+        assert_eq!(e.slot(&d, "c"), CODE_RARE as usize);
+        assert_eq!(e.slot(&d, "d"), CODE_RARE as usize);
+    }
+
+    #[test]
+    fn one_hot_slot_always_within_width() {
+        let d = build(&["a", "a", "b", "c"], &["?"], RarePolicy::KEEP_ALL);
+        for e in [
+            OneHotEncoder::new(),
+            OneHotEncoder::with_max_real(1),
+            OneHotEncoder::with_max_real(0),
+        ] {
+            let w = e.width(&d);
+            for raw in ["a", "b", "c", "?", "unknown", ""] {
+                assert!(e.slot(&d, raw) < w, "slot out of bounds for {raw:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn one_hot_encode_into_sets_single_one_and_reuses_buffer() {
+        let d = build(&["a", "a", "b"], &[], RarePolicy::KEEP_ALL);
+        let e = OneHotEncoder::new();
+        let mut buf = vec![9.0; 99]; // pre-filled garbage
+        e.encode_into(&d, "a", &mut buf);
+        assert_eq!(buf.len(), e.width(&d));
+        assert_eq!(buf.iter().sum::<f64>(), 1.0);
+        assert_eq!(buf[e.slot(&d, "a")], 1.0);
+    }
+
+    #[test]
+    fn route_bucket_clamps_and_keeps_frequent_distinct() {
+        assert_eq!(route_bucket(CODE_MISSING, 4), 0);
+        assert_eq!(route_bucket(CODE_UNKNOWN, 4), 1);
+        assert_eq!(route_bucket(CODE_RARE, 4), 2);
+        assert_eq!(route_bucket(FIRST_REAL_CODE, 4), 3);
+        assert_eq!(route_bucket(FIRST_REAL_CODE + 9, 4), 3); // tail lumps
+    }
+
+    #[test]
+    fn route_bucket_wider_bins_keep_more_distinct() {
+        assert_eq!(route_bucket(FIRST_REAL_CODE + 3, 8), FIRST_REAL_CODE as u8 + 3);
+        assert_eq!(route_bucket(FIRST_REAL_CODE + 99, 8), 7); // last bucket
+    }
+
+    #[test]
+    fn schema_snapshot_canonical_bytes_deterministic() {
+        let s = sample_snapshot();
+        assert_eq!(s.canonical_bytes(), s.clone().canonical_bytes());
+        assert_eq!(s.snapshot_hash(), s.snapshot_hash());
+    }
+
+    #[test]
+    fn schema_snapshot_hash_changes_with_every_field() {
+        let base = sample_snapshot();
+        let h = base.snapshot_hash();
+        let mut v;
+        v = base.clone();
+        v.raw_dataset_hash[0] ^= 1;
+        assert_ne!(v.snapshot_hash(), h);
+        v = base.clone();
+        v.schema_hash[0] ^= 1;
+        assert_ne!(v.snapshot_hash(), h);
+        v = base.clone();
+        v.categorical_vocab_hash[0] ^= 1;
+        assert_ne!(v.snapshot_hash(), h);
+        v = base.clone();
+        v.numeric_standardization_hash[0] ^= 1;
+        assert_ne!(v.snapshot_hash(), h);
+        v = base.clone();
+        v.feature_transform_version += 1;
+        assert_ne!(v.snapshot_hash(), h);
+        v = base.clone();
+        v.split_seed += 1;
+        assert_ne!(v.snapshot_hash(), h);
+        v = base.clone();
+        v.row_count += 1;
+        assert_ne!(v.snapshot_hash(), h);
+        v = base.clone();
+        v.target_definition.push('!');
+        assert_ne!(v.snapshot_hash(), h);
+    }
+
+    #[test]
+    fn hash_vocabularies_is_feature_order_independent() {
+        let da = build(&["x", "x", "y"], &[], RarePolicy::KEEP_ALL);
+        let db = build(&["p", "q", "q"], &[], RarePolicy::KEEP_ALL);
+        let ab = hash_vocabularies(&[("alpha", &da), ("beta", &db)]);
+        let ba = hash_vocabularies(&[("beta", &db), ("alpha", &da)]);
+        assert_eq!(ab, ba);
+    }
+
+    #[test]
+    fn hash_vocabularies_changes_when_a_dictionary_changes() {
+        let da = build(&["x", "x", "y"], &[], RarePolicy::KEEP_ALL);
+        let db = build(&["p", "q", "q"], &[], RarePolicy::KEEP_ALL);
+        let dc = build(&["p", "q", "q", "r"], &[], RarePolicy::KEEP_ALL);
+        assert_ne!(
+            hash_vocabularies(&[("a", &da), ("b", &db)]),
+            hash_vocabularies(&[("a", &da), ("b", &dc)]),
+        );
     }
 }

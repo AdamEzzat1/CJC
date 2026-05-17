@@ -45,7 +45,9 @@ pub mod stats;
 pub use audit::{AuditEvent, AuditKind, AuditLog, AuditLogIter};
 pub use blr::{BlrError, BlrPrior, BlrState};
 pub use calibration::{CalibrationBins, CalibrationError};
-pub use categorical::{CategoryDictionary, CategoryDictionaryBuilder, RarePolicy};
+pub use categorical::{
+    CategoryDictionary, CategoryDictionaryBuilder, OneHotEncoder, RarePolicy, SchemaSnapshot,
+};
 pub use children::{AdaptiveChildren, ChildrenKind};
 pub use codebook::{CodebookError, QuantileCodebook};
 pub use density::{DensityError, DensityTracker};
