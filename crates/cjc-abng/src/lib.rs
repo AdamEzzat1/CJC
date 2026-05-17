@@ -23,6 +23,7 @@
 pub mod audit;
 pub mod blr;
 pub mod calibration;
+pub mod categorical;
 pub mod children;
 pub mod codebook;
 pub mod density;
@@ -44,6 +45,7 @@ pub mod stats;
 pub use audit::{AuditEvent, AuditKind, AuditLog, AuditLogIter};
 pub use blr::{BlrError, BlrPrior, BlrState};
 pub use calibration::{CalibrationBins, CalibrationError};
+pub use categorical::{CategoryDictionary, CategoryDictionaryBuilder, RarePolicy};
 pub use children::{AdaptiveChildren, ChildrenKind};
 pub use codebook::{CodebookError, QuantileCodebook};
 pub use density::{DensityError, DensityTracker};
