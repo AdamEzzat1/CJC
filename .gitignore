@@ -18,3 +18,9 @@ bench_results/data_100k_half.csv
 bench_results/**/*.bin
 bench_results/*.lock
 
+# Phase 0.9.5 raw medical datasets (too large for git; fetched from UCI,
+# reproduced via the URLs + raw_dataset_hash in PHASE_0_9_5_STATUS.md)
+tests/data/diabetes_130/
+tests/data/diabetes_130.zip
+tests/data/cdc_brfss.csv
+
