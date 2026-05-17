@@ -42,7 +42,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use cjc_abng::blr::{cholesky, BlrPrior, BlrState};
+use cjc_abng::blr::{chol_rank1_update, cholesky, cholesky_solve, BlrPrior, BlrState};
 use cjc_abng::categorical::{
     CategoricalTransform, ColumnRole, RarePolicy, Schema, TransformConfig,
 };
@@ -410,6 +410,34 @@ fn main() {
         let _ = cholesky(&warm_prec, d).unwrap();
     });
     emit("cholesky_d (update miss)", chol_min, chol_med);
+
+    // ── update sub-costs (Research Phase R1) ──────────────────────────
+    // Where the steady O(d²) rank-1 NIG update's time goes. The 477 KB
+    // `precision.to_vec()` clone, the Givens rank-1 factor update, and
+    // the triangular solve are directly measurable; the remaining
+    // passes (matvec, two quadratic forms, the Λ+φφᵀ build) are O(d²)
+    // each and estimated by subtraction in the R1 design doc.
+    let d2 = d * d;
+    let clone_src = vec![0.5f64; d2];
+    let (clone_min, clone_med) = bench(9, 5_000, || (), |_, _| {
+        let _ = std::hint::black_box(clone_src.clone());
+    });
+    emit("  vec clone d*d (~precision.to_vec)", clone_min, clone_med);
+
+    let (cr1_min, cr1_med) = bench(
+        9,
+        2_000,
+        || cholesky(&warm_prec, d).unwrap(),
+        |l, _| chol_rank1_update(l, d, &phi0),
+    );
+    emit("  chol_rank1_update O(d²)", cr1_min, cr1_med);
+
+    let chol_l = cholesky(&warm_prec, d).unwrap();
+    let solve_rhs = vec![0.7f64; d];
+    let (cs_min, cs_med) = bench(9, 2_000, || (), |_, _| {
+        let _ = cholesky_solve(&chol_l, d, &solve_rhs);
+    });
+    emit("  cholesky_solve O(d²)", cs_min, cs_med);
 
     // ── BLR predict — cache hit and cache miss ────────────────────────
     let (ph_min, ph_med, pm_min, pm_med) = {
