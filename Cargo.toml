@@ -109,6 +109,19 @@ tempfile = "3"
 [features]
 compression = ["cjc-abng/compression"]
 
+# Phase 0.10 Track R4 — release-profile optimization. Full LTO plus a
+# single codegen unit trade build time for a faster release binary
+# (the Phase 0.9 handoff's W4 table estimated ~5-15%). Determinism is
+# preserved: `lto` / `codegen-units` are optimization-level settings
+# (cross-crate inlining, dead-code elimination) — they do not change
+# IEEE-754 results, do not enable fast-math, and do not introduce FMA
+# contraction. PGO (the other half of R4) needs a two-pass profiling
+# build driven by a representative workload, not a profile flag, so it
+# is deferred to a dedicated perf pass.
+[profile.release]
+lto = true
+codegen-units = 1
+
 [workspace.dependencies]
 cjc-ast = { path = "crates/cjc-ast", version = "0.1.6" }
 cjc-diag = { path = "crates/cjc-diag", version = "0.1.6" }
