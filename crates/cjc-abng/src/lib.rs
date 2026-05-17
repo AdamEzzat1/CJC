@@ -46,7 +46,8 @@ pub use audit::{AuditEvent, AuditKind, AuditLog, AuditLogIter};
 pub use blr::{BlrError, BlrPrior, BlrState};
 pub use calibration::{CalibrationBins, CalibrationError};
 pub use categorical::{
-    CategoryDictionary, CategoryDictionaryBuilder, OneHotEncoder, RarePolicy, SchemaSnapshot,
+    CategoricalTransform, CategoryDictionary, CategoryDictionaryBuilder, ColumnRole, OneHotEncoder,
+    RarePolicy, Schema, SchemaSnapshot, Standardizer, TransformConfig, TransformError,
 };
 pub use children::{AdaptiveChildren, ChildrenKind};
 pub use codebook::{CodebookError, QuantileCodebook};

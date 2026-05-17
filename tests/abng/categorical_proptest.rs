@@ -27,8 +27,9 @@ use std::collections::BTreeMap;
 use proptest::prelude::*;
 
 use cjc_abng::categorical::{
-    route_bucket, CategoryDictionary, CategoryDictionaryBuilder, OneHotEncoder, RarePolicy,
-    SchemaSnapshot, CODE_MISSING, CODE_RARE, CODE_UNKNOWN, FIRST_REAL_CODE,
+    route_bucket, CategoricalTransform, CategoryDictionary, CategoryDictionaryBuilder, ColumnRole,
+    OneHotEncoder, RarePolicy, Schema, SchemaSnapshot, TransformConfig, CODE_MISSING, CODE_RARE,
+    CODE_UNKNOWN, FIRST_REAL_CODE,
 };
 
 /// SplitMix64 — the same mixer as `cjc_repro::Rng`, used here to drive a
@@ -63,6 +64,40 @@ fn build(values: &[String], markers: &[&str], policy: RarePolicy) -> CategoryDic
 /// Map generated category ids to stable label strings.
 fn labels(ids: &[u8]) -> Vec<String> {
     ids.iter().map(|b| format!("cat{b}")).collect()
+}
+
+/// Fixed schema for the COMMIT 4 `CategoricalTransform` properties — one
+/// column of each fittable role.
+fn tf_schema() -> Schema {
+    Schema::new(vec![
+        ("cat".to_string(), ColumnRole::Categorical),
+        ("num".to_string(), ColumnRole::Numeric),
+        ("lab".to_string(), ColumnRole::Target),
+    ])
+}
+
+/// Transform config with `KEEP_ALL` folding so the small generated
+/// fixtures do not collapse entirely into the RARE slot.
+fn tf_config() -> TransformConfig {
+    TransformConfig {
+        rare_policy: RarePolicy::KEEP_ALL,
+        target_positives: vec!["yes".to_string()],
+        ..TransformConfig::default()
+    }
+}
+
+/// Map generated `(cat_id, num_value, positive)` triples to raw string
+/// rows matching [`tf_schema`].
+fn tf_rows(spec: &[(u8, u8, bool)]) -> Vec<Vec<String>> {
+    spec.iter()
+        .map(|&(c, n, pos)| {
+            vec![
+                format!("cat{c}"),
+                format!("{n}"),
+                if pos { "yes".to_string() } else { "no".to_string() },
+            ]
+        })
+        .collect()
 }
 
 proptest! {
@@ -295,5 +330,48 @@ proptest! {
         v = base.clone();
         v.target_definition.push('\u{1}');
         prop_assert_ne!(v.snapshot_hash(), h);
+    }
+
+    // COMMIT 4 — `CategoricalTransform::fit` is invariant to training-row
+    // order: a permutation of the train rows yields a byte-identical
+    // snapshot, routing selection, and per-row transform output. This is
+    // the directive-1 determinism contract over the whole transform.
+    #[test]
+    fn prop_transform_fit_is_row_order_invariant(
+        spec in prop::collection::vec((0u8..6, 0u8..20, any::<bool>()), 1..200),
+        shuffle_seed in any::<u64>(),
+    ) {
+        let schema = tf_schema();
+        let config = tf_config();
+        let forward = tf_rows(&spec);
+        let shuffled = shuffle(&forward, shuffle_seed);
+        let a = CategoricalTransform::fit(&schema, &forward, &config).unwrap();
+        let b = CategoricalTransform::fit(&schema, &shuffled, &config).unwrap();
+        prop_assert_eq!(a.snapshot().snapshot_hash(), b.snapshot().snapshot_hash());
+        prop_assert_eq!(a.routing_feature_columns(), b.routing_feature_columns());
+        prop_assert_eq!(a.phi_width(), b.phi_width());
+        for r in &forward {
+            prop_assert_eq!(a.transform(r).unwrap(), b.transform(r).unwrap());
+        }
+    }
+
+    // COMMIT 4 — every transformed row is well-formed: `x` holds one
+    // valid route bucket per routing feature, `phi` has the fixed
+    // `phi_width`, and `y` is a `0.0` / `1.0` label.
+    #[test]
+    fn prop_transform_outputs_well_formed(
+        spec in prop::collection::vec((0u8..6, 0u8..20, any::<bool>()), 1..200),
+    ) {
+        let t = CategoricalTransform::fit(&tf_schema(), &tf_rows(&spec), &tf_config()).unwrap();
+        let route_bins = t.route_bins() as f64;
+        for r in &tf_rows(&spec) {
+            let (x, phi, y) = t.transform(r).unwrap();
+            prop_assert_eq!(x.len(), t.n_routing_features());
+            for &xi in &x {
+                prop_assert!(xi >= 0.0 && xi < route_bins);
+            }
+            prop_assert_eq!(phi.len(), t.phi_width());
+            prop_assert!(y == 0.0 || y == 1.0);
+        }
     }
 }

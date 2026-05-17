@@ -28,6 +28,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use cjc_repro::{kahan_sum_f64, KahanAccumulatorF64};
+
 /// Reserved code — the source cell was empty or a missing-marker.
 pub const CODE_MISSING: u32 = 0;
 /// Reserved code — a category absent from the frozen training
@@ -479,6 +481,721 @@ pub fn hash_vocabularies(features: &[(&str, &CategoryDictionary)]) -> [u8; 32] {
     cjc_snap::hash::sha256(&buf)
 }
 
+// ──────────────────────────────────────────────────────────────────
+// Phase 0.9.5 COMMIT 4 — CategoricalTransform: raw rows -> (x, phi, y).
+// ──────────────────────────────────────────────────────────────────
+
+/// How one source column is consumed by a [`CategoricalTransform`].
+///
+/// The two `*PhiOnly` roles are the Phase 0.9.5 §4 route-explosion hard
+/// guard: a high-cardinality nominal column (ICD-9 `diag_1/2/3`, the 23
+/// medication columns) feeds the predictive vector `phi` but is **never**
+/// eligible as a routing feature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnRole {
+    /// The binary target / label column.
+    Target,
+    /// Dropped entirely — identifiers and leakage-risk columns.
+    Ignore,
+    /// Categorical: one-hot encoded into `phi`, eligible for routing.
+    Categorical,
+    /// Categorical, one-hot into `phi` only — never a routing feature.
+    CategoricalPhiOnly,
+    /// Numeric: standardized into `phi`, eligible for routing.
+    Numeric,
+    /// Numeric, standardized into `phi` only — never a routing feature.
+    NumericPhiOnly,
+}
+
+impl ColumnRole {
+    /// True if a column with this role may be picked as a routing feature.
+    fn is_routing_candidate(self) -> bool {
+        matches!(self, ColumnRole::Categorical | ColumnRole::Numeric)
+    }
+}
+
+/// One source column's tag byte for the schema hash.
+fn role_tag(role: ColumnRole) -> u8 {
+    match role {
+        ColumnRole::Target => 0,
+        ColumnRole::Ignore => 1,
+        ColumnRole::Categorical => 2,
+        ColumnRole::CategoricalPhiOnly => 3,
+        ColumnRole::Numeric => 4,
+        ColumnRole::NumericPhiOnly => 5,
+    }
+}
+
+/// The ordered column layout of a dataset — one `(name, role)` per
+/// column, in raw row order (CSV column order).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Schema {
+    columns: Vec<(String, ColumnRole)>,
+}
+
+impl Schema {
+    /// Build a schema from `(name, role)` pairs in column order.
+    pub fn new(columns: Vec<(String, ColumnRole)>) -> Self {
+        Self { columns }
+    }
+
+    /// Number of columns.
+    pub fn len(&self) -> usize {
+        self.columns.len()
+    }
+
+    /// True if the schema has no columns.
+    pub fn is_empty(&self) -> bool {
+        self.columns.is_empty()
+    }
+
+    /// The role of column `idx`.
+    pub fn role(&self, idx: usize) -> ColumnRole {
+        self.columns[idx].1
+    }
+
+    /// The name of column `idx`.
+    pub fn name(&self, idx: usize) -> &str {
+        &self.columns[idx].0
+    }
+
+    /// Index of the sole [`ColumnRole::Target`] column.
+    fn target_index(&self) -> Result<usize, TransformError> {
+        let mut found: Option<usize> = None;
+        for (i, (_, role)) in self.columns.iter().enumerate() {
+            if *role == ColumnRole::Target {
+                if found.is_some() {
+                    return Err(TransformError::MultipleTargets);
+                }
+                found = Some(i);
+            }
+        }
+        found.ok_or(TransformError::NoTarget)
+    }
+
+    /// Deterministic canonical bytes — column count, then each name
+    /// (length-prefixed) followed by its role tag, in column order.
+    fn canonical_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(self.columns.len() as u32).to_be_bytes());
+        for (name, role) in &self.columns {
+            write_str(&mut buf, name);
+            buf.push(role_tag(*role));
+        }
+        buf
+    }
+}
+
+/// Errors from [`CategoricalTransform::fit`] / [`CategoricalTransform::transform`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum TransformError {
+    /// The schema has no columns.
+    EmptySchema,
+    /// The schema has no `Target` column.
+    NoTarget,
+    /// The schema has more than one `Target` column.
+    MultipleTargets,
+    /// `route_bins` is not a power of two in `[2, 128]`.
+    BadRouteBins(u8),
+    /// A row's cell count does not match the schema's column count.
+    RowArityMismatch {
+        /// The schema's column count.
+        expected: usize,
+        /// The offending row's cell count.
+        got: usize,
+    },
+    /// A row's target cell is empty or a missing-marker.
+    MissingTarget,
+}
+
+impl std::fmt::Display for TransformError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TransformError::EmptySchema => {
+                write!(f, "categorical transform: schema has no columns")
+            }
+            TransformError::NoTarget => {
+                write!(f, "categorical transform: schema has no Target column")
+            }
+            TransformError::MultipleTargets => write!(
+                f,
+                "categorical transform: schema has more than one Target column"
+            ),
+            TransformError::BadRouteBins(n) => write!(
+                f,
+                "categorical transform: route_bins must be a power of two in [2, 128], got {n}"
+            ),
+            TransformError::RowArityMismatch { expected, got } => write!(
+                f,
+                "categorical transform: row has {got} cells, schema has {expected} columns"
+            ),
+            TransformError::MissingTarget => {
+                write!(f, "categorical transform: row has a missing target cell")
+            }
+        }
+    }
+}
+
+/// Per-column z-score standardization statistics, fit on the **training
+/// split only** (Phase 0.9.5 directive 6 — no test-split leakage).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Standardizer {
+    /// Training-split column mean.
+    pub mean: f64,
+    /// Training-split column standard deviation, floored at `1e-12` so a
+    /// constant column cannot divide by zero.
+    pub std: f64,
+}
+
+impl Standardizer {
+    /// Fit `(mean, std)` over `values` — population variance (`1/n`
+    /// divisor). The values are sorted before summation so the result is
+    /// invariant to training-row order, and both reductions use Kahan
+    /// compensated summation (per the determinism rules). An empty input
+    /// yields the identity standardizer `(0.0, 1.0)`.
+    pub fn fit(values: &[f64]) -> Self {
+        let n = values.len();
+        if n == 0 {
+            return Self {
+                mean: 0.0,
+                std: 1.0,
+            };
+        }
+        let mut sorted: Vec<f64> = values.to_vec();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        let mean = kahan_sum_f64(&sorted) / (n as f64);
+        let mut var_acc = KahanAccumulatorF64::new();
+        for &v in &sorted {
+            let d = v - mean;
+            var_acc.add(d * d);
+        }
+        let std = (var_acc.finalize() / (n as f64)).sqrt().max(1e-12);
+        Self { mean, std }
+    }
+
+    /// Standardize one value: `(v - mean) / std`.
+    pub fn apply(&self, v: f64) -> f64 {
+        (v - self.mean) / self.std
+    }
+}
+
+/// Mutual information `I(F; Y)` in nats between a discrete feature `F`
+/// (bucket indices `0..n_buckets`) and a binary target `Y` (`0` / `1`),
+/// estimated from exact co-occurrence counts.
+///
+/// Deterministic: counts are integers, the joint table is walked in a
+/// fixed `(bucket, y)` order, and the running sum is Kahan-compensated.
+/// Returns `0.0` for an empty / length-mismatched input.
+fn mutual_information(buckets: &[u8], target: &[u8], n_buckets: usize) -> f64 {
+    let n = buckets.len();
+    if n == 0 || n != target.len() {
+        return 0.0;
+    }
+    let mut joint: Vec<[u64; 2]> = vec![[0, 0]; n_buckets];
+    let mut margin_y = [0u64; 2];
+    for (&b, &y) in buckets.iter().zip(target.iter()) {
+        let bi = b as usize;
+        if bi >= n_buckets {
+            continue;
+        }
+        let yi = (y != 0) as usize;
+        joint[bi][yi] += 1;
+        margin_y[yi] += 1;
+    }
+    let total = (margin_y[0] + margin_y[1]) as f64;
+    if total == 0.0 {
+        return 0.0;
+    }
+    let mut acc = KahanAccumulatorF64::new();
+    for counts in &joint {
+        let nb = counts[0] + counts[1];
+        if nb == 0 {
+            continue;
+        }
+        let p_b = (nb as f64) / total;
+        for yi in 0..2 {
+            let nby = counts[yi];
+            if nby == 0 {
+                continue;
+            }
+            let p_by = (nby as f64) / total;
+            let p_y = (margin_y[yi] as f64) / total;
+            acc.add(p_by * (p_by / (p_b * p_y)).ln());
+        }
+    }
+    // MI is non-negative; clamp tiny round-off below zero.
+    acc.finalize().max(0.0)
+}
+
+/// `route_bins - 1` quantile cut points for a numeric column, from its
+/// training values. Cut `k` is the `k / route_bins` quantile. A
+/// low-variety column can yield repeated cuts — [`numeric_bucket`]'s
+/// `partition_point` lookup tolerates that. Sorting makes the result
+/// invariant to training-row order.
+fn quantile_cuts(values: &[f64], route_bins: u8) -> Vec<f64> {
+    let want = route_bins as usize - 1;
+    let mut sorted: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let n = sorted.len();
+    if n == 0 {
+        return vec![0.0; want];
+    }
+    let mut cuts = Vec::with_capacity(want);
+    for k in 1..route_bins as usize {
+        let q = (k as f64) / (route_bins as f64);
+        let idx = ((q * n as f64) as usize).min(n - 1);
+        cuts.push(sorted[idx]);
+    }
+    cuts
+}
+
+/// Routing bucket for a numeric value: the count of cut points strictly
+/// below it, clamped into `0..route_bins`. Mirrors the codebook's
+/// `partition_point(|b| b < v)` binning convention.
+fn numeric_bucket(value: f64, cuts: &[f64], route_bins: u8) -> u8 {
+    let b = cuts.partition_point(|&c| c < value);
+    b.min(route_bins as usize - 1) as u8
+}
+
+/// Parse a numeric cell. `None` for a missing-marker or an unparseable
+/// string — the caller imputes those to the training-split column mean.
+fn parse_numeric(raw: &str, markers: &[&str]) -> Option<f64> {
+    if markers.contains(&raw) {
+        return None;
+    }
+    match raw.trim().parse::<f64>() {
+        Ok(v) if v.is_finite() => Some(v),
+        _ => None,
+    }
+}
+
+/// Map a raw target cell to a `0` / `1` label byte. A missing-marker
+/// target counts as `0` here — used only for MI feature selection;
+/// `transform` rejects a missing target rather than mislabelling it.
+fn binarise_target(raw: &str, positives: &BTreeSet<String>, markers: &[&str]) -> u8 {
+    if !markers.contains(&raw) && positives.contains(raw) {
+        1
+    } else {
+        0
+    }
+}
+
+/// Deterministic hash of every numeric column's `(mean, std)` — the
+/// `numeric_standardization_hash` for the schema snapshot. Columns are
+/// taken in schema order; `f64`s via `to_bits`.
+fn hash_standardizers(schema: &Schema, columns: &[ColumnTransform]) -> [u8; 32] {
+    let mut buf = Vec::new();
+    for (c, ct) in columns.iter().enumerate() {
+        if let ColumnTransform::Numeric { stdz } = ct {
+            write_str(&mut buf, schema.name(c));
+            buf.extend_from_slice(&stdz.mean.to_bits().to_be_bytes());
+            buf.extend_from_slice(&stdz.std.to_bits().to_be_bytes());
+        }
+    }
+    cjc_snap::hash::sha256(&buf)
+}
+
+/// One selected routing feature: a source column plus the rule that
+/// derives its `0..route_bins` routing bucket from a raw cell.
+#[derive(Debug, Clone, PartialEq)]
+struct RoutingFeature {
+    /// Original column index.
+    col: usize,
+    /// Bucketing rule.
+    kind: RoutingKind,
+}
+
+/// How a [`RoutingFeature`] derives its routing bucket.
+#[derive(Debug, Clone, PartialEq)]
+enum RoutingKind {
+    /// Categorical: `route_bucket(dict.encode(cell), route_bins)`, where
+    /// `dict` is the column's entry in `CategoricalTransform::columns`.
+    Categorical,
+    /// Numeric: [`numeric_bucket`] of the (mean-imputed) value against
+    /// these `route_bins - 1` quantile cut points.
+    Numeric { cuts: Vec<f64> },
+}
+
+/// Per-column fitted state inside a [`CategoricalTransform`].
+#[derive(Debug, Clone)]
+enum ColumnTransform {
+    /// The target column — carries the positive-label set.
+    Target { positives: BTreeSet<String> },
+    /// A dropped column.
+    Ignore,
+    /// A categorical column: frozen dictionary + one-hot encoder.
+    Categorical {
+        dict: CategoryDictionary,
+        encoder: OneHotEncoder,
+    },
+    /// A numeric column: its standardizer.
+    Numeric { stdz: Standardizer },
+}
+
+/// Configuration for [`CategoricalTransform::fit`].
+///
+/// The Phase 0.9.5 defaults (`route_bins = 4`, `k_routing = 4`,
+/// `max_real = 32`, [`RarePolicy::DEFAULT`]) come from the handoff §9.
+#[derive(Debug, Clone)]
+pub struct TransformConfig {
+    /// Routing buckets per routing feature — the codebook `n_bins`.
+    /// Must be a power of two in `[2, 128]`.
+    pub route_bins: u8,
+    /// How many routing features to select by mutual information.
+    /// Clamped to the number of routing candidates in the schema.
+    pub k_routing: usize,
+    /// One-hot width cap for wide categorical columns — the `phi`-side
+    /// explosion guard (see [`OneHotEncoder::with_max_real`]).
+    pub max_real: u32,
+    /// Rare-category folding policy applied to every dictionary.
+    pub rare_policy: RarePolicy,
+    /// Raw cell strings treated as missing.
+    pub missing_markers: Vec<String>,
+    /// Target cell values that map to the positive class (`y = 1.0`);
+    /// every other non-missing value is negative (`y = 0.0`).
+    pub target_positives: Vec<String>,
+    /// Human-readable target definition for the schema snapshot.
+    pub target_definition: String,
+    /// SHA-256 of the raw source CSV bytes (supplied by the harness).
+    pub raw_dataset_hash: [u8; 32],
+    /// The train/test split seed.
+    pub split_seed: u64,
+    /// Total dataset row count (train + test).
+    pub row_count: u64,
+}
+
+impl Default for TransformConfig {
+    fn default() -> Self {
+        Self {
+            route_bins: 4,
+            k_routing: 4,
+            max_real: 32,
+            rare_policy: RarePolicy::DEFAULT,
+            missing_markers: vec![String::from("?"), String::new()],
+            target_positives: Vec::new(),
+            target_definition: String::new(),
+            raw_dataset_hash: [0u8; 32],
+            split_seed: 0,
+            row_count: 0,
+        }
+    }
+}
+
+/// A fitted categorical preprocessing pipeline — turns raw heterogeneous
+/// string rows into the `(x, phi, y)` triples ABNG's
+/// `train_step(x, phi, y)` consumes.
+///
+/// Built once from the **training split** via [`fit`](Self::fit): the
+/// dictionaries, standardization statistics, and routing-feature
+/// selection are a pure function of the train rows (Phase 0.9.5
+/// directive 6 — leakage-free). The result is immutable.
+#[derive(Debug, Clone)]
+pub struct CategoricalTransform {
+    /// Per-column fitted state, indexed by original column position.
+    columns: Vec<ColumnTransform>,
+    /// Index of the `Target` column.
+    target_col: usize,
+    /// Selected routing features (the `x` layout), in MI-rank order.
+    routing: Vec<RoutingFeature>,
+    /// Total `phi` width.
+    phi_width: usize,
+    /// Routing bucket count per `x` dimension (the codebook `n_bins`).
+    route_bins: u8,
+    /// Raw cell strings treated as missing (for numeric parsing in
+    /// `transform`).
+    missing_markers: Vec<String>,
+    /// Deterministic provenance bundle.
+    snapshot: SchemaSnapshot,
+}
+
+impl CategoricalTransform {
+    /// Fit the transform on the **training split**.
+    ///
+    /// `train_rows` are the raw cell rows of the train split only; each
+    /// must have exactly one cell per `schema` column. Builds a
+    /// dictionary per categorical column and a [`Standardizer`] per
+    /// numeric column, selects the top-`k_routing` routing features by
+    /// mutual information with the target, and assembles the
+    /// [`SchemaSnapshot`].
+    ///
+    /// # Determinism
+    ///
+    /// `fit` is a pure function of the schema, the *multiset* of train
+    /// rows, and the config: dictionaries are frequency+lexically sorted
+    /// (COMMIT 1), standardization sums over sorted values, and MI
+    /// selection scores order-free counts — so a permutation of the
+    /// train rows yields a byte-identical transform and snapshot.
+    pub fn fit(
+        schema: &Schema,
+        train_rows: &[Vec<String>],
+        config: &TransformConfig,
+    ) -> Result<Self, TransformError> {
+        if schema.is_empty() {
+            return Err(TransformError::EmptySchema);
+        }
+        let target_col = schema.target_index()?;
+        if !matches!(config.route_bins, 2 | 4 | 8 | 16 | 32 | 64 | 128) {
+            return Err(TransformError::BadRouteBins(config.route_bins));
+        }
+        let n_cols = schema.len();
+        for row in train_rows {
+            if row.len() != n_cols {
+                return Err(TransformError::RowArityMismatch {
+                    expected: n_cols,
+                    got: row.len(),
+                });
+            }
+        }
+
+        let markers: Vec<&str> = config.missing_markers.iter().map(String::as_str).collect();
+
+        // ── Per-column fitted state (train rows only). ───────────────
+        let mut columns: Vec<ColumnTransform> = Vec::with_capacity(n_cols);
+        for c in 0..n_cols {
+            let ct = match schema.role(c) {
+                ColumnRole::Target => ColumnTransform::Target {
+                    positives: config.target_positives.iter().cloned().collect(),
+                },
+                ColumnRole::Ignore => ColumnTransform::Ignore,
+                ColumnRole::Categorical | ColumnRole::CategoricalPhiOnly => {
+                    let mut b = CategoryDictionaryBuilder::new(&markers);
+                    for row in train_rows {
+                        b.observe(row[c].as_str());
+                    }
+                    ColumnTransform::Categorical {
+                        dict: b.build(config.rare_policy),
+                        encoder: OneHotEncoder::with_max_real(config.max_real),
+                    }
+                }
+                ColumnRole::Numeric | ColumnRole::NumericPhiOnly => {
+                    let mut vals: Vec<f64> = Vec::new();
+                    for row in train_rows {
+                        if let Some(v) = parse_numeric(row[c].as_str(), &markers) {
+                            vals.push(v);
+                        }
+                    }
+                    ColumnTransform::Numeric {
+                        stdz: Standardizer::fit(&vals),
+                    }
+                }
+            };
+            columns.push(ct);
+        }
+
+        // ── phi width — sum of every column's phi contribution. ──────
+        let mut phi_width = 0usize;
+        for ct in &columns {
+            phi_width += match ct {
+                ColumnTransform::Categorical { dict, encoder } => encoder.width(dict),
+                ColumnTransform::Numeric { .. } => 1,
+                ColumnTransform::Target { .. } | ColumnTransform::Ignore => 0,
+            };
+        }
+
+        // ── Binarised train target (for MI selection). ───────────────
+        let target: Vec<u8> = match &columns[target_col] {
+            ColumnTransform::Target { positives } => train_rows
+                .iter()
+                .map(|row| binarise_target(row[target_col].as_str(), positives, &markers))
+                .collect(),
+            _ => unreachable!("target_index points at the Target column"),
+        };
+
+        // ── MI-based routing-feature selection. ──────────────────────
+        // Each routing candidate is scored by I(routing-bucket; target)
+        // — exactly the signal that reaches `x`. Sort (MI desc, col asc).
+        let mut scored: Vec<(usize, f64, Option<Vec<f64>>)> = Vec::new();
+        for c in 0..n_cols {
+            if !schema.role(c).is_routing_candidate() {
+                continue;
+            }
+            let (mi, cuts) = match &columns[c] {
+                ColumnTransform::Categorical { dict, .. } => {
+                    let buckets: Vec<u8> = train_rows
+                        .iter()
+                        .map(|row| route_bucket(dict.encode(row[c].as_str()), config.route_bins))
+                        .collect();
+                    let mi = mutual_information(&buckets, &target, config.route_bins as usize);
+                    (mi, None)
+                }
+                ColumnTransform::Numeric { stdz } => {
+                    let raw: Vec<f64> = train_rows
+                        .iter()
+                        .map(|row| parse_numeric(row[c].as_str(), &markers).unwrap_or(stdz.mean))
+                        .collect();
+                    let cuts = quantile_cuts(&raw, config.route_bins);
+                    let buckets: Vec<u8> = raw
+                        .iter()
+                        .map(|&v| numeric_bucket(v, &cuts, config.route_bins))
+                        .collect();
+                    let mi = mutual_information(&buckets, &target, config.route_bins as usize);
+                    (mi, Some(cuts))
+                }
+                _ => unreachable!("a routing candidate is Categorical or Numeric"),
+            };
+            scored.push((c, mi, cuts));
+        }
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        let k = config.k_routing.min(scored.len());
+        let routing: Vec<RoutingFeature> = scored
+            .into_iter()
+            .take(k)
+            .map(|(col, _mi, cuts)| RoutingFeature {
+                col,
+                kind: match cuts {
+                    Some(cuts) => RoutingKind::Numeric { cuts },
+                    None => RoutingKind::Categorical,
+                },
+            })
+            .collect();
+
+        // ── Schema snapshot. ─────────────────────────────────────────
+        let categorical_vocab_hash = {
+            let mut vocab_pairs: Vec<(&str, &CategoryDictionary)> = Vec::new();
+            for (c, ct) in columns.iter().enumerate() {
+                if let ColumnTransform::Categorical { dict, .. } = ct {
+                    vocab_pairs.push((schema.name(c), dict));
+                }
+            }
+            hash_vocabularies(&vocab_pairs)
+        };
+        let numeric_standardization_hash = hash_standardizers(schema, &columns);
+        let snapshot = SchemaSnapshot {
+            raw_dataset_hash: config.raw_dataset_hash,
+            schema_hash: cjc_snap::hash::sha256(&schema.canonical_bytes()),
+            categorical_vocab_hash,
+            numeric_standardization_hash,
+            feature_transform_version: FEATURE_TRANSFORM_VERSION,
+            split_seed: config.split_seed,
+            row_count: config.row_count,
+            target_definition: config.target_definition.clone(),
+        };
+
+        Ok(Self {
+            columns,
+            target_col,
+            routing,
+            phi_width,
+            route_bins: config.route_bins,
+            missing_markers: config.missing_markers.clone(),
+            snapshot,
+        })
+    }
+
+    /// Transform one raw row into `(x, phi, y)`:
+    ///
+    /// * `x` — one routing-bucket value (in `0.0..route_bins`) per
+    ///   selected routing feature, in MI-rank order; feeds the codebook.
+    /// * `phi` — concatenated one-hot (categorical, `max_real`-capped)
+    ///   and standardized-numeric features, in column order; feeds the
+    ///   leaf BLR. Length is always [`phi_width`](Self::phi_width).
+    /// * `y` — `1.0` if the target cell is a positive value, else `0.0`.
+    ///
+    /// A missing or unparseable numeric cell is imputed to its column's
+    /// training-split mean. Errors on a row-arity mismatch or a missing
+    /// target cell.
+    pub fn transform(&self, row: &[String]) -> Result<(Vec<f64>, Vec<f64>, f64), TransformError> {
+        if row.len() != self.columns.len() {
+            return Err(TransformError::RowArityMismatch {
+                expected: self.columns.len(),
+                got: row.len(),
+            });
+        }
+        let markers: Vec<&str> = self.missing_markers.iter().map(String::as_str).collect();
+
+        // ── y — the binary label. ────────────────────────────────────
+        let target_cell = row[self.target_col].as_str();
+        if markers.contains(&target_cell) {
+            return Err(TransformError::MissingTarget);
+        }
+        let positives = match &self.columns[self.target_col] {
+            ColumnTransform::Target { positives } => positives,
+            _ => unreachable!("target_col points at the Target column"),
+        };
+        let y = if positives.contains(target_cell) {
+            1.0
+        } else {
+            0.0
+        };
+
+        // ── x — one routing bucket per selected feature. ─────────────
+        let mut x: Vec<f64> = Vec::with_capacity(self.routing.len());
+        for rf in &self.routing {
+            let cell = row[rf.col].as_str();
+            let bucket: u8 = match &rf.kind {
+                RoutingKind::Categorical => {
+                    let dict = match &self.columns[rf.col] {
+                        ColumnTransform::Categorical { dict, .. } => dict,
+                        _ => unreachable!("RoutingKind::Categorical column is Categorical"),
+                    };
+                    route_bucket(dict.encode(cell), self.route_bins)
+                }
+                RoutingKind::Numeric { cuts } => {
+                    let mean = match &self.columns[rf.col] {
+                        ColumnTransform::Numeric { stdz } => stdz.mean,
+                        _ => unreachable!("RoutingKind::Numeric column is Numeric"),
+                    };
+                    let v = parse_numeric(cell, &markers).unwrap_or(mean);
+                    numeric_bucket(v, cuts, self.route_bins)
+                }
+            };
+            x.push(bucket as f64);
+        }
+
+        // ── phi — one-hot + standardized numeric, in column order. ───
+        let mut phi: Vec<f64> = Vec::with_capacity(self.phi_width);
+        for (c, ct) in self.columns.iter().enumerate() {
+            match ct {
+                ColumnTransform::Categorical { dict, encoder } => {
+                    let base = phi.len();
+                    let width = encoder.width(dict);
+                    phi.resize(base + width, 0.0);
+                    phi[base + encoder.slot(dict, row[c].as_str())] = 1.0;
+                }
+                ColumnTransform::Numeric { stdz } => {
+                    let v = parse_numeric(row[c].as_str(), &markers).unwrap_or(stdz.mean);
+                    phi.push(stdz.apply(v));
+                }
+                ColumnTransform::Target { .. } | ColumnTransform::Ignore => {}
+            }
+        }
+
+        Ok((x, phi, y))
+    }
+
+    /// The deterministic provenance bundle for this fit.
+    pub fn snapshot(&self) -> &SchemaSnapshot {
+        &self.snapshot
+    }
+
+    /// Width of the `phi` vector every [`transform`](Self::transform)
+    /// call produces.
+    pub fn phi_width(&self) -> usize {
+        self.phi_width
+    }
+
+    /// Number of selected routing features — the length of `x`.
+    pub fn n_routing_features(&self) -> usize {
+        self.routing.len()
+    }
+
+    /// Routing bucket count per `x` dimension — use as the codebook
+    /// `n_bins` when wiring the routing tree.
+    pub fn route_bins(&self) -> u8 {
+        self.route_bins
+    }
+
+    /// Original column indices of the selected routing features, in
+    /// MI-rank (descending mutual information) order.
+    pub fn routing_feature_columns(&self) -> Vec<usize> {
+        self.routing.iter().map(|rf| rf.col).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -791,5 +1508,374 @@ mod tests {
             hash_vocabularies(&[("a", &da), ("b", &db)]),
             hash_vocabularies(&[("a", &da), ("b", &dc)]),
         );
+    }
+
+    // ── COMMIT 4 — CategoricalTransform: raw rows -> (x, phi, y) ──────
+
+    fn rows(data: &[&[&str]]) -> Vec<Vec<String>> {
+        data.iter()
+            .map(|r| r.iter().map(|s| s.to_string()).collect())
+            .collect()
+    }
+
+    fn row(cells: &[&str]) -> Vec<String> {
+        cells.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn schema(cols: &[(&str, ColumnRole)]) -> Schema {
+        Schema::new(cols.iter().map(|(n, r)| (n.to_string(), *r)).collect())
+    }
+
+    /// A test config — `KEEP_ALL` policy so the tiny fixtures don't all
+    /// rare-fold; positives `{"yes"}`.
+    fn cfg() -> TransformConfig {
+        TransformConfig {
+            route_bins: 4,
+            k_routing: 2,
+            max_real: 32,
+            rare_policy: RarePolicy::KEEP_ALL,
+            missing_markers: vec!["?".to_string()],
+            target_positives: vec!["yes".to_string()],
+            target_definition: "label == 'yes'".to_string(),
+            raw_dataset_hash: [7u8; 32],
+            split_seed: 42,
+            row_count: 6,
+        }
+    }
+
+    fn mixed_schema() -> Schema {
+        schema(&[
+            ("color", ColumnRole::Categorical),
+            ("size", ColumnRole::Numeric),
+            ("tag", ColumnRole::CategoricalPhiOnly),
+            ("label", ColumnRole::Target),
+            ("rowid", ColumnRole::Ignore),
+        ])
+    }
+
+    fn mixed_rows() -> Vec<Vec<String>> {
+        rows(&[
+            &["red", "1.0", "a", "yes", "0"],
+            &["red", "2.0", "b", "yes", "1"],
+            &["blue", "8.0", "c", "no", "2"],
+            &["blue", "9.0", "d", "no", "3"],
+            &["green", "5.0", "e", "yes", "4"],
+            &["green", "4.0", "f", "no", "5"],
+        ])
+    }
+
+    #[test]
+    fn standardizer_fit_basic() {
+        // [0, 2, 4]: mean 2, population variance 8/3.
+        let s = Standardizer::fit(&[0.0, 2.0, 4.0]);
+        assert_eq!(s.mean, 2.0);
+        let expect_std = (8.0_f64 / 3.0).sqrt();
+        assert!((s.std - expect_std).abs() < 1e-12);
+        assert!((s.apply(4.0) - 2.0 / expect_std).abs() < 1e-12);
+    }
+
+    #[test]
+    fn standardizer_empty_is_identity() {
+        let s = Standardizer::fit(&[]);
+        assert_eq!(s.mean, 0.0);
+        assert_eq!(s.std, 1.0);
+        assert_eq!(s.apply(3.5), 3.5);
+    }
+
+    #[test]
+    fn standardizer_constant_column_floors_std() {
+        let s = Standardizer::fit(&[7.0, 7.0, 7.0, 7.0]);
+        assert_eq!(s.mean, 7.0);
+        assert_eq!(s.std, 1e-12);
+        // No div-by-zero; a value at the mean standardizes to exactly 0.
+        assert_eq!(s.apply(7.0), 0.0);
+    }
+
+    #[test]
+    fn standardizer_fit_is_row_order_invariant() {
+        // Sorted-before-summed -> bit-identical regardless of input order.
+        let a = Standardizer::fit(&[1.0, 5.0, 2.0, 9.0, 3.0]);
+        let b = Standardizer::fit(&[9.0, 3.0, 1.0, 2.0, 5.0]);
+        assert_eq!(a.mean.to_bits(), b.mean.to_bits());
+        assert_eq!(a.std.to_bits(), b.std.to_bits());
+    }
+
+    #[test]
+    fn mutual_information_zero_when_independent() {
+        // Each bucket sees both targets equally — the feature is useless.
+        let buckets = [0u8, 0, 1, 1];
+        let target = [0u8, 1, 0, 1];
+        assert_eq!(mutual_information(&buckets, &target, 2), 0.0);
+    }
+
+    #[test]
+    fn mutual_information_positive_when_predictive() {
+        // The bucket perfectly predicts the target.
+        let buckets = [0u8, 0, 1, 1];
+        let target = [0u8, 0, 1, 1];
+        assert!(mutual_information(&buckets, &target, 2) > 0.0);
+    }
+
+    #[test]
+    fn mutual_information_empty_or_mismatched_is_zero() {
+        assert_eq!(mutual_information(&[], &[], 4), 0.0);
+        assert_eq!(mutual_information(&[0], &[0, 1], 4), 0.0);
+    }
+
+    #[test]
+    fn numeric_bucket_clamps_into_route_bins() {
+        let cuts = [1.0, 2.0, 3.0];
+        assert_eq!(numeric_bucket(0.0, &cuts, 4), 0);
+        assert_eq!(numeric_bucket(1.5, &cuts, 4), 1);
+        assert_eq!(numeric_bucket(2.5, &cuts, 4), 2);
+        assert_eq!(numeric_bucket(100.0, &cuts, 4), 3);
+        assert!(numeric_bucket(-1e9, &cuts, 4) < 4);
+        assert!(numeric_bucket(1e9, &cuts, 4) < 4);
+    }
+
+    #[test]
+    fn quantile_cuts_empty_input_is_degenerate() {
+        // No data -> `route_bins - 1` placeholder cuts, no panic.
+        assert_eq!(quantile_cuts(&[], 4).len(), 3);
+    }
+
+    #[test]
+    fn quantile_cuts_are_nondecreasing() {
+        let cuts = quantile_cuts(&[5.0, 1.0, 9.0, 3.0, 7.0, 2.0, 8.0, 4.0], 4);
+        assert_eq!(cuts.len(), 3);
+        for w in cuts.windows(2) {
+            assert!(w[0] <= w[1]);
+        }
+    }
+
+    #[test]
+    fn schema_canonical_bytes_deterministic() {
+        let s = schema(&[("a", ColumnRole::Categorical), ("y", ColumnRole::Target)]);
+        assert_eq!(s.canonical_bytes(), s.clone().canonical_bytes());
+    }
+
+    #[test]
+    fn fit_rejects_empty_schema() {
+        let s = Schema::new(vec![]);
+        assert_eq!(
+            CategoricalTransform::fit(&s, &[], &cfg()).unwrap_err(),
+            TransformError::EmptySchema
+        );
+    }
+
+    #[test]
+    fn fit_rejects_no_target() {
+        let s = schema(&[("a", ColumnRole::Categorical)]);
+        assert_eq!(
+            CategoricalTransform::fit(&s, &rows(&[&["x"]]), &cfg()).unwrap_err(),
+            TransformError::NoTarget
+        );
+    }
+
+    #[test]
+    fn fit_rejects_multiple_targets() {
+        let s = schema(&[("y1", ColumnRole::Target), ("y2", ColumnRole::Target)]);
+        assert_eq!(
+            CategoricalTransform::fit(&s, &[], &cfg()).unwrap_err(),
+            TransformError::MultipleTargets
+        );
+    }
+
+    #[test]
+    fn fit_rejects_bad_route_bins() {
+        let s = schema(&[("y", ColumnRole::Target)]);
+        let mut c = cfg();
+        c.route_bins = 3; // not a power of two
+        assert_eq!(
+            CategoricalTransform::fit(&s, &[], &c).unwrap_err(),
+            TransformError::BadRouteBins(3)
+        );
+    }
+
+    #[test]
+    fn fit_rejects_row_arity_mismatch() {
+        let s = schema(&[("a", ColumnRole::Categorical), ("y", ColumnRole::Target)]);
+        let bad = rows(&[&["x", "yes", "EXTRA"]]);
+        assert_eq!(
+            CategoricalTransform::fit(&s, &bad, &cfg()).unwrap_err(),
+            TransformError::RowArityMismatch { expected: 2, got: 3 }
+        );
+    }
+
+    #[test]
+    fn fit_then_transform_produces_x_phi_y() {
+        let t = CategoricalTransform::fit(&mixed_schema(), &mixed_rows(), &cfg()).unwrap();
+        let (x, phi, y) = t
+            .transform(&row(&["red", "1.0", "a", "yes", "99"]))
+            .unwrap();
+        assert_eq!(x.len(), t.n_routing_features());
+        assert_eq!(x.len(), 2);
+        assert_eq!(phi.len(), t.phi_width());
+        assert_eq!(y, 1.0);
+        for &xi in &x {
+            assert!(xi >= 0.0 && xi < t.route_bins() as f64);
+        }
+    }
+
+    #[test]
+    fn transform_phi_width_constant_across_rows() {
+        let t = CategoricalTransform::fit(&mixed_schema(), &mixed_rows(), &cfg()).unwrap();
+        for r in mixed_rows() {
+            let (_, phi, _) = t.transform(&r).unwrap();
+            assert_eq!(phi.len(), t.phi_width());
+        }
+        // Unknown categories / missing numerics keep `phi` the same width.
+        let (_, phi, _) = t
+            .transform(&row(&["MAGENTA", "?", "ZZZ", "no", "x"]))
+            .unwrap();
+        assert_eq!(phi.len(), t.phi_width());
+    }
+
+    #[test]
+    fn transform_phi_is_one_hot_plus_standardized() {
+        // Fixture widths: color 3 cats -> 6, size -> 1, tag 6 cats -> 9.
+        let t = CategoricalTransform::fit(&mixed_schema(), &mixed_rows(), &cfg()).unwrap();
+        let (_, phi, _) = t
+            .transform(&row(&["red", "1.0", "a", "yes", "0"]))
+            .unwrap();
+        assert_eq!(phi.len(), 16);
+        let color_seg: f64 = phi[0..6].iter().sum();
+        assert_eq!(color_seg, 1.0);
+        let tag_seg: f64 = phi[7..16].iter().sum();
+        assert_eq!(tag_seg, 1.0);
+    }
+
+    #[test]
+    fn transform_rejects_missing_target() {
+        let t = CategoricalTransform::fit(&mixed_schema(), &mixed_rows(), &cfg()).unwrap();
+        assert_eq!(
+            t.transform(&row(&["red", "1.0", "a", "?", "0"])).unwrap_err(),
+            TransformError::MissingTarget
+        );
+    }
+
+    #[test]
+    fn transform_rejects_row_arity_mismatch() {
+        let t = CategoricalTransform::fit(&mixed_schema(), &mixed_rows(), &cfg()).unwrap();
+        assert_eq!(
+            t.transform(&row(&["red", "1.0"])).unwrap_err(),
+            TransformError::RowArityMismatch { expected: 5, got: 2 }
+        );
+    }
+
+    #[test]
+    fn phi_only_column_is_never_a_routing_feature() {
+        let mut c = cfg();
+        c.k_routing = 4; // ask for more than the candidate count
+        let t = CategoricalTransform::fit(&mixed_schema(), &mixed_rows(), &c).unwrap();
+        let routing = t.routing_feature_columns();
+        // tag (2, CategoricalPhiOnly), label (3, Target), rowid (4,
+        // Ignore) are never routing features.
+        assert!(!routing.contains(&2));
+        assert!(!routing.contains(&3));
+        assert!(!routing.contains(&4));
+        assert_eq!(t.n_routing_features(), 2); // only color + size
+    }
+
+    #[test]
+    fn routing_features_clamped_to_candidate_count() {
+        let s = schema(&[
+            ("a", ColumnRole::Categorical),
+            ("b", ColumnRole::CategoricalPhiOnly),
+            ("y", ColumnRole::Target),
+        ]);
+        let mut c = cfg();
+        c.k_routing = 3;
+        let t = CategoricalTransform::fit(
+            &s,
+            &rows(&[&["p", "q", "yes"], &["p", "r", "no"]]),
+            &c,
+        )
+        .unwrap();
+        assert_eq!(t.n_routing_features(), 1); // only "a" is a candidate
+    }
+
+    #[test]
+    fn fit_is_deterministic_double_run() {
+        let t1 = CategoricalTransform::fit(&mixed_schema(), &mixed_rows(), &cfg()).unwrap();
+        let t2 = CategoricalTransform::fit(&mixed_schema(), &mixed_rows(), &cfg()).unwrap();
+        assert_eq!(t1.snapshot().snapshot_hash(), t2.snapshot().snapshot_hash());
+        assert_eq!(t1.routing_feature_columns(), t2.routing_feature_columns());
+        assert_eq!(t1.phi_width(), t2.phi_width());
+        let r = row(&["green", "5.0", "e", "yes", "0"]);
+        assert_eq!(t1.transform(&r).unwrap(), t2.transform(&r).unwrap());
+    }
+
+    #[test]
+    fn fit_is_row_order_invariant() {
+        let forward = mixed_rows();
+        let mut reversed = forward.clone();
+        reversed.reverse();
+        let t1 = CategoricalTransform::fit(&mixed_schema(), &forward, &cfg()).unwrap();
+        let t2 = CategoricalTransform::fit(&mixed_schema(), &reversed, &cfg()).unwrap();
+        // The whole snapshot — including numeric standardization — is
+        // row-order invariant (the standardizer sorts before summing).
+        assert_eq!(t1.snapshot().snapshot_hash(), t2.snapshot().snapshot_hash());
+        assert_eq!(t1.routing_feature_columns(), t2.routing_feature_columns());
+        let r = row(&["blue", "8.0", "c", "no", "0"]);
+        assert_eq!(t1.transform(&r).unwrap(), t2.transform(&r).unwrap());
+    }
+
+    #[test]
+    fn transform_x_buckets_within_route_bins() {
+        let t = CategoricalTransform::fit(&mixed_schema(), &mixed_rows(), &cfg()).unwrap();
+        for r in mixed_rows() {
+            let (x, _, _) = t.transform(&r).unwrap();
+            for &xi in &x {
+                assert!(xi >= 0.0 && xi < t.route_bins() as f64);
+            }
+        }
+    }
+
+    #[test]
+    fn transform_numeric_missing_imputed_to_mean() {
+        let s = schema(&[("n", ColumnRole::Numeric), ("y", ColumnRole::Target)]);
+        let t = CategoricalTransform::fit(
+            &s,
+            &rows(&[&["2.0", "yes"], &["4.0", "no"], &["6.0", "yes"]]),
+            &cfg(),
+        )
+        .unwrap();
+        // Train mean of [2, 4, 6] is 4; a "?" cell imputes to 4 -> z = 0.
+        let (_, phi, _) = t.transform(&row(&["?", "no"])).unwrap();
+        assert_eq!(phi.len(), 1);
+        assert_eq!(phi[0], 0.0);
+    }
+
+    #[test]
+    fn snapshot_carries_config_provenance() {
+        let t = CategoricalTransform::fit(&mixed_schema(), &mixed_rows(), &cfg()).unwrap();
+        let snap = t.snapshot();
+        assert_eq!(snap.raw_dataset_hash, [7u8; 32]);
+        assert_eq!(snap.split_seed, 42);
+        assert_eq!(snap.row_count, 6);
+        assert_eq!(snap.target_definition, "label == 'yes'");
+        assert_eq!(snap.feature_transform_version, FEATURE_TRANSFORM_VERSION);
+    }
+
+    #[test]
+    fn mi_selection_prefers_the_predictive_feature() {
+        // "signal" perfectly predicts the target; "noise" is constant.
+        let s = schema(&[
+            ("signal", ColumnRole::Categorical),
+            ("noise", ColumnRole::Categorical),
+            ("y", ColumnRole::Target),
+        ]);
+        let data = rows(&[
+            &["A", "k", "yes"],
+            &["A", "k", "yes"],
+            &["B", "k", "no"],
+            &["B", "k", "no"],
+        ]);
+        let mut c = cfg();
+        c.route_bins = 8; // wide enough to keep the two reals distinct
+        c.k_routing = 1;
+        let t = CategoricalTransform::fit(&s, &data, &c).unwrap();
+        assert_eq!(t.routing_feature_columns(), vec![0]);
     }
 }
