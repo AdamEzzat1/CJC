@@ -1054,6 +1054,9 @@ fn decode_blr_state(cur: &mut Cursor, wire: WireVersion) -> Result<BlrState, Dec
         // Phase 0.8 D1 — cache is purely a performance hint, not
         // serialized. First `predict` after replay lazy-populates.
         cached_l: std::cell::RefCell::new(None),
+        // Phase 0.9.5 — the incremental rank-1 factor is likewise not
+        // serialized; the first n=1 update after replay recomputes it.
+        chol_factor: None,
     })
 }
 

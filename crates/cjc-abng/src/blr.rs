@@ -243,6 +243,25 @@ pub struct BlrState {
     /// not touch `cached_l` (other than to populate it on lazy
     /// init).
     pub cached_l: RefCell<Option<Vec<f64>>>,
+    /// Phase 0.9.5 — incrementally-maintained Cholesky factor of
+    /// `precision`, used only by the `n = 1` fast path of
+    /// [`update`](Self::update) to apply a rank-1 factor update
+    /// ([`chol_rank1_update`], `O(d²)`) instead of a full refactor
+    /// (`O(d³)`).
+    ///
+    /// **NOT part of `canonical_bytes`** — like [`cached_l`](Self::cached_l)
+    /// this is a pure performance field: not hashed, not serialized,
+    /// left `None` by any (de)serialization round-trip. A miss (the
+    /// first update, or the first update after replay) costs one full
+    /// `cholesky`.
+    ///
+    /// Kept **distinct** from `cached_l` deliberately: `cached_l` must
+    /// stay exactly `cholesky(precision)` so `predict` is bit-identical
+    /// on a live vs a replayed graph. `chol_factor` is a *valid* factor
+    /// of `precision` reached by rank-1 updates — equal to `cholesky`'s
+    /// result only up to floating-point rounding — and is never
+    /// consumed by `predict`.
+    pub chol_factor: Option<Vec<f64>>,
 }
 
 impl BlrState {
@@ -269,6 +288,8 @@ impl BlrState {
             feature_version_hash: [0u8; 32],
             // Phase 0.8 D1 — first predict will lazy-populate.
             cached_l: RefCell::new(None),
+            // Phase 0.9.5 — first n=1 update will lazy-populate.
+            chol_factor: None,
         }
     }
 
@@ -309,6 +330,13 @@ impl BlrState {
             if !v.is_finite() {
                 return Err(BlrError::NonFiniteInput { value: v });
             }
+        }
+
+        // Phase 0.9.5 — the n = 1 hot path (`train_step`, single-row
+        // `blr_update`) takes a dedicated O(d²) rank-1 Cholesky update
+        // instead of the O(d³) full refactor below. See `update_rank1`.
+        if n == 1 {
+            return self.update_rank1(features, y[0]);
         }
 
         // Phase 0.8c v14 Item D2b — SIMD-friendly Kahan accumulation.
@@ -446,10 +474,86 @@ impl BlrState {
         self.a = a_new;
         self.b = b_new;
         self.n_seen = self.n_seen.saturating_add(n as u64);
+        // Phase 0.9.5 — the incremental rank-1 factor is only valid
+        // across a run of n = 1 updates; a batch update invalidates it
+        // (the next n = 1 update recomputes one full Cholesky).
+        self.chol_factor = None;
         // Phase 0.8 D1 — `l` is the Cholesky factor of `lambda_new`,
         // which is now `self.precision`. Cache it so subsequent
         // `predict` calls skip the redundant decomposition.
         *self.cached_l.borrow_mut() = Some(l);
+        Ok(rescue)
+    }
+
+    /// The `n = 1` fast path of [`update`](Self::update) — the
+    /// `train_step` / single-row `blr_update` hot path.
+    ///
+    /// Mathematically the conjugate Normal-Inverse-Gamma update for a
+    /// one-row batch, but it applies the precision update as a **rank-1
+    /// Cholesky update** ([`chol_rank1_update`], `O(d²)`) instead of
+    /// refactoring `Λ_new` from scratch (`O(d³)`), and skips the `d×d`
+    /// Kahan accumulator scratch (inert for a single row).
+    ///
+    /// `precision`, `a`, and `n_seen` are **bit-identical** to the
+    /// pre-0.9.5 path. `mean` and `b` are solved from the
+    /// rank-1-updated factor — an equally valid Cholesky factor of the
+    /// same `Λ_new` (the factor is unique; only its rounding differs) —
+    /// so their low bits differ from a full-refactor solve.
+    fn update_rank1(&mut self, phi: &[f64], y: f64) -> Result<Option<f64>, BlrError> {
+        let d = self.d as usize;
+
+        let lambda_old = self.precision.to_vec();
+        let mu_old = self.mean.to_vec();
+
+        // rhs = Λ_old · μ_old + φ·y
+        let xty: Vec<f64> = (0..d).map(|a| phi[a] * y).collect();
+        let rhs = matvec_plus_xty_kahan(&lambda_old, &mu_old, &xty, d);
+        let mu_lmu_old = quadratic_form(&lambda_old, d, &mu_old);
+
+        // L_old — the incrementally-maintained factor of Λ_old. A miss
+        // (first update, or first update after replay) pays one full
+        // Cholesky; thereafter the factor is carried forward.
+        let mut l = match self.chol_factor.take() {
+            Some(l) => l,
+            None => cholesky(&lambda_old, d)?,
+        };
+
+        // Λ_new = Λ_old + φφᵀ — reuse `lambda_old`'s buffer (no clone).
+        let mut lambda_new = lambda_old;
+        for a in 0..d {
+            for b in 0..d {
+                lambda_new[a * d + b] += phi[a] * phi[b];
+            }
+        }
+
+        // L_new — rank-1 update of L_old; the factor of Λ_new.
+        chol_rank1_update(&mut l, d, phi);
+        let m_new = cholesky_solve(&l, d, &rhs);
+
+        let yty = y * y;
+        let m_lm_new = quadratic_form(&lambda_new, d, &m_new);
+
+        let a_new = self.a + 0.5;
+        // b_new = b_old + 0.5 (μ_old^T Λ_old μ_old + y^T y - m_new^T Λ_new m_new)
+        let b_pre_clamp = self.b + 0.5 * (mu_lmu_old + yty - m_lm_new);
+        let (b_new, rescue) = if b_pre_clamp < f64::EPSILON {
+            (f64::EPSILON, Some(b_pre_clamp))
+        } else {
+            (b_pre_clamp, None)
+        };
+
+        self.mean = Tensor::from_vec(m_new, &[d]).expect("blr mean update");
+        self.precision =
+            Tensor::from_vec(lambda_new, &[d, d]).expect("blr precision update");
+        self.a = a_new;
+        self.b = b_new;
+        self.n_seen = self.n_seen.saturating_add(1);
+        // Carry the rank-1-updated factor forward for the next update.
+        self.chol_factor = Some(l);
+        // `precision` changed → the predict cache is stale. `predict`
+        // re-derives `cholesky(precision)` on its next call — bit-identical
+        // on a live vs a replayed graph.
+        *self.cached_l.borrow_mut() = None;
         Ok(rescue)
     }
 
@@ -599,6 +703,9 @@ impl BlrState {
         self.b = b_new;
         self.n_seen = self.n_seen.saturating_add(other.n_seen);
         // feature_version_hash unchanged — into's feature space wins.
+        // Phase 0.9.5 — `combine` replaced `precision`; the n = 1 fast
+        // path's incremental factor is stale, so invalidate it.
+        self.chol_factor = None;
         // Phase 0.8 D1 — `l` is the Cholesky factor of `lambda_new`,
         // which is now `self.precision`. Cache it for predict.
         *self.cached_l.borrow_mut() = Some(l);
@@ -733,6 +840,46 @@ pub fn cholesky(a: &[f64], d: usize) -> Result<Vec<f64>, BlrError> {
         }
     }
     Ok(l)
+}
+
+/// Apply a **positive rank-1 update** to a Cholesky factor, in place.
+///
+/// Given the lower-triangular factor `l` (row-major `d × d`) of a
+/// positive-definite `A` — so `A = L Lᵀ` — and a vector `x` of length
+/// `d`, overwrites `l` with the lower-triangular Cholesky factor of
+/// `A + x xᵀ`.
+///
+/// This is the standard Givens-rotation rank-1 update — the kernel
+/// behind recursive least squares and the Kalman filter. The positive
+/// (evidence-adding) case is unconditionally numerically stable, and it
+/// costs `O(d²)` versus `O(d³)` for a full re-factorisation. The
+/// Cholesky factor with positive diagonal is unique, so the result is
+/// the same matrix [`cholesky`] would produce on `A + x xᵀ`, up to
+/// floating-point rounding.
+///
+/// Determinism: only IEEE add / sub / mul / div / sqrt — no FMA — so
+/// the result is bit-stable across runs and platforms.
+pub fn chol_rank1_update(l: &mut [f64], d: usize, x: &[f64]) {
+    debug_assert_eq!(l.len(), d * d);
+    debug_assert_eq!(x.len(), d);
+    // `x` is consumed by the rotations — work on a local copy.
+    let mut x = x.to_vec();
+    for k in 0..d {
+        let lkk = l[k * d + k];
+        let xk = x[k];
+        // r > 0: lkk is a Cholesky diagonal (positive), so
+        // r = sqrt(lkk² + xk²) >= lkk > 0.
+        let r = (lkk * lkk + xk * xk).sqrt();
+        let c = lkk / r;
+        let s = xk / r;
+        l[k * d + k] = r;
+        for i in (k + 1)..d {
+            let lik = l[i * d + k];
+            let xi = x[i];
+            l[i * d + k] = c * lik + s * xi;
+            x[i] = c * xi - s * lik;
+        }
+    }
 }
 
 /// Forward substitution: solve `L y = b` for `y`, given lower-triangular `L`.
@@ -914,6 +1061,109 @@ mod tests {
         let x = cholesky_solve(&l, 2, &[4.0, 6.0]);
         assert!(approx_eq(x[0], 2.0, 1e-12));
         assert!(approx_eq(x[1], 2.0, 1e-12));
+    }
+
+    // ── Phase 0.9.5 — rank-1 Cholesky update ─────────────────────────
+
+    /// `chol_rank1_update(cholesky(A), x)` factors `A + x xᵀ`: the
+    /// reconstruction `L' L'ᵀ` must equal `A + x xᵀ`.
+    #[test]
+    fn chol_rank1_update_reconstructs_a_plus_xxt() {
+        let d = 3;
+        #[rustfmt::skip]
+        let a = vec![
+            4.0,  1.0,  0.5,
+            1.0,  3.0,  0.25,
+            0.5,  0.25, 2.0,
+        ];
+        let x = vec![0.7, -1.3, 0.4];
+        let mut l = cholesky(&a, d).unwrap();
+        chol_rank1_update(&mut l, d, &x);
+        for i in 0..d {
+            for j in 0..d {
+                let mut recon = 0.0;
+                for k in 0..d {
+                    recon += l[i * d + k] * l[j * d + k];
+                }
+                let want = a[i * d + j] + x[i] * x[j];
+                assert!(
+                    approx_eq(recon, want, 1e-9),
+                    "({i},{j}): reconstructed {recon}, want {want}"
+                );
+            }
+        }
+    }
+
+    /// The rank-1 update lands on the *same unique* Cholesky factor as a
+    /// full decomposition of `A + x xᵀ` — to tight rounding tolerance.
+    #[test]
+    fn chol_rank1_update_matches_full_cholesky() {
+        let d = 4;
+        #[rustfmt::skip]
+        let a = vec![
+            5.0, 1.0, 0.5, 0.2,
+            1.0, 4.0, 0.3, 0.1,
+            0.5, 0.3, 3.0, 0.4,
+            0.2, 0.1, 0.4, 2.5,
+        ];
+        let x = vec![1.1, -0.6, 0.9, 0.3];
+        let mut l_inc = cholesky(&a, d).unwrap();
+        chol_rank1_update(&mut l_inc, d, &x);
+        let mut a_plus = a.clone();
+        for i in 0..d {
+            for j in 0..d {
+                a_plus[i * d + j] += x[i] * x[j];
+            }
+        }
+        let l_full = cholesky(&a_plus, d).unwrap();
+        for i in 0..(d * d) {
+            assert!(
+                approx_eq(l_inc[i], l_full[i], 1e-9),
+                "entry {i}: rank-1 {} vs full {}",
+                l_inc[i],
+                l_full[i]
+            );
+        }
+    }
+
+    /// Bit-identical across runs — no FMA, fixed arithmetic order.
+    #[test]
+    fn chol_rank1_update_is_deterministic() {
+        let d = 3;
+        let a = vec![4.0, 0.5, 0.1, 0.5, 3.0, 0.2, 0.1, 0.2, 2.0];
+        let x = vec![0.33, 1.7, -0.8];
+        let run = || {
+            let mut l = cholesky(&a, d).unwrap();
+            chol_rank1_update(&mut l, d, &x);
+            l
+        };
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&run()), bits(&run()));
+    }
+
+    /// 1×1: `A = l²`, update by `x` ⇒ factor of `l² + x²`.
+    #[test]
+    fn chol_rank1_update_d1_trivial() {
+        let mut l = vec![2.0]; // A = 4
+        chol_rank1_update(&mut l, 1, &[3.0]); // A + 9 = 13
+        assert!(approx_eq(l[0], 13.0_f64.sqrt(), 1e-12));
+    }
+
+    /// The `n = 1` `update` fast path yields a positive-definite
+    /// posterior precision and a finite, sane mean.
+    #[test]
+    fn update_rank1_keeps_precision_positive_definite() {
+        let prior = BlrPrior::new(1.0, 1.0, 1.0).unwrap();
+        let mut s = BlrState::from_prior(&prior, 3);
+        for row in [[1.0, 0.5, -0.3], [0.2, -1.1, 0.7], [-0.8, 0.4, 1.2]] {
+            s.update(&row, &[0.6]).expect("n=1 update");
+        }
+        // precision must still admit a Cholesky (i.e. stays PD).
+        assert!(cholesky(&s.precision.to_vec(), 3).is_ok());
+        // predict must succeed and return finite values.
+        let (mean, lev, _) = s.predict(&[0.1, 0.2, 0.3]).unwrap();
+        assert!(mean.is_finite() && lev.is_finite() && lev >= 0.0);
+        assert_eq!(s.n_seen, 3);
     }
 
     #[test]

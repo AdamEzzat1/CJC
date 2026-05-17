@@ -11,6 +11,13 @@
 //! a graph through `serialize` -> `replay` produces a graph whose
 //! BLR states have `cached_l == None` (fresh-after-deserialize).
 //!
+//! Phase 0.9.5 — the `n = 1` `update` fast path maintains its own
+//! incremental Cholesky factor (`chol_factor`) and *invalidates*
+//! `cached_l`; the next `predict` lazily repopulates it. Batch
+//! (`n >= 2`) `update` and `combine` still populate `cached_l`
+//! eagerly. Either way the cache is never stale — it is `None` or
+//! exactly `cholesky(precision)`.
+//!
 //! These tests gate D1 against silent regressions: if a future
 //! refactor accidentally lets the cache go stale (e.g. mutates
 //! `precision` without updating `cached_l`), one of the parity
@@ -88,42 +95,67 @@ fn first_predict_populates_cache() {
 }
 
 #[test]
-fn update_populates_cache() {
+fn update_n1_invalidates_cache_then_predict_repopulates() {
+    // Phase 0.9.5 — the n = 1 fast path maintains its own incremental
+    // factor and invalidates the predict cache rather than eagerly
+    // populating it. The next `predict` lazily recomputes
+    // `cholesky(precision)`.
     let prior = BlrPrior::new(2.0, 1.0, 0.5).unwrap();
     let mut s = BlrState::from_prior(&prior, D);
-    assert!(s.cached_l.borrow().is_none());
-    s.update(&PHI, &[0.7]).unwrap();
+    s.update(&PHI, &[0.7]).unwrap(); // n = 1
+    assert!(
+        s.cached_l.borrow().is_none(),
+        "an n=1 update invalidates the predict cache"
+    );
+    let _ = s.predict(&PHI).unwrap();
     assert!(
         s.cached_l.borrow().is_some(),
-        "update must populate the cache as a side effect"
+        "predict after an n=1 update repopulates the cache"
     );
 }
 
 #[test]
-fn update_invalidates_stale_cache() {
-    // The cache tracks `precision`. After update, precision is
-    // different, and the cache must reflect the new factor — NOT
-    // a stale L from before the update.
+fn update_batch_populates_cache() {
+    // An n >= 2 batch update still eagerly populates the cache — it
+    // computes the full Cholesky for its own solve regardless.
+    let prior = BlrPrior::new(2.0, 1.0, 0.5).unwrap();
+    let mut s = BlrState::from_prior(&prior, D);
+    let feats = [
+        PHI[0], PHI[1], PHI[2], PHI[3], // row 0
+        PHI[0], PHI[1], PHI[2], PHI[3], // row 1
+    ];
+    s.update(&feats, &[0.7, 0.8]).unwrap(); // n = 2
+    assert!(
+        s.cached_l.borrow().is_some(),
+        "an n>=2 update eagerly populates the cache"
+    );
+}
+
+#[test]
+fn update_n1_does_not_leave_a_stale_cache() {
+    // The cache tracks `precision`. After an n=1 update changes
+    // `precision`, the cache must NOT hold a stale factor from before
+    // the update — the n=1 path invalidates it, and `predict` then
+    // recomputes the Cholesky of the *new* precision.
     let prior = BlrPrior::new(2.0, 1.0, 0.5).unwrap();
     let mut s = primed_state(&prior, 10);
-    let _l_before = s.cached_l.borrow().clone().expect("cache must be populated");
-    s.update(&PHI, &[0.9]).unwrap();
-    let l_after = s
-        .cached_l
-        .borrow()
-        .clone()
-        .expect("update must repopulate cache");
-    // The factor must be the Cholesky of the *new* precision. The
-    // cleanest gate: it must produce the correct predict output.
-    let predict_via_cache = s.predict(&PHI).unwrap();
+    // Populate the cache via a predict, then do one more n=1 update.
+    let _ = s.predict(&PHI).unwrap();
+    assert!(s.cached_l.borrow().is_some());
+    s.update(&PHI, &[0.9]).unwrap(); // n = 1 — must invalidate
+    assert!(
+        s.cached_l.borrow().is_none(),
+        "n=1 update must invalidate, not leave a stale cache"
+    );
+    // `predict` recomputes from the post-update precision; the result
+    // must match a from-scratch recompute (cache cleared).
+    let predict_via_lazy = s.predict(&PHI).unwrap();
     *s.cached_l.borrow_mut() = None;
-    let predict_after_clear = s.predict(&PHI).unwrap();
+    let predict_via_fresh = s.predict(&PHI).unwrap();
     assert_eq!(
-        predict_via_cache, predict_after_clear,
+        predict_via_lazy, predict_via_fresh,
         "post-update cache must be the Cholesky of the post-update precision"
     );
-    // Sanity: l_after should not be obviously wrong.
-    assert!(l_after.iter().all(|x| x.is_finite()));
 }
 
 #[test]
