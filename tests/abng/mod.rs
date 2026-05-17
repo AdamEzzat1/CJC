@@ -73,3 +73,6 @@ mod verify_par_tests;
 // Phase 0.9.5 COMMIT 3 — categorical subsystem property + fuzz suites.
 mod categorical_fuzz;
 mod categorical_proptest;
+
+// Phase 0.9.5 COMMIT 5 — Dataset-A (Diabetes-130) benchmark harness.
+mod dataset_a_diabetes130;
