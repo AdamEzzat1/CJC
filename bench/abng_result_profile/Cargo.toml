@@ -14,3 +14,6 @@ path = "main.rs"
 cjc-abng = { path = "../../crates/cjc-abng" }
 cjc-ad = { path = "../../crates/cjc-ad" }
 cjc-snap = { path = "../../crates/cjc-snap" }
+# Research Phase R1 — scalar vs lane-parallel Kahan accumulator
+# comparison (the `update`'s reduction-throughput question).
+cjc-repro = { path = "../../crates/cjc-repro" }

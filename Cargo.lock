@@ -36,6 +36,7 @@ version = "0.1.7"
 dependencies = [
  "cjc-abng",
  "cjc-ad",
+ "cjc-repro",
  "cjc-snap",
 ]
 

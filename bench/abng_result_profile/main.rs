@@ -48,6 +48,7 @@ use cjc_abng::categorical::{
 };
 use cjc_abng::graph::{AdaptiveBeliefGraph, BLR_CHECKPOINT_INTERVAL};
 use cjc_ad::pinn::Activation;
+use cjc_repro::{KahanAccumulatorF64, KahanAccumulatorF64x4, KahanAccumulatorF64x8};
 
 // ── Configuration ───────────────────────────────────────────────────
 
@@ -438,6 +439,88 @@ fn main() {
         let _ = cholesky_solve(&chol_l, d, &solve_rhs);
     });
     emit("  cholesky_solve O(d²)", cs_min, cs_med);
+
+    // ── R1: Kahan accumulator comparison — scalar vs x4 vs x8 ─────────
+    // Reduce a d²-element array three ways (the `quadratic_form`
+    // reduction shape). Answers "is there a faster Kahan alternative":
+    // x4/x8 break the serial dependency chain into independent lanes.
+    let kahan_src: Vec<f64> = (0..d2).map(|i| ((i as f64) * 0.017).sin()).collect();
+    let (ks_min, ks_med) = bench(9, 2_000, || (), |_, _| {
+        let mut acc = KahanAccumulatorF64::new();
+        acc.add_slice(&kahan_src);
+        let _ = std::hint::black_box(acc.finalize());
+    });
+    emit("  kahan scalar reduce d²", ks_min, ks_med);
+    let (kx4_min, kx4_med) = bench(9, 2_000, || (), |_, _| {
+        let mut acc = KahanAccumulatorF64x4::new();
+        acc.add_slice(&kahan_src);
+        let _ = std::hint::black_box(acc.finalize());
+    });
+    emit("  kahan x4 reduce d²", kx4_min, kx4_med);
+    let (kx8_min, kx8_med) = bench(9, 2_000, || (), |_, _| {
+        let mut acc = KahanAccumulatorF64x8::new();
+        acc.add_slice(&kahan_src);
+        let _ = std::hint::black_box(acc.finalize());
+    });
+    emit("  kahan x8 reduce d²", kx8_min, kx8_med);
+    eprintln!(
+        "  -> Kahan reduce: x4 {:.2}x, x8 {:.2}x faster than scalar  (accumulators are 16/64/128 B stack structs)",
+        ks_med / kx4_med,
+        ks_med / kx8_med,
+    );
+
+    // ── R1: matrix layout — full d² vs triangular d(d+1)/2 ────────────
+    // A plain matvec read two ways: does halving the matrix footprint
+    // (triangular storage of the symmetric precision) buy speed, or is
+    // it memory-only? Plain (non-Kahan) sum isolates the layout effect.
+    let xv: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.03).cos()).collect();
+    let full: Vec<f64> = (0..d2).map(|i| ((i as f64) * 0.011).sin()).collect();
+    let (mvf_min, mvf_med) = bench(
+        9,
+        3_000,
+        || vec![0.0f64; d],
+        |acc, _| {
+            for a in 0..d {
+                let mut s = 0.0;
+                for b in 0..d {
+                    s += full[a * d + b] * xv[b];
+                }
+                acc[a] = s;
+            }
+            std::hint::black_box(&acc);
+        },
+    );
+    emit("  matvec full d² layout", mvf_min, mvf_med);
+    let tri_len = d * (d + 1) / 2;
+    let tri: Vec<f64> = (0..tri_len).map(|i| ((i as f64) * 0.011).sin()).collect();
+    let (mvt_min, mvt_med) = bench(
+        9,
+        3_000,
+        || vec![0.0f64; d],
+        |acc, _| {
+            for v in acc.iter_mut() {
+                *v = 0.0;
+            }
+            for a in 0..d {
+                let row = a * (a + 1) / 2;
+                for b in 0..=a {
+                    let val = tri[row + b];
+                    acc[a] += val * xv[b];
+                    if a != b {
+                        acc[b] += val * xv[a];
+                    }
+                }
+            }
+            std::hint::black_box(&acc);
+        },
+    );
+    emit("  matvec triangular layout", mvt_min, mvt_med);
+    eprintln!(
+        "  -> triangular vs full: {:.2}x (>1 = triangular faster); footprint d²={} KB -> tri={} KB",
+        mvf_med / mvt_med,
+        d2 * 8 / 1024,
+        tri_len * 8 / 1024,
+    );
 
     // ── BLR predict — cache hit and cache miss ────────────────────────
     let (ph_min, ph_med, pm_min, pm_med) = {

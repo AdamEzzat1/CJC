@@ -35,7 +35,7 @@
 
 use std::cell::RefCell;
 
-use cjc_repro::{KahanAccumulatorF64, KahanAccumulatorF64x4};
+use cjc_repro::{KahanAccumulatorF64, KahanAccumulatorF64x4, KahanAccumulatorF64x8};
 use cjc_runtime::tensor::Tensor;
 
 /// Errors specific to the BLR subsystem.
@@ -495,20 +495,31 @@ impl BlrState {
     /// Kahan accumulator scratch (inert for a single row).
     ///
     /// `precision`, `a`, and `n_seen` are **bit-identical** to the
-    /// pre-0.9.5 path. `mean` and `b` are solved from the
-    /// rank-1-updated factor — an equally valid Cholesky factor of the
-    /// same `Λ_new` (the factor is unique; only its rounding differs) —
-    /// so their low bits differ from a full-refactor solve.
+    /// pre-0.9.5 path. `mean` and `b` differ in their low bits for two
+    /// reasons: they are solved from the rank-1-updated Cholesky factor
+    /// (an equally valid factor of the same `Λ_new`), and — Phase 0.9.5
+    /// R1-1 — the matvec / quadratic-form reductions feeding them use
+    /// **lane-parallel Kahan** ([`quadratic_form_lanes`],
+    /// [`matvec_plus_xty_lanes`]) instead of a single serial
+    /// `KahanAccumulatorF64`. Lane-parallel Kahan is ~5× faster on the
+    /// d² reductions (it breaks the serial dependency chain into 8
+    /// independent lanes); it is deterministic, Kahan-compensated, and
+    /// bit-stable across runs and platforms, but reorders the adds, so
+    /// it is bit-different from the scalar order — a deliberate re-lock
+    /// confined to this n=1 hot path (the shared scalar `quadratic_form`
+    /// / `matvec_plus_xty_kahan` are kept for `kl_divergence`, `combine`,
+    /// and the n>1 `update`, so the `decide_step` canaries are untouched).
     fn update_rank1(&mut self, phi: &[f64], y: f64) -> Result<Option<f64>, BlrError> {
         let d = self.d as usize;
 
         let lambda_old = self.precision.to_vec();
         let mu_old = self.mean.to_vec();
 
-        // rhs = Λ_old · μ_old + φ·y
+        // rhs = Λ_old · μ_old + φ·y. Phase 0.9.5 R1-1 — lane-parallel
+        // Kahan reductions (8 independent lanes) on the n=1 hot path.
         let xty: Vec<f64> = (0..d).map(|a| phi[a] * y).collect();
-        let rhs = matvec_plus_xty_kahan(&lambda_old, &mu_old, &xty, d);
-        let mu_lmu_old = quadratic_form(&lambda_old, d, &mu_old);
+        let rhs = matvec_plus_xty_lanes(&lambda_old, &mu_old, &xty, d);
+        let mu_lmu_old = quadratic_form_lanes(&lambda_old, d, &mu_old);
 
         // L_old — the incrementally-maintained factor of Λ_old. A miss
         // (first update, or first update after replay) pays one full
@@ -531,7 +542,7 @@ impl BlrState {
         let m_new = cholesky_solve(&l, d, &rhs);
 
         let yty = y * y;
-        let m_lm_new = quadratic_form(&lambda_new, d, &m_new);
+        let m_lm_new = quadratic_form_lanes(&lambda_new, d, &m_new);
 
         let a_new = self.a + 0.5;
         // b_new = b_old + 0.5 (μ_old^T Λ_old μ_old + y^T y - m_new^T Λ_new m_new)
@@ -1052,6 +1063,94 @@ pub(crate) fn matvec_plus_xty_kahan(
             }
         }
         acc.add(xty_finalized[a]);
+        rhs[a] = acc.finalize();
+    }
+    rhs
+}
+
+/// Phase 0.9.5 R1-1 — lane-parallel quadratic form `xᵀ A x` for the
+/// n=1 [`update_rank1`](BlrState::update_rank1) hot path.
+///
+/// Mathematically identical to [`quadratic_form`], but distributes the
+/// `d²` products across the **8 independent lanes** of a
+/// [`KahanAccumulatorF64x8`] instead of one serial `KahanAccumulatorF64`.
+/// The serial accumulator is latency-bound — every Kahan `add` depends
+/// on the previous add's running sum *and* compensation register; eight
+/// independent lane recurrences run with instruction-level parallelism
+/// (~5× faster on a d²-scale reduction, measured by `abng-result-profile`).
+///
+/// # Determinism
+///
+/// `KahanAccumulatorF64x8` has a fixed lane assignment (product `k` →
+/// lane `k % 8`, the `d² % 8` tail folded into lane 0) and a fixed
+/// horizontal-reduce order; no FMA, single-threaded. The result is
+/// **bit-stable across runs and platforms**. It is *bit-different* from
+/// the serial [`quadratic_form`] — a different but equally
+/// Kahan-compensated rounding pattern. That difference is a deliberate,
+/// signed-off re-lock confined to the n=1 training path; the shared
+/// scalar [`quadratic_form`] is kept for `kl_divergence` and the n>1
+/// `update`, so the `decide_step` canaries are untouched.
+fn quadratic_form_lanes(a: &[f64], d: usize, x: &[f64]) -> f64 {
+    let mut acc = KahanAccumulatorF64x8::new();
+    let mut chunk = [0.0f64; 8];
+    let mut fill = 0usize;
+    for i in 0..d {
+        let xi = x[i];
+        let row = i * d;
+        for j in 0..d {
+            chunk[fill] = xi * a[row + j] * x[j];
+            fill += 1;
+            if fill == 8 {
+                acc.add_lanes(chunk);
+                fill = 0;
+            }
+        }
+    }
+    // Tail (`d² % 8` leftover) — folded into lane 0, matching
+    // `KahanAccumulatorF64x8::add_slice`'s remainder handling, so this
+    // is identical to `add_slice` over the full product sequence.
+    if fill > 0 {
+        acc.add_slice(&chunk[..fill]);
+    }
+    acc.finalize()
+}
+
+/// Phase 0.9.5 R1-1 — lane-parallel `Λμ + xty` for the n=1
+/// [`update_rank1`](BlrState::update_rank1) hot path, for **arbitrary
+/// d**.
+///
+/// Mathematically identical to [`matvec_plus_xty_kahan`], but each
+/// output row's reduction over `b ∈ 0..d` runs on the 8 lanes of a
+/// [`KahanAccumulatorF64x8`] (`d % 8` tail folded into lane 0), then a
+/// single outer scalar Kahan adds `xty[a]`. The shared
+/// `matvec_plus_xty_kahan` only takes its lane-parallel path at
+/// `d ≥ 8 && d % 4 == 0`, which the Diabetes-130 width d=247 (d%4=3)
+/// never reaches; this helper has no such gate.
+///
+/// Determinism / re-lock: identical reasoning to [`quadratic_form_lanes`].
+fn matvec_plus_xty_lanes(lambda: &[f64], mu: &[f64], xty: &[f64], d: usize) -> Vec<f64> {
+    let mut rhs = vec![0.0f64; d];
+    for a in 0..d {
+        let row = a * d;
+        let mut acc8 = KahanAccumulatorF64x8::new();
+        let mut chunk = [0.0f64; 8];
+        let mut fill = 0usize;
+        for b in 0..d {
+            chunk[fill] = lambda[row + b] * mu[b];
+            fill += 1;
+            if fill == 8 {
+                acc8.add_lanes(chunk);
+                fill = 0;
+            }
+        }
+        if fill > 0 {
+            acc8.add_slice(&chunk[..fill]);
+        }
+        // Outer Kahan: matvec row, then `+ xty[a]` — same two-stage
+        // shape as `matvec_plus_xty_kahan`'s SIMD path.
+        let mut acc = KahanAccumulatorF64::new();
+        acc.add(acc8.finalize());
+        acc.add(xty[a]);
         rhs[a] = acc.finalize();
     }
     rhs
@@ -1762,5 +1861,124 @@ mod tests {
         for i in 0..16 {
             assert_eq!(a[i].to_bits(), b[i].to_bits(), "i={i}");
         }
+    }
+
+    // ── Phase 0.9.5 R1-1: lane-parallel Kahan reductions ─────────────
+
+    #[test]
+    fn quadratic_form_lanes_equals_x8_add_slice() {
+        // The chunked `add_lanes` + lane-0 tail is exactly
+        // `KahanAccumulatorF64x8::add_slice` over the full product
+        // sequence — pins the determinism contract of the helper.
+        let d = 13;
+        let a: Vec<f64> = (0..d * d).map(|i| ((i as f64) * 0.07).sin()).collect();
+        let x: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.31).cos()).collect();
+        let got = quadratic_form_lanes(&a, d, &x);
+        let mut products = Vec::with_capacity(d * d);
+        for i in 0..d {
+            for j in 0..d {
+                products.push(x[i] * a[i * d + j] * x[j]);
+            }
+        }
+        let mut acc = KahanAccumulatorF64x8::new();
+        acc.add_slice(&products);
+        assert_eq!(got.to_bits(), acc.finalize().to_bits());
+    }
+
+    #[test]
+    fn quadratic_form_lanes_approx_matches_scalar() {
+        // Lane-parallel and serial Kahan agree to machine precision —
+        // accuracy is preserved; only the low bits move (the re-lock).
+        for d in [1usize, 4, 7, 8, 16, 31] {
+            let a: Vec<f64> =
+                (0..d * d).map(|i| ((i as f64) * 0.013).sin() * 3.0).collect();
+            let x: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.29).cos()).collect();
+            let lanes = quadratic_form_lanes(&a, d, &x);
+            let scalar = quadratic_form(&a, d, &x);
+            let scale = scalar.abs().max(1.0);
+            assert!(
+                (lanes - scalar).abs() <= 1e-9 * scale,
+                "d={d}: lanes {lanes} vs scalar {scalar}"
+            );
+        }
+    }
+
+    #[test]
+    fn quadratic_form_lanes_is_deterministic() {
+        let d = 19;
+        let a: Vec<f64> = (0..d * d).map(|i| ((i as f64) * 0.017).sin()).collect();
+        let x: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.41).cos()).collect();
+        assert_eq!(
+            quadratic_form_lanes(&a, d, &x).to_bits(),
+            quadratic_form_lanes(&a, d, &x).to_bits()
+        );
+    }
+
+    #[test]
+    fn matvec_plus_xty_lanes_approx_matches_scalar() {
+        for d in [1usize, 5, 8, 17, 32] {
+            let lambda: Vec<f64> =
+                (0..d * d).map(|i| ((i as f64) * 0.011).sin()).collect();
+            let mu: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.23).cos()).collect();
+            let xty: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.05).sin()).collect();
+            let lanes = matvec_plus_xty_lanes(&lambda, &mu, &xty, d);
+            let scalar = matvec_plus_xty_kahan(&lambda, &mu, &xty, d);
+            for i in 0..d {
+                let scale = scalar[i].abs().max(1.0);
+                assert!(
+                    (lanes[i] - scalar[i]).abs() <= 1e-9 * scale,
+                    "d={d}, i={i}: lanes {} vs scalar {}",
+                    lanes[i],
+                    scalar[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn matvec_plus_xty_lanes_is_deterministic() {
+        let d = 23;
+        let lambda: Vec<f64> = (0..d * d).map(|i| ((i as f64) * 0.013).sin()).collect();
+        let mu: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.37).cos()).collect();
+        let xty: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.07).sin()).collect();
+        let a = matvec_plus_xty_lanes(&lambda, &mu, &xty, d);
+        let b = matvec_plus_xty_lanes(&lambda, &mu, &xty, d);
+        for i in 0..d {
+            assert_eq!(a[i].to_bits(), b[i].to_bits(), "i={i}");
+        }
+    }
+
+    #[test]
+    fn update_rank1_lane_parallel_is_deterministic() {
+        // The n=1 hot path stays bit-deterministic across runs after
+        // the R1-1 lane-parallel Kahan switch.
+        let prior = BlrPrior::new(2.0, 1.0, 0.5).unwrap();
+        let run = || {
+            let mut s = BlrState::from_prior(&prior, 17);
+            for k in 0..40usize {
+                let phi: Vec<f64> =
+                    (0..17).map(|i| ((i + k) as f64 * 0.07).sin()).collect();
+                s.update(&phi, &[0.3 + k as f64 * 0.01]).unwrap();
+            }
+            s.canonical_bytes()
+        };
+        assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn update_rank1_lane_parallel_recovers_known_weights() {
+        // Accuracy preserved end-to-end: the lane-parallel n=1 path
+        // still recovers y = 2·x1 + 3·x2 from deterministic data, to
+        // the same tolerance as the n>1 `nig_update_d2_recovers_known_weights`.
+        let p = BlrPrior::new(0.001, 1.0, 1.0).unwrap();
+        let mut s = BlrState::from_prior(&p, 2);
+        for i in 0..200 {
+            let x1 = (i as f64) * 0.01;
+            let x2 = ((i + 7) as f64) * 0.013;
+            s.update(&[x1, x2], &[2.0 * x1 + 3.0 * x2]).unwrap();
+        }
+        let mu = s.mean.to_vec();
+        assert!((mu[0] - 2.0).abs() < 0.01, "w0 = {}", mu[0]);
+        assert!((mu[1] - 3.0).abs() < 0.01, "w1 = {}", mu[1]);
     }
 }

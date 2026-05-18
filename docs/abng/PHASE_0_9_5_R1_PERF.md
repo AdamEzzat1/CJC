@@ -2,7 +2,9 @@
 
 **Date:** 2026-05-17
 **Branch:** `claude/abng-phase-0-9-5` (worktree `claude/zealous-nobel-66abc9`)
-**Status:** profiled; speedup proposed; the one real lever awaits sign-off.
+**Status:** COMPLETE — profiled; Option 1 (lane-parallel x8 Kahan) shipped
+as R1-1; Option 2 (triangular storage) measured and rejected. §6-§8 record
+the measured results.
 **Continues** [`PHASE_0_9_5_R0_PROFILE.md`](PHASE_0_9_5_R0_PROFILE.md) — R0
 cut the per-row `state_hash`; R1 looks at what is now dominant.
 
@@ -68,15 +70,22 @@ is not worth taking.
 
 ## 5. The lever — lane-parallel Kahan (`KahanAccumulatorF64x4`)
 
-The serial chain is broken by accumulating into **4 (or 8) independent
-lanes** and horizontally reducing once at the end:
-`KahanAccumulatorF64x4` / `x8` from `cjc-repro`. Four independent Kahan
-recurrences run with instruction-level parallelism (and opportunistic
-SIMD on AVX/NEON release builds) instead of one serial chain —
-realistically **~2-4×** on the reduction passes, taking the ~804 µs
-of Kahan reductions to roughly ~250-400 µs and the whole update from
-~1.04 ms toward ~0.5-0.6 ms (**~1.7-2× on the update**, **~1.5× on the
-row**: 2.6 → ~1.7 ms).
+The serial chain is broken by accumulating into **8 independent lanes**
+and horizontally reducing once at the end: `KahanAccumulatorF64x8` from
+`cjc-repro`. Eight independent Kahan recurrences run with
+instruction-level parallelism (and opportunistic SIMD on AVX/NEON
+release builds) instead of one serial chain.
+
+**Measured** (`abng-result-profile`, within-run so contention cancels):
+on a d²-element reduction `KahanAccumulatorF64x8` is **5.69×** faster
+than scalar Kahan (`x4`: 4.70× — so x8 is the choice). But the
+*realized* gain on the full `update` is far smaller, **~1.25×**
+(~1.05 ms → ~0.85 ms): the reduction is only one part of the update —
+the d² product computations feeding it, the non-Kahan `Λ+φφᵀ` build,
+`cholesky_solve`, and `chol_rank1_update` are all unchanged. The first
+R1-design pass projected ~1.5× on the row; the honest measured figure
+is **~1.2×** (per-row ~2.6 → ~2.1 ms). Modest — but real, and free of
+any accuracy or determinism cost.
 
 This is **not** a new or exotic primitive: Phase 0.8c **Item D2b**
 already replaced the batch (`n>1`) `update`'s accumulators with
@@ -119,46 +128,58 @@ tests are relative (run-to-run, seed-distinctness) and hold, and it
 has no absolute chain-head pin — only its `chain_heads.txt` artifact
 shifts. Expected churn: a handful of round-trip tests, R0-3-sized.
 
-## 6. Memory efficiency
+## 6. Memory efficiency — measured
 
 The handoff (§R0.4 #3) and the user both asked for memory efficiency.
-The measured picture:
+Measured, it is a non-finding:
 
-- **Per-update churn is already small** — the 14 µs clone, plus O(d)
-  scratch vectors. `Tensor::from_vec` *moves* its `Vec` (no copy). The
-  audit log grows ~100 B/event; `transform` allocates small per-row
-  vectors. None is a hotspot, and the handoff itself recorded "peak
-  ~700 MB, no memory pressure."
-- **The one real footprint item: triangular precision storage.** Each
-  node's BLR precision is a *symmetric* d×d matrix stored in full —
-  477 KB at d=247, ~40 MB across an 85-node graph. Storing only the
-  lower triangle (d(d+1)/2) halves that to ~20 MB. It can be made
-  byte-identical (`canonical_bytes` reconstructs the full d² for the
-  hash, exactly as snapshot decoding already mirrors the v14
-  lower-triangle layout). But it touches every precision-indexing site
-  (`cholesky`, `chol_rank1_update`, the solves, `matvec`,
-  `quadratic_form`), it does **not** speed the compute (the d²
-  multiply-adds are unchanged), and there is no memory *pressure* to
-  relieve. **Noted; deferred** — high churn, no speed gain, no pressure.
+- **The accumulator is never the memory cost.** Scalar / x4 / x8 Kahan
+  accumulators are 16 / 64 / 128-byte *stack* structs — switching to x8
+  costs ~112 B per call site, immeasurable. The memory in the update is
+  the d×d precision matrix.
+- **Per-update churn is already small** — the `precision.to_vec()`
+  clone is 14.7 µs (1.4 % of the update); `Tensor::from_vec` *moves*
+  its `Vec`. No hotspot, and the handoff recorded "peak ~700 MB, no
+  memory pressure."
+- **Triangular precision storage — measured and rejected.** Storing
+  each symmetric d×d precision as its lower triangle halves the
+  footprint (476 → 239 KB/node, ~40 → ~20 MB across the graph). A
+  micro-benchmark (`abng-result-profile`) timed a matvec over a full-d²
+  layout vs a triangular d(d+1)/2 layout: triangular is **0.76× — 24 %
+  *slower***. Halving the storage forces scattered `acc[b] += …`
+  writes, `tri(a,b)` index arithmetic, and an `if a≠b` branch — costing
+  more than the cache benefit of touching half the bytes. Triangular
+  storage trades 24 % speed for memory under no pressure. **Rejected by
+  measurement** — no production refactor written; the micro-bench
+  settled it.
 
-## 7. Recommendation
+## 7. Option 1 vs Option 2 — the comparison
 
-- **Byte-identical R1 — nothing worth shipping.** The only byte-
-  identical lever (the clone) is 1.4 % and costs a 40-site refactor.
-  Skip it.
-- **The R1 lever is lane-parallel Kahan in `update_rank1`** — ~1.5× on
-  the row, determinism + accuracy + auditability all preserved, a
-  re-lock confined to the training path (~0 canaries, like Option C).
-  It needs the same Lead-Architect sign-off Option C did; surfaced
-  before implementation.
-- **Triangular precision storage** (memory) — deferred: invasive, no
-  speed gain, no memory pressure.
-
-## 8. If the lever is taken — commit plan
-
-| Commit | Content | Gate |
+| Axis | **Option 1** — lane-parallel x8 Kahan | **Option 2** — + triangular storage |
 |---|---|---|
-| **R1-1** | lane-parallel Kahan reductions in `update_rank1` (arbitrary d: ×4 lanes + scalar tail), dedicated so shared helpers stay scalar | full `cargo test --test abng`; canaries expected unchanged; round-trip tests re-checked |
+| **Speed** | **~1.2× on the row** (update ~1.05→~0.85 ms; reduction kernel 5.69×) | **0.76× on matvec — slower**; adds nothing over Option 1 |
+| **Memory** | accumulator +112 B/call (immeasurable); matrix unchanged | matrix −50 % (476→239 KB/node) — but no memory pressure exists |
+| **Determinism** | preserved — `KahanAccumulatorF64x8` bit-stable, no FMA, single-thread; a re-lock vs the scalar order | preserved (byte-identical if `canonical_bytes` reconstructs full d²) |
+| **Auditability** | preserved — chain / Merkle / replay intact; re-lock confined to the n=1 train path → **0 of 28 canaries** | preserved |
+| **ABNG features** | all preserved — `cargo test --test abng` 624/0 (1 known wall-clock flake passes in isolation) | would touch every precision-indexing site — large, risky surface, for no speed and no needed memory |
+| **Verdict** | **SHIP** (R1-1) — modest but real, zero accuracy/determinism cost | **REJECT** — measured slower, relieves no pressure |
 
-A single focused commit — the change is one hot function plus its
-dedicated reduction helpers and their tests.
+## 8. Verdict
+
+- The post-R0 result path is latency-bound on the serial Kahan
+  reduction chain inside the rank-1 BLR update; **byte-identical
+  speedups are marginal (~1.4 %)**.
+- **Option 1 (lane-parallel x8 Kahan) — shipped as R1-1.** ~1.2× on the
+  row, honest measured (the design pass over-projected ~1.5× — the
+  reduction is only part of the update). Determinism, accuracy, and
+  auditability all preserved; **0 of the 28 canaries re-locked** — the
+  change is confined to the n=1 training path, which the canaries do
+  not exercise. `cargo test --test abng` 624/0; +7 lane-parallel tests.
+- **Option 2 (triangular storage) — rejected by measurement.** The
+  triangular-layout matvec is 24 % *slower*; it relieves no memory
+  pressure. Not implemented — the micro-bench was the test.
+- **Cumulative R0 + R1:** per-row ~6.9 → ~2.1 ms (**~3.3×**); the
+  residual is the inherent O(d²) rank-1 NIG arithmetic, which cannot be
+  cut further without a model approximation (rejected — it would
+  change the epistemic-uncertainty output) or an audit-granularity
+  change (a separate signed-off decision).
