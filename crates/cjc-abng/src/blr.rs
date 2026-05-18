@@ -539,7 +539,8 @@ impl BlrState {
 
         // L_new — rank-1 update of L_old; the factor of Λ_new.
         chol_rank1_update(&mut l, d, phi);
-        let m_new = cholesky_solve(&l, d, &rhs);
+        // Phase 0.9.5 R1-2 — lane-parallel triangular solve.
+        let m_new = cholesky_solve_lanes(&l, d, &rhs);
 
         let yty = y * y;
         let m_lm_new = quadratic_form_lanes(&lambda_new, d, &m_new);
@@ -969,6 +970,74 @@ fn back_subst(l: &[f64], d: usize, y: &[f64]) -> Vec<f64> {
 pub fn cholesky_solve(l: &[f64], d: usize, b: &[f64]) -> Vec<f64> {
     let y = forward_subst(l, d, b);
     back_subst(l, d, &y)
+}
+
+/// Phase 0.9.5 R1-2 — lane-parallel forward substitution for the n=1
+/// [`update_rank1`](BlrState::update_rank1) hot path.
+///
+/// The outer loop stays sequential (`y[i]` depends on `y[k<i]`); only
+/// the inner reduction `Σ_{k<i} l[i][k]·y[k]` is lane-parallelized —
+/// the d² products fed to the 8 lanes of a [`KahanAccumulatorF64x8`]
+/// in chunks of 8, the tail folded into lane 0. Determinism and the
+/// re-lock reasoning are identical to [`quadratic_form_lanes`]; the
+/// scalar [`forward_subst`] is kept for `predict` and the shared
+/// [`cholesky_solve`].
+fn forward_subst_lanes(l: &[f64], d: usize, b: &[f64]) -> Vec<f64> {
+    let mut y = vec![0.0f64; d];
+    for i in 0..d {
+        let row = i * d;
+        let mut acc = KahanAccumulatorF64x8::new();
+        let mut chunk = [0.0f64; 8];
+        let mut fill = 0usize;
+        for k in 0..i {
+            chunk[fill] = l[row + k] * y[k];
+            fill += 1;
+            if fill == 8 {
+                acc.add_lanes(chunk);
+                fill = 0;
+            }
+        }
+        if fill > 0 {
+            acc.add_slice(&chunk[..fill]);
+        }
+        y[i] = (b[i] - acc.finalize()) / l[row + i];
+    }
+    y
+}
+
+/// Phase 0.9.5 R1-2 — lane-parallel back substitution. Mirror of
+/// [`forward_subst_lanes`]; the strided inner read `l[k*d + ii]` is
+/// gathered into the 8-lane chunk buffer exactly as the forward pass
+/// gathers its contiguous row.
+fn back_subst_lanes(l: &[f64], d: usize, y: &[f64]) -> Vec<f64> {
+    let mut x = vec![0.0f64; d];
+    for ii in (0..d).rev() {
+        let mut acc = KahanAccumulatorF64x8::new();
+        let mut chunk = [0.0f64; 8];
+        let mut fill = 0usize;
+        for k in (ii + 1)..d {
+            chunk[fill] = l[k * d + ii] * x[k];
+            fill += 1;
+            if fill == 8 {
+                acc.add_lanes(chunk);
+                fill = 0;
+            }
+        }
+        if fill > 0 {
+            acc.add_slice(&chunk[..fill]);
+        }
+        x[ii] = (y[ii] - acc.finalize()) / l[ii * d + ii];
+    }
+    x
+}
+
+/// Phase 0.9.5 R1-2 — lane-parallel `A x = b` solve for the n=1
+/// [`update_rank1`](BlrState::update_rank1) hot path. Bit-different
+/// from the shared scalar [`cholesky_solve`] (which is kept for
+/// `combine` / the n>1 `update`); confined to the n=1 training path.
+fn cholesky_solve_lanes(l: &[f64], d: usize, b: &[f64]) -> Vec<f64> {
+    let y = forward_subst_lanes(l, d, b);
+    back_subst_lanes(l, d, &y)
 }
 
 /// `x^T A x`, with `x: [d]`, `A: [d, d]` row-major. Kahan-summed.
@@ -1980,5 +2049,52 @@ mod tests {
         let mu = s.mean.to_vec();
         assert!((mu[0] - 2.0).abs() < 0.01, "w0 = {}", mu[0]);
         assert!((mu[1] - 3.0).abs() < 0.01, "w1 = {}", mu[1]);
+    }
+
+    // ── Phase 0.9.5 R1-2: lane-parallel triangular solve ─────────────
+
+    #[test]
+    fn cholesky_solve_lanes_approx_matches_scalar() {
+        // Lane-parallel and scalar triangular solve agree to machine
+        // precision — accuracy preserved; only the low bits move.
+        for d in [1usize, 5, 8, 19, 40] {
+            let mut a = vec![0.0f64; d * d];
+            for i in 0..d {
+                for j in 0..d {
+                    a[i * d + j] = if i == j { d as f64 + 2.0 } else { 0.3 };
+                }
+            }
+            let l = cholesky(&a, d).unwrap();
+            let b: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.41).sin() + 1.0).collect();
+            let lanes = cholesky_solve_lanes(&l, d, &b);
+            let scalar = cholesky_solve(&l, d, &b);
+            for i in 0..d {
+                let scale = scalar[i].abs().max(1.0);
+                assert!(
+                    (lanes[i] - scalar[i]).abs() <= 1e-9 * scale,
+                    "d={d}, i={i}: lanes {} vs scalar {}",
+                    lanes[i],
+                    scalar[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cholesky_solve_lanes_is_deterministic() {
+        let d = 23;
+        let mut a = vec![0.0f64; d * d];
+        for i in 0..d {
+            for j in 0..d {
+                a[i * d + j] = if i == j { d as f64 + 1.0 } else { 0.2 };
+            }
+        }
+        let l = cholesky(&a, d).unwrap();
+        let b: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.13).cos()).collect();
+        let r1 = cholesky_solve_lanes(&l, d, &b);
+        let r2 = cholesky_solve_lanes(&l, d, &b);
+        for i in 0..d {
+            assert_eq!(r1[i].to_bits(), r2[i].to_bits(), "i={i}");
+        }
     }
 }

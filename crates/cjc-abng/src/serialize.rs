@@ -1632,6 +1632,8 @@ pub fn replay_with_outcome(
             welford_routing: crate::signature::SignatureWelford::new(),
             // Phase 0.5 Item 1 — unstamped at replay seed.
             provenance_stamp_hash: [0u8; 32],
+            // Phase 0.9.5 R1-2 — derived cache, lazily repopulated.
+            params_hash_cache: None,
         }],
         // Defensive: untrusted `n_events` cannot drive a giant
         // `with_capacity` allocation; let the AuditLog grow naturally.

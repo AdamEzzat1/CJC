@@ -1293,6 +1293,9 @@ impl AdaptiveBeliefGraph {
         }
         self.nodes[node_id as usize].params[k as usize] = t;
         let phash = params_hash(&self.nodes[node_id as usize].params);
+        // Phase 0.9.5 R1-2 — params changed; refresh the cache the
+        // per-row `validate_blr_inputs` staleness check reads.
+        self.nodes[node_id as usize].params_hash_cache = Some(phash);
         self.append_event(
             node_id,
             AuditKind::LeafParamsUpdated {
@@ -1350,6 +1353,8 @@ impl AdaptiveBeliefGraph {
         // All params validated — write atomically.
         self.nodes[node_id as usize].params = params;
         let phash = params_hash(&self.nodes[node_id as usize].params);
+        // Phase 0.9.5 R1-2 — params changed; refresh the cache.
+        self.nodes[node_id as usize].params_hash_cache = Some(phash);
         self.append_event(
             node_id,
             AuditKind::LeafParamsUpdatedBatch {
@@ -1524,10 +1529,12 @@ impl AdaptiveBeliefGraph {
     /// * `features.len()` is the expected row-major shape for `[n, d]`
     ///   given `n = y.len()` and `d = blr.d`
     ///
-    /// Borrows `self` immutably so the caller can take a mutable
-    /// borrow on `self.nodes[node_id].blr` immediately after.
+    /// Phase 0.9.5 R1-2 — takes `&mut self` so it can lazily populate
+    /// the per-node `params_hash_cache`. The borrow still ends at
+    /// return, so a caller's subsequent `&mut self.nodes[node_id].blr`
+    /// is unaffected.
     fn validate_blr_inputs(
-        &self,
+        &mut self,
         node_id: NodeId,
         features: &[f64],
         y: &[f64],
@@ -1536,11 +1543,20 @@ impl AdaptiveBeliefGraph {
         if node_id >= n_nodes {
             return Err(GraphError::NodeOutOfRange { node_id, n_nodes });
         }
-        let current_hash = params_hash(&self.nodes[node_id as usize].params);
-        let blr = self.nodes[node_id as usize]
-            .blr
-            .as_ref()
-            .ok_or(BlrError::NoBlrPrior)?;
+        // Phase 0.9.5 R1-2 — the MLP-params staleness check recomputed
+        // `params_hash` on *every* training row. Cache it per node;
+        // `leaf_set_param` / `leaf_set_params_batch` refresh the cache
+        // when they mutate `params`, so a hit is always current.
+        let node = &mut self.nodes[node_id as usize];
+        let current_hash = match node.params_hash_cache {
+            Some(h) => h,
+            None => {
+                let h = params_hash(&node.params);
+                node.params_hash_cache = Some(h);
+                h
+            }
+        };
+        let blr = node.blr.as_ref().ok_or(BlrError::NoBlrPrior)?;
         if blr.feature_version_hash != current_hash {
             return Err(BlrError::FeatureVersionStale {
                 stored: blr.feature_version_hash,
