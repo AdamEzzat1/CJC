@@ -525,6 +525,107 @@ impl ErrorCode {
             _ => "unknown",
         }
     }
+
+    // ── Parse + pedagogy layer (v0) ──────────────────────────────────────
+
+    /// Every defined [`ErrorCode`] variant, in declaration order.
+    ///
+    /// Used by [`ErrorCode::from_str`] to parse a canonical code string back
+    /// to its enum variant, and by `cjcl explain` and drift-check tests to
+    /// iterate the full taxonomy. Adding a new variant requires adding it
+    /// here too — `test_all_codes_count_locked` catches the omission.
+    pub const ALL_CODES: &'static [ErrorCode] = &[
+        // Lexer (E0xxx)
+        ErrorCode::E0001, ErrorCode::E0002, ErrorCode::E0003, ErrorCode::E0004,
+        ErrorCode::E0005, ErrorCode::E0006, ErrorCode::E0007, ErrorCode::E0008,
+        ErrorCode::E0009, ErrorCode::E0010,
+        // Parser (E1xxx)
+        ErrorCode::E1000, ErrorCode::E1001, ErrorCode::E1002, ErrorCode::E1003,
+        ErrorCode::E1004, ErrorCode::E1005, ErrorCode::E1006, ErrorCode::E1007,
+        ErrorCode::E1008, ErrorCode::E1009, ErrorCode::E1010, ErrorCode::E1011,
+        ErrorCode::E1012, ErrorCode::E1013,
+        // Type (E2xxx)
+        ErrorCode::E2001, ErrorCode::E2002, ErrorCode::E2003, ErrorCode::E2004,
+        ErrorCode::E2005, ErrorCode::E2006, ErrorCode::E2007, ErrorCode::E2008,
+        ErrorCode::E2009, ErrorCode::E2010, ErrorCode::E2011, ErrorCode::E2012,
+        ErrorCode::E2013, ErrorCode::E2014, ErrorCode::E2015,
+        // Borrow/Ownership (E3xxx)
+        ErrorCode::E3001, ErrorCode::E3002, ErrorCode::E3003, ErrorCode::E3004,
+        ErrorCode::E3005, ErrorCode::E3006, ErrorCode::E3007, ErrorCode::E3008,
+        // Effect (E4xxx)
+        ErrorCode::E4001, ErrorCode::E4002, ErrorCode::E4003, ErrorCode::E4004,
+        ErrorCode::E4005, ErrorCode::E4006,
+        // Name resolution (E5xxx)
+        ErrorCode::E5001, ErrorCode::E5002, ErrorCode::E5003, ErrorCode::E5004,
+        // Generics/Trait (E6xxx)
+        ErrorCode::E6001, ErrorCode::E6002, ErrorCode::E6003, ErrorCode::E6004,
+        ErrorCode::E6005, ErrorCode::E6006,
+        // MIR (E7xxx)
+        ErrorCode::E7001, ErrorCode::E7002, ErrorCode::E7003,
+        // Runtime (E8xxx)
+        ErrorCode::E8001, ErrorCode::E8002, ErrorCode::E8003, ErrorCode::E8004,
+        ErrorCode::E8005,
+        // Module (E9xxx)
+        ErrorCode::E9001, ErrorCode::E9002,
+        // Snap (E06xx)
+        ErrorCode::E0601, ErrorCode::E0602, ErrorCode::E0603, ErrorCode::E0604,
+        // Warnings (W0xxx)
+        ErrorCode::W0001, ErrorCode::W0002, ErrorCode::W0003, ErrorCode::W0004,
+        ErrorCode::W0005,
+    ];
+
+    /// Parses a canonical error-code string (e.g., `"E1003"`, `"W0001"`)
+    /// back into its [`ErrorCode`] variant.
+    ///
+    /// Returns `None` for unknown or malformed codes. This is the inverse of
+    /// [`ErrorCode::code_str`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cjc_diag::ErrorCode;
+    ///
+    /// assert_eq!(ErrorCode::from_str("E1003"), Some(ErrorCode::E1003));
+    /// assert_eq!(ErrorCode::from_str("W0001"), Some(ErrorCode::W0001));
+    /// assert_eq!(ErrorCode::from_str("E9999"), None);
+    /// assert_eq!(ErrorCode::from_str("not a code"), None);
+    /// ```
+    pub fn from_str(s: &str) -> Option<ErrorCode> {
+        Self::ALL_CODES.iter().copied().find(|c| c.code_str() == s)
+    }
+
+    /// Returns the long-form Elm-style explanation for this code, if one
+    /// has been authored.
+    ///
+    /// Explanations are markdown files under
+    /// `crates/cjc-diag/explanations/EXXXX.md`, embedded at build time via
+    /// `include_str!`. The pedagogy layer is **opt-in per code** — adding
+    /// a new file in the `explanations/` directory has no effect until its
+    /// corresponding variant is registered in this match.
+    ///
+    /// Use the CLI command `cjcl explain EXXXX` for the user-facing path.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cjc_diag::ErrorCode;
+    ///
+    /// // Documented codes return Some(markdown).
+    /// assert!(ErrorCode::E1003.explanation().is_some());
+    ///
+    /// // Undocumented codes return None — no error, just no extra prose.
+    /// assert!(ErrorCode::E5001.explanation().is_none());
+    /// ```
+    pub fn explanation(&self) -> Option<&'static str> {
+        match self {
+            ErrorCode::E1003 => Some(include_str!("../explanations/E1003.md")),
+            ErrorCode::E2001 => Some(include_str!("../explanations/E2001.md")),
+            ErrorCode::E4001 => Some(include_str!("../explanations/E4001.md")),
+            ErrorCode::E8001 => Some(include_str!("../explanations/E8001.md")),
+            ErrorCode::W0001 => Some(include_str!("../explanations/W0001.md")),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for ErrorCode {
@@ -603,6 +704,142 @@ mod tests {
         ];
         for code in &codes {
             assert!(!code.message_template().is_empty(), "{} has empty template", code);
+        }
+    }
+
+    // ── ALL_CODES + from_str tests ──────────────────────────────────────
+
+    #[test]
+    fn test_all_codes_count_locked() {
+        // Drift check: if you add a new ErrorCode variant, you must also
+        // add it to ALL_CODES. This count is the canonical total.
+        assert_eq!(
+            ErrorCode::ALL_CODES.len(),
+            82,
+            "ALL_CODES count drift: a new ErrorCode variant was probably \
+             added without updating ALL_CODES in error_codes.rs"
+        );
+    }
+
+    #[test]
+    fn test_all_codes_unique() {
+        // No duplicate entries in ALL_CODES.
+        let mut seen = Vec::with_capacity(ErrorCode::ALL_CODES.len());
+        for code in ErrorCode::ALL_CODES {
+            assert!(!seen.contains(code), "duplicate in ALL_CODES: {}", code);
+            seen.push(*code);
+        }
+    }
+
+    #[test]
+    fn test_from_str_roundtrip_all() {
+        // Every code in ALL_CODES must round-trip through code_str <-> from_str.
+        for code in ErrorCode::ALL_CODES {
+            let s = code.code_str();
+            assert_eq!(
+                ErrorCode::from_str(s),
+                Some(*code),
+                "round-trip failed for {}",
+                s
+            );
+        }
+    }
+
+    #[test]
+    fn test_from_str_known() {
+        assert_eq!(ErrorCode::from_str("E1003"), Some(ErrorCode::E1003));
+        assert_eq!(ErrorCode::from_str("W0001"), Some(ErrorCode::W0001));
+        assert_eq!(ErrorCode::from_str("E0601"), Some(ErrorCode::E0601));
+    }
+
+    #[test]
+    fn test_from_str_unknown() {
+        // Well-formed but not assigned.
+        assert_eq!(ErrorCode::from_str("E9999"), None);
+        assert_eq!(ErrorCode::from_str("W9999"), None);
+    }
+
+    #[test]
+    fn test_from_str_malformed() {
+        assert_eq!(ErrorCode::from_str(""), None);
+        assert_eq!(ErrorCode::from_str("E"), None);
+        assert_eq!(ErrorCode::from_str("E1"), None);
+        assert_eq!(ErrorCode::from_str("E10001"), None);
+        assert_eq!(ErrorCode::from_str("foo"), None);
+        // Case-sensitive.
+        assert_eq!(ErrorCode::from_str("e1003"), None);
+        assert_eq!(ErrorCode::from_str("w0001"), None);
+        // No prefix at all.
+        assert_eq!(ErrorCode::from_str("1003"), None);
+    }
+
+    // ── explanation() tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_explanation_returns_some_for_documented() {
+        // The five seed codes shipped with v0 of the pedagogy layer.
+        assert!(ErrorCode::E1003.explanation().is_some());
+        assert!(ErrorCode::E2001.explanation().is_some());
+        assert!(ErrorCode::E4001.explanation().is_some());
+        assert!(ErrorCode::E8001.explanation().is_some());
+        assert!(ErrorCode::W0001.explanation().is_some());
+    }
+
+    #[test]
+    fn test_explanation_returns_none_for_undocumented() {
+        // Any code not in the documented set must return None.
+        assert!(ErrorCode::E0001.explanation().is_none());
+        assert!(ErrorCode::E5001.explanation().is_none());
+        assert!(ErrorCode::E7001.explanation().is_none());
+        assert!(ErrorCode::W0005.explanation().is_none());
+    }
+
+    #[test]
+    fn test_explanation_content_nonempty_and_titled() {
+        // Every documented explanation must be non-empty and start with a
+        // markdown H1 header (the title), so the CLI never prints an empty
+        // or malformed blob.
+        for code in ErrorCode::ALL_CODES {
+            if let Some(text) = code.explanation() {
+                assert!(!text.is_empty(), "{} explanation is empty", code);
+                assert!(
+                    text.trim_start().starts_with("# "),
+                    "{} explanation must start with a `# ` markdown H1",
+                    code
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_explanation_content_has_pedagogy_sections() {
+        // Each documented explanation must follow the style guide:
+        // "What happened", "Why it matters", "How to fix" sections must
+        // appear. Catches incomplete or merely-stubbed pedagogy files.
+        let documented = [
+            ErrorCode::E1003,
+            ErrorCode::E2001,
+            ErrorCode::E4001,
+            ErrorCode::E8001,
+            ErrorCode::W0001,
+        ];
+        for code in &documented {
+            let text = code.explanation().expect("documented code must have text");
+            assert!(
+                text.contains("## What happened"),
+                "{} missing 'What happened' section",
+                code
+            );
+            assert!(
+                text.contains("## Why it matters"),
+                "{} missing 'Why it matters' section",
+                code
+            );
+            assert!(
+                text.contains("## How to fix"),
+                "{} missing 'How to fix' section",
+                code
+            );
         }
     }
 }
