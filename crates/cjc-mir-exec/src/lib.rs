@@ -508,22 +508,31 @@ impl MirExecutor {
                 if let Some(cjc_mir::AllocHint::Arena) = alloc_hint {
                     self.arena_alloc_count += 1;
                 }
-                // Tier-0 perf (Stage 3): write to the frame slot when the
-                // lowering assigned one AND a frame is active. The frame
-                // write is the fast-path target for the body's
-                // `VarLocal { slot, .. }` reads.
-                if let Some(s) = slot {
-                    self.frame_set(*s, val.clone());
+                // Tier-0 perf (Stage 5a): single source of truth.
+                //
+                // - `slot.is_some()`: the lowering pass already
+                //   slot-resolved every reference to this binding,
+                //   so the frame is the only path readers take. Skip
+                //   the name binding entirely.
+                // - `slot.is_none()`: this is a `__main` top-level
+                //   let (or a defensive fallback). References emit
+                //   `Var(name)`, which walks the scope chain. Bind
+                //   by name only.
+                //
+                // Stages 2-4 invariant: `slot.is_some()` IFF every
+                // reference to `name` in this function emits VarLocal.
+                // Closures don't capture by name -- their capture
+                // expressions are evaluated at creation time and the
+                // captured values are passed as PARAMS to the lifted
+                // function, which is itself slot-resolved.
+                match slot {
+                    Some(s) => {
+                        self.frame_set(*s, val);
+                    }
+                    None => {
+                        self.define(name, val);
+                    }
                 }
-                // ALWAYS also `self.define(name, val)` for now:
-                //   1. Closure captures address outer locals by name.
-                //   2. Match arm bodies may reference outer-scope locals
-                //      by name (Stage 2 disabled slot resolution there).
-                //   3. The `Var(name)` fallback path (top-level, pattern
-                //      bindings, closure bodies) needs the name binding.
-                // Stage 5 will drop the name binding once every var
-                // reference is slot-indexed.
-                self.define(name, val);
                 Ok(Value::Void)
             }
             MirStmt::Expr(expr) => {
@@ -834,17 +843,21 @@ impl MirExecutor {
                 for arm in arms {
                     if let Some(bindings) = self.match_pattern(&arm.pattern, &scrut_val) {
                         self.push_scope();
-                        // Tier-0 perf (Stage 4): pattern bindings with a
-                        // slot also write the frame so the arm body's
-                        // `VarLocal { slot, .. }` reads hit the fast
-                        // path. The `self.define(...)` call is the
-                        // Stage 5 cleanup target (same double-
-                        // bookkeeping rationale as Let).
+                        // Tier-0 perf (Stage 5a): same source-of-truth
+                        // discipline as Let -- slot-carrying bindings
+                        // route through the frame ONLY; slot-less
+                        // bindings (none after Stage 4 inside fns, but
+                        // the variant supports them defensively) route
+                        // through the name chain ONLY.
                         for (name, slot, val) in bindings {
-                            if let Some(s) = slot {
-                                self.frame_set(s, val.clone());
+                            match slot {
+                                Some(s) => {
+                                    self.frame_set(s, val);
+                                }
+                                None => {
+                                    self.define(&name, val);
+                                }
                             }
-                            self.define(&name, val);
                         }
                         let result = self.exec_body(&arm.body);
                         self.pop_scope();
@@ -1362,12 +1375,49 @@ impl MirExecutor {
         }
 
         match &callee.kind {
-            // Tier-0 perf (T0-b Stage 2): Var and VarLocal are dispatched
-            // identically. dispatch_call() does its own scope lookup for
-            // names bound to Fn / Closure values; the only behavioral
-            // difference between the two variants is which kind tag the
-            // lowering emits.
-            MirExprKind::Var(name) | MirExprKind::VarLocal { name, .. } => {
+            // Tier-0 perf (T0-b Stage 5a): split the Var / VarLocal
+            // dispatch paths. `dispatch_call(name, ...)` consults the
+            // scope chain to find Closure / Fn values bound to a name
+            // -- which works for top-level Var references but NOT for
+            // slot-resolved locals (whose binding lives only in the
+            // frame after Stage 5a). For `VarLocal`, evaluate the
+            // callee through `eval_expr` (which reads `frame[slot]`)
+            // and dispatch on the resulting Value -- the same path
+            // the catch-all arm below uses.
+            MirExprKind::Var(name) => self.dispatch_call(name, arg_vals),
+            MirExprKind::VarLocal { name, slot } => {
+                // Fast path: top-level function names are still emitted
+                // as Var, so a VarLocal callee whose name happens to
+                // match a registered fn means the lowering classified
+                // it as a local that SHADOWS a top-level fn -- in that
+                // case the local binding wins. We still try the
+                // registered-functions table first because that's the
+                // historic precedence in dispatch_call (`user functions
+                // take priority over builtins`), but only if the local
+                // slot resolves to a non-Fn / non-Closure value (i.e.,
+                // the local isn't actually holding a callable).
+                if let Some(v) = self.frame_get(*slot).cloned() {
+                    match v {
+                        Value::Fn(fv) => {
+                            return self.call_function(&fv.name, &arg_vals);
+                        }
+                        Value::Closure { fn_name, env, .. } => {
+                            let mut full_args = env;
+                            full_args.extend(arg_vals);
+                            return self.call_function(&fn_name, &full_args);
+                        }
+                        _ => {
+                            return Err(MirExecError::Runtime(format!(
+                                "cannot call value of type {}",
+                                v.type_name()
+                            )));
+                        }
+                    }
+                }
+                // Fallback: frame was empty (no active call) -- treat
+                // as a name reference. Should not happen given lowering
+                // invariants, but keep the safety net symmetric with
+                // VarLocal reads.
                 self.dispatch_call(name, arg_vals)
             }
             MirExprKind::Field { object, name } => {
@@ -3982,14 +4032,15 @@ impl MirExecutor {
             // Bind parameters: use provided args, then fall back to defaults.
             // Variadic params collect remaining args into an array.
             //
-            // Stage 3: when `pushed_frame`, also write the binding to
-            // `frame[base + i]` so the body's `VarLocal { slot: i, .. }`
-            // reads hit the fast path. We still call `self.define(...)`
-            // because the body may also contain plain `Var(name)`
-            // references (e.g. inside closure bodies / match arms that
-            // ran with slot resolution disabled). Maintaining both views
-            // is the structural-compat insurance until Stage 5 removes
-            // the name fallback.
+            // Stage 5a: single source of truth -- when `pushed_frame`,
+            // the body's references resolve to slots so we write the
+            // frame ONLY. When the function has `local_count = 0`
+            // (currently `__main` and any closure body that escaped
+            // Stage 4's lift, which should never happen post-Stage-4),
+            // the body uses name lookup so we bind by name ONLY.
+            //
+            // Params occupy slots 0..n_params in declaration order --
+            // matches `HirToMir::enter_function` invariant.
             for (i, param) in func.params.iter().enumerate() {
                 let val = if param.is_variadic {
                     // Pack all remaining args into a deterministic array.
@@ -4005,11 +4056,10 @@ impl MirExecutor {
                     )));
                 };
                 if pushed_frame {
-                    // Params occupy slots 0..n_params in declaration order
-                    // -- matches `HirToMir::enter_function` invariant.
-                    self.frame[frame_base + i] = val.clone();
+                    self.frame[frame_base + i] = val;
+                } else {
+                    self.define(&param.name, val);
                 }
-                self.define(&param.name, val);
             }
 
             // Track which function we're in for TCO detection.
@@ -4195,14 +4245,25 @@ impl MirExecutor {
 
     fn exec_assign(&mut self, target: &MirExpr, val: Value) -> Result<(), MirExecError> {
         match &target.kind {
-            // Tier-0 perf (T0-b Stage 3): assignment to a slot-resolved
-            // local writes the frame slot AND updates the name binding
-            // (the latter keeps closure-capture / name-fallback paths in
-            // sync until Stage 5 retires `Var(name)` entirely).
+            // Tier-0 perf (T0-b Stage 5a): single source of truth.
+            // `Var(name)` targets the scope chain (top-level / unresolved
+            // fallback path). `VarLocal { slot, .. }` targets the frame
+            // ONLY -- the name binding has nothing to keep in sync since
+            // every read goes through the slot.
             MirExprKind::Var(name) => self.assign(name, val),
-            MirExprKind::VarLocal { name, slot } => {
-                self.frame_set(*slot, val.clone());
-                self.assign(name, val)
+            MirExprKind::VarLocal { slot, .. } => {
+                if self.frame_set(*slot, val) {
+                    Ok(())
+                } else {
+                    // Defensive: frame_set returns false only when no
+                    // frame is active. A `VarLocal` outside any frame
+                    // shouldn't happen given the lowering invariants,
+                    // but emit a clear runtime error if it ever does.
+                    Err(MirExecError::Runtime(
+                        "VarLocal assignment with no active call frame"
+                            .to_string(),
+                    ))
+                }
             }
             MirExprKind::Field { object, name } => {
                 if let MirExprKind::Var(obj_name)
