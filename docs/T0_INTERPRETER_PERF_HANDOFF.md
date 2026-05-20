@@ -1,6 +1,6 @@
 # Tier-0 Interpreter Perf — Handoff
 
-**Status as of 2026-05-19** · master at `d005d40` · scope: pre-JIT perf wins for the tree-walking executor, before any backend work.
+**Status as of 2026-05-20** · master at `bd99522` · scope: pre-JIT perf wins for the tree-walking executor, before any backend work.
 
 This handoff carries enough context for a fresh chat session to resume Tier-0
 work without needing the prior session's context window. Read top to bottom.
@@ -14,16 +14,21 @@ work without needing the prior session's context window. Read top to bottom.
 | **T0-a** Microbench harness | ✅ shipped | `0b4d007` | `cargo run -p interp-micro --release` |
 | **T0-c** Inline cache for `dispatch_call` | ✅ shipped | `0b4d007` | Correctness-preserving; cache hits below bench noise floor |
 | **T0-b Stage 1** Data foundation | ✅ shipped | `d005d40` | `VarLocal` variant + `MirFunction.local_count`; purely additive |
-| **T0-b Stage 2** HIR→MIR lowering | ⏸ **NEXT** | — | Walk fn bodies, assign slots, emit `VarLocal` |
-| **T0-b Stage 3** Executor `frame[slot]` fast-path | ⏸ after Stage 2 | — | The actual perf payoff lives here |
-| **T0-b Stage 4** Closures + captures | ⏸ later | — | Stays on name fallback until 4 |
+| **T0-b Stage 2** HIR→MIR lowering | ✅ shipped | `bd99522` | `HirToMir` slot tracker emits `VarLocal` for params + lets; 6 executor pattern sites updated via or-patterns; 10 new unit tests; structural change only, no behaviour delta |
+| **T0-b Stage 3** Executor `frame[slot]` fast-path | ⏸ **NEXT** | — | The actual perf payoff lives here |
+| **T0-b Stage 4** Closures + captures + match patterns | ⏸ later | — | Stays on name fallback until 4 |
 | **T0-b Stage 5** Remove name fallback | ⏸ later | — | Once everything is slot-indexed |
 | **T0-d** `eval_binary` fast-paths | optional | — | ~1 hr, marginal but cheap |
 | **T0-e** `is_known_builtin` static set | optional | — | ~30 min |
 
-Regression baseline:
-- `cargo test --workspace --lib` → **2,505 / 2,505 pass**
+Regression baseline (post-Stage 2):
+- `cargo test --workspace --lib` → **2,515 / 2,515 pass** (was 2,505; +10 new Stage 2 tests)
 - `cargo test --test test_builtin_parity` → **10 / 10 pass**
+- `cargo test --test test_chess_rl_v2 --release` → **97 / 97 pass**
+- Pre-existing failure (NOT a regression): `tests/physics_ml/heat_1d_pure_cjcl_parity.rs` reads `examples/physics_ml/pinn_heat_1d_pure.cjcl` which was never committed to git. Same failure reproduces on pristine master.
+
+**Vault docs:** [[ADR-0024 Tier-0 Slot Resolution]] (design) +
+`CJC-Lang_Obsidian_Vault/03_Compiler/Tier-0 Interpreter Perf.md` (concept note / roadmap).
 
 ---
 
@@ -138,7 +143,24 @@ This means Stage 1 is **purely additive, zero behavior change**. All
 
 ---
 
-## STAGE 2 — HIR → MIR slot resolution (start here)
+## STAGE 2 — HIR → MIR slot resolution (✅ shipped 2026-05-20, `bd99522`)
+
+**The section below is retained as a retrospective sketch.** Stage 2 has
+shipped: `HirToMir` carries a `scope_stack: Vec<BTreeMap<String, u32>>`,
+monotonic `slot_counter`, and a `slot_resolution_active` gate;
+`lower_fn`/`lower_block`/`lower_stmt`/`lower_expr` were updated as
+described; the executor's six `Var(name)` pattern-match sites now also
+recognise `VarLocal { name, .. }` via or-patterns; closures and match
+arm bodies stay on the name fallback. 10 new unit tests in
+`crates/cjc-mir/src/lib.rs` pin the rules. Read [[ADR-0024 Tier-0 Slot
+Resolution]] and `CJC-Lang_Obsidian_Vault/03_Compiler/Tier-0 Interpreter
+Perf.md` for the design as it actually shipped — the original sketch
+below has minor differences (e.g. capture *expressions* now slot-resolve
+in the outer scope, which the sketch did not specify).
+
+Resume at [Stage 3](#stage-3--executor-frame-fast-path) below.
+
+### Original Stage 2 sketch (kept for retrospective)
 
 This is the next session's primary task. Roughly 200–400 lines of
 changes, mostly in `crates/cjc-mir/src/lib.rs`. No new public APIs.

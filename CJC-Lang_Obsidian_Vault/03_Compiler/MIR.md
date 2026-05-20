@@ -23,12 +23,28 @@ Mid-level Intermediate Representation: a control-flow graph of basic blocks cont
 ## Key types
 
 - `MirProgram { functions: Vec<MirFunction> }`
-- `MirFunction { id: MirFnId, body: MirBody, ... }`
+- `MirFunction { id: MirFnId, body: MirBody, local_count: u32, ... }`
 - `MirBody` — blocks, edges, entry/exit
-- `MirExpr` / `MirExprKind`
+- `MirExpr` / `MirExprKind` (notable variants: `Var(String)` unresolved,
+  `VarLocal { name, slot }` slot-resolved — see [[Tier-0 Interpreter Perf]])
 - `MirStmt`
 - `BlockId`, `MirFnId`
 - `AllocHint` enum: `Stack`, `Arena`, `Rc`
+
+## Slot resolution (T0-b Stage 2, shipped 2026-05-20)
+
+`HirToMir` now performs a single-pass slot-resolution walk over each
+function body and emits `MirExprKind::VarLocal { name, slot }` for
+references to function-local bindings (params + `let`). References to
+top-level functions, captured variables, and pattern-bound names stay
+as `MirExprKind::Var(name)` (the executor's scope-chain fallback).
+`MirFunction.local_count` records how many slots the function needs.
+
+The synthetic `__main` function and lambda-lifted closures stay at
+`local_count = 0` in this stage; they will be lifted in Stage 4. The
+executor still does name-based lookup for both variants — the actual
+frame-based fast path is Stage 3. See [[ADR-0024 Tier-0 Slot Resolution]]
+and [[Tier-0 Interpreter Perf]].
 
 ## Passes
 
@@ -70,3 +86,5 @@ The `cjc-mir` crate contains multiple passes, each in its own file:
 - [[Escape Analysis]]
 - [[cjc-mir-exec]]
 - [[Float Reassociation Policy]]
+- [[Tier-0 Interpreter Perf]] — slot-resolution work on top of MIR
+- [[ADR-0024 Tier-0 Slot Resolution]]

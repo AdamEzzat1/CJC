@@ -29,10 +29,20 @@ All three take the typed `Program` (the AST), lower it through [[HIR]] → [[MIR
 
 ## Execution model
 
-- **Register machine**: every SSA variable maps to a register slot.
+- **Tree-walker** (despite the "register-machine" framing above). `eval_expr`
+  recursively walks `MirExpr` nodes via Rust's match dispatch; there is no
+  opcode dispatch loop or bytecode. The "register" framing was aspirational.
+  See [[ADR-0024 Tier-0 Slot Resolution]] for the architectural discussion
+  and the perf programme stacked on this finding ([[Tier-0 Interpreter Perf]]).
 - **Frame arena**: per-call bump allocator for `Arena`-classified allocations.
 - **Tail-call trampoline**: tail calls jump to a new frame without growing the call stack (observed by `crates/cjc-mir-exec/src/lib.rs`).
 - **Shared dispatch**: all builtins route through [[cjc-dispatch]] and `cjc-runtime::builtins`, guaranteeing the same semantics as [[cjc-eval]].
+- **Variable resolution** (post Tier-0 T0-b Stage 2): `MirExprKind::VarLocal { name, slot }`
+  carries a statically-resolved slot index for function-local references.
+  Stage 2 routes both `Var` and `VarLocal` through the same name-lookup
+  fallback (or-pattern in every dispatch site — `eval_expr`, `eval_call`,
+  `exec_assign`, TCO checks). Stage 3 will switch `VarLocal` reads/writes
+  to a flat `Vec<Value>` call frame.
 
 ## Feature crates
 
@@ -57,3 +67,5 @@ Every feature must work *identically* in [[cjc-eval]] and cjc-mir-exec. When a n
 - [[Memory Model]]
 - [[cjc-eval]]
 - [[Wiring Pattern]]
+- [[Tier-0 Interpreter Perf]]
+- [[ADR-0024 Tier-0 Slot Resolution]]
