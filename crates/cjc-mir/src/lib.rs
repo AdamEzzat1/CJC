@@ -519,7 +519,16 @@ pub enum MirPattern {
     /// Wildcard: matches anything, binds nothing.
     Wildcard,
     /// Binding: matches anything, binds the value to a name.
-    Binding(String),
+    ///
+    /// `slot` is populated by the slot-resolution pass in `HirToMir`
+    /// (T0-b Stage 4). `Some(slot)` when the binding is inside a
+    /// function whose body is slot-resolved (regular fn bodies, closure
+    /// bodies). The executor writes both `frame[base + slot] = value`
+    /// AND `self.define(name, value)` when binding. `None` for patterns
+    /// outside any slot-resolved function (currently never -- match is
+    /// only valid inside a function -- but kept for symmetry with the
+    /// `MirStmt::Let.slot` rule).
+    Binding { name: String, slot: Option<u32> },
     /// Literal patterns
     LitInt(i64),
     LitFloat(f64),
@@ -1094,23 +1103,26 @@ impl HirToMir {
                     })
                     .collect();
 
-                // Tier-0 perf (Stage 2): closures stay on the name fallback
-                // (`local_count = 0`). The lifted body's references to its
-                // OWN params + captures route through the executor's scope
-                // chain by name. Stage 4 will slot-resolve closures.
+                // Tier-0 perf (Stage 4): slot-resolve the lifted body just
+                // like a regular function. The lifted params (captures
+                // first, then original) get slots 0..N in declaration
+                // order; lets inside the body get slots after. The
+                // executor's `call_function` path pushes a frame on entry
+                // and binds args (including captures, which the
+                // `MakeClosure` mechanism prepends) into the frame slots.
                 //
-                // Snapshot the outer tracker so the closure body doesn't
-                // contaminate the outer function's slot counter / scopes,
-                // then disable resolution during the body lowering.
+                // Snapshot the outer tracker so the closure body's slot
+                // space is fresh -- nested closures and the outer fn
+                // each get their own monotonic counter.
                 let saved = self.save_tracker();
-                self.slot_resolution_active = false;
-                self.scope_stack.clear();
+                self.enter_function(&lifted_params);
 
                 let lifted_body = MirBody {
                     stmts: vec![],
                     result: Some(Box::new(self.lower_expr(body))),
                 };
 
+                let local_count = self.exit_function();
                 self.restore_tracker(saved);
 
                 self.lifted_functions.push(MirFunction {
@@ -1124,7 +1136,7 @@ impl HirToMir {
                     cfg_body: None,
                     decorators: vec![],
                     vis: Visibility::Private,
-                    local_count: 0,
+                    local_count,
                 });
 
                 MirExprKind::MakeClosure {
@@ -1134,33 +1146,32 @@ impl HirToMir {
             }
             HirExprKind::Match { scrutinee, arms } => {
                 // Scrutinee is evaluated in the OUTER scope -- lower with
-                // tracker still active.
+                // tracker still active so it sees outer locals.
                 let mir_scrutinee = Box::new(self.lower_expr(scrutinee));
 
-                // Tier-0 perf (Stage 2): pattern-bound names (e.g. `x` in
-                // `Some(x) => ...`) are NOT tracked by the lowering pass.
-                // Emitting `VarLocal { name: x, slot: outer_slot }` for an
-                // arm-body reference would happen to work in Stage 2 (the
-                // executor falls back to name lookup which finds the
-                // pattern-bound `x` higher in the scope chain) but bake in
-                // a latent bug for Stage 3's frame[slot] reads. Disable
-                // slot resolution for arm bodies; defer to Stage 4.
-                let saved = self.save_tracker();
-                self.slot_resolution_active = false;
-
+                // Tier-0 perf (Stage 4): each arm opens its own lexical
+                // scope. `lower_pattern` walks the pattern and assigns
+                // a slot to every `Binding` via `define_local`, recording
+                // the name -> slot mapping in the tracker so the arm
+                // body's references resolve to those slots. Outer-scope
+                // locals still resolve to outer slots. After the body is
+                // lowered, the scope pops so the next arm starts fresh
+                // (the slot counter is monotonic, so sibling arms get
+                // distinct slot ranges -- same trade-off as sibling
+                // `if`/`else` branches).
                 let mir_arms = arms
                     .iter()
                     .map(|arm| {
+                        self.push_scope();
                         let pattern = self.lower_pattern(&arm.pattern);
                         let body = MirBody {
                             stmts: vec![],
                             result: Some(Box::new(self.lower_expr(&arm.body))),
                         };
+                        self.pop_scope();
                         MirMatchArm { pattern, body }
                     })
                     .collect();
-
-                self.restore_tracker(saved);
 
                 MirExprKind::Match {
                     scrutinee: mir_scrutinee,
@@ -1204,17 +1215,43 @@ impl HirToMir {
         MirExpr { kind }
     }
 
-    fn lower_pattern(&self, pat: &HirPattern) -> MirPattern {
+    /// Lower an HIR pattern to MIR, assigning slot indices to every
+    /// `Binding` pattern found anywhere in the tree (recurses through
+    /// `Tuple`, `Struct`, `Variant` patterns).
+    ///
+    /// Tier-0 perf (Stage 4): when slot resolution is active for the
+    /// enclosing function, every `Binding` slot is `Some(slot)` and
+    /// the slot tracker's scope_stack records the name -> slot mapping
+    /// so subsequent variable references in the arm body resolve
+    /// correctly. When slot resolution is inactive (only happens if a
+    /// match expression is somehow encountered outside a fn body),
+    /// bindings get `slot: None` and the executor falls back to
+    /// name-only definition.
+    ///
+    /// IMPORTANT: this must be called AFTER `push_scope` and BEFORE
+    /// the arm body is lowered, so the bindings are visible to the
+    /// arm body's references via the scope_stack lookup.
+    fn lower_pattern(&mut self, pat: &HirPattern) -> MirPattern {
         match &pat.kind {
             HirPatternKind::Wildcard => MirPattern::Wildcard,
-            HirPatternKind::Binding(name) => MirPattern::Binding(name.clone()),
+            HirPatternKind::Binding(name) => {
+                let slot = if self.slot_resolution_active {
+                    Some(self.define_local(name))
+                } else {
+                    None
+                };
+                MirPattern::Binding {
+                    name: name.clone(),
+                    slot,
+                }
+            }
             HirPatternKind::LitInt(v) => MirPattern::LitInt(*v),
             HirPatternKind::LitFloat(v) => MirPattern::LitFloat(*v),
             HirPatternKind::LitBool(b) => MirPattern::LitBool(*b),
             HirPatternKind::LitString(s) => MirPattern::LitString(s.clone()),
-            HirPatternKind::Tuple(pats) => {
-                MirPattern::Tuple(pats.iter().map(|p| self.lower_pattern(p)).collect())
-            }
+            HirPatternKind::Tuple(pats) => MirPattern::Tuple(
+                pats.iter().map(|p| self.lower_pattern(p)).collect(),
+            ),
             HirPatternKind::Struct { name, fields } => MirPattern::Struct {
                 name: name.clone(),
                 fields: fields
@@ -1674,11 +1711,12 @@ mod tests {
     }
 
     #[test]
-    fn t0b_stage2_closure_body_stays_on_name_fallback() {
-        // `fn outer() { let x = 1; (|y| x + y) }` -- the lambda-lifted
-        // closure body should NOT slot-resolve its own param `y` or its
-        // capture `x`. The lifted function has local_count = 0 and emits
-        // Var for both references.
+    fn t0b_stage4_closure_body_is_slot_resolved() {
+        // `fn outer() { let x = 1; (|y| x + y) }` -- Stage 4 slot-resolves
+        // the lifted closure body just like a regular function. The
+        // lifted fn has params [capture x, param y] => local_count >= 2;
+        // body references emit VarLocal for both `x` (capture, slot 0)
+        // and `y` (param, slot 1).
         let mut lowering = HirToMir::new();
         let lambda_body = HirExpr {
             kind: HirExprKind::Binary {
@@ -1732,27 +1770,37 @@ mod tests {
         };
 
         let _outer_mir = lowering.lower_fn(&outer);
-        // The lifted closure is appended to lifted_functions.
         assert_eq!(lowering.lifted_functions.len(), 1);
         let lifted = &lowering.lifted_functions[0];
+        // Stage 4: closures get a real local_count. The lifted params
+        // are [x (capture), y (original)] -> 2 slots.
         assert_eq!(
-            lifted.local_count, 0,
-            "Stage 2 leaves closures on name fallback"
+            lifted.local_count, 2,
+            "Stage 4 slot-resolves closure bodies; lifted params -> slots 0..N"
         );
 
-        // Body of the lifted function: x + y. Both must be plain Var.
+        // Body of the lifted function: x + y. Both should be VarLocal
+        // with `x` at slot 0 (first capture-param) and `y` at slot 1.
         match &lifted.body.result.as_ref().unwrap().kind {
             MirExprKind::Binary { left, right, .. } => {
-                assert!(
-                    matches!(&left.kind, MirExprKind::Var(_)),
-                    "capture `x` in closure body stays Var, got {:?}",
-                    &left.kind
-                );
-                assert!(
-                    matches!(&right.kind, MirExprKind::Var(_)),
-                    "param `y` in closure body stays Var, got {:?}",
-                    &right.kind
-                );
+                match &left.kind {
+                    MirExprKind::VarLocal { name, slot } => {
+                        assert_eq!(name, "x");
+                        assert_eq!(*slot, 0, "capture-param `x` -> slot 0");
+                    }
+                    other => panic!(
+                        "expected VarLocal for capture `x`, got {other:?}"
+                    ),
+                }
+                match &right.kind {
+                    MirExprKind::VarLocal { name, slot } => {
+                        assert_eq!(name, "y");
+                        assert_eq!(*slot, 1, "original param `y` -> slot 1");
+                    }
+                    other => {
+                        panic!("expected VarLocal for param `y`, got {other:?}")
+                    }
+                }
             }
             other => panic!("expected Binary in closure body, got {other:?}"),
         }
@@ -1892,17 +1940,18 @@ mod tests {
     }
 
     #[test]
-    fn t0b_stage2_match_arm_bodies_disabled() {
-        // Match arm bodies emit Var, NOT VarLocal, for any reference
-        // (Stage 4 will handle pattern-bound names properly). This is the
-        // safety net that prevents Stage 3's frame[slot] reads from
-        // silently picking up the wrong value when a pattern shadows.
+    fn t0b_stage4_match_arm_pattern_bindings_get_slots() {
+        // `fn f(outer) { match outer { inner => outer + inner } }`
+        //
+        // Stage 4: the pattern binding `inner` gets a slot (1, after
+        // param `outer` at slot 0); references to `outer` and `inner`
+        // in the arm body both slot-resolve. The pattern itself carries
+        // the assigned slot so the executor knows where to write the
+        // binding value.
         let mut lowering = HirToMir::new();
         let arm_body = HirExpr {
             kind: HirExprKind::Binary {
                 op: BinOp::Add,
-                // `outer` would be slot 0 if resolution were active --
-                // verify it's NOT.
                 left: Box::new(hir_var("outer")),
                 right: Box::new(hir_var("inner")),
             },
@@ -1925,31 +1974,64 @@ mod tests {
         let hir_fn = mk_fn("f", vec![("outer", "i64")], match_expr);
         let mir_fn = lowering.lower_fn(&hir_fn);
 
-        // Scrutinee (evaluated in outer scope) DOES resolve.
+        // Param outer is slot 0; pattern binding inner is slot 1.
+        // local_count is 2.
+        assert_eq!(
+            mir_fn.local_count, 2,
+            "param outer (slot 0) + pattern binding inner (slot 1)"
+        );
+
         match &mir_fn.body.result.as_ref().unwrap().kind {
             MirExprKind::Match { scrutinee, arms } => {
+                // Scrutinee in outer scope -> VarLocal slot 0.
                 match &scrutinee.kind {
                     MirExprKind::VarLocal { name, slot } => {
                         assert_eq!(name, "outer");
                         assert_eq!(*slot, 0);
                     }
-                    other => panic!("scrutinee should slot-resolve, got {other:?}"),
+                    other => {
+                        panic!("scrutinee should slot-resolve, got {other:?}")
+                    }
                 }
-                // Arm body: both `outer` and `inner` stay as Var.
-                match &arms[0].body.result.as_ref().unwrap().kind {
-                    MirExprKind::Binary { left, right, .. } => {
-                        assert!(
-                            matches!(&left.kind, MirExprKind::Var(_)),
-                            "arm body must not slot-resolve, got {:?}",
-                            &left.kind
-                        );
-                        assert!(
-                            matches!(&right.kind, MirExprKind::Var(_)),
-                            "arm body must not slot-resolve, got {:?}",
-                            &right.kind
+                // Pattern itself carries slot.
+                match &arms[0].pattern {
+                    MirPattern::Binding { name, slot } => {
+                        assert_eq!(name, "inner");
+                        assert_eq!(
+                            *slot,
+                            Some(1),
+                            "pattern binding -> slot 1"
                         );
                     }
-                    other => panic!("expected Binary in arm body, got {other:?}"),
+                    other => panic!(
+                        "expected Binding pattern, got {other:?}"
+                    ),
+                }
+                // Arm body: both `outer` and `inner` are VarLocal.
+                match &arms[0].body.result.as_ref().unwrap().kind {
+                    MirExprKind::Binary { left, right, .. } => {
+                        match &left.kind {
+                            MirExprKind::VarLocal { name, slot } => {
+                                assert_eq!(name, "outer");
+                                assert_eq!(*slot, 0);
+                            }
+                            other => panic!(
+                                "expected VarLocal for `outer`, got {other:?}"
+                            ),
+                        }
+                        match &right.kind {
+                            MirExprKind::VarLocal { name, slot } => {
+                                assert_eq!(name, "inner");
+                                assert_eq!(*slot, 1);
+                            }
+                            other => panic!(
+                                "expected VarLocal for `inner`, got {other:?}"
+                            ),
+                        }
+                    }
+                    other => {
+                        panic!("expected Binary in arm body, got {other:?}")
+                    }
                 }
             }
             other => panic!("expected Match, got {other:?}"),

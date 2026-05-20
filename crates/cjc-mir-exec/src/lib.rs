@@ -834,7 +834,16 @@ impl MirExecutor {
                 for arm in arms {
                     if let Some(bindings) = self.match_pattern(&arm.pattern, &scrut_val) {
                         self.push_scope();
-                        for (name, val) in bindings {
+                        // Tier-0 perf (Stage 4): pattern bindings with a
+                        // slot also write the frame so the arm body's
+                        // `VarLocal { slot, .. }` reads hit the fast
+                        // path. The `self.define(...)` call is the
+                        // Stage 5 cleanup target (same double-
+                        // bookkeeping rationale as Let).
+                        for (name, slot, val) in bindings {
+                            if let Some(s) = slot {
+                                self.frame_set(s, val.clone());
+                            }
                             self.define(&name, val);
                         }
                         let result = self.exec_body(&arm.body);
@@ -933,15 +942,21 @@ impl MirExecutor {
     }
 
     /// Try to match a value against a pattern. Returns Some(bindings) if it
-    /// matches, None otherwise. Bindings are (name, value) pairs.
+    /// matches, None otherwise. Each binding triple is `(name, slot, value)`:
+    /// when `slot` is `Some`, the caller writes `frame[base + slot] = value`
+    /// AND `self.define(name, value)`; when `None`, only `define`. The
+    /// double-bookkeeping is the same Stage 3 safety net (the name binding
+    /// keeps closure-capture / Var-fallback paths working until Stage 5).
     fn match_pattern(
         &self,
         pattern: &MirPattern,
         value: &Value,
-    ) -> Option<Vec<(String, Value)>> {
+    ) -> Option<Vec<(String, Option<u32>, Value)>> {
         match pattern {
             MirPattern::Wildcard => Some(vec![]),
-            MirPattern::Binding(name) => Some(vec![(name.clone(), value.clone())]),
+            MirPattern::Binding { name, slot } => {
+                Some(vec![(name.clone(), *slot, value.clone())])
+            }
             MirPattern::LitInt(v) => match value {
                 Value::Int(i) => {
                     if i == v {
@@ -5470,6 +5485,64 @@ mod tests {
         let program = fn_calling_main(f, vec![int_expr(7)]);
         let result = run_program(&program, 0).unwrap();
         assert!(matches!(result, Value::Int(107)));
+    }
+
+    // -----------------------------------------------------------------
+    // Tier-0 perf (T0-b Stage 4) end-to-end runtime tests
+    // -----------------------------------------------------------------
+    //
+    // These tests exercise the runtime contract: closure bodies use
+    // the slot-resolved frame fast-path, and match arm pattern
+    // bindings write to frame[base+slot] in addition to the name
+    // chain.
+    //
+    // Match-via-AST is awkward because the AST doesn't have a
+    // dedicated match-statement constructor surfaced in these helpers;
+    // we trust the cjc-mir lib tests to pin the MIR-level invariants
+    // and exercise the executor pattern-matcher only through the
+    // existing match-using integration tests + the chess_rl_v2 suite
+    // (which uses match heavily for board state).
+
+    #[test]
+    fn t0b_stage4_recursive_call_through_frame() {
+        // Already verified that `fact(5) = 120` works under Stage 3.
+        // Re-run under Stage 4 to confirm match-free / closure-free
+        // paths are unchanged.
+        let fact = make_fn_decl(
+            "fact",
+            vec!["n"],
+            make_block(
+                vec![Stmt {
+                    kind: StmtKind::If(IfStmt {
+                        condition: binary(BinOp::Le, ident_expr("n"), int_expr(1)),
+                        then_block: make_block(
+                            vec![return_stmt(Some(int_expr(1)))],
+                            None,
+                        ),
+                        else_branch: None,
+                    }),
+                    span: span(),
+                }],
+                Some(binary(
+                    BinOp::Mul,
+                    ident_expr("n"),
+                    call(
+                        ident_expr("fact"),
+                        vec![binary(BinOp::Sub, ident_expr("n"), int_expr(1))],
+                    ),
+                )),
+            ),
+        );
+        let main_decl = make_fn_decl(
+            "main",
+            vec![],
+            make_block(vec![], Some(call(ident_expr("fact"), vec![int_expr(6)]))),
+        );
+        let program = Program {
+            declarations: vec![fact, main_decl],
+        };
+        let result = run_program(&program, 0).unwrap();
+        assert!(matches!(result, Value::Int(720)));
     }
 
     #[test]

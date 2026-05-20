@@ -447,9 +447,12 @@ fn collect_bindings_expr(expr: &MirExpr, ctx: &mut AnalysisCtx) {
 /// Collect bindings introduced by pattern matching (match arm patterns).
 fn collect_pattern_bindings(pattern: &MirPattern, ctx: &mut AnalysisCtx) {
     match pattern {
-        MirPattern::Binding(name) => {
+        MirPattern::Binding { name, .. } => {
             // Pattern bindings are non-mutable (match bindings are immutable in CJC).
             // Their init_kind is "Other" since the actual value comes from the scrutinee.
+            // Tier-0 perf (Stage 4): the `slot` field is consumed by the
+            // executor + lowering passes; escape analysis only needs the
+            // name to track lifetime.
             ctx.bindings.insert(
                 name.clone(),
                 BindingInfo {
