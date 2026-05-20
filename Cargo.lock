@@ -642,6 +642,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "interp-micro"
+version = "0.1.7"
+dependencies = [
+ "cjc-ast",
+ "cjc-eval",
+ "cjc-hir",
+ "cjc-mir",
+ "cjc-mir-exec",
+ "cjc-parser",
+ "cjc-runtime",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"

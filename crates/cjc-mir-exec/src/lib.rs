@@ -206,6 +206,26 @@ fn value_eq(a: &Value, b: &Value) -> bool {
 /// exec.scan_ast_imports(&program);
 /// let result = exec.exec(&mir)?;
 /// ```
+/// Which of the 4 satellite-dispatcher tables recognized a given builtin
+/// name. Populated lazily by `dispatch_call` on first successful resolution
+/// and consulted on subsequent calls to short-circuit the satellite chain.
+///
+/// Tier-0 inline-cache optimization: without this, every builtin call walks
+/// the full `runtime → quantum → grad_graph → abng` chain, even though
+/// after the first call we know exactly which satellite owns the name.
+/// With the cache, repeated calls jump straight to the right dispatcher.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum CallDispatch {
+    /// Resolved by `cjc_runtime::builtins::dispatch_builtin`.
+    Runtime,
+    /// Resolved by `cjc_quantum::dispatch_quantum`.
+    Quantum,
+    /// Resolved by `cjc_ad::dispatch_grad_graph`.
+    GradGraph,
+    /// Resolved by `cjc_abng::dispatch_abng`.
+    Abng,
+}
+
 pub struct MirExecutor {
     /// Function bodies stored as `Rc` to avoid cloning on every call.
     functions: BTreeMap<String, Rc<MirFunction>>,
@@ -227,6 +247,13 @@ pub struct MirExecutor {
     memo_cache: BTreeMap<[u8; 32], Value>,
     /// Import-gated library set (e.g. "vizor").
     libraries_enabled: std::collections::BTreeSet<String>,
+    /// Tier-0 inline cache: builtin name -> which satellite dispatcher
+    /// recognized it. Populated lazily by `dispatch_call` after the first
+    /// successful resolution; subsequent calls skip the satellite chain.
+    /// `BTreeMap` (not `HashMap`) preserves the project-wide determinism
+    /// rule about iteration order, even though iteration order isn't
+    /// observable for a cache used only via `get`.
+    call_cache: BTreeMap<String, CallDispatch>,
 }
 
 impl MirExecutor {
@@ -254,6 +281,7 @@ impl MirExecutor {
             arena_alloc_count: 0,
             memo_cache: BTreeMap::new(),
             libraries_enabled: std::collections::BTreeSet::new(),
+            call_cache: BTreeMap::new(),
         }
     }
 
@@ -1608,6 +1636,48 @@ impl MirExecutor {
                 }
             }
         }
+
+        // Tier-0 inline cache: if we've seen this name resolve to a specific
+        // satellite dispatcher before, jump straight there. Skips the slow
+        // stateful-builtin match + the 3-of-4 satellite tries that would
+        // otherwise miss before the right one matches. This check runs AFTER
+        // the user-function and closure-variable checks above so static
+        // builtins never shadow dynamic dispatch -- but BEFORE the stateful
+        // match below so we save the most work per hit.
+        if let Some(&kind) = self.call_cache.get(name) {
+            return match kind {
+                CallDispatch::Runtime => {
+                    match cjc_runtime::builtins::dispatch_builtin(name, &args) {
+                        Ok(Some(value)) => Ok(value),
+                        Ok(None) => Err(MirExecError::Runtime(format!(
+                            "call cache inconsistency: `{name}` cached as Runtime but dispatcher returned None"
+                        ))),
+                        Err(msg) => Err(MirExecError::Runtime(msg)),
+                    }
+                }
+                CallDispatch::Quantum => match cjc_quantum::dispatch_quantum(name, &args) {
+                    Ok(Some(value)) => Ok(value),
+                    Ok(None) => Err(MirExecError::Runtime(format!(
+                        "call cache inconsistency: `{name}` cached as Quantum but dispatcher returned None"
+                    ))),
+                    Err(msg) => Err(MirExecError::Runtime(msg)),
+                },
+                CallDispatch::GradGraph => match cjc_ad::dispatch_grad_graph(name, &args) {
+                    Ok(Some(value)) => Ok(value),
+                    Ok(None) => Err(MirExecError::Runtime(format!(
+                        "call cache inconsistency: `{name}` cached as GradGraph but dispatcher returned None"
+                    ))),
+                    Err(msg) => Err(MirExecError::Runtime(msg)),
+                },
+                CallDispatch::Abng => match cjc_abng::dispatch_abng(name, &args) {
+                    Ok(Some(value)) => Ok(value),
+                    Ok(None) => Err(MirExecError::Runtime(format!(
+                        "call cache inconsistency: `{name}` cached as Abng but dispatcher returned None"
+                    ))),
+                    Err(msg) => Err(MirExecError::Runtime(msg)),
+                },
+            };
+        }
         // Stateful builtins that need interpreter state
         match name {
             "print" => {
@@ -1924,16 +1994,24 @@ impl MirExecutor {
             _ => {}
         }
 
-        // Try shared (stateless) builtins
+        // Try shared (stateless) builtins. On success, populate the
+        // inline cache so future calls to this name skip the chain above
+        // and the 3 satellite checks below.
         match cjc_runtime::builtins::dispatch_builtin(name, &args) {
-            Ok(Some(value)) => return Ok(value),
+            Ok(Some(value)) => {
+                self.call_cache.insert(name.to_string(), CallDispatch::Runtime);
+                return Ok(value);
+            }
             Err(msg) => return Err(MirExecError::Runtime(msg)),
             Ok(None) => {} // not a shared builtin, fall through
         }
 
         // Quantum builtins (qubits, q_h, q_cx, q_measure, etc.)
         match cjc_quantum::dispatch_quantum(name, &args) {
-            Ok(Some(value)) => return Ok(value),
+            Ok(Some(value)) => {
+                self.call_cache.insert(name.to_string(), CallDispatch::Quantum);
+                return Ok(value);
+            }
             Err(msg) => return Err(MirExecError::Runtime(msg)),
             Ok(None) => {} // not a quantum builtin, fall through
         }
@@ -1942,7 +2020,10 @@ impl MirExecutor {
         // Same dispatch as cjc-eval's path so AST and MIR observe the same
         // ambient graph on a single thread.
         match cjc_ad::dispatch_grad_graph(name, &args) {
-            Ok(Some(value)) => return Ok(value),
+            Ok(Some(value)) => {
+                self.call_cache.insert(name.to_string(), CallDispatch::GradGraph);
+                return Ok(value);
+            }
             Err(msg) => return Err(MirExecError::Runtime(msg)),
             Ok(None) => {} // not a grad_graph_* builtin, fall through
         }
@@ -1951,7 +2032,10 @@ impl MirExecutor {
         // primitives (abng_*). Same routing pattern as dispatch_grad_graph
         // — both executors share the same per-thread arena.
         match cjc_abng::dispatch_abng(name, &args) {
-            Ok(Some(value)) => return Ok(value),
+            Ok(Some(value)) => {
+                self.call_cache.insert(name.to_string(), CallDispatch::Abng);
+                return Ok(value);
+            }
             Err(msg) => return Err(MirExecError::Runtime(msg)),
             Ok(None) => {} // not an abng_* builtin, fall through
         }

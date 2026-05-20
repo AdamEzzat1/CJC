@@ -1,0 +1,21 @@
+[package]
+name = "interp-micro"
+version = "0.1.7"
+edition = "2021"
+
+[[bin]]
+name = "interp_micro"
+path = "main.rs"
+
+[dependencies]
+# Tier-0 interpreter microbench -- needs the parser, the MIR executor,
+# and the tree-walking eval for parity comparisons across the two
+# backends. No criterion dep -- matches the abng_micro convention of
+# manual Instant timing + JSONL output.
+cjc-ast = { path = "../../crates/cjc-ast" }
+cjc-parser = { path = "../../crates/cjc-parser" }
+cjc-eval = { path = "../../crates/cjc-eval" }
+cjc-hir = { path = "../../crates/cjc-hir" }
+cjc-mir = { path = "../../crates/cjc-mir" }
+cjc-mir-exec = { path = "../../crates/cjc-mir-exec" }
+cjc-runtime = { path = "../../crates/cjc-runtime" }
