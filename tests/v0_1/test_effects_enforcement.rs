@@ -127,6 +127,7 @@ fn nogc_rejects_gc_builtin() {
             cfg_body: None,
             decorators: vec![],
             vis: cjc_ast::Visibility::Private,
+            local_count: 0,
         }],
         struct_defs: vec![],
         enum_defs: vec![],

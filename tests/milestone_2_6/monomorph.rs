@@ -78,6 +78,7 @@ fn make_generic_id_fn(id: u32) -> MirFunction {
         cfg_body: None,
         decorators: vec![],
         vis: cjc_ast::Visibility::Private,
+        local_count: 0,
     }
 }
 
@@ -96,6 +97,7 @@ fn make_main_fn(id: u32, body_stmts: Vec<MirStmt>) -> MirFunction {
         cfg_body: None,
         decorators: vec![],
         vis: cjc_ast::Visibility::Private,
+        local_count: 0,
     }
 }
 
@@ -121,6 +123,7 @@ fn mono_noop_on_non_generic_program() {
             cfg_body: None,
             decorators: vec![],
             vis: cjc_ast::Visibility::Private,
+            local_count: 0,
         }],
         struct_defs: vec![],
         enum_defs: vec![],
@@ -267,6 +270,7 @@ fn mono_report_top_fanout() {
         cfg_body: None,
         decorators: vec![],
         vis: cjc_ast::Visibility::Private,
+        local_count: 0,
     };
 
     let main_fn = make_main_fn(

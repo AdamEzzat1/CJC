@@ -403,7 +403,15 @@ impl MirExecutor {
             // stmts and a result expr that is a direct call.  Emit TailCall so
             // the trampoline in call_function can loop instead of recursing.
             if let MirExprKind::Call { callee, args } = &expr.kind {
-                if let MirExprKind::Var(callee_name) = &callee.kind {
+                // Tier-0 perf (T0-b Stage 2): callees that resolve to a
+                // local binding are emitted as VarLocal. Treat them
+                // identically to Var here -- the inner check
+                // `functions.contains_key(...)` still gates TCO to
+                // user-defined functions (locals holding closure values
+                // never satisfy it, so behavior is preserved).
+                if let MirExprKind::Var(callee_name)
+                | MirExprKind::VarLocal { name: callee_name, .. } = &callee.kind
+                {
                     if self.functions.contains_key(callee_name.as_str()) {
                         let evaluated_args: Result<Vec<Value>, _> =
                             args.iter().map(|a| self.eval_expr(a)).collect();
@@ -497,7 +505,11 @@ impl MirExecutor {
                 // call_function will restart the loop without growing the stack.
                 if let Some(expr) = opt_expr {
                     if let MirExprKind::Call { callee, args } = &expr.kind {
-                        if let MirExprKind::Var(callee_name) = &callee.kind {
+                        // Tier-0 perf (T0-b Stage 2): also match VarLocal
+                        // in callee position. See comment in exec_body.
+                        if let MirExprKind::Var(callee_name)
+                        | MirExprKind::VarLocal { name: callee_name, .. } = &callee.kind
+                        {
                             if self.functions.contains_key(callee_name.as_str()) {
                                 // Evaluate all arguments before trampolining.
                                 let evaluated_args: Result<Vec<Value>, _> =
@@ -1247,10 +1259,22 @@ impl MirExecutor {
         }
 
         match &callee.kind {
-            MirExprKind::Var(name) => self.dispatch_call(name, arg_vals),
+            // Tier-0 perf (T0-b Stage 2): Var and VarLocal are dispatched
+            // identically. dispatch_call() does its own scope lookup for
+            // names bound to Fn / Closure values; the only behavioral
+            // difference between the two variants is which kind tag the
+            // lowering emits.
+            MirExprKind::Var(name) | MirExprKind::VarLocal { name, .. } => {
+                self.dispatch_call(name, arg_vals)
+            }
             MirExprKind::Field { object, name } => {
-                // Static method: Tensor.zeros(...) etc.
-                if let MirExprKind::Var(obj_name) = &object.kind {
+                // Static method: Tensor.zeros(...) etc. The object name
+                // for a static dispatch is always a top-level type name
+                // (Var), but be permissive and accept VarLocal too in case
+                // a future feature binds type names to locals.
+                if let MirExprKind::Var(obj_name)
+                | MirExprKind::VarLocal { name: obj_name, .. } = &object.kind
+                {
                     let qualified = format!("{obj_name}.{name}");
                     if self.is_known_builtin(&qualified)
                         || self.functions.contains_key(&qualified)
@@ -4019,9 +4043,16 @@ impl MirExecutor {
 
     fn exec_assign(&mut self, target: &MirExpr, val: Value) -> Result<(), MirExecError> {
         match &target.kind {
-            MirExprKind::Var(name) => self.assign(name, val),
+            // Tier-0 perf (T0-b Stage 2): assignment to a slot-resolved
+            // local routes through the same `assign()` path as Var. Stage
+            // 3 will switch this to `frame[slot] = val`.
+            MirExprKind::Var(name) | MirExprKind::VarLocal { name, .. } => {
+                self.assign(name, val)
+            }
             MirExprKind::Field { object, name } => {
-                if let MirExprKind::Var(obj_name) = &object.kind {
+                if let MirExprKind::Var(obj_name)
+                | MirExprKind::VarLocal { name: obj_name, .. } = &object.kind
+                {
                     let obj_name = obj_name.clone();
                     let field_name = name.clone();
                     let mut obj_val = self
@@ -4058,7 +4089,9 @@ impl MirExecutor {
                 }
             }
             MirExprKind::Index { object, index } => {
-                if let MirExprKind::Var(obj_name) = &object.kind {
+                if let MirExprKind::Var(obj_name)
+                | MirExprKind::VarLocal { name: obj_name, .. } = &object.kind
+                {
                     let obj_name = obj_name.clone();
                     let idx = self.eval_expr(index)?;
                     let idx = match idx {

@@ -68,6 +68,7 @@ fn mk_fn(name: &str, stmts: Vec<MirStmt>, result: Option<MirExpr>) -> MirFunctio
         cfg_body: None,
         decorators: vec![],
         vis: cjc_ast::Visibility::Private,
+        local_count: 0,
     }
 }
 

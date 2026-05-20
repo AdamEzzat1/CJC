@@ -173,6 +173,7 @@ fn g3_escape_analysis_classifies_primitives_as_stack() {
         cfg_body: None,
         decorators: vec![],
         vis: cjc_ast::Visibility::Private,
+        local_count: 0,
     };
 
     let info = analyze_function(&func);
@@ -211,6 +212,7 @@ fn g3_escape_analysis_detects_return_escape() {
         cfg_body: None,
         decorators: vec![],
         vis: cjc_ast::Visibility::Private,
+        local_count: 0,
     };
 
     let info = analyze_function(&func);
@@ -242,6 +244,7 @@ fn g3_has_heap_alloc_detects_arena_and_rc() {
         cfg_body: None,
         decorators: vec![],
         vis: cjc_ast::Visibility::Private,
+        local_count: 0,
     };
     assert!(!has_heap_alloc(&analyze_function(&pure_fn)));
 
@@ -267,6 +270,7 @@ fn g3_has_heap_alloc_detects_arena_and_rc() {
         cfg_body: None,
         decorators: vec![],
         vis: cjc_ast::Visibility::Private,
+        local_count: 0,
     };
     assert!(has_heap_alloc(&analyze_function(&string_fn)));
 }

@@ -544,6 +544,7 @@ fn mk_mir_fn(name: &str, is_nogc: bool, stmts: Vec<cjc_mir::MirStmt>) -> cjc_mir
         cfg_body: None,
         decorators: vec![],
         vis: cjc_ast::Visibility::Private,
+        local_count: 0,
     }
 }
 

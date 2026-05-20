@@ -46,6 +46,7 @@ fn mk_fn(name: &str, is_nogc: bool, calls: &[&str]) -> MirFunction {
         cfg_body: None,
         decorators: vec![],
         vis: cjc_ast::Visibility::Private,
+        local_count: 0,
     }
 }
 fn mk_program(fns: Vec<MirFunction>) -> MirProgram {

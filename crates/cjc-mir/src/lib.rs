@@ -26,6 +26,7 @@ pub mod ssa_optimize;
 pub mod verify;
 
 use cjc_ast::{BinOp, UnaryOp, Visibility};
+use std::collections::BTreeMap;
 pub use escape::AllocHint;
 
 // ---------------------------------------------------------------------------
@@ -560,6 +561,40 @@ pub struct HirToMir {
     /// Lambda-lifted functions accumulated during lowering.
     /// These are appended to the MirProgram's function list.
     lifted_functions: Vec<MirFunction>,
+
+    // ---------- Tier-0 perf (T0-b Stage 2) slot-resolution state ----------
+    //
+    // These fields are active only inside `lower_fn`. The synthetic `__main`
+    // and lambda-lifted closures are NOT slot-resolved in Stage 2 (they keep
+    // `local_count = 0` and emit `MirExprKind::Var` for every reference, which
+    // makes the executor fall back to name-based scope lookup).
+    /// Stack of lexical scopes mapping `name -> slot` for the current
+    /// function being lowered. `BTreeMap` (not `HashMap`) preserves
+    /// deterministic iteration if it ever leaks into output.
+    scope_stack: Vec<BTreeMap<String, u32>>,
+    /// Monotonic per-function slot counter. Never decrements when scopes
+    /// pop, so a function with `if { let x } else { let y }` consumes two
+    /// frame slots (one each). This trades a small space cost for a much
+    /// simpler implementation.
+    slot_counter: u32,
+    /// When `false`, `Var` references stay as `Var(name)` instead of
+    /// becoming `VarLocal { name, slot }`. Used to skip:
+    /// - the `__main` synthetic function body
+    /// - lambda-lifted closure bodies (deferred to Stage 4)
+    /// - match arm bodies (pattern-bound names are not tracked here;
+    ///   deferred to Stage 4. Emitting VarLocal with the outer slot would
+    ///   work in Stage 2 (executor still does name lookup) but would bake
+    ///   in a latent bug for Stage 3's frame-based reads.)
+    slot_resolution_active: bool,
+}
+
+/// Snapshot of the slot tracker that can be saved / restored across a
+/// nested lowering (closure body, match arm body, etc.).
+#[derive(Debug)]
+struct TrackerState {
+    scope_stack: Vec<BTreeMap<String, u32>>,
+    slot_counter: u32,
+    slot_resolution_active: bool,
 }
 
 impl HirToMir {
@@ -569,6 +604,9 @@ impl HirToMir {
             next_fn_id: 0,
             next_lambda_id: 0,
             lifted_functions: Vec::new(),
+            scope_stack: Vec::new(),
+            slot_counter: 0,
+            slot_resolution_active: false,
         }
     }
 
@@ -582,6 +620,88 @@ impl HirToMir {
         let name = format!("__closure_{}", self.next_lambda_id);
         self.next_lambda_id += 1;
         name
+    }
+
+    // -- Slot tracker helpers (Tier-0 perf, T0-b Stage 2) ------------------
+
+    /// Begin tracking slots for a new function. Clears any previous state,
+    /// pushes the initial scope, and assigns each parameter a sequential
+    /// slot starting at 0.
+    fn enter_function(&mut self, params: &[MirParam]) {
+        self.scope_stack.clear();
+        self.scope_stack.push(BTreeMap::new());
+        self.slot_counter = 0;
+        self.slot_resolution_active = true;
+        for p in params {
+            self.define_local(&p.name);
+        }
+    }
+
+    /// Finish tracking slots for the current function and return the total
+    /// slot count (= `MirFunction.local_count`). Resets the tracker.
+    fn exit_function(&mut self) -> u32 {
+        let count = self.slot_counter;
+        self.scope_stack.clear();
+        self.slot_counter = 0;
+        self.slot_resolution_active = false;
+        count
+    }
+
+    fn push_scope(&mut self) {
+        if self.slot_resolution_active {
+            self.scope_stack.push(BTreeMap::new());
+        }
+    }
+
+    fn pop_scope(&mut self) {
+        if self.slot_resolution_active {
+            self.scope_stack.pop();
+        }
+    }
+
+    /// Register `name` as a local in the top scope, assigning it the next
+    /// available slot. Returns the assigned slot.
+    fn define_local(&mut self, name: &str) -> u32 {
+        let slot = self.slot_counter;
+        if let Some(top) = self.scope_stack.last_mut() {
+            top.insert(name.to_string(), slot);
+        }
+        self.slot_counter += 1;
+        slot
+    }
+
+    /// Walk the scope stack from innermost outward, returning the slot for
+    /// `name` if it is bound as a local. Returns `None` for top-level
+    /// names, captured variables, function names, etc. — these emit
+    /// `MirExprKind::Var(name)` and rely on the executor's scope-chain
+    /// fallback.
+    fn resolve_local(&self, name: &str) -> Option<u32> {
+        if !self.slot_resolution_active {
+            return None;
+        }
+        for scope in self.scope_stack.iter().rev() {
+            if let Some(&slot) = scope.get(name) {
+                return Some(slot);
+            }
+        }
+        None
+    }
+
+    /// Snapshot the tracker so a nested lowering can run with its own
+    /// (or disabled) state.
+    fn save_tracker(&mut self) -> TrackerState {
+        TrackerState {
+            scope_stack: std::mem::take(&mut self.scope_stack),
+            slot_counter: self.slot_counter,
+            slot_resolution_active: self.slot_resolution_active,
+        }
+    }
+
+    /// Restore a previously saved tracker state.
+    fn restore_tracker(&mut self, saved: TrackerState) {
+        self.scope_stack = saved.scope_stack;
+        self.slot_counter = saved.slot_counter;
+        self.slot_resolution_active = saved.slot_resolution_active;
     }
 
     /// Lower a HIR program to MIR.
@@ -695,7 +815,15 @@ impl HirToMir {
     /// body are lambda-lifted and accumulated in `self.lifted_functions`.
     pub fn lower_fn(&mut self, f: &HirFn) -> MirFunction {
         let id = self.fresh_fn_id();
-        let params = f
+
+        // Param defaults are evaluated AT CALL SITES in the caller's scope,
+        // not inside the callee's frame. Lower them with the outer tracker
+        // state (or whatever state is active when `lower_fn` is called).
+        // We snapshot the tracker so `enter_function` below can claim a
+        // fresh slot space for the callee body.
+        let saved = self.save_tracker();
+
+        let params: Vec<MirParam> = f
             .params
             .iter()
             .map(|p| MirParam {
@@ -705,7 +833,18 @@ impl HirToMir {
                 is_variadic: p.is_variadic,
             })
             .collect();
+
+        // Tier-0 perf (Stage 2): begin slot tracking for this function body.
+        // Parameters are assigned slots 0..N in declaration order.
+        self.enter_function(&params);
         let body = self.lower_block(&f.body);
+        let local_count = self.exit_function();
+
+        // Restore the outer tracker state (typically inactive for top-level
+        // fns; may be active when `lower_fn` is invoked from an Impl method
+        // iteration after a closure restore -- belt and suspenders).
+        self.restore_tracker(saved);
+
         MirFunction {
             id,
             name: f.name.clone(),
@@ -717,13 +856,19 @@ impl HirToMir {
             cfg_body: None,
             decorators: f.decorators.clone(),
             vis: f.vis,
-            local_count: 0,
+            local_count,
         }
     }
 
     fn lower_block(&mut self, block: &HirBlock) -> MirBody {
+        // Tier-0 perf: each block boundary opens a new lexical scope so that
+        // shadowing `let` bindings consume distinct slots. The slot counter
+        // does NOT reset on pop -- a function with `if { let x } else { let y }`
+        // consumes two slots, not one. See `define_local` doc.
+        self.push_scope();
         let stmts = block.stmts.iter().map(|s| self.lower_stmt(s)).collect();
         let result = block.expr.as_ref().map(|e| Box::new(self.lower_expr(e)));
+        self.pop_scope();
         MirBody { stmts, result }
     }
 
@@ -734,12 +879,19 @@ impl HirToMir {
                 mutable,
                 init,
                 ..
-            } => MirStmt::Let {
-                name: name.clone(),
-                mutable: *mutable,
-                init: self.lower_expr(init),
-                alloc_hint: None,
-            },
+            } => {
+                // Lower the initializer BEFORE binding `name` so the RHS
+                // resolves to the outer (not the new) binding for shadowing
+                // cases like `let x = x + 1`.
+                let init = self.lower_expr(init);
+                self.define_local(name);
+                MirStmt::Let {
+                    name: name.clone(),
+                    mutable: *mutable,
+                    init,
+                    alloc_hint: None,
+                }
+            }
             HirStmtKind::Expr(e) => MirStmt::Expr(self.lower_expr(e)),
             HirStmtKind::If(if_expr) => self.lower_if_stmt(if_expr),
             HirStmtKind::While { cond, body } => MirStmt::While {
@@ -803,7 +955,21 @@ impl HirToMir {
                 }).collect();
                 MirExprKind::TensorLit { rows: mir_rows }
             }
-            HirExprKind::Var(name) => MirExprKind::Var(name.clone()),
+            HirExprKind::Var(name) => {
+                // Tier-0 perf (Stage 2): if `name` is bound as a local
+                // (parameter or `let`) in the current function, emit the
+                // slot-resolved `VarLocal` variant. Otherwise fall back to
+                // `Var(name)` (top-level function, captured variable,
+                // pattern binding, or any reference outside an active
+                // tracker).
+                match self.resolve_local(name) {
+                    Some(slot) => MirExprKind::VarLocal {
+                        name: name.clone(),
+                        slot,
+                    },
+                    None => MirExprKind::Var(name.clone()),
+                }
+            }
             HirExprKind::Binary { op, left, right } => MirExprKind::Binary {
                 op: *op,
                 left: Box::new(self.lower_expr(left)),
@@ -867,7 +1033,10 @@ impl HirToMir {
                 let lifted_name = self.fresh_lambda_name();
                 let lifted_id = self.fresh_fn_id();
 
-                // Build params: captures first, then the original params
+                // Build params: captures first, then the original params.
+                // Default expressions on params are evaluated in the OUTER
+                // (call-site) scope, so lower them BEFORE saving the
+                // tracker for the closure body.
                 let mut lifted_params: Vec<MirParam> = captures
                     .iter()
                     .map(|c| MirParam {
@@ -886,10 +1055,42 @@ impl HirToMir {
                     });
                 }
 
+                // The capture expressions are simple Var references in the
+                // OUTER scope. Slot-resolve them while the outer tracker
+                // is still active -- `MakeClosure` evaluates these every
+                // time it runs to bundle them with the lifted function name.
+                let capture_exprs: Vec<MirExpr> = captures
+                    .iter()
+                    .map(|c| {
+                        let kind = match self.resolve_local(&c.name) {
+                            Some(slot) => MirExprKind::VarLocal {
+                                name: c.name.clone(),
+                                slot,
+                            },
+                            None => MirExprKind::Var(c.name.clone()),
+                        };
+                        MirExpr { kind }
+                    })
+                    .collect();
+
+                // Tier-0 perf (Stage 2): closures stay on the name fallback
+                // (`local_count = 0`). The lifted body's references to its
+                // OWN params + captures route through the executor's scope
+                // chain by name. Stage 4 will slot-resolve closures.
+                //
+                // Snapshot the outer tracker so the closure body doesn't
+                // contaminate the outer function's slot counter / scopes,
+                // then disable resolution during the body lowering.
+                let saved = self.save_tracker();
+                self.slot_resolution_active = false;
+                self.scope_stack.clear();
+
                 let lifted_body = MirBody {
                     stmts: vec![],
                     result: Some(Box::new(self.lower_expr(body))),
                 };
+
+                self.restore_tracker(saved);
 
                 self.lifted_functions.push(MirFunction {
                     id: lifted_id,
@@ -905,22 +1106,27 @@ impl HirToMir {
                     local_count: 0,
                 });
 
-                // At the call site, emit MakeClosure with the capture
-                // variable references as capture expressions
-                let capture_exprs: Vec<MirExpr> = captures
-                    .iter()
-                    .map(|c| MirExpr {
-                        kind: MirExprKind::Var(c.name.clone()),
-                    })
-                    .collect();
-
                 MirExprKind::MakeClosure {
                     fn_name: lifted_name,
                     captures: capture_exprs,
                 }
             }
             HirExprKind::Match { scrutinee, arms } => {
+                // Scrutinee is evaluated in the OUTER scope -- lower with
+                // tracker still active.
                 let mir_scrutinee = Box::new(self.lower_expr(scrutinee));
+
+                // Tier-0 perf (Stage 2): pattern-bound names (e.g. `x` in
+                // `Some(x) => ...`) are NOT tracked by the lowering pass.
+                // Emitting `VarLocal { name: x, slot: outer_slot }` for an
+                // arm-body reference would happen to work in Stage 2 (the
+                // executor falls back to name lookup which finds the
+                // pattern-bound `x` higher in the scope chain) but bake in
+                // a latent bug for Stage 3's frame[slot] reads. Disable
+                // slot resolution for arm bodies; defer to Stage 4.
+                let saved = self.save_tracker();
+                self.slot_resolution_active = false;
+
                 let mir_arms = arms
                     .iter()
                     .map(|arm| {
@@ -932,6 +1138,9 @@ impl HirToMir {
                         MirMatchArm { pattern, body }
                     })
                     .collect();
+
+                self.restore_tracker(saved);
+
                 MirExprKind::Match {
                     scrutinee: mir_scrutinee,
                     arms: mir_arms,
@@ -1199,5 +1408,548 @@ mod tests {
         assert_eq!(mir.struct_defs.len(), 1);
         assert_eq!(mir.struct_defs[0].name, "Point");
         assert_eq!(mir.struct_defs[0].fields.len(), 2);
+    }
+
+    // -----------------------------------------------------------------
+    // Tier-0 perf (T0-b Stage 2) slot-resolution tests
+    // -----------------------------------------------------------------
+    //
+    // These tests pin down the lowering's slot assignment rules so future
+    // refactors can't silently break them. The runtime behavior is covered
+    // by the existing parity + workspace tests; this module only checks
+    // the structure of the lowered MIR.
+
+    /// Build a minimal `HirFn` from a body expression plus param list.
+    fn mk_fn(name: &str, params: Vec<(&str, &str)>, body_expr: HirExpr) -> HirFn {
+        HirFn {
+            name: name.to_string(),
+            type_params: vec![],
+            params: params
+                .into_iter()
+                .map(|(n, t)| HirParam {
+                    name: n.to_string(),
+                    ty_name: t.to_string(),
+                    default: None,
+                    is_variadic: false,
+                    hir_id: hir_id(0),
+                })
+                .collect(),
+            return_type: None,
+            body: HirBlock {
+                stmts: vec![],
+                expr: Some(Box::new(body_expr)),
+                hir_id: hir_id(0),
+            },
+            is_nogc: false,
+            hir_id: hir_id(0),
+            decorators: vec![],
+            vis: cjc_ast::Visibility::Private,
+        }
+    }
+
+    #[test]
+    fn t0b_stage2_params_get_sequential_slots() {
+        // `fn f(a, b, c) { a + b + c }` -- a/b/c get slots 0/1/2;
+        // local_count = 3; body emits VarLocal for every reference.
+        let mut lowering = HirToMir::new();
+        let body = HirExpr {
+            kind: HirExprKind::Binary {
+                op: BinOp::Add,
+                left: Box::new(HirExpr {
+                    kind: HirExprKind::Binary {
+                        op: BinOp::Add,
+                        left: Box::new(hir_var("a")),
+                        right: Box::new(hir_var("b")),
+                    },
+                    hir_id: hir_id(0),
+                }),
+                right: Box::new(hir_var("c")),
+            },
+            hir_id: hir_id(0),
+        };
+        let hir_fn = mk_fn("f", vec![("a", "i64"), ("b", "i64"), ("c", "i64")], body);
+        let mir_fn = lowering.lower_fn(&hir_fn);
+
+        assert_eq!(mir_fn.local_count, 3, "three params -> three slots");
+
+        // Walk the body looking for VarLocal references.
+        fn collect_var_locals(expr: &MirExpr, out: &mut Vec<(String, u32)>) {
+            match &expr.kind {
+                MirExprKind::VarLocal { name, slot } => out.push((name.clone(), *slot)),
+                MirExprKind::Binary { left, right, .. } => {
+                    collect_var_locals(left, out);
+                    collect_var_locals(right, out);
+                }
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        collect_var_locals(mir_fn.body.result.as_ref().unwrap(), &mut found);
+        assert_eq!(
+            found,
+            vec![
+                ("a".to_string(), 0),
+                ("b".to_string(), 1),
+                ("c".to_string(), 2),
+            ],
+            "params should slot-resolve to their declaration order"
+        );
+    }
+
+    #[test]
+    fn t0b_stage2_let_binding_gets_next_slot_after_params() {
+        // `fn f(a) { let b = a; b }` -- a slot 0, b slot 1, local_count 2.
+        let mut lowering = HirToMir::new();
+        let let_stmt = HirStmt {
+            kind: HirStmtKind::Let {
+                name: "b".to_string(),
+                mutable: false,
+                ty_name: None,
+                init: hir_var("a"),
+            },
+            hir_id: hir_id(0),
+        };
+        let hir_fn = HirFn {
+            name: "f".to_string(),
+            type_params: vec![],
+            params: vec![HirParam {
+                name: "a".to_string(),
+                ty_name: "i64".to_string(),
+                default: None,
+                is_variadic: false,
+                hir_id: hir_id(0),
+            }],
+            return_type: None,
+            body: HirBlock {
+                stmts: vec![let_stmt],
+                expr: Some(Box::new(hir_var("b"))),
+                hir_id: hir_id(0),
+            },
+            is_nogc: false,
+            hir_id: hir_id(0),
+            decorators: vec![],
+            vis: cjc_ast::Visibility::Private,
+        };
+        let mir_fn = lowering.lower_fn(&hir_fn);
+        assert_eq!(mir_fn.local_count, 2);
+
+        // The Let's init expression should resolve `a` to slot 0.
+        match &mir_fn.body.stmts[0] {
+            MirStmt::Let { init, .. } => match &init.kind {
+                MirExprKind::VarLocal { name, slot } => {
+                    assert_eq!(name, "a");
+                    assert_eq!(*slot, 0);
+                }
+                other => panic!("expected VarLocal for `a`, got {other:?}"),
+            },
+            other => panic!("expected Let stmt, got {other:?}"),
+        }
+        // The body result should resolve `b` to slot 1.
+        match &mir_fn.body.result.as_ref().unwrap().kind {
+            MirExprKind::VarLocal { name, slot } => {
+                assert_eq!(name, "b");
+                assert_eq!(*slot, 1);
+            }
+            other => panic!("expected VarLocal for `b`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t0b_stage2_let_rhs_resolves_to_outer_for_shadowing() {
+        // `fn f(x) { let x = x + 1; x }` -- the init's `x` must resolve
+        // to the PARAMETER's slot (0), not the new let's slot.
+        let mut lowering = HirToMir::new();
+        let let_stmt = HirStmt {
+            kind: HirStmtKind::Let {
+                name: "x".to_string(),
+                mutable: false,
+                ty_name: None,
+                init: HirExpr {
+                    kind: HirExprKind::Binary {
+                        op: BinOp::Add,
+                        left: Box::new(hir_var("x")),
+                        right: Box::new(hir_int(1)),
+                    },
+                    hir_id: hir_id(0),
+                },
+            },
+            hir_id: hir_id(0),
+        };
+        let hir_fn = HirFn {
+            name: "f".to_string(),
+            type_params: vec![],
+            params: vec![HirParam {
+                name: "x".to_string(),
+                ty_name: "i64".to_string(),
+                default: None,
+                is_variadic: false,
+                hir_id: hir_id(0),
+            }],
+            return_type: None,
+            body: HirBlock {
+                stmts: vec![let_stmt],
+                expr: Some(Box::new(hir_var("x"))),
+                hir_id: hir_id(0),
+            },
+            is_nogc: false,
+            hir_id: hir_id(0),
+            decorators: vec![],
+            vis: cjc_ast::Visibility::Private,
+        };
+        let mir_fn = lowering.lower_fn(&hir_fn);
+        assert_eq!(mir_fn.local_count, 2, "param x (slot 0) + let x (slot 1)");
+
+        // Init RHS: x + 1 -- `x` must be slot 0 (the param), not slot 1.
+        match &mir_fn.body.stmts[0] {
+            MirStmt::Let { init, .. } => match &init.kind {
+                MirExprKind::Binary { left, .. } => match &left.kind {
+                    MirExprKind::VarLocal { slot, .. } => assert_eq!(*slot, 0),
+                    other => panic!("expected VarLocal in RHS, got {other:?}"),
+                },
+                other => panic!("expected Binary init, got {other:?}"),
+            },
+            other => panic!("expected Let stmt, got {other:?}"),
+        }
+        // Body result: `x` must be slot 1 (the new binding shadows the param).
+        match &mir_fn.body.result.as_ref().unwrap().kind {
+            MirExprKind::VarLocal { slot, .. } => assert_eq!(*slot, 1),
+            other => panic!("expected VarLocal in body, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t0b_stage2_main_function_not_slot_resolved() {
+        // Top-level lets feed __main, which is NOT lowered through
+        // `lower_fn`. local_count stays at 0 and references stay as Var.
+        let mut lowering = HirToMir::new();
+        let hir = HirProgram {
+            items: vec![HirItem::Let(HirLetDecl {
+                name: "x".to_string(),
+                mutable: false,
+                ty_name: None,
+                init: hir_int(42),
+                hir_id: hir_id(0),
+            })],
+        };
+        let mir = lowering.lower_program(&hir);
+        let main = mir.functions.iter().find(|f| f.name == "__main").unwrap();
+        assert_eq!(main.local_count, 0, "__main left on name fallback in Stage 2");
+    }
+
+    #[test]
+    fn t0b_stage2_unresolved_name_stays_as_var() {
+        // `fn f() { undefined_global }` -- no local of that name; emit Var.
+        let mut lowering = HirToMir::new();
+        let hir_fn = mk_fn("f", vec![], hir_var("undefined_global"));
+        let mir_fn = lowering.lower_fn(&hir_fn);
+        assert_eq!(mir_fn.local_count, 0, "no params + no lets -> zero slots");
+
+        match &mir_fn.body.result.as_ref().unwrap().kind {
+            MirExprKind::Var(name) => assert_eq!(name, "undefined_global"),
+            other => panic!(
+                "expected Var(name) for unresolved reference, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn t0b_stage2_closure_body_stays_on_name_fallback() {
+        // `fn outer() { let x = 1; (|y| x + y) }` -- the lambda-lifted
+        // closure body should NOT slot-resolve its own param `y` or its
+        // capture `x`. The lifted function has local_count = 0 and emits
+        // Var for both references.
+        let mut lowering = HirToMir::new();
+        let lambda_body = HirExpr {
+            kind: HirExprKind::Binary {
+                op: BinOp::Add,
+                left: Box::new(hir_var("x")),
+                right: Box::new(hir_var("y")),
+            },
+            hir_id: hir_id(0),
+        };
+        let closure = HirExpr {
+            kind: HirExprKind::Closure {
+                params: vec![HirParam {
+                    name: "y".to_string(),
+                    ty_name: "i64".to_string(),
+                    default: None,
+                    is_variadic: false,
+                    hir_id: hir_id(0),
+                }],
+                body: Box::new(lambda_body),
+                captures: vec![HirCapture {
+                    name: "x".to_string(),
+                    mode: CaptureMode::Ref,
+                    hir_id: hir_id(0),
+                }],
+            },
+            hir_id: hir_id(0),
+        };
+        let let_x = HirStmt {
+            kind: HirStmtKind::Let {
+                name: "x".to_string(),
+                mutable: false,
+                ty_name: None,
+                init: hir_int(1),
+            },
+            hir_id: hir_id(0),
+        };
+        let outer = HirFn {
+            name: "outer".to_string(),
+            type_params: vec![],
+            params: vec![],
+            return_type: None,
+            body: HirBlock {
+                stmts: vec![let_x],
+                expr: Some(Box::new(closure)),
+                hir_id: hir_id(0),
+            },
+            is_nogc: false,
+            hir_id: hir_id(0),
+            decorators: vec![],
+            vis: cjc_ast::Visibility::Private,
+        };
+
+        let _outer_mir = lowering.lower_fn(&outer);
+        // The lifted closure is appended to lifted_functions.
+        assert_eq!(lowering.lifted_functions.len(), 1);
+        let lifted = &lowering.lifted_functions[0];
+        assert_eq!(
+            lifted.local_count, 0,
+            "Stage 2 leaves closures on name fallback"
+        );
+
+        // Body of the lifted function: x + y. Both must be plain Var.
+        match &lifted.body.result.as_ref().unwrap().kind {
+            MirExprKind::Binary { left, right, .. } => {
+                assert!(
+                    matches!(&left.kind, MirExprKind::Var(_)),
+                    "capture `x` in closure body stays Var, got {:?}",
+                    &left.kind
+                );
+                assert!(
+                    matches!(&right.kind, MirExprKind::Var(_)),
+                    "param `y` in closure body stays Var, got {:?}",
+                    &right.kind
+                );
+            }
+            other => panic!("expected Binary in closure body, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t0b_stage2_capture_expr_in_outer_is_slot_resolved() {
+        // The MakeClosure node's capture *expressions* run in the OUTER
+        // scope -- they should slot-resolve. This is the closure-creation
+        // hot path.
+        //
+        // `fn outer() { let x = 1; (|y| x + y) }` -- the MakeClosure's
+        // captures vec contains a slot-resolved reference to `x`.
+        let mut lowering = HirToMir::new();
+        let lambda_body = HirExpr {
+            kind: HirExprKind::Binary {
+                op: BinOp::Add,
+                left: Box::new(hir_var("x")),
+                right: Box::new(hir_var("y")),
+            },
+            hir_id: hir_id(0),
+        };
+        let closure = HirExpr {
+            kind: HirExprKind::Closure {
+                params: vec![HirParam {
+                    name: "y".to_string(),
+                    ty_name: "i64".to_string(),
+                    default: None,
+                    is_variadic: false,
+                    hir_id: hir_id(0),
+                }],
+                body: Box::new(lambda_body),
+                captures: vec![HirCapture {
+                    name: "x".to_string(),
+                    mode: CaptureMode::Ref,
+                    hir_id: hir_id(0),
+                }],
+            },
+            hir_id: hir_id(0),
+        };
+        let let_x = HirStmt {
+            kind: HirStmtKind::Let {
+                name: "x".to_string(),
+                mutable: false,
+                ty_name: None,
+                init: hir_int(1),
+            },
+            hir_id: hir_id(0),
+        };
+        let outer = HirFn {
+            name: "outer".to_string(),
+            type_params: vec![],
+            params: vec![],
+            return_type: None,
+            body: HirBlock {
+                stmts: vec![let_x],
+                expr: Some(Box::new(closure)),
+                hir_id: hir_id(0),
+            },
+            is_nogc: false,
+            hir_id: hir_id(0),
+            decorators: vec![],
+            vis: cjc_ast::Visibility::Private,
+        };
+
+        let outer_mir = lowering.lower_fn(&outer);
+        assert_eq!(outer_mir.local_count, 1, "outer fn has one let (x)");
+
+        match &outer_mir.body.result.as_ref().unwrap().kind {
+            MirExprKind::MakeClosure { captures, .. } => {
+                assert_eq!(captures.len(), 1);
+                match &captures[0].kind {
+                    MirExprKind::VarLocal { name, slot } => {
+                        assert_eq!(name, "x");
+                        assert_eq!(*slot, 0);
+                    }
+                    other => panic!(
+                        "expected VarLocal in MakeClosure capture, got {other:?}"
+                    ),
+                }
+            }
+            other => panic!("expected MakeClosure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t0b_stage2_nested_blocks_use_distinct_slots() {
+        // `fn f() { if cond { let x = 1; x } else { let y = 2; y } }`
+        // -- x and y must occupy different slots (counter is monotonic).
+        let mut lowering = HirToMir::new();
+        let then_block = HirBlock {
+            stmts: vec![HirStmt {
+                kind: HirStmtKind::Let {
+                    name: "x".to_string(),
+                    mutable: false,
+                    ty_name: None,
+                    init: hir_int(1),
+                },
+                hir_id: hir_id(0),
+            }],
+            expr: Some(Box::new(hir_var("x"))),
+            hir_id: hir_id(0),
+        };
+        let else_block = HirBlock {
+            stmts: vec![HirStmt {
+                kind: HirStmtKind::Let {
+                    name: "y".to_string(),
+                    mutable: false,
+                    ty_name: None,
+                    init: hir_int(2),
+                },
+                hir_id: hir_id(0),
+            }],
+            expr: Some(Box::new(hir_var("y"))),
+            hir_id: hir_id(0),
+        };
+        let if_expr = HirExpr {
+            kind: HirExprKind::If {
+                cond: Box::new(HirExpr {
+                    kind: HirExprKind::BoolLit(true),
+                    hir_id: hir_id(0),
+                }),
+                then_block,
+                else_branch: Some(HirElseBranch::Else(else_block)),
+            },
+            hir_id: hir_id(0),
+        };
+        let hir_fn = mk_fn("f", vec![], if_expr);
+        let mir_fn = lowering.lower_fn(&hir_fn);
+
+        // Two distinct slots even though only one branch executes at runtime
+        // -- slot counter never decrements.
+        assert_eq!(
+            mir_fn.local_count, 2,
+            "shadowing across siblings consumes two slots"
+        );
+    }
+
+    #[test]
+    fn t0b_stage2_match_arm_bodies_disabled() {
+        // Match arm bodies emit Var, NOT VarLocal, for any reference
+        // (Stage 4 will handle pattern-bound names properly). This is the
+        // safety net that prevents Stage 3's frame[slot] reads from
+        // silently picking up the wrong value when a pattern shadows.
+        let mut lowering = HirToMir::new();
+        let arm_body = HirExpr {
+            kind: HirExprKind::Binary {
+                op: BinOp::Add,
+                // `outer` would be slot 0 if resolution were active --
+                // verify it's NOT.
+                left: Box::new(hir_var("outer")),
+                right: Box::new(hir_var("inner")),
+            },
+            hir_id: hir_id(0),
+        };
+        let match_expr = HirExpr {
+            kind: HirExprKind::Match {
+                scrutinee: Box::new(hir_var("outer")),
+                arms: vec![HirMatchArm {
+                    pattern: HirPattern {
+                        kind: HirPatternKind::Binding("inner".to_string()),
+                        hir_id: hir_id(0),
+                    },
+                    body: arm_body,
+                    hir_id: hir_id(0),
+                }],
+            },
+            hir_id: hir_id(0),
+        };
+        let hir_fn = mk_fn("f", vec![("outer", "i64")], match_expr);
+        let mir_fn = lowering.lower_fn(&hir_fn);
+
+        // Scrutinee (evaluated in outer scope) DOES resolve.
+        match &mir_fn.body.result.as_ref().unwrap().kind {
+            MirExprKind::Match { scrutinee, arms } => {
+                match &scrutinee.kind {
+                    MirExprKind::VarLocal { name, slot } => {
+                        assert_eq!(name, "outer");
+                        assert_eq!(*slot, 0);
+                    }
+                    other => panic!("scrutinee should slot-resolve, got {other:?}"),
+                }
+                // Arm body: both `outer` and `inner` stay as Var.
+                match &arms[0].body.result.as_ref().unwrap().kind {
+                    MirExprKind::Binary { left, right, .. } => {
+                        assert!(
+                            matches!(&left.kind, MirExprKind::Var(_)),
+                            "arm body must not slot-resolve, got {:?}",
+                            &left.kind
+                        );
+                        assert!(
+                            matches!(&right.kind, MirExprKind::Var(_)),
+                            "arm body must not slot-resolve, got {:?}",
+                            &right.kind
+                        );
+                    }
+                    other => panic!("expected Binary in arm body, got {other:?}"),
+                }
+            }
+            other => panic!("expected Match, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t0b_stage2_function_calls_dont_disturb_outer_slots() {
+        // Lowering an inner `lower_fn` from inside an outer function (via
+        // an Impl method, say) must save/restore the outer tracker.
+        //
+        // Here we manually trigger this by lowering two functions in
+        // sequence; the second must have local_count = its own params,
+        // not the first's.
+        let mut lowering = HirToMir::new();
+        let f1 = mk_fn("f1", vec![("a", "i64"), ("b", "i64")], hir_var("a"));
+        let f2 = mk_fn("f2", vec![("x", "i64")], hir_var("x"));
+
+        let m1 = lowering.lower_fn(&f1);
+        let m2 = lowering.lower_fn(&f2);
+        assert_eq!(m1.local_count, 2);
+        assert_eq!(m2.local_count, 1, "f2 should not inherit f1's slot count");
     }
 }
