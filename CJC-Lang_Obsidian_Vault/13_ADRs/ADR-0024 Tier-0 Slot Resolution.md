@@ -1,7 +1,7 @@
 ---
 title: "ADR-0024: Tier-0 Slot Resolution"
 tags: [adr, mir, executor, perf]
-status: Accepted (Stages 1+2 shipped; Stages 3-5 pending)
+status: Accepted (Stages 1+2+3 shipped; Stages 4-5 pending)
 date: 2026-05-20
 ---
 
@@ -9,10 +9,11 @@ date: 2026-05-20
 
 ## Status
 
-**Accepted.** Stage 1 (data foundation) and Stage 2 (slot resolution +
-executor pattern coverage) shipped on `master` as of 2026-05-20. Stages
-3-5 (frame fast-path, closures, name-fallback removal) are sequenced
-follow-ups tracked in [[Tier-0 Interpreter Perf]].
+**Accepted.** Stages 1 (data foundation), 2 (slot resolution + executor
+pattern coverage), and 3 (executor frame fast-path) shipped on `master`
+as of 2026-05-20. Stages 4 (closures + match patterns slot-resolved)
+and 5 (retire `Var(String)`) are sequenced follow-ups tracked in
+[[Tier-0 Interpreter Perf]].
 
 ## Context
 
@@ -106,6 +107,55 @@ Rules:
   with an outer slot would happen to work in Stage 2 (executor still
   does name lookup) but bake in a latent bug for Stage 3's
   `frame[slot]` reads.
+
+### Executor frame fast-path (Stage 3, commit `9e65aa5`)
+
+`MirExecutor` gains two fields:
+
+```rust
+frame: Vec<Value>,           // flat slot array, sliced per call
+frame_stack: Vec<usize>,     // saved frame.len() per active call
+```
+
+On `call_function` entry, if `func.local_count > 0`:
+1. `frame_stack.push(self.frame.len())` — save the base for this call
+2. `frame.resize(base + local_count, Value::Void)` — reserve N slots
+3. Bind params: write `frame[base + i] = arg_i` for each param
+
+On `call_function` exit (return, error, or tail-call trampoline):
+1. `frame_stack.pop()` — discard this call's base
+2. `frame.truncate(base)` — release this call's slots
+
+`MirStmt::Let` gained a `slot: Option<u32>` field, populated by
+`HirToMir::lower_stmt`. When `Some(s)`, the executor writes
+`frame[base + s] = init_value`. `MirExprKind::VarLocal { slot, .. }`
+reads via `frame[base + slot]` (a single indexed `Vec` access),
+falling back to scope-chain lookup only if no frame is active
+(Stage 2 structural compat).
+
+The slot identity has to live on `MirStmt::Let` because
+**branch-unbalanced shadowing**: `if c { let x } else { let y }`
+assigns slots `N` and `N+1` to DIFFERENT names depending on which
+branch runs. The executor cannot re-derive the right slot at runtime
+by counting Lets — only one branch executes, so the counter would
+be off for the other branch's references.
+
+#### Double-bookkeeping (the Stage 5 cleanup target)
+
+Stage 3 still calls `self.define(name, val)` alongside every
+`frame_set(slot, val)`, and `self.assign(name, val)` alongside every
+slot-targeted assign. Reason: closure captures (`MakeClosure`
+captures address outer locals by name), match arm body references
+(Stage 2 disabled slot resolution there, so references emit
+`Var(name)` and rely on the scope chain), and pattern bindings all
+still need the name binding. Until Stage 4 lifts the closure/match
+restriction and Stage 5 retires `Var(String)`, the double cost
+stays.
+
+This is why the measured Stage 3 win is below the Windows noise
+floor — `frame_get` is faster than `BTreeMap::get`, but the
+`define`+`frame_set` pair on writes nullifies most of the read-side
+savings. Stage 5 is where the sharper signal lands.
 
 ### Executor pattern coverage (Stage 2)
 

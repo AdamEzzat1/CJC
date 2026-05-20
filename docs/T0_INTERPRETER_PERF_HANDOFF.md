@@ -1,6 +1,6 @@
 # Tier-0 Interpreter Perf — Handoff
 
-**Status as of 2026-05-20** · master at `bd99522` · scope: pre-JIT perf wins for the tree-walking executor, before any backend work.
+**Status as of 2026-05-20** · master at `9e65aa5` · scope: pre-JIT perf wins for the tree-walking executor, before any backend work.
 
 This handoff carries enough context for a fresh chat session to resume Tier-0
 work without needing the prior session's context window. Read top to bottom.
@@ -15,19 +15,19 @@ work without needing the prior session's context window. Read top to bottom.
 | **T0-c** Inline cache for `dispatch_call` | ✅ shipped | `0b4d007` | Correctness-preserving; cache hits below bench noise floor |
 | **T0-b Stage 1** Data foundation | ✅ shipped | `d005d40` | `VarLocal` variant + `MirFunction.local_count`; purely additive |
 | **T0-b Stage 2** HIR→MIR lowering | ✅ shipped | `bd99522` | `HirToMir` slot tracker emits `VarLocal` for params + lets; 6 executor pattern sites updated via or-patterns; 10 new unit tests; structural change only, no behaviour delta |
-| **T0-b Stage 3** Executor `frame[slot]` fast-path | ⏸ **NEXT** | — | The actual perf payoff lives here |
-| **T0-b Stage 4** Closures + captures + match patterns | ⏸ later | — | Stays on name fallback until 4 |
-| **T0-b Stage 5** Remove name fallback | ⏸ later | — | Once everything is slot-indexed |
+| **T0-b Stage 3** Executor `frame[slot]` fast-path | ✅ shipped | `9e65aa5` | `Vec<Value>` per call frame; `MirStmt::Let.slot` populated; `VarLocal` reads through `frame[base+slot]`; 8 new unit tests; perf win below Windows noise floor because of double-bookkeeping with `define()` (Stage 5 cleanup target) |
+| **T0-b Stage 4** Closures + captures + match patterns | ⏸ **NEXT** | — | Lift `local_count = 0` cap from closures and arm bodies |
+| **T0-b Stage 5** Remove name fallback | ⏸ later | — | Delete `Var(String)` + scopes; double-bookkeeping vanishes here |
 | **T0-d** `eval_binary` fast-paths | optional | — | ~1 hr, marginal but cheap |
 | **T0-e** `is_known_builtin` static set | optional | — | ~30 min |
 
-Regression baseline (post-Stage 2):
-- `cargo test --workspace --lib` → **2,515 / 2,515 pass** (was 2,505; +10 new Stage 2 tests)
+Regression baseline (post-Stage 3):
+- `cargo test --workspace --lib` → **2,523 / 2,523 pass** (was 2,515; +8 new Stage 3 tests)
 - `cargo test --test test_builtin_parity` → **10 / 10 pass**
-- `cargo test --test test_chess_rl_v2 --release` → **97 / 97 pass**
+- `cargo test --test test_chess_rl_v2 --release` → **97 / 97 pass** (~13 min, MIR-heavy end-to-end ML training run)
 - Pre-existing failure (NOT a regression): `tests/physics_ml/heat_1d_pure_cjcl_parity.rs` reads `examples/physics_ml/pinn_heat_1d_pure.cjcl` which was never committed to git. Same failure reproduces on pristine master.
 
-**Vault docs:** [[ADR-0024 Tier-0 Slot Resolution]] (design) +
+**Vault docs:** [[ADR-0024 Tier-0 Slot Resolution]] (design through Stage 3) +
 `CJC-Lang_Obsidian_Vault/03_Compiler/Tier-0 Interpreter Perf.md` (concept note / roadmap).
 
 ---
@@ -266,7 +266,24 @@ because the executor still does name-based lookup for both variants.
 
 ---
 
-## STAGE 3 — Executor frame fast-path
+## STAGE 3 — Executor frame fast-path (✅ shipped 2026-05-20, `9e65aa5`)
+
+**This section is now retrospective.** Stage 3 has shipped:
+`MirExecutor` gained `frame: Vec<Value>` + `frame_stack: Vec<usize>`;
+`MirStmt::Let` gained `slot: Option<u32>`; `call_function` pushes /
+truncates the frame at entry / exit (including the tail-call path);
+`eval_expr::VarLocal` reads `frame[base+slot]`; `exec_assign::VarLocal`
+writes to the slot. 8 new unit tests pin the contracts. The
+double-bookkeeping with `self.define(name, val)` is kept until
+Stage 5. See [[ADR-0024 Tier-0 Slot Resolution]] for the design as
+shipped.
+
+Resume at Stage 4 (closures + match patterns) or Stage 5 (retire
+`Var(String)` + the scope chain) below.
+
+### Original Stage 3 sketch (retained)
+
+
 
 After Stage 2 ships and tests pass, light up the actual perf payoff in
 the executor.

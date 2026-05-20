@@ -24,7 +24,7 @@ Architecture Decision Records for CJC-Lang. Each ADR captures a single decision,
 | [[ADR-0016 Language-Level GradGraph Primitives]] | `grad_graph_*` builtins via satellite dispatch | Accepted | 2026-04-26 | 24 new builtins; ambient thread-local graph; flips PINN to pure-CJC-Lang |
 | [[ADR-0017 Adaptive TidyView Selection]] | Five-arm `AdaptiveSelection` enum, density-classified | Accepted | 2026-04-26 | Empty/All/SelectionVector/VerbatimMask + reserved Hybrid; sparse joins no longer pay dense costs |
 | [[ADR-0018 Deterministic Adaptive Dictionary Engine]] | Byte-first categorical engine: `BytePool` + `AdaptiveCodes` + `BTreeMap` lookup | Accepted | 2026-04-28 | Phase 1 of TidyView v3; row-axis (ADR-0017) was adaptive, column-axis (categoricals) now adaptive too |
-| [[ADR-0024 Tier-0 Slot Resolution]] | `VarLocal` variant + `HirToMir` slot tracker + executor pattern coverage | Accepted | 2026-05-20 | Stages 1+2 shipped; foundation for Stage 3 frame fast-path (expected 3-5× on `lookup`) |
+| [[ADR-0024 Tier-0 Slot Resolution]] | `VarLocal` variant + `HirToMir` slot tracker + executor frame fast-path | Accepted | 2026-05-20 | Stages 1+2+3 shipped; double-bookkeeping kept until Stage 5 means the perf win is currently below Windows noise (~30% on `lookup`) |
 
 ## Proposed decisions (not yet implemented)
 

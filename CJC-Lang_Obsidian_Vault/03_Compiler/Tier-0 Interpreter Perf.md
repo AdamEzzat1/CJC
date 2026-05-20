@@ -1,7 +1,7 @@
 ---
 title: Tier-0 Interpreter Perf
 tags: [compiler, runtime, executor, perf]
-status: In progress (T0-a + T0-c + T0-b S1 + T0-b S2 shipped; S3-S5 pending)
+status: In progress (T0-a + T0-c + T0-b S1+S2+S3 shipped; S4-S5 pending)
 ---
 
 # Tier-0 Interpreter Perf
@@ -21,17 +21,17 @@ because `cjc-mir-exec` is a tree-walker, not a register machine. See
 | **T0-a** Microbench harness | ✅ shipped | `0b4d007` | `bench/interp_micro/` |
 | **T0-c** Inline cache for `dispatch_call` | ✅ shipped | `0b4d007` | Cache hits below bench noise floor |
 | **T0-b Stage 1** Data foundation | ✅ shipped | `d005d40` | `VarLocal` variant + `MirFunction.local_count`; purely additive |
-| **T0-b Stage 2** HIR→MIR slot resolution | ✅ shipped | `bd99522` | Producer + executor pattern coverage; this concept note's home |
-| **T0-b Stage 3** Executor frame fast-path | ⏸ next | — | `Vec<Value>` per call frame; `frame[slot]` reads; perf payoff |
-| **T0-b Stage 4** Closures + match patterns | ⏸ later | — | Lift `local_count = 0` cap from closures and arm bodies |
-| **T0-b Stage 5** Remove name fallback | ⏸ later | — | Delete `Var(String)` once everything is slot-indexed |
+| **T0-b Stage 2** HIR→MIR slot resolution | ✅ shipped | `bd99522` | Producer + executor pattern coverage |
+| **T0-b Stage 3** Executor frame fast-path | ✅ shipped | `9e65aa5` | `Vec<Value>` per call frame; `frame[slot]` reads; perf payoff (double-bookkeeping keeps writes at parity until Stage 5) |
+| **T0-b Stage 4** Closures + match patterns | ⏸ next | — | Lift `local_count = 0` cap from closures and arm bodies |
+| **T0-b Stage 5** Remove name fallback | ⏸ later | — | Delete `Var(String)` + scopes chain; double-bookkeeping vanishes here |
 | **T0-d** `eval_binary` fast-paths | optional | — | Per-shape arithmetic; ~1 hr |
 | **T0-e** `is_known_builtin` static set | optional | — | ~30 min |
 
-Regression baseline (post-Stage 2):
-- `cargo test --workspace --lib` — 2,515 / 2,515 pass
+Regression baseline (post-Stage 3):
+- `cargo test --workspace --lib` — 2,523 / 2,523 pass (was 2,515; +8 new Stage 3 tests)
 - `cargo test --test test_builtin_parity` — 10 / 10 pass
-- `cargo test --test test_chess_rl_v2 --release` — 97 / 97 pass
+- `cargo test --test test_chess_rl_v2 --release` — 97 / 97 pass (~13 min, MIR-heavy end-to-end ML training)
 
 ## The three building blocks (Stages 1+2)
 
@@ -63,10 +63,9 @@ Currently `VarLocal` and `Var` route to the same name-lookup code paths
 in the executor — Stage 2 is purely a structural refactor, no
 behaviour change. Stage 3 lights up the actual fast path.
 
-## Stage 3 plan (next)
+## Stage 3 as it shipped
 
-Add a flat `Vec<Value>` call frame and route `VarLocal` reads through
-it:
+`MirExecutor` gained two fields:
 
 ```rust
 pub struct MirExecutor {
@@ -77,20 +76,52 @@ pub struct MirExecutor {
 }
 ```
 
-**Hook points:**
-- On function entry (`call_function`): grow `frame` by `local_count`;
-  push the prior length to `frame_stack`; bind params to
-  `frame[base..base+n_params]`
-- On function return: pop `frame_stack`; truncate `frame`
-- On `MirStmt::Let`: write to `frame[slot]` (requires either adding
-  `slot: Option<u32>` to `MirStmt::Let` or maintaining a parallel
-  scope→slot map in the executor)
-- On `MirExprKind::VarLocal { slot, .. }`:
-  `frame[frame_stack.last().unwrap() + slot]`
-- On `MirExprKind::Var(name)`: unchanged (closures, top-level, captures)
+Hook points wired:
+- **`call_function` entry**: if `func.local_count > 0`, push
+  `frame_stack(frame.len())` + resize `frame` to `base + local_count`
+  + bind params to `frame[base..base+n_params]`.
+- **`call_function` exit (Return, Err, TailCall)**: pop `frame_stack`,
+  truncate `frame` back to base. The TailCall path is critical —
+  without it, tight tail-call loops would grow the frame unbounded.
+- **`MirStmt::Let`**: if `slot` is `Some`, write `frame[base+slot]`.
+  Also call `self.define(name, val)` for the safety net (closure
+  captures + match arm bodies reference by name).
+- **`eval_expr::VarLocal { slot, .. }`**: try `frame_get(slot)` first,
+  fall back to scope-chain lookup if no frame is active.
+- **`exec_assign::VarLocal { slot, name }`**: write `frame[base+slot]`
+  AND `self.assign(name, val)`. Same safety-net rationale.
 
-Expected: 3-5× speedup on the `lookup` workload in the microbench.
-This is the **actual** perf payoff.
+The `slot` field had to land on `MirStmt::Let` (not derivable by the
+executor at runtime) because **branch-unbalanced shadowing** —
+`if c { let x } else { let y }` — assigns DIFFERENT slots to
+DIFFERENT names depending on which branch executes. Re-deriving by
+counting Lets at runtime would give the wrong slot.
+
+The helpers `frame_base()`, `frame_get(slot)`, `frame_set(slot, val)`
+are marked `#[inline(always)]` — they're on the per-reference hot
+path (~50,000 calls per inner bench iteration).
+
+### Measured win (Windows microbench)
+
+5 runs of the `lookup` workload (mir_warm vs eval, ms):
+
+| Run | mir_warm | eval | ratio |
+|---|---|---|---|
+| 1 | 112.24 | 128.27 | 0.88 |
+| 2 | 90.00 | 127.98 | 0.70 |
+| 3 | 84.68 | 131.76 | 0.64 |
+| 4 | 106.17 | 113.76 | 0.93 |
+| 5 | 53.23 | 77.34 | 0.69 |
+
+mir-exec is 7-36% faster than eval (median ~30%). The handoff
+warned that Windows ~2× run-to-run variance hides anything below
+30% — and that's what we see. The frame fast-path saves on reads,
+but the **double-bookkeeping** (still calling `self.define()`
+alongside `frame_set()` to keep closure captures and match arm body
+references working) keeps writes at parity. **Stage 5 is where the
+sharper win lands** — once every variable reference is slot-indexed,
+`define()` can disappear and the BTreeMap scope chain can be
+deleted entirely.
 
 ## Why AST-eval is faster than MIR-exec on the bench
 

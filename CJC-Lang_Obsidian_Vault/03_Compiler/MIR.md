@@ -31,20 +31,26 @@ Mid-level Intermediate Representation: a control-flow graph of basic blocks cont
 - `BlockId`, `MirFnId`
 - `AllocHint` enum: `Stack`, `Arena`, `Rc`
 
-## Slot resolution (T0-b Stage 2, shipped 2026-05-20)
+## Slot resolution (T0-b Stages 2+3, shipped 2026-05-20)
 
-`HirToMir` now performs a single-pass slot-resolution walk over each
+`HirToMir` performs a single-pass slot-resolution walk over each
 function body and emits `MirExprKind::VarLocal { name, slot }` for
 references to function-local bindings (params + `let`). References to
 top-level functions, captured variables, and pattern-bound names stay
 as `MirExprKind::Var(name)` (the executor's scope-chain fallback).
 `MirFunction.local_count` records how many slots the function needs.
+`MirStmt::Let` carries an optional `slot: Option<u32>` populated by
+the same pass.
 
 The synthetic `__main` function and lambda-lifted closures stay at
-`local_count = 0` in this stage; they will be lifted in Stage 4. The
-executor still does name-based lookup for both variants — the actual
-frame-based fast path is Stage 3. See [[ADR-0024 Tier-0 Slot Resolution]]
-and [[Tier-0 Interpreter Perf]].
+`local_count = 0` in Stages 2-3; they will be lifted in Stage 4. The
+executor (`cjc-mir-exec`) now reads `VarLocal` through a flat
+`frame: Vec<Value>` indexed by `frame_stack.last() + slot` — a single
+`Vec` access vs the old `BTreeMap`-keyed scope walk. The double-
+bookkeeping with `self.define(name, val)` is kept as a safety net for
+closure captures + match arm body name references until Stage 5
+retires `Var(String)`. See [[ADR-0024 Tier-0 Slot Resolution]] and
+[[Tier-0 Interpreter Perf]].
 
 ## Passes
 
