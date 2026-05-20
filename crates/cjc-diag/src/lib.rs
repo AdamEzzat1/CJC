@@ -1187,6 +1187,8 @@ mod tests {
 
     #[test]
     fn test_diagnostic_builder() {
+        // E1000 is documented (has an explanation), so the builder also
+        // auto-appends a pedagogy hint -- expected hints = user + auto = 2.
         let diag = DiagnosticBuilder::new(ErrorCode::E1000, Span::new(5, 10))
             .message("unexpected `}` here")
             .label(Span::new(5, 6), "this `}`")
@@ -1197,7 +1199,9 @@ mod tests {
         assert_eq!(diag.severity, Severity::Error);
         assert_eq!(diag.message, "unexpected `}` here");
         assert_eq!(diag.labels.len(), 1);
-        assert_eq!(diag.hints.len(), 1);
+        assert_eq!(diag.hints.len(), 2);
+        assert_eq!(diag.hints[0], "did you forget to close a previous block?");
+        assert!(diag.hints[1].contains("cjcl explain E1000"));
     }
 
     #[test]
@@ -1312,8 +1316,9 @@ mod tests {
 
     #[test]
     fn test_builder_skips_auto_hint_for_undocumented() {
-        // E1000 has no explanation yet; no auto-hint must be added.
-        let diag = DiagnosticBuilder::new(ErrorCode::E1000, Span::new(0, 1)).build();
+        // E5001 (unresolved name) is in the taxonomy but has no explanation
+        // yet -- the builder must NOT add an auto-hint.
+        let diag = DiagnosticBuilder::new(ErrorCode::E5001, Span::new(0, 1)).build();
         assert!(
             diag.hints.is_empty(),
             "expected no hints for undocumented code, got: {:?}",
@@ -1403,9 +1408,10 @@ mod tests {
 
     #[test]
     fn test_emit_skips_hint_for_undocumented_code() {
-        // E1000 has no explanation yet; emit must not add a hint.
+        // E5001 (unresolved name) is in the taxonomy but has no explanation
+        // yet -- emit must NOT add a hint.
         let mut bag = DiagnosticBag::new();
-        bag.emit(Diagnostic::error("E1000", "unexpected", Span::new(0, 1)));
+        bag.emit(Diagnostic::error("E5001", "unresolved", Span::new(0, 1)));
         assert!(bag.diagnostics[0].hints.is_empty());
     }
 

@@ -618,11 +618,29 @@ impl ErrorCode {
     /// ```
     pub fn explanation(&self) -> Option<&'static str> {
         match self {
+            // Parser errors (E1xxx) -- the codes a new user is most likely to
+            // hit first. E1000/E1001/E1002 are actually emitted in
+            // cjc-parser/src/lib.rs today.
+            ErrorCode::E1000 => Some(include_str!("../explanations/E1000.md")),
+            ErrorCode::E1001 => Some(include_str!("../explanations/E1001.md")),
+            ErrorCode::E1002 => Some(include_str!("../explanations/E1002.md")),
             ErrorCode::E1003 => Some(include_str!("../explanations/E1003.md")),
+            ErrorCode::E1004 => Some(include_str!("../explanations/E1004.md")),
+            // Type errors (E2xxx)
             ErrorCode::E2001 => Some(include_str!("../explanations/E2001.md")),
+            ErrorCode::E2002 => Some(include_str!("../explanations/E2002.md")),
+            ErrorCode::E2005 => Some(include_str!("../explanations/E2005.md")),
+            ErrorCode::E2006 => Some(include_str!("../explanations/E2006.md")),
+            ErrorCode::E2007 => Some(include_str!("../explanations/E2007.md")),
+            // Effect errors (E4xxx) -- CJC-Lang distinctive
             ErrorCode::E4001 => Some(include_str!("../explanations/E4001.md")),
+            // Runtime errors (E8xxx)
             ErrorCode::E8001 => Some(include_str!("../explanations/E8001.md")),
+            ErrorCode::E8002 => Some(include_str!("../explanations/E8002.md")),
+            ErrorCode::E8004 => Some(include_str!("../explanations/E8004.md")),
+            // Warnings (W0xxx)
             ErrorCode::W0001 => Some(include_str!("../explanations/W0001.md")),
+            ErrorCode::W0003 => Some(include_str!("../explanations/W0003.md")),
             _ => None,
         }
     }
@@ -777,12 +795,28 @@ mod tests {
 
     #[test]
     fn test_explanation_returns_some_for_documented() {
-        // The five seed codes shipped with v0 of the pedagogy layer.
+        // The 16 codes documented as of v0.1 of the pedagogy layer.
+        // Parser (the codes a new user hits first):
+        assert!(ErrorCode::E1000.explanation().is_some());
+        assert!(ErrorCode::E1001.explanation().is_some());
+        assert!(ErrorCode::E1002.explanation().is_some());
         assert!(ErrorCode::E1003.explanation().is_some());
+        assert!(ErrorCode::E1004.explanation().is_some());
+        // Type:
         assert!(ErrorCode::E2001.explanation().is_some());
+        assert!(ErrorCode::E2002.explanation().is_some());
+        assert!(ErrorCode::E2005.explanation().is_some());
+        assert!(ErrorCode::E2006.explanation().is_some());
+        assert!(ErrorCode::E2007.explanation().is_some());
+        // Effect (CJC-distinctive):
         assert!(ErrorCode::E4001.explanation().is_some());
+        // Runtime:
         assert!(ErrorCode::E8001.explanation().is_some());
+        assert!(ErrorCode::E8002.explanation().is_some());
+        assert!(ErrorCode::E8004.explanation().is_some());
+        // Warnings:
         assert!(ErrorCode::W0001.explanation().is_some());
+        assert!(ErrorCode::W0003.explanation().is_some());
     }
 
     #[test]
@@ -816,30 +850,29 @@ mod tests {
         // Each documented explanation must follow the style guide:
         // "What happened", "Why it matters", "How to fix" sections must
         // appear. Catches incomplete or merely-stubbed pedagogy files.
-        let documented = [
-            ErrorCode::E1003,
-            ErrorCode::E2001,
-            ErrorCode::E4001,
-            ErrorCode::E8001,
-            ErrorCode::W0001,
-        ];
-        for code in &documented {
-            let text = code.explanation().expect("documented code must have text");
-            assert!(
-                text.contains("## What happened"),
-                "{} missing 'What happened' section",
-                code
-            );
-            assert!(
-                text.contains("## Why it matters"),
-                "{} missing 'Why it matters' section",
-                code
-            );
-            assert!(
-                text.contains("## How to fix"),
-                "{} missing 'How to fix' section",
-                code
-            );
+        //
+        // This is the drift defense that scales as coverage grows --
+        // iterates ALL_CODES and checks every code with an explanation,
+        // so new explanations are automatically pulled into the style
+        // check without having to update this list.
+        for code in ErrorCode::ALL_CODES {
+            if let Some(text) = code.explanation() {
+                assert!(
+                    text.contains("## What happened"),
+                    "{} missing 'What happened' section",
+                    code
+                );
+                assert!(
+                    text.contains("## Why it matters"),
+                    "{} missing 'Why it matters' section",
+                    code
+                );
+                assert!(
+                    text.contains("## How to fix"),
+                    "{} missing 'How to fix' section",
+                    code
+                );
+            }
         }
     }
 }
