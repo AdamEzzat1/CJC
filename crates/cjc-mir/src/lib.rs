@@ -239,6 +239,14 @@ pub enum MirStmt {
         init: MirExpr,
         /// Escape analysis annotation. `None` before analysis runs.
         alloc_hint: Option<AllocHint>,
+        /// Tier-0 perf (T0-b Stage 3): statically resolved frame slot for
+        /// this binding, populated by the slot-resolution pass in
+        /// `HirToMir`. `Some(slot)` when slot resolution was active for
+        /// the enclosing function (the executor writes
+        /// `frame[base + slot] = init_value`); `None` otherwise (the
+        /// executor falls back to `self.define(name, val)` for `__main`,
+        /// lambda-lifted closure bodies, and match arm bodies).
+        slot: Option<u32>,
     },
     /// A standalone expression statement (e.g., function call, assignment).
     Expr(MirExpr),
@@ -754,11 +762,15 @@ impl HirToMir {
                     });
                 }
                 HirItem::Let(l) => {
+                    // __main has no slot tracker (Stage 2 left __main on
+                    // name fallback). slot stays None; the executor will
+                    // route this through self.define(name, val).
                     main_stmts.push(MirStmt::Let {
                         name: l.name.clone(),
                         mutable: l.mutable,
                         init: self.lower_expr(&l.init),
                         alloc_hint: None,
+                        slot: None,
                     });
                 }
                 HirItem::Stmt(s) => {
@@ -884,12 +896,21 @@ impl HirToMir {
                 // resolves to the outer (not the new) binding for shadowing
                 // cases like `let x = x + 1`.
                 let init = self.lower_expr(init);
-                self.define_local(name);
+                // Tier-0 perf (Stage 3): record the slot the executor will
+                // write into. `Some` when slot resolution is active for
+                // this function; `None` otherwise (e.g. inside match arm
+                // bodies or closure bodies).
+                let slot = if self.slot_resolution_active {
+                    Some(self.define_local(name))
+                } else {
+                    None
+                };
                 MirStmt::Let {
                     name: name.clone(),
                     mutable: *mutable,
                     init,
                     alloc_hint: None,
+                    slot,
                 }
             }
             HirStmtKind::Expr(e) => MirStmt::Expr(self.lower_expr(e)),

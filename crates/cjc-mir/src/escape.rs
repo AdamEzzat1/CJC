@@ -1052,6 +1052,7 @@ mod tests {
                 mutable: false,
                 init: mk_int(42),
                 alloc_hint: None,
+                slot: None,
             },
         ]);
         let info = analyze_function(&func);
@@ -1066,6 +1067,7 @@ mod tests {
                 mutable: true,
                 init: mk_int(0),
                 alloc_hint: None,
+                slot: None,
             },
         ]);
         let info = analyze_function(&func);
@@ -1083,6 +1085,7 @@ mod tests {
                 mutable: false,
                 init: mk_string("hello"),
                 alloc_hint: None,
+                slot: None,
             },
             MirStmt::Expr(mk_call("print", vec![mk_var("s")])),
         ]);
@@ -1100,6 +1103,7 @@ mod tests {
                 mutable: false,
                 init: mk_string("hello"),
                 alloc_hint: None,
+                slot: None,
             },
             MirStmt::Return(Some(mk_var("s"))),
         ]);
@@ -1117,6 +1121,7 @@ mod tests {
                 mutable: false,
                 init: mk_string("captured"),
                 alloc_hint: None,
+                slot: None,
             },
             MirStmt::Expr(MirExpr {
                 kind: MirExprKind::MakeClosure {
@@ -1139,6 +1144,7 @@ mod tests {
                 mutable: false,
                 init: mk_string("item"),
                 alloc_hint: None,
+                slot: None,
             },
             MirStmt::Expr(MirExpr {
                 kind: MirExprKind::ArrayLit(vec![mk_var("s")]),
@@ -1158,6 +1164,7 @@ mod tests {
                 mutable: false,
                 init: mk_string("data"),
                 alloc_hint: None,
+                slot: None,
             },
             MirStmt::Expr(mk_call("unknown_fn", vec![mk_var("s")])),
         ]);
@@ -1175,6 +1182,7 @@ mod tests {
                 mutable: false,
                 init: mk_string("data"),
                 alloc_hint: None,
+                slot: None,
             },
             MirStmt::Expr(mk_call("print", vec![mk_var("s")])),
         ]);
@@ -1192,6 +1200,7 @@ mod tests {
                 mutable: true,
                 init: mk_string("mutable"),
                 alloc_hint: None,
+                slot: None,
             },
         ]);
         let info = analyze_function(&func);
@@ -1210,6 +1219,7 @@ mod tests {
                         mutable: false,
                         init: mk_int(1),
                         alloc_hint: None,
+                        slot: None,
                     },
                 ]),
                 mk_func("f2", vec![
@@ -1218,6 +1228,7 @@ mod tests {
                         mutable: false,
                         init: mk_string("hello"),
                         alloc_hint: None,
+                        slot: None,
                     },
                     MirStmt::Return(Some(mk_var("s"))),
                 ]),
@@ -1241,12 +1252,14 @@ mod tests {
                 mutable: false,
                 init: mk_int(1),
                 alloc_hint: None,
+                slot: None,
             },
             MirStmt::Let {
                 name: "y".to_string(),
                 mutable: true,
                 init: MirExpr { kind: MirExprKind::FloatLit(3.14) },
                 alloc_hint: None,
+                slot: None,
             },
         ]);
         let info = analyze_function(&func);
@@ -1261,6 +1274,7 @@ mod tests {
                 mutable: false,
                 init: mk_string("hello"),
                 alloc_hint: None,
+                slot: None,
             },
         ]);
         let info = analyze_function(&func);
@@ -1277,6 +1291,7 @@ mod tests {
                 mutable: false,
                 init: mk_int(42),
                 alloc_hint: None,
+                slot: None,
             },
         ]);
         let info = analyze_function(&func);

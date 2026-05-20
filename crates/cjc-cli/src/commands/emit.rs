@@ -342,7 +342,7 @@ fn format_mir_body(body: &cjc_mir::MirBody, indent: usize, out: &mut String) {
 fn format_mir_stmt(stmt: &cjc_mir::MirStmt, indent: usize, out: &mut String) {
     let pad = "  ".repeat(indent);
     match stmt {
-        cjc_mir::MirStmt::Let { name, mutable, init, alloc_hint } => {
+        cjc_mir::MirStmt::Let { name, mutable, init, alloc_hint, slot: _ } => {
             let mut_str = if *mutable { "mut " } else { "" };
             let hint_str = match alloc_hint {
                 Some(cjc_mir::AllocHint::Stack) => " /* stack */",

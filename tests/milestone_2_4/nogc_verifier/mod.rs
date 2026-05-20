@@ -249,6 +249,7 @@ fn g8_pure_arithmetic_in_nogc_allowed() {
                     right: Box::new(mk_expr(MirExprKind::IntLit(2))),
                 }),
                 alloc_hint: None,
+                slot: None,
             },
         ]),
     ]);
@@ -399,6 +400,7 @@ fn step5_nogc_rejects_returned_string_binding() {
                 mutable: false,
                 init: mk_expr(MirExprKind::StringLit("hello".to_string())),
                 alloc_hint: None,
+                slot: None,
             },
             MirStmt::Return(Some(mk_expr(MirExprKind::Var("s".to_string())))),
         ]),
@@ -420,18 +422,21 @@ fn step5_nogc_allows_primitive_only_function() {
                 mutable: false,
                 init: mk_expr(MirExprKind::IntLit(42)),
                 alloc_hint: None,
+                slot: None,
             },
             MirStmt::Let {
                 name: "b".to_string(),
                 mutable: false,
                 init: mk_expr(MirExprKind::FloatLit(3.14)),
                 alloc_hint: None,
+                slot: None,
             },
             MirStmt::Let {
                 name: "c".to_string(),
                 mutable: false,
                 init: mk_expr(MirExprKind::BoolLit(true)),
                 alloc_hint: None,
+                slot: None,
             },
             MirStmt::Let {
                 name: "d".to_string(),
@@ -442,6 +447,7 @@ fn step5_nogc_allows_primitive_only_function() {
                     right: Box::new(mk_expr(MirExprKind::IntLit(20))),
                 }),
                 alloc_hint: None,
+                slot: None,
             },
         ]),
     ]);
@@ -459,6 +465,7 @@ fn step5_nogc_allows_non_escaping_string_arena() {
                 mutable: false,
                 init: mk_expr(MirExprKind::StringLit("local".to_string())),
                 alloc_hint: None,
+                slot: None,
             },
             // Only use s in a safe builtin call (print) — no escape.
             MirStmt::Expr(mk_call("print", vec![
@@ -480,6 +487,7 @@ fn step5_nogc_rejects_mutable_string_binding() {
                 mutable: true,
                 init: mk_expr(MirExprKind::StringLit("mutable".to_string())),
                 alloc_hint: None,
+                slot: None,
             },
         ]),
     ]);

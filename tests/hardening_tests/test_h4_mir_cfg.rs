@@ -33,8 +33,8 @@ fn test_cfg_types_are_exported() {
 fn test_cfg_straight_line_single_block_return() {
     let body = MirBody {
         stmts: vec![
-            MirStmt::Let { name: "x".into(), mutable: false, init: int_expr(1), alloc_hint: None },
-            MirStmt::Let { name: "y".into(), mutable: false, init: int_expr(2), alloc_hint: None },
+            MirStmt::Let { name: "x".into(), mutable: false, init: int_expr(1), alloc_hint: None, slot: None },
+            MirStmt::Let { name: "y".into(), mutable: false, init: int_expr(2), alloc_hint: None, slot: None },
         ],
         result: Some(Box::new(int_expr(3))),
     };
@@ -179,11 +179,11 @@ fn test_cfg_build_is_deterministic() {
             MirStmt::If {
                 cond: bool_expr(true),
                 then_body: MirBody {
-                    stmts: vec![MirStmt::Let { name: "a".into(), mutable: false, init: int_expr(1), alloc_hint: None }],
+                    stmts: vec![MirStmt::Let { name: "a".into(), mutable: false, init: int_expr(1), alloc_hint: None, slot: None }],
                     result: None,
                 },
                 else_body: Some(MirBody {
-                    stmts: vec![MirStmt::Let { name: "b".into(), mutable: false, init: int_expr(2), alloc_hint: None }],
+                    stmts: vec![MirStmt::Let { name: "b".into(), mutable: false, init: int_expr(2), alloc_hint: None, slot: None }],
                     result: None,
                 }),
             },

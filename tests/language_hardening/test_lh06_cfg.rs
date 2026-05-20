@@ -215,6 +215,7 @@ fn test_cfg_builder_let_binding() {
                 mutable: false,
                 init: MirExpr { kind: MirExprKind::IntLit(42) },
                 alloc_hint: None,
+                slot: None,
             },
         ],
         result: Some(Box::new(MirExpr { kind: MirExprKind::Var("x".into()) })),

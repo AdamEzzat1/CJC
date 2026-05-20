@@ -496,11 +496,12 @@ fn substitute_body(body: &MirBody, subst: &BTreeMap<String, String>) -> MirBody 
 
 fn substitute_stmt(stmt: &MirStmt, subst: &BTreeMap<String, String>) -> MirStmt {
     match stmt {
-        MirStmt::Let { name, mutable, init, alloc_hint } => MirStmt::Let {
+        MirStmt::Let { name, mutable, init, alloc_hint, slot } => MirStmt::Let {
             name: name.clone(),
             mutable: *mutable,
             init: substitute_expr(init, subst),
             alloc_hint: *alloc_hint,
+            slot: *slot,
         },
         MirStmt::Expr(e) => MirStmt::Expr(substitute_expr(e, subst)),
         MirStmt::If {

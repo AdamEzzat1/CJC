@@ -753,6 +753,7 @@ mod tests {
                         mutable: false,
                         init: int_expr(42),
                         alloc_hint: None,
+                        slot: None,
                     },
                     MirStmt::If {
                         cond: bool_expr(true),
@@ -873,6 +874,7 @@ mod tests {
                     mutable: false,
                     init: int_expr(42),
                     alloc_hint: None,
+                    slot: None,
                 }],
                 result: Some(Box::new(int_expr(42))),
             },

@@ -47,6 +47,7 @@ fn test_mirstmt_has_no_basic_block_variant() {
         mutable: false,
         init: MirExpr { kind: MirExprKind::IntLit(0) },
         alloc_hint: None,
+        slot: None,
     };
     let _expr_stmt = MirStmt::Expr(MirExpr { kind: MirExprKind::Void });
     let _if_stmt = MirStmt::If {

@@ -1310,6 +1310,7 @@ mod tests {
                 mutable: false,
                 init: add_expr(int_expr(2), int_expr(3)),
                 alloc_hint: None,
+                slot: None,
             }],
             result: Some(Box::new(var_expr("x"))),
         };
@@ -1339,6 +1340,7 @@ mod tests {
                     mutable: true,
                     init: int_expr(10),
                     alloc_hint: None,
+                    slot: None,
                 },
                 MirStmt::If {
                     cond: bool_expr(true),

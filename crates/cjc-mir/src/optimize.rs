@@ -1044,13 +1044,14 @@ fn hoist_invariants(loop_body: MirBody) -> (Vec<MirStmt>, MirBody) {
     let mut remaining = Vec::new();
 
     for stmt in loop_body.stmts {
-        if let MirStmt::Let { ref name, ref init, mutable, alloc_hint } = stmt {
+        if let MirStmt::Let { ref name, ref init, mutable, alloc_hint, slot } = stmt {
             if is_pure_expr(init) && !references_any(init, &modified_vars) {
                 hoisted.push(MirStmt::Let {
                     name: name.clone(),
                     mutable,
                     init: init.clone(),
                     alloc_hint,
+                    slot,
                 });
                 continue;
             }
@@ -1272,6 +1273,7 @@ mod tests {
                     mutable: false,
                     init: mk_int(42),
                     alloc_hint: None,
+                    slot: None,
                 },
                 MirStmt::Expr(mk_expr(MirExprKind::Call {
                     callee: Box::new(mk_expr(MirExprKind::Var("print".to_string()))),
@@ -1295,6 +1297,7 @@ mod tests {
                     mutable: false,
                     init: mk_int(42),
                     alloc_hint: None,
+                    slot: None,
                 },
             ],
             result: Some(Box::new(mk_expr(MirExprKind::Var("x".to_string())))),
@@ -1366,6 +1369,7 @@ mod tests {
                     mutable: false,
                     init: mk_binary(BinOp::Add, mk_int(2), mk_int(3)),
                     alloc_hint: None,
+                    slot: None,
                 },
             ],
             Some(mk_expr(MirExprKind::Var("x".to_string()))),
@@ -1459,24 +1463,28 @@ mod tests {
                     mutable: false,
                     init: mk_int(10),
                     alloc_hint: None,
+                    slot: None,
                 },
                 MirStmt::Let {
                     name: "b".to_string(),
                     mutable: false,
                     init: mk_int(20),
                     alloc_hint: None,
+                    slot: None,
                 },
                 MirStmt::Let {
                     name: "x".to_string(),
                     mutable: false,
                     init: mk_binary(BinOp::Add, mk_var("a"), mk_var("b")),
                     alloc_hint: None,
+                    slot: None,
                 },
                 MirStmt::Let {
                     name: "y".to_string(),
                     mutable: false,
                     init: mk_binary(BinOp::Add, mk_var("a"), mk_var("b")),
                     alloc_hint: None,
+                    slot: None,
                 },
             ],
             result: Some(Box::new(mk_var("y"))),
@@ -1510,12 +1518,14 @@ mod tests {
                             mutable: false,
                             init: mk_binary(BinOp::Add, mk_int(1), mk_int(2)),
                             alloc_hint: None,
+                            slot: None,
                         },
                         MirStmt::Let {
                             name: "x".to_string(),
                             mutable: false,
                             init: mk_binary(BinOp::Add, mk_var("inv"), mk_var("i")),
                             alloc_hint: None,
+                            slot: None,
                         },
                         MirStmt::Expr(mk_expr(MirExprKind::Assign {
                             target: Box::new(mk_var("i")),
@@ -1565,6 +1575,7 @@ mod tests {
                             mutable: false,
                             init: mk_binary(BinOp::Mul, mk_var("i"), mk_int(2)),
                             alloc_hint: None,
+                            slot: None,
                         },
                     ],
                     result: None,
@@ -1598,18 +1609,21 @@ mod tests {
                     mutable: false,
                     init: mk_int(42),
                     alloc_hint: None,
+                    slot: None,
                 },
                 MirStmt::Let {
                     name: "x".to_string(),
                     mutable: false,
                     init: mk_binary(BinOp::Mul, mk_var("y"), mk_int(1)),
                     alloc_hint: None,
+                    slot: None,
                 },
                 MirStmt::Let {
                     name: "z".to_string(),
                     mutable: false,
                     init: mk_binary(BinOp::Add, mk_var("y"), mk_int(0)),
                     alloc_hint: None,
+                    slot: None,
                 },
             ],
             Some(mk_binary(BinOp::Add, mk_var("x"), mk_var("z"))),

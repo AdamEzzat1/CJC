@@ -896,6 +896,7 @@ mod tests {
                     mutable: true,
                     init: int_expr(0),
                     alloc_hint: None,
+                    slot: None,
                 },
                 MirStmt::If {
                     cond: bool_expr(true),
@@ -928,6 +929,7 @@ mod tests {
                     mutable: true,
                     init: int_expr(0),
                     alloc_hint: None,
+                    slot: None,
                 },
                 MirStmt::While {
                     cond: bool_expr(true),
@@ -1058,6 +1060,7 @@ mod tests {
                     mutable: true,
                     init: int_expr(0),
                     alloc_hint: None,
+                    slot: None,
                 },
                 MirStmt::If {
                     cond: bool_expr(true),

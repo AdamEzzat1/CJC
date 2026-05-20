@@ -254,6 +254,30 @@ pub struct MirExecutor {
     /// rule about iteration order, even though iteration order isn't
     /// observable for a cache used only via `get`.
     call_cache: BTreeMap<String, CallDispatch>,
+    /// Tier-0 perf (T0-b Stage 3): flat call frame for slot-resolved
+    /// local bindings.
+    ///
+    /// Each function whose `MirFunction.local_count > 0` reserves a
+    /// contiguous span of `local_count` slots in this vector on entry,
+    /// indexed by `frame[frame_stack.last() + slot]`. The frame grows
+    /// monotonically as calls nest and shrinks on return / unwind.
+    /// Functions with `local_count == 0` (e.g. `__main`, lambda-lifted
+    /// closure bodies, match arm bodies in Stage 2) do NOT push a
+    /// frame; their lets and var-references route through the
+    /// `scopes` name-keyed fallback.
+    ///
+    /// This is the actual perf payoff for Tier-0: `frame[base+slot]`
+    /// is a single indexed read vs `BTreeMap::get(name)` walking the
+    /// `scopes` chain.
+    frame: Vec<Value>,
+    /// Tier-0 perf (Stage 3): saved `frame.len()` per active call.
+    ///
+    /// Push on function entry (`call_function`), pop on exit. The
+    /// current frame's base is `frame_stack.last().copied().unwrap_or(0)`.
+    /// On any control-flow exit (return, error, unwind) we truncate
+    /// `frame` back to the popped base, so half-executed frames don't
+    /// leak data into subsequent calls.
+    frame_stack: Vec<usize>,
 }
 
 impl MirExecutor {
@@ -282,6 +306,46 @@ impl MirExecutor {
             memo_cache: BTreeMap::new(),
             libraries_enabled: std::collections::BTreeSet::new(),
             call_cache: BTreeMap::new(),
+            frame: Vec::new(),
+            frame_stack: Vec::new(),
+        }
+    }
+
+    // -- Tier-0 perf (Stage 3) call-frame helpers --------------------------
+
+    /// Current frame base — index in `self.frame` where the active
+    /// function's slots begin. Returns 0 if no frame is active (we're at
+    /// the top level / inside `__main`).
+    #[inline(always)]
+    fn frame_base(&self) -> usize {
+        self.frame_stack.last().copied().unwrap_or(0)
+    }
+
+    /// Read slot-resolved local at index `slot` in the current frame.
+    /// Returns `None` if no frame is active or `slot` is out of range
+    /// (defensive — should never happen given the lowering invariants).
+    #[inline(always)]
+    fn frame_get(&self, slot: u32) -> Option<&Value> {
+        if self.frame_stack.is_empty() {
+            return None;
+        }
+        let idx = self.frame_base() + slot as usize;
+        self.frame.get(idx)
+    }
+
+    /// Write slot-resolved local. Returns true if the write hit the frame
+    /// (`frame_stack` non-empty and `slot` in range), false otherwise.
+    #[inline(always)]
+    fn frame_set(&mut self, slot: u32, val: Value) -> bool {
+        if self.frame_stack.is_empty() {
+            return false;
+        }
+        let idx = self.frame_base() + slot as usize;
+        if idx < self.frame.len() {
+            self.frame[idx] = val;
+            true
+        } else {
+            false
         }
     }
 
@@ -438,12 +502,27 @@ impl MirExecutor {
 
     fn exec_stmt(&mut self, stmt: &MirStmt) -> MirExecResult {
         match stmt {
-            MirStmt::Let { name, init, alloc_hint, .. } => {
+            MirStmt::Let { name, init, alloc_hint, slot, .. } => {
                 let val = self.eval_expr(init)?;
                 // Track arena-classified allocations for diagnostics.
                 if let Some(cjc_mir::AllocHint::Arena) = alloc_hint {
                     self.arena_alloc_count += 1;
                 }
+                // Tier-0 perf (Stage 3): write to the frame slot when the
+                // lowering assigned one AND a frame is active. The frame
+                // write is the fast-path target for the body's
+                // `VarLocal { slot, .. }` reads.
+                if let Some(s) = slot {
+                    self.frame_set(*s, val.clone());
+                }
+                // ALWAYS also `self.define(name, val)` for now:
+                //   1. Closure captures address outer locals by name.
+                //   2. Match arm bodies may reference outer-scope locals
+                //      by name (Stage 2 disabled slot resolution there).
+                //   3. The `Var(name)` fallback path (top-level, pattern
+                //      bindings, closure bodies) needs the name binding.
+                // Stage 5 will drop the name binding once every var
+                // reference is slot-indexed.
                 self.define(name, val);
                 Ok(Value::Void)
             }
@@ -614,7 +693,16 @@ impl MirExecutor {
                 }
                 Err(MirExecError::Runtime(format!("undefined variable `{name}`")))
             }
-            MirExprKind::VarLocal { name, .. } => {
+            MirExprKind::VarLocal { name, slot } => {
+                // Tier-0 perf (Stage 3): frame fast-path. `frame_get`
+                // returns `None` when no frame is active (Stage 2
+                // structural compat) -- we then fall back to the
+                // scope-chain lookup just like Var. The fast path is a
+                // single indexed read; the fallback is the slow
+                // BTreeMap walk we're trying to avoid.
+                if let Some(v) = self.frame_get(*slot) {
+                    return Ok(v.clone());
+                }
                 if let Some(v) = self.lookup(name).cloned() {
                     return Ok(v);
                 }
@@ -3856,8 +3944,37 @@ impl MirExecutor {
 
             self.push_scope();
             self.arena_stack.push(cjc_runtime::ArenaStore::new());
+
+            // Tier-0 perf (Stage 3): if this function uses slot-resolved
+            // locals (`local_count > 0`), reserve a span in the flat frame
+            // for them. The frame base is the current `frame.len()` BEFORE
+            // the resize, so nested calls don't overlap.
+            //
+            // `pushed_frame` records whether THIS iteration pushed, so the
+            // exit paths below pop exactly what was pushed (tail-call
+            // trampolines may switch to a function with different
+            // `local_count`).
+            let pushed_frame = func.local_count > 0;
+            let frame_base = self.frame.len();
+            if pushed_frame {
+                self.frame_stack.push(frame_base);
+                self.frame.resize(
+                    frame_base + func.local_count as usize,
+                    Value::Void,
+                );
+            }
+
             // Bind parameters: use provided args, then fall back to defaults.
             // Variadic params collect remaining args into an array.
+            //
+            // Stage 3: when `pushed_frame`, also write the binding to
+            // `frame[base + i]` so the body's `VarLocal { slot: i, .. }`
+            // reads hit the fast path. We still call `self.define(...)`
+            // because the body may also contain plain `Var(name)`
+            // references (e.g. inside closure bodies / match arms that
+            // ran with slot resolution disabled). Maintaining both views
+            // is the structural-compat insurance until Stage 5 removes
+            // the name fallback.
             for (i, param) in func.params.iter().enumerate() {
                 let val = if param.is_variadic {
                     // Pack all remaining args into a deterministic array.
@@ -3872,6 +3989,11 @@ impl MirExecutor {
                         "missing required argument `{}`", param.name
                     )));
                 };
+                if pushed_frame {
+                    // Params occupy slots 0..n_params in declaration order
+                    // -- matches `HirToMir::enter_function` invariant.
+                    self.frame[frame_base + i] = val.clone();
+                }
                 self.define(&param.name, val);
             }
 
@@ -3888,6 +4010,13 @@ impl MirExecutor {
                         arena.reset();
                     }
                     self.pop_scope();
+                    // Stage 3: also unwind this iteration's frame. The
+                    // next loop iteration's func may have a different
+                    // local_count, and it will push fresh.
+                    if pushed_frame {
+                        self.frame_stack.pop();
+                        self.frame.truncate(frame_base);
+                    }
                     self.current_fn = prev_fn;
                     current_name = tco_name;
                     current_args = tco_args;
@@ -3896,6 +4025,10 @@ impl MirExecutor {
                 Err(e) => {
                     self.arena_stack.pop();
                     self.pop_scope();
+                    if pushed_frame {
+                        self.frame_stack.pop();
+                        self.frame.truncate(frame_base);
+                    }
                     self.current_fn = prev_fn;
                     return Err(e);
                 }
@@ -3903,6 +4036,10 @@ impl MirExecutor {
 
             self.arena_stack.pop();
             self.pop_scope();
+            if pushed_frame {
+                self.frame_stack.pop();
+                self.frame.truncate(frame_base);
+            }
             self.current_fn = prev_fn;
 
             // --- Decorator: @trace — log exit ---
@@ -4043,10 +4180,13 @@ impl MirExecutor {
 
     fn exec_assign(&mut self, target: &MirExpr, val: Value) -> Result<(), MirExecError> {
         match &target.kind {
-            // Tier-0 perf (T0-b Stage 2): assignment to a slot-resolved
-            // local routes through the same `assign()` path as Var. Stage
-            // 3 will switch this to `frame[slot] = val`.
-            MirExprKind::Var(name) | MirExprKind::VarLocal { name, .. } => {
+            // Tier-0 perf (T0-b Stage 3): assignment to a slot-resolved
+            // local writes the frame slot AND updates the name binding
+            // (the latter keeps closure-capture / name-fallback paths in
+            // sync until Stage 5 retires `Var(name)` entirely).
+            MirExprKind::Var(name) => self.assign(name, val),
+            MirExprKind::VarLocal { name, slot } => {
+                self.frame_set(*slot, val.clone());
                 self.assign(name, val)
             }
             MirExprKind::Field { object, name } => {
@@ -5071,6 +5211,292 @@ mod tests {
         };
         let (_, executor) = run_program_with_executor(&program, 0).unwrap();
         assert_eq!(executor.output, vec!["hello world"]);
+    }
+
+    // -----------------------------------------------------------------
+    // Tier-0 perf (T0-b Stage 3) frame fast-path tests
+    // -----------------------------------------------------------------
+    //
+    // These tests pin the runtime contracts for the slot-resolved
+    // frame: parameters land in slots 0..n, lets land at slot_counter,
+    // VarLocal reads see the frame, and nested calls don't collide.
+
+    /// Helper: build a user-defined function `fn name(params...) {
+    /// body }`, plus a `main` that calls it and returns the result.
+    fn fn_calling_main(callee: Decl, call_args: Vec<Expr>) -> Program {
+        Program {
+            declarations: vec![
+                callee.clone(),
+                make_fn_decl(
+                    "main",
+                    vec![],
+                    make_block(
+                        vec![],
+                        Some(call(
+                            ident_expr(
+                                if let DeclKind::Fn(f) = &callee.kind {
+                                    &f.name.name
+                                } else {
+                                    panic!("expected Fn")
+                                },
+                            ),
+                            call_args,
+                        )),
+                    ),
+                ),
+            ],
+        }
+    }
+
+    #[test]
+    fn t0b_stage3_params_route_through_frame() {
+        // fn add3(a, b, c) { a + b + c }
+        // main: add3(10, 20, 30) -> 60
+        let add3 = make_fn_decl(
+            "add3",
+            vec!["a", "b", "c"],
+            make_block(
+                vec![],
+                Some(binary(
+                    BinOp::Add,
+                    binary(BinOp::Add, ident_expr("a"), ident_expr("b")),
+                    ident_expr("c"),
+                )),
+            ),
+        );
+        let program = fn_calling_main(
+            add3,
+            vec![int_expr(10), int_expr(20), int_expr(30)],
+        );
+        let result = run_program(&program, 0).unwrap();
+        assert!(matches!(result, Value::Int(60)));
+    }
+
+    #[test]
+    fn t0b_stage3_let_writes_frame_slot() {
+        // fn compute(x) { let y = x + 1; let z = y * 2; z }
+        // main: compute(5) -> 12
+        let compute = make_fn_decl(
+            "compute",
+            vec!["x"],
+            make_block(
+                vec![
+                    let_stmt_ast("y", binary(BinOp::Add, ident_expr("x"), int_expr(1))),
+                    let_stmt_ast("z", binary(BinOp::Mul, ident_expr("y"), int_expr(2))),
+                ],
+                Some(ident_expr("z")),
+            ),
+        );
+        let program = fn_calling_main(compute, vec![int_expr(5)]);
+        let result = run_program(&program, 0).unwrap();
+        assert!(matches!(result, Value::Int(12)));
+    }
+
+    #[test]
+    fn t0b_stage3_shadowing_in_let_rhs_reads_outer() {
+        // fn f(x) { let x = x + 100; x }   // RHS x is outer (param)
+        // main: f(7) -> 107
+        let f = make_fn_decl(
+            "f",
+            vec!["x"],
+            make_block(
+                vec![let_stmt_ast(
+                    "x",
+                    binary(BinOp::Add, ident_expr("x"), int_expr(100)),
+                )],
+                Some(ident_expr("x")),
+            ),
+        );
+        let program = fn_calling_main(f, vec![int_expr(7)]);
+        let result = run_program(&program, 0).unwrap();
+        assert!(matches!(result, Value::Int(107)));
+    }
+
+    #[test]
+    fn t0b_stage3_nested_calls_dont_collide_in_frame() {
+        // fn inner(a) { a + 1 }
+        // fn outer(x) { inner(x) + inner(x + 10) }
+        // main: outer(1) -> (1+1) + (11+1) = 2 + 12 = 14
+        //
+        // Verifies that `inner`'s frame base differs from `outer`'s,
+        // so the param slot 0 in `inner` doesn't overwrite `outer`'s.
+        let inner = make_fn_decl(
+            "inner",
+            vec!["a"],
+            make_block(
+                vec![],
+                Some(binary(BinOp::Add, ident_expr("a"), int_expr(1))),
+            ),
+        );
+        let outer = make_fn_decl(
+            "outer",
+            vec!["x"],
+            make_block(
+                vec![],
+                Some(binary(
+                    BinOp::Add,
+                    call(ident_expr("inner"), vec![ident_expr("x")]),
+                    call(
+                        ident_expr("inner"),
+                        vec![binary(BinOp::Add, ident_expr("x"), int_expr(10))],
+                    ),
+                )),
+            ),
+        );
+        let main_decl = make_fn_decl(
+            "main",
+            vec![],
+            make_block(vec![], Some(call(ident_expr("outer"), vec![int_expr(1)]))),
+        );
+        let program = Program {
+            declarations: vec![inner, outer, main_decl],
+        };
+        let result = run_program(&program, 0).unwrap();
+        assert!(matches!(result, Value::Int(14)));
+    }
+
+    #[test]
+    fn t0b_stage3_recursive_call_grows_frame() {
+        // fn fact(n) { if n <= 1 { 1 } else { n * fact(n - 1) } }
+        // main: fact(5) -> 120
+        //
+        // Every recursive call pushes a fresh `n` slot onto the frame.
+        // Slot bases must increment so each recursion level sees its
+        // own `n`. (Note: this is NOT a tail call -- the multiplication
+        // wraps the recursion -- so the TCO trampoline doesn't fire.)
+        let fact = make_fn_decl(
+            "fact",
+            vec!["n"],
+            make_block(
+                vec![Stmt {
+                    kind: StmtKind::If(IfStmt {
+                        condition: binary(BinOp::Le, ident_expr("n"), int_expr(1)),
+                        then_block: make_block(
+                            vec![return_stmt(Some(int_expr(1)))],
+                            None,
+                        ),
+                        else_branch: None,
+                    }),
+                    span: span(),
+                }],
+                Some(binary(
+                    BinOp::Mul,
+                    ident_expr("n"),
+                    call(
+                        ident_expr("fact"),
+                        vec![binary(BinOp::Sub, ident_expr("n"), int_expr(1))],
+                    ),
+                )),
+            ),
+        );
+        let program = fn_calling_main(fact, vec![int_expr(5)]);
+        let result = run_program(&program, 0).unwrap();
+        assert!(matches!(result, Value::Int(120)));
+    }
+
+    #[test]
+    fn t0b_stage3_tail_call_unwinds_frame() {
+        // fn count_down(n) { if n == 0 { 0 } else { return count_down(n - 1); } }
+        // main: count_down(100) -> 0
+        //
+        // Tail call: the TCO trampoline should reset the frame on each
+        // iteration so frame doesn't grow unbounded for large `n`.
+        let count_down = make_fn_decl(
+            "count_down",
+            vec!["n"],
+            make_block(
+                vec![Stmt {
+                    kind: StmtKind::If(IfStmt {
+                        condition: binary(BinOp::Eq, ident_expr("n"), int_expr(0)),
+                        then_block: make_block(
+                            vec![return_stmt(Some(int_expr(0)))],
+                            None,
+                        ),
+                        else_branch: None,
+                    }),
+                    span: span(),
+                }],
+                Some(call(
+                    ident_expr("count_down"),
+                    vec![binary(BinOp::Sub, ident_expr("n"), int_expr(1))],
+                )),
+            ),
+        );
+        let program = fn_calling_main(count_down, vec![int_expr(100)]);
+        let (result, executor) = run_program_with_executor(&program, 0).unwrap();
+        assert!(matches!(result, Value::Int(0)));
+        // Critical: the frame must be fully unwound on return -- if
+        // TCO doesn't pop, this stack-of-stacks would have grown to
+        // hundreds of usize entries.
+        assert!(
+            executor.frame.is_empty(),
+            "frame should be empty after the program returns, got len={}",
+            executor.frame.len()
+        );
+        assert!(
+            executor.frame_stack.is_empty(),
+            "frame_stack should be empty after the program returns, got len={}",
+            executor.frame_stack.len()
+        );
+    }
+
+    #[test]
+    fn t0b_stage3_mutable_assign_writes_frame() {
+        // fn f(x) { let mut y = x; y = y + 100; y }
+        // main: f(7) -> 107
+        // Tests that `Assign { target: VarLocal{slot}, ... }` writes
+        // through to the frame slot, not just the name binding.
+        let f = make_fn_decl(
+            "f",
+            vec!["x"],
+            make_block(
+                vec![
+                    let_mut_stmt("y", ident_expr("x")),
+                    expr_stmt(Expr {
+                        kind: ExprKind::Assign {
+                            target: Box::new(ident_expr("y")),
+                            value: Box::new(binary(
+                                BinOp::Add,
+                                ident_expr("y"),
+                                int_expr(100),
+                            )),
+                        },
+                        span: span(),
+                    }),
+                ],
+                Some(ident_expr("y")),
+            ),
+        );
+        let program = fn_calling_main(f, vec![int_expr(7)]);
+        let result = run_program(&program, 0).unwrap();
+        assert!(matches!(result, Value::Int(107)));
+    }
+
+    #[test]
+    fn t0b_stage3_main_does_not_push_frame() {
+        // __main has local_count=0 in Stage 2/3 (not slot-resolved).
+        // Top-level let should NOT push a frame.
+        let program = Program {
+            declarations: vec![make_fn_decl(
+                "main",
+                vec![],
+                make_block(
+                    vec![let_stmt_ast("x", int_expr(42))],
+                    Some(ident_expr("x")),
+                ),
+            )],
+        };
+        let (result, executor) = run_program_with_executor(&program, 0).unwrap();
+        assert!(matches!(result, Value::Int(42)));
+        // frame_stack remains empty because no user fn was called.
+        // (`main` is wrapped through `__main` but neither is slot-
+        // resolved in Stage 3.) The frame may have grown internally
+        // and shrunk back to empty -- we check the resting state.
+        assert_eq!(
+            executor.frame_stack.len(),
+            0,
+            "frame_stack should be empty at end of execution"
+        );
     }
 }
 
