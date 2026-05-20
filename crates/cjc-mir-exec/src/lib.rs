@@ -51,7 +51,11 @@ use cjc_vizor::dispatch as vizor_dispatch;
 ///
 /// Mirrors [`cjc_eval::EvalError`] for parity, with additional variants for
 /// compile-time type errors ([`MirExecError::TypeErrors`]) and tail-call
-/// optimization signaling ([`MirExecError::TailCall`]).
+/// optimization signaling ([`MirExecError::TailCall`]). Both executors
+/// share the [`Coded`](Self::Coded) variant for typed errors carrying a
+/// stable [`cjc_diag::ErrorCode`] -- this is required for parity tests
+/// to assert that the same input produces the same error code on both
+/// backends.
 #[derive(Debug)]
 pub enum MirExecError {
     /// A `return` statement was executed. The executor unwinds the call stack
@@ -61,8 +65,14 @@ pub enum MirExecError {
     Break,
     /// A `continue` statement -- caught by the innermost loop.
     Continue,
-    /// A runtime error with a human-readable message.
+    /// A runtime error with a human-readable message but no stable code.
+    /// Use [`MirExecError::Coded`] for new error sites when a matching
+    /// [`cjc_diag::ErrorCode`] exists.
     Runtime(String),
+    /// A runtime error carrying a stable typed code plus a human message.
+    /// Mirrors [`cjc_eval::EvalError::Coded`] for executor parity -- the
+    /// same input must produce the same `(code, msg)` on both backends.
+    Coded(cjc_diag::ErrorCode, String),
     /// An error propagated from the runtime crate.
     RuntimeError(cjc_runtime::RuntimeError),
     /// Compile-time type errors collected by [`type_check_program`].
@@ -87,6 +97,17 @@ impl fmt::Display for MirExecError {
             MirExecError::Break => write!(f, "break outside of loop"),
             MirExecError::Continue => write!(f, "continue outside of loop"),
             MirExecError::Runtime(msg) => write!(f, "runtime error: {msg}"),
+            MirExecError::Coded(code, msg) => {
+                write!(f, "runtime error [{}]: {}", code.code_str(), msg)?;
+                if code.explanation().is_some() {
+                    write!(
+                        f,
+                        "\nhint: for the full explanation: cjcl explain {}",
+                        code.code_str()
+                    )?;
+                }
+                Ok(())
+            }
             MirExecError::RuntimeError(e) => write!(f, "runtime error: {e}"),
             MirExecError::TypeErrors(errs) => {
                 write!(f, "{} compile error(s):\n{}", errs.len(), errs.join("\n"))
@@ -1099,7 +1120,10 @@ impl MirExecutor {
             BinOp::Mul => Ok(Value::Int(a.wrapping_mul(b))),
             BinOp::Div => {
                 if b == 0 {
-                    Err(MirExecError::Runtime("division by zero".to_string()))
+                    Err(MirExecError::Coded(
+                        cjc_diag::ErrorCode::E8002,
+                        "division by zero".to_string(),
+                    ))
                 } else {
                     Ok(Value::Int(a / b))
                 }
@@ -2833,9 +2857,14 @@ impl MirExecutor {
                 }
                 let idx = self.value_to_usize(&args[0])?;
                 if idx >= b.len() {
-                    return Err(MirExecError::Runtime(format!(
-                        "index {} out of bounds for ByteSlice of length {}", idx, b.len()
-                    )));
+                    return Err(MirExecError::Coded(
+                        cjc_diag::ErrorCode::E8001,
+                        format!(
+                            "index {} out of bounds for ByteSlice of length {}",
+                            idx,
+                            b.len()
+                        ),
+                    ));
                 }
                 Ok(Value::U8(b[idx]))
             }
@@ -3799,10 +3828,13 @@ impl MirExecutor {
                     if idx < elems.len() {
                         Ok(elems[idx].clone())
                     } else {
-                        Err(MirExecError::Runtime(format!(
-                            "tuple index {idx} out of bounds for tuple of length {}",
-                            elems.len()
-                        )))
+                        Err(MirExecError::Coded(
+                            cjc_diag::ErrorCode::E8001,
+                            format!(
+                                "tuple index {idx} out of bounds for tuple of length {}",
+                                elems.len()
+                            ),
+                        ))
                     }
                 } else {
                     Err(MirExecError::Runtime(format!(
@@ -3827,10 +3859,13 @@ impl MirExecutor {
             (Value::Array(arr), Value::Int(i)) => {
                 let i = *i as usize;
                 arr.get(i).cloned().ok_or_else(|| {
-                    MirExecError::Runtime(format!(
-                        "index {i} out of bounds for array of length {}",
-                        arr.len()
-                    ))
+                    MirExecError::Coded(
+                        cjc_diag::ErrorCode::E8001,
+                        format!(
+                            "index {i} out of bounds for array of length {}",
+                            arr.len()
+                        ),
+                    )
                 })
             }
             (Value::Tensor(t), Value::Int(i)) => {
@@ -3942,10 +3977,13 @@ impl MirExecutor {
                     match &mut obj_val {
                         Value::Array(arr) => {
                             if idx >= arr.len() {
-                                return Err(MirExecError::Runtime(format!(
-                                    "index {idx} out of bounds for array of length {}",
-                                    arr.len()
-                                )));
+                                return Err(MirExecError::Coded(
+                                    cjc_diag::ErrorCode::E8001,
+                                    format!(
+                                        "index {idx} out of bounds for array of length {}",
+                                        arr.len()
+                                    ),
+                                ));
                             }
                             Rc::make_mut(arr)[idx] = val;
                         }

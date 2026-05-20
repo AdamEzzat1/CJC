@@ -51,7 +51,10 @@ use cjc_vizor::dispatch as vizor_dispatch;
 ///
 /// Includes control-flow signals ([`EvalError::Return`], [`EvalError::Break`],
 /// [`EvalError::Continue`]) that are caught internally by function and loop
-/// boundaries, as well as genuine runtime failures ([`EvalError::Runtime`]).
+/// boundaries, as well as genuine runtime failures ([`EvalError::Runtime`]
+/// for legacy lossy-string errors, and [`EvalError::Coded`] for typed
+/// errors that carry a stable [`cjc_diag::ErrorCode`] for telemetry,
+/// pattern-matching, and pedagogy-hint auto-discovery).
 #[derive(Debug)]
 pub enum EvalError {
     /// A `return` statement was executed. The interpreter unwinds the call
@@ -64,8 +67,18 @@ pub enum EvalError {
     /// A `continue` statement was executed. Caught by the innermost loop.
     Continue,
 
-    /// A runtime error with a human-readable message.
+    /// A runtime error with a human-readable message but no stable code.
+    /// Use [`EvalError::Coded`] for new error sites when a matching
+    /// [`cjc_diag::ErrorCode`] exists -- it enables stable test assertions
+    /// and auto-attaches the pedagogy discovery hint on display.
     Runtime(String),
+
+    /// A runtime error carrying a stable typed code plus a human message.
+    /// On [`Display`], renders as `runtime error [EXXXX]: msg`, with an
+    /// auto-appended `hint: for the full explanation: cjcl explain EXXXX`
+    /// footer when the code has a written explanation. This is the
+    /// migration target for the lossy-string [`EvalError::Runtime`].
+    Coded(cjc_diag::ErrorCode, String),
 
     /// An error propagated from the runtime crate.
     RuntimeError(cjc_runtime::RuntimeError),
@@ -78,6 +91,17 @@ impl fmt::Display for EvalError {
             EvalError::Break => write!(f, "break outside of loop"),
             EvalError::Continue => write!(f, "continue outside of loop"),
             EvalError::Runtime(msg) => write!(f, "runtime error: {msg}"),
+            EvalError::Coded(code, msg) => {
+                write!(f, "runtime error [{}]: {}", code.code_str(), msg)?;
+                if code.explanation().is_some() {
+                    write!(
+                        f,
+                        "\nhint: for the full explanation: cjcl explain {}",
+                        code.code_str()
+                    )?;
+                }
+                Ok(())
+            }
             EvalError::RuntimeError(e) => write!(f, "runtime error: {e}"),
         }
     }
@@ -1419,7 +1443,10 @@ impl Interpreter {
             BinOp::Mul => Ok(Value::Int(a.wrapping_mul(b))),
             BinOp::Div => {
                 if b == 0 {
-                    Err(EvalError::Runtime("division by zero".to_string()))
+                    Err(EvalError::Coded(
+                        cjc_diag::ErrorCode::E8002,
+                        "division by zero".to_string(),
+                    ))
                 } else {
                     Ok(Value::Int(a / b))
                 }
@@ -3251,9 +3278,14 @@ impl Interpreter {
                 }
                 let idx = self.value_to_usize(&args[0])?;
                 if idx >= b.len() {
-                    return Err(EvalError::Runtime(format!(
-                        "index {} out of bounds for ByteSlice of length {}", idx, b.len()
-                    )));
+                    return Err(EvalError::Coded(
+                        cjc_diag::ErrorCode::E8001,
+                        format!(
+                            "index {} out of bounds for ByteSlice of length {}",
+                            idx,
+                            b.len()
+                        ),
+                    ));
                 }
                 Ok(Value::U8(b[idx]))
             }
@@ -4005,10 +4037,13 @@ impl Interpreter {
                     if idx < elems.len() {
                         Ok(elems[idx].clone())
                     } else {
-                        Err(EvalError::Runtime(format!(
-                            "tuple index {idx} out of bounds for tuple of length {}",
-                            elems.len()
-                        )))
+                        Err(EvalError::Coded(
+                            cjc_diag::ErrorCode::E8001,
+                            format!(
+                                "tuple index {idx} out of bounds for tuple of length {}",
+                                elems.len()
+                            ),
+                        ))
                     }
                 } else {
                     Err(EvalError::Runtime(format!(
@@ -4033,10 +4068,13 @@ impl Interpreter {
             (Value::Array(arr), Value::Int(i)) => {
                 let i = *i as usize;
                 arr.get(i).cloned().ok_or_else(|| {
-                    EvalError::Runtime(format!(
-                        "index {i} out of bounds for array of length {}",
-                        arr.len()
-                    ))
+                    EvalError::Coded(
+                        cjc_diag::ErrorCode::E8001,
+                        format!(
+                            "index {i} out of bounds for array of length {}",
+                            arr.len()
+                        ),
+                    )
                 })
             }
             (Value::Tensor(t), Value::Int(i)) => {
@@ -4141,10 +4179,13 @@ impl Interpreter {
                     match &mut obj_val {
                         Value::Array(arr) => {
                             if idx >= arr.len() {
-                                return Err(EvalError::Runtime(format!(
-                                    "index {idx} out of bounds for array of length {}",
-                                    arr.len()
-                                )));
+                                return Err(EvalError::Coded(
+                                    cjc_diag::ErrorCode::E8001,
+                                    format!(
+                                        "index {idx} out of bounds for array of length {}",
+                                        arr.len()
+                                    ),
+                                ));
                             }
                             Rc::make_mut(arr)[idx] = val;
                         }
