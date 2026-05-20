@@ -514,15 +514,34 @@ impl DiagnosticBuilder {
     /// If no custom message was set via [`message`](Self::message), the
     /// [`ErrorCode::message_template`] is used as the diagnostic message.
     /// Severity is always derived from [`ErrorCode::severity`].
+    ///
+    /// # Auto-attached pedagogy hint
+    ///
+    /// If [`self.code.explanation()`](ErrorCode::explanation) returns `Some`,
+    /// a one-line discovery hint pointing at `cjcl explain <code>` is
+    /// appended to [`Diagnostic::hints`] automatically. This links the
+    /// terse Rust-style diagnostic (this struct) to the long-form Elm-style
+    /// explanation, so users hitting a documented error see a breadcrumb
+    /// to the pedagogy layer without having to know the convention exists.
+    ///
+    /// Codes without a registered explanation get no extra hint — the
+    /// behaviour scales gracefully as pedagogy coverage grows.
     pub fn build(self) -> Diagnostic {
         let message = self.message.unwrap_or_else(|| self.code.message_template().to_string());
+        let mut hints = self.hints;
+        if self.code.explanation().is_some() {
+            hints.push(format!(
+                "for the full explanation: cjcl explain {}",
+                self.code.code_str()
+            ));
+        }
         Diagnostic {
             severity: self.code.severity(),
             code: self.code.code_str().to_string(),
             message,
             span: self.span,
             labels: self.labels,
-            hints: self.hints,
+            hints,
             fix_suggestions: self.fix_suggestions,
             filename: self.filename,
         }
@@ -890,14 +909,39 @@ impl DiagnosticBag {
     /// is non-zero), the diagnostic is silently dropped to prevent cascading
     /// error floods.
     ///
+    /// # Pedagogy hint auto-attachment
+    ///
+    /// Before pushing, `emit` idempotently appends a one-line discovery hint
+    /// (`for the full explanation: cjcl explain <code>`) when:
+    /// - the diagnostic's code parses to a known [`ErrorCode`],
+    /// - that code has a written long-form explanation
+    ///   ([`ErrorCode::explanation`] returns `Some`),
+    /// - and no hint with the canonical prefix is already present.
+    ///
+    /// This is the universal chokepoint that links the precise Rust-style
+    /// diagnostic to the Elm-style pedagogy layer, regardless of whether
+    /// the diagnostic was built via [`DiagnosticBuilder`] or constructed
+    /// directly via [`Diagnostic::error`] / [`Diagnostic::warning`].
+    ///
     /// # Arguments
     ///
     /// * `diag` — the diagnostic to emit.
-    pub fn emit(&mut self, diag: Diagnostic) {
+    pub fn emit(&mut self, mut diag: Diagnostic) {
         if diag.severity == Severity::Error && self.error_limit > 0 {
             let current_errors = self.error_count();
             if current_errors >= self.error_limit {
                 return; // suppress cascading errors beyond limit
+            }
+        }
+        const AUTO_HINT_PREFIX: &str = "for the full explanation:";
+        if !diag.hints.iter().any(|h| h.starts_with(AUTO_HINT_PREFIX)) {
+            if let Some(ec) = ErrorCode::from_str(&diag.code) {
+                if ec.explanation().is_some() {
+                    diag.hints.push(format!(
+                        "{} cjcl explain {}",
+                        AUTO_HINT_PREFIX, diag.code
+                    ));
+                }
             }
         }
         self.diagnostics.push(diag);
@@ -1249,6 +1293,165 @@ mod tests {
     fn test_builder_default_no_filename() {
         let diag = DiagnosticBuilder::new(ErrorCode::E1000, Span::new(0, 1)).build();
         assert!(diag.filename.is_none());
+    }
+
+    // ── Auto-attached pedagogy hint tests ───────────────────────────────
+
+    #[test]
+    fn test_builder_auto_attaches_explain_hint_for_documented() {
+        // E1003 has a written explanation; the builder must auto-append a
+        // discovery hint pointing at `cjcl explain E1003`.
+        let diag = DiagnosticBuilder::new(ErrorCode::E1003, Span::new(0, 1)).build();
+        assert_eq!(diag.hints.len(), 1, "expected 1 auto-attached hint");
+        assert!(
+            diag.hints[0].contains("cjcl explain E1003"),
+            "auto-hint should contain `cjcl explain E1003`, got: {}",
+            diag.hints[0]
+        );
+    }
+
+    #[test]
+    fn test_builder_skips_auto_hint_for_undocumented() {
+        // E1000 has no explanation yet; no auto-hint must be added.
+        let diag = DiagnosticBuilder::new(ErrorCode::E1000, Span::new(0, 1)).build();
+        assert!(
+            diag.hints.is_empty(),
+            "expected no hints for undocumented code, got: {:?}",
+            diag.hints
+        );
+    }
+
+    #[test]
+    fn test_builder_auto_hint_appends_after_user_hints() {
+        // User-supplied hints come first; auto-hint comes last so the
+        // specific user guidance is read before the generic discovery link.
+        let diag = DiagnosticBuilder::new(ErrorCode::E1003, Span::new(0, 1))
+            .hint("did you mean `x: i64`?")
+            .build();
+        assert_eq!(diag.hints.len(), 2);
+        assert_eq!(diag.hints[0], "did you mean `x: i64`?");
+        assert!(diag.hints[1].contains("cjcl explain E1003"));
+    }
+
+    #[test]
+    fn test_builder_auto_hint_warning_code() {
+        // W0001 is documented — warnings get the auto-hint just like errors.
+        let diag = DiagnosticBuilder::new(ErrorCode::W0001, Span::new(0, 1)).build();
+        assert_eq!(diag.hints.len(), 1);
+        assert!(diag.hints[0].contains("cjcl explain W0001"));
+    }
+
+    #[test]
+    fn test_builder_auto_hint_covers_all_documented_codes() {
+        // Drift defense: every code that .explanation() returns Some for
+        // must also receive the auto-hint through the builder.
+        for code in ErrorCode::ALL_CODES {
+            if code.explanation().is_some() {
+                let diag = DiagnosticBuilder::new(*code, Span::new(0, 1)).build();
+                assert!(
+                    diag.hints.iter().any(|h| h.contains("cjcl explain") && h.contains(code.code_str())),
+                    "{} has an explanation but did not get auto-hint",
+                    code
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_auto_hint_appears_in_rendered_output() {
+        // The hint must flow through to the user-facing rendered string.
+        let diag = DiagnosticBuilder::new(ErrorCode::E1003, Span::new(0, 5)).build();
+        let source = "fn foo(x) { }\n";
+        let renderer = DiagnosticRenderer::new(source, "test.cjcl");
+        let output = renderer.render(&diag);
+        assert!(
+            output.contains("cjcl explain E1003"),
+            "rendered output missing auto-hint:\n{}",
+            output
+        );
+        assert!(
+            output.contains("hint"),
+            "rendered output missing hint label:\n{}",
+            output
+        );
+    }
+
+    // ── DiagnosticBag::emit auto-hint tests (the universal chokepoint) ──
+
+    #[test]
+    fn test_emit_auto_attaches_hint_for_direct_error_constructor() {
+        // The critical path — most existing emit sites in the workspace use
+        // Diagnostic::error(...) (with a String code), not the typed Builder.
+        // emit() must add the hint regardless of construction path.
+        let mut bag = DiagnosticBag::new();
+        bag.emit(Diagnostic::error("E1003", "missing type", Span::new(0, 1)));
+        assert_eq!(bag.diagnostics.len(), 1);
+        let hints = &bag.diagnostics[0].hints;
+        assert_eq!(hints.len(), 1, "expected auto-hint to be appended");
+        assert!(hints[0].contains("cjcl explain E1003"));
+    }
+
+    #[test]
+    fn test_emit_auto_attaches_hint_for_direct_warning_constructor() {
+        let mut bag = DiagnosticBag::new();
+        bag.emit(Diagnostic::warning("W0001", "unused var", Span::new(0, 1)));
+        assert_eq!(bag.diagnostics.len(), 1);
+        let hints = &bag.diagnostics[0].hints;
+        assert_eq!(hints.len(), 1);
+        assert!(hints[0].contains("cjcl explain W0001"));
+    }
+
+    #[test]
+    fn test_emit_skips_hint_for_undocumented_code() {
+        // E1000 has no explanation yet; emit must not add a hint.
+        let mut bag = DiagnosticBag::new();
+        bag.emit(Diagnostic::error("E1000", "unexpected", Span::new(0, 1)));
+        assert!(bag.diagnostics[0].hints.is_empty());
+    }
+
+    #[test]
+    fn test_emit_does_not_duplicate_when_builder_already_added_hint() {
+        // The Builder path also adds the auto-hint; emit must not duplicate.
+        let mut bag = DiagnosticBag::new();
+        bag.emit_coded(DiagnosticBuilder::new(ErrorCode::E4001, Span::new(0, 5)));
+        let hints = &bag.diagnostics[0].hints;
+        let auto_count = hints
+            .iter()
+            .filter(|h| h.starts_with("for the full explanation:"))
+            .count();
+        assert_eq!(auto_count, 1, "auto-hint duplicated, hints = {:?}", hints);
+    }
+
+    #[test]
+    fn test_emit_skips_hint_for_unknown_code_string() {
+        // Robustness: emit must not crash on codes that don't parse.
+        let mut bag = DiagnosticBag::new();
+        bag.emit(Diagnostic::error("NOT_A_CODE", "junk", Span::new(0, 1)));
+        bag.emit(Diagnostic::error("", "empty code", Span::new(0, 1)));
+        assert!(bag.diagnostics[0].hints.is_empty());
+        assert!(bag.diagnostics[1].hints.is_empty());
+    }
+
+    #[test]
+    fn test_emit_preserves_user_hint_order_and_appends_auto_hint() {
+        // User hints are read first; the auto-hint appears last.
+        let mut bag = DiagnosticBag::new();
+        let diag = Diagnostic::error("E8001", "out of bounds", Span::new(0, 1))
+            .with_hint("check the loop bound");
+        bag.emit(diag);
+        let hints = &bag.diagnostics[0].hints;
+        assert_eq!(hints.len(), 2);
+        assert_eq!(hints[0], "check the loop bound");
+        assert!(hints[1].contains("cjcl explain E8001"));
+    }
+
+    #[test]
+    fn test_emit_respects_error_limit_with_auto_hint() {
+        // The error_limit short-circuit must run before any hint manipulation.
+        let mut bag = DiagnosticBag { diagnostics: Vec::new(), error_limit: 1 };
+        bag.emit(Diagnostic::error("E1003", "first", Span::new(0, 1)));
+        bag.emit(Diagnostic::error("E1003", "dropped", Span::new(0, 1)));
+        assert_eq!(bag.diagnostics.len(), 1, "second emit must be dropped");
     }
 
     // ── SourceMap tests ──────────────────────────────────────────────
