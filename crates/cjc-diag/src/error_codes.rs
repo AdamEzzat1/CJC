@@ -664,13 +664,26 @@ impl ErrorCode {
             ErrorCode::E2015 => Some(include_str!("../explanations/E2015.md")),
             // Effect errors (E4xxx) -- CJC-Lang distinctive
             ErrorCode::E4001 => Some(include_str!("../explanations/E4001.md")),
+            ErrorCode::E4002 => Some(include_str!("../explanations/E4002.md")),
+            ErrorCode::E4003 => Some(include_str!("../explanations/E4003.md")),
+            ErrorCode::E4004 => Some(include_str!("../explanations/E4004.md")),
+            ErrorCode::E4005 => Some(include_str!("../explanations/E4005.md")),
+            ErrorCode::E4006 => Some(include_str!("../explanations/E4006.md")),
+            // Name resolution (E5xxx)
+            ErrorCode::E5001 => Some(include_str!("../explanations/E5001.md")),
+            ErrorCode::E5002 => Some(include_str!("../explanations/E5002.md")),
+            ErrorCode::E5003 => Some(include_str!("../explanations/E5003.md")),
+            ErrorCode::E5004 => Some(include_str!("../explanations/E5004.md")),
             // Runtime errors (E8xxx)
             ErrorCode::E8001 => Some(include_str!("../explanations/E8001.md")),
             ErrorCode::E8002 => Some(include_str!("../explanations/E8002.md")),
             ErrorCode::E8004 => Some(include_str!("../explanations/E8004.md")),
             // Warnings (W0xxx)
             ErrorCode::W0001 => Some(include_str!("../explanations/W0001.md")),
+            ErrorCode::W0002 => Some(include_str!("../explanations/W0002.md")),
             ErrorCode::W0003 => Some(include_str!("../explanations/W0003.md")),
+            ErrorCode::W0004 => Some(include_str!("../explanations/W0004.md")),
+            ErrorCode::W0005 => Some(include_str!("../explanations/W0005.md")),
             _ => None,
         }
     }
@@ -870,13 +883,26 @@ mod tests {
         assert!(ErrorCode::E2015.explanation().is_some());
         // Effect (CJC-distinctive):
         assert!(ErrorCode::E4001.explanation().is_some());
+        assert!(ErrorCode::E4002.explanation().is_some());
+        assert!(ErrorCode::E4003.explanation().is_some());
+        assert!(ErrorCode::E4004.explanation().is_some());
+        assert!(ErrorCode::E4005.explanation().is_some());
+        assert!(ErrorCode::E4006.explanation().is_some());
+        // Name resolution:
+        assert!(ErrorCode::E5001.explanation().is_some());
+        assert!(ErrorCode::E5002.explanation().is_some());
+        assert!(ErrorCode::E5003.explanation().is_some());
+        assert!(ErrorCode::E5004.explanation().is_some());
         // Runtime:
         assert!(ErrorCode::E8001.explanation().is_some());
         assert!(ErrorCode::E8002.explanation().is_some());
         assert!(ErrorCode::E8004.explanation().is_some());
         // Warnings:
         assert!(ErrorCode::W0001.explanation().is_some());
+        assert!(ErrorCode::W0002.explanation().is_some());
         assert!(ErrorCode::W0003.explanation().is_some());
+        assert!(ErrorCode::W0004.explanation().is_some());
+        assert!(ErrorCode::W0005.explanation().is_some());
     }
 
     #[test]
@@ -884,10 +910,11 @@ mod tests {
         // Any code not in the documented set must return None. Pick codes
         // from categories that haven't been documented yet.
         assert!(ErrorCode::E3001.explanation().is_none()); // borrow
-        assert!(ErrorCode::E5001.explanation().is_none()); // name res
         assert!(ErrorCode::E6001.explanation().is_none()); // generics
         assert!(ErrorCode::E7001.explanation().is_none()); // MIR
-        assert!(ErrorCode::W0005.explanation().is_none()); // warning
+        assert!(ErrorCode::E8003.explanation().is_none()); // runtime stack overflow
+        assert!(ErrorCode::E9001.explanation().is_none()); // module
+        assert!(ErrorCode::E0601.explanation().is_none()); // snap
     }
 
     #[test]

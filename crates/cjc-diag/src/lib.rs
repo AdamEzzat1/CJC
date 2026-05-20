@@ -1316,9 +1316,9 @@ mod tests {
 
     #[test]
     fn test_builder_skips_auto_hint_for_undocumented() {
-        // E5001 (unresolved name) is in the taxonomy but has no explanation
-        // yet -- the builder must NOT add an auto-hint.
-        let diag = DiagnosticBuilder::new(ErrorCode::E5001, Span::new(0, 1)).build();
+        // E3001 (move of borrowed value) is in the taxonomy but has no
+        // explanation yet -- the builder must NOT add an auto-hint.
+        let diag = DiagnosticBuilder::new(ErrorCode::E3001, Span::new(0, 1)).build();
         assert!(
             diag.hints.is_empty(),
             "expected no hints for undocumented code, got: {:?}",
@@ -1408,10 +1408,10 @@ mod tests {
 
     #[test]
     fn test_emit_skips_hint_for_undocumented_code() {
-        // E5001 (unresolved name) is in the taxonomy but has no explanation
-        // yet -- emit must NOT add a hint.
+        // E3001 (move of borrowed value) is in the taxonomy but has no
+        // explanation yet -- emit must NOT add a hint.
         let mut bag = DiagnosticBag::new();
-        bag.emit(Diagnostic::error("E5001", "unresolved", Span::new(0, 1)));
+        bag.emit(Diagnostic::error("E3001", "borrow", Span::new(0, 1)));
         assert!(bag.diagnostics[0].hints.is_empty());
     }
 
