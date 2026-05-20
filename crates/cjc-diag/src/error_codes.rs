@@ -637,6 +637,15 @@ impl ErrorCode {
             ErrorCode::E1002 => Some(include_str!("../explanations/E1002.md")),
             ErrorCode::E1003 => Some(include_str!("../explanations/E1003.md")),
             ErrorCode::E1004 => Some(include_str!("../explanations/E1004.md")),
+            ErrorCode::E1005 => Some(include_str!("../explanations/E1005.md")),
+            ErrorCode::E1006 => Some(include_str!("../explanations/E1006.md")),
+            ErrorCode::E1007 => Some(include_str!("../explanations/E1007.md")),
+            ErrorCode::E1008 => Some(include_str!("../explanations/E1008.md")),
+            ErrorCode::E1009 => Some(include_str!("../explanations/E1009.md")),
+            ErrorCode::E1010 => Some(include_str!("../explanations/E1010.md")),
+            ErrorCode::E1011 => Some(include_str!("../explanations/E1011.md")),
+            ErrorCode::E1012 => Some(include_str!("../explanations/E1012.md")),
+            ErrorCode::E1013 => Some(include_str!("../explanations/E1013.md")),
             // Type errors (E2xxx)
             ErrorCode::E2001 => Some(include_str!("../explanations/E2001.md")),
             ErrorCode::E2002 => Some(include_str!("../explanations/E2002.md")),
@@ -824,6 +833,15 @@ mod tests {
         assert!(ErrorCode::E1002.explanation().is_some());
         assert!(ErrorCode::E1003.explanation().is_some());
         assert!(ErrorCode::E1004.explanation().is_some());
+        assert!(ErrorCode::E1005.explanation().is_some());
+        assert!(ErrorCode::E1006.explanation().is_some());
+        assert!(ErrorCode::E1007.explanation().is_some());
+        assert!(ErrorCode::E1008.explanation().is_some());
+        assert!(ErrorCode::E1009.explanation().is_some());
+        assert!(ErrorCode::E1010.explanation().is_some());
+        assert!(ErrorCode::E1011.explanation().is_some());
+        assert!(ErrorCode::E1012.explanation().is_some());
+        assert!(ErrorCode::E1013.explanation().is_some());
         // Type:
         assert!(ErrorCode::E2001.explanation().is_some());
         assert!(ErrorCode::E2002.explanation().is_some());
