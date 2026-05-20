@@ -1,6 +1,6 @@
 # Tier-0 Interpreter Perf — Handoff
 
-**Status as of 2026-05-20** · master at `5edadd6` · scope: pre-JIT perf wins for the tree-walking executor, before any backend work.
+**Status as of 2026-05-20** · master at `2f8db84` · scope: pre-JIT perf wins for the tree-walking executor, before any backend work.
 
 This handoff carries enough context for a fresh chat session to resume Tier-0
 work without needing the prior session's context window. Read top to bottom.
@@ -16,20 +16,21 @@ work without needing the prior session's context window. Read top to bottom.
 | **T0-b Stage 1** Data foundation | ✅ shipped | `d005d40` | `VarLocal` variant + `MirFunction.local_count`; purely additive |
 | **T0-b Stage 2** HIR→MIR lowering | ✅ shipped | `bd99522` | `HirToMir` slot tracker emits `VarLocal` for params + lets |
 | **T0-b Stage 3** Executor `frame[slot]` fast-path | ✅ shipped | `9e65aa5` | `Vec<Value>` per call frame; `MirStmt::Let.slot` populated; `VarLocal` reads through `frame[base+slot]` |
-| **T0-b Stage 4** Closures + match patterns | ✅ shipped | `5edadd6` | Lifts `local_count = 0` cap from closures and match arm bodies. **15% speedup on chess_rl_v2 (802s → 680s)** — first measurable Tier-0 win on a real workload |
-| **T0-b Stage 5** Remove name fallback | ⏸ **NEXT** | — | Delete `Var(String)` + scopes chain; drop `self.define()` from Let/Assign/match-bind. The double-bookkeeping cost vanishes here |
+| **T0-b Stage 4** Closures + match patterns | ✅ shipped | `5edadd6` | Lifts `local_count = 0` cap. **15% speedup on chess_rl_v2 (802s → 680s)** |
+| **T0-b Stage 5a** Drop double-bookkeeping | ✅ shipped | `2f8db84` | Single-source-of-truth: `slot.is_some()` → frame only; `slot.is_none()` → name only. **Microbench lookup ratio 0.70 → 0.50 (~2× win)** but **chess_rl_v2 regressed 680s → ~950s (avg)** — workload-specific |
+| **T0-b Stage 5b** Investigate + finish | ⏸ **NEXT** | — | Profile chess_rl_v2 to find the regression source (leading hypothesis: `eval_call::VarLocal` lost early-exit fast paths from `dispatch_call`); fix; then delete `Var(String)` + `scopes` |
 | **T0-d** `eval_binary` fast-paths | optional | — | ~1 hr, marginal but cheap |
 | **T0-e** `is_known_builtin` static set | optional | — | ~30 min |
 
-Regression baseline (post-Stage 4):
-- `cargo test --workspace --lib` → **2,524 / 2,524 pass** (was 2,523; +1 new Stage 4 test)
+Regression baseline (post-Stage 5a):
+- `cargo test --workspace --lib` → **2,524 / 2,524 pass**
 - `cargo test --test test_builtin_parity` → **10 / 10 pass**
 - `cargo test --test test_match_patterns` → **26 / 26 pass**
-- `cargo test --test test_closures` → **51 / 51 pass**
-- `cargo test --test test_chess_rl_v2 --release` → **97 / 97 pass in 680s** (Stage 3 was 802s, -15%)
+- `cargo test --test test_closures` → **26 / 26 pass**
+- `cargo test --test test_chess_rl_v2 --release` → **97 / 97 pass** (correct), but wall-clock regressed (Stage 4 680s → Stage 5a 892s + 1005s across two runs). Workload-specific, flagged for Stage 5b investigation.
 - Pre-existing failure (NOT a regression): `tests/physics_ml/heat_1d_pure_cjcl_parity.rs` reads `examples/physics_ml/pinn_heat_1d_pure.cjcl` which was never committed to git. Same failure reproduces on pristine master.
 
-**Vault docs:** [[ADR-0024 Tier-0 Slot Resolution]] (design through Stage 4) +
+**Vault docs:** [[ADR-0024 Tier-0 Slot Resolution]] (design through Stage 5a) +
 `CJC-Lang_Obsidian_Vault/03_Compiler/Tier-0 Interpreter Perf.md` (concept note / roadmap).
 
 ---

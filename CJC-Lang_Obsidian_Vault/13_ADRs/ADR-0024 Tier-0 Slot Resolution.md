@@ -1,7 +1,7 @@
 ---
 title: "ADR-0024: Tier-0 Slot Resolution"
 tags: [adr, mir, executor, perf]
-status: Accepted (Stages 1+2+3+4 shipped; Stage 5 pending)
+status: Accepted (Stages 1+2+3+4+5a shipped; Stage 5b pending — has known regression)
 date: 2026-05-20
 ---
 
@@ -10,15 +10,26 @@ date: 2026-05-20
 ## Status
 
 **Accepted.** Stages 1 (data foundation), 2 (slot resolution + executor
-pattern coverage), 3 (executor frame fast-path), and 4 (closures +
-match patterns slot-resolved) shipped on `master` as of 2026-05-20.
-Stage 5 (retire `Var(String)`) is the sequenced follow-up tracked in
-[[Tier-0 Interpreter Perf]].
+pattern coverage), 3 (executor frame fast-path), 4 (closures + match
+patterns slot-resolved), and 5a (drop double-bookkeeping on
+slot-resolved paths) shipped on `master` as of 2026-05-20. Stage 5b
+(profile + finish the cleanup; delete `Var(String)` + `scopes`) is
+the sequenced follow-up tracked in [[Tier-0 Interpreter Perf]].
 
-**First measurable win:** Stage 4 produced a 15% wall-clock speedup on
-chess_rl_v2 (802s → 680s) — the load-bearing real workload. Stage 3's
-gains were below Windows microbench noise; Stage 4 surfaces above it
-because match-heavy code is finally hitting the frame fast-path.
+**Measured wins so far:**
+
+- Stage 4: 15% wall-clock speedup on chess_rl_v2 (802s → 680s) — first
+  measurable Tier-0 win on a real program; match-heavy code finally
+  hits the frame fast-path.
+- Stage 5a: sharper microbench win (lookup mir/eval ratio 0.70 → 0.50,
+  ≈2× faster than eval) — the "single source of truth" cleanup pays
+  off on synthetic workloads.
+
+**Known regression**: Stage 5a's chess_rl_v2 went from 680s → ~950s
+(2 runs averaged), workload-specific. Tracked for Stage 5b
+investigation; the leading hypothesis is that the new
+`eval_call::VarLocal` dispatch path lost some fast-out short-circuits
+that the old shared `dispatch_call(name)` path had.
 
 ## Context
 
@@ -161,6 +172,48 @@ This is why the measured Stage 3 win is below the Windows noise
 floor — `frame_get` is faster than `BTreeMap::get`, but the
 `define`+`frame_set` pair on writes nullifies most of the read-side
 savings. Stage 5 is where the sharper signal lands.
+
+### Drop double-bookkeeping (Stage 5a, commit `2f8db84`)
+
+Stage 5a establishes single-source-of-truth discipline for the
+slot-resolved paths: `slot.is_some()` → frame only; `slot.is_none()`
+→ name only. The two are exhaustive and disjoint.
+
+Sites updated:
+- `MirStmt::Let` handler
+- Match arm binding loop
+- `exec_assign::VarLocal`
+- `call_function` param binding (gated on `pushed_frame`)
+- `eval_call::VarLocal` callee (split from `Var(name)` because
+  `dispatch_call(name, ...)` consulted the scope chain which is now
+  empty for slot-resolved bindings; replaced with `frame_get(*slot)
+  .cloned() + match value`)
+
+**Measured win**: microbench `lookup` mir/eval ratio dropped from
+~0.70 to ~0.50 — mir ≈2× faster than eval. This is the sharper win
+the handoff predicted: with the BTreeMap insert cost removed from
+every Let/Assign/param-bind, the frame fast path finally shows above
+Windows noise.
+
+**Known regression**: chess_rl_v2 went 680s → ~950s (avg of 892s and
+1005s). Both runs are repeatable, not noise. The microbench shows
+the opposite signal, so this is workload-specific. Leading
+hypothesis: the new `eval_call::VarLocal` dispatch path
+(`frame_get(*slot).cloned()` then `match value`) lost the early-exit
+fast paths that `dispatch_call`'s `functions.contains_key(name)` and
+`is_known_builtin(name)` checks provided. For chess RL's
+closure-call-heavy hot paths, those early exits may have been
+firing more than expected.
+
+**Stage 5b is the investigation/fix sequel**:
+1. Profile chess_rl_v2 with the existing `profile_zone_*` builtins
+   to confirm the regression source.
+2. Either restore the early-exit fast paths at the front of the new
+   VarLocal callee dispatch, OR avoid the Value clone via
+   `&Value`-based inspection.
+3. Once the regression is resolved, finish the cleanup: delete
+   `MirExprKind::Var(String)`, delete `scopes: Vec<BTreeMap<...>>`,
+   and drop the slot:None paths everywhere.
 
 ### Closures + match patterns (Stage 4, commit `5edadd6`)
 

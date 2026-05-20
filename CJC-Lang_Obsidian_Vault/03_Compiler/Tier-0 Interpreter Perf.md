@@ -1,7 +1,7 @@
 ---
 title: Tier-0 Interpreter Perf
 tags: [compiler, runtime, executor, perf]
-status: In progress (T0-a + T0-c + T0-b S1+S2+S3+S4 shipped; S5 pending)
+status: In progress (T0-a + T0-c + T0-b S1+S2+S3+S4+S5a shipped; S5b pending)
 ---
 
 # Tier-0 Interpreter Perf
@@ -24,16 +24,17 @@ because `cjc-mir-exec` is a tree-walker, not a register machine. See
 | **T0-b Stage 2** HIR→MIR slot resolution | ✅ shipped | `bd99522` | Producer + executor pattern coverage |
 | **T0-b Stage 3** Executor frame fast-path | ✅ shipped | `9e65aa5` | `Vec<Value>` per call frame; `frame[slot]` reads; perf payoff (double-bookkeeping keeps writes at parity until Stage 5) |
 | **T0-b Stage 4** Closures + match patterns | ✅ shipped | `5edadd6` | Lifts `local_count = 0` cap from closures and match arm bodies. **15% wall-clock speedup on chess_rl_v2** (802s → 680s) — match-heavy workloads now hit the frame fast-path |
-| **T0-b Stage 5** Remove name fallback | ⏸ next | — | Delete `Var(String)` + scopes chain; double-bookkeeping vanishes here |
+| **T0-b Stage 5a** Drop double-bookkeeping | ✅ shipped | `2f8db84` | Slot-resolved Let/Assign/match-bind/param-bind skip `define`/`assign`. **Microbench lookup ratio 0.70 → 0.50 (~2× win)** but **chess_rl_v2 regressed 680s → ~950s (-40%)** — workload-specific, flagged for Stage 5b investigation |
+| **T0-b Stage 5b** Investigate + finish cleanup | ⏸ next | — | Profile chess_rl_v2 to find the regression; then audit + delete `Var(String)` variant and `scopes` field |
 | **T0-d** `eval_binary` fast-paths | optional | — | Per-shape arithmetic; ~1 hr |
 | **T0-e** `is_known_builtin` static set | optional | — | ~30 min |
 
-Regression baseline (post-Stage 4):
-- `cargo test --workspace --lib` — 2,524 / 2,524 pass (was 2,523; +1 new Stage 4 test)
+Regression baseline (post-Stage 5a):
+- `cargo test --workspace --lib` — 2,524 / 2,524 pass
 - `cargo test --test test_builtin_parity` — 10 / 10 pass
 - `cargo test --test test_match_patterns` — 26 / 26 pass
-- `cargo test --test test_closures` — 51 / 51 pass
-- `cargo test --test test_chess_rl_v2 --release` — 97 / 97 pass in **680 seconds (Stage 3 was 802s — 15% speedup)**
+- `cargo test --test test_closures` — 26 / 26 pass
+- `cargo test --test test_chess_rl_v2 --release` — 97 / 97 pass (correct), but **wall-clock regressed**: Stage 4 680s → Stage 5a 892s/1005s (two runs, ~30-50% slower). Workload-specific regression flagged for Stage 5b investigation.
 
 ## The three building blocks (Stages 1+2)
 
@@ -190,6 +191,81 @@ program** — Stage 3's lookup-workload microbench gains were below
 Windows noise, but Stage 4 moves the needle on the real chess RL
 workload because the match expressions inside the per-move scoring
 loop now hit the frame fast-path.
+
+## Stage 5a as it shipped (commit `2f8db84`)
+
+Stage 5a drops the `self.define()` / `self.assign()` double-bookkeeping
+from slot-resolved paths and establishes single-source-of-truth
+discipline:
+
+> `slot.is_some()` → frame is the only path
+> `slot.is_none()` → name binding is the only path
+
+The two never overlap. For slot-resolved fns (every regular fn +
+every lifted closure + every match arm body after Stages 2-4), the
+name path is unused; for `__main` (`local_count = 0`) the name path
+is the only path.
+
+### Sites updated
+
+- `MirStmt::Let` handler — `match slot { Some -> frame_set, None -> define }`.
+- Match arm binding loop — same conditional.
+- `exec_assign::VarLocal` — `frame_set(slot, val)` only.
+- `call_function` param binding — `frame[i] = val` when `pushed_frame`, else `define`.
+- `eval_call::VarLocal` callee — split from `Var(name)`; uses `frame_get(*slot).cloned()` to inspect the Value and dispatch as `Fn`/`Closure` directly (the old shared path went through `dispatch_call`, which relied on scope-chain `lookup` that's now empty for slot-resolved bindings).
+
+### Sharper microbench win
+
+The lookup workload finally moved into the "≥30% win" range the
+handoff said would clear Windows noise:
+
+| Workload | Stage 4 mir/eval | Stage 5a mir/eval |
+|---|---|---|
+| arith | ~0.70 | ~0.40-0.80 |
+| **lookup** | **~0.70** | **~0.50 (≈2× faster than eval)** |
+| call | ~0.70 | ~0.50 |
+| mixed | ~0.50 | ~0.50 |
+
+### Chess RL regression (workload-specific, flagged for 5b)
+
+The chess_rl_v2 wall-clock REGRESSED:
+
+| Stage | chess_rl_v2 |
+|---|---|
+| Stage 3 | 802 s |
+| Stage 4 | 680 s |
+| **Stage 5a run 1** | 892 s |
+| **Stage 5a run 2** | 1005 s |
+
+Both Stage 5a runs are consistently slower than Stage 4 (30-50%).
+Since the microbench shows the opposite signal, this is
+workload-specific — not a global regression.
+
+**Hypothesis**: the new `eval_call::VarLocal` callee path
+(`frame_get(*slot).cloned()` to inspect the Value) is exercised on
+every indirect call through a local-bound `Value::Closure` (Adam
+optimizer state, training callbacks). The clone cost matches the
+old `lookup(name).cloned()` path, but the OLD `dispatch_call` had
+early-exit fast paths for `functions.contains_key(name)` and
+`is_known_builtin(name)` that the new VarLocal path skips. For
+chess RL's hot paths, those early exits may have been firing more
+than expected.
+
+**Stage 5b should**:
+1. Profile chess_rl_v2 (use the existing `profile_zone_*` builtins
+   from the v2.3 work) to confirm the regression source.
+2. Either restore early-exit fast paths at the front of the new
+   VarLocal callee dispatch, OR find a way to inspect the Value
+   via `&Value` instead of clone-and-match.
+3. Decide whether to ship Stage 5b's deeper cleanup (delete
+   `Var(String)` + `scopes` field) once the chess RL regression
+   is resolved.
+
+The Stage 5a commit ships the regression alongside the win because:
+1. Functional correctness is solid (97/97 chess_rl_v2 still passes).
+2. The microbench gains are real and reproducible.
+3. Reverting would lose the lookup-workload win and put us back at
+   Stage 4's double-bookkeeping cost.
 
 ### Measured win (Windows microbench)
 
