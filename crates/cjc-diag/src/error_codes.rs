@@ -662,6 +662,16 @@ impl ErrorCode {
             ErrorCode::E2013 => Some(include_str!("../explanations/E2013.md")),
             ErrorCode::E2014 => Some(include_str!("../explanations/E2014.md")),
             ErrorCode::E2015 => Some(include_str!("../explanations/E2015.md")),
+            // Borrow / ownership (E3xxx) -- aspirational, the borrow
+            // checker may not be fully wired up in all CJC-Lang versions
+            ErrorCode::E3001 => Some(include_str!("../explanations/E3001.md")),
+            ErrorCode::E3002 => Some(include_str!("../explanations/E3002.md")),
+            ErrorCode::E3003 => Some(include_str!("../explanations/E3003.md")),
+            ErrorCode::E3004 => Some(include_str!("../explanations/E3004.md")),
+            ErrorCode::E3005 => Some(include_str!("../explanations/E3005.md")),
+            ErrorCode::E3006 => Some(include_str!("../explanations/E3006.md")),
+            ErrorCode::E3007 => Some(include_str!("../explanations/E3007.md")),
+            ErrorCode::E3008 => Some(include_str!("../explanations/E3008.md")),
             // Effect errors (E4xxx) -- CJC-Lang distinctive
             ErrorCode::E4001 => Some(include_str!("../explanations/E4001.md")),
             ErrorCode::E4002 => Some(include_str!("../explanations/E4002.md")),
@@ -684,6 +694,14 @@ impl ErrorCode {
             ErrorCode::E8003 => Some(include_str!("../explanations/E8003.md")),
             ErrorCode::E8004 => Some(include_str!("../explanations/E8004.md")),
             ErrorCode::E8005 => Some(include_str!("../explanations/E8005.md")),
+            // Generics / trait errors (E6xxx) -- aspirational, generic
+            // instantiation may not be fully implemented yet
+            ErrorCode::E6001 => Some(include_str!("../explanations/E6001.md")),
+            ErrorCode::E6002 => Some(include_str!("../explanations/E6002.md")),
+            ErrorCode::E6003 => Some(include_str!("../explanations/E6003.md")),
+            ErrorCode::E6004 => Some(include_str!("../explanations/E6004.md")),
+            ErrorCode::E6005 => Some(include_str!("../explanations/E6005.md")),
+            ErrorCode::E6006 => Some(include_str!("../explanations/E6006.md")),
             // Module (E9xxx)
             ErrorCode::E9001 => Some(include_str!("../explanations/E9001.md")),
             ErrorCode::E9002 => Some(include_str!("../explanations/E9002.md")),
@@ -907,6 +925,22 @@ mod tests {
         assert!(ErrorCode::E5002.explanation().is_some());
         assert!(ErrorCode::E5003.explanation().is_some());
         assert!(ErrorCode::E5004.explanation().is_some());
+        // Borrow / ownership:
+        assert!(ErrorCode::E3001.explanation().is_some());
+        assert!(ErrorCode::E3002.explanation().is_some());
+        assert!(ErrorCode::E3003.explanation().is_some());
+        assert!(ErrorCode::E3004.explanation().is_some());
+        assert!(ErrorCode::E3005.explanation().is_some());
+        assert!(ErrorCode::E3006.explanation().is_some());
+        assert!(ErrorCode::E3007.explanation().is_some());
+        assert!(ErrorCode::E3008.explanation().is_some());
+        // Generics / trait:
+        assert!(ErrorCode::E6001.explanation().is_some());
+        assert!(ErrorCode::E6002.explanation().is_some());
+        assert!(ErrorCode::E6003.explanation().is_some());
+        assert!(ErrorCode::E6004.explanation().is_some());
+        assert!(ErrorCode::E6005.explanation().is_some());
+        assert!(ErrorCode::E6006.explanation().is_some());
         // MIR / internal compiler errors:
         assert!(ErrorCode::E7001.explanation().is_some());
         assert!(ErrorCode::E7002.explanation().is_some());
@@ -934,14 +968,22 @@ mod tests {
     }
 
     #[test]
-    fn test_explanation_returns_none_for_undocumented() {
-        // Any code not in the documented set must return None. Only the
-        // borrow/ownership (E3xxx) and generics/trait (E6xxx) groups
-        // remain undocumented at this point.
-        assert!(ErrorCode::E3001.explanation().is_none()); // borrow
-        assert!(ErrorCode::E3005.explanation().is_none()); // borrow
-        assert!(ErrorCode::E6001.explanation().is_none()); // generics
-        assert!(ErrorCode::E6003.explanation().is_none()); // generics
+    fn test_full_pedagogy_coverage_achieved() {
+        // Every code in ALL_CODES now has a written explanation -- 82/82.
+        // This is the inverse of the original "none for undocumented" test:
+        // we've reached 100% coverage, so no code should return None.
+        //
+        // If a new ErrorCode variant is added to the taxonomy without a
+        // matching explanation .md file + match arm registration, this
+        // test fires immediately. Maintains the "every code that exists
+        // has pedagogy" invariant.
+        for code in ErrorCode::ALL_CODES {
+            assert!(
+                code.explanation().is_some(),
+                "{} has no explanation -- pedagogy coverage regressed",
+                code
+            );
+        }
     }
 
     #[test]

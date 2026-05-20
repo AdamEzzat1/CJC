@@ -1315,15 +1315,22 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_skips_auto_hint_for_undocumented() {
-        // E3001 (move of borrowed value) is in the taxonomy but has no
-        // explanation yet -- the builder must NOT add an auto-hint.
-        let diag = DiagnosticBuilder::new(ErrorCode::E3001, Span::new(0, 1)).build();
-        assert!(
-            diag.hints.is_empty(),
-            "expected no hints for undocumented code, got: {:?}",
-            diag.hints
-        );
+    fn test_builder_auto_hint_fires_for_every_code() {
+        // Coverage reached 100% -- every ErrorCode variant has an
+        // explanation registered. The Builder auto-hint path now always
+        // fires through `ErrorCode::explanation()` returning Some, so the
+        // historical "skips for undocumented" test fixture no longer
+        // exists. This test asserts the corresponding always-fires
+        // invariant: every code produces a Builder result with at least
+        // one hint (the auto-attached pedagogy link).
+        for code in ErrorCode::ALL_CODES {
+            let diag = DiagnosticBuilder::new(*code, Span::new(0, 1)).build();
+            assert!(
+                !diag.hints.is_empty(),
+                "{} produced a Builder result with no auto-hint",
+                code
+            );
+        }
     }
 
     #[test]
@@ -1407,11 +1414,14 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_skips_hint_for_undocumented_code() {
-        // E3001 (move of borrowed value) is in the taxonomy but has no
-        // explanation yet -- emit must NOT add a hint.
+    fn test_emit_skips_hint_for_unparseable_code() {
+        // With 100% pedagogy coverage, no defined code triggers the
+        // "skip hint" path -- but the path still exists for code STRINGS
+        // that don't parse to a known ErrorCode (e.g., a future code added
+        // to the source without taxonomy registration, or a hand-written
+        // ad-hoc code string). emit() falls back to no-hint behaviour.
         let mut bag = DiagnosticBag::new();
-        bag.emit(Diagnostic::error("E3001", "borrow", Span::new(0, 1)));
+        bag.emit(Diagnostic::error("E9999", "future code", Span::new(0, 1)));
         assert!(bag.diagnostics[0].hints.is_empty());
     }
 

@@ -381,14 +381,25 @@ mod tests {
     }
 
     #[test]
-    fn test_format_error_lookup_known_undocumented() {
-        // E3001 (borrow/ownership) exists as a code but has no explanation
-        // yet -- must succeed with a header + a contribution hint, not error.
-        let out = format_error_lookup("E3001").expect("E3001 must be known");
-        assert!(out.contains("E3001"));
-        assert!(out.contains("ownership"));
-        assert!(out.contains("No detailed explanation"));
-        assert!(out.contains("Contributions welcome"));
+    fn test_format_error_lookup_full_coverage() {
+        // Coverage reached 100% in batch 6 -- every code in ALL_CODES now
+        // has a written explanation, so the "no detailed explanation"
+        // fallback path is no longer reachable for any known code.
+        //
+        // This test now serves as the coverage gate: every code's render
+        // must contain pedagogy content, not the contribution-hint
+        // fallback. Catches the regression "code added to ALL_CODES but
+        // no explanation registered."
+        for code in cjc_diag::ErrorCode::ALL_CODES {
+            let out = format_error_lookup(code.code_str())
+                .unwrap_or_else(|_| panic!("{} must be known", code));
+            assert!(out.contains(code.code_str()));
+            assert!(
+                !out.contains("No detailed explanation"),
+                "{} fell through to the no-explanation fallback",
+                code
+            );
+        }
     }
 
     #[test]
