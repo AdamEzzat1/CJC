@@ -286,6 +286,7 @@ impl<'a> Monomorphizer<'a> {
             | MirExprKind::RawByteStringLit(_)
             | MirExprKind::RegexLit { .. }
             | MirExprKind::Var(_)
+            | MirExprKind::VarLocal { .. }
             | MirExprKind::Col(_)
             | MirExprKind::Void => {}
             MirExprKind::TensorLit { rows } => {
@@ -398,6 +399,7 @@ impl<'a> Monomorphizer<'a> {
             cfg_body: None,
             decorators: vec![],
             vis: cjc_ast::Visibility::Private,
+            local_count: 0,
         });
     }
 
@@ -652,6 +654,7 @@ fn substitute_expr(expr: &MirExpr, subst: &BTreeMap<String, String>) -> MirExpr 
         | MirExprKind::RawByteStringLit(_)
         | MirExprKind::RegexLit { .. }
         | MirExprKind::Var(_)
+        | MirExprKind::VarLocal { .. }
         | MirExprKind::Col(_)
         | MirExprKind::Void => expr.kind.clone(),
     };
@@ -862,6 +865,7 @@ fn rewrite_calls_in_expr(
         | MirExprKind::RawByteStringLit(_)
         | MirExprKind::RegexLit { .. }
         | MirExprKind::Var(_)
+        | MirExprKind::VarLocal { .. }
         | MirExprKind::Col(_)
         | MirExprKind::Void => {}
     }
@@ -940,6 +944,7 @@ mod tests {
                 cfg_body: None,
                 decorators: vec![],
                 vis: cjc_ast::Visibility::Private,
+                local_count: 0,
             }],
             struct_defs: vec![],
             enum_defs: vec![],
@@ -975,6 +980,7 @@ mod tests {
             cfg_body: None,
             decorators: vec![],
             vis: cjc_ast::Visibility::Private,
+            local_count: 0,
         };
 
         let main_fn = MirFunction {
@@ -991,6 +997,7 @@ mod tests {
             cfg_body: None,
             decorators: vec![],
             vis: cjc_ast::Visibility::Private,
+            local_count: 0,
         };
 
         let program = MirProgram {

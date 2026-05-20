@@ -438,6 +438,7 @@ fn collect_bindings_expr(expr: &MirExpr, ctx: &mut AnalysisCtx) {
         | MirExprKind::RawByteStringLit(_)
         | MirExprKind::RegexLit { .. }
         | MirExprKind::Var(_)
+        | MirExprKind::VarLocal { .. }
         | MirExprKind::Col(_)
         | MirExprKind::Void => {}
     }
@@ -685,6 +686,7 @@ fn walk_expr_for_escapes(expr: &MirExpr, ctx: &mut AnalysisCtx) {
         | MirExprKind::RawByteStringLit(_)
         | MirExprKind::RegexLit { .. }
         | MirExprKind::Var(_)
+        | MirExprKind::VarLocal { .. }
         | MirExprKind::Col(_)
         | MirExprKind::Void => {}
     }
@@ -779,6 +781,7 @@ fn collect_var_refs(expr: &MirExpr) -> Vec<String> {
 fn collect_var_refs_inner(expr: &MirExpr, vars: &mut Vec<String>) {
     match &expr.kind {
         MirExprKind::Var(name) => vars.push(name.clone()),
+        MirExprKind::VarLocal { name, .. } => vars.push(name.clone()),
         MirExprKind::Binary { left, right, .. } => {
             collect_var_refs_inner(left, vars);
             collect_var_refs_inner(right, vars);
@@ -1035,6 +1038,7 @@ mod tests {
             cfg_body: None,
             decorators: vec![],
             vis: cjc_ast::Visibility::Private,
+            local_count: 0,
         }
     }
 

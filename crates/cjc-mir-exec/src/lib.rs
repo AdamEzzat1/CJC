@@ -602,6 +602,22 @@ impl MirExecutor {
                 }
                 Err(MirExecError::Runtime(format!("undefined variable `{name}`")))
             }
+            MirExprKind::VarLocal { name, .. } => {
+                if let Some(v) = self.lookup(name).cloned() {
+                    return Ok(v);
+                }
+                // Fall back: if name is a registered function, produce a Fn value.
+                // This allows passing functions as first-class values (e.g. opt.map(double)).
+                if let Some(func) = self.functions.get(name.as_str()) {
+                    let arity = func.params.len();
+                    return Ok(Value::Fn(cjc_runtime::FnValue {
+                        name: name.clone(),
+                        arity,
+                        body_id: 0,
+                    }));
+                }
+                Err(MirExecError::Runtime(format!("undefined variable `{name}`")))
+            }
             MirExprKind::Binary { op, left, right } => self.eval_binary(*op, left, right),
             MirExprKind::Unary { op, operand } => self.eval_unary(*op, operand),
             MirExprKind::Call { callee, args } => self.eval_call(callee, args),
@@ -658,6 +674,7 @@ impl MirExecutor {
                     cfg_body: None,
                     decorators: vec![],
                     vis: cjc_ast::Visibility::Private,
+                    local_count: 0,
                 };
                 self.functions.insert(lambda_name.clone(), Rc::new(mir_fn));
                 Ok(Value::Fn(cjc_runtime::FnValue {

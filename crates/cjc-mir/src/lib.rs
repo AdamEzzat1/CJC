@@ -147,6 +147,14 @@ pub struct MirFunction {
     pub decorators: Vec<String>,
     /// Visibility of this function definition.
     pub vis: Visibility,
+    /// Tier-0 perf: total number of local slots used by this function
+    /// (parameters + `let` bindings, including those in nested blocks).
+    ///
+    /// Populated by the slot-resolution pass in `HirToMir`. Used by the
+    /// executor to size the call frame in one allocation rather than
+    /// growing it incrementally. `0` means "no slot resolution was
+    /// performed; fall back to name-based scope lookup."
+    pub local_count: u32,
 }
 
 /// A function parameter at the MIR level.
@@ -313,8 +321,32 @@ pub enum MirExprKind {
     },
     /// NA (missing value) literal.
     NaLit,
-    /// Variable reference by name.
+    /// Variable reference by name (unresolved fallback path).
+    ///
+    /// Used for closures, captured variables, top-level/global references,
+    /// and any case where the slot-resolution pass in `HirToMir` couldn't
+    /// statically determine a slot. The executor falls back to walking
+    /// the scope chain by name for these.
     Var(String),
+    /// Tier-0 fast-path: variable reference resolved to a flat slot
+    /// index into the current call frame.
+    ///
+    /// Emitted by `HirToMir` when the variable refers to a function-local
+    /// binding (parameter or `let`) and the slot was resolvable
+    /// statically. The executor reads directly from `frame[slot]` without
+    /// touching the scope chain. The `name` field is retained for
+    /// debugging and for the `MirExpr` printer; runtime dispatch uses
+    /// `slot` only.
+    ///
+    /// See ADR-... (Tier-0 perf work) for the design rationale.
+    VarLocal {
+        /// Original binding name (debugging / printer use only).
+        name: String,
+        /// 0-indexed slot in the current call frame.
+        /// `slot < MirFunction::local_count` is an invariant maintained
+        /// by the lowering pass.
+        slot: u32,
+    },
     /// Binary operation.
     /// Binary operation.
     Binary {
@@ -642,6 +674,7 @@ impl HirToMir {
             cfg_body: None,
             decorators: vec![],
             vis: Visibility::Private,
+            local_count: 0,
         });
 
         // Append all lambda-lifted functions
@@ -684,6 +717,7 @@ impl HirToMir {
             cfg_body: None,
             decorators: f.decorators.clone(),
             vis: f.vis,
+            local_count: 0,
         }
     }
 
@@ -868,6 +902,7 @@ impl HirToMir {
                     cfg_body: None,
                     decorators: vec![],
                     vis: Visibility::Private,
+                    local_count: 0,
                 });
 
                 // At the call site, emit MakeClosure with the capture

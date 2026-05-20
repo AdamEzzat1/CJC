@@ -213,6 +213,7 @@ fn constant_fold_expr(expr: &mut MirExpr) {
         | MirExprKind::RawByteStringLit(_)
         | MirExprKind::RegexLit { .. }
         | MirExprKind::Var(_)
+        | MirExprKind::VarLocal { .. }
         | MirExprKind::Col(_)
         | MirExprKind::Void => {}
         MirExprKind::TensorLit { rows } => {
@@ -522,6 +523,7 @@ fn is_pure_expr(expr: &MirExpr) -> bool {
         | MirExprKind::RawByteStringLit(_)
         | MirExprKind::RegexLit { .. }
         | MirExprKind::Var(_)
+        | MirExprKind::VarLocal { .. }
         | MirExprKind::Void => true,
         MirExprKind::Binary { left, right, .. } => is_pure_expr(left) && is_pure_expr(right),
         MirExprKind::Unary { operand, .. } => is_pure_expr(operand),
@@ -606,6 +608,9 @@ fn collect_used_vars_body(body: &MirBody, used: &mut BTreeSet<String>) {
 fn collect_used_vars_expr(expr: &MirExpr, used: &mut BTreeSet<String>) {
     match &expr.kind {
         MirExprKind::Var(name) => {
+            used.insert(name.clone());
+        }
+        MirExprKind::VarLocal { name, .. } => {
             used.insert(name.clone());
         }
         MirExprKind::Binary { left, right, .. } => {
@@ -1179,6 +1184,7 @@ mod tests {
             cfg_body: None,
             decorators: vec![],
             vis: cjc_ast::Visibility::Private,
+            local_count: 0,
         }
     }
 

@@ -286,6 +286,7 @@ fn collect_calls_expr(expr: &MirExpr, in_nogc_block: bool, info: &mut FnCallInfo
         | MirExprKind::RawByteStringLit(_)
         | MirExprKind::RegexLit { .. }
         | MirExprKind::Var(_)
+        | MirExprKind::VarLocal { .. }
         | MirExprKind::Col(_)
         | MirExprKind::Void => {}
         MirExprKind::TensorLit { rows } => {
@@ -592,6 +593,7 @@ mod tests {
             cfg_body: None,
             decorators: vec![],
             vis: cjc_ast::Visibility::Private,
+            local_count: 0,
         }
     }
 

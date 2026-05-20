@@ -648,6 +648,7 @@ mod tests {
             cfg_body: None,
             decorators: vec![],
             vis: Visibility::Private,
+            local_count: 0,
         }
     }
 
