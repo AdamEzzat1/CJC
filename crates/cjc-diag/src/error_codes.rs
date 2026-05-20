@@ -649,9 +649,19 @@ impl ErrorCode {
             // Type errors (E2xxx)
             ErrorCode::E2001 => Some(include_str!("../explanations/E2001.md")),
             ErrorCode::E2002 => Some(include_str!("../explanations/E2002.md")),
+            ErrorCode::E2003 => Some(include_str!("../explanations/E2003.md")),
+            ErrorCode::E2004 => Some(include_str!("../explanations/E2004.md")),
             ErrorCode::E2005 => Some(include_str!("../explanations/E2005.md")),
             ErrorCode::E2006 => Some(include_str!("../explanations/E2006.md")),
             ErrorCode::E2007 => Some(include_str!("../explanations/E2007.md")),
+            ErrorCode::E2008 => Some(include_str!("../explanations/E2008.md")),
+            ErrorCode::E2009 => Some(include_str!("../explanations/E2009.md")),
+            ErrorCode::E2010 => Some(include_str!("../explanations/E2010.md")),
+            ErrorCode::E2011 => Some(include_str!("../explanations/E2011.md")),
+            ErrorCode::E2012 => Some(include_str!("../explanations/E2012.md")),
+            ErrorCode::E2013 => Some(include_str!("../explanations/E2013.md")),
+            ErrorCode::E2014 => Some(include_str!("../explanations/E2014.md")),
+            ErrorCode::E2015 => Some(include_str!("../explanations/E2015.md")),
             // Effect errors (E4xxx) -- CJC-Lang distinctive
             ErrorCode::E4001 => Some(include_str!("../explanations/E4001.md")),
             // Runtime errors (E8xxx)
@@ -845,9 +855,19 @@ mod tests {
         // Type:
         assert!(ErrorCode::E2001.explanation().is_some());
         assert!(ErrorCode::E2002.explanation().is_some());
+        assert!(ErrorCode::E2003.explanation().is_some());
+        assert!(ErrorCode::E2004.explanation().is_some());
         assert!(ErrorCode::E2005.explanation().is_some());
         assert!(ErrorCode::E2006.explanation().is_some());
         assert!(ErrorCode::E2007.explanation().is_some());
+        assert!(ErrorCode::E2008.explanation().is_some());
+        assert!(ErrorCode::E2009.explanation().is_some());
+        assert!(ErrorCode::E2010.explanation().is_some());
+        assert!(ErrorCode::E2011.explanation().is_some());
+        assert!(ErrorCode::E2012.explanation().is_some());
+        assert!(ErrorCode::E2013.explanation().is_some());
+        assert!(ErrorCode::E2014.explanation().is_some());
+        assert!(ErrorCode::E2015.explanation().is_some());
         // Effect (CJC-distinctive):
         assert!(ErrorCode::E4001.explanation().is_some());
         // Runtime:
@@ -863,7 +883,6 @@ mod tests {
     fn test_explanation_returns_none_for_undocumented() {
         // Any code not in the documented set must return None. Pick codes
         // from categories that haven't been documented yet.
-        assert!(ErrorCode::E2003.explanation().is_none()); // type
         assert!(ErrorCode::E3001.explanation().is_none()); // borrow
         assert!(ErrorCode::E5001.explanation().is_none()); // name res
         assert!(ErrorCode::E6001.explanation().is_none()); // generics
