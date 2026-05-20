@@ -618,6 +618,17 @@ impl ErrorCode {
     /// ```
     pub fn explanation(&self) -> Option<&'static str> {
         match self {
+            // Lexer errors (E0xxx)
+            ErrorCode::E0001 => Some(include_str!("../explanations/E0001.md")),
+            ErrorCode::E0002 => Some(include_str!("../explanations/E0002.md")),
+            ErrorCode::E0003 => Some(include_str!("../explanations/E0003.md")),
+            ErrorCode::E0004 => Some(include_str!("../explanations/E0004.md")),
+            ErrorCode::E0005 => Some(include_str!("../explanations/E0005.md")),
+            ErrorCode::E0006 => Some(include_str!("../explanations/E0006.md")),
+            ErrorCode::E0007 => Some(include_str!("../explanations/E0007.md")),
+            ErrorCode::E0008 => Some(include_str!("../explanations/E0008.md")),
+            ErrorCode::E0009 => Some(include_str!("../explanations/E0009.md")),
+            ErrorCode::E0010 => Some(include_str!("../explanations/E0010.md")),
             // Parser errors (E1xxx) -- the codes a new user is most likely to
             // hit first. E1000/E1001/E1002 are actually emitted in
             // cjc-parser/src/lib.rs today.
@@ -795,7 +806,18 @@ mod tests {
 
     #[test]
     fn test_explanation_returns_some_for_documented() {
-        // The 16 codes documented as of v0.1 of the pedagogy layer.
+        // The 26 codes documented as of the pedagogy expansion.
+        // Lexer:
+        assert!(ErrorCode::E0001.explanation().is_some());
+        assert!(ErrorCode::E0002.explanation().is_some());
+        assert!(ErrorCode::E0003.explanation().is_some());
+        assert!(ErrorCode::E0004.explanation().is_some());
+        assert!(ErrorCode::E0005.explanation().is_some());
+        assert!(ErrorCode::E0006.explanation().is_some());
+        assert!(ErrorCode::E0007.explanation().is_some());
+        assert!(ErrorCode::E0008.explanation().is_some());
+        assert!(ErrorCode::E0009.explanation().is_some());
+        assert!(ErrorCode::E0010.explanation().is_some());
         // Parser (the codes a new user hits first):
         assert!(ErrorCode::E1000.explanation().is_some());
         assert!(ErrorCode::E1001.explanation().is_some());
@@ -821,11 +843,14 @@ mod tests {
 
     #[test]
     fn test_explanation_returns_none_for_undocumented() {
-        // Any code not in the documented set must return None.
-        assert!(ErrorCode::E0001.explanation().is_none());
-        assert!(ErrorCode::E5001.explanation().is_none());
-        assert!(ErrorCode::E7001.explanation().is_none());
-        assert!(ErrorCode::W0005.explanation().is_none());
+        // Any code not in the documented set must return None. Pick codes
+        // from categories that haven't been documented yet.
+        assert!(ErrorCode::E2003.explanation().is_none()); // type
+        assert!(ErrorCode::E3001.explanation().is_none()); // borrow
+        assert!(ErrorCode::E5001.explanation().is_none()); // name res
+        assert!(ErrorCode::E6001.explanation().is_none()); // generics
+        assert!(ErrorCode::E7001.explanation().is_none()); // MIR
+        assert!(ErrorCode::W0005.explanation().is_none()); // warning
     }
 
     #[test]

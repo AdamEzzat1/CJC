@@ -382,11 +382,11 @@ mod tests {
 
     #[test]
     fn test_format_error_lookup_known_undocumented() {
-        // E0001 exists as a code but has no v0 explanation — must succeed
-        // with a header + a contribution hint, not error.
-        let out = format_error_lookup("E0001").expect("E0001 must be known");
-        assert!(out.contains("E0001"));
-        assert!(out.contains("lexer"));
+        // E3001 (borrow/ownership) exists as a code but has no explanation
+        // yet -- must succeed with a header + a contribution hint, not error.
+        let out = format_error_lookup("E3001").expect("E3001 must be known");
+        assert!(out.contains("E3001"));
+        assert!(out.contains("ownership"));
         assert!(out.contains("No detailed explanation"));
         assert!(out.contains("Contributions welcome"));
     }
