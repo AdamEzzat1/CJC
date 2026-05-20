@@ -31,25 +31,29 @@ Mid-level Intermediate Representation: a control-flow graph of basic blocks cont
 - `BlockId`, `MirFnId`
 - `AllocHint` enum: `Stack`, `Arena`, `Rc`
 
-## Slot resolution (T0-b Stages 2+3, shipped 2026-05-20)
+## Slot resolution (T0-b Stages 2+3+4, shipped 2026-05-20)
 
 `HirToMir` performs a single-pass slot-resolution walk over each
-function body and emits `MirExprKind::VarLocal { name, slot }` for
-references to function-local bindings (params + `let`). References to
-top-level functions, captured variables, and pattern-bound names stay
-as `MirExprKind::Var(name)` (the executor's scope-chain fallback).
-`MirFunction.local_count` records how many slots the function needs.
-`MirStmt::Let` carries an optional `slot: Option<u32>` populated by
-the same pass.
+function body — regular fns, lambda-lifted closure bodies, and match
+arm bodies all participate. It emits `MirExprKind::VarLocal {
+name, slot }` for references to function-local bindings (params +
+`let` + match-pattern bindings). References to top-level functions
+and unresolved names stay as `MirExprKind::Var(name)` (the
+executor's scope-chain fallback). `MirFunction.local_count` records
+how many slots the function needs. `MirStmt::Let` and
+`MirPattern::Binding` both carry an optional `slot: Option<u32>`
+populated by the same pass.
 
-The synthetic `__main` function and lambda-lifted closures stay at
-`local_count = 0` in Stages 2-3; they will be lifted in Stage 4. The
-executor (`cjc-mir-exec`) now reads `VarLocal` through a flat
-`frame: Vec<Value>` indexed by `frame_stack.last() + slot` — a single
-`Vec` access vs the old `BTreeMap`-keyed scope walk. The double-
-bookkeeping with `self.define(name, val)` is kept as a safety net for
-closure captures + match arm body name references until Stage 5
-retires `Var(String)`. See [[ADR-0024 Tier-0 Slot Resolution]] and
+The only path still on the name fallback after Stage 4 is the
+synthetic `__main` function (top-level statements). The executor
+(`cjc-mir-exec`) reads `VarLocal` through a flat `frame: Vec<Value>`
+indexed by `frame_stack.last() + slot` — a single `Vec` access vs
+the old `BTreeMap`-keyed scope walk. The double-bookkeeping with
+`self.define(name, val)` is kept as a safety net until Stage 5
+retires `Var(String)`. **First measurable win**: Stage 4 cut
+chess_rl_v2 wall-clock from 802s → 680s (15% speedup) by routing
+match expressions inside the per-move scoring loop through the
+frame fast-path. See [[ADR-0024 Tier-0 Slot Resolution]] and
 [[Tier-0 Interpreter Perf]].
 
 ## Passes

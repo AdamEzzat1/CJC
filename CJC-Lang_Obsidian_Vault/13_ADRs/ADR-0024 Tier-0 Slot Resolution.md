@@ -1,7 +1,7 @@
 ---
 title: "ADR-0024: Tier-0 Slot Resolution"
 tags: [adr, mir, executor, perf]
-status: Accepted (Stages 1+2+3 shipped; Stages 4-5 pending)
+status: Accepted (Stages 1+2+3+4 shipped; Stage 5 pending)
 date: 2026-05-20
 ---
 
@@ -10,10 +10,15 @@ date: 2026-05-20
 ## Status
 
 **Accepted.** Stages 1 (data foundation), 2 (slot resolution + executor
-pattern coverage), and 3 (executor frame fast-path) shipped on `master`
-as of 2026-05-20. Stages 4 (closures + match patterns slot-resolved)
-and 5 (retire `Var(String)`) are sequenced follow-ups tracked in
+pattern coverage), 3 (executor frame fast-path), and 4 (closures +
+match patterns slot-resolved) shipped on `master` as of 2026-05-20.
+Stage 5 (retire `Var(String)`) is the sequenced follow-up tracked in
 [[Tier-0 Interpreter Perf]].
+
+**First measurable win:** Stage 4 produced a 15% wall-clock speedup on
+chess_rl_v2 (802s → 680s) — the load-bearing real workload. Stage 3's
+gains were below Windows microbench noise; Stage 4 surfaces above it
+because match-heavy code is finally hitting the frame fast-path.
 
 ## Context
 
@@ -156,6 +161,55 @@ This is why the measured Stage 3 win is below the Windows noise
 floor — `frame_get` is faster than `BTreeMap::get`, but the
 `define`+`frame_set` pair on writes nullifies most of the read-side
 savings. Stage 5 is where the sharper signal lands.
+
+### Closures + match patterns (Stage 4, commit `5edadd6`)
+
+Stage 4 lifts the `local_count = 0` cap that Stages 2-3 placed on
+lambda-lifted closure bodies and match arm bodies.
+
+**Closures**: in `HirToMir::lower_expr::Closure`, the Stage 2
+disable-and-restore tracker hack is replaced with the standard
+function-lowering pattern:
+
+```rust
+let saved = self.save_tracker();
+self.enter_function(&lifted_params);     // params -> slots 0..N
+let lifted_body = ...lower(body)...;     // refs slot-resolve
+let local_count = self.exit_function();
+self.restore_tracker(saved);
+```
+
+Lifted closures now go through the same `call_function` entry/exit
+in the executor as regular functions — no new executor code needed.
+
+**Match patterns**: `MirPattern::Binding(String)` became
+`MirPattern::Binding { name: String, slot: Option<u32> }`. The slot
+is populated by `lower_pattern` (now `&mut self`) which walks the
+pattern tree and `define_local`s each Binding it finds, including
+nested ones in `Tuple`/`Struct`/`Variant`.
+
+`HirExprKind::Match` lowering opens a lexical scope per arm:
+push_scope → lower_pattern (assigns slots) → lower body (refs
+resolve) → pop_scope. Sibling arms consume distinct slot ranges
+(monotonic counter — same trade-off as if/else branches).
+
+The executor's `match_pattern` return type widened from
+`Vec<(String, Value)>` to `Vec<(String, Option<u32>, Value)>`. The
+arm handler writes `frame[base + slot]` when slot is `Some`, AND
+still calls `self.define(name, val)` (same double-bookkeeping
+pattern as Stage 3's Let — Stage 5 cleanup target).
+
+**Measured impact**:
+
+| Stage | chess_rl_v2 wall-clock (release) |
+|---|---|
+| Stage 3 | 802 s |
+| **Stage 4** | **680 s** (-15%) |
+
+First clearly measurable Tier-0 perf win on a real program. The
+microbench `lookup` workload is unchanged (it doesn't use match or
+closures), confirming Stage 4's gains are specific to the workloads
+that actually exercise the new fast paths.
 
 ### Executor pattern coverage (Stage 2)
 

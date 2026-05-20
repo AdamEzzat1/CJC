@@ -37,16 +37,19 @@ All three take the typed `Program` (the AST), lower it through [[HIR]] → [[MIR
 - **Frame arena**: per-call bump allocator for `Arena`-classified allocations.
 - **Tail-call trampoline**: tail calls jump to a new frame without growing the call stack (observed by `crates/cjc-mir-exec/src/lib.rs`).
 - **Shared dispatch**: all builtins route through [[cjc-dispatch]] and `cjc-runtime::builtins`, guaranteeing the same semantics as [[cjc-eval]].
-- **Variable resolution** (post Tier-0 T0-b Stage 3): `MirExprKind::VarLocal { name, slot }`
+- **Variable resolution** (post Tier-0 T0-b Stage 4): `MirExprKind::VarLocal { name, slot }`
   carries a statically-resolved slot index for function-local references.
   The executor maintains `frame: Vec<Value>` + `frame_stack: Vec<usize>`
   (saved `frame.len()` per active call). On call entry, if
   `func.local_count > 0`, the frame is grown by `local_count` slots and
   params are written into `frame[base..base+n]`. `MirExprKind::VarLocal`
   reads through `frame[base + slot]` — a single indexed `Vec` access.
-  `Var(name)` still uses the scope-chain fallback (closures, top-level,
-  match arm bodies, pattern bindings). `MirStmt::Let` carries the slot
-  too, written to `frame[base + slot]` when present.
+  `MirStmt::Let` and `MirPattern::Binding` both carry the slot too, and
+  the match-arm handler writes `frame[base + slot]` when binding a
+  pattern. After Stage 4 the slot path covers regular fns, closure
+  bodies, and match arm bodies; the only fallback path remaining is
+  `__main`. `Var(name)` is the unresolved fallback for top-level
+  references (Stage 5 retires this).
 
 ## Feature crates
 
