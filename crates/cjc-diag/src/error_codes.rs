@@ -674,10 +674,24 @@ impl ErrorCode {
             ErrorCode::E5002 => Some(include_str!("../explanations/E5002.md")),
             ErrorCode::E5003 => Some(include_str!("../explanations/E5003.md")),
             ErrorCode::E5004 => Some(include_str!("../explanations/E5004.md")),
+            // MIR / internal compiler errors (E7xxx)
+            ErrorCode::E7001 => Some(include_str!("../explanations/E7001.md")),
+            ErrorCode::E7002 => Some(include_str!("../explanations/E7002.md")),
+            ErrorCode::E7003 => Some(include_str!("../explanations/E7003.md")),
             // Runtime errors (E8xxx)
             ErrorCode::E8001 => Some(include_str!("../explanations/E8001.md")),
             ErrorCode::E8002 => Some(include_str!("../explanations/E8002.md")),
+            ErrorCode::E8003 => Some(include_str!("../explanations/E8003.md")),
             ErrorCode::E8004 => Some(include_str!("../explanations/E8004.md")),
+            ErrorCode::E8005 => Some(include_str!("../explanations/E8005.md")),
+            // Module (E9xxx)
+            ErrorCode::E9001 => Some(include_str!("../explanations/E9001.md")),
+            ErrorCode::E9002 => Some(include_str!("../explanations/E9002.md")),
+            // Snap (E06xx)
+            ErrorCode::E0601 => Some(include_str!("../explanations/E0601.md")),
+            ErrorCode::E0602 => Some(include_str!("../explanations/E0602.md")),
+            ErrorCode::E0603 => Some(include_str!("../explanations/E0603.md")),
+            ErrorCode::E0604 => Some(include_str!("../explanations/E0604.md")),
             // Warnings (W0xxx)
             ErrorCode::W0001 => Some(include_str!("../explanations/W0001.md")),
             ErrorCode::W0002 => Some(include_str!("../explanations/W0002.md")),
@@ -893,10 +907,24 @@ mod tests {
         assert!(ErrorCode::E5002.explanation().is_some());
         assert!(ErrorCode::E5003.explanation().is_some());
         assert!(ErrorCode::E5004.explanation().is_some());
+        // MIR / internal compiler errors:
+        assert!(ErrorCode::E7001.explanation().is_some());
+        assert!(ErrorCode::E7002.explanation().is_some());
+        assert!(ErrorCode::E7003.explanation().is_some());
         // Runtime:
         assert!(ErrorCode::E8001.explanation().is_some());
         assert!(ErrorCode::E8002.explanation().is_some());
+        assert!(ErrorCode::E8003.explanation().is_some());
         assert!(ErrorCode::E8004.explanation().is_some());
+        assert!(ErrorCode::E8005.explanation().is_some());
+        // Module:
+        assert!(ErrorCode::E9001.explanation().is_some());
+        assert!(ErrorCode::E9002.explanation().is_some());
+        // Snap:
+        assert!(ErrorCode::E0601.explanation().is_some());
+        assert!(ErrorCode::E0602.explanation().is_some());
+        assert!(ErrorCode::E0603.explanation().is_some());
+        assert!(ErrorCode::E0604.explanation().is_some());
         // Warnings:
         assert!(ErrorCode::W0001.explanation().is_some());
         assert!(ErrorCode::W0002.explanation().is_some());
@@ -907,14 +935,13 @@ mod tests {
 
     #[test]
     fn test_explanation_returns_none_for_undocumented() {
-        // Any code not in the documented set must return None. Pick codes
-        // from categories that haven't been documented yet.
+        // Any code not in the documented set must return None. Only the
+        // borrow/ownership (E3xxx) and generics/trait (E6xxx) groups
+        // remain undocumented at this point.
         assert!(ErrorCode::E3001.explanation().is_none()); // borrow
+        assert!(ErrorCode::E3005.explanation().is_none()); // borrow
         assert!(ErrorCode::E6001.explanation().is_none()); // generics
-        assert!(ErrorCode::E7001.explanation().is_none()); // MIR
-        assert!(ErrorCode::E8003.explanation().is_none()); // runtime stack overflow
-        assert!(ErrorCode::E9001.explanation().is_none()); // module
-        assert!(ErrorCode::E0601.explanation().is_none()); // snap
+        assert!(ErrorCode::E6003.explanation().is_none()); // generics
     }
 
     #[test]
