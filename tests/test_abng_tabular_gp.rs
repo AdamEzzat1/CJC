@@ -100,11 +100,14 @@ fn route_for(g: &AdaptiveBeliefGraph, x1: f64) -> u32 {
 }
 
 fn train_one(g: &mut AdaptiveBeliefGraph, x1: f64, x2: f64) {
-    let leaf = route_for(g, x1);
+    // Phase 0.8c v14 Item A2 — fused per-row training step. One
+    // `AuditKind::TrainStep` event per row instead of the pre-A2
+    // `BlrUpdated + BeliefUpdate` pair. `train_step` does its own
+    // descend, so the previous `route_for` indirection is folded
+    // into the same call.
     let phi = tabular_features(x1, x2);
     let y = target(x1, x2);
-    g.blr_update(leaf, &phi, &[y]).unwrap();
-    g.observe(leaf, y).unwrap();
+    g.train_step(&[x1], &phi, y).unwrap();
 }
 
 /// Train the graph on `n` deterministic samples drawn from the
@@ -289,8 +292,15 @@ fn tabular_chain_head_canary_locked() {
     println!("tabular canary chain_head = {actual_hex}");
     // Locked at Phase 0.5 ship — fires only on tabular training
     // determinism breakage. Independent of PINN + chess RL canaries.
+    // Re-locked at Phase 0.8c v14 Item A2 — the demo's `train_one`
+    // flipped from `blr_update + observe` (pre-A2: two events / row,
+    // tags 0x0A + 0x01) to `train_step` (post-A2: one TrainStep
+    // event / row, tag 0x1E). The audit-chain payload bytes per
+    // training row therefore changed, so the chain head shifted.
+    // Pre-A2 hex: `cd3f5c7be81f5966d1f41af811cc94a859b653adf9993f1d5b3e23c0a87397e6`.
+    // V14_MIGRATION.md records the v13 → v14 mapping.
     const CANARY_HEX: &str =
-        "cd3f5c7be81f5966d1f41af811cc94a859b653adf9993f1d5b3e23c0a87397e6";
+        "26ab2b37812607a77da2ee0d242558f672c408717ee4dd78c152e9f9f40d6745";
     assert_eq!(
         actual_hex, CANARY_HEX,
         "tabular GP-like chain_head canary mismatch — see comment"

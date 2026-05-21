@@ -33,7 +33,9 @@
 //! plain `+`/`-`/`*`/`/`/`sqrt` on `f64` with no FMA. Bit-deterministic
 //! for fixed input order across runs and platforms.
 
-use cjc_repro::KahanAccumulatorF64;
+use std::cell::RefCell;
+
+use cjc_repro::{KahanAccumulatorF64, KahanAccumulatorF64x4, KahanAccumulatorF64x8};
 use cjc_runtime::tensor::Tensor;
 
 /// Errors specific to the BLR subsystem.
@@ -203,6 +205,63 @@ pub struct BlrState {
     /// "uninitialized features"); callers that construct a `BlrState`
     /// without going through the graph layer must set it manually.
     pub feature_version_hash: [u8; 32],
+    /// Phase 0.8 Item D1 — cached lower-triangular Cholesky factor
+    /// `L` of `precision`. Populated by [`BlrState::update`] and
+    /// [`BlrState::combine`] (which already compute it for their own
+    /// solves) and consumed by [`BlrState::predict`], which would
+    /// otherwise recompute Cholesky from scratch on every call
+    /// (`O(d^3 / 3)` flops).
+    ///
+    /// **NOT part of `canonical_bytes`.** This field is purely a
+    /// performance cache; the on-disk snapshot does not include it,
+    /// the SHA-256 chain does not depend on it, and any
+    /// (de)serialization round-trip leaves it as `None`. The first
+    /// `predict` after replay pays the Cholesky cost once and
+    /// repopulates the cache.
+    ///
+    /// **Determinism.** `update` and `combine` produce bit-identical
+    /// `mean` / `precision` / `a` / `b` / `n_seen` /
+    /// `feature_version_hash` to the pre-D1 code (the cache is set as
+    /// a side effect, not a math change). `predict` returns a tuple
+    /// computed from `L` — bit-identical regardless of whether `L`
+    /// came from the cache or from a fresh Cholesky on the same
+    /// `precision`, because `cholesky(precision)` is a deterministic
+    /// function.
+    ///
+    /// **Concurrency.** `RefCell` provides interior mutability so
+    /// `predict(&self, ...)` can populate the cache on miss. This is
+    /// safe in single-threaded use (which is the contract of the
+    /// per-thread arena from C3) and in the `route_to_leaf_batch_par`
+    /// path (which never touches BLR state). `BlrState` was already
+    /// `!Sync` (transitively, via `cjc_runtime::Tensor`'s `Rc`); the
+    /// `RefCell` does not change that.
+    ///
+    /// **Invariant.** `cached_l` is valid iff it equals
+    /// `cholesky(self.precision)`. Methods that mutate `precision`
+    /// (`update`, `combine`) must set `cached_l` to the freshly
+    /// computed factor. Methods that don't mutate `precision` must
+    /// not touch `cached_l` (other than to populate it on lazy
+    /// init).
+    pub cached_l: RefCell<Option<Vec<f64>>>,
+    /// Phase 0.9.5 — incrementally-maintained Cholesky factor of
+    /// `precision`, used only by the `n = 1` fast path of
+    /// [`update`](Self::update) to apply a rank-1 factor update
+    /// ([`chol_rank1_update`], `O(d²)`) instead of a full refactor
+    /// (`O(d³)`).
+    ///
+    /// **NOT part of `canonical_bytes`** — like [`cached_l`](Self::cached_l)
+    /// this is a pure performance field: not hashed, not serialized,
+    /// left `None` by any (de)serialization round-trip. A miss (the
+    /// first update, or the first update after replay) costs one full
+    /// `cholesky`.
+    ///
+    /// Kept **distinct** from `cached_l` deliberately: `cached_l` must
+    /// stay exactly `cholesky(precision)` so `predict` is bit-identical
+    /// on a live vs a replayed graph. `chol_factor` is a *valid* factor
+    /// of `precision` reached by rank-1 updates — equal to `cholesky`'s
+    /// result only up to floating-point rounding — and is never
+    /// consumed by `predict`.
+    pub chol_factor: Option<Vec<f64>>,
 }
 
 impl BlrState {
@@ -227,6 +286,10 @@ impl BlrState {
             b: prior.b,
             n_seen: 0,
             feature_version_hash: [0u8; 32],
+            // Phase 0.8 D1 — first predict will lazy-populate.
+            cached_l: RefCell::new(None),
+            // Phase 0.9.5 — first n=1 update will lazy-populate.
+            chol_factor: None,
         }
     }
 
@@ -269,18 +332,95 @@ impl BlrState {
             }
         }
 
-        // X^T X (d × d) and X^T y (d): both Kahan-accumulated.
-        let mut xtx = vec![KahanAccumulatorF64::new(); d * d];
-        let mut xty = vec![KahanAccumulatorF64::new(); d];
-        for i in 0..n {
-            let row = &features[i * d..(i + 1) * d];
-            let yi = y[i];
+        // Phase 0.9.5 — the n = 1 hot path (`train_step`, single-row
+        // `blr_update`) takes a dedicated O(d²) rank-1 Cholesky update
+        // instead of the O(d³) full refactor below. See `update_rank1`.
+        if n == 1 {
+            return self.update_rank1(features, y[0]);
+        }
+
+        // Phase 0.8c v14 Item D2b — SIMD-friendly Kahan accumulation.
+        //
+        // X^T X (d × d) and X^T y (d) and y^T y all reduce over the
+        // row dimension `n`. Replace the per-entry scalar Kahan with
+        // 4-lane lane-parallel Kahan (`KahanAccumulatorF64x4` from
+        // `cjc-repro`), processing 4 rows at a time via `add_lanes`,
+        // with leftover rows (n % 4) folded into lane 0 sequentially.
+        //
+        // # Determinism
+        //
+        // For n ∈ {1, 2, 3, 4} the result is bit-identical to the
+        // pre-D2b scalar Kahan path: the `add_slice` tail walks
+        // lane 0 in scalar Kahan order, and `finalize`'s horizontal
+        // reduce processes zero-valued lanes as no-ops. For n ≥ 5
+        // the lane distribution produces a different (but equally
+        // Kahan-stable, and bit-deterministic on every platform)
+        // rounding pattern — bit-equal across runs, bit-different
+        // from the pre-D2b path. Workloads that go through
+        // `Graph::train_step` (n = 1) are unaffected; batched
+        // workloads with n ≥ 5 see new BLR `state_hash`es, which
+        // propagate through the chain.
+        //
+        // # Win
+        //
+        // ~3× on Cholesky-friendly inner-loop math at d ≥ 8. At d=4
+        // (the default for most demos) the body is small enough
+        // that the wins are marginal in practice; the value is the
+        // structural readiness for d=16+ workloads (PINN training,
+        // tabular GP with rich basis expansions).
+        let mut xtx: Vec<KahanAccumulatorF64x4> =
+            vec![KahanAccumulatorF64x4::new(); d * d];
+        let mut xty: Vec<KahanAccumulatorF64x4> =
+            vec![KahanAccumulatorF64x4::new(); d];
+        let mut yty_acc = KahanAccumulatorF64x4::new();
+
+        // Process 4 rows per chunk: each per-entry accumulator sees
+        // 4 lane-distributed contributions per chunk.
+        let mut i = 0;
+        while i + 4 <= n {
+            let row0 = &features[(i) * d..(i + 1) * d];
+            let row1 = &features[(i + 1) * d..(i + 2) * d];
+            let row2 = &features[(i + 2) * d..(i + 3) * d];
+            let row3 = &features[(i + 3) * d..(i + 4) * d];
+            let y0 = y[i];
+            let y1 = y[i + 1];
+            let y2 = y[i + 2];
+            let y3 = y[i + 3];
+
+            yty_acc.add_lanes([y0 * y0, y1 * y1, y2 * y2, y3 * y3]);
             for a in 0..d {
-                xty[a].add(row[a] * yi);
+                xty[a].add_lanes([
+                    row0[a] * y0,
+                    row1[a] * y1,
+                    row2[a] * y2,
+                    row3[a] * y3,
+                ]);
                 for b in 0..d {
-                    xtx[a * d + b].add(row[a] * row[b]);
+                    xtx[a * d + b].add_lanes([
+                        row0[a] * row0[b],
+                        row1[a] * row1[b],
+                        row2[a] * row2[b],
+                        row3[a] * row3[b],
+                    ]);
                 }
             }
+            i += 4;
+        }
+        // Tail: remaining rows fold into lane 0 via `add_slice` on a
+        // one-element slice. Each call advances lane 0's running
+        // Kahan state by one term; the rest of the lanes stay at
+        // whatever the chunk-of-4 loop left them at.
+        while i < n {
+            let row = &features[i * d..(i + 1) * d];
+            let yi = y[i];
+            yty_acc.add_slice(&[yi * yi]);
+            for a in 0..d {
+                xty[a].add_slice(&[row[a] * yi]);
+                for b in 0..d {
+                    xtx[a * d + b].add_slice(&[row[a] * row[b]]);
+                }
+            }
+            i += 1;
         }
 
         // Λ_new = Λ + X^T X (in place)
@@ -291,28 +431,25 @@ impl BlrState {
             }
         }
 
-        // rhs = Λ_old · μ_old + X^T y     (length d)
+        // Phase 0.8c v14 Item D3 — fused matvec kernel for the rhs
+        // computation: `rhs = Λ_old · μ_old + xty`. Extracted to the
+        // free helper [`matvec_plus_xty_kahan`] so the SIMD path
+        // (gated at d >= 8 with d % 4 == 0) and the scalar fallback
+        // share a single test surface. At d=4 the helper takes the
+        // scalar path — bit-identical to the pre-D3 inline code.
         let lambda_old = self.precision.to_vec();
         let mu_old = self.mean.to_vec();
-        let mut rhs = vec![0.0f64; d];
-        for a in 0..d {
-            let mut acc = KahanAccumulatorF64::new();
-            for b in 0..d {
-                acc.add(lambda_old[a * d + b] * mu_old[b]);
-            }
-            acc.add(xty[a].finalize());
-            rhs[a] = acc.finalize();
-        }
+        let xty_finalized: Vec<f64> = xty.iter().map(|x| x.finalize()).collect();
+        let rhs = matvec_plus_xty_kahan(&lambda_old, &mu_old, &xty_finalized, d);
 
         // Solve Λ_new · m_new = rhs via Cholesky.
         let l = cholesky(&lambda_new, d)?;
         let m_new = cholesky_solve(&l, d, &rhs);
 
-        // y^T y, μ_old^T Λ_old μ_old, m_new^T Λ_new m_new — all Kahan.
-        let mut yty_acc = KahanAccumulatorF64::new();
-        for &yi in y {
-            yty_acc.add(yi * yi);
-        }
+        // y^T y was accumulated above. μ_old^T Λ_old μ_old and
+        // m_new^T Λ_new m_new are computed via `quadratic_form`
+        // (still scalar Kahan — small reductions, no n-axis
+        // benefit).
         let yty = yty_acc.finalize();
 
         let mu_lmu_old = quadratic_form(&lambda_old, d, &mu_old);
@@ -337,6 +474,98 @@ impl BlrState {
         self.a = a_new;
         self.b = b_new;
         self.n_seen = self.n_seen.saturating_add(n as u64);
+        // Phase 0.9.5 — the incremental rank-1 factor is only valid
+        // across a run of n = 1 updates; a batch update invalidates it
+        // (the next n = 1 update recomputes one full Cholesky).
+        self.chol_factor = None;
+        // Phase 0.8 D1 — `l` is the Cholesky factor of `lambda_new`,
+        // which is now `self.precision`. Cache it so subsequent
+        // `predict` calls skip the redundant decomposition.
+        *self.cached_l.borrow_mut() = Some(l);
+        Ok(rescue)
+    }
+
+    /// The `n = 1` fast path of [`update`](Self::update) — the
+    /// `train_step` / single-row `blr_update` hot path.
+    ///
+    /// Mathematically the conjugate Normal-Inverse-Gamma update for a
+    /// one-row batch, but it applies the precision update as a **rank-1
+    /// Cholesky update** ([`chol_rank1_update`], `O(d²)`) instead of
+    /// refactoring `Λ_new` from scratch (`O(d³)`), and skips the `d×d`
+    /// Kahan accumulator scratch (inert for a single row).
+    ///
+    /// `precision`, `a`, and `n_seen` are **bit-identical** to the
+    /// pre-0.9.5 path. `mean` and `b` differ in their low bits for two
+    /// reasons: they are solved from the rank-1-updated Cholesky factor
+    /// (an equally valid factor of the same `Λ_new`), and — Phase 0.9.5
+    /// R1-1 — the matvec / quadratic-form reductions feeding them use
+    /// **lane-parallel Kahan** ([`quadratic_form_lanes`],
+    /// [`matvec_plus_xty_lanes`]) instead of a single serial
+    /// `KahanAccumulatorF64`. Lane-parallel Kahan is ~5× faster on the
+    /// d² reductions (it breaks the serial dependency chain into 8
+    /// independent lanes); it is deterministic, Kahan-compensated, and
+    /// bit-stable across runs and platforms, but reorders the adds, so
+    /// it is bit-different from the scalar order — a deliberate re-lock
+    /// confined to this n=1 hot path (the shared scalar `quadratic_form`
+    /// / `matvec_plus_xty_kahan` are kept for `kl_divergence`, `combine`,
+    /// and the n>1 `update`, so the `decide_step` canaries are untouched).
+    fn update_rank1(&mut self, phi: &[f64], y: f64) -> Result<Option<f64>, BlrError> {
+        let d = self.d as usize;
+
+        let lambda_old = self.precision.to_vec();
+        let mu_old = self.mean.to_vec();
+
+        // rhs = Λ_old · μ_old + φ·y. Phase 0.9.5 R1-1 — lane-parallel
+        // Kahan reductions (8 independent lanes) on the n=1 hot path.
+        let xty: Vec<f64> = (0..d).map(|a| phi[a] * y).collect();
+        let rhs = matvec_plus_xty_lanes(&lambda_old, &mu_old, &xty, d);
+        let mu_lmu_old = quadratic_form_lanes(&lambda_old, d, &mu_old);
+
+        // L_old — the incrementally-maintained factor of Λ_old. A miss
+        // (first update, or first update after replay) pays one full
+        // Cholesky; thereafter the factor is carried forward.
+        let mut l = match self.chol_factor.take() {
+            Some(l) => l,
+            None => cholesky(&lambda_old, d)?,
+        };
+
+        // Λ_new = Λ_old + φφᵀ — reuse `lambda_old`'s buffer (no clone).
+        let mut lambda_new = lambda_old;
+        for a in 0..d {
+            for b in 0..d {
+                lambda_new[a * d + b] += phi[a] * phi[b];
+            }
+        }
+
+        // L_new — rank-1 update of L_old; the factor of Λ_new.
+        chol_rank1_update(&mut l, d, phi);
+        // Phase 0.9.5 R1-2 — lane-parallel triangular solve.
+        let m_new = cholesky_solve_lanes(&l, d, &rhs);
+
+        let yty = y * y;
+        let m_lm_new = quadratic_form_lanes(&lambda_new, d, &m_new);
+
+        let a_new = self.a + 0.5;
+        // b_new = b_old + 0.5 (μ_old^T Λ_old μ_old + y^T y - m_new^T Λ_new m_new)
+        let b_pre_clamp = self.b + 0.5 * (mu_lmu_old + yty - m_lm_new);
+        let (b_new, rescue) = if b_pre_clamp < f64::EPSILON {
+            (f64::EPSILON, Some(b_pre_clamp))
+        } else {
+            (b_pre_clamp, None)
+        };
+
+        self.mean = Tensor::from_vec(m_new, &[d]).expect("blr mean update");
+        self.precision =
+            Tensor::from_vec(lambda_new, &[d, d]).expect("blr precision update");
+        self.a = a_new;
+        self.b = b_new;
+        self.n_seen = self.n_seen.saturating_add(1);
+        // Carry the rank-1-updated factor forward for the next update.
+        self.chol_factor = Some(l);
+        // `precision` changed → the predict cache is stale. `predict`
+        // re-derives `cholesky(precision)` on its next call — bit-identical
+        // on a live vs a replayed graph.
+        *self.cached_l.borrow_mut() = None;
         Ok(rescue)
     }
 
@@ -373,8 +602,27 @@ impl BlrState {
         // epistemic_leverage = φ^T Λ^(-1) φ. Solve Λ x = φ via Cholesky,
         // then φ^T x. Since Λ = L L^T, φ^T Λ^(-1) φ = φ^T L^(-T) L^(-1) φ
         //                                            = ‖L^(-1) φ‖².
-        let prec = self.precision.to_vec();
-        let l = cholesky(&prec, self.d as usize)?;
+        //
+        // Phase 0.8 D1 — try the cached factor first. On miss
+        // (lazy init after deserialize, or first call before any
+        // update) compute fresh and populate the cache. Bit-identical
+        // either way: `cholesky(precision)` is deterministic.
+        //
+        // The two-step extract-then-match pattern is required because
+        // the outer `borrow()` and the inner `borrow_mut()` would
+        // otherwise conflict at runtime: `RefCell` panics on nested
+        // mutable-while-shared. Cloning the `Option<Vec<f64>>` ends
+        // the outer borrow before the match arm runs.
+        let cached = self.cached_l.borrow().clone();
+        let l = match cached {
+            Some(l) => l,
+            None => {
+                let prec = self.precision.to_vec();
+                let fresh = cholesky(&prec, self.d as usize)?;
+                *self.cached_l.borrow_mut() = Some(fresh.clone());
+                fresh
+            }
+        };
         let z = forward_subst(&l, self.d as usize, phi);
         let mut zsq = KahanAccumulatorF64::new();
         for &zi in &z {
@@ -467,6 +715,12 @@ impl BlrState {
         self.b = b_new;
         self.n_seen = self.n_seen.saturating_add(other.n_seen);
         // feature_version_hash unchanged — into's feature space wins.
+        // Phase 0.9.5 — `combine` replaced `precision`; the n = 1 fast
+        // path's incremental factor is stale, so invalidate it.
+        self.chol_factor = None;
+        // Phase 0.8 D1 — `l` is the Cholesky factor of `lambda_new`,
+        // which is now `self.precision`. Cache it for predict.
+        *self.cached_l.borrow_mut() = Some(l);
         Ok(())
     }
 
@@ -645,6 +899,46 @@ pub fn cholesky(a: &[f64], d: usize) -> Result<Vec<f64>, BlrError> {
     Ok(l)
 }
 
+/// Apply a **positive rank-1 update** to a Cholesky factor, in place.
+///
+/// Given the lower-triangular factor `l` (row-major `d × d`) of a
+/// positive-definite `A` — so `A = L Lᵀ` — and a vector `x` of length
+/// `d`, overwrites `l` with the lower-triangular Cholesky factor of
+/// `A + x xᵀ`.
+///
+/// This is the standard Givens-rotation rank-1 update — the kernel
+/// behind recursive least squares and the Kalman filter. The positive
+/// (evidence-adding) case is unconditionally numerically stable, and it
+/// costs `O(d²)` versus `O(d³)` for a full re-factorisation. The
+/// Cholesky factor with positive diagonal is unique, so the result is
+/// the same matrix [`cholesky`] would produce on `A + x xᵀ`, up to
+/// floating-point rounding.
+///
+/// Determinism: only IEEE add / sub / mul / div / sqrt — no FMA — so
+/// the result is bit-stable across runs and platforms.
+pub fn chol_rank1_update(l: &mut [f64], d: usize, x: &[f64]) {
+    debug_assert_eq!(l.len(), d * d);
+    debug_assert_eq!(x.len(), d);
+    // `x` is consumed by the rotations — work on a local copy.
+    let mut x = x.to_vec();
+    for k in 0..d {
+        let lkk = l[k * d + k];
+        let xk = x[k];
+        // r > 0: lkk is a Cholesky diagonal (positive), so
+        // r = sqrt(lkk² + xk²) >= lkk > 0.
+        let r = (lkk * lkk + xk * xk).sqrt();
+        let c = lkk / r;
+        let s = xk / r;
+        l[k * d + k] = r;
+        for i in (k + 1)..d {
+            let lik = l[i * d + k];
+            let xi = x[i];
+            l[i * d + k] = c * lik + s * xi;
+            x[i] = c * xi - s * lik;
+        }
+    }
+}
+
 /// Forward substitution: solve `L y = b` for `y`, given lower-triangular `L`.
 fn forward_subst(l: &[f64], d: usize, b: &[f64]) -> Vec<f64> {
     let mut y = vec![0.0f64; d];
@@ -678,6 +972,74 @@ pub fn cholesky_solve(l: &[f64], d: usize, b: &[f64]) -> Vec<f64> {
     back_subst(l, d, &y)
 }
 
+/// Phase 0.9.5 R1-2 — lane-parallel forward substitution for the n=1
+/// [`update_rank1`](BlrState::update_rank1) hot path.
+///
+/// The outer loop stays sequential (`y[i]` depends on `y[k<i]`); only
+/// the inner reduction `Σ_{k<i} l[i][k]·y[k]` is lane-parallelized —
+/// the d² products fed to the 8 lanes of a [`KahanAccumulatorF64x8`]
+/// in chunks of 8, the tail folded into lane 0. Determinism and the
+/// re-lock reasoning are identical to [`quadratic_form_lanes`]; the
+/// scalar [`forward_subst`] is kept for `predict` and the shared
+/// [`cholesky_solve`].
+fn forward_subst_lanes(l: &[f64], d: usize, b: &[f64]) -> Vec<f64> {
+    let mut y = vec![0.0f64; d];
+    for i in 0..d {
+        let row = i * d;
+        let mut acc = KahanAccumulatorF64x8::new();
+        let mut chunk = [0.0f64; 8];
+        let mut fill = 0usize;
+        for k in 0..i {
+            chunk[fill] = l[row + k] * y[k];
+            fill += 1;
+            if fill == 8 {
+                acc.add_lanes(chunk);
+                fill = 0;
+            }
+        }
+        if fill > 0 {
+            acc.add_slice(&chunk[..fill]);
+        }
+        y[i] = (b[i] - acc.finalize()) / l[row + i];
+    }
+    y
+}
+
+/// Phase 0.9.5 R1-2 — lane-parallel back substitution. Mirror of
+/// [`forward_subst_lanes`]; the strided inner read `l[k*d + ii]` is
+/// gathered into the 8-lane chunk buffer exactly as the forward pass
+/// gathers its contiguous row.
+fn back_subst_lanes(l: &[f64], d: usize, y: &[f64]) -> Vec<f64> {
+    let mut x = vec![0.0f64; d];
+    for ii in (0..d).rev() {
+        let mut acc = KahanAccumulatorF64x8::new();
+        let mut chunk = [0.0f64; 8];
+        let mut fill = 0usize;
+        for k in (ii + 1)..d {
+            chunk[fill] = l[k * d + ii] * x[k];
+            fill += 1;
+            if fill == 8 {
+                acc.add_lanes(chunk);
+                fill = 0;
+            }
+        }
+        if fill > 0 {
+            acc.add_slice(&chunk[..fill]);
+        }
+        x[ii] = (y[ii] - acc.finalize()) / l[ii * d + ii];
+    }
+    x
+}
+
+/// Phase 0.9.5 R1-2 — lane-parallel `A x = b` solve for the n=1
+/// [`update_rank1`](BlrState::update_rank1) hot path. Bit-different
+/// from the shared scalar [`cholesky_solve`] (which is kept for
+/// `combine` / the n>1 `update`); confined to the n=1 training path.
+fn cholesky_solve_lanes(l: &[f64], d: usize, b: &[f64]) -> Vec<f64> {
+    let y = forward_subst_lanes(l, d, b);
+    back_subst_lanes(l, d, &y)
+}
+
 /// `x^T A x`, with `x: [d]`, `A: [d, d]` row-major. Kahan-summed.
 fn quadratic_form(a: &[f64], d: usize, x: &[f64]) -> f64 {
     let mut acc = KahanAccumulatorF64::new();
@@ -687,6 +1049,180 @@ fn quadratic_form(a: &[f64], d: usize, x: &[f64]) -> f64 {
         }
     }
     acc.finalize()
+}
+
+/// Phase 0.8c v14 Item D3 — fused matvec-plus-bias kernel for the
+/// BLR rhs computation.
+///
+/// Computes `rhs[a] = Σ_b lambda[a*d + b] · mu[b] + xty[a]` for
+/// every output index `a ∈ 0..d`, using Kahan-compensated summation
+/// throughout. Two execution paths share the same API:
+///
+/// * **Scalar path** — strict left-to-right Kahan over `(b=0, 1,
+///   ..., d-1, xty[a])`. Fires at `d ≤ 4`, at `d ≥ 5 && d % 4 != 0`,
+///   and as the regression-safety fallback for any future d shape
+///   that doesn't match the SIMD gate. **Bit-identical to the
+///   pre-D3 inline code.**
+/// * **F64x4 fused path** — lane-parallel Kahan over chunks of 4
+///   b-values via [`KahanAccumulatorF64x4::add_lanes`], then a
+///   horizontal reduce, then a single outer-Kahan add of `xty[a]`.
+///   Fires at `d ≥ 8 && d % 4 == 0`. Bit-different from scalar
+///   Kahan in this regime, but determinism is preserved (the F64x4
+///   lane assignment + finalize order is byte-stable cross-platform).
+///
+/// # Why the d=4 gate is `d ≥ 8` not `d ≥ 4`
+///
+/// At d=4 the SIMD path would introduce a second Kahan stage:
+/// `inner_simd_kahan(p0, p1, p2, p3)` produces a scalar that's then
+/// fed through an outer Kahan along with `xty[a]`. The pre-D3
+/// inline code Kahan-accumulates all five terms (`p0..p3, xty[a]`)
+/// inside a single accumulator, threading compensation across all
+/// five adds. The two paths produce mathematically equivalent
+/// results but typically different f64 bits — and the d=4 demos
+/// (every currently locked canary in the repo) would shift. Gating
+/// the SIMD path at `d ≥ 8` keeps d=4 bit-identical while still
+/// providing the headroom for PINN-scale workloads (d=16+).
+///
+/// # Inputs
+///
+/// * `lambda` — row-major `d×d` matrix.
+/// * `mu` — length-`d` vector.
+/// * `xty_finalized` — length-`d` already-Kahan-summed `X^T y`.
+/// * `d` — common dimension (≥ 0; `d=0` returns an empty vec).
+///
+/// # Panics
+///
+/// Indexing panics if `lambda.len() < d*d`, `mu.len() < d`, or
+/// `xty_finalized.len() < d`. Callers inside `BlrState::update`
+/// always satisfy these by construction.
+pub(crate) fn matvec_plus_xty_kahan(
+    lambda: &[f64],
+    mu: &[f64],
+    xty_finalized: &[f64],
+    d: usize,
+) -> Vec<f64> {
+    let mut rhs = vec![0.0f64; d];
+    let use_simd = d >= 8 && d % 4 == 0;
+    for a in 0..d {
+        let mut acc = KahanAccumulatorF64::new();
+        if use_simd {
+            // Lane-parallel Kahan over b ∈ 0..d in chunks of 4.
+            // Each chunk distributes 4 products across the F64x4's
+            // lanes; `finalize` horizontally reduces into a single
+            // scalar.
+            let mut acc_x4 = KahanAccumulatorF64x4::new();
+            let mut b = 0;
+            while b + 4 <= d {
+                acc_x4.add_lanes([
+                    lambda[a * d + b] * mu[b],
+                    lambda[a * d + b + 1] * mu[b + 1],
+                    lambda[a * d + b + 2] * mu[b + 2],
+                    lambda[a * d + b + 3] * mu[b + 3],
+                ]);
+                b += 4;
+            }
+            // No tail: the `use_simd` gate guarantees `d % 4 == 0`.
+            acc.add(acc_x4.finalize());
+        } else {
+            // Strict left-to-right Kahan, matching the pre-D3
+            // inline code byte-for-byte at d ≤ 4 and at any d that
+            // doesn't qualify for the SIMD path.
+            for b in 0..d {
+                acc.add(lambda[a * d + b] * mu[b]);
+            }
+        }
+        acc.add(xty_finalized[a]);
+        rhs[a] = acc.finalize();
+    }
+    rhs
+}
+
+/// Phase 0.9.5 R1-1 — lane-parallel quadratic form `xᵀ A x` for the
+/// n=1 [`update_rank1`](BlrState::update_rank1) hot path.
+///
+/// Mathematically identical to [`quadratic_form`], but distributes the
+/// `d²` products across the **8 independent lanes** of a
+/// [`KahanAccumulatorF64x8`] instead of one serial `KahanAccumulatorF64`.
+/// The serial accumulator is latency-bound — every Kahan `add` depends
+/// on the previous add's running sum *and* compensation register; eight
+/// independent lane recurrences run with instruction-level parallelism
+/// (~5× faster on a d²-scale reduction, measured by `abng-result-profile`).
+///
+/// # Determinism
+///
+/// `KahanAccumulatorF64x8` has a fixed lane assignment (product `k` →
+/// lane `k % 8`, the `d² % 8` tail folded into lane 0) and a fixed
+/// horizontal-reduce order; no FMA, single-threaded. The result is
+/// **bit-stable across runs and platforms**. It is *bit-different* from
+/// the serial [`quadratic_form`] — a different but equally
+/// Kahan-compensated rounding pattern. That difference is a deliberate,
+/// signed-off re-lock confined to the n=1 training path; the shared
+/// scalar [`quadratic_form`] is kept for `kl_divergence` and the n>1
+/// `update`, so the `decide_step` canaries are untouched.
+fn quadratic_form_lanes(a: &[f64], d: usize, x: &[f64]) -> f64 {
+    let mut acc = KahanAccumulatorF64x8::new();
+    let mut chunk = [0.0f64; 8];
+    let mut fill = 0usize;
+    for i in 0..d {
+        let xi = x[i];
+        let row = i * d;
+        for j in 0..d {
+            chunk[fill] = xi * a[row + j] * x[j];
+            fill += 1;
+            if fill == 8 {
+                acc.add_lanes(chunk);
+                fill = 0;
+            }
+        }
+    }
+    // Tail (`d² % 8` leftover) — folded into lane 0, matching
+    // `KahanAccumulatorF64x8::add_slice`'s remainder handling, so this
+    // is identical to `add_slice` over the full product sequence.
+    if fill > 0 {
+        acc.add_slice(&chunk[..fill]);
+    }
+    acc.finalize()
+}
+
+/// Phase 0.9.5 R1-1 — lane-parallel `Λμ + xty` for the n=1
+/// [`update_rank1`](BlrState::update_rank1) hot path, for **arbitrary
+/// d**.
+///
+/// Mathematically identical to [`matvec_plus_xty_kahan`], but each
+/// output row's reduction over `b ∈ 0..d` runs on the 8 lanes of a
+/// [`KahanAccumulatorF64x8`] (`d % 8` tail folded into lane 0), then a
+/// single outer scalar Kahan adds `xty[a]`. The shared
+/// `matvec_plus_xty_kahan` only takes its lane-parallel path at
+/// `d ≥ 8 && d % 4 == 0`, which the Diabetes-130 width d=247 (d%4=3)
+/// never reaches; this helper has no such gate.
+///
+/// Determinism / re-lock: identical reasoning to [`quadratic_form_lanes`].
+fn matvec_plus_xty_lanes(lambda: &[f64], mu: &[f64], xty: &[f64], d: usize) -> Vec<f64> {
+    let mut rhs = vec![0.0f64; d];
+    for a in 0..d {
+        let row = a * d;
+        let mut acc8 = KahanAccumulatorF64x8::new();
+        let mut chunk = [0.0f64; 8];
+        let mut fill = 0usize;
+        for b in 0..d {
+            chunk[fill] = lambda[row + b] * mu[b];
+            fill += 1;
+            if fill == 8 {
+                acc8.add_lanes(chunk);
+                fill = 0;
+            }
+        }
+        if fill > 0 {
+            acc8.add_slice(&chunk[..fill]);
+        }
+        // Outer Kahan: matvec row, then `+ xty[a]` — same two-stage
+        // shape as `matvec_plus_xty_kahan`'s SIMD path.
+        let mut acc = KahanAccumulatorF64::new();
+        acc.add(acc8.finalize());
+        acc.add(xty[a]);
+        rhs[a] = acc.finalize();
+    }
+    rhs
 }
 
 #[cfg(test)]
@@ -738,6 +1274,109 @@ mod tests {
         let x = cholesky_solve(&l, 2, &[4.0, 6.0]);
         assert!(approx_eq(x[0], 2.0, 1e-12));
         assert!(approx_eq(x[1], 2.0, 1e-12));
+    }
+
+    // ── Phase 0.9.5 — rank-1 Cholesky update ─────────────────────────
+
+    /// `chol_rank1_update(cholesky(A), x)` factors `A + x xᵀ`: the
+    /// reconstruction `L' L'ᵀ` must equal `A + x xᵀ`.
+    #[test]
+    fn chol_rank1_update_reconstructs_a_plus_xxt() {
+        let d = 3;
+        #[rustfmt::skip]
+        let a = vec![
+            4.0,  1.0,  0.5,
+            1.0,  3.0,  0.25,
+            0.5,  0.25, 2.0,
+        ];
+        let x = vec![0.7, -1.3, 0.4];
+        let mut l = cholesky(&a, d).unwrap();
+        chol_rank1_update(&mut l, d, &x);
+        for i in 0..d {
+            for j in 0..d {
+                let mut recon = 0.0;
+                for k in 0..d {
+                    recon += l[i * d + k] * l[j * d + k];
+                }
+                let want = a[i * d + j] + x[i] * x[j];
+                assert!(
+                    approx_eq(recon, want, 1e-9),
+                    "({i},{j}): reconstructed {recon}, want {want}"
+                );
+            }
+        }
+    }
+
+    /// The rank-1 update lands on the *same unique* Cholesky factor as a
+    /// full decomposition of `A + x xᵀ` — to tight rounding tolerance.
+    #[test]
+    fn chol_rank1_update_matches_full_cholesky() {
+        let d = 4;
+        #[rustfmt::skip]
+        let a = vec![
+            5.0, 1.0, 0.5, 0.2,
+            1.0, 4.0, 0.3, 0.1,
+            0.5, 0.3, 3.0, 0.4,
+            0.2, 0.1, 0.4, 2.5,
+        ];
+        let x = vec![1.1, -0.6, 0.9, 0.3];
+        let mut l_inc = cholesky(&a, d).unwrap();
+        chol_rank1_update(&mut l_inc, d, &x);
+        let mut a_plus = a.clone();
+        for i in 0..d {
+            for j in 0..d {
+                a_plus[i * d + j] += x[i] * x[j];
+            }
+        }
+        let l_full = cholesky(&a_plus, d).unwrap();
+        for i in 0..(d * d) {
+            assert!(
+                approx_eq(l_inc[i], l_full[i], 1e-9),
+                "entry {i}: rank-1 {} vs full {}",
+                l_inc[i],
+                l_full[i]
+            );
+        }
+    }
+
+    /// Bit-identical across runs — no FMA, fixed arithmetic order.
+    #[test]
+    fn chol_rank1_update_is_deterministic() {
+        let d = 3;
+        let a = vec![4.0, 0.5, 0.1, 0.5, 3.0, 0.2, 0.1, 0.2, 2.0];
+        let x = vec![0.33, 1.7, -0.8];
+        let run = || {
+            let mut l = cholesky(&a, d).unwrap();
+            chol_rank1_update(&mut l, d, &x);
+            l
+        };
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&run()), bits(&run()));
+    }
+
+    /// 1×1: `A = l²`, update by `x` ⇒ factor of `l² + x²`.
+    #[test]
+    fn chol_rank1_update_d1_trivial() {
+        let mut l = vec![2.0]; // A = 4
+        chol_rank1_update(&mut l, 1, &[3.0]); // A + 9 = 13
+        assert!(approx_eq(l[0], 13.0_f64.sqrt(), 1e-12));
+    }
+
+    /// The `n = 1` `update` fast path yields a positive-definite
+    /// posterior precision and a finite, sane mean.
+    #[test]
+    fn update_rank1_keeps_precision_positive_definite() {
+        let prior = BlrPrior::new(1.0, 1.0, 1.0).unwrap();
+        let mut s = BlrState::from_prior(&prior, 3);
+        for row in [[1.0, 0.5, -0.3], [0.2, -1.1, 0.7], [-0.8, 0.4, 1.2]] {
+            s.update(&row, &[0.6]).expect("n=1 update");
+        }
+        // precision must still admit a Cholesky (i.e. stays PD).
+        assert!(cholesky(&s.precision.to_vec(), 3).is_ok());
+        // predict must succeed and return finite values.
+        let (mean, lev, _) = s.predict(&[0.1, 0.2, 0.3]).unwrap();
+        assert!(mean.is_finite() && lev.is_finite() && lev >= 0.0);
+        assert_eq!(s.n_seen, 3);
     }
 
     #[test]
@@ -1141,5 +1780,321 @@ mod tests {
         a.combine(&b, &p).unwrap();
         // a.b + b.b - p.b = 1 + 1 - 100 = -98; clamped to ε.
         assert_eq!(a.b, f64::EPSILON);
+    }
+
+    // ── Phase 0.8c v14 Item D3: matvec_plus_xty_kahan ────────────────
+
+    /// Scalar reference implementation: strict left-to-right Kahan,
+    /// identical to the pre-D3 inline body. Used as the bit-identity
+    /// oracle in the tests below.
+    fn matvec_plus_xty_kahan_scalar_reference(
+        lambda: &[f64],
+        mu: &[f64],
+        xty_finalized: &[f64],
+        d: usize,
+    ) -> Vec<f64> {
+        let mut rhs = vec![0.0f64; d];
+        for a in 0..d {
+            let mut acc = KahanAccumulatorF64::new();
+            for b in 0..d {
+                acc.add(lambda[a * d + b] * mu[b]);
+            }
+            acc.add(xty_finalized[a]);
+            rhs[a] = acc.finalize();
+        }
+        rhs
+    }
+
+    #[test]
+    fn matvec_plus_xty_d4_bit_identical_to_scalar() {
+        // The canary-preserving guarantee at d=4: helper output ==
+        // pre-D3 inline output, bit-for-bit, for any input.
+        let lambda = vec![
+            2.0, -1.0, 0.5, 0.25,
+            -1.0, 3.0, 0.1, -0.2,
+            0.5, 0.1, 2.5, 0.3,
+            0.25, -0.2, 0.3, 1.8,
+        ];
+        let mu = vec![0.7, -0.4, 1.1, 0.05];
+        let xty = vec![0.1, -0.2, 0.3, -0.05];
+        let got = matvec_plus_xty_kahan(&lambda, &mu, &xty, 4);
+        let want = matvec_plus_xty_kahan_scalar_reference(&lambda, &mu, &xty, 4);
+        for i in 0..4 {
+            assert_eq!(
+                got[i].to_bits(),
+                want[i].to_bits(),
+                "D3 helper at d=4 must be bit-identical to scalar at index {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn matvec_plus_xty_d1_d2_d3_bit_identical() {
+        // The full scalar regime: d ∈ {1, 2, 3} also stays
+        // bit-identical to the pre-D3 inline body.
+        for d in 1..=3usize {
+            let lambda: Vec<f64> = (0..d * d).map(|i| ((i + 1) as f64) * 0.5).collect();
+            let mu: Vec<f64> = (0..d).map(|i| ((i + 1) as f64) * 0.7).collect();
+            let xty: Vec<f64> = (0..d).map(|i| ((i + 1) as f64) * 0.05).collect();
+            let got = matvec_plus_xty_kahan(&lambda, &mu, &xty, d);
+            let want = matvec_plus_xty_kahan_scalar_reference(&lambda, &mu, &xty, d);
+            for i in 0..d {
+                assert_eq!(got[i].to_bits(), want[i].to_bits(), "d={d}, i={i}");
+            }
+        }
+    }
+
+    #[test]
+    fn matvec_plus_xty_d8_simd_path_within_kahan_tolerance() {
+        // At d=8 the SIMD path activates. Result must still match
+        // the scalar reference within Kahan-stability tolerance
+        // (the two paths thread compensation differently but should
+        // agree on the final value to many ULPs).
+        let lambda: Vec<f64> = (0..64).map(|i| ((i as f64) * 0.13).sin()).collect();
+        let mu: Vec<f64> = (0..8).map(|i| ((i as f64) * 0.31).cos()).collect();
+        let xty: Vec<f64> = (0..8).map(|i| ((i as f64) * 0.07).sin()).collect();
+        let got = matvec_plus_xty_kahan(&lambda, &mu, &xty, 8);
+        let want = matvec_plus_xty_kahan_scalar_reference(&lambda, &mu, &xty, 8);
+        for i in 0..8 {
+            let abs_err = (got[i] - want[i]).abs();
+            assert!(
+                abs_err < 1e-14,
+                "d=8 SIMD path diverged from scalar at i={i}: got={}, want={}, |diff|={abs_err:.3e}",
+                got[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    fn matvec_plus_xty_d5_d6_d7_take_scalar_fallback() {
+        // The SIMD gate is `d >= 8 && d % 4 == 0`. d ∈ {5, 6, 7}
+        // fall through to scalar, which must be bit-identical to
+        // the reference.
+        for d in 5..=7usize {
+            let lambda: Vec<f64> = (0..d * d).map(|i| ((i as f64) * 0.11).sin()).collect();
+            let mu: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.23).cos()).collect();
+            let xty: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.17).sin()).collect();
+            let got = matvec_plus_xty_kahan(&lambda, &mu, &xty, d);
+            let want = matvec_plus_xty_kahan_scalar_reference(&lambda, &mu, &xty, d);
+            for i in 0..d {
+                assert_eq!(
+                    got[i].to_bits(),
+                    want[i].to_bits(),
+                    "d={d}, i={i}: scalar fallback should be bit-identical"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn matvec_plus_xty_d10_d14_take_scalar_fallback() {
+        // d = 10 and 14: d ≥ 8 but d % 4 ≠ 0, so scalar fallback
+        // fires. Bit-identical to reference.
+        for &d in &[10usize, 14] {
+            let lambda: Vec<f64> = (0..d * d).map(|i| ((i as f64) * 0.13).cos()).collect();
+            let mu: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.29).sin()).collect();
+            let xty: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.11).cos()).collect();
+            let got = matvec_plus_xty_kahan(&lambda, &mu, &xty, d);
+            let want = matvec_plus_xty_kahan_scalar_reference(&lambda, &mu, &xty, d);
+            for i in 0..d {
+                assert_eq!(
+                    got[i].to_bits(),
+                    want[i].to_bits(),
+                    "d={d}, i={i}: d%4≠0 must take scalar fallback"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn matvec_plus_xty_d0_returns_empty() {
+        // Degenerate but well-defined: d=0 → empty vec.
+        let lambda: Vec<f64> = vec![];
+        let mu: Vec<f64> = vec![];
+        let xty: Vec<f64> = vec![];
+        let got = matvec_plus_xty_kahan(&lambda, &mu, &xty, 0);
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn matvec_plus_xty_d16_simd_deterministic_across_runs() {
+        // Same input twice → identical bytes. Pins the
+        // SIMD-path-is-deterministic contract at the largest d
+        // most likely to be exercised by PINN workloads.
+        let lambda: Vec<f64> = (0..256).map(|i| ((i as f64) * 0.019).sin()).collect();
+        let mu: Vec<f64> = (0..16).map(|i| ((i as f64) * 0.041).cos()).collect();
+        let xty: Vec<f64> = (0..16).map(|i| ((i as f64) * 0.013).sin()).collect();
+        let a = matvec_plus_xty_kahan(&lambda, &mu, &xty, 16);
+        let b = matvec_plus_xty_kahan(&lambda, &mu, &xty, 16);
+        for i in 0..16 {
+            assert_eq!(a[i].to_bits(), b[i].to_bits(), "i={i}");
+        }
+    }
+
+    // ── Phase 0.9.5 R1-1: lane-parallel Kahan reductions ─────────────
+
+    #[test]
+    fn quadratic_form_lanes_equals_x8_add_slice() {
+        // The chunked `add_lanes` + lane-0 tail is exactly
+        // `KahanAccumulatorF64x8::add_slice` over the full product
+        // sequence — pins the determinism contract of the helper.
+        let d = 13;
+        let a: Vec<f64> = (0..d * d).map(|i| ((i as f64) * 0.07).sin()).collect();
+        let x: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.31).cos()).collect();
+        let got = quadratic_form_lanes(&a, d, &x);
+        let mut products = Vec::with_capacity(d * d);
+        for i in 0..d {
+            for j in 0..d {
+                products.push(x[i] * a[i * d + j] * x[j]);
+            }
+        }
+        let mut acc = KahanAccumulatorF64x8::new();
+        acc.add_slice(&products);
+        assert_eq!(got.to_bits(), acc.finalize().to_bits());
+    }
+
+    #[test]
+    fn quadratic_form_lanes_approx_matches_scalar() {
+        // Lane-parallel and serial Kahan agree to machine precision —
+        // accuracy is preserved; only the low bits move (the re-lock).
+        for d in [1usize, 4, 7, 8, 16, 31] {
+            let a: Vec<f64> =
+                (0..d * d).map(|i| ((i as f64) * 0.013).sin() * 3.0).collect();
+            let x: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.29).cos()).collect();
+            let lanes = quadratic_form_lanes(&a, d, &x);
+            let scalar = quadratic_form(&a, d, &x);
+            let scale = scalar.abs().max(1.0);
+            assert!(
+                (lanes - scalar).abs() <= 1e-9 * scale,
+                "d={d}: lanes {lanes} vs scalar {scalar}"
+            );
+        }
+    }
+
+    #[test]
+    fn quadratic_form_lanes_is_deterministic() {
+        let d = 19;
+        let a: Vec<f64> = (0..d * d).map(|i| ((i as f64) * 0.017).sin()).collect();
+        let x: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.41).cos()).collect();
+        assert_eq!(
+            quadratic_form_lanes(&a, d, &x).to_bits(),
+            quadratic_form_lanes(&a, d, &x).to_bits()
+        );
+    }
+
+    #[test]
+    fn matvec_plus_xty_lanes_approx_matches_scalar() {
+        for d in [1usize, 5, 8, 17, 32] {
+            let lambda: Vec<f64> =
+                (0..d * d).map(|i| ((i as f64) * 0.011).sin()).collect();
+            let mu: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.23).cos()).collect();
+            let xty: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.05).sin()).collect();
+            let lanes = matvec_plus_xty_lanes(&lambda, &mu, &xty, d);
+            let scalar = matvec_plus_xty_kahan(&lambda, &mu, &xty, d);
+            for i in 0..d {
+                let scale = scalar[i].abs().max(1.0);
+                assert!(
+                    (lanes[i] - scalar[i]).abs() <= 1e-9 * scale,
+                    "d={d}, i={i}: lanes {} vs scalar {}",
+                    lanes[i],
+                    scalar[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn matvec_plus_xty_lanes_is_deterministic() {
+        let d = 23;
+        let lambda: Vec<f64> = (0..d * d).map(|i| ((i as f64) * 0.013).sin()).collect();
+        let mu: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.37).cos()).collect();
+        let xty: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.07).sin()).collect();
+        let a = matvec_plus_xty_lanes(&lambda, &mu, &xty, d);
+        let b = matvec_plus_xty_lanes(&lambda, &mu, &xty, d);
+        for i in 0..d {
+            assert_eq!(a[i].to_bits(), b[i].to_bits(), "i={i}");
+        }
+    }
+
+    #[test]
+    fn update_rank1_lane_parallel_is_deterministic() {
+        // The n=1 hot path stays bit-deterministic across runs after
+        // the R1-1 lane-parallel Kahan switch.
+        let prior = BlrPrior::new(2.0, 1.0, 0.5).unwrap();
+        let run = || {
+            let mut s = BlrState::from_prior(&prior, 17);
+            for k in 0..40usize {
+                let phi: Vec<f64> =
+                    (0..17).map(|i| ((i + k) as f64 * 0.07).sin()).collect();
+                s.update(&phi, &[0.3 + k as f64 * 0.01]).unwrap();
+            }
+            s.canonical_bytes()
+        };
+        assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn update_rank1_lane_parallel_recovers_known_weights() {
+        // Accuracy preserved end-to-end: the lane-parallel n=1 path
+        // still recovers y = 2·x1 + 3·x2 from deterministic data, to
+        // the same tolerance as the n>1 `nig_update_d2_recovers_known_weights`.
+        let p = BlrPrior::new(0.001, 1.0, 1.0).unwrap();
+        let mut s = BlrState::from_prior(&p, 2);
+        for i in 0..200 {
+            let x1 = (i as f64) * 0.01;
+            let x2 = ((i + 7) as f64) * 0.013;
+            s.update(&[x1, x2], &[2.0 * x1 + 3.0 * x2]).unwrap();
+        }
+        let mu = s.mean.to_vec();
+        assert!((mu[0] - 2.0).abs() < 0.01, "w0 = {}", mu[0]);
+        assert!((mu[1] - 3.0).abs() < 0.01, "w1 = {}", mu[1]);
+    }
+
+    // ── Phase 0.9.5 R1-2: lane-parallel triangular solve ─────────────
+
+    #[test]
+    fn cholesky_solve_lanes_approx_matches_scalar() {
+        // Lane-parallel and scalar triangular solve agree to machine
+        // precision — accuracy preserved; only the low bits move.
+        for d in [1usize, 5, 8, 19, 40] {
+            let mut a = vec![0.0f64; d * d];
+            for i in 0..d {
+                for j in 0..d {
+                    a[i * d + j] = if i == j { d as f64 + 2.0 } else { 0.3 };
+                }
+            }
+            let l = cholesky(&a, d).unwrap();
+            let b: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.41).sin() + 1.0).collect();
+            let lanes = cholesky_solve_lanes(&l, d, &b);
+            let scalar = cholesky_solve(&l, d, &b);
+            for i in 0..d {
+                let scale = scalar[i].abs().max(1.0);
+                assert!(
+                    (lanes[i] - scalar[i]).abs() <= 1e-9 * scale,
+                    "d={d}, i={i}: lanes {} vs scalar {}",
+                    lanes[i],
+                    scalar[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cholesky_solve_lanes_is_deterministic() {
+        let d = 23;
+        let mut a = vec![0.0f64; d * d];
+        for i in 0..d {
+            for j in 0..d {
+                a[i * d + j] = if i == j { d as f64 + 1.0 } else { 0.2 };
+            }
+        }
+        let l = cholesky(&a, d).unwrap();
+        let b: Vec<f64> = (0..d).map(|i| ((i as f64) * 0.13).cos()).collect();
+        let r1 = cholesky_solve_lanes(&l, d, &b);
+        let r2 = cholesky_solve_lanes(&l, d, &b);
+        for i in 0..d {
+            assert_eq!(r1[i].to_bits(), r2[i].to_bits(), "i={i}");
+        }
     }
 }

@@ -333,8 +333,14 @@ fn main() {
     // ── Phase 0.8 Item B3: zstd-compressed snapshot ratio + speed ─────
     bench_serialize_compressed(seed);
 
+    // ── Phase 0.8 Item C3: concurrent multi-graph training scaling ────
+    bench_concurrent_training_scaling(seed);
+
+    // ── Phase 0.8 Item D1: BLR predict cache hit vs miss ──────────────
+    bench_blr_predict_cache(seed);
+
     eprintln!("=== Done ===");
-    eprintln!("Phase 0.6 baseline + Items 3/4/7/8 perf wins + Phase 0.8 B1 mmap + C1 parallel route + D2 SIMD Kahan + B2 streaming encode + B3 zstd compression.");
+    eprintln!("Phase 0.6 baseline + Items 3/4/7/8 perf wins + Phase 0.8 B1 mmap + C1 parallel route + D2 SIMD Kahan + B2 streaming encode + B3 zstd compression + C3 arena + D1 BLR cache.");
 }
 
 /// Phase 0.6 Item 3 — measure smart-replay fast-forward speedup over
@@ -1107,4 +1113,187 @@ fn bench_serialize_compressed(seed: u64) {
         uncompressed_min_ns as f64 / 1e6,
         replay_compressed_min_ns as f64 / 1e6,
     );
+}
+
+/// Phase 0.8 Item C3 — measure concurrent multi-graph training
+/// throughput vs serial.
+///
+/// Workload: train N independent graphs for K observations each.
+/// Serial path runs all N on a single thread; concurrent path
+/// spawns N threads (one graph per thread). Each graph is
+/// constructed inside its thread, so the graph itself never
+/// crosses a thread boundary — the per-thread arena pattern.
+///
+/// Speedup is bounded by the number of physical cores on the
+/// host. On a 4-core CPU we expect roughly 3–4× at N=4. This is
+/// a classic embarrassingly-parallel workload that demonstrates
+/// the arena's no-contention contract.
+fn bench_concurrent_training_scaling(seed: u64) {
+    const N_GRAPHS: usize = 4;
+    const N_OBS_PER_GRAPH: usize = 5_000;
+    const N_TRIALS: usize = 5;
+
+    let seeds: [u64; N_GRAPHS] = [
+        seed,
+        seed.wrapping_add(1),
+        seed.wrapping_add(2),
+        seed.wrapping_add(3),
+    ];
+
+    // Warm caches: train one small graph to discount JIT/branch
+    // predictor effects.
+    {
+        let mut g = AdaptiveBeliefGraph::new(0);
+        for i in 0..500 {
+            g.observe(0, (i as f64) * 0.001).unwrap();
+        }
+    }
+
+    // Serial path.
+    let mut serial_min_ns = u128::MAX;
+    let mut serial_head_acc = [0u8; 32];
+    for _ in 0..N_TRIALS {
+        let start = Instant::now();
+        let mut acc = [0u8; 32];
+        for &s in &seeds {
+            let mut g = AdaptiveBeliefGraph::new(s);
+            for i in 0..N_OBS_PER_GRAPH {
+                g.observe(0, (i as f64) * 0.001).unwrap();
+            }
+            for (a, b) in acc.iter_mut().zip(g.chain_head.iter()) {
+                *a ^= b;
+            }
+        }
+        let elapsed = start.elapsed().as_nanos();
+        if elapsed < serial_min_ns {
+            serial_min_ns = elapsed;
+            serial_head_acc = acc;
+        }
+    }
+
+    // Concurrent path: one thread per graph.
+    let mut concurrent_min_ns = u128::MAX;
+    let mut concurrent_head_acc = [0u8; 32];
+    for _ in 0..N_TRIALS {
+        let start = Instant::now();
+        let heads: Vec<[u8; 32]> = std::thread::scope(|sc| {
+            let handles: Vec<_> = seeds
+                .iter()
+                .map(|&s| {
+                    sc.spawn(move || {
+                        let mut g = AdaptiveBeliefGraph::new(s);
+                        for i in 0..N_OBS_PER_GRAPH {
+                            g.observe(0, (i as f64) * 0.001).unwrap();
+                        }
+                        g.chain_head
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("training thread panicked"))
+                .collect()
+        });
+        let mut acc = [0u8; 32];
+        for h in heads {
+            for (a, b) in acc.iter_mut().zip(h.iter()) {
+                *a ^= b;
+            }
+        }
+        let elapsed = start.elapsed().as_nanos();
+        if elapsed < concurrent_min_ns {
+            concurrent_min_ns = elapsed;
+            concurrent_head_acc = acc;
+        }
+    }
+
+    // Determinism witness: serial and concurrent must produce the
+    // same XOR-of-chain-heads. If a hidden global lock were
+    // ordering training events differently, this would diverge.
+    assert_eq!(
+        serial_head_acc, concurrent_head_acc,
+        "serial and concurrent training must produce identical chain_heads"
+    );
+
+    let ratio = serial_min_ns as f64 / concurrent_min_ns as f64;
+    println!(
+        r#"{{"op":"concurrent_training_scaling","n_graphs":{N_GRAPHS},"n_obs_per_graph":{N_OBS_PER_GRAPH},"serial_min_ns":{serial_min_ns},"concurrent_min_ns":{concurrent_min_ns},"speedup":{ratio:.3}}}"#
+    );
+    eprintln!(
+        "  concurrent_training_scaling N={N_GRAPHS}: serial={:.2} ms  concurrent={:.2} ms  speedup={:.2}x  (ideal=N at no-contention; bounded by physical cores)",
+        serial_min_ns as f64 / 1e6,
+        concurrent_min_ns as f64 / 1e6,
+        ratio,
+    );
+}
+/// Phase 0.8 Item D1 — measure `BlrState::predict` with the cached
+/// Cholesky factor (cache hit, the new D1 path) vs without (cache
+/// miss, equivalent to pre-D1 behavior). The cache-miss measurement
+/// is the honest baseline because that's what every predict call
+/// did before D1 shipped.
+///
+/// Workload: prime a `BlrState` with `n_updates` rows so its
+/// precision matrix has accumulated state, then time `predict`
+/// repeatedly. Cache-hit measurements run a tight predict loop
+/// with the cache populated. Cache-miss measurements clear the
+/// cache before each predict to force the Cholesky.
+///
+/// Sweeps `d` in {4, 8, 16, 32} so the speedup curve as a function
+/// of dimension is visible. The handoff predicted ~30% at d=4 and
+/// ~70% at d=16+; at d=32 (PINN-style features) the win compounds.
+fn bench_blr_predict_cache(seed: u64) {
+    use cjc_abng::blr::BlrState;
+    let _ = seed; // unused: BLR math is seed-agnostic
+
+    const N_ITERS: usize = 50_000;
+    const N_UPDATES_PRIMING: usize = 64;
+
+    for &d in &[4usize, 8, 16, 32] {
+        // Prime the state: feed in `N_UPDATES_PRIMING` rows so
+        // precision is well-conditioned (not the prior identity).
+        let prior = BlrPrior::new(2.0, 1.0, 0.5).unwrap();
+        let mut s = BlrState::from_prior(&prior, d as u32);
+        let phi: Vec<f64> = (0..d).map(|i| 1.0 / ((i + 1) as f64)).collect();
+        for k in 0..N_UPDATES_PRIMING {
+            let yi = [0.7 + (k as f64) * 0.0001];
+            s.update(&phi, &yi).unwrap();
+        }
+        // Cache is populated by the last update. Verify.
+        assert!(s.cached_l.borrow().is_some());
+
+        // ─ Cache-hit path (new D1 default) ────────────────────────
+        for _ in 0..N_WARMUP {
+            let _ = s.predict(&phi).unwrap();
+        }
+        let start = Instant::now();
+        for _ in 0..N_ITERS {
+            let _ = s.predict(&phi).unwrap();
+        }
+        let cached_elapsed = start.elapsed();
+        let cached_per_op = cached_elapsed.as_nanos() as f64 / N_ITERS as f64;
+
+        // ─ Cache-miss path (pre-D1 equivalent) ───────────────────
+        // Clear the cache before each predict to force fresh
+        // Cholesky on every call.
+        for _ in 0..N_WARMUP {
+            *s.cached_l.borrow_mut() = None;
+            let _ = s.predict(&phi).unwrap();
+        }
+        let start = Instant::now();
+        for _ in 0..N_ITERS {
+            *s.cached_l.borrow_mut() = None;
+            let _ = s.predict(&phi).unwrap();
+        }
+        let miss_elapsed = start.elapsed();
+        let miss_per_op = miss_elapsed.as_nanos() as f64 / N_ITERS as f64;
+
+        let speedup = miss_per_op / cached_per_op;
+        println!(
+            r#"{{"op":"blr_predict_cache","d":{d},"miss_ns":{miss_per_op:.2},"hit_ns":{cached_per_op:.2},"speedup":{speedup:.3}}}"#
+        );
+        eprintln!(
+            "  blr_predict_cache d={d:>2}: miss={:>8.0} ns/op  hit={:>8.0} ns/op  speedup={:.2}x",
+            miss_per_op, cached_per_op, speedup,
+        );
+    }
 }

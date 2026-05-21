@@ -23,6 +23,7 @@
 pub mod audit;
 pub mod blr;
 pub mod calibration;
+pub mod categorical;
 pub mod children;
 pub mod codebook;
 pub mod density;
@@ -31,10 +32,12 @@ pub mod drift;
 pub mod graph;
 pub mod leaf_head;
 pub mod maturity;
+pub mod merkle;
 pub mod node;
 pub mod policy;
 pub mod predict_snap;
 pub mod route;
+pub mod route_cache;
 pub mod serialize;
 pub mod signature;
 pub mod stats;
@@ -42,10 +45,16 @@ pub mod stats;
 pub use audit::{AuditEvent, AuditKind, AuditLog, AuditLogIter};
 pub use blr::{BlrError, BlrPrior, BlrState};
 pub use calibration::{CalibrationBins, CalibrationError};
+pub use categorical::{
+    CategoricalTransform, CategoryDictionary, CategoryDictionaryBuilder, ColumnRole, OneHotEncoder,
+    RarePolicy, Schema, SchemaSnapshot, Standardizer, TransformConfig, TransformError,
+};
 pub use children::{AdaptiveChildren, ChildrenKind};
 pub use codebook::{CodebookError, QuantileCodebook};
 pub use density::{DensityError, DensityTracker};
-pub use dispatch::dispatch_abng;
+pub use dispatch::{
+    arena_graph_count, arena_next_id, dispatch_abng, reset_arena,
+};
 pub use drift::{DriftBaseline, DriftError};
 pub use graph::{ActionKind, AdaptiveBeliefGraph, GraphError};
 pub use leaf_head::{LeafHead, LeafHeadError};
@@ -53,6 +62,7 @@ pub use maturity::Maturity;
 pub use node::{AdaptiveBeliefNode, NodeId};
 pub use policy::{DecisionPolicy, PolicyError};
 pub use route::RouteEvidence;
+pub use route_cache::RouteCache;
 pub use signature::NodeSignature;
 pub use stats::NodeStats;
 

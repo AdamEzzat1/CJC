@@ -159,6 +159,19 @@ pub struct AdaptiveBeliefNode {
     /// repeated stamps with the same hash — only a *change* emits a
     /// new event.
     pub provenance_stamp_hash: [u8; 32],
+    /// Phase 0.9.5 R1-2 — lazily-computed cache of
+    /// `params_hash(&self.params)`. `validate_blr_inputs` checks the
+    /// per-node MLP-params hash against the BLR's `feature_version_hash`
+    /// on **every** `blr_update` / `train_step`; caching it skips
+    /// re-hashing the (unchanged) params on every training row.
+    ///
+    /// Invalidated to `None` by `leaf_set_param` / `leaf_set_params_batch`
+    /// (the only ops that mutate an existing node's `params`); `None`
+    /// after construction and after any (de)serialization round-trip,
+    /// where the first `validate_blr_inputs` re-populates it. **NOT
+    /// serialized** — a pure performance field, fully derived from
+    /// `params`, so the wire format is unchanged.
+    pub params_hash_cache: Option<[u8; 32]>,
 }
 
 impl AdaptiveBeliefNode {
@@ -193,6 +206,8 @@ impl AdaptiveBeliefNode {
             welford_routing: SignatureWelford::new(),
             // Phase 0.5 Item 1 — unstamped by default.
             provenance_stamp_hash: [0u8; 32],
+            // Phase 0.9.5 R1-2 — lazily populated on first validate.
+            params_hash_cache: None,
         }
     }
 

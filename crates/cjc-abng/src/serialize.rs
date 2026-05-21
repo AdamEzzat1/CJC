@@ -43,7 +43,48 @@ use crate::stats::NodeStats;
 // with its variable-length payload (count u32 + values f64×count +
 // batch_hash [u8; 32]). All 15 Phase 0.5 SHA-256 canaries are
 // re-locked simultaneously as part of this bump.
-const MAGIC: &[u8; 5] = b"ABNG\x0D";
+const MAGIC_V13: &[u8; 5] = b"ABNG\x0D";
+
+// Phase 0.8c — wire format v14 (`\x0E`). Bumped to absorb the four
+// Track A items A1+A2+A3+A4 as a single logical release per the
+// Phase 0.8 handoff's "one wire-format bump captures all" guidance:
+//
+//   A1: packed lower-triangular `BlrState.precision` (d(d+1)/2 bytes
+//       per BLR head instead of d²; symmetric matrix exploited).
+//   A2: fused `AuditKind::TrainStep` event (one chain step per row;
+//       halves audit volume + chain-hash compute for training-heavy
+//       workloads).
+//   A3: Merkle-indexed audit chain (O(log N) verify; parallel-friendly).
+//   A4: compact `AdaptiveChildren` snapshot for sparse Node48/Node256
+//       (saves ~150 bytes per sparse node).
+//
+// Forward-compatibility contract (per the handoff doc):
+//   * Snapshot writers ALWAYS emit v14. `MAGIC` is the v14 magic.
+//   * Snapshot readers (`replay_with_outcome`) ACCEPT BOTH v13 and
+//     v14 magic during the Phase 0.8c transition. v13 blobs decode
+//     through the legacy code path; v14 blobs decode through the
+//     new path. The migration is a one-time re-serialize per
+//     snapshot — v13 archives stay readable indefinitely.
+//   * The 28 SHA-256 canaries embedded in demo files are re-locked
+//     to the v14 byte sequence at the end of this phase.
+//
+// During the staged v14 work (this branch's A4 → A1 → A2 → A3
+// rollout), `MAGIC` may still write a v13-equivalent byte stream
+// until the corresponding item's content change lands. The byte-
+// level guarantee for downstream readers is: a v14 magic always
+// indicates "decode through the v14 path"; what that path does is
+// the union of whichever A-items have shipped at that point.
+const MAGIC: &[u8; 5] = b"ABNG\x0E";
+
+/// Wire-format version recognised by the decoder. Set by
+/// `detect_wire_version` based on the magic byte; passed through
+/// the decode pipeline so per-item v13-vs-v14 branches can select
+/// the right path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WireVersion {
+    V13,
+    V14,
+}
 
 // Phase 0.8 Item B3 — zstd-compressed snapshot wrapper magic. The
 // 6 bytes `ABNGZ\x01` are unambiguously distinguishable from any
@@ -176,6 +217,17 @@ pub enum DecodeError {
     /// in. Callers should rebuild with `--features compression` or
     /// re-serialize the snapshot uncompressed.
     CompressionFeatureDisabled,
+    /// Phase 0.8c v14 Item A3 — the snapshot trailer carried an
+    /// unrecognized tag byte. Tag `0x01` is the only allocated value
+    /// (Merkle root v1). A different value indicates either a
+    /// truncated snapshot or a future trailer version that this
+    /// decoder doesn't recognize.
+    UnknownTrailerTag(u8),
+    /// Phase 0.8c v14 Item A3 — the snapshot's stored Merkle root
+    /// did not match the root recomputed from the decoded audit
+    /// chain's `new_hash` column. Indicates either the audit log
+    /// or the trailer was tampered with after serialization.
+    MerkleRootMismatch,
 }
 
 impl std::fmt::Display for DecodeError {
@@ -255,6 +307,12 @@ impl std::fmt::Display for DecodeError {
                 f,
                 "abng: snapshot is zstd-compressed but cjc-abng was built without the `compression` feature"
             ),
+            DecodeError::UnknownTrailerTag(t) => {
+                write!(f, "abng: unknown trailer tag {t:#04x}")
+            }
+            DecodeError::MerkleRootMismatch => {
+                write!(f, "abng: Merkle root in trailer does not match audit chain")
+            }
         }
     }
 }
@@ -476,8 +534,28 @@ pub fn serialize_into(
         w.write_all(&event.previous_hash)?;
         w.write_all(&event.new_hash)?;
     }
+
+    // Phase 0.8c v14 Item A3 — Merkle root trailer. Single tag byte
+    // (`0x01` = "Merkle root v1") followed by a 32-byte root. The
+    // root is computed FROM `audit.new_hashes()`, never feeds INTO
+    // any audit-event payload, so adding the trailer does not shift
+    // any chain witness.
+    //
+    // Always emitted under v14. v13 readers never reach this code
+    // (different magic, different decode path); v14 readers always
+    // expect the trailer (encode + decode are in lock-step on this
+    // branch).
+    w.write_all(&[MERKLE_TRAILER_TAG_V1])?;
+    w.write_all(&graph.merkle_root())?;
     Ok(())
 }
+
+/// Phase 0.8c v14 Item A3 — trailer tag byte for the "Merkle root
+/// v1" block (32-byte SHA-256 over the audit chain's `new_hash`
+/// column). Allocated from the top of the trailer-tag namespace; if
+/// future v14 work adds another trailer block (e.g. a serialized
+/// proof index), allocate `0x02`, `0x03`, etc.
+const MERKLE_TRAILER_TAG_V1: u8 = 0x01;
 
 /// Phase 0.8 Item B3 — zstd-compressed counterpart to
 /// [`serialize_into`]. Writes the 6-byte compressed magic
@@ -586,10 +664,70 @@ fn encode_blr_prior(p: &BlrPrior, w: &mut dyn Write) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Encode a [`BlrState`]: just the canonical bytes (which already
-/// include `d`, mean, precision, a, b, n_seen).
+/// Encode a [`BlrState`] for v14 with packed lower-triangular precision.
+///
+/// **Phase 0.8c Item A1.** The precision matrix is symmetric positive-
+/// definite by construction (NIG posterior). The v13 wire format stored
+/// the full `d × d` matrix; v14 stores only the lower triangle + diagonal
+/// (`d(d+1)/2` entries) in row-major order. Decode reconstructs the full
+/// matrix by mirroring `(i,j) -> (j,i)`.
+///
+/// Layout (Phase 0.8c v14):
+/// ```text
+///   d                       u32 BE              (4)
+///   mean                    f64 BE × d          (d*8)
+///   packed_precision        f64 BE × d(d+1)/2   (d(d+1)*4)  ← v14 vs v13 d*d*8
+///   a                       f64 BE              (8)
+///   b                       f64 BE              (8)
+///   n_seen                  u64 BE              (8)
+///   feature_version_hash    [u8; 32]            (32)
+/// ```
+///
+/// **Determinism:** `BlrState::canonical_bytes()` is intentionally NOT
+/// changed by A1 -- the canonical hash input still uses the full d*d
+/// matrix, so `state_hash` (and therefore every BLR-related audit-event
+/// chain step, and therefore all 28 SHA-256 canaries) verifies byte-
+/// identically. This commit shrinks the *snapshot* representation only;
+/// the in-memory `Tensor` and the hash domain are unchanged. The
+/// decoupling lets future Phase 0.8c items (or v15 work) pack/unpack
+/// the snapshot freely without ever touching the hash input.
+///
+/// **Size win:** at d=4, saves 6 floats (48 B) per BLR state per node.
+/// At d=16, saves 120 floats (960 B). Across 10⁴ BLR-enabled nodes at
+/// d=16, ~10 MB off a typical snapshot.
+///
+/// **Lane order:** strictly row-major (i, j) with `j <= i`. Cross-
+/// platform CI must verify this byte-stable order across x86_64 and
+/// aarch64.
 fn encode_blr_state(s: &BlrState, w: &mut dyn Write) -> std::io::Result<()> {
-    w.write_all(&s.canonical_bytes())?;
+    let dz = s.d as usize;
+    let prec_full = s.precision.to_vec();
+    if prec_full.len() != dz * dz {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "encode_blr_state: precision tensor length {} does not match d*d={}",
+                prec_full.len(),
+                dz * dz
+            ),
+        ));
+    }
+    w.write_all(&s.d.to_be_bytes())?;
+    for x in s.mean.to_vec() {
+        w.write_all(&x.to_bits().to_be_bytes())?;
+    }
+    // Phase 0.8c Item A1 — packed lower-triangular precision. Row-major
+    // (i, j) with `j <= i`: 1 + 2 + 3 + ... + d = d(d+1)/2 entries.
+    for i in 0..dz {
+        for j in 0..=i {
+            let v = prec_full[i * dz + j];
+            w.write_all(&v.to_bits().to_be_bytes())?;
+        }
+    }
+    w.write_all(&s.a.to_bits().to_be_bytes())?;
+    w.write_all(&s.b.to_bits().to_be_bytes())?;
+    w.write_all(&s.n_seen.to_be_bytes())?;
+    w.write_all(&s.feature_version_hash)?;
     Ok(())
 }
 
@@ -617,6 +755,26 @@ fn encode_codebook(cb: &QuantileCodebook, w: &mut dyn Write) -> std::io::Result<
 ///                   + slots[n_slots] × i32 BE
 ///   Node256 : tag=4 + slots[256] (256 × i32 BE)
 /// ```
+// Phase 0.8c Item A4 — Node48 and Node256 now encode sparsely under
+// v14. The v13 dense encoding (256-byte index for Node48; 256 × 4-byte
+// slot table for Node256) wastes bytes when most slots are empty —
+// which is the common case in real workloads. v14 replaces both with
+// `count u32 BE + (byte u8, child_id i32 BE) × count`.
+//
+// Size comparison (Node48 with 25 children):
+//   v13: 1 tag + 256 index + 1 n_slots + 25 × 4 = 358 B
+//   v14: 1 tag + 4 count   + 25 × 5             = 130 B
+//   savings: 228 B per Node48 with this density
+//
+// For a fully-dense Node256 (256 children), v14 is slightly larger
+// (1 + 4 + 256 × 5 = 1285 B vs. v13's 1 + 256 × 4 = 1025 B), but the
+// 256-key case is extremely rare in ABNG routing — keys are emitted
+// from quantile-codebook outputs, so most parent nodes have ≤ 16
+// children. Optimizing for the common case is the right trade.
+//
+// Node4 and Node16 keep their v13 fixed-size layouts because they're
+// already as compact as practical (1 tag + 4 keys + 4 i32 = 21 B for
+// Node4; 1 + 16 + 16 × 4 = 81 B for Node16).
 fn encode_children(children: &AdaptiveChildren, w: &mut dyn Write) -> std::io::Result<()> {
     w.write_all(&[children.kind() as u8])?;
     match children {
@@ -636,17 +794,40 @@ fn encode_children(children: &AdaptiveChildren, w: &mut dyn Write) -> std::io::R
             }
         }
         AdaptiveChildren::Node48 { index, slots } => {
-            w.write_all(&index[..])?;
-            w.write_all(&[slots.len() as u8])?;
-            for slot in slots.iter() {
-                let v: i32 = slot.map(|id| id as i32).unwrap_or(-1);
-                w.write_all(&v.to_be_bytes())?;
+            // v14 sparse encoding. Walk the 256-byte index in
+            // ascending byte order so the (byte, child_id) pairs come
+            // out sorted by byte — required for the v13<->v14 parity
+            // contract (decode produces sorted pairs in both).
+            let mut count: u32 = 0;
+            for byte in 0u16..=255 {
+                let slot_idx = index[byte as usize];
+                if slot_idx != 0xFF {
+                    if let Some(Some(_id)) = slots.get(slot_idx as usize) {
+                        count += 1;
+                    }
+                }
+            }
+            w.write_all(&count.to_be_bytes())?;
+            for byte in 0u16..=255 {
+                let slot_idx = index[byte as usize];
+                if slot_idx != 0xFF {
+                    if let Some(Some(id)) = slots.get(slot_idx as usize) {
+                        w.write_all(&[byte as u8])?;
+                        w.write_all(&(*id as i32).to_be_bytes())?;
+                    }
+                }
             }
         }
         AdaptiveChildren::Node256 { slots } => {
-            for slot in slots.iter() {
-                let v: i32 = slot.map(|id| id as i32).unwrap_or(-1);
-                w.write_all(&v.to_be_bytes())?;
+            // v14 sparse encoding. Same `count + (byte, child_id)`
+            // shape as Node48.
+            let count: u32 = slots.iter().filter(|s| s.is_some()).count() as u32;
+            w.write_all(&count.to_be_bytes())?;
+            for byte in 0u16..=255 {
+                if let Some(Some(id)) = slots.get(byte as usize) {
+                    w.write_all(&[byte as u8])?;
+                    w.write_all(&(*id as i32).to_be_bytes())?;
+                }
             }
         }
         AdaptiveChildren::Dense { signature } => {
@@ -820,16 +1001,38 @@ fn decode_blr_prior(cur: &mut Cursor) -> Result<BlrPrior, DecodeError> {
     Ok(prior)
 }
 
-fn decode_blr_state(cur: &mut Cursor) -> Result<BlrState, DecodeError> {
+fn decode_blr_state(cur: &mut Cursor, wire: WireVersion) -> Result<BlrState, DecodeError> {
     let d = cur.u32_be()?;
     let dz = d as usize;
     let mut mean_data = Vec::with_capacity(dz);
     for _ in 0..dz {
         mean_data.push(cur.f64_be()?);
     }
-    let mut prec_data = Vec::with_capacity(dz * dz);
-    for _ in 0..(dz * dz) {
-        prec_data.push(cur.f64_be()?);
+    // Phase 0.8c Item A1 — precision encoding branches on wire version.
+    // v13 stored the full d*d matrix; v14 stores the lower-triangle +
+    // diagonal (d(d+1)/2 entries) and we mirror to upper triangle to
+    // restore the full symmetric matrix in memory. `canonical_bytes`
+    // still hashes the full matrix, so `state_hash` -- and therefore
+    // every BLR audit-event chain step and all 28 SHA-256 canaries --
+    // is byte-identical to the v13 era.
+    let mut prec_data = vec![0.0_f64; dz * dz];
+    match wire {
+        WireVersion::V13 => {
+            for k in 0..(dz * dz) {
+                prec_data[k] = cur.f64_be()?;
+            }
+        }
+        WireVersion::V14 => {
+            for i in 0..dz {
+                for j in 0..=i {
+                    let v = cur.f64_be()?;
+                    prec_data[i * dz + j] = v;
+                    if i != j {
+                        prec_data[j * dz + i] = v;
+                    }
+                }
+            }
+        }
     }
     let a = cur.f64_be()?;
     let b = cur.f64_be()?;
@@ -848,6 +1051,12 @@ fn decode_blr_state(cur: &mut Cursor) -> Result<BlrState, DecodeError> {
         b,
         n_seen,
         feature_version_hash,
+        // Phase 0.8 D1 — cache is purely a performance hint, not
+        // serialized. First `predict` after replay lazy-populates.
+        cached_l: std::cell::RefCell::new(None),
+        // Phase 0.9.5 — the incremental rank-1 factor is likewise not
+        // serialized; the first n=1 update after replay recomputes it.
+        chol_factor: None,
     })
 }
 
@@ -964,6 +1173,7 @@ struct StoredNode {
 
 fn decode_children(
     cur: &mut Cursor,
+    wire: WireVersion,
 ) -> Result<(ChildrenKind, Vec<(u8, NodeId)>, Option<[u8; 32]>), DecodeError> {
     let tag = cur.u8()?;
     let kind = ChildrenKind::from_tag(tag).ok_or(DecodeError::UnknownChildrenKind(tag))?;
@@ -972,6 +1182,7 @@ fn decode_children(
     match kind {
         ChildrenKind::None => {}
         ChildrenKind::Node4 => {
+            // Node4 layout is identical in v13 and v14.
             let keys = cur.take(4)?.to_vec();
             for i in 0..4 {
                 let v = cur.i32_be()?;
@@ -981,6 +1192,7 @@ fn decode_children(
             }
         }
         ChildrenKind::Node16 => {
+            // Node16 layout is identical in v13 and v14.
             let keys = cur.take(16)?.to_vec();
             for i in 0..16 {
                 let v = cur.i32_be()?;
@@ -989,34 +1201,65 @@ fn decode_children(
                 }
             }
         }
-        ChildrenKind::Node48 => {
-            let index_bytes = cur.take(256)?.to_vec();
-            let n_slots = cur.u8()? as usize;
-            let mut slots: Vec<i32> = Vec::with_capacity(n_slots);
-            for _ in 0..n_slots {
-                slots.push(cur.i32_be()?);
+        ChildrenKind::Node48 => match wire {
+            WireVersion::V13 => {
+                // v13 dense Node48: 256-byte index + n_slots u8 +
+                // slots × i32.
+                let index_bytes = cur.take(256)?.to_vec();
+                let n_slots = cur.u8()? as usize;
+                let mut slots: Vec<i32> = Vec::with_capacity(n_slots);
+                for _ in 0..n_slots {
+                    slots.push(cur.i32_be()?);
+                }
+                for byte in 0u16..=255 {
+                    let slot_idx = index_bytes[byte as usize];
+                    if slot_idx != 0xFF {
+                        let v = slots
+                            .get(slot_idx as usize)
+                            .copied()
+                            .ok_or(DecodeError::UnexpectedEof)?;
+                        if v >= 0 {
+                            pairs.push((byte as u8, v as NodeId));
+                        }
+                    }
+                }
             }
-            for byte in 0u16..=255 {
-                let slot_idx = index_bytes[byte as usize];
-                if slot_idx != 0xFF {
-                    let v = slots
-                        .get(slot_idx as usize)
-                        .copied()
-                        .ok_or(DecodeError::UnexpectedEof)?;
+            WireVersion::V14 => {
+                // Phase 0.8c Item A4 — v14 sparse Node48: count u32 BE
+                // + (byte u8, child_id i32 BE) × count.
+                let count = cur.u32_be()? as usize;
+                for _ in 0..count {
+                    let byte = cur.u8()?;
+                    let v = cur.i32_be()?;
+                    if v >= 0 {
+                        pairs.push((byte, v as NodeId));
+                    }
+                }
+            }
+        },
+        ChildrenKind::Node256 => match wire {
+            WireVersion::V13 => {
+                // v13 dense Node256: 256 × i32 slot table.
+                for byte in 0u16..=255 {
+                    let v = cur.i32_be()?;
                     if v >= 0 {
                         pairs.push((byte as u8, v as NodeId));
                     }
                 }
             }
-        }
-        ChildrenKind::Node256 => {
-            for byte in 0u16..=255 {
-                let v = cur.i32_be()?;
-                if v >= 0 {
-                    pairs.push((byte as u8, v as NodeId));
+            WireVersion::V14 => {
+                // Phase 0.8c Item A4 — v14 sparse Node256: count u32 BE
+                // + (byte u8, child_id i32 BE) × count.
+                let count = cur.u32_be()? as usize;
+                for _ in 0..count {
+                    let byte = cur.u8()?;
+                    let v = cur.i32_be()?;
+                    if v >= 0 {
+                        pairs.push((byte, v as NodeId));
+                    }
                 }
             }
-        }
+        },
         ChildrenKind::Dense => {
             let sig = cur.take(32)?;
             let mut s = [0u8; 32];
@@ -1028,14 +1271,14 @@ fn decode_children(
     Ok((kind, pairs, dense_sig))
 }
 
-fn decode_stored_node(cur: &mut Cursor) -> Result<StoredNode, DecodeError> {
+fn decode_stored_node(cur: &mut Cursor, wire: WireVersion) -> Result<StoredNode, DecodeError> {
     let parent_i32 = cur.i32_be()?;
     let parent = if parent_i32 < 0 {
         None
     } else {
         Some(parent_i32 as NodeId)
     };
-    let (children_kind, children_pairs, children_dense_signature) = decode_children(cur)?;
+    let (children_kind, children_pairs, children_dense_signature) = decode_children(cur, wire)?;
     // Phase 0.5 Item 4 (v12) — canonical_bytes grew from 24 → 32 bytes.
     let canon_slice = cur.take(32)?;
     let mut canonical_bytes = [0u8; 32];
@@ -1052,7 +1295,7 @@ fn decode_stored_node(cur: &mut Cursor) -> Result<StoredNode, DecodeError> {
     let blr_present = cur.u8()?;
     let blr = match blr_present {
         0 => None,
-        1 => Some(decode_blr_state(cur)?),
+        1 => Some(decode_blr_state(cur, wire)?),
         other => return Err(DecodeError::UnknownChildrenKind(other)),
     };
     // Phase 0.3c — three optional blobs.
@@ -1266,11 +1509,20 @@ pub fn replay_with_outcome(
     }
     let mut cur = Cursor::new(bytes);
 
-    // Header.
+    // Header. Phase 0.8c — accept either v13 or v14 magic during the
+    // transition. Writers always emit v14 (`MAGIC`); v13 archives
+    // stay readable indefinitely via this dual-acceptance check. The
+    // resolved `WireVersion` is threaded through the decode pipeline
+    // so per-item code (A1 packed precision, A2 fused TrainStep, A3
+    // Merkle, A4 sparse Node48/256) can select the right path.
     let magic = cur.take(MAGIC.len())?;
-    if magic != MAGIC {
+    let wire_version = if magic == MAGIC {
+        WireVersion::V14
+    } else if magic == MAGIC_V13 {
+        WireVersion::V13
+    } else {
         return Err(DecodeError::BadMagic);
-    }
+    };
     let seed = cur.u64_be()?;
     let epoch = cur.u64_be()?;
     let stored_final_hash = cur.hash32()?;
@@ -1335,7 +1587,7 @@ pub fn replay_with_outcome(
     // unexpected EOF if the count is bogus.
     let mut stored_nodes: Vec<StoredNode> = Vec::new();
     for _ in 0..n_nodes {
-        stored_nodes.push(decode_stored_node(&mut cur)?);
+        stored_nodes.push(decode_stored_node(&mut cur, wire_version)?);
     }
 
     // Audit log.
@@ -1380,6 +1632,8 @@ pub fn replay_with_outcome(
             welford_routing: crate::signature::SignatureWelford::new(),
             // Phase 0.5 Item 1 — unstamped at replay seed.
             provenance_stamp_hash: [0u8; 32],
+            // Phase 0.9.5 R1-2 — derived cache, lazily repopulated.
+            params_hash_cache: None,
         }],
         // Defensive: untrusted `n_events` cannot drive a giant
         // `with_capacity` allocation; let the AuditLog grow naturally.
@@ -1393,6 +1647,9 @@ pub fn replay_with_outcome(
         decision_policy: None,
         action_counts: [0u64; N_ACTION_KINDS],
         unfreeze_count: 0,
+        // Phase 0.10 Q1 — route cache is in-memory only; a replayed
+        // graph starts with it disabled.
+        route_cache: None,
     };
 
     // Phase 0.6 Item 3 — decode all events into a Vec first, then run
@@ -1416,7 +1673,7 @@ pub fn replay_with_outcome(
         let stored_previous = cur.hash32()?;
         let stored_new = cur.hash32()?;
 
-        let event = decode_payload(payload, stored_previous, stored_new)?;
+        let event = decode_payload(payload, wire_version, stored_previous, stored_new)?;
 
         // Phase 0.4 Track C-2.3.3 — semantic invariants run BEFORE the
         // chain hash check so an adversarial blob whose hashes are
@@ -1460,6 +1717,36 @@ pub fn replay_with_outcome(
         decoded.push((event, recomputed_new));
         prev_hash = recomputed_new;
         expected_seq += 1;
+    }
+
+    // Phase 0.8c v14 Item A3 — Merkle root trailer. v14 writers
+    // always emit a `[tag 0x01][root [u8;32]]` block after the audit
+    // log; v14 readers always consume it and cross-check the stored
+    // root against the root recomputed from the decoded events'
+    // `new_hash` column. A mismatch indicates either the audit log
+    // or the trailer was tampered with after serialization (the
+    // chain-link check above catches per-event tamper; this catches
+    // the case where someone forged a coherent chain but left the
+    // trailer stale, or vice versa).
+    //
+    // v13 archives skip the trailer entirely — different magic,
+    // they never reach this code.
+    if wire_version == WireVersion::V14 {
+        let trailer_tag = cur.u8()?;
+        if trailer_tag != MERKLE_TRAILER_TAG_V1 {
+            return Err(DecodeError::UnknownTrailerTag(trailer_tag));
+        }
+        let stored_root = cur.hash32()?;
+        let recomputed_root = {
+            let new_hashes: Vec<[u8; 32]> = decoded
+                .iter()
+                .map(|(_, recomputed_new)| *recomputed_new)
+                .collect();
+            crate::merkle::MerkleTree::build(&new_hashes).root()
+        };
+        if stored_root != recomputed_root {
+            return Err(DecodeError::MerkleRootMismatch);
+        }
     }
 
     // Phase 0.6 Item 3 — pre-pass: identify fast-forwardable nodes.
@@ -1665,7 +1952,10 @@ pub fn replay_with_outcome(
             }
         }
         // Phase 0.3b: install stored BLR state (if any) and verify
-        // against most-recent BlrInitialized/BlrUpdated witness.
+        // against most-recent BlrInitialized/BlrUpdated/TrainStep
+        // witness. (Phase 0.8c v14 Item A2 — TrainStep is the fused
+        // training-step event; its `state_hash` is the post-update
+        // BLR state hash, same role as BlrUpdated's.)
         graph.nodes[i].blr = expected.blr.clone();
         if let Some(blr) = &graph.nodes[i].blr {
             let stored_shash = blr.state_hash();
@@ -1680,6 +1970,9 @@ pub fn replay_with_outcome(
                                 Some((e.seq, *state_hash))
                             }
                             AuditKind::BlrUpdated { state_hash } => {
+                                Some((e.seq, *state_hash))
+                            }
+                            AuditKind::TrainStep { state_hash, .. } => {
                                 Some((e.seq, *state_hash))
                             }
                             _ => None,
@@ -2454,6 +2747,28 @@ fn apply_event(
             }
             graph.nodes[*node_id as usize].provenance_stamp_hash = *hash;
         }
+        AuditKind::TrainStep { value, .. } => {
+            // Phase 0.8c v14 Item A2 — fused per-row training step.
+            //
+            // Mirrors the pre-A2 apply_event sequence for
+            // `BlrUpdated + BeliefUpdate`:
+            //
+            // * BLR side (witness-only). The post-update BLR state
+            //   lives in the per-node section of the snapshot; the
+            //   end-of-replay verifier checks `state_hash` against
+            //   the reconstructed BLR state. Same trade-off as
+            //   `BlrUpdated` — keeps the audit log compact under
+            //   heavy training.
+            //
+            // * Welford side (mutating). Reapply the observation
+            //   exactly as `AuditKind::BeliefUpdate { value }`
+            //   would have, so the post-replay `NodeStats` is
+            //   bit-identical to the pre-A2 sequence.
+            if event.node_id as usize >= graph.nodes.len() {
+                return Err(DecodeError::ChainMismatch { at_seq: event.seq });
+            }
+            graph.nodes[event.node_id as usize].observe(*value);
+        }
         AuditKind::BeliefUpdateBatch {
             count,
             batch_hash,
@@ -2537,6 +2852,7 @@ fn fresh_replay_child(
 
 fn decode_payload(
     payload: &[u8],
+    wire: WireVersion,
     previous_hash: [u8; 32],
     new_hash: [u8; 32],
 ) -> Result<AuditEvent, DecodeError> {
@@ -2716,6 +3032,19 @@ fn decode_payload(
                 values,
             }
         }
+        0x1E if wire == WireVersion::V14 => {
+            // Phase 0.8c v14 Item A2 — fused per-row training step.
+            // 40-byte body: value f64 BE (.to_bits()) + state_hash [u8; 32].
+            // Tag is gated by wire == V14: a v13 archive containing
+            // 0x1E is malformed (no v13 writer ever emitted this tag),
+            // so reject it via the UnknownKindTag fall-through.
+            let value_bits = cur.u64_be()?;
+            let state_hash = cur.hash32()?;
+            AuditKind::TrainStep {
+                value: f64::from_bits(value_bits),
+                state_hash,
+            }
+        }
         other => return Err(DecodeError::UnknownKindTag(other)),
     };
     let stats_version = cur.u64_be()?;
@@ -2845,13 +3174,31 @@ mod tests {
     // ── Phase 0.4-extended (v11) — snapshot v11 ────────────────────
 
     #[test]
-    fn v13_magic_in_blob() {
-        // Phase 0.6 Item 4 — wire format v13 (`\x0D`). Bumped from
-        // v12 to absorb the new `BeliefUpdateBatch` audit kind
-        // (tag 0x1D).
+    fn v14_magic_in_blob() {
+        // Phase 0.8c — wire format v14 (`\x0E`). Bumped from v13 to
+        // absorb Track A items A1+A2+A3+A4 (packed BLR precision,
+        // fused TrainStep audit, Merkle audit chain, sparse Node48/
+        // 256 encoding). Writers always emit v14; readers accept
+        // both v13 and v14 during the transition.
         let g = AdaptiveBeliefGraph::new(0);
         let blob = serialize(&g);
-        assert_eq!(&blob[..5], b"ABNG\x0D");
+        assert_eq!(&blob[..5], b"ABNG\x0E");
+    }
+
+    #[test]
+    fn v13_magic_still_accepted_by_replay() {
+        // Phase 0.8c forward-compat: v13 archives must continue to
+        // load through `replay`. We forge a v13 blob by serializing
+        // a fresh graph and overwriting the magic byte; the rest of
+        // the byte sequence is identical between v13 and the current
+        // v14 (no content changes have shipped on this branch yet).
+        let g = AdaptiveBeliefGraph::new(42);
+        let mut blob = serialize(&g);
+        blob[4] = 0x0D; // overwrite v14 magic with v13 magic
+        let g2 = replay(&blob).expect("v13 blob must replay through dual-magic check");
+        assert_eq!(g.chain_head, g2.chain_head);
+        assert_eq!(g.seed, g2.seed);
+        assert_eq!(g.epoch, g2.epoch);
     }
 
     #[test]

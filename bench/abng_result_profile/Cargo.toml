@@ -1,0 +1,19 @@
+[package]
+name = "abng-result-profile"
+version = "0.1.7"
+edition = "2021"
+
+[[bin]]
+name = "abng_result_profile"
+path = "main.rs"
+
+[dependencies]
+# Phase 0.9.5 Research Phase R0 — empirical profiler for the ABNG
+# result path (transform -> train_step -> predict). Depends only on the
+# crates the result path itself touches.
+cjc-abng = { path = "../../crates/cjc-abng" }
+cjc-ad = { path = "../../crates/cjc-ad" }
+cjc-snap = { path = "../../crates/cjc-snap" }
+# Research Phase R1 — scalar vs lane-parallel Kahan accumulator
+# comparison (the `update`'s reduction-throughput question).
+cjc-repro = { path = "../../crates/cjc-repro" }

@@ -251,6 +251,10 @@ fn snapshot_round_trip_after_reset_preserves_fvh() {
     g.blr_update(0, &[1.0, 0.5], &[2.0]).unwrap();
 
     let pre_fvh = g.nodes[0].blr.as_ref().unwrap().feature_version_hash;
+    // Phase 0.9.5 R0-3 (Tier 2 Option C) — flush periodic-checkpoint
+    // BLR witnesses before serialize so replay's end-of-replay verifier
+    // finds a real state hash for the mid-interval node.
+    g.checkpoint_blr();
     let blob = serialize(&g);
     let g2 = replay(&blob).expect("replays cleanly");
     let post_fvh = g2.nodes[0].blr.as_ref().unwrap().feature_version_hash;

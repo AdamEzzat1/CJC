@@ -77,8 +77,15 @@ fn tabular_cjcl_chain_head_canary_locked() {
     // tabular canary. Fires on CJC-Lang interpreter determinism
     // breakage, BLR conjugate update arithmetic change, or
     // dispatch-routing change for the abng_blr_n_seen / observe path.
+    // Re-locked at Phase 0.8c v14 Item A2 — `tabular_source.cjcl`'s
+    // `train_one` flipped from `abng_blr_update + abng_observe`
+    // (pre-A2: two events / row, tags 0x0A + 0x01) to
+    // `abng_train_step` (post-A2: one TrainStep event / row, tag
+    // 0x1E). Pre-A2 hex:
+    // `4ffacae41d76f505335218ee0479c656e059024cb7e8d6c95350bbc2af09be54`.
+    // V14_MIGRATION.md records the v13 → v14 mapping.
     const CANARY_HEX: &str =
-        "4ffacae41d76f505335218ee0479c656e059024cb7e8d6c95350bbc2af09be54";
+        "6b3374934095965bca39904a48a5ab557f80347910ed555bae6ea4bd762510fe";
     assert_eq!(
         chain, CANARY_HEX,
         "cjcl tabular chain_head canary mismatch — see comment"

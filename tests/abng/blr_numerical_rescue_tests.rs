@@ -133,6 +133,11 @@ fn rescue_event_round_trip_byte_identical() {
     let mut g = graph_with_degenerate_prior();
     g.blr_update(0, &[1.0, 0.5], &[0.0]).unwrap(); // first call clamps
     g.blr_update(0, &[2.0, 1.0], &[0.0]).unwrap(); // subsequent: no clamp
+    // Phase 0.9.5 R0-3 (Tier 2 Option C) — flush the periodic-checkpoint
+    // BLR witness before snapshotting (the two n=1 blr_updates above
+    // left node 0 mid-interval). Captured into head_before/audit_before
+    // so the round-trip assertions compare post-checkpoint state.
+    g.checkpoint_blr();
     let head_before = g.chain_head;
     let audit_before = g.audit_len();
     let rescue_before = g
@@ -172,6 +177,10 @@ fn rescue_event_apply_event_is_no_op() {
     let pre_b = g.nodes[0].blr.as_ref().unwrap().b;
     let pre_n_seen = g.nodes[0].blr.as_ref().unwrap().n_seen;
 
+    // Phase 0.9.5 R0-3 (Tier 2 Option C) — flush the periodic-checkpoint
+    // BLR witness so replay's verifier finds a real state hash. Neither
+    // `b` nor `n_seen` is touched by the flush.
+    g.checkpoint_blr();
     let blob = serialize(&g);
     let g2 = replay(&blob).unwrap();
     let post_b = g2.nodes[0].blr.as_ref().unwrap().b;

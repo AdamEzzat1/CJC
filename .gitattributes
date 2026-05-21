@@ -1,0 +1,20 @@
+# Test data — pinned by SHA-256, must not be line-ending-converted.
+# The pinned hashes in `tests/abng/baseline_wisconsin_bc.rs` (and
+# any future tests/data/* pins) attest to the exact byte stream
+# served by the upstream source. Git's autocrlf machinery would
+# silently change those bytes on Windows checkouts; marking these
+# paths as `binary` disables both CRLF↔LF conversion and any
+# textual diff that would otherwise be useless on a 569-row CSV.
+tests/data/* binary
+
+# bench_results/ artifacts are deterministic, byte-stable outputs
+# of `cargo test --ignored ...` producers. Force LF so the
+# committed bytes match what producers emit on every platform.
+# Without this, a Windows checkout sees CRLF in working tree,
+# the byte-stability test's "render → write → readback" check
+# would fail at readback, and `git diff` would be noisy across
+# platforms.
+bench_results/**/*.md text eol=lf
+bench_results/**/*.csv text eol=lf
+bench_results/**/*.txt text eol=lf
+bench_results/**/*.svg text eol=lf

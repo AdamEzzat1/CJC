@@ -17,6 +17,8 @@
 //! * `verify_chain()` — recompute every event's `new_hash` and confirm
 //!   the chain is consistent.
 
+use std::cell::RefCell;
+
 use cjc_ad::pinn::Activation;
 use cjc_runtime::tensor::Tensor;
 
@@ -32,11 +34,55 @@ use crate::leaf_head::{expected_param_shape, init_params, params_hash, LeafHead,
 use crate::node::{AdaptiveBeliefNode, NodeId};
 use crate::policy::{DecisionPolicy, PolicyError};
 use crate::route::RouteEvidence;
+use crate::route_cache::RouteCache;
 use crate::signature::NodeSignature;
 
 /// Number of structural-action kinds tracked by [`AdaptiveBeliefGraph::action_counts`].
 /// Indexed in tag order: 0=Grow, 1=Split, 2=Merge, 3=Prune, 4=Compress, 5=Freeze.
 pub const N_ACTION_KINDS: usize = 6;
+
+/// Phase 0.9.5 R0-3 (Tier 2 Option C) — BLR audit-checkpoint interval.
+///
+/// `train_step` and the `n = 1` `blr_update` hot path SHA-256 the full
+/// `d×d` precision matrix into the `TrainStep` / `BlrUpdated` audit
+/// witness only when the node's post-update `n_seen` is a multiple of
+/// this; the intermediate rows carry the [`BLR_INTERMEDIATE_WITNESS`]
+/// sentinel. Profiling (Research Phase R0) showed that per-row
+/// `state_hash` is ~67 % of the result path and ~91 % of *that* is
+/// irreducible SHA-256 compression over the `d²` matrix; checkpointing
+/// every 64th update cuts per-row hashing ~64× while bounding
+/// state-tamper localization to a 64-row window.
+///
+/// A graph trained past a non-multiple of this **must** be flushed
+/// with [`AdaptiveBeliefGraph::checkpoint_blr`] before serialization,
+/// or replay fails with `DecodeError::BlrStateHashMismatch`.
+///
+/// This value is part of the determinism contract: changing it shifts
+/// every BLR-related audit-chain head (the `decide_step` canaries and
+/// the Wisconsin BC baseline pin the resulting hexes).
+pub const BLR_CHECKPOINT_INTERVAL: u64 = 64;
+
+/// The intermediate (non-checkpoint) BLR audit witness — an all-zero
+/// sentinel. The `TrainStep` / `BlrUpdated` event is still fully
+/// chain-bound via the outer `new_hash = sha256(prev ‖ payload)`; the
+/// sentinel only signals "this row carries no independent `d×d` state
+/// witness — the nearest checkpoint does." Phase 0.9.5 R0-3.
+pub const BLR_INTERMEDIATE_WITNESS: [u8; 32] = [0u8; 32];
+
+/// The periodic-checkpoint audit witness for one BLR update
+/// ([`BLR_CHECKPOINT_INTERVAL`], Tier 2 Option C). Returns the full
+/// `BlrState::state_hash()` when the post-update `n_seen` lands on a
+/// checkpoint boundary, else the [`BLR_INTERMEDIATE_WITNESS`]
+/// sentinel. `n_seen` is always `>= 1` at every call site (the update
+/// that produced this state incremented it), so `n_seen % k == 0`
+/// only ever fires on a genuine checkpoint, never on the prior.
+fn periodic_blr_witness(blr: &BlrState) -> [u8; 32] {
+    if blr.n_seen % BLR_CHECKPOINT_INTERVAL == 0 {
+        blr.state_hash()
+    } else {
+        BLR_INTERMEDIATE_WITNESS
+    }
+}
 
 /// Numeric index for each structural action — matches its
 /// position in [`AdaptiveBeliefGraph::action_counts`] and the offset
@@ -314,6 +360,15 @@ pub struct AdaptiveBeliefGraph {
     /// indexing convention from §7 #13 stays valid; Unfreeze is a
     /// flag-flip, not a structural mutation.
     pub unfreeze_count: u64,
+    /// Phase 0.10 Q1 — opt-in D-HARHT route-memoization cache. `None`
+    /// (the default) means `descend` runs the plain radix walk,
+    /// exactly as before Phase 0.10 — every pre-0.10 caller stays
+    /// byte-identical. In-memory only: never serialized, never part
+    /// of the audit chain, so a hit cannot change `descend`'s
+    /// observable output. `RefCell` because `descend` is `&self` and
+    /// populates the cache on a miss; the graph is already `!Sync`,
+    /// so this adds no new constraint.
+    pub route_cache: Option<RefCell<RouteCache>>,
 }
 
 impl AdaptiveBeliefGraph {
@@ -334,6 +389,7 @@ impl AdaptiveBeliefGraph {
             decision_policy: None,
             action_counts: [0u64; N_ACTION_KINDS],
             unfreeze_count: 0,
+            route_cache: None,
         };
         let root = AdaptiveBeliefNode::new(0, None, g.chain_head);
         g.nodes.push(root);
@@ -665,6 +721,27 @@ impl AdaptiveBeliefGraph {
     }
 
     pub fn descend(&self, prefix: &[u8]) -> RouteEvidence {
+        // Phase 0.10 Q1 — optional route memoization. The cache is
+        // outcome-transparent: a hit returns exactly the RouteEvidence
+        // `descend_walk` would compute, and topology changes clear it
+        // (see `append_event`). When `route_cache` is `None` — the
+        // default — this is byte-identical to the pre-0.10 walk.
+        if let Some(cache) = &self.route_cache {
+            let mut cache = cache.borrow_mut();
+            if let Some(evidence) = cache.lookup(prefix) {
+                return evidence;
+            }
+            let evidence = self.descend_walk(prefix);
+            cache.record(prefix, &evidence);
+            return evidence;
+        }
+        self.descend_walk(prefix)
+    }
+
+    /// The radix walk: root-to-leaf, one prefix byte per hop. This is
+    /// the pre-Phase-0.10 `descend` body, extracted so the cached and
+    /// uncached paths share a single implementation.
+    fn descend_walk(&self, prefix: &[u8]) -> RouteEvidence {
         let root_id: NodeId = 0;
         let mut path = Vec::with_capacity(prefix.len() + 1);
         path.push(root_id);
@@ -685,6 +762,35 @@ impl AdaptiveBeliefGraph {
             leaf_id: current,
             path,
         }
+    }
+
+    /// Phase 0.10 Q1 — enable the opt-in D-HARHT route-memoization
+    /// cache. Subsequent `descend` calls memoize `prefix -> RouteEvidence`;
+    /// topology-changing audit events clear the cache automatically.
+    /// Idempotent — a second call resets the cache to empty.
+    pub fn enable_route_cache(&mut self) {
+        self.route_cache = Some(RefCell::new(RouteCache::new()));
+    }
+
+    /// Disable and drop the route-memoization cache. `descend` reverts
+    /// to the plain radix walk.
+    pub fn disable_route_cache(&mut self) {
+        self.route_cache = None;
+    }
+
+    /// Whether the route cache is currently enabled.
+    pub fn route_cache_enabled(&self) -> bool {
+        self.route_cache.is_some()
+    }
+
+    /// Cumulative `(hits, misses, skips)` for the route cache, or
+    /// `None` when the cache is disabled. `skips` counts descends
+    /// whose prefix was uncacheable (length `0` or `> 7`).
+    pub fn route_cache_stats(&self) -> Option<(u64, u64, u64)> {
+        self.route_cache.as_ref().map(|cache| {
+            let cache = cache.borrow();
+            (cache.hits(), cache.misses(), cache.skips())
+        })
     }
 
     /// Phase 0.8 Item C1 — parallel sibling of [`route_to_leaf_batch`].
@@ -883,6 +989,14 @@ impl AdaptiveBeliefGraph {
         let previous_hash = self.chain_head;
         let seq = self.audit.len() as u64;
 
+        // Phase 0.10 Q1 — a topology-changing event (NodeAdded `0x02`,
+        // or one of Grow/Split/Merge/Prune/Compress `0x10..=0x14`)
+        // invalidates every memoized route. Computed before `kind` is
+        // moved into the event below. `ChildrenPromoted` (`0x03`) is
+        // deliberately excluded: promotion preserves every key→child
+        // mapping, so routing is unchanged.
+        let topology_changed = matches!(kind.tag(), 0x02 | 0x10..=0x14);
+
         let mut event = AuditEvent {
             seq,
             epoch: self.epoch,
@@ -896,6 +1010,146 @@ impl AdaptiveBeliefGraph {
         event.new_hash = AuditEvent::compute_new_hash(&previous_hash, &event.payload_bytes());
         self.chain_head = event.new_hash;
         self.audit.push(event);
+
+        if topology_changed {
+            if let Some(cache) = &self.route_cache {
+                cache.borrow_mut().clear();
+            }
+        }
+    }
+
+    /// Phase 0.8c v14 Item A3 — Merkle root over the audit chain's
+    /// `new_hash` column. The root is a single 32-byte attestation
+    /// that fixes the entire chain; a third party with the root and
+    /// an inclusion proof (`MerkleTree::proof`) can verify any
+    /// event's position in the chain in `O(log N)` hashes without
+    /// downloading the full audit log.
+    ///
+    /// Built freshly on every call from `audit.new_hashes()` (which
+    /// Phase 0.8 Item B4's columnar [`crate::audit::AuditLog`]
+    /// exposes as a zero-copy slice). The tree is not cached on the
+    /// graph — callers that need it repeatedly should retain the
+    /// [`crate::merkle::MerkleTree`] returned by [`merkle_tree`].
+    ///
+    /// Determinism: byte-identical across platforms (uses
+    /// `cjc_snap::hash::Sha256` for all combiner hashes, matching
+    /// the chain's own primitive).
+    pub fn merkle_root(&self) -> [u8; 32] {
+        crate::merkle::MerkleTree::build(self.audit.new_hashes()).root()
+    }
+
+    /// Build the full Merkle tree (Phase 0.8c v14 Item A3). Allows
+    /// the caller to extract inclusion proofs for arbitrary leaves
+    /// via [`crate::merkle::MerkleTree::proof`]. `O(N)` time and
+    /// memory.
+    pub fn merkle_tree(&self) -> crate::merkle::MerkleTree {
+        crate::merkle::MerkleTree::build(self.audit.new_hashes())
+    }
+
+    /// Phase 0.8c v14 Item C2 — parallel counterpart to
+    /// [`verify_chain`]. Splits the audit log into `n_threads` equal
+    /// (rounded up) chunks and verifies each in parallel via
+    /// `std::thread::scope` (no Rayon, no new deps — matches Phase
+    /// 0.8 Item C1's pattern). Determinism is preserved: the same
+    /// graph + same `n_threads` produces the same `Ok(())` or
+    /// `Err(ChainBroken { at_seq })` as the sequential path.
+    ///
+    /// Each chunk verifies:
+    /// 1. **Per-event integrity:** every event's stored `new_hash`
+    ///    equals `sha256(stored_previous_hash ‖ payload_bytes)`.
+    /// 2. **Intra-chunk linkage:** for `i > chunk_start`, event `i`'s
+    ///    `previous_hash` equals event `i-1`'s `new_hash`.
+    ///
+    /// After all chunks complete, the main thread runs:
+    /// 3. **Cross-chunk linkage:** the first event of each non-zero
+    ///    chunk links back to the previous chunk's last event.
+    /// 4. **Genesis anchor:** the first event's `previous_hash` is
+    ///    `genesis_hash()`.
+    /// 5. **Final chain head:** the last event's `new_hash` equals
+    ///    [`Self::chain_head`].
+    ///
+    /// **Threshold gating.** Below 10,000 events, the parallel
+    /// overhead dominates (matches the Phase 0.8 lesson learned
+    /// from the `route_to_leaf_batch_par` 33×-slowdown-at-n=1024
+    /// incident). Small chains fall through to [`verify_chain`].
+    ///
+    /// `n_threads <= 1` also falls through to the sequential path.
+    ///
+    /// The new [`Self::merkle_root`] / [`Self::merkle_tree`] API
+    /// (Phase 0.8c Item A3) is the conceptual prerequisite: a
+    /// future caller that wants to attest to a third party about a
+    /// successful parallel verification can include the Merkle root
+    /// as a single 32-byte witness alongside the `Ok(())` outcome.
+    pub fn verify_chain_par(&self, n_threads: usize) -> Result<(), GraphError> {
+        let n_events = self.audit.len();
+        const PAR_THRESHOLD: usize = 10_000;
+        if n_events < PAR_THRESHOLD || n_threads <= 1 {
+            return self.verify_chain();
+        }
+        let chunk_size = n_events.div_ceil(n_threads);
+
+        // Audit-only view: tensor-free, auto-`Sync`. Matches Phase
+        // 0.8 Item C1's pattern of extracting a `Sync` sub-view
+        // (route-only there, audit-only here) before spawning, so
+        // the thread closures don't need to capture the full
+        // `&AdaptiveBeliefGraph` (which isn't `Sync` because of
+        // tensor `Rc<RefCell>` interior on the per-node section).
+        let audit: &crate::audit::AuditLog = &self.audit;
+
+        // Each thread verifies its `[start..end)` range and returns
+        // `Ok(())` if internally consistent. The columnar slices
+        // (Phase 0.8 Item B4) are `&[[u8; 32]]` views over the
+        // audit log's `new_hash` / `previous_hash` columns —
+        // zero-copy reads inside the worker loop.
+        std::thread::scope(|s| -> Result<(), GraphError> {
+            let mut handles = Vec::with_capacity(n_threads);
+            for k in 0..n_threads {
+                let start = k * chunk_size;
+                let end = ((k + 1) * chunk_size).min(n_events);
+                if start >= end {
+                    break;
+                }
+                handles.push(s.spawn(move || verify_chain_chunk(audit, start, end)));
+            }
+            for h in handles {
+                match h.join() {
+                    Ok(r) => r?,
+                    Err(_) => {
+                        return Err(GraphError::ChainBroken { at_seq: 0 })
+                    }
+                }
+            }
+            Ok(())
+        })?;
+
+        // Cross-chunk + global anchor checks.
+        let prev_hashes = self.audit.previous_hashes();
+        let new_hashes = self.audit.new_hashes();
+        if prev_hashes[0] != genesis_hash() {
+            return Err(GraphError::ChainBroken { at_seq: 0 });
+        }
+        let mut k = 1usize;
+        loop {
+            let boundary = k * chunk_size;
+            if boundary >= n_events {
+                break;
+            }
+            if prev_hashes[boundary] != new_hashes[boundary - 1] {
+                let seq = self
+                    .audit
+                    .get(boundary)
+                    .expect("in range")
+                    .seq;
+                return Err(GraphError::ChainBroken { at_seq: seq });
+            }
+            k += 1;
+        }
+        if self.chain_head != new_hashes[n_events - 1] {
+            return Err(GraphError::ChainBroken {
+                at_seq: n_events as u64,
+            });
+        }
+        Ok(())
     }
 
     /// Recompute every event's `new_hash` from scratch and check that the
@@ -1039,6 +1293,9 @@ impl AdaptiveBeliefGraph {
         }
         self.nodes[node_id as usize].params[k as usize] = t;
         let phash = params_hash(&self.nodes[node_id as usize].params);
+        // Phase 0.9.5 R1-2 — params changed; refresh the cache the
+        // per-row `validate_blr_inputs` staleness check reads.
+        self.nodes[node_id as usize].params_hash_cache = Some(phash);
         self.append_event(
             node_id,
             AuditKind::LeafParamsUpdated {
@@ -1096,6 +1353,8 @@ impl AdaptiveBeliefGraph {
         // All params validated — write atomically.
         self.nodes[node_id as usize].params = params;
         let phash = params_hash(&self.nodes[node_id as usize].params);
+        // Phase 0.9.5 R1-2 — params changed; refresh the cache.
+        self.nodes[node_id as usize].params_hash_cache = Some(phash);
         self.append_event(
             node_id,
             AuditKind::LeafParamsUpdatedBatch {
@@ -1258,12 +1517,23 @@ impl AdaptiveBeliefGraph {
         Ok(result)
     }
 
-    /// Apply a Normal-Inverse-Gamma update to a node's BLR posterior.
+    /// Phase 0.8c v14 Item A2 — input-validation block extracted from
+    /// `blr_update` so `train_step` can run the identical checks before
+    /// taking a mutable borrow on the BLR state. Returns `Ok(())` only
+    /// when every check passes:
     ///
-    /// `features` is row-major `[n, d]`; `y` is `[n]`. Errors if the
-    /// node has no BLR state, the dimensions don't match, or Cholesky
-    /// of the updated precision matrix fails (corrupt state).
-    pub fn blr_update(
+    /// * `node_id` is in range
+    /// * the node has a `BlrState` (prior was configured)
+    /// * `feature_version_hash` matches the current MLP params (the
+    ///   stale-feature-space guard, Phase 0.4 Track C-2.3.5)
+    /// * `features.len()` is the expected row-major shape for `[n, d]`
+    ///   given `n = y.len()` and `d = blr.d`
+    ///
+    /// Phase 0.9.5 R1-2 — takes `&mut self` so it can lazily populate
+    /// the per-node `params_hash_cache`. The borrow still ends at
+    /// return, so a caller's subsequent `&mut self.nodes[node_id].blr`
+    /// is unaffected.
+    fn validate_blr_inputs(
         &mut self,
         node_id: NodeId,
         features: &[f64],
@@ -1273,16 +1543,20 @@ impl AdaptiveBeliefGraph {
         if node_id >= n_nodes {
             return Err(GraphError::NodeOutOfRange { node_id, n_nodes });
         }
-        // Phase 0.4 Track C-2.3.5 — feature-version stale check. Snapshot
-        // the current per-node MLP params hash *before* taking a mutable
-        // borrow on the BLR state; if the BLR was trained against a
-        // different feature space, refuse the update so the posterior
-        // never trains on inconsistent features.
-        let current_hash = params_hash(&self.nodes[node_id as usize].params);
-        let blr = self.nodes[node_id as usize]
-            .blr
-            .as_mut()
-            .ok_or(BlrError::NoBlrPrior)?;
+        // Phase 0.9.5 R1-2 — the MLP-params staleness check recomputed
+        // `params_hash` on *every* training row. Cache it per node;
+        // `leaf_set_param` / `leaf_set_params_batch` refresh the cache
+        // when they mutate `params`, so a hit is always current.
+        let node = &mut self.nodes[node_id as usize];
+        let current_hash = match node.params_hash_cache {
+            Some(h) => h,
+            None => {
+                let h = params_hash(&node.params);
+                node.params_hash_cache = Some(h);
+                h
+            }
+        };
+        let blr = node.blr.as_ref().ok_or(BlrError::NoBlrPrior)?;
         if blr.feature_version_hash != current_hash {
             return Err(BlrError::FeatureVersionStale {
                 stored: blr.feature_version_hash,
@@ -1300,12 +1574,48 @@ impl AdaptiveBeliefGraph {
             }
             .into());
         }
+        Ok(())
+    }
+
+    /// Apply a Normal-Inverse-Gamma update to a node's BLR posterior.
+    ///
+    /// `features` is row-major `[n, d]`; `y` is `[n]`. Errors if the
+    /// node has no BLR state, the dimensions don't match, or Cholesky
+    /// of the updated precision matrix fails (corrupt state).
+    ///
+    /// Phase 0.9.5 R0-3 (Tier 2 Option C) — the **n = 1** call (the
+    /// per-row training hot path) takes the periodic-checkpoint audit
+    /// witness ([`periodic_blr_witness`]): the full `d×d` precision is
+    /// SHA-256'd into the `BlrUpdated` witness only every
+    /// [`BLR_CHECKPOINT_INTERVAL`] updates, intermediate rows carry the
+    /// [`BLR_INTERMEDIATE_WITNESS`] sentinel. Batched (`n > 1`) calls
+    /// are rare and always carry the full witness. See
+    /// [`checkpoint_blr`](Self::checkpoint_blr) for the
+    /// flush-before-serialize contract.
+    pub fn blr_update(
+        &mut self,
+        node_id: NodeId,
+        features: &[f64],
+        y: &[f64],
+    ) -> Result<(), GraphError> {
+        // Phase 0.4 Track C-2.3.5 — params staleness + dim checks.
+        self.validate_blr_inputs(node_id, features, y)?;
+        let blr = self.nodes[node_id as usize]
+            .blr
+            .as_mut()
+            .expect("validate_blr_inputs guarantees blr is Some");
         let rescue = blr.update(features, y)?;
-        let shash = self.nodes[node_id as usize]
+        let blr_ref = self.nodes[node_id as usize]
             .blr
             .as_ref()
-            .expect("blr present")
-            .state_hash();
+            .expect("blr present");
+        // n = 1 (the hot per-row path) takes the periodic witness;
+        // batched updates always carry the full d×d state hash.
+        let shash = if y.len() == 1 {
+            periodic_blr_witness(blr_ref)
+        } else {
+            blr_ref.state_hash()
+        };
         self.append_event(node_id, AuditKind::BlrUpdated { state_hash: shash });
         // Phase 0.4 Track C-2.3.4 — diagnostic event when the b<ε
         // numerical rescue fired. Emitted *after* BlrUpdated so the
@@ -1324,40 +1634,45 @@ impl AdaptiveBeliefGraph {
         Ok(())
     }
 
-    /// Phase 0.7 (Item 4) — fused per-row training step.
+    /// Phase 0.7 (Item 4) + Phase 0.8c v14 Item A2 — fused per-row
+    /// training step.
     ///
-    /// Equivalent to:
+    /// Functionally equivalent to:
     /// ```ignore
     ///     let leaf = g.descend(&g.encode_prefix(x)?).leaf_id;
     ///     g.blr_update(leaf, phi, &[y_val])?;
     ///     g.observe(leaf, y_val)?;
     ///     Ok(leaf)
     /// ```
-    /// but performs the route, blr_update, and observe in a single
-    /// Rust call. The savings come from collapsing three CJC-Lang
-    /// builtin dispatches into one — at the language interpreter
-    /// boundary the per-call overhead is on the order of ~5 µs each,
-    /// so a per-row training loop saves ~10 µs per row by going
-    /// through `train_step` instead.
+    /// at the level of post-call `NodeStats` and `BlrState` bytes,
+    /// but emits a **single** fused `AuditKind::TrainStep` chain event
+    /// (tag `0x1E`) instead of the 2-event `BlrUpdated + BeliefUpdate`
+    /// sequence. The numerical-rescue branch retains its own
+    /// `BlrNumericalRescue` (tag `0x18`) follow-up event when it
+    /// fires; in the common path one row produces exactly one chain
+    /// step.
     ///
-    /// **Audit-chain compatibility.** This function emits the EXISTING
-    /// audit-event sequence: `BlrUpdated` (from `blr_update`) followed
-    /// by `BeliefUpdate` (from `observe`). No new `AuditKind` is
-    /// introduced — the v13 wire format and the 28 locked SHA-256
-    /// canaries are preserved. The chain_head after this call equals
-    /// the chain_head after running the 3-call sequence on identical
-    /// inputs from identical pre-state. Verified by the
-    /// `train_step_chain_head_matches_three_call_sequence` parity
-    /// test.
+    /// **Audit-chain compatibility (post-A2, v14).** The chain head
+    /// after `train_step` does NOT equal the chain head of the 3-call
+    /// sequence on identical pre-state — by design (the whole point
+    /// of A2 is to collapse the two chain steps into one). What does
+    /// match, bit-for-bit, is the post-call `NodeStats.canonical_bytes()`
+    /// and `BlrState.state_hash()` at the affected leaf. Verified by
+    /// the `train_step_state_bit_equals_three_call_sequence_modulo_chain_head`
+    /// parity test.
+    ///
+    /// Validation ordering: every fallible check (route encoding, BLR
+    /// dim / staleness, value finiteness) runs BEFORE any state
+    /// mutation or audit append. A rejected call leaves chain head,
+    /// stats versions, and audit log identical to pre-call.
     ///
     /// Arguments:
-    /// * `x` — route input, length = `codebook.n_dims`. Used to walk
-    ///   the radix tree to a leaf node.
+    /// * `x` — route input, length = `codebook.n_dims`. Walks the
+    ///   radix tree to a leaf.
     /// * `phi` — BLR feature vector, length = `blr_prior.d`. Treated
-    ///   as a single-row `[1, d]` design matrix for `blr_update`.
+    ///   as a single-row `[1, d]` design matrix.
     /// * `y_val` — observation value. Used both as the BLR target
-    ///   `y[0]` and as the `observe` value (matching the canonical
-    ///   3-call training pattern).
+    ///   `y[0]` and as the Welford observation.
     ///
     /// Returns the leaf node id that received the update.
     pub fn train_step(
@@ -1366,17 +1681,102 @@ impl AdaptiveBeliefGraph {
         phi: &[f64],
         y_val: f64,
     ) -> Result<NodeId, GraphError> {
-        // Step 1: route x → leaf. Same as `abng_route_to_leaf`.
+        // ── All validation BEFORE any mutation or audit append. ──────────
+        // A rejected call must leave chain head, stats version, and audit
+        // log identical to pre-call.
         let prefix = self.encode_prefix(x)?;
         let leaf = self.descend(&prefix).leaf_id;
-        // Step 2: BLR update at leaf, single row. The `[y_val]` array
-        // lives on the stack; no heap allocation for this 1-element
-        // slice.
         let y_arr = [y_val];
-        self.blr_update(leaf, phi, &y_arr)?;
-        // Step 3: observe at leaf.
-        self.observe(leaf, y_val)?;
+        self.validate_blr_inputs(leaf, phi, &y_arr)?;
+        if !y_val.is_finite() {
+            return Err(GraphError::ObserveNonFinite { value: y_val });
+        }
+
+        // ── Mutations + single fused chain event. ────────────────────────
+        // Inline blr_update and observe so the BLR posterior, Welford
+        // stats, and chain advance all bind to ONE `TrainStep` event.
+        let rescue = self.nodes[leaf as usize]
+            .blr
+            .as_mut()
+            .expect("validate_blr_inputs guarantees blr is Some")
+            .update(phi, &y_arr)?;
+        // Phase 0.9.5 R0-3 (Tier 2 Option C) — periodic-checkpoint
+        // witness: the full d×d precision is hashed into the chain
+        // only every `BLR_CHECKPOINT_INTERVAL` updates; intermediate
+        // rows carry the `BLR_INTERMEDIATE_WITNESS` sentinel. The row
+        // is still fully chain-bound via the outer `new_hash`.
+        let blr_state_hash = periodic_blr_witness(
+            self.nodes[leaf as usize]
+                .blr
+                .as_ref()
+                .expect("blr present after update"),
+        );
+        self.nodes[leaf as usize].observe(y_val);
+        self.append_event(
+            leaf,
+            AuditKind::TrainStep {
+                value: y_val,
+                state_hash: blr_state_hash,
+            },
+        );
+
+        // ── Rare diagnostic: numerical rescue, mirroring blr_update. ─────
+        if let Some(b_pre_clamp) = rescue {
+            self.append_event(
+                leaf,
+                AuditKind::BlrNumericalRescue {
+                    reason: BLR_RESCUE_B_BELOW_EPSILON,
+                    b_pre_clamp_bits: b_pre_clamp.to_bits(),
+                },
+            );
+        }
         Ok(leaf)
+    }
+
+    /// Phase 0.9.5 R0-3 (Tier 2 Option C) — flush a full-state BLR
+    /// checkpoint for every node left mid-interval by the
+    /// periodic-checkpoint witness policy.
+    ///
+    /// Under that policy ([`BLR_CHECKPOINT_INTERVAL`]) a node trained
+    /// past a non-multiple of the interval has, as its most recent BLR
+    /// audit event, a `TrainStep` / `BlrUpdated` carrying the
+    /// [`BLR_INTERMEDIATE_WITNESS`] sentinel. The end-of-replay
+    /// verifier checks each node's *latest* BLR witness against the
+    /// snapshot's reconstructed state, so such a graph would fail
+    /// replay with `DecodeError::BlrStateHashMismatch`.
+    ///
+    /// Call this **once after training and before serialization** to
+    /// re-anchor every node's final `d×d` state into the audit chain.
+    /// It emits one `BlrUpdated { state_hash }` carrying the real
+    /// [`BlrState::state_hash`] for each node with `blr.n_seen > 0 &&
+    /// n_seen % BLR_CHECKPOINT_INTERVAL != 0`; nodes already on a
+    /// checkpoint boundary, and never-trained nodes (witnessed by
+    /// `BlrInitialized`), are skipped. Nodes are visited in ascending
+    /// `NodeId` order, so the emitted events — and the resulting
+    /// chain head — are deterministic.
+    ///
+    /// Returns the number of checkpoint events emitted.
+    pub fn checkpoint_blr(&mut self) -> usize {
+        let n = self.node_count();
+        let mut emitted = 0usize;
+        for id in 0..n {
+            let needs = match &self.nodes[id as usize].blr {
+                Some(blr) => {
+                    blr.n_seen > 0 && blr.n_seen % BLR_CHECKPOINT_INTERVAL != 0
+                }
+                None => false,
+            };
+            if needs {
+                let shash = self.nodes[id as usize]
+                    .blr
+                    .as_ref()
+                    .expect("checked Some above")
+                    .state_hash();
+                self.append_event(id, AuditKind::BlrUpdated { state_hash: shash });
+                emitted += 1;
+            }
+        }
+        emitted
     }
 
     /// Phase 0.4 Track C-2.3.5 — reset the BLR posterior on a node back
@@ -2729,6 +3129,52 @@ impl AdaptiveBeliefGraph {
     }
 }
 
+// ── Phase 0.8c v14 Item C2: parallel verify_chain helper ─────────────
+
+/// Worker function for [`AdaptiveBeliefGraph::verify_chain_par`].
+/// Verifies per-event integrity + intra-chunk linkage for the range
+/// `[start..end)` of the audit log. Cross-chunk linkage and the
+/// `chain_head` anchor are checked by the caller after thread-join.
+///
+/// Uses the columnar accessors `audit.previous_hashes()` and
+/// `audit.new_hashes()` (Phase 0.8 Item B4) to avoid materializing
+/// any AoS intermediate — every read inside the loop is a 32-byte
+/// slice indexing.
+fn verify_chain_chunk(
+    audit: &crate::audit::AuditLog,
+    start: usize,
+    end: usize,
+) -> Result<(), GraphError> {
+    let new_hashes = audit.new_hashes();
+    let prev_hashes = audit.previous_hashes();
+    // One payload scratch buffer per chunk, reused across events
+    // (matches the Phase 0.7 (A) buffer-reuse pattern in the
+    // sequential `verify_chain`).
+    let mut payload_buf: Vec<u8> = Vec::with_capacity(96);
+    for i in start..end {
+        let event = audit.get(i).expect("index in range");
+        let stored_prev = prev_hashes[i];
+
+        // Intra-chunk linkage: every non-first event in the chunk
+        // must follow on directly from its predecessor. The first
+        // event in the chunk is anchored by the caller's
+        // cross-chunk check (or by the genesis check for chunk 0).
+        if i > start && stored_prev != new_hashes[i - 1] {
+            return Err(GraphError::ChainBroken { at_seq: event.seq });
+        }
+
+        // Per-event integrity: stored `new_hash` must equal the
+        // recomputation against the stored `previous_hash` and the
+        // event's full canonical payload.
+        event.write_payload(&mut payload_buf);
+        let recomputed = AuditEvent::compute_new_hash(&stored_prev, &payload_buf);
+        if recomputed != new_hashes[i] {
+            return Err(GraphError::ChainBroken { at_seq: event.seq });
+        }
+    }
+    Ok(())
+}
+
 // ── Phase 0.3d-4: trigger helpers ───────────────────────────────────
 
 /// Byte-Hamming distance between two 32-byte signatures: count of
@@ -3136,6 +3582,51 @@ mod tests {
         assert_eq!(e0.previous_hash, genesis_hash());
         assert_eq!(g.chain_head, e0.new_hash);
         assert_eq!(g.nodes[0].parent, None);
+    }
+
+    // ── Phase 0.9.5 R0-3 (Tier 2 Option C): periodic BLR checkpoints ──
+
+    #[test]
+    fn periodic_blr_witness_checkpoints_on_interval() {
+        // The witness is the real state hash exactly when post-update
+        // `n_seen` is a multiple of BLR_CHECKPOINT_INTERVAL, else the
+        // zero sentinel.
+        let prior = BlrPrior::new(2.0, 1.0, 0.5).unwrap();
+        let mut s = BlrState::from_prior(&prior, 3);
+        for n in [1u64, 2, 63, 65, 127] {
+            s.n_seen = n;
+            assert_eq!(
+                periodic_blr_witness(&s),
+                BLR_INTERMEDIATE_WITNESS,
+                "n_seen={n} is mid-interval -> sentinel"
+            );
+        }
+        for n in [BLR_CHECKPOINT_INTERVAL, 2 * BLR_CHECKPOINT_INTERVAL] {
+            s.n_seen = n;
+            assert_eq!(
+                periodic_blr_witness(&s),
+                s.state_hash(),
+                "n_seen={n} is a checkpoint -> real state_hash"
+            );
+            assert_ne!(periodic_blr_witness(&s), BLR_INTERMEDIATE_WITNESS);
+        }
+    }
+
+    #[test]
+    fn checkpoint_blr_emits_only_for_mid_interval_nodes() {
+        let mut g = AdaptiveBeliefGraph::new(7);
+        g.set_leaf_head(2, vec![], 1, Activation::None).unwrap();
+        g.set_blr_prior(2.0, 1.0, 0.5).unwrap();
+        // Untrained graph: every node is witnessed by BlrInitialized.
+        assert_eq!(g.checkpoint_blr(), 0, "no trained nodes -> nothing to flush");
+        // Train the root mid-interval.
+        for i in 0..5 {
+            g.blr_update(0, &[1.0, 0.5], &[0.3 + i as f64 * 1e-3]).unwrap();
+        }
+        assert_eq!(g.checkpoint_blr(), 1, "the mid-interval root needs a flush");
+        let last = g.audit.last().unwrap();
+        assert_eq!(last.node_id, 0);
+        assert!(matches!(last.kind, AuditKind::BlrUpdated { .. }));
     }
 
     #[test]

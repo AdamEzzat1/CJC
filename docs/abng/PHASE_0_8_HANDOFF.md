@@ -28,17 +28,28 @@
 
 ### Items remaining
 
-| Item | Status | Blocked on |
-|---|---|---|
-| **A1** Packed lower-triangular `BlrState.precision` | unstarted | v14 wire bump |
-| **A2** Fused `AuditKind::TrainStep` audit | unstarted | v14 wire bump |
-| **A3** Merkle-indexed audit chain | unstarted | v14 wire bump (B4 unblocked the columnar prerequisite) |
-| **A4** Compact `AdaptiveChildren` snapshot (Node48/256) | unstarted | v14 wire bump |
-| **C2** Parallel `verify_chain` via Merkle segments | unstarted | depends on A3 |
-| **D2b** SIMD Kahan refactor of `BlrState::update` | unstarted | v14 wire bump (reorders BLR canonical bytes) |
-| **D3** Fused matmul kernel for `Λ_old · μ_old` | unstarted | v14 wire bump (same reason as D2b) |
+**Phase 0.8 is now COMPLETE as of branch `claude/abng-v14-wire-format`.** All 11 numbered items have shipped:
 
-**All seven remaining items depend on the v14 wire bump.** Track A items A1+A2+A3+A4 ship as one v14 release per the original handoff's "one logical v14 bump" guidance. C2/D2b/D3 follow.
+| Item | Commit | Branch | What it added |
+|---|---|---|---|
+| **A4** Compact `AdaptiveChildren` snapshot | `d2ce894` | `claude/abng-v14-wire-format` | Sparse `Node48`/`Node256` encoding (`count u32 + (byte, child_id)×count` replaces dense `index[256] + slots[]`). ~228 B saved per Node48 at 25 children. Path B (encoding-only) — zero canary impact. |
+| **A1** Packed lower-triangular BLR precision | `d61a366` | `claude/abng-v14-wire-format` | `d(d+1)/2` entries on disk vs `d×d` (full matrix). ~960 B saved per BlrState at d=16. Path B (encoding-only) — zero canary impact. |
+| **A2** Fused `AuditKind::TrainStep` audit | `457c3c1` + `eb18f1a` | `claude/abng-v14-wire-format` | New audit kind (tag `0x1E`) collapses `BlrUpdated + BeliefUpdate` into one chain event for `train_step` workloads. 38% audit-log size reduction. Path A — 6 canaries re-locked. |
+| **A3** Merkle-indexed audit chain | `2a5801d` | `claude/abng-v14-wire-format` | `MerkleTree::build`/`proof`/`verify_proof`; `Graph::merkle_root` + `merkle_tree`; snapshot trailer (`0x01` + 32-byte root). External O(log N) inclusion proofs. Zero canary impact (witness column). |
+| **C2** Parallel `verify_chain` via Merkle segments | `43bf29e` | `claude/abng-v14-wire-format` | `verify_chain_par(n_threads)` via `std::thread::scope`, threshold-gated at 10K events. Zero canary impact (read-only). |
+| **D2b** SIMD Kahan refactor of `BlrState::update` | `7227e30` | `claude/abng-v14-wire-format` | Replaces scalar Kahan with `KahanAccumulatorF64x4` for the n-axis reductions (xtx, xty, yty). Bit-identical at n ≤ 4, bit-different at n ≥ 5. **3 canaries re-locked** — only the 3 "*_scaled_cjcl" demos with batched n ≥ 5 per leaf shifted; everything else (post-A2 train_step demos, trigger demos) stayed byte-stable. |
+| **D3** Fused matvec kernel for `Λ_old · μ_old` | `2803242` | `claude/abng-v14-wire-format` | `matvec_plus_xty_kahan` free helper with scalar path at d ≤ 4 (bit-identical to pre-D3) and F64x4 fused path at d ≥ 8 with d % 4 == 0. Zero canary impact (every locked canary uses d=4). |
+
+**Bonus items shipped on a different branch (not merged here):**
+
+| Item | Commit | Branch |
+|---|---|---|
+| **C3** Per-thread arena observability | `34047f5` | `claude/elastic-kirch-db47b2` |
+| **D1** Cholesky factor caching | `8c86f82` | `claude/elastic-kirch-db47b2` |
+
+**Final Phase 0.8 canary state: 9 canaries re-locked (6 from A2, 3 from D2b); 19 canaries unchanged.**
+
+The original handoff said "all seven remaining items depend on the v14 wire bump" and that proved true: A1/A2/A3/A4/D2b/D3 all shipped under v14 magic `ABNG\x0E`. C2 didn't actually require the wire bump (it's a read-only API) but rode along on the same branch for narrative coherence.
 
 ### Honest macro impact — PINN scale bench
 

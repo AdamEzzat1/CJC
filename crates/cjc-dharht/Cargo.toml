@@ -1,0 +1,10 @@
+[package]
+name = "cjc-dharht"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "D-HARHT deterministic hash-array radix-hybrid trie (memory profile) — route-memoization engine for ABNG"
+
+[dependencies]

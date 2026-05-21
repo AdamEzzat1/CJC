@@ -58,6 +58,21 @@ pub fn reset_arena() {
     ARENA.with(|cell| *cell.borrow_mut() = Arena::default());
 }
 
+/// Phase 0.8 Item C3 — observability helper for tests verifying the
+/// per-thread arena's isolation and scaling contract. Returns the
+/// number of live graphs in the *current* thread's arena. Threads
+/// other than the caller are not visible.
+pub fn arena_graph_count() -> usize {
+    ARENA.with(|cell| cell.borrow().graphs.len())
+}
+
+/// Phase 0.8 Item C3 — companion to [`arena_graph_count`] for tests
+/// asserting that `next_id` is monotonic per thread independent of
+/// other threads.
+pub fn arena_next_id() -> i64 {
+    ARENA.with(|cell| cell.borrow().next_id)
+}
+
 fn with_arena<R>(f: impl FnOnce(&mut Arena) -> R) -> R {
     ARENA.with(|cell| f(&mut *cell.borrow_mut()))
 }

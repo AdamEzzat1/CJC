@@ -427,6 +427,7 @@ mod inspect {
             AuditKind::StatsSnapshot { .. } => "StatsSnapshot",
             AuditKind::ProvenanceStamped { .. } => "ProvenanceStamped",
             AuditKind::BeliefUpdateBatch { .. } => "BeliefUpdateBatch",
+            AuditKind::TrainStep { .. } => "TrainStep",
         }
     }
 }

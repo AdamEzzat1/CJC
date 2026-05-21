@@ -127,11 +127,14 @@ fn train_pinn(g: &mut AdaptiveBeliefGraph) {
 }
 
 fn train_one(g: &mut AdaptiveBeliefGraph, x: f64) {
-    let leaf = route_to_leaf(g, x);
+    // Phase 0.8c v14 Item A2 — fused per-row training step. One
+    // `AuditKind::TrainStep` event per row instead of the pre-A2
+    // `BlrUpdated + BeliefUpdate` pair. `train_step` does its own
+    // descend, so the previous `route_to_leaf` indirection is folded
+    // into the same call.
     let phi = pinn_features(x);
     let y = analytical_u(x);
-    g.blr_update(leaf, &phi, &[y]).unwrap();
-    g.observe(leaf, y).unwrap();
+    g.train_step(&[x], &phi, y).unwrap();
 }
 
 // ── Forward pass + spatial fidelity ───────────────────────────────────
@@ -373,8 +376,15 @@ fn pinn_chain_head_canary_locked() {
     // Locked at Phase 0.5 ship — recompute and update if you change
     // the training trajectory, codebook bins, prior, or BLR
     // arithmetic. Independent canary from chess RL v2.6.
+    // Re-locked at Phase 0.8c v14 Item A2 — the demo's `train_one`
+    // flipped from `blr_update + observe` (pre-A2: two events / row,
+    // tags 0x0A + 0x01) to `train_step` (post-A2: one TrainStep
+    // event / row, tag 0x1E). The audit-chain payload bytes per
+    // training row therefore changed. Pre-A2 hex:
+    // `30d333f1f7dca5acaa76b0e4bfdbd4a733df38c6adeda094ae69cf0e9c4e468d`.
+    // V14_MIGRATION.md records the v13 → v14 mapping.
     const CANARY_HEX: &str =
-        "30d333f1f7dca5acaa76b0e4bfdbd4a733df38c6adeda094ae69cf0e9c4e468d";
+        "280fd661a59ff09126696a61475e3564552d7135c1471972976ec4478facf5c0";
     assert_eq!(
         actual_hex, CANARY_HEX,
         "PINN chain_head canary mismatch — see comment"

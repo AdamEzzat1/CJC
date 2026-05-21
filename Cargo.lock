@@ -31,6 +31,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "abng-result-profile"
+version = "0.1.7"
+dependencies = [
+ "cjc-abng",
+ "cjc-ad",
+ "cjc-repro",
+ "cjc-snap",
+]
+
+[[package]]
 name = "abng-vs-sklearn"
 version = "0.1.7"
 dependencies = [
@@ -209,6 +219,7 @@ name = "cjc-abng"
 version = "0.1.7"
 dependencies = [
  "cjc-ad",
+ "cjc-dharht",
  "cjc-repro",
  "cjc-runtime",
  "cjc-snap",
@@ -273,6 +284,10 @@ dependencies = [
  "cjc-repro",
  "cjc-runtime",
 ]
+
+[[package]]
+name = "cjc-dharht"
+version = "0.1.7"
 
 [[package]]
 name = "cjc-diag"
