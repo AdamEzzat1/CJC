@@ -2,6 +2,7 @@
 name = "abng-vs-sklearn"
 version = "0.1.7"
 edition = "2021"
+publish = false
 
 [[bin]]
 name = "abng_vs_sklearn"

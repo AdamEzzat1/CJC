@@ -2,6 +2,7 @@
 name = "interp-micro"
 version = "0.1.7"
 edition = "2021"
+publish = false
 
 [[bin]]
 name = "interp_micro"

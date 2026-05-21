@@ -2,6 +2,7 @@
 name = "abng-result-profile"
 version = "0.1.7"
 edition = "2021"
+publish = false
 
 [[bin]]
 name = "abng_result_profile"
