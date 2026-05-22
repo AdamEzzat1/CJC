@@ -118,6 +118,11 @@ const KNOWN_FLAGS: &[&str] = &[
     "--no-color",
     "--diagnostic-format",
     "--format",
+    "--profile",
+    "--threads",
+    "--batch-size",
+    "--audit",
+    "--no-adaptive",
     "--help",
     "--version",
     "-h",
@@ -286,6 +291,18 @@ impl Config {
                         )),
                     }
                 }
+                // Green-compute runtime policy flags. The actual policy is
+                // applied process-wide at the top of `cli_main` (so it covers
+                // every command, including the CLI-suite subcommands); here we
+                // only consume the flag + its value so the run-path parser does
+                // not reject them as unknown.
+                flag @ ("--profile" | "--threads" | "--batch-size" | "--audit") => {
+                    i += 1;
+                    if i >= args.len() {
+                        cli_error(&format!("{} requires an argument", flag));
+                    }
+                }
+                "--no-adaptive" => { /* boolean policy flag, applied in cli_main */ }
                 "--help" | "-h" | "--version" | "-V" => { /* already handled */ }
                 other if other.starts_with("--") || other.starts_with('-') && other.len() > 1 => {
                     let suggestion = suggest_flag(other);
@@ -414,10 +431,125 @@ fn levenshtein(a: &str, b: &str) -> usize {
     prev[n]
 }
 
+// ── Runtime policy (green compute) ───────────────────────────────────
+
+/// Parse the green-compute policy flags (`--profile`, `--threads`,
+/// `--batch-size`, `--audit`) from the full argument list and apply them to the
+/// process-wide runtime policy + rayon thread pool.
+///
+/// Applied once, at the very start of `cli_main`, before any command runs — so
+/// the thermal/thread bound is in effect for `run`, `bench`, and every other
+/// command. The thread cap is enforced on rayon's global pool here (it can only
+/// be configured once per process). With no flags the laptop-safe `Balanced`
+/// default applies (≈ half the cores) rather than saturating every core.
+///
+/// `--profile` is applied first so explicit `--threads` / `--batch-size` /
+/// `--audit` overrides win over the profile presets.
+fn apply_runtime_policy_flags(args: &[String]) {
+    use cjc_runtime::runtime_policy as rp;
+
+    let mut profile: Option<String> = None;
+    let mut threads: Option<String> = None;
+    let mut batch: Option<String> = None;
+    let mut audit: Option<String> = None;
+    let mut no_adaptive = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--profile" => {
+                i += 1;
+                profile = args.get(i).cloned();
+            }
+            "--threads" => {
+                i += 1;
+                threads = args.get(i).cloned();
+            }
+            "--batch-size" => {
+                i += 1;
+                batch = args.get(i).cloned();
+            }
+            "--audit" => {
+                i += 1;
+                audit = args.get(i).cloned();
+            }
+            "--no-adaptive" => no_adaptive = true,
+            _ => {}
+        }
+        i += 1;
+    }
+
+    if let Some(p) = profile {
+        match rp::ThermalMode::from_str(&p) {
+            Some(m) => rp::set_thermal_mode(m),
+            None => cli_error(&format!(
+                "unknown --profile `{}` (expected cool, balanced, or max-perf)",
+                p
+            )),
+        }
+    }
+    if let Some(t) = threads {
+        match t.parse::<usize>() {
+            Ok(n) => rp::set_threads(n),
+            Err(_) => cli_error(&format!(
+                "invalid --threads value `{}` (expected a non-negative integer; 0 = auto)",
+                t
+            )),
+        }
+    }
+    if let Some(b) = batch {
+        match b.parse::<usize>() {
+            Ok(n) => rp::set_batch_size(n),
+            Err(_) => cli_error(&format!(
+                "invalid --batch-size value `{}` (expected a non-negative integer)",
+                b
+            )),
+        }
+    }
+    if let Some(a) = audit {
+        match rp::AuditMode::from_str(&a) {
+            Some(m) => rp::set_audit_mode(m),
+            None => cli_error(&format!(
+                "unknown --audit `{}` (expected summary, full, or forensic)",
+                a
+            )),
+        }
+    }
+    if no_adaptive {
+        rp::set_adaptive(false); // fixed cap (reproducible schedule)
+    }
+
+    // Pre-warm the throttle pool for the resolved cap. The global rayon pool is
+    // left at full size so bursts can use all cores; `run_parallel` enforces the
+    // cap per-operation. Determinism-safe: pool choice changes only how many
+    // bands run concurrently, never the numeric result.
+    let _ = rp::apply_thread_cap(rp::current_effective_threads());
+}
+
+/// Remove the green-compute policy flags (and their values) from a CLI-suite
+/// subcommand's argument slice. The policy is already applied process-wide in
+/// `cli_main`, so subcommands neither need nor should choke on these flags.
+fn strip_policy_flags(args: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--profile" | "--threads" | "--batch-size" | "--audit" => {
+                i += 1; // also skip the value
+            }
+            "--no-adaptive" => {} // boolean flag, no value to skip
+            _ => out.push(args[i].clone()),
+        }
+        i += 1;
+    }
+    out
+}
+
 // ── Entry point ──────────────────────────────────────────────────────
 
 pub fn cli_main() {
     let all_args: Vec<String> = env::args().collect();
+    apply_runtime_policy_flags(&all_args);
     let config = Config::from_args();
 
     // CLI suite commands: pass all args after the command name
@@ -460,7 +592,9 @@ pub fn cli_main() {
                 _ => unreachable!(),
             };
             let cmd_idx = all_args.iter().position(|a| a == cmd_name).unwrap_or(1);
-            let sub_args: Vec<String> = all_args[cmd_idx + 1..].to_vec();
+            // Strip the green-compute policy flags — already applied process-wide
+            // in `cli_main` — so the subcommand's own parser does not see them.
+            let sub_args: Vec<String> = strip_policy_flags(&all_args[cmd_idx + 1..]);
 
             // Check for --help
             if sub_args.iter().any(|a| a == "--help" || a == "-h") {
@@ -611,6 +745,16 @@ fn print_usage() {
     eprintln!("  --diagnostic-format <fmt>        Diagnostic format: rich (default) or short");
     eprintln!("  --help, -h                       Print this help message");
     eprintln!("  --version, -V                    Print version information");
+    eprintln!();
+    eprintln!("Green Compute (Runtime Policy):");
+    eprintln!("  --profile <mode>                 Thermal profile: cool | balanced (default) | max-perf");
+    eprintln!("  --threads <N>                    Cap worker threads (0 = auto from profile)");
+    eprintln!("  --batch-size <N>                 Advisory batch size for chunked workloads");
+    eprintln!("  --audit <mode>                   Audit depth: summary | full | forensic");
+    eprintln!("  --no-adaptive                    Disable race-to-idle; apply the cap uniformly");
+    eprintln!("                                   (cool ≈ ¼ cores, balanced ≈ ½, max-perf = all;");
+    eprintln!("                                    adaptive = full speed for short bursts, throttle");
+    eprintln!("                                    when sustained; thread count never changes results)");
     eprintln!();
     eprintln!("Run `cjcl <command> --help` for command-specific help.");
 }

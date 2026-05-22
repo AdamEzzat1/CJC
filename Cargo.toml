@@ -204,3 +204,11 @@ path = "tests/physics_ml/mod.rs"
 [[test]]
 name = "abng"
 path = "tests/abng/mod.rs"
+
+[[test]]
+name = "runtime_policy"
+path = "tests/runtime_policy/mod.rs"
+
+[[test]]
+name = "fused_ops"
+path = "tests/fused_ops/mod.rs"

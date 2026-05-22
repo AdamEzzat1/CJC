@@ -158,6 +158,10 @@ pub mod differentiate;
 /// Deterministic profile counters (Tier 2 of Chess RL v2.3). Write-only
 /// timing sink that does not perturb program state, RNG, or weight hashes.
 pub mod profile;
+/// Runtime Policy Layer — deterministic thermally-bounded execution policy
+/// (thread caps, thermal profiles, batch sizing, audit depth) plus a
+/// wall-clock-free energy estimate. The "green compute" control surface.
+pub mod runtime_policy;
 /// Phase 2b — typed-ID newtypes for ML metadata. Currently provides
 /// only `ParamIdx`, used by `crate::ml::AdamState` and `SgdState`.
 pub mod idx;

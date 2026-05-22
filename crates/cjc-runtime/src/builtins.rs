@@ -1444,6 +1444,240 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             }
         }
 
+        // ── Runtime Policy Layer (green compute) ──────────────────────
+        // Deterministic, thermally-bounded execution policy. The thread cap
+        // and thermal mode move only the performance/heat axis — numeric
+        // results are unchanged because the parallel reductions use a fixed
+        // chunk order with Kahan/binned summation. Energy is estimated from
+        // workload counts, never wall-clock time, so the estimate is
+        // bit-identical across runs. See `crate::runtime_policy` for the full
+        // determinism story.
+        //
+        // OBSERVABILITY CONTRACT: the policy-query builtins that depend on
+        // detected core count (`runtime_policy_threads`, `runtime_policy_summary`)
+        // return environment-dependent values. Like the profiler handles, these
+        // must NOT feed into program logic, RNG draws, tensor math, or control
+        // flow that affects output — doing so would make output machine-dependent
+        // and break cross-platform determinism. The `energy_estimate*` builtins
+        // ARE deterministic (pure functions of explicit args) and are safe to
+        // use in program logic.
+        "runtime_policy_thermal_mode" => {
+            if !args.is_empty() {
+                return Err("runtime_policy_thermal_mode takes no arguments".into());
+            }
+            Ok(Some(Value::String(Rc::new(
+                crate::runtime_policy::get().thermal_mode.as_str().to_string(),
+            ))))
+        }
+        "runtime_policy_set_thermal_mode" => {
+            if args.len() != 1 {
+                return Err(
+                    "runtime_policy_set_thermal_mode requires 1 argument (mode: String)".into(),
+                );
+            }
+            match &args[0] {
+                Value::String(s) => match crate::runtime_policy::ThermalMode::from_str(s.as_str()) {
+                    Some(mode) => {
+                        crate::runtime_policy::set_thermal_mode(mode);
+                        Ok(Some(Value::String(Rc::new(mode.as_str().to_string()))))
+                    }
+                    None => Err(format!(
+                        "unknown thermal mode `{}` (expected cool, balanced, or max-perf)",
+                        s
+                    )),
+                },
+                _ => Err(format!(
+                    "runtime_policy_set_thermal_mode requires String mode, got {}",
+                    args[0].type_name()
+                )),
+            }
+        }
+        "runtime_policy_threads" => {
+            if !args.is_empty() {
+                return Err("runtime_policy_threads takes no arguments".into());
+            }
+            Ok(Some(Value::Int(
+                crate::runtime_policy::current_effective_threads() as i64,
+            )))
+        }
+        "runtime_policy_set_threads" => {
+            if args.len() != 1 {
+                return Err("runtime_policy_set_threads requires 1 argument (n: Int)".into());
+            }
+            match &args[0] {
+                Value::Int(n) => {
+                    crate::runtime_policy::set_threads((*n).max(0) as usize);
+                    Ok(Some(Value::Int(
+                        crate::runtime_policy::current_effective_threads() as i64,
+                    )))
+                }
+                _ => Err(format!(
+                    "runtime_policy_set_threads requires Int, got {}",
+                    args[0].type_name()
+                )),
+            }
+        }
+        "runtime_policy_batch_size" => {
+            if !args.is_empty() {
+                return Err("runtime_policy_batch_size takes no arguments".into());
+            }
+            Ok(Some(Value::Int(
+                crate::runtime_policy::get().batch_size as i64,
+            )))
+        }
+        "runtime_policy_set_batch_size" => {
+            if args.len() != 1 {
+                return Err("runtime_policy_set_batch_size requires 1 argument (n: Int)".into());
+            }
+            match &args[0] {
+                Value::Int(n) => {
+                    let n = (*n).max(0) as usize;
+                    crate::runtime_policy::set_batch_size(n);
+                    Ok(Some(Value::Int(n as i64)))
+                }
+                _ => Err(format!(
+                    "runtime_policy_set_batch_size requires Int, got {}",
+                    args[0].type_name()
+                )),
+            }
+        }
+        "runtime_policy_audit_mode" => {
+            if !args.is_empty() {
+                return Err("runtime_policy_audit_mode takes no arguments".into());
+            }
+            Ok(Some(Value::String(Rc::new(
+                crate::runtime_policy::get().audit_mode.as_str().to_string(),
+            ))))
+        }
+        "runtime_policy_set_audit_mode" => {
+            if args.len() != 1 {
+                return Err(
+                    "runtime_policy_set_audit_mode requires 1 argument (mode: String)".into(),
+                );
+            }
+            match &args[0] {
+                Value::String(s) => match crate::runtime_policy::AuditMode::from_str(s.as_str()) {
+                    Some(mode) => {
+                        crate::runtime_policy::set_audit_mode(mode);
+                        Ok(Some(Value::String(Rc::new(mode.as_str().to_string()))))
+                    }
+                    None => Err(format!(
+                        "unknown audit mode `{}` (expected summary, full, or forensic)",
+                        s
+                    )),
+                },
+                _ => Err(format!(
+                    "runtime_policy_set_audit_mode requires String mode, got {}",
+                    args[0].type_name()
+                )),
+            }
+        }
+        "runtime_policy_numeric_mode" => {
+            if !args.is_empty() {
+                return Err("runtime_policy_numeric_mode takes no arguments".into());
+            }
+            Ok(Some(Value::String(Rc::new(
+                crate::runtime_policy::get().numeric_mode.as_str().to_string(),
+            ))))
+        }
+        "runtime_policy_set_numeric_mode" => {
+            if args.len() != 1 {
+                return Err(
+                    "runtime_policy_set_numeric_mode requires 1 argument (mode: String)".into(),
+                );
+            }
+            match &args[0] {
+                Value::String(s) => match crate::runtime_policy::NumericMode::from_str(s.as_str()) {
+                    Some(mode) => {
+                        crate::runtime_policy::set_numeric_mode(mode);
+                        Ok(Some(Value::String(Rc::new(mode.as_str().to_string()))))
+                    }
+                    None => Err(format!(
+                        "unknown numeric mode `{}` (expected kahan, binned, or fixed-tree)",
+                        s
+                    )),
+                },
+                _ => Err(format!(
+                    "runtime_policy_set_numeric_mode requires String mode, got {}",
+                    args[0].type_name()
+                )),
+            }
+        }
+        "runtime_policy_adaptive" => {
+            if !args.is_empty() {
+                return Err("runtime_policy_adaptive takes no arguments".into());
+            }
+            Ok(Some(Value::Bool(crate::runtime_policy::get().adaptive)))
+        }
+        "runtime_policy_set_adaptive" => {
+            if args.len() != 1 {
+                return Err("runtime_policy_set_adaptive requires 1 argument (on: Bool)".into());
+            }
+            match &args[0] {
+                Value::Bool(on) => {
+                    crate::runtime_policy::set_adaptive(*on);
+                    Ok(Some(Value::Bool(*on)))
+                }
+                _ => Err(format!(
+                    "runtime_policy_set_adaptive requires Bool, got {}",
+                    args[0].type_name()
+                )),
+            }
+        }
+        "runtime_policy_reset" => {
+            if !args.is_empty() {
+                return Err("runtime_policy_reset takes no arguments".into());
+            }
+            crate::runtime_policy::reset();
+            Ok(Some(Value::Int(0)))
+        }
+        "runtime_policy_summary" => {
+            if !args.is_empty() {
+                return Err("runtime_policy_summary takes no arguments".into());
+            }
+            Ok(Some(Value::String(Rc::new(
+                crate::runtime_policy::get().summary(),
+            ))))
+        }
+        "energy_estimate" => {
+            if args.len() != 2 {
+                return Err(
+                    "energy_estimate requires 2 arguments (flops: Int, bytes: Int)".into(),
+                );
+            }
+            let to_i64 = |v: &Value, which: &str| -> Result<i64, String> {
+                match v {
+                    Value::Int(n) => Ok(*n),
+                    Value::Float(f) => Ok(*f as i64),
+                    other => Err(format!(
+                        "energy_estimate {which} must be Int or Float, got {}",
+                        other.type_name()
+                    )),
+                }
+            };
+            let flops = to_i64(&args[0], "flops")?;
+            let bytes = to_i64(&args[1], "bytes")?;
+            Ok(Some(Value::Float(
+                crate::runtime_policy::energy_estimate_joules(flops, bytes),
+            )))
+        }
+        "energy_per_flop" => {
+            if !args.is_empty() {
+                return Err("energy_per_flop takes no arguments".into());
+            }
+            Ok(Some(Value::Float(
+                crate::runtime_policy::ENERGY_PER_FLOP_JOULES,
+            )))
+        }
+        "energy_per_byte" => {
+            if !args.is_empty() {
+                return Err("energy_per_byte takes no arguments".into());
+            }
+            Ok(Some(Value::Float(
+                crate::runtime_policy::ENERGY_PER_BYTE_JOULES,
+            )))
+        }
+
         // ── Chess RL v2.3 native hot-path kernels (Tier 3) ────────────
         // These replace O(n²) CJC-Lang loops with tight Rust implementations.
         // They must produce **bit-identical** output to the pure-CJC-Lang
@@ -3448,6 +3682,50 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let c = value_to_tensor(&args[2])?;
             let result = a.fused_mul_add(&b, &c)
                 .map_err(|e| format!("broadcast_fma: {e}"))?;
+            Ok(Some(Value::Tensor(result)))
+        }
+        "fused_axpy" => {
+            // fused_axpy(alpha, x, y) = alpha * x + y, scalar alpha, one pass.
+            // Eliminates the intermediate from scalar_mul + add (BLAS axpy).
+            if args.len() != 3 {
+                return Err(
+                    "fused_axpy requires 3 arguments (alpha: Float, x: Tensor, y: Tensor)".into(),
+                );
+            }
+            let alpha = match &args[0] {
+                Value::Float(v) => *v,
+                Value::Int(v) => *v as f64,
+                other => {
+                    return Err(format!(
+                        "fused_axpy alpha must be Float or Int, got {}",
+                        other.type_name()
+                    ))
+                }
+            };
+            let x = value_to_tensor(&args[1])?;
+            let y = value_to_tensor(&args[2])?;
+            let result = x.fused_axpy(alpha, &y).map_err(|e| format!("fused_axpy: {e}"))?;
+            Ok(Some(Value::Tensor(result)))
+        }
+        "fused_mul_sub" => {
+            // fused_mul_sub(a, b, c) = a * b - c, one pass.
+            if args.len() != 3 {
+                return Err("fused_mul_sub requires 3 arguments (a, b, c)".into());
+            }
+            let a = value_to_tensor(&args[0])?;
+            let b = value_to_tensor(&args[1])?;
+            let c = value_to_tensor(&args[2])?;
+            let result = a.fused_mul_sub(&b, &c).map_err(|e| format!("fused_mul_sub: {e}"))?;
+            Ok(Some(Value::Tensor(result)))
+        }
+        "fused_sub_sq" => {
+            // fused_sub_sq(a, b) = (a - b)^2, one pass (MSE/variance/distance).
+            if args.len() != 2 {
+                return Err("fused_sub_sq requires 2 arguments (a, b)".into());
+            }
+            let a = value_to_tensor(&args[0])?;
+            let b = value_to_tensor(&args[1])?;
+            let result = a.fused_sub_sq(&b).map_err(|e| format!("fused_sub_sq: {e}"))?;
             Ok(Some(Value::Tensor(result)))
         }
 

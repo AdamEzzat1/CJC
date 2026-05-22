@@ -114,36 +114,40 @@ fn simd_binop_parallel(a: &[f64], b: &[f64], op: BinOp) -> Vec<f64> {
     let mut out = vec![0.0f64; n];
     let chunk_size = 4096; // ~32 KB per chunk (good L1 cache fit)
 
-    out.par_chunks_mut(chunk_size)
-        .enumerate()
-        .for_each(|(chunk_idx, out_chunk)| {
-            let start = chunk_idx * chunk_size;
-            let len = out_chunk.len();
-            let a_chunk = &a[start..start + len];
-            let b_chunk = &b[start..start + len];
+    // Each element `out[i] = a[i] ⊕ b[i]` is independent, so throttling
+    // concurrency via `run_parallel` (thermal policy) leaves output identical.
+    crate::runtime_policy::run_parallel(|| {
+        out.par_chunks_mut(chunk_size)
+            .enumerate()
+            .for_each(|(chunk_idx, out_chunk)| {
+                let start = chunk_idx * chunk_size;
+                let len = out_chunk.len();
+                let a_chunk = &a[start..start + len];
+                let b_chunk = &b[start..start + len];
 
-            #[cfg(target_arch = "x86_64")]
-            {
-                if has_avx2() {
-                    unsafe {
-                        match op {
-                            BinOp::Add => avx2_binop::<ADD_TAG>(a_chunk, b_chunk, out_chunk),
-                            BinOp::Sub => avx2_binop::<SUB_TAG>(a_chunk, b_chunk, out_chunk),
-                            BinOp::Mul => avx2_binop::<MUL_TAG>(a_chunk, b_chunk, out_chunk),
-                            BinOp::Div => avx2_binop::<DIV_TAG>(a_chunk, b_chunk, out_chunk),
+                #[cfg(target_arch = "x86_64")]
+                {
+                    if has_avx2() {
+                        unsafe {
+                            match op {
+                                BinOp::Add => avx2_binop::<ADD_TAG>(a_chunk, b_chunk, out_chunk),
+                                BinOp::Sub => avx2_binop::<SUB_TAG>(a_chunk, b_chunk, out_chunk),
+                                BinOp::Mul => avx2_binop::<MUL_TAG>(a_chunk, b_chunk, out_chunk),
+                                BinOp::Div => avx2_binop::<DIV_TAG>(a_chunk, b_chunk, out_chunk),
+                            }
                         }
+                        return;
                     }
-                    return;
                 }
-            }
 
-            match op {
-                BinOp::Add => { for i in 0..len { out_chunk[i] = a_chunk[i] + b_chunk[i]; } }
-                BinOp::Sub => { for i in 0..len { out_chunk[i] = a_chunk[i] - b_chunk[i]; } }
-                BinOp::Mul => { for i in 0..len { out_chunk[i] = a_chunk[i] * b_chunk[i]; } }
-                BinOp::Div => { for i in 0..len { out_chunk[i] = a_chunk[i] / b_chunk[i]; } }
-            }
-        });
+                match op {
+                    BinOp::Add => { for i in 0..len { out_chunk[i] = a_chunk[i] + b_chunk[i]; } }
+                    BinOp::Sub => { for i in 0..len { out_chunk[i] = a_chunk[i] - b_chunk[i]; } }
+                    BinOp::Mul => { for i in 0..len { out_chunk[i] = a_chunk[i] * b_chunk[i]; } }
+                    BinOp::Div => { for i in 0..len { out_chunk[i] = a_chunk[i] / b_chunk[i]; } }
+                }
+            });
+    });
 
     out
 }

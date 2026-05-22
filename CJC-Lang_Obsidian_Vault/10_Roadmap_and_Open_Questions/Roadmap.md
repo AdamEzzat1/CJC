@@ -65,6 +65,28 @@ These are the **feature implementation scope** items called out in the project's
 7. **Multi-file module system**: `mod math;` / `import stats.linear`. See [[Module System]] — infrastructure partially exists but is not wired as the default path.
 8. **Decorators**: `@log`, `@timed` as a language feature. Parser → AST → HIR → MIR → runtime wrapper execution.
 
+## Green Compute (Runtime Policy)
+
+The "make CJC-Lang greener — more energy and thermally efficient" initiative.
+Framing: *efficient trustworthy computation*, not brute-force throughput. The
+niche is more efficient per **trustworthy** result (scientific, medical,
+regulated, reproducible, edge), not hyperscale TFLOPs. Design:
+[[ADR-0025 Runtime Policy Layer]]; concept: [[Runtime Policy Layer]];
+performance-recovery research: [[Green Compute Performance Recovery]].
+
+| ID | Item | Status | Crates |
+|---|---|---|---|
+| GC-01 | `RuntimePolicy` struct + `cool`/`balanced`/`max-perf` thermal profiles | ✅ Done | `cjc-runtime` |
+| GC-02 | rayon thread cap (`--threads`/`--profile`) — set-once at CLI startup, laptop-safe `balanced` default | ✅ Done | `cjc-runtime`, `cjc-cli` |
+| GC-03 | Deterministic energy estimate (`energy_estimate`, workload-counts not wall time) + 15 policy/energy builtins | ✅ Done | `cjc-runtime` |
+| GC-09 | **Race-to-idle adaptive cap** — burst full / throttle when sustained; recovers burst perf, keeps sustained bound; `--no-adaptive` for fixed schedule ([[ADR-0026 Race-to-Idle Adaptive Scheduling]]) | ✅ Done | `cjc-runtime`, `cjc-cli` |
+| GC-04 | Wire `numeric_mode` into live reduction dispatch (today: recorded preference only) | 📋 Planned | `cjc-runtime` |
+| GC-05 | Instrumented FLOP/byte counter for whole-program energy accounting | 📋 Planned | `cjc-runtime` |
+| GC-06a | **Fused elementwise kernels** — `fused_axpy`/`fused_mul_sub`/`fused_sub_sq` single-pass, eliminate intermediate allocs (~40% less traffic), bit-identical to unfused; compounds with race-to-idle ([[ADR-0027 Fused Elementwise Kernels]]) | ✅ Done | `cjc-runtime` |
+| GC-06b | **Adaptive layout abstraction + deterministic hash-table** — memory + scaling headroom for the next dataset size; unblocks **Phase 1.0** of [[TidyView Architecture]] / [[ADR-0023 ABNG Adaptive Belief Radix Graph (Phase 0.1)|ABNG]] at real scale (memory traffic is energy) | 📋 Planned | `cjc-data`, `cjc-abng` |
+| GC-07 | Hot/cold path split (fast numerical path vs. cold audit/SVG/Merkle work) via `audit_mode` hook | ❓ Implied | `cjc-runtime` |
+| GC-08 | Energy/perf telemetry: `joules_per_epoch`, `AUC_per_joule`, `trust_adjusted_auc_per_joule` (user code / [[Bastion]] on top of `energy_estimate`) | ❓ Implied | `cjc-data`, libs |
+
 ## Stage 4 preview
 
 Listed in `stage3_roadmap.md` as post-Stage-3 targets:

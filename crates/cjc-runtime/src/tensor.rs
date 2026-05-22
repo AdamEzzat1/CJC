@@ -535,6 +535,93 @@ impl Tensor {
         temp.add(c)
     }
 
+    /// Fused `alpha * self + y` (scalar `alpha`) in one pass — the BLAS axpy,
+    /// ubiquitous in optimizers, EMAs, and linear combinations. Eliminates the
+    /// intermediate tensor that `scalar_mul` + `add` would allocate. Software
+    /// two-rounding (separate mul then add, **no hardware FMA**) so the result
+    /// is bit-identical to `self.scalar_mul(alpha).add(y)`.
+    pub fn fused_axpy(&self, alpha: f64, y: &Tensor) -> Result<Tensor, RuntimeError> {
+        if self.shape != y.shape {
+            return Err(RuntimeError::InvalidOperation(
+                "fused_axpy: self and y must have the same shape".to_string(),
+            ));
+        }
+        if self.is_contiguous() && y.is_contiguous() {
+            let x_data = self.buffer.borrow_data();
+            let y_data = y.buffer.borrow_data();
+            let n = x_data.len();
+            let mut out = vec![0.0f64; n];
+            for i in 0..n {
+                out[i] = alpha * x_data[i] + y_data[i];
+            }
+            return Ok(Tensor {
+                buffer: Buffer::from_vec(out),
+                shape: self.shape.clone(),
+                strides: Self::compute_strides(&self.shape),
+                offset: 0,
+            });
+        }
+        // Non-contiguous fallback: scalar_mul then add.
+        self.scalar_mul(alpha).add(y)
+    }
+
+    /// Fused `self * b - c` in one pass. Eliminates the `mul_elem` intermediate.
+    /// Bit-identical to `self.mul_elem(b).sub(c)` (two roundings, no hardware FMA).
+    pub fn fused_mul_sub(&self, b: &Tensor, c: &Tensor) -> Result<Tensor, RuntimeError> {
+        if self.shape != b.shape || self.shape != c.shape {
+            return Err(RuntimeError::InvalidOperation(
+                "fused_mul_sub: all three tensors must have the same shape".to_string(),
+            ));
+        }
+        if self.is_contiguous() && b.is_contiguous() && c.is_contiguous() {
+            let a_data = self.buffer.borrow_data();
+            let b_data = b.buffer.borrow_data();
+            let c_data = c.buffer.borrow_data();
+            let n = a_data.len();
+            let mut out = vec![0.0f64; n];
+            for i in 0..n {
+                out[i] = a_data[i] * b_data[i] - c_data[i];
+            }
+            return Ok(Tensor {
+                buffer: Buffer::from_vec(out),
+                shape: self.shape.clone(),
+                strides: Self::compute_strides(&self.shape),
+                offset: 0,
+            });
+        }
+        let temp = self.mul_elem(b)?;
+        temp.sub(c)
+    }
+
+    /// Fused `(self - b)^2` in one pass — the squared difference at the heart of
+    /// MSE, variance, and Euclidean distance. Eliminates the `sub` intermediate.
+    /// Bit-identical to `let d = self.sub(b); d.mul_elem(&d)`.
+    pub fn fused_sub_sq(&self, b: &Tensor) -> Result<Tensor, RuntimeError> {
+        if self.shape != b.shape {
+            return Err(RuntimeError::InvalidOperation(
+                "fused_sub_sq: self and b must have the same shape".to_string(),
+            ));
+        }
+        if self.is_contiguous() && b.is_contiguous() {
+            let a_data = self.buffer.borrow_data();
+            let b_data = b.buffer.borrow_data();
+            let n = a_data.len();
+            let mut out = vec![0.0f64; n];
+            for i in 0..n {
+                let d = a_data[i] - b_data[i];
+                out[i] = d * d;
+            }
+            return Ok(Tensor {
+                buffer: Buffer::from_vec(out),
+                shape: self.shape.clone(),
+                strides: Self::compute_strides(&self.shape),
+                offset: 0,
+            });
+        }
+        let d = self.sub(b)?;
+        d.mul_elem(&d)
+    }
+
     // ── v0.1 Broadcasting: additional element-wise binary ops ──
 
     /// Element-wise power: `a^b`.
@@ -897,40 +984,51 @@ impl Tensor {
         if m >= 512 && n >= 512 {
             // Only use rayon for very large matrices where thread overhead
             // is amortized. Split into row-bands, each processed with tiled matmul.
-            let band_size = (m + rayon::current_num_threads() - 1) / rayon::current_num_threads();
-            let band_size = band_size.max(64); // At least 64 rows per band
-            let mut result = vec![0.0f64; m * n];
-
-            result
-                .par_chunks_mut(band_size * n)
-                .enumerate()
-                .for_each(|(band_idx, band)| {
-                    let i_start = band_idx * band_size;
-                    let i_end = (i_start + band_size).min(m);
-                    let band_m = i_end - i_start;
-                    let a_band = &a[i_start * k .. i_end * k];
-                    let engine = crate::tensor_tiled::TiledMatmul::new();
-                    let tiled_result = engine.matmul(a_band, band_m, k, b, n);
-                    band[..band_m * n].copy_from_slice(&tiled_result);
-                });
+            // Wrapped in `run_parallel` so the thermal policy throttles
+            // concurrency (band count auto-scales to the live pool's
+            // `current_num_threads()`); the per-band tiled result is identical
+            // regardless of how the rows are banded, so output is bit-identical.
+            let result = crate::runtime_policy::run_parallel(|| {
+                let band_size =
+                    ((m + rayon::current_num_threads() - 1) / rayon::current_num_threads()).max(64);
+                let mut result = vec![0.0f64; m * n];
+                result
+                    .par_chunks_mut(band_size * n)
+                    .enumerate()
+                    .for_each(|(band_idx, band)| {
+                        let i_start = band_idx * band_size;
+                        let i_end = (i_start + band_size).min(m);
+                        let band_m = i_end - i_start;
+                        let a_band = &a[i_start * k..i_end * k];
+                        let engine = crate::tensor_tiled::TiledMatmul::new();
+                        let tiled_result = engine.matmul(a_band, band_m, k, b, n);
+                        band[..band_m * n].copy_from_slice(&tiled_result);
+                    });
+                result
+            });
 
             return Tensor::from_vec(result, &[m, n]);
         }
 
         // For medium matrices (256-511), use Kahan accumulator (16 bytes, not 32KB).
-        let mut result = vec![0.0f64; m * n];
-        result
-            .par_chunks_mut(n)
-            .enumerate()
-            .for_each(|(i, row)| {
-                for j in 0..n {
-                    let mut acc = KahanAccumulatorF64::new();
-                    for p in 0..k {
-                        acc.add(a[i * k + p] * b[p * n + j]);
+        // Each output row is independent, so throttling concurrency via
+        // `run_parallel` leaves the values bit-identical.
+        let result = crate::runtime_policy::run_parallel(|| {
+            let mut result = vec![0.0f64; m * n];
+            result
+                .par_chunks_mut(n)
+                .enumerate()
+                .for_each(|(i, row)| {
+                    for j in 0..n {
+                        let mut acc = KahanAccumulatorF64::new();
+                        for p in 0..k {
+                            acc.add(a[i * k + p] * b[p * n + j]);
+                        }
+                        row[j] = acc.finalize();
                     }
-                    row[j] = acc.finalize();
-                }
-            });
+                });
+            result
+        });
 
         Tensor::from_vec(result, &[m, n])
     }
@@ -1017,12 +1115,16 @@ impl Tensor {
         {
             if batch_size > 1 && m * k >= 4096 {
                 use rayon::prelude::*;
-                result
-                    .par_chunks_mut(mat_c_stride)
-                    .enumerate()
-                    .for_each(|(batch, c_slice)| {
-                        compute_batch(batch, c_slice);
-                    });
+                // Each batch is independent → throttling concurrency via
+                // `run_parallel` keeps output bit-identical.
+                crate::runtime_policy::run_parallel(|| {
+                    result
+                        .par_chunks_mut(mat_c_stride)
+                        .enumerate()
+                        .for_each(|(batch, c_slice)| {
+                            compute_batch(batch, c_slice);
+                        });
+                });
 
                 let mut out_shape = batch_dims_a.to_vec();
                 out_shape.push(m);
