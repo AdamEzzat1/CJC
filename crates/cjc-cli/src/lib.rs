@@ -121,7 +121,7 @@ const KNOWN_FLAGS: &[&str] = &[
     "--profile",
     "--threads",
     "--batch-size",
-    "--audit",
+    "--audit-mode",
     "--no-adaptive",
     "--help",
     "--version",
@@ -296,7 +296,7 @@ impl Config {
                 // every command, including the CLI-suite subcommands); here we
                 // only consume the flag + its value so the run-path parser does
                 // not reject them as unknown.
-                flag @ ("--profile" | "--threads" | "--batch-size" | "--audit") => {
+                flag @ ("--profile" | "--threads" | "--batch-size" | "--audit-mode") => {
                     i += 1;
                     if i >= args.len() {
                         cli_error(&format!("{} requires an argument", flag));
@@ -434,7 +434,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
 // ── Runtime policy (green compute) ───────────────────────────────────
 
 /// Parse the green-compute policy flags (`--profile`, `--threads`,
-/// `--batch-size`, `--audit`) from the full argument list and apply them to the
+/// `--batch-size`, `--audit-mode`) from the full argument list and apply them to the
 /// process-wide runtime policy + rayon thread pool.
 ///
 /// Applied once, at the very start of `cli_main`, before any command runs — so
@@ -444,7 +444,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
 /// default applies (≈ half the cores) rather than saturating every core.
 ///
 /// `--profile` is applied first so explicit `--threads` / `--batch-size` /
-/// `--audit` overrides win over the profile presets.
+/// `--audit-mode` overrides win over the profile presets.
 fn apply_runtime_policy_flags(args: &[String]) {
     use cjc_runtime::runtime_policy as rp;
 
@@ -469,7 +469,7 @@ fn apply_runtime_policy_flags(args: &[String]) {
                 i += 1;
                 batch = args.get(i).cloned();
             }
-            "--audit" => {
+            "--audit-mode" => {
                 i += 1;
                 audit = args.get(i).cloned();
             }
@@ -510,7 +510,7 @@ fn apply_runtime_policy_flags(args: &[String]) {
         match rp::AuditMode::from_str(&a) {
             Some(m) => rp::set_audit_mode(m),
             None => cli_error(&format!(
-                "unknown --audit `{}` (expected summary, full, or forensic)",
+                "unknown --audit-mode `{}` (expected summary, full, or forensic)",
                 a
             )),
         }
@@ -534,7 +534,7 @@ fn strip_policy_flags(args: &[String]) -> Vec<String> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--profile" | "--threads" | "--batch-size" | "--audit" => {
+            "--profile" | "--threads" | "--batch-size" | "--audit-mode" => {
                 i += 1; // also skip the value
             }
             "--no-adaptive" => {} // boolean flag, no value to skip
@@ -750,7 +750,7 @@ fn print_usage() {
     eprintln!("  --profile <mode>                 Thermal profile: cool | balanced (default) | max-perf");
     eprintln!("  --threads <N>                    Cap worker threads (0 = auto from profile)");
     eprintln!("  --batch-size <N>                 Advisory batch size for chunked workloads");
-    eprintln!("  --audit <mode>                   Audit depth: summary | full | forensic");
+    eprintln!("  --audit-mode <mode>              Audit depth: summary | full | forensic");
     eprintln!("  --no-adaptive                    Disable race-to-idle; apply the cap uniformly");
     eprintln!("                                   (cool ≈ ¼ cores, balanced ≈ ½, max-perf = all;");
     eprintln!("                                    adaptive = full speed for short bursts, throttle");

@@ -130,14 +130,14 @@ cjcl run model.cjcl --profile cool       # ¼ cores when sustained, gentle
 cjcl run model.cjcl --profile balanced   # default — ½ cores when sustained
 cjcl bench model.cjcl --profile max-perf # all cores, benchmark
 cjcl run model.cjcl --threads 2          # explicit cap (overrides profile)
-cjcl run model.cjcl --profile cool --batch-size 16 --audit summary
+cjcl run model.cjcl --profile cool --batch-size 16 --audit-mode summary
 cjcl bench model.cjcl --profile cool --no-adaptive  # fixed cap (reproducible)
 ```
 
 Applied once at the top of `cli_main`, before any command runs, so the
 thermal/thread bound covers `run`, `bench`, and every other command.
 `--profile` is applied first so explicit `--threads` / `--batch-size` /
-`--audit` overrides win over the presets. See [[CLI Surfaces]].
+`--audit-mode` overrides win over the presets. See [[CLI Surfaces]].
 
 ## Phase 2 — race-to-idle adaptive scheduling
 

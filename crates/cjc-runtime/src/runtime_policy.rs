@@ -510,7 +510,7 @@ pub fn reset() {
 /// Adopt a thermal profile wholesale: sets the thermal mode plus its preset
 /// batch size and audit depth, and resets the thread cap to `auto`. Explicit
 /// per-field setters called *after* this win (the CLI applies the profile
-/// first, then individual `--threads` / `--batch-size` / `--audit` overrides).
+/// first, then individual `--threads` / `--batch-size` / `--audit-mode` overrides).
 pub fn set_thermal_mode(mode: ThermalMode) {
     POLICY.with(|c| {
         let mut p = c.borrow_mut();

@@ -12,7 +12,7 @@ date: 2026-05-20
 **Accepted.** Phase 1 shipped: the `RuntimePolicy` struct (six fields),
 three thermal profiles (`cool` / `balanced` / `max-perf`), a rayon thread
 cap applied at CLI startup, four CLI flags (`--profile`, `--threads`,
-`--batch-size`, `--audit`), 15 policy + energy builtins routed through the
+`--batch-size`, `--audit-mode`), 15 policy + energy builtins routed through the
 shared dispatch, and a four-flavor test suite (16 unit + 27 wiring + 8
 proptest + 3 bolero fuzz = 54 tests).
 
@@ -137,7 +137,7 @@ once auto-wires both — and AST↔MIR parity is almost free. This is the
 
 ### CLI flags
 
-`--profile <mode>`, `--threads <N>`, `--batch-size <N>`, `--audit <mode>`
+`--profile <mode>`, `--threads <N>`, `--batch-size <N>`, `--audit-mode <mode>`
 are parsed and applied process-wide in `cli_main`; `--profile` is applied
 first so explicit field overrides win over the profile presets. For
 CLI-suite subcommands (e.g. `bench`) the flags are stripped from `sub_args`

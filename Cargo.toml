@@ -1,6 +1,6 @@
 [package]
 name = "cjc-lang"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2021"
 license = "MIT"
 description = "CJC-Lang (Computational Jacobian Core) — a deterministic numerical programming language for reproducible computation, ML pipelines, scientific computing, and physics-informed neural networks"
@@ -68,7 +68,7 @@ exclude = ["fuzz"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.9"
+version = "0.1.10"
 edition = "2021"
 license = "MIT"
 authors = ["Adam Ezzat"]
@@ -125,29 +125,29 @@ lto = true
 codegen-units = 1
 
 [workspace.dependencies]
-cjc-ast = { path = "crates/cjc-ast", version = "0.1.9" }
-cjc-diag = { path = "crates/cjc-diag", version = "0.1.9" }
-cjc-lexer = { path = "crates/cjc-lexer", version = "0.1.9" }
-cjc-parser = { path = "crates/cjc-parser", version = "0.1.9" }
-cjc-types = { path = "crates/cjc-types", version = "0.1.9" }
-cjc-dispatch = { path = "crates/cjc-dispatch", version = "0.1.9" }
-cjc-runtime = { path = "crates/cjc-runtime", version = "0.1.9" }
-cjc-eval = { path = "crates/cjc-eval", version = "0.1.9" }
-cjc-ad = { path = "crates/cjc-ad", version = "0.1.9" }
-cjc-data = { path = "crates/cjc-data", version = "0.1.9" }
-cjc-repro = { path = "crates/cjc-repro", version = "0.1.9" }
-cjc-cli = { path = "crates/cjc-cli", version = "0.1.9" }
-cjc-module = { path = "crates/cjc-module", version = "0.1.9" }
-cjc-snap = { path = "crates/cjc-snap", version = "0.1.9" }
-cjc-vizor = { path = "crates/cjc-vizor", version = "0.1.9" }
-cjc-hir = { path = "crates/cjc-hir", version = "0.1.9" }
-cjc-mir = { path = "crates/cjc-mir", version = "0.1.9" }
-cjc-mir-exec = { path = "crates/cjc-mir-exec", version = "0.1.9" }
-cjc-regex = { path = "crates/cjc-regex", version = "0.1.9" }
-cjc-analyzer = { path = "crates/cjc-analyzer", version = "0.1.9" }
-cjc-quantum = { path = "crates/cjc-quantum", version = "0.1.9" }
-cjc-dharht = { path = "crates/cjc-dharht", version = "0.1.9" }
-cjc-abng = { path = "crates/cjc-abng", version = "0.1.9" }
+cjc-ast = { path = "crates/cjc-ast", version = "0.1.10" }
+cjc-diag = { path = "crates/cjc-diag", version = "0.1.10" }
+cjc-lexer = { path = "crates/cjc-lexer", version = "0.1.10" }
+cjc-parser = { path = "crates/cjc-parser", version = "0.1.10" }
+cjc-types = { path = "crates/cjc-types", version = "0.1.10" }
+cjc-dispatch = { path = "crates/cjc-dispatch", version = "0.1.10" }
+cjc-runtime = { path = "crates/cjc-runtime", version = "0.1.10" }
+cjc-eval = { path = "crates/cjc-eval", version = "0.1.10" }
+cjc-ad = { path = "crates/cjc-ad", version = "0.1.10" }
+cjc-data = { path = "crates/cjc-data", version = "0.1.10" }
+cjc-repro = { path = "crates/cjc-repro", version = "0.1.10" }
+cjc-cli = { path = "crates/cjc-cli", version = "0.1.10" }
+cjc-module = { path = "crates/cjc-module", version = "0.1.10" }
+cjc-snap = { path = "crates/cjc-snap", version = "0.1.10" }
+cjc-vizor = { path = "crates/cjc-vizor", version = "0.1.10" }
+cjc-hir = { path = "crates/cjc-hir", version = "0.1.10" }
+cjc-mir = { path = "crates/cjc-mir", version = "0.1.10" }
+cjc-mir-exec = { path = "crates/cjc-mir-exec", version = "0.1.10" }
+cjc-regex = { path = "crates/cjc-regex", version = "0.1.10" }
+cjc-analyzer = { path = "crates/cjc-analyzer", version = "0.1.10" }
+cjc-quantum = { path = "crates/cjc-quantum", version = "0.1.10" }
+cjc-dharht = { path = "crates/cjc-dharht", version = "0.1.10" }
+cjc-abng = { path = "crates/cjc-abng", version = "0.1.10" }
 
 [[test]]
 name = "fixtures"

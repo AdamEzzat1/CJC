@@ -4,6 +4,33 @@ All notable changes to CJC-Lang (Computational Jacobian Core) will be documented
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.10] — 2026-05-23
+
+### Green Compute — Runtime Policy Layer, Adaptive Scheduling & Fused Kernels
+
+A green-compute layer that bounds thermal/CPU load deterministically. The heat/speed knobs **provably never change output** — same seed, same bits, across every profile, thread count, and both executors.
+
+#### Runtime Policy Layer (`cjc-runtime`)
+- **`RuntimePolicy`** — thermal profiles via `--profile cool | balanced | max-perf`, a thread cap via `--threads N`, an advisory batch size, audit depth, and a numeric-mode hint. The default is `balanced` (≈ ½ cores), deliberately not "all cores forever."
+- **Deterministic energy estimate** — `energy_estimate(flops, bytes)` is a pure function of the workload, never of wall-clock time: same seed → same joules, bit-for-bit. Plus `energy_per_flop` / `energy_per_byte`.
+- Policy query/set builtins (`runtime_policy_*`), routed through the shared dispatch so both executors agree.
+
+#### Race-to-Idle Adaptive Scheduling
+- Parallel kernels run at full width during short bursts and throttle to the cap only once load is **sustained** — recovering most of the throughput a fixed cap costs while keeping the thermal bound. `--no-adaptive` applies the cap uniformly for reproducible benchmarking.
+- **Determinism preserved:** only the *schedule* adapts; thread count, pool size, and chunk count never change the numeric result.
+
+#### Fused Elementwise Kernels (GC-06 Phase 3a)
+- `fused_axpy(α, x, y)`, `fused_mul_sub(a, b, c)`, `fused_sub_sq(a, b)` — single-pass kernels that eliminate intermediate tensor allocations (~40% less memory traffic, one allocation instead of two). Bit-identical to the unfused sequence (software two-rounding, **no hardware FMA**).
+
+#### CLI
+- New flags applied once at startup across all commands: `--profile`, `--threads`, `--batch-size`, `--audit-mode`, `--no-adaptive`.
+
+#### Fixes
+- Renamed the runtime-policy `--audit` flag to `--audit-mode` to avoid colliding with the `abng inspect --audit` subcommand flag.
+
+#### Tests
+- 80 new tests (unit, dual-executor parity, property, and fuzz) covering the policy/scheduling layer and the fused kernels.
+
 ## [0.1.5] — 2026-04-14
 
 ### Physics-Informed Neural Networks (PINNs) & Scientific Machine Learning
