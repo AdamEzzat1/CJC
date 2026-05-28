@@ -39,6 +39,9 @@ pub struct LeakageConfig {
     pub id_like_cardinality_ratio: f64,
     /// Minimum row count before ID-like checks fire.
     pub id_like_min_rows: u64,
+    /// v0.6.3: maximum number of distinct values an Int target can have
+    /// before being treated as continuous and skipped. Default 20.
+    pub multiclass_max_classes: u32,
 }
 
 impl Default for LeakageConfig {
@@ -49,6 +52,7 @@ impl Default for LeakageConfig {
             min_class_count: 10,
             id_like_cardinality_ratio: 0.95,
             id_like_min_rows: 50,
+            multiclass_max_classes: 20,
         }
     }
 }
@@ -155,6 +159,166 @@ pub fn binary_target_auc(
     let n_neg_f = n_neg as f64;
     let auc = (sum_ranks_positive - n_pos_f * (n_pos_f + 1.0) / 2.0) / (n_pos_f * n_neg_f);
     Some(auc)
+}
+
+// ─── Multi-class leakage (v0.6.3) ─────────────────────────────────────────
+
+/// Extract an Int target with 3 to `max_classes` distinct values as a
+/// `(Vec<u32>, Vec<i64>)` of (per-row class index, sorted distinct labels).
+/// Returns `None` if the target isn't Int, has fewer than 3 distinct
+/// values (binary or constant — handled elsewhere), or has more than
+/// `max_classes` distinct values (likely continuous-ish).
+fn extract_multiclass_target(
+    df: &DataFrame,
+    name: &str,
+    max_classes: u32,
+) -> Option<(Vec<u32>, Vec<i64>)> {
+    let col = df.get_column(name)?;
+    let Column::Int(values) = col else { return None };
+    let mut distinct: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+    for v in values {
+        distinct.insert(*v);
+        if distinct.len() > max_classes as usize {
+            return None;
+        }
+    }
+    if distinct.len() < 3 {
+        return None;
+    }
+    let labels: Vec<i64> = distinct.into_iter().collect();
+    let mut lookup: std::collections::BTreeMap<i64, u32> = std::collections::BTreeMap::new();
+    for (i, lbl) in labels.iter().enumerate() {
+        lookup.insert(*lbl, i as u32);
+    }
+    let classes: Vec<u32> = values.iter().map(|v| lookup[v]).collect();
+    Some((classes, labels))
+}
+
+/// One-vs-rest AUC: for each class `c` in `0..n_classes`, compute AUC of
+/// `feature` against the binary target `target == c`. Returns the **max**
+/// per-class AUC (so a feature that perfectly identifies one class
+/// surfaces, even if it's noise on the others). Returns `None` if no
+/// class has enough samples on both sides for the AUC computation.
+pub fn multiclass_max_one_vs_rest_auc(
+    feature: &[f64],
+    target: &[u32],
+    n_classes: u32,
+    min_class_count: u64,
+) -> Option<f64> {
+    if feature.len() != target.len() {
+        return None;
+    }
+    let mut best: Option<f64> = None;
+    for c in 0..n_classes {
+        let binary: Vec<u8> = target
+            .iter()
+            .map(|t| if *t == c { 1u8 } else { 0u8 })
+            .collect();
+        if let Some(auc) = binary_target_auc(feature, &binary, min_class_count) {
+            let abs_auc = auc.max(1.0 - auc);
+            best = Some(best.map_or(abs_auc, |b| b.max(abs_auc)));
+        }
+    }
+    best
+}
+
+/// Multi-class variant of `detect_target_leakage`. Emits **E9063**
+/// (Warning when max OVR |AUC| ≥ `auc_warn_threshold`, Error when ≥
+/// `auc_error_threshold`). Same evidence shape as E9060/E9061 plus
+/// the per-class breakdown.
+pub fn detect_target_leakage_multiclass(
+    df: &DataFrame,
+    target_col: &str,
+    cfg: &LeakageConfig,
+) -> Vec<ValidationFinding> {
+    let mut out = Vec::new();
+    let Some((target_idx, labels)) = extract_multiclass_target(df, target_col, cfg.multiclass_max_classes) else {
+        return out;
+    };
+    let n_classes = labels.len() as u32;
+    let n_rows = df.nrows() as u64;
+    for (name, _col) in &df.columns {
+        if name == target_col {
+            continue;
+        }
+        let Some(feat) = extract_feature(df, name) else {
+            continue;
+        };
+        let Some(max_auc) = multiclass_max_one_vs_rest_auc(
+            &feat,
+            &target_idx,
+            n_classes,
+            cfg.min_class_count,
+        ) else {
+            continue;
+        };
+        let (severity, marker) = if max_auc >= cfg.auc_error_threshold {
+            (FindingSeverity::Error, "almost certainly leakage")
+        } else if max_auc >= cfg.auc_warn_threshold {
+            (FindingSeverity::Warning, "worth investigating")
+        } else {
+            continue;
+        };
+        // Build a sample showing top-3 per-class AUCs (sorted desc).
+        let mut per_class_aucs: Vec<(u32, f64)> = Vec::new();
+        for c in 0..n_classes {
+            let binary: Vec<u8> = target_idx
+                .iter()
+                .map(|t| if *t == c { 1u8 } else { 0u8 })
+                .collect();
+            if let Some(auc) = binary_target_auc(&feat, &binary, cfg.min_class_count) {
+                let abs = auc.max(1.0 - auc);
+                per_class_aucs.push((c, abs));
+            }
+        }
+        per_class_aucs.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let per_class_str = per_class_aucs
+            .iter()
+            .take(3)
+            .map(|(c, auc)| format!("class[{}]={:.3}", labels[*c as usize], auc))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        out.push(ValidationFinding::new(
+            "E9063",
+            severity,
+            format!(
+                "feature `{}` has max OVR |AUC| = {:.4} against multi-class target `{}` ({}); {}",
+                name, max_auc, target_col, n_classes, marker
+            ),
+            Some(name.clone()),
+            None,
+            vec![
+                FindingEvidence::Metric {
+                    label: "max_ovr_auc".into(),
+                    value: max_auc,
+                },
+                FindingEvidence::Count {
+                    label: "n_classes".into(),
+                    value: n_classes as u64,
+                },
+                FindingEvidence::Sample {
+                    label: "target".into(),
+                    value: target_col.into(),
+                },
+                FindingEvidence::Sample {
+                    label: "top_per_class_aucs".into(),
+                    value: per_class_str,
+                },
+            ],
+            n_rows,
+            vec![
+                "one-vs-rest AUC: for each class c, compute AUC of feature vs (target == c) and take the max".into(),
+                "v0.6.3 multi-class extension; binary handled by E9060/E9061".into(),
+                "high AUC on a single class often points to a class-specific leak (e.g. encoded outcome category)".into(),
+            ],
+            vec![
+                "inspect which class drives the leak; it usually localises the upstream bug".into(),
+                "verify the feature is not derived from a post-outcome value".into(),
+            ],
+        ));
+    }
+    out
 }
 
 /// For each feature column (excluding the target), compute AUC and

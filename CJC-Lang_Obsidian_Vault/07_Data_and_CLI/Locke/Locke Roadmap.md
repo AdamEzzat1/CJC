@@ -137,9 +137,9 @@ Plus medium items not in batch 2 (could ship as v0.6.x):
 #### Data-skepticism upgrades (legacy entries kept for traceability)
 - [x] ~~**Sentinel-value detection**~~ — shipped v0.4 as E9007.
 - [x] ~~**Outlier heuristics**~~ — shipped v0.4 as E9040/E9041.
-- [ ] **Distribution-shape diagnostics** — skew, kurtosis, top-k modes.
-- [ ] **Multi-class target-leakage AUC** — v0.5 supports binary targets only.
-- [ ] **`CategoricalAdaptive` variant support** — every v0.6 categorical detector currently skips it.
+- [x] **Distribution-shape diagnostics** — shipped v0.6.3 (ADR-0035) as E9024. Skew, excess kurtosis, top-K modes inline.
+- [x] **Multi-class target-leakage AUC** — shipped v0.6.3 (ADR-0035) as E9063. One-vs-rest over Int targets with 3..20 distinct values.
+- [x] **`CategoricalAdaptive` variant support** — shipped v0.6.3 (ADR-0035). All 8 v0.6 categorical detectors now adaptive-aware via dictionary materialisation.
 
 ### Drift upgrades
 

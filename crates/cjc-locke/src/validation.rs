@@ -921,6 +921,8 @@ pub fn detect_high_cardinality_categorical(
                 let s: BTreeSet<&String> = v.iter().collect();
                 (s.len() as u64, "Str")
             }
+            // v0.6.3: CategoricalAdaptive — read dictionary size directly.
+            Column::CategoricalAdaptive(cc) => (cc.dictionary().len() as u64, "CategoricalAdaptive"),
             _ => continue,
         };
         let ratio = level_count as f64 / n_rows.max(1) as f64;
@@ -1709,6 +1711,11 @@ pub fn validate_dataframe(
     out.extend(detect_label_encoding_risk(df, &LabelEncodingRiskConfig::default()));
     // v0.6 batch 2: PII pattern scan (E9090-E9093).
     out.extend(crate::pii::detect_all_pii(df, &crate::pii::PiiConfig::default()));
+    // v0.6.3: distribution-shape diagnostics (E9024).
+    out.extend(crate::shape::detect_distribution_shape(
+        df,
+        &crate::shape::ShapeConfig::default(),
+    ));
     if let Some(sch) = expected_schema {
         out.extend(detect_schema_mismatch(df, sch));
     }

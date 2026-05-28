@@ -34,6 +34,8 @@ Each check emits zero or more `ValidationFinding`s. A finding is a structured re
 | E9018  | Categorical cardinality explosion train→test — v0.6 batch 2 | Notice or Warning |
 | E9019  | Categorical entropy shift between train and test — v0.6 batch 2 | Notice |
 | E9023  | Int column densely packed in small range — label-encoding risk — v0.6 batch 2 | Notice |
+| E9024  | Distribution shape outside normal range (skew, kurtosis) — v0.6.3 | Notice |
+| E9063  | Multi-class target leakage via one-vs-rest AUC — v0.6.3 | Warning or Error |
 | E9020  | Expected column is missing                          | Error |
 | E9021  | Column has wrong type                               | Error |
 | E9022  | Column is not in the expected schema                | Error or Notice (controlled by `strict_extra`) |

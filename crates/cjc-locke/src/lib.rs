@@ -55,6 +55,7 @@ pub mod parquet_reader;
 pub mod lineage;
 pub mod pii;
 pub mod report;
+pub mod shape;
 pub mod stats;
 pub mod streaming;
 pub mod temporal;
@@ -109,7 +110,12 @@ pub use pii::{
     detect_all_pii, looks_like_api_key, looks_like_email, looks_like_phone, looks_like_ssn,
     PiiConfig,
 };
+pub use shape::{detect_distribution_shape, skew_and_kurtosis, top_k_modes, ShapeConfig};
 pub use temporal::{detect_seasonality, SeasonalityConfig};
+pub use leakage::{
+    detect_target_leakage, detect_target_leakage_multiclass, multiclass_max_one_vs_rest_auc,
+    LeakageConfig,
+};
 pub use api::{
     belief_report_from_locke, belief_report_from_locke_with_model, causal_guardrail,
     lineage_for_dataset, validate, validate_and_compare, worst_severity, ValidateOptions,

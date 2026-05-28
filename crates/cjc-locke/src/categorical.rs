@@ -103,13 +103,16 @@ impl Default for CategoricalQualityConfig {
 /// Per-distinct-category count, in sorted order (`BTreeMap`).
 type CategoryCounts = BTreeMap<String, u64>;
 
-/// Materialise per-category counts for a Str or Categorical column. Returns
-/// `None` for non-categorical columns (numeric / bool / datetime / adaptive).
+/// Materialise per-category counts for a Str, Categorical, or
+/// CategoricalAdaptive column. Returns `None` for non-categorical
+/// columns (numeric / bool / datetime).
 ///
-/// `CategoricalAdaptive` is deliberately deferred — its public API exposes
-/// `dictionary()` + `codes()` but the iteration semantics differ enough
-/// that a separate code path is cleaner. The categorical-quality detectors
-/// skip those columns rather than partial-handle them.
+/// For `Column::CategoricalAdaptive` we walk the adaptive code stream and
+/// look up each code's bytes in the column's `ByteDictionary`, converting
+/// to `String` via `from_utf8_lossy` (bytes are UTF-8 by `ByteDictionary`'s
+/// design — `lossy` only triggers on corrupted streams). The result is
+/// semantically identical to materialising the column to `Column::Str`
+/// first, at O(rows × log(dict_size)) cost. Wired in v0.6.3.
 fn category_counts(col: &Column) -> Option<CategoryCounts> {
     let mut counts: CategoryCounts = BTreeMap::new();
     match col {
@@ -125,6 +128,15 @@ fn category_counts(col: &Column) -> Option<CategoryCounts> {
                     continue;
                 };
                 *counts.entry(label.clone()).or_insert(0u64) += 1;
+            }
+            Some(counts)
+        }
+        Column::CategoricalAdaptive(cc) => {
+            let dict = cc.dictionary();
+            for code in cc.codes().iter() {
+                let Some(bytes) = dict.get(code) else { continue };
+                let label = String::from_utf8_lossy(bytes).to_string();
+                *counts.entry(label).or_insert(0u64) += 1;
             }
             Some(counts)
         }

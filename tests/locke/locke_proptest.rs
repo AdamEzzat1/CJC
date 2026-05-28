@@ -228,4 +228,41 @@ proptest! {
             }
         }
     }
+
+    // ── v0.6.3 ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn shape_skewness_and_kurtosis_are_finite(v in arb_float_vec()) {
+        if let Some((s, k)) = cjc_locke::skew_and_kurtosis(&v) {
+            prop_assert!(s.is_finite(), "skew = {}", s);
+            prop_assert!(k.is_finite(), "ex_kurt = {}", k);
+        }
+    }
+
+    #[test]
+    fn shape_detection_is_deterministic(v in arb_float_vec()) {
+        let df = DataFrame::from_columns(vec![("x".into(), Column::Float(v))]).unwrap();
+        let cfg = cjc_locke::ShapeConfig::default();
+        let a = cjc_locke::detect_distribution_shape(&df, &cfg);
+        let b = cjc_locke::detect_distribution_shape(&df, &cfg);
+        prop_assert_eq!(a, b);
+    }
+
+    #[test]
+    fn multiclass_max_auc_is_in_unit_interval(
+        n_per_class in 10u64..30,
+        feature_seed in any::<u64>()
+    ) {
+        let mut state = feature_seed;
+        let target: Vec<u32> = (0..3)
+            .flat_map(|c| std::iter::repeat(c).take(n_per_class as usize))
+            .collect();
+        let feat: Vec<f64> = (0..target.len()).map(|_| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state as f64) / (u64::MAX as f64)
+        }).collect();
+        if let Some(auc) = cjc_locke::multiclass_max_one_vs_rest_auc(&feat, &target, 3, 5) {
+            prop_assert!(auc >= 0.0 && auc <= 1.0 + 1e-9, "max OVR AUC = {}", auc);
+        }
+    }
 }

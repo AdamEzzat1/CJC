@@ -468,6 +468,50 @@ fn e9086_quiet_on_only_one_form() {
     assert!(f.is_empty(), "expected quiet, got {:?}", f);
 }
 
+// ─── v0.6.3: CategoricalAdaptive variant support ────────────────────────
+
+#[test]
+fn case_fold_collisions_work_on_categorical_adaptive() {
+    use cjc_data::byte_dict::CategoricalColumn;
+
+    let mut cc = CategoricalColumn::new();
+    // 30 rows total: Premium, premium, then 28 basic — case-fold
+    // collision between {Premium, premium} → E9080 must fire even when
+    // the column is stored as CategoricalAdaptive.
+    cc.push(b"Premium").unwrap();
+    cc.push(b"premium").unwrap();
+    for _ in 0..28 {
+        cc.push(b"basic").unwrap();
+    }
+    let df =
+        DataFrame::from_columns(vec![("tier".into(), Column::categorical_adaptive(cc))]).unwrap();
+    let f = detect_case_fold_collisions(&df, &CategoricalQualityConfig::default());
+    assert_eq!(f.len(), 1, "E9080 should fire on adaptive too: {:?}", f);
+    assert_eq!(f[0].code, "E9080");
+}
+
+#[test]
+fn rare_categories_work_on_categorical_adaptive() {
+    use cjc_data::byte_dict::CategoricalColumn;
+
+    let mut cc = CategoricalColumn::new();
+    // 12 rows: 9 common + 1 each of 3 rare → E9016 fires.
+    for _ in 0..9 {
+        cc.push(b"common").unwrap();
+    }
+    cc.push(b"rare_a").unwrap();
+    cc.push(b"rare_b").unwrap();
+    cc.push(b"rare_c").unwrap();
+    let df = DataFrame::from_columns(vec![(
+        "plan".into(),
+        Column::categorical_adaptive(cc),
+    )])
+    .unwrap();
+    let f = detect_rare_categories(&df, &CategoricalQualityConfig::default());
+    assert_eq!(f.len(), 1);
+    assert_eq!(f[0].code, "E9016");
+}
+
 #[test]
 fn e9086_fires_via_validate() {
     let nfc = "caf\u{00E9}";

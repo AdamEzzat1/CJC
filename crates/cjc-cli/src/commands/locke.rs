@@ -294,6 +294,12 @@ fn cmd_validate(
     if let Some(tg) = &ext.target {
         let lcfg = cjc_locke::leakage::LeakageConfig::default();
         extra.extend(cjc_locke::leakage::detect_target_leakage(&df, tg, &lcfg));
+        // v0.6.3: multi-class target-leakage AUC (one-vs-rest).
+        // Returns empty if the target is binary or has > max_classes
+        // distinct values; safe to always call.
+        extra.extend(cjc_locke::leakage::detect_target_leakage_multiclass(
+            &df, tg, &lcfg,
+        ));
         extra.extend(cjc_locke::detect_imbalanced_target(&df, tg, 0.05));
     }
     // Always-on v0.5 additions:

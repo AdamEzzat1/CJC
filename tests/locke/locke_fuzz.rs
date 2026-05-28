@@ -207,6 +207,47 @@ fn fuzz_seasonality_arbitrary_timestamps_never_panics() {
 }
 
 #[test]
+fn fuzz_shape_detection_arbitrary_floats_never_panics() {
+    bolero::check!()
+        .with_type::<Vec<f64>>()
+        .for_each(|v: &Vec<f64>| {
+            if v.is_empty() {
+                return;
+            }
+            let df = DataFrame::from_columns(vec![("x".into(), Column::Float(v.clone()))]).unwrap();
+            let cfg = cjc_locke::ShapeConfig::default();
+            let findings = cjc_locke::detect_distribution_shape(&df, &cfg);
+            for f in &findings {
+                for ev in &f.evidence {
+                    if let cjc_locke::FindingEvidence::Metric { label, value } = ev {
+                        if label == "skewness" || label == "excess_kurtosis" {
+                            assert!(value.is_finite());
+                        }
+                    }
+                }
+            }
+        });
+}
+
+#[test]
+fn fuzz_multiclass_leakage_arbitrary_ints_never_panics() {
+    bolero::check!()
+        .with_type::<(Vec<i64>, Vec<f64>)>()
+        .for_each(|(t, f): &(Vec<i64>, Vec<f64>)| {
+            if t.is_empty() || t.len() != f.len() {
+                return;
+            }
+            let df = DataFrame::from_columns(vec![
+                ("feat".into(), Column::Float(f.clone())),
+                ("target".into(), Column::Int(t.clone())),
+            ])
+            .unwrap();
+            let cfg = cjc_locke::leakage::LeakageConfig::default();
+            let _ = cjc_locke::leakage::detect_target_leakage_multiclass(&df, "target", &cfg);
+        });
+}
+
+#[test]
 fn fuzz_mermaid_emit_arbitrary_label_never_panics() {
     bolero::check!()
         .with_type::<String>()
