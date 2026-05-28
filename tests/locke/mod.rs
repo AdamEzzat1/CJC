@@ -15,3 +15,4 @@ mod locke_fuzz;
 mod language_builtins;
 mod snapshot_tests;
 mod ground_truth_tests;
+mod scale_benchmark;

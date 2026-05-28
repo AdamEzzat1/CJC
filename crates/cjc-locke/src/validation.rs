@@ -1043,6 +1043,310 @@ pub fn detect_schema_mismatch(df: &DataFrame, expected: &ExpectedSchema) -> Vec<
     out
 }
 
+// ─── Conditional missingness (v0.5) ────────────────────────────────────────
+
+#[derive(Clone, Debug)]
+pub struct ConditionalMissingnessConfig {
+    /// Minimum count of missing rows in A for the check to fire.
+    pub min_missing_in_a: u64,
+    /// Threshold on `P(missing(B) | missing(A))` — if ≥ this, fire.
+    pub implication_threshold: f64,
+}
+
+impl Default for ConditionalMissingnessConfig {
+    fn default() -> Self {
+        Self {
+            min_missing_in_a: 5,
+            implication_threshold: 0.95,
+        }
+    }
+}
+
+/// Detect "missing(A) implies missing(B)" patterns — when A is missing,
+/// B is *also* missing in ≥ threshold of those rows. Common churn-
+/// pipeline bug: a join failed and a whole feature family is jointly
+/// null.
+///
+/// Only fires on Float columns in v0.5 (NaN-based missingness). For
+/// columns whose missingness is declared via NullMask, the caller can
+/// build their own conditional-missingness check via the same shape.
+///
+/// Emits **E9070** (Notice) per (A, B) pair that crosses the threshold.
+pub fn detect_conditional_missingness(
+    df: &DataFrame,
+    cfg: &ConditionalMissingnessConfig,
+) -> Vec<ValidationFinding> {
+    let mut out = Vec::new();
+    let n_rows = df.nrows();
+    if n_rows == 0 {
+        return out;
+    }
+
+    // Build per-column missing-row sets (Float columns only, NaN-based).
+    let mut miss_sets: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+    for (name, col) in &df.columns {
+        if let Column::Float(v) = col {
+            let s: BTreeSet<usize> = v
+                .iter()
+                .enumerate()
+                .filter_map(|(i, x)| if x.is_nan() { Some(i) } else { None })
+                .collect();
+            if (s.len() as u64) >= cfg.min_missing_in_a {
+                miss_sets.insert(name.clone(), s);
+            }
+        }
+    }
+
+    // Pairwise check.
+    let names: Vec<&String> = miss_sets.keys().collect();
+    for i in 0..names.len() {
+        for j in 0..names.len() {
+            if i == j {
+                continue;
+            }
+            let a = names[i];
+            let b = names[j];
+            let set_a = &miss_sets[a];
+            let set_b = &miss_sets[b];
+            let n_a = set_a.len() as u64;
+            let intersection = set_a.iter().filter(|r| set_b.contains(r)).count() as u64;
+            let p = intersection as f64 / n_a.max(1) as f64;
+            if p >= cfg.implication_threshold {
+                out.push(ValidationFinding::new(
+                    "E9070",
+                    FindingSeverity::Notice,
+                    format!(
+                        "missing(`{}`) implies missing(`{}`) in {:.1}% of rows ({}/{})",
+                        a, b, p * 100.0, intersection, n_a
+                    ),
+                    Some(a.clone()),
+                    None,
+                    vec![
+                        FindingEvidence::Ratio {
+                            label: "implication_strength".into(),
+                            value: p,
+                        },
+                        FindingEvidence::Count {
+                            label: "n_jointly_missing".into(),
+                            value: intersection,
+                        },
+                        FindingEvidence::Count {
+                            label: "n_missing_in_a".into(),
+                            value: n_a,
+                        },
+                        FindingEvidence::Sample {
+                            label: "implied_column".into(),
+                            value: b.clone(),
+                        },
+                    ],
+                    n_rows as u64,
+                    vec![
+                        "joint missingness often signals a failed join or a shared upstream pipeline failure".into(),
+                    ],
+                    vec![
+                        format!("inspect the rows where both `{}` and `{}` are NaN", a, b),
+                        "verify whether the upstream join keys are correct".into(),
+                    ],
+                ));
+            }
+        }
+    }
+    out
+}
+
+// ─── Imbalanced-class warning (v0.5) ───────────────────────────────────────
+
+/// For a caller-declared *binary* target column, flag if the minority
+/// class is below `min_minority_rate` of the column.
+///
+/// Code: **E9071** (Notice if minority ≥ 1%, Warning if minority < 1%).
+pub fn detect_imbalanced_target(
+    df: &DataFrame,
+    target_col: &str,
+    min_minority_rate: f64,
+) -> Vec<ValidationFinding> {
+    let Some(col) = df.get_column(target_col) else {
+        return vec![ValidationFinding::new(
+            "E9075",
+            FindingSeverity::Error,
+            format!("target column `{}` not found", target_col),
+            Some(target_col.into()),
+            None,
+            vec![],
+            df.nrows() as u64,
+            vec![],
+            vec!["verify the column name".into()],
+        )];
+    };
+    let n_rows = df.nrows() as u64;
+    let (n_pos, n_neg) = match col {
+        Column::Bool(v) => {
+            let p = v.iter().filter(|b| **b).count() as u64;
+            (p, n_rows - p)
+        }
+        Column::Int(v) => {
+            let mut distinct: BTreeSet<i64> = BTreeSet::new();
+            for x in v {
+                distinct.insert(*x);
+                if distinct.len() > 2 {
+                    return vec![];
+                }
+            }
+            if distinct.len() != 2 {
+                return vec![];
+            }
+            let mut it = distinct.iter();
+            let lo = *it.next().unwrap();
+            let hi = *it.next().unwrap();
+            let p = v.iter().filter(|x| **x == hi).count() as u64;
+            let _ = lo;
+            (p, n_rows - p)
+        }
+        _ => return vec![],
+    };
+    if n_rows == 0 {
+        return vec![];
+    }
+    let minority = n_pos.min(n_neg);
+    let minority_rate = minority as f64 / n_rows as f64;
+    if minority_rate >= min_minority_rate {
+        return vec![];
+    }
+    let severity = if minority_rate < 0.01 {
+        FindingSeverity::Warning
+    } else {
+        FindingSeverity::Notice
+    };
+    vec![ValidationFinding::new(
+        "E9071",
+        severity,
+        format!(
+            "target `{}` is heavily imbalanced: minority class is {:.2}% ({} of {} rows)",
+            target_col, minority_rate * 100.0, minority, n_rows
+        ),
+        Some(target_col.into()),
+        None,
+        vec![
+            FindingEvidence::Ratio {
+                label: "minority_rate".into(),
+                value: minority_rate,
+            },
+            FindingEvidence::Count {
+                label: "n_pos".into(),
+                value: n_pos,
+            },
+            FindingEvidence::Count {
+                label: "n_neg".into(),
+                value: n_neg,
+            },
+        ],
+        n_rows,
+        vec![
+            "models trained on imbalanced data tend to predict the majority class regardless of input".into(),
+        ],
+        vec![
+            "use class_weight='balanced' or stratified sampling at training time".into(),
+            "report precision/recall (not accuracy) when evaluating".into(),
+            "consider whether undersampling, oversampling, or SMOTE is appropriate".into(),
+        ],
+    )]
+}
+
+// ─── Duplicate-key conditioning (v0.5) ─────────────────────────────────────
+
+/// Augments `detect_duplicate_keys` with information about WHICH other
+/// columns differ within each duplicate-key group. Helps debug bad
+/// joins where the same primary key has been ingested with different
+/// values in some columns.
+///
+/// Emits **E9073** (Notice) describing each column whose values vary
+/// within at least one duplicate-key group.
+pub fn detect_duplicate_key_conditioning(
+    df: &DataFrame,
+    key_column: &str,
+) -> Vec<ValidationFinding> {
+    let mut out = Vec::new();
+    let Some(key_col) = df.get_column(key_column) else {
+        return out;
+    };
+    let n = key_col.len();
+
+    // Bucket rows by key.
+    let mut buckets: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
+    for r in 0..n {
+        let mut bytes = Vec::new();
+        cell_bytes(key_col, r, &mut bytes);
+        buckets.entry(bytes).or_default().push(r);
+    }
+    let dup_groups: Vec<&Vec<usize>> = buckets.values().filter(|v| v.len() > 1).collect();
+    if dup_groups.is_empty() {
+        return out;
+    }
+
+    // For each non-key column, count how many duplicate groups contain
+    // rows that differ in that column.
+    for (col_name, col) in &df.columns {
+        if col_name == key_column {
+            continue;
+        }
+        let mut n_groups_with_disagreement = 0u64;
+        let mut sample_group_size = 0usize;
+        for group in &dup_groups {
+            let mut first_bytes: Option<Vec<u8>> = None;
+            let mut disagrees = false;
+            for &r in *group {
+                let mut bytes = Vec::new();
+                cell_bytes(col, r, &mut bytes);
+                if let Some(fb) = &first_bytes {
+                    if fb != &bytes {
+                        disagrees = true;
+                        break;
+                    }
+                } else {
+                    first_bytes = Some(bytes);
+                }
+            }
+            if disagrees {
+                n_groups_with_disagreement += 1;
+                if sample_group_size == 0 {
+                    sample_group_size = group.len();
+                }
+            }
+        }
+        if n_groups_with_disagreement > 0 {
+            out.push(ValidationFinding::new(
+                "E9073",
+                FindingSeverity::Notice,
+                format!(
+                    "duplicate-key groups disagree on column `{}` in {} group(s)",
+                    col_name, n_groups_with_disagreement
+                ),
+                Some(col_name.clone()),
+                None,
+                vec![
+                    FindingEvidence::Count {
+                        label: "n_groups_with_disagreement".into(),
+                        value: n_groups_with_disagreement,
+                    },
+                    FindingEvidence::Sample {
+                        label: "key_column".into(),
+                        value: key_column.into(),
+                    },
+                ],
+                n as u64,
+                vec![
+                    "rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data".into(),
+                ],
+                vec![
+                    format!("group by `{}` and inspect the rows that disagree on `{}`", key_column, col_name),
+                    "decide which value is authoritative".into(),
+                ],
+            ));
+        }
+    }
+    out
+}
+
 // ─── Sentinel-value detection (v0.4) ───────────────────────────────────────
 
 /// Configuration for sentinel-value detection.
@@ -1570,6 +1874,94 @@ mod tests {
         let a = detect_missingness(&df, &cfg, &masks);
         let b = detect_missingness(&df, &cfg, &masks);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn conditional_missingness_detects_joint_nans() {
+        // Build a DF where rows 0..10 are NaN in BOTH columns, the rest are valid.
+        let mut a: Vec<f64> = (0..100).map(|i| i as f64).collect();
+        let mut b: Vec<f64> = (0..100).map(|i| (i + 1) as f64).collect();
+        for i in 0..10 {
+            a[i] = f64::NAN;
+            b[i] = f64::NAN;
+        }
+        let df = DataFrame::from_columns(vec![
+            ("a".into(), Column::Float(a)),
+            ("b".into(), Column::Float(b)),
+        ])
+        .unwrap();
+        let r = detect_conditional_missingness(&df, &ConditionalMissingnessConfig::default());
+        // Should see both directions: a→b and b→a, both 100%.
+        assert!(r.iter().any(|f| f.code == "E9070" && f.column.as_deref() == Some("a")));
+        assert!(r.iter().any(|f| f.code == "E9070" && f.column.as_deref() == Some("b")));
+    }
+
+    #[test]
+    fn conditional_missingness_no_finding_for_independent_nans() {
+        // a is missing at rows 0..10, b is missing at rows 50..60 — disjoint.
+        let mut a: Vec<f64> = (0..100).map(|i| i as f64).collect();
+        let mut b: Vec<f64> = (0..100).map(|i| (i + 1) as f64).collect();
+        for i in 0..10 {
+            a[i] = f64::NAN;
+        }
+        for i in 50..60 {
+            b[i] = f64::NAN;
+        }
+        let df = DataFrame::from_columns(vec![
+            ("a".into(), Column::Float(a)),
+            ("b".into(), Column::Float(b)),
+        ])
+        .unwrap();
+        let r = detect_conditional_missingness(&df, &ConditionalMissingnessConfig::default());
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn imbalanced_target_warning_fires_below_one_percent() {
+        let mut y = vec![0i64; 1000];
+        for i in 0..5 {
+            y[i] = 1; // 0.5% positive — clearly under the Warning threshold
+        }
+        let df = DataFrame::from_columns(vec![("churned".into(), Column::Int(y))]).unwrap();
+        let r = detect_imbalanced_target(&df, "churned", 0.05);
+        let f = r.iter().find(|f| f.code == "E9071").expect("E9071 expected");
+        assert_eq!(f.severity, FindingSeverity::Warning);
+    }
+
+    #[test]
+    fn imbalanced_target_no_warning_for_50_50() {
+        let y: Vec<i64> = (0..100).map(|i| (i % 2) as i64).collect();
+        let df = DataFrame::from_columns(vec![("churned".into(), Column::Int(y))]).unwrap();
+        let r = detect_imbalanced_target(&df, "churned", 0.05);
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn duplicate_key_conditioning_finds_disagreement() {
+        // user_id 7 appears twice with different last_login values
+        let ids = vec![1i64, 2, 7, 7, 5];
+        let logins = vec![100.0f64, 200.0, 300.0, 999.0, 500.0]; // row 2 & 3 disagree
+        let df = DataFrame::from_columns(vec![
+            ("user_id".into(), Column::Int(ids)),
+            ("last_login".into(), Column::Float(logins)),
+        ])
+        .unwrap();
+        let r = detect_duplicate_key_conditioning(&df, "user_id");
+        assert!(r.iter().any(|f| f.code == "E9073" && f.column.as_deref() == Some("last_login")));
+    }
+
+    #[test]
+    fn duplicate_key_conditioning_no_finding_when_dups_agree() {
+        // user_id 7 appears twice with the SAME last_login
+        let ids = vec![1i64, 2, 7, 7, 5];
+        let logins = vec![100.0f64, 200.0, 300.0, 300.0, 500.0];
+        let df = DataFrame::from_columns(vec![
+            ("user_id".into(), Column::Int(ids)),
+            ("last_login".into(), Column::Float(logins)),
+        ])
+        .unwrap();
+        let r = detect_duplicate_key_conditioning(&df, "user_id");
+        assert!(r.is_empty());
     }
 
     #[test]

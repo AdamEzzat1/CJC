@@ -46,7 +46,17 @@
 - [x] **No-reconstruction streaming** — Welford + ECDF map. KS D bit-identical to single-shot at `sample_cap=0`.
 - [x] **Parquet structural recognition** — better diagnostics; full decoder is v0.5.
 
-## v0.5 priorities
+## v0.5 (shipped 2026-05-28)
+
+- [x] **Time-aware validation** — `temporal.rs` with sortedness/cutoff/gap/overlap checks. E9050-E9054.
+- [x] **Target leakage detection** — `leakage.rs` with rank-sum AUC. E9060/E9061/E9062.
+- [x] **Conditional missingness** — pairwise NaN-implication scan. E9070.
+- [x] **Imbalanced-class warning** — E9071.
+- [x] **ID-like cardinality hint** — E9072.
+- [x] **Duplicate-key conditioning** — E9073.
+- [x] **HTML cross-column correlation matrix** — inline-SVG heatmap via `emit_locke_report_html_with_df`.
+
+## v0.6 priorities
 
 ### Data-skepticism upgrades
 - [ ] **Sentinel-value detection** — common "magic missing" values (`-1`, `-9999`, `""`, empty string, `"NA"`, `"unknown"`) detected as candidate nulls.

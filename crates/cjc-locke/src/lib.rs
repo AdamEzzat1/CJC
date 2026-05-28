@@ -48,17 +48,19 @@ pub mod gate;
 pub mod html_emit;
 pub mod id;
 pub mod json_emit;
+pub mod leakage;
 pub mod parquet_reader;
 pub mod lineage;
 pub mod report;
 pub mod stats;
 pub mod streaming;
+pub mod temporal;
 pub mod traced;
 pub mod validation;
 
 pub use dispatch::dispatch_locke;
 pub use gate::{diff_reports, emit_diff_text, ReportDiff};
-pub use html_emit::emit_locke_report_html;
+pub use html_emit::{emit_locke_report_html, emit_locke_report_html_with_df};
 pub use json_emit::{emit_locke_report_json, parse_locke_report_json};
 pub use streaming::{
     validate_view, StreamingColumnSummary, StreamingConfig, StreamingValidator,
@@ -82,11 +84,12 @@ pub use report::{
     LockeInputSummary, LockeReport, SeverityCounts, ValidationFinding,
 };
 pub use validation::{
-    detect_constant_and_near_constant, detect_duplicate_keys, detect_duplicates_full_row,
-    detect_high_cardinality_categorical, detect_impossible_values, detect_missingness,
-    detect_outliers, detect_schema_mismatch, detect_sentinel_values, validate_dataframe,
-    ExpectedSchema, ImpossibleValueRule, NullMask, NullMaskMap, OutlierConfig, SentinelConfig,
-    ValidationConfig,
+    detect_conditional_missingness, detect_constant_and_near_constant,
+    detect_duplicate_key_conditioning, detect_duplicate_keys, detect_duplicates_full_row,
+    detect_high_cardinality_categorical, detect_imbalanced_target, detect_impossible_values,
+    detect_missingness, detect_outliers, detect_schema_mismatch, detect_sentinel_values,
+    validate_dataframe, ConditionalMissingnessConfig, ExpectedSchema, ImpossibleValueRule,
+    NullMask, NullMaskMap, OutlierConfig, SentinelConfig, ValidationConfig,
 };
 pub use api::{
     belief_report_from_locke, belief_report_from_locke_with_model, causal_guardrail,

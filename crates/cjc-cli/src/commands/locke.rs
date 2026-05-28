@@ -38,6 +38,12 @@ pub enum LockeSubcommand {
         label: Option<String>,
         save_json: Option<PathBuf>,
         save_html: Option<PathBuf>,
+        // v0.5 extensions:
+        time_col: Option<String>,
+        max_timestamp: Option<i64>,
+        gap_threshold: Option<i64>,
+        target: Option<String>,
+        primary_key: Option<String>,
     },
     Drift { train: PathBuf, test: PathBuf },
     Belief { data: PathBuf },
@@ -55,11 +61,28 @@ pub struct LockeArgs {
 
 fn dispatch(args: LockeArgs) -> i32 {
     let res = match args.subcommand.clone() {
-        LockeSubcommand::Validate { data, label, save_json, save_html } => cmd_validate(
+        LockeSubcommand::Validate {
+            data,
+            label,
+            save_json,
+            save_html,
+            time_col,
+            max_timestamp,
+            gap_threshold,
+            target,
+            primary_key,
+        } => cmd_validate(
             &data,
             label.as_deref(),
             save_json.as_deref(),
             save_html.as_deref(),
+            ValidateExtensions {
+                time_col,
+                max_timestamp,
+                gap_threshold,
+                target,
+                primary_key,
+            },
             args.format,
         ),
         LockeSubcommand::Drift { train, test } => cmd_drift(&train, &test, args.format),
@@ -221,11 +244,21 @@ fn infer_column_type(raw: &[&str]) -> cjc_data::Column {
     Column::Str(raw.iter().map(|s| (*s).to_string()).collect())
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ValidateExtensions {
+    pub time_col: Option<String>,
+    pub max_timestamp: Option<i64>,
+    pub gap_threshold: Option<i64>,
+    pub target: Option<String>,
+    pub primary_key: Option<String>,
+}
+
 fn cmd_validate(
     data: &PathBuf,
     label: Option<&str>,
     save_json: Option<&std::path::Path>,
     save_html: Option<&std::path::Path>,
+    ext: ValidateExtensions,
     format: LockeFormat,
 ) -> Result<CmdOutput, String> {
     let df = read_csv(data)?;
@@ -235,12 +268,54 @@ fn cmd_validate(
     let opts = ValidateOptions {
         dataset_label: dataset_label.clone(),
         config: ValidationConfig::default(),
+        primary_key: ext.primary_key.clone(),
         ..Default::default()
     };
-    let report = validate(&df, &opts);
+    let mut report = validate(&df, &opts);
+
+    // v0.5: extension validators that need extra arguments beyond
+    // ValidateOptions. These run *after* the standard validate() and
+    // their findings are merged in. We rebuild the report from the
+    // combined finding set so the run_id is content-addressed over
+    // everything.
+    let mut extra: Vec<cjc_locke::ValidationFinding> = Vec::new();
+    if let Some(tc) = &ext.time_col {
+        let mut tcfg = cjc_locke::temporal::TimeColumnConfig::default();
+        tcfg.max_timestamp = ext.max_timestamp;
+        tcfg.gap_threshold = ext.gap_threshold;
+        extra.extend(cjc_locke::temporal::detect_temporal_issues(&df, tc, &tcfg));
+    }
+    if let Some(tg) = &ext.target {
+        let lcfg = cjc_locke::leakage::LeakageConfig::default();
+        extra.extend(cjc_locke::leakage::detect_target_leakage(&df, tg, &lcfg));
+        extra.extend(cjc_locke::detect_imbalanced_target(&df, tg, 0.05));
+    }
+    // Always-on v0.5 additions:
+    extra.extend(cjc_locke::detect_conditional_missingness(
+        &df,
+        &cjc_locke::ConditionalMissingnessConfig::default(),
+    ));
+    extra.extend(cjc_locke::leakage::detect_id_like_columns(
+        &df,
+        &cjc_locke::leakage::LeakageConfig::default(),
+    ));
+    if let Some(pk) = &ext.primary_key {
+        extra.extend(cjc_locke::detect_duplicate_key_conditioning(&df, pk));
+    }
+
+    if !extra.is_empty() {
+        let mut all = report.findings.clone();
+        all.extend(extra);
+        report = cjc_locke::LockeReport::new(
+            report.input.clone(),
+            all,
+            report.column_reports.clone(),
+            report.assumptions.clone(),
+        );
+    }
+
     let worst = report.worst_severity().as_str().to_string();
 
-    // v0.4: optional persistence
     if let Some(path) = save_json {
         let json = cjc_locke::emit_locke_report_json(&report);
         fs::write(path, json).map_err(|e| {
@@ -248,7 +323,9 @@ fn cmd_validate(
         })?;
     }
     if let Some(path) = save_html {
-        let html = cjc_locke::emit_locke_report_html(&report);
+        // v0.5: use the with-DataFrame variant so the correlation
+        // matrix renders.
+        let html = cjc_locke::emit_locke_report_html_with_df(&report, &df);
         fs::write(path, html).map_err(|e| {
             format!("failed to write report HTML to {}: {}", path.display(), e)
         })?;
@@ -575,6 +652,11 @@ pub fn try_parse_sub(sub_args: &[String]) -> Option<LockeArgs> {
     let mut label: Option<String> = None;
     let mut save_json: Option<PathBuf> = None;
     let mut save_html: Option<PathBuf> = None;
+    // v0.5 extensions
+    let mut time_col: Option<String> = None;
+    let mut max_timestamp: Option<i64> = None;
+    let mut gap_threshold: Option<i64> = None;
+    let mut primary_key: Option<String> = None;
     let mut i = 0;
     while i < rest.len() {
         let a = &rest[i];
@@ -602,6 +684,23 @@ pub fn try_parse_sub(sub_args: &[String]) -> Option<LockeArgs> {
                 i += 1;
                 save_html = rest.get(i).map(PathBuf::from);
             }
+            // v0.5 flags
+            "--time-col" => {
+                i += 1;
+                time_col = rest.get(i).cloned();
+            }
+            "--max-timestamp" => {
+                i += 1;
+                max_timestamp = rest.get(i).and_then(|s| s.parse::<i64>().ok());
+            }
+            "--gap-threshold" => {
+                i += 1;
+                gap_threshold = rest.get(i).and_then(|s| s.parse::<i64>().ok());
+            }
+            "--primary-key" => {
+                i += 1;
+                primary_key = rest.get(i).cloned();
+            }
             _ => positional.push(a.clone()),
         }
         i += 1;
@@ -610,7 +709,17 @@ pub fn try_parse_sub(sub_args: &[String]) -> Option<LockeArgs> {
     let subcommand = match sub {
         "validate" => {
             let data = positional.first()?.into();
-            LockeSubcommand::Validate { data, label, save_json, save_html }
+            LockeSubcommand::Validate {
+                data,
+                label,
+                save_json,
+                save_html,
+                time_col,
+                max_timestamp,
+                gap_threshold,
+                target,
+                primary_key,
+            }
         }
         "drift" => {
             let train = positional.first()?.into();
@@ -667,6 +776,8 @@ pub fn print_help() {
 
 usage:
   cjcl locke validate <data.csv> [--label NAME] [--json] [--fail-on SEV] [--save-json PATH] [--html PATH]
+                                 [--time-col COL] [--max-timestamp N] [--gap-threshold N]
+                                 [--target COL] [--primary-key COL]
   cjcl locke drift    <train.csv> <test.csv>      [--json] [--fail-on SEV]
   cjcl locke belief   <data.csv>                  [--json]
   cjcl locke lineage  <data.csv> [--label NAME]
@@ -701,10 +812,21 @@ mod tests {
     fn parse_validate_simple() {
         let parsed = try_parse_sub(&args(&["validate", "data.csv"])).expect("validate parse");
         match parsed.subcommand {
-            LockeSubcommand::Validate { data, save_json, save_html, .. } => {
+            LockeSubcommand::Validate {
+                data,
+                save_json,
+                save_html,
+                time_col,
+                target,
+                primary_key,
+                ..
+            } => {
                 assert_eq!(data.to_str().unwrap(), "data.csv");
                 assert!(save_json.is_none());
                 assert!(save_html.is_none());
+                assert!(time_col.is_none());
+                assert!(target.is_none());
+                assert!(primary_key.is_none());
             }
             _ => panic!(),
         }

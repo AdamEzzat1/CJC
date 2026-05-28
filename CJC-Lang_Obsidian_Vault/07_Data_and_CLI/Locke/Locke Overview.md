@@ -83,9 +83,19 @@ See [[Locke CLI]] for full flag reference.
 
 ## Status
 
-- Locke **v0.4** (2026-05-27). **238 tests passing** across unit + integration + proptest + Bolero + insta + CLI + ground-truth + language-builtin + JSON-emit + gate + HTML + streaming + Parquet-recognition buckets.
+- Locke **v0.5** (2026-05-28). **264 tests passing** across unit + integration + proptest + Bolero + insta + CLI + ground-truth + language-builtin + JSON-emit + gate + HTML + streaming + Parquet-recognition + temporal + leakage buckets.
 - Crate: `cjc-locke` (added to the workspace alongside `cjc-quantum`, `cjc-abng`, `cjc-dharht`).
 - Error-code range: **E9000–E9099**.
+
+### v0.5 additions (customer-churn ML enablement)
+
+- **Time-aware validation** — `--time-col COL`, `--max-timestamp N`, `--gap-threshold N`. Codes E9050-E9054 cover sortedness, future-leakage cutoff, gap detection, and train/test temporal overlap.
+- **Target leakage detection** — `--target COL` runs per-feature ROC AUC; E9060 (Error, |AUC|≥0.95), E9061 (Warning, ≥0.85).
+- **Conditional missingness** — pairwise "missing(A) implies missing(B)" detection (E9070).
+- **Imbalanced-class warning** — E9071 fires when binary target's minority class < 5%.
+- **ID-like cardinality hint** — E9072 when distinct/n_rows ≥ 0.95.
+- **Duplicate-key conditioning** — E9073 lists columns whose values disagree within a `--primary-key` group.
+- **HTML correlation matrix** — `--html PATH` now embeds an inline-SVG Pearson heatmap (≥3 numeric columns, capped at 30).
 
 ### v0.4 additions
 

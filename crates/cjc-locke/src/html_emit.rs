@@ -1,4 +1,4 @@
-//! HTML report emitter (v0.4).
+//! HTML report emitter (v0.4 + v0.5 correlation matrix).
 //!
 //! Produces a single, self-contained HTML file: inline CSS, inline SVG
 //! sparklines, no external assets, no JS. Opens offline in any browser
@@ -17,8 +17,11 @@
 //!   `stats::equal_width_histogram`. No JS, no Plotly.
 
 use crate::report::{FindingSeverity, LockeReport, ValidationFinding};
+use cjc_data::{Column, DataFrame};
 
-/// Emit a self-contained HTML report.
+/// Emit a self-contained HTML report. The correlation-matrix section
+/// is omitted (no DataFrame in scope); use [`emit_locke_report_html_with_df`]
+/// to include it.
 pub fn emit_locke_report_html(report: &LockeReport) -> String {
     let mut s = String::with_capacity(8192);
     s.push_str("<!DOCTYPE html>\n");
@@ -38,6 +41,140 @@ pub fn emit_locke_report_html(report: &LockeReport) -> String {
 
     s.push_str("</body>\n</html>\n");
     s
+}
+
+/// v0.5: like `emit_locke_report_html` but additionally renders a
+/// pairwise Pearson-correlation heatmap for the report's DataFrame.
+pub fn emit_locke_report_html_with_df(report: &LockeReport, df: &DataFrame) -> String {
+    let mut s = String::with_capacity(8192);
+    s.push_str("<!DOCTYPE html>\n");
+    s.push_str("<html lang=\"en\">\n<head>\n");
+    s.push_str("<meta charset=\"utf-8\">\n");
+    s.push_str("<title>Locke Validation Report — ");
+    push_escaped(&mut s, &report.input.dataset_label);
+    s.push_str("</title>\n");
+    push_inline_styles(&mut s);
+    s.push_str("</head>\n<body>\n");
+
+    push_header(&mut s, report);
+    push_summary(&mut s, report);
+    push_findings_table(&mut s, &report.findings);
+    push_correlation_matrix(&mut s, df);
+    push_assumptions(&mut s, &report.assumptions);
+    push_footer(&mut s, report);
+
+    s.push_str("</body>\n</html>\n");
+    s
+}
+
+/// Build and render a pairwise Pearson correlation heatmap.
+fn push_correlation_matrix(s: &mut String, df: &DataFrame) {
+    // Collect numeric columns.
+    let mut numeric: Vec<(&String, Vec<f64>)> = Vec::new();
+    for (name, col) in &df.columns {
+        let v: Option<Vec<f64>> = match col {
+            Column::Float(v) => Some(v.clone()),
+            Column::Int(v) => Some(v.iter().map(|x| *x as f64).collect()),
+            _ => None,
+        };
+        if let Some(v) = v {
+            numeric.push((name, v));
+        }
+    }
+    if numeric.len() < 3 {
+        return; // Pointless for 0/1/2 columns.
+    }
+    // Cap at 30 cols for legibility; if more, drop the lowest-variance ones.
+    if numeric.len() > 30 {
+        // Compute variance per column.
+        let mut with_var: Vec<(&String, Vec<f64>, f64)> = numeric
+            .into_iter()
+            .map(|(n, v)| {
+                let var = crate::stats::summarize_f64(&v).variance.unwrap_or(0.0);
+                (n, v, var)
+            })
+            .collect();
+        with_var.sort_by(|a, b| b.2.total_cmp(&a.2));
+        with_var.truncate(30);
+        numeric = with_var.into_iter().map(|(n, v, _)| (n, v)).collect();
+    }
+    let n = numeric.len();
+    let cell = 22;
+    let header = 120;
+    let width = header + n * cell;
+    let height = header + n * cell;
+
+    s.push_str("<h2>Cross-column correlation</h2>\n");
+    s.push_str("<p style=\"color: var(--muted); margin-top: -.5em;\">");
+    s.push_str(&format!(
+        "Pairwise Pearson correlation between numeric columns ({} shown). \
+         Cells are colored by |r| — darker red = stronger correlation.",
+        n
+    ));
+    s.push_str("</p>\n");
+    s.push_str(&format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" style=\"font-family: sans-serif; font-size: 11px;\">\n",
+        width, height
+    ));
+    // Column labels (top, rotated -45deg).
+    for (i, (name, _)) in numeric.iter().enumerate() {
+        let x = header + i * cell + cell / 2;
+        let y = header - 5;
+        s.push_str(&format!(
+            "<text x=\"{}\" y=\"{}\" transform=\"rotate(-45, {}, {})\" text-anchor=\"start\">",
+            x, y, x, y
+        ));
+        push_escaped(s, name);
+        s.push_str("</text>\n");
+    }
+    // Row labels (left).
+    for (j, (name, _)) in numeric.iter().enumerate() {
+        let x = header - 5;
+        let y = header + j * cell + cell / 2 + 4;
+        s.push_str(&format!(
+            "<text x=\"{}\" y=\"{}\" text-anchor=\"end\">",
+            x, y
+        ));
+        push_escaped(s, name);
+        s.push_str("</text>\n");
+    }
+    // Cells.
+    for i in 0..n {
+        for j in 0..n {
+            let r = if i == j {
+                1.0
+            } else {
+                crate::stats::pearson_correlation(&numeric[i].1, &numeric[j].1).unwrap_or(0.0)
+            };
+            let abs_r = r.abs();
+            // Color: white at |r|=0, deep red at |r|=1. Use sign hue.
+            let (hue, sat, lightness) = if r >= 0.0 {
+                (0u32, (abs_r * 100.0) as u32, (100.0 - abs_r * 50.0) as u32)
+            } else {
+                (220u32, (abs_r * 100.0) as u32, (100.0 - abs_r * 50.0) as u32)
+            };
+            let x = header + i * cell;
+            let y = header + j * cell;
+            s.push_str(&format!(
+                "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"hsl({}, {}%, {}%)\" stroke=\"#eee\" stroke-width=\"0.5\">",
+                x, y, cell, cell, hue, sat, lightness
+            ));
+            s.push_str(&format!("<title>{} vs {}: r = {:.3}</title>", numeric[i].0, numeric[j].0, r));
+            s.push_str("</rect>\n");
+            // r-value text for high |r|.
+            if abs_r > 0.5 {
+                let text_color = if abs_r > 0.7 { "#fff" } else { "#000" };
+                s.push_str(&format!(
+                    "<text x=\"{}\" y=\"{}\" text-anchor=\"middle\" fill=\"{}\" font-size=\"9\">{:.2}</text>\n",
+                    x + cell / 2,
+                    y + cell / 2 + 3,
+                    text_color,
+                    r
+                ));
+            }
+        }
+    }
+    s.push_str("</svg>\n");
 }
 
 fn push_inline_styles(s: &mut String) {
@@ -312,6 +449,50 @@ mod tests {
         assert!(h.contains("&gt;"));
         assert!(h.contains("&amp;"));
         assert!(h.contains("&quot;"));
+    }
+
+    #[test]
+    fn correlation_matrix_only_rendered_with_df_overload() {
+        let r = fixture_report();
+        let h_plain = emit_locke_report_html(&r);
+        assert!(!h_plain.contains("Cross-column correlation"));
+
+        let df = DataFrame::from_columns(vec![
+            ("a".into(), Column::Float((0..50).map(|i| i as f64).collect())),
+            ("b".into(), Column::Float((0..50).map(|i| (i as f64) * 2.0).collect())),
+            ("c".into(), Column::Float((0..50).map(|i| (i as f64).sin()).collect())),
+        ])
+        .unwrap();
+        let h_with_df = emit_locke_report_html_with_df(&r, &df);
+        assert!(h_with_df.contains("Cross-column correlation"));
+        // SVG cell colors should appear.
+        assert!(h_with_df.contains("hsl("));
+    }
+
+    #[test]
+    fn correlation_matrix_skipped_for_fewer_than_three_numeric_cols() {
+        let r = fixture_report();
+        let df = DataFrame::from_columns(vec![
+            ("a".into(), Column::Float((0..50).map(|i| i as f64).collect())),
+            ("b".into(), Column::Float((0..50).map(|i| (i as f64) * 2.0).collect())),
+        ])
+        .unwrap();
+        let h = emit_locke_report_html_with_df(&r, &df);
+        assert!(!h.contains("Cross-column correlation"));
+    }
+
+    #[test]
+    fn correlation_matrix_is_deterministic() {
+        let r = fixture_report();
+        let df = DataFrame::from_columns(vec![
+            ("a".into(), Column::Float((0..50).map(|i| i as f64).collect())),
+            ("b".into(), Column::Float((0..50).map(|i| (i as f64) * 2.0).collect())),
+            ("c".into(), Column::Float((0..50).map(|i| (i as f64).sin()).collect())),
+        ])
+        .unwrap();
+        let a = emit_locke_report_html_with_df(&r, &df);
+        let b = emit_locke_report_html_with_df(&r, &df);
+        assert_eq!(a, b);
     }
 
     #[test]
