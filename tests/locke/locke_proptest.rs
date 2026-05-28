@@ -265,4 +265,100 @@ proptest! {
             prop_assert!(auc >= 0.0 && auc <= 1.0 + 1e-9, "max OVR AUC = {}", auc);
         }
     }
+
+    // ── v0.7: BeliefScore meet-semilattice laws ─────────────────────────
+
+    #[test]
+    fn algebra_default_compose_is_idempotent(
+        a in arb_belief_score()
+    ) {
+        let r = cjc_locke::BeliefAxisRules::default();
+        let b = cjc_locke::compose(&a, &a, &r);
+        prop_assert!(cjc_locke::eq_componentwise(&a, &b, 1e-12));
+    }
+
+    #[test]
+    fn algebra_default_compose_is_commutative(
+        a in arb_belief_score(),
+        b in arb_belief_score()
+    ) {
+        let r = cjc_locke::BeliefAxisRules::default();
+        let ab = cjc_locke::compose(&a, &b, &r);
+        let ba = cjc_locke::compose(&b, &a, &r);
+        prop_assert!(cjc_locke::eq_componentwise(&ab, &ba, 1e-12));
+    }
+
+    #[test]
+    fn algebra_default_compose_is_associative(
+        a in arb_belief_score(),
+        b in arb_belief_score(),
+        c in arb_belief_score()
+    ) {
+        let r = cjc_locke::BeliefAxisRules::default();
+        let ab_then_c = cjc_locke::compose(&cjc_locke::compose(&a, &b, &r), &c, &r);
+        let a_then_bc = cjc_locke::compose(&a, &cjc_locke::compose(&b, &c, &r), &r);
+        prop_assert!(cjc_locke::eq_componentwise(&ab_then_c, &a_then_bc, 1e-12));
+    }
+
+    #[test]
+    fn algebra_default_compose_has_identity_top(
+        a in arb_belief_score()
+    ) {
+        let r = cjc_locke::BeliefAxisRules::default();
+        let with_top = cjc_locke::compose(&a, &cjc_locke::top(), &r);
+        prop_assert!(cjc_locke::eq_componentwise(&a, &with_top, 1e-12));
+    }
+
+    #[test]
+    fn algebra_default_compose_is_monotonic_downward(
+        a in arb_belief_score(),
+        b in arb_belief_score()
+    ) {
+        let r = cjc_locke::BeliefAxisRules::default();
+        let ab = cjc_locke::compose(&a, &b, &r);
+        prop_assert!(cjc_locke::le_componentwise(&ab, &a, 1e-12));
+        prop_assert!(cjc_locke::le_componentwise(&ab, &b, 1e-12));
+    }
+
+    #[test]
+    fn algebra_all_rules_keep_axes_in_unit_interval(
+        a in arb_belief_score(),
+        b in arb_belief_score(),
+        rule_idx in 0usize..4
+    ) {
+        let rule = match rule_idx {
+            0 => cjc_locke::CompositionRule::Min,
+            1 => cjc_locke::CompositionRule::Max,
+            2 => cjc_locke::CompositionRule::GeometricMean,
+            _ => cjc_locke::CompositionRule::ArithmeticMean,
+        };
+        let r = cjc_locke::BeliefAxisRules {
+            schema: rule, missingness: rule, drift: rule, leakage: rule,
+            lineage: rule, sample: rule, duplication: rule, constraint: rule,
+        };
+        let c = cjc_locke::compose(&a, &b, &r);
+        for axis in [
+            c.schema_score, c.missingness_score, c.drift_score, c.leakage_score,
+            c.lineage_score, c.sample_score, c.duplication_score, c.constraint_score,
+            c.overall,
+        ] {
+            prop_assert!(axis >= 0.0 && axis <= 1.0, "axis = {}", axis);
+        }
+    }
+}
+
+fn arb_belief_score() -> impl Strategy<Value = cjc_locke::BeliefScore> {
+    (
+        0.0f64..=1.0,
+        0.0f64..=1.0,
+        0.0f64..=1.0,
+        0.0f64..=1.0,
+        0.0f64..=1.0,
+        0.0f64..=1.0,
+        0.0f64..=1.0,
+        0.0f64..=1.0,
+    )
+        .prop_map(|(a, b, c, d, e, f, g, h)| {
+            cjc_locke::BeliefScore::from_dimensions(a, b, c, d, e, f, g, h)
+        })
 }

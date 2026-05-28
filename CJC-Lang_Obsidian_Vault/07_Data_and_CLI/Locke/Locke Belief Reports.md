@@ -132,6 +132,56 @@ The shape is `1 - exp(-n / 43.281)` with `k = -30 / ln(0.5)`. This is not a cali
 - `sample_score_from_n(n)` is monotonically non-decreasing in `n`.
 - The full belief calculation is bit-identical across repeated runs.
 
+## Formal composition algebra (v0.7, ADR-0036)
+
+`(BeliefScore, compose, ⊤)` under the default `BeliefAxisRules` (all axes → `Min`) is a **commutative idempotent monoid with identity** — i.e. a meet-semilattice. The `crates/cjc-locke/src/algebra.rs` module exposes this as first-class code with proptest-locked laws.
+
+### The five laws
+
+For any belief scores `a`, `b`, `c` and identity `⊤ = [1, 1, …, 1]`:
+
+| Law | Statement |
+|---|---|
+| **Identity** | `compose(b, ⊤) = b` |
+| **Idempotence** | `compose(b, b) = b` |
+| **Commutativity** | `compose(b, c) = compose(c, b)` |
+| **Associativity** | `compose(compose(a, b), c) = compose(a, compose(b, c))` |
+| **Monotonicity** | `compose(b, c) ≤ b` component-wise |
+
+Each is locked by a proptest in `tests/locke/locke_proptest.rs` under `BeliefAxisRules::default()`. Bolero structural fuzz checks every rule (`Min` / `Max` / `GeometricMean` / `ArithmeticMean`) produces axis values in `[0, 1]` on arbitrary 16-float input.
+
+### Composition API
+
+```rust
+use cjc_locke::{compose, compose_many, compose_many_arithmetic, compose_weighted,
+                top, bottom, BeliefAxisRules, CompositionRule};
+
+// Default meet-semilattice composition.
+let merged = compose(&parent_view, &child_view, &BeliefAxisRules::default());
+
+// Aggregate N leaf beliefs into a single per-leaf-mean.
+let mean = compose_many_arithmetic(&leaf_beliefs).unwrap();
+
+// Weighted by leaf row count.
+let dataset_belief = compose_weighted(&leaf_beliefs, &row_counts).unwrap();
+
+// Custom rules per axis (e.g. sample uses ArithmeticMean for aggregation).
+let mut rules = BeliefAxisRules::default();
+rules.sample = CompositionRule::ArithmeticMean;
+let merged = compose(&a, &b, &rules);
+```
+
+### Per-rule law summary
+
+| Rule | Identity | Idempotent | Commutative | Associative | Monotonic-down |
+|---|:---:|:---:|:---:|:---:|:---:|
+| `Min` | `⊤ = 1` | ✓ | ✓ | ✓ | ✓ |
+| `Max` | `⊥ = 0` | ✓ | ✓ | ✓ | dual ↑ |
+| `GeometricMean` | only vacuously at `{0,1}` | only at `{0,1}` | ✓ | ✓ | ✓ |
+| `ArithmeticMean` | none | ✓ | ✓ | ✗ (chaining diverges) | ✗ |
+
+Only `Min` satisfies all five — that's the meet-semilattice algebra. The other rules are useful combinators for specific use cases; see ADR-0036 §3 for the use-case map.
+
 ## Tests
 
 - `crates/cjc-locke/src/belief.rs` — 7 unit tests

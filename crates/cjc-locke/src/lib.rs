@@ -39,6 +39,7 @@
 //! println!("worst severity: {}", report.worst_severity());
 //! ```
 
+pub mod algebra;
 pub mod api;
 pub mod belief;
 pub mod categorical;
@@ -71,6 +72,10 @@ pub use streaming::{
 };
 
 // Convenience re-exports — the most commonly used types.
+pub use algebra::{
+    bottom, compose, compose_many, compose_many_arithmetic, compose_weighted,
+    eq_componentwise, le_componentwise, top, BeliefAxisRules, CompositionRule,
+};
 pub use belief::{BeliefPenalty, BeliefReport, BeliefScore, BeliefWeights};
 pub use causal::{
     CausalClaim, CausalConfig, CausalDag, CausalDagError, CausalDirection,

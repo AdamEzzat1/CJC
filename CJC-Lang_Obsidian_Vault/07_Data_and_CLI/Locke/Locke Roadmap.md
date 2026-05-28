@@ -122,7 +122,18 @@ Net delta: cjc-locke 217 lib (was 197, +20) + tests/locke 103 (was 89, +14) + cj
 
 Net delta: cjc-locke --lib **237** (was 217, +20) + tests/locke **141** (was 103, +38) + cjc-cli **154** (no regressions). Workspace builds clean. Vault audit: 4 pre-existing broken links in ADR-0023 (references to a not-yet-created Showcase note); no new broken links introduced by batch 2.
 
-### Still deferred to v0.7+
+## v0.7 part 1 (shipped 2026-05-28, ADR-0036)
+
+- [x] **Per-axis BeliefScore composition rules** — formalise the v0.2 algebra as code. New `algebra.rs` module with `CompositionRule` enum (Min/Max/GeometricMean/ArithmeticMean), `BeliefAxisRules` struct, `compose` / `compose_many` / `compose_many_arithmetic` / `compose_weighted`, identity elements `top()` / `bottom()`, and partial-order helpers `le_componentwise` / `eq_componentwise`. 5 meet-semilattice laws (identity, idempotence, commutativity, associativity, monotonicity) **proptest-locked** under default all-`Min` rules. Bolero fuzz on all four rules × arbitrary 16-float input. 21 unit + 7 integration + 6 proptest + 1 bolero. cjc-locke --lib 268 (was 247, +21); tests/locke 176 (was 161, +15).
+
+### v0.7 part 2 (deferred)
+
+- [ ] **Migrate `api::belief_report_from_locke_with_model` to `compose`.** Currently computes per-axis scores in-line via `penalty_from_findings_with_model`; should use the algebra directly for traceability.
+- [ ] **Migrate `gate::diff_reports` to use `le_componentwise`** for the partial-order diff.
+- [ ] **Continuous-domain semantics for `transform_factor`** — parameterise rule selectivity by a continuous parameter.
+- [ ] **Full diabetes-130 per-leaf run** — extend `tests/abng/per_leaf_belief.rs` to the real dataset.
+
+### Still deferred to v0.7+ heavy
 
 The five **heavy** items each requiring multiple batches:
 
@@ -130,7 +141,6 @@ The five **heavy** items each requiring multiple batches:
 - [ ] **Ontology / taxonomy consistency** — hyphen/underscore variants, common-prefix taxonomy inference, hierarchy fragmentation.
 - [ ] **Per-value category lineage** — `raw → normalized → grouped → encoded → embedding` chain. Distinct from existing DataFrame-level `TracedDataFrame`.
 - [ ] **Governance workflows** — suppression files, owner annotations, required-finding policies.
-- [ ] **Per-axis BeliefScore composition rules** — formalise the v0.2 plan as code with property tests.
 
 Plus medium items not in batch 2 (could ship as v0.6.x):
 

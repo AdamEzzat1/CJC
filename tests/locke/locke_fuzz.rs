@@ -248,6 +248,47 @@ fn fuzz_multiclass_leakage_arbitrary_ints_never_panics() {
 }
 
 #[test]
+fn fuzz_algebra_compose_never_panics_and_stays_in_unit_interval() {
+    // Arbitrary 16 floats → 2 BeliefScores → compose under each rule.
+    // No panic; every axis stays in [0, 1] regardless of input.
+    bolero::check!()
+        .with_type::<([f64; 8], [f64; 8])>()
+        .for_each(|(a_arr, b_arr): &([f64; 8], [f64; 8])| {
+            let a = cjc_locke::BeliefScore::from_dimensions(
+                a_arr[0], a_arr[1], a_arr[2], a_arr[3],
+                a_arr[4], a_arr[5], a_arr[6], a_arr[7],
+            );
+            let b = cjc_locke::BeliefScore::from_dimensions(
+                b_arr[0], b_arr[1], b_arr[2], b_arr[3],
+                b_arr[4], b_arr[5], b_arr[6], b_arr[7],
+            );
+            for rule in [
+                cjc_locke::CompositionRule::Min,
+                cjc_locke::CompositionRule::Max,
+                cjc_locke::CompositionRule::GeometricMean,
+                cjc_locke::CompositionRule::ArithmeticMean,
+            ] {
+                let r = cjc_locke::BeliefAxisRules {
+                    schema: rule, missingness: rule, drift: rule, leakage: rule,
+                    lineage: rule, sample: rule, duplication: rule, constraint: rule,
+                };
+                let c = cjc_locke::compose(&a, &b, &r);
+                for axis in [
+                    c.schema_score, c.missingness_score, c.drift_score, c.leakage_score,
+                    c.lineage_score, c.sample_score, c.duplication_score, c.constraint_score,
+                    c.overall,
+                ] {
+                    assert!(
+                        axis >= 0.0 && axis <= 1.0,
+                        "rule {:?} produced out-of-range axis {}",
+                        rule, axis
+                    );
+                }
+            }
+        });
+}
+
+#[test]
 fn fuzz_mermaid_emit_arbitrary_label_never_panics() {
     bolero::check!()
         .with_type::<String>()

@@ -4,6 +4,7 @@
 //! module is wired into the workspace's `[[test]]` table in the root
 //! `Cargo.toml` so `cargo test --test locke` runs everything here.
 
+mod algebra_tests;
 mod validation_tests;
 mod drift_tests;
 mod lineage_tests;
