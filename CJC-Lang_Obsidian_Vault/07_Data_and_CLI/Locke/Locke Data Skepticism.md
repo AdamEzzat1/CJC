@@ -1,0 +1,108 @@
+# Locke Data Skepticism
+
+## What it does
+
+Locke's `validation` module asks the boring-but-important questions:
+
+- Is anything missing?
+- Are rows duplicated?
+- Are there impossible values?
+- Are any columns constant or near-constant?
+- Is the schema what we expect?
+- Is any categorical column suspiciously high-cardinality?
+
+Each check emits zero or more `ValidationFinding`s. A finding is a structured record — never free text — containing severity, evidence, assumptions, and suggested next checks.
+
+## Validators
+
+| Code   | Check                                              | Default severity policy |
+|--------|----------------------------------------------------|--------------------------|
+| E9001  | NaN-as-missing in `Column::Float` **OR** null-mask missingness in any column (v0.2) | rate ≥ 0.5 → Error; ≥ 0.1 → Warning; else Notice |
+| E9002  | Non-float column with no null mask supplied        | Info |
+| E9003  | Full-row duplicates                                | rate ≥ 0.2 → Error; ≥ 0.05 → Warning; else Notice |
+| E9004  | Duplicate values in named key column                | Error |
+| E9005  | Key column not found                                | Error |
+| E9006  | Null mask contains out-of-bounds indices (v0.2)     | Warning |
+| E9010  | Constant column (`n_distinct == 1`)                 | Warning |
+| E9011  | Near-constant (top freq ≥ 0.99)                     | Notice |
+| E9012  | Impossible-value rule references missing column     | Error |
+| E9013  | Rule-column type mismatch                           | Warning |
+| E9014  | Impossible-value violations                         | rate ≥ 0.1 → Error; ≥ 0.01 → Warning; else Notice |
+| E9015  | High-cardinality categorical (ratio ≥ 0.5)          | Notice |
+| E9020  | Expected column is missing                          | Error |
+| E9021  | Column has wrong type                               | Error |
+| E9022  | Column is not in the expected schema                | Error or Notice (controlled by `strict_extra`) |
+
+## The validation flow
+
+```mermaid
+flowchart LR
+  DF[DataFrame] --> M[detect_missingness]
+  DF --> DR[detect_duplicates_full_row]
+  DF --> DK[detect_duplicate_keys]
+  DF --> C[detect_constant_and_near_constant]
+  DF --> I[detect_impossible_values]
+  DF --> HC[detect_high_cardinality_categorical]
+  DF --> SC[detect_schema_mismatch]
+  M & DR & DK & C & I & HC & SC --> SORT[stable sort by severity, code, column]
+  SORT --> R[LockeReport]
+```
+
+## The impossible-value DSL
+
+```rust
+use cjc_locke::ImpossibleValueRule;
+
+let rules = vec![
+    ImpossibleValueRule::NumericRange { column: "age".into(), min: 0.0, max: 120.0 },
+    ImpossibleValueRule::NonNegative { column: "score".into() },
+    ImpossibleValueRule::StrictlyPositive { column: "weight".into() },
+    ImpossibleValueRule::AllowedInts { column: "rating".into(), allowed: vec![1, 2, 3, 4, 5] },
+    ImpossibleValueRule::AllowedStrings {
+        column: "country".into(),
+        allowed: ["us".into(), "uk".into()].into_iter().collect(),
+    },
+];
+```
+
+Locke is conservative: a rule that doesn't match its column type emits **E9013** (Warning) and the validator continues — we don't silently coerce.
+
+## Deterministic guarantees
+
+- Row-canonical bytes for duplicate detection treat all NaN bit patterns as identical, so `NaN == NaN` under the duplicate hash. This is a deliberate choice — without it the duplicate count would be sensitive to which NaN payload happened to be in the column.
+- Distinct-count for `Column::Float` is computed over canonicalised bit patterns (NaN folded to `u64::MAX`).
+- `Column::CategoricalAdaptive` is treated as opaque in v0 — a conservative `n_distinct = column.len()` upper bound is used, and a future v0.2 hook will dereference the shared dictionary.
+
+## Null masks (v0.2)
+
+Locke v0.2 adds a `NullMask` type — a sparse `BTreeSet<usize>` of null row indices — that can be supplied per column:
+
+```rust
+use cjc_locke::{NullMask, NullMaskMap, ValidateOptions};
+
+let mut masks = NullMaskMap::new();
+masks.insert("country".into(), NullMask::from_indices([1, 7, 42]));
+let opts = ValidateOptions {
+    dataset_label: "train.csv".into(),
+    null_masks: masks,
+    ..Default::default()
+};
+let report = validate(&df, &opts);
+// E9001 now fires with the supplied null counts for `country`.
+```
+
+For `Column::Float`, NaN positions are **unioned** with the mask positions. For other column types, the mask is the *only* source of missingness. Out-of-bounds mask indices are flagged as E9006 and skipped — a caller bug that should be fixed upstream.
+
+When no mask is supplied for a non-float column, E9002 still fires as an Info-level acknowledgement (downgraded from v0.1's wording).
+
+## Limitations
+
+- The duplicate detector compares **entire rows byte-canonically** — it does not honour user-supplied "equality is up to column X" rules. Define a primary key and use `detect_duplicate_keys` for that case.
+- Time-aware checks (sorted timestamps, future-leakage warnings) are deferred to v0.3 — see [[Locke Roadmap]].
+
+## Tests
+
+- `crates/cjc-locke/src/validation.rs` — 15 unit tests (12 v0.1 + 3 null-mask v0.2)
+- `tests/locke/validation_tests.rs` — 9 integration tests (8 v0.1 + 1 null-mask v0.2)
+- `tests/locke/locke_proptest.rs` — generative properties (missingness ≤ row count, more-NaN never improves score)
+- `tests/locke/locke_fuzz.rs` — Bolero fuzz over arbitrary `Vec<f64>` / `Vec<i64>` inputs

@@ -36,3 +36,6 @@ pub mod ci;
 
 // Phase 0.4 Track A — ABNG CLI surface (cjcl abng …)
 pub mod abng;
+
+// Locke — evidence-aware analytics (cjcl locke …)
+pub mod locke;

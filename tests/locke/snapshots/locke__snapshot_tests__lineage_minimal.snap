@@ -1,0 +1,12 @@
+---
+source: tests/locke/snapshot_tests.rs
+expression: rendered
+---
+# Locke Lineage Graph
+run_label: snapshot-run
+root: [FP]
+nodes:
+  - id=[FP] kind=impression source=train.csv schema=[FP] n_rows=100
+edges:
+audit:
+  - seq=0 kind=impression subject=[FP] note=added impression

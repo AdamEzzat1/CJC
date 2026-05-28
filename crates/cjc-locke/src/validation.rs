@@ -1,0 +1,1721 @@
+//! Data-skepticism validators.
+//!
+//! Each validator reads a `cjc_data::DataFrame` and emits a `Vec<ValidationFinding>`.
+//! Validators never mutate input. They are deterministic and produce
+//! findings whose IDs depend only on (code, column, evidence) — repeated
+//! runs over the same data produce byte-identical IDs.
+//!
+//! ## Supported
+//!
+//! * `detect_missingness` — NaN-as-missing for floats; user-supplied
+//!   `NullMask` (added v0.2) for non-float types. When no mask is supplied
+//!   for a non-float column, a low-severity informational finding (E9002)
+//!   acknowledges that missingness could not be inferred.
+//! * `detect_duplicates_full_row` — full-row duplicates via canonical byte hashing.
+//! * `detect_duplicate_keys` — duplicates restricted to a named key column.
+//! * `detect_constant_and_near_constant` — `n_distinct == 1` and top-freq dominance.
+//! * `detect_impossible_values` — user-supplied constraints (`ImpossibleValueRule`).
+//! * `detect_high_cardinality_categorical` — heuristic categorical anomalies.
+//! * `detect_schema_mismatch` — column-name and type comparison vs an expected schema.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use cjc_data::{Column, DataFrame};
+
+use crate::report::{FindingEvidence, FindingSeverity, ValidationFinding};
+
+// ─── Configuration ──────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug)]
+pub struct ValidationConfig {
+    pub near_constant_threshold: f64,
+    pub high_cardinality_ratio: f64,
+    pub duplicate_sample_limit: usize,
+}
+
+impl Default for ValidationConfig {
+    fn default() -> Self {
+        Self {
+            near_constant_threshold: 0.99,
+            high_cardinality_ratio: 0.5,
+            duplicate_sample_limit: 5,
+        }
+    }
+}
+
+// ─── Null masks (v0.2) ──────────────────────────────────────────────────────
+
+/// A sparse set of row indices that should be treated as null for a column.
+///
+/// Used for `Column::Int`, `Column::Bool`, `Column::Str`, `Column::Categorical`,
+/// `Column::DateTime` — types where the column itself has no native null
+/// sentinel. For `Column::Float`, NaN is the canonical null and a mask is
+/// usually unnecessary; if a float column has both NaN values *and* a mask,
+/// the union is treated as missing.
+///
+/// Determinism: `BTreeSet` iterates in sorted order, so the resulting
+/// findings have stable IDs regardless of how the caller built the mask.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NullMask {
+    pub null_rows: BTreeSet<usize>,
+}
+
+impl NullMask {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn from_indices<I: IntoIterator<Item = usize>>(rows: I) -> Self {
+        Self {
+            null_rows: rows.into_iter().collect(),
+        }
+    }
+    pub fn count(&self) -> u64 {
+        self.null_rows.len() as u64
+    }
+    pub fn contains(&self, row: usize) -> bool {
+        self.null_rows.contains(&row)
+    }
+}
+
+/// Convenience alias used in [`ValidateOptions`].
+pub type NullMaskMap = BTreeMap<String, NullMask>;
+
+// ─── Impossible-value constraint DSL ────────────────────────────────────────
+
+#[derive(Clone, Debug)]
+pub enum ImpossibleValueRule {
+    /// f64 value < min or > max is impossible.
+    NumericRange { column: String, min: f64, max: f64 },
+    /// f64 value not in the listed set is impossible.
+    AllowedFloats { column: String, allowed: Vec<f64> },
+    /// i64 value not in the listed set is impossible.
+    AllowedInts { column: String, allowed: Vec<i64> },
+    /// String value not in the listed set is impossible.
+    AllowedStrings { column: String, allowed: BTreeSet<String> },
+    /// f64 value must be non-negative.
+    NonNegative { column: String },
+    /// f64 / i64 value must be strictly positive.
+    StrictlyPositive { column: String },
+}
+
+impl ImpossibleValueRule {
+    pub fn column(&self) -> &str {
+        match self {
+            ImpossibleValueRule::NumericRange { column, .. }
+            | ImpossibleValueRule::AllowedFloats { column, .. }
+            | ImpossibleValueRule::AllowedInts { column, .. }
+            | ImpossibleValueRule::AllowedStrings { column, .. }
+            | ImpossibleValueRule::NonNegative { column }
+            | ImpossibleValueRule::StrictlyPositive { column } => column,
+        }
+    }
+}
+
+// ─── Schema expectation ─────────────────────────────────────────────────────
+
+#[derive(Clone, Debug, Default)]
+pub struct ExpectedSchema {
+    /// Required column names with expected type tags. Type tag uses
+    /// `Column::type_name()` strings: "Int", "Float", "Str", "Bool",
+    /// "Categorical", "CategoricalAdaptive", "DateTime".
+    pub columns: BTreeMap<String, String>,
+    /// If `true`, extra columns in the actual frame are an error;
+    /// otherwise they're a notice.
+    pub strict_extra: bool,
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+fn nan_count(values: &[f64]) -> u64 {
+    values.iter().filter(|v| v.is_nan()).count() as u64
+}
+
+/// Canonical byte rep of one column cell. Used to hash rows for duplicate
+/// detection. NaN is canonicalised so two NaNs hash the same.
+fn cell_bytes(col: &Column, row: usize, out: &mut Vec<u8>) {
+    match col {
+        Column::Int(v) => {
+            out.push(b'i');
+            out.extend_from_slice(&v[row].to_le_bytes());
+        }
+        Column::Float(v) => {
+            out.push(b'f');
+            let x = v[row];
+            // Canonicalise NaN: any NaN bit pattern becomes the same value.
+            let bits = if x.is_nan() { u64::MAX } else { x.to_bits() };
+            out.extend_from_slice(&bits.to_le_bytes());
+        }
+        Column::Str(v) => {
+            out.push(b's');
+            let s = &v[row];
+            out.extend_from_slice(&(s.len() as u64).to_le_bytes());
+            out.extend_from_slice(s.as_bytes());
+        }
+        Column::Bool(v) => {
+            out.push(b'b');
+            out.push(if v[row] { 1 } else { 0 });
+        }
+        Column::Categorical { levels, codes } => {
+            out.push(b'c');
+            let code = codes[row] as usize;
+            let level = levels.get(code).map(|s| s.as_str()).unwrap_or("");
+            out.extend_from_slice(&(level.len() as u64).to_le_bytes());
+            out.extend_from_slice(level.as_bytes());
+        }
+        Column::CategoricalAdaptive(_cc) => {
+            // For v0 we treat adaptive categorical as opaque — use its row index.
+            // (A future v0.2 hook can dereference the dictionary.)
+            out.push(b'a');
+            out.extend_from_slice(&(row as u64).to_le_bytes());
+        }
+        Column::DateTime(v) => {
+            out.push(b'd');
+            out.extend_from_slice(&v[row].to_le_bytes());
+        }
+    }
+}
+
+fn row_canonical_bytes(df: &DataFrame, row: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(df.ncols() * 16);
+    for (_, col) in &df.columns {
+        cell_bytes(col, row, &mut out);
+        out.push(0x1f);
+    }
+    out
+}
+
+// ─── Missingness ────────────────────────────────────────────────────────────
+
+/// Detect missingness column-by-column, honoring an optional user-supplied
+/// null mask for non-float columns (v0.2).
+///
+/// For `Column::Float`, NaN is missing. If a null mask is also supplied
+/// for a float column, the **union** of NaN positions and mask positions
+/// counts as missing.
+///
+/// For other column types, missingness is **only** detected if the caller
+/// supplies a `NullMask` in `null_masks` for that column. Without a mask,
+/// Locke emits an Info-level E9002 acknowledging that missingness could
+/// not be inferred.
+///
+/// Out-of-bounds mask indices (≥ column length) are surfaced as E9006
+/// (Warning) and the offending indices are skipped.
+pub fn detect_missingness(
+    df: &DataFrame,
+    _cfg: &ValidationConfig,
+    null_masks: &NullMaskMap,
+) -> Vec<ValidationFinding> {
+    let mut out = Vec::new();
+    let n_rows = df.nrows() as u64;
+
+    for (name, col) in &df.columns {
+        let col_len = col.len();
+        let mask = null_masks.get(name);
+
+        // Validate the mask bounds, if present.
+        let (clean_mask_count, oob_count) = if let Some(m) = mask {
+            let oob: Vec<usize> = m
+                .null_rows
+                .iter()
+                .copied()
+                .filter(|i| *i >= col_len)
+                .collect();
+            if !oob.is_empty() {
+                let sample = oob
+                    .iter()
+                    .take(3)
+                    .map(|i| i.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                out.push(ValidationFinding::new(
+                    "E9006",
+                    FindingSeverity::Warning,
+                    format!(
+                        "null mask for `{}` contains {} out-of-bounds index(es); these will be ignored",
+                        name,
+                        oob.len()
+                    ),
+                    Some(name.clone()),
+                    None,
+                    vec![
+                        FindingEvidence::Count {
+                            label: "out_of_bounds_indices".into(),
+                            value: oob.len() as u64,
+                        },
+                        FindingEvidence::Count {
+                            label: "column_length".into(),
+                            value: col_len as u64,
+                        },
+                        FindingEvidence::Sample {
+                            label: "sample_oob".into(),
+                            value: sample,
+                        },
+                    ],
+                    col_len as u64,
+                    vec![
+                        "out-of-bounds indices indicate a caller bug — mask was built against a different column length".into(),
+                    ],
+                    vec![
+                        "verify the mask is built against the same DataFrame snapshot used for validation".into(),
+                    ],
+                ));
+            }
+            let clean = m.null_rows.iter().filter(|i| **i < col_len).count() as u64;
+            (clean, oob.len() as u64)
+        } else {
+            (0, 0)
+        };
+        let _ = oob_count; // already surfaced above
+
+        match col {
+            Column::Float(v) => {
+                let nan_n = nan_count(v);
+                // Union of NaN positions and mask positions.
+                let n_miss = if let Some(m) = mask {
+                    let mut s: BTreeSet<usize> = (0..v.len()).filter(|i| v[*i].is_nan()).collect();
+                    for r in &m.null_rows {
+                        if *r < v.len() {
+                            s.insert(*r);
+                        }
+                    }
+                    s.len() as u64
+                } else {
+                    nan_n
+                };
+
+                if n_miss > 0 {
+                    let rate = n_miss as f64 / n_rows.max(1) as f64;
+                    let severity = if rate >= 0.5 {
+                        FindingSeverity::Error
+                    } else if rate >= 0.1 {
+                        FindingSeverity::Warning
+                    } else {
+                        FindingSeverity::Notice
+                    };
+                    let mut assumptions = vec!["NaN values treated as missing".into()];
+                    if mask.is_some() {
+                        assumptions
+                            .push("user-supplied null mask combined with NaN positions (union)".into());
+                    }
+                    out.push(ValidationFinding::new(
+                        "E9001",
+                        severity,
+                        format!("{} of {} values in `{}` are missing", n_miss, n_rows, name),
+                        Some(name.clone()),
+                        None,
+                        vec![
+                            FindingEvidence::Count {
+                                label: "n_missing".into(),
+                                value: n_miss,
+                            },
+                            FindingEvidence::Ratio {
+                                label: "missingness_rate".into(),
+                                value: rate,
+                            },
+                        ],
+                        n_rows,
+                        assumptions,
+                        vec![
+                            "inspect a sample of missing rows".into(),
+                            "decide imputation strategy or drop policy".into(),
+                        ],
+                    ));
+                }
+            }
+            Column::Int(_) | Column::Bool(_) | Column::Str(_) | Column::DateTime(_)
+            | Column::Categorical { .. } | Column::CategoricalAdaptive(_) => {
+                if let Some(_m) = mask {
+                    let n_miss = clean_mask_count;
+                    if n_miss > 0 {
+                        let rate = n_miss as f64 / n_rows.max(1) as f64;
+                        let severity = if rate >= 0.5 {
+                            FindingSeverity::Error
+                        } else if rate >= 0.1 {
+                            FindingSeverity::Warning
+                        } else {
+                            FindingSeverity::Notice
+                        };
+                        out.push(ValidationFinding::new(
+                            "E9001",
+                            severity,
+                            format!(
+                                "{} of {} values in `{}` are missing (via null mask)",
+                                n_miss, n_rows, name
+                            ),
+                            Some(name.clone()),
+                            None,
+                            vec![
+                                FindingEvidence::Count {
+                                    label: "n_missing".into(),
+                                    value: n_miss,
+                                },
+                                FindingEvidence::Ratio {
+                                    label: "missingness_rate".into(),
+                                    value: rate,
+                                },
+                                FindingEvidence::Sample {
+                                    label: "type".into(),
+                                    value: col.type_name().into(),
+                                },
+                            ],
+                            n_rows,
+                            vec![
+                                "missingness derived from caller-supplied NullMask".into(),
+                            ],
+                            vec![
+                                "decide imputation strategy or drop policy".into(),
+                            ],
+                        ));
+                    }
+                } else {
+                    // No mask supplied: emit the legacy E9002 acknowledgement
+                    // so missingness is still surfaced (at Info severity).
+                    out.push(ValidationFinding::new(
+                        "E9002",
+                        FindingSeverity::Info,
+                        format!(
+                            "column `{}` is of type `{}`; no null mask supplied so missingness cannot be inferred",
+                            name,
+                            col.type_name()
+                        ),
+                        Some(name.clone()),
+                        None,
+                        vec![FindingEvidence::Sample {
+                            label: "type".into(),
+                            value: col.type_name().into(),
+                        }],
+                        n_rows,
+                        vec![
+                            "Locke treats only Float NaN as missing without a null mask".into(),
+                            "supply ValidateOptions.null_masks to mark null rows explicitly".into(),
+                        ],
+                        vec![
+                            "if missingness matters here, build a NullMask::from_indices(...) for this column".into(),
+                        ],
+                    ));
+                }
+            }
+        }
+    }
+
+    out
+}
+
+// ─── Duplicates ─────────────────────────────────────────────────────────────
+
+pub fn detect_duplicates_full_row(df: &DataFrame, cfg: &ValidationConfig) -> Vec<ValidationFinding> {
+    let n_rows = df.nrows();
+    if n_rows == 0 {
+        return vec![];
+    }
+    // Bucket rows by canonical-byte fingerprint into a BTreeMap so output
+    // ordering is deterministic.
+    let mut buckets: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
+    for r in 0..n_rows {
+        buckets.entry(row_canonical_bytes(df, r)).or_default().push(r);
+    }
+    let mut total_dupes: u64 = 0;
+    let mut sample_rows: Vec<u64> = Vec::new();
+    let mut groups: u64 = 0;
+    for (_k, rows) in &buckets {
+        if rows.len() > 1 {
+            groups += 1;
+            total_dupes += (rows.len() - 1) as u64;
+            for r in rows.iter().take(cfg.duplicate_sample_limit) {
+                sample_rows.push(*r as u64);
+            }
+        }
+    }
+    if total_dupes == 0 {
+        return vec![];
+    }
+    let rate = total_dupes as f64 / n_rows as f64;
+    let mut sample_str = String::new();
+    for (i, r) in sample_rows.iter().take(cfg.duplicate_sample_limit).enumerate() {
+        if i > 0 {
+            sample_str.push(',');
+        }
+        sample_str.push_str(&r.to_string());
+    }
+    let severity = if rate >= 0.2 {
+        FindingSeverity::Error
+    } else if rate >= 0.05 {
+        FindingSeverity::Warning
+    } else {
+        FindingSeverity::Notice
+    };
+    vec![ValidationFinding::new(
+        "E9003",
+        severity,
+        format!("{} duplicate rows across {} groups", total_dupes, groups),
+        None,
+        None,
+        vec![
+            FindingEvidence::Count {
+                label: "duplicate_rows".into(),
+                value: total_dupes,
+            },
+            FindingEvidence::Ratio {
+                label: "duplicate_rate".into(),
+                value: rate,
+            },
+            FindingEvidence::Sample {
+                label: "sample_row_indices".into(),
+                value: sample_str,
+            },
+        ],
+        n_rows as u64,
+        vec!["row equality is byte-canonical; NaN equals NaN under this comparison".into()],
+        vec![
+            "decide whether duplicates are erroneous re-ingest or legitimate repeated observations".into(),
+            "consider df.distinct() or grouping with a primary key".into(),
+        ],
+    )]
+}
+
+pub fn detect_duplicate_keys(df: &DataFrame, key_column: &str) -> Vec<ValidationFinding> {
+    let col = match df.get_column(key_column) {
+        Some(c) => c,
+        None => {
+            return vec![ValidationFinding::new(
+                "E9005",
+                FindingSeverity::Error,
+                format!("key column `{}` not found in dataframe", key_column),
+                Some(key_column.into()),
+                None,
+                vec![],
+                df.nrows() as u64,
+                vec![],
+                vec!["verify the column name and re-run".into()],
+            )];
+        }
+    };
+    let n = col.len();
+    let mut buckets: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
+    for r in 0..n {
+        let mut bytes = Vec::new();
+        cell_bytes(col, r, &mut bytes);
+        buckets.entry(bytes).or_default().push(r);
+    }
+    let mut dups: u64 = 0;
+    let mut groups: u64 = 0;
+    for (_, rows) in &buckets {
+        if rows.len() > 1 {
+            groups += 1;
+            dups += (rows.len() - 1) as u64;
+        }
+    }
+    if dups == 0 {
+        return vec![];
+    }
+    vec![ValidationFinding::new(
+        "E9004",
+        FindingSeverity::Error,
+        format!(
+            "key column `{}` has {} duplicate values across {} groups",
+            key_column, dups, groups
+        ),
+        Some(key_column.into()),
+        None,
+        vec![
+            FindingEvidence::Count {
+                label: "duplicate_keys".into(),
+                value: dups,
+            },
+            FindingEvidence::Count {
+                label: "duplicate_groups".into(),
+                value: groups,
+            },
+        ],
+        n as u64,
+        vec!["key uniqueness assumed; primary-key constraint not enforced by cjc-data".into()],
+        vec!["check ingest pipeline; primary keys should be unique".into()],
+    )]
+}
+
+// ─── Constant / near-constant ───────────────────────────────────────────────
+
+pub(crate) fn distinct_count(col: &Column) -> u64 {
+    match col {
+        Column::Int(v) => {
+            let set: BTreeSet<i64> = v.iter().copied().collect();
+            set.len() as u64
+        }
+        Column::Float(v) => {
+            // Bit-pattern dedup, with NaN canonicalised so all NaNs count once.
+            let set: BTreeSet<u64> = v
+                .iter()
+                .map(|x| if x.is_nan() { u64::MAX } else { x.to_bits() })
+                .collect();
+            set.len() as u64
+        }
+        Column::Str(v) => {
+            let set: BTreeSet<&String> = v.iter().collect();
+            set.len() as u64
+        }
+        Column::Bool(v) => {
+            let set: BTreeSet<bool> = v.iter().copied().collect();
+            set.len() as u64
+        }
+        Column::Categorical { codes, .. } => {
+            let set: BTreeSet<u32> = codes.iter().copied().collect();
+            set.len() as u64
+        }
+        Column::CategoricalAdaptive(cc) => cc.len() as u64, // conservative upper bound
+        Column::DateTime(v) => {
+            let set: BTreeSet<i64> = v.iter().copied().collect();
+            set.len() as u64
+        }
+    }
+}
+
+/// Top-value frequency for a column (max count of any single value).
+pub(crate) fn top_value_freq(col: &Column) -> u64 {
+    match col {
+        Column::Int(v) => count_top(v.iter().copied().collect()),
+        Column::Float(v) => count_top(
+            v.iter()
+                .map(|x| if x.is_nan() { u64::MAX } else { x.to_bits() })
+                .collect(),
+        ),
+        Column::Str(v) => count_top(v.iter().cloned().collect()),
+        Column::Bool(v) => count_top(v.iter().copied().collect()),
+        Column::Categorical { codes, .. } => count_top(codes.iter().copied().collect()),
+        Column::DateTime(v) => count_top(v.iter().copied().collect()),
+        Column::CategoricalAdaptive(_) => 0,
+    }
+}
+
+fn count_top<T: Ord>(values: Vec<T>) -> u64 {
+    let mut counts: BTreeMap<T, u64> = BTreeMap::new();
+    for v in values {
+        *counts.entry(v).or_insert(0) += 1;
+    }
+    counts.values().copied().max().unwrap_or(0)
+}
+
+pub fn detect_constant_and_near_constant(
+    df: &DataFrame,
+    cfg: &ValidationConfig,
+) -> Vec<ValidationFinding> {
+    let mut out = Vec::new();
+    let n_rows = df.nrows() as u64;
+    for (name, col) in &df.columns {
+        let n = col.len() as u64;
+        if n == 0 {
+            continue;
+        }
+        let distinct = distinct_count(col);
+        if distinct <= 1 {
+            out.push(ValidationFinding::new(
+                "E9010",
+                FindingSeverity::Warning,
+                format!("column `{}` is constant", name),
+                Some(name.clone()),
+                None,
+                vec![FindingEvidence::Count {
+                    label: "distinct".into(),
+                    value: distinct,
+                }],
+                n_rows,
+                vec!["constant features carry no predictive signal".into()],
+                vec!["drop the column or check whether the ingest is correct".into()],
+            ));
+            continue;
+        }
+        let top = top_value_freq(col);
+        let ratio = top as f64 / n as f64;
+        if ratio >= cfg.near_constant_threshold {
+            out.push(ValidationFinding::new(
+                "E9011",
+                FindingSeverity::Notice,
+                format!(
+                    "column `{}` is near-constant: top value occupies {:.1}% of rows",
+                    name,
+                    ratio * 100.0
+                ),
+                Some(name.clone()),
+                None,
+                vec![
+                    FindingEvidence::Ratio {
+                        label: "top_freq_ratio".into(),
+                        value: ratio,
+                    },
+                    FindingEvidence::Count {
+                        label: "distinct".into(),
+                        value: distinct,
+                    },
+                ],
+                n_rows,
+                vec![
+                    format!("near-constant threshold {:.2}", cfg.near_constant_threshold)
+                ],
+                vec![
+                    "consider whether this column carries useful signal".into(),
+                    "examine the rare-value rows manually".into(),
+                ],
+            ));
+        }
+    }
+    out
+}
+
+// ─── Impossible values ──────────────────────────────────────────────────────
+
+pub fn detect_impossible_values(
+    df: &DataFrame,
+    rules: &[ImpossibleValueRule],
+) -> Vec<ValidationFinding> {
+    let mut out = Vec::new();
+    for rule in rules {
+        let col = match df.get_column(rule.column()) {
+            Some(c) => c,
+            None => {
+                out.push(ValidationFinding::new(
+                    "E9012",
+                    FindingSeverity::Error,
+                    format!(
+                        "impossible-value rule references missing column `{}`",
+                        rule.column()
+                    ),
+                    Some(rule.column().into()),
+                    None,
+                    vec![],
+                    0,
+                    vec![],
+                    vec!["correct the rule or the schema".into()],
+                ));
+                continue;
+            }
+        };
+        let n = col.len() as u64;
+        let mut violations: u64 = 0;
+        let mut sample = String::new();
+        let mut samples_added = 0;
+        match (rule, col) {
+            (ImpossibleValueRule::NumericRange { min, max, .. }, Column::Float(v)) => {
+                for (i, x) in v.iter().enumerate() {
+                    if x.is_nan() {
+                        continue;
+                    }
+                    if x < min || x > max {
+                        violations += 1;
+                        if samples_added < 3 {
+                            if samples_added > 0 {
+                                sample.push(',');
+                            }
+                            sample.push_str(&format!("row{}={}", i, x));
+                            samples_added += 1;
+                        }
+                    }
+                }
+            }
+            (ImpossibleValueRule::NumericRange { min, max, .. }, Column::Int(v)) => {
+                let (mn, mx) = (*min, *max);
+                for (i, x) in v.iter().enumerate() {
+                    let f = *x as f64;
+                    if f < mn || f > mx {
+                        violations += 1;
+                        if samples_added < 3 {
+                            if samples_added > 0 {
+                                sample.push(',');
+                            }
+                            sample.push_str(&format!("row{}={}", i, x));
+                            samples_added += 1;
+                        }
+                    }
+                }
+            }
+            (ImpossibleValueRule::NonNegative { .. }, Column::Float(v)) => {
+                for (i, x) in v.iter().enumerate() {
+                    if x.is_nan() {
+                        continue;
+                    }
+                    if *x < 0.0 {
+                        violations += 1;
+                        if samples_added < 3 {
+                            if samples_added > 0 {
+                                sample.push(',');
+                            }
+                            sample.push_str(&format!("row{}={}", i, x));
+                            samples_added += 1;
+                        }
+                    }
+                }
+            }
+            (ImpossibleValueRule::NonNegative { .. }, Column::Int(v)) => {
+                for (i, x) in v.iter().enumerate() {
+                    if *x < 0 {
+                        violations += 1;
+                        if samples_added < 3 {
+                            if samples_added > 0 {
+                                sample.push(',');
+                            }
+                            sample.push_str(&format!("row{}={}", i, x));
+                            samples_added += 1;
+                        }
+                    }
+                }
+            }
+            (ImpossibleValueRule::StrictlyPositive { .. }, Column::Float(v)) => {
+                for (i, x) in v.iter().enumerate() {
+                    if x.is_nan() {
+                        continue;
+                    }
+                    if *x <= 0.0 {
+                        violations += 1;
+                        if samples_added < 3 {
+                            if samples_added > 0 {
+                                sample.push(',');
+                            }
+                            sample.push_str(&format!("row{}={}", i, x));
+                            samples_added += 1;
+                        }
+                    }
+                }
+            }
+            (ImpossibleValueRule::StrictlyPositive { .. }, Column::Int(v)) => {
+                for (i, x) in v.iter().enumerate() {
+                    if *x <= 0 {
+                        violations += 1;
+                        if samples_added < 3 {
+                            if samples_added > 0 {
+                                sample.push(',');
+                            }
+                            sample.push_str(&format!("row{}={}", i, x));
+                            samples_added += 1;
+                        }
+                    }
+                }
+            }
+            (ImpossibleValueRule::AllowedFloats { allowed, .. }, Column::Float(v)) => {
+                let mut allowed_bits: BTreeSet<u64> = BTreeSet::new();
+                for &a in allowed {
+                    let bits = if a.is_nan() { u64::MAX } else { a.to_bits() };
+                    allowed_bits.insert(bits);
+                }
+                for (i, x) in v.iter().enumerate() {
+                    if x.is_nan() {
+                        continue;
+                    }
+                    if !allowed_bits.contains(&x.to_bits()) {
+                        violations += 1;
+                        if samples_added < 3 {
+                            if samples_added > 0 {
+                                sample.push(',');
+                            }
+                            sample.push_str(&format!("row{}={}", i, x));
+                            samples_added += 1;
+                        }
+                    }
+                }
+            }
+            (ImpossibleValueRule::AllowedInts { allowed, .. }, Column::Int(v)) => {
+                let allowed_set: BTreeSet<i64> = allowed.iter().copied().collect();
+                for (i, x) in v.iter().enumerate() {
+                    if !allowed_set.contains(x) {
+                        violations += 1;
+                        if samples_added < 3 {
+                            if samples_added > 0 {
+                                sample.push(',');
+                            }
+                            sample.push_str(&format!("row{}={}", i, x));
+                            samples_added += 1;
+                        }
+                    }
+                }
+            }
+            (ImpossibleValueRule::AllowedStrings { allowed, .. }, Column::Str(v)) => {
+                for (i, s) in v.iter().enumerate() {
+                    if !allowed.contains(s) {
+                        violations += 1;
+                        if samples_added < 3 {
+                            if samples_added > 0 {
+                                sample.push(',');
+                            }
+                            sample.push_str(&format!("row{}={:?}", i, s));
+                            samples_added += 1;
+                        }
+                    }
+                }
+            }
+            (rule, col) => {
+                out.push(ValidationFinding::new(
+                    "E9013",
+                    FindingSeverity::Warning,
+                    format!(
+                        "rule `{:?}` is not applicable to column `{}` of type `{}` (skipped)",
+                        std::mem::discriminant(rule),
+                        rule.column(),
+                        col.type_name()
+                    ),
+                    Some(rule.column().into()),
+                    None,
+                    vec![],
+                    n,
+                    vec!["rule-column type mismatch".into()],
+                    vec!["choose a rule appropriate for the column type".into()],
+                ));
+                continue;
+            }
+        }
+
+        if violations > 0 {
+            let rate = violations as f64 / n.max(1) as f64;
+            let severity = if rate >= 0.10 {
+                FindingSeverity::Error
+            } else if rate >= 0.01 {
+                FindingSeverity::Warning
+            } else {
+                FindingSeverity::Notice
+            };
+            out.push(ValidationFinding::new(
+                "E9014",
+                severity,
+                format!(
+                    "{} impossible values in `{}` ({:.2}% of rows)",
+                    violations,
+                    rule.column(),
+                    rate * 100.0
+                ),
+                Some(rule.column().into()),
+                None,
+                vec![
+                    FindingEvidence::Count {
+                        label: "violations".into(),
+                        value: violations,
+                    },
+                    FindingEvidence::Ratio {
+                        label: "violation_rate".into(),
+                        value: rate,
+                    },
+                    FindingEvidence::Sample {
+                        label: "sample".into(),
+                        value: sample,
+                    },
+                ],
+                n,
+                vec!["constraint defined by caller; Locke does not infer constraints".into()],
+                vec![
+                    "fix at source if possible".into(),
+                    "decide whether to filter or impute these rows".into(),
+                ],
+            ));
+        }
+    }
+    out
+}
+
+// ─── High-cardinality categorical ───────────────────────────────────────────
+
+pub fn detect_high_cardinality_categorical(
+    df: &DataFrame,
+    cfg: &ValidationConfig,
+) -> Vec<ValidationFinding> {
+    let mut out = Vec::new();
+    let n_rows = df.nrows() as u64;
+    for (name, col) in &df.columns {
+        let (level_count, kind_tag) = match col {
+            Column::Categorical { levels, .. } => (levels.len() as u64, "Categorical"),
+            Column::Str(v) => {
+                let s: BTreeSet<&String> = v.iter().collect();
+                (s.len() as u64, "Str")
+            }
+            _ => continue,
+        };
+        let ratio = level_count as f64 / n_rows.max(1) as f64;
+        if ratio >= cfg.high_cardinality_ratio && n_rows >= 10 {
+            out.push(ValidationFinding::new(
+                "E9015",
+                FindingSeverity::Notice,
+                format!(
+                    "column `{}` has {} distinct {} values out of {} rows ({:.0}%)",
+                    name,
+                    level_count,
+                    kind_tag,
+                    n_rows,
+                    ratio * 100.0
+                ),
+                Some(name.clone()),
+                None,
+                vec![
+                    FindingEvidence::Count {
+                        label: "n_distinct".into(),
+                        value: level_count,
+                    },
+                    FindingEvidence::Ratio {
+                        label: "cardinality_ratio".into(),
+                        value: ratio,
+                    },
+                ],
+                n_rows,
+                vec!["high cardinality may indicate IDs leaking as features".into()],
+                vec![
+                    "verify this column is intended to be high-cardinality".into(),
+                    "if not, consider grouping or hashing".into(),
+                ],
+            ));
+        }
+    }
+    out
+}
+
+// ─── Schema mismatch ────────────────────────────────────────────────────────
+
+pub fn detect_schema_mismatch(df: &DataFrame, expected: &ExpectedSchema) -> Vec<ValidationFinding> {
+    let mut out = Vec::new();
+    let actual: BTreeMap<String, String> = df
+        .columns
+        .iter()
+        .map(|(n, c)| (n.clone(), c.type_name().to_string()))
+        .collect();
+
+    // Missing columns.
+    for (name, exp_ty) in &expected.columns {
+        match actual.get(name) {
+            None => {
+                out.push(ValidationFinding::new(
+                    "E9020",
+                    FindingSeverity::Error,
+                    format!("expected column `{}` is missing", name),
+                    Some(name.clone()),
+                    None,
+                    vec![FindingEvidence::Sample {
+                        label: "expected_type".into(),
+                        value: exp_ty.clone(),
+                    }],
+                    df.nrows() as u64,
+                    vec![],
+                    vec!["check ingest path; ensure schema is enforced upstream".into()],
+                ));
+            }
+            Some(got_ty) if got_ty != exp_ty => {
+                out.push(ValidationFinding::new(
+                    "E9021",
+                    FindingSeverity::Error,
+                    format!(
+                        "column `{}` has type `{}`, expected `{}`",
+                        name, got_ty, exp_ty
+                    ),
+                    Some(name.clone()),
+                    None,
+                    vec![
+                        FindingEvidence::Sample {
+                            label: "actual_type".into(),
+                            value: got_ty.clone(),
+                        },
+                        FindingEvidence::Sample {
+                            label: "expected_type".into(),
+                            value: exp_ty.clone(),
+                        },
+                    ],
+                    df.nrows() as u64,
+                    vec!["type mismatch likely from upstream serialisation drift".into()],
+                    vec!["align the upstream schema or update the expected schema".into()],
+                ));
+            }
+            _ => {}
+        }
+    }
+    // Extra columns.
+    for name in actual.keys() {
+        if !expected.columns.contains_key(name) {
+            let sev = if expected.strict_extra {
+                FindingSeverity::Error
+            } else {
+                FindingSeverity::Notice
+            };
+            out.push(ValidationFinding::new(
+                "E9022",
+                sev,
+                format!("column `{}` is not in the expected schema", name),
+                Some(name.clone()),
+                None,
+                vec![],
+                df.nrows() as u64,
+                vec![
+                    "strict_extra controls whether this is an error or a notice".into(),
+                ],
+                vec!["either widen the schema or drop the column".into()],
+            ));
+        }
+    }
+    out
+}
+
+// ─── Sentinel-value detection (v0.4) ───────────────────────────────────────
+
+/// Configuration for sentinel-value detection.
+#[derive(Clone, Debug)]
+pub struct SentinelConfig {
+    /// Numeric sentinel candidates. Default: `-1`, `-9999`, `-99`, `999`, `9999`.
+    pub numeric_sentinels: Vec<f64>,
+    /// String sentinel candidates (case-insensitive). Default: empty, "NA",
+    /// "null", "N/A", "unknown", "missing", "-".
+    pub string_sentinels: Vec<String>,
+    /// Minimum count of the sentinel in the column to fire.
+    pub min_count: u64,
+    /// Minimum fraction of column the sentinel must occupy to fire.
+    pub min_rate: f64,
+}
+
+impl Default for SentinelConfig {
+    fn default() -> Self {
+        Self {
+            numeric_sentinels: vec![-1.0, -99.0, -999.0, -9999.0, 999.0, 9999.0],
+            string_sentinels: vec![
+                "".into(),
+                "NA".into(),
+                "N/A".into(),
+                "null".into(),
+                "NULL".into(),
+                "Null".into(),
+                "None".into(),
+                "unknown".into(),
+                "Unknown".into(),
+                "missing".into(),
+                "MISSING".into(),
+                "-".into(),
+                "?".into(),
+            ],
+            min_count: 3,
+            min_rate: 0.01,
+        }
+    }
+}
+
+/// Detect common "magic missing" sentinel values per column.
+///
+/// Emits **E9007** (Info) per (column, sentinel) pair that crosses both
+/// `min_count` and `min_rate` thresholds. The message is intentionally
+/// hedged ("may be a sentinel missing value") — Locke can't know
+/// without domain context.
+pub fn detect_sentinel_values(df: &DataFrame, cfg: &SentinelConfig) -> Vec<ValidationFinding> {
+    let mut out = Vec::new();
+    let n_rows = df.nrows() as u64;
+    if n_rows == 0 {
+        return out;
+    }
+
+    for (name, col) in &df.columns {
+        match col {
+            Column::Float(v) => {
+                for &sentinel in &cfg.numeric_sentinels {
+                    let count = v
+                        .iter()
+                        .filter(|x| !x.is_nan() && (*x - sentinel).abs() < 1e-12)
+                        .count() as u64;
+                    if count >= cfg.min_count
+                        && (count as f64 / n_rows as f64) >= cfg.min_rate
+                    {
+                        out.push(make_sentinel_finding(
+                            name, &format!("{}", sentinel), count, n_rows, "numeric"
+                        ));
+                    }
+                }
+            }
+            Column::Int(v) => {
+                for &sentinel in &cfg.numeric_sentinels {
+                    let s = sentinel as i64;
+                    if (s as f64 - sentinel).abs() > 1e-12 {
+                        continue; // non-integer sentinel can't match Int column
+                    }
+                    let count = v.iter().filter(|x| **x == s).count() as u64;
+                    if count >= cfg.min_count
+                        && (count as f64 / n_rows as f64) >= cfg.min_rate
+                    {
+                        out.push(make_sentinel_finding(
+                            name, &format!("{}", s), count, n_rows, "integer"
+                        ));
+                    }
+                }
+            }
+            Column::Str(v) => {
+                for sentinel in &cfg.string_sentinels {
+                    let count = v.iter().filter(|s| s.as_str() == sentinel.as_str()).count() as u64;
+                    if count >= cfg.min_count
+                        && (count as f64 / n_rows as f64) >= cfg.min_rate
+                    {
+                        out.push(make_sentinel_finding(
+                            name,
+                            &format!("{:?}", sentinel),
+                            count,
+                            n_rows,
+                            "string",
+                        ));
+                    }
+                }
+            }
+            _ => {} // Bool / DateTime / Categorical / CategoricalAdaptive: skip
+        }
+    }
+    out
+}
+
+fn make_sentinel_finding(
+    column: &str,
+    sentinel_repr: &str,
+    count: u64,
+    n_rows: u64,
+    kind: &str,
+) -> ValidationFinding {
+    let rate = count as f64 / n_rows as f64;
+    ValidationFinding::new(
+        "E9007",
+        FindingSeverity::Info,
+        format!(
+            "column `{}` has {} occurrences of {} ({:.1}%); may be a sentinel missing value",
+            column, count, sentinel_repr, rate * 100.0
+        ),
+        Some(column.into()),
+        None,
+        vec![
+            FindingEvidence::Count {
+                label: "occurrences".into(),
+                value: count,
+            },
+            FindingEvidence::Ratio {
+                label: "rate".into(),
+                value: rate,
+            },
+            FindingEvidence::Sample {
+                label: "sentinel".into(),
+                value: sentinel_repr.to_string(),
+            },
+            FindingEvidence::Sample {
+                label: "kind".into(),
+                value: kind.into(),
+            },
+        ],
+        n_rows,
+        vec![
+            "sentinel detection is heuristic — `-1` may be real data in a delta column".into(),
+            "Locke only surfaces candidates; the user decides whether to treat as null".into(),
+        ],
+        vec![
+            "if this is missing, declare it via NullMask::from_indices(...) in v0.2+".into(),
+            "or filter / impute at source".into(),
+        ],
+    )
+}
+
+// ─── Outliers (v0.4) ────────────────────────────────────────────────────────
+
+/// Configuration for outlier detection.
+#[derive(Clone, Debug)]
+pub struct OutlierConfig {
+    /// 1.5×IQR is the textbook "mild" cutoff.
+    pub mild_iqr_multiplier: f64,
+    /// 3×IQR is the textbook "extreme" cutoff.
+    pub extreme_iqr_multiplier: f64,
+    /// |modified Z| ≥ 3.5 is Iglewicz & Hoaglin's mild cutoff.
+    pub mild_mod_z: f64,
+    /// |modified Z| ≥ 5 is the extreme cutoff.
+    pub extreme_mod_z: f64,
+    /// Don't fire any outlier finding if the column has fewer than this many
+    /// valid (non-NaN) values — outlier detection is unreliable below ~20.
+    pub min_n_for_outliers: u64,
+}
+
+impl Default for OutlierConfig {
+    fn default() -> Self {
+        Self {
+            mild_iqr_multiplier: 1.5,
+            extreme_iqr_multiplier: 3.0,
+            mild_mod_z: 3.5,
+            extreme_mod_z: 5.0,
+            min_n_for_outliers: 20,
+        }
+    }
+}
+
+/// Per-column outlier counts, surfaced as findings.
+///
+/// Two finding codes:
+/// - **E9040** (Notice) — column has `n_mild` mild outliers
+/// - **E9041** (Warning) — column has `n_extreme` extreme outliers
+pub fn detect_outliers(df: &DataFrame, cfg: &OutlierConfig) -> Vec<ValidationFinding> {
+    use crate::stats::outlier_baselines;
+    let mut out = Vec::new();
+    for (name, col) in &df.columns {
+        let values: Option<Vec<f64>> = match col {
+            Column::Float(v) => Some(v.clone()),
+            Column::Int(v) => Some(v.iter().map(|x| *x as f64).collect()),
+            _ => None,
+        };
+        let Some(values) = values else { continue };
+        let n_valid = values.iter().filter(|x| !x.is_nan()).count() as u64;
+        if n_valid < cfg.min_n_for_outliers {
+            continue;
+        }
+        let Some(b) = outlier_baselines(&values) else { continue };
+        if b.iqr <= 0.0 && b.mad <= 0.0 {
+            continue;
+        }
+        // Count mild + extreme by either method.
+        let mut n_mild: u64 = 0;
+        let mut n_extreme: u64 = 0;
+        let mut sample_extreme = String::new();
+        let mut samples_added = 0;
+        for (i, &x) in values.iter().enumerate() {
+            if x.is_nan() {
+                continue;
+            }
+            // IQR test.
+            let iqr_extreme = b.iqr > 0.0
+                && (x < b.q1 - cfg.extreme_iqr_multiplier * b.iqr
+                    || x > b.q3 + cfg.extreme_iqr_multiplier * b.iqr);
+            let iqr_mild = b.iqr > 0.0
+                && (x < b.q1 - cfg.mild_iqr_multiplier * b.iqr
+                    || x > b.q3 + cfg.mild_iqr_multiplier * b.iqr);
+            // Modified Z test.
+            let mod_z = (x - b.median) * b.mod_z_inv;
+            let mod_z_extreme = b.mad > 0.0 && mod_z.abs() >= cfg.extreme_mod_z;
+            let mod_z_mild = b.mad > 0.0 && mod_z.abs() >= cfg.mild_mod_z;
+
+            let is_extreme = iqr_extreme || mod_z_extreme;
+            let is_mild = !is_extreme && (iqr_mild || mod_z_mild);
+
+            if is_extreme {
+                n_extreme += 1;
+                if samples_added < 3 {
+                    if samples_added > 0 {
+                        sample_extreme.push(',');
+                    }
+                    sample_extreme.push_str(&format!("row{}={}", i, x));
+                    samples_added += 1;
+                }
+            } else if is_mild {
+                n_mild += 1;
+            }
+        }
+
+        if n_mild > 0 {
+            out.push(ValidationFinding::new(
+                "E9040",
+                FindingSeverity::Notice,
+                format!(
+                    "column `{}` has {} mild outliers (1.5×IQR or |mod-Z| ≥ {:.1})",
+                    name, n_mild, cfg.mild_mod_z
+                ),
+                Some(name.clone()),
+                None,
+                vec![
+                    FindingEvidence::Count {
+                        label: "n_mild".into(),
+                        value: n_mild,
+                    },
+                    FindingEvidence::Range {
+                        label: "iqr_q1_q3".into(),
+                        min: b.q1,
+                        max: b.q3,
+                    },
+                    FindingEvidence::Metric {
+                        label: "iqr".into(),
+                        value: b.iqr,
+                    },
+                    FindingEvidence::Metric {
+                        label: "mad".into(),
+                        value: b.mad,
+                    },
+                ],
+                n_valid,
+                vec![
+                    "outliers are flagged by IQR (1.5×) or modified-Z (≥3.5)".into(),
+                    "not all outliers are errors — check whether they're plausible at source".into(),
+                ],
+                vec![
+                    "inspect the sample rows".into(),
+                    "decide imputation, clipping, or 'this is a real tail' policy".into(),
+                ],
+            ));
+        }
+
+        if n_extreme > 0 {
+            out.push(ValidationFinding::new(
+                "E9041",
+                FindingSeverity::Warning,
+                format!(
+                    "column `{}` has {} extreme outliers (3×IQR or |mod-Z| ≥ {:.1})",
+                    name, n_extreme, cfg.extreme_mod_z
+                ),
+                Some(name.clone()),
+                None,
+                vec![
+                    FindingEvidence::Count {
+                        label: "n_extreme".into(),
+                        value: n_extreme,
+                    },
+                    FindingEvidence::Sample {
+                        label: "sample".into(),
+                        value: sample_extreme,
+                    },
+                    FindingEvidence::Range {
+                        label: "iqr_q1_q3".into(),
+                        min: b.q1,
+                        max: b.q3,
+                    },
+                ],
+                n_valid,
+                vec![
+                    "extreme outliers usually indicate sensor errors, sentinel values, or unit-mix-ups".into(),
+                ],
+                vec![
+                    "verify physical plausibility (e.g. age = 999, temperature = -9999)".into(),
+                    "consider declaring sentinel values as nulls via NullMask".into(),
+                ],
+            ));
+        }
+    }
+    out
+}
+
+// ─── Top-level orchestrator ─────────────────────────────────────────────────
+
+/// Run every v0 validator and concatenate findings.
+pub fn validate_dataframe(
+    df: &DataFrame,
+    cfg: &ValidationConfig,
+    impossible: &[ImpossibleValueRule],
+    expected_schema: Option<&ExpectedSchema>,
+    primary_key: Option<&str>,
+    null_masks: &NullMaskMap,
+) -> Vec<ValidationFinding> {
+    let mut out = Vec::new();
+    out.extend(detect_missingness(df, cfg, null_masks));
+    out.extend(detect_duplicates_full_row(df, cfg));
+    if let Some(pk) = primary_key {
+        out.extend(detect_duplicate_keys(df, pk));
+    }
+    out.extend(detect_constant_and_near_constant(df, cfg));
+    out.extend(detect_impossible_values(df, impossible));
+    out.extend(detect_high_cardinality_categorical(df, cfg));
+    // v0.4: outlier detection on numeric columns.
+    out.extend(detect_outliers(df, &OutlierConfig::default()));
+    // v0.4: sentinel-value detection (heuristic, Info severity).
+    out.extend(detect_sentinel_values(df, &SentinelConfig::default()));
+    if let Some(sch) = expected_schema {
+        out.extend(detect_schema_mismatch(df, sch));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cjc_data::{Column, DataFrame};
+
+    fn df_with_nans() -> DataFrame {
+        DataFrame::from_columns(vec![
+            (
+                "age".into(),
+                Column::Float(vec![1.0, 2.0, f64::NAN, 4.0, f64::NAN]),
+            ),
+            ("flag".into(), Column::Bool(vec![true, true, true, true, true])),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn missingness_detects_nan_in_float() {
+        let df = df_with_nans();
+        let cfg = ValidationConfig::default();
+        let findings = detect_missingness(&df, &cfg, &NullMaskMap::new());
+        let miss = findings
+            .iter()
+            .find(|f| f.code == "E9001" && f.column.as_deref() == Some("age"))
+            .expect("expected missingness finding");
+        let n = miss
+            .evidence
+            .iter()
+            .find_map(|e| match e {
+                FindingEvidence::Count { label, value } if label == "n_missing" => Some(*value),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn missingness_emits_limitation_for_non_float() {
+        let df = df_with_nans();
+        let cfg = ValidationConfig::default();
+        let findings = detect_missingness(&df, &cfg, &NullMaskMap::new());
+        // bool column gets a limitation note (E9002)
+        assert!(findings
+            .iter()
+            .any(|f| f.code == "E9002" && f.column.as_deref() == Some("flag")));
+    }
+
+    #[test]
+    fn detect_duplicates_full_row_finds_dupes() {
+        let df = DataFrame::from_columns(vec![
+            ("x".into(), Column::Int(vec![1, 1, 2, 2, 3])),
+            ("y".into(), Column::Int(vec![10, 10, 20, 20, 30])),
+        ])
+        .unwrap();
+        let cfg = ValidationConfig::default();
+        let findings = detect_duplicates_full_row(&df, &cfg);
+        assert_eq!(findings.len(), 1);
+        let f = &findings[0];
+        let n = f
+            .evidence
+            .iter()
+            .find_map(|e| match e {
+                FindingEvidence::Count { label, value } if label == "duplicate_rows" => Some(*value),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn duplicate_keys_detects_repeated_values() {
+        let df = DataFrame::from_columns(vec![(
+            "id".into(),
+            Column::Int(vec![1, 2, 2, 3, 3, 3]),
+        )])
+        .unwrap();
+        let findings = detect_duplicate_keys(&df, "id");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, "E9004");
+    }
+
+    #[test]
+    fn duplicate_keys_missing_column_is_error() {
+        let df = DataFrame::from_columns(vec![("x".into(), Column::Int(vec![1]))]).unwrap();
+        let findings = detect_duplicate_keys(&df, "id");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, "E9005");
+        assert_eq!(findings[0].severity, FindingSeverity::Error);
+    }
+
+    #[test]
+    fn constant_column_warns() {
+        let df = DataFrame::from_columns(vec![("c".into(), Column::Int(vec![5, 5, 5, 5]))]).unwrap();
+        let cfg = ValidationConfig::default();
+        let findings = detect_constant_and_near_constant(&df, &cfg);
+        assert!(findings.iter().any(|f| f.code == "E9010"));
+    }
+
+    #[test]
+    fn near_constant_column_notices() {
+        let mut vals = vec![1i64; 100];
+        vals[0] = 2;
+        let df = DataFrame::from_columns(vec![("c".into(), Column::Int(vals))]).unwrap();
+        let cfg = ValidationConfig::default();
+        let findings = detect_constant_and_near_constant(&df, &cfg);
+        assert!(findings.iter().any(|f| f.code == "E9011"));
+    }
+
+    #[test]
+    fn impossible_numeric_range_flags() {
+        let df = DataFrame::from_columns(vec![(
+            "x".into(),
+            Column::Float(vec![1.0, -5.0, 3.0, 99.0]),
+        )])
+        .unwrap();
+        let rules = vec![ImpossibleValueRule::NumericRange {
+            column: "x".into(),
+            min: 0.0,
+            max: 10.0,
+        }];
+        let findings = detect_impossible_values(&df, &rules);
+        assert!(findings.iter().any(|f| f.code == "E9014"));
+    }
+
+    #[test]
+    fn impossible_allowed_strings_flags() {
+        let df = DataFrame::from_columns(vec![(
+            "country".into(),
+            Column::Str(vec!["us".into(), "uk".into(), "atlantis".into()]),
+        )])
+        .unwrap();
+        let mut allowed = BTreeSet::new();
+        allowed.insert("us".into());
+        allowed.insert("uk".into());
+        let rules = vec![ImpossibleValueRule::AllowedStrings {
+            column: "country".into(),
+            allowed,
+        }];
+        let findings = detect_impossible_values(&df, &rules);
+        assert!(findings.iter().any(|f| f.code == "E9014"));
+    }
+
+    #[test]
+    fn schema_mismatch_detects_missing_and_typed() {
+        let df = DataFrame::from_columns(vec![
+            ("age".into(), Column::Int(vec![1, 2, 3])),
+            ("extra".into(), Column::Int(vec![9, 9, 9])),
+        ])
+        .unwrap();
+        let mut cols = BTreeMap::new();
+        cols.insert("age".into(), "Float".into()); // type mismatch
+        cols.insert("missing".into(), "Int".into()); // missing column
+        let sch = ExpectedSchema {
+            columns: cols,
+            strict_extra: false,
+        };
+        let findings = detect_schema_mismatch(&df, &sch);
+        assert!(findings.iter().any(|f| f.code == "E9020")); // missing
+        assert!(findings.iter().any(|f| f.code == "E9021")); // type
+        assert!(findings.iter().any(|f| f.code == "E9022")); // extra (notice)
+    }
+
+    #[test]
+    fn validators_are_deterministic_across_runs() {
+        let df = df_with_nans();
+        let cfg = ValidationConfig::default();
+        let masks = NullMaskMap::new();
+        let a = detect_missingness(&df, &cfg, &masks);
+        let b = detect_missingness(&df, &cfg, &masks);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn sentinel_detection_flags_minus_nine_thousand_nine_hundred_ninety_nine() {
+        let mut v: Vec<f64> = (0..100).map(|i| i as f64).collect();
+        for i in 0..10 {
+            v[i] = -9999.0;
+        }
+        let df = DataFrame::from_columns(vec![("x".into(), Column::Float(v))]).unwrap();
+        let findings = detect_sentinel_values(&df, &SentinelConfig::default());
+        assert!(findings.iter().any(|f| f.code == "E9007"));
+    }
+
+    #[test]
+    fn sentinel_detection_below_threshold_does_not_fire() {
+        // Only 2 occurrences out of 100 → below min_count (3).
+        let mut v: Vec<f64> = (0..100).map(|i| i as f64).collect();
+        v[0] = -9999.0;
+        v[1] = -9999.0;
+        let df = DataFrame::from_columns(vec![("x".into(), Column::Float(v))]).unwrap();
+        let findings = detect_sentinel_values(&df, &SentinelConfig::default());
+        assert!(!findings.iter().any(|f| f.code == "E9007"));
+    }
+
+    #[test]
+    fn sentinel_detection_string_na_fires() {
+        let mut v: Vec<String> = (0..100).map(|i| format!("v{}", i)).collect();
+        for i in 0..5 {
+            v[i] = "NA".into();
+        }
+        let df = DataFrame::from_columns(vec![("country".into(), Column::Str(v))]).unwrap();
+        let findings = detect_sentinel_values(&df, &SentinelConfig::default());
+        assert!(findings.iter().any(|f| f.code == "E9007" && f.message.contains("\\\"NA\\\"") || f.message.contains("NA")));
+    }
+
+    #[test]
+    fn sentinel_detection_is_deterministic() {
+        let v: Vec<f64> = (0..100).map(|i| if i < 5 { -9999.0 } else { i as f64 }).collect();
+        let df = DataFrame::from_columns(vec![("x".into(), Column::Float(v))]).unwrap();
+        let cfg = SentinelConfig::default();
+        let a = detect_sentinel_values(&df, &cfg);
+        let b = detect_sentinel_values(&df, &cfg);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn outlier_detection_emits_e9041_for_extreme() {
+        // 50 normal-ish values + 1 wildly extreme one.
+        let mut v: Vec<f64> = (0..50).map(|i| i as f64).collect();
+        v.push(10_000.0);
+        let df = DataFrame::from_columns(vec![("x".into(), Column::Float(v))]).unwrap();
+        let cfg = OutlierConfig::default();
+        let findings = detect_outliers(&df, &cfg);
+        assert!(findings.iter().any(|f| f.code == "E9041"));
+    }
+
+    #[test]
+    fn outlier_detection_does_not_fire_on_small_samples() {
+        // Only 10 rows — below `min_n_for_outliers = 20`. No finding even
+        // if a wild value is present.
+        let v = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10_000.0];
+        let df = DataFrame::from_columns(vec![("x".into(), Column::Float(v))]).unwrap();
+        let findings = detect_outliers(&df, &OutlierConfig::default());
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn outlier_detection_skips_non_numeric_columns() {
+        let df = DataFrame::from_columns(vec![(
+            "name".into(),
+            Column::Str(vec!["a".into(); 30]),
+        )])
+        .unwrap();
+        let findings = detect_outliers(&df, &OutlierConfig::default());
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn outlier_detection_is_deterministic() {
+        let mut v: Vec<f64> = (0..50).map(|i| (i as f64).sin() * 10.0).collect();
+        v.push(1_000.0);
+        let df = DataFrame::from_columns(vec![("x".into(), Column::Float(v))]).unwrap();
+        let cfg = OutlierConfig::default();
+        let a = detect_outliers(&df, &cfg);
+        let b = detect_outliers(&df, &cfg);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn null_mask_for_int_column_emits_e9001() {
+        let df = DataFrame::from_columns(vec![
+            ("age".into(), Column::Int(vec![10, 20, 30, 40, 50])),
+        ])
+        .unwrap();
+        let cfg = ValidationConfig::default();
+        let mut masks = NullMaskMap::new();
+        masks.insert("age".into(), NullMask::from_indices([1, 3]));
+        let findings = detect_missingness(&df, &cfg, &masks);
+        // E9001 should fire with n_missing=2; E9002 must NOT fire.
+        assert!(findings.iter().any(|f| f.code == "E9001"));
+        assert!(!findings.iter().any(|f| f.code == "E9002"));
+    }
+
+    #[test]
+    fn null_mask_out_of_bounds_emits_e9006() {
+        let df = DataFrame::from_columns(vec![
+            ("age".into(), Column::Int(vec![10, 20, 30])),
+        ])
+        .unwrap();
+        let cfg = ValidationConfig::default();
+        let mut masks = NullMaskMap::new();
+        masks.insert("age".into(), NullMask::from_indices([1, 99]));
+        let findings = detect_missingness(&df, &cfg, &masks);
+        assert!(findings.iter().any(|f| f.code == "E9006"));
+        // Out-of-bounds index ignored; in-bounds index 1 still counts.
+        let miss = findings.iter().find(|f| f.code == "E9001").unwrap();
+        for ev in &miss.evidence {
+            if let FindingEvidence::Count { label, value } = ev {
+                if label == "n_missing" {
+                    assert_eq!(*value, 1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn null_mask_union_with_nan_for_float_columns() {
+        let df = DataFrame::from_columns(vec![(
+            "x".into(),
+            Column::Float(vec![1.0, f64::NAN, 3.0, 4.0, 5.0]),
+        )])
+        .unwrap();
+        let cfg = ValidationConfig::default();
+        let mut masks = NullMaskMap::new();
+        // Mark rows 1 (already NaN) and 4 (clean). Union should be {1, 4} = 2.
+        masks.insert("x".into(), NullMask::from_indices([1, 4]));
+        let findings = detect_missingness(&df, &cfg, &masks);
+        let miss = findings.iter().find(|f| f.code == "E9001").unwrap();
+        let n = miss
+            .evidence
+            .iter()
+            .find_map(|e| match e {
+                FindingEvidence::Count { label, value } if label == "n_missing" => Some(*value),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(n, 2);
+    }
+}
