@@ -12,8 +12,8 @@ use cjc_locke::{
     detect_all_categorical_quality, detect_case_fold_collisions, detect_confusable_scripts,
     detect_encoding_risk, detect_mojibake, detect_near_duplicate_categories,
     detect_rare_categories, detect_transitive_clusters,
-    detect_whitespace_punctuation_variants, CategoricalQualityConfig, FindingSeverity,
-    ValidationConfig,
+    detect_unicode_normalization_variants, detect_whitespace_punctuation_variants,
+    CategoricalQualityConfig, FindingSeverity, ValidationConfig,
 };
 
 // ─── Fixture helpers ──────────────────────────────────────────────────────
@@ -440,4 +440,48 @@ fn categorical_storage_works_too() {
     let f = detect_case_fold_collisions(&df, &CategoricalQualityConfig::default());
     assert_eq!(f.len(), 1);
     assert_eq!(f[0].code, "E9080");
+}
+
+// ─── E9086 Unicode NFC/NFD ─────────────────────────────────────────────────
+
+#[test]
+fn e9086_fires_on_nfc_vs_nfd_variants() {
+    // NFC "café" U+00E9, NFD "café" = U+0065 U+0301.
+    let nfc = "caf\u{00E9}"; // café in NFC
+    let nfd = "caf\u{0065}\u{0301}"; // café in NFD (e + combining acute)
+    let mut values = vec![nfc, nfd];
+    values.extend(vec!["bistro"; 18]);
+    let df = df_str("venue", &values);
+    let f = detect_unicode_normalization_variants(&df, &CategoricalQualityConfig::default());
+    assert_eq!(f.len(), 1);
+    assert_eq!(f[0].code, "E9086");
+    assert_eq!(f[0].severity, FindingSeverity::Warning);
+}
+
+#[test]
+fn e9086_quiet_on_only_one_form() {
+    // All in NFC — no collision under combining-mark stripping.
+    let mut values: Vec<&str> = vec!["caf\u{00E9}", "th\u{00E9}", "na\u{00EF}ve"];
+    values.extend(vec!["bistro"; 18]);
+    let df = df_str("venue", &values);
+    let f = detect_unicode_normalization_variants(&df, &CategoricalQualityConfig::default());
+    assert!(f.is_empty(), "expected quiet, got {:?}", f);
+}
+
+#[test]
+fn e9086_fires_via_validate() {
+    let nfc = "caf\u{00E9}";
+    let nfd = "caf\u{0065}\u{0301}";
+    let mut values = vec![nfc, nfd];
+    values.extend(vec!["bistro"; 18]);
+    let df = df_str("venue", &values);
+    let report = validate(
+        &df,
+        &ValidateOptions {
+            dataset_label: "e9086".into(),
+            config: ValidationConfig::default(),
+            ..Default::default()
+        },
+    );
+    assert!(report.findings.iter().any(|f| f.code == "E9086"));
 }

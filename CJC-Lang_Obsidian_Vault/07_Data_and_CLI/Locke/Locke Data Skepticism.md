@@ -31,6 +31,9 @@ Each check emits zero or more `ValidationFinding`s. A finding is a structured re
 | E9015  | High-cardinality categorical (ratio ≥ 0.5)          | Notice |
 | E9016  | Rare categories (`count < rare_category_min_count`) — v0.6 | Notice |
 | E9017  | One-hot encoding-risk (cardinality > threshold) — v0.6 | Notice |
+| E9018  | Categorical cardinality explosion train→test — v0.6 batch 2 | Notice or Warning |
+| E9019  | Categorical entropy shift between train and test — v0.6 batch 2 | Notice |
+| E9023  | Int column densely packed in small range — label-encoding risk — v0.6 batch 2 | Notice |
 | E9020  | Expected column is missing                          | Error |
 | E9021  | Column has wrong type                               | Error |
 | E9022  | Column is not in the expected schema                | Error or Notice (controlled by `strict_extra`) |
@@ -40,6 +43,12 @@ Each check emits zero or more `ValidationFinding`s. A finding is a structured re
 | E9083  | Confusable mixed-script labels (Latin + Cyrillic) — v0.6 | Warning |
 | E9084  | Mojibake (UTF-8 decoded as Latin-1) — v0.6        | Notice |
 | E9085  | Transitive cluster summary across E9080/81/82 — v0.6 | Notice |
+| E9086  | Unicode NFC/NFD normalisation variants — v0.6 batch 2 | Warning |
+| E9090  | Email-like values detected (≥ 10% of column) — v0.6 batch 2 | Warning |
+| E9091  | Phone-like values detected — v0.6 batch 2 | Notice |
+| E9092  | SSN-like values detected (`NNN-NN-NNNN`) — v0.6 batch 2 | Error |
+| E9093  | API-key-like values detected (high entropy) — v0.6 batch 2 | Warning |
+| E9055  | Time-column hour-of-day or day-of-week periodicity — v0.6 batch 2 | Notice |
 
 ## v0.6 categorical / string semantic-quality detectors
 

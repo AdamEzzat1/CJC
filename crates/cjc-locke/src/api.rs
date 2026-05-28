@@ -173,15 +173,19 @@ pub fn belief_report_from_locke_with_model(
             |code| {
                 // True schema-shape codes
                 code == "E9020" || code == "E9021" || code == "E9022"
+                // v0.6 batch 2: label-encoding risk weakens schema (the
+                // column's declared type is misleading for downstream).
+                || code == "E9023"
                 // v0.6: semantic-category fragmentation (encoding-risk
                 // E9017, case-fold E9080, whitespace E9081, near-duplicate
                 // E9082, confusable-script E9083, mojibake E9084,
-                // transitive-cluster E9085). These weaken the schema axis
-                // because the column's effective alphabet is ambiguous,
-                // even though the row-level types are fine.
+                // transitive-cluster E9085, NFC/NFD E9086). These weaken
+                // the schema axis because the column's effective alphabet
+                // is ambiguous, even though the row-level types are fine.
                 || code == "E9017"
                 || code == "E9080" || code == "E9081" || code == "E9082"
                 || code == "E9083" || code == "E9084" || code == "E9085"
+                || code == "E9086"
             },
             penalty,
         );
@@ -189,8 +193,13 @@ pub fn belief_report_from_locke_with_model(
         - penalty_from_findings_with_model(
             &report.findings,
             // E9014 (legacy constraint) + E9016 (rare-category long-tail
-            // is a distributional constraint risk, not a schema-shape one).
-            |code| code == "E9014" || code == "E9016",
+            // is a distributional constraint risk, not a schema-shape one)
+            // + v0.6 batch 2 PII (E9090-E9093 — presence of PII is a
+            // constraint violation per data-governance policy).
+            |code| {
+                code == "E9014" || code == "E9016"
+                || code == "E9090" || code == "E9091" || code == "E9092" || code == "E9093"
+            },
             penalty,
         );
     // Drift / leakage / lineage scores are 1.0 here (no signal in single-df flow);

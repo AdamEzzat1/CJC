@@ -165,4 +165,67 @@ proptest! {
         let b = cjc_locke::emit_lineage_mermaid(&g);
         prop_assert_eq!(a, b);
     }
+
+    // ── v0.6 batch 2 ─────────────────────────────────────────────────────
+
+    #[test]
+    fn pii_detection_is_deterministic(
+        vs in prop::collection::vec(any::<String>(), 10..40)
+    ) {
+        let df = DataFrame::from_columns(vec![("c".into(), Column::Str(vs))]).unwrap();
+        let cfg = cjc_locke::PiiConfig::default();
+        let a = cjc_locke::detect_all_pii(&df, &cfg);
+        let b = cjc_locke::detect_all_pii(&df, &cfg);
+        prop_assert_eq!(a, b);
+    }
+
+    #[test]
+    fn label_encoding_risk_is_deterministic(
+        seed in any::<u64>(),
+        n in 30u64..200,
+        cap in 2i64..30
+    ) {
+        let mut state = seed;
+        let values: Vec<i64> = (0..n).map(|_| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state % cap as u64) as i64
+        }).collect();
+        let df = DataFrame::from_columns(vec![("v".into(), Column::Int(values))]).unwrap();
+        let cfg = cjc_locke::LabelEncodingRiskConfig::default();
+        let a = cjc_locke::detect_label_encoding_risk(&df, &cfg);
+        let b = cjc_locke::detect_label_encoding_risk(&df, &cfg);
+        prop_assert_eq!(a, b);
+    }
+
+    #[test]
+    fn per_column_summary_emit_is_deterministic(
+        nrows in 5u64..50
+    ) {
+        let df = DataFrame::from_columns(vec![
+            ("x".into(), Column::Float((0..nrows).map(|i| i as f64).collect()))
+        ]).unwrap();
+        let opts = ValidateOptions { dataset_label: "p".into(), ..Default::default() };
+        let r = validate(&df, &opts);
+        let a = cjc_locke::emit_per_column_confidence_summary(&r);
+        let b = cjc_locke::emit_per_column_confidence_summary(&r);
+        prop_assert_eq!(a, b);
+    }
+
+    #[test]
+    fn seasonality_dispersion_is_finite_and_non_negative(
+        times in prop::collection::vec(0i64..1_000_000_000_000i64, 100..400)
+    ) {
+        let df = DataFrame::from_columns(vec![("ts".into(), Column::Int(times))]).unwrap();
+        let cfg = cjc_locke::SeasonalityConfig::default();
+        let findings = cjc_locke::detect_seasonality(&df, "ts", &cfg);
+        for f in &findings {
+            for ev in &f.evidence {
+                if let cjc_locke::FindingEvidence::Metric { label, value } = ev {
+                    if label == "index_of_dispersion" {
+                        prop_assert!(value.is_finite() && *value >= 0.0, "ID = {}", value);
+                    }
+                }
+            }
+        }
+    }
 }

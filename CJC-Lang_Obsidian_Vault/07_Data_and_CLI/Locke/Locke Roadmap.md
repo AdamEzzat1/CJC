@@ -95,12 +95,51 @@ The meet-semilattice composition algebra documented in [[Locke Belief Reports]] 
 
 Net delta: cjc-locke 217 lib (was 197, +20) + tests/locke 103 (was 89, +14) + cjc-cli 154 (no regressions). Workspace builds clean.
 
-### v0.6 priorities still deferred
+### v0.6 batch 2 (shipped 2026-05-28, ADR-0034)
+
+- [x] **Category drift extensions** — E9018 cardinality explosion (train→test ratio ≥ `cardinality_explosion_ratio`), E9019 entropy shift (`-Σ p ln p` shift ≥ `entropy_shift_warn` nats). Complement to existing E9034 TVD on different axes.
+- [x] **Label-encoding risk** — E9023 (Notice) for `Column::Int` columns with small bounded distinct sets that look like nominal codes (e.g. `discharge_disposition_id` 1..29).
+- [x] **Unicode NFC/NFD variants** — E9086 (Warning). Strips combining marks AND maps Latin-1 / Latin-Extended-A precomposed letters to ASCII bases via a hand-rolled ~150-entry table. Catches `café` (NFC) coexisting with `café` (NFD). Zero-dep.
+- [x] **PII detection** — new `pii.rs` module with E9090 email / E9091 phone / E9092 SSN / E9093 API-key. Hand-rolled patterns (no `regex` dep). Configurable share threshold (`PiiConfig::min_match_share`, default 10%). Shannon-entropy gate for API-key heuristic.
+- [x] **Per-column confidence summary** — new `column_summary.rs` module. `ColumnConfidenceSummary` + `emit_per_column_confidence_summary` synthesise findings per column into a readable triage emit. Three confidence bands (High / Moderate / Low) from worst-severity heuristic.
+- [x] **Seasonality / periodicity** — E9055 in `temporal.rs`. Index of dispersion on hour-of-day and day-of-week buckets. Detects business-hours, weekday-only, etc. clustering. Caller invokes explicitly with a time column.
+
+### Belief-axis mapping for batch-2 codes
+
+| Code | Axis weakened |
+|---|---|
+| E9018, E9019 | (drift path — affects `drift_score` via `compare()`) |
+| E9023, E9086 | `schema_score` (declared vs effective type / alphabet mismatch) |
+| E9090–E9093 | `constraint_score` (PII = constraint violation per governance policy) |
+| E9055 | (temporal path — currently informational, not penalised) |
+
+### Test infrastructure (batch 2)
+
+- [x] **Unit tests** — 20 new across categorical/drift/validation/temporal/pii/column_summary modules.
+- [x] **Integration tests** — 38 new across 3 existing test files (validation_tests, drift_tests, categorical_tests) plus 3 new files (`pii_tests.rs`, `column_summary_tests.rs`, `seasonality_tests.rs`).
+- [x] **Property tests** — 4 new (PII determinism, label-encoding determinism, per-column-summary determinism, seasonality dispersion finiteness).
+- [x] **Bolero fuzz targets** — 3 new (PII never panics on arbitrary strings, label-encoding never panics on arbitrary i64 vectors, seasonality dispersion stays finite + non-negative on arbitrary timestamps).
+
+Net delta: cjc-locke --lib **237** (was 217, +20) + tests/locke **141** (was 103, +38) + cjc-cli **154** (no regressions). Workspace builds clean. Vault audit: 4 pre-existing broken links in ADR-0023 (references to a not-yet-created Showcase note); no new broken links introduced by batch 2.
+
+### Still deferred to v0.7+
+
+The five **heavy** items each requiring multiple batches:
+
+- [ ] **Text drift** — vocabulary KS, token-entropy drift, language-distribution shift. Needs a tokenizer.
+- [ ] **Ontology / taxonomy consistency** — hyphen/underscore variants, common-prefix taxonomy inference, hierarchy fragmentation.
+- [ ] **Per-value category lineage** — `raw → normalized → grouped → encoded → embedding` chain. Distinct from existing DataFrame-level `TracedDataFrame`.
+- [ ] **Governance workflows** — suppression files, owner annotations, required-finding policies.
+- [ ] **Per-axis BeliefScore composition rules** — formalise the v0.2 plan as code with property tests.
+
+Plus medium items not in batch 2 (could ship as v0.6.x):
 
 #### Data-skepticism upgrades (legacy entries kept for traceability)
 - [x] ~~**Sentinel-value detection**~~ — shipped v0.4 as E9007.
 - [x] ~~**Outlier heuristics**~~ — shipped v0.4 as E9040/E9041.
 - [ ] **Distribution-shape diagnostics** — skew, kurtosis, top-k modes.
+- [ ] **Multi-class target-leakage AUC** — v0.5 supports binary targets only.
+- [ ] **`CategoricalAdaptive` variant support** — every v0.6 categorical detector currently skips it.
 
 ### Drift upgrades
 

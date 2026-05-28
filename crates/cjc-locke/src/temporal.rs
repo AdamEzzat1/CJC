@@ -294,6 +294,167 @@ pub fn detect_train_test_temporal_overlap(
     out
 }
 
+// ─── E9055 — Seasonality / periodicity (v0.6 batch 2) ─────────────────────
+
+/// Configuration for the seasonality detector.
+#[derive(Clone, Debug)]
+pub struct SeasonalityConfig {
+    /// Treat the time column as epoch milliseconds (default) or seconds.
+    pub unit_is_millis: bool,
+    /// Skip detection on columns with fewer rows than this. Variance
+    /// estimates on tiny samples are unreliable.
+    pub min_rows: u64,
+    /// Bucket counts per hour-of-day. E9055 fires when
+    /// `var(counts) / mean(counts)` ≥ this index of dispersion
+    /// (a uniform distribution would be ~1 under Poisson). Default 3.0.
+    pub dispersion_threshold: f64,
+}
+
+impl Default for SeasonalityConfig {
+    fn default() -> Self {
+        Self {
+            unit_is_millis: true,
+            min_rows: 100,
+            dispersion_threshold: 3.0,
+        }
+    }
+}
+
+/// Compute hour-of-day (0..23) for an epoch timestamp.
+fn hour_of_day(ts: i64, unit_is_millis: bool) -> u8 {
+    let secs = if unit_is_millis { ts / 1000 } else { ts };
+    // Positive modulo so we don't get -1 hours.
+    let seconds_in_day = 86_400i64;
+    let day_secs = ((secs % seconds_in_day) + seconds_in_day) % seconds_in_day;
+    (day_secs / 3600) as u8
+}
+
+/// Compute day-of-week (0..6, Mon=0) for an epoch timestamp.
+fn day_of_week(ts: i64, unit_is_millis: bool) -> u8 {
+    let secs = if unit_is_millis { ts / 1000 } else { ts };
+    let days = secs.div_euclid(86_400);
+    // 1970-01-01 was a Thursday → DOW 3 with Mon=0.
+    let dow = ((days + 3).rem_euclid(7)) as u8;
+    dow
+}
+
+/// Index of dispersion (variance / mean) over a histogram of bucket
+/// counts. Returns 0 when total ≤ 1 (mean = 0 case).
+fn index_of_dispersion(counts: &[u64]) -> f64 {
+    let total: u64 = counts.iter().sum();
+    if total <= 1 {
+        return 0.0;
+    }
+    let n = counts.len() as f64;
+    let mean = total as f64 / n;
+    if mean <= 0.0 {
+        return 0.0;
+    }
+    let mut acc = cjc_repro::KahanAccumulatorF64::new();
+    for &c in counts {
+        let d = c as f64 - mean;
+        acc.add(d * d);
+    }
+    let var = acc.finalize() / n;
+    var / mean
+}
+
+/// Fire E9055 (Notice) when the time column exhibits strong periodic
+/// structure on either hour-of-day or day-of-week — i.e. timestamps
+/// cluster around specific hours or days rather than spreading
+/// uniformly. Useful for catching: support-ticket pipelines that miss
+/// graveyard-shift batches, financial feeds that only update on
+/// weekdays, etc.
+///
+/// The heuristic compares the per-bucket index of dispersion (variance
+/// / mean) against a threshold. A uniform Poisson process has ID ≈ 1;
+/// strong periodic patterns produce ID ≫ 1. Default threshold 3.0
+/// (i.e. observed variance ≥ 3× the Poisson-uniform variance).
+pub fn detect_seasonality(
+    df: &DataFrame,
+    time_col: &str,
+    cfg: &SeasonalityConfig,
+) -> Vec<ValidationFinding> {
+    let mut out = Vec::new();
+    let n_rows = df.nrows() as u64;
+    if n_rows < cfg.min_rows {
+        return out;
+    }
+    let Some(times) = extract_time_column(df, time_col) else {
+        return out;
+    };
+    if times.len() < cfg.min_rows as usize {
+        return out;
+    }
+    // Hour-of-day bucket counts (24 buckets).
+    let mut hod = vec![0u64; 24];
+    let mut dow = vec![0u64; 7];
+    for &ts in &times {
+        hod[hour_of_day(ts, cfg.unit_is_millis) as usize] += 1;
+        dow[day_of_week(ts, cfg.unit_is_millis) as usize] += 1;
+    }
+    let hod_disp = index_of_dispersion(&hod);
+    let dow_disp = index_of_dispersion(&dow);
+
+    let mut hits: Vec<(String, f64, Vec<u64>)> = Vec::new();
+    if hod_disp >= cfg.dispersion_threshold {
+        hits.push(("hour_of_day".into(), hod_disp, hod.clone()));
+    }
+    if dow_disp >= cfg.dispersion_threshold {
+        hits.push(("day_of_week".into(), dow_disp, dow.clone()));
+    }
+    if hits.is_empty() {
+        return out;
+    }
+    // Sort hits by axis name for determinism.
+    hits.sort_by(|a, b| a.0.cmp(&b.0));
+    for (axis, disp, buckets) in &hits {
+        let max_bucket = buckets.iter().enumerate().max_by_key(|(_, c)| **c);
+        let min_bucket = buckets.iter().enumerate().min_by_key(|(_, c)| **c);
+        let sample_str = format!(
+            "max bucket {} at {}, min bucket {} at {}",
+            max_bucket.map(|(_, c)| *c).unwrap_or(0),
+            max_bucket.map(|(i, _)| i).unwrap_or(0),
+            min_bucket.map(|(_, c)| *c).unwrap_or(0),
+            min_bucket.map(|(i, _)| i).unwrap_or(0),
+        );
+        out.push(ValidationFinding::new(
+            "E9055",
+            FindingSeverity::Notice,
+            format!(
+                "time column `{}` shows {} periodicity (index of dispersion = {:.2}, threshold {:.2})",
+                time_col, axis, disp, cfg.dispersion_threshold
+            ),
+            Some(time_col.into()),
+            None,
+            vec![
+                FindingEvidence::Sample {
+                    label: "axis".into(),
+                    value: axis.clone(),
+                },
+                FindingEvidence::Metric {
+                    label: "index_of_dispersion".into(),
+                    value: *disp,
+                },
+                FindingEvidence::Sample {
+                    label: "bucket_extremes".into(),
+                    value: sample_str,
+                },
+            ],
+            n_rows,
+            vec![
+                "index of dispersion compares observed bucket variance to a Poisson-uniform null".into(),
+                "high ID is informative (data is periodic); whether that's expected is the caller's call".into(),
+            ],
+            vec![
+                "if periodicity is expected (business-hours data), document it; consider time-aware splits".into(),
+                "if not, check upstream batch schedule for missing time windows".into(),
+            ],
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

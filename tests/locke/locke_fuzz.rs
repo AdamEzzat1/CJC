@@ -155,6 +155,58 @@ fn fuzz_wasserstein_arbitrary_floats_never_panics() {
 }
 
 #[test]
+fn fuzz_pii_detection_arbitrary_strings_never_panic() {
+    bolero::check!()
+        .with_type::<Vec<String>>()
+        .for_each(|v: &Vec<String>| {
+            if v.is_empty() {
+                return;
+            }
+            let df = DataFrame::from_columns(vec![("c".into(), Column::Str(v.clone()))]).unwrap();
+            let cfg = cjc_locke::PiiConfig::default();
+            // PII pattern detectors must never panic on arbitrary input.
+            let _ = cjc_locke::detect_all_pii(&df, &cfg);
+        });
+}
+
+#[test]
+fn fuzz_label_encoding_risk_arbitrary_ints_never_panics() {
+    bolero::check!()
+        .with_type::<Vec<i64>>()
+        .for_each(|v: &Vec<i64>| {
+            if v.is_empty() {
+                return;
+            }
+            let df = DataFrame::from_columns(vec![("v".into(), Column::Int(v.clone()))]).unwrap();
+            let cfg = cjc_locke::LabelEncodingRiskConfig::default();
+            let _ = cjc_locke::detect_label_encoding_risk(&df, &cfg);
+        });
+}
+
+#[test]
+fn fuzz_seasonality_arbitrary_timestamps_never_panics() {
+    bolero::check!()
+        .with_type::<Vec<i64>>()
+        .for_each(|v: &Vec<i64>| {
+            if v.is_empty() {
+                return;
+            }
+            let df = DataFrame::from_columns(vec![("ts".into(), Column::Int(v.clone()))]).unwrap();
+            let cfg = cjc_locke::SeasonalityConfig::default();
+            let findings = cjc_locke::detect_seasonality(&df, "ts", &cfg);
+            for f in &findings {
+                for ev in &f.evidence {
+                    if let cjc_locke::FindingEvidence::Metric { label, value } = ev {
+                        if label == "index_of_dispersion" {
+                            assert!(value.is_finite() && *value >= 0.0);
+                        }
+                    }
+                }
+            }
+        });
+}
+
+#[test]
 fn fuzz_mermaid_emit_arbitrary_label_never_panics() {
     bolero::check!()
         .with_type::<String>()

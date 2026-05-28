@@ -49,6 +49,18 @@ pub struct DriftConfig {
     pub missingness_shift_warn: f64,
     pub small_sample_threshold: u64,
     pub n_bins: usize,
+    /// v0.6 batch 2: fire E9018 (cardinality explosion) when
+    /// `test_cardinality >= train_cardinality * cardinality_explosion_ratio`.
+    /// Default 2.0 — test has at least twice as many distinct levels as train.
+    pub cardinality_explosion_ratio: f64,
+    /// v0.6 batch 2: fire E9019 (entropy shift) when the absolute Shannon
+    /// entropy of category frequencies shifts by at least this many nats
+    /// (natural log). Default 0.20 ≈ 0.29 bits of distributional
+    /// concentration change.
+    pub entropy_shift_warn: f64,
+    /// Entropy shift skipped on columns with fewer than this many distinct
+    /// categories in either side (too few levels to compute meaningful H).
+    pub entropy_min_distinct: u64,
 }
 
 impl Default for DriftConfig {
@@ -66,6 +78,9 @@ impl Default for DriftConfig {
             missingness_shift_warn: 0.05,
             small_sample_threshold: 30,
             n_bins: 10,
+            cardinality_explosion_ratio: 2.0,
+            entropy_shift_warn: 0.20,
+            entropy_min_distinct: 3,
         }
     }
 }
@@ -549,6 +564,162 @@ fn category_tvd_finding(
     ))
 }
 
+/// E9018 — cardinality jumped between train and test. Fires when the
+/// test side has at least `cfg.cardinality_explosion_ratio` × as many
+/// distinct levels as train. Important because category TVD can be
+/// arbitrarily low when each new category has tiny mass, so explosion
+/// is a *separate* signal: "many new things appeared, each rare."
+fn category_cardinality_explosion_finding(
+    column: &str,
+    train: &[String],
+    test: &[String],
+    cfg: &DriftConfig,
+) -> Option<ValidationFinding> {
+    let mut train_set: BTreeMap<&str, ()> = BTreeMap::new();
+    let mut test_set: BTreeMap<&str, ()> = BTreeMap::new();
+    for s in train {
+        train_set.insert(s.as_str(), ());
+    }
+    for s in test {
+        test_set.insert(s.as_str(), ());
+    }
+    let n_train = train_set.len() as u64;
+    let n_test = test_set.len() as u64;
+    if n_train == 0 || n_test == 0 {
+        return None;
+    }
+    let ratio = n_test as f64 / n_train as f64;
+    if ratio < cfg.cardinality_explosion_ratio {
+        return None;
+    }
+    // Count newly-appeared categories explicitly.
+    let new_in_test: u64 = test_set.keys().filter(|k| !train_set.contains_key(*k)).count() as u64;
+    let sev = if ratio >= cfg.cardinality_explosion_ratio * 2.0 {
+        FindingSeverity::Warning
+    } else {
+        FindingSeverity::Notice
+    };
+    Some(ValidationFinding::new(
+        "E9018",
+        sev,
+        format!(
+            "category cardinality of `{}` jumped: train={}, test={} (×{:.2}); {} new categories in test",
+            column, n_train, n_test, ratio, new_in_test
+        ),
+        Some(column.into()),
+        None,
+        vec![
+            FindingEvidence::Count {
+                label: "n_distinct_train".into(),
+                value: n_train,
+            },
+            FindingEvidence::Count {
+                label: "n_distinct_test".into(),
+                value: n_test,
+            },
+            FindingEvidence::Metric {
+                label: "cardinality_ratio".into(),
+                value: ratio,
+            },
+            FindingEvidence::Count {
+                label: "n_new_categories".into(),
+                value: new_in_test,
+            },
+        ],
+        (train.len() + test.len()) as u64,
+        vec![
+            "cardinality explosion can be a real signal (new product SKUs) or an ingestion bug".into(),
+            "complement to E9034 TVD — TVD can be near 0 if each new category has tiny mass".into(),
+        ],
+        vec![
+            "review the new categories; if they're unexpected, freeze your category mapping at train time".into(),
+            "consider mapping unknown categories to `__other__` instead of one-hot expansion".into(),
+        ],
+    ))
+}
+
+/// E9019 — Shannon entropy of category frequencies shifted between
+/// train and test. Captures *distributional concentration* changes that
+/// neither TVD nor cardinality alone reveals (e.g. one tier going from
+/// uniform-mass to dominating 90% of rows).
+///
+/// H computed in nats via `-Σ p ln p` with Kahan summation; convention
+/// `0 ln 0 = 0` enforced explicitly.
+fn category_entropy_shift_finding(
+    column: &str,
+    train: &[String],
+    test: &[String],
+    cfg: &DriftConfig,
+) -> Option<ValidationFinding> {
+    let mut train_freq: BTreeMap<&str, u64> = BTreeMap::new();
+    let mut test_freq: BTreeMap<&str, u64> = BTreeMap::new();
+    for s in train {
+        *train_freq.entry(s.as_str()).or_insert(0) += 1;
+    }
+    for s in test {
+        *test_freq.entry(s.as_str()).or_insert(0) += 1;
+    }
+    if (train_freq.len() as u64) < cfg.entropy_min_distinct
+        || (test_freq.len() as u64) < cfg.entropy_min_distinct
+    {
+        return None;
+    }
+    let entropy_nats = |freq: &BTreeMap<&str, u64>| -> f64 {
+        let total: f64 = freq.values().sum::<u64>() as f64;
+        if total == 0.0 {
+            return 0.0;
+        }
+        let mut acc = cjc_repro::KahanAccumulatorF64::new();
+        for &c in freq.values() {
+            if c == 0 {
+                continue;
+            }
+            let p = c as f64 / total;
+            acc.add(-p * p.ln());
+        }
+        acc.finalize()
+    };
+    let h_train = entropy_nats(&train_freq);
+    let h_test = entropy_nats(&test_freq);
+    let delta = (h_train - h_test).abs();
+    if delta < cfg.entropy_shift_warn {
+        return None;
+    }
+    Some(ValidationFinding::new(
+        "E9019",
+        FindingSeverity::Notice,
+        format!(
+            "category entropy of `{}` shifted by {:.3} nats: train_H={:.3}, test_H={:.3}",
+            column, delta, h_train, h_test
+        ),
+        Some(column.into()),
+        None,
+        vec![
+            FindingEvidence::Metric {
+                label: "train_entropy_nats".into(),
+                value: h_train,
+            },
+            FindingEvidence::Metric {
+                label: "test_entropy_nats".into(),
+                value: h_test,
+            },
+            FindingEvidence::Metric {
+                label: "entropy_delta_nats".into(),
+                value: delta,
+            },
+        ],
+        (train.len() + test.len()) as u64,
+        vec![
+            "Shannon entropy in nats; convert to bits by dividing by ln(2)".into(),
+            "captures concentration shifts (uniform → peaked) that TVD/cardinality miss".into(),
+        ],
+        vec![
+            "inspect the top-K modes of each side to localise the concentration change".into(),
+            "if the column drives a downstream feature, retrain or re-calibrate".into(),
+        ],
+    ))
+}
+
 fn missingness_shift_finding(
     column: &str,
     train: &NumericSummary,
@@ -731,6 +902,13 @@ pub fn compare(
             _ => continue,
         };
         if let Some(f) = category_tvd_finding(col, &train_levels, &test_levels, cfg) {
+            findings.push(f);
+        }
+        // v0.6 batch 2: cardinality explosion + entropy shift.
+        if let Some(f) = category_cardinality_explosion_finding(col, &train_levels, &test_levels, cfg) {
+            findings.push(f);
+        }
+        if let Some(f) = category_entropy_shift_finding(col, &train_levels, &test_levels, cfg) {
             findings.push(f);
         }
     }

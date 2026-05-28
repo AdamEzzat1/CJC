@@ -112,3 +112,65 @@ fn small_test_set_triggers_low_power_warning() {
     let r = compare(&train, &test, &DriftConfig::default());
     assert!(r.findings.iter().any(|f| f.code == "E9036"));
 }
+
+// ─── v0.6 batch 2: E9018 cardinality explosion ──────────────────────────
+
+fn mk_str(name: &str, vs: Vec<&str>) -> (String, Column) {
+    (name.into(), Column::Str(vs.iter().map(|s| (*s).into()).collect()))
+}
+
+#[test]
+fn cardinality_explosion_fires_e9018() {
+    let train_vals: Vec<&str> = ["a", "b", "c", "d", "e"].repeat(20);
+    let test_strs: Vec<String> = (0..50).map(|i| format!("v{}", i)).collect();
+    let test_refs: Vec<&str> = test_strs.iter().map(|s| s.as_str()).collect();
+
+    let train = DataFrame::from_columns(vec![mk_str("c", train_vals)]).unwrap();
+    let test = DataFrame::from_columns(vec![mk_str("c", test_refs)]).unwrap();
+    let r = compare(&train, &test, &DriftConfig::default());
+    let f = r
+        .findings
+        .iter()
+        .find(|f| f.code == "E9018")
+        .expect("E9018 cardinality explosion expected");
+    // ratio = 50 / 5 = 10 > 4 (2 × 2.0) → Warning.
+    assert_eq!(f.severity, cjc_locke::FindingSeverity::Warning);
+}
+
+#[test]
+fn no_cardinality_explosion_when_train_and_test_match() {
+    let vs: Vec<&str> = ["a", "b", "c", "d", "e"].repeat(20);
+    let train = DataFrame::from_columns(vec![mk_str("c", vs.clone())]).unwrap();
+    let test = DataFrame::from_columns(vec![mk_str("c", vs)]).unwrap();
+    let r = compare(&train, &test, &DriftConfig::default());
+    assert!(r.findings.iter().all(|f| f.code != "E9018"));
+}
+
+// ─── v0.6 batch 2: E9019 entropy shift ──────────────────────────────────
+
+#[test]
+fn entropy_shift_fires_e9019_on_concentration_change() {
+    // Train: uniform over 4 categories. Test: 90% "a", 10% spread.
+    let train_vs: Vec<&str> = ["a", "b", "c", "d"].repeat(50);
+    let mut test_vs: Vec<&str> = vec!["a"; 180];
+    test_vs.extend(vec!["b"; 7]);
+    test_vs.extend(vec!["c"; 7]);
+    test_vs.extend(vec!["d"; 6]);
+    let train = DataFrame::from_columns(vec![mk_str("c", train_vs)]).unwrap();
+    let test = DataFrame::from_columns(vec![mk_str("c", test_vs)]).unwrap();
+    let r = compare(&train, &test, &DriftConfig::default());
+    assert!(
+        r.findings.iter().any(|f| f.code == "E9019"),
+        "E9019 entropy shift expected, got {:?}",
+        r.findings.iter().map(|f| f.code).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn no_entropy_shift_when_distributions_match() {
+    let vs: Vec<&str> = ["a", "b", "c", "d"].repeat(50);
+    let train = DataFrame::from_columns(vec![mk_str("c", vs.clone())]).unwrap();
+    let test = DataFrame::from_columns(vec![mk_str("c", vs)]).unwrap();
+    let r = compare(&train, &test, &DriftConfig::default());
+    assert!(r.findings.iter().all(|f| f.code != "E9019"));
+}

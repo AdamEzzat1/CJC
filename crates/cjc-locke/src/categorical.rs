@@ -1050,9 +1050,216 @@ pub fn detect_transitive_clusters(
     out
 }
 
+// ─── E9086 — Unicode NFC/NFD normalization variants ───────────────────────
+
+/// Approximate normalisation for NFC/NFD collision detection: strip all
+/// Unicode combining marks (U+0300..U+036F + the more obscure ranges)
+/// AND map Latin-1 / Latin-Extended-A precomposed accented letters to
+/// their ASCII bases. This sidesteps a full `unicode-normalization`
+/// dependency while still catching the most common real-world case: a
+/// precomposed `é` (U+00E9, NFC) coexisting with `e + ́`
+/// (U+0065 U+0301, NFD).
+///
+/// Both forms map to the same ASCII string under this function, which
+/// is what `detect_unicode_normalization_variants` uses for grouping.
+fn strip_combining_marks(s: &str) -> String {
+    s.chars()
+        .filter(|c| {
+            let code = *c as u32;
+            !matches!(code,
+                0x0300..=0x036F
+                | 0x1AB0..=0x1AFF
+                | 0x1DC0..=0x1DFF
+                | 0x20D0..=0x20FF
+                | 0xFE20..=0xFE2F
+            )
+        })
+        .map(latin_to_base_ascii)
+        .collect()
+}
+
+/// Map a single Latin-1 / Latin-Extended-A precomposed letter to its
+/// ASCII base (case-preserving). Returns the input unchanged for any
+/// char outside these blocks. Hand-rolled small table — covers the
+/// ~150 most common Western European accented letters without pulling
+/// in a Unicode database.
+fn latin_to_base_ascii(c: char) -> char {
+    match c {
+        // Lowercase Latin-1 supplement accented letters
+        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => 'a',
+        'ç' | 'ć' | 'č' | 'ĉ' | 'ċ' => 'c',
+        'ď' | 'đ' => 'd',
+        'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => 'e',
+        'ĝ' | 'ğ' | 'ġ' | 'ģ' => 'g',
+        'ĥ' | 'ħ' => 'h',
+        'ì' | 'í' | 'î' | 'ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' | 'ı' => 'i',
+        'ĵ' => 'j',
+        'ķ' => 'k',
+        'ĺ' | 'ļ' | 'ľ' | 'ŀ' | 'ł' => 'l',
+        'ñ' | 'ń' | 'ņ' | 'ň' | 'ŉ' => 'n',
+        'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' | 'ŏ' | 'ő' => 'o',
+        'ŕ' | 'ŗ' | 'ř' => 'r',
+        'ś' | 'ŝ' | 'ş' | 'š' => 's',
+        'ţ' | 'ť' | 'ŧ' => 't',
+        'ù' | 'ú' | 'û' | 'ü' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => 'u',
+        'ŵ' => 'w',
+        'ý' | 'ÿ' | 'ŷ' => 'y',
+        'ź' | 'ż' | 'ž' => 'z',
+        'ß' => 's',
+        'æ' | 'œ' => 'a',
+        // Uppercase
+        'À' | 'Á' | 'Â' | 'Ã' | 'Ä' | 'Å' | 'Ā' | 'Ă' | 'Ą' => 'A',
+        'Ç' | 'Ć' | 'Č' | 'Ĉ' | 'Ċ' => 'C',
+        'Ď' | 'Đ' => 'D',
+        'È' | 'É' | 'Ê' | 'Ë' | 'Ē' | 'Ĕ' | 'Ė' | 'Ę' | 'Ě' => 'E',
+        'Ĝ' | 'Ğ' | 'Ġ' | 'Ģ' => 'G',
+        'Ĥ' | 'Ħ' => 'H',
+        'Ì' | 'Í' | 'Î' | 'Ï' | 'Ĩ' | 'Ī' | 'Ĭ' | 'Į' | 'İ' => 'I',
+        'Ĵ' => 'J',
+        'Ķ' => 'K',
+        'Ĺ' | 'Ļ' | 'Ľ' | 'Ŀ' | 'Ł' => 'L',
+        'Ñ' | 'Ń' | 'Ņ' | 'Ň' => 'N',
+        'Ò' | 'Ó' | 'Ô' | 'Õ' | 'Ö' | 'Ø' | 'Ō' | 'Ŏ' | 'Ő' => 'O',
+        'Ŕ' | 'Ŗ' | 'Ř' => 'R',
+        'Ś' | 'Ŝ' | 'Ş' | 'Š' => 'S',
+        'Ţ' | 'Ť' | 'Ŧ' => 'T',
+        'Ù' | 'Ú' | 'Û' | 'Ü' | 'Ũ' | 'Ū' | 'Ŭ' | 'Ů' | 'Ű' | 'Ų' => 'U',
+        'Ŵ' => 'W',
+        'Ý' | 'Ÿ' | 'Ŷ' => 'Y',
+        'Ź' | 'Ż' | 'Ž' => 'Z',
+        other => other,
+    }
+}
+
+/// True iff the string contains at least one combining mark — i.e. it is
+/// (probably) in NFD form for one of the affected ranges. Used to gate
+/// E9086 below: we only fire when one of the colliding spellings is
+/// actually decomposed.
+fn has_combining_mark(s: &str) -> bool {
+    s.chars().any(|c| {
+        let code = c as u32;
+        matches!(code,
+            0x0300..=0x036F
+            | 0x1AB0..=0x1AFF
+            | 0x1DC0..=0x1DFF
+            | 0x20D0..=0x20FF
+            | 0xFE20..=0xFE2F
+        )
+    })
+}
+
+/// Fire E9086 (Warning) on columns where at least one pair of categories
+/// becomes equal after stripping all combining marks, AND at least one
+/// of them carries a combining mark in its stored form. This identifies
+/// NFC vs NFD mixing — the most common cause of "the same word appearing
+/// twice but compare-unequal" in datasets ingested from heterogeneous
+/// sources (macOS HFS+ filenames in NFD, Linux files in NFC, copy-paste
+/// from web in either form).
+pub fn detect_unicode_normalization_variants(
+    df: &DataFrame,
+    cfg: &CategoricalQualityConfig,
+) -> Vec<ValidationFinding> {
+    let mut out = Vec::new();
+    let n_rows = df.nrows() as u64;
+    if n_rows < cfg.min_rows_for_detection {
+        return out;
+    }
+    for (name, col) in &df.columns {
+        let Some(counts) = category_counts(col) else {
+            continue;
+        };
+        if counts.len() < 2 {
+            continue;
+        }
+        // Group by combining-mark-stripped form.
+        let mut groups: BTreeMap<String, Vec<(String, u64)>> = BTreeMap::new();
+        for (orig, count) in &counts {
+            let key = strip_combining_marks(orig);
+            // Skip if the orig and stripped form are equal AND no other
+            // category has a combining mark — that's a fully NFC-only
+            // column where stripping is a no-op.
+            groups.entry(key).or_default().push((orig.clone(), *count));
+        }
+        // Keep only groups with multiple originals AND at least one of
+        // them carries a combining mark.
+        let collision_groups: Vec<(&String, &Vec<(String, u64)>)> = groups
+            .iter()
+            .filter(|(_, members)| {
+                members.len() > 1
+                    && members.iter().any(|(s, _)| has_combining_mark(s))
+            })
+            .collect();
+        if collision_groups.is_empty() {
+            continue;
+        }
+        let total_collision_rows: u64 = collision_groups
+            .iter()
+            .flat_map(|(_, m)| m.iter().map(|(_, c)| *c))
+            .sum();
+        let sample_str = collision_groups
+            .iter()
+            .take(3)
+            .map(|(stripped, members)| {
+                let inner = members
+                    .iter()
+                    .map(|(s, c)| {
+                        let tag = if has_combining_mark(s) { "NFD" } else { "NFC" };
+                        format!("{:?}({}):{}", s, tag, c)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("|");
+                format!("{:?}=>{}", stripped, inner)
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+
+        out.push(ValidationFinding::new(
+            "E9086",
+            FindingSeverity::Warning,
+            format!(
+                "column `{}` has {} NFC/NFD collision group(s) covering {} rows; the same word is stored in multiple Unicode normalisation forms",
+                name,
+                collision_groups.len(),
+                total_collision_rows
+            ),
+            Some(name.clone()),
+            None,
+            vec![
+                FindingEvidence::Count {
+                    label: "n_normalization_groups".into(),
+                    value: collision_groups.len() as u64,
+                },
+                FindingEvidence::Count {
+                    label: "rows_in_normalization".into(),
+                    value: total_collision_rows,
+                },
+                FindingEvidence::Ratio {
+                    label: "normalization_row_share".into(),
+                    value: (total_collision_rows as f64 / n_rows as f64).clamp(0.0, 1.0),
+                },
+                FindingEvidence::Sample {
+                    label: "sample".into(),
+                    value: sample_str,
+                },
+            ],
+            n_rows,
+            vec![
+                "fold strips Unicode combining marks (U+0300-U+036F and related blocks)".into(),
+                "this is a crude approximation of NFD-then-discard, not a full Unicode normalisation".into(),
+                "false-positive rate is low because we require at least one member to carry a combining mark".into(),
+            ],
+            vec![
+                "normalise to NFC at ingest (consider adding `unicode-normalization` dep at the source layer)".into(),
+                "or store the column as its `.chars().nfc()` form before downstream use".into(),
+            ],
+        ));
+    }
+    out
+}
+
 // ─── Aggregate ─────────────────────────────────────────────────────────────
 
-/// Run all eight categorical-quality detectors and concatenate results.
+/// Run all nine categorical-quality detectors and concatenate results.
 ///
 /// Order matters slightly: E9085 (transitive cluster) consumes the
 /// findings of E9080/E9081/E9082, so we run those first.
@@ -1068,6 +1275,7 @@ pub fn detect_all_categorical_quality(
     out.extend(detect_near_duplicate_categories(df, cfg));
     out.extend(detect_confusable_scripts(df, cfg));
     out.extend(detect_mojibake(df, cfg));
+    out.extend(detect_unicode_normalization_variants(df, cfg));
     // Transitive-cluster summary must see the prior findings.
     let cluster_summaries = detect_transitive_clusters(df, cfg, &out);
     out.extend(cluster_summaries);

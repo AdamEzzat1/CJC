@@ -1705,8 +1705,119 @@ pub fn validate_dataframe(
         df,
         &crate::categorical::CategoricalQualityConfig::default(),
     ));
+    // v0.6 batch 2: Int columns that look nominal-not-ordinal.
+    out.extend(detect_label_encoding_risk(df, &LabelEncodingRiskConfig::default()));
+    // v0.6 batch 2: PII pattern scan (E9090-E9093).
+    out.extend(crate::pii::detect_all_pii(df, &crate::pii::PiiConfig::default()));
     if let Some(sch) = expected_schema {
         out.extend(detect_schema_mismatch(df, sch));
+    }
+    out
+}
+
+// ─── Label-encoding risk (v0.6 batch 2) ─────────────────────────────────────
+
+/// Config for `detect_label_encoding_risk`.
+#[derive(Clone, Debug)]
+pub struct LabelEncodingRiskConfig {
+    /// Fire E9023 only when the Int column has <= this many distinct
+    /// values. Default 30 — above this it's probably a real count, not
+    /// an encoded category.
+    pub max_distinct_for_risk: u64,
+    /// And requires at least this many rows to avoid noise on tiny data.
+    pub min_rows: u64,
+    /// Suppress E9023 when the distinct values span a "wide enough"
+    /// range relative to their count, suggesting a true ordinal /
+    /// numeric quantity (e.g. ages 0..120). Specifically: fire only when
+    /// `(max - min + 1) <= distinct * span_tightness` — i.e. the values
+    /// densely pack into a small contiguous range.
+    pub span_tightness: f64,
+}
+
+impl Default for LabelEncodingRiskConfig {
+    fn default() -> Self {
+        Self {
+            max_distinct_for_risk: 30,
+            min_rows: 30,
+            span_tightness: 1.5,
+        }
+    }
+}
+
+/// Fire E9023 (Notice) when an `Int` column has a small bounded set of
+/// distinct values arranged like a label-encoding (e.g. `0..N-1` or
+/// `1..N`). Treating such a column as ordinal-numeric (e.g. in a linear
+/// model) introduces a spurious ordering that wasn't in the source data.
+pub fn detect_label_encoding_risk(
+    df: &DataFrame,
+    cfg: &LabelEncodingRiskConfig,
+) -> Vec<ValidationFinding> {
+    let mut out = Vec::new();
+    let n_rows = df.nrows() as u64;
+    if n_rows < cfg.min_rows {
+        return out;
+    }
+    for (name, col) in &df.columns {
+        let Column::Int(values) = col else { continue };
+        if values.is_empty() {
+            continue;
+        }
+        let mut distinct: BTreeSet<i64> = BTreeSet::new();
+        for &v in values {
+            distinct.insert(v);
+        }
+        let n_distinct = distinct.len() as u64;
+        if n_distinct < 2 || n_distinct > cfg.max_distinct_for_risk {
+            continue;
+        }
+        // Range packing: how tight is the value spread?
+        let (lo, hi) = (*distinct.iter().next().unwrap(), *distinct.iter().next_back().unwrap());
+        let span = (hi - lo + 1) as f64;
+        let density = span / n_distinct as f64;
+        if density > cfg.span_tightness {
+            // Sparse spread — probably a real numeric quantity (e.g. ages
+            // 1, 18, 67, 99). Don't fire.
+            continue;
+        }
+        let sample_vals: Vec<String> = distinct.iter().take(8).map(|v| v.to_string()).collect();
+        out.push(ValidationFinding::new(
+            "E9023",
+            FindingSeverity::Notice,
+            format!(
+                "column `{}` has {} distinct Int values densely packed in [{}, {}] — looks like a label-encoded nominal, not an ordinal numeric",
+                name, n_distinct, lo, hi
+            ),
+            Some(name.clone()),
+            None,
+            vec![
+                FindingEvidence::Count {
+                    label: "n_distinct".into(),
+                    value: n_distinct,
+                },
+                FindingEvidence::Range {
+                    label: "value_range".into(),
+                    min: lo as f64,
+                    max: hi as f64,
+                },
+                FindingEvidence::Metric {
+                    label: "range_density".into(),
+                    value: density,
+                },
+                FindingEvidence::Sample {
+                    label: "distinct_values".into(),
+                    value: sample_vals.join(","),
+                },
+            ],
+            n_rows,
+            vec![
+                "label-encoding risk is heuristic; the column may be a true ordinal (age, rating) — Locke surfaces a hint, not a verdict".into(),
+                "tunable via LabelEncodingRiskConfig::max_distinct_for_risk and span_tightness".into(),
+            ],
+            vec![
+                "if the values are categorical (e.g. discharge_disposition_id codes), one-hot encode or use embeddings".into(),
+                "if the values are ordinal, document the ordering and keep the Int representation".into(),
+            ],
+        ));
     }
     out
 }

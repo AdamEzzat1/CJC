@@ -186,3 +186,60 @@ fn missingness_severity_scales_with_rate() {
     let miss = findings.iter().find(|f| f.code == "E9001").unwrap();
     assert_eq!(miss.severity, FindingSeverity::Error);
 }
+
+// ─── v0.6 batch 2: E9023 label-encoding risk ────────────────────────────
+
+#[test]
+fn label_encoding_risk_fires_on_small_dense_int_range() {
+    // 5 distinct values densely packed in [0, 4] across 50 rows.
+    let values: Vec<i64> = (0..50).map(|i| (i % 5) as i64).collect();
+    let df = DataFrame::from_columns(vec![("plan_tier_id".into(), Column::Int(values))]).unwrap();
+    let report = validate(
+        &df,
+        &ValidateOptions {
+            dataset_label: "label-enc".into(),
+            config: ValidationConfig::default(),
+            ..Default::default()
+        },
+    );
+    let f = report
+        .findings
+        .iter()
+        .find(|f| f.code == "E9023")
+        .expect("E9023 expected on dense small Int range");
+    assert_eq!(f.severity, FindingSeverity::Notice);
+    assert_eq!(f.column.as_deref(), Some("plan_tier_id"));
+}
+
+#[test]
+fn label_encoding_risk_quiet_on_sparse_numeric() {
+    // Ages: distinct values 1, 18, 35, 67, 99 — sparse, real numeric.
+    let raw = vec![1i64, 18, 35, 67, 99];
+    let values: Vec<i64> = (0..50).map(|i| raw[i % raw.len()]).collect();
+    let df = DataFrame::from_columns(vec![("age".into(), Column::Int(values))]).unwrap();
+    let report = validate(
+        &df,
+        &ValidateOptions {
+            dataset_label: "sparse".into(),
+            config: ValidationConfig::default(),
+            ..Default::default()
+        },
+    );
+    assert!(report.findings.iter().all(|f| f.code != "E9023"));
+}
+
+#[test]
+fn label_encoding_risk_quiet_on_high_cardinality() {
+    // 100 distinct values [0, 99] — above default threshold.
+    let values: Vec<i64> = (0..100).collect();
+    let df = DataFrame::from_columns(vec![("big".into(), Column::Int(values))]).unwrap();
+    let report = validate(
+        &df,
+        &ValidateOptions {
+            dataset_label: "big".into(),
+            config: ValidationConfig::default(),
+            ..Default::default()
+        },
+    );
+    assert!(report.findings.iter().all(|f| f.code != "E9023"));
+}

@@ -43,6 +43,7 @@ pub mod api;
 pub mod belief;
 pub mod categorical;
 pub mod causal;
+pub mod column_summary;
 pub mod dispatch;
 pub mod drift;
 pub mod gate;
@@ -52,6 +53,7 @@ pub mod json_emit;
 pub mod leakage;
 pub mod parquet_reader;
 pub mod lineage;
+pub mod pii;
 pub mod report;
 pub mod stats;
 pub mod streaming;
@@ -88,16 +90,26 @@ pub use validation::{
     detect_conditional_missingness, detect_constant_and_near_constant,
     detect_duplicate_key_conditioning, detect_duplicate_keys, detect_duplicates_full_row,
     detect_high_cardinality_categorical, detect_imbalanced_target, detect_impossible_values,
-    detect_missingness, detect_outliers, detect_schema_mismatch, detect_sentinel_values,
-    validate_dataframe, ConditionalMissingnessConfig, ExpectedSchema, ImpossibleValueRule,
-    NullMask, NullMaskMap, OutlierConfig, SentinelConfig, ValidationConfig,
+    detect_label_encoding_risk, detect_missingness, detect_outliers, detect_schema_mismatch,
+    detect_sentinel_values, validate_dataframe, ConditionalMissingnessConfig, ExpectedSchema,
+    ImpossibleValueRule, LabelEncodingRiskConfig, NullMask, NullMaskMap, OutlierConfig,
+    SentinelConfig, ValidationConfig,
 };
 pub use categorical::{
     detect_all_categorical_quality, detect_case_fold_collisions, detect_confusable_scripts,
     detect_encoding_risk, detect_mojibake, detect_near_duplicate_categories,
-    detect_rare_categories, detect_transitive_clusters,
+    detect_rare_categories, detect_transitive_clusters, detect_unicode_normalization_variants,
     detect_whitespace_punctuation_variants, CategoricalQualityConfig,
 };
+pub use column_summary::{
+    build_per_column_summaries, emit_per_column_confidence_summary, ColumnConfidenceSummary,
+    ConfidenceBand,
+};
+pub use pii::{
+    detect_all_pii, looks_like_api_key, looks_like_email, looks_like_phone, looks_like_ssn,
+    PiiConfig,
+};
+pub use temporal::{detect_seasonality, SeasonalityConfig};
 pub use api::{
     belief_report_from_locke, belief_report_from_locke_with_model, causal_guardrail,
     lineage_for_dataset, validate, validate_and_compare, worst_severity, ValidateOptions,
