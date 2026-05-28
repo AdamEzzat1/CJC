@@ -73,11 +73,11 @@ pub use causal::{
     CausalClaim, CausalConfig, CausalDag, CausalDagError, CausalDirection,
     CausalGuardrailReport, CausalMode, CausalWarning, ConfounderHint, CorrelationFinding,
 };
-pub use drift::{compare, DriftConfig, InductionRiskReport};
+pub use drift::{compare, wasserstein_1, DriftConfig, InductionRiskReport};
 pub use id::{FingerprintId, IdDomain};
 pub use lineage::{
-    AuditEvent, ImpressionKind, LineageBuilder, LineageEdge, LineageGraph, LineageNode,
-    LockeIdea, LockeImpression, TransformationRecord,
+    emit_lineage_mermaid, emit_lineage_text, AuditEvent, ImpressionKind, LineageBuilder,
+    LineageEdge, LineageGraph, LineageNode, LockeIdea, LockeImpression, TransformationRecord,
 };
 pub use traced::TracedDataFrame;
 pub use report::{
@@ -93,8 +93,9 @@ pub use validation::{
     NullMask, NullMaskMap, OutlierConfig, SentinelConfig, ValidationConfig,
 };
 pub use categorical::{
-    detect_all_categorical_quality, detect_case_fold_collisions, detect_encoding_risk,
-    detect_near_duplicate_categories, detect_rare_categories,
+    detect_all_categorical_quality, detect_case_fold_collisions, detect_confusable_scripts,
+    detect_encoding_risk, detect_mojibake, detect_near_duplicate_categories,
+    detect_rare_categories, detect_transitive_clusters,
     detect_whitespace_punctuation_variants, CategoricalQualityConfig,
 };
 pub use api::{

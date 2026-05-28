@@ -2,15 +2,18 @@
 //!
 //! These checks run on `Column::Str` and `Column::Categorical` columns and
 //! surface semantic / encoding problems that the numeric-first validators
-//! miss. Five codes:
+//! miss. Eight codes:
 //!
 //! | Code  | Severity | What it flags |
 //! |-------|----------|---------------|
-//! | E9010 | Notice   | Rare categories below `rare_category_min_count` (long-tail / overfit risk) |
-//! | E9011 | Notice   | High cardinality above `one_hot_explosion_threshold` (encoding choice risk) |
+//! | E9016 | Notice   | Rare categories below `rare_category_min_count` (long-tail / overfit risk) |
+//! | E9017 | Notice   | High cardinality above `one_hot_explosion_threshold` (encoding choice risk) |
 //! | E9080 | Warning  | Categories that collide under simple lowercase fold (e.g. "Premium" / "premium") |
 //! | E9081 | Notice   | Categories that collide after trim + strip-terminal-punctuation (e.g. "USA" / "USA.") |
 //! | E9082 | Warning  | Categories within Levenshtein distance ≤ `edit_distance_threshold` of each other |
+//! | E9083 | Warning  | Mixed-script strings (e.g. Latin + Cyrillic in one label) — confusable-character risk |
+//! | E9084 | Notice   | Mojibake — UTF-8 decoded as Latin-1 patterns (e.g. "Ã©" for "é", "â€™" for "'") |
+//! | E9085 | Notice   | Transitive cluster summary — when ≥ 2 of E9080/E9081/E9082 fire on a column, also emit a unified cluster view |
 //!
 //! ## Determinism
 //!
@@ -59,6 +62,21 @@ pub struct CategoricalQualityConfig {
     pub max_categories_for_edit_distance: usize,
     /// E9081 strips these trailing characters before comparing.
     pub trim_terminal_chars: &'static str,
+    /// E9083 fires when more than this many *distinct* Unicode scripts
+    /// appear inside a single category string (default 1 → fire on any
+    /// mixed-script category). Latin + ASCII-digits + ASCII-punct count
+    /// as a single script bucket.
+    pub mixed_script_max_distinct: usize,
+    /// E9083 ignores strings shorter than this (single-char strings can't
+    /// meaningfully mix scripts).
+    pub mixed_script_min_len: usize,
+    /// E9084 (mojibake) fires when a single category string contains at
+    /// least this many mojibake-signature characters.
+    pub mojibake_min_signature_count: usize,
+    /// E9085 (transitive cluster) fires when at least this many of
+    /// {E9080, E9081, E9082} fired on the same column. Default 2: at least
+    /// two distinct normalization channels agree something is off.
+    pub transitive_cluster_min_signals: usize,
 }
 
 impl Default for CategoricalQualityConfig {
@@ -72,6 +90,10 @@ impl Default for CategoricalQualityConfig {
             edit_distance_threshold: 2,
             max_categories_for_edit_distance: 200,
             trim_terminal_chars: ".,!?;:",
+            mixed_script_max_distinct: 1,
+            mixed_script_min_len: 3,
+            mojibake_min_signature_count: 1,
+            transitive_cluster_min_signals: 2,
         }
     }
 }
@@ -110,9 +132,9 @@ fn category_counts(col: &Column) -> Option<CategoryCounts> {
     }
 }
 
-// ─── E9010 — Rare categories ──────────────────────────────────────────────
+// ─── E9016 — Rare categories ──────────────────────────────────────────────
 
-/// Fire E9010 (Notice) when a categorical column has multiple categories
+/// Fire E9016 (Notice) when a categorical column has multiple categories
 /// appearing fewer than `cfg.rare_category_min_count` times. Long-tail
 /// categories are an overfit / instability signal for downstream encoders.
 pub fn detect_rare_categories(
@@ -154,7 +176,7 @@ pub fn detect_rare_categories(
             .join(", ");
 
         out.push(ValidationFinding::new(
-            "E9010",
+            "E9016",
             FindingSeverity::Notice,
             format!(
                 "column `{}` has {} rare categories (count < {}) covering {} rows ({:.1}%)",
@@ -202,9 +224,9 @@ pub fn detect_rare_categories(
     out
 }
 
-// ─── E9011 — Encoding-risk (one-hot explosion) ────────────────────────────
+// ─── E9017 — Encoding-risk (one-hot explosion) ────────────────────────────
 
-/// Fire E9011 (Notice) when a string/categorical column has cardinality
+/// Fire E9017 (Notice) when a string/categorical column has cardinality
 /// above `cfg.one_hot_explosion_threshold`. This isn't a leakage claim
 /// (E9072 covers ID-like cardinality near 1.0) — it's a downstream-encoding
 /// hint: 312 distinct countries probably wants an embedding, not one-hot.
@@ -231,7 +253,7 @@ pub fn detect_encoding_risk(
             continue;
         }
         out.push(ValidationFinding::new(
-            "E9011",
+            "E9017",
             FindingSeverity::Notice,
             format!(
                 "column `{}` has {} distinct values (> {} threshold); one-hot encoding may produce sparse unstable features",
@@ -699,9 +721,341 @@ pub fn detect_near_duplicate_categories(
     out
 }
 
+// ─── E9083 — Confusable / mixed-script characters ─────────────────────────
+
+/// Classify a `char` into a coarse script bucket. Latin + ASCII digits +
+/// common ASCII punctuation are folded into a single bucket because mixing
+/// them inside one label is normal (e.g. "USA-1"). Everything else groups
+/// by `char::is_ascii` falsehood + the leading Unicode block boundaries
+/// most likely to host confusables.
+fn script_bucket(c: char) -> &'static str {
+    if c.is_ascii() {
+        // Latin block (uppercase/lowercase) + digits + punctuation + space.
+        return "latin";
+    }
+    // Common confusable origins. We don't try to enumerate every script —
+    // the goal is to detect "this label has chars from more than one
+    // visually-confusable bucket".
+    let code = c as u32;
+    match code {
+        0x0080..=0x024F => "latin_extended",
+        0x0370..=0x03FF => "greek",
+        0x0400..=0x04FF => "cyrillic",
+        0x0500..=0x052F => "cyrillic_supp",
+        0x0530..=0x058F => "armenian",
+        0x0590..=0x05FF => "hebrew",
+        0x0600..=0x06FF => "arabic",
+        0x0900..=0x097F => "devanagari",
+        0x4E00..=0x9FFF => "cjk",
+        0x3040..=0x309F => "hiragana",
+        0x30A0..=0x30FF => "katakana",
+        0xAC00..=0xD7AF => "hangul",
+        _ => "other",
+    }
+}
+
+/// Fire E9083 (Warning) on category strings whose characters span more
+/// than `cfg.mixed_script_max_distinct` script buckets. This is the
+/// classic Unicode confusable attack vector ("раypal" with Cyrillic 'а' /
+/// 'р' looks identical to "paypal" but compares unequal).
+pub fn detect_confusable_scripts(
+    df: &DataFrame,
+    cfg: &CategoricalQualityConfig,
+) -> Vec<ValidationFinding> {
+    let mut out = Vec::new();
+    let n_rows = df.nrows() as u64;
+    if n_rows < cfg.min_rows_for_detection {
+        return out;
+    }
+    for (name, col) in &df.columns {
+        let Some(counts) = category_counts(col) else {
+            continue;
+        };
+        // BTreeMap from offending label -> (n_buckets, row_count, script set).
+        let mut hits: BTreeMap<String, (usize, u64, Vec<&'static str>)> = BTreeMap::new();
+        for (orig, count) in &counts {
+            let nchars = orig.chars().count();
+            if nchars < cfg.mixed_script_min_len {
+                continue;
+            }
+            let mut buckets: Vec<&'static str> =
+                orig.chars().map(script_bucket).collect();
+            buckets.sort_unstable();
+            buckets.dedup();
+            if buckets.len() > cfg.mixed_script_max_distinct {
+                hits.insert(orig.clone(), (buckets.len(), *count, buckets));
+            }
+        }
+        if hits.is_empty() {
+            continue;
+        }
+        let total_hit_rows: u64 = hits.values().map(|(_, c, _)| *c).sum();
+        let sample_str = hits
+            .iter()
+            .take(3)
+            .map(|(s, (nb, c, buckets))| {
+                format!("{:?}({}sc:[{}]):{}", s, nb, buckets.join(","), c)
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+
+        out.push(ValidationFinding::new(
+            "E9083",
+            FindingSeverity::Warning,
+            format!(
+                "column `{}` has {} category string(s) mixing > {} Unicode script(s); confusable-character risk",
+                name,
+                hits.len(),
+                cfg.mixed_script_max_distinct
+            ),
+            Some(name.clone()),
+            None,
+            vec![
+                FindingEvidence::Count {
+                    label: "n_mixed_strings".into(),
+                    value: hits.len() as u64,
+                },
+                FindingEvidence::Count {
+                    label: "rows_in_mixed".into(),
+                    value: total_hit_rows,
+                },
+                FindingEvidence::Ratio {
+                    label: "mixed_row_share".into(),
+                    value: (total_hit_rows as f64 / n_rows as f64).clamp(0.0, 1.0),
+                },
+                FindingEvidence::Sample {
+                    label: "sample".into(),
+                    value: sample_str,
+                },
+            ],
+            n_rows,
+            vec![
+                "script buckets group ASCII as `latin`; Latin Extended / Greek / Cyrillic / CJK / etc. are separate buckets".into(),
+                "mixed script can be legitimate (multilingual data) or an attack vector (homoglyph spoofing)".into(),
+            ],
+            vec![
+                "if multilingual is expected, raise mixed_script_max_distinct".into(),
+                "otherwise normalize to a canonical script at ingest".into(),
+            ],
+        ));
+    }
+    out
+}
+
+// ─── E9084 — Mojibake (UTF-8 decoded as Latin-1) ──────────────────────────
+
+/// Count the mojibake-signature characters in a single string. The
+/// signatures here are the canonical residue of "I decoded UTF-8 bytes as
+/// Latin-1 / Windows-1252":
+///
+/// * UTF-8 2-byte sequences starting with `0xC3` (covers é/è/à/ç/ñ...)
+///   become "Ã" + Latin-1-supplement char (U+0080..U+00FF).
+/// * UTF-8 2-byte sequences starting with `0xC2` (covers ©/®/°/non-breaking
+///   space...) become "Â" + Latin-1-supplement char.
+/// * UTF-8 3-byte sequences for smart quotes / em-dash (U+2018..U+201F /
+///   U+2013..U+2014) become "â" + Windows-1252 special (€/‚/„/™/etc.).
+fn count_mojibake_signatures(s: &str) -> usize {
+    let chars: Vec<char> = s.chars().collect();
+    let mut n = 0;
+    let mut i = 0;
+    fn in_latin1_supp(c: char) -> bool {
+        let code = c as u32;
+        (0x0080..=0x00FF).contains(&code)
+    }
+    fn is_win1252_special(c: char) -> bool {
+        // The classic Windows-1252 extras that show up in mojibake'd
+        // smart quotes / em-dashes / etc.
+        matches!(
+            c,
+            '\u{20AC}' // €
+            | '\u{201A}' | '\u{201E}' | '\u{2026}' // ‚ „ …
+            | '\u{2020}' | '\u{2021}' // † ‡
+            | '\u{02C6}' | '\u{02DC}' // ˆ ˜
+            | '\u{2030}'              // ‰
+            | '\u{0160}' | '\u{0152}' // Š Œ
+            | '\u{2018}' | '\u{2019}' // ‘ ’
+            | '\u{201C}' | '\u{201D}' // “ ”
+            | '\u{2022}'              // •
+            | '\u{2013}' | '\u{2014}' // – —
+            | '\u{2122}'              // ™
+            | '\u{0161}' | '\u{0153}' // š œ
+        )
+    }
+    while i + 1 < chars.len() {
+        let (a, b) = (chars[i], chars[i + 1]);
+        // Latin-1 high-byte residue from UTF-8 2-byte:
+        //   Ã + Latin-1-supp char → was original é/è/à/ñ/...
+        //   Â + Latin-1-supp char → was original ©/®/°/non-breaking-space/...
+        if (a == 'Ã' || a == 'Â')
+            && (in_latin1_supp(b) || b.is_ascii_alphabetic())
+        {
+            n += 1;
+            i += 2;
+            continue;
+        }
+        // 3-byte residue: â + Windows-1252 special → was smart-quote /
+        // dash / bullet / etc.
+        if a == 'â' && is_win1252_special(b) {
+            n += 1;
+            // Advance by 2 (the third char of the original triple may or
+            // may not be present after Latin-1 → Win-1252 substitution).
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    n
+}
+
+/// Fire E9084 (Notice) on columns where at least one category string
+/// shows mojibake signatures above `cfg.mojibake_min_signature_count`.
+pub fn detect_mojibake(
+    df: &DataFrame,
+    cfg: &CategoricalQualityConfig,
+) -> Vec<ValidationFinding> {
+    let mut out = Vec::new();
+    let n_rows = df.nrows() as u64;
+    if n_rows < cfg.min_rows_for_detection {
+        return out;
+    }
+    for (name, col) in &df.columns {
+        let Some(counts) = category_counts(col) else {
+            continue;
+        };
+        let mut hits: BTreeMap<String, (usize, u64)> = BTreeMap::new();
+        for (orig, count) in &counts {
+            let n = count_mojibake_signatures(orig);
+            if n >= cfg.mojibake_min_signature_count {
+                hits.insert(orig.clone(), (n, *count));
+            }
+        }
+        if hits.is_empty() {
+            continue;
+        }
+        let total_hit_rows: u64 = hits.values().map(|(_, c)| *c).sum();
+        let sample_str = hits
+            .iter()
+            .take(3)
+            .map(|(s, (n, c))| format!("{:?}(sig={}):{}", s, n, c))
+            .collect::<Vec<_>>()
+            .join("; ");
+        out.push(ValidationFinding::new(
+            "E9084",
+            FindingSeverity::Notice,
+            format!(
+                "column `{}` has {} category string(s) showing mojibake signatures (UTF-8 decoded as Latin-1)",
+                name,
+                hits.len()
+            ),
+            Some(name.clone()),
+            None,
+            vec![
+                FindingEvidence::Count {
+                    label: "n_mojibake_strings".into(),
+                    value: hits.len() as u64,
+                },
+                FindingEvidence::Count {
+                    label: "rows_in_mojibake".into(),
+                    value: total_hit_rows,
+                },
+                FindingEvidence::Ratio {
+                    label: "mojibake_row_share".into(),
+                    value: (total_hit_rows as f64 / n_rows as f64).clamp(0.0, 1.0),
+                },
+                FindingEvidence::Sample {
+                    label: "sample".into(),
+                    value: sample_str,
+                },
+            ],
+            n_rows,
+            vec![
+                "signatures: \"Ã\"/\"Â\"+ASCII (Latin-1 residue of UTF-8) and \"â€\"+ASCII (UTF-8 smart-quote residue)".into(),
+                "false-positives are possible on legitimate multilingual text containing these characters in context".into(),
+            ],
+            vec![
+                "re-ingest from source with correct encoding (UTF-8 in, UTF-8 out)".into(),
+                "or run a one-pass decode-twice fix (`text.encode('latin-1').decode('utf-8')`)".into(),
+            ],
+        ));
+    }
+    out
+}
+
+// ─── E9085 — Transitive cluster summary ───────────────────────────────────
+
+/// When multiple semantic-duplicate channels (E9080 / E9081 / E9082) fire
+/// on the same column, emit a unified summary that lists how many channels
+/// agreed and the total share of rows in collisions. Doesn't replace the
+/// per-channel findings — it sits alongside them for the per-column view.
+pub fn detect_transitive_clusters(
+    df: &DataFrame,
+    cfg: &CategoricalQualityConfig,
+    prior_findings: &[ValidationFinding],
+) -> Vec<ValidationFinding> {
+    let mut out = Vec::new();
+    let n_rows = df.nrows() as u64;
+    if n_rows < cfg.min_rows_for_detection {
+        return out;
+    }
+
+    // Group prior findings by column where code ∈ {E9080, E9081, E9082}.
+    let mut per_column: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for f in prior_findings {
+        if let Some(col) = f.column.as_deref() {
+            if matches!(f.code, "E9080" | "E9081" | "E9082") {
+                per_column.entry(col).or_default().push(f.code);
+            }
+        }
+    }
+    // For each column that crosses the threshold, emit E9085.
+    for (col, codes) in &per_column {
+        let mut sorted_codes: Vec<&str> = codes.iter().copied().collect();
+        sorted_codes.sort_unstable();
+        sorted_codes.dedup();
+        if sorted_codes.len() < cfg.transitive_cluster_min_signals {
+            continue;
+        }
+        out.push(ValidationFinding::new(
+            "E9085",
+            FindingSeverity::Notice,
+            format!(
+                "column `{}` has semantic-duplicate signals from {} channels: {}",
+                col,
+                sorted_codes.len(),
+                sorted_codes.join(", ")
+            ),
+            Some((*col).into()),
+            None,
+            vec![
+                FindingEvidence::Count {
+                    label: "n_channels".into(),
+                    value: sorted_codes.len() as u64,
+                },
+                FindingEvidence::Sample {
+                    label: "channels".into(),
+                    value: sorted_codes.join(","),
+                },
+            ],
+            n_rows,
+            vec![
+                "this finding is a *summary* of prior E9080/E9081/E9082 findings on this column".into(),
+                "the per-channel findings remain authoritative for exact counts and pairs".into(),
+            ],
+            vec![
+                "multiple channels agreeing strongly suggests upstream normalization is required".into(),
+                "consider establishing a controlled vocabulary for this column".into(),
+            ],
+        ));
+    }
+    out
+}
+
 // ─── Aggregate ─────────────────────────────────────────────────────────────
 
-/// Run all five categorical-quality detectors and concatenate results.
+/// Run all eight categorical-quality detectors and concatenate results.
+///
+/// Order matters slightly: E9085 (transitive cluster) consumes the
+/// findings of E9080/E9081/E9082, so we run those first.
 pub fn detect_all_categorical_quality(
     df: &DataFrame,
     cfg: &CategoricalQualityConfig,
@@ -712,6 +1066,11 @@ pub fn detect_all_categorical_quality(
     out.extend(detect_case_fold_collisions(df, cfg));
     out.extend(detect_whitespace_punctuation_variants(df, cfg));
     out.extend(detect_near_duplicate_categories(df, cfg));
+    out.extend(detect_confusable_scripts(df, cfg));
+    out.extend(detect_mojibake(df, cfg));
+    // Transitive-cluster summary must see the prior findings.
+    let cluster_summaries = detect_transitive_clusters(df, cfg, &out);
+    out.extend(cluster_summaries);
     out
 }
 
@@ -741,10 +1100,10 @@ mod tests {
         .unwrap()
     }
 
-    // ── E9010 ─────────────────────────────────────────────────────────
+    // ── E9016 ─────────────────────────────────────────────────────────
 
     #[test]
-    fn e9010_fires_on_long_tail() {
+    fn e9016_fires_on_long_tail() {
         // 12 rows: 9 of "common", 1 each of three rare values.
         let mut values: Vec<&str> = vec!["common"; 9];
         values.extend(["rare_a", "rare_b", "rare_c"]);
@@ -752,12 +1111,12 @@ mod tests {
         let cfg = CategoricalQualityConfig::default();
         let f = detect_rare_categories(&df, &cfg);
         assert_eq!(f.len(), 1);
-        assert_eq!(f[0].code, "E9010");
+        assert_eq!(f[0].code, "E9016");
         assert_eq!(f[0].column.as_deref(), Some("plan"));
     }
 
     #[test]
-    fn e9010_quiet_when_only_one_rare() {
+    fn e9016_quiet_when_only_one_rare() {
         let mut values: Vec<&str> = vec!["a"; 5];
         values.extend(["b"; 5]);
         values.push("only_rare");
@@ -768,7 +1127,7 @@ mod tests {
     }
 
     #[test]
-    fn e9010_works_on_categorical_storage() {
+    fn e9016_works_on_categorical_storage() {
         let codes: Vec<u32> = (0..12)
             .map(|i| if i < 9 { 0 } else { (i - 8) as u32 })
             .collect();
@@ -777,21 +1136,21 @@ mod tests {
         assert_eq!(f.len(), 1);
     }
 
-    // ── E9011 ─────────────────────────────────────────────────────────
+    // ── E9017 ─────────────────────────────────────────────────────────
 
     #[test]
-    fn e9011_fires_above_threshold() {
+    fn e9017_fires_above_threshold() {
         // 100 rows, 60 distinct values — above default 50, below 0.95 ratio.
         let values: Vec<String> = (0..100).map(|i| format!("v{:02}", i % 60)).collect();
         let v_refs: Vec<&str> = values.iter().map(|s| s.as_str()).collect();
         let df = df_str("country", &v_refs);
         let f = detect_encoding_risk(&df, &CategoricalQualityConfig::default());
         assert_eq!(f.len(), 1);
-        assert_eq!(f[0].code, "E9011");
+        assert_eq!(f[0].code, "E9017");
     }
 
     #[test]
-    fn e9011_quiet_when_id_like() {
+    fn e9017_quiet_when_id_like() {
         // 100 rows, 99 distinct — that's E9072 territory, not E9011.
         let values: Vec<String> = (0..100).map(|i| format!("u{:03}", i % 99)).collect();
         let v_refs: Vec<&str> = values.iter().map(|s| s.as_str()).collect();
@@ -966,5 +1325,165 @@ mod tests {
         assert_eq!(bounded_edit_distance("foo", "foo", 2), 0);
         // Above threshold returns sentinel = threshold+1.
         assert_eq!(bounded_edit_distance("kitten", "sitting", 1), 2);
+    }
+
+    // ── E9083 ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn e9083_fires_on_cyrillic_in_latin() {
+        // "pаypal" — the second char is Cyrillic 'а' (U+0430), not Latin 'a' (U+0061).
+        let mut values = vec!["pаypal"];
+        values.extend(vec!["paypal"; 20]);
+        let df = df_str("brand", &values);
+        let f = detect_confusable_scripts(&df, &CategoricalQualityConfig::default());
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].code, "E9083");
+        assert_eq!(f[0].severity, FindingSeverity::Warning);
+    }
+
+    #[test]
+    fn e9083_quiet_on_pure_latin() {
+        let mut values = vec!["paypal", "stripe", "amazon", "google"];
+        values.extend(vec!["paypal"; 10]);
+        let df = df_str("brand", &values);
+        assert!(detect_confusable_scripts(&df, &CategoricalQualityConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn e9083_quiet_on_pure_cyrillic_text() {
+        // All chars in same Cyrillic bucket → no mixed-script finding.
+        let mut values: Vec<String> = vec!["привет".into()];
+        values.extend((0..20).map(|_| "москва".to_string()));
+        let v_refs: Vec<&str> = values.iter().map(|s| s.as_str()).collect();
+        let df = df_str("city", &v_refs);
+        assert!(detect_confusable_scripts(&df, &CategoricalQualityConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn e9083_skips_short_strings() {
+        // Single char of mixed script doesn't fire (min_len = 3 default).
+        let mut values = vec!["а"]; // single Cyrillic
+        values.extend(vec!["a"; 20]);
+        let df = df_str("c", &values);
+        assert!(detect_confusable_scripts(&df, &CategoricalQualityConfig::default()).is_empty());
+    }
+
+    // ── E9084 ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn e9084_fires_on_classic_mojibake() {
+        // "café" decoded as Latin-1 produces "cafÃ©".
+        let mut values = vec!["cafÃ©"];
+        values.extend(vec!["bistro"; 20]);
+        let df = df_str("venue", &values);
+        let f = detect_mojibake(&df, &CategoricalQualityConfig::default());
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].code, "E9084");
+        assert_eq!(f[0].severity, FindingSeverity::Notice);
+    }
+
+    #[test]
+    fn e9084_quiet_on_clean_text() {
+        let values = vec!["café", "bistro", "restaurant", "salon", "tavern"];
+        let mut all = values;
+        all.extend(vec!["café"; 20]);
+        let df = df_str("venue", &all);
+        assert!(detect_mojibake(&df, &CategoricalQualityConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn e9084_counts_signatures_correctly() {
+        // Two signatures: "Ã©" and "Ã¨".
+        assert_eq!(count_mojibake_signatures("cafÃ© et thÃ¨"), 2);
+        // Smart quote sig: â€™.
+        assert_eq!(count_mojibake_signatures("itâ€™s"), 1);
+        // Pure ASCII / clean utf-8.
+        assert_eq!(count_mojibake_signatures("café"), 0);
+        assert_eq!(count_mojibake_signatures(""), 0);
+    }
+
+    // ── E9085 ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn e9085_fires_when_two_channels_agree() {
+        // Construct findings as if E9080 and E9081 both fired on "plan".
+        let prior = vec![
+            ValidationFinding::new(
+                "E9080",
+                FindingSeverity::Warning,
+                "case-fold",
+                Some("plan".into()),
+                None,
+                vec![],
+                100,
+                vec![],
+                vec![],
+            ),
+            ValidationFinding::new(
+                "E9081",
+                FindingSeverity::Notice,
+                "whitespace",
+                Some("plan".into()),
+                None,
+                vec![],
+                100,
+                vec![],
+                vec![],
+            ),
+        ];
+        // We need a df only to read n_rows; build one with 100 rows.
+        let values: Vec<String> = (0..100).map(|i| format!("x{}", i)).collect();
+        let v_refs: Vec<&str> = values.iter().map(|s| s.as_str()).collect();
+        let df = df_str("plan", &v_refs);
+        let out = detect_transitive_clusters(&df, &CategoricalQualityConfig::default(), &prior);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].code, "E9085");
+        assert_eq!(out[0].column.as_deref(), Some("plan"));
+    }
+
+    #[test]
+    fn e9085_quiet_with_single_channel() {
+        let prior = vec![ValidationFinding::new(
+            "E9080",
+            FindingSeverity::Warning,
+            "only one",
+            Some("plan".into()),
+            None,
+            vec![],
+            100,
+            vec![],
+            vec![],
+        )];
+        let values: Vec<String> = (0..100).map(|i| format!("x{}", i)).collect();
+        let v_refs: Vec<&str> = values.iter().map(|s| s.as_str()).collect();
+        let df = df_str("plan", &v_refs);
+        assert!(detect_transitive_clusters(&df, &CategoricalQualityConfig::default(), &prior).is_empty());
+    }
+
+    #[test]
+    fn detect_all_includes_e9083_e9084_e9085() {
+        // Multi-issue column: case-fold + edit-dist + mojibake + mixed-script.
+        let mut values: Vec<&str> = vec!["Premium", "premium", "PREMIUM", "enterprise", "enterprize"];
+        values.extend(["cafÃ©", "pаypal"]);
+        values.extend(vec!["basic"; 20]);
+        let df = df_str("tier", &values);
+        let f = detect_all_categorical_quality(&df, &CategoricalQualityConfig::default());
+        let codes: std::collections::BTreeSet<&str> = f.iter().map(|x| x.code).collect();
+        for code in ["E9080", "E9082", "E9083", "E9084", "E9085"] {
+            assert!(codes.contains(code), "expected {} in {:?}", code, codes);
+        }
+    }
+
+    // ── script_bucket — direct unit test ────────────────────────────────
+
+    #[test]
+    fn script_bucket_classifies() {
+        assert_eq!(script_bucket('a'), "latin");
+        assert_eq!(script_bucket('A'), "latin");
+        assert_eq!(script_bucket('1'), "latin");
+        assert_eq!(script_bucket('.'), "latin");
+        assert_eq!(script_bucket('а'), "cyrillic"); // U+0430
+        assert_eq!(script_bucket('α'), "greek"); // U+03B1
+        assert_eq!(script_bucket('中'), "cjk");
     }
 }

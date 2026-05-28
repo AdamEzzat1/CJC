@@ -12,4 +12,4 @@ findings:
   - code=E9030 severity=error column=x
     mean of `x` shifted: train=49.500000, test=99.500000 (relative shift 1.0101)
   - code=E9039 severity=error column=x
-    numeric distribution shift in `x` (KS D = 0.5000)
+    numeric distribution shift in `x` (KS D = 0.5000, W1 = 50.0000)

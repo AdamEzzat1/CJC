@@ -47,9 +47,12 @@ pub enum LockeSubcommand {
     },
     Drift { train: PathBuf, test: PathBuf },
     Belief { data: PathBuf },
-    Lineage { data: PathBuf, label: Option<String> },
+    Lineage { data: PathBuf, label: Option<String>, mermaid: bool },
     Causal { data: PathBuf, target: Option<String>, observational_only: bool },
     Gate { reference: PathBuf, current: PathBuf },
+    /// v0.6: run `validate` N times and assert byte-identical reports.
+    /// Exits 0 if all runs match, 3 if any divergence.
+    Verify { data: PathBuf, runs: u32 },
 }
 
 #[derive(Debug, Clone)]
@@ -87,13 +90,16 @@ fn dispatch(args: LockeArgs) -> i32 {
         ),
         LockeSubcommand::Drift { train, test } => cmd_drift(&train, &test, args.format),
         LockeSubcommand::Belief { data } => cmd_belief(&data, args.format),
-        LockeSubcommand::Lineage { data, label } => cmd_lineage(&data, label.as_deref(), args.format),
+        LockeSubcommand::Lineage { data, label, mermaid } => {
+            cmd_lineage(&data, label.as_deref(), args.format, mermaid)
+        }
         LockeSubcommand::Causal { data, target, observational_only } => {
             cmd_causal(&data, target.as_deref(), observational_only, args.format)
         }
         LockeSubcommand::Gate { reference, current } => {
             cmd_gate(&reference, &current, args.fail_on_severity.as_deref())
         }
+        LockeSubcommand::Verify { data, runs } => cmd_verify(&data, runs),
     };
     match res {
         Ok(report) => {
@@ -467,12 +473,67 @@ fn cmd_belief(data: &PathBuf, format: LockeFormat) -> Result<CmdOutput, String> 
     Ok(CmdOutput { text, worst })
 }
 
-fn cmd_lineage(data: &PathBuf, label: Option<&str>, _format: LockeFormat) -> Result<CmdOutput, String> {
+fn cmd_lineage(
+    data: &PathBuf,
+    label: Option<&str>,
+    _format: LockeFormat,
+    mermaid: bool,
+) -> Result<CmdOutput, String> {
     let df = read_csv(data)?;
     let lbl = label.unwrap_or_else(|| data.to_str().unwrap_or("dataset"));
     let g = cjc_locke::api::lineage_for_dataset(lbl, &df);
-    let text = emit_lineage_text(&g);
+    let text = if mermaid {
+        cjc_locke::lineage::emit_lineage_mermaid(&g)
+    } else {
+        emit_lineage_text(&g)
+    };
     Ok(CmdOutput { text, worst: "info".into() })
+}
+
+/// v0.6 — re-run `validate` N times and assert all reports are byte-identical.
+///
+/// Returns a short success-or-divergence summary in `text`. Exits with code
+/// 3 (caller's responsibility) when any byte differs between runs.
+fn cmd_verify(data: &PathBuf, runs: u32) -> Result<CmdOutput, String> {
+    if runs < 2 {
+        return Err("--runs must be >= 2".into());
+    }
+    let df = read_csv(data)?;
+    let opts = ValidateOptions {
+        dataset_label: data.to_str().unwrap_or("dataset").into(),
+        config: ValidationConfig::default(),
+        ..Default::default()
+    };
+    let first = validate(&df, &opts);
+    let first_bytes = cjc_locke::json_emit::emit_locke_report_json(&first);
+    let mut divergent_runs: Vec<u32> = Vec::new();
+    for i in 1..runs {
+        let r = validate(&df, &opts);
+        let bytes = cjc_locke::json_emit::emit_locke_report_json(&r);
+        if bytes != first_bytes {
+            divergent_runs.push(i);
+        }
+    }
+    let mut text = String::new();
+    text.push_str("# Locke Reproducibility Verifier\n");
+    text.push_str(&format!("dataset: {}\n", first.input.dataset_label));
+    text.push_str(&format!("runs: {}\n", runs));
+    text.push_str(&format!("run_id: {}\n", first.run_id));
+    text.push_str(&format!("findings: {}\n", first.findings.len()));
+    text.push_str(&format!("report_bytes: {}\n", first_bytes.len()));
+    if divergent_runs.is_empty() {
+        text.push_str("status: REPRODUCIBLE — all runs byte-identical\n");
+        Ok(CmdOutput { text, worst: "info".into() })
+    } else {
+        text.push_str(&format!(
+            "status: DIVERGENT — {}/{} runs differed from run 0 (indices: {:?})\n",
+            divergent_runs.len(),
+            runs,
+            divergent_runs
+        ));
+        // Worst severity "error" so a `--fail-on error` would also fire.
+        Ok(CmdOutput { text, worst: "error".into() })
+    }
 }
 
 fn cmd_causal(
@@ -657,6 +718,9 @@ pub fn try_parse_sub(sub_args: &[String]) -> Option<LockeArgs> {
     let mut max_timestamp: Option<i64> = None;
     let mut gap_threshold: Option<i64> = None;
     let mut primary_key: Option<String> = None;
+    // v0.6 flags
+    let mut mermaid = false;
+    let mut runs: u32 = 3;
     let mut i = 0;
     while i < rest.len() {
         let a = &rest[i];
@@ -701,6 +765,13 @@ pub fn try_parse_sub(sub_args: &[String]) -> Option<LockeArgs> {
                 i += 1;
                 primary_key = rest.get(i).cloned();
             }
+            "--mermaid" => mermaid = true,
+            "--runs" => {
+                i += 1;
+                if let Some(n) = rest.get(i).and_then(|s| s.parse::<u32>().ok()) {
+                    runs = n;
+                }
+            }
             _ => positional.push(a.clone()),
         }
         i += 1;
@@ -732,7 +803,7 @@ pub fn try_parse_sub(sub_args: &[String]) -> Option<LockeArgs> {
         }
         "lineage" => {
             let data = positional.first()?.into();
-            LockeSubcommand::Lineage { data, label }
+            LockeSubcommand::Lineage { data, label, mermaid }
         }
         "causal" => {
             let data = positional.first()?.into();
@@ -742,6 +813,10 @@ pub fn try_parse_sub(sub_args: &[String]) -> Option<LockeArgs> {
             let reference = positional.first()?.into();
             let current = positional.get(1)?.into();
             LockeSubcommand::Gate { reference, current }
+        }
+        "verify" => {
+            let data = positional.first()?.into();
+            LockeSubcommand::Verify { data, runs }
         }
         _ => return None,
     };
@@ -780,9 +855,10 @@ usage:
                                  [--target COL] [--primary-key COL]
   cjcl locke drift    <train.csv> <test.csv>      [--json] [--fail-on SEV]
   cjcl locke belief   <data.csv>                  [--json]
-  cjcl locke lineage  <data.csv> [--label NAME]
+  cjcl locke lineage  <data.csv> [--label NAME] [--mermaid]
   cjcl locke causal   <data.csv> [--target COL] [--observational-only] [--json]
   cjcl locke gate     <reference.json> <current>  [--fail-on SEV]
+  cjcl locke verify   <data.csv> [--runs N]
 
 flags:
   --json                 emit one JSON-ish record per line
@@ -792,6 +868,8 @@ flags:
   --label NAME           override the dataset label in the report
   --target COL           target column for confounder hints (causal only)
   --observational-only   declare data is observational; raises warning severity
+  --mermaid              emit lineage as a Quarto/Markdown Mermaid block
+  --runs N               number of validate runs to compare (verify; default 3)
 
 determinism:
   every report is deterministic — repeated runs over the same data
@@ -903,5 +981,49 @@ mod tests {
     fn json_escape_handles_quotes_and_backslashes() {
         let s = json_escape("a\"b\\c\n");
         assert_eq!(s, "a\\\"b\\\\c\\n");
+    }
+
+    // ── v0.6: lineage --mermaid, verify --runs ──────────────────────────
+
+    #[test]
+    fn parse_lineage_with_mermaid_flag() {
+        let parsed = try_parse_sub(&args(&["lineage", "data.csv", "--mermaid"]))
+            .expect("lineage --mermaid parse");
+        match parsed.subcommand {
+            LockeSubcommand::Lineage { mermaid, .. } => assert!(mermaid),
+            _ => panic!("expected Lineage"),
+        }
+    }
+
+    #[test]
+    fn parse_lineage_default_no_mermaid() {
+        let parsed =
+            try_parse_sub(&args(&["lineage", "data.csv"])).expect("lineage default parse");
+        match parsed.subcommand {
+            LockeSubcommand::Lineage { mermaid, .. } => assert!(!mermaid),
+            _ => panic!("expected Lineage"),
+        }
+    }
+
+    #[test]
+    fn parse_verify_subcommand_with_runs() {
+        let parsed =
+            try_parse_sub(&args(&["verify", "data.csv", "--runs", "5"])).expect("verify parse");
+        match parsed.subcommand {
+            LockeSubcommand::Verify { data, runs } => {
+                assert_eq!(data.to_str().unwrap(), "data.csv");
+                assert_eq!(runs, 5);
+            }
+            _ => panic!("expected Verify"),
+        }
+    }
+
+    #[test]
+    fn parse_verify_default_runs_is_three() {
+        let parsed = try_parse_sub(&args(&["verify", "data.csv"])).expect("verify default parse");
+        match parsed.subcommand {
+            LockeSubcommand::Verify { runs, .. } => assert_eq!(runs, 3),
+            _ => panic!(),
+        }
     }
 }

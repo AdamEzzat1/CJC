@@ -56,11 +56,50 @@
 - [x] **Duplicate-key conditioning** — E9073.
 - [x] **HTML cross-column correlation matrix** — inline-SVG heatmap via `emit_locke_report_html_with_df`.
 
-## v0.6 priorities
+## v0.6 (in progress, 2026-05-28)
 
-### Data-skepticism upgrades
-- [ ] **Sentinel-value detection** — common "magic missing" values (`-1`, `-9999`, `""`, empty string, `"NA"`, `"unknown"`) detected as candidate nulls.
-- [ ] **Outlier heuristics** — IQR-based and modified-Z-score-based outlier counts per column.
+### Shipped this release
+
+- [x] **Categorical / string semantic-quality detectors** — 5 codes in `categorical.rs`:
+  - **E9016** rare categories (long-tail / overfit risk)
+  - **E9017** one-hot encoding-risk (cardinality > 50, ratio < 0.95)
+  - **E9080** case-fold collisions ("Premium"/"premium"/"PREMIUM")
+  - **E9081** whitespace + terminal-punctuation variants ("USA"/"USA.")
+  - **E9082** near-duplicate categories via bounded Levenshtein ≤ 2
+- [x] **Confusable / Unicode anti-spoofing** — 3 additional codes:
+  - **E9083** mixed-script labels (Latin + Cyrillic / Greek / CJK in one string)
+  - **E9084** mojibake detection (UTF-8 decoded as Latin-1, including Win-1252 smart-quote residue)
+  - **E9085** transitive-cluster summary (when ≥ 2 of E9080/E9081/E9082 fire on same column)
+- [x] **Wasserstein-1 drift evidence** — added as `Metric { label: "wasserstein_1" }` inside every E9039 KS finding. Unit-bearing complement to KS D's unit-free shape statistic. Computed via O((n+m) log(n+m)) merge integration over the two empirical CDFs with Kahan accumulation. Public API: `cjc_locke::wasserstein_1(&[f64], &[f64]) -> Option<f64>`.
+- [x] **CLI `cjcl locke lineage --mermaid`** — emit Quarto/Markdown Mermaid `flowchart LR` block from a lineage graph. Impressions render as cylinder nodes, ideas as rounded nodes. Two runs over the same graph emit byte-identical bytes.
+- [x] **CLI `cjcl locke verify --runs N`** — re-runs `validate` N times and asserts byte-identical canonical-JSON output. Exits 0 on agreement; non-zero with `status: DIVERGENT` line otherwise.
+
+### Belief-axis mapping for the new codes
+
+| Code | Axis weakened | Why |
+|---|---|---|
+| E9016 | `constraint` | rare categories are a distributional, not schema-shape, concern |
+| E9017 | `schema` | one-hot explosion is an encoding-design defect of the effective alphabet |
+| E9080–E9085 | `schema` | semantic-category fragmentation = effective-alphabet ambiguity |
+
+The meet-semilattice composition algebra documented in [[Locke Belief Reports]] §formal-model is preserved — no new BeliefScore axes were added; v0.6 codes route to existing axes.
+
+### Test infrastructure
+
+- [x] **Unit tests** — 20 new in `categorical::tests` and `drift::tests` (Wasserstein).
+- [x] **Integration tests** — 14 new in `tests/locke/categorical_tests.rs`.
+- [x] **Property tests** — 4 new in `tests/locke/locke_proptest.rs` covering categorical determinism, Wasserstein non-negativity / symmetry, Mermaid emit determinism.
+- [x] **Bolero fuzz targets** — 3 new in `tests/locke/locke_fuzz.rs` (arbitrary strings → no panic, arbitrary floats for Wasserstein → finite + non-negative, arbitrary labels for Mermaid → well-formed fenced block).
+- [x] **CLI parser tests** — 4 new in `crates/cjc-cli/src/commands/locke.rs` (`--mermaid` flag, `verify` subcommand + `--runs N`).
+- [x] **Insta snapshot** — `drift_default.snap` updated to include the new W1 evidence in the E9039 message.
+
+Net delta: cjc-locke 217 lib (was 197, +20) + tests/locke 103 (was 89, +14) + cjc-cli 154 (no regressions). Workspace builds clean.
+
+### v0.6 priorities still deferred
+
+#### Data-skepticism upgrades (legacy entries kept for traceability)
+- [x] ~~**Sentinel-value detection**~~ — shipped v0.4 as E9007.
+- [x] ~~**Outlier heuristics**~~ — shipped v0.4 as E9040/E9041.
 - [ ] **Distribution-shape diagnostics** — skew, kurtosis, top-k modes.
 
 ### Drift upgrades

@@ -9,8 +9,9 @@
 use cjc_data::{Column, DataFrame};
 use cjc_locke::{
     api::{belief_report_from_locke, validate, ValidateOptions},
-    detect_all_categorical_quality, detect_case_fold_collisions, detect_encoding_risk,
-    detect_near_duplicate_categories, detect_rare_categories,
+    detect_all_categorical_quality, detect_case_fold_collisions, detect_confusable_scripts,
+    detect_encoding_risk, detect_mojibake, detect_near_duplicate_categories,
+    detect_rare_categories, detect_transitive_clusters,
     detect_whitespace_punctuation_variants, CategoricalQualityConfig, FindingSeverity,
     ValidationConfig,
 };
@@ -39,10 +40,10 @@ fn df_multi_str(cols: &[(&str, &[&str])]) -> DataFrame {
     .unwrap()
 }
 
-// ─── E9010 ────────────────────────────────────────────────────────────────
+// ─── E9016 ────────────────────────────────────────────────────────────────
 
 #[test]
-fn e9010_fires_on_long_tail_via_validate() {
+fn e9016_fires_on_long_tail_via_validate() {
     let mut values: Vec<&str> = vec!["common"; 100];
     values.extend(["rare_a", "rare_b", "rare_c"]);
     let df = df_str("plan", &values);
@@ -52,12 +53,12 @@ fn e9010_fires_on_long_tail_via_validate() {
         ..Default::default()
     };
     let report = validate(&df, &opts);
-    let any = report.findings.iter().any(|f| f.code == "E9010");
+    let any = report.findings.iter().any(|f| f.code == "E9016");
     assert!(any, "expected E9010 finding in {:?}", report.findings);
 }
 
 #[test]
-fn e9010_weakens_constraint_axis() {
+fn e9016_weakens_constraint_axis() {
     let mut values: Vec<&str> = vec!["common"; 100];
     values.extend(["r1", "r2", "r3", "r4", "r5"]);
     let df = df_str("plan", &values);
@@ -77,21 +78,21 @@ fn e9010_weakens_constraint_axis() {
     );
 }
 
-// ─── E9011 ────────────────────────────────────────────────────────────────
+// ─── E9017 ────────────────────────────────────────────────────────────────
 
 #[test]
-fn e9011_fires_on_wide_categorical() {
+fn e9017_fires_on_wide_categorical() {
     // 100 rows, 60 distinct values — above default 50, below 0.95 ratio.
     let values: Vec<String> = (0..100).map(|i| format!("v{:02}", i % 60)).collect();
     let v_refs: Vec<&str> = values.iter().map(|s| s.as_str()).collect();
     let df = df_str("country", &v_refs);
     let f = detect_encoding_risk(&df, &CategoricalQualityConfig::default());
     assert_eq!(f.len(), 1);
-    assert_eq!(f[0].code, "E9011");
+    assert_eq!(f[0].code, "E9017");
 }
 
 #[test]
-fn e9011_weakens_schema_axis() {
+fn e9017_weakens_schema_axis() {
     let values: Vec<String> = (0..100).map(|i| format!("v{:02}", i % 60)).collect();
     let v_refs: Vec<&str> = values.iter().map(|s| s.as_str()).collect();
     let df = df_str("country", &v_refs);
@@ -305,6 +306,121 @@ fn numeric_columns_are_skipped() {
     .unwrap();
     let cfg = CategoricalQualityConfig::default();
     assert!(detect_all_categorical_quality(&df, &cfg).is_empty());
+}
+
+// ─── E9083 (confusable scripts) ─────────────────────────────────────────
+
+#[test]
+fn e9083_fires_via_validate_on_mixed_script() {
+    // Cyrillic 'а' (U+0430) inside an otherwise-Latin string.
+    let mut values = vec!["pаypal"];
+    values.extend(vec!["paypal"; 20]);
+    let df = df_str("brand", &values);
+    let report = validate(
+        &df,
+        &ValidateOptions {
+            dataset_label: "e9083".into(),
+            config: ValidationConfig::default(),
+            ..Default::default()
+        },
+    );
+    assert!(report.findings.iter().any(|f| f.code == "E9083"));
+}
+
+#[test]
+fn e9083_quiet_on_pure_latin_data() {
+    let values: Vec<&str> = vec!["paypal", "stripe", "amazon"]
+        .into_iter()
+        .cycle()
+        .take(30)
+        .collect();
+    let df = df_str("brand", &values);
+    let f = detect_confusable_scripts(&df, &CategoricalQualityConfig::default());
+    assert!(f.is_empty());
+}
+
+// ─── E9084 (mojibake) ───────────────────────────────────────────────────
+
+#[test]
+fn e9084_fires_via_validate_on_mojibake() {
+    let mut values = vec!["cafÃ©"];
+    values.extend(vec!["bistro"; 20]);
+    let df = df_str("venue", &values);
+    let report = validate(
+        &df,
+        &ValidateOptions {
+            dataset_label: "e9084".into(),
+            config: ValidationConfig::default(),
+            ..Default::default()
+        },
+    );
+    let f = report
+        .findings
+        .iter()
+        .find(|f| f.code == "E9084")
+        .expect("E9084 expected");
+    assert_eq!(f.severity, FindingSeverity::Notice);
+}
+
+#[test]
+fn e9084_quiet_on_clean_utf8() {
+    let mut values = vec!["café", "thé", "naïve"];
+    values.extend(vec!["bistro"; 20]);
+    let df = df_str("venue", &values);
+    assert!(detect_mojibake(&df, &CategoricalQualityConfig::default()).is_empty());
+}
+
+// ─── E9085 (transitive cluster) ─────────────────────────────────────────
+
+#[test]
+fn e9085_fires_when_e9080_and_e9082_both_fire() {
+    // "Premium"/"premium" → E9080; "enterprise"/"enterprize" → E9082.
+    // Both on same column "tier".
+    let mut values = vec!["Premium", "premium", "enterprise", "enterprize"];
+    values.extend(vec!["basic"; 25]);
+    let df = df_str("tier", &values);
+    let f = detect_all_categorical_quality(&df, &CategoricalQualityConfig::default());
+    let codes: std::collections::BTreeSet<&str> = f.iter().map(|x| x.code).collect();
+    assert!(codes.contains("E9080"));
+    assert!(codes.contains("E9082"));
+    assert!(codes.contains("E9085"));
+    let e9085 = f
+        .iter()
+        .find(|x| x.code == "E9085")
+        .expect("E9085 expected");
+    assert_eq!(e9085.column.as_deref(), Some("tier"));
+}
+
+#[test]
+fn e9085_quiet_when_only_one_channel_fires() {
+    // Use spellings whose ONLY collision is case-fold. With many
+    // case-differing positions, Levenshtein > 2 so E9082 doesn't fire,
+    // and no whitespace/punctuation so E9081 doesn't fire either.
+    let mut values = vec!["ABCDEFGHIJ", "abcdefghij"];
+    values.extend(vec!["basic"; 25]);
+    let df = df_str("tier", &values);
+    let f = detect_all_categorical_quality(&df, &CategoricalQualityConfig::default());
+    let codes: std::collections::BTreeSet<&str> = f.iter().map(|x| x.code).collect();
+    assert!(codes.contains("E9080"), "E9080 should fire");
+    assert!(!codes.contains("E9082"), "E9082 should not fire (edit dist > 2)");
+    assert!(
+        !codes.contains("E9085"),
+        "E9085 should not fire with only one channel: {:?}",
+        codes
+    );
+}
+
+// ─── Determinism for the v0.6 codes ─────────────────────────────────────
+
+#[test]
+fn v06_categorical_codes_are_deterministic() {
+    let mut values = vec!["Premium", "premium", "enterprise", "enterprize", "pаypal", "cafÃ©"];
+    values.extend(vec!["basic"; 25]);
+    let df = df_str("col", &values);
+    let cfg = CategoricalQualityConfig::default();
+    let a = detect_all_categorical_quality(&df, &cfg);
+    let b = detect_all_categorical_quality(&df, &cfg);
+    assert_eq!(a, b);
 }
 
 #[test]

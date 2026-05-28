@@ -262,11 +262,74 @@ fn numeric_drift_findings(
     out
 }
 
+/// 1-Wasserstein distance between two 1-D empirical distributions.
+///
+/// W₁(P, Q) = ∫ |F_P(x) − F_Q(x)| dx — the L¹ area between the two
+/// empirical CDFs. Computed exactly in O((n+m) log(n+m)) by sorting both
+/// samples and integrating along the union of support. NaN values are
+/// dropped (matching `ks_d_statistic` semantics).
+///
+/// Returns `None` when either sample is empty. Returns 0 when the two
+/// samples are bytewise-equal in sorted form. Unit: same units as the
+/// input values (i.e. not unit-free like KS D).
+///
+/// This is the auxiliary metric attached to E9039 evidence in v0.6 —
+/// surfaced because two distributions can be KS-close and Wasserstein-far
+/// (mass moved a small distance) or vice versa (mass moved a large
+/// distance but ECDFs cross).
+pub fn wasserstein_1(a: &[f64], b: &[f64]) -> Option<f64> {
+    let mut aa: Vec<f64> = a.iter().copied().filter(|x| !x.is_nan()).collect();
+    let mut bb: Vec<f64> = b.iter().copied().filter(|x| !x.is_nan()).collect();
+    if aa.is_empty() || bb.is_empty() {
+        return None;
+    }
+    aa.sort_by(|x, y| x.total_cmp(y));
+    bb.sort_by(|x, y| x.total_cmp(y));
+    let n = aa.len() as f64;
+    let m = bb.len() as f64;
+
+    // Two-pointer integration over union of support. At each step, track
+    // (i, j) = number of a-points and b-points already <= current x.
+    // ECDF_a = i/n, ECDF_b = j/m. Move to the next breakpoint and add
+    // |ECDF_a - ECDF_b| * (x_next - x_current) to the accumulator.
+    let mut acc = cjc_repro::KahanAccumulatorF64::new();
+    let mut i = 0usize;
+    let mut j = 0usize;
+    let mut prev_x = aa[0].min(bb[0]);
+    while i < aa.len() || j < bb.len() {
+        let next_x = match (aa.get(i), bb.get(j)) {
+            (Some(&xa), Some(&xb)) => xa.min(xb),
+            (Some(&xa), None) => xa,
+            (None, Some(&xb)) => xb,
+            (None, None) => break,
+        };
+        let dx = next_x - prev_x;
+        if dx > 0.0 {
+            let ecdf_a = i as f64 / n;
+            let ecdf_b = j as f64 / m;
+            acc.add((ecdf_a - ecdf_b).abs() * dx);
+        }
+        // Advance both pointers past `next_x` (handle ties).
+        while i < aa.len() && aa[i] <= next_x {
+            i += 1;
+        }
+        while j < bb.len() && bb[j] <= next_x {
+            j += 1;
+        }
+        prev_x = next_x;
+    }
+    Some(acc.finalize())
+}
+
 /// Exact Kolmogorov–Smirnov D as the default numeric drift signal (v0.2).
 ///
 /// Emits **E9039** when the configured threshold is crossed. Replaces the
 /// equal-width-binned PSI proxy (`numeric_psi_finding`) which is retained
 /// as a private helper for future opt-in.
+///
+/// As of v0.6, the evidence list also carries the 1-Wasserstein distance
+/// between the two samples, computed via [`wasserstein_1`]. Reviewers can
+/// use it alongside KS D — they're complementary signals.
 fn numeric_ks_finding(
     column: &str,
     train_values: &[f64],
@@ -283,12 +346,13 @@ fn numeric_ks_finding(
     };
     let n_train_valid = train_values.iter().filter(|x| !x.is_nan()).count() as u64;
     let n_test_valid = test_values.iter().filter(|x| !x.is_nan()).count() as u64;
+    let w1 = wasserstein_1(train_values, test_values).unwrap_or(0.0);
     Some(ValidationFinding::new(
         "E9039",
         sev,
         format!(
-            "numeric distribution shift in `{}` (KS D = {:.4})",
-            column, d
+            "numeric distribution shift in `{}` (KS D = {:.4}, W1 = {:.4})",
+            column, d, w1
         ),
         Some(column.into()),
         None,
@@ -296,6 +360,10 @@ fn numeric_ks_finding(
             FindingEvidence::Metric {
                 label: "ks_d".into(),
                 value: d,
+            },
+            FindingEvidence::Metric {
+                label: "wasserstein_1".into(),
+                value: w1,
             },
             FindingEvidence::Count {
                 label: "n_train_valid".into(),
@@ -309,6 +377,7 @@ fn numeric_ks_finding(
         n_train_valid + n_test_valid,
         vec![
             "exact two-sample KS D-statistic; not a significance test".into(),
+            "Wasserstein₁ has the same units as the values (not unit-free like KS)".into(),
             "NaN excluded before sorting".into(),
             format!(
                 "thresholds: warn ≥ {:.2}, error ≥ {:.2}",
@@ -778,5 +847,58 @@ mod tests {
         let a = compare(&train, &test, &DriftConfig::default());
         let b = compare(&train, &test, &DriftConfig::default());
         assert_eq!(a, b);
+    }
+
+    // ── Wasserstein-1 ───────────────────────────────────────────────────
+
+    #[test]
+    fn wasserstein_zero_for_identical_samples() {
+        let a = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let b = a.clone();
+        let w = wasserstein_1(&a, &b).unwrap();
+        assert!(w.abs() < 1e-12, "got {}", w);
+    }
+
+    #[test]
+    fn wasserstein_translation_equals_shift() {
+        // Translating every point by +c should give W_1 = c.
+        let a: Vec<f64> = (0..100).map(|i| i as f64).collect();
+        let b: Vec<f64> = a.iter().map(|x| x + 3.0).collect();
+        let w = wasserstein_1(&a, &b).unwrap();
+        assert!((w - 3.0).abs() < 1e-9, "got {}", w);
+    }
+
+    #[test]
+    fn wasserstein_handles_nan() {
+        let a = vec![1.0, f64::NAN, 2.0];
+        let b = vec![1.0, 2.0];
+        let w = wasserstein_1(&a, &b).unwrap();
+        assert!(w.abs() < 1e-12);
+    }
+
+    #[test]
+    fn wasserstein_none_on_empty() {
+        assert!(wasserstein_1(&[], &[1.0]).is_none());
+        assert!(wasserstein_1(&[1.0], &[]).is_none());
+    }
+
+    #[test]
+    fn wasserstein_appears_as_evidence_in_e9039() {
+        // Use a clear shift so KS fires and we can inspect evidence.
+        let train: Vec<f64> = (0..200).map(|i| i as f64 * 0.01).collect();
+        let test: Vec<f64> = (0..200).map(|i| i as f64 * 0.01 + 1.0).collect();
+        let train_df = DataFrame::from_columns(vec![mk_floats("x", train)]).unwrap();
+        let test_df = DataFrame::from_columns(vec![mk_floats("x", test)]).unwrap();
+        let r = compare(&train_df, &test_df, &DriftConfig::default());
+        let ks = r
+            .findings
+            .iter()
+            .find(|f| f.code == "E9039")
+            .expect("E9039 KS finding");
+        let has_w1 = ks.evidence.iter().any(|e| matches!(
+            e,
+            FindingEvidence::Metric { label, .. } if label == "wasserstein_1"
+        ));
+        assert!(has_w1, "wasserstein_1 evidence missing from E9039: {:?}", ks.evidence);
     }
 }

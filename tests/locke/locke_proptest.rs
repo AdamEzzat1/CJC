@@ -114,4 +114,55 @@ proptest! {
         let s = sample_score_from_n(n);
         prop_assert!(s >= 0.0 && s <= 1.0);
     }
+
+    // ── v0.6 categorical detectors ──────────────────────────────────────
+
+    #[test]
+    fn categorical_quality_is_deterministic_under_arbitrary_strings(
+        vs in prop::collection::vec(any::<String>(), 5..50)
+    ) {
+        let df = DataFrame::from_columns(vec![("c".into(), Column::Str(vs))]).unwrap();
+        let cfg = cjc_locke::CategoricalQualityConfig::default();
+        let a = cjc_locke::detect_all_categorical_quality(&df, &cfg);
+        let b = cjc_locke::detect_all_categorical_quality(&df, &cfg);
+        prop_assert_eq!(a, b);
+    }
+
+    #[test]
+    fn wasserstein_is_nonnegative_and_finite(
+        a in arb_float_vec(),
+        b in arb_float_vec()
+    ) {
+        if let Some(w) = cjc_locke::wasserstein_1(&a, &b) {
+            prop_assert!(w >= -1e-9, "W_1 should be non-negative, got {}", w);
+            prop_assert!(w.is_finite(), "W_1 should be finite, got {}", w);
+        }
+    }
+
+    #[test]
+    fn wasserstein_symmetric(
+        a in arb_float_vec(),
+        b in arb_float_vec()
+    ) {
+        let lhs = cjc_locke::wasserstein_1(&a, &b);
+        let rhs = cjc_locke::wasserstein_1(&b, &a);
+        match (lhs, rhs) {
+            (Some(x), Some(y)) => prop_assert!((x - y).abs() < 1e-9, "{} vs {}", x, y),
+            _ => prop_assert_eq!(lhs, rhs),
+        }
+    }
+
+    #[test]
+    fn lineage_mermaid_emit_is_deterministic(
+        label in "[a-z]{1,10}",
+        nrows in 1u64..50
+    ) {
+        let df = DataFrame::from_columns(vec![
+            ("x".into(), Column::Float((0..nrows).map(|i| i as f64).collect()))
+        ]).unwrap();
+        let g = cjc_locke::api::lineage_for_dataset(&label, &df);
+        let a = cjc_locke::emit_lineage_mermaid(&g);
+        let b = cjc_locke::emit_lineage_mermaid(&g);
+        prop_assert_eq!(a, b);
+    }
 }

@@ -122,3 +122,54 @@ fn fuzz_validate_arbitrary_int_column_never_panics() {
             let _ = validate(&df, &opts);
         });
 }
+
+#[test]
+fn fuzz_categorical_quality_arbitrary_strings_never_panics() {
+    bolero::check!()
+        .with_type::<Vec<String>>()
+        .for_each(|v: &Vec<String>| {
+            if v.is_empty() {
+                return;
+            }
+            let df = DataFrame::from_columns(vec![("c".into(), Column::Str(v.clone()))]).unwrap();
+            let cfg = cjc_locke::CategoricalQualityConfig::default();
+            // None of the eight categorical detectors should panic on
+            // arbitrary string input — including escape sequences, null
+            // bytes (in UTF-8 form), control chars, BOM, etc.
+            let _ = cjc_locke::detect_all_categorical_quality(&df, &cfg);
+        });
+}
+
+#[test]
+fn fuzz_wasserstein_arbitrary_floats_never_panics() {
+    bolero::check!()
+        .with_type::<(Vec<f64>, Vec<f64>)>()
+        .for_each(|(a, b): &(Vec<f64>, Vec<f64>)| {
+            // Empty input returns None; non-empty must produce a finite,
+            // non-negative number (or None for fully-NaN inputs).
+            if let Some(w) = cjc_locke::wasserstein_1(a, b) {
+                assert!(w.is_finite(), "W_1 must be finite, got {}", w);
+                assert!(w >= -1e-9, "W_1 must be non-negative, got {}", w);
+            }
+        });
+}
+
+#[test]
+fn fuzz_mermaid_emit_arbitrary_label_never_panics() {
+    bolero::check!()
+        .with_type::<String>()
+        .for_each(|label: &String| {
+            let df = DataFrame::from_columns(vec![
+                ("x".into(), Column::Float(vec![1.0, 2.0, 3.0])),
+            ])
+            .unwrap();
+            let g = cjc_locke::api::lineage_for_dataset(label, &df);
+            let out = cjc_locke::emit_lineage_mermaid(&g);
+            // Output must be a well-formed Mermaid fenced block.
+            assert!(out.starts_with("```{mermaid}"));
+            assert!(out.ends_with("```\n"));
+            // Two runs over the same graph must be byte-identical.
+            let out2 = cjc_locke::emit_lineage_mermaid(&g);
+            assert_eq!(out, out2);
+        });
+}

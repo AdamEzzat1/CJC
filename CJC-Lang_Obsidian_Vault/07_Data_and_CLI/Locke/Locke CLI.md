@@ -5,11 +5,15 @@ The `cjcl locke` subcommand is the user-facing entry point. All output is determ
 ## Subcommands
 
 ```bash
-cjcl locke validate <data.csv> [--label NAME] [--json] [--fail-on SEV]
+cjcl locke validate <data.csv> [--label NAME] [--json] [--fail-on SEV] [--save-json PATH] [--html PATH]
+                                [--time-col COL] [--max-timestamp N] [--gap-threshold N]
+                                [--target COL] [--primary-key COL]
 cjcl locke drift    <train.csv> <test.csv>    [--json] [--fail-on SEV]
 cjcl locke belief   <data.csv>                [--json]
-cjcl locke lineage  <data.csv> [--label NAME]
+cjcl locke lineage  <data.csv> [--label NAME] [--mermaid]
 cjcl locke causal   <data.csv> [--target COL] [--observational-only] [--json]
+cjcl locke gate     <reference.json> <current> [--fail-on SEV]
+cjcl locke verify   <data.csv> [--runs N]
 ```
 
 ## Flags
@@ -20,8 +24,43 @@ cjcl locke causal   <data.csv> [--target COL] [--observational-only] [--json]
 | `--text`               | on     | emit indented text |
 | `--fail-on SEV`        | none   | exit non-zero if worst severity >= SEV (`info`, `notice`, `warning`, `error`) |
 | `--label NAME`         | path   | override the dataset label |
-| `--target COL`         | none   | target column for confounder hints (causal only) |
+| `--target COL`         | none   | target column for confounder hints / target-leakage AUC |
 | `--observational-only` | off    | declare observational data; raises causal warning severity |
+| `--save-json PATH`     | none   | persist the canonical JSON report (v0.4) |
+| `--html PATH`          | none   | emit a self-contained HTML report with inline-SVG heatmap (v0.5) |
+| `--time-col COL`       | none   | declare the time column (enables E9050–E9054 temporal checks) |
+| `--max-timestamp N`    | none   | declare the maximum-allowed timestamp (E9052 future leakage) |
+| `--gap-threshold N`    | none   | E9053 firing threshold for time-gap detection |
+| `--primary-key COL`    | none   | declare the primary-key column (E9004 / E9073) |
+| `--mermaid` (v0.6)     | off    | for `lineage`: emit a Quarto/Markdown Mermaid block instead of text |
+| `--runs N` (v0.6)      | 3      | for `verify`: number of validation runs to compare (must be ≥ 2) |
+
+## v0.6 subcommands
+
+### `cjcl locke verify`
+
+Re-runs `validate` `N` times and asserts every report is byte-identical. Catches accidental nondeterminism in user code that wraps Locke (e.g., a wrapper that mutates a HashMap in the file-reading path). Exits 0 when all runs agree, non-zero with a `status: DIVERGENT` line otherwise.
+
+```bash
+$ cjcl locke verify train.csv --runs 5
+# Locke Reproducibility Verifier
+dataset: train.csv
+runs: 5
+run_id: 1075bbad9d9b882f
+findings: 17
+report_bytes: 4823
+status: REPRODUCIBLE — all runs byte-identical
+```
+
+### `cjcl locke lineage --mermaid`
+
+Replaces the text emit with a Mermaid `flowchart LR` block. Impressions render as cylinder nodes (`[(...)]`), ideas as rounded nodes (`(...)`). Edge labels carry the transformation op id. Output is determined entirely by the lineage graph's content-addressed ids — two runs over the same input emit identical bytes.
+
+```bash
+$ cjcl locke lineage train.csv --label "Q3-2026" --mermaid > lineage.qmd
+```
+
+The output is suitable for direct pasting into a Quarto document or rendering with the [`mermaid-cli`](https://github.com/mermaid-js/mermaid-cli) tool.
 
 ## Examples
 

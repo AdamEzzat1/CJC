@@ -29,9 +29,42 @@ Each check emits zero or more `ValidationFinding`s. A finding is a structured re
 | E9013  | Rule-column type mismatch                           | Warning |
 | E9014  | Impossible-value violations                         | rate ≥ 0.1 → Error; ≥ 0.01 → Warning; else Notice |
 | E9015  | High-cardinality categorical (ratio ≥ 0.5)          | Notice |
+| E9016  | Rare categories (`count < rare_category_min_count`) — v0.6 | Notice |
+| E9017  | One-hot encoding-risk (cardinality > threshold) — v0.6 | Notice |
 | E9020  | Expected column is missing                          | Error |
 | E9021  | Column has wrong type                               | Error |
 | E9022  | Column is not in the expected schema                | Error or Notice (controlled by `strict_extra`) |
+| E9080  | Case-fold collisions ("Premium"/"premium") — v0.6  | Warning |
+| E9081  | Whitespace / terminal-punctuation variants — v0.6  | Notice |
+| E9082  | Near-duplicate categories (Levenshtein ≤ 2) — v0.6 | Warning |
+| E9083  | Confusable mixed-script labels (Latin + Cyrillic) — v0.6 | Warning |
+| E9084  | Mojibake (UTF-8 decoded as Latin-1) — v0.6        | Notice |
+| E9085  | Transitive cluster summary across E9080/81/82 — v0.6 | Notice |
+
+## v0.6 categorical / string semantic-quality detectors
+
+The `categorical` module surfaces semantic problems that the numeric-first validators miss. They run automatically as part of `validate_dataframe()` (see the validation flow diagram below) and are configurable through `CategoricalQualityConfig`. See [[Locke Roadmap]] §v0.6 for the full discussion of the eight new codes plus the deferred items (PII, ontology, taxonomy fragmentation).
+
+```mermaid
+flowchart LR
+  DF[String/Categorical column] --> RC[detect_rare_categories<br/>E9016]
+  DF --> ER[detect_encoding_risk<br/>E9017]
+  DF --> CF[detect_case_fold_collisions<br/>E9080]
+  DF --> WS[detect_whitespace_punctuation_variants<br/>E9081]
+  DF --> ND[detect_near_duplicate_categories<br/>E9082]
+  DF --> CS[detect_confusable_scripts<br/>E9083]
+  DF --> MJ[detect_mojibake<br/>E9084]
+  CF & WS & ND --> TC[detect_transitive_clusters<br/>E9085]
+```
+
+The transitive-cluster summary `E9085` is *aggregating* — it inspects the prior E9080/E9081/E9082 findings and fires when ≥ 2 distinct channels agree on the same column. This makes the per-column semantic-quality picture readable even when the underlying findings are many.
+
+The eight detectors map to BeliefScore axes:
+
+| Code | Axis weakened |
+|---|---|
+| E9016 | `constraint` (distributional long-tail concern) |
+| E9017, E9080–E9085 | `schema` (effective-alphabet ambiguity) |
 
 ## The validation flow
 
@@ -44,7 +77,8 @@ flowchart LR
   DF --> I[detect_impossible_values]
   DF --> HC[detect_high_cardinality_categorical]
   DF --> SC[detect_schema_mismatch]
-  M & DR & DK & C & I & HC & SC --> SORT[stable sort by severity, code, column]
+  DF --> CQ["detect_all_categorical_quality<br/>(E9016/17/80-85)"]
+  M & DR & DK & C & I & HC & SC & CQ --> SORT[stable sort by severity, code, column]
   SORT --> R[LockeReport]
 ```
 

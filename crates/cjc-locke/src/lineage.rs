@@ -438,6 +438,65 @@ pub fn emit_lineage_text(g: &LineageGraph) -> String {
     out
 }
 
+/// Emit the lineage graph as a Quarto/Markdown-friendly Mermaid block.
+///
+/// The output is deterministic (nodes ordered by their content-addressed
+/// id; edges by `(from, to)` order). Impressions are rendered as cylinder
+/// nodes (`[(...)]`); ideas as rounded nodes (`(...)`).
+///
+/// Escapes embedded `"` to `&quot;` so labels are safe to drop straight
+/// into a Mermaid block.
+pub fn emit_lineage_mermaid(g: &LineageGraph) -> String {
+    fn safe(s: &str) -> String {
+        s.replace('"', "&quot;").replace('\n', " ")
+    }
+    fn short_id(id: &FingerprintId) -> String {
+        // Mermaid node-id must be a valid identifier — use a prefix + hex.
+        format!("n{:016x}", id.0)
+    }
+    let mut out = String::new();
+    out.push_str("```{mermaid}\n");
+    out.push_str(&format!("%%| fig-cap: \"Locke lineage graph for {}.\"\n", safe(&g.run_label)));
+    out.push_str("flowchart LR\n");
+    // Nodes — iterate in BTreeMap (sorted) order for determinism.
+    for (id, node) in &g.nodes {
+        let nid = short_id(id);
+        match node {
+            LineageNode::Impression(imp) => {
+                out.push_str(&format!(
+                    "    {}[(\"{}<br/>id={}<br/>n_rows={}\")]:::imp\n",
+                    nid,
+                    safe(&imp.source),
+                    id,
+                    imp.n_rows
+                ));
+            }
+            LineageNode::Idea(idea) => {
+                out.push_str(&format!(
+                    "    {}([\"{}<br/>op={}<br/>id={}\"]):::idea\n",
+                    nid,
+                    safe(&idea.name),
+                    safe(&idea.transform.op_id),
+                    id
+                ));
+            }
+        }
+    }
+    // Edges — iterate in vector order (already deterministic).
+    for e in &g.edges {
+        out.push_str(&format!(
+            "    {} -->|\"{}\"| {}\n",
+            short_id(&e.from),
+            safe(&e.label),
+            short_id(&e.to)
+        ));
+    }
+    out.push_str("    classDef imp fill:#e8f4fd,stroke:#2196F3,stroke-width:2px\n");
+    out.push_str("    classDef idea fill:#fff3e0,stroke:#FF9800,stroke-width:1px\n");
+    out.push_str("```\n");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,5 +592,56 @@ mod tests {
         let anc = g.ancestors(m);
         assert!(anc.contains(&p));
         assert!(anc.contains(&f));
+    }
+
+    // ── Mermaid emit ────────────────────────────────────────────────────
+
+    fn small_graph() -> LineageGraph {
+        let mut b = LineageBuilder::new("test-run");
+        let p = b.add_impression(imp("train.csv")).unwrap();
+        let f = b.add_idea(idea("filter", vec![p], "filter")).unwrap();
+        let _m = b.add_idea(idea("mean", vec![f], "mean")).unwrap();
+        b.finish()
+    }
+
+    #[test]
+    fn mermaid_emit_starts_with_fenced_block() {
+        let g = small_graph();
+        let s = emit_lineage_mermaid(&g);
+        assert!(s.starts_with("```{mermaid}\n"));
+        assert!(s.ends_with("```\n"));
+    }
+
+    #[test]
+    fn mermaid_emit_contains_flowchart_keyword() {
+        let g = small_graph();
+        let s = emit_lineage_mermaid(&g);
+        assert!(s.contains("flowchart LR"));
+        assert!(s.contains("classDef imp"));
+        assert!(s.contains("classDef idea"));
+    }
+
+    #[test]
+    fn mermaid_emit_is_deterministic() {
+        let a = emit_lineage_mermaid(&small_graph());
+        let b = emit_lineage_mermaid(&small_graph());
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn mermaid_emit_escapes_quotes_in_labels() {
+        let mut b = LineageBuilder::new("test-run");
+        let _p = b
+            .add_impression(LockeImpression::new(
+                "evil\"label",
+                ImpressionKind::Dataset,
+                1,
+                vec!["x".into()],
+            ))
+            .unwrap();
+        let g = b.finish();
+        let s = emit_lineage_mermaid(&g);
+        assert!(s.contains("evil&quot;label"));
+        assert!(!s.contains("evil\"label"));
     }
 }
