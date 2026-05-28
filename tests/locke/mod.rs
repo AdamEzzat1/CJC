@@ -8,6 +8,7 @@ mod validation_tests;
 mod drift_tests;
 mod lineage_tests;
 mod belief_tests;
+mod categorical_tests;
 mod causal_tests;
 mod determinism_tests;
 mod locke_proptest;

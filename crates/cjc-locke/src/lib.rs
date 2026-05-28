@@ -41,6 +41,7 @@
 
 pub mod api;
 pub mod belief;
+pub mod categorical;
 pub mod causal;
 pub mod dispatch;
 pub mod drift;
@@ -90,6 +91,11 @@ pub use validation::{
     detect_missingness, detect_outliers, detect_schema_mismatch, detect_sentinel_values,
     validate_dataframe, ConditionalMissingnessConfig, ExpectedSchema, ImpossibleValueRule,
     NullMask, NullMaskMap, OutlierConfig, SentinelConfig, ValidationConfig,
+};
+pub use categorical::{
+    detect_all_categorical_quality, detect_case_fold_collisions, detect_encoding_risk,
+    detect_near_duplicate_categories, detect_rare_categories,
+    detect_whitespace_punctuation_variants, CategoricalQualityConfig,
 };
 pub use api::{
     belief_report_from_locke, belief_report_from_locke_with_model, causal_guardrail,

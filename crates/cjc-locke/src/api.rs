@@ -170,11 +170,25 @@ pub fn belief_report_from_locke_with_model(
     let schema_score = 1.0
         - penalty_from_findings_with_model(
             &report.findings,
-            |code| code == "E9020" || code == "E9021" || code == "E9022",
+            |code| {
+                // True schema-shape codes
+                code == "E9020" || code == "E9021" || code == "E9022"
+                // v0.6: semantic-category fragmentation (encoding-risk,
+                // case-fold, whitespace, near-duplicate). These weaken the
+                // schema axis because the column's effective alphabet is
+                // ambiguous, even though the row-level types are fine.
+                || code == "E9011" || code == "E9080" || code == "E9081" || code == "E9082"
+            },
             penalty,
         );
     let constraint_score = 1.0
-        - penalty_from_findings_with_model(&report.findings, |code| code == "E9014", penalty);
+        - penalty_from_findings_with_model(
+            &report.findings,
+            // E9014 (legacy constraint) + E9010 (rare-category long-tail
+            // is a distributional constraint risk, not a schema-shape one).
+            |code| code == "E9014" || code == "E9010",
+            penalty,
+        );
     // Drift / leakage / lineage scores are 1.0 here (no signal in single-df flow);
     // they get populated when the caller composes `validate` + `compare` + lineage.
     let drift_score = 1.0;

@@ -1698,6 +1698,13 @@ pub fn validate_dataframe(
     out.extend(detect_outliers(df, &OutlierConfig::default()));
     // v0.4: sentinel-value detection (heuristic, Info severity).
     out.extend(detect_sentinel_values(df, &SentinelConfig::default()));
+    // v0.6: categorical / string semantic quality (E9010 rare,
+    // E9011 encoding-risk, E9080 case-fold, E9081 whitespace,
+    // E9082 near-duplicate).
+    out.extend(crate::categorical::detect_all_categorical_quality(
+        df,
+        &crate::categorical::CategoricalQualityConfig::default(),
+    ));
     if let Some(sch) = expected_schema {
         out.extend(detect_schema_mismatch(df, sch));
     }
