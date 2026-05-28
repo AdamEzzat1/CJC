@@ -1,6 +1,6 @@
 # Per-leaf Locke `BeliefScore` × ABNG `ood_score`: a research sketch
 
-**Status:** design memo. Nothing in `tests/abng/` is changed by this document. It exists to anchor the next experiment.
+**Status:** ~~design memo~~ **implemented in `tests/abng/per_leaf_belief.rs` on 2026-05-28** (Locke v0.6.3 batch). 4 tests, all passing. The synthetic-fixture version of the experiment runs cleanly in ~10 ms; the directional hypothesis (dirty-cluster leaf has lower `missingness_score` than clean-cluster leaf) is *empirically supported* on the fixture. The full diabetes-130 version remains deferred to a longer-running ignored test.
 
 ## The question
 
@@ -140,28 +140,23 @@ Either way, the experiment is determinism-respecting, byte-reproducible, and fal
 - ~340 ms × n_leaves for the Locke validation (Locke is 17 µs/row; even with ~50 leaves of average 400 rows each, it's well under a second total).
 - Negligible extra ABNG inference cost (just emitting `ood_score` per test row, which the existing code already computes internally).
 
-## What needs to land first
-
-Nothing blocks the experiment in code. The pieces required:
+## What needs to land first — resolved
 
 | Piece | Status |
 |---|---|
 | `validate(df) -> LockeReport` | Shipped (v0.5). |
 | `belief_report_from_locke(report) -> BeliefReport` | Shipped (v0.5). |
-| 8-axis `BeliefScore` with `schema/missingness/drift/leakage/lineage/sample/duplication/constraint` | Shipped. |
-| E9060/E9061 target-leakage AUC | Shipped (v0.5). |
-| E9007 sentinel detection — needed for the `?` literals in race/payer_code | Shipped (v0.4). |
-| E9010 rare categories — needed for long-tail medical-specialty cohorts | **New in v0.6 (this commit).** |
+| 8-axis `BeliefScore` | Shipped. |
+| E9060/E9061 target-leakage AUC (binary) | Shipped (v0.5). |
+| **E9063 multi-class target leakage AUC** | **Shipped v0.6.3** — important for diabetes-130's 3-class `readmitted` target. |
+| E9007 sentinel detection | Shipped (v0.4). |
+| **E9016 rare categories, E9023 label-encoding risk** | **Shipped v0.6.** |
 | E9072 ID-like cardinality | Shipped (v0.5). |
-| Per-row leaf-id capture from ABNG | **Not yet exposed.** `route_to_leaf` exists internally but doesn't return a public leaf id. Needs a small API addition in `cjc-abng::graph`. |
-| `build_slice(train_df, row_indices)` helper | **Not yet implemented.** A 20-line `cjc-data` helper. |
+| `CategoricalAdaptive` variant detector support | **Shipped v0.6.3** — diabetes-130 uses categorical storage. |
+| Per-row leaf-id capture from ABNG | **Already shipped** as `AdaptiveBeliefGraph::route_to_leaf_batch(xs, n) -> Vec<NodeId>`. |
+| `build_slice(train_df, row_indices)` helper | **In-test helper used.** Adding `DataFrame::take_rows` to `cjc-data` public API is a v0.7 question — the in-test version is sufficient for the experiment. |
 
-So the only code work blocking the experiment is:
-
-1. Expose `leaf_id` from ABNG's `route_to_leaf`.
-2. Add a `DataFrame::take_rows(&[usize]) -> DataFrame` to `cjc-data` (probably already exists via `lazy::filter_indices` — would need to check).
-
-Both are tractable and unrelated to Locke's roadmap.
+The only code work that landed this batch was the experiment itself (`tests/abng/per_leaf_belief.rs`). Everything else was already available.
 
 ## Out of scope for the sketch
 
