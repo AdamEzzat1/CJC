@@ -1,0 +1,917 @@
+[
+  {
+    "name": "not_null(tenure_months)",
+    "severity": "Error",
+    "success": true,
+    "details": {
+      "element_count": 7023,
+      "unexpected_count": 0,
+      "unexpected_percent": 0.0,
+      "partial_unexpected_list": [],
+      "partial_unexpected_counts": [],
+      "partial_unexpected_index_list": []
+    }
+  },
+  {
+    "name": "not_null(monthly_charges)",
+    "severity": "Error",
+    "success": true,
+    "details": {
+      "element_count": 7023,
+      "unexpected_count": 0,
+      "unexpected_percent": 0.0,
+      "partial_unexpected_list": [],
+      "partial_unexpected_counts": [],
+      "partial_unexpected_index_list": []
+    }
+  },
+  {
+    "name": "not_null(total_charges)",
+    "severity": "Error",
+    "success": false,
+    "details": {
+      "element_count": 7023,
+      "unexpected_count": 100,
+      "unexpected_percent": 1.4238929232521715,
+      "partial_unexpected_list": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "partial_unexpected_counts": [
+        {
+          "value": null,
+          "count": 1
+        },
+        {
+          "value": null,
+          "count": 1
+        },
+        {
+          "value": null,
+          "count": 1
+        },
+        {
+          "value": null,
+          "count": 1
+        },
+        {
+          "value": null,
+          "count": 1
+        },
+        {
+          "value": null,
+          "count": 1
+        },
+        {
+          "value": null,
+          "count": 1
+        },
+        {
+          "value": null,
+          "count": 1
+        },
+        {
+          "value": null,
+          "count": 1
+        },
+        {
+          "value": null,
+          "count": 1
+        },
+        {
+          "value": null,
+          "count": 1
+        },
+        {
+          "value": null,
+          "count": 1
+        },
+        {
+          "value": null,
+          "count": 1
+        },
+        {
+          "value": null,
+          "count": 1
+        },
+        {
+          "value": null,
+          "count": 1
+        },
+        {
+          "value": null,
+          "count": 1
+        },
+        {
+          "value": null,
+          "count": 1
+        },
+        {
+          "value": null,
+          "count": 1
+        },
+        {
+          "value": null,
+          "count": 1
+        },
+        {
+          "value": null,
+          "count": 1
+        }
+      ],
+      "partial_unexpected_index_list": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19
+      ]
+    }
+  },
+  {
+    "name": "not_null(last_login_unix)",
+    "severity": "Error",
+    "success": true,
+    "details": {
+      "element_count": 7023,
+      "unexpected_count": 0,
+      "unexpected_percent": 0.0,
+      "partial_unexpected_list": [],
+      "partial_unexpected_counts": [],
+      "partial_unexpected_index_list": []
+    }
+  },
+  {
+    "name": "not_null(churned)",
+    "severity": "Error",
+    "success": true,
+    "details": {
+      "element_count": 7023,
+      "unexpected_count": 0,
+      "unexpected_percent": 0.0,
+      "partial_unexpected_list": [],
+      "partial_unexpected_counts": [],
+      "partial_unexpected_index_list": []
+    }
+  },
+  {
+    "name": "monthly_charges_in_range[-100,500]",
+    "severity": "Error",
+    "success": false,
+    "details": {
+      "element_count": 7023,
+      "unexpected_count": 5,
+      "unexpected_percent": 0.07119464616260858,
+      "partial_unexpected_list": [
+        -9999.0,
+        -9999.0,
+        -9999.0,
+        -9999.0,
+        -9999.0
+      ],
+      "missing_count": 0,
+      "missing_percent": 0.0,
+      "unexpected_percent_total": 0.07119464616260858,
+      "unexpected_percent_nonmissing": 0.07119464616260858,
+      "partial_unexpected_counts": [
+        {
+          "value": -9999.0,
+          "count": 5
+        }
+      ],
+      "partial_unexpected_index_list": [
+        150,
+        151,
+        152,
+        153,
+        154
+      ]
+    }
+  },
+  {
+    "name": "tenure_months_in_range[0,200]",
+    "severity": "Warning",
+    "success": false,
+    "details": {
+      "element_count": 7023,
+      "unexpected_count": 17,
+      "unexpected_percent": 0.24206179695286917,
+      "partial_unexpected_list": [
+        250,
+        251,
+        252,
+        253,
+        254,
+        255,
+        256,
+        257,
+        258,
+        259,
+        260,
+        261,
+        262,
+        263,
+        264,
+        265,
+        266
+      ],
+      "missing_count": 0,
+      "missing_percent": 0.0,
+      "unexpected_percent_total": 0.24206179695286917,
+      "unexpected_percent_nonmissing": 0.24206179695286917,
+      "partial_unexpected_counts": [
+        {
+          "value": 250,
+          "count": 1
+        },
+        {
+          "value": 251,
+          "count": 1
+        },
+        {
+          "value": 252,
+          "count": 1
+        },
+        {
+          "value": 253,
+          "count": 1
+        },
+        {
+          "value": 254,
+          "count": 1
+        },
+        {
+          "value": 255,
+          "count": 1
+        },
+        {
+          "value": 256,
+          "count": 1
+        },
+        {
+          "value": 257,
+          "count": 1
+        },
+        {
+          "value": 258,
+          "count": 1
+        },
+        {
+          "value": 259,
+          "count": 1
+        },
+        {
+          "value": 260,
+          "count": 1
+        },
+        {
+          "value": 261,
+          "count": 1
+        },
+        {
+          "value": 262,
+          "count": 1
+        },
+        {
+          "value": 263,
+          "count": 1
+        },
+        {
+          "value": 264,
+          "count": 1
+        },
+        {
+          "value": 265,
+          "count": 1
+        },
+        {
+          "value": 266,
+          "count": 1
+        }
+      ],
+      "partial_unexpected_index_list": [
+        200,
+        201,
+        202,
+        203,
+        204,
+        205,
+        206,
+        207,
+        208,
+        209,
+        210,
+        211,
+        212,
+        213,
+        214,
+        215,
+        216
+      ]
+    }
+  },
+  {
+    "name": "full_row_unique",
+    "severity": "Error",
+    "success": false,
+    "details": {
+      "element_count": 7023,
+      "unexpected_count": 46,
+      "unexpected_percent": 0.6549907446959988,
+      "partial_unexpected_list": [
+        {
+          "customer_id": 101000,
+          "tenure_months": 1,
+          "monthly_charges": 65.15,
+          "total_charges": 109.53,
+          "country": "DE",
+          "plan": "standard",
+          "last_login_unix": 1686397736,
+          "churned": 1
+        },
+        {
+          "customer_id": 101001,
+          "tenure_months": 38,
+          "monthly_charges": 50.11,
+          "total_charges": 1922.1,
+          "country": "US",
+          "plan": "standard",
+          "last_login_unix": 1686485183,
+          "churned": 0
+        },
+        {
+          "customer_id": 101002,
+          "tenure_months": 68,
+          "monthly_charges": 115.8,
+          "total_charges": 7862.54,
+          "country": "FR",
+          "plan": "premium",
+          "last_login_unix": 1686570412,
+          "churned": 1
+        },
+        {
+          "customer_id": 101003,
+          "tenure_months": 51,
+          "monthly_charges": 25.3,
+          "total_charges": 1274.73,
+          "country": "BR",
+          "plan": "standard",
+          "last_login_unix": 1686659317,
+          "churned": 0
+        },
+        {
+          "customer_id": 101004,
+          "tenure_months": 20,
+          "monthly_charges": 55.24,
+          "total_charges": 1107.27,
+          "country": "UK",
+          "plan": "standard",
+          "last_login_unix": 1686745411,
+          "churned": 0
+        },
+        {
+          "customer_id": 101005,
+          "tenure_months": 52,
+          "monthly_charges": 86.98,
+          "total_charges": 4528.13,
+          "country": "JP",
+          "plan": "standard",
+          "last_login_unix": 1686829117,
+          "churned": 0
+        },
+        {
+          "customer_id": 101006,
+          "tenure_months": 11,
+          "monthly_charges": 36.8,
+          "total_charges": 360.6,
+          "country": "BR",
+          "plan": "premium",
+          "last_login_unix": 1686915035,
+          "churned": 1
+        },
+        {
+          "customer_id": 101007,
+          "tenure_months": 47,
+          "monthly_charges": 90.83,
+          "total_charges": 4309.21,
+          "country": "DE",
+          "plan": "basic",
+          "last_login_unix": 1687001469,
+          "churned": 0
+        },
+        {
+          "customer_id": 101008,
+          "tenure_months": 12,
+          "monthly_charges": 81.14,
+          "total_charges": 962.18,
+          "country": "CA",
+          "plan": "premium",
+          "last_login_unix": 1687091533,
+          "churned": 0
+        },
+        {
+          "customer_id": 101009,
+          "tenure_months": 5,
+          "monthly_charges": 87.96,
+          "total_charges": 404.11,
+          "country": "JP",
+          "plan": "premium",
+          "last_login_unix": 1687177955,
+          "churned": 1
+        },
+        {
+          "customer_id": 101010,
+          "tenure_months": 70,
+          "monthly_charges": 70.48,
+          "total_charges": 4921.81,
+          "country": "DE",
+          "plan": "premium",
+          "last_login_unix": 1687263544,
+          "churned": 1
+        },
+        {
+          "customer_id": 101011,
+          "tenure_months": 49,
+          "monthly_charges": 42.32,
+          "total_charges": 2122.28,
+          "country": "CA",
+          "plan": "basic",
+          "last_login_unix": 1687349695,
+          "churned": 0
+        },
+        {
+          "customer_id": 101012,
+          "tenure_months": 43,
+          "monthly_charges": 36.9,
+          "total_charges": 1556.59,
+          "country": "UK",
+          "plan": "basic",
+          "last_login_unix": 1687438426,
+          "churned": 1
+        },
+        {
+          "customer_id": 101013,
+          "tenure_months": 45,
+          "monthly_charges": 80.0,
+          "total_charges": 3578.87,
+          "country": "JP",
+          "plan": "premium",
+          "last_login_unix": 1687523122,
+          "churned": 1
+        },
+        {
+          "customer_id": 101014,
+          "tenure_months": 64,
+          "monthly_charges": 70.94,
+          "total_charges": 4525.86,
+          "country": "CA",
+          "plan": "standard",
+          "last_login_unix": 1687612371,
+          "churned": 0
+        },
+        {
+          "customer_id": 101015,
+          "tenure_months": 3,
+          "monthly_charges": 79.96,
+          "total_charges": 199.08,
+          "country": "DE",
+          "plan": "basic",
+          "last_login_unix": 1687695984,
+          "churned": 1
+        },
+        {
+          "customer_id": 101016,
+          "tenure_months": 4,
+          "monthly_charges": 48.55,
+          "total_charges": 157.54,
+          "country": "FR",
+          "plan": "standard",
+          "last_login_unix": 1687783001,
+          "churned": 0
+        },
+        {
+          "customer_id": 101017,
+          "tenure_months": 15,
+          "monthly_charges": 34.27,
+          "total_charges": 520.65,
+          "country": "UK",
+          "plan": "basic",
+          "last_login_unix": 1687869665,
+          "churned": 0
+        },
+        {
+          "customer_id": 101018,
+          "tenure_months": 14,
+          "monthly_charges": 39.6,
+          "total_charges": 550.71,
+          "country": "AU",
+          "plan": "standard",
+          "last_login_unix": 1687955396,
+          "churned": 0
+        },
+        {
+          "customer_id": 101019,
+          "tenure_months": 47,
+          "monthly_charges": 119.42,
+          "total_charges": 5613.56,
+          "country": "FR",
+          "plan": "standard",
+          "last_login_unix": 1688039022,
+          "churned": 0
+        }
+      ],
+      "missing_count": 0,
+      "missing_percent": 0.0,
+      "unexpected_percent_total": 0.6549907446959988,
+      "unexpected_percent_nonmissing": 0.6549907446959988,
+      "partial_unexpected_counts": [
+        {
+          "value": [
+            101000,
+            1,
+            65.15,
+            109.53,
+            "DE",
+            "standard",
+            1686397736,
+            1
+          ],
+          "count": 1
+        },
+        {
+          "value": [
+            101001,
+            38,
+            50.11,
+            1922.1,
+            "US",
+            "standard",
+            1686485183,
+            0
+          ],
+          "count": 1
+        },
+        {
+          "value": [
+            101002,
+            68,
+            115.8,
+            7862.54,
+            "FR",
+            "premium",
+            1686570412,
+            1
+          ],
+          "count": 1
+        },
+        {
+          "value": [
+            101003,
+            51,
+            25.3,
+            1274.73,
+            "BR",
+            "standard",
+            1686659317,
+            0
+          ],
+          "count": 1
+        },
+        {
+          "value": [
+            101004,
+            20,
+            55.24,
+            1107.27,
+            "UK",
+            "standard",
+            1686745411,
+            0
+          ],
+          "count": 1
+        },
+        {
+          "value": [
+            101005,
+            52,
+            86.98,
+            4528.13,
+            "JP",
+            "standard",
+            1686829117,
+            0
+          ],
+          "count": 1
+        },
+        {
+          "value": [
+            101006,
+            11,
+            36.8,
+            360.6,
+            "BR",
+            "premium",
+            1686915035,
+            1
+          ],
+          "count": 1
+        },
+        {
+          "value": [
+            101007,
+            47,
+            90.83,
+            4309.21,
+            "DE",
+            "basic",
+            1687001469,
+            0
+          ],
+          "count": 1
+        },
+        {
+          "value": [
+            101008,
+            12,
+            81.14,
+            962.18,
+            "CA",
+            "premium",
+            1687091533,
+            0
+          ],
+          "count": 1
+        },
+        {
+          "value": [
+            101009,
+            5,
+            87.96,
+            404.11,
+            "JP",
+            "premium",
+            1687177955,
+            1
+          ],
+          "count": 1
+        },
+        {
+          "value": [
+            101010,
+            70,
+            70.48,
+            4921.81,
+            "DE",
+            "premium",
+            1687263544,
+            1
+          ],
+          "count": 1
+        },
+        {
+          "value": [
+            101011,
+            49,
+            42.32,
+            2122.28,
+            "CA",
+            "basic",
+            1687349695,
+            0
+          ],
+          "count": 1
+        },
+        {
+          "value": [
+            101012,
+            43,
+            36.9,
+            1556.59,
+            "UK",
+            "basic",
+            1687438426,
+            1
+          ],
+          "count": 1
+        },
+        {
+          "value": [
+            101013,
+            45,
+            80.0,
+            3578.87,
+            "JP",
+            "premium",
+            1687523122,
+            1
+          ],
+          "count": 1
+        },
+        {
+          "value": [
+            101014,
+            64,
+            70.94,
+            4525.86,
+            "CA",
+            "standard",
+            1687612371,
+            0
+          ],
+          "count": 1
+        },
+        {
+          "value": [
+            101015,
+            3,
+            79.96,
+            199.08,
+            "DE",
+            "basic",
+            1687695984,
+            1
+          ],
+          "count": 1
+        },
+        {
+          "value": [
+            101016,
+            4,
+            48.55,
+            157.54,
+            "FR",
+            "standard",
+            1687783001,
+            0
+          ],
+          "count": 1
+        },
+        {
+          "value": [
+            101017,
+            15,
+            34.27,
+            520.65,
+            "UK",
+            "basic",
+            1687869665,
+            0
+          ],
+          "count": 1
+        },
+        {
+          "value": [
+            101018,
+            14,
+            39.6,
+            550.71,
+            "AU",
+            "standard",
+            1687955396,
+            0
+          ],
+          "count": 1
+        },
+        {
+          "value": [
+            101019,
+            47,
+            119.42,
+            5613.56,
+            "FR",
+            "standard",
+            1688039022,
+            0
+          ],
+          "count": 1
+        }
+      ],
+      "partial_unexpected_index_list": [
+        1000,
+        1001,
+        1002,
+        1003,
+        1004,
+        1005,
+        1006,
+        1007,
+        1008,
+        1009,
+        1010,
+        1011,
+        1012,
+        1013,
+        1014,
+        1015,
+        1016,
+        1017,
+        1018,
+        1019
+      ]
+    }
+  },
+  {
+    "name": "plan_in_set",
+    "severity": "Error",
+    "success": true,
+    "details": {
+      "observed_value": null,
+      "unexpected_count": 0,
+      "partial_unexpected_list": []
+    }
+  },
+  {
+    "name": "country_in_set",
+    "severity": "Error",
+    "success": true,
+    "details": {
+      "observed_value": null,
+      "unexpected_count": 0,
+      "partial_unexpected_list": []
+    }
+  },
+  {
+    "name": "tenure_mean_in_range",
+    "severity": "Info",
+    "success": true,
+    "details": {
+      "observed_value": 37.093834543642316
+    }
+  },
+  {
+    "name": "last_login_unix_increasing",
+    "severity": "Warning",
+    "success": false,
+    "details": {
+      "element_count": 7023,
+      "unexpected_count": 1,
+      "unexpected_percent": 0.014238929232521716,
+      "partial_unexpected_list": [
+        1686397736
+      ],
+      "missing_count": 0,
+      "missing_percent": 0.0,
+      "unexpected_percent_total": 0.014238929232521716,
+      "unexpected_percent_nonmissing": 0.014238929232521716,
+      "partial_unexpected_counts": [
+        {
+          "value": 1686397736,
+          "count": 1
+        }
+      ],
+      "partial_unexpected_index_list": [
+        7000
+      ]
+    }
+  },
+  {
+    "name": "churned_binary",
+    "severity": "Info",
+    "success": true,
+    "details": {
+      "element_count": 7023,
+      "unexpected_count": 0,
+      "unexpected_percent": 0.0,
+      "partial_unexpected_list": [],
+      "missing_count": 0,
+      "missing_percent": 0.0,
+      "unexpected_percent_total": 0.0,
+      "unexpected_percent_nonmissing": 0.0,
+      "partial_unexpected_counts": [],
+      "partial_unexpected_index_list": []
+    }
+  }
+]
