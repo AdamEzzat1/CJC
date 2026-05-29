@@ -41,7 +41,8 @@ use cjc_abng::graph::AdaptiveBeliefGraph;
 use cjc_data::{Column, DataFrame};
 use cjc_locke::{
     api::{belief_report_from_locke, validate, ValidateOptions},
-    compose_many_arithmetic, compose_weighted, BeliefScore, ValidationConfig,
+    compose_many_arithmetic, compose_weighted, BeliefScore, NullMask, NullMaskMap,
+    ValidationConfig,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -450,4 +451,171 @@ fn diabetes130_per_leaf_belief_csv_is_deterministic() {
         .join("target")
         .join("diabetes_per_leaf_belief.csv");
     let _ = std::fs::write(&out_path, &csv_a);
+}
+
+// ─── Phase 0.10 §4.D part 1 — `?`-aware per-leaf belief ────────────────
+//
+// The baseline `per_leaf_belief` function (used above) calls Locke's
+// `validate()` with no `null_masks`. Locke's default treats only
+// `f64::NAN` (Float columns) as missing — so the diabetes-130
+// convention of storing missingness as the literal `?` string in
+// `Str` columns goes unnoticed. The per-leaf BeliefScore ends up with
+// `missingness_score = 1.0` on every leaf (= "no missingness
+// detected"), which is technically correct under the default config
+// but useless as a data-quality signal.
+//
+// §4.D requires per-leaf BeliefScore to carry information so that a
+// future "weight per-leaf prior by belief" step has a meaningful
+// signal to weight by. This part 1 wires `?`-aware NullMasks into the
+// per-leaf belief computation. Part 2 (deferred — needs new ABNG
+// plumbing for per-leaf priors) would consume these informative
+// belief vectors.
+
+/// Build a `NullMaskMap` that marks rows where the value of any
+/// `Str` column equals the diabetes-130 missing sentinel (`?`).
+/// Numeric / Bool / Int columns aren't included because Locke handles
+/// `f64::NAN` natively for them — and the build_dataframe loader
+/// already maps `?`-in-numeric to NaN.
+fn build_question_mark_null_masks(df: &DataFrame) -> NullMaskMap {
+    let mut out = NullMaskMap::new();
+    for (name, col) in df.columns.iter() {
+        if let Column::Str(values) = col {
+            let null_rows: Vec<usize> = values
+                .iter()
+                .enumerate()
+                .filter_map(|(i, v)| if v == "?" { Some(i) } else { None })
+                .collect();
+            if !null_rows.is_empty() {
+                out.insert(name.clone(), NullMask::from_indices(null_rows));
+            }
+        }
+    }
+    out
+}
+
+/// Per-leaf BeliefScore using `?`-aware `NullMasks`. Re-maps the
+/// full-DataFrame null indices to the leaf-slice index space.
+fn per_leaf_belief_with_masks(
+    df: &DataFrame,
+    leaves: &[u32],
+    full_null_masks: &NullMaskMap,
+) -> BTreeMap<u32, (BeliefScore, usize)> {
+    let buckets = bucket_by_leaf(leaves);
+    let mut out: BTreeMap<u32, (BeliefScore, usize)> = BTreeMap::new();
+    for (leaf_id, indices) in &buckets {
+        if indices.len() < MIN_ROWS_PER_LEAF {
+            continue;
+        }
+        let slice = take_rows(df, indices);
+
+        // Build a lookup from full-DataFrame index → leaf-slice index.
+        // The leaf is a contiguous subset of `df`'s rows in `indices`'
+        // order, so `index_lookup[old_idx] = position-of-old_idx-in-indices`.
+        let mut index_lookup: BTreeMap<usize, usize> = BTreeMap::new();
+        for (new, &old) in indices.iter().enumerate() {
+            index_lookup.insert(old, new);
+        }
+
+        // Re-map each full-DataFrame NullMask to the leaf slice's
+        // index space. Only the rows that actually land in this leaf
+        // contribute to the per-leaf NullMask.
+        let mut leaf_null_masks = NullMaskMap::new();
+        for (col_name, mask) in full_null_masks {
+            let remapped: Vec<usize> = mask
+                .null_rows
+                .iter()
+                .filter_map(|old| index_lookup.get(old).copied())
+                .collect();
+            if !remapped.is_empty() {
+                leaf_null_masks
+                    .insert(col_name.clone(), NullMask::from_indices(remapped));
+            }
+        }
+
+        let opts = ValidateOptions {
+            dataset_label: format!("leaf_{}", leaf_id),
+            config: ValidationConfig::default(),
+            null_masks: leaf_null_masks,
+            ..Default::default()
+        };
+        let report = validate(&slice, &opts);
+        let belief = belief_report_from_locke(&report);
+        out.insert(*leaf_id, (belief.score, indices.len()));
+    }
+    out
+}
+
+#[test]
+#[ignore = "diabetes-130 dataset not in CI; run with --ignored"]
+fn diabetes130_per_leaf_belief_with_question_marks() {
+    let Some(rows) = load_dataset() else {
+        eprintln!("dataset not found at {DATASET_REL_PATH}; skipping");
+        return;
+    };
+    let subset = stratified_subsample(&rows, SUBSAMPLE_ROWS, SEED);
+    let df = build_dataframe(&rows, &subset);
+    let g = build_routing_graph();
+    let leaves = route_all_rows(&g, &df);
+
+    let null_masks = build_question_mark_null_masks(&df);
+
+    // The `weight` column is documented to be ~97% `?` in diabetes-130;
+    // the null mask for it must be non-empty.
+    assert!(
+        null_masks.contains_key("weight"),
+        "build_question_mark_null_masks did not mark any `?` in `weight`"
+    );
+    let weight_null_count = null_masks["weight"].count();
+    let weight_total = df.nrows() as u64;
+    let weight_null_rate = weight_null_count as f64 / weight_total as f64;
+    assert!(
+        weight_null_rate > 0.90,
+        "expected `weight` to be > 90% `?`, got {:.4}",
+        weight_null_rate
+    );
+
+    let per_leaf_aware = per_leaf_belief_with_masks(&df, &leaves, &null_masks);
+    let per_leaf_naive = per_leaf_belief(&df, &leaves);
+
+    // Hypothesis: the `?`-aware variant produces a *different*
+    // missingness_score on at least one leaf — proving the
+    // ValidationConfig fix is the actual blocker for §4.D part 2.
+    let mut any_diff = false;
+    let mut min_aware_score = 1.0_f64;
+    for (lid, (aware, _)) in &per_leaf_aware {
+        if let Some((naive, _)) = per_leaf_naive.get(lid) {
+            if (aware.missingness_score - naive.missingness_score).abs() > 1e-6 {
+                any_diff = true;
+            }
+            min_aware_score = min_aware_score.min(aware.missingness_score);
+        }
+    }
+    assert!(
+        any_diff,
+        "?-aware belief vector identical to naive — null masks did not flow through to Locke"
+    );
+    assert!(
+        min_aware_score < 1.0,
+        "minimum ?-aware missingness_score = {} (expected < 1.0 — `?`-heavy `weight` column should pull it down)",
+        min_aware_score
+    );
+
+    let csv = emit_per_leaf_csv(&per_leaf_aware);
+    eprintln!(
+        "\ndiabetes130_per_leaf_belief_with_question_marks:\n  n_subsample={} n_columns_with_?={} weight_?_rate={:.4}\n  min_missingness_aware={:.4} min_missingness_naive={:.4}\n",
+        df.nrows(),
+        null_masks.len(),
+        weight_null_rate,
+        min_aware_score,
+        per_leaf_naive
+            .values()
+            .map(|(b, _)| b.missingness_score)
+            .fold(1.0_f64, f64::min),
+    );
+    eprint!("{}", csv);
+
+    let out_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("diabetes_per_leaf_belief_with_question_marks.csv");
+    let _ = std::fs::write(&out_path, &csv);
 }
