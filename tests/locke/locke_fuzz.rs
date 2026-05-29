@@ -307,3 +307,84 @@ fn fuzz_mermaid_emit_arbitrary_label_never_panics() {
             assert_eq!(out, out2);
         });
 }
+
+// ─── v0.6.4 — auto-sentinel + E9064 structural fuzz ─────────────────────
+
+/// Arbitrary `Vec<String>` may include any byte sequence — Bolero
+/// will generate empty strings, whitespace, unicode, near-sentinels,
+/// real sentinels, anything. The detector must never panic and the
+/// returned mask must be bounded by the input length.
+#[test]
+fn fuzz_auto_sentinel_never_panics() {
+    bolero::check!()
+        .with_type::<Vec<String>>()
+        .for_each(|v: &Vec<String>| {
+            if v.is_empty() {
+                return;
+            }
+            let df = DataFrame::from_columns(vec![(
+                "x".into(),
+                Column::Str(v.clone()),
+            )])
+            .unwrap();
+            let cfg = ValidationConfig::default();
+            let (masks, findings) = cjc_locke::detect_string_sentinels(&df, &cfg);
+            // Invariants:
+            // - mask null-row count never exceeds input length
+            if let Some(m) = masks.get("x") {
+                assert!(m.null_rows.len() <= v.len());
+                // - every row index is in [0, len)
+                for r in &m.null_rows {
+                    assert!(*r < v.len());
+                }
+            }
+            // - at most one E9008 finding per column (we have one column)
+            assert!(findings.iter().filter(|f| f.code == "E9008").count() <= 1);
+            // - opt-out path never panics either
+            let off = ValidationConfig { auto_detect_sentinels: false, ..Default::default() };
+            let (m_off, f_off) = cjc_locke::detect_string_sentinels(&df, &off);
+            assert!(m_off.is_empty());
+            assert!(f_off.is_empty());
+        });
+}
+
+/// Arbitrary `(Vec<i64>, Vec<i64>)` for E9064. Detector must never
+/// panic; emitted findings must carry the required evidence fields.
+#[test]
+fn fuzz_e9064_never_panics() {
+    bolero::check!()
+        .with_type::<(Vec<i64>, Vec<i64>)>()
+        .for_each(|(col, target): &(Vec<i64>, Vec<i64>)| {
+            let n = col.len().min(target.len());
+            if n == 0 {
+                return;
+            }
+            let df = DataFrame::from_columns(vec![
+                ("col".into(), Column::Int(col[..n].to_vec())),
+                ("y".into(), Column::Int(target[..n].to_vec())),
+            ])
+            .unwrap();
+            let cfg = cjc_locke::PerLevelLeakageConfig::default();
+            let findings = cjc_locke::detect_per_level_target_leakage(&df, "y", &cfg);
+            // Every E9064 finding must carry support + p_class_given_level
+            // + base_rate evidence.
+            for f in findings.iter().filter(|f| f.code == "E9064") {
+                let has_metric = |label: &str| {
+                    f.evidence.iter().any(|e| matches!(e,
+                        cjc_locke::FindingEvidence::Metric { label: l, .. } if l == label))
+                };
+                let has_count = |label: &str| {
+                    f.evidence.iter().any(|e| matches!(e,
+                        cjc_locke::FindingEvidence::Count { label: l, .. } if l == label))
+                };
+                assert!(has_metric("p_class_given_level"));
+                assert!(has_metric("base_rate"));
+                assert!(has_count("support"));
+                // Severity is Error per spec.
+                assert!(matches!(f.severity, cjc_locke::FindingSeverity::Error));
+            }
+            // Two consecutive runs are byte-identical.
+            let again = cjc_locke::detect_per_level_target_leakage(&df, "y", &cfg);
+            assert_eq!(findings, again);
+        });
+}

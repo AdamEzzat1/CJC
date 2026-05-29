@@ -362,3 +362,136 @@ fn arb_belief_score() -> impl Strategy<Value = cjc_locke::BeliefScore> {
             cjc_locke::BeliefScore::from_dimensions(a, b, c, d, e, f, g, h)
         })
 }
+
+// ─── v0.6.4 — auto-sentinel + E9064 properties ──────────────────────────
+
+/// Random sentinel value chosen from the built-in list.
+fn arb_sentinel_choice() -> impl Strategy<Value = &'static str> {
+    prop::sample::select(cjc_locke::BUILTIN_STRING_SENTINELS.to_vec())
+}
+
+/// A vector of strings where some fraction are sentinels and the rest
+/// are arbitrary "real" tokens.
+fn arb_mixed_str_col(n: usize, sentinel_prob_pct: u8) -> impl Strategy<Value = Vec<String>> {
+    prop::collection::vec(
+        (0u8..100, arb_sentinel_choice(), "[a-z]{1,5}"),
+        n..=n,
+    )
+    .prop_map(move |xs| {
+        xs.into_iter()
+            .map(|(p, sent, real)| {
+                if p < sentinel_prob_pct {
+                    sent.to_string()
+                } else {
+                    real
+                }
+            })
+            .collect()
+    })
+}
+
+proptest! {
+    /// Auto-sentinel detection is deterministic — same input always
+    /// produces the same mask and the same E9008 findings (canonical
+    /// byte-for-byte).
+    #[test]
+    fn sentinel_detection_is_deterministic_under_arbitrary_str_input(
+        v in arb_mixed_str_col(20, 40),
+    ) {
+        let df = cjc_data::DataFrame::from_columns(vec![(
+            "x".into(),
+            cjc_data::Column::Str(v),
+        )])
+        .unwrap();
+        let cfg = cjc_locke::ValidationConfig::default();
+        let (m1, f1) = cjc_locke::detect_string_sentinels(&df, &cfg);
+        let (m2, f2) = cjc_locke::detect_string_sentinels(&df, &cfg);
+        prop_assert_eq!(m1, m2);
+        prop_assert_eq!(f1, f2);
+    }
+
+    /// Detected sentinel count never exceeds row count.
+    #[test]
+    fn sentinel_count_bounded_by_row_count(
+        v in arb_mixed_str_col(30, 70),
+    ) {
+        let n = v.len() as u64;
+        let df = cjc_data::DataFrame::from_columns(vec![(
+            "x".into(),
+            cjc_data::Column::Str(v),
+        )])
+        .unwrap();
+        let (masks, _) = cjc_locke::detect_string_sentinels(
+            &df,
+            &cjc_locke::ValidationConfig::default(),
+        );
+        let detected = masks
+            .get("x")
+            .map(|m| m.null_rows.len() as u64)
+            .unwrap_or(0);
+        prop_assert!(detected <= n);
+    }
+
+    /// Opt-out is monotonic — disabling auto-detect can only REMOVE
+    /// findings, never add them.
+    #[test]
+    fn opt_out_only_removes_e9008_findings(
+        v in arb_mixed_str_col(20, 50),
+    ) {
+        let df = cjc_data::DataFrame::from_columns(vec![(
+            "x".into(),
+            cjc_data::Column::Str(v),
+        )])
+        .unwrap();
+        let on = cjc_locke::ValidationConfig::default();
+        let off = cjc_locke::ValidationConfig {
+            auto_detect_sentinels: false,
+            ..Default::default()
+        };
+        let (_, f_on) = cjc_locke::detect_string_sentinels(&df, &on);
+        let (_, f_off) = cjc_locke::detect_string_sentinels(&df, &off);
+        prop_assert!(f_off.is_empty());
+        prop_assert!(f_on.iter().all(|f| f.code == "E9008"));
+    }
+
+    /// E9064 is deterministic on synthetic (column, target) pairs.
+    #[test]
+    fn e9064_deterministic_on_arbitrary_int_columns(
+        col in prop::collection::vec(0_i64..5, 30..60),
+        target in prop::collection::vec(0_i64..3, 30..60),
+    ) {
+        // Equalise lengths.
+        let n = col.len().min(target.len());
+        let df = cjc_data::DataFrame::from_columns(vec![
+            ("col".into(), cjc_data::Column::Int(col[..n].to_vec())),
+            ("y".into(), cjc_data::Column::Int(target[..n].to_vec())),
+        ])
+        .unwrap();
+        let cfg = cjc_locke::PerLevelLeakageConfig::default();
+        let a = cjc_locke::detect_per_level_target_leakage(&df, "y", &cfg);
+        let b = cjc_locke::detect_per_level_target_leakage(&df, "y", &cfg);
+        prop_assert_eq!(a, b);
+    }
+
+    /// Raising `min_support` is monotonic in the suppression direction:
+    /// a higher threshold never produces MORE findings than a lower one.
+    #[test]
+    fn e9064_higher_min_support_never_adds_findings(
+        col in prop::collection::vec(0_i64..5, 40..80),
+        target in prop::collection::vec(0_i64..3, 40..80),
+        low in 1_u64..6,
+        delta in 1_u64..20,
+    ) {
+        let n = col.len().min(target.len());
+        let df = cjc_data::DataFrame::from_columns(vec![
+            ("col".into(), cjc_data::Column::Int(col[..n].to_vec())),
+            ("y".into(), cjc_data::Column::Int(target[..n].to_vec())),
+        ])
+        .unwrap();
+        let cfg_low = cjc_locke::PerLevelLeakageConfig { min_support: low, ..Default::default() };
+        let cfg_high = cjc_locke::PerLevelLeakageConfig { min_support: low + delta, ..Default::default() };
+        let n_low = cjc_locke::detect_per_level_target_leakage(&df, "y", &cfg_low).len();
+        let n_high = cjc_locke::detect_per_level_target_leakage(&df, "y", &cfg_high).len();
+        prop_assert!(n_high <= n_low);
+    }
+}

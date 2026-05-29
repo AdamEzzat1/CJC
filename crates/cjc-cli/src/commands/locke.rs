@@ -301,12 +301,26 @@ fn cmd_validate(
             &df, tg, &lcfg,
         ));
         extra.extend(cjc_locke::detect_imbalanced_target(&df, tg, 0.05));
+        // v0.6.4 — per-level deterministic-outcome leakage (E9064).
+        // Complements E9063: catches level-by-level leakage that
+        // column-wide ROC AUC misses (motivating example: diabetes-130
+        // discharge_disposition_id death codes → readmitted=NO).
+        let per_level_cfg = cjc_locke::PerLevelLeakageConfig::default();
+        extra.extend(cjc_locke::detect_per_level_target_leakage(
+            &df, tg, &per_level_cfg,
+        ));
     }
     // Always-on v0.5 additions:
-    extra.extend(cjc_locke::detect_conditional_missingness(
-        &df,
-        &cjc_locke::ConditionalMissingnessConfig::default(),
-    ));
+    // v0.6.4 — auto-detect string sentinels so the conditional-missingness
+    // pairwise check sees `?`, `NA`, `NULL`, etc. on Str columns. Without
+    // this, a column like diabetes-130's `weight` (96.9% `?`) is invisible
+    // to the implication detector even when the user supplied a target.
+    let cm_cfg = cjc_locke::ConditionalMissingnessConfig::default();
+    let (auto_masks_cm, _) =
+        cjc_locke::detect_string_sentinels(&df, &cjc_locke::ValidationConfig::default());
+    let cm_masks =
+        cjc_locke::merge_null_mask_maps(&cjc_locke::NullMaskMap::new(), &auto_masks_cm);
+    extra.extend(cjc_locke::detect_conditional_missingness(&df, &cm_cfg, &cm_masks));
     extra.extend(cjc_locke::leakage::detect_id_like_columns(
         &df,
         &cjc_locke::leakage::LeakageConfig::default(),

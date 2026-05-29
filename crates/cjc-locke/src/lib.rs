@@ -97,9 +97,10 @@ pub use validation::{
     detect_duplicate_key_conditioning, detect_duplicate_keys, detect_duplicates_full_row,
     detect_high_cardinality_categorical, detect_imbalanced_target, detect_impossible_values,
     detect_label_encoding_risk, detect_missingness, detect_outliers, detect_schema_mismatch,
-    detect_sentinel_values, validate_dataframe, ConditionalMissingnessConfig, ExpectedSchema,
-    ImpossibleValueRule, LabelEncodingRiskConfig, NullMask, NullMaskMap, OutlierConfig,
-    SentinelConfig, ValidationConfig,
+    detect_sentinel_values, detect_string_sentinels, merge_null_mask_maps, validate_dataframe,
+    BUILTIN_STRING_SENTINELS, ConditionalMissingnessConfig, ExpectedSchema, ImpossibleValueRule,
+    LabelEncodingRiskConfig, NullMask, NullMaskMap, OutlierConfig, SentinelConfig,
+    ValidationConfig,
 };
 pub use categorical::{
     detect_all_categorical_quality, detect_case_fold_collisions, detect_confusable_scripts,
@@ -118,8 +119,8 @@ pub use pii::{
 pub use shape::{detect_distribution_shape, skew_and_kurtosis, top_k_modes, ShapeConfig};
 pub use temporal::{detect_seasonality, SeasonalityConfig};
 pub use leakage::{
-    detect_target_leakage, detect_target_leakage_multiclass, multiclass_max_one_vs_rest_auc,
-    LeakageConfig,
+    detect_per_level_target_leakage, detect_target_leakage, detect_target_leakage_multiclass,
+    multiclass_max_one_vs_rest_auc, LeakageConfig, PerLevelLeakageConfig,
 };
 pub use api::{
     belief_report_from_locke, belief_report_from_locke_with_model, causal_guardrail,

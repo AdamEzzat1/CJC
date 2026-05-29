@@ -17,6 +17,7 @@ mod locke_proptest;
 mod locke_fuzz;
 mod language_builtins;
 mod multiclass_leakage_tests;
+mod sentinel_e9064_tests;
 mod pii_tests;
 mod seasonality_tests;
 mod shape_tests;

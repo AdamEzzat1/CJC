@@ -122,6 +122,33 @@ Net delta: cjc-locke 217 lib (was 197, +20) + tests/locke 103 (was 89, +14) + cj
 
 Net delta: cjc-locke --lib **237** (was 217, +20) + tests/locke **141** (was 103, +38) + cjc-cli **154** (no regressions). Workspace builds clean. Vault audit: 4 pre-existing broken links in ADR-0023 (references to a not-yet-created Showcase note); no new broken links introduced by batch 2.
 
+## v0.6.4 (shipped 2026-05-29, ADR-0037)
+
+Motivated by Phase 0.10 §4.B / §4.D blog work on UCI Diabetes-130. Two new finding codes plus one cross-detector wiring fix.
+
+### Shipped
+
+- [x] **E9008 — auto string-sentinel detection (Info).** Pre-scans every `Str` column for `?`, `NA`, `N/A`, `NULL`, `null`, `nan`, `NaN`, `None`, `-`, `` `` (the empty string), plus any custom strings in `ValidationConfig.additional_sentinels`. Auto-mask is unioned with the user-supplied `NullMaskMap` before `detect_missingness` and `detect_conditional_missingness` run. Opt-out via `auto_detect_sentinels = false`. Closes the Phase 0.10 §4.D Part 1 finding (diabetes-130 `weight` 96.9% `?` was invisible to default Locke).
+- [x] **E9064 — per-level deterministic-outcome leakage (Error).** For each `(column, level, target_class)`: emit when `P(class | level) ≥ conditional_threshold` (default 0.99) with `≥ min_support` rows (default 10) AND unconditional `P(class) < conditional_threshold`. Catches per-level deterministic leakage that E9063's column-wide ROC AUC misses (motivating example: diabetes-130 `discharge_disposition_id` codes 11/13/14/19/20/21 → `readmitted = NO`).
+- [x] **`detect_conditional_missingness` accepts `&NullMaskMap`.** The v0.5 version was Float-only; v0.6.4 unions Float NaN positions with mask-driven positions for every column type so a `?`-bearing `Str` column joins the pairwise implication check.
+- [x] **Hardened `detect_label_encoding_risk` against `i64::MAX - i64::MIN` overflow.** Pre-existing latent bug in `(hi - lo + 1) as f64`; uses `checked_sub` + `checked_add` now. Surfaced by bolero input-sequence reshuffle when v0.6.4 added fuzz targets.
+
+### Belief-axis mapping for v0.6.4 codes
+
+| Code | Severity | BeliefScore axis |
+|---|---|---|
+| E9008 | Info | (none directly; raises E9001 missingness count indirectly) |
+| E9064 | Error | `leakage` (alongside E9060/E9061/E9063) |
+
+### Test infrastructure (v0.6.4)
+
+- [x] **Unit tests** — 7 sentinel-detection (bottom of `validation.rs`) + 8 E9064 (bottom of `leakage.rs`). Net +15.
+- [x] **Integration tests** — new file `tests/locke/sentinel_e9064_tests.rs`. 12 wiring + cross-detector tests.
+- [x] **Property tests** — 4 new (sentinel-detection determinism, sentinel-count bound, opt-out monotonicity, E9064 determinism, E9064 min-support monotonicity) × 256 cases.
+- [x] **Bolero fuzz targets** — 2 new (`fuzz_auto_sentinel_never_panics`, `fuzz_e9064_never_panics`).
+
+Net delta: cjc-locke --lib **284** (was 268, +16) + tests/locke **194** (was 176, +18). ABNG suite 629/629 unchanged. Workspace clean.
+
 ## v0.7 part 1 (shipped 2026-05-28, ADR-0036)
 
 - [x] **Per-axis BeliefScore composition rules** — formalise the v0.2 algebra as code. New `algebra.rs` module with `CompositionRule` enum (Min/Max/GeometricMean/ArithmeticMean), `BeliefAxisRules` struct, `compose` / `compose_many` / `compose_many_arithmetic` / `compose_weighted`, identity elements `top()` / `bottom()`, and partial-order helpers `le_componentwise` / `eq_componentwise`. 5 meet-semilattice laws (identity, idempotence, commutativity, associativity, monotonicity) **proptest-locked** under default all-`Min` rules. Bolero fuzz on all four rules × arbitrary 16-float input. 21 unit + 7 integration + 6 proptest + 1 bolero. cjc-locke --lib 268 (was 247, +21); tests/locke 176 (was 161, +15).

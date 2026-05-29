@@ -31,6 +31,25 @@ pub struct ValidationConfig {
     pub near_constant_threshold: f64,
     pub high_cardinality_ratio: f64,
     pub duplicate_sample_limit: usize,
+    /// **v0.6.4** — auto-detect common missing-value sentinels in `Str`
+    /// columns (`?`, `NA`, `N/A`, `NULL`, `null`, `nan`, `NaN`, `None`,
+    /// `-`, and empty string). When `true` (the default), every `Str`
+    /// column is pre-scanned and matching rows are folded into the
+    /// effective null mask before `detect_missingness` runs. Each
+    /// affected column emits one `E9008` info finding naming the
+    /// sentinel(s) and the missingness rate. Disable to restore v0.6.3
+    /// behaviour (NaN-only for Float, mask-only for everything else).
+    ///
+    /// Motivated by the Phase 0.10 §4.D Part 1 finding: diabetes-130's
+    /// `weight` column is 96.9% `?` but Locke's default missingness
+    /// detector reported `missingness_score = 1.0000` ("perfect") until
+    /// a `NullMaskMap` was hand-built.
+    pub auto_detect_sentinels: bool,
+    /// Custom sentinels added on top of the built-in list. Exact match
+    /// after no transformation — case-sensitive, whitespace-significant.
+    /// Use this to register dataset-specific conventions (e.g., `"."`
+    /// in older SAS exports, `"unknown"` in spreadsheet data).
+    pub additional_sentinels: Vec<String>,
 }
 
 impl Default for ValidationConfig {
@@ -39,9 +58,31 @@ impl Default for ValidationConfig {
             near_constant_threshold: 0.99,
             high_cardinality_ratio: 0.5,
             duplicate_sample_limit: 5,
+            // v0.6.4 — opt-in by default; the false-positive cost is
+            // small (one info finding the user can read and ignore),
+            // the false-negative cost is what §4.D Part 1 documented
+            // (a 97%-missing column reported as perfectly clean).
+            auto_detect_sentinels: true,
+            additional_sentinels: Vec::new(),
         }
     }
 }
+
+/// **v0.6.4** — built-in list of recognised string sentinels. Frozen.
+/// Add custom values via `ValidationConfig.additional_sentinels`.
+/// Order is significant for canonicalisation of the audit message.
+pub const BUILTIN_STRING_SENTINELS: &[&str] = &[
+    "?",       // UCI convention (diabetes-130, etc.)
+    "NA",      // R convention
+    "N/A",     // forms / spreadsheets
+    "NULL",    // SQL convention (upper)
+    "null",    // SQL convention (lower)
+    "nan",     // pandas / numpy stringified
+    "NaN",     // ditto, capitalised
+    "None",    // Python stringified
+    "-",       // dash placeholder
+    "",        // empty string
+];
 
 // ─── Null masks (v0.2) ──────────────────────────────────────────────────────
 
@@ -79,6 +120,140 @@ impl NullMask {
 
 /// Convenience alias used in [`ValidateOptions`].
 pub type NullMaskMap = BTreeMap<String, NullMask>;
+
+/// **v0.6.4** — pre-scan `Str` columns for common missing-value
+/// sentinels and build a `NullMaskMap` keyed by column name. Returns
+/// the mask alongside a `Vec<ValidationFinding>` of [`E9008`]
+/// info-severity findings — one per `Str` column where at least one
+/// sentinel matched.
+///
+/// Sentinels recognised: [`BUILTIN_STRING_SENTINELS`] plus any custom
+/// values supplied in `cfg.additional_sentinels`. Matching is exact:
+/// no trimming, no case folding. Use `cfg.additional_sentinels` to
+/// register dataset conventions.
+///
+/// When `cfg.auto_detect_sentinels` is `false`, returns an empty mask
+/// and an empty findings vector — backward-compatible with v0.6.3
+/// behaviour.
+///
+/// # Composition
+///
+/// The intent is for the caller to union this mask with any
+/// user-supplied [`NullMaskMap`] before invoking
+/// [`detect_missingness`] or [`detect_conditional_missingness`]. The
+/// canonical caller is [`crate::api::validate`], which performs that
+/// union once and passes the combined map throughout the validator
+/// pipeline.
+///
+/// # Determinism
+///
+/// Iteration is in `BTreeMap` order (`df.columns` is sorted; output
+/// `NullMask.null_rows` is a `BTreeSet`). Findings are appended in
+/// column-name order. Two runs over the same `DataFrame` produce
+/// byte-identical `ValidationFinding` IDs.
+pub fn detect_string_sentinels(
+    df: &DataFrame,
+    cfg: &ValidationConfig,
+) -> (NullMaskMap, Vec<ValidationFinding>) {
+    let mut masks = NullMaskMap::new();
+    let mut findings = Vec::new();
+    if !cfg.auto_detect_sentinels {
+        return (masks, findings);
+    }
+
+    let n_rows = df.nrows() as u64;
+    for (name, col) in &df.columns {
+        let Column::Str(values) = col else { continue };
+
+        // Per-sentinel hit indices, kept in a BTreeMap for deterministic
+        // sample ordering in the audit message.
+        let mut hits: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+        for (i, v) in values.iter().enumerate() {
+            let s = v.as_str();
+            let is_builtin = BUILTIN_STRING_SENTINELS.iter().any(|b| *b == s);
+            let is_custom = cfg.additional_sentinels.iter().any(|c| c == s);
+            if is_builtin || is_custom {
+                hits.entry(s.to_string()).or_default().insert(i);
+            }
+        }
+        if hits.is_empty() {
+            continue;
+        }
+
+        // Union the per-sentinel sets into one mask. BTreeSet keeps
+        // null_rows sorted; the resulting NullMask is byte-canonical.
+        let union: BTreeSet<usize> = hits
+            .values()
+            .flat_map(|s| s.iter().copied())
+            .collect();
+        let n_missing = union.len() as u64;
+        let rate = if n_rows == 0 {
+            0.0
+        } else {
+            n_missing as f64 / n_rows as f64
+        };
+
+        // Deterministic, human-readable breakdown showing up to 3
+        // sentinels and their counts.
+        let breakdown = hits
+            .iter()
+            .take(3)
+            .map(|(s, idx)| format!("{:?}: {}", s, idx.len()))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        masks.insert(name.clone(), NullMask { null_rows: union });
+        findings.push(ValidationFinding::new(
+            "E9008",
+            FindingSeverity::Info,
+            format!(
+                "auto-detected {} string-sentinel value(s) in `{}` ({:.1}% of rows); folded into the effective null mask",
+                n_missing, name, rate * 100.0
+            ),
+            Some(name.clone()),
+            None,
+            vec![
+                FindingEvidence::Count {
+                    label: "n_sentinel_rows".into(),
+                    value: n_missing,
+                },
+                FindingEvidence::Ratio {
+                    label: "sentinel_rate".into(),
+                    value: rate,
+                },
+                FindingEvidence::Sample {
+                    label: "sentinels_seen".into(),
+                    value: breakdown,
+                },
+            ],
+            n_rows,
+            vec![
+                "Built-in sentinels: ?, NA, N/A, NULL, null, nan, NaN, None, -, ``".into(),
+                "Set ValidationConfig.auto_detect_sentinels = false to disable".into(),
+                "Use ValidationConfig.additional_sentinels for dataset-specific conventions".into(),
+            ],
+            vec![
+                "Confirm the sentinel encodes 'missing' here — some columns legitimately use `-` or `NA`".into(),
+                "If false positive, opt out and supply a manual NullMaskMap".into(),
+            ],
+        ));
+    }
+    (masks, findings)
+}
+
+/// **v0.6.4** — union two `NullMaskMap`s, key by key. For columns
+/// present in both, the resulting `NullMask.null_rows` is the
+/// set-union of both inputs.
+pub fn merge_null_mask_maps(a: &NullMaskMap, b: &NullMaskMap) -> NullMaskMap {
+    let mut out: NullMaskMap = a.clone();
+    for (k, mask_b) in b {
+        let entry = out.entry(k.clone()).or_default();
+        for r in &mask_b.null_rows {
+            entry.null_rows.insert(*r);
+        }
+    }
+    out
+}
 
 // ─── Impossible-value constraint DSL ────────────────────────────────────────
 
@@ -1077,6 +1252,7 @@ impl Default for ConditionalMissingnessConfig {
 pub fn detect_conditional_missingness(
     df: &DataFrame,
     cfg: &ConditionalMissingnessConfig,
+    null_masks: &NullMaskMap,
 ) -> Vec<ValidationFinding> {
     let mut out = Vec::new();
     let n_rows = df.nrows();
@@ -1084,18 +1260,35 @@ pub fn detect_conditional_missingness(
         return out;
     }
 
-    // Build per-column missing-row sets (Float columns only, NaN-based).
+    // **v0.6.4 fix** — the v0.5 version was Float-only (it skipped
+    // `Str` / `Int` / etc. columns entirely, so a `?`-sentinel-bearing
+    // `Str` column was invisible to the pairwise implication check
+    // even when the caller had passed a `NullMaskMap`). We now build
+    // the per-column missing-row set by *unioning* Float NaN positions
+    // with the caller-supplied `null_masks`, for every column type.
     let mut miss_sets: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
     for (name, col) in &df.columns {
+        let mut s: BTreeSet<usize> = BTreeSet::new();
+        // Float NaN positions (no-op for non-Float).
         if let Column::Float(v) = col {
-            let s: BTreeSet<usize> = v
-                .iter()
-                .enumerate()
-                .filter_map(|(i, x)| if x.is_nan() { Some(i) } else { None })
-                .collect();
-            if (s.len() as u64) >= cfg.min_missing_in_a {
-                miss_sets.insert(name.clone(), s);
+            for (i, x) in v.iter().enumerate() {
+                if x.is_nan() {
+                    s.insert(i);
+                }
             }
+        }
+        // Mask-driven null positions for ALL types (Str, Int, Bool,
+        // Categorical, DateTime), bounded to col length.
+        if let Some(mask) = null_masks.get(name) {
+            let col_len = col.len();
+            for r in &mask.null_rows {
+                if *r < col_len {
+                    s.insert(*r);
+                }
+            }
+        }
+        if (s.len() as u64) >= cfg.min_missing_in_a {
+            miss_sets.insert(name.clone(), s);
         }
     }
 
@@ -1688,7 +1881,15 @@ pub fn validate_dataframe(
     null_masks: &NullMaskMap,
 ) -> Vec<ValidationFinding> {
     let mut out = Vec::new();
-    out.extend(detect_missingness(df, cfg, null_masks));
+    // **v0.6.4** — auto-detect common string sentinels (?, NA, NULL,
+    // ...) before the missingness pipeline runs. The detected mask is
+    // unioned with the caller's mask so both `detect_missingness` and
+    // `detect_conditional_missingness` see the full set of missing
+    // rows. Opt out via `cfg.auto_detect_sentinels = false`.
+    let (auto_masks, auto_findings) = detect_string_sentinels(df, cfg);
+    out.extend(auto_findings);
+    let effective_masks = merge_null_mask_maps(null_masks, &auto_masks);
+    out.extend(detect_missingness(df, cfg, &effective_masks));
     out.extend(detect_duplicates_full_row(df, cfg));
     if let Some(pk) = primary_key {
         out.extend(detect_duplicate_keys(df, pk));
@@ -1779,7 +1980,13 @@ pub fn detect_label_encoding_risk(
         }
         // Range packing: how tight is the value spread?
         let (lo, hi) = (*distinct.iter().next().unwrap(), *distinct.iter().next_back().unwrap());
-        let span = (hi - lo + 1) as f64;
+        // v0.6.4 — guard against i64 overflow when (hi - lo + 1) would
+        // exceed i64::MAX. A column spanning ~the full i64 range is
+        // definitionally not a label encoding; skip it.
+        let span = match hi.checked_sub(lo).and_then(|d| d.checked_add(1)) {
+            Some(s) => s as f64,
+            None => continue,
+        };
         let density = span / n_distinct as f64;
         if density > cfg.span_tightness {
             // Sparse spread — probably a real numeric quantity (e.g. ages
@@ -2015,7 +2222,7 @@ mod tests {
             ("b".into(), Column::Float(b)),
         ])
         .unwrap();
-        let r = detect_conditional_missingness(&df, &ConditionalMissingnessConfig::default());
+        let r = detect_conditional_missingness(&df, &ConditionalMissingnessConfig::default(), &NullMaskMap::new());
         // Should see both directions: a→b and b→a, both 100%.
         assert!(r.iter().any(|f| f.code == "E9070" && f.column.as_deref() == Some("a")));
         assert!(r.iter().any(|f| f.code == "E9070" && f.column.as_deref() == Some("b")));
@@ -2037,7 +2244,7 @@ mod tests {
             ("b".into(), Column::Float(b)),
         ])
         .unwrap();
-        let r = detect_conditional_missingness(&df, &ConditionalMissingnessConfig::default());
+        let r = detect_conditional_missingness(&df, &ConditionalMissingnessConfig::default(), &NullMaskMap::new());
         assert!(r.is_empty());
     }
 
@@ -2234,5 +2441,167 @@ mod tests {
             })
             .unwrap();
         assert_eq!(n, 2);
+    }
+
+    // ─── v0.6.4 — auto string-sentinel detection (E9008) ───────────────────
+
+    fn df_with_sentinels() -> DataFrame {
+        DataFrame::from_columns(vec![
+            (
+                "weight".into(),
+                Column::Str(vec![
+                    "?".into(), "?".into(), "?".into(),
+                    "[0-25)".into(), "[25-50)".into(),
+                ]),
+            ),
+            (
+                "race".into(),
+                Column::Str(vec![
+                    "Caucasian".into(), "AfricanAmerican".into(),
+                    "?".into(), "Asian".into(), "Other".into(),
+                ]),
+            ),
+            (
+                "clean".into(),
+                Column::Str(vec![
+                    "x".into(), "y".into(), "z".into(), "x".into(), "y".into(),
+                ]),
+            ),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn string_sentinel_detection_finds_question_mark_columns() {
+        let df = df_with_sentinels();
+        let cfg = ValidationConfig::default();
+        let (masks, findings) = detect_string_sentinels(&df, &cfg);
+        // weight (3 of 5) + race (1 of 5) — clean has none.
+        assert_eq!(masks.len(), 2);
+        assert_eq!(masks["weight"].null_rows, [0, 1, 2].iter().copied().collect());
+        assert_eq!(masks["race"].null_rows, [2].iter().copied().collect());
+        assert!(!masks.contains_key("clean"));
+        // One E9008 finding per affected column.
+        assert_eq!(findings.iter().filter(|f| f.code == "E9008").count(), 2);
+        assert!(findings
+            .iter()
+            .any(|f| f.code == "E9008" && f.column.as_deref() == Some("weight")));
+    }
+
+    #[test]
+    fn string_sentinel_detection_opt_out_is_backward_compatible() {
+        let df = df_with_sentinels();
+        let cfg = ValidationConfig {
+            auto_detect_sentinels: false,
+            ..Default::default()
+        };
+        let (masks, findings) = detect_string_sentinels(&df, &cfg);
+        assert!(masks.is_empty());
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn string_sentinel_detection_handles_custom_sentinel() {
+        let df = DataFrame::from_columns(vec![(
+            "discharge".into(),
+            Column::Str(vec![
+                "DECEASED".into(), "Home".into(), "DECEASED".into(), "Home".into(),
+            ]),
+        )])
+        .unwrap();
+        let cfg = ValidationConfig {
+            additional_sentinels: vec!["DECEASED".into()],
+            ..Default::default()
+        };
+        let (masks, _findings) = detect_string_sentinels(&df, &cfg);
+        assert_eq!(masks["discharge"].null_rows, [0, 2].iter().copied().collect());
+    }
+
+    #[test]
+    fn string_sentinel_detection_finds_all_builtins() {
+        let mut cols = Vec::new();
+        for (i, sentinel) in BUILTIN_STRING_SENTINELS.iter().enumerate() {
+            cols.push((
+                format!("col_{}", i),
+                Column::Str(vec![(*sentinel).into(), "real_value".into()]),
+            ));
+        }
+        let df = DataFrame::from_columns(cols).unwrap();
+        let cfg = ValidationConfig::default();
+        let (masks, _findings) = detect_string_sentinels(&df, &cfg);
+        // Every builtin should match its row 0.
+        assert_eq!(masks.len(), BUILTIN_STRING_SENTINELS.len());
+    }
+
+    #[test]
+    fn string_sentinel_detection_skips_non_str_columns() {
+        let df = DataFrame::from_columns(vec![
+            ("score".into(), Column::Float(vec![1.0, 2.0, 3.0])),
+            ("n".into(), Column::Int(vec![1, 2, 3])),
+        ])
+        .unwrap();
+        let cfg = ValidationConfig::default();
+        let (masks, findings) = detect_string_sentinels(&df, &cfg);
+        assert!(masks.is_empty());
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn string_sentinel_detection_is_deterministic() {
+        let df = df_with_sentinels();
+        let cfg = ValidationConfig::default();
+        let a = detect_string_sentinels(&df, &cfg);
+        let b = detect_string_sentinels(&df, &cfg);
+        assert_eq!(a.0, b.0);
+        assert_eq!(a.1, b.1);
+    }
+
+    #[test]
+    fn merge_null_mask_maps_unions_row_sets() {
+        let mut a = NullMaskMap::new();
+        a.insert("x".into(), NullMask::from_indices([1, 3]));
+        a.insert("y".into(), NullMask::from_indices([0]));
+        let mut b = NullMaskMap::new();
+        b.insert("x".into(), NullMask::from_indices([2, 3]));
+        b.insert("z".into(), NullMask::from_indices([4]));
+        let merged = merge_null_mask_maps(&a, &b);
+        assert_eq!(merged["x"].null_rows, [1, 2, 3].iter().copied().collect());
+        assert_eq!(merged["y"].null_rows, [0].iter().copied().collect());
+        assert_eq!(merged["z"].null_rows, [4].iter().copied().collect());
+    }
+
+    #[test]
+    fn validate_dataframe_pipeline_picks_up_sentinels_automatically() {
+        let df = df_with_sentinels();
+        let cfg = ValidationConfig::default();
+        let findings = validate_dataframe(
+            &df, &cfg, &[], None, None, &NullMaskMap::new(),
+        );
+        // E9008 (sentinels) AND E9001 (missingness for weight, since
+        // 60% > 10% Warning) should both fire.
+        assert!(findings.iter().any(|f| f.code == "E9008" && f.column.as_deref() == Some("weight")));
+        assert!(findings.iter().any(|f| f.code == "E9001" && f.column.as_deref() == Some("weight")));
+    }
+
+    #[test]
+    fn conditional_missingness_sees_str_sentinels_via_mask() {
+        // Two Str columns both 100% `?` — implication should fire
+        // 100% in both directions when the mask covers them.
+        let df = DataFrame::from_columns(vec![
+            ("a".into(), Column::Str(vec!["?".into(); 20])),
+            ("b".into(), Column::Str(vec!["?".into(); 20])),
+        ])
+        .unwrap();
+        let mut masks = NullMaskMap::new();
+        masks.insert("a".into(), NullMask::from_indices(0..20));
+        masks.insert("b".into(), NullMask::from_indices(0..20));
+        let r = detect_conditional_missingness(
+            &df,
+            &ConditionalMissingnessConfig::default(),
+            &masks,
+        );
+        // E9070 should fire in both directions: a→b and b→a.
+        assert!(r.iter().any(|f| f.code == "E9070" && f.column.as_deref() == Some("a")));
+        assert!(r.iter().any(|f| f.code == "E9070" && f.column.as_deref() == Some("b")));
     }
 }

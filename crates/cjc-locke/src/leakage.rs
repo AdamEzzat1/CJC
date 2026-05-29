@@ -410,6 +410,279 @@ pub fn detect_target_leakage(
     out
 }
 
+// ─── Per-level deterministic-leakage detector (E9064, v0.6.4) ───────────────
+
+/// Config for [`detect_per_level_target_leakage`].
+///
+/// **Motivation.** [`detect_target_leakage_multiclass`] (E9063) computes
+/// a per-feature ROC AUC against a multi-class target. AUC is a
+/// column-wide rank statistic — it misses leakage that hides at the
+/// *level* of a column. On UCI Diabetes-130, `discharge_disposition_id`
+/// codes 11, 13, 14, 19, 20, 21 deterministically predict
+/// `readmitted = NO` (a dead patient cannot be readmitted), but death
+/// codes are interspersed *numerically* with non-death codes 12, 15,
+/// 16, 17, 18 — so the column-wide AUC stays below 0.85 and E9063
+/// stays silent. The Phase 0.10 §4.B work documented this miss and
+/// motivated this detector.
+///
+/// **Detection.** For each `(column, level, target_class)` triple:
+///
+/// 1. Count rows where `column == level` — call this the *support*.
+/// 2. Of those, count rows where `target == class` — the *concentration*.
+/// 3. Compute `P(class | level) = concentration / support`.
+/// 4. Compute the unconditional `P(class)` (the base rate) once per
+///    target class.
+/// 5. Emit [`"E9064"`](ValidationFinding) when
+///    `P(class | level) ≥ conditional_threshold`, the support is at
+///    least `min_support`, and `P(class) < conditional_threshold` (so
+///    the level adds information beyond the base rate).
+#[derive(Clone, Debug)]
+pub struct PerLevelLeakageConfig {
+    /// Threshold on `P(class | level)`. Default `0.99` — only flag
+    /// near-deterministic outcomes.
+    pub conditional_threshold: f64,
+    /// Minimum rows where `column == level` for the (level, class)
+    /// pair to be considered. Default `10` — below this the
+    /// conditional estimate is unreliable.
+    pub min_support: u64,
+    /// Maximum distinct levels per column. Above this, the column is
+    /// likely continuous-ish or high-cardinality nominal (e.g. an
+    /// ICD-9 code); skip it. Default `1000`.
+    pub max_levels: u64,
+    /// Maximum distinct classes in the target. Above this, the target
+    /// is likely continuous; skip it. Default `20` (matches
+    /// [`LeakageConfig::multiclass_max_classes`]).
+    pub max_classes: u32,
+}
+
+impl Default for PerLevelLeakageConfig {
+    fn default() -> Self {
+        Self {
+            conditional_threshold: 0.99,
+            min_support: 10,
+            max_levels: 1000,
+            max_classes: 20,
+        }
+    }
+}
+
+/// Render a level value as a deterministic string for the finding
+/// message. Float NaN is rendered as `NaN` so the message is stable
+/// across runs.
+fn format_level(col: &Column, row: usize) -> String {
+    match col {
+        Column::Str(v) => format!("{:?}", v[row]),
+        Column::Int(v) => v[row].to_string(),
+        Column::Bool(v) => v[row].to_string(),
+        Column::Float(v) => {
+            if v[row].is_nan() {
+                "NaN".to_string()
+            } else {
+                format!("{:.6}", v[row])
+            }
+        }
+        Column::Categorical { levels, codes } => {
+            let c = codes[row] as usize;
+            if c < levels.len() {
+                format!("{:?}", levels[c])
+            } else {
+                "<oob>".into()
+            }
+        }
+        Column::DateTime(v) => v[row].to_string(),
+        Column::CategoricalAdaptive(_) => "<adaptive>".into(),
+    }
+}
+
+/// Per-level deterministic-outcome leakage detector. Emits
+/// [`"E9064"`](ValidationFinding) (Error severity) when at least one
+/// `(column, level)` pair deterministically predicts the target.
+///
+/// Returns the empty vector when:
+/// - the target column is missing or its type isn't `Bool` / `Int`
+/// - the target has more than `cfg.max_classes` distinct values
+/// - no feature column has any level meeting the thresholds
+///
+/// # Algorithm
+///
+/// One pass over the rows per feature column. O(n_rows × n_features)
+/// time, O(n_levels_per_feature × n_classes) memory per column.
+///
+/// # Determinism
+///
+/// Levels iterate in `BTreeMap` order; classes iterate in the
+/// canonical sorted-distinct order computed from `extract_multiclass_target`
+/// (binary follows the same convention). Findings are appended
+/// column-by-column, level-by-level; two runs over the same
+/// `DataFrame` produce byte-identical IDs.
+pub fn detect_per_level_target_leakage(
+    df: &DataFrame,
+    target_col: &str,
+    cfg: &PerLevelLeakageConfig,
+) -> Vec<ValidationFinding> {
+    let mut out = Vec::new();
+
+    // Step 1 — decode the target. Accept either Bool, binary Int, or
+    // multi-class Int (up to max_classes distinct).
+    let target_col_data = match df.get_column(target_col) {
+        Some(c) => c,
+        None => return out,
+    };
+    let (target_codes, class_labels): (Vec<u32>, Vec<String>) = match target_col_data {
+        Column::Bool(v) => {
+            let codes: Vec<u32> = v.iter().map(|b| u32::from(*b)).collect();
+            (codes, vec!["false".into(), "true".into()])
+        }
+        Column::Int(v) => {
+            let mut distinct: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+            for x in v {
+                distinct.insert(*x);
+                if distinct.len() > cfg.max_classes as usize {
+                    return out;
+                }
+            }
+            if distinct.len() < 2 {
+                return out;
+            }
+            let labels_i64: Vec<i64> = distinct.into_iter().collect();
+            let mut lookup: std::collections::BTreeMap<i64, u32> =
+                std::collections::BTreeMap::new();
+            for (i, lbl) in labels_i64.iter().enumerate() {
+                lookup.insert(*lbl, i as u32);
+            }
+            let codes: Vec<u32> = v.iter().map(|x| lookup[x]).collect();
+            let labels: Vec<String> = labels_i64.iter().map(|x| x.to_string()).collect();
+            (codes, labels)
+        }
+        _ => return out,
+    };
+    let n_classes = class_labels.len() as u32;
+    let n_rows = target_codes.len();
+    if n_rows == 0 {
+        return out;
+    }
+
+    // Step 2 — compute base rates P(class).
+    let mut class_counts: Vec<u64> = vec![0u64; n_classes as usize];
+    for c in &target_codes {
+        class_counts[*c as usize] += 1;
+    }
+    let base_rates: Vec<f64> = class_counts
+        .iter()
+        .map(|c| *c as f64 / n_rows as f64)
+        .collect();
+
+    // Step 3 — per-feature scan.
+    for (name, col) in &df.columns {
+        if name == target_col {
+            continue;
+        }
+        if matches!(col, Column::Float(_)) {
+            // Floats are continuous; binning is the caller's job. A
+            // value-by-value match would be meaningless for f64.
+            continue;
+        }
+
+        // Per-level deterministic representation we can hash on. We
+        // bin rows by their level-as-string (deterministic via
+        // `format_level`) but only count distinct (representative
+        // row) per level for memory bounds.
+        let mut level_buckets: std::collections::BTreeMap<String, (usize, Vec<u64>)> =
+            std::collections::BTreeMap::new();
+        // (representative_row_idx, per_class_count)
+        for (row, tgt) in target_codes.iter().enumerate() {
+            let key = format_level(col, row);
+            let entry = level_buckets
+                .entry(key)
+                .or_insert_with(|| (row, vec![0u64; n_classes as usize]));
+            entry.1[*tgt as usize] += 1;
+            if level_buckets.len() > cfg.max_levels as usize {
+                // High-cardinality column — bail. (BTreeMap can grow
+                // past max_levels in one row; we cap.)
+                break;
+            }
+        }
+        if level_buckets.len() > cfg.max_levels as usize {
+            continue;
+        }
+
+        // Step 4 — evaluate each level × class for the threshold.
+        for (level_key, (rep_row, per_class)) in &level_buckets {
+            let support: u64 = per_class.iter().sum();
+            if support < cfg.min_support {
+                continue;
+            }
+            // Find the most-concentrated class for this level.
+            let (best_c, best_count) = per_class
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, c)| **c)
+                .map(|(i, c)| (i as u32, *c))
+                .unwrap_or((0, 0));
+            let p_class_given_level = best_count as f64 / support as f64;
+            if p_class_given_level < cfg.conditional_threshold {
+                continue;
+            }
+            // Filter base-rate-dominated levels (the column doesn't
+            // add information).
+            let p_class_uncond = base_rates[best_c as usize];
+            if p_class_uncond >= cfg.conditional_threshold {
+                continue;
+            }
+
+            let pretty_level = format_level(col, *rep_row);
+            let _ = level_key;
+            let pretty_class = &class_labels[best_c as usize];
+
+            out.push(ValidationFinding::new(
+                "E9064",
+                FindingSeverity::Error,
+                format!(
+                    "level `{}` of column `{}` deterministically predicts target class `{}` ({}/{} rows = {:.4}, base rate {:.4})",
+                    pretty_level, name, pretty_class, best_count, support, p_class_given_level, p_class_uncond
+                ),
+                Some(name.clone()),
+                None,
+                vec![
+                    FindingEvidence::Sample {
+                        label: "level".into(),
+                        value: pretty_level.clone(),
+                    },
+                    FindingEvidence::Sample {
+                        label: "target_class".into(),
+                        value: pretty_class.clone(),
+                    },
+                    FindingEvidence::Metric {
+                        label: "p_class_given_level".into(),
+                        value: p_class_given_level,
+                    },
+                    FindingEvidence::Metric {
+                        label: "base_rate".into(),
+                        value: p_class_uncond,
+                    },
+                    FindingEvidence::Count {
+                        label: "support".into(),
+                        value: support,
+                    },
+                ],
+                n_rows as u64,
+                vec![
+                    "Per-level deterministic-outcome leakage: this specific value of the column predicts the target with ≥ threshold probability".into(),
+                    "Diabetes-130 motivating example: discharge_disposition_id ∈ {11, 13, 14, 19, 20, 21} (death/hospice) → readmitted = NO".into(),
+                    "Continuous features (Float) skipped — bin them before re-running if you want a per-bin check".into(),
+                ],
+                vec![
+                    "Verify the level is not derived from a post-outcome event (e.g. a discharge code that records the outcome)".into(),
+                    "If the level encodes a structural impossibility (death → no readmission), drop those rows from training".into(),
+                    "Alternative: split the multi-class target so the impossible class is its own task".into(),
+                ],
+            ));
+        }
+    }
+
+    out
+}
+
 /// ID-like cardinality hint — flags columns whose `distinct / n_rows`
 /// ratio crosses the configured threshold. Often catches join keys or
 /// row IDs accidentally left in the feature matrix.
@@ -568,5 +841,180 @@ mod tests {
         let a = detect_target_leakage(&df, "y", &cfg);
         let b = detect_target_leakage(&df, "y", &cfg);
         assert_eq!(a, b);
+    }
+
+    // ─── v0.6.4 — E9064 per-level deterministic leakage ────────────────────
+
+    /// Build a synthetic "discharge code → outcome" frame mirroring
+    /// the diabetes-130 pattern: codes 11/13/14 (death/hospice)
+    /// deterministically predict y=0; codes 1-10 (normal discharges)
+    /// have a 50/50 split.
+    fn df_with_per_level_leak() -> DataFrame {
+        let mut discharge: Vec<i64> = Vec::new();
+        let mut y: Vec<i64> = Vec::new();
+        // 15 rows of death codes — all y=0
+        for code in [11_i64, 13, 14] {
+            for _ in 0..15 {
+                discharge.push(code);
+                y.push(0);
+            }
+        }
+        // 100 rows of normal codes — 50/50 split
+        for code in 1_i64..=10 {
+            for r in 0..10 {
+                discharge.push(code);
+                y.push(if r < 5 { 0 } else { 1 });
+            }
+        }
+        DataFrame::from_columns(vec![
+            ("discharge".into(), Column::Int(discharge)),
+            ("y".into(), Column::Int(y)),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn per_level_leakage_fires_on_death_codes() {
+        let df = df_with_per_level_leak();
+        let cfg = PerLevelLeakageConfig::default();
+        let r = detect_per_level_target_leakage(&df, "y", &cfg);
+        assert!(!r.is_empty(), "expected at least one E9064 finding");
+        // Each of {11, 13, 14} should produce an E9064 finding
+        // (15 rows of class 0, p=1.0).
+        for code in ["11", "13", "14"] {
+            assert!(
+                r.iter().any(|f| f.code == "E9064"
+                    && f.column.as_deref() == Some("discharge")
+                    && f.message.contains(&format!("level `{}`", code))),
+                "missing E9064 for discharge={}",
+                code
+            );
+        }
+        // Codes 1-10 should NOT fire (50/50 split is well below 0.99).
+        for code in 1..=10 {
+            assert!(
+                !r.iter().any(|f| f.message.contains(&format!("level `{}`", code))),
+                "false positive on non-leaking discharge={}",
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn per_level_leakage_respects_min_support() {
+        // 3 rows of code 11 → y=0; min_support=10 → no finding.
+        let df = DataFrame::from_columns(vec![
+            ("discharge".into(), Column::Int(vec![11, 11, 11, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1])),
+            ("y".into(),         Column::Int(vec![ 0,  0,  0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0])),
+        ])
+        .unwrap();
+        let cfg = PerLevelLeakageConfig {
+            min_support: 10,
+            ..Default::default()
+        };
+        let r = detect_per_level_target_leakage(&df, "y", &cfg);
+        assert!(
+            r.is_empty(),
+            "min_support should suppress finding (got {:?})",
+            r
+        );
+    }
+
+    #[test]
+    fn per_level_leakage_skips_base_rate_dominated_classes() {
+        // 99% of the dataset is class 0; the level 11 → class 0
+        // relationship adds NO information vs the base rate.
+        let mut discharge = vec![11_i64; 200];
+        let mut y = vec![0_i64; 200];
+        // Sprinkle a few class-1 rows on code 99 (not on code 11)
+        for i in 198..200 {
+            discharge[i] = 99;
+            y[i] = 1;
+        }
+        let df = DataFrame::from_columns(vec![
+            ("discharge".into(), Column::Int(discharge)),
+            ("y".into(), Column::Int(y)),
+        ])
+        .unwrap();
+        let cfg = PerLevelLeakageConfig::default();
+        let r = detect_per_level_target_leakage(&df, "y", &cfg);
+        // Base rate of class 0 is 198/200 = 0.99 ≥ threshold; the
+        // level adds nothing, so we should NOT fire.
+        assert!(r.is_empty(), "base-rate filter should suppress (got {:?})", r);
+    }
+
+    #[test]
+    fn per_level_leakage_handles_str_levels() {
+        // String-level case: status "Deceased" → y=0 deterministically.
+        let mut status: Vec<String> = Vec::new();
+        let mut y: Vec<i64> = Vec::new();
+        for _ in 0..15 {
+            status.push("Deceased".into());
+            y.push(0);
+        }
+        for _ in 0..30 {
+            status.push("Alive".into());
+            y.push(0);
+        }
+        for _ in 0..30 {
+            status.push("Alive".into());
+            y.push(1);
+        }
+        let df = DataFrame::from_columns(vec![
+            ("status".into(), Column::Str(status)),
+            ("y".into(), Column::Int(y)),
+        ])
+        .unwrap();
+        let cfg = PerLevelLeakageConfig::default();
+        let r = detect_per_level_target_leakage(&df, "y", &cfg);
+        assert!(
+            r.iter().any(|f| f.code == "E9064" && f.message.contains("Deceased")),
+            "expected E9064 finding on Deceased level (got {:?})",
+            r
+        );
+    }
+
+    #[test]
+    fn per_level_leakage_skips_float_columns() {
+        // Float columns are continuous — we don't try to bin per-value.
+        let df = DataFrame::from_columns(vec![
+            (
+                "temp".into(),
+                Column::Float((0..40).map(|i| i as f64).collect()),
+            ),
+            ("y".into(), Column::Int(vec![0_i64; 40])),
+        ])
+        .unwrap();
+        let r = detect_per_level_target_leakage(
+            &df, "y", &PerLevelLeakageConfig::default(),
+        );
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn per_level_leakage_is_deterministic() {
+        let df = df_with_per_level_leak();
+        let cfg = PerLevelLeakageConfig::default();
+        let a = detect_per_level_target_leakage(&df, "y", &cfg);
+        let b = detect_per_level_target_leakage(&df, "y", &cfg);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn per_level_leakage_handles_bool_target() {
+        // Bool target accepted.
+        let df = DataFrame::from_columns(vec![
+            ("status".into(), Column::Str(vec!["dead".into(); 15].into_iter().chain(vec!["ok".into(); 100]).collect())),
+            ("alive".into(), Column::Bool(vec![false; 15].into_iter().chain(vec![true; 50]).chain(vec![false; 50]).collect())),
+        ])
+        .unwrap();
+        let r = detect_per_level_target_leakage(
+            &df, "alive", &PerLevelLeakageConfig::default(),
+        );
+        assert!(
+            r.iter().any(|f| f.code == "E9064" && f.message.contains("dead")),
+            "expected E9064 on dead level vs Bool target (got {:?})",
+            r
+        );
     }
 }

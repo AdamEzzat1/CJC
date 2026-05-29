@@ -48,6 +48,18 @@ pub fn validate(df: &DataFrame, opts: &ValidateOptions) -> LockeReport {
         &opts.null_masks,
     );
 
+    // v0.6.4 — also build the auto-sentinel mask here so the per-column
+    // `missingness_rate` reflects auto-detected `?` / `NA` / ... rows on
+    // Str columns. Without this, validate_dataframe's E9001 fires
+    // correctly (it sees the unioned mask internally) but the
+    // ColumnBeliefReport rate computed below would still be 0 for any
+    // Str column the user didn't manually mask. That's the missing half
+    // of the §4.D Part 1 fix.
+    let (auto_masks, _auto_findings) =
+        crate::validation::detect_string_sentinels(df, &opts.config);
+    let effective_masks =
+        crate::validation::merge_null_mask_maps(&opts.null_masks, &auto_masks);
+
     let mut column_reports: BTreeMap<String, ColumnBeliefReport> = BTreeMap::new();
     for (name, col) in &df.columns {
         let mut col_findings: Vec<ValidationFinding> = findings
@@ -57,12 +69,11 @@ pub fn validate(df: &DataFrame, opts: &ValidateOptions) -> LockeReport {
             .collect();
         col_findings.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
         let n_total = col.len() as f64;
-        // Missingness rate: Float NaN union with null-mask positions; non-float
-        // uses mask only.
+        // Missingness rate: Float NaN union with effective-mask
+        // positions; non-Float uses effective mask only.
         let missing = {
             let col_len = col.len();
-            let mask_count = opts
-                .null_masks
+            let mask_count = effective_masks
                 .get(name)
                 .map(|m| m.null_rows.iter().filter(|i| **i < col_len).count())
                 .unwrap_or(0);
@@ -77,7 +88,7 @@ pub fn validate(df: &DataFrame, opts: &ValidateOptions) -> LockeReport {
                 cjc_data::Column::Float(v) => {
                     let mut s: std::collections::BTreeSet<usize> =
                         (0..v.len()).filter(|i| v[*i].is_nan()).collect();
-                    if let Some(m) = opts.null_masks.get(name) {
+                    if let Some(m) = effective_masks.get(name) {
                         for r in &m.null_rows {
                             if *r < v.len() {
                                 s.insert(*r);
