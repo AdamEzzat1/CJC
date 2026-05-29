@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 use cjc_data::DataFrame;
 
+use crate::algebra::{compose_many, BeliefAxisRules};
 use crate::belief::{
     penalty_from_findings, penalty_from_findings_with_model, sample_score_from_n, BeliefPenalty,
     BeliefReport, BeliefScore,
@@ -153,10 +154,67 @@ pub fn belief_report_from_locke(report: &LockeReport) -> BeliefReport {
 
 /// v0.3: user-tunable variant. Same shape as `belief_report_from_locke`
 /// but takes an explicit `BeliefPenalty` model.
+///
+/// **v0.7 part 2 (ADR-0036)** — the final [`BeliefScore`] is constructed via
+/// [`algebra::compose_many`](crate::algebra::compose_many) over 8 per-axis
+/// partials under [`BeliefAxisRules::default()`] (all-`Min`), making the
+/// meet-semilattice algebra explicit at the construction site. The result
+/// is byte-identical to the pre-migration direct
+/// [`BeliefScore::from_dimensions`] call on the same 8-tuple — proptest-locked
+/// in `tests/locke/locke_proptest.rs`. The inline path is preserved as
+/// [`__belief_report_from_locke_inline_for_regression_test`] for the
+/// byte-identity regression gate.
 pub fn belief_report_from_locke_with_model(
     report: &LockeReport,
     penalty: &BeliefPenalty,
 ) -> BeliefReport {
+    let (
+        schema_score,
+        missingness_score,
+        drift_score,
+        leakage_score,
+        lineage_score,
+        sample_score,
+        duplication_score,
+        constraint_score,
+    ) = belief_axis_scores_from_report(report, penalty);
+
+    // v0.7 part 2 — route final BeliefScore construction through the
+    // algebra. Each per-axis partial carries one axis's computed value
+    // and 1.0 (the all-Min identity ⊤) on the other seven. Under
+    // `BeliefAxisRules::default()` (all-Min), `compose_many` reduces
+    // the 8 partials to a single BeliefScore whose i-th axis is
+    // `min(axis_i, 1.0, 1.0, ..., 1.0) = axis_i`. The last step inside
+    // `compose_many` calls `BeliefScore::from_dimensions` with that
+    // 8-tuple, in the same order as the pre-migration direct call —
+    // hence the result is byte-identical, not just numerically close.
+    // Proof-of-invariant: `algebra_path_is_byte_identical_to_direct_from_dimensions`
+    // in `tests/locke/locke_proptest.rs`.
+    let rules = BeliefAxisRules::default();
+    let partials = [
+        BeliefScore::from_dimensions(schema_score, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+        BeliefScore::from_dimensions(1.0, missingness_score, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+        BeliefScore::from_dimensions(1.0, 1.0, drift_score, 1.0, 1.0, 1.0, 1.0, 1.0),
+        BeliefScore::from_dimensions(1.0, 1.0, 1.0, leakage_score, 1.0, 1.0, 1.0, 1.0),
+        BeliefScore::from_dimensions(1.0, 1.0, 1.0, 1.0, lineage_score, 1.0, 1.0, 1.0),
+        BeliefScore::from_dimensions(1.0, 1.0, 1.0, 1.0, 1.0, sample_score, 1.0, 1.0),
+        BeliefScore::from_dimensions(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, duplication_score, 1.0),
+        BeliefScore::from_dimensions(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, constraint_score),
+    ];
+    let score = compose_many(&partials, &rules)
+        .expect("8 non-empty partials always compose under any rule");
+
+    finish_belief_report(report, score)
+}
+
+/// Compute the 8 per-axis scores from a `LockeReport` + penalty model.
+/// Shared between the migrated and inline paths so the byte-identity
+/// regression test exercises only the construction-mode divergence
+/// (compose vs from_dimensions), not the per-axis derivation logic.
+fn belief_axis_scores_from_report(
+    report: &LockeReport,
+    penalty: &BeliefPenalty,
+) -> (f64, f64, f64, f64, f64, f64, f64, f64) {
     let n = report.input.n_rows;
 
     let missingness_score = {
@@ -220,7 +278,7 @@ pub fn belief_report_from_locke_with_model(
     let lineage_score = 1.0;
     let sample_score = sample_score_from_n(n);
 
-    let score = BeliefScore::from_dimensions(
+    (
         schema_score,
         missingness_score,
         drift_score,
@@ -229,8 +287,13 @@ pub fn belief_report_from_locke_with_model(
         sample_score,
         duplication_score,
         constraint_score,
-    );
+    )
+}
 
+/// Build the surrounding `BeliefReport` (assumptions, evidence summary,
+/// recommended next steps) from a finished `BeliefScore`. Shared between
+/// the migrated and inline paths.
+fn finish_belief_report(report: &LockeReport, score: BeliefScore) -> BeliefReport {
     let mut assumptions = report.assumptions.clone();
     // If sub-scores defaulted to 1.0 due to absent evidence, say so.
     assumptions
@@ -262,6 +325,45 @@ pub fn belief_report_from_locke_with_model(
     }
 
     BeliefReport::new(score, assumptions, evidence_summary, next)
+}
+
+/// **Test-only oracle.** Reproduces the pre-v0.7-part-2 inline implementation
+/// of [`belief_report_from_locke_with_model`] — direct
+/// [`BeliefScore::from_dimensions`] construction instead of the algebra
+/// path. Exposed as `#[doc(hidden)] pub` exclusively as a byte-identity
+/// reference oracle for the v0.7 part 2 algebra-migration regression
+/// proptest (`tests/locke/locke_proptest.rs`).
+///
+/// Not part of the public Locke API; will be removed once the algebra
+/// migration has shipped for at least one stable release without regression.
+#[doc(hidden)]
+pub fn __belief_report_from_locke_inline_for_regression_test(
+    report: &LockeReport,
+    penalty: &BeliefPenalty,
+) -> BeliefReport {
+    let (
+        schema_score,
+        missingness_score,
+        drift_score,
+        leakage_score,
+        lineage_score,
+        sample_score,
+        duplication_score,
+        constraint_score,
+    ) = belief_axis_scores_from_report(report, penalty);
+
+    let score = BeliefScore::from_dimensions(
+        schema_score,
+        missingness_score,
+        drift_score,
+        leakage_score,
+        lineage_score,
+        sample_score,
+        duplication_score,
+        constraint_score,
+    );
+
+    finish_belief_report(report, score)
 }
 
 impl crate::report::SeverityCounts {

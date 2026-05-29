@@ -345,6 +345,96 @@ proptest! {
             prop_assert!(axis >= 0.0 && axis <= 1.0, "axis = {}", axis);
         }
     }
+
+    // ── v0.7 part 2: byte-identity regression for the algebra migration ─
+    //
+    // The migration of `api::belief_report_from_locke_with_model` from a
+    // direct `BeliefScore::from_dimensions(...)` call to a per-axis
+    // `compose_many(...)` chain under `BeliefAxisRules::default()` is safe
+    // only because of an algebraic identity: under all-Min, composing 8
+    // per-axis partials (each carrying one axis's value with the other
+    // seven set to the meet identity ⊤ = 1.0) reduces to the same
+    // `from_dimensions(...)` call on the same 8-tuple.
+    //
+    // This proptest locks the identity at the f64 bit-pattern level —
+    // any drift between the two paths fails the gate immediately. See
+    // ADR-0036 v0.7 part 2 for the migration record.
+
+    #[test]
+    fn algebra_path_is_byte_identical_to_direct_from_dimensions(
+        s in 0.0f64..=1.0, m in 0.0f64..=1.0, d in 0.0f64..=1.0, l in 0.0f64..=1.0,
+        li in 0.0f64..=1.0, sa in 0.0f64..=1.0, du in 0.0f64..=1.0, c in 0.0f64..=1.0,
+    ) {
+        // The pre-migration path: a single `from_dimensions` call.
+        let direct = cjc_locke::BeliefScore::from_dimensions(s, m, d, l, li, sa, du, c);
+
+        // The migrated path: 8 per-axis partials composed under all-Min.
+        let rules = cjc_locke::BeliefAxisRules::default();
+        let partials = [
+            cjc_locke::BeliefScore::from_dimensions(s, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+            cjc_locke::BeliefScore::from_dimensions(1.0, m, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+            cjc_locke::BeliefScore::from_dimensions(1.0, 1.0, d, 1.0, 1.0, 1.0, 1.0, 1.0),
+            cjc_locke::BeliefScore::from_dimensions(1.0, 1.0, 1.0, l, 1.0, 1.0, 1.0, 1.0),
+            cjc_locke::BeliefScore::from_dimensions(1.0, 1.0, 1.0, 1.0, li, 1.0, 1.0, 1.0),
+            cjc_locke::BeliefScore::from_dimensions(1.0, 1.0, 1.0, 1.0, 1.0, sa, 1.0, 1.0),
+            cjc_locke::BeliefScore::from_dimensions(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, du, 1.0),
+            cjc_locke::BeliefScore::from_dimensions(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, c),
+        ];
+        let composed = cjc_locke::compose_many(&partials, &rules)
+            .expect("8 non-empty partials always compose");
+
+        // Bit-equal on every axis AND overall — not just numerically close.
+        prop_assert_eq!(direct.schema_score.to_bits(), composed.schema_score.to_bits());
+        prop_assert_eq!(direct.missingness_score.to_bits(), composed.missingness_score.to_bits());
+        prop_assert_eq!(direct.drift_score.to_bits(), composed.drift_score.to_bits());
+        prop_assert_eq!(direct.leakage_score.to_bits(), composed.leakage_score.to_bits());
+        prop_assert_eq!(direct.lineage_score.to_bits(), composed.lineage_score.to_bits());
+        prop_assert_eq!(direct.sample_score.to_bits(), composed.sample_score.to_bits());
+        prop_assert_eq!(direct.duplication_score.to_bits(), composed.duplication_score.to_bits());
+        prop_assert_eq!(direct.constraint_score.to_bits(), composed.constraint_score.to_bits());
+        prop_assert_eq!(direct.overall.to_bits(), composed.overall.to_bits());
+    }
+
+    /// End-to-end regression — for arbitrary float-column inputs, the
+    /// migrated `belief_report_from_locke` and the preserved inline path
+    /// (`__belief_report_from_locke_inline_for_regression_test`) produce
+    /// byte-identical `BeliefReport`s. This is stronger than the
+    /// algebraic identity above because it exercises the full per-axis
+    /// derivation, the `BeliefPenalty::default()` path, and the
+    /// recommended-next-steps thresholding.
+    #[test]
+    fn belief_report_migrated_path_is_byte_identical_to_inline_oracle(
+        v in arb_float_vec()
+    ) {
+        let df = DataFrame::from_columns(vec![("x".into(), Column::Float(v))]).unwrap();
+        let opts = ValidateOptions { dataset_label: "prop".into(), ..Default::default() };
+        let report = validate(&df, &opts);
+        let penalty = cjc_locke::BeliefPenalty::default();
+
+        // Migrated path (current implementation, uses algebra::compose_many).
+        let migrated = cjc_locke::belief_report_from_locke_with_model(&report, &penalty);
+
+        // Preserved oracle (pre-migration direct from_dimensions path).
+        let oracle = cjc_locke::api::__belief_report_from_locke_inline_for_regression_test(
+            &report, &penalty,
+        );
+
+        // Score axes bit-equal.
+        prop_assert_eq!(migrated.score.schema_score.to_bits(), oracle.score.schema_score.to_bits());
+        prop_assert_eq!(migrated.score.missingness_score.to_bits(), oracle.score.missingness_score.to_bits());
+        prop_assert_eq!(migrated.score.drift_score.to_bits(), oracle.score.drift_score.to_bits());
+        prop_assert_eq!(migrated.score.leakage_score.to_bits(), oracle.score.leakage_score.to_bits());
+        prop_assert_eq!(migrated.score.lineage_score.to_bits(), oracle.score.lineage_score.to_bits());
+        prop_assert_eq!(migrated.score.sample_score.to_bits(), oracle.score.sample_score.to_bits());
+        prop_assert_eq!(migrated.score.duplication_score.to_bits(), oracle.score.duplication_score.to_bits());
+        prop_assert_eq!(migrated.score.constraint_score.to_bits(), oracle.score.constraint_score.to_bits());
+        prop_assert_eq!(migrated.score.overall.to_bits(), oracle.score.overall.to_bits());
+
+        // Surrounding report structure preserved.
+        prop_assert_eq!(&migrated.assumptions, &oracle.assumptions);
+        prop_assert_eq!(&migrated.evidence_summary, &oracle.evidence_summary);
+        prop_assert_eq!(&migrated.recommended_next_steps, &oracle.recommended_next_steps);
+    }
 }
 
 fn arb_belief_score() -> impl Strategy<Value = cjc_locke::BeliefScore> {

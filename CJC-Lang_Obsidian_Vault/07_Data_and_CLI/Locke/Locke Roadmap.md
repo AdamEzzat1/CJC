@@ -153,10 +153,17 @@ Net delta: cjc-locke --lib **284** (was 268, +16) + tests/locke **194** (was 176
 
 - [x] **Per-axis BeliefScore composition rules** — formalise the v0.2 algebra as code. New `algebra.rs` module with `CompositionRule` enum (Min/Max/GeometricMean/ArithmeticMean), `BeliefAxisRules` struct, `compose` / `compose_many` / `compose_many_arithmetic` / `compose_weighted`, identity elements `top()` / `bottom()`, and partial-order helpers `le_componentwise` / `eq_componentwise`. 5 meet-semilattice laws (identity, idempotence, commutativity, associativity, monotonicity) **proptest-locked** under default all-`Min` rules. Bolero fuzz on all four rules × arbitrary 16-float input. 21 unit + 7 integration + 6 proptest + 1 bolero. cjc-locke --lib 268 (was 247, +21); tests/locke 176 (was 161, +15).
 
-### v0.7 part 2 (deferred)
+## v0.7 part 2 (shipped 2026-05-29, ADR-0036)
 
-- [ ] **Migrate `api::belief_report_from_locke_with_model` to `compose`.** Currently computes per-axis scores in-line via `penalty_from_findings_with_model`; should use the algebra directly for traceability.
-- [ ] **Migrate `gate::diff_reports` to use `le_componentwise`** for the partial-order diff.
+- [x] **Migrate `api::belief_report_from_locke_with_model` to `algebra::compose_many`.** The final `BeliefScore` is now built from 8 per-axis partials reduced under `BeliefAxisRules::default()` (all-`Min`). Byte-identical to the pre-migration direct `BeliefScore::from_dimensions` construction by construction — the algebra-level identity `compose_many(per_axis_partials, all_min) = from_dimensions(tuple)` is proptest-locked at the f64 bit-pattern level. The pre-migration inline path is preserved as `#[doc(hidden)] pub fn __belief_report_from_locke_inline_for_regression_test` exclusively as a byte-identity reference oracle for the regression proptest.
+- [x] **Extend `gate::diff_reports` with `algebra::le_componentwise` partial-order classification.** New `BeliefPartialOrder` field on `ReportDiff` records both directions of the componentwise ≤ relation between reference and current belief scores; `BeliefDirection` enum classifies the result as `Equal` / `MonotonicDecrease` / `MonotonicIncrease` / `Incomparable`. `emit_diff_text` gains one stable line surfacing the direction + ref/cur `overall`. The five pre-migration `ReportDiff` fields are unchanged — the addition is additive and existing assertions on the finding-set diff continue to pass without modification.
+- [x] **`BeliefPartialOrder` / `BeliefDirection` / `DEFAULT_BELIEF_COMPARISON_EPS` re-exported from the crate root.**
+- [x] **Test infrastructure** — 7 new unit tests in `gate.rs::tests` (semantics of the 4 directions, determinism, label round-trip, hand-built incomparable case, emit_diff_text belief line) + 2 new proptests in `tests/locke/locke_proptest.rs` (algebra byte-identity over arbitrary 8-tuples, end-to-end byte-identity of migrated path vs preserved inline oracle over arbitrary float-column reports).
+
+Net delta: cjc-locke --lib **291** (was 284 post-v0.6.4, +7) + tests/locke **196** (was 194, +2 proptest properties × 256 cases each). ABNG suite 629 unchanged. Workspace builds clean.
+
+### v0.7 part 2 still deferred
+
 - [ ] **Continuous-domain semantics for `transform_factor`** — parameterise rule selectivity by a continuous parameter.
 - [ ] **Full diabetes-130 per-leaf run** — extend `tests/abng/per_leaf_belief.rs` to the real dataset.
 

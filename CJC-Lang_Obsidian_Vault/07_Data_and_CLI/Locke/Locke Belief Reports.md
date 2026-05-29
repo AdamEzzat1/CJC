@@ -182,6 +182,15 @@ let merged = compose(&a, &b, &rules);
 
 Only `Min` satisfies all five — that's the meet-semilattice algebra. The other rules are useful combinators for specific use cases; see ADR-0036 §3 for the use-case map.
 
+### v0.7 part 2 — algebra is now the construction substrate
+
+The two pre-v0.7-part-2 consumers, `api::belief_report_from_locke_with_model` and `gate::diff_reports`, are now built on the algebra rather than ad-hoc per-call-site code:
+
+- **`api::belief_report_from_locke_with_model`** constructs the final `BeliefScore` via `compose_many(per_axis_partials, BeliefAxisRules::default())` — eight per-axis partials, each carrying one axis's computed value with the other seven set to the meet identity `⊤ = 1.0`. The result is byte-identical to the pre-migration direct `BeliefScore::from_dimensions(...)` call because under all-`Min`, composing partials with seven `1.0` axes reduces to `min(v, 1, …, 1) = v` and the final `from_dimensions` call inside the chain sees the same 8-tuple in the same order. The byte-identity is locked at the f64 bit-pattern level by the `algebra_path_is_byte_identical_to_direct_from_dimensions` proptest.
+- **`gate::diff_reports`** carries a new `belief_partial_order: BeliefPartialOrder` field on `ReportDiff`. It uses `le_componentwise` to classify the reference vs current relationship into `BeliefDirection::{Equal, MonotonicDecrease, MonotonicIncrease, Incomparable}`. `emit_diff_text` surfaces the direction + both `overall` values in one stable line — answering "did dataset belief monotonically degrade between snapshot and now?" that was previously impossible to express through the diff.
+
+The migration is additive on the user-facing surface (5 pre-migration `ReportDiff` fields unchanged) and the inline pre-migration path is preserved as `#[doc(hidden)] pub fn __belief_report_from_locke_inline_for_regression_test` exclusively as the proptest oracle.
+
 ## Tests
 
 - `crates/cjc-locke/src/belief.rs` — 7 unit tests

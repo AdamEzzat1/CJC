@@ -64,7 +64,10 @@ pub mod traced;
 pub mod validation;
 
 pub use dispatch::dispatch_locke;
-pub use gate::{diff_reports, emit_diff_text, ReportDiff};
+pub use gate::{
+    diff_reports, emit_diff_text, BeliefDirection, BeliefPartialOrder, ReportDiff,
+    DEFAULT_BELIEF_COMPARISON_EPS,
+};
 pub use html_emit::{emit_locke_report_html, emit_locke_report_html_with_df};
 pub use json_emit::{emit_locke_report_json, parse_locke_report_json};
 pub use streaming::{
