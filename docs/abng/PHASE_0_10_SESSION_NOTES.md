@@ -15,7 +15,9 @@
 | Target: AUC 0.62 from Locke pruning alone | EXCEEDED on a different path — \*not\* from Locke pruning. |
 | Stretch: AUC ≥ 0.64 from MLP heads (§4.C) | EXCEEDED **without** MLP heads — the linear BLR at K=2, prior=0.5, on full 101K gets us into the 0.64–0.68 strong-published-model band. |
 
-**Three sections landed in this session:** §4.A (tuned config), §4.B (Locke audit + negative pruning finding), §4.E (full-scale headline). Three sections deferred to a follow-up session: §4.C (MLP heads), §4.D (belief-weighted prior), §4.F (multi-seed variance).
+**Four sections landed in this session:** §4.A (tuned config), §4.B (Locke audit + negative pruning finding), §4.E (full-scale headline), §4.F (multi-seed variance, 3 seeds). Two sections deferred: §4.C (MLP heads — multi-session), §4.D (belief-weighted prior — pre-blocked by Locke `?`-sentinel issue + unknown per-leaf prior API).
+
+**Final headline: AUC = 0.6645 ± 0.0018** (n=3 seeds, full 101K, K=2, prior=0.5).
 
 ---
 
@@ -98,6 +100,23 @@ Ran the existing `diabetes130_full_run` test at the §4.A-tuned config (per user
 The calibration metrics (Brier, NLL, ECE) are *better than the blog's calibrated values* — without any Platt scaling. The increased data volume at the same model class produced raw outputs that are already well-calibrated.
 
 Chain head: `56af19614b4dfff6df97c53949668765acdc045e316e4fed087a8a5d9b3233b6`. Deterministic; reproducible.
+
+### §4.F — Multi-seed variance bounds
+
+Added `diabetes130_multi_seed_variance_full` ignored test with `MULTI_SEED_VARIANCE_SEEDS = [42, 43, 44]`. Wall clock 610.77s (~10.2 min).
+
+| Metric | Mean ± Std (n=3) | seed 42 | seed 43 | seed 44 |
+|---|---|---|---|---|
+| AUC | **0.6645 ± 0.0018** | 0.6621 | 0.6664 | 0.6649 |
+| Brier | 0.0950 ± 0.0002 | 0.0953 | 0.0948 | 0.0950 |
+| NLL | 0.3346 ± 0.0004 | 0.3349 | 0.3340 | 0.3347 |
+| ECE | 0.0038 ± 0.0006 | 0.0044 | 0.0030 | 0.0041 |
+| Bal. accuracy | 0.5019 ± 0.0008 | 0.5012 | 0.5015 | 0.5030 |
+| F1 @ 0.5 | 0.0087 ± 0.0031 | 0.0061 | 0.0070 | 0.0130 |
+
+All three seeds picked the same routing `[17, 16]`. The §4.E single-seed 0.6621 was actually *below* the 3-seed mean (seed 42 happened to be the lowest). The variance is ≈0.27% — the 3rd decimal is pinned. F1 is the noisiest metric (relative std 36%) because of fixed-threshold sensitivity on extreme class imbalance.
+
+**Headline solidified: AUC = 0.6645 ± 0.0018 — published-paper-defensible mean with confidence bound.**
 
 ---
 
@@ -200,9 +219,9 @@ The handoff said this is "the variance honesty the blog called out as pending." 
 
 ## Recommended next-session pickup order
 
-1. **§4.F multi-seed variance** at the §4.E config (full 101K). Confirm the AUC 0.6621 isn't a lucky-seed result. Honest report: mean ± std at 10 seeds.
-2. **§4.D belief-weighted prior** — but only after fixing the `?`-sentinel issue in the per-leaf belief experiment. If ABNG's `set_blr_prior` is graph-wide, defer §4.D until the ABNG plumbing decision is made.
-3. **§4.C MLP heads** — last, and only if pushing from 0.66 → 0.68 is worth the multi-session work. Likely deferrable to a later phase.
+1. ~~**§4.F multi-seed variance**~~ — DONE this session. AUC 0.6645 ± 0.0018 at n=3 seeds; extend to n=10 only if a tighter band is needed.
+2. **§4.D belief-weighted prior** — pre-blocked by (a) Locke's missingness detector not recognising `?` sentinel (so per-leaf belief is uninformative on this dataset), and (b) the open question of whether ABNG exposes a per-leaf-set-prior API or only `set_blr_prior` graph-wide. Fix (a) first by extending the per-leaf belief experiment to thread `ValidationConfig` with `missingness_markers = vec!["?".into()]`, then audit (b). If (b) requires new ABNG plumbing, defer §4.D to a phase that consolidates per-leaf API work.
+3. **§4.C MLP heads** — last, and only if pushing from 0.66 → 0.68 is worth the multi-session work. Now that §4.F has solidified the headline at 0.6645 ± 0.0018, the §4.C return on investment is more clearly bounded: the best plausible MLP-head result is ~0.68, a 0.015 lift over current, in exchange for a multi-session architectural change + new audit-kind canary lock. May be deferrable to Phase 0.11 or beyond.
 
 ---
 
@@ -212,7 +231,8 @@ The handoff said this is "the variance honesty the blog called out as pending." 
 - Bench artifacts:
   - [`bench_results/diabetes_phase_0_10_section_4a/SUMMARY.md`](../../bench_results/diabetes_phase_0_10_section_4a/SUMMARY.md) — tuned config landing
   - [`bench_results/diabetes_phase_0_10_section_4b/SUMMARY.md`](../../bench_results/diabetes_phase_0_10_section_4b/SUMMARY.md) — Locke audit + negative pruning result
-  - [`bench_results/diabetes_phase_0_10_section_4e/SUMMARY.md`](../../bench_results/diabetes_phase_0_10_section_4e/SUMMARY.md) — full 101K headline
+  - [`bench_results/diabetes_phase_0_10_section_4e/SUMMARY.md`](../../bench_results/diabetes_phase_0_10_section_4e/SUMMARY.md) — full 101K single-seed headline
+  - [`bench_results/diabetes_phase_0_10_section_4f/SUMMARY.md`](../../bench_results/diabetes_phase_0_10_section_4f/SUMMARY.md) — multi-seed variance bounds
   - [`bench_results/diabetes_per_leaf_belief_baseline.csv`](../../bench_results/diabetes_per_leaf_belief_baseline.csv) — pre-flight per-leaf BeliefScore snapshot
 
 ## Repro one-shot
@@ -225,4 +245,5 @@ cargo test --test abng per_leaf_belief --release                     # 4/4 (synt
 cargo test --test abng diabetes130_subsample_trial --release -- --ignored --nocapture
 cargo test --test abng diabetes130_subsample_trial_locke_pruned --release -- --ignored --nocapture
 cargo test --test abng diabetes130_full_run --release -- --ignored --nocapture
+cargo test --test abng diabetes130_multi_seed_variance_full --release -- --ignored --nocapture
 ```

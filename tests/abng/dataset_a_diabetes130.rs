@@ -1033,3 +1033,115 @@ fn diabetes130_full_run() {
         result.chain_head_hex,
     );
 }
+
+/// Phase 0.10 §4.F — multi-seed variance bounds on the §4.E full
+/// 101,766-row headline. 3 seeds (42/43/44) is the minimum sample for
+/// a meaningful std; expand if the spread looks tight or noisy.
+///
+/// Wall-clock budget: ~3 × full_run ≈ 10-12 minutes. Each seed
+/// re-shuffles the stratified sub-sample of all rows (here `budget =
+/// usize::MAX` so the entire dataset is used, but the seed still
+/// permutes order which affects MI feature selection on ties and the
+/// per-leaf BLR update order, both of which are deterministic given
+/// (seed, data) but seed-sensitive in the small).
+const MULTI_SEED_VARIANCE_SEEDS: &[u64] = &[42, 43, 44];
+
+#[test]
+#[ignore = "Phase 0.10 §4.F multi-seed variance -- 3 × 101K full runs, ~10-15 min wall clock"]
+fn diabetes130_multi_seed_variance_full() {
+    let Some((rows, raw_hash)) = dataset_or_skip("diabetes130_multi_seed_variance_full")
+    else {
+        return;
+    };
+    let schema = diabetes_schema();
+
+    let mut per_seed: Vec<(u64, Metrics, String, Vec<usize>)> =
+        Vec::with_capacity(MULTI_SEED_VARIANCE_SEEDS.len());
+    for &seed in MULTI_SEED_VARIANCE_SEEDS {
+        let result = run_trial(&rows, raw_hash, &schema, seed, usize::MAX);
+        per_seed.push((
+            seed,
+            result.metrics,
+            result.chain_head_hex,
+            result.routing_feature_columns,
+        ));
+    }
+
+    // Mean ± std (population std, n-divisor) for each metric. For 3
+    // seeds this is informative but not precise — the operator should
+    // expand the seed list if std/√n exceeds the 3rd decimal.
+    let n_seeds = per_seed.len() as f64;
+    let mean = |getter: &dyn Fn(&Metrics) -> f64| -> f64 {
+        per_seed.iter().map(|(_, m, _, _)| getter(m)).sum::<f64>() / n_seeds
+    };
+    let std = |getter: &dyn Fn(&Metrics) -> f64, mu: f64| -> f64 {
+        let v = per_seed
+            .iter()
+            .map(|(_, m, _, _)| {
+                let d = getter(m) - mu;
+                d * d
+            })
+            .sum::<f64>()
+            / n_seeds;
+        v.sqrt()
+    };
+    let auc_mu = mean(&|m| m.auc);
+    let auc_sigma = std(&|m| m.auc, auc_mu);
+    let brier_mu = mean(&|m| m.brier);
+    let brier_sigma = std(&|m| m.brier, brier_mu);
+    let nll_mu = mean(&|m| m.nll);
+    let nll_sigma = std(&|m| m.nll, nll_mu);
+    let ece_mu = mean(&|m| m.ece);
+    let ece_sigma = std(&|m| m.ece, ece_mu);
+    let bal_acc_mu = mean(&|m| m.balanced_accuracy);
+    let bal_acc_sigma = std(&|m| m.balanced_accuracy, bal_acc_mu);
+    let f1_mu = mean(&|m| m.f1);
+    let f1_sigma = std(&|m| m.f1, f1_mu);
+
+    eprintln!(
+        "\ndiabetes130_multi_seed_variance_full:\n  config: K_ROUTING={} BLR_PRIOR=({},{},{}) n_rows={} seeds={:?}\n",
+        K_ROUTING,
+        BLR_PRIOR_PRECISION,
+        BLR_PRIOR_A,
+        BLR_PRIOR_B,
+        rows.len(),
+        MULTI_SEED_VARIANCE_SEEDS,
+    );
+    for (seed, m, head, routing) in &per_seed {
+        eprintln!(
+            "  seed {}: auc={:.4} brier={:.4} nll={:.4} ece={:.4} bal_acc={:.4} f1={:.4} routing={:?} chain={}",
+            seed, m.auc, m.brier, m.nll, m.ece, m.balanced_accuracy, m.f1, routing, head,
+        );
+    }
+    eprintln!(
+        "\n  mean ± std (n={}):",
+        MULTI_SEED_VARIANCE_SEEDS.len(),
+    );
+    eprintln!("    AUC          {:.4} ± {:.4}", auc_mu, auc_sigma);
+    eprintln!("    Brier        {:.4} ± {:.4}", brier_mu, brier_sigma);
+    eprintln!("    NLL          {:.4} ± {:.4}", nll_mu, nll_sigma);
+    eprintln!("    ECE          {:.4} ± {:.4}", ece_mu, ece_sigma);
+    eprintln!("    Balanced acc {:.4} ± {:.4}", bal_acc_mu, bal_acc_sigma);
+    eprintln!("    F1           {:.4} ± {:.4}", f1_mu, f1_sigma);
+
+    // Sanity floor: every seed must beat the blog's untuned 20K
+    // baseline (AUC > 0.60) — anything below means the tuned config
+    // didn't take effect under this seed.
+    for (seed, m, _, _) in &per_seed {
+        assert!(
+            m.auc > 0.60,
+            "seed {} AUC {} below 0.60 — tuned config underperforming",
+            seed,
+            m.auc,
+        );
+    }
+    // The std must be finite (catches divide-by-zero edge cases).
+    for (name, s) in [
+        ("auc_std", auc_sigma),
+        ("brier_std", brier_sigma),
+        ("nll_std", nll_sigma),
+        ("ece_std", ece_sigma),
+    ] {
+        assert!(s.is_finite(), "{} = {}", name, s);
+    }
+}
