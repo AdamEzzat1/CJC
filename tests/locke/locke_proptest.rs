@@ -543,6 +543,56 @@ proptest! {
         prop_assert_eq!(&migrated.evidence_summary, &oracle.evidence_summary);
         prop_assert_eq!(&migrated.recommended_next_steps, &oracle.recommended_next_steps);
     }
+
+    /// v0.7+ A1-follow-through: `validate_and_compare` now merges the drift
+    /// signal into the belief score via `algebra::compose` (drift-only
+    /// partial under all-Min). This is a genuine second consumer of the
+    /// compose algebra — beyond the original `belief_report_from_locke_with_model`
+    /// migration. Verifies the merged drift axis matches the pre-A1
+    /// direct-assignment formula `min(train.drift, drift_score) = drift_score`
+    /// (since train.drift defaults to 1.0 when no comparison ran) bit-exactly.
+    #[test]
+    fn validate_and_compare_drift_composition_is_byte_identical(
+        train_v in arb_float_vec(),
+        test_v in arb_float_vec(),
+    ) {
+        use cjc_locke::api::validate_and_compare;
+        let train = DataFrame::from_columns(vec![("x".into(), Column::Float(train_v))]).unwrap();
+        let test = DataFrame::from_columns(vec![("x".into(), Column::Float(test_v))]).unwrap();
+        let opts = ValidateOptions { dataset_label: "prop".into(), ..Default::default() };
+        let drift_cfg = cjc_locke::drift::DriftConfig::default();
+        let (val_report, drift_report, belief) =
+            validate_and_compare(&train, &test, &opts, &drift_cfg);
+
+        // Compute what the pre-A1 path would have produced: same axes as
+        // belief_report_from_locke(train) except drift axis = drift_score.
+        let train_belief = cjc_locke::belief_report_from_locke(&val_report);
+        let drift_penalty = cjc_locke::belief::penalty_from_findings(
+            &drift_report.findings,
+            |code| code.starts_with("E903"),
+        );
+        let drift_score = (1.0 - drift_penalty).clamp(0.0, 1.0);
+        let expected = cjc_locke::BeliefScore::from_dimensions(
+            train_belief.score.schema_score,
+            train_belief.score.missingness_score,
+            drift_score,
+            train_belief.score.leakage_score,
+            train_belief.score.lineage_score,
+            train_belief.score.sample_score,
+            train_belief.score.duplication_score,
+            train_belief.score.constraint_score,
+        );
+        // Bit-equal on every axis (and overall).
+        prop_assert_eq!(belief.score.schema_score.to_bits(), expected.schema_score.to_bits());
+        prop_assert_eq!(belief.score.missingness_score.to_bits(), expected.missingness_score.to_bits());
+        prop_assert_eq!(belief.score.drift_score.to_bits(), expected.drift_score.to_bits());
+        prop_assert_eq!(belief.score.leakage_score.to_bits(), expected.leakage_score.to_bits());
+        prop_assert_eq!(belief.score.lineage_score.to_bits(), expected.lineage_score.to_bits());
+        prop_assert_eq!(belief.score.sample_score.to_bits(), expected.sample_score.to_bits());
+        prop_assert_eq!(belief.score.duplication_score.to_bits(), expected.duplication_score.to_bits());
+        prop_assert_eq!(belief.score.constraint_score.to_bits(), expected.constraint_score.to_bits());
+        prop_assert_eq!(belief.score.overall.to_bits(), expected.overall.to_bits());
+    }
 }
 
 fn arb_belief_score() -> impl Strategy<Value = cjc_locke::BeliefScore> {

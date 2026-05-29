@@ -440,7 +440,15 @@ fn fuzz_policy_apply_arbitrary_rules_never_panic() {
                 .take(4)
                 .map(|b| cjc_locke::SuppressionRule {
                     code: pick_code(*b).into(),
-                    column: if b % 2 == 0 { Some("x".into()) } else { None },
+                    // A3.2 — column is now ColumnMatcher; exercise both
+                    // exact and glob variants under arbitrary input.
+                    column: if b % 3 == 0 {
+                        Some(cjc_locke::ColumnMatcher::Exact("x".into()))
+                    } else if b % 3 == 1 {
+                        Some(cjc_locke::ColumnMatcher::Glob("d*".into()))
+                    } else {
+                        None
+                    },
                     reason: "fuzz".into(),
                 })
                 .collect();

@@ -100,9 +100,9 @@ pub use per_value_lineage::{
     ValueTransform,
 };
 pub use policy::{
-    apply_policy, emit_policy_result_text, OwnerAttribution, OwnerRule, Policy,
-    PolicyResult, RequiredFindingRule, RequirementOperator, RequirementResult,
-    SuppressionDecision, SuppressionRule,
+    apply_policy, emit_policy_result_text, glob_match, ColumnMatcher, OwnerAttribution,
+    OwnerRule, Policy, PolicyResult, RequiredFindingRule, RequirementOperator,
+    RequirementResult, SuppressionDecision, SuppressionRule,
 };
 pub use text_drift::{
     detect_language_distribution_shift_on_column, detect_text_drift,

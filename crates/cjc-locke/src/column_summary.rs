@@ -205,6 +205,7 @@ mod tests {
             findings: vec![],
             assumptions: vec![],
             column_reports: BTreeMap::new(),
+            per_value_lineage: None,
         }
     }
 

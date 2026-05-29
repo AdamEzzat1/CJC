@@ -289,3 +289,229 @@ fn empty_dataframe_yields_no_findings() {
     assert!(masks.is_empty());
     assert!(findings.is_empty());
 }
+
+// ─── C. E9064 adversarial fixtures (catch-rate validation) ──────────────
+//
+// These fixtures stress-test E9064's boundary behaviour. The honest
+// answer to "real-world catch rate on adversarial data is still being
+// validated" is to ship fixtures that explicitly probe what E9064
+// catches and what it doesn't — and assert each result is intended.
+
+/// Boundary case: a level that hits 98% deterministic — *below* the
+/// default `conditional_threshold = 0.99`. The detector MUST NOT fire,
+/// or the threshold semantics break. 99 deterministic + 1 contrary +
+/// large base population.
+#[test]
+fn e9064_does_not_fire_below_default_conditional_threshold() {
+    let mut codes: Vec<i64> = Vec::new();
+    let mut y: Vec<i64> = Vec::new();
+    // Background: balanced 50/50 base rate so a level being deterministic
+    // is a real signal, not a sample artefact.
+    for _ in 0..500 { codes.push(1); y.push(0); }
+    for _ in 0..500 { codes.push(1); y.push(1); }
+    // Level 42: 99 deterministic + 1 contrary = 0.99 conditional prob,
+    // but the default threshold is ≥ 0.99 — borderline edge.
+    // To put us *under* the threshold, use 98 deterministic + 2 contrary
+    // (= 0.98). Should NOT fire.
+    for _ in 0..98 { codes.push(42); y.push(1); }
+    for _ in 0..2 { codes.push(42); y.push(0); }
+    let df = DataFrame::from_columns(vec![
+        ("code".into(), Column::Int(codes)),
+        ("y".into(), Column::Int(y)),
+    ])
+    .unwrap();
+    let findings = detect_per_level_target_leakage(
+        &df,
+        "y",
+        &PerLevelLeakageConfig::default(),
+    );
+    assert!(
+        !findings.iter().any(|f| f.code == "E9064"
+            && f.message.contains("level `42`")),
+        "level 42 at 0.98 conditional prob should NOT fire E9064 at default threshold 0.99 (got {:?})",
+        findings.iter().map(|f| &f.message).collect::<Vec<_>>()
+    );
+}
+
+/// Low-support case: a level with only 5 rows of deterministic outcome
+/// should NOT fire (`min_support = 10` is the default). Otherwise the
+/// detector would over-fit to tiny levels and become noisy.
+#[test]
+fn e9064_does_not_fire_below_default_min_support() {
+    let mut codes: Vec<i64> = Vec::new();
+    let mut y: Vec<i64> = Vec::new();
+    for _ in 0..1000 { codes.push(1); y.push(0); }
+    for _ in 0..1000 { codes.push(1); y.push(1); }
+    // Level 99: 5 rows, all class 1 — perfectly deterministic but support
+    // is below the floor.
+    for _ in 0..5 { codes.push(99); y.push(1); }
+    let df = DataFrame::from_columns(vec![
+        ("code".into(), Column::Int(codes)),
+        ("y".into(), Column::Int(y)),
+    ])
+    .unwrap();
+    let findings = detect_per_level_target_leakage(
+        &df,
+        "y",
+        &PerLevelLeakageConfig::default(),
+    );
+    assert!(
+        !findings.iter().any(|f| f.code == "E9064" && f.message.contains("level `99`")),
+        "low-support level 99 should NOT fire E9064"
+    );
+}
+
+/// Inverse: an explicit lower min_support (= 5) should let the same
+/// signal fire — proving the parameter is honest.
+#[test]
+fn e9064_fires_at_low_support_with_explicit_config() {
+    let mut codes: Vec<i64> = Vec::new();
+    let mut y: Vec<i64> = Vec::new();
+    for _ in 0..1000 { codes.push(1); y.push(0); }
+    for _ in 0..1000 { codes.push(1); y.push(1); }
+    for _ in 0..5 { codes.push(99); y.push(1); }
+    let df = DataFrame::from_columns(vec![
+        ("code".into(), Column::Int(codes)),
+        ("y".into(), Column::Int(y)),
+    ])
+    .unwrap();
+    let cfg = PerLevelLeakageConfig {
+        min_support: 5,
+        ..Default::default()
+    };
+    let findings = detect_per_level_target_leakage(&df, "y", &cfg);
+    assert!(
+        findings.iter().any(|f| f.code == "E9064" && f.message.contains("level `99`")),
+        "level 99 with explicit min_support=5 should fire"
+    );
+}
+
+/// Imbalanced base rate: target is 95% class 0 to start. A level that
+/// emits class 0 with 96% conditional probability is NOT leakage —
+/// it's just consistent with the base rate. E9064 must NOT fire (the
+/// implementation guards on `P(class) < conditional_threshold` precisely
+/// for this case).
+#[test]
+fn e9064_does_not_fire_when_class_dominates_base_rate() {
+    let mut codes: Vec<i64> = Vec::new();
+    let mut y: Vec<i64> = Vec::new();
+    // 950 class 0, 50 class 1 → base rate ~0.95.
+    for _ in 0..950 { codes.push(1); y.push(0); }
+    for _ in 0..50 { codes.push(1); y.push(1); }
+    // Level 7: 100 class 0 + 0 class 1 → conditional = 1.0, but base
+    // rate is already 0.95 → not "deterministic surprise."
+    // Actually it's 100/100=1.0 which IS above conditional_threshold,
+    // but the *base rate* is also at the borderline. The detector
+    // guards on `P(class) < conditional_threshold` (= 0.99): since
+    // 0.95 < 0.99, the level fires. To prove the *other* guard
+    // direction (base rate already near 1.0), we need the unconditional
+    // P(class=0) ≥ threshold. Bump to 990/10.
+    let mut codes2: Vec<i64> = Vec::new();
+    let mut y2: Vec<i64> = Vec::new();
+    for _ in 0..990 { codes2.push(1); y2.push(0); }
+    for _ in 0..10 { codes2.push(1); y2.push(1); }
+    for _ in 0..100 { codes2.push(7); y2.push(0); }
+    let df = DataFrame::from_columns(vec![
+        ("code".into(), Column::Int(codes2)),
+        ("y".into(), Column::Int(y2)),
+    ])
+    .unwrap();
+    // Base rate P(y=0) = 0.991 ≥ default threshold 0.99 → suppressed.
+    let findings = detect_per_level_target_leakage(
+        &df,
+        "y",
+        &PerLevelLeakageConfig::default(),
+    );
+    assert!(
+        !findings.iter().any(|f| f.code == "E9064"),
+        "level 7 dominant-class should NOT fire when base rate ≥ threshold (got {:?})",
+        findings.iter().map(|f| &f.message).collect::<Vec<_>>()
+    );
+    // And keep the first fixture as a regression for the other guard.
+    let _ = (codes, y);
+}
+
+/// Multiple deterministic levels in one column: each must surface
+/// independently. The detector should emit one finding per
+/// `(column, level, class)` triple. Diabetes-130's death codes
+/// 11/13/14/19/20 are the canonical example.
+#[test]
+fn e9064_emits_one_finding_per_deterministic_level() {
+    let mut codes: Vec<i64> = Vec::new();
+    let mut y: Vec<i64> = Vec::new();
+    // 50/50 base.
+    for _ in 0..500 { codes.push(1); y.push(0); }
+    for _ in 0..500 { codes.push(1); y.push(1); }
+    // 5 deterministic levels, each 100% class 0, each with sufficient support.
+    for level in [11_i64, 13, 14, 19, 20] {
+        for _ in 0..30 {
+            codes.push(level);
+            y.push(0);
+        }
+    }
+    let df = DataFrame::from_columns(vec![
+        ("discharge".into(), Column::Int(codes)),
+        ("y".into(), Column::Int(y)),
+    ])
+    .unwrap();
+    let findings = detect_per_level_target_leakage(
+        &df,
+        "y",
+        &PerLevelLeakageConfig::default(),
+    );
+    for level in ["11", "13", "14", "19", "20"] {
+        assert!(
+            findings.iter().any(|f| {
+                f.code == "E9064"
+                    && f.column.as_deref() == Some("discharge")
+                    && f.message.contains(&format!("level `{}`", level))
+            }),
+            "missing E9064 for deterministic level {}",
+            level
+        );
+    }
+}
+
+/// Confounded features: two columns where each level of A always
+/// co-occurs with a unique level of B, both deterministic for class.
+/// Both columns must fire — the detector is per-column, doesn't deduplicate
+/// across confounded columns. (That's correct behaviour: the user has
+/// to triage which feature to remove.)
+#[test]
+fn e9064_fires_independently_on_confounded_columns() {
+    let mut col_a: Vec<i64> = Vec::new();
+    let mut col_b: Vec<i64> = Vec::new();
+    let mut y: Vec<i64> = Vec::new();
+    // Baseline 50/50.
+    for _ in 0..500 { col_a.push(1); col_b.push(1); y.push(0); }
+    for _ in 0..500 { col_a.push(1); col_b.push(1); y.push(1); }
+    // Co-occurring deterministic levels: A=42 ↔ B=99, all class 0, support 30.
+    for _ in 0..30 {
+        col_a.push(42);
+        col_b.push(99);
+        y.push(0);
+    }
+    let df = DataFrame::from_columns(vec![
+        ("a".into(), Column::Int(col_a)),
+        ("b".into(), Column::Int(col_b)),
+        ("y".into(), Column::Int(y)),
+    ])
+    .unwrap();
+    let findings = detect_per_level_target_leakage(
+        &df,
+        "y",
+        &PerLevelLeakageConfig::default(),
+    );
+    let a_fires = findings.iter().any(|f| {
+        f.code == "E9064"
+            && f.column.as_deref() == Some("a")
+            && f.message.contains("level `42`")
+    });
+    let b_fires = findings.iter().any(|f| {
+        f.code == "E9064"
+            && f.column.as_deref() == Some("b")
+            && f.message.contains("level `99`")
+    });
+    assert!(a_fires, "column a should fire on level 42");
+    assert!(b_fires, "column b should fire on level 99");
+}

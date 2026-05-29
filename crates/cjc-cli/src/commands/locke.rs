@@ -52,6 +52,9 @@ pub enum LockeSubcommand {
         gap_threshold: Option<i64>,
         target: Option<String>,
         primary_key: Option<String>,
+        // v0.7+ (A2-by-default): emit per-value canonicalisation lineage
+        // summary alongside the validate output.
+        with_trace: bool,
     },
     Drift { train: PathBuf, test: PathBuf },
     Belief { data: PathBuf },
@@ -90,11 +93,13 @@ fn dispatch(args: LockeArgs) -> i32 {
             gap_threshold,
             target,
             primary_key,
+            with_trace,
         } => cmd_validate(
             &data,
             label.as_deref(),
             save_json.as_deref(),
             save_html.as_deref(),
+            with_trace,
             ValidateExtensions {
                 time_col,
                 max_timestamp,
@@ -289,6 +294,7 @@ fn cmd_validate(
     label: Option<&str>,
     save_json: Option<&std::path::Path>,
     save_html: Option<&std::path::Path>,
+    with_trace: bool,
     ext: ValidateExtensions,
     format: LockeFormat,
 ) -> Result<CmdOutput, String> {
@@ -296,9 +302,14 @@ fn cmd_validate(
     let dataset_label = label
         .map(String::from)
         .unwrap_or_else(|| data.display().to_string());
+    // v0.7+ (A2-by-default): --with-trace flips the per-value lineage
+    // flag so build_per_value_lineage runs during validate() and the
+    // result is attached to the LockeReport.
+    let mut vcfg = ValidationConfig::default();
+    vcfg.collect_per_value_lineage = with_trace;
     let opts = ValidateOptions {
         dataset_label: dataset_label.clone(),
-        config: ValidationConfig::default(),
+        config: vcfg,
         primary_key: ext.primary_key.clone(),
         ..Default::default()
     };
@@ -357,12 +368,18 @@ fn cmd_validate(
     if !extra.is_empty() {
         let mut all = report.findings.clone();
         all.extend(extra);
+        // Preserve the per-value lineage across the merge — the new
+        // LockeReport::new doesn't carry it, so re-attach explicitly.
+        let prior_lineage = report.per_value_lineage.clone();
         report = cjc_locke::LockeReport::new(
             report.input.clone(),
             all,
             report.column_reports.clone(),
             report.assumptions.clone(),
         );
+        if let Some(l) = prior_lineage {
+            report = report.with_per_value_lineage(l);
+        }
     }
 
     let worst = report.worst_severity().as_str().to_string();
@@ -382,10 +399,37 @@ fn cmd_validate(
         })?;
     }
 
-    let text = match format {
+    let mut text = match format {
         LockeFormat::Text => render_report_text(&report),
         LockeFormat::Json => render_report_json(&report),
     };
+    // v0.7+ A2-by-default: append a brief lineage summary when --with-trace
+    // is on. Only meaningful for text format; JSON mode keeps the lineage
+    // out of the structured emit until a v0.7.1 schema bump adds it.
+    if with_trace && matches!(format, LockeFormat::Text) {
+        if let Some(lineage) = &report.per_value_lineage {
+            text.push_str("\n# Per-Value Lineage Summary\n");
+            // Distinct columns + total stages per column.
+            let mut per_col: std::collections::BTreeMap<&str, (usize, usize)> =
+                std::collections::BTreeMap::new();
+            for ((col, _value), entry) in lineage {
+                let bucket = per_col.entry(col.as_str()).or_insert((0, 0));
+                bucket.0 += 1;
+                bucket.1 += entry.stages.len();
+            }
+            text.push_str(&format!(
+                "columns_with_lineage: {}\n",
+                per_col.len()
+            ));
+            for (col, (n_values, n_stages)) in &per_col {
+                text.push_str(&format!(
+                    "  - {}: {} value(s), {} total stage(s)\n",
+                    col, n_values, n_stages
+                ));
+            }
+            text.push_str("(use `cjcl locke trace-value <col> <value>` for the full chain on a specific value)\n");
+        }
+    }
     Ok(CmdOutput { text, worst })
 }
 
@@ -527,7 +571,8 @@ fn cmd_policy_apply(
 /// caller (typically a CLI command) wraps that into a non-zero exit.
 fn parse_policy_toml(src: &str) -> Result<cjc_locke::Policy, String> {
     use cjc_locke::{
-        OwnerRule, Policy, RequiredFindingRule, RequirementOperator, SuppressionRule,
+        ColumnMatcher, OwnerRule, Policy, RequiredFindingRule, RequirementOperator,
+        SuppressionRule,
     };
 
     let doc = crate::toml_min::parse(src).map_err(|e| e.to_string())?;
@@ -540,13 +585,20 @@ fn parse_policy_toml(src: &str) -> Result<cjc_locke::Policy, String> {
         t.iter()
             .find_map(|(k, v)| if k == key { v.as_int() } else { None })
     };
+    // A3.2 — route `column = "..."` through ColumnMatcher::from_pattern so
+    // any `*` triggers glob semantics. Exact strings pass through as
+    // ColumnMatcher::Exact, fingerprint-stable.
+    let get_column =
+        |t: &crate::toml_min::TomlTable| -> Option<ColumnMatcher> {
+            get_str(t, "column").map(|s| ColumnMatcher::from_pattern(&s))
+        };
 
     let mut policy = Policy::default();
 
     for entry in doc.array_tables("suppress") {
         let code = get_str(entry, "code")
             .ok_or_else(|| "suppress entry missing required `code`".to_string())?;
-        let column = get_str(entry, "column");
+        let column = get_column(entry);
         let reason = get_str(entry, "reason")
             .ok_or_else(|| "suppress entry missing required `reason`".to_string())?;
         policy.suppressions.push(SuppressionRule {
@@ -559,7 +611,7 @@ fn parse_policy_toml(src: &str) -> Result<cjc_locke::Policy, String> {
     for entry in doc.array_tables("owner") {
         let team = get_str(entry, "team")
             .ok_or_else(|| "owner entry missing required `team`".to_string())?;
-        let column = get_str(entry, "column");
+        let column = get_column(entry);
         let code = get_str(entry, "code");
         policy.owners.push(OwnerRule { team, column, code });
     }
@@ -950,6 +1002,8 @@ pub fn try_parse_sub(sub_args: &[String]) -> Option<LockeArgs> {
     let mut runs: u32 = 3;
     // v0.7+ A3 flag
     let mut policy_path: Option<PathBuf> = None;
+    // v0.7+ A2-by-default
+    let mut with_trace = false;
     let mut i = 0;
     while i < rest.len() {
         let a = &rest[i];
@@ -1006,6 +1060,8 @@ pub fn try_parse_sub(sub_args: &[String]) -> Option<LockeArgs> {
                 i += 1;
                 policy_path = rest.get(i).map(PathBuf::from);
             }
+            // v0.7+ A2-by-default — emit per-value lineage summary.
+            "--with-trace" => with_trace = true,
             _ => positional.push(a.clone()),
         }
         i += 1;
@@ -1024,6 +1080,7 @@ pub fn try_parse_sub(sub_args: &[String]) -> Option<LockeArgs> {
                 gap_threshold,
                 target,
                 primary_key,
+                with_trace,
             }
         }
         "drift" => {
@@ -1344,6 +1401,30 @@ mod tests {
         }
     }
 
+    // ── v0.7+ A2-by-default: --with-trace on validate ───────────────────
+
+    #[test]
+    fn parse_validate_with_trace_flag() {
+        let parsed = try_parse_sub(&args(&[
+            "validate", "data.csv", "--with-trace",
+        ]))
+        .expect("validate --with-trace");
+        match parsed.subcommand {
+            LockeSubcommand::Validate { with_trace, .. } => assert!(with_trace),
+            _ => panic!("expected Validate"),
+        }
+    }
+
+    #[test]
+    fn parse_validate_default_does_not_enable_trace() {
+        let parsed = try_parse_sub(&args(&["validate", "data.csv"]))
+            .expect("validate default parse");
+        match parsed.subcommand {
+            LockeSubcommand::Validate { with_trace, .. } => assert!(!with_trace),
+            _ => panic!("expected Validate"),
+        }
+    }
+
     // ── v0.7+ A3: policy + gate --policy ────────────────────────────────
 
     #[test]
@@ -1410,7 +1491,14 @@ reason = "real distinction, not typo"
         let p = parse_policy_toml(src).expect("policy parse");
         assert_eq!(p.suppressions.len(), 1);
         assert_eq!(p.suppressions[0].code, "E9082");
-        assert_eq!(p.suppressions[0].column.as_deref(), Some("weight"));
+        // A3.2: column is now ColumnMatcher; check via pattern_str().
+        assert_eq!(
+            p.suppressions[0]
+                .column
+                .as_ref()
+                .map(|m| m.pattern_str()),
+            Some("weight")
+        );
         assert_eq!(p.suppressions[0].reason, "real distinction, not typo");
     }
 
@@ -1520,5 +1608,78 @@ reason = "second"
         let p = parse_policy_toml(src).expect("parse ok");
         assert_eq!(p.suppressions[0].reason, "first");
         assert_eq!(p.suppressions[1].reason, "second");
+    }
+
+    // ── A3.2: wildcard column matchers via TOML ─────────────────────────
+
+    #[test]
+    fn parse_policy_toml_exact_column_routes_to_exact_matcher() {
+        let src = r#"
+[[suppress]]
+code = "E9001"
+column = "patient_nbr"
+reason = "intentional column"
+"#;
+        let p = parse_policy_toml(src).expect("parse ok");
+        let rule = &p.suppressions[0];
+        match &rule.column {
+            Some(cjc_locke::ColumnMatcher::Exact(s)) => assert_eq!(s, "patient_nbr"),
+            other => panic!("expected Exact, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_policy_toml_wildcard_column_routes_to_glob_matcher() {
+        // The flagship diabetes-130 use case: one rule replaces three.
+        let src = r#"
+[[suppress]]
+code = "E9080"
+column = "diag_*"
+reason = "ICD codes share prefix"
+"#;
+        let p = parse_policy_toml(src).expect("parse ok");
+        let rule = &p.suppressions[0];
+        match &rule.column {
+            Some(cjc_locke::ColumnMatcher::Glob(s)) => assert_eq!(s, "diag_*"),
+            other => panic!("expected Glob, got {:?}", other),
+        }
+        assert!(rule
+            .column
+            .as_ref()
+            .map(|m| m.is_glob())
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn parse_policy_toml_owner_rule_supports_wildcards() {
+        let src = r#"
+[[owner]]
+team = "team-clinical"
+column = "diag_*"
+"#;
+        let p = parse_policy_toml(src).expect("parse ok");
+        match &p.owners[0].column {
+            Some(cjc_locke::ColumnMatcher::Glob(s)) => assert_eq!(s, "diag_*"),
+            other => panic!("expected Glob, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_policy_toml_mixed_exact_and_glob_in_same_file() {
+        let src = r#"
+[[suppress]]
+code = "E9080"
+column = "diag_*"
+reason = "ICD prefix"
+
+[[suppress]]
+code = "E9004"
+column = "patient_nbr"
+reason = "expected duplicates"
+"#;
+        let p = parse_policy_toml(src).expect("parse ok");
+        assert_eq!(p.suppressions.len(), 2);
+        assert!(p.suppressions[0].column.as_ref().unwrap().is_glob());
+        assert!(!p.suppressions[1].column.as_ref().unwrap().is_glob());
     }
 }

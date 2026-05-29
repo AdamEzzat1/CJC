@@ -39,15 +39,20 @@
 //! "is this the same suppression decision the team approved last
 //! week?" purely by ID comparison.
 //!
-//! ## Out of scope (v0.7+ A3.1)
+//! ## A3.2 additions (this batch)
 //!
-//! - Column wildcards / patterns (`column = "diag_*"`).
+//! - **Column wildcards** — `column = "diag_*"` matches `diag_1`, `diag_2`,
+//!   `diag_3` etc. Implemented via [`ColumnMatcher`] with auto-detection
+//!   from the pattern string: any `*` triggers `Glob` semantics, otherwise
+//!   `Exact`. The diabetes-130 case (three repeated rules for
+//!   `diag_1`/`diag_2`/`diag_3`) collapses to one.
+//!
+//! ## Out of scope (still)
+//!
 //! - Multi-policy file inheritance / merging.
 //! - Suppression expiration dates.
 //! - Conditional policies ("require E9004=0 only if `target_column`
 //!   is `readmitted`").
-//!
-//! These are A3.2+; the current rule semantics are exact-match.
 
 use std::collections::BTreeMap;
 
@@ -112,25 +117,171 @@ impl RequirementOperator {
     }
 }
 
+// ─── Column matcher (A3.2 wildcards) ──────────────────────────────────────
+
+/// How a policy rule selects column names.
+///
+/// `Exact(s)` matches when the column equals `s` literally. `Glob(p)`
+/// matches when `p` (containing `*` wildcards) matches via [`glob_match`].
+/// Use [`ColumnMatcher::from_pattern`] to auto-detect which form a
+/// user-supplied string should adopt — any `*` in the input triggers
+/// `Glob`. The TOML loader in `cjc-cli` routes through `from_pattern`
+/// so the same `column = "..."` key transparently supports both.
+///
+/// ## Determinism
+///
+/// `matches()` is a pure function of the (matcher, column_name) pair.
+/// The fingerprint used in [`SuppressionRule::fingerprint`] and
+/// [`OwnerRule::fingerprint`] hashes the pattern *string*, not the enum
+/// tag — so two policies that both spell out `column = "diag_*"`
+/// produce byte-identical audit IDs whether constructed via
+/// `from_pattern("diag_*")` or `Glob("diag_*".into())` directly.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ColumnMatcher {
+    /// Literal string match — fastest path, no wildcard semantics.
+    Exact(String),
+    /// Glob pattern with `*` wildcards (zero-or-more chars). See
+    /// [`glob_match`] for the supported subset.
+    Glob(String),
+}
+
+impl ColumnMatcher {
+    /// Construct from a user-supplied pattern string. Any `*` triggers
+    /// `Glob`; otherwise `Exact`. This is the convention the TOML
+    /// loader uses so `column = "patient_nbr"` and `column = "diag_*"`
+    /// transparently route to the right variant.
+    pub fn from_pattern(pattern: &str) -> Self {
+        if pattern.contains('*') {
+            ColumnMatcher::Glob(pattern.to_string())
+        } else {
+            ColumnMatcher::Exact(pattern.to_string())
+        }
+    }
+
+    /// True iff this matcher accepts the given column name.
+    pub fn matches(&self, column: &str) -> bool {
+        match self {
+            ColumnMatcher::Exact(s) => s == column,
+            ColumnMatcher::Glob(pat) => glob_match(pat, column),
+        }
+    }
+
+    /// User-facing pattern string (the same form that was passed to
+    /// [`from_pattern`]). Stable for emit + fingerprint hashing.
+    pub fn pattern_str(&self) -> &str {
+        match self {
+            ColumnMatcher::Exact(s) => s,
+            ColumnMatcher::Glob(s) => s,
+        }
+    }
+
+    /// True iff this matcher uses glob semantics (contains a `*`).
+    pub fn is_glob(&self) -> bool {
+        matches!(self, ColumnMatcher::Glob(_))
+    }
+}
+
+/// Deterministic glob match. Supports a single wildcard kind: `*`,
+/// matching zero or more characters of any kind. No `?`, no `[...]`
+/// char classes, no escape sequences. The pattern is split on `*`;
+/// each segment must appear in order, the first anchored to the start
+/// of `s` and the last anchored to the end.
+///
+/// Edge cases pinned by the unit tests below:
+/// - `"*"` matches every string (including `""`).
+/// - `""` matches only `""`.
+/// - Consecutive stars (`"**foo"`) behave the same as a single star —
+///   empty segments are skipped.
+/// - Anchored prefix (`"diag_*"`) must match from position 0.
+/// - Anchored suffix (`"*_id"`) must match to the end of `s`.
+///
+/// Greedy match is implicit: each middle segment is found via the
+/// leftmost `find()`, but because the final segment is anchored to the
+/// end, the algorithm cannot over-consume.
+pub fn glob_match(pattern: &str, s: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if !pattern.contains('*') {
+        return pattern == s;
+    }
+    let segments: Vec<&str> = pattern.split('*').collect();
+    // Special case: pattern starts with non-empty segment → anchor to start.
+    let first = segments[0];
+    if !first.is_empty() && !s.starts_with(first) {
+        return false;
+    }
+    // Special case: pattern ends with non-empty segment → anchor to end.
+    let last = segments[segments.len() - 1];
+    if !last.is_empty() && !s.ends_with(last) {
+        return false;
+    }
+    // Walk middle segments in order.
+    let mut cursor = first.len();
+    let end_limit = s.len().saturating_sub(last.len());
+    for seg in &segments[1..segments.len() - 1] {
+        if seg.is_empty() {
+            continue;
+        }
+        match s.get(cursor..end_limit).and_then(|window| window.find(seg)) {
+            Some(rel) => cursor += rel + seg.len(),
+            None => return false,
+        }
+    }
+    cursor <= end_limit
+}
+
 // ─── Rule data model ──────────────────────────────────────────────────────
 
 /// Drop findings matching `(code, column?)` with a recorded `reason`.
 /// `column = None` matches findings on any column (including dataset-wide).
+/// When `Some`, the [`ColumnMatcher`] may be exact or glob — see
+/// [`ColumnMatcher::from_pattern`] for the auto-detection convention.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SuppressionRule {
     pub code: String,
-    pub column: Option<String>,
+    pub column: Option<ColumnMatcher>,
     pub reason: String,
 }
 
 impl SuppressionRule {
-    /// Content-addressed fingerprint over (code, column, reason). Used
-    /// inside [`SuppressionDecision::decision_id`] and stable across runs.
+    /// Convenience constructor: exact-column suppression rule.
+    pub fn exact(code: impl Into<String>, column: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            column: Some(ColumnMatcher::Exact(column.into())),
+            reason: reason.into(),
+        }
+    }
+
+    /// Convenience constructor: pattern-based suppression rule. Routes
+    /// through [`ColumnMatcher::from_pattern`].
+    pub fn pattern(code: impl Into<String>, pattern: impl AsRef<str>, reason: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            column: Some(ColumnMatcher::from_pattern(pattern.as_ref())),
+            reason: reason.into(),
+        }
+    }
+
+    /// Convenience constructor: code-only rule (matches any column).
+    pub fn any_column(code: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            column: None,
+            reason: reason.into(),
+        }
+    }
+
+    /// Content-addressed fingerprint over (code, column_pattern, reason).
+    /// Hashes the **pattern string** so two policies that spell the
+    /// column identically produce identical audit IDs regardless of how
+    /// the matcher was constructed.
     pub fn fingerprint(&self) -> FingerprintId {
         let canon = format!(
             "{}\u{1f}{}\u{1f}{}",
             self.code,
-            self.column.as_deref().unwrap_or(""),
+            self.column.as_ref().map(|m| m.pattern_str()).unwrap_or(""),
             self.reason
         );
         fingerprint_str(IdDomain::AuditEvent, &canon)
@@ -138,20 +289,39 @@ impl SuppressionRule {
 }
 
 /// Tag findings with an owner. `column = None` means the rule applies
-/// to *any* column; `code = None` means *any* code.
+/// to *any* column; `code = None` means *any* code. Column patterns
+/// support the same glob semantics as [`SuppressionRule::column`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct OwnerRule {
     pub team: String,
-    pub column: Option<String>,
+    pub column: Option<ColumnMatcher>,
     pub code: Option<String>,
 }
 
 impl OwnerRule {
+    /// Convenience constructor: exact-column owner rule.
+    pub fn exact(team: impl Into<String>, column: Option<impl Into<String>>, code: Option<impl Into<String>>) -> Self {
+        Self {
+            team: team.into(),
+            column: column.map(|c| ColumnMatcher::Exact(c.into())),
+            code: code.map(Into::into),
+        }
+    }
+
+    /// Convenience constructor: pattern-based owner rule.
+    pub fn pattern(team: impl Into<String>, pattern: impl AsRef<str>, code: Option<impl Into<String>>) -> Self {
+        Self {
+            team: team.into(),
+            column: Some(ColumnMatcher::from_pattern(pattern.as_ref())),
+            code: code.map(Into::into),
+        }
+    }
+
     pub fn fingerprint(&self) -> FingerprintId {
         let canon = format!(
             "{}\u{1f}{}\u{1f}{}",
             self.team,
-            self.column.as_deref().unwrap_or(""),
+            self.column.as_ref().map(|m| m.pattern_str()).unwrap_or(""),
             self.code.as_deref().unwrap_or("")
         );
         fingerprint_str(IdDomain::AuditEvent, &canon)
@@ -314,7 +484,12 @@ pub fn apply_policy(report: &LockeReport, policy: &Policy) -> PolicyResult {
                     rule_index,
                     decision_id: compose_decision_id(f.id, rule),
                     code: rule.code.clone(),
-                    column: rule.column.clone(),
+                    // Store the rule's *pattern string* (e.g. "diag_*")
+                    // for traceability in audit emit; the finding's own
+                    // column (e.g. "diag_2") is on the finding itself
+                    // for cross-reference. Keeping the field shape stable
+                    // means existing snapshot tests don't regress.
+                    column: rule.column.as_ref().map(|m| m.pattern_str().to_string()),
                     reason: rule.reason.clone(),
                     severity: f.severity,
                 };
@@ -377,8 +552,12 @@ fn suppression_matches(rule: &SuppressionRule, f: &ValidationFinding) -> bool {
         return false;
     }
     if let Some(rule_col) = &rule.column {
-        if f.column.as_deref() != Some(rule_col.as_str()) {
-            return false;
+        // Finding must have a column AND the matcher must accept it.
+        // (A column-scoped rule does NOT match dataset-wide findings
+        //  with `column = None`; use a code-only rule for that case.)
+        match f.column.as_deref() {
+            Some(actual) if rule_col.matches(actual) => {}
+            _ => return false,
         }
     }
     true
@@ -390,9 +569,10 @@ fn owner_matches(rule: &OwnerRule, f: &ValidationFinding) -> bool {
             return false;
         }
     }
-    if let Some(col) = &rule.column {
-        if f.column.as_deref() != Some(col.as_str()) {
-            return false;
+    if let Some(rule_col) = &rule.column {
+        match f.column.as_deref() {
+            Some(actual) if rule_col.matches(actual) => {}
+            _ => return false,
         }
     }
     true
@@ -573,12 +753,146 @@ mod tests {
     fn suppression_filters_by_column_when_supplied() {
         let r = SuppressionRule {
             code: "E9001".into(),
-            column: Some("not_the_real_column".into()),
+            column: Some(ColumnMatcher::Exact("not_the_real_column".into())),
             reason: "wrong column on purpose".into(),
         };
         let report = report_with_e9001();
         let f = report.findings.iter().find(|f| f.code == "E9001").unwrap();
         assert!(!suppression_matches(&r, f));
+    }
+
+    // ── A3.2: ColumnMatcher + glob_match unit tests ──────────────────────
+
+    #[test]
+    fn from_pattern_auto_routes_exact_vs_glob() {
+        assert_eq!(
+            ColumnMatcher::from_pattern("patient_nbr"),
+            ColumnMatcher::Exact("patient_nbr".into())
+        );
+        assert_eq!(
+            ColumnMatcher::from_pattern("diag_*"),
+            ColumnMatcher::Glob("diag_*".into())
+        );
+        assert!(ColumnMatcher::from_pattern("diag_*").is_glob());
+        assert!(!ColumnMatcher::from_pattern("patient_nbr").is_glob());
+    }
+
+    #[test]
+    fn glob_match_handles_anchored_prefix() {
+        // Prefix match — must start with `diag_`.
+        assert!(glob_match("diag_*", "diag_1"));
+        assert!(glob_match("diag_*", "diag_2"));
+        assert!(glob_match("diag_*", "diag_anything"));
+        assert!(!glob_match("diag_*", "predict_diag_1"));
+    }
+
+    #[test]
+    fn glob_match_handles_anchored_suffix() {
+        // Suffix match — must end with `_id`.
+        assert!(glob_match("*_id", "patient_id"));
+        assert!(glob_match("*_id", "encounter_id"));
+        assert!(!glob_match("*_id", "patient_idx"));
+    }
+
+    #[test]
+    fn glob_match_handles_middle_wildcards() {
+        assert!(glob_match("diag_*_code", "diag_1_code"));
+        assert!(glob_match("diag_*_code", "diag_primary_code"));
+        assert!(!glob_match("diag_*_code", "diag_1_name"));
+        assert!(!glob_match("diag_*_code", "diag_code"));
+    }
+
+    #[test]
+    fn glob_match_universal_star() {
+        // `*` matches any string including the empty string.
+        assert!(glob_match("*", ""));
+        assert!(glob_match("*", "x"));
+        assert!(glob_match("*", "patient_nbr"));
+    }
+
+    #[test]
+    fn glob_match_no_wildcard_falls_back_to_exact_equality() {
+        assert!(glob_match("patient_nbr", "patient_nbr"));
+        assert!(!glob_match("patient_nbr", "patient_id"));
+    }
+
+    #[test]
+    fn glob_match_consecutive_stars_behave_as_one() {
+        assert!(glob_match("diag_**", "diag_1"));
+        assert!(glob_match("**diag**", "patient_diag_1_code"));
+    }
+
+    #[test]
+    fn glob_match_empty_pattern_only_matches_empty() {
+        assert!(glob_match("", ""));
+        assert!(!glob_match("", "x"));
+    }
+
+    #[test]
+    fn column_matcher_matches_delegates_correctly() {
+        let exact = ColumnMatcher::from_pattern("patient_nbr");
+        assert!(exact.matches("patient_nbr"));
+        assert!(!exact.matches("patient_id"));
+
+        let glob = ColumnMatcher::from_pattern("diag_*");
+        assert!(glob.matches("diag_1"));
+        assert!(glob.matches("diag_anything"));
+        assert!(!glob.matches("predict_diag"));
+    }
+
+    #[test]
+    fn suppression_with_glob_matches_multiple_diag_columns() {
+        // The diabetes-130 use case: one rule covers diag_1, diag_2, diag_3.
+        let r = SuppressionRule::pattern("E9080", "diag_*", "ICD codes share prefix");
+        // Hand-built findings with different diag_N columns.
+        let f1 = ValidationFinding::new(
+            "E9080", FindingSeverity::Warning, "synthetic",
+            Some("diag_1".into()), None, vec![], 0, vec![], vec![],
+        );
+        let f2 = ValidationFinding::new(
+            "E9080", FindingSeverity::Warning, "synthetic",
+            Some("diag_2".into()), None, vec![], 0, vec![], vec![],
+        );
+        let f3 = ValidationFinding::new(
+            "E9080", FindingSeverity::Warning, "synthetic",
+            Some("diag_3".into()), None, vec![], 0, vec![], vec![],
+        );
+        let f4 = ValidationFinding::new(
+            "E9080", FindingSeverity::Warning, "synthetic",
+            Some("patient_nbr".into()), None, vec![], 0, vec![], vec![],
+        );
+        assert!(suppression_matches(&r, &f1));
+        assert!(suppression_matches(&r, &f2));
+        assert!(suppression_matches(&r, &f3));
+        // patient_nbr does NOT match `diag_*` — the glob is anchored.
+        assert!(!suppression_matches(&r, &f4));
+    }
+
+    #[test]
+    fn suppression_fingerprint_is_pattern_string_stable() {
+        // Two policies that spell the column the same way produce the
+        // same audit fingerprint regardless of how the matcher was
+        // constructed (Exact via constructor vs Glob via from_pattern).
+        let r_pattern = SuppressionRule::pattern("E9080", "patient_nbr", "ack");
+        let r_exact = SuppressionRule::exact("E9080", "patient_nbr", "ack");
+        // Both go through the same canonical pattern_str() in the hash.
+        assert_eq!(r_pattern.fingerprint(), r_exact.fingerprint());
+        // A different pattern produces a different fingerprint.
+        let r_diff = SuppressionRule::pattern("E9080", "diag_*", "ack");
+        assert_ne!(r_pattern.fingerprint(), r_diff.fingerprint());
+    }
+
+    #[test]
+    fn column_scoped_rule_does_not_match_dataset_wide_finding() {
+        // Defensive: an E9099 finding with column = None should NOT be
+        // suppressed by a rule that names a column (because the
+        // user wrote `column = "x"` to scope the rule).
+        let r = SuppressionRule::exact("E9099", "x", "scoped");
+        let f = ValidationFinding::new(
+            "E9099", FindingSeverity::Notice, "dataset-wide",
+            None, None, vec![], 0, vec![], vec![],
+        );
+        assert!(!suppression_matches(&r, &f));
     }
 
     #[test]

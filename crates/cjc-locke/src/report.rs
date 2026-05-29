@@ -250,7 +250,17 @@ pub struct LockeReport {
     pub column_reports: BTreeMap<String, ColumnBeliefReport>,
     pub assumptions: Vec<String>,
     /// Deterministic run identifier — fingerprint of (input summary + findings).
+    /// **Does not include `per_value_lineage`** so attaching lineage to an
+    /// existing report does not change its identity — the lineage is a
+    /// derived observation, not a primary fact.
     pub run_id: FingerprintId,
+    /// **v0.7+ (A2-by-default)** — optional per-value canonicalisation
+    /// lineage, populated when [`crate::validation::ValidationConfig::collect_per_value_lineage`]
+    /// is `true`. `None` for the historical byte-identical-to-v0.7 path.
+    /// Not currently included in JSON emit / parse round-trips — the
+    /// lineage map is in-memory only for this batch. See ADR-0038 for
+    /// the data model.
+    pub per_value_lineage: Option<crate::per_value_lineage::PerValueLineageMap>,
 }
 
 impl LockeReport {
@@ -273,7 +283,20 @@ impl LockeReport {
             column_reports,
             assumptions,
             run_id,
+            per_value_lineage: None,
         }
+    }
+
+    /// Attach a per-value lineage map to this report, returning the
+    /// modified report. Used by [`crate::api::validate`] when
+    /// [`crate::validation::ValidationConfig::collect_per_value_lineage`]
+    /// is `true`. Does not change `run_id` — lineage is derived data.
+    pub fn with_per_value_lineage(
+        mut self,
+        lineage: crate::per_value_lineage::PerValueLineageMap,
+    ) -> Self {
+        self.per_value_lineage = Some(lineage);
+        self
     }
 
     fn derive_run_id(input: &LockeInputSummary, findings: &[ValidationFinding]) -> FingerprintId {

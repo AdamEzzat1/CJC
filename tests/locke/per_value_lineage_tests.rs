@@ -309,3 +309,98 @@ fn stage_set_can_isolate_a_single_transform_for_targeted_inspection() {
         "disabling sentinel stage should remove it from the trace"
     );
 }
+
+// ─── A2-by-default: validate(...) opt-in lineage attachment ───────────────
+
+#[test]
+fn default_validate_does_not_attach_per_value_lineage() {
+    use cjc_locke::api::{validate, ValidateOptions};
+    use cjc_locke::validation::ValidationConfig;
+    let df = diabetes130_weight_fixture();
+    let opts = ValidateOptions {
+        dataset_label: "default".into(),
+        config: ValidationConfig::default(),
+        ..Default::default()
+    };
+    let report = validate(&df, &opts);
+    assert!(
+        report.per_value_lineage.is_none(),
+        "default config must not attach lineage — byte-identical to v0.7"
+    );
+}
+
+#[test]
+fn opt_in_validate_attaches_per_value_lineage() {
+    use cjc_locke::api::{validate, ValidateOptions};
+    use cjc_locke::validation::ValidationConfig;
+    let df = diabetes130_weight_fixture();
+    let mut cfg = ValidationConfig::default();
+    cfg.collect_per_value_lineage = true;
+    let opts = ValidateOptions {
+        dataset_label: "with_trace".into(),
+        config: cfg,
+        ..Default::default()
+    };
+    let report = validate(&df, &opts);
+    let lineage = report
+        .per_value_lineage
+        .expect("opt-in must attach lineage");
+    // The diabetes-130 ? sentinel must appear in the lineage map.
+    let weight_q_key = ("weight".to_string(), "?".to_string());
+    let entry = lineage
+        .get(&weight_q_key)
+        .expect("? sentinel must appear in lineage");
+    assert!(matches!(
+        entry.stages[0].transform,
+        ValueTransform::SentinelMask { .. }
+    ));
+}
+
+#[test]
+fn opt_in_validate_byte_identical_findings_to_default() {
+    // Critical regression — turning on lineage must NOT change the
+    // findings, run_id, severity_counts, etc. on the report. Only the
+    // new field changes.
+    use cjc_locke::api::{validate, ValidateOptions};
+    use cjc_locke::validation::ValidationConfig;
+    let df = diabetes130_weight_fixture();
+    let opts_default = ValidateOptions {
+        dataset_label: "regression_check".into(),
+        config: ValidationConfig::default(),
+        ..Default::default()
+    };
+    let mut cfg_opt_in = ValidationConfig::default();
+    cfg_opt_in.collect_per_value_lineage = true;
+    let opts_opt_in = ValidateOptions {
+        dataset_label: "regression_check".into(),
+        config: cfg_opt_in,
+        ..Default::default()
+    };
+    let r_default = validate(&df, &opts_default);
+    let r_opt_in = validate(&df, &opts_opt_in);
+    assert_eq!(r_default.findings, r_opt_in.findings);
+    assert_eq!(r_default.run_id, r_opt_in.run_id);
+    assert_eq!(r_default.severity_counts, r_opt_in.severity_counts);
+    assert_eq!(r_default.column_reports, r_opt_in.column_reports);
+    // The only difference is the new field.
+    assert!(r_default.per_value_lineage.is_none());
+    assert!(r_opt_in.per_value_lineage.is_some());
+}
+
+#[test]
+fn opt_in_validate_is_deterministic_across_runs() {
+    use cjc_locke::api::{validate, ValidateOptions};
+    use cjc_locke::validation::ValidationConfig;
+    let df = diabetes130_weight_fixture();
+    let mut cfg = ValidationConfig::default();
+    cfg.collect_per_value_lineage = true;
+    let opts = ValidateOptions {
+        dataset_label: "det".into(),
+        config: cfg,
+        ..Default::default()
+    };
+    let a = validate(&df, &opts);
+    let b = validate(&df, &opts);
+    assert_eq!(a.per_value_lineage, b.per_value_lineage);
+    assert_eq!(a.findings, b.findings);
+}

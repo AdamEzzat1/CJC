@@ -9,8 +9,8 @@
 use cjc_data::{Column, DataFrame};
 use cjc_locke::{
     apply_policy, belief_report_from_locke, diff_reports, emit_policy_result_text,
-    BeliefDirection, OwnerRule, Policy, RequiredFindingRule, RequirementOperator,
-    SuppressionRule,
+    BeliefDirection, ColumnMatcher, OwnerRule, Policy, RequiredFindingRule,
+    RequirementOperator, SuppressionRule,
 };
 use cjc_locke::api::{validate, ValidateOptions};
 
@@ -80,7 +80,7 @@ fn column_specific_suppression_does_not_drop_other_columns() {
     let policy = Policy {
         suppressions: vec![SuppressionRule {
             code: "E9001".into(),
-            column: Some("acknowledged".into()),
+            column: Some(ColumnMatcher::Exact("acknowledged".into())),
             reason: "known dev placeholder column".into(),
         }],
         owners: vec![],
@@ -109,7 +109,7 @@ fn owner_attribution_groups_findings_by_team() {
         suppressions: vec![],
         owners: vec![OwnerRule {
             team: "data-platform".into(),
-            column: Some("x".into()),
+            column: Some(ColumnMatcher::Exact("x".into())),
             code: None,
         }],
         requirements: vec![],
@@ -330,4 +330,162 @@ fn applying_policy_does_not_change_belief_report_for_same_data() {
     let _ = apply_policy(&report, &policy);
     let belief_post = belief_report_from_locke(&report);
     assert_eq!(belief_pre, belief_post);
+}
+
+// ─── A3.2: Wildcard column matchers ───────────────────────────────────────
+
+/// Flagship A3.2 scenario: diabetes-130-style schema with `diag_1`,
+/// `diag_2`, `diag_3` columns. Before A3.2 a user needed three rules.
+/// With wildcards, a single `column = "diag_*"` rule replaces all three
+/// and produces byte-identical suppression decisions to the three-rule
+/// version (modulo the rule_index — which sequence index applies).
+#[test]
+fn wildcard_diag_star_suppresses_all_three_diag_columns_at_once() {
+    // Build a frame with three diag_N columns + an unrelated patient_nbr.
+    // Inject NaNs so E9001 (missingness) fires on all four.
+    let bad_floats = |n: usize, frac: f64| -> Column {
+        let cutoff = (n as f64 * frac) as usize;
+        Column::Float(
+            (0..n)
+                .map(|i| if i < cutoff { f64::NAN } else { i as f64 })
+                .collect(),
+        )
+    };
+    let df = DataFrame::from_columns(vec![
+        ("diag_1".into(), bad_floats(100, 0.5)),
+        ("diag_2".into(), bad_floats(100, 0.5)),
+        ("diag_3".into(), bad_floats(100, 0.5)),
+        ("patient_nbr".into(), bad_floats(100, 0.5)),
+    ])
+    .unwrap();
+    let report = validate_default(&df, "diabetes_130_like");
+
+    // A single glob rule.
+    let glob_policy = Policy {
+        suppressions: vec![SuppressionRule::pattern(
+            "E9001",
+            "diag_*",
+            "ICD codes share prefix",
+        )],
+        owners: vec![],
+        requirements: vec![],
+    };
+    let glob_result = apply_policy(&report, &glob_policy);
+
+    // Three exact rules — what the user had to write before A3.2.
+    let exact_policy = Policy {
+        suppressions: vec![
+            SuppressionRule::exact("E9001", "diag_1", "ICD code 1"),
+            SuppressionRule::exact("E9001", "diag_2", "ICD code 2"),
+            SuppressionRule::exact("E9001", "diag_3", "ICD code 3"),
+        ],
+        owners: vec![],
+        requirements: vec![],
+    };
+    let exact_result = apply_policy(&report, &exact_policy);
+
+    // Same number of findings suppressed.
+    assert_eq!(glob_result.suppressions.len(), exact_result.suppressions.len());
+    // Same number of remaining findings (only patient_nbr-scoped E9001 + dataset-wide).
+    assert_eq!(
+        glob_result.remaining_findings.len(),
+        exact_result.remaining_findings.len()
+    );
+    // The patient_nbr finding is preserved in both — the glob does NOT match it.
+    let glob_remaining_cols: Vec<Option<&str>> = glob_result
+        .remaining_findings
+        .iter()
+        .filter(|f| f.code == "E9001")
+        .map(|f| f.column.as_deref())
+        .collect();
+    assert!(glob_remaining_cols.contains(&Some("patient_nbr")));
+    assert!(!glob_remaining_cols.contains(&Some("diag_1")));
+    assert!(!glob_remaining_cols.contains(&Some("diag_2")));
+    assert!(!glob_remaining_cols.contains(&Some("diag_3")));
+}
+
+#[test]
+fn wildcard_suppression_decisions_are_byte_identical_across_runs() {
+    let df = DataFrame::from_columns(vec![
+        (
+            "diag_1".into(),
+            Column::Float({
+                let mut v: Vec<f64> = (0..100).map(|i| i as f64).collect();
+                for x in v.iter_mut().take(50) { *x = f64::NAN; }
+                v
+            }),
+        ),
+        (
+            "diag_2".into(),
+            Column::Float({
+                let mut v: Vec<f64> = (0..100).map(|i| i as f64).collect();
+                for x in v.iter_mut().take(50) { *x = f64::NAN; }
+                v
+            }),
+        ),
+    ])
+    .unwrap();
+    let report = validate_default(&df, "wildcard_determinism");
+    let policy = Policy {
+        suppressions: vec![SuppressionRule::pattern("E9001", "diag_*", "ack")],
+        owners: vec![],
+        requirements: vec![],
+    };
+    let a = apply_policy(&report, &policy);
+    let b = apply_policy(&report, &policy);
+    assert_eq!(a, b);
+}
+
+#[test]
+fn wildcard_owner_rule_attributes_diag_columns_to_clinical_team() {
+    let df = DataFrame::from_columns(vec![
+        (
+            "diag_1".into(),
+            Column::Float({
+                let mut v: Vec<f64> = (0..100).map(|i| i as f64).collect();
+                for x in v.iter_mut().take(50) { *x = f64::NAN; }
+                v
+            }),
+        ),
+        (
+            "diag_2".into(),
+            Column::Float({
+                let mut v: Vec<f64> = (0..100).map(|i| i as f64).collect();
+                for x in v.iter_mut().take(50) { *x = f64::NAN; }
+                v
+            }),
+        ),
+        (
+            "patient_nbr".into(),
+            Column::Float({
+                let mut v: Vec<f64> = (0..100).map(|i| i as f64).collect();
+                for x in v.iter_mut().take(50) { *x = f64::NAN; }
+                v
+            }),
+        ),
+    ])
+    .unwrap();
+    let report = validate_default(&df, "wildcard_owner");
+    let policy = Policy {
+        suppressions: vec![],
+        owners: vec![
+            OwnerRule::pattern("team-clinical", "diag_*", None::<String>),
+            OwnerRule::exact(
+                "team-data-platform",
+                Some("patient_nbr"),
+                None::<String>,
+            ),
+        ],
+        requirements: vec![],
+    };
+    let result = apply_policy(&report, &policy);
+    let by_team = result.attributions_by_team();
+    let clinical = by_team.get("team-clinical").expect("clinical team");
+    let platform = by_team
+        .get("team-data-platform")
+        .expect("data-platform team");
+    // Two diag columns → at least two clinical attributions.
+    assert!(clinical.len() >= 2);
+    // patient_nbr is attributed separately.
+    assert!(!platform.is_empty());
 }

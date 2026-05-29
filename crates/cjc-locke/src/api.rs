@@ -143,7 +143,18 @@ pub fn validate(df: &DataFrame, opts: &ValidateOptions) -> LockeReport {
         "duplicate detection is byte-canonical".into(),
     ];
 
-    LockeReport::new(input, findings, column_reports, assumptions)
+    let mut report = LockeReport::new(input, findings, column_reports, assumptions);
+
+    // v0.7+ (A2-by-default) — optionally attach per-value canonicalisation
+    // lineage. Default off (preserves byte-identical v0.7 reports); CLI
+    // exposes this via `cjcl locke validate --with-trace`.
+    if opts.config.collect_per_value_lineage {
+        let lineage_cfg = crate::per_value_lineage::PerValueLineageConfig::default();
+        let lineage = crate::per_value_lineage::build_per_value_lineage(df, &lineage_cfg);
+        report = report.with_per_value_lineage(lineage);
+    }
+
+    report
 }
 
 /// Compute a `BeliefReport` from a `LockeReport`. Pure function of the
@@ -378,6 +389,20 @@ impl crate::report::SeverityCounts {
 }
 
 /// Compose validate + drift + belief into one composite invocation.
+///
+/// **v0.7+ A1 follow-through** — this is a genuine second consumer of
+/// [`algebra::compose`](crate::algebra::compose). Previously the train
+/// belief and the drift signal were merged by directly overwriting the
+/// drift axis on the belief score (`BeliefScore::from_dimensions(...,
+/// drift_score, ...)`). Under the meet-semilattice algebra the same
+/// behaviour is expressed declaratively as `compose(train_belief,
+/// drift_only_partial, all_min)`: every other axis takes `min(x, 1.0) = x`
+/// (unchanged), and the drift axis takes `min(train.drift, drift_score)`.
+/// Train's drift score defaults to 1.0 when no comparison ran (see
+/// [`belief_report_from_locke_with_model`]), so the result on the drift
+/// axis is `drift_score` — byte-identical to the pre-migration path,
+/// but now traceable through the algebra. Proptest-locked in
+/// `tests/locke/locke_proptest.rs::validate_and_compare_drift_composition_is_byte_identical`.
 pub fn validate_and_compare(
     train: &DataFrame,
     test: &DataFrame,
@@ -387,22 +412,21 @@ pub fn validate_and_compare(
     let val_report = validate(train, opts);
     let drift_report = compare_drift(train, test, drift_cfg);
 
-    // Update belief to incorporate drift signal.
+    // Update belief to incorporate drift signal via the meet-semilattice
+    // algebra. The drift signal is a "drift-only partial": top on every
+    // axis except drift, which carries the derived score. Under all-Min
+    // composition this collapses to "train belief, except drift axis =
+    // min(train.drift, drift_score)" — i.e. the same construction as
+    // the pre-A1 direct-assignment path, but visibly using the algebra.
     let mut belief = belief_report_from_locke(&val_report);
     let drift_penalty = penalty_from_findings(&drift_report.findings, |code| {
         code.starts_with("E903")
     });
     let drift_score = (1.0 - drift_penalty).clamp(0.0, 1.0);
-    belief.score = BeliefScore::from_dimensions(
-        belief.score.schema_score,
-        belief.score.missingness_score,
-        drift_score,
-        belief.score.leakage_score,
-        belief.score.lineage_score,
-        belief.score.sample_score,
-        belief.score.duplication_score,
-        belief.score.constraint_score,
-    );
+    let drift_only_partial =
+        BeliefScore::from_dimensions(1.0, 1.0, drift_score, 1.0, 1.0, 1.0, 1.0, 1.0);
+    let rules = crate::algebra::BeliefAxisRules::default();
+    belief.score = crate::algebra::compose(&belief.score, &drift_only_partial, &rules);
     belief
         .assumptions
         .retain(|a| !a.starts_with("drift_score = 1.0"));

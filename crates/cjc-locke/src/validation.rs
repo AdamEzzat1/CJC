@@ -50,6 +50,19 @@ pub struct ValidationConfig {
     /// Use this to register dataset-specific conventions (e.g., `"."`
     /// in older SAS exports, `"unknown"` in spreadsheet data).
     pub additional_sentinels: Vec<String>,
+    /// **v0.7+ (A2-by-default)** — when `true`, run
+    /// [`crate::per_value_lineage::build_per_value_lineage`] during
+    /// [`crate::api::validate`] and attach the result to
+    /// [`crate::report::LockeReport::per_value_lineage`]. Default
+    /// `false` so existing reports stay byte-identical to v0.7.
+    ///
+    /// Enable when investigating *which canonical form a value would
+    /// take* under Locke's normalisation pipeline — without having to
+    /// invoke `cjcl locke trace-value` per value. Cheap on small
+    /// datasets (O(distinct_categorical_values)); use the
+    /// `max_distinct_per_column` knob in `PerValueLineageConfig` if
+    /// you want to bound a wide column.
+    pub collect_per_value_lineage: bool,
 }
 
 impl Default for ValidationConfig {
@@ -64,6 +77,9 @@ impl Default for ValidationConfig {
             // (a 97%-missing column reported as perfectly clean).
             auto_detect_sentinels: true,
             additional_sentinels: Vec::new(),
+            // v0.7+ — opt-in, default false to preserve byte-identical
+            // reports for existing CI gates. CLI exposes `--with-trace`.
+            collect_per_value_lineage: false,
         }
     }
 }
