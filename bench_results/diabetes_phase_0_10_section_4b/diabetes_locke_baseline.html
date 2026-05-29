@@ -1,0 +1,1703 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Locke Validation Report — tests/data/diabetes_130/diabetic_data.csv</title>
+<style>
+:root {
+  --sev-info: #6c757d;
+  --sev-notice: #0d6efd;
+  --sev-warning: #ffc107;
+  --sev-error: #dc3545;
+  --bg: #ffffff;
+  --fg: #212529;
+  --muted: #6c757d;
+  --border: #dee2e6;
+  --card-bg: #f8f9fa;
+}
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 1100px; margin: 2em auto; padding: 0 1em; color: var(--fg); background: var(--bg); }
+h1, h2 { border-bottom: 1px solid var(--border); padding-bottom: .3em; }
+h1 { margin-top: 0; }
+.meta { color: var(--muted); font-size: .9em; }
+.meta code { background: var(--card-bg); padding: 1px 4px; border-radius: 3px; }
+.summary { display: flex; gap: 1em; margin: 1.5em 0; }
+.summary .card { flex: 1; padding: 1em; background: var(--card-bg); border-radius: 6px; border-left: 4px solid var(--border); }
+.summary .card.info { border-left-color: var(--sev-info); }
+.summary .card.notice { border-left-color: var(--sev-notice); }
+.summary .card.warning { border-left-color: var(--sev-warning); }
+.summary .card.error { border-left-color: var(--sev-error); }
+.summary .card .count { font-size: 2em; font-weight: 600; }
+.summary .card .label { color: var(--muted); text-transform: uppercase; font-size: .8em; letter-spacing: .05em; }
+table { width: 100%; border-collapse: collapse; margin: 1em 0; font-size: .92em; }
+th, td { padding: .6em .8em; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { background: var(--card-bg); font-weight: 600; }
+.sev { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: .8em; font-weight: 600; color: white; }
+.sev.info { background: var(--sev-info); }
+.sev.notice { background: var(--sev-notice); }
+.sev.warning { background: var(--sev-warning); color: #212529; }
+.sev.error { background: var(--sev-error); }
+.code { font-family: 'SF Mono', Consolas, monospace; font-size: .85em; background: var(--card-bg); padding: 1px 6px; border-radius: 3px; }
+.col { font-family: 'SF Mono', Consolas, monospace; color: var(--muted); }
+.assumptions { background: var(--card-bg); padding: 1em 1.5em; border-radius: 6px; margin: 1em 0; }
+.assumptions li { color: var(--muted); margin: .4em 0; }
+.footer { color: var(--muted); font-size: .8em; margin-top: 3em; padding-top: 1em; border-top: 1px solid var(--border); }
+.no-findings { text-align: center; padding: 2em; background: var(--card-bg); border-radius: 6px; color: var(--muted); }
+</style>
+</head>
+<body>
+<h1>Locke Validation Report</h1>
+<div class="meta">
+<p>Dataset: <code>tests/data/diabetes_130/diabetic_data.csv</code></p>
+<p>Schema version: <code>1</code> &mdash; Run ID: <code>181a7f47c862b30c</code></p>
+<p>Shape: <code>101766 rows &times; 50 columns</code></p>
+</div>
+<h2>Summary</h2>
+<div class="summary">
+<div class="card info"><div class="count">58</div><div class="label">Info</div></div>
+<div class="card notice"><div class="count">75</div><div class="label">Notice</div></div>
+<div class="card warning"><div class="count">8</div><div class="label">Warning</div></div>
+<div class="card error"><div class="count">1</div><div class="label">Error</div></div>
+</div>
+<h2>Findings</h2>
+<table>
+<thead>
+<tr>
+<th>Severity</th><th>Code</th><th>Column</th><th>Message</th><th>Evidence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">A1Cresult</span></td>
+<td>column `A1Cresult` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">acarbose</span></td>
+<td>column `acarbose` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">acetohexamide</span></td>
+<td>column `acetohexamide` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">admission_source_id</span></td>
+<td>column `admission_source_id` is of type `Bool`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Bool</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">admission_type_id</span></td>
+<td>column `admission_type_id` is of type `Int`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Int</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">age</span></td>
+<td>column `age` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">change</span></td>
+<td>column `change` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">chlorpropamide</span></td>
+<td>column `chlorpropamide` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">citoglipton</span></td>
+<td>column `citoglipton` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">diabetesMed</span></td>
+<td>column `diabetesMed` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">diag_2</span></td>
+<td>column `diag_2` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">diag_3</span></td>
+<td>column `diag_3` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">discharge_disposition_id</span></td>
+<td>column `discharge_disposition_id` is of type `Int`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Int</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">encounter_id</span></td>
+<td>column `encounter_id` is of type `Int`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Int</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">examide</span></td>
+<td>column `examide` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">gender</span></td>
+<td>column `gender` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">glimepiride</span></td>
+<td>column `glimepiride` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">glimepiride-pioglitazone</span></td>
+<td>column `glimepiride-pioglitazone` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">glipizide</span></td>
+<td>column `glipizide` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">glipizide-metformin</span></td>
+<td>column `glipizide-metformin` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">glyburide</span></td>
+<td>column `glyburide` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">glyburide-metformin</span></td>
+<td>column `glyburide-metformin` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">insulin</span></td>
+<td>column `insulin` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">max_glu_serum</span></td>
+<td>column `max_glu_serum` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">medical_specialty</span></td>
+<td>column `medical_specialty` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">metformin</span></td>
+<td>column `metformin` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">metformin-pioglitazone</span></td>
+<td>column `metformin-pioglitazone` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">metformin-rosiglitazone</span></td>
+<td>column `metformin-rosiglitazone` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">miglitol</span></td>
+<td>column `miglitol` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">nateglinide</span></td>
+<td>column `nateglinide` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">num_lab_procedures</span></td>
+<td>column `num_lab_procedures` is of type `Int`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Int</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">num_medications</span></td>
+<td>column `num_medications` is of type `Bool`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Bool</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">num_procedures</span></td>
+<td>column `num_procedures` is of type `Bool`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Bool</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">number_diagnoses</span></td>
+<td>column `number_diagnoses` is of type `Bool`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Bool</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">number_emergency</span></td>
+<td>column `number_emergency` is of type `Bool`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Bool</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">number_inpatient</span></td>
+<td>column `number_inpatient` is of type `Bool`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Bool</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">number_outpatient</span></td>
+<td>column `number_outpatient` is of type `Bool`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Bool</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">patient_nbr</span></td>
+<td>column `patient_nbr` is of type `Int`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Int</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">payer_code</span></td>
+<td>column `payer_code` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">pioglitazone</span></td>
+<td>column `pioglitazone` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">race</span></td>
+<td>column `race` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">readmitted</span></td>
+<td>column `readmitted` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">repaglinide</span></td>
+<td>column `repaglinide` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">rosiglitazone</span></td>
+<td>column `rosiglitazone` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">time_in_hospital</span></td>
+<td>column `time_in_hospital` is of type `Bool`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Bool</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">tolazamide</span></td>
+<td>column `tolazamide` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">tolbutamide</span></td>
+<td>column `tolbutamide` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">troglitazone</span></td>
+<td>column `troglitazone` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9002</span></td>
+<td><span class="col">weight</span></td>
+<td>column `weight` is of type `Str`; no null mask supplied so missingness cannot be inferred</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>type = <code>Str</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9007</span></td>
+<td><span class="col">A1Cresult</span></td>
+<td>column `A1Cresult` has 84748 occurrences of &quot;None&quot; (83.3%); may be a sentinel missing value</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>occurrences = <code>84748</code></li>
+<li>rate = <code>0.8328</code></li>
+<li>sentinel = <code>&quot;None&quot;</code></li>
+<li>kind = <code>string</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9007</span></td>
+<td><span class="col">diag_3</span></td>
+<td>column `diag_3` has 1423 occurrences of &quot;?&quot; (1.4%); may be a sentinel missing value</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>occurrences = <code>1423</code></li>
+<li>rate = <code>0.0140</code></li>
+<li>sentinel = <code>&quot;?&quot;</code></li>
+<li>kind = <code>string</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9007</span></td>
+<td><span class="col">max_glu_serum</span></td>
+<td>column `max_glu_serum` has 96420 occurrences of &quot;None&quot; (94.7%); may be a sentinel missing value</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>occurrences = <code>96420</code></li>
+<li>rate = <code>0.9475</code></li>
+<li>sentinel = <code>&quot;None&quot;</code></li>
+<li>kind = <code>string</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9007</span></td>
+<td><span class="col">medical_specialty</span></td>
+<td>column `medical_specialty` has 49949 occurrences of &quot;?&quot; (49.1%); may be a sentinel missing value</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>occurrences = <code>49949</code></li>
+<li>rate = <code>0.4908</code></li>
+<li>sentinel = <code>&quot;?&quot;</code></li>
+<li>kind = <code>string</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9007</span></td>
+<td><span class="col">payer_code</span></td>
+<td>column `payer_code` has 40256 occurrences of &quot;?&quot; (39.6%); may be a sentinel missing value</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>occurrences = <code>40256</code></li>
+<li>rate = <code>0.3956</code></li>
+<li>sentinel = <code>&quot;?&quot;</code></li>
+<li>kind = <code>string</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9007</span></td>
+<td><span class="col">race</span></td>
+<td>column `race` has 2273 occurrences of &quot;?&quot; (2.2%); may be a sentinel missing value</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>occurrences = <code>2273</code></li>
+<li>rate = <code>0.0223</code></li>
+<li>sentinel = <code>&quot;?&quot;</code></li>
+<li>kind = <code>string</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9007</span></td>
+<td><span class="col">weight</span></td>
+<td>column `weight` has 98569 occurrences of &quot;?&quot; (96.9%); may be a sentinel missing value</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>occurrences = <code>98569</code></li>
+<li>rate = <code>0.9686</code></li>
+<li>sentinel = <code>&quot;?&quot;</code></li>
+<li>kind = <code>string</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9082</span></td>
+<td><span class="col">diag_2</span></td>
+<td>column `diag_2` has 749 distinct values, above the edit-distance scan cap (200); skipped</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_distinct = <code>749</code></li>
+<li>scan_cap = <code>200</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev info">info</span></td>
+<td><span class="code">E9082</span></td>
+<td><span class="col">diag_3</span></td>
+<td>column `diag_3` has 790 distinct values, above the edit-distance scan cap (200); skipped</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_distinct = <code>790</code></li>
+<li>scan_cap = <code>200</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9011</span></td>
+<td><span class="col">acarbose</span></td>
+<td>column `acarbose` is near-constant: top value occupies 99.7% of rows</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>top_freq_ratio = <code>0.9970</code></li>
+<li>distinct = <code>4</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9011</span></td>
+<td><span class="col">acetohexamide</span></td>
+<td>column `acetohexamide` is near-constant: top value occupies 100.0% of rows</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>top_freq_ratio = <code>1.0000</code></li>
+<li>distinct = <code>2</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9011</span></td>
+<td><span class="col">chlorpropamide</span></td>
+<td>column `chlorpropamide` is near-constant: top value occupies 99.9% of rows</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>top_freq_ratio = <code>0.9992</code></li>
+<li>distinct = <code>4</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9011</span></td>
+<td><span class="col">glimepiride-pioglitazone</span></td>
+<td>column `glimepiride-pioglitazone` is near-constant: top value occupies 100.0% of rows</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>top_freq_ratio = <code>1.0000</code></li>
+<li>distinct = <code>2</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9011</span></td>
+<td><span class="col">glipizide-metformin</span></td>
+<td>column `glipizide-metformin` is near-constant: top value occupies 100.0% of rows</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>top_freq_ratio = <code>0.9999</code></li>
+<li>distinct = <code>2</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9011</span></td>
+<td><span class="col">glyburide-metformin</span></td>
+<td>column `glyburide-metformin` is near-constant: top value occupies 99.3% of rows</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>top_freq_ratio = <code>0.9931</code></li>
+<li>distinct = <code>4</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9011</span></td>
+<td><span class="col">metformin-pioglitazone</span></td>
+<td>column `metformin-pioglitazone` is near-constant: top value occupies 100.0% of rows</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>top_freq_ratio = <code>1.0000</code></li>
+<li>distinct = <code>2</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9011</span></td>
+<td><span class="col">metformin-rosiglitazone</span></td>
+<td>column `metformin-rosiglitazone` is near-constant: top value occupies 100.0% of rows</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>top_freq_ratio = <code>1.0000</code></li>
+<li>distinct = <code>2</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9011</span></td>
+<td><span class="col">miglitol</span></td>
+<td>column `miglitol` is near-constant: top value occupies 100.0% of rows</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>top_freq_ratio = <code>0.9996</code></li>
+<li>distinct = <code>4</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9011</span></td>
+<td><span class="col">nateglinide</span></td>
+<td>column `nateglinide` is near-constant: top value occupies 99.3% of rows</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>top_freq_ratio = <code>0.9931</code></li>
+<li>distinct = <code>4</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9011</span></td>
+<td><span class="col">num_medications</span></td>
+<td>column `num_medications` is near-constant: top value occupies 99.7% of rows</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>top_freq_ratio = <code>0.9974</code></li>
+<li>distinct = <code>2</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9011</span></td>
+<td><span class="col">number_diagnoses</span></td>
+<td>column `number_diagnoses` is near-constant: top value occupies 99.8% of rows</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>top_freq_ratio = <code>0.9978</code></li>
+<li>distinct = <code>2</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9011</span></td>
+<td><span class="col">tolazamide</span></td>
+<td>column `tolazamide` is near-constant: top value occupies 100.0% of rows</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>top_freq_ratio = <code>0.9996</code></li>
+<li>distinct = <code>3</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9011</span></td>
+<td><span class="col">tolbutamide</span></td>
+<td>column `tolbutamide` is near-constant: top value occupies 100.0% of rows</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>top_freq_ratio = <code>0.9998</code></li>
+<li>distinct = <code>2</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9011</span></td>
+<td><span class="col">troglitazone</span></td>
+<td>column `troglitazone` is near-constant: top value occupies 100.0% of rows</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>top_freq_ratio = <code>1.0000</code></li>
+<li>distinct = <code>2</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9016</span></td>
+<td><span class="col">diag_2</span></td>
+<td>column `diag_2` has 262 rare categories (count &lt; 5) covering 507 rows (0.5%)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_rare_categories = <code>262</code></li>
+<li>total_rare_rows = <code>507</code></li>
+<li>rare_share = <code>0.0050</code></li>
+<li>n_distinct = <code>749</code></li>
+<li>sample = <code>&quot;111&quot;:1, &quot;114&quot;:1, &quot;115&quot;:1, &quot;123&quot;:1, &quot;130&quot;:1</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9016</span></td>
+<td><span class="col">diag_3</span></td>
+<td>column `diag_3` has 268 rare categories (count &lt; 5) covering 535 rows (0.5%)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_rare_categories = <code>268</code></li>
+<li>total_rare_rows = <code>535</code></li>
+<li>rare_share = <code>0.0053</code></li>
+<li>n_distinct = <code>790</code></li>
+<li>sample = <code>&quot;111&quot;:1, &quot;115&quot;:1, &quot;122&quot;:1, &quot;123&quot;:1, &quot;14&quot;:1</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9016</span></td>
+<td><span class="col">medical_specialty</span></td>
+<td>column `medical_specialty` has 14 rare categories (count &lt; 5) covering 25 rows (0.0%)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_rare_categories = <code>14</code></li>
+<li>total_rare_rows = <code>25</code></li>
+<li>rare_share = <code>0.0002</code></li>
+<li>n_distinct = <code>73</code></li>
+<li>sample = <code>&quot;Dermatology&quot;:1, &quot;Neurophysiology&quot;:1, &quot;Pediatrics-InfectiousDiseases&quot;:1, &quot;Perinatology&quot;:1, &quot;Proctology&quot;:1</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9017</span></td>
+<td><span class="col">diag_2</span></td>
+<td>column `diag_2` has 749 distinct values (&gt; 50 threshold); one-hot encoding may produce sparse unstable features</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_distinct = <code>749</code></li>
+<li>one_hot_threshold = <code>50</code></li>
+<li>cardinality_ratio = <code>0.0074</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9017</span></td>
+<td><span class="col">diag_3</span></td>
+<td>column `diag_3` has 790 distinct values (&gt; 50 threshold); one-hot encoding may produce sparse unstable features</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_distinct = <code>790</code></li>
+<li>one_hot_threshold = <code>50</code></li>
+<li>cardinality_ratio = <code>0.0078</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9017</span></td>
+<td><span class="col">medical_specialty</span></td>
+<td>column `medical_specialty` has 73 distinct values (&gt; 50 threshold); one-hot encoding may produce sparse unstable features</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_distinct = <code>73</code></li>
+<li>one_hot_threshold = <code>50</code></li>
+<li>cardinality_ratio = <code>0.0007</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9023</span></td>
+<td><span class="col">admission_type_id</span></td>
+<td>column `admission_type_id` has 8 distinct Int values densely packed in [1, 8] — looks like a label-encoded nominal, not an ordinal numeric</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_distinct = <code>8</code></li>
+<li>value_range = <code>[1.0000, 8.0000]</code></li>
+<li>range_density = <code>1.000000</code></li>
+<li>distinct_values = <code>1,2,3,4,5,6,7,8</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9023</span></td>
+<td><span class="col">discharge_disposition_id</span></td>
+<td>column `discharge_disposition_id` has 26 distinct Int values densely packed in [1, 28] — looks like a label-encoded nominal, not an ordinal numeric</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_distinct = <code>26</code></li>
+<li>value_range = <code>[1.0000, 28.0000]</code></li>
+<li>range_density = <code>1.076923</code></li>
+<li>distinct_values = <code>1,2,3,4,5,6,7,8</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9024</span></td>
+<td><span class="col">discharge_disposition_id</span></td>
+<td>column `discharge_disposition_id` distribution shape: skewness outside normal range (skew = 2.563, excess_kurt = 6.003)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>skewness = <code>2.563029</code></li>
+<li>excess_kurtosis = <code>6.002993</code></li>
+<li>n_valid = <code>101766</code></li>
+<li>top_modes = <code>&quot;1&quot;:60234, &quot;3&quot;:13954, &quot;6&quot;:12902</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9040</span></td>
+<td><span class="col">admission_type_id</span></td>
+<td>column `admission_type_id` has 341 mild outliers (1.5×IQR or |mod-Z| ≥ 3.5)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_mild = <code>341</code></li>
+<li>iqr_q1_q3 = <code>[1.0000, 3.0000]</code></li>
+<li>iqr = <code>2.000000</code></li>
+<li>mad = <code>0.000000</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9040</span></td>
+<td><span class="col">diag_1</span></td>
+<td>column `diag_1` has 8332 mild outliers (1.5×IQR or |mod-Z| ≥ 3.5)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_mild = <code>8332</code></li>
+<li>iqr_q1_q3 = <code>[404.0000, 594.0000]</code></li>
+<li>iqr = <code>190.000000</code></li>
+<li>mad = <code>140.000000</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9040</span></td>
+<td><span class="col">discharge_disposition_id</span></td>
+<td>column `discharge_disposition_id` has 2071 mild outliers (1.5×IQR or |mod-Z| ≥ 3.5)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_mild = <code>2071</code></li>
+<li>iqr_q1_q3 = <code>[1.0000, 4.0000]</code></li>
+<li>iqr = <code>3.000000</code></li>
+<li>mad = <code>0.000000</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9040</span></td>
+<td><span class="col">num_lab_procedures</span></td>
+<td>column `num_lab_procedures` has 143 mild outliers (1.5×IQR or |mod-Z| ≥ 3.5)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_mild = <code>143</code></li>
+<li>iqr_q1_q3 = <code>[31.0000, 57.0000]</code></li>
+<li>iqr = <code>26.000000</code></li>
+<li>mad = <code>13.000000</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9040</span></td>
+<td><span class="col">patient_nbr</span></td>
+<td>column `patient_nbr` has 247 mild outliers (1.5×IQR or |mod-Z| ≥ 3.5)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_mild = <code>247</code></li>
+<li>iqr_q1_q3 = <code>[23413221.0000, 87545949.7500]</code></li>
+<li>iqr = <code>64132728.750000</code></li>
+<li>mad = <code>32950134.000000</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9062</span></td>
+<td><span class="col">readmitted</span></td>
+<td>target column `readmitted` is not a binary type (Bool or Int-with-exactly-2-distinct); target leakage check skipped</td>
+<td>&mdash;</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9072</span></td>
+<td><span class="col">encounter_id</span></td>
+<td>column `encounter_id` has cardinality 101766 / 101766 rows = 1.000; may be an ID leaking as a feature</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>distinct = <code>101766</code></li>
+<li>distinct_per_row = <code>1.0000</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">A1Cresult</span></td>
+<td>duplicate-key groups disagree on column `A1Cresult` in 4912 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>4912</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">acarbose</span></td>
+<td>duplicate-key groups disagree on column `acarbose` in 82 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>82</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">admission_source_id</span></td>
+<td>duplicate-key groups disagree on column `admission_source_id` in 6206 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>6206</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">admission_type_id</span></td>
+<td>duplicate-key groups disagree on column `admission_type_id` in 7800 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>7800</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">age</span></td>
+<td>duplicate-key groups disagree on column `age` in 1574 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>1574</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">change</span></td>
+<td>duplicate-key groups disagree on column `change` in 6556 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>6556</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">chlorpropamide</span></td>
+<td>duplicate-key groups disagree on column `chlorpropamide` in 15 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>15</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">diabetesMed</span></td>
+<td>duplicate-key groups disagree on column `diabetesMed` in 4240 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>4240</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">diag_1</span></td>
+<td>duplicate-key groups disagree on column `diag_1` in 14678 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>14678</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">diag_2</span></td>
+<td>duplicate-key groups disagree on column `diag_2` in 15172 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>15172</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">diag_3</span></td>
+<td>duplicate-key groups disagree on column `diag_3` in 15642 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>15642</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">discharge_disposition_id</span></td>
+<td>duplicate-key groups disagree on column `discharge_disposition_id` in 8611 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>8611</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">encounter_id</span></td>
+<td>duplicate-key groups disagree on column `encounter_id` in 16773 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>16773</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">gender</span></td>
+<td>duplicate-key groups disagree on column `gender` in 3 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>3</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">glimepiride</span></td>
+<td>duplicate-key groups disagree on column `glimepiride` in 972 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>972</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">glimepiride-pioglitazone</span></td>
+<td>duplicate-key groups disagree on column `glimepiride-pioglitazone` in 1 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>1</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">glipizide</span></td>
+<td>duplicate-key groups disagree on column `glipizide` in 2264 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>2264</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">glipizide-metformin</span></td>
+<td>duplicate-key groups disagree on column `glipizide-metformin` in 5 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>5</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">glyburide</span></td>
+<td>duplicate-key groups disagree on column `glyburide` in 1911 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>1911</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">glyburide-metformin</span></td>
+<td>duplicate-key groups disagree on column `glyburide-metformin` in 151 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>151</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">insulin</span></td>
+<td>duplicate-key groups disagree on column `insulin` in 9016 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>9016</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">max_glu_serum</span></td>
+<td>duplicate-key groups disagree on column `max_glu_serum` in 798 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>798</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">medical_specialty</span></td>
+<td>duplicate-key groups disagree on column `medical_specialty` in 6388 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>6388</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">metformin</span></td>
+<td>duplicate-key groups disagree on column `metformin` in 3490 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>3490</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">miglitol</span></td>
+<td>duplicate-key groups disagree on column `miglitol` in 10 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>10</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">nateglinide</span></td>
+<td>duplicate-key groups disagree on column `nateglinide` in 156 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>156</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">num_lab_procedures</span></td>
+<td>duplicate-key groups disagree on column `num_lab_procedures` in 16359 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>16359</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">num_medications</span></td>
+<td>duplicate-key groups disagree on column `num_medications` in 81 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>81</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">num_procedures</span></td>
+<td>duplicate-key groups disagree on column `num_procedures` in 6485 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>6485</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">number_diagnoses</span></td>
+<td>duplicate-key groups disagree on column `number_diagnoses` in 35 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>35</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">number_emergency</span></td>
+<td>duplicate-key groups disagree on column `number_emergency` in 2345 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>2345</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">number_inpatient</span></td>
+<td>duplicate-key groups disagree on column `number_inpatient` in 13336 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>13336</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">number_outpatient</span></td>
+<td>duplicate-key groups disagree on column `number_outpatient` in 2373 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>2373</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">payer_code</span></td>
+<td>duplicate-key groups disagree on column `payer_code` in 3525 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>3525</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">pioglitazone</span></td>
+<td>duplicate-key groups disagree on column `pioglitazone` in 1339 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>1339</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">race</span></td>
+<td>duplicate-key groups disagree on column `race` in 249 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>249</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">readmitted</span></td>
+<td>duplicate-key groups disagree on column `readmitted` in 14007 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>14007</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">repaglinide</span></td>
+<td>duplicate-key groups disagree on column `repaglinide` in 431 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>431</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">rosiglitazone</span></td>
+<td>duplicate-key groups disagree on column `rosiglitazone` in 1216 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>1216</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">time_in_hospital</span></td>
+<td>duplicate-key groups disagree on column `time_in_hospital` in 4091 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>4091</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">tolazamide</span></td>
+<td>duplicate-key groups disagree on column `tolazamide` in 7 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>7</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">tolbutamide</span></td>
+<td>duplicate-key groups disagree on column `tolbutamide` in 4 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>4</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">troglitazone</span></td>
+<td>duplicate-key groups disagree on column `troglitazone` in 1 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>1</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev notice">notice</span></td>
+<td><span class="code">E9073</span></td>
+<td><span class="col">weight</span></td>
+<td>duplicate-key groups disagree on column `weight` in 128 group(s)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_groups_with_disagreement = <code>128</code></li>
+<li>key_column = <code>patient_nbr</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev warning">warning</span></td>
+<td><span class="code">E9010</span></td>
+<td><span class="col">citoglipton</span></td>
+<td>column `citoglipton` is constant</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>distinct = <code>1</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev warning">warning</span></td>
+<td><span class="code">E9010</span></td>
+<td><span class="col">examide</span></td>
+<td>column `examide` is constant</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>distinct = <code>1</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev warning">warning</span></td>
+<td><span class="code">E9041</span></td>
+<td><span class="col">discharge_disposition_id</span></td>
+<td>column `discharge_disposition_id` has 7747 extreme outliers (3×IQR or |mod-Z| ≥ 5.0)</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_extreme = <code>7747</code></li>
+<li>sample = <code>row0=25,row117=25,row118=25</code></li>
+<li>iqr_q1_q3 = <code>[1.0000, 4.0000]</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev warning">warning</span></td>
+<td><span class="code">E9082</span></td>
+<td><span class="col">A1Cresult</span></td>
+<td>column `A1Cresult` has 1 near-duplicate category pair(s) within edit distance ≤ 2</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_near_dup_pairs = <code>1</code></li>
+<li>edit_distance_threshold = <code>2</code></li>
+<li>rows_in_pairs = <code>89738</code></li>
+<li>sample = <code>&quot;None&quot;~&quot;Norm&quot;(d=2)</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev warning">warning</span></td>
+<td><span class="code">E9082</span></td>
+<td><span class="col">age</span></td>
+<td>column `age` has 37 near-duplicate category pair(s) within edit distance ≤ 2</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_near_dup_pairs = <code>37</code></li>
+<li>edit_distance_threshold = <code>2</code></li>
+<li>rows_in_pairs = <code>794738</code></li>
+<li>sample = <code>&quot;[0-10)&quot;~&quot;[10-20)&quot;(d=2); &quot;[0-10)&quot;~&quot;[20-30)&quot;(d=2); &quot;[0-10)&quot;~&quot;[30-40)&quot;(d=2); &quot;[0-10)&quot;~&quot;[40-50)&quot;(d=2); &quot;[0-10)&quot;~&quot;[50-60)&quot;(d=2)</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev warning">warning</span></td>
+<td><span class="code">E9082</span></td>
+<td><span class="col">max_glu_serum</span></td>
+<td>column `max_glu_serum` has 2 near-duplicate category pair(s) within edit distance ≤ 2</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_near_dup_pairs = <code>2</code></li>
+<li>edit_distance_threshold = <code>2</code></li>
+<li>rows_in_pairs = <code>101766</code></li>
+<li>sample = <code>&quot;&gt;200&quot;~&quot;&gt;300&quot;(d=1); &quot;None&quot;~&quot;Norm&quot;(d=2)</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev warning">warning</span></td>
+<td><span class="code">E9082</span></td>
+<td><span class="col">medical_specialty</span></td>
+<td>column `medical_specialty` has 3 near-duplicate category pair(s) within edit distance ≤ 2</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_near_dup_pairs = <code>3</code></li>
+<li>edit_distance_threshold = <code>2</code></li>
+<li>rows_in_pairs = <code>7304</code></li>
+<li>sample = <code>&quot;Cardiology&quot;~&quot;Radiology&quot;(d=2); &quot;Dermatology&quot;~&quot;Hematology&quot;(d=2); &quot;Nephrology&quot;~&quot;Neurology&quot;(d=2)</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev warning">warning</span></td>
+<td><span class="code">E9082</span></td>
+<td><span class="col">weight</span></td>
+<td>column `weight` has 5 near-duplicate category pair(s) within edit distance ≤ 2</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>n_near_dup_pairs = <code>5</code></li>
+<li>edit_distance_threshold = <code>2</code></li>
+<li>rows_in_pairs = <code>4126</code></li>
+<li>sample = <code>&quot;[0-25)&quot;~&quot;[50-75)&quot;(d=2); &quot;[100-125)&quot;~&quot;[150-175)&quot;(d=2); &quot;[125-150)&quot;~&quot;[25-50)&quot;(d=2); &quot;[150-175)&quot;~&quot;[50-75)&quot;(d=2); &quot;[175-200)&quot;~&quot;[75-100)&quot;(d=2)</code></li>
+</ul>
+</td>
+</tr>
+<tr>
+<td><span class="sev error">error</span></td>
+<td><span class="code">E9004</span></td>
+<td><span class="col">patient_nbr</span></td>
+<td>key column `patient_nbr` has 30248 duplicate values across 16773 groups</td>
+<td><ul style="margin: 0; padding-left: 1.2em;">
+<li>duplicate_keys = <code>30248</code></li>
+<li>duplicate_groups = <code>16773</code></li>
+</ul>
+</td>
+</tr>
+</tbody>
+</table>
+<h2>Cross-column correlation</h2>
+<p style="color: var(--muted); margin-top: -.5em;">Pairwise Pearson correlation between numeric columns (6 shown). Cells are colored by |r| — darker red = stronger correlation.</p>
+<svg xmlns="http://www.w3.org/2000/svg" width="252" height="252" style="font-family: sans-serif; font-size: 11px;">
+<text x="131" y="115" transform="rotate(-45, 131, 115)" text-anchor="start">encounter_id</text>
+<text x="153" y="115" transform="rotate(-45, 153, 115)" text-anchor="start">patient_nbr</text>
+<text x="175" y="115" transform="rotate(-45, 175, 115)" text-anchor="start">admission_type_id</text>
+<text x="197" y="115" transform="rotate(-45, 197, 115)" text-anchor="start">discharge_disposition_id</text>
+<text x="219" y="115" transform="rotate(-45, 219, 115)" text-anchor="start">num_lab_procedures</text>
+<text x="241" y="115" transform="rotate(-45, 241, 115)" text-anchor="start">diag_1</text>
+<text x="115" y="135" text-anchor="end">encounter_id</text>
+<text x="115" y="157" text-anchor="end">patient_nbr</text>
+<text x="115" y="179" text-anchor="end">admission_type_id</text>
+<text x="115" y="201" text-anchor="end">discharge_disposition_id</text>
+<text x="115" y="223" text-anchor="end">num_lab_procedures</text>
+<text x="115" y="245" text-anchor="end">diag_1</text>
+<rect x="120" y="120" width="22" height="22" fill="hsl(0, 100%, 50%)" stroke="#eee" stroke-width="0.5"><title>encounter_id vs encounter_id: r = 1.000</title></rect>
+<text x="131" y="134" text-anchor="middle" fill="#fff" font-size="9">1.00</text>
+<rect x="120" y="142" width="22" height="22" fill="hsl(0, 51%, 74%)" stroke="#eee" stroke-width="0.5"><title>encounter_id vs patient_nbr: r = 0.512</title></rect>
+<text x="131" y="156" text-anchor="middle" fill="#000" font-size="9">0.51</text>
+<rect x="120" y="164" width="22" height="22" fill="hsl(220, 15%, 92%)" stroke="#eee" stroke-width="0.5"><title>encounter_id vs admission_type_id: r = -0.159</title></rect>
+<rect x="120" y="186" width="22" height="22" fill="hsl(220, 13%, 93%)" stroke="#eee" stroke-width="0.5"><title>encounter_id vs discharge_disposition_id: r = -0.133</title></rect>
+<rect x="120" y="208" width="22" height="22" fill="hsl(220, 2%, 98%)" stroke="#eee" stroke-width="0.5"><title>encounter_id vs num_lab_procedures: r = -0.026</title></rect>
+<rect x="120" y="230" width="22" height="22" fill="hsl(0, 1%, 99%)" stroke="#eee" stroke-width="0.5"><title>encounter_id vs diag_1: r = 0.012</title></rect>
+<rect x="142" y="120" width="22" height="22" fill="hsl(0, 51%, 74%)" stroke="#eee" stroke-width="0.5"><title>patient_nbr vs encounter_id: r = 0.512</title></rect>
+<text x="153" y="134" text-anchor="middle" fill="#000" font-size="9">0.51</text>
+<rect x="142" y="142" width="22" height="22" fill="hsl(0, 100%, 50%)" stroke="#eee" stroke-width="0.5"><title>patient_nbr vs patient_nbr: r = 1.000</title></rect>
+<text x="153" y="156" text-anchor="middle" fill="#fff" font-size="9">1.00</text>
+<rect x="142" y="164" width="22" height="22" fill="hsl(220, 1%, 99%)" stroke="#eee" stroke-width="0.5"><title>patient_nbr vs admission_type_id: r = -0.011</title></rect>
+<rect x="142" y="186" width="22" height="22" fill="hsl(220, 13%, 93%)" stroke="#eee" stroke-width="0.5"><title>patient_nbr vs discharge_disposition_id: r = -0.137</title></rect>
+<rect x="142" y="208" width="22" height="22" fill="hsl(0, 1%, 99%)" stroke="#eee" stroke-width="0.5"><title>patient_nbr vs num_lab_procedures: r = 0.016</title></rect>
+<rect x="142" y="230" width="22" height="22" fill="hsl(0, 1%, 99%)" stroke="#eee" stroke-width="0.5"><title>patient_nbr vs diag_1: r = 0.014</title></rect>
+<rect x="164" y="120" width="22" height="22" fill="hsl(220, 15%, 92%)" stroke="#eee" stroke-width="0.5"><title>admission_type_id vs encounter_id: r = -0.159</title></rect>
+<rect x="164" y="142" width="22" height="22" fill="hsl(220, 1%, 99%)" stroke="#eee" stroke-width="0.5"><title>admission_type_id vs patient_nbr: r = -0.011</title></rect>
+<rect x="164" y="164" width="22" height="22" fill="hsl(0, 100%, 50%)" stroke="#eee" stroke-width="0.5"><title>admission_type_id vs admission_type_id: r = 1.000</title></rect>
+<text x="175" y="178" text-anchor="middle" fill="#fff" font-size="9">1.00</text>
+<rect x="164" y="186" width="22" height="22" fill="hsl(0, 8%, 95%)" stroke="#eee" stroke-width="0.5"><title>admission_type_id vs discharge_disposition_id: r = 0.083</title></rect>
+<rect x="164" y="208" width="22" height="22" fill="hsl(220, 14%, 92%)" stroke="#eee" stroke-width="0.5"><title>admission_type_id vs num_lab_procedures: r = -0.144</title></rect>
+<rect x="164" y="230" width="22" height="22" fill="hsl(220, 0%, 99%)" stroke="#eee" stroke-width="0.5"><title>admission_type_id vs diag_1: r = -0.002</title></rect>
+<rect x="186" y="120" width="22" height="22" fill="hsl(220, 13%, 93%)" stroke="#eee" stroke-width="0.5"><title>discharge_disposition_id vs encounter_id: r = -0.133</title></rect>
+<rect x="186" y="142" width="22" height="22" fill="hsl(220, 13%, 93%)" stroke="#eee" stroke-width="0.5"><title>discharge_disposition_id vs patient_nbr: r = -0.137</title></rect>
+<rect x="186" y="164" width="22" height="22" fill="hsl(0, 8%, 95%)" stroke="#eee" stroke-width="0.5"><title>discharge_disposition_id vs admission_type_id: r = 0.083</title></rect>
+<rect x="186" y="186" width="22" height="22" fill="hsl(0, 100%, 50%)" stroke="#eee" stroke-width="0.5"><title>discharge_disposition_id vs discharge_disposition_id: r = 1.000</title></rect>
+<text x="197" y="200" text-anchor="middle" fill="#fff" font-size="9">1.00</text>
+<rect x="186" y="208" width="22" height="22" fill="hsl(0, 2%, 98%)" stroke="#eee" stroke-width="0.5"><title>discharge_disposition_id vs num_lab_procedures: r = 0.023</title></rect>
+<rect x="186" y="230" width="22" height="22" fill="hsl(0, 1%, 99%)" stroke="#eee" stroke-width="0.5"><title>discharge_disposition_id vs diag_1: r = 0.012</title></rect>
+<rect x="208" y="120" width="22" height="22" fill="hsl(220, 2%, 98%)" stroke="#eee" stroke-width="0.5"><title>num_lab_procedures vs encounter_id: r = -0.026</title></rect>
+<rect x="208" y="142" width="22" height="22" fill="hsl(0, 1%, 99%)" stroke="#eee" stroke-width="0.5"><title>num_lab_procedures vs patient_nbr: r = 0.016</title></rect>
+<rect x="208" y="164" width="22" height="22" fill="hsl(220, 14%, 92%)" stroke="#eee" stroke-width="0.5"><title>num_lab_procedures vs admission_type_id: r = -0.144</title></rect>
+<rect x="208" y="186" width="22" height="22" fill="hsl(0, 2%, 98%)" stroke="#eee" stroke-width="0.5"><title>num_lab_procedures vs discharge_disposition_id: r = 0.023</title></rect>
+<rect x="208" y="208" width="22" height="22" fill="hsl(0, 100%, 50%)" stroke="#eee" stroke-width="0.5"><title>num_lab_procedures vs num_lab_procedures: r = 1.000</title></rect>
+<text x="219" y="222" text-anchor="middle" fill="#fff" font-size="9">1.00</text>
+<rect x="208" y="230" width="22" height="22" fill="hsl(220, 6%, 96%)" stroke="#eee" stroke-width="0.5"><title>num_lab_procedures vs diag_1: r = -0.063</title></rect>
+<rect x="230" y="120" width="22" height="22" fill="hsl(0, 1%, 99%)" stroke="#eee" stroke-width="0.5"><title>diag_1 vs encounter_id: r = 0.012</title></rect>
+<rect x="230" y="142" width="22" height="22" fill="hsl(0, 1%, 99%)" stroke="#eee" stroke-width="0.5"><title>diag_1 vs patient_nbr: r = 0.014</title></rect>
+<rect x="230" y="164" width="22" height="22" fill="hsl(220, 0%, 99%)" stroke="#eee" stroke-width="0.5"><title>diag_1 vs admission_type_id: r = -0.002</title></rect>
+<rect x="230" y="186" width="22" height="22" fill="hsl(0, 1%, 99%)" stroke="#eee" stroke-width="0.5"><title>diag_1 vs discharge_disposition_id: r = 0.012</title></rect>
+<rect x="230" y="208" width="22" height="22" fill="hsl(220, 6%, 96%)" stroke="#eee" stroke-width="0.5"><title>diag_1 vs num_lab_procedures: r = -0.063</title></rect>
+<rect x="230" y="230" width="22" height="22" fill="hsl(0, 100%, 50%)" stroke="#eee" stroke-width="0.5"><title>diag_1 vs diag_1: r = 1.000</title></rect>
+<text x="241" y="244" text-anchor="middle" fill="#fff" font-size="9">1.00</text>
+</svg>
+<h2>Assumptions</h2>
+<div class="assumptions">
+<ul>
+<li>NaN treated as missing for Float columns; other types report a limitation</li>
+<li>missingness, drift, and belief use deterministic Kahan summation</li>
+<li>duplicate detection is byte-canonical</li>
+</ul>
+</div>
+<div class="footer">
+Generated by Locke v0.1.10 &mdash; deterministic, content-addressed. Re-running over the same data will produce a report with the same run_id (<code>181a7f47c862b30c</code>).
+</div>
+</body>
+</html>

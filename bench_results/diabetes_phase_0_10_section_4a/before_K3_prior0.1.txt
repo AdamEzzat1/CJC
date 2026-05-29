@@ -1,0 +1,40 @@
+237 |     let mut s2 = s1.clone();
+    |         ----^^
+    |         |
+    |         help: remove this `mut`
+
+warning: field `label` is never read
+  --> tests\abng\demo_a2_fused_training.rs:80:5
+   |
+79 | struct RunSummary {
+   |        ---------- field in this struct
+80 |     label: &'static str,
+   |     ^^^^^
+   |
+   = note: `RunSummary` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `expect_string` is never used
+   --> tests\abng\dispatch.rs:293:4
+    |
+293 | fn expect_string(v: Value) -> String {
+    |    ^^^^^^^^^^^^^
+
+warning: `cjc-lang` (test "abng") generated 10 warnings (run `cargo fix --test "abng"` to apply 8 suggestions)
+    Finished `release` profile [optimized] target(s) in 2m 49s
+     Running tests\abng\mod.rs (target\release\deps\abng-b60c009580a7a2c6.exe)
+
+running 1 test
+
+diabetes130_subsample_trial:
+  config: K_ROUTING=3 BLR_PRIOR=(0.1,1,0.5) seed=42
+  shape: n_rows=20000 n_train=15999 phi=262 routing_cols=[17, 9, 21]
+  raw_metrics: acc=0.8823 bal_acc=0.5123 auc=0.5760 f1=0.0636 brier=0.1049 nll=0.5259 ece=0.0573 n_test=4001
+  ablation: root_acc=0.8893 leaf_acc=0.8598 ensemble_acc=0.8823
+  audit: chain_head=8897c2dd674b7197856f0ffc866e427665bc35fb52303f563956b427bf0a3ed6 merkle_root=0f63135e806eb60bed3b24540c78e220832050b66f39e9f292582b84cb43f806 events=32322
+  leaves: total=64 populated=45 dead=19 min/mean/max=1/355.5/1583
+
+test dataset_a_diabetes130::diabetes130_subsample_trial ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 636 filtered out; finished in 36.12s
+
