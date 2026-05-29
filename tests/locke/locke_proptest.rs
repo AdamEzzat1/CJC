@@ -435,6 +435,40 @@ proptest! {
         }
     }
 
+    // ── v0.7+ A3: policy determinism ────────────────────────────────────
+
+    #[test]
+    fn apply_policy_is_deterministic_under_arbitrary_inputs(
+        v in arb_float_vec(),
+        suppress_code_id in 0u8..3,
+    ) {
+        let df = DataFrame::from_columns(vec![("x".into(), Column::Float(v))]).unwrap();
+        let opts = ValidateOptions { dataset_label: "p".into(), ..Default::default() };
+        let report = validate(&df, &opts);
+        let code = match suppress_code_id {
+            0 => "E9001",
+            1 => "E9080",
+            _ => "E9999",  // non-matching code — policy should be a no-op
+        };
+        let policy = cjc_locke::Policy {
+            suppressions: vec![cjc_locke::SuppressionRule {
+                code: code.into(),
+                column: None,
+                reason: "prop ack".into(),
+            }],
+            owners: vec![],
+            requirements: vec![cjc_locke::RequiredFindingRule {
+                code: "E9001".into(),
+                operator: cjc_locke::RequirementOperator::EqZero,
+                threshold: 0,
+                owner: None,
+            }],
+        };
+        let r1 = cjc_locke::apply_policy(&report, &policy);
+        let r2 = cjc_locke::apply_policy(&report, &policy);
+        prop_assert_eq!(r1, r2);
+    }
+
     /// End-to-end regression — for arbitrary float-column inputs, the
     /// migrated `belief_report_from_locke` and the preserved inline path
     /// (`__belief_report_from_locke_inline_for_regression_test`) produce

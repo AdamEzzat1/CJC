@@ -348,6 +348,81 @@ fn fuzz_auto_sentinel_never_panics() {
         });
 }
 
+/// Arbitrary suppression / requirement parameters → `apply_policy`
+/// must never panic. Two consecutive runs are byte-identical. Result
+/// is well-formed: every suppression decision has a non-zero
+/// decision_id, every requirement has observed >= 0.
+#[test]
+fn fuzz_policy_apply_arbitrary_rules_never_panic() {
+    bolero::check!()
+        .with_type::<(Vec<f64>, Vec<u8>, Vec<u8>)>()
+        .for_each(|(values, codes, ops): &(Vec<f64>, Vec<u8>, Vec<u8>)| {
+            if values.is_empty() {
+                return;
+            }
+            let df = DataFrame::from_columns(vec![("x".into(), Column::Float(values.clone()))])
+                .unwrap();
+            let opts = ValidateOptions {
+                dataset_label: "fuzz".into(),
+                config: ValidationConfig::default(),
+                ..Default::default()
+            };
+            let report = validate(&df, &opts);
+
+            // Build an arbitrary policy.
+            let pick_code = |b: u8| match b % 4 {
+                0 => "E9001",
+                1 => "E9080",
+                2 => "E9081",
+                _ => "E9999",
+            };
+            let suppressions: Vec<cjc_locke::SuppressionRule> = codes
+                .iter()
+                .take(4)
+                .map(|b| cjc_locke::SuppressionRule {
+                    code: pick_code(*b).into(),
+                    column: if b % 2 == 0 { Some("x".into()) } else { None },
+                    reason: "fuzz".into(),
+                })
+                .collect();
+            let pick_op = |b: u8| match b % 6 {
+                0 => cjc_locke::RequirementOperator::EqZero,
+                1 => cjc_locke::RequirementOperator::LessOrEqual,
+                2 => cjc_locke::RequirementOperator::GreaterOrEqual,
+                3 => cjc_locke::RequirementOperator::Less,
+                4 => cjc_locke::RequirementOperator::Greater,
+                _ => cjc_locke::RequirementOperator::Equal,
+            };
+            let requirements: Vec<cjc_locke::RequiredFindingRule> = ops
+                .iter()
+                .take(4)
+                .map(|b| cjc_locke::RequiredFindingRule {
+                    code: pick_code(*b).into(),
+                    operator: pick_op(*b),
+                    threshold: (*b as u64) % 10,
+                    owner: None,
+                })
+                .collect();
+            let policy = cjc_locke::Policy {
+                suppressions,
+                owners: vec![],
+                requirements,
+            };
+
+            let r1 = cjc_locke::apply_policy(&report, &policy);
+            let r2 = cjc_locke::apply_policy(&report, &policy);
+            // Determinism.
+            assert_eq!(r1, r2);
+            // No suppression decision has the zero fingerprint (extremely
+            // unlikely collision, sanity check that we built proper IDs).
+            for d in &r1.suppressions {
+                assert_ne!(d.decision_id.0, 0);
+            }
+            // Emit doesn't panic.
+            let _ = cjc_locke::emit_policy_result_text(&r1);
+        });
+}
+
 /// Arbitrary strings → per-value lineage builder must never panic.
 /// Stages stay in fixed code order; emitted text is well-formed;
 /// determinism holds for two consecutive runs on the same input.

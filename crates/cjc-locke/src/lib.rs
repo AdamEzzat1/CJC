@@ -56,6 +56,7 @@ pub mod parquet_reader;
 pub mod lineage;
 pub mod per_value_lineage;
 pub mod pii;
+pub mod policy;
 pub mod report;
 pub mod shape;
 pub mod stats;
@@ -95,6 +96,11 @@ pub use per_value_lineage::{
     build_per_value_lineage, emit_value_trace_text, trace_value, LineageStage,
     PerValueLineage, PerValueLineageConfig, PerValueLineageMap, PerValueStageSet,
     ValueTransform,
+};
+pub use policy::{
+    apply_policy, emit_policy_result_text, OwnerAttribution, OwnerRule, Policy,
+    PolicyResult, RequiredFindingRule, RequirementOperator, RequirementResult,
+    SuppressionDecision, SuppressionRule,
 };
 pub use traced::TracedDataFrame;
 pub use report::{

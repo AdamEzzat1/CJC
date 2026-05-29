@@ -10,6 +10,11 @@
 //! * `cjcl locke trace-value <data.csv> <column> <value>` — per-value
 //!   lineage chain showing the canonicalisation stages that would apply
 //!   to a single distinct value (v0.7+ A2).
+//! * `cjcl locke policy apply <data.csv> --policy <.cjcl-locke.toml>` —
+//!   apply a governance policy (suppressions + owner annotations +
+//!   required-finding checks) to the validation output (v0.7+ A3).
+//! * `cjcl locke gate <ref.json> <current> [--policy <.cjcl-locke.toml>]` —
+//!   gate diff also honours required-finding policy when supplied (v0.7+ A3).
 //!
 //! All output is deterministic. The default format is a stable, indented
 //! text emit suitable for snapshot tests; `--json` swaps in newline-
@@ -52,7 +57,7 @@ pub enum LockeSubcommand {
     Belief { data: PathBuf },
     Lineage { data: PathBuf, label: Option<String>, mermaid: bool },
     Causal { data: PathBuf, target: Option<String>, observational_only: bool },
-    Gate { reference: PathBuf, current: PathBuf },
+    Gate { reference: PathBuf, current: PathBuf, policy: Option<PathBuf> },
     /// v0.6: run `validate` N times and assert byte-identical reports.
     /// Exits 0 if all runs match, 3 if any divergence.
     Verify { data: PathBuf, runs: u32 },
@@ -60,6 +65,10 @@ pub enum LockeSubcommand {
     /// pair. Emits the canonicalisation chain that would apply if the
     /// user adopted Locke's suggested normalisations.
     TraceValue { data: PathBuf, column: String, value: String },
+    /// v0.7+ A3: apply a governance policy to a freshly-validated
+    /// dataset and emit a `PolicyResult`. Exits non-zero if any
+    /// required-finding rule fails.
+    PolicyApply { data: PathBuf, policy: PathBuf },
 }
 
 #[derive(Debug, Clone)]
@@ -103,12 +112,18 @@ fn dispatch(args: LockeArgs) -> i32 {
         LockeSubcommand::Causal { data, target, observational_only } => {
             cmd_causal(&data, target.as_deref(), observational_only, args.format)
         }
-        LockeSubcommand::Gate { reference, current } => {
-            cmd_gate(&reference, &current, args.fail_on_severity.as_deref())
-        }
+        LockeSubcommand::Gate { reference, current, policy } => cmd_gate(
+            &reference,
+            &current,
+            args.fail_on_severity.as_deref(),
+            policy.as_deref(),
+        ),
         LockeSubcommand::Verify { data, runs } => cmd_verify(&data, runs),
         LockeSubcommand::TraceValue { data, column, value } => {
             cmd_trace_value(&data, &column, &value)
+        }
+        LockeSubcommand::PolicyApply { data, policy } => {
+            cmd_policy_apply(&data, &policy)
         }
     };
     match res {
@@ -378,10 +393,15 @@ fn cmd_validate(
 /// stored reference report against a fresh validation of `current`
 /// (or, if `current` is also a `.json` file, parse it as a stored
 /// report).
+///
+/// v0.7+ A3: when `policy` is supplied, the policy is also applied
+/// to the current report. The gate fails if either the appeared-
+/// severity threshold is met OR any required-finding rule fails.
 fn cmd_gate(
     reference: &PathBuf,
     current: &PathBuf,
     fail_on: Option<&str>,
+    policy: Option<&std::path::Path>,
 ) -> Result<CmdOutput, String> {
     use cjc_locke::{diff_reports, emit_diff_text, parse_locke_report_json};
 
@@ -406,23 +426,174 @@ fn cmd_gate(
     };
 
     let diff = diff_reports(&ref_report, &cur_report);
+    // v0.7+ A3 — attach a policy if supplied via --policy.
+    let diff = if let Some(path) = policy {
+        let policy_src = fs::read_to_string(path)
+            .map_err(|e| format!("failed to read policy {}: {}", path.display(), e))?;
+        let parsed = parse_policy_toml(&policy_src)
+            .map_err(|e| format!("policy parse error: {}", e))?;
+        diff.with_policy(&parsed, &cur_report)
+    } else {
+        diff
+    };
     let text = emit_diff_text(&diff);
 
     // Worst severity is computed from *appeared* findings only — that's
-    // the gate semantics. Disappeared findings are informational.
+    // the v0.4 gate semantics. Disappeared findings are informational.
+    // v0.7+ A3: also escalate worst to "error" when a required-finding
+    // policy fails, so a `--fail-on error` from the caller correctly
+    // fires on policy violations.
     let worst = match fail_on {
         Some(t) => {
             let threshold = parse_severity(t)?;
-            if diff.gate_fails(threshold) {
-                diff.appeared_worst_severity().as_str().to_string()
+            if diff.gate_fails(threshold) || diff.policy_gate_fails() {
+                if diff.policy_gate_fails() {
+                    "error".into()
+                } else {
+                    diff.appeared_worst_severity().as_str().to_string()
+                }
             } else {
                 "info".into()
             }
         }
-        None => "info".into(),
+        None => {
+            // Without an explicit threshold, a policy gate failure still
+            // surfaces as "error" so the CLI can decide.
+            if diff.policy_gate_fails() {
+                "error".into()
+            } else {
+                "info".into()
+            }
+        }
     };
 
     Ok(CmdOutput { text, worst })
+}
+
+/// v0.7+ A3 — apply a governance policy to a freshly-validated dataset.
+/// Emits the `PolicyResult` as canonical text. Exit code `0` when all
+/// requirements satisfied, escalates to "error" worst-severity otherwise
+/// so `--fail-on error` fires on policy violations.
+fn cmd_policy_apply(
+    data: &PathBuf,
+    policy: &PathBuf,
+) -> Result<CmdOutput, String> {
+    let df = read_csv(data)?;
+    let opts = ValidateOptions {
+        dataset_label: data.display().to_string(),
+        config: ValidationConfig::default(),
+        ..Default::default()
+    };
+    let report = validate(&df, &opts);
+
+    let policy_src = fs::read_to_string(policy)
+        .map_err(|e| format!("failed to read policy {}: {}", policy.display(), e))?;
+    let parsed = parse_policy_toml(&policy_src)
+        .map_err(|e| format!("policy parse error: {}", e))?;
+
+    let result = cjc_locke::apply_policy(&report, &parsed);
+    let text = cjc_locke::emit_policy_result_text(&result);
+    let worst = if result.gate_fails() {
+        "error".into()
+    } else {
+        "info".into()
+    };
+    Ok(CmdOutput { text, worst })
+}
+
+/// v0.7+ A3 — parse a `.cjcl-locke.toml` policy file into a `Policy`.
+///
+/// Schema (subset):
+///
+/// ```toml
+/// [[suppress]]
+/// code = "E9082"
+/// column = "weight"          # optional
+/// reason = "..."             # required
+///
+/// [[owner]]
+/// team = "team-data-platform"
+/// column = "patient_nbr"     # optional
+/// code = "E9001"             # optional
+///
+/// [[require]]
+/// code = "E9004"
+/// operator = "=="            # one of: ==0, <=, >=, <, >, ==
+/// threshold = 0
+/// owner = "..."              # optional
+/// ```
+///
+/// Returns a friendly error string when the file is malformed. The
+/// caller (typically a CLI command) wraps that into a non-zero exit.
+fn parse_policy_toml(src: &str) -> Result<cjc_locke::Policy, String> {
+    use cjc_locke::{
+        OwnerRule, Policy, RequiredFindingRule, RequirementOperator, SuppressionRule,
+    };
+
+    let doc = crate::toml_min::parse(src).map_err(|e| e.to_string())?;
+
+    let get_str = |t: &crate::toml_min::TomlTable, key: &str| -> Option<String> {
+        t.iter()
+            .find_map(|(k, v)| if k == key { v.as_str().map(String::from) } else { None })
+    };
+    let get_int = |t: &crate::toml_min::TomlTable, key: &str| -> Option<i64> {
+        t.iter()
+            .find_map(|(k, v)| if k == key { v.as_int() } else { None })
+    };
+
+    let mut policy = Policy::default();
+
+    for entry in doc.array_tables("suppress") {
+        let code = get_str(entry, "code")
+            .ok_or_else(|| "suppress entry missing required `code`".to_string())?;
+        let column = get_str(entry, "column");
+        let reason = get_str(entry, "reason")
+            .ok_or_else(|| "suppress entry missing required `reason`".to_string())?;
+        policy.suppressions.push(SuppressionRule {
+            code,
+            column,
+            reason,
+        });
+    }
+
+    for entry in doc.array_tables("owner") {
+        let team = get_str(entry, "team")
+            .ok_or_else(|| "owner entry missing required `team`".to_string())?;
+        let column = get_str(entry, "column");
+        let code = get_str(entry, "code");
+        policy.owners.push(OwnerRule { team, column, code });
+    }
+
+    for entry in doc.array_tables("require") {
+        let code = get_str(entry, "code")
+            .ok_or_else(|| "require entry missing required `code`".to_string())?;
+        let op_str = get_str(entry, "operator")
+            .ok_or_else(|| "require entry missing required `operator`".to_string())?;
+        let operator = RequirementOperator::from_label(&op_str).ok_or_else(|| {
+            format!(
+                "require entry has unknown operator {:?} (one of: ==0, <=, >=, <, >, ==)",
+                op_str
+            )
+        })?;
+        let threshold_raw = get_int(entry, "threshold").ok_or_else(|| {
+            "require entry missing required `threshold` (non-negative integer)".to_string()
+        })?;
+        let threshold = u64::try_from(threshold_raw).map_err(|_| {
+            format!(
+                "require entry has invalid threshold {} (must be non-negative)",
+                threshold_raw
+            )
+        })?;
+        let owner = get_str(entry, "owner");
+        policy.requirements.push(RequiredFindingRule {
+            code,
+            operator,
+            threshold,
+            owner,
+        });
+    }
+
+    Ok(policy)
 }
 
 fn parse_severity(s: &str) -> Result<cjc_locke::FindingSeverity, String> {
@@ -777,6 +948,8 @@ pub fn try_parse_sub(sub_args: &[String]) -> Option<LockeArgs> {
     // v0.6 flags
     let mut mermaid = false;
     let mut runs: u32 = 3;
+    // v0.7+ A3 flag
+    let mut policy_path: Option<PathBuf> = None;
     let mut i = 0;
     while i < rest.len() {
         let a = &rest[i];
@@ -828,6 +1001,11 @@ pub fn try_parse_sub(sub_args: &[String]) -> Option<LockeArgs> {
                     runs = n;
                 }
             }
+            // v0.7+ A3 — policy file path; valid for `gate` and `policy apply`.
+            "--policy" => {
+                i += 1;
+                policy_path = rest.get(i).map(PathBuf::from);
+            }
             _ => positional.push(a.clone()),
         }
         i += 1;
@@ -868,7 +1046,11 @@ pub fn try_parse_sub(sub_args: &[String]) -> Option<LockeArgs> {
         "gate" => {
             let reference = positional.first()?.into();
             let current = positional.get(1)?.into();
-            LockeSubcommand::Gate { reference, current }
+            LockeSubcommand::Gate {
+                reference,
+                current,
+                policy: policy_path.clone(),
+            }
         }
         "verify" => {
             let data = positional.first()?.into();
@@ -880,6 +1062,20 @@ pub fn try_parse_sub(sub_args: &[String]) -> Option<LockeArgs> {
             let column = positional.get(1)?.clone();
             let value = positional.get(2)?.clone();
             LockeSubcommand::TraceValue { data, column, value }
+        }
+        // v0.7+ A3 — `policy apply <data> --policy <policy.toml>`.
+        // The `apply` action is the only one shipped in A3.1; future
+        // actions (lint, show, etc.) will surface as further nested
+        // verbs.
+        "policy" => {
+            // Sub-action must be "apply".
+            let action = positional.first().map(String::as_str)?;
+            if action != "apply" {
+                return None;
+            }
+            let data = positional.get(1)?.into();
+            let policy = policy_path?;
+            LockeSubcommand::PolicyApply { data, policy }
         }
         _ => return None,
     };
@@ -920,12 +1116,17 @@ usage:
   cjcl locke belief   <data.csv>                  [--json]
   cjcl locke lineage  <data.csv> [--label NAME] [--mermaid]
   cjcl locke causal   <data.csv> [--target COL] [--observational-only] [--json]
-  cjcl locke gate     <reference.json> <current>  [--fail-on SEV]
+  cjcl locke gate     <reference.json> <current>  [--fail-on SEV] [--policy FILE]
   cjcl locke verify   <data.csv> [--runs N]
   cjcl locke trace-value <data.csv> <column> <value>
                                   emit the per-value canonicalisation
                                   lineage chain for a single distinct
                                   value (v0.7+ A2)
+  cjcl locke policy apply <data.csv> --policy <.cjcl-locke.toml>
+                                  apply a governance policy
+                                  (suppressions + owner annotations +
+                                  required-finding checks) to the
+                                  validation output (v0.7+ A3)
 
 flags:
   --json                 emit one JSON-ish record per line
@@ -937,6 +1138,8 @@ flags:
   --observational-only   declare data is observational; raises warning severity
   --mermaid              emit lineage as a Quarto/Markdown Mermaid block
   --runs N               number of validate runs to compare (verify; default 3)
+  --policy FILE          path to a .cjcl-locke.toml policy file
+                         (gate, policy apply)
 
 determinism:
   every report is deterministic — repeated runs over the same data
@@ -1029,9 +1232,10 @@ mod tests {
     fn parse_gate_subcommand() {
         let parsed = try_parse_sub(&args(&["gate", "ref.json", "data.csv"])).expect("gate parse");
         match parsed.subcommand {
-            LockeSubcommand::Gate { reference, current } => {
+            LockeSubcommand::Gate { reference, current, policy } => {
                 assert_eq!(reference.to_str().unwrap(), "ref.json");
                 assert_eq!(current.to_str().unwrap(), "data.csv");
+                assert!(policy.is_none());
             }
             _ => panic!("expected Gate"),
         }
@@ -1138,5 +1342,183 @@ mod tests {
             LockeSubcommand::TraceValue { value, .. } => assert_eq!(value, "?"),
             _ => panic!("expected TraceValue"),
         }
+    }
+
+    // ── v0.7+ A3: policy + gate --policy ────────────────────────────────
+
+    #[test]
+    fn parse_policy_apply_subcommand() {
+        let parsed = try_parse_sub(&args(&[
+            "policy", "apply", "data.csv",
+            "--policy", "p.toml",
+        ]))
+        .expect("policy apply parse");
+        match parsed.subcommand {
+            LockeSubcommand::PolicyApply { data, policy } => {
+                assert_eq!(data.to_str().unwrap(), "data.csv");
+                assert_eq!(policy.to_str().unwrap(), "p.toml");
+            }
+            _ => panic!("expected PolicyApply"),
+        }
+    }
+
+    #[test]
+    fn parse_policy_apply_requires_policy_flag() {
+        assert!(
+            try_parse_sub(&args(&["policy", "apply", "data.csv"])).is_none(),
+            "policy apply without --policy should not parse"
+        );
+    }
+
+    #[test]
+    fn parse_policy_with_unknown_action_returns_none() {
+        assert!(
+            try_parse_sub(&args(&[
+                "policy", "show", "data.csv", "--policy", "p.toml"
+            ])).is_none(),
+            "policy with unknown action should fail to parse"
+        );
+    }
+
+    #[test]
+    fn parse_gate_with_policy_flag() {
+        let parsed = try_parse_sub(&args(&[
+            "gate", "ref.json", "current.csv",
+            "--policy", "p.toml",
+        ]))
+        .expect("gate --policy parse");
+        match parsed.subcommand {
+            LockeSubcommand::Gate { reference, current, policy } => {
+                assert_eq!(reference.to_str().unwrap(), "ref.json");
+                assert_eq!(current.to_str().unwrap(), "current.csv");
+                assert_eq!(policy.as_ref().and_then(|p| p.to_str()), Some("p.toml"));
+            }
+            _ => panic!("expected Gate"),
+        }
+    }
+
+    // ── policy TOML parser ───────────────────────────────────────────────
+
+    #[test]
+    fn parse_policy_toml_minimal() {
+        let src = r#"
+[[suppress]]
+code = "E9082"
+column = "weight"
+reason = "real distinction, not typo"
+"#;
+        let p = parse_policy_toml(src).expect("policy parse");
+        assert_eq!(p.suppressions.len(), 1);
+        assert_eq!(p.suppressions[0].code, "E9082");
+        assert_eq!(p.suppressions[0].column.as_deref(), Some("weight"));
+        assert_eq!(p.suppressions[0].reason, "real distinction, not typo");
+    }
+
+    #[test]
+    fn parse_policy_toml_full_three_kinds() {
+        let src = r#"
+[[suppress]]
+code = "E9082"
+column = "weight"
+reason = "ack"
+
+[[owner]]
+team = "team-data-platform"
+column = "patient_nbr"
+
+[[require]]
+code = "E9004"
+operator = "==0"
+threshold = 0
+owner = "team-data-platform"
+"#;
+        let p = parse_policy_toml(src).expect("policy parse");
+        assert_eq!(p.suppressions.len(), 1);
+        assert_eq!(p.owners.len(), 1);
+        assert_eq!(p.requirements.len(), 1);
+        assert_eq!(p.owners[0].team, "team-data-platform");
+        assert_eq!(p.requirements[0].code, "E9004");
+        assert_eq!(
+            p.requirements[0].operator,
+            cjc_locke::RequirementOperator::EqZero
+        );
+        assert_eq!(p.requirements[0].owner.as_deref(), Some("team-data-platform"));
+    }
+
+    #[test]
+    fn parse_policy_toml_missing_required_fields_errs() {
+        // `reason` missing on suppress
+        let src = r#"
+[[suppress]]
+code = "E9082"
+"#;
+        let err = parse_policy_toml(src).unwrap_err();
+        assert!(err.contains("reason"), "got: {}", err);
+    }
+
+    #[test]
+    fn parse_policy_toml_unknown_operator_errs() {
+        let src = r#"
+[[require]]
+code = "E9004"
+operator = "not-an-op"
+threshold = 0
+"#;
+        let err = parse_policy_toml(src).unwrap_err();
+        assert!(err.contains("unknown operator"), "got: {}", err);
+    }
+
+    #[test]
+    fn parse_policy_toml_negative_threshold_errs() {
+        let src = r#"
+[[require]]
+code = "E9004"
+operator = "<="
+threshold = -1
+"#;
+        let err = parse_policy_toml(src).unwrap_err();
+        assert!(err.contains("non-negative"), "got: {}", err);
+    }
+
+    #[test]
+    fn parse_policy_toml_empty_input_yields_empty_policy() {
+        let p = parse_policy_toml("").expect("empty parses ok");
+        assert!(p.suppressions.is_empty());
+        assert!(p.owners.is_empty());
+        assert!(p.requirements.is_empty());
+    }
+
+    #[test]
+    fn parse_policy_toml_supports_alias_operators() {
+        // "lte" should map to LessOrEqual same as "<=".
+        let src = r#"
+[[require]]
+code = "E9001"
+operator = "lte"
+threshold = 5
+"#;
+        let p = parse_policy_toml(src).expect("parse ok");
+        assert_eq!(
+            p.requirements[0].operator,
+            cjc_locke::RequirementOperator::LessOrEqual
+        );
+    }
+
+    #[test]
+    fn parse_policy_toml_preserves_declaration_order() {
+        // First-match-wins matters: order in the TOML file equals order
+        // in Policy.suppressions.
+        let src = r#"
+[[suppress]]
+code = "E9001"
+reason = "first"
+
+[[suppress]]
+code = "E9001"
+reason = "second"
+"#;
+        let p = parse_policy_toml(src).expect("parse ok");
+        assert_eq!(p.suppressions[0].reason, "first");
+        assert_eq!(p.suppressions[1].reason, "second");
     }
 }

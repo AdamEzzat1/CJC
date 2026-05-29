@@ -11,6 +11,10 @@
 //! * **Tables** — `[name]` headers; the next key=value pairs belong
 //!   to the most recently declared table. The empty/root table holds
 //!   any pairs declared before the first `[name]`.
+//! * **Array of tables** — `[[name]]` headers (v0.7+ A3 addition).
+//!   Each occurrence appends a new entry to the named array of tables.
+//!   Unlike `[name]`, repeated `[[name]]` headers are NOT duplicate-key
+//!   errors. Access via [`TomlDoc::array_tables`].
 //! * **Keys** — bare-keys only: `[A-Za-z0-9_-]+`. No dotted keys, no
 //!   quoted keys, no whitespace inside a key.
 //! * **Values:**
@@ -123,6 +127,10 @@ pub struct TomlDoc {
     /// Tables, in declaration order. The root table (pre-first-`[name]`
     /// key=value pairs) is named `""` if present.
     pub tables: Vec<(String, TomlTable)>,
+    /// Array-of-tables entries, in declaration order. Each `[[name]]`
+    /// header appends one entry here under `name`. Lookup via
+    /// [`TomlDoc::array_tables`].
+    pub array_tables: Vec<(String, TomlTable)>,
 }
 
 impl TomlDoc {
@@ -141,6 +149,15 @@ impl TomlDoc {
             t.iter()
                 .find_map(|(k, v)| if k == key { Some(v) } else { None })
         })
+    }
+
+    /// Return every array-of-tables entry whose header matches `name`,
+    /// in declaration order. v0.7+ A3 addition for the Locke policy DSL.
+    pub fn array_tables(&self, name: &str) -> Vec<&TomlTable> {
+        self.array_tables
+            .iter()
+            .filter_map(|(n, t)| if n == name { Some(t) } else { None })
+            .collect()
     }
 }
 
@@ -289,7 +306,25 @@ impl<'a> Parser<'a> {
         let mut doc = TomlDoc::default();
         let mut current_table: TomlTable = Vec::new();
         let mut current_name = String::new();
+        // The kind of header that opened the current table: false for
+        // `[name]`, true for `[[name]]`. Flushed table is routed to the
+        // right field on TomlDoc.
+        let mut current_is_array_entry = false;
         let mut declared_table_names: Vec<String> = Vec::new();
+
+        // Helper closure to flush current_table to the right field.
+        // Inlined because closures + mutable borrows make this ugly otherwise.
+        macro_rules! flush_current {
+            () => {
+                if !current_table.is_empty() || current_name != *"" {
+                    if current_is_array_entry {
+                        doc.array_tables.push((current_name.clone(), current_table));
+                    } else {
+                        doc.tables.push((current_name.clone(), current_table));
+                    }
+                }
+            };
+        }
 
         loop {
             self.skip_ws_and_comments();
@@ -297,11 +332,14 @@ impl<'a> Parser<'a> {
                 None => break,
                 Some(b'[') => {
                     // Flush current table.
-                    if !current_table.is_empty() || current_name != *"" {
-                        doc.tables.push((current_name.clone(), current_table));
-                    }
+                    flush_current!();
                     let header_line = self.line;
-                    self.pos += 1; // consume '['
+                    self.pos += 1; // consume first '['
+                    // v0.7+ A3: detect `[[name]]` (array-of-tables) vs `[name]`.
+                    let is_array_header = self.peek() == Some(b'[');
+                    if is_array_header {
+                        self.pos += 1; // consume second '['
+                    }
                     self.skip_inline_ws();
                     let name = self.parse_bare_key()?;
                     self.skip_inline_ws();
@@ -309,15 +347,25 @@ impl<'a> Parser<'a> {
                         Some(b']') => self.pos += 1,
                         _ => return Err(TomlError::UnclosedTableHeader { line: header_line }),
                     }
-                    if declared_table_names.contains(&name) {
-                        return Err(TomlError::DuplicateTable {
-                            line: header_line,
-                            name,
-                        });
+                    if is_array_header {
+                        match self.peek() {
+                            Some(b']') => self.pos += 1,
+                            _ => return Err(TomlError::UnclosedTableHeader { line: header_line }),
+                        }
                     }
-                    declared_table_names.push(name.clone());
+                    if !is_array_header {
+                        // Standard table: still enforce uniqueness vs prior `[name]`.
+                        if declared_table_names.contains(&name) {
+                            return Err(TomlError::DuplicateTable {
+                                line: header_line,
+                                name,
+                            });
+                        }
+                        declared_table_names.push(name.clone());
+                    }
                     current_name = name;
                     current_table = Vec::new();
+                    current_is_array_entry = is_array_header;
                 }
                 Some(_) => {
                     let pair_line = self.line;
@@ -355,9 +403,7 @@ impl<'a> Parser<'a> {
             }
         }
         // Flush the trailing table.
-        if !current_table.is_empty() || current_name != *"" {
-            doc.tables.push((current_name, current_table));
-        }
+        flush_current!();
         Ok(doc)
     }
 
@@ -857,5 +903,106 @@ path = "model.snap"
         assert_eq!(thresholds.len(), 14);
         let pairs = d.get("graph", "add_nodes").unwrap().as_array().unwrap();
         assert_eq!(pairs.len(), 2);
+    }
+
+    // ── v0.7+ A3: array-of-tables ──────────────────────────────────
+
+    #[test]
+    fn array_of_tables_collects_repeated_headers() {
+        let src = r#"
+[[suppress]]
+code = "E9082"
+column = "weight"
+
+[[suppress]]
+code = "E9080"
+column = "patient_nbr"
+
+[[suppress]]
+code = "E9008"
+"#;
+        let d = parse_ok(src);
+        let entries = d.array_tables("suppress");
+        assert_eq!(entries.len(), 3);
+        assert_eq!(
+            entries[0]
+                .iter()
+                .find(|(k, _)| k == "code")
+                .unwrap()
+                .1,
+            TomlValue::String("E9082".into())
+        );
+        assert_eq!(
+            entries[1]
+                .iter()
+                .find(|(k, _)| k == "column")
+                .unwrap()
+                .1,
+            TomlValue::String("patient_nbr".into())
+        );
+        // Third entry has no `column` key — that's allowed.
+        assert!(entries[2].iter().all(|(k, _)| k != "column"));
+    }
+
+    #[test]
+    fn array_of_tables_preserves_declaration_order() {
+        let src = "[[x]]\nv = 1\n[[x]]\nv = 2\n[[x]]\nv = 3\n";
+        let d = parse_ok(src);
+        let entries = d.array_tables("x");
+        assert_eq!(
+            entries
+                .iter()
+                .map(|t| t.iter().find(|(k, _)| k == "v").unwrap().1.as_int().unwrap())
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn array_of_tables_unknown_name_returns_empty() {
+        let src = "[[suppress]]\ncode = \"E1\"\n";
+        let d = parse_ok(src);
+        assert!(d.array_tables("nonexistent").is_empty());
+    }
+
+    #[test]
+    fn array_of_tables_interleaved_with_named_tables() {
+        let src = r#"
+[[suppress]]
+code = "E1"
+
+[meta]
+version = 1
+
+[[suppress]]
+code = "E2"
+
+[[owner]]
+team = "data"
+"#;
+        let d = parse_ok(src);
+        let suppress = d.array_tables("suppress");
+        assert_eq!(suppress.len(), 2);
+        let owner = d.array_tables("owner");
+        assert_eq!(owner.len(), 1);
+        // The named [meta] table is still in `tables`, not `array_tables`.
+        assert_eq!(
+            d.get("meta", "version"),
+            Some(&TomlValue::Int(1))
+        );
+    }
+
+    #[test]
+    fn array_of_tables_unclosed_double_bracket_errs() {
+        // `[[x]` should fail — only one closing bracket.
+        let e = parse_err("[[x]\nv = 1\n");
+        assert!(matches!(e, TomlError::UnclosedTableHeader { .. }));
+    }
+
+    #[test]
+    fn array_of_tables_allows_repeated_name_no_duplicate_error() {
+        // Previously `[graph]\n[graph]` was a DuplicateTable error.
+        // `[[suppress]]\n[[suppress]]` must NOT error.
+        assert!(parse("[[suppress]]\n[[suppress]]\n").is_ok());
     }
 }

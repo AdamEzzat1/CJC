@@ -33,6 +33,7 @@ use std::collections::BTreeMap;
 use crate::algebra::le_componentwise;
 use crate::api::belief_report_from_locke;
 use crate::belief::BeliefScore;
+use crate::policy::{apply_policy, Policy, PolicyResult};
 use crate::report::{FindingSeverity, LockeReport, ValidationFinding};
 
 /// Tolerance used when comparing two belief scores axis-by-axis inside
@@ -157,6 +158,14 @@ pub struct ReportDiff {
     /// custom penalty models, derive the scores separately and call
     /// [`BeliefPartialOrder::from_scores`] directly.
     pub belief_partial_order: BeliefPartialOrder,
+    /// v0.7+ A3 (governance): `Some` when a `Policy` was attached via
+    /// [`ReportDiff::with_policy`]; `None` for the default diff. The
+    /// policy result is computed by applying the policy to the
+    /// *current* report's findings (suppression, owner attribution,
+    /// requirement evaluation). Independent of the finding-set diff
+    /// fields above — both are useful signals; neither replaces the
+    /// other.
+    pub policy_result: Option<PolicyResult>,
 }
 
 impl ReportDiff {
@@ -183,6 +192,39 @@ impl ReportDiff {
     /// reports under the v0.7 part 1 meet-semilattice partial order.
     pub fn belief_direction(&self) -> BeliefDirection {
         self.belief_partial_order.direction()
+    }
+
+    /// v0.7+ A3: attach a [`Policy`] to this diff. The policy is
+    /// applied to `current_report`'s findings (suppression + owner
+    /// attribution + requirement evaluation) and stored as
+    /// `policy_result`. Returns `self` for chaining:
+    ///
+    /// ```ignore
+    /// let diff = diff_reports(&ref_report, &cur_report)
+    ///     .with_policy(&policy, &cur_report);
+    /// ```
+    ///
+    /// The diff's existing fields (`appeared`, `disappeared`,
+    /// `unchanged`, belief partial order) are *not* affected — policy
+    /// suppression is a separate channel.
+    pub fn with_policy(mut self, policy: &Policy, current_report: &LockeReport) -> Self {
+        self.policy_result = Some(apply_policy(current_report, policy));
+        self
+    }
+
+    /// v0.7+ A3: true iff a policy is attached AND at least one
+    /// requirement failed. Composes with [`Self::gate_fails`] — typical
+    /// callers will check both:
+    ///
+    /// ```ignore
+    /// if diff.gate_fails(FindingSeverity::Warning) || diff.policy_gate_fails() {
+    ///     std::process::exit(1);
+    /// }
+    /// ```
+    pub fn policy_gate_fails(&self) -> bool {
+        self.policy_result
+            .as_ref()
+            .is_some_and(|p| p.gate_fails())
     }
 }
 
@@ -246,6 +288,8 @@ pub fn diff_reports(reference: &LockeReport, current: &LockeReport) -> ReportDif
         ref_run_id: reference.run_id,
         cur_run_id: current.run_id,
         belief_partial_order,
+        // v0.7+ A3 (governance): policy is opt-in via `with_policy`.
+        policy_result: None,
     }
 }
 
@@ -274,6 +318,20 @@ pub fn emit_diff_text(diff: &ReportDiff) -> String {
         bpo.reference_belief.overall,
         bpo.current_belief.overall,
     ));
+    // v0.7+ A3 — surface the policy result one-line summary when
+    // attached. Full PolicyResult is available on
+    // `ReportDiff::policy_result` for callers that need detail.
+    if let Some(pr) = &diff.policy_result {
+        let status = if pr.gate_fails() { "GATE FAIL" } else { "OK" };
+        s.push_str(&format!(
+            "policy: status={} suppressions={} attributions={} requirements={} fingerprint={}\n",
+            status,
+            pr.suppressions.len(),
+            pr.attributions.len(),
+            pr.requirements.len(),
+            pr.policy_fingerprint,
+        ));
+    }
     if !diff.appeared.is_empty() {
         s.push_str("\nappeared:\n");
         for f in &diff.appeared {
@@ -495,5 +553,125 @@ mod tests {
         assert!(bpo.is_incomparable());
         assert!(!bpo.current_le_reference);
         assert!(!bpo.reference_le_current);
+    }
+
+    // ─── v0.7+ A3 — policy integration ────────────────────────────────
+
+    #[test]
+    fn diff_default_has_no_policy_result() {
+        let opts = ValidateOptions {
+            dataset_label: "t".into(),
+            ..Default::default()
+        };
+        let d = diff_reports(&validate(&df_clean(), &opts), &validate(&df_with_nans(), &opts));
+        assert!(d.policy_result.is_none());
+        assert!(!d.policy_gate_fails());
+    }
+
+    #[test]
+    fn with_policy_populates_policy_result_and_drops_matched_findings() {
+        use crate::policy::{Policy, SuppressionRule};
+        let opts = ValidateOptions {
+            dataset_label: "t".into(),
+            ..Default::default()
+        };
+        let cur = validate(&df_with_nans(), &opts);
+        let policy = Policy {
+            suppressions: vec![SuppressionRule {
+                code: "E9001".into(),
+                column: None,
+                reason: "ack".into(),
+            }],
+            owners: vec![],
+            requirements: vec![],
+        };
+        let d = diff_reports(&validate(&df_clean(), &opts), &cur).with_policy(&policy, &cur);
+        let pr = d.policy_result.as_ref().expect("policy_result populated");
+        assert!(!pr.suppressions.is_empty());
+        assert!(pr.remaining_findings.iter().all(|f| f.code != "E9001"));
+        assert!(!d.policy_gate_fails()); // no requirements → no gate failure
+    }
+
+    #[test]
+    fn policy_gate_fails_when_required_finding_violation_present() {
+        use crate::policy::{Policy, RequiredFindingRule, RequirementOperator};
+        let opts = ValidateOptions {
+            dataset_label: "t".into(),
+            ..Default::default()
+        };
+        let cur = validate(&df_with_nans(), &opts);
+        let policy = Policy {
+            suppressions: vec![],
+            owners: vec![],
+            requirements: vec![RequiredFindingRule {
+                code: "E9001".into(),
+                operator: RequirementOperator::EqZero,
+                threshold: 0,
+                owner: None,
+            }],
+        };
+        let d = diff_reports(&validate(&df_clean(), &opts), &cur).with_policy(&policy, &cur);
+        assert!(d.policy_gate_fails());
+        let pr = d.policy_result.unwrap();
+        assert!(!pr.all_requirements_satisfied());
+    }
+
+    #[test]
+    fn emit_diff_text_surfaces_policy_status_line_when_attached() {
+        use crate::policy::{Policy, RequiredFindingRule, RequirementOperator};
+        let opts = ValidateOptions {
+            dataset_label: "t".into(),
+            ..Default::default()
+        };
+        let cur = validate(&df_with_nans(), &opts);
+        let policy = Policy {
+            suppressions: vec![],
+            owners: vec![],
+            requirements: vec![RequiredFindingRule {
+                code: "E9001".into(),
+                operator: RequirementOperator::EqZero,
+                threshold: 0,
+                owner: None,
+            }],
+        };
+        let d = diff_reports(&validate(&df_clean(), &opts), &cur).with_policy(&policy, &cur);
+        let s = emit_diff_text(&d);
+        assert!(s.contains("policy: status=GATE FAIL"));
+        assert!(s.contains("suppressions=0"));
+        assert!(s.contains("requirements=1"));
+        assert!(s.contains("fingerprint="));
+    }
+
+    #[test]
+    fn emit_diff_text_does_not_include_policy_line_when_unattached() {
+        let opts = ValidateOptions {
+            dataset_label: "t".into(),
+            ..Default::default()
+        };
+        let d = diff_reports(&validate(&df_clean(), &opts), &validate(&df_with_nans(), &opts));
+        let s = emit_diff_text(&d);
+        assert!(!s.contains("policy:"));
+    }
+
+    #[test]
+    fn with_policy_is_deterministic_across_calls() {
+        use crate::policy::{Policy, SuppressionRule};
+        let opts = ValidateOptions {
+            dataset_label: "t".into(),
+            ..Default::default()
+        };
+        let cur = validate(&df_with_nans(), &opts);
+        let policy = Policy {
+            suppressions: vec![SuppressionRule {
+                code: "E9001".into(),
+                column: None,
+                reason: "ack".into(),
+            }],
+            owners: vec![],
+            requirements: vec![],
+        };
+        let d1 = diff_reports(&validate(&df_clean(), &opts), &cur).with_policy(&policy, &cur);
+        let d2 = diff_reports(&validate(&df_clean(), &opts), &cur).with_policy(&policy, &cur);
+        assert_eq!(d1.policy_result, d2.policy_result);
     }
 }
