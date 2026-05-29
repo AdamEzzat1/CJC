@@ -15,7 +15,7 @@
 | Target: AUC 0.62 from Locke pruning alone | EXCEEDED on a different path — \*not\* from Locke pruning. |
 | Stretch: AUC ≥ 0.64 from MLP heads (§4.C) | EXCEEDED **without** MLP heads — the linear BLR at K=2, prior=0.5, on full 101K gets us into the 0.64–0.68 strong-published-model band. |
 
-**Four sections landed in this session:** §4.A (tuned config), §4.B (Locke audit + negative pruning finding), §4.E (full-scale headline), §4.F (multi-seed variance, 3 seeds). Two sections deferred: §4.C (MLP heads — multi-session), §4.D (belief-weighted prior — pre-blocked by Locke `?`-sentinel issue + unknown per-leaf prior API).
+**Six section outputs landed in this session:** §4.A (tuned config), §4.B (Locke audit + negative pruning finding), §4.E (full-scale headline), §4.F (multi-seed variance, 3 seeds), §4.D Part 1 (`?`-aware per-leaf belief), §4.C (design doc — implementation deferred). One section partial: §4.D Part 2 (per-leaf BLR prior — pre-blocked by graph-wide-only ABNG API; documented as Phase 0.11+).
 
 **Final headline: AUC = 0.6645 ± 0.0018** (n=3 seeds, full 101K, K=2, prior=0.5).
 
@@ -117,6 +117,29 @@ Added `diabetes130_multi_seed_variance_full` ignored test with `MULTI_SEED_VARIA
 All three seeds picked the same routing `[17, 16]`. The §4.E single-seed 0.6621 was actually *below* the 3-seed mean (seed 42 happened to be the lowest). The variance is ≈0.27% — the 3rd decimal is pinned. F1 is the noisiest metric (relative std 36%) because of fixed-threshold sensitivity on extreme class imbalance.
 
 **Headline solidified: AUC = 0.6645 ± 0.0018 — published-paper-defensible mean with confidence bound.**
+
+### §4.D Part 1 — Locke `?`-sentinel blindness fixed
+
+Added `build_question_mark_null_masks` + `per_leaf_belief_with_masks` + `diabetes130_per_leaf_belief_with_question_marks` test in [`tests/abng/per_leaf_belief_diabetes130.rs`](../../tests/abng/per_leaf_belief_diabetes130.rs). The harness now scans `Str` columns for `?` and threads a `NullMaskMap` through `ValidateOptions.null_masks`.
+
+| Metric | Naive | `?`-aware |
+|---|---|---|
+| `weight` recognised as `?`-heavy | NO | YES (96.9%) |
+| Min per-leaf `missingness_score` | 1.000 | **0.961** |
+
+7 columns flagged with `?`. Per-leaf BeliefScore vector is now informative. **However**, all 4 leaves cluster in the same belief band (~0.961-0.962) because the routing on `time_in_hospital` doesn't correlate with data-quality variation. §4.D Part 2 (the actual belief-weighted prior experiment) would need the harness's real K=2 categorical routing instead — and would also need new ABNG per-leaf prior plumbing. Both deferred. See [`bench_results/diabetes_phase_0_10_section_4d/SUMMARY.md`](../../bench_results/diabetes_phase_0_10_section_4d/SUMMARY.md).
+
+### §4.C — design exploration, implementation deferred
+
+[`docs/abng/PHASE_0_10_SECTION_4C_DESIGN.md`](PHASE_0_10_SECTION_4C_DESIGN.md) — written this session. Key findings from the exploration:
+
+1. **MLP forward infrastructure already exists.** `LeafHead` ([`leaf_head.rs:30`](../../crates/cjc-abng/src/leaf_head.rs:30)) takes `hidden_dims: Vec<u32>` and 9 activations; `leaf_forward` ([`graph.rs:1386`](../../crates/cjc-abng/src/graph.rs:1386)) walks layers inside a GradGraph. The infrastructure was designed for MLP heads from the start.
+2. **The harness's `train_step` bypasses MLP forward** — calls `blr.update(phi, y)` directly with raw φ. Wiring MLP requires a forward-then-BLR-update loop, not inline with `train_step`.
+3. **§4.C may not require any new AuditKind variant.** `LeafSetParam` / `LeafSetParamBatch` already canary-lock param updates. The handoff's anticipated new audit event + canary lock might not be needed.
+4. **Implementation is ~250 LOC of test-side surgery** (no ABNG changes) + multi-seed validation.
+5. **ROI reframe:** §4.E + §4.F already hit the strong-published-model band. §4.C now reads as "push 0.6645 → ~0.68", not "break the 0.61 ceiling" the handoff implied. Cost/benefit weaker.
+
+Recommend Phase 0.11 (or later in a longer focused session) for §4.C.
 
 ---
 
@@ -249,8 +272,9 @@ The handoff said this is "the variance honesty the blog called out as pending." 
 ## Recommended next-session pickup order
 
 1. ~~**§4.F multi-seed variance**~~ — DONE this session. AUC 0.6645 ± 0.0018 at n=3 seeds; extend to n=10 only if a tighter band is needed.
-2. **§4.D belief-weighted prior** — pre-blocked by (a) Locke's missingness detector not recognising `?` sentinel (so per-leaf belief is uninformative on this dataset), and (b) the open question of whether ABNG exposes a per-leaf-set-prior API or only `set_blr_prior` graph-wide. Fix (a) first by extending the per-leaf belief experiment to thread `ValidationConfig` with `missingness_markers = vec!["?".into()]`, then audit (b). If (b) requires new ABNG plumbing, defer §4.D to a phase that consolidates per-leaf API work.
-3. **§4.C MLP heads** — last, and only if pushing from 0.66 → 0.68 is worth the multi-session work. Now that §4.F has solidified the headline at 0.6645 ± 0.0018, the §4.C return on investment is more clearly bounded: the best plausible MLP-head result is ~0.68, a 0.015 lift over current, in exchange for a multi-session architectural change + new audit-kind canary lock. May be deferrable to Phase 0.11 or beyond.
+2. ~~**§4.D Part 1**~~ — DONE this session. `?`-aware NullMasks wired; min per-leaf missingness_score 1.0 → 0.961.
+3. **§4.D Part 2** — DEFERRED. Pre-blocked by ABNG's graph-wide-only `set_blr_prior`. Adding a `set_blr_prior_for_node(node_id, ...)` + new `AuditKind::BlrLeafPriorOverride` is multi-session work, in the same architectural-change tier as §4.C. Also: Part 1's finding that all leaves cluster near 0.961 belief on the simple-codebook routing suggests Part 2's signal may be weak until real-routing leaf indices are wired. Recommend deferring until ABNG per-leaf-state work is consolidated.
+4. **§4.C MLP heads** — DESIGN-ONLY this session, see [PHASE_0_10_SECTION_4C_DESIGN.md](PHASE_0_10_SECTION_4C_DESIGN.md). Implementation is ~250 LOC of test-side surgery (no ABNG changes needed because the MLP forward infrastructure already exists!). Plausibly **lower-risk than §4.D Part 2** since it touches only the harness. Suggested decomposition: (a) add `train_mlp_then_blr` driver in a new test file, (b) run 20K trial, (c) compare AUC against §4.A's 0.6312, (d) only proceed to 101K + multi-seed if 20K shows a clear lift.
 
 ---
 
@@ -262,7 +286,10 @@ The handoff said this is "the variance honesty the blog called out as pending." 
   - [`bench_results/diabetes_phase_0_10_section_4b/SUMMARY.md`](../../bench_results/diabetes_phase_0_10_section_4b/SUMMARY.md) — Locke audit + negative pruning result
   - [`bench_results/diabetes_phase_0_10_section_4e/SUMMARY.md`](../../bench_results/diabetes_phase_0_10_section_4e/SUMMARY.md) — full 101K single-seed headline
   - [`bench_results/diabetes_phase_0_10_section_4f/SUMMARY.md`](../../bench_results/diabetes_phase_0_10_section_4f/SUMMARY.md) — multi-seed variance bounds
+  - [`bench_results/diabetes_phase_0_10_section_4d/SUMMARY.md`](../../bench_results/diabetes_phase_0_10_section_4d/SUMMARY.md) — §4.D Part 1 `?`-aware per-leaf belief
   - [`bench_results/diabetes_per_leaf_belief_baseline.csv`](../../bench_results/diabetes_per_leaf_belief_baseline.csv) — pre-flight per-leaf BeliefScore snapshot
+- Design docs:
+  - [`docs/abng/PHASE_0_10_SECTION_4C_DESIGN.md`](PHASE_0_10_SECTION_4C_DESIGN.md) — §4.C MLP-head implementation plan
 
 ## Repro one-shot
 
