@@ -113,7 +113,10 @@ type CategoryCounts = BTreeMap<String, u64>;
 /// design — `lossy` only triggers on corrupted streams). The result is
 /// semantically identical to materialising the column to `Column::Str`
 /// first, at O(rows × log(dict_size)) cost. Wired in v0.6.3.
-fn category_counts(col: &Column) -> Option<CategoryCounts> {
+///
+/// Crate-visible so `per_value_lineage` can iterate distinct categorical
+/// values without duplicating the dispatch over `Column` variants.
+pub(crate) fn category_counts(col: &Column) -> Option<CategoryCounts> {
     let mut counts: CategoryCounts = BTreeMap::new();
     match col {
         Column::Str(v) => {
@@ -404,7 +407,10 @@ pub fn detect_case_fold_collisions(
 /// Fold helper for E9081: trim outer whitespace, strip trailing punctuation
 /// listed in `cfg.trim_terminal_chars`, and lowercase. Returns the
 /// canonical form used for grouping.
-fn normalize_whitespace_punct(s: &str, terminal_chars: &str) -> String {
+///
+/// Crate-visible so `per_value_lineage` can reproduce the exact same
+/// canonicalisation when tracing a single value through the pipeline.
+pub(crate) fn normalize_whitespace_punct(s: &str, terminal_chars: &str) -> String {
     let trimmed = s.trim();
     let mut bytes_end = trimmed.len();
     // Walk from the end stripping any chars in terminal_chars.
@@ -1074,7 +1080,10 @@ pub fn detect_transitive_clusters(
 ///
 /// Both forms map to the same ASCII string under this function, which
 /// is what `detect_unicode_normalization_variants` uses for grouping.
-fn strip_combining_marks(s: &str) -> String {
+///
+/// Crate-visible so `per_value_lineage` can reproduce the exact same
+/// canonicalisation when tracing a single value through the pipeline.
+pub(crate) fn strip_combining_marks(s: &str) -> String {
     s.chars()
         .filter(|c| {
             let code = *c as u32;

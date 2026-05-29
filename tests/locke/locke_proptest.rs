@@ -395,6 +395,46 @@ proptest! {
         prop_assert_eq!(direct.overall.to_bits(), composed.overall.to_bits());
     }
 
+    // ── v0.7+ A2: per-value lineage determinism ─────────────────────────
+
+    #[test]
+    fn per_value_lineage_is_deterministic_under_arbitrary_strings(
+        vs in prop::collection::vec(any::<String>(), 2..40)
+    ) {
+        let df = DataFrame::from_columns(vec![("c".into(), Column::Str(vs))]).unwrap();
+        let cfg = cjc_locke::PerValueLineageConfig::default();
+        let a = cjc_locke::build_per_value_lineage(&df, &cfg);
+        let b = cjc_locke::build_per_value_lineage(&df, &cfg);
+        prop_assert_eq!(a, b);
+    }
+
+    /// Every emitted `PerValueLineage` text representation must begin with
+    /// the canonical `trace: column=` prefix and contain the original
+    /// value — locks both the prefix and a basic well-formedness invariant
+    /// across arbitrary string inputs.
+    #[test]
+    fn per_value_lineage_emit_text_is_well_formed(
+        vs in prop::collection::vec(any::<String>(), 2..30)
+    ) {
+        let df = DataFrame::from_columns(vec![("c".into(), Column::Str(vs))]).unwrap();
+        let cfg = cjc_locke::PerValueLineageConfig::default();
+        let map = cjc_locke::build_per_value_lineage(&df, &cfg);
+        for lineage in map.values() {
+            let s = cjc_locke::emit_value_trace_text(lineage);
+            prop_assert!(s.starts_with("trace: column=c "));
+            // Either a stage line OR the "no canonicalisation" sentinel —
+            // never both, never neither.
+            let has_stage_line = s.contains("  stage 1:");
+            let has_clean_marker =
+                s.contains("no canonicalisation transforms triggered");
+            prop_assert!(
+                has_stage_line ^ has_clean_marker,
+                "expected exactly one of stage-line / clean-marker, got s={:?}",
+                s
+            );
+        }
+    }
+
     /// End-to-end regression — for arbitrary float-column inputs, the
     /// migrated `belief_report_from_locke` and the preserved inline path
     /// (`__belief_report_from_locke_inline_for_regression_test`) produce

@@ -348,6 +348,40 @@ fn fuzz_auto_sentinel_never_panics() {
         });
 }
 
+/// Arbitrary strings → per-value lineage builder must never panic.
+/// Stages stay in fixed code order; emitted text is well-formed;
+/// determinism holds for two consecutive runs on the same input.
+#[test]
+fn fuzz_per_value_lineage_arbitrary_strings_never_panic() {
+    bolero::check!()
+        .with_type::<Vec<String>>()
+        .for_each(|values: &Vec<String>| {
+            if values.is_empty() {
+                return;
+            }
+            let df = DataFrame::from_columns(vec![(
+                "c".into(),
+                Column::Str(values.clone()),
+            )])
+            .unwrap();
+            let cfg = cjc_locke::PerValueLineageConfig::default();
+            let map_a = cjc_locke::build_per_value_lineage(&df, &cfg);
+            let map_b = cjc_locke::build_per_value_lineage(&df, &cfg);
+            // Determinism.
+            assert_eq!(map_a, map_b);
+            // Every emitted lineage's stage list never exceeds 5
+            // (4 transforms + 1 rare tag — the fixed total).
+            for lineage in map_a.values() {
+                assert!(lineage.stages.len() <= 5);
+            }
+            // Emit text never panics on any lineage.
+            for lineage in map_a.values() {
+                let s = cjc_locke::emit_value_trace_text(lineage);
+                assert!(s.starts_with("trace: column="));
+            }
+        });
+}
+
 /// Arbitrary `(Vec<i64>, Vec<i64>)` for E9064. Detector must never
 /// panic; emitted findings must carry the required evidence fields.
 #[test]

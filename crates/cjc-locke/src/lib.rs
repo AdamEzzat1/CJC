@@ -54,6 +54,7 @@ pub mod json_emit;
 pub mod leakage;
 pub mod parquet_reader;
 pub mod lineage;
+pub mod per_value_lineage;
 pub mod pii;
 pub mod report;
 pub mod shape;
@@ -89,6 +90,11 @@ pub use id::{FingerprintId, IdDomain};
 pub use lineage::{
     emit_lineage_mermaid, emit_lineage_text, AuditEvent, ImpressionKind, LineageBuilder,
     LineageEdge, LineageGraph, LineageNode, LockeIdea, LockeImpression, TransformationRecord,
+};
+pub use per_value_lineage::{
+    build_per_value_lineage, emit_value_trace_text, trace_value, LineageStage,
+    PerValueLineage, PerValueLineageConfig, PerValueLineageMap, PerValueStageSet,
+    ValueTransform,
 };
 pub use traced::TracedDataFrame;
 pub use report::{

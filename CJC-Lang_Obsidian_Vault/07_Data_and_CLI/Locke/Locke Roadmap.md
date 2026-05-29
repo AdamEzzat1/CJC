@@ -169,11 +169,11 @@ Net delta: cjc-locke --lib **291** (was 284 post-v0.6.4, +7) + tests/locke **196
 
 ### Still deferred to v0.7+ heavy
 
-The five **heavy** items each requiring multiple batches:
+The remaining **heavy** items each requiring multiple batches:
 
 - [ ] **Text drift** — vocabulary KS, token-entropy drift, language-distribution shift. Needs a tokenizer.
 - [ ] **Ontology / taxonomy consistency** — hyphen/underscore variants, common-prefix taxonomy inference, hierarchy fragmentation.
-- [ ] **Per-value category lineage** — `raw → normalized → grouped → encoded → embedding` chain. Distinct from existing DataFrame-level `TracedDataFrame`.
+- [x] **Per-value category lineage** — shipped 2026-05-29 (ADR-0038, A2). New `per_value_lineage.rs` module + `cjcl locke trace-value` CLI subcommand. Closes the v0.6.4 silent-failure story: E9008 surfaces *that* a sentinel exists; A2 surfaces *what happened to it*. 5 transforms (`SentinelMask` / `CaseFold` / `WhitespacePunctStrip` / `UnicodeNormalize` / `RareCandidate`). Reuses `normalize_whitespace_punct` / `strip_combining_marks` / `category_counts` from `categorical.rs` — single source of canonicalisation truth. cjc-locke `--lib` 291→309 (+18); tests/locke 196→211 (+12 integration + 2 proptest + 1 bolero); cjc-cli `--lib` 154→157 (+3 trace-value parser tests); tests/abng 629 unchanged.
 - [ ] **Governance workflows** — suppression files, owner annotations, required-finding policies.
 
 Plus medium items not in batch 2 (could ship as v0.6.x):

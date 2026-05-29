@@ -7,6 +7,9 @@
 //! * `cjcl locke belief <data.csv>`    — emit a `BeliefReport` summary
 //! * `cjcl locke lineage <data.csv>`   — emit a minimal lineage graph
 //! * `cjcl locke causal <data.csv>`    — emit a causal-guardrail report
+//! * `cjcl locke trace-value <data.csv> <column> <value>` — per-value
+//!   lineage chain showing the canonicalisation stages that would apply
+//!   to a single distinct value (v0.7+ A2).
 //!
 //! All output is deterministic. The default format is a stable, indented
 //! text emit suitable for snapshot tests; `--json` swaps in newline-
@@ -53,6 +56,10 @@ pub enum LockeSubcommand {
     /// v0.6: run `validate` N times and assert byte-identical reports.
     /// Exits 0 if all runs match, 3 if any divergence.
     Verify { data: PathBuf, runs: u32 },
+    /// v0.7+ A2: per-value lineage trace for a single `(column, value)`
+    /// pair. Emits the canonicalisation chain that would apply if the
+    /// user adopted Locke's suggested normalisations.
+    TraceValue { data: PathBuf, column: String, value: String },
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +107,9 @@ fn dispatch(args: LockeArgs) -> i32 {
             cmd_gate(&reference, &current, args.fail_on_severity.as_deref())
         }
         LockeSubcommand::Verify { data, runs } => cmd_verify(&data, runs),
+        LockeSubcommand::TraceValue { data, column, value } => {
+            cmd_trace_value(&data, &column, &value)
+        }
     };
     match res {
         Ok(report) => {
@@ -556,6 +566,32 @@ fn cmd_verify(data: &PathBuf, runs: u32) -> Result<CmdOutput, String> {
     }
 }
 
+/// v0.7+ A2 — `cjcl locke trace-value <data> <column> <value>` emits the
+/// per-value canonicalisation lineage for a single `(column, value)`
+/// pair. Surfaces "what would happen to this value if Locke's
+/// suggested normalisations were adopted."
+///
+/// Exit semantics:
+/// - 0 when the value is present and its lineage was emitted.
+/// - 2 (caller-mapped from the returned `Err`) when the column or value
+///   is missing.
+fn cmd_trace_value(
+    data: &PathBuf,
+    column: &str,
+    value: &str,
+) -> Result<CmdOutput, String> {
+    let df = read_csv(data)?;
+    let cfg = cjc_locke::PerValueLineageConfig::default();
+    let lineage = cjc_locke::trace_value(&df, &cfg, column, value).ok_or_else(|| {
+        format!(
+            "value {:?} not found in column {:?} (or column is not categorical)",
+            value, column
+        )
+    })?;
+    let text = cjc_locke::emit_value_trace_text(&lineage);
+    Ok(CmdOutput { text, worst: "info".into() })
+}
+
 fn cmd_causal(
     data: &PathBuf,
     target: Option<&str>,
@@ -838,6 +874,13 @@ pub fn try_parse_sub(sub_args: &[String]) -> Option<LockeArgs> {
             let data = positional.first()?.into();
             LockeSubcommand::Verify { data, runs }
         }
+        "trace-value" => {
+            // trace-value <data.csv> <column> <value>
+            let data = positional.first()?.into();
+            let column = positional.get(1)?.clone();
+            let value = positional.get(2)?.clone();
+            LockeSubcommand::TraceValue { data, column, value }
+        }
         _ => return None,
     };
 
@@ -879,6 +922,10 @@ usage:
   cjcl locke causal   <data.csv> [--target COL] [--observational-only] [--json]
   cjcl locke gate     <reference.json> <current>  [--fail-on SEV]
   cjcl locke verify   <data.csv> [--runs N]
+  cjcl locke trace-value <data.csv> <column> <value>
+                                  emit the per-value canonicalisation
+                                  lineage chain for a single distinct
+                                  value (v0.7+ A2)
 
 flags:
   --json                 emit one JSON-ish record per line
@@ -1044,6 +1091,52 @@ mod tests {
         match parsed.subcommand {
             LockeSubcommand::Verify { runs, .. } => assert_eq!(runs, 3),
             _ => panic!(),
+        }
+    }
+
+    // ── v0.7+ A2: trace-value subcommand ─────────────────────────────────
+
+    #[test]
+    fn parse_trace_value_subcommand() {
+        let parsed = try_parse_sub(&args(&[
+            "trace-value",
+            "data.csv",
+            "race",
+            "Caucasian",
+        ]))
+        .expect("trace-value parse");
+        match parsed.subcommand {
+            LockeSubcommand::TraceValue { data, column, value } => {
+                assert_eq!(data.to_str().unwrap(), "data.csv");
+                assert_eq!(column, "race");
+                assert_eq!(value, "Caucasian");
+            }
+            _ => panic!("expected TraceValue"),
+        }
+    }
+
+    #[test]
+    fn parse_trace_value_missing_positional_returns_none() {
+        // Only two positionals supplied — missing the value arg.
+        assert!(
+            try_parse_sub(&args(&["trace-value", "data.csv", "race"])).is_none(),
+            "trace-value with only 2 positionals should fail to parse"
+        );
+    }
+
+    #[test]
+    fn parse_trace_value_accepts_question_mark_value() {
+        // Real-world case: tracing the diabetes-130 `?` sentinel.
+        let parsed = try_parse_sub(&args(&[
+            "trace-value",
+            "diabetes.csv",
+            "weight",
+            "?",
+        ]))
+        .expect("trace-value with ? value");
+        match parsed.subcommand {
+            LockeSubcommand::TraceValue { value, .. } => assert_eq!(value, "?"),
+            _ => panic!("expected TraceValue"),
         }
     }
 }
