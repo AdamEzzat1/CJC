@@ -178,6 +178,35 @@ This is a *reframe* for the §4.C path: it's now "push from 0.66 to 0.68", not "
 
 ---
 
+## Has Locke helped Phase 0.10? An honest assessment
+
+The brief asked us to use Locke wherever it fits. We did — and the result is more nuanced than "Locke drove the AUC headline." Going role-by-role (per the [project's stacked-team framing](../../CLAUDE.md)):
+
+### Numerical Computing Engineer's verdict
+**Locke did not directly drive the AUC bump.** Every gain — §4.A's +0.055, §4.E's +0.031, §4.F's confidence bound — came from ABNG tuning + data scale, not from any Locke finding. The handoff's flagship §4.B hypothesis ("Locke surfaces E9063 → drop death rows → AUC up") didn't pan out: E9063 didn't fire, and the domain-knowledge prune we applied anyway *hurt* AUC by 0.012.
+
+### Lead Language Architect's verdict
+**Locke surfaced its own detector ceiling, which is a publishable finding in itself.** E9063 is a per-feature ROC-AUC detector; it misses per-level deterministic leakage. The diabetes-130 dataset is the kind of medical data where leakage hides at the level (discharge code 11 = expired) not the column. The missing **E9064 per-level conditional-probability detector** is now a concrete Locke roadmap item that this session bound to a real example.
+
+### Determinism & Reproducibility Auditor's verdict
+**Locke's determinism contract held — `cjcl locke verify --runs N` would still pass on every artifact we produced.** The 142 findings + their hashes are reproducible. The audit chain integrity is preserved. This is a non-trivial systems contribution: a noisy, exploratory ML harness changed configuration substantially this session, and the data-side audit trail never needed to budge.
+
+### Compiler Pipeline Engineer's verdict
+**Locke's CLI surface worked exactly as designed.** `--target readmitted --primary-key patient_nbr --save-json --html` ran to completion, emitted structured JSON, and produced a navigable HTML report with the Pearson heatmap. The plumbing is solid. No CLI or schema issues.
+
+### Runtime Systems Engineer's verdict
+**Locke's findings flagged structural concerns the AUC numbers couldn't see.** Two examples:
+1. **E9004 on `patient_nbr`** — 30,248 duplicate keys across 16,773 groups. This means the harness's encounter-level train/test split lets the *same patient* appear in train + test. That's a leakage hole the blog didn't address. AUC won't show it unless you patient-level split; Locke surfaced it without running a single model.
+2. **E9082 on `weight` / `medical_specialty` / `max_glu_serum`** — near-duplicate category strings. Some of these are real distinctions (`[0-25)` vs `[50-75)`), but the warning forces a deliberate "yes these are different, not typos" review.
+
+### QA Automation Engineer's verdict
+**Locke's null result on missingness was the most actionable finding.** The default config doesn't recognize `?` as missing, which means a 97%-missing column like `weight` shows up as "missingness_score = 1.0 (perfect)" in the per-leaf BeliefScore CSV. This is a Locke bug-or-config-gap: medical CSVs with `?` are not rare. The fix is either (a) auto-detect common sentinels (?, NA, -, NULL), or (b) make `ValidateOptions.missingness_markers` more discoverable. **Pre-blocks §4.D from being useful as the handoff defined it** — if the per-leaf belief vector isn't informative, weighting per-leaf priors by it can't help.
+
+### Net assessment
+Locke *did* help — but on the **systems / determinism / detector-roadmap** axis, not directly on the **AUC-bump** axis. The brief implicitly assumed Locke would surface a leakage pattern that, when filtered, would lift AUC. What actually happened: Locke surfaced detector limits + structural issues that *will* drive future Phase 0.11 work but didn't move this session's number. The §4.B negative result is the most valuable Locke output of the session — it pins a concrete failure mode and points at a concrete fix (E9064 conditional-probability detector).
+
+ABNG, by contrast, *was* the lever. The K=2 / prior=0.5 config + full data + 3-seed variance is what produces AUC 0.6645 ± 0.0018. ABNG's audit chain, BLR conjugate update, deterministic stratified sub-sample, and MI-based routing selection all carried this session. The cost in code: two constants and three new test functions.
+
 ## Determinism contract — unmoved
 
 - 629/629 always-run ABNG tests pass (no canary drift).
