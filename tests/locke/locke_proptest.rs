@@ -435,6 +435,40 @@ proptest! {
         }
     }
 
+    // ── v0.7+ A5: tokenizer determinism + round-trip ────────────────────
+
+    #[test]
+    fn tokenizer_encode_decode_round_trips_on_arbitrary_strings(
+        s in "[ -~]{0,200}"  // ASCII printable, 0-200 chars
+    ) {
+        let cfg = cjc_locke::TokenizerTrainConfig::default();
+        let t = cjc_locke::Tokenizer::train(&[s.as_str()], &cfg);
+        let ids = t.encode(&s);
+        prop_assert_eq!(t.decode(&ids), s);
+    }
+
+    #[test]
+    fn tokenizer_training_is_deterministic_under_arbitrary_corpus(
+        s1 in "[a-z ]{20,200}",
+        s2 in "[a-z ]{20,200}"
+    ) {
+        let cfg = cjc_locke::TokenizerTrainConfig::default();
+        let t1 = cjc_locke::Tokenizer::train(&[s1.as_str(), s2.as_str()], &cfg);
+        let t2 = cjc_locke::Tokenizer::train(&[s1.as_str(), s2.as_str()], &cfg);
+        prop_assert_eq!(t1.fingerprint(), t2.fingerprint());
+    }
+
+    #[test]
+    fn text_drift_detection_is_deterministic(
+        train in "[a-z ]{200,500}",
+        test in "[a-z ]{200,500}"
+    ) {
+        let cfg = cjc_locke::TextDriftConfig::default();
+        let a = cjc_locke::detect_vocabulary_ks_drift_on_column("c", &train, &test, &cfg);
+        let b = cjc_locke::detect_vocabulary_ks_drift_on_column("c", &train, &test, &cfg);
+        prop_assert_eq!(a, b);
+    }
+
     // ── v0.7+ A3: policy determinism ────────────────────────────────────
 
     #[test]

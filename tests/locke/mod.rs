@@ -20,6 +20,7 @@ mod multiclass_leakage_tests;
 mod sentinel_e9064_tests;
 mod per_value_lineage_tests;
 mod policy_tests;
+mod text_drift_tests;
 mod pii_tests;
 mod seasonality_tests;
 mod shape_tests;

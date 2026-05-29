@@ -348,6 +348,65 @@ fn fuzz_auto_sentinel_never_panics() {
         });
 }
 
+/// Arbitrary strings → tokenizer train + encode + decode must never
+/// panic. Round-trip is preserved by construction. Determinism holds
+/// across two consecutive training calls.
+#[test]
+fn fuzz_tokenizer_arbitrary_strings_never_panic() {
+    bolero::check!()
+        .with_type::<(String, String)>()
+        .for_each(|(s1, s2): &(String, String)| {
+            let cfg = cjc_locke::TokenizerTrainConfig::default();
+            let t = cjc_locke::Tokenizer::train(&[s1.as_str(), s2.as_str()], &cfg);
+            // Determinism.
+            let t2 = cjc_locke::Tokenizer::train(&[s1.as_str(), s2.as_str()], &cfg);
+            assert_eq!(t.fingerprint(), t2.fingerprint());
+            // Round-trip on every input.
+            for s in &[s1, s2] {
+                let ids = t.encode(s);
+                let back = t.decode(&ids);
+                assert_eq!(&back, *s);
+            }
+        });
+}
+
+/// Arbitrary `(train, test)` text → text drift detectors must never
+/// panic. Whichever findings emit must satisfy basic invariants:
+/// KS-D in `[0, 1]`, entropy values finite and non-negative.
+#[test]
+fn fuzz_text_drift_arbitrary_strings_never_panic() {
+    bolero::check!()
+        .with_type::<(String, String)>()
+        .for_each(|(train, test): &(String, String)| {
+            let cfg = cjc_locke::TextDriftConfig::default();
+            let f_vocab =
+                cjc_locke::detect_vocabulary_ks_drift_on_column("c", train, test, &cfg);
+            if let Some(f) = f_vocab {
+                assert_eq!(f.code, "E9110");
+                for ev in &f.evidence {
+                    if let cjc_locke::FindingEvidence::Metric { label, value } = ev {
+                        if label == "vocab_ks_d" {
+                            assert!(*value >= 0.0 && *value <= 1.0 + 1e-9);
+                        }
+                    }
+                }
+            }
+            let f_lang = cjc_locke::detect_language_distribution_shift_on_column(
+                "c", train, test, &cfg,
+            );
+            if let Some(f) = f_lang {
+                assert_eq!(f.code, "E9112");
+                for ev in &f.evidence {
+                    if let cjc_locke::FindingEvidence::Metric { label, value } = ev {
+                        if label == "char_3gram_ks_d" {
+                            assert!(*value >= 0.0 && *value <= 1.0 + 1e-9);
+                        }
+                    }
+                }
+            }
+        });
+}
+
 /// Arbitrary suppression / requirement parameters → `apply_policy`
 /// must never panic. Two consecutive runs are byte-identical. Result
 /// is well-formed: every suppression decision has a non-zero

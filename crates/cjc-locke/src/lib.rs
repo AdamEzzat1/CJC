@@ -62,6 +62,8 @@ pub mod shape;
 pub mod stats;
 pub mod streaming;
 pub mod temporal;
+pub mod text_drift;
+pub mod tokenizer;
 pub mod traced;
 pub mod validation;
 
@@ -102,6 +104,12 @@ pub use policy::{
     PolicyResult, RequiredFindingRule, RequirementOperator, RequirementResult,
     SuppressionDecision, SuppressionRule,
 };
+pub use text_drift::{
+    detect_language_distribution_shift_on_column, detect_text_drift,
+    detect_token_entropy_drift_on_column, detect_vocabulary_ks_drift_on_column,
+    TextDriftConfig,
+};
+pub use tokenizer::{Tokenizer, TokenizerTrainConfig};
 pub use traced::TracedDataFrame;
 pub use report::{
     ColumnBeliefReport, DatasetSkepticismReport, FindingEvidence, FindingSeverity,
