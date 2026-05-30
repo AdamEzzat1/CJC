@@ -205,10 +205,31 @@ pub fn multiclass_max_one_vs_rest_auc(
     n_classes: u32,
     min_class_count: u64,
 ) -> Option<f64> {
+    compute_per_class_aucs(feature, target, n_classes, min_class_count)
+        .into_iter()
+        .map(|(_, a)| a)
+        .fold(None, |best, a| Some(best.map_or(a, |b: f64| b.max(a))))
+}
+
+/// Compute per-class one-vs-rest |AUC| in a single pass. The detector
+/// pipeline previously called `multiclass_max_one_vs_rest_auc` (which
+/// internally iterates classes) and then iterated classes again to
+/// build the top-3 display — N²-style double work in the multi-class
+/// path. This helper computes both pieces from one iteration; max is a
+/// trivial fold of the returned vec.
+///
+/// Returns an empty vec when no class has enough samples on both
+/// sides.
+pub(crate) fn compute_per_class_aucs(
+    feature: &[f64],
+    target: &[u32],
+    n_classes: u32,
+    min_class_count: u64,
+) -> Vec<(u32, f64)> {
     if feature.len() != target.len() {
-        return None;
+        return Vec::new();
     }
-    let mut best: Option<f64> = None;
+    let mut out: Vec<(u32, f64)> = Vec::with_capacity(n_classes as usize);
     for c in 0..n_classes {
         let binary: Vec<u8> = target
             .iter()
@@ -216,10 +237,10 @@ pub fn multiclass_max_one_vs_rest_auc(
             .collect();
         if let Some(auc) = binary_target_auc(feature, &binary, min_class_count) {
             let abs_auc = auc.max(1.0 - auc);
-            best = Some(best.map_or(abs_auc, |b| b.max(abs_auc)));
+            out.push((c, abs_auc));
         }
     }
-    best
+    out
 }
 
 /// Multi-class variant of `detect_target_leakage`. Emits **E9063**
@@ -244,14 +265,21 @@ pub fn detect_target_leakage_multiclass(
         let Some(feat) = extract_feature(df, name) else {
             continue;
         };
-        let Some(max_auc) = multiclass_max_one_vs_rest_auc(
-            &feat,
-            &target_idx,
-            n_classes,
-            cfg.min_class_count,
-        ) else {
+        // v0.7+ B6.7: previously the per-class AUC loop ran twice —
+        // once via `multiclass_max_one_vs_rest_auc` for the max, then
+        // again here for the top-3 display. Each loop allocates a
+        // length-N binary vector per class and sorts a length-N pair
+        // vector inside `binary_target_auc`. Single-pass cuts the cost
+        // by a factor of two.
+        let mut per_class_aucs =
+            compute_per_class_aucs(&feat, &target_idx, n_classes, cfg.min_class_count);
+        if per_class_aucs.is_empty() {
             continue;
-        };
+        }
+        let max_auc = per_class_aucs
+            .iter()
+            .map(|(_, a)| *a)
+            .fold(f64::MIN, f64::max);
         let (severity, marker) = if max_auc >= cfg.auc_error_threshold {
             (FindingSeverity::Error, "almost certainly leakage")
         } else if max_auc >= cfg.auc_warn_threshold {
@@ -259,18 +287,6 @@ pub fn detect_target_leakage_multiclass(
         } else {
             continue;
         };
-        // Build a sample showing top-3 per-class AUCs (sorted desc).
-        let mut per_class_aucs: Vec<(u32, f64)> = Vec::new();
-        for c in 0..n_classes {
-            let binary: Vec<u8> = target_idx
-                .iter()
-                .map(|t| if *t == c { 1u8 } else { 0u8 })
-                .collect();
-            if let Some(auc) = binary_target_auc(&feat, &binary, cfg.min_class_count) {
-                let abs = auc.max(1.0 - auc);
-                per_class_aucs.push((c, abs));
-            }
-        }
         per_class_aucs.sort_by(|a, b| b.1.total_cmp(&a.1));
         let per_class_str = per_class_aucs
             .iter()
@@ -466,6 +482,46 @@ impl Default for PerLevelLeakageConfig {
     }
 }
 
+/// Typed BTreeMap key for the per-level leakage detector. Avoids the
+/// per-row String allocation that the old `format_level`-keyed map
+/// did — on diabetes-130-scale data that's 10⁵+ Strings per validate.
+///
+/// Determinism: the final `LockeReport` sorts findings by
+/// `(severity, code, column, id)` — so the per-detector emit order is
+/// invisible to output. Switching from String keys (lex order) to
+/// typed keys (natural order, e.g. Int(2) < Int(10) instead of "10" <
+/// "2") shifts emit order but the final report bytes are unchanged.
+///
+/// Float columns are skipped upstream at the per-feature filter so no
+/// f64-key collision semantics are involved.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum LevelKey<'a> {
+    Int(i64),
+    Str(&'a str),
+    Bool(bool),
+    Cat(u32),
+    Datetime(i64),
+    /// `CategoricalAdaptive` historically collapsed to a single bucket
+    /// via the "<adaptive>" sentinel; preserve that behaviour with a
+    /// unit variant.
+    Adaptive,
+}
+
+fn level_key<'a>(col: &'a Column, row: usize) -> LevelKey<'a> {
+    match col {
+        Column::Int(v) => LevelKey::Int(v[row]),
+        Column::Str(v) => LevelKey::Str(v[row].as_str()),
+        Column::Bool(v) => LevelKey::Bool(v[row]),
+        Column::Categorical { codes, .. } => LevelKey::Cat(codes[row]),
+        Column::DateTime(v) => LevelKey::Datetime(v[row]),
+        Column::CategoricalAdaptive(_) => LevelKey::Adaptive,
+        // Float is filtered out at the per-feature loop so this arm is
+        // never reached during normal operation. Treat as Adaptive to
+        // avoid panicking in case a future caller widens the surface.
+        Column::Float(_) => LevelKey::Adaptive,
+    }
+}
+
 /// Render a level value as a deterministic string for the finding
 /// message. Float NaN is rendered as `NaN` so the message is stable
 /// across runs.
@@ -583,15 +639,17 @@ pub fn detect_per_level_target_leakage(
             continue;
         }
 
-        // Per-level deterministic representation we can hash on. We
-        // bin rows by their level-as-string (deterministic via
-        // `format_level`) but only count distinct (representative
-        // row) per level for memory bounds.
-        let mut level_buckets: std::collections::BTreeMap<String, (usize, Vec<u64>)> =
+        // v0.7+ B6.6: per-level bucketing previously called
+        // `format_level` per (row, col) — one heap allocation per cell,
+        // 10⁵+ on diabetes-130-scale data. The LevelKey enum uses a
+        // typed key (Int/Str(&str)/Bool/...) that avoids the
+        // allocation; format_level is still called once per *emitted*
+        // finding for the human-readable level display.
+        let mut level_buckets: std::collections::BTreeMap<LevelKey<'_>, (usize, Vec<u64>)> =
             std::collections::BTreeMap::new();
         // (representative_row_idx, per_class_count)
         for (row, tgt) in target_codes.iter().enumerate() {
-            let key = format_level(col, row);
+            let key = level_key(col, row);
             let entry = level_buckets
                 .entry(key)
                 .or_insert_with(|| (row, vec![0u64; n_classes as usize]));
@@ -607,7 +665,7 @@ pub fn detect_per_level_target_leakage(
         }
 
         // Step 4 — evaluate each level × class for the threshold.
-        for (level_key, (rep_row, per_class)) in &level_buckets {
+        for (level_key_val, (rep_row, per_class)) in &level_buckets {
             let support: u64 = per_class.iter().sum();
             if support < cfg.min_support {
                 continue;
@@ -631,7 +689,7 @@ pub fn detect_per_level_target_leakage(
             }
 
             let pretty_level = format_level(col, *rep_row);
-            let _ = level_key;
+            let _ = level_key_val;
             let pretty_class = &class_labels[best_c as usize];
 
             out.push(ValidationFinding::new(
