@@ -65,28 +65,61 @@ AuditEvent = _cjc_locke.AuditEvent
 PolicyResult = _cjc_locke.PolicyResult
 
 
-def _ensure_dict(data: Any) -> DataDict:
-    """Coerce a pandas / polars DataFrame into a plain dict[str, array].
+def _pandas_column_payload(series: Any) -> Any:
+    """Pick the cheapest representation that the Rust side can accept.
 
-    Pandas and polars are optional. If the user passes a DataFrame and the
-    library is installed, we extract columns in DataFrame-order. Otherwise
-    raise a TypeError. Plain dicts pass through unchanged.
+    Numeric columns go through `.to_numpy()` for the zero-copy buffer-
+    protocol path. Object/string/category dtypes go through `.tolist()`
+    because numpy object arrays aren't supported by the wrapper (the
+    Rust side would have to per-element extract anyway).
+    """
+    dtype = getattr(series, "dtype", None)
+    kind = getattr(dtype, "kind", None)
+    # 'i'/'u'/'f'/'b' = numeric / bool; pass via numpy buffer protocol.
+    if kind in ("i", "u", "f", "b"):
+        return series.to_numpy()
+    # Everything else (object, string, category, datetime, etc.) → list.
+    # We could special-case category to extract codes + levels, but the
+    # list path is correct and ~ms-level overhead for typical sizes.
+    return series.tolist()
+
+
+def _polars_column_payload(series: Any) -> Any:
+    """Same idea for polars: try `.to_numpy()` first; if the dtype is
+    a string/object/category that numpy can't represent zero-copy,
+    fall back to `.to_list()`."""
+    # polars Utf8 / Categorical etc. can be detected via `.dtype`. We
+    # don't import polars (zero hard deps) so we duck-type by trying
+    # to_numpy and catching the failure case.
+    try:
+        arr = series.to_numpy()
+        # Object-dtype arrays will fail downstream — convert to list.
+        if hasattr(arr, "dtype") and arr.dtype == object:
+            return series.to_list()
+        return arr
+    except Exception:
+        return series.to_list()
+
+
+def _ensure_dict(data: Any) -> DataDict:
+    """Coerce a pandas / polars DataFrame into a plain dict[str, array|list].
+
+    Pandas and polars are optional. We duck-type on attribute presence
+    so both libraries remain optional dependencies. Plain dicts pass
+    through unchanged.
+
+    Polars is checked BEFORE pandas because polars DataFrames also have
+    `.to_dict()` (so the pandas duck-typing branch would catch them
+    incorrectly). `.to_pandas()` is polars-specific.
     """
     if isinstance(data, dict):
         return data
-    # pandas duck-typing (don't import pandas — keep zero hard deps)
-    if hasattr(data, "columns") and hasattr(data, "to_dict"):
-        # pandas: prefer per-column .values to get numpy arrays
-        try:
-            return {c: data[c].values for c in data.columns}
-        except Exception:  # pragma: no cover
-            return {c: list(data[c]) for c in data.columns}
-    # polars duck-typing
+    # polars DataFrame — check first because pandas check would match too
     if hasattr(data, "columns") and hasattr(data, "to_pandas"):
-        try:
-            return {c: data[c].to_numpy() for c in data.columns}
-        except Exception:  # pragma: no cover
-            return {c: list(data[c]) for c in data.columns}
+        return {c: _polars_column_payload(data[c]) for c in data.columns}
+    # pandas DataFrame
+    if hasattr(data, "columns") and hasattr(data, "to_dict"):
+        return {c: _pandas_column_payload(data[c]) for c in data.columns}
     raise TypeError(
         f"unsupported data type {type(data).__name__}: expected dict, "
         f"pandas.DataFrame, or polars.DataFrame"
