@@ -353,11 +353,25 @@ fn cell_bytes(col: &Column, row: usize, out: &mut Vec<u8>) {
             out.extend_from_slice(&(level.len() as u64).to_le_bytes());
             out.extend_from_slice(level.as_bytes());
         }
-        Column::CategoricalAdaptive(_cc) => {
-            // For v0 we treat adaptive categorical as opaque — use its row index.
-            // (A future v0.2 hook can dereference the dictionary.)
-            out.push(b'a');
-            out.extend_from_slice(&(row as u64).to_le_bytes());
+        Column::CategoricalAdaptive(cc) => {
+            // v0.7+ deep-dive bug-fix (was CRITICAL): previously this branch
+            // wrote `(b'a', row_index_bytes)` so every row produced a unique
+            // canonical hash. As a result, `detect_duplicates_full_row` and
+            // `detect_duplicate_keys` *silently never fired E9003/E9004* on
+            // any DataFrame containing a CategoricalAdaptive column — a 100%
+            // false-negative rate on duplicate detection for the storage
+            // variant used by the diabetes-130 high-cardinality columns.
+            //
+            // The fix dereferences the dictionary to the same byte stream the
+            // plain Categorical branch uses. The `b'c'` tag is shared with
+            // Column::Categorical so equal content produces equal fingerprints
+            // across the two storage variants — the user shouldn't get
+            // different finding IDs just because they chose adaptive encoding.
+            out.push(b'c');
+            let code = cc.codes().get(row);
+            let bytes = cc.dictionary().get(code).unwrap_or(&[]);
+            out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+            out.extend_from_slice(bytes);
         }
         Column::DateTime(v) => {
             out.push(b'd');
@@ -752,7 +766,15 @@ pub(crate) fn distinct_count(col: &Column) -> u64 {
             let set: BTreeSet<u32> = codes.iter().copied().collect();
             set.len() as u64
         }
-        Column::CategoricalAdaptive(cc) => cc.len() as u64, // conservative upper bound
+        // v0.7+ deep-dive bug-fix (was CRITICAL): previously this returned
+        // `cc.len()` (the row count, commented "conservative upper bound").
+        // That made the `distinct <= 1` check in E9010 unreachable for
+        // adaptive-categorical columns, and made `detect_id_like_columns`
+        // (E9072 in leakage.rs) compute `distinct/n_rows = 1.0` for EVERY
+        // such column — flagging every adaptive-categorical column as an
+        // ID-like leakage candidate. Replaced with the actual distinct
+        // level count via the dictionary API.
+        Column::CategoricalAdaptive(cc) => cc.dictionary().len() as u64,
         Column::DateTime(v) => {
             let set: BTreeSet<i64> = v.iter().copied().collect();
             set.len() as u64
@@ -763,21 +785,41 @@ pub(crate) fn distinct_count(col: &Column) -> u64 {
 /// Top-value frequency for a column (max count of any single value).
 pub(crate) fn top_value_freq(col: &Column) -> u64 {
     match col {
-        Column::Int(v) => count_top(v.iter().copied().collect()),
+        Column::Int(v) => count_top(v.iter().copied()),
         Column::Float(v) => count_top(
             v.iter()
-                .map(|x| if x.is_nan() { u64::MAX } else { x.to_bits() })
-                .collect(),
+                .map(|x| if x.is_nan() { u64::MAX } else { x.to_bits() }),
         ),
-        Column::Str(v) => count_top(v.iter().cloned().collect()),
-        Column::Bool(v) => count_top(v.iter().copied().collect()),
-        Column::Categorical { codes, .. } => count_top(codes.iter().copied().collect()),
-        Column::DateTime(v) => count_top(v.iter().copied().collect()),
-        Column::CategoricalAdaptive(_) => 0,
+        // v0.7+ deep-dive perf-fix: was cloning every String into a Vec
+        // before counting. For a 1M-row Str column with 10 distinct values
+        // that's 1M wasted clones. Counting by `&str` keeps the lifetime
+        // tied to the column and zero-allocates the keys.
+        Column::Str(v) => {
+            let mut counts: BTreeMap<&str, u64> = BTreeMap::new();
+            for s in v {
+                *counts.entry(s.as_str()).or_insert(0) += 1;
+            }
+            counts.values().copied().max().unwrap_or(0)
+        }
+        Column::Bool(v) => count_top(v.iter().copied()),
+        Column::Categorical { codes, .. } => count_top(codes.iter().copied()),
+        Column::DateTime(v) => count_top(v.iter().copied()),
+        // v0.7+ deep-dive bug-fix (was HIGH): previously returned 0
+        // unconditionally for adaptive-categorical, which made
+        // `detect_constant_and_near_constant` always report 0 frequency on
+        // the top value → no near-constant findings could ever fire on
+        // these columns. Now properly counts via the code stream.
+        Column::CategoricalAdaptive(cc) => {
+            let mut counts: BTreeMap<u64, u64> = BTreeMap::new();
+            for code in cc.codes().iter() {
+                *counts.entry(code).or_insert(0) += 1;
+            }
+            counts.values().copied().max().unwrap_or(0)
+        }
     }
 }
 
-fn count_top<T: Ord>(values: Vec<T>) -> u64 {
+fn count_top<T: Ord, I: IntoIterator<Item = T>>(values: I) -> u64 {
     let mut counts: BTreeMap<T, u64> = BTreeMap::new();
     for v in values {
         *counts.entry(v).or_insert(0) += 1;

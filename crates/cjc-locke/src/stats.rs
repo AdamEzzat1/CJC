@@ -216,39 +216,45 @@ pub fn ks_d_statistic(xs: &[f64], ys: &[f64]) -> Option<f64> {
     let mut i = 0usize;
     let mut j = 0usize;
     let mut d_max: f64 = 0.0;
-    let mut f_a: f64 = 0.0;
-    let mut f_b: f64 = 0.0;
 
-    while i < n && j < m {
-        let x = a[i];
-        let y = b[j];
-        if x <= y {
+    // v0.7+ deep-dive bug-fix (was CRITICAL): the previous implementation
+    // walked element-by-element and emitted intermediate gaps after each
+    // single-side advance. For samples with tied values *within* one side
+    // (e.g. a=[1,1,2,2], b=[1,2]) the algorithm over-reported D — it saw
+    // a 0.25 gap between the two one-side advances of a[0] and b[0], even
+    // though the true CDF step function jumps at distinct x-breakpoints
+    // only. Concretely, on a=[1,1,2,2], b=[1,2] the textbook D is 0; the
+    // old code returned 0.25. This silently affected E9039 (numeric drift),
+    // E9110 (vocab KS) and E9112 (language-shift KS), all of which feed
+    // KS-D over heavily-tied frequency-counted distributions.
+    //
+    // The corrected algorithm advances both pointers past *all* equal
+    // values at the next distinct breakpoint, then measures the gap once.
+    // Matches the textbook two-sample KS step-function CDF construction.
+    while i < n || j < m {
+        // Pick the next distinct break-x = min of the two heads.
+        let next_x = match (a.get(i), b.get(j)) {
+            (Some(&xa), Some(&xb)) => {
+                if xa.total_cmp(&xb).is_le() {
+                    xa
+                } else {
+                    xb
+                }
+            }
+            (Some(&xa), None) => xa,
+            (None, Some(&xb)) => xb,
+            (None, None) => break,
+        };
+        // Advance i past every a value bit-equal (total_cmp) to next_x.
+        while i < n && a[i].total_cmp(&next_x).is_eq() {
             i += 1;
-            f_a = i as f64 / n_f;
         }
-        if y <= x {
+        // Same for j on the b side.
+        while j < m && b[j].total_cmp(&next_x).is_eq() {
             j += 1;
-            f_b = j as f64 / m_f;
         }
-        let gap = (f_a - f_b).abs();
-        if gap > d_max {
-            d_max = gap;
-        }
-    }
-    // The remaining tail can only widen the gap if one CDF reaches 1.0
-    // before the other; we've already captured that gap at the last
-    // matching step, but check explicitly for safety.
-    while i < n {
-        i += 1;
-        f_a = i as f64 / n_f;
-        let gap = (f_a - f_b).abs();
-        if gap > d_max {
-            d_max = gap;
-        }
-    }
-    while j < m {
-        j += 1;
-        f_b = j as f64 / m_f;
+        let f_a = i as f64 / n_f;
+        let f_b = j as f64 / m_f;
         let gap = (f_a - f_b).abs();
         if gap > d_max {
             d_max = gap;
