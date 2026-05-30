@@ -293,13 +293,19 @@ fn numeric_drift_findings(
 /// (mass moved a small distance) or vice versa (mass moved a large
 /// distance but ECDFs cross).
 pub fn wasserstein_1(a: &[f64], b: &[f64]) -> Option<f64> {
-    let mut aa: Vec<f64> = a.iter().copied().filter(|x| !x.is_nan()).collect();
-    let mut bb: Vec<f64> = b.iter().copied().filter(|x| !x.is_nan()).collect();
+    let aa = crate::stats::sort_filter_nan(a);
+    let bb = crate::stats::sort_filter_nan(b);
+    wasserstein_1_sorted(&aa, &bb)
+}
+
+/// W₁ computed from pre-sorted, NaN-free inputs. Same contract as
+/// [`wasserstein_1`] but skips the filter+sort step — paired with
+/// [`crate::stats::ks_d_statistic_sorted`] this lets callers share
+/// one sort across both metrics.
+pub fn wasserstein_1_sorted(aa: &[f64], bb: &[f64]) -> Option<f64> {
     if aa.is_empty() || bb.is_empty() {
         return None;
     }
-    aa.sort_by(|x, y| x.total_cmp(y));
-    bb.sort_by(|x, y| x.total_cmp(y));
     let n = aa.len() as f64;
     let m = bb.len() as f64;
 
@@ -351,7 +357,13 @@ fn numeric_ks_finding(
     test_values: &[f64],
     cfg: &DriftConfig,
 ) -> Option<ValidationFinding> {
-    let d = ks_d_statistic(train_values, test_values)?;
+    // v0.7+ B4.4 perf-fix: previously this function sorted both inputs
+    // twice — once inside `ks_d_statistic`, once inside `wasserstein_1`.
+    // Filter and sort once here, then pass the sorted slices to the
+    // `_sorted` variants of both metrics.
+    let train_sorted = crate::stats::sort_filter_nan(train_values);
+    let test_sorted = crate::stats::sort_filter_nan(test_values);
+    let d = crate::stats::ks_d_statistic_sorted(&train_sorted, &test_sorted)?;
     let sev = if d >= cfg.ks_d_error {
         FindingSeverity::Error
     } else if d >= cfg.ks_d_warn {
@@ -359,9 +371,9 @@ fn numeric_ks_finding(
     } else {
         return None;
     };
-    let n_train_valid = train_values.iter().filter(|x| !x.is_nan()).count() as u64;
-    let n_test_valid = test_values.iter().filter(|x| !x.is_nan()).count() as u64;
-    let w1 = wasserstein_1(train_values, test_values).unwrap_or(0.0);
+    let n_train_valid = train_sorted.len() as u64;
+    let n_test_valid = test_sorted.len() as u64;
+    let w1 = wasserstein_1_sorted(&train_sorted, &test_sorted).unwrap_or(0.0);
     Some(ValidationFinding::new(
         "E9039",
         sev,

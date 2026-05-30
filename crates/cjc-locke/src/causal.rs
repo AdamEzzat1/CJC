@@ -470,45 +470,65 @@ pub fn audit_correlations(
 
     // 3. Confounder hints.
     if let Some(target) = target_column {
+        // v0.7+ B4.3 perf-fix: previously this block (a) stored every
+        // correlation twice — both `(a,b)` and `(b,a)` — doubling memory
+        // and (b) cloned both keys per inner lookup, allocating two
+        // Strings per candidate. Refactor: borrow strings from
+        // `correlations` directly (BTreeMap<(&str,&str), f64>), store one
+        // canonical orientation only, and look up symmetrically.
+        // Additionally: cache the features list once outside the outer
+        // loop instead of rebuilding the candidate Vec per feature.
+
         // Build per-column adjacency: for each column X != target with |r| ≥ conf,
         // record r(X, target). Then for each (X, target) hot pair, find a Z
         // distinct from X and target with |r(Z, X)| and |r(Z, target)| ≥ conf.
-        let mut r_with_target: BTreeMap<String, f64> = BTreeMap::new();
-        let mut pairwise: BTreeMap<(String, String), f64> = BTreeMap::new();
-        for c in correlations {
-            pairwise.insert((c.a.clone(), c.b.clone()), c.r);
-            pairwise.insert((c.b.clone(), c.a.clone()), c.r);
-            if c.a == target {
-                r_with_target.insert(c.b.clone(), c.r);
-            } else if c.b == target {
-                r_with_target.insert(c.a.clone(), c.r);
-            }
-        }
+        let r_with_target: BTreeMap<&str, f64> = correlations
+            .iter()
+            .filter_map(|c| {
+                if c.a == target {
+                    Some((c.b.as_str(), c.r))
+                } else if c.b == target {
+                    Some((c.a.as_str(), c.r))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let pairwise: BTreeMap<(&str, &str), f64> = correlations
+            .iter()
+            .map(|c| {
+                let (l, r) = if c.a <= c.b {
+                    (c.a.as_str(), c.b.as_str())
+                } else {
+                    (c.b.as_str(), c.a.as_str())
+                };
+                ((l, r), c.r)
+            })
+            .collect();
+        let pair_lookup = |a: &str, b: &str| -> Option<f64> {
+            let (l, r) = if a <= b { (a, b) } else { (b, a) };
+            pairwise.get(&(l, r)).copied()
+        };
 
-        let mut features: Vec<&String> = r_with_target.keys().collect();
-        features.sort();
-        for feature in &features {
-            let r_feat_target = match r_with_target.get(*feature) {
+        // BTreeMap.keys() is already sorted — no extra sort needed.
+        let features: Vec<&str> = r_with_target.keys().copied().collect();
+        for &feature in &features {
+            let r_feat_target = match r_with_target.get(feature) {
                 Some(r) if r.abs() >= config.confounder_threshold => *r,
                 _ => continue,
             };
-            // Find Zs.
-            let candidates: Vec<&String> = r_with_target
-                .keys()
-                .filter(|z| *z != *feature)
-                .collect();
-            for z in candidates {
+            for &z in &features {
+                if z == feature {
+                    continue;
+                }
                 let r_z_target = r_with_target.get(z).copied().unwrap_or(0.0);
-                let r_z_feature = pairwise
-                    .get(&(z.clone(), (*feature).clone()))
-                    .copied()
-                    .unwrap_or(0.0);
+                let r_z_feature = pair_lookup(z, feature).unwrap_or(0.0);
                 if r_z_target.abs() >= config.confounder_threshold
                     && r_z_feature.abs() >= config.confounder_threshold
                 {
                     confounders.push(ConfounderHint {
-                        candidate: z.clone(),
-                        feature: (*feature).clone(),
+                        candidate: z.to_string(),
+                        feature: feature.to_string(),
                         target: target.to_string(),
                         r_with_feature: r_z_feature,
                         r_with_target: r_z_target,

@@ -114,43 +114,57 @@ impl Tokenizer {
 
         let target = cfg.target_vocab_size.max(256) as usize;
 
-        while vocab.len() < target {
-            // Count adjacent pairs across all sequences (BTreeMap → sorted).
-            let mut counts: BTreeMap<(u32, u32), u64> = BTreeMap::new();
-            for seq in &seqs {
-                if seq.len() < 2 {
-                    continue;
-                }
-                for w in seq.windows(2) {
-                    *counts.entry((w[0], w[1])).or_insert(0) += 1;
-                }
+        // v0.7+ B4.1 perf-fix: previously this loop rebuilt the full
+        // pair-count BTreeMap from scratch on every iteration by walking
+        // every byte of every sequence — O(merges × corpus_bytes). The
+        // incremental variant maintains `pair_counts` across iterations
+        // and only updates the sequences that actually contained the
+        // just-merged pair (L, R). On every other sequence the cached
+        // counts are still correct.
+        //
+        // Lex tie-break: rather than building `(count, lex, l, r)`
+        // tuples (which clones two `Vec<u8>` per pair) and `min_by`-ing
+        // the whole map, we filter to pairs at the max count first and
+        // sort only that small tied set. Byte-slice comparison borrows
+        // from `vocab` — no clones.
+        let mut pair_counts: BTreeMap<(u32, u32), u64> = BTreeMap::new();
+        for seq in &seqs {
+            if seq.len() < 2 {
+                continue;
             }
-            if counts.is_empty() {
-                break;
+            for w in seq.windows(2) {
+                *pair_counts.entry((w[0], w[1])).or_insert(0) += 1;
             }
+        }
 
-            // Pick the pair with the highest frequency; break ties by
-            // lexicographic comparison of `(left_bytes, right_bytes)`.
-            // The (count, lex) key produces a fully deterministic choice
-            // independent of BTreeMap iteration order (which is already
-            // deterministic — belt and suspenders).
-            let chosen = counts
-                .iter()
-                .map(|(&(l, r), &c)| {
-                    let lex = (vocab[l as usize].clone(), vocab[r as usize].clone());
-                    (c, lex, l, r)
-                })
-                // Reverse-sort on count, then forward-sort on lex.
-                .min_by(|a, b| {
-                    b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1))
-                });
-            let (best_count, _lex, left_id, right_id) = match chosen {
-                Some(x) => x,
-                None => break,
-            };
-            if best_count < cfg.min_pair_frequency {
+        while vocab.len() < target {
+            if pair_counts.is_empty() {
                 break;
             }
+            let max_count = pair_counts.values().copied().max().unwrap_or(0);
+            if max_count < cfg.min_pair_frequency {
+                break;
+            }
+            // Filter to max-count pairs first, then lex-tie-break on that
+            // smaller set. Byte-slice cmp borrows from vocab.
+            let mut tied: Vec<(u32, u32)> = pair_counts
+                .iter()
+                .filter(|(_, &c)| c == max_count)
+                .map(|(&p, _)| p)
+                .collect();
+            tied.sort_by(|&(la, ra), &(lb, rb)| {
+                vocab[la as usize]
+                    .as_slice()
+                    .cmp(vocab[lb as usize].as_slice())
+                    .then_with(|| {
+                        vocab[ra as usize]
+                            .as_slice()
+                            .cmp(vocab[rb as usize].as_slice())
+                    })
+            });
+            let (left_id, right_id) = tied[0];
+            let best_count = max_count;
+            let _ = best_count;
 
             // Build merged token bytes and add to vocab.
             let mut merged_bytes = vocab[left_id as usize].clone();
@@ -167,14 +181,60 @@ impl Tokenizer {
             byte_to_id.insert(merged_bytes, merged_id);
             merges.push((left_id, right_id, merged_id));
 
-            // Rewrite all sequences applying the new merge.
+            // Rewrite affected sequences and update pair_counts incrementally.
             for seq in seqs.iter_mut() {
-                *seq = apply_merge(seq, left_id, right_id, merged_id);
+                if !contains_pair(seq, left_id, right_id) {
+                    continue;
+                }
+                let old_pairs = pair_multiset(seq);
+                let new_seq = apply_merge(seq, left_id, right_id, merged_id);
+                let new_pairs = pair_multiset(&new_seq);
+                // Apply deltas to pair_counts. `saturating_sub` defends
+                // against any drift between maintained and recomputed
+                // counts; under correct logic the subtraction never
+                // saturates because every counted pair-occurrence is
+                // exactly accounted for.
+                for (p, &c) in &old_pairs {
+                    let cur = pair_counts.get(p).copied().unwrap_or(0);
+                    let new_val = cur.saturating_sub(c);
+                    if new_val == 0 {
+                        pair_counts.remove(p);
+                    } else {
+                        pair_counts.insert(*p, new_val);
+                    }
+                }
+                for (p, &c) in &new_pairs {
+                    *pair_counts.entry(*p).or_insert(0) += c;
+                }
+                *seq = new_seq;
             }
         }
 
         Self { vocab, merges, byte_to_id }
     }
+}
+
+/// True iff `seq` contains the adjacency `(left_id, right_id)` anywhere.
+/// Used by [`Tokenizer::train`] to skip pair-count updates on sequences
+/// that don't change under the current merge.
+fn contains_pair(seq: &[u32], left_id: u32, right_id: u32) -> bool {
+    if seq.len() < 2 {
+        return false;
+    }
+    seq.windows(2).any(|w| w[0] == left_id && w[1] == right_id)
+}
+
+/// Multiset of adjacent pairs in `seq` (overlapping windows). Used to
+/// compute per-sequence pair-count deltas for incremental updates.
+fn pair_multiset(seq: &[u32]) -> BTreeMap<(u32, u32), u64> {
+    let mut m: BTreeMap<(u32, u32), u64> = BTreeMap::new();
+    if seq.len() < 2 {
+        return m;
+    }
+    for w in seq.windows(2) {
+        *m.entry((w[0], w[1])).or_insert(0) += 1;
+    }
+    m
 }
 
 /// Replace every adjacent `(left_id, right_id)` in `seq` with

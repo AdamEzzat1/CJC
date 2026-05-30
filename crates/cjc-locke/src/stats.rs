@@ -201,15 +201,30 @@ pub fn pearson_correlation(xs: &[f64], ys: &[f64]) -> Option<f64> {
 /// uses `f64::total_cmp` so NaN-free inputs produce a fully-determined
 /// order across platforms. Repeated calls yield bit-identical D.
 pub fn ks_d_statistic(xs: &[f64], ys: &[f64]) -> Option<f64> {
-    let mut a: Vec<f64> = xs.iter().copied().filter(|x| !x.is_nan()).collect();
-    let mut b: Vec<f64> = ys.iter().copied().filter(|x| !x.is_nan()).collect();
+    let a = sort_filter_nan(xs);
+    let b = sort_filter_nan(ys);
+    ks_d_statistic_sorted(&a, &b)
+}
+
+/// Filter NaN and sort by `f64::total_cmp`. Shared helper for callers
+/// that want to sort once and reuse across multiple distribution
+/// metrics (e.g. KS and Wasserstein in [`drift::numeric_ks_finding`]).
+pub fn sort_filter_nan(xs: &[f64]) -> Vec<f64> {
+    let mut v: Vec<f64> = xs.iter().copied().filter(|x| !x.is_nan()).collect();
+    v.sort_by(|x, y| x.total_cmp(y));
+    v
+}
+
+/// KS-D computed from pre-sorted, NaN-free inputs. Identical contract
+/// to [`ks_d_statistic`] but skips the filter+sort step — callers
+/// computing multiple sorted-input metrics (KS + Wasserstein) avoid
+/// the double-sort cost by going through this entry point.
+pub fn ks_d_statistic_sorted(a: &[f64], b: &[f64]) -> Option<f64> {
     let n = a.len();
     let m = b.len();
     if n < 2 || m < 2 {
         return None;
     }
-    a.sort_by(|x, y| x.total_cmp(y));
-    b.sort_by(|x, y| x.total_cmp(y));
 
     let n_f = n as f64;
     let m_f = m as f64;

@@ -215,7 +215,12 @@ impl LineageGraph {
     /// via `LineageBuilder` (which rejects cycles at insertion), but kept
     /// as a public invariant check for property tests.
     pub fn is_acyclic(&self) -> bool {
-        // Kahn's algorithm with deterministic ordering.
+        // v0.7+ B4.2 perf-fix: previously the inner `for e in &self.edges`
+        // scanned every edge per popped node — O(V·E). Materialise a
+        // forward-adjacency map once (sorted edge iteration preserves
+        // determinism) and look up successors in O(deg) per pop —
+        // textbook Kahn's at O(V+E).
+        let succ = forward_adjacency(&self.edges);
         let mut indeg: BTreeMap<FingerprintId, u64> = self.nodes.keys().map(|k| (*k, 0)).collect();
         for e in &self.edges {
             if let Some(d) = indeg.get_mut(&e.to) {
@@ -237,12 +242,12 @@ impl LineageGraph {
         while let Some(n) = queue.pop() {
             visited += 1;
             let mut newly_zero: Vec<FingerprintId> = Vec::new();
-            for e in &self.edges {
-                if e.from == n {
-                    if let Some(d) = indeg.get_mut(&e.to) {
+            if let Some(succs) = succ.get(&n) {
+                for &to in succs {
+                    if let Some(d) = indeg.get_mut(&to) {
                         *d -= 1;
                         if *d == 0 {
-                            newly_zero.push(e.to);
+                            newly_zero.push(to);
                         }
                     }
                 }
@@ -255,18 +260,49 @@ impl LineageGraph {
 
     /// Reachable ancestor set of `id` (deterministic order).
     pub fn ancestors(&self, id: FingerprintId) -> BTreeSet<FingerprintId> {
+        // v0.7+ B4.2 perf-fix: O(V·E) → O(V+E) via a reverse-adjacency
+        // map computed once. `out` doubles as the visited set (insert
+        // returns false for already-present, gating the push).
+        let pred = reverse_adjacency(&self.edges);
         let mut out = BTreeSet::new();
         let mut stack = vec![id];
         while let Some(n) = stack.pop() {
-            for e in &self.edges {
-                if e.to == n && !out.contains(&e.from) {
-                    out.insert(e.from);
-                    stack.push(e.from);
+            if let Some(parents) = pred.get(&n) {
+                for &from in parents {
+                    if out.insert(from) {
+                        stack.push(from);
+                    }
                 }
             }
         }
         out
     }
+}
+
+/// Build a forward-adjacency map `from → [to, ...]` from the sorted
+/// `edges` list. Per-key Vec preserves edge-sorted order, so traversals
+/// using this map produce deterministic results.
+fn forward_adjacency(edges: &[LineageEdge]) -> BTreeMap<FingerprintId, Vec<FingerprintId>> {
+    let mut adj: BTreeMap<FingerprintId, Vec<FingerprintId>> = BTreeMap::new();
+    for e in edges {
+        adj.entry(e.from).or_default().push(e.to);
+    }
+    adj
+}
+
+/// Build a reverse-adjacency map `to → [from, ...]`. Used for ancestor
+/// traversal and cycle-introduction checks.
+fn reverse_adjacency<I, E>(edges: I) -> BTreeMap<FingerprintId, Vec<FingerprintId>>
+where
+    I: IntoIterator<Item = E>,
+    E: std::borrow::Borrow<LineageEdge>,
+{
+    let mut adj: BTreeMap<FingerprintId, Vec<FingerprintId>> = BTreeMap::new();
+    for e in edges {
+        let e = e.borrow();
+        adj.entry(e.to).or_default().push(e.from);
+    }
+    adj
 }
 
 /// Construct a deterministic lineage graph incrementally.
@@ -358,6 +394,14 @@ impl LineageBuilder {
     fn would_introduce_cycle(&self, parent: FingerprintId, child_to_be: FingerprintId) -> bool {
         // If `child_to_be` is already an ancestor of `parent`, adding the edge
         // parent → child_to_be would create a cycle.
+        //
+        // v0.7+ B4.2 perf-fix: previously the inner `for e in &self.edges`
+        // scanned every edge per popped node — O(V·E) per call, O(N·V·E)
+        // across N add_idea calls. Materialise the reverse-adjacency map
+        // once per call so the traversal is O(V+E); each call is still
+        // independent (cf. incremental-closure approach which would cache
+        // across calls but is MEDIUM effort — deferred).
+        let pred = reverse_adjacency(self.edges.iter());
         let mut stack = vec![parent];
         let mut seen: BTreeSet<FingerprintId> = BTreeSet::new();
         while let Some(n) = stack.pop() {
@@ -367,9 +411,9 @@ impl LineageBuilder {
             if !seen.insert(n) {
                 continue;
             }
-            for e in &self.edges {
-                if e.to == n {
-                    stack.push(e.from);
+            if let Some(parents) = pred.get(&n) {
+                for &from in parents {
+                    stack.push(from);
                 }
             }
         }
