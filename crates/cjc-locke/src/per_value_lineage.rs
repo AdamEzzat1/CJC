@@ -231,19 +231,39 @@ pub fn build_per_value_lineage(
             );
             continue;
         }
-        // Precompute the canonicalisation tables once per column so each
-        // value's siblings can be derived in O(1) from a BTreeMap lookup.
-        let case_fold_groups = group_by(&counts, |s| s.to_lowercase());
-        let whitespace_groups = group_by(&counts, |s| {
-            normalize_whitespace_punct(s, cfg.trim_terminal_chars)
-        });
-        let unicode_groups = group_by(&counts, |s| strip_combining_marks(s));
+        // v0.7+ deep-dive perf-fix: only materialise the canonicalisation
+        // group tables whose stages are actually enabled. Previously
+        // all three (case_fold / whitespace / unicode) were always built
+        // even when the user disabled some via PerValueStageSet. For
+        // diabetes-130-style columns with hundreds of distinct codes
+        // each, that's hundreds of BTreeSet allocations per skipped stage.
+        let case_fold_groups = if cfg.stages.case_fold {
+            group_by(&counts, |s| s.to_lowercase())
+        } else {
+            BTreeMap::new()
+        };
+        let whitespace_groups = if cfg.stages.whitespace_punct {
+            group_by(&counts, |s| {
+                normalize_whitespace_punct(s, cfg.trim_terminal_chars)
+            })
+        } else {
+            BTreeMap::new()
+        };
+        let unicode_groups = if cfg.stages.unicode_normalize {
+            group_by(&counts, |s| strip_combining_marks(s))
+        } else {
+            BTreeMap::new()
+        };
+        // Hoist the rare-stage "is any value above threshold?" check —
+        // it's a column-invariant predicate but the inner per-value loop
+        // was re-computing it for every (count >= threshold) probe.
+        let any_above_threshold = counts.values().any(|c| *c >= cfg.rare_threshold);
 
         for (original, &count) in &counts {
             let stages = lineage_stages_for(
                 original,
                 count,
-                &counts,
+                any_above_threshold,
                 cfg,
                 &case_fold_groups,
                 &whitespace_groups,
@@ -292,14 +312,28 @@ pub fn trace_value(
         });
     }
     let count = *counts.get(value)?;
-    let case_fold_groups = group_by(&counts, |s| s.to_lowercase());
-    let whitespace_groups =
-        group_by(&counts, |s| normalize_whitespace_punct(s, cfg.trim_terminal_chars));
-    let unicode_groups = group_by(&counts, |s| strip_combining_marks(s));
+    // v0.7+ deep-dive perf-fix: skip group materialisation for any
+    // disabled stage — same change applied in build_per_value_lineage.
+    let case_fold_groups = if cfg.stages.case_fold {
+        group_by(&counts, |s| s.to_lowercase())
+    } else {
+        BTreeMap::new()
+    };
+    let whitespace_groups = if cfg.stages.whitespace_punct {
+        group_by(&counts, |s| normalize_whitespace_punct(s, cfg.trim_terminal_chars))
+    } else {
+        BTreeMap::new()
+    };
+    let unicode_groups = if cfg.stages.unicode_normalize {
+        group_by(&counts, |s| strip_combining_marks(s))
+    } else {
+        BTreeMap::new()
+    };
+    let any_above_threshold = counts.values().any(|c| *c >= cfg.rare_threshold);
     let stages = lineage_stages_for(
         value,
         count,
-        &counts,
+        any_above_threshold,
         cfg,
         &case_fold_groups,
         &whitespace_groups,
@@ -314,10 +348,16 @@ pub fn trace_value(
 
 /// Compute the lineage stages list for a single value. Shared between
 /// `build_per_value_lineage` and `trace_value`.
+///
+/// `any_above_threshold` is the precomputed answer to "is at least one
+/// value in the column above the rare threshold?" — the rare-candidate
+/// stage only fires when both `count < threshold` and at least one
+/// other value clears the threshold. Hoisting this out of the per-value
+/// loop turns O(values × distinct) into O(distinct).
 fn lineage_stages_for(
     original: &str,
     count: u64,
-    counts: &BTreeMap<String, u64>,
+    any_above_threshold: bool,
     cfg: &PerValueLineageConfig,
     case_fold_groups: &BTreeMap<String, BTreeSet<String>>,
     whitespace_groups: &BTreeMap<String, BTreeSet<String>>,
@@ -384,10 +424,7 @@ fn lineage_stages_for(
     // self; tag-only). Emitted when count < threshold and the column
     // has at least one value with count >= threshold (otherwise every
     // value is rare and the tag isn't useful).
-    if cfg.stages.rare_candidate
-        && count < cfg.rare_threshold
-        && counts.values().any(|c| *c >= cfg.rare_threshold)
-    {
+    if cfg.stages.rare_candidate && count < cfg.rare_threshold && any_above_threshold {
         stages.push(LineageStage {
             transform: ValueTransform::RareCandidate {
                 count,

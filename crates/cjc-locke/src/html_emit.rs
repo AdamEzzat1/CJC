@@ -138,14 +138,29 @@ fn push_correlation_matrix(s: &mut String, df: &DataFrame) {
         push_escaped(s, name);
         s.push_str("</text>\n");
     }
+    // v0.7+ deep-dive perf-fix: Pearson is symmetric (r(i,j) = r(j,i))
+    // but the previous code computed every (i,j) cell, including the
+    // lower triangle — half the work was redundant. For a 30-column ×
+    // 30K-row dataset (diabetes-130 magnitude), that's ~450 wasted
+    // Pearson computations per HTML emit, each ~30K Kahan adds.
+    //
+    // Compute the upper triangle once into a flat Vec indexed by i*n+j,
+    // then look up symmetrically when rendering. Pearson at (i,i) is 1.0
+    // by definition (skip the computation).
+    let mut r_cache: Vec<f64> = vec![0.0; n * n];
+    for i in 0..n {
+        r_cache[i * n + i] = 1.0;
+        for j in (i + 1)..n {
+            let r = crate::stats::pearson_correlation(&numeric[i].1, &numeric[j].1)
+                .unwrap_or(0.0);
+            r_cache[i * n + j] = r;
+            r_cache[j * n + i] = r; // symmetric
+        }
+    }
     // Cells.
     for i in 0..n {
         for j in 0..n {
-            let r = if i == j {
-                1.0
-            } else {
-                crate::stats::pearson_correlation(&numeric[i].1, &numeric[j].1).unwrap_or(0.0)
-            };
+            let r = r_cache[i * n + j];
             let abs_r = r.abs();
             // Color: white at |r|=0, deep red at |r|=1. Use sign hue.
             let (hue, sat, lightness) = if r >= 0.0 {
@@ -159,7 +174,18 @@ fn push_correlation_matrix(s: &mut String, df: &DataFrame) {
                 "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"hsl({}, {}%, {}%)\" stroke=\"#eee\" stroke-width=\"0.5\">",
                 x, y, cell, cell, hue, sat, lightness
             ));
-            s.push_str(&format!("<title>{} vs {}: r = {:.3}</title>", numeric[i].0, numeric[j].0, r));
+            // v0.7+ deep-dive bug-fix: previously column names were
+            // emitted into the <title> tooltip without HTML-escaping.
+            // A DataFrame column named e.g. "<script>alert(1)</script>"
+            // would land literal markup inside SVG (low actual XSS risk
+            // because <title> in SVG is tooltip-only in browsers, but it
+            // violates the push_escaped contract documented elsewhere
+            // in this file).
+            s.push_str("<title>");
+            push_escaped(s, &numeric[i].0);
+            s.push_str(" vs ");
+            push_escaped(s, &numeric[j].0);
+            s.push_str(&format!(": r = {:.3}</title>", r));
             s.push_str("</rect>\n");
             // r-value text for high |r|.
             if abs_r > 0.5 {

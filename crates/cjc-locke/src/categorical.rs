@@ -180,8 +180,12 @@ pub fn detect_rare_categories(
         let total_rare_rows: u64 = rares.iter().map(|(_, c)| *c).sum();
         let rare_share = total_rare_rows as f64 / n_rows as f64;
         // Show up to 5 sample rare categories, sorted ascending by count.
+        // v0.7+ deep-dive perf-fix: the previous version collected twice
+        // (`.collect::<Vec<_>>().into_iter().map(...).collect()`) — a
+        // copy-paste-refactor leftover that built an intermediate Vec for
+        // no semantic reason. Direct collect saves one allocation per call.
         let mut sample: Vec<(&&String, &u64)> =
-            rares.iter().map(|(k, c)| (k, c)).collect::<Vec<_>>().into_iter().map(|(k, c)| (k, c)).collect();
+            rares.iter().map(|(k, c)| (k, c)).collect();
         sample.sort_by(|a, b| (a.1, a.0).cmp(&(b.1, b.0)));
         let sample_str = sample
             .iter()

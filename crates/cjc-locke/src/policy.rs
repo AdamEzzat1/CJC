@@ -521,11 +521,22 @@ pub fn apply_policy(report: &LockeReport, policy: &Policy) -> PolicyResult {
         })
         .collect();
 
+    // v0.7+ deep-dive perf-fix: previously requirement evaluation was
+    // O(R × F) — for each of R requirements, walk all F remaining findings
+    // and count code matches. At the cluster's CI use case (hundreds of
+    // datasets × dozens of requirements × thousands of findings) that's
+    // millions of string comparisons per Locke run. Pre-aggregating once
+    // into a BTreeMap drops it to O(F + R log F), preserves determinism
+    // (BTreeMap iteration is sorted), and pays for itself at R≥3.
+    let mut code_counts: BTreeMap<&str, u64> = BTreeMap::new();
+    for f in &remaining {
+        *code_counts.entry(f.code).or_insert(0) += 1;
+    }
     let requirements: Vec<RequirementResult> = policy
         .requirements
         .iter()
         .map(|req| {
-            let observed = remaining.iter().filter(|f| f.code == req.code).count() as u64;
+            let observed = code_counts.get(req.code.as_str()).copied().unwrap_or(0);
             let satisfied = req.operator.evaluate(observed, req.threshold);
             RequirementResult {
                 code: req.code.clone(),

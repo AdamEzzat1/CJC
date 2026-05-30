@@ -475,15 +475,25 @@ pub fn detect_missingness(
         match col {
             Column::Float(v) => {
                 let nan_n = nan_count(v);
-                // Union of NaN positions and mask positions.
+                // v0.7+ deep-dive perf-fix: previously this branch built a
+                // BTreeSet<usize> of every NaN row index just to count its
+                // size — O(n log n) inserts + O(n) memory for a single
+                // u64 result. For a 90%-NaN column with masking, that was
+                // 0.9n usize entries allocated and dropped immediately.
+                //
+                // The mask `null_rows` is a BTreeSet<usize>, so we can
+                // compute the union count with a single column walk +
+                // mask lookup, no intermediate set allocation.
                 let n_miss = if let Some(m) = mask {
-                    let mut s: BTreeSet<usize> = (0..v.len()).filter(|i| v[*i].is_nan()).collect();
-                    for r in &m.null_rows {
-                        if *r < v.len() {
-                            s.insert(*r);
+                    let mut count = 0u64;
+                    for (i, x) in v.iter().enumerate() {
+                        // Count row i as missing if either NaN or
+                        // present in the mask (mask lookup is O(log m)).
+                        if x.is_nan() || m.null_rows.contains(&i) {
+                            count += 1;
                         }
                     }
-                    s.len() as u64
+                    count
                 } else {
                     nan_n
                 };
