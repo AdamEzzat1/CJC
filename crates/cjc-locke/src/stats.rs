@@ -215,6 +215,130 @@ pub fn sort_filter_nan(xs: &[f64]) -> Vec<f64> {
     v
 }
 
+/// KS-D computed directly from sorted count maps — no sample
+/// materialisation, no sort.
+///
+/// **Why**: text-drift and any other discrete-multiplicity workflow
+/// stores its sample as `BTreeMap<K, count>` (key → multiplicity).
+/// The pre-v0.7+ path expanded that map into a `Vec<f64>` of size
+/// `n_samples` then sorted it — at 1M tokens that's 8 MB of heap +
+/// O(N log N) sort cost, both thrown away after the KS-D number is
+/// computed. Walking the two `BTreeMap` iterators in lockstep gives
+/// the same D-statistic in O(V_a + V_b) time and zero extra heap.
+///
+/// **Byte-identity**: produces the same `f64` as
+/// `ks_d_statistic_sorted` on the equivalent materialised + sorted
+/// samples. BTreeMap iteration is already sorted by `K`, so the
+/// "next distinct break-x" walk is the same construction.
+/// KS-D under "chain-iter" key ordering: walk `a`'s sorted keys
+/// first (accumulating both `a` and `b` counts for each), then walk
+/// `b`'s sorted keys that aren't in `a` (accumulating `b` only).
+///
+/// Why this exists: the E9112 language-distribution detector
+/// historically assigned 3-gram indices via this exact chain (train
+/// keys first, then test-only keys) and computed KS-D against the
+/// resulting integer ordering. That ordering is NOT the natural
+/// lexicographic order on 3-grams — it biases the metric toward
+/// "vocabulary disjointness." Preserving that behaviour is a
+/// byte-identity contract for the E9112 detector; switching to natural
+/// sort silently shifts every E9112 threshold crossing.
+///
+/// For ordinary discrete KS-D where natural sort is the intended
+/// support, use `ks_d_from_counts` instead.
+pub fn ks_d_from_counts_chain_ordered<K: Ord>(
+    a: &std::collections::BTreeMap<K, u64>,
+    b: &std::collections::BTreeMap<K, u64>,
+) -> Option<f64> {
+    let n_a: u64 = a.values().sum();
+    let n_b: u64 = b.values().sum();
+    if n_a < 2 || n_b < 2 {
+        return None;
+    }
+    let n_a_f = n_a as f64;
+    let n_b_f = n_b as f64;
+    let mut cum_a: u64 = 0;
+    let mut cum_b: u64 = 0;
+    let mut d_max: f64 = 0.0;
+    for (k, &c_a) in a {
+        cum_a += c_a;
+        if let Some(&c_b) = b.get(k) {
+            cum_b += c_b;
+        }
+        let gap = (cum_a as f64 / n_a_f - cum_b as f64 / n_b_f).abs();
+        if gap > d_max {
+            d_max = gap;
+        }
+    }
+    for (k, &c_b) in b {
+        if a.contains_key(k) {
+            continue;
+        }
+        cum_b += c_b;
+        let gap = (cum_a as f64 / n_a_f - cum_b as f64 / n_b_f).abs();
+        if gap > d_max {
+            d_max = gap;
+        }
+    }
+    Some(d_max)
+}
+
+pub fn ks_d_from_counts<K: Ord + Clone>(
+    a: &std::collections::BTreeMap<K, u64>,
+    b: &std::collections::BTreeMap<K, u64>,
+) -> Option<f64> {
+    let n_a: u64 = a.values().sum();
+    let n_b: u64 = b.values().sum();
+    if n_a < 2 || n_b < 2 {
+        return None;
+    }
+    let n_a_f = n_a as f64;
+    let n_b_f = n_b as f64;
+
+    let mut iter_a = a.iter().peekable();
+    let mut iter_b = b.iter().peekable();
+    let mut cum_a: u64 = 0;
+    let mut cum_b: u64 = 0;
+    let mut d_max: f64 = 0.0;
+
+    loop {
+        let next_key: K = match (iter_a.peek(), iter_b.peek()) {
+            (Some((ka, _)), Some((kb, _))) => {
+                if ka <= kb {
+                    (*ka).clone()
+                } else {
+                    (*kb).clone()
+                }
+            }
+            (Some((ka, _)), None) => (*ka).clone(),
+            (None, Some((kb, _))) => (*kb).clone(),
+            (None, None) => break,
+        };
+        while let Some((k, c)) = iter_a.peek() {
+            if **k == next_key {
+                cum_a += **c;
+                iter_a.next();
+            } else {
+                break;
+            }
+        }
+        while let Some((k, c)) = iter_b.peek() {
+            if **k == next_key {
+                cum_b += **c;
+                iter_b.next();
+            } else {
+                break;
+            }
+        }
+        let f_a = cum_a as f64 / n_a_f;
+        let f_b = cum_b as f64 / n_b_f;
+        let gap = (f_a - f_b).abs();
+        if gap > d_max {
+            d_max = gap;
+        }
+    }
+    Some(d_max)
+}
+
 /// KS-D computed from pre-sorted, NaN-free inputs. Identical contract
 /// to [`ks_d_statistic`] but skips the filter+sort step — callers
 /// computing multiple sorted-input metrics (KS + Wasserstein) avoid

@@ -42,7 +42,6 @@ use std::collections::BTreeMap;
 use cjc_data::{Column, DataFrame};
 
 use crate::report::{FindingEvidence, FindingSeverity, ValidationFinding};
-use crate::stats::ks_d_statistic;
 use crate::tokenizer::{Tokenizer, TokenizerTrainConfig};
 
 // ─── Config ───────────────────────────────────────────────────────────────
@@ -95,6 +94,13 @@ impl Default for TextDriftConfig {
 /// Concatenate a column's string values, returning `None` for
 /// non-string columns. The detector layer requires text columns;
 /// numeric columns are skipped silently.
+///
+/// v0.7+ B6.4: the `CategoricalAdaptive` arm used to call
+/// `String::from_utf8_lossy(bytes).into_owned()` per row — one heap
+/// allocation per cell, then `Vec<String>` join. On a 1M-row column
+/// with a 100-entry dictionary that's 1M unnecessary allocations.
+/// The fixed path pre-decodes each dict entry once (V allocations,
+/// not N) and pushes by reference into a pre-sized buffer.
 fn concat_str_values(col: &Column) -> Option<String> {
     match col {
         Column::Str(v) => Some(v.join("\n")),
@@ -108,15 +114,41 @@ fn concat_str_values(col: &Column) -> Option<String> {
         ),
         Column::CategoricalAdaptive(cc) => {
             let dict = cc.dictionary();
-            let parts: Vec<String> = cc
-                .codes()
-                .iter()
-                .filter_map(|c| {
-                    dict.get(c)
-                        .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
-                })
-                .collect();
-            Some(parts.join("\n"))
+            // Pre-decode each *unique* code that appears. The codes()
+            // iterator yields u64 per row; the BTreeMap caches the
+            // lossy-UTF8 conversion so each dict entry is decoded at
+            // most once regardless of the column's row count.
+            let mut decoded: BTreeMap<u64, String> = BTreeMap::new();
+            let codes: Vec<u64> = cc.codes().iter().collect();
+            for &code in &codes {
+                if !decoded.contains_key(&code) {
+                    if let Some(bytes) = dict.get(code) {
+                        decoded
+                            .insert(code, String::from_utf8_lossy(bytes).into_owned());
+                    }
+                }
+            }
+            // Compute exact final length so push_str never reallocs.
+            // +1 per separator newline (we have len-1 separators for
+            // `len` segments, but +1 for the absent codes is harmless
+            // upper-bound — over-alloc is fine, under-alloc would
+            // matter).
+            let mut total: usize = 0;
+            for code in &codes {
+                if let Some(s) = decoded.get(code) {
+                    total += s.len() + 1;
+                }
+            }
+            let mut out = String::with_capacity(total);
+            for (i, code) in codes.iter().enumerate() {
+                if i > 0 {
+                    out.push('\n');
+                }
+                if let Some(s) = decoded.get(code) {
+                    out.push_str(s);
+                }
+            }
+            Some(out)
         }
         _ => None,
     }
@@ -130,18 +162,6 @@ fn token_freqs(tokenizer: &Tokenizer, text: &str) -> BTreeMap<u32, u64> {
         *freqs.entry(id).or_insert(0) += 1;
     }
     freqs
-}
-
-/// Expand a frequency map into a sample vector: each key repeats its
-/// count times. Used as the input to `ks_d_statistic`. Token IDs are
-/// cast to `f64` (lossless for `u32`).
-fn samples_from_freqs(freqs: &BTreeMap<u32, u64>) -> Vec<f64> {
-    let total: u64 = freqs.values().sum();
-    let mut out = Vec::with_capacity(total as usize);
-    for (&id, &c) in freqs {
-        out.extend(std::iter::repeat(id as f64).take(c as usize));
-    }
-    out
 }
 
 /// Shannon entropy (in nats) over the values of a frequency map.
@@ -166,33 +186,28 @@ fn shannon_entropy(freqs: &BTreeMap<u32, u64>) -> f64 {
 /// Build a character-3-gram frequency map for the input. Iterates over
 /// Unicode scalars (NOT bytes) so multi-byte characters count as one
 /// position. Empty / single-/double-char inputs produce an empty map.
+///
+/// v0.7+ B6.2: previously collected the entire string into a
+/// `Vec<char>` (4 bytes per char × 10⁶ chars = 40 MB on a long
+/// document). The ring-buffer rewrite below keeps three `char`s of
+/// state and walks the lazy `chars()` iterator once — same windows,
+/// same counts, byte-identical output.
 fn char_3gram_freqs(text: &str) -> BTreeMap<(char, char, char), u64> {
-    let chars: Vec<char> = text.chars().collect();
     let mut freqs: BTreeMap<(char, char, char), u64> = BTreeMap::new();
-    if chars.len() < 3 {
-        return freqs;
-    }
-    for w in chars.windows(3) {
-        *freqs.entry((w[0], w[1], w[2])).or_insert(0) += 1;
+    let mut iter = text.chars();
+    let (a, b, c) = match (iter.next(), iter.next(), iter.next()) {
+        (Some(a), Some(b), Some(c)) => (a, b, c),
+        _ => return freqs,
+    };
+    let (mut a, mut b, mut c) = (a, b, c);
+    *freqs.entry((a, b, c)).or_insert(0) += 1;
+    for next in iter {
+        a = b;
+        b = c;
+        c = next;
+        *freqs.entry((a, b, c)).or_insert(0) += 1;
     }
     freqs
-}
-
-/// Map character 3-grams into integer indices via a sorted union.
-/// Index = position in the sorted union (BTreeSet-equivalent). Used to
-/// convert 3-gram frequency maps into f64 sample vectors for KS-D.
-fn samples_from_char_3gram_freqs(
-    freqs: &BTreeMap<(char, char, char), u64>,
-    index_map: &BTreeMap<(char, char, char), u32>,
-) -> Vec<f64> {
-    let total: u64 = freqs.values().sum();
-    let mut out = Vec::with_capacity(total as usize);
-    for (gram, &c) in freqs {
-        if let Some(&idx) = index_map.get(gram) {
-            out.extend(std::iter::repeat(idx as f64).take(c as usize));
-        }
-    }
-    out
 }
 
 // ─── Per-column detectors ────────────────────────────────────────────────
@@ -215,11 +230,24 @@ pub fn detect_vocabulary_ks_drift_on_column(
     // Combined-corpus tokenizer: shared vocab so train + test produce
     // comparable token IDs.
     let tokenizer = Tokenizer::train(&[train_text, test_text], &cfg.tokenizer);
-    let train_freqs = token_freqs(&tokenizer, train_text);
-    let test_freqs = token_freqs(&tokenizer, test_text);
-    let train_samples = samples_from_freqs(&train_freqs);
-    let test_samples = samples_from_freqs(&test_freqs);
-    let ks_d = ks_d_statistic(&train_samples, &test_samples)?;
+    detect_vocabulary_ks_drift_with_tokenizer(column, train_text, test_text, &tokenizer, cfg)
+}
+
+/// E9110 implementation that accepts a pre-trained tokenizer. Used by
+/// [`detect_text_drift`] to amortise training across the E9110 + E9111
+/// detectors that both need the same vocabulary (B6.3).
+pub fn detect_vocabulary_ks_drift_with_tokenizer(
+    column: &str,
+    train_text: &str,
+    test_text: &str,
+    tokenizer: &Tokenizer,
+    cfg: &TextDriftConfig,
+) -> Option<ValidationFinding> {
+    let train_freqs = token_freqs(tokenizer, train_text);
+    let test_freqs = token_freqs(tokenizer, test_text);
+    // v0.7+ B6.1: walk the count maps directly instead of materialising
+    // the multiplicity-expanded sample vector. Byte-identical D.
+    let ks_d = crate::stats::ks_d_from_counts(&train_freqs, &test_freqs)?;
     if ks_d < cfg.vocab_ks_warn {
         return None;
     }
@@ -284,8 +312,20 @@ pub fn detect_token_entropy_drift_on_column(
         return None;
     }
     let tokenizer = Tokenizer::train(&[train_text, test_text], &cfg.tokenizer);
-    let train_freqs = token_freqs(&tokenizer, train_text);
-    let test_freqs = token_freqs(&tokenizer, test_text);
+    detect_token_entropy_drift_with_tokenizer(column, train_text, test_text, &tokenizer, cfg)
+}
+
+/// E9111 implementation that accepts a pre-trained tokenizer. Used by
+/// [`detect_text_drift`] to amortise training across both E9110 + E9111.
+pub fn detect_token_entropy_drift_with_tokenizer(
+    column: &str,
+    train_text: &str,
+    test_text: &str,
+    tokenizer: &Tokenizer,
+    cfg: &TextDriftConfig,
+) -> Option<ValidationFinding> {
+    let train_freqs = token_freqs(tokenizer, train_text);
+    let test_freqs = token_freqs(tokenizer, test_text);
     let h_train = shannon_entropy(&train_freqs);
     let h_test = shannon_entropy(&test_freqs);
     let delta = (h_train - h_test).abs();
@@ -352,21 +392,27 @@ pub fn detect_language_distribution_shift_on_column(
     if train_freqs.is_empty() || test_freqs.is_empty() {
         return None;
     }
-    // Build sorted union → indices.
-    let mut union: BTreeMap<(char, char, char), u32> = BTreeMap::new();
-    let mut next_idx: u32 = 0;
-    for gram in train_freqs.keys().chain(test_freqs.keys()) {
-        if !union.contains_key(gram) {
-            union.insert(*gram, next_idx);
-            next_idx += 1;
-        }
-    }
-    let train_samples = samples_from_char_3gram_freqs(&train_freqs, &union);
-    let test_samples = samples_from_char_3gram_freqs(&test_freqs, &union);
-    let ks_d = ks_d_statistic(&train_samples, &test_samples)?;
+    // v0.7+ B6.1: walk the count maps directly. The old code assigned
+    // sorted indices via a `union` map (train keys first, then
+    // test-only keys) then expanded into a multiplicity Vec<f64>. The
+    // resulting D was effectively measured against that chain-iter
+    // ordering — biased toward "vocabulary disjointness." We preserve
+    // that semantic via `ks_d_from_counts_chain_ordered`, which walks
+    // the two maps in the same chain order without materialising. For
+    // ordinary natural-sorted KS-D (used by E9110 over token IDs), see
+    // `ks_d_from_counts`.
+    let ks_d = crate::stats::ks_d_from_counts_chain_ordered(&train_freqs, &test_freqs)?;
     if ks_d < cfg.char_3gram_ks_warn {
         return None;
     }
+    // The evidence still surfaces the union cardinality. Compute it
+    // cheaply without materialising a key→index map by deduping into a
+    // BTreeSet view of the chained keys.
+    let n_union_distinct: u64 = train_freqs
+        .keys()
+        .chain(test_freqs.keys())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len() as u64;
     let severity = if ks_d >= cfg.char_3gram_ks_error {
         FindingSeverity::Error
     } else {
@@ -396,7 +442,7 @@ pub fn detect_language_distribution_shift_on_column(
             },
             FindingEvidence::Count {
                 label: "n_union_distinct_3grams".into(),
-                value: union.len() as u64,
+                value: n_union_distinct,
             },
         ],
         (train_freqs.values().sum::<u64>() + test_freqs.values().sum::<u64>()),
@@ -440,15 +486,32 @@ pub fn detect_text_drift(
             Some(s) => s,
             None => continue,
         };
-        if let Some(f) =
-            detect_vocabulary_ks_drift_on_column(name, &train_text, &test_text, cfg)
-        {
-            out.push(f);
-        }
-        if let Some(f) =
-            detect_token_entropy_drift_on_column(name, &train_text, &test_text, cfg)
-        {
-            out.push(f);
+        // v0.7+ B6.3: previously each of the three detectors trained
+        // its own copy of the BPE tokenizer on (train + test) — that's
+        // two redundant trainings per column (the language detector
+        // doesn't need a tokenizer). Train once here, hand both E9110
+        // and E9111 the same instance via the `_with_tokenizer`
+        // helpers. Byte-identical output because the tokenizer build
+        // is deterministic (proptest-locked).
+        let min_chars = cfg.min_chars_per_side;
+        let train_chars = train_text.chars().count();
+        let test_chars = test_text.chars().count();
+        let tokenizer = if train_chars >= min_chars && test_chars >= min_chars {
+            Some(Tokenizer::train(&[&train_text, &test_text], &cfg.tokenizer))
+        } else {
+            None
+        };
+        if let Some(tk) = tokenizer.as_ref() {
+            if let Some(f) =
+                detect_vocabulary_ks_drift_with_tokenizer(name, &train_text, &test_text, tk, cfg)
+            {
+                out.push(f);
+            }
+            if let Some(f) =
+                detect_token_entropy_drift_with_tokenizer(name, &train_text, &test_text, tk, cfg)
+            {
+                out.push(f);
+            }
         }
         if let Some(f) =
             detect_language_distribution_shift_on_column(name, &train_text, &test_text, cfg)
