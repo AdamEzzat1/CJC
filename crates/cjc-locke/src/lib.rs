@@ -91,8 +91,9 @@ pub use causal::{
 pub use drift::{compare, wasserstein_1, DriftConfig, InductionRiskReport};
 pub use id::{FingerprintId, IdDomain};
 pub use lineage::{
-    emit_lineage_mermaid, emit_lineage_text, AuditEvent, ImpressionKind, LineageBuilder,
-    LineageEdge, LineageGraph, LineageNode, LockeIdea, LockeImpression, TransformationRecord,
+    emit_lineage_mermaid, emit_lineage_text, AuditEvent, AuditMonotonicError, ImpressionKind,
+    LineageBuilder, LineageEdge, LineageGraph, LineageNode, LockeIdea, LockeImpression,
+    TransformationRecord,
 };
 pub use per_value_lineage::{
     build_per_value_lineage, emit_value_trace_text, trace_value, LineageStage,

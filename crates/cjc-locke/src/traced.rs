@@ -253,6 +253,14 @@ impl<'a> TracedDataFrame<'a> {
         let mut params = BTreeMap::new();
         params.insert("kind".into(), kind.into());
         params.insert("on".into(), on.join(","));
+        // v0.7+ B5.1 fix: `LockeIdea::new` sorts `parents` before fingerprinting,
+        // which is correct for n-ary commutative ops but loses the
+        // `parent_a` / `parent_b` distinction for binary joins. Encoding the
+        // parent IDs as ordered params keeps the join non-commutative at the
+        // identity level — `L LEFT JOIN R` and `R LEFT JOIN L` now produce
+        // distinct IDs.
+        params.insert("parent_a".into(), format!("{}", parent_a));
+        params.insert("parent_b".into(), format!("{}", parent_b));
         let xform = TransformationRecord {
             op_id: "join".into(),
             params,
@@ -286,6 +294,12 @@ impl<'a> TracedDataFrame<'a> {
         let new_df = f(&self.df, &other_df);
         let mut params = BTreeMap::new();
         params.insert("axis".into(), "col".into());
+        // B5.1 fix: see `join` above. `bind_cols` is column-wise binary
+        // concat; column-order matters to schema, so the result of
+        // `A.bind_cols(B)` differs from `B.bind_cols(A)` in the produced
+        // dataframe and must differ at the identity level.
+        params.insert("parent_a".into(), format!("{}", parent_a));
+        params.insert("parent_b".into(), format!("{}", parent_b));
         let xform = TransformationRecord {
             op_id: "bind_cols".into(),
             params,
@@ -326,6 +340,11 @@ impl<'a> TracedDataFrame<'a> {
             "axis".into(),
             "row".into(), // v0.2 default; future overload for column concat
         );
+        // B5.1 fix: see `join` above. `A.concat(B)` produces a row-stacked
+        // frame with A on top of B; reversing the order produces a different
+        // frame, so the identity must reflect it.
+        params.insert("parent_a".into(), format!("{}", parent_a));
+        params.insert("parent_b".into(), format!("{}", parent_b));
         let xform = TransformationRecord {
             op_id: "concat".into(),
             params,
@@ -536,6 +555,83 @@ mod tests {
             .filter(|n| matches!(n, crate::lineage::LineageNode::Impression(_)))
             .count();
         assert_eq!(imp_count, 2);
+    }
+
+    // ─── B5.1 regression: binary-op parent-order asymmetry ─────────────
+
+    /// Pin the post-fix behaviour: a binary op (join / bind_cols /
+    /// concat) produces distinct LockeIdea IDs when its parents are
+    /// swapped. Pre-fix the `LockeIdea::new` sort-parents step caused
+    /// `(parent_a, parent_b)` and `(parent_b, parent_a)` to collide,
+    /// because no `transform.params` entry carried the ordering.
+    /// Post-fix the traced binary ops insert `parent_a` and `parent_b`
+    /// into `params` BEFORE constructing the idea — order shows up in
+    /// `TransformationRecord::fingerprint` so the IDs diverge.
+    #[test]
+    fn binary_op_id_encodes_parent_order_after_b5_1_fix() {
+        use crate::lineage::{LockeIdea, TransformationRecord};
+        use crate::FingerprintId;
+
+        // Build two ideas with the SAME op_id + parent set but the
+        // parent_a/parent_b params swapped — the shape of `traced::join`
+        // post-fix.
+        fn make_join_idea(parent_a: FingerprintId, parent_b: FingerprintId) -> LockeIdea {
+            let mut params = BTreeMap::new();
+            params.insert("kind".into(), "inner".into());
+            params.insert("on".into(), "key".into());
+            params.insert("parent_a".into(), format!("{}", parent_a));
+            params.insert("parent_b".into(), format!("{}", parent_b));
+            let xform = TransformationRecord {
+                op_id: "join".into(),
+                params,
+                seed: None,
+            };
+            LockeIdea::new("join", xform, vec![parent_a, parent_b])
+        }
+
+        let p1 = FingerprintId(0xAAAA_BBBB_CCCC_DDDD);
+        let p2 = FingerprintId(0x1111_2222_3333_4444);
+        let idea_ab = make_join_idea(p1, p2);
+        let idea_ba = make_join_idea(p2, p1);
+        assert_ne!(
+            idea_ab.id, idea_ba.id,
+            "binary-op ID must encode parent order (B5.1 regression)",
+        );
+        // The parent sets ARE equal under sort, so the fix is the params
+        // encoding, not the parent list.
+        assert_eq!(idea_ab.parents, idea_ba.parents);
+    }
+
+    /// Symmetric op: a hypothetical n-ary commutative op (no parent_a /
+    /// parent_b in params) MUST still collide on swapped parents, because
+    /// `LockeIdea::new` sorts the parent list. This pins the orthogonal
+    /// guarantee — fix only affects ops that opt in via params.
+    #[test]
+    fn n_ary_op_id_unchanged_when_parents_swap() {
+        use crate::lineage::{LockeIdea, TransformationRecord};
+        use crate::FingerprintId;
+
+        fn make_union_idea(parents: Vec<FingerprintId>) -> LockeIdea {
+            let mut params = BTreeMap::new();
+            params.insert("op".into(), "union".into());
+            // Intentionally no parent_a / parent_b — commutative.
+            let xform = TransformationRecord {
+                op_id: "union".into(),
+                params,
+                seed: None,
+            };
+            LockeIdea::new("union", xform, parents)
+        }
+
+        let p1 = FingerprintId(0x100);
+        let p2 = FingerprintId(0x200);
+        let p3 = FingerprintId(0x300);
+        let idea_123 = make_union_idea(vec![p1, p2, p3]);
+        let idea_321 = make_union_idea(vec![p3, p2, p1]);
+        assert_eq!(
+            idea_123.id, idea_321.id,
+            "commutative ops must still collide under parent-swap",
+        );
     }
 }
 

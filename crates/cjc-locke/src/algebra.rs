@@ -512,6 +512,69 @@ mod tests {
         assert!(eq_componentwise(&chained, &many, 1e-12));
     }
 
+    // ── B5.4: cascade-floor for the drift axis ──────────────────────
+
+    /// Pin the meet-semilattice contract that the [`api::validate_and_compare`]
+    /// doc references: when a caller stitches together repeated
+    /// `(train, test_i)` comparisons by composing the resulting belief
+    /// scores under `all_min`, the drift axis monotonically floors to
+    /// the worst observed value. It does NOT recover when a subsequent
+    /// comparison is less alarming.
+    #[test]
+    fn cascade_drift_axis_floors_monotonically() {
+        let rules = BeliefAxisRules::default();
+        let initial = bs(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
+        // First comparison: drift_score = 0.6
+        let first_partial = bs(1.0, 1.0, 0.6, 1.0, 1.0, 1.0, 1.0, 1.0);
+        let after_first = compose(&initial, &first_partial, &rules);
+        assert!((after_first.drift_score - 0.6).abs() < 1e-12);
+        // Second comparison reports BETTER drift (0.7). The min floors
+        // it at 0.6 — drift axis does NOT recover.
+        let second_partial = bs(1.0, 1.0, 0.7, 1.0, 1.0, 1.0, 1.0, 1.0);
+        let after_second = compose(&after_first, &second_partial, &rules);
+        assert!(
+            (after_second.drift_score - 0.6).abs() < 1e-12,
+            "drift axis must floor under cascade, not recover: got {}",
+            after_second.drift_score,
+        );
+        // Third comparison reports WORSE drift (0.4). The floor drops.
+        let third_partial = bs(1.0, 1.0, 0.4, 1.0, 1.0, 1.0, 1.0, 1.0);
+        let after_third = compose(&after_second, &third_partial, &rules);
+        assert!((after_third.drift_score - 0.4).abs() < 1e-12);
+        // Non-drift axes preserved from `initial` since every partial
+        // sets them to 1.0.
+        assert!((after_third.schema_score - 1.0).abs() < 1e-12);
+        assert!((after_third.leakage_score - 1.0).abs() < 1e-12);
+    }
+
+    /// Companion to the above: under `compose_many` the cascade-floor
+    /// produces the same result as a single-pass min across the chain.
+    #[test]
+    fn cascade_drift_axis_floor_matches_compose_many_min() {
+        let rules = BeliefAxisRules::default();
+        let initial = bs(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
+        let drift_partials = [
+            bs(1.0, 1.0, 0.7, 1.0, 1.0, 1.0, 1.0, 1.0),
+            bs(1.0, 1.0, 0.4, 1.0, 1.0, 1.0, 1.0, 1.0),
+            bs(1.0, 1.0, 0.6, 1.0, 1.0, 1.0, 1.0, 1.0),
+            bs(1.0, 1.0, 0.5, 1.0, 1.0, 1.0, 1.0, 1.0),
+        ];
+        // Pairwise chain
+        let mut chained = initial.clone();
+        for p in &drift_partials {
+            chained = compose(&chained, p, &rules);
+        }
+        // compose_many over the same sequence (including initial)
+        let mut all = vec![initial];
+        all.extend(drift_partials.iter().cloned());
+        let many = compose_many(&all, &rules).unwrap();
+        // Both must produce drift = 0.4 (the worst).
+        assert!((chained.drift_score - 0.4).abs() < 1e-12);
+        assert!((many.drift_score - 0.4).abs() < 1e-12);
+        // And bit-equal to each other on every axis.
+        assert!(eq_componentwise(&chained, &many, 1e-12));
+    }
+
     #[test]
     fn compose_many_arithmetic_averages_all_at_once() {
         let a = bs(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);

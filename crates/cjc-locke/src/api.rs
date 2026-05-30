@@ -403,6 +403,22 @@ impl crate::report::SeverityCounts {
 /// axis is `drift_score` — byte-identical to the pre-migration path,
 /// but now traceable through the algebra. Proptest-locked in
 /// `tests/locke/locke_proptest.rs::validate_and_compare_drift_composition_is_byte_identical`.
+///
+/// **Cascade semantics (v0.7+ B5.4)**: the drift axis under the
+/// meet-semilattice algebra is **monotonically downward** — composing
+/// against another partial floor a previous value, it never recovers.
+/// `validate_and_compare` as written always starts from a fresh
+/// `belief_report_from_locke(val_report)`, so cascading happens only
+/// across separate calls *with the same train data* (different test
+/// data); each call independently rebuilds the train belief, so the
+/// drift axis does not chain through this API directly. Callers that
+/// stitch multiple `(train, test_i)` comparisons together by hand
+/// — `compose(prior_belief, new_compare_result.belief, all_min)` —
+/// will see the drift axis monotonically floor to the worst observed
+/// `drift_score` across the chain; that is the intended
+/// meet-semilattice contract, not a bug. See
+/// `tests/locke/locke_proptest.rs` and `algebra::tests` for the
+/// monotonicity laws.
 pub fn validate_and_compare(
     train: &DataFrame,
     test: &DataFrame,

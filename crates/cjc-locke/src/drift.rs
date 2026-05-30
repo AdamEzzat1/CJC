@@ -61,6 +61,15 @@ pub struct DriftConfig {
     /// Entropy shift skipped on columns with fewer than this many distinct
     /// categories in either side (too few levels to compute meaningful H).
     pub entropy_min_distinct: u64,
+    /// v0.7+ B5.3 fix: skip mean-drift emission when both `|train_mean|`
+    /// and `|test_mean|` are below this absolute threshold. Pre-fix the
+    /// `relative_shift` denominator was floored at `1e-12`, so a column
+    /// with mean ≈ 1e-15 and a tiny `1e-12` jitter produced a "1.0"
+    /// relative shift that fired E9030. Default `1e-9` covers ordinary
+    /// IEEE-754 noise on near-zero columns without blocking legitimate
+    /// drift on small-but-meaningful values. Set to `0.0` to restore
+    /// pre-fix behaviour (no skip).
+    pub mean_shift_near_zero_threshold: f64,
 }
 
 impl Default for DriftConfig {
@@ -81,6 +90,7 @@ impl Default for DriftConfig {
             cardinality_explosion_ratio: 2.0,
             entropy_shift_warn: 0.20,
             entropy_min_distinct: 3,
+            mean_shift_near_zero_threshold: 1e-9,
         }
     }
 }
@@ -150,6 +160,12 @@ fn psi_severity(score: f64, cfg: &DriftConfig) -> Option<FindingSeverity> {
     }
 }
 
+/// Magnitude of the shift from `a` to `b` relative to `|a|`. The
+/// denominator is floored at `1e-12` to avoid division by literal zero;
+/// callers that need protection against larger near-zero amplification
+/// should additionally guard via `DriftConfig::mean_shift_near_zero_threshold`
+/// (see [`numeric_drift_findings`]). Result is clamped at `1e6` to keep
+/// formatted finding messages readable.
 fn relative_shift(a: f64, b: f64) -> f64 {
     let denom = a.abs().max(1e-12);
     ((a - b).abs() / denom).min(1e6)
@@ -165,6 +181,15 @@ fn numeric_drift_findings(
     let (Some(t_mean), Some(s_mean)) = (train.mean, test.mean) else {
         return out;
     };
+    // v0.7+ B5.3: when both means are below the near-zero threshold,
+    // skip the mean-drift check entirely. The relative-shift formula's
+    // `1e-12` denominator floor amplifies sub-femto-scale jitter into
+    // a spurious "100% shift" that fires E9030 on noise. Cases above
+    // the threshold are evaluated identically to the pre-fix code.
+    let near_zero = cfg.mean_shift_near_zero_threshold;
+    if near_zero > 0.0 && t_mean.abs() < near_zero && s_mean.abs() < near_zero {
+        return out;
+    }
     let mean_shift = relative_shift(t_mean, s_mean);
     let mean_sev = if mean_shift >= cfg.mean_shift_error {
         FindingSeverity::Error

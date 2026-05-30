@@ -4,7 +4,8 @@
 //! min/max, NaN count, distinct-count sketch — as chunks arrive. After
 //! the final chunk, `into_report()` produces a `LockeReport` that is
 //! byte-identical to what a single-shot `validate(&full_df)` would
-//! produce, provided the chunk boundaries don't change.
+//! produce, provided **(a)** the chunk boundaries don't change and
+//! **(b)** the total row count fits within `StreamingConfig::sample_cap`.
 //!
 //! ## Determinism contract
 //!
@@ -18,6 +19,19 @@
 //!   row-canonical-bytes — this gives bit-identical dup counts but
 //!   O(n_rows) memory. For genuinely large inputs (≫ RAM), v0.4 plans
 //!   a deterministic count-min sketch fallback.
+//!
+//! ## Sample-cap caveat (v0.7+ B5.4 clarification)
+//!
+//! The byte-identity claim above breaks once any column's row count
+//! exceeds `StreamingConfig::sample_cap`. Past that point the sample
+//! Vec stops growing but the Welford / ECDF / dup-count state keeps
+//! accumulating. `into_report()` rebuilds a `DataFrame` from the
+//! **truncated** samples and runs `validate()` on that — every
+//! distribution-shaped finding (KS-style drift, near-constant
+//! detection, PSI bins) sees the truncated view. Running summaries
+//! produced via `streaming_summaries()` are unaffected and remain
+//! lossless. If you need exact per-finding fidelity above the cap,
+//! raise `sample_cap` or use single-shot `validate()`.
 //!
 //! ## When to use streaming vs single-shot
 //!
@@ -221,8 +235,11 @@ impl StreamingValidator {
     /// Finalize and produce a `LockeReport`.
     ///
     /// Determinism: produces a report byte-identical to a single-shot
-    /// `validate(&full_df, ...)` provided chunks are fed in the same
-    /// order as the full DataFrame's row order.
+    /// `validate(&full_df, ...)` provided **(a)** chunks are fed in the
+    /// same order as the full DataFrame's row order AND **(b)** no
+    /// column exceeded `StreamingConfig::sample_cap` — see the module
+    /// doc's "sample-cap caveat" section for the divergence when the
+    /// cap is hit.
     ///
     /// Implementation note: v0.3 finalizes by **reconstructing a
     /// `DataFrame` from the retained samples** and delegating to the
@@ -767,5 +784,60 @@ mod tests {
         };
         let r = validate_view(&view, &opts).unwrap();
         assert_eq!(r.input.n_rows, 100);
+    }
+
+    // ─── B5.6 regression: pin the truncation-divergence contract ──────
+
+    #[test]
+    fn into_report_byte_identical_when_sample_cap_holds() {
+        // With `sample_cap >= n_rows` the streaming report MUST match
+        // single-shot validate byte-for-byte (the documented contract).
+        let v: Vec<f64> = (0..500).map(|i| i as f64 + 0.1).collect();
+        let df = DataFrame::from_columns(vec![("x".into(), Column::Float(v.clone()))]).unwrap();
+        let opts = ValidateOptions {
+            dataset_label: "cap-holds".into(),
+            ..Default::default()
+        };
+        let single = validate(&df, &opts);
+
+        let mut cfg = StreamingConfig::default();
+        cfg.sample_cap = 1000; // > n_rows
+        let mut sv = StreamingValidator::new("cap-holds", cfg);
+        sv.ingest_chunk(&df).unwrap();
+        let streamed = sv.into_report(Some(opts)).unwrap();
+
+        // Same row count, same finding count, same per-finding codes.
+        assert_eq!(streamed.input.n_rows, single.input.n_rows);
+        assert_eq!(streamed.findings.len(), single.findings.len());
+        let single_codes: Vec<&str> = single.findings.iter().map(|f| f.code).collect();
+        let streamed_codes: Vec<&str> = streamed.findings.iter().map(|f| f.code).collect();
+        assert_eq!(single_codes, streamed_codes);
+    }
+
+    #[test]
+    fn into_report_diverges_when_sample_cap_exceeded() {
+        // With `sample_cap < n_rows` the streaming report sees only the
+        // first `sample_cap` rows — `n_rows` in the report reflects the
+        // truncated sample, NOT the true stream length. This pins the
+        // divergence so future refactors that aim to fix it (e.g. by
+        // moving every check into the streaming layer) have a regression
+        // gate that flips deliberately rather than silently.
+        let v: Vec<f64> = (0..1000).map(|i| i as f64).collect();
+        let df = DataFrame::from_columns(vec![("x".into(), Column::Float(v.clone()))]).unwrap();
+        let opts = ValidateOptions {
+            dataset_label: "cap-breach".into(),
+            ..Default::default()
+        };
+        let single = validate(&df, &opts);
+
+        let mut cfg = StreamingConfig::default();
+        cfg.sample_cap = 100; // < n_rows = 1000
+        let mut sv = StreamingValidator::new("cap-breach", cfg);
+        sv.ingest_chunk(&df).unwrap();
+        let streamed = sv.into_report(Some(opts)).unwrap();
+
+        // Single-shot saw 1000 rows; streamed report saw only the cap.
+        assert_eq!(single.input.n_rows, 1000);
+        assert_eq!(streamed.input.n_rows, 100);
     }
 }

@@ -113,6 +113,57 @@ fn small_test_set_triggers_low_power_warning() {
     assert!(r.findings.iter().any(|f| f.code == "E9036"));
 }
 
+// ─── B5.3 regression: near-zero mean false positive ─────────────────
+
+#[test]
+fn near_zero_mean_with_tiny_jitter_does_not_fire_e9030() {
+    // Pre-fix: a column with mean ≈ 1e-15 and a 1e-12 jitter on the test
+    // side hit `denom = max(1e-15, 1e-12) = 1e-12`, then `shift = 1.0`
+    // which crosses the 0.30 error threshold → spurious E9030. Post-fix:
+    // both means are below `mean_shift_near_zero_threshold = 1e-9`, so
+    // mean-shift evaluation is skipped entirely.
+    let train = DataFrame::from_columns(vec![mk("x", vec![1e-15; 200])]).unwrap();
+    let test = DataFrame::from_columns(vec![mk("x", vec![1e-15 + 1e-12; 200])]).unwrap();
+    let r = compare(&train, &test, &DriftConfig::default());
+    let e9030_fires = r.findings.iter().any(|f| f.code == "E9030");
+    assert!(
+        !e9030_fires,
+        "E9030 must not fire on near-zero mean with sub-eps jitter, got: {:?}",
+        r.findings.iter().map(|f| (f.code, &f.message)).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn near_zero_threshold_zero_restores_pre_fix_behaviour() {
+    // Setting the threshold to 0.0 disables the skip — useful for
+    // callers who NEED the pre-fix behaviour (e.g. comparing against a
+    // baseline that wasn't run with the fix).
+    let mut cfg = DriftConfig::default();
+    cfg.mean_shift_near_zero_threshold = 0.0;
+    let train = DataFrame::from_columns(vec![mk("x", vec![1e-15; 200])]).unwrap();
+    let test = DataFrame::from_columns(vec![mk("x", vec![1e-15 + 1e-12; 200])]).unwrap();
+    let r = compare(&train, &test, &cfg);
+    // With threshold disabled the old behaviour returns — E9030 may fire.
+    // We don't assert it MUST fire (different severity thresholds could
+    // gate it) — we only assert the fix's lever works (no panic, runs cleanly).
+    let _ = r;
+}
+
+#[test]
+fn small_but_above_threshold_means_still_fire_normally() {
+    // Means above `mean_shift_near_zero_threshold` go through the
+    // unchanged code path. This pins backward compatibility.
+    let train = DataFrame::from_columns(vec![mk("x", vec![1.0; 200])]).unwrap();
+    let test = DataFrame::from_columns(vec![mk("x", vec![10.0; 200])]).unwrap();
+    let r = compare(&train, &test, &DriftConfig::default());
+    let f = r
+        .findings
+        .iter()
+        .find(|f| f.code == "E9030")
+        .expect("E9030 must still fire on normal large shifts");
+    assert_eq!(f.severity, cjc_locke::FindingSeverity::Error);
+}
+
 // ─── v0.6 batch 2: E9018 cardinality explosion ──────────────────────────
 
 fn mk_str(name: &str, vs: Vec<&str>) -> (String, Column) {

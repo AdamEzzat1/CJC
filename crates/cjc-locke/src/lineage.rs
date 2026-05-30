@@ -173,6 +173,21 @@ pub struct AuditEvent {
 }
 
 impl AuditEvent {
+    /// Construct a new audit event.
+    ///
+    /// **Monotonicity is the caller's responsibility.** Internal callers go
+    /// through [`LineageBuilder`] which assigns `seq` via an internal
+    /// counter, so the chain produced by `builder.finish()` is always
+    /// monotonic. If you construct events outside `LineageBuilder` and
+    /// want to trust the resulting [`LineageGraph`]'s audit chain for
+    /// replay or deterministic-ID purposes, you MUST guarantee that
+    /// successive events have strictly-increasing `seq` values within a
+    /// single `run_label`.
+    ///
+    /// To verify a graph's audit chain after construction (e.g. when
+    /// rebuilding from JSON via [`crate::parse_locke_report_json`] or
+    /// from external sources), call
+    /// [`LineageGraph::validate_audit_monotonic`].
     pub fn new(run_label: &str, seq: u64, kind: &str, subject_id: FingerprintId, note: &str) -> Self {
         let id_parts = [
             fingerprint_str(IdDomain::AuditEvent, run_label),
@@ -277,7 +292,66 @@ impl LineageGraph {
         }
         out
     }
+
+    /// Validate that the audit chain is monotonic within each
+    /// `run_label`: successive events must have strictly-increasing
+    /// `seq` values. Graphs built via `LineageBuilder` always satisfy
+    /// this — the builder assigns `seq` from an internal counter. The
+    /// validator exists because [`AuditEvent::new`] is public and can
+    /// be invoked with arbitrary `seq` values by external callers (for
+    /// instance, when rebuilding a graph from external storage).
+    ///
+    /// Returns `Ok(())` if every run-label's audit subchain is strictly
+    /// monotonic; `Err` describes the first violation found (the indices
+    /// are deterministic given the same `audit` vector).
+    pub fn validate_audit_monotonic(&self) -> Result<(), AuditMonotonicError> {
+        let mut last_seq_per_label: BTreeMap<&str, (u64, usize)> = BTreeMap::new();
+        for (i, ev) in self.audit.iter().enumerate() {
+            match last_seq_per_label.get(ev.run_label.as_str()) {
+                None => {
+                    last_seq_per_label.insert(ev.run_label.as_str(), (ev.seq, i));
+                }
+                Some(&(last_seq, last_i)) => {
+                    if ev.seq <= last_seq {
+                        return Err(AuditMonotonicError {
+                            run_label: ev.run_label.clone(),
+                            prior_index: last_i,
+                            prior_seq: last_seq,
+                            offending_index: i,
+                            offending_seq: ev.seq,
+                        });
+                    }
+                    last_seq_per_label.insert(ev.run_label.as_str(), (ev.seq, i));
+                }
+            }
+        }
+        Ok(())
+    }
 }
+
+/// Detail for a non-monotonic audit-chain violation surfaced by
+/// [`LineageGraph::validate_audit_monotonic`]. All fields are owned so
+/// the error survives the graph that produced it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuditMonotonicError {
+    pub run_label: String,
+    pub prior_index: usize,
+    pub prior_seq: u64,
+    pub offending_index: usize,
+    pub offending_seq: u64,
+}
+
+impl std::fmt::Display for AuditMonotonicError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "non-monotonic audit chain in run `{}`: event #{} has seq={} but prior event #{} has seq={}",
+            self.run_label, self.offending_index, self.offending_seq, self.prior_index, self.prior_seq,
+        )
+    }
+}
+
+impl std::error::Error for AuditMonotonicError {}
 
 /// Build a forward-adjacency map `from → [to, ...]` from the sorted
 /// `edges` list. Per-key Vec preserves edge-sorted order, so traversals
@@ -687,5 +761,73 @@ mod tests {
         let s = emit_lineage_mermaid(&g);
         assert!(s.contains("evil&quot;label"));
         assert!(!s.contains("evil\"label"));
+    }
+
+    // ─── B5.2: audit monotonic validator ─────────────────────────────
+
+    #[test]
+    fn validate_audit_monotonic_passes_on_builder_constructed_graph() {
+        // Graphs from the builder are always monotonic by construction.
+        let mut b = LineageBuilder::new("run-1");
+        let p1 = b.add_impression(imp("train.csv")).unwrap();
+        let p2 = b.add_impression(imp("test.csv")).unwrap();
+        b.add_idea(idea("filter", vec![p1], "filter")).unwrap();
+        b.add_idea(idea("filter2", vec![p2], "filter")).unwrap();
+        let g = b.finish();
+        g.validate_audit_monotonic()
+            .expect("builder-constructed graph must be monotonic");
+    }
+
+    #[test]
+    fn validate_audit_monotonic_detects_external_seq_violation() {
+        // Hand-construct a graph with a non-monotonic audit chain — the
+        // kind of state external `AuditEvent::new` callers could produce.
+        let imp1 = imp("train.csv");
+        let id1 = imp1.id;
+        let nodes: BTreeMap<FingerprintId, LineageNode> =
+            [(id1, LineageNode::Impression(imp1))].into_iter().collect();
+        let audit = vec![
+            AuditEvent::new("run-1", 5, "impression", id1, "first"),
+            // BUG: external caller resets seq to 0
+            AuditEvent::new("run-1", 0, "audit-note", id1, "rolled-back seq"),
+        ];
+        let g = LineageGraph {
+            run_label: "test".into(),
+            nodes,
+            edges: vec![],
+            audit,
+            root_fingerprint: id1,
+        };
+        let err = g
+            .validate_audit_monotonic()
+            .expect_err("non-monotonic chain must fail");
+        assert_eq!(err.run_label, "run-1");
+        assert_eq!(err.prior_seq, 5);
+        assert_eq!(err.offending_seq, 0);
+    }
+
+    #[test]
+    fn validate_audit_monotonic_treats_run_labels_independently() {
+        // Two run-labels in the same graph each maintain their own
+        // monotonic chain; reusing low seq under a fresh label is fine.
+        let imp1 = imp("a.csv");
+        let id1 = imp1.id;
+        let nodes: BTreeMap<FingerprintId, LineageNode> =
+            [(id1, LineageNode::Impression(imp1))].into_iter().collect();
+        let audit = vec![
+            AuditEvent::new("run-A", 10, "x", id1, ""),
+            AuditEvent::new("run-B", 0, "x", id1, ""),
+            AuditEvent::new("run-A", 11, "x", id1, ""),
+            AuditEvent::new("run-B", 1, "x", id1, ""),
+        ];
+        let g = LineageGraph {
+            run_label: "test".into(),
+            nodes,
+            edges: vec![],
+            audit,
+            root_fingerprint: id1,
+        };
+        g.validate_audit_monotonic()
+            .expect("independent run-labels must each be monotonic");
     }
 }
