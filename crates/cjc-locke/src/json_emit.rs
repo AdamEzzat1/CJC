@@ -21,15 +21,59 @@ use crate::report::{
     FindingEvidence, FindingSeverity, LockeInputSummary, LockeReport, SeverityCounts,
     ValidationFinding,
 };
+use std::cell::RefCell;
+use std::collections::BTreeSet;
+use std::fmt::Write as _;
+
+// ─── Static-code interner ─────────────────────────────────────────────────────
+//
+// `ValidationFinding::code` is `&'static str` by design (it's a stable error
+// code, not user input). When `parse_locke_report_json` reconstructs a report
+// from JSON, the code string starts life as a heap `String` and must be
+// converted to `&'static str` to fit the type. Pre-fix: `box_leak_str` leaked
+// per finding, so a 10K-finding parse leaked 10K small `String`s permanently
+// — monotonic growth in any long-lived process.
+//
+// Post-fix: a thread-local `BTreeSet<&'static str>` dedupes leaks. Distinct
+// codes are leaked at most once per thread. The set is internal state used
+// only for memoization — its iteration is never observed by output, so
+// determinism is unaffected. `BTreeSet` is used rather than `HashSet` to
+// align with the project's "no HashSet/HashMap" rule.
+thread_local! {
+    static STATIC_CODE_INTERNER: RefCell<BTreeSet<&'static str>> =
+        RefCell::new(BTreeSet::new());
+}
+
+/// Intern `s` as a `&'static str`. Distinct strings leak at most once per
+/// thread; subsequent calls with an equal string return the previously
+/// leaked pointer. Used only by `parse_locke_report_json` for the
+/// `ValidationFinding::code` field.
+fn intern_static_code(s: String) -> &'static str {
+    STATIC_CODE_INTERNER.with(|interner| {
+        if let Some(existing) = interner.borrow().get(s.as_str()) {
+            return *existing;
+        }
+        let leaked: &'static str = Box::leak(s.into_boxed_str());
+        interner.borrow_mut().insert(leaked);
+        leaked
+    })
+}
+
+/// Rough size estimate for preallocation. 256 bytes per finding is a
+/// generous average that avoids early-resize reallocs for typical reports.
+fn estimated_report_size(report: &LockeReport) -> usize {
+    256 + report.findings.len() * 256 + report.assumptions.len() * 64
+}
 
 /// Serialize a `LockeReport` to a canonical JSON string. Repeated calls
 /// over equal reports produce byte-identical output.
 pub fn emit_locke_report_json(report: &LockeReport) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(estimated_report_size(report));
     out.push('{');
-    write_string_field(&mut out, "schema_version", &report.schema_version.to_string(), true);
+    out.push_str("\"schema_version\":");
+    write!(out, "{}", report.schema_version).unwrap();
     out.push(',');
-    write_field(&mut out, "run_id", &format!("\"{}\"", report.run_id));
+    write!(out, "\"run_id\":\"{}\"", report.run_id).unwrap();
     out.push(',');
     out.push_str("\"input\":");
     write_input_summary(&mut out, &report.input);
@@ -46,24 +90,6 @@ pub fn emit_locke_report_json(report: &LockeReport) -> String {
     out
 }
 
-fn write_field(out: &mut String, key: &str, value_json: &str) {
-    out.push('"');
-    out.push_str(key);
-    out.push_str("\":");
-    out.push_str(value_json);
-}
-
-fn write_string_field(out: &mut String, key: &str, value: &str, raw: bool) {
-    out.push('"');
-    out.push_str(key);
-    out.push_str("\":");
-    if raw {
-        out.push_str(value);
-    } else {
-        write_string(out, value);
-    }
-}
-
 fn write_string(out: &mut String, s: &str) {
     out.push('"');
     for c in s.chars() {
@@ -74,7 +100,7 @@ fn write_string(out: &mut String, s: &str) {
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
+                write!(out, "\\u{:04x}", c as u32).unwrap();
             }
             c => out.push(c),
         }
@@ -99,8 +125,7 @@ fn write_float(out: &mut String, x: f64) {
     } else if x.is_infinite() {
         out.push_str(if x > 0.0 { "\"Infinity\"" } else { "\"-Infinity\"" });
     } else {
-        // {:?} gives a round-trippable representation.
-        out.push_str(&format!("{:?}", x));
+        write!(out, "{:?}", x).unwrap();
     }
 }
 
@@ -109,9 +134,9 @@ fn write_input_summary(out: &mut String, input: &LockeInputSummary) {
     out.push_str("\"dataset_label\":");
     write_string(out, &input.dataset_label);
     out.push(',');
-    out.push_str(&format!("\"n_rows\":{}", input.n_rows));
+    write!(out, "\"n_rows\":{}", input.n_rows).unwrap();
     out.push(',');
-    out.push_str(&format!("\"n_cols\":{}", input.n_cols));
+    write!(out, "\"n_cols\":{}", input.n_cols).unwrap();
     out.push(',');
     out.push_str("\"column_types\":{");
     for (i, (k, v)) in input.column_types.iter().enumerate() {
@@ -126,12 +151,12 @@ fn write_input_summary(out: &mut String, input: &LockeInputSummary) {
 }
 
 fn write_severity_counts(out: &mut String, c: &SeverityCounts) {
-    out.push('{');
-    out.push_str(&format!(
-        "\"info\":{},\"notice\":{},\"warning\":{},\"error\":{}",
+    write!(
+        out,
+        "{{\"info\":{},\"notice\":{},\"warning\":{},\"error\":{}}}",
         c.info, c.notice, c.warning, c.error
-    ));
-    out.push('}');
+    )
+    .unwrap();
 }
 
 fn write_findings(out: &mut String, fs: &[ValidationFinding]) {
@@ -151,7 +176,7 @@ fn severity_str(s: FindingSeverity) -> &'static str {
 
 fn write_finding(out: &mut String, f: &ValidationFinding) {
     out.push('{');
-    out.push_str(&format!("\"id\":\"{}\"", f.id));
+    write!(out, "\"id\":\"{}\"", f.id).unwrap();
     out.push(',');
     out.push_str("\"code\":\"");
     out.push_str(f.code);
@@ -172,11 +197,13 @@ fn write_finding(out: &mut String, f: &ValidationFinding) {
     out.push(',');
     out.push_str("\"row_range\":");
     match f.row_range {
-        Some((lo, hi)) => out.push_str(&format!("[{},{}]", lo, hi)),
+        Some((lo, hi)) => {
+            write!(out, "[{},{}]", lo, hi).unwrap();
+        }
         None => out.push_str("null"),
     }
     out.push(',');
-    out.push_str(&format!("\"sample_size\":{}", f.sample_size));
+    write!(out, "\"sample_size\":{}", f.sample_size).unwrap();
     out.push(',');
     out.push_str("\"evidence\":");
     write_evidence_array(out, &f.evidence);
@@ -206,7 +233,7 @@ fn write_evidence(out: &mut String, e: &FindingEvidence) {
         FindingEvidence::Count { label, value } => {
             out.push_str("\"kind\":\"count\",\"label\":");
             write_string(out, label);
-            out.push_str(&format!(",\"value\":{}", value));
+            write!(out, ",\"value\":{}", value).unwrap();
         }
         FindingEvidence::Ratio { label, value } => {
             out.push_str("\"kind\":\"ratio\",\"label\":");
@@ -245,12 +272,16 @@ fn write_evidence(out: &mut String, e: &FindingEvidence) {
 /// exact byte sequences `emit_locke_report_json` produces and rejects
 /// most other valid JSON with structured errors. v0.5 may relax this
 /// to handle whitespace / key reordering if real demand appears.
+///
+/// Surrogate-pair `\uXXXX\uYYYY` escapes are accepted for human-edited
+/// input even though emit never produces them (emit writes codepoints
+/// above U+FFFF as raw UTF-8 chars). Lone surrogates are rejected.
 pub fn parse_locke_report_json(input: &str) -> Result<LockeReport, String> {
     let mut p = Parser::new(input);
     p.expect('{')?;
     p.expect_key("schema_version")?;
-    let schema_version: u32 = p.parse_int()? as u32;
-    if schema_version != LockeReport::SCHEMA_VERSION {
+    let schema_version = p.parse_u64()?;
+    if schema_version > u32::MAX as u64 || (schema_version as u32) != LockeReport::SCHEMA_VERSION {
         return Err(format!(
             "schema_version mismatch: got {}, expected {}",
             schema_version,
@@ -287,10 +318,10 @@ fn parse_input_summary(p: &mut Parser) -> Result<LockeInputSummary, String> {
     let dataset_label = p.parse_string()?;
     p.expect(',')?;
     p.expect_key("n_rows")?;
-    let n_rows = p.parse_int()? as u64;
+    let n_rows = p.parse_u64()?;
     p.expect(',')?;
     p.expect_key("n_cols")?;
-    let n_cols = p.parse_int()? as u64;
+    let n_cols = p.parse_u64()?;
     p.expect(',')?;
     p.expect_key("column_types")?;
     let column_types = parse_string_map(p)?;
@@ -306,16 +337,16 @@ fn parse_input_summary(p: &mut Parser) -> Result<LockeInputSummary, String> {
 fn parse_severity_counts(p: &mut Parser) -> Result<SeverityCounts, String> {
     p.expect('{')?;
     p.expect_key("info")?;
-    let info = p.parse_int()? as u64;
+    let info = p.parse_u64()?;
     p.expect(',')?;
     p.expect_key("notice")?;
-    let notice = p.parse_int()? as u64;
+    let notice = p.parse_u64()?;
     p.expect(',')?;
     p.expect_key("warning")?;
-    let warning = p.parse_int()? as u64;
+    let warning = p.parse_u64()?;
     p.expect(',')?;
     p.expect_key("error")?;
-    let error = p.parse_int()? as u64;
+    let error = p.parse_u64()?;
     p.expect('}')?;
     Ok(SeverityCounts {
         info,
@@ -351,7 +382,7 @@ fn parse_finding(p: &mut Parser) -> Result<ValidationFinding, String> {
     p.expect(',')?;
     p.expect_key("code")?;
     let code_owned = p.parse_string()?;
-    let code = box_leak_str(code_owned);
+    let code = intern_static_code(code_owned);
     p.expect(',')?;
     p.expect_key("severity")?;
     let severity = parse_severity(&p.parse_string()?)?;
@@ -366,7 +397,7 @@ fn parse_finding(p: &mut Parser) -> Result<ValidationFinding, String> {
     let row_range = parse_row_range(p)?;
     p.expect(',')?;
     p.expect_key("sample_size")?;
-    let sample_size = p.parse_int()? as u64;
+    let sample_size = p.parse_u64()?;
     p.expect(',')?;
     p.expect_key("evidence")?;
     let evidence = parse_evidence_array(p)?;
@@ -390,13 +421,6 @@ fn parse_finding(p: &mut Parser) -> Result<ValidationFinding, String> {
     ))
 }
 
-/// Leak a `String` into a `&'static str`. Used because `ValidationFinding::code`
-/// is `&'static str` by design (it's a stable error code, not user input).
-/// The leak is bounded by the number of distinct codes in a report.
-fn box_leak_str(s: String) -> &'static str {
-    Box::leak(s.into_boxed_str())
-}
-
 fn parse_severity(s: &str) -> Result<FindingSeverity, String> {
     match s {
         "info" => Ok(FindingSeverity::Info),
@@ -413,9 +437,9 @@ fn parse_row_range(p: &mut Parser) -> Result<Option<(usize, usize)>, String> {
         Ok(None)
     } else {
         p.expect('[')?;
-        let lo = p.parse_int()? as usize;
+        let lo = p.parse_usize()?;
         p.expect(',')?;
-        let hi = p.parse_int()? as usize;
+        let hi = p.parse_usize()?;
         p.expect(']')?;
         Ok(Some((lo, hi)))
     }
@@ -451,7 +475,7 @@ fn parse_evidence(p: &mut Parser) -> Result<FindingEvidence, String> {
         "count" => {
             p.expect(',')?;
             p.expect_key("value")?;
-            let value = p.parse_int()? as u64;
+            let value = p.parse_u64()?;
             FindingEvidence::Count { label, value }
         }
         "ratio" => {
@@ -587,11 +611,41 @@ impl<'a> Parser<'a> {
                         'r' => out.push('\r'),
                         't' => out.push('\t'),
                         'u' => {
-                            let hex: String =
-                                (0..4).filter_map(|_| self.advance()).collect();
-                            let cp = u32::from_str_radix(&hex, 16)
-                                .map_err(|_| format!("bad \\u escape: {}", hex))?;
-                            if let Some(ch) = char::from_u32(cp) {
+                            let cp = self.parse_u_hex4()?;
+                            // RFC 8259 §7: surrogate pair handling. A high
+                            // surrogate (U+D800..=U+DBFF) MUST be followed
+                            // by `\u` + a low surrogate (U+DC00..=U+DFFF).
+                            // The combined codepoint is computed via the
+                            // UTF-16 encoding formula.
+                            if (0xD800..=0xDBFF).contains(&cp) {
+                                if self.advance() != Some('\\') || self.advance() != Some('u') {
+                                    return Err(format!(
+                                        "high surrogate U+{:04X} not followed by \\u low surrogate at pos {}",
+                                        cp, self.pos
+                                    ));
+                                }
+                                let lo = self.parse_u_hex4()?;
+                                if !(0xDC00..=0xDFFF).contains(&lo) {
+                                    return Err(format!(
+                                        "expected low surrogate (U+DC00..U+DFFF), got U+{:04X} at pos {}",
+                                        lo, self.pos
+                                    ));
+                                }
+                                let full = 0x10000u32 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                                if let Some(ch) = char::from_u32(full) {
+                                    out.push(ch);
+                                } else {
+                                    return Err(format!(
+                                        "bad surrogate-pair codepoint U+{:06X}",
+                                        full
+                                    ));
+                                }
+                            } else if (0xDC00..=0xDFFF).contains(&cp) {
+                                return Err(format!(
+                                    "unexpected lone low surrogate U+{:04X} at pos {}",
+                                    cp, self.pos
+                                ));
+                            } else if let Some(ch) = char::from_u32(cp) {
                                 out.push(ch);
                             } else {
                                 return Err(format!("bad codepoint U+{:04X}", cp));
@@ -604,6 +658,21 @@ impl<'a> Parser<'a> {
             }
         }
     }
+    /// Read exactly 4 ASCII-hex digits and parse them as a `u32`. Errors
+    /// on EOF mid-sequence or any non-hex character.
+    fn parse_u_hex4(&mut self) -> Result<u32, String> {
+        let mut acc: u32 = 0;
+        for i in 0..4 {
+            let c = self
+                .advance()
+                .ok_or_else(|| format!("EOF mid \\u escape after {} hex digits", i))?;
+            let d = c.to_digit(16).ok_or_else(|| {
+                format!("non-hex char '{}' in \\u escape at pos {}", c, self.pos)
+            })?;
+            acc = (acc << 4) | d;
+        }
+        Ok(acc)
+    }
     fn parse_nullable_string(&mut self) -> Result<Option<String>, String> {
         if self.peek() == Some('n') {
             self.expect_literal("null")?;
@@ -612,10 +681,17 @@ impl<'a> Parser<'a> {
             Ok(Some(self.parse_string()?))
         }
     }
-    fn parse_int(&mut self) -> Result<i64, String> {
+    /// Parse an unsigned integer. Rejects a leading `-` explicitly rather
+    /// than relying on `i64::parse + as u64` (which silently wraps
+    /// negatives to enormous values). All Locke `u64` fields go through
+    /// this method.
+    fn parse_u64(&mut self) -> Result<u64, String> {
         let start = self.pos;
         if self.peek() == Some('-') {
-            self.advance();
+            return Err(format!(
+                "expected unsigned integer, got leading `-` at pos {}",
+                self.pos
+            ));
         }
         while let Some(c) = self.peek() {
             if c.is_ascii_digit() {
@@ -624,8 +700,24 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
+        if start == self.pos {
+            return Err(format!("expected unsigned integer at pos {}", self.pos));
+        }
         let s = &self.src[start..self.pos];
-        s.parse::<i64>().map_err(|e| format!("bad int `{}`: {}", s, e))
+        s.parse::<u64>().map_err(|e| format!("bad u64 `{}`: {}", s, e))
+    }
+    /// Parse a `usize`, checking the value fits the host's pointer width.
+    /// On 32-bit hosts this rejects values that would silently truncate.
+    fn parse_usize(&mut self) -> Result<usize, String> {
+        let v = self.parse_u64()?;
+        if v > usize::MAX as u64 {
+            return Err(format!(
+                "value {} exceeds usize::MAX ({}) on this host",
+                v,
+                usize::MAX
+            ));
+        }
+        Ok(v as usize)
     }
     fn parse_float(&mut self) -> Result<f64, String> {
         // Handle the special string forms "NaN" / "Infinity" / "-Infinity".
@@ -772,5 +864,216 @@ mod tests {
         let bad = r#"{"schema_version":99,"run_id":"x","input":{}}"#;
         let r = parse_locke_report_json(bad);
         assert!(r.is_err());
+    }
+
+    // ─── B3.1: negative-int wrap regression tests ────────────────────────
+
+    #[test]
+    fn parse_u64_rejects_negative_n_rows() {
+        // Pre-fix: parse_int returns -1, then `as u64` gives u64::MAX,
+        // so the parser "succeeds" on a hostile input with absurd n_rows.
+        let bad = r#"{"schema_version":1,"run_id":"x","input":{"dataset_label":"t","n_rows":-1,"n_cols":0,"column_types":{}},"severity_counts":{"info":0,"notice":0,"warning":0,"error":0},"findings":[],"assumptions":[]}"#;
+        let r = parse_locke_report_json(bad);
+        assert!(r.is_err(), "negative n_rows must error, got {:?}", r);
+        let msg = r.unwrap_err();
+        assert!(
+            msg.contains("leading `-`") || msg.contains("unsigned"),
+            "expected leading-minus error, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn parse_u64_rejects_oversized_n_rows() {
+        // 99...99 (20 nines) overflows u64 (max ~1.8e19, this is 1e20).
+        let bad = r#"{"schema_version":1,"run_id":"x","input":{"dataset_label":"t","n_rows":99999999999999999999,"n_cols":0,"column_types":{}},"severity_counts":{"info":0,"notice":0,"warning":0,"error":0},"findings":[],"assumptions":[]}"#;
+        let r = parse_locke_report_json(bad);
+        assert!(r.is_err(), "oversized n_rows must error");
+        let msg = r.unwrap_err();
+        assert!(msg.contains("bad u64"), "expected u64 overflow error, got: {}", msg);
+    }
+
+    #[test]
+    fn parse_u64_rejects_negative_sample_size() {
+        // Same shape attack, but at the per-finding sample_size field.
+        let bad = r#"{"schema_version":1,"run_id":"x","input":{"dataset_label":"t","n_rows":0,"n_cols":0,"column_types":{}},"severity_counts":{"info":0,"notice":0,"warning":0,"error":0},"findings":[{"id":"abc","code":"E9001","severity":"info","message":"m","column":null,"row_range":null,"sample_size":-5,"evidence":[],"assumptions":[],"suggested_next_checks":[]}],"assumptions":[]}"#;
+        let r = parse_locke_report_json(bad);
+        assert!(r.is_err(), "negative sample_size must error, got {:?}", r);
+    }
+
+    #[test]
+    fn parse_u64_accepts_zero_and_legitimate_max() {
+        // Zero and u64::MAX are the boundary legitimate values.
+        let ok_zero = r#"{"schema_version":1,"run_id":"x","input":{"dataset_label":"t","n_rows":0,"n_cols":0,"column_types":{}},"severity_counts":{"info":0,"notice":0,"warning":0,"error":0},"findings":[],"assumptions":[]}"#;
+        assert!(parse_locke_report_json(ok_zero).is_ok());
+        // u64::MAX = 18446744073709551615 (20 digits).
+        let ok_max = r#"{"schema_version":1,"run_id":"x","input":{"dataset_label":"t","n_rows":18446744073709551615,"n_cols":0,"column_types":{}},"severity_counts":{"info":0,"notice":0,"warning":0,"error":0},"findings":[],"assumptions":[]}"#;
+        let parsed = parse_locke_report_json(ok_max).expect("u64::MAX must parse");
+        assert_eq!(parsed.input.n_rows, u64::MAX);
+    }
+
+    // ─── B3.2: interner dedup regression test ───────────────────────────
+
+    #[test]
+    fn intern_static_code_dedupes_repeated_strings() {
+        // Same logical code interned twice → same pointer.
+        let a = intern_static_code(String::from("E9999_INTERNER_TEST"));
+        let b = intern_static_code(String::from("E9999_INTERNER_TEST"));
+        assert!(std::ptr::eq(a, b), "interner must return same pointer for equal strings");
+    }
+
+    #[test]
+    fn intern_static_code_distinct_strings_get_distinct_leaks() {
+        let a = intern_static_code(String::from("E9999_INTERNER_A"));
+        let b = intern_static_code(String::from("E9999_INTERNER_B"));
+        assert!(
+            !std::ptr::eq(a, b),
+            "distinct strings must get distinct interned pointers"
+        );
+        assert_eq!(a, "E9999_INTERNER_A");
+        assert_eq!(b, "E9999_INTERNER_B");
+    }
+
+    // ─── B3.3: surrogate pair regression tests ──────────────────────────
+
+    #[test]
+    fn parse_string_handles_surrogate_pair_for_emoji() {
+        // 😀 = U+1F600 = surrogate pair (U+D83D, U+DE00) in UTF-16.
+        // Emit doesn't produce this, but human-edited JSON can.
+        // Construct a minimal valid report with a surrogate-pair emoji
+        // in the dataset_label, then verify it parses to 😀.
+        let json = r#"{"schema_version":1,"run_id":"x","input":{"dataset_label":"hi \uD83D\uDE00 there","n_rows":0,"n_cols":0,"column_types":{}},"severity_counts":{"info":0,"notice":0,"warning":0,"error":0},"findings":[],"assumptions":[]}"#;
+        let r = parse_locke_report_json(json).expect("surrogate pair must parse");
+        assert!(
+            r.input.dataset_label.contains('😀'),
+            "expected emoji in dataset_label, got: {}",
+            r.input.dataset_label
+        );
+    }
+
+    #[test]
+    fn parse_string_rejects_lone_high_surrogate() {
+        // Lone high surrogate with no follow-up \u — must error.
+        let bad = r#"{"schema_version":1,"run_id":"x","input":{"dataset_label":"\uD83D","n_rows":0,"n_cols":0,"column_types":{}},"severity_counts":{"info":0,"notice":0,"warning":0,"error":0},"findings":[],"assumptions":[]}"#;
+        let r = parse_locke_report_json(bad);
+        assert!(r.is_err(), "lone high surrogate must error");
+        let msg = r.unwrap_err();
+        assert!(
+            msg.contains("high surrogate"),
+            "expected high-surrogate error, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn parse_string_rejects_lone_low_surrogate() {
+        // Lone low surrogate (no preceding high surrogate).
+        let bad = r#"{"schema_version":1,"run_id":"x","input":{"dataset_label":"\uDE00","n_rows":0,"n_cols":0,"column_types":{}},"severity_counts":{"info":0,"notice":0,"warning":0,"error":0},"findings":[],"assumptions":[]}"#;
+        let r = parse_locke_report_json(bad);
+        assert!(r.is_err(), "lone low surrogate must error");
+        let msg = r.unwrap_err();
+        assert!(
+            msg.contains("lone low surrogate") || msg.contains("low surrogate"),
+            "expected low-surrogate error, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn parse_string_rejects_high_surrogate_then_non_low() {
+        // High surrogate followed by \u + non-low (here A = 'A').
+        let bad = r#"{"schema_version":1,"run_id":"x","input":{"dataset_label":"\uD83DA","n_rows":0,"n_cols":0,"column_types":{}},"severity_counts":{"info":0,"notice":0,"warning":0,"error":0},"findings":[],"assumptions":[]}"#;
+        let r = parse_locke_report_json(bad);
+        assert!(r.is_err(), "high surrogate + non-low must error");
+    }
+
+    #[test]
+    fn parse_u_hex4_rejects_non_hex_chars() {
+        // Bad hex in \u escape — must error, not silently consume garbage.
+        let bad = r#"{"schema_version":1,"run_id":"x","input":{"dataset_label":"\uZZZZ","n_rows":0,"n_cols":0,"column_types":{}},"severity_counts":{"info":0,"notice":0,"warning":0,"error":0},"findings":[],"assumptions":[]}"#;
+        let r = parse_locke_report_json(bad);
+        assert!(r.is_err(), "non-hex in \\u escape must error");
+    }
+
+    // ─── B3.4: byte-identity regression test ────────────────────────────
+
+    // ─── B3.5 tripwire: detect future stdlib drift in {:?} f64 format ───
+    //
+    // The canonical Locke JSON byte-output relies on Rust's `f64::Debug`
+    // (the `{:?}` format spec) producing the same shortest-round-trip
+    // representation across compiler versions. This has been stable in
+    // practice since Rust 1.0, but is not a formal stdlib guarantee.
+    //
+    // This test pins the output bytes for a battery of edge-case f64
+    // values. If a future toolchain bump changes any of them, this test
+    // fires loudly at test time — far better than discovering it via a
+    // broken audit chain in production. The expected strings below were
+    // captured against Rust 1.91.1; update only after deliberate review.
+
+    #[test]
+    fn write_float_canonical_bytes_for_edge_cases() {
+        let cases: &[(f64, &str)] = &[
+            (0.0_f64, "0.0"),
+            (-0.0_f64, "-0.0"),
+            (1.0_f64, "1.0"),
+            (-1.0_f64, "-1.0"),
+            (0.5_f64, "0.5"),
+            (0.1_f64, "0.1"),
+            (1e30_f64, "1e30"),
+            (1e-30_f64, "1e-30"),
+            (f64::EPSILON, "2.220446049250313e-16"),
+            (f64::MIN_POSITIVE, "2.2250738585072014e-308"),
+            (f64::MAX, "1.7976931348623157e308"),
+            (f64::MIN, "-1.7976931348623157e308"),
+            (f64::from_bits(1), "5e-324"), // smallest subnormal
+            ((1u64 << 53) as f64, "9007199254740992.0"),
+            (std::f64::consts::PI, "3.141592653589793"),
+        ];
+        for (x, expected) in cases {
+            let mut out = String::new();
+            write_float(&mut out, *x);
+            assert_eq!(
+                out,
+                *expected,
+                "write_float({}) drifted from frozen golden — toolchain f64::Debug changed",
+                x
+            );
+        }
+    }
+
+    #[test]
+    fn write_float_nan_and_infinity_canonical_bytes() {
+        // These don't go through {:?} (we wrap them as JSON strings).
+        for (x, expected) in [
+            (f64::NAN, "\"NaN\""),
+            (f64::INFINITY, "\"Infinity\""),
+            (f64::NEG_INFINITY, "\"-Infinity\""),
+        ] {
+            let mut out = String::new();
+            write_float(&mut out, x);
+            assert_eq!(out, expected);
+        }
+    }
+
+    #[test]
+    fn emit_output_matches_known_golden() {
+        // Lock in the exact byte sequence for a known finding so the
+        // write!()-based emit doesn't drift from format!()-based emit.
+        // Any drift in this string means the canonical output changed and
+        // every audit chain ID downstream would shift.
+        let r = make_report();
+        let s = emit_locke_report_json(&r);
+        // Spot-check a few specific substrings rather than the whole
+        // string (run_id is content-addressed and depends on input).
+        assert!(s.starts_with(r#"{"schema_version":1,"run_id":""#));
+        assert!(s.contains(r#""input":{"dataset_label":"test","n_rows":100,"n_cols":1"#));
+        assert!(s.contains(r#""severity_counts":{"info":0,"notice":0,"warning":1,"error":0}"#));
+        assert!(s.contains(r#""code":"E9001""#));
+        assert!(s.contains(r#""severity":"warning""#));
+        assert!(s.contains(r#""sample_size":100"#));
+        assert!(s.contains(r#""row_range":[0,10]"#));
+        // Evidence value:0.5 — verify {:?} format produces "0.5" not "0.5e0".
+        assert!(s.contains(r#""value":0.5"#));
+        assert!(s.ends_with("}"));
     }
 }
