@@ -1,0 +1,15 @@
+# Python build artefacts
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+
+# Cargo build artefacts (already-ignored by workspace .gitignore, but
+# the python/ crate has its own target/ via [workspace] standalone)
+target/
+
+# Maturin output (also under target/wheels)
+wheels/
