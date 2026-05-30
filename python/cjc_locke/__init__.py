@@ -1,0 +1,274 @@
+"""cjc_locke — deterministic dataset validation for Python.
+
+Thin wrapper over the Rust `cjc-locke` crate via PyO3.
+
+Design contract:
+  * Every public function delegates to one Rust call. No business logic
+    on the Python side.
+  * Input dicts are insertion-ordered (PEP 468), so column order in →
+    column order out, reproducible across runs.
+  * Numpy arrays cross the FFI boundary zero-copy via the buffer protocol;
+    Python lists incur one allocation per column.
+  * The Rust side is byte-identical to a native call — the wrapper does
+    not multithread, cache, or reorder anything.
+
+Quick start:
+
+    >>> import numpy as np
+    >>> import cjc_locke
+    >>> data = {"age": np.array([20.0, 30.0, np.nan, 40.0]),
+    ...         "city": ["NY", "LA", "NY", "SF"]}
+    >>> report = cjc_locke.validate(data, label="users")
+    >>> report.severity_counts
+    {'info': 0, 'notice': 0, 'warning': 1, 'error': 0}
+    >>> report.finding_codes()
+    ['E9001']
+
+The full output (every finding with full evidence) is one JSON-decode away:
+
+    >>> import json
+    >>> report.to_dict()['findings'][0]['evidence']
+    [{'kind': 'count', 'label': 'n_missing', 'value': 1}, ...]
+"""
+
+from __future__ import annotations
+
+import json as _json
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+
+from . import _cjc_locke
+
+__version__ = _cjc_locke.__version__
+__rust_crate_version__ = _cjc_locke.__rust_crate_version__
+
+# ── Type aliases ──────────────────────────────────────────────────────────────
+#
+# We keep these as `Any` rather than depending on numpy so the package has
+# zero hard runtime deps. Users with numpy installed get the zero-copy fast
+# path automatically.
+DataDict = Dict[str, Any]
+
+
+# ── Output classes ────────────────────────────────────────────────────────────
+#
+# These are imported from the native module but re-exported here so users
+# can do `from cjc_locke import LockeReport` for type hinting.
+
+LockeReport = _cjc_locke.LockeReport
+InductionRiskReport = _cjc_locke.InductionRiskReport
+BeliefReport = _cjc_locke.BeliefReport
+CausalGuardrailReport = _cjc_locke.CausalGuardrailReport
+StreamingValidator = _cjc_locke.StreamingValidator
+LineageBuilder = _cjc_locke.LineageBuilder
+LineageGraph = _cjc_locke.LineageGraph
+AuditEvent = _cjc_locke.AuditEvent
+PolicyResult = _cjc_locke.PolicyResult
+
+
+def _ensure_dict(data: Any) -> DataDict:
+    """Coerce a pandas / polars DataFrame into a plain dict[str, array].
+
+    Pandas and polars are optional. If the user passes a DataFrame and the
+    library is installed, we extract columns in DataFrame-order. Otherwise
+    raise a TypeError. Plain dicts pass through unchanged.
+    """
+    if isinstance(data, dict):
+        return data
+    # pandas duck-typing (don't import pandas — keep zero hard deps)
+    if hasattr(data, "columns") and hasattr(data, "to_dict"):
+        # pandas: prefer per-column .values to get numpy arrays
+        try:
+            return {c: data[c].values for c in data.columns}
+        except Exception:  # pragma: no cover
+            return {c: list(data[c]) for c in data.columns}
+    # polars duck-typing
+    if hasattr(data, "columns") and hasattr(data, "to_pandas"):
+        try:
+            return {c: data[c].to_numpy() for c in data.columns}
+        except Exception:  # pragma: no cover
+            return {c: list(data[c]) for c in data.columns}
+    raise TypeError(
+        f"unsupported data type {type(data).__name__}: expected dict, "
+        f"pandas.DataFrame, or polars.DataFrame"
+    )
+
+
+# ── Public functions ──────────────────────────────────────────────────────────
+
+
+def validate(
+    data: Any,
+    label: str = "dataset",
+    options: Optional[Dict[str, Any]] = None,
+) -> LockeReport:
+    """Validate a single DataFrame.
+
+    Args:
+        data: dict[str, np.ndarray | list] (or pandas/polars DataFrame).
+        label: dataset label that lands in the report.
+        options: optional dict of `ValidateOptions` overrides.
+
+    Returns:
+        A `LockeReport`. Inspect it via `.severity_counts`, `.finding_codes()`,
+        `.to_json()`, or `report.to_dict()` for the full content.
+    """
+    return _cjc_locke.validate_dataframe(_ensure_dict(data), label, options)
+
+
+def compare_drift(
+    train: Any,
+    test: Any,
+    drift_config: Optional[Dict[str, Any]] = None,
+) -> InductionRiskReport:
+    """Compare train and test DataFrames for distribution drift."""
+    return _cjc_locke.compare_drift(_ensure_dict(train), _ensure_dict(test), drift_config)
+
+
+def validate_and_compare(
+    train: Any,
+    test: Any,
+    label: str = "dataset",
+    options: Optional[Dict[str, Any]] = None,
+    drift_config: Optional[Dict[str, Any]] = None,
+) -> Tuple[LockeReport, InductionRiskReport, BeliefReport]:
+    """Combined validate + drift + belief in one call.
+
+    Returns the three reports as a tuple. The belief score's drift axis is
+    composed from the drift report under the meet-semilattice algebra
+    (see the Rust-side docs).
+    """
+    return _cjc_locke.validate_and_compare(
+        _ensure_dict(train),
+        _ensure_dict(test),
+        label,
+        options,
+        drift_config,
+    )
+
+
+def belief_report(
+    report: LockeReport,
+    model: Optional[Dict[str, float]] = None,
+) -> BeliefReport:
+    """Derive a BeliefReport from a LockeReport.
+
+    `model` is an optional `BeliefPenalty` model: `{"info": float, "notice":
+    float, "warning": float, "error": float}`. Defaults match the Rust-side
+    `BeliefPenalty::default()`.
+    """
+    return _cjc_locke.belief_report(report, model)
+
+
+def causal_guardrail(
+    data: Any,
+    target_column: Optional[str] = None,
+    causal_config: Optional[Dict[str, Any]] = None,
+    label_text: Optional[str] = None,
+    interpret_model_explanation_as_causal: bool = False,
+) -> CausalGuardrailReport:
+    """Run the causal guardrail audit on a DataFrame."""
+    return _cjc_locke.causal_guardrail(
+        _ensure_dict(data),
+        target_column,
+        causal_config,
+        label_text,
+        interpret_model_explanation_as_causal,
+    )
+
+
+def detect_temporal_issues(
+    data: Any,
+    time_col: str,
+    config: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """Run temporal sanity checks on a column. Returns the list of finding codes."""
+    return _cjc_locke.detect_temporal_issues(_ensure_dict(data), time_col, config)
+
+
+def apply_policy(report: LockeReport, policy: Dict[str, Any]) -> PolicyResult:
+    """Apply a policy (suppressions/owners/requirements) to a LockeReport.
+
+    Policy shape:
+
+        {
+            "suppressions": [{"code": "E9001", "column": "phone", "reason": "ack"}],
+            "owners":       [{"team": "data", "code": "E9072"}],
+            "requirements": [{"code": "E9001", "operator": "eq_zero", "threshold": 0}],
+        }
+    """
+    return _cjc_locke.apply_policy(report, policy)
+
+
+def make_audit_event(
+    run_label: str,
+    seq: int,
+    kind: str,
+    subject_id: int,
+    note: str,
+) -> AuditEvent:
+    """Construct an AuditEvent. Monotonicity is the caller's responsibility —
+    prefer `LineageBuilder` for automatic seq assignment."""
+    return _cjc_locke.make_audit_event(run_label, seq, kind, subject_id, note)
+
+
+# ── JSON round-trip ───────────────────────────────────────────────────────────
+
+
+def emit_report_json(report: LockeReport) -> str:
+    """Serialize a LockeReport to canonical JSON. Byte-identical across runs."""
+    return _cjc_locke.emit_report_json(report)
+
+
+def parse_report_json(json_str: str) -> LockeReport:
+    """Parse a canonical-JSON-serialized LockeReport back into an object."""
+    return _cjc_locke.parse_report_json(json_str)
+
+
+# ── Convenience: .to_dict() on output objects ─────────────────────────────────
+#
+# We attach this to the output classes from Python so the Rust wrapper stays
+# free of Python-dict-construction machinery. It's a cheap JSON round-trip —
+# the canonical bytes are byte-identical to a native Rust call, then
+# `json.loads` produces the dict.
+
+
+def _locke_report_to_dict(self: LockeReport) -> Dict[str, Any]:
+    return _json.loads(self.to_json())
+
+
+def _induction_to_dict(self: InductionRiskReport) -> Dict[str, Any]:
+    return _json.loads(self.to_json())
+
+
+LockeReport.to_dict = _locke_report_to_dict  # type: ignore[attr-defined]
+InductionRiskReport.to_dict = _induction_to_dict  # type: ignore[attr-defined]
+
+
+# ── Module exports ────────────────────────────────────────────────────────────
+
+__all__ = [
+    # Functions
+    "validate",
+    "compare_drift",
+    "validate_and_compare",
+    "belief_report",
+    "causal_guardrail",
+    "detect_temporal_issues",
+    "apply_policy",
+    "make_audit_event",
+    "emit_report_json",
+    "parse_report_json",
+    # Classes
+    "LockeReport",
+    "InductionRiskReport",
+    "BeliefReport",
+    "CausalGuardrailReport",
+    "StreamingValidator",
+    "LineageBuilder",
+    "LineageGraph",
+    "AuditEvent",
+    "PolicyResult",
+    # Metadata
+    "__version__",
+    "__rust_crate_version__",
+]

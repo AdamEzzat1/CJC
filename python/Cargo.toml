@@ -1,0 +1,48 @@
+# Standalone workspace declaration so this crate is excluded from the
+# main CJC workspace even when the worktree's parent doesn't see the
+# `exclude = ["python"]` setting (git worktrees share Cargo state with
+# the main checkout). The empty `[workspace]` table tells Cargo to
+# treat this directory as its own root.
+[workspace]
+
+[package]
+name = "cjc-locke-py"
+version = "0.1.0"
+edition = "2021"
+authors = ["Adam Ezzat"]
+license = "MIT"
+description = "Python wrapper for cjc-locke — deterministic dataset validation, drift detection, and lineage audit"
+publish = false
+
+# Excluded from the main workspace so `cargo build --workspace` does not
+# require Python headers on the build machine. Build via maturin:
+#
+#     pip install maturin
+#     maturin develop --release    # local dev install
+#     maturin build --release      # produce a wheel in target/wheels/
+
+[lib]
+# `_cjc_locke` matches the Python facade's import:  from cjc_locke import _cjc_locke
+name = "_cjc_locke"
+crate-type = ["cdylib"]
+
+[dependencies]
+# PyO3 0.22 — stable Rust API, Bound-handle style.
+# `abi3-py39` produces a single wheel compatible with every CPython 3.9+
+# without per-version rebuilds. Big win for distribution; no perf cost.
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
+
+# Zero-copy numpy buffer access for f64/i64 columns. Without this we'd
+# iterate Python lists element-by-element which is ~100× slower.
+numpy = "0.22"
+
+# The crates we expose. Path-deps so they always match the workspace.
+cjc-locke = { path = "../crates/cjc-locke" }
+cjc-data = { path = "../crates/cjc-data" }
+
+[profile.release]
+# Match the main workspace's release profile so the produced .so is
+# subject to the same optimization (full LTO + 1 codegen unit). Slower
+# build but consistent performance with the in-workspace Rust binaries.
+lto = true
+codegen-units = 1
