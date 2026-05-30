@@ -877,9 +877,7 @@ pub fn detect_confusable_scripts(
 /// * UTF-8 3-byte sequences for smart quotes / em-dash (U+2018..U+201F /
 ///   U+2013..U+2014) become "â" + Windows-1252 special (€/‚/„/™/etc.).
 fn count_mojibake_signatures(s: &str) -> usize {
-    let chars: Vec<char> = s.chars().collect();
     let mut n = 0;
-    let mut i = 0;
     fn in_latin1_supp(c: char) -> bool {
         let code = c as u32;
         (0x0080..=0x00FF).contains(&code)
@@ -903,8 +901,15 @@ fn count_mojibake_signatures(s: &str) -> usize {
             | '\u{0161}' | '\u{0153}' // š œ
         )
     }
-    while i + 1 < chars.len() {
-        let (a, b) = (chars[i], chars[i + 1]);
+    // Walk the chars as a stream of overlapping two-char windows. The
+    // original implementation collected into Vec<char> (one heap alloc
+    // per call); peekable() lets us read pairs lazily — same byte-equal
+    // count, no Vec allocation. Pattern matches consume both chars (next
+    // + next), non-matches consume only `a` so `b` slides into the next
+    // iteration as `a`, preserving the original `i += 1` semantics.
+    let mut iter = s.chars().peekable();
+    while let Some(a) = iter.next() {
+        let Some(&b) = iter.peek() else { break };
         // Latin-1 high-byte residue from UTF-8 2-byte:
         //   Ã + Latin-1-supp char → was original é/è/à/ñ/...
         //   Â + Latin-1-supp char → was original ©/®/°/non-breaking-space/...
@@ -912,19 +917,19 @@ fn count_mojibake_signatures(s: &str) -> usize {
             && (in_latin1_supp(b) || b.is_ascii_alphabetic())
         {
             n += 1;
-            i += 2;
+            iter.next();
             continue;
         }
         // 3-byte residue: â + Windows-1252 special → was smart-quote /
         // dash / bullet / etc.
         if a == 'â' && is_win1252_special(b) {
             n += 1;
-            // Advance by 2 (the third char of the original triple may or
-            // may not be present after Latin-1 → Win-1252 substitution).
-            i += 2;
+            // Consume `b` so the third char of the original triple (if
+            // any) starts a fresh window — matches the original
+            // `i += 2` semantics.
+            iter.next();
             continue;
         }
-        i += 1;
     }
     n
 }

@@ -344,6 +344,14 @@ pub fn penalty_from_findings(findings: &[ValidationFinding], dim_filter: impl Fn
 
 /// v0.3: user-tunable variant. Same shape as `penalty_from_findings`
 /// but takes an explicit `BeliefPenalty` model.
+///
+/// The return is **clamped to `[0, 1]`**: a sufficiently noisy report
+/// (many high-severity findings) can produce an uncapped sum > 1.0,
+/// but the caller's contract is `axis_score = 1.0 - penalty` which
+/// only makes sense in `[0, 1]`. Every existing caller already routed
+/// the result through `BeliefScore::from_dimensions` (which clamps
+/// per-axis), so the clamp here is byte-identical at the caller's
+/// boundary — it just makes the contract explicit at the source.
 pub fn penalty_from_findings_with_model(
     findings: &[ValidationFinding],
     dim_filter: impl Fn(&str) -> bool,
@@ -356,7 +364,7 @@ pub fn penalty_from_findings_with_model(
         }
         penalty += model.for_severity(f.severity);
     }
-    penalty
+    penalty.clamp(0.0, 1.0)
 }
 
 #[cfg(test)]

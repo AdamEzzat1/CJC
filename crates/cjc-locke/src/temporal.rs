@@ -33,8 +33,6 @@ pub struct TimeColumnConfig {
     /// Successive timestamps separated by more than `gap_threshold`
     /// trigger an E9053 Notice. `None` disables the check.
     pub gap_threshold: Option<i64>,
-    /// Treat the time column as epoch milliseconds (default) or seconds.
-    pub unit_is_millis: bool,
 }
 
 impl Default for TimeColumnConfig {
@@ -42,7 +40,6 @@ impl Default for TimeColumnConfig {
         Self {
             max_timestamp: None,
             gap_threshold: None,
-            unit_is_millis: true,
         }
     }
 }

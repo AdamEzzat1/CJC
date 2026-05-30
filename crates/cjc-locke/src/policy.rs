@@ -256,6 +256,13 @@ impl SuppressionRule {
 
     /// Convenience constructor: pattern-based suppression rule. Routes
     /// through [`ColumnMatcher::from_pattern`].
+    ///
+    /// **Empty pattern behaviour**: `pattern(code, "", reason)` produces
+    /// a rule with `column = Some(ColumnMatcher::Exact(""))`, which only
+    /// matches findings whose `column` is literally the empty string —
+    /// effectively inert. To suppress a code across **all** columns
+    /// (including dataset-wide findings with `column: None`), use
+    /// [`SuppressionRule::any_column`] instead.
     pub fn pattern(code: impl Into<String>, pattern: impl AsRef<str>, reason: impl Into<String>) -> Self {
         Self {
             code: code.into(),
@@ -789,6 +796,27 @@ mod tests {
     }
 
     #[test]
+    fn pattern_empty_string_yields_inert_exact_rule() {
+        // Pins the (documented) behaviour of `SuppressionRule::pattern("")`.
+        // The constructed rule has `column = Some(Exact(""))`, so it only
+        // matches findings whose column is literally `""` — effectively
+        // inert. Callers wanting code-only suppression must use
+        // `SuppressionRule::any_column`.
+        let rule = SuppressionRule::pattern("E9001", "", "intended as code-only");
+        match rule.column.as_ref() {
+            Some(ColumnMatcher::Exact(s)) => assert_eq!(s, ""),
+            other => panic!("expected Some(Exact(\"\")), got {:?}", other),
+        }
+        // Real-world finding with a non-empty column does NOT match.
+        let report = report_with_e9001();
+        let f = report.findings.iter().find(|f| f.code == "E9001").unwrap();
+        assert!(
+            !suppression_matches(&rule, f),
+            "pattern(\"\") must not match a finding with a non-empty column",
+        );
+    }
+
+    #[test]
     fn glob_match_handles_anchored_prefix() {
         // Prefix match — must start with `diag_`.
         assert!(glob_match("diag_*", "diag_1"));
@@ -992,6 +1020,42 @@ mod tests {
                 .iter()
                 .any(|f| f.id == a.finding_id)
         }));
+    }
+
+    #[test]
+    fn apply_policy_first_match_wins_for_owners() {
+        // Mirrors `apply_policy_first_match_wins_for_suppressions`: when
+        // multiple owner rules match the same finding, only the first
+        // produces an attribution. The owner-attribution loop in
+        // `apply_policy` uses `Iterator::find` which returns the
+        // earliest-declared match, so the policy author's ordering is
+        // load-bearing.
+        let report = report_with_e9001();
+        let policy = Policy {
+            suppressions: vec![],
+            owners: vec![
+                OwnerRule {
+                    team: "team-a".into(),
+                    column: None,
+                    code: Some("E9001".into()),
+                },
+                OwnerRule {
+                    team: "team-b".into(),
+                    column: None,
+                    code: Some("E9001".into()),
+                },
+            ],
+            requirements: vec![],
+        };
+        let result = apply_policy(&report, &policy);
+        assert!(
+            !result.attributions.is_empty(),
+            "expected at least one attribution"
+        );
+        for a in &result.attributions {
+            assert_eq!(a.rule_index, 0, "first matching owner rule must win");
+            assert_eq!(a.team, "team-a");
+        }
     }
 
     // ── Requirement evaluation ────────────────────────────────────────
