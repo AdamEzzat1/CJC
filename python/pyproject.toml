@@ -4,11 +4,12 @@ build-backend = "maturin"
 
 [project]
 name = "cjc-locke"
-version = "0.1.0"
+version = "0.1.1"
 description = "Deterministic dataset validation, drift detection, and lineage audit — Python wrapper for the cjc-locke Rust crate"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Adam Ezzat" }]
 keywords = ["validation", "drift", "lineage", "audit", "determinism", "data-quality"]
 classifiers = [

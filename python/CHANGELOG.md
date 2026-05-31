@@ -9,9 +9,34 @@ Rust crate. Wrapper versions may bump independently of the underlying
 crate (the wrapper's version is in `Cargo.toml` and `pyproject.toml`,
 the crate's version is pinned via `Cargo.toml`'s path dependency).
 
+## [0.1.1] — 2026-05-31
+
+First successful PyPI release.
+
+### Fixed
+
+- **PEP 639 license metadata mismatch** — `pyproject.toml` now uses
+  the modern `license = "MIT"` SPDX expression with explicit
+  `license-files = ["LICENSE"]`. The previous `license = { text = "MIT" }`
+  form caused maturin 1.13.3 to emit `License-File: LICENSE` metadata
+  without actually packing the file into the sdist, which PyPI rejected
+  with `400 License-File LICENSE does not exist in distribution file`.
+
+### Release-train notes
+
+- The `0.1.0` namespace on PyPI is permanently reserved by one orphan
+  wheel (`cjc_locke-0.1.0-cp39-abi3-win_arm64.whl`) that uploaded
+  successfully before the sdist publish failed. `pip install cjc-locke`
+  resolves to `0.1.1` by default; only an explicit `==0.1.0` pin on
+  Windows-on-ARM64 would resolve to the orphan.
+- CI workflow had its `Build free-threaded wheels` (python3.14t) steps
+  stripped because `pyo3 0.22` with `abi3-py39` cannot target
+  free-threaded Python's ABI. To re-enable: upgrade pyo3 to ≥0.23,
+  drop the abi3 feature, and emit per-Python-version wheels.
+
 ## [0.1.0] — 2026-05-30
 
-Initial public release.
+Initial public release (failed to publish — see 0.1.1 notes).
 
 ### Added
 
