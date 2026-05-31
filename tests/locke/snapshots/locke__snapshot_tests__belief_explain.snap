@@ -1,0 +1,16 @@
+---
+source: tests/locke/snapshot_tests.rs
+expression: rendered
+---
+n_rows: 5
+sample_score: 0.109
+
+overall=0.880
+  schema      = 1.000
+  missingness = 0.933
+  drift       = 1.000
+  leakage     = 1.000
+  lineage     = 1.000
+  sample      = 0.109
+  duplication = 1.000
+  constraint  = 1.000

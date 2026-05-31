@@ -1,0 +1,1454 @@
+# Locke Validation Report
+schema_version: 1
+dataset: tests/data/diabetes_130/diabetic_data.csv
+n_rows: 101766
+n_cols: 50
+run_id: 181a7f47c862b30c
+severity_counts: info=58 notice=75 warning=8 error=1
+assumptions:
+  - NaN treated as missing for Float columns; other types report a limitation
+  - missingness, drift, and belief use deterministic Kahan summation
+  - duplicate detection is byte-canonical
+findings:
+  - code=E9002 severity=info column=A1Cresult id=850a25bcfebe5789
+    message: column `A1Cresult` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=acarbose id=693a558d58be6f95
+    message: column `acarbose` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=acetohexamide id=087b228cb8c748ec
+    message: column `acetohexamide` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=admission_source_id id=1ae43205834d1763
+    message: column `admission_source_id` is of type `Bool`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Bool"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=admission_type_id id=e6e4b2da11eda272
+    message: column `admission_type_id` is of type `Int`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Int"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=age id=c8babd2b9f740d06
+    message: column `age` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=change id=41275c138971d613
+    message: column `change` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=chlorpropamide id=58826f639d4cedd7
+    message: column `chlorpropamide` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=citoglipton id=4cf5f61cac499e08
+    message: column `citoglipton` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=diabetesMed id=4816db8d49d8b660
+    message: column `diabetesMed` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=diag_2 id=7d1bdf3f922d5e0e
+    message: column `diag_2` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=diag_3 id=5bb6b86e29662cba
+    message: column `diag_3` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=discharge_disposition_id id=9026fb994cff5f2a
+    message: column `discharge_disposition_id` is of type `Int`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Int"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=encounter_id id=d6aa2cc791c9263c
+    message: column `encounter_id` is of type `Int`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Int"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=examide id=fac378847d9986df
+    message: column `examide` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=gender id=cdfef56b9094e1ae
+    message: column `gender` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=glimepiride id=3373e3d89d303947
+    message: column `glimepiride` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=glimepiride-pioglitazone id=fd55eb1ae55bb59d
+    message: column `glimepiride-pioglitazone` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=glipizide id=a314ae7d96c342f8
+    message: column `glipizide` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=glipizide-metformin id=245f4d9172dfcb03
+    message: column `glipizide-metformin` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=glyburide id=9aa52006c506d0a9
+    message: column `glyburide` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=glyburide-metformin id=a055cb9c1f5d6481
+    message: column `glyburide-metformin` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=insulin id=d61b759bd25a8284
+    message: column `insulin` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=max_glu_serum id=7c34ca042662cff0
+    message: column `max_glu_serum` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=medical_specialty id=b9d190aa22a8d6f6
+    message: column `medical_specialty` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=metformin id=cbe282bc8b80a128
+    message: column `metformin` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=metformin-pioglitazone id=e66b3686e9ddfbf3
+    message: column `metformin-pioglitazone` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=metformin-rosiglitazone id=4ce951bd2fe03ea7
+    message: column `metformin-rosiglitazone` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=miglitol id=0b002c20d1a44d8f
+    message: column `miglitol` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=nateglinide id=ff2447ab70d223bf
+    message: column `nateglinide` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=num_lab_procedures id=381c347a3c674883
+    message: column `num_lab_procedures` is of type `Int`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Int"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=num_medications id=3bef6812ecaeb584
+    message: column `num_medications` is of type `Bool`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Bool"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=num_procedures id=22d136d9d47dbd8c
+    message: column `num_procedures` is of type `Bool`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Bool"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=number_diagnoses id=0d5896798858209e
+    message: column `number_diagnoses` is of type `Bool`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Bool"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=number_emergency id=14836b32d810562e
+    message: column `number_emergency` is of type `Bool`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Bool"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=number_inpatient id=5438044c1938e056
+    message: column `number_inpatient` is of type `Bool`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Bool"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=number_outpatient id=6c081b79fe2bcee0
+    message: column `number_outpatient` is of type `Bool`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Bool"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=patient_nbr id=4d1bb14ed6128049
+    message: column `patient_nbr` is of type `Int`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Int"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=payer_code id=2872179b14d4091e
+    message: column `payer_code` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=pioglitazone id=e5390a6a0555d3da
+    message: column `pioglitazone` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=race id=2879f3b6f180a425
+    message: column `race` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=readmitted id=23189a5eb76f4479
+    message: column `readmitted` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=repaglinide id=77cb535a18bdf079
+    message: column `repaglinide` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=rosiglitazone id=895a8f60ae940a7b
+    message: column `rosiglitazone` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=time_in_hospital id=9f9fdd5b14461370
+    message: column `time_in_hospital` is of type `Bool`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Bool"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=tolazamide id=59b36d73fdba6a4c
+    message: column `tolazamide` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=tolbutamide id=cea28484738f3141
+    message: column `tolbutamide` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=troglitazone id=d98bc15d29adaebc
+    message: column `troglitazone` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9002 severity=info column=weight id=011978e2f73a8515
+    message: column `weight` is of type `Str`; no null mask supplied so missingness cannot be inferred
+    evidence:
+      - type="Str"
+    assumptions:
+      - Locke treats only Float NaN as missing without a null mask
+      - supply ValidateOptions.null_masks to mark null rows explicitly
+    next_checks:
+      - if missingness matters here, build a NullMask::from_indices(...) for this column
+  - code=E9007 severity=info column=A1Cresult id=c9e7662f644e397e
+    message: column `A1Cresult` has 84748 occurrences of "None" (83.3%); may be a sentinel missing value
+    evidence:
+      - occurrences=84748
+      - rate=0.832773
+      - sentinel="\"None\""
+      - kind="string"
+    assumptions:
+      - sentinel detection is heuristic — `-1` may be real data in a delta column
+      - Locke only surfaces candidates; the user decides whether to treat as null
+    next_checks:
+      - if this is missing, declare it via NullMask::from_indices(...) in v0.2+
+      - or filter / impute at source
+  - code=E9007 severity=info column=diag_3 id=f1040e507005a9a2
+    message: column `diag_3` has 1423 occurrences of "?" (1.4%); may be a sentinel missing value
+    evidence:
+      - occurrences=1423
+      - rate=0.013983
+      - sentinel="\"?\""
+      - kind="string"
+    assumptions:
+      - sentinel detection is heuristic — `-1` may be real data in a delta column
+      - Locke only surfaces candidates; the user decides whether to treat as null
+    next_checks:
+      - if this is missing, declare it via NullMask::from_indices(...) in v0.2+
+      - or filter / impute at source
+  - code=E9007 severity=info column=max_glu_serum id=a0e708f8aef128f4
+    message: column `max_glu_serum` has 96420 occurrences of "None" (94.7%); may be a sentinel missing value
+    evidence:
+      - occurrences=96420
+      - rate=0.947468
+      - sentinel="\"None\""
+      - kind="string"
+    assumptions:
+      - sentinel detection is heuristic — `-1` may be real data in a delta column
+      - Locke only surfaces candidates; the user decides whether to treat as null
+    next_checks:
+      - if this is missing, declare it via NullMask::from_indices(...) in v0.2+
+      - or filter / impute at source
+  - code=E9007 severity=info column=medical_specialty id=92bb83a50c84dadf
+    message: column `medical_specialty` has 49949 occurrences of "?" (49.1%); may be a sentinel missing value
+    evidence:
+      - occurrences=49949
+      - rate=0.490822
+      - sentinel="\"?\""
+      - kind="string"
+    assumptions:
+      - sentinel detection is heuristic — `-1` may be real data in a delta column
+      - Locke only surfaces candidates; the user decides whether to treat as null
+    next_checks:
+      - if this is missing, declare it via NullMask::from_indices(...) in v0.2+
+      - or filter / impute at source
+  - code=E9007 severity=info column=payer_code id=74e3d636d3ff6b3c
+    message: column `payer_code` has 40256 occurrences of "?" (39.6%); may be a sentinel missing value
+    evidence:
+      - occurrences=40256
+      - rate=0.395574
+      - sentinel="\"?\""
+      - kind="string"
+    assumptions:
+      - sentinel detection is heuristic — `-1` may be real data in a delta column
+      - Locke only surfaces candidates; the user decides whether to treat as null
+    next_checks:
+      - if this is missing, declare it via NullMask::from_indices(...) in v0.2+
+      - or filter / impute at source
+  - code=E9007 severity=info column=race id=47a52634d3f7e03e
+    message: column `race` has 2273 occurrences of "?" (2.2%); may be a sentinel missing value
+    evidence:
+      - occurrences=2273
+      - rate=0.022336
+      - sentinel="\"?\""
+      - kind="string"
+    assumptions:
+      - sentinel detection is heuristic — `-1` may be real data in a delta column
+      - Locke only surfaces candidates; the user decides whether to treat as null
+    next_checks:
+      - if this is missing, declare it via NullMask::from_indices(...) in v0.2+
+      - or filter / impute at source
+  - code=E9007 severity=info column=weight id=4f1f0c30b24f4883
+    message: column `weight` has 98569 occurrences of "?" (96.9%); may be a sentinel missing value
+    evidence:
+      - occurrences=98569
+      - rate=0.968585
+      - sentinel="\"?\""
+      - kind="string"
+    assumptions:
+      - sentinel detection is heuristic — `-1` may be real data in a delta column
+      - Locke only surfaces candidates; the user decides whether to treat as null
+    next_checks:
+      - if this is missing, declare it via NullMask::from_indices(...) in v0.2+
+      - or filter / impute at source
+  - code=E9082 severity=info column=diag_2 id=6761e467750c70b7
+    message: column `diag_2` has 749 distinct values, above the edit-distance scan cap (200); skipped
+    evidence:
+      - n_distinct=749
+      - scan_cap=200
+    assumptions:
+      - edit-distance scan is O(N²·L); skipped to preserve responsiveness
+    next_checks:
+      - raise `max_categories_for_edit_distance` if you need this column scanned
+  - code=E9082 severity=info column=diag_3 id=41c44d28a9ad492f
+    message: column `diag_3` has 790 distinct values, above the edit-distance scan cap (200); skipped
+    evidence:
+      - n_distinct=790
+      - scan_cap=200
+    assumptions:
+      - edit-distance scan is O(N²·L); skipped to preserve responsiveness
+    next_checks:
+      - raise `max_categories_for_edit_distance` if you need this column scanned
+  - code=E9011 severity=notice column=acarbose id=5d5211cd7789c615
+    message: column `acarbose` is near-constant: top value occupies 99.7% of rows
+    evidence:
+      - top_freq_ratio=0.996973
+      - distinct=4
+    assumptions:
+      - near-constant threshold 0.99
+    next_checks:
+      - consider whether this column carries useful signal
+      - examine the rare-value rows manually
+  - code=E9011 severity=notice column=acetohexamide id=a28dc56f6bc7aebf
+    message: column `acetohexamide` is near-constant: top value occupies 100.0% of rows
+    evidence:
+      - top_freq_ratio=0.999990
+      - distinct=2
+    assumptions:
+      - near-constant threshold 0.99
+    next_checks:
+      - consider whether this column carries useful signal
+      - examine the rare-value rows manually
+  - code=E9011 severity=notice column=chlorpropamide id=8f129cffe4532e6e
+    message: column `chlorpropamide` is near-constant: top value occupies 99.9% of rows
+    evidence:
+      - top_freq_ratio=0.999155
+      - distinct=4
+    assumptions:
+      - near-constant threshold 0.99
+    next_checks:
+      - consider whether this column carries useful signal
+      - examine the rare-value rows manually
+  - code=E9011 severity=notice column=glimepiride-pioglitazone id=46f8755b6733ec75
+    message: column `glimepiride-pioglitazone` is near-constant: top value occupies 100.0% of rows
+    evidence:
+      - top_freq_ratio=0.999990
+      - distinct=2
+    assumptions:
+      - near-constant threshold 0.99
+    next_checks:
+      - consider whether this column carries useful signal
+      - examine the rare-value rows manually
+  - code=E9011 severity=notice column=glipizide-metformin id=088fcb7291191ae5
+    message: column `glipizide-metformin` is near-constant: top value occupies 100.0% of rows
+    evidence:
+      - top_freq_ratio=0.999872
+      - distinct=2
+    assumptions:
+      - near-constant threshold 0.99
+    next_checks:
+      - consider whether this column carries useful signal
+      - examine the rare-value rows manually
+  - code=E9011 severity=notice column=glyburide-metformin id=928a18acfd1badc3
+    message: column `glyburide-metformin` is near-constant: top value occupies 99.3% of rows
+    evidence:
+      - top_freq_ratio=0.993063
+      - distinct=4
+    assumptions:
+      - near-constant threshold 0.99
+    next_checks:
+      - consider whether this column carries useful signal
+      - examine the rare-value rows manually
+  - code=E9011 severity=notice column=metformin-pioglitazone id=1336dc1ddce1fde6
+    message: column `metformin-pioglitazone` is near-constant: top value occupies 100.0% of rows
+    evidence:
+      - top_freq_ratio=0.999990
+      - distinct=2
+    assumptions:
+      - near-constant threshold 0.99
+    next_checks:
+      - consider whether this column carries useful signal
+      - examine the rare-value rows manually
+  - code=E9011 severity=notice column=metformin-rosiglitazone id=d6d31854533d9259
+    message: column `metformin-rosiglitazone` is near-constant: top value occupies 100.0% of rows
+    evidence:
+      - top_freq_ratio=0.999980
+      - distinct=2
+    assumptions:
+      - near-constant threshold 0.99
+    next_checks:
+      - consider whether this column carries useful signal
+      - examine the rare-value rows manually
+  - code=E9011 severity=notice column=miglitol id=a681687057e71e7f
+    message: column `miglitol` is near-constant: top value occupies 100.0% of rows
+    evidence:
+      - top_freq_ratio=0.999627
+      - distinct=4
+    assumptions:
+      - near-constant threshold 0.99
+    next_checks:
+      - consider whether this column carries useful signal
+      - examine the rare-value rows manually
+  - code=E9011 severity=notice column=nateglinide id=29daa0a25ecc947d
+    message: column `nateglinide` is near-constant: top value occupies 99.3% of rows
+    evidence:
+      - top_freq_ratio=0.993092
+      - distinct=4
+    assumptions:
+      - near-constant threshold 0.99
+    next_checks:
+      - consider whether this column carries useful signal
+      - examine the rare-value rows manually
+  - code=E9011 severity=notice column=num_medications id=ddf56bc568fb68b5
+    message: column `num_medications` is near-constant: top value occupies 99.7% of rows
+    evidence:
+      - top_freq_ratio=0.997425
+      - distinct=2
+    assumptions:
+      - near-constant threshold 0.99
+    next_checks:
+      - consider whether this column carries useful signal
+      - examine the rare-value rows manually
+  - code=E9011 severity=notice column=number_diagnoses id=99e427f6023f237e
+    message: column `number_diagnoses` is near-constant: top value occupies 99.8% of rows
+    evidence:
+      - top_freq_ratio=0.997848
+      - distinct=2
+    assumptions:
+      - near-constant threshold 0.99
+    next_checks:
+      - consider whether this column carries useful signal
+      - examine the rare-value rows manually
+  - code=E9011 severity=notice column=tolazamide id=d5a8f77782e7e9b5
+    message: column `tolazamide` is near-constant: top value occupies 100.0% of rows
+    evidence:
+      - top_freq_ratio=0.999617
+      - distinct=3
+    assumptions:
+      - near-constant threshold 0.99
+    next_checks:
+      - consider whether this column carries useful signal
+      - examine the rare-value rows manually
+  - code=E9011 severity=notice column=tolbutamide id=9a1b2ff49df13f9e
+    message: column `tolbutamide` is near-constant: top value occupies 100.0% of rows
+    evidence:
+      - top_freq_ratio=0.999774
+      - distinct=2
+    assumptions:
+      - near-constant threshold 0.99
+    next_checks:
+      - consider whether this column carries useful signal
+      - examine the rare-value rows manually
+  - code=E9011 severity=notice column=troglitazone id=3ba8753da0cccc2c
+    message: column `troglitazone` is near-constant: top value occupies 100.0% of rows
+    evidence:
+      - top_freq_ratio=0.999971
+      - distinct=2
+    assumptions:
+      - near-constant threshold 0.99
+    next_checks:
+      - consider whether this column carries useful signal
+      - examine the rare-value rows manually
+  - code=E9016 severity=notice column=diag_2 id=871df8b7d592bf8a
+    message: column `diag_2` has 262 rare categories (count < 5) covering 507 rows (0.5%)
+    evidence:
+      - n_rare_categories=262
+      - total_rare_rows=507
+      - rare_share=0.004982
+      - n_distinct=749
+      - sample="\"111\":1, \"114\":1, \"115\":1, \"123\":1, \"130\":1"
+    assumptions:
+      - rare categories destabilise embeddings and one-hot encoders
+      - a category with count 1 in the training split contributes a leaf seen exactly once
+    next_checks:
+      - consider grouping rare categories into an `__other__` bucket
+      - or treating long-tail categories as the column's missing-value sentinel
+  - code=E9016 severity=notice column=diag_3 id=d5248f84c122d867
+    message: column `diag_3` has 268 rare categories (count < 5) covering 535 rows (0.5%)
+    evidence:
+      - n_rare_categories=268
+      - total_rare_rows=535
+      - rare_share=0.005257
+      - n_distinct=790
+      - sample="\"111\":1, \"115\":1, \"122\":1, \"123\":1, \"14\":1"
+    assumptions:
+      - rare categories destabilise embeddings and one-hot encoders
+      - a category with count 1 in the training split contributes a leaf seen exactly once
+    next_checks:
+      - consider grouping rare categories into an `__other__` bucket
+      - or treating long-tail categories as the column's missing-value sentinel
+  - code=E9016 severity=notice column=medical_specialty id=7e955e9f9aed6b3f
+    message: column `medical_specialty` has 14 rare categories (count < 5) covering 25 rows (0.0%)
+    evidence:
+      - n_rare_categories=14
+      - total_rare_rows=25
+      - rare_share=0.000246
+      - n_distinct=73
+      - sample="\"Dermatology\":1, \"Neurophysiology\":1, \"Pediatrics-InfectiousDiseases\":1, \"Perinatology\":1, \"Proctology\":1"
+    assumptions:
+      - rare categories destabilise embeddings and one-hot encoders
+      - a category with count 1 in the training split contributes a leaf seen exactly once
+    next_checks:
+      - consider grouping rare categories into an `__other__` bucket
+      - or treating long-tail categories as the column's missing-value sentinel
+  - code=E9017 severity=notice column=diag_2 id=02aacee04e499dae
+    message: column `diag_2` has 749 distinct values (> 50 threshold); one-hot encoding may produce sparse unstable features
+    evidence:
+      - n_distinct=749
+      - one_hot_threshold=50
+      - cardinality_ratio=0.007360
+    assumptions:
+      - this is an encoding-design hint, not an ID-leakage claim (see E9072 for the ≥0.95 case)
+      - the threshold is heuristic; raise it for legitimately wide categorical features
+    next_checks:
+      - consider target / mean encoding, hashing trick, or a small embedding
+      - if downstream is tree-based, ordinal-encoding with care may be fine
+  - code=E9017 severity=notice column=diag_3 id=dd45285a4d4309e1
+    message: column `diag_3` has 790 distinct values (> 50 threshold); one-hot encoding may produce sparse unstable features
+    evidence:
+      - n_distinct=790
+      - one_hot_threshold=50
+      - cardinality_ratio=0.007763
+    assumptions:
+      - this is an encoding-design hint, not an ID-leakage claim (see E9072 for the ≥0.95 case)
+      - the threshold is heuristic; raise it for legitimately wide categorical features
+    next_checks:
+      - consider target / mean encoding, hashing trick, or a small embedding
+      - if downstream is tree-based, ordinal-encoding with care may be fine
+  - code=E9017 severity=notice column=medical_specialty id=5cc05c13c3ecc517
+    message: column `medical_specialty` has 73 distinct values (> 50 threshold); one-hot encoding may produce sparse unstable features
+    evidence:
+      - n_distinct=73
+      - one_hot_threshold=50
+      - cardinality_ratio=0.000717
+    assumptions:
+      - this is an encoding-design hint, not an ID-leakage claim (see E9072 for the ≥0.95 case)
+      - the threshold is heuristic; raise it for legitimately wide categorical features
+    next_checks:
+      - consider target / mean encoding, hashing trick, or a small embedding
+      - if downstream is tree-based, ordinal-encoding with care may be fine
+  - code=E9023 severity=notice column=admission_type_id id=c444c3b058eca5cd
+    message: column `admission_type_id` has 8 distinct Int values densely packed in [1, 8] — looks like a label-encoded nominal, not an ordinal numeric
+    evidence:
+      - n_distinct=8
+      - value_range=[1.000000, 8.000000]
+      - range_density=1.000000
+      - distinct_values="1,2,3,4,5,6,7,8"
+    assumptions:
+      - label-encoding risk is heuristic; the column may be a true ordinal (age, rating) — Locke surfaces a hint, not a verdict
+      - tunable via LabelEncodingRiskConfig::max_distinct_for_risk and span_tightness
+    next_checks:
+      - if the values are categorical (e.g. discharge_disposition_id codes), one-hot encode or use embeddings
+      - if the values are ordinal, document the ordering and keep the Int representation
+  - code=E9023 severity=notice column=discharge_disposition_id id=1baab0f63c4f9e24
+    message: column `discharge_disposition_id` has 26 distinct Int values densely packed in [1, 28] — looks like a label-encoded nominal, not an ordinal numeric
+    evidence:
+      - n_distinct=26
+      - value_range=[1.000000, 28.000000]
+      - range_density=1.076923
+      - distinct_values="1,2,3,4,5,6,7,8"
+    assumptions:
+      - label-encoding risk is heuristic; the column may be a true ordinal (age, rating) — Locke surfaces a hint, not a verdict
+      - tunable via LabelEncodingRiskConfig::max_distinct_for_risk and span_tightness
+    next_checks:
+      - if the values are categorical (e.g. discharge_disposition_id codes), one-hot encode or use embeddings
+      - if the values are ordinal, document the ordering and keep the Int representation
+  - code=E9024 severity=notice column=discharge_disposition_id id=08ad3762b7386961
+    message: column `discharge_disposition_id` distribution shape: skewness outside normal range (skew = 2.563, excess_kurt = 6.003)
+    evidence:
+      - skewness=2.563029
+      - excess_kurtosis=6.002993
+      - n_valid=101766
+      - top_modes="\"1\":60234, \"3\":13954, \"6\":12902"
+    assumptions:
+      - skewness > 0 indicates right tail; < 0 indicates left tail
+      - positive excess kurtosis means heavier tails than Gaussian
+      - thresholds are heuristic (default |skew|>2, |excess_kurt|>7); tune via ShapeConfig
+    next_checks:
+      - consider log / Box-Cox transformation if downstream assumes normality
+      - review the top modes — concentration around a few values is often a real signal (sentinels, defaults)
+  - code=E9040 severity=notice column=admission_type_id id=e6298052b91f895c
+    message: column `admission_type_id` has 341 mild outliers (1.5×IQR or |mod-Z| ≥ 3.5)
+    evidence:
+      - n_mild=341
+      - iqr_q1_q3=[1.000000, 3.000000]
+      - iqr=2.000000
+      - mad=0.000000
+    assumptions:
+      - outliers are flagged by IQR (1.5×) or modified-Z (≥3.5)
+      - not all outliers are errors — check whether they're plausible at source
+    next_checks:
+      - inspect the sample rows
+      - decide imputation, clipping, or 'this is a real tail' policy
+  - code=E9040 severity=notice column=diag_1 id=ced42586576b4d9a
+    message: column `diag_1` has 8332 mild outliers (1.5×IQR or |mod-Z| ≥ 3.5)
+    evidence:
+      - n_mild=8332
+      - iqr_q1_q3=[404.000000, 594.000000]
+      - iqr=190.000000
+      - mad=140.000000
+    assumptions:
+      - outliers are flagged by IQR (1.5×) or modified-Z (≥3.5)
+      - not all outliers are errors — check whether they're plausible at source
+    next_checks:
+      - inspect the sample rows
+      - decide imputation, clipping, or 'this is a real tail' policy
+  - code=E9040 severity=notice column=discharge_disposition_id id=01ab76f7ac3ccadf
+    message: column `discharge_disposition_id` has 2071 mild outliers (1.5×IQR or |mod-Z| ≥ 3.5)
+    evidence:
+      - n_mild=2071
+      - iqr_q1_q3=[1.000000, 4.000000]
+      - iqr=3.000000
+      - mad=0.000000
+    assumptions:
+      - outliers are flagged by IQR (1.5×) or modified-Z (≥3.5)
+      - not all outliers are errors — check whether they're plausible at source
+    next_checks:
+      - inspect the sample rows
+      - decide imputation, clipping, or 'this is a real tail' policy
+  - code=E9040 severity=notice column=num_lab_procedures id=461d15ffd8ed45a7
+    message: column `num_lab_procedures` has 143 mild outliers (1.5×IQR or |mod-Z| ≥ 3.5)
+    evidence:
+      - n_mild=143
+      - iqr_q1_q3=[31.000000, 57.000000]
+      - iqr=26.000000
+      - mad=13.000000
+    assumptions:
+      - outliers are flagged by IQR (1.5×) or modified-Z (≥3.5)
+      - not all outliers are errors — check whether they're plausible at source
+    next_checks:
+      - inspect the sample rows
+      - decide imputation, clipping, or 'this is a real tail' policy
+  - code=E9040 severity=notice column=patient_nbr id=6d74f486003893b8
+    message: column `patient_nbr` has 247 mild outliers (1.5×IQR or |mod-Z| ≥ 3.5)
+    evidence:
+      - n_mild=247
+      - iqr_q1_q3=[23413221.000000, 87545949.750000]
+      - iqr=64132728.750000
+      - mad=32950134.000000
+    assumptions:
+      - outliers are flagged by IQR (1.5×) or modified-Z (≥3.5)
+      - not all outliers are errors — check whether they're plausible at source
+    next_checks:
+      - inspect the sample rows
+      - decide imputation, clipping, or 'this is a real tail' policy
+  - code=E9062 severity=notice column=readmitted id=8c1018546de920ab
+    message: target column `readmitted` is not a binary type (Bool or Int-with-exactly-2-distinct); target leakage check skipped
+    assumptions:
+      - v0.5 supports only binary targets for the per-feature AUC check
+    next_checks:
+      - encode the target as Bool or 0/1 Int
+      - multi-class AUC support is on the v0.6 roadmap
+  - code=E9072 severity=notice column=encounter_id id=f1e5b6d5132fe129
+    message: column `encounter_id` has cardinality 101766 / 101766 rows = 1.000; may be an ID leaking as a feature
+    evidence:
+      - distinct=101766
+      - distinct_per_row=1.000000
+    assumptions:
+      - ID-like columns memorise the training set and don't generalise
+      - high cardinality may also be legitimate (a free-text field) — Locke surfaces a hint, not a verdict
+    next_checks:
+      - drop the column if it's a customer/row/transaction ID
+      - hash to a low-cardinality bucket if you must retain the value
+  - code=E9073 severity=notice column=A1Cresult id=006a1e5ba4c57b5f
+    message: duplicate-key groups disagree on column `A1Cresult` in 4912 group(s)
+    evidence:
+      - n_groups_with_disagreement=4912
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `A1Cresult`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=acarbose id=ecb33f5b46755d2b
+    message: duplicate-key groups disagree on column `acarbose` in 82 group(s)
+    evidence:
+      - n_groups_with_disagreement=82
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `acarbose`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=admission_source_id id=ea048e41c478a7f5
+    message: duplicate-key groups disagree on column `admission_source_id` in 6206 group(s)
+    evidence:
+      - n_groups_with_disagreement=6206
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `admission_source_id`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=admission_type_id id=5112a32284696ce8
+    message: duplicate-key groups disagree on column `admission_type_id` in 7800 group(s)
+    evidence:
+      - n_groups_with_disagreement=7800
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `admission_type_id`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=age id=321614a8dfaf8e2e
+    message: duplicate-key groups disagree on column `age` in 1574 group(s)
+    evidence:
+      - n_groups_with_disagreement=1574
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `age`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=change id=7d7c6dfe2b2e4c4c
+    message: duplicate-key groups disagree on column `change` in 6556 group(s)
+    evidence:
+      - n_groups_with_disagreement=6556
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `change`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=chlorpropamide id=ae26cdf9f7488e87
+    message: duplicate-key groups disagree on column `chlorpropamide` in 15 group(s)
+    evidence:
+      - n_groups_with_disagreement=15
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `chlorpropamide`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=diabetesMed id=fb5b82cb43e58740
+    message: duplicate-key groups disagree on column `diabetesMed` in 4240 group(s)
+    evidence:
+      - n_groups_with_disagreement=4240
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `diabetesMed`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=diag_1 id=65671be7698fb1b1
+    message: duplicate-key groups disagree on column `diag_1` in 14678 group(s)
+    evidence:
+      - n_groups_with_disagreement=14678
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `diag_1`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=diag_2 id=9e0cf5302875c202
+    message: duplicate-key groups disagree on column `diag_2` in 15172 group(s)
+    evidence:
+      - n_groups_with_disagreement=15172
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `diag_2`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=diag_3 id=4ce88abb2cb7f412
+    message: duplicate-key groups disagree on column `diag_3` in 15642 group(s)
+    evidence:
+      - n_groups_with_disagreement=15642
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `diag_3`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=discharge_disposition_id id=133994a466ed5ba2
+    message: duplicate-key groups disagree on column `discharge_disposition_id` in 8611 group(s)
+    evidence:
+      - n_groups_with_disagreement=8611
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `discharge_disposition_id`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=encounter_id id=806ceca7ef459379
+    message: duplicate-key groups disagree on column `encounter_id` in 16773 group(s)
+    evidence:
+      - n_groups_with_disagreement=16773
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `encounter_id`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=gender id=87eff7f70e5f6d5b
+    message: duplicate-key groups disagree on column `gender` in 3 group(s)
+    evidence:
+      - n_groups_with_disagreement=3
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `gender`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=glimepiride id=c1c494f2826e2411
+    message: duplicate-key groups disagree on column `glimepiride` in 972 group(s)
+    evidence:
+      - n_groups_with_disagreement=972
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `glimepiride`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=glimepiride-pioglitazone id=0d2350fda8bfc0f3
+    message: duplicate-key groups disagree on column `glimepiride-pioglitazone` in 1 group(s)
+    evidence:
+      - n_groups_with_disagreement=1
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `glimepiride-pioglitazone`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=glipizide id=dcde72f62ecccb6c
+    message: duplicate-key groups disagree on column `glipizide` in 2264 group(s)
+    evidence:
+      - n_groups_with_disagreement=2264
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `glipizide`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=glipizide-metformin id=79273288a34cfd1f
+    message: duplicate-key groups disagree on column `glipizide-metformin` in 5 group(s)
+    evidence:
+      - n_groups_with_disagreement=5
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `glipizide-metformin`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=glyburide id=0e2a8a7a2ae093ca
+    message: duplicate-key groups disagree on column `glyburide` in 1911 group(s)
+    evidence:
+      - n_groups_with_disagreement=1911
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `glyburide`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=glyburide-metformin id=ab243d26dc681664
+    message: duplicate-key groups disagree on column `glyburide-metformin` in 151 group(s)
+    evidence:
+      - n_groups_with_disagreement=151
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `glyburide-metformin`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=insulin id=44898fdde248a4e3
+    message: duplicate-key groups disagree on column `insulin` in 9016 group(s)
+    evidence:
+      - n_groups_with_disagreement=9016
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `insulin`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=max_glu_serum id=dd8e674fd54f7e74
+    message: duplicate-key groups disagree on column `max_glu_serum` in 798 group(s)
+    evidence:
+      - n_groups_with_disagreement=798
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `max_glu_serum`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=medical_specialty id=c85b4262329ac204
+    message: duplicate-key groups disagree on column `medical_specialty` in 6388 group(s)
+    evidence:
+      - n_groups_with_disagreement=6388
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `medical_specialty`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=metformin id=0c5ad5759bb0233f
+    message: duplicate-key groups disagree on column `metformin` in 3490 group(s)
+    evidence:
+      - n_groups_with_disagreement=3490
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `metformin`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=miglitol id=b26200961b2df7f2
+    message: duplicate-key groups disagree on column `miglitol` in 10 group(s)
+    evidence:
+      - n_groups_with_disagreement=10
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `miglitol`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=nateglinide id=4d32482833dd9536
+    message: duplicate-key groups disagree on column `nateglinide` in 156 group(s)
+    evidence:
+      - n_groups_with_disagreement=156
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `nateglinide`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=num_lab_procedures id=8093d38ba927296d
+    message: duplicate-key groups disagree on column `num_lab_procedures` in 16359 group(s)
+    evidence:
+      - n_groups_with_disagreement=16359
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `num_lab_procedures`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=num_medications id=a100eae269daad1c
+    message: duplicate-key groups disagree on column `num_medications` in 81 group(s)
+    evidence:
+      - n_groups_with_disagreement=81
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `num_medications`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=num_procedures id=e01e2260224781e2
+    message: duplicate-key groups disagree on column `num_procedures` in 6485 group(s)
+    evidence:
+      - n_groups_with_disagreement=6485
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `num_procedures`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=number_diagnoses id=e0c92fdbc50585cd
+    message: duplicate-key groups disagree on column `number_diagnoses` in 35 group(s)
+    evidence:
+      - n_groups_with_disagreement=35
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `number_diagnoses`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=number_emergency id=d6c721267712e2ae
+    message: duplicate-key groups disagree on column `number_emergency` in 2345 group(s)
+    evidence:
+      - n_groups_with_disagreement=2345
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `number_emergency`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=number_inpatient id=0dfa1194a7cf86a3
+    message: duplicate-key groups disagree on column `number_inpatient` in 13336 group(s)
+    evidence:
+      - n_groups_with_disagreement=13336
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `number_inpatient`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=number_outpatient id=75fb8275a63d3078
+    message: duplicate-key groups disagree on column `number_outpatient` in 2373 group(s)
+    evidence:
+      - n_groups_with_disagreement=2373
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `number_outpatient`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=payer_code id=c0811b4fcace153d
+    message: duplicate-key groups disagree on column `payer_code` in 3525 group(s)
+    evidence:
+      - n_groups_with_disagreement=3525
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `payer_code`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=pioglitazone id=d6cabe9319b3c751
+    message: duplicate-key groups disagree on column `pioglitazone` in 1339 group(s)
+    evidence:
+      - n_groups_with_disagreement=1339
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `pioglitazone`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=race id=0675c11c9d17cab7
+    message: duplicate-key groups disagree on column `race` in 249 group(s)
+    evidence:
+      - n_groups_with_disagreement=249
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `race`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=readmitted id=f1f371255cb42b9c
+    message: duplicate-key groups disagree on column `readmitted` in 14007 group(s)
+    evidence:
+      - n_groups_with_disagreement=14007
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `readmitted`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=repaglinide id=1a92b9061e7431ca
+    message: duplicate-key groups disagree on column `repaglinide` in 431 group(s)
+    evidence:
+      - n_groups_with_disagreement=431
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `repaglinide`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=rosiglitazone id=891df2ff0dbce6df
+    message: duplicate-key groups disagree on column `rosiglitazone` in 1216 group(s)
+    evidence:
+      - n_groups_with_disagreement=1216
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `rosiglitazone`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=time_in_hospital id=d85da83ccc4ee683
+    message: duplicate-key groups disagree on column `time_in_hospital` in 4091 group(s)
+    evidence:
+      - n_groups_with_disagreement=4091
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `time_in_hospital`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=tolazamide id=47f85f7f22cd0dea
+    message: duplicate-key groups disagree on column `tolazamide` in 7 group(s)
+    evidence:
+      - n_groups_with_disagreement=7
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `tolazamide`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=tolbutamide id=3da409b8087e1c2e
+    message: duplicate-key groups disagree on column `tolbutamide` in 4 group(s)
+    evidence:
+      - n_groups_with_disagreement=4
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `tolbutamide`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=troglitazone id=b27d68d1efb10399
+    message: duplicate-key groups disagree on column `troglitazone` in 1 group(s)
+    evidence:
+      - n_groups_with_disagreement=1
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `troglitazone`
+      - decide which value is authoritative
+  - code=E9073 severity=notice column=weight id=7df1667066a62eb0
+    message: duplicate-key groups disagree on column `weight` in 128 group(s)
+    evidence:
+      - n_groups_with_disagreement=128
+      - key_column="patient_nbr"
+    assumptions:
+      - rows sharing the same primary key but disagreeing on this column typically signal a join bug or stale data
+    next_checks:
+      - group by `patient_nbr` and inspect the rows that disagree on `weight`
+      - decide which value is authoritative
+  - code=E9010 severity=warning column=citoglipton id=2d146c406ea019e0
+    message: column `citoglipton` is constant
+    evidence:
+      - distinct=1
+    assumptions:
+      - constant features carry no predictive signal
+    next_checks:
+      - drop the column or check whether the ingest is correct
+  - code=E9010 severity=warning column=examide id=21c1e7bc397d236f
+    message: column `examide` is constant
+    evidence:
+      - distinct=1
+    assumptions:
+      - constant features carry no predictive signal
+    next_checks:
+      - drop the column or check whether the ingest is correct
+  - code=E9041 severity=warning column=discharge_disposition_id id=e90976b2a59918a3
+    message: column `discharge_disposition_id` has 7747 extreme outliers (3×IQR or |mod-Z| ≥ 5.0)
+    evidence:
+      - n_extreme=7747
+      - sample="row0=25,row117=25,row118=25"
+      - iqr_q1_q3=[1.000000, 4.000000]
+    assumptions:
+      - extreme outliers usually indicate sensor errors, sentinel values, or unit-mix-ups
+    next_checks:
+      - verify physical plausibility (e.g. age = 999, temperature = -9999)
+      - consider declaring sentinel values as nulls via NullMask
+  - code=E9082 severity=warning column=A1Cresult id=3ac3d88d47166cfc
+    message: column `A1Cresult` has 1 near-duplicate category pair(s) within edit distance ≤ 2
+    evidence:
+      - n_near_dup_pairs=1
+      - edit_distance_threshold=2
+      - rows_in_pairs=89738
+      - sample="\"None\"~\"Norm\"(d=2)"
+    assumptions:
+      - Levenshtein distance is character-level; short strings produce noise (cap via min_string_len)
+      - high-d small-edit pairs may be legitimate (e.g. "USA" vs "USB" — different products)
+    next_checks:
+      - review pairs; consolidate via controlled vocabulary if they are semantic duplicates
+      - for typo-driven duplicates, normalize at ingest with a fuzzy-match lookup
+  - code=E9082 severity=warning column=age id=afed9122e69d17d3
+    message: column `age` has 37 near-duplicate category pair(s) within edit distance ≤ 2
+    evidence:
+      - n_near_dup_pairs=37
+      - edit_distance_threshold=2
+      - rows_in_pairs=794738
+      - sample="\"[0-10)\"~\"[10-20)\"(d=2); \"[0-10)\"~\"[20-30)\"(d=2); \"[0-10)\"~\"[30-40)\"(d=2); \"[0-10)\"~\"[40-50)\"(d=2); \"[0-10)\"~\"[50-60)\"(d=2)"
+    assumptions:
+      - Levenshtein distance is character-level; short strings produce noise (cap via min_string_len)
+      - high-d small-edit pairs may be legitimate (e.g. "USA" vs "USB" — different products)
+    next_checks:
+      - review pairs; consolidate via controlled vocabulary if they are semantic duplicates
+      - for typo-driven duplicates, normalize at ingest with a fuzzy-match lookup
+  - code=E9082 severity=warning column=max_glu_serum id=0a4e9605ae63d315
+    message: column `max_glu_serum` has 2 near-duplicate category pair(s) within edit distance ≤ 2
+    evidence:
+      - n_near_dup_pairs=2
+      - edit_distance_threshold=2
+      - rows_in_pairs=101766
+      - sample="\">200\"~\">300\"(d=1); \"None\"~\"Norm\"(d=2)"
+    assumptions:
+      - Levenshtein distance is character-level; short strings produce noise (cap via min_string_len)
+      - high-d small-edit pairs may be legitimate (e.g. "USA" vs "USB" — different products)
+    next_checks:
+      - review pairs; consolidate via controlled vocabulary if they are semantic duplicates
+      - for typo-driven duplicates, normalize at ingest with a fuzzy-match lookup
+  - code=E9082 severity=warning column=medical_specialty id=bdfb253b63d47f51
+    message: column `medical_specialty` has 3 near-duplicate category pair(s) within edit distance ≤ 2
+    evidence:
+      - n_near_dup_pairs=3
+      - edit_distance_threshold=2
+      - rows_in_pairs=7304
+      - sample="\"Cardiology\"~\"Radiology\"(d=2); \"Dermatology\"~\"Hematology\"(d=2); \"Nephrology\"~\"Neurology\"(d=2)"
+    assumptions:
+      - Levenshtein distance is character-level; short strings produce noise (cap via min_string_len)
+      - high-d small-edit pairs may be legitimate (e.g. "USA" vs "USB" — different products)
+    next_checks:
+      - review pairs; consolidate via controlled vocabulary if they are semantic duplicates
+      - for typo-driven duplicates, normalize at ingest with a fuzzy-match lookup
+  - code=E9082 severity=warning column=weight id=29b2f5ec66586700
+    message: column `weight` has 5 near-duplicate category pair(s) within edit distance ≤ 2
+    evidence:
+      - n_near_dup_pairs=5
+      - edit_distance_threshold=2
+      - rows_in_pairs=4126
+      - sample="\"[0-25)\"~\"[50-75)\"(d=2); \"[100-125)\"~\"[150-175)\"(d=2); \"[125-150)\"~\"[25-50)\"(d=2); \"[150-175)\"~\"[50-75)\"(d=2); \"[175-200)\"~\"[75-100)\"(d=2)"
+    assumptions:
+      - Levenshtein distance is character-level; short strings produce noise (cap via min_string_len)
+      - high-d small-edit pairs may be legitimate (e.g. "USA" vs "USB" — different products)
+    next_checks:
+      - review pairs; consolidate via controlled vocabulary if they are semantic duplicates
+      - for typo-driven duplicates, normalize at ingest with a fuzzy-match lookup
+  - code=E9004 severity=error column=patient_nbr id=38d336afe2aed004
+    message: key column `patient_nbr` has 30248 duplicate values across 16773 groups
+    evidence:
+      - duplicate_keys=30248
+      - duplicate_groups=16773
+    assumptions:
+      - key uniqueness assumed; primary-key constraint not enforced by cjc-data
+    next_checks:
+      - check ingest pipeline; primary keys should be unique

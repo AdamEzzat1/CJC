@@ -1,0 +1,42 @@
+[build-system]
+requires = ["maturin>=1.4,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "cjc-locke"
+version = "0.1.0"
+description = "Deterministic dataset validation, drift detection, and lineage audit — Python wrapper for the cjc-locke Rust crate"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Adam Ezzat" }]
+keywords = ["validation", "drift", "lineage", "audit", "determinism", "data-quality"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Rust",
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+# Zero hard runtime deps. numpy/pandas/polars are user-installed.
+dependencies = []
+
+[project.optional-dependencies]
+numpy = ["numpy>=1.20"]
+pandas = ["pandas>=1.5", "numpy>=1.20"]
+polars = ["polars>=0.18"]
+dev = ["pytest>=7", "numpy>=1.20"]
+
+[project.urls]
+Repository = "https://github.com/AdamEzzat1/CJC"
+Homepage = "https://github.com/AdamEzzat1/CJC"
+
+[tool.maturin]
+# Mixed project: Rust at src/, Python facade at cjc_locke/.
+# The compiled .so/.pyd lands at cjc_locke/_cjc_locke.{ext} per the
+# Cargo.toml [lib] name. Python facade imports it via `from . import _cjc_locke`.
+python-source = "."
+module-name = "cjc_locke._cjc_locke"
+features = ["pyo3/extension-module"]

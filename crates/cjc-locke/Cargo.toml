@@ -1,0 +1,22 @@
+[package]
+name = "cjc-locke"
+description = "CJC-Lang Locke — evidence-aware analytics, data skepticism, drift detection, lineage, and confidence reports. Deterministic, reproducible, audit-friendly."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+cjc-data = { workspace = true }
+cjc-repro = { workspace = true }
+cjc-runtime = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"
+bolero = "0.13.4"
+tempfile = "3"

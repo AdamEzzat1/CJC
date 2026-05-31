@@ -1,0 +1,15 @@
+---
+source: tests/locke/snapshot_tests.rs
+expression: redact(&s)
+---
+# Locke Induction-Risk Report
+n_train: 100
+n_test:  100
+shared_columns: x
+findings:
+  - code=E9032 severity=notice column=x
+    range of `x` widened: train=[0.000, 99.000], test=[50.000, 149.000]
+  - code=E9030 severity=error column=x
+    mean of `x` shifted: train=49.500000, test=99.500000 (relative shift 1.0101)
+  - code=E9039 severity=error column=x
+    numeric distribution shift in `x` (KS D = 0.5000, W1 = 50.0000)

@@ -1,0 +1,25 @@
+
+warning: function `expect_string` is never used
+   --> tests\abng\dispatch.rs:293:4
+    |
+293 | fn expect_string(v: Value) -> String {
+    |    ^^^^^^^^^^^^^
+
+warning: `cjc-lang` (test "abng") generated 10 warnings (run `cargo fix --test "abng"` to apply 8 suggestions)
+    Finished `release` profile [optimized] target(s) in 1.18s
+     Running tests\abng\mod.rs (target\release\deps\abng-b60c009580a7a2c6.exe)
+
+running 1 test
+
+diabetes130_subsample_trial:
+  config: K_ROUTING=2 BLR_PRIOR=(0.5,1,0.5) seed=42
+  shape: n_rows=20000 n_train=15999 phi=262 routing_cols=[17, 9]
+  raw_metrics: acc=0.8875 bal_acc=0.5084 auc=0.6312 f1=0.0385 brier=0.0979 nll=0.3666 ece=0.0279 n_test=4001
+  ablation: root_acc=0.8893 leaf_acc=0.8810 ensemble_acc=0.8875
+  audit: chain_head=57463728a08711f671212fd9891263c7538cd1eec2b5d6d47af545f8f9741dca merkle_root=1ea49a5045679af74ee68a1a7d51ff70ad48803122b80f179dc81cbcfa10645e events=32082
+  leaves: total=16 populated=12 dead=4 min/mean/max=428/1333.2/3462
+
+test dataset_a_diabetes130::diabetes130_subsample_trial ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 636 filtered out; finished in 38.39s
+

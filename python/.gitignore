@@ -1,0 +1,21 @@
+# Python build artefacts
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+
+# Cargo build artefacts (already-ignored by workspace .gitignore, but
+# the python/ crate has its own target/ via [workspace] standalone)
+target/
+
+# Maturin output (also under target/wheels)
+wheels/
+
+# `maturin develop` drops the compiled extension into the package dir
+# next to __init__.py — that's a build artefact, not source.
+cjc_locke/_cjc_locke.pyd
+cjc_locke/_cjc_locke.so
+cjc_locke/_cjc_locke.dylib

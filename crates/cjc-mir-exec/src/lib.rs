@@ -224,6 +224,8 @@ enum CallDispatch {
     GradGraph,
     /// Resolved by `cjc_abng::dispatch_abng`.
     Abng,
+    /// Resolved by `cjc_locke::dispatch_locke` (v0.2).
+    Locke,
 }
 
 pub struct MirExecutor {
@@ -1870,6 +1872,13 @@ impl MirExecutor {
                     ))),
                     Err(msg) => Err(MirExecError::Runtime(msg)),
                 },
+                CallDispatch::Locke => match cjc_locke::dispatch_locke(name, &args) {
+                    Ok(Some(value)) => Ok(value),
+                    Ok(None) => Err(MirExecError::Runtime(format!(
+                        "call cache inconsistency: `{name}` cached as Locke but dispatcher returned None"
+                    ))),
+                    Err(msg) => Err(MirExecError::Runtime(msg)),
+                },
             };
         }
         // Stateful builtins that need interpreter state
@@ -2232,6 +2241,16 @@ impl MirExecutor {
             }
             Err(msg) => return Err(MirExecError::Runtime(msg)),
             Ok(None) => {} // not an abng_* builtin, fall through
+        }
+
+        // Locke v0.2: language-level analytics primitives (locke_*).
+        match cjc_locke::dispatch_locke(name, &args) {
+            Ok(Some(value)) => {
+                self.call_cache.insert(name.to_string(), CallDispatch::Locke);
+                return Ok(value);
+            }
+            Err(msg) => return Err(MirExecError::Runtime(msg)),
+            Ok(None) => {} // not a locke_* builtin, fall through
         }
 
         // PINN training builtins (bypass builtins.rs — cjc-ad dep)

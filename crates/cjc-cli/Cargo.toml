@@ -27,3 +27,5 @@ cjc-snap.workspace = true
 cjc-repro.workspace = true
 cjc-abng.workspace = true
 cjc-ad.workspace = true
+cjc-data.workspace = true
+cjc-locke.workspace = true

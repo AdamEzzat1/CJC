@@ -1,0 +1,30 @@
+   |     ^^^^^
+   |
+   = note: `RunSummary` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `expect_string` is never used
+   --> tests\abng\dispatch.rs:293:4
+    |
+293 | fn expect_string(v: Value) -> String {
+    |    ^^^^^^^^^^^^^
+
+warning: `cjc-lang` (test "abng") generated 10 warnings (run `cargo fix --test "abng"` to apply 8 suggestions)
+    Finished `release` profile [optimized] target(s) in 4m 06s
+     Running tests\abng\mod.rs (target\release\deps\abng-b60c009580a7a2c6.exe)
+
+running 1 test
+
+diabetes130_per_leaf_belief_with_question_marks:
+  n_subsample=20000 n_columns_with_?=7 weight_?_rate=0.9690
+  min_missingness_aware=0.9613 min_missingness_naive=1.0000
+
+leaf_id,n_rows,overall,schema,missingness,drift,leakage,lineage,sample,duplication,constraint
+1,9617,0.897765,0.340000,0.962121,1.000000,1.000000,1.000000,1.000000,1.000000,0.880000
+2,6215,0.900305,0.360000,0.962436,1.000000,1.000000,1.000000,1.000000,1.000000,0.880000
+3,2545,0.897762,0.360000,0.962098,1.000000,1.000000,1.000000,1.000000,1.000000,0.860000
+4,1623,0.897662,0.360000,0.961294,1.000000,1.000000,1.000000,1.000000,1.000000,0.860000
+test per_leaf_belief_diabetes130::diabetes130_per_leaf_belief_with_question_marks ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 639 filtered out; finished in 2.30s
+

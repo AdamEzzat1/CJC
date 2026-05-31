@@ -77,3 +77,9 @@ mod categorical_proptest;
 
 // Phase 0.9.5 COMMIT 5 — Dataset-A (Diabetes-130) benchmark harness.
 mod dataset_a_diabetes130;
+
+// Locke v0.6.3 integration — per-leaf BeliefScore experiment.
+mod per_leaf_belief;
+
+// Locke v0.7 part 1 — full diabetes-130 per-leaf belief run.
+mod per_leaf_belief_diabetes130;

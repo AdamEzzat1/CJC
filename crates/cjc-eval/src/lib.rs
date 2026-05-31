@@ -2476,6 +2476,14 @@ impl Interpreter {
             Ok(None) => {} // not an abng_* builtin, fall through
         }
 
+        // Locke v0.2: language-level analytics primitives (locke_*).
+        // Same satellite-dispatch pattern as cjc-ad / cjc-abng / cjc-quantum.
+        match cjc_locke::dispatch_locke(name, &args) {
+            Ok(Some(value)) => return Ok(value),
+            Err(msg) => return Err(EvalError::Runtime(msg)),
+            Ok(None) => {} // not a locke_* builtin, fall through
+        }
+
         // PINN training builtins (bypass builtins.rs — cjc-ad dep)
         match name {
             "pinn_train_burgers" => {

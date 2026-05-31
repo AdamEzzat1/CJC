@@ -26,3 +26,4 @@ cjc-snap.workspace = true
 cjc-vizor.workspace = true
 cjc-quantum.workspace = true
 cjc-abng.workspace = true
+cjc-locke.workspace = true

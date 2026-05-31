@@ -1,0 +1,16 @@
+---
+source: tests/locke/snapshot_tests.rs
+expression: rendered
+---
+# Locke Validation Report
+schema_version: 1
+dataset: fixtures/sample.csv
+n_rows: 5
+n_cols: 3
+run_id: [FP]
+severity_counts: info=1 notice=0 warning=1 error=0
+findings:
+  - code=E9002 severity=info column=label
+    column `label` is of type `Str`; no null mask supplied so missingness cannot be inferred
+  - code=E9001 severity=warning column=age
+    1 of 5 values in `age` are missing

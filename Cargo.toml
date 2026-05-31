@@ -55,6 +55,7 @@ members = [
     "crates/cjc-quantum",
     "crates/cjc-dharht",
     "crates/cjc-abng",
+    "crates/cjc-locke",
     "bench/ad_bench",
     "bench/nlp_preprocess_bench",
     "bench/abng_micro",
@@ -64,7 +65,7 @@ members = [
     "bench/abng_lineage_at_scale",
     "bench/interp_micro",
 ]
-exclude = ["fuzz"]
+exclude = ["fuzz", "python"]
 resolver = "2"
 
 [workspace.package]
@@ -98,11 +99,13 @@ cjc-vizor.workspace = true
 cjc-quantum.workspace = true
 cjc-abng.workspace = true
 cjc-cli.workspace = true
+cjc-locke.workspace = true
 
 [dev-dependencies]
 bolero = "0.13.4"
 proptest = "1"
 tempfile = "3"
+insta = "1"
 
 # Phase 0.8 Item B3 — feature propagation so the test binary in
 # `tests/abng/serialize_compressed.rs` can call the gated
@@ -148,6 +151,7 @@ cjc-analyzer = { path = "crates/cjc-analyzer", version = "0.1.10" }
 cjc-quantum = { path = "crates/cjc-quantum", version = "0.1.10" }
 cjc-dharht = { path = "crates/cjc-dharht", version = "0.1.10" }
 cjc-abng = { path = "crates/cjc-abng", version = "0.1.10" }
+cjc-locke = { path = "crates/cjc-locke", version = "0.1.10" }
 
 [[test]]
 name = "fixtures"
@@ -212,3 +216,7 @@ path = "tests/runtime_policy/mod.rs"
 [[test]]
 name = "fused_ops"
 path = "tests/fused_ops/mod.rs"
+
+[[test]]
+name = "locke"
+path = "tests/locke/mod.rs"
