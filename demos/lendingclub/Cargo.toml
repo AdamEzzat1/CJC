@@ -9,6 +9,10 @@ description = "Locke demo: target-leakage audit on the LendingClub 2007-2018 dat
 name = "lendingclub_demo"
 path = "src/main.rs"
 
+[[bin]]
+name = "honest_model"
+path = "src/bin/honest_model.rs"
+
 [lib]
 name = "lendingclub_demo"
 path = "src/lib.rs"
@@ -16,6 +20,7 @@ path = "src/lib.rs"
 [dependencies]
 cjc-data = { path = "../../crates/cjc-data" }
 cjc-locke = { path = "../../crates/cjc-locke" }
+cjc-runtime = { path = "../../crates/cjc-runtime" }
 flate2 = "1"
 
 [dev-dependencies]

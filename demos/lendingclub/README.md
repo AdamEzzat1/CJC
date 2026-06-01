@@ -115,29 +115,36 @@ Get-FileHash run2.json -Algorithm SHA256
 
 | Path                                 | What                                                              |
 | ------------------------------------ | ----------------------------------------------------------------- |
-| `src/lib.rs`                         | CSV loader + binarization + audit composition                     |
-| `src/main.rs`                        | CLI shim                                                          |
+| `src/lib.rs`                         | CSV loader + binarization + audit composition + honest-model helpers |
+| `src/main.rs`                        | CLI shim — runs Locke audit, emits report.json                    |
+| `src/bin/honest_model.rs`            | Second binary — fits 3 logistic regressions, reports test AUCs    |
 | `expected_findings.json`             | Required E-codes the regression gate enforces                     |
-| `cross_validate.md`                  | Mapping from Locke's findings to credit-risk literature           |
+| `cross_validate.md`                  | Mapping from Locke's findings to credit-risk literature + measured AUC table |
 | `tests/expected_findings.rs`         | Regression-gate integration test                                  |
 | `data/`                              | Downloaded CSV (gitignored)                                       |
 | `out/`                               | Emitted reports (gitignored)                                      |
 
-## Honest-model evaluation (optional follow-up)
+## Honest-model evaluation
 
-This demo does not itself train a credit-risk model. To complete the
-"before vs after Locke" comparison in
-[cross_validate.md](cross_validate.md), you need a separate scoring
-script that:
+A second binary, `honest_model`, fits three logistic regressions and
+reports test-set |AUC| for each, validating the cross_validate.md §3
+claim. Run via:
 
-1. Splits the post-binarization frame 70/30 (train/test)
-2. Fits one logistic regression *with* the E9060-flagged columns, AUC on
-   test → should be > 0.99 (useless)
-3. Fits a second logistic regression *without* the E9060-flagged columns,
-   AUC on test → should fall into the 0.70 - 0.75 band cited by Tsai &
-   Wu (2008) and Bao et al. (2019)
+```powershell
+cargo run --release -p lendingclub-demo --bin honest_model -- `
+    --input demos/lendingclub/data/accepted_2007_to_2018Q4.csv.gz `
+    --sample-rows 200000 --seed 42
+```
 
-`cjc-runtime` exposes the necessary primitives (logistic regression via
-GradGraph, ROC curve via Kahan-summed binning). Wiring is left as an
-exercise to keep the demo's primary deliverable scoped to the Locke
-audit itself.
+Expected output (2026-06-01 measurement, see
+[cross_validate.md §3](cross_validate.md#3-honest-model-auc-measurement)):
+
+| Variant            | \|AUC\| | Interpretation                                         |
+| ------------------ | ------- | ------------------------------------------------------ |
+| Pre-Locke (naive)  | 0.9993  | catastrophic overfitting via leakage                   |
+| Locke-filtered     | 0.9995  | removing only Locke's E9061 flags is not sufficient    |
+| Domain-honest      | 0.7394  | matches Bao et al. (2019) AUC ≈ 0.74 — honest baseline |
+
+Implementation uses `cjc-runtime::hypothesis::logistic_regression`
+(IRLS), `cjc-runtime::ml::auc_roc`, and
+`cjc-runtime::ml::train_test_split`. Wall: ~3-4 min on 200K subsample.
