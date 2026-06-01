@@ -108,6 +108,121 @@ fn scale_benchmark_single_shot() {
     }
 }
 
+/// Multi-run statistical wrapper for `scale_benchmark_single_shot`. Runs
+/// the validate() call `RUNS` times per row count, reports `min / median
+/// / max / stddev_pct` in ns/row. The single-run bench has 30-50% wall
+/// clock variance from OS scheduling and thermal effects; this version
+/// gives a tight enough signal to attribute changes <5%.
+///
+/// No external dependency — keeps the workspace's zero-external-deps
+/// invariant intact. The added math is a sort + 4 reductions per row
+/// count.
+#[test]
+#[ignore]
+fn scale_benchmark_single_shot_stable() {
+    const RUNS: usize = 5;
+    const WARMUP: usize = 1;
+    println!("\n=== Locke single-shot validate() stable benchmark (median of {}) ===\n", RUNS);
+    println!(
+        "{:>12} | {:>12} | {:>12} | {:>12} | {:>12} | {:>10}",
+        "rows", "min ns/row", "median", "max ns/row", "stddev%", "findings"
+    );
+    println!("{}", "-".repeat(86));
+
+    for &n in &[10_000usize, 100_000, 1_000_000] {
+        let df = synthesize(n, 0xCAFE);
+        let opts = ValidateOptions {
+            dataset_label: format!("bench-{}", n),
+            ..Default::default()
+        };
+        // Warmup — touch the binary, warm caches, let the CPU governor lift.
+        for _ in 0..WARMUP {
+            let _ = validate(&df, &opts);
+        }
+        let mut samples_ns_per_row: Vec<f64> = Vec::with_capacity(RUNS);
+        let mut last_findings = 0usize;
+        for _ in 0..RUNS {
+            let t = Instant::now();
+            let r = validate(&df, &opts);
+            let dt = t.elapsed();
+            samples_ns_per_row.push(dt.as_nanos() as f64 / n as f64);
+            last_findings = r.findings.len();
+        }
+        let stats = summarise(&mut samples_ns_per_row);
+        println!(
+            "{:>12} | {:>9.2} ns | {:>9.2} ns | {:>9.2} ns | {:>10.1}% | {:>10}",
+            n, stats.min, stats.median, stats.max, stats.stddev_pct, last_findings
+        );
+    }
+}
+
+/// Multi-run statistical wrapper for `scale_benchmark_drift_compare`.
+#[test]
+#[ignore]
+fn scale_benchmark_drift_compare_stable() {
+    const RUNS: usize = 5;
+    const WARMUP: usize = 1;
+    println!("\n=== Locke drift compare() stable benchmark (median of {}) ===\n", RUNS);
+    println!(
+        "{:>12} | {:>12} | {:>12} | {:>12} | {:>12} | {:>10}",
+        "rows/side", "min ns/row", "median", "max ns/row", "stddev%", "findings"
+    );
+    println!("{}", "-".repeat(86));
+
+    for &n in &[10_000usize, 100_000, 1_000_000] {
+        let train = synthesize(n, 0x1111);
+        let test = synthesize(n, 0x2222);
+        let cfg = DriftConfig::default();
+        for _ in 0..WARMUP {
+            let _ = compare(&train, &test, &cfg);
+        }
+        let mut samples_ns_per_row: Vec<f64> = Vec::with_capacity(RUNS);
+        let mut last_findings = 0usize;
+        for _ in 0..RUNS {
+            let t = Instant::now();
+            let r = compare(&train, &test, &cfg);
+            let dt = t.elapsed();
+            samples_ns_per_row.push(dt.as_nanos() as f64 / (2 * n) as f64);
+            last_findings = r.findings.len();
+        }
+        let stats = summarise(&mut samples_ns_per_row);
+        println!(
+            "{:>12} | {:>9.2} ns | {:>9.2} ns | {:>9.2} ns | {:>10.1}% | {:>10}",
+            n, stats.min, stats.median, stats.max, stats.stddev_pct, last_findings
+        );
+    }
+}
+
+struct SampleStats {
+    min: f64,
+    median: f64,
+    max: f64,
+    stddev_pct: f64,
+}
+
+fn summarise(samples: &mut [f64]) -> SampleStats {
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = samples.len();
+    let min = samples[0];
+    let max = samples[n - 1];
+    let median = if n % 2 == 1 {
+        samples[n / 2]
+    } else {
+        0.5 * (samples[n / 2 - 1] + samples[n / 2])
+    };
+    let mean: f64 = samples.iter().sum::<f64>() / n as f64;
+    let variance: f64 =
+        samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n as f64;
+    let stddev = variance.sqrt();
+    let stddev_pct = if mean != 0.0 { 100.0 * stddev / mean } else { 0.0 };
+    SampleStats {
+        min,
+        median,
+        max,
+        stddev_pct,
+    }
+}
+
 #[test]
 #[ignore]
 fn scale_benchmark_drift_compare() {

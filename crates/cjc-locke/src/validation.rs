@@ -183,13 +183,29 @@ pub fn detect_string_sentinels(
 
         // Per-sentinel hit indices, kept in a BTreeMap for deterministic
         // sample ordering in the audit message.
-        let mut hits: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+        //
+        // Perf: key the bucket map on `&str` borrowed from either the static
+        // built-in table or `cfg.additional_sentinels`, NOT a per-cell owned
+        // `String`. On a column where ~all rows hit a sentinel (e.g., a
+        // 97%-`?` column like diabetes-130's `weight`), the previous
+        // implementation paid an `s.to_string()` allocation per row to look
+        // up an entry that already existed. The borrow-based key gives
+        // identical map contents with zero per-cell allocation.
+        let mut hits: BTreeMap<&str, BTreeSet<usize>> = BTreeMap::new();
         for (i, v) in values.iter().enumerate() {
             let s = v.as_str();
-            let is_builtin = BUILTIN_STRING_SENTINELS.iter().any(|b| *b == s);
-            let is_custom = cfg.additional_sentinels.iter().any(|c| c == s);
-            if is_builtin || is_custom {
-                hits.entry(s.to_string()).or_default().insert(i);
+            let matched: Option<&str> = BUILTIN_STRING_SENTINELS
+                .iter()
+                .find(|b| **b == s)
+                .copied()
+                .or_else(|| {
+                    cfg.additional_sentinels
+                        .iter()
+                        .find(|c| c.as_str() == s)
+                        .map(|c| c.as_str())
+                });
+            if let Some(key) = matched {
+                hits.entry(key).or_default().insert(i);
             }
         }
         if hits.is_empty() {
@@ -837,6 +853,59 @@ fn count_top<T: Ord, I: IntoIterator<Item = T>>(values: I) -> u64 {
     counts.values().copied().max().unwrap_or(0)
 }
 
+/// Combined single-pass alternative to back-to-back
+/// `(distinct_count(col), top_value_freq(col))`. Builds the per-value
+/// count map *once* and reads both numbers off it, instead of scanning
+/// the column twice and constructing two separate maps. Bit-identical
+/// to the standalone calls for every column type.
+///
+/// Used by `api::validate()` and `detect_constant_and_near_constant`,
+/// each of which previously did two full scans per column.
+pub(crate) fn distinct_count_and_top_freq(col: &Column) -> (u64, u64) {
+    match col {
+        Column::Int(v) => count_distinct_and_top(v.iter().copied()),
+        Column::Float(v) => count_distinct_and_top(
+            v.iter()
+                .map(|x| if x.is_nan() { u64::MAX } else { x.to_bits() }),
+        ),
+        Column::Str(v) => {
+            let mut counts: BTreeMap<&str, u64> = BTreeMap::new();
+            for s in v {
+                *counts.entry(s.as_str()).or_insert(0) += 1;
+            }
+            (
+                counts.len() as u64,
+                counts.values().copied().max().unwrap_or(0),
+            )
+        }
+        Column::Bool(v) => count_distinct_and_top(v.iter().copied()),
+        Column::Categorical { codes, .. } => count_distinct_and_top(codes.iter().copied()),
+        // `CategoricalAdaptive` distinct count uses the dictionary, NOT the
+        // count map — mirrors the standalone `distinct_count` fix (line 803).
+        // Top frequency is still taken from the code-stream count map.
+        Column::CategoricalAdaptive(cc) => {
+            let mut counts: BTreeMap<u64, u64> = BTreeMap::new();
+            for code in cc.codes().iter() {
+                *counts.entry(code).or_insert(0) += 1;
+            }
+            let distinct = cc.dictionary().len() as u64;
+            let top = counts.values().copied().max().unwrap_or(0);
+            (distinct, top)
+        }
+        Column::DateTime(v) => count_distinct_and_top(v.iter().copied()),
+    }
+}
+
+fn count_distinct_and_top<T: Ord, I: IntoIterator<Item = T>>(values: I) -> (u64, u64) {
+    let mut counts: BTreeMap<T, u64> = BTreeMap::new();
+    for v in values {
+        *counts.entry(v).or_insert(0) += 1;
+    }
+    let distinct = counts.len() as u64;
+    let top = counts.values().copied().max().unwrap_or(0);
+    (distinct, top)
+}
+
 pub fn detect_constant_and_near_constant(
     df: &DataFrame,
     cfg: &ValidationConfig,
@@ -848,7 +917,11 @@ pub fn detect_constant_and_near_constant(
         if n == 0 {
             continue;
         }
-        let distinct = distinct_count(col);
+        // Single-pass: build the count map once, read distinct + top off it.
+        // Previously this function scanned the column twice (once in
+        // `distinct_count`, once in `top_value_freq`); the combined function
+        // halves the per-column work for the common non-constant path.
+        let (distinct, top) = distinct_count_and_top_freq(col);
         if distinct <= 1 {
             out.push(ValidationFinding::new(
                 "E9010",
@@ -866,7 +939,6 @@ pub fn detect_constant_and_near_constant(
             ));
             continue;
         }
-        let top = top_value_freq(col);
         let ratio = top as f64 / n as f64;
         if ratio >= cfg.near_constant_threshold {
             out.push(ValidationFinding::new(

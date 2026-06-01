@@ -61,14 +61,32 @@ pub fn validate(df: &DataFrame, opts: &ValidateOptions) -> LockeReport {
     let effective_masks =
         crate::validation::merge_null_mask_maps(&opts.null_masks, &auto_masks);
 
+    // Pre-bucket findings by column once. The prior code re-scanned every
+    // finding for each column — O(C·F). For wide dataframes with many
+    // findings this is the dominant cost in the api wrapper (especially
+    // visible in the 1M-row scale benchmark, where ns/row went super-linear).
+    // Bucketing once: O(F) pass + per-bucket sort, identical sort_key ordering
+    // → bit-identical column_reports[col].findings.
+    let mut findings_by_col: BTreeMap<&str, Vec<ValidationFinding>> = BTreeMap::new();
+    for f in &findings {
+        if let Some(col_name) = f.column.as_deref() {
+            findings_by_col.entry(col_name).or_default().push(f.clone());
+        }
+    }
+    for v in findings_by_col.values_mut() {
+        v.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+    }
+
     let mut column_reports: BTreeMap<String, ColumnBeliefReport> = BTreeMap::new();
     for (name, col) in &df.columns {
-        let mut col_findings: Vec<ValidationFinding> = findings
-            .iter()
-            .filter(|f| f.column.as_deref() == Some(name.as_str()))
+        // `get().cloned()` rather than `remove()` so duplicate-named
+        // columns (legal in cjc_data::DataFrame::from_columns) see the
+        // same bucket on each visit — preserving the prior behaviour
+        // where each iteration re-derived the full filtered list.
+        let col_findings: Vec<ValidationFinding> = findings_by_col
+            .get(name.as_str())
             .cloned()
-            .collect();
-        col_findings.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+            .unwrap_or_default();
         let n_total = col.len() as f64;
         // Missingness rate: Float NaN union with effective-mask
         // positions; non-Float uses effective mask only.
@@ -78,38 +96,34 @@ pub fn validate(df: &DataFrame, opts: &ValidateOptions) -> LockeReport {
                 .get(name)
                 .map(|m| m.null_rows.iter().filter(|i| **i < col_len).count())
                 .unwrap_or(0);
-            let nan_count = match col {
-                cjc_data::Column::Float(v) => v.iter().filter(|x| x.is_nan()).count(),
-                _ => 0,
-            };
-            // Union estimate: for Float, true union via BTreeSet would be more
-            // accurate, but for the per-column rate this small overcount is
-            // bounded by the column length and acceptable.
+            // Union: for Float, |NaN ∪ Mask| = |NaN| + |Mask positions that
+            // are NOT also NaN|. Counted in O(n + m) with zero heap; the
+            // previous implementation allocated a fresh BTreeSet<usize> per
+            // column and scanned NaNs twice. Bit-identical union size.
             match col {
                 cjc_data::Column::Float(v) => {
-                    let mut s: std::collections::BTreeSet<usize> =
-                        (0..v.len()).filter(|i| v[*i].is_nan()).collect();
-                    if let Some(m) = effective_masks.get(name) {
-                        for r in &m.null_rows {
-                            if *r < v.len() {
-                                s.insert(*r);
-                            }
-                        }
-                    }
-                    s.len()
+                    let n_nan = v.iter().filter(|x| x.is_nan()).count();
+                    let extra = effective_masks
+                        .get(name)
+                        .map(|m| {
+                            m.null_rows
+                                .iter()
+                                .filter(|&&r| r < v.len() && !v[r].is_nan())
+                                .count()
+                        })
+                        .unwrap_or(0);
+                    n_nan + extra
                 }
-                _ => {
-                    let _ = nan_count;
-                    mask_count
-                }
+                _ => mask_count,
             }
         } as f64;
         let missingness_rate = if n_total == 0.0 { 0.0 } else { missing / n_total };
-        let distinct = crate::validation::distinct_count(col);
+        // Single-pass distinct + top-freq. Replaces two back-to-back full
+        // column scans that each built their own per-value count map.
+        let (distinct, top_freq) = crate::validation::distinct_count_and_top_freq(col);
         let constant = distinct <= 1;
         let near_constant = if n_total > 0.0 {
-            crate::validation::top_value_freq(col) as f64 / n_total
-                >= opts.config.near_constant_threshold
+            top_freq as f64 / n_total >= opts.config.near_constant_threshold
         } else {
             false
         };
