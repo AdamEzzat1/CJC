@@ -64,6 +64,7 @@ members = [
     "bench/abng_pinn_scale",
     "bench/abng_lineage_at_scale",
     "bench/interp_micro",
+    "demos/lendingclub",
 ]
 exclude = ["fuzz", "python"]
 resolver = "2"

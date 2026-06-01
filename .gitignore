@@ -24,3 +24,13 @@ tests/data/diabetes_130/
 tests/data/diabetes_130.zip
 tests/data/cdc_brfss.csv
 
+# Locke demo input data (downloaded by demo scripts, not committed)
+demos/lendingclub/data/*
+!demos/lendingclub/data/.gitkeep
+demos/nyc_taxi/data/*
+!demos/nyc_taxi/data/.gitkeep
+
+# Locke demo output artifacts (regenerated on each run)
+demos/lendingclub/out/
+demos/nyc_taxi/out/
+

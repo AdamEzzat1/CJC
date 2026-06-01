@@ -1,0 +1,74 @@
+{
+  "_comment": "Regression fixture for the LendingClub Locke demo. Each entry names an E-code that MUST appear in the Locke report when run against the full LendingClub 2007-2018 accepted-loans CSV after `binarize_loan_status` filters to terminal-outcome rows. The integration test in tests/expected_findings.rs verifies (a) every required code fires at least min_count times, (b) every code in fingerprint_columns fires against the listed column(s). Empirically calibrated against report.json from a full-dataset run on 2026-06-01 (~2.26M rows loaded, 1.33M terminal-outcome rows kept). See cross_validate.md for the measurement provenance.",
+  "_dataset": "wordsforthewise/lending-club -> accepted_2007_to_2018Q4.csv.gz",
+  "_source_target": "loan_status",
+  "_derived_target": "target_default",
+  "_keep_classes": ["Charged Off", "Default", "Fully Paid"],
+  "required_findings": [
+    {
+      "code": "E9008",
+      "severity": "info",
+      "description": "Auto-detected string sentinels — `\"n/a\"` on `emp_length`, empty-string on the joint-application columns, and similar across ~55 Str columns. NOTE: the handoff predicted E9008 would fire on `term` due to its leading-space `\" 36 months\"` artifact, but E9008 detects missing-value SENTINELS specifically (`?`/`NA`/etc.), not leading-whitespace formatting issues, so `term` is not in the fingerprint set.",
+      "min_count": 10,
+      "fingerprint_columns": ["emp_length"]
+    },
+    {
+      "code": "E9001",
+      "severity": "warning",
+      "description": "High missingness — co-borrower columns (annual_inc_joint, dti_joint, verification_status_joint, etc.) are empty for the ~85% of loans without a co-applicant; hardship/settlement columns are also sparse.",
+      "min_count": 20,
+      "fingerprint_columns": [
+        "annual_inc_joint",
+        "dti_joint",
+        "verification_status_joint"
+      ]
+    },
+    {
+      "code": "E9061",
+      "severity": "warning",
+      "description": "Suspicious target leakage (0.85 ≤ |AUC| < 0.95). The top signals are the LAST REFRESHED FICO range (`last_fico_range_high`/`low`) — these reflect the borrower's credit AFTER the loan, so a charged-off loan's borrower typically shows a depressed FICO. `total_rec_prncp` is the principal recovered to date — high for paid, low for defaulted. The handoff predicted `total_pymnt` and other payment streams would dominate at AUC ≥ 0.95; in this dataset they instead land below the 0.85 threshold because their value is also dominated by loan size and term duration, not just outcome.",
+      "min_count": 3,
+      "fingerprint_columns": [
+        "last_fico_range_high",
+        "last_fico_range_low",
+        "total_rec_prncp"
+      ]
+    },
+    {
+      "code": "E9072",
+      "severity": "warning",
+      "description": "ID-like cardinality — distinct/n_rows ≥ 0.95. `id` is the loan key. `url` carries the per-loan listing URL with the loan ID embedded, so it ALSO has near-perfect cardinality — a separate-but-related leakage hint Locke surfaces independently. `member_id` does NOT fire because the same member can hold multiple loans.",
+      "min_count": 2,
+      "fingerprint_columns": ["id", "url"]
+    }
+  ],
+  "_acceptable_codes_not_required": [
+    "E9002",
+    "E9007",
+    "E9010",
+    "E9011",
+    "E9014",
+    "E9015",
+    "E9016",
+    "E9017",
+    "E9024",
+    "E9040",
+    "E9041",
+    "E9062",
+    "E9071",
+    "E9080",
+    "E9081",
+    "E9082",
+    "E9083",
+    "E9084",
+    "E9085"
+  ],
+  "_notes": [
+    "E9062 ('target not binary') must NOT fire — we binarize loan_status into target_default upstream.",
+    "E9060 (|AUC| ≥ 0.95) does NOT fire in this dataset. The handoff predicted it would on `total_pymnt`/`recoveries`/etc., but the empirical AUCs all land in [0.85, 0.95] (warning band) at most. This is a real finding: the post-origination payment streams are leaky but not deterministically so, because loan size + term duration spreads their distribution.",
+    "E9070 (conditional missingness) does NOT fire on `annual_inc_joint` etc. The CSV reader infers these as Str columns (empty-string for missing), and `detect_conditional_missingness` only links NaN-positions across Float columns. The high-missingness signal still surfaces as E9001 and the sentinel-detection as E9008.",
+    "fingerprint_columns is the canonical column the E-code MUST fire on. The fixture treats extra firings on other columns as acceptable noise (LC has ~150 cols and many co-vary).",
+    "min_count is a lower bound. Locke is allowed to fire more findings per code than listed; the gate fails only on UNDER-firing.",
+    "If E9060 starts firing on any column in a future run, that's a story worth investigating — the leakage signal will have crossed from suspicious to near-deterministic."
+  ]
+}
