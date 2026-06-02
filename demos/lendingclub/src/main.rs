@@ -20,9 +20,11 @@ use std::time::Instant;
 
 use cjc_locke::json_emit::emit_locke_report_json;
 
+use cjc_locke::api::validate as locke_validate;
+
 use lendingclub_demo::{
-    binarize_loan_status, finding_counts_by_code, load_csv_gz, run_locke_audit,
-    SOURCE_TARGET_COLUMN, TARGET_COLUMN,
+    binarize_loan_status, finding_counts_by_code, lendingclub_validate_options_with_custom_detector,
+    load_csv_gz, run_locke_audit, SOURCE_TARGET_COLUMN, TARGET_COLUMN,
 };
 
 #[derive(Debug)]
@@ -30,6 +32,7 @@ struct Args {
     input: PathBuf,
     output: PathBuf,
     max_rows: Option<usize>,
+    use_custom_detectors: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -37,6 +40,7 @@ fn parse_args() -> Result<Args, String> {
     let mut output: Option<PathBuf> = None;
     let mut max_rows: Option<usize> = None;
 
+    let mut use_custom_detectors = false;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -50,6 +54,9 @@ fn parse_args() -> Result<Args, String> {
                 let s = it.next().ok_or("--max-rows needs a value")?;
                 max_rows = Some(s.parse().map_err(|e| format!("--max-rows: {}", e))?);
             }
+            "--use-custom-detectors" => {
+                use_custom_detectors = true;
+            }
             "-h" | "--help" => {
                 print_usage();
                 std::process::exit(0);
@@ -61,6 +68,7 @@ fn parse_args() -> Result<Args, String> {
         input: input.ok_or("--input required")?,
         output: output.ok_or("--output required")?,
         max_rows,
+        use_custom_detectors,
     })
 }
 
@@ -135,9 +143,37 @@ fn main() -> ExitCode {
         target_default_rate,
     );
 
-    eprintln!("[locke] running validate() + detect_target_leakage + detect_id_like_columns");
     let t2 = Instant::now();
-    let report = run_locke_audit(&df);
+    let report = if args.use_custom_detectors {
+        eprintln!(
+            "[locke] running validate() with PostOriginationByName custom detector (ADR-0041) + detect_target_leakage + detect_id_like_columns"
+        );
+        // Re-uses the standard audit pipeline but registers the custom
+        // detector via ValidateOptions::custom_detectors. The detector's
+        // E9500 findings appear alongside the built-in E9061 ones.
+        let opts = lendingclub_validate_options_with_custom_detector();
+        let mut r = locke_validate(&df, &opts);
+        // Splice in leakage + ID-like findings the same way run_locke_audit does.
+        let leakage = cjc_locke::leakage::detect_target_leakage(
+            &df,
+            TARGET_COLUMN,
+            &cjc_locke::leakage::LeakageConfig::default(),
+        );
+        let id_like = cjc_locke::leakage::detect_id_like_columns(
+            &df,
+            &cjc_locke::leakage::LeakageConfig::default(),
+        );
+        let mut all = r.findings.clone();
+        all.extend(leakage);
+        all.extend(id_like);
+        all.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+        r.severity_counts = cjc_locke::report::SeverityCounts::from_findings(&all);
+        r.findings = all;
+        r
+    } else {
+        eprintln!("[locke] running validate() + detect_target_leakage + detect_id_like_columns");
+        run_locke_audit(&df)
+    };
     eprintln!(
         "[locke] {} findings ({} error, {} warning, {} notice, {} info), {:.2}s",
         report.findings.len(),

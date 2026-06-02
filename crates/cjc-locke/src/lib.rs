@@ -78,6 +78,7 @@ pub mod belief;
 pub mod categorical;
 pub mod causal;
 pub mod column_summary;
+pub mod custom_detector;
 pub mod dispatch;
 pub mod drift;
 pub mod gate;

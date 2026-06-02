@@ -89,20 +89,34 @@ cargo run --release -p lendingclub-demo --bin honest_model -- `
     --sample-rows 200000 --seed 42
 ```
 
-### 3.1 Three feature sets, three AUCs
+### 3.1 Four feature sets, four AUCs
 
-We trained three logistic regression models on the same 200K-row sample
+We trained four logistic regression models on the same 200K-row sample
 (140K train / 60K test, seed=42). Each model uses every numeric column
 from the binarized frame EXCEPT the columns named in its exclusion set.
-All three use the same standardization, NaN imputation, and target.
+All four use the same standardization, NaN imputation, and target.
 
-| Variant            | Exclusion set                                              | p  | Test \|AUC\| | IRLS iter | Wall (train) |
-| ------------------ | ---------------------------------------------------------- | -- | ------------ | --------- | ------------ |
-| Pre-Locke (naive)  | `target_default`, `id`, `member_id` only                   | 87 | **0.9993**   | 100 (cap) | 109.3 s      |
-| Locke-filtered     | naive set + the 3 E9061 columns                            | 84 | **0.9995**   | 100 (cap) | 95.8 s       |
-| Domain-honest      | naive set + handoff §3.3 full post-origination column list | 75 | **0.7394**   | 14        | 9.0 s        |
+| Variant                 | Exclusion set                                              | p  | Test \|AUC\| | IRLS iter | Wall (train) |
+| ----------------------- | ---------------------------------------------------------- | -- | ------------ | --------- | ------------ |
+| Pre-Locke (naive)       | `target_default`, `id`, `member_id` only                   | 87 | **0.9993**   | 100 (cap) | 128.3 s      |
+| Locke-filtered          | naive set + the 3 E9061 columns                            | 84 | **0.9995**   | 100 (cap) | 112.7 s      |
+| **Locke + custom det.** | **naive + 39 E9500∪E9061 columns from custom detector**    | **68** | **0.7388**   | **17**    | **10.8 s**   |
+| Domain-honest           | naive set + handoff §3.3 full post-origination column list | 75 | **0.7394**   | 14        | 11.1 s       |
 
-The exclusion sets compose strictly: `naive ⊂ Locke-filtered ⊂ domain-honest`.
+The first two are documented from the initial honest-model follow-up
+(see `cargo run -p lendingclub-demo --bin honest_model`). The third is
+the **ADR-0041 (custom detector extension layer)** payload: the
+`PostOriginationByNameDetector` flags 39 columns by name pattern; the
+honest-model harness reads them from the report JSON via the
+`--from-report <path>` flag. The fourth is the hand-curated literature
+baseline.
+
+The exclusion sets compose: `naive ⊂ Locke-filtered ⊂ Locke + custom det.`,
+and `naive ⊂ domain-honest`. The "Locke + custom det." set is a strict
+superset of the handoff's domain list — it catches more pattern matches
+(`hardship_*`, `settlement_*`, etc.) than the handoff predicted, but
+with negligible AUC cost relative to domain-honest (`0.7388` vs `0.7394`,
+within 0.0006).
 
 ### 3.2 Cross-validation against the literature
 
@@ -120,30 +134,41 @@ Our 0.7394 is essentially identical to Bao et al.'s 0.74 baseline. Tsai &
 Wu used a different model class but the same feature space; the match is
 within their ±0.02 reported sampling variance.
 
-### 3.3 The interesting finding: Locke's flags alone are not sufficient
+### 3.3 The two findings, before and after the custom-detector layer
 
-The Locke-filtered variant excludes the three columns Locke flagged at
-E9061 (`last_fico_range_high/low`, `total_rec_prncp`). Its test AUC is
-**0.9995** — *not better* than the naive model's 0.9993. This is the
-deepest finding from the AUC follow-up:
+Two findings of decreasing severity:
 
-> **Locke's |AUC| ≥ 0.85 heuristic catches the strongest leakage but
-> not all leakage.** The columns that survive the Locke filter
-> (`total_pymnt`, `out_prncp`, `total_pymnt_inv`, etc.) carry enough
-> leakage signal jointly to keep the model's AUC inflated. Removing
-> them — via the handoff's domain-knowledge list — is what actually
-> collapses AUC into the honest band.
+**(a) Locke's built-in flags alone are not sufficient.** The Locke-filtered
+variant excludes the three columns Locke flagged at E9061
+(`last_fico_range_high/low`, `total_rec_prncp`). Its test AUC is **0.9995**
+— *not better* than the naive model's 0.9993. The columns that survive
+the Locke filter (`total_pymnt`, `out_prncp`, `total_pymnt_inv`, etc.)
+carry enough leakage signal jointly to keep the model's AUC inflated.
 
-This is *not* a bug in Locke. Locke surfaces *suspicious* columns; the
-analyst still applies domain triage to decide the full exclusion list.
-The demo's honest framing of Locke's value is therefore:
+**(b) Locke + a domain-encoded custom detector matches the literature
+baseline.** The PostOriginationByName custom detector (ADR-0041) flags
+any column matching `total_*`, `last_pymnt_*`, `last_fico_range_*`,
+`out_prncp*`, `recoveries`, `collection_recovery_fee`, `hardship_*`,
+`settlement_*`, `debt_settlement_*`. Run via
+`--use-custom-detectors`, it fires 39 times on the LC dataset. Removing
+those 39 columns + the original 3 E9061 columns collapses AUC to
+**0.7388**, within 0.0006 of the hand-curated `domain-honest` baseline.
 
-> Locke shows you where to look. The fact that `last_fico_range_high`
-> jumped out at |AUC| 0.92 is what *suggests* the analyst should
-> hand-curate a fuller post-origination exclusion list — the kind of
-> curation `DOMAIN_POST_ORIGINATION_COLUMNS` in [src/lib.rs](src/lib.rs)
-> encodes. Without Locke, the analyst might never have realized the
-> last-refreshed FICO range was post-origination at all.
+The original honest framing of Locke's value ("Locke shows you where to
+look; analyst does the triage") now becomes:
+
+> Locke shows you where to look. Where Locke's built-in heuristics
+> aren't sufficient, the **custom detector extension layer** lets the
+> analyst encode domain knowledge directly into Locke configuration —
+> with the same finding format, same belief composition, same
+> determinism guarantees, same JSON emit. The analyst's experience
+> accumulates as Locke configuration instead of bespoke code that
+> lives next to Locke.
+
+ADR-0041 documents the trait, the namespace contract (E9500..=E9999),
+and the belief-axis routing. The PostOriginationByNameDetector in
+[`src/lib.rs`](src/lib.rs) is the demo's reference implementation —
+~30 LOC of pattern matching.
 
 ### 3.4 IRLS non-convergence on the leaky models
 

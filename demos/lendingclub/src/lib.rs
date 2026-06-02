@@ -217,6 +217,7 @@ pub fn lendingclub_validate_options() -> ValidateOptions {
         expected_schema: None,
         primary_key: Some("id".into()),
         null_masks: Default::default(),
+        custom_detectors: Vec::new(),
     }
 }
 
@@ -289,6 +290,100 @@ pub const DOMAIN_POST_ORIGINATION_COLUMNS: &[&str] = &[
 
 /// Always-exclude columns: the target itself and ID-like keys.
 pub const ALWAYS_EXCLUDED_COLUMNS: &[&str] = &[TARGET_COLUMN, "id", "member_id"];
+
+/// Custom detector (ADR-0041) that flags any LC column whose name matches
+/// a known post-origination naming pattern. Encodes the domain triage
+/// from the handoff §3.3 directly *inside* Locke's report, instead of
+/// requiring the analyst to maintain an exclusion list in their own code.
+///
+/// Patterns covered:
+/// - `total_*` — cumulative payment totals
+/// - `last_pymnt_*` — most-recent-payment fields
+/// - `last_fico_range_*` — refreshed FICO after origination
+/// - `recoveries`, `collection_recovery_fee` — chargeoff recovery
+/// - `out_prncp*` — outstanding principal (partial leak)
+/// - `debt_settlement_*`, `hardship_*`, `settlement_*` — workout state
+///
+/// Belief axis: `leakage`. Emits Error severity so it dominates the
+/// post-Locke decision. Code: **E9500**.
+#[derive(Debug, Default)]
+pub struct PostOriginationByNameDetector;
+
+impl PostOriginationByNameDetector {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// True if a column name matches one of the canonical
+    /// post-origination patterns. Pure function — same input always
+    /// produces the same answer.
+    pub fn is_post_origination(name: &str) -> bool {
+        const PREFIX_PATTERNS: &[&str] = &[
+            "total_",
+            "last_pymnt_",
+            "last_fico_range_",
+            "out_prncp",
+            "debt_settlement_",
+            "hardship_",
+            "settlement_",
+        ];
+        const EXACT_PATTERNS: &[&str] = &[
+            "recoveries",
+            "collection_recovery_fee",
+            "debt_settlement_flag",
+        ];
+        if EXACT_PATTERNS.iter().any(|p| *p == name) {
+            return true;
+        }
+        PREFIX_PATTERNS.iter().any(|p| name.starts_with(p))
+    }
+}
+
+impl cjc_locke::custom_detector::CustomDetector for PostOriginationByNameDetector {
+    fn code(&self) -> &'static str {
+        "E9500"
+    }
+    fn belief_axes(&self) -> cjc_locke::custom_detector::BeliefAxisSet {
+        cjc_locke::custom_detector::BeliefAxisSet::LEAKAGE
+    }
+    fn name(&self) -> &str {
+        "PostOriginationByName"
+    }
+    fn run(
+        &self,
+        df: &DataFrame,
+        sink: &mut cjc_locke::custom_detector::FindingSink,
+    ) {
+        for (name, _col) in &df.columns {
+            if Self::is_post_origination(name) {
+                sink.emit(
+                    cjc_locke::report::FindingSeverity::Error,
+                    format!(
+                        "column `{}` matches a known post-origination naming pattern",
+                        name
+                    ),
+                    Some(name.clone()),
+                    None,
+                    vec![],
+                    df.nrows() as u64,
+                );
+            }
+        }
+    }
+}
+
+/// Build the LC-tailored ValidateOptions WITH the post-origination
+/// custom detector registered. Use this variant to run an audit that
+/// includes domain-encoded leakage detection alongside Locke's
+/// built-in |AUC| heuristic.
+pub fn lendingclub_validate_options_with_custom_detector() -> ValidateOptions {
+    use std::sync::Arc as StdArc;
+    let mut opts = lendingclub_validate_options();
+    let det: StdArc<dyn cjc_locke::custom_detector::CustomDetector> =
+        StdArc::new(PostOriginationByNameDetector::new());
+    opts.custom_detectors = vec![det];
+    opts
+}
 
 /// Numeric column extraction. Returns column names and per-column f64
 /// vectors. Skips columns whose names appear in `exclude`. Bool and Int
@@ -591,6 +686,54 @@ mod tests {
         // Select rows 0 and 2 in order.
         let out = flatten_subset_row_major(&columns, &[0, 2]);
         assert_eq!(out, vec![10.0, 1.0, 30.0, 3.0]);
+    }
+
+    #[test]
+    fn post_origination_pattern_match() {
+        assert!(PostOriginationByNameDetector::is_post_origination("total_pymnt"));
+        assert!(PostOriginationByNameDetector::is_post_origination("total_rec_int"));
+        assert!(PostOriginationByNameDetector::is_post_origination("last_pymnt_amnt"));
+        assert!(PostOriginationByNameDetector::is_post_origination("last_pymnt_d"));
+        assert!(PostOriginationByNameDetector::is_post_origination("last_fico_range_low"));
+        assert!(PostOriginationByNameDetector::is_post_origination("last_fico_range_high"));
+        assert!(PostOriginationByNameDetector::is_post_origination("out_prncp"));
+        assert!(PostOriginationByNameDetector::is_post_origination("out_prncp_inv"));
+        assert!(PostOriginationByNameDetector::is_post_origination("recoveries"));
+        assert!(PostOriginationByNameDetector::is_post_origination("collection_recovery_fee"));
+        assert!(PostOriginationByNameDetector::is_post_origination("hardship_amount"));
+        assert!(PostOriginationByNameDetector::is_post_origination("settlement_amount"));
+        // Pre-origination columns must NOT match.
+        assert!(!PostOriginationByNameDetector::is_post_origination("loan_amnt"));
+        assert!(!PostOriginationByNameDetector::is_post_origination("int_rate"));
+        assert!(!PostOriginationByNameDetector::is_post_origination("dti"));
+        assert!(!PostOriginationByNameDetector::is_post_origination("annual_inc"));
+        assert!(!PostOriginationByNameDetector::is_post_origination("fico_range_low"));
+        assert!(!PostOriginationByNameDetector::is_post_origination("fico_range_high"));
+        assert!(!PostOriginationByNameDetector::is_post_origination("term"));
+    }
+
+    #[test]
+    fn post_origination_detector_emits_e9500() {
+        let df = DataFrame::from_columns(vec![
+            ("loan_amnt".into(), Column::Float(vec![1.0])),
+            ("total_pymnt".into(), Column::Float(vec![0.5])),
+            ("recoveries".into(), Column::Float(vec![0.0])),
+            ("dti".into(), Column::Float(vec![10.0])),
+        ])
+        .unwrap();
+        let det: std::sync::Arc<dyn cjc_locke::custom_detector::CustomDetector> =
+            std::sync::Arc::new(PostOriginationByNameDetector::new());
+        let outcome = cjc_locke::custom_detector::run_custom_detectors(&df, &[det]);
+        let columns: Vec<_> = outcome
+            .findings
+            .iter()
+            .filter(|f| f.code == "E9500")
+            .filter_map(|f| f.column.as_deref())
+            .collect();
+        assert!(columns.contains(&"total_pymnt"));
+        assert!(columns.contains(&"recoveries"));
+        assert!(!columns.contains(&"loan_amnt"));
+        assert!(!columns.contains(&"dti"));
     }
 
     #[test]

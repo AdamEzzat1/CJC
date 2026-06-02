@@ -34,3 +34,9 @@ demos/nyc_taxi/data/*
 demos/lendingclub/out/
 demos/nyc_taxi/out/
 
+# Python venv + bytecode caches
+python/.venv/
+python/**/__pycache__/
+python/.pytest_cache/
+python/*.egg-info/
+

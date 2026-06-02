@@ -62,11 +62,29 @@ Pick one of:
 
 ## Running
 
+### Baseline run (built-in detectors only)
+
 ```powershell
 cargo run --release -p lendingclub-demo -- `
     --input  demos/lendingclub/data/accepted_2007_to_2018Q4.csv.gz `
     --output demos/lendingclub/out/report.json
 ```
+
+### With the `PostOriginationByName` custom detector (ADR-0041)
+
+```powershell
+cargo run --release -p lendingclub-demo -- `
+    --input  demos/lendingclub/data/accepted_2007_to_2018Q4.csv.gz `
+    --output demos/lendingclub/out/report_with_custom.json `
+    --use-custom-detectors
+```
+
+Registers the demo's `PostOriginationByNameDetector` (in
+[`src/lib.rs`](src/lib.rs)) via `ValidateOptions::custom_detectors`. The
+detector emits E9500 findings for every column whose name matches a
+known post-origination pattern (`total_*`, `last_pymnt_*`, `recoveries`,
+etc.). The report's E9500 + E9061 columns together cover the broader
+leakage set the analyst's domain triage would have hand-curated.
 
 For a faster smoke run on a smaller machine:
 
@@ -136,14 +154,26 @@ cargo run --release -p lendingclub-demo --bin honest_model -- `
     --sample-rows 200000 --seed 42
 ```
 
+For the 4-way comparison (including the ADR-0041 custom detector
+result), pass `--from-report` pointing at the report produced with
+`--use-custom-detectors`:
+
+```powershell
+.\target\release\honest_model.exe `
+    --input demos/lendingclub/data/accepted_2007_to_2018Q4.csv.gz `
+    --sample-rows 200000 --seed 42 `
+    --from-report demos/lendingclub/out/report_with_custom.json
+```
+
 Expected output (2026-06-01 measurement, see
 [cross_validate.md §3](cross_validate.md#3-honest-model-auc-measurement)):
 
-| Variant            | \|AUC\| | Interpretation                                         |
-| ------------------ | ------- | ------------------------------------------------------ |
-| Pre-Locke (naive)  | 0.9993  | catastrophic overfitting via leakage                   |
-| Locke-filtered     | 0.9995  | removing only Locke's E9061 flags is not sufficient    |
-| Domain-honest      | 0.7394  | matches Bao et al. (2019) AUC ≈ 0.74 — honest baseline |
+| Variant                 | \|AUC\| | Interpretation                                                |
+| ----------------------- | ------- | ------------------------------------------------------------- |
+| Pre-Locke (naive)       | 0.9993  | catastrophic overfitting via leakage                          |
+| Locke-filtered          | 0.9995  | removing only Locke's E9061 flags is not sufficient           |
+| **Locke + custom det.** | **0.7388** | **ADR-0041 custom detector closes the gap inside Locke**  |
+| Domain-honest           | 0.7394  | matches Bao et al. (2019) AUC ≈ 0.74 — hand-curated baseline  |
 
 Implementation uses `cjc-runtime::hypothesis::logistic_regression`
 (IRLS), `cjc-runtime::ml::auc_roc`, and

@@ -44,6 +44,12 @@ struct Args {
     sample_rows: usize,
     seed: u64,
     test_fraction: f64,
+    /// Optional path to a LockeReport JSON produced by the
+    /// `lendingclub_demo` binary. When set, the harness adds a 4th
+    /// variant — "Locke + custom detector" — whose exclusion set is
+    /// derived from the report's E9500 (post-origination by name) and
+    /// E9061 (|AUC|>=0.85) flagged columns.
+    from_report: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -51,6 +57,7 @@ fn parse_args() -> Result<Args, String> {
     let mut sample_rows: usize = 200_000;
     let mut seed: u64 = 42;
     let mut test_fraction: f64 = 0.3;
+    let mut from_report: Option<PathBuf> = None;
 
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -79,8 +86,13 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|e| format!("--test-fraction: {}", e))?;
             }
+            "--from-report" => {
+                from_report = Some(PathBuf::from(
+                    it.next().ok_or("--from-report needs a value")?,
+                ));
+            }
             "-h" | "--help" => {
-                eprintln!("honest_model --input <path.csv.gz> [--sample-rows N] [--seed S] [--test-fraction F]");
+                eprintln!("honest_model --input <path.csv.gz> [--sample-rows N] [--seed S] [--test-fraction F] [--from-report <path.json>]");
                 std::process::exit(0);
             }
             other => return Err(format!("unknown argument: {}", other)),
@@ -91,7 +103,89 @@ fn parse_args() -> Result<Args, String> {
         sample_rows,
         seed,
         test_fraction,
+        from_report,
     })
+}
+
+/// Parse a LockeReport JSON file and return the set of column names
+/// flagged with E9500 (custom: post-origination by name) OR E9061
+/// (built-in: |AUC|>=0.85 leakage). Used by the `--from-report` variant
+/// to build the exclusion set directly from Locke's output.
+fn extract_locke_flagged_columns(path: &PathBuf) -> Result<Vec<String>, String> {
+    let json = std::fs::read_to_string(path)
+        .map_err(|e| format!("read report {}: {}", path.display(), e))?;
+    let mut out: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    // The JSON's findings are an array of objects; we walk linearly
+    // tracking (code, column) pairs in the depth-2 boundary. Same
+    // pattern as the demo's expected_findings.rs walker.
+    let mut depth = 0i32;
+    let mut current_code: Option<String> = None;
+    let mut current_column: Option<String> = None;
+    let bytes = json.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] as char {
+            '{' => {
+                depth += 1;
+                if depth == 2 {
+                    current_code = None;
+                    current_column = None;
+                }
+            }
+            '}' => {
+                if depth == 2 {
+                    if let (Some(code), Some(col)) = (current_code.take(), current_column.take()) {
+                        if code == "E9500" || code == "E9061" {
+                            out.insert(col);
+                        }
+                    }
+                }
+                depth -= 1;
+            }
+            '"' if depth == 2 => {
+                let rest = &json[i..];
+                if rest.starts_with("\"code\"") {
+                    if let Some(v) = extract_string_after(&json, i + "\"code\"".len()) {
+                        current_code = Some(v);
+                    }
+                } else if rest.starts_with("\"column\"") {
+                    if let Some(v) = extract_string_after(&json, i + "\"column\"".len()) {
+                        current_column = Some(v);
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    Ok(out.into_iter().collect())
+}
+
+fn extract_string_after(s: &str, start: usize) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut i = start;
+    while i < bytes.len() && matches!(bytes[i], b' ' | b':' | b'\t') {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b'"' {
+        return None;
+    }
+    i += 1;
+    let mut out = Vec::new();
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if i + 1 < bytes.len() => {
+                out.push(bytes[i + 1]);
+                i += 2;
+            }
+            b'"' => return String::from_utf8(out).ok(),
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    None
 }
 
 /// One full train-and-score iteration for a named feature set.
@@ -233,19 +327,50 @@ fn main() -> ExitCode {
     // the file gives us), a fixed seed + fixed input produces a fixed pool.
     let sample_indices: Vec<usize> = (0..actual_sample).collect();
 
-    // Run all three variants. Failures don't abort — each variant is
+    // Build the set of variants. The first three are always run;
+    // the fourth ("Locke + custom detector") is added when --from-report
+    // is supplied.
+    let mut variants: Vec<(String, Vec<String>)> = vec![
+        ("pre-Locke (naive)".into(), Vec::new()),
+        (
+            "Locke-filtered".into(),
+            LOCKE_E9061_COLUMNS.iter().map(|s| s.to_string()).collect(),
+        ),
+        (
+            "domain-honest".into(),
+            DOMAIN_POST_ORIGINATION_COLUMNS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        ),
+    ];
+    if let Some(report_path) = &args.from_report {
+        match extract_locke_flagged_columns(report_path) {
+            Ok(cols) => {
+                eprintln!(
+                    "[from-report] extracted {} E9500/E9061-flagged columns from {}",
+                    cols.len(),
+                    report_path.display()
+                );
+                variants.push(("Locke + custom det.".into(), cols));
+            }
+            Err(e) => {
+                eprintln!("[from-report] failed: {}; skipping variant", e);
+            }
+        }
+    }
+
+    // Run each variant. Failures don't abort — each variant is
     // independent and even a partial result is useful.
     let mut results: Vec<VariantResult> = Vec::new();
-    for (label, excludes) in [
-        ("pre-Locke (naive)", vec![]),
-        ("Locke-filtered", LOCKE_E9061_COLUMNS.to_vec()),
-        ("domain-honest", DOMAIN_POST_ORIGINATION_COLUMNS.to_vec()),
-    ] {
+    for (label, excludes_owned) in variants {
+        let label_static: &'static str = Box::leak(label.into_boxed_str());
+        let excludes: Vec<&str> = excludes_owned.iter().map(|s| s.as_str()).collect();
         let mut full_excludes: Vec<&str> = ALWAYS_EXCLUDED_COLUMNS.to_vec();
         full_excludes.extend(excludes);
-        eprintln!("[variant] {} — fitting...", label);
+        eprintln!("[variant] {} — fitting...", label_static);
         match run_variant(
-            label,
+            label_static,
             full_excludes,
             &df,
             &sample_indices,
@@ -260,7 +385,7 @@ fn main() -> ExitCode {
                 results.push(r);
             }
             Err(e) => {
-                eprintln!("[variant] {} failed: {}", label, e);
+                eprintln!("[variant] {} failed: {}", label_static, e);
             }
         }
     }
