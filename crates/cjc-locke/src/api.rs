@@ -28,6 +28,11 @@ use crate::validation::{
 /// `null_masks` (v0.2) lets the caller mark specific row indices as null
 /// for non-float columns. Without a mask, non-float missingness is not
 /// inferred — see [`NullMask`](crate::validation::NullMask).
+///
+/// `custom_detectors` (v0.8 / ADR-0041) registers user-defined detectors
+/// that run after the built-in ones. They must declare a code in
+/// `E9500..=E9999` and which belief axes they affect. See
+/// [`crate::custom_detector`] for the trait + determinism contract.
 #[derive(Clone, Debug, Default)]
 pub struct ValidateOptions {
     pub dataset_label: String,
@@ -36,18 +41,41 @@ pub struct ValidateOptions {
     pub expected_schema: Option<ExpectedSchema>,
     pub primary_key: Option<String>,
     pub null_masks: NullMaskMap,
+    pub custom_detectors: Vec<std::sync::Arc<dyn crate::custom_detector::CustomDetector>>,
 }
 
 /// Build a `LockeReport` from a single dataframe.
 pub fn validate(df: &DataFrame, opts: &ValidateOptions) -> LockeReport {
-    let findings = validate_dataframe(
-        df,
+    // v0.8 (ADR-0042) — auto-promote mostly-numeric Str columns to
+    // Float-with-NaN BEFORE any detector runs. Fixes the CSV-reader gap
+    // where a numeric column with empty/sentinel first row stays Str
+    // and silently bypasses E9070 / E9039 / E9050+ detectors.
+    //
+    // The `working_df` reference points at the promoted frame if any
+    // column qualified, else at the original. Zero-copy when no
+    // promotion happens.
+    let (maybe_promoted_df, promo_findings) =
+        crate::auto_promote::auto_promote_str_columns(df, &opts.config);
+    let working_df: &DataFrame = maybe_promoted_df.as_ref().unwrap_or(df);
+
+    let mut findings = validate_dataframe(
+        working_df,
         &opts.config,
         &opts.impossible_rules,
         opts.expected_schema.as_ref(),
         opts.primary_key.as_deref(),
         &opts.null_masks,
     );
+    findings.extend(promo_findings);
+
+    // v0.8 (ADR-0041) — invoke custom detectors after built-ins. They
+    // produce findings in the E9500..=E9999 namespace and declare which
+    // belief axes their findings affect. We merge their findings into
+    // the main vector and stash the axis assignments + assumptions for
+    // the LockeReport.
+    let custom_outcome =
+        crate::custom_detector::run_custom_detectors(working_df, &opts.custom_detectors);
+    findings.extend(custom_outcome.findings.iter().cloned());
 
     // v0.6.4 — also build the auto-sentinel mask here so the per-column
     // `missingness_rate` reflects auto-detected `?` / `NA` / ... rows on
@@ -57,18 +85,36 @@ pub fn validate(df: &DataFrame, opts: &ValidateOptions) -> LockeReport {
     // Str column the user didn't manually mask. That's the missing half
     // of the §4.D Part 1 fix.
     let (auto_masks, _auto_findings) =
-        crate::validation::detect_string_sentinels(df, &opts.config);
+        crate::validation::detect_string_sentinels(working_df, &opts.config);
     let effective_masks =
         crate::validation::merge_null_mask_maps(&opts.null_masks, &auto_masks);
 
+    // Pre-bucket findings by column once. The prior code re-scanned every
+    // finding for each column — O(C·F). For wide dataframes with many
+    // findings this is the dominant cost in the api wrapper (especially
+    // visible in the 1M-row scale benchmark, where ns/row went super-linear).
+    // Bucketing once: O(F) pass + per-bucket sort, identical sort_key ordering
+    // → bit-identical column_reports[col].findings.
+    let mut findings_by_col: BTreeMap<&str, Vec<ValidationFinding>> = BTreeMap::new();
+    for f in &findings {
+        if let Some(col_name) = f.column.as_deref() {
+            findings_by_col.entry(col_name).or_default().push(f.clone());
+        }
+    }
+    for v in findings_by_col.values_mut() {
+        v.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+    }
+
     let mut column_reports: BTreeMap<String, ColumnBeliefReport> = BTreeMap::new();
-    for (name, col) in &df.columns {
-        let mut col_findings: Vec<ValidationFinding> = findings
-            .iter()
-            .filter(|f| f.column.as_deref() == Some(name.as_str()))
+    for (name, col) in &working_df.columns {
+        // `get().cloned()` rather than `remove()` so duplicate-named
+        // columns (legal in cjc_data::DataFrame::from_columns) see the
+        // same bucket on each visit — preserving the prior behaviour
+        // where each iteration re-derived the full filtered list.
+        let col_findings: Vec<ValidationFinding> = findings_by_col
+            .get(name.as_str())
             .cloned()
-            .collect();
-        col_findings.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+            .unwrap_or_default();
         let n_total = col.len() as f64;
         // Missingness rate: Float NaN union with effective-mask
         // positions; non-Float uses effective mask only.
@@ -78,38 +124,34 @@ pub fn validate(df: &DataFrame, opts: &ValidateOptions) -> LockeReport {
                 .get(name)
                 .map(|m| m.null_rows.iter().filter(|i| **i < col_len).count())
                 .unwrap_or(0);
-            let nan_count = match col {
-                cjc_data::Column::Float(v) => v.iter().filter(|x| x.is_nan()).count(),
-                _ => 0,
-            };
-            // Union estimate: for Float, true union via BTreeSet would be more
-            // accurate, but for the per-column rate this small overcount is
-            // bounded by the column length and acceptable.
+            // Union: for Float, |NaN ∪ Mask| = |NaN| + |Mask positions that
+            // are NOT also NaN|. Counted in O(n + m) with zero heap; the
+            // previous implementation allocated a fresh BTreeSet<usize> per
+            // column and scanned NaNs twice. Bit-identical union size.
             match col {
                 cjc_data::Column::Float(v) => {
-                    let mut s: std::collections::BTreeSet<usize> =
-                        (0..v.len()).filter(|i| v[*i].is_nan()).collect();
-                    if let Some(m) = effective_masks.get(name) {
-                        for r in &m.null_rows {
-                            if *r < v.len() {
-                                s.insert(*r);
-                            }
-                        }
-                    }
-                    s.len()
+                    let n_nan = v.iter().filter(|x| x.is_nan()).count();
+                    let extra = effective_masks
+                        .get(name)
+                        .map(|m| {
+                            m.null_rows
+                                .iter()
+                                .filter(|&&r| r < v.len() && !v[r].is_nan())
+                                .count()
+                        })
+                        .unwrap_or(0);
+                    n_nan + extra
                 }
-                _ => {
-                    let _ = nan_count;
-                    mask_count
-                }
+                _ => mask_count,
             }
         } as f64;
         let missingness_rate = if n_total == 0.0 { 0.0 } else { missing / n_total };
-        let distinct = crate::validation::distinct_count(col);
+        // Single-pass distinct + top-freq. Replaces two back-to-back full
+        // column scans that each built their own per-value count map.
+        let (distinct, top_freq) = crate::validation::distinct_count_and_top_freq(col);
         let constant = distinct <= 1;
         let near_constant = if n_total > 0.0 {
-            crate::validation::top_value_freq(col) as f64 / n_total
-                >= opts.config.near_constant_threshold
+            top_freq as f64 / n_total >= opts.config.near_constant_threshold
         } else {
             false
         };
@@ -126,31 +168,33 @@ pub fn validate(df: &DataFrame, opts: &ValidateOptions) -> LockeReport {
         );
     }
 
-    let column_types: BTreeMap<String, String> = df
+    let column_types: BTreeMap<String, String> = working_df
         .columns
         .iter()
         .map(|(n, c)| (n.clone(), c.type_name().to_string()))
         .collect();
     let input = LockeInputSummary {
         dataset_label: opts.dataset_label.clone(),
-        n_rows: df.nrows() as u64,
-        n_cols: df.ncols() as u64,
+        n_rows: working_df.nrows() as u64,
+        n_cols: working_df.ncols() as u64,
         column_types,
     };
-    let assumptions = vec![
+    let mut assumptions = vec![
         "NaN treated as missing for Float columns; other types report a limitation".into(),
         "missingness, drift, and belief use deterministic Kahan summation".into(),
         "duplicate detection is byte-canonical".into(),
     ];
+    assumptions.extend(custom_outcome.assumptions.iter().cloned());
 
     let mut report = LockeReport::new(input, findings, column_reports, assumptions);
+    report.custom_axis_assignments = custom_outcome.axis_assignments;
 
     // v0.7+ (A2-by-default) — optionally attach per-value canonicalisation
     // lineage. Default off (preserves byte-identical v0.7 reports); CLI
     // exposes this via `cjcl locke validate --with-trace`.
     if opts.config.collect_per_value_lineage {
         let lineage_cfg = crate::per_value_lineage::PerValueLineageConfig::default();
-        let lineage = crate::per_value_lineage::build_per_value_lineage(df, &lineage_cfg);
+        let lineage = crate::per_value_lineage::build_per_value_lineage(working_df, &lineage_cfg);
         report = report.with_per_value_lineage(lineage);
     }
 
@@ -222,15 +266,32 @@ pub fn belief_report_from_locke_with_model(
 /// Shared between the migrated and inline paths so the byte-identity
 /// regression test exercises only the construction-mode divergence
 /// (compose vs from_dimensions), not the per-axis derivation logic.
+///
+/// **v0.8 (ADR-0041)** — also routes custom-detector findings to their
+/// declared belief axes via `report.custom_axis_assignments`. When no
+/// custom detectors are registered, the map is empty and the per-axis
+/// scores are byte-identical to pre-v0.8.
 fn belief_axis_scores_from_report(
     report: &LockeReport,
     penalty: &BeliefPenalty,
 ) -> (f64, f64, f64, f64, f64, f64, f64, f64) {
     let n = report.input.n_rows;
 
+    // Helper closure: does this code's custom-axis assignment contain
+    // the named axis? Empty map → always false → backward-compatible.
+    let custom_contains = |code: &str, axis: crate::custom_detector::BeliefAxisSet| -> bool {
+        report
+            .custom_axis_assignments
+            .get(code)
+            .map(|axes| axes.contains(axis))
+            .unwrap_or(false)
+    };
+
     let missingness_score = {
-        // Mean missingness rate across columns reported.
-        if report.column_reports.is_empty() {
+        // Built-in mean-rate computation across column_reports stays the
+        // baseline. Custom findings on the missingness axis stack a
+        // penalty on top via the standard model.
+        let baseline = if report.column_reports.is_empty() {
             1.0
         } else {
             let total: f64 = report
@@ -239,12 +300,22 @@ fn belief_axis_scores_from_report(
                 .map(|c| c.missingness_rate)
                 .sum();
             1.0 - (total / report.column_reports.len() as f64)
-        }
+        };
+        let custom_penalty = penalty_from_findings_with_model(
+            &report.findings,
+            |code| custom_contains(code, crate::custom_detector::BeliefAxisSet::MISSINGNESS),
+            penalty,
+        );
+        (baseline - custom_penalty).clamp(0.0, 1.0)
     };
     let duplication_score = 1.0
         - penalty_from_findings_with_model(
             &report.findings,
-            |code| code == "E9003" || code == "E9004",
+            |code| {
+                code == "E9003"
+                    || code == "E9004"
+                    || custom_contains(code, crate::custom_detector::BeliefAxisSet::DUPLICATION)
+            },
             penalty,
         );
     let schema_score = 1.0
@@ -266,6 +337,7 @@ fn belief_axis_scores_from_report(
                 || code == "E9080" || code == "E9081" || code == "E9082"
                 || code == "E9083" || code == "E9084" || code == "E9085"
                 || code == "E9086"
+                || custom_contains(code, crate::custom_detector::BeliefAxisSet::SCHEMA)
             },
             penalty,
         );
@@ -279,15 +351,41 @@ fn belief_axis_scores_from_report(
             |code| {
                 code == "E9014" || code == "E9016"
                 || code == "E9090" || code == "E9091" || code == "E9092" || code == "E9093"
+                || custom_contains(code, crate::custom_detector::BeliefAxisSet::CONSTRAINT)
             },
             penalty,
         );
-    // Drift / leakage / lineage scores are 1.0 here (no signal in single-df flow);
-    // they get populated when the caller composes `validate` + `compare` + lineage.
-    let drift_score = 1.0;
-    let leakage_score = 1.0;
-    let lineage_score = 1.0;
-    let sample_score = sample_score_from_n(n);
+    // Drift / leakage / lineage scores are 1.0 by default in the
+    // single-df flow; custom detectors are the FIRST way for these axes
+    // to be touched without a compare/lineage pass. Apply the standard
+    // penalty model where the custom map routes findings to the axis.
+    let drift_score = 1.0
+        - penalty_from_findings_with_model(
+            &report.findings,
+            |code| custom_contains(code, crate::custom_detector::BeliefAxisSet::DRIFT),
+            penalty,
+        );
+    let leakage_score = 1.0
+        - penalty_from_findings_with_model(
+            &report.findings,
+            |code| custom_contains(code, crate::custom_detector::BeliefAxisSet::LEAKAGE),
+            penalty,
+        );
+    let lineage_score = 1.0
+        - penalty_from_findings_with_model(
+            &report.findings,
+            |code| custom_contains(code, crate::custom_detector::BeliefAxisSet::LINEAGE),
+            penalty,
+        );
+    let sample_score = {
+        let baseline = sample_score_from_n(n);
+        let custom_penalty = penalty_from_findings_with_model(
+            &report.findings,
+            |code| custom_contains(code, crate::custom_detector::BeliefAxisSet::SAMPLE),
+            penalty,
+        );
+        (baseline - custom_penalty).clamp(0.0, 1.0)
+    };
 
     (
         schema_score,

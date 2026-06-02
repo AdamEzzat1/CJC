@@ -38,13 +38,48 @@
 //! let report = validate(&df, &opts);
 //! println!("worst severity: {}", report.worst_severity());
 //! ```
+//!
+//! ## Composing evidence across stages (v0.7+)
+//!
+//! Locke is not just a one-shot validator. Every report carries an
+//! 8-dimensional [`BeliefScore`] — `(schema, missingness, drift, leakage,
+//! lineage, sample, duplication, constraint)` — that the
+//! [`algebra`] module knows how to compose across pipeline stages.
+//!
+//! The default composition rule is *meet over min*: evidence weakens to
+//! the worst link, never strengthens via majority vote. This is an
+//! intentional pessimism — a meet-semilattice in
+//! `(BeliefScore, meet, ⊤=[1,...,1])` with proptest-locked laws
+//! (identity, idempotence, commutativity, associativity, monotonicity).
+//! Alternative rules (`Max`, `GeometricMean`, `ArithmeticMean`) are
+//! provided, each with its own law-introspection methods so callers can
+//! see what algebraic guarantees they lose by switching.
+//!
+//! ```no_run
+//! use cjc_locke::algebra::{compose_many, BeliefAxisRules};
+//! use cjc_locke::api::belief_report_from_locke;
+//! # let stage_a_report: cjc_locke::LockeReport = unimplemented!();
+//! # let stage_b_report: cjc_locke::LockeReport = unimplemented!();
+//! let belief_a = belief_report_from_locke(&stage_a_report).score;
+//! let belief_b = belief_report_from_locke(&stage_b_report).score;
+//! // Compose under the default all-Min meet semilattice. The result is
+//! // the pessimistic floor across both stages, axis by axis.
+//! let combined = compose_many(&[belief_a, belief_b], &BeliefAxisRules::default())
+//!     .expect("non-empty input always composes");
+//! ```
+//!
+//! See [`algebra`] for the full composition rule catalog and the
+//! per-rule laws each one preserves. See [`belief`] for the per-axis
+//! breakdown and the penalty model that derives scores from findings.
 
 pub mod algebra;
 pub mod api;
+pub mod auto_promote;
 pub mod belief;
 pub mod categorical;
 pub mod causal;
 pub mod column_summary;
+pub mod custom_detector;
 pub mod dispatch;
 pub mod drift;
 pub mod gate;

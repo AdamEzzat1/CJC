@@ -261,6 +261,15 @@ pub struct LockeReport {
     /// lineage map is in-memory only for this batch. See ADR-0038 for
     /// the data model.
     pub per_value_lineage: Option<crate::per_value_lineage::PerValueLineageMap>,
+    /// **v0.8 (ADR-0041)** — mapping from custom-detector E-code to the
+    /// belief axes that detector's findings affect. Empty when no
+    /// custom detectors are registered; populated by
+    /// [`crate::api::validate`] via
+    /// [`crate::custom_detector::run_custom_detectors`]. The belief
+    /// composition consults this map to route custom-finding penalties
+    /// to the correct axes.
+    pub custom_axis_assignments:
+        BTreeMap<String, crate::custom_detector::BeliefAxisSet>,
 }
 
 impl LockeReport {
@@ -284,6 +293,7 @@ impl LockeReport {
             assumptions,
             run_id,
             per_value_lineage: None,
+            custom_axis_assignments: BTreeMap::new(),
         }
     }
 

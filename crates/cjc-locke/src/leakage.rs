@@ -186,11 +186,18 @@ fn extract_multiclass_target(
         return None;
     }
     let labels: Vec<i64> = distinct.into_iter().collect();
-    let mut lookup: std::collections::BTreeMap<i64, u32> = std::collections::BTreeMap::new();
-    for (i, lbl) in labels.iter().enumerate() {
-        lookup.insert(*lbl, i as u32);
-    }
-    let classes: Vec<u32> = values.iter().map(|v| lookup[v]).collect();
+    // `labels` is built from a `BTreeSet`, so it is already sorted. Use
+    // `binary_search` directly instead of building a separate
+    // `BTreeMap<i64, u32>` whose only purpose is "label -> index" lookup.
+    // For n_classes ≤ 20 (the practical cap) binary search on a
+    // contiguous `Vec` beats `BTreeMap` (better cache locality, zero
+    // additional heap, identical O(log n) complexity). `expect` cannot
+    // fire: every `v` in `values` was already inserted into `distinct`
+    // → it is guaranteed to be in `labels`.
+    let classes: Vec<u32> = values
+        .iter()
+        .map(|v| labels.binary_search(v).expect("value must be in distinct set") as u32)
+        .collect();
     Some((classes, labels))
 }
 

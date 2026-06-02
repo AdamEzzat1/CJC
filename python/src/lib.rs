@@ -25,12 +25,18 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString};
 
+use std::sync::Arc;
+
 use cjc_data::{Column, DataFrame};
 use cjc_locke::api::{
     belief_report_from_locke, belief_report_from_locke_with_model,
     causal_guardrail as locke_causal_guardrail, validate,
     validate_and_compare as locke_validate_and_compare, ValidateOptions,
 };
+use cjc_locke::custom_detector::{
+    validate_custom_code, BeliefAxisSet, CustomDetector, FindingSink,
+};
+use cjc_locke::report::{FindingEvidence, FindingSeverity};
 use cjc_locke::belief::{BeliefPenalty, BeliefReport};
 use cjc_locke::causal::{CausalConfig, CausalGuardrailReport};
 use cjc_locke::drift::{compare as locke_compare_drift, DriftConfig, InductionRiskReport};
@@ -343,6 +349,342 @@ fn dict_to_belief_penalty(d: Option<&Bound<'_, PyDict>>) -> PyResult<BeliefPenal
     Ok(p)
 }
 
+// ─── Custom detector bridge (ADR-0041) ───────────────────────────────────────
+//
+// Python users subclass `cjc_locke.CustomDetector` and pass instances to
+// `validate(..., custom_detectors=[...])`. The bridge:
+//
+// 1. Validates each detector's static config (code namespace, axes).
+// 2. Wraps each Python instance in a `PyCustomDetectorAdapter` that
+//    implements the Rust `CustomDetector` trait.
+// 3. Inside `run()`, builds read-only Python views of the DataFrame and
+//    of a finding-collecting sink, then calls the Python detector's
+//    `run(df, sink)` method.
+// 4. After Python returns, drains the sink's pending emissions into the
+//    real Rust `FindingSink`, which applies the same canonicalization,
+//    severity rules, and sort order as built-in detectors.
+//
+// Determinism contract: the Python-side `run()` can use any data
+// structures it likes — the Rust framework sorts emitted findings by
+// `sort_key()` after the call returns, so emission order inside the
+// Python code does not affect the final report bytes. The user is
+// responsible for the *set* of findings being a deterministic function
+// of the input.
+
+/// Read-only view of a `DataFrame` passed to a Python custom detector.
+///
+/// Holds an `Arc<DataFrame>` cloned once per detector invocation so the
+/// view can outlive the Rust `run()` call without lifetime headaches.
+/// Most pattern-based detectors only need column names + types, which
+/// are O(cols) to access. Bulk data access (`get_float` etc.) costs
+/// O(rows) per column.
+#[pyclass(name = "CustomDetectorDataFrame", module = "cjc_locke")]
+struct PyDetectorDataFrame {
+    inner: Arc<DataFrame>,
+}
+
+#[pymethods]
+impl PyDetectorDataFrame {
+    #[getter]
+    fn n_rows(&self) -> usize {
+        self.inner.nrows()
+    }
+
+    #[getter]
+    fn n_cols(&self) -> usize {
+        self.inner.ncols()
+    }
+
+    /// Column names in dataframe order.
+    fn column_names(&self) -> Vec<String> {
+        self.inner.column_names().iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Returns the type name of a column: "Float", "Int", "Bool", "Str",
+    /// "Categorical", "CategoricalAdaptive", "DateTime", or `None` if the
+    /// column does not exist.
+    fn column_type(&self, name: &str) -> Option<String> {
+        self.inner
+            .get_column(name)
+            .map(|c| c.type_name().to_string())
+    }
+
+    /// Returns the column as a list of f64. Raises if the column is not
+    /// numeric. NaN values are preserved.
+    fn get_float(&self, name: &str) -> PyResult<Vec<f64>> {
+        match self.inner.get_column(name) {
+            Some(Column::Float(v)) => Ok(v.clone()),
+            Some(Column::Int(v)) => Ok(v.iter().map(|&x| x as f64).collect()),
+            Some(Column::Bool(v)) => Ok(v.iter().map(|&b| if b { 1.0 } else { 0.0 }).collect()),
+            Some(other) => Err(PyValueError::new_err(format!(
+                "column `{}` is `{}`, not numeric",
+                name,
+                other.type_name()
+            ))),
+            None => Err(PyValueError::new_err(format!("column `{}` not found", name))),
+        }
+    }
+
+    /// Returns the column as a list of strings. Works on Str and
+    /// Categorical columns; raises on numeric.
+    fn get_str(&self, name: &str) -> PyResult<Vec<String>> {
+        match self.inner.get_column(name) {
+            Some(Column::Str(v)) => Ok(v.clone()),
+            Some(Column::Categorical { levels, codes }) => Ok(codes
+                .iter()
+                .map(|&c| levels.get(c as usize).cloned().unwrap_or_default())
+                .collect()),
+            Some(other) => Err(PyValueError::new_err(format!(
+                "column `{}` is `{}`, not string-like",
+                name,
+                other.type_name()
+            ))),
+            None => Err(PyValueError::new_err(format!("column `{}` not found", name))),
+        }
+    }
+
+    fn __len__(&self) -> usize {
+        self.inner.nrows()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "<CustomDetectorDataFrame rows={} cols={}>",
+            self.inner.nrows(),
+            self.inner.ncols()
+        )
+    }
+}
+
+/// Sink passed to a Python custom detector. Internally collects pending
+/// emissions; after the Rust side reads them they are forwarded into the
+/// real Rust `FindingSink` (where canonicalization happens).
+///
+/// This pattern avoids unsafe mutable references across the Python
+/// boundary: the sink the user touches is owned by Python; the actual
+/// canonical sink stays on the Rust side.
+#[pyclass(name = "CustomDetectorSink", module = "cjc_locke")]
+struct PyDetectorSink {
+    pending: Vec<PyEmittedFinding>,
+    code: String,
+    axes_empty: bool,
+    /// Last error message, exposed for Python tests that want to assert
+    /// rejection behaviour.
+    last_error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct PyEmittedFinding {
+    severity: FindingSeverity,
+    message: String,
+    column: Option<String>,
+    row_range: Option<(usize, usize)>,
+    sample_size: u64,
+}
+
+#[pymethods]
+impl PyDetectorSink {
+    /// Emit a finding. Mirrors `FindingSink::emit` on the Rust side.
+    ///
+    /// `severity` must be one of `"info"`, `"notice"`, `"warning"`, `"error"`.
+    /// `message` must be non-empty.
+    ///
+    /// Empty messages and non-Info severities on an axes-empty detector
+    /// are recorded as errors and dropped — same contract as the Rust
+    /// `FindingSink`.
+    #[pyo3(signature = (severity, message, column=None, row_range=None, sample_size=0))]
+    fn emit(
+        &mut self,
+        severity: &str,
+        message: &str,
+        column: Option<String>,
+        row_range: Option<(usize, usize)>,
+        sample_size: u64,
+    ) -> PyResult<usize> {
+        if message.is_empty() {
+            self.last_error = Some("empty message".into());
+            return Ok(self.pending.len());
+        }
+        let sev = match severity {
+            "info" => FindingSeverity::Info,
+            "notice" => FindingSeverity::Notice,
+            "warning" => FindingSeverity::Warning,
+            "error" => FindingSeverity::Error,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown severity `{}` (expected info/notice/warning/error)",
+                    other
+                )))
+            }
+        };
+        if self.axes_empty && sev != FindingSeverity::Info {
+            self.last_error = Some(
+                "detector declares no belief axes; only Info-severity findings are accepted".into(),
+            );
+            return Ok(self.pending.len());
+        }
+        self.pending.push(PyEmittedFinding {
+            severity: sev,
+            message: message.to_string(),
+            column,
+            row_range,
+            sample_size,
+        });
+        Ok(self.pending.len())
+    }
+
+    /// Read-only: the detector's declared code (used by Python tests).
+    #[getter]
+    fn code(&self) -> String {
+        self.code.clone()
+    }
+
+    /// Read-only: number of emissions pending.
+    #[getter]
+    fn n_pending(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Read-only: last rejection error (None if all emissions succeeded).
+    #[getter]
+    fn last_error(&self) -> Option<String> {
+        self.last_error.clone()
+    }
+}
+
+/// Rust-side wrapper that adapts a Python detector instance into the
+/// `CustomDetector` trait.
+struct PyCustomDetectorAdapter {
+    /// The Python instance. `Py<PyAny>` is refcounted so the user's
+    /// detector survives until the wrapper is dropped.
+    instance: Py<PyAny>,
+    /// Leaked at registration so the trait's `code()` can return
+    /// `&'static str`. Detectors are typically registered once per
+    /// process so the leak is bounded.
+    code: &'static str,
+    axes: BeliefAxisSet,
+    name: String,
+}
+
+impl std::fmt::Debug for PyCustomDetectorAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PyCustomDetectorAdapter {{ code: {}, name: {} }}", self.code, self.name)
+    }
+}
+
+impl CustomDetector for PyCustomDetectorAdapter {
+    fn code(&self) -> &'static str {
+        self.code
+    }
+    fn belief_axes(&self) -> BeliefAxisSet {
+        self.axes
+    }
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn run(&self, df: &DataFrame, sink: &mut FindingSink) {
+        Python::with_gil(|py| {
+            // Build the view + sink that the Python detector sees.
+            let view = Py::new(
+                py,
+                PyDetectorDataFrame {
+                    inner: Arc::new(df.clone()),
+                },
+            );
+            let view = match view {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!(
+                        "[cjc_locke] failed to allocate PyDetectorDataFrame for `{}`: {}",
+                        self.code, e
+                    );
+                    return;
+                }
+            };
+            let py_sink = Py::new(
+                py,
+                PyDetectorSink {
+                    pending: Vec::new(),
+                    code: self.code.to_string(),
+                    axes_empty: self.axes.is_empty(),
+                    last_error: None,
+                },
+            );
+            let py_sink = match py_sink {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!(
+                        "[cjc_locke] failed to allocate PyDetectorSink for `{}`: {}",
+                        self.code, e
+                    );
+                    return;
+                }
+            };
+            // Call the user's run(df, sink). Errors are caught and
+            // surfaced as findings on stderr; we don't abort the whole
+            // validate() call on one detector's exception.
+            match self
+                .instance
+                .bind(py)
+                .call_method1("run", (view, py_sink.clone_ref(py)))
+            {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!(
+                        "[cjc_locke] custom detector `{}` raised: {}",
+                        self.code, e
+                    );
+                    return;
+                }
+            }
+            // Drain pending emissions into the Rust sink.
+            let py_sink_bound = py_sink.bind(py);
+            let pending = {
+                let borrow = py_sink_bound.borrow();
+                borrow.pending.clone()
+            };
+            for emission in pending {
+                sink.emit(
+                    emission.severity,
+                    emission.message,
+                    emission.column,
+                    emission.row_range,
+                    Vec::<FindingEvidence>::new(),
+                    emission.sample_size,
+                );
+            }
+        });
+    }
+}
+
+/// Build a Rust trait wrapper from a Python detector instance.
+/// Validates static config at registration. Raises if the code is
+/// outside the custom namespace or the axes list contains unknown names.
+fn build_python_detector_adapter(
+    py: Python<'_>,
+    detector: Py<PyAny>,
+) -> PyResult<PyCustomDetectorAdapter> {
+    let bound = detector.bind(py);
+    let code: String = bound.getattr("code")?.call0()?.extract()?;
+    validate_custom_code(&code).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let axes_raw: Vec<String> = bound.getattr("belief_axes")?.call0()?.extract()?;
+    let axes_refs: Vec<&str> = axes_raw.iter().map(|s| s.as_str()).collect();
+    let axes = BeliefAxisSet::from_names(&axes_refs).map_err(PyValueError::new_err)?;
+    let name: String = match bound.getattr("name") {
+        Ok(n) => n.call0().and_then(|v| v.extract::<String>()).unwrap_or_else(|_| code.clone()),
+        Err(_) => code.clone(),
+    };
+    // Leak the code so the trait can return &'static str. Detectors
+    // typically live for the process lifetime so the leak is bounded.
+    let leaked: &'static str = Box::leak(code.into_boxed_str());
+    Ok(PyCustomDetectorAdapter {
+        instance: detector,
+        code: leaked,
+        axes,
+        name,
+    })
+}
+
 // ─── Output wrappers ──────────────────────────────────────────────────────────
 //
 // Each output type wraps a Rust value verbatim. `to_json()` uses the existing
@@ -537,21 +879,33 @@ impl PyCausalGuardrailReport {
 
 /// Validate a single DataFrame.
 ///
-/// `data`        — dict mapping column name to numpy array (f64/i64/bool/f32/i32)
-///                 or Python list (float/int/str/bool).
-/// `label`       — dataset label that lands in the report (default "dataset").
-/// `options`     — optional dict of ValidateOptions overrides (e.g.
-///                 `{"null_masks": {"col": [3, 7, 12]}}`).
+/// `data`              — dict mapping column name to numpy array (f64/i64/bool/f32/i32)
+///                       or Python list (float/int/str/bool).
+/// `label`             — dataset label that lands in the report (default "dataset").
+/// `options`           — optional dict of ValidateOptions overrides (e.g.
+///                       `{"null_masks": {"col": [3, 7, 12]}}`).
+/// `custom_detectors`  — optional list of Python `CustomDetector` instances
+///                       (ADR-0041). Each must expose `code()` returning
+///                       `"E9500"-"E9999"`, `belief_axes()` returning a list of
+///                       axis names, and `run(df, sink)`.
 #[pyfunction]
-#[pyo3(signature = (data, label="dataset", options=None))]
+#[pyo3(signature = (data, label="dataset", options=None, custom_detectors=None))]
 fn validate_dataframe(
     py: Python<'_>,
     data: &Bound<'_, PyDict>,
     label: &str,
     options: Option<&Bound<'_, PyDict>>,
+    custom_detectors: Option<Vec<Py<PyAny>>>,
 ) -> PyResult<PyLockeReport> {
     let df = dict_to_dataframe(py, data)?;
-    let opts = dict_to_validate_options(options, label)?;
+    let mut opts = dict_to_validate_options(options, label)?;
+    if let Some(detectors) = custom_detectors {
+        for detector in detectors {
+            let adapter = build_python_detector_adapter(py, detector)?;
+            opts.custom_detectors
+                .push(Arc::new(adapter) as Arc<dyn CustomDetector>);
+        }
+    }
     let report = validate(&df, &opts);
     Ok(PyLockeReport { inner: report })
 }
@@ -1110,6 +1464,10 @@ fn _cjc_locke(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyLineageGraph>()?;
     m.add_class::<PyAuditEvent>()?;
     m.add_class::<PyPolicyResult>()?;
+
+    // Custom-detector bridge (ADR-0041)
+    m.add_class::<PyDetectorDataFrame>()?;
+    m.add_class::<PyDetectorSink>()?;
 
     // Version (matches the Rust workspace at build time).
     m.add("__version__", "0.1.0")?;

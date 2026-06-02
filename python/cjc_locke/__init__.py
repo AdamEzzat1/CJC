@@ -64,6 +64,90 @@ LineageGraph = _cjc_locke.LineageGraph
 AuditEvent = _cjc_locke.AuditEvent
 PolicyResult = _cjc_locke.PolicyResult
 
+# Custom-detector bridge (ADR-0041). The DataFrame view + sink classes
+# are passed BY THE FRAMEWORK to a user's CustomDetector.run(df, sink) —
+# users don't construct them directly, but they're re-exported here for
+# type hinting.
+CustomDetectorDataFrame = _cjc_locke.CustomDetectorDataFrame
+CustomDetectorSink = _cjc_locke.CustomDetectorSink
+
+
+# ── CustomDetector ABC ───────────────────────────────────────────────────────
+#
+# User detectors subclass this. The framework calls `code()`,
+# `belief_axes()`, and `run(df, sink)` directly — no metaclass magic, no
+# registry, just three method calls.
+
+
+class CustomDetector:
+    """Base class for user-defined Locke detectors (ADR-0041).
+
+    Subclass and override:
+
+    - ``code()`` → str — E-code in ``E9500..=E9999``. Built-in codes
+      ``E9001..=E9112`` are reserved.
+    - ``belief_axes()`` → list[str] — list of axis names this detector's
+      findings affect. Valid names: ``schema``, ``missingness``, ``drift``,
+      ``leakage``, ``lineage``, ``sample``, ``duplication``, ``constraint``.
+      Empty list = the detector contributes findings to the report but
+      does NOT affect any belief score (advisory-only). In that case,
+      only ``info``-severity findings are accepted by the sink.
+    - ``run(df, sink)`` — detection logic. ``df`` is a read-only
+      ``CustomDetectorDataFrame`` (column_names, n_rows, get_float,
+      get_str, ...). ``sink`` is a ``CustomDetectorSink`` with one method:
+      ``emit(severity, message, column=None, row_range=None, sample_size=0)``.
+
+    The framework guarantees:
+
+    - Detectors are invoked in canonical (sort-by-code) order.
+    - Emitted findings are sorted by ``sort_key`` after ``run()`` returns,
+      so emission order inside ``run()`` does not affect report bytes.
+    - Findings outside the ``E9500..=E9999`` namespace are rejected at
+      registration.
+
+    Example::
+
+        class PostOriginationByName(cjc_locke.CustomDetector):
+            def code(self) -> str:
+                return "E9500"
+
+            def belief_axes(self) -> list[str]:
+                return ["leakage"]
+
+            def run(self, df, sink) -> None:
+                for col in df.column_names():
+                    if col.startswith(("total_", "last_pymnt_", "recoveries")):
+                        sink.emit(
+                            "error",
+                            f"`{col}` matches a post-origination naming pattern",
+                            column=col,
+                            sample_size=df.n_rows,
+                        )
+
+        report = cjc_locke.validate(
+            data,
+            label="lc",
+            custom_detectors=[PostOriginationByName()],
+        )
+    """
+
+    def code(self) -> str:
+        raise NotImplementedError("override CustomDetector.code() to return an E-code string")
+
+    def belief_axes(self) -> List[str]:
+        raise NotImplementedError(
+            "override CustomDetector.belief_axes() to return a list of axis names"
+        )
+
+    def name(self) -> str:
+        """Human-readable label used in error messages. Defaults to ``code()``."""
+        return self.code()
+
+    def run(self, df: Any, sink: Any) -> None:
+        raise NotImplementedError(
+            "override CustomDetector.run(df, sink) to emit findings via sink.emit(...)"
+        )
+
 
 def _pandas_column_payload(series: Any) -> Any:
     """Pick the cheapest representation that the Rust side can accept.
@@ -133,6 +217,7 @@ def validate(
     data: Any,
     label: str = "dataset",
     options: Optional[Dict[str, Any]] = None,
+    custom_detectors: Optional[Sequence[CustomDetector]] = None,
 ) -> LockeReport:
     """Validate a single DataFrame.
 
@@ -140,12 +225,17 @@ def validate(
         data: dict[str, np.ndarray | list] (or pandas/polars DataFrame).
         label: dataset label that lands in the report.
         options: optional dict of `ValidateOptions` overrides.
+        custom_detectors: optional list of `CustomDetector` instances
+            (ADR-0041). Each detector's findings are merged into the
+            report under the determinism contract documented on
+            `CustomDetector`.
 
     Returns:
         A `LockeReport`. Inspect it via `.severity_counts`, `.finding_codes()`,
         `.to_json()`, or `report.to_dict()` for the full content.
     """
-    return _cjc_locke.validate_dataframe(_ensure_dict(data), label, options)
+    detectors = list(custom_detectors) if custom_detectors is not None else None
+    return _cjc_locke.validate_dataframe(_ensure_dict(data), label, options, detectors)
 
 
 def compare_drift(
@@ -301,6 +391,9 @@ __all__ = [
     "LineageGraph",
     "AuditEvent",
     "PolicyResult",
+    "CustomDetector",
+    "CustomDetectorDataFrame",
+    "CustomDetectorSink",
     # Metadata
     "__version__",
     "__rust_crate_version__",

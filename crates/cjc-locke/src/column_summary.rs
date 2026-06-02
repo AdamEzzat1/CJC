@@ -206,6 +206,7 @@ mod tests {
             assumptions: vec![],
             column_reports: BTreeMap::new(),
             per_value_lineage: None,
+            custom_axis_assignments: BTreeMap::new(),
         }
     }
 
