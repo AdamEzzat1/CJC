@@ -40,6 +40,20 @@
       "description": "ID-like cardinality — distinct/n_rows ≥ 0.95. `id` is the loan key. `url` carries the per-loan listing URL with the loan ID embedded, so it ALSO has near-perfect cardinality — a separate-but-related leakage hint Locke surfaces independently. `member_id` does NOT fire because the same member can hold multiple loans.",
       "min_count": 2,
       "fingerprint_columns": ["id", "url"]
+    },
+    {
+      "code": "E9009",
+      "severity": "info",
+      "description": "v0.8 (ADR-0042) auto-promotion: Str columns whose non-sentinel values are mostly parseable as f64 are converted to Float-with-NaN. On LC, this fires on 22 columns including the secondary-applicant set (sec_app_*), the hardship workout fields (hardship_*), settlement_*, revol_bal_joint, mths_since_last_record, and orig_projected_additional_accrued_interest. IMPORTANT: it does NOT fire on annual_inc_joint / dti_joint / verification_status_joint despite their being numeric in spirit. The CSV reader does not handle quoted strings, so commas inside the `desc` (free-text loan description) column shift subsequent columns left, polluting later columns with `application_type` values like 'Individual'. The parseable-fraction check correctly refuses to promote in that case. The right upstream fix is RFC-4180 quoting support in `cjc-data::CsvReader`; out of scope for ADR-0042.",
+      "min_count": 10,
+      "fingerprint_columns": ["sec_app_fico_range_high", "hardship_amount"]
+    },
+    {
+      "code": "E9070",
+      "severity": "notice",
+      "description": "v0.8 (ADR-0042 part 2) wires `detect_conditional_missingness` into the pipeline (it was defined but never called pre-v0.8). After auto-promotion + the wiring fix, E9070 fires across the secondary-applicant column set and other co-missing Float pairs (sec_app_*, hardship_*, settlement_*). The pairwise count is large (~1800 firings, ~54 unique columns) because there are ~30 Float columns whose NaN positions perfectly align — every ordered pair fires. Consumers who want a smaller set can raise `ConditionalMissingnessConfig.implication_threshold` above 0.95 or filter to specific column pairs in post-processing.",
+      "min_count": 30,
+      "fingerprint_columns": ["sec_app_fico_range_high"]
     }
   ],
   "_acceptable_codes_not_required": [
@@ -66,7 +80,8 @@
   "_notes": [
     "E9062 ('target not binary') must NOT fire — we binarize loan_status into target_default upstream.",
     "E9060 (|AUC| ≥ 0.95) does NOT fire in this dataset. The handoff predicted it would on `total_pymnt`/`recoveries`/etc., but the empirical AUCs all land in [0.85, 0.95] (warning band) at most. This is a real finding: the post-origination payment streams are leaky but not deterministically so, because loan size + term duration spreads their distribution.",
-    "E9070 (conditional missingness) does NOT fire on `annual_inc_joint` etc. The CSV reader infers these as Str columns (empty-string for missing), and `detect_conditional_missingness` only links NaN-positions across Float columns. The high-missingness signal still surfaces as E9001 and the sentinel-detection as E9008.",
+    "E9070 (conditional missingness) NOW FIRES on the *secondary-applicant* columns as of v0.8 (ADR-0042). The earlier note that it would NOT fire was correct for v0.7 and earlier — the gap was three-fold: (a) the CSV reader typed numeric-but-empty-first-row cols as Str, blinding the Float-NaN check, (b) `detect_conditional_missingness` was defined but never called from validate_dataframe, and (c) the CSV reader's lack of quoted-string support means columns sitting after the `desc` (free-text) field get polluted, so promotion still skips them. ADR-0042 ships fixes for (a) and (b); fix (c) is upstream in cjc-data::CsvReader and out of scope.",
+    "E9009 (v0.8) is the auto-promotion notice. It MUST fire on ≥10 columns. The actual fingerprint set is the secondary-applicant fields (sec_app_*) and hardship/settlement workout fields, NOT the joint-application columns. If E9009 fires zero times, ValidationConfig::auto_promote_str_to_float was disabled OR the CSV columns no longer match the sentinel-rich-first-row pattern.",
     "fingerprint_columns is the canonical column the E-code MUST fire on. The fixture treats extra firings on other columns as acceptable noise (LC has ~150 cols and many co-vary).",
     "min_count is a lower bound. Locke is allowed to fire more findings per code than listed; the gate fails only on UNDER-firing.",
     "If E9060 starts firing on any column in a future run, that's a story worth investigating — the leakage signal will have crossed from suspicious to near-deterministic."

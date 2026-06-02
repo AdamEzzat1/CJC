@@ -29,3 +29,4 @@ mod snapshot_tests;
 mod ground_truth_tests;
 mod scale_benchmark;
 mod custom_detector_tests;
+mod auto_promote_tests;

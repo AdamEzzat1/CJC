@@ -46,14 +46,27 @@ pub struct ValidateOptions {
 
 /// Build a `LockeReport` from a single dataframe.
 pub fn validate(df: &DataFrame, opts: &ValidateOptions) -> LockeReport {
+    // v0.8 (ADR-0042) — auto-promote mostly-numeric Str columns to
+    // Float-with-NaN BEFORE any detector runs. Fixes the CSV-reader gap
+    // where a numeric column with empty/sentinel first row stays Str
+    // and silently bypasses E9070 / E9039 / E9050+ detectors.
+    //
+    // The `working_df` reference points at the promoted frame if any
+    // column qualified, else at the original. Zero-copy when no
+    // promotion happens.
+    let (maybe_promoted_df, promo_findings) =
+        crate::auto_promote::auto_promote_str_columns(df, &opts.config);
+    let working_df: &DataFrame = maybe_promoted_df.as_ref().unwrap_or(df);
+
     let mut findings = validate_dataframe(
-        df,
+        working_df,
         &opts.config,
         &opts.impossible_rules,
         opts.expected_schema.as_ref(),
         opts.primary_key.as_deref(),
         &opts.null_masks,
     );
+    findings.extend(promo_findings);
 
     // v0.8 (ADR-0041) — invoke custom detectors after built-ins. They
     // produce findings in the E9500..=E9999 namespace and declare which
@@ -61,7 +74,7 @@ pub fn validate(df: &DataFrame, opts: &ValidateOptions) -> LockeReport {
     // the main vector and stash the axis assignments + assumptions for
     // the LockeReport.
     let custom_outcome =
-        crate::custom_detector::run_custom_detectors(df, &opts.custom_detectors);
+        crate::custom_detector::run_custom_detectors(working_df, &opts.custom_detectors);
     findings.extend(custom_outcome.findings.iter().cloned());
 
     // v0.6.4 — also build the auto-sentinel mask here so the per-column
@@ -72,7 +85,7 @@ pub fn validate(df: &DataFrame, opts: &ValidateOptions) -> LockeReport {
     // Str column the user didn't manually mask. That's the missing half
     // of the §4.D Part 1 fix.
     let (auto_masks, _auto_findings) =
-        crate::validation::detect_string_sentinels(df, &opts.config);
+        crate::validation::detect_string_sentinels(working_df, &opts.config);
     let effective_masks =
         crate::validation::merge_null_mask_maps(&opts.null_masks, &auto_masks);
 
@@ -93,7 +106,7 @@ pub fn validate(df: &DataFrame, opts: &ValidateOptions) -> LockeReport {
     }
 
     let mut column_reports: BTreeMap<String, ColumnBeliefReport> = BTreeMap::new();
-    for (name, col) in &df.columns {
+    for (name, col) in &working_df.columns {
         // `get().cloned()` rather than `remove()` so duplicate-named
         // columns (legal in cjc_data::DataFrame::from_columns) see the
         // same bucket on each visit — preserving the prior behaviour
@@ -155,15 +168,15 @@ pub fn validate(df: &DataFrame, opts: &ValidateOptions) -> LockeReport {
         );
     }
 
-    let column_types: BTreeMap<String, String> = df
+    let column_types: BTreeMap<String, String> = working_df
         .columns
         .iter()
         .map(|(n, c)| (n.clone(), c.type_name().to_string()))
         .collect();
     let input = LockeInputSummary {
         dataset_label: opts.dataset_label.clone(),
-        n_rows: df.nrows() as u64,
-        n_cols: df.ncols() as u64,
+        n_rows: working_df.nrows() as u64,
+        n_cols: working_df.ncols() as u64,
         column_types,
     };
     let mut assumptions = vec![
@@ -181,7 +194,7 @@ pub fn validate(df: &DataFrame, opts: &ValidateOptions) -> LockeReport {
     // exposes this via `cjcl locke validate --with-trace`.
     if opts.config.collect_per_value_lineage {
         let lineage_cfg = crate::per_value_lineage::PerValueLineageConfig::default();
-        let lineage = crate::per_value_lineage::build_per_value_lineage(df, &lineage_cfg);
+        let lineage = crate::per_value_lineage::build_per_value_lineage(working_df, &lineage_cfg);
         report = report.with_per_value_lineage(lineage);
     }
 

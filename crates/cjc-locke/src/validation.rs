@@ -63,6 +63,31 @@ pub struct ValidationConfig {
     /// `max_distinct_per_column` knob in `PerValueLineageConfig` if
     /// you want to bound a wide column.
     pub collect_per_value_lineage: bool,
+    /// **v0.8 (ADR-0042)** — when `true`, scan every `Str` column at
+    /// the start of `validate()` and promote those that are
+    /// mostly-numeric (with sentinel-rich first rows) to `Column::Float`
+    /// with NaN replacing the sentinels. This unblocks
+    /// [`crate::detect_conditional_missingness`] (E9070),
+    /// [`crate::drift::compare`] (E9039), and the temporal detectors
+    /// (E9050+) on columns that CSV readers mis-typed as `Str`.
+    ///
+    /// Each promoted column emits one E9009 `Info` finding. Default
+    /// `true` because the no-promotion behaviour silently disabled
+    /// three detector families on real-world data (see the LC demo).
+    ///
+    /// Disable by setting to `false` if you need byte-identical reports
+    /// to a pre-v0.8 baseline.
+    pub auto_promote_str_to_float: bool,
+    /// Minimum fraction of *non-sentinel* values in a `Str` column that
+    /// must parse as `f64` before the column is promoted. Default
+    /// `0.80` — high enough to avoid false positives on free-text
+    /// columns, low enough to tolerate a few malformed-numeric rows.
+    pub min_parseable_fraction_for_promotion: f64,
+    /// Minimum number of *non-sentinel* rows required before a `Str`
+    /// column is considered for promotion. Default `10` — guards
+    /// against tiny columns where the parseable-fraction statistic is
+    /// noisy.
+    pub min_non_sentinel_rows_for_promotion: usize,
 }
 
 impl Default for ValidationConfig {
@@ -80,6 +105,14 @@ impl Default for ValidationConfig {
             // v0.7+ — opt-in, default false to preserve byte-identical
             // reports for existing CI gates. CLI exposes `--with-trace`.
             collect_per_value_lineage: false,
+            // v0.8 (ADR-0042) — default ON. The pre-v0.8 behaviour
+            // silently disabled E9070 / E9039 / E9050 on a real LC
+            // column (`annual_inc_joint`). The new default lets those
+            // detectors do their job; users with strict byte-identity
+            // requirements can flip this off.
+            auto_promote_str_to_float: true,
+            min_parseable_fraction_for_promotion: 0.80,
+            min_non_sentinel_rows_for_promotion: 10,
         }
     }
 }
@@ -2030,6 +2063,16 @@ pub fn validate_dataframe(
     out.extend(auto_findings);
     let effective_masks = merge_null_mask_maps(null_masks, &auto_masks);
     out.extend(detect_missingness(df, cfg, &effective_masks));
+    // v0.8 (ADR-0042 part 2) — wire E9070 pairwise conditional
+    // missingness into the pipeline. Previously the detector was
+    // defined and unit-tested but never invoked from validate_dataframe,
+    // so E9070 silently never fired regardless of the input. Default
+    // config: implication_threshold = 0.95, min_missing_in_a = 5.
+    out.extend(detect_conditional_missingness(
+        df,
+        &ConditionalMissingnessConfig::default(),
+        &effective_masks,
+    ));
     out.extend(detect_duplicates_full_row(df, cfg));
     if let Some(pk) = primary_key {
         out.extend(detect_duplicate_keys(df, pk));

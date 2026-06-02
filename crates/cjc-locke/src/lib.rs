@@ -74,6 +74,7 @@
 
 pub mod algebra;
 pub mod api;
+pub mod auto_promote;
 pub mod belief;
 pub mod categorical;
 pub mod causal;

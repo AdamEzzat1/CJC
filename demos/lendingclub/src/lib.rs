@@ -191,6 +191,13 @@ pub fn lendingclub_validate_options() -> ValidateOptions {
             high_cardinality_ratio: 0.5,
             duplicate_sample_limit: 5,
             collect_per_value_lineage: false,
+            // v0.8 (ADR-0042): default-on. Promotes `annual_inc_joint` /
+            // `dti_joint` / similar Str-typed-but-numeric LC columns to
+            // Float-with-NaN so E9070 conditional missingness and other
+            // Float-only detectors actually see them.
+            auto_promote_str_to_float: true,
+            min_parseable_fraction_for_promotion: 0.80,
+            min_non_sentinel_rows_for_promotion: 10,
         },
         impossible_rules: vec![
             ImpossibleValueRule::NumericRange {

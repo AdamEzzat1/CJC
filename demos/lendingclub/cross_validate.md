@@ -134,6 +134,28 @@ Our 0.7394 is essentially identical to Bao et al.'s 0.74 baseline. Tsai &
 Wu used a different model class but the same feature space; the match is
 within their ±0.02 reported sampling variance.
 
+### 3.2.1 What v0.8 (ADR-0042) added since the AUC table was measured
+
+The honest-model AUC numbers above were measured 2026-06-01 with the
+pre-v0.8 Locke pipeline. The v0.8 release on 2026-06-02 adds two more
+fixes that re-run the full LC validate call without changing the model
+training inputs:
+
+- **E9009 (auto-promotion)** — 22 Str columns are now promoted to Float
+  (sec_app_*, hardship_*, settlement_*, revol_bal_joint, and three
+  others). The `annual_inc_joint` family is NOT among them because
+  the CSV reader lacks quoted-string support and `desc` column commas
+  shift their content; the parseable-fraction guard correctly skips.
+- **E9070 (conditional missingness)** — wired into the pipeline for the
+  first time. Fires 1879 times across ~54 unique columns where joint
+  missingness implies missingness in another column with >= 95%
+  probability. This is the gap closure the earlier review predicted.
+
+Neither of these changes affects the honest-model AUC measurement —
+the model trains on numeric columns regardless of whether they were
+typed Float originally or promoted from Str. The AUC table at §3.1
+remains valid post-v0.8.
+
 ### 3.3 The two findings, before and after the custom-detector layer
 
 Two findings of decreasing severity:
