@@ -359,6 +359,7 @@ dependencies = [
  "cjc-repro",
  "cjc-runtime",
  "cjc-snap",
+ "cjc-tempest",
  "cjc-types",
  "cjc-vizor",
  "insta",
@@ -473,6 +474,20 @@ name = "cjc-snap"
 version = "0.1.11"
 dependencies = [
  "cjc-runtime",
+]
+
+[[package]]
+name = "cjc-tempest"
+version = "0.1.11"
+dependencies = [
+ "bolero",
+ "cjc-ad",
+ "cjc-locke",
+ "cjc-repro",
+ "cjc-runtime",
+ "cjc-snap",
+ "proptest",
+ "tempfile",
 ]
 
 [[package]]
