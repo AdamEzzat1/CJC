@@ -19,6 +19,9 @@
 //! same model + same seed → same `content_hash` on Linux + macOS + Windows.
 //! If this test fails on any platform, the release does NOT ship.
 
+mod metropolis_tests;
+mod tempest_determinism;
+
 use cjc_tempest::{AcceptResult, ConvergenceDiagnostics, FingerprintId, PosteriorSamples, TempestError};
 
 #[test]

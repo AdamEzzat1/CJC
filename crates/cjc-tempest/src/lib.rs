@@ -72,10 +72,12 @@
 //! handoff §5.3 reservation.
 
 pub mod error;
+pub mod metropolis;
 pub mod posterior;
 pub mod sampler;
 
 pub use error::TempestError;
+pub use metropolis::MetropolisHastings;
 pub use posterior::{ConvergenceDiagnostics, PosteriorSamples};
 pub use sampler::{AcceptResult, Sampler};
 

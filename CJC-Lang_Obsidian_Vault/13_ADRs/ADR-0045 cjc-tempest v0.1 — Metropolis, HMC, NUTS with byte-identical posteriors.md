@@ -1,6 +1,6 @@
 # ADR-0045 cjc-tempest v0.1 — Metropolis, HMC, NUTS with byte-identical posteriors
 
-- **Status:** Proposed (2026-06-02) — scaffolding committed, implementation pending across multiple sessions
+- **Status:** Accepted (2026-06-02) — Session 1 (`MetropolisHastings` with symmetric Gaussian proposal + Welford-adaptive diagonal covariance) shipped on `feat/cjc-tempest-scaffolding` with the headline cross-run determinism test passing. HMC + NUTS + Vehtari 2021 R-hat/ESS still pending across subsequent sessions. v0.1 ships **diagonal proposal covariance** only; full covariance and mass-matrix adaptation deferred to v0.2 per §What's-deferred. **Per-chain seed stretch via SplitMix64 step constant** locks the determinism contract for arbitrary `n_chains`
 - **Crate:** `cjc-tempest` (new)
 - **Companion docs:** [[New Crate Stack — Cronos, Causal, Tempest]] (handoff §4), [[ADR-0043 cjc-causal v0.1 — Propensity Score, IV, Double ML]] (sister crate), [[ADR-0044 cjc-cronos v0.1 — ETS, ARIMA, Kalman, STL]] (sister crate), [[ADR-0016 Language-Level GradGraph Primitives]] (HMC's gradient dependency)
 - **Reserved error-code range:** **E9300..=E9399**
