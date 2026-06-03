@@ -1,6 +1,6 @@
 # ADR-0043 cjc-causal v0.1 — Propensity Score, IV, Double ML
 
-- **Status:** Accepted (2026-06-02) — Sessions 1 (`PropensityScoreMatcher`) + 2 (`IVRegression` with HC1 sandwich SE + Stock-Yogo F-stat) shipped on `feat/cjc-causal-scaffolding`; Session 3 (`DoubleMLEstimator`) still pending
+- **Status:** Accepted (2026-06-02) — **v0.1 estimator surface complete**. Sessions 1 (`PropensityScoreMatcher`), 2 (`IVRegression` with HC1 sandwich SE + Stock-Yogo F-stat → E9100), and 3 (`DoubleMLEstimator` with K-fold cross-fitted linear nuisances) all shipped on `feat/cjc-causal-scaffolding`. v0.1 ships **linear nuisances** for DML; MLP nuisances via `cjc_ad::GradGraph` deferred to v0.2 (deliberate decision — see §What's-deferred). `publish = false` retained until v0.2.x release engineering pass
 - **Crate:** `cjc-causal` (new)
 - **Companion docs:** [[New Crate Stack — Cronos, Causal, Tempest]] (handoff §2), [[ADR-0028 Locke Data Skepticism Layer]], [[ADR-0041 Locke v0.8 — Custom Detector Extension Layer]], [[ADR-0042 Locke v0.8 — Str-to-Float Auto-Promotion + E9070 Wiring]]
 - **Reserved error-code range:** **E9100..=E9199**

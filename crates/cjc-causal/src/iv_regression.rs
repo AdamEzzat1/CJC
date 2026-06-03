@@ -369,10 +369,15 @@ pub fn weak_instrument_finding(
 /// the critical value such that `P(|Z| <= q) = cl`. For `cl = 0.95` the result
 /// is approximately `1.959963984540054`.
 ///
-/// Accuracy: better than `1e-9` over the full input range. Deterministic
-/// across runs and platforms (no transcendental library calls beyond
-/// `f64::ln` and `f64::sqrt`, both of which are IEEE-754-correct).
-fn normal_quantile_two_sided(cl: f64) -> f64 {
+/// Accuracy: better than `1e-7` over the full input range (Acklam's published
+/// relative error is `1.15e-9`; the absolute tolerance is set by the largest
+/// expected `z` value, e.g. ~3e-9 at z=2.576). Deterministic across runs and
+/// platforms (no transcendental library calls beyond `f64::ln` and
+/// `f64::sqrt`, both of which are IEEE-754-correct).
+///
+/// `pub(crate)` so the DML orchestrator can reuse the same normal-quantile
+/// implementation rather than duplicating Acklam coefficients.
+pub(crate) fn normal_quantile_two_sided(cl: f64) -> f64 {
     let p = 1.0 - (1.0 - cl) / 2.0;
     acklam_normal_quantile(p)
 }

@@ -19,10 +19,13 @@
 mod common;
 mod propensity_score_tests;
 mod iv_regression_tests;
+mod dml_tests;
 mod causal_proptest;
 mod iv_proptest;
+mod dml_proptest;
 mod causal_fuzz;
 mod iv_fuzz;
+mod dml_fuzz;
 
 use cjc_causal::{CausalError, EffectEstimate, FingerprintId, IdentificationAssumption};
 

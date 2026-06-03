@@ -67,6 +67,43 @@ pub fn synthetic_confounded(n: usize, seed: u64, true_ate: f64) -> DataFrame {
     ])
 }
 
+/// Synthetic data generator for the partially linear DML model:
+/// `y = β·T + g(X) + ε`, `T = m(X) + V`.
+///
+/// Two non-collinear covariates `x1`, `x2`. Both `T` and `Y` depend on `X`,
+/// so naive OLS of `Y ~ T` would be biased; DML's cross-fit residualisation
+/// recovers `β` asymptotically.
+pub fn synthetic_dml(n: usize, seed: u64, true_beta: f64) -> DataFrame {
+    let mut rng = Rng::seeded(seed);
+    let mut x1 = Vec::with_capacity(n);
+    let mut x2 = Vec::with_capacity(n);
+    let mut t = Vec::with_capacity(n);
+    let mut y = Vec::with_capacity(n);
+
+    for _ in 0..n {
+        let a = (rng.next_f64() - 0.5) * 4.0;
+        // Non-collinear second covariate: a² minus a linear shift so it has
+        // its own variance independent of x1.
+        let b = (rng.next_f64() - 0.5) * 4.0;
+        // m(X) = 0.5·x1 + 0.3·x2 (treatment depends on covariates)
+        let t_noise = (rng.next_f64() - 0.5) * 0.5;
+        let t_i = 0.5 * a + 0.3 * b + t_noise;
+        // y = β·T + g(X) + ε with g(X) = 0.8·x1 + 0.4·x2
+        let y_noise = (rng.next_f64() - 0.5) * 0.5;
+        let y_i = true_beta * t_i + 0.8 * a + 0.4 * b + y_noise;
+        x1.push(a);
+        x2.push(b);
+        t.push(t_i);
+        y.push(y_i);
+    }
+    df_from_floats(&[
+        ("treatment", t),
+        ("outcome", y),
+        ("x1", x1),
+        ("x2", x2),
+    ])
+}
+
 /// Synthetic data generator for IV regression: instrument-driven treatment
 /// + unobserved confounder.
 ///

@@ -93,15 +93,19 @@
 pub mod assumption;
 pub mod balance;
 pub mod content_hash;
+pub mod dml;
 pub mod error;
 pub mod estimate;
 pub mod iv_regression;
 pub mod linalg;
 pub mod matching;
+pub mod nuisance;
+pub mod orthogonal_moment;
 pub mod propensity_score;
 pub mod refusal;
 
 pub use assumption::IdentificationAssumption;
+pub use dml::DoubleMLEstimator;
 pub use error::CausalError;
 pub use estimate::{BalanceReport, EffectEstimate};
 pub use iv_regression::{weak_instrument_finding, IVRegression};
