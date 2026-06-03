@@ -216,7 +216,7 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "cjc-abng"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "cjc-ad",
  "cjc-dharht",
@@ -229,7 +229,7 @@ dependencies = [
 
 [[package]]
 name = "cjc-ad"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "cjc-repro",
  "cjc-runtime",
@@ -237,7 +237,7 @@ dependencies = [
 
 [[package]]
 name = "cjc-analyzer"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "cjc-ast",
  "cjc-diag",
@@ -253,11 +253,11 @@ dependencies = [
 
 [[package]]
 name = "cjc-ast"
-version = "0.1.11"
+version = "0.1.12"
 
 [[package]]
 name = "cjc-cli"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "cjc-abng",
  "cjc-ad",
@@ -280,7 +280,7 @@ dependencies = [
 
 [[package]]
 name = "cjc-cronos"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "bolero",
  "cjc-data",
@@ -293,7 +293,7 @@ dependencies = [
 
 [[package]]
 name = "cjc-data"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "cjc-regex",
  "cjc-repro",
@@ -302,15 +302,15 @@ dependencies = [
 
 [[package]]
 name = "cjc-dharht"
-version = "0.1.11"
+version = "0.1.12"
 
 [[package]]
 name = "cjc-diag"
-version = "0.1.11"
+version = "0.1.12"
 
 [[package]]
 name = "cjc-dispatch"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "cjc-ast",
  "cjc-diag",
@@ -319,7 +319,7 @@ dependencies = [
 
 [[package]]
 name = "cjc-eval"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "cjc-abng",
  "cjc-ad",
@@ -340,7 +340,7 @@ dependencies = [
 
 [[package]]
 name = "cjc-hir"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "cjc-ast",
  "cjc-diag",
@@ -349,7 +349,7 @@ dependencies = [
 
 [[package]]
 name = "cjc-lang"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "bolero",
  "cjc-abng",
@@ -382,14 +382,14 @@ dependencies = [
 
 [[package]]
 name = "cjc-lexer"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "cjc-diag",
 ]
 
 [[package]]
 name = "cjc-locke"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "bolero",
  "cjc-data",
@@ -401,7 +401,7 @@ dependencies = [
 
 [[package]]
 name = "cjc-mir"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "cjc-ast",
  "cjc-diag",
@@ -411,7 +411,7 @@ dependencies = [
 
 [[package]]
 name = "cjc-mir-exec"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "cjc-abng",
  "cjc-ad",
@@ -436,7 +436,7 @@ dependencies = [
 
 [[package]]
 name = "cjc-module"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "cjc-ast",
  "cjc-diag",
@@ -450,7 +450,7 @@ dependencies = [
 
 [[package]]
 name = "cjc-parser"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "cjc-ast",
  "cjc-diag",
@@ -459,7 +459,7 @@ dependencies = [
 
 [[package]]
 name = "cjc-quantum"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "cjc-repro",
  "cjc-runtime",
@@ -467,15 +467,15 @@ dependencies = [
 
 [[package]]
 name = "cjc-regex"
-version = "0.1.11"
+version = "0.1.12"
 
 [[package]]
 name = "cjc-repro"
-version = "0.1.11"
+version = "0.1.12"
 
 [[package]]
 name = "cjc-runtime"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "cjc-regex",
  "cjc-repro",
@@ -484,14 +484,14 @@ dependencies = [
 
 [[package]]
 name = "cjc-snap"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "cjc-runtime",
 ]
 
 [[package]]
 name = "cjc-types"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "cjc-ast",
  "cjc-diag",
@@ -499,7 +499,7 @@ dependencies = [
 
 [[package]]
 name = "cjc-vizor"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "cjc-repro",
  "cjc-runtime",
