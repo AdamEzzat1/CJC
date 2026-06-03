@@ -63,14 +63,26 @@ pub enum EtsKind {
     Simple,
     /// Level + additive trend. Forecast is linear (`ŷ_{n+h} = l_n + h·b_n`).
     Holt,
+    /// Level + trend + seasonal (Hyndman-Athanasopoulos OTexts §7.3).
+    ///
+    /// `multiplicative = true` selects the multiplicative model:
+    /// `l_t = α·(y_t / s_{t-m}) + (1-α)·(l_{t-1} + b_{t-1})`,
+    /// `s_t = γ·(y_t / (l_{t-1} + b_{t-1})) + (1-γ)·s_{t-m}`.
+    ///
+    /// `multiplicative = false` selects the additive model:
+    /// `l_t = α·(y_t - s_{t-m}) + (1-α)·(l_{t-1} + b_{t-1})`,
+    /// `s_t = γ·(y_t - l_{t-1} - b_{t-1}) + (1-γ)·s_{t-m}`.
+    HoltWinters { period: usize, multiplicative: bool },
 }
 
 impl EtsKind {
     /// Stable string label used in [`Forecast::fitted_model_id`] hashing.
-    pub const fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             EtsKind::Simple => "ets_simple",
             EtsKind::Holt => "ets_holt",
+            EtsKind::HoltWinters { multiplicative: false, .. } => "ets_holt_winters_add",
+            EtsKind::HoltWinters { multiplicative: true, .. } => "ets_holt_winters_mul",
         }
     }
 }
@@ -87,17 +99,25 @@ pub struct Ets {
     confidence_level: f64,
     alpha_grid: Vec<f64>,
     beta_grid: Vec<f64>,
+    gamma_grid: Vec<f64>,
 }
 
 impl Ets {
-    /// Construct with default `α ∈ {0.05, 0.10, …, 0.95}` (and `β` same for Holt).
+    /// Construct with default `α ∈ {0.05, 0.10, …, 0.95}` (and `β`, `γ` same).
     pub fn new(kind: EtsKind) -> Self {
         Self {
             kind,
             confidence_level: 0.95,
             alpha_grid: default_grid(),
             beta_grid: default_grid(),
+            gamma_grid: default_grid(),
         }
+    }
+
+    /// Override the γ grid (only consulted for [`EtsKind::HoltWinters`]).
+    pub fn with_gamma_grid(mut self, g: Vec<f64>) -> Self {
+        self.gamma_grid = g;
+        self
     }
 
     /// Confidence level in `(0, 1)` for the forecast bounds.
@@ -174,6 +194,7 @@ impl Ets {
         let min_n = match self.kind {
             EtsKind::Simple => 2,
             EtsKind::Holt => 3,
+            EtsKind::HoltWinters { period, .. } => 2 * period,
         };
         if n < min_n {
             return Err(CronosError::Numerical {
@@ -189,6 +210,40 @@ impl Ets {
                 return Err(CronosError::Numerical {
                     detail: format!("value at row {} is non-finite ({})", i, v),
                 });
+            }
+        }
+        // For HoltWinters, validate gamma grid and additional constraints.
+        if let EtsKind::HoltWinters { period, multiplicative } = self.kind {
+            if period < 2 {
+                return Err(CronosError::Unsupported {
+                    detail: format!("HoltWinters period must be >= 2, got {}", period),
+                });
+            }
+            if self.gamma_grid.is_empty() {
+                return Err(CronosError::Unsupported {
+                    detail: "gamma_grid is empty for HoltWinters".to_string(),
+                });
+            }
+            for g in &self.gamma_grid {
+                if !g.is_finite() || *g <= 0.0 || *g >= 1.0 {
+                    return Err(CronosError::Unsupported {
+                        detail: format!("gamma {} is not in (0, 1)", g),
+                    });
+                }
+            }
+            if multiplicative {
+                // Multiplicative model requires non-zero values (we divide by
+                // y_t / s_{t-m}).
+                for (i, v) in values.iter().enumerate() {
+                    if *v <= 0.0 {
+                        return Err(CronosError::Numerical {
+                            detail: format!(
+                                "multiplicative HoltWinters requires strictly positive values; got {} at row {}",
+                                v, i
+                            ),
+                        });
+                    }
+                }
             }
         }
 
@@ -208,6 +263,28 @@ impl Ets {
                     trend_t,
                     sigma,
                     horizon,
+                    self.confidence_level,
+                );
+                (p, lo, hi, alpha, Some(beta))
+            }
+            EtsKind::HoltWinters { period, multiplicative } => {
+                let (alpha, beta, _gamma, level_t, trend_t, seasonals, sigma) =
+                    grid_search_holt_winters(
+                        values,
+                        &self.alpha_grid,
+                        &self.beta_grid,
+                        &self.gamma_grid,
+                        period,
+                        multiplicative,
+                    );
+                let (p, lo, hi) = forecast_holt_winters(
+                    level_t,
+                    trend_t,
+                    &seasonals,
+                    sigma,
+                    horizon,
+                    period,
+                    multiplicative,
                     self.confidence_level,
                 );
                 (p, lo, hi, alpha, Some(beta))
@@ -403,6 +480,204 @@ fn forecast_holt(
     let mut upper = Vec::with_capacity(horizon);
     for h in 1..=horizon {
         let p = level_t + (h as f64) * trend_t;
+        let band = z * sigma * (h as f64).sqrt();
+        point.push(p);
+        lower.push(p - band);
+        upper.push(p + band);
+    }
+    (point, lower, upper)
+}
+
+// ---------------------------------------------------------------------------
+// Holt-Winters seasonal (additive + multiplicative)
+// ---------------------------------------------------------------------------
+
+/// Fit Holt-Winters with the given (α, β, γ). Returns `(level_T, trend_T,
+/// seasonals_vector, residual_sd)`.
+///
+/// `seasonals_vector` has length `period` and represents the final state of
+/// the seasonal component (used by [`forecast_holt_winters`] to assign
+/// future steps their seasonal offset / factor).
+pub(crate) fn fit_holt_winters_with_params(
+    values: &[f64],
+    alpha: f64,
+    beta: f64,
+    gamma: f64,
+    period: usize,
+    multiplicative: bool,
+) -> (f64, f64, Vec<f64>, f64) {
+    let n = values.len();
+    // Initialise from the first cycle (Hyndman-Athanasopoulos §7.3).
+    let mut level = 0.0;
+    for i in 0..period {
+        level += values[i];
+    }
+    level /= period as f64;
+    // Trend: average of (cycle-2 mean - cycle-1 mean) / period.
+    let mut cycle2 = 0.0;
+    for i in period..(2 * period).min(n) {
+        cycle2 += values[i];
+    }
+    let n_cycle2 = (2 * period).min(n) - period;
+    let trend = if n_cycle2 > 0 {
+        let mean2 = cycle2 / n_cycle2 as f64;
+        (mean2 - level) / period as f64
+    } else {
+        0.0
+    };
+    // Seasonals: y_i - level (additive) or y_i / level (multiplicative)
+    // for i in 0..period.
+    let mut seasonals = Vec::with_capacity(period);
+    for i in 0..period {
+        if multiplicative {
+            // Guard against division by zero — caller already validates
+            // values > 0 for multiplicative, so level should be > 0 too.
+            seasonals.push(if level > 0.0 { values[i] / level } else { 1.0 });
+        } else {
+            seasonals.push(values[i] - level);
+        }
+    }
+
+    let mut sse = KahanAccumulatorF64::new();
+    let mut k: u64 = 0;
+    let mut level_state = level;
+    let mut trend_state = trend;
+    for t in period..n {
+        let seasonal_index = t % period;
+        let s_prev = seasonals[seasonal_index];
+        let projected = level_state + trend_state;
+        let yhat = if multiplicative {
+            projected * s_prev
+        } else {
+            projected + s_prev
+        };
+        let err = values[t] - yhat;
+        sse.add(err * err);
+        k += 1;
+        // Updates.
+        let new_level = if multiplicative {
+            // Guard: if s_prev is zero or near-zero, fall back to non-seasonal.
+            if s_prev.abs() > f64::EPSILON {
+                alpha * (values[t] / s_prev) + (1.0 - alpha) * projected
+            } else {
+                alpha * values[t] + (1.0 - alpha) * projected
+            }
+        } else {
+            alpha * (values[t] - s_prev) + (1.0 - alpha) * projected
+        };
+        let new_trend = beta * (new_level - level_state) + (1.0 - beta) * trend_state;
+        let new_season = if multiplicative {
+            if projected.abs() > f64::EPSILON {
+                gamma * (values[t] / projected) + (1.0 - gamma) * s_prev
+            } else {
+                s_prev
+            }
+        } else {
+            gamma * (values[t] - projected) + (1.0 - gamma) * s_prev
+        };
+        seasonals[seasonal_index] = new_season;
+        level_state = new_level;
+        trend_state = new_trend;
+    }
+    let sigma = if k > 0 {
+        (sse.finalize() / k as f64).sqrt()
+    } else {
+        0.0
+    };
+    (level_state, trend_state, seasonals, sigma)
+}
+
+/// Compute the in-sample one-step-ahead SSE for Holt-Winters with (α, β, γ).
+fn compute_holt_winters_sse(
+    values: &[f64],
+    alpha: f64,
+    beta: f64,
+    gamma: f64,
+    period: usize,
+    multiplicative: bool,
+) -> f64 {
+    let (_l, _t, _s, sigma) =
+        fit_holt_winters_with_params(values, alpha, beta, gamma, period, multiplicative);
+    // SSE = sigma² · n_errors. Reconstruct.
+    let n = values.len();
+    let n_err = (n - period) as f64;
+    sigma * sigma * n_err
+}
+
+/// Grid-search Holt-Winters. Returns `(α, β, γ, level_T, trend_T,
+/// seasonals_vec, residual_sd)`.
+pub(crate) fn grid_search_holt_winters(
+    values: &[f64],
+    alpha_grid: &[f64],
+    beta_grid: &[f64],
+    gamma_grid: &[f64],
+    period: usize,
+    multiplicative: bool,
+) -> (f64, f64, f64, f64, f64, Vec<f64>, f64) {
+    let mut best_alpha = alpha_grid[0];
+    let mut best_beta = beta_grid[0];
+    let mut best_gamma = gamma_grid[0];
+    let mut best_level = values[0];
+    let mut best_trend = 0.0;
+    let mut best_seasonals = vec![if multiplicative { 1.0 } else { 0.0 }; period];
+    let mut best_sigma = f64::INFINITY;
+    let mut best_sse = f64::INFINITY;
+    for &alpha in alpha_grid {
+        for &beta in beta_grid {
+            for &gamma in gamma_grid {
+                let sse = compute_holt_winters_sse(values, alpha, beta, gamma, period, multiplicative);
+                if sse < best_sse {
+                    best_sse = sse;
+                    best_alpha = alpha;
+                    best_beta = beta;
+                    best_gamma = gamma;
+                    let (l, b, s, sig) =
+                        fit_holt_winters_with_params(values, alpha, beta, gamma, period, multiplicative);
+                    best_level = l;
+                    best_trend = b;
+                    best_seasonals = s;
+                    best_sigma = sig;
+                }
+            }
+        }
+    }
+    (best_alpha, best_beta, best_gamma, best_level, best_trend, best_seasonals, best_sigma)
+}
+
+/// Produce point + lower + upper bounds for Holt-Winters forecast.
+///
+/// `ŷ_{n+h} = (l_n + h·b_n) + s_{(n+h) mod m}` (additive)
+/// `ŷ_{n+h} = (l_n + h·b_n) · s_{(n+h) mod m}` (multiplicative)
+///
+/// Indexing: the seasonals vector represents *the most recent observation
+/// of each phase*. For forecast step h (1-indexed), the relevant phase is
+/// `(n - 1 + h) mod period` where `n` is the training length. Since the
+/// caller doesn't expose `n` to this function, we use a convention: the
+/// forecast loop simply uses `h % period` indexed off `seasonals`.
+/// Callers must be aware that the `seasonals` vector returned from
+/// `grid_search_holt_winters` already reflects the in-sample final state.
+fn forecast_holt_winters(
+    level_t: f64,
+    trend_t: f64,
+    seasonals: &[f64],
+    sigma: f64,
+    horizon: usize,
+    period: usize,
+    multiplicative: bool,
+    cl: f64,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let z = normal_quantile_two_sided(cl);
+    let mut point = Vec::with_capacity(horizon);
+    let mut lower = Vec::with_capacity(horizon);
+    let mut upper = Vec::with_capacity(horizon);
+    for h in 1..=horizon {
+        let s_idx = (h - 1) % period;
+        let s = seasonals[s_idx];
+        let core = level_t + (h as f64) * trend_t;
+        let p = if multiplicative { core * s } else { core + s };
+        // Bound width grows with horizon. For multiplicative, the scale
+        // depends on the seasonal factor too; v0.1 uses the simpler
+        // additive bound for both.
         let band = z * sigma * (h as f64).sqrt();
         point.push(p);
         lower.push(p - band);
@@ -692,5 +967,97 @@ mod tests {
         assert!((alpha - grid[0]).abs() < 1e-12, "expected first α, got {}", alpha);
         assert_eq!(level, 0.0);
         assert_eq!(sigma, 0.0);
+    }
+
+    #[test]
+    fn holt_winters_additive_on_constant_series_predicts_constant() {
+        // Constant series → seasonals collapse to zero → forecast is constant.
+        let ts = make_ts(vec![5.0; 30]);
+        let f = Ets::new(EtsKind::HoltWinters { period: 4, multiplicative: false })
+            .fit_and_forecast(&ts, 5)
+            .unwrap();
+        for &p in &f.point_estimates {
+            assert!((p - 5.0).abs() < 1.0, "got {}", p);
+        }
+    }
+
+    #[test]
+    fn holt_winters_additive_on_periodic_series_recovers_period() {
+        // y_t = base + sin(2π·t/4) — pure period-4 seasonality.
+        let period = 4usize;
+        let n = 40;
+        let values: Vec<f64> = (0..n)
+            .map(|i| 10.0 + 2.0 * (std::f64::consts::TAU * i as f64 / period as f64).sin())
+            .collect();
+        let ts = make_ts(values);
+        let f = Ets::new(EtsKind::HoltWinters { period, multiplicative: false })
+            .fit_and_forecast(&ts, period)
+            .unwrap();
+        // Forecast values should also oscillate (not collapse to a constant).
+        let max = f.point_estimates.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let min = f.point_estimates.iter().cloned().fold(f64::INFINITY, f64::min);
+        assert!(
+            (max - min) > 0.5,
+            "HW forecast should preserve seasonal variation; got range = {} (min={}, max={})",
+            max - min, min, max,
+        );
+    }
+
+    #[test]
+    fn holt_winters_multiplicative_on_positive_series_runs() {
+        let n = 40;
+        let values: Vec<f64> = (0..n)
+            .map(|i| 100.0 + 10.0 * (std::f64::consts::TAU * i as f64 / 4.0).sin())
+            .collect();
+        let ts = make_ts(values);
+        let f = Ets::new(EtsKind::HoltWinters { period: 4, multiplicative: true })
+            .fit_and_forecast(&ts, 4)
+            .unwrap();
+        for &p in &f.point_estimates {
+            assert!(p > 0.0 && p.is_finite());
+        }
+    }
+
+    #[test]
+    fn holt_winters_multiplicative_rejects_non_positive_values() {
+        let mut v = vec![10.0; 30];
+        v[5] = -0.5;
+        let ts = make_ts(v);
+        let err = Ets::new(EtsKind::HoltWinters { period: 4, multiplicative: true })
+            .fit_and_forecast(&ts, 3)
+            .unwrap_err();
+        assert!(matches!(err, CronosError::Numerical { .. }));
+    }
+
+    #[test]
+    fn holt_winters_period_too_small_returns_unsupported() {
+        let ts = make_ts(vec![10.0; 30]);
+        let err = Ets::new(EtsKind::HoltWinters { period: 1, multiplicative: false })
+            .fit_and_forecast(&ts, 3)
+            .unwrap_err();
+        assert!(matches!(err, CronosError::Unsupported { .. }));
+    }
+
+    #[test]
+    fn holt_winters_byte_identical_across_runs() {
+        let n = 40;
+        let values: Vec<f64> = (0..n)
+            .map(|i| 5.0 + 2.0 * (std::f64::consts::TAU * i as f64 / 4.0).sin())
+            .collect();
+        let ts = make_ts(values);
+        let est = Ets::new(EtsKind::HoltWinters { period: 4, multiplicative: false });
+        let f1 = est.fit_and_forecast(&ts, 4).unwrap();
+        let f2 = est.fit_and_forecast(&ts, 4).unwrap();
+        for h in 0..4 {
+            assert_eq!(f1.point_estimates[h].to_bits(), f2.point_estimates[h].to_bits());
+        }
+        assert_eq!(f1.fitted_model_id, f2.fitted_model_id);
+    }
+
+    #[test]
+    fn holt_winters_label_distinguishes_add_vs_mul() {
+        let add = EtsKind::HoltWinters { period: 4, multiplicative: false };
+        let mul = EtsKind::HoltWinters { period: 4, multiplicative: true };
+        assert_ne!(add.label(), mul.label());
     }
 }

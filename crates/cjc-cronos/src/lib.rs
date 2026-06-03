@@ -66,6 +66,8 @@ pub mod arima;
 pub mod ets;
 pub mod forecast;
 pub mod frequency;
+pub mod kalman;
+pub mod stl;
 pub mod time_series;
 
 pub use arima::Arima;
@@ -74,6 +76,8 @@ pub use error::CronosError;
 pub use ets::{Ets, EtsKind};
 pub use forecast::{BacktestReport, Forecast};
 pub use frequency::Frequency;
+pub use kalman::{Kalman, KalmanFilterOutput, KalmanSmootherOutput};
+pub use stl::{Decomposition, Stl};
 pub use time_series::TimeSeries;
 
 /// Re-export of `cjc_locke::id::FingerprintId` so callers don't need a
