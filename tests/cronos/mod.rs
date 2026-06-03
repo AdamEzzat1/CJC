@@ -17,6 +17,10 @@
 //! Wired into the workspace's `[[test]]` table in the root `Cargo.toml`
 //! so `cargo test --test cronos` runs everything here.
 
+mod ets_tests;
+mod cronos_proptest;
+mod cronos_fuzz;
+
 use cjc_cronos::{CronosError, FingerprintId, Frequency, TimeSeries};
 
 #[test]

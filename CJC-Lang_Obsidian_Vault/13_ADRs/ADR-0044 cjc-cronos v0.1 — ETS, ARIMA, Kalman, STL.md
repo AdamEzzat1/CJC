@@ -1,6 +1,6 @@
 # ADR-0044 cjc-cronos v0.1 — ETS, ARIMA, Kalman, STL
 
-- **Status:** Proposed (2026-06-02) — scaffolding committed, implementation pending across multiple sessions
+- **Status:** Accepted (2026-06-02) — Session 1 (ETS Simple + Holt + backtest harness) shipped on `feat/cjc-cronos-scaffolding`; Sessions 2 (ARIMA / SARIMA), 3 (Kalman + RTS), and STL still pending. v0.1 ships **grid-search hyperparameter selection** (deterministic by construction); gradient-based fitting deferred to v0.2 per §What's-deferred. **Holt-Winters seasonal smoothing** deferred to a follow-up session within v0.1 (multiplicative-vs-additive seasonality + period detection deserves its own focused pass)
 - **Crate:** `cjc-cronos` (new)
 - **Companion docs:** [[New Crate Stack — Cronos, Causal, Tempest]] (handoff §3), [[ADR-0043 cjc-causal v0.1 — Propensity Score, IV, Double ML]] (sister crate, same pattern)
 - **Reserved error-code range:** **E9200..=E9299**

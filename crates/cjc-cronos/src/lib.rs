@@ -60,11 +60,17 @@
 //! ground truth. Cronos-side findings emit in the `E9200..=E9299` range
 //! per the handoff §5.3 reservation.
 
+pub mod backtest;
 pub mod error;
+pub mod ets;
+pub mod forecast;
 pub mod frequency;
 pub mod time_series;
 
+pub use backtest::backtest_ets;
 pub use error::CronosError;
+pub use ets::{Ets, EtsKind};
+pub use forecast::{BacktestReport, Forecast};
 pub use frequency::Frequency;
 pub use time_series::TimeSeries;
 
