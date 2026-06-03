@@ -1,0 +1,31 @@
+[package]
+name = "cjc-cronos"
+description = "CJC-Lang Cronos — deterministic time-series analysis and forecasting (ETS, ARIMA/SARIMA, Kalman filter, STL decomposition) with byte-identical backtests across runs and platforms. SCAFFOLDING — v0.1 implementation pending."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+# Skeleton crate — not yet published. The v0.1 implementation lands across
+# multiple sessions per the handoff at
+# `CJC-Lang_Obsidian_Vault/10_Roadmap_and_Open_Questions/New Crate Stack — Cronos, Causal, Tempest.md`
+# and `ADR-0044 cjc-cronos v0.1`. Remove `publish = false` once the v0.1
+# surface (ETS + ARIMA + Kalman + STL) is implemented and tests meet the
+# §6.1 floors.
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+cjc-data = { workspace = true }
+cjc-repro = { workspace = true }
+cjc-runtime = { workspace = true }
+cjc-locke = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"
+bolero = "0.13.4"
+tempfile = "3"
