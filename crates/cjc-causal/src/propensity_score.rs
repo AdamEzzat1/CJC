@@ -262,11 +262,15 @@ impl PropensityScoreMatcher {
         // 11. Balance report.
         let balance = compute_balance(&cov_named, &treated_idx, &control_idx, n_treated_unmatched);
 
-        // 12. Content-addressed identifier.
+        // 12. Content-addressed identifier. `instrument = None` because PSM
+        // has no instrument; this preserves byte-identity with Session 1
+        // identifiers (the `None` arm of `compute_identifier` skips the
+        // instrument hash step entirely).
         let identifier = compute_identifier(
             ESTIMATOR_LABEL,
             treatment,
             outcome,
+            None,
             covariates,
             assumptions,
             self.seed,
@@ -284,6 +288,7 @@ impl PropensityScoreMatcher {
             n_control: pairs.len() as u64,
             assumptions_declared: assumptions.to_vec(),
             balance_diagnostics: Some(balance),
+            iv_first_stage_f: None,
             identifier,
         })
     }
@@ -292,7 +297,10 @@ impl PropensityScoreMatcher {
 /// Extract a numeric column as `Vec<f64>`, accepting `Column::Float` or
 /// `Column::Int`. Returns `CausalError::UnknownColumn` if missing or
 /// `CausalError::WrongColumnType` for non-numeric kinds.
-fn extract_numeric_column(df: &DataFrame, name: &str, role: &str) -> Result<Vec<f64>, CausalError> {
+///
+/// `pub(crate)` so [`super::iv_regression::IVRegression`] can reuse the same
+/// extraction logic — the two estimators must agree on what "numeric" means.
+pub(crate) fn extract_numeric_column(df: &DataFrame, name: &str, role: &str) -> Result<Vec<f64>, CausalError> {
     let col = df.get_column(name).ok_or_else(|| CausalError::UnknownColumn { name: name.to_string() })?;
     match col {
         Column::Float(v) => Ok(v.clone()),

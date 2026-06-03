@@ -18,8 +18,11 @@
 
 mod common;
 mod propensity_score_tests;
+mod iv_regression_tests;
 mod causal_proptest;
+mod iv_proptest;
 mod causal_fuzz;
+mod iv_fuzz;
 
 use cjc_causal::{CausalError, EffectEstimate, FingerprintId, IdentificationAssumption};
 
@@ -58,6 +61,7 @@ fn effect_estimate_is_constructible() {
         n_control: 500,
         assumptions_declared: vec![IdentificationAssumption::Unconfoundedness],
         balance_diagnostics: None,
+        iv_first_stage_f: None,
         identifier: FingerprintId(0),
     };
     assert!(estimate.ci_lower <= estimate.point);

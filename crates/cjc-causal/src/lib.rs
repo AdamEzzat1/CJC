@@ -95,6 +95,8 @@ pub mod balance;
 pub mod content_hash;
 pub mod error;
 pub mod estimate;
+pub mod iv_regression;
+pub mod linalg;
 pub mod matching;
 pub mod propensity_score;
 pub mod refusal;
@@ -102,6 +104,7 @@ pub mod refusal;
 pub use assumption::IdentificationAssumption;
 pub use error::CausalError;
 pub use estimate::{BalanceReport, EffectEstimate};
+pub use iv_regression::{weak_instrument_finding, IVRegression};
 pub use propensity_score::PropensityScoreMatcher;
 
 /// Re-export of `cjc_locke::id::FingerprintId` so callers don't need a

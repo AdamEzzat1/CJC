@@ -44,16 +44,27 @@ pub struct EffectEstimate {
     /// Part of the [`identifier`](Self::identifier) content hash.
     pub assumptions_declared: Vec<IdentificationAssumption>,
 
-    /// Per-estimator diagnostics. For matching estimators this is a
-    /// covariate-balance breakdown; for IV it's the first-stage F-statistic;
-    /// for DML it's the orthogonal-moment closure check.
+    /// Per-estimator balance diagnostics. Populated for matching estimators
+    /// (a per-covariate SMD + variance ratio breakdown); `None` for IV and
+    /// DML which surface diagnostics through other slots.
     pub balance_diagnostics: Option<BalanceReport>,
+
+    /// First-stage F-statistic for instrument strength, populated by
+    /// [`super::IVRegression`] and any future IV-style estimator. `None`
+    /// for non-IV estimators.
+    ///
+    /// Per the Stock-Yogo 2005 critical-value convention, a value of `F < 10`
+    /// indicates a weak instrument (causal interpretation of the 2SLS
+    /// coefficient is unreliable). cjc-causal also surfaces this case as
+    /// Locke finding `E9100` when the threshold is breached.
+    pub iv_first_stage_f: Option<f64>,
 
     /// Content-addressed identifier. Computed via SplitMix64 (per
     /// `cjc_locke::id::fingerprint`) over the canonical byte representation
     /// of (estimator type, treatment column name, outcome column name,
-    /// covariate column names sorted ascending, assumptions sorted ascending,
-    /// seed, point estimate bits, std_error bits).
+    /// optional instrument column name, covariate column names sorted
+    /// ascending, assumptions sorted ascending, seed, point estimate bits,
+    /// std_error bits).
     pub identifier: FingerprintId,
 }
 

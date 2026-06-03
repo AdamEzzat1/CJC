@@ -67,6 +67,46 @@ pub fn synthetic_confounded(n: usize, seed: u64, true_ate: f64) -> DataFrame {
     ])
 }
 
+/// Synthetic data generator for IV regression: instrument-driven treatment
+/// + unobserved confounder.
+///
+/// Model:
+/// - `Z` (instrument) — exogenous, independent of confounder.
+/// - `x` (covariate) — exogenous, included in both stages.
+/// - `U` (confounder) — unobserved by the analyst; correlated with both T and Y.
+/// - `T = instrument_strength·Z + 0.3·x + 0.7·U + noise_t` (endogenous).
+/// - `y = true_beta·T + 0.5·x + 0.6·U + noise_y` (structural equation).
+///
+/// IV correctly recovers `true_beta` (asymptotically); naive OLS of y on T
+/// is biased upward because `cov(T, U) ≠ 0`.
+pub fn synthetic_iv(n: usize, seed: u64, true_beta: f64, instrument_strength: f64) -> DataFrame {
+    let mut rng = Rng::seeded(seed);
+    let mut z = Vec::with_capacity(n);
+    let mut x_cov = Vec::with_capacity(n);
+    let mut t = Vec::with_capacity(n);
+    let mut y = Vec::with_capacity(n);
+
+    for _ in 0..n {
+        let z_i = (rng.next_f64() - 0.5) * 4.0;
+        let x_i = (rng.next_f64() - 0.5) * 4.0;
+        let u = (rng.next_f64() - 0.5) * 2.0;
+        let t_noise = (rng.next_f64() - 0.5) * 0.5;
+        let t_i = instrument_strength * z_i + 0.3 * x_i + 0.7 * u + t_noise;
+        let y_noise = (rng.next_f64() - 0.5) * 0.5;
+        let y_i = true_beta * t_i + 0.5 * x_i + 0.6 * u + y_noise;
+        z.push(z_i);
+        x_cov.push(x_i);
+        t.push(t_i);
+        y.push(y_i);
+    }
+    df_from_floats(&[
+        ("treatment", t),
+        ("outcome", y),
+        ("instrument", z),
+        ("x", x_cov),
+    ])
+}
+
 /// Synthetic data generator: truly randomised assignment.
 ///
 /// Treatment is a coin flip independent of covariates, so the naive
