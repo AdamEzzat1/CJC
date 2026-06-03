@@ -256,6 +256,20 @@ name = "cjc-ast"
 version = "0.1.11"
 
 [[package]]
+name = "cjc-causal"
+version = "0.1.11"
+dependencies = [
+ "bolero",
+ "cjc-ad",
+ "cjc-data",
+ "cjc-locke",
+ "cjc-repro",
+ "cjc-runtime",
+ "proptest",
+ "tempfile",
+]
+
+[[package]]
 name = "cjc-cli"
 version = "0.1.11"
 dependencies = [
@@ -342,6 +356,7 @@ dependencies = [
  "cjc-abng",
  "cjc-ad",
  "cjc-ast",
+ "cjc-causal",
  "cjc-cli",
  "cjc-data",
  "cjc-diag",
