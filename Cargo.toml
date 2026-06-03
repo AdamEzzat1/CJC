@@ -1,6 +1,6 @@
 [package]
 name = "cjc-lang"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2021"
 license = "MIT"
 description = "CJC-Lang (Computational Jacobian Core) — a deterministic numerical programming language for reproducible computation, ML pipelines, scientific computing, and physics-informed neural networks"
@@ -71,7 +71,7 @@ exclude = ["fuzz", "python"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.11"
+version = "0.1.12"
 edition = "2021"
 license = "MIT"
 authors = ["Adam Ezzat"]
