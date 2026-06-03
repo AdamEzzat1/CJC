@@ -1,6 +1,6 @@
 # ADR-0043 cjc-causal v0.1 — Propensity Score, IV, Double ML
 
-- **Status:** Proposed (2026-06-02) — scaffolding committed, implementation pending
+- **Status:** Accepted (2026-06-02) — Session 1 (`PropensityScoreMatcher`) shipped on `feat/cjc-causal-scaffolding`; Sessions 2 (`IVRegression`) and 3 (`DoubleMLEstimator`) still pending
 - **Crate:** `cjc-causal` (new)
 - **Companion docs:** [[New Crate Stack — Cronos, Causal, Tempest]] (handoff §2), [[ADR-0028 Locke Data Skepticism Layer]], [[ADR-0041 Locke v0.8 — Custom Detector Extension Layer]], [[ADR-0042 Locke v0.8 — Str-to-Float Auto-Promotion + E9070 Wiring]]
 - **Reserved error-code range:** **E9100..=E9199**

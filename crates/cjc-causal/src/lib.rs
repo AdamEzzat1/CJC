@@ -91,12 +91,18 @@
 //! ```
 
 pub mod assumption;
+pub mod balance;
+pub mod content_hash;
 pub mod error;
 pub mod estimate;
+pub mod matching;
+pub mod propensity_score;
+pub mod refusal;
 
 pub use assumption::IdentificationAssumption;
 pub use error::CausalError;
 pub use estimate::{BalanceReport, EffectEstimate};
+pub use propensity_score::PropensityScoreMatcher;
 
 /// Re-export of `cjc_locke::id::FingerprintId` so callers don't need a
 /// direct dep on cjc-locke just to spell the estimate's content-addressed ID.
