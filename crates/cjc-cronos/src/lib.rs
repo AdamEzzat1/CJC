@@ -62,11 +62,13 @@
 
 pub mod backtest;
 pub mod error;
+pub mod arima;
 pub mod ets;
 pub mod forecast;
 pub mod frequency;
 pub mod time_series;
 
+pub use arima::Arima;
 pub use backtest::backtest_ets;
 pub use error::CronosError;
 pub use ets::{Ets, EtsKind};
