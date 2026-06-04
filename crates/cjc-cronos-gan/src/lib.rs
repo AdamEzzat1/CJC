@@ -140,7 +140,11 @@ pub use datasets::{
     chaotic_spike, noisy_sine, regime_shift, smooth_sine, step_change_anomaly, CronosDataset,
 };
 pub use disagreement::{compute_disagreement, TemporalDisagreement};
-pub use experiment::{run_experiment, ExperimentConfig, ExperimentReport, TrainingTrajectory};
+pub use experiment::{
+    run_experiment, run_experiment_sweep, ExperimentConfig, ExperimentReport,
+    ExperimentSweepReport, SweepBaseConfig, SweepCell, TrainingTrajectory, SWEEP_DATASETS,
+    SWEEP_MODES,
+};
 pub use gan::{TemporalGan, TemporalGanConfig, TemporalGanMode, TemporalGanRolloutResult};
 pub use gan_trainer::{Role, TemporalGanTrainStep, TemporalGanTrainer};
 pub use error::CronosGanError;

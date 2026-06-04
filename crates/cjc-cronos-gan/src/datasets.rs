@@ -127,7 +127,7 @@ pub fn chaotic_spike(
 
 /// Stable identifier for each shipped dataset — used by the experiment
 /// harness's content-addressed run ID.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CronosDataset {
     SmoothSine,
     NoisySine,

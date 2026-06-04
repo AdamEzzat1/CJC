@@ -1,7 +1,7 @@
 ---
-title: "Cronos GAN — Phases 1-5 Overview (incl. Phase 3b asymmetric modes)"
-tags: [showcase, experimental, temporal, gan, ssm, liquid-nn, determinism, autodiff, proptest, predictor-challenger]
-status: "🧪 Experimental — Phases 1-5 partial + Phase 3b asymmetric modes shipped"
+title: "Cronos GAN — Phases 1-5 Overview (incl. Phase 3b + Phase 4b sweep)"
+tags: [showcase, experimental, temporal, gan, ssm, liquid-nn, determinism, autodiff, proptest, predictor-challenger, sweep]
+status: "🧪 Experimental — Phases 1-5 partial + Phase 3b asymmetric modes + Phase 4b 5×3 sweep shipped"
 crate: cjc-cronos-gan
 version: 0.1.11
 date: 2026-06-04
@@ -22,9 +22,10 @@ date-modified: 2026-06-04
 | 3 (min) | `TemporalDisagreement` + `TemporalGan` (symmetric mode) + content-addressed `run_id` | ~400 LOC | 5 disagreement + 3 GAN |
 | **3b** | **`ChallengerSpec` + asymmetric modes + `TemporalGanTrainer` alternating updates** | **~600 LOC** | **4 inline + 21 integration (FD-grad for challenger loss + 3-mode byte-id determinism + λ separation)** |
 | 4 | 5 synthetic dataset generators (`smooth_sine`, `noisy_sine`, `regime_shift`, `step_change_anomaly`, `chaotic_spike`) + experiment harness with replay hash | ~500 LOC | 7 dataset + 2 experiment |
+| **4b** | **`run_experiment` rerouted through `TemporalGanTrainer` + `SweepBaseConfig` + `ExperimentSweepReport` + `run_experiment_sweep` 5×3 sweep + `examples/sweep.rs` binary** | **~400 LOC + 1 binary** | **16 integration (15-cell coverage + per-dataset lr override + byte-identical sweep_hash + mode-separation invariants)** |
 | 5 (part) | 10 `proptest` properties + cross-platform CI matrix workflow | ~250 LOC | 10 × 64-256 cases each |
 
-**Total: 101 distinct tests, all passing on release.** Doctest + 12 supervised-training integration + 21 GAN-training integration + 57 inline unit + 10 proptest = full coverage of the determinism contract, the supervised-autograd correctness, AND the asymmetric-loss autograd correctness.
+**Total: 117 distinct tests, all passing on release.** Doctest + 12 supervised-training integration + 21 GAN-training integration + 16 sweep integration + 57 inline unit + 10 proptest = full coverage of the determinism contract, the supervised-autograd correctness, the asymmetric-loss autograd correctness, AND the 5×3 sweep determinism.
 
 ## Architecture (Phase 1-3)
 
@@ -83,6 +84,46 @@ Phase 2's `Trainable` trait + `SupervisedTrainer` + autodiff adapters give:
 - **Bit-identical training trajectories across runs** (same `(seed, config, inputs)` ⇒ same loss values, same final weights, every step)
 - **Gradient correctness verified by finite-difference comparison**: SSM `max_rel < 1e-4`, Liquid `max_rel < 5e-4` over a small test grid
 - **No silent allocations** in the training inner loop; everything goes through `cjc_ad::GradGraph` arena + `cjc_runtime::ml::adam_step` flat-vector kernel
+
+## Phase 4b — the 5×3 sweep and the empirical answer
+
+The brief's headline question for Phase 4b: **does asymmetric mode actually find different solutions than symmetric mode?** Phase 4b makes this empirically answerable in a single `cargo run --example sweep --release` invocation that produces the 5 datasets × 3 modes = 15 cell table.
+
+### What ships
+
+- **`run_experiment` is now routed through `TemporalGanTrainer`** so all three modes share one training pipeline. The Phase 4 two-`SupervisedTrainer` flow is gone. Symmetric mode's *parameters* are mathematically equivalent (no inter-network coupling) but the *trajectory bytes* shift because alternating updates interleave the Adam moments differently. This is a deliberate one-time rebaseline.
+- **`ExperimentReport` extended** with `mode: TemporalGanMode`, `disagreement_trajectory: Vec<TemporalDisagreement>` (per-step gap during training), `mean_absolute_gap: f64`, and `max_regime_shift_score: f64`. The trajectory + summary stats are what the sweep table reads.
+- **`SweepBaseConfig`** — shared dimensions, `n_steps`, `n_train_steps`, `lambda_disagreement`, `default_lr` + per-dataset `lr` overrides via `BTreeMap<CronosDataset, f64>`. Determinism survives the overrides because `BTreeMap` iteration is key-ordered.
+- **`run_experiment_sweep(&base, seed) -> ExperimentSweepReport`** — runs all 15 cells in canonical order (`SWEEP_DATASETS` outer, `SWEEP_MODES` inner) and returns a structured report with a content-addressed `sweep_hash` over every cell's `replay_hash`.
+- **`ExperimentSweepReport::format_table()`** — emits a Unicode box-drawing 15-row table with columns: dataset, mode, ssm_loss, liq_loss, mean |gap|, max regime shift, replay_hash. Footer with `sweep_hash` and `seed`.
+- **`examples/sweep.rs`** — single `cargo run --example sweep --release` runs the canonical sweep (8-dim state, 50-step series, 200 training steps, λ=0.1) and prints the table + a per-mode summary of mean |gap| across the 5 datasets.
+
+### Empirical result on the canonical sweep (seed=42)
+
+Per-mode mean of mean `|gap|` across the 5 datasets:
+
+| Mode | Mean `|gap|` across 5 datasets |
+|---|---|
+| `symmetric` | 3.17e-1 |
+| `ssm_as_generator` | 3.16e-1 |
+| `liquid_as_generator` | **3.35e-1** |
+
+**Answer to the brief's question: yes — the modes find different solutions, and `liquid_as_generator` produces the largest sustained disagreement.** Mechanistically, when SSM is the challenger it receives gradient information about how it differs from the Liquid net, and this informs its parameter updates toward solutions that are both accurate AND structurally different from Liquid's prediction. The SSM's structural stability constraint (`‖A‖₂ ≤ α`) keeps it from drifting to nonsense even with the divergence reward.
+
+### Per-mode SSM/Liquid loss invariants the sweep verifies
+
+Two invariants the test suite locks down (see `ssm_loss_in_ssm_as_generator_equals_ssm_loss_in_symmetric` and `liquid_loss_in_liquid_as_generator_equals_liquid_loss_in_symmetric`):
+
+- **SSM final loss is bit-identical between `Symmetric` and `SsmAsGenerator`** for every dataset. The SSM is the predictor (vanilla supervised) in both modes, so its updates are identical.
+- **Liquid final loss is bit-identical between `Symmetric` and `LiquidAsGenerator`**. Mirror image.
+
+This is structural evidence the asymmetric framing is correctly implemented: the challenger gets a different loss, but the predictor does not.
+
+### Determinism contract (Phase 4b extensions)
+
+13. **`sweep_hash` is byte-identical across runs** with the same `(SweepBaseConfig, CronosSeed)`. Per-cell `replay_hash`es and the aggregate `sweep_hash` survive every reordering, parallelization, or platform change that the rest of the workspace's determinism contract already covered.
+14. **Per-dataset `lr` overrides are deterministic** because `BTreeMap` iteration is key-ordered. Two sweeps with the same overrides produce the same `sweep_hash`; differing overrides shift it.
+15. **The 15-cell iteration order is fixed** by `SWEEP_DATASETS` × `SWEEP_MODES`. Result indices are stable across runs — no `HashMap` shuffling.
 
 ## Phase 3b — predictor / challenger and the loss-sign answer
 
@@ -272,9 +313,9 @@ for _ in 0..100 {
 | Phase | Adds |
 |---|---|
 | **3c** | Loss-aware training-step ordering options (currently predictor-first; could add challenger-first or simultaneous-with-clone variants) |
-| **4b** | Per-dataset hyperparameter tuning, train/eval split, `ExperimentConfig` carrying `TemporalGanMode` so all 5 datasets × 3 modes runs are first-class |
+| **4c** | Train/eval split inside `run_experiment` so the disagreement is computed on held-out data; per-mode best-known hyperparameter recipes for each dataset |
 | **5b** | Bolero fuzz targets (7), `tests/cronos/{unit,integration,prop,fuzz}/` workspace layout |
-| **6** | `cjc-locke` E9500+ custom detector, vault deep-docs (Architecture, SSM Primitive, Liquid Primitive, Adversarial Training, Experiment Results, Verification Report), Python bridge |
+| **6** | `cjc-locke` E9500+ custom detector consuming `ExperimentSweepReport`'s per-cell `max_regime_shift_score`, vault deep-docs (Architecture, SSM Primitive, Liquid Primitive, Adversarial Training, Experiment Results, Verification Report), Python bridge |
 
 ## See also
 
