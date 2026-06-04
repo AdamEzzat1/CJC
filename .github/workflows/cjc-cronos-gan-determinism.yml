@@ -71,6 +71,25 @@ jobs:
       - name: Gate 4 — cjc-cronos-gan doctests
         run: cargo test -p cjc-cronos-gan --release --doc
 
+      # Gate 5 — Phase 4d integration tests (~25 tests, 21 non-ignored)
+      # Cover: LambdaSchedule math + integration, per-mode lr override,
+      # multi-seed sweep shape + aggregation + determinism, format_table
+      # adaptation. The 4 #[ignore]'d empirical-flip-replication tests
+      # are NOT run in CI (slow + informational, not a hard gate); run
+      # locally with `--ignored` to validate Phase 6 prerequisites.
+      - name: Gate 5 — cjc-cronos-gan Phase 4d integration tests
+        run: cargo test -p cjc-cronos-gan --release --test test_phase_4d
+
+      # Gate 6 — Phase 5b bolero fuzz suite (7 targets × 1024 iterations)
+      # Cover: malformed temporal batch, random sequence lengths,
+      # SequenceMask vs series-length matching, random seed byte-identity,
+      # SSM + Liquid config validation, TemporalGanTrainer.step on
+      # adversarial inputs. Compiles to proptest by default; under
+      # `cargo bolero` would dispatch to libfuzzer for coverage-guided
+      # mutation. The 1024 iterations per target completes in ~50ms each.
+      - name: Gate 6 — cjc-cronos-gan bolero fuzz suite
+        run: cargo test -p cjc-cronos-gan --release --test test_fuzz
+
   cronos-gan-byte-identity-check:
     name: cjc-cronos-gan Byte-Identity (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -95,4 +114,32 @@ jobs:
           cargo test -p cjc-cronos-gan --release --test test_proptest -- --nocapture \
             ssm_same_seed_byte_identical_rollout liquid_same_seed_byte_identical_rollout \
             ssm_repeated_rollout_byte_identical
+        shell: bash
+
+  cronos-gan-multi-seed-byte-identity:
+    name: cjc-cronos-gan Multi-Seed Sweep Byte-Identity (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cronos-gan-determinism
+
+      # Phase 4d: run the n_seeds=3 multi-seed sweep on each platform
+      # and assert that two consecutive runs produce a byte-identical
+      # sweep_hash. This validates the determinism contract that Phase
+      # 6 (cjc-locke regime-shift detector) relies on — every per-seed
+      # replay_hash plus the top-level sweep_hash must replay
+      # bit-identical across runs, machines, and platforms.
+      - name: Multi-seed (n_seeds=3) sweep_hash byte-identity
+        run: |
+          cargo test -p cjc-cronos-gan --release --test test_phase_4d -- --nocapture \
+            aggregate_sweep_hash_byte_identical_across_runs_n_seeds_three \
+            same_config_same_seed_same_stride_byte_identical_sweep_hash
         shell: bash
