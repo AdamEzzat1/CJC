@@ -31,11 +31,20 @@ use crate::error::CronosGanError;
 use crate::gan::{TemporalGan, TemporalGanConfig, TemporalGanMode};
 use crate::gan_trainer::TemporalGanTrainer;
 use crate::liquid::LiquidState;
+use crate::schedule::LambdaSchedule;
 use crate::seed::{CronosRunId, CronosSeed};
 use crate::ssm::StateSpaceState;
 use crate::training::Trainable;
 use cjc_locke::id::{fingerprint, fingerprint_compose, fingerprint_str, IdDomain};
 use std::collections::BTreeMap;
+
+/// Phase 4d: default stride between consecutive seeds when
+/// [`SweepBaseConfig::n_seeds`] > 1. This is the SplitMix64 "golden
+/// ratio" mixing constant — coprime to 2^64 and known to produce
+/// well-separated subsequences when used to jump a seeded RNG. The
+/// value is exposed so external callers can audit it; override via
+/// [`SweepBaseConfig::with_seed_stride`].
+pub const DEFAULT_SEED_STRIDE: u64 = 0x9E37_79B9_7F4A_7C15;
 
 /// Configuration for one Cronos GAN experiment run.
 #[derive(Clone, Debug)]
@@ -256,7 +265,7 @@ pub fn run_experiment(
     // Liquid params, training-trajectory bit pattern, disagreement-
     // trajectory bit pattern, eval-bit pattern when present).
     let mut parts = Vec::new();
-    parts.push(fingerprint_str(IdDomain::CausalClaim, "cronos_gan_experiment_v4c"));
+    parts.push(fingerprint_str(IdDomain::CausalClaim, "cronos_gan_experiment_v4d"));
     parts.push(fingerprint(IdDomain::CausalClaim, &config.canonical_bytes()));
     parts.push(fingerprint(IdDomain::CausalClaim, &seed.0.to_le_bytes()));
     let ssm_params_bytes = float_vec_bytes(&gan.ssm().params_flat());
@@ -274,7 +283,7 @@ pub fn run_experiment(
     }
     let replay_hash = CronosRunId(fingerprint_compose(
         IdDomain::CausalClaim,
-        "cronos_experiment_replay_hash_v4c",
+        "cronos_experiment_replay_hash_v4d",
         &parts,
     ));
 
@@ -462,9 +471,21 @@ pub const SWEEP_MODES: [TemporalGanMode; 3] = [
 /// Configuration shared across the 15 cells of a sweep.
 ///
 /// All cells share `(state_dim, input_dim, output_dim, n_steps,
-/// eval_steps, n_train_steps)`. Per-dataset learning rates and per-mode
-/// challenger weights can be overridden — cells without an override use
-/// the fallback `default_lr` / `lambda_disagreement`.
+/// eval_steps, n_train_steps)`. Per-dataset learning rates, per-mode
+/// learning rates, and per-mode λ schedules can be overridden — cells
+/// without an override use the fallback `default_lr` / `lambda_schedule`.
+///
+/// **Phase 4d additions** vs Phase 4c:
+/// - [`Self::lambda_schedule`] replaces the prior `lambda_disagreement:
+///   f64`; the back-compat shim
+///   [`Self::with_lambda_disagreement`] still accepts a scalar.
+/// - [`Self::per_mode_schedule`] replaces the prior `per_mode_lambda`;
+///   [`Self::with_lambda_for`] still accepts a scalar.
+/// - [`Self::per_mode_lr`] adds per-mode learning-rate overrides.
+///   Resolution order in [`Self::experiment_config_for`] is
+///   `per_dataset_lr → per_mode_lr → default_lr` (most-specific wins).
+/// - [`Self::n_seeds`] + [`Self::seed_stride`] drive the multi-seed
+///   sweep loop (default `n_seeds = 1`, matching Phase 4c).
 #[derive(Clone, Debug)]
 pub struct SweepBaseConfig {
     pub state_dim: usize,
@@ -477,23 +498,38 @@ pub struct SweepBaseConfig {
     /// metrics for that mode.
     pub eval_steps: usize,
     pub n_train_steps: usize,
-    /// Fallback challenger weight applied to any
-    /// [`TemporalGanMode`] not in `per_mode_lambda`. Ignored for
-    /// `Symmetric` (its λ has no effect on the loss).
-    pub lambda_disagreement: f64,
-    /// Phase 4c: per-mode overrides for the challenger weight.
-    /// `Symmetric` should normally stay at `0.0` (or be absent);
-    /// `SsmAsGenerator` and `LiquidAsGenerator` may use different λ.
-    pub per_mode_lambda: BTreeMap<TemporalGanMode, f64>,
+    /// Phase 4d: fallback λ-schedule applied to any [`TemporalGanMode`]
+    /// not in [`Self::per_mode_schedule`]. Ignored for `Symmetric`
+    /// (its λ has no effect on the loss).
+    pub lambda_schedule: LambdaSchedule,
+    /// Phase 4d: per-mode overrides for the λ-schedule. Replaces the
+    /// pre-Phase-4d `per_mode_lambda: BTreeMap<…, f64>`.
+    pub per_mode_schedule: BTreeMap<TemporalGanMode, LambdaSchedule>,
     /// Per-dataset learning-rate overrides, keyed by dataset enum.
+    /// Most specific in the resolution order.
     pub per_dataset_lr: BTreeMap<CronosDataset, f64>,
-    /// Fallback learning rate for datasets without an override.
+    /// Phase 4d: per-mode learning-rate overrides. Consulted *after*
+    /// `per_dataset_lr` and *before* `default_lr`.
+    pub per_mode_lr: BTreeMap<TemporalGanMode, f64>,
+    /// Fallback learning rate for cells without a per-dataset or
+    /// per-mode override.
     pub default_lr: f64,
+    /// Phase 4d: number of seeds to run per cell. With `n_seeds > 1`,
+    /// the sweep produces `SweepCell.per_seed_reports.len() == n_seeds`
+    /// reports per cell plus `mean` + `variance` aggregates. Default 1
+    /// (matches Phase 4c behaviour exactly).
+    pub n_seeds: usize,
+    /// Phase 4d: stride between consecutive per-cell seeds. The Nth
+    /// seed in a sweep is `base_seed.wrapping_add(N * seed_stride)`.
+    /// Defaults to [`DEFAULT_SEED_STRIDE`] (the SplitMix64 golden-ratio
+    /// gamma).
+    pub seed_stride: u64,
 }
 
 impl SweepBaseConfig {
-    /// Construct with reasonable defaults: `lambda = 0.1`, `default_lr =
-    /// 1e-2`, `eval_steps = 0`, no per-mode or per-dataset overrides.
+    /// Construct with reasonable defaults: λ = Constant(0.1), `default_lr =
+    /// 1e-2`, `eval_steps = 0`, `n_seeds = 1`, `seed_stride =
+    /// DEFAULT_SEED_STRIDE`, no per-mode/per-dataset overrides.
     pub fn new(
         state_dim: usize,
         input_dim: usize,
@@ -508,23 +544,46 @@ impl SweepBaseConfig {
             n_steps,
             eval_steps: 0,
             n_train_steps,
-            lambda_disagreement: 0.1,
-            per_mode_lambda: BTreeMap::new(),
+            lambda_schedule: LambdaSchedule::Constant(0.1),
+            per_mode_schedule: BTreeMap::new(),
             per_dataset_lr: BTreeMap::new(),
+            per_mode_lr: BTreeMap::new(),
             default_lr: 1e-2,
+            n_seeds: 1,
+            seed_stride: DEFAULT_SEED_STRIDE,
         }
     }
 
-    /// Set the *fallback* λ. Modes present in `per_mode_lambda`
-    /// override this.
+    /// Back-compat setter — wraps `lambda` in [`LambdaSchedule::Constant`]
+    /// and assigns to [`Self::lambda_schedule`].
     pub fn with_lambda_disagreement(mut self, lambda: f64) -> Self {
-        self.lambda_disagreement = lambda;
+        self.lambda_schedule = LambdaSchedule::Constant(lambda);
         self
     }
 
-    /// Phase 4c: set a per-mode λ override.
+    /// Phase 4d: explicit fallback λ-schedule (replaces
+    /// [`Self::with_lambda_disagreement`] when you want decaying or
+    /// ramping λ).
+    pub fn with_lambda_schedule(mut self, schedule: LambdaSchedule) -> Self {
+        self.lambda_schedule = schedule;
+        self
+    }
+
+    /// Back-compat setter — wraps `lambda` in [`LambdaSchedule::Constant`]
+    /// and inserts into [`Self::per_mode_schedule`].
     pub fn with_lambda_for(mut self, mode: TemporalGanMode, lambda: f64) -> Self {
-        self.per_mode_lambda.insert(mode, lambda);
+        self.per_mode_schedule
+            .insert(mode, LambdaSchedule::Constant(lambda));
+        self
+    }
+
+    /// Phase 4d: explicit per-mode λ-schedule override.
+    pub fn with_lambda_schedule_for(
+        mut self,
+        mode: TemporalGanMode,
+        schedule: LambdaSchedule,
+    ) -> Self {
+        self.per_mode_schedule.insert(mode, schedule);
         self
     }
 
@@ -544,16 +603,52 @@ impl SweepBaseConfig {
         self
     }
 
-    /// Look up the effective λ for `mode` — falls back to
-    /// `lambda_disagreement` if no per-mode override is set.
-    pub fn lambda_for(&self, mode: TemporalGanMode) -> f64 {
-        self.per_mode_lambda
+    /// Phase 4d: set a per-mode learning rate. Less specific than
+    /// `per_dataset_lr`; more specific than `default_lr`.
+    pub fn with_lr_for_mode(mut self, mode: TemporalGanMode, lr: f64) -> Self {
+        self.per_mode_lr.insert(mode, lr);
+        self
+    }
+
+    /// Phase 4d: override the number of seeds per cell. With `n_seeds >
+    /// 1`, the sweep aggregates `mean ± std` per cell across seeds.
+    pub fn with_n_seeds(mut self, n_seeds: usize) -> Self {
+        self.n_seeds = n_seeds;
+        self
+    }
+
+    /// Phase 4d: override the stride between consecutive per-cell seeds.
+    pub fn with_seed_stride(mut self, seed_stride: u64) -> Self {
+        self.seed_stride = seed_stride;
+        self
+    }
+
+    /// Phase 4d: the effective λ-schedule for `mode` — per-mode override
+    /// if present, otherwise the fallback [`Self::lambda_schedule`].
+    /// Return type changed from `f64` in Phase 4c.
+    pub fn lambda_for(&self, mode: TemporalGanMode) -> LambdaSchedule {
+        self.per_mode_schedule
             .get(&mode)
             .copied()
-            .unwrap_or(self.lambda_disagreement)
+            .unwrap_or(self.lambda_schedule)
+    }
+
+    /// Phase 4d: the effective learning rate for `mode`, considering only
+    /// per-mode override + default (no per-dataset axis). Mirrors the
+    /// [`Self::lambda_for`] fallback pattern.
+    pub fn lr_for(&self, mode: TemporalGanMode) -> f64 {
+        self.per_mode_lr
+            .get(&mode)
+            .copied()
+            .unwrap_or(self.default_lr)
     }
 
     /// Construct a per-cell [`ExperimentConfig`] for `(dataset, mode)`.
+    ///
+    /// Phase 4d resolution order:
+    /// - **λ-schedule**: `per_mode_schedule[mode]` → `lambda_schedule`
+    /// - **lr**: `per_dataset_lr[dataset]` → `per_mode_lr[mode]` →
+    ///   `default_lr` (most-specific wins)
     pub fn experiment_config_for(
         &self,
         dataset: CronosDataset,
@@ -561,11 +656,12 @@ impl SweepBaseConfig {
     ) -> ExperimentConfig {
         let gan = TemporalGanConfig::symmetric(self.state_dim, self.input_dim, self.output_dim)
             .with_mode(mode)
-            .with_lambda_disagreement(self.lambda_for(mode));
+            .with_lambda_schedule(self.lambda_for(mode));
         let lr = self
             .per_dataset_lr
             .get(&dataset)
             .copied()
+            .or_else(|| self.per_mode_lr.get(&mode).copied())
             .unwrap_or(self.default_lr);
         ExperimentConfig::new(gan, dataset, self.n_steps)
             .with_n_train_steps(self.n_train_steps)
@@ -581,63 +677,161 @@ impl SweepBaseConfig {
         bytes.extend_from_slice(&(self.n_steps as u64).to_le_bytes());
         bytes.extend_from_slice(&(self.eval_steps as u64).to_le_bytes());
         bytes.extend_from_slice(&(self.n_train_steps as u64).to_le_bytes());
-        bytes.extend_from_slice(&self.lambda_disagreement.to_bits().to_le_bytes());
+        bytes.extend(self.lambda_schedule.canonical_bytes());
         bytes.extend_from_slice(&self.default_lr.to_bits().to_le_bytes());
+        bytes.extend_from_slice(&(self.n_seeds as u64).to_le_bytes());
+        bytes.extend_from_slice(&self.seed_stride.to_le_bytes());
         // BTreeMap iteration is key-ordered → deterministic across runs
         // and platforms.
-        for (mode, lambda) in &self.per_mode_lambda {
+        for (mode, schedule) in &self.per_mode_schedule {
             bytes.extend_from_slice(mode.label().as_bytes());
-            bytes.extend_from_slice(&lambda.to_bits().to_le_bytes());
+            bytes.extend(schedule.canonical_bytes());
         }
         for (ds, lr) in &self.per_dataset_lr {
             bytes.extend_from_slice(ds.label().as_bytes());
+            bytes.extend_from_slice(&lr.to_bits().to_le_bytes());
+        }
+        for (mode, lr) in &self.per_mode_lr {
+            bytes.extend_from_slice(mode.label().as_bytes());
             bytes.extend_from_slice(&lr.to_bits().to_le_bytes());
         }
         bytes
     }
 }
 
+/// Phase 4d: scalar aggregates over a cell's per-seed reports.
+///
+/// `mean` and `variance` instances are produced by
+/// [`run_experiment_sweep`] via Kahan-summed averaging + Welford's
+/// online variance recurrence. For `n_seeds == 1`, the `mean` instance
+/// matches the single report's fields exactly and the `variance`
+/// instance is all-zero (sample variance is undefined for a single
+/// observation; we use 0.0 by convention).
+///
+/// `Option<f64>` fields are `None` when [`ExperimentConfig::eval_steps`]
+/// is 0 across all seeds; `Some(value)` when all seeds populated eval.
+/// Mixed cells (some seeds eval, some not) are impossible by
+/// construction because all seeds within a cell share the same
+/// [`ExperimentConfig`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CellAggregate {
+    pub final_loss_ssm: f64,
+    pub final_loss_liquid: f64,
+    pub mean_absolute_gap: f64,
+    pub max_regime_shift_score: f64,
+    pub eval_ssm_loss: Option<f64>,
+    pub eval_liquid_loss: Option<f64>,
+    pub eval_absolute_gap: Option<f64>,
+}
+
 /// One cell of an [`ExperimentSweepReport`].
+///
+/// **Phase 4d**: `report: ExperimentReport` was promoted to
+/// `per_seed_reports: Vec<ExperimentReport>` to support
+/// `SweepBaseConfig::n_seeds > 1`. The convenience accessor
+/// [`Self::first_report`] returns `&per_seed_reports[0]` for callers
+/// that only care about the first seed (e.g. determinism comparisons).
 #[derive(Clone, Debug)]
 pub struct SweepCell {
     pub dataset: CronosDataset,
     pub mode: TemporalGanMode,
-    pub report: ExperimentReport,
+    /// One report per seed, in the order produced by the sweep loop.
+    /// Length equals [`SweepBaseConfig::n_seeds`].
+    pub per_seed_reports: Vec<ExperimentReport>,
+    /// Per-field mean across [`Self::per_seed_reports`] (Kahan-summed).
+    pub mean: CellAggregate,
+    /// Per-field sample variance across [`Self::per_seed_reports`]
+    /// (Welford). Zero when `per_seed_reports.len() == 1`.
+    pub variance: CellAggregate,
+}
+
+impl SweepCell {
+    /// First per-seed report. Convenient for callers that ran with
+    /// `n_seeds == 1` and want the legacy single-report access.
+    pub fn first_report(&self) -> &ExperimentReport {
+        &self.per_seed_reports[0]
+    }
+
+    /// Number of seeds the cell aggregates. Same as
+    /// `self.per_seed_reports.len()`.
+    pub fn n_seeds(&self) -> usize {
+        self.per_seed_reports.len()
+    }
 }
 
 /// Structured report from a 15-cell sweep.
 #[derive(Clone, Debug)]
 pub struct ExperimentSweepReport {
+    /// Base seed of the sweep. Per-cell per-seed seeds are
+    /// `base.wrapping_add(k * base_config.seed_stride)` for
+    /// `k ∈ [0, n_seeds)`.
     pub seed: CronosSeed,
     /// 15 cells in canonical order — datasets outer ([`SWEEP_DATASETS`]),
     /// modes inner ([`SWEEP_MODES`]).
     pub cells: Vec<SweepCell>,
     /// Content-addressed hash over `(base_config, seed, every cell's
-    /// replay_hash)`. Two sweeps with the same `(base_config, seed)`
-    /// produce the same hash.
+    /// per-seed replay_hash list in canonical order)`. Two sweeps with
+    /// the same `(base_config, seed)` produce the same hash.
     pub sweep_hash: CronosRunId,
 }
 
 impl ExperimentSweepReport {
-    /// Fetch the report for a specific `(dataset, mode)` combination.
+    /// Fetch the **first-seed report** for a specific `(dataset, mode)`
+    /// combination. For sweeps with `n_seeds == 1`, this is the cell's
+    /// only report (matches Phase 4c behavior). For `n_seeds > 1`,
+    /// callers wanting the full per-seed list or aggregates should use
+    /// [`Self::cell_full`].
     pub fn cell(&self, dataset: CronosDataset, mode: TemporalGanMode) -> Option<&ExperimentReport> {
         self.cells
             .iter()
             .find(|c| c.dataset == dataset && c.mode == mode)
-            .map(|c| &c.report)
+            .map(|c| c.first_report())
     }
 
-    /// Format a fixed-width 15-row table for stdout / a file. Columns:
-    /// dataset, mode, final SSM loss, final Liquid loss,
-    /// mean |gap|, max regime-shift, replay_hash.
+    /// Phase 4d: fetch the full [`SweepCell`] for `(dataset, mode)`,
+    /// exposing `per_seed_reports`, `mean`, and `variance`.
+    pub fn cell_full(
+        &self,
+        dataset: CronosDataset,
+        mode: TemporalGanMode,
+    ) -> Option<&SweepCell> {
+        self.cells
+            .iter()
+            .find(|c| c.dataset == dataset && c.mode == mode)
+    }
+
+    /// True iff any cell aggregates more than one seed. Used by
+    /// [`Self::format_table`] to pick the per-seed vs aggregate layout.
+    pub fn is_multi_seed(&self) -> bool {
+        self.cells.iter().any(|c| c.n_seeds() > 1)
+    }
+
+    /// Format a fixed-width table for stdout / a file.
     ///
     /// **Phase 4c**: when any cell has a populated
     /// [`ExperimentReport::eval`], the table grows three additional
     /// columns covering held-out eval (eval_ssm_loss, eval_liq_loss,
-    /// eval_mean_gap). Cells with no eval show `—`.
+    /// eval_mean_gap).
+    ///
+    /// **Phase 4d**: when [`Self::is_multi_seed`] is true, each
+    /// numeric cell renders as `mean ± std` instead of a single value
+    /// (column widths expand accordingly). The `replay_hash` column
+    /// always shows the first-seed hash even in multi-seed mode.
     pub fn format_table(&self) -> String {
-        let any_eval = self.cells.iter().any(|c| c.report.eval.is_some());
+        let any_eval = self
+            .cells
+            .iter()
+            .any(|c| c.first_report().eval.is_some());
+        let multi = self.is_multi_seed();
 
+        if multi {
+            self.format_table_multi_seed(any_eval)
+        } else {
+            self.format_table_single_seed(any_eval)
+        }
+    }
+
+    fn format_table_single_seed(&self, any_eval: bool) -> String {
         let mut out = String::new();
         if any_eval {
             out.push_str("┌────────────────────────┬──────────────────────┬──────────────┬──────────────┬─────────────┬──────────────┬──────────────┬──────────────┬─────────────┬──────────────────┐\n");
@@ -650,8 +844,9 @@ impl ExperimentSweepReport {
         }
 
         for c in &self.cells {
+            let report = c.first_report();
             if any_eval {
-                let (eval_ssm, eval_liq, eval_gap) = match &c.report.eval {
+                let (eval_ssm, eval_liq, eval_gap) = match &report.eval {
                     Some(e) => (
                         format!("{:>12.6e}", e.ssm_loss),
                         format!("{:>12.6e}", e.liquid_loss),
@@ -667,25 +862,25 @@ impl ExperimentSweepReport {
                     "│ {:<22} │ {:<20} │ {:>12.6e} │ {:>12.6e} │ {:>11.4e} │ {:>12.4e} │ {} │ {} │ {} │ {:>16} │\n",
                     c.dataset.label(),
                     c.mode.label(),
-                    c.report.final_loss_ssm,
-                    c.report.final_loss_liquid,
-                    c.report.mean_absolute_gap,
-                    c.report.max_regime_shift_score,
+                    report.final_loss_ssm,
+                    report.final_loss_liquid,
+                    report.mean_absolute_gap,
+                    report.max_regime_shift_score,
                     eval_ssm,
                     eval_liq,
                     eval_gap,
-                    format!("{}", c.report.replay_hash),
+                    format!("{}", report.replay_hash),
                 ));
             } else {
                 out.push_str(&format!(
                     "│ {:<22} │ {:<20} │ {:>12.6e} │ {:>12.6e} │ {:>11.4e} │ {:>12.4e} │ {:>16} │\n",
                     c.dataset.label(),
                     c.mode.label(),
-                    c.report.final_loss_ssm,
-                    c.report.final_loss_liquid,
-                    c.report.mean_absolute_gap,
-                    c.report.max_regime_shift_score,
-                    format!("{}", c.report.replay_hash),
+                    report.final_loss_ssm,
+                    report.final_loss_liquid,
+                    report.mean_absolute_gap,
+                    report.max_regime_shift_score,
+                    format!("{}", report.replay_hash),
                 ));
             }
         }
@@ -699,45 +894,163 @@ impl ExperimentSweepReport {
         out.push_str(&format!("seed       = {}\n", self.seed.0));
         out
     }
+
+    fn format_table_multi_seed(&self, any_eval: bool) -> String {
+        // Numeric cells are "mean ± std" — width 20 each.
+        // Format: "{:>9.3e} ± {:>7.1e}" = 9 + 3 + 7 + padding = 20.
+        let mut out = String::new();
+        if any_eval {
+            out.push_str("┌────────────────────────┬──────────────────────┬──────────────────────┬──────────────────────┬──────────────────────┬──────────────────────┬──────────────────────┬──────────────────────┬──────────────────────┬──────────────────┐\n");
+            out.push_str("│ dataset                │ mode                 │ ssm_loss (mean±std)  │ liq_loss (mean±std)  │ |gap| (mean±std)     │ regime (mean±std)    │ eval ssm (mean±std)  │ eval liq (mean±std)  │ eval|gap|(mean±std)  │ replay_hash[0]   │\n");
+            out.push_str("├────────────────────────┼──────────────────────┼──────────────────────┼──────────────────────┼──────────────────────┼──────────────────────┼──────────────────────┼──────────────────────┼──────────────────────┼──────────────────┤\n");
+        } else {
+            out.push_str("┌────────────────────────┬──────────────────────┬──────────────────────┬──────────────────────┬──────────────────────┬──────────────────────┬──────────────────┐\n");
+            out.push_str("│ dataset                │ mode                 │ ssm_loss (mean±std)  │ liq_loss (mean±std)  │ |gap| (mean±std)     │ regime (mean±std)    │ replay_hash[0]   │\n");
+            out.push_str("├────────────────────────┼──────────────────────┼──────────────────────┼──────────────────────┼──────────────────────┼──────────────────────┼──────────────────┤\n");
+        }
+
+        for c in &self.cells {
+            let report = c.first_report();
+            let ssm_loss = format_mean_std(c.mean.final_loss_ssm, c.variance.final_loss_ssm);
+            let liq_loss = format_mean_std(c.mean.final_loss_liquid, c.variance.final_loss_liquid);
+            let gap = format_mean_std(c.mean.mean_absolute_gap, c.variance.mean_absolute_gap);
+            let regime = format_mean_std(
+                c.mean.max_regime_shift_score,
+                c.variance.max_regime_shift_score,
+            );
+
+            if any_eval {
+                let eval_ssm = match (c.mean.eval_ssm_loss, c.variance.eval_ssm_loss) {
+                    (Some(m), Some(v)) => format_mean_std(m, v),
+                    _ => "          —          ".to_string(),
+                };
+                let eval_liq = match (c.mean.eval_liquid_loss, c.variance.eval_liquid_loss) {
+                    (Some(m), Some(v)) => format_mean_std(m, v),
+                    _ => "          —          ".to_string(),
+                };
+                let eval_gap = match (c.mean.eval_absolute_gap, c.variance.eval_absolute_gap) {
+                    (Some(m), Some(v)) => format_mean_std(m, v),
+                    _ => "          —          ".to_string(),
+                };
+                out.push_str(&format!(
+                    "│ {:<22} │ {:<20} │ {} │ {} │ {} │ {} │ {} │ {} │ {} │ {:>16} │\n",
+                    c.dataset.label(),
+                    c.mode.label(),
+                    ssm_loss,
+                    liq_loss,
+                    gap,
+                    regime,
+                    eval_ssm,
+                    eval_liq,
+                    eval_gap,
+                    format!("{}", report.replay_hash),
+                ));
+            } else {
+                out.push_str(&format!(
+                    "│ {:<22} │ {:<20} │ {} │ {} │ {} │ {} │ {:>16} │\n",
+                    c.dataset.label(),
+                    c.mode.label(),
+                    ssm_loss,
+                    liq_loss,
+                    gap,
+                    regime,
+                    format!("{}", report.replay_hash),
+                ));
+            }
+        }
+
+        if any_eval {
+            out.push_str("└────────────────────────┴──────────────────────┴──────────────────────┴──────────────────────┴──────────────────────┴──────────────────────┴──────────────────────┴──────────────────────┴──────────────────────┴──────────────────┘\n");
+        } else {
+            out.push_str("└────────────────────────┴──────────────────────┴──────────────────────┴──────────────────────┴──────────────────────┴──────────────────────┴──────────────────┘\n");
+        }
+        out.push_str(&format!("sweep_hash = {}\n", self.sweep_hash));
+        out.push_str(&format!("seed       = {}\n", self.seed.0));
+        out.push_str(&format!(
+            "n_seeds    = {}  (per-cell aggregate; std = sample std-dev)\n",
+            self.cells[0].n_seeds()
+        ));
+        out
+    }
 }
 
-/// Run the 15-cell sweep: 5 datasets × 3 modes. Cells are evaluated in
-/// canonical order ([`SWEEP_DATASETS`] outer, [`SWEEP_MODES`] inner) so
-/// the resulting [`ExperimentSweepReport.cells`] index is stable across
-/// runs and platforms.
+/// Format "mean ± std" into a fixed-width 20-char string. Variance
+/// input is converted to std-dev before display.
+fn format_mean_std(mean: f64, variance: f64) -> String {
+    let std = variance.sqrt();
+    format!("{:>9.3e} ± {:>7.1e}", mean, std)
+}
+
+/// Run the 15-cell sweep: 5 datasets × 3 modes × `n_seeds` per cell.
+/// Cells are evaluated in canonical order ([`SWEEP_DATASETS`] outer,
+/// [`SWEEP_MODES`] inner). Within each cell, seeds run in stride
+/// order: `base, base + seed_stride, base + 2·seed_stride, …` for
+/// [`SweepBaseConfig::n_seeds`] iterations. The resulting
+/// [`ExperimentSweepReport.cells`] index is stable across runs and
+/// platforms.
+///
+/// **Phase 4d**: when `base_config.n_seeds > 1`, each cell aggregates
+/// its per-seed reports into `SweepCell::mean` (Kahan-summed averages)
+/// and `SweepCell::variance` (Welford sample variance). The `sweep_hash`
+/// is salted with every per-seed `replay_hash` in canonical order, so
+/// changing `n_seeds` or `seed_stride` always shifts the hash.
 ///
 /// **Determinism guarantee**: two sweeps with the same `(base_config,
-/// seed)` produce byte-identical `ExperimentSweepReport` (including the
-/// `sweep_hash`).
+/// seed)` produce byte-identical `ExperimentSweepReport` (including
+/// every per-seed `replay_hash` and the top-level `sweep_hash`).
 pub fn run_experiment_sweep(
     base_config: &SweepBaseConfig,
     seed: CronosSeed,
 ) -> Result<ExperimentSweepReport, CronosGanError> {
+    let n_seeds = base_config.n_seeds.max(1);
+    let stride = base_config.seed_stride;
+
     let mut cells: Vec<SweepCell> = Vec::with_capacity(SWEEP_DATASETS.len() * SWEEP_MODES.len());
 
     for &dataset in &SWEEP_DATASETS {
         for &mode in &SWEEP_MODES {
             let cfg = base_config.experiment_config_for(dataset, mode);
-            let report = run_experiment(&cfg, seed).map_err(prepend_context_sweep(dataset, mode))?;
-            cells.push(SweepCell { dataset, mode, report });
+            let mut per_seed_reports: Vec<ExperimentReport> = Vec::with_capacity(n_seeds);
+
+            for seed_idx in 0..n_seeds {
+                let cell_seed = CronosSeed(
+                    seed.0
+                        .wrapping_add(stride.wrapping_mul(seed_idx as u64)),
+                );
+                let report = run_experiment(&cfg, cell_seed)
+                    .map_err(prepend_context_sweep_seeded(dataset, mode, seed_idx))?;
+                per_seed_reports.push(report);
+            }
+
+            let (mean, variance) = aggregate_seeds(&per_seed_reports);
+            cells.push(SweepCell {
+                dataset,
+                mode,
+                per_seed_reports,
+                mean,
+                variance,
+            });
         }
     }
 
     // sweep_hash: combines (base_config bytes, seed, every cell's
-    // replay_hash bytes).
-    let mut parts = Vec::with_capacity(2 + cells.len());
-    parts.push(fingerprint_str(IdDomain::CausalClaim, "cronos_sweep_v4b"));
+    // per-seed replay_hash bytes in canonical order).
+    let total_replay_parts: usize = cells.iter().map(|c| c.per_seed_reports.len()).sum();
+    let mut parts = Vec::with_capacity(3 + total_replay_parts);
+    parts.push(fingerprint_str(IdDomain::CausalClaim, "cronos_sweep_v4d"));
     parts.push(fingerprint(IdDomain::CausalClaim, &base_config.canonical_bytes()));
     parts.push(fingerprint(IdDomain::CausalClaim, &seed.0.to_le_bytes()));
     for c in &cells {
-        parts.push(fingerprint(
-            IdDomain::CausalClaim,
-            &c.report.replay_hash.0 .0.to_le_bytes(),
-        ));
+        for r in &c.per_seed_reports {
+            parts.push(fingerprint(
+                IdDomain::CausalClaim,
+                &r.replay_hash.0 .0.to_le_bytes(),
+            ));
+        }
     }
     let sweep_hash = CronosRunId(fingerprint_compose(
         IdDomain::CausalClaim,
-        "cronos_sweep_replay_hash",
+        "cronos_sweep_replay_hash_v4d",
         &parts,
     ));
 
@@ -748,22 +1061,133 @@ pub fn run_experiment_sweep(
     })
 }
 
-fn prepend_context_sweep(
+fn prepend_context_sweep_seeded(
     dataset: CronosDataset,
     mode: TemporalGanMode,
+    seed_idx: usize,
 ) -> impl Fn(CronosGanError) -> CronosGanError {
-    move |e| match e {
-        CronosGanError::DimensionMismatch { detail } => CronosGanError::DimensionMismatch {
-            detail: format!("[sweep cell ({}, {})] {}", dataset.label(), mode.label(), detail),
-        },
-        CronosGanError::InvalidConfig { detail } => CronosGanError::InvalidConfig {
-            detail: format!("[sweep cell ({}, {})] {}", dataset.label(), mode.label(), detail),
-        },
-        CronosGanError::NonFiniteInput { detail } => CronosGanError::NonFiniteInput {
-            detail: format!("[sweep cell ({}, {})] {}", dataset.label(), mode.label(), detail),
-        },
-        other => other,
+    move |e| {
+        let prefix = format!(
+            "[sweep cell ({}, {}) seed_idx={}]",
+            dataset.label(),
+            mode.label(),
+            seed_idx
+        );
+        match e {
+            CronosGanError::DimensionMismatch { detail } => CronosGanError::DimensionMismatch {
+                detail: format!("{} {}", prefix, detail),
+            },
+            CronosGanError::InvalidConfig { detail } => CronosGanError::InvalidConfig {
+                detail: format!("{} {}", prefix, detail),
+            },
+            CronosGanError::NonFiniteInput { detail } => CronosGanError::NonFiniteInput {
+                detail: format!("{} {}", prefix, detail),
+            },
+            other => other,
+        }
     }
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// Phase 4d: per-cell aggregation across seeds
+// ───────────────────────────────────────────────────────────────────────
+
+/// Aggregate the per-seed reports of a single sweep cell into `(mean,
+/// variance)` [`CellAggregate`]s. Mean uses Kahan-summed averaging;
+/// variance uses Welford's online sample-variance recurrence. For
+/// `n_seeds == 1`, mean equals the single value's field and variance
+/// is 0.0 by convention.
+///
+/// `Option<f64>` fields: `None` when no seed populated `report.eval`
+/// (i.e. `eval_steps == 0`); `Some(value)` when every seed populated
+/// it. Mixed cells are impossible because all seeds within a cell
+/// share the same [`ExperimentConfig`].
+fn aggregate_seeds(reports: &[ExperimentReport]) -> (CellAggregate, CellAggregate) {
+    assert!(!reports.is_empty(), "aggregate_seeds requires ≥1 report");
+
+    let ssm_losses: Vec<f64> = reports.iter().map(|r| r.final_loss_ssm).collect();
+    let liq_losses: Vec<f64> = reports.iter().map(|r| r.final_loss_liquid).collect();
+    let gaps: Vec<f64> = reports.iter().map(|r| r.mean_absolute_gap).collect();
+    let regimes: Vec<f64> = reports.iter().map(|r| r.max_regime_shift_score).collect();
+
+    let eval_present = reports[0].eval.is_some();
+    debug_assert!(
+        reports.iter().all(|r| r.eval.is_some() == eval_present),
+        "Mixed eval presence across seeds — same ExperimentConfig should yield identical eval-mode"
+    );
+
+    let (eval_ssm, eval_liq, eval_gap): (Option<Vec<f64>>, Option<Vec<f64>>, Option<Vec<f64>>) =
+        if eval_present {
+            let ssm: Vec<f64> = reports
+                .iter()
+                .map(|r| r.eval.as_ref().unwrap().ssm_loss)
+                .collect();
+            let liq: Vec<f64> = reports
+                .iter()
+                .map(|r| r.eval.as_ref().unwrap().liquid_loss)
+                .collect();
+            let gap: Vec<f64> = reports
+                .iter()
+                .map(|r| r.eval.as_ref().unwrap().disagreement.absolute_gap)
+                .collect();
+            (Some(ssm), Some(liq), Some(gap))
+        } else {
+            (None, None, None)
+        };
+
+    let mean = CellAggregate {
+        final_loss_ssm: kahan_mean(&ssm_losses),
+        final_loss_liquid: kahan_mean(&liq_losses),
+        mean_absolute_gap: kahan_mean(&gaps),
+        max_regime_shift_score: kahan_mean(&regimes),
+        eval_ssm_loss: eval_ssm.as_ref().map(|v| kahan_mean(v)),
+        eval_liquid_loss: eval_liq.as_ref().map(|v| kahan_mean(v)),
+        eval_absolute_gap: eval_gap.as_ref().map(|v| kahan_mean(v)),
+    };
+
+    let variance = CellAggregate {
+        final_loss_ssm: welford_variance(&ssm_losses),
+        final_loss_liquid: welford_variance(&liq_losses),
+        mean_absolute_gap: welford_variance(&gaps),
+        max_regime_shift_score: welford_variance(&regimes),
+        eval_ssm_loss: eval_ssm.as_ref().map(|v| welford_variance(v)),
+        eval_liquid_loss: eval_liq.as_ref().map(|v| welford_variance(v)),
+        eval_absolute_gap: eval_gap.as_ref().map(|v| welford_variance(v)),
+    };
+
+    (mean, variance)
+}
+
+/// Kahan-summed mean. Returns 0.0 for empty input.
+fn kahan_mean(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut acc = cjc_repro::KahanAccumulatorF64::new();
+    for &v in values {
+        acc.add(v);
+    }
+    acc.finalize() / values.len() as f64
+}
+
+/// Sample variance via Welford's online recurrence. Returns 0.0 for
+/// `values.len() < 2` (sample variance is undefined for one
+/// observation; we use 0.0 by convention to keep downstream
+/// `sqrt(variance)` finite).
+fn welford_variance(values: &[f64]) -> f64 {
+    if values.len() < 2 {
+        return 0.0;
+    }
+    let mut mean = 0.0_f64;
+    let mut m2 = 0.0_f64;
+    for (i, &x) in values.iter().enumerate() {
+        let n = (i + 1) as f64;
+        let delta = x - mean;
+        mean += delta / n;
+        let delta2 = x - mean;
+        m2 += delta * delta2;
+    }
+    m2 / (values.len() - 1) as f64
 }
 
 // Tests are intentionally light here — full coverage lives in the

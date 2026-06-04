@@ -123,7 +123,11 @@ impl TemporalGanTrainer {
                 let predictor_outputs = forward_ssm_outputs(gan.ssm(), inputs)?;
                 let spec = ChallengerSpec {
                     predictor_outputs: &predictor_outputs,
-                    lambda: self.config.lambda_disagreement,
+                    // Phase 4d: λ is sampled from the schedule at the
+                    // current step index (`step_count` is incremented
+                    // at the END of step(), so it indexes the step
+                    // about to execute).
+                    lambda: self.config.lambda_schedule.lambda_at(self.step_count),
                 };
                 let l = self
                     .liquid_trainer
@@ -136,7 +140,7 @@ impl TemporalGanTrainer {
                 let predictor_outputs = forward_liquid_outputs(gan.liquid(), inputs)?;
                 let spec = ChallengerSpec {
                     predictor_outputs: &predictor_outputs,
-                    lambda: self.config.lambda_disagreement,
+                    lambda: self.config.lambda_schedule.lambda_at(self.step_count),
                 };
                 let s = self
                     .ssm_trainer
@@ -162,15 +166,15 @@ impl TemporalGanTrainer {
 }
 
 fn validate_lambda_if_asymmetric(cfg: &TemporalGanConfig) -> Result<(), CronosGanError> {
-    if cfg.mode.is_asymmetric()
-        && (!cfg.lambda_disagreement.is_finite() || cfg.lambda_disagreement < 0.0)
-    {
-        return Err(CronosGanError::InvalidConfig {
-            detail: format!(
-                "TemporalGanConfig.lambda_disagreement must be finite and >= 0 in asymmetric mode, got {}",
-                cfg.lambda_disagreement
-            ),
-        });
+    if cfg.mode.is_asymmetric() {
+        if let Err(detail) = cfg.lambda_schedule.validate_non_negative_and_finite() {
+            return Err(CronosGanError::InvalidConfig {
+                detail: format!(
+                    "TemporalGanConfig.lambda_schedule invalid in asymmetric mode: {}",
+                    detail
+                ),
+            });
+        }
     }
     Ok(())
 }

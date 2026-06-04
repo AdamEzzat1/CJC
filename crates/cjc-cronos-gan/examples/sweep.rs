@@ -70,9 +70,10 @@ fn main() -> Result<(), CronosGanError> {
         let mut count = 0;
         let mut eval_count = 0;
         for cell in report.cells.iter().filter(|c| c.mode == mode) {
-            sum_train_gap += cell.report.mean_absolute_gap;
+            let r = cell.first_report();
+            sum_train_gap += r.mean_absolute_gap;
             count += 1;
-            if let Some(e) = &cell.report.eval {
+            if let Some(e) = &r.eval {
                 sum_eval_ssm += e.ssm_loss;
                 sum_eval_gap += e.disagreement.absolute_gap;
                 eval_count += 1;

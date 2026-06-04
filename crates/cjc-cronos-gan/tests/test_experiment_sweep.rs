@@ -41,8 +41,8 @@ fn sweep_yields_exactly_fifteen_cells_in_canonical_order() {
             let c = &report.cells[idx];
             assert_eq!(c.dataset, ds, "cell {} dataset mismatch", idx);
             assert_eq!(c.mode, mode, "cell {} mode mismatch", idx);
-            assert_eq!(c.report.dataset_label, ds.label());
-            assert_eq!(c.report.mode, mode);
+            assert_eq!(c.first_report().dataset_label, ds.label());
+            assert_eq!(c.first_report().mode, mode);
             idx += 1;
         }
     }
@@ -68,17 +68,18 @@ fn sweep_each_cell_has_finite_losses_and_finite_replay_hash_field() {
     let base = small_sweep_config();
     let report = run_experiment_sweep(&base, CronosSeed(42)).unwrap();
     for c in &report.cells {
+        let r = c.first_report();
         assert!(
-            c.report.final_loss_ssm.is_finite(),
+            r.final_loss_ssm.is_finite(),
             "non-finite ssm_loss in cell ({}, {})",
             c.dataset.label(),
             c.mode.label()
         );
-        assert!(c.report.final_loss_liquid.is_finite());
-        assert!(c.report.mean_absolute_gap.is_finite());
-        assert!(c.report.max_regime_shift_score.is_finite());
-        assert!(c.report.mean_absolute_gap >= 0.0);
-        assert!(c.report.max_regime_shift_score >= 0.0);
+        assert!(r.final_loss_liquid.is_finite());
+        assert!(r.mean_absolute_gap.is_finite());
+        assert!(r.max_regime_shift_score.is_finite());
+        assert!(r.mean_absolute_gap >= 0.0);
+        assert!(r.max_regime_shift_score >= 0.0);
     }
 }
 
@@ -92,22 +93,21 @@ fn sweep_byte_identical_across_runs() {
     assert_eq!(r1.sweep_hash, r2.sweep_hash, "sweep_hash must replay");
     assert_eq!(r1.cells.len(), r2.cells.len());
     for (a, b) in r1.cells.iter().zip(r2.cells.iter()) {
-        assert_eq!(a.report.replay_hash, b.report.replay_hash);
+        let ra = a.first_report();
+        let rb = b.first_report();
+        assert_eq!(ra.replay_hash, rb.replay_hash);
+        assert_eq!(ra.final_loss_ssm.to_bits(), rb.final_loss_ssm.to_bits());
         assert_eq!(
-            a.report.final_loss_ssm.to_bits(),
-            b.report.final_loss_ssm.to_bits()
+            ra.final_loss_liquid.to_bits(),
+            rb.final_loss_liquid.to_bits()
         );
         assert_eq!(
-            a.report.final_loss_liquid.to_bits(),
-            b.report.final_loss_liquid.to_bits()
+            ra.mean_absolute_gap.to_bits(),
+            rb.mean_absolute_gap.to_bits()
         );
         assert_eq!(
-            a.report.mean_absolute_gap.to_bits(),
-            b.report.mean_absolute_gap.to_bits()
-        );
-        assert_eq!(
-            a.report.max_regime_shift_score.to_bits(),
-            b.report.max_regime_shift_score.to_bits()
+            ra.max_regime_shift_score.to_bits(),
+            rb.max_regime_shift_score.to_bits()
         );
     }
 }

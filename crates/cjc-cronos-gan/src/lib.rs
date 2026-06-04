@@ -128,6 +128,7 @@ pub mod experiment;
 pub mod gan;
 pub mod gan_trainer;
 pub mod liquid;
+pub mod schedule;
 pub mod seed;
 pub mod ssm;
 pub mod temporal_state;
@@ -141,11 +142,12 @@ pub use datasets::{
 };
 pub use disagreement::{compute_disagreement, TemporalDisagreement};
 pub use experiment::{
-    run_experiment, run_experiment_sweep, EvalReport, ExperimentConfig, ExperimentReport,
-    ExperimentSweepReport, SweepBaseConfig, SweepCell, TrainingTrajectory, SWEEP_DATASETS,
-    SWEEP_MODES,
+    run_experiment, run_experiment_sweep, CellAggregate, EvalReport, ExperimentConfig,
+    ExperimentReport, ExperimentSweepReport, SweepBaseConfig, SweepCell, TrainingTrajectory,
+    DEFAULT_SEED_STRIDE, SWEEP_DATASETS, SWEEP_MODES,
 };
 pub use gan::{TemporalGan, TemporalGanConfig, TemporalGanMode, TemporalGanRolloutResult};
+pub use schedule::LambdaSchedule;
 pub use gan_trainer::{Role, TemporalGanTrainStep, TemporalGanTrainer};
 pub use error::CronosGanError;
 pub use liquid::{

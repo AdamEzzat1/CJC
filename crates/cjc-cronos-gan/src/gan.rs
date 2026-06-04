@@ -8,6 +8,7 @@
 use crate::disagreement::{compute_disagreement, TemporalDisagreement};
 use crate::error::CronosGanError;
 use crate::liquid::{LiquidConfig, LiquidNetwork, LiquidState};
+use crate::schedule::LambdaSchedule;
 use crate::seed::{CronosRunId, CronosSeed};
 use crate::ssm::{StateSpaceConfig, StateSpaceModel, StateSpaceState};
 
@@ -57,18 +58,23 @@ pub struct TemporalGanConfig {
     pub ssm: StateSpaceConfig,
     pub liquid: LiquidConfig,
     pub mode: TemporalGanMode,
-    /// Phase 3b: weight on the challenger network's `−λ · MSE-vs-predictor`
-    /// term. Must be finite and `≥ 0`. Ignored in `Symmetric` mode.
+    /// Phase 4d: the asymmetric-mode challenger weight λ, as a
+    /// schedule across training steps. Ignored in `Symmetric` mode.
     ///
-    /// - `0.0` recovers vanilla supervised behaviour (asymmetric mode
-    ///   acts identically to symmetric mode — useful as a sanity check).
-    /// - Small positive values (~0.05–0.2 in practice) preserve target
-    ///   accuracy while encouraging the challenger to find diverging
-    ///   solutions where it's still right.
-    /// - Large values (~> 1.0) emphasise divergence over accuracy and may
-    ///   cause the challenger to drift; treat as adversarial-style
-    ///   experimentation rather than supervised regression.
-    pub lambda_disagreement: f64,
+    /// Pre-Phase-4d this was a flat `f64` named `lambda_disagreement`;
+    /// the back-compat shim [`Self::with_lambda_disagreement`] still
+    /// accepts a scalar and wraps it into [`LambdaSchedule::Constant`].
+    ///
+    /// All variants must emit finite, non-negative λ values at every
+    /// training step (see [`LambdaSchedule::validate_non_negative_and_finite`]);
+    /// the [`crate::TemporalGanTrainer`] checks this once per `step()`
+    /// call against the *current* training step.
+    ///
+    /// Typical scalar values (Phase 4c findings): ~0.05–0.2 preserves
+    /// target accuracy while encouraging divergence; ~> 1.0
+    /// emphasises divergence over accuracy and may cause the challenger
+    /// to drift.
+    pub lambda_schedule: LambdaSchedule,
 }
 
 impl TemporalGanConfig {
@@ -78,7 +84,7 @@ impl TemporalGanConfig {
             ssm: StateSpaceConfig::new(state_dim, input_dim, output_dim),
             liquid: LiquidConfig::new(state_dim, input_dim, output_dim),
             mode: TemporalGanMode::Symmetric,
-            lambda_disagreement: 0.0,
+            lambda_schedule: LambdaSchedule::Constant(0.0),
         }
     }
 
@@ -88,14 +94,30 @@ impl TemporalGanConfig {
         self
     }
 
-    /// Override `lambda_disagreement` (Phase 3b challenger weight).
+    /// Back-compat setter — wraps `lambda` into
+    /// [`LambdaSchedule::Constant`] and assigns. Most pre-Phase-4d
+    /// call sites continue to work unchanged.
     pub fn with_lambda_disagreement(mut self, lambda: f64) -> Self {
-        self.lambda_disagreement = lambda;
+        self.lambda_schedule = LambdaSchedule::Constant(lambda);
         self
     }
 
+    /// Phase 4d: assign an arbitrary λ-schedule. Use this when you
+    /// want decaying / ramping λ across training (e.g.
+    /// [`LambdaSchedule::Linear`]).
+    pub fn with_lambda_schedule(mut self, schedule: LambdaSchedule) -> Self {
+        self.lambda_schedule = schedule;
+        self
+    }
+
+    /// Convenience: λ value at the given training step. Identical to
+    /// `self.lambda_schedule.lambda_at(step)`.
+    pub fn lambda_at(&self, step: u64) -> f64 {
+        self.lambda_schedule.lambda_at(step)
+    }
+
     /// Shortcut: construct in `SsmAsGenerator` mode with the supplied
-    /// `lambda_disagreement`.
+    /// scalar λ (wrapped in [`LambdaSchedule::Constant`]).
     pub fn ssm_as_generator(
         state_dim: usize,
         input_dim: usize,
@@ -108,7 +130,7 @@ impl TemporalGanConfig {
     }
 
     /// Shortcut: construct in `LiquidAsGenerator` mode with the supplied
-    /// `lambda_disagreement`.
+    /// scalar λ (wrapped in [`LambdaSchedule::Constant`]).
     pub fn liquid_as_generator(
         state_dim: usize,
         input_dim: usize,
@@ -125,7 +147,7 @@ impl TemporalGanConfig {
         bytes.extend(self.ssm.canonical_bytes());
         bytes.extend(self.liquid.canonical_bytes());
         bytes.extend_from_slice(self.mode.label().as_bytes());
-        bytes.extend_from_slice(&self.lambda_disagreement.to_bits().to_le_bytes());
+        bytes.extend(self.lambda_schedule.canonical_bytes());
         bytes
     }
 }

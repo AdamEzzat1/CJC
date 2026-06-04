@@ -13,7 +13,8 @@
 //!    `SsmAsGenerator` vs `LiquidAsGenerator` produces different
 //!    cells.
 //! 6. `with_lambda_for(mode, λ)` shows up in the per-cell
-//!    `ExperimentConfig.gan.lambda_disagreement`.
+//!    `ExperimentConfig.gan.lambda_schedule` (Phase 4d wraps scalar
+//!    λ into `LambdaSchedule::Constant`).
 //! 7. `lambda_for(mode)` falls back to `lambda_disagreement` when no
 //!    override.
 //! 8. Sweep with eval shifts `sweep_hash` away from sweep without eval
@@ -23,7 +24,7 @@
 
 use cjc_cronos_gan::{
     run_experiment, run_experiment_sweep, CronosDataset, CronosSeed, ExperimentConfig,
-    SweepBaseConfig, TemporalGanConfig, TemporalGanMode,
+    LambdaSchedule, SweepBaseConfig, TemporalGanConfig, TemporalGanMode,
 };
 
 fn sweep_small_no_eval() -> SweepBaseConfig {
@@ -157,8 +158,11 @@ fn per_mode_lambda_propagates_into_experiment_config() {
         CronosDataset::SmoothSine,
         TemporalGanMode::LiquidAsGenerator,
     );
-    assert_eq!(cfg_ssm.gan.lambda_disagreement.to_bits(), 0.25_f64.to_bits());
-    assert_eq!(cfg_liq.gan.lambda_disagreement.to_bits(), 0.75_f64.to_bits());
+    // Phase 4d: `lambda_disagreement: f64` was promoted to
+    // `lambda_schedule: LambdaSchedule`. The back-compat shim
+    // `with_lambda_for(_, f64)` wraps into Constant.
+    assert_eq!(cfg_ssm.gan.lambda_schedule, LambdaSchedule::Constant(0.25));
+    assert_eq!(cfg_liq.gan.lambda_schedule, LambdaSchedule::Constant(0.75));
 }
 
 // ─── § 6: lambda_for fallback ─────────────────────────────────────────────
@@ -166,15 +170,16 @@ fn per_mode_lambda_propagates_into_experiment_config() {
 #[test]
 fn lambda_for_falls_back_to_lambda_disagreement_when_no_override() {
     let base = sweep_small_no_eval().with_lambda_disagreement(0.42);
+    // Phase 4d: `lambda_for` now returns `LambdaSchedule`. The
+    // back-compat shim `with_lambda_disagreement(0.42)` wraps in
+    // `Constant`, so both modes should see `Constant(0.42)`.
     assert_eq!(
-        base.lambda_for(TemporalGanMode::SsmAsGenerator)
-            .to_bits(),
-        0.42_f64.to_bits()
+        base.lambda_for(TemporalGanMode::SsmAsGenerator),
+        LambdaSchedule::Constant(0.42)
     );
     assert_eq!(
-        base.lambda_for(TemporalGanMode::LiquidAsGenerator)
-            .to_bits(),
-        0.42_f64.to_bits()
+        base.lambda_for(TemporalGanMode::LiquidAsGenerator),
+        LambdaSchedule::Constant(0.42)
     );
 }
 
@@ -184,15 +189,13 @@ fn lambda_for_uses_override_when_present() {
         .with_lambda_disagreement(0.42)
         .with_lambda_for(TemporalGanMode::SsmAsGenerator, 0.99);
     assert_eq!(
-        base.lambda_for(TemporalGanMode::SsmAsGenerator)
-            .to_bits(),
-        0.99_f64.to_bits()
+        base.lambda_for(TemporalGanMode::SsmAsGenerator),
+        LambdaSchedule::Constant(0.99)
     );
     // Non-overridden mode falls back to fallback.
     assert_eq!(
-        base.lambda_for(TemporalGanMode::LiquidAsGenerator)
-            .to_bits(),
-        0.42_f64.to_bits()
+        base.lambda_for(TemporalGanMode::LiquidAsGenerator),
+        LambdaSchedule::Constant(0.42)
     );
 }
 
