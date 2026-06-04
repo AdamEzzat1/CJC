@@ -33,6 +33,10 @@ pub enum CronosGanError {
         horizon: usize,
         n_steps: usize,
     },
+
+    /// The requested configuration is not supported (e.g., a dataset
+    /// dimension Phase 4c's eval pipeline doesn't yet handle).
+    Unsupported { detail: String },
 }
 
 impl fmt::Display for CronosGanError {
@@ -61,6 +65,9 @@ impl fmt::Display for CronosGanError {
                 "forecast window [start={}, horizon={}] exceeds series length {}",
                 start_step, horizon, n_steps
             ),
+            CronosGanError::Unsupported { detail } => {
+                write!(f, "unsupported configuration: {}", detail)
+            }
         }
     }
 }

@@ -27,7 +27,7 @@ use crate::ssm::{StateSpaceConfig, StateSpaceModel, StateSpaceState};
 /// remaining accurate, producing persistent calibrated disagreement
 /// (the brief's headline goal) rather than the predictor's prediction
 /// being made indistinguishable from real data.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TemporalGanMode {
     Symmetric,
     SsmAsGenerator,

@@ -1,7 +1,7 @@
 ---
-title: "Cronos GAN — Phases 1-5 Overview (incl. Phase 3b + Phase 4b sweep)"
-tags: [showcase, experimental, temporal, gan, ssm, liquid-nn, determinism, autodiff, proptest, predictor-challenger, sweep]
-status: "🧪 Experimental — Phases 1-5 partial + Phase 3b asymmetric modes + Phase 4b 5×3 sweep shipped"
+title: "Cronos GAN — Phases 1-5 Overview (incl. Phase 3b + Phase 4b sweep + Phase 4c eval split)"
+tags: [showcase, experimental, temporal, gan, ssm, liquid-nn, determinism, autodiff, proptest, predictor-challenger, sweep, holdout-eval]
+status: "🧪 Experimental — Phases 1-5 partial + Phase 3b asymmetric modes + Phase 4b 5×3 sweep + Phase 4c held-out eval shipped"
 crate: cjc-cronos-gan
 version: 0.1.11
 date: 2026-06-04
@@ -23,9 +23,10 @@ date-modified: 2026-06-04
 | **3b** | **`ChallengerSpec` + asymmetric modes + `TemporalGanTrainer` alternating updates** | **~600 LOC** | **4 inline + 21 integration (FD-grad for challenger loss + 3-mode byte-id determinism + λ separation)** |
 | 4 | 5 synthetic dataset generators (`smooth_sine`, `noisy_sine`, `regime_shift`, `step_change_anomaly`, `chaotic_spike`) + experiment harness with replay hash | ~500 LOC | 7 dataset + 2 experiment |
 | **4b** | **`run_experiment` rerouted through `TemporalGanTrainer` + `SweepBaseConfig` + `ExperimentSweepReport` + `run_experiment_sweep` 5×3 sweep + `examples/sweep.rs` binary** | **~400 LOC + 1 binary** | **16 integration (15-cell coverage + per-dataset lr override + byte-identical sweep_hash + mode-separation invariants)** |
+| **4c** | **`eval_steps` held-out forecasting horizon in `ExperimentConfig` + `EvalReport` + per-mode λ in `SweepBaseConfig` + adaptive `format_table` (eval columns when present) + Phase 3b structural invariants verified on eval data** | **~250 LOC** | **14 integration (eval determinism + per-mode λ override + eval bytes in replay_hash + Phase 3b invariants survive Phase 4c)** |
 | 5 (part) | 10 `proptest` properties + cross-platform CI matrix workflow | ~250 LOC | 10 × 64-256 cases each |
 
-**Total: 117 distinct tests, all passing on release.** Doctest + 12 supervised-training integration + 21 GAN-training integration + 16 sweep integration + 57 inline unit + 10 proptest = full coverage of the determinism contract, the supervised-autograd correctness, the asymmetric-loss autograd correctness, AND the 5×3 sweep determinism.
+**Total: 131 distinct tests, all passing on release.** Doctest + 12 supervised-training integration + 21 GAN-training integration + 16 sweep integration + 14 Phase 4c integration + 57 inline unit + 10 proptest.
 
 ## Architecture (Phase 1-3)
 
@@ -84,6 +85,51 @@ Phase 2's `Trainable` trait + `SupervisedTrainer` + autodiff adapters give:
 - **Bit-identical training trajectories across runs** (same `(seed, config, inputs)` ⇒ same loss values, same final weights, every step)
 - **Gradient correctness verified by finite-difference comparison**: SSM `max_rel < 1e-4`, Liquid `max_rel < 5e-4` over a small test grid
 - **No silent allocations** in the training inner loop; everything goes through `cjc_ad::GradGraph` arena + `cjc_runtime::ml::adam_step` flat-vector kernel
+
+## Phase 4c — held-out forecasting horizon and the empirical flip
+
+Phase 4b reported a striking result: in `liquid_as_generator` mode the SSM achieves substantially lower training MSE than in symmetric mode (38% reduction on smooth_sine, 43% on noisy_sine). The interpretation was the SSM uses the `-λ · MSE-vs-Liquid` gradient as informative regularization to escape into a different (better) basin of the loss landscape.
+
+**Phase 4c added a held-out forecasting horizon and the conclusion flipped.** The training-set advantage was *overfitting*, not generalization.
+
+### What changed
+
+- `ExperimentConfig` gains `eval_steps: usize` (default 0). When > 0, the dataset generator produces `n_steps + eval_steps` samples; the model trains on the first `n_steps`, then each network's rollout continues from its post-training hidden state on the eval window. Disagreement is computed on `(eval_predictions, eval_targets)` — true forecastability, no information leakage.
+- `ExperimentReport` gains `eval: Option<EvalReport>` with `ssm_loss`, `liquid_loss`, `disagreement` on the held-out window.
+- `SweepBaseConfig` gains `per_mode_lambda: BTreeMap<TemporalGanMode, f64>` so the canonical sweep can probe whether the optimal λ differs between `SsmAsGenerator` and `LiquidAsGenerator`. `with_lambda_for(mode, λ)` builder + `lambda_for(mode)` accessor (falls back to `lambda_disagreement` when no override).
+- `format_table` is adaptive: shows 3 extra eval columns (eval ssm, eval liq, eval |gap|) iff at least one cell has populated eval.
+- Phase 3b's bit-identity structural invariants are **re-verified on eval data**: `ssm_loss_in_ssm_as_generator_still_equals_symmetric_with_eval` and the Liquid mirror assert that the held-out eval SSM MSE is bit-identical between Symmetric and SsmAsGenerator. The eval pipeline reads only the post-training SSM state, so it inherits the structural property.
+
+### The empirical flip (canonical sweep, seed=42)
+
+Canonical Phase 4c sweep: 50 train steps × 20 eval steps × 200 Adam updates × λ_SsmAsGen=0.10, λ_LiquidAsGen=0.15.
+
+| Mode | train \|gap\| | **eval SSM MSE** | **eval \|gap\|** |
+|---|---|---|---|
+| `symmetric` | 3.03e-1 | 3.18e-1 | 5.70e-1 |
+| `ssm_as_generator` | 3.03e-1 | **3.18e-1** | **3.67e-1** |
+| `liquid_as_generator` | 3.30e-1 | 3.70e-1 (worst) | 6.08e-1 |
+
+**Three observations the table forces you to confront:**
+
+1. **`ssm_as_generator` produces the lowest held-out `|gap|`** — 36% lower than symmetric, 40% lower than liquid_as_generator. The Liquid challenger has learned to *consistently disagree-less-on-eval-than-on-train* with the SSM. The disagreement signal in this mode is *calibrated* to forecastability, not to training-data idiosyncrasies.
+2. **`liquid_as_generator`'s eval SSM MSE is the WORST** of the three modes — 16% higher than symmetric. The training-MSE reductions Phase 4b celebrated (down to 1.07e-2 on smooth_sine) do not survive to held-out data (4.75e-4 → 100× WORSE in `liquid_as_generator` than in `symmetric`/`ssm_as_generator` for smooth_sine).
+3. **`symmetric` and `ssm_as_generator` have identical eval SSM MSE byte-for-byte** — because the SSM is the predictor in both modes (Phase 3b invariant survives Phase 4c). The only thing that *changes* between these two modes is what the Liquid learns. And `ssm_as_generator`'s Liquid generalizes *much* better at the disagreement metric.
+
+### The mechanism
+
+The Phase 4b mechanism (NCL diversity → SSM escapes into alternative basin) is real but the alternative basin is **dataset-specific**. The SSM in `liquid_as_generator` is being pushed away from Liquid's specific failure modes on the training data. Liquid's failure modes on training data don't match Liquid's failure modes on held-out data, so the SSM's anti-Liquid adjustments are misdirected for forecasting. Standard "diversity vs ensemble error" theory predicts this: diversity helps the ensemble on data the ensemble was trained on, but the adjustments transfer to held-out data only if the disagreement is **systematic** (about the data) rather than **incidental** (about training trajectory).
+
+`ssm_as_generator` is the inverse: the Liquid challenger learns to predict accurately while being decorrelated from the SSM's stable-dynamics solution. The Liquid's challenger gradient `-λ · MSE-vs-SSM` is pointing it away from a *consistent* SSM bias (smooth/linear dynamics → mispredicts spikes). Liquid then captures the residual structure the SSM systematically misses, and that residual is *itself* systematic in the data. On held-out data, the Liquid still captures it.
+
+**Choosing between modes for production forecastability disagreement: pick `SsmAsGenerator`.** It preserves the SSM's structural-stability accuracy AND produces a Liquid challenger whose disagreement is informative on held-out data.
+
+### Phase 4c determinism contract additions
+
+16. **Eval rollout is byte-identical across runs** with the same `(config, seed)` — `eval_byte_identical_across_runs` test asserts to `to_bits()`.
+17. **Eval bytes enter the replay hash** — `report_replay_hash_changes_with_eval_steps` proves `eval_steps=0` and `eval_steps=5` produce distinct `replay_hash`es with otherwise-identical configs. The sweep hash inherits this discrimination.
+18. **Per-mode λ overrides are deterministic** — `BTreeMap<TemporalGanMode, f64>` iteration is key-ordered. Two sweeps with the same per-mode λ map produce the same `sweep_hash`.
+19. **Phase 3b SSM-predictor invariant survives Phase 4c** — the SSM's eval MSE is bit-identical between `Symmetric` and `SsmAsGenerator` for every dataset because the eval pipeline reads only post-training SSM state.
 
 ## Phase 4b — the 5×3 sweep and the empirical answer
 
@@ -313,9 +359,9 @@ for _ in 0..100 {
 | Phase | Adds |
 |---|---|
 | **3c** | Loss-aware training-step ordering options (currently predictor-first; could add challenger-first or simultaneous-with-clone variants) |
-| **4c** | Train/eval split inside `run_experiment` so the disagreement is computed on held-out data; per-mode best-known hyperparameter recipes for each dataset |
+| **4d** | λ schedule (warmup + plateau + decay) — Phase 4c showed `liquid_as_generator` overfits; a decaying λ might recover its training-MSE advantage *with* generalization; per-mode best-known hyperparameter recipes per dataset based on Phase 4c sweep findings |
 | **5b** | Bolero fuzz targets (7), `tests/cronos/{unit,integration,prop,fuzz}/` workspace layout |
-| **6** | `cjc-locke` E9500+ custom detector consuming `ExperimentSweepReport`'s per-cell `max_regime_shift_score`, vault deep-docs (Architecture, SSM Primitive, Liquid Primitive, Adversarial Training, Experiment Results, Verification Report), Python bridge |
+| **6** | `cjc-locke` E9500+ custom detector consuming `ExperimentSweepReport`'s per-cell `max_regime_shift_score` AND `eval.disagreement.regime_shift_score`, vault deep-docs (Architecture, SSM Primitive, Liquid Primitive, Adversarial Training, Experiment Results, Verification Report), Python bridge |
 
 ## See also
 

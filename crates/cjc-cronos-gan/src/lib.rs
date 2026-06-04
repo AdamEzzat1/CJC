@@ -141,7 +141,7 @@ pub use datasets::{
 };
 pub use disagreement::{compute_disagreement, TemporalDisagreement};
 pub use experiment::{
-    run_experiment, run_experiment_sweep, ExperimentConfig, ExperimentReport,
+    run_experiment, run_experiment_sweep, EvalReport, ExperimentConfig, ExperimentReport,
     ExperimentSweepReport, SweepBaseConfig, SweepCell, TrainingTrajectory, SWEEP_DATASETS,
     SWEEP_MODES,
 };

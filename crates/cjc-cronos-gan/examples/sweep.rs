@@ -1,31 +1,30 @@
-//! Phase 4b sweep deliverable.
+//! Phase 4b + Phase 4c sweep deliverable.
 //!
 //! Single `cargo run --example sweep --release` produces the 15-cell
-//! `(dataset, mode)` → `(final_ssm_loss, final_liquid_loss,
-//! mean_disagreement, max_regime_shift_score, replay_hash)` table that
-//! makes the question "does asymmetric mode actually find different
-//! solutions than symmetric mode?" empirically answerable.
+//! `(dataset, mode)` table with BOTH the in-sample disagreement metrics
+//! (Phase 4b) AND the held-out forecastability metrics (Phase 4c).
 //!
 //! Defaults:
 //! - `state_dim = 8`, `input_dim = 1`, `output_dim = 1`
-//! - `n_steps = 50` per dataset
+//! - `n_steps = 50` per dataset (training window)
+//! - `eval_steps = 20` per dataset (held-out forecasting horizon)
 //! - `n_train_steps = 200`
-//! - `lambda_disagreement = 0.1`
+//! - Per-mode λ: `SsmAsGenerator = 0.1`, `LiquidAsGenerator = 0.15`
+//!   (a deliberate asymmetry to probe Phase 4c's open question about
+//!   whether the optimal λ differs between the asymmetric modes).
 //! - `default_lr = 1e-2`, with per-dataset overrides for the noisier
 //!   datasets that benefit from a slower learning rate.
 //! - `seed = 42`
 //!
-//! All defaults are overridable on the command line via the standard
-//! `cargo run` envvars are *not* wired — this is a "single cargo run"
-//! deliverable, deliberately frictionless. Customise by editing this
-//! file or copying it.
+//! Customise by editing this file or copying it.
 
 use cjc_cronos_gan::{
     run_experiment_sweep, CronosDataset, CronosGanError, CronosSeed, SweepBaseConfig,
+    TemporalGanMode,
 };
 
 fn main() -> Result<(), CronosGanError> {
-    eprintln!("Running 5×3 Cronos GAN sweep (release profile recommended)...");
+    eprintln!("Running 5×3 Cronos GAN sweep (release profile, ~5-10s)...");
 
     let base = SweepBaseConfig::new(
         /* state_dim */ 8,
@@ -34,7 +33,14 @@ fn main() -> Result<(), CronosGanError> {
         /* n_steps */ 50,
         /* n_train_steps */ 200,
     )
-    .with_lambda_disagreement(0.1)
+    // Phase 4c: held-out forecasting horizon.
+    .with_eval_steps(20)
+    // Phase 4c: per-mode λ. The SsmAsGenerator default is the canonical
+    // Phase 4b value; LiquidAsGenerator gets a slightly higher λ to
+    // probe whether the SSM-challenger benefits more from extra
+    // divergence pressure (the Phase 4b empirical finding suggests yes).
+    .with_lambda_for(TemporalGanMode::SsmAsGenerator, 0.10)
+    .with_lambda_for(TemporalGanMode::LiquidAsGenerator, 0.15)
     .with_default_lr(1e-2)
     // Noisier datasets benefit from a slower lr — convergence stays
     // monotonic instead of bouncing.
@@ -50,23 +56,46 @@ fn main() -> Result<(), CronosGanError> {
 
     println!("{}", report.format_table());
 
-    // A quick per-mode summary: mean of mean_absolute_gap across datasets,
-    // by mode. Surfaces the headline question without forcing the user to
-    // eyeball 15 rows.
+    // Per-mode summaries side-by-side: in-sample vs held-out gap.
     println!();
-    println!("Per-mode mean of (mean |gap|) across 5 datasets:");
+    println!("Per-mode means across 5 datasets:");
+    println!(
+        "  {:<20}  {:<12}  {:<12}  {:<12}",
+        "mode", "train |gap|", "eval ssm MSE", "eval |gap|"
+    );
     for &mode in cjc_cronos_gan::SWEEP_MODES.iter() {
-        let mut sum = 0.0_f64;
+        let mut sum_train_gap = 0.0_f64;
+        let mut sum_eval_ssm = 0.0_f64;
+        let mut sum_eval_gap = 0.0_f64;
         let mut count = 0;
+        let mut eval_count = 0;
         for cell in report.cells.iter().filter(|c| c.mode == mode) {
-            sum += cell.report.mean_absolute_gap;
+            sum_train_gap += cell.report.mean_absolute_gap;
             count += 1;
+            if let Some(e) = &cell.report.eval {
+                sum_eval_ssm += e.ssm_loss;
+                sum_eval_gap += e.disagreement.absolute_gap;
+                eval_count += 1;
+            }
         }
         if count > 0 {
+            let train_gap = sum_train_gap / count as f64;
+            let eval_ssm_str = if eval_count > 0 {
+                format!("{:.4e}", sum_eval_ssm / eval_count as f64)
+            } else {
+                "—".to_string()
+            };
+            let eval_gap_str = if eval_count > 0 {
+                format!("{:.4e}", sum_eval_gap / eval_count as f64)
+            } else {
+                "—".to_string()
+            };
             println!(
-                "  {:<20}  {:.4e}",
+                "  {:<20}  {:.4e}    {:<12}  {:<12}",
                 mode.label(),
-                sum / count as f64
+                train_gap,
+                eval_ssm_str,
+                eval_gap_str
             );
         }
     }
