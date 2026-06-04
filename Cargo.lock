@@ -284,6 +284,7 @@ version = "0.1.11"
 dependencies = [
  "bolero",
  "cjc-ad",
+ "cjc-data",
  "cjc-locke",
  "cjc-repro",
  "cjc-runtime",
