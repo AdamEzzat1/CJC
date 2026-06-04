@@ -128,6 +128,7 @@ pub mod experiment;
 pub mod gan;
 pub mod gan_trainer;
 pub mod liquid;
+pub mod locke_detector;
 pub mod schedule;
 pub mod seed;
 pub mod ssm;
@@ -147,6 +148,13 @@ pub use experiment::{
     DEFAULT_SEED_STRIDE, SWEEP_DATASETS, SWEEP_MODES,
 };
 pub use gan::{TemporalGan, TemporalGanConfig, TemporalGanMode, TemporalGanRolloutResult};
+pub use locke_detector::{
+    cronos_default_detectors, experiment_report_to_dataframe, sweep_report_to_dataframe,
+    CronosPersistentDisagreementDetector, CronosRegimeShiftDetector,
+    CronosSsmEvalDegradationDetector, DEFAULT_ABSOLUTE_GAP_THRESHOLD,
+    DEFAULT_REGIME_SHIFT_THRESHOLD, DEFAULT_SSM_LOSS_DEGRADATION_RATIO,
+    SWEEP_DATAFRAME_COLUMNS,
+};
 pub use schedule::LambdaSchedule;
 pub use gan_trainer::{Role, TemporalGanTrainStep, TemporalGanTrainer};
 pub use error::CronosGanError;
