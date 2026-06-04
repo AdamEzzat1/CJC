@@ -126,6 +126,7 @@ pub mod disagreement;
 pub mod error;
 pub mod experiment;
 pub mod gan;
+pub mod gan_trainer;
 pub mod liquid;
 pub mod seed;
 pub mod ssm;
@@ -141,6 +142,7 @@ pub use datasets::{
 pub use disagreement::{compute_disagreement, TemporalDisagreement};
 pub use experiment::{run_experiment, ExperimentConfig, ExperimentReport, TrainingTrajectory};
 pub use gan::{TemporalGan, TemporalGanConfig, TemporalGanMode, TemporalGanRolloutResult};
+pub use gan_trainer::{Role, TemporalGanTrainStep, TemporalGanTrainer};
 pub use error::CronosGanError;
 pub use liquid::{
     LiquidConfig, LiquidGate, LiquidNetwork, LiquidParams, LiquidRolloutResult, LiquidState,
@@ -156,7 +158,7 @@ pub use time_series::{
     ForecastWindow, SequenceMask, TemporalBatch, TemporalLoss, TimeSeries, TimeStep,
 };
 pub use training::{
-    LossAggregation, RolloutGraph, RolloutLossKind, SupervisedTrainer, Trainable,
+    ChallengerSpec, LossAggregation, RolloutGraph, RolloutLossKind, SupervisedTrainer, Trainable,
 };
 
 /// Re-export of `cjc_locke::id::FingerprintId` so callers don't need a

@@ -13,12 +13,42 @@ use crate::ssm::{StateSpaceConfig, StateSpaceModel, StateSpaceState};
 
 /// Which adversarial mode the GAN runs.
 ///
-/// Only `Symmetric` ships in Phase 3 minimal; `SsmAsGenerator` and
-/// `LiquidAsGenerator` are reserved for Phase 3b.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// - `Symmetric` (Phase 3 minimal): both networks trained on pure
+///   supervised MSE; disagreement is observed, not trained against.
+/// - `SsmAsGenerator` (Phase 3b): SSM is the *predictor* (supervised MSE);
+///   Liquid is the *challenger* (supervised MSE − λ · MSE-vs-SSM).
+/// - `LiquidAsGenerator` (Phase 3b): Liquid is the *predictor* (supervised
+///   MSE); SSM is the *challenger* (supervised MSE − λ · MSE-vs-Liquid).
+///
+/// "Predictor" and "challenger" are the cjc-cronos-gan-specific names for
+/// what a standard GAN calls "generator" and "discriminator". They're
+/// chosen because Cronos GAN does not do fake-vs-real classification —
+/// the challenger is incentivised to *diverge* from the predictor while
+/// remaining accurate, producing persistent calibrated disagreement
+/// (the brief's headline goal) rather than the predictor's prediction
+/// being made indistinguishable from real data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TemporalGanMode {
-    /// Both networks predict the same target; disagreement is symmetric.
     Symmetric,
+    SsmAsGenerator,
+    LiquidAsGenerator,
+}
+
+impl TemporalGanMode {
+    /// Stable string label for content-hashing.
+    pub fn label(self) -> &'static str {
+        match self {
+            TemporalGanMode::Symmetric => "symmetric",
+            TemporalGanMode::SsmAsGenerator => "ssm_as_generator",
+            TemporalGanMode::LiquidAsGenerator => "liquid_as_generator",
+        }
+    }
+
+    /// True for `SsmAsGenerator` / `LiquidAsGenerator`, false for
+    /// `Symmetric`.
+    pub fn is_asymmetric(self) -> bool {
+        !matches!(self, TemporalGanMode::Symmetric)
+    }
 }
 
 /// Configuration for a [`TemporalGan`].
@@ -27,25 +57,75 @@ pub struct TemporalGanConfig {
     pub ssm: StateSpaceConfig,
     pub liquid: LiquidConfig,
     pub mode: TemporalGanMode,
+    /// Phase 3b: weight on the challenger network's `−λ · MSE-vs-predictor`
+    /// term. Must be finite and `≥ 0`. Ignored in `Symmetric` mode.
+    ///
+    /// - `0.0` recovers vanilla supervised behaviour (asymmetric mode
+    ///   acts identically to symmetric mode — useful as a sanity check).
+    /// - Small positive values (~0.05–0.2 in practice) preserve target
+    ///   accuracy while encouraging the challenger to find diverging
+    ///   solutions where it's still right.
+    /// - Large values (~> 1.0) emphasise divergence over accuracy and may
+    ///   cause the challenger to drift; treat as adversarial-style
+    ///   experimentation rather than supervised regression.
+    pub lambda_disagreement: f64,
 }
 
 impl TemporalGanConfig {
-    /// Construct with both networks sharing the same `(state_dim,
-    /// input_dim, output_dim)` triple — required for their outputs to be
-    /// directly comparable.
+    /// Construct in symmetric mode (Phase 3 default).
     pub fn symmetric(state_dim: usize, input_dim: usize, output_dim: usize) -> Self {
         Self {
             ssm: StateSpaceConfig::new(state_dim, input_dim, output_dim),
             liquid: LiquidConfig::new(state_dim, input_dim, output_dim),
             mode: TemporalGanMode::Symmetric,
+            lambda_disagreement: 0.0,
         }
     }
 
-    fn canonical_bytes(&self) -> Vec<u8> {
+    /// Override the GAN mode.
+    pub fn with_mode(mut self, mode: TemporalGanMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Override `lambda_disagreement` (Phase 3b challenger weight).
+    pub fn with_lambda_disagreement(mut self, lambda: f64) -> Self {
+        self.lambda_disagreement = lambda;
+        self
+    }
+
+    /// Shortcut: construct in `SsmAsGenerator` mode with the supplied
+    /// `lambda_disagreement`.
+    pub fn ssm_as_generator(
+        state_dim: usize,
+        input_dim: usize,
+        output_dim: usize,
+        lambda: f64,
+    ) -> Self {
+        Self::symmetric(state_dim, input_dim, output_dim)
+            .with_mode(TemporalGanMode::SsmAsGenerator)
+            .with_lambda_disagreement(lambda)
+    }
+
+    /// Shortcut: construct in `LiquidAsGenerator` mode with the supplied
+    /// `lambda_disagreement`.
+    pub fn liquid_as_generator(
+        state_dim: usize,
+        input_dim: usize,
+        output_dim: usize,
+        lambda: f64,
+    ) -> Self {
+        Self::symmetric(state_dim, input_dim, output_dim)
+            .with_mode(TemporalGanMode::LiquidAsGenerator)
+            .with_lambda_disagreement(lambda)
+    }
+
+    pub(crate) fn canonical_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend(self.ssm.canonical_bytes());
         bytes.extend(self.liquid.canonical_bytes());
-        bytes.extend_from_slice(&(self.mode as u32 as u64).to_le_bytes());
+        bytes.extend_from_slice(self.mode.label().as_bytes());
+        bytes.extend_from_slice(&self.lambda_disagreement.to_bits().to_le_bytes());
         bytes
     }
 }
@@ -172,9 +252,13 @@ impl TemporalGan {
         let disagreement =
             compute_disagreement(&ssm_outputs, &liquid_outputs, target, n_steps, od)?;
 
+        // run_id is salted with the mode label so two rollouts with the
+        // same param state but different modes produce distinct IDs.
+        let sampler_label_str =
+            format!("temporal_gan_rollout::{}", cfg.mode.label());
         let run_id = CronosRunId::build(
             self.seed,
-            "temporal_gan_symmetric_rollout",
+            &sampler_label_str,
             &cfg.canonical_bytes(),
         );
 

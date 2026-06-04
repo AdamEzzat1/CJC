@@ -1,7 +1,7 @@
 ---
-title: "Cronos GAN — Phases 1-5 Overview"
-tags: [showcase, experimental, temporal, gan, ssm, liquid-nn, determinism, autodiff, proptest]
-status: "🧪 Experimental — Phases 1-5 (partial) shipped"
+title: "Cronos GAN — Phases 1-5 Overview (incl. Phase 3b asymmetric modes)"
+tags: [showcase, experimental, temporal, gan, ssm, liquid-nn, determinism, autodiff, proptest, predictor-challenger]
+status: "🧪 Experimental — Phases 1-5 partial + Phase 3b asymmetric modes shipped"
 crate: cjc-cronos-gan
 version: 0.1.11
 date: 2026-06-04
@@ -20,10 +20,11 @@ date-modified: 2026-06-04
 | 1 | Temporal primitives + SSM + Liquid forward steps + rollouts + determinism types | ~1,100 LOC | 35 inline unit |
 | 2 | `Trainable` trait, SSM + Liquid `GradGraph` autodiff adapters, `SupervisedTrainer` with Adam | ~750 LOC | 12 integration (FD-grad + training convergence + byte-identical replay) |
 | 3 (min) | `TemporalDisagreement` + `TemporalGan` (symmetric mode) + content-addressed `run_id` | ~400 LOC | 5 disagreement + 3 GAN |
+| **3b** | **`ChallengerSpec` + asymmetric modes + `TemporalGanTrainer` alternating updates** | **~600 LOC** | **4 inline + 21 integration (FD-grad for challenger loss + 3-mode byte-id determinism + λ separation)** |
 | 4 | 5 synthetic dataset generators (`smooth_sine`, `noisy_sine`, `regime_shift`, `step_change_anomaly`, `chaotic_spike`) + experiment harness with replay hash | ~500 LOC | 7 dataset + 2 experiment |
 | 5 (part) | 10 `proptest` properties + cross-platform CI matrix workflow | ~250 LOC | 10 × 64-256 cases each |
 
-**Total: 76 distinct tests, all passing on release.** Doctest + 12 integration + 53 inline unit + 10 proptest = full coverage of the determinism contract and the autograd-pipeline correctness.
+**Total: 101 distinct tests, all passing on release.** Doctest + 12 supervised-training integration + 21 GAN-training integration + 57 inline unit + 10 proptest = full coverage of the determinism contract, the supervised-autograd correctness, AND the asymmetric-loss autograd correctness.
 
 ## Architecture (Phase 1-3)
 
@@ -83,7 +84,54 @@ Phase 2's `Trainable` trait + `SupervisedTrainer` + autodiff adapters give:
 - **Gradient correctness verified by finite-difference comparison**: SSM `max_rel < 1e-4`, Liquid `max_rel < 5e-4` over a small test grid
 - **No silent allocations** in the training inner loop; everything goes through `cjc_ad::GradGraph` arena + `cjc_runtime::ml::adam_step` flat-vector kernel
 
-## Phase 3 — TemporalDisagreement is the artifact
+## Phase 3b — predictor / challenger and the loss-sign answer
+
+The open question the phase had to answer: **when SSM is the "generator", does it train to minimise or maximise disagreement?**
+
+The answer — both framings are wrong because they treat disagreement as a binary target. The shipped formulation:
+
+> **Asymmetric mode = predictor + challenger.** One network (the *predictor*, what a standard GAN calls the "generator") gets a vanilla supervised MSE loss. The other (the *challenger*, what a standard GAN calls the "discriminator") gets `MSE(target) − λ · MSE(predictor)` — a supervised loss *minus* a bonus for diverging from the predictor.
+
+**Loss-sign answer.** SSM does NOT train to maximise OR minimise disagreement when it's the generator. It trains to be accurate. The disagreement signal is produced by the **challenger's** asymmetric loss term — the `−λ` is on the challenger, not the predictor. The brief's "the latter [maximise]" intuition was directionally right but applied to the wrong network.
+
+| Mode | SSM role | Liquid role | What pushes disagreement? |
+|---|---|---|---|
+| `Symmetric` (Phase 3 min) | Predictor (supervised MSE) | Predictor (supervised MSE) | Nothing — disagreement is observed, not trained against |
+| `SsmAsGenerator` (Phase 3b) | Predictor (supervised MSE) | Challenger (MSE − λ · MSE-vs-SSM) | The Liquid challenger is rewarded for diverging from the SSM while staying accurate |
+| `LiquidAsGenerator` (Phase 3b) | Challenger (MSE − λ · MSE-vs-Liquid) | Predictor (supervised MSE) | The SSM challenger is rewarded for diverging from the Liquid while staying accurate |
+
+### Choosing λ
+
+- **λ = 0**: asymmetric mode reduces *byte-identically* to symmetric mode (proven in `lambda_zero_asymmetric_equals_symmetric_trajectory`). The canonical sanity check on the implementation.
+- **Small λ (0.05–0.2)**: the challenger remains accurate but is encouraged to find alternative prediction paths. The disagreement signal becomes *informative* rather than noisy.
+- **Large λ (≥ 1.0)**: divergence dominates accuracy; the challenger drifts. Useful for stress-testing the regime-shift score, not for production forecasts.
+
+### The alternating-update step
+
+`TemporalGanTrainer::step` runs one Adam update per network per call. In asymmetric modes the predictor updates first (because the challenger's loss depends on the predictor's CURRENT outputs):
+
+```text
+SsmAsGenerator step:
+  1. update SSM with supervised MSE         → new SSM weights
+  2. forward SSM with new weights           → predictor_outputs (frozen)
+  3. update Liquid with MSE − λ·MSE-vs-SSM  → new Liquid weights
+  4. compute disagreement                   → returned to caller
+
+LiquidAsGenerator step: roles flip.
+Symmetric step: both supervised updates, independent.
+```
+
+The `TemporalGanTrainStep` carries `ssm_role` and `liquid_role` (each `Role::Predictor` or `Role::Challenger`) so the caller can attribute losses correctly to the role each network played that step.
+
+### Determinism contract (Phase 3b extensions)
+
+Items 1–9 from Phase 1–5 still hold. Phase 3b adds:
+
+10. **Alternating-update order is fixed per mode** — predictor always updates first; challenger reads the predictor's POST-update outputs. Same (seed, config, inputs, targets, initial Adam) ⇒ byte-identical SSM update ⇒ byte-identical predictor outputs ⇒ byte-identical challenger update.
+11. **Mode label is in the canonical config bytes** — `TemporalGanRolloutResult.run_id` differs across modes even with same seed and same network dims (`run_id_differs_across_modes_with_same_seed_and_dims`).
+12. **`λ = 0` collapses the asymmetric loss to the supervised loss byte-identically** — not approximately, exactly. The negative sign on the challenger term is the entire reason this property holds.
+
+## Phase 3 (minimal) — TemporalDisagreement is the artifact
 
 Where most GANs train *toward* indistinguishability, Cronos GAN treats persistent calibrated disagreement as the **signal**. The four scalars in `TemporalDisagreement`:
 
@@ -98,7 +146,7 @@ pub struct TemporalDisagreement {
 
 The **regime_shift_score** is the headline signal: when one step has a much larger SSM-vs-Liquid gap than the average, the score spikes — that's the regime-shift signature the brief asks for. Tested via `regime_shift_score_fires_on_localised_gap` on a synthetic sequence with 7 zero gaps + 1 gap of 10 (expected score ≈ 4.44, threshold 3.0).
 
-Phase 3 minimal ships `TemporalGanMode::Symmetric` only. The asymmetric modes (SSM-as-generator / Liquid-as-generator) and the alternating-update adversarial training loop ship in Phase 3b — the "disagreement as artifact" framing makes those non-obvious to design, and they deserve their own session.
+Phase 3 minimal shipped `TemporalGanMode::Symmetric` only. **Phase 3b** added `SsmAsGenerator` and `LiquidAsGenerator` modes (see preceding section) along with `TemporalGanTrainer` driving the alternating-update training loop.
 
 ## Phase 4 — five synthetic datasets
 
@@ -180,12 +228,21 @@ let cfg = ExperimentConfig::new(
 );
 let report = run_experiment(&cfg, seed)?;
 println!("replay hash: {}", report.replay_hash);
+
+// Phase 3b: asymmetric mode + alternating-update training
+use cjc_cronos_gan::{TemporalGanTrainer, TemporalGanMode};
+let cfg = TemporalGanConfig::ssm_as_generator(8, 1, 1, 0.1); // SSM=predictor, Liquid=challenger
+let mut gan = TemporalGan::from_seed(cfg, seed)?;
+let mut trainer = TemporalGanTrainer::new(cfg, &gan, 1e-2);
+for _ in 0..100 {
+    let step = trainer.step(&mut gan, &inputs, &targets)?;
+    // step.ssm_loss, step.liquid_loss, step.disagreement, step.ssm_role, step.liquid_role
+}
 ```
 
-## Known limitations (post Phase 5)
+## Known limitations (post Phase 3b)
 
-- **Asymmetric GAN modes deferred** (Phase 3b). `SsmAsGenerator` / `LiquidAsGenerator` + alternating-update training need a design pass on the loss signs.
-- **No Bolero fuzz** (Phase 5b). Proptest covers structural invariants; fuzz adds adversarial-input branching coverage when the GAN modes ship.
+- **No Bolero fuzz** (Phase 5b). Proptest covers structural invariants; fuzz adds adversarial-input branching coverage that's now more valuable since Phase 3b introduced branching on `mode`.
 - **No per-dataset hyperparameter tuning** (Phase 4b). Experiment harness uses a single `(lr, n_train_steps)` per call; per-dataset best practices live in a future tuning sweep.
 - **`tests/cronos/{unit,integration,prop,fuzz}/` workspace layout**: Phase 5 ships proptest at the crate-level `tests/test_proptest.rs` instead. The workspace-level layout is a Phase 6 refactor once Bolero fuzz adds enough mass to justify the directory split.
 - **No `cjc-locke` E9500+ custom detector** for regime-shift findings (Phase 6).
@@ -214,8 +271,8 @@ println!("replay hash: {}", report.replay_hash);
 
 | Phase | Adds |
 |---|---|
-| **3b** | Asymmetric GAN modes, adversarial alternating-update training loop |
-| **4b** | Per-dataset hyperparameter tuning, train/eval split |
+| **3c** | Loss-aware training-step ordering options (currently predictor-first; could add challenger-first or simultaneous-with-clone variants) |
+| **4b** | Per-dataset hyperparameter tuning, train/eval split, `ExperimentConfig` carrying `TemporalGanMode` so all 5 datasets × 3 modes runs are first-class |
 | **5b** | Bolero fuzz targets (7), `tests/cronos/{unit,integration,prop,fuzz}/` workspace layout |
 | **6** | `cjc-locke` E9500+ custom detector, vault deep-docs (Architecture, SSM Primitive, Liquid Primitive, Adversarial Training, Experiment Results, Verification Report), Python bridge |
 

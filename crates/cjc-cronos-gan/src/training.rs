@@ -65,6 +65,104 @@ pub struct RolloutGraph {
     pub param_shapes: Vec<Vec<usize>>,
 }
 
+/// Phase 3b: the "challenger loss" term applied on top of supervised MSE.
+///
+/// When passed to [`Trainable::build_rollout_graph_with`], the per-step
+/// loss becomes
+///
+/// ```text
+/// L_t = mean((self_out_t − target_t)²) − λ · mean((self_out_t − predictor_out_t)²)
+/// ```
+///
+/// The negative coefficient on the disagreement term rewards the
+/// challenger for *diverging* from the predictor, while the supervised
+/// term keeps it accurate. The result is **persistent calibrated
+/// disagreement** — the brief's stated goal — rather than collapse to the
+/// predictor's prediction or to noise.
+///
+/// `predictor_outputs` is row-major `[n_steps, output_dim]` and must
+/// match the rollout's `targets` shape. `lambda` must be finite and `≥ 0`;
+/// `lambda = 0` recovers vanilla supervised behaviour and is the
+/// canonical sanity check.
+#[derive(Clone, Copy, Debug)]
+pub struct ChallengerSpec<'a> {
+    pub predictor_outputs: &'a [f64],
+    pub lambda: f64,
+}
+
+impl<'a> ChallengerSpec<'a> {
+    /// Validate against a rollout's `(n_steps, output_dim)` shape and the
+    /// crate's invariants (`lambda` finite + non-negative). Returns the
+    /// expected `predictor_outputs.len()` on success.
+    pub fn validate(
+        &self,
+        n_steps: usize,
+        output_dim: usize,
+    ) -> Result<(), CronosGanError> {
+        let expected = n_steps * output_dim;
+        if self.predictor_outputs.len() != expected {
+            return Err(CronosGanError::DimensionMismatch {
+                detail: format!(
+                    "ChallengerSpec: predictor_outputs.len()={} but expected n_steps*output_dim={}",
+                    self.predictor_outputs.len(),
+                    expected
+                ),
+            });
+        }
+        if !self.lambda.is_finite() || self.lambda < 0.0 {
+            return Err(CronosGanError::InvalidConfig {
+                detail: format!(
+                    "ChallengerSpec.lambda must be finite and >= 0, got {}",
+                    self.lambda
+                ),
+            });
+        }
+        for (i, &v) in self.predictor_outputs.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(CronosGanError::NonFiniteInput {
+                    detail: format!(
+                        "ChallengerSpec.predictor_outputs[{}] is non-finite",
+                        i
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Build the per-step loss subgraph from the challenger's per-step output
+/// and target nodes. Shared between the SSM and Liquid `Trainable` impls
+/// so the loss arithmetic is consistent across networks.
+///
+/// Returns the scalar `step_loss` node:
+/// - If `challenger` is `None`: `mean((out - target)²)`.
+/// - If `Some((predictor_out_node, lambda))`:
+///   `mean((out - target)²) − lambda · mean((out - predictor_out)²)`.
+pub fn build_step_loss(
+    graph: &mut cjc_ad::GradGraph,
+    out_node: usize,
+    target_node: usize,
+    challenger: Option<(usize, f64)>,
+) -> usize {
+    let err_target = graph.sub(out_node, target_node);
+    let sq_target = graph.mul(err_target, err_target);
+    let mean_target = graph.mean(sq_target);
+    match challenger {
+        None => mean_target,
+        Some((predictor_node, lambda)) => {
+            let err_pred = graph.sub(out_node, predictor_node);
+            let sq_pred = graph.mul(err_pred, err_pred);
+            let mean_pred = graph.mean(sq_pred);
+            let scaled = graph.scalar_mul(mean_pred, lambda);
+            // mean_target − λ · mean_pred  (challenger is REWARDED for
+            // diverging from the predictor — the negative sign is the
+            // entire point of the asymmetric framing).
+            graph.sub(mean_target, scaled)
+        }
+    }
+}
+
 /// A temporal model that can be trained via supervised BPTT.
 pub trait Trainable {
     /// Total scalar parameter count across all trainable tensors.
@@ -78,9 +176,26 @@ pub trait Trainable {
     /// order. Returns `DimensionMismatch` if `params.len() != n_params()`.
     fn set_params_flat(&mut self, params: &[f64]) -> Result<(), CronosGanError>;
 
-    /// Build a BPTT graph for one rollout. Inputs are row-major
-    /// `[n_steps, input_dim]`; targets are row-major
-    /// `[n_steps, output_dim]`.
+    /// Build a BPTT graph for one rollout, optionally with a Phase 3b
+    /// [`ChallengerSpec`] modifying the per-step loss to incentivise
+    /// divergence from a fixed predictor's predictions.
+    ///
+    /// This is the **required** method — Phase 2 callers can continue to
+    /// call [`build_rollout_graph`](Self::build_rollout_graph), which is
+    /// a provided default delegating here with `challenger = None`.
+    fn build_rollout_graph_with(
+        &self,
+        graph: &mut GradGraph,
+        inputs: &[f64],
+        targets: &[f64],
+        loss_kind: RolloutLossKind,
+        aggregation: LossAggregation,
+        challenger: Option<&ChallengerSpec<'_>>,
+    ) -> Result<RolloutGraph, CronosGanError>;
+
+    /// Phase 2 entry point — supervised MSE only, no challenger term.
+    /// Default impl delegates to
+    /// [`build_rollout_graph_with`](Self::build_rollout_graph_with).
     fn build_rollout_graph(
         &self,
         graph: &mut GradGraph,
@@ -88,7 +203,9 @@ pub trait Trainable {
         targets: &[f64],
         loss_kind: RolloutLossKind,
         aggregation: LossAggregation,
-    ) -> Result<RolloutGraph, CronosGanError>;
+    ) -> Result<RolloutGraph, CronosGanError> {
+        self.build_rollout_graph_with(graph, inputs, targets, loss_kind, aggregation, None)
+    }
 }
 
 /// Supervised trainer with Adam.
@@ -140,6 +257,21 @@ impl SupervisedTrainer {
         inputs: &[f64],
         targets: &[f64],
     ) -> Result<f64, CronosGanError> {
+        self.step_with(model, inputs, targets, None)
+    }
+
+    /// Phase 3b extension: run one BPTT step with an optional
+    /// [`ChallengerSpec`]. When `challenger` is `None`, this is identical
+    /// to [`SupervisedTrainer::step`]. When `Some`, the per-step loss
+    /// becomes `MSE(target) − λ · MSE(predictor_outputs)` and the model
+    /// being trained is the *challenger* in the asymmetric framing.
+    pub fn step_with<M: Trainable>(
+        &mut self,
+        model: &mut M,
+        inputs: &[f64],
+        targets: &[f64],
+        challenger: Option<&ChallengerSpec<'_>>,
+    ) -> Result<f64, CronosGanError> {
         debug_assert_eq!(
             model.n_params(),
             self.adam.n_params(),
@@ -147,12 +279,13 @@ impl SupervisedTrainer {
         );
 
         let mut graph = GradGraph::new();
-        let rollout = model.build_rollout_graph(
+        let rollout = model.build_rollout_graph_with(
             &mut graph,
             inputs,
             targets,
             self.loss_kind,
             self.aggregation,
+            challenger,
         )?;
 
         // Forward pass is eager in cjc-ad — graph.tensor(loss_node) is the

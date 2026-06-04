@@ -20,7 +20,7 @@
 
 use crate::error::CronosGanError;
 use crate::ssm::{StateSpaceModel, StateSpaceParams};
-use crate::training::{LossAggregation, RolloutGraph, RolloutLossKind, Trainable};
+use crate::training::{ChallengerSpec, LossAggregation, RolloutGraph, RolloutLossKind, Trainable};
 use cjc_ad::GradGraph;
 use cjc_runtime::tensor::Tensor;
 
@@ -78,13 +78,14 @@ impl Trainable for StateSpaceModel {
         Ok(())
     }
 
-    fn build_rollout_graph(
+    fn build_rollout_graph_with(
         &self,
         graph: &mut GradGraph,
         inputs: &[f64],
         targets: &[f64],
         loss_kind: RolloutLossKind,
         aggregation: LossAggregation,
+        challenger: Option<&ChallengerSpec<'_>>,
     ) -> Result<RolloutGraph, CronosGanError> {
         let cfg = self.config();
         let sd = cfg.state_dim;
@@ -112,10 +113,11 @@ impl Trainable for StateSpaceModel {
                 ),
             });
         }
-        // Phase 2 forward-graph supports MSE only — caller is responsible
-        // for picking that variant.
         match loss_kind {
             RolloutLossKind::Mse => {}
+        }
+        if let Some(c) = challenger {
+            c.validate(n_steps, od)?;
         }
 
         let p = self.params();
@@ -158,10 +160,13 @@ impl Trainable for StateSpaceModel {
             // y_t = C x_t   (D = 0 omitted)
             let y = graph.matmul(c_node, state_node);
 
-            // step_loss = mean((y - target)²)
-            let diff = graph.sub(y, target_node);
-            let sq = graph.mul(diff, diff);
-            let step_loss = graph.mean(sq);
+            // step_loss = mean((y - target)²)  OR  challenger formulation.
+            let pred_node_opt = challenger.map(|c| {
+                let slice = &c.predictor_outputs[t * od..(t + 1) * od];
+                let node = graph.input(make_tensor(slice, &[od, 1]).unwrap());
+                (node, c.lambda)
+            });
+            let step_loss = crate::training::build_step_loss(graph, y, target_node, pred_node_opt);
             step_losses.push(step_loss);
 
             state_node = next_state;

@@ -20,7 +20,7 @@
 
 use crate::error::CronosGanError;
 use crate::liquid::{LiquidNetwork, LiquidParams};
-use crate::training::{LossAggregation, RolloutGraph, RolloutLossKind, Trainable};
+use crate::training::{ChallengerSpec, LossAggregation, RolloutGraph, RolloutLossKind, Trainable};
 use cjc_ad::GradGraph;
 use cjc_runtime::tensor::Tensor;
 
@@ -105,13 +105,14 @@ impl Trainable for LiquidNetwork {
         Ok(())
     }
 
-    fn build_rollout_graph(
+    fn build_rollout_graph_with(
         &self,
         graph: &mut GradGraph,
         inputs: &[f64],
         targets: &[f64],
         loss_kind: RolloutLossKind,
         aggregation: LossAggregation,
+        challenger: Option<&ChallengerSpec<'_>>,
     ) -> Result<RolloutGraph, CronosGanError> {
         let cfg = self.config();
         let sd = cfg.state_dim;
@@ -139,6 +140,9 @@ impl Trainable for LiquidNetwork {
         }
         match loss_kind {
             RolloutLossKind::Mse => {}
+        }
+        if let Some(c) = challenger {
+            c.validate(n_steps, od)?;
         }
 
         let p = self.params();
@@ -225,10 +229,13 @@ impl Trainable for LiquidNetwork {
             let delta = graph.mul(gate, diff_inner);
             let h_new = graph.add(h_node, delta);
 
-            // step loss = mean((y - target)²)
-            let err = graph.sub(y, target_n);
-            let sq = graph.mul(err, err);
-            let step_loss = graph.mean(sq);
+            // step loss = mean((y - target)²)  OR  challenger formulation.
+            let pred_node_opt = challenger.map(|c| {
+                let slice = &c.predictor_outputs[t * od..(t + 1) * od];
+                let node = graph.input(make_tensor(slice, &[od, 1]).unwrap());
+                (node, c.lambda)
+            });
+            let step_loss = crate::training::build_step_loss(graph, y, target_n, pred_node_opt);
             step_losses.push(step_loss);
 
             h_node = h_new;
