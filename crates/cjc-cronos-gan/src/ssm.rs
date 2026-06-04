@@ -323,6 +323,14 @@ impl StateSpaceModel {
     }
 }
 
+/// Internal setter used by the Phase 2 [`crate::training::Trainable`]
+/// adapter. NOT public — keeping the canonical parameter order behind
+/// the trait avoids accidental misuse from callers that don't know the
+/// `A | B | C` flattening rule.
+pub(crate) fn set_params_internal(model: &mut StateSpaceModel, new_params: StateSpaceParams) {
+    model.params = new_params;
+}
+
 // ── Internal helpers ─────────────────────────────────────────────────────
 
 /// Build a stable transition matrix `A` of shape `[state_dim, state_dim]`

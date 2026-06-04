@@ -119,13 +119,28 @@
 //! // to compute the TemporalDisagreement score.
 //! ```
 
+pub mod autograd_liquid;
+pub mod autograd_ssm;
+pub mod datasets;
+pub mod disagreement;
 pub mod error;
+pub mod experiment;
+pub mod gan;
 pub mod liquid;
 pub mod seed;
 pub mod ssm;
 pub mod temporal_state;
 pub mod time_series;
+pub mod training;
 
+pub use autograd_liquid::liquid_param_names;
+pub use autograd_ssm::ssm_param_names;
+pub use datasets::{
+    chaotic_spike, noisy_sine, regime_shift, smooth_sine, step_change_anomaly, CronosDataset,
+};
+pub use disagreement::{compute_disagreement, TemporalDisagreement};
+pub use experiment::{run_experiment, ExperimentConfig, ExperimentReport, TrainingTrajectory};
+pub use gan::{TemporalGan, TemporalGanConfig, TemporalGanMode, TemporalGanRolloutResult};
 pub use error::CronosGanError;
 pub use liquid::{
     LiquidConfig, LiquidGate, LiquidNetwork, LiquidParams, LiquidRolloutResult, LiquidState,
@@ -139,6 +154,9 @@ pub use ssm::{
 pub use temporal_state::{TemporalRollout, TemporalState, TemporalTransition};
 pub use time_series::{
     ForecastWindow, SequenceMask, TemporalBatch, TemporalLoss, TimeSeries, TimeStep,
+};
+pub use training::{
+    LossAggregation, RolloutGraph, RolloutLossKind, SupervisedTrainer, Trainable,
 };
 
 /// Re-export of `cjc_locke::id::FingerprintId` so callers don't need a

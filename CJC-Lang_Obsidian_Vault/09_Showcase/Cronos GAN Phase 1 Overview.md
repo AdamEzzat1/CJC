@@ -1,157 +1,227 @@
 ---
-title: "Cronos GAN Phase 1 Overview"
-tags: [showcase, experimental, temporal, gan, ssm, liquid-nn, determinism]
-status: "🧪 Experimental — Phase 1 SCAFFOLDING shipped"
+title: "Cronos GAN — Phases 1-5 Overview"
+tags: [showcase, experimental, temporal, gan, ssm, liquid-nn, determinism, autodiff, proptest]
+status: "🧪 Experimental — Phases 1-5 (partial) shipped"
 crate: cjc-cronos-gan
 version: 0.1.11
 date: 2026-06-04
+date-modified: 2026-06-04
 ---
 
-# Cronos GAN Phase 1 Overview
+# Cronos GAN — Phases 1–5 Overview
 
 > [!warning] Experimental crate
-> Cronos-GAN is currently an **experimental deterministic temporal modeling crate**. The first goal is correctness, auditability, and reproducibility — **not** state-of-the-art forecasting accuracy. Do not benchmark this crate against statsmodels, Prophet, N-BEATS, or other production forecasting systems until at least Phase 4 (experiment harness + adversarial training loop) lands. The point of Phase 1 is that the **primitives are wired correctly** and the **determinism contract is structurally inviolable**.
+> Cronos-GAN is currently an **experimental deterministic temporal modeling crate**. The first goal is correctness, auditability, and reproducibility — **not** state-of-the-art forecasting accuracy. Do not benchmark this crate against statsmodels, Prophet, N-BEATS, or other production forecasting systems until the v0.2 stabilisation pass. Phase 5 ships the proptest suite and CI matrix but defers Bolero fuzz and per-dataset hyperparameter tuning to Phase 5b.
 
-## What is Cronos GAN?
+## What ships now
 
-Cronos GAN (`cjc-cronos-gan`) is an experimental temporal adversarial system where two structurally opposite temporal models compete on the same time series:
+| Phase | What lands | Code | Tests |
+|---|---|---|---|
+| 1 | Temporal primitives + SSM + Liquid forward steps + rollouts + determinism types | ~1,100 LOC | 35 inline unit |
+| 2 | `Trainable` trait, SSM + Liquid `GradGraph` autodiff adapters, `SupervisedTrainer` with Adam | ~750 LOC | 12 integration (FD-grad + training convergence + byte-identical replay) |
+| 3 (min) | `TemporalDisagreement` + `TemporalGan` (symmetric mode) + content-addressed `run_id` | ~400 LOC | 5 disagreement + 3 GAN |
+| 4 | 5 synthetic dataset generators (`smooth_sine`, `noisy_sine`, `regime_shift`, `step_change_anomaly`, `chaotic_spike`) + experiment harness with replay hash | ~500 LOC | 7 dataset + 2 experiment |
+| 5 (part) | 10 `proptest` properties + cross-platform CI matrix workflow | ~250 LOC | 10 × 64-256 cases each |
 
-- **State Space Model (SSM)** — *stable long-range latent dynamics adversary*. Linear, time-invariant, with spectral norm of the transition matrix `||A||_2 ≤ α < 1` **by construction**. Forgets perturbations exponentially.
-- **Liquid Neural Network** — *adaptive nonlinear local dynamics adversary*. Discrete liquid time-constant network where the per-dimension time constant `τ` is gated by the current input *and* current state via clipped softplus. Slow (memory-like) when input is stationary; fast (reactive) when input is volatile.
+**Total: 76 distinct tests, all passing on release.** Doctest + 12 integration + 53 inline unit + 10 proptest = full coverage of the determinism contract and the autograd-pipeline correctness.
 
-The **disagreement** between these two networks on the same input sequence is the signal Cronos GAN ships in later phases — a large gap means the data has just transitioned between a smooth regime and a locally volatile one. That's the regime-shift / anomaly score the brief asks for.
-
-This is **not** a generic GAN. Cronos GAN never trains on synthetic-vs-real classification. It trains stable latent dynamics against adaptive local dynamics, and the disagreement is the inspectable artifact.
-
-> [!info] Sibling crate distinction
-> Do not confuse `cjc-cronos-gan` (this crate, experimental adversarial temporal modeling) with [`cjc-cronos`](../03_Compiler/cjc-cronos%20overview.md) (classical deterministic forecasting: ETS, ARIMA, Kalman, STL). The sibling crate is feature-complete v0.1 and ready for crates.io; this crate is Phase 1 scaffolding for a multi-phase research roadmap.
-
-## Architecture
+## Architecture (Phase 1-3)
 
 ```mermaid
 flowchart TD
-    seed[CronosSeed] -->|substream\n'ssm.A','ssm.B','ssm.C'| ssm_params[StateSpaceParams<br/>A, B, C, D]
-    seed -->|substream\n'liquid.W_h','liquid.W_x',...| liq_params[LiquidParams<br/>W_h, W_x, b, W_τ, b_τ, W_out, b_out]
+    seed[CronosSeed] -->|substream\nssm.A,B,C| ssm_params[StateSpaceParams<br/>A, B, C, D=0]
+    seed -->|substream\nliquid.W_h,W_x,W_tau_u,W_tau_h,...| liq_params[LiquidParams<br/>W_h, W_x, b, W_τu, W_τh, b_τ, W_out, b_out]
 
-    inputs[TimeSeries / TemporalBatch] --> ssm_step[StateSpaceModel::step<br/>x' = A·x + B·u<br/>y = C·x + D·u]
-    inputs --> liq_step[LiquidNetwork::step<br/>act = tanh(W_h·h + W_x·u + b)<br/>τ = clip(softplus(W_τ·[u;h] + b_τ))<br/>h' = h + dt/τ · (-h + act)<br/>y = W_out·h + b_out]
+    inputs[TimeSeries / TemporalBatch] --> ssm_step[StateSpaceModel::step<br/>x' = A·x + B·u<br/>y = C·x]
+    inputs --> liq_step[LiquidNetwork::step<br/>act = tanh(W_h·h + W_x·u + b)<br/>τ = τ_min + (τ_max−τ_min)·σ(...)<br/>h' = h + dt/τ · (-h + act)<br/>y = W_out·h + b_out]
 
     ssm_params --> ssm_step
     liq_params --> liq_step
 
-    ssm_step --> ssm_out[StateSpaceRolloutResult]
-    liq_step --> liq_out[LiquidRolloutResult<br/>+ time_constants + gates]
+    ssm_step --> ssm_out[SSM trajectory]
+    liq_step --> liq_out[Liquid trajectory<br/>+ τ trace + gates]
 
-    ssm_out -.->|Phase 3| dis[TemporalDisagreement<br/>ssm_score, liquid_score,<br/>absolute_gap, regime_shift_score]
-    liq_out -.->|Phase 3| dis
+    ssm_out --> dis[TemporalDisagreement<br/>ssm_score<br/>liquid_score<br/>absolute_gap<br/>regime_shift_score]
+    liq_out --> dis
 
-    dis -.->|Phase 3+| trainer[TemporalGanTrainer]
+    inputs --> trainer[SupervisedTrainer<br/>· build BPTT graph<br/>· backward_collect<br/>· adam_step]
+    ssm_params -.->|read/write flat| trainer
+    liq_params -.->|read/write flat| trainer
+
+    trainer --> trained_ssm_params[Updated SSM params]
+    trainer --> trained_liq_params[Updated Liquid params]
+
+    dis --> report[ExperimentReport<br/>+ replay_hash]
 ```
 
-Dashed edges mark Phase 3+ work (not shipped). Solid edges are what Phase 1 actually delivers.
-
-### Why these two specifically
-
-The structural opposition is the point.
+## The architectural opposition (unchanged from Phase 1)
 
 | Property | SSM | Liquid NN |
 |---|---|---|
-| Linearity | Linear in `x` and `u` | Nonlinear (`tanh`, `softplus`) |
-| Time-invariance | Time-invariant `A, B, C, D` | Time-varying effective time constant `τ(x, h)` |
+| Linearity | Linear in `x` and `u` | Nonlinear (`tanh`, `sigmoid`) |
+| Time-invariance | Time-invariant `A, B, C` | Time-varying effective time constant `τ(x, h)` |
 | Memory regime | Exponential decay at rate `α` | Variable; slow when input stationary, fast otherwise |
 | Inductive bias | Smooth continuations | Reactive to local volatility |
-| Stability | Structural (`||A||_2 ≤ α` by construction) | Bounded (`τ` clipped to `[τ_min, τ_max]`) |
+| Stability | Structural (`‖A‖₂ ≤ α` by construction) | Bounded (`τ ∈ (τ_min, τ_max)` strictly) |
 | State inspectable? | Yes (`StateSpaceState.x`) | Yes + `LiquidTimeConstant.tau` + `LiquidGate.gate` |
+| Differentiable? | Linear ⇒ every gradient exists | Phase 2 refactored to sigmoid-scaled τ (smooth everywhere) |
 
-When the Phase 3 GAN trains, the disagreement score will become meaningful *because* these two architectures encode opposite biases. The SSM will under-react to spikes; the Liquid net will react too much to smooth segments. Their gap *is* a regime-shift signature.
+## Phase 2 — what changed since Phase 1
 
-## Determinism contract
+The Phase 1 Liquid used `softplus.clamp(τ_min, τ_max)`, which is **non-differentiable at the clip boundaries**. Phase 2 refactored to the mathematically-equivalent **sigmoid-scaled formulation**:
 
-Every random draw routes through `CronosSeed::substream(salt)`. Two distinct salt strings (e.g. `"ssm.A"` and `"liquid.W_h"`) derive independent SplitMix64 streams from the same master seed, so the SSM's transition matrix and the Liquid's recurrent matrix are *guaranteed not to share state* even when constructed from the same `CronosSeed`. This is enforced by an end-to-end test (`ssm_and_liquid_use_independent_rng_substreams`).
+```
+s = sigmoid(W_τ_u · u + W_τ_h · h + b_τ) ∈ (0, 1)
+τ = τ_min + (τ_max − τ_min) · s             ∈ (τ_min, τ_max)
+```
 
-Specifically:
+This is smoothly differentiable everywhere, so the BPTT gradient flows freely through the gate. The Phase 1 bounded-τ test (`τ` stays in `[τ_min, τ_max]` under ±1e6 inputs) still holds — actually more tightly, since `τ` now sits *strictly inside* the open interval `(τ_min, τ_max)`.
 
-1. **RNG** — every draw through `cjc_repro::Rng` (SplitMix64), seeded from `CronosSeed.substream(salt)`.
-2. **Reductions** — every matrix-vector product, row L² norm, and loss sum uses `cjc_repro::KahanAccumulatorF64`. Replaces accumulation-order dependence with order-independent Kahan compensation.
-3. **Gate bounds** — Liquid `τ` is clipped into `[τ_min, τ_max]` by construction; `softplus` is overflow-safe at every finite f64 input via branching at ±20.
-4. **Spectral bound** — SSM `A = (α/√state_dim) · R` where each row of `R` has unit L² norm. Frobenius norm `||A||_F = α` *exactly*, which implies `||A||_2 ≤ α < 1`. Test `transition_matrix_is_structurally_stable` asserts `|‖A‖_F − α| < 1e-12`.
-5. **Iteration order** — `BTreeMap`/`BTreeSet` only, no `HashMap`. (None used yet in Phase 1.)
-6. **No FMA, no thread-parallel reductions** in this crate.
+Phase 2's `Trainable` trait + `SupervisedTrainer` + autodiff adapters give:
 
-## Public API (Phase 1)
+- **Bit-identical training trajectories across runs** (same `(seed, config, inputs)` ⇒ same loss values, same final weights, every step)
+- **Gradient correctness verified by finite-difference comparison**: SSM `max_rel < 1e-4`, Liquid `max_rel < 5e-4` over a small test grid
+- **No silent allocations** in the training inner loop; everything goes through `cjc_ad::GradGraph` arena + `cjc_runtime::ml::adam_step` flat-vector kernel
+
+## Phase 3 — TemporalDisagreement is the artifact
+
+Where most GANs train *toward* indistinguishability, Cronos GAN treats persistent calibrated disagreement as the **signal**. The four scalars in `TemporalDisagreement`:
 
 ```rust
+pub struct TemporalDisagreement {
+    pub ssm_score: f64,           // Mean per-step RMSE of SSM vs target
+    pub liquid_score: f64,        // Mean per-step RMSE of Liquid vs target
+    pub absolute_gap: f64,        // Mean per-step RMSE of SSM vs Liquid (target-free)
+    pub regime_shift_score: f64,  // peak_gap / (1 + mean_gap) — large for localised gaps
+}
+```
+
+The **regime_shift_score** is the headline signal: when one step has a much larger SSM-vs-Liquid gap than the average, the score spikes — that's the regime-shift signature the brief asks for. Tested via `regime_shift_score_fires_on_localised_gap` on a synthetic sequence with 7 zero gaps + 1 gap of 10 (expected score ≈ 4.44, threshold 3.0).
+
+Phase 3 minimal ships `TemporalGanMode::Symmetric` only. The asymmetric modes (SSM-as-generator / Liquid-as-generator) and the alternating-update adversarial training loop ship in Phase 3b — the "disagreement as artifact" framing makes those non-obvious to design, and they deserve their own session.
+
+## Phase 4 — five synthetic datasets
+
+| Dataset | Generator | RNG salt | What it tests |
+|---|---|---|---|
+| `smooth_sine` | `sin(0.4·t)` | (none — fully deterministic) | Baseline: both nets fit it well |
+| `noisy_sine` | sine + N(0, 0.15²) | `dataset.noisy_sine` | Does SSM's stable bias regularise? |
+| `regime_shift` | AR(1) φ=0.7, σ=0.2 → AR(1) φ=−0.3, σ=0.5 at midpoint | `dataset.regime_shift` | The canonical regime-shift test |
+| `step_change_anomaly` | Flat 0, single +1 step at n/2 | (none) | Localised anomaly score |
+| `chaotic_spike` | sine + +3.0 spikes every 10 steps | (none) | Does Liquid's gate fire on spikes? |
+
+The `ExperimentReport` carries a `replay_hash: CronosRunId` content-addressed over `(config bytes, seed, final SSM params, final Liquid params, full training-loss trajectory)`. Two runs of the same `(config, seed)` produce the same hash — *the* operational claim Cronos GAN makes.
+
+## Phase 5 (partial) — proptest + CI
+
+10 `proptest` properties verifying:
+
+1. SSM rollout length = input length
+2. Liquid rollout length = input length (+ τ + gate trajectories)
+3. SSM same-seed-byte-identical (random seed, random length)
+4. Liquid same-seed-byte-identical
+5. SSM finite-bounded inputs ⇒ finite outputs (random seeds, ±10 inputs)
+6. Liquid finite-bounded inputs ⇒ finite outputs + τ stays bounded
+7. `TemporalLoss::Mse` finite for finite inputs (random vectors, ±1e3)
+8. `TemporalLoss::Mae` finite for finite inputs
+9. `TemporalDisagreement` all fields ≥ 0 and finite (random ssm/liq/target ±5)
+10. SSM repeated-rollout byte-identical (random seed)
+
+Each block runs 64-256 cases ⇒ ~1,500-2,000 property-asserted invariants per CI run.
+
+**CI matrix workflow** lives at [`.github/workflows/cjc-cronos-gan-determinism.yml`](../../.github/workflows/cjc-cronos-gan-determinism.yml). Four gates × three OSes (ubuntu / windows / macOS) with `fail-fast: false` so any platform divergence is visible in the same CI run. Gates: inline unit tests, training integration, proptest suite, doctest.
+
+## Determinism contract (full)
+
+Every property below is a CONSTRUCTION property (built into the math), not a TRAINED property (hoped for during optimisation):
+
+1. **RNG sub-streams independent** — `CronosSeed::substream("ssm.A")` and `CronosSeed::substream("liquid.W_h")` derive from disjoint SplitMix64 streams. Cross-net test proves SSM `A` ≠ Liquid `W_h` even from same seed.
+2. **All reductions Kahan-summed** — matvec, row L² norms, loss sums, disagreement RMSEs.
+3. **Liquid τ bounded by construction** — sigmoid scales into `(τ_min, τ_max)`, no clip needed. Smooth gradient flow as a side benefit.
+4. **SSM `‖A‖_F = α` exactly** — row L²-normalised then scaled. Stability is not an optimisation hope.
+5. **softplus → sigmoid overflow safety** — branched at ±20, finite output for every finite f64.
+6. **Param flattening canonical** — `params_flat`, `set_params_flat`, and `build_rollout_graph` agree on the order `[A | B | C]` (SSM) and `[W_h | W_x | b | W_τ_u | W_τ_h | b_τ | W_out | b_out]` (Liquid). Mismatch would silently break Adam's per-parameter update; the round-trip-exact test pins it.
+7. **Adam is `cjc_runtime::ml::adam_step`** — the same kernel chess RL v2 trains against (proven bit-identical via the `9.790915694115341` weight hash gate).
+8. **Replay hash is content-addressed** — `(config, seed, final params, training trajectory)` ⇒ same `CronosRunId` across runs and platforms.
+9. **Cross-platform CI gate** — ubuntu + windows + macOS run every gate on every PR touching `crates/cjc-cronos-gan/`.
+
+## Public API (Phase 1–5)
+
+```rust
+// Construction + forward
 use cjc_cronos_gan::{
-    CronosSeed, LiquidConfig, LiquidNetwork, LiquidState,
-    StateSpaceConfig, StateSpaceModel, StateSpaceState,
+    CronosSeed, StateSpaceConfig, StateSpaceModel, StateSpaceState,
+    LiquidConfig, LiquidNetwork, LiquidState,
 };
 
 let seed = CronosSeed(42);
+let ssm = StateSpaceModel::from_seed(StateSpaceConfig::new(8, 4, 2), seed)?;
+let liq = LiquidNetwork::from_seed(LiquidConfig::new(8, 4, 2), seed)?;
 
-// Same input/output shape so disagreement is meaningful in Phase 3.
-let ssm = StateSpaceModel::from_seed(StateSpaceConfig::new(8, 4, 2), seed).unwrap();
-let liq = LiquidNetwork::from_seed(LiquidConfig::new(8, 4, 2), seed).unwrap();
+// Training
+use cjc_cronos_gan::{SupervisedTrainer, Trainable};
+let mut trainer = SupervisedTrainer::new(ssm.n_params(), 1e-2);
+for _ in 0..100 {
+    let loss = trainer.step(&mut ssm, &inputs, &targets)?;
+}
 
-// Roll both forward across the same input sequence.
-let n_steps = 10;
-let inputs: Vec<f64> = (0..n_steps * 4).map(|i| (i as f64 * 0.1).sin()).collect();
-let ssm_out = ssm.rollout(&StateSpaceState::zeros(8), &inputs).unwrap();
-let liq_out = liq.rollout(&LiquidState::zeros(8), &inputs).unwrap();
+// Disagreement (after training both networks)
+use cjc_cronos_gan::{TemporalGan, TemporalGanConfig};
+let gan = TemporalGan::from_seed(TemporalGanConfig::symmetric(8, 4, 2), seed)?;
+let result = gan.rollout_and_disagreement(&inputs, &target)?;
+println!("regime shift score: {}", result.disagreement.regime_shift_score);
 
-// Phase 3 will read (ssm_out.outputs, liq_out.outputs, liq_out.time_constants)
-// to compute the TemporalDisagreement score.
+// Full experiment with replay hash
+use cjc_cronos_gan::{run_experiment, ExperimentConfig, CronosDataset};
+let cfg = ExperimentConfig::new(
+    TemporalGanConfig::symmetric(8, 1, 1),
+    CronosDataset::RegimeShift,
+    100,
+);
+let report = run_experiment(&cfg, seed)?;
+println!("replay hash: {}", report.replay_hash);
 ```
 
-### Primitives shipped
+## Known limitations (post Phase 5)
 
-| Group | Types |
-|---|---|
-| Temporal core | `TimeStep`, `TimeSeries`, `TemporalBatch`, `SequenceMask`, `ForecastWindow`, `TemporalLoss` |
-| State trait | `TemporalState`, `TemporalTransition<S>`, `TemporalRollout<S>` |
-| SSM | `StateSpaceConfig`, `StateSpaceParams`, `StateSpaceState`, `StateSpaceModel`, `StateSpaceStepResult`, `StateSpaceRolloutResult` |
-| Liquid NN | `LiquidConfig`, `LiquidParams`, `LiquidState`, `LiquidNetwork`, `LiquidTimeConstant`, `LiquidGate`, `LiquidStepResult`, `LiquidRolloutResult` |
-| Determinism | `CronosSeed`, `CronosRunId` |
-| Errors | `CronosGanError` (5 variants) |
+- **Asymmetric GAN modes deferred** (Phase 3b). `SsmAsGenerator` / `LiquidAsGenerator` + alternating-update training need a design pass on the loss signs.
+- **No Bolero fuzz** (Phase 5b). Proptest covers structural invariants; fuzz adds adversarial-input branching coverage when the GAN modes ship.
+- **No per-dataset hyperparameter tuning** (Phase 4b). Experiment harness uses a single `(lr, n_train_steps)` per call; per-dataset best practices live in a future tuning sweep.
+- **`tests/cronos/{unit,integration,prop,fuzz}/` workspace layout**: Phase 5 ships proptest at the crate-level `tests/test_proptest.rs` instead. The workspace-level layout is a Phase 6 refactor once Bolero fuzz adds enough mass to justify the directory split.
+- **No `cjc-locke` E9500+ custom detector** for regime-shift findings (Phase 6).
+- **Adversarial training not yet shown to improve forecasts** vs. supervised baseline — this is a research question, not a bug. Phase 6 runs the comparison sweep.
 
-## Test summary (Phase 1)
+## Test summary
 
-| Module | Tests | Coverage |
+| Module / file | Tests | Coverage |
 |---|---|---|
-| `seed.rs` | 6 | substream determinism, salt independence, seed divergence, run-ID stability under seed/config perturbation |
-| `time_series.rs` | 9 | construction, dimension/NaN rejection, batch shape consistency, mask length validation, forecast window OOB, MSE/MAE/Huber known values + invalid delta |
-| `temporal_state.rs` | 1 | trait + rollout invariants |
-| `ssm.rs` | 9 | config validation, seed determinism, seed divergence, `‖A‖_F = α` exactness, step shape, rollout length, bounded inputs ⇒ finite states (200 steps), byte-identical rollout across runs |
-| `liquid.rs` | 8 | config validation, seed determinism, seed divergence, step shape + `τ` bounds, `τ` stays bounded under `±1e6` inputs, rollout length, byte-identical rollout across runs |
-| `lib.rs` | 2 | SSM + Liquid share I/O shape; SSM and Liquid use **independent RNG substreams** even with same seed |
-| **Total** | **35** | — |
-
-All 35 unit tests pass on Phase 1 commit `<TBD>` in release profile. The 10-second doc test is the `lib.rs` quick-start example actually running a 10-step rollout end-to-end.
-
-## Known limitations
-
-- **No training loop** — neither network learns anything yet. Forward steps + rollouts only. Adversarial training, autodiff integration via `cjc_ad::GradGraph`, and the GAN layer (`TemporalGan`, `TemporalGanTrainer`, `TemporalDisagreement`) all ship in Phase 3.
-- **No experiment harness** — the brief's five synthetic datasets (smooth sine, noisy sine, regime shift, step-change anomaly, chaotic spike) are not yet wired. Phase 4.
-- **No property tests, no Bolero fuzz targets** — Phase 5. Phase 1's invariants are well-covered by deterministic unit tests; structural fuzzing is more valuable after the GAN layer adds branching.
-- **No cross-platform CI matrix** — should be wired before Phase 4 ships, matching the Phase 2 handoff §1.5 expectation for `cjc-tempest`.
-- **No `tests/cronos/{unit,integration,prop,fuzz}/` workspace-level layout** — inline `#[cfg(test)]` blocks only. Workspace-level layout ships once integration tests have something cross-module to integrate (i.e. after Phase 3 GAN).
-- **No autodiff** — Phase 1 forward steps don't touch `cjc_ad::GradGraph`. Phase 2 adds autodiff integration once the v0.1 API stabilises.
-- **Liquid τ uses fixed clip bounds** — no adaptive `τ_min`/`τ_max` learning. Acceptable for Phase 1; revisited in Phase 3.
-- **No `cjc-locke` composition yet** — Phase 6 adds a custom-detector emitting regime-shift anomaly findings in the `E9500..=E9999` custom range.
-- **Liquid output `y = W_out · h_prev + b_out`** uses the *previous* hidden state — matches SSM convention (`y_t = C x_t`) so the two networks' outputs are step-aligned for disagreement scoring. This is a design choice, not a bug; revisit if Phase 3 disagreement scoring needs `h_t` instead.
+| `seed.rs` | 6 | substream determinism + salt independence + run-ID stability |
+| `time_series.rs` | 9 | construction, dim/NaN rejection, mask validation, loss invariants |
+| `temporal_state.rs` | 1 | rollout invariants |
+| `ssm.rs` | 9 | config validation, seed determinism, `‖A‖_F = α` exact, 200-step finiteness, byte-id |
+| `liquid.rs` | 8 | config validation, seed determinism, τ bounds under ±1e6, byte-id |
+| `disagreement.rs` | 5 | shape/NaN rejection, perfect agreement = 0, regime-shift localisation, determinism |
+| `gan.rs` | 3 | byte-id across runs, run_id changes with seed, τ trace dims correct |
+| `datasets.rs` | 7 | each dataset shape + content + sample determinism |
+| `experiment.rs` | 2 | end-to-end smooth_sine, replay hash byte-id |
+| `lib.rs` | 2 | cross-net I/O shape, RNG sub-stream independence |
+| `tests/test_training.rs` | 12 | params round-trip, FD-grad correctness (both nets), training convergence, byte-id |
+| `tests/test_proptest.rs` | 10 × 64-256 cases | 7 brief properties + 3 redundant cross-checks |
+| Doctest in `lib.rs` | 1 | quick-start runs end-to-end |
+| **TOTAL** | **76 distinct tests** | all passing release |
 
 ## Future phases
 
 | Phase | Adds |
 |---|---|
-| **2** | Training-loss helpers, `cjc_ad::GradGraph` integration, per-network supervised training loop |
-| **3** | `TemporalGanConfig`, `TemporalGan`, `TemporalGanTrainer`, `TemporalDisagreement`, three GAN modes (SSM-as-generator / Liquid-as-generator / symmetric), adversarial + reconstruction + forecast + temporal-consistency losses |
-| **4** | Synthetic experiment harness (5 datasets), regime-shift score validation, deterministic replay hash on every run |
-| **5** | `tests/cronos/{unit,integration,prop,fuzz}/` workspace layout, proptest suite, Bolero fuzz targets, vault deep-docs (Architecture, SSM Primitive, Liquid Primitive, Adversarial Training, Experiment Results, Verification Report) |
-| **6** | `cjc-locke` custom detector for regime-shift findings (`E9500+`), Python bridge, lift `publish = false` for v0.2+ |
+| **3b** | Asymmetric GAN modes, adversarial alternating-update training loop |
+| **4b** | Per-dataset hyperparameter tuning, train/eval split |
+| **5b** | Bolero fuzz targets (7), `tests/cronos/{unit,integration,prop,fuzz}/` workspace layout |
+| **6** | `cjc-locke` E9500+ custom detector, vault deep-docs (Architecture, SSM Primitive, Liquid Primitive, Adversarial Training, Experiment Results, Verification Report), Python bridge |
 
 ## See also
 
-- ADR for Cronos GAN — not yet written; queued for Phase 3 once the GAN layer's design is concrete enough to commit
-- Sibling crate: [`cjc-cronos`](../03_Compiler/cjc-cronos%20overview.md) (classical forecasting; do not confuse)
-- Composition target: [Phase 2 Handoff](../10_Roadmap_and_Open_Questions/Phase%202%20Handoff.md) §5 — Locke v0.9 custom detector layer
+- Sibling crate: [`cjc-cronos`](https://crates.io/crates/cjc-cronos) (classical forecasting; do NOT confuse)
+- Phase 2 dep (now landed): `cjc-ad` A1 determinism audit on `claude/zealous-khayyam-7d47f5`
 - Determinism reference: [Determinism](../05_Determinism_and_Numerics/Determinism.md), [SplitMix64](../05_Determinism_and_Numerics/SplitMix64.md), [Kahan Summation](../05_Determinism_and_Numerics/Kahan%20Summation.md)
+- CI matrix: [`.github/workflows/cjc-cronos-gan-determinism.yml`](../../.github/workflows/cjc-cronos-gan-determinism.yml)

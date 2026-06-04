@@ -1,20 +1,27 @@
 //! Liquid Neural Network — the **adaptive nonlinear local dynamics
 //! adversary** of the Temporal GAN.
 //!
-//! Phase 1 ships a discrete liquid time-constant network (after Hasani
-//! et al. 2020, simplified for determinism + auditability). The state
-//! update is:
+//! Discrete liquid time-constant network (after Hasani et al. 2020,
+//! simplified for determinism + auditability). The state update is:
 //!
 //! ```text
 //! pre   = W_h · h_t + W_x · u_t + b
 //! act   = tanh(pre)
-//! tau   = clip(softplus(W_tau · [u_t; h_t] + b_tau), tau_min, tau_max)
+//! s     = sigmoid(W_tau_u · u_t + W_tau_h · h_t + b_tau)        ∈ (0,1)
+//! tau   = tau_min + (tau_max − tau_min) · s                      ∈ (tau_min, tau_max)
 //! h_{t+1} = h_t + (dt / tau) ⊙ (-h_t + act)
 //! y_t   = W_out · h_t + b_out
 //! ```
 //!
-//! Where `clip` is elementwise, `⊙` is elementwise multiply, and the
-//! `softplus` keeps `tau` positive *before* clipping.
+//! Where `⊙` is elementwise multiply. The range-scaled-sigmoid formulation
+//! is mathematically equivalent to the softplus-then-clip variant from
+//! Phase 0 — `tau` is bounded by construction — but is **smoothly
+//! differentiable everywhere**, which is what the Phase 2 autodiff
+//! adapter requires. The two `W_tau_u` / `W_tau_h` matrices are also
+//! cleaner than the concatenated `W_tau` because cjc-ad's GradGraph has
+//! no `concat` op; splitting the input-and-state contribution into two
+//! separate matmuls lets the gradient flow through both without requiring
+//! a graph extension.
 //!
 //! This is the deliberate counterpart to the SSM: where the SSM's
 //! transition matrix is time-invariant and linear, the Liquid net's
@@ -149,9 +156,12 @@ pub struct LiquidParams {
     pub w_x: Vec<f64>,
     /// Pre-activation bias, shape `[state_dim]`.
     pub bias: Vec<f64>,
-    /// Time-constant gating weights, shape
-    /// `[state_dim, input_dim + state_dim]` (applied to `[u; h]`).
-    pub w_tau: Vec<f64>,
+    /// Time-constant gating weights for the input `u`, shape
+    /// `[state_dim, input_dim]`.
+    pub w_tau_u: Vec<f64>,
+    /// Time-constant gating weights for the state `h`, shape
+    /// `[state_dim, state_dim]`.
+    pub w_tau_h: Vec<f64>,
     /// Time-constant gating bias, shape `[state_dim]`.
     pub bias_tau: Vec<f64>,
     /// Output projection, shape `[output_dim, state_dim]`.
@@ -245,7 +255,8 @@ impl LiquidNetwork {
         let mut rng_wh = seed.substream("liquid.W_h");
         let mut rng_wx = seed.substream("liquid.W_x");
         let mut rng_bias = seed.substream("liquid.bias");
-        let mut rng_wtau = seed.substream("liquid.W_tau");
+        let mut rng_wtau_u = seed.substream("liquid.W_tau_u");
+        let mut rng_wtau_h = seed.substream("liquid.W_tau_h");
         let mut rng_btau = seed.substream("liquid.bias_tau");
         let mut rng_wout = seed.substream("liquid.W_out");
         let mut rng_bout = seed.substream("liquid.bias_out");
@@ -253,10 +264,15 @@ impl LiquidNetwork {
         let w_h = sample_normal(config.state_dim * config.state_dim, config.init_scale, &mut rng_wh);
         let w_x = sample_normal(config.state_dim * config.input_dim, config.init_scale, &mut rng_wx);
         let bias = sample_normal(config.state_dim, config.init_scale, &mut rng_bias);
-        let w_tau = sample_normal(
-            config.state_dim * (config.input_dim + config.state_dim),
+        let w_tau_u = sample_normal(
+            config.state_dim * config.input_dim,
             config.init_scale,
-            &mut rng_wtau,
+            &mut rng_wtau_u,
+        );
+        let w_tau_h = sample_normal(
+            config.state_dim * config.state_dim,
+            config.init_scale,
+            &mut rng_wtau_h,
         );
         let bias_tau = sample_normal(config.state_dim, config.init_scale, &mut rng_btau);
         let w_out = sample_normal(config.output_dim * config.state_dim, config.init_scale, &mut rng_wout);
@@ -268,7 +284,8 @@ impl LiquidNetwork {
                 w_h,
                 w_x,
                 bias,
-                w_tau,
+                w_tau_u,
+                w_tau_h,
                 bias_tau,
                 w_out,
                 bias_out,
@@ -327,22 +344,17 @@ impl LiquidNetwork {
         // act = tanh(pre)
         let act: Vec<f64> = pre.iter().map(|v| v.tanh()).collect();
 
-        // tau = clip(softplus(W_tau · [u; h] + bias_tau), tau_min, tau_max)
-        let mut combined = Vec::with_capacity(cfg.input_dim + cfg.state_dim);
-        combined.extend_from_slice(u);
-        combined.extend_from_slice(&state.h);
-        let mut tau_pre = matvec_kahan(
-            &self.params.w_tau,
-            &combined,
-            cfg.state_dim,
-            cfg.input_dim + cfg.state_dim,
-        );
+        // tau = tau_min + (tau_max − tau_min) · sigmoid(W_tau_u u + W_tau_h h + b_tau)
+        // — bounded by construction, smoothly differentiable everywhere.
+        let mut tau_pre = matvec_kahan(&self.params.w_tau_u, u, cfg.state_dim, cfg.input_dim);
+        let tau_h = matvec_kahan(&self.params.w_tau_h, &state.h, cfg.state_dim, cfg.state_dim);
         for d in 0..cfg.state_dim {
-            tau_pre[d] += self.params.bias_tau[d];
+            tau_pre[d] += tau_h[d] + self.params.bias_tau[d];
         }
+        let tau_range = cfg.tau_max - cfg.tau_min;
         let tau: Vec<f64> = tau_pre
             .iter()
-            .map(|v| softplus(*v).clamp(cfg.tau_min, cfg.tau_max))
+            .map(|v| cfg.tau_min + tau_range * sigmoid(*v))
             .collect();
         let gate: Vec<f64> = tau.iter().map(|t| cfg.dt / *t).collect();
 
@@ -413,19 +425,26 @@ impl LiquidNetwork {
     }
 }
 
+/// Internal setter used by the Phase 2 [`crate::training::Trainable`]
+/// adapter. NOT public — same rationale as `crate::ssm::set_params_internal`.
+pub(crate) fn set_params_internal(model: &mut LiquidNetwork, new_params: LiquidParams) {
+    model.params = new_params;
+}
+
 // ── Internal helpers ─────────────────────────────────────────────────────
 
-/// Overflow-safe softplus. `ln(1 + e^x)` directly overflows for `x > ~709`
-/// and underflows to `0` for `x < ~-37`. Branching at +20 / -20 keeps
-/// every finite f64 input producing a finite output, which is what the
-/// "gates / time constants remain bounded" test depends on.
-fn softplus(x: f64) -> f64 {
-    if x > 20.0 {
-        x
-    } else if x < -20.0 {
-        x.exp()
+/// Overflow-safe sigmoid. `1 / (1 + e^{-x})` directly overflows for
+/// `x < -709` and the equivalent `e^x / (1+e^x)` overflows for `x > 709`.
+/// Branching at ±20 keeps every finite f64 input producing a finite
+/// output in (0, 1), which is what the `tau ∈ (tau_min, tau_max)`
+/// invariant depends on.
+fn sigmoid(x: f64) -> f64 {
+    if x >= 0.0 {
+        let z = (-x).exp();
+        1.0 / (1.0 + z)
     } else {
-        (1.0 + x.exp()).ln()
+        let z = x.exp();
+        z / (1.0 + z)
     }
 }
 
