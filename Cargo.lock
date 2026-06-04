@@ -279,6 +279,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cjc-cronos-gan"
+version = "0.1.11"
+dependencies = [
+ "bolero",
+ "cjc-locke",
+ "cjc-repro",
+ "cjc-runtime",
+ "proptest",
+]
+
+[[package]]
 name = "cjc-data"
 version = "0.1.11"
 dependencies = [
