@@ -28,3 +28,10 @@ cjc-ad = { workspace = true }
 [dev-dependencies]
 proptest = "1"
 bolero = "0.13.4"
+
+[features]
+# Phase 7a.3 — trace-based replay debugging. Enables the `trace` module
+# and `TemporalGanTrainer::step_with_trace`. Adds no external deps; the
+# trace machinery is fully self-contained (FNV-1a hash + tab-separated
+# key=value lines).
+trace = []

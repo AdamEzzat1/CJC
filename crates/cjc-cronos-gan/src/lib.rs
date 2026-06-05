@@ -134,6 +134,8 @@ pub mod seed;
 pub mod ssm;
 pub mod temporal_state;
 pub mod time_series;
+#[cfg(feature = "trace")]
+pub mod trace;
 pub mod training;
 
 pub use autograd_liquid::liquid_param_names;
@@ -158,6 +160,8 @@ pub use locke_detector::{
     TRAJECTORY_DATAFRAME_COLUMNS,
 };
 pub use schedule::LambdaSchedule;
+#[cfg(feature = "trace")]
+pub use trace::{bisect_traces, fnv1a_hash_f64s, BisectResult, TraceEvent, TraceWriter};
 pub use gan_trainer::{Role, TemporalGanTrainStep, TemporalGanTrainer};
 pub use error::CronosGanError;
 pub use liquid::{
