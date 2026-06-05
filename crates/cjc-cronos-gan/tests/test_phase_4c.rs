@@ -279,8 +279,8 @@ fn ssm_loss_in_ssm_as_generator_still_equals_symmetric_with_eval() {
         );
         // And the eval SSM MSE is identical too — same trained SSM, same
         // eval data.
-        let sym_eval = sym.eval.unwrap();
-        let ssm_g_eval = ssm_g.eval.unwrap();
+        let sym_eval = sym.eval.as_ref().unwrap();
+        let ssm_g_eval = ssm_g.eval.as_ref().unwrap();
         assert_eq!(
             sym_eval.ssm_loss.to_bits(),
             ssm_g_eval.ssm_loss.to_bits(),
@@ -303,8 +303,8 @@ fn liquid_loss_in_liquid_as_generator_still_equals_symmetric_with_eval() {
             "Phase 3b Liquid-predictor invariant broken at {:?}",
             ds
         );
-        let sym_eval = sym.eval.unwrap();
-        let liq_g_eval = liq_g.eval.unwrap();
+        let sym_eval = sym.eval.as_ref().unwrap();
+        let liq_g_eval = liq_g.eval.as_ref().unwrap();
         assert_eq!(
             sym_eval.liquid_loss.to_bits(),
             liq_g_eval.liquid_loss.to_bits(),

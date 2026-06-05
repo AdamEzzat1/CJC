@@ -124,6 +124,7 @@ pub mod autograd_ssm;
 pub mod datasets;
 pub mod disagreement;
 pub mod error;
+pub mod eval_analysis;
 pub mod experiment;
 pub mod gan;
 pub mod gan_trainer;
@@ -158,6 +159,10 @@ pub use locke_detector::{
     DEFAULT_ABSOLUTE_GAP_THRESHOLD, DEFAULT_REGIME_SHIFT_THRESHOLD,
     DEFAULT_SSM_LOSS_DEGRADATION_RATIO, SWEEP_DATAFRAME_COLUMNS,
     TRAJECTORY_DATAFRAME_COLUMNS,
+};
+pub use eval_analysis::{
+    compute_gap_trajectory, compute_predictive_uncertainty, segment_trajectory, Segment,
+    SegmentLabel, SegmentationConfig, DEFAULT_SEGMENTATION_ENTER, DEFAULT_SEGMENTATION_EXIT,
 };
 pub use schedule::LambdaSchedule;
 #[cfg(feature = "trace")]

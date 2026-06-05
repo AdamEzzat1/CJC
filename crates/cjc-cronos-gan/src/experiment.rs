@@ -120,9 +120,16 @@ pub struct TrainingTrajectory {
     pub liquid_losses: Vec<f64>,
 }
 
-/// Phase 4c eval-window summary. `None` in [`ExperimentReport`] when
-/// `eval_steps == 0`.
-#[derive(Clone, Copy, Debug)]
+/// Phase 4c eval-window summary, extended in Phase 7b with per-step
+/// gap, per-step predictive `(mean, variance)`, and segmentation
+/// labels.
+///
+/// `None` in [`ExperimentReport`] when `eval_steps == 0`. When
+/// populated, the per-step vectors all have length `eval_steps` (for
+/// 1-D output series — all currently shipped datasets) or
+/// `eval_steps * output_dim` for `eval_gap_trajectory`. See the field
+/// docs for shape details.
+#[derive(Clone, Debug)]
 pub struct EvalReport {
     /// MSE of the SSM's predictions on the held-out window.
     pub ssm_loss: f64,
@@ -132,6 +139,21 @@ pub struct EvalReport {
     /// window. This is the true forecastability disagreement — neither
     /// network saw these timesteps during training.
     pub disagreement: TemporalDisagreement,
+    /// Phase 7b: per-step absolute gap `|ssm_out − liq_out|`
+    /// aggregated across output dims via L¹ — length `eval_steps`.
+    /// The natural input to [`crate::segment_trajectory`].
+    pub eval_gap_trajectory: Vec<f64>,
+    /// Phase 7b: per-step `(mean, variance)` interpreting the
+    /// SSM/Liquid pair as a 2-element ensemble over inductive biases.
+    /// `mean(t) = (ssm(t) + liq(t)) / 2`, `variance(t) = (ssm(t) -
+    /// liq(t))² / 2`. Length `eval_steps * output_dim`.
+    pub predictive_uncertainty: Vec<(f64, f64)>,
+    /// Phase 7b: hysteresis-segmentation of [`Self::eval_gap_trajectory`]
+    /// using [`crate::SegmentationConfig::default`] (enter=0.5,
+    /// exit=0.3). Callers wanting different thresholds can recompute
+    /// via [`crate::segment_trajectory`] against the same
+    /// [`Self::eval_gap_trajectory`].
+    pub segments: Vec<crate::eval_analysis::Segment>,
 }
 
 /// Structured experiment result.
@@ -265,7 +287,7 @@ pub fn run_experiment(
     // Liquid params, training-trajectory bit pattern, disagreement-
     // trajectory bit pattern, eval-bit pattern when present).
     let mut parts = Vec::new();
-    parts.push(fingerprint_str(IdDomain::CausalClaim, "cronos_gan_experiment_v4d"));
+    parts.push(fingerprint_str(IdDomain::CausalClaim, "cronos_gan_experiment_v7b"));
     parts.push(fingerprint(IdDomain::CausalClaim, &config.canonical_bytes()));
     parts.push(fingerprint(IdDomain::CausalClaim, &seed.0.to_le_bytes()));
     let ssm_params_bytes = float_vec_bytes(&gan.ssm().params_flat());
@@ -283,7 +305,7 @@ pub fn run_experiment(
     }
     let replay_hash = CronosRunId(fingerprint_compose(
         IdDomain::CausalClaim,
-        "cronos_experiment_replay_hash_v4d",
+        "cronos_experiment_replay_hash_v7b",
         &parts,
     ));
 
@@ -363,21 +385,65 @@ fn run_eval(
         od,
     )?;
 
+    // Phase 7b: per-step analysis derived from the SSM and Liquid
+    // eval rollouts. All three are pure functions of the eval
+    // outputs — no extra model calls, just one extra pass.
+    let eval_gap_trajectory =
+        crate::eval_analysis::compute_gap_trajectory(&ssm_eval_outputs, &liq_eval_outputs, od);
+    let predictive_uncertainty = crate::eval_analysis::compute_predictive_uncertainty(
+        &ssm_eval_outputs,
+        &liq_eval_outputs,
+        od,
+    );
+    let segments = crate::eval_analysis::segment_trajectory(
+        &eval_gap_trajectory,
+        crate::eval_analysis::SegmentationConfig::default(),
+    );
+
     Ok(EvalReport {
         ssm_loss,
         liquid_loss,
         disagreement,
+        eval_gap_trajectory,
+        predictive_uncertainty,
+        segments,
     })
 }
 
 fn eval_report_bytes(e: &EvalReport) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(48);
+    let mut bytes = Vec::with_capacity(
+        48 + e.eval_gap_trajectory.len() * 8 + e.predictive_uncertainty.len() * 16 + e.segments.len() * 24,
+    );
     bytes.extend_from_slice(&e.ssm_loss.to_bits().to_le_bytes());
     bytes.extend_from_slice(&e.liquid_loss.to_bits().to_le_bytes());
     bytes.extend_from_slice(&e.disagreement.ssm_score.to_bits().to_le_bytes());
     bytes.extend_from_slice(&e.disagreement.liquid_score.to_bits().to_le_bytes());
     bytes.extend_from_slice(&e.disagreement.absolute_gap.to_bits().to_le_bytes());
     bytes.extend_from_slice(&e.disagreement.regime_shift_score.to_bits().to_le_bytes());
+    // Phase 7b: gap trajectory + predictive uncertainty + segments.
+    // Length-prefixed so an empty / shorter trajectory hashes
+    // distinctly from a longer one with the same prefix.
+    bytes.extend_from_slice(&(e.eval_gap_trajectory.len() as u64).to_le_bytes());
+    for v in &e.eval_gap_trajectory {
+        bytes.extend_from_slice(&v.to_bits().to_le_bytes());
+    }
+    bytes.extend_from_slice(&(e.predictive_uncertainty.len() as u64).to_le_bytes());
+    for (m, v) in &e.predictive_uncertainty {
+        bytes.extend_from_slice(&m.to_bits().to_le_bytes());
+        bytes.extend_from_slice(&v.to_bits().to_le_bytes());
+    }
+    bytes.extend_from_slice(&(e.segments.len() as u64).to_le_bytes());
+    for seg in &e.segments {
+        bytes.extend_from_slice(&(seg.start_step as u64).to_le_bytes());
+        bytes.extend_from_slice(&(seg.end_step as u64).to_le_bytes());
+        // Encode label as a single tag byte so distinct labels with
+        // matching start/end still hash differently.
+        let tag: u8 = match seg.label {
+            crate::eval_analysis::SegmentLabel::Stable => 0,
+            crate::eval_analysis::SegmentLabel::Transitional => 1,
+        };
+        bytes.push(tag);
+    }
     bytes
 }
 
@@ -1037,7 +1103,7 @@ pub fn run_experiment_sweep(
     // per-seed replay_hash bytes in canonical order).
     let total_replay_parts: usize = cells.iter().map(|c| c.per_seed_reports.len()).sum();
     let mut parts = Vec::with_capacity(3 + total_replay_parts);
-    parts.push(fingerprint_str(IdDomain::CausalClaim, "cronos_sweep_v4d"));
+    parts.push(fingerprint_str(IdDomain::CausalClaim, "cronos_sweep_v7b"));
     parts.push(fingerprint(IdDomain::CausalClaim, &base_config.canonical_bytes()));
     parts.push(fingerprint(IdDomain::CausalClaim, &seed.0.to_le_bytes()));
     for c in &cells {
@@ -1050,7 +1116,7 @@ pub fn run_experiment_sweep(
     }
     let sweep_hash = CronosRunId(fingerprint_compose(
         IdDomain::CausalClaim,
-        "cronos_sweep_replay_hash_v4d",
+        "cronos_sweep_replay_hash_v7b",
         &parts,
     ));
 
