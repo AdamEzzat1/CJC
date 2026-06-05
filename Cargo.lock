@@ -448,6 +448,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cjc-nss"
+version = "0.1.11"
+dependencies = [
+ "bolero",
+ "cjc-ad",
+ "cjc-locke",
+ "cjc-repro",
+ "cjc-runtime",
+ "proptest",
+]
+
+[[package]]
 name = "cjc-parser"
 version = "0.1.11"
 dependencies = [

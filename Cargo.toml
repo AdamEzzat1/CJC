@@ -57,6 +57,7 @@ members = [
     "crates/cjc-abng",
     "crates/cjc-locke",
     "crates/cjc-cronos-gan",
+    "crates/cjc-nss",
     "bench/ad_bench",
     "bench/nlp_preprocess_bench",
     "bench/abng_micro",
@@ -155,6 +156,7 @@ cjc-dharht = { path = "crates/cjc-dharht", version = "0.1.11" }
 cjc-abng = { path = "crates/cjc-abng", version = "0.1.11" }
 cjc-locke = { path = "crates/cjc-locke", version = "0.1.11" }
 cjc-cronos-gan = { path = "crates/cjc-cronos-gan", version = "0.1.11" }
+cjc-nss = { path = "crates/cjc-nss", version = "0.1.11" }
 
 [[test]]
 name = "fixtures"

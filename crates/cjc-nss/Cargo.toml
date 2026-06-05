@@ -1,0 +1,37 @@
+[package]
+name = "cjc-nss"
+description = "Neural Systems Simulator — deterministic infrastructure dynamics modeling (pressure fields, causal propagation, scheduler-aware temporal dynamics). Phase 1: Queue Pressure Predictor."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+# Experimental research crate — not yet published. Phase 1 ships:
+#   * Pressure-field primitives (SystemState, PressureGraph, SIR)
+#   * Deterministic Queue Simulator
+#   * Pressure propagation engine (conservation + dissipation)
+#   * NSS neural core (encoder + state engine + failure head + attribution)
+#   * Deterministic replay / audit trace
+#   * Property + Bolero fuzz tests
+# Phases 2-5 (distributed simulator, scheduler advisor, autonomous optimizer,
+# infrastructure nervous system) ship later. See crates/cjc-nss/README.md.
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+cjc-repro = { workspace = true }
+cjc-locke = { workspace = true }
+# Phase 2d — autodiff-based cluster-head training. We use cjc-ad's
+# GradGraph (the same machinery the PINN demos and cjc-cronos-gan use)
+# to compute exact gradients on the cluster failure head. cjc-runtime
+# is pulled in for the Tensor type GradGraph builds against.
+cjc-ad = { workspace = true }
+cjc-runtime = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"
+bolero = "0.13.4"
