@@ -58,6 +58,7 @@ members = [
     "crates/cjc-locke",
     "crates/cjc-cronos-gan",
     "crates/cjc-cana",
+    "crates/cjc-nss",
     "bench/cana_train_cost_model",
     "bench/ad_bench",
     "bench/nlp_preprocess_bench",
@@ -162,6 +163,7 @@ cjc-abng = { path = "crates/cjc-abng", version = "0.1.11" }
 cjc-locke = { path = "crates/cjc-locke", version = "0.1.11" }
 cjc-cronos-gan = { path = "crates/cjc-cronos-gan", version = "0.1.11" }
 cjc-cana = { path = "crates/cjc-cana", version = "0.1.11" }
+cjc-nss = { path = "crates/cjc-nss", version = "0.1.11" }
 
 [[test]]
 name = "fixtures"
