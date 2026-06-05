@@ -130,6 +130,38 @@ impl LiquidConfig {
                 ),
             });
         }
+        // Phase 7a.1: dt/tau_min overflow gate (closes the Phase 5b
+        // fuzz finding). Each field above is individually finite-
+        // positive, but `dt / tau_min` can still overflow f64 (e.g.
+        // dt=1e234, tau_min=1e-179 ⇒ ratio=1e413 = +inf). When the
+        // ratio is not finite, the integration step (`dt/τ`) becomes
+        // non-finite and NaN propagates through `tanh ∘ sigmoid`
+        // before the τ-clipping invariant can rescue it.
+        let dt_over_tau_min = self.dt / self.tau_min;
+        if !dt_over_tau_min.is_finite() {
+            return Err(CronosGanError::InvalidConfig {
+                detail: format!(
+                    "LiquidConfig: dt/tau_min = {}/{} overflows f64 (= {}); pick smaller dt or larger tau_min so the integration step is representable",
+                    self.dt, self.tau_min, dt_over_tau_min
+                ),
+            });
+        }
+        // Phase 7a.1: init_scale magnitude gate. Astronomical init
+        // values (e.g. 1e241) produce parameter matrices whose entries
+        // overflow as soon as they multiply each other in subsequent
+        // step. The bound is intentionally wide — six orders of
+        // magnitude either side of the default 0.1 — and rejects only
+        // the extreme f64 corners the fuzzer surfaces.
+        const INIT_SCALE_MIN: f64 = 1e-10;
+        const INIT_SCALE_MAX: f64 = 1e10;
+        if !(INIT_SCALE_MIN..=INIT_SCALE_MAX).contains(&self.init_scale) {
+            return Err(CronosGanError::InvalidConfig {
+                detail: format!(
+                    "LiquidConfig.init_scale = {} outside the supported range [{}, {}]; extreme values cause f64 overflow in parameter products before clipping can rescue τ",
+                    self.init_scale, INIT_SCALE_MIN, INIT_SCALE_MAX
+                ),
+            });
+        }
         Ok(())
     }
 
@@ -499,6 +531,68 @@ mod tests {
         let cfg = LiquidConfig::new(8, 4, 2).with_tau_bounds(2.0, 1.0);
         let err = LiquidNetwork::from_seed(cfg, CronosSeed(42)).unwrap_err();
         assert!(matches!(err, CronosGanError::InvalidConfig { .. }));
+    }
+
+    /// Phase 7a.1: the formerly-accepted-now-rejected config the
+    /// Phase 5b fuzzer found. dt and tau_min are each individually
+    /// finite-positive, but `dt / tau_min` overflows f64 and the τ
+    /// values went to NaN during rollout before this validation gate
+    /// was added.
+    #[test]
+    fn invalid_config_dt_over_tau_min_overflow() {
+        let cfg = LiquidConfig {
+            state_dim: 4,
+            input_dim: 3,
+            output_dim: 1,
+            dt: 1.407_479_369_009_508e234,
+            tau_min: 1.498_943_675_141_439_8e-179,
+            tau_max: 5.347_589_358_449_688e-42,
+            init_scale: 0.1,
+        };
+        let err = LiquidNetwork::from_seed(cfg, CronosSeed(42)).unwrap_err();
+        match err {
+            CronosGanError::InvalidConfig { detail } => {
+                assert!(
+                    detail.contains("dt/tau_min")
+                        && (detail.contains("overflows") || detail.contains("inf")),
+                    "expected dt/tau_min overflow detail, got: {}",
+                    detail
+                );
+            }
+            other => panic!("expected InvalidConfig, got {:?}", other),
+        }
+    }
+
+    /// Phase 7a.1: init_scale outside the supported [1e-10, 1e10]
+    /// range is rejected. Extreme values cause parameter products to
+    /// overflow downstream of validation.
+    #[test]
+    fn invalid_config_init_scale_too_large() {
+        let cfg = LiquidConfig::new(4, 1, 1).with_init_scale(1.741e241);
+        let err = LiquidNetwork::from_seed(cfg, CronosSeed(42)).unwrap_err();
+        assert!(matches!(err, CronosGanError::InvalidConfig { .. }));
+    }
+
+    #[test]
+    fn invalid_config_init_scale_too_small() {
+        let cfg = LiquidConfig::new(4, 1, 1).with_init_scale(1e-15);
+        let err = LiquidNetwork::from_seed(cfg, CronosSeed(42)).unwrap_err();
+        assert!(matches!(err, CronosGanError::InvalidConfig { .. }));
+    }
+
+    /// Phase 7a.1: the new bounds are *inclusive* at the boundary —
+    /// 1e-10 and 1e10 are accepted; 1e-10 - ε and 1e10 + ε are not.
+    /// Default init_scale (0.1) is well inside the range.
+    #[test]
+    fn init_scale_boundary_values_accepted() {
+        for scale in [1e-10, 1e-5, 0.1, 1.0, 1e5, 1e10] {
+            let cfg = LiquidConfig::new(4, 1, 1).with_init_scale(scale);
+            assert!(
+                LiquidNetwork::from_seed(cfg, CronosSeed(42)).is_ok(),
+                "init_scale = {} should be accepted",
+                scale
+            );
+        }
     }
 
     #[test]

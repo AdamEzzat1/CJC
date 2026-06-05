@@ -349,20 +349,23 @@ fn fuzz_random_liquid_configs() {
         .with_iterations(1024)
         .for_each(|bytes: &[u8]| {
             let mut c = 0_usize;
-            // Dims may be 0 (to exercise InvalidConfig rejection).
-            // Float fields stay in the realistic regime — the
-            // extreme-f64 corner where `dt / tau_min` overflows
-            // currently slips past `LiquidConfig::validate` and
-            // breaks the documented "τ clipped by construction"
-            // invariant; that's tracked as a separate hardening task
-            // (spawned at the time this fuzz target was added).
+            // Phase 7a.1: full f64 range for every float field — the
+            // previous workaround that bounded these to realistic
+            // values is no longer needed now that
+            // `LiquidConfig::validate` rejects dt/tau_min overflow
+            // and out-of-range init_scale.
+            //
+            // The contract: every random config either
+            // - passes `from_seed` (in which case ‖τ‖ ∈ [tau_min,
+            //   tau_max] is enforced by construction), OR
+            // - returns `InvalidConfig` (no panic, no NaN).
             let state_dim = take_u8(bytes, &mut c) as usize % 8;
             let input_dim = take_u8(bytes, &mut c) as usize % 4;
             let output_dim = take_u8(bytes, &mut c) as usize % 4;
-            let dt = bounded_f64(bytes, &mut c, 0.01, 5.0);
-            let tau_min = bounded_f64(bytes, &mut c, 0.01, 0.5);
-            let tau_max = bounded_f64(bytes, &mut c, 1.0, 100.0);
-            let init_scale = bounded_f64(bytes, &mut c, 0.001, 1.0);
+            let dt = take_f64(bytes, &mut c);
+            let tau_min = take_f64(bytes, &mut c);
+            let tau_max = take_f64(bytes, &mut c);
+            let init_scale = take_f64(bytes, &mut c);
 
             let cfg = LiquidConfig {
                 state_dim,
