@@ -1,0 +1,37 @@
+[package]
+name = "cjc-cronos-gan"
+description = "Experimental deterministic temporal adversarial modeling — State Space Model vs Liquid Neural Network GAN with byte-identical replay (Phase 1 SCAFFOLDING)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+# Experimental research crate — not yet published. Phase 1 ships the core
+# temporal primitives + SSM + Liquid forward-step stubs + determinism types.
+# Subsequent phases add training, GAN layer, experiment runner, full test
+# suite, and Obsidian vault documentation. See cjc-cronos-gan/README.md for
+# the phased roadmap.
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+cjc-repro = { workspace = true }
+cjc-runtime = { workspace = true }
+cjc-locke = { workspace = true }
+cjc-data = { workspace = true }
+cjc-ad = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"
+bolero = "0.13.4"
+
+[features]
+# Phase 7a.3 — trace-based replay debugging. Enables the `trace` module
+# and `TemporalGanTrainer::step_with_trace`. Adds no external deps; the
+# trace machinery is fully self-contained (FNV-1a hash + tab-separated
+# key=value lines).
+trace = []
