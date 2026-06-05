@@ -92,6 +92,27 @@ pub const SWEEP_DATAFRAME_COLUMNS: [&str; 17] = [
     "eval_absolute_gap_std",
 ];
 
+/// Phase 7a.2: the 10 column names produced by
+/// [`disagreement_trajectory_to_dataframe`] and
+/// [`sweep_disagreement_trajectory_to_dataframe`], in canonical order.
+///
+/// Semantic note: within a row, `ssm_loss` / `liquid_loss` are taken
+/// **before** that step's gradient update; the disagreement columns
+/// are computed **after**. The two halves are aligned by training
+/// step index but represent different points within the step.
+pub const TRAJECTORY_DATAFRAME_COLUMNS: [&str; 10] = [
+    "step",
+    "dataset",
+    "mode",
+    "seed_idx",
+    "ssm_score",
+    "liquid_score",
+    "absolute_gap",
+    "regime_shift_score",
+    "ssm_loss",
+    "liquid_loss",
+];
+
 // ─── Lift function ───────────────────────────────────────────────────────
 
 /// Convert an [`ExperimentSweepReport`] into a tabular
@@ -270,6 +291,161 @@ pub fn experiment_report_to_dataframe(
     ];
 
     DataFrame::from_columns(cols).expect("experiment_report_to_dataframe column lengths agree")
+}
+
+// ─── Phase 7a.2 — per-timestep trajectory lifts ─────────────────────────
+
+/// Lift a single [`crate::ExperimentReport`]'s training-time
+/// disagreement trajectory into a [`cjc_data::DataFrame`].
+///
+/// Output shape: one row per training step in the report's
+/// `disagreement_trajectory` (length `n_train_steps + 1` — includes the
+/// "initial step" the trainer takes before the loop). Columns: see
+/// [`TRAJECTORY_DATAFRAME_COLUMNS`].
+///
+/// The `seed_idx` column is always 0 in the single-report variant;
+/// the sweep variant uses it to distinguish per-seed trajectories
+/// within the same `(dataset, mode)` cell.
+///
+/// # Use cases
+///
+/// - **Phase 7b segmentation**: regime_shift_score per step is the
+///   signal the segmentation algorithm reads.
+/// - **Phase 7b probabilistic forecasting**: absolute_gap per step
+///   feeds the variance estimator.
+/// - **cjc-locke E9050-E9054 time-series detectors**: the row layout
+///   (one row per ordered timestep) lets Locke's existing temporal
+///   detectors (unsorted, train-test overlap, future-leakage cutoff)
+///   operate on Cronos output directly.
+pub fn disagreement_trajectory_to_dataframe(
+    report: &crate::experiment::ExperimentReport,
+) -> DataFrame {
+    let n_rows = report.disagreement_trajectory.len();
+    // The training_trajectory has the same length as
+    // disagreement_trajectory (1 initial + n_train_steps).
+    debug_assert_eq!(report.training_trajectory.ssm_losses.len(), n_rows);
+
+    let steps: Vec<f64> = (0..n_rows).map(|i| i as f64).collect();
+    let datasets: Vec<String> = vec![report.dataset_label.to_string(); n_rows];
+    let modes: Vec<String> = vec![report.mode.label().to_string(); n_rows];
+    let seed_idxs: Vec<f64> = vec![0.0; n_rows];
+
+    let ssm_scores: Vec<f64> = report
+        .disagreement_trajectory
+        .iter()
+        .map(|d| d.ssm_score)
+        .collect();
+    let liq_scores: Vec<f64> = report
+        .disagreement_trajectory
+        .iter()
+        .map(|d| d.liquid_score)
+        .collect();
+    let gaps: Vec<f64> = report
+        .disagreement_trajectory
+        .iter()
+        .map(|d| d.absolute_gap)
+        .collect();
+    let regime_shifts: Vec<f64> = report
+        .disagreement_trajectory
+        .iter()
+        .map(|d| d.regime_shift_score)
+        .collect();
+    let ssm_losses: Vec<f64> = report.training_trajectory.ssm_losses.clone();
+    let liq_losses: Vec<f64> = report.training_trajectory.liquid_losses.clone();
+
+    let cols: Vec<(String, Column)> = vec![
+        ("step".to_string(), Column::Float(steps)),
+        ("dataset".to_string(), Column::Str(datasets)),
+        ("mode".to_string(), Column::Str(modes)),
+        ("seed_idx".to_string(), Column::Float(seed_idxs)),
+        ("ssm_score".to_string(), Column::Float(ssm_scores)),
+        ("liquid_score".to_string(), Column::Float(liq_scores)),
+        ("absolute_gap".to_string(), Column::Float(gaps)),
+        ("regime_shift_score".to_string(), Column::Float(regime_shifts)),
+        ("ssm_loss".to_string(), Column::Float(ssm_losses)),
+        ("liquid_loss".to_string(), Column::Float(liq_losses)),
+    ];
+
+    DataFrame::from_columns(cols)
+        .expect("disagreement_trajectory_to_dataframe column lengths agree")
+}
+
+/// Lift an entire [`ExperimentSweepReport`]'s training-time
+/// disagreement trajectories into one wide [`cjc_data::DataFrame`].
+///
+/// Output shape: `Σ_cell (n_seeds × (n_train_steps + 1))` rows. Rows
+/// are emitted in canonical order — cells outer ([`SWEEP_DATASETS`] ×
+/// [`SWEEP_MODES`]), seeds middle (0..n_seeds), steps inner
+/// (0..n_train_steps + 1). This deterministic ordering means the
+/// resulting DataFrame is byte-identical for the same input.
+///
+/// Use this when you want to analyze the disagreement evolution
+/// across all sweep cells in one tabular pass — e.g. feeding into
+/// cjc-locke's `validate(df, opts)` pipeline alongside the
+/// [`cronos_default_detectors`] cell-level detectors.
+pub fn sweep_disagreement_trajectory_to_dataframe(
+    report: &ExperimentSweepReport,
+) -> DataFrame {
+    // Pre-compute row count exactly. Each cell contributes
+    // n_seeds × (n_train_steps + 1) rows; each per_seed_report has
+    // the same trajectory length because the cell's ExperimentConfig
+    // is shared across seeds.
+    let n_rows: usize = report
+        .cells
+        .iter()
+        .map(|c| {
+            c.per_seed_reports
+                .iter()
+                .map(|r| r.disagreement_trajectory.len())
+                .sum::<usize>()
+        })
+        .sum();
+
+    let mut steps: Vec<f64> = Vec::with_capacity(n_rows);
+    let mut datasets: Vec<String> = Vec::with_capacity(n_rows);
+    let mut modes: Vec<String> = Vec::with_capacity(n_rows);
+    let mut seed_idxs: Vec<f64> = Vec::with_capacity(n_rows);
+    let mut ssm_scores: Vec<f64> = Vec::with_capacity(n_rows);
+    let mut liq_scores: Vec<f64> = Vec::with_capacity(n_rows);
+    let mut gaps: Vec<f64> = Vec::with_capacity(n_rows);
+    let mut regime_shifts: Vec<f64> = Vec::with_capacity(n_rows);
+    let mut ssm_losses: Vec<f64> = Vec::with_capacity(n_rows);
+    let mut liq_losses: Vec<f64> = Vec::with_capacity(n_rows);
+
+    for cell in &report.cells {
+        let ds_label = cell.dataset.label();
+        let mode_label = cell.mode.label();
+        for (seed_idx, per_seed) in cell.per_seed_reports.iter().enumerate() {
+            for (step, dis) in per_seed.disagreement_trajectory.iter().enumerate() {
+                steps.push(step as f64);
+                datasets.push(ds_label.to_string());
+                modes.push(mode_label.to_string());
+                seed_idxs.push(seed_idx as f64);
+                ssm_scores.push(dis.ssm_score);
+                liq_scores.push(dis.liquid_score);
+                gaps.push(dis.absolute_gap);
+                regime_shifts.push(dis.regime_shift_score);
+                ssm_losses.push(per_seed.training_trajectory.ssm_losses[step]);
+                liq_losses.push(per_seed.training_trajectory.liquid_losses[step]);
+            }
+        }
+    }
+
+    let cols: Vec<(String, Column)> = vec![
+        ("step".to_string(), Column::Float(steps)),
+        ("dataset".to_string(), Column::Str(datasets)),
+        ("mode".to_string(), Column::Str(modes)),
+        ("seed_idx".to_string(), Column::Float(seed_idxs)),
+        ("ssm_score".to_string(), Column::Float(ssm_scores)),
+        ("liquid_score".to_string(), Column::Float(liq_scores)),
+        ("absolute_gap".to_string(), Column::Float(gaps)),
+        ("regime_shift_score".to_string(), Column::Float(regime_shifts)),
+        ("ssm_loss".to_string(), Column::Float(ssm_losses)),
+        ("liquid_loss".to_string(), Column::Float(liq_losses)),
+    ];
+
+    DataFrame::from_columns(cols)
+        .expect("sweep_disagreement_trajectory_to_dataframe column lengths agree")
 }
 
 // ─── Detector: E9500 regime-shift ────────────────────────────────────────

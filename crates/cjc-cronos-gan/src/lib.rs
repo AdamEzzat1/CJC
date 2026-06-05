@@ -149,11 +149,13 @@ pub use experiment::{
 };
 pub use gan::{TemporalGan, TemporalGanConfig, TemporalGanMode, TemporalGanRolloutResult};
 pub use locke_detector::{
-    cronos_default_detectors, experiment_report_to_dataframe, sweep_report_to_dataframe,
-    CronosPersistentDisagreementDetector, CronosRegimeShiftDetector,
-    CronosSsmEvalDegradationDetector, DEFAULT_ABSOLUTE_GAP_THRESHOLD,
-    DEFAULT_REGIME_SHIFT_THRESHOLD, DEFAULT_SSM_LOSS_DEGRADATION_RATIO,
-    SWEEP_DATAFRAME_COLUMNS,
+    cronos_default_detectors, disagreement_trajectory_to_dataframe,
+    experiment_report_to_dataframe, sweep_disagreement_trajectory_to_dataframe,
+    sweep_report_to_dataframe, CronosPersistentDisagreementDetector,
+    CronosRegimeShiftDetector, CronosSsmEvalDegradationDetector,
+    DEFAULT_ABSOLUTE_GAP_THRESHOLD, DEFAULT_REGIME_SHIFT_THRESHOLD,
+    DEFAULT_SSM_LOSS_DEGRADATION_RATIO, SWEEP_DATAFRAME_COLUMNS,
+    TRAJECTORY_DATAFRAME_COLUMNS,
 };
 pub use schedule::LambdaSchedule;
 pub use gan_trainer::{Role, TemporalGanTrainStep, TemporalGanTrainer};

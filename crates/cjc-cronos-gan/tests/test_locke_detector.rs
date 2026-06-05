@@ -11,11 +11,12 @@
 use std::sync::Arc;
 
 use cjc_cronos_gan::{
-    cronos_default_detectors, experiment_report_to_dataframe, run_experiment,
-    run_experiment_sweep, sweep_report_to_dataframe, CronosDataset,
+    cronos_default_detectors, disagreement_trajectory_to_dataframe,
+    experiment_report_to_dataframe, run_experiment, run_experiment_sweep,
+    sweep_disagreement_trajectory_to_dataframe, sweep_report_to_dataframe, CronosDataset,
     CronosPersistentDisagreementDetector, CronosRegimeShiftDetector, CronosSeed,
     CronosSsmEvalDegradationDetector, ExperimentConfig, SweepBaseConfig, TemporalGanConfig,
-    SWEEP_DATAFRAME_COLUMNS, SWEEP_DATASETS, SWEEP_MODES,
+    SWEEP_DATAFRAME_COLUMNS, SWEEP_DATASETS, SWEEP_MODES, TRAJECTORY_DATAFRAME_COLUMNS,
 };
 use cjc_data::{Column, DataFrame};
 use cjc_locke::custom_detector::{BeliefAxisSet, CustomDetector, FindingSink};
@@ -430,6 +431,196 @@ fn cronos_default_detectors_returns_three_distinct_detectors() {
     let codes: Vec<&str> = detectors.iter().map(|d| d.code()).collect();
     assert_eq!(codes, vec!["E9500", "E9501", "E9502"]);
 }
+
+// ─── § G Phase 7a.2 per-timestep trajectory lifts (8) ──────────────────
+
+#[test]
+fn trajectory_lift_has_one_row_per_disagreement_step() {
+    let gan_cfg = TemporalGanConfig::ssm_as_generator(4, 1, 1, 0.1);
+    let cfg = ExperimentConfig::new(gan_cfg, CronosDataset::RegimeShift, 15)
+        .with_n_train_steps(8)
+        .with_lr(1e-2);
+    let report = run_experiment(&cfg, CronosSeed(42)).unwrap();
+    let df = disagreement_trajectory_to_dataframe(&report);
+    // n_train_steps + 1 = initial step + 8 update steps = 9 rows.
+    let expected_rows = report.disagreement_trajectory.len();
+    assert_eq!(expected_rows, cfg.n_train_steps + 1);
+    for (name, col) in &df.columns {
+        let len = match col {
+            Column::Str(v) => v.len(),
+            Column::Float(v) => v.len(),
+            _ => 0,
+        };
+        assert_eq!(
+            len, expected_rows,
+            "column `{}` has {} rows, expected {}",
+            name, len, expected_rows
+        );
+    }
+}
+
+#[test]
+fn trajectory_lift_canonical_column_order() {
+    let gan_cfg = TemporalGanConfig::symmetric(4, 1, 1);
+    let cfg = ExperimentConfig::new(gan_cfg, CronosDataset::SmoothSine, 10)
+        .with_n_train_steps(5)
+        .with_lr(1e-2);
+    let report = run_experiment(&cfg, CronosSeed(42)).unwrap();
+    let df = disagreement_trajectory_to_dataframe(&report);
+    assert_eq!(df.columns.len(), TRAJECTORY_DATAFRAME_COLUMNS.len());
+    for (i, expected_name) in TRAJECTORY_DATAFRAME_COLUMNS.iter().enumerate() {
+        assert_eq!(df.columns[i].0, *expected_name);
+    }
+}
+
+#[test]
+fn trajectory_lift_step_column_is_zero_to_n_inclusive() {
+    let gan_cfg = TemporalGanConfig::symmetric(4, 1, 1);
+    let cfg = ExperimentConfig::new(gan_cfg, CronosDataset::NoisySine, 10)
+        .with_n_train_steps(6)
+        .with_lr(1e-2);
+    let report = run_experiment(&cfg, CronosSeed(42)).unwrap();
+    let df = disagreement_trajectory_to_dataframe(&report);
+    let steps = match df.columns.iter().find(|(n, _)| n == "step") {
+        Some((_, Column::Float(v))) => v.clone(),
+        _ => panic!("step column missing"),
+    };
+    let expected: Vec<f64> = (0..=cfg.n_train_steps).map(|i| i as f64).collect();
+    assert_eq!(steps, expected);
+}
+
+#[test]
+fn trajectory_lift_numeric_values_match_source_report() {
+    let gan_cfg = TemporalGanConfig::ssm_as_generator(4, 1, 1, 0.1);
+    let cfg = ExperimentConfig::new(gan_cfg, CronosDataset::ChaoticSpike, 12)
+        .with_n_train_steps(4)
+        .with_lr(1e-2);
+    let report = run_experiment(&cfg, CronosSeed(42)).unwrap();
+    let df = disagreement_trajectory_to_dataframe(&report);
+    let gap_col = match df.columns.iter().find(|(n, _)| n == "absolute_gap") {
+        Some((_, Column::Float(v))) => v.clone(),
+        _ => panic!("absolute_gap column missing"),
+    };
+    let ssm_loss_col = match df.columns.iter().find(|(n, _)| n == "ssm_loss") {
+        Some((_, Column::Float(v))) => v.clone(),
+        _ => panic!("ssm_loss column missing"),
+    };
+    for (i, dis) in report.disagreement_trajectory.iter().enumerate() {
+        assert_eq!(
+            gap_col[i].to_bits(),
+            dis.absolute_gap.to_bits(),
+            "absolute_gap mismatch at step {}",
+            i
+        );
+    }
+    for (i, loss) in report.training_trajectory.ssm_losses.iter().enumerate() {
+        assert_eq!(ssm_loss_col[i].to_bits(), loss.to_bits());
+    }
+}
+
+#[test]
+fn trajectory_lift_seed_idx_zero_for_single_experiment() {
+    let gan_cfg = TemporalGanConfig::symmetric(4, 1, 1);
+    let cfg = ExperimentConfig::new(gan_cfg, CronosDataset::SmoothSine, 10)
+        .with_n_train_steps(3)
+        .with_lr(1e-2);
+    let report = run_experiment(&cfg, CronosSeed(42)).unwrap();
+    let df = disagreement_trajectory_to_dataframe(&report);
+    let seed_idx = match df.columns.iter().find(|(n, _)| n == "seed_idx") {
+        Some((_, Column::Float(v))) => v.clone(),
+        _ => panic!("seed_idx column missing"),
+    };
+    for v in seed_idx {
+        assert_eq!(v.to_bits(), 0.0_f64.to_bits());
+    }
+}
+
+#[test]
+fn sweep_trajectory_lift_row_count_is_cells_times_seeds_times_steps() {
+    let base = SweepBaseConfig::new(4, 1, 1, 10, 4)
+        .with_lambda_disagreement(0.1)
+        .with_n_seeds(2);
+    let report = run_experiment_sweep(&base, CronosSeed(42)).unwrap();
+    let df = sweep_disagreement_trajectory_to_dataframe(&report);
+    // 15 cells × 2 seeds × (4 + 1) steps = 150 rows.
+    let expected = 15 * 2 * (base.n_train_steps + 1);
+    for (_, col) in &df.columns {
+        let len = match col {
+            Column::Str(v) => v.len(),
+            Column::Float(v) => v.len(),
+            _ => 0,
+        };
+        assert_eq!(len, expected, "expected {} rows", expected);
+    }
+}
+
+#[test]
+fn sweep_trajectory_lift_canonical_order_outer_inner() {
+    let base = SweepBaseConfig::new(4, 1, 1, 10, 3)
+        .with_lambda_disagreement(0.1)
+        .with_n_seeds(2);
+    let report = run_experiment_sweep(&base, CronosSeed(42)).unwrap();
+    let df = sweep_disagreement_trajectory_to_dataframe(&report);
+    let datasets = match df.columns.iter().find(|(n, _)| n == "dataset") {
+        Some((_, Column::Str(v))) => v.clone(),
+        _ => panic!("dataset col missing"),
+    };
+    let modes = match df.columns.iter().find(|(n, _)| n == "mode") {
+        Some((_, Column::Str(v))) => v.clone(),
+        _ => panic!("mode col missing"),
+    };
+    let seed_idxs = match df.columns.iter().find(|(n, _)| n == "seed_idx") {
+        Some((_, Column::Float(v))) => v.clone(),
+        _ => panic!("seed_idx col missing"),
+    };
+    let steps_per_seed = base.n_train_steps + 1;
+    // First chunk of `steps_per_seed` rows: (smooth_sine, symmetric, seed=0)
+    for i in 0..steps_per_seed {
+        assert_eq!(datasets[i], "smooth_sine");
+        assert_eq!(modes[i], "symmetric");
+        assert_eq!(seed_idxs[i].to_bits(), 0.0_f64.to_bits());
+    }
+    // Second chunk: (smooth_sine, symmetric, seed=1)
+    for i in steps_per_seed..2 * steps_per_seed {
+        assert_eq!(datasets[i], "smooth_sine");
+        assert_eq!(modes[i], "symmetric");
+        assert_eq!(seed_idxs[i].to_bits(), 1.0_f64.to_bits());
+    }
+    // Third chunk: (smooth_sine, ssm_as_generator, seed=0) — mode inner.
+    for i in 2 * steps_per_seed..3 * steps_per_seed {
+        assert_eq!(datasets[i], "smooth_sine");
+        assert_eq!(modes[i], "ssm_as_generator");
+        assert_eq!(seed_idxs[i].to_bits(), 0.0_f64.to_bits());
+    }
+}
+
+#[test]
+fn trajectory_lifts_are_deterministic_across_runs() {
+    let gan_cfg = TemporalGanConfig::ssm_as_generator(4, 1, 1, 0.1);
+    let cfg = ExperimentConfig::new(gan_cfg, CronosDataset::RegimeShift, 12)
+        .with_n_train_steps(5)
+        .with_lr(1e-2);
+    let r1 = run_experiment(&cfg, CronosSeed(42)).unwrap();
+    let r2 = run_experiment(&cfg, CronosSeed(42)).unwrap();
+    let df1 = disagreement_trajectory_to_dataframe(&r1);
+    let df2 = disagreement_trajectory_to_dataframe(&r2);
+    // Compare every numeric column bit-by-bit.
+    for ((n1, c1), (n2, c2)) in df1.columns.iter().zip(df2.columns.iter()) {
+        assert_eq!(n1, n2);
+        if let (Column::Float(v1), Column::Float(v2)) = (c1, c2) {
+            for (a, b) in v1.iter().zip(v2.iter()) {
+                assert_eq!(
+                    a.to_bits(),
+                    b.to_bits(),
+                    "trajectory column `{}` drifted across runs",
+                    n1
+                );
+            }
+        }
+    }
+}
+
+// ─── § F Bundle helper + malformed-DataFrame safety (carried from Phase 6.1) ─
 
 #[test]
 fn detectors_silently_no_op_on_malformed_dataframe() {
