@@ -105,6 +105,9 @@ struct Config {
     use_color: bool,
     diag_format: cjc_diag::DiagnosticFormat,
     output_format: OutputFormat,
+    /// CANA Phase-1 passive observer: when set, emit a JSON sidecar at this
+    /// path with per-function MIR features. Opt-in; never affects execution.
+    cana_report: Option<String>,
 }
 
 /// Known flags for typo suggestions.
@@ -114,6 +117,7 @@ const KNOWN_FLAGS: &[&str] = &[
     "--time",
     "--mir-opt",
     "--mir-mono",
+    "--cana-report",
     "--multi-file",
     "--color",
     "--no-color",
@@ -233,6 +237,7 @@ impl Config {
                     use_color: true,
                     diag_format: cjc_diag::DiagnosticFormat::Rich,
                     output_format: OutputFormat::Plain,
+                    cana_report: None,
                 };
             }
         }
@@ -246,6 +251,7 @@ impl Config {
         let mut force_color: Option<bool> = None;
         let mut diag_format = cjc_diag::DiagnosticFormat::Rich;
         let mut output_format = OutputFormat::Plain;
+        let mut cana_report: Option<String> = None;
         let mut positional: Vec<String> = Vec::new();
 
         let mut i = 1;
@@ -256,6 +262,23 @@ impl Config {
                 "--mir-opt" => mir_opt = true,
                 "--mir-mono" => mir_mono = true,
                 "--multi-file" => multi_file = true,
+                // CANA Phase-1 sidecar emission. Two forms:
+                //   --cana-report PATH
+                //   --cana-report=PATH
+                "--cana-report" => {
+                    i += 1;
+                    if i >= args.len() {
+                        cli_error("--cana-report requires a path argument");
+                    }
+                    cana_report = Some(args[i].clone());
+                }
+                arg if arg.starts_with("--cana-report=") => {
+                    let path = &arg["--cana-report=".len()..];
+                    if path.is_empty() {
+                        cli_error("--cana-report= requires a non-empty path");
+                    }
+                    cana_report = Some(path.to_string());
+                }
                 "--color" => force_color = Some(true),
                 "--no-color" => force_color = Some(false),
                 "--diagnostic-format" => {
@@ -375,6 +398,7 @@ impl Config {
             use_color,
             diag_format,
             output_format,
+            cana_report,
         }
     }
 }
@@ -385,6 +409,35 @@ impl Config {
 fn cli_error(msg: &str) -> ! {
     eprintln!("error: {}", msg);
     process::exit(1);
+}
+
+// ── CANA Phase-1: passive observer sidecar ──────────────────────────
+//
+// Lower AST→HIR→MIR (same pattern as `cjc_mir_exec::run_program_optimized`),
+// run the CANA featurizer, and write the JSON report. Never aborts on
+// error — the goal of Phase-1 is observation, not compilation gating.
+fn emit_cana_report(program: &cjc_ast::Program, path: &str) {
+    let mut ast_lowering = cjc_hir::AstLowering::new();
+    let hir = ast_lowering.lower_program(program);
+    let mut hir_to_mir = cjc_mir::HirToMir::new();
+    let mir = hir_to_mir.lower_program(&hir);
+
+    let report = cjc_cana::analyze_program(&mir);
+    let bytes = report.canonical_bytes();
+    match std::fs::write(path, &bytes) {
+        Ok(()) => {
+            eprintln!(
+                "[cana] wrote {} bytes to {} (program_hash={}, feature_hash={})",
+                bytes.len(),
+                path,
+                report.features.program_hash.to_hex(),
+                report.features.feature_hash.to_hex()
+            );
+        }
+        Err(e) => {
+            eprintln!("[cana] warning: failed to write report to {}: {}", path, e);
+        }
+    }
 }
 
 /// Suggest the closest known flag using edit distance (Levenshtein).
@@ -745,6 +798,7 @@ fn print_usage() {
     eprintln!("  --time                           Print execution time after running");
     eprintln!("  --mir-opt                        Enable MIR optimizations (CF + DCE)");
     eprintln!("  --mir-mono                       Enable MIR monomorphization");
+    eprintln!("  --cana-report <path>             Emit CANA Phase-1 MIR feature sidecar to <path>");
     eprintln!("  --multi-file                     Enable multi-file module resolution");
     eprintln!("  --color                          Force color output");
     eprintln!("  --no-color                       Disable color output");
@@ -894,6 +948,14 @@ fn cmd_run(source: &str, filename: &str, config: &Config) {
         if let Err(e) = cjc_mir_exec::verify_nogc(&program) {
             eprintln!("NoGC verification failed:\n{}", e);
             process::exit(EXIT_TYPE);
+        }
+
+        // CANA Phase-1: passive observer. Emit MIR feature sidecar if
+        // --cana-report=PATH was specified. Failure to write the sidecar
+        // is reported but does not abort compilation — CANA must never
+        // change which executor runs or which optimisations apply.
+        if let Some(path) = &config.cana_report {
+            emit_cana_report(&program, path);
         }
 
         if config.mir_mono {
