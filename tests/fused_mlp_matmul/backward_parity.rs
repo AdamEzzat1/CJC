@@ -142,3 +142,19 @@ fn backward_grads_match_elu() {
     assert_bit_identical(&fused.1, &unfused.1, "grad_b1 elu");
     assert_bit_identical(&fused.2, &unfused.2, "grad_w2 elu");
 }
+
+#[test]
+fn backward_grads_match_selu() {
+    let (fused, unfused) = fused_vs_unfused_grads(2, 2, 4, 2, Activation::Selu);
+    assert_bit_identical(&fused.0, &unfused.0, "grad_w1 selu");
+    assert_bit_identical(&fused.1, &unfused.1, "grad_b1 selu");
+    assert_bit_identical(&fused.2, &unfused.2, "grad_w2 selu");
+}
+
+#[test]
+fn backward_grads_match_sin() {
+    let (fused, unfused) = fused_vs_unfused_grads(1, 2, 2, 1, Activation::SinAct);
+    assert_bit_identical(&fused.0, &unfused.0, "grad_w1 sin");
+    assert_bit_identical(&fused.1, &unfused.1, "grad_b1 sin");
+    assert_bit_identical(&fused.2, &unfused.2, "grad_w2 sin");
+}
