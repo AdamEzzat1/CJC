@@ -4,33 +4,9 @@
 //! and verifies that cjc-eval and cjc-mir-exec produce the exact same stdout.
 //! This is the load-bearing AST↔MIR parity gate for the new primitive.
 
-fn run_eval(src: &str, seed: u64) -> Vec<String> {
-    let (prog, diags) = cjc_parser::parse_source(src);
-    assert!(!diags.has_errors(), "parse errors: {:?}", diags.diagnostics);
-    let mut interp = cjc_eval::Interpreter::new(seed);
-    interp
-        .exec(&prog)
-        .unwrap_or_else(|e| panic!("eval failed: {e:?}"));
-    interp.output
-}
-
-fn run_mir(src: &str, seed: u64) -> Vec<String> {
-    let (prog, diags) = cjc_parser::parse_source(src);
-    assert!(!diags.has_errors(), "parse errors: {:?}", diags.diagnostics);
-    let (_val, executor) = cjc_mir_exec::run_program_with_executor(&prog, seed)
-        .unwrap_or_else(|e| panic!("mir-exec failed: {e:?}"));
-    executor.output
-}
-
-fn run_parity(src: &str, seed: u64) -> Vec<String> {
-    let a = run_eval(src, seed);
-    let b = run_mir(src, seed);
-    assert_eq!(
-        a, b,
-        "parity violation between cjc-eval and cjc-mir-exec\neval: {a:?}\nmir: {b:?}"
-    );
-    a
-}
+#[path = "../fused_test_helpers/mod.rs"]
+mod helpers;
+use helpers::{run_eval, run_mir, run_parity};
 
 #[test]
 fn fused_matmul_dot_basic_call_runs_in_both_executors() {
