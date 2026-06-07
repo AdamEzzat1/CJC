@@ -430,15 +430,36 @@ fn scan_body_for_accumulations(
     }
 }
 
+/// Extract the variable name from a `Var` or `VarLocal` expression.
+///
+/// After the Tier-0 perf slot-resolution pass (T0-b Stage 3) in `HirToMir`,
+/// function-local bindings are emitted as `MirExprKind::VarLocal { name, slot }`
+/// instead of `MirExprKind::Var(name)`. Pattern-matchers in this module must
+/// accept both forms so reduction analysis still works on slot-resolved MIR.
+fn var_name(expr: &MirExpr) -> Option<&str> {
+    match &expr.kind {
+        MirExprKind::Var(name) => Some(name.as_str()),
+        MirExprKind::VarLocal { name, .. } => Some(name.as_str()),
+        _ => None,
+    }
+}
+
 /// Match the pattern `acc = acc ⊕ expr` in an expression.
 ///
 /// Returns `Some((accumulator_name, op))` if matched.
+///
+/// Accepts both `Var` (pre-slot-resolution) and `VarLocal { name, .. }`
+/// (post-slot-resolution) forms for the accumulator references. The pre-2026
+/// version of this function only matched `Var`, which silently broke the
+/// reduction analyser on every function that went through HirToMir's
+/// slot-resolution pass.
 fn match_accumulation_pattern(expr: &MirExpr) -> Option<(String, ReductionOp)> {
-    // Pattern: Assign { target: Var(acc), value: Binary { op, left: Var(acc), right: _ } }
+    // Pattern: Assign { target: <var>(acc), value: Binary { op, left: <var>(acc), right: _ } }
+    // where <var> is either `Var(name)` or `VarLocal { name, .. }`.
     if let MirExprKind::Assign { target, value } = &expr.kind {
-        if let MirExprKind::Var(acc_name) = &target.kind {
+        if let Some(acc_name) = var_name(target) {
             if let MirExprKind::Binary { op, left, .. } = &value.kind {
-                if let MirExprKind::Var(left_name) = &left.kind {
+                if let Some(left_name) = var_name(left) {
                     if left_name == acc_name {
                         let reduction_op = match op {
                             BinOp::Add => Some(ReductionOp::Add),
@@ -448,7 +469,7 @@ fn match_accumulation_pattern(expr: &MirExpr) -> Option<(String, ReductionOp)> {
                             BinOp::BitAnd => Some(ReductionOp::BitwiseAnd),
                             _ => None,
                         };
-                        return reduction_op.map(|rop| (acc_name.clone(), rop));
+                        return reduction_op.map(|rop| (acc_name.to_string(), rop));
                     }
                 }
             }
