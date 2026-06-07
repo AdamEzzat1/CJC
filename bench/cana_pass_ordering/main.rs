@@ -119,6 +119,75 @@ fn classify(n: i64) -> i64 {
 print(classify(40));
 "#;
 
+/// 6. Float arithmetic — exercises CANA's reduction-axis tracking. Every
+///    float accumulator is a StrictFold per cjc-mir's reduction analyzer.
+///    CANA's DefaultLegalityGate refuses any reorder of these reductions.
+const PROG_FLOAT: &str = r#"
+fn polynomial(x: f64) -> f64 {
+    let a: f64 = 3.14;
+    let b: f64 = 2.71;
+    let c: f64 = 1.41;
+    return a * x * x + b * x + c;
+}
+print(polynomial(1.5));
+"#;
+
+/// 7. Recursive function — exercises per-function ranking on the
+///    call-graph. The driver and recursive helper get separate
+///    PassRecommendation entries.
+///
+/// Uses single-return shape (let-binding the if/else result) to avoid
+/// the dominators OOB on unreachable blocks (`task_9d7ae8b2`).
+const PROG_RECURSIVE: &str = r#"
+fn factorial(n: i64) -> i64 {
+    let result: i64 = if n <= 1 { 1 } else { n * factorial(n - 1) };
+    return result;
+}
+print(factorial(10));
+"#;
+
+/// 8. Larger program — stresses scaling. Multiple loops, multiple
+///    accumulators, multiple functions. Demonstrates CANA's per-function
+///    ranking dispatch when the call graph has heterogeneous structure.
+const PROG_LARGE: &str = r#"
+fn count_evens(n: i64) -> i64 {
+    let mut c: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        if i * 2 / 2 == i {
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+fn count_squares(n: i64) -> i64 {
+    let mut c: i64 = 0;
+    let mut i: i64 = 0;
+    while i * i < n {
+        c = c + 1;
+        i = i + 1;
+    }
+    return c;
+}
+fn sum_to(n: i64) -> i64 {
+    let mut s: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        s = s + i;
+        i = i + 1;
+    }
+    return s;
+}
+fn combined(n: i64) -> i64 {
+    let a: i64 = count_evens(n);
+    let b: i64 = count_squares(n);
+    let c: i64 = sum_to(n);
+    return a + b + c;
+}
+print(combined(50));
+"#;
+
 struct Program {
     name: &'static str,
     source: &'static str,
@@ -130,6 +199,9 @@ const PROGRAMS: &[Program] = &[
     Program { name: "nested", source: PROG_NESTED },
     Program { name: "many_fn", source: PROG_MANY_FN },
     Program { name: "mixed", source: PROG_MIXED },
+    Program { name: "float", source: PROG_FLOAT },
+    Program { name: "recursive", source: PROG_RECURSIVE },
+    Program { name: "large", source: PROG_LARGE },
 ];
 
 // ---------------------------------------------------------------------------
@@ -141,6 +213,10 @@ enum Config {
     NoOpt,
     FixedOpt,
     CanaOpt,
+    /// Phase 5: same as CanaOpt but uses a CachingPassRanker that
+    /// persists across iterations. The first iteration pays the full
+    /// recommendation cost; subsequent iterations get cache hits.
+    CanaCached,
 }
 
 impl Config {
@@ -149,6 +225,7 @@ impl Config {
             Config::NoOpt => "no_opt",
             Config::FixedOpt => "fixed_opt",
             Config::CanaOpt => "cana_opt",
+            Config::CanaCached => "cana_cached",
         }
     }
 }
@@ -166,7 +243,16 @@ struct Measurement {
     output: String,
 }
 
-fn measure(prog: &Program, cfg: Config) -> Measurement {
+type CanaCachedRanker = cjc_cana::CachingPassRanker<
+    cjc_cana::LinearCostModel,
+    cjc_cana::DefaultLegalityGate,
+>;
+
+fn measure(
+    prog: &Program,
+    cfg: Config,
+    cached_ranker: &CanaCachedRanker,
+) -> Measurement {
     let source = prog.source;
 
     // --- COMPILE PHASE -------------------------------------------------
@@ -202,6 +288,21 @@ fn measure(prog: &Program, cfg: Config) -> Measurement {
             cjc_mir::escape::annotate_program(&mut prog);
             // Total invocations counts CANA-chosen passes + defaults for
             // unmapped functions.
+            let fn_names: Vec<String> =
+                mir.functions.iter().map(|f| f.name.clone()).collect();
+            let invocations = plan.total_pass_invocations(&fn_names);
+            (prog, invocations)
+        }
+        Config::CanaCached => {
+            // Phase 5: consult the persistent CachingPassRanker.
+            // On the first iteration this misses; on subsequent
+            // iterations (same source -> same MIR -> same hash)
+            // this hits and skips the full recommendation pipeline.
+            let features = cjc_cana::analyze_program(&mir).features;
+            let report = cached_ranker.rank(&mir, &features);
+            let plan = cjc_cana::pass_plan_from(&report.sequence);
+            let mut prog = cjc_mir::optimize::optimize_program_with_plan(&mir, &plan);
+            cjc_mir::escape::annotate_program(&mut prog);
             let fn_names: Vec<String> =
                 mir.functions.iter().map(|f| f.name.clone()).collect();
             let invocations = plan.total_pass_invocations(&fn_names);
@@ -243,7 +344,17 @@ fn median(values: &mut [u128]) -> u128 {
 // ---------------------------------------------------------------------------
 
 fn main() {
-    let configs = [Config::NoOpt, Config::FixedOpt, Config::CanaOpt];
+    let configs = [
+        Config::NoOpt,
+        Config::FixedOpt,
+        Config::CanaOpt,
+        Config::CanaCached,
+    ];
+
+    // Persistent caching ranker — survives across all programs/iterations.
+    // The first time a program is seen, it misses; subsequent iterations
+    // of THE SAME program get cache hits, demonstrating the Phase 5 win.
+    let cached_ranker = cjc_cana::default_caching_ranker();
 
     println!(
         "{:<10} {:<12} {:>12} {:>12} {:>15} {:<24}",
@@ -252,7 +363,7 @@ fn main() {
     println!("{}", "-".repeat(96));
 
     for prog in PROGRAMS {
-        // Determinism check: all three configs must produce the same output.
+        // Determinism check: all configs must produce the same output.
         let mut canonical_output: Option<String> = None;
 
         for cfg in &configs {
@@ -262,7 +373,7 @@ fn main() {
             let mut output = String::new();
 
             for _ in 0..N_ITERS {
-                let m = measure(prog, *cfg);
+                let m = measure(prog, *cfg, &cached_ranker);
                 compile_samples.push(m.compile_us);
                 run_samples.push(m.run_us);
                 pass_invocations = m.pass_invocations;
@@ -319,6 +430,19 @@ fn main() {
     }
 
     println!("\nDeterminism: ALL CONFIGS produced byte-identical output for every program ✓");
+
+    // Print Phase 5 cache stats at the end.
+    let stats = cached_ranker.stats();
+    println!(
+        "\nPhase 5 cache stats: {} hits, {} misses, {:.1}% hit rate, {} evictions, size={}/{} entries",
+        stats.hits,
+        stats.misses,
+        stats.hit_rate() * 100.0,
+        stats.evictions,
+        stats.size,
+        stats.capacity,
+    );
+
     println!("\nKey questions answered by this run:");
     println!(
         "  1. Does CANA's pass selection match or beat fixed opt on compile time? \
@@ -331,5 +455,9 @@ fn main() {
     println!(
         "  3. Does CANA actually skip passes when they don't help? \
          (compare cana_opt pass_invocations vs fixed_opt)"
+    );
+    println!(
+        "  4. Does Phase 5 caching eliminate the recommendation overhead? \
+         (compare cana_cached vs cana_opt compile_us — cache hits on iterations 2-5)"
     );
 }
