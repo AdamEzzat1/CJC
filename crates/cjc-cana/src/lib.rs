@@ -65,8 +65,10 @@ pub mod cost_model;
 pub mod features;
 pub mod hash;
 pub mod legality;
+pub mod linear_cost_model;
 pub mod memory_proxy;
 pub mod pass_history;
+pub mod pass_ranker;
 pub mod reduction_axes;
 pub mod report;
 
@@ -84,8 +86,13 @@ pub use crate::legality::{
     DefaultLegalityGate, LegalityGate, LegalityVerdict, LegalityViolation, PassSequence,
     ProposedPass,
 };
+pub use crate::linear_cost_model::LinearCostModel;
 pub use crate::memory_proxy::MemoryProxy;
 pub use crate::pass_history::{PassHistory, PassRecord};
+pub use crate::pass_ranker::{
+    default_ranker, FunctionRanking, PassRanker, PassRecommendation, RankingRationale,
+    RankingReport, CANONICAL_PASSES, DEFAULT_SKIP_THRESHOLD,
+};
 pub use crate::reduction_axes::ReductionAxes;
 pub use crate::report::CanaReport;
 

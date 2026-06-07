@@ -76,9 +76,10 @@ impl PassSequence {
 // ---------------------------------------------------------------------------
 
 /// Outcome of running a [`LegalityGate`] over a [`PassSequence`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum LegalityVerdict {
     /// All proposed actions are safe to apply.
+    #[default]
     Approved,
     /// One or more violations were detected. Phase-2 advisors should drop
     /// the affected actions or escalate to the user.
