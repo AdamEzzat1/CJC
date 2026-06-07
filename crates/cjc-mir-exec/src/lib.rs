@@ -4285,90 +4285,132 @@ impl MirExecutor {
                 }
             }
             MirExprKind::Field { object, name } => {
-                if let MirExprKind::Var(obj_name)
-                | MirExprKind::VarLocal { name: obj_name, .. } = &object.kind
-                {
-                    let obj_name = obj_name.clone();
-                    let field_name = name.clone();
-                    let mut obj_val = self
-                        .lookup(&obj_name)
-                        .cloned()
-                        .ok_or_else(|| {
-                            MirExecError::Runtime(format!("undefined variable `{obj_name}`"))
+                // After Tier-0 perf slot-resolution (T0-b Stage 3), local
+                // variables are emitted as `VarLocal { slot, name }` and
+                // their VALUES live in the call frame, NOT the named scope
+                // chain. The pre-fix path used `lookup(name)` which only
+                // walks scopes, so any field-assign on a slot-resolved
+                // local (`let mut b = a; b.x = 99`) panicked with
+                // "undefined variable `b`". Fix: read via slot-first /
+                // name-fallback (see `read_var_value` helper) and write
+                // back to whichever storage held the value.
+                let field_name = name.clone();
+                let (obj_name, mut obj_val, slot_hint) = match &object.kind {
+                    MirExprKind::Var(n) => {
+                        let v = self.lookup(n).cloned().ok_or_else(|| {
+                            MirExecError::Runtime(format!("undefined variable `{n}`"))
                         })?;
-                    match &mut obj_val {
-                        Value::Struct { name: struct_name, fields } => {
-                            // Enforce record immutability at runtime.
-                            if let Some(sd) = self.struct_defs.get(struct_name.as_str()) {
-                                if sd.is_record {
-                                    return Err(MirExecError::Runtime(format!(
-                                        "cannot assign to field `{}` of record `{}`: records are immutable",
-                                        field_name, struct_name
-                                    )));
-                                }
-                            }
-                            fields.insert(field_name, val);
-                        }
-                        _ => {
-                            return Err(MirExecError::Runtime(format!(
-                                "cannot assign field on {}",
-                                obj_val.type_name()
-                            )));
-                        }
+                        (n.clone(), v, None)
                     }
-                    self.assign(&obj_name, obj_val)
-                } else {
-                    Err(MirExecError::Runtime(
-                        "complex field assignment not supported".to_string(),
-                    ))
+                    MirExprKind::VarLocal { slot, name: n } => {
+                        let v = self
+                            .frame_get(*slot)
+                            .cloned()
+                            .or_else(|| self.lookup(n).cloned())
+                            .ok_or_else(|| {
+                                MirExecError::Runtime(format!("undefined variable `{n}`"))
+                            })?;
+                        (n.clone(), v, Some(*slot))
+                    }
+                    _ => {
+                        return Err(MirExecError::Runtime(
+                            "complex field assignment not supported".to_string(),
+                        ));
+                    }
+                };
+                match &mut obj_val {
+                    Value::Struct { name: struct_name, fields } => {
+                        // Enforce record immutability at runtime.
+                        if let Some(sd) = self.struct_defs.get(struct_name.as_str()) {
+                            if sd.is_record {
+                                return Err(MirExecError::Runtime(format!(
+                                    "cannot assign to field `{}` of record `{}`: records are immutable",
+                                    field_name, struct_name
+                                )));
+                            }
+                        }
+                        fields.insert(field_name, val);
+                    }
+                    _ => {
+                        return Err(MirExecError::Runtime(format!(
+                            "cannot assign field on {}",
+                            obj_val.type_name()
+                        )));
+                    }
                 }
+                // Write back: prefer the frame slot when this object came
+                // from one; fall back to named scope (covers top-level
+                // bindings, lambda-lifted closures, and any future
+                // construct whose `VarLocal.name` lives in scope only).
+                if let Some(slot) = slot_hint {
+                    if self.frame_set(slot, obj_val.clone()) {
+                        return Ok(());
+                    }
+                }
+                self.assign(&obj_name, obj_val)
             }
             MirExprKind::Index { object, index } => {
-                if let MirExprKind::Var(obj_name)
-                | MirExprKind::VarLocal { name: obj_name, .. } = &object.kind
-                {
-                    let obj_name = obj_name.clone();
-                    let idx = self.eval_expr(index)?;
-                    let idx = match idx {
-                        Value::Int(i) => i as usize,
-                        _ => {
-                            return Err(MirExecError::Runtime(
-                                "index must be Int".to_string(),
-                            ))
-                        }
-                    };
-                    let mut obj_val = self
-                        .lookup(&obj_name)
-                        .cloned()
-                        .ok_or_else(|| {
-                            MirExecError::Runtime(format!("undefined variable `{obj_name}`"))
-                        })?;
-                    match &mut obj_val {
-                        Value::Array(arr) => {
-                            if idx >= arr.len() {
-                                return Err(MirExecError::Coded(
-                                    cjc_diag::ErrorCode::E8001,
-                                    format!(
-                                        "index {idx} out of bounds for array of length {}",
-                                        arr.len()
-                                    ),
-                                ));
-                            }
-                            Rc::make_mut(arr)[idx] = val;
-                        }
-                        _ => {
-                            return Err(MirExecError::Runtime(format!(
-                                "cannot index-assign on {}",
-                                obj_val.type_name()
-                            )));
-                        }
+                // Same slot-vs-scope fix as the `Field` branch above —
+                // `arr[i] = v` on a slot-resolved local needs frame reads
+                // and frame writes, not just `lookup`/`assign` by name.
+                let idx = self.eval_expr(index)?;
+                let idx = match idx {
+                    Value::Int(i) => i as usize,
+                    _ => {
+                        return Err(MirExecError::Runtime(
+                            "index must be Int".to_string(),
+                        ))
                     }
-                    self.assign(&obj_name, obj_val)
-                } else {
-                    Err(MirExecError::Runtime(
-                        "complex index assignment not supported".to_string(),
-                    ))
+                };
+                let (obj_name, mut obj_val, slot_hint) = match &object.kind {
+                    MirExprKind::Var(n) => {
+                        let v = self.lookup(n).cloned().ok_or_else(|| {
+                            MirExecError::Runtime(format!("undefined variable `{n}`"))
+                        })?;
+                        (n.clone(), v, None)
+                    }
+                    MirExprKind::VarLocal { slot, name: n } => {
+                        let v = self
+                            .frame_get(*slot)
+                            .cloned()
+                            .or_else(|| self.lookup(n).cloned())
+                            .ok_or_else(|| {
+                                MirExecError::Runtime(format!("undefined variable `{n}`"))
+                            })?;
+                        (n.clone(), v, Some(*slot))
+                    }
+                    _ => {
+                        return Err(MirExecError::Runtime(
+                            "complex index assignment not supported".to_string(),
+                        ));
+                    }
+                };
+                match &mut obj_val {
+                    Value::Array(arr) => {
+                        if idx >= arr.len() {
+                            return Err(MirExecError::Coded(
+                                cjc_diag::ErrorCode::E8001,
+                                format!(
+                                    "index {idx} out of bounds for array of length {}",
+                                    arr.len()
+                                ),
+                            ));
+                        }
+                        Rc::make_mut(arr)[idx] = val;
+                    }
+                    _ => {
+                        return Err(MirExecError::Runtime(format!(
+                            "cannot index-assign on {}",
+                            obj_val.type_name()
+                        )));
+                    }
                 }
+                if let Some(slot) = slot_hint {
+                    if self.frame_set(slot, obj_val.clone()) {
+                        return Ok(());
+                    }
+                }
+                self.assign(&obj_name, obj_val)
             }
             _ => Err(MirExecError::Runtime(
                 "invalid assignment target".to_string(),
