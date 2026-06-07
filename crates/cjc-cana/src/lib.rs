@@ -66,13 +66,16 @@ pub mod cost_model;
 pub mod features;
 pub mod fusion;
 pub mod hash;
+pub mod kernel_variant;
 pub mod legality;
 pub mod linear_cost_model;
 pub mod memory_proxy;
 pub mod pass_history;
 pub mod pass_ranker;
+pub mod pressure;
 pub mod reduction_axes;
 pub mod report;
+pub mod thermal_cost_model;
 
 // ---------------------------------------------------------------------------
 // Top-level entry point
