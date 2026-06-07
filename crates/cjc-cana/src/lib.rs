@@ -64,6 +64,7 @@ pub mod caching_ranker;
 pub mod cfg_metrics;
 pub mod cost_model;
 pub mod features;
+pub mod fusion;
 pub mod hash;
 pub mod legality;
 pub mod linear_cost_model;
@@ -85,6 +86,10 @@ pub use crate::caching_ranker::{
 pub use crate::cfg_metrics::CfgMetrics;
 pub use crate::cost_model::{CostEstimate, CostModel, NullCostModel};
 pub use crate::features::{CanaFeatures, FnFeatures};
+pub use crate::fusion::{
+    identify_fusion_candidates, is_native_primitive, ChainEntry, FusionCandidate,
+    FusionPlan, NATIVE_PRIMITIVES,
+};
 pub use crate::hash::{CanaHasher, CfgHash, FeatureHash, ProgramHash};
 pub use crate::legality::{
     DefaultLegalityGate, LegalityGate, LegalityVerdict, LegalityViolation, PassSequence,
