@@ -77,6 +77,13 @@ pub const NATIVE_PRIMITIVES: &[&str] = &[
     "encode_state_fast",
     "score_moves_batch",
     "adam_step",
+    // CANA Phase 3.5a: fused tensor primitives (codegen targets).
+    // A chain like `let h = matmul(a, w); let s = dot(h, v);` is identified
+    // by Phase 3 as a fusion candidate and replaced by Phase 3.5c with a
+    // single `fused_matmul_dot(a_as_vec, w, v)` call. Listing it here lets
+    // the identifier recognise the fused name as already-fused so it does
+    // not re-suggest fusion on top of itself.
+    "fused_matmul_dot",
 ];
 
 /// Lookup helper.

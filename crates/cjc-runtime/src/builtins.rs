@@ -996,6 +996,76 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let sum = crate::accumulator::binned_sum_f64(&products);
             Ok(Some(Value::Float(sum)))
         }
+        // ---- CANA Phase 3.5a: fused matmul+dot ----
+        // Computes the quadratic-form scalar aᵀ W v in a single pass, eliminating
+        // the intermediate [N] tensor that `matmul(a_as_row, w)` would allocate.
+        // Math is bit-identical to the sequential-matmul + dot chain.
+        // See docs/cana/CANA_PHASE_3_5_FUSION_CODEGEN_DESIGN.md §3.
+        "fused_matmul_dot" => {
+            if args.len() != 3 {
+                return Err(
+                    "fused_matmul_dot requires 3 arguments: a (1D), w (2D), v (1D)".into(),
+                );
+            }
+            let a = match &args[0] {
+                Value::Tensor(t) => t,
+                _ => return Err(format!(
+                    "fused_matmul_dot requires tensors, got {}",
+                    args[0].type_name()
+                )),
+            };
+            let w = match &args[1] {
+                Value::Tensor(t) => t,
+                _ => return Err(format!(
+                    "fused_matmul_dot requires tensors, got {}",
+                    args[1].type_name()
+                )),
+            };
+            let v = match &args[2] {
+                Value::Tensor(t) => t,
+                _ => return Err(format!(
+                    "fused_matmul_dot requires tensors, got {}",
+                    args[2].type_name()
+                )),
+            };
+            if a.ndim() != 1 {
+                return Err(format!(
+                    "fused_matmul_dot: a must be 1D, got {}D",
+                    a.ndim()
+                ));
+            }
+            if w.ndim() != 2 {
+                return Err(format!(
+                    "fused_matmul_dot: w must be 2D, got {}D",
+                    w.ndim()
+                ));
+            }
+            if v.ndim() != 1 {
+                return Err(format!(
+                    "fused_matmul_dot: v must be 1D, got {}D",
+                    v.ndim()
+                ));
+            }
+            let m = a.len();
+            let m_w = w.shape()[0];
+            let n = w.shape()[1];
+            let n_v = v.len();
+            if m != m_w {
+                return Err(format!(
+                    "fused_matmul_dot: a length {m} != w rows {m_w}"
+                ));
+            }
+            if n != n_v {
+                return Err(format!(
+                    "fused_matmul_dot: w cols {n} != v length {n_v}"
+                ));
+            }
+            let av = a.to_vec();
+            let wv = w.to_vec();
+            let vv = v.to_vec();
+            let sum = crate::accumulator::fused_matmul_dot_kernel(&av, &wv, &vv, m, n);
+            Ok(Some(Value::Float(sum)))
+        }
         "outer" => {
             if args.len() != 2 { return Err("outer requires exactly 2 arguments".into()); }
             let a = match &args[0] {

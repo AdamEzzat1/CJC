@@ -1877,6 +1877,8 @@ impl Interpreter {
                 | "hypot"
                 | "PI" | "E" | "TAU" | "INF" | "NAN_VAL"
                 | "dot" | "outer" | "cross" | "norm"
+                // CANA Phase 3.5a: fused tensor primitives
+                | "fused_matmul_dot"
                 | "Tensor.linspace" | "Tensor.arange" | "Tensor.eye"
                 | "Tensor.full" | "Tensor.diag" | "Tensor.uniform"
                 // ML Autodiff builtins

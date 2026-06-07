@@ -110,6 +110,9 @@ bolero = "0.13.4"
 proptest = "1"
 tempfile = "3"
 insta = "1"
+# CANA Phase 3.5a integration tests need to assert against the fusion
+# identifier's NATIVE_PRIMITIVES set.
+cjc-cana = { workspace = true }
 
 # Phase 0.8 Item B3 — feature propagation so the test binary in
 # `tests/abng/serialize_compressed.rs` can call the gated
@@ -222,6 +225,10 @@ path = "tests/runtime_policy/mod.rs"
 [[test]]
 name = "fused_ops"
 path = "tests/fused_ops/mod.rs"
+
+[[test]]
+name = "fused_matmul_dot"
+path = "tests/fused_matmul_dot/mod.rs"
 
 [[test]]
 name = "locke"
