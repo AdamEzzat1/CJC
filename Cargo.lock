@@ -256,12 +256,24 @@ name = "cjc-ast"
 version = "0.1.11"
 
 [[package]]
+name = "cjc-cana"
+version = "0.1.11"
+dependencies = [
+ "bolero",
+ "cjc-ast",
+ "cjc-diag",
+ "cjc-mir",
+ "proptest",
+]
+
+[[package]]
 name = "cjc-cli"
 version = "0.1.11"
 dependencies = [
  "cjc-abng",
  "cjc-ad",
  "cjc-ast",
+ "cjc-cana",
  "cjc-data",
  "cjc-diag",
  "cjc-eval",
