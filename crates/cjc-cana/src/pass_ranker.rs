@@ -344,6 +344,59 @@ pub fn default_ranker() -> PassRanker<crate::linear_cost_model::LinearCostModel,
 }
 
 // ---------------------------------------------------------------------------
+// Conversion: CANA's PassSequence → cjc-mir's PassPlan
+// ---------------------------------------------------------------------------
+
+/// Convert a CANA `PassSequence` into a `cjc_mir::optimize::PassPlan`.
+///
+/// This is the dependency-direction-safe bridge between CANA's
+/// recommendation surface and the MIR optimizer. CANA's `PassSequence`
+/// holds `ProposedPass::Run("name")` entries; `cjc_mir::PassPlan` holds
+/// plain pass-name strings. We unpack the run/skip distinction (Phase 2
+/// only emits `Run`; future `Skip` entries can be modeled by simply
+/// omitting from the plan).
+///
+/// Functions with no entry in `sequence` are absent from the returned
+/// plan, which means `cjc_mir::optimize_program_with_plan` will run the
+/// default 6-pass sequence on them. This is the safe fallback.
+///
+/// # Determinism
+///
+/// Output ordering inherits from `PassSequence::per_function`'s
+/// `BTreeMap` iteration; the per-function pass vec preserves CANA's
+/// recommended order verbatim.
+pub fn pass_plan_from(sequence: &PassSequence) -> cjc_mir::optimize::PassPlan {
+    let mut plan = cjc_mir::optimize::PassPlan::empty();
+    for (fn_name, proposed_passes) in &sequence.per_function {
+        let run_only: Vec<String> = proposed_passes
+            .iter()
+            .filter_map(|p| match p {
+                ProposedPass::Run(name) => Some(name.clone()),
+                ProposedPass::Skip(_) => None, // Phase 2 ignores Skip
+            })
+            .collect();
+        if !run_only.is_empty() {
+            plan.per_function.insert(fn_name.clone(), run_only);
+        }
+    }
+    plan
+}
+
+/// Convenience: run the default ranker and convert the resulting
+/// sequence to a `cjc_mir::PassPlan` in one step.
+///
+/// This is the entry point `cjc-mir-exec` calls when `--mir-opt` is set.
+pub fn recommend_pass_plan(
+    program: &cjc_mir::MirProgram,
+) -> (RankingReport, cjc_mir::optimize::PassPlan) {
+    let features = crate::analyze_program(program).features;
+    let ranker = default_ranker();
+    let report = ranker.rank(program, &features);
+    let plan = pass_plan_from(&report.sequence);
+    (report, plan)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -541,5 +594,99 @@ mod tests {
     #[test]
     fn canonical_pass_count_is_six() {
         assert_eq!(CANONICAL_PASSES.len(), 6);
+    }
+
+    // ---------------------------------------------------------------
+    // Conversion tests: PassSequence -> cjc-mir PassPlan
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn pass_plan_from_empty_sequence_is_empty() {
+        let seq = PassSequence::empty();
+        let plan = pass_plan_from(&seq);
+        assert!(plan.per_function.is_empty());
+    }
+
+    #[test]
+    fn pass_plan_from_translates_run_entries_verbatim() {
+        let mut seq = PassSequence::empty();
+        seq.per_function.insert(
+            "main".to_string(),
+            vec![
+                ProposedPass::Run("constant_fold".to_string()),
+                ProposedPass::Run("licm".to_string()),
+                ProposedPass::Run("dce".to_string()),
+            ],
+        );
+        let plan = pass_plan_from(&seq);
+        let entries = plan.per_function.get("main").expect("main present");
+        assert_eq!(entries, &vec!["constant_fold", "licm", "dce"]);
+    }
+
+    #[test]
+    fn pass_plan_from_drops_skip_entries() {
+        let mut seq = PassSequence::empty();
+        seq.per_function.insert(
+            "main".to_string(),
+            vec![
+                ProposedPass::Run("cf".to_string()),
+                ProposedPass::Skip("cse".to_string()),
+                ProposedPass::Run("dce".to_string()),
+            ],
+        );
+        let plan = pass_plan_from(&seq);
+        let entries = plan.per_function.get("main").expect("main present");
+        // Skip is dropped; Run entries are preserved in order.
+        assert_eq!(entries, &vec!["cf", "dce"]);
+    }
+
+    #[test]
+    fn pass_plan_from_omits_function_with_only_skips() {
+        let mut seq = PassSequence::empty();
+        seq.per_function.insert(
+            "skip_only".to_string(),
+            vec![ProposedPass::Skip("cf".to_string())],
+        );
+        let plan = pass_plan_from(&seq);
+        // A function with only Skip entries → no entry in the plan,
+        // meaning the MIR optimizer will fall back to default. This is
+        // the safe fallback.
+        assert!(plan.per_function.is_empty());
+    }
+
+    #[test]
+    fn pass_plan_from_preserves_btreemap_ordering() {
+        let mut seq = PassSequence::empty();
+        for name in ["zebra", "alpha", "middle"].iter() {
+            seq.per_function.insert(
+                name.to_string(),
+                vec![ProposedPass::Run("cf".to_string())],
+            );
+        }
+        let plan = pass_plan_from(&seq);
+        let keys: Vec<&str> = plan.per_function.keys().map(|s| s.as_str()).collect();
+        // BTreeMap → sorted iteration → "alpha", "middle", "zebra"
+        assert_eq!(keys, vec!["alpha", "middle", "zebra"]);
+    }
+
+    #[test]
+    fn recommend_pass_plan_end_to_end_returns_plan() {
+        let p = program_with_loops();
+        let (report, plan) = recommend_pass_plan(&p);
+        // The plan should have an entry for the function (which has loops
+        // so LICM gets recommended).
+        assert!(plan.per_function.contains_key("with_loops"));
+        // And the verdict should be Approved.
+        assert!(report.verdict.is_approved());
+    }
+
+    #[test]
+    fn recommend_pass_plan_is_deterministic() {
+        let p = program_with_loops();
+        let (_, first) = recommend_pass_plan(&p);
+        for _ in 0..50 {
+            let (_, again) = recommend_pass_plan(&p);
+            assert_eq!(again, first);
+        }
     }
 }

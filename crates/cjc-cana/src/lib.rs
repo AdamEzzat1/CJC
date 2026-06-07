@@ -90,8 +90,9 @@ pub use crate::linear_cost_model::LinearCostModel;
 pub use crate::memory_proxy::MemoryProxy;
 pub use crate::pass_history::{PassHistory, PassRecord};
 pub use crate::pass_ranker::{
-    default_ranker, FunctionRanking, PassRanker, PassRecommendation, RankingRationale,
-    RankingReport, CANONICAL_PASSES, DEFAULT_SKIP_THRESHOLD,
+    default_ranker, pass_plan_from, recommend_pass_plan, FunctionRanking, PassRanker,
+    PassRecommendation, RankingRationale, RankingReport, CANONICAL_PASSES,
+    DEFAULT_SKIP_THRESHOLD,
 };
 pub use crate::reduction_axes::ReductionAxes;
 pub use crate::report::CanaReport;

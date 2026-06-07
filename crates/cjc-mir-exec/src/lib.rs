@@ -4590,11 +4590,38 @@ pub fn run_program_with_executor(
     Ok((result, executor))
 }
 
+/// Build a CANA-aware optimization plan for a MIR program.
+///
+/// Calls into `cjc-cana` to:
+/// 1. Extract per-function features from the lowered MIR.
+/// 2. Run the default `PassRanker` (LinearCostModel + DefaultLegalityGate)
+///    to produce per-function pass recommendations.
+/// 3. Convert the recommendations to a `cjc_mir::optimize::PassPlan`.
+///
+/// Functions for which CANA has no recommendation get the default 6-pass
+/// sequence (via the `PassPlan` fallback). This guarantees byte-identical
+/// behaviour to the pre-Phase-2 optimizer for any function CANA chose not
+/// to override.
+///
+/// ## Why this is safe to call by default
+///
+/// CANA's `DefaultLegalityGate` refuses any pass-reordering that would
+/// touch a function with a `StrictFold` reduction (the determinism
+/// trip-wire). The `PassPlan` produced here therefore can only ever
+/// (a) preserve the default sequence, or (b) recommend a subset/permutation
+/// of semantics-preserving passes. Either way, output is byte-identical
+/// to the AST tree-walk interpreter — the parity contract is intact.
+fn cana_plan_for(mir: &cjc_mir::MirProgram) -> cjc_mir::optimize::PassPlan {
+    let (_report, plan) = cjc_cana::recommend_pass_plan(mir);
+    plan
+}
+
 /// Run a full AST program through the optimized MIR pipeline.
 ///
-/// Apply constant folding (CF) and dead code elimination (DCE) via
-/// [`cjc_mir::optimize::optimize_program`] before execution. Enabled by the
-/// `--mir-opt` CLI flag.
+/// Phase 2 change (2026-06): the pass sequence is now selected by CANA's
+/// `PassRanker`. Functions CANA has no opinion on continue to receive the
+/// default 6-pass sequence (CF → SR → DCE → CSE → LICM → CF). Enabled
+/// by the `--mir-opt` CLI flag.
 ///
 /// # Arguments
 ///
@@ -4603,7 +4630,9 @@ pub fn run_program_with_executor(
 ///
 /// # Returns
 ///
-/// The final [`Value`] produced by the optimized program.
+/// The final [`Value`] produced by the optimized program. Output is
+/// byte-identical to `cjc-eval` (the AST tree-walk interpreter) for every
+/// program — verified by the AST/MIR parity gate in `tests/fixtures/`.
 pub fn run_program_optimized(program: &cjc_ast::Program, seed: u64) -> MirExecResult {
     let mut ast_lowering = cjc_hir::AstLowering::new();
     let hir = ast_lowering.lower_program(program);
@@ -4611,7 +4640,8 @@ pub fn run_program_optimized(program: &cjc_ast::Program, seed: u64) -> MirExecRe
     let mut hir_to_mir = cjc_mir::HirToMir::new();
     let mir = hir_to_mir.lower_program(&hir);
 
-    let mut optimized = cjc_mir::optimize::optimize_program(&mir);
+    let plan = cana_plan_for(&mir);
+    let mut optimized = cjc_mir::optimize::optimize_program_with_plan(&mir, &plan);
     cjc_mir::escape::annotate_program(&mut optimized);
 
     let mut executor = MirExecutor::new(seed);
@@ -4642,7 +4672,10 @@ pub fn run_program_optimized_with_executor(
     let mut hir_to_mir = cjc_mir::HirToMir::new();
     let mir = hir_to_mir.lower_program(&hir);
 
-    let mut optimized = cjc_mir::optimize::optimize_program(&mir);
+    // Phase 2: CANA-driven pass selection (see `run_program_optimized`
+    // for the parity contract).
+    let plan = cana_plan_for(&mir);
+    let mut optimized = cjc_mir::optimize::optimize_program_with_plan(&mir, &plan);
     cjc_mir::escape::annotate_program(&mut optimized);
 
     let mut executor = MirExecutor::new(seed);
