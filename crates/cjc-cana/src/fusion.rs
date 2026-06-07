@@ -69,6 +69,7 @@ pub const NATIVE_PRIMITIVES: &[&str] = &[
     "matmul",
     "transpose",
     "dot",
+    "norm",
     "sum",
     "mean",
     "tensor_concat_1d",

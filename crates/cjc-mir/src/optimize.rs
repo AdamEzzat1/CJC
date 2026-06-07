@@ -123,6 +123,13 @@ pub fn apply_pass(pass_name: &str, func: &mut MirFunction) -> bool {
             licm_fn(func);
             true
         }
+        // CANA Phase 3.5c — opt-in fusion rewriter. Not in the default
+        // sequence; a CANA PassPlan adds it by name when fusion candidates
+        // were identified in the function.
+        "fusion_rewrite" | "fusion" => {
+            crate::fusion_rewrite::fusion_rewrite_fn(func);
+            true
+        }
         _ => false,
     }
 }

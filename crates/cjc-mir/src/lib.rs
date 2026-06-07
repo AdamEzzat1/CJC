@@ -14,6 +14,7 @@
 pub mod cfg;
 pub mod dominators;
 pub mod escape;
+pub mod fusion_rewrite;
 pub mod inspect;
 pub mod loop_analysis;
 pub mod monomorph;
