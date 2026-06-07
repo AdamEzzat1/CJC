@@ -66,6 +66,23 @@ pub const CANONICAL_PASSES: &[&str] = &[
 /// the runtime saving.
 pub const DEFAULT_SKIP_THRESHOLD: f64 = 0.005;
 
+/// Pass name the ranker injects when fusion candidates are present.
+/// Matches the case accepted by [`cjc_mir::optimize::apply_pass`].
+pub const FUSION_REWRITE_PASS_NAME: &str = "fusion_rewrite";
+
+/// Hardcoded predicted benefit for fusion_rewrite. Bypasses the cost
+/// model because the linear cost model can't yet predict the per-call
+/// allocation savings from eliminating intermediate Tensor wrappers.
+/// 0.10 = "saves ~10% of expected runtime on a chain-heavy function" —
+/// a deliberately conservative estimate.
+pub const FUSION_REWRITE_BENEFIT: f64 = 0.10;
+
+/// Hardcoded predicted compile cost for fusion_rewrite. Very cheap: a
+/// single walk of each body with use-count map + pattern match. The
+/// 0.02 figure reflects "less than 2% of the canonical 6-pass build
+/// time" — should be well-amortized.
+pub const FUSION_REWRITE_COMPILE_COST: f64 = 0.02;
+
 // ---------------------------------------------------------------------------
 // Recommendation types
 // ---------------------------------------------------------------------------
@@ -100,6 +117,12 @@ pub enum RankingRationale {
     BelowSkipThreshold,
     /// Pass dropped because the legality gate would reject it.
     LegalityGateRejected,
+    /// Phase 3.5c+ — pass kept because the function has fusion-worthy
+    /// candidates (length ≥ 2 chain of native primitives) identified by
+    /// [`crate::fusion::identify_fusion_candidates`]. Bypasses the cost
+    /// model: fusion eliminates intermediate-tensor allocations, a benefit
+    /// the linear cost model can't yet quantify.
+    FusionCandidatesIdentified,
 }
 
 /// Per-function ranked recommendation set.
@@ -186,9 +209,57 @@ impl<M: CostModel, G: LegalityGate> PassRanker<M, G> {
         let mut per_fn: BTreeMap<String, FunctionRanking> = BTreeMap::new();
         let mut sequence = PassSequence::empty();
 
+        // CANA Phase 3.5c+: pre-compute fusion candidates once for the
+        // whole program. Each function-level rank inspects this to decide
+        // whether to inject the `fusion_rewrite` pass.
+        let fusion_plan = crate::fusion::identify_fusion_candidates(program);
+        let fn_has_fusion: BTreeMap<&str, bool> = program
+            .functions
+            .iter()
+            .map(|f| {
+                let any = fusion_plan
+                    .fusion_worthy()
+                    .any(|c| c.function_name == f.name);
+                (f.name.as_str(), any)
+            })
+            .collect();
+
         // Iteration is in BTreeMap key order → deterministic per function.
         for fn_name in features.per_fn.keys() {
-            let ranking = self.rank_function(program, features, fn_name);
+            let mut ranking = self.rank_function(program, features, fn_name);
+
+            // CANA Phase 3.5c+ — auto-inject fusion_rewrite when the
+            // function has fusion-worthy chains. We append (rather than
+            // sort-into-place) because fusion_rewrite is semantics-
+            // preserving and runs AFTER the canonical optimization passes
+            // — those passes simplify expressions that may expose new
+            // fusion candidates, so fusion runs last by convention.
+            if fn_has_fusion.get(fn_name.as_str()).copied().unwrap_or(false) {
+                let rec = PassRecommendation {
+                    pass_name: FUSION_REWRITE_PASS_NAME.to_string(),
+                    predicted_benefit: FUSION_REWRITE_BENEFIT,
+                    predicted_compile_cost: FUSION_REWRITE_COMPILE_COST,
+                    confidence: 1.0,
+                    rationale: RankingRationale::FusionCandidatesIdentified,
+                };
+                // Legality gate check, identical pattern to rank_function.
+                let mut single = PassSequence::empty();
+                single.per_function.insert(
+                    fn_name.clone(),
+                    vec![ProposedPass::Run(rec.pass_name.clone())],
+                );
+                let verdict = self.legality_gate.verify(program, &single, features);
+                match verdict {
+                    LegalityVerdict::Approved => {
+                        ranking.recommended.push(rec);
+                    }
+                    LegalityVerdict::Rejected(_) => {
+                        let mut rejected = rec;
+                        rejected.rationale = RankingRationale::LegalityGateRejected;
+                        ranking.dropped.push(rejected);
+                    }
+                }
+            }
 
             // Populate the proposed `PassSequence` with the kept passes,
             // in their ranked order, as `ProposedPass::Run`.
@@ -687,6 +758,166 @@ mod tests {
         for _ in 0..50 {
             let (_, again) = recommend_pass_plan(&p);
             assert_eq!(again, first);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // CANA Phase 3.5c+ — auto-inject fusion_rewrite tests
+    // -----------------------------------------------------------------------
+
+    fn var(n: &str) -> MirExpr {
+        MirExpr { kind: MirExprKind::Var(n.to_string()) }
+    }
+
+    fn call(callee: &str, args: Vec<MirExpr>) -> MirExpr {
+        MirExpr {
+            kind: MirExprKind::Call {
+                callee: Box::new(var(callee)),
+                args,
+            },
+        }
+    }
+
+    fn let_stmt(name: &str, init: MirExpr) -> MirStmt {
+        MirStmt::Let {
+            name: name.to_string(),
+            mutable: false,
+            init,
+            alloc_hint: None,
+            slot: None,
+        }
+    }
+
+    fn program_with_matmul_norm_chain() -> MirProgram {
+        MirProgram {
+            functions: vec![MirFunction {
+                id: MirFnId(0),
+                name: "f_with_chain".to_string(),
+                type_params: vec![],
+                params: vec![],
+                return_type: None,
+                body: MirBody {
+                    stmts: vec![
+                        let_stmt("h", call("matmul", vec![var("a"), var("w")])),
+                        let_stmt("n", call("norm", vec![var("h")])),
+                    ],
+                    result: None,
+                },
+                is_nogc: false,
+                cfg_body: None,
+                decorators: vec![],
+                vis: cjc_ast::Visibility::Public,
+                local_count: 0,
+            }],
+            struct_defs: vec![],
+            enum_defs: vec![],
+            entry: MirFnId(0),
+        }
+    }
+
+    #[test]
+    fn fusion_rewrite_injected_when_chain_present() {
+        let p = program_with_matmul_norm_chain();
+        let f = extract(&p);
+        let ranker = default_ranker();
+        let report = ranker.rank(&p, &f);
+
+        let r = report.per_fn.get("f_with_chain").expect("function ranked");
+        assert!(
+            r.recommended.iter().any(|rec| rec.pass_name == FUSION_REWRITE_PASS_NAME),
+            "fusion_rewrite should be auto-injected; got: {:?}",
+            r.recommended.iter().map(|r| &r.pass_name).collect::<Vec<_>>()
+        );
+
+        // The sequence also carries it.
+        let seq = report
+            .sequence
+            .per_function
+            .get("f_with_chain")
+            .expect("sequence has the function");
+        assert!(
+            seq.iter().any(|p| matches!(p, ProposedPass::Run(n) if n == FUSION_REWRITE_PASS_NAME)),
+            "PassSequence should include fusion_rewrite"
+        );
+    }
+
+    #[test]
+    fn fusion_rewrite_carries_correct_rationale() {
+        let p = program_with_matmul_norm_chain();
+        let f = extract(&p);
+        let ranker = default_ranker();
+        let report = ranker.rank(&p, &f);
+        let r = report.per_fn.get("f_with_chain").expect("function ranked");
+        let rec = r
+            .recommended
+            .iter()
+            .find(|rec| rec.pass_name == FUSION_REWRITE_PASS_NAME)
+            .expect("fusion_rewrite present");
+        assert_eq!(rec.rationale, RankingRationale::FusionCandidatesIdentified);
+        assert!((rec.predicted_benefit - FUSION_REWRITE_BENEFIT).abs() < 1e-9);
+        assert!((rec.predicted_compile_cost - FUSION_REWRITE_COMPILE_COST).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fusion_rewrite_not_injected_without_candidates() {
+        // Empty program has no fusion candidates → no fusion_rewrite.
+        let p = empty_program();
+        let f = extract(&p);
+        let ranker = default_ranker();
+        let report = ranker.rank(&p, &f);
+        let r = report.per_fn.get("empty").expect("function ranked");
+        assert!(
+            !r.recommended.iter().any(|rec| rec.pass_name == FUSION_REWRITE_PASS_NAME),
+            "fusion_rewrite must NOT be injected for a function with no candidates"
+        );
+    }
+
+    #[test]
+    fn fusion_rewrite_pass_plan_includes_the_pass() {
+        let p = program_with_matmul_norm_chain();
+        let (_, plan) = recommend_pass_plan(&p);
+        let passes = plan
+            .per_function
+            .get("f_with_chain")
+            .expect("function in plan");
+        assert!(
+            passes.iter().any(|p| p == FUSION_REWRITE_PASS_NAME),
+            "PassPlan should propagate fusion_rewrite to cjc-mir; got: {passes:?}"
+        );
+    }
+
+    #[test]
+    fn fusion_rewrite_injection_is_deterministic() {
+        // Same program, run 50 times, fusion_rewrite is always either
+        // present-everywhere or absent-everywhere across runs.
+        let p = program_with_matmul_norm_chain();
+        let f = extract(&p);
+        let ranker = default_ranker();
+        let first = ranker.rank(&p, &f);
+        for _ in 0..50 {
+            let again = ranker.rank(&p, &f);
+            assert_eq!(again.per_fn, first.per_fn);
+            assert_eq!(again.sequence, first.sequence);
+        }
+    }
+
+    #[test]
+    fn fusion_rewrite_runs_last_after_canonical_passes() {
+        // Convention: fusion runs AFTER the canonical optimization passes
+        // so CF/DCE/CSE can simplify what fusion will rewrite.
+        let p = program_with_matmul_norm_chain();
+        let f = extract(&p);
+        let ranker = default_ranker();
+        let report = ranker.rank(&p, &f);
+        let seq = report
+            .sequence
+            .per_function
+            .get("f_with_chain")
+            .expect("function in sequence");
+        let last = seq.last().expect("sequence non-empty");
+        match last {
+            ProposedPass::Run(name) => assert_eq!(name, FUSION_REWRITE_PASS_NAME),
+            other => panic!("expected fusion_rewrite last, got {other:?}"),
         }
     }
 }
