@@ -107,20 +107,24 @@ fn fusion_rewrite_body(body: &mut MirBody) -> usize {
     // Walk stmts pairwise looking for our pattern.
     let mut i = 0;
     while i + 1 < body.stmts.len() {
-        let pair_match = match_matmul_norm_pair(&body.stmts[i], &body.stmts[i + 1]);
-        if let Some(matched) = pair_match {
-            // Use-once check: the matmul output binding must be referenced
-            // exactly once across the entire body. The "one" use is the
-            // norm call's first argument — anything else means there's
-            // another consumer and we cannot rewrite.
+        // Try matmul → norm
+        if let Some(matched) = match_matmul_norm_pair(&body.stmts[i], &body.stmts[i + 1]) {
             let h_count = counts.get(&matched.h_name).copied().unwrap_or(0);
             if h_count == 1 {
                 let fused = build_fused_let(matched);
-                // Replace stmts[i..i+2] with the single fused let.
                 body.stmts.splice(i..i + 2, std::iter::once(fused));
                 rewrites += 1;
-                // After splice, stmts[i] is the fused let. Skip past it;
-                // no further match starts here.
+                i += 1;
+                continue;
+            }
+        }
+        // Try matmul → matmul
+        if let Some(matched) = match_matmul_matmul_pair(&body.stmts[i], &body.stmts[i + 1]) {
+            let h_count = counts.get(&matched.h_name).copied().unwrap_or(0);
+            if h_count == 1 {
+                let fused = build_fused_matmul_matmul_let(matched);
+                body.stmts.splice(i..i + 2, std::iter::once(fused));
+                rewrites += 1;
                 i += 1;
                 continue;
             }
@@ -261,6 +265,79 @@ fn build_fused_let(m: MatmulNormMatch<'_>) -> MirStmt {
         init: call,
         alloc_hint: None,
         slot: m.n_slot,
+    }
+}
+
+/// Match for `let h = matmul(a, b); let r = matmul(h, c);` (left-associative
+/// triple-product). When `h` is use-once, the rewriter collapses both lets
+/// into a single `let r = fused_matmul_matmul(a, b, c);`.
+struct MatmulMatmulMatch<'a> {
+    h_name: String,
+    r_name: String,
+    r_mutable: bool,
+    r_slot: Option<u32>,
+    a_expr: &'a MirExpr,
+    b_expr: &'a MirExpr,
+    c_expr: &'a MirExpr,
+}
+
+fn match_matmul_matmul_pair<'a>(
+    stmt1: &'a MirStmt,
+    stmt2: &'a MirStmt,
+) -> Option<MatmulMatmulMatch<'a>> {
+    let MirStmt::Let { name: h_name, init: init_h, .. } = stmt1 else { return None; };
+    let MirStmt::Let { name: r_name, init: init_r, mutable: r_mut, slot: r_slot, .. } = stmt2
+    else {
+        return None;
+    };
+
+    // stmt1: Call(matmul, [a, b])
+    let (h_callee, h_args) = match &init_h.kind {
+        MirExprKind::Call { callee, args } => (callee, args),
+        _ => return None,
+    };
+    if callee_name(h_callee) != Some("matmul") || h_args.len() != 2 {
+        return None;
+    }
+
+    // stmt2: Call(matmul, [Var(h_name), c])
+    let (r_callee, r_args) = match &init_r.kind {
+        MirExprKind::Call { callee, args } => (callee, args),
+        _ => return None,
+    };
+    if callee_name(r_callee) != Some("matmul") || r_args.len() != 2 {
+        return None;
+    }
+    if var_name(&r_args[0]) != Some(h_name.as_str()) {
+        return None;
+    }
+
+    Some(MatmulMatmulMatch {
+        h_name: h_name.clone(),
+        r_name: r_name.clone(),
+        r_mutable: *r_mut,
+        r_slot: *r_slot,
+        a_expr: &h_args[0],
+        b_expr: &h_args[1],
+        c_expr: &r_args[1],
+    })
+}
+
+fn build_fused_matmul_matmul_let(m: MatmulMatmulMatch<'_>) -> MirStmt {
+    let call = MirExpr {
+        kind: MirExprKind::Call {
+            callee: Box::new(MirExpr {
+                kind: MirExprKind::Var("fused_matmul_matmul".to_string()),
+            }),
+            args: vec![m.a_expr.clone(), m.b_expr.clone(), m.c_expr.clone()],
+        },
+    };
+    MirStmt::Let {
+        name: m.r_name,
+        mutable: m.r_mutable,
+        init: call,
+        alloc_hint: None,
+        slot: m.r_slot,
     }
 }
 
@@ -625,5 +702,96 @@ mod tests {
         let result = fusion_rewrite_program(&mut prog);
         assert_eq!(result.rewrites_applied, 2);
         assert_eq!(prog.functions[0].body.stmts.len(), 2);
+    }
+
+    // ------------------------------------------------------------------
+    // matmul → matmul tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn rewrites_matmul_matmul_chain() {
+        let mut prog = program(vec![
+            let_stmt("h", call("matmul", vec![var("a"), var("b")])),
+            let_stmt("r", call("matmul", vec![var("h"), var("c")])),
+        ]);
+        let result = fusion_rewrite_program(&mut prog);
+        assert_eq!(result.rewrites_applied, 1);
+        let stmts = &prog.functions[0].body.stmts;
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            MirStmt::Let { name, init, .. } => {
+                assert_eq!(name, "r");
+                match &init.kind {
+                    MirExprKind::Call { callee, args } => {
+                        assert_eq!(callee_name(callee), Some("fused_matmul_matmul"));
+                        assert_eq!(args.len(), 3);
+                        assert_eq!(var_name(&args[0]), Some("a"));
+                        assert_eq!(var_name(&args[1]), Some("b"));
+                        assert_eq!(var_name(&args[2]), Some("c"));
+                    }
+                    other => panic!("expected Call, got {other:?}"),
+                }
+            }
+            other => panic!("expected Let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refuses_matmul_matmul_when_h_used_twice() {
+        let mut prog = program(vec![
+            let_stmt("h", call("matmul", vec![var("a"), var("b")])),
+            let_stmt("r", call("matmul", vec![var("h"), var("c")])),
+            let_stmt("g", call("transpose", vec![var("h")])),
+        ]);
+        let result = fusion_rewrite_program(&mut prog);
+        assert_eq!(result.rewrites_applied, 0);
+    }
+
+    #[test]
+    fn refuses_matmul_matmul_when_h_not_first_arg_of_second() {
+        // r = matmul(c, h) — h in second position, not first. We only
+        // rewrite the left-associative shape (a@b)@c.
+        let mut prog = program(vec![
+            let_stmt("h", call("matmul", vec![var("a"), var("b")])),
+            let_stmt("r", call("matmul", vec![var("c"), var("h")])),
+        ]);
+        let result = fusion_rewrite_program(&mut prog);
+        assert_eq!(result.rewrites_applied, 0);
+    }
+
+    #[test]
+    fn fused_matmul_matmul_not_re_fused() {
+        // Idempotency: after rewriting, the new fused call should NOT match
+        // either pattern on the next pass.
+        let mut prog = program(vec![
+            let_stmt("h", call("matmul", vec![var("a"), var("b")])),
+            let_stmt("r", call("matmul", vec![var("h"), var("c")])),
+        ]);
+        let first = fusion_rewrite_program(&mut prog);
+        assert_eq!(first.rewrites_applied, 1);
+        let second = fusion_rewrite_program(&mut prog);
+        assert_eq!(second.rewrites_applied, 0);
+    }
+
+    #[test]
+    fn rewrites_mixed_chain_types() {
+        // Two different fusion patterns in one body — each pair independent.
+        let mut prog = program(vec![
+            // pair 1: matmul → norm
+            let_stmt("h1", call("matmul", vec![var("a1"), var("w1")])),
+            let_stmt("n1", call("norm", vec![var("h1")])),
+            // pair 2: matmul → matmul
+            let_stmt("h2", call("matmul", vec![var("a2"), var("b2")])),
+            let_stmt("r2", call("matmul", vec![var("h2"), var("c2")])),
+        ]);
+        let result = fusion_rewrite_program(&mut prog);
+        assert_eq!(result.rewrites_applied, 2);
+        assert_eq!(prog.functions[0].body.stmts.len(), 2);
+        // Verify the second is fused_matmul_matmul
+        if let MirStmt::Let { init, .. } = &prog.functions[0].body.stmts[1] {
+            if let MirExprKind::Call { callee, .. } = &init.kind {
+                assert_eq!(callee_name(callee), Some("fused_matmul_matmul"));
+            }
+        }
     }
 }

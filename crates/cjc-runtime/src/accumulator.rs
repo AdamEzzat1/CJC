@@ -447,6 +447,66 @@ pub fn binned_sum_f64(values: &[f64]) -> f64 {
     acc.finalize()
 }
 
+/// Fused matmul + matmul kernel: computes `(A @ B) @ C` in a single pass.
+///
+/// Inputs are flat row-major slices: `a` length `m*n` (row-major `[m, n]`),
+/// `b` length `n*k` (row-major `[n, k]`), `c` length `k*p` (row-major `[k, p]`).
+///
+/// Math is **left-associative** — `(A @ B) @ C`, matching the unfused chain
+/// `matmul(matmul(A, B), C)`. The other associativity `A @ (B @ C)` gives a
+/// different bit-pattern in IEEE-754; this kernel picks the same order as
+/// the unfused chain by construction.
+///
+/// Equivalent to `matmul(matmul(A, B), C)` and bit-identical when both
+/// matmul ops take the sequential path (every dim < 64).
+///
+/// **Allocation:** the named intermediate Tensor wrapper is gone (we still
+/// hold a `Vec<f64>` for the [m, k] partial; that's the cheapest
+/// allocation savings). Real fusion-with-tiling would skip even that —
+/// future work.
+///
+/// **Determinism:** per-element Kahan in both matmul steps. Order matches
+/// `matmul_sequential` exactly.
+#[inline]
+pub fn fused_matmul_matmul_kernel(
+    a: &[f64],
+    b: &[f64],
+    c: &[f64],
+    m: usize,
+    n: usize,
+    k: usize,
+    p: usize,
+) -> Vec<f64> {
+    debug_assert_eq!(a.len(), m * n);
+    debug_assert_eq!(b.len(), n * k);
+    debug_assert_eq!(c.len(), k * p);
+
+    // Step 1: intermediate[i, q] = Σₗ a[i, l] * b[l, q]   shape [m, k]
+    let mut intermediate = vec![0.0f64; m * k];
+    for i in 0..m {
+        for q in 0..k {
+            let mut acc = cjc_repro::KahanAccumulatorF64::new();
+            for l in 0..n {
+                acc.add(a[i * n + l] * b[l * k + q]);
+            }
+            intermediate[i * k + q] = acc.finalize();
+        }
+    }
+
+    // Step 2: result[i, j] = Σ_q intermediate[i, q] * c[q, j]   shape [m, p]
+    let mut result = vec![0.0f64; m * p];
+    for i in 0..m {
+        for j in 0..p {
+            let mut acc = cjc_repro::KahanAccumulatorF64::new();
+            for q in 0..k {
+                acc.add(intermediate[i * k + q] * c[q * p + j]);
+            }
+            result[i * p + j] = acc.finalize();
+        }
+    }
+    result
+}
+
 /// Fused matmul + norm kernel: computes `||A @ W||_p` in a single pass.
 ///
 /// Inputs are flat row-major slices: `a` length `m*k` (row-major `[m, k]`),
@@ -1010,5 +1070,109 @@ mod tests {
             let again = fused_matmul_norm_kernel(&a, &w, 2, 3, 2, 2);
             assert_eq!(first.to_bits(), again.to_bits());
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // fused_matmul_matmul_kernel tests
+    // -----------------------------------------------------------------------
+
+    /// Reference: two sequential Kahan matmuls (matches matmul_sequential).
+    fn unfused_matmul_matmul_reference(
+        a: &[f64], b: &[f64], c: &[f64], m: usize, n: usize, k: usize, p: usize,
+    ) -> Vec<f64> {
+        let mut intermediate = vec![0.0f64; m * k];
+        for i in 0..m {
+            for q in 0..k {
+                let mut acc = cjc_repro::KahanAccumulatorF64::new();
+                for l in 0..n {
+                    acc.add(a[i * n + l] * b[l * k + q]);
+                }
+                intermediate[i * k + q] = acc.finalize();
+            }
+        }
+        let mut result = vec![0.0f64; m * p];
+        for i in 0..m {
+            for j in 0..p {
+                let mut acc = cjc_repro::KahanAccumulatorF64::new();
+                for q in 0..k {
+                    acc.add(intermediate[i * k + q] * c[q * p + j]);
+                }
+                result[i * p + j] = acc.finalize();
+            }
+        }
+        result
+    }
+
+    fn assert_bits_equal(a: &[f64], b: &[f64]) {
+        assert_eq!(a.len(), b.len());
+        for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+            assert_eq!(x.to_bits(), y.to_bits(), "element {i}: {x:e} vs {y:e}");
+        }
+    }
+
+    #[test]
+    fn fused_matmul_matmul_identity_chain() {
+        // I @ I @ V = V (all 1x1)
+        let a = vec![1.0];
+        let b = vec![1.0];
+        let c = vec![5.0];
+        let r = fused_matmul_matmul_kernel(&a, &b, &c, 1, 1, 1, 1);
+        assert_eq!(r, vec![5.0]);
+    }
+
+    #[test]
+    fn fused_matmul_matmul_2x2_chain_matches_reference() {
+        let a = vec![1.0, 2.0, 3.0, 4.0]; // [2, 2]
+        let b = vec![5.0, 6.0, 7.0, 8.0]; // [2, 2]
+        let c = vec![1.0, 0.0, 0.0, 1.0]; // [2, 2] identity
+        let fused = fused_matmul_matmul_kernel(&a, &b, &c, 2, 2, 2, 2);
+        let unfused = unfused_matmul_matmul_reference(&a, &b, &c, 2, 2, 2, 2);
+        assert_bits_equal(&fused, &unfused);
+    }
+
+    #[test]
+    fn fused_matmul_matmul_2x3_matches_reference() {
+        // a: [2, 3], b: [3, 4], c: [4, 2]
+        let a: Vec<f64> = (1..=6).map(|i| i as f64 * 0.1).collect();
+        let b: Vec<f64> = (1..=12).map(|i| i as f64 * 0.2).collect();
+        let c: Vec<f64> = (1..=8).map(|i| i as f64 * 0.3).collect();
+        let fused = fused_matmul_matmul_kernel(&a, &b, &c, 2, 3, 4, 2);
+        let unfused = unfused_matmul_matmul_reference(&a, &b, &c, 2, 3, 4, 2);
+        assert_bits_equal(&fused, &unfused);
+    }
+
+    #[test]
+    fn fused_matmul_matmul_catastrophic_cancellation_bit_identical() {
+        // Pathological: mixes 1e16 with 1.0, designed to test that the
+        // per-element Kahan accumulator in both matmul steps matches the
+        // unfused reference's accumulator exactly.
+        let a = vec![1e16, 1.0, -1e16, 1.0]; // [2, 2]
+        let b = vec![1.0, 2.0, 1.0, 2.0];     // [2, 2]
+        let c = vec![1.0, -1.0, 0.5, 0.25];   // [2, 2]
+        let fused = fused_matmul_matmul_kernel(&a, &b, &c, 2, 2, 2, 2);
+        let unfused = unfused_matmul_matmul_reference(&a, &b, &c, 2, 2, 2, 2);
+        assert_bits_equal(&fused, &unfused);
+    }
+
+    #[test]
+    fn fused_matmul_matmul_determinism_100_runs() {
+        let a: Vec<f64> = (1..=4).map(|i| i as f64 * 0.3).collect();
+        let b: Vec<f64> = (1..=4).map(|i| i as f64 * 0.5).collect();
+        let c: Vec<f64> = (1..=4).map(|i| i as f64 * 0.7).collect();
+        let first = fused_matmul_matmul_kernel(&a, &b, &c, 2, 2, 2, 2);
+        for _ in 0..100 {
+            let again = fused_matmul_matmul_kernel(&a, &b, &c, 2, 2, 2, 2);
+            assert_bits_equal(&first, &again);
+        }
+    }
+
+    #[test]
+    fn fused_matmul_matmul_3x3_chain_matches_reference() {
+        let a: Vec<f64> = (1..=9).map(|i| i as f64 * 0.11).collect(); // [3, 3]
+        let b: Vec<f64> = (1..=9).map(|i| i as f64 * 0.13).collect(); // [3, 3]
+        let c: Vec<f64> = (1..=9).map(|i| i as f64 * 0.17).collect(); // [3, 3]
+        let fused = fused_matmul_matmul_kernel(&a, &b, &c, 3, 3, 3, 3);
+        let unfused = unfused_matmul_matmul_reference(&a, &b, &c, 3, 3, 3, 3);
+        assert_bits_equal(&fused, &unfused);
     }
 }

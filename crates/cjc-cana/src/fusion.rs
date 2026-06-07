@@ -86,6 +86,7 @@ pub const NATIVE_PRIMITIVES: &[&str] = &[
     // not re-suggest fusion on top of itself.
     "fused_matmul_dot",
     "fused_matmul_norm",
+    "fused_matmul_matmul",
 ];
 
 /// Lookup helper.

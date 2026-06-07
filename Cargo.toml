@@ -243,5 +243,9 @@ name = "fused_mlp_matmul"
 path = "tests/fused_mlp_matmul/mod.rs"
 
 [[test]]
+name = "fused_matmul_matmul"
+path = "tests/fused_matmul_matmul/mod.rs"
+
+[[test]]
 name = "locke"
 path = "tests/locke/mod.rs"
