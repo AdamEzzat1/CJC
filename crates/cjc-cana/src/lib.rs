@@ -60,6 +60,7 @@
 //!   See the NSS architecture doc, §3 ("Why this architecture is a good fit
 //!   for compilers") for the projection mapping.
 
+pub mod caching_ranker;
 pub mod cfg_metrics;
 pub mod cost_model;
 pub mod features;
@@ -78,6 +79,9 @@ pub mod report;
 
 use cjc_mir::MirProgram;
 
+pub use crate::caching_ranker::{
+    default_caching_ranker, CacheStats, CachingPassRanker, DEFAULT_CACHE_CAPACITY,
+};
 pub use crate::cfg_metrics::CfgMetrics;
 pub use crate::cost_model::{CostEstimate, CostModel, NullCostModel};
 pub use crate::features::{CanaFeatures, FnFeatures};
