@@ -1162,20 +1162,51 @@ fn licm_body(body: &mut MirBody) {
 }
 
 /// Try to hoist loop-invariant let-bindings out of a while body.
-/// A let-binding is invariant if:
-/// - It is pure
-/// - It does not reference any variable that is assigned inside the loop
+///
+/// A `let` binding is hoisted only if ALL of the following hold:
+/// 1. Its initializer is pure (no side effects).
+/// 2. The initializer does not reference any variable that is *defined
+///    or assigned* inside the loop (the "all changed" set).
+/// 3. The binding's own name is **not** reassigned later in the loop.
+///
+/// Condition (3) is the fix for task_a30e8eec: the canonical
+/// `while ... { let mut j = 0; while j < n { ...; j = j + 1; } }`
+/// pattern. Without condition (3), the inner `let mut j = 0;` got
+/// hoisted out of the outer loop, breaking re-initialization on each
+/// outer iteration. Programs like the chess RL training loop relied
+/// on per-iteration re-binding; before this fix, `--mir-opt` silently
+/// produced wrong results on every nested-loop accumulator.
+///
+/// ## Helper-name variant handling
+///
+/// Both [`collect_modified_vars_expr`] and [`references_any`] now
+/// accept the post-slot-resolution `MirExprKind::VarLocal { name, .. }`
+/// form in addition to `Var(name)`. Without this, `j = j + 1` after
+/// the Tier-0 slot pass produced an Assign whose target was VarLocal,
+/// and the collection routine silently dropped it from `modified_vars`
+/// (allowing more invalid hoists). Same family of bug as commit
+/// `2983f2b` (reduction analyzer).
 fn hoist_invariants(loop_body: MirBody) -> (Vec<MirStmt>, MirBody) {
-    // Collect variables that are modified (assigned to) inside the loop.
-    let mut modified_vars = BTreeSet::new();
-    collect_modified_vars_body(&loop_body, &mut modified_vars);
+    // (1) All vars that change in the loop (Let defines + Assign targets).
+    //     Used for the `references_any` check on initializers.
+    let mut all_changed = BTreeSet::new();
+    collect_modified_vars_body(&loop_body, &mut all_changed);
+
+    // (2) Just the Assign targets — used to refuse hoisting a Let whose
+    //     name is reassigned later in the loop. This is the fix for
+    //     task_a30e8eec; see function-level docs above.
+    let mut assigned_only = BTreeSet::new();
+    collect_assigned_vars_body(&loop_body, &mut assigned_only);
 
     let mut hoisted = Vec::new();
     let mut remaining = Vec::new();
 
     for stmt in loop_body.stmts {
         if let MirStmt::Let { ref name, ref init, mutable, alloc_hint, slot } = stmt {
-            if is_pure_expr(init) && !references_any(init, &modified_vars) {
+            if is_pure_expr(init)
+                && !references_any(init, &all_changed)
+                && !assigned_only.contains(name)
+            {
                 hoisted.push(MirStmt::Let {
                     name: name.clone(),
                     mutable,
@@ -1192,7 +1223,12 @@ fn hoist_invariants(loop_body: MirBody) -> (Vec<MirStmt>, MirBody) {
     (hoisted, MirBody { stmts: remaining, result: loop_body.result })
 }
 
-/// Collect all variable names that are modified (written to) in a body.
+/// Collect all variable names that are modified (declared or written to)
+/// in a body. The result is the union of `let`-bound names and Assign
+/// targets.
+///
+/// Used to compute the `all_changed` set for `references_any`'s
+/// "no init may depend on loop-local change" check.
 fn collect_modified_vars_body(body: &MirBody, modified: &mut BTreeSet<String>) {
     for stmt in &body.stmts {
         collect_modified_vars_stmt(stmt, modified);
@@ -1224,8 +1260,16 @@ fn collect_modified_vars_stmt(stmt: &MirStmt, modified: &mut BTreeSet<String>) {
 fn collect_modified_vars_expr(expr: &MirExpr, modified: &mut BTreeSet<String>) {
     match &expr.kind {
         MirExprKind::Assign { target, value } => {
-            if let MirExprKind::Var(name) = &target.kind {
-                modified.insert(name.clone());
+            // Handle both Var(name) and VarLocal { name, .. } — the
+            // latter appears post-slot-resolution. Pre-fix this branch
+            // only matched Var, silently dropping every slot-resolved
+            // reassignment from the modified set.
+            match &target.kind {
+                MirExprKind::Var(name)
+                | MirExprKind::VarLocal { name, .. } => {
+                    modified.insert(name.clone());
+                }
+                _ => {}
             }
             collect_modified_vars_expr(value, modified);
         }
@@ -1241,10 +1285,73 @@ fn collect_modified_vars_expr(expr: &MirExpr, modified: &mut BTreeSet<String>) {
     }
 }
 
+/// Collect ONLY the names that are Assign targets (reassigned, not
+/// merely let-bound) inside a body. Used to gate hoisting: a `let`
+/// whose name appears here must not be hoisted out of the loop.
+fn collect_assigned_vars_body(body: &MirBody, assigned: &mut BTreeSet<String>) {
+    for stmt in &body.stmts {
+        collect_assigned_vars_stmt(stmt, assigned);
+    }
+}
+
+fn collect_assigned_vars_stmt(stmt: &MirStmt, assigned: &mut BTreeSet<String>) {
+    match stmt {
+        MirStmt::Let { init, .. } => {
+            // Recurse into init but DO NOT add the let name itself.
+            collect_assigned_vars_expr(init, assigned);
+        }
+        MirStmt::Expr(expr) => collect_assigned_vars_expr(expr, assigned),
+        MirStmt::If { cond, then_body, else_body } => {
+            collect_assigned_vars_expr(cond, assigned);
+            collect_assigned_vars_body(then_body, assigned);
+            if let Some(eb) = else_body { collect_assigned_vars_body(eb, assigned); }
+        }
+        MirStmt::While { cond, body } => {
+            collect_assigned_vars_expr(cond, assigned);
+            collect_assigned_vars_body(body, assigned);
+        }
+        MirStmt::Return(_) => {}
+        MirStmt::Break | MirStmt::Continue => {}
+        MirStmt::NoGcBlock(body) => collect_assigned_vars_body(body, assigned),
+    }
+}
+
+fn collect_assigned_vars_expr(expr: &MirExpr, assigned: &mut BTreeSet<String>) {
+    match &expr.kind {
+        MirExprKind::Assign { target, value } => {
+            match &target.kind {
+                MirExprKind::Var(name)
+                | MirExprKind::VarLocal { name, .. } => {
+                    assigned.insert(name.clone());
+                }
+                _ => {}
+            }
+            collect_assigned_vars_expr(value, assigned);
+        }
+        MirExprKind::Binary { left, right, .. } => {
+            collect_assigned_vars_expr(left, assigned);
+            collect_assigned_vars_expr(right, assigned);
+        }
+        MirExprKind::Call { callee, args } => {
+            collect_assigned_vars_expr(callee, assigned);
+            for arg in args { collect_assigned_vars_expr(arg, assigned); }
+        }
+        _ => {}
+    }
+}
+
 /// Check if an expression references any variable in the given set.
+///
+/// Handles both `Var(name)` and `VarLocal { name, .. }` — the latter
+/// appears post-slot-resolution. Pre-fix this function only matched
+/// `Var`, silently returning false for every slot-resolved variable
+/// reference. Combined with the analogous bug in
+/// `collect_modified_vars_expr`, that allowed LICM to hoist
+/// inner-loop-dependent expressions out of nested loops.
 fn references_any(expr: &MirExpr, vars: &BTreeSet<String>) -> bool {
     match &expr.kind {
         MirExprKind::Var(name) => vars.contains(name.as_str()),
+        MirExprKind::VarLocal { name, .. } => vars.contains(name.as_str()),
         MirExprKind::Binary { left, right, .. } => {
             references_any(left, vars) || references_any(right, vars)
         }
@@ -1998,5 +2105,382 @@ mod tests {
         // Drift guard: if a pass is added/removed, this needs to change
         // alongside cjc-cana::pass_ranker::CANONICAL_PASSES.
         assert_eq!(DEFAULT_PASS_SEQUENCE.len(), 6);
+    }
+
+    // -- Regression test for task_a30e8eec --------------------------------
+    //
+    // Tests that LICM does NOT hoist `let mut j = 0;` out of an outer
+    // while loop when j is reassigned inside the inner loop. Pre-fix,
+    // LICM hoisted the let, losing per-iteration re-initialization and
+    // producing wrong results on every nested-loop accumulator.
+
+    fn nested_loop_program() -> MirProgram {
+        // Build the MIR for:
+        //   let mut total: i64 = 0;
+        //   let mut i: i64 = 0;
+        //   while i < 3 {
+        //       let mut j: i64 = 0;
+        //       while j < 3 {
+        //           total = total + i * j;
+        //           j = j + 1;
+        //       }
+        //       i = i + 1;
+        //   }
+        //   total
+        //
+        // Expected result: sum_{i=0..3} sum_{j=0..3} i*j = (0+1+2)*(0+1+2) = 9
+        let inner_loop = MirStmt::While {
+            cond: MirExpr {
+                kind: MirExprKind::Binary {
+                    op: BinOp::Lt,
+                    left: Box::new(MirExpr { kind: MirExprKind::Var("j".to_string()) }),
+                    right: Box::new(MirExpr { kind: MirExprKind::IntLit(3) }),
+                },
+            },
+            body: MirBody {
+                stmts: vec![
+                    // total = total + i * j;
+                    MirStmt::Expr(MirExpr {
+                        kind: MirExprKind::Assign {
+                            target: Box::new(MirExpr {
+                                kind: MirExprKind::Var("total".to_string()),
+                            }),
+                            value: Box::new(MirExpr {
+                                kind: MirExprKind::Binary {
+                                    op: BinOp::Add,
+                                    left: Box::new(MirExpr {
+                                        kind: MirExprKind::Var("total".to_string()),
+                                    }),
+                                    right: Box::new(MirExpr {
+                                        kind: MirExprKind::Binary {
+                                            op: BinOp::Mul,
+                                            left: Box::new(MirExpr {
+                                                kind: MirExprKind::Var("i".to_string()),
+                                            }),
+                                            right: Box::new(MirExpr {
+                                                kind: MirExprKind::Var("j".to_string()),
+                                            }),
+                                        },
+                                    }),
+                                },
+                            }),
+                        },
+                    }),
+                    // j = j + 1;
+                    MirStmt::Expr(MirExpr {
+                        kind: MirExprKind::Assign {
+                            target: Box::new(MirExpr {
+                                kind: MirExprKind::Var("j".to_string()),
+                            }),
+                            value: Box::new(MirExpr {
+                                kind: MirExprKind::Binary {
+                                    op: BinOp::Add,
+                                    left: Box::new(MirExpr {
+                                        kind: MirExprKind::Var("j".to_string()),
+                                    }),
+                                    right: Box::new(MirExpr {
+                                        kind: MirExprKind::IntLit(1) }),
+                                },
+                            }),
+                        },
+                    }),
+                ],
+                result: None,
+            },
+        };
+
+        let outer_loop = MirStmt::While {
+            cond: MirExpr {
+                kind: MirExprKind::Binary {
+                    op: BinOp::Lt,
+                    left: Box::new(MirExpr { kind: MirExprKind::Var("i".to_string()) }),
+                    right: Box::new(MirExpr { kind: MirExprKind::IntLit(3) }),
+                },
+            },
+            body: MirBody {
+                stmts: vec![
+                    // let mut j: i64 = 0;  ← THIS is what LICM was incorrectly hoisting
+                    MirStmt::Let {
+                        name: "j".to_string(),
+                        mutable: true,
+                        init: MirExpr { kind: MirExprKind::IntLit(0) },
+                        alloc_hint: None,
+                        slot: None,
+                    },
+                    inner_loop,
+                    // i = i + 1;
+                    MirStmt::Expr(MirExpr {
+                        kind: MirExprKind::Assign {
+                            target: Box::new(MirExpr {
+                                kind: MirExprKind::Var("i".to_string()),
+                            }),
+                            value: Box::new(MirExpr {
+                                kind: MirExprKind::Binary {
+                                    op: BinOp::Add,
+                                    left: Box::new(MirExpr {
+                                        kind: MirExprKind::Var("i".to_string()),
+                                    }),
+                                    right: Box::new(MirExpr {
+                                        kind: MirExprKind::IntLit(1) }),
+                                },
+                            }),
+                        },
+                    }),
+                ],
+                result: None,
+            },
+        };
+
+        let body = MirBody {
+            stmts: vec![
+                MirStmt::Let {
+                    name: "total".to_string(),
+                    mutable: true,
+                    init: MirExpr { kind: MirExprKind::IntLit(0) },
+                    alloc_hint: None,
+                    slot: None,
+                },
+                MirStmt::Let {
+                    name: "i".to_string(),
+                    mutable: true,
+                    init: MirExpr { kind: MirExprKind::IntLit(0) },
+                    alloc_hint: None,
+                    slot: None,
+                },
+                outer_loop,
+            ],
+            result: Some(Box::new(MirExpr {
+                kind: MirExprKind::Var("total".to_string()),
+            })),
+        };
+
+        MirProgram {
+            functions: vec![MirFunction {
+                id: MirFnId(0),
+                name: "nested".to_string(),
+                type_params: vec![],
+                params: vec![],
+                return_type: None,
+                body,
+                is_nogc: false,
+                cfg_body: None,
+                decorators: vec![],
+                vis: cjc_ast::Visibility::Public,
+                local_count: 0,
+            }],
+            struct_defs: vec![],
+            enum_defs: vec![],
+            entry: MirFnId(0),
+        }
+    }
+
+    /// Count how many `let mut j = 0;` Lets remain inside the outer loop
+    /// body after optimization. The expected post-fix value is 1 (the
+    /// Let stays inside); the buggy pre-fix value was 0 (LICM hoisted
+    /// it out).
+    fn count_inner_j_lets(prog: &MirProgram) -> usize {
+        fn count_in_body(body: &MirBody) -> usize {
+            let mut n = 0;
+            for stmt in &body.stmts {
+                match stmt {
+                    MirStmt::Let { name, .. } if name == "j" => n += 1,
+                    MirStmt::While { body: wb, .. } => n += count_in_body(wb),
+                    MirStmt::If { then_body, else_body, .. } => {
+                        n += count_in_body(then_body);
+                        if let Some(eb) = else_body {
+                            n += count_in_body(eb);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            n
+        }
+        prog.functions
+            .iter()
+            .map(|f| count_in_body(&f.body))
+            .sum()
+    }
+
+    #[test]
+    fn licm_does_not_hoist_reassigned_let_out_of_loop() {
+        // Build a program containing the canonical nested-loop pattern
+        // where the inner `let mut j = 0;` MUST survive optimization
+        // (because j gets reassigned inside the inner loop). Pre-fix,
+        // LICM would lift the Let out of the outer loop, producing a
+        // wrong-result program.
+        let prog = nested_loop_program();
+
+        // Before optimization: exactly 1 `let j` (the one inside the outer loop).
+        assert_eq!(
+            count_inner_j_lets(&prog),
+            1,
+            "test setup invariant: program starts with 1 `let j`"
+        );
+
+        // Apply only LICM (no constant folding etc.) to isolate the test.
+        let mut optimized = prog.clone();
+        for func in &mut optimized.functions {
+            super::licm_fn(func);
+        }
+
+        // After LICM, the `let j` must still be inside the loop body
+        // (1 occurrence somewhere in the function), not hoisted out.
+        assert_eq!(
+            count_inner_j_lets(&optimized),
+            1,
+            "LICM must NOT hoist `let mut j = 0;` out of the loop when j is \
+             reassigned inside (task_a30e8eec regression)"
+        );
+
+        // Also: the outer loop's top-level stmts (before the outer while)
+        // must NOT contain a Let named "j". We check this directly:
+        // the function body's top-level stmts are [Let total, Let i, While].
+        // If LICM had hoisted j out, we'd see an extra [Let j] before the
+        // While. We assert there is no `let j` at the top level.
+        let top_level_j_lets = optimized
+            .functions
+            .iter()
+            .flat_map(|f| f.body.stmts.iter())
+            .filter(|s| matches!(s, MirStmt::Let { name, .. } if name == "j"))
+            .count();
+        assert_eq!(
+            top_level_j_lets, 0,
+            "LICM hoisted `let j` to the function's top level — regression"
+        );
+    }
+
+    #[test]
+    fn licm_still_hoists_truly_invariant_let() {
+        // Verify the fix did NOT regress the "good" hoist case: a Let
+        // whose name is NOT reassigned in the loop and whose init
+        // doesn't reference any modified vars should still be hoisted.
+        //
+        // Program:
+        //   let mut total: i64 = 0;
+        //   let mut i: i64 = 0;
+        //   while i < 10 {
+        //       let constant: i64 = 42;      ← MUST be hoisted (no reassign)
+        //       total = total + constant;
+        //       i = i + 1;
+        //   }
+        //   total
+        let body = MirBody {
+            stmts: vec![
+                MirStmt::Let {
+                    name: "total".to_string(),
+                    mutable: true,
+                    init: MirExpr { kind: MirExprKind::IntLit(0) },
+                    alloc_hint: None,
+                    slot: None,
+                },
+                MirStmt::Let {
+                    name: "i".to_string(),
+                    mutable: true,
+                    init: MirExpr { kind: MirExprKind::IntLit(0) },
+                    alloc_hint: None,
+                    slot: None,
+                },
+                MirStmt::While {
+                    cond: MirExpr {
+                        kind: MirExprKind::Binary {
+                            op: BinOp::Lt,
+                            left: Box::new(MirExpr { kind: MirExprKind::Var("i".to_string()) }),
+                            right: Box::new(MirExpr { kind: MirExprKind::IntLit(10) }),
+                        },
+                    },
+                    body: MirBody {
+                        stmts: vec![
+                            MirStmt::Let {
+                                name: "constant".to_string(),
+                                mutable: false,
+                                init: MirExpr { kind: MirExprKind::IntLit(42) },
+                                alloc_hint: None,
+                                slot: None,
+                            },
+                            MirStmt::Expr(MirExpr {
+                                kind: MirExprKind::Assign {
+                                    target: Box::new(MirExpr {
+                                        kind: MirExprKind::Var("total".to_string()),
+                                    }),
+                                    value: Box::new(MirExpr {
+                                        kind: MirExprKind::Binary {
+                                            op: BinOp::Add,
+                                            left: Box::new(MirExpr {
+                                                kind: MirExprKind::Var("total".to_string()),
+                                            }),
+                                            right: Box::new(MirExpr {
+                                                kind: MirExprKind::Var("constant".to_string()),
+                                            }),
+                                        },
+                                    }),
+                                },
+                            }),
+                            MirStmt::Expr(MirExpr {
+                                kind: MirExprKind::Assign {
+                                    target: Box::new(MirExpr {
+                                        kind: MirExprKind::Var("i".to_string()),
+                                    }),
+                                    value: Box::new(MirExpr {
+                                        kind: MirExprKind::Binary {
+                                            op: BinOp::Add,
+                                            left: Box::new(MirExpr {
+                                                kind: MirExprKind::Var("i".to_string()),
+                                            }),
+                                            right: Box::new(MirExpr { kind: MirExprKind::IntLit(1) }),
+                                        },
+                                    }),
+                                },
+                            }),
+                        ],
+                        result: None,
+                    },
+                },
+            ],
+            result: Some(Box::new(MirExpr {
+                kind: MirExprKind::Var("total".to_string()),
+            })),
+        };
+
+        let prog = MirProgram {
+            functions: vec![MirFunction {
+                id: MirFnId(0),
+                name: "f".to_string(),
+                type_params: vec![],
+                params: vec![],
+                return_type: None,
+                body,
+                is_nogc: false,
+                cfg_body: None,
+                decorators: vec![],
+                vis: cjc_ast::Visibility::Public,
+                local_count: 0,
+            }],
+            struct_defs: vec![],
+            enum_defs: vec![],
+            entry: MirFnId(0),
+        };
+
+        let mut optimized = prog.clone();
+        for func in &mut optimized.functions {
+            super::licm_fn(func);
+        }
+
+        // The `let constant: i64 = 42;` MUST be hoisted to the top
+        // level (before the while), because:
+        // - init is pure (literal)
+        // - init references no loop-modified vars
+        // - `constant` is not reassigned in the loop
+        let top_level_constant_lets = optimized
+            .functions
+            .iter()
+            .flat_map(|f| f.body.stmts.iter())
+            .filter(|s| matches!(s, MirStmt::Let { name, .. } if name == "constant"))
+            .count();
+        assert_eq!(
+            top_level_constant_lets, 1,
+            "LICM should have hoisted `let constant = 42;` to the function top \
+             level — without this, the LICM fix regressed the good case"
+        );
     }
 }
