@@ -1066,6 +1066,65 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let sum = crate::accumulator::fused_matmul_dot_kernel(&av, &wv, &vv, m, n);
             Ok(Some(Value::Float(sum)))
         }
+        // ---- CANA Phase 3.5a-prime: fused matmul+norm ----
+        // Computes ||A @ W||_p in a single pass, eliminating the intermediate
+        // [M, N] tensor. Bit-identical to `norm(matmul(A, W), ord)` on the
+        // sequential matmul path. See docs/cana/CANA_PHASE_3_5_FUSION_CODEGEN_DESIGN.md.
+        "fused_matmul_norm" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err(
+                    "fused_matmul_norm requires 2-3 arguments: a (2D), w (2D), [ord=2]".into(),
+                );
+            }
+            let a = match &args[0] {
+                Value::Tensor(t) => t,
+                _ => return Err(format!(
+                    "fused_matmul_norm requires tensors, got {}",
+                    args[0].type_name()
+                )),
+            };
+            let w = match &args[1] {
+                Value::Tensor(t) => t,
+                _ => return Err(format!(
+                    "fused_matmul_norm requires tensors, got {}",
+                    args[1].type_name()
+                )),
+            };
+            let ord: i64 = if args.len() == 3 {
+                match &args[2] {
+                    Value::Int(i) => *i,
+                    Value::Float(f) => *f as i64,
+                    _ => return Err("fused_matmul_norm: ord must be an integer".into()),
+                }
+            } else {
+                2
+            };
+            if a.ndim() != 2 {
+                return Err(format!(
+                    "fused_matmul_norm: a must be 2D, got {}D",
+                    a.ndim()
+                ));
+            }
+            if w.ndim() != 2 {
+                return Err(format!(
+                    "fused_matmul_norm: w must be 2D, got {}D",
+                    w.ndim()
+                ));
+            }
+            let m = a.shape()[0];
+            let k = a.shape()[1];
+            let k_w = w.shape()[0];
+            let n = w.shape()[1];
+            if k != k_w {
+                return Err(format!(
+                    "fused_matmul_norm: a cols {k} != w rows {k_w}"
+                ));
+            }
+            let av = a.to_vec();
+            let wv = w.to_vec();
+            let result = crate::accumulator::fused_matmul_norm_kernel(&av, &wv, ord, m, k, n);
+            Ok(Some(Value::Float(result)))
+        }
         "outer" => {
             if args.len() != 2 { return Err("outer requires exactly 2 arguments".into()); }
             let a = match &args[0] {

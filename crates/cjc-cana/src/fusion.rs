@@ -84,6 +84,7 @@ pub const NATIVE_PRIMITIVES: &[&str] = &[
     // the identifier recognise the fused name as already-fused so it does
     // not re-suggest fusion on top of itself.
     "fused_matmul_dot",
+    "fused_matmul_norm",
 ];
 
 /// Lookup helper.

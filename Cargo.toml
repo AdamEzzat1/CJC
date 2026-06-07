@@ -231,5 +231,9 @@ name = "fused_matmul_dot"
 path = "tests/fused_matmul_dot/mod.rs"
 
 [[test]]
+name = "fused_matmul_norm"
+path = "tests/fused_matmul_norm/mod.rs"
+
+[[test]]
 name = "locke"
 path = "tests/locke/mod.rs"

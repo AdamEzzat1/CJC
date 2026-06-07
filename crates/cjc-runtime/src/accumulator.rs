@@ -447,6 +447,67 @@ pub fn binned_sum_f64(values: &[f64]) -> f64 {
     acc.finalize()
 }
 
+/// Fused matmul + norm kernel: computes `||A @ W||_p` in a single pass.
+///
+/// Inputs are flat row-major slices: `a` length `m*k` (row-major `[m, k]`),
+/// `w` length `k*n` (row-major `[k, n]`).
+///
+/// Equivalent to `norm(matmul(A, W), ord)` and bit-identical to the unfused
+/// chain when matmul takes the sequential path (every dim < 64 in
+/// [`crate::tensor::Tensor::matmul`]).
+///
+/// **`ord` semantics:** matches the `norm` builtin —
+///   - `1` → Σᵢⱼ |h[i,j]| (L1 norm, no final root)
+///   - `2` → √(Σᵢⱼ h[i,j]²) (L2 / Frobenius norm)
+///   - `p` → (Σᵢⱼ |h[i,j]|^p)^(1/p) (general L_p)
+///
+/// **Math:** for each output element `h[i,j]`, accumulate `a[i,k] · w[k,j]`
+/// over the inner dim with a Kahan accumulator (matches `matmul_sequential`),
+/// transform via the ord-specific function, then accumulate across all
+/// `(i, j)` with a binned accumulator (matches `norm`).
+///
+/// **Allocation:** stack-only — no `Vec` for the `[m, n]` intermediate.
+///
+/// **Determinism:** order-invariant binned reduction over (i, j) matches
+/// `binned_sum_f64`; the per-element Kahan order matches `matmul_sequential`.
+#[inline]
+pub fn fused_matmul_norm_kernel(
+    a: &[f64],
+    w: &[f64],
+    ord: i64,
+    m: usize,
+    k: usize,
+    n: usize,
+) -> f64 {
+    debug_assert_eq!(a.len(), m * k);
+    debug_assert_eq!(w.len(), k * n);
+
+    let mut outer = BinnedAccumulatorF64::new();
+    for i in 0..m {
+        for j in 0..n {
+            let mut inner = cjc_repro::KahanAccumulatorF64::new();
+            for kk in 0..k {
+                inner.add(a[i * k + kk] * w[kk * n + j]);
+            }
+            let h_ij = inner.finalize();
+            // Apply ord-specific transform (matches `norm` builtin exactly).
+            let transformed = match ord {
+                1 => h_ij.abs(),
+                2 => h_ij * h_ij,
+                p => h_ij.abs().powf(p as f64),
+            };
+            outer.add(transformed);
+        }
+    }
+    let raw_sum = outer.finalize();
+    // Final root (matches `norm` builtin).
+    match ord {
+        1 => raw_sum,
+        2 => raw_sum.sqrt(),
+        p => raw_sum.powf(1.0 / (p as f64)),
+    }
+}
+
 /// Fused matmul + dot kernel: computes aᵀ · W · v in a single pass.
 ///
 /// Inputs are flat row-major slices: `a` length `m`, `w` length `m*n`
@@ -824,5 +885,130 @@ mod tests {
             result.to_bits(),
             unfused_matmul_dot_reference(&a, &w, &v, 3, 2).to_bits()
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // fused_matmul_norm_kernel tests
+    // -----------------------------------------------------------------------
+
+    /// Reference: sequential Kahan matmul, then norm (mirrors the unfused chain).
+    fn unfused_matmul_norm_reference(
+        a: &[f64], w: &[f64], ord: i64, m: usize, k: usize, n: usize,
+    ) -> f64 {
+        let mut intermediate = Vec::with_capacity(m * n);
+        for i in 0..m {
+            for j in 0..n {
+                let mut acc = cjc_repro::KahanAccumulatorF64::new();
+                for kk in 0..k {
+                    acc.add(a[i * k + kk] * w[kk * n + j]);
+                }
+                intermediate.push(acc.finalize());
+            }
+        }
+        match ord {
+            1 => {
+                let abs_vals: Vec<f64> = intermediate.iter().map(|x| x.abs()).collect();
+                binned_sum_f64(&abs_vals)
+            }
+            2 => {
+                let sq_vals: Vec<f64> = intermediate.iter().map(|x| x * x).collect();
+                binned_sum_f64(&sq_vals).sqrt()
+            }
+            p => {
+                let pf = p as f64;
+                let pv: Vec<f64> = intermediate.iter().map(|x| x.abs().powf(pf)).collect();
+                binned_sum_f64(&pv).powf(1.0 / pf)
+            }
+        }
+    }
+
+    #[test]
+    fn fused_matmul_norm_1x1_l2_matches_reference() {
+        // [3.0] @ [[4.0]] = [12.0], ||·||_2 = 12.0
+        let a = [3.0];
+        let w = [4.0];
+        let result = fused_matmul_norm_kernel(&a, &w, 2, 1, 1, 1);
+        assert_eq!(result, 12.0);
+        assert_eq!(
+            result.to_bits(),
+            unfused_matmul_norm_reference(&a, &w, 2, 1, 1, 1).to_bits()
+        );
+    }
+
+    #[test]
+    fn fused_matmul_norm_l1_matches_reference() {
+        // a = [[1, 2], [3, 4]] (2x2), w = [[1, 0], [0, 1]] (identity, 2x2)
+        // h = a, |a| = [1, 2, 3, 4], sum = 10
+        let a = vec![1.0, 2.0, 3.0, 4.0];
+        let w = vec![1.0, 0.0, 0.0, 1.0];
+        let result = fused_matmul_norm_kernel(&a, &w, 1, 2, 2, 2);
+        assert_eq!(result, 10.0);
+        assert_eq!(
+            result.to_bits(),
+            unfused_matmul_norm_reference(&a, &w, 1, 2, 2, 2).to_bits()
+        );
+    }
+
+    #[test]
+    fn fused_matmul_norm_l2_matches_reference() {
+        // a = [[3, 0], [0, 4]] (2x2), w = identity
+        // h = a, ||·||_2 = sqrt(9 + 0 + 0 + 16) = sqrt(25) = 5
+        let a = vec![3.0, 0.0, 0.0, 4.0];
+        let w = vec![1.0, 0.0, 0.0, 1.0];
+        let result = fused_matmul_norm_kernel(&a, &w, 2, 2, 2, 2);
+        assert_eq!(result, 5.0);
+        assert_eq!(
+            result.to_bits(),
+            unfused_matmul_norm_reference(&a, &w, 2, 2, 2, 2).to_bits()
+        );
+    }
+
+    #[test]
+    fn fused_matmul_norm_l3_matches_reference() {
+        // L3 norm exercises the general-p branch with .powf().
+        let a = vec![2.0, 0.0, 0.0, 0.0];
+        let w = vec![1.0, 0.0, 0.0, 1.0];
+        let result = fused_matmul_norm_kernel(&a, &w, 3, 2, 2, 2);
+        // h = a, L3 = (8 + 0 + 0 + 0)^(1/3) = 2.0
+        assert!((result - 2.0).abs() < 1e-12);
+        assert_eq!(
+            result.to_bits(),
+            unfused_matmul_norm_reference(&a, &w, 3, 2, 2, 2).to_bits()
+        );
+    }
+
+    #[test]
+    fn fused_matmul_norm_negative_values_l2() {
+        // Negative values exercise the |x|² (squaring kills sign).
+        let a = vec![-1.0, 2.0, -3.0, 4.0];
+        let w = vec![1.0, -1.0, -2.0, 2.0];
+        let result = fused_matmul_norm_kernel(&a, &w, 2, 2, 2, 2);
+        assert_eq!(
+            result.to_bits(),
+            unfused_matmul_norm_reference(&a, &w, 2, 2, 2, 2).to_bits()
+        );
+    }
+
+    #[test]
+    fn fused_matmul_norm_catastrophic_cancellation_bit_identical() {
+        let a = vec![1e16, 1.0, -1e16, 0.5];
+        let w = vec![1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0];
+        let result = fused_matmul_norm_kernel(&a, &w, 2, 2, 2, 4);
+        assert_eq!(
+            result.to_bits(),
+            unfused_matmul_norm_reference(&a, &w, 2, 2, 2, 4).to_bits(),
+            "fused norm must be bit-identical to unfused reference"
+        );
+    }
+
+    #[test]
+    fn fused_matmul_norm_determinism_100_runs() {
+        let a = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6];
+        let w = vec![1.5, 2.5, 3.5, 4.5];
+        let first = fused_matmul_norm_kernel(&a, &w, 2, 3, 2, 2);
+        for _ in 0..100 {
+            let again = fused_matmul_norm_kernel(&a, &w, 2, 3, 2, 2);
+            assert_eq!(first.to_bits(), again.to_bits());
+        }
     }
 }
