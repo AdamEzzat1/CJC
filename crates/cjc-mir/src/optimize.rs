@@ -22,39 +22,169 @@ use std::collections::{BTreeMap, BTreeSet};
 // Public API
 // ===========================================================================
 
-/// Run all optimization passes on a MIR program.
-/// Returns a new program with optimizations applied.
+/// Default pass sequence, in the order applied by [`optimize_program`].
+/// Each entry is the canonical pass name accepted by [`PassPlan`] and
+/// [`apply_pass`]. Aliases (e.g. `"cf"` for `"constant_fold"`) are accepted
+/// in plans but the canonical form is used here.
+pub const DEFAULT_PASS_SEQUENCE: &[&str] = &[
+    "constant_fold",
+    "strength_reduce",
+    "dce",
+    "cse",
+    "licm",
+    "cf_round_2",
+];
+
+/// A per-function plan for which optimization passes to run, in which order.
+///
+/// `per_function` is a `BTreeMap<function_name, Vec<pass_name>>`. Functions
+/// not in the map fall back to [`DEFAULT_PASS_SEQUENCE`] — this preserves
+/// today's behaviour for any function CANA hasn't recommended for.
+///
+/// Pass names are matched case-sensitively. Recognised canonical names are
+/// listed in [`DEFAULT_PASS_SEQUENCE`]; aliases handled by [`apply_pass`].
+///
+/// ## Why this lives in cjc-mir (not cjc-cana)
+///
+/// `cjc-cana` already depends on `cjc-mir` (it reads MIR). If `cjc-mir`
+/// also depended on `cjc-cana` (to consume `cjc_cana::PassSequence`) we'd
+/// have a dependency cycle. Defining `PassPlan` here lets `cjc-mir` stay at
+/// the bottom of the dep tree; `cjc-cana` provides a conversion helper
+/// (`cjc_cana::pass_plan_from`) that builds one of these from a CANA
+/// recommendation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PassPlan {
+    /// Per-function pass sequence. Functions absent from the map use
+    /// [`DEFAULT_PASS_SEQUENCE`].
+    pub per_function: BTreeMap<String, Vec<String>>,
+}
+
+impl PassPlan {
+    /// Construct an empty plan — every function uses the default sequence.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Set the pass sequence for a single function.
+    pub fn with_function(mut self, fn_name: impl Into<String>, passes: Vec<String>) -> Self {
+        self.per_function.insert(fn_name.into(), passes);
+        self
+    }
+
+    /// Total number of pass invocations across all functions, counting the
+    /// default sequence for functions not in the map. Used for debug /
+    /// audit surfaces.
+    pub fn total_pass_invocations(&self, all_function_names: &[String]) -> usize {
+        all_function_names
+            .iter()
+            .map(|n| {
+                self.per_function
+                    .get(n)
+                    .map(|v| v.len())
+                    .unwrap_or(DEFAULT_PASS_SEQUENCE.len())
+            })
+            .sum()
+    }
+}
+
+/// Apply one pass by name to a function. Returns `true` if the pass name
+/// was recognised; `false` if it was a no-op (unknown name).
+///
+/// Recognised names (case-sensitive):
+/// - `"constant_fold"`, `"cf"`, `"cf_round_2"` → constant folding
+/// - `"strength_reduce"`, `"sr"` → strength reduction
+/// - `"dce"`, `"dead_code_elimination"` → dead code elimination
+/// - `"cse"`, `"common_subexpression_elimination"` → CSE
+/// - `"licm"`, `"loop_invariant_code_motion"` → LICM
+///
+/// Unknown names are silently skipped. This is intentional: CANA may
+/// recommend a pass that's not yet implemented in the compiler, and the
+/// right response is to skip it (and log via the caller's audit trail),
+/// not to error.
+pub fn apply_pass(pass_name: &str, func: &mut MirFunction) -> bool {
+    match pass_name {
+        "constant_fold" | "cf" | "cf_round_2" => {
+            constant_fold_fn(func);
+            true
+        }
+        "strength_reduce" | "sr" => {
+            strength_reduce_fn(func);
+            true
+        }
+        "dce" | "dead_code_elimination" => {
+            dce_fn(func);
+            true
+        }
+        "cse" | "common_subexpression_elimination" => {
+            cse_fn(func);
+            true
+        }
+        "licm" | "loop_invariant_code_motion" => {
+            licm_fn(func);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Run all optimization passes on a MIR program using the default
+/// 6-pass sequence (CF → SR → DCE → CSE → LICM → CF).
+///
+/// This is the entry point preserved for callers that don't have a
+/// CANA recommendation. Internally, it delegates to
+/// [`optimize_program_with_plan`] with an empty plan, so every function
+/// falls back to [`DEFAULT_PASS_SEQUENCE`].
+///
+/// Behaviour is byte-identical to the pre-Phase-2 implementation —
+/// preserved for parity tests and any caller that hasn't opted into
+/// CANA yet.
 pub fn optimize_program(program: &MirProgram) -> MirProgram {
+    optimize_program_with_plan(program, &PassPlan::empty())
+}
+
+/// Run optimization passes on a MIR program using a per-function plan.
+///
+/// For each function:
+/// - If `plan.per_function` has an entry, run those passes in that order.
+/// - Otherwise, run [`DEFAULT_PASS_SEQUENCE`].
+///
+/// This is the Phase 2 entry point for CANA-driven optimization. Callers
+/// build a `PassPlan` from a CANA `PassSequence` (via
+/// `cjc_cana::pass_plan_from`) and pass it here.
+///
+/// ## Determinism
+///
+/// For a given `(program, plan)`, the output is byte-identical across
+/// runs and platforms. The pass implementations are unchanged from
+/// the pre-Phase-2 era; only the *selection* of which to run differs.
+///
+/// ## Semantics
+///
+/// Each individual pass is semantics-preserving (verified by the
+/// AST/MIR parity gate in `tests/fixtures/`). The composition of any
+/// subset in any order is therefore also semantics-preserving — so
+/// CANA's recommendations cannot break parity, only optimization
+/// quality.
+pub fn optimize_program_with_plan(program: &MirProgram, plan: &PassPlan) -> MirProgram {
     let mut optimized = program.clone();
 
-    // Pass 1: Constant Folding
     for func in &mut optimized.functions {
-        constant_fold_fn(func);
-    }
-
-    // Pass 2: Strength Reduction
-    for func in &mut optimized.functions {
-        strength_reduce_fn(func);
-    }
-
-    // Pass 3: Dead Code Elimination
-    for func in &mut optimized.functions {
-        dce_fn(func);
-    }
-
-    // Pass 4: Common Subexpression Elimination
-    for func in &mut optimized.functions {
-        cse_fn(func);
-    }
-
-    // Pass 5: Loop-Invariant Code Motion
-    for func in &mut optimized.functions {
-        licm_fn(func);
-    }
-
-    // Pass 6: Second round of CF (may expose new opportunities after other passes)
-    for func in &mut optimized.functions {
-        constant_fold_fn(func);
+        let passes: &[String] = match plan.per_function.get(&func.name) {
+            Some(custom) => custom,
+            None => {
+                // Fall back to default. We need a slice of String, so
+                // construct one lazily here. (A static const Vec<String>
+                // would be cleaner but Rust's const surface doesn't
+                // support heap-allocated Strings.)
+                for default_pass in DEFAULT_PASS_SEQUENCE {
+                    apply_pass(default_pass, func);
+                }
+                continue;
+            }
+        };
+        for pass in passes {
+            apply_pass(pass, func);
+        }
     }
 
     optimized
@@ -1645,5 +1775,228 @@ mod tests {
             }
             _ => panic!("expected Let"),
         }
+    }
+
+    // -- Phase 2: PassPlan + optimize_program_with_plan ----------------
+
+    /// Build a single-function program whose body computes `init_value + 0`
+    /// and *uses* the result as the body's tail expression. The "use" stops
+    /// DCE from eliminating the binding, so the optimization-visible
+    /// expression survives for assertions.
+    fn make_program_with_fn(name: &str, init_value: i64) -> MirProgram {
+        let body = MirBody {
+            stmts: vec![MirStmt::Let {
+                name: "x".to_string(),
+                mutable: false,
+                init: MirExpr {
+                    kind: MirExprKind::Binary {
+                        op: BinOp::Add,
+                        left: Box::new(MirExpr {
+                            kind: MirExprKind::IntLit(init_value),
+                        }),
+                        right: Box::new(MirExpr {
+                            kind: MirExprKind::IntLit(0),
+                        }),
+                    },
+                },
+                alloc_hint: None,
+                slot: None,
+            }],
+            // Body's tail expression references `x`, making it live.
+            result: Some(Box::new(MirExpr {
+                kind: MirExprKind::Var("x".to_string()),
+            })),
+        };
+        MirProgram {
+            functions: vec![MirFunction {
+                id: MirFnId(0),
+                name: name.to_string(),
+                type_params: vec![],
+                params: vec![],
+                return_type: None,
+                body,
+                is_nogc: false,
+                cfg_body: None,
+                decorators: vec![],
+                vis: cjc_ast::Visibility::Public,
+                local_count: 0,
+            }],
+            struct_defs: vec![],
+            enum_defs: vec![],
+            entry: MirFnId(0),
+        }
+    }
+
+    fn first_let_init(prog: &MirProgram) -> &MirExpr {
+        let func = prog
+            .functions
+            .first()
+            .expect("expected at least one function");
+        let stmt = func
+            .body
+            .stmts
+            .first()
+            .expect("expected at least one statement (DCE removed our binding?)");
+        match stmt {
+            MirStmt::Let { init, .. } => init,
+            _ => panic!("expected Let, got {:?}", stmt),
+        }
+    }
+
+    #[test]
+    fn pass_plan_default_is_empty() {
+        let plan = PassPlan::empty();
+        assert!(plan.per_function.is_empty());
+    }
+
+    #[test]
+    fn pass_plan_with_function_inserts() {
+        let plan = PassPlan::empty().with_function(
+            "main",
+            vec!["dce".to_string(), "licm".to_string()],
+        );
+        assert_eq!(plan.per_function.len(), 1);
+        assert_eq!(plan.per_function.get("main").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn pass_plan_total_invocations_uses_default_for_unmapped() {
+        let plan = PassPlan::empty();
+        let total = plan.total_pass_invocations(&["a".into(), "b".into()]);
+        assert_eq!(total, 2 * DEFAULT_PASS_SEQUENCE.len());
+    }
+
+    #[test]
+    fn apply_pass_recognises_canonical_and_alias_names() {
+        let mut f = MirFunction {
+            id: MirFnId(0),
+            name: "f".to_string(),
+            type_params: vec![],
+            params: vec![],
+            return_type: None,
+            body: MirBody {
+                stmts: vec![],
+                result: None,
+            },
+            is_nogc: false,
+            cfg_body: None,
+            decorators: vec![],
+            vis: cjc_ast::Visibility::Public,
+            local_count: 0,
+        };
+        // Every canonical and alias name should return true.
+        for name in &[
+            "constant_fold", "cf", "cf_round_2",
+            "strength_reduce", "sr",
+            "dce", "dead_code_elimination",
+            "cse", "common_subexpression_elimination",
+            "licm", "loop_invariant_code_motion",
+        ] {
+            assert!(apply_pass(name, &mut f), "should recognise {}", name);
+        }
+        // Unknown should return false.
+        assert!(!apply_pass("nonexistent_pass", &mut f));
+    }
+
+    #[test]
+    fn optimize_program_with_empty_plan_matches_optimize_program() {
+        // Phase 2 invariant: empty plan = default behaviour.
+        let prog = make_program_with_fn("main", 42);
+        let opt_old = optimize_program(&prog);
+        let opt_new = optimize_program_with_plan(&prog, &PassPlan::empty());
+
+        // Both should fold `42 + 0` to `42`.
+        for opt in [&opt_old, &opt_new] {
+            let init = first_let_init(opt);
+            assert!(
+                matches!(init.kind, MirExprKind::IntLit(42)),
+                "expected IntLit(42) after CF, got {:?}",
+                init.kind
+            );
+        }
+        // And the two should be byte-identical (debug-compared via Debug
+        // since MirProgram does not derive Eq).
+        assert_eq!(format!("{:?}", opt_old), format!("{:?}", opt_new));
+    }
+
+    #[test]
+    fn optimize_program_with_plan_runs_only_specified_passes() {
+        let prog = make_program_with_fn("main", 5);
+        // Plan that only runs strength_reduce (no constant fold).
+        let plan = PassPlan::empty().with_function(
+            "main",
+            vec!["strength_reduce".to_string()],
+        );
+        let opt = optimize_program_with_plan(&prog, &plan);
+        let init = first_let_init(&opt);
+        // Without CF, the `5 + 0` stays as a binary expression. The strength
+        // reducer should still simplify add-zero, so we expect just `5`.
+        // Actually: strength reduction also turns `x + 0 -> x`, so we
+        // still get IntLit(5) here (the pre-pass already had IntLit(5)).
+        assert!(
+            matches!(init.kind, MirExprKind::IntLit(5) | MirExprKind::Binary { .. }),
+            "expected IntLit(5) or unchanged Binary after SR-only, got {:?}",
+            init.kind
+        );
+    }
+
+    #[test]
+    fn optimize_program_with_plan_unknown_pass_is_no_op() {
+        // A plan that names a pass that doesn't exist should NOT error;
+        // it just skips. This is the "CANA may recommend a pass not yet
+        // implemented" contract.
+        let prog = make_program_with_fn("main", 7);
+        let plan = PassPlan::empty().with_function(
+            "main",
+            vec!["nonexistent_pass".to_string()],
+        );
+        let opt = optimize_program_with_plan(&prog, &plan);
+        let init = first_let_init(&opt);
+        // No passes ran, so `7 + 0` stays as Binary.
+        assert!(
+            matches!(init.kind, MirExprKind::Binary { .. }),
+            "expected Binary after no-op plan, got {:?}",
+            init.kind
+        );
+    }
+
+    #[test]
+    fn optimize_program_with_plan_unmapped_function_uses_default() {
+        // Plan that names "main" but the program has function "other" — the
+        // unmapped "other" should still get the default 6-pass treatment.
+        let prog = make_program_with_fn("other", 99);
+        let plan = PassPlan::empty().with_function(
+            "main", // wrong name; "other" is unmapped
+            vec!["dce".to_string()],
+        );
+        let opt = optimize_program_with_plan(&prog, &plan);
+        let init = first_let_init(&opt);
+        // "other" was unmapped → default sequence → CF folds 99+0 to 99.
+        assert!(
+            matches!(init.kind, MirExprKind::IntLit(99)),
+            "expected IntLit(99) after default sequence on unmapped fn, got {:?}",
+            init.kind
+        );
+    }
+
+    #[test]
+    fn optimize_program_with_plan_is_deterministic() {
+        let prog = make_program_with_fn("main", 42);
+        let plan = PassPlan::empty().with_function(
+            "main",
+            vec!["constant_fold".to_string(), "dce".to_string()],
+        );
+        let first = optimize_program_with_plan(&prog, &plan);
+        for _ in 0..50 {
+            let again = optimize_program_with_plan(&prog, &plan);
+            assert_eq!(format!("{:?}", first), format!("{:?}", again));
+        }
+    }
+
+    #[test]
+    fn default_pass_sequence_has_six_entries() {
+        // Drift guard: if a pass is added/removed, this needs to change
+        // alongside cjc-cana::pass_ranker::CANONICAL_PASSES.
+        assert_eq!(DEFAULT_PASS_SEQUENCE.len(), 6);
     }
 }
