@@ -239,5 +239,9 @@ name = "fusion_rewrite"
 path = "tests/fusion_rewrite/mod.rs"
 
 [[test]]
+name = "fused_mlp_matmul"
+path = "tests/fused_mlp_matmul/mod.rs"
+
+[[test]]
 name = "locke"
 path = "tests/locke/mod.rs"
