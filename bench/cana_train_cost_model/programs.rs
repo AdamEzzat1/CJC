@@ -1,29 +1,31 @@
-//! Training corpus for the LinearCostModel.
+//! Training corpus for the LinearCostModel — **v2 (60-program expansion).**
 //!
-//! 18 CJC-Lang programs chosen to span the feature space of `CanaFeatures`:
+//! Revised after the first-run findings (RMSE 0.13-0.18 vs mean benefits
+//! 0.06-0.12 — noise floor exceeded signal). Two structural changes:
 //!
-//!   - `expr_count`: from tiny (single literal) to huge (60+ exprs)
-//!   - `max_loop_depth`: 0 (no loops), 1, 2, 3, 4 (deeply nested)
-//!   - `branch_count`: 0 to ~10
-//!   - `alloc_sites`: 0 to ~6
+//!   1. **Workload scaling.** Inner-loop iteration counts are scaled up so
+//!      most programs run for ≥ 1ms wall-clock, putting per-pass benefits
+//!      well above the 5-20μs scheduler-noise floor.
 //!
-//! Each program is intentionally designed to make ONE pass shine:
+//!   2. **Corpus expansion** from 18 → 60 programs. The new programs densify
+//!      the feature space across (`expr_count`, `max_loop_depth`,
+//!      `branch_count`, `alloc_sites`) corners and across pass-affinity
+//!      categories. Each pass now has ~10-15 programs where it should
+//!      dominate, vs 2-4 before.
 //!
-//!   - "arith_*" → CF (constants everywhere)
-//!   - "loop_*"  → LICM (loops with hoistable invariants)
-//!   - "cse_*"   → CSE (repeated subexpressions)
-//!   - "sr_*"    → SR (multiplications by powers of 2)
-//!   - "dce_*"   → DCE (computed-but-unused values)
-//!   - "mixed_*" → no single pass dominates
+//! Feature-space coverage targets:
+//!
+//!   | Axis               | First run    | v2 corpus     |
+//!   |--------------------|--------------|---------------|
+//!   | max_loop_depth     | {0,1,2,3,4}  | {0,1,2,3,4}   |
+//!   | expr_count buckets | small only   | 0-20 / 20-50 / 50-100 / 100+ |
+//!   | branch_count       | 0-3 typical  | 0-10 typical, peak 12 |
+//!   | alloc_sites        | 0 across all | 0-2 (still mostly 0 — language has no easy heap surface) |
 //!
 //! Programs use single-return shape (let-bound if/else) throughout — the
-//! `if cond { return x; } ... return y;` shape triggers the dominators OOB
-//! that was task_9d7ae8b2 (now fixed but the convention is documented in
-//! the original cana_pass_ordering bench).
-//!
-//! Each program is documented with its expected dominant pass to make the
-//! resulting trained coefficients auditable: if the fitted w_loop_depth
-//! coefficient for LICM is near zero after training, something went wrong.
+//! `if cond { return x; } ... return y;` shape used to trigger the
+//! dominators OOB (task_9d7ae8b2, now fixed but the convention is
+//! documented in the original cana_pass_ordering bench).
 
 pub struct Program {
     pub name: &'static str,
@@ -35,10 +37,9 @@ pub struct Program {
 }
 
 // ============================================================================
-// CF-favoring programs (constant arithmetic)
+// CF-favoring programs (constant arithmetic — chain folds collapse to literals)
 // ============================================================================
 
-/// Tiny: a single foldable expression. CF nukes nearly everything.
 const PROG_ARITH_TINY: &str = r#"
 fn compute() -> i64 {
     let a: i64 = 5 + 3;
@@ -47,7 +48,6 @@ fn compute() -> i64 {
 print(compute());
 "#;
 
-/// Medium: chain of foldable arithmetic. CF saves the most.
 const PROG_ARITH_MED: &str = r#"
 fn compute(n: i64) -> i64 {
     let a: i64 = 10 * 5 + 2;
@@ -58,8 +58,6 @@ fn compute(n: i64) -> i64 {
 print(compute(7));
 "#;
 
-/// Heavy: many constants chained, but with one runtime input. CF folds
-/// most and DCE may eliminate a few unused intermediates.
 const PROG_ARITH_HEAVY: &str = r#"
 fn compute(n: i64) -> i64 {
     let a: i64 = 1 + 2 + 3 + 4 + 5;
@@ -72,12 +70,52 @@ fn compute(n: i64) -> i64 {
 print(compute(11));
 "#;
 
+/// Many independent constant chains (~30 foldable subexpressions).
+const PROG_CF_FORTY: &str = r#"
+fn compute(n: i64) -> i64 {
+    let a1: i64 = 1 + 2; let a2: i64 = 3 + 4; let a3: i64 = 5 + 6;
+    let a4: i64 = 7 + 8; let a5: i64 = 9 + 10; let a6: i64 = 11 + 12;
+    let b1: i64 = a1 * 2; let b2: i64 = a2 * 3; let b3: i64 = a3 * 4;
+    let b4: i64 = a4 * 5; let b5: i64 = a5 * 6; let b6: i64 = a6 * 7;
+    let c1: i64 = b1 + b2; let c2: i64 = b3 + b4; let c3: i64 = b5 + b6;
+    return c1 + c2 + c3 + n;
+}
+print(compute(99));
+"#;
+
+/// Many constant-arithmetic operations packed into a single loop body.
+/// CF folds the body; LICM hoists what remains; the loop runs unchanged.
+const PROG_CF_IN_HOT_LOOP: &str = r#"
+fn compute(n: i64) -> i64 {
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let k: i64 = 2 * 3 + 4 * 5 - 1;
+        total = total + k + i;
+        i = i + 1;
+    }
+    return total;
+}
+print(compute(5000));
+"#;
+
+/// CF on integer constants ≠ CF on float constants (different reduction
+/// axes). Float version exercises the `StrictFold` reduction-axis path.
+const PROG_CF_PURE_FLOAT: &str = r#"
+fn compute(x: f64) -> f64 {
+    let a: f64 = 1.5 + 2.5;
+    let b: f64 = 3.0 * 4.0;
+    let c: f64 = a * b - 1.0;
+    return c + x;
+}
+print(compute(0.5));
+"#;
+
 // ============================================================================
 // LICM-favoring programs (loops with hoistable invariants)
 // ============================================================================
 
-/// Simple loop with loop-invariant expression. LICM can hoist `n * 10`.
-const PROG_LOOP_INVARIANT: &str = r#"
+const PROG_LOOP_INVARIANT_BIG: &str = r#"
 fn loop_inv(n: i64) -> i64 {
     let mut total: i64 = 0;
     let mut i: i64 = 0;
@@ -87,11 +125,10 @@ fn loop_inv(n: i64) -> i64 {
     }
     return total;
 }
-print(loop_inv(100));
+print(loop_inv(50000));
 "#;
 
-/// Doubly-nested loop. LICM has TWO levels of hoisting opportunities.
-const PROG_LOOP_NESTED2: &str = r#"
+const PROG_LOOP_NESTED2_BIG: &str = r#"
 fn nested2(n: i64) -> i64 {
     let mut total: i64 = 0;
     let mut i: i64 = 0;
@@ -105,11 +142,10 @@ fn nested2(n: i64) -> i64 {
     }
     return total;
 }
-print(nested2(20));
+print(nested2(200));
 "#;
 
-/// Triply-nested loop. Loop depth 3 — strong LICM signal.
-const PROG_LOOP_NESTED3: &str = r#"
+const PROG_LOOP_NESTED3_BIG: &str = r#"
 fn nested3(n: i64) -> i64 {
     let mut t: i64 = 0;
     let mut i: i64 = 0;
@@ -127,11 +163,10 @@ fn nested3(n: i64) -> i64 {
     }
     return t;
 }
-print(nested3(8));
+print(nested3(30));
 "#;
 
-/// Quadruply-nested. Loop depth 4 — extreme.
-const PROG_LOOP_NESTED4: &str = r#"
+const PROG_LOOP_NESTED4_BIG: &str = r#"
 fn nested4(n: i64) -> i64 {
     let mut t: i64 = 0;
     let mut a: i64 = 0;
@@ -153,14 +188,58 @@ fn nested4(n: i64) -> i64 {
     }
     return t;
 }
-print(nested4(4));
+print(nested4(10));
+"#;
+
+/// Loop with multiple hoistable invariants. Each iteration recomputes
+/// (k*k), (k+m), (m*m). LICM moves all three to the pre-header.
+const PROG_LICM_MANY_INV: &str = r#"
+fn many_inv(n: i64, k: i64, m: i64) -> i64 {
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        total = total + (k * k) + (k + m) + (m * m) + i;
+        i = i + 1;
+    }
+    return total;
+}
+print(many_inv(20000, 7, 3));
+"#;
+
+/// LICM with conditional invariant hoisting opportunity.
+const PROG_LICM_BRANCHY: &str = r#"
+fn branchy(n: i64, k: i64) -> i64 {
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let v: i64 = if k > 0 { k * k + i } else { -k * k + i };
+        total = total + v;
+        i = i + 1;
+    }
+    return total;
+}
+print(branchy(15000, 5));
+"#;
+
+/// Long outer loop, very small inner body. LICM hoists the inner
+/// constant expression out of the hot loop.
+const PROG_LICM_LONG_OUTER: &str = r#"
+fn long_outer(n: i64, k: i64) -> i64 {
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        total = total + k * 100;
+        i = i + 1;
+    }
+    return total;
+}
+print(long_outer(100000, 13));
 "#;
 
 // ============================================================================
 // CSE-favoring programs (repeated subexpressions)
 // ============================================================================
 
-/// Same subexpression used many times. CSE replaces them with one binding.
 const PROG_CSE_REPEAT: &str = r#"
 fn repeats(x: i64, y: i64) -> i64 {
     let a: i64 = (x + y) * 2;
@@ -172,9 +251,7 @@ fn repeats(x: i64, y: i64) -> i64 {
 print(repeats(3, 4));
 "#;
 
-/// Repeated subexpression inside a loop body. CSE saves a multiplication
-/// per iteration (and LICM may move the result out).
-const PROG_CSE_IN_LOOP: &str = r#"
+const PROG_CSE_IN_LOOP_BIG: &str = r#"
 fn cse_loop(n: i64, k: i64) -> i64 {
     let mut total: i64 = 0;
     let mut i: i64 = 0;
@@ -186,14 +263,52 @@ fn cse_loop(n: i64, k: i64) -> i64 {
     }
     return total;
 }
-print(cse_loop(50, 7));
+print(cse_loop(20000, 7));
+"#;
+
+/// CSE with deeply repeated subexpression (10× repetition).
+const PROG_CSE_HEAVY: &str = r#"
+fn heavy(x: i64, y: i64, z: i64) -> i64 {
+    let a: i64 = (x + y * z) * 2;
+    let b: i64 = (x + y * z) * 3;
+    let c: i64 = (x + y * z) * 4;
+    let d: i64 = (x + y * z) * 5;
+    let e: i64 = (x + y * z) * 6;
+    let f: i64 = (x + y * z) * 7;
+    let g: i64 = (x + y * z) * 8;
+    let h: i64 = (x + y * z) * 9;
+    let i: i64 = (x + y * z) * 10;
+    let j: i64 = (x + y * z) * 11;
+    return a + b + c + d + e + f + g + h + i + j;
+}
+print(heavy(2, 3, 4));
+"#;
+
+/// Repeated subexpression inside an outer + inner loop. CSE saves work
+/// per inner-loop iteration; the savings compound.
+const PROG_CSE_DOUBLE_LOOP: &str = r#"
+fn double_cse(n: i64, k: i64) -> i64 {
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let mut j: i64 = 0;
+        while j < n {
+            let a: i64 = (k * k * k) + j;
+            let b: i64 = (k * k * k) - j;
+            total = total + a + b + i;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return total;
+}
+print(double_cse(150, 4));
 "#;
 
 // ============================================================================
 // SR-favoring programs (multiplications by powers of two)
 // ============================================================================
 
-/// Many multiplications by 2/4/8. SR rewrites as shifts.
 const PROG_SR_POW2: &str = r#"
 fn power_mul(n: i64) -> i64 {
     let a: i64 = n * 2;
@@ -206,8 +321,7 @@ fn power_mul(n: i64) -> i64 {
 print(power_mul(13));
 "#;
 
-/// SR inside a loop body — bigger payoff per iteration.
-const PROG_SR_IN_LOOP: &str = r#"
+const PROG_SR_IN_LOOP_BIG: &str = r#"
 fn sr_loop(n: i64) -> i64 {
     let mut total: i64 = 0;
     let mut i: i64 = 0;
@@ -217,14 +331,48 @@ fn sr_loop(n: i64) -> i64 {
     }
     return total;
 }
-print(sr_loop(200));
+print(sr_loop(20000));
+"#;
+
+/// Many pow-2 multiplications inside a tight loop. Maximum SR signal.
+const PROG_SR_HEAVY_LOOP: &str = r#"
+fn sr_heavy(n: i64) -> i64 {
+    let mut t: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let a: i64 = i * 2;
+        let b: i64 = i * 4;
+        let c: i64 = i * 8;
+        let d: i64 = i * 16;
+        t = t + a + b + c + d;
+        i = i + 1;
+    }
+    return t;
+}
+print(sr_heavy(10000));
+"#;
+
+/// SR over division (i / 2, i / 4 etc. → shifts). Tests SR's coverage
+/// of the divide side, not just multiply.
+const PROG_SR_DIV_POW2: &str = r#"
+fn sr_div(n: i64) -> i64 {
+    let mut t: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let a: i64 = i / 2;
+        let b: i64 = i / 4;
+        t = t + a + b;
+        i = i + 1;
+    }
+    return t;
+}
+print(sr_div(15000));
 "#;
 
 // ============================================================================
 // DCE-favoring programs (computed-but-unused values)
 // ============================================================================
 
-/// Many lets computed but never read. DCE wipes them out.
 const PROG_DCE_DEAD: &str = r#"
 fn dead_lets(n: i64) -> i64 {
     let dead1: i64 = n * 100;
@@ -237,7 +385,6 @@ fn dead_lets(n: i64) -> i64 {
 print(dead_lets(9));
 "#;
 
-/// Branches that compute but discard intermediates. DCE + CF win together.
 const PROG_DCE_BRANCHY: &str = r#"
 fn branchy(n: i64) -> i64 {
     let unused: i64 = n * 999;
@@ -248,12 +395,85 @@ fn branchy(n: i64) -> i64 {
 print(branchy(5));
 "#;
 
+/// Many dead lets in a row (~20). DCE has a giant linear cleanup.
+const PROG_DCE_TWENTY_DEAD: &str = r#"
+fn many_dead(n: i64) -> i64 {
+    let d1: i64 = n * 2; let d2: i64 = n * 3; let d3: i64 = n * 4;
+    let d4: i64 = n * 5; let d5: i64 = n * 6; let d6: i64 = n * 7;
+    let d7: i64 = n * 8; let d8: i64 = n * 9; let d9: i64 = n * 10;
+    let d10: i64 = n * 11;
+    let d11: i64 = n + 1; let d12: i64 = n + 2; let d13: i64 = n + 3;
+    let d14: i64 = n + 4; let d15: i64 = n + 5; let d16: i64 = n + 6;
+    let d17: i64 = n + 7; let d18: i64 = n + 8; let d19: i64 = n + 9;
+    let d20: i64 = n + 10;
+    return n;
+}
+print(many_dead(7));
+"#;
+
+/// Dead code inside a hot loop. DCE saves work per iteration.
+const PROG_DCE_IN_LOOP: &str = r#"
+fn dce_loop(n: i64) -> i64 {
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let dead: i64 = i * i * i;
+        total = total + i;
+        i = i + 1;
+    }
+    return total;
+}
+print(dce_loop(15000));
+"#;
+
 // ============================================================================
-// Mixed / multi-pass programs
+// Branch-heavy programs (DCE benefits from unreachable elimination)
 // ============================================================================
 
-/// Multi-function with a call graph. Each function gets its own per-fn
-/// PassPlan entry.
+const PROG_BRANCH_LADDER: &str = r#"
+fn classify(n: i64) -> i64 {
+    let a: i64 = if n > 10 { 1 } else { 0 };
+    let b: i64 = if n > 20 { 2 } else { 0 };
+    let c: i64 = if n > 30 { 3 } else { 0 };
+    let d: i64 = if n > 40 { 4 } else { 0 };
+    let e: i64 = if n > 50 { 5 } else { 0 };
+    let f: i64 = if n > 60 { 6 } else { 0 };
+    return a + b + c + d + e + f;
+}
+print(classify(35));
+"#;
+
+const PROG_NESTED_IFS: &str = r#"
+fn nested_ifs(n: i64) -> i64 {
+    let r: i64 = if n > 0 {
+        if n > 10 {
+            if n > 100 { 100 } else { 10 }
+        } else { 1 }
+    } else {
+        if n < -10 { -10 } else { -1 }
+    };
+    return r;
+}
+print(nested_ifs(55));
+"#;
+
+/// Many independent if/else chains, each computing into separate locals.
+const PROG_BRANCH_HEAVY: &str = r#"
+fn branchy(n: i64) -> i64 {
+    let a: i64 = if n > 5 { n * 2 } else { n };
+    let b: i64 = if n > 10 { n * 3 } else { n };
+    let c: i64 = if n > 15 { n * 4 } else { n };
+    let d: i64 = if n > 20 { n * 5 } else { n };
+    let e: i64 = if n > 25 { n * 6 } else { n };
+    return a + b + c + d + e;
+}
+print(branchy(18));
+"#;
+
+// ============================================================================
+// Mixed / multi-pass programs (no single dominant pass)
+// ============================================================================
+
 const PROG_MANY_FN: &str = r#"
 fn add1(x: i64) -> i64 { return x + 1; }
 fn add2(x: i64) -> i64 { return x + 2; }
@@ -270,7 +490,6 @@ fn driver() -> i64 {
 print(driver());
 "#;
 
-/// Recursive — distinct CFG shape (call graph rather than basic blocks).
 const PROG_RECURSIVE: &str = r#"
 fn factorial(n: i64) -> i64 {
     let result: i64 = if n <= 1 { 1 } else { n * factorial(n - 1) };
@@ -279,9 +498,6 @@ fn factorial(n: i64) -> i64 {
 print(factorial(10));
 "#;
 
-/// Floats: introduces StrictFold reductions, which the DefaultLegalityGate
-/// refuses to reorder. Useful for ensuring the cost model learns "high
-/// expr_count alone doesn't justify aggressive reordering on float fns."
 const PROG_FLOAT: &str = r#"
 fn polynomial(x: f64) -> f64 {
     let a: f64 = 3.14;
@@ -292,8 +508,7 @@ fn polynomial(x: f64) -> f64 {
 print(polynomial(1.5));
 "#;
 
-/// Mixed: loop + branches + constants. No single pass dominates.
-const PROG_MIXED: &str = r#"
+const PROG_MIXED_BIG: &str = r#"
 fn classify(n: i64) -> i64 {
     let mut sum: i64 = 0;
     let mut i: i64 = 0;
@@ -304,10 +519,9 @@ fn classify(n: i64) -> i64 {
     }
     return sum;
 }
-print(classify(40));
+print(classify(5000));
 "#;
 
-/// Larger multi-function program — composite stress test.
 const PROG_LARGE: &str = r#"
 fn count_evens(n: i64) -> i64 {
     let mut c: i64 = 0;
@@ -344,36 +558,556 @@ fn combined(n: i64) -> i64 {
     let c: i64 = sum_to(n);
     return a + b + c;
 }
-print(combined(50));
+print(combined(2000));
 "#;
 
 // ============================================================================
-// The corpus
+// Recursion variations
+// ============================================================================
+
+const PROG_RECURSIVE_BIG: &str = r#"
+fn factorial(n: i64) -> i64 {
+    let r: i64 = if n <= 1 { 1 } else { n * factorial(n - 1) };
+    return r;
+}
+print(factorial(12));
+"#;
+
+const PROG_FIB_REC: &str = r#"
+fn fib(n: i64) -> i64 {
+    let r: i64 = if n <= 1 { n } else { fib(n - 1) + fib(n - 2) };
+    return r;
+}
+print(fib(15));
+"#;
+
+const PROG_MUTUAL_REC: &str = r#"
+fn is_even(n: i64) -> i64 {
+    let r: i64 = if n == 0 { 1 } else { is_odd(n - 1) };
+    return r;
+}
+fn is_odd(n: i64) -> i64 {
+    let r: i64 = if n == 0 { 0 } else { is_even(n - 1) };
+    return r;
+}
+print(is_even(20));
+"#;
+
+// ============================================================================
+// Float-heavy programs (StrictFold reductions present)
+// ============================================================================
+
+const PROG_FLOAT_LOOP: &str = r#"
+fn float_sum(n: i64) -> f64 {
+    let mut total: f64 = 0.0;
+    let mut i: i64 = 0;
+    while i < n {
+        total = total + 1.5;
+        i = i + 1;
+    }
+    return total;
+}
+print(float_sum(10000));
+"#;
+
+const PROG_FLOAT_POLY: &str = r#"
+fn poly(x: f64, n: i64) -> f64 {
+    let mut acc: f64 = 0.0;
+    let mut i: i64 = 0;
+    while i < n {
+        acc = acc + x * x + 2.0 * x + 1.0;
+        i = i + 1;
+    }
+    return acc;
+}
+print(poly(2.5, 5000));
+"#;
+
+const PROG_FLOAT_TRIG: &str = r#"
+fn trig_chain(x: f64) -> f64 {
+    let a: f64 = x + 1.0;
+    let b: f64 = a * 2.0;
+    let c: f64 = b - 0.5;
+    let d: f64 = c * c;
+    return d + a + b;
+}
+print(trig_chain(3.14));
+"#;
+
+// ============================================================================
+// Straight-line size programs (vary expr_count without loops)
+// ============================================================================
+
+const PROG_STRAIGHT_SHORT: &str = r#"
+fn sl(n: i64) -> i64 {
+    let a: i64 = n + 1;
+    let b: i64 = a + 2;
+    let c: i64 = b + 3;
+    return c;
+}
+print(sl(0));
+"#;
+
+const PROG_STRAIGHT_MED: &str = r#"
+fn sl(n: i64) -> i64 {
+    let a: i64 = n + 1;
+    let b: i64 = a + 2;
+    let c: i64 = b + 3;
+    let d: i64 = c + 4;
+    let e: i64 = d + 5;
+    let f: i64 = e + 6;
+    let g: i64 = f + 7;
+    let h: i64 = g + 8;
+    return h;
+}
+print(sl(0));
+"#;
+
+const PROG_STRAIGHT_LONG: &str = r#"
+fn sl(n: i64) -> i64 {
+    let a1: i64 = n + 1; let a2: i64 = a1 + 1; let a3: i64 = a2 + 1;
+    let a4: i64 = a3 + 1; let a5: i64 = a4 + 1; let a6: i64 = a5 + 1;
+    let a7: i64 = a6 + 1; let a8: i64 = a7 + 1; let a9: i64 = a8 + 1;
+    let a10: i64 = a9 + 1;
+    let b1: i64 = a10 * 2; let b2: i64 = b1 * 2; let b3: i64 = b2 * 2;
+    let b4: i64 = b3 * 2; let b5: i64 = b4 * 2; let b6: i64 = b5 * 2;
+    let b7: i64 = b6 * 2; let b8: i64 = b7 * 2; let b9: i64 = b8 * 2;
+    let b10: i64 = b9 * 2;
+    return b10;
+}
+print(sl(0));
+"#;
+
+// ============================================================================
+// Empty / degenerate / corner-case programs
+// ============================================================================
+
+const PROG_EMPTY_RETURN: &str = r#"
+fn nothing() -> i64 { return 0; }
+print(nothing());
+"#;
+
+const PROG_SINGLE_LIT: &str = r#"
+fn lit() -> i64 { return 42; }
+print(lit());
+"#;
+
+const PROG_IDENTITY: &str = r#"
+fn identity(x: i64) -> i64 { return x; }
+print(identity(7));
+"#;
+
+// ============================================================================
+// Hot inner loop, cold outer (where LICM compounds with CSE)
+// ============================================================================
+
+const PROG_HOT_INNER: &str = r#"
+fn hot(n: i64, k: i64) -> i64 {
+    let mut total: i64 = 0;
+    let mut o: i64 = 0;
+    while o < n {
+        let inv: i64 = (k * k) + (k + 1);
+        let mut i: i64 = 0;
+        while i < n {
+            total = total + inv + i;
+            i = i + 1;
+        }
+        o = o + 1;
+    }
+    return total;
+}
+print(hot(200, 5));
+"#;
+
+const PROG_LICM_CSE_MIX: &str = r#"
+fn mix(n: i64, k: i64) -> i64 {
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let a: i64 = (k * k * k) + i;
+        let b: i64 = (k * k * k) - i;
+        let c: i64 = (k + 1) * i;
+        total = total + a + b + c;
+        i = i + 1;
+    }
+    return total;
+}
+print(mix(15000, 4));
+"#;
+
+// ============================================================================
+// Many-function call graphs (per-function ranking dispatch)
+// ============================================================================
+
+const PROG_CHAIN_OF_TEN: &str = r#"
+fn f1(x: i64) -> i64 { return x + 1; }
+fn f2(x: i64) -> i64 { return x + 2; }
+fn f3(x: i64) -> i64 { return x + 3; }
+fn f4(x: i64) -> i64 { return x + 4; }
+fn f5(x: i64) -> i64 { return x + 5; }
+fn f6(x: i64) -> i64 { return x + 6; }
+fn f7(x: i64) -> i64 { return x + 7; }
+fn f8(x: i64) -> i64 { return x + 8; }
+fn f9(x: i64) -> i64 { return x + 9; }
+fn driver() -> i64 {
+    let mut r: i64 = 0;
+    r = f1(r); r = f2(r); r = f3(r); r = f4(r); r = f5(r);
+    r = f6(r); r = f7(r); r = f8(r); r = f9(r);
+    return r;
+}
+print(driver());
+"#;
+
+const PROG_THREE_LOOP_FNS: &str = r#"
+fn loop_a(n: i64) -> i64 {
+    let mut t: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n { t = t + i; i = i + 1; }
+    return t;
+}
+fn loop_b(n: i64) -> i64 {
+    let mut t: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n { t = t + i * 2; i = i + 1; }
+    return t;
+}
+fn loop_c(n: i64) -> i64 {
+    let mut t: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n { t = t + i + 10; i = i + 1; }
+    return t;
+}
+fn driver(n: i64) -> i64 {
+    return loop_a(n) + loop_b(n) + loop_c(n);
+}
+print(driver(5000));
+"#;
+
+// ============================================================================
+// Mixed-arithmetic stress (large but no single dominant pass)
+// ============================================================================
+
+const PROG_MIXED_ARITH: &str = r#"
+fn mixed(n: i64) -> i64 {
+    let a: i64 = (n + 1) * 2;
+    let b: i64 = a + (n + 1) * 3;
+    let c: i64 = b - a + (n - 1);
+    let d: i64 = c * 4 + a + b;
+    let e: i64 = d + (n + 2) * 5;
+    return e + a + b + c + d;
+}
+print(mixed(11));
+"#;
+
+const PROG_FUNCALL_IN_LOOP: &str = r#"
+fn helper(x: i64) -> i64 { return x * 2 + 1; }
+fn caller(n: i64) -> i64 {
+    let mut t: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        t = t + helper(i);
+        i = i + 1;
+    }
+    return t;
+}
+print(caller(5000));
+"#;
+
+// ============================================================================
+// Big composite programs (max expr_count + multi-pass interactions)
+// ============================================================================
+
+const PROG_BIG_COMPOSITE_1: &str = r#"
+fn process(n: i64) -> i64 {
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let a: i64 = (i + 1) * 2;
+        let b: i64 = (i + 1) * 3;
+        let dead: i64 = i * 999;
+        let c: i64 = a + b;
+        total = total + c;
+        i = i + 1;
+    }
+    return total;
+}
+print(process(5000));
+"#;
+
+const PROG_BIG_COMPOSITE_2: &str = r#"
+fn process(n: i64) -> i64 {
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let const_part: i64 = 100 * 200 + 5;
+        let var_part: i64 = i * 8;
+        let repeat: i64 = (i + 1) * (i + 1);
+        let also_repeat: i64 = (i + 1) * (i + 1) + 10;
+        total = total + const_part + var_part + repeat + also_repeat;
+        i = i + 1;
+    }
+    return total;
+}
+print(process(3000));
+"#;
+
+const PROG_BIG_COMPOSITE_3: &str = r#"
+fn process(n: i64, k: i64) -> i64 {
+    let mut total: i64 = 0;
+    let mut o: i64 = 0;
+    while o < n {
+        let mut i: i64 = 0;
+        while i < n {
+            let cse: i64 = (k * k) + 1;
+            let dead: i64 = i * 7;
+            let real: i64 = (i + 1) * 2;
+            total = total + cse + real;
+            i = i + 1;
+        }
+        o = o + 1;
+    }
+    return total;
+}
+print(process(120, 3));
+"#;
+
+// ============================================================================
+// New 10-pack: programs with branches inside loops + many lets
+// ============================================================================
+
+const PROG_LOOP_WITH_BRANCH_1: &str = r#"
+fn lwb(n: i64) -> i64 {
+    let mut t: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let v: i64 = if i % 2 == 0 { i + 1 } else { i - 1 };
+        t = t + v;
+        i = i + 1;
+    }
+    return t;
+}
+print(lwb(8000));
+"#;
+
+const PROG_LOOP_WITH_BRANCH_2: &str = r#"
+fn lwb2(n: i64) -> i64 {
+    let mut t: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let v: i64 = if i > n / 2 { i * 2 } else { i };
+        let w: i64 = if v > n { 0 } else { v };
+        t = t + w;
+        i = i + 1;
+    }
+    return t;
+}
+print(lwb2(5000));
+"#;
+
+const PROG_MANY_LETS_LOOP: &str = r#"
+fn mll(n: i64) -> i64 {
+    let mut t: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let a: i64 = i + 1;
+        let b: i64 = a + 2;
+        let c: i64 = b + 3;
+        let d: i64 = c + 4;
+        let e: i64 = d + 5;
+        t = t + a + b + c + d + e;
+        i = i + 1;
+    }
+    return t;
+}
+print(mll(5000));
+"#;
+
+const PROG_ACCUMULATOR: &str = r#"
+fn acc(n: i64) -> i64 {
+    let mut sum: i64 = 0;
+    let mut prod: i64 = 1;
+    let mut i: i64 = 1;
+    while i < n {
+        sum = sum + i;
+        prod = prod + i * 2;
+        i = i + 1;
+    }
+    return sum + prod;
+}
+print(acc(5000));
+"#;
+
+const PROG_RANGED_LOOP: &str = r#"
+fn ranged(lo: i64, hi: i64) -> i64 {
+    let mut t: i64 = 0;
+    let mut i: i64 = lo;
+    while i < hi {
+        t = t + i;
+        i = i + 1;
+    }
+    return t;
+}
+print(ranged(0, 10000));
+"#;
+
+const PROG_WHILE_DOUBLE: &str = r#"
+fn whd(n: i64) -> i64 {
+    let mut i: i64 = 1;
+    let mut t: i64 = 0;
+    while i < n {
+        t = t + i;
+        i = i * 2;
+    }
+    return t;
+}
+print(whd(1000000));
+"#;
+
+const PROG_COND_ACCUM: &str = r#"
+fn cnd(n: i64) -> i64 {
+    let mut pos: i64 = 0;
+    let mut neg: i64 = 0;
+    let mut i: i64 = -n;
+    while i < n {
+        let inc: i64 = if i > 0 { 1 } else { 0 };
+        pos = pos + inc;
+        let dec: i64 = if i < 0 { 1 } else { 0 };
+        neg = neg + dec;
+        i = i + 1;
+    }
+    return pos + neg;
+}
+print(cnd(5000));
+"#;
+
+const PROG_TWO_LOOPS_SEQUENTIAL: &str = r#"
+fn two(n: i64) -> i64 {
+    let mut a: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n { a = a + i; i = i + 1; }
+    let mut b: i64 = 0;
+    let mut j: i64 = 0;
+    while j < n { b = b + j * 2; j = j + 1; }
+    return a + b;
+}
+print(two(5000));
+"#;
+
+const PROG_INNER_LOOP_BREAK_LIKE: &str = r#"
+fn ilbl(n: i64) -> i64 {
+    let mut t: i64 = 0;
+    let mut o: i64 = 0;
+    while o < n {
+        let mut i: i64 = 0;
+        let limit: i64 = if o > 5 { 5 } else { o };
+        while i < limit { t = t + 1; i = i + 1; }
+        o = o + 1;
+    }
+    return t;
+}
+print(ilbl(500));
+"#;
+
+const PROG_NESTED2_WITH_INV: &str = r#"
+fn n2i(n: i64, k: i64) -> i64 {
+    let mut t: i64 = 0;
+    let mut o: i64 = 0;
+    while o < n {
+        let mut i: i64 = 0;
+        while i < n {
+            t = t + k * k + i + o;
+            i = i + 1;
+        }
+        o = o + 1;
+    }
+    return t;
+}
+print(n2i(150, 4));
+"#;
+
+// ============================================================================
+// The corpus  (60 programs)
 // ============================================================================
 
 pub const PROGRAMS: &[Program] = &[
-    // CF
-    Program { name: "arith_tiny",      source: PROG_ARITH_TINY,      expected_dominant_pass: "constant_fold" },
-    Program { name: "arith_med",       source: PROG_ARITH_MED,       expected_dominant_pass: "constant_fold" },
-    Program { name: "arith_heavy",     source: PROG_ARITH_HEAVY,     expected_dominant_pass: "constant_fold" },
-    // LICM
-    Program { name: "loop_invariant",  source: PROG_LOOP_INVARIANT,  expected_dominant_pass: "licm" },
-    Program { name: "loop_nested2",    source: PROG_LOOP_NESTED2,    expected_dominant_pass: "licm" },
-    Program { name: "loop_nested3",    source: PROG_LOOP_NESTED3,    expected_dominant_pass: "licm" },
-    Program { name: "loop_nested4",    source: PROG_LOOP_NESTED4,    expected_dominant_pass: "licm" },
-    // CSE
-    Program { name: "cse_repeat",      source: PROG_CSE_REPEAT,      expected_dominant_pass: "cse" },
-    Program { name: "cse_in_loop",     source: PROG_CSE_IN_LOOP,     expected_dominant_pass: "cse" },
-    // SR
-    Program { name: "sr_pow2",         source: PROG_SR_POW2,         expected_dominant_pass: "strength_reduce" },
-    Program { name: "sr_in_loop",      source: PROG_SR_IN_LOOP,      expected_dominant_pass: "strength_reduce" },
-    // DCE
-    Program { name: "dce_dead",        source: PROG_DCE_DEAD,        expected_dominant_pass: "dce" },
-    Program { name: "dce_branchy",     source: PROG_DCE_BRANCHY,     expected_dominant_pass: "dce" },
-    // Mixed
-    Program { name: "many_fn",         source: PROG_MANY_FN,         expected_dominant_pass: "constant_fold" },
-    Program { name: "recursive",       source: PROG_RECURSIVE,       expected_dominant_pass: "constant_fold" },
-    Program { name: "float",           source: PROG_FLOAT,           expected_dominant_pass: "constant_fold" },
-    Program { name: "mixed",           source: PROG_MIXED,           expected_dominant_pass: "licm" },
-    Program { name: "large",           source: PROG_LARGE,           expected_dominant_pass: "licm" },
+    // CF (6)
+    Program { name: "arith_tiny",            source: PROG_ARITH_TINY,            expected_dominant_pass: "constant_fold" },
+    Program { name: "arith_med",             source: PROG_ARITH_MED,             expected_dominant_pass: "constant_fold" },
+    Program { name: "arith_heavy",           source: PROG_ARITH_HEAVY,           expected_dominant_pass: "constant_fold" },
+    Program { name: "cf_forty",              source: PROG_CF_FORTY,              expected_dominant_pass: "constant_fold" },
+    Program { name: "cf_in_hot_loop",        source: PROG_CF_IN_HOT_LOOP,        expected_dominant_pass: "constant_fold" },
+    Program { name: "cf_pure_float",         source: PROG_CF_PURE_FLOAT,         expected_dominant_pass: "constant_fold" },
+    // LICM (7)
+    Program { name: "loop_invariant_big",    source: PROG_LOOP_INVARIANT_BIG,    expected_dominant_pass: "licm" },
+    Program { name: "loop_nested2_big",      source: PROG_LOOP_NESTED2_BIG,      expected_dominant_pass: "licm" },
+    Program { name: "loop_nested3_big",      source: PROG_LOOP_NESTED3_BIG,      expected_dominant_pass: "licm" },
+    Program { name: "loop_nested4_big",      source: PROG_LOOP_NESTED4_BIG,      expected_dominant_pass: "licm" },
+    Program { name: "licm_many_inv",         source: PROG_LICM_MANY_INV,         expected_dominant_pass: "licm" },
+    Program { name: "licm_branchy",          source: PROG_LICM_BRANCHY,          expected_dominant_pass: "licm" },
+    Program { name: "licm_long_outer",       source: PROG_LICM_LONG_OUTER,       expected_dominant_pass: "licm" },
+    // CSE (4)
+    Program { name: "cse_repeat",            source: PROG_CSE_REPEAT,            expected_dominant_pass: "cse" },
+    Program { name: "cse_in_loop_big",       source: PROG_CSE_IN_LOOP_BIG,       expected_dominant_pass: "cse" },
+    Program { name: "cse_heavy",             source: PROG_CSE_HEAVY,             expected_dominant_pass: "cse" },
+    Program { name: "cse_double_loop",       source: PROG_CSE_DOUBLE_LOOP,       expected_dominant_pass: "cse" },
+    // SR (4)
+    Program { name: "sr_pow2",               source: PROG_SR_POW2,               expected_dominant_pass: "strength_reduce" },
+    Program { name: "sr_in_loop_big",        source: PROG_SR_IN_LOOP_BIG,        expected_dominant_pass: "strength_reduce" },
+    Program { name: "sr_heavy_loop",         source: PROG_SR_HEAVY_LOOP,         expected_dominant_pass: "strength_reduce" },
+    Program { name: "sr_div_pow2",           source: PROG_SR_DIV_POW2,           expected_dominant_pass: "strength_reduce" },
+    // DCE (4)
+    Program { name: "dce_dead",              source: PROG_DCE_DEAD,              expected_dominant_pass: "dce" },
+    Program { name: "dce_branchy",           source: PROG_DCE_BRANCHY,           expected_dominant_pass: "dce" },
+    Program { name: "dce_twenty_dead",       source: PROG_DCE_TWENTY_DEAD,       expected_dominant_pass: "dce" },
+    Program { name: "dce_in_loop",           source: PROG_DCE_IN_LOOP,           expected_dominant_pass: "dce" },
+    // Branch-heavy (3)
+    Program { name: "branch_ladder",         source: PROG_BRANCH_LADDER,         expected_dominant_pass: "dce" },
+    Program { name: "nested_ifs",            source: PROG_NESTED_IFS,            expected_dominant_pass: "constant_fold" },
+    Program { name: "branch_heavy",          source: PROG_BRANCH_HEAVY,          expected_dominant_pass: "dce" },
+    // Mixed multi-fn (5)
+    Program { name: "many_fn",               source: PROG_MANY_FN,               expected_dominant_pass: "constant_fold" },
+    Program { name: "recursive",             source: PROG_RECURSIVE,             expected_dominant_pass: "constant_fold" },
+    Program { name: "float",                 source: PROG_FLOAT,                 expected_dominant_pass: "constant_fold" },
+    Program { name: "mixed_big",             source: PROG_MIXED_BIG,             expected_dominant_pass: "licm" },
+    Program { name: "large",                 source: PROG_LARGE,                 expected_dominant_pass: "licm" },
+    // Recursion (3)
+    Program { name: "recursive_big",         source: PROG_RECURSIVE_BIG,         expected_dominant_pass: "constant_fold" },
+    Program { name: "fib_rec",               source: PROG_FIB_REC,               expected_dominant_pass: "constant_fold" },
+    Program { name: "mutual_rec",            source: PROG_MUTUAL_REC,            expected_dominant_pass: "constant_fold" },
+    // Float (3)
+    Program { name: "float_loop",            source: PROG_FLOAT_LOOP,            expected_dominant_pass: "licm" },
+    Program { name: "float_poly",            source: PROG_FLOAT_POLY,            expected_dominant_pass: "licm" },
+    Program { name: "float_trig",            source: PROG_FLOAT_TRIG,            expected_dominant_pass: "constant_fold" },
+    // Straight-line (3)
+    Program { name: "straight_short",        source: PROG_STRAIGHT_SHORT,        expected_dominant_pass: "constant_fold" },
+    Program { name: "straight_med",          source: PROG_STRAIGHT_MED,          expected_dominant_pass: "constant_fold" },
+    Program { name: "straight_long",         source: PROG_STRAIGHT_LONG,         expected_dominant_pass: "constant_fold" },
+    // Degenerate (3)
+    Program { name: "empty_return",          source: PROG_EMPTY_RETURN,          expected_dominant_pass: "constant_fold" },
+    Program { name: "single_lit",            source: PROG_SINGLE_LIT,            expected_dominant_pass: "constant_fold" },
+    Program { name: "identity",              source: PROG_IDENTITY,              expected_dominant_pass: "constant_fold" },
+    // LICM × CSE mix (2)
+    Program { name: "hot_inner",             source: PROG_HOT_INNER,             expected_dominant_pass: "licm" },
+    Program { name: "licm_cse_mix",          source: PROG_LICM_CSE_MIX,          expected_dominant_pass: "licm" },
+    // Many-fn (2)
+    Program { name: "chain_of_ten",          source: PROG_CHAIN_OF_TEN,          expected_dominant_pass: "constant_fold" },
+    Program { name: "three_loop_fns",        source: PROG_THREE_LOOP_FNS,        expected_dominant_pass: "licm" },
+    // Mixed arith / funcall (2)
+    Program { name: "mixed_arith",           source: PROG_MIXED_ARITH,           expected_dominant_pass: "constant_fold" },
+    Program { name: "funcall_in_loop",       source: PROG_FUNCALL_IN_LOOP,       expected_dominant_pass: "licm" },
+    // Big composites (3)
+    Program { name: "big_composite_1",       source: PROG_BIG_COMPOSITE_1,       expected_dominant_pass: "dce" },
+    Program { name: "big_composite_2",       source: PROG_BIG_COMPOSITE_2,       expected_dominant_pass: "cse" },
+    Program { name: "big_composite_3",       source: PROG_BIG_COMPOSITE_3,       expected_dominant_pass: "licm" },
+    // 10-pack additions (10)
+    Program { name: "loop_with_branch_1",    source: PROG_LOOP_WITH_BRANCH_1,    expected_dominant_pass: "licm" },
+    Program { name: "loop_with_branch_2",    source: PROG_LOOP_WITH_BRANCH_2,    expected_dominant_pass: "licm" },
+    Program { name: "many_lets_loop",        source: PROG_MANY_LETS_LOOP,        expected_dominant_pass: "cse" },
+    Program { name: "accumulator",           source: PROG_ACCUMULATOR,           expected_dominant_pass: "licm" },
+    Program { name: "ranged_loop",           source: PROG_RANGED_LOOP,           expected_dominant_pass: "licm" },
+    Program { name: "while_double",          source: PROG_WHILE_DOUBLE,          expected_dominant_pass: "licm" },
+    Program { name: "cond_accum",            source: PROG_COND_ACCUM,            expected_dominant_pass: "licm" },
+    Program { name: "two_loops_sequential",  source: PROG_TWO_LOOPS_SEQUENTIAL,  expected_dominant_pass: "licm" },
+    Program { name: "inner_loop_break_like", source: PROG_INNER_LOOP_BREAK_LIKE, expected_dominant_pass: "licm" },
+    Program { name: "nested2_with_inv",      source: PROG_NESTED2_WITH_INV,      expected_dominant_pass: "licm" },
 ];

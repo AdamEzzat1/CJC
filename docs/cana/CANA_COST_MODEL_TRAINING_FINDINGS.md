@@ -1,174 +1,207 @@
-# CANA Cost Model Training — First Run Findings
+# CANA Cost Model Training — Findings (v1 → v2 comparison)
 
 **Date:** 2026-06-07 (TIER B #4 from handoff)
-**Status:** Infrastructure shipped; first-pass training data captured.
-**Output:** `LinearCostModel::trained()` constructor + `trained_ranker()` helper.
+**Status:** v2 shipped — all four improvements from v1 findings implemented.
+**Output:** `LinearCostModel::trained()` with v2 coefficients + 60-program corpus.
 
 ---
 
-## 1. What shipped
+## 1. What v2 changed vs v1
 
-### Infrastructure
-- `bench/cana_train_cost_model/` — new training-only benchmark crate
-  - `programs.rs`: 18-program training corpus spanning all five
-    canonical passes (CF, SR, DCE, CSE, LICM)
-  - `main.rs`: leave-one-out measurement + gradient-descent OLS fit +
-    Rust-source code generation
+The v1 findings doc identified four improvements that "would move the
+needle." v2 implements all four:
 
-### API additions
-- `cjc_cana::CoefficientSource` — enum: `Default` (hand-tuned) | `Trained`
-- `cjc_cana::LinearCostModel::trained()` — const constructor
-- `cjc_cana::trained_ranker()` — PassRanker using trained coefficients
+| Improvement | Implementation |
+|---|---|
+| **1. Bigger workloads** (10-100× n) | Inner-loop iteration counts scaled. Most programs now run for 100μs-10ms instead of 1-100μs. |
+| **2. 60-program corpus** (was 18) | 42 new programs densifying the (expr_count, loop_depth, branch_count) corners. |
+| **3. MIR-instruction-count delta** for size-shrinking passes | New `count_mir_nodes` walker. Used as label for CF + DCE — deterministic, zero variance. |
+| **4. Multi-seed averaging** (N_ITERS 5 → 21) | `sqrt(21/5) ≈ 2.05×` reduction in wall-clock variance. |
 
-### Tests (7 new, in `linear_cost_model.rs`)
-- `trained_constructor_returns_distinct_source`
-- `trained_model_resolves_known_passes`
-- `trained_model_rejects_unknown_passes`
-- `trained_predictions_stay_in_normalized_range`
-- `trained_predictions_are_deterministic`
-- `trained_and_default_differ_on_at_least_one_query`
-- `trained_confidence_reflects_data_quality`
+A fifth thing happened that wasn't planned: discovering that **CSE and SR
+don't shrink MIR structure** in this codebase. CSE replaces variable uses
+(the dead lets it creates get cleaned up by a later DCE pass — but
+DEFAULT_PASS_SEQUENCE runs DCE *before* CSE, so the cleanup never
+happens). SR rewrites operations in place (`x * 8` → `x << 3`) without
+changing node shape. So the MIR-count proxy reports zero benefit for
+these passes — correctly, structurally, but useless as a training
+signal. They were moved to wall-clock measurement.
+
+**Final signal assignment in v2:**
+
+```
+mir_count (deterministic):  constant_fold, dce
+wall_clock (noisy):         strength_reduce, cse, licm
+```
 
 ---
 
-## 2. How to regenerate
+## 2. Headline results
+
+### Per-pass RMSE: v1 → v2
+
+| Pass            | v1 RMSE | v2 RMSE | Reduction | v2 Signal      |
+|-----------------|---------|---------|-----------|----------------|
+| constant_fold   | 0.182   | **0.055** | **3.3×**  | mir_count      |
+| dce             | 0.166   | **0.097** | **1.7×**  | mir_count      |
+| strength_reduce | 0.130   | 0.087   | 1.5×      | wall_clock     |
+| licm            | 0.169   | 0.135   | 1.3×      | wall_clock     |
+| cse             | 0.137   | 0.140   | ~1.0×     | wall_clock     |
+
+### Per-pass confidence: v1 → v2
+
+| Pass            | v1 conf | v2 conf | Gain  |
+|-----------------|---------|---------|-------|
+| constant_fold   | 0.10    | **0.65** | 6.5×  |
+| dce             | 0.16    | **0.47** | 2.9×  |
+| strength_reduce | 0.32    | 0.51    | 1.6×  |
+| licm            | 0.14    | 0.29    | 2.1×  |
+| cse             | 0.29    | 0.27    | ~flat |
+
+### What the numbers mean
+
+CF and DCE got the **deterministic signal treatment** — their RMSE
+dropped 1.7-3.3×, their confidence rose 3-6×. These trained
+coefficients are now in **the same quality band as the hand-tuned
+defaults**. They're reproducible bit-for-bit on re-runs.
+
+SR, CSE, LICM stayed on wall-clock — their RMSE improved 1.0-1.5×
+purely from bigger workloads + 4× more samples per program. The
+remaining noise is microsecond-scale scheduler variance that no amount
+of corpus tuning will eliminate. **These coefficients vary 10-30%
+between re-runs.**
+
+CSE was the only pass that didn't budge much. Its measured benefit is
+genuinely small in this codebase (mean 0.07 across the corpus) — the
+optimizer's CSE pass mostly does its work for cases where the savings
+are too small to measure cleanly at microsecond scale, regardless of
+N_ITERS.
+
+---
+
+## 3. Determinism contract by signal
+
+A reader trying to reproduce these numbers from the binary needs to know
+what's reproducible:
+
+| Pass | Reproducible across runs? |
+|---|---|
+| `constant_fold` | **YES** — mir_count is a structural property of the IR, identical across runs/OS/CPU |
+| `dce` | **YES** — same reason |
+| `strength_reduce` | NO — wall-clock dependent; expect ±10-30% drift per run |
+| `cse` | NO — same |
+| `licm` | NO — same |
+
+The trained CF and DCE coefficients you see in `linear_cost_model.rs`
+will regenerate identically every time. The trained SR/CSE/LICM
+coefficients will drift; the file gets stamped with the most-recent
+run's values when someone runs the training binary.
+
+This is a **load-bearing distinction** — it tells maintainers which
+fields are safe to copy verbatim into design docs and which are
+representative samples that callers should treat as noisy.
+
+---
+
+## 4. The wall-clock plateau
+
+We've reached the limit of what microsecond-scale wall-clock can give
+us. Future-proof options if cleaner SR/CSE/LICM coefficients are
+needed:
+
+**Option A — instruction-count proxy (custom per pass)**
+- For SR: instrument MIR walker to count `Mul` vs `Shl` ops. Direct measure.
+- For CSE: count `let X = ...` bindings whose `init` matches a previously-
+  seen pure expression. Direct measure.
+- For LICM: count *hoisted nodes* via a marker pass that tags movements.
+  Requires optimizer instrumentation.
+
+Estimated effort: 2-3 days per pass; estimated RMSE improvement: ~4-10× on each.
+
+**Option B — millisecond-scale workloads + perf counter instead of wall-clock**
+- Use `windows::Performance::QueryPerformanceCounter` for sub-microsecond
+  resolution; scale workloads to 10-100ms each.
+- Total benchmark wall-clock would be 30-60 min (vs 6-7 min today).
+- Estimated RMSE improvement: ~3× on wall-clock passes.
+
+**Option C — accept the plateau, document it, move on**
+- Ship v2 coefficients with the confidence-floor safety property.
+- Document that further refinement is gated on someone caring enough
+  to invest in A or B.
+
+This commit takes Option C. The v2 trained model is good enough for the
+deterministic-signal passes (CF, DCE) and honestly noisy on the others
+(documented confidence < 0.51, automatic fallback when confidence is low).
+
+---
+
+## 5. How to regenerate
 
 ```bash
 cargo run --release -p cana-train-cost-model
 ```
 
-The binary:
-1. Parses + lowers all 18 corpus programs to MIR.
-2. For each (program, pass) pair, runs the program twice (with and without
-   the pass), measures wall-clock run_us, takes median of 5 iters.
-3. Labels: `benefit = (run_us_without - run_us_with) / max(run_us_without, 1)`,
-   clamped to `[0, 0.5]`.
-4. Per pass, fits 4 weights (over expr_count, loop_depth, branch_count,
-   alloc_sites) via gradient descent (lr=0.05, 5000 steps, normalized
-   features).
-5. Emits Rust source ready to paste into `linear_cost_model.rs`'s
-   `trained_pass_coefficients` function.
+Wall-clock: ~6-7 minutes on a modern Windows release-mode build.
+- Phase 1 (collect training data): ~5 minutes (60 programs × 5 passes × measurements)
+- Phase 2 (per-pass OLS fit): <1 second
+- Output: Rust source ready to paste into `linear_cost_model.rs`
 
 Confidence values are derived from training RMSE: lower RMSE → higher
 confidence, capped at [0.1, 0.95].
 
 ---
 
-## 3. First-run results
+## 6. What v2 measured benefits look like in the wild
 
-### Per-pass fit quality
+### Per-program leaderboard (which pass "won" each program in v2)
 
-| Pass             | Mean benefit | Train RMSE | Confidence |
-|------------------|--------------|------------|------------|
-| constant_fold    | 0.1229       | 0.1817     | 0.10       |
-| strength_reduce  | 0.0728       | 0.1295     | 0.32       |
-| dce              | 0.1049       | 0.1663     | 0.16       |
-| cse              | 0.0609       | 0.1369     | 0.29       |
-| licm             | 0.1237       | 0.1687     | 0.14       |
+The leaderboard is now more sensible than v1:
 
-### Per-program leaderboard (highest measured benefit per program)
-
-| Program         | Winning pass    | Benefit |
-|-----------------|-----------------|---------|
-| arith_heavy     | licm            | 0.5000  |
-| arith_med       | dce             | 0.5000  |
-| arith_tiny      | constant_fold   | 0.2581  |
-| cse_in_loop     | licm            | 0.0556  |
-| cse_repeat      | constant_fold   | 0.5000  |
-| dce_branchy     | licm            | 0.0588  |
-| dce_dead        | licm            | 0.0000  |
-| float           | cse             | 0.2692  |
-| large           | strength_reduce | 0.0678  |
-| loop_invariant  | licm            | 0.0000  |
-| loop_nested2    | licm            | 0.0000  |
-| loop_nested3    | dce             | 0.4690  |
-| loop_nested4    | constant_fold   | 0.0980  |
-| many_fn         | constant_fold   | 0.3208  |
-| mixed           | constant_fold   | 0.5000  |
-| recursive       | licm            | 0.0000  |
-| sr_in_loop      | cse             | 0.5000  |
-| sr_pow2         | licm            | 0.3103  |
-
----
-
-## 4. Honest assessment
-
-**The leaderboard is half-noise.** A few representative weirdnesses:
-
-- `arith_heavy` "won" with LICM, but it has zero loops.
-- `sr_in_loop` "won" with CSE, but its shared subexpressions are trivial.
-- `loop_invariant` and `loop_nested2` show LICM benefit at 0.0000 — i.e.,
-  the measurement found no improvement.
-
-**Root cause:** the programs run in 1-100 μs on modern hardware. OS
-scheduler and cache noise contribute ±5-20 μs of variance per
-measurement. The actual per-pass benefit on a microbenchmark is in the
-same order as the noise floor. Median-of-5 only partially helps.
-
-**Consequences for the fit:**
-- LICM's fitted `w_loop_depth` is **negative** (-0.038). It shouldn't be.
-- CF's fitted `w_loop_depth` is also negative. Same story.
-- All confidences are below 0.5 — the model knows it's uncertain.
-
-The clamp in `predict_pass_gain` (output to `[0.0, 0.5]`) prevents
-nonsense predictions like negative benefit, but a sign-flipped weight
-still distorts the relative ranking of programs.
-
----
-
-## 5. Why ship it anyway
-
-1. **The infrastructure is the value.** A future maintainer with a
-   bigger corpus, longer-running programs, or a cleaner signal (e.g.
-   instruction-count proxy) can regenerate trained coefficients in
-   ~2 minutes by running the binary and pasting the output.
-
-2. **The default is unchanged.** `default_ranker()` keeps the hand-tuned
-   coefficients that were known-good in Phase 2. `trained_ranker()` is
-   opt-in for users who want to experiment.
-
-3. **The confidence floor protects callers.** Trained coefficients all
-   carry confidence ≤ 0.32. Any downstream consumer that weighs by
-   confidence will naturally distrust the trained model and fall back
-   to the canonical default sequence when uncertainty is high.
-
-4. **Determinism is preserved.** The trained coefficients are baked-in
-   constants; predictions remain bit-identical across runs and
-   platforms. Same as the hand-tuned values.
-
----
-
-## 6. What would move the needle
-
-In rough effort order:
-
-| Improvement | Effort | Expected RMSE reduction |
+| Program category | Expected winner | v2 actual winners |
 |---|---|---|
-| Larger workloads (multiply each loop's `n` by 10-100×) | 1 hr | ~2× |
-| More corpus programs (18 → 60) targeting feature corners | 1 day | ~1.5× |
-| Switch label from wall-clock to MIR-instruction-count delta for CF/DCE/CSE/SR | 1 day | ~3× (but only on these 4 passes) |
-| Hybrid label: instruction-count for size-shrinking passes, wall-clock for LICM | 1 day | ~2× overall |
-| Multi-seed averaging at compile time (run each (prog, pass) 100x not 5x) | small | ~4× (40 min benchmark) |
-| Constrained OLS (enforce non-negative `w_loop_depth` for LICM) | half day | Stops sign-flips, doesn't fix variance |
+| arith_* (CF programs) | constant_fold | constant_fold, sometimes SR (noise) |
+| loop_* (LICM programs) | licm | mostly licm or SR (wall-clock noise mixing them) |
+| cse_* (CSE programs) | cse | mostly licm (CSE's wall-clock signal is weak) |
+| sr_* (SR programs) | strength_reduce | SR for half, licm for the rest (noise) |
+| dce_* (DCE programs) | dce | **dce wins decisively for all four** (mir_count clean) |
 
-None of these were done in this session — that's deliberate scope.
-The first-run findings are the deliverable; further refinement is
-follow-up work guided by what we now know about the noise floor.
+The clean wins for DCE confirm the deterministic signal works. The
+ambiguous winners for SR and CSE confirm the wall-clock noise is real.
 
 ---
 
-## 7. Where to read the code
+## 7. API surface — unchanged in v2
+
+The v1 API still works identically; v2 only changed the coefficients:
+
+```rust
+let m_default = LinearCostModel::new();      // hand-tuned coefficients
+let m_trained = LinearCostModel::trained();  // v2 fit coefficients
+
+let r_default = default_ranker();   // uses hand-tuned
+let r_trained = trained_ranker();   // uses trained
+```
+
+The seven tests in `linear_cost_model::tests` all still pass. New
+coefficients are still in `[0.0, 0.5]` range, still deterministic for
+a given coefficient set, still differ from hand-tuned on at least one
+pass.
+
+---
+
+## 8. Where to read the code
 
 | File | Purpose |
 |---|---|
-| `bench/cana_train_cost_model/programs.rs` | 18-program training corpus |
-| `bench/cana_train_cost_model/main.rs` | Measurement + OLS fit + code generation |
-| `crates/cjc-cana/src/linear_cost_model.rs` | `CoefficientSource` enum + `trained_pass_coefficients` fn |
+| `bench/cana_train_cost_model/programs.rs` | 60-program training corpus |
+| `bench/cana_train_cost_model/main.rs` | Measurement (mir_count or wall_clock per pass) + OLS fit + code generation |
+| `crates/cjc-cana/src/linear_cost_model.rs` | `trained_pass_coefficients` fn |
 | `crates/cjc-cana/src/pass_ranker.rs` | `trained_ranker()` helper |
 
 ---
 
-**Bottom line:** the cost-model training loop closes. The numbers it
-produces today reflect microbenchmark reality more than they reflect the
-"true" per-pass benefit. The architecture stays clean; the corpus and
-signal can be improved when the marginal benefit justifies the effort.
+**Bottom line:** the four improvements landed. CF and DCE now have
+clean, reproducible, audit-worthy trained coefficients. SR/CSE/LICM
+have noisier-but-better trained coefficients than v1. The infrastructure
+for cleaner signal on wall-clock passes (Option A above) is well-scoped
+when someone has reason to invest in it.
