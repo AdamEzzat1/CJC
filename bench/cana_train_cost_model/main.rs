@@ -28,7 +28,9 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use cjc_cana::features::FnFeatures;
-use cjc_mir::optimize::{optimize_program_with_plan, PassPlan, DEFAULT_PASS_SEQUENCE};
+use cjc_mir::optimize::{
+    apply_pass_with_diagnostics, optimize_program_with_plan, PassPlan, DEFAULT_PASS_SEQUENCE,
+};
 use cjc_mir::{MirBody, MirExpr, MirExprKind, MirProgram, MirStmt};
 
 mod programs;
@@ -49,33 +51,26 @@ const TARGET_PASSES: &[&str] = &[
     "licm",
 ];
 
-/// Passes whose per-program benefit is measured by **MIR-node-count
-/// delta** rather than wall-clock. These are passes that actually shrink
-/// MIR structure: CF collapses literal subexpressions; DCE deletes
-/// unreachable let bindings. Both produce a deterministic node-count
-/// change — zero-variance label.
-const SIZE_SHRINKING_PASSES: &[&str] = &[
-    "constant_fold",
-    "dce",
-];
-
-/// Passes whose per-program benefit must be measured by **wall-clock**.
+/// **Option A** (cost-model training findings doc §4): every pass gets a
+/// deterministic signal sourced from its own native diagnostic count.
 ///
-/// - SR rewrites operations in-place (e.g. `x * 8` → `x << 3`) — same
-///   node count, faster runtime.
-/// - CSE replaces variable *uses* with earlier bindings; the now-redundant
-///   let stays in the IR until a subsequent DCE pass cleans it up — but
-///   DEFAULT_PASS_SEQUENCE puts DCE *before* CSE, so this cleanup never
-///   happens. Net: CSE leaves node count unchanged at training time.
-/// - LICM rearranges code, doesn't shrink it.
+/// For each (program, pass) we run a fresh copy of the function through
+/// `apply_pass_with_diagnostics(pass, &mut fn)` and use:
 ///
-/// All three need wall-clock measurement. Subject to microsecond
-/// scheduler noise; that's the trade-off.
-const RUNTIME_ONLY_PASSES: &[&str] = &[
-    "strength_reduce",
-    "cse",
-    "licm",
-];
+///   benefit = changes_applied / max(nodes_before, 1)
+///
+/// where `changes_applied` is the pass's NATIVE count of rewrites:
+///   * CF: node-count delta (CF only collapses literal subexpressions —
+///     delta is exact)
+///   * SR: count of `try_strength_reduce` successes
+///   * DCE: node-count delta
+///   * CSE: count of variable-replacement applications
+///   * LICM: count of statements hoisted out of `while` loops
+///
+/// This eliminates wall-clock measurement entirely. Every signal is
+/// deterministic, reproducible bit-for-bit across runs and platforms,
+/// and tracks each pass's own understanding of its work.
+const ALL_PASSES_DETERMINISTIC: bool = true;
 
 // ---------------------------------------------------------------------------
 // Training data shape
@@ -243,73 +238,62 @@ fn median_run_us(ast: &cjc_ast::Program, mir: &cjc_mir::MirProgram, plan: &PassP
 // Per-program label collection — switches signal based on pass
 // ---------------------------------------------------------------------------
 
-/// For size-shrinking passes, return the MIR-node-count fractional
-/// reduction after applying the default pass sequence WITH vs WITHOUT
-/// the pass under test. Deterministic, zero-variance.
-fn measure_mir_count_benefit(
+/// **Option A signal — per-function, per-pass diagnostic counts.**
+///
+/// We run the target pass alone on a fresh copy of each function in the
+/// program (default-sequence-optimized first, so we see what the pass
+/// does on already-CF'd/DCE'd code — closest to the real pipeline
+/// position). The pass's own `changes_applied` from
+/// `PassDiagnostics` is the numerator; the function's pre-pass node
+/// count is the denominator. The result is the function-level benefit.
+fn measure_pass_native_benefit_per_function(
     mir: &cjc_mir::MirProgram,
-    fn_names: &[String],
     pass: &str,
-) -> f64 {
-    let with_plan = plan_default(fn_names);
-    let without_plan = plan_without(fn_names, pass);
+) -> Vec<(String, f64)> {
+    let mut results = Vec::new();
+    // Pre-optimize through the default sequence MINUS the target pass.
+    // This is what the function looks like just before our target pass
+    // would run, so the diagnostic count reflects realistic opportunity.
+    let fn_names: Vec<String> = mir.functions.iter().map(|f| f.name.clone()).collect();
+    let pre_plan = plan_without(&fn_names, pass);
+    let pre_optimized = optimize_program_with_plan(mir, &pre_plan);
 
-    let with_opt = optimize_program_with_plan(mir, &with_plan);
-    let without_opt = optimize_program_with_plan(mir, &without_plan);
-
-    let with_nodes = count_mir_nodes(&with_opt) as f64;
-    let without_nodes = count_mir_nodes(&without_opt) as f64;
-
-    // benefit = how much MORE code "without" has, fractionally.
-    // Equivalent to: how much code "with" eliminates from "without".
-    let raw = (without_nodes - with_nodes) / without_nodes.max(1.0);
-    raw.clamp(0.0, 0.5)
-}
-
-/// For runtime-only passes (LICM), measure wall-clock benefit via
-/// median-of-N_ITERS. Noisy but unavoidable.
-fn measure_wall_clock_benefit(
-    ast: &cjc_ast::Program,
-    mir: &cjc_mir::MirProgram,
-    fn_names: &[String],
-    pass: &str,
-) -> f64 {
-    let with_plan = plan_default(fn_names);
-    let without_plan = plan_without(fn_names, pass);
-
-    let with_us = median_run_us(ast, mir, &with_plan) as f64;
-    let without_us = median_run_us(ast, mir, &without_plan) as f64;
-
-    let raw = (without_us - with_us) / without_us.max(1.0);
-    raw.clamp(0.0, 0.5)
+    for func in &pre_optimized.functions {
+        let mut clone = func.clone();
+        let Some(d) = apply_pass_with_diagnostics(pass, &mut clone) else {
+            // Unknown pass — shouldn't happen for TARGET_PASSES, skip.
+            continue;
+        };
+        let raw = if d.nodes_before == 0 {
+            0.0
+        } else {
+            (d.changes_applied as f64) / (d.nodes_before as f64)
+        };
+        let benefit = raw.clamp(0.0, 0.5);
+        results.push((func.name.clone(), benefit));
+    }
+    results
 }
 
 fn collect_training_points(prog: &Program) -> Vec<TrainingPoint> {
-    let (ast, mir) = parse_and_lower(prog.source);
-    let fn_names: Vec<String> = mir.functions.iter().map(|f| f.name.clone()).collect();
+    let (_ast, mir) = parse_and_lower(prog.source);
     let features = cjc_cana::analyze_program(&mir).features;
 
     let mut points = Vec::new();
     for &pass in TARGET_PASSES {
-        let (benefit, signal) = if SIZE_SHRINKING_PASSES.contains(&pass) {
-            (measure_mir_count_benefit(&mir, &fn_names, pass), "mir_count")
-        } else {
-            assert!(RUNTIME_ONLY_PASSES.contains(&pass));
-            (measure_wall_clock_benefit(&ast, &mir, &fn_names, pass), "wall_clock")
-        };
-
-        for fname in &fn_names {
-            let Some(ff) = features.per_fn.get(fname) else { continue };
+        let per_fn_benefits = measure_pass_native_benefit_per_function(&mir, pass);
+        for (fname, benefit) in per_fn_benefits {
+            let Some(ff) = features.per_fn.get(&fname) else { continue };
             points.push(TrainingPoint {
                 program: prog.name.to_string(),
-                function: fname.clone(),
+                function: fname,
                 pass: pass.to_string(),
                 expr_count: ff.memory.expr_count as f64,
                 loop_depth: ff.cfg.max_loop_depth as f64,
                 branch_count: ff.cfg.branch_count as f64,
                 alloc_sites: ff.memory.alloc_sites as f64,
                 benefit,
-                signal,
+                signal: "pass_native",
             });
         }
     }
@@ -524,7 +508,7 @@ fn main() {
             .collect();
         let y: Vec<f64> = pass_pts.iter().map(|p| p.benefit).collect();
         let (fit, rmse) = fit_ols_gd(&x, &y, 0.05, 5000);
-        let signal = if SIZE_SHRINKING_PASSES.contains(&pass) { "mir_count" } else { "wall_clock" };
+        let signal = "pass_native";
         println!(
             "  {:<20} {:>4} pts, signal={:<10} mean_benefit={:.4}, rmse={:.4}",
             pass, pass_pts.len(), signal, fit.train_mean_benefit, rmse,
@@ -541,7 +525,7 @@ fn main() {
         let pts: Vec<&TrainingPoint> = all_points.iter().filter(|p| p.pass == pass).collect();
         let mean_benefit: f64 = if pts.is_empty() { 0.0 }
             else { pts.iter().map(|p| p.benefit).sum::<f64>() / pts.len() as f64 };
-        let signal = if SIZE_SHRINKING_PASSES.contains(&pass) { "mir_count" } else { "wall_clock" };
+        let signal = "pass_native";
         println!("  {:<20} signal={:<10} mean_benefit = {:.4}", pass, signal, mean_benefit);
     }
 

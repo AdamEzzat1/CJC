@@ -1026,6 +1026,160 @@ print(n2i(150, 4));
 "#;
 
 // ============================================================================
+// CSE-eligible programs (explicit duplicate let-bindings)
+// ============================================================================
+
+/// Two lets with identical pure init — CSE replaces uses of `b` with `a`.
+const PROG_CSE_LET_DUP_TINY: &str = r#"
+fn dup(x: i64, y: i64) -> i64 {
+    let a: i64 = x + y;
+    let b: i64 = x + y;
+    return a + b * 2;
+}
+print(dup(3, 4));
+"#;
+
+/// 5 duplicate let bindings → 4 replacements.
+const PROG_CSE_LET_DUP_FIVE: &str = r#"
+fn five_dup(x: i64, y: i64) -> i64 {
+    let a: i64 = x * y + 1;
+    let b: i64 = x * y + 1;
+    let c: i64 = x * y + 1;
+    let d: i64 = x * y + 1;
+    let e: i64 = x * y + 1;
+    return a + b + c + d + e;
+}
+print(five_dup(3, 4));
+"#;
+
+/// Many independent duplicate pairs.
+const PROG_CSE_PAIRS: &str = r#"
+fn pairs(x: i64, y: i64, z: i64) -> i64 {
+    let p1a: i64 = x + y;
+    let p1b: i64 = x + y;
+    let p2a: i64 = y * z;
+    let p2b: i64 = y * z;
+    let p3a: i64 = x * z + 1;
+    let p3b: i64 = x * z + 1;
+    return p1a + p1b + p2a + p2b + p3a + p3b;
+}
+print(pairs(2, 3, 4));
+"#;
+
+/// CSE-eligible duplicates inside a loop body — CSE saves work per
+/// iteration AND the original computation is still there for LICM to
+/// hoist on a later pass.
+const PROG_CSE_DUP_IN_LOOP: &str = r#"
+fn dup_loop(n: i64, k: i64) -> i64 {
+    let mut t: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let a: i64 = k * k + i;
+        let b: i64 = k * k + i;
+        t = t + a + b;
+        i = i + 1;
+    }
+    return t;
+}
+print(dup_loop(5000, 7));
+"#;
+
+// ============================================================================
+// LICM-eligible programs (explicit invariant let-bindings inside loops)
+// ============================================================================
+
+/// Single invariant let inside loop — LICM hoists one binding.
+const PROG_LICM_ONE_LET: &str = r#"
+fn one_inv(n: i64, k: i64) -> i64 {
+    let mut t: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let inv: i64 = k * k * k;
+        t = t + inv + i;
+        i = i + 1;
+    }
+    return t;
+}
+print(one_inv(20000, 5));
+"#;
+
+/// Three invariant lets inside loop — LICM hoists all three.
+const PROG_LICM_THREE_LETS: &str = r#"
+fn three_inv(n: i64, k: i64, m: i64) -> i64 {
+    let mut t: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let inv1: i64 = k * k;
+        let inv2: i64 = k + m;
+        let inv3: i64 = m * m;
+        t = t + inv1 + inv2 + inv3 + i;
+        i = i + 1;
+    }
+    return t;
+}
+print(three_inv(15000, 7, 3));
+"#;
+
+/// Doubly-nested loop with invariants at each level — LICM hoists
+/// twice (inner invariant goes to between-loops, outer goes above outer).
+const PROG_LICM_NESTED: &str = r#"
+fn n_inv(n: i64, k: i64) -> i64 {
+    let mut t: i64 = 0;
+    let mut o: i64 = 0;
+    while o < n {
+        let inv_outer: i64 = k * k;
+        let mut i: i64 = 0;
+        while i < n {
+            let inv_inner: i64 = k + 1;
+            t = t + inv_outer + inv_inner + i;
+            i = i + 1;
+        }
+        o = o + 1;
+    }
+    return t;
+}
+print(n_inv(200, 4));
+"#;
+
+/// 5 invariant lets in one loop. Maximum LICM signal.
+const PROG_LICM_FIVE_LETS: &str = r#"
+fn five_inv(n: i64, a: i64, b: i64) -> i64 {
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let inv1: i64 = a * b;
+        let inv2: i64 = a + b;
+        let inv3: i64 = a - b;
+        let inv4: i64 = a * a;
+        let inv5: i64 = b * b;
+        total = total + inv1 + inv2 + inv3 + inv4 + inv5 + i;
+        i = i + 1;
+    }
+    return total;
+}
+print(five_inv(10000, 5, 3));
+"#;
+
+// ============================================================================
+// Mixed CSE+LICM (duplicate invariant lets — both passes can help)
+// ============================================================================
+
+const PROG_CSE_LICM_DUP_INV: &str = r#"
+fn dup_inv(n: i64, k: i64) -> i64 {
+    let mut t: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let a: i64 = k * k + 1;
+        let b: i64 = k * k + 1;
+        t = t + a + b + i;
+        i = i + 1;
+    }
+    return t;
+}
+print(dup_inv(8000, 7));
+"#;
+
+// ============================================================================
 // The corpus  (60 programs)
 // ============================================================================
 
@@ -1110,4 +1264,16 @@ pub const PROGRAMS: &[Program] = &[
     Program { name: "two_loops_sequential",  source: PROG_TWO_LOOPS_SEQUENTIAL,  expected_dominant_pass: "licm" },
     Program { name: "inner_loop_break_like", source: PROG_INNER_LOOP_BREAK_LIKE, expected_dominant_pass: "licm" },
     Program { name: "nested2_with_inv",      source: PROG_NESTED2_WITH_INV,      expected_dominant_pass: "licm" },
+    // CSE-eligible programs with explicit duplicate let bindings (4)
+    Program { name: "cse_let_dup_tiny",       source: PROG_CSE_LET_DUP_TINY,      expected_dominant_pass: "cse" },
+    Program { name: "cse_let_dup_five",       source: PROG_CSE_LET_DUP_FIVE,      expected_dominant_pass: "cse" },
+    Program { name: "cse_pairs",              source: PROG_CSE_PAIRS,             expected_dominant_pass: "cse" },
+    Program { name: "cse_dup_in_loop",        source: PROG_CSE_DUP_IN_LOOP,       expected_dominant_pass: "cse" },
+    // LICM-eligible programs with explicit invariant let bindings (4)
+    Program { name: "licm_one_let",           source: PROG_LICM_ONE_LET,          expected_dominant_pass: "licm" },
+    Program { name: "licm_three_lets",        source: PROG_LICM_THREE_LETS,       expected_dominant_pass: "licm" },
+    Program { name: "licm_nested",            source: PROG_LICM_NESTED,           expected_dominant_pass: "licm" },
+    Program { name: "licm_five_lets",         source: PROG_LICM_FIVE_LETS,        expected_dominant_pass: "licm" },
+    // Mixed CSE + LICM eligible (1)
+    Program { name: "cse_licm_dup_inv",       source: PROG_CSE_LICM_DUP_INV,      expected_dominant_pass: "licm" },
 ];
