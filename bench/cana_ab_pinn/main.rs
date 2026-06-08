@@ -1,9 +1,17 @@
-//! §3A.2 — AB test: `trained_ranker` vs `default_ranker` on a real workload.
+//! §3A.2 + §4B.3 extension — three-way AB test: `default_ranker` vs
+//! `trained_ranker` vs **thermal-aware ranker** on a real workload.
 //!
-//! Implements the experiment from `docs/cana/HANDOFF_NEXT_SESSION.md` §3A.2:
-//! pick a real CJC-Lang program, compile it twice (once with each ranker),
-//! diff the PassPlans, measure compile + runtime, verify byte-identical
-//! output.
+//! Originally implemented §3A.2 (default vs trained). After §4B.3 landed,
+//! extended to a third config: the thermal-aware ranker constructed from
+//! `ThermalAwareCostModel<LinearCostModel::trained, NssPressurePredictor>`
+//! — the exact composition that `cjcl run --thermal-aware` uses through
+//! `cjc_mir_exec::run_program_optimized_thermal_aware`.
+//!
+//! The §4B.2 design doc and §3A.2 bench-level checks predict that
+//! `NssPressurePredictor` in Option C mode returns empty thermal maps,
+//! so the thermal-wrapped cost model is a behavioural no-op vs the
+//! base trained model. This bench confirms that prediction at the
+//! end-to-end compile + run level on a substantial real program.
 //!
 //! Workload: `examples/08_pinn_heat_equation.cjcl` — a physics-informed
 //! neural network with 4 functions, ~180 LOC of CJC-Lang, dominated by
@@ -18,8 +26,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
-use cjc_cana::pass_ranker::trained_ranker;
-use cjc_cana::{analyze_program, default_ranker, pass_plan_from};
+use cjc_cana::legality::DefaultLegalityGate;
+use cjc_cana::pass_ranker::{trained_ranker, PassRanker};
+use cjc_cana::thermal_cost_model::ThermalAwareCostModel;
+use cjc_cana::{analyze_program, default_ranker, pass_plan_from, LinearCostModel};
+use cjc_cana_nss::NssPressurePredictor;
 use cjc_mir::optimize::{optimize_program_with_plan, PassPlan};
 
 /// The PINN program is loaded from the example tree. We do a
@@ -42,10 +53,11 @@ fn pinn_source_short() -> String {
     modified
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Ranker {
     Default,
     Trained,
+    Thermal,
 }
 
 impl Ranker {
@@ -53,9 +65,13 @@ impl Ranker {
         match self {
             Ranker::Default => "default",
             Ranker::Trained => "trained",
+            Ranker::Thermal => "thermal",
         }
     }
 }
+
+/// All three rankers, in canonical comparison order.
+const ALL_RANKERS: &[Ranker] = &[Ranker::Default, Ranker::Trained, Ranker::Thermal];
 
 struct AbResult {
     ranker: Ranker,
@@ -105,6 +121,19 @@ fn measure_one(source: &str, ranker: Ranker) -> OneShot {
     let report = match ranker {
         Ranker::Default => default_ranker().rank(&mir, &features),
         Ranker::Trained => trained_ranker().rank(&mir, &features),
+        Ranker::Thermal => {
+            // The exact composition that `cjcl run --thermal-aware`
+            // builds inside `cjc_mir_exec::cana_thermal_aware_plan_for`.
+            // Keep this construction in sync with that helper — if it
+            // ever changes (e.g. NssPressurePredictor takes a non-default
+            // seed), update here too.
+            let cost_model = ThermalAwareCostModel::new(
+                LinearCostModel::trained(),
+                NssPressurePredictor::default(),
+            );
+            PassRanker::new(cost_model, DefaultLegalityGate::new())
+                .rank(&mir, &features)
+        }
     };
     let plan = pass_plan_from(&report.sequence);
     let mut optimized = optimize_program_with_plan(&mir, &plan);
@@ -181,7 +210,7 @@ fn median(samples: &[u128]) -> u128 {
     s[s.len() / 2]
 }
 
-fn diff_plans(a: &PassPlan, b: &PassPlan) -> Vec<String> {
+fn diff_plans(a: &PassPlan, b: &PassPlan, label_a: &str, label_b: &str) -> Vec<String> {
     let mut diffs = Vec::new();
     let all_fns: BTreeSet<&String> = a
         .per_function
@@ -194,16 +223,16 @@ fn diff_plans(a: &PassPlan, b: &PassPlan) -> Vec<String> {
         match (av, bv) {
             (Some(av), Some(bv)) if av == bv => {}
             (Some(av), Some(bv)) => diffs.push(format!(
-                "  fn {}\n     default: {:?}\n     trained: {:?}",
-                f, av, bv,
+                "  fn {}\n     {}: {:?}\n     {}: {:?}",
+                f, label_a, av, label_b, bv,
             )),
             (Some(av), None) => diffs.push(format!(
-                "  fn {} (only in default)\n     default: {:?}",
-                f, av,
+                "  fn {} (only in {})\n     {}: {:?}",
+                f, label_a, label_a, av,
             )),
             (None, Some(bv)) => diffs.push(format!(
-                "  fn {} (only in trained)\n     trained: {:?}",
-                f, bv,
+                "  fn {} (only in {})\n     {}: {:?}",
+                f, label_b, label_b, bv,
             )),
             (None, None) => unreachable!(),
         }
@@ -240,7 +269,8 @@ fn summarize_plan(plan: &PassPlan) -> BTreeMap<&'static str, usize> {
 
 fn main() {
     println!("============================================================");
-    println!("§3A.2 — AB test: trained vs default ranker on PINN heat 1D");
+    println!("§3A.2 + §4B.3 — Three-way AB test on PINN heat 1D");
+    println!("                default / trained / thermal-aware");
     println!("============================================================");
     let src = pinn_source_short();
     println!(
@@ -267,116 +297,145 @@ fn main() {
     );
     println!();
 
-    println!("Running default-ranker timings:");
-    let default_res = measure(&src, Ranker::Default);
-    println!();
-    println!("Running trained-ranker timings:");
-    let trained_res = measure(&src, Ranker::Trained);
+    // ---------------------------------------------------------------------
+    // Measure all three configs.
+    // ---------------------------------------------------------------------
+    let mut results: BTreeMap<&'static str, AbResult> = BTreeMap::new();
+    for &ranker in ALL_RANKERS {
+        println!("Running {}-ranker timings:", ranker.label());
+        let res = measure(&src, ranker);
+        results.insert(ranker.label(), res);
+        println!();
+    }
+
+    let get = |label: &str| -> &AbResult {
+        results
+            .get(label)
+            .unwrap_or_else(|| panic!("missing result for ranker {}", label))
+    };
+    let default_res = get("default");
+    let trained_res = get("trained");
+    let thermal_res = get("thermal");
 
     // ---------------------------------------------------------------------
-    // Timing summary
+    // Timing summary (3 rows, deltas vs default baseline)
     // ---------------------------------------------------------------------
-    let default_compile = median(&default_res.compile_us_samples);
-    let default_run = median(&default_res.run_us_samples);
-    let trained_compile = median(&trained_res.compile_us_samples);
-    let trained_run = median(&trained_res.run_us_samples);
+    let medians: BTreeMap<&'static str, (u128, u128)> = results
+        .iter()
+        .map(|(k, r)| (*k, (median(&r.compile_us_samples), median(&r.run_us_samples))))
+        .collect();
+    let (base_compile, base_run) = medians["default"];
 
-    println!();
     println!("============================================================");
     println!("Timing summary (median across {} iterations per config)", N_ITERS);
     println!("============================================================");
     println!(
-        "{:<12} {:>14} {:>14}",
-        "ranker", "compile_us", "run_us",
+        "{:<12} {:>14} {:>14} {:>12} {:>12}",
+        "ranker", "compile_us", "run_us", "Δcompile%", "Δrun%",
     );
-    println!("{}", "-".repeat(44));
-    println!(
-        "{:<12} {:>14} {:>14}",
-        "default", default_compile, default_run,
-    );
-    println!(
-        "{:<12} {:>14} {:>14}",
-        "trained", trained_compile, trained_run,
-    );
-
-    let compile_delta_us = trained_compile as i128 - default_compile as i128;
-    let run_delta_us = trained_run as i128 - default_run as i128;
-    let compile_pct = (compile_delta_us as f64 / default_compile as f64) * 100.0;
-    let run_pct = (run_delta_us as f64 / default_run as f64) * 100.0;
-    println!();
-    println!(
-        "delta (trained − default):  compile = {:+.1}% ({:+}us)   run = {:+.2}% ({:+}us)",
-        compile_pct, compile_delta_us, run_pct, run_delta_us,
-    );
+    println!("{}", "-".repeat(68));
+    for &ranker in ALL_RANKERS {
+        let label = ranker.label();
+        let (c, r) = medians[label];
+        let dc_pct = ((c as f64 - base_compile as f64) / base_compile as f64) * 100.0;
+        let dr_pct = ((r as f64 - base_run as f64) / base_run as f64) * 100.0;
+        if label == "default" {
+            println!("{:<12} {:>14} {:>14} {:>12} {:>12}", label, c, r, "(base)", "(base)");
+        } else {
+            println!(
+                "{:<12} {:>14} {:>14} {:>+11.2}% {:>+11.2}%",
+                label, c, r, dc_pct, dr_pct,
+            );
+        }
+    }
 
     // ---------------------------------------------------------------------
-    // Internal ranking summary (what the ranker itself decided, before
-    // pass_plan_from filtered Skip recommendations away).
+    // Internal ranking summary across all 3 configs
     // ---------------------------------------------------------------------
     println!();
     println!("============================================================");
     println!("Internal RankingReport summary");
     println!("============================================================");
     println!(
-        "  default: total_recommended (Run) = {:>3}, total_dropped = {:>3}",
-        default_res.total_recommended, default_res.total_dropped,
+        "{:<12} {:>20} {:>14}",
+        "ranker", "total_recommended (Run)", "total_dropped",
     );
-    println!(
-        "  trained: total_recommended (Run) = {:>3}, total_dropped = {:>3}",
-        trained_res.total_recommended, trained_res.total_dropped,
-    );
+    println!("{}", "-".repeat(50));
+    for &ranker in ALL_RANKERS {
+        let r = get(ranker.label());
+        println!(
+            "{:<12} {:>20} {:>14}",
+            ranker.label(),
+            r.total_recommended,
+            r.total_dropped,
+        );
+    }
+
     println!();
     println!("Per-function Run-recommendation count:");
-    let all_fns: BTreeSet<&String> = default_res
-        .per_fn_run_count
-        .keys()
-        .chain(trained_res.per_fn_run_count.keys())
+    let all_fns: BTreeSet<&String> = ALL_RANKERS
+        .iter()
+        .flat_map(|r| get(r.label()).per_fn_run_count.keys())
         .collect();
-    println!("  {:<20} {:>10} {:>10} {:>9}", "function", "default", "trained", "delta");
+    println!(
+        "  {:<20} {:>10} {:>10} {:>10}",
+        "function", "default", "trained", "thermal",
+    );
     println!("  {}", "-".repeat(53));
     for f in all_fns {
         let d = default_res.per_fn_run_count.get(f).copied().unwrap_or(0);
         let t = trained_res.per_fn_run_count.get(f).copied().unwrap_or(0);
-        let delta = t as i64 - d as i64;
-        println!("  {:<20} {:>10} {:>10} {:>+9}", f, d, t, delta);
+        let th = thermal_res.per_fn_run_count.get(f).copied().unwrap_or(0);
+        println!("  {:<20} {:>10} {:>10} {:>10}", f, d, t, th);
     }
 
     // ---------------------------------------------------------------------
-    // Behavioural checks
+    // Behavioural checks — three-way byte-identity
     // ---------------------------------------------------------------------
     println!();
     println!("============================================================");
-    println!("Behavioural checks");
+    println!("Behavioural checks — three-way byte-identity");
     println!("============================================================");
-    let output_match = default_res.output == trained_res.output;
-    println!("Output byte-identical: {}", output_match);
-    if !output_match {
-        let common_prefix_lines = default_res
-            .output
-            .lines()
-            .zip(trained_res.output.lines())
-            .take_while(|(a, b)| a == b)
-            .count();
-        println!(
-            "  Diverged after {} matching lines (correctness regression — investigate!).",
-            common_prefix_lines,
-        );
-    }
+    let dt_match = default_res.output == trained_res.output;
+    let dth_match = default_res.output == thermal_res.output;
+    let tth_match = trained_res.output == thermal_res.output;
+    let all_match = dt_match && dth_match && tth_match;
 
-    // ---------------------------------------------------------------------
-    // PassPlan diff
-    // ---------------------------------------------------------------------
+    println!("  default == trained: {}", dt_match);
+    println!("  default == thermal: {}", dth_match);
+    println!("  trained == thermal: {}", tth_match);
     println!();
-    let plan_diffs = diff_plans(&default_res.pass_plan, &trained_res.pass_plan);
-    if plan_diffs.is_empty() {
-        println!("PassPlan diff: NONE — both rankers produced identical plans for every function.");
-        println!("  Interpretation: on this workload, the trained coefficients lead to the");
-        println!("  same per-function pass sequence as the default coefficients. The compile +");
-        println!("  runtime deltas above (if any) are pure noise.");
+    if all_match {
+        println!("Three-way output byte-identical: ✓");
+        println!("  All three rankers produced byte-identical stdout. No correctness");
+        println!("  regression in the §4B.3 thermal-aware path. The §4B.2 design-doc");
+        println!("  claim 'NssPressurePredictor empty thermal map → ThermalAwareCostModel");
+        println!("  is a no-op vs base cost model' is confirmed end-to-end on a real");
+        println!("  workload, not just via the cjc-cana-nss unit test.");
     } else {
-        println!("PassPlan diff: {} function(s) differ.", plan_diffs.len());
-        for d in &plan_diffs {
-            println!("{}", d);
+        println!("Three-way output byte-identical: FAIL");
+        println!("  CRITICAL — at least one ranker changes output bytes vs another.");
+        println!("  Investigate before shipping.");
+    }
+
+    // ---------------------------------------------------------------------
+    // PassPlan diff — pairwise across all three
+    // ---------------------------------------------------------------------
+    println!();
+    println!("============================================================");
+    println!("PassPlan diffs (pairwise)");
+    println!("============================================================");
+    for (label_a, label_b) in [("default", "trained"), ("default", "thermal"), ("trained", "thermal")] {
+        let a = &get(label_a).pass_plan;
+        let b = &get(label_b).pass_plan;
+        let diffs = diff_plans(a, b, label_a, label_b);
+        if diffs.is_empty() {
+            println!("  {} vs {}: NONE", label_a, label_b);
+        } else {
+            println!("  {} vs {}: {} function(s) differ.", label_a, label_b, diffs.len());
+            for d in &diffs {
+                println!("{}", d);
+            }
         }
     }
 
@@ -384,39 +443,53 @@ fn main() {
     println!("============================================================");
     println!("Per-pass invocation counts (across all functions)");
     println!("============================================================");
-    let default_counts = summarize_plan(&default_res.pass_plan);
-    let trained_counts = summarize_plan(&trained_res.pass_plan);
-    println!("{:<20} {:>10} {:>10} {:>+9}", "pass", "default", "trained", "delta");
+    let counts: BTreeMap<&'static str, BTreeMap<&'static str, usize>> = results
+        .iter()
+        .map(|(k, r)| (*k, summarize_plan(&r.pass_plan)))
+        .collect();
+    println!(
+        "{:<20} {:>10} {:>10} {:>10}",
+        "pass", "default", "trained", "thermal",
+    );
     println!("{}", "-".repeat(54));
-    for key in default_counts.keys() {
-        let d = default_counts.get(key).copied().unwrap_or(0);
-        let t = trained_counts.get(key).copied().unwrap_or(0);
-        let delta = t as i64 - d as i64;
-        println!("{:<20} {:>10} {:>10} {:>+9}", key, d, t, delta);
+    let pass_keys = counts["default"].keys().copied().collect::<Vec<_>>();
+    for key in &pass_keys {
+        let d = counts["default"].get(key).copied().unwrap_or(0);
+        let t = counts["trained"].get(key).copied().unwrap_or(0);
+        let th = counts["thermal"].get(key).copied().unwrap_or(0);
+        println!("{:<20} {:>10} {:>10} {:>10}", key, d, t, th);
     }
 
+    // ---------------------------------------------------------------------
+    // Verdict
+    // ---------------------------------------------------------------------
     println!();
     println!("============================================================");
     println!("Verdict");
     println!("============================================================");
-    if plan_diffs.is_empty() {
-        println!("Trained ranker produces no behavioural change vs default on this workload.");
-        println!("Recommendation: §3A.1+§3A.3 validation results stand; trained_ranker() is");
-        println!("safe but inactive here. Try a workload with more diverse feature ranges to");
-        println!("provoke a divergent decision (e.g. one with branch_count > 5).");
-    } else if !output_match {
-        println!("CRITICAL: trained ranker changes output bytes. Investigate before shipping.");
-    } else if compile_pct < -5.0 && run_pct < -5.0 {
-        println!("Trained ranker is faster on BOTH dimensions. Strong positive signal.");
-    } else if run_pct < -5.0 {
-        println!("Trained ranker produces measurably faster code (compile-time tradeoff acceptable).");
-    } else if compile_pct < -10.0 {
-        println!("Trained ranker is materially faster to compile (runtime indistinguishable).");
-    } else if run_pct > 5.0 {
-        println!("Trained ranker is SLOWER at runtime. Held-out validation passed but this workload");
-        println!("hit a generalization weak spot. See §3A.1 for SR overfitting context.");
+    let dt_plans_match = default_res.pass_plan == trained_res.pass_plan;
+    let dth_plans_match = default_res.pass_plan == thermal_res.pass_plan;
+    if !all_match {
+        println!("CRITICAL: output divergence between rankers — investigate before shipping.");
+    } else if dt_plans_match && dth_plans_match {
+        println!("All three rankers produced identical PassPlans on this workload.");
+        println!();
+        println!("Implications:");
+        println!("  §3A.2 (default vs trained):   trained_ranker is inactive here (see §3A.4 audit).");
+        println!("  §4B.3 (thermal vs trained):   thermal-aware wrapper is currently a no-op,");
+        println!("                                consistent with §4B.2 Option C empty-map design.");
+        println!();
+        println!("Both wrappers are wired and validated. They will become differentially active");
+        println!("once the base ranker starts producing non-trivial plans on real workloads");
+        println!("(corpus expansion / threshold tuning) or once NssPressurePredictor migrates");
+        println!("from Option C (empty maps) to Option A (synthetic trace) or Option B (real");
+        println!("instrumentation). The bench is ready to detect either transition immediately.");
     } else {
-        println!("Both rankers within noise band (±5%). Trained ranker produces different plans");
-        println!("but no measurable runtime impact on this workload.");
+        println!("PassPlans differ across configs but output stays byte-identical:");
+        println!("  default vs trained plan: {}", if dt_plans_match { "match" } else { "differ" });
+        println!("  default vs thermal plan: {}", if dth_plans_match { "match" } else { "differ" });
+        println!();
+        println!("Investigate: which functions differ, and what the per-pass changes mean.");
+        println!("The 'PassPlan diffs (pairwise)' section above lists specific differences.");
     }
 }

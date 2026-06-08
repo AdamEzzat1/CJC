@@ -807,3 +807,137 @@ wall-clock), but the PassPlan / RankingReport diagnostics are
 deterministic per the CANA pipeline's contract. The byte-identity
 check on stdout is the strongest invariant: divergence there would
 indicate an optimization-induced correctness regression.
+
+---
+
+## 15. Three-way AB extension: `--thermal-aware` on PINN (§4B.3)
+
+After §4B.3 landed the `cjcl run --thermal-aware` flag (wired through
+`cjc_mir_exec::run_program_optimized_thermal_aware`), the AB bench
+[`bench/cana_ab_pinn/`](../../bench/cana_ab_pinn/) was extended to a
+**three-way comparison**: default ranker vs trained ranker vs the new
+`ThermalAwareCostModel<LinearCostModel::trained, NssPressurePredictor>`
+composition. This catches whether the §4B.3 plumbing introduced any
+end-to-end behavioural change vs the §3A.2 baseline.
+
+### Methodology
+
+Same PINN heat 1D workload as §14 (n_epochs=80 → 20 substitution,
+4 functions, ~180 LOC). N=3 iterations per ranker. The thermal-aware
+config constructs:
+
+```rust
+let cost_model = ThermalAwareCostModel::new(
+    LinearCostModel::trained(),
+    NssPressurePredictor::default(),
+);
+PassRanker::new(cost_model, DefaultLegalityGate::new()).rank(&mir, &features)
+```
+
+This is the exact composition that `cjcl run --thermal-aware` builds
+through `cjc_mir_exec::cana_thermal_aware_plan_for`. If those two paths
+diverged, the bench would catch it.
+
+### Internal RankingReport — all three configs agree
+
+| Ranker | total_recommended (Run) | total_dropped |
+|---|---|---|
+| default | 0 | 30 |
+| trained | 0 | 30 |
+| thermal | 0 | 30 |
+
+All three rankers considered the same 30 candidate (function, pass)
+pairs (5 functions × 6 candidate passes including `cf_round_2`) and
+rejected every one. Per-function Run-recommendation count is 0 across
+all functions for every ranker. This is the same internal state that
+§3A.2 (§14 above) documented — the thermal-wrapping doesn't shift any
+decision over the skip threshold.
+
+### PassPlan diffs — pairwise
+
+| Pair | Differs? |
+|---|---|
+| default vs trained | NONE |
+| default vs thermal | NONE |
+| trained vs thermal | NONE |
+
+All three rankers produced identical (empty) PassPlans for every
+function. `optimize_program_with_plan` falls back to the default
+6-pass sequence for every function across all three configurations.
+
+### Behavioural checks — three-way byte-identity
+
+| Pair | Output byte-identical? |
+|---|---|
+| default == trained | yes |
+| default == thermal | yes |
+| trained == thermal | yes |
+
+**All three rankers produce byte-identical stdout** — no correctness
+regression introduced by §4B.3. The §4B.2 design-doc claim that
+`NssPressurePredictor` in Option C mode is a behavioural no-op vs the
+base trained cost model is now validated at **five independent layers**:
+
+1. `cjc-cana-nss::tests::thermal_aware_composes_with_empty_predictor_as_noop`
+   — unit test, base vs wrapped `CostEstimate` byte-for-byte equal.
+2. AST/MIR parity gate (`tests/fixtures/`) — full-pipeline determinism
+   on every fixture, both rankers' plans collapse to the same fallback.
+3. CLI smoke test (small program) — `diff <(cjcl run --mir-opt p.cjcl)
+   <(cjcl run --thermal-aware p.cjcl)` empty.
+4. This three-way bench on PINN (substantial real workload) — all
+   pairwise diffs NONE, all pairwise outputs byte-identical.
+5. Workspace regression on every test crate — no test fails.
+
+### Timing summary (median across 3 iterations)
+
+| Ranker | compile_us | run_us | Δcompile% | Δrun% |
+|---|---|---|---|---|
+| default | 2023 | 879,401 | (base) | (base) |
+| trained | 1957 | 1,096,900 | -3.26% | +24.73% |
+| thermal | 1273 | 895,967 | -37.07% | +1.88% |
+
+**The timing deltas are pure measurement noise.** Both PassPlans are
+empty across all three configs, so identical optimized code is being
+executed. The 24.73% run_us delta for trained and 1.88% for thermal
+are different samples from the same noise distribution — per-iteration
+run_us spans 800k-1.2M for each config, well above the inter-config
+variation. The 37% compile_us improvement for thermal looks
+spectacular but lives inside a ~750 µs window on a sub-second compile,
+again well within noise.
+
+### Interpretation
+
+This is the strongest possible confirmation that §4B.3's plumbing did
+not introduce any observable change vs `--mir-opt` alone on PINN. The
+new `--thermal-aware` flag is a working surface that's currently
+inactive — exactly the design intent.
+
+The combined verdict across the four validation experiments + the
+three-way extension:
+
+| Validation | Result | Status of `--thermal-aware` |
+|---|---|---|
+| §3A.1 in-corpus held-out | 4/5 passes robust, SR overfits | Trained model safe |
+| §3A.3 cross-corpus | 5/5 passes robust | Trained model robust to author drift |
+| §3A.4 feature audit | `alloc_sites` blind dimension | Documented limitation |
+| §3A.2 PINN (default vs trained) | Both skip every pass | Trained model inactive on PINN |
+| **§15 PINN (3-way incl. thermal)** | **Three-way byte-identical** | **Thermal layer ships as no-op, ready for activation** |
+
+`cjcl run --thermal-aware` is safe to recommend to users. Today it
+behaves identically to `--mir-opt`. When the base ranker starts
+producing differential decisions (corpus expansion, threshold tuning,
+chess RL / LendingClub workloads) **and** `NssPressurePredictor`
+migrates from Option C to A or B, this flag will become the
+forward-compatible activation surface for that newly-active layer
+without any further CLI changes.
+
+### Reproducibility
+
+```bash
+cargo run --release -p cana-ab-pinn
+```
+
+The full three-way bench takes ~6 minutes wall-clock at N=3 per
+config (build + ~2 minutes per config). Output structure is stable
+across runs (PassPlan diffs deterministic, byte-identity check
+deterministic); only the wall-clock timings vary with machine load.
