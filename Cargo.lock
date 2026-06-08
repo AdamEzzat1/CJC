@@ -479,6 +479,7 @@ dependencies = [
  "cjc-ad",
  "cjc-ast",
  "cjc-cana",
+ "cjc-cana-nss",
  "cjc-data",
  "cjc-diag",
  "cjc-dispatch",

@@ -28,3 +28,4 @@ cjc-quantum.workspace = true
 cjc-abng.workspace = true
 cjc-locke.workspace = true
 cjc-cana.workspace = true
+cjc-cana-nss.workspace = true

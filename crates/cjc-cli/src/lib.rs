@@ -100,6 +100,14 @@ struct Config {
     reproducible: bool,
     time: bool,
     mir_opt: bool,
+    /// `--thermal-aware`: when set, use the NSS-backed thermal-aware
+    /// cost model wrapping the trained LinearCostModel. Implies
+    /// `--mir-opt`. Today (NSS bridge in Option C mode) the predictor
+    /// returns empty maps, so the thermal layer is a behavioural no-op
+    /// vs `--mir-opt` alone — wired for forward compatibility with
+    /// future Option A/B migrations that produce real thermal signal.
+    /// See `docs/cana/CANA_PHASE_4_NSS_BRIDGE_DESIGN_OPTIONS.md`.
+    thermal_aware: bool,
     mir_mono: bool,
     multi_file: bool,
     use_color: bool,
@@ -116,6 +124,7 @@ const KNOWN_FLAGS: &[&str] = &[
     "--seed",
     "--time",
     "--mir-opt",
+    "--thermal-aware",
     "--mir-mono",
     "--cana-report",
     "--multi-file",
@@ -232,6 +241,7 @@ impl Config {
                     reproducible: false,
                     time: false,
                     mir_opt: false,
+                    thermal_aware: false,
                     mir_mono: false,
                     multi_file: false,
                     use_color: true,
@@ -246,6 +256,7 @@ impl Config {
         let mut seed: u64 = 42;
         let mut time = false;
         let mut mir_opt = false;
+        let mut thermal_aware = false;
         let mut mir_mono = false;
         let mut multi_file = false;
         let mut force_color: Option<bool> = None;
@@ -260,6 +271,14 @@ impl Config {
                 "--reproducible" => reproducible = true,
                 "--time" => time = true,
                 "--mir-opt" => mir_opt = true,
+                // --thermal-aware implies --mir-opt: thermal-aware ranking
+                // only makes sense when MIR optimization is being run.
+                // Setting both flags is fine; the thermal flag dominates
+                // the cost-model selection.
+                "--thermal-aware" => {
+                    thermal_aware = true;
+                    mir_opt = true;
+                }
                 "--mir-mono" => mir_mono = true,
                 "--multi-file" => multi_file = true,
                 // CANA Phase-1 sidecar emission. Two forms:
@@ -393,6 +412,7 @@ impl Config {
             reproducible,
             time,
             mir_opt,
+            thermal_aware,
             mir_mono,
             multi_file,
             use_color,
@@ -797,6 +817,7 @@ fn print_usage() {
     eprintln!("  --seed <N>                       Set RNG seed (default: 42)");
     eprintln!("  --time                           Print execution time after running");
     eprintln!("  --mir-opt                        Enable MIR optimizations (CF + DCE)");
+    eprintln!("  --thermal-aware                  Enable NSS-backed thermal-aware ranking (implies --mir-opt)");
     eprintln!("  --mir-mono                       Enable MIR monomorphization");
     eprintln!("  --cana-report <path>             Emit CANA Phase-1 MIR feature sidecar to <path>");
     eprintln!("  --multi-file                     Enable multi-file module resolution");
@@ -960,6 +981,19 @@ fn cmd_run(source: &str, filename: &str, config: &Config) {
 
         if config.mir_mono {
             if let Err(e) = cjc_mir_exec::run_program_monomorphized(&program, config.seed) {
+                eprintln!("{}", e);
+                process::exit(EXIT_RUNTIME);
+            }
+        } else if config.thermal_aware {
+            // --thermal-aware: wrap the trained LinearCostModel in
+            // ThermalAwareCostModel<_, NssPressurePredictor>. Currently a
+            // no-op vs --mir-opt because Option C's NssPressurePredictor
+            // returns empty thermal maps (validated by §3A.2 PINN AB-test
+            // and cjc-cana-nss integration tests). Wired now so future
+            // Option A/B migrations land transparently.
+            if let Err(e) =
+                cjc_mir_exec::run_program_optimized_thermal_aware(&program, config.seed)
+            {
                 eprintln!("{}", e);
                 process::exit(EXIT_RUNTIME);
             }
@@ -1497,6 +1531,8 @@ mod tests {
         assert_eq!(suggest_flag("--colr"), Some("--color"));
         // --mir-op -> --mir-opt (distance 1)
         assert_eq!(suggest_flag("--mir-op"), Some("--mir-opt"));
+        // --thermal-awar -> --thermal-aware (distance 1)
+        assert_eq!(suggest_flag("--thermal-awar"), Some("--thermal-aware"));
     }
 
     #[test]

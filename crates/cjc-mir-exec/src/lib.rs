@@ -4618,6 +4618,37 @@ fn cana_plan_for(mir: &cjc_mir::MirProgram) -> cjc_mir::optimize::PassPlan {
     plan
 }
 
+/// Build a pass plan using a CANA ranker wrapped in the **thermal-aware
+/// cost model** (NSS Phase 4, Option C — see
+/// `docs/cana/CANA_PHASE_4_NSS_BRIDGE_DESIGN_OPTIONS.md`).
+///
+/// Wraps the trained [`cjc_cana::LinearCostModel`] in a
+/// [`cjc_cana::thermal_cost_model::ThermalAwareCostModel`] backed by
+/// [`cjc_cana_nss::NssPressurePredictor`] (Option C, structural-only).
+/// Today the NSS predictor returns empty thermal maps so the wrapping
+/// is a behavioural no-op — the resulting plan is byte-identical to
+/// what the default ranker would produce. When Option A or Option B
+/// lands and the NSS predictor starts returning non-empty maps, this
+/// is the path along which thermal feedback will reach the ranker.
+///
+/// Wired through `cjcl run --thermal-aware`. Falls back gracefully:
+/// the trained model is the same one validated by §3A.1 and §3A.3,
+/// and the empty-map composition is validated by
+/// `cjc-cana-nss::tests::thermal_aware_composes_with_empty_predictor_as_noop`.
+fn cana_thermal_aware_plan_for(mir: &cjc_mir::MirProgram) -> cjc_mir::optimize::PassPlan {
+    let features = cjc_cana::analyze_program(mir).features;
+    let cost_model = cjc_cana::thermal_cost_model::ThermalAwareCostModel::new(
+        cjc_cana::LinearCostModel::trained(),
+        cjc_cana_nss::NssPressurePredictor::default(),
+    );
+    let ranker = cjc_cana::pass_ranker::PassRanker::new(
+        cost_model,
+        cjc_cana::legality::DefaultLegalityGate::new(),
+    );
+    let report = ranker.rank(mir, &features);
+    cjc_cana::pass_ranker::pass_plan_from(&report.sequence)
+}
+
 /// Run a full AST program through the optimized MIR pipeline.
 ///
 /// Phase 2 change (2026-06): the pass sequence is now selected by CANA's
@@ -4677,6 +4708,76 @@ pub fn run_program_optimized_with_executor(
     // Phase 2: CANA-driven pass selection (see `run_program_optimized`
     // for the parity contract).
     let plan = cana_plan_for(&mir);
+    let mut optimized = cjc_mir::optimize::optimize_program_with_plan(&mir, &plan);
+    cjc_mir::escape::annotate_program(&mut optimized);
+
+    let mut executor = MirExecutor::new(seed);
+    executor.scan_ast_imports(program);
+    let result = executor.exec(&optimized)?;
+    Ok((result, executor))
+}
+
+/// Run a full AST program through the optimized MIR pipeline using the
+/// **thermal-aware** CANA ranker.
+///
+/// Same as [`run_program_optimized`] but the pass-plan recommendation
+/// is sourced from a `ThermalAwareCostModel<LinearCostModel,
+/// NssPressurePredictor>` composition (§4B.2 Option C). The thermal
+/// predictor currently returns empty maps, so the composed cost model
+/// is a behavioural no-op vs the default ranker — output is
+/// byte-identical and the §3A.2 PINN AB-test holds. The path is wired
+/// now so that future migrations to Option A (synthetic trace) or
+/// Option B (real MIR-exec instrumentation) only need to change the
+/// internals of `NssPressurePredictor`.
+///
+/// Wired through `cjcl run --thermal-aware`. The flag implies
+/// `--mir-opt` — both produce optimized output, the thermal flag
+/// changes the cost model behind that optimization.
+///
+/// # Arguments
+///
+/// * `program` - The parsed AST program.
+/// * `seed`    - Deterministic RNG seed for reproducible execution.
+///
+/// # Returns
+///
+/// The final [`Value`] produced by the optimized program. Output is
+/// byte-identical to `cjc-eval` for every program (the AST/MIR parity
+/// gate enforces this regardless of which ranker selected the plan).
+pub fn run_program_optimized_thermal_aware(
+    program: &cjc_ast::Program,
+    seed: u64,
+) -> MirExecResult {
+    let mut ast_lowering = cjc_hir::AstLowering::new();
+    let hir = ast_lowering.lower_program(program);
+
+    let mut hir_to_mir = cjc_mir::HirToMir::new();
+    let mir = hir_to_mir.lower_program(&hir);
+
+    let plan = cana_thermal_aware_plan_for(&mir);
+    let mut optimized = cjc_mir::optimize::optimize_program_with_plan(&mir, &plan);
+    cjc_mir::escape::annotate_program(&mut optimized);
+
+    let mut executor = MirExecutor::new(seed);
+    executor.scan_ast_imports(program);
+    executor.exec(&optimized)
+}
+
+/// `run_program_optimized_thermal_aware` variant that also returns the
+/// [`MirExecutor`] for post-execution inspection. Mirrors the
+/// [`run_program_optimized_with_executor`] / [`run_program_optimized`]
+/// pair.
+pub fn run_program_optimized_thermal_aware_with_executor(
+    program: &cjc_ast::Program,
+    seed: u64,
+) -> Result<(Value, MirExecutor), MirExecError> {
+    let mut ast_lowering = cjc_hir::AstLowering::new();
+    let hir = ast_lowering.lower_program(program);
+
+    let mut hir_to_mir = cjc_mir::HirToMir::new();
+    let mir = hir_to_mir.lower_program(&hir);
+
+    let plan = cana_thermal_aware_plan_for(&mir);
     let mut optimized = cjc_mir::optimize::optimize_program_with_plan(&mir, &plan);
     cjc_mir::escape::annotate_program(&mut optimized);
 
