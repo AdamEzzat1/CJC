@@ -1,0 +1,30 @@
+[package]
+name = "cana-ab-pinn"
+version = "0.1.11"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "cana_ab_pinn"
+path = "main.rs"
+
+[dependencies]
+# §3A.2 AB-test bench: compares default_ranker vs trained_ranker on a real
+# CJC-Lang workload (PINN heat 1D). Implements the experiment from
+# docs/cana/HANDOFF_NEXT_SESSION.md to answer:
+#
+#   - Do the two rankers produce different PassPlans on real code?
+#   - If so, does the trained ranker compile faster, slower, or the same?
+#   - Does it produce code that runs faster, slower, or the same?
+#   - Is output byte-identical (no correctness regression)?
+cjc-ast = { path = "../../crates/cjc-ast" }
+cjc-parser = { path = "../../crates/cjc-parser" }
+cjc-hir = { path = "../../crates/cjc-hir" }
+cjc-mir = { path = "../../crates/cjc-mir" }
+cjc-mir-exec = { path = "../../crates/cjc-mir-exec" }
+cjc-cana = { path = "../../crates/cjc-cana" }
+# §4B.3 extension: third config compares the --thermal-aware ranker
+# (ThermalAwareCostModel<LinearCostModel::trained, NssPressurePredictor>)
+# against default and trained. Confirms the §3A.2 byte-identity claim
+# extends to the new flag at the bench level.
+cjc-cana-nss = { path = "../../crates/cjc-cana-nss" }

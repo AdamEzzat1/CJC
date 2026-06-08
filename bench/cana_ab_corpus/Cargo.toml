@@ -1,0 +1,23 @@
+[package]
+name = "cana-ab-corpus"
+version = "0.1.11"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "cana_ab_corpus"
+path = "main.rs"
+
+[dependencies]
+# Compile-time-only three-way ranker comparison across a corpus.
+# Sister bench to cana_ab_pinn but scoped to compile-time decisions only
+# (no runtime measurement) — answers the question: do any of the 8
+# pass_ordering programs cause default/trained/thermal rankers to
+# produce different PassPlans? Each run is ~10 seconds vs ~6 minutes
+# per workload for cana_ab_pinn because no MIR-exec phase.
+cjc-ast = { path = "../../crates/cjc-ast" }
+cjc-parser = { path = "../../crates/cjc-parser" }
+cjc-hir = { path = "../../crates/cjc-hir" }
+cjc-mir = { path = "../../crates/cjc-mir" }
+cjc-cana = { path = "../../crates/cjc-cana" }
+cjc-cana-nss = { path = "../../crates/cjc-cana-nss" }

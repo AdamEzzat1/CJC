@@ -996,6 +996,201 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let sum = crate::accumulator::binned_sum_f64(&products);
             Ok(Some(Value::Float(sum)))
         }
+        // ---- CANA Phase 3.5a: fused matmul+dot ----
+        // Computes the quadratic-form scalar aᵀ W v in a single pass, eliminating
+        // the intermediate [N] tensor that `matmul(a_as_row, w)` would allocate.
+        // Math is bit-identical to the sequential-matmul + dot chain.
+        // See docs/cana/CANA_PHASE_3_5_FUSION_CODEGEN_DESIGN.md §3.
+        "fused_matmul_dot" => {
+            if args.len() != 3 {
+                return Err(
+                    "fused_matmul_dot requires 3 arguments: a (1D), w (2D), v (1D)".into(),
+                );
+            }
+            let a = match &args[0] {
+                Value::Tensor(t) => t,
+                _ => return Err(format!(
+                    "fused_matmul_dot requires tensors, got {}",
+                    args[0].type_name()
+                )),
+            };
+            let w = match &args[1] {
+                Value::Tensor(t) => t,
+                _ => return Err(format!(
+                    "fused_matmul_dot requires tensors, got {}",
+                    args[1].type_name()
+                )),
+            };
+            let v = match &args[2] {
+                Value::Tensor(t) => t,
+                _ => return Err(format!(
+                    "fused_matmul_dot requires tensors, got {}",
+                    args[2].type_name()
+                )),
+            };
+            if a.ndim() != 1 {
+                return Err(format!(
+                    "fused_matmul_dot: a must be 1D, got {}D",
+                    a.ndim()
+                ));
+            }
+            if w.ndim() != 2 {
+                return Err(format!(
+                    "fused_matmul_dot: w must be 2D, got {}D",
+                    w.ndim()
+                ));
+            }
+            if v.ndim() != 1 {
+                return Err(format!(
+                    "fused_matmul_dot: v must be 1D, got {}D",
+                    v.ndim()
+                ));
+            }
+            let m = a.len();
+            let m_w = w.shape()[0];
+            let n = w.shape()[1];
+            let n_v = v.len();
+            if m != m_w {
+                return Err(format!(
+                    "fused_matmul_dot: a length {m} != w rows {m_w}"
+                ));
+            }
+            if n != n_v {
+                return Err(format!(
+                    "fused_matmul_dot: w cols {n} != v length {n_v}"
+                ));
+            }
+            let av = a.to_vec();
+            let wv = w.to_vec();
+            let vv = v.to_vec();
+            let sum = crate::accumulator::fused_matmul_dot_kernel(&av, &wv, &vv, m, n);
+            Ok(Some(Value::Float(sum)))
+        }
+        // ---- CANA Phase 3.5a-prime: fused matmul+norm ----
+        // Computes ||A @ W||_p in a single pass, eliminating the intermediate
+        // [M, N] tensor. Bit-identical to `norm(matmul(A, W), ord)` on the
+        // sequential matmul path. See docs/cana/CANA_PHASE_3_5_FUSION_CODEGEN_DESIGN.md.
+        "fused_matmul_norm" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err(
+                    "fused_matmul_norm requires 2-3 arguments: a (2D), w (2D), [ord=2]".into(),
+                );
+            }
+            let a = match &args[0] {
+                Value::Tensor(t) => t,
+                _ => return Err(format!(
+                    "fused_matmul_norm requires tensors, got {}",
+                    args[0].type_name()
+                )),
+            };
+            let w = match &args[1] {
+                Value::Tensor(t) => t,
+                _ => return Err(format!(
+                    "fused_matmul_norm requires tensors, got {}",
+                    args[1].type_name()
+                )),
+            };
+            let ord: i64 = if args.len() == 3 {
+                match &args[2] {
+                    Value::Int(i) => *i,
+                    Value::Float(f) => *f as i64,
+                    _ => return Err("fused_matmul_norm: ord must be an integer".into()),
+                }
+            } else {
+                2
+            };
+            if a.ndim() != 2 {
+                return Err(format!(
+                    "fused_matmul_norm: a must be 2D, got {}D",
+                    a.ndim()
+                ));
+            }
+            if w.ndim() != 2 {
+                return Err(format!(
+                    "fused_matmul_norm: w must be 2D, got {}D",
+                    w.ndim()
+                ));
+            }
+            let m = a.shape()[0];
+            let k = a.shape()[1];
+            let k_w = w.shape()[0];
+            let n = w.shape()[1];
+            if k != k_w {
+                return Err(format!(
+                    "fused_matmul_norm: a cols {k} != w rows {k_w}"
+                ));
+            }
+            let av = a.to_vec();
+            let wv = w.to_vec();
+            let result = crate::accumulator::fused_matmul_norm_kernel(&av, &wv, ord, m, k, n);
+            Ok(Some(Value::Float(result)))
+        }
+        // ---- CANA Phase 3.5d: fused matmul+matmul ----
+        // Computes (A @ B) @ C in a single pass, eliminating the intermediate
+        // [M, K] Tensor wrapper. Bit-identical to the unfused chain on the
+        // sequential matmul path. Math is left-associative.
+        "fused_matmul_matmul" => {
+            if args.len() != 3 {
+                return Err(
+                    "fused_matmul_matmul requires 3 arguments: a (2D), b (2D), c (2D)".into(),
+                );
+            }
+            let a = match &args[0] {
+                Value::Tensor(t) => t,
+                _ => return Err(format!(
+                    "fused_matmul_matmul requires tensors, got {}",
+                    args[0].type_name()
+                )),
+            };
+            let b = match &args[1] {
+                Value::Tensor(t) => t,
+                _ => return Err(format!(
+                    "fused_matmul_matmul requires tensors, got {}",
+                    args[1].type_name()
+                )),
+            };
+            let c = match &args[2] {
+                Value::Tensor(t) => t,
+                _ => return Err(format!(
+                    "fused_matmul_matmul requires tensors, got {}",
+                    args[2].type_name()
+                )),
+            };
+            if a.ndim() != 2 {
+                return Err(format!("fused_matmul_matmul: a must be 2D, got {}D", a.ndim()));
+            }
+            if b.ndim() != 2 {
+                return Err(format!("fused_matmul_matmul: b must be 2D, got {}D", b.ndim()));
+            }
+            if c.ndim() != 2 {
+                return Err(format!("fused_matmul_matmul: c must be 2D, got {}D", c.ndim()));
+            }
+            let m = a.shape()[0];
+            let n_a = a.shape()[1];
+            let n_b = b.shape()[0];
+            let k_b = b.shape()[1];
+            let k_c = c.shape()[0];
+            let p = c.shape()[1];
+            if n_a != n_b {
+                return Err(format!(
+                    "fused_matmul_matmul: a cols {n_a} != b rows {n_b}"
+                ));
+            }
+            if k_b != k_c {
+                return Err(format!(
+                    "fused_matmul_matmul: b cols {k_b} != c rows {k_c}"
+                ));
+            }
+            let av = a.to_vec();
+            let bv = b.to_vec();
+            let cv = c.to_vec();
+            let data = crate::accumulator::fused_matmul_matmul_kernel(
+                &av, &bv, &cv, m, n_a, k_b, p,
+            );
+            Ok(Some(Value::Tensor(
+                Tensor::from_vec(data, &[m, p]).map_err(|e| format!("{e}"))?,
+            )))
+        }
         "outer" => {
             if args.len() != 2 { return Err("outer requires exactly 2 arguments".into()); }
             let a = match &args[0] {

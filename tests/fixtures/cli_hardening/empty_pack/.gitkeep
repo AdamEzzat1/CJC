@@ -1,0 +1,9 @@
+This file ensures the empty_pack/ directory exists in git.
+
+The `pack_discovery::pack_empty_directory_warns` test in
+`tests/test_cli_hardening.rs` runs `cjcl pack empty_pack/ --dry-run` and
+asserts the CLI emits a "no packable files found" warning. For that to
+work, the directory itself must exist — git doesn't track empty
+directories, so this `.gitkeep` marker is the standard idiom.
+
+Do not add other files to this directory; it's deliberately empty.

@@ -1,0 +1,17 @@
+[package]
+name = "cjc-cana-nss"
+version = "0.1.11"
+edition = "2021"
+publish = false
+description = "Bridge crate: NSS-backed PressurePredictor for CANA's compile-time recommendation engine"
+license = "MIT"
+
+[dependencies]
+cjc-cana = { workspace = true }
+cjc-mir = { workspace = true }
+cjc-nss = { workspace = true }
+
+[dev-dependencies]
+cjc-ast = { workspace = true }
+cjc-parser = { workspace = true }
+cjc-hir = { workspace = true }

@@ -1,0 +1,18 @@
+[package]
+name = "cjc-cana"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "CANA Phase 1 — Compiler-Aware Neural Architecture passive observer: MIR feature extraction, deterministic content-addressing, legality-gate trait surface"
+publish = false
+
+[dependencies]
+cjc-ast.workspace = true
+cjc-mir.workspace = true
+cjc-diag.workspace = true
+
+[dev-dependencies]
+proptest = "1"
+bolero = "0.13.4"

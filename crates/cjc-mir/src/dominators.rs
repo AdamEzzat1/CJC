@@ -103,13 +103,23 @@ impl DominatorTree {
     /// A block dominates itself. The check walks up the immediate dominator
     /// chain from `b` toward the entry block, returning true if `a` is
     /// encountered.
+    ///
+    /// Returns `false` for unreachable blocks whose idom remained UNDEF after
+    /// [`Self::compute`] — matches the convention used by
+    /// [`Self::dominance_frontiers`], which also skips unreachable blocks.
     pub fn dominates(&self, a: BlockId, b: BlockId) -> bool {
         let mut current = b;
         loop {
             if current == a {
                 return true;
             }
+            if (current.0 as usize) >= self.num_blocks {
+                return false;
+            }
             let idom = self.idom[current.0 as usize];
+            if (idom.0 as usize) >= self.num_blocks {
+                return false;
+            }
             if idom == current {
                 // Reached the entry's self-loop
                 return current == a;
@@ -331,6 +341,90 @@ mod tests {
                 "entry should dominate block {}", i
             );
         }
+    }
+
+    #[test]
+    fn test_dominates_unreachable_block_does_not_panic() {
+        // Regression for task_9d7ae8b2: `dominates()` used to OOB on blocks
+        // whose idom stayed UNDEF after compute() (i.e. unreachable blocks).
+        //
+        // CFG: 0 -> 1 (return); 2 is unreachable.
+        let cfg = MirCfg {
+            basic_blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    statements: vec![],
+                    terminator: Terminator::Goto(BlockId(1)),
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    statements: vec![],
+                    terminator: Terminator::Return(None),
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    statements: vec![],
+                    terminator: Terminator::Return(None),
+                },
+            ],
+            entry: BlockId(0),
+        };
+        let domtree = DominatorTree::compute(&cfg);
+        // Block 2 is unreachable; its idom stays UNDEF (u32::MAX).
+        // The chain walk must terminate without panicking.
+        assert!(!domtree.dominates(BlockId(0), BlockId(2)));
+        assert!(!domtree.dominates(BlockId(1), BlockId(2)));
+        // Self-dominance still holds (handled before any indexing).
+        assert!(domtree.dominates(BlockId(2), BlockId(2)));
+    }
+
+    #[test]
+    fn test_dominates_early_return_pattern() {
+        // Regression: the `if cond { return x; } ... return y;` CJC-Lang
+        // pattern produces a CFG where the post-`if` merge block may be
+        // unreachable when both branches return. dominates() must survive
+        // queries against any block, reachable or not.
+        //
+        // CFG shape:
+        //   0 (entry, branch) -> 1 (then: return) / 2 (else: return)
+        //   3 (merge, unreachable, return)
+        let cfg = MirCfg {
+            basic_blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    statements: vec![],
+                    terminator: Terminator::Branch {
+                        cond: bool_expr(true),
+                        then_block: BlockId(1),
+                        else_block: BlockId(2),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    statements: vec![],
+                    terminator: Terminator::Return(Some(int_expr(-1))),
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    statements: vec![],
+                    terminator: Terminator::Return(Some(int_expr(1))),
+                },
+                BasicBlock {
+                    id: BlockId(3),
+                    statements: vec![],
+                    terminator: Terminator::Return(None),
+                },
+            ],
+            entry: BlockId(0),
+        };
+        let domtree = DominatorTree::compute(&cfg);
+
+        // Reachable dominance still works.
+        assert!(domtree.dominates(BlockId(0), BlockId(1)));
+        assert!(domtree.dominates(BlockId(0), BlockId(2)));
+        // Querying the unreachable merge block must not panic.
+        assert!(!domtree.dominates(BlockId(0), BlockId(3)));
+        assert!(!domtree.dominates(BlockId(1), BlockId(3)));
     }
 
     #[test]

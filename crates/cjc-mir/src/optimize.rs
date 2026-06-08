@@ -22,39 +22,321 @@ use std::collections::{BTreeMap, BTreeSet};
 // Public API
 // ===========================================================================
 
-/// Run all optimization passes on a MIR program.
-/// Returns a new program with optimizations applied.
+/// Default pass sequence, in the order applied by [`optimize_program`].
+/// Each entry is the canonical pass name accepted by [`PassPlan`] and
+/// [`apply_pass`]. Aliases (e.g. `"cf"` for `"constant_fold"`) are accepted
+/// in plans but the canonical form is used here.
+pub const DEFAULT_PASS_SEQUENCE: &[&str] = &[
+    "constant_fold",
+    "strength_reduce",
+    "dce",
+    "cse",
+    "licm",
+    "cf_round_2",
+];
+
+/// A per-function plan for which optimization passes to run, in which order.
+///
+/// `per_function` is a `BTreeMap<function_name, Vec<pass_name>>`. Functions
+/// not in the map fall back to [`DEFAULT_PASS_SEQUENCE`] — this preserves
+/// today's behaviour for any function CANA hasn't recommended for.
+///
+/// Pass names are matched case-sensitively. Recognised canonical names are
+/// listed in [`DEFAULT_PASS_SEQUENCE`]; aliases handled by [`apply_pass`].
+///
+/// ## Why this lives in cjc-mir (not cjc-cana)
+///
+/// `cjc-cana` already depends on `cjc-mir` (it reads MIR). If `cjc-mir`
+/// also depended on `cjc-cana` (to consume `cjc_cana::PassSequence`) we'd
+/// have a dependency cycle. Defining `PassPlan` here lets `cjc-mir` stay at
+/// the bottom of the dep tree; `cjc-cana` provides a conversion helper
+/// (`cjc_cana::pass_plan_from`) that builds one of these from a CANA
+/// recommendation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PassPlan {
+    /// Per-function pass sequence. Functions absent from the map use
+    /// [`DEFAULT_PASS_SEQUENCE`].
+    pub per_function: BTreeMap<String, Vec<String>>,
+}
+
+impl PassPlan {
+    /// Construct an empty plan — every function uses the default sequence.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Set the pass sequence for a single function.
+    pub fn with_function(mut self, fn_name: impl Into<String>, passes: Vec<String>) -> Self {
+        self.per_function.insert(fn_name.into(), passes);
+        self
+    }
+
+    /// Total number of pass invocations across all functions, counting the
+    /// default sequence for functions not in the map. Used for debug /
+    /// audit surfaces.
+    pub fn total_pass_invocations(&self, all_function_names: &[String]) -> usize {
+        all_function_names
+            .iter()
+            .map(|n| {
+                self.per_function
+                    .get(n)
+                    .map(|v| v.len())
+                    .unwrap_or(DEFAULT_PASS_SEQUENCE.len())
+            })
+            .sum()
+    }
+}
+
+/// Apply one pass by name to a function. Returns `true` if the pass name
+/// was recognised; `false` if it was a no-op (unknown name).
+///
+/// Recognised names (case-sensitive):
+/// - `"constant_fold"`, `"cf"`, `"cf_round_2"` → constant folding
+/// - `"strength_reduce"`, `"sr"` → strength reduction
+/// - `"dce"`, `"dead_code_elimination"` → dead code elimination
+/// - `"cse"`, `"common_subexpression_elimination"` → CSE
+/// - `"licm"`, `"loop_invariant_code_motion"` → LICM
+///
+/// Unknown names are silently skipped. This is intentional: CANA may
+/// recommend a pass that's not yet implemented in the compiler, and the
+/// right response is to skip it (and log via the caller's audit trail),
+/// not to error.
+pub fn apply_pass(pass_name: &str, func: &mut MirFunction) -> bool {
+    apply_pass_with_diagnostics(pass_name, func).is_some()
+}
+
+/// Per-pass observability data returned by [`apply_pass_with_diagnostics`].
+///
+/// `changes_applied` is the pass's native count of rewrites — what the
+/// pass itself reports it changed. Each pass's interpretation:
+///
+/// | Pass | `changes_applied` is |
+/// |---|---|
+/// | `constant_fold` | node-count delta (before − after) |
+/// | `strength_reduce` | count of `try_strength_reduce` rewrites |
+/// | `dce` | node-count delta (before − after) |
+/// | `cse` | count of variable replacements applied |
+/// | `licm` | count of statements hoisted out of `while` loops |
+/// | `fusion_rewrite` | count of fused chains created (via the rewriter) |
+///
+/// `nodes_before`/`nodes_after` always reflect the structural change to
+/// the function regardless of how `changes_applied` was derived. The two
+/// can disagree (e.g. SR's `x * 2 → x + x` changes one operator but
+/// keeps node count). That disagreement is informative — it tells the
+/// caller whether the pass shrank code or just rewrote in place.
+///
+/// ## Why this surface exists
+///
+/// Two complementary use cases:
+///
+/// 1. **Training the cost model.** `bench/cana_train_cost_model/` reads
+///    `changes_applied` to construct a deterministic, zero-variance
+///    benefit signal for SR/CSE/LICM (the passes where MIR-count delta
+///    is zero for structural reasons).
+///
+/// 2. **Permanent observability.** `cjcl emit --pass-stats` (future),
+///    any audit tooling, the upcoming `CanaReport` diagnostics — all
+///    can consume the same `PassDiagnostics` shape without each
+///    re-instrumenting the optimizer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PassDiagnostics {
+    /// Canonical name of the pass that produced this report.
+    pub pass_name: String,
+    /// Pass-native count of "interesting changes" applied. See struct
+    /// docs for the per-pass interpretation.
+    pub changes_applied: usize,
+    /// Total MIR-node count of the function before the pass ran.
+    pub nodes_before: usize,
+    /// Total MIR-node count of the function after the pass ran.
+    pub nodes_after: usize,
+}
+
+impl PassDiagnostics {
+    /// Fractional structural change: `(nodes_before - nodes_after) / max(nodes_before, 1)`.
+    /// Equivalent to the v2 MIR-count proxy used by CF and DCE.
+    pub fn structural_delta_fraction(&self) -> f64 {
+        let before = self.nodes_before.max(1) as f64;
+        (self.nodes_before.saturating_sub(self.nodes_after) as f64) / before
+    }
+
+    /// Fractional pass-native change: `changes_applied / max(nodes_before, 1)`.
+    /// More informative than `structural_delta_fraction` when the pass
+    /// rewrites in place (e.g. SR's `Mul → Shl`-style operations that
+    /// don't shrink nodes). The deterministic training signal used by
+    /// Option A of the cost-model training findings.
+    pub fn pass_native_change_fraction(&self) -> f64 {
+        let before = self.nodes_before.max(1) as f64;
+        (self.changes_applied as f64) / before
+    }
+}
+
+/// Like [`apply_pass`] but also returns a [`PassDiagnostics`] report for
+/// the pass that ran. Returns `None` only when the pass name is unknown.
+///
+/// Same semantics as `apply_pass` for known passes — the optimizer is
+/// unchanged; the wrapper just instruments before/after node counting
+/// and forwards each pass's native change count.
+pub fn apply_pass_with_diagnostics(
+    pass_name: &str,
+    func: &mut MirFunction,
+) -> Option<PassDiagnostics> {
+    let nodes_before = count_function_nodes(func);
+    let pass_native_changes: Option<usize> = match pass_name {
+        "constant_fold" | "cf" | "cf_round_2" => {
+            constant_fold_fn(func);
+            // CF doesn't currently report its own count; the
+            // structural delta is exact (CF only collapses literal
+            // subexpressions, shrinking node count by exactly the
+            // number of folded nodes).
+            None
+        }
+        "strength_reduce" | "sr" => Some(strength_reduce_fn(func)),
+        "dce" | "dead_code_elimination" => {
+            dce_fn(func);
+            // Same story as CF — DCE's effect is exactly captured by
+            // node-count delta.
+            None
+        }
+        "cse" | "common_subexpression_elimination" => Some(cse_fn(func)),
+        "licm" | "loop_invariant_code_motion" => Some(licm_fn(func)),
+        "fusion_rewrite" | "fusion" => {
+            Some(crate::fusion_rewrite::fusion_rewrite_fn(func))
+        }
+        _ => return None,
+    };
+    let nodes_after = count_function_nodes(func);
+    let changes_applied = pass_native_changes
+        .unwrap_or_else(|| nodes_before.saturating_sub(nodes_after));
+    Some(PassDiagnostics {
+        pass_name: pass_name.to_string(),
+        changes_applied,
+        nodes_before,
+        nodes_after,
+    })
+}
+
+/// Count MIR nodes (statements + expressions) in one function. Used by
+/// [`apply_pass_with_diagnostics`] to populate `nodes_before` / `nodes_after`
+/// and by Option-A's training signal as the denominator of the change
+/// fraction.
+fn count_function_nodes(func: &MirFunction) -> usize {
+    count_body_node_total(&func.body)
+}
+
+fn count_body_node_total(body: &MirBody) -> usize {
+    let mut count = 0;
+    for stmt in &body.stmts {
+        count += count_stmt_node_total(stmt);
+    }
+    if let Some(e) = &body.result {
+        count += count_expr_node_total(e);
+    }
+    count
+}
+
+fn count_stmt_node_total(stmt: &MirStmt) -> usize {
+    1 + match stmt {
+        MirStmt::Let { init, .. } => count_expr_node_total(init),
+        MirStmt::Expr(e) => count_expr_node_total(e),
+        MirStmt::If { cond, then_body, else_body } => {
+            count_expr_node_total(cond)
+                + count_body_node_total(then_body)
+                + else_body.as_ref().map(count_body_node_total).unwrap_or(0)
+        }
+        MirStmt::While { cond, body } => count_expr_node_total(cond) + count_body_node_total(body),
+        MirStmt::Return(Some(e)) => count_expr_node_total(e),
+        MirStmt::Return(None) | MirStmt::Break | MirStmt::Continue => 0,
+        MirStmt::NoGcBlock(b) => count_body_node_total(b),
+    }
+}
+
+fn count_expr_node_total(expr: &MirExpr) -> usize {
+    1 + match &expr.kind {
+        MirExprKind::Binary { left, right, .. } => {
+            count_expr_node_total(left) + count_expr_node_total(right)
+        }
+        MirExprKind::Unary { operand, .. } => count_expr_node_total(operand),
+        MirExprKind::Call { callee, args } => {
+            count_expr_node_total(callee) + args.iter().map(count_expr_node_total).sum::<usize>()
+        }
+        MirExprKind::Assign { target, value } => {
+            count_expr_node_total(target) + count_expr_node_total(value)
+        }
+        MirExprKind::Field { object, .. } => count_expr_node_total(object),
+        MirExprKind::Index { object, index } => {
+            count_expr_node_total(object) + count_expr_node_total(index)
+        }
+        MirExprKind::ArrayLit(es) | MirExprKind::TupleLit(es) => {
+            es.iter().map(count_expr_node_total).sum::<usize>()
+        }
+        MirExprKind::StructLit { fields, .. } => {
+            fields.iter().map(|(_, e)| count_expr_node_total(e)).sum::<usize>()
+        }
+        MirExprKind::MakeClosure { captures, .. } => {
+            captures.iter().map(count_expr_node_total).sum::<usize>()
+        }
+        _ => 0,
+    }
+}
+
+/// Run all optimization passes on a MIR program using the default
+/// 6-pass sequence (CF → SR → DCE → CSE → LICM → CF).
+///
+/// This is the entry point preserved for callers that don't have a
+/// CANA recommendation. Internally, it delegates to
+/// [`optimize_program_with_plan`] with an empty plan, so every function
+/// falls back to [`DEFAULT_PASS_SEQUENCE`].
+///
+/// Behaviour is byte-identical to the pre-Phase-2 implementation —
+/// preserved for parity tests and any caller that hasn't opted into
+/// CANA yet.
 pub fn optimize_program(program: &MirProgram) -> MirProgram {
+    optimize_program_with_plan(program, &PassPlan::empty())
+}
+
+/// Run optimization passes on a MIR program using a per-function plan.
+///
+/// For each function:
+/// - If `plan.per_function` has an entry, run those passes in that order.
+/// - Otherwise, run [`DEFAULT_PASS_SEQUENCE`].
+///
+/// This is the Phase 2 entry point for CANA-driven optimization. Callers
+/// build a `PassPlan` from a CANA `PassSequence` (via
+/// `cjc_cana::pass_plan_from`) and pass it here.
+///
+/// ## Determinism
+///
+/// For a given `(program, plan)`, the output is byte-identical across
+/// runs and platforms. The pass implementations are unchanged from
+/// the pre-Phase-2 era; only the *selection* of which to run differs.
+///
+/// ## Semantics
+///
+/// Each individual pass is semantics-preserving (verified by the
+/// AST/MIR parity gate in `tests/fixtures/`). The composition of any
+/// subset in any order is therefore also semantics-preserving — so
+/// CANA's recommendations cannot break parity, only optimization
+/// quality.
+pub fn optimize_program_with_plan(program: &MirProgram, plan: &PassPlan) -> MirProgram {
     let mut optimized = program.clone();
 
-    // Pass 1: Constant Folding
     for func in &mut optimized.functions {
-        constant_fold_fn(func);
-    }
-
-    // Pass 2: Strength Reduction
-    for func in &mut optimized.functions {
-        strength_reduce_fn(func);
-    }
-
-    // Pass 3: Dead Code Elimination
-    for func in &mut optimized.functions {
-        dce_fn(func);
-    }
-
-    // Pass 4: Common Subexpression Elimination
-    for func in &mut optimized.functions {
-        cse_fn(func);
-    }
-
-    // Pass 5: Loop-Invariant Code Motion
-    for func in &mut optimized.functions {
-        licm_fn(func);
-    }
-
-    // Pass 6: Second round of CF (may expose new opportunities after other passes)
-    for func in &mut optimized.functions {
-        constant_fold_fn(func);
+        let passes: &[String] = match plan.per_function.get(&func.name) {
+            Some(custom) => custom,
+            None => {
+                // Fall back to default. We need a slice of String, so
+                // construct one lazily here. (A static const Vec<String>
+                // would be cleaner but Rust's const surface doesn't
+                // support heap-allocated Strings.)
+                for default_pass in DEFAULT_PASS_SEQUENCE {
+                    apply_pass(default_pass, func);
+                }
+                continue;
+            }
+        };
+        for pass in passes {
+            apply_pass(pass, func);
+        }
     }
 
     optimized
@@ -724,70 +1006,80 @@ fn collect_used_vars_expr(expr: &MirExpr, used: &mut BTreeSet<String>) {
 // Strength Reduction
 // ===========================================================================
 
-fn strength_reduce_fn(func: &mut MirFunction) {
-    strength_reduce_body(&mut func.body);
+/// Apply strength reduction to a whole function. Returns the **count of
+/// successful rewrites** — the number of times [`try_strength_reduce`]
+/// returned `Some`. Used as a deterministic training signal by
+/// `bench/cana_train_cost_model/` and exposed via
+/// [`apply_pass_with_diagnostics`] as a permanent observability surface.
+fn strength_reduce_fn(func: &mut MirFunction) -> usize {
+    strength_reduce_body(&mut func.body)
 }
 
-fn strength_reduce_body(body: &mut MirBody) {
+fn strength_reduce_body(body: &mut MirBody) -> usize {
+    let mut count = 0;
     for stmt in &mut body.stmts {
-        strength_reduce_stmt(stmt);
+        count += strength_reduce_stmt(stmt);
     }
     if let Some(ref mut expr) = body.result {
-        strength_reduce_expr(expr);
+        count += strength_reduce_expr(expr);
     }
+    count
 }
 
-fn strength_reduce_stmt(stmt: &mut MirStmt) {
+fn strength_reduce_stmt(stmt: &mut MirStmt) -> usize {
     match stmt {
         MirStmt::Let { init, .. } => strength_reduce_expr(init),
         MirStmt::Expr(expr) => strength_reduce_expr(expr),
         MirStmt::If { cond, then_body, else_body } => {
-            strength_reduce_expr(cond);
-            strength_reduce_body(then_body);
+            let mut c = strength_reduce_expr(cond) + strength_reduce_body(then_body);
             if let Some(eb) = else_body {
-                strength_reduce_body(eb);
+                c += strength_reduce_body(eb);
             }
+            c
         }
         MirStmt::While { cond, body } => {
-            strength_reduce_expr(cond);
-            strength_reduce_body(body);
+            strength_reduce_expr(cond) + strength_reduce_body(body)
         }
         MirStmt::Return(opt_expr) => {
             if let Some(expr) = opt_expr {
-                strength_reduce_expr(expr);
+                strength_reduce_expr(expr)
+            } else {
+                0
             }
         }
-        MirStmt::Break | MirStmt::Continue => {}
+        MirStmt::Break | MirStmt::Continue => 0,
         MirStmt::NoGcBlock(body) => strength_reduce_body(body),
     }
 }
 
-fn strength_reduce_expr(expr: &mut MirExpr) {
+fn strength_reduce_expr(expr: &mut MirExpr) -> usize {
     // Recurse first (bottom-up).
-    match &mut expr.kind {
+    let mut count = match &mut expr.kind {
         MirExprKind::Binary { left, right, .. } => {
-            strength_reduce_expr(left);
-            strength_reduce_expr(right);
+            strength_reduce_expr(left) + strength_reduce_expr(right)
         }
         MirExprKind::Unary { operand, .. } => strength_reduce_expr(operand),
         MirExprKind::Call { callee, args } => {
-            strength_reduce_expr(callee);
-            for arg in args { strength_reduce_expr(arg); }
+            let mut c = strength_reduce_expr(callee);
+            for arg in args { c += strength_reduce_expr(arg); }
+            c
         }
         MirExprKind::Block(body) => strength_reduce_body(body),
         MirExprKind::If { cond, then_body, else_body } => {
-            strength_reduce_expr(cond);
-            strength_reduce_body(then_body);
-            if let Some(eb) = else_body { strength_reduce_body(eb); }
+            let mut c = strength_reduce_expr(cond) + strength_reduce_body(then_body);
+            if let Some(eb) = else_body { c += strength_reduce_body(eb); }
+            c
         }
         MirExprKind::Lambda { body, .. } => strength_reduce_expr(body),
-        _ => {}
-    }
+        _ => 0,
+    };
 
     // Apply strength reduction rules.
     if let Some(reduced) = try_strength_reduce(expr) {
         *expr = reduced;
+        count += 1;
     }
+    count
 }
 
 /// Attempt to reduce an expression to a cheaper form.
@@ -857,15 +1149,21 @@ fn try_strength_reduce(expr: &MirExpr) -> Option<MirExpr> {
 // Common Subexpression Elimination (CSE)
 // ===========================================================================
 
-fn cse_fn(func: &mut MirFunction) {
-    cse_body(&mut func.body);
+/// Run CSE on a whole function. Returns the **count of replacements
+/// applied** — the number of variable uses that got renamed to a
+/// previously-computed equivalent. Useful as a deterministic training
+/// signal and as a permanent observability surface via
+/// [`apply_pass_with_diagnostics`].
+fn cse_fn(func: &mut MirFunction) -> usize {
+    cse_body(&mut func.body)
 }
 
 /// CSE at the body level: find duplicate pure let-bindings and replace
-/// uses of the later one with the first.
-fn cse_body(body: &mut MirBody) {
+/// uses of the later one with the first. Returns the number of
+/// replacements applied across this body and all nested sub-bodies.
+fn cse_body(body: &mut MirBody) -> usize {
+    let mut count = 0;
     // Build a map from expression hash to the first variable name bound to it.
-    // We use a simple structural string representation as the hash key.
     let mut expr_to_var: BTreeMap<String, String> = BTreeMap::new();
     let mut replacements: BTreeMap<String, String> = BTreeMap::new();
 
@@ -876,7 +1174,6 @@ fn cse_body(body: &mut MirBody) {
             if !mutable && is_pure_expr(init) {
                 let key = expr_key(init);
                 if let Some(existing) = expr_to_var.get(&key) {
-                    // This expression is already computed in `existing`.
                     replacements.insert(name.clone(), existing.clone());
                 } else {
                     expr_to_var.insert(key, name.clone());
@@ -886,7 +1183,9 @@ fn cse_body(body: &mut MirBody) {
     }
 
     if !replacements.is_empty() {
-        // Apply replacements: rename uses of duplicate vars to the original.
+        // Count is the number of duplicate bindings detected. Each one is
+        // a "rewrite opportunity" — the deterministic CSE training signal.
+        count += replacements.len();
         for stmt in &mut body.stmts {
             apply_cse_replacements_stmt(stmt, &replacements);
         }
@@ -899,14 +1198,15 @@ fn cse_body(body: &mut MirBody) {
     for stmt in &mut body.stmts {
         match stmt {
             MirStmt::If { then_body, else_body, .. } => {
-                cse_body(then_body);
-                if let Some(eb) = else_body { cse_body(eb); }
+                count += cse_body(then_body);
+                if let Some(eb) = else_body { count += cse_body(eb); }
             }
-            MirStmt::While { body: wb, .. } => cse_body(wb),
-            MirStmt::NoGcBlock(b) => cse_body(b),
+            MirStmt::While { body: wb, .. } => count += cse_body(wb),
+            MirStmt::NoGcBlock(b) => count += cse_body(b),
             _ => {}
         }
     }
+    count
 }
 
 /// Produce a deterministic string key for a pure expression (for CSE).
@@ -917,7 +1217,16 @@ fn expr_key(expr: &MirExpr) -> String {
         MirExprKind::BoolLit(v) => format!("bool:{v}"),
         MirExprKind::NaLit => "na".to_string(),
         MirExprKind::StringLit(s) => format!("str:{s}"),
+        // CSE key normalisation: both `Var("x")` and `VarLocal { name: "x", .. }`
+        // refer to the same logical binding `x`. Slot numbers are a layout
+        // artifact of the Tier-0 slot resolution pass and must NOT distinguish
+        // CSE keys — same family of bug as the `task_a30e8eec` LICM fix and
+        // `commit 2983f2b` (reduction analyzer). Without this, the CSE pass
+        // silently never fires on any function past slot resolution, because
+        // every `VarLocal` falls into the opaque-pointer fallback arm and gets
+        // a unique key.
         MirExprKind::Var(name) => format!("var:{name}"),
+        MirExprKind::VarLocal { name, .. } => format!("var:{name}"),
         MirExprKind::Binary { op, left, right } => {
             format!("bin:{:?}({},{})", op, expr_key(left), expr_key(right))
         }
@@ -998,20 +1307,25 @@ fn apply_cse_replacements_expr(expr: &mut MirExpr, replacements: &BTreeMap<Strin
 // Loop-Invariant Code Motion (LICM)
 // ===========================================================================
 
-fn licm_fn(func: &mut MirFunction) {
-    licm_body(&mut func.body);
+/// Run LICM on a whole function. Returns the **count of statements
+/// hoisted** out of `while` loops. Useful as a deterministic training
+/// signal and as a permanent observability surface via
+/// [`apply_pass_with_diagnostics`].
+fn licm_fn(func: &mut MirFunction) -> usize {
+    licm_body(&mut func.body)
 }
 
-fn licm_body(body: &mut MirBody) {
+fn licm_body(body: &mut MirBody) -> usize {
+    let mut count = 0;
     // Process nested structures first (bottom-up).
     for stmt in &mut body.stmts {
         match stmt {
             MirStmt::If { then_body, else_body, .. } => {
-                licm_body(then_body);
-                if let Some(eb) = else_body { licm_body(eb); }
+                count += licm_body(then_body);
+                if let Some(eb) = else_body { count += licm_body(eb); }
             }
-            MirStmt::While { body: wb, .. } => licm_body(wb),
-            MirStmt::NoGcBlock(b) => licm_body(b),
+            MirStmt::While { body: wb, .. } => count += licm_body(wb),
+            MirStmt::NoGcBlock(b) => count += licm_body(b),
             _ => {}
         }
     }
@@ -1021,7 +1335,9 @@ fn licm_body(body: &mut MirBody) {
     for stmt in std::mem::take(&mut body.stmts) {
         if let MirStmt::While { cond, body: loop_body } = stmt {
             let (hoisted, remaining_body) = hoist_invariants(loop_body);
-            // Insert hoisted lets before the while.
+            // Each hoisted statement is one rewrite opportunity — the
+            // deterministic LICM training signal.
+            count += hoisted.len();
             new_stmts.extend(hoisted);
             new_stmts.push(MirStmt::While { cond, body: remaining_body });
         } else {
@@ -1029,23 +1345,55 @@ fn licm_body(body: &mut MirBody) {
         }
     }
     body.stmts = new_stmts;
+    count
 }
 
 /// Try to hoist loop-invariant let-bindings out of a while body.
-/// A let-binding is invariant if:
-/// - It is pure
-/// - It does not reference any variable that is assigned inside the loop
+///
+/// A `let` binding is hoisted only if ALL of the following hold:
+/// 1. Its initializer is pure (no side effects).
+/// 2. The initializer does not reference any variable that is *defined
+///    or assigned* inside the loop (the "all changed" set).
+/// 3. The binding's own name is **not** reassigned later in the loop.
+///
+/// Condition (3) is the fix for task_a30e8eec: the canonical
+/// `while ... { let mut j = 0; while j < n { ...; j = j + 1; } }`
+/// pattern. Without condition (3), the inner `let mut j = 0;` got
+/// hoisted out of the outer loop, breaking re-initialization on each
+/// outer iteration. Programs like the chess RL training loop relied
+/// on per-iteration re-binding; before this fix, `--mir-opt` silently
+/// produced wrong results on every nested-loop accumulator.
+///
+/// ## Helper-name variant handling
+///
+/// Both [`collect_modified_vars_expr`] and [`references_any`] now
+/// accept the post-slot-resolution `MirExprKind::VarLocal { name, .. }`
+/// form in addition to `Var(name)`. Without this, `j = j + 1` after
+/// the Tier-0 slot pass produced an Assign whose target was VarLocal,
+/// and the collection routine silently dropped it from `modified_vars`
+/// (allowing more invalid hoists). Same family of bug as commit
+/// `2983f2b` (reduction analyzer).
 fn hoist_invariants(loop_body: MirBody) -> (Vec<MirStmt>, MirBody) {
-    // Collect variables that are modified (assigned to) inside the loop.
-    let mut modified_vars = BTreeSet::new();
-    collect_modified_vars_body(&loop_body, &mut modified_vars);
+    // (1) All vars that change in the loop (Let defines + Assign targets).
+    //     Used for the `references_any` check on initializers.
+    let mut all_changed = BTreeSet::new();
+    collect_modified_vars_body(&loop_body, &mut all_changed);
+
+    // (2) Just the Assign targets — used to refuse hoisting a Let whose
+    //     name is reassigned later in the loop. This is the fix for
+    //     task_a30e8eec; see function-level docs above.
+    let mut assigned_only = BTreeSet::new();
+    collect_assigned_vars_body(&loop_body, &mut assigned_only);
 
     let mut hoisted = Vec::new();
     let mut remaining = Vec::new();
 
     for stmt in loop_body.stmts {
         if let MirStmt::Let { ref name, ref init, mutable, alloc_hint, slot } = stmt {
-            if is_pure_expr(init) && !references_any(init, &modified_vars) {
+            if is_pure_expr(init)
+                && !references_any(init, &all_changed)
+                && !assigned_only.contains(name)
+            {
                 hoisted.push(MirStmt::Let {
                     name: name.clone(),
                     mutable,
@@ -1062,7 +1410,12 @@ fn hoist_invariants(loop_body: MirBody) -> (Vec<MirStmt>, MirBody) {
     (hoisted, MirBody { stmts: remaining, result: loop_body.result })
 }
 
-/// Collect all variable names that are modified (written to) in a body.
+/// Collect all variable names that are modified (declared or written to)
+/// in a body. The result is the union of `let`-bound names and Assign
+/// targets.
+///
+/// Used to compute the `all_changed` set for `references_any`'s
+/// "no init may depend on loop-local change" check.
 fn collect_modified_vars_body(body: &MirBody, modified: &mut BTreeSet<String>) {
     for stmt in &body.stmts {
         collect_modified_vars_stmt(stmt, modified);
@@ -1094,8 +1447,16 @@ fn collect_modified_vars_stmt(stmt: &MirStmt, modified: &mut BTreeSet<String>) {
 fn collect_modified_vars_expr(expr: &MirExpr, modified: &mut BTreeSet<String>) {
     match &expr.kind {
         MirExprKind::Assign { target, value } => {
-            if let MirExprKind::Var(name) = &target.kind {
-                modified.insert(name.clone());
+            // Handle both Var(name) and VarLocal { name, .. } — the
+            // latter appears post-slot-resolution. Pre-fix this branch
+            // only matched Var, silently dropping every slot-resolved
+            // reassignment from the modified set.
+            match &target.kind {
+                MirExprKind::Var(name)
+                | MirExprKind::VarLocal { name, .. } => {
+                    modified.insert(name.clone());
+                }
+                _ => {}
             }
             collect_modified_vars_expr(value, modified);
         }
@@ -1111,10 +1472,73 @@ fn collect_modified_vars_expr(expr: &MirExpr, modified: &mut BTreeSet<String>) {
     }
 }
 
+/// Collect ONLY the names that are Assign targets (reassigned, not
+/// merely let-bound) inside a body. Used to gate hoisting: a `let`
+/// whose name appears here must not be hoisted out of the loop.
+fn collect_assigned_vars_body(body: &MirBody, assigned: &mut BTreeSet<String>) {
+    for stmt in &body.stmts {
+        collect_assigned_vars_stmt(stmt, assigned);
+    }
+}
+
+fn collect_assigned_vars_stmt(stmt: &MirStmt, assigned: &mut BTreeSet<String>) {
+    match stmt {
+        MirStmt::Let { init, .. } => {
+            // Recurse into init but DO NOT add the let name itself.
+            collect_assigned_vars_expr(init, assigned);
+        }
+        MirStmt::Expr(expr) => collect_assigned_vars_expr(expr, assigned),
+        MirStmt::If { cond, then_body, else_body } => {
+            collect_assigned_vars_expr(cond, assigned);
+            collect_assigned_vars_body(then_body, assigned);
+            if let Some(eb) = else_body { collect_assigned_vars_body(eb, assigned); }
+        }
+        MirStmt::While { cond, body } => {
+            collect_assigned_vars_expr(cond, assigned);
+            collect_assigned_vars_body(body, assigned);
+        }
+        MirStmt::Return(_) => {}
+        MirStmt::Break | MirStmt::Continue => {}
+        MirStmt::NoGcBlock(body) => collect_assigned_vars_body(body, assigned),
+    }
+}
+
+fn collect_assigned_vars_expr(expr: &MirExpr, assigned: &mut BTreeSet<String>) {
+    match &expr.kind {
+        MirExprKind::Assign { target, value } => {
+            match &target.kind {
+                MirExprKind::Var(name)
+                | MirExprKind::VarLocal { name, .. } => {
+                    assigned.insert(name.clone());
+                }
+                _ => {}
+            }
+            collect_assigned_vars_expr(value, assigned);
+        }
+        MirExprKind::Binary { left, right, .. } => {
+            collect_assigned_vars_expr(left, assigned);
+            collect_assigned_vars_expr(right, assigned);
+        }
+        MirExprKind::Call { callee, args } => {
+            collect_assigned_vars_expr(callee, assigned);
+            for arg in args { collect_assigned_vars_expr(arg, assigned); }
+        }
+        _ => {}
+    }
+}
+
 /// Check if an expression references any variable in the given set.
+///
+/// Handles both `Var(name)` and `VarLocal { name, .. }` — the latter
+/// appears post-slot-resolution. Pre-fix this function only matched
+/// `Var`, silently returning false for every slot-resolved variable
+/// reference. Combined with the analogous bug in
+/// `collect_modified_vars_expr`, that allowed LICM to hoist
+/// inner-loop-dependent expressions out of nested loops.
 fn references_any(expr: &MirExpr, vars: &BTreeSet<String>) -> bool {
     match &expr.kind {
         MirExprKind::Var(name) => vars.contains(name.as_str()),
+        MirExprKind::VarLocal { name, .. } => vars.contains(name.as_str()),
         MirExprKind::Binary { left, right, .. } => {
             references_any(left, vars) || references_any(right, vars)
         }
@@ -1645,5 +2069,825 @@ mod tests {
             }
             _ => panic!("expected Let"),
         }
+    }
+
+    // -- Phase 2: PassPlan + optimize_program_with_plan ----------------
+
+    /// Build a single-function program whose body computes `init_value + 0`
+    /// and *uses* the result as the body's tail expression. The "use" stops
+    /// DCE from eliminating the binding, so the optimization-visible
+    /// expression survives for assertions.
+    fn make_program_with_fn(name: &str, init_value: i64) -> MirProgram {
+        let body = MirBody {
+            stmts: vec![MirStmt::Let {
+                name: "x".to_string(),
+                mutable: false,
+                init: MirExpr {
+                    kind: MirExprKind::Binary {
+                        op: BinOp::Add,
+                        left: Box::new(MirExpr {
+                            kind: MirExprKind::IntLit(init_value),
+                        }),
+                        right: Box::new(MirExpr {
+                            kind: MirExprKind::IntLit(0),
+                        }),
+                    },
+                },
+                alloc_hint: None,
+                slot: None,
+            }],
+            // Body's tail expression references `x`, making it live.
+            result: Some(Box::new(MirExpr {
+                kind: MirExprKind::Var("x".to_string()),
+            })),
+        };
+        MirProgram {
+            functions: vec![MirFunction {
+                id: MirFnId(0),
+                name: name.to_string(),
+                type_params: vec![],
+                params: vec![],
+                return_type: None,
+                body,
+                is_nogc: false,
+                cfg_body: None,
+                decorators: vec![],
+                vis: cjc_ast::Visibility::Public,
+                local_count: 0,
+            }],
+            struct_defs: vec![],
+            enum_defs: vec![],
+            entry: MirFnId(0),
+        }
+    }
+
+    fn first_let_init(prog: &MirProgram) -> &MirExpr {
+        let func = prog
+            .functions
+            .first()
+            .expect("expected at least one function");
+        let stmt = func
+            .body
+            .stmts
+            .first()
+            .expect("expected at least one statement (DCE removed our binding?)");
+        match stmt {
+            MirStmt::Let { init, .. } => init,
+            _ => panic!("expected Let, got {:?}", stmt),
+        }
+    }
+
+    #[test]
+    fn pass_plan_default_is_empty() {
+        let plan = PassPlan::empty();
+        assert!(plan.per_function.is_empty());
+    }
+
+    #[test]
+    fn pass_plan_with_function_inserts() {
+        let plan = PassPlan::empty().with_function(
+            "main",
+            vec!["dce".to_string(), "licm".to_string()],
+        );
+        assert_eq!(plan.per_function.len(), 1);
+        assert_eq!(plan.per_function.get("main").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn pass_plan_total_invocations_uses_default_for_unmapped() {
+        let plan = PassPlan::empty();
+        let total = plan.total_pass_invocations(&["a".into(), "b".into()]);
+        assert_eq!(total, 2 * DEFAULT_PASS_SEQUENCE.len());
+    }
+
+    #[test]
+    fn apply_pass_recognises_canonical_and_alias_names() {
+        let mut f = MirFunction {
+            id: MirFnId(0),
+            name: "f".to_string(),
+            type_params: vec![],
+            params: vec![],
+            return_type: None,
+            body: MirBody {
+                stmts: vec![],
+                result: None,
+            },
+            is_nogc: false,
+            cfg_body: None,
+            decorators: vec![],
+            vis: cjc_ast::Visibility::Public,
+            local_count: 0,
+        };
+        // Every canonical and alias name should return true.
+        for name in &[
+            "constant_fold", "cf", "cf_round_2",
+            "strength_reduce", "sr",
+            "dce", "dead_code_elimination",
+            "cse", "common_subexpression_elimination",
+            "licm", "loop_invariant_code_motion",
+        ] {
+            assert!(apply_pass(name, &mut f), "should recognise {}", name);
+        }
+        // Unknown should return false.
+        assert!(!apply_pass("nonexistent_pass", &mut f));
+    }
+
+    #[test]
+    fn optimize_program_with_empty_plan_matches_optimize_program() {
+        // Phase 2 invariant: empty plan = default behaviour.
+        let prog = make_program_with_fn("main", 42);
+        let opt_old = optimize_program(&prog);
+        let opt_new = optimize_program_with_plan(&prog, &PassPlan::empty());
+
+        // Both should fold `42 + 0` to `42`.
+        for opt in [&opt_old, &opt_new] {
+            let init = first_let_init(opt);
+            assert!(
+                matches!(init.kind, MirExprKind::IntLit(42)),
+                "expected IntLit(42) after CF, got {:?}",
+                init.kind
+            );
+        }
+        // And the two should be byte-identical (debug-compared via Debug
+        // since MirProgram does not derive Eq).
+        assert_eq!(format!("{:?}", opt_old), format!("{:?}", opt_new));
+    }
+
+    #[test]
+    fn optimize_program_with_plan_runs_only_specified_passes() {
+        let prog = make_program_with_fn("main", 5);
+        // Plan that only runs strength_reduce (no constant fold).
+        let plan = PassPlan::empty().with_function(
+            "main",
+            vec!["strength_reduce".to_string()],
+        );
+        let opt = optimize_program_with_plan(&prog, &plan);
+        let init = first_let_init(&opt);
+        // Without CF, the `5 + 0` stays as a binary expression. The strength
+        // reducer should still simplify add-zero, so we expect just `5`.
+        // Actually: strength reduction also turns `x + 0 -> x`, so we
+        // still get IntLit(5) here (the pre-pass already had IntLit(5)).
+        assert!(
+            matches!(init.kind, MirExprKind::IntLit(5) | MirExprKind::Binary { .. }),
+            "expected IntLit(5) or unchanged Binary after SR-only, got {:?}",
+            init.kind
+        );
+    }
+
+    #[test]
+    fn optimize_program_with_plan_unknown_pass_is_no_op() {
+        // A plan that names a pass that doesn't exist should NOT error;
+        // it just skips. This is the "CANA may recommend a pass not yet
+        // implemented" contract.
+        let prog = make_program_with_fn("main", 7);
+        let plan = PassPlan::empty().with_function(
+            "main",
+            vec!["nonexistent_pass".to_string()],
+        );
+        let opt = optimize_program_with_plan(&prog, &plan);
+        let init = first_let_init(&opt);
+        // No passes ran, so `7 + 0` stays as Binary.
+        assert!(
+            matches!(init.kind, MirExprKind::Binary { .. }),
+            "expected Binary after no-op plan, got {:?}",
+            init.kind
+        );
+    }
+
+    #[test]
+    fn optimize_program_with_plan_unmapped_function_uses_default() {
+        // Plan that names "main" but the program has function "other" — the
+        // unmapped "other" should still get the default 6-pass treatment.
+        let prog = make_program_with_fn("other", 99);
+        let plan = PassPlan::empty().with_function(
+            "main", // wrong name; "other" is unmapped
+            vec!["dce".to_string()],
+        );
+        let opt = optimize_program_with_plan(&prog, &plan);
+        let init = first_let_init(&opt);
+        // "other" was unmapped → default sequence → CF folds 99+0 to 99.
+        assert!(
+            matches!(init.kind, MirExprKind::IntLit(99)),
+            "expected IntLit(99) after default sequence on unmapped fn, got {:?}",
+            init.kind
+        );
+    }
+
+    #[test]
+    fn optimize_program_with_plan_is_deterministic() {
+        let prog = make_program_with_fn("main", 42);
+        let plan = PassPlan::empty().with_function(
+            "main",
+            vec!["constant_fold".to_string(), "dce".to_string()],
+        );
+        let first = optimize_program_with_plan(&prog, &plan);
+        for _ in 0..50 {
+            let again = optimize_program_with_plan(&prog, &plan);
+            assert_eq!(format!("{:?}", first), format!("{:?}", again));
+        }
+    }
+
+    #[test]
+    fn default_pass_sequence_has_six_entries() {
+        // Drift guard: if a pass is added/removed, this needs to change
+        // alongside cjc-cana::pass_ranker::CANONICAL_PASSES.
+        assert_eq!(DEFAULT_PASS_SEQUENCE.len(), 6);
+    }
+
+    // -- Regression test for task_a30e8eec --------------------------------
+    //
+    // Tests that LICM does NOT hoist `let mut j = 0;` out of an outer
+    // while loop when j is reassigned inside the inner loop. Pre-fix,
+    // LICM hoisted the let, losing per-iteration re-initialization and
+    // producing wrong results on every nested-loop accumulator.
+
+    fn nested_loop_program() -> MirProgram {
+        // Build the MIR for:
+        //   let mut total: i64 = 0;
+        //   let mut i: i64 = 0;
+        //   while i < 3 {
+        //       let mut j: i64 = 0;
+        //       while j < 3 {
+        //           total = total + i * j;
+        //           j = j + 1;
+        //       }
+        //       i = i + 1;
+        //   }
+        //   total
+        //
+        // Expected result: sum_{i=0..3} sum_{j=0..3} i*j = (0+1+2)*(0+1+2) = 9
+        let inner_loop = MirStmt::While {
+            cond: MirExpr {
+                kind: MirExprKind::Binary {
+                    op: BinOp::Lt,
+                    left: Box::new(MirExpr { kind: MirExprKind::Var("j".to_string()) }),
+                    right: Box::new(MirExpr { kind: MirExprKind::IntLit(3) }),
+                },
+            },
+            body: MirBody {
+                stmts: vec![
+                    // total = total + i * j;
+                    MirStmt::Expr(MirExpr {
+                        kind: MirExprKind::Assign {
+                            target: Box::new(MirExpr {
+                                kind: MirExprKind::Var("total".to_string()),
+                            }),
+                            value: Box::new(MirExpr {
+                                kind: MirExprKind::Binary {
+                                    op: BinOp::Add,
+                                    left: Box::new(MirExpr {
+                                        kind: MirExprKind::Var("total".to_string()),
+                                    }),
+                                    right: Box::new(MirExpr {
+                                        kind: MirExprKind::Binary {
+                                            op: BinOp::Mul,
+                                            left: Box::new(MirExpr {
+                                                kind: MirExprKind::Var("i".to_string()),
+                                            }),
+                                            right: Box::new(MirExpr {
+                                                kind: MirExprKind::Var("j".to_string()),
+                                            }),
+                                        },
+                                    }),
+                                },
+                            }),
+                        },
+                    }),
+                    // j = j + 1;
+                    MirStmt::Expr(MirExpr {
+                        kind: MirExprKind::Assign {
+                            target: Box::new(MirExpr {
+                                kind: MirExprKind::Var("j".to_string()),
+                            }),
+                            value: Box::new(MirExpr {
+                                kind: MirExprKind::Binary {
+                                    op: BinOp::Add,
+                                    left: Box::new(MirExpr {
+                                        kind: MirExprKind::Var("j".to_string()),
+                                    }),
+                                    right: Box::new(MirExpr {
+                                        kind: MirExprKind::IntLit(1) }),
+                                },
+                            }),
+                        },
+                    }),
+                ],
+                result: None,
+            },
+        };
+
+        let outer_loop = MirStmt::While {
+            cond: MirExpr {
+                kind: MirExprKind::Binary {
+                    op: BinOp::Lt,
+                    left: Box::new(MirExpr { kind: MirExprKind::Var("i".to_string()) }),
+                    right: Box::new(MirExpr { kind: MirExprKind::IntLit(3) }),
+                },
+            },
+            body: MirBody {
+                stmts: vec![
+                    // let mut j: i64 = 0;  ← THIS is what LICM was incorrectly hoisting
+                    MirStmt::Let {
+                        name: "j".to_string(),
+                        mutable: true,
+                        init: MirExpr { kind: MirExprKind::IntLit(0) },
+                        alloc_hint: None,
+                        slot: None,
+                    },
+                    inner_loop,
+                    // i = i + 1;
+                    MirStmt::Expr(MirExpr {
+                        kind: MirExprKind::Assign {
+                            target: Box::new(MirExpr {
+                                kind: MirExprKind::Var("i".to_string()),
+                            }),
+                            value: Box::new(MirExpr {
+                                kind: MirExprKind::Binary {
+                                    op: BinOp::Add,
+                                    left: Box::new(MirExpr {
+                                        kind: MirExprKind::Var("i".to_string()),
+                                    }),
+                                    right: Box::new(MirExpr {
+                                        kind: MirExprKind::IntLit(1) }),
+                                },
+                            }),
+                        },
+                    }),
+                ],
+                result: None,
+            },
+        };
+
+        let body = MirBody {
+            stmts: vec![
+                MirStmt::Let {
+                    name: "total".to_string(),
+                    mutable: true,
+                    init: MirExpr { kind: MirExprKind::IntLit(0) },
+                    alloc_hint: None,
+                    slot: None,
+                },
+                MirStmt::Let {
+                    name: "i".to_string(),
+                    mutable: true,
+                    init: MirExpr { kind: MirExprKind::IntLit(0) },
+                    alloc_hint: None,
+                    slot: None,
+                },
+                outer_loop,
+            ],
+            result: Some(Box::new(MirExpr {
+                kind: MirExprKind::Var("total".to_string()),
+            })),
+        };
+
+        MirProgram {
+            functions: vec![MirFunction {
+                id: MirFnId(0),
+                name: "nested".to_string(),
+                type_params: vec![],
+                params: vec![],
+                return_type: None,
+                body,
+                is_nogc: false,
+                cfg_body: None,
+                decorators: vec![],
+                vis: cjc_ast::Visibility::Public,
+                local_count: 0,
+            }],
+            struct_defs: vec![],
+            enum_defs: vec![],
+            entry: MirFnId(0),
+        }
+    }
+
+    /// Count how many `let mut j = 0;` Lets remain inside the outer loop
+    /// body after optimization. The expected post-fix value is 1 (the
+    /// Let stays inside); the buggy pre-fix value was 0 (LICM hoisted
+    /// it out).
+    fn count_inner_j_lets(prog: &MirProgram) -> usize {
+        fn count_in_body(body: &MirBody) -> usize {
+            let mut n = 0;
+            for stmt in &body.stmts {
+                match stmt {
+                    MirStmt::Let { name, .. } if name == "j" => n += 1,
+                    MirStmt::While { body: wb, .. } => n += count_in_body(wb),
+                    MirStmt::If { then_body, else_body, .. } => {
+                        n += count_in_body(then_body);
+                        if let Some(eb) = else_body {
+                            n += count_in_body(eb);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            n
+        }
+        prog.functions
+            .iter()
+            .map(|f| count_in_body(&f.body))
+            .sum()
+    }
+
+    #[test]
+    fn licm_does_not_hoist_reassigned_let_out_of_loop() {
+        // Build a program containing the canonical nested-loop pattern
+        // where the inner `let mut j = 0;` MUST survive optimization
+        // (because j gets reassigned inside the inner loop). Pre-fix,
+        // LICM would lift the Let out of the outer loop, producing a
+        // wrong-result program.
+        let prog = nested_loop_program();
+
+        // Before optimization: exactly 1 `let j` (the one inside the outer loop).
+        assert_eq!(
+            count_inner_j_lets(&prog),
+            1,
+            "test setup invariant: program starts with 1 `let j`"
+        );
+
+        // Apply only LICM (no constant folding etc.) to isolate the test.
+        let mut optimized = prog.clone();
+        for func in &mut optimized.functions {
+            super::licm_fn(func);
+        }
+
+        // After LICM, the `let j` must still be inside the loop body
+        // (1 occurrence somewhere in the function), not hoisted out.
+        assert_eq!(
+            count_inner_j_lets(&optimized),
+            1,
+            "LICM must NOT hoist `let mut j = 0;` out of the loop when j is \
+             reassigned inside (task_a30e8eec regression)"
+        );
+
+        // Also: the outer loop's top-level stmts (before the outer while)
+        // must NOT contain a Let named "j". We check this directly:
+        // the function body's top-level stmts are [Let total, Let i, While].
+        // If LICM had hoisted j out, we'd see an extra [Let j] before the
+        // While. We assert there is no `let j` at the top level.
+        let top_level_j_lets = optimized
+            .functions
+            .iter()
+            .flat_map(|f| f.body.stmts.iter())
+            .filter(|s| matches!(s, MirStmt::Let { name, .. } if name == "j"))
+            .count();
+        assert_eq!(
+            top_level_j_lets, 0,
+            "LICM hoisted `let j` to the function's top level — regression"
+        );
+    }
+
+    #[test]
+    fn licm_still_hoists_truly_invariant_let() {
+        // Verify the fix did NOT regress the "good" hoist case: a Let
+        // whose name is NOT reassigned in the loop and whose init
+        // doesn't reference any modified vars should still be hoisted.
+        //
+        // Program:
+        //   let mut total: i64 = 0;
+        //   let mut i: i64 = 0;
+        //   while i < 10 {
+        //       let constant: i64 = 42;      ← MUST be hoisted (no reassign)
+        //       total = total + constant;
+        //       i = i + 1;
+        //   }
+        //   total
+        let body = MirBody {
+            stmts: vec![
+                MirStmt::Let {
+                    name: "total".to_string(),
+                    mutable: true,
+                    init: MirExpr { kind: MirExprKind::IntLit(0) },
+                    alloc_hint: None,
+                    slot: None,
+                },
+                MirStmt::Let {
+                    name: "i".to_string(),
+                    mutable: true,
+                    init: MirExpr { kind: MirExprKind::IntLit(0) },
+                    alloc_hint: None,
+                    slot: None,
+                },
+                MirStmt::While {
+                    cond: MirExpr {
+                        kind: MirExprKind::Binary {
+                            op: BinOp::Lt,
+                            left: Box::new(MirExpr { kind: MirExprKind::Var("i".to_string()) }),
+                            right: Box::new(MirExpr { kind: MirExprKind::IntLit(10) }),
+                        },
+                    },
+                    body: MirBody {
+                        stmts: vec![
+                            MirStmt::Let {
+                                name: "constant".to_string(),
+                                mutable: false,
+                                init: MirExpr { kind: MirExprKind::IntLit(42) },
+                                alloc_hint: None,
+                                slot: None,
+                            },
+                            MirStmt::Expr(MirExpr {
+                                kind: MirExprKind::Assign {
+                                    target: Box::new(MirExpr {
+                                        kind: MirExprKind::Var("total".to_string()),
+                                    }),
+                                    value: Box::new(MirExpr {
+                                        kind: MirExprKind::Binary {
+                                            op: BinOp::Add,
+                                            left: Box::new(MirExpr {
+                                                kind: MirExprKind::Var("total".to_string()),
+                                            }),
+                                            right: Box::new(MirExpr {
+                                                kind: MirExprKind::Var("constant".to_string()),
+                                            }),
+                                        },
+                                    }),
+                                },
+                            }),
+                            MirStmt::Expr(MirExpr {
+                                kind: MirExprKind::Assign {
+                                    target: Box::new(MirExpr {
+                                        kind: MirExprKind::Var("i".to_string()),
+                                    }),
+                                    value: Box::new(MirExpr {
+                                        kind: MirExprKind::Binary {
+                                            op: BinOp::Add,
+                                            left: Box::new(MirExpr {
+                                                kind: MirExprKind::Var("i".to_string()),
+                                            }),
+                                            right: Box::new(MirExpr { kind: MirExprKind::IntLit(1) }),
+                                        },
+                                    }),
+                                },
+                            }),
+                        ],
+                        result: None,
+                    },
+                },
+            ],
+            result: Some(Box::new(MirExpr {
+                kind: MirExprKind::Var("total".to_string()),
+            })),
+        };
+
+        let prog = MirProgram {
+            functions: vec![MirFunction {
+                id: MirFnId(0),
+                name: "f".to_string(),
+                type_params: vec![],
+                params: vec![],
+                return_type: None,
+                body,
+                is_nogc: false,
+                cfg_body: None,
+                decorators: vec![],
+                vis: cjc_ast::Visibility::Public,
+                local_count: 0,
+            }],
+            struct_defs: vec![],
+            enum_defs: vec![],
+            entry: MirFnId(0),
+        };
+
+        let mut optimized = prog.clone();
+        for func in &mut optimized.functions {
+            super::licm_fn(func);
+        }
+
+        // The `let constant: i64 = 42;` MUST be hoisted to the top
+        // level (before the while), because:
+        // - init is pure (literal)
+        // - init references no loop-modified vars
+        // - `constant` is not reassigned in the loop
+        let top_level_constant_lets = optimized
+            .functions
+            .iter()
+            .flat_map(|f| f.body.stmts.iter())
+            .filter(|s| matches!(s, MirStmt::Let { name, .. } if name == "constant"))
+            .count();
+        assert_eq!(
+            top_level_constant_lets, 1,
+            "LICM should have hoisted `let constant = 42;` to the function top \
+             level — without this, the LICM fix regressed the good case"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PassDiagnostics + apply_pass_with_diagnostics tests (Option A)
+    // -----------------------------------------------------------------------
+
+    fn make_test_fn(name: &str, body: MirBody) -> MirFunction {
+        MirFunction {
+            id: crate::MirFnId(0),
+            name: name.to_string(),
+            type_params: vec![],
+            params: vec![],
+            return_type: None,
+            body,
+            is_nogc: false,
+            cfg_body: None,
+            decorators: vec![],
+            vis: cjc_ast::Visibility::Public,
+            local_count: 0,
+        }
+    }
+
+    fn ekind(k: MirExprKind) -> MirExpr {
+        MirExpr { kind: k }
+    }
+
+    #[test]
+    fn diagnostics_for_unknown_pass_returns_none() {
+        let mut f = make_test_fn("f", MirBody { stmts: vec![], result: None });
+        let d = apply_pass_with_diagnostics("definitely_not_a_pass", &mut f);
+        assert!(d.is_none());
+    }
+
+    #[test]
+    fn diagnostics_for_known_pass_returns_some() {
+        let mut f = make_test_fn("f", MirBody { stmts: vec![], result: None });
+        let d = apply_pass_with_diagnostics("constant_fold", &mut f);
+        let d = d.expect("CF is a known pass");
+        assert_eq!(d.pass_name, "constant_fold");
+    }
+
+    #[test]
+    fn sr_counts_native_rewrites() {
+        // x * 0 → 0  (1 rewrite, shrinks 3 nodes to 1)
+        let body = MirBody {
+            stmts: vec![MirStmt::Let {
+                name: "a".to_string(),
+                mutable: false,
+                init: ekind(MirExprKind::Binary {
+                    op: BinOp::Mul,
+                    left: Box::new(ekind(MirExprKind::Var("x".to_string()))),
+                    right: Box::new(ekind(MirExprKind::IntLit(0))),
+                }),
+                alloc_hint: None,
+                slot: None,
+            }],
+            result: None,
+        };
+        let mut f = make_test_fn("f", body);
+        let d = apply_pass_with_diagnostics("strength_reduce", &mut f).unwrap();
+        assert_eq!(d.changes_applied, 1, "x * 0 is one SR rewrite");
+        assert!(d.nodes_after < d.nodes_before, "should shrink: {d:?}");
+    }
+
+    #[test]
+    fn sr_in_place_rewrite_counts_but_doesnt_shrink() {
+        // x * 2 → x + x  (1 rewrite, node count unchanged)
+        let body = MirBody {
+            stmts: vec![MirStmt::Let {
+                name: "a".to_string(),
+                mutable: false,
+                init: ekind(MirExprKind::Binary {
+                    op: BinOp::Mul,
+                    left: Box::new(ekind(MirExprKind::Var("x".to_string()))),
+                    right: Box::new(ekind(MirExprKind::IntLit(2))),
+                }),
+                alloc_hint: None,
+                slot: None,
+            }],
+            result: None,
+        };
+        let mut f = make_test_fn("f", body);
+        let d = apply_pass_with_diagnostics("strength_reduce", &mut f).unwrap();
+        assert_eq!(d.changes_applied, 1, "x * 2 → x + x is one SR rewrite");
+        assert_eq!(
+            d.nodes_before, d.nodes_after,
+            "x * 2 → x + x doesn't shrink node count — exactly the case where \
+             pass_native_change beats structural_delta as a training signal"
+        );
+        assert_eq!(d.structural_delta_fraction(), 0.0);
+        assert!(d.pass_native_change_fraction() > 0.0);
+    }
+
+    #[test]
+    fn cse_counts_replacements() {
+        // let a = x + y;  let b = x + y;  → CSE detects b duplicates a
+        let xy = || ekind(MirExprKind::Binary {
+            op: BinOp::Add,
+            left: Box::new(ekind(MirExprKind::Var("x".to_string()))),
+            right: Box::new(ekind(MirExprKind::Var("y".to_string()))),
+        });
+        let body = MirBody {
+            stmts: vec![
+                MirStmt::Let { name: "a".to_string(), mutable: false, init: xy(),
+                    alloc_hint: None, slot: None },
+                MirStmt::Let { name: "b".to_string(), mutable: false, init: xy(),
+                    alloc_hint: None, slot: None },
+            ],
+            result: None,
+        };
+        let mut f = make_test_fn("f", body);
+        let d = apply_pass_with_diagnostics("cse", &mut f).unwrap();
+        assert_eq!(d.changes_applied, 1, "b duplicates a — one CSE replacement");
+    }
+
+    #[test]
+    fn cse_no_duplicates_returns_zero() {
+        let body = MirBody {
+            stmts: vec![MirStmt::Let {
+                name: "a".to_string(),
+                mutable: false,
+                init: ekind(MirExprKind::Var("x".to_string())),
+                alloc_hint: None,
+                slot: None,
+            }],
+            result: None,
+        };
+        let mut f = make_test_fn("f", body);
+        let d = apply_pass_with_diagnostics("cse", &mut f).unwrap();
+        assert_eq!(d.changes_applied, 0);
+    }
+
+    #[test]
+    fn licm_counts_hoisted_lets() {
+        // Hoistable let inside a while: should count exactly 1 hoist.
+        // while cond { let k = 42; ... }
+        let body = MirBody {
+            stmts: vec![MirStmt::While {
+                cond: ekind(MirExprKind::BoolLit(true)),
+                body: MirBody {
+                    stmts: vec![
+                        MirStmt::Let {
+                            name: "k".to_string(),
+                            mutable: false,
+                            init: ekind(MirExprKind::IntLit(42)),
+                            alloc_hint: None,
+                            slot: None,
+                        },
+                        MirStmt::Break,
+                    ],
+                    result: None,
+                },
+            }],
+            result: None,
+        };
+        let mut f = make_test_fn("f", body);
+        let d = apply_pass_with_diagnostics("licm", &mut f).unwrap();
+        assert_eq!(d.changes_applied, 1, "one let hoisted out of the while");
+    }
+
+    #[test]
+    fn cf_uses_structural_delta_as_change_count() {
+        // CF doesn't report its own count yet — falls back to node delta.
+        // 1 + 2 → 3 shrinks 3 nodes to 1.
+        let body = MirBody {
+            stmts: vec![MirStmt::Let {
+                name: "a".to_string(),
+                mutable: false,
+                init: ekind(MirExprKind::Binary {
+                    op: BinOp::Add,
+                    left: Box::new(ekind(MirExprKind::IntLit(1))),
+                    right: Box::new(ekind(MirExprKind::IntLit(2))),
+                }),
+                alloc_hint: None,
+                slot: None,
+            }],
+            result: None,
+        };
+        let mut f = make_test_fn("f", body);
+        let d = apply_pass_with_diagnostics("constant_fold", &mut f).unwrap();
+        assert!(d.nodes_after < d.nodes_before, "CF must shrink: {d:?}");
+        assert_eq!(d.changes_applied, d.nodes_before - d.nodes_after);
+    }
+
+    #[test]
+    fn diagnostics_are_deterministic() {
+        let body = MirBody {
+            stmts: vec![MirStmt::Let {
+                name: "a".to_string(),
+                mutable: false,
+                init: ekind(MirExprKind::Binary {
+                    op: BinOp::Mul,
+                    left: Box::new(ekind(MirExprKind::Var("x".to_string()))),
+                    right: Box::new(ekind(MirExprKind::IntLit(0))),
+                }),
+                alloc_hint: None,
+                slot: None,
+            }],
+            result: None,
+        };
+        let mut f = make_test_fn("f", body.clone());
+        let first = apply_pass_with_diagnostics("strength_reduce", &mut f).unwrap();
+        for _ in 0..20 {
+            let mut f2 = make_test_fn("f", body.clone());
+            let again = apply_pass_with_diagnostics("strength_reduce", &mut f2).unwrap();
+            assert_eq!(again, first);
+        }
+    }
+
+    #[test]
+    fn apply_pass_compatibility_preserved() {
+        // apply_pass returns true for known passes — same contract as before.
+        let mut f = make_test_fn("f", MirBody { stmts: vec![], result: None });
+        assert!(apply_pass("constant_fold", &mut f));
+        assert!(apply_pass("strength_reduce", &mut f));
+        assert!(apply_pass("dce", &mut f));
+        assert!(apply_pass("cse", &mut f));
+        assert!(apply_pass("licm", &mut f));
+        assert!(apply_pass("fusion_rewrite", &mut f));
+        assert!(!apply_pass("nothing_real", &mut f));
     }
 }

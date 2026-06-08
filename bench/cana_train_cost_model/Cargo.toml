@@ -1,0 +1,26 @@
+[package]
+name = "cana-train-cost-model"
+version = "0.1.11"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "cana_train_cost_model"
+path = "main.rs"
+
+[dependencies]
+# CANA cost-model training harness.
+#
+# Measures per-pass runtime benefit on an expanded benchmark corpus (~18
+# programs) via leave-one-out experiments, then fits per-pass coefficients
+# for `cjc_cana::LinearCostModel` via gradient descent.
+#
+# Output: trained coefficients printed in Rust-source form, ready to paste
+# into `LinearCostModel::trained()`.
+cjc-ast = { path = "../../crates/cjc-ast" }
+cjc-parser = { path = "../../crates/cjc-parser" }
+cjc-hir = { path = "../../crates/cjc-hir" }
+cjc-mir = { path = "../../crates/cjc-mir" }
+cjc-mir-exec = { path = "../../crates/cjc-mir-exec" }
+cjc-cana = { path = "../../crates/cjc-cana" }
+cjc-runtime = { path = "../../crates/cjc-runtime" }

@@ -1,0 +1,25 @@
+[package]
+name = "cana-threshold-probe"
+version = "0.1.11"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "cana_threshold_probe"
+path = "main.rs"
+
+[dependencies]
+# §17 — sweep PassRanker.skip_threshold and see how many Run vs Skip
+# decisions the trained ranker produces at each threshold value on
+# (a) PINN heat 1D (the §3A.2 stubborn workload), and
+# (b) each of the 8 pass_ordering programs.
+#
+# Answers: is the default skip_threshold = 0.005 calibrated for the
+# pass_ordering corpus (where it works) and over-aggressive on PINN
+# (where it blocks everything)? Or do PINN's features just intrinsically
+# fall below any reasonable threshold?
+cjc-ast = { path = "../../crates/cjc-ast" }
+cjc-parser = { path = "../../crates/cjc-parser" }
+cjc-hir = { path = "../../crates/cjc-hir" }
+cjc-mir = { path = "../../crates/cjc-mir" }
+cjc-cana = { path = "../../crates/cjc-cana" }

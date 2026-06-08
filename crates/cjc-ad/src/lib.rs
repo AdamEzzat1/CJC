@@ -336,6 +336,30 @@ pub enum GradOp {
         /// Activation function applied after affine transform.
         activation: crate::pinn::Activation,
     },
+    /// CANA Phase 3.5b — fused MLP layer + output projection:
+    /// `activation(input @ w1^T + b1) @ w2`.
+    ///
+    /// Collapses [transpose + matmul + bias-add + activation + matmul] into
+    /// one node, reducing graph size by 4× per layer-pair and avoiding the
+    /// `[batch, hidden]` intermediate tensor between the activation and the
+    /// output projection.
+    ///
+    /// This is the GradGraph-level analogue of the literal
+    /// `fused_mlp_matmul_dot` from the brief — "dot" in autodiff context
+    /// reduces to `Mul + Sum` ops, so a true mlp+matmul+dot is a one-extra-
+    /// step extension that builds on top of this variant.
+    MlpLayerMatMul {
+        /// Node index of the input tensor [batch, in_features].
+        input: usize,
+        /// Node index of the first weight parameter [hidden, in_features].
+        w1: usize,
+        /// Node index of the first bias parameter [hidden].
+        b1: usize,
+        /// Activation applied after the first affine transform.
+        activation: crate::pinn::Activation,
+        /// Node index of the second weight parameter [hidden, out_features].
+        w2: usize,
+    },
 }
 
 /// A node in the reverse-mode AD graph.
@@ -939,6 +963,129 @@ impl GradGraph {
         idx
     }
 
+    /// CANA Phase 3.5b — fused MLP layer + output projection in one node.
+    ///
+    /// Forward: `output = activation(input @ w1^T + b1) @ w2`
+    ///
+    /// - `input`: node index for input tensor `[batch, in_features]`
+    /// - `w1`: node index for first weight parameter `[hidden, in_features]`
+    /// - `b1`: node index for first bias parameter `[hidden]`
+    /// - `activation`: applied after the first affine transform
+    /// - `w2`: node index for output weight parameter `[hidden, out_features]`
+    ///
+    /// Produces a tensor of shape `[batch, out_features]`. Bit-identical to
+    /// the unfused chain `matmul(mlp_layer(input, w1, b1, act), w2)` on the
+    /// sequential matmul path.
+    pub fn mlp_layer_matmul(
+        &mut self,
+        input: usize,
+        w1: usize,
+        b1: usize,
+        activation: crate::pinn::Activation,
+        w2: usize,
+    ) -> usize {
+        let input_t = &self.tensors[input];
+        let w1_t = &self.tensors[w1];
+        let b1_t = &self.tensors[b1];
+        let w2_t = &self.tensors[w2];
+
+        // Step 1: z = input @ w1^T + b1  (same as MlpLayer first half)
+        let w1t = w1_t.transpose();
+        let z = input_t.matmul_unchecked(&w1t);
+        let z_biased = z.add_unchecked(b1_t);
+
+        // Step 2: h = activation(z_biased)  (same as MlpLayer activation arm)
+        let h = match activation {
+            crate::pinn::Activation::Tanh => {
+                let data = z_biased.to_vec();
+                let shape = z_biased.shape().to_vec();
+                Tensor::from_vec_unchecked(data.iter().map(|x| x.tanh()).collect(), &shape)
+            }
+            crate::pinn::Activation::Sigmoid => {
+                let data = z_biased.to_vec();
+                let shape = z_biased.shape().to_vec();
+                Tensor::from_vec_unchecked(
+                    data.iter().map(|&x| 1.0 / (1.0 + (-x).exp())).collect(),
+                    &shape,
+                )
+            }
+            crate::pinn::Activation::Relu => {
+                let data = z_biased.to_vec();
+                let shape = z_biased.shape().to_vec();
+                Tensor::from_vec_unchecked(
+                    data.iter().map(|&x| if x > 0.0 { x } else { 0.0 }).collect(),
+                    &shape,
+                )
+            }
+            crate::pinn::Activation::None => z_biased,
+            crate::pinn::Activation::Gelu => {
+                let data = z_biased.to_vec();
+                let shape = z_biased.shape().to_vec();
+                Tensor::from_vec_unchecked(
+                    data.iter().map(|&x| {
+                        let inner = (2.0_f64 / std::f64::consts::PI).sqrt()
+                            * (x + 0.044715 * x * x * x);
+                        0.5 * x * (1.0 + inner.tanh())
+                    }).collect(),
+                    &shape,
+                )
+            }
+            crate::pinn::Activation::Silu => {
+                let data = z_biased.to_vec();
+                let shape = z_biased.shape().to_vec();
+                Tensor::from_vec_unchecked(
+                    data.iter().map(|&x| x / (1.0 + (-x).exp())).collect(),
+                    &shape,
+                )
+            }
+            crate::pinn::Activation::Elu => {
+                let data = z_biased.to_vec();
+                let shape = z_biased.shape().to_vec();
+                Tensor::from_vec_unchecked(
+                    data.iter().map(|&x| if x > 0.0 { x } else { x.exp() - 1.0 }).collect(),
+                    &shape,
+                )
+            }
+            crate::pinn::Activation::Selu => {
+                let data = z_biased.to_vec();
+                let shape = z_biased.shape().to_vec();
+                Tensor::from_vec_unchecked(
+                    data.iter().map(|&x| {
+                        if x > 0.0 {
+                            Self::SELU_LAMBDA * x
+                        } else {
+                            Self::SELU_LAMBDA * Self::SELU_ALPHA * (x.exp() - 1.0)
+                        }
+                    }).collect(),
+                    &shape,
+                )
+            }
+            crate::pinn::Activation::SinAct => {
+                let data = z_biased.to_vec();
+                let shape = z_biased.shape().to_vec();
+                Tensor::from_vec_unchecked(
+                    data.iter().map(|&x| x.sin()).collect(),
+                    &shape,
+                )
+            }
+        };
+
+        // Step 3: output = h @ w2
+        let result = h.matmul_unchecked(w2_t);
+
+        let idx = self.ops.len();
+        self.ops.push(GradOp::MlpLayerMatMul {
+            input,
+            w1,
+            b1,
+            activation,
+            w2,
+        });
+        self.tensors.push(result);
+        self.param_grads.push(None);
+        idx
+    }
+
     /// Concatenate tensors along an axis.
     /// All input tensors must have the same shape except along the concatenation axis.
     pub fn cat(&mut self, inputs: &[usize], axis: usize) -> usize {
@@ -1244,6 +1391,12 @@ impl GradGraph {
                 reachable[*input] = true;
                 reachable[*weight] = true;
                 reachable[*bias] = true;
+            }
+            GradOp::MlpLayerMatMul { input, w1, b1, w2, .. } => {
+                reachable[*input] = true;
+                reachable[*w1] = true;
+                reachable[*b1] = true;
+                reachable[*w2] = true;
             }
         }
     }
@@ -1914,6 +2067,232 @@ impl GradGraph {
                         accumulate_grad(&mut grads, bias, &dz);
                     }
                 }
+                GradOp::MlpLayerMatMul { input, w1, b1, activation, w2 } => {
+                    // CANA Phase 3.5b — fused backward for
+                    //   output = activation(input @ w1^T + b1) @ w2
+                    //
+                    // Step A — backward through the output projection:
+                    //   d_h  = d_output @ w2^T
+                    //   d_w2 = h^T @ d_output
+                    //
+                    // Step B — backward through the activation + affine
+                    // (identical to MlpLayer backward with d_h as the
+                    // incoming gradient):
+                    //   d_z      = d_h * activation'(z)
+                    //   d_input  = d_z @ w1
+                    //   d_w1     = d_z^T @ input
+                    //   d_b1     = sum(d_z, axis=0)
+
+                    // Recompute z and h (we need both for the gradient chain).
+                    let input_t = &self.tensors[input];
+                    let w1_t = &self.tensors[w1];
+                    let b1_t = &self.tensors[b1];
+                    let w2_t = &self.tensors[w2];
+                    let w1t = w1_t.transpose();
+                    let z = input_t.matmul_unchecked(&w1t).add_unchecked(b1_t);
+                    // h = activation(z) — match the forward exactly.
+                    let h = match activation {
+                        crate::pinn::Activation::Tanh => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(
+                                data.iter().map(|x| x.tanh()).collect(),
+                                z.shape(),
+                            )
+                        }
+                        crate::pinn::Activation::Sigmoid => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(
+                                data.iter().map(|&x| 1.0 / (1.0 + (-x).exp())).collect(),
+                                z.shape(),
+                            )
+                        }
+                        crate::pinn::Activation::Relu => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(
+                                data.iter().map(|&x| if x > 0.0 { x } else { 0.0 }).collect(),
+                                z.shape(),
+                            )
+                        }
+                        crate::pinn::Activation::None => z.clone(),
+                        crate::pinn::Activation::Gelu => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(
+                                data.iter().map(|&x| {
+                                    let inner = (2.0_f64 / std::f64::consts::PI).sqrt()
+                                        * (x + 0.044715 * x * x * x);
+                                    0.5 * x * (1.0 + inner.tanh())
+                                }).collect(),
+                                z.shape(),
+                            )
+                        }
+                        crate::pinn::Activation::Silu => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(
+                                data.iter().map(|&x| x / (1.0 + (-x).exp())).collect(),
+                                z.shape(),
+                            )
+                        }
+                        crate::pinn::Activation::Elu => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(
+                                data.iter().map(|&x| if x > 0.0 { x } else { x.exp() - 1.0 }).collect(),
+                                z.shape(),
+                            )
+                        }
+                        crate::pinn::Activation::Selu => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(
+                                data.iter().map(|&x| {
+                                    if x > 0.0 { GradGraph::SELU_LAMBDA * x }
+                                    else { GradGraph::SELU_LAMBDA * GradGraph::SELU_ALPHA * (x.exp() - 1.0) }
+                                }).collect(),
+                                z.shape(),
+                            )
+                        }
+                        crate::pinn::Activation::SinAct => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(
+                                data.iter().map(|&x| x.sin()).collect(),
+                                z.shape(),
+                            )
+                        }
+                    };
+
+                    // Step A: backward through output = h @ w2
+                    let w2t = w2_t.transpose();
+                    let d_h = grad.matmul_unchecked(&w2t);
+                    let d_w2 = h.transpose().matmul_unchecked(&grad);
+                    accumulate_grad(&mut grads, w2, &d_w2);
+
+                    // Step B: activation derivative, then chain through affine
+                    let dz = match activation {
+                        crate::pinn::Activation::Tanh => {
+                            // d/dz tanh(z) = 1 - tanh(z)^2 — use h (= tanh(z)) directly
+                            let h_data = h.to_vec();
+                            let dh_data = d_h.to_vec();
+                            let shape = d_h.shape().to_vec();
+                            Tensor::from_vec_unchecked(
+                                h_data.iter().zip(dh_data.iter())
+                                    .map(|(&o, &g)| g * (1.0 - o * o))
+                                    .collect(),
+                                &shape,
+                            )
+                        }
+                        crate::pinn::Activation::Sigmoid => {
+                            // d/dz sigmoid(z) = sigmoid(z) * (1 - sigmoid(z))
+                            let h_data = h.to_vec();
+                            let dh_data = d_h.to_vec();
+                            let shape = d_h.shape().to_vec();
+                            Tensor::from_vec_unchecked(
+                                h_data.iter().zip(dh_data.iter())
+                                    .map(|(&o, &g)| g * o * (1.0 - o))
+                                    .collect(),
+                                &shape,
+                            )
+                        }
+                        crate::pinn::Activation::Relu => {
+                            let z_data = z.to_vec();
+                            let dh_data = d_h.to_vec();
+                            let shape = d_h.shape().to_vec();
+                            Tensor::from_vec_unchecked(
+                                z_data.iter().zip(dh_data.iter())
+                                    .map(|(&z_val, &g)| if z_val > 0.0 { g } else { 0.0 })
+                                    .collect(),
+                                &shape,
+                            )
+                        }
+                        crate::pinn::Activation::None => d_h.clone(),
+                        crate::pinn::Activation::Gelu => {
+                            let z_data = z.to_vec();
+                            let dh_data = d_h.to_vec();
+                            let shape = d_h.shape().to_vec();
+                            Tensor::from_vec_unchecked(
+                                z_data.iter().zip(dh_data.iter()).map(|(&x, &g)| {
+                                    let c = (2.0_f64 / std::f64::consts::PI).sqrt();
+                                    let k = c * (x + 0.044715 * x * x * x);
+                                    let tanh_k = k.tanh();
+                                    let dk = c * (1.0 + 3.0 * 0.044715 * x * x);
+                                    g * (0.5 * (1.0 + tanh_k) + 0.5 * x * (1.0 - tanh_k * tanh_k) * dk)
+                                }).collect(),
+                                &shape,
+                            )
+                        }
+                        crate::pinn::Activation::Silu => {
+                            let z_data = z.to_vec();
+                            let dh_data = d_h.to_vec();
+                            let shape = d_h.shape().to_vec();
+                            Tensor::from_vec_unchecked(
+                                z_data.iter().zip(dh_data.iter()).map(|(&x, &g)| {
+                                    let s = 1.0 / (1.0 + (-x).exp());
+                                    g * s * (1.0 + x * (1.0 - s))
+                                }).collect(),
+                                &shape,
+                            )
+                        }
+                        crate::pinn::Activation::Elu => {
+                            let z_data = z.to_vec();
+                            let dh_data = d_h.to_vec();
+                            let shape = d_h.shape().to_vec();
+                            Tensor::from_vec_unchecked(
+                                z_data.iter().zip(dh_data.iter()).map(|(&x, &g)| {
+                                    if x > 0.0 { g } else { g * x.exp() }
+                                }).collect(),
+                                &shape,
+                            )
+                        }
+                        crate::pinn::Activation::Selu => {
+                            let z_data = z.to_vec();
+                            let dh_data = d_h.to_vec();
+                            let shape = d_h.shape().to_vec();
+                            Tensor::from_vec_unchecked(
+                                z_data.iter().zip(dh_data.iter()).map(|(&x, &g)| {
+                                    if x > 0.0 { g * GradGraph::SELU_LAMBDA }
+                                    else { g * GradGraph::SELU_LAMBDA * GradGraph::SELU_ALPHA * x.exp() }
+                                }).collect(),
+                                &shape,
+                            )
+                        }
+                        crate::pinn::Activation::SinAct => {
+                            let z_data = z.to_vec();
+                            let dh_data = d_h.to_vec();
+                            let shape = d_h.shape().to_vec();
+                            Tensor::from_vec_unchecked(
+                                z_data.iter().zip(dh_data.iter())
+                                    .map(|(&x, &g)| g * x.cos())
+                                    .collect(),
+                                &shape,
+                            )
+                        }
+                    };
+
+                    // d_input = dz @ w1
+                    let d_input = dz.matmul_unchecked(w1_t);
+                    accumulate_grad(&mut grads, input, &d_input);
+
+                    // d_w1 = dz^T @ input  (shape [hidden, in_f] matching w1)
+                    let d_w1 = dz.transpose().matmul_unchecked(input_t);
+                    accumulate_grad(&mut grads, w1, &d_w1);
+
+                    // d_b1 = sum(dz, axis=0)
+                    let dz_data = dz.to_vec();
+                    let dz_shape = dz.shape();
+                    if dz_shape.len() == 2 {
+                        let (rows, cols) = (dz_shape[0], dz_shape[1]);
+                        let mut bias_grad = vec![0.0_f64; cols];
+                        for r in 0..rows {
+                            for c in 0..cols {
+                                bias_grad[c] += dz_data[r * cols + c];
+                            }
+                        }
+                        accumulate_grad(
+                            &mut grads,
+                            b1,
+                            &Tensor::from_vec_unchecked(bias_grad, &[cols]),
+                        );
+                    } else {
+                        accumulate_grad(&mut grads, b1, &dz);
+                    }
+                }
             }
         }
     }
@@ -2254,6 +2633,58 @@ impl GradGraph {
                             Tensor::from_vec_unchecked(data.iter().map(|&x| x.sin()).collect(), z.shape())
                         }
                     }
+                }
+                GradOp::MlpLayerMatMul { input, w1, b1, activation, w2 } => {
+                    // Recompute output = activation(input @ w1^T + b1) @ w2
+                    // Used by double_backward when w1/b1/w2 are perturbed
+                    // for finite-difference Hessian computation.
+                    let input_t = &self.tensors[*input];
+                    let w1_t = &self.tensors[*w1];
+                    let b1_t = &self.tensors[*b1];
+                    let w2_t = &self.tensors[*w2];
+                    let w1t = w1_t.transpose();
+                    let z = input_t.matmul_unchecked(&w1t).add_unchecked(b1_t);
+                    let h = match activation {
+                        crate::pinn::Activation::Tanh => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(data.iter().map(|x| x.tanh()).collect(), z.shape())
+                        }
+                        crate::pinn::Activation::Sigmoid => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(data.iter().map(|&x| 1.0 / (1.0 + (-x).exp())).collect(), z.shape())
+                        }
+                        crate::pinn::Activation::Relu => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(data.iter().map(|&x| if x > 0.0 { x } else { 0.0 }).collect(), z.shape())
+                        }
+                        crate::pinn::Activation::None => z,
+                        crate::pinn::Activation::Gelu => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(data.iter().map(|&x| {
+                                let inner = (2.0_f64 / std::f64::consts::PI).sqrt() * (x + 0.044715 * x * x * x);
+                                0.5 * x * (1.0 + inner.tanh())
+                            }).collect(), z.shape())
+                        }
+                        crate::pinn::Activation::Silu => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(data.iter().map(|&x| x / (1.0 + (-x).exp())).collect(), z.shape())
+                        }
+                        crate::pinn::Activation::Elu => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(data.iter().map(|&x| if x > 0.0 { x } else { x.exp() - 1.0 }).collect(), z.shape())
+                        }
+                        crate::pinn::Activation::Selu => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(data.iter().map(|&x| {
+                                if x > 0.0 { GradGraph::SELU_LAMBDA * x } else { GradGraph::SELU_LAMBDA * GradGraph::SELU_ALPHA * (x.exp() - 1.0) }
+                            }).collect(), z.shape())
+                        }
+                        crate::pinn::Activation::SinAct => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(data.iter().map(|&x| x.sin()).collect(), z.shape())
+                        }
+                    };
+                    h.matmul_unchecked(w2_t)
                 }
                 // For complex ops (softmax, layernorm, etc.), keep existing tensor.
                 // These are not typically used in simple Hessian computations.
@@ -3062,6 +3493,160 @@ impl GradGraph {
                         accumulate_grad(&mut grads, *bias, &Tensor::from_vec_unchecked(bias_grad, &[cols]));
                     } else {
                         accumulate_grad(&mut grads, *bias, &dz);
+                    }
+                }
+                GradOp::MlpLayerMatMul { input, w1, b1, activation, w2 } => {
+                    // backward_with_seed for the fused MLP+matmul op.
+                    // Math identical to the main `backward()` arm above —
+                    // the only difference is which gradient initialises the
+                    // chain (seeded by the caller for Jacobian rows).
+                    let input_t = &self.tensors[*input];
+                    let w1_t = &self.tensors[*w1];
+                    let b1_t = &self.tensors[*b1];
+                    let w2_t = &self.tensors[*w2];
+                    let w1t = w1_t.transpose();
+                    let z = input_t.matmul_unchecked(&w1t).add_unchecked(b1_t);
+                    // Recompute h = activation(z)
+                    let h = match activation {
+                        crate::pinn::Activation::Tanh => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(data.iter().map(|x| x.tanh()).collect(), z.shape())
+                        }
+                        crate::pinn::Activation::Sigmoid => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(data.iter().map(|&x| 1.0 / (1.0 + (-x).exp())).collect(), z.shape())
+                        }
+                        crate::pinn::Activation::Relu => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(data.iter().map(|&x| if x > 0.0 { x } else { 0.0 }).collect(), z.shape())
+                        }
+                        crate::pinn::Activation::None => z.clone(),
+                        crate::pinn::Activation::Gelu => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(data.iter().map(|&x| {
+                                let inner = (2.0_f64 / std::f64::consts::PI).sqrt() * (x + 0.044715 * x * x * x);
+                                0.5 * x * (1.0 + inner.tanh())
+                            }).collect(), z.shape())
+                        }
+                        crate::pinn::Activation::Silu => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(data.iter().map(|&x| x / (1.0 + (-x).exp())).collect(), z.shape())
+                        }
+                        crate::pinn::Activation::Elu => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(data.iter().map(|&x| if x > 0.0 { x } else { x.exp() - 1.0 }).collect(), z.shape())
+                        }
+                        crate::pinn::Activation::Selu => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(data.iter().map(|&x| {
+                                if x > 0.0 { GradGraph::SELU_LAMBDA * x } else { GradGraph::SELU_LAMBDA * GradGraph::SELU_ALPHA * (x.exp() - 1.0) }
+                            }).collect(), z.shape())
+                        }
+                        crate::pinn::Activation::SinAct => {
+                            let data = z.to_vec();
+                            Tensor::from_vec_unchecked(data.iter().map(|&x| x.sin()).collect(), z.shape())
+                        }
+                    };
+
+                    // Backward through output projection
+                    let w2t = w2_t.transpose();
+                    let d_h = grad.matmul_unchecked(&w2t);
+                    let d_w2 = h.transpose().matmul_unchecked(&grad);
+                    accumulate_grad(&mut grads, *w2, &d_w2);
+
+                    // Activation derivative
+                    let dz = match activation {
+                        crate::pinn::Activation::Tanh => {
+                            let h_data = h.to_vec();
+                            let dh_data = d_h.to_vec();
+                            Tensor::from_vec_unchecked(
+                                h_data.iter().zip(dh_data.iter()).map(|(&o, &g)| g * (1.0 - o * o)).collect(),
+                                d_h.shape(),
+                            )
+                        }
+                        crate::pinn::Activation::Sigmoid => {
+                            let h_data = h.to_vec();
+                            let dh_data = d_h.to_vec();
+                            Tensor::from_vec_unchecked(
+                                h_data.iter().zip(dh_data.iter()).map(|(&o, &g)| g * o * (1.0 - o)).collect(),
+                                d_h.shape(),
+                            )
+                        }
+                        crate::pinn::Activation::Relu => {
+                            let z_data = z.to_vec();
+                            let dh_data = d_h.to_vec();
+                            Tensor::from_vec_unchecked(
+                                z_data.iter().zip(dh_data.iter()).map(|(&zv, &g)| if zv > 0.0 { g } else { 0.0 }).collect(),
+                                d_h.shape(),
+                            )
+                        }
+                        crate::pinn::Activation::None => d_h.clone(),
+                        crate::pinn::Activation::Gelu => {
+                            let z_data = z.to_vec();
+                            let dh_data = d_h.to_vec();
+                            Tensor::from_vec_unchecked(
+                                z_data.iter().zip(dh_data.iter()).map(|(&x, &g)| {
+                                    let c = (2.0_f64 / std::f64::consts::PI).sqrt();
+                                    let k = c * (x + 0.044715 * x * x * x);
+                                    let tk = k.tanh();
+                                    let dk = c * (1.0 + 3.0 * 0.044715 * x * x);
+                                    g * (0.5 * (1.0 + tk) + 0.5 * x * (1.0 - tk * tk) * dk)
+                                }).collect(),
+                                d_h.shape(),
+                            )
+                        }
+                        crate::pinn::Activation::Silu => {
+                            let z_data = z.to_vec();
+                            let dh_data = d_h.to_vec();
+                            Tensor::from_vec_unchecked(
+                                z_data.iter().zip(dh_data.iter()).map(|(&x, &g)| {
+                                    let s = 1.0 / (1.0 + (-x).exp());
+                                    g * s * (1.0 + x * (1.0 - s))
+                                }).collect(),
+                                d_h.shape(),
+                            )
+                        }
+                        crate::pinn::Activation::Elu => {
+                            let z_data = z.to_vec();
+                            let dh_data = d_h.to_vec();
+                            Tensor::from_vec_unchecked(
+                                z_data.iter().zip(dh_data.iter()).map(|(&x, &g)| if x > 0.0 { g } else { g * x.exp() }).collect(),
+                                d_h.shape(),
+                            )
+                        }
+                        crate::pinn::Activation::Selu => {
+                            let z_data = z.to_vec();
+                            let dh_data = d_h.to_vec();
+                            Tensor::from_vec_unchecked(
+                                z_data.iter().zip(dh_data.iter()).map(|(&x, &g)| {
+                                    if x > 0.0 { g * GradGraph::SELU_LAMBDA }
+                                    else { g * GradGraph::SELU_LAMBDA * GradGraph::SELU_ALPHA * x.exp() }
+                                }).collect(),
+                                d_h.shape(),
+                            )
+                        }
+                        crate::pinn::Activation::SinAct => {
+                            let z_data = z.to_vec();
+                            let dh_data = d_h.to_vec();
+                            Tensor::from_vec_unchecked(
+                                z_data.iter().zip(dh_data.iter()).map(|(&x, &g)| g * x.cos()).collect(),
+                                d_h.shape(),
+                            )
+                        }
+                    };
+
+                    // Chain through affine
+                    accumulate_grad(&mut grads, *input, &dz.matmul_unchecked(w1_t));
+                    accumulate_grad(&mut grads, *w1, &dz.transpose().matmul_unchecked(input_t));
+                    let dz_data = dz.to_vec();
+                    let dz_shape = dz.shape();
+                    if dz_shape.len() == 2 {
+                        let (rows, cols) = (dz_shape[0], dz_shape[1]);
+                        let mut bias_grad = vec![0.0_f64; cols];
+                        for r in 0..rows { for c in 0..cols { bias_grad[c] += dz_data[r * cols + c]; } }
+                        accumulate_grad(&mut grads, *b1, &Tensor::from_vec_unchecked(bias_grad, &[cols]));
+                    } else {
+                        accumulate_grad(&mut grads, *b1, &dz);
                     }
                 }
             }

@@ -1731,6 +1731,8 @@ impl MirExecutor {
                 | "hypot"
                 | "PI" | "E" | "TAU" | "INF" | "NAN_VAL"
                 | "dot" | "outer" | "cross" | "norm"
+                // CANA Phase 3.5a: fused tensor primitives
+                | "fused_matmul_dot" | "fused_matmul_norm" | "fused_matmul_matmul"
                 | "Tensor.linspace" | "Tensor.arange" | "Tensor.eye"
                 | "Tensor.full" | "Tensor.diag" | "Tensor.uniform"
                 // ML Autodiff builtins
@@ -4285,90 +4287,132 @@ impl MirExecutor {
                 }
             }
             MirExprKind::Field { object, name } => {
-                if let MirExprKind::Var(obj_name)
-                | MirExprKind::VarLocal { name: obj_name, .. } = &object.kind
-                {
-                    let obj_name = obj_name.clone();
-                    let field_name = name.clone();
-                    let mut obj_val = self
-                        .lookup(&obj_name)
-                        .cloned()
-                        .ok_or_else(|| {
-                            MirExecError::Runtime(format!("undefined variable `{obj_name}`"))
+                // After Tier-0 perf slot-resolution (T0-b Stage 3), local
+                // variables are emitted as `VarLocal { slot, name }` and
+                // their VALUES live in the call frame, NOT the named scope
+                // chain. The pre-fix path used `lookup(name)` which only
+                // walks scopes, so any field-assign on a slot-resolved
+                // local (`let mut b = a; b.x = 99`) panicked with
+                // "undefined variable `b`". Fix: read via slot-first /
+                // name-fallback (see `read_var_value` helper) and write
+                // back to whichever storage held the value.
+                let field_name = name.clone();
+                let (obj_name, mut obj_val, slot_hint) = match &object.kind {
+                    MirExprKind::Var(n) => {
+                        let v = self.lookup(n).cloned().ok_or_else(|| {
+                            MirExecError::Runtime(format!("undefined variable `{n}`"))
                         })?;
-                    match &mut obj_val {
-                        Value::Struct { name: struct_name, fields } => {
-                            // Enforce record immutability at runtime.
-                            if let Some(sd) = self.struct_defs.get(struct_name.as_str()) {
-                                if sd.is_record {
-                                    return Err(MirExecError::Runtime(format!(
-                                        "cannot assign to field `{}` of record `{}`: records are immutable",
-                                        field_name, struct_name
-                                    )));
-                                }
-                            }
-                            fields.insert(field_name, val);
-                        }
-                        _ => {
-                            return Err(MirExecError::Runtime(format!(
-                                "cannot assign field on {}",
-                                obj_val.type_name()
-                            )));
-                        }
+                        (n.clone(), v, None)
                     }
-                    self.assign(&obj_name, obj_val)
-                } else {
-                    Err(MirExecError::Runtime(
-                        "complex field assignment not supported".to_string(),
-                    ))
+                    MirExprKind::VarLocal { slot, name: n } => {
+                        let v = self
+                            .frame_get(*slot)
+                            .cloned()
+                            .or_else(|| self.lookup(n).cloned())
+                            .ok_or_else(|| {
+                                MirExecError::Runtime(format!("undefined variable `{n}`"))
+                            })?;
+                        (n.clone(), v, Some(*slot))
+                    }
+                    _ => {
+                        return Err(MirExecError::Runtime(
+                            "complex field assignment not supported".to_string(),
+                        ));
+                    }
+                };
+                match &mut obj_val {
+                    Value::Struct { name: struct_name, fields } => {
+                        // Enforce record immutability at runtime.
+                        if let Some(sd) = self.struct_defs.get(struct_name.as_str()) {
+                            if sd.is_record {
+                                return Err(MirExecError::Runtime(format!(
+                                    "cannot assign to field `{}` of record `{}`: records are immutable",
+                                    field_name, struct_name
+                                )));
+                            }
+                        }
+                        fields.insert(field_name, val);
+                    }
+                    _ => {
+                        return Err(MirExecError::Runtime(format!(
+                            "cannot assign field on {}",
+                            obj_val.type_name()
+                        )));
+                    }
                 }
+                // Write back: prefer the frame slot when this object came
+                // from one; fall back to named scope (covers top-level
+                // bindings, lambda-lifted closures, and any future
+                // construct whose `VarLocal.name` lives in scope only).
+                if let Some(slot) = slot_hint {
+                    if self.frame_set(slot, obj_val.clone()) {
+                        return Ok(());
+                    }
+                }
+                self.assign(&obj_name, obj_val)
             }
             MirExprKind::Index { object, index } => {
-                if let MirExprKind::Var(obj_name)
-                | MirExprKind::VarLocal { name: obj_name, .. } = &object.kind
-                {
-                    let obj_name = obj_name.clone();
-                    let idx = self.eval_expr(index)?;
-                    let idx = match idx {
-                        Value::Int(i) => i as usize,
-                        _ => {
-                            return Err(MirExecError::Runtime(
-                                "index must be Int".to_string(),
-                            ))
-                        }
-                    };
-                    let mut obj_val = self
-                        .lookup(&obj_name)
-                        .cloned()
-                        .ok_or_else(|| {
-                            MirExecError::Runtime(format!("undefined variable `{obj_name}`"))
-                        })?;
-                    match &mut obj_val {
-                        Value::Array(arr) => {
-                            if idx >= arr.len() {
-                                return Err(MirExecError::Coded(
-                                    cjc_diag::ErrorCode::E8001,
-                                    format!(
-                                        "index {idx} out of bounds for array of length {}",
-                                        arr.len()
-                                    ),
-                                ));
-                            }
-                            Rc::make_mut(arr)[idx] = val;
-                        }
-                        _ => {
-                            return Err(MirExecError::Runtime(format!(
-                                "cannot index-assign on {}",
-                                obj_val.type_name()
-                            )));
-                        }
+                // Same slot-vs-scope fix as the `Field` branch above —
+                // `arr[i] = v` on a slot-resolved local needs frame reads
+                // and frame writes, not just `lookup`/`assign` by name.
+                let idx = self.eval_expr(index)?;
+                let idx = match idx {
+                    Value::Int(i) => i as usize,
+                    _ => {
+                        return Err(MirExecError::Runtime(
+                            "index must be Int".to_string(),
+                        ))
                     }
-                    self.assign(&obj_name, obj_val)
-                } else {
-                    Err(MirExecError::Runtime(
-                        "complex index assignment not supported".to_string(),
-                    ))
+                };
+                let (obj_name, mut obj_val, slot_hint) = match &object.kind {
+                    MirExprKind::Var(n) => {
+                        let v = self.lookup(n).cloned().ok_or_else(|| {
+                            MirExecError::Runtime(format!("undefined variable `{n}`"))
+                        })?;
+                        (n.clone(), v, None)
+                    }
+                    MirExprKind::VarLocal { slot, name: n } => {
+                        let v = self
+                            .frame_get(*slot)
+                            .cloned()
+                            .or_else(|| self.lookup(n).cloned())
+                            .ok_or_else(|| {
+                                MirExecError::Runtime(format!("undefined variable `{n}`"))
+                            })?;
+                        (n.clone(), v, Some(*slot))
+                    }
+                    _ => {
+                        return Err(MirExecError::Runtime(
+                            "complex index assignment not supported".to_string(),
+                        ));
+                    }
+                };
+                match &mut obj_val {
+                    Value::Array(arr) => {
+                        if idx >= arr.len() {
+                            return Err(MirExecError::Coded(
+                                cjc_diag::ErrorCode::E8001,
+                                format!(
+                                    "index {idx} out of bounds for array of length {}",
+                                    arr.len()
+                                ),
+                            ));
+                        }
+                        Rc::make_mut(arr)[idx] = val;
+                    }
+                    _ => {
+                        return Err(MirExecError::Runtime(format!(
+                            "cannot index-assign on {}",
+                            obj_val.type_name()
+                        )));
+                    }
                 }
+                if let Some(slot) = slot_hint {
+                    if self.frame_set(slot, obj_val.clone()) {
+                        return Ok(());
+                    }
+                }
+                self.assign(&obj_name, obj_val)
             }
             _ => Err(MirExecError::Runtime(
                 "invalid assignment target".to_string(),
@@ -4548,11 +4592,74 @@ pub fn run_program_with_executor(
     Ok((result, executor))
 }
 
+/// Build a CANA-aware optimization plan for a MIR program.
+///
+/// Calls into `cjc-cana` to:
+/// 1. Extract per-function features from the lowered MIR.
+/// 2. Run the default `PassRanker` (LinearCostModel + DefaultLegalityGate)
+///    to produce per-function pass recommendations.
+/// 3. Convert the recommendations to a `cjc_mir::optimize::PassPlan`.
+///
+/// Functions for which CANA has no recommendation get the default 6-pass
+/// sequence (via the `PassPlan` fallback). This guarantees byte-identical
+/// behaviour to the pre-Phase-2 optimizer for any function CANA chose not
+/// to override.
+///
+/// ## Why this is safe to call by default
+///
+/// CANA's `DefaultLegalityGate` refuses any pass-reordering that would
+/// touch a function with a `StrictFold` reduction (the determinism
+/// trip-wire). The `PassPlan` produced here therefore can only ever
+/// (a) preserve the default sequence, or (b) recommend a subset/permutation
+/// of semantics-preserving passes. Either way, output is byte-identical
+/// to the AST tree-walk interpreter — the parity contract is intact.
+fn cana_plan_for(mir: &cjc_mir::MirProgram) -> cjc_mir::optimize::PassPlan {
+    let (_report, plan) = cjc_cana::recommend_pass_plan(mir);
+    plan
+}
+
+/// Build a pass plan using a CANA ranker wrapped in the **thermal-aware
+/// cost model** (NSS Phase 4, Option C — see
+/// `docs/cana/CANA_PHASE_4_NSS_BRIDGE_DESIGN_OPTIONS.md`).
+///
+/// Wraps the trained [`cjc_cana::LinearCostModel`] in a
+/// [`cjc_cana::thermal_cost_model::ThermalAwareCostModel`] backed by
+/// [`cjc_cana_nss::NssPressurePredictor`] (Option C, structural-only).
+/// Today the NSS predictor returns empty thermal maps so the wrapping
+/// is a behavioural no-op — the resulting plan is byte-identical to
+/// what the default ranker would produce. When Option A or Option B
+/// lands and the NSS predictor starts returning non-empty maps, this
+/// is the path along which thermal feedback will reach the ranker.
+///
+/// Wired through `cjcl run --thermal-aware`. Falls back gracefully:
+/// the trained model is the same one validated by §3A.1 and §3A.3,
+/// and the empty-map composition is validated by
+/// `cjc-cana-nss::tests::thermal_aware_composes_with_empty_predictor_as_noop`.
+fn cana_thermal_aware_plan_for(mir: &cjc_mir::MirProgram) -> cjc_mir::optimize::PassPlan {
+    let features = cjc_cana::analyze_program(mir).features;
+    let cost_model = cjc_cana::thermal_cost_model::ThermalAwareCostModel::new(
+        cjc_cana::LinearCostModel::trained(),
+        cjc_cana_nss::NssPressurePredictor::default(),
+    );
+    // §19: use PerPassLegalityGate (CF/DCE/LICM unconditionally; CSE/SR
+    // only when strict_count == 0). Matches the gate that the convenience
+    // constructors (`default_ranker`, `trained_ranker`) now use, ensuring
+    // `cjcl run --mir-opt` and `cjcl run --thermal-aware` produce
+    // consistent legality verdicts.
+    let ranker = cjc_cana::pass_ranker::PassRanker::new(
+        cost_model,
+        cjc_cana::legality::PerPassLegalityGate::new(),
+    );
+    let report = ranker.rank(mir, &features);
+    cjc_cana::pass_ranker::pass_plan_from(&report.sequence)
+}
+
 /// Run a full AST program through the optimized MIR pipeline.
 ///
-/// Apply constant folding (CF) and dead code elimination (DCE) via
-/// [`cjc_mir::optimize::optimize_program`] before execution. Enabled by the
-/// `--mir-opt` CLI flag.
+/// Phase 2 change (2026-06): the pass sequence is now selected by CANA's
+/// `PassRanker`. Functions CANA has no opinion on continue to receive the
+/// default 6-pass sequence (CF → SR → DCE → CSE → LICM → CF). Enabled
+/// by the `--mir-opt` CLI flag.
 ///
 /// # Arguments
 ///
@@ -4561,7 +4668,9 @@ pub fn run_program_with_executor(
 ///
 /// # Returns
 ///
-/// The final [`Value`] produced by the optimized program.
+/// The final [`Value`] produced by the optimized program. Output is
+/// byte-identical to `cjc-eval` (the AST tree-walk interpreter) for every
+/// program — verified by the AST/MIR parity gate in `tests/fixtures/`.
 pub fn run_program_optimized(program: &cjc_ast::Program, seed: u64) -> MirExecResult {
     let mut ast_lowering = cjc_hir::AstLowering::new();
     let hir = ast_lowering.lower_program(program);
@@ -4569,7 +4678,8 @@ pub fn run_program_optimized(program: &cjc_ast::Program, seed: u64) -> MirExecRe
     let mut hir_to_mir = cjc_mir::HirToMir::new();
     let mir = hir_to_mir.lower_program(&hir);
 
-    let mut optimized = cjc_mir::optimize::optimize_program(&mir);
+    let plan = cana_plan_for(&mir);
+    let mut optimized = cjc_mir::optimize::optimize_program_with_plan(&mir, &plan);
     cjc_mir::escape::annotate_program(&mut optimized);
 
     let mut executor = MirExecutor::new(seed);
@@ -4600,7 +4710,80 @@ pub fn run_program_optimized_with_executor(
     let mut hir_to_mir = cjc_mir::HirToMir::new();
     let mir = hir_to_mir.lower_program(&hir);
 
-    let mut optimized = cjc_mir::optimize::optimize_program(&mir);
+    // Phase 2: CANA-driven pass selection (see `run_program_optimized`
+    // for the parity contract).
+    let plan = cana_plan_for(&mir);
+    let mut optimized = cjc_mir::optimize::optimize_program_with_plan(&mir, &plan);
+    cjc_mir::escape::annotate_program(&mut optimized);
+
+    let mut executor = MirExecutor::new(seed);
+    executor.scan_ast_imports(program);
+    let result = executor.exec(&optimized)?;
+    Ok((result, executor))
+}
+
+/// Run a full AST program through the optimized MIR pipeline using the
+/// **thermal-aware** CANA ranker.
+///
+/// Same as [`run_program_optimized`] but the pass-plan recommendation
+/// is sourced from a `ThermalAwareCostModel<LinearCostModel,
+/// NssPressurePredictor>` composition (§4B.2 Option C). The thermal
+/// predictor currently returns empty maps, so the composed cost model
+/// is a behavioural no-op vs the default ranker — output is
+/// byte-identical and the §3A.2 PINN AB-test holds. The path is wired
+/// now so that future migrations to Option A (synthetic trace) or
+/// Option B (real MIR-exec instrumentation) only need to change the
+/// internals of `NssPressurePredictor`.
+///
+/// Wired through `cjcl run --thermal-aware`. The flag implies
+/// `--mir-opt` — both produce optimized output, the thermal flag
+/// changes the cost model behind that optimization.
+///
+/// # Arguments
+///
+/// * `program` - The parsed AST program.
+/// * `seed`    - Deterministic RNG seed for reproducible execution.
+///
+/// # Returns
+///
+/// The final [`Value`] produced by the optimized program. Output is
+/// byte-identical to `cjc-eval` for every program (the AST/MIR parity
+/// gate enforces this regardless of which ranker selected the plan).
+pub fn run_program_optimized_thermal_aware(
+    program: &cjc_ast::Program,
+    seed: u64,
+) -> MirExecResult {
+    let mut ast_lowering = cjc_hir::AstLowering::new();
+    let hir = ast_lowering.lower_program(program);
+
+    let mut hir_to_mir = cjc_mir::HirToMir::new();
+    let mir = hir_to_mir.lower_program(&hir);
+
+    let plan = cana_thermal_aware_plan_for(&mir);
+    let mut optimized = cjc_mir::optimize::optimize_program_with_plan(&mir, &plan);
+    cjc_mir::escape::annotate_program(&mut optimized);
+
+    let mut executor = MirExecutor::new(seed);
+    executor.scan_ast_imports(program);
+    executor.exec(&optimized)
+}
+
+/// `run_program_optimized_thermal_aware` variant that also returns the
+/// [`MirExecutor`] for post-execution inspection. Mirrors the
+/// [`run_program_optimized_with_executor`] / [`run_program_optimized`]
+/// pair.
+pub fn run_program_optimized_thermal_aware_with_executor(
+    program: &cjc_ast::Program,
+    seed: u64,
+) -> Result<(Value, MirExecutor), MirExecError> {
+    let mut ast_lowering = cjc_hir::AstLowering::new();
+    let hir = ast_lowering.lower_program(program);
+
+    let mut hir_to_mir = cjc_mir::HirToMir::new();
+    let mir = hir_to_mir.lower_program(&hir);
+
+    let plan = cana_thermal_aware_plan_for(&mir);
+    let mut optimized = cjc_mir::optimize::optimize_program_with_plan(&mir, &plan);
     cjc_mir::escape::annotate_program(&mut optimized);
 
     let mut executor = MirExecutor::new(seed);
@@ -4664,6 +4847,30 @@ pub fn run_program_monomorphized(program: &cjc_ast::Program, seed: u64) -> MirEx
     let mut executor = MirExecutor::new(seed);
     executor.scan_ast_imports(program);
     executor.exec(&optimized)
+}
+
+/// [`run_program_monomorphized`] variant that returns the [`MirExecutor`]
+/// for post-execution inspection (output capture, GC stats). Mirrors the
+/// [`run_program_optimized_with_executor`] pair convention.
+pub fn run_program_monomorphized_with_executor(
+    program: &cjc_ast::Program,
+    seed: u64,
+) -> Result<(Value, MirExecutor), MirExecError> {
+    let mut ast_lowering = cjc_hir::AstLowering::new();
+    let hir = ast_lowering.lower_program(program);
+
+    let mut hir_to_mir = cjc_mir::HirToMir::new();
+    let mir = hir_to_mir.lower_program(&hir);
+
+    let (monomorphized, _report) = cjc_mir::monomorph::monomorphize_program(&mir);
+
+    let mut optimized = cjc_mir::optimize::optimize_program(&monomorphized);
+    cjc_mir::escape::annotate_program(&mut optimized);
+
+    let mut executor = MirExecutor::new(seed);
+    executor.scan_ast_imports(program);
+    let result = executor.exec(&optimized)?;
+    Ok((result, executor))
 }
 
 /// Run a multi-file CJC program starting from the entry file path.
