@@ -653,3 +653,157 @@ Combined with §3A.1 (in-corpus held-out generalization) and §3A.4
 Phase 4 output is bit-identical across runs (verified by two-run
 diff). Same fit_ols_gd, same deterministic Option A signal, same
 external corpus snapshot — output stable.
+
+---
+
+## 14. Real-workload AB test on PINN heat 1D (§3A.2 from handoff)
+
+§3A.1, §3A.3, and §3A.4 measured statistical properties of the
+trained coefficients themselves. §3A.2 asks the practical question:
+when a real CJC-Lang program is compiled with the trained ranker vs
+the default ranker, does anything observable actually change?
+
+### Methodology
+
+- **Workload.** `examples/08_pinn_heat_equation.cjcl` — a 183-line
+  physics-informed neural network with 5 functions
+  (`main`, `forward`, `init_weights`, `perturb`, `__main`), dominated
+  by nested while-loops and float arithmetic. The example has
+  `n_epochs = 80`, which takes ~4 minutes per run through MIR-exec
+  on the bench machine. For AB-testing we substitute `n_epochs = 20`
+  via a one-line `str::replace` to keep total wall-clock tractable
+  (~6 minutes for 2 configs × 3 iterations). The program *structure*
+  that drives compile-time decisions is unaffected by this
+  substitution.
+- **Bench.**
+  [`bench/cana_ab_pinn/`](../../bench/cana_ab_pinn/) compiles the
+  PINN twice — once with `default_ranker()` and once with
+  `trained_ranker()` from `cjc-cana::pass_ranker` — and reports
+  per-iteration `compile_us`, `run_us`, the resulting `PassPlan`,
+  the underlying `RankingReport.total_recommended` + `total_dropped`
+  counts, and the captured stdout for byte-identity verification.
+- **N=3 iterations per ranker**, median used for reported timings.
+
+### Results
+
+**Timing summary (median across 3 iterations):**
+
+| Ranker | compile_us | run_us |
+|---|---|---|
+| default | 1364 | 1,117,025 |
+| trained | 1267 | 1,011,370 |
+
+Compile delta: -7.1% (-97 µs). Run delta: -9.46% (-105,655 µs).
+
+**Both deltas are measurement noise.** Per-iteration run_us values
+span 846k-1138k for default and 942k-1229k for trained — the
+distributions overlap heavily. With only 3 samples per side and
+~25% intrinsic variance, a 9.46% "delta" on the medians is well
+within noise. The behavioural check below confirms why: both
+rankers compile to byte-identical code, so the run_us values are
+sampling pure OS-scheduler + cache noise.
+
+**Behavioural checks:**
+
+- **Output byte-identical: yes.** No correctness regression.
+- **PassPlan diff: NONE.** Both rankers produce the same per-function
+  pass sequence (empty in both cases — see internal stats below).
+
+**Internal RankingReport — what the ranker actually decided:**
+
+| Ranker | total_recommended (Run) | total_dropped |
+|---|---|---|
+| default | 0 | 30 |
+| trained | 0 | 30 |
+
+Both rankers considered 30 candidate `(function, pass)` pairs (5
+functions × 6 candidate passes including `cf_round_2`) and
+**rejected every one of them**. The empty PassPlan means
+`optimize_program_with_plan` falls back to the default 6-pass
+sequence for every function, so both compilations end up running
+identical optimizations.
+
+### The honest finding
+
+**On this workload, the trained ranker produces zero observable
+change vs the default ranker.** Identical decisions, identical
+optimized code, byte-identical stdout, indistinguishable timing.
+
+This isn't a *negative* finding (the trained ranker didn't break
+anything; §3A.1 and §3A.3 still hold). But it's also not a positive
+one (the trained ranker didn't help). It's an *inactive* finding:
+the workload sits in a region of the cost model's input space
+where the trained coefficients and the hand-tuned defaults agree
+about what to do, and that decision is "skip every candidate pass."
+
+### Why both rankers skip everything on PINN
+
+Three structural reasons:
+
+1. **`alloc_sites = 0` on every PINN function.** The blind dimension
+   from §3A.4 — both rankers learn nothing from this feature, but
+   that "nothing" still appears in the linear sum and depresses the
+   predicted benefit toward zero.
+2. **Loop-and-branch-light functions.** `forward` is the workhorse
+   (an MLP forward pass) but it's a single deep `while` loop with
+   no inner branches. `init_weights` / `perturb` are simpler still.
+   `loop_depth ≤ 1` for every function and `branch_count ≤ 1` —
+   well within the narrow training range that §3A.4 documented.
+3. **Strict default skip threshold.** The
+   `DefaultLegalityGate::DEFAULT_SKIP_THRESHOLD` (~0.05 per CANA
+   defaults) cuts off recommendations below ~5% predicted benefit.
+   On these small, simple functions, every pass's predicted
+   benefit lands below that — for both rankers.
+
+The two rankers agree because both arrive at the same conclusion
+("predicted benefit < skip threshold") via slightly different
+arithmetic. The trained coefficients differ from the defaults but
+not by enough to push any (pass, function) decision across the
+threshold.
+
+### Caveats
+
+- **One workload doesn't generalize.** §3A.2 was scoped to a single
+  PINN program at the user's request. The handoff lists chess RL
+  and LendingClub as candidate follow-up workloads — both have very
+  different feature distributions (chess RL has deep tensor ops, big
+  weight matrices; LendingClub has a 2.26M-row DataFrame and
+  Locke detector traversals). Either could provoke a divergent
+  decision.
+- **The `--mir-opt` path.** PINN heat 1D doesn't use `--mir-opt`
+  unless the user explicitly passes it; the default `cjcl run`
+  doesn't optimize. The AB test bench *always* runs the ranker, so
+  it reflects the `--mir-opt` configuration specifically.
+- **Skip-threshold tuning.** If `DefaultLegalityGate` were
+  configured with a smaller `skip_threshold`, both rankers would
+  start producing non-empty plans on PINN — and *then* their
+  differences might become visible. Outside §3A.2's scope but worth
+  flagging.
+
+### Recommendation
+
+Status of `trained_ranker()` after the four validation experiments:
+
+| Validation | Result | Verdict |
+|---|---|---|
+| §3A.1 (in-corpus held-out) | 4/5 passes generalize; SR overfit at ratio 2.23 | Mostly safe |
+| §3A.3 (cross-corpus) | All 5 passes robust (ext/held ≤ 1.5) | Safe |
+| §3A.4 (feature audit) | `alloc_sites` blind, otherwise OK | Documented limitation |
+| §3A.2 (PINN AB test) | No observable change vs default | Inactive but safe |
+
+**Net recommendation: `trained_ranker()` is safe to enable, but on
+this PINN workload it provides no measurable benefit because it
+agrees with the default ranker.** A more diverse workload (one
+with mixed loop / branch / allocation structure, or one of the
+chess RL / LendingClub workloads) is needed to surface a
+meaningful behavioural difference.
+
+### Reproducibility
+
+The AB test bench has been added at
+[`bench/cana_ab_pinn/`](../../bench/cana_ab_pinn/) — `cargo run
+--release -p cana-ab-pinn`. Timings vary with machine load (real
+wall-clock), but the PassPlan / RankingReport diagnostics are
+deterministic per the CANA pipeline's contract. The byte-identity
+check on stdout is the strongest invariant: divergence there would
+indicate an optimization-induced correctness regression.

@@ -197,6 +197,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cana-ab-pinn"
+version = "0.1.11"
+dependencies = [
+ "cjc-ast",
+ "cjc-cana",
+ "cjc-hir",
+ "cjc-mir",
+ "cjc-mir-exec",
+ "cjc-parser",
+]
+
+[[package]]
 name = "cana-pass-ordering"
 version = "0.1.11"
 dependencies = [
