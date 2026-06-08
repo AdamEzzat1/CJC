@@ -62,6 +62,7 @@ members = [
     "crates/cjc-cana-nss",
     "bench/cana_train_cost_model",
     "bench/cana_ab_pinn",
+    "bench/cana_ab_corpus",
     "bench/ad_bench",
     "bench/nlp_preprocess_bench",
     "bench/abng_micro",
