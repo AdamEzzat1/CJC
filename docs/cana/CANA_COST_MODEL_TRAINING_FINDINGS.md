@@ -411,3 +411,245 @@ Phase 3's output is bit-identical across runs on the same machine — same
 fit_ols_gd, same Option A signal, same deterministic data flow. Re-run
 `cargo run --release -p cana-train-cost-model` and the Phase 3 table
 above will match exactly.
+
+---
+
+## 12. Feature distribution audit (§3A.4 from handoff)
+
+§3A.1 verified the model generalizes to held-out *programs* drawn from
+the same corpus distribution. §3A.4 asks a different question: does
+the corpus distribution itself cover the feature corners that real
+CJC-Lang programs occupy? A held-out test only validates against the
+features the corpus exercises — if a feature column is constant across
+all training data, the OLS fit can't learn anything about it and the
+held-out test is silent on the missing dimension.
+
+The training binary now prints a per-feature distribution table after
+Phase 1, with WARNING flags for features that don't carry enough
+signal to inform their coefficient.
+
+### Distribution table (835 points across 5 passes, 73 programs)
+
+| Feature | min | q25 | q50 | q75 | max | unique |
+|---|---|---|---|---|---|---|
+| expr_count   | 1.0 | 5.0 | 6.0 | 24.0 | 89.0 | **42** |
+| loop_depth   | 0.0 | 0.0 | 0.0 |  1.0 |  4.0 |  5 |
+| branch_count | 0.0 | 0.0 | 0.0 |  1.0 |  4.0 |  5 |
+| alloc_sites  | 0.0 | 0.0 | 0.0 |  0.0 |  0.0 |  **1** |
+
+### Warnings raised
+
+**`alloc_sites` is a complete blind spot.** All 835 training points
+report `alloc_sites = 0`. The trained `w_alloc_sites` coefficient is
+mathematically unconstrained by the data — OLS picks 0 because that's
+the trivial minimum-error solution given no variance — but any real
+CJC-Lang program that allocates tensors, arrays, strings, or any heap
+value has `alloc_sites > 0`. On those programs the trained model's
+prediction silently ignores the allocation cost dimension.
+
+This corroborates handoff §3A.5 item 6 (`w_alloc_sites = 0` everywhere).
+The cause is structural: the corpus is composed of integer-arithmetic
+benchmarks (constant folding programs, loop programs, branch programs)
+because those are the cleanest workloads for measuring CF/SR/DCE/CSE/LICM
+benefits via the pass-native diagnostic count. The corpus authors didn't
+include allocation-heavy programs because allocations don't trigger any
+of the target passes.
+
+### Narrow-range features (within threshold, but flagged for attention)
+
+**`loop_depth`** and **`branch_count`** each have only 5 unique values
+(0, 1, 2, 3, 4) but pass the `unique > 2` threshold so they don't
+trigger the WARNING. Still worth noting:
+
+- The medians are both 0, meaning most programs neither loop nor branch.
+  The trained coefficients are dominated by the no-loop / no-branch
+  cluster of points, with a few high-depth/high-branch programs at
+  the tail.
+- This narrow range plausibly explains handoff §3A.5 item 7 (wrong-sign
+  `w_branch_count` for CF and DCE). With branch_count ∈ {0, 1, 2, 3, 4}
+  and most points at 0, OLS can fit a small negative weight that
+  happens to reduce error on the few non-zero points without affecting
+  the bulk. It's not a real signal that branches *reduce* CF benefit;
+  it's an artifact of the cluster-at-zero distribution.
+- The §3A.1 held-out test passed for CF (ratio 1.15) and DCE (0.42)
+  despite these wrong-sign weights, which confirms the weights aren't
+  catching a real generalization bug — they're a small-corpus artifact.
+
+### What's well-covered
+
+**`expr_count`** has 42 unique values spanning 1 to 89, with the
+distribution skewed toward small programs (q50 = 6) but a clean tail
+of large programs (q75 = 24, max = 89). This is the only feature with
+enough variance to confidently support a trained coefficient.
+
+### Follow-up: corpus augmentation (§3A.4 steps 3-4, deferred)
+
+The handoff specifies step 3 as "add at least 3 programs with
+alloc_sites > 0 (tensor allocation, array, string interning)" and "at
+least 3 programs with branch_count > 10 (deep nested if/else, match
+dispatch)", then step 4 as "re-fit and compare coefficient drift on
+the augmented corpus."
+
+Both are real work, not in the immediate §3A.4 scope:
+
+- **Allocation programs.** The corpus's `programs.rs` is restricted
+  to CJC-Lang's basic integer-arithmetic surface. Allocation
+  programs require either array literals, struct constructors, or
+  builtin calls like `tensor_new`. Each new program needs to (a)
+  parse and lower cleanly, (b) have its `FnFeatures::alloc_sites`
+  count come out non-zero, (c) actually exercise CF/SR/DCE/CSE/LICM
+  in measurable ways. That's ~30 LOC of CJC-Lang per program, ~3-5
+  programs, plus verification.
+- **High-branch programs.** Easier — deep nested `if/else` chains
+  pass through the lexer/parser cleanly. But `cjc-cana::features`
+  may treat `match` arms specially (need to check the
+  `branch_count` accumulator), so the most reliable way to drive
+  the counter up is plain `if/else` chains.
+- **Drift comparison.** After augmenting, re-run the training binary
+  and diff the emitted coefficients pre vs post. The interesting
+  question: do CF/DCE/CSE/LICM coefficients drift meaningfully when
+  alloc_sites stops being a constant column? If yes, the v3
+  coefficients in `linear_cost_model.rs` are subtly miscalibrated;
+  if no, alloc_sites is a small enough signal that the trained
+  model didn't need to know.
+
+Estimated follow-up cost: 1-2 hours, depending on how easy
+allocation-intensive CJC-Lang programs are to write within the
+language's current parse/lower surface.
+
+### Production gate (in scope for §3A.4 follow-up)
+
+Handoff §3A.4 also recommends:
+
+> Consider adding an assertion in `LinearCostModel::trained()` that
+> prints a warning when called from a program whose features fall
+> outside the training distribution.
+
+This is straightforward: store the q25/max bounds from the audit
+as constants in `linear_cost_model.rs`, and emit a `tracing::warn!`
+when `predict()` sees a function whose `alloc_sites > 0` (the blind
+dimension) or whose `expr_count > 89` (the training-tail boundary).
+Deferred until after corpus augmentation, since augmenting will
+change the bounds.
+
+---
+
+## 13. Cross-corpus validation (§3A.3 from handoff)
+
+§3A.1 measured generalization within the corpus. §3A.4 quantified the
+corpus's feature blind spots. §3A.3 asks the third question: does the
+trained model generalize to programs hand-written by a *different*
+author for a *different* purpose?
+
+The training binary now snapshots the 8 programs from
+`bench/cana_pass_ordering` (a different author's bench, originally
+written to compare pass plans, not to train cost models) into
+[`external_corpus.rs`](../../bench/cana_train_cost_model/external_corpus.rs)
+and evaluates the full-corpus Phase 2 fit against them as a Phase 4
+section.
+
+### Results
+
+The external corpus produces 120 evaluation points (24 per pass).
+The Phase 2 fit (trained on all 73 internal programs) is applied
+directly — no re-fitting.
+
+| Pass | N_ext | train_rmse | ext_rmse | held_out_rmse | ext/train | ext/held |
+|---|---|---|---|---|---|---|
+| constant_fold   | 24 | 0.0450 | 0.0290 | 0.0495 | **0.65** | **0.59** |
+| strength_reduce | 24 | 0.0292 | 0.0525 | 0.0446 | **1.79** | **1.18** |
+| dce             | 24 | 0.0670 | 0.0106 | 0.0325 | **0.16** | **0.33** |
+| cse             | 24 | 0.0112 | 0.0015 | 0.0108 | **0.13** | **0.14** |
+| licm            | 24 | 0.0117 | 0.0039 | 0.0102 | **0.33** | **0.38** |
+
+Where:
+- `train_rmse` is the full-corpus fit's training error (Phase 2).
+- `ext_rmse` is RMSE on the 8 external programs.
+- `held_out_rmse` is from §3A.1 (test set = every 4th internal program).
+- `ext/train` is the headline: does the external corpus hold up against
+  the model's own training fit? Values << 1 mean the external programs
+  are *easier* than the average training point.
+- `ext/held` is the more meaningful comparison: how does cross-corpus
+  RMSE compare to in-corpus held-out RMSE? Values ≈ 1 mean robust;
+  values >> 1 mean the model has overfit to the corpus author's style.
+
+### Per-pass verdict
+
+- **constant_fold (ext/held = 0.59).** External RMSE is actually *lower*
+  than held-out. The pass_ordering programs have cleaner CF
+  opportunities (literal-heavy arithmetic in `PROG_ARITH`, `PROG_FLOAT`)
+  than the v3 internal corpus's mixed bag, so the model fits them
+  well. Cross-corpus robust.
+- **strength_reduce (ext/held = 1.18).** External RMSE is slightly
+  *higher* than held-out (0.052 vs 0.045) but the ratio is well within
+  the robust threshold (< 1.5). The §3A.1 finding stands: SR is
+  intrinsically the noisiest pass in this signal regime. But §3A.3
+  shows this noise *doesn't grow* on an unseen corpus — SR is
+  uniformly mediocre, not author-overfit.
+- **dce (ext/held = 0.33).** External performance is 3× better than
+  held-out. The pass_ordering corpus has more obviously-dead code
+  patterns (the `PROG_MANY_FN` driver with 5 chained pure-function
+  calls is a DCE softball). Cross-corpus robust; if anything, DCE's
+  v3 train RMSE is pessimistic about how well the model handles real
+  DCE scenarios.
+- **cse (ext/held = 0.14).** External RMSE 0.0015 vs held-out 0.0108.
+  Phenomenal generalization. The pass_ordering programs are CSE-easy
+  (especially `PROG_FLOAT`'s `a * x * x` pattern). Combined with the
+  in-corpus held-out ratio of 0.94, CSE is the most-validated pass
+  in the suite.
+- **licm (ext/held = 0.38).** External is 2.6× better. The
+  pass_ordering programs `PROG_LOOP` / `PROG_NESTED` / `PROG_LARGE`
+  have explicit nested loops that LICM excels at. Robust.
+
+### Aggregate finding: the model is corpus-author-robust
+
+Every pass shows `ext/held ≤ 1.5`, the "robust" threshold from the
+verdict logic. The trained coefficients are not idiosyncratic to my
+specific 73-program corpus — they extend to a completely separate set
+of programs written for a different purpose.
+
+Combined with §3A.1 (in-corpus held-out generalization) and §3A.4
+(feature audit), the validation picture for v3 is:
+
+- **CF / DCE / CSE / LICM**: validated across two independent
+  generalization checks. Coefficients trustworthy for production
+  decisions. Confidence values in `trained_pass_coefficients()` are
+  reasonable.
+- **strength_reduce**: passes §3A.3 (cross-corpus stays in the robust
+  band) but fails §3A.1 (in-corpus held-out is 2.23× the training
+  RMSE). The two findings together pin SR's failure mode: the
+  pass-native diagnostic count is intrinsically noisy as a signal,
+  *uniformly* across corpora. Recommendation unchanged from §3A.1:
+  flag SR's confidence in `trained_pass_coefficients()` doc-comment,
+  or downgrade the confidence value to reflect the cross-validated
+  RMSE rather than the training RMSE.
+- **`alloc_sites` blind spot (§3A.4)**: still unaddressed. Neither
+  validation set has `alloc_sites > 0`, so both checks are silent
+  on the dimension. Production gate (warn on out-of-distribution
+  features) remains the right fix.
+
+### What §3A.3 does NOT cover
+
+- **Real-workload behaviour.** Even with external robustness, the
+  pass_ordering programs are still hand-written micro-benchmarks. A
+  real CJC-Lang program with hundreds of functions, deep call graphs,
+  and tensors will have different feature distributions than either
+  corpus. §3A.2 (chess RL / PINN / LendingClub AB test) is the
+  experiment for that.
+- **Compile-time vs runtime impact.** §3A.3 measures *prediction*
+  RMSE, not *runtime decision* quality. If two PassPlans both
+  produce similar runtime improvements, the model's RMSE on the
+  benefit metric doesn't tell us which plan is better. §3A.2 is
+  also the right experiment for this.
+- **Corpus-of-corpora.** Two corpora is a small sample. The real
+  generalization story would need 5+ external corpora to be
+  statistically robust. Pragmatically, the v3 model is "validated
+  enough to ship with caveats" — not "validated enough to be a
+  production-grade ML system." The framing in the README should
+  reflect this.
+
+### Reproducibility receipt — Phase 4
+
+Phase 4 output is bit-identical across runs (verified by two-run
+diff). Same fit_ols_gd, same deterministic Option A signal, same
+external corpus snapshot — output stable.

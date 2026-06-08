@@ -36,6 +36,9 @@ use cjc_mir::{MirBody, MirExpr, MirExprKind, MirProgram, MirStmt};
 mod programs;
 use programs::{Program, PROGRAMS};
 
+mod external_corpus;
+use external_corpus::EXTERNAL_PROGRAMS;
+
 // ---------------------------------------------------------------------------
 // Measurement constants
 // ---------------------------------------------------------------------------
@@ -402,6 +405,97 @@ fn fit_ols_gd(
     )
 }
 
+/// Print a per-feature distribution report over the training corpus.
+///
+/// For each of the 4 features (expr_count, loop_depth, branch_count,
+/// alloc_sites) we report min/q25/q50/q75/max and the unique-value count.
+/// Features with `unique <= 2` or `max == 0` get a WARNING — they
+/// effectively don't contribute signal to the OLS fit, so the
+/// corresponding coefficient is meaningless and the model is implicitly
+/// extrapolating on any real program that varies along that axis.
+///
+/// Implements §3A.4 (steps 1-2) from the cost-model handoff. Step 3-4
+/// (corpus augmentation + drift comparison) are deferred follow-up.
+fn print_feature_audit(points: &[TrainingPoint]) {
+    println!();
+    println!("============================================================");
+    println!("§3A.4 — Feature distribution audit");
+    println!("============================================================");
+    if points.is_empty() {
+        println!("(no points — skipping)");
+        return;
+    }
+
+    let n = points.len();
+    let features: [(&str, fn(&TrainingPoint) -> f64); 4] = [
+        ("expr_count", |p| p.expr_count),
+        ("loop_depth", |p| p.loop_depth),
+        ("branch_count", |p| p.branch_count),
+        ("alloc_sites", |p| p.alloc_sites),
+    ];
+
+    println!(
+        "{:<14} {:>7} {:>7} {:>7} {:>7} {:>7} {:>8}",
+        "feature", "min", "q25", "q50", "q75", "max", "unique",
+    );
+    println!("{}", "-".repeat(66));
+
+    let mut warnings: Vec<String> = Vec::new();
+    for (name, get) in features {
+        let mut vals: Vec<f64> = points.iter().map(get).collect();
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let min = vals[0];
+        let max = *vals.last().unwrap();
+        let q25 = vals[n / 4];
+        let q50 = vals[n / 2];
+        let q75 = vals[(3 * n) / 4];
+        let unique: usize = {
+            let mut seen: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+            for v in &vals {
+                seen.insert(v.to_bits());
+            }
+            seen.len()
+        };
+
+        println!(
+            "{:<14} {:>7.1} {:>7.1} {:>7.1} {:>7.1} {:>7.1} {:>8}",
+            name, min, q25, q50, q75, max, unique,
+        );
+
+        if unique <= 2 {
+            warnings.push(format!(
+                "  WARNING: feature `{}` has only {} unique value(s) in corpus.\n           Trained coefficient is effectively meaningless — the OLS fit\n           cannot distinguish this column from a constant. Real programs\n           that vary along `{}` will get extrapolated predictions.",
+                name, unique, name,
+            ));
+        }
+        if max == 0.0 {
+            warnings.push(format!(
+                "  WARNING: feature `{}` is zero across the entire corpus.\n           Coefficient `w_{}` is mathematically free; OLS sets it to 0.\n           Adds zero signal to predictions on programs where `{} > 0`.",
+                name, name, name,
+            ));
+        }
+    }
+
+    if warnings.is_empty() {
+        println!();
+        println!("All four features have variance > 2 and non-zero range.");
+        println!("Trained model is not blind on any feature dimension.");
+    } else {
+        println!();
+        for w in &warnings {
+            println!("{}", w);
+        }
+        println!();
+        println!(
+            "Total feature blind spots: {}. The trained model is implicitly",
+            warnings.len(),
+        );
+        println!("extrapolating on these dimensions. §3A.4 follow-up: extend the");
+        println!("corpus with programs that exercise these features non-trivially");
+        println!("(see docs/cana/CANA_COST_MODEL_TRAINING_FINDINGS.md §12).");
+    }
+}
+
 /// Evaluate a fitted model on held-out data. Returns RMSE in raw (unnormalized)
 /// feature space, matching what `FitCoefs` stores.
 fn evaluate_fit(fit: &FitCoefs, test_pts: &[&TrainingPoint]) -> f64 {
@@ -534,6 +628,8 @@ fn main() {
         train_points.len(),
         test_points.len(),
     );
+
+    print_feature_audit(&all_points);
 
     println!("\n=== Phase 2: per-pass OLS fits ===");
     let mut fits: BTreeMap<String, FitCoefs> = BTreeMap::new();
@@ -684,5 +780,103 @@ fn main() {
             "overfit — downgrade claims"
         };
         println!("  {:<20} ratio={:>5.2}  →  {}", pass, ratio, verdict);
+    }
+
+    // =========================================================================
+    // Phase 4: Cross-corpus validation (§3A.3 from CANA handoff)
+    // =========================================================================
+    //
+    // §3A.1 measured generalization within our 73-program corpus by holding
+    // out 25%. §3A.3 asks a harder question: does the trained model
+    // generalize to programs hand-written by a *different* author for a
+    // *different* purpose? We evaluate the full-corpus Phase 2 fit against
+    // the 8 programs in bench/cana_pass_ordering (snapshotted in
+    // external_corpus.rs). If the external RMSE is close to held-out RMSE
+    // from Phase 3, the model is robust across authors. If external RMSE
+    // is much worse, the model has overfit to the corpus author's style
+    // (here: the integer-arithmetic emphasis from `programs.rs`).
+    println!();
+    println!("============================================================");
+    println!("§3A.3 — Cross-corpus validation");
+    println!("============================================================");
+    println!(
+        "External corpus: bench/cana_pass_ordering, {} programs (snapshotted",
+        EXTERNAL_PROGRAMS.len(),
+    );
+    println!("in external_corpus.rs). Evaluating the full-corpus Phase 2 fit.");
+    println!();
+
+    let mut ext_points: Vec<TrainingPoint> = Vec::new();
+    for (i, prog) in EXTERNAL_PROGRAMS.iter().enumerate() {
+        let pts = collect_training_points(prog);
+        println!(
+            "  [{:>1}/{}] {:<14} {} points",
+            i + 1,
+            EXTERNAL_PROGRAMS.len(),
+            prog.name,
+            pts.len(),
+        );
+        ext_points.extend(pts);
+    }
+    println!("Collected {} external points.", ext_points.len());
+    println!();
+    println!(
+        "{:<20} {:>6} {:>11} {:>10} {:>11} {:>10} {:>8}",
+        "pass", "N_ext", "train_rmse", "ext_rmse", "held_out", "ext/trn", "ext/held",
+    );
+    println!("{}", "-".repeat(80));
+
+    for &pass in TARGET_PASSES {
+        let ext_pts: Vec<&TrainingPoint> = ext_points.iter().filter(|p| p.pass == pass).collect();
+        let Some(full_fit) = fits.get(pass) else { continue };
+
+        let ext_rmse = evaluate_fit(full_fit, &ext_pts);
+        let train_rmse = full_fit.train_rmse;
+        let held_out_rmse = held_out_fits.get(pass).map(|(_, r)| *r).unwrap_or(0.0);
+
+        let ratio_train = if train_rmse > 1e-9 {
+            ext_rmse / train_rmse
+        } else {
+            f64::NAN
+        };
+        let ratio_held = if held_out_rmse > 1e-9 {
+            ext_rmse / held_out_rmse
+        } else {
+            f64::NAN
+        };
+
+        println!(
+            "{:<20} {:>6} {:>11.4} {:>10.4} {:>11.4} {:>10.2} {:>8.2}",
+            pass,
+            ext_pts.len(),
+            train_rmse,
+            ext_rmse,
+            held_out_rmse,
+            ratio_train,
+            ratio_held,
+        );
+    }
+    println!();
+    println!("Verdict (cross-corpus generalization):");
+    for &pass in TARGET_PASSES {
+        let ext_pts: Vec<&TrainingPoint> = ext_points.iter().filter(|p| p.pass == pass).collect();
+        let Some(full_fit) = fits.get(pass) else { continue };
+        let ext_rmse = evaluate_fit(full_fit, &ext_pts);
+        let held_out_rmse = held_out_fits.get(pass).map(|(_, r)| *r).unwrap_or(0.0);
+        let ratio = if held_out_rmse > 1e-9 {
+            ext_rmse / held_out_rmse
+        } else {
+            f64::NAN
+        };
+        let verdict = if ratio.is_nan() {
+            "(no signal)"
+        } else if ratio <= 1.5 {
+            "external matches held-out — robust"
+        } else if ratio <= 2.5 {
+            "external worse than held-out — corpus-style dependency"
+        } else {
+            "external much worse — model overfit to corpus author"
+        };
+        println!("  {:<20} ext/held={:>5.2}  →  {}", pass, ratio, verdict);
     }
 }
