@@ -1036,27 +1036,53 @@ fn cmd_run_formatted(source: &str, filename: &str, config: &Config) {
         process::exit(EXIT_PARSE);
     }
 
-    let mut interpreter = cjc_eval::Interpreter::new(config.seed);
-    match interpreter.exec(&program) {
-        Ok(_) => {
-            let lines = &interpreter.output;
-            match config.output_format {
-                OutputFormat::Json => {
-                    // Emit JSON array of output lines
-                    let items: Vec<String> = lines.iter().map(|l| json_escape(l)).collect();
-                    println!("{{\"ok\":true,\"output\":[{}]}}", items.join(","));
-                }
-                OutputFormat::Csv => {
-                    for line in lines {
-                        println!("{}", line);
-                    }
-                }
-                OutputFormat::Plain => unreachable!(),
-            }
+    // Dispatch to the same execution path as cmd_run, capturing output via
+    // the appropriate _with_executor variant for MIR paths. Previously this
+    // function hardcoded the AST interpreter, silently ignoring --mir-opt,
+    // --thermal-aware, and --mir-mono when combined with --format json/csv.
+    //
+    // Priority order matches cmd_run:
+    //   --mir-mono → run_program_monomorphized_with_executor
+    //   --thermal-aware → run_program_optimized_thermal_aware_with_executor
+    //   --mir-opt → run_program_optimized_with_executor
+    //   (none) → cjc_eval::Interpreter (AST tree-walk, original behavior)
+    let exec_result: Result<Vec<String>, String> = if config.mir_mono {
+        cjc_mir_exec::run_program_monomorphized_with_executor(&program, config.seed)
+            .map(|(_, exec)| exec.output)
+            .map_err(|e| format!("{}", e))
+    } else if config.thermal_aware {
+        cjc_mir_exec::run_program_optimized_thermal_aware_with_executor(&program, config.seed)
+            .map(|(_, exec)| exec.output)
+            .map_err(|e| format!("{}", e))
+    } else if config.mir_opt {
+        cjc_mir_exec::run_program_optimized_with_executor(&program, config.seed)
+            .map(|(_, exec)| exec.output)
+            .map_err(|e| format!("{}", e))
+    } else {
+        let mut interpreter = cjc_eval::Interpreter::new(config.seed);
+        match interpreter.exec(&program) {
+            Ok(_) => Ok(interpreter.output.clone()),
+            Err(e) => Err(format!("{}", e)),
         }
+    };
+
+    match exec_result {
+        Ok(lines) => match config.output_format {
+            OutputFormat::Json => {
+                // Emit JSON array of output lines
+                let items: Vec<String> = lines.iter().map(|l| json_escape(l)).collect();
+                println!("{{\"ok\":true,\"output\":[{}]}}", items.join(","));
+            }
+            OutputFormat::Csv => {
+                for line in lines {
+                    println!("{}", line);
+                }
+            }
+            OutputFormat::Plain => unreachable!(),
+        },
         Err(e) => {
             if config.output_format == OutputFormat::Json {
-                println!("{{\"ok\":false,\"error\":{}}}", json_escape(&format!("{}", e)));
+                println!("{{\"ok\":false,\"error\":{}}}", json_escape(&e));
             } else {
                 eprintln!("{}", e);
             }

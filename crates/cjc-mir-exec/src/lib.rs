@@ -4844,6 +4844,30 @@ pub fn run_program_monomorphized(program: &cjc_ast::Program, seed: u64) -> MirEx
     executor.exec(&optimized)
 }
 
+/// [`run_program_monomorphized`] variant that returns the [`MirExecutor`]
+/// for post-execution inspection (output capture, GC stats). Mirrors the
+/// [`run_program_optimized_with_executor`] pair convention.
+pub fn run_program_monomorphized_with_executor(
+    program: &cjc_ast::Program,
+    seed: u64,
+) -> Result<(Value, MirExecutor), MirExecError> {
+    let mut ast_lowering = cjc_hir::AstLowering::new();
+    let hir = ast_lowering.lower_program(program);
+
+    let mut hir_to_mir = cjc_mir::HirToMir::new();
+    let mir = hir_to_mir.lower_program(&hir);
+
+    let (monomorphized, _report) = cjc_mir::monomorph::monomorphize_program(&mir);
+
+    let mut optimized = cjc_mir::optimize::optimize_program(&monomorphized);
+    cjc_mir::escape::annotate_program(&mut optimized);
+
+    let mut executor = MirExecutor::new(seed);
+    executor.scan_ast_imports(program);
+    let result = executor.exec(&optimized)?;
+    Ok((result, executor))
+}
+
 /// Run a multi-file CJC program starting from the entry file path.
 ///
 /// This function:
