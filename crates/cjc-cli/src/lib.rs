@@ -100,14 +100,22 @@ struct Config {
     reproducible: bool,
     time: bool,
     mir_opt: bool,
-    /// `--thermal-aware`: when set, use the NSS-backed thermal-aware
-    /// cost model wrapping the trained LinearCostModel. Implies
-    /// `--mir-opt`. Today (NSS bridge in Option C mode) the predictor
-    /// returns empty maps, so the thermal layer is a behavioural no-op
-    /// vs `--mir-opt` alone — wired for forward compatibility with
-    /// future Option A/B migrations that produce real thermal signal.
-    /// See `docs/cana/CANA_PHASE_4_NSS_BRIDGE_DESIGN_OPTIONS.md`.
+    /// `--thermal-aware`: thermal-aware MIR optimization through the
+    /// NSS-backed cost model. **As of §20, this is the default behavior
+    /// when `--mir-opt` is set** — passing `--thermal-aware` explicitly
+    /// is now redundant but still accepted for documentation /
+    /// scripting clarity.
+    ///
+    /// Use `--no-thermal-aware` to opt back into the conservative
+    /// hand-tuned `LinearCostModel::new()` path without NSS thermal
+    /// predictions.
     thermal_aware: bool,
+    /// `--no-thermal-aware`: opt-out of the new default. When set with
+    /// `--mir-opt`, falls back to the pre-§20 hand-tuned cost model
+    /// (`LinearCostModel::new()` + no NSS thermal wrapper). Useful for
+    /// regression testing or for users who explicitly want the
+    /// older, simpler optimization decisions.
+    no_thermal_aware: bool,
     mir_mono: bool,
     multi_file: bool,
     use_color: bool,
@@ -125,6 +133,7 @@ const KNOWN_FLAGS: &[&str] = &[
     "--time",
     "--mir-opt",
     "--thermal-aware",
+    "--no-thermal-aware",
     "--mir-mono",
     "--cana-report",
     "--multi-file",
@@ -242,6 +251,7 @@ impl Config {
                     time: false,
                     mir_opt: false,
                     thermal_aware: false,
+                    no_thermal_aware: false,
                     mir_mono: false,
                     multi_file: false,
                     use_color: true,
@@ -257,6 +267,7 @@ impl Config {
         let mut time = false;
         let mut mir_opt = false;
         let mut thermal_aware = false;
+        let mut no_thermal_aware = false;
         let mut mir_mono = false;
         let mut multi_file = false;
         let mut force_color: Option<bool> = None;
@@ -271,14 +282,19 @@ impl Config {
                 "--reproducible" => reproducible = true,
                 "--time" => time = true,
                 "--mir-opt" => mir_opt = true,
-                // --thermal-aware implies --mir-opt: thermal-aware ranking
-                // only makes sense when MIR optimization is being run.
-                // Setting both flags is fine; the thermal flag dominates
-                // the cost-model selection.
+                // --thermal-aware: explicitly opt into thermal-aware
+                // optimization (as of §20 this is also implicit when
+                // --mir-opt is set without --no-thermal-aware). Implies
+                // --mir-opt because thermal-aware ranking only makes
+                // sense when optimization is being run.
                 "--thermal-aware" => {
                     thermal_aware = true;
                     mir_opt = true;
                 }
+                // --no-thermal-aware: opt-OUT of the new default. With
+                // --mir-opt, falls back to the conservative hand-tuned
+                // LinearCostModel::new() + no NSS thermal wrapper.
+                "--no-thermal-aware" => no_thermal_aware = true,
                 "--mir-mono" => mir_mono = true,
                 "--multi-file" => multi_file = true,
                 // CANA Phase-1 sidecar emission. Two forms:
@@ -404,6 +420,18 @@ impl Config {
             (Some(positional[1].clone()), None)
         };
 
+        // §20: --mir-opt now defaults to thermal-aware behavior unless
+        // --no-thermal-aware was explicitly passed. Computed here so the
+        // CLI dispatch logic doesn't need to know the resolution rule.
+        let effective_thermal_aware = if no_thermal_aware {
+            // User explicit opt-out wins over any other flag.
+            false
+        } else {
+            // Either explicit --thermal-aware, OR --mir-opt (which now
+            // implies thermal-aware as the post-§20 standard).
+            thermal_aware || mir_opt
+        };
+
         Config {
             command,
             filename,
@@ -412,7 +440,8 @@ impl Config {
             reproducible,
             time,
             mir_opt,
-            thermal_aware,
+            thermal_aware: effective_thermal_aware,
+            no_thermal_aware,
             mir_mono,
             multi_file,
             use_color,
@@ -816,8 +845,9 @@ fn print_usage() {
     eprintln!("  --reproducible                   Enable reproducibility mode");
     eprintln!("  --seed <N>                       Set RNG seed (default: 42)");
     eprintln!("  --time                           Print execution time after running");
-    eprintln!("  --mir-opt                        Enable MIR optimizations (CF + DCE)");
-    eprintln!("  --thermal-aware                  Enable NSS-backed thermal-aware ranking (implies --mir-opt)");
+    eprintln!("  --mir-opt                        Enable MIR optimizations (defaults to thermal-aware)");
+    eprintln!("  --thermal-aware                  Explicit thermal-aware (now the default; redundant with --mir-opt)");
+    eprintln!("  --no-thermal-aware               Opt out of thermal-aware default (use hand-tuned LinearCostModel)");
     eprintln!("  --mir-mono                       Enable MIR monomorphization");
     eprintln!("  --cana-report <path>             Emit CANA Phase-1 MIR feature sidecar to <path>");
     eprintln!("  --multi-file                     Enable multi-file module resolution");
@@ -985,12 +1015,25 @@ fn cmd_run(source: &str, filename: &str, config: &Config) {
                 process::exit(EXIT_RUNTIME);
             }
         } else if config.thermal_aware {
-            // --thermal-aware: wrap the trained LinearCostModel in
-            // ThermalAwareCostModel<_, NssPressurePredictor>. Currently a
-            // no-op vs --mir-opt because Option C's NssPressurePredictor
-            // returns empty thermal maps (validated by §3A.2 PINN AB-test
-            // and cjc-cana-nss integration tests). Wired now so future
-            // Option A/B migrations land transparently.
+            // §20: thermal-aware MIR optimization is the new default for
+            // `cjcl run --mir-opt`. The `thermal_aware` field of Config
+            // resolves to:
+            //   - true  when --thermal-aware OR --mir-opt is set AND
+            //           --no-thermal-aware is NOT set
+            //   - false when --no-thermal-aware is explicitly set, OR
+            //           neither --thermal-aware nor --mir-opt is set
+            //
+            // Cost model: ThermalAwareCostModel<LinearCostModel::trained(),
+            // NssPressurePredictor (Option A — synthetic-trace
+            // projection)>. PerPassLegalityGate (§19) lets CF/DCE/LICM
+            // through regardless of strict-reduction count; CSE/SR
+            // remain blocked when strict_count > 0.
+            //
+            // The thermal predictions populate per-function maps but
+            // current trainable passes (CF/SR/DCE/CSE/LICM) are NOT in
+            // THERMALLY_AGGRESSIVE_PASSES, so the predictions don't
+            // change PassPlans today. Future passes (loop_unroll,
+            // vectorize) will automatically benefit.
             if let Err(e) =
                 cjc_mir_exec::run_program_optimized_thermal_aware(&program, config.seed)
             {
@@ -998,6 +1041,10 @@ fn cmd_run(source: &str, filename: &str, config: &Config) {
                 process::exit(EXIT_RUNTIME);
             }
         } else if config.mir_opt {
+            // Only reached when --mir-opt is set WITH --no-thermal-aware
+            // — the user has explicitly opted out of the new default.
+            // Uses the conservative hand-tuned LinearCostModel::new()
+            // + DefaultLegalityGate (via cana_plan_for).
             if let Err(e) = cjc_mir_exec::run_program_optimized(&program, config.seed) {
                 eprintln!("{}", e);
                 process::exit(EXIT_RUNTIME);
@@ -1041,10 +1088,11 @@ fn cmd_run_formatted(source: &str, filename: &str, config: &Config) {
     // function hardcoded the AST interpreter, silently ignoring --mir-opt,
     // --thermal-aware, and --mir-mono when combined with --format json/csv.
     //
-    // Priority order matches cmd_run:
+    // Priority order matches cmd_run (and §20 thermal-aware default):
     //   --mir-mono → run_program_monomorphized_with_executor
-    //   --thermal-aware → run_program_optimized_thermal_aware_with_executor
-    //   --mir-opt → run_program_optimized_with_executor
+    //   thermal_aware (= --thermal-aware OR --mir-opt without --no-thermal-aware)
+    //                 → run_program_optimized_thermal_aware_with_executor
+    //   --mir-opt with --no-thermal-aware → run_program_optimized_with_executor
     //   (none) → cjc_eval::Interpreter (AST tree-walk, original behavior)
     let exec_result: Result<Vec<String>, String> = if config.mir_mono {
         cjc_mir_exec::run_program_monomorphized_with_executor(&program, config.seed)

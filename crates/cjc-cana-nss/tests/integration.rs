@@ -36,7 +36,7 @@ fn parse_and_lower(source: &str) -> cjc_mir::MirProgram {
 }
 
 // ---------------------------------------------------------------------------
-// Empty-map contract
+// Option A: non-empty maps + value range + determinism
 // ---------------------------------------------------------------------------
 
 const SIMPLE_PROGRAM: &str = r#"
@@ -47,30 +47,62 @@ print(add(1, 2));
 "#;
 
 #[test]
-fn predict_thermal_is_empty_on_real_program() {
+fn predict_thermal_is_populated_on_real_program() {
+    // Option A contract: predict_thermal returns one entry per featurized
+    // function (excluding synthetic ones not in CanaFeatures). The exact
+    // values depend on the synthesis heuristic + NSS adapter, but the
+    // map must be non-empty and every value in [0, 1].
     let p = NssPressurePredictor::default();
     let mir = parse_and_lower(SIMPLE_PROGRAM);
     let features = analyze_program(&mir).features;
-    assert!(
-        p.predict_thermal(&mir, &features).is_empty(),
-        "Option C contract: predict_thermal must return an empty map",
-    );
+    let map = p.predict_thermal(&mir, &features);
+    assert!(!map.is_empty(), "Option A: predict_thermal must populate the map");
+    for (fname, v) in &map {
+        assert!(
+            (0.0..=1.0).contains(v),
+            "thermal magnitude for {} out of [0, 1]: {}",
+            fname,
+            v
+        );
+    }
 }
 
 #[test]
-fn predict_memory_peak_is_empty_on_real_program() {
+fn predict_memory_peak_is_populated_on_real_program() {
     let p = NssPressurePredictor::default();
     let mir = parse_and_lower(SIMPLE_PROGRAM);
     let features = analyze_program(&mir).features;
-    assert!(p.predict_memory_peak(&mir, &features).is_empty());
+    let map = p.predict_memory_peak(&mir, &features);
+    assert!(!map.is_empty());
+    for (_, v) in &map {
+        assert!((0.0..=1.0).contains(v));
+    }
 }
 
 #[test]
-fn predict_cpu_saturation_is_empty_on_real_program() {
+fn predict_cpu_saturation_is_populated_on_real_program() {
     let p = NssPressurePredictor::default();
     let mir = parse_and_lower(SIMPLE_PROGRAM);
     let features = analyze_program(&mir).features;
-    assert!(p.predict_cpu_saturation(&mir, &features).is_empty());
+    let map = p.predict_cpu_saturation(&mir, &features);
+    assert!(!map.is_empty());
+    for (_, v) in &map {
+        assert!((0.0..=1.0).contains(v));
+    }
+}
+
+#[test]
+fn predict_thermal_is_deterministic_across_runs() {
+    // Same input → byte-identical map every time. This is the core
+    // determinism contract for any future NSS audit trail.
+    let p = NssPressurePredictor::default();
+    let mir = parse_and_lower(SIMPLE_PROGRAM);
+    let features = analyze_program(&mir).features;
+    let baseline = p.predict_thermal(&mir, &features);
+    for _ in 0..20 {
+        let m = p.predict_thermal(&mir, &features);
+        assert_eq!(m, baseline, "predict_thermal must be deterministic");
+    }
 }
 
 // ---------------------------------------------------------------------------
