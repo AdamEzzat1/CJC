@@ -1,10 +1,120 @@
 # §4B.5 — Second-NN Composition with NSS: Design Options
 
-**Status:** decision pending. Authored 2026-06-08. Sibling docs:
+**Status:** **partially shipped** — see §0 below. Authored 2026-06-08,
+revised same day after a sharp reader observation forced a re-framing.
+Sibling docs:
 [`CANA_PHASE_4_NSS_BRIDGE_DESIGN_OPTIONS.md`](CANA_PHASE_4_NSS_BRIDGE_DESIGN_OPTIONS.md)
 (§4B.2 bridge crate) and
 [`CANA_PHASE_4_KERNEL_VARIANT_DESIGN_OPTIONS.md`](CANA_PHASE_4_KERNEL_VARIANT_DESIGN_OPTIONS.md)
 (§4B.4 kernel variants).
+
+---
+
+## 0. Already shipped: Option 5 — Downstream-consumer composition (CANA ← NSS)
+
+**The most obvious composition was missing from the original four
+options.** The first draft of this document enumerated three options
+where the "second NN" was a separate entity *producing* outputs into
+NSS (audit-trace consumer, pressure-field interlingua, learned-feature
+extractor) plus a fourth alternative with no NSS coupling. None of
+those describe what we've already built. Option 5 — the
+**downstream-consumer** pattern — does:
+
+```
+Compile  →  MIR  →  CANA features
+                       ↓
+                  NSS Pressure-                  ↓
+                  Predictor                  CANA's
+                       ↓                  LinearCostModel
+                  pressure_map  →  ThermalAwareCostModel
+                                            ↓
+                                       adjusted_cost
+                                            ↓
+                                       CANA's PassRanker
+                                            ↓
+                                         PassPlan
+```
+
+The second NN (CANA's trained `LinearCostModel`) is **downstream** of
+NSS in the data flow. NSS produces pressure predictions; CANA's
+`ThermalAwareCostModel` reads those predictions and uses them to adjust
+its own per-pass benefit estimates; CANA's `PassRanker` then produces
+the `PassPlan` consumed by `cjc-mir-exec`.
+
+This is what `cjc-cana-nss::NssPressurePredictor` +
+`cjc_cana::thermal_cost_model::ThermalAwareCostModel` already implement
+end-to-end, wired through `cjcl run --thermal-aware` as of §4B.3 and
+validated three-way byte-identical in §15.
+
+### What "second NN" reads naturally
+
+CANA's `LinearCostModel` is a learned model:
+
+- Coefficients fit by OLS gradient descent on a 73-program corpus
+  (`bench/cana_train_cost_model/`).
+- Takes 4 features per `(function, pass)` pair (expr_count, loop_depth,
+  branch_count, alloc_sites).
+- Produces per-pass benefit predictions in `[0, 1]`.
+- Is not a *deep* neural network (no hidden layers, no nonlinearities)
+  but is unambiguously a trained statistical model.
+
+If "the second NN" in the NSS handoff §5 refers to CANA — and based on
+the architectural fact that CANA is the existing compile-time learned
+model wired to NSS — then the composition pattern has been chosen and
+shipped. It's Option 5.
+
+### What's open under this reading
+
+The composition *pattern* is fixed. What's not yet active is the
+**signal flow**:
+
+- `NssPressurePredictor` in Option C mode returns empty thermal maps.
+- `ThermalAwareCostModel.predict_thermal(...).get(name).unwrap_or(0.0)`
+  evaluates to 0.0 for every function.
+- So the thermal adjustment is a no-op today, exactly matching the
+  §3A.2 and §15 byte-identity findings.
+
+The composition activates when:
+
+1. `NssPressurePredictor` migrates from Option C to Option A (synthetic
+   trace, see §4B.2 doc) or Option B (real MIR-exec instrumentation),
+   AND
+2. The base ranker starts producing differential decisions on real
+   workloads (corpus expansion or threshold tuning),
+
+after which the existing `ThermalAwareCostModel` plumbing will start
+producing measurably different `PassPlan`s under `--thermal-aware` vs
+`--mir-opt`. No further composition-architecture work is needed at
+that point; the wiring is already correct.
+
+### When the remaining options below DO apply
+
+The four options in §1-§4 below describe how to compose a
+**genuinely additional** learned model with NSS — one that isn't
+CANA's `LinearCostModel`. Examples:
+
+- A deep network trained on PINN-shaped programs to predict per-pass
+  benefit better than CANA's 4-feature linear model.
+- A learned static-analysis model that predicts thermal pressure
+  directly from MIR shape (effectively Option A for §4B.2's
+  `NssPressurePredictor`, but with the prediction sourced from an ML
+  model instead of a hand-coded synthesis heuristic).
+- An ML-driven kernel-variant selector that replaces
+  `KernelVariant::select_for_budget` (§4B.4 Option α's
+  `PressureAwareSelector`) with a learned decision boundary.
+
+In any of those scenarios, the four options below are the design
+choices for how that **new** model composes with the existing
+NSS + CANA pipeline. So they're still relevant — they just don't
+describe the CANA ↔ NSS bridge, which is already done.
+
+---
+
+The four options that follow describe **genuinely separate**
+neural networks (not CANA) and how each would compose with NSS. If
+you're not planning to add such a model, the only thing this doc
+contributes beyond §0 is forward-compatible thinking for a possible
+future.
 
 ---
 
@@ -325,26 +435,33 @@ Option 1 isolates that non-determinism behind a clean serialization
 boundary. The second NN can be the messy reality-of-ML model it
 wants to be, and NSS-side determinism stays clean.
 
-### But I need your input first
+### But this only applies if you're adding a NEW model
 
-I'm reluctant to scaffold any of these without knowing:
+Per §0 above, if "second NN" means CANA's existing `LinearCostModel`,
+the composition is done. The four options 1-3 (plus 4 as the no-NSS
+alternative) describe how a **future, additional** learned model would
+compose. If no such model is being added, this entire doc beyond §0
+is forward-compatible thinking, not a pending decision.
 
-1. What does the second NN actually predict?
+If you ARE planning an additional model on top of CANA + NSS:
+
+1. What does the new model predict?
 2. What does it consume as input?
-3. Is it deterministic?
-4. Is it being trained alongside NSS or separately?
+3. Is it deterministic (BTreeMap iteration, no FMA, fixed RNG)?
+4. Is it co-trained with NSS or developed separately?
 
-The right composition point genuinely depends on those answers. If
-you can answer them, I can write a concrete §4B.5 design doc for the
-chosen option (or a minor variant) and scaffold the matching bridge
-crate the same way §4B.2 Option C went.
-
-Without those answers, scaffolding anything would be a guess at what
-shape the integration should take.
+The right composition point genuinely depends on those answers. With
+them I can write a focused implementation design doc the same way
+§4B.2 went. Without them, scaffolding would be a guess.
 
 ### Next-step proposal
 
-When you're ready:
+If you don't have a separate model in flight: **§4B.5 is done as
+Option 5**. The composition pattern is shipped. Activation happens
+automatically when §4B.2 migrates from Option C to A or B. No further
+work on this item is needed today.
+
+If you DO have a separate model:
 
 1. **You send a short note** answering the four questions above.
 2. **I write a focused §4B.5 design doc** for the matched composition
