@@ -1329,6 +1329,137 @@ print(branchy_loop(50));
 "#;
 
 // ============================================================================
+// §17 Option A — PINN-shaped programs (push loop_depth/branch_count
+//                coefficients less negative so small loop-and-branch
+//                functions don't clamp to zero)
+// ============================================================================
+//
+// The §17 threshold probe revealed that on PINN, every candidate
+// (function, pass) pair produced `predicted_benefit = 0` because the
+// linear cost model's `raw` value was NEGATIVE before the clamp:
+//
+//   raw = w_expr_count × expr_count
+//       + w_loop_depth × loop_depth          (negative coeff!)
+//       + w_branch_count × branch_count      (negative coeff!)
+//       + w_alloc_sites × alloc_sites
+//
+// For small PINN functions (expr_count ≈ 15, loop_depth = 1,
+// branch_count = 1, alloc_sites = 0), the negative loop_depth and
+// branch_count contributions overwhelm the small positive
+// expr_count contribution → raw < 0 → clamp to 0 → drop.
+//
+// Per the §17 doc Option A, the cheapest fix is to add 5-10
+// programs with PINN's structural shape — small functions with
+// non-trivial loops and at least one branch, exercising one of
+// the trainable passes measurably. The OLS fit will see that
+// these (small, looping, branching) feature combinations DO
+// produce non-trivial pass benefits, and the coefficients on
+// loop_depth and branch_count will become less negative.
+//
+// Target shape per program: 15-50 expr_count, max_loop_depth
+// ∈ {1, 2}, branch_count ∈ {1, 2, 3}, alloc_sites = 0. Each
+// program exercises a clear trainable pass (LICM, SR, or CF).
+
+const PROG_PINN_INNER_ACCUM: &str = r#"
+fn inner_accum(n: i64) -> i64 {
+    let mut acc: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let factor: i64 = 5 * 7 + 3;
+        acc = acc + factor + i * 2;
+        i = i + 1;
+    }
+    return acc;
+}
+print(inner_accum(50));
+"#;
+
+const PROG_PINN_DOT_PRODUCT: &str = r#"
+fn dot_product(n: i64) -> i64 {
+    let mut sum: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let bias: i64 = 100 * 2 - 50;
+        let scale: i64 = bias + 7 * 3;
+        sum = sum + scale * i;
+        i = i + 1;
+    }
+    return sum;
+}
+print(dot_product(40));
+"#;
+
+const PROG_PINN_GRAD_STEP: &str = r#"
+fn grad_step(n: i64) -> i64 {
+    let mut w: i64 = n;
+    let mut i: i64 = 0;
+    while i < n {
+        let lr: i64 = 1 + 2 + 3;
+        let grad: i64 = w * 2 + lr;
+        w = w - grad / 4;
+        i = i + 1;
+    }
+    return w;
+}
+print(grad_step(15));
+"#;
+
+const PROG_PINN_LOSS_TERM: &str = r#"
+fn loss_term(x: i64, n: i64) -> i64 {
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let target: i64 = 2 * 5 + 1;
+        let diff: i64 = x - target + i;
+        let sq: i64 = diff * diff;
+        let weight: i64 = 7 + 3;
+        total = total + sq * weight;
+        i = i + 1;
+    }
+    return total + 100;
+}
+print(loss_term(13, 20));
+"#;
+
+const PROG_PINN_NESTED_SMALL: &str = r#"
+fn forward_proxy(n: i64) -> i64 {
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let mut j: i64 = 0;
+        while j < n {
+            let w: i64 = 3 * 7 + 1;
+            total = total + w * j;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return total;
+}
+print(forward_proxy(8));
+"#;
+
+const PROG_PINN_TANH_ESTIMATE: &str = r#"
+fn tanh_estimate(n: i64) -> i64 {
+    let mut acc: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let coef: i64 = 4 * 3 - 7;
+        let x: i64 = i - n / 2;
+        let approx: i64 = coef * x - x * x * x / 6;
+        if approx > 0 {
+            acc = acc + approx;
+        } else {
+            acc = acc - approx;
+        }
+        i = i + 1;
+    }
+    return acc;
+}
+print(tanh_estimate(20));
+"#;
+
+// ============================================================================
 // The corpus  (60 programs)
 // ============================================================================
 
@@ -1433,4 +1564,11 @@ pub const PROGRAMS: &[Program] = &[
     Program { name: "branch_ladder_12",       source: PROG_BRANCH_LADDER_12,      expected_dominant_pass: "constant_fold" },
     Program { name: "branch_nested_15",       source: PROG_BRANCH_NESTED_15,      expected_dominant_pass: "constant_fold" },
     Program { name: "branch_loop_mix",        source: PROG_BRANCH_LOOP_MIX,       expected_dominant_pass: "licm" },
+    // §17 Option A — PINN-shaped (6) — small loop+branch functions
+    Program { name: "pinn_inner_accum",       source: PROG_PINN_INNER_ACCUM,      expected_dominant_pass: "licm" },
+    Program { name: "pinn_dot_product",       source: PROG_PINN_DOT_PRODUCT,      expected_dominant_pass: "licm" },
+    Program { name: "pinn_grad_step",         source: PROG_PINN_GRAD_STEP,        expected_dominant_pass: "licm" },
+    Program { name: "pinn_loss_term",         source: PROG_PINN_LOSS_TERM,        expected_dominant_pass: "licm" },
+    Program { name: "pinn_nested_small",      source: PROG_PINN_NESTED_SMALL,     expected_dominant_pass: "licm" },
+    Program { name: "pinn_tanh_estimate",     source: PROG_PINN_TANH_ESTIMATE,    expected_dominant_pass: "constant_fold" },
 ];

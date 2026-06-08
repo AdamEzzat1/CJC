@@ -221,46 +221,75 @@ fn default_pass_coefficients(pass_name: &str) -> Option<PassCoefficients> {
 //
 // Regenerate after corpus changes or optimizer-pass changes; do not hand-edit.
 fn trained_pass_coefficients(pass_name: &str) -> Option<PassCoefficients> {
+    // §17 Option A — v5 coefficients trained on the 85-program corpus
+    // (73 original + 6 §3A.4 alloc/branch + 6 §17 PINN-shaped).
+    //
+    // Key shifts vs v3 production:
+    //   * `w_loop_depth` for CF flipped from -4.34e-3 to +3.17e-3 —
+    //     PINN-shaped programs in the corpus showed that small
+    //     functions with loops still benefit from CF. The v3 coefficient
+    //     was overweighting loop-depth as a negative signal, causing
+    //     `raw.clamp(0.0, 0.5)` to pin small loop-heavy functions at 0
+    //     (the §17 threshold probe identified this).
+    //   * `w_loop_depth` for LICM went from +3.78e-3 to +7.85e-3 —
+    //     strongly positive on functions with loops, which is
+    //     semantically correct.
+    //   * `w_alloc_sites` activated for 4 of 5 passes (§3A.4 §16 fix
+    //     carried through) — corpus has alloc-heavy programs now.
+    //   * `w_branch_count` is still negative on most passes. Reflects
+    //     that branchy programs (branch_count > 10) have fewer
+    //     opportunities for pass-native diagnostic increments on
+    //     average.
+    //
+    // Held-out (§3A.1) ratios essentially unchanged:
+    //   CF 1.13 (was 1.15), SR 2.22 (was 2.23), DCE 0.43 (was 0.42),
+    //   CSE 0.96 (was 0.94), LICM 0.83 (was 0.83).
+    //
+    // Cross-corpus (§3A.3) ratios all ≤ 1.5 — robust to author drift.
+    // Reproducible bit-for-bit on re-run.
+    //
+    // Regenerate after corpus changes or optimizer-pass changes; do
+    // not hand-edit.
     match pass_name {
         "constant_fold" | "cf" => Some(PassCoefficients {
-            w_expr_count: 7.392691e-4,   // train_rmse=0.0450, mean_benefit=0.0088
-            w_loop_depth: -4.344242e-3,
-            w_branch_count: -6.329966e-3,
-            w_alloc_sites: 0.000000e0,
+            w_expr_count: 8.006940e-4,   // train_rmse=0.0469, mean_benefit=0.0138
+            w_loop_depth: 3.165795e-3,   // §17 flip: was -4.34e-3
+            w_branch_count: -8.393307e-3,
+            w_alloc_sites: 2.261203e-2,  // §3A.4 fix: was 0.0
             base_compile_cost: 0.0500,
-            confidence: 0.6945,
+            confidence: 0.6860,
         }),
         "cse" | "common_subexpression_elimination" => Some(PassCoefficients {
-            w_expr_count: 1.639609e-4,   // train_rmse=0.0112, mean_benefit=0.0018
-            w_loop_depth: -1.078356e-3,
-            w_branch_count: -1.442550e-3,
-            w_alloc_sites: 0.000000e0,
+            w_expr_count: 1.392273e-4,   // train_rmse=0.0105, mean_benefit=0.0016
+            w_loop_depth: -6.242910e-4,
+            w_branch_count: -1.543944e-3,
+            w_alloc_sites: -1.287841e-3, // §3A.4 fix: was 0.0
             base_compile_cost: 0.0800,
-            confidence: 0.8446,
+            confidence: 0.8478,
         }),
         "dce" | "dead_code_elimination" => Some(PassCoefficients {
-            w_expr_count: 1.155845e-3,   // train_rmse=0.0670, mean_benefit=0.0113
-            w_loop_depth: -7.008318e-3,
-            w_branch_count: -9.969590e-3,
-            w_alloc_sites: 0.000000e0,
+            w_expr_count: 9.808181e-4,   // train_rmse=0.0628, mean_benefit=0.0098
+            w_loop_depth: -3.645429e-3,
+            w_branch_count: -1.090120e-2,
+            w_alloc_sites: -9.127190e-3, // §3A.4 fix: was 0.0
             base_compile_cost: 0.0400,
-            confidence: 0.5969,
+            confidence: 0.6153,
         }),
         "licm" | "loop_invariant_code_motion" => Some(PassCoefficients {
-            w_expr_count: 9.889623e-5,   // train_rmse=0.0117, mean_benefit=0.0027
-            w_loop_depth: 3.784886e-3,
-            w_branch_count: 6.220646e-4,
-            w_alloc_sites: 0.000000e0,
+            w_expr_count: 1.052997e-4,   // train_rmse=0.0121, mean_benefit=0.0036
+            w_loop_depth: 7.845437e-3,   // §17: strengthened (was +3.78e-3)
+            w_branch_count: -1.231466e-3,
+            w_alloc_sites: -2.966216e-4, // §3A.4 fix: was 0.0
             base_compile_cost: 0.0700,
-            confidence: 0.8424,
+            confidence: 0.8405,
         }),
         "strength_reduce" | "sr" => Some(PassCoefficients {
-            w_expr_count: 4.820979e-4,   // train_rmse=0.0292, mean_benefit=0.0073
-            w_loop_depth: -5.563423e-3,
-            w_branch_count: -1.259382e-3,
-            w_alloc_sites: 0.000000e0,
+            w_expr_count: 4.082048e-4,   // train_rmse=0.0275, mean_benefit=0.0066
+            w_loop_depth: -1.028890e-3,
+            w_branch_count: -4.457264e-3,
+            w_alloc_sites: -2.541548e-3, // §3A.4 fix: was 0.0
             base_compile_cost: 0.0300,
-            confidence: 0.7645,
+            confidence: 0.7720,
         }),
         _ => None,
     }

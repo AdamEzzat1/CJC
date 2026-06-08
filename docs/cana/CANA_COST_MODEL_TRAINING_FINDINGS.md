@@ -1322,3 +1322,215 @@ Output is deterministic — same coefficients, same feature
 extraction, same threshold sweep. Re-runs produce byte-identical
 Run/Skip counts. Wall-clock dominated by first-build (~45s); the
 probe itself takes < 1 second across all 9 programs.
+
+---
+
+## 18. §17 Option A executed — coefficients shifted, PINN still blocked
+
+### What was done
+
+Following the §17 Option A recommendation, the corpus was augmented
+with 6 PINN-shaped programs (small functions with `loop_depth` ∈
+{1, 2}, `branch_count` ∈ {1, 2, 3}, `alloc_sites = 0`, each
+exercising a trainable pass measurably):
+
+| Program | Shape |
+|---|---|
+| `pinn_inner_accum` | tight loop with LICM-able `factor` calculation |
+| `pinn_dot_product` | loop with two LICM-able let-bindings |
+| `pinn_grad_step` | tight loop with `lr` invariant + arithmetic |
+| `pinn_loss_term` | loop computing squared error |
+| `pinn_nested_small` | nested whiles like PINN's `forward` |
+| `pinn_tanh_estimate` | loop with an `if/else` accumulator |
+
+Corpus: 79 → 85 programs. Training points: 895 → 955.
+
+### Coefficient shifts (v4 → v5)
+
+The §17-targeted coefficient flip happened on CF as predicted:
+
+| Pass | feature | v4 (post-§3A.4) | v5 (post-§17) | Δ |
+|---|---|---|---|---|
+| CF | `w_loop_depth` | -3.534e-3 | **+3.166e-3** | **flipped sign** |
+| LICM | `w_loop_depth` | +5.861e-3 | +7.845e-3 | strengthened |
+| CF | `w_expr_count` | +7.125e-4 | +8.007e-4 | small lift |
+| CF | `w_alloc_sites` | +2.395e-2 | +2.261e-2 | essentially same |
+
+For a PINN-like function with `expr_count=20, loop_depth=2,
+branch_count=2, alloc_sites=0`:
+
+- v4 CF raw: 20 × 7.125e-4 + 2 × (-3.534e-3) + 2 × (-7.403e-3) + 0
+  = 0.01425 - 0.00707 - 0.01481 = **-0.00763** → clamp to 0
+- v5 CF raw: 20 × 8.007e-4 + 2 × (+3.166e-3) + 2 × (-8.393e-3) + 0
+  = 0.01601 + 0.00633 - 0.01679 = **+0.00555** → above 0.005 threshold ✓
+
+The §17 Option A coefficient fix is **mathematically correct** for
+the predicted case.
+
+### But PINN STILL produces zero recommendations at default threshold
+
+The threshold probe with v5 coefficients shows the same pattern as
+v3 and v4: PINN gets 0 Run at every positive threshold, 6 Run only
+at threshold = 0.0.
+
+Per-function feature dump revealed why:
+
+| Function | `expr_count` | `loop_depth` | `branch_count` | `alloc_sites` | **`strict_reds`** |
+|---|---|---|---|---|---|
+| `__main` | 0 | 0 | 0 | 0 | 0 |
+| `forward` | 113 | 2 | 4 | 2 | **4** |
+| `init_weights` | 45 | 1 | 1 | 2 | **1** |
+| `main` | 484 | 2 | 6 | 18 | **5** |
+| `perturb` | 56 | 1 | 1 | 2 | **1** |
+
+Every PINN function except the synthetic `__main` has
+`strict_reductions > 0` (from float arithmetic — `f64` reductions
+that aren't yet annotated as Kahan or BinnedAccumulator).
+`DefaultLegalityGate` rejects ANY function with `strict_count > 0`
+on ANY pass, with `LegalityViolation::StrictReductionPresent`. The
+cost-model verdict is irrelevant — the gate filters first.
+
+For `forward`, the v5 CF prediction is:
+
+  raw = 113 × 8.007e-4 + 2 × 3.166e-3 + 4 × (-8.393e-3) + 2 × 2.261e-2
+      = 0.0905 + 0.00633 − 0.03357 + 0.04522
+      = **0.108**
+
+Well above the 0.005 threshold. But `DefaultLegalityGate.verify`
+sees `strict_count = 4 > 0`, returns
+`LegalityVerdict::Rejected(StrictReductionPresent { ... })`, and the
+ranker moves the recommendation from kept to dropped with
+`RankingRationale::LegalityGateRejected`.
+
+### The real PINN activation work is in the legality gate
+
+This is a larger architectural piece than §17 territory:
+
+`DefaultLegalityGate` is Phase-1's conservative default. It assumes
+that ANY pass on a function with strict reductions could reorder
+them in unsafe ways (changing summation order across multiplied
+floats, breaking bit-identity). The Phase-1 contract says "if
+unsure, don't touch."
+
+This is the right safety stance, but it means **every float-heavy
+ML workload through CANA gets zero optimization** — PINN, but also
+the chess RL trainer, the MLP examples, any GradGraph computation.
+That's all of CJC-Lang's ML domain.
+
+What unblocks PINN-like workloads is **per-pass legality
+reasoning**: for each pass, determine which reduction-containing
+functions it can safely operate on. For example:
+
+- **CF**: only folds literal subexpressions, never touches
+  reductions. Safe on every function regardless of reductions.
+- **DCE**: removes provably-dead code. Safe iff the dead branch
+  doesn't contain a reduction the rest of the program depends on.
+- **CSE**: collapses common subexpressions. Safe iff the
+  subexpression isn't a reduction (or both occurrences are inside
+  the same reduction).
+- **LICM**: moves invariants out of loops. Safe if the invariant
+  isn't a partial reduction accumulator.
+- **SR**: rewrites `x * 2 → x + x`. Safe if the multiplication
+  isn't part of a strict reduction.
+
+So at least 2 of the 5 (CF, DCE) could be safely allowed on PINN
+with a refined gate. Probably 3 (LICM on non-reduction-invariants).
+
+### The §17 Option A coefficients ARE shipped to production
+
+Despite the PINN-specific finding, the v5 coefficients are
+structurally better than v3:
+
+1. `w_loop_depth` for CF flipped from -4.34e-3 (mathematically
+   incorrect — programs with loops still benefit from CF) to
+   +3.17e-3 (corrected sign).
+2. `w_loop_depth` for LICM strengthened from +3.78e-3 to +7.85e-3
+   (LICM benefits MORE from deeper loops, semantically correct).
+3. `w_alloc_sites` activated on 4 of 5 passes (the §3A.4 §16 fix
+   carried through).
+4. Held-out (§3A.1) ratios essentially unchanged: CF 1.13 (was
+   1.15), SR 2.22 (was 2.26), DCE 0.43, CSE 0.96, LICM 0.83. The
+   model didn't get worse on the training distribution.
+5. Cross-corpus (§3A.3) ratios all ≤ 1.5 — still robust across
+   authors.
+
+The v5 coefficients are pasted into
+[`crates/cjc-cana/src/linear_cost_model.rs`](../../crates/cjc-cana/src/linear_cost_model.rs).
+The §16 doc's reason for not shipping the v4 augmented
+coefficients ("premature until §17 sorts out threshold logic") no
+longer applies: §17 sorted it out by revealing that the legality
+gate is the upstream bottleneck. The coefficient quality
+improvements are real and independently valuable.
+
+### Side effect on pass_ordering
+
+`cana_ab_corpus` after the v5 update:
+
+  - default: 22 Run / 122 Skip (unchanged, default doesn't use trained)
+  - trained: 20 Run / 124 Skip (was 27 / 117)
+  - thermal: 20 Run / 124 Skip (identical to trained)
+
+The trained ranker now produces FEWER recommendations on
+pass_ordering than v3 did. This isn't a regression in the bug
+sense — v3's wrong-sign `w_loop_depth` for CF was causing it to
+*over-recommend* CF on small loop programs. v5's corrected sign
+brings the recommendation rate closer to default (which is hand-
+tuned). Specifically, default and trained now agree on 3 of 8
+programs (loop, mixed, nested — the three with `default = 0 Run`
+that v3 was incorrectly bumping to 1 Run).
+
+This is consistent with v5 being a structurally better model:
+both rankers should converge on the same answer for cases where
+the "obvious" answer is clear. The v3 trained model was producing
+divergent decisions because its coefficient signs were partially
+wrong; the v5 model agrees with default on those cases.
+
+### Why this matters for §4B.2 Option A migration
+
+The original §4B.2 plan (synthesize thermal predictions, route to
+CANA's cost model via ThermalAwareCostModel) assumed activating
+thermal-aware compilation would change PassPlans on real workloads.
+After today:
+
+- **For PINN and other float-heavy ML workloads**: thermal
+  predictions can't help because the legality gate already
+  rejected every candidate. NSS thermal signal is downstream of
+  the gate's veto.
+- **For pass_ordering-shaped workloads**: thermal predictions can
+  refine decisions (trained vs default already differ; thermal
+  could push some decisions across thresholds), but the magnitude
+  of refinement is bounded by the cost model's coefficient
+  precision.
+
+So §4B.2 Option A's user-visible effect is constrained to
+non-float workloads. For float-heavy ML to benefit from
+thermal-aware compilation, **the legality gate refinement is the
+required prerequisite**, not the predictor migration.
+
+### Recommendation for follow-up
+
+In priority order:
+
+1. **`PerPassLegalityGate`** — per-pass safety rules instead of
+   blanket strict-reduction rejection. CF and DCE are the
+   safest to allow first; ~1 day of work plus tests.
+2. **§4B.2 Option A migration** — synthesize trace from features
+   for `NssPressurePredictor.predict_thermal`. 3-5 days.
+3. **Empirical AB on pass_ordering** with the new gate to see if
+   thermal-aware actually changes decisions on workloads that
+   reach the cost model layer.
+
+Order (1) before (2) — there's no point in shipping thermal
+predictions if the gate is going to reject the functions they're
+predicting for.
+
+### Reproducibility
+
+```bash
+cargo run --release -p cana-threshold-probe   # PINN + 8 progs sweep
+cargo run --release -p cana-ab-corpus          # corpus-wide AB
+cargo run --release -p cana-train-cost-model   # regenerate coefficients
+```
+
+All three are deterministic per the CANA pipeline's contract.
+v5 coefficients are stable across runs.

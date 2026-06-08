@@ -237,6 +237,35 @@ fn sweep_thresholds(program_name: &str, source: &str) -> Vec<(f64, usize, usize)
 // Main
 // =============================================================================
 
+/// Print per-function feature counts. Useful for diagnosing why a
+/// program produces 0 Run-recommendations: if the cost-model predictions
+/// are above threshold but the ranker still drops them, the cause is
+/// downstream (e.g. DefaultLegalityGate rejecting functions with
+/// `strict_count > 0` from float reductions). The feature dump shows
+/// at a glance what the trained model is being asked about.
+#[allow(dead_code)]
+fn dump_features(name: &str, source: &str) {
+    let mir = parse_and_lower(source);
+    let features = analyze_program(&mir).features;
+    println!();
+    println!("--- {} feature dump (per-function) ---", name);
+    println!(
+        "  {:<22} {:>10} {:>10} {:>12} {:>11} {:>13}",
+        "function", "expr_count", "loop_depth", "branch_count", "alloc_sites", "strict_reds",
+    );
+    for (fname, ff) in &features.per_fn {
+        println!(
+            "  {:<22} {:>10} {:>10} {:>12} {:>11} {:>13}",
+            fname,
+            ff.memory.expr_count,
+            ff.cfg.max_loop_depth,
+            ff.cfg.branch_count,
+            ff.memory.alloc_sites,
+            ff.reductions.strict_count(),
+        );
+    }
+}
+
 fn main() {
     println!("============================================================");
     println!("§17 — Skip-threshold sensitivity probe");
@@ -244,8 +273,12 @@ fn main() {
     println!();
     println!("Sweeping PassRanker.skip_threshold from 1e-2 down to 0.0 on");
     println!("(a) PINN heat 1D (n_epochs=20), (b) 8 pass_ordering programs.");
-    println!("Trained ranker only — its coefficients are the v3 production set.");
+    println!("Trained ranker only — its coefficients are the v5 production set.");
     println!();
+    // Feature dump on PINN — reveals that PINN's functions have
+    // non-trivial strict reductions (from float arithmetic), which
+    // DefaultLegalityGate rejects regardless of cost-model verdict.
+    dump_features("PINN", &pinn_source_short());
 
     // PINN
     println!("============================================================");
