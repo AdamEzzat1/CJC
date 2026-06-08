@@ -414,6 +414,30 @@ pub fn default_ranker() -> PassRanker<crate::linear_cost_model::LinearCostModel,
     )
 }
 
+/// Build a ranker using the **trained** `LinearCostModel` variant. Same
+/// architecture as `default_ranker`; just swaps the coefficient source.
+///
+/// Trained coefficients are fit by `bench/cana_train_cost_model/` from
+/// wall-clock measurements over an 18-program corpus. They are NOT
+/// guaranteed to be better than hand-tuned on every program — the
+/// microsecond-scale measurement noise on small programs can exceed the
+/// per-pass benefit signal. See
+/// [`crate::linear_cost_model::LinearCostModel::trained`] for caveats.
+///
+/// Use when:
+///   - You want to A/B test trained vs hand-tuned on a real workload.
+///   - You've regenerated the trained coefficients on a corpus more
+///     representative of your target programs (and re-pasted the output
+///     into `linear_cost_model.rs`).
+///   - You're benchmarking the Phase 5 cost-model architecture itself.
+pub fn trained_ranker() -> PassRanker<crate::linear_cost_model::LinearCostModel, crate::legality::DefaultLegalityGate>
+{
+    PassRanker::new(
+        crate::linear_cost_model::LinearCostModel::trained(),
+        crate::legality::DefaultLegalityGate::new(),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Conversion: CANA's PassSequence → cjc-mir's PassPlan
 // ---------------------------------------------------------------------------

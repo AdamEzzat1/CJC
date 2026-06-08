@@ -58,6 +58,7 @@ members = [
     "crates/cjc-locke",
     "crates/cjc-cronos-gan",
     "crates/cjc-cana",
+    "bench/cana_train_cost_model",
     "bench/ad_bench",
     "bench/nlp_preprocess_bench",
     "bench/abng_micro",
