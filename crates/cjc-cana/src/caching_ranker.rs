@@ -216,8 +216,12 @@ impl<M: CostModel, G: LegalityGate> CachingPassRanker<M, G> {
 /// This is the standard entry point for Phase-5-enabled callers.
 pub fn default_caching_ranker() -> CachingPassRanker<
     crate::linear_cost_model::LinearCostModel,
-    crate::legality::DefaultLegalityGate,
+    crate::legality::PerPassLegalityGate,
 > {
+    // §19: tracks `default_ranker`'s switch from DefaultLegalityGate to
+    // PerPassLegalityGate (CF/DCE/LICM unconditionally; CSE/SR only when
+    // strict_count == 0). Unblocks float-heavy ML workloads from CANA
+    // optimization recommendations.
     CachingPassRanker::new(crate::pass_ranker::default_ranker())
 }
 

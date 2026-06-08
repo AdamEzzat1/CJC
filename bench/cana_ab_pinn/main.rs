@@ -26,7 +26,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
-use cjc_cana::legality::DefaultLegalityGate;
+use cjc_cana::legality::PerPassLegalityGate;
 use cjc_cana::pass_ranker::{trained_ranker, PassRanker};
 use cjc_cana::thermal_cost_model::ThermalAwareCostModel;
 use cjc_cana::{analyze_program, default_ranker, pass_plan_from, LinearCostModel};
@@ -131,7 +131,7 @@ fn measure_one(source: &str, ranker: Ranker) -> OneShot {
                 LinearCostModel::trained(),
                 NssPressurePredictor::default(),
             );
-            PassRanker::new(cost_model, DefaultLegalityGate::new())
+            PassRanker::new(cost_model, PerPassLegalityGate::new())
                 .rank(&mir, &features)
         }
     };

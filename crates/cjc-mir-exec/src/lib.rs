@@ -4641,9 +4641,14 @@ fn cana_thermal_aware_plan_for(mir: &cjc_mir::MirProgram) -> cjc_mir::optimize::
         cjc_cana::LinearCostModel::trained(),
         cjc_cana_nss::NssPressurePredictor::default(),
     );
+    // §19: use PerPassLegalityGate (CF/DCE/LICM unconditionally; CSE/SR
+    // only when strict_count == 0). Matches the gate that the convenience
+    // constructors (`default_ranker`, `trained_ranker`) now use, ensuring
+    // `cjcl run --mir-opt` and `cjcl run --thermal-aware` produce
+    // consistent legality verdicts.
     let ranker = cjc_cana::pass_ranker::PassRanker::new(
         cost_model,
-        cjc_cana::legality::DefaultLegalityGate::new(),
+        cjc_cana::legality::PerPassLegalityGate::new(),
     );
     let report = ranker.rank(mir, &features);
     cjc_cana::pass_ranker::pass_plan_from(&report.sequence)

@@ -404,13 +404,22 @@ impl<M: CostModel, G: LegalityGate> PassRanker<M, G> {
 // ---------------------------------------------------------------------------
 
 /// Build a ranker with Phase 2 defaults: `LinearCostModel` +
-/// `DefaultLegalityGate`. The standard entry point for callers that just
+/// `PerPassLegalityGate`. The standard entry point for callers that just
 /// want recommendations without dependency injection.
-pub fn default_ranker() -> PassRanker<crate::linear_cost_model::LinearCostModel, crate::legality::DefaultLegalityGate>
+///
+/// **As of §19**: defaults switched from `DefaultLegalityGate` (blanket
+/// reject any pass on a function with `strict_count > 0`) to
+/// `PerPassLegalityGate` (allow CF / DCE / LICM regardless; restrict
+/// CSE / SR only when strict reductions are present). This unblocks
+/// float-heavy ML workloads (PINN, chess RL, etc.) from CANA-driven
+/// optimization — they previously got zero recommendations across all 5
+/// passes regardless of the cost model's verdict. For the old conservative
+/// behavior, construct directly with `DefaultLegalityGate`.
+pub fn default_ranker() -> PassRanker<crate::linear_cost_model::LinearCostModel, crate::legality::PerPassLegalityGate>
 {
     PassRanker::new(
         crate::linear_cost_model::LinearCostModel::new(),
-        crate::legality::DefaultLegalityGate::new(),
+        crate::legality::PerPassLegalityGate::new(),
     )
 }
 
@@ -424,17 +433,20 @@ pub fn default_ranker() -> PassRanker<crate::linear_cost_model::LinearCostModel,
 /// per-pass benefit signal. See
 /// [`crate::linear_cost_model::LinearCostModel::trained`] for caveats.
 ///
+/// **As of §19**: defaults switched to [`PerPassLegalityGate`] — see
+/// [`default_ranker`] for the rationale.
+///
 /// Use when:
 ///   - You want to A/B test trained vs hand-tuned on a real workload.
 ///   - You've regenerated the trained coefficients on a corpus more
 ///     representative of your target programs (and re-pasted the output
 ///     into `linear_cost_model.rs`).
 ///   - You're benchmarking the Phase 5 cost-model architecture itself.
-pub fn trained_ranker() -> PassRanker<crate::linear_cost_model::LinearCostModel, crate::legality::DefaultLegalityGate>
+pub fn trained_ranker() -> PassRanker<crate::linear_cost_model::LinearCostModel, crate::legality::PerPassLegalityGate>
 {
     PassRanker::new(
         crate::linear_cost_model::LinearCostModel::trained(),
-        crate::legality::DefaultLegalityGate::new(),
+        crate::legality::PerPassLegalityGate::new(),
     )
 }
 

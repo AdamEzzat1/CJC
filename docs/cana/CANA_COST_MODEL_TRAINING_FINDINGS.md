@@ -1534,3 +1534,257 @@ cargo run --release -p cana-train-cost-model   # regenerate coefficients
 
 All three are deterministic per the CANA pipeline's contract.
 v5 coefficients are stable across runs.
+
+---
+
+## 19. PerPassLegalityGate — PINN activation finally lands
+
+§18 identified `DefaultLegalityGate` as the actual blocker on PINN
+(and on every float-heavy ML workload). The gate's rule was blanket:
+ANY function with `strict_count > 0` blocks ANY pass. The §18
+recommendation was to refine the gate with per-pass safety rules.
+
+### The new gate
+
+[`crates/cjc-cana/src/legality.rs`](../../crates/cjc-cana/src/legality.rs)
+now exports `PerPassLegalityGate` alongside `DefaultLegalityGate`.
+It classifies passes by their structural ability to alter reduction
+semantics:
+
+| Tier | Passes | Rule |
+|---|---|---|
+| `Universal` | `constant_fold`, `cf_round_2`, `dce`, `licm` | Allowed on every function regardless of `strict_count` |
+| `NoStrictReductions` | `cse`, `strength_reduce` | Allowed only when `strict_count == 0`; otherwise rejected with `StrictReductionPresent` (same shape as before) |
+
+The classification reasoning:
+
+- **CF**: only folds *literal* subexpressions. It cannot alter runtime
+  reductions because by definition it doesn't operate on them.
+  Compile-time arithmetic on `f64` literals produces bit-identical
+  results to runtime (same IEEE 754 rounding).
+- **DCE**: removes provably-unreachable code. Dead code has no
+  observers, including reductions. Removing it cannot change any
+  observable computation.
+- **LICM**: moves loop-invariants out of loops. A reduction
+  accumulator `acc = acc + ...` depends on the prior iteration's
+  `acc` value, so it's NEVER loop-invariant — LICM cannot hoist
+  it. The invariants LICM does hoist (e.g. `let c = a*b` where
+  `a` and `b` are unchanged) preserve the reduction's bit-exact
+  order.
+- **CSE**: could collapse `(a + b)` occurrences where one is part of
+  a strict reduction. Conservative: block when `strict_count > 0`
+  until per-expression analysis can verify each occurrence.
+- **SR**: rewrites `x * 2.0` as `x + x` (IEEE 754 guarantees
+  bit-identity for finite normal floats) but the safer per-
+  expression analysis can land later. For now, block when
+  `strict_count > 0`.
+
+### The activation result on PINN
+
+The threshold probe on PINN immediately after the gate switch:
+
+| threshold | Run-rec | Skip-drop | Notes |
+|---|---|---|---|
+| 0.010 | **16** | 14 | (would have been 0 with DefaultLegalityGate) |
+| 0.005 (DEFAULT) | **16** | 14 | the §18 0-recommendation block is gone |
+| 0.001 | 16 | 14 |
+| 0.0 | 22 | 8 | only CSE / SR still rejected on strict-reduction functions |
+
+PINN went from **0 Run / 30 Skip at every positive threshold** to
+**16 Run / 14 Skip at default threshold**. The 16 recommendations
+are the CF / DCE / LICM decisions on PINN's 4 non-empty functions
+(`forward`, `init_weights`, `perturb`, `main`). The 14 Skips are
+the 4 functions × {CSE, SR, cf_round_2 below threshold for one or
+two of them} pattern, which is exactly what the gate's design
+intends.
+
+### The activation result on pass_ordering
+
+`cana_ab_corpus` aggregate counts before and after:
+
+| Ranker | Before §19 (DefaultLegalityGate) | After §19 (PerPassLegalityGate) |
+|---|---|---|
+| default | 22 Run / 122 Skip | **46 Run / 98 Skip** |
+| trained | 20 Run / 124 Skip | **37 Run / 107 Skip** |
+| thermal | 20 Run / 124 Skip | 37 Run / 107 Skip |
+
+Both rankers more than doubled their Run-recommendations. The
+specific programs that gained:
+
+- `loop`, `nested`, `mixed`: all `c = c + 1` integer-accumulator
+  patterns count as `StrictFold` in MIR's reduction analyzer,
+  which previously blocked them. Now they get CF/DCE/LICM. Each
+  jumped from default's 0 Run to 3-4 Run.
+- `large`: 5 → 11 Run (the four-function combined program had
+  multiple reduction-blocked functions).
+
+Thermal == trained still on 8/8 programs, confirming §4B.2
+Option C's empty-thermal-map contract holds — the gate change
+doesn't affect the thermal layer's compositional property.
+
+### Byte-identity correctness preserved
+
+The headline correctness check: does running CF / DCE / LICM on
+float-reduction-containing code change observable output? Tested
+end-to-end through `cjcl`:
+
+```bash
+$ cat /tmp/cjcl_float.cjcl
+fn poly(x: f64) -> f64 {
+    let a: f64 = 3.14;
+    let b: f64 = 2.71;
+    let c: f64 = 1.41;
+    return a * x * x + b * x + c;
+}
+fn accum(n: i64) -> f64 {
+    let mut s: f64 = 0.0;
+    let mut i: i64 = 0;
+    while i < n {
+        let xi: f64 = poly(0.5);
+        s = s + xi;
+        i = i + 1;
+    }
+    return s;
+}
+print(accum(40));
+
+$ cjcl run                /tmp/cjcl_float.cjcl  →  141.99999999999997
+$ cjcl run --mir-opt      /tmp/cjcl_float.cjcl  →  141.99999999999997
+$ cjcl run --thermal-aware /tmp/cjcl_float.cjcl  →  141.99999999999997
+```
+
+Bit-exact across all three paths, including the trailing
+`.99999999999997` IEEE 754 quirk that demonstrates the f64
+accumulation order is preserved verbatim.
+
+The AST/MIR parity gate (`tests/fixtures/`) also passes
+unchanged — 100% of the fixture suite produces byte-identical
+output between `cjc-eval` (AST tree-walk) and `cjc-mir-exec`
+(MIR optimized).
+
+### What's now activated end-to-end
+
+```
+cjcl run --mir-opt <prog.cjcl>
+  ↓
+  cjc_mir_exec::run_program_optimized
+  ↓
+  cana_plan_for(mir)
+  ↓
+  cjc_cana::recommend_pass_plan
+  ↓
+  default_ranker()  ← now uses PerPassLegalityGate
+  ↓
+  PassRanker<LinearCostModel::new(), PerPassLegalityGate>
+  ↓
+  PassPlan with non-trivial CF/DCE/LICM recommendations on
+  float-heavy functions that DefaultLegalityGate would have blocked
+```
+
+And for `--thermal-aware`:
+
+```
+cjcl run --thermal-aware <prog.cjcl>
+  ↓
+  cjc_mir_exec::run_program_optimized_thermal_aware
+  ↓
+  cana_thermal_aware_plan_for(mir)
+  ↓
+  ThermalAwareCostModel<LinearCostModel::trained(), NssPressurePredictor>
+  + PerPassLegalityGate
+  ↓
+  Same activation surface as --mir-opt today (NssPressurePredictor
+  still returns empty thermal maps under Option C, so the wrapper
+  is still a no-op).
+```
+
+When `NssPressurePredictor` migrates from Option C → A or B in a
+future session, the thermal layer becomes the differential factor
+between `--mir-opt` and `--thermal-aware`. PerPassLegalityGate is
+the prerequisite that makes that differential factor actually
+matter — without it, the gate would still veto everything.
+
+### The 5-layer activation chain is now real
+
+After §19, the "Five layers, one trigger" claim from earlier in the
+session is finally accurate at the production-realized level:
+
+1. **`NssPressurePredictor.predict_thermal`** returns non-empty map
+   (still gated on Option A / B migration).
+2. **`ThermalAwareCostModel`** applies the penalty factor — wired,
+   tested by `cjc-cana-nss::tests::thermal_aware_composes_with_empty_predictor_as_noop`.
+3. **CANA's `PassRanker`** uses the adjusted cost — wired, validated
+   by the 3-way AB bench.
+4. **`PerPassLegalityGate`** lets CF/DCE/LICM through — **NOW
+   ACTIVATED** (was blocking everything on PINN before §19).
+5. **`cjcl run --thermal-aware`** routes through the chain — wired
+   in §4B.3.
+
+Layers 2, 3, 4, 5 are all live today. Only layer 1 (Option A or B
+migration) gates the actual behavioural divergence between
+`--mir-opt` and `--thermal-aware`. Everything downstream is
+already producing real PassPlans on real workloads.
+
+### Tests added (10 new)
+
+In [`legality.rs::tests`](../../crates/cjc-cana/src/legality.rs):
+
+- `pass_safety_tier_universal_passes`: CF, DCE, LICM all `Universal`.
+- `pass_safety_tier_no_strict_reductions_passes`: CSE, SR.
+- `pass_safety_tier_unknown_is_conservative`: unknown → NoStrict.
+- `per_pass_gate_empty_sequence_approved`: trivial.
+- `per_pass_gate_unknown_function_rejected`: still rejects ghosts.
+- `per_pass_gate_universal_pass_approved_despite_strict_reductions`:
+  the headline — CF / DCE / LICM allowed on `strict_count = 5`.
+- `per_pass_gate_no_strict_reductions_pass_rejected_when_strict`:
+  CSE / SR still rejected on `strict_count = 3`.
+- `per_pass_gate_no_strict_reductions_pass_approved_when_clean`:
+  CSE / SR allowed on `strict_count = 0`.
+- `per_pass_gate_strictly_more_permissive_than_default`: head-to-head
+  with DefaultLegalityGate on a function with strict reductions and
+  CF requested — Default rejects, PerPass approves.
+- `per_pass_gate_deterministic`: same input → same verdict, 50 runs.
+
+cjc-cana: 144 unit + 26 integration = **170 tests** (was 160; +10
+new for `PerPassLegalityGate`).
+
+### What's still NOT activated (honest accounting)
+
+- **CSE and SR on float-heavy functions.** Conservative until
+  per-expression analysis lands. Future work: a `PerExpressionLegalityGate`
+  that checks whether each CSE candidate (or SR candidate) is
+  inside a strict-reduction context.
+- **End-to-end runtime measurement.** This finding is at the
+  compile-time decision layer. The actual runtime impact of
+  running CF / DCE / LICM on PINN's `forward` is still unmeasured
+  — the existing `cana_ab_pinn` bench was scoped to compile-time
+  byte-identity verification, not "is the code faster." That's a
+  natural follow-up bench.
+- **Predictor migration (§4B.2 Option A or B).** The thermal-aware
+  layer remains a no-op until `NssPressurePredictor` starts
+  returning non-empty thermal maps.
+
+### Recommendation
+
+`PerPassLegalityGate` is now the production default. To revert to
+the old conservative behavior on a specific workload, callers can
+explicitly construct `PassRanker::new(cost_model,
+DefaultLegalityGate::new())`.
+
+Most users won't notice the change because their workloads either
+don't have strict reductions (i64 arithmetic) or already worked
+under the old gate. The users who *will* notice are the ones
+running float-heavy ML — and for them, the change is the
+difference between "every optimization is silently disabled" and
+"optimizations actually run."
+
+### Reproducibility
+
+```bash
+cargo test -p cjc-cana --release      # 170 tests pass
+cargo test --test fixtures --release  # AST/MIR parity, 1 test
+cargo run --release -p cana-threshold-probe   # PINN activation visible
+cargo run --release -p cana-ab-corpus         # 46/37/37 Run counts
+```
+
+All deterministic. Same input → same output across runs.

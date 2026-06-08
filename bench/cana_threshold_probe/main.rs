@@ -24,7 +24,7 @@
 //! (small expr_count per function, narrow loop_depth and branch_count)
 //! mean even a near-zero threshold won't produce meaningful decisions.
 
-use cjc_cana::legality::DefaultLegalityGate;
+use cjc_cana::legality::PerPassLegalityGate;
 use cjc_cana::pass_ranker::PassRanker;
 use cjc_cana::{analyze_program, LinearCostModel};
 
@@ -220,7 +220,7 @@ fn sweep_thresholds(program_name: &str, source: &str) -> Vec<(f64, usize, usize)
         // Rebuild the trained ranker with a custom threshold each iteration.
         let ranker = PassRanker::new(
             LinearCostModel::trained(),
-            DefaultLegalityGate::new(),
+            PerPassLegalityGate::new(),
         )
         .with_skip_threshold(thresh);
 

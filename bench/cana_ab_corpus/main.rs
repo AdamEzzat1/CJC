@@ -22,7 +22,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cjc_cana::legality::DefaultLegalityGate;
+use cjc_cana::legality::PerPassLegalityGate;
 use cjc_cana::pass_ranker::{pass_plan_from, trained_ranker, PassRanker};
 use cjc_cana::thermal_cost_model::ThermalAwareCostModel;
 use cjc_cana::{analyze_program, default_ranker, LinearCostModel};
@@ -221,7 +221,7 @@ fn rank_program(prog: &Program) -> RankerComparison {
         NssPressurePredictor::default(),
     );
     let thermal_report =
-        PassRanker::new(thermal_cost_model, DefaultLegalityGate::new()).rank(&mir, &features);
+        PassRanker::new(thermal_cost_model, PerPassLegalityGate::new()).rank(&mir, &features);
 
     let default_plan = pass_plan_from(&default_report.sequence);
     let trained_plan = pass_plan_from(&trained_report.sequence);
