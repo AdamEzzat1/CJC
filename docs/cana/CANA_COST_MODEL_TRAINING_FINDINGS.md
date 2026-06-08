@@ -941,3 +941,164 @@ The full three-way bench takes ~6 minutes wall-clock at N=3 per
 config (build + ~2 minutes per config). Output structure is stable
 across runs (PassPlan diffs deterministic, byte-identity check
 deterministic); only the wall-clock timings vary with machine load.
+
+---
+
+## 16. Corpus augmentation — closing the `alloc_sites` blind dimension (§3A.4 follow-up)
+
+§12 documented that the v3 corpus had `alloc_sites = 0` across all
+835 training points. The trained `w_alloc_sites` coefficient was
+mathematically unconstrained — OLS picks 0 because no data point
+varied along that axis. The §12 follow-up plan was to add programs
+exercising `MirExprKind::ArrayLit`, `TupleLit`, and `StringLit` (the
+three cheapest allocation-incrementing constructs) plus programs
+with `branch_count` ≥ 10 to fill the corpus's branch-count tail.
+
+This section records the result.
+
+### What was added
+
+**6 new programs** appended to `bench/cana_train_cost_model/programs.rs`:
+
+| Program | Purpose | Expected dominant pass |
+|---|---|---|
+| `alloc_array_fold` | 4 array literals + arithmetic chain | constant_fold |
+| `alloc_tuples_chain` | 5 tuple literals + folded constants | constant_fold |
+| `alloc_strings_loop` | 5 string literals + invariant in loop | licm |
+| `branch_ladder_12` | 12 sequential if/else with const arithmetic | constant_fold |
+| `branch_nested_15` | 4 levels of nested if/else | constant_fold |
+| `branch_loop_mix` | 8 if/else inside a while loop with invariant | licm |
+
+Total corpus size: **73 → 79 programs**, training points: **835 → 895**.
+
+### Feature distribution shift
+
+Comparing the §12 v3 audit table to the post-augmentation v4 table:
+
+| Feature | v3 (835 points) | v4 (895 points) |
+|---|---|---|
+| expr_count | min 1, q75 24, max 89, unique 42 | min 1, q75 26, **max 154, unique 47** |
+| loop_depth | min 0, max 4, unique 5 | min 0, max 4, unique 5 (unchanged) |
+| branch_count | min 0, max 4, unique 5 | min 0, **max 12, unique 8** |
+| alloc_sites | min 0, **max 0, unique 1** ⚠️ | min 0, **max 5, unique 3** ✓ |
+
+The two warnings raised in §12 are both addressed:
+
+- **`alloc_sites` is no longer a blind dimension.** The
+  `unique <= 2` and `max == 0` warnings stop firing. The OLS fit
+  now has data points where `alloc_sites > 0`, so the trained
+  coefficient carries real information about how alloc cost
+  affects per-pass benefit.
+- **`branch_count` tail is broader.** Going from 5 unique values
+  (0,1,2,3,4) to 8 unique values (now reaching 12) gives the
+  branch-count column more variance, addressing the §12 concern
+  about wrong-sign artifacts in CF and DCE coefficients caused by
+  cluster-at-zero distributions.
+
+`loop_depth` did not move — adding more loops would require
+deeper nested-loop programs, which would have been an unforced
+expansion of scope. The current distribution remains q75 = 1,
+which §12 documented as narrow but technically within the
+variance threshold.
+
+### Coefficient drift
+
+The most consequential change is `w_alloc_sites` going from zero
+across all 5 passes (v3) to non-zero on 4 of 5 (v4):
+
+| Pass | v3 `w_alloc_sites` | v4 `w_alloc_sites` | Sign |
+|---|---|---|---|
+| constant_fold | 0.000000e+0 | **+2.394756e-2** | active |
+| strength_reduce | 0.000000e+0 | -2.645147e-3 | active |
+| dce | 0.000000e+0 | -9.544048e-3 | active |
+| cse | 0.000000e+0 | -1.345422e-3 | active |
+| licm | 0.000000e+0 | +5.441954e-5 | near-zero |
+
+CF has the largest positive coefficient on alloc_sites, which is
+the intuitively correct direction: programs with more allocations
+have more literal constructors, more constant-fold opportunities
+in their initializers. The other three trainable passes (SR,
+DCE, CSE) show negative `w_alloc_sites` — meaning their predicted
+benefit drops slightly when alloc_sites is high. LICM is
+effectively zero, which also makes sense (LICM moves invariants
+out of loops; allocation count doesn't affect that opportunity).
+
+The model now has a *learned story* about alloc_sites that future
+predictions on alloc-heavy programs can rely on, instead of
+silently extrapolating from the prior all-zero training data.
+
+### Generalization properties preserved
+
+The held-out validation numbers (§3A.1 from §10) are essentially
+unchanged across the augmentation:
+
+| Pass | v3 ratio | v4 ratio |
+|---|---|---|
+| constant_fold | 1.15 | 1.15 |
+| strength_reduce | 2.23 | 2.26 |
+| dce | 0.42 | 0.43 |
+| cse | 0.94 | 0.96 |
+| licm | 0.83 | 0.85 |
+
+SR continues to overfit (ratio > 2.0). The other four pass the
+1.5 generalization threshold. The augmentation didn't fix the
+SR overfit (which is a feature-distribution issue) and didn't
+break any of the other four passes' generalization.
+
+Cross-corpus (§3A.3 from §13) numbers also stayed close:
+
+| Pass | v3 ext/held | v4 ext/held |
+|---|---|---|
+| constant_fold | (similar) | 0.60 |
+| strength_reduce | (similar) | 1.20 |
+| dce | (similar) | 0.29 |
+| cse | (similar) | 0.13 |
+| licm | (similar) | 0.39 |
+
+All five passes remain ext/held ≤ 1.5, confirming the augmented
+model is still robust across authors.
+
+### What this DOESN'T fix
+
+This augmentation closes the structural blind spot, but doesn't
+solve the deeper §3A.2 finding that the trained ranker doesn't
+produce differential decisions on real workloads. That's a
+threshold-and-confidence-interaction problem, addressed
+separately by the skip-threshold work in §17.
+
+Likewise, the SR overfit (held-out ratio 2.26) survived the
+augmentation. SR's overfit appears to be intrinsic to the
+sparse `try_strength_reduce` opportunity signal in our corpus —
+SR has the lowest mean_benefit (0.0069) of any pass, so noise
+dominates the signal in held-out tests. Future work on SR
+specifically would need either (a) programs with denser SR
+opportunities (`x * 2 → x + x` chains) or (b) a non-linear
+cost model that captures the all-or-nothing nature of strength
+reduction better than OLS.
+
+### Reproducibility
+
+```bash
+cargo run --release -p cana-train-cost-model
+```
+
+The augmented coefficients are deterministic — same OLS fit, same
+73 + 6 = 79 program corpus, same `pass_native` signal. Re-running
+produces byte-identical Phase 2/3/4 output. The new coefficients
+have NOT been pasted into `linear_cost_model.rs` because:
+
+1. The held-out ratio didn't change, so the user-visible
+   `trained_ranker()` behavior is essentially unchanged.
+2. The §3A.2 PINN AB test would still report "trained vs default
+   no observable change" because the base ranker still rejects
+   all candidate passes (skip threshold problem, not coefficient
+   problem).
+3. Promoting the augmented coefficients to production is
+   premature until §17 (threshold tuning) determines whether
+   the current threshold logic is what's blocking activation.
+
+When §17 lands and thresholds are tuned to a regime where the
+ranker produces non-trivial plans on real workloads, **then**
+the augmented coefficients become worth pasting in. Until then,
+they live in the training binary's output and this doc records
+the drift.

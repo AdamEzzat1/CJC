@@ -1180,6 +1180,155 @@ print(dup_inv(8000, 7));
 "#;
 
 // ============================================================================
+// §3A.4 follow-up — Alloc-heavy programs (close `alloc_sites` blind dimension)
+// ============================================================================
+//
+// The §3A.4 feature distribution audit found that the corpus had
+// `alloc_sites = 0` across all 73 programs (max == 0, unique == 1),
+// because every CF/SR/DCE/CSE/LICM-favoring program was pure integer
+// arithmetic. The trained `w_alloc_sites` coefficient was mathematically
+// unconstrained — OLS picked 0 because no data point varied along that
+// axis.
+//
+// These programs exercise `MirExprKind::ArrayLit`, `TupleLit`, and
+// `StringLit` — the three cheapest constructs that increment
+// `MemoryProxy::alloc_sites`. Each program also exercises one of the
+// trainable passes (CF, DCE, CSE) so that the alloc signal is paired
+// with a non-trivial benefit measurement, not silenced by an all-zero
+// label.
+
+const PROG_ALLOC_ARRAY_FOLD: &str = r#"
+fn arrays_and_arith(n: i64) -> i64 {
+    let a: [i64] = [1, 2, 3];
+    let b: [i64] = [4, 5, 6];
+    let c: [i64] = [7, 8, 9];
+    let d: [i64] = [n, n + 1, n + 2];
+    let x: i64 = 1 + 2 + 3 + 4 + 5;
+    let y: i64 = x * 10 - 20 + 30;
+    let z: i64 = y + a[0] + b[1] + c[2] + d[0];
+    return z;
+}
+print(arrays_and_arith(7));
+"#;
+
+const PROG_ALLOC_TUPLES_CHAIN: &str = r#"
+fn tuples_chain(n: i64) -> i64 {
+    let p1: (i64, i64) = (1, 2);
+    let p2: (i64, i64) = (3, 4);
+    let p3: (i64, i64) = (5, 6);
+    let p4: (i64, i64) = (n, n + 1);
+    let p5: (i64, i64) = (10, 20);
+    let sum_const: i64 = 1 + 2 + 3 + 4 + 5;
+    let mul_const: i64 = 10 * 20 - 100 + 50;
+    return sum_const + mul_const + p1.0 + p2.1 + p3.0 + p4.1 + p5.0;
+}
+print(tuples_chain(11));
+"#;
+
+const PROG_ALLOC_STRINGS_LOOP: &str = r#"
+fn string_count(n: i64) -> i64 {
+    let s1: Str = "alpha";
+    let s2: Str = "beta";
+    let s3: Str = "gamma";
+    let s4: Str = "delta";
+    let s5: Str = "epsilon";
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let inv: i64 = 7 * 11 - 5;
+        let dup: i64 = inv * 2;
+        total = total + dup;
+        i = i + 1;
+    }
+    return total + len(s1) + len(s2) + len(s3) + len(s4) + len(s5);
+}
+print(string_count(40));
+"#;
+
+// ============================================================================
+// §3A.4 follow-up — High-branch programs (saturate `branch_count` distribution)
+// ============================================================================
+//
+// The same audit found `branch_count` had only 5 unique values (0-4),
+// with the corpus median at 0. Coefficient signs on this column were
+// suspect — wrong sign for CF and DCE per the original v3 findings.
+// These programs reach `branch_count >= 10` so the OLS fit has data
+// points beyond the corpus's previous cluster-at-zero distribution.
+//
+// Each program is a chain of `if/else` decisions paired with one of
+// the trainable passes (CF, DCE) so the branch signal is paired with
+// a non-trivial benefit measurement.
+
+const PROG_BRANCH_LADDER_12: &str = r#"
+fn classify(n: i64) -> i64 {
+    let mut r: i64 = 0;
+    if n > 100 { r = 12; } else { r = 0; }
+    if n > 90  { r = r + 11; } else { r = r + 0; }
+    if n > 80  { r = r + 10; } else { r = r + 0; }
+    if n > 70  { r = r + 9;  } else { r = r + 0; }
+    if n > 60  { r = r + 8;  } else { r = r + 0; }
+    if n > 50  { r = r + 7;  } else { r = r + 0; }
+    if n > 40  { r = r + 6;  } else { r = r + 0; }
+    if n > 30  { r = r + 5;  } else { r = r + 0; }
+    if n > 20  { r = r + 4;  } else { r = r + 0; }
+    if n > 10  { r = r + 3;  } else { r = r + 0; }
+    if n > 5   { r = r + 2;  } else { r = r + 0; }
+    if n > 0   { r = r + 1;  } else { r = r + 0; }
+    return r;
+}
+print(classify(55));
+"#;
+
+const PROG_BRANCH_NESTED_15: &str = r#"
+fn deep_branch(n: i64) -> i64 {
+    let mut r: i64 = 0;
+    if n > 50 {
+        if n > 70 {
+            if n > 90 { r = 9; } else { r = 7; }
+        } else {
+            if n > 60 { r = 6; } else { r = 5; }
+        }
+    } else {
+        if n > 20 {
+            if n > 40 { r = 4; } else { r = 3; }
+        } else {
+            if n > 10 { r = 2; } else { r = 1; }
+        }
+    }
+    if r > 5 {
+        if r > 7 { r = r + 100; } else { r = r + 50; }
+    } else {
+        if r > 2 { r = r + 25; } else { r = r + 10; }
+    }
+    return r + 1 + 2 + 3 + 4 + 5;
+}
+print(deep_branch(45));
+"#;
+
+const PROG_BRANCH_LOOP_MIX: &str = r#"
+fn branchy_loop(n: i64) -> i64 {
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let mut step: i64 = 0;
+        if i > 100 { step = step + 10; } else { step = step + 1; }
+        if i > 80  { step = step + 9;  } else { step = step + 1; }
+        if i > 60  { step = step + 8;  } else { step = step + 1; }
+        if i > 40  { step = step + 7;  } else { step = step + 1; }
+        if i > 20  { step = step + 6;  } else { step = step + 1; }
+        if i > 10  { step = step + 5;  } else { step = step + 1; }
+        if i > 5   { step = step + 4;  } else { step = step + 1; }
+        if i > 0   { step = step + 3;  } else { step = step + 1; }
+        let inv: i64 = 7 * 8 + 100;
+        total = total + step + inv;
+        i = i + 1;
+    }
+    return total;
+}
+print(branchy_loop(50));
+"#;
+
+// ============================================================================
 // The corpus  (60 programs)
 // ============================================================================
 
@@ -1276,4 +1425,12 @@ pub const PROGRAMS: &[Program] = &[
     Program { name: "licm_five_lets",         source: PROG_LICM_FIVE_LETS,        expected_dominant_pass: "licm" },
     // Mixed CSE + LICM eligible (1)
     Program { name: "cse_licm_dup_inv",       source: PROG_CSE_LICM_DUP_INV,      expected_dominant_pass: "licm" },
+    // §3A.4 follow-up — Alloc-heavy (3) — closes alloc_sites blind dimension
+    Program { name: "alloc_array_fold",       source: PROG_ALLOC_ARRAY_FOLD,      expected_dominant_pass: "constant_fold" },
+    Program { name: "alloc_tuples_chain",     source: PROG_ALLOC_TUPLES_CHAIN,    expected_dominant_pass: "constant_fold" },
+    Program { name: "alloc_strings_loop",     source: PROG_ALLOC_STRINGS_LOOP,    expected_dominant_pass: "licm" },
+    // §3A.4 follow-up — High-branch (3) — saturates branch_count tail
+    Program { name: "branch_ladder_12",       source: PROG_BRANCH_LADDER_12,      expected_dominant_pass: "constant_fold" },
+    Program { name: "branch_nested_15",       source: PROG_BRANCH_NESTED_15,      expected_dominant_pass: "constant_fold" },
+    Program { name: "branch_loop_mix",        source: PROG_BRANCH_LOOP_MIX,       expected_dominant_pass: "licm" },
 ];
