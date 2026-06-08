@@ -402,6 +402,24 @@ fn fit_ols_gd(
     )
 }
 
+/// Evaluate a fitted model on held-out data. Returns RMSE in raw (unnormalized)
+/// feature space, matching what `FitCoefs` stores.
+fn evaluate_fit(fit: &FitCoefs, test_pts: &[&TrainingPoint]) -> f64 {
+    if test_pts.is_empty() {
+        return 0.0;
+    }
+    let mut sum_err_sq = 0.0_f64;
+    for p in test_pts {
+        let pred = fit.w_expr_count * p.expr_count
+            + fit.w_loop_depth * p.loop_depth
+            + fit.w_branch_count * p.branch_count
+            + fit.w_alloc_sites * p.alloc_sites;
+        let err = pred - p.benefit;
+        sum_err_sq += err * err;
+    }
+    (sum_err_sq / test_pts.len() as f64).sqrt()
+}
+
 // ---------------------------------------------------------------------------
 // Output generation (unchanged)
 // ---------------------------------------------------------------------------
@@ -485,16 +503,36 @@ fn main() {
     println!("\n=== Phase 1: collecting training data ===");
     let collect_start = Instant::now();
     let mut all_points: Vec<TrainingPoint> = Vec::new();
+    let mut train_points: Vec<TrainingPoint> = Vec::new();
+    let mut test_points: Vec<TrainingPoint> = Vec::new();
     for (i, prog) in PROGRAMS.iter().enumerate() {
         let pts = collect_training_points(prog);
-        println!("  [{:>2}/{}] {:<26} {} points", i + 1, PROGRAMS.len(), prog.name, pts.len());
-        all_points.extend(pts);
+        let is_test = i % 4 == 0;
+        println!(
+            "  [{:>2}/{}] {:<26} {} points{}",
+            i + 1,
+            PROGRAMS.len(),
+            prog.name,
+            pts.len(),
+            if is_test { " [test]" } else { "" },
+        );
+        all_points.extend(pts.iter().cloned());
+        if is_test {
+            test_points.extend(pts);
+        } else {
+            train_points.extend(pts);
+        }
     }
     let collect_elapsed = collect_start.elapsed();
     println!(
         "Collected {} training points in {:.1}s.",
         all_points.len(),
         collect_elapsed.as_secs_f64(),
+    );
+    println!(
+        "  → train: {} points, test: {} points",
+        train_points.len(),
+        test_points.len(),
     );
 
     println!("\n=== Phase 2: per-pass OLS fits ===");
@@ -545,5 +583,106 @@ fn main() {
         if let Some(b) = best {
             println!("{:<26} {:<20} {:>10.4}", prog, b.pass, b.benefit);
         }
+    }
+
+    // =========================================================================
+    // Phase 3: Held-out validation (§3A.1 from CANA handoff)
+    // =========================================================================
+    //
+    // The Phase 2 fit above uses the entire 73-program corpus and emits its
+    // coefficients into linear_cost_model.rs. That fit's RMSE is *training*
+    // RMSE — what the model gets right on the corpus it saw. It tells us
+    // nothing about whether the model generalizes to held-out programs.
+    //
+    // Phase 3 splits the corpus into train (75%) and test (25%) by program
+    // index — every 4th program goes to test. We re-fit using train-only data,
+    // then evaluate the resulting coefficients on the test set. The gap
+    // (test_rmse - train_rmse) and ratio (test_rmse / train_rmse) tell us
+    // whether the "14× headline" from the full-corpus fit is real
+    // generalization or an artifact of training on the evaluation set.
+    //
+    // Interpretation thresholds (from handoff §3A.1):
+    //   * ratio ≤ 1.5  → model generalizes well; trust the full-corpus fit.
+    //   * 1.5 < ratio ≤ 2.0  → mild overfitting; usable but flag in docs.
+    //   * ratio > 2.0  → overfit; the headline doesn't hold, downgrade claims.
+    println!();
+    println!("============================================================");
+    println!("§3A.1 — Held-out validation (train/test split)");
+    println!("============================================================");
+    let test_program_count = PROGRAMS
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| i % 4 == 0)
+        .count();
+    let train_program_count = PROGRAMS.len() - test_program_count;
+    println!("Split rule: every 4th program (indices 0, 4, 8, ...) → test.");
+    println!(
+        "Train: {} programs ({} points)  |  Test: {} programs ({} points)",
+        train_program_count,
+        train_points.len(),
+        test_program_count,
+        test_points.len(),
+    );
+    println!();
+    println!(
+        "{:<20} {:>7} {:>7} {:>11} {:>11} {:>9} {:>6}",
+        "pass", "N_train", "N_test", "train_rmse", "test_rmse", "gap", "ratio",
+    );
+    println!("{}", "-".repeat(76));
+
+    let mut held_out_fits: BTreeMap<String, (FitCoefs, f64)> = BTreeMap::new();
+    for &pass in TARGET_PASSES {
+        let train_pts: Vec<&TrainingPoint> =
+            train_points.iter().filter(|p| p.pass == pass).collect();
+        let test_pts: Vec<&TrainingPoint> =
+            test_points.iter().filter(|p| p.pass == pass).collect();
+
+        let train_x: Vec<[f64; 4]> = train_pts
+            .iter()
+            .map(|p| [p.expr_count, p.loop_depth, p.branch_count, p.alloc_sites])
+            .collect();
+        let train_y: Vec<f64> = train_pts.iter().map(|p| p.benefit).collect();
+        let (train_fit, train_rmse) = fit_ols_gd(&train_x, &train_y, 0.05, 5000);
+
+        let test_rmse = evaluate_fit(&train_fit, &test_pts);
+        let gap = test_rmse - train_rmse;
+        let ratio = if train_rmse > 1e-9 {
+            test_rmse / train_rmse
+        } else {
+            f64::NAN
+        };
+
+        println!(
+            "{:<20} {:>7} {:>7} {:>11.4} {:>11.4} {:>+9.4} {:>6.2}",
+            pass,
+            train_pts.len(),
+            test_pts.len(),
+            train_rmse,
+            test_rmse,
+            gap,
+            ratio,
+        );
+        held_out_fits.insert(pass.to_string(), (train_fit, test_rmse));
+    }
+    println!();
+    println!("Verdict (per pass, by handoff §3A.1 threshold):");
+    for &pass in TARGET_PASSES {
+        let Some((fit, test_rmse)) = held_out_fits.get(pass) else { continue };
+        let train_rmse = fit.train_rmse;
+        let ratio = if train_rmse > 1e-9 {
+            test_rmse / train_rmse
+        } else {
+            f64::NAN
+        };
+        let verdict = if ratio.is_nan() {
+            "(no signal)"
+        } else if ratio <= 1.5 {
+            "generalizes well"
+        } else if ratio <= 2.0 {
+            "mild overfitting"
+        } else {
+            "overfit — downgrade claims"
+        };
+        println!("  {:<20} ratio={:>5.2}  →  {}", pass, ratio, verdict);
     }
 }

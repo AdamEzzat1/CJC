@@ -282,3 +282,132 @@ count returns) along the way.
 
 Option B turned out to be unnecessary — Option A eliminated the
 wall-clock signal that Option B was designed to clean up.
+
+---
+
+## 10. Held-out validation (§3A.1 from the next-session handoff)
+
+The RMSEs reported in section 5 are **training RMSE** — the model's error
+on the corpus it was fit to. They tell us how well the linear cost model
+*can* reproduce the signal we measured; they tell us nothing about whether
+it will generalize to programs it hasn't seen.
+
+This section runs the §3A.1 experiment: split the corpus into train (75%)
+and test (25%) by program index (every 4th program → test), re-fit on
+train only, evaluate on test. The gap between train-RMSE and test-RMSE,
+and the ratio `test_rmse / train_rmse`, are the generalization signals.
+
+### Methodology
+
+- **Split rule.** `i % 4 == 0` → test set. Deterministic, stratified across
+  the corpus structure (programs are grouped by pass-affinity, so the
+  every-4th sampling naturally hits each affinity category roughly equally).
+- **Train.** 54 programs, 595 training points.
+- **Test.** 19 programs, 240 held-out points.
+- **Fit.** Same `fit_ols_gd` (5000 GD steps, lr 0.05, column-max normalization).
+  Train data only — the test points are never seen by the fitter.
+- **Predict.** Raw-feature prediction with the train-fit coefficients
+  applied to test-point features. RMSE in raw benefit units.
+
+### Results
+
+| Pass | N train | N test | train_rmse | test_rmse | gap | ratio |
+|---|---|---|---|---|---|---|
+| constant_fold   | 119 | 48 | 0.0431 | 0.0495 | +0.0064 | **1.15** |
+| strength_reduce | 119 | 48 | 0.0200 | 0.0446 | +0.0245 | **2.23** |
+| dce             | 119 | 48 | 0.0766 | 0.0325 | -0.0441 | **0.42** |
+| cse             | 119 | 48 | 0.0114 | 0.0108 | -0.0006 | **0.94** |
+| licm            | 119 | 48 | 0.0123 | 0.0102 | -0.0021 | **0.83** |
+
+Interpretation thresholds from the handoff:
+- `ratio ≤ 1.5` — generalizes well; trust the full-corpus fit.
+- `1.5 < ratio ≤ 2.0` — mild overfitting; usable but flag in docs.
+- `ratio > 2.0` — overfit; the full-corpus RMSE headline does not hold.
+
+### Per-pass verdict
+
+- **constant_fold — generalizes well (ratio 1.15).** Train and test RMSE
+  are essentially the same. Full-corpus coefficients are trustworthy.
+- **strength_reduce — overfit (ratio 2.23).** Train RMSE 0.0200 jumps to
+  test RMSE 0.0446, a 2.23× gap above the handoff's 2.0 overfitting
+  threshold. The full-corpus train RMSE of 0.029 reported in section 5
+  is a misleading headline number — held-out programs see roughly 2×
+  worse error. This corroborates handoff §3A.5 item 8: SR's pass-native
+  change-count (e.g. `x*2 → x+x` counts as 1 rewrite) is the noisiest
+  proxy for runtime benefit, so a fit that nails the training corpus
+  doesn't carry to new programs cleanly.
+- **dce — generalizes well (ratio 0.42).** Test RMSE is *lower* than
+  train. This is mildly suspicious — it could indicate the test split
+  happens to contain DCE-easy programs, or that the train set has high-
+  variance DCE outliers that the linear model couldn't fit. Either way
+  the absolute test RMSE (0.0325) is comparable to other passes, so the
+  generalization claim still holds.
+- **cse — generalizes well (ratio 0.94).** Best-behaved pass. The v3
+  Phase 2 RMSE of 0.011 holds essentially unchanged on held-out data.
+- **licm — generalizes well (ratio 0.83).** Same picture as CSE —
+  small train RMSE, smaller test RMSE, robust generalization.
+
+### What changes downstream
+
+The full-corpus coefficient values shipped in
+[`linear_cost_model.rs`](../../crates/cjc-cana/src/linear_cost_model.rs)
+are **unchanged** — Phase 2 of the training binary still emits them from
+the full-corpus fit. The Phase 3 held-out fit is reporting-only and
+doesn't alter what the compiler uses today.
+
+But the v3 confidence values (mapped from train RMSE) should be read
+with a Phase 3 lens:
+
+- For CF/DCE/CSE/LICM, the v3 confidence (≥0.59) is roughly right; the
+  generalization gap is small enough that the held-out picture matches
+  the training picture.
+- **For SR, the v3 confidence is overstated.** A train RMSE of 0.029
+  maps to confidence ≈ 0.77 in v3's `trained_confidence()`, but the
+  test RMSE of 0.045 would map to confidence ≈ 0.65. The
+  `trained_ranker()` is more bullish on SR than the data justifies.
+
+### What this does *not* tell us
+
+The handoff explicitly lists this as item 4 of 8 critiques (§3A.5).
+Items still unverified after this experiment:
+
+- **Item 5 (mean benefits tiny).** Untouched — the held-out RMSE numbers
+  are still 1-7× the mean benefit signal. Inherent to the linear model
+  + small-benefit regime; needs corpus expansion or non-linear model.
+- **Item 6 (`w_alloc_sites = 0`).** Untouched — same corpus, same zero-
+  variance feature column. §3A.4 (feature audit) is the experiment for
+  this.
+- **Item 7 (negative wrong-sign `w_branch_count` for CF/DCE).** Held-out
+  RMSE for CF and DCE is fine, so the wrong-sign weights are not catching
+  a real generalization bug. They're probably an artifact of column
+  correlation in the small corpus, not a load-bearing error. Still worth
+  noting in `trained_ranker()`'s doc comment.
+- **Item 8 (pass-native ≠ runtime benefit).** §3A.2 (chess RL AB test)
+  is the experiment for this. Phase 3 here strengthens the suspicion
+  that SR specifically suffers from this mismatch, but doesn't measure
+  runtime impact.
+
+### Recommendation
+
+`trained_ranker()` is safe to keep on by default for **CF, DCE, CSE,
+LICM** based on this validation. For **SR**, either:
+
+1. Add a doc-comment caveat to `trained_ranker()` flagging SR as having
+   ~2× higher real-world error than the training RMSE suggests, OR
+2. Reduce SR's emitted confidence (in `trained_base_compile_cost` or the
+   `trained_confidence` mapping) to reflect the held-out RMSE rather
+   than the training RMSE.
+
+The next validation that would change this picture is §3A.2 (real-
+workload AB test on chess RL / PINN / LendingClub). If the AB test
+shows trained vs default PassPlans differ but runtime is unchanged for
+SR-heavy programs, the held-out finding gets reinforced.
+
+---
+
+## 11. Reproducibility receipt — Phase 3
+
+Phase 3's output is bit-identical across runs on the same machine — same
+fit_ols_gd, same Option A signal, same deterministic data flow. Re-run
+`cargo run --release -p cana-train-cost-model` and the Phase 3 table
+above will match exactly.
