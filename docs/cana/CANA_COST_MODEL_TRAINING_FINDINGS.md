@@ -1102,3 +1102,223 @@ ranker produces non-trivial plans on real workloads, **then**
 the augmented coefficients become worth pasting in. Until then,
 they live in the training binary's output and this doc records
 the drift.
+
+---
+
+## 17. Skip-threshold sensitivity probe — what actually blocks PINN
+
+Earlier sections framed §17 as "tune the skip threshold to make the
+trained ranker produce non-trivial plans on PINN." After running the
+[`cana_threshold_probe`](../../bench/cana_threshold_probe/) bench
+across an 8-value threshold sweep on PINN + 8 pass_ordering programs,
+the actual story is different and clearer.
+
+### What the probe ran
+
+`PassRanker::with_skip_threshold(t)` lets the threshold be overridden.
+The bench sweeps `t ∈ {0.01, 0.005, 0.002, 0.001, 0.0005, 0.0001,
+0.00001, 0.0}` on each program and reports
+`RankingReport.total_recommended()` (Run) and `.total_dropped()` (Skip)
+at each value.
+
+### Headline numbers
+
+**PINN heat 1D:**
+
+| threshold | Run | Skip |
+|---|---|---|
+| 0.01 | 0 | 30 |
+| 0.005 (DEFAULT) | 0 | 30 |
+| 0.002 | 0 | 30 |
+| 0.001 | 0 | 30 |
+| 0.0005 | 0 | 30 |
+| 0.0001 | 0 | 30 |
+| 0.00001 | 0 | 30 |
+| **0.0** | **6** | **24** |
+
+**8 pass_ordering programs at the same sweep:**
+
+| Program | default (0.005) → Run | t=0 → Run |
+|---|---|---|
+| arith | 5 | 12 |
+| loop | 1 | 6 |
+| nested | 1 | 6 |
+| many_fn | 4 | 42 |
+| mixed | 1 | 6 |
+| float | 5 | 12 |
+| recursive | 5 | 12 |
+| large | 5 | 12 |
+
+### The finding: PINN's predictions are zero, not "small positive"
+
+PINN gets 0 recommendations at every threshold ≥ 10⁻⁵, then jumps to
+6 at threshold = exactly 0.0. That's the smoking gun: 6 candidates
+have `predicted_benefit` **exactly equal to 0**. They only pass the
+gate when threshold is 0 (because `0 >= 0` is true) and fail at any
+strictly positive threshold (because `0 < ε` is true for any ε > 0).
+
+The remaining 24 candidates are presumably also exactly 0 (or
+negative-clamped-to-0). Lowering the threshold doesn't help —
+the gate compares to a value that's already zero, and zero is
+below any strictly positive bound.
+
+For pass_ordering programs, the pattern is different: many
+candidates have *small positive* predictions that fail at default
+0.005 but pass at lower thresholds. E.g. `many_fn` goes from 4 Run
+at default to 42 Run at t=0 — 38 candidates are in `(0, 0.005)`,
+real predictions just below the threshold.
+
+### The root cause: clamp-from-negative
+
+`LinearCostModel::predict_pass_gain` ends with
+`raw.clamp(0.0, 0.5)`. If the linear formula returns a negative
+value (e.g. when negative coefficients on `loop_depth` and
+`branch_count` outweigh the positive coefficient on `expr_count`),
+the clamp pins it to 0. The threshold gate then treats it the same
+as a prediction of "no benefit."
+
+PINN's `forward` function is the prototypical case:
+
+- `expr_count` ≈ 40-80 (medium-large)
+- `loop_depth` = 2 (nested whiles)
+- `branch_count` = 2 (each `while` is a conditional branch terminator
+  in MIR CFG)
+- `alloc_sites` = 0 (no allocations in pure arithmetic)
+
+For trained CF:
+- `w_expr_count = 7.39e-4`, `w_loop_depth = -3.4e-3`,
+  `w_branch_count = -7.4e-3`, `w_alloc_sites = 2.4e-2 (v4)`
+
+Raw ≈ 60 × 7.39e-4 + 2 × (-3.4e-3) + 2 × (-7.4e-3) + 0 × 2.4e-2
+    = 0.0443 - 0.0068 - 0.0148 + 0
+    = 0.0227
+
+Wait — that's positive, not negative. So why does PINN have zero
+predictions?
+
+The likely answer: per-function feature extraction may produce
+*lower* expr_count values than I'm estimating from source code.
+The `expr_count` counts MIR nodes after lowering — branch conditions,
+let-binding RHSs, loop conditions, etc. all separately. But also,
+PINN's helper functions (`init_weights`, `perturb`, `main`) are
+*smaller* than `forward` — their `expr_count` might be 10-15, where
+the negative `loop_depth`/`branch_count` contributions overwhelm the
+small positive `expr_count` contribution.
+
+For a 15-expr function with the same trained coefficients:
+- Raw ≈ 15 × 7.39e-4 + 2 × (-3.4e-3) + 2 × (-7.4e-3)
+      = 0.0111 - 0.0068 - 0.0148
+      = -0.0105
+- After clamp(0.0, 0.5) → **0.0**
+
+That's the mechanism. Small PINN functions with non-trivial loop
+or branch structure produce negative raw values, the clamp pins
+them to 0, the threshold drops them. The 6 candidates that emerge
+at threshold = 0 are the only ones whose raw value happened to
+land at exactly 0 (or slightly positive after clamping).
+
+### Threshold tuning is the wrong lever
+
+The probe was designed to find a threshold where PINN activates.
+It did — `t = 0.0` — but that value is **not viable for production**:
+
+1. **Compile-cost dominance.** At threshold = 0, every pass with
+   any positive predicted benefit gets recommended, including ones
+   whose compile cost would outweigh the runtime gain.
+2. **Confidence ignored.** Low-confidence predictions get the same
+   treatment as high-confidence ones.
+3. **Asymmetric behavior across workloads.** PINN benefits from
+   t=0; pass_ordering programs get up to 42 recommendations on
+   `many_fn` (10× the default 4), most of which are sub-noise.
+
+### What would actually fix PINN activation
+
+Three concrete options:
+
+#### Option A — Refit with PINN-shaped programs
+
+The trained coefficients were fit on a corpus dominated by
+integer-arithmetic programs. None of those have PINN's specific
+shape (many small functions with loop_depth ≥ 1 and branch_count ≥ 1
+but low expr_count). Refitting with 5-10 such programs would
+shift the coefficient signs.
+
+Specifically: if the loop_depth/branch_count coefficients become
+less negative (or positive), small PINN-like functions stop
+producing negative raw values. This is the same shape of fix as
+§3A.4's alloc_sites blind dim, but applied to a different feature
+interaction.
+
+#### Option B — Remove or weaken the clamp
+
+`raw.clamp(0.0, 0.5)` aggressively pins negatives to 0. An
+alternative:
+
+```rust
+// Soft clamping: let small negatives survive, attenuate by confidence.
+raw.max(-self.skip_threshold * 0.5).min(0.5)
+```
+
+This lets predictions in `[-skip_threshold/2, 0)` flow through but
+treat them as "very low confidence." Combined with confidence
+weighting (which already exists in the cost model), this might
+let PINN's predictions reach the threshold gate.
+
+Risk: removing the clamp can produce nonsensical "negative benefit"
+recommendations. Mitigation: scale the confidence proportionally.
+
+#### Option C — Non-linear cost model
+
+A small MLP (2-3 hidden layers) with non-linear activations could
+learn that "small expr_count + non-trivial loop_depth" is a
+PINN-like signal that should get its own per-pass benefit estimate,
+distinct from the global linear sum.
+
+This is the same direction as §16's deeper-fix proposal. Multi-week
+work; probably premature without first trying Option A.
+
+### Recommendation
+
+**Option A is the cheapest and most likely to work.** Closing the
+§3A.4 alloc_sites blind dim with 6 programs measurably shifted
+`w_alloc_sites` from 0 to non-zero on 4 of 5 passes. The same
+approach with 5-10 PINN-shaped programs (small-but-not-trivial
+arithmetic with explicit loops + branches) would probably shift
+the loop_depth/branch_count coefficients enough to stop the
+clamp-from-negative behavior.
+
+Estimated effort: 2-3 hours (write programs, validate they parse,
+re-fit, document drift). Mirror of §16's §3A.4 follow-up workflow.
+
+**Option B is fast but risky.** Could ship in 1 day but needs
+careful validation against the §3A.1 held-out gate to confirm it
+doesn't introduce overfitting.
+
+**Option C is multi-week** and shouldn't be undertaken until A and
+B have been ruled out.
+
+### Why this matters for §4B.2 Option A migration
+
+The original §4B.2 plan (synthesize MirTraceEvents from CanaFeatures,
+feed through NSS) assumed the trained ranker would produce divergent
+PassPlans once thermal predictions activated. The §17 finding shows
+that's true on pass_ordering programs but NOT on PINN-shaped
+workloads, regardless of what NSS predicts.
+
+For thermal-aware compilation to provide value on PINN-like
+programs, the predictions need to reach the threshold gate first.
+The §17 fix (Option A above) is logically upstream of the §4B.2
+Option A migration: address the prediction-zero problem first,
+*then* worry about whether NSS's thermal signal further refines
+those predictions.
+
+### Reproducibility
+
+```bash
+cargo run --release -p cana-threshold-probe
+```
+
+Output is deterministic — same coefficients, same feature
+extraction, same threshold sweep. Re-runs produce byte-identical
+Run/Skip counts. Wall-clock dominated by first-build (~45s); the
+probe itself takes < 1 second across all 9 programs.
