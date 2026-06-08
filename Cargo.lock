@@ -305,6 +305,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cjc-cana-nss"
+version = "0.1.11"
+dependencies = [
+ "cjc-ast",
+ "cjc-cana",
+ "cjc-hir",
+ "cjc-mir",
+ "cjc-nss",
+ "cjc-parser",
+]
+
+[[package]]
 name = "cjc-cli"
 version = "0.1.11"
 dependencies = [
