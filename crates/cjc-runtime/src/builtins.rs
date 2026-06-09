@@ -4070,6 +4070,91 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let a = value_to_sparse(&args[0])?;
             Ok(Some(Value::SparseTensor(crate::sparse::sparse_transpose(a))))
         }
+        // -- §4.4 Sparse eigenvalue solvers ------------------------------------
+        //
+        // Wraps the existing implementations in `crate::sparse_eigen`.
+        // Both use Kahan-summed reductions and a deterministic starting
+        // vector (Lanczos: uniform 1/√n; Arnoldi: standard basis e_0), so
+        // the same input matrix produces the same eigenvalue sequence
+        // bit-for-bit on every run (witnessed by
+        // `sparse_eigen::tests::test_lanczos_deterministic`).
+        //
+        // Note: both currently return eigenvalues only. Eigenvector
+        // recovery is deferred — `LanczosResult.eigenvectors` is empty.
+        // A future revision can extend the return shape to a tuple once
+        // eigenvector extraction lands in sparse_eigen.rs.
+        "sparse_lanczos" => {
+            if args.len() < 2 {
+                return Err(format!(
+                    "sparse_lanczos requires at least 2 arguments \
+                     (sparse_matrix, k); got {}",
+                    args.len()
+                ));
+            }
+            let matrix = value_to_sparse(&args[0])?;
+            let k = value_to_usize(&args[1])?;
+            // max_iter is optional — default to 10*k (rule of thumb for
+            // Lanczos convergence on well-conditioned spectra).
+            let max_iter = if args.len() >= 3 {
+                value_to_usize(&args[2])?
+            } else {
+                k.saturating_mul(10).max(20)
+            };
+            if k == 0 {
+                return Err("sparse_lanczos: k must be >= 1".into());
+            }
+            if k > matrix.nrows {
+                return Err(format!(
+                    "sparse_lanczos: k ({k}) cannot exceed matrix dimension ({})",
+                    matrix.nrows
+                ));
+            }
+            let result = crate::sparse_eigen::lanczos_eigsh(matrix, k, max_iter);
+            let vals: Vec<Value> = result
+                .eigenvalues
+                .into_iter()
+                .map(Value::Float)
+                .collect();
+            Ok(Some(Value::Array(Rc::new(vals))))
+        }
+        "sparse_arnoldi" => {
+            if args.len() < 2 {
+                return Err(format!(
+                    "sparse_arnoldi requires at least 2 arguments \
+                     (sparse_matrix, k); got {}",
+                    args.len()
+                ));
+            }
+            let matrix = value_to_sparse(&args[0])?;
+            let k = value_to_usize(&args[1])?;
+            if k == 0 {
+                return Err("sparse_arnoldi: k must be >= 1".into());
+            }
+            if k > matrix.nrows {
+                return Err(format!(
+                    "sparse_arnoldi: k ({k}) cannot exceed matrix dimension ({})",
+                    matrix.nrows
+                ));
+            }
+            let result = crate::sparse_eigen::arnoldi_eigs(matrix, k);
+            // Return a tuple (real_parts, imag_parts) so the caller can
+            // tell apart real eigenvalues from complex-conjugate pairs.
+            // Real-only matrices have imag_parts all zeros.
+            let real: Vec<Value> = result
+                .eigenvalues_real
+                .into_iter()
+                .map(Value::Float)
+                .collect();
+            let imag: Vec<Value> = result
+                .eigenvalues_imag
+                .into_iter()
+                .map(Value::Float)
+                .collect();
+            Ok(Some(Value::Tuple(Rc::new(vec![
+                Value::Array(Rc::new(real)),
+                Value::Array(Rc::new(imag)),
+            ]))))
+        }
         // -- Phase 9: Clustering -----------------------------------------------
         "kmeans" => {
             let data = value_to_f64_vec(&args[0])?;
@@ -6255,5 +6340,162 @@ mod tests {
                 "stub `{name}` must Err (claimed name), not Ok(None) (fallthrough)"
             );
         }
+    }
+
+    // ── §4.4 Sparse eigenvalue solvers ────────────────────────────────────
+    //
+    // The underlying algorithms have their own unit tests in
+    // crates/cjc-runtime/src/sparse_eigen.rs. These tests verify the
+    // *dispatch wiring* — argument validation, type conversion, return
+    // shape, and that two calls produce bit-identical Value outputs
+    // (proving determinism survives the Value boundary).
+
+    fn diagonal_sparse(diag: &[f64]) -> Value {
+        use crate::sparse::{SparseCoo, SparseCsr};
+        let n = diag.len();
+        let mut values = Vec::with_capacity(n);
+        let mut rows = Vec::with_capacity(n);
+        let mut cols = Vec::with_capacity(n);
+        for (i, &d) in diag.iter().enumerate() {
+            values.push(d);
+            rows.push(i);
+            cols.push(i);
+        }
+        let coo = SparseCoo::new(values, rows, cols, n, n);
+        Value::SparseTensor(SparseCsr::from_coo(&coo))
+    }
+
+    #[test]
+    fn sparse_lanczos_dispatched_and_returns_eigenvalues_array() {
+        // 5x5 diagonal matrix with eigenvalues 1,2,3,4,5 — top 2 are 4,5.
+        let mat = diagonal_sparse(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        let result = dispatch_builtin("sparse_lanczos", &[mat, Value::Int(2)])
+            .unwrap()
+            .unwrap();
+        let evs = match result {
+            Value::Array(a) => a,
+            other => panic!("expected Array, got {}", other.type_name()),
+        };
+        assert!(evs.len() >= 2, "should return at least k=2 eigenvalues");
+        // Last eigenvalue (largest) should be close to 5.0.
+        if let Value::Float(top) = &evs[evs.len() - 1] {
+            assert!(
+                (top - 5.0).abs() < 1e-8,
+                "largest eigenvalue should be 5.0, got {top}"
+            );
+        } else {
+            panic!("expected Float eigenvalue");
+        }
+    }
+
+    #[test]
+    fn sparse_lanczos_uses_default_max_iter_when_omitted() {
+        // 2-arg form: only matrix + k, max_iter defaults to 10*k.
+        let mat = diagonal_sparse(&[2.0, 4.0, 6.0]);
+        let result = dispatch_builtin("sparse_lanczos", &[mat, Value::Int(1)])
+            .unwrap()
+            .unwrap();
+        match result {
+            Value::Array(a) => assert!(!a.is_empty()),
+            other => panic!("expected Array, got {}", other.type_name()),
+        }
+    }
+
+    #[test]
+    fn sparse_lanczos_validates_arity() {
+        let mat = diagonal_sparse(&[1.0, 2.0]);
+        // Only 1 arg (missing k) → arity error.
+        let msg = dispatch_builtin("sparse_lanczos", &[mat]).unwrap_err();
+        assert!(msg.contains("at least 2"), "expected arity error; got: {msg}");
+    }
+
+    #[test]
+    fn sparse_lanczos_rejects_invalid_k() {
+        // k=0 → invalid.
+        let mat = diagonal_sparse(&[1.0, 2.0, 3.0]);
+        let msg =
+            dispatch_builtin("sparse_lanczos", &[mat.clone(), Value::Int(0)]).unwrap_err();
+        assert!(msg.contains("k must be >= 1"), "got: {msg}");
+
+        // k > n → invalid.
+        let msg2 = dispatch_builtin("sparse_lanczos", &[mat, Value::Int(99)]).unwrap_err();
+        assert!(msg2.contains("cannot exceed"), "got: {msg2}");
+    }
+
+    #[test]
+    fn sparse_arnoldi_dispatched_and_returns_tuple() {
+        let mat = diagonal_sparse(&[1.0, 2.0, 3.0, 4.0]);
+        let result = dispatch_builtin("sparse_arnoldi", &[mat, Value::Int(4)])
+            .unwrap()
+            .unwrap();
+        // Arnoldi returns (real_parts, imag_parts) tuple.
+        let parts = match result {
+            Value::Tuple(t) => t,
+            other => panic!("expected Tuple(real, imag), got {}", other.type_name()),
+        };
+        assert_eq!(parts.len(), 2, "expected (real_parts, imag_parts)");
+        let imag = match &parts[1] {
+            Value::Array(a) => a,
+            _ => panic!("imag_parts must be Array"),
+        };
+        // Real-only diagonal matrix → all imag parts should be 0.
+        for v in imag.iter() {
+            if let Value::Float(im) = v {
+                assert_eq!(im.to_bits(), 0.0_f64.to_bits(), "real matrix → 0 imag");
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_arnoldi_validates_arity_and_k() {
+        let mat = diagonal_sparse(&[1.0, 2.0]);
+        let msg = dispatch_builtin("sparse_arnoldi", &[mat.clone()]).unwrap_err();
+        assert!(msg.contains("at least 2"));
+        let msg2 = dispatch_builtin("sparse_arnoldi", &[mat, Value::Int(0)]).unwrap_err();
+        assert!(msg2.contains("k must be >= 1"));
+    }
+
+    #[test]
+    fn sparse_lanczos_value_level_determinism() {
+        // Two consecutive dispatch calls on the same matrix must
+        // produce bit-identical Value::Float entries. This is the
+        // dispatch-layer witness for determinism — the underlying
+        // sparse_eigen test verifies the algorithm itself.
+        let mat = diagonal_sparse(&[1.0, 3.0, 5.0, 7.0, 9.0]);
+        let r1 = dispatch_builtin("sparse_lanczos", &[mat.clone(), Value::Int(3)])
+            .unwrap()
+            .unwrap();
+        let r2 = dispatch_builtin("sparse_lanczos", &[mat, Value::Int(3)])
+            .unwrap()
+            .unwrap();
+        let (a1, a2) = match (r1, r2) {
+            (Value::Array(a), Value::Array(b)) => (a, b),
+            _ => panic!("both should be Array"),
+        };
+        assert_eq!(a1.len(), a2.len());
+        for (x, y) in a1.iter().zip(a2.iter()) {
+            if let (Value::Float(fx), Value::Float(fy)) = (x, y) {
+                assert_eq!(
+                    fx.to_bits(),
+                    fy.to_bits(),
+                    "dispatch-layer non-determinism: {fx} vs {fy}",
+                );
+            } else {
+                panic!("expected Float pair");
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_arnoldi_value_level_determinism() {
+        let mat = diagonal_sparse(&[2.0, 4.0, 6.0, 8.0]);
+        let r1 = dispatch_builtin("sparse_arnoldi", &[mat.clone(), Value::Int(3)])
+            .unwrap()
+            .unwrap();
+        let r2 = dispatch_builtin("sparse_arnoldi", &[mat, Value::Int(3)])
+            .unwrap()
+            .unwrap();
+        // Both must be byte-identical Tuples.
+        assert_eq!(format!("{r1:?}"), format!("{r2:?}"));
     }
 }
