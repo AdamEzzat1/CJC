@@ -4117,6 +4117,211 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 .collect();
             Ok(Some(Value::Array(Rc::new(vals))))
         }
+        // -- §3.2 Vectorize slice 1: explicit-named SIMD tensor ops ----------
+        //
+        // CJC-Lang already gets SIMD automatically when the user writes
+        // `a + b` for tensors `a, b` of matching shape — `Tensor::add`
+        // routes through `tensor_simd::simd_binop` with AVX2 acceleration
+        // (scalar fallback otherwise). These builtins expose the SAME
+        // SIMD path under explicit names so library code can call them
+        // directly without going through operator dispatch.
+        //
+        // The shipped `vectorize` MIR pass is still a no-op scaffold —
+        // the loop-rewrite work that detects `for i { c[i] = a[i] + b[i] }`
+        // and replaces it with a tensor binary op call is the remaining
+        // piece. See `docs/cana/PASS_IMPLEMENTATION_DESIGNS.md` §4 for
+        // the slice 3 plan.
+        //
+        // Why this is in the §4.4-adjacent batch: the existing
+        // `Tensor::add` SIMD path returns errors that we want to
+        // surface cleanly here, AND adding explicit names makes the
+        // SIMD primitives discoverable in CJC-Lang code without users
+        // having to grep the operator-dispatch table.
+        "tensor_elementwise_add" => {
+            if args.len() != 2 {
+                return Err(format!(
+                    "tensor_elementwise_add requires 2 arguments (a, b); got {}",
+                    args.len()
+                ));
+            }
+            let a = match &args[0] {
+                Value::Tensor(t) => t,
+                v => return Err(format!("tensor_elementwise_add: first arg must be Tensor, got {}", v.type_name())),
+            };
+            let b = match &args[1] {
+                Value::Tensor(t) => t,
+                v => return Err(format!("tensor_elementwise_add: second arg must be Tensor, got {}", v.type_name())),
+            };
+            Ok(Some(Value::Tensor(a.add(b).map_err(|e| format!("{e}"))?)))
+        }
+        "tensor_elementwise_sub" => {
+            if args.len() != 2 {
+                return Err(format!(
+                    "tensor_elementwise_sub requires 2 arguments (a, b); got {}",
+                    args.len()
+                ));
+            }
+            let a = match &args[0] {
+                Value::Tensor(t) => t,
+                v => return Err(format!("tensor_elementwise_sub: first arg must be Tensor, got {}", v.type_name())),
+            };
+            let b = match &args[1] {
+                Value::Tensor(t) => t,
+                v => return Err(format!("tensor_elementwise_sub: second arg must be Tensor, got {}", v.type_name())),
+            };
+            Ok(Some(Value::Tensor(a.sub(b).map_err(|e| format!("{e}"))?)))
+        }
+        "tensor_elementwise_mul" => {
+            if args.len() != 2 {
+                return Err(format!(
+                    "tensor_elementwise_mul requires 2 arguments (a, b); got {}",
+                    args.len()
+                ));
+            }
+            let a = match &args[0] {
+                Value::Tensor(t) => t,
+                v => return Err(format!("tensor_elementwise_mul: first arg must be Tensor, got {}", v.type_name())),
+            };
+            let b = match &args[1] {
+                Value::Tensor(t) => t,
+                v => return Err(format!("tensor_elementwise_mul: second arg must be Tensor, got {}", v.type_name())),
+            };
+            Ok(Some(Value::Tensor(a.mul_elem(b).map_err(|e| format!("{e}"))?)))
+        }
+        "tensor_elementwise_div" => {
+            if args.len() != 2 {
+                return Err(format!(
+                    "tensor_elementwise_div requires 2 arguments (a, b); got {}",
+                    args.len()
+                ));
+            }
+            let a = match &args[0] {
+                Value::Tensor(t) => t,
+                v => return Err(format!("tensor_elementwise_div: first arg must be Tensor, got {}", v.type_name())),
+            };
+            let b = match &args[1] {
+                Value::Tensor(t) => t,
+                v => return Err(format!("tensor_elementwise_div: second arg must be Tensor, got {}", v.type_name())),
+            };
+            Ok(Some(Value::Tensor(a.div_elem(b).map_err(|e| format!("{e}"))?)))
+        }
+        // Unary SIMD: wrap Tensor::map_simd with explicit names. Sqrt,
+        // Abs, Neg, Relu are the four AVX2-accelerated kernels in
+        // tensor_simd::simd_unary.
+        "tensor_elementwise_sqrt" => {
+            if args.len() != 1 {
+                return Err(format!(
+                    "tensor_elementwise_sqrt requires 1 argument (tensor); got {}",
+                    args.len()
+                ));
+            }
+            let t = match &args[0] {
+                Value::Tensor(t) => t,
+                v => return Err(format!("tensor_elementwise_sqrt: arg must be Tensor, got {}", v.type_name())),
+            };
+            Ok(Some(Value::Tensor(t.map_simd(crate::tensor_simd::UnaryOp::Sqrt))))
+        }
+        "tensor_elementwise_abs" => {
+            if args.len() != 1 {
+                return Err(format!(
+                    "tensor_elementwise_abs requires 1 argument (tensor); got {}",
+                    args.len()
+                ));
+            }
+            let t = match &args[0] {
+                Value::Tensor(t) => t,
+                v => return Err(format!("tensor_elementwise_abs: arg must be Tensor, got {}", v.type_name())),
+            };
+            Ok(Some(Value::Tensor(t.map_simd(crate::tensor_simd::UnaryOp::Abs))))
+        }
+        "tensor_elementwise_neg" => {
+            if args.len() != 1 {
+                return Err(format!(
+                    "tensor_elementwise_neg requires 1 argument (tensor); got {}",
+                    args.len()
+                ));
+            }
+            let t = match &args[0] {
+                Value::Tensor(t) => t,
+                v => return Err(format!("tensor_elementwise_neg: arg must be Tensor, got {}", v.type_name())),
+            };
+            Ok(Some(Value::Tensor(t.map_simd(crate::tensor_simd::UnaryOp::Neg))))
+        }
+        "tensor_elementwise_relu" => {
+            if args.len() != 1 {
+                return Err(format!(
+                    "tensor_elementwise_relu requires 1 argument (tensor); got {}",
+                    args.len()
+                ));
+            }
+            let t = match &args[0] {
+                Value::Tensor(t) => t,
+                v => return Err(format!("tensor_elementwise_relu: arg must be Tensor, got {}", v.type_name())),
+            };
+            Ok(Some(Value::Tensor(t.map_simd(crate::tensor_simd::UnaryOp::Relu))))
+        }
+        "sparse_lanczos_with_vectors" => {
+            // Same shape as `sparse_lanczos` but additionally returns
+            // approximate eigenvectors. Output is a tuple
+            //   (eigenvalues: Array<Float>, eigenvectors: Tensor<k×n>)
+            // where row i of the tensor is the eigenvector for
+            // eigenvalues[i].
+            //
+            // Memory cost: O(n × max_iter) for the Lanczos basis (vs
+            // O(n) for the eigenvalue-only path). Use this variant
+            // only when eigenvectors are actually needed.
+            if args.len() < 2 {
+                return Err(format!(
+                    "sparse_lanczos_with_vectors requires at least 2 arguments \
+                     (sparse_matrix, k); got {}",
+                    args.len()
+                ));
+            }
+            let matrix = value_to_sparse(&args[0])?;
+            let k = value_to_usize(&args[1])?;
+            let max_iter = if args.len() >= 3 {
+                value_to_usize(&args[2])?
+            } else {
+                k.saturating_mul(10).max(20)
+            };
+            if k == 0 {
+                return Err("sparse_lanczos_with_vectors: k must be >= 1".into());
+            }
+            if k > matrix.nrows {
+                return Err(format!(
+                    "sparse_lanczos_with_vectors: k ({k}) cannot exceed \
+                     matrix dimension ({})",
+                    matrix.nrows
+                ));
+            }
+            let result = crate::sparse_eigen::lanczos_eigsh_with_vectors(
+                matrix, k, max_iter,
+            );
+            let n = matrix.nrows;
+            let actual_k = result.eigenvalues.len();
+            let vals: Vec<Value> = result
+                .eigenvalues
+                .into_iter()
+                .map(Value::Float)
+                .collect();
+            // Flatten eigenvectors row-by-row into a k×n Tensor.
+            let mut flat = Vec::with_capacity(actual_k * n);
+            for v in &result.eigenvectors {
+                flat.extend_from_slice(v);
+            }
+            let evec_tensor = if actual_k > 0 {
+                Tensor::from_vec(flat, &[actual_k, n])
+                    .map_err(|e| format!("eigenvector tensor build: {e}"))?
+            } else {
+                // Empty result — zero-row tensor.
+                Tensor::from_vec(vec![], &[0, n])
+                    .map_err(|e| format!("empty eigenvector tensor build: {e}"))?
+            };
+            Ok(Some(Value::Tuple(Rc::new(vec![
+                Value::Array(Rc::new(vals)),
+                Value::Tensor(evec_tensor),
+            ]))))
+        }
         "sparse_arnoldi" => {
             if args.len() < 2 {
                 return Err(format!(
@@ -6497,5 +6702,200 @@ mod tests {
             .unwrap();
         // Both must be byte-identical Tuples.
         assert_eq!(format!("{r1:?}"), format!("{r2:?}"));
+    }
+
+    // -- §4.4 follow-up: Lanczos with eigenvector recovery dispatch --
+
+    #[test]
+    fn sparse_lanczos_with_vectors_returns_tuple_with_tensor() {
+        let mat = diagonal_sparse(&[1.0, 2.0, 3.0, 4.0]);
+        let result = dispatch_builtin("sparse_lanczos_with_vectors", &[mat, Value::Int(2)])
+            .unwrap()
+            .unwrap();
+        // Tuple of (Array<Float> eigenvalues, Tensor k×n eigenvectors).
+        let parts = match result {
+            Value::Tuple(t) => t,
+            other => panic!("expected Tuple, got {}", other.type_name()),
+        };
+        assert_eq!(parts.len(), 2, "expected (eigenvalues, eigenvectors)");
+        // First element: eigenvalues array.
+        let evals = match &parts[0] {
+            Value::Array(a) => a,
+            _ => panic!("eigenvalues must be Array"),
+        };
+        assert!(evals.len() >= 2);
+        // Second element: eigenvectors tensor with rows = k, cols = n.
+        let evec_tensor = match &parts[1] {
+            Value::Tensor(t) => t,
+            _ => panic!("eigenvectors must be Tensor"),
+        };
+        let shape = evec_tensor.shape.clone();
+        assert_eq!(shape.len(), 2, "expected 2-D tensor; got shape {shape:?}");
+        assert_eq!(shape[0], evals.len(), "rows must equal k");
+        assert_eq!(shape[1], 4, "cols must equal matrix dim");
+    }
+
+    #[test]
+    fn sparse_lanczos_with_vectors_validates_arity_and_k() {
+        let mat = diagonal_sparse(&[1.0, 2.0]);
+        let msg = dispatch_builtin("sparse_lanczos_with_vectors", &[mat.clone()]).unwrap_err();
+        assert!(msg.contains("at least 2"));
+        let msg2 = dispatch_builtin(
+            "sparse_lanczos_with_vectors",
+            &[mat.clone(), Value::Int(0)],
+        )
+        .unwrap_err();
+        assert!(msg2.contains("k must be >= 1"));
+        let msg3 = dispatch_builtin(
+            "sparse_lanczos_with_vectors",
+            &[mat, Value::Int(99)],
+        )
+        .unwrap_err();
+        assert!(msg3.contains("cannot exceed"));
+    }
+
+    #[test]
+    fn sparse_lanczos_with_vectors_dispatch_determinism() {
+        // Two consecutive dispatch calls must produce bit-identical
+        // tuple output. Witnesses determinism across Value boundary.
+        let mat = diagonal_sparse(&[2.0, 4.0, 6.0, 8.0]);
+        let r1 = dispatch_builtin(
+            "sparse_lanczos_with_vectors",
+            &[mat.clone(), Value::Int(2)],
+        )
+        .unwrap()
+        .unwrap();
+        let r2 = dispatch_builtin(
+            "sparse_lanczos_with_vectors",
+            &[mat, Value::Int(2)],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(format!("{r1:?}"), format!("{r2:?}"));
+    }
+
+    // -- §3.2 Vectorize slice 1: explicit-named SIMD tensor op dispatch --
+
+    fn float_tensor(data: Vec<f64>, shape: &[usize]) -> Value {
+        Value::Tensor(Tensor::from_vec(data, shape).unwrap())
+    }
+
+    #[test]
+    fn tensor_elementwise_add_matches_operator_dispatch() {
+        let a = float_tensor(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]);
+        let b = float_tensor(vec![10.0, 20.0, 30.0, 40.0], &[2, 2]);
+        let via_builtin = dispatch_builtin("tensor_elementwise_add", &[a.clone(), b.clone()])
+            .unwrap()
+            .unwrap();
+        // The result through the explicit name must equal a SIMD path
+        // result called directly on Tensor::add.
+        let (at, bt) = match (a, b) {
+            (Value::Tensor(at), Value::Tensor(bt)) => (at, bt),
+            _ => unreachable!(),
+        };
+        let direct = at.add(&bt).unwrap();
+        match via_builtin {
+            Value::Tensor(t) => {
+                assert_eq!(t.shape, direct.shape);
+                assert_eq!(
+                    t.buffer.borrow_data().to_vec(),
+                    direct.buffer.borrow_data().to_vec(),
+                );
+            }
+            _ => panic!("expected Tensor"),
+        }
+    }
+
+    #[test]
+    fn tensor_elementwise_all_binops_dispatched() {
+        let a = float_tensor(vec![6.0, 12.0, 18.0, 24.0], &[4]);
+        let b = float_tensor(vec![2.0, 3.0, 6.0, 4.0], &[4]);
+        for name in &[
+            "tensor_elementwise_add",
+            "tensor_elementwise_sub",
+            "tensor_elementwise_mul",
+            "tensor_elementwise_div",
+        ] {
+            let result = dispatch_builtin(name, &[a.clone(), b.clone()])
+                .unwrap_or_else(|e| panic!("{name} dispatch failed: {e}"))
+                .unwrap_or_else(|| panic!("{name} returned None (fell through to fallback?)"));
+            assert!(
+                matches!(result, Value::Tensor(_)),
+                "{name} must return Value::Tensor"
+            );
+        }
+    }
+
+    #[test]
+    fn tensor_elementwise_all_unary_dispatched() {
+        let t = float_tensor(vec![-4.0, -1.0, 0.5, 9.0], &[4]);
+        for name in &[
+            "tensor_elementwise_sqrt",
+            "tensor_elementwise_abs",
+            "tensor_elementwise_neg",
+            "tensor_elementwise_relu",
+        ] {
+            let result = dispatch_builtin(name, &[t.clone()])
+                .unwrap_or_else(|e| panic!("{name} dispatch failed: {e}"))
+                .unwrap_or_else(|| panic!("{name} fell through"));
+            assert!(matches!(result, Value::Tensor(_)), "{name} returns Tensor");
+        }
+    }
+
+    #[test]
+    fn tensor_elementwise_validates_arity() {
+        let t = float_tensor(vec![1.0, 2.0], &[2]);
+        // Binary ops require exactly 2 args.
+        let msg = dispatch_builtin("tensor_elementwise_add", &[t.clone()]).unwrap_err();
+        assert!(msg.contains("2 arguments"));
+        let msg2 = dispatch_builtin(
+            "tensor_elementwise_add",
+            &[t.clone(), t.clone(), t.clone()],
+        )
+        .unwrap_err();
+        assert!(msg2.contains("2 arguments"));
+        // Unary ops require exactly 1 arg.
+        let msg3 = dispatch_builtin("tensor_elementwise_sqrt", &[t.clone(), t.clone()])
+            .unwrap_err();
+        assert!(msg3.contains("1 argument"));
+    }
+
+    #[test]
+    fn tensor_elementwise_rejects_non_tensor_args() {
+        let int = Value::Int(42);
+        let t = float_tensor(vec![1.0, 2.0], &[2]);
+        let msg = dispatch_builtin("tensor_elementwise_add", &[int.clone(), t.clone()])
+            .unwrap_err();
+        assert!(msg.contains("must be Tensor"));
+        let msg2 = dispatch_builtin("tensor_elementwise_sqrt", &[int]).unwrap_err();
+        assert!(msg2.contains("must be Tensor"));
+    }
+
+    #[test]
+    fn tensor_elementwise_dispatch_determinism() {
+        // Same input → byte-identical result across runs.
+        let a = float_tensor(vec![1.5, 2.5, 3.5, 4.5], &[2, 2]);
+        let b = float_tensor(vec![0.1, 0.2, 0.3, 0.4], &[2, 2]);
+        let r1 = dispatch_builtin("tensor_elementwise_mul", &[a.clone(), b.clone()])
+            .unwrap()
+            .unwrap();
+        let r2 = dispatch_builtin("tensor_elementwise_mul", &[a, b])
+            .unwrap()
+            .unwrap();
+        match (r1, r2) {
+            (Value::Tensor(t1), Value::Tensor(t2)) => {
+                let d1 = t1.buffer.borrow_data();
+                let d2 = t2.buffer.borrow_data();
+                assert_eq!(d1.len(), d2.len());
+                for (x, y) in d1.iter().zip(d2.iter()) {
+                    assert_eq!(
+                        x.to_bits(),
+                        y.to_bits(),
+                        "non-deterministic tensor_elementwise_mul: {x} vs {y}",
+                    );
+                }
+            }
+            _ => panic!("expected Tensor pair"),
+        }
     }
 }
