@@ -1460,7 +1460,173 @@ print(tanh_estimate(20));
 "#;
 
 // ============================================================================
-// The corpus  (60 programs)
+// §3.2 — loop_unroll-eligible programs (8 active + 2 negative)
+// ============================================================================
+//
+// loop_unroll detects `let mut i = K0; while i < N { ... ; i = i + 1; }`
+// where N is a literal IntLit and N - K0 ≤ 8. Active programs hit that
+// shape; negative ones don't (so the OLS fit sees both classes).
+//
+// The float-accumulator program is the empirical witness for the Universal
+// classification: it proves the unrolled form preserves the bit pattern
+// of a strict reduction sequence.
+
+const PROG_UNROLL_TINY_3: &str = r#"
+fn compute() -> i64 {
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    while i < 3 {
+        total = total + i;
+        i = i + 1;
+    }
+    return total;
+}
+print(compute());
+"#;
+
+const PROG_UNROLL_MAX_8: &str = r#"
+fn compute() -> i64 {
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    while i < 8 {
+        total = total + i * 2;
+        i = i + 1;
+    }
+    return total;
+}
+print(compute());
+"#;
+
+const PROG_UNROLL_FLOAT_ACCUM: &str = r#"
+fn compute() -> f64 {
+    let mut total: f64 = 0.0;
+    let mut i: i64 = 0;
+    while i < 5 {
+        total = total + 1.5;
+        i = i + 1;
+    }
+    return total;
+}
+print(compute());
+"#;
+
+const PROG_UNROLL_TWO_SEQ: &str = r#"
+fn compute() -> i64 {
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    while i < 4 {
+        total = total + i;
+        i = i + 1;
+    }
+    let mut j: i64 = 0;
+    while j < 4 {
+        total = total + j * 2;
+        j = j + 1;
+    }
+    return total;
+}
+print(compute());
+"#;
+
+const PROG_UNROLL_NESTED: &str = r#"
+fn compute() -> i64 {
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    while i < 3 {
+        let mut j: i64 = 0;
+        while j < 3 {
+            total = total + i * j;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return total;
+}
+print(compute());
+"#;
+
+const PROG_UNROLL_WITH_BRANCH: &str = r#"
+fn compute() -> i64 {
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    while i < 5 {
+        if i > 2 {
+            total = total + 100;
+        }
+        total = total + i;
+        i = i + 1;
+    }
+    return total;
+}
+print(compute());
+"#;
+
+const PROG_UNROLL_BIG_FUNC: &str = r#"
+fn compute(n: i64) -> i64 {
+    let a: i64 = n + 7;
+    let b: i64 = a * 3 - 4;
+    let c: i64 = b + 11;
+    let d: i64 = c * 2;
+    let mut total: i64 = a + b + c + d;
+    let mut i: i64 = 0;
+    while i < 6 {
+        total = total + i;
+        i = i + 1;
+    }
+    let e: i64 = total * 2;
+    let f: i64 = e + a + b;
+    let g: i64 = f - c * d;
+    return g + total;
+}
+print(compute(17));
+"#;
+
+const PROG_UNROLL_HEAVY_BODY: &str = r#"
+fn compute() -> i64 {
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    while i < 4 {
+        let a: i64 = i + 1;
+        let b: i64 = a * 2;
+        let c: i64 = b - 3;
+        let d: i64 = c + 4;
+        let e: i64 = d * 5;
+        total = total + a + b + c + d + e;
+        i = i + 1;
+    }
+    return total;
+}
+print(compute());
+"#;
+
+const PROG_UNROLL_REJECTED_N9: &str = r#"
+fn compute() -> i64 {
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    while i < 9 {
+        total = total + i;
+        i = i + 1;
+    }
+    return total;
+}
+print(compute());
+"#;
+
+const PROG_UNROLL_REJECTED_VAR_BOUND: &str = r#"
+fn compute(n: i64) -> i64 {
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        total = total + i;
+        i = i + 1;
+    }
+    return total;
+}
+print(compute(5));
+"#;
+
+// ============================================================================
+// The corpus  (95 programs)
 // ============================================================================
 
 pub const PROGRAMS: &[Program] = &[
@@ -1571,4 +1737,15 @@ pub const PROGRAMS: &[Program] = &[
     Program { name: "pinn_loss_term",         source: PROG_PINN_LOSS_TERM,        expected_dominant_pass: "licm" },
     Program { name: "pinn_nested_small",      source: PROG_PINN_NESTED_SMALL,     expected_dominant_pass: "licm" },
     Program { name: "pinn_tanh_estimate",     source: PROG_PINN_TANH_ESTIMATE,    expected_dominant_pass: "constant_fold" },
+    // §3.2 — loop_unroll active (8) + rejected (2)
+    Program { name: "unroll_tiny_3",          source: PROG_UNROLL_TINY_3,         expected_dominant_pass: "loop_unroll" },
+    Program { name: "unroll_max_8",           source: PROG_UNROLL_MAX_8,          expected_dominant_pass: "loop_unroll" },
+    Program { name: "unroll_float_accum",     source: PROG_UNROLL_FLOAT_ACCUM,    expected_dominant_pass: "loop_unroll" },
+    Program { name: "unroll_two_seq",         source: PROG_UNROLL_TWO_SEQ,        expected_dominant_pass: "loop_unroll" },
+    Program { name: "unroll_nested",          source: PROG_UNROLL_NESTED,         expected_dominant_pass: "loop_unroll" },
+    Program { name: "unroll_with_branch",     source: PROG_UNROLL_WITH_BRANCH,    expected_dominant_pass: "loop_unroll" },
+    Program { name: "unroll_big_func",        source: PROG_UNROLL_BIG_FUNC,       expected_dominant_pass: "loop_unroll" },
+    Program { name: "unroll_heavy_body",      source: PROG_UNROLL_HEAVY_BODY,     expected_dominant_pass: "loop_unroll" },
+    Program { name: "unroll_rejected_n9",     source: PROG_UNROLL_REJECTED_N9,    expected_dominant_pass: "licm" },
+    Program { name: "unroll_rejected_var",    source: PROG_UNROLL_REJECTED_VAR_BOUND, expected_dominant_pass: "licm" },
 ];

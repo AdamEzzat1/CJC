@@ -6,7 +6,10 @@
 //! 3. Dead Code Elimination (DCE) — remove unused assigns and unreachable blocks.
 //! 4. Common Subexpression Elimination (CSE) — reuse identical pure expressions.
 //! 5. Loop-Invariant Code Motion (LICM) — hoist invariant code out of loops.
-//! 6. Second round of CF (may expose new opportunities after other passes).
+//! 6. Loop Unrolling — replace short fixed-trip-count `while` loops with
+//!    straight-line replicas of their body.
+//! 7. Second round of CF (may expose new opportunities after other passes,
+//!    including the literal-trip-count constants exposed by unrolling).
 //!
 //! Design constraints:
 //! - Bit-identical results: no float reassociation, no reorder of evaluation.
@@ -32,6 +35,7 @@ pub const DEFAULT_PASS_SEQUENCE: &[&str] = &[
     "dce",
     "cse",
     "licm",
+    "loop_unroll",
     "cf_round_2",
 ];
 
@@ -96,6 +100,7 @@ impl PassPlan {
 /// - `"dce"`, `"dead_code_elimination"` → dead code elimination
 /// - `"cse"`, `"common_subexpression_elimination"` → CSE
 /// - `"licm"`, `"loop_invariant_code_motion"` → LICM
+/// - `"loop_unroll"`, `"unroll"` → loop unrolling
 ///
 /// Unknown names are silently skipped. This is intentional: CANA may
 /// recommend a pass that's not yet implemented in the compiler, and the
@@ -117,6 +122,7 @@ pub fn apply_pass(pass_name: &str, func: &mut MirFunction) -> bool {
 /// | `dce` | node-count delta (before − after) |
 /// | `cse` | count of variable replacements applied |
 /// | `licm` | count of statements hoisted out of `while` loops |
+/// | `loop_unroll` | count of `while` loops successfully unrolled |
 /// | `fusion_rewrite` | count of fused chains created (via the rewriter) |
 ///
 /// `nodes_before`/`nodes_after` always reflect the structural change to
@@ -199,6 +205,7 @@ pub fn apply_pass_with_diagnostics(
         }
         "cse" | "common_subexpression_elimination" => Some(cse_fn(func)),
         "licm" | "loop_invariant_code_motion" => Some(licm_fn(func)),
+        "loop_unroll" | "unroll" => Some(loop_unroll_fn(func)),
         "fusion_rewrite" | "fusion" => {
             Some(crate::fusion_rewrite::fusion_rewrite_fn(func))
         }
@@ -1555,6 +1562,293 @@ fn references_any(expr: &MirExpr, vars: &BTreeSet<String>) -> bool {
 }
 
 // ===========================================================================
+// Loop Unrolling
+// ===========================================================================
+
+/// Maximum number of iterations to fully unroll. Larger bounds risk
+/// code bloat that erases the speedup; smaller bounds defeat the pass.
+/// 8 is the conservative initial choice — a body of 20 statements at 8
+/// iterations turns into 160 statements (the original Let stays).
+const UNROLL_MAX_ITERATIONS: i64 = 8;
+
+/// Maximum body length (including the trailing increment) for an
+/// unrollable loop. Long bodies + many iterations cause exponential
+/// code bloat with diminishing performance benefit.
+const UNROLL_MAX_BODY_STMTS: usize = 20;
+
+/// Run loop unrolling on a whole function. Returns the **count of
+/// `while` loops successfully unrolled** — one rewrite per loop,
+/// regardless of how many copies of the body we emit. Used as a
+/// deterministic training signal and as a permanent observability
+/// surface via [`apply_pass_with_diagnostics`].
+///
+/// ## What it does
+///
+/// Detects the canonical induction-variable loop pattern, where the
+/// `let mut` immediately precedes the `while` at the same statement
+/// level:
+///
+/// ```text
+/// let mut i: i64 = K0;
+/// while i < N {
+///     ... body stmts ...     (none may write to `i`)
+///     i = i + 1;             (exactly this, as the last body stmt)
+/// }
+/// ```
+///
+/// Replaces the `while` with `N - K0` literal copies of the body,
+/// keeping the `let` so any post-loop reader of `i` still sees the
+/// expected value:
+///
+/// ```text
+/// let mut i: i64 = K0;       (kept — `i` may be read after)
+/// { body }                    (the body's trailing `i = i + 1;`
+/// { body }                     brings `i` from K0 to K0 + 1, etc.;
+/// ...                          after N-K0 copies, `i == N`, same as
+/// { body }                     the rolled loop's exit value)
+/// ```
+///
+/// No symbolic substitution of `i` into the body is needed — the body
+/// computes the same values it would have, in the same order. The
+/// transformation is byte-equivalent to the rolled form under both
+/// executors.
+///
+/// ## What it refuses
+///
+/// - `while` loops without an immediately-preceding `let mut i: i64 = IntLit(_)`
+/// - Loops whose iteration count is `≤ 0` or `> UNROLL_MAX_ITERATIONS`
+/// - Loops whose body length exceeds `UNROLL_MAX_BODY_STMTS`
+/// - Loops whose body contains `Break` or `Continue` at any depth not
+///   shadowed by a nested `while` (their semantics under replication
+///   would differ from the rolled form)
+/// - Loops whose body modifies the induction variable anywhere other
+///   than the trailing `i = i + 1;` (non-canonical induction pattern)
+/// - Loops whose body has a tail `result` expression
+///
+/// ## Recursion
+///
+/// Like LICM, bottom-up: inner loops are unrolled first, so an outer
+/// loop sees the already-normalised inner body when deciding whether
+/// to unroll itself.
+fn loop_unroll_fn(func: &mut MirFunction) -> usize {
+    loop_unroll_body(&mut func.body)
+}
+
+fn loop_unroll_body(body: &mut MirBody) -> usize {
+    let mut count = 0;
+
+    // Bottom-up: recurse into nested sub-bodies first.
+    for stmt in &mut body.stmts {
+        count += loop_unroll_stmt_descend(stmt);
+    }
+
+    // Scan top-level statements for `(Let mut i = IntLit, While)` pairs.
+    let stmts = std::mem::take(&mut body.stmts);
+    let mut iter = stmts.into_iter().peekable();
+    let mut new_stmts: Vec<MirStmt> = Vec::new();
+
+    while let Some(stmt) = iter.next() {
+        if let Some((var_name, start)) = let_init_int(&stmt) {
+            if matches!(iter.peek(), Some(MirStmt::While { .. })) {
+                let while_stmt = iter.next().expect("peeked While present");
+                match try_unroll(&var_name, start, &while_stmt) {
+                    Some(unrolled) => {
+                        new_stmts.push(stmt);
+                        new_stmts.extend(unrolled);
+                        count += 1;
+                    }
+                    None => {
+                        new_stmts.push(stmt);
+                        new_stmts.push(while_stmt);
+                    }
+                }
+                continue;
+            }
+        }
+        new_stmts.push(stmt);
+    }
+    body.stmts = new_stmts;
+    count
+}
+
+/// Recurse into nested sub-bodies (If arms, While body, NoGcBlock) to
+/// give inner loops a chance to unroll first. Does NOT itself try to
+/// unroll the top-level `stmt` — that's the pair-scan loop's job in
+/// [`loop_unroll_body`].
+fn loop_unroll_stmt_descend(stmt: &mut MirStmt) -> usize {
+    match stmt {
+        MirStmt::If { then_body, else_body, .. } => {
+            let mut c = loop_unroll_body(then_body);
+            if let Some(eb) = else_body {
+                c += loop_unroll_body(eb);
+            }
+            c
+        }
+        MirStmt::While { body, .. } => loop_unroll_body(body),
+        MirStmt::NoGcBlock(body) => loop_unroll_body(body),
+        _ => 0,
+    }
+}
+
+/// Extract `(var_name, start_value)` from a `let mut name = IntLit(start);`
+/// statement. Returns `None` if the statement isn't that exact shape
+/// (immutable bindings, non-integer initialisers, and any other stmt
+/// kind all fail).
+///
+/// Mutability is required: the canonical pattern increments `i` inside
+/// the loop body, which would fail type-checking if `i` were immutable.
+fn let_init_int(stmt: &MirStmt) -> Option<(String, i64)> {
+    if let MirStmt::Let { name, mutable: true, init, .. } = stmt {
+        if let MirExprKind::IntLit(start) = &init.kind {
+            return Some((name.clone(), *start));
+        }
+    }
+    None
+}
+
+/// Attempt to unroll one `while` loop given the preceding induction
+/// variable's name + starting value. Returns the replicated body
+/// statements on success; `None` if any structural guard fails.
+fn try_unroll(var_name: &str, start: i64, while_stmt: &MirStmt) -> Option<Vec<MirStmt>> {
+    let (cond, body) = match while_stmt {
+        MirStmt::While { cond, body } => (cond, body),
+        _ => return None,
+    };
+
+    // Condition must be `var_name < IntLit(bound)`.
+    let bound = match &cond.kind {
+        MirExprKind::Binary {
+            op: BinOp::Lt,
+            left,
+            right,
+        } => {
+            if !is_var_named(left, var_name) {
+                return None;
+            }
+            match &right.kind {
+                MirExprKind::IntLit(n) => *n,
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+
+    // Iteration count must be positive and small.
+    let iter_count = bound.saturating_sub(start);
+    if iter_count <= 0 || iter_count > UNROLL_MAX_ITERATIONS {
+        return None;
+    }
+
+    // Body must be non-empty + short; no tail expression.
+    if body.stmts.is_empty() || body.stmts.len() > UNROLL_MAX_BODY_STMTS {
+        return None;
+    }
+    if body.result.is_some() {
+        return None;
+    }
+
+    // The last statement must be exactly `var_name = var_name + 1`.
+    let last_idx = body.stmts.len() - 1;
+    if !is_unit_increment_of(&body.stmts[last_idx], var_name) {
+        return None;
+    }
+
+    // No other body statement may modify `var_name`, and no statement
+    // may contain `Break` or `Continue` at this loop's scope.
+    for (idx, stmt) in body.stmts.iter().enumerate() {
+        if idx == last_idx {
+            continue;
+        }
+        if stmt_assigns_to(stmt, var_name) {
+            return None;
+        }
+        if contains_break_or_continue(stmt) {
+            return None;
+        }
+    }
+
+    // Emit N literal copies of the body. The trailing `i = i + 1;` in
+    // each copy advances `i` correctly; after all copies, `i == bound`.
+    let mut unrolled: Vec<MirStmt> =
+        Vec::with_capacity(body.stmts.len() * iter_count as usize);
+    for _ in 0..iter_count {
+        for stmt in &body.stmts {
+            unrolled.push(stmt.clone());
+        }
+    }
+    Some(unrolled)
+}
+
+/// `true` iff `expr` is `Var(name)` or `VarLocal { name, .. }`. Handles
+/// both forms so the pass works pre- and post-slot-resolution.
+fn is_var_named(expr: &MirExpr, name: &str) -> bool {
+    match &expr.kind {
+        MirExprKind::Var(n) => n == name,
+        MirExprKind::VarLocal { name: n, .. } => n == name,
+        _ => false,
+    }
+}
+
+/// `true` iff `stmt` is exactly `var_name = var_name + 1;` — i.e.
+/// `Expr(Assign { target = Var/VarLocal(name), value = Binary { Add,
+/// left = Var/VarLocal(name), right = IntLit(1) } })`.
+///
+/// Any other increment form (compound `+=`, non-unit step) is
+/// intentionally rejected; the pass stays narrow.
+fn is_unit_increment_of(stmt: &MirStmt, var_name: &str) -> bool {
+    let expr = match stmt {
+        MirStmt::Expr(e) => e,
+        _ => return false,
+    };
+    let (target, value) = match &expr.kind {
+        MirExprKind::Assign { target, value } => (target, value),
+        _ => return false,
+    };
+    if !is_var_named(target, var_name) {
+        return false;
+    }
+    match &value.kind {
+        MirExprKind::Binary { op: BinOp::Add, left, right } => {
+            is_var_named(left, var_name)
+                && matches!(right.kind, MirExprKind::IntLit(1))
+        }
+        _ => false,
+    }
+}
+
+/// `true` iff `stmt` directly assigns to `var_name` anywhere in its
+/// nested sub-statements or sub-expressions. Reuses LICM's existing
+/// [`collect_assigned_vars_stmt`] walker so behaviour matches LICM's
+/// "modified inside the loop" check exactly.
+fn stmt_assigns_to(stmt: &MirStmt, var_name: &str) -> bool {
+    let mut assigned = BTreeSet::new();
+    collect_assigned_vars_stmt(stmt, &mut assigned);
+    assigned.contains(var_name)
+}
+
+/// `true` iff `stmt` contains a `Break` or `Continue` at any nesting
+/// depth EXCEPT inside a nested `While` (whose break/continue belong
+/// to that inner loop, not the one we're considering unrolling).
+fn contains_break_or_continue(stmt: &MirStmt) -> bool {
+    match stmt {
+        MirStmt::Break | MirStmt::Continue => true,
+        MirStmt::If { then_body, else_body, .. } => {
+            then_body.stmts.iter().any(contains_break_or_continue)
+                || else_body
+                    .as_ref()
+                    .map(|b| b.stmts.iter().any(contains_break_or_continue))
+                    .unwrap_or(false)
+        }
+        MirStmt::NoGcBlock(body) => {
+            body.stmts.iter().any(contains_break_or_continue)
+        }
+        // Nested `While` has its own break/continue scope.
+        MirStmt::While { .. } => false,
+        _ => false,
+    }
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 
@@ -2185,6 +2479,7 @@ mod tests {
             "dce", "dead_code_elimination",
             "cse", "common_subexpression_elimination",
             "licm", "loop_invariant_code_motion",
+            "loop_unroll", "unroll",
         ] {
             assert!(apply_pass(name, &mut f), "should recognise {}", name);
         }
@@ -2288,10 +2583,16 @@ mod tests {
     }
 
     #[test]
-    fn default_pass_sequence_has_six_entries() {
+    fn default_pass_sequence_has_seven_entries() {
         // Drift guard: if a pass is added/removed, this needs to change
         // alongside cjc-cana::pass_ranker::CANONICAL_PASSES.
-        assert_eq!(DEFAULT_PASS_SEQUENCE.len(), 6);
+        //
+        // Phase 2 was 6 passes (CF / SR / DCE / CSE / LICM / cf_round_2).
+        // loop_unroll was added between LICM and cf_round_2 so the
+        // second CF round can fold the literal-trip-count constants
+        // exposed by unrolling.
+        assert_eq!(DEFAULT_PASS_SEQUENCE.len(), 7);
+        assert_eq!(DEFAULT_PASS_SEQUENCE[5], "loop_unroll");
     }
 
     // -- Regression test for task_a30e8eec --------------------------------
@@ -2887,7 +3188,569 @@ mod tests {
         assert!(apply_pass("dce", &mut f));
         assert!(apply_pass("cse", &mut f));
         assert!(apply_pass("licm", &mut f));
+        assert!(apply_pass("loop_unroll", &mut f));
         assert!(apply_pass("fusion_rewrite", &mut f));
         assert!(!apply_pass("nothing_real", &mut f));
+    }
+
+    // -----------------------------------------------------------------------
+    // Loop Unrolling tests
+    // -----------------------------------------------------------------------
+
+    /// Build the canonical unrollable pattern as a single function body:
+    ///
+    ///   let mut total: i64 = 0;
+    ///   let mut <name>: i64 = <start>;
+    ///   while <name> < <bound> {
+    ///       total = total + <name>;
+    ///       <name> = <name> + 1;
+    ///   }
+    ///   total
+    ///
+    /// Returns a one-function `MirProgram` with this body in `f`.
+    fn unrollable_program(name: &str, start: i64, bound: i64) -> MirProgram {
+        let body_stmts = vec![
+            MirStmt::Expr(MirExpr {
+                kind: MirExprKind::Assign {
+                    target: Box::new(MirExpr {
+                        kind: MirExprKind::Var("total".to_string()),
+                    }),
+                    value: Box::new(MirExpr {
+                        kind: MirExprKind::Binary {
+                            op: BinOp::Add,
+                            left: Box::new(MirExpr {
+                                kind: MirExprKind::Var("total".to_string()),
+                            }),
+                            right: Box::new(MirExpr {
+                                kind: MirExprKind::Var(name.to_string()),
+                            }),
+                        },
+                    }),
+                },
+            }),
+            // i = i + 1
+            MirStmt::Expr(MirExpr {
+                kind: MirExprKind::Assign {
+                    target: Box::new(MirExpr {
+                        kind: MirExprKind::Var(name.to_string()),
+                    }),
+                    value: Box::new(MirExpr {
+                        kind: MirExprKind::Binary {
+                            op: BinOp::Add,
+                            left: Box::new(MirExpr {
+                                kind: MirExprKind::Var(name.to_string()),
+                            }),
+                            right: Box::new(MirExpr { kind: MirExprKind::IntLit(1) }),
+                        },
+                    }),
+                },
+            }),
+        ];
+        let body = MirBody {
+            stmts: vec![
+                MirStmt::Let {
+                    name: "total".to_string(),
+                    mutable: true,
+                    init: MirExpr { kind: MirExprKind::IntLit(0) },
+                    alloc_hint: None,
+                    slot: None,
+                },
+                MirStmt::Let {
+                    name: name.to_string(),
+                    mutable: true,
+                    init: MirExpr { kind: MirExprKind::IntLit(start) },
+                    alloc_hint: None,
+                    slot: None,
+                },
+                MirStmt::While {
+                    cond: MirExpr {
+                        kind: MirExprKind::Binary {
+                            op: BinOp::Lt,
+                            left: Box::new(MirExpr {
+                                kind: MirExprKind::Var(name.to_string()),
+                            }),
+                            right: Box::new(MirExpr { kind: MirExprKind::IntLit(bound) }),
+                        },
+                    },
+                    body: MirBody { stmts: body_stmts, result: None },
+                },
+            ],
+            result: Some(Box::new(MirExpr {
+                kind: MirExprKind::Var("total".to_string()),
+            })),
+        };
+        mk_program(vec![mk_fn("f", body.stmts, body.result.map(|b| *b))])
+    }
+
+    /// Count `MirStmt::While` occurrences anywhere in a function body.
+    /// Used to assert that the unrolled program has zero whiles where
+    /// it started with one.
+    fn count_whiles(prog: &MirProgram) -> usize {
+        fn count_in_body(body: &MirBody) -> usize {
+            let mut n = 0;
+            for stmt in &body.stmts {
+                match stmt {
+                    MirStmt::While { body: wb, .. } => {
+                        n += 1;
+                        n += count_in_body(wb);
+                    }
+                    MirStmt::If { then_body, else_body, .. } => {
+                        n += count_in_body(then_body);
+                        if let Some(eb) = else_body {
+                            n += count_in_body(eb);
+                        }
+                    }
+                    MirStmt::NoGcBlock(b) => n += count_in_body(b),
+                    _ => {}
+                }
+            }
+            n
+        }
+        prog.functions
+            .iter()
+            .map(|f| count_in_body(&f.body))
+            .sum()
+    }
+
+    #[test]
+    fn unroll_collapses_simple_short_loop() {
+        // 4 iterations: while i < 4 { total = total + i; i = i + 1 }
+        // Body has 2 stmts. Unrolled: 2 * 4 = 8 stmts inline, plus the Let.
+        let mut prog = unrollable_program("i", 0, 4);
+
+        // Sanity: starts with exactly one while.
+        assert_eq!(count_whiles(&prog), 1);
+
+        let f = &mut prog.functions[0];
+        let count = loop_unroll_fn(f);
+        assert_eq!(count, 1, "exactly one loop should have been unrolled");
+        assert_eq!(count_whiles(&prog), 0, "the while should be gone");
+
+        // The function body should now be:
+        //   [Let total, Let i, body_stmt, body_stmt, body_stmt, body_stmt, body_stmt, body_stmt, body_stmt, body_stmt, <tail expr>]
+        //   = 2 lets + 8 body stmts = 10 stmts.
+        assert_eq!(prog.functions[0].body.stmts.len(), 2 + 2 * 4);
+    }
+
+    #[test]
+    fn unroll_refuses_when_iter_count_exceeds_max() {
+        // 9 iterations > UNROLL_MAX_ITERATIONS (8) → refuse.
+        let mut prog = unrollable_program("i", 0, 9);
+        let f = &mut prog.functions[0];
+        let count = loop_unroll_fn(f);
+        assert_eq!(count, 0, "9-iter loop must not be unrolled");
+        assert_eq!(count_whiles(&prog), 1, "the while must remain");
+    }
+
+    #[test]
+    fn unroll_refuses_when_iter_count_nonpositive() {
+        // bound <= start → iter_count <= 0. Don't unroll (DCE handles
+        // dead loops elsewhere; we shouldn't fabricate empty blocks).
+        let mut prog = unrollable_program("i", 5, 5);
+        let f = &mut prog.functions[0];
+        let count = loop_unroll_fn(f);
+        assert_eq!(count, 0, "empty-range loop must not be unrolled");
+        assert_eq!(count_whiles(&prog), 1);
+    }
+
+    #[test]
+    fn unroll_refuses_when_let_isnt_immediately_preceding() {
+        // Build a program where the `let mut i = 0;` is separated from
+        // the while by a non-Let statement. The pair-detection only
+        // looks at adjacent statements, so this should not unroll.
+        let mut prog = unrollable_program("i", 0, 3);
+        // Splice an Expr stmt between the Let and the While.
+        let f = &mut prog.functions[0];
+        let intervening = MirStmt::Expr(MirExpr {
+            kind: MirExprKind::Assign {
+                target: Box::new(MirExpr {
+                    kind: MirExprKind::Var("total".to_string()),
+                }),
+                value: Box::new(MirExpr { kind: MirExprKind::IntLit(0) }),
+            },
+        });
+        // After change: [Let total, Let i, <Expr>, While, ...]
+        f.body.stmts.insert(2, intervening);
+
+        let count = loop_unroll_fn(f);
+        assert_eq!(count, 0, "must not unroll when Let isn't adjacent to While");
+        assert_eq!(count_whiles(&prog), 1);
+    }
+
+    #[test]
+    fn unroll_refuses_when_body_contains_break() {
+        // while i < 3 { if cond { break }; total = total + i; i = i + 1 }
+        let mut prog = unrollable_program("i", 0, 3);
+        let f = &mut prog.functions[0];
+        // Replace the while body to inject a Break inside an If.
+        if let MirStmt::While { body, .. } = &mut f.body.stmts[2] {
+            let break_stmt = MirStmt::If {
+                cond: MirExpr {
+                    kind: MirExprKind::Var("cond".to_string()),
+                },
+                then_body: MirBody {
+                    stmts: vec![MirStmt::Break],
+                    result: None,
+                },
+                else_body: None,
+            };
+            body.stmts.insert(0, break_stmt);
+        } else {
+            panic!("expected While at index 2");
+        }
+
+        let count = loop_unroll_fn(f);
+        assert_eq!(count, 0, "must not unroll bodies with Break");
+        assert_eq!(count_whiles(&prog), 1);
+    }
+
+    #[test]
+    fn unroll_refuses_when_last_stmt_isnt_unit_increment() {
+        // The last stmt is `i = i + 2` (non-unit step) — refuse.
+        let mut prog = unrollable_program("i", 0, 3);
+        let f = &mut prog.functions[0];
+        if let MirStmt::While { body, .. } = &mut f.body.stmts[2] {
+            // body.stmts[1] is the `i = i + 1` increment. Rewrite to + 2.
+            if let MirStmt::Expr(MirExpr {
+                kind: MirExprKind::Assign { value, .. },
+            }) = &mut body.stmts[1]
+            {
+                if let MirExprKind::Binary { right, .. } = &mut value.kind {
+                    right.kind = MirExprKind::IntLit(2);
+                }
+            }
+        }
+        let count = loop_unroll_fn(f);
+        assert_eq!(count, 0, "non-unit step must not unroll");
+        assert_eq!(count_whiles(&prog), 1);
+    }
+
+    #[test]
+    fn unroll_refuses_when_body_reassigns_loop_var() {
+        // Body assigns to `i` outside the trailing increment (e.g. `i = 0`
+        // earlier in the body) — refuse.
+        let mut prog = unrollable_program("i", 0, 3);
+        let f = &mut prog.functions[0];
+        if let MirStmt::While { body, .. } = &mut f.body.stmts[2] {
+            let extra_assign = MirStmt::Expr(MirExpr {
+                kind: MirExprKind::Assign {
+                    target: Box::new(MirExpr {
+                        kind: MirExprKind::Var("i".to_string()),
+                    }),
+                    value: Box::new(MirExpr { kind: MirExprKind::IntLit(0) }),
+                },
+            });
+            body.stmts.insert(0, extra_assign);
+        }
+        let count = loop_unroll_fn(f);
+        assert_eq!(count, 0, "extra modification of i must not unroll");
+        assert_eq!(count_whiles(&prog), 1);
+    }
+
+    #[test]
+    fn unroll_counts_in_diagnostics_surface() {
+        let mut prog = unrollable_program("i", 0, 3);
+        let f = &mut prog.functions[0];
+        let d = apply_pass_with_diagnostics("loop_unroll", f).unwrap();
+        assert_eq!(d.pass_name, "loop_unroll");
+        assert_eq!(d.changes_applied, 1, "one loop unrolled = one rewrite");
+        assert!(
+            d.nodes_after > d.nodes_before,
+            "unrolling grows the node count by replication: {d:?}"
+        );
+        // The "unroll" alias should also work.
+        let mut prog2 = unrollable_program("j", 0, 3);
+        let f2 = &mut prog2.functions[0];
+        let d2 = apply_pass_with_diagnostics("unroll", f2).unwrap();
+        assert_eq!(d2.changes_applied, 1);
+    }
+
+    #[test]
+    fn unroll_is_deterministic_across_runs() {
+        let prog = unrollable_program("i", 0, 5);
+        let mut first = prog.clone();
+        loop_unroll_fn(&mut first.functions[0]);
+        for _ in 0..20 {
+            let mut again = prog.clone();
+            loop_unroll_fn(&mut again.functions[0]);
+            assert_eq!(
+                format!("{:?}", first),
+                format!("{:?}", again),
+                "loop_unroll must produce byte-identical MIR every run",
+            );
+        }
+    }
+
+    #[test]
+    fn unroll_handles_nested_loops_bottom_up() {
+        // Outer loop with an inner unrollable loop. The inner one should
+        // get unrolled; the outer is not unrollable as-is (its body has
+        // assignments to `j` not adjacent to a fresh `let mut j` at the
+        // outer level — `j` is declared INSIDE the outer body).
+        let inner_body_stmts = vec![
+            MirStmt::Expr(MirExpr {
+                kind: MirExprKind::Assign {
+                    target: Box::new(MirExpr {
+                        kind: MirExprKind::Var("total".to_string()),
+                    }),
+                    value: Box::new(MirExpr {
+                        kind: MirExprKind::Binary {
+                            op: BinOp::Add,
+                            left: Box::new(MirExpr {
+                                kind: MirExprKind::Var("total".to_string()),
+                            }),
+                            right: Box::new(MirExpr {
+                                kind: MirExprKind::Var("j".to_string()),
+                            }),
+                        },
+                    }),
+                },
+            }),
+            MirStmt::Expr(MirExpr {
+                kind: MirExprKind::Assign {
+                    target: Box::new(MirExpr {
+                        kind: MirExprKind::Var("j".to_string()),
+                    }),
+                    value: Box::new(MirExpr {
+                        kind: MirExprKind::Binary {
+                            op: BinOp::Add,
+                            left: Box::new(MirExpr {
+                                kind: MirExprKind::Var("j".to_string()),
+                            }),
+                            right: Box::new(MirExpr { kind: MirExprKind::IntLit(1) }),
+                        },
+                    }),
+                },
+            }),
+        ];
+        let inner_while = MirStmt::While {
+            cond: MirExpr {
+                kind: MirExprKind::Binary {
+                    op: BinOp::Lt,
+                    left: Box::new(MirExpr { kind: MirExprKind::Var("j".to_string()) }),
+                    right: Box::new(MirExpr { kind: MirExprKind::IntLit(2) }),
+                },
+            },
+            body: MirBody { stmts: inner_body_stmts, result: None },
+        };
+        let outer_while = MirStmt::While {
+            cond: MirExpr {
+                kind: MirExprKind::Binary {
+                    op: BinOp::Lt,
+                    left: Box::new(MirExpr { kind: MirExprKind::Var("i".to_string()) }),
+                    right: Box::new(MirExpr { kind: MirExprKind::IntLit(3) }),
+                },
+            },
+            body: MirBody {
+                stmts: vec![
+                    // let mut j = 0; while j < 2 { ... }
+                    MirStmt::Let {
+                        name: "j".to_string(),
+                        mutable: true,
+                        init: MirExpr { kind: MirExprKind::IntLit(0) },
+                        alloc_hint: None,
+                        slot: None,
+                    },
+                    inner_while,
+                    // i = i + 1
+                    MirStmt::Expr(MirExpr {
+                        kind: MirExprKind::Assign {
+                            target: Box::new(MirExpr {
+                                kind: MirExprKind::Var("i".to_string()),
+                            }),
+                            value: Box::new(MirExpr {
+                                kind: MirExprKind::Binary {
+                                    op: BinOp::Add,
+                                    left: Box::new(MirExpr {
+                                        kind: MirExprKind::Var("i".to_string()),
+                                    }),
+                                    right: Box::new(MirExpr { kind: MirExprKind::IntLit(1) }),
+                                },
+                            }),
+                        },
+                    }),
+                ],
+                result: None,
+            },
+        };
+
+        let body = MirBody {
+            stmts: vec![
+                MirStmt::Let {
+                    name: "total".to_string(),
+                    mutable: true,
+                    init: MirExpr { kind: MirExprKind::IntLit(0) },
+                    alloc_hint: None,
+                    slot: None,
+                },
+                MirStmt::Let {
+                    name: "i".to_string(),
+                    mutable: true,
+                    init: MirExpr { kind: MirExprKind::IntLit(0) },
+                    alloc_hint: None,
+                    slot: None,
+                },
+                outer_while,
+            ],
+            result: None,
+        };
+        let mut prog = mk_program(vec![mk_fn("f", body.stmts, body.result.map(|b| *b))]);
+
+        // Starts with 2 whiles (outer + inner).
+        assert_eq!(count_whiles(&prog), 2);
+
+        let count = loop_unroll_fn(&mut prog.functions[0]);
+        // BOTH whiles get unrolled: inner first (bottom-up), then the
+        // outer's body is normalised and the outer pair is detectable
+        // (Let i = 0; While i < 3 { ...; i = i + 1 }) — the inner Let j
+        // inside the outer body doesn't affect the outer's eligibility
+        // because the outer pair-scan looks at top-level statements
+        // around the outer While.
+        assert_eq!(count, 2, "both loops should unroll (inner then outer)");
+        assert_eq!(count_whiles(&prog), 0);
+    }
+
+    #[test]
+    fn unroll_via_default_pass_sequence_runs() {
+        // Through the full optimize_program pipeline, the unrollable
+        // loop should disappear because loop_unroll is in
+        // DEFAULT_PASS_SEQUENCE.
+        let prog = unrollable_program("i", 0, 4);
+        assert_eq!(count_whiles(&prog), 1);
+        let optimized = optimize_program(&prog);
+        assert_eq!(
+            count_whiles(&optimized),
+            0,
+            "loop_unroll in DEFAULT_PASS_SEQUENCE should eliminate this while",
+        );
+    }
+
+    #[test]
+    fn unroll_strict_float_accumulator_preserves_order() {
+        // The structural argument for promoting loop_unroll to Tier 1
+        // (Universal) in cjc-cana::legality::pass_safety_tier hinges on
+        // this invariant: replicating the body N times in sequence
+        // preserves the relative order of every floating-point add in a
+        // strict accumulator. This test is the witness.
+        //
+        // Build:
+        //   let mut acc: f64 = 0.0;
+        //   let mut i: i64 = 0;
+        //   while i < 4 {
+        //       acc = acc + 1.5;       // strict reduction
+        //       i = i + 1;
+        //   }
+        //   acc
+        //
+        // After unrolling, the body becomes 4 sequential copies of
+        // `acc = acc + 1.5; i = i + 1;`. The 4 float adds happen in
+        // exactly the order
+        //   acc0 + 1.5, (acc0 + 1.5) + 1.5, ...
+        // which is the same order the rolled form would produce. We
+        // can't check the dynamic value here (we'd need to run the
+        // executor), but we CAN check that the unrolled MIR contains
+        // exactly 4 sequential `acc = acc + 1.5;` statements with the
+        // same operand types as the original — that's the structural
+        // witness that operand ordering is preserved.
+        let body_stmts = vec![
+            MirStmt::Expr(MirExpr {
+                kind: MirExprKind::Assign {
+                    target: Box::new(MirExpr {
+                        kind: MirExprKind::Var("acc".to_string()),
+                    }),
+                    value: Box::new(MirExpr {
+                        kind: MirExprKind::Binary {
+                            op: BinOp::Add,
+                            left: Box::new(MirExpr {
+                                kind: MirExprKind::Var("acc".to_string()),
+                            }),
+                            right: Box::new(MirExpr { kind: MirExprKind::FloatLit(1.5) }),
+                        },
+                    }),
+                },
+            }),
+            MirStmt::Expr(MirExpr {
+                kind: MirExprKind::Assign {
+                    target: Box::new(MirExpr {
+                        kind: MirExprKind::Var("i".to_string()),
+                    }),
+                    value: Box::new(MirExpr {
+                        kind: MirExprKind::Binary {
+                            op: BinOp::Add,
+                            left: Box::new(MirExpr {
+                                kind: MirExprKind::Var("i".to_string()),
+                            }),
+                            right: Box::new(MirExpr { kind: MirExprKind::IntLit(1) }),
+                        },
+                    }),
+                },
+            }),
+        ];
+        let body = MirBody {
+            stmts: vec![
+                MirStmt::Let {
+                    name: "acc".to_string(),
+                    mutable: true,
+                    init: MirExpr { kind: MirExprKind::FloatLit(0.0) },
+                    alloc_hint: None,
+                    slot: None,
+                },
+                MirStmt::Let {
+                    name: "i".to_string(),
+                    mutable: true,
+                    init: MirExpr { kind: MirExprKind::IntLit(0) },
+                    alloc_hint: None,
+                    slot: None,
+                },
+                MirStmt::While {
+                    cond: MirExpr {
+                        kind: MirExprKind::Binary {
+                            op: BinOp::Lt,
+                            left: Box::new(MirExpr {
+                                kind: MirExprKind::Var("i".to_string()),
+                            }),
+                            right: Box::new(MirExpr { kind: MirExprKind::IntLit(4) }),
+                        },
+                    },
+                    body: MirBody { stmts: body_stmts, result: None },
+                },
+            ],
+            result: Some(Box::new(MirExpr {
+                kind: MirExprKind::Var("acc".to_string()),
+            })),
+        };
+        let mut prog = mk_program(vec![mk_fn("strict_acc", body.stmts, body.result.map(|b| *b))]);
+        let count = loop_unroll_fn(&mut prog.functions[0]);
+        assert_eq!(count, 1, "strict float accumulator loop should unroll");
+
+        // Walk the function and count float-add Assigns to `acc`.
+        // Expect exactly 4 (one per unrolled iteration) — that's the
+        // structural witness for accumulator-order preservation.
+        let mut acc_adds = 0;
+        for stmt in &prog.functions[0].body.stmts {
+            if let MirStmt::Expr(MirExpr {
+                kind: MirExprKind::Assign { target, value },
+            }) = stmt
+            {
+                let assigns_acc = matches!(
+                    &target.kind,
+                    MirExprKind::Var(n) if n == "acc"
+                );
+                let adds_float = matches!(
+                    &value.kind,
+                    MirExprKind::Binary { op: BinOp::Add, right, .. }
+                        if matches!(right.kind, MirExprKind::FloatLit(_))
+                );
+                if assigns_acc && adds_float {
+                    acc_adds += 1;
+                }
+            }
+        }
+        assert_eq!(
+            acc_adds, 4,
+            "after unroll, expected exactly 4 sequential `acc = acc + FloatLit` \
+             statements (one per iteration) — the structural witness that the \
+             strict accumulator's bit-exact ordering is preserved",
+        );
     }
 }

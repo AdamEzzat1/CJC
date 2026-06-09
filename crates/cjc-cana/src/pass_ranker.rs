@@ -44,17 +44,20 @@ use crate::legality::{LegalityGate, LegalityVerdict, PassSequence, ProposedPass}
 // ---------------------------------------------------------------------------
 
 /// The fixed pass vocabulary the ranker draws from. Aligns 1:1 with
-/// `cjc_mir::optimize::optimize_program`'s 6-pass sequence (with the second
+/// `cjc_mir::optimize::optimize_program`'s 7-pass sequence (with the second
 /// `constant_fold` run handled as a separate `cf_round_2` slot).
 ///
 /// Order in this array is the *default* pipeline order; the ranker may
-/// reorder them per function based on predicted benefit.
+/// reorder them per function based on predicted benefit. `loop_unroll`
+/// sits between `licm` and `cf_round_2` so the second CF round can fold
+/// the literal-trip-count constants that unrolling exposes.
 pub const CANONICAL_PASSES: &[&str] = &[
     "constant_fold",
     "strength_reduce",
     "dce",
     "cse",
     "licm",
+    "loop_unroll",
     "cf_round_2",
 ];
 
@@ -699,8 +702,11 @@ mod tests {
     }
 
     #[test]
-    fn canonical_pass_count_is_six() {
-        assert_eq!(CANONICAL_PASSES.len(), 6);
+    fn canonical_pass_count_is_seven() {
+        // Drift guard alongside cjc-mir's DEFAULT_PASS_SEQUENCE.
+        // loop_unroll was added between licm and cf_round_2.
+        assert_eq!(CANONICAL_PASSES.len(), 7);
+        assert_eq!(CANONICAL_PASSES[5], "loop_unroll");
     }
 
     // ---------------------------------------------------------------

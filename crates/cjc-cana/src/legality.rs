@@ -217,8 +217,8 @@ impl LegalityGate for DefaultLegalityGate {
 ///
 /// - **[`Universal`]**: the pass cannot, by construction, reorder or alter
 ///   any reduction's bit-exact computation. Safe on every function regardless
-///   of `strict_count`. Used for `constant_fold`, `cf_round_2`, `dce`, and
-///   `licm`.
+///   of `strict_count`. Used for `constant_fold`, `cf_round_2`, `dce`,
+///   `licm`, and `loop_unroll`.
 /// - **[`NoStrictReductions`]**: the pass *might* touch a reduction's
 ///   subexpression (e.g. CSE collapsing two occurrences of `a + b` where
 ///   either occurrence is part of a strict reduction, or SR rewriting
@@ -237,7 +237,10 @@ pub enum PassSafetyTier {
     /// no observers including reductions). `licm` (moves loop-invariants
     /// out; a reduction accumulator `acc = acc + ...` depends on the prior
     /// iteration's `acc`, so it's never loop-invariant by definition —
-    /// LICM cannot hoist it).
+    /// LICM cannot hoist it). `loop_unroll` (replicates the body N times
+    /// in sequence — each iteration's operands are consumed in the same
+    /// order as the rolled form, so a strict accumulator's bit pattern
+    /// is preserved exactly).
     Universal,
     /// Pass might collapse or rewrite a subexpression that's part of a
     /// strict reduction, which would change the bit-exact computation order.
@@ -264,6 +267,37 @@ pub fn pass_safety_tier(pass_name: &str) -> PassSafetyTier {
         // Tier 2: could touch a reduction's subexpression.
         "cse" | "common_subexpression_elimination" => PassSafetyTier::NoStrictReductions,
         "strength_reduce" | "sr" => PassSafetyTier::NoStrictReductions,
+        // Tier 1: `loop_unroll` is structurally unable to alter any
+        // reduction's bit-exact accumulation.
+        //
+        // Structural argument: the pass replaces
+        //     while i < N { body; i = i + 1; }
+        // with N literal copies of `body` in sequence. Each copy of the
+        // body executes in the SAME relative position it would have in
+        // the rolled loop — iteration K's body runs before iteration K+1's
+        // body in both forms. Specifically for a strict accumulator
+        // `acc = acc + sample[i];` inside the loop, the operands are
+        // consumed in exactly the order
+        //     sample[K0], sample[K0+1], ..., sample[N-1]
+        // in both forms. IEEE 754 addition is order-sensitive but the
+        // order is preserved exactly, so the bit-pattern of `acc` after
+        // the loop is identical.
+        //
+        // Note: this guarantee depends on the body executing identically
+        // in each replicated copy (which it does, because we replicate
+        // verbatim with no symbolic substitution of `i`). If a future
+        // extension substituted `i` with a literal at each copy (a common
+        // unrolling enhancement), the floating-point operations would
+        // still happen in the same order — the substitution only changes
+        // integer arithmetic — but the per-copy expression-tree shape
+        // would change. The MVP form is safe; future variants should
+        // re-justify if they alter that.
+        //
+        // Net effect: PINN's hot kernels can now receive `loop_unroll`
+        // recommendations (subject to the cost model's verdict), and the
+        // §6.1 thermal penalty becomes operative on real workloads
+        // (loop_unroll is in THERMALLY_AGGRESSIVE_PASSES).
+        "loop_unroll" | "unroll" => PassSafetyTier::Universal,
 
         // Unknown pass — conservative.
         _ => PassSafetyTier::NoStrictReductions,
@@ -472,7 +506,7 @@ mod tests {
 
     #[test]
     fn pass_safety_tier_universal_passes() {
-        // CF, DCE, LICM are all Tier 1.
+        // CF, DCE, LICM, loop_unroll are all Tier 1.
         assert_eq!(
             pass_safety_tier("constant_fold"),
             PassSafetyTier::Universal,
@@ -489,6 +523,12 @@ mod tests {
             pass_safety_tier("loop_invariant_code_motion"),
             PassSafetyTier::Universal,
         );
+        // loop_unroll was promoted from NoStrictReductions to Universal —
+        // the structural argument (sequential replication preserves
+        // accumulator order) makes the conservative classification
+        // unnecessary. See `pass_safety_tier` for the full rationale.
+        assert_eq!(pass_safety_tier("loop_unroll"), PassSafetyTier::Universal);
+        assert_eq!(pass_safety_tier("unroll"), PassSafetyTier::Universal);
     }
 
     #[test]
