@@ -512,6 +512,7 @@ dependencies = [
  "cjc-locke",
  "cjc-mir",
  "cjc-module",
+ "cjc-nss",
  "cjc-parser",
  "cjc-quantum",
  "cjc-regex",

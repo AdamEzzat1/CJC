@@ -28,6 +28,10 @@
 //! | [`run_program_cfg`] | CFG-based block-walking executor |
 //! | [`verify_nogc`] | Static NoGC verification |
 //! | [`lower_to_mir`] | Lower AST to MIR for inspection |
+//! | [`run_program_instrumented`] | Option B PR 1: same as `run_program_with_executor` but additionally returns a `Vec<MirTraceEvent>` recorded by the [`trace`] module. Empty until PRs 2-4 wire instrumentation sites. |
+
+pub mod trace;
+pub use trace::{with_trace, TraceCollector};
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -4590,6 +4594,68 @@ pub fn run_program_with_executor(
     executor.scan_ast_imports(program);
     let result = executor.exec(&mir)?;
     Ok((result, executor))
+}
+
+/// **Option B PR 1** — instrumented variant of [`run_program_with_executor`].
+///
+/// Enables the per-thread [`trace::TRACE_COLLECTOR`] for the duration
+/// of the executor run, then returns the recorded events alongside the
+/// usual `(Value, MirExecutor)` tuple.
+///
+/// **Today (PR 1):** the executor has no instrumentation sites wired
+/// in yet, so the returned `Vec<MirTraceEvent>` is empty. The value
+/// of this entry point right now is that:
+///
+///   1. It demonstrates the TLS plumbing works without breaking the
+///      AST/MIR parity gate.
+///   2. Tests that compare uninstrumented vs instrumented output
+///      can already be written (and serve as a regression gate when
+///      PRs 2-4 land actual instrumentation sites).
+///   3. Downstream code can build against this signature now, so
+///      PRs 2-4 don't need to change the public API.
+///
+/// **Future (PRs 2-4):** each PR will populate one or more
+/// instrumentation sites (basic-block entry, FP-op count, call
+/// entry/exit, etc.) via the [`trace::with_trace`] helper. The
+/// returned event vec grows as each PR lands; the entry-point
+/// signature doesn't change.
+///
+/// # Determinism contract
+///
+/// Two consecutive calls to `run_program_instrumented(p, s)` must
+/// produce:
+///   - byte-identical `Value` (same as the uninstrumented run)
+///   - byte-identical `MirExecutor.output` (same as the uninstrumented run)
+///   - byte-identical `Vec<MirTraceEvent>` (event sequence is
+///     deterministic per the [`trace`] module's contract)
+///
+/// The first two are critical — instrumentation breaking program
+/// semantics would silently corrupt every downstream consumer.
+pub fn run_program_instrumented(
+    program: &cjc_ast::Program,
+    seed: u64,
+) -> Result<(Value, MirExecutor, Vec<cjc_nss::mir_adapter::MirTraceEvent>), MirExecError> {
+    // Clear any stale TLS state from a prior instrumented run on this
+    // thread (defensive — the previous run should have called reset
+    // itself, but this protects against panics that bypassed the
+    // cleanup path).
+    trace::with_trace(|c| c.reset());
+
+    trace::with_trace(|c| c.enable());
+
+    // Run the normal executor pipeline. Future PRs will add emit
+    // sites inside this; for now the collector receives zero events.
+    let result = run_program_with_executor(program, seed);
+
+    let events = trace::with_trace(|c| {
+        c.disable();
+        c.take()
+    });
+
+    match result {
+        Ok((value, executor)) => Ok((value, executor, events)),
+        Err(e) => Err(e),
+    }
 }
 
 /// Build a CANA-aware optimization plan for a MIR program.

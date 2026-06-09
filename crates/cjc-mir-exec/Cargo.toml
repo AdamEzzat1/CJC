@@ -29,3 +29,7 @@ cjc-abng.workspace = true
 cjc-locke.workspace = true
 cjc-cana.workspace = true
 cjc-cana-nss.workspace = true
+# Option B PR 1 — MirTraceEvent type for the runtime trace collector.
+# Defined in cjc-nss because the NSS layer is the canonical consumer
+# (cjc_nss::adapt_mir_trace_to_cluster_trajectory).
+cjc-nss.workspace = true
