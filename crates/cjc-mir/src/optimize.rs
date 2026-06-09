@@ -101,6 +101,9 @@ impl PassPlan {
 /// - `"cse"`, `"common_subexpression_elimination"` → CSE
 /// - `"licm"`, `"loop_invariant_code_motion"` → LICM
 /// - `"loop_unroll"`, `"unroll"` → loop unrolling
+/// - `"vectorize"` → SIMD vectorization (scaffold; no-op until §3.2)
+/// - `"specialize"` → type-specialization (scaffold; no-op until §3.2)
+/// - `"monomorphize"` → generic monomorphization (scaffold; no-op until §3.2)
 ///
 /// Unknown names are silently skipped. This is intentional: CANA may
 /// recommend a pass that's not yet implemented in the compiler, and the
@@ -206,6 +209,18 @@ pub fn apply_pass_with_diagnostics(
         "cse" | "common_subexpression_elimination" => Some(cse_fn(func)),
         "licm" | "loop_invariant_code_motion" => Some(licm_fn(func)),
         "loop_unroll" | "unroll" => Some(loop_unroll_fn(func)),
+        // §3.2 scaffolds — reserve the names in dispatch so callers
+        // get a clean Some(0) (recognized, no-op) instead of None
+        // (unknown). Each name is classified in
+        // cjc-cana::legality::pass_safety_tier and has placeholder
+        // coefficients in cjc-cana::linear_cost_model. They are NOT
+        // in CANONICAL_PASSES or DEFAULT_PASS_SEQUENCE yet — adding
+        // them there would have no functional effect (the no-ops
+        // return 0) but would consume ranker cycles per function.
+        // Promote when a real implementation lands.
+        "vectorize" => Some(vectorize_noop_fn(func)),
+        "specialize" => Some(specialize_noop_fn(func)),
+        "monomorphize" => Some(monomorphize_noop_fn(func)),
         "fusion_rewrite" | "fusion" => {
             Some(crate::fusion_rewrite::fusion_rewrite_fn(func))
         }
@@ -1849,6 +1864,51 @@ fn contains_break_or_continue(stmt: &MirStmt) -> bool {
 }
 
 // ===========================================================================
+// §3.2 Scaffolds — vectorize / specialize / monomorphize
+// ===========================================================================
+//
+// These three passes are listed in
+// `cjc-cana::thermal_cost_model::THERMALLY_AGGRESSIVE_PASSES` but had
+// no consumer in CANONICAL_PASSES until now. Each one ships as a no-op
+// here so:
+//
+//   * `apply_pass(name, ...)` returns true (recognized) instead of
+//     false (unknown), letting future callers exercise the dispatch
+//     path without touching this file.
+//   * `apply_pass_with_diagnostics(name, ...)` produces a normal
+//     PassDiagnostics record with changes_applied = 0, so observability
+//     surfaces don't have to special-case "unrecognized".
+//   * `cjc-cana::legality::pass_safety_tier(name)` and
+//     `cjc-cana::linear_cost_model` already classify these names — see
+//     those files for the (placeholder) safety tier and coefficients.
+//
+// The actual implementations are out of scope for §3.2 scaffolding:
+//
+//   - vectorize    needs SIMD codegen + alignment analysis. Likely the
+//                  hardest of the three.
+//   - specialize   would specialize generic functions for specific
+//                  concrete-type call sites (analogous to Rust's
+//                  inlining-driven specialization).
+//   - monomorphize would instantiate fully-generic MirFunction
+//                  templates with concrete type substitutions.
+//
+// Each returns 0 (no rewrites applied) so they don't perturb the
+// MIR. AST/MIR parity is preserved — the no-op is the identity
+// transform.
+
+fn vectorize_noop_fn(_func: &mut MirFunction) -> usize {
+    0
+}
+
+fn specialize_noop_fn(_func: &mut MirFunction) -> usize {
+    0
+}
+
+fn monomorphize_noop_fn(_func: &mut MirFunction) -> usize {
+    0
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 
@@ -2480,6 +2540,8 @@ mod tests {
             "cse", "common_subexpression_elimination",
             "licm", "loop_invariant_code_motion",
             "loop_unroll", "unroll",
+            // §3.2 scaffolds (no-ops; reserve the name in dispatch)
+            "vectorize", "specialize", "monomorphize",
         ] {
             assert!(apply_pass(name, &mut f), "should recognise {}", name);
         }
@@ -3189,8 +3251,40 @@ mod tests {
         assert!(apply_pass("cse", &mut f));
         assert!(apply_pass("licm", &mut f));
         assert!(apply_pass("loop_unroll", &mut f));
+        assert!(apply_pass("vectorize", &mut f));
+        assert!(apply_pass("specialize", &mut f));
+        assert!(apply_pass("monomorphize", &mut f));
         assert!(apply_pass("fusion_rewrite", &mut f));
         assert!(!apply_pass("nothing_real", &mut f));
+    }
+
+    #[test]
+    fn vectorize_specialize_monomorphize_scaffolds_return_zero_changes() {
+        // The §3.2 scaffolds are no-ops by design. They must report
+        // changes_applied = 0 AND leave the function MIR untouched
+        // (nodes_before == nodes_after). The AST/MIR parity gate
+        // relies on this property — if these stubs ever mutate the
+        // MIR, every fixture comparison would silently shift.
+        let body = MirBody {
+            stmts: vec![MirStmt::Let {
+                name: "x".to_string(),
+                mutable: false,
+                init: MirExpr { kind: MirExprKind::IntLit(42) },
+                alloc_hint: None,
+                slot: None,
+            }],
+            result: None,
+        };
+        for name in &["vectorize", "specialize", "monomorphize"] {
+            let mut f = make_test_fn("f", body.clone());
+            let d = apply_pass_with_diagnostics(name, &mut f).unwrap();
+            assert_eq!(d.pass_name, *name);
+            assert_eq!(d.changes_applied, 0, "{name} scaffold must report 0");
+            assert_eq!(
+                d.nodes_before, d.nodes_after,
+                "{name} scaffold must not mutate MIR — needed for AST/MIR parity",
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

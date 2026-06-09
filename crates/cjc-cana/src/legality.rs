@@ -298,6 +298,25 @@ pub fn pass_safety_tier(pass_name: &str) -> PassSafetyTier {
         // §6.1 thermal penalty becomes operative on real workloads
         // (loop_unroll is in THERMALLY_AGGRESSIVE_PASSES).
         "loop_unroll" | "unroll" => PassSafetyTier::Universal,
+        // §3.2 scaffolds — classified conservatively until real
+        // implementations land. The MIR-level no-op stubs in
+        // cjc-mir::optimize don't touch any reductions, so even the
+        // NoStrictReductions classification is over-cautious for the
+        // CURRENT no-op behavior. But a future real implementation
+        // could plausibly:
+        //   * vectorize: reorder FP ops within a SIMD lane → strictly
+        //     unsafe on strict reductions
+        //   * specialize: inline a generic function body, which could
+        //     change associativity of FP ops at the call site → unsafe
+        //     until per-call analysis proves otherwise
+        //   * monomorphize: instantiate a generic with concrete types;
+        //     same risk as specialize once code is generated
+        // Pinning all three to NoStrictReductions now lets the gate
+        // refuse them on PINN-like strict-reduction functions without
+        // needing a re-classification when the implementation lands.
+        "vectorize" => PassSafetyTier::NoStrictReductions,
+        "specialize" => PassSafetyTier::NoStrictReductions,
+        "monomorphize" => PassSafetyTier::NoStrictReductions,
 
         // Unknown pass — conservative.
         _ => PassSafetyTier::NoStrictReductions,
