@@ -5215,6 +5215,84 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             dispatch_elastic_net(&args)
         }
 
+        // ── Numerical solver infrastructure stubs (CLAUDE.md §3) ─────────
+        //
+        // These three builtins claim the name in dispatch so that higher-
+        // level libraries (Bastion, etc.) can write call sites against a
+        // stable surface today. Each stub validates the minimum reasonable
+        // arity, then returns a clear "not yet implemented" error rather
+        // than silently producing wrong results.
+        //
+        // Cross-reference: `crates/cjc-runtime/src/ode.rs` already provides
+        // primitive-level Rust functions (`ode_step_euler`, `ode_step_rk4`,
+        // `pde_step_diffusion`, `ode_solve_rk4/rk45`, `SymExpr::differentiate`)
+        // that the future high-level wrappers can call. The vault note
+        // `ODE Integration.md` documents this split. Wiring the existing
+        // primitives directly into dispatch is left for the next pass —
+        // the function-as-argument plumbing (closures called back into the
+        // interpreter from a builtin) needs design first.
+        //
+        // The argument shapes here are intentionally minimal — future
+        // implementations are free to extend the surface (additional
+        // optional args, method selectors, etc.) without breaking the
+        // current "always-errors" contract.
+        //
+        // Visibility note: every name added here is automatically reachable
+        // from both cjc-eval and cjc-mir-exec via their `Try shared
+        // (stateless) builtins` fallback — no per-executor wiring needed.
+        "ode_step" => {
+            // Conceptual surface: ode_step(state, dt) -> next_state
+            // Future impl: ode_step(state, dt, method?, tol?) for adaptive
+            // Runge-Kutta etc. Library code builds closures around this.
+            if args.len() < 2 {
+                return Err(format!(
+                    "ode_step requires at least 2 arguments (state, dt); got {}",
+                    args.len()
+                ));
+            }
+            Err(
+                "ode_step is reserved numerical-solver infrastructure (CLAUDE.md \
+                 §3); not yet implemented. Track in the cjc-lang issue tracker."
+                    .into(),
+            )
+        }
+        "pde_step" => {
+            // Conceptual surface: pde_step(state, dx, dt) -> next_state
+            // Future impl: explicit/implicit method selectors, boundary
+            // conditions, multi-dimensional grids.
+            if args.len() < 3 {
+                return Err(format!(
+                    "pde_step requires at least 3 arguments (state, dx, dt); got {}",
+                    args.len()
+                ));
+            }
+            Err(
+                "pde_step is reserved numerical-solver infrastructure (CLAUDE.md \
+                 §3); not yet implemented. Track in the cjc-lang issue tracker."
+                    .into(),
+            )
+        }
+        "symbolic_derivative" => {
+            // Conceptual surface: symbolic_derivative(expr, var) -> derivative
+            // Future impl: parse expr string (or accept an AST node), produce
+            // the symbolic derivative w.r.t. var. Distinct from cjc-ad's
+            // autodiff (which operates on runtime values, not symbolic
+            // expressions).
+            if args.len() < 2 {
+                return Err(format!(
+                    "symbolic_derivative requires at least 2 arguments \
+                     (expr, var); got {}",
+                    args.len()
+                ));
+            }
+            Err(
+                "symbolic_derivative is reserved numerical-solver infrastructure \
+                 (CLAUDE.md §3); not yet implemented. Track in the cjc-lang \
+                 issue tracker."
+                    .into(),
+            )
+        }
+
         _ => Ok(None), // Not a shared builtin
     }
 }
@@ -6082,5 +6160,100 @@ mod tests {
         let probs = Tensor::from_vec(vec![0.2, 0.3, 0.5], &[3]).unwrap();
         // u=0.99 → cumsum 0.2, 0.5, 1.0 → picks index 2
         assert_eq!(categorical_sample_with_u(&probs, 0.99).unwrap(), 2);
+    }
+
+    // ── Numerical solver infrastructure stubs (CLAUDE.md §3) ─────────────
+    //
+    // These tests assert that the stubs claim their name in dispatch and
+    // produce a clear "not yet implemented" error rather than dispatching
+    // to a wrong builtin or silently returning None.
+
+    #[test]
+    fn ode_step_stub_is_dispatched_and_errors() {
+        // The dispatch arm must return Err (not Ok(None)) — that's how a
+        // caller knows the name IS reserved infrastructure rather than a
+        // typo for some other builtin.
+        let args = vec![Value::Float(0.0), Value::Float(0.01)];
+        let result = dispatch_builtin("ode_step", &args);
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("not yet implemented"),
+            "ode_step stub should mention not-yet-implemented; got: {msg}"
+        );
+        assert!(
+            msg.contains("CLAUDE.md"),
+            "stub error should point at CLAUDE.md so users find the rationale; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn ode_step_stub_validates_arity() {
+        // Calling with too few args must produce an arity error, not the
+        // "not yet implemented" error. This lets library authors distinguish
+        // "I called it wrong" from "the feature isn't built yet."
+        let args = vec![Value::Float(0.0)];
+        let msg = dispatch_builtin("ode_step", &args).unwrap_err();
+        assert!(msg.contains("at least 2"), "expected arity error; got: {msg}");
+        assert!(!msg.contains("not yet implemented"));
+    }
+
+    #[test]
+    fn pde_step_stub_is_dispatched_and_errors() {
+        let args = vec![Value::Float(0.0), Value::Float(0.1), Value::Float(0.01)];
+        let msg = dispatch_builtin("pde_step", &args).unwrap_err();
+        assert!(msg.contains("not yet implemented"));
+        assert!(msg.contains("CLAUDE.md"));
+    }
+
+    #[test]
+    fn pde_step_stub_validates_arity() {
+        // pde_step requires 3 args (state, dx, dt) — fewer should fail arity.
+        let args = vec![Value::Float(0.0), Value::Float(0.1)];
+        let msg = dispatch_builtin("pde_step", &args).unwrap_err();
+        assert!(msg.contains("at least 3"), "expected arity error; got: {msg}");
+        assert!(!msg.contains("not yet implemented"));
+    }
+
+    #[test]
+    fn symbolic_derivative_stub_is_dispatched_and_errors() {
+        let args = vec![
+            Value::String(Rc::new("x^2 + 2*x".to_string())),
+            Value::String(Rc::new("x".to_string())),
+        ];
+        let msg = dispatch_builtin("symbolic_derivative", &args).unwrap_err();
+        assert!(msg.contains("not yet implemented"));
+        assert!(msg.contains("CLAUDE.md"));
+    }
+
+    #[test]
+    fn symbolic_derivative_stub_validates_arity() {
+        let args = vec![Value::String(Rc::new("x".to_string()))];
+        let msg = dispatch_builtin("symbolic_derivative", &args).unwrap_err();
+        assert!(msg.contains("at least 2"), "expected arity error; got: {msg}");
+        assert!(!msg.contains("not yet implemented"));
+    }
+
+    #[test]
+    fn solver_stubs_are_distinct_from_unknown_builtins() {
+        // The fallback `_ => Ok(None)` arm fires for actually-unknown
+        // names. The stubs MUST NOT fall through that arm — they must
+        // return Err immediately so callers see "reserved infrastructure"
+        // rather than "this dispatcher doesn't know that name."
+        let unknown = dispatch_builtin("definitely_not_a_real_builtin", &[]).unwrap();
+        assert!(unknown.is_none(), "truly unknown names produce Ok(None)");
+
+        // All three solver stubs produce Err, never Ok(None).
+        for name in &["ode_step", "pde_step", "symbolic_derivative"] {
+            let many_args = vec![
+                Value::Float(0.0),
+                Value::Float(0.0),
+                Value::Float(0.0),
+            ];
+            let result = dispatch_builtin(name, &many_args);
+            assert!(
+                result.is_err(),
+                "stub `{name}` must Err (claimed name), not Ok(None) (fallthrough)"
+            );
+        }
     }
 }
