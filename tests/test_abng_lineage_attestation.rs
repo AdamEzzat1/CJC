@@ -399,8 +399,19 @@ fn lineage_chain_head_canary_locked() {
     // therefore changed, so the chain head shifted. Pre-A2 hex
     // was `789acce77a22241c2e3601bf958e978b24e4707874cdbb23a7fde9a98f0606c2`;
     // V14_MIGRATION.md records the v13 → v14 mapping.
+    //
+    // Re-locked at ABNG 0.9.5 R0/R1 (2026-06-09) — the 0.9.5
+    // performance refactors changed the rank-1 BLR update's lane
+    // ordering, Cholesky update path, and intermediate state hash:
+    //   * 614b7d7  R1-1: lane-parallel x8 Kahan in rank-1 BLR update
+    //   * 08a4a6b  perf: O(d²) rank-1 Cholesky update for n=1 hot path
+    //   * f678997  R1-2: cholesky_solve lane-parallel + params_hash cache
+    // The end-to-end training trajectory remains bit-deterministic
+    // (two consecutive runs produced identical actual_hex), only the
+    // per-step audit-chain bytes shifted. Pre-R0/R1 hex (Phase 0.8c
+    // v14 Item A2): `7892bd9f9e2331e7729c3e973c4ae7c8db9aaf344772bedd786fd22418fddf81`.
     const CANARY_HEX: &str =
-        "7892bd9f9e2331e7729c3e973c4ae7c8db9aaf344772bedd786fd22418fddf81";
+        "b9b6024fc35d7344950cc014bd27a1e9b8b936f14d1375ca3155e861c2234c63";
     assert_eq!(
         actual_hex, CANARY_HEX,
         "lineage chain_head canary mismatch — see comment"

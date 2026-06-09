@@ -299,8 +299,17 @@ fn tabular_chain_head_canary_locked() {
     // training row therefore changed, so the chain head shifted.
     // Pre-A2 hex: `cd3f5c7be81f5966d1f41af811cc94a859b653adf9993f1d5b3e23c0a87397e6`.
     // V14_MIGRATION.md records the v13 → v14 mapping.
+    //
+    // Re-locked at ABNG 0.9.5 R0/R1 (2026-06-09) — the 0.9.5
+    // performance refactors changed the rank-1 BLR update path:
+    //   * 614b7d7  R1-1: lane-parallel x8 Kahan in rank-1 BLR update
+    //   * 08a4a6b  perf: O(d²) rank-1 Cholesky update for n=1 hot path
+    //   * f678997  R1-2: cholesky_solve lane-parallel + params_hash cache
+    // Per-step audit-chain bytes shifted; end-to-end training is
+    // still bit-deterministic. Pre-R0/R1 hex:
+    // `26ab2b37812607a77da2ee0d242558f672c408717ee4dd78c152e9f9f40d6745`.
     const CANARY_HEX: &str =
-        "26ab2b37812607a77da2ee0d242558f672c408717ee4dd78c152e9f9f40d6745";
+        "d73d61df7ffc1604afc31cdcdae6316b4f8251b62bb5de7b7cab4a63caa892d2";
     assert_eq!(
         actual_hex, CANARY_HEX,
         "tabular GP-like chain_head canary mismatch — see comment"

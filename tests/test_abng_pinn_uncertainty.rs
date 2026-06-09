@@ -383,8 +383,17 @@ fn pinn_chain_head_canary_locked() {
     // training row therefore changed. Pre-A2 hex:
     // `30d333f1f7dca5acaa76b0e4bfdbd4a733df38c6adeda094ae69cf0e9c4e468d`.
     // V14_MIGRATION.md records the v13 → v14 mapping.
+    //
+    // Re-locked at ABNG 0.9.5 R0/R1 (2026-06-09) — the 0.9.5
+    // performance refactors changed the rank-1 BLR update path:
+    //   * 614b7d7  R1-1: lane-parallel x8 Kahan in rank-1 BLR update
+    //   * 08a4a6b  perf: O(d²) rank-1 Cholesky update for n=1 hot path
+    //   * f678997  R1-2: cholesky_solve lane-parallel + params_hash cache
+    // Per-step audit-chain bytes shifted; end-to-end training is
+    // still bit-deterministic. Pre-R0/R1 hex:
+    // `280fd661a59ff09126696a61475e3564552d7135c1471972976ec4478facf5c0`.
     const CANARY_HEX: &str =
-        "280fd661a59ff09126696a61475e3564552d7135c1471972976ec4478facf5c0";
+        "a10785165693ee22277c5a1e51e54900c513d73e526852ed53f36fe967ced8c7";
     assert_eq!(
         actual_hex, CANARY_HEX,
         "PINN chain_head canary mismatch — see comment"

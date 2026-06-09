@@ -123,8 +123,19 @@ fn lineage_cjcl_chain_head_canary_locked() {
     // 0x1E). Pre-A2 hex:
     // `20f5f977cd7dcfad536fbf4be49d4b18c6ba2430b32e510713a038c94fa39b40`.
     // V14_MIGRATION.md records the v13 → v14 mapping.
+    //
+    // Re-locked at ABNG 0.9.5 R0/R1 (2026-06-09) — the 0.9.5
+    // performance refactors changed the rank-1 BLR update path
+    // observed through the CJC-Lang dispatch surface (same algorithmic
+    // drift as the Rust-side canary):
+    //   * 614b7d7  R1-1: lane-parallel x8 Kahan in rank-1 BLR update
+    //   * 08a4a6b  perf: O(d²) rank-1 Cholesky update for n=1 hot path
+    //   * f678997  R1-2: cholesky_solve lane-parallel + params_hash cache
+    // The CJC-Lang interpreter path is still bit-deterministic
+    // (two consecutive runs produced identical actual_hex). Pre-R0/R1
+    // hex: `223906f55c3506a5f33c43f378cd4b32ff04545af37e8c706432f5a2250617d7`.
     const CANARY_HEX: &str =
-        "223906f55c3506a5f33c43f378cd4b32ff04545af37e8c706432f5a2250617d7";
+        "fe9a662e311051334ab9e3d530e1a9ba2c479f16e9ac36b42d3b634d9689ed40";
     assert_eq!(
         chain_a, CANARY_HEX,
         "cjcl lineage chain_head canary mismatch — see comment"

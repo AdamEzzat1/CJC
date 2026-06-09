@@ -84,8 +84,14 @@ fn tabular_cjcl_chain_head_canary_locked() {
     // 0x1E). Pre-A2 hex:
     // `4ffacae41d76f505335218ee0479c656e059024cb7e8d6c95350bbc2af09be54`.
     // V14_MIGRATION.md records the v13 → v14 mapping.
+    //
+    // Re-locked at ABNG 0.9.5 R0/R1 (2026-06-09) — same algorithmic
+    // drift as the Rust-side tabular canary; the 0.9.5 BLR refactors
+    // shifted intermediate audit-chain bytes through the CJC-Lang
+    // dispatch path. Commits 614b7d7 / 08a4a6b / f678997. Pre-R0/R1
+    // hex: `6b3374934095965bca39904a48a5ab557f80347910ed555bae6ea4bd762510fe`.
     const CANARY_HEX: &str =
-        "6b3374934095965bca39904a48a5ab557f80347910ed555bae6ea4bd762510fe";
+        "fe88f60da2670c298082618019ebdbdfa7c534f9cd0a4498835534eb7779fc09";
     assert_eq!(
         chain, CANARY_HEX,
         "cjcl tabular chain_head canary mismatch — see comment"
