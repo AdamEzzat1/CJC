@@ -563,6 +563,7 @@ fn run_experiment(
     let mut est_written = 0u64;
     let mut est_alloc = 0u64;
     let mut est_ws = 0u64;
+    let mut est_float_ops = 0u64;
     let mut pinn_energy_max = 0.0f64;
     let mut pinn_thermal_max = 0.0f64;
     let mut pinn_bandwidth_max = 0.0f64;
@@ -573,6 +574,7 @@ fn run_experiment(
         est_written = est_written.saturating_add(q.bytes_written_estimate);
         est_alloc = est_alloc.saturating_add(q.allocation_bytes_estimate);
         est_ws = est_ws.saturating_add(q.working_set_bytes_estimate);
+        est_float_ops = est_float_ops.saturating_add(q.float_ops_estimate);
         if let Some(est) = predict_physical(&q, &coeffs) {
             pinn_energy_max = pinn_energy_max.max(est.energy_estimate);
             pinn_thermal_max = pinn_thermal_max.max(est.thermal_pressure);
@@ -583,8 +585,12 @@ fn run_experiment(
     // -- NSS predictions -----------------------------------------------------
     // Recorded configs record the recorded predictor's view; synthetic
     // configs record Option A's — the row reflects what the ranker saw.
+    // Membership test, NOT `ends_with("_rec")`: the `_t50`/`_c80`/`_c60`
+    // variants rank under recorded pressures too, and a suffix match
+    // silently stamped them with Option-A labels (caught by the v2 §2.1
+    // data-sanity pass).
     let max_of = |m: BTreeMap<String, f64>| m.values().copied().fold(0.0f64, f64::max);
-    let (nss_cpu_max, nss_memory_max, nss_thermal_max) = if config.ends_with("_rec") {
+    let (nss_cpu_max, nss_memory_max, nss_thermal_max) = if CONFIG_IDS_RECORDED.contains(&config) {
         (
             max_of(recorded.predict_cpu_saturation(&mir, &features)),
             max_of(recorded.predict_memory_peak(&mir, &features)),
@@ -673,6 +679,7 @@ fn run_experiment(
         estimated_bytes_written: est_written,
         estimated_alloc_bytes: est_alloc,
         estimated_working_set: est_ws,
+        estimated_float_ops: est_float_ops,
         nss_predicted_cpu_max: nss_cpu_max,
         nss_predicted_memory_max: nss_memory_max,
         nss_predicted_thermal_max: nss_thermal_max,

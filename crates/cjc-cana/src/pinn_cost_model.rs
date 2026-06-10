@@ -70,6 +70,7 @@ use crate::physical_cost::{
     build_physical_query, predict_physical, PhysicalCoefficients, PhysicalConstraints,
     PhysicalCostEstimate,
 };
+use crate::pinn_thermal_v2::{PinnThermalV2, PINN_V2_MODEL_ID, PINN_V2_MODEL_VERSION};
 use crate::pressure::PressurePredictor;
 
 // ---------------------------------------------------------------------------
@@ -92,6 +93,13 @@ pub struct PinnPhysicalCostModel<M: CostModel, P: PressurePredictor> {
     pub pressure_predictor: P,
     pub physical_coeffs: PhysicalCoefficients,
     pub thresholds: PhysicalConstraints,
+    /// PINN v2: optional TRAINED thermal head. When attached (and
+    /// valid), it replaces the closed-form `thermal_pressure` — every
+    /// other estimate dimension stays v1 (the §2.1 data-sanity pass
+    /// found only thermal has trainable signal). Attaching the head
+    /// flips `name()`/`version()` to the v2 identity so report hashes
+    /// distinguish the two models (determinism invariant #8).
+    pub thermal_head: Option<PinnThermalV2>,
 }
 
 /// Stable model identifier; flows into report hashes via
@@ -109,6 +117,7 @@ impl<M: CostModel, P: PressurePredictor> PinnPhysicalCostModel<M, P> {
             pressure_predictor,
             physical_coeffs: PhysicalCoefficients::default(),
             thresholds: PhysicalConstraints::default(),
+            thermal_head: None,
         }
     }
 
@@ -121,6 +130,17 @@ impl<M: CostModel, P: PressurePredictor> PinnPhysicalCostModel<M, P> {
     /// Override the constraint thresholds.
     pub fn with_constraints(mut self, constraints: PhysicalConstraints) -> Self {
         self.thresholds = constraints;
+        self
+    }
+
+    /// Attach a TRAINED v2 thermal head (see
+    /// [`crate::pinn_thermal_v2`]). Invalid heads are refused — the
+    /// model silently stays v1 rather than predicting from NaN weights;
+    /// callers that must know should check `head.is_valid()` first.
+    pub fn with_thermal_head(mut self, head: PinnThermalV2) -> Self {
+        if head.is_valid() {
+            self.thermal_head = Some(head);
+        }
         self
     }
 
@@ -139,6 +159,13 @@ impl<M: CostModel, P: PressurePredictor> PinnPhysicalCostModel<M, P> {
         let fn_features = features.per_fn.get(function_name)?;
         let query = build_physical_query(function_name, pass_name, fn_features);
         let mut est = predict_physical(&query, &self.physical_coeffs)?;
+
+        // PINN v2: the trained head replaces the closed-form thermal
+        // BEFORE the NSS blend, so the blend's "never report less heat
+        // than the predictor sees" guarantee holds for v2 too.
+        if let Some(head) = &self.thermal_head {
+            est.thermal_pressure = head.predict_thermal(&query);
+        }
 
         // Conservative NSS blend: never report less heat than the
         // predictor sees. f64::max is exact (no rounding), so this
@@ -163,6 +190,7 @@ impl<M: CostModel, P: PressurePredictor> std::fmt::Debug for PinnPhysicalCostMod
             .field("pressure_predictor", &self.pressure_predictor)
             .field("physical_coeffs", &self.physical_coeffs)
             .field("thresholds", &self.thresholds)
+            .field("thermal_head", &self.thermal_head.is_some())
             .finish()
     }
 }
@@ -226,11 +254,19 @@ impl<M: CostModel, P: PressurePredictor> CostModel for PinnPhysicalCostModel<M, 
     }
 
     fn name(&self) -> &'static str {
-        PINN_V1_MODEL_ID
+        if self.thermal_head.is_some() {
+            PINN_V2_MODEL_ID
+        } else {
+            PINN_V1_MODEL_ID
+        }
     }
 
     fn version(&self) -> u32 {
-        PINN_V1_MODEL_VERSION
+        if self.thermal_head.is_some() {
+            PINN_V2_MODEL_VERSION
+        } else {
+            PINN_V1_MODEL_VERSION
+        }
     }
 }
 
@@ -597,6 +633,90 @@ mod tests {
         let first = format!("{:?}", model.query(&p, &f, &q));
         for _ in 0..50 {
             assert_eq!(first, format!("{:?}", model.query(&p, &f, &q)));
+        }
+    }
+
+    // -- PINN v2 trained-thermal-head behavior --------------------------------
+
+    /// Identity-standardized head predicting a constant via the
+    /// intercept — isolates the swap-in mechanics from the weights.
+    fn constant_head(thermal: f64) -> PinnThermalV2 {
+        PinnThermalV2 {
+            feature_means: [0.0; crate::pinn_thermal_v2::PINN_V2_FEATURE_COUNT],
+            feature_stds: [1.0; crate::pinn_thermal_v2::PINN_V2_FEATURE_COUNT],
+            coefficients: [0.0; crate::pinn_thermal_v2::PINN_V2_FEATURE_COUNT],
+            intercept: thermal,
+        }
+    }
+
+    #[test]
+    fn attaching_head_flips_model_identity_to_v2() {
+        let model = PinnPhysicalCostModel::new(NullCostModel, NullPressurePredictor)
+            .with_thermal_head(constant_head(0.1));
+        assert_eq!(model.name(), "pinn_thermal_v2");
+        assert_eq!(model.version(), 2);
+    }
+
+    #[test]
+    fn invalid_head_is_refused_and_identity_stays_v1() {
+        let mut bad = constant_head(0.1);
+        bad.feature_stds[0] = 0.0;
+        let model =
+            PinnPhysicalCostModel::new(NullCostModel, NullPressurePredictor).with_thermal_head(bad);
+        assert!(model.thermal_head.is_none());
+        assert_eq!(model.name(), "pinn_coeffs_v1");
+        assert_eq!(model.version(), 1);
+    }
+
+    #[test]
+    fn trained_head_replaces_closed_form_thermal() {
+        // The closed form sees ~0 thermal for 10 int exprs; a head
+        // predicting 0.99 must trip the 0.95 hard limit where v1 would
+        // soft-blend. The two models therefore make OPPOSITE calls on
+        // the same program — the swap-in genuinely changes behavior.
+        let p = program_with("main", 10);
+        let f = extract(&p);
+        let q = benefit_query("main", "loop_unroll");
+        let base = || ConstantCostModel {
+            value: 0.5,
+            confidence: 0.8,
+        };
+        let v1 = PinnPhysicalCostModel::new(base(), NullPressurePredictor);
+        let v2 = PinnPhysicalCostModel::new(base(), NullPressurePredictor)
+            .with_thermal_head(constant_head(0.99));
+        let v1_value = match v1.query(&p, &f, &q) {
+            CostEstimate::Estimated { value, .. } => value,
+            other => panic!("expected estimate, got {other:?}"),
+        };
+        let v2_value = match v2.query(&p, &f, &q) {
+            CostEstimate::Estimated { value, .. } => value,
+            other => panic!("expected estimate, got {other:?}"),
+        };
+        assert!(v1_value > 0.0, "v1 should keep some benefit: {v1_value}");
+        assert_eq!(v2_value, 0.0, "v2's hot prediction must hard-reject");
+    }
+
+    #[test]
+    fn nss_blend_still_applies_over_trained_head() {
+        // Head predicts cold (0.0); the NSS predictor reports 0.99.
+        // The conservative max-blend must still win — the trained head
+        // can never HIDE heat the runtime predictor sees.
+        let p = program_with("main", 10);
+        let f = extract(&p);
+        let model = PinnPhysicalCostModel::new(
+            ConstantCostModel {
+                value: 0.5,
+                confidence: 0.8,
+            },
+            FixedThermalPredictor { thermal: 0.99 },
+        )
+        .with_thermal_head(constant_head(0.0));
+        match model.query(&p, &f, &benefit_query("main", "loop_unroll")) {
+            CostEstimate::Estimated { value, confidence } => {
+                assert_eq!(value, 0.0, "NSS heat must survive the head swap");
+                assert_eq!(confidence, 1.0);
+            }
+            other => panic!("expected rejection, got {other:?}"),
         }
     }
 }

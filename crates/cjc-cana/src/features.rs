@@ -16,6 +16,7 @@ use crate::cfg_metrics::CfgMetrics;
 use crate::hash::{CanaHasher, FeatureHash, ProgramHash};
 use crate::memory_proxy::MemoryProxy;
 use crate::reduction_axes::ReductionAxes;
+use crate::type_mix::TypeMix;
 
 // ---------------------------------------------------------------------------
 // FnFeatures — per-function record
@@ -27,6 +28,9 @@ pub struct FnFeatures {
     pub cfg: CfgMetrics,
     pub memory: MemoryProxy,
     pub reductions: ReductionAxes,
+    /// Float/int operation mix (PINN v2): the static analog of the
+    /// executor's runtime FP-binop counter. See [`crate::type_mix`].
+    pub type_mix: TypeMix,
 }
 
 impl FnFeatures {
@@ -34,6 +38,7 @@ impl FnFeatures {
         self.cfg.feed(hasher);
         self.memory.feed(hasher);
         self.reductions.feed(hasher);
+        self.type_mix.feed(hasher);
     }
 }
 
@@ -122,12 +127,14 @@ pub fn extract(program: &MirProgram) -> CanaFeatures {
         let memory = MemoryProxy::from_function(func);
         let reductions = ReductionAxes::from_report_for_fn(&reduction_report, &func.name);
         let cfg_metrics = CfgMetrics::from_cfg(cfg, loops);
+        let type_mix = TypeMix::from_function(func);
         per_fn.insert(
             func.name.clone(),
             FnFeatures {
                 cfg: cfg_metrics,
                 memory,
                 reductions,
+                type_mix,
             },
         );
     }
@@ -260,10 +267,7 @@ mod tests {
 
     #[test]
     fn extract_is_deterministic_across_repeated_calls() {
-        let p = prog(vec![
-            fn_with("a", vec![("x", "i64")]),
-            fn_with("b", vec![]),
-        ]);
+        let p = prog(vec![fn_with("a", vec![("x", "i64")]), fn_with("b", vec![])]);
         let mut prior: Option<(ProgramHash, FeatureHash)> = None;
         for _ in 0..50 {
             let f = extract(&p);
@@ -296,10 +300,7 @@ mod tests {
     #[test]
     fn adding_a_function_changes_program_hash() {
         let p1 = prog(vec![fn_with("foo", vec![])]);
-        let p2 = prog(vec![
-            fn_with("foo", vec![]),
-            fn_with("bar", vec![]),
-        ]);
+        let p2 = prog(vec![fn_with("foo", vec![]), fn_with("bar", vec![])]);
         let f1 = extract(&p1);
         let f2 = extract(&p2);
         assert_ne!(f1.program_hash, f2.program_hash);

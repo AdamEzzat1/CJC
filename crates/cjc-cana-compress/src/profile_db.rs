@@ -56,7 +56,13 @@ const FILE_MAGIC: &[u8; 4] = b"CPDB";
 /// payload).
 const ROW_MAGIC: &[u8; 4] = b"CPR0";
 /// Bump on incompatible schema changes.
-pub const PROFILE_SCHEMA_VERSION: u32 = 1;
+///
+/// v2 (PINN v2 §2.2): added `estimated_float_ops` — the §2.1
+/// data-sanity pass proved the v1 feature set was type-blind, making
+/// recorded thermal (FP-op density) unpredictable by ANY model class.
+/// The corpus regenerates deterministically in ~35 s, so no v1→v2
+/// migration path is provided; v1 files are rejected on read.
+pub const PROFILE_SCHEMA_VERSION: u32 = 2;
 
 // ---------------------------------------------------------------------------
 // CompilationProfile — one experiment row
@@ -102,6 +108,10 @@ pub struct CompilationProfile {
     pub estimated_alloc_bytes: u64,
     /// Sum of per-function `working_set_bytes_estimate` (saturating).
     pub estimated_working_set: u64,
+    /// Sum of per-function `float_ops_estimate` (saturating). Schema
+    /// v2: the FP-density signal (`estimated_float_ops /
+    /// estimated_flops`) the thermal head trains on.
+    pub estimated_float_ops: u64,
 
     // -- Predictions (deterministic; recorded at rank time) --
     /// Max per-function NSS CPU saturation.
@@ -143,8 +153,10 @@ pub struct CompilationProfile {
 
     // -- Final --
     /// Deterministic experiment score (lower = better), as defined by
-    /// the emitting harness. For the A6 ablation this is the
-    /// post-optimization MIR-size ratio.
+    /// the emitting harness. For the A6 v3 ablation this is the
+    /// baseline-relative modeled energy of the optimized run
+    /// (`raw_energy / baseline_config_energy`); earlier harness
+    /// versions stored the post-optimization MIR-size ratio.
     pub score: f64,
 }
 
@@ -175,6 +187,7 @@ impl CompilationProfile {
         push_u64(&mut out, self.estimated_bytes_written);
         push_u64(&mut out, self.estimated_alloc_bytes);
         push_u64(&mut out, self.estimated_working_set);
+        push_u64(&mut out, self.estimated_float_ops);
         push_f64(&mut out, self.nss_predicted_cpu_max);
         push_f64(&mut out, self.nss_predicted_memory_max);
         push_f64(&mut out, self.nss_predicted_thermal_max);
@@ -243,6 +256,7 @@ impl CompilationProfile {
         let estimated_bytes_written = r.read_u64()?;
         let estimated_alloc_bytes = r.read_u64()?;
         let estimated_working_set = r.read_u64()?;
+        let estimated_float_ops = r.read_u64()?;
         let nss_predicted_cpu_max = r.read_f64()?;
         let nss_predicted_memory_max = r.read_f64()?;
         let nss_predicted_thermal_max = r.read_f64()?;
@@ -289,6 +303,7 @@ impl CompilationProfile {
             estimated_bytes_written,
             estimated_alloc_bytes,
             estimated_working_set,
+            estimated_float_ops,
             nss_predicted_cpu_max,
             nss_predicted_memory_max,
             nss_predicted_thermal_max,
@@ -492,6 +507,7 @@ mod tests {
             estimated_bytes_written: 2_000_000,
             estimated_alloc_bytes: 64_000,
             estimated_working_set: 128_000,
+            estimated_float_ops: 250_000,
             nss_predicted_cpu_max: 0.5,
             nss_predicted_memory_max: 0.25,
             nss_predicted_thermal_max: 0.75,

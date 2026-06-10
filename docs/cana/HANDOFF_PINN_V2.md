@@ -1,5 +1,20 @@
 # Handoff — PINN v2 Neural Training (everything not finished)
 
+> **STATUS UPDATE (2026-06-10, branch `claude/naughty-cannon-4b058d`):
+> §2.1–§2.5 are DONE — see `docs/cana/PINN_V2_DESIGN.md` for the
+> results.** The §2.1 sanity pass redirected §2.3: the feature set was
+> type-blind (no FP-op signal), so v2 shipped a `TypeMix` static
+> analysis + a TRAINED LINEAR thermal head (held-out R² 0.952; an MLP
+> was unjustified — exactly the saturation case §2.1 warned about).
+> Shadow gate verdict: PROMOTE (9× held-out MAE reduction vs v1).
+> Two more Rule-#0 catches: (a) this doc's "HEAD: ee7b341" predates its
+> own commit — the arc tip is `6980273`; (b) the ablation harness
+> stamped Option-A labels on the `_t50`/`_c80`/`_c60` rows
+> (`ends_with("_rec")` bug, 402 contaminated rows — fixed, corpus
+> regenerated under profile-DB schema v2). Still open from §3:
+> merge-to-master, energy-label variance (forced-plan configs),
+> CLI bundle loading, and the §3.5 unrelated queue.
+
 **Date:** 2026-06-10
 **Branch:** `claude/objective-davinci-62975a` (worktree `C:\Users\adame\CJC\.claude\worktrees\objective-davinci-62975a`)
 **HEAD:** `ee7b341`

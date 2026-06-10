@@ -16,3 +16,8 @@ cjc-diag.workspace = true
 [dev-dependencies]
 proptest = "1"
 bolero = "0.13.4"
+# type_mix unit tests lower real source (parse → HIR → MIR) so the
+# propagation rules are exercised against genuine lowering output, not
+# hand-built MIR that may drift from it.
+cjc-parser.workspace = true
+cjc-hir.workspace = true

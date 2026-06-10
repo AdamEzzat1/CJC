@@ -91,6 +91,7 @@ pub mod energy_pass_ranker;
 pub mod lossless_trace;
 pub mod lowrank;
 pub mod motif_dictionary;
+pub mod pinn_bundle;
 pub mod plan;
 pub mod profile_db;
 pub mod report;
@@ -116,6 +117,9 @@ pub use lossless_trace::{compress_pass_history, decompress_pass_history, Lossles
 pub use lowrank::{compress_low_rank, LowRankPayload};
 pub use motif_dictionary::{
     compress_motif_dictionary, decompress_motif_dictionary, MotifDictionaryPayload,
+};
+pub use pinn_bundle::{
+    read_bundle, write_bundle, PinnBundle, PinnBundleError, PINN_BUNDLE_SCHEMA_VERSION,
 };
 pub use plan::{encode_low_rank_payload, encode_tensor_train_payload, CompressionPlan, PlanEntry};
 pub use profile_db::{

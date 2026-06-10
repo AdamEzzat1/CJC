@@ -74,10 +74,12 @@ pub mod pass_history;
 pub mod pass_ranker;
 pub mod physical_cost;
 pub mod pinn_cost_model;
+pub mod pinn_thermal_v2;
 pub mod pressure;
 pub mod reduction_axes;
 pub mod report;
 pub mod thermal_cost_model;
+pub mod type_mix;
 
 // ---------------------------------------------------------------------------
 // Top-level entry point
@@ -92,8 +94,8 @@ pub use crate::cfg_metrics::CfgMetrics;
 pub use crate::cost_model::{CostEstimate, CostModel, NullCostModel};
 pub use crate::features::{CanaFeatures, FnFeatures};
 pub use crate::fusion::{
-    identify_fusion_candidates, is_native_primitive, ChainEntry, FusionCandidate,
-    FusionPlan, NATIVE_PRIMITIVES,
+    identify_fusion_candidates, is_native_primitive, ChainEntry, FusionCandidate, FusionPlan,
+    NATIVE_PRIMITIVES,
 };
 pub use crate::hash::{CanaHasher, CfgHash, FeatureHash, ProgramHash};
 pub use crate::legality::{
@@ -105,16 +107,13 @@ pub use crate::memory_proxy::MemoryProxy;
 pub use crate::pass_history::{PassHistory, PassRecord};
 pub use crate::pass_ranker::{
     default_ranker, pass_plan_from, recommend_pass_plan, FunctionRanking, PassRanker,
-    PassRecommendation, RankingRationale, RankingReport, CANONICAL_PASSES,
-    DEFAULT_SKIP_THRESHOLD,
+    PassRecommendation, RankingRationale, RankingReport, CANONICAL_PASSES, DEFAULT_SKIP_THRESHOLD,
 };
 pub use crate::physical_cost::{
     build_physical_query, predict_physical, PhysicalCoefficients, PhysicalConstraints,
     PhysicalCostEstimate, PhysicalCostQuery,
 };
-pub use crate::pinn_cost_model::{
-    PinnPhysicalCostModel, PINN_V1_MODEL_ID, PINN_V1_MODEL_VERSION,
-};
+pub use crate::pinn_cost_model::{PinnPhysicalCostModel, PINN_V1_MODEL_ID, PINN_V1_MODEL_VERSION};
 pub use crate::reduction_axes::ReductionAxes;
 pub use crate::report::CanaReport;
 

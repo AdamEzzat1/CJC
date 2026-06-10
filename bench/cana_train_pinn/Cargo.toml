@@ -1,0 +1,22 @@
+# PINN v2 — neural physical-cost model: data-sanity pass + training.
+#
+# Reads the Phase-A6 ablation corpus (bench_results/cana_ablation/
+# profiles.cpdb), audits label distributions / feature-label structure
+# (the §2.1 data-sanity pass), and — once sanity is established —
+# trains the v2 model offline. Training NEVER runs during compilation;
+# this harness emits a CPB0 weight bundle the compiler loads read-only.
+
+[package]
+name = "cana-train-pinn"
+version = "0.1.11"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "cana_train_pinn"
+path = "main.rs"
+
+[dependencies]
+cjc-repro = { path = "../../crates/cjc-repro" }
+cjc-cana = { path = "../../crates/cjc-cana" }
+cjc-cana-compress = { path = "../../crates/cjc-cana-compress" }

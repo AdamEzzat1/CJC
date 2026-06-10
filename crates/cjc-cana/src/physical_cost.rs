@@ -103,6 +103,15 @@ pub struct PhysicalCostQuery<'a> {
     /// plan is attached — [`build_physical_query`] always sets `0`;
     /// the compression bridge populates it.
     pub compression_overhead_bytes: u64,
+    /// FLOATING-POINT operation estimate (PINN v2): float binops ×
+    /// loop amplification × pass amplification, from the
+    /// [`TypeMix`](crate::type_mix::TypeMix) static analysis. Additive
+    /// field — the v1 closed form (`predict_physical`) deliberately
+    /// does NOT read it, so v1's active report hashes are unchanged;
+    /// the v2 trained model consumes it as its FP-density signal
+    /// (`float_ops_estimate / flops_estimate` ≈ runtime
+    /// `thermal_intensity`).
+    pub float_ops_estimate: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -342,6 +351,11 @@ pub fn build_physical_query<'a>(
     let flops_base = expr.saturating_mul(loop_amp);
     let flops_estimate = flops_base.saturating_mul(amp.flops);
 
+    let float_binops = features.type_mix.float_binop_count as u64;
+    let float_ops_estimate = float_binops
+        .saturating_mul(loop_amp)
+        .saturating_mul(amp.flops);
+
     let read_base = tensor
         .saturating_mul(BYTES_PER_TENSOR_OP_READ)
         .saturating_add(expr.saturating_mul(BYTES_PER_EXPR_READ));
@@ -371,6 +385,7 @@ pub fn build_physical_query<'a>(
         thread_count: 1,
         batch_size: 1,
         compression_overhead_bytes: 0,
+        float_ops_estimate,
     }
 }
 
@@ -483,6 +498,7 @@ mod tests {
     use crate::hash::CfgHash;
     use crate::memory_proxy::MemoryProxy;
     use crate::reduction_axes::ReductionAxes;
+    use crate::type_mix::TypeMix;
 
     fn zero_query() -> PhysicalCostQuery<'static> {
         PhysicalCostQuery {
@@ -496,6 +512,7 @@ mod tests {
             thread_count: 1,
             batch_size: 1,
             compression_overhead_bytes: 0,
+            float_ops_estimate: 0,
         }
     }
 
@@ -511,6 +528,7 @@ mod tests {
             thread_count: 1,
             batch_size: 1,
             compression_overhead_bytes: 0,
+            float_ops_estimate: 2_500_000,
         }
     }
 
@@ -543,6 +561,7 @@ mod tests {
                 expr_count,
             },
             reductions: ReductionAxes::default(),
+            type_mix: TypeMix::default(),
         }
     }
 
