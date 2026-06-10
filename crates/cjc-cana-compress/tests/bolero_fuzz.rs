@@ -237,8 +237,8 @@ fn fuzz_physical_cost_prediction_stays_clamped() {
         .with_max_len(256)
         .with_iterations(1000)
         .for_each(|raw: &[u8]| {
-            // 6 u64 workload counters + 2 u32 = 56 bytes for the query,
-            // 8 f64 = 64 bytes for the coefficients.
+            // 5 u64 + 2 u32 + 1 u64 overhead = 56 bytes for the query,
+            // 8 f64 = 64 bytes for the coefficients → 120 total.
             if raw.len() < 120 {
                 return;
             }
@@ -259,18 +259,19 @@ fn fuzz_physical_cost_prediction_stays_clamped() {
                 working_set_bytes_estimate: u64_at(32),
                 thread_count: u32_at(40),
                 batch_size: u32_at(44),
+                compression_overhead_bytes: u64_at(48),
             };
             // Raw-bit f64s are frequently NaN / negative / subnormal —
             // exactly the inputs the validity gate must catch.
             let coeffs = PhysicalCoefficients {
-                flops_norm_scale: f64_at(48),
-                cooling_rate: f64_at(56),
-                bytes_per_flop_scale: f64_at(64),
-                bytes_norm_scale: f64_at(72),
-                alloc_norm_scale: f64_at(80),
-                thread_amplification: f64_at(88),
-                batch_amplification: f64_at(96),
-                locality_weight: f64_at(104),
+                flops_norm_scale: f64_at(56),
+                cooling_rate: f64_at(64),
+                bytes_per_flop_scale: f64_at(72),
+                bytes_norm_scale: f64_at(80),
+                alloc_norm_scale: f64_at(88),
+                thread_amplification: f64_at(96),
+                batch_amplification: f64_at(104),
+                locality_weight: f64_at(112),
             };
 
             match predict_physical(&query, &coeffs) {
@@ -315,6 +316,7 @@ fn fuzz_default_coefficients_never_abstain() {
                 working_set_bytes_estimate: u64_at(32),
                 thread_count: u32_at(40),
                 batch_size: u32_at(44),
+                compression_overhead_bytes: 0,
             };
             let est = predict_physical(&query, &PhysicalCoefficients::default())
                 .expect("default coefficients are valid by construction");

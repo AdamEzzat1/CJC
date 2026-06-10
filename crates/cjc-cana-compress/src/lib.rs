@@ -92,11 +92,15 @@ pub mod lossless_trace;
 pub mod lowrank;
 pub mod motif_dictionary;
 pub mod plan;
+pub mod profile_db;
 pub mod report;
 pub mod sidecar;
 pub mod tensor_train;
 
-pub use bridge::{compression_pressure_delta, BridgeCoefficients, CompressionPressureDelta};
+pub use bridge::{
+    compression_pressure_delta, BridgeCoefficients, CompressionAwarePressurePredictor,
+    CompressionPressureDelta,
+};
 pub use candidate::{
     CandidateId, CompressionCandidate, CompressionError, CompressionKind, Criticality,
     CriticalityTag,
@@ -114,6 +118,9 @@ pub use motif_dictionary::{
     compress_motif_dictionary, decompress_motif_dictionary, MotifDictionaryPayload,
 };
 pub use plan::{encode_low_rank_payload, encode_tensor_train_payload, CompressionPlan, PlanEntry};
+pub use profile_db::{
+    append_row, read_all, CompilationProfile, ProfileDbError, PROFILE_SCHEMA_VERSION,
+};
 pub use report::{CompressionReport, EntryStatus, ReportEntry, ReportHash};
 pub use sidecar::{CompressedCanaSidecar, SidecarIoError};
 pub use tensor_train::{compress_tensor_train, TensorTrainPayload};

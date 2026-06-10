@@ -55,6 +55,13 @@ pub const LOOP_AMP_STEP: u64 = 7;
 /// deeper static nesting tells us little extra about dynamic cost.
 pub const LOOP_AMP_CAP: u32 = 4;
 
+/// Weight of decompression compute in the thermal term: heat from
+/// decompressing `compression_overhead_bytes`, normalized by the same
+/// byte scale as bandwidth. Small by design — decompression is cheap
+/// relative to the workload itself; v2 replaces this with a measured
+/// coefficient.
+pub const DECOMPRESS_THERMAL_WEIGHT: f64 = 0.05;
+
 // Proxy byte-scales. Documented guesses, not measurements; the names
 // say what they price, the values keep the derived pressures in a
 // useful dynamic range for MIR-shaped inputs (expr counts 1e1..1e5).
@@ -89,6 +96,13 @@ pub struct PhysicalCostQuery<'a> {
     /// the schema so v2 training rows are forward-compatible.
     pub thread_count: u32,
     pub batch_size: u32,
+    /// Bytes of compressed advisory data this strategy would have to
+    /// decompress at runtime (Phase-A handoff §4.6). Routed into the
+    /// bytes-moved term (bandwidth + memory traffic) plus a small
+    /// thermal term for decompression compute. `0` when no compression
+    /// plan is attached — [`build_physical_query`] always sets `0`;
+    /// the compression bridge populates it.
+    pub compression_overhead_bytes: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -356,6 +370,7 @@ pub fn build_physical_query<'a>(
         working_set_bytes_estimate,
         thread_count: 1,
         batch_size: 1,
+        compression_overhead_bytes: 0,
     }
 }
 
@@ -399,22 +414,27 @@ pub fn predict_physical(
     let extra_threads = query.thread_count.saturating_sub(1) as f64;
     let extra_batch = query.batch_size.saturating_sub(1) as f64;
 
-    // Thermal: normalized FLOPs, amplified by parallelism, damped by
-    // cooling.
+    // Thermal: normalized FLOPs, amplified by parallelism, plus a
+    // small decompression-compute term, damped by cooling.
     let heat_base = norm(query.flops_estimate, coeffs.flops_norm_scale);
     let thread_term = coeffs.thread_amplification * extra_threads;
     let batch_term = coeffs.batch_amplification * extra_batch;
     let thread_factor = 1.0 + thread_term;
     let batch_factor = 1.0 + batch_term;
     let heat_amplified = heat_base * thread_factor;
-    let heat_accumulation = heat_amplified * batch_factor;
+    let heat_workload = heat_amplified * batch_factor;
+    let decompress_norm = norm(query.compression_overhead_bytes, coeffs.bytes_norm_scale);
+    let decompress_heat = DECOMPRESS_THERMAL_WEIGHT * decompress_norm;
+    let heat_accumulation = heat_workload + decompress_heat;
     let cooling_keep = 1.0 - coeffs.cooling_rate;
     let thermal_pressure = clamp01(heat_accumulation * cooling_keep);
 
     // Memory: allocation pressure + weighted traffic pressure.
+    // Decompression overhead is real traffic — it rides bytes_moved.
     let bytes_moved = query
         .bytes_read_estimate
-        .saturating_add(query.bytes_written_estimate);
+        .saturating_add(query.bytes_written_estimate)
+        .saturating_add(query.compression_overhead_bytes);
     let alloc_pressure = norm(query.allocation_bytes_estimate, coeffs.alloc_norm_scale);
     let traffic_norm = norm(bytes_moved, coeffs.bytes_norm_scale);
     let traffic_term = coeffs.bytes_per_flop_scale * traffic_norm;
@@ -475,6 +495,7 @@ mod tests {
             working_set_bytes_estimate: 0,
             thread_count: 1,
             batch_size: 1,
+            compression_overhead_bytes: 0,
         }
     }
 
@@ -489,6 +510,7 @@ mod tests {
             working_set_bytes_estimate: 1_000_000,
             thread_count: 1,
             batch_size: 1,
+            compression_overhead_bytes: 0,
         }
     }
 
@@ -658,6 +680,24 @@ mod tests {
         // guarantees the contract either way.
         assert!(est.thermal_pressure <= 1.0);
         assert!(est.bandwidth_pressure <= 1.0);
+    }
+
+    #[test]
+    fn compression_overhead_raises_bandwidth_and_thermal() {
+        let coeffs = PhysicalCoefficients::default();
+        let base = predict_physical(&synthetic_query(), &coeffs).unwrap();
+        let mut q = synthetic_query();
+        q.compression_overhead_bytes = 50_000_000;
+        let with_overhead = predict_physical(&q, &coeffs).unwrap();
+        assert!(
+            with_overhead.bandwidth_pressure > base.bandwidth_pressure,
+            "overhead bytes are traffic"
+        );
+        assert!(
+            with_overhead.thermal_pressure > base.thermal_pressure,
+            "decompression compute heats"
+        );
+        assert!(with_overhead.is_valid());
     }
 
     #[test]

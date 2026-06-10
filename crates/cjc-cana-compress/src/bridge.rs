@@ -202,6 +202,133 @@ pub fn compression_pressure_delta(
 }
 
 // ---------------------------------------------------------------------------
+// CompressionAwarePressurePredictor — Phase A5
+// ---------------------------------------------------------------------------
+
+use std::collections::BTreeMap;
+
+use cjc_cana::features::CanaFeatures;
+use cjc_cana::pressure::PressurePredictor;
+use cjc_mir::MirProgram;
+
+/// A [`PressurePredictor`] wrapper that folds a compression plan's
+/// pressure effect into the wrapped predictor's outputs (Phase A5).
+///
+/// ## Why a wrapper and not an `NssPressurePredictor` extension
+///
+/// The Phase-A handoff sketched "extend
+/// `NssPressurePredictor::predict_*` to optionally take a
+/// `CompressionReport`" — that can't compile: those are
+/// `PressurePredictor` *trait* methods with fixed signatures. And
+/// `cjc-cana-nss` depending on this crate would pull `cjc-quantum`
+/// into the CLI's dependency tree, defeating the satellite-crate
+/// isolation. So A5 follows the workspace's established wrapper
+/// pattern (`ThermalAwareCostModel`, `PinnPhysicalCostModel`,
+/// `EnergyAwarePassRanker`): wrap any predictor, adjust its outputs.
+///
+/// ## Semantics
+///
+/// `predict_memory_peak` and `predict_thermal` outputs are shifted by
+/// the (signed) aggregate deltas of a [`CompressionPressureDelta`],
+/// then clamped to `[0, 1]`. Compression effects are program-global in
+/// v1 (a report isn't attributed per function), so the shift is
+/// uniform across functions. CPU saturation and hot-kernel
+/// identification pass through unchanged.
+#[derive(Debug)]
+pub struct CompressionAwarePressurePredictor<P: PressurePredictor> {
+    /// The wrapped predictor.
+    pub inner: P,
+    /// Signed memory-pressure shift (negative = compression relieved
+    /// memory pressure).
+    pub delta_memory: f64,
+    /// Signed thermal-pressure shift (positive = advisory
+    /// reconstruction costs compute).
+    pub delta_thermal: f64,
+}
+
+impl<P: PressurePredictor> CompressionAwarePressurePredictor<P> {
+    /// Wrap `inner`, taking the aggregate deltas from `delta`.
+    pub fn new(inner: P, delta: &CompressionPressureDelta) -> Self {
+        Self {
+            inner,
+            delta_memory: delta.delta_memory,
+            delta_thermal: delta.delta_thermal,
+        }
+    }
+
+    /// Wrap `inner` with explicit deltas (useful for tests and for
+    /// callers that aggregate several reports).
+    pub fn with_deltas(inner: P, delta_memory: f64, delta_thermal: f64) -> Self {
+        Self {
+            inner,
+            delta_memory,
+            delta_thermal,
+        }
+    }
+
+    fn shift(map: BTreeMap<String, f64>, delta: f64) -> BTreeMap<String, f64> {
+        if delta == 0.0 || !delta.is_finite() {
+            return map;
+        }
+        map.into_iter()
+            .map(|(k, v)| {
+                let shifted = v + delta;
+                (k, shifted.clamp(0.0, 1.0))
+            })
+            .collect()
+    }
+}
+
+impl<P: PressurePredictor> PressurePredictor for CompressionAwarePressurePredictor<P> {
+    fn predict_thermal(
+        &self,
+        program: &MirProgram,
+        features: &CanaFeatures,
+    ) -> BTreeMap<String, f64> {
+        Self::shift(
+            self.inner.predict_thermal(program, features),
+            self.delta_thermal,
+        )
+    }
+
+    fn predict_memory_peak(
+        &self,
+        program: &MirProgram,
+        features: &CanaFeatures,
+    ) -> BTreeMap<String, f64> {
+        Self::shift(
+            self.inner.predict_memory_peak(program, features),
+            self.delta_memory,
+        )
+    }
+
+    fn predict_cpu_saturation(
+        &self,
+        program: &MirProgram,
+        features: &CanaFeatures,
+    ) -> BTreeMap<String, f64> {
+        self.inner.predict_cpu_saturation(program, features)
+    }
+
+    fn identify_structural_hot_kernels(
+        &self,
+        program: &MirProgram,
+        features: &CanaFeatures,
+    ) -> Vec<String> {
+        self.inner
+            .identify_structural_hot_kernels(program, features)
+    }
+
+    fn name(&self) -> &'static str {
+        "compression_aware"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -416,5 +543,152 @@ mod tests {
             compression_pressure_delta(baseline_with(0.5), &report, BridgeCoefficients::default());
         assert_eq!(result.rewarded_entries, 1);
         assert_eq!(result.penalised_entries, 2);
+    }
+
+    // ----- CompressionAwarePressurePredictor (A5) -----------------------
+
+    use cjc_cana::pressure::NullPressurePredictor;
+    use cjc_mir::{MirBody, MirFnId, MirFunction};
+
+    /// Predictor returning a constant for every function on every axis.
+    #[derive(Debug)]
+    struct ConstPredictor {
+        value: f64,
+    }
+    impl PressurePredictor for ConstPredictor {
+        fn predict_thermal(&self, p: &MirProgram, _f: &CanaFeatures) -> BTreeMap<String, f64> {
+            p.functions
+                .iter()
+                .map(|f| (f.name.clone(), self.value))
+                .collect()
+        }
+        fn predict_memory_peak(&self, p: &MirProgram, _f: &CanaFeatures) -> BTreeMap<String, f64> {
+            p.functions
+                .iter()
+                .map(|f| (f.name.clone(), self.value))
+                .collect()
+        }
+        fn predict_cpu_saturation(
+            &self,
+            p: &MirProgram,
+            _f: &CanaFeatures,
+        ) -> BTreeMap<String, f64> {
+            p.functions
+                .iter()
+                .map(|f| (f.name.clone(), self.value))
+                .collect()
+        }
+        fn identify_structural_hot_kernels(
+            &self,
+            _p: &MirProgram,
+            _f: &CanaFeatures,
+        ) -> Vec<String> {
+            Vec::new()
+        }
+        fn name(&self) -> &'static str {
+            "const"
+        }
+        fn version(&self) -> u32 {
+            1
+        }
+    }
+
+    fn one_fn_program() -> MirProgram {
+        MirProgram {
+            functions: vec![MirFunction {
+                id: MirFnId(0),
+                name: "main".to_string(),
+                type_params: vec![],
+                params: vec![],
+                return_type: None,
+                body: MirBody {
+                    stmts: vec![],
+                    result: None,
+                },
+                is_nogc: false,
+                cfg_body: None,
+                decorators: vec![],
+                vis: cjc_ast::Visibility::Public,
+                local_count: 0,
+            }],
+            struct_defs: vec![],
+            enum_defs: vec![],
+            entry: MirFnId(0),
+        }
+    }
+
+    #[test]
+    fn compression_aware_shifts_memory_and_thermal_only() {
+        let p = one_fn_program();
+        let f = cjc_cana::features::extract(&p);
+        let wrapped = CompressionAwarePressurePredictor::with_deltas(
+            ConstPredictor { value: 0.5 },
+            -0.2, // compression relieved memory
+            0.1,  // advisory reconstruction heats
+        );
+        let memory = wrapped.predict_memory_peak(&p, &f);
+        let thermal = wrapped.predict_thermal(&p, &f);
+        let cpu = wrapped.predict_cpu_saturation(&p, &f);
+        assert!((memory["main"] - 0.3).abs() < 1e-15);
+        assert!((thermal["main"] - 0.6).abs() < 1e-15);
+        assert!((cpu["main"] - 0.5).abs() < 1e-15, "cpu passes through");
+    }
+
+    #[test]
+    fn compression_aware_clamps_to_unit_interval() {
+        let p = one_fn_program();
+        let f = cjc_cana::features::extract(&p);
+        let big = CompressionAwarePressurePredictor::with_deltas(
+            ConstPredictor { value: 0.9 },
+            -5.0,
+            5.0,
+        );
+        assert_eq!(big.predict_memory_peak(&p, &f)["main"], 0.0);
+        assert_eq!(big.predict_thermal(&p, &f)["main"], 1.0);
+    }
+
+    #[test]
+    fn compression_aware_zero_delta_is_identity() {
+        let p = one_fn_program();
+        let f = cjc_cana::features::extract(&p);
+        let wrapped =
+            CompressionAwarePressurePredictor::with_deltas(NullPressurePredictor, 0.0, 0.0);
+        assert_eq!(
+            wrapped.predict_thermal(&p, &f),
+            NullPressurePredictor.predict_thermal(&p, &f)
+        );
+        assert_eq!(
+            wrapped.predict_memory_peak(&p, &f),
+            NullPressurePredictor.predict_memory_peak(&p, &f)
+        );
+    }
+
+    #[test]
+    fn compression_aware_from_real_delta_is_deterministic() {
+        let p = one_fn_program();
+        let f = cjc_cana::features::extract(&p);
+        let report = CompressionReport::new(0, vec![validated_lossless_entry(0, 1000, 100)]);
+        let delta =
+            compression_pressure_delta(baseline_with(0.5), &report, BridgeCoefficients::default());
+        let wrapped = CompressionAwarePressurePredictor::new(ConstPredictor { value: 0.5 }, &delta);
+        let first = wrapped.predict_memory_peak(&p, &f);
+        for _ in 0..50 {
+            assert_eq!(first, wrapped.predict_memory_peak(&p, &f));
+        }
+        // The lossless reward must relieve memory pressure.
+        assert!(first["main"] < 0.5, "compression reward shifts memory down");
+    }
+
+    #[test]
+    fn compression_aware_non_finite_delta_degrades_to_identity() {
+        let p = one_fn_program();
+        let f = cjc_cana::features::extract(&p);
+        let wrapped = CompressionAwarePressurePredictor::with_deltas(
+            ConstPredictor { value: 0.5 },
+            f64::NAN,
+            f64::INFINITY,
+        );
+        assert_eq!(wrapped.predict_memory_peak(&p, &f)["main"], 0.5);
+        assert_eq!(wrapped.predict_thermal(&p, &f)["main"], 0.5);
     }
 }

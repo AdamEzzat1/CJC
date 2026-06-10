@@ -1,0 +1,28 @@
+# Phase A6 — 5-way ablation harness emitting CompilationProfile rows.
+#
+# Runs the 8-program snapshot corpus through five ranker configurations
+# (baseline / +NSS / +quantum / +NSS+quantum / full PINN stack), executes
+# both executors for parity, and appends one CompilationProfile row per
+# (program x config) to bench_results/cana_ablation/profiles.cpdb.
+# This is the training-data corpus PINN v2 (neural) trains from.
+
+[package]
+name = "cana-ablation"
+version = "0.1.11"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "cana_ablation"
+path = "main.rs"
+
+[dependencies]
+cjc-ast = { path = "../../crates/cjc-ast" }
+cjc-parser = { path = "../../crates/cjc-parser" }
+cjc-hir = { path = "../../crates/cjc-hir" }
+cjc-mir = { path = "../../crates/cjc-mir" }
+cjc-eval = { path = "../../crates/cjc-eval" }
+cjc-mir-exec = { path = "../../crates/cjc-mir-exec" }
+cjc-cana = { path = "../../crates/cjc-cana" }
+cjc-cana-nss = { path = "../../crates/cjc-cana-nss" }
+cjc-cana-compress = { path = "../../crates/cjc-cana-compress" }
