@@ -17,9 +17,9 @@
 //! - Pauli terms stored in Vec (deterministic iteration)
 //! - Complex arithmetic via mul_fixed (no FMA)
 
-use cjc_runtime::complex::ComplexF64;
-use cjc_repro::KahanAccumulatorF64;
 use crate::statevector::Statevector;
+use cjc_repro::KahanAccumulatorF64;
+use cjc_runtime::complex::ComplexF64;
 
 // ---------------------------------------------------------------------------
 // Pauli Algebra
@@ -72,7 +72,11 @@ impl PauliTerm {
     ///   XY = iZ, YX = -iZ, XZ = -iY, ZX = iY, YZ = iX, ZY = -iX
     ///   P*P = I for P in {X,Y,Z}
     pub fn multiply(&self, other: &PauliTerm) -> PauliTerm {
-        assert_eq!(self.ops.len(), other.ops.len(), "Pauli string length mismatch");
+        assert_eq!(
+            self.ops.len(),
+            other.ops.len(),
+            "Pauli string length mismatch"
+        );
         let n = self.ops.len();
         let mut result_ops = vec![Pauli::I; n];
         let mut phase = self.coeff.mul_fixed(other.coeff);
@@ -83,7 +87,10 @@ impl PauliTerm {
             phase = phase.mul_fixed(ph);
         }
 
-        PauliTerm { coeff: phase, ops: result_ops }
+        PauliTerm {
+            coeff: phase,
+            ops: result_ops,
+        }
     }
 }
 
@@ -118,7 +125,10 @@ pub struct FermionicHamiltonian {
 impl FermionicHamiltonian {
     /// Create an empty Hamiltonian on `n` qubits.
     pub fn new(n: usize) -> Self {
-        FermionicHamiltonian { n_qubits: n, terms: Vec::new() }
+        FermionicHamiltonian {
+            n_qubits: n,
+            terms: Vec::new(),
+        }
     }
 
     /// Add a Pauli term to the Hamiltonian.
@@ -157,7 +167,10 @@ fn pauli_expectation(term: &PauliTerm, sv: &Statevector) -> f64 {
     for k in 0..n {
         let (k_prime, phase) = apply_pauli_string(&term.ops, k);
         // contribution = conj(ψ_k) * phase * ψ_{k'}
-        let contrib = sv.amplitudes[k].conj().mul_fixed(phase).mul_fixed(sv.amplitudes[k_prime]);
+        let contrib = sv.amplitudes[k]
+            .conj()
+            .mul_fixed(phase)
+            .mul_fixed(sv.amplitudes[k_prime]);
         acc_re.add(contrib.re);
         acc_im.add(contrib.im);
     }
@@ -183,7 +196,7 @@ fn apply_pauli_string(ops: &[Pauli], mut k: usize) -> (usize, ComplexF64) {
             }
             Pauli::Y => {
                 k_new ^= 1 << q; // flip bit
-                // Y|0⟩ = i|1⟩, Y|1⟩ = -i|0⟩
+                                 // Y|0⟩ = i|1⟩, Y|1⟩ = -i|0⟩
                 if bit == 0 {
                     phase = phase.mul_fixed(ComplexF64::I);
                 } else {
@@ -235,7 +248,9 @@ pub fn jw_one_body(n_qubits: usize, p: usize, q: usize) -> Vec<PauliTerm> {
         xx.coeff = ComplexF64::real(0.5);
         xx.ops[p] = Pauli::X;
         xx.ops[q] = Pauli::X;
-        for z in (lo + 1)..hi { xx.ops[z] = Pauli::Z; }
+        for z in (lo + 1)..hi {
+            xx.ops[z] = Pauli::Z;
+        }
         terms.push(xx);
 
         // YY term
@@ -243,7 +258,9 @@ pub fn jw_one_body(n_qubits: usize, p: usize, q: usize) -> Vec<PauliTerm> {
         yy.coeff = ComplexF64::real(0.5);
         yy.ops[p] = Pauli::Y;
         yy.ops[q] = Pauli::Y;
-        for z in (lo + 1)..hi { yy.ops[z] = Pauli::Z; }
+        for z in (lo + 1)..hi {
+            yy.ops[z] = Pauli::Z;
+        }
         terms.push(yy);
 
         if p < q {
@@ -252,14 +269,18 @@ pub fn jw_one_body(n_qubits: usize, p: usize, q: usize) -> Vec<PauliTerm> {
             xy.coeff = ComplexF64::new(0.0, 0.5);
             xy.ops[p] = Pauli::X;
             xy.ops[q] = Pauli::Y;
-            for z in (lo + 1)..hi { xy.ops[z] = Pauli::Z; }
+            for z in (lo + 1)..hi {
+                xy.ops[z] = Pauli::Z;
+            }
             terms.push(xy);
 
             let mut yx = PauliTerm::identity(n_qubits);
             yx.coeff = ComplexF64::new(0.0, -0.5);
             yx.ops[p] = Pauli::Y;
             yx.ops[q] = Pauli::X;
-            for z in (lo + 1)..hi { yx.ops[z] = Pauli::Z; }
+            for z in (lo + 1)..hi {
+                yx.ops[z] = Pauli::Z;
+            }
             terms.push(yx);
         } else {
             // a†_p a_q with p > q: conjugate
@@ -267,14 +288,18 @@ pub fn jw_one_body(n_qubits: usize, p: usize, q: usize) -> Vec<PauliTerm> {
             xy.coeff = ComplexF64::new(0.0, -0.5);
             xy.ops[p] = Pauli::X;
             xy.ops[q] = Pauli::Y;
-            for z in (lo + 1)..hi { xy.ops[z] = Pauli::Z; }
+            for z in (lo + 1)..hi {
+                xy.ops[z] = Pauli::Z;
+            }
             terms.push(xy);
 
             let mut yx = PauliTerm::identity(n_qubits);
             yx.coeff = ComplexF64::new(0.0, 0.5);
             yx.ops[p] = Pauli::Y;
             yx.ops[q] = Pauli::X;
-            for z in (lo + 1)..hi { yx.ops[z] = Pauli::Z; }
+            for z in (lo + 1)..hi {
+                yx.ops[z] = Pauli::Z;
+            }
             terms.push(yx);
         }
 
@@ -290,7 +315,14 @@ pub fn jw_one_body(n_qubits: usize, p: usize, q: usize) -> Vec<PauliTerm> {
 /// Jordan-Wigner transform of two-body term: a†_p a†_q a_r a_s.
 /// Decomposes into one-body JW terms via anticommutation.
 /// Used for two-electron integrals in molecular Hamiltonians.
-pub fn jw_two_body(n_qubits: usize, p: usize, q: usize, r: usize, s: usize, coeff: f64) -> Vec<PauliTerm> {
+pub fn jw_two_body(
+    n_qubits: usize,
+    p: usize,
+    q: usize,
+    r: usize,
+    s: usize,
+    coeff: f64,
+) -> Vec<PauliTerm> {
     assert!(p < n_qubits && q < n_qubits && r < n_qubits && s < n_qubits);
 
     // a†_p a†_q a_r a_s decomposed using Wick's theorem:
@@ -343,12 +375,12 @@ pub fn h2_hamiltonian() -> FermionicHamiltonian {
     let mut h = FermionicHamiltonian::new(n);
 
     // STO-3G coefficients at equilibrium bond length R=0.7414 Å
-    let g0 = -0.4804;  // Nuclear repulsion + constant
-    let g1 = 0.3435;   // Z_0 coefficient
-    let g2 = -0.4347;  // Z_1 coefficient
-    let g3 = 0.5716;   // Z_0 Z_1 coefficient
-    let g4 = 0.0910;   // X_0 X_1 coefficient
-    let g5 = 0.0910;   // Y_0 Y_1 coefficient
+    let g0 = -0.4804; // Nuclear repulsion + constant
+    let g1 = 0.3435; // Z_0 coefficient
+    let g2 = -0.4347; // Z_1 coefficient
+    let g3 = 0.5716; // Z_0 Z_1 coefficient
+    let g4 = 0.0910; // X_0 X_1 coefficient
+    let g5 = 0.0910; // Y_0 Y_1 coefficient
 
     // Identity term
     let mut id = PauliTerm::identity(n);
@@ -439,8 +471,8 @@ pub fn lih_hamiltonian() -> FermionicHamiltonian {
     }
 
     // Two-body terms: selected dominant two-electron integrals
-    let v_0011 = 0.3366;  // (00|11)
-    let v_0101 = 0.0908;  // (01|01)
+    let v_0011 = 0.3366; // (00|11)
+    let v_0101 = 0.0908; // (01|01)
     let two_body_integrals = [
         (0, 0, 1, 1, v_0011),
         (2, 2, 3, 3, v_0011),
@@ -495,22 +527,35 @@ mod tests {
         let (_, phase_xy) = pauli_mul(Pauli::X, Pauli::Y);
         let (_, phase_yx) = pauli_mul(Pauli::Y, Pauli::X);
         let sum = phase_xy.add(phase_yx);
-        assert!(sum.re.abs() < TOL && sum.im.abs() < TOL, "X and Y must anti-commute");
+        assert!(
+            sum.re.abs() < TOL && sum.im.abs() < TOL,
+            "X and Y must anti-commute"
+        );
     }
 
     #[test]
     fn test_jw_number_operator() {
         let terms = jw_one_body(2, 0, 0);
-        assert_eq!(terms.len(), 2, "number operator should have 2 terms (I and Z)");
+        assert_eq!(
+            terms.len(),
+            2,
+            "number operator should have 2 terms (I and Z)"
+        );
 
         // Apply to |01⟩ state (qubit 0 = 1, occupied)
         let mut sv = Statevector::new(2);
         crate::gates::Gate::X(0).apply(&mut sv).unwrap();
 
         let mut h = FermionicHamiltonian::new(2);
-        for t in terms { h.add_term(t); }
+        for t in terms {
+            h.add_term(t);
+        }
         let e = h.expectation(&sv);
-        assert!((e - 1.0).abs() < TOL, "⟨01|n_0|01⟩ should be 1.0, got {}", e);
+        assert!(
+            (e - 1.0).abs() < TOL,
+            "⟨01|n_0|01⟩ should be 1.0, got {}",
+            e
+        );
     }
 
     #[test]
@@ -548,7 +593,11 @@ mod tests {
 
         let e1 = h.expectation(&sv);
         let e2 = h.expectation(&sv);
-        assert_eq!(e1.to_bits(), e2.to_bits(), "expectation must be bit-identical");
+        assert_eq!(
+            e1.to_bits(),
+            e2.to_bits(),
+            "expectation must be bit-identical"
+        );
     }
 
     #[test]

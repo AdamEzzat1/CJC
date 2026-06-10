@@ -81,7 +81,12 @@ impl SystemEncoder {
         cfg.validate()?;
         let mut rng_w = seed.substream("encoder.W");
         let mut rng_b = seed.substream("encoder.b");
-        let w = init_matrix(&mut rng_w, cfg.latent_dim, EncoderConfig::INPUT_FEATURES, cfg.init_scale);
+        let w = init_matrix(
+            &mut rng_w,
+            cfg.latent_dim,
+            EncoderConfig::INPUT_FEATURES,
+            cfg.init_scale,
+        );
         let b = init_vector(&mut rng_b, cfg.latent_dim, cfg.init_scale);
         Ok(Self { cfg, w, b })
     }
@@ -120,10 +125,7 @@ impl SystemEncoder {
         // `completed + rejected` total below.
         let denom = state.tick.saturating_add(1) as f64;
         out[n + 1] = (state.completed as f64 / denom).ln_1p();
-        let total = state
-            .completed
-            .saturating_add(state.rejected)
-            .max(1) as f64;
+        let total = state.completed.saturating_add(state.rejected).max(1) as f64;
         out[n + 2] = state.rejected as f64 / total;
         out[n + 3] = state.mean_service_time;
         out

@@ -98,7 +98,10 @@ impl PropagationConfig {
         }
         if !self.magnitude_cap.is_finite() || self.magnitude_cap <= 0.0 {
             return Err(NssError::InvalidConfig {
-                detail: format!("magnitude_cap must be > 0 and finite, got {}", self.magnitude_cap),
+                detail: format!(
+                    "magnitude_cap must be > 0 and finite, got {}",
+                    self.magnitude_cap
+                ),
             });
         }
         Ok(())
@@ -177,12 +180,21 @@ impl PressurePropagator {
             if src_mag <= 0.0 {
                 continue;
             }
-            let amplified = edge.amplify_on_instability
-                && *snapshot_unstable.get(&src).unwrap_or(&false);
-            let amp = if amplified { self.cfg.amplification_factor } else { 1.0 };
+            let amplified =
+                edge.amplify_on_instability && *snapshot_unstable.get(&src).unwrap_or(&false);
+            let amp = if amplified {
+                self.cfg.amplification_factor
+            } else {
+                1.0
+            };
             let gross = edge.weight * src_mag * amp;
             let net = gross * self.cfg.transfer_efficiency;
-            flows.push(PressureFlow { source: src, target: dst, amount: net, amplified });
+            flows.push(PressureFlow {
+                source: src,
+                target: dst,
+                amount: net,
+                amplified,
+            });
         }
 
         // Per-source: sum gross outflow; per-target: sum net inflow.
@@ -198,9 +210,13 @@ impl PressurePropagator {
             if src_mag <= 0.0 {
                 continue;
             }
-            let amplified = edge.amplify_on_instability
-                && *snapshot_unstable.get(&src).unwrap_or(&false);
-            let amp = if amplified { self.cfg.amplification_factor } else { 1.0 };
+            let amplified =
+                edge.amplify_on_instability && *snapshot_unstable.get(&src).unwrap_or(&false);
+            let amp = if amplified {
+                self.cfg.amplification_factor
+            } else {
+                1.0
+            };
             let gross = edge.weight * src_mag * amp;
             let net = gross * self.cfg.transfer_efficiency;
             gross_out
@@ -297,7 +313,11 @@ mod tests {
         let prop = PressurePropagator::new(small_graph(), PropagationConfig::default()).unwrap();
         let mut f = PressureField::with_default_thresholds();
         let flows = prop.step(&mut f).unwrap();
-        assert!(flows.is_empty(), "expected no flows for empty field, got {:?}", flows);
+        assert!(
+            flows.is_empty(),
+            "expected no flows for empty field, got {:?}",
+            flows
+        );
     }
 
     #[test]
@@ -306,21 +326,25 @@ mod tests {
         let mut f = PressureField::with_default_thresholds();
         // Override Queue with non-dissipating, sub-threshold pressure
         // so the test isolates the propagation effect.
-        f.set(
-            PressureKind::Queue,
-            Pressure::new(0.5, 10.0, 0.0).unwrap(),
-        );
+        f.set(PressureKind::Queue, Pressure::new(0.5, 10.0, 0.0).unwrap());
         let flows = prop.step(&mut f).unwrap();
         // Queue → Scheduler should fire; Scheduler had no pressure so
         // Scheduler → Sync starts from zero and does not fire.
-        assert!(!flows.is_empty(), "expected at least the Queue->Scheduler flow");
+        assert!(
+            !flows.is_empty(),
+            "expected at least the Queue->Scheduler flow"
+        );
         let queue_to_scheduler = flows
             .iter()
             .find(|fl| fl.source == PressureKind::Queue && fl.target == PressureKind::Scheduler);
         assert!(queue_to_scheduler.is_some());
         let f1 = queue_to_scheduler.unwrap();
         // gross = 0.5 * 0.5 * 1.0 = 0.25; net = 0.25 * 0.85 = 0.2125
-        assert!((f1.amount - 0.2125).abs() < 1e-12, "unexpected net flow {}", f1.amount);
+        assert!(
+            (f1.amount - 0.2125).abs() < 1e-12,
+            "unexpected net flow {}",
+            f1.amount
+        );
         assert!(!f1.amplified, "should not amplify below threshold");
     }
 
@@ -328,10 +352,7 @@ mod tests {
     fn amplification_fires_above_threshold() {
         let prop = PressurePropagator::new(small_graph(), PropagationConfig::default()).unwrap();
         let mut f = PressureField::with_default_thresholds();
-        f.set(
-            PressureKind::Queue,
-            Pressure::new(2.0, 1.0, 0.0).unwrap(),
-        );
+        f.set(PressureKind::Queue, Pressure::new(2.0, 1.0, 0.0).unwrap());
         let flows = prop.step(&mut f).unwrap();
         let amp_flow = flows
             .iter()
@@ -339,7 +360,11 @@ mod tests {
             .expect("missing Queue->Scheduler flow");
         assert!(amp_flow.amplified, "should amplify above threshold");
         // gross = 0.5 * 2.0 * 1.5 = 1.5; net = 1.5 * 0.85 = 1.275
-        assert!((amp_flow.amount - 1.275).abs() < 1e-12, "got {}", amp_flow.amount);
+        assert!(
+            (amp_flow.amount - 1.275).abs() < 1e-12,
+            "got {}",
+            amp_flow.amount
+        );
     }
 
     #[test]
@@ -354,7 +379,12 @@ mod tests {
         let before = f.total_magnitude();
         prop.step(&mut f).unwrap();
         let after = f.total_magnitude();
-        assert!(after < before, "tax must strictly reduce total magnitude (before={}, after={})", before, after);
+        assert!(
+            after < before,
+            "tax must strictly reduce total magnitude (before={}, after={})",
+            before,
+            after
+        );
     }
 
     #[test]

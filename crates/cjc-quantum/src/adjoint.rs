@@ -21,11 +21,11 @@
 //! - Gate unapplication uses the same fixed-sequence complex arithmetic
 //! - Basis states processed in ascending order
 
-use cjc_repro::KahanAccumulatorF64;
-use cjc_runtime::complex::ComplexF64;
+use crate::circuit::Circuit;
 use crate::gates::Gate;
 use crate::statevector::Statevector;
-use crate::circuit::Circuit;
+use cjc_repro::KahanAccumulatorF64;
+use cjc_runtime::complex::ComplexF64;
 
 /// Result of adjoint differentiation: gradients for each parameterized gate.
 #[derive(Debug, Clone)]
@@ -58,7 +58,8 @@ pub fn adjoint_differentiation(
     if observable.len() != n_states {
         return Err(format!(
             "observable length {} != 2^n_qubits = {}",
-            observable.len(), n_states
+            observable.len(),
+            n_states
         ));
     }
 
@@ -103,7 +104,8 @@ pub fn expectation_value(sv: &Statevector, observable: &[f64]) -> Result<f64, St
     if observable.len() != sv.n_states() {
         return Err(format!(
             "observable length {} != n_states {}",
-            observable.len(), sv.n_states()
+            observable.len(),
+            sv.n_states()
         ));
     }
 
@@ -155,11 +157,7 @@ fn gate_adjoint(gate: &Gate) -> Gate {
 /// where ∂Rx/∂θ = (-i/2) X · Rx(θ), etc.
 ///
 /// For non-parameterized gates, returns None.
-fn compute_parameter_gradient(
-    lambda: &Statevector,
-    psi: &Statevector,
-    gate: &Gate,
-) -> Option<f64> {
+fn compute_parameter_gradient(lambda: &Statevector, psi: &Statevector, gate: &Gate) -> Option<f64> {
     match gate {
         Gate::Rx(q, theta) => {
             // ∂Rx(θ)/∂θ |ψ⟩ = (-i/2) X Rx(θ) |ψ⟩
@@ -351,8 +349,12 @@ mod tests {
 
         // Gate 0 = H (gradient 0), Gate 1 = Rz (gradient -sin(θ)), Gate 2 = H (gradient 0)
         let expected = -(theta).sin();
-        assert!((grads.gradients[1] - expected).abs() < TOL,
-            "Rz gradient: got {}, expected {}", grads.gradients[1], expected);
+        assert!(
+            (grads.gradients[1] - expected).abs() < TOL,
+            "Rz gradient: got {}, expected {}",
+            grads.gradients[1],
+            expected
+        );
     }
 
     #[test]
@@ -368,8 +370,12 @@ mod tests {
         let grads = adjoint_differentiation(&circ, &z_obs).unwrap();
 
         let expected = -(theta).sin();
-        assert!((grads.gradients[0] - expected).abs() < TOL,
-            "Ry gradient: got {}, expected {}", grads.gradients[0], expected);
+        assert!(
+            (grads.gradients[0] - expected).abs() < TOL,
+            "Ry gradient: got {}, expected {}",
+            grads.gradients[0],
+            expected
+        );
     }
 
     #[test]
@@ -409,8 +415,12 @@ mod tests {
         circ.ry(0, theta);
         let adj_grads = adjoint_differentiation(&circ, &z_obs).unwrap();
 
-        assert!((adj_grads.gradients[0] - fd_grad).abs() < 1e-4,
-            "Adjoint {} vs FD {}", adj_grads.gradients[0], fd_grad);
+        assert!(
+            (adj_grads.gradients[0] - fd_grad).abs() < 1e-4,
+            "Adjoint {} vs FD {}",
+            adj_grads.gradients[0],
+            fd_grad
+        );
     }
 
     #[test]
@@ -439,8 +449,13 @@ mod tests {
             let e_p = expectation_value(&circ_p.execute().unwrap(), &z_obs).unwrap();
             let e_m = expectation_value(&circ_m.execute().unwrap(), &z_obs).unwrap();
             let fd = (e_p - e_m) / (2.0 * eps);
-            assert!((grads.gradients[i] - fd).abs() < 1e-4,
-                "Gate {} gradient: adjoint {} vs FD {}", i, grads.gradients[i], fd);
+            assert!(
+                (grads.gradients[i] - fd).abs() < 1e-4,
+                "Gate {} gradient: adjoint {} vs FD {}",
+                i,
+                grads.gradients[i],
+                fd
+            );
         }
     }
 
@@ -479,7 +494,7 @@ mod tests {
         hc.gate(Gate::H(0));
         hc.measure(0, 0); // measure q0 → creg 0
         hc.measure(1, 1); // measure q1 → creg 1
-        // Classical corrections
+                          // Classical corrections
         hc.if_then(1, 1, Gate::X(2)); // if creg[1] == 1, apply X to q2
         hc.if_then(0, 1, Gate::Z(2)); // if creg[0] == 1, apply Z to q2
 
@@ -511,8 +526,8 @@ mod tests {
         // If we measure qubit 0 and conditionally X qubit 1,
         // qubit 1 should always end up matching the measurement.
         let mut hc = HybridCircuit::new(2, 1);
-        hc.gate(Gate::H(0));      // |+⟩ on q0
-        hc.measure(0, 0);         // measure → creg[0]
+        hc.gate(Gate::H(0)); // |+⟩ on q0
+        hc.measure(0, 0); // measure → creg[0]
         hc.if_then(0, 1, Gate::X(1)); // if 1, flip q1
 
         for seed in 0..100u64 {
@@ -522,11 +537,17 @@ mod tests {
             // If creg[0] == 0: state = |00⟩
             // If creg[0] == 1: state = |11⟩
             if cregs[0] == 0 {
-                assert!((sv.amplitudes[0].norm_sq() - 1.0).abs() < 1e-12,
-                    "seed {}: expected |00⟩", seed);
+                assert!(
+                    (sv.amplitudes[0].norm_sq() - 1.0).abs() < 1e-12,
+                    "seed {}: expected |00⟩",
+                    seed
+                );
             } else {
-                assert!((sv.amplitudes[3].norm_sq() - 1.0).abs() < 1e-12,
-                    "seed {}: expected |11⟩", seed);
+                assert!(
+                    (sv.amplitudes[3].norm_sq() - 1.0).abs() < 1e-12,
+                    "seed {}: expected |11⟩",
+                    seed
+                );
             }
         }
     }

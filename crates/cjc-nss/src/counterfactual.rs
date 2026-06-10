@@ -71,7 +71,10 @@ impl ClusterSnapshot {
     /// targets an unknown node or fires at a tick already past the
     /// snapshot tick (the latter would be a no-op but signals
     /// caller confusion).
-    pub fn fork(&self, extra_interventions: Vec<Intervention>) -> Result<ClusterSimulator, NssError> {
+    pub fn fork(
+        &self,
+        extra_interventions: Vec<Intervention>,
+    ) -> Result<ClusterSimulator, NssError> {
         let mut sim = self.inner.clone();
         let snap_tick = sim.tick();
         for iv in &extra_interventions {
@@ -231,10 +234,10 @@ pub struct CounterfactualComparison {
 impl CounterfactualComparison {
     /// Build a comparison from two paired outcomes.
     pub fn between(a: CounterfactualOutcome, b: CounterfactualOutcome) -> Self {
-        let collapse_delta = b.prediction.failure.collapse_probability
-            - a.prediction.failure.collapse_probability;
-        let degraded_delta = b.prediction.failure.degraded_probability
-            - a.prediction.failure.degraded_probability;
+        let collapse_delta =
+            b.prediction.failure.collapse_probability - a.prediction.failure.collapse_probability;
+        let degraded_delta =
+            b.prediction.failure.degraded_probability - a.prediction.failure.degraded_probability;
         let a_label = a
             .trajectory
             .iter()
@@ -256,8 +259,16 @@ impl CounterfactualComparison {
         let mut node_health_disagreements = BTreeMap::new();
         if let (Some(sa), Some(sb)) = (a.trajectory.last_state(), b.trajectory.last_state()) {
             for id in sa.nodes.keys() {
-                let ha = sa.node_health.get(id).copied().unwrap_or(NodeHealth::Healthy);
-                let hb = sb.node_health.get(id).copied().unwrap_or(NodeHealth::Healthy);
+                let ha = sa
+                    .node_health
+                    .get(id)
+                    .copied()
+                    .unwrap_or(NodeHealth::Healthy);
+                let hb = sb
+                    .node_health
+                    .get(id)
+                    .copied()
+                    .unwrap_or(NodeHealth::Healthy);
                 if ha != hb {
                     node_health_disagreements.insert(*id, (ha, hb));
                 }
@@ -308,16 +319,22 @@ pub fn run_cluster_counterfactual(
     let mut fork_b = snapshot.fork(interventions_b)?;
     let traj_a = fork_a.run(horizon)?;
     let traj_b = fork_b.run(horizon)?;
-    let pred_a = nss.predict_next(traj_a.last_state().ok_or_else(|| {
-        NssError::InvalidTrajectory {
-            detail: "fork A produced empty trajectory".into(),
-        }
-    })?)?;
-    let pred_b = nss.predict_next(traj_b.last_state().ok_or_else(|| {
-        NssError::InvalidTrajectory {
-            detail: "fork B produced empty trajectory".into(),
-        }
-    })?)?;
+    let pred_a =
+        nss.predict_next(
+            traj_a
+                .last_state()
+                .ok_or_else(|| NssError::InvalidTrajectory {
+                    detail: "fork A produced empty trajectory".into(),
+                })?,
+        )?;
+    let pred_b =
+        nss.predict_next(
+            traj_b
+                .last_state()
+                .ok_or_else(|| NssError::InvalidTrajectory {
+                    detail: "fork B produced empty trajectory".into(),
+                })?,
+        )?;
     Ok(CounterfactualComparison::between(
         CounterfactualOutcome {
             label: label_a.to_string(),

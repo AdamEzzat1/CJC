@@ -14,9 +14,9 @@
 //! - RNG via SplitMix64 with explicit seed threading
 //! - Same seed = bit-identical training trajectory
 
-use cjc_runtime::complex::ComplexF64;
 use crate::mps::Mps;
 use crate::vqe::{transfer_matrix_identity, transfer_matrix_z};
+use cjc_runtime::complex::ComplexF64;
 
 // ---------------------------------------------------------------------------
 // Configuration & Result Types
@@ -126,7 +126,12 @@ fn param_index(layer: usize, qubit: usize, gate: usize, n_qubits: usize) -> usiz
 /// Compute ⟨ψ|Z_q|ψ⟩ for a single qubit in an MPS state.
 pub fn mps_single_z_expectation(mps: &Mps, qubit: usize) -> f64 {
     let n = mps.n_qubits;
-    assert!(qubit < n, "qubit {} out of range for {}-qubit MPS", qubit, n);
+    assert!(
+        qubit < n,
+        "qubit {} out of range for {}-qubit MPS",
+        qubit,
+        n
+    );
 
     // Start with 1x1 identity environment
     let mut env = vec![vec![ComplexF64::ONE]];
@@ -156,15 +161,21 @@ pub fn mps_single_z_expectation(mps: &Mps, qubit: usize) -> f64 {
 /// Each re-upload pass applies:
 /// 1. Rx(w_rx * x + b_rx), Ry(w_ry * x + b_ry), Rz(w_rz * x + b_rz) per qubit
 /// 2. CNOT chain: (0,1), (1,2), ..., (N-2, N-1)
-pub fn build_qml_circuit(
-    config: &QmlConfig,
-    params: &[f64],
-    input: &[f64],
-) -> Mps {
-    assert_eq!(input.len(), config.n_qubits,
-        "input length {} != n_qubits {}", input.len(), config.n_qubits);
-    assert_eq!(params.len(), total_params(config),
-        "params length {} != expected {}", params.len(), total_params(config));
+pub fn build_qml_circuit(config: &QmlConfig, params: &[f64], input: &[f64]) -> Mps {
+    assert_eq!(
+        input.len(),
+        config.n_qubits,
+        "input length {} != n_qubits {}",
+        input.len(),
+        config.n_qubits
+    );
+    assert_eq!(
+        params.len(),
+        total_params(config),
+        "params length {} != expected {}",
+        params.len(),
+        total_params(config)
+    );
 
     let mut mps = Mps::with_max_bond(config.n_qubits, config.max_bond);
 
@@ -203,13 +214,13 @@ pub fn build_qml_circuit(
 // ---------------------------------------------------------------------------
 
 /// Compute class probabilities from MPS state via softmax over Z expectation values.
-pub fn classify(
-    mps: &Mps,
-    readout_qubits: &[usize],
-    n_classes: usize,
-) -> Vec<f64> {
-    assert!(readout_qubits.len() >= n_classes,
-        "need at least {} readout qubits, got {}", n_classes, readout_qubits.len());
+pub fn classify(mps: &Mps, readout_qubits: &[usize], n_classes: usize) -> Vec<f64> {
+    assert!(
+        readout_qubits.len() >= n_classes,
+        "need at least {} readout qubits, got {}",
+        n_classes,
+        readout_qubits.len()
+    );
 
     // Compute Z expectations for readout qubits
     let z_values: Vec<f64> = (0..n_classes)
@@ -367,12 +378,7 @@ pub fn snake_order(width: usize, height: usize) -> Vec<(usize, usize)> {
 ///
 /// Input: grayscale pixels (0-255), row-major.
 /// Output: n_qubits values in [0, pi].
-pub fn preprocess_image(
-    pixels: &[u8],
-    width: usize,
-    height: usize,
-    n_qubits: usize,
-) -> Vec<f64> {
+pub fn preprocess_image(pixels: &[u8], width: usize, height: usize, n_qubits: usize) -> Vec<f64> {
     assert_eq!(pixels.len(), width * height, "pixel count mismatch");
     assert!(n_qubits > 0, "n_qubits must be > 0");
 
@@ -607,8 +613,11 @@ mod tests {
         let result = preprocess_image(&pixels, 4, 4, 4);
         assert_eq!(result.len(), 4);
         for &v in &result {
-            assert!((v - std::f64::consts::PI).abs() < 1e-12,
-                "255 pixels should give pi, got {}", v);
+            assert!(
+                (v - std::f64::consts::PI).abs() < 1e-12,
+                "255 pixels should give pi, got {}",
+                v
+            );
         }
     }
 
@@ -620,8 +629,11 @@ mod tests {
         }
         let result = preprocess_image(&pixels, 8, 8, 8);
         for &v in &result {
-            assert!(v >= 0.0 && v <= std::f64::consts::PI,
-                "value {} out of [0, pi]", v);
+            assert!(
+                v >= 0.0 && v <= std::f64::consts::PI,
+                "value {} out of [0, pi]",
+                v
+            );
         }
     }
 
@@ -632,8 +644,12 @@ mod tests {
         let mps = Mps::new(4);
         for q in 0..4 {
             let z = mps_single_z_expectation(&mps, q);
-            assert!((z - 1.0).abs() < 1e-10,
-                "Z expectation of |0> should be +1, got {} for qubit {}", z, q);
+            assert!(
+                (z - 1.0).abs() < 1e-10,
+                "Z expectation of |0> should be +1, got {} for qubit {}",
+                z,
+                q
+            );
         }
     }
 
@@ -641,21 +657,29 @@ mod tests {
     fn test_single_z_excited_state() {
         let mut mps = Mps::new(2);
         // Apply X to qubit 0 to get |10>
-        let x_mat = [[ComplexF64::ZERO, ComplexF64::ONE],
-                      [ComplexF64::ONE, ComplexF64::ZERO]];
+        let x_mat = [
+            [ComplexF64::ZERO, ComplexF64::ONE],
+            [ComplexF64::ONE, ComplexF64::ZERO],
+        ];
         mps.apply_single_qubit(0, x_mat);
-        assert!((mps_single_z_expectation(&mps, 0) - (-1.0)).abs() < 1e-10,
-            "Z of |1> should be -1");
-        assert!((mps_single_z_expectation(&mps, 1) - 1.0).abs() < 1e-10,
-            "Z of |0> should be +1");
+        assert!(
+            (mps_single_z_expectation(&mps, 0) - (-1.0)).abs() < 1e-10,
+            "Z of |1> should be -1"
+        );
+        assert!(
+            (mps_single_z_expectation(&mps, 1) - 1.0).abs() < 1e-10,
+            "Z of |0> should be +1"
+        );
     }
 
     #[test]
     fn test_single_z_plus_state() {
         let mut mps = Mps::new(1);
         let isq2 = 1.0 / 2.0f64.sqrt();
-        let h = [[ComplexF64::real(isq2), ComplexF64::real(isq2)],
-                  [ComplexF64::real(isq2), ComplexF64::real(-isq2)]];
+        let h = [
+            [ComplexF64::real(isq2), ComplexF64::real(isq2)],
+            [ComplexF64::real(isq2), ComplexF64::real(-isq2)],
+        ];
         mps.apply_single_qubit(0, h);
         let z = mps_single_z_expectation(&mps, 0);
         assert!(z.abs() < 1e-10, "Z of |+> should be 0, got {}", z);
@@ -672,8 +696,12 @@ mod tests {
         // All zero angles → identity gates → |0000>
         for q in 0..4 {
             let z = mps_single_z_expectation(&mps, q);
-            assert!((z - 1.0).abs() < 1e-10,
-                "zero params + zero input should give |0>, got Z={} for qubit {}", z, q);
+            assert!(
+                (z - 1.0).abs() < 1e-10,
+                "zero params + zero input should give |0>, got Z={} for qubit {}",
+                z,
+                q
+            );
         }
     }
 
@@ -733,10 +761,7 @@ mod tests {
         let params: Vec<f64> = (0..total_params(&config))
             .map(|i| (i as f64) * 0.1 - 0.5)
             .collect();
-        let samples = vec![
-            vec![0.5, 1.0, 0.2],
-            vec![1.5, 0.3, 2.0],
-        ];
+        let samples = vec![vec![0.5, 1.0, 0.2], vec![1.5, 0.3, 2.0]];
         let labels = vec![0, 1];
 
         let grads = qml_gradient(&config, &params, &samples, &labels);
@@ -751,8 +776,13 @@ mod tests {
             let fd_grad = (batch_loss(&config, &p_plus, &samples, &labels)
                 - batch_loss(&config, &p_minus, &samples, &labels))
                 / (2.0 * eps);
-            assert!((grads[k] - fd_grad).abs() < 1e-3,
-                "param {}: grad={}, fd={}", k, grads[k], fd_grad);
+            assert!(
+                (grads[k] - fd_grad).abs() < 1e-3,
+                "param {}: grad={}, fd={}",
+                k,
+                grads[k],
+                fd_grad
+            );
         }
 
         // Gradient should be nonzero for at least some parameters
@@ -791,9 +821,17 @@ mod tests {
         let result = qml_train(&config, &dataset);
         let initial = result.loss_history[0];
         // Check that loss decreased at some point during training
-        let min_loss = result.loss_history.iter().cloned().fold(f64::INFINITY, f64::min);
-        assert!(min_loss < initial,
-            "loss should decrease at some point: initial={}, min={}", initial, min_loss);
+        let min_loss = result
+            .loss_history
+            .iter()
+            .cloned()
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            min_loss < initial,
+            "loss should decrease at some point: initial={}, min={}",
+            initial,
+            min_loss
+        );
     }
 
     // --- Determinism ---
@@ -813,10 +851,7 @@ mod tests {
             seed: 123,
         };
         let dataset = QmlDataset {
-            samples: vec![
-                vec![0.1, 0.2, 0.3],
-                vec![2.0, 1.5, 1.0],
-            ],
+            samples: vec![vec![0.1, 0.2, 0.3], vec![2.0, 1.5, 1.0]],
             labels: vec![0, 1],
             n_classes: 2,
         };
@@ -826,12 +861,24 @@ mod tests {
 
         assert_eq!(r1.params.len(), r2.params.len());
         for k in 0..r1.params.len() {
-            assert_eq!(r1.params[k].to_bits(), r2.params[k].to_bits(),
-                "param[{}]: {} vs {}", k, r1.params[k], r2.params[k]);
+            assert_eq!(
+                r1.params[k].to_bits(),
+                r2.params[k].to_bits(),
+                "param[{}]: {} vs {}",
+                k,
+                r1.params[k],
+                r2.params[k]
+            );
         }
         for (i, (l1, l2)) in r1.loss_history.iter().zip(&r2.loss_history).enumerate() {
-            assert_eq!(l1.to_bits(), l2.to_bits(),
-                "loss_history[{}]: {} vs {}", i, l1, l2);
+            assert_eq!(
+                l1.to_bits(),
+                l2.to_bits(),
+                "loss_history[{}]: {} vs {}",
+                i,
+                l1,
+                l2
+            );
         }
     }
 
@@ -857,7 +904,11 @@ mod tests {
         let mem = mps.memory_bytes();
         assert!(mem < 2_000_000_000, "memory {} exceeds 2GB", mem);
         // Should be well under: 50 * 2 * 16 * 16 * 16 bytes ~ 400KB
-        assert!(mem < 1_000_000, "memory {} should be under 1MB for chi=16", mem);
+        assert!(
+            mem < 1_000_000,
+            "memory {} should be under 1MB for chi=16",
+            mem
+        );
     }
 
     // --- Load dataset ---

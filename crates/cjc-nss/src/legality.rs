@@ -242,7 +242,10 @@ impl LegalityReport {
             )
         } else {
             let by_kind = self.violations_by_kind();
-            let parts: Vec<String> = by_kind.iter().map(|(k, n)| format!("{}={}", k, n)).collect();
+            let parts: Vec<String> = by_kind
+                .iter()
+                .map(|(k, n)| format!("{}={}", k, n))
+                .collect();
             format!(
                 "FAIL ({} interventions, {} violations: {})",
                 self.script_size,
@@ -279,11 +282,7 @@ impl LegalityVerifier {
     }
 
     /// Verify a script against the topology + config.
-    pub fn verify(
-        &self,
-        script: &[Intervention],
-        topology: &ClusterTopology,
-    ) -> LegalityReport {
+    pub fn verify(&self, script: &[Intervention], topology: &ClusterTopology) -> LegalityReport {
         let mut violations: Vec<LegalityViolation> = Vec::new();
         let mut touched: std::collections::BTreeSet<NodeId> = std::collections::BTreeSet::new();
         // Pre-collect topology node IDs for quick lookup.
@@ -505,7 +504,10 @@ mod tests {
         assert!(!report.passed());
         assert!(matches!(
             report.violations[0],
-            LegalityViolation::UnknownNode { tick: 5, node: NodeId(99) }
+            LegalityViolation::UnknownNode {
+                tick: 5,
+                node: NodeId(99)
+            }
         ));
     }
 
@@ -518,10 +520,10 @@ mod tests {
             intensity: 1.5,
         }];
         let report = v.verify(&script, &small_topology());
-        assert!(report.violations.iter().any(|x| matches!(
-            x,
-            LegalityViolation::InvalidIntensity { .. }
-        )));
+        assert!(report
+            .violations
+            .iter()
+            .any(|x| matches!(x, LegalityViolation::InvalidIntensity { .. })));
     }
 
     #[test]
@@ -623,10 +625,10 @@ mod tests {
             node: NodeId(1),
         }];
         let report = v.verify(&script, &small_topology());
-        assert!(report.violations.iter().any(|x| matches!(
-            x,
-            LegalityViolation::AggressiveActionForbidden { .. }
-        )));
+        assert!(report
+            .violations
+            .iter()
+            .any(|x| matches!(x, LegalityViolation::AggressiveActionForbidden { .. })));
     }
 
     #[test]

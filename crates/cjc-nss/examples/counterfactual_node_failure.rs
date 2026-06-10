@@ -45,8 +45,7 @@ fn main() {
     );
 
     // 2. Build the cluster NSS.
-    let nss =
-        ClusterNeuralSystemsSimulator::from_seed(ClusterNssConfig::default(), seed).unwrap();
+    let nss = ClusterNeuralSystemsSimulator::from_seed(ClusterNssConfig::default(), seed).unwrap();
 
     // 3. Counterfactual experiment.
     let comparison = run_cluster_counterfactual(
@@ -111,7 +110,9 @@ fn main() {
     // 6. Per-node health disagreements (the structural diff between
     //    the two futures).
     if comparison.node_health_disagreements.is_empty() {
-        println!("\n[diff] no per-node health disagreements (intervention had no structural effect)");
+        println!(
+            "\n[diff] no per-node health disagreements (intervention had no structural effect)"
+        );
     } else {
         println!("\n[diff] node-health disagreements at final tick:");
         for (id, (ha, hb)) in &comparison.node_health_disagreements {
@@ -153,13 +154,33 @@ fn main() {
         _ => println!("  → intervention has negligible effect on predicted outcome (|Δ| < 0.05)"),
     }
 
-    let _final_a = comparison.a.trajectory.last_state().map(|s| s.tick).unwrap_or(0);
-    let _final_b = comparison.b.trajectory.last_state().map(|s| s.tick).unwrap_or(0);
+    let _final_a = comparison
+        .a
+        .trajectory
+        .last_state()
+        .map(|s| s.tick)
+        .unwrap_or(0);
+    let _final_b = comparison
+        .b
+        .trajectory
+        .last_state()
+        .map(|s| s.tick)
+        .unwrap_or(0);
     println!(
         "\n[summary] snapshot_tick={}, baseline_final_tick={}, intervention_final_tick={}",
         snapshot.tick(),
-        comparison.a.trajectory.last_state().map(|s| s.tick).unwrap_or(0),
-        comparison.b.trajectory.last_state().map(|s| s.tick).unwrap_or(0),
+        comparison
+            .a
+            .trajectory
+            .last_state()
+            .map(|s| s.tick)
+            .unwrap_or(0),
+        comparison
+            .b
+            .trajectory
+            .last_state()
+            .map(|s| s.tick)
+            .unwrap_or(0),
     );
     // Just to use the variable — the `cluster_failure.kind` matters
     // semantically as the demo's "did we predict differently?" signal.

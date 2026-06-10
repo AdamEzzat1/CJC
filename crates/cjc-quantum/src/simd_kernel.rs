@@ -16,8 +16,8 @@
 //! For qubit targets where the stride exceeds L1 cache size (~32KB),
 //! loop tiling groups basis state pairs into cache-friendly blocks.
 
-use cjc_runtime::complex::ComplexF64;
 use crate::statevector::Statevector;
+use cjc_runtime::complex::ComplexF64;
 
 /// Cache block size in complex amplitudes (L1 = ~32KB = 4K f64 = 2K complex).
 const CACHE_BLOCK_SIZE: usize = 2048;
@@ -33,11 +33,7 @@ const CACHE_BLOCK_SIZE: usize = 2048;
 /// working set within L1 cache.
 ///
 /// Falls back to the standard path for small qubits (stride < CACHE_BLOCK_SIZE).
-pub fn apply_single_qubit_cached(
-    sv: &mut Statevector,
-    q: usize,
-    u: [[ComplexF64; 2]; 2],
-) {
+pub fn apply_single_qubit_cached(sv: &mut Statevector, q: usize, u: [[ComplexF64; 2]; 2]) {
     let n = sv.n_states();
     let bit = 1usize << q;
 
@@ -73,11 +69,7 @@ pub fn apply_single_qubit_cached(
 
 /// Scalar baseline for single-qubit gate application.
 /// Processes pairs in ascending order for determinism.
-fn apply_single_qubit_scalar(
-    sv: &mut Statevector,
-    q: usize,
-    u: [[ComplexF64; 2]; 2],
-) {
+fn apply_single_qubit_scalar(sv: &mut Statevector, q: usize, u: [[ComplexF64; 2]; 2]) {
     let n = sv.n_states();
     let bit = 1usize << q;
 
@@ -110,10 +102,7 @@ fn apply_single_qubit_scalar(
 /// `is_x86_feature_detected!("avx2")` must be checked before calling.
 #[cfg(target_arch = "x86_64")]
 #[inline]
-pub fn complex_mul_batch_2(
-    a: &[ComplexF64; 2],
-    b: &[ComplexF64; 2],
-) -> [ComplexF64; 2] {
+pub fn complex_mul_batch_2(a: &[ComplexF64; 2], b: &[ComplexF64; 2]) -> [ComplexF64; 2] {
     // Check for AVX2 at runtime
     if is_x86_feature_detected!("avx2") {
         // SAFETY: We checked for AVX2 support.
@@ -126,10 +115,7 @@ pub fn complex_mul_batch_2(
 /// Fallback for non-x86_64 platforms.
 #[cfg(not(target_arch = "x86_64"))]
 #[inline]
-pub fn complex_mul_batch_2(
-    a: &[ComplexF64; 2],
-    b: &[ComplexF64; 2],
-) -> [ComplexF64; 2] {
+pub fn complex_mul_batch_2(a: &[ComplexF64; 2], b: &[ComplexF64; 2]) -> [ComplexF64; 2] {
     [a[0].mul_fixed(b[0]), a[1].mul_fixed(b[1])]
 }
 
@@ -144,10 +130,7 @@ pub fn complex_mul_batch_2(
 /// ```
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn complex_mul_batch_2_avx2(
-    a: &[ComplexF64; 2],
-    b: &[ComplexF64; 2],
-) -> [ComplexF64; 2] {
+unsafe fn complex_mul_batch_2_avx2(a: &[ComplexF64; 2], b: &[ComplexF64; 2]) -> [ComplexF64; 2] {
     use core::arch::x86_64::*;
 
     // Load a = [a0.re, a0.im, a1.re, a1.im]
@@ -181,11 +164,7 @@ unsafe fn complex_mul_batch_2_avx2(
 ///
 /// Processes two amplitude pairs per iteration on AVX2 platforms.
 #[cfg(target_arch = "x86_64")]
-pub fn apply_single_qubit_simd(
-    sv: &mut Statevector,
-    q: usize,
-    u: [[ComplexF64; 2]; 2],
-) {
+pub fn apply_single_qubit_simd(sv: &mut Statevector, q: usize, u: [[ComplexF64; 2]; 2]) {
     let n = sv.n_states();
     let bit = 1usize << q;
 
@@ -240,11 +219,7 @@ pub fn apply_single_qubit_simd(
 
 /// Non-x86 fallback.
 #[cfg(not(target_arch = "x86_64"))]
-pub fn apply_single_qubit_simd(
-    sv: &mut Statevector,
-    q: usize,
-    u: [[ComplexF64; 2]; 2],
-) {
+pub fn apply_single_qubit_simd(sv: &mut Statevector, q: usize, u: [[ComplexF64; 2]; 2]) {
     apply_single_qubit_scalar(sv, q, u);
 }
 
@@ -267,8 +242,10 @@ mod tests {
     }
 
     fn x_matrix() -> [[ComplexF64; 2]; 2] {
-        [[ComplexF64::ZERO, ComplexF64::ONE],
-         [ComplexF64::ONE, ComplexF64::ZERO]]
+        [
+            [ComplexF64::ZERO, ComplexF64::ONE],
+            [ComplexF64::ONE, ComplexF64::ZERO],
+        ]
     }
 
     #[test]
@@ -297,13 +274,17 @@ mod tests {
                         sv_scalar.amplitudes[i].re.to_bits(),
                         sv_cached.amplitudes[i].re.to_bits(),
                         "Cached mismatch at n={}, q={}, state={}, re",
-                        n_qubits, target, i
+                        n_qubits,
+                        target,
+                        i
                     );
                     assert_eq!(
                         sv_scalar.amplitudes[i].im.to_bits(),
                         sv_cached.amplitudes[i].im.to_bits(),
                         "Cached mismatch at n={}, q={}, state={}, im",
-                        n_qubits, target, i
+                        n_qubits,
+                        target,
+                        i
                     );
                 }
             }
@@ -326,13 +307,17 @@ mod tests {
                         sv_scalar.amplitudes[i].re.to_bits(),
                         sv_simd.amplitudes[i].re.to_bits(),
                         "SIMD mismatch at n={}, q={}, state={}, re",
-                        n_qubits, target, i
+                        n_qubits,
+                        target,
+                        i
                     );
                     assert_eq!(
                         sv_scalar.amplitudes[i].im.to_bits(),
                         sv_simd.amplitudes[i].im.to_bits(),
                         "SIMD mismatch at n={}, q={}, state={}, im",
-                        n_qubits, target, i
+                        n_qubits,
+                        target,
+                        i
                     );
                 }
             }
@@ -342,14 +327,8 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn test_complex_mul_batch_deterministic() {
-        let a = [
-            ComplexF64::new(1.23, -4.56),
-            ComplexF64::new(7.89, 0.12),
-        ];
-        let b = [
-            ComplexF64::new(-3.45, 6.78),
-            ComplexF64::new(9.01, -2.34),
-        ];
+        let a = [ComplexF64::new(1.23, -4.56), ComplexF64::new(7.89, 0.12)];
+        let b = [ComplexF64::new(-3.45, 6.78), ComplexF64::new(9.01, -2.34)];
 
         let result1 = complex_mul_batch_2(&a, &b);
         let result2 = complex_mul_batch_2(&a, &b);
@@ -363,23 +342,25 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn test_complex_mul_batch_matches_scalar() {
-        let a = [
-            ComplexF64::new(1.23, -4.56),
-            ComplexF64::new(7.89, 0.12),
-        ];
-        let b = [
-            ComplexF64::new(-3.45, 6.78),
-            ComplexF64::new(9.01, -2.34),
-        ];
+        let a = [ComplexF64::new(1.23, -4.56), ComplexF64::new(7.89, 0.12)];
+        let b = [ComplexF64::new(-3.45, 6.78), ComplexF64::new(9.01, -2.34)];
 
         let batch = complex_mul_batch_2(&a, &b);
         let scalar = [a[0].mul_fixed(b[0]), a[1].mul_fixed(b[1])];
 
         for i in 0..2 {
-            assert_eq!(batch[i].re.to_bits(), scalar[i].re.to_bits(),
-                "Batch vs scalar mismatch at {}, re", i);
-            assert_eq!(batch[i].im.to_bits(), scalar[i].im.to_bits(),
-                "Batch vs scalar mismatch at {}, im", i);
+            assert_eq!(
+                batch[i].re.to_bits(),
+                scalar[i].re.to_bits(),
+                "Batch vs scalar mismatch at {}, re",
+                i
+            );
+            assert_eq!(
+                batch[i].im.to_bits(),
+                scalar[i].im.to_bits(),
+                "Batch vs scalar mismatch at {}, im",
+                i
+            );
         }
     }
 

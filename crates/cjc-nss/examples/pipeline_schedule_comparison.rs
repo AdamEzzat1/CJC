@@ -91,10 +91,26 @@ fn main() {
         let mut net_sum = 0.0f64;
         for ev in traj.iter() {
             for s in ev.state.nodes.values() {
-                mem_sum += s.pressures.get(PressureKind::Memory).map(|p| p.saturation()).unwrap_or(0.0);
-                sync_sum += s.pressures.get(PressureKind::Sync).map(|p| p.saturation()).unwrap_or(0.0);
-                cpu_sum += s.pressures.get(PressureKind::Cpu).map(|p| p.saturation()).unwrap_or(0.0);
-                net_sum += s.pressures.get(PressureKind::Network).map(|p| p.saturation()).unwrap_or(0.0);
+                mem_sum += s
+                    .pressures
+                    .get(PressureKind::Memory)
+                    .map(|p| p.saturation())
+                    .unwrap_or(0.0);
+                sync_sum += s
+                    .pressures
+                    .get(PressureKind::Sync)
+                    .map(|p| p.saturation())
+                    .unwrap_or(0.0);
+                cpu_sum += s
+                    .pressures
+                    .get(PressureKind::Cpu)
+                    .map(|p| p.saturation())
+                    .unwrap_or(0.0);
+                net_sum += s
+                    .pressures
+                    .get(PressureKind::Network)
+                    .map(|p| p.saturation())
+                    .unwrap_or(0.0);
             }
         }
         println!(

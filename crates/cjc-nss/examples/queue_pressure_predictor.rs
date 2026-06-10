@@ -66,7 +66,11 @@ fn main() {
     //    the collapse logit?
     println!("[nss] causal attribution (top 5):");
     for c in pred.attribution.contributions.iter().take(5) {
-        println!("       {:>11}  contribution = {:+.4}", c.kind.label(), c.magnitude);
+        println!(
+            "       {:>11}  contribution = {:+.4}",
+            c.kind.label(),
+            c.magnitude
+        );
     }
     println!(
         "[nss] dominant_source = {} (magnitude {:+.4})",
@@ -86,5 +90,8 @@ fn main() {
     ReplayValidator::new()
         .verify(&trace)
         .expect("replay must verify");
-    println!("[replay] verified: {} bytes of canonical trace", trace.canonical_bytes().len());
+    println!(
+        "[replay] verified: {} bytes of canonical trace",
+        trace.canonical_bytes().len()
+    );
 }

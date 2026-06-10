@@ -191,19 +191,13 @@ impl PipelineSchedule {
     /// Activation-memory multiplier vs the GPipe baseline. GPipe = 1.0,
     /// 1F1B ≈ `stages / microbatches` (capped at 1.0), Interleaved =
     /// `factor * stages / microbatches` (capped at 1.0).
-    pub fn activation_memory_multiplier(
-        self,
-        stages: u32,
-        microbatches: u32,
-    ) -> f64 {
+    pub fn activation_memory_multiplier(self, stages: u32, microbatches: u32) -> f64 {
         let s = stages as f64;
         let m = (microbatches as f64).max(1.0);
         match self {
             PipelineSchedule::GPipe => 1.0,
             PipelineSchedule::OneForwardOneBackward => (s / m).min(1.0),
-            PipelineSchedule::Interleaved { factor } => {
-                ((factor as f64).max(1.0) * s / m).min(1.0)
-            }
+            PipelineSchedule::Interleaved { factor } => ((factor as f64).max(1.0) * s / m).min(1.0),
         }
     }
 
@@ -259,7 +253,10 @@ impl GpuTrainingConfig {
         }
         if !self.service_mean.is_finite() || self.service_mean <= 0.0 {
             return Err(NssError::InvalidConfig {
-                detail: format!("service_mean must be > 0 and finite, got {}", self.service_mean),
+                detail: format!(
+                    "service_mean must be > 0 and finite, got {}",
+                    self.service_mean
+                ),
             });
         }
         if !self.service_jitter.is_finite() || self.service_jitter < 0.0 {
@@ -790,10 +787,8 @@ impl GpuTrainingSimulator {
                     PressureKind::Sync,
                     Pressure::new(1.0, 1.0, 0.15)?, // 100% sync pressure for a dead peer
                 );
-                g.field.set(
-                    PressureKind::Throughput,
-                    Pressure::new(1.0, 1.0, 0.05)?,
-                );
+                g.field
+                    .set(PressureKind::Throughput, Pressure::new(1.0, 1.0, 0.05)?);
                 g.field.set(
                     PressureKind::Network,
                     Pressure::new(allreduce_pressure, 1.0, 0.1)?,
@@ -821,15 +816,18 @@ impl GpuTrainingSimulator {
             // The bubble extends the iteration without contributing
             // work, so utilisation is `own_t / (max_t + bubble)`.
             let denom_util = max_t + pipeline_idle;
-            let util = if denom_util > 0.0 { own_t / denom_util } else { 1.0 };
+            let util = if denom_util > 0.0 {
+                own_t / denom_util
+            } else {
+                1.0
+            };
             // Phase 3d — checkpointing recompute is real work, additive
             // to starvation. Without jitter, starvation is 0 but
             // checkpointing still adds ~recompute_overhead to CPU pressure.
             let starvation_p = ((1.0 - util) + checkpoint_cpu_load).max(0.0).min(1.5);
             // Throughput pressure = (allreduce + bubble) / total cost.
             let total_iter_cost = max_t + pipeline_idle + allreduce_time;
-            let thr_p =
-                ((allreduce_time + pipeline_idle) / total_iter_cost.max(1e-12)).min(1.5);
+            let thr_p = ((allreduce_time + pipeline_idle) / total_iter_cost.max(1e-12)).min(1.5);
             // Memory + fragmentation update.
             // Phase 2c — earlier pipeline stages hold more activation
             // memory. Stage 0 sees `microbatches` worth of fwd activations
@@ -840,8 +838,8 @@ impl GpuTrainingSimulator {
             g.memory_used += self.cfg.memory_per_microbatch * stage_mem_mul;
             g.fragmentation += self.cfg.fragmentation_growth;
             // Garbage collection (deterministic schedule).
-            let do_gc = self.cfg.gc_interval > 0
-                && ((g.iterations + 1) % self.cfg.gc_interval as u64) == 0;
+            let do_gc =
+                self.cfg.gc_interval > 0 && ((g.iterations + 1) % self.cfg.gc_interval as u64) == 0;
             if do_gc {
                 // GC quality jitter (zero std-dev unless future
                 // versions add it) — call the RNG so the stream
@@ -923,7 +921,10 @@ impl GpuTrainingSimulator {
             let memory_knee = 0.85;
             let sync_knee = 0.7;
             let action = if mem_sat >= memory_knee {
-                SchedulerAction::new(SchedulerKind::ShedLoad, (mem_sat - memory_knee) / (1.0 - memory_knee))
+                SchedulerAction::new(
+                    SchedulerKind::ShedLoad,
+                    (mem_sat - memory_knee) / (1.0 - memory_knee),
+                )
             } else {
                 SchedulerAction::idle()
             };
@@ -932,7 +933,11 @@ impl GpuTrainingSimulator {
             //     capacity (i.e., mem_sat >= 1.0)
             //   - Degraded if mem_sat >= memory_knee or sync_sat >= sync_knee
             //   - Nominal otherwise
-            let dominant = if mem_sat >= sync_sat { PressureKind::Memory } else { PressureKind::Sync };
+            let dominant = if mem_sat >= sync_sat {
+                PressureKind::Memory
+            } else {
+                PressureKind::Sync
+            };
             let failure = if mem_sat >= 1.0 {
                 FailureState::collapse(PressureKind::Memory)
             } else if mem_sat >= memory_knee || sync_sat >= sync_knee {
@@ -981,7 +986,11 @@ impl GpuTrainingSimulator {
             let state = SystemState {
                 tick: self.tick,
                 pressures: g.field.clone(),
-                in_flight: if g.health == NodeHealth::Healthy { 1 } else { 0 },
+                in_flight: if g.health == NodeHealth::Healthy {
+                    1
+                } else {
+                    0
+                },
                 completed: g.iterations,
                 rejected: if g.health == NodeHealth::Failed { 1 } else { 0 },
                 mean_service_time: g.last_service_time,
@@ -1022,7 +1031,10 @@ impl GpuTrainingSimulator {
     /// Per-GPU iteration count snapshot — for tests + the demo
     /// (the trajectory's `completed` carries the same number).
     pub fn iteration_counts(&self) -> BTreeMap<NodeId, u64> {
-        self.gpus.iter().map(|(id, g)| (*id, g.iterations)).collect()
+        self.gpus
+            .iter()
+            .map(|(id, g)| (*id, g.iterations))
+            .collect()
     }
 
     /// Cumulative idle time per GPU — useful for tests that compare
@@ -1053,7 +1065,12 @@ impl GpuTrainingSimulator {
     pub fn total_sync_pressure(&self) -> f64 {
         let mut acc = KahanAccumulatorF64::new();
         for g in self.gpus.values() {
-            acc.add(g.field.get(PressureKind::Sync).map(|p| p.magnitude).unwrap_or(0.0));
+            acc.add(
+                g.field
+                    .get(PressureKind::Sync)
+                    .map(|p| p.magnitude)
+                    .unwrap_or(0.0),
+            );
         }
         acc.finalize()
     }
@@ -1119,10 +1136,8 @@ mod tests {
             n_gpus: 4,
             ..GpuTrainingConfig::default()
         };
-        let mut a =
-            GpuTrainingSimulator::new(cfg, small_topology(4), NssSeed(42), vec![]).unwrap();
-        let mut b =
-            GpuTrainingSimulator::new(cfg, small_topology(4), NssSeed(42), vec![]).unwrap();
+        let mut a = GpuTrainingSimulator::new(cfg, small_topology(4), NssSeed(42), vec![]).unwrap();
+        let mut b = GpuTrainingSimulator::new(cfg, small_topology(4), NssSeed(42), vec![]).unwrap();
         let ta = a.run(32).unwrap();
         let tb = b.run(32).unwrap();
         assert_eq!(ta.canonical_bytes(), tb.canonical_bytes());
@@ -1134,10 +1149,8 @@ mod tests {
             n_gpus: 4,
             ..GpuTrainingConfig::default()
         };
-        let mut a =
-            GpuTrainingSimulator::new(cfg, small_topology(4), NssSeed(1), vec![]).unwrap();
-        let mut b =
-            GpuTrainingSimulator::new(cfg, small_topology(4), NssSeed(2), vec![]).unwrap();
+        let mut a = GpuTrainingSimulator::new(cfg, small_topology(4), NssSeed(1), vec![]).unwrap();
+        let mut b = GpuTrainingSimulator::new(cfg, small_topology(4), NssSeed(2), vec![]).unwrap();
         assert_ne!(
             a.run(32).unwrap().canonical_bytes(),
             b.run(32).unwrap().canonical_bytes(),
@@ -1304,8 +1317,10 @@ mod tests {
             allreduce_bytes: 5.0e9,
             ..base
         };
-        let mut sf = GpuTrainingSimulator::new(fast, small_topology(4), NssSeed(7), vec![]).unwrap();
-        let mut ss = GpuTrainingSimulator::new(slow, small_topology(4), NssSeed(7), vec![]).unwrap();
+        let mut sf =
+            GpuTrainingSimulator::new(fast, small_topology(4), NssSeed(7), vec![]).unwrap();
+        let mut ss =
+            GpuTrainingSimulator::new(slow, small_topology(4), NssSeed(7), vec![]).unwrap();
         let tf = sf.run(16).unwrap();
         let ts = ss.run(16).unwrap();
         let net_sum = |t: &ClusterTrajectory| -> f64 {
@@ -1324,7 +1339,12 @@ mod tests {
         };
         let nf = net_sum(&tf);
         let ns = net_sum(&ts);
-        assert!(ns > nf, "slow allreduce must drive more network pressure (fast={}, slow={})", nf, ns);
+        assert!(
+            ns > nf,
+            "slow allreduce must drive more network pressure (fast={}, slow={})",
+            nf,
+            ns
+        );
     }
 
     #[test]
@@ -1338,11 +1358,15 @@ mod tests {
             service_jitter: 0.2,
             ..GpuTrainingConfig::default()
         };
-        let mut sim = GpuTrainingSimulator::new(cfg, small_topology(4), NssSeed(42), vec![]).unwrap();
+        let mut sim =
+            GpuTrainingSimulator::new(cfg, small_topology(4), NssSeed(42), vec![]).unwrap();
         let _ = sim.run(64).unwrap();
         let idle = sim.idle_accumulated();
         let any_idle = idle.values().any(|t| *t > 0.0);
-        assert!(any_idle, "expected at least one GPU to accumulate idle time");
+        assert!(
+            any_idle,
+            "expected at least one GPU to accumulate idle time"
+        );
     }
 
     #[test]
@@ -1352,7 +1376,8 @@ mod tests {
             service_jitter: 0.1,
             ..GpuTrainingConfig::default()
         };
-        let mut sim = GpuTrainingSimulator::new(cfg, small_topology(4), NssSeed(42), vec![]).unwrap();
+        let mut sim =
+            GpuTrainingSimulator::new(cfg, small_topology(4), NssSeed(42), vec![]).unwrap();
         let traj = sim.run(64).unwrap();
         for ev in traj.iter() {
             ev.state.validate().expect("state must validate every tick");
@@ -1494,7 +1519,12 @@ mod tests {
         // still be strictly higher.)
         let m0 = mem_at_end(NodeId(0));
         let m7 = mem_at_end(NodeId(7));
-        assert!(m0 > m7, "stage 0 memory must exceed final-stage memory (s0={}, s3={})", m0, m7);
+        assert!(
+            m0 > m7,
+            "stage 0 memory must exceed final-stage memory (s0={}, s3={})",
+            m0,
+            m7
+        );
     }
 
     #[test]
@@ -1548,7 +1578,10 @@ mod tests {
 
     #[test]
     fn pipeline_schedule_default_is_gpipe() {
-        assert_eq!(GpuTrainingConfig::default().pipeline_schedule, PipelineSchedule::GPipe);
+        assert_eq!(
+            GpuTrainingConfig::default().pipeline_schedule,
+            PipelineSchedule::GPipe
+        );
     }
 
     #[test]
@@ -1576,7 +1609,12 @@ mod tests {
         };
         let bf_base = base.bubble_fraction();
         let bf_inter = interleaved.bubble_fraction();
-        assert!(bf_inter < bf_base, "interleaved bubble must be smaller (gpipe={}, interleaved={})", bf_base, bf_inter);
+        assert!(
+            bf_inter < bf_base,
+            "interleaved bubble must be smaller (gpipe={}, interleaved={})",
+            bf_base,
+            bf_inter
+        );
         // With factor=4, the bubble should be exactly 1/4 of the base.
         assert!((bf_inter - bf_base / 4.0).abs() < 1e-12);
     }
@@ -1616,7 +1654,12 @@ mod tests {
         //   1F1B:  gpipe_skew * (4/32 = 0.125) = 0.125
         let m_gpipe = cfg_gpipe.stage_activation_memory_multiplier(0);
         let m_1f1b = cfg_1f1b.stage_activation_memory_multiplier(0);
-        assert!(m_1f1b < m_gpipe, "1F1B must reduce stage 0 memory (gpipe={}, 1f1b={})", m_gpipe, m_1f1b);
+        assert!(
+            m_1f1b < m_gpipe,
+            "1F1B must reduce stage 0 memory (gpipe={}, 1f1b={})",
+            m_gpipe,
+            m_1f1b
+        );
         assert!(m_1f1b <= 0.2);
     }
 
@@ -1660,8 +1703,14 @@ mod tests {
         };
         let mem_no = no_cp.stage_activation_memory_multiplier(0);
         let mem_yes = with_cp.stage_activation_memory_multiplier(0);
-        assert!((mem_no - 1.0).abs() < 1e-12, "no-checkpoint mem multiplier should be 1.0");
-        assert!((mem_yes - 0.4).abs() < 1e-12, "checkpointed mem should be 0.4");
+        assert!(
+            (mem_no - 1.0).abs() < 1e-12,
+            "no-checkpoint mem multiplier should be 1.0"
+        );
+        assert!(
+            (mem_yes - 0.4).abs() < 1e-12,
+            "checkpointed mem should be 0.4"
+        );
     }
 
     #[test]
@@ -1777,10 +1826,8 @@ mod tests {
             service_jitter: 0.1,
             ..GpuTrainingConfig::default()
         };
-        let mut a =
-            GpuTrainingSimulator::new(cfg, small_topology(8), NssSeed(11), vec![]).unwrap();
-        let mut b =
-            GpuTrainingSimulator::new(cfg, small_topology(8), NssSeed(11), vec![]).unwrap();
+        let mut a = GpuTrainingSimulator::new(cfg, small_topology(8), NssSeed(11), vec![]).unwrap();
+        let mut b = GpuTrainingSimulator::new(cfg, small_topology(8), NssSeed(11), vec![]).unwrap();
         assert_eq!(
             a.run(24).unwrap().canonical_bytes(),
             b.run(24).unwrap().canonical_bytes()

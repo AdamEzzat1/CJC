@@ -24,7 +24,10 @@ impl Statevector {
         if n_states > 0 {
             amplitudes[0] = ComplexF64::ONE;
         }
-        Statevector { amplitudes, n_qubits }
+        Statevector {
+            amplitudes,
+            n_qubits,
+        }
     }
 
     /// Create a statevector from explicit amplitudes.
@@ -35,7 +38,10 @@ impl Statevector {
             return Err(format!("amplitude count must be a power of 2, got {}", n));
         }
         let n_qubits = n.trailing_zeros() as usize;
-        Ok(Statevector { amplitudes: amps, n_qubits })
+        Ok(Statevector {
+            amplitudes: amps,
+            n_qubits,
+        })
     }
 
     /// Number of qubits.
@@ -54,7 +60,9 @@ impl Statevector {
     pub fn amplitude(&self, index: usize) -> Result<ComplexF64, String> {
         if index >= self.n_states() {
             return Err(format!(
-                "basis state index {} out of range (n_states={})", index, self.n_states()
+                "basis state index {} out of range (n_states={})",
+                index,
+                self.n_states()
             ));
         }
         Ok(self.amplitudes[index])
@@ -93,7 +101,10 @@ impl Statevector {
     /// Validate a qubit index.
     pub fn validate_qubit(&self, qubit: usize) -> Result<(), String> {
         if qubit >= self.n_qubits {
-            Err(format!("qubit {} out of range (n_qubits={})", qubit, self.n_qubits))
+            Err(format!(
+                "qubit {} out of range (n_qubits={})",
+                qubit, self.n_qubits
+            ))
         } else {
             Ok(())
         }
@@ -102,7 +113,12 @@ impl Statevector {
 
 impl std::fmt::Display for Statevector {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Statevector({} qubits, {} states)", self.n_qubits, self.n_states())
+        write!(
+            f,
+            "Statevector({} qubits, {} states)",
+            self.n_qubits,
+            self.n_states()
+        )
     }
 }
 
@@ -160,10 +176,7 @@ mod tests {
 
     #[test]
     fn test_normalize() {
-        let amps = vec![
-            ComplexF64::new(1.0, 0.0),
-            ComplexF64::new(1.0, 0.0),
-        ];
+        let amps = vec![ComplexF64::new(1.0, 0.0), ComplexF64::new(1.0, 0.0)];
         let mut sv = Statevector::from_amplitudes(amps).unwrap();
         assert!(!sv.is_normalized(1e-12));
         sv.normalize();

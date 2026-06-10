@@ -254,11 +254,9 @@ mod tests {
     fn replay_after_fit_is_stable() {
         let cfg = NssConfig::default();
         let seed = NssSeed(42);
-        let mut sim = crate::simulator::QueueSimulator::new(
-            crate::simulator::QueueConfig::default(),
-            seed,
-        )
-        .unwrap();
+        let mut sim =
+            crate::simulator::QueueSimulator::new(crate::simulator::QueueConfig::default(), seed)
+                .unwrap();
         let traj = sim.run(64).unwrap();
         // Build, fit, predict.
         let mut nss = NeuralSystemsSimulator::from_seed(cfg, seed).unwrap();

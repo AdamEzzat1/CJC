@@ -402,10 +402,7 @@ fn build_cluster_state(
         }
         // in_flight: events seen in this tick on this block; completed:
         // running total of instructions executed.
-        let in_flight = per_block
-            .get(&block)
-            .map(|a| a.event_count)
-            .unwrap_or(0);
+        let in_flight = per_block.get(&block).map(|a| a.event_count).unwrap_or(0);
         let completed = bucket_events
             .iter()
             .filter(|e| e.block_id == block)
@@ -540,7 +537,12 @@ mod tests {
         let b2 = last.state.nodes.get(&NodeId(2)).unwrap();
         let cpu0 = b0.pressures.get(PressureKind::Cpu).unwrap().saturation();
         let cpu2 = b2.pressures.get(PressureKind::Cpu).unwrap().saturation();
-        assert!(cpu2 > cpu0, "block 2 cpu pressure ({}) must exceed block 0 ({})", cpu2, cpu0);
+        assert!(
+            cpu2 > cpu0,
+            "block 2 cpu pressure ({}) must exceed block 0 ({})",
+            cpu2,
+            cpu0
+        );
         // Memory: 3 MiB / 1 GiB ≈ 0.003 — well below 1.0 saturation,
         // but b2 should still be > b0.
         let mem0 = b0.pressures.get(PressureKind::Memory).unwrap().saturation();
@@ -572,7 +574,10 @@ mod tests {
         let events = three_block_trace();
         let a = adapt_mir_trace_to_cluster_trajectory(&events, &cfg).unwrap();
         let b = adapt_mir_trace_to_cluster_trajectory(&events, &cfg).unwrap();
-        assert_eq!(a.trajectory.canonical_bytes(), b.trajectory.canonical_bytes());
+        assert_eq!(
+            a.trajectory.canonical_bytes(),
+            b.trajectory.canonical_bytes()
+        );
     }
 
     #[test]
@@ -588,15 +593,15 @@ mod tests {
         };
         let events = three_block_trace();
         let out = adapt_mir_trace_to_cluster_trajectory(&events, &cfg).unwrap();
-        let nss = ClusterNeuralSystemsSimulator::from_seed(
-            ClusterNssConfig::default(),
-            NssSeed(42),
-        )
-        .unwrap();
+        let nss =
+            ClusterNeuralSystemsSimulator::from_seed(ClusterNssConfig::default(), NssSeed(42))
+                .unwrap();
         let last = out.trajectory.last_state().unwrap();
         let pred = nss.predict_next(last).unwrap();
         assert!(pred.failure.collapse_probability.is_finite());
-        assert!(pred.failure.collapse_probability >= 0.0 && pred.failure.collapse_probability <= 1.0);
+        assert!(
+            pred.failure.collapse_probability >= 0.0 && pred.failure.collapse_probability <= 1.0
+        );
     }
 
     #[test]

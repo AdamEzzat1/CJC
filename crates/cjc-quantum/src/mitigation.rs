@@ -63,7 +63,8 @@ pub fn richardson_extrapolate(
     if n != measured_values.len() {
         return Err(format!(
             "scale_factors ({}) and measured_values ({}) must have same length",
-            n, measured_values.len()
+            n,
+            measured_values.len()
         ));
     }
 
@@ -214,14 +215,12 @@ pub fn scale_amplitude_damping(base_gamma: f64, scale_factor: f64) -> f64 {
 ///
 /// Takes a function that computes an expectation value given a noise scale factor,
 /// runs it at each scale factor, and returns the extrapolated result.
-pub fn run_zne<F>(
-    scale_factors: &[f64],
-    compute_expectation: F,
-) -> Result<ZneResult, String>
+pub fn run_zne<F>(scale_factors: &[f64], compute_expectation: F) -> Result<ZneResult, String>
 where
     F: Fn(f64) -> f64,
 {
-    let measured: Vec<f64> = scale_factors.iter()
+    let measured: Vec<f64> = scale_factors
+        .iter()
         .map(|&sf| compute_expectation(sf))
         .collect();
 
@@ -251,8 +250,11 @@ mod tests {
         let lambdas = [1.0, 2.0];
         let values = [1.5, 2.0]; // 1+0.5, 1+1.0
         let result = richardson_extrapolate(&lambdas, &values).unwrap();
-        assert!((result.mitigated_value - 1.0).abs() < TOL,
-            "linear Richardson: got {}, expected 1.0", result.mitigated_value);
+        assert!(
+            (result.mitigated_value - 1.0).abs() < TOL,
+            "linear Richardson: got {}, expected 1.0",
+            result.mitigated_value
+        );
     }
 
     #[test]
@@ -260,12 +262,16 @@ mod tests {
         // Quadratic function: E(λ) = 2.0 + 0.3λ + 0.1λ²
         // E(0) should be 2.0
         let lambdas = [1.0, 2.0, 3.0];
-        let values: Vec<f64> = lambdas.iter()
+        let values: Vec<f64> = lambdas
+            .iter()
             .map(|&l| 2.0 + 0.3 * l + 0.1 * l * l)
             .collect();
         let result = richardson_extrapolate(&lambdas, &values).unwrap();
-        assert!((result.mitigated_value - 2.0).abs() < 1e-8,
-            "quadratic Richardson: got {}, expected 2.0", result.mitigated_value);
+        assert!(
+            (result.mitigated_value - 2.0).abs() < 1e-8,
+            "quadratic Richardson: got {}, expected 2.0",
+            result.mitigated_value
+        );
     }
 
     #[test]
@@ -274,14 +280,22 @@ mod tests {
         let lambdas = [1.0, 2.0, 3.0];
         let coeffs = compute_richardson_coefficients(&lambdas).unwrap();
         let sum: f64 = coeffs.iter().sum();
-        assert!((sum - 1.0).abs() < TOL, "coefficients must sum to 1, got {}", sum);
+        assert!(
+            (sum - 1.0).abs() < TOL,
+            "coefficients must sum to 1, got {}",
+            sum
+        );
     }
 
     #[test]
     fn test_linear_extrapolate() {
         // E(1) = 1.5, E(2) = 2.0 → E(0) = 1.0
         let result = linear_extrapolate(1.0, 1.5, 2.0, 2.0).unwrap();
-        assert!((result - 1.0).abs() < TOL, "linear: got {}, expected 1.0", result);
+        assert!(
+            (result - 1.0).abs() < TOL,
+            "linear: got {}, expected 1.0",
+            result
+        );
     }
 
     #[test]
@@ -317,8 +331,11 @@ mod tests {
     fn test_run_zne_linear_model() {
         // Simulate a noisy observable: true value = 1.0, noise adds 0.2*λ
         let result = run_zne(&[1.0, 2.0, 3.0], |lambda| 1.0 + 0.2 * lambda).unwrap();
-        assert!((result.mitigated_value - 1.0).abs() < 1e-8,
-            "ZNE should recover true value, got {}", result.mitigated_value);
+        assert!(
+            (result.mitigated_value - 1.0).abs() < 1e-8,
+            "ZNE should recover true value, got {}",
+            result.mitigated_value
+        );
     }
 
     #[test]
@@ -327,8 +344,11 @@ mod tests {
         let values = [1.3, 1.6, 1.9];
         let r1 = richardson_extrapolate(&lambdas, &values).unwrap();
         let r2 = richardson_extrapolate(&lambdas, &values).unwrap();
-        assert_eq!(r1.mitigated_value.to_bits(), r2.mitigated_value.to_bits(),
-            "Richardson must be bit-identical");
+        assert_eq!(
+            r1.mitigated_value.to_bits(),
+            r2.mitigated_value.to_bits(),
+            "Richardson must be bit-identical"
+        );
     }
 
     #[test]

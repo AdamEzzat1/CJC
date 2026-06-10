@@ -227,7 +227,11 @@ impl Intervention {
                 bytes.extend_from_slice(&tick.to_le_bytes());
                 bytes.extend_from_slice(&node.to_le_bytes());
             }
-            Intervention::ShedLoadOverride { tick, node, intensity } => {
+            Intervention::ShedLoadOverride {
+                tick,
+                node,
+                intensity,
+            } => {
                 bytes.push(b'S');
                 bytes.extend_from_slice(&tick.to_le_bytes());
                 bytes.extend_from_slice(&node.to_le_bytes());
@@ -308,7 +312,10 @@ impl ClusterConfig {
         }
         if !self.service_min.is_finite() || self.service_min < 0.0 {
             return Err(NssError::InvalidConfig {
-                detail: format!("service_min must be finite and >= 0, got {}", self.service_min),
+                detail: format!(
+                    "service_min must be finite and >= 0, got {}",
+                    self.service_min
+                ),
             });
         }
         if !self.service_max.is_finite() || self.service_max < self.service_min {
@@ -702,11 +709,23 @@ impl ClusterSimulator {
         let mut works: Vec<EdgeWork> = Vec::with_capacity(self.topology.edge_count());
         for (src, dst, link) in self.topology.edges() {
             let src_served = *served.get(&src).unwrap_or(&0) as f64;
-            let src_healthy = self.nodes.get(&src).map(|r| r.health).unwrap_or(NodeHealth::Failed)
+            let src_healthy = self
+                .nodes
+                .get(&src)
+                .map(|r| r.health)
+                .unwrap_or(NodeHealth::Failed)
                 == NodeHealth::Healthy;
-            let dst_healthy = self.nodes.get(&dst).map(|r| r.health).unwrap_or(NodeHealth::Failed)
+            let dst_healthy = self
+                .nodes
+                .get(&dst)
+                .map(|r| r.health)
+                .unwrap_or(NodeHealth::Failed)
                 == NodeHealth::Healthy;
-            let volume = if src_healthy { src_served * link.weight } else { 0.0 };
+            let volume = if src_healthy {
+                src_served * link.weight
+            } else {
+                0.0
+            };
             works.push(EdgeWork {
                 src,
                 dst,
@@ -749,31 +768,22 @@ impl ClusterSimulator {
                 // Dead node: zero pressures, but the (Memory, Thermal)
                 // fields hold their last value (modelling lingering
                 // local state).
-                rt.field.set(
-                    PressureKind::Queue,
-                    Pressure::new(0.0, 1.0, 0.05)?,
-                );
-                rt.field.set(
-                    PressureKind::Cpu,
-                    Pressure::new(0.0, 1.0, 0.1)?,
-                );
-                rt.field.set(
-                    PressureKind::Sync,
-                    Pressure::new(0.0, 1.0, 0.08)?,
-                );
+                rt.field
+                    .set(PressureKind::Queue, Pressure::new(0.0, 1.0, 0.05)?);
+                rt.field
+                    .set(PressureKind::Cpu, Pressure::new(0.0, 1.0, 0.1)?);
+                rt.field
+                    .set(PressureKind::Sync, Pressure::new(0.0, 1.0, 0.08)?);
                 rt.field.set(
                     PressureKind::Throughput,
                     Pressure::new(1.0, 1.0, 0.05)?, // 100% throughput pressure for a dead node
                 );
-                rt.field.set(
-                    PressureKind::Network,
-                    Pressure::new(0.0, 1.0, 0.1)?,
-                );
+                rt.field
+                    .set(PressureKind::Network, Pressure::new(0.0, 1.0, 0.1)?);
                 continue;
             }
             let queue_p = rt.queue_len as f64 / self.cfg.queue_capacity as f64;
-            let cpu_p =
-                *served.get(id).unwrap_or(&0) as f64 / self.cfg.workers_per_node as f64;
+            let cpu_p = *served.get(id).unwrap_or(&0) as f64 / self.cfg.workers_per_node as f64;
             let sync_p = ((rt.queue_len as f64 * self.cfg.workers_per_node as f64).sqrt()
                 / self.cfg.queue_capacity as f64)
                 .min(1.5);
@@ -782,8 +792,9 @@ impl ClusterSimulator {
                 + rt.queue_len as f64
                 + *served.get(id).unwrap_or(&0) as f64)
                 .max(1.0);
-            let throughput =
-                (*served.get(id).unwrap_or(&0) as f64 / denom).max(0.0).min(1.0);
+            let throughput = (*served.get(id).unwrap_or(&0) as f64 / denom)
+                .max(0.0)
+                .min(1.0);
             rt.last_throughput = throughput;
             let thr_p = (1.0 - throughput).max(0.0);
             // Network pressure: scaled inflow against per-node
@@ -792,26 +803,16 @@ impl ClusterSimulator {
             let net_in = *net_inflow.get(id).unwrap_or(&0.0);
             let net_p = (net_in / self.cfg.workers_per_node as f64).min(1.5);
 
-            rt.field.set(
-                PressureKind::Queue,
-                Pressure::new(queue_p, 1.0, 0.05)?,
-            );
-            rt.field.set(
-                PressureKind::Cpu,
-                Pressure::new(cpu_p, 1.0, 0.1)?,
-            );
-            rt.field.set(
-                PressureKind::Sync,
-                Pressure::new(sync_p, 1.0, 0.08)?,
-            );
-            rt.field.set(
-                PressureKind::Throughput,
-                Pressure::new(thr_p, 1.0, 0.05)?,
-            );
-            rt.field.set(
-                PressureKind::Network,
-                Pressure::new(net_p, 1.0, 0.1)?,
-            );
+            rt.field
+                .set(PressureKind::Queue, Pressure::new(queue_p, 1.0, 0.05)?);
+            rt.field
+                .set(PressureKind::Cpu, Pressure::new(cpu_p, 1.0, 0.1)?);
+            rt.field
+                .set(PressureKind::Sync, Pressure::new(sync_p, 1.0, 0.08)?);
+            rt.field
+                .set(PressureKind::Throughput, Pressure::new(thr_p, 1.0, 0.05)?);
+            rt.field
+                .set(PressureKind::Network, Pressure::new(net_p, 1.0, 0.1)?);
         }
 
         // 7. Per-node Phase-1 propagation (intra-node).
@@ -950,7 +951,11 @@ impl ClusterSimulator {
                 // BTreeMap iteration is already in NodeId order, so the
                 // tie-break is canonical.
                 let mut best = healthy[0];
-                let mut best_q = self.nodes.get(&best).map(|r| r.queue_len).unwrap_or(u32::MAX);
+                let mut best_q = self
+                    .nodes
+                    .get(&best)
+                    .map(|r| r.queue_len)
+                    .unwrap_or(u32::MAX);
                 for id in healthy.iter().skip(1) {
                     let q = self.nodes.get(id).map(|r| r.queue_len).unwrap_or(u32::MAX);
                     if q < best_q {
@@ -960,9 +965,7 @@ impl ClusterSimulator {
                 }
                 best
             }
-            RoutingPolicy::HashPartition => {
-                healthy[(self.task_index as usize) % healthy.len()]
-            }
+            RoutingPolicy::HashPartition => healthy[(self.task_index as usize) % healthy.len()],
         }
     }
 
@@ -1047,7 +1050,10 @@ mod tests {
         let ivs_b: Vec<Intervention> = ivs_a.iter().rev().copied().collect();
         let mut a = ClusterSimulator::new(cfg, top.clone(), NssSeed(7), ivs_a).unwrap();
         let mut b = ClusterSimulator::new(cfg, top, NssSeed(7), ivs_b).unwrap();
-        assert_eq!(a.run(32).unwrap().canonical_bytes(), b.run(32).unwrap().canonical_bytes());
+        assert_eq!(
+            a.run(32).unwrap().canonical_bytes(),
+            b.run(32).unwrap().canonical_bytes()
+        );
     }
 
     #[test]
@@ -1081,7 +1087,10 @@ mod tests {
             .iter()
             .skip(8)
             .any(|ev| ev.cluster_failure.kind == FailureKind::Collapse);
-        assert!(any_collapse, "failed-node cluster should rollup to Collapse");
+        assert!(
+            any_collapse,
+            "failed-node cluster should rollup to Collapse"
+        );
     }
 
     #[test]
@@ -1169,7 +1178,13 @@ mod tests {
         // After 8 ticks the *completed* counters should be within
         // workers_per_node of each other (round-robin spread is exact
         // modulo individual queue fullness).
-        let mut totals: Vec<u64> = traj.last_state().unwrap().nodes.values().map(|s| s.completed).collect();
+        let mut totals: Vec<u64> = traj
+            .last_state()
+            .unwrap()
+            .nodes
+            .values()
+            .map(|s| s.completed)
+            .collect();
         totals.sort();
         let spread = totals.last().unwrap() - totals.first().unwrap();
         assert!(spread <= 8, "round-robin spread {} too large", spread);

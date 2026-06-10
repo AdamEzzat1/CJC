@@ -16,9 +16,8 @@
 //! ```
 
 use cjc_nss::{
-    AdvisorConfig, AdvisoryAction, ClusterConfig, ClusterNeuralSystemsSimulator,
-    ClusterNssConfig, ClusterSimulator, ClusterTopology, Intervention, NodeHealth, NodeId,
-    NssSeed, SchedulerAdvisor,
+    AdvisorConfig, AdvisoryAction, ClusterConfig, ClusterNeuralSystemsSimulator, ClusterNssConfig,
+    ClusterSimulator, ClusterTopology, Intervention, NodeHealth, NodeId, NssSeed, SchedulerAdvisor,
 };
 
 fn main() {
@@ -53,8 +52,7 @@ fn main() {
     println!("\n[decision] snapshot taken at tick {}", snapshot.tick());
 
     // 4. Build the cluster NSS predictor.
-    let nss =
-        ClusterNeuralSystemsSimulator::from_seed(ClusterNssConfig::default(), seed).unwrap();
+    let nss = ClusterNeuralSystemsSimulator::from_seed(ClusterNssConfig::default(), seed).unwrap();
 
     // 5. Build the advisor. Consider BOTH failure and recovery
     //    actions — the operator wants to see the full menu.
@@ -67,8 +65,15 @@ fn main() {
     .unwrap();
 
     let ranking = advisor.recommend(&snapshot, &nss).unwrap();
-    println!("\n[advisor] evaluated {} candidate actions over horizon={}", ranking.candidates.len(), ranking.horizon);
-    println!("[advisor] recommendation: {:?}  (confidence margin = {:.4})", ranking.recommended, ranking.confidence_margin);
+    println!(
+        "\n[advisor] evaluated {} candidate actions over horizon={}",
+        ranking.candidates.len(),
+        ranking.horizon
+    );
+    println!(
+        "[advisor] recommendation: {:?}  (confidence margin = {:.4})",
+        ranking.recommended, ranking.confidence_margin
+    );
 
     // 6. Print the full ranking.
     println!("\n[ranking]   (sorted ascending by P(collapse) — best first)");
@@ -77,7 +82,11 @@ fn main() {
         "#", "action", "P(coll.)", "P(deg.)", "collapse#", "dom_kind"
     );
     for (i, cand) in ranking.candidates.iter().enumerate() {
-        let marker = if cand.action == ranking.recommended { "★" } else { " " };
+        let marker = if cand.action == ranking.recommended {
+            "★"
+        } else {
+            " "
+        };
         println!(
             "  {}{:<3} {:<22} {:>10.4} {:>10.4} {:>11} {:<10}",
             marker,

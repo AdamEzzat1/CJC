@@ -17,32 +17,32 @@
 //! - No noise model (pure unitary evolution only)
 //! - No hardware backend (simulation only)
 
-pub mod gates;
-pub mod statevector;
-pub mod measure;
-pub mod circuit;
-pub mod dispatch;
-pub mod wirtinger;
 pub mod adjoint;
-pub mod simd_kernel;
-pub mod mps;
-pub mod vqe;
-pub mod qaoa;
-pub mod stabilizer;
+pub mod circuit;
 pub mod density;
-pub mod qec;
+pub mod dispatch;
 pub mod dmrg;
-pub mod qml;
 pub mod fermion;
-pub mod trotter;
+pub mod gates;
+pub mod measure;
 pub mod mitigation;
+pub mod mps;
 pub mod pure;
+pub mod qaoa;
+pub mod qec;
+pub mod qml;
+pub mod simd_kernel;
+pub mod stabilizer;
+pub mod statevector;
+pub mod trotter;
+pub mod vqe;
+pub mod wirtinger;
 
-pub use gates::Gate;
-pub use statevector::Statevector;
-pub use measure::{measure_qubit, measure_all};
 pub use circuit::Circuit;
 pub use dispatch::dispatch_quantum;
+pub use gates::Gate;
+pub use measure::{measure_all, measure_qubit};
+pub use statevector::Statevector;
 
 // Re-export ComplexF64 for convenience
 pub use cjc_runtime::complex::ComplexF64 as Complex;

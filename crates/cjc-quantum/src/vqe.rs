@@ -19,8 +19,8 @@
 //! - Gradient computation uses deterministic MPS operations
 //! - Sign-stabilized SVD ensures bit-identical bond truncation
 
-use cjc_runtime::complex::ComplexF64;
 use crate::mps::Mps;
+use cjc_runtime::complex::ComplexF64;
 
 // ---------------------------------------------------------------------------
 // Heisenberg 1D Hamiltonian
@@ -78,7 +78,9 @@ pub fn mps_zz_expectation(mps: &Mps, site_i: usize) -> f64 {
 /// redundant O(N) contractions per term. Reduces total cost from O(N² χ⁴) to O(N χ⁴).
 pub fn mps_heisenberg_energy(mps: &Mps) -> f64 {
     let n = mps.n_qubits;
-    if n < 2 { return 0.0; }
+    if n < 2 {
+        return 0.0;
+    }
 
     // Pre-compute left identity environments: left_envs[k] = env after contracting sites 0..k
     let mut left_envs = Vec::with_capacity(n);
@@ -135,7 +137,9 @@ fn transfer_matrix_identity_right(
         for j in 0..br {
             for jp in 0..br {
                 let e = env[j][jp];
-                if e.re == 0.0 && e.im == 0.0 { continue; }
+                if e.re == 0.0 && e.im == 0.0 {
+                    continue;
+                }
                 for a in 0..bl {
                     let conj_a = tensor.a[s].get(a, j).conj();
                     let ea = e.mul_fixed(conj_a);
@@ -306,7 +310,7 @@ fn transfer_matrix_y(
     let mut result = vec![vec![ComplexF64::ZERO; br]; br];
 
     let y_01 = ComplexF64::new(0.0, -1.0); // ⟨0|Y|1⟩ = -i
-    let y_10 = ComplexF64::new(0.0, 1.0);  // ⟨1|Y|0⟩ = +i
+    let y_10 = ComplexF64::new(0.0, 1.0); // ⟨1|Y|0⟩ = +i
 
     for j in 0..bl {
         for jp in 0..bl {
@@ -378,7 +382,9 @@ pub fn mps_yy_expectation(mps: &Mps, site_i: usize) -> f64 {
 /// Optimized: caches left/right identity environments to avoid O(N²) redundant contractions.
 pub fn mps_full_heisenberg_energy(mps: &Mps) -> f64 {
     let n = mps.n_qubits;
-    if n < 2 { return 0.0; }
+    if n < 2 {
+        return 0.0;
+    }
 
     // Pre-compute left identity environments
     let mut left_envs = Vec::with_capacity(n);
@@ -481,7 +487,14 @@ pub fn vqe_full_heisenberg_1d(
     max_iters: usize,
     seed: u64,
 ) -> VqeResult {
-    vqe_with_hamiltonian(n_qubits, max_bond, learning_rate, max_iters, seed, Hamiltonian::Heisenberg)
+    vqe_with_hamiltonian(
+        n_qubits,
+        max_bond,
+        learning_rate,
+        max_iters,
+        seed,
+        Hamiltonian::Heisenberg,
+    )
 }
 
 /// Generic VQE optimizer for any supported Hamiltonian.
@@ -569,11 +582,7 @@ pub fn build_mps_ansatz(n_qubits: usize, thetas: &[f64], max_bond: usize) -> Mps
 /// Compute energy gradient via parameter-shift rule on MPS.
 ///
 /// ∂E/∂θ_k = (E(θ_k + π/2) - E(θ_k - π/2)) / 2
-pub fn mps_parameter_shift_gradient(
-    n_qubits: usize,
-    thetas: &[f64],
-    max_bond: usize,
-) -> Vec<f64> {
+pub fn mps_parameter_shift_gradient(n_qubits: usize, thetas: &[f64], max_bond: usize) -> Vec<f64> {
     let shift = std::f64::consts::FRAC_PI_2;
     let mut grads = vec![0.0; thetas.len()];
 
@@ -686,7 +695,9 @@ pub fn verification_gate(seed: u64) -> Result<(), String> {
     // Check 1: MPS/Statevector parity on a 4-qubit sub-circuit
     let n = 4;
     let mut rng = seed;
-    let thetas: Vec<f64> = (0..n).map(|_| crate::rand_f64(&mut rng) * std::f64::consts::PI).collect();
+    let thetas: Vec<f64> = (0..n)
+        .map(|_| crate::rand_f64(&mut rng) * std::f64::consts::PI)
+        .collect();
 
     let mps = build_mps_ansatz(n, &thetas, 64);
     let mps_sv = mps.to_statevector();
@@ -699,7 +710,9 @@ pub fn verification_gate(seed: u64) -> Result<(), String> {
     for i in 0..(n - 1) {
         circ.cnot(i, i + 1);
     }
-    let circ_sv = circ.execute().map_err(|e| format!("Circuit exec failed: {}", e))?;
+    let circ_sv = circ
+        .execute()
+        .map_err(|e| format!("Circuit exec failed: {}", e))?;
 
     for i in 0..(1 << n) {
         let err = mps_sv[i].add(circ_sv.amplitudes[i].neg()).norm_sq().sqrt();
@@ -733,12 +746,23 @@ pub fn verification_gate(seed: u64) -> Result<(), String> {
 
     let mut circ_p = crate::circuit::Circuit::new(n);
     let mut circ_m = crate::circuit::Circuit::new(n);
-    for (q, &theta) in thetas_p.iter().enumerate() { circ_p.ry(q, theta); }
-    for (q, &theta) in thetas_m.iter().enumerate() { circ_m.ry(q, theta); }
-    for i in 0..(n - 1) { circ_p.cnot(i, i + 1); circ_m.cnot(i, i + 1); }
+    for (q, &theta) in thetas_p.iter().enumerate() {
+        circ_p.ry(q, theta);
+    }
+    for (q, &theta) in thetas_m.iter().enumerate() {
+        circ_m.ry(q, theta);
+    }
+    for i in 0..(n - 1) {
+        circ_p.cnot(i, i + 1);
+        circ_m.cnot(i, i + 1);
+    }
 
-    let sv_p = circ_p.execute().map_err(|e| format!("Circuit+ exec: {}", e))?;
-    let sv_m = circ_m.execute().map_err(|e| format!("Circuit- exec: {}", e))?;
+    let sv_p = circ_p
+        .execute()
+        .map_err(|e| format!("Circuit+ exec: {}", e))?;
+    let sv_m = circ_m
+        .execute()
+        .map_err(|e| format!("Circuit- exec: {}", e))?;
     let e_p = crate::adjoint::expectation_value(&sv_p, &z_obs)
         .map_err(|e| format!("Expect+ failed: {}", e))?;
     let e_m = crate::adjoint::expectation_value(&sv_m, &z_obs)
@@ -773,7 +797,13 @@ mod tests {
         let mps = Mps::new(4);
         for i in 0..3 {
             let zz = mps_zz_expectation(&mps, i);
-            assert!((zz - 1.0).abs() < TOL, "ZZ({},{}) = {}, expected 1.0", i, i + 1, zz);
+            assert!(
+                (zz - 1.0).abs() < TOL,
+                "ZZ({},{}) = {}, expected 1.0",
+                i,
+                i + 1,
+                zz
+            );
         }
     }
 
@@ -782,14 +812,20 @@ mod tests {
         // X|0⟩ = |1⟩, Z eigenvalue = -1
         // |10...0⟩: Z_0=-1, Z_1=+1, so Z_0 Z_1 = -1
         let mut mps = Mps::new(4);
-        let x = [[ComplexF64::ZERO, ComplexF64::ONE],
-                  [ComplexF64::ONE, ComplexF64::ZERO]];
+        let x = [
+            [ComplexF64::ZERO, ComplexF64::ONE],
+            [ComplexF64::ONE, ComplexF64::ZERO],
+        ];
         mps.apply_single_qubit(0, x);
 
-        assert!((mps_zz_expectation(&mps, 0) - (-1.0)).abs() < TOL,
-            "ZZ(0,1) after X on q0");
-        assert!((mps_zz_expectation(&mps, 1) - 1.0).abs() < TOL,
-            "ZZ(1,2) after X on q0");
+        assert!(
+            (mps_zz_expectation(&mps, 0) - (-1.0)).abs() < TOL,
+            "ZZ(0,1) after X on q0"
+        );
+        assert!(
+            (mps_zz_expectation(&mps, 1) - 1.0).abs() < TOL,
+            "ZZ(1,2) after X on q0"
+        );
     }
 
     #[test]
@@ -815,8 +851,12 @@ mod tests {
         let thetas = vec![0.0; 4];
         let grads = mps_parameter_shift_gradient(4, &thetas, 64);
         for (k, &g) in grads.iter().enumerate() {
-            assert!(g.abs() < 1e-8,
-                "Gradient at theta=0 should be ~0, got {} for param {}", g, k);
+            assert!(
+                g.abs() < 1e-8,
+                "Gradient at theta=0 should be ~0, got {} for param {}",
+                g,
+                k
+            );
         }
     }
 
@@ -826,8 +866,12 @@ mod tests {
         let result = vqe_heisenberg_1d(4, 16, 0.1, 5, 42);
         let initial = result.energy_history[0];
         let final_e = result.energy;
-        assert!(final_e <= initial + 1e-8,
-            "Energy should decrease: initial={}, final={}", initial, final_e);
+        assert!(
+            final_e <= initial + 1e-8,
+            "Energy should decrease: initial={}, final={}",
+            initial,
+            final_e
+        );
     }
 
     #[test]
@@ -837,11 +881,18 @@ mod tests {
         let r2 = vqe_heisenberg_1d(4, 16, 0.1, 3, 42);
 
         for k in 0..r1.thetas.len() {
-            assert_eq!(r1.thetas[k].to_bits(), r2.thetas[k].to_bits(),
-                "theta[{}] not bit-identical", k);
+            assert_eq!(
+                r1.thetas[k].to_bits(),
+                r2.thetas[k].to_bits(),
+                "theta[{}] not bit-identical",
+                k
+            );
         }
-        assert_eq!(r1.energy.to_bits(), r2.energy.to_bits(),
-            "Energy not bit-identical");
+        assert_eq!(
+            r1.energy.to_bits(),
+            r2.energy.to_bits(),
+            "Energy not bit-identical"
+        );
     }
 
     #[test]
@@ -888,7 +939,11 @@ mod tests {
         // Full Heisenberg = Σ(0 + 0 + 1) = N-1
         let mps = Mps::new(5);
         let e = mps_full_heisenberg_energy(&mps);
-        assert!((e - 4.0).abs() < TOL, "Full Heisenberg E = {}, expected 4.0", e);
+        assert!(
+            (e - 4.0).abs() < TOL,
+            "Full Heisenberg E = {}, expected 4.0",
+            e
+        );
     }
 
     #[test]
@@ -896,8 +951,10 @@ mod tests {
         // Bell state (|00⟩ + |11⟩)/√2 via H + CNOT
         let mut mps = Mps::new(2);
         let isq2 = 1.0 / 2.0f64.sqrt();
-        let h = [[ComplexF64::real(isq2), ComplexF64::real(isq2)],
-                  [ComplexF64::real(isq2), ComplexF64::real(-isq2)]];
+        let h = [
+            [ComplexF64::real(isq2), ComplexF64::real(isq2)],
+            [ComplexF64::real(isq2), ComplexF64::real(-isq2)],
+        ];
         mps.apply_single_qubit(0, h);
         mps.apply_cnot_adjacent(0, 1);
 
@@ -910,7 +967,11 @@ mod tests {
         assert!((yy - (-1.0)).abs() < TOL, "Bell YY = {}, expected -1.0", yy);
         assert!((zz - 1.0).abs() < TOL, "Bell ZZ = {}, expected 1.0", zz);
         // Full Heisenberg for Bell: 1 + (-1) + 1 = 1
-        assert!((xx + yy + zz - 1.0).abs() < TOL, "Bell H = {}", xx + yy + zz);
+        assert!(
+            (xx + yy + zz - 1.0).abs() < TOL,
+            "Bell H = {}",
+            xx + yy + zz
+        );
     }
 
     #[test]
@@ -918,8 +979,12 @@ mod tests {
         let result = vqe_full_heisenberg_1d(4, 16, 0.1, 10, 42);
         let initial = result.energy_history[0];
         let final_e = result.energy;
-        assert!(final_e <= initial + 1e-8,
-            "Full Heisenberg energy should decrease: initial={}, final={}", initial, final_e);
+        assert!(
+            final_e <= initial + 1e-8,
+            "Full Heisenberg energy should decrease: initial={}, final={}",
+            initial,
+            final_e
+        );
     }
 
     #[test]
@@ -927,8 +992,12 @@ mod tests {
         let r1 = vqe_full_heisenberg_1d(4, 16, 0.1, 3, 42);
         let r2 = vqe_full_heisenberg_1d(4, 16, 0.1, 3, 42);
         for k in 0..r1.thetas.len() {
-            assert_eq!(r1.thetas[k].to_bits(), r2.thetas[k].to_bits(),
-                "Full Heisenberg theta[{}] not bit-identical", k);
+            assert_eq!(
+                r1.thetas[k].to_bits(),
+                r2.thetas[k].to_bits(),
+                "Full Heisenberg theta[{}] not bit-identical",
+                k
+            );
         }
     }
 
@@ -938,8 +1007,13 @@ mod tests {
         let thetas = vec![0.3; 50];
         let mps = build_mps_ansatz(50, &thetas, 8);
         for i in 0..49 {
-            assert!(mps.tensors[i].bond_right <= 8,
-                "Bond between {} and {} is {}", i, i + 1, mps.tensors[i].bond_right);
+            assert!(
+                mps.tensors[i].bond_right <= 8,
+                "Bond between {} and {} is {}",
+                i,
+                i + 1,
+                mps.tensors[i].bond_right
+            );
         }
     }
 }

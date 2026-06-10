@@ -35,8 +35,7 @@ fn main() {
     let mut sim = ClusterSimulator::new(sim_cfg, topology, seed, initial_script).unwrap();
 
     // 2. Build NSS predictor.
-    let nss =
-        ClusterNeuralSystemsSimulator::from_seed(ClusterNssConfig::default(), seed).unwrap();
+    let nss = ClusterNeuralSystemsSimulator::from_seed(ClusterNssConfig::default(), seed).unwrap();
 
     // 3. Build the autonomous controller. Conservative mode = only
     //    Recovery actions are allowed; min_improvement=0 lets the
@@ -62,10 +61,7 @@ fn main() {
 
     // 5. Report.
     println!("Phase 4 — autonomous closed-loop demo");
-    println!(
-        "  trajectory length:    {} ticks",
-        report.trajectory.len()
-    );
+    println!("  trajectory length:    {} ticks", report.trajectory.len());
     println!(
         "  decisions made:       {} ({} applied, {} skipped, {} no-ops)",
         report.decisions.len(),
@@ -95,7 +91,10 @@ fn main() {
             FailureKind::Collapse => col += 1,
         }
     }
-    println!("\n[label distribution]  ({} nominal / {} degraded / {} collapse)", nom, deg, col);
+    println!(
+        "\n[label distribution]  ({} nominal / {} degraded / {} collapse)",
+        nom, deg, col
+    );
 
     // 6. Audit log.
     println!("\n[audit log]");
@@ -132,8 +131,7 @@ fn main() {
         }],
     )
     .unwrap();
-    let nss2 =
-        ClusterNeuralSystemsSimulator::from_seed(ClusterNssConfig::default(), seed).unwrap();
+    let nss2 = ClusterNeuralSystemsSimulator::from_seed(ClusterNssConfig::default(), seed).unwrap();
     let mut opt2 = AutonomousOptimizer::new(OptimizerConfig {
         control_period: 4,
         min_improvement: 0.0,

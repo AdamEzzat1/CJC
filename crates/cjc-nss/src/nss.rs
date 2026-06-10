@@ -46,9 +46,7 @@
 use crate::encoder::{EncoderConfig, SystemEncoder};
 use crate::error::NssError;
 use crate::failure::{FailureKind, FailurePrediction};
-use crate::heads::{
-    CausalAttribution, CausalAttributionHead, FailurePredictionHead, HeadConfig,
-};
+use crate::heads::{CausalAttribution, CausalAttributionHead, FailurePredictionHead, HeadConfig};
 use crate::pressure::PressureKind;
 use crate::propagation::PropagationConfig;
 use crate::replay::TransitionRecord;
@@ -296,11 +294,7 @@ impl NeuralSystemsSimulator {
             w_new[state_dim + i] += boost;
         }
         // Set via a small re-build helper.
-        self.head = FailurePredictionHead::with_collapse_weights(
-            self.cfg.head,
-            self.seed,
-            w_new,
-        )?;
+        self.head = FailurePredictionHead::with_collapse_weights(self.cfg.head, self.seed, w_new)?;
         self.fitted = true;
         Ok(())
     }
@@ -477,7 +471,10 @@ mod tests {
             .filter(|ev| ev.failure.kind == crate::FailureKind::Collapse)
             .count();
         let n_other = traj.len() - n_collapse;
-        assert!(n_collapse > 0 && n_other > 0, "trajectory must carry both labels");
+        assert!(
+            n_collapse > 0 && n_other > 0,
+            "trajectory must carry both labels"
+        );
 
         let mut nss = NeuralSystemsSimulator::from_seed(NssConfig::default(), NssSeed(42)).unwrap();
         let before_weights = nss.head.collapse_weights().to_vec();
@@ -494,7 +491,10 @@ mod tests {
                 break;
             }
         }
-        assert!(any_changed, "fit did not adjust any pressure-feature collapse weight");
+        assert!(
+            any_changed,
+            "fit did not adjust any pressure-feature collapse weight"
+        );
     }
 
     #[test]

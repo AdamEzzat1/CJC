@@ -13,8 +13,8 @@
 use cjc_nss::{
     cluster_summary_label, ClusterConfig, ClusterNeuralSystemsSimulator, ClusterNssConfig,
     ClusterReplayValidator, ClusterSimulator, ClusterTopology, ClusterTrace, FailureKind,
-    Intervention, NodeId, NssSeed, PressureKind, RoutingPolicy, NSS_MODEL_VERSION,
-    CLUSTER_SUMMARY_FEATURES,
+    Intervention, NodeId, NssSeed, PressureKind, RoutingPolicy, CLUSTER_SUMMARY_FEATURES,
+    NSS_MODEL_VERSION,
 };
 
 fn main() {
@@ -47,8 +47,7 @@ fn main() {
         },
     ];
 
-    let mut sim =
-        ClusterSimulator::new(sim_cfg, topology.clone(), seed, script.clone()).unwrap();
+    let mut sim = ClusterSimulator::new(sim_cfg, topology.clone(), seed, script.clone()).unwrap();
     let traj = sim.run(48).unwrap();
 
     // 3. Summarise the trajectory.

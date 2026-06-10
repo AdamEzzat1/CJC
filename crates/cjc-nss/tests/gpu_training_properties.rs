@@ -8,32 +8,34 @@ use proptest::prelude::*;
 
 fn gpu_config_strategy() -> impl Strategy<Value = GpuTrainingConfig> {
     (
-        2u32..=8,        // n_gpus
-        0.1f64..2.0,     // service_mean
-        0.0f64..0.4,     // service_jitter
-        0.0f64..0.5,     // allreduce_base
-        1.0e7f64..5.0e9, // allreduce_bytes
-        1.0e9f64..1.0e11,// nccl_bandwidth
-        0.0f64..0.1,     // memory_per_microbatch
-        2u32..=32,       // gc_interval
-        0.0f64..0.05,    // fragmentation_growth
+        2u32..=8,         // n_gpus
+        0.1f64..2.0,      // service_mean
+        0.0f64..0.4,      // service_jitter
+        0.0f64..0.5,      // allreduce_base
+        1.0e7f64..5.0e9,  // allreduce_bytes
+        1.0e9f64..1.0e11, // nccl_bandwidth
+        0.0f64..0.1,      // memory_per_microbatch
+        2u32..=32,        // gc_interval
+        0.0f64..0.05,     // fragmentation_growth
     )
-        .prop_map(|(n, sm, sj, ab, abytes, bw, mpm, gci, fg)| GpuTrainingConfig {
-            n_gpus: n,
-            service_mean: sm,
-            service_jitter: sj,
-            allreduce_base: ab,
-            allreduce_bytes: abytes,
-            nccl_bandwidth: bw,
-            memory_per_microbatch: mpm,
-            gc_interval: gci,
-            gc_recovery: 0.7,
-            fragmentation_growth: fg,
-            memory_capacity: 1.0,
-            pipeline_stages: 1,
-            microbatches_per_iteration: 1,
-            ..GpuTrainingConfig::default()
-        })
+        .prop_map(
+            |(n, sm, sj, ab, abytes, bw, mpm, gci, fg)| GpuTrainingConfig {
+                n_gpus: n,
+                service_mean: sm,
+                service_jitter: sj,
+                allreduce_base: ab,
+                allreduce_bytes: abytes,
+                nccl_bandwidth: bw,
+                memory_per_microbatch: mpm,
+                gc_interval: gci,
+                gc_recovery: 0.7,
+                fragmentation_growth: fg,
+                memory_capacity: 1.0,
+                pipeline_stages: 1,
+                microbatches_per_iteration: 1,
+                ..GpuTrainingConfig::default()
+            },
+        )
 }
 
 proptest! {

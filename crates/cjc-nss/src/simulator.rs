@@ -41,9 +41,9 @@
 
 use crate::error::NssError;
 use crate::failure::FailureState;
+use crate::pressure::PressureGraph;
 use crate::pressure::{Pressure, PressureField, PressureKind};
 use crate::propagation::{PressurePropagator, PropagationConfig};
-use crate::pressure::PressureGraph;
 use crate::scheduler::{SchedulerAction, SchedulerKind};
 use crate::seed::NssSeed;
 use crate::system::{SystemEvent, SystemState, SystemTrajectory};
@@ -112,12 +112,18 @@ impl QueueConfig {
         }
         if !self.arrival_rate.is_finite() || self.arrival_rate < 0.0 {
             return Err(NssError::InvalidConfig {
-                detail: format!("arrival_rate must be finite and >= 0, got {}", self.arrival_rate),
+                detail: format!(
+                    "arrival_rate must be finite and >= 0, got {}",
+                    self.arrival_rate
+                ),
             });
         }
         if !self.service_min.is_finite() || self.service_min < 0.0 {
             return Err(NssError::InvalidConfig {
-                detail: format!("service_min must be finite and >= 0, got {}", self.service_min),
+                detail: format!(
+                    "service_min must be finite and >= 0, got {}",
+                    self.service_min
+                ),
             });
         }
         if !self.service_max.is_finite() || self.service_max < self.service_min {
@@ -212,8 +218,7 @@ impl QueueSimulator {
     /// Build a simulator. Validates the config.
     pub fn new(cfg: QueueConfig, seed: NssSeed) -> Result<Self, NssError> {
         cfg.validate()?;
-        let propagator =
-            PressurePropagator::new(PressureGraph::default_phase1(), cfg.propagation)?;
+        let propagator = PressurePropagator::new(PressureGraph::default_phase1(), cfg.propagation)?;
         Ok(Self {
             cfg,
             seed,
@@ -268,7 +273,11 @@ impl QueueSimulator {
         // 1. Arrivals: clamped Poisson(λ + retry_amplifier * retries).
         let effective_rate =
             self.cfg.arrival_rate + self.cfg.retry_amplifier * self.pending_retries as f64;
-        let arrivals = poisson_clamped(&mut self.rng_arrivals, effective_rate, 4 * self.cfg.queue_capacity);
+        let arrivals = poisson_clamped(
+            &mut self.rng_arrivals,
+            effective_rate,
+            4 * self.cfg.queue_capacity,
+        );
         self.pending_retries = 0;
 
         // 2. Admission: queue_capacity - queue_len slots free.
@@ -323,28 +332,20 @@ impl QueueSimulator {
         let queue_p = (self.queue_len as f64) / (self.cfg.queue_capacity as f64);
         let cpu_p = (to_serve as f64) / (self.cfg.workers as f64);
         // Sync contention: grows with sqrt(queue_len * workers).
-        let sync_p =
-            ((self.queue_len as f64 * self.cfg.workers as f64).sqrt() / self.cfg.queue_capacity as f64)
-                .min(1.5);
+        let sync_p = ((self.queue_len as f64 * self.cfg.workers as f64).sqrt()
+            / self.cfg.queue_capacity as f64)
+            .min(1.5);
         // Throughput "pressure" rises *as* throughput falls.
         let thr_p = (1.0 - throughput).max(0.0);
 
-        self.field.set(
-            PressureKind::Queue,
-            Pressure::new(queue_p, 1.0, 0.05)?,
-        );
-        self.field.set(
-            PressureKind::Cpu,
-            Pressure::new(cpu_p, 1.0, 0.1)?,
-        );
-        self.field.set(
-            PressureKind::Sync,
-            Pressure::new(sync_p, 1.0, 0.08)?,
-        );
-        self.field.set(
-            PressureKind::Throughput,
-            Pressure::new(thr_p, 1.0, 0.05)?,
-        );
+        self.field
+            .set(PressureKind::Queue, Pressure::new(queue_p, 1.0, 0.05)?);
+        self.field
+            .set(PressureKind::Cpu, Pressure::new(cpu_p, 1.0, 0.1)?);
+        self.field
+            .set(PressureKind::Sync, Pressure::new(sync_p, 1.0, 0.08)?);
+        self.field
+            .set(PressureKind::Throughput, Pressure::new(thr_p, 1.0, 0.05)?);
 
         // 6. Propagate.
         let _flows = self.propagator.step(&mut self.field)?;
@@ -570,9 +571,7 @@ mod tests {
         };
         let mut sim = QueueSimulator::new(cfg, NssSeed(42)).unwrap();
         let t = sim.run(32).unwrap();
-        let any_shed = t
-            .iter()
-            .any(|ev| ev.action.kind == SchedulerKind::ShedLoad);
+        let any_shed = t.iter().any(|ev| ev.action.kind == SchedulerKind::ShedLoad);
         assert!(any_shed, "expected shed-load actions above the knee");
     }
 
@@ -595,7 +594,12 @@ mod tests {
             assert!(ev.state.pressures.all_finite());
             for p in PressureKind::all() {
                 let v = ev.state.pressures.get(p).unwrap().magnitude;
-                assert!(v.is_finite() && v >= 0.0, "non-finite or negative {:?}={}", p, v);
+                assert!(
+                    v.is_finite() && v >= 0.0,
+                    "non-finite or negative {:?}={}",
+                    p,
+                    v
+                );
             }
         }
     }

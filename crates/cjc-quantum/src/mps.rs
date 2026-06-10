@@ -93,6 +93,22 @@ impl DenseMatrix {
     }
 }
 
+/// Conjugate-transpose a complex `DenseMatrix`. For an `m × n` input
+/// returns an `n × m` matrix whose entry `(c, r)` is `conj(input[r][c])`.
+///
+/// Used by [`svd_sign_stabilized`] to route wide matrices (`m < n`)
+/// through the tall path — see that function's docstring for the
+/// SVD identity.
+fn conj_transpose_matrix(a: &DenseMatrix) -> DenseMatrix {
+    let mut result = DenseMatrix::zeros(a.cols, a.rows);
+    for r in 0..a.rows {
+        for c in 0..a.cols {
+            result.set(c, r, a.get(r, c).conj());
+        }
+    }
+    result
+}
+
 // ---------------------------------------------------------------------------
 // Sign-Stabilized SVD (One-Sided Jacobi)
 // ---------------------------------------------------------------------------
@@ -115,6 +131,30 @@ pub struct SvdResult {
 /// the largest-magnitude element in each column of U is real and positive.
 ///
 /// Returns (U, S, V^H) where A ≈ U * diag(S) * V^H.
+///
+/// ## Wide-matrix routing (m < n)
+///
+/// One-sided Jacobi rotates *columns* of `work`. For tall matrices
+/// (m >= n) the converged work matrix's first `min(m, n) = n` columns
+/// contain all the non-zero singular triplets. For **wide** matrices
+/// (m < n), however, the algorithm can leave the non-zero singular
+/// vectors in any of the `n` columns of `work`, but the extraction
+/// loop below only reads the first `min(m, n) = m` columns — silently
+/// losing dominant singular triplets that ended up in columns
+/// `>= m`. This was a real bug discovered while implementing the
+/// TT-SVD path in `cjc-cana-compress::tensor_train`.
+///
+/// **Fix**: route wide matrices through the tall path via the SVD
+/// conjugate-transpose identity. If `SVD(A^H) = (U', Σ, V'^H)` then
+///
+/// ```text
+///   A^H = V Σ U^H  ⇒  U_A = (V'^H)^H  and  V_A^H = (U')^H, Σ_A = Σ.
+/// ```
+///
+/// The inner recursive call hits the tall path (rows of `A^H` are
+/// `n >= m = cols of A^H`), so the routing is single-level. For real
+/// inputs (im == 0 throughout), `conj` is a no-op and this reduces to
+/// a plain transpose adapter.
 pub fn svd_sign_stabilized(a: &DenseMatrix) -> SvdResult {
     let m = a.rows;
     let n = a.cols;
@@ -127,6 +167,24 @@ pub fn svd_sign_stabilized(a: &DenseMatrix) -> SvdResult {
             vh: DenseMatrix::zeros(0, n),
         };
     }
+
+    if m < n {
+        // Recurse on A^H (which is tall: rows = n >= m = cols).
+        let a_h = conj_transpose_matrix(a);
+        let SvdResult {
+            u: u_of_ah,
+            s,
+            vh: vh_of_ah,
+        } = svd_sign_stabilized(&a_h);
+        // U_A = (V'^H)^H,  V_A^H = (U')^H.
+        let u = conj_transpose_matrix(&vh_of_ah);
+        let vh = conj_transpose_matrix(&u_of_ah);
+        return SvdResult { u, s, vh };
+    }
+    debug_assert!(
+        m >= n,
+        "tall-path invariant violated by wide-matrix routing"
+    );
 
     // Work on a copy; columns will be orthogonalized in place.
     let mut work = a.clone();
@@ -168,8 +226,8 @@ pub fn svd_sign_stabilized(a: &DenseMatrix) -> SvdResult {
                 // The unitary Q = [[c, -s], [s*conj(phase), c*conj(phase)]]
                 // Applied to columns: new_i = c*col_i + s*conj(phase)*col_j
                 //                     new_j = -s*col_i + c*conj(phase)*col_j
-                let q10 = conj_phase.scale(s_real);  // s * conj(phase)
-                let q11 = conj_phase.scale(cs);      // c * conj(phase)
+                let q10 = conj_phase.scale(s_real); // s * conj(phase)
+                let q11 = conj_phase.scale(cs); // c * conj(phase)
                 let neg_s = -s_real;
 
                 for r in 0..m {
@@ -429,10 +487,16 @@ impl Mps {
     /// Optimized: gate permutation is fused into the contraction step, eliminating
     /// 4 intermediate matrix clones. Combined matrix is built directly from theta.
     pub fn apply_cnot_adjacent(&mut self, ctrl: usize, targ: usize) {
-        assert!(targ == ctrl + 1 || ctrl == targ + 1,
-            "CNOT requires adjacent qubits for MPS");
+        assert!(
+            targ == ctrl + 1 || ctrl == targ + 1,
+            "CNOT requires adjacent qubits for MPS"
+        );
 
-        let (q_left, q_right) = if ctrl < targ { (ctrl, targ) } else { (targ, ctrl) };
+        let (q_left, q_right) = if ctrl < targ {
+            (ctrl, targ)
+        } else {
+            (targ, ctrl)
+        };
 
         // Contract sites q_left and q_right
         let tl = &self.tensors[q_left];
@@ -445,7 +509,7 @@ impl Mps {
         // ctrl < targ (ctrl=left):  |00⟩→|00⟩, |01⟩→|01⟩, |10⟩→|11⟩, |11⟩→|10⟩
         // ctrl > targ (ctrl=right): |00⟩→|00⟩, |01⟩→|11⟩, |10⟩→|10⟩, |11⟩→|01⟩
         let gate_map: [[usize; 2]; 4] = if ctrl < targ {
-            [[0, 0], [0, 1], [1, 1], [1, 0]]  // (sl,sr) → (new_sl, new_sr)
+            [[0, 0], [0, 1], [1, 1], [1, 0]] // (sl,sr) → (new_sl, new_sr)
         } else {
             [[0, 0], [1, 1], [1, 0], [0, 1]]
         };
@@ -478,7 +542,12 @@ impl Mps {
 
         // SVD and truncate
         let svd = svd_sign_stabilized(&combined);
-        let chi = svd.s.iter().filter(|&&s| s > SVD_TOL).count().min(self.max_bond);
+        let chi = svd
+            .s
+            .iter()
+            .filter(|&&s| s > SVD_TOL)
+            .count()
+            .min(self.max_bond);
         let chi = chi.max(1); // at least bond dim 1
 
         // Build new left tensor: A_left[s](i, j) from U * sqrt(S)
@@ -645,7 +714,11 @@ impl Mps {
                 for c in 0..next_br {
                     let mut val = ComplexF64::ZERO;
                     for m in 0..br {
-                        val = val.add(sv_mat.get(r, m).mul_fixed(self.tensors[i + 1].a[s].get(m, c)));
+                        val = val.add(
+                            sv_mat
+                                .get(r, m)
+                                .mul_fixed(self.tensors[i + 1].a[s].get(m, c)),
+                        );
                     }
                     new_next.a[s].set(r, c, val);
                 }
@@ -704,7 +777,11 @@ impl Mps {
                 for c in 0..k {
                     let mut val = ComplexF64::ZERO;
                     for m in 0..bl {
-                        val = val.add(self.tensors[i - 1].a[s].get(r, m).mul_fixed(us_mat.get(m, c)));
+                        val = val.add(
+                            self.tensors[i - 1].a[s]
+                                .get(r, m)
+                                .mul_fixed(us_mat.get(m, c)),
+                        );
                     }
                     new_prev.a[s].set(r, c, val);
                 }
@@ -722,14 +799,11 @@ impl Mps {
     ///
     /// Strategy: SWAP qubits closer together, apply the gate on adjacent sites,
     /// then SWAP back. This is exact but may increase bond dimension.
-    pub fn apply_gate_swap_network(
-        &mut self,
-        q1: usize,
-        q2: usize,
-        gate: [[ComplexF64; 4]; 4],
-    ) {
-        assert!(q1 < self.n_qubits && q2 < self.n_qubits && q1 != q2,
-            "invalid qubit indices for SWAP network");
+    pub fn apply_gate_swap_network(&mut self, q1: usize, q2: usize, gate: [[ComplexF64; 4]; 4]) {
+        assert!(
+            q1 < self.n_qubits && q2 < self.n_qubits && q1 != q2,
+            "invalid qubit indices for SWAP network"
+        );
 
         let (lo, hi) = if q1 < q2 { (q1, q2) } else { (q2, q1) };
 
@@ -762,9 +836,9 @@ impl Mps {
         let zero = ComplexF64::ZERO;
         let one = ComplexF64::ONE;
         let swap_mat = [
-            [one,  zero, zero, zero],
-            [zero, zero, one,  zero],
-            [zero, one,  zero, zero],
+            [one, zero, zero, zero],
+            [zero, zero, one, zero],
+            [zero, one, zero, zero],
             [zero, zero, zero, one],
         ];
         self.apply_two_qubit_gate(i, swap_mat);
@@ -788,8 +862,9 @@ impl Mps {
                         let mut val = ComplexF64::ZERO;
                         for m in 0..bond_mid {
                             val = val.add(
-                                self.tensors[i].a[s1].get(r, m)
-                                    .mul_fixed(self.tensors[i + 1].a[s2].get(m, c))
+                                self.tensors[i].a[s1]
+                                    .get(r, m)
+                                    .mul_fixed(self.tensors[i + 1].a[s2].get(m, c)),
                             );
                         }
                         theta.set(s * bl + r, c, val);
@@ -809,7 +884,8 @@ impl Mps {
                     for c in 0..br {
                         let old = new_theta.get(sp * bl + r, c);
                         new_theta.set(
-                            sp * bl + r, c,
+                            sp * bl + r,
+                            c,
                             old.add(gate[sp][s].mul_fixed(theta.get(s * bl + r, c))),
                         );
                     }
@@ -834,7 +910,12 @@ impl Mps {
         }
 
         let svd = svd_sign_stabilized(&svd_mat);
-        let k = svd.s.iter().filter(|&&s| s > SVD_TOL).count().min(self.max_bond);
+        let k = svd
+            .s
+            .iter()
+            .filter(|&&s| s > SVD_TOL)
+            .count()
+            .min(self.max_bond);
         let k = k.max(1);
 
         // New tensor i: U[:, :k] reshaped to (bl, 2, k)
@@ -880,8 +961,10 @@ mod tests {
     }
 
     fn x_matrix() -> [[ComplexF64; 2]; 2] {
-        [[ComplexF64::ZERO, ComplexF64::ONE],
-         [ComplexF64::ONE, ComplexF64::ZERO]]
+        [
+            [ComplexF64::ZERO, ComplexF64::ONE],
+            [ComplexF64::ONE, ComplexF64::ZERO],
+        ]
     }
 
     #[test]
@@ -967,20 +1050,28 @@ mod tests {
         let svd2 = svd_sign_stabilized(&m);
 
         for i in 0..svd1.s.len() {
-            assert_eq!(svd1.s[i].to_bits(), svd2.s[i].to_bits(),
-                "SVD singular value {} not bit-identical", i);
+            assert_eq!(
+                svd1.s[i].to_bits(),
+                svd2.s[i].to_bits(),
+                "SVD singular value {} not bit-identical",
+                i
+            );
         }
         for r in 0..svd1.u.rows {
             for c in 0..svd1.u.cols {
                 assert_eq!(
                     svd1.u.get(r, c).re.to_bits(),
                     svd2.u.get(r, c).re.to_bits(),
-                    "U[{},{}].re not bit-identical", r, c
+                    "U[{},{}].re not bit-identical",
+                    r,
+                    c
                 );
                 assert_eq!(
                     svd1.u.get(r, c).im.to_bits(),
                     svd2.u.get(r, c).im.to_bits(),
-                    "U[{},{}].im not bit-identical", r, c
+                    "U[{},{}].im not bit-identical",
+                    r,
+                    c
                 );
             }
         }
@@ -1005,17 +1096,166 @@ mod tests {
             for c in 0..m.cols {
                 let mut sum = ComplexF64::ZERO;
                 for i in 0..k {
-                    sum = sum.add(
-                        svd.u.get(r, i).scale(svd.s[i]).mul_fixed(svd.vh.get(i, c))
-                    );
+                    sum = sum.add(svd.u.get(r, i).scale(svd.s[i]).mul_fixed(svd.vh.get(i, c)));
                 }
                 let orig = m.get(r, c);
                 let err = sum.add(orig.neg()).norm_sq().sqrt();
-                assert!(err < 1e-8,
+                assert!(
+                    err < 1e-8,
                     "Reconstruction error at ({},{}): {} (got {:?}, expected {:?})",
-                    r, c, err, sum, orig);
+                    r,
+                    c,
+                    err,
+                    sum,
+                    orig
+                );
             }
         }
+    }
+
+    /// Helper for wide-matrix tests: reconstruct A from SVD and assert
+    /// every entry is within `tol` of the original.
+    fn assert_svd_reconstructs(m: &DenseMatrix, tol: f64) {
+        let svd = svd_sign_stabilized(m);
+        let k = svd.s.len();
+        for r in 0..m.rows {
+            for c in 0..m.cols {
+                let mut sum = ComplexF64::ZERO;
+                for i in 0..k {
+                    sum = sum.add(svd.u.get(r, i).scale(svd.s[i]).mul_fixed(svd.vh.get(i, c)));
+                }
+                let orig = m.get(r, c);
+                let err = sum.add(orig.neg()).norm_sq().sqrt();
+                assert!(
+                    err < tol,
+                    "Reconstruction error at ({},{}): {} (got {:?}, expected {:?})",
+                    r,
+                    c,
+                    err,
+                    sum,
+                    orig
+                );
+            }
+        }
+    }
+
+    /// Regression test for the wide-matrix bug
+    /// (cjc-quantum < 0.1.11 silently dropped dominant singular vectors
+    /// when `m < n` — see the docstring on `svd_sign_stabilized`).
+    ///
+    /// This is the exact matrix shape that broke TT-SVD in
+    /// `cjc-cana-compress::tensor_train` at step k=0 of a 3D tensor:
+    /// a (2, 4) matrix lifted from real tensor entries 1..=8.
+    #[test]
+    fn test_svd_wide_2x4_reconstruction() {
+        let mut m = DenseMatrix::zeros(2, 4);
+        for r in 0..2 {
+            for c in 0..4 {
+                m.set(r, c, ComplexF64::real((r * 4 + c + 1) as f64));
+            }
+        }
+        assert_svd_reconstructs(&m, 1e-9);
+    }
+
+    /// Wide-matrix SVD on a complex-valued input. Confirms the
+    /// conjugate-transpose routing handles non-real entries correctly.
+    #[test]
+    fn test_svd_wide_complex_reconstruction() {
+        let mut m = DenseMatrix::zeros(2, 5);
+        m.set(0, 0, ComplexF64::new(1.0, 0.5));
+        m.set(0, 1, ComplexF64::new(0.3, -0.2));
+        m.set(0, 2, ComplexF64::new(-0.6, 0.7));
+        m.set(0, 3, ComplexF64::new(0.4, 0.1));
+        m.set(0, 4, ComplexF64::new(-0.2, -0.3));
+        m.set(1, 0, ComplexF64::new(-0.7, 0.1));
+        m.set(1, 1, ComplexF64::new(0.9, 0.4));
+        m.set(1, 2, ComplexF64::new(0.2, -0.8));
+        m.set(1, 3, ComplexF64::new(-0.1, 0.6));
+        m.set(1, 4, ComplexF64::new(0.5, -0.4));
+        assert_svd_reconstructs(&m, 1e-8);
+    }
+
+    /// Tall counterpart to `test_svd_wide_2x4_reconstruction` — confirms
+    /// the pre-existing tall path still reconstructs after the
+    /// wide-routing patch.
+    #[test]
+    fn test_svd_tall_4x2_still_reconstructs() {
+        let mut m = DenseMatrix::zeros(4, 2);
+        for r in 0..4 {
+            for c in 0..2 {
+                m.set(r, c, ComplexF64::real((r * 2 + c + 1) as f64));
+            }
+        }
+        assert_svd_reconstructs(&m, 1e-9);
+    }
+
+    /// 1×N matrix — degenerate but allowed; the wide-routing path must
+    /// not panic on `m == 1`.
+    #[test]
+    fn test_svd_wide_1xN_does_not_panic() {
+        let mut m = DenseMatrix::zeros(1, 4);
+        for c in 0..4 {
+            m.set(0, c, ComplexF64::real((c + 1) as f64));
+        }
+        assert_svd_reconstructs(&m, 1e-9);
+    }
+
+    /// Wide SVD is deterministic across repeated calls (sanity-check the
+    /// routing path inherits the sign-stability discipline).
+    #[test]
+    fn test_svd_wide_is_deterministic() {
+        let mut m = DenseMatrix::zeros(3, 5);
+        for r in 0..3 {
+            for c in 0..5 {
+                let re = ((r + 1) as f64) * ((c + 1) as f64).sqrt();
+                let im = ((r as f64) - (c as f64)) * 0.1;
+                m.set(r, c, ComplexF64::new(re, im));
+            }
+        }
+        let svd1 = svd_sign_stabilized(&m);
+        let svd2 = svd_sign_stabilized(&m);
+        assert_eq!(svd1.s.len(), svd2.s.len());
+        for i in 0..svd1.s.len() {
+            assert_eq!(svd1.s[i].to_bits(), svd2.s[i].to_bits());
+        }
+        for r in 0..svd1.u.rows {
+            for c in 0..svd1.u.cols {
+                assert_eq!(svd1.u.get(r, c).re.to_bits(), svd2.u.get(r, c).re.to_bits());
+                assert_eq!(svd1.u.get(r, c).im.to_bits(), svd2.u.get(r, c).im.to_bits());
+            }
+        }
+    }
+
+    /// SVD of A and SVD of A^H must produce the same singular values,
+    /// and swapped U/V factors. Verifies the conjugate-transpose
+    /// identity that the wide-routing path uses.
+    #[test]
+    fn test_svd_conjugate_transpose_identity() {
+        let mut m = DenseMatrix::zeros(3, 2);
+        m.set(0, 0, ComplexF64::new(1.0, 0.5));
+        m.set(0, 1, ComplexF64::new(0.3, -0.2));
+        m.set(1, 0, ComplexF64::new(-0.7, 0.1));
+        m.set(1, 1, ComplexF64::new(0.9, 0.4));
+        m.set(2, 0, ComplexF64::new(0.2, -0.8));
+        m.set(2, 1, ComplexF64::new(-0.1, 0.6));
+        let svd_a = svd_sign_stabilized(&m);
+
+        let m_h = conj_transpose_matrix(&m);
+        let svd_ah = svd_sign_stabilized(&m_h);
+
+        // Singular values identical.
+        assert_eq!(svd_a.s.len(), svd_ah.s.len());
+        for i in 0..svd_a.s.len() {
+            assert!(
+                (svd_a.s[i] - svd_ah.s[i]).abs() < 1e-9,
+                "σ[{}] mismatch: {} vs {}",
+                i,
+                svd_a.s[i],
+                svd_ah.s[i]
+            );
+        }
+        // SVD of A^H must reconstruct A^H within tolerance.
+        assert_svd_reconstructs(&m_h, 1e-8);
     }
 
     #[test]
@@ -1041,7 +1281,9 @@ mod tests {
             assert!(
                 self::tensors_bond_right(&mps, i) <= 2,
                 "Bond between {} and {} is {}, expected ≤ 2",
-                i, i + 1, self::tensors_bond_right(&mps, i)
+                i,
+                i + 1,
+                self::tensors_bond_right(&mps, i)
             );
         }
     }

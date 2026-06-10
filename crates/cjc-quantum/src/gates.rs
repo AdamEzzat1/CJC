@@ -11,8 +11,8 @@
 //! - Basis states are processed in ascending index order
 //! - No HashMap or non-deterministic data structures
 
-use cjc_runtime::complex::ComplexF64;
 use crate::statevector::Statevector;
+use cjc_runtime::complex::ComplexF64;
 
 /// A quantum gate represented by its unitary matrix and target qubits.
 #[derive(Debug, Clone)]
@@ -54,9 +54,15 @@ impl Gate {
     /// Return the qubit indices this gate acts on.
     pub fn qubits(&self) -> Vec<usize> {
         match self {
-            Gate::H(q) | Gate::X(q) | Gate::Y(q) | Gate::Z(q)
-            | Gate::S(q) | Gate::T(q)
-            | Gate::Rx(q, _) | Gate::Ry(q, _) | Gate::Rz(q, _) => vec![*q],
+            Gate::H(q)
+            | Gate::X(q)
+            | Gate::Y(q)
+            | Gate::Z(q)
+            | Gate::S(q)
+            | Gate::T(q)
+            | Gate::Rx(q, _)
+            | Gate::Ry(q, _)
+            | Gate::Rz(q, _) => vec![*q],
             Gate::CNOT(a, b) | Gate::CZ(a, b) | Gate::SWAP(a, b) => vec![*a, *b],
             Gate::Toffoli(a, b, c) => vec![*a, *b, *c],
         }
@@ -130,29 +136,39 @@ fn h_matrix() -> Mat2x2 {
 }
 
 fn x_matrix() -> Mat2x2 {
-    [[ComplexF64::ZERO, ComplexF64::ONE],
-     [ComplexF64::ONE, ComplexF64::ZERO]]
+    [
+        [ComplexF64::ZERO, ComplexF64::ONE],
+        [ComplexF64::ONE, ComplexF64::ZERO],
+    ]
 }
 
 fn y_matrix() -> Mat2x2 {
-    [[ComplexF64::ZERO, ComplexF64::new(0.0, -1.0)],
-     [ComplexF64::new(0.0, 1.0), ComplexF64::ZERO]]
+    [
+        [ComplexF64::ZERO, ComplexF64::new(0.0, -1.0)],
+        [ComplexF64::new(0.0, 1.0), ComplexF64::ZERO],
+    ]
 }
 
 fn z_matrix() -> Mat2x2 {
-    [[ComplexF64::ONE, ComplexF64::ZERO],
-     [ComplexF64::ZERO, ComplexF64::new(-1.0, 0.0)]]
+    [
+        [ComplexF64::ONE, ComplexF64::ZERO],
+        [ComplexF64::ZERO, ComplexF64::new(-1.0, 0.0)],
+    ]
 }
 
 fn s_matrix() -> Mat2x2 {
-    [[ComplexF64::ONE, ComplexF64::ZERO],
-     [ComplexF64::ZERO, ComplexF64::I]]
+    [
+        [ComplexF64::ONE, ComplexF64::ZERO],
+        [ComplexF64::ZERO, ComplexF64::I],
+    ]
 }
 
 fn t_matrix() -> Mat2x2 {
     let phase = ComplexF64::new(INV_SQRT2, INV_SQRT2); // e^(iπ/4)
-    [[ComplexF64::ONE, ComplexF64::ZERO],
-     [ComplexF64::ZERO, phase]]
+    [
+        [ComplexF64::ONE, ComplexF64::ZERO],
+        [ComplexF64::ZERO, phase],
+    ]
 }
 
 fn rx_matrix(theta: f64) -> Mat2x2 {
@@ -171,8 +187,7 @@ fn ry_matrix(theta: f64) -> Mat2x2 {
 fn rz_matrix(theta: f64) -> Mat2x2 {
     let pos = ComplexF64::new((theta / 2.0).cos(), (theta / 2.0).sin());
     let neg = ComplexF64::new((theta / 2.0).cos(), -(theta / 2.0).sin());
-    [[neg, ComplexF64::ZERO],
-     [ComplexF64::ZERO, pos]]
+    [[neg, ComplexF64::ZERO], [ComplexF64::ZERO, pos]]
 }
 
 // ---------------------------------------------------------------------------
@@ -287,8 +302,15 @@ mod tests {
     const TOL: f64 = 1e-12;
 
     fn assert_approx(a: ComplexF64, b: ComplexF64, msg: &str) {
-        assert!((a.re - b.re).abs() < TOL && (a.im - b.im).abs() < TOL,
-            "{}: got ({}, {}) expected ({}, {})", msg, a.re, a.im, b.re, b.im);
+        assert!(
+            (a.re - b.re).abs() < TOL && (a.im - b.im).abs() < TOL,
+            "{}: got ({}, {}) expected ({}, {})",
+            msg,
+            a.re,
+            a.im,
+            b.re,
+            b.im
+        );
     }
 
     #[test]
@@ -363,8 +385,14 @@ mod tests {
         let mut sv = Statevector::new(1);
         Gate::Rx(0, std::f64::consts::PI).apply(&mut sv).unwrap();
         // |0⟩ → cos(π/2)|0⟩ - i·sin(π/2)|1⟩ = -i|1⟩
-        assert!((sv.amplitudes[0].norm_sq()).abs() < TOL, "Rx(π)|0⟩ should have no |0⟩");
-        assert!((sv.amplitudes[1].norm_sq() - 1.0).abs() < TOL, "Rx(π)|0⟩ should be all |1⟩");
+        assert!(
+            (sv.amplitudes[0].norm_sq()).abs() < TOL,
+            "Rx(π)|0⟩ should have no |0⟩"
+        );
+        assert!(
+            (sv.amplitudes[1].norm_sq() - 1.0).abs() < TOL,
+            "Rx(π)|0⟩ should be all |1⟩"
+        );
     }
 
     #[test]
@@ -411,8 +439,11 @@ mod tests {
         Gate::CZ(1, 0).apply(&mut sv2).unwrap();
 
         for i in 0..4 {
-            assert_approx(sv1.amplitudes[i], sv2.amplitudes[i],
-                &format!("CZ symmetry [{}]", i));
+            assert_approx(
+                sv1.amplitudes[i],
+                sv2.amplitudes[i],
+                &format!("CZ symmetry [{}]", i),
+            );
         }
     }
 
@@ -421,7 +452,7 @@ mod tests {
         // Prepare |10⟩, SWAP → |01⟩
         let mut sv = Statevector::new(2);
         Gate::X(0).apply(&mut sv).unwrap(); // |01⟩ in little-endian = index 1
-        // State is now: [0, 1, 0, 0] → qubit 0 is |1⟩, qubit 1 is |0⟩
+                                            // State is now: [0, 1, 0, 0] → qubit 0 is |1⟩, qubit 1 is |0⟩
         Gate::SWAP(0, 1).apply(&mut sv).unwrap();
         // After SWAP: qubit 0 is |0⟩, qubit 1 is |1⟩ → index 2
         assert_approx(sv.amplitudes[2], ComplexF64::ONE, "SWAP|10⟩→|01⟩");

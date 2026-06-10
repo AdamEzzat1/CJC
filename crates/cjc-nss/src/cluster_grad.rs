@@ -70,7 +70,11 @@ impl Optimizer {
             Optimizer::CountBased => {
                 bytes.extend_from_slice(b"count_based");
             }
-            Optimizer::Adam { lr, epochs, batch_size } => {
+            Optimizer::Adam {
+                lr,
+                epochs,
+                batch_size,
+            } => {
                 bytes.extend_from_slice(b"adam|");
                 bytes.extend_from_slice(&lr.to_bits().to_le_bytes());
                 bytes.extend_from_slice(&(*epochs as u64).to_le_bytes());
@@ -185,8 +189,16 @@ pub fn fit_with_adam(
         feat.extend_from_slice(&h_after);
         feat.extend_from_slice(&summary);
         features.push(feat);
-        labels_collapse.push(if next.cluster_failure.kind == FailureKind::Collapse { 1.0 } else { 0.0 });
-        labels_degraded.push(if next.cluster_failure.kind == FailureKind::Degraded { 1.0 } else { 0.0 });
+        labels_collapse.push(if next.cluster_failure.kind == FailureKind::Collapse {
+            1.0
+        } else {
+            0.0
+        });
+        labels_degraded.push(if next.cluster_failure.kind == FailureKind::Degraded {
+            1.0
+        } else {
+            0.0
+        });
     }
     let n = features.len();
     let in_dim = cfg.cluster_head_input();
@@ -253,18 +265,12 @@ pub fn fit_with_adam(
             // graph is tiny (in_dim ≤ 32) and Adam's cost is dominated
             // by the param updates anyway.
             let mut graph = GradGraph::new();
-            let w_c_idx = graph.parameter(
-                Tensor::from_vec(w_c.clone(), &[in_dim]).expect("valid tensor"),
-            );
-            let b_c_idx = graph.parameter(
-                Tensor::from_vec(vec![b_c], &[1]).expect("valid scalar"),
-            );
-            let w_d_idx = graph.parameter(
-                Tensor::from_vec(w_d.clone(), &[in_dim]).expect("valid tensor"),
-            );
-            let b_d_idx = graph.parameter(
-                Tensor::from_vec(vec![b_d], &[1]).expect("valid scalar"),
-            );
+            let w_c_idx =
+                graph.parameter(Tensor::from_vec(w_c.clone(), &[in_dim]).expect("valid tensor"));
+            let b_c_idx = graph.parameter(Tensor::from_vec(vec![b_c], &[1]).expect("valid scalar"));
+            let w_d_idx =
+                graph.parameter(Tensor::from_vec(w_d.clone(), &[in_dim]).expect("valid tensor"));
+            let b_d_idx = graph.parameter(Tensor::from_vec(vec![b_d], &[1]).expect("valid scalar"));
 
             // Accumulate per-sample BCE losses (each is a scalar
             // node) and sum into a single batch loss. We compute

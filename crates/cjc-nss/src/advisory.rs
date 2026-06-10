@@ -421,9 +421,11 @@ impl SchedulerAdvisor {
         let interventions = action.to_interventions(snapshot.tick());
         let mut fork = snapshot.fork(interventions)?;
         let traj = fork.run(self.cfg.horizon)?;
-        let last = traj.last_state().ok_or_else(|| NssError::InvalidTrajectory {
-            detail: "candidate fork produced empty trajectory".into(),
-        })?;
+        let last = traj
+            .last_state()
+            .ok_or_else(|| NssError::InvalidTrajectory {
+                detail: "candidate fork produced empty trajectory".into(),
+            })?;
         let prediction = nss.predict_next(last)?;
         let collapse_tick_count = traj
             .iter()
@@ -620,7 +622,10 @@ mod tests {
             .candidates
             .iter()
             .any(|c| c.action == AdvisoryAction::RecoverNode { node: NodeId(1) });
-        assert!(recovers_failed, "advisor must enumerate recovery for failed node");
+        assert!(
+            recovers_failed,
+            "advisor must enumerate recovery for failed node"
+        );
     }
 
     #[test]
@@ -804,7 +809,11 @@ mod tests {
                     AdvisoryAction::RemoveNode { node } => Some(node),
                 };
                 if let Some(n) = n {
-                    assert_eq!(n, *id, "per-node ranking must only contain actions for node {}", id);
+                    assert_eq!(
+                        n, *id,
+                        "per-node ranking must only contain actions for node {}",
+                        id
+                    );
                 }
             }
         }

@@ -5,8 +5,8 @@
 //! executing them with a specific seed for deterministic results.
 
 use crate::gates::Gate;
-use crate::statevector::Statevector;
 use crate::measure;
+use crate::statevector::Statevector;
 
 /// A quantum circuit: an ordered list of gates on N qubits.
 #[derive(Debug, Clone)]
@@ -43,29 +43,53 @@ impl Circuit {
     }
 
     /// Convenience: add Hadamard gate.
-    pub fn h(&mut self, qubit: usize) -> &mut Self { self.add(Gate::H(qubit)) }
+    pub fn h(&mut self, qubit: usize) -> &mut Self {
+        self.add(Gate::H(qubit))
+    }
     /// Convenience: add Pauli-X gate.
-    pub fn x(&mut self, qubit: usize) -> &mut Self { self.add(Gate::X(qubit)) }
+    pub fn x(&mut self, qubit: usize) -> &mut Self {
+        self.add(Gate::X(qubit))
+    }
     /// Convenience: add Pauli-Y gate.
-    pub fn y(&mut self, qubit: usize) -> &mut Self { self.add(Gate::Y(qubit)) }
+    pub fn y(&mut self, qubit: usize) -> &mut Self {
+        self.add(Gate::Y(qubit))
+    }
     /// Convenience: add Pauli-Z gate.
-    pub fn z(&mut self, qubit: usize) -> &mut Self { self.add(Gate::Z(qubit)) }
+    pub fn z(&mut self, qubit: usize) -> &mut Self {
+        self.add(Gate::Z(qubit))
+    }
     /// Convenience: add S gate.
-    pub fn s(&mut self, qubit: usize) -> &mut Self { self.add(Gate::S(qubit)) }
+    pub fn s(&mut self, qubit: usize) -> &mut Self {
+        self.add(Gate::S(qubit))
+    }
     /// Convenience: add T gate.
-    pub fn t(&mut self, qubit: usize) -> &mut Self { self.add(Gate::T(qubit)) }
+    pub fn t(&mut self, qubit: usize) -> &mut Self {
+        self.add(Gate::T(qubit))
+    }
     /// Convenience: add Rx gate.
-    pub fn rx(&mut self, qubit: usize, theta: f64) -> &mut Self { self.add(Gate::Rx(qubit, theta)) }
+    pub fn rx(&mut self, qubit: usize, theta: f64) -> &mut Self {
+        self.add(Gate::Rx(qubit, theta))
+    }
     /// Convenience: add Ry gate.
-    pub fn ry(&mut self, qubit: usize, theta: f64) -> &mut Self { self.add(Gate::Ry(qubit, theta)) }
+    pub fn ry(&mut self, qubit: usize, theta: f64) -> &mut Self {
+        self.add(Gate::Ry(qubit, theta))
+    }
     /// Convenience: add Rz gate.
-    pub fn rz(&mut self, qubit: usize, theta: f64) -> &mut Self { self.add(Gate::Rz(qubit, theta)) }
+    pub fn rz(&mut self, qubit: usize, theta: f64) -> &mut Self {
+        self.add(Gate::Rz(qubit, theta))
+    }
     /// Convenience: add CNOT gate.
-    pub fn cnot(&mut self, ctrl: usize, tgt: usize) -> &mut Self { self.add(Gate::CNOT(ctrl, tgt)) }
+    pub fn cnot(&mut self, ctrl: usize, tgt: usize) -> &mut Self {
+        self.add(Gate::CNOT(ctrl, tgt))
+    }
     /// Convenience: add CZ gate.
-    pub fn cz(&mut self, a: usize, b: usize) -> &mut Self { self.add(Gate::CZ(a, b)) }
+    pub fn cz(&mut self, a: usize, b: usize) -> &mut Self {
+        self.add(Gate::CZ(a, b))
+    }
     /// Convenience: add SWAP gate.
-    pub fn swap(&mut self, a: usize, b: usize) -> &mut Self { self.add(Gate::SWAP(a, b)) }
+    pub fn swap(&mut self, a: usize, b: usize) -> &mut Self {
+        self.add(Gate::SWAP(a, b))
+    }
     /// Convenience: add Toffoli gate.
     pub fn toffoli(&mut self, c1: usize, c2: usize, tgt: usize) -> &mut Self {
         self.add(Gate::Toffoli(c1, c2, tgt))
@@ -83,7 +107,10 @@ impl Circuit {
 
     /// Execute the circuit and measure all qubits.
     /// Returns (measurement outcomes, final collapsed statevector).
-    pub fn execute_and_measure(&self, rng_state: &mut u64) -> Result<(Vec<u8>, Statevector), String> {
+    pub fn execute_and_measure(
+        &self,
+        rng_state: &mut u64,
+    ) -> Result<(Vec<u8>, Statevector), String> {
         let mut sv = self.execute()?;
         let outcomes = measure::measure_all(&mut sv, rng_state)?;
         Ok((outcomes, sv))
@@ -110,7 +137,12 @@ impl Circuit {
 
 impl std::fmt::Display for Circuit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "Circuit({} qubits, {} gates):", self.n_qubits, self.gates.len())?;
+        writeln!(
+            f,
+            "Circuit({} qubits, {} gates):",
+            self.n_qubits,
+            self.gates.len()
+        )?;
         for (i, gate) in self.gates.iter().enumerate() {
             writeln!(f, "  [{}] {}", i, gate)?;
         }
@@ -162,8 +194,11 @@ mod tests {
         assert!((sv.amplitudes[7].re - inv).abs() < TOL, "GHZ |111⟩");
         // All other amplitudes should be 0
         for i in 1..7 {
-            assert!((sv.amplitudes[i].norm_sq()).abs() < TOL,
-                "GHZ non-zero at index {}", i);
+            assert!(
+                (sv.amplitudes[i].norm_sq()).abs() < TOL,
+                "GHZ non-zero at index {}",
+                i
+            );
         }
         assert!(sv.is_normalized(TOL));
     }
@@ -201,8 +236,11 @@ mod tests {
         let samples = circ.sample(1000, &mut rng).unwrap();
         let count0 = samples.iter().filter(|&&s| s == 0).count();
         let ratio = count0 as f64 / 1000.0;
-        assert!(ratio > 0.4 && ratio < 0.6,
-            "H|0⟩ sample ratio: {} (expected ~0.5)", ratio);
+        assert!(
+            ratio > 0.4 && ratio < 0.6,
+            "H|0⟩ sample ratio: {} (expected ~0.5)",
+            ratio
+        );
     }
 
     #[test]
@@ -247,6 +285,9 @@ mod tests {
         circ.cnot(0, 1).h(0);
 
         let sv = circ.execute().unwrap();
-        assert!(sv.is_normalized(TOL), "Teleportation circuit preserves norm");
+        assert!(
+            sv.is_normalized(TOL),
+            "Teleportation circuit preserves norm"
+        );
     }
 }

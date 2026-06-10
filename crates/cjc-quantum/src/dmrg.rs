@@ -29,8 +29,8 @@
 
 use cjc_runtime::complex::ComplexF64;
 
-use crate::mps::{DenseMatrix, Mps, MpsTensor, SvdResult, svd_sign_stabilized};
-use crate::vqe::{mps_heisenberg_energy, mps_full_heisenberg_energy};
+use crate::mps::{svd_sign_stabilized, DenseMatrix, Mps, MpsTensor, SvdResult};
+use crate::vqe::{mps_full_heisenberg_energy, mps_heisenberg_energy};
 
 // ---------------------------------------------------------------------------
 // Hamiltonian types
@@ -212,7 +212,9 @@ fn lanczos_ground(
         alphas.push(alpha_j);
 
         for i in 0..dim {
-            w[i] = w[i].sub(v_new[i].scale(alpha_j)).sub(v_prev[i].scale(beta_j));
+            w[i] = w[i]
+                .sub(v_new[i].scale(alpha_j))
+                .sub(v_prev[i].scale(beta_j));
         }
 
         // Full reorthogonalization
@@ -525,10 +527,8 @@ fn build_bond_envs(mps: &Mps, bond: usize, hamiltonian: DmrgHamiltonian) -> Bond
         }
 
         // Fresh dangling operators from site k.
-        let new_l_ops: Vec<Vec<Vec<ComplexF64>>> = ops
-            .iter()
-            .map(|op| transfer_left_op(t, &l_i, op))
-            .collect();
+        let new_l_ops: Vec<Vec<Vec<ComplexF64>>> =
+            ops.iter().map(|op| transfer_left_op(t, &l_i, op)).collect();
 
         let new_l_i = transfer_left_op(t, &l_i, &oi);
 
@@ -880,7 +880,13 @@ pub fn dmrg_full_heisenberg_1d(
     max_sweeps: usize,
     tol: f64,
 ) -> DmrgResult {
-    dmrg_1d(n_qubits, max_bond, max_sweeps, tol, DmrgHamiltonian::Heisenberg)
+    dmrg_1d(
+        n_qubits,
+        max_bond,
+        max_sweeps,
+        tol,
+        DmrgHamiltonian::Heisenberg,
+    )
 }
 
 /// Core two-site DMRG using variational Lanczos with proper MPO environments.

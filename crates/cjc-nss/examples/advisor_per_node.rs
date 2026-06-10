@@ -17,9 +17,8 @@
 //! ```
 
 use cjc_nss::{
-    AdvisorConfig, AdvisoryAction, ClusterConfig, ClusterNeuralSystemsSimulator,
-    ClusterNssConfig, ClusterSimulator, ClusterTopology, Intervention, NodeHealth, NodeId,
-    NssSeed, SchedulerAdvisor,
+    AdvisorConfig, AdvisoryAction, ClusterConfig, ClusterNeuralSystemsSimulator, ClusterNssConfig,
+    ClusterSimulator, ClusterTopology, Intervention, NodeHealth, NodeId, NssSeed, SchedulerAdvisor,
 };
 
 fn main() {
@@ -59,8 +58,7 @@ fn main() {
     let snapshot = sim.snapshot();
     println!("\n[decision] snapshot at tick {}", snapshot.tick());
 
-    let nss =
-        ClusterNeuralSystemsSimulator::from_seed(ClusterNssConfig::default(), seed).unwrap();
+    let nss = ClusterNeuralSystemsSimulator::from_seed(ClusterNssConfig::default(), seed).unwrap();
 
     // 2. Build the advisor with the full Phase 3e action set enabled.
     let advisor = SchedulerAdvisor::new(AdvisorConfig {
@@ -133,14 +131,20 @@ fn main() {
 
     // 6. Determinism receipt.
     let per_node_2 = advisor.recommend_per_node(&snapshot, &nss).unwrap();
-    let identical = per_node.iter().zip(per_node_2.iter()).all(|((a_id, ra), (b_id, rb))| {
-        a_id == b_id
-            && ra.recommended == rb.recommended
-            && ra
-                .candidates
-                .iter()
-                .zip(rb.candidates.iter())
-                .all(|(x, y)| x.predicted_collapse.to_bits() == y.predicted_collapse.to_bits())
-    });
-    println!("\n[determinism] second per-node recommendation: bit-identical = {}", identical);
+    let identical = per_node
+        .iter()
+        .zip(per_node_2.iter())
+        .all(|((a_id, ra), (b_id, rb))| {
+            a_id == b_id
+                && ra.recommended == rb.recommended
+                && ra
+                    .candidates
+                    .iter()
+                    .zip(rb.candidates.iter())
+                    .all(|(x, y)| x.predicted_collapse.to_bits() == y.predicted_collapse.to_bits())
+        });
+    println!(
+        "\n[determinism] second per-node recommendation: bit-identical = {}",
+        identical
+    );
 }

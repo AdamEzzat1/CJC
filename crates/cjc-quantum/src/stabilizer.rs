@@ -26,8 +26,8 @@
 //! outcomes for non-deterministic measurements use `splitmix64` for
 //! reproducible randomness.
 
-use cjc_runtime::complex::ComplexF64;
 use crate::rand_f64;
+use cjc_runtime::complex::ComplexF64;
 
 // ---------------------------------------------------------------------------
 // Bit manipulation helpers
@@ -76,10 +76,10 @@ fn flip_bit(words: &mut [u64], idx: usize) {
 #[inline]
 fn g_phase(x1: bool, z1: bool, x2: bool, z2: bool) -> i32 {
     match (x1, z1) {
-        (false, false) => 0,                                    // I * anything = no phase
-        (true, true) => (z2 as i32) - (x2 as i32),             // Y * {I,X,Z,Y}
-        (true, false) => (z2 as i32) * (2 * (x2 as i32) - 1),  // X * {I,X,Z,Y}
-        (false, true) => (x2 as i32) * (1 - 2 * (z2 as i32)),  // Z * {I,X,Z,Y}
+        (false, false) => 0,                                  // I * anything = no phase
+        (true, true) => (z2 as i32) - (x2 as i32),            // Y * {I,X,Z,Y}
+        (true, false) => (z2 as i32) * (2 * (x2 as i32) - 1), // X * {I,X,Z,Y}
+        (false, true) => (x2 as i32) * (1 - 2 * (z2 as i32)), // Z * {I,X,Z,Y}
     }
 }
 
@@ -135,7 +135,13 @@ impl StabilizerState {
             set_bit(&mut z[n + i], i, true);
         }
 
-        StabilizerState { n, words_per_row, x, z, phase }
+        StabilizerState {
+            n,
+            words_per_row,
+            x,
+            z,
+            phase,
+        }
     }
 
     // -------------------------------------------------------------------
@@ -194,12 +200,12 @@ impl StabilizerState {
             // Positive contributions (g = +1):
             let pos = (x1 & !z1 & x2 & z2)      // X * Y → +1
                     | (!x1 & z1 & x2 & !z2)      // Z * X → +1
-                    | (x1 & z1 & z2 & !x2);      // Y * Z → +1
+                    | (x1 & z1 & z2 & !x2); // Y * Z → +1
 
             // Negative contributions (g = -1):
             let neg = (x1 & !z1 & !x2 & z2)      // X * Z → -1
                     | (!x1 & z1 & x2 & z2)        // Z * Y → -1
-                    | (x1 & z1 & x2 & !z2);       // Y * X → -1
+                    | (x1 & z1 & x2 & !z2); // Y * X → -1
 
             phase_sum += pos.count_ones() as i64;
             phase_sum -= neg.count_ones() as i64;
@@ -289,8 +295,18 @@ impl StabilizerState {
     ///   x[i][tgt] ^= x[i][ctrl]
     ///   z[i][ctrl] ^= z[i][tgt]
     pub fn cnot(&mut self, ctrl: usize, tgt: usize) {
-        assert!(ctrl < self.n, "ctrl qubit index {} out of range (n={})", ctrl, self.n);
-        assert!(tgt < self.n, "tgt qubit index {} out of range (n={})", tgt, self.n);
+        assert!(
+            ctrl < self.n,
+            "ctrl qubit index {} out of range (n={})",
+            ctrl,
+            self.n
+        );
+        assert!(
+            tgt < self.n,
+            "tgt qubit index {} out of range (n={})",
+            tgt,
+            self.n
+        );
         assert!(ctrl != tgt, "CNOT control and target must differ");
         for i in 0..(2 * self.n) {
             let xc = get_bit(&self.x[i], ctrl);
@@ -438,9 +454,8 @@ impl StabilizerState {
                             phase_sum += g_phase(x1, z1, x2, z2);
                         }
 
-                        let new_phase = (scratch_phase as i32
-                            + self.phase[stab] as i32
-                            + phase_sum) as i64;
+                        let new_phase =
+                            (scratch_phase as i32 + self.phase[stab] as i32 + phase_sum) as i64;
                         scratch_phase = (((new_phase % 4) + 4) % 4) as u8;
 
                         for w in 0..self.words_per_row {
@@ -451,7 +466,11 @@ impl StabilizerState {
                 }
 
                 // Phase 0 -> outcome 0 (+1 eigenvalue), Phase 2 -> outcome 1 (-1 eigenvalue)
-                if scratch_phase == 0 { 0 } else { 1 }
+                if scratch_phase == 0 {
+                    0
+                } else {
+                    1
+                }
             }
         }
     }

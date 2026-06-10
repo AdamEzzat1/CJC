@@ -16,14 +16,13 @@ use crate::gates::Gate;
 use crate::statevector::Statevector;
 
 // Extension imports
+use crate::density::DensityMatrix;
 use crate::mps::Mps;
 use crate::stabilizer::StabilizerState;
-use crate::density::DensityMatrix;
 
 // Pure backend imports
 use crate::pure::{
-    PureMps, PureStabilizer, PureDensity, PureCircuit, PureGate,
-    has_pure_flag, is_pure, wrap_pure,
+    has_pure_flag, is_pure, wrap_pure, PureCircuit, PureDensity, PureGate, PureMps, PureStabilizer,
 };
 
 /// Dispatch a quantum builtin function call by name.
@@ -84,7 +83,10 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
         // --- Three-qubit gates ---
         "q_toffoli" | "q_ccx" => {
             if args.len() != 4 {
-                return Err(format!("q_toffoli(circuit, ctrl1, ctrl2, target) requires 4 args, got {}", args.len()));
+                return Err(format!(
+                    "q_toffoli(circuit, ctrl1, ctrl2, target) requires 4 args, got {}",
+                    args.len()
+                ));
             }
             let c1 = extract_qubit_index(&args[1], "ctrl1")?;
             let c2 = extract_qubit_index(&args[2], "ctrl2")?;
@@ -115,9 +117,8 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 _ => return Err("q_measure seed must be an integer".into()),
             };
             let mut rng_state = seed;
-            let (outcomes, _sv) = with_circuit(&args[0], |circ| {
-                circ.execute_and_measure(&mut rng_state)
-            })?;
+            let (outcomes, _sv) =
+                with_circuit(&args[0], |circ| circ.execute_and_measure(&mut rng_state))?;
             let result: Vec<Value> = outcomes.iter().map(|&b| Value::Int(b as i64)).collect();
             Ok(Some(Value::Array(Rc::new(result))))
         }
@@ -163,9 +164,7 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 return Err("q_amplitudes(circuit) requires a circuit argument".into());
             }
             let sv = with_circuit(&args[0], |circ| circ.execute())?;
-            let result: Vec<Value> = sv.amplitudes.iter()
-                .map(|&a| Value::Complex(a))
-                .collect();
+            let result: Vec<Value> = sv.amplitudes.iter().map(|&a| Value::Complex(a)).collect();
             Ok(Some(Value::Array(Rc::new(result))))
         }
 
@@ -174,8 +173,7 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             if args.is_empty() {
                 return Err("q_n_qubits(circuit) requires a circuit argument".into());
             }
-            with_circuit(&args[0], |circ| Ok(Value::Int(circ.n_qubits() as i64)))
-                .map(Some)
+            with_circuit(&args[0], |circ| Ok(Value::Int(circ.n_qubits() as i64))).map(Some)
         }
 
         // --- Get number of gates ---
@@ -183,14 +181,12 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             if args.is_empty() {
                 return Err("q_n_gates(circuit) requires a circuit argument".into());
             }
-            with_circuit(&args[0], |circ| Ok(Value::Int(circ.n_gates() as i64)))
-                .map(Some)
+            with_circuit(&args[0], |circ| Ok(Value::Int(circ.n_gates() as i64))).map(Some)
         }
 
         // =======================================================================
         // MPS (Matrix Product States) — 50+ qubit simulation
         // =======================================================================
-
         "mps_new" => {
             let n = extract_int(&args, 0, "n_qubits")?;
             let mps = if args.len() > 1 {
@@ -206,11 +202,15 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let q = extract_int(&args, 1, "qubit")? as usize;
             let isq2 = 1.0 / 2.0f64.sqrt();
             let mat = if name == "mps_h" {
-                [[ComplexF64::real(isq2), ComplexF64::real(isq2)],
-                 [ComplexF64::real(isq2), ComplexF64::real(-isq2)]]
+                [
+                    [ComplexF64::real(isq2), ComplexF64::real(isq2)],
+                    [ComplexF64::real(isq2), ComplexF64::real(-isq2)],
+                ]
             } else {
-                [[ComplexF64::ZERO, ComplexF64::ONE],
-                 [ComplexF64::ONE, ComplexF64::ZERO]]
+                [
+                    [ComplexF64::ZERO, ComplexF64::ONE],
+                    [ComplexF64::ONE, ComplexF64::ZERO],
+                ]
             };
             with_any_mut::<Mps>(&args[0], "MPS", |mps| {
                 mps.apply_single_qubit(q, mat);
@@ -252,27 +252,23 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
 
         "mps_energy" => {
             let ham = match args.get(1) {
-                Some(Value::String(s)) if s.as_ref() == "heisenberg" =>
-                    crate::vqe::Hamiltonian::Heisenberg,
+                Some(Value::String(s)) if s.as_ref() == "heisenberg" => {
+                    crate::vqe::Hamiltonian::Heisenberg
+                }
                 _ => crate::vqe::Hamiltonian::Ising,
             };
-            let e = read_f64::<Mps>(&args[0], "MPS", |mps| {
-                crate::vqe::mps_energy(mps, ham)
-            })?;
+            let e = read_f64::<Mps>(&args[0], "MPS", |mps| crate::vqe::mps_energy(mps, ham))?;
             Ok(Some(Value::Float(e)))
         }
 
         "mps_memory" => {
-            let mem = read_i64::<Mps>(&args[0], "MPS", |mps| {
-                mps.memory_bytes() as i64
-            })?;
+            let mem = read_i64::<Mps>(&args[0], "MPS", |mps| mps.memory_bytes() as i64)?;
             Ok(Some(Value::Int(mem)))
         }
 
         // =======================================================================
         // VQE — Variational Quantum Eigensolver
         // =======================================================================
-
         "vqe_heisenberg" => {
             let n = extract_int(&args, 0, "n_qubits")? as usize;
             let chi = extract_int(&args, 1, "max_bond")? as usize;
@@ -296,7 +292,6 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
         // =======================================================================
         // QAOA — Quantum Approximate Optimization
         // =======================================================================
-
         "qaoa_graph_cycle" => {
             let n = extract_int(&args, 0, "n_vertices")? as usize;
             let g = crate::qaoa::Graph::cycle(n);
@@ -312,7 +307,8 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let result = match &args[0] {
                 Value::QuantumState(rc) => {
                     let borrow = rc.borrow();
-                    let g = borrow.downcast_ref::<crate::qaoa::Graph>()
+                    let g = borrow
+                        .downcast_ref::<crate::qaoa::Graph>()
                         .ok_or_else(|| "expected Graph".to_string())?;
                     crate::qaoa::qaoa_maxcut(g, layers, max_bond, lr, iters, seed)
                 }
@@ -328,14 +324,12 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
         // =======================================================================
         // Stabilizer — Clifford/CHP simulator (1000+ qubits)
         // =======================================================================
-
         "stabilizer_new" => {
             let n = extract_int(&args, 0, "n_qubits")? as usize;
             Ok(Some(wrap_any(StabilizerState::new(n))))
         }
 
-        "stabilizer_h" | "stabilizer_s" | "stabilizer_x" |
-        "stabilizer_y" | "stabilizer_z" => {
+        "stabilizer_h" | "stabilizer_s" | "stabilizer_x" | "stabilizer_y" | "stabilizer_z" => {
             let q = extract_int(&args, 1, "qubit")? as usize;
             with_any_mut::<StabilizerState>(&args[0], "StabilizerState", |s| {
                 match name {
@@ -368,7 +362,8 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let outcome = match &args[0] {
                 Value::QuantumState(rc) => {
                     let mut borrow = rc.borrow_mut();
-                    let s = borrow.downcast_mut::<StabilizerState>()
+                    let s = borrow
+                        .downcast_mut::<StabilizerState>()
                         .ok_or_else(|| "expected StabilizerState".to_string())?;
                     s.measure(q, &mut rng) as i64
                 }
@@ -387,7 +382,6 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
         // =======================================================================
         // Density Matrix — Mixed states + noise
         // =======================================================================
-
         "density_new" => {
             let n = extract_int(&args, 0, "n_qubits")? as usize;
             Ok(Some(wrap_any(DensityMatrix::new(n))))
@@ -469,12 +463,15 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
         }
 
         "density_entropy" => {
-            let e = read_f64::<DensityMatrix>(&args[0], "DensityMatrix", |dm| dm.von_neumann_entropy())?;
+            let e = read_f64::<DensityMatrix>(&args[0], "DensityMatrix", |dm| {
+                dm.von_neumann_entropy()
+            })?;
             Ok(Some(Value::Float(e)))
         }
 
         "density_probs" => {
-            let probs = read_vec_f64::<DensityMatrix>(&args[0], "DensityMatrix", |dm| dm.probabilities())?;
+            let probs =
+                read_vec_f64::<DensityMatrix>(&args[0], "DensityMatrix", |dm| dm.probabilities())?;
             let arr: Vec<Value> = probs.into_iter().map(Value::Float).collect();
             Ok(Some(Value::Array(Rc::new(arr))))
         }
@@ -482,7 +479,6 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
         // =======================================================================
         // DMRG — Density Matrix Renormalization Group
         // =======================================================================
-
         "dmrg_ising" => {
             let n = extract_int(&args, 0, "n_qubits")? as usize;
             let chi = extract_int(&args, 1, "max_bond")? as usize;
@@ -504,7 +500,6 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
         // =======================================================================
         // QEC — Quantum Error Correction
         // =======================================================================
-
         "qec_repetition_code" => {
             let d = extract_int(&args, 0, "distance")? as usize;
             let code = crate::qec::build_repetition_code(d);
@@ -525,13 +520,16 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             match (&args[0], &args[1]) {
                 (Value::QuantumState(state_rc), Value::QuantumState(code_rc)) => {
                     let code_borrow = code_rc.borrow();
-                    let code = code_borrow.downcast_ref::<crate::qec::SurfaceCode>()
+                    let code = code_borrow
+                        .downcast_ref::<crate::qec::SurfaceCode>()
                         .ok_or_else(|| "expected SurfaceCode".to_string())?;
                     let mut state_borrow = state_rc.borrow_mut();
-                    let state = state_borrow.downcast_mut::<StabilizerState>()
+                    let state = state_borrow
+                        .downcast_mut::<StabilizerState>()
                         .ok_or_else(|| "expected StabilizerState".to_string())?;
                     let syndrome = crate::qec::syndrome_extraction(state, code, &mut rng);
-                    let arr: Vec<Value> = syndrome.into_iter().map(|b| Value::Int(b as i64)).collect();
+                    let arr: Vec<Value> =
+                        syndrome.into_iter().map(|b| Value::Int(b as i64)).collect();
                     Ok(Some(Value::Array(Rc::new(arr))))
                 }
                 _ => Err("qec_syndrome(state, code, seed): expected QuantumState args".into()),
@@ -540,22 +538,29 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
 
         "qec_decode" => {
             let syndrome = match &args[0] {
-                Value::Array(arr) => arr.iter().map(|v| match v {
-                    Value::Int(i) => *i as u8,
-                    _ => 0,
-                }).collect::<Vec<u8>>(),
+                Value::Array(arr) => arr
+                    .iter()
+                    .map(|v| match v {
+                        Value::Int(i) => *i as u8,
+                        _ => 0,
+                    })
+                    .collect::<Vec<u8>>(),
                 _ => return Err("qec_decode: first arg must be syndrome array".into()),
             };
             let corrections = match &args[1] {
                 Value::QuantumState(rc) => {
                     let borrow = rc.borrow();
-                    let code = borrow.downcast_ref::<crate::qec::SurfaceCode>()
+                    let code = borrow
+                        .downcast_ref::<crate::qec::SurfaceCode>()
                         .ok_or_else(|| "expected SurfaceCode".to_string())?;
                     crate::qec::decode_repetition_code(&syndrome, code)
                 }
                 _ => return Err("qec_decode: second arg must be SurfaceCode".into()),
             };
-            let arr: Vec<Value> = corrections.into_iter().map(|c| Value::Int(c as i64)).collect();
+            let arr: Vec<Value> = corrections
+                .into_iter()
+                .map(|c| Value::Int(c as i64))
+                .collect();
             Ok(Some(Value::Array(Rc::new(arr))))
         }
 
@@ -571,7 +576,6 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
         // =======================================================================
         // QML — Quantum Machine Learning
         // =======================================================================
-
         "qml_train" => {
             let n_qubits = extract_int(&args, 0, "n_qubits")? as usize;
             let layers = extract_int(&args, 1, "layers")? as usize;
@@ -597,29 +601,38 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
 
             // Build dataset from args[7] (samples array) and args[8] (labels array)
             let samples = match args.get(7) {
-                Some(Value::Array(arr)) => {
-                    arr.iter().map(|row| match row {
-                        Value::Array(inner) => inner.iter().map(|v| match v {
-                            Value::Float(f) => *f,
-                            Value::Int(i) => *i as f64,
-                            _ => 0.0,
-                        }).collect(),
+                Some(Value::Array(arr)) => arr
+                    .iter()
+                    .map(|row| match row {
+                        Value::Array(inner) => inner
+                            .iter()
+                            .map(|v| match v {
+                                Value::Float(f) => *f,
+                                Value::Int(i) => *i as f64,
+                                _ => 0.0,
+                            })
+                            .collect(),
                         _ => vec![],
-                    }).collect::<Vec<Vec<f64>>>()
-                }
+                    })
+                    .collect::<Vec<Vec<f64>>>(),
                 _ => return Err("qml_train: arg 7 must be samples array".into()),
             };
             let labels = match args.get(8) {
-                Some(Value::Array(arr)) => {
-                    arr.iter().map(|v| match v {
+                Some(Value::Array(arr)) => arr
+                    .iter()
+                    .map(|v| match v {
                         Value::Int(i) => *i as usize,
                         _ => 0,
-                    }).collect::<Vec<usize>>()
-                }
+                    })
+                    .collect::<Vec<usize>>(),
                 _ => return Err("qml_train: arg 8 must be labels array".into()),
             };
 
-            let dataset = crate::qml::QmlDataset { samples, labels, n_classes };
+            let dataset = crate::qml::QmlDataset {
+                samples,
+                labels,
+                n_classes,
+            };
             let result = crate::qml::qml_train(&config, &dataset);
 
             let loss_arr: Vec<Value> = result.loss_history.into_iter().map(Value::Float).collect();
@@ -650,19 +663,25 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             };
 
             let params = match args.get(4) {
-                Some(Value::Array(arr)) => arr.iter().map(|v| match v {
-                    Value::Float(f) => *f,
-                    Value::Int(i) => *i as f64,
-                    _ => 0.0,
-                }).collect::<Vec<f64>>(),
+                Some(Value::Array(arr)) => arr
+                    .iter()
+                    .map(|v| match v {
+                        Value::Float(f) => *f,
+                        Value::Int(i) => *i as f64,
+                        _ => 0.0,
+                    })
+                    .collect::<Vec<f64>>(),
                 _ => return Err("qml_predict: arg 4 must be params array".into()),
             };
             let input = match args.get(5) {
-                Some(Value::Array(arr)) => arr.iter().map(|v| match v {
-                    Value::Float(f) => *f,
-                    Value::Int(i) => *i as f64,
-                    _ => 0.0,
-                }).collect::<Vec<f64>>(),
+                Some(Value::Array(arr)) => arr
+                    .iter()
+                    .map(|v| match v {
+                        Value::Float(f) => *f,
+                        Value::Int(i) => *i as f64,
+                        _ => 0.0,
+                    })
+                    .collect::<Vec<f64>>(),
                 _ => return Err("qml_predict: arg 5 must be input array".into()),
             };
 
@@ -682,7 +701,6 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
         // =======================================================================
         // Fermion — Jordan-Wigner Hamiltonians
         // =======================================================================
-
         "q_fermion_h2" => {
             let h = crate::fermion::h2_hamiltonian();
             Ok(Some(wrap_any(h)))
@@ -700,7 +718,9 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
 
         "q_fermion_n_terms" => {
             let n = read_i64::<crate::fermion::FermionicHamiltonian>(
-                &args[0], "FermionicHamiltonian", |h| h.n_terms() as i64,
+                &args[0],
+                "FermionicHamiltonian",
+                |h| h.n_terms() as i64,
             )?;
             Ok(Some(Value::Int(n)))
         }
@@ -712,11 +732,16 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let e = match &args[0] {
                 Value::QuantumState(rc) => {
                     let borrow = rc.borrow();
-                    let h = borrow.downcast_ref::<crate::fermion::FermionicHamiltonian>()
+                    let h = borrow
+                        .downcast_ref::<crate::fermion::FermionicHamiltonian>()
                         .ok_or_else(|| "expected FermionicHamiltonian".to_string())?;
                     h.expectation(&sv)
                 }
-                _ => return Err("q_fermion_expectation: first arg must be a FermionicHamiltonian".into()),
+                _ => {
+                    return Err(
+                        "q_fermion_expectation: first arg must be a FermionicHamiltonian".into(),
+                    )
+                }
             };
             Ok(Some(Value::Float(e)))
         }
@@ -724,7 +749,6 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
         // =======================================================================
         // Trotter — Time Evolution
         // =======================================================================
-
         "q_trotter_evolve" => {
             // q_trotter_evolve(hamiltonian, circuit, time, n_steps, order)
             // order: 1 or 2
@@ -740,11 +764,14 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             match &args[0] {
                 Value::QuantumState(rc) => {
                     let borrow = rc.borrow();
-                    let h = borrow.downcast_ref::<crate::fermion::FermionicHamiltonian>()
+                    let h = borrow
+                        .downcast_ref::<crate::fermion::FermionicHamiltonian>()
                         .ok_or_else(|| "expected FermionicHamiltonian".to_string())?;
                     crate::trotter::trotter_evolve(&mut sv, h, time, n_steps, order);
                 }
-                _ => return Err("q_trotter_evolve: first arg must be a FermionicHamiltonian".into()),
+                _ => {
+                    return Err("q_trotter_evolve: first arg must be a FermionicHamiltonian".into())
+                }
             }
 
             Ok(Some(wrap_statevector(sv)))
@@ -761,7 +788,8 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let bound = match &args[0] {
                 Value::QuantumState(rc) => {
                     let borrow = rc.borrow();
-                    let h = borrow.downcast_ref::<crate::fermion::FermionicHamiltonian>()
+                    let h = borrow
+                        .downcast_ref::<crate::fermion::FermionicHamiltonian>()
                         .ok_or_else(|| "expected FermionicHamiltonian".to_string())?;
                     crate::trotter::trotter_error_bound(h, time, n_steps, order)
                 }
@@ -773,30 +801,37 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
         // =======================================================================
         // ZNE — Zero-Noise Extrapolation
         // =======================================================================
-
         "q_zne_mitigate" => {
             // q_zne_mitigate(scale_factors_array, measured_values_array)
             let scales = match &args[0] {
-                Value::Array(arr) => arr.iter().map(|v| match v {
-                    Value::Float(f) => *f,
-                    Value::Int(i) => *i as f64,
-                    _ => 0.0,
-                }).collect::<Vec<f64>>(),
+                Value::Array(arr) => arr
+                    .iter()
+                    .map(|v| match v {
+                        Value::Float(f) => *f,
+                        Value::Int(i) => *i as f64,
+                        _ => 0.0,
+                    })
+                    .collect::<Vec<f64>>(),
                 _ => return Err("q_zne_mitigate: arg 0 must be scale factors array".into()),
             };
             let values = match &args[1] {
-                Value::Array(arr) => arr.iter().map(|v| match v {
-                    Value::Float(f) => *f,
-                    Value::Int(i) => *i as f64,
-                    _ => 0.0,
-                }).collect::<Vec<f64>>(),
+                Value::Array(arr) => arr
+                    .iter()
+                    .map(|v| match v {
+                        Value::Float(f) => *f,
+                        Value::Int(i) => *i as f64,
+                        _ => 0.0,
+                    })
+                    .collect::<Vec<f64>>(),
                 _ => return Err("q_zne_mitigate: arg 1 must be measured values array".into()),
             };
 
             let result = crate::mitigation::richardson_extrapolate(&scales, &values)?;
             let out = vec![
                 Value::Float(result.mitigated_value),
-                Value::Array(Rc::new(result.coefficients.into_iter().map(Value::Float).collect())),
+                Value::Array(Rc::new(
+                    result.coefficients.into_iter().map(Value::Float).collect(),
+                )),
             ];
             Ok(Some(Value::Array(Rc::new(out))))
         }
@@ -816,10 +851,12 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let base_p = extract_angle(&args[0], "base_p")?;
             let scale = extract_angle(&args[1], "scale_factor")?;
             let result = match args.get(2) {
-                Some(Value::String(s)) if s.as_ref() == "amplitude_damping" =>
-                    crate::mitigation::scale_amplitude_damping(base_p, scale),
-                Some(Value::String(s)) if s.as_ref() == "dephasing" =>
-                    crate::mitigation::scale_dephasing_noise(base_p, scale),
+                Some(Value::String(s)) if s.as_ref() == "amplitude_damping" => {
+                    crate::mitigation::scale_amplitude_damping(base_p, scale)
+                }
+                Some(Value::String(s)) if s.as_ref() == "dephasing" => {
+                    crate::mitigation::scale_dephasing_noise(base_p, scale)
+                }
                 _ => crate::mitigation::scale_depolarizing_noise(base_p, scale),
             };
             Ok(Some(Value::Float(result)))
@@ -828,7 +865,6 @@ pub fn dispatch_quantum(name: &str, args: &[Value]) -> Result<Option<Value>, Str
         // =======================================================================
         // MPS — Canonical Form & SWAP Network
         // =======================================================================
-
         "mps_left_canonicalize" => {
             with_any_mut::<Mps>(&args[0], "MPS", |mps| {
                 mps.left_canonicalize();
@@ -889,7 +925,6 @@ fn dispatch_pure(name: &str, args: &[Value]) -> Result<Option<Value>, String> {
 
     match name {
         // === Pure constructors (triggered by "pure" flag) ===
-
         "qubits" if has_pure_flag(args) => {
             let n = extract_int(args, 0, "n_qubits")? as usize;
             if n < 1 || n > 26 {
@@ -900,7 +935,11 @@ fn dispatch_pure(name: &str, args: &[Value]) -> Result<Option<Value>, String> {
 
         "mps_new" if has_pure_flag(args) => {
             let n = extract_int(args, 0, "n_qubits")? as usize;
-            let chi = if args.len() > 2 { extract_int(args, 1, "max_bond")? as usize } else { 32 };
+            let chi = if args.len() > 2 {
+                extract_int(args, 1, "max_bond")? as usize
+            } else {
+                32
+            };
             Ok(Some(wrap_pure(PureMps::new(n, chi))))
         }
 
@@ -915,10 +954,13 @@ fn dispatch_pure(name: &str, args: &[Value]) -> Result<Option<Value>, String> {
         }
 
         // === Pure MPS operations (auto-detected) ===
-
         "mps_h" | "mps_x" if is_pure::<PureMps>(&args[0]) => {
             let q = extract_int(args, 1, "qubit")? as usize;
-            let mat = if name == "mps_h" { h_matrix() } else { x_matrix() };
+            let mat = if name == "mps_h" {
+                h_matrix()
+            } else {
+                x_matrix()
+            };
             pure_mps_mut(&args[0], |mps| mps.apply_single_qubit(q, mat))?;
             Ok(Some(args[0].clone()))
         }
@@ -949,19 +991,17 @@ fn dispatch_pure(name: &str, args: &[Value]) -> Result<Option<Value>, String> {
         }
 
         // === Pure Stabilizer operations ===
-
-        "stabilizer_h" | "stabilizer_s" | "stabilizer_x" |
-        "stabilizer_y" | "stabilizer_z" if is_pure::<PureStabilizer>(&args[0]) => {
+        "stabilizer_h" | "stabilizer_s" | "stabilizer_x" | "stabilizer_y" | "stabilizer_z"
+            if is_pure::<PureStabilizer>(&args[0]) =>
+        {
             let q = extract_int(args, 1, "qubit")? as usize;
-            pure_stab_mut(&args[0], |s| {
-                match name {
-                    "stabilizer_h" => s.h(q),
-                    "stabilizer_s" => s.s(q),
-                    "stabilizer_x" => s.x(q),
-                    "stabilizer_y" => s.y(q),
-                    "stabilizer_z" => s.z(q),
-                    _ => unreachable!(),
-                }
+            pure_stab_mut(&args[0], |s| match name {
+                "stabilizer_h" => s.h(q),
+                "stabilizer_s" => s.s(q),
+                "stabilizer_x" => s.x(q),
+                "stabilizer_y" => s.y(q),
+                "stabilizer_z" => s.z(q),
+                _ => unreachable!(),
             })?;
             Ok(Some(args[0].clone()))
         }
@@ -979,7 +1019,8 @@ fn dispatch_pure(name: &str, args: &[Value]) -> Result<Option<Value>, String> {
             let outcome = match &args[0] {
                 Value::QuantumState(rc) => {
                     let mut borrow = rc.borrow_mut();
-                    let s = borrow.downcast_mut::<PureStabilizer>()
+                    let s = borrow
+                        .downcast_mut::<PureStabilizer>()
                         .ok_or_else(|| "expected PureStabilizer".to_string())?;
                     let mut rng = seed;
                     s.measure(q, &mut rng) as i64
@@ -995,7 +1036,6 @@ fn dispatch_pure(name: &str, args: &[Value]) -> Result<Option<Value>, String> {
         }
 
         // === Pure Density Matrix operations ===
-
         "density_gate" if is_pure::<PureDensity>(&args[0]) => {
             let gate_name = match &args[1] {
                 Value::String(s) => s.to_string(),
@@ -1003,8 +1043,12 @@ fn dispatch_pure(name: &str, args: &[Value]) -> Result<Option<Value>, String> {
             };
             let q = extract_int(args, 2, "qubit")? as usize;
             let mat = match gate_name.as_str() {
-                "H" => h_matrix(), "X" => x_matrix(), "Y" => y_matrix(),
-                "Z" => z_matrix(), "S" => s_matrix(), "T" => t_matrix(),
+                "H" => h_matrix(),
+                "X" => x_matrix(),
+                "Y" => y_matrix(),
+                "Z" => z_matrix(),
+                "S" => s_matrix(),
+                "T" => t_matrix(),
                 _ => return Err(format!("density_gate: unknown gate '{}'", gate_name)),
             };
             pure_density_mut(&args[0], |dm| dm.apply_gate_2x2(q, mat))?;
@@ -1061,13 +1105,15 @@ fn dispatch_pure(name: &str, args: &[Value]) -> Result<Option<Value>, String> {
         }
 
         // === Pure Circuit operations ===
-
         "q_h" | "q_x" | "q_y" | "q_z" | "q_s" | "q_t" if is_pure::<PureCircuit>(&args[0]) => {
             let q = extract_qubit_index(&args[1], "qubit")?;
             let gate = match name {
-                "q_h" => PureGate::H(q), "q_x" => PureGate::X(q),
-                "q_y" => PureGate::Y(q), "q_z" => PureGate::Z(q),
-                "q_s" => PureGate::S(q), "q_t" => PureGate::T(q),
+                "q_h" => PureGate::H(q),
+                "q_x" => PureGate::X(q),
+                "q_y" => PureGate::Y(q),
+                "q_z" => PureGate::Z(q),
+                "q_s" => PureGate::S(q),
+                "q_t" => PureGate::T(q),
                 _ => unreachable!(),
             };
             pure_circuit_mut(&args[0], |c| c.add(gate))?;
@@ -1142,23 +1188,22 @@ fn dispatch_pure(name: &str, args: &[Value]) -> Result<Option<Value>, String> {
         }
 
         // === Pure Fermion/Trotter/ZNE (triggered by "pure" flag) ===
-
-        "q_fermion_h2" if has_pure_flag(args) => {
-            Ok(Some(wrap_pure(pure_h2_hamiltonian())))
-        }
+        "q_fermion_h2" if has_pure_flag(args) => Ok(Some(wrap_pure(pure_h2_hamiltonian()))),
 
         "q_fermion_expectation" if is_pure::<PureFermionicHamiltonian>(&args[0]) => {
             // Expects a PureStatevector as second arg
             match &args[1] {
                 Value::QuantumState(rc) => {
                     let borrow = rc.borrow();
-                    let psv = borrow.downcast_ref::<PureStatevector>()
+                    let psv = borrow
+                        .downcast_ref::<PureStatevector>()
                         .ok_or_else(|| "expected PureStatevector".to_string())?;
                     let h_borrow = match &args[0] {
                         Value::QuantumState(hrc) => hrc.borrow(),
                         _ => return Err("expected PureFermionicHamiltonian".into()),
                     };
-                    let h = h_borrow.downcast_ref::<PureFermionicHamiltonian>()
+                    let h = h_borrow
+                        .downcast_ref::<PureFermionicHamiltonian>()
                         .ok_or_else(|| "expected PureFermionicHamiltonian".to_string())?;
                     let e = h.expectation(&psv.amplitudes, psv.n_qubits);
                     Ok(Some(Value::Float(e)))
@@ -1169,25 +1214,33 @@ fn dispatch_pure(name: &str, args: &[Value]) -> Result<Option<Value>, String> {
 
         "q_zne_mitigate" if has_pure_flag(args) => {
             let scales = match &args[0] {
-                Value::Array(arr) => arr.iter().map(|v| match v {
-                    Value::Float(f) => *f,
-                    Value::Int(i) => *i as f64,
-                    _ => 0.0,
-                }).collect::<Vec<f64>>(),
+                Value::Array(arr) => arr
+                    .iter()
+                    .map(|v| match v {
+                        Value::Float(f) => *f,
+                        Value::Int(i) => *i as f64,
+                        _ => 0.0,
+                    })
+                    .collect::<Vec<f64>>(),
                 _ => return Err("q_zne_mitigate: arg 0 must be scale factors array".into()),
             };
             let values = match &args[1] {
-                Value::Array(arr) => arr.iter().map(|v| match v {
-                    Value::Float(f) => *f,
-                    Value::Int(i) => *i as f64,
-                    _ => 0.0,
-                }).collect::<Vec<f64>>(),
+                Value::Array(arr) => arr
+                    .iter()
+                    .map(|v| match v {
+                        Value::Float(f) => *f,
+                        Value::Int(i) => *i as f64,
+                        _ => 0.0,
+                    })
+                    .collect::<Vec<f64>>(),
                 _ => return Err("q_zne_mitigate: arg 1 must be measured values array".into()),
             };
             let result = pure_richardson_extrapolate(&scales, &values)?;
             let out = vec![
                 Value::Float(result.mitigated_value),
-                Value::Array(Rc::new(result.coefficients.into_iter().map(Value::Float).collect())),
+                Value::Array(Rc::new(
+                    result.coefficients.into_iter().map(Value::Float).collect(),
+                )),
             ];
             Ok(Some(Value::Array(Rc::new(out))))
         }
@@ -1224,7 +1277,9 @@ fn pure_stab_mut(val: &Value, f: impl FnOnce(&mut PureStabilizer)) -> Result<(),
     match val {
         Value::QuantumState(rc) => {
             let mut b = rc.borrow_mut();
-            let s = b.downcast_mut::<PureStabilizer>().ok_or("expected PureStabilizer")?;
+            let s = b
+                .downcast_mut::<PureStabilizer>()
+                .ok_or("expected PureStabilizer")?;
             f(s);
             Ok(())
         }
@@ -1236,7 +1291,9 @@ fn pure_stab_ref(val: &Value, f: impl FnOnce(&PureStabilizer) -> f64) -> Result<
     match val {
         Value::QuantumState(rc) => {
             let b = rc.borrow();
-            let s = b.downcast_ref::<PureStabilizer>().ok_or("expected PureStabilizer")?;
+            let s = b
+                .downcast_ref::<PureStabilizer>()
+                .ok_or("expected PureStabilizer")?;
             Ok(f(s))
         }
         _ => Err("expected PureStabilizer".into()),
@@ -1247,7 +1304,9 @@ fn pure_density_mut(val: &Value, f: impl FnOnce(&mut PureDensity)) -> Result<(),
     match val {
         Value::QuantumState(rc) => {
             let mut b = rc.borrow_mut();
-            let dm = b.downcast_mut::<PureDensity>().ok_or("expected PureDensity")?;
+            let dm = b
+                .downcast_mut::<PureDensity>()
+                .ok_or("expected PureDensity")?;
             f(dm);
             Ok(())
         }
@@ -1259,18 +1318,25 @@ fn pure_density_ref(val: &Value, f: impl FnOnce(&PureDensity) -> f64) -> Result<
     match val {
         Value::QuantumState(rc) => {
             let b = rc.borrow();
-            let dm = b.downcast_ref::<PureDensity>().ok_or("expected PureDensity")?;
+            let dm = b
+                .downcast_ref::<PureDensity>()
+                .ok_or("expected PureDensity")?;
             Ok(f(dm))
         }
         _ => Err("expected PureDensity".into()),
     }
 }
 
-fn pure_density_ref_vec(val: &Value, f: impl FnOnce(&PureDensity) -> Vec<f64>) -> Result<Vec<f64>, String> {
+fn pure_density_ref_vec(
+    val: &Value,
+    f: impl FnOnce(&PureDensity) -> Vec<f64>,
+) -> Result<Vec<f64>, String> {
     match val {
         Value::QuantumState(rc) => {
             let b = rc.borrow();
-            let dm = b.downcast_ref::<PureDensity>().ok_or("expected PureDensity")?;
+            let dm = b
+                .downcast_ref::<PureDensity>()
+                .ok_or("expected PureDensity")?;
             Ok(f(dm))
         }
         _ => Err("expected PureDensity".into()),
@@ -1281,7 +1347,9 @@ fn pure_circuit_mut(val: &Value, f: impl FnOnce(&mut PureCircuit)) -> Result<(),
     match val {
         Value::QuantumState(rc) => {
             let mut b = rc.borrow_mut();
-            let c = b.downcast_mut::<PureCircuit>().ok_or("expected PureCircuit")?;
+            let c = b
+                .downcast_mut::<PureCircuit>()
+                .ok_or("expected PureCircuit")?;
             f(c);
             Ok(())
         }
@@ -1293,7 +1361,9 @@ fn pure_circuit_ref<T>(val: &Value, f: impl FnOnce(&PureCircuit) -> T) -> Result
     match val {
         Value::QuantumState(rc) => {
             let b = rc.borrow();
-            let c = b.downcast_ref::<PureCircuit>().ok_or("expected PureCircuit")?;
+            let c = b
+                .downcast_ref::<PureCircuit>()
+                .ok_or("expected PureCircuit")?;
             Ok(f(c))
         }
         _ => Err("expected PureCircuit".into()),
@@ -1314,54 +1384,90 @@ fn wrap_any<T: Any + 'static>(val: T) -> Value {
 }
 
 /// Borrow a typed value immutably and extract a float.
-fn read_f64<T: Any + 'static>(val: &Value, type_name: &str, f: impl FnOnce(&T) -> f64) -> Result<f64, String> {
+fn read_f64<T: Any + 'static>(
+    val: &Value,
+    type_name: &str,
+    f: impl FnOnce(&T) -> f64,
+) -> Result<f64, String> {
     match val {
         Value::QuantumState(rc) => {
             let borrow = rc.borrow();
-            let obj = borrow.downcast_ref::<T>()
+            let obj = borrow
+                .downcast_ref::<T>()
                 .ok_or_else(|| format!("expected {}", type_name))?;
             Ok(f(obj))
         }
-        _ => Err(format!("expected QuantumState({}), got {}", type_name, val.type_name())),
+        _ => Err(format!(
+            "expected QuantumState({}), got {}",
+            type_name,
+            val.type_name()
+        )),
     }
 }
 
 /// Borrow a typed value immutably and extract an i64.
-fn read_i64<T: Any + 'static>(val: &Value, type_name: &str, f: impl FnOnce(&T) -> i64) -> Result<i64, String> {
+fn read_i64<T: Any + 'static>(
+    val: &Value,
+    type_name: &str,
+    f: impl FnOnce(&T) -> i64,
+) -> Result<i64, String> {
     match val {
         Value::QuantumState(rc) => {
             let borrow = rc.borrow();
-            let obj = borrow.downcast_ref::<T>()
+            let obj = borrow
+                .downcast_ref::<T>()
                 .ok_or_else(|| format!("expected {}", type_name))?;
             Ok(f(obj))
         }
-        _ => Err(format!("expected QuantumState({}), got {}", type_name, val.type_name())),
+        _ => Err(format!(
+            "expected QuantumState({}), got {}",
+            type_name,
+            val.type_name()
+        )),
     }
 }
 
 /// Borrow a typed value immutably and extract a Vec<f64>.
-fn read_vec_f64<T: Any + 'static>(val: &Value, type_name: &str, f: impl FnOnce(&T) -> Vec<f64>) -> Result<Vec<f64>, String> {
+fn read_vec_f64<T: Any + 'static>(
+    val: &Value,
+    type_name: &str,
+    f: impl FnOnce(&T) -> Vec<f64>,
+) -> Result<Vec<f64>, String> {
     match val {
         Value::QuantumState(rc) => {
             let borrow = rc.borrow();
-            let obj = borrow.downcast_ref::<T>()
+            let obj = borrow
+                .downcast_ref::<T>()
                 .ok_or_else(|| format!("expected {}", type_name))?;
             Ok(f(obj))
         }
-        _ => Err(format!("expected QuantumState({}), got {}", type_name, val.type_name())),
+        _ => Err(format!(
+            "expected QuantumState({}), got {}",
+            type_name,
+            val.type_name()
+        )),
     }
 }
 
 /// Borrow a typed value mutably from a QuantumState.
-fn with_any_mut<T: Any + 'static>(val: &Value, type_name: &str, f: impl FnOnce(&mut T) -> Result<(), String>) -> Result<(), String> {
+fn with_any_mut<T: Any + 'static>(
+    val: &Value,
+    type_name: &str,
+    f: impl FnOnce(&mut T) -> Result<(), String>,
+) -> Result<(), String> {
     match val {
         Value::QuantumState(rc) => {
             let mut borrow = rc.borrow_mut();
-            let obj = borrow.downcast_mut::<T>()
+            let obj = borrow
+                .downcast_mut::<T>()
                 .ok_or_else(|| format!("expected {}", type_name))?;
             f(obj)
         }
-        _ => Err(format!("expected QuantumState({}), got {}", type_name, val.type_name())),
+        _ => Err(format!(
+            "expected QuantumState({}), got {}",
+            type_name,
+            val.type_name()
+        )),
     }
 }
 
@@ -1369,7 +1475,11 @@ fn extract_int(args: &[Value], idx: usize, name: &str) -> Result<i64, String> {
     match args.get(idx) {
         Some(Value::Int(i)) => Ok(*i),
         Some(Value::Float(f)) => Ok(*f as i64),
-        Some(other) => Err(format!("{} must be an integer, got {}", name, other.type_name())),
+        Some(other) => Err(format!(
+            "{} must be an integer, got {}",
+            name,
+            other.type_name()
+        )),
         None => Err(format!("missing argument: {}", name)),
     }
 }
@@ -1396,11 +1506,15 @@ fn extract_angle(val: &Value, name: &str) -> Result<f64, String> {
 }
 
 /// Borrow the circuit immutably from a QuantumState value.
-fn with_circuit<T>(val: &Value, f: impl FnOnce(&Circuit) -> Result<T, String>) -> Result<T, String> {
+fn with_circuit<T>(
+    val: &Value,
+    f: impl FnOnce(&Circuit) -> Result<T, String>,
+) -> Result<T, String> {
     match val {
         Value::QuantumState(rc) => {
             let borrow = rc.borrow();
-            let circ = borrow.downcast_ref::<Circuit>()
+            let circ = borrow
+                .downcast_ref::<Circuit>()
                 .ok_or_else(|| "expected a quantum circuit".to_string())?;
             f(circ)
         }
@@ -1409,11 +1523,15 @@ fn with_circuit<T>(val: &Value, f: impl FnOnce(&Circuit) -> Result<T, String>) -
 }
 
 /// Borrow the circuit mutably from a QuantumState value.
-fn with_circuit_mut(val: &Value, f: impl FnOnce(&mut Circuit) -> Result<(), String>) -> Result<(), String> {
+fn with_circuit_mut(
+    val: &Value,
+    f: impl FnOnce(&mut Circuit) -> Result<(), String>,
+) -> Result<(), String> {
     match val {
         Value::QuantumState(rc) => {
             let mut borrow = rc.borrow_mut();
-            let circ = borrow.downcast_mut::<Circuit>()
+            let circ = borrow
+                .downcast_mut::<Circuit>()
                 .ok_or_else(|| "expected a quantum circuit".to_string())?;
             f(circ)
         }
@@ -1422,9 +1540,15 @@ fn with_circuit_mut(val: &Value, f: impl FnOnce(&mut Circuit) -> Result<(), Stri
 }
 
 /// Apply a single-qubit gate: fn(circuit, qubit) -> circuit
-fn apply_gate_1q(args: &[Value], make_gate: impl Fn(usize) -> Gate) -> Result<Option<Value>, String> {
+fn apply_gate_1q(
+    args: &[Value],
+    make_gate: impl Fn(usize) -> Gate,
+) -> Result<Option<Value>, String> {
     if args.len() != 2 {
-        return Err(format!("gate requires (circuit, qubit), got {} args", args.len()));
+        return Err(format!(
+            "gate requires (circuit, qubit), got {} args",
+            args.len()
+        ));
     }
     let q = extract_qubit_index(&args[1], "qubit")?;
     with_circuit_mut(&args[0], |circ| {
@@ -1435,9 +1559,15 @@ fn apply_gate_1q(args: &[Value], make_gate: impl Fn(usize) -> Gate) -> Result<Op
 }
 
 /// Apply a parameterized single-qubit gate: fn(circuit, qubit, angle) -> circuit
-fn apply_gate_1q_param(args: &[Value], make_gate: impl Fn(usize, f64) -> Gate) -> Result<Option<Value>, String> {
+fn apply_gate_1q_param(
+    args: &[Value],
+    make_gate: impl Fn(usize, f64) -> Gate,
+) -> Result<Option<Value>, String> {
     if args.len() != 3 {
-        return Err(format!("gate requires (circuit, qubit, angle), got {} args", args.len()));
+        return Err(format!(
+            "gate requires (circuit, qubit, angle), got {} args",
+            args.len()
+        ));
     }
     let q = extract_qubit_index(&args[1], "qubit")?;
     let theta = extract_angle(&args[2], "angle")?;
@@ -1449,9 +1579,15 @@ fn apply_gate_1q_param(args: &[Value], make_gate: impl Fn(usize, f64) -> Gate) -
 }
 
 /// Apply a two-qubit gate: fn(circuit, qubit_a, qubit_b) -> circuit
-fn apply_gate_2q(args: &[Value], make_gate: impl Fn(usize, usize) -> Gate) -> Result<Option<Value>, String> {
+fn apply_gate_2q(
+    args: &[Value],
+    make_gate: impl Fn(usize, usize) -> Gate,
+) -> Result<Option<Value>, String> {
     if args.len() != 3 {
-        return Err(format!("gate requires (circuit, qubit_a, qubit_b), got {} args", args.len()));
+        return Err(format!(
+            "gate requires (circuit, qubit_a, qubit_b), got {} args",
+            args.len()
+        ));
     }
     let a = extract_qubit_index(&args[1], "qubit_a")?;
     let b = extract_qubit_index(&args[2], "qubit_b")?;
@@ -1486,12 +1622,20 @@ mod tests {
 
     #[test]
     fn test_gate_chain() {
-        let circ = dispatch_quantum("qubits", &[Value::Int(2)]).unwrap().unwrap();
-        let circ = dispatch_quantum("q_h", &[circ.clone(), Value::Int(0)]).unwrap().unwrap();
-        let circ = dispatch_quantum("q_cx", &[circ.clone(), Value::Int(0), Value::Int(1)]).unwrap().unwrap();
+        let circ = dispatch_quantum("qubits", &[Value::Int(2)])
+            .unwrap()
+            .unwrap();
+        let circ = dispatch_quantum("q_h", &[circ.clone(), Value::Int(0)])
+            .unwrap()
+            .unwrap();
+        let circ = dispatch_quantum("q_cx", &[circ.clone(), Value::Int(0), Value::Int(1)])
+            .unwrap()
+            .unwrap();
 
         // Check n_gates
-        let n = dispatch_quantum("q_n_gates", &[circ.clone()]).unwrap().unwrap();
+        let n = dispatch_quantum("q_n_gates", &[circ.clone()])
+            .unwrap()
+            .unwrap();
         match n {
             Value::Int(2) => {}
             other => panic!("Expected Int(2), got {}", other),
@@ -1500,11 +1644,19 @@ mod tests {
 
     #[test]
     fn test_q_probs_bell_state() {
-        let circ = dispatch_quantum("qubits", &[Value::Int(2)]).unwrap().unwrap();
-        let circ = dispatch_quantum("q_h", &[circ.clone(), Value::Int(0)]).unwrap().unwrap();
-        let circ = dispatch_quantum("q_cx", &[circ.clone(), Value::Int(0), Value::Int(1)]).unwrap().unwrap();
+        let circ = dispatch_quantum("qubits", &[Value::Int(2)])
+            .unwrap()
+            .unwrap();
+        let circ = dispatch_quantum("q_h", &[circ.clone(), Value::Int(0)])
+            .unwrap()
+            .unwrap();
+        let circ = dispatch_quantum("q_cx", &[circ.clone(), Value::Int(0), Value::Int(1)])
+            .unwrap()
+            .unwrap();
 
-        let probs = dispatch_quantum("q_probs", &[circ.clone()]).unwrap().unwrap();
+        let probs = dispatch_quantum("q_probs", &[circ.clone()])
+            .unwrap()
+            .unwrap();
         if let Value::Array(arr) = probs {
             assert_eq!(arr.len(), 4);
             // Bell state: P(|00⟩) ≈ 0.5, P(|01⟩) ≈ 0, P(|10⟩) ≈ 0, P(|11⟩) ≈ 0.5
@@ -1519,32 +1671,64 @@ mod tests {
 
     #[test]
     fn test_q_measure_deterministic() {
-        let circ = dispatch_quantum("qubits", &[Value::Int(2)]).unwrap().unwrap();
-        let circ = dispatch_quantum("q_h", &[circ.clone(), Value::Int(0)]).unwrap().unwrap();
-        let circ = dispatch_quantum("q_cx", &[circ.clone(), Value::Int(0), Value::Int(1)]).unwrap().unwrap();
+        let circ = dispatch_quantum("qubits", &[Value::Int(2)])
+            .unwrap()
+            .unwrap();
+        let circ = dispatch_quantum("q_h", &[circ.clone(), Value::Int(0)])
+            .unwrap()
+            .unwrap();
+        let circ = dispatch_quantum("q_cx", &[circ.clone(), Value::Int(0), Value::Int(1)])
+            .unwrap()
+            .unwrap();
 
-        let r1 = dispatch_quantum("q_measure", &[circ.clone(), Value::Int(42)]).unwrap().unwrap();
-        let r2 = dispatch_quantum("q_measure", &[circ.clone(), Value::Int(42)]).unwrap().unwrap();
+        let r1 = dispatch_quantum("q_measure", &[circ.clone(), Value::Int(42)])
+            .unwrap()
+            .unwrap();
+        let r2 = dispatch_quantum("q_measure", &[circ.clone(), Value::Int(42)])
+            .unwrap()
+            .unwrap();
         // Compare string representations since Value doesn't implement PartialEq
-        assert_eq!(format!("{}", r1), format!("{}", r2), "Same seed must produce same measurement");
+        assert_eq!(
+            format!("{}", r1),
+            format!("{}", r2),
+            "Same seed must produce same measurement"
+        );
     }
 
     #[test]
     fn test_q_sample_deterministic() {
-        let circ = dispatch_quantum("qubits", &[Value::Int(1)]).unwrap().unwrap();
-        let circ = dispatch_quantum("q_h", &[circ.clone(), Value::Int(0)]).unwrap().unwrap();
+        let circ = dispatch_quantum("qubits", &[Value::Int(1)])
+            .unwrap()
+            .unwrap();
+        let circ = dispatch_quantum("q_h", &[circ.clone(), Value::Int(0)])
+            .unwrap()
+            .unwrap();
 
-        let s1 = dispatch_quantum("q_sample", &[circ.clone(), Value::Int(100), Value::Int(42)]).unwrap().unwrap();
-        let s2 = dispatch_quantum("q_sample", &[circ.clone(), Value::Int(100), Value::Int(42)]).unwrap().unwrap();
-        assert_eq!(format!("{}", s1), format!("{}", s2), "Same seed must produce same samples");
+        let s1 = dispatch_quantum("q_sample", &[circ.clone(), Value::Int(100), Value::Int(42)])
+            .unwrap()
+            .unwrap();
+        let s2 = dispatch_quantum("q_sample", &[circ.clone(), Value::Int(100), Value::Int(42)])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            format!("{}", s1),
+            format!("{}", s2),
+            "Same seed must produce same samples"
+        );
     }
 
     #[test]
     fn test_q_amplitudes() {
-        let circ = dispatch_quantum("qubits", &[Value::Int(1)]).unwrap().unwrap();
-        let circ = dispatch_quantum("q_h", &[circ.clone(), Value::Int(0)]).unwrap().unwrap();
+        let circ = dispatch_quantum("qubits", &[Value::Int(1)])
+            .unwrap()
+            .unwrap();
+        let circ = dispatch_quantum("q_h", &[circ.clone(), Value::Int(0)])
+            .unwrap()
+            .unwrap();
 
-        let amps = dispatch_quantum("q_amplitudes", &[circ.clone()]).unwrap().unwrap();
+        let amps = dispatch_quantum("q_amplitudes", &[circ.clone()])
+            .unwrap()
+            .unwrap();
         if let Value::Array(arr) = amps {
             assert_eq!(arr.len(), 2);
         } else {
@@ -1560,10 +1744,18 @@ mod tests {
 
     #[test]
     fn test_rotation_gates() {
-        let circ = dispatch_quantum("qubits", &[Value::Int(1)]).unwrap().unwrap();
-        let circ = dispatch_quantum("q_rx", &[circ.clone(), Value::Int(0), Value::Float(1.57)]).unwrap().unwrap();
-        let circ = dispatch_quantum("q_ry", &[circ.clone(), Value::Int(0), Value::Float(1.57)]).unwrap().unwrap();
-        let circ = dispatch_quantum("q_rz", &[circ.clone(), Value::Int(0), Value::Float(1.57)]).unwrap().unwrap();
+        let circ = dispatch_quantum("qubits", &[Value::Int(1)])
+            .unwrap()
+            .unwrap();
+        let circ = dispatch_quantum("q_rx", &[circ.clone(), Value::Int(0), Value::Float(1.57)])
+            .unwrap()
+            .unwrap();
+        let circ = dispatch_quantum("q_ry", &[circ.clone(), Value::Int(0), Value::Float(1.57)])
+            .unwrap()
+            .unwrap();
+        let circ = dispatch_quantum("q_rz", &[circ.clone(), Value::Int(0), Value::Float(1.57)])
+            .unwrap()
+            .unwrap();
         let n = dispatch_quantum("q_n_gates", &[circ]).unwrap().unwrap();
         match n {
             Value::Int(3) => {}

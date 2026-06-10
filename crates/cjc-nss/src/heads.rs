@@ -13,8 +13,8 @@
 //! Phase 3 will add separate heads for throughput-degradation, latency
 //! spike, and partial outage, plus a scheduler-advisory head.
 
-use crate::error::NssError;
 use crate::encoder::EncoderConfig;
+use crate::error::NssError;
 use crate::failure::FailurePrediction;
 use crate::pressure::PressureKind;
 use crate::seed::NssSeed;
@@ -347,8 +347,8 @@ mod tests {
     fn end_to_end_pipeline_smoke() {
         // Encoder → temporal → head → attribution. Verifies wire-up.
         let enc = SystemEncoder::from_seed(EncoderConfig::default(), NssSeed(42)).unwrap();
-        let tem = TemporalStateEngine::from_seed(TemporalStateConfig::default(), NssSeed(42))
-            .unwrap();
+        let tem =
+            TemporalStateEngine::from_seed(TemporalStateConfig::default(), NssSeed(42)).unwrap();
         let (head, attr) = fully_wired_head();
         let state = SystemState::initial();
         let z = enc.forward(&state);

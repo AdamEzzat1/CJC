@@ -250,24 +250,24 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-pub mod error;
-pub mod pressure;
-pub mod scheduler;
-pub mod failure;
-pub mod system;
-pub mod seed;
-pub mod simulator;
-pub mod propagation;
 pub mod encoder;
-pub mod temporal;
+pub mod error;
+pub mod failure;
 pub mod heads;
 pub mod nss;
+pub mod pressure;
+pub mod propagation;
 pub mod replay;
+pub mod scheduler;
+pub mod seed;
+pub mod simulator;
+pub mod system;
+pub mod temporal;
 
 // Phase 2 — distributed cluster simulator + cluster-aware NSS.
 pub mod cluster;
-pub mod cluster_simulator;
 pub mod cluster_nss;
+pub mod cluster_simulator;
 
 // Phase 2b — GPU training simulator (data-parallel, lockstep microbatches).
 pub mod gpu_training;
@@ -293,36 +293,46 @@ pub mod mir_adapter;
 // Phase 5b — pressure-legality verifier (static analysis on intervention scripts).
 pub mod legality;
 
+// Phase 6 — density-matrix-inspired pressure correlation summary.
+// Used by `cjc-cana-compress` for the CANA↔NSS bridge: a compression
+// decision shifts the diagonal magnitudes (memory pressure down, with a
+// reconstruction-risk uptick on the advisory axis) and the resulting
+// summary feeds back into CANA's energy ranking. The module itself is
+// purely structural — it produces deterministic summaries from
+// pressure trajectories and never reaches back into NSS's simulators
+// or schedulers.
+pub mod density;
+
+pub use encoder::{EncoderConfig, SystemEncoder};
 pub use error::NssError;
-pub use pressure::{
-    Pressure, PressureEdge, PressureField, PressureFlow, PressureGraph, PressureKind,
-};
-pub use scheduler::{SchedulerAction, SchedulerKind};
 pub use failure::{FailureKind, FailurePrediction, FailureState};
-pub use system::{SystemEvent, SystemState, SystemTrajectory};
-pub use seed::{InputHash, NssRunId, NssSeed};
-pub use simulator::{QueueConfig, QueueSimulator, QueueSnapshot};
-pub use propagation::{PressurePropagator, PropagationConfig};
-pub use encoder::{SystemEncoder, EncoderConfig};
-pub use temporal::{TemporalStateEngine, TemporalStateConfig};
 pub use heads::{
     CausalAttribution, CausalAttributionHead, FailurePredictionHead, HeadConfig,
     PressureContribution,
 };
 pub use nss::{NeuralSystemsSimulator, NssConfig, NssPrediction};
+pub use pressure::{
+    Pressure, PressureEdge, PressureField, PressureFlow, PressureGraph, PressureKind,
+};
+pub use propagation::{PressurePropagator, PropagationConfig};
 pub use replay::{PredictionTrace, ReplayValidator, TransitionRecord};
+pub use scheduler::{SchedulerAction, SchedulerKind};
+pub use seed::{InputHash, NssRunId, NssSeed};
+pub use simulator::{QueueConfig, QueueSimulator, QueueSnapshot};
+pub use system::{SystemEvent, SystemState, SystemTrajectory};
+pub use temporal::{TemporalStateConfig, TemporalStateEngine};
 
 // Phase 2 re-exports.
 pub use cluster::{
     ClusterEvent, ClusterSystemState, ClusterTopology, ClusterTrajectory, NetworkLink, NodeHealth,
     NodeId,
 };
-pub use cluster_simulator::{ClusterConfig, ClusterSimulator, Intervention, RoutingPolicy};
 pub use cluster_nss::{
     cluster_summary_label, ClusterCausalAttribution, ClusterFailurePredictionHead,
     ClusterNeuralSystemsSimulator, ClusterNssConfig, ClusterPrediction, ClusterReplayValidator,
     ClusterTrace, CLUSTER_SUMMARY_FEATURES,
 };
+pub use cluster_simulator::{ClusterConfig, ClusterSimulator, Intervention, RoutingPolicy};
 
 // Phase 2b re-exports.
 pub use gpu_training::{GpuTrainingConfig, GpuTrainingSimulator};
@@ -340,11 +350,13 @@ pub use counterfactual::{
 };
 
 // Phase 3b re-exports.
-pub use multi_timescale::{MultiTimescaleConfig, MultiTimescaleEngine, Timescale};
 pub use cluster_nss::TemporalMode;
+pub use multi_timescale::{MultiTimescaleConfig, MultiTimescaleEngine, Timescale};
 
 // Phase 3c re-exports.
-pub use advisory::{AdvisorConfig, AdvisoryAction, AdvisoryCandidate, AdvisoryRanking, SchedulerAdvisor};
+pub use advisory::{
+    AdvisorConfig, AdvisoryAction, AdvisoryCandidate, AdvisoryRanking, SchedulerAdvisor,
+};
 
 // Phase 4 re-exports.
 pub use autonomous::{
@@ -360,6 +372,10 @@ pub use mir_adapter::{
 
 // Phase 5b re-exports.
 pub use legality::{LegalityConfig, LegalityReport, LegalityVerifier, LegalityViolation};
+
+// Phase 6 re-exports — density-matrix-inspired pressure correlation
+// summary, consumed by the CANA compression bridge.
+pub use density::{PressureCorrelationSummary, PressureDensityState};
 
 /// Crate version stamped into every [`PredictionTrace`]. Phase 1 is
 /// `0.1.0` of the NSS surface; bump on every non-backward-compatible

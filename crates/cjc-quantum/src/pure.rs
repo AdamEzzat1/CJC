@@ -45,16 +45,24 @@ const CZERO: C = (0.0, 0.0);
 const CONE: C = (1.0, 0.0);
 
 #[inline]
-fn c_re(a: C) -> f64 { a.0 }
+fn c_re(a: C) -> f64 {
+    a.0
+}
 
 #[inline]
-fn c_im(a: C) -> f64 { a.1 }
+fn c_im(a: C) -> f64 {
+    a.1
+}
 
 #[inline]
-fn c_add(a: C, b: C) -> C { (a.0 + b.0, a.1 + b.1) }
+fn c_add(a: C, b: C) -> C {
+    (a.0 + b.0, a.1 + b.1)
+}
 
 #[inline]
-fn c_sub(a: C, b: C) -> C { (a.0 - b.0, a.1 - b.1) }
+fn c_sub(a: C, b: C) -> C {
+    (a.0 - b.0, a.1 - b.1)
+}
 
 #[inline]
 fn c_mul(a: C, b: C) -> C {
@@ -63,19 +71,29 @@ fn c_mul(a: C, b: C) -> C {
 }
 
 #[inline]
-fn c_conj(a: C) -> C { (a.0, -a.1) }
+fn c_conj(a: C) -> C {
+    (a.0, -a.1)
+}
 
 #[inline]
-fn c_abs2(a: C) -> f64 { a.0 * a.0 + a.1 * a.1 }
+fn c_abs2(a: C) -> f64 {
+    a.0 * a.0 + a.1 * a.1
+}
 
 #[inline]
-fn c_abs(a: C) -> f64 { c_abs2(a).sqrt() }
+fn c_abs(a: C) -> f64 {
+    c_abs2(a).sqrt()
+}
 
 #[inline]
-fn c_scale(s: f64, a: C) -> C { (s * a.0, s * a.1) }
+fn c_scale(s: f64, a: C) -> C {
+    (s * a.0, s * a.1)
+}
 
 #[inline]
-fn c_neg(a: C) -> C { (-a.0, -a.1) }
+fn c_neg(a: C) -> C {
+    (-a.0, -a.1)
+}
 
 /// Kahan-compensated sum for deterministic f64 accumulation.
 fn kahan_sum(vals: &[f64]) -> f64 {
@@ -235,7 +253,11 @@ impl PureMpsTensor {
         let mut data = vec![CZERO; 2 * bl * br];
         // |0⟩ state: T[0][0][0] = 1, rest = 0
         data[0] = CONE;
-        PureMpsTensor { bond_left: bl, bond_right: br, data }
+        PureMpsTensor {
+            bond_left: bl,
+            bond_right: br,
+            data,
+        }
     }
 
     fn get(&self, phys: usize, r: usize, c: usize) -> C {
@@ -266,7 +288,11 @@ impl PureMps {
         let tensors: Vec<PureMpsTensor> = (0..n_qubits)
             .map(|_| PureMpsTensor::new_zero_state(1, 1))
             .collect();
-        PureMps { n_qubits, max_bond, tensors }
+        PureMps {
+            n_qubits,
+            max_bond,
+            tensors,
+        }
     }
 
     /// Apply a 2x2 unitary gate to qubit q (in-place).
@@ -291,7 +317,11 @@ impl PureMps {
         let diff = (ctrl as isize - targ as isize).unsigned_abs();
         assert_eq!(diff, 1, "Pure MPS CNOT requires adjacent qubits");
 
-        let (left_idx, right_idx) = if ctrl < targ { (ctrl, targ) } else { (targ, ctrl) };
+        let (left_idx, right_idx) = if ctrl < targ {
+            (ctrl, targ)
+        } else {
+            (targ, ctrl)
+        };
         let tl = self.tensors[left_idx].clone();
         let tr = self.tensors[right_idx].clone();
 
@@ -321,10 +351,7 @@ impl PureMps {
                     for r in 0..br {
                         let mut val = CZERO;
                         for m in 0..bm {
-                            val = c_add(val, c_mul(
-                                tl.get(new_sl, l, m),
-                                tr.get(new_sr, m, r),
-                            ));
+                            val = c_add(val, c_mul(tl.get(new_sl, l, m), tr.get(new_sr, m, r)));
                         }
                         let row = sl * bl + l;
                         let col = sr * br + r;
@@ -336,7 +363,12 @@ impl PureMps {
 
         // SVD and truncate
         let (u, s, v) = jacobi_svd(&combined, rows, cols);
-        let k = s.iter().take_while(|&&sv| sv > 1e-14).count().max(1).min(self.max_bond);
+        let k = s
+            .iter()
+            .take_while(|&&sv| sv > 1e-14)
+            .count()
+            .max(1)
+            .min(self.max_bond);
 
         // Rebuild left tensor: T_left[sl][l][bond_new] = U[sl*bl+l, bond_new] * sqrt(S[bond_new])
         let new_bl_left = tl.bond_left;
@@ -404,7 +436,11 @@ impl PureMps {
             // sigma_z factor: +1 for phys=0, -1 for phys=1 (at site q)
             for phys in 0..2usize {
                 let z_factor = if site == q {
-                    if phys == 0 { 1.0 } else { -1.0 }
+                    if phys == 0 {
+                        1.0
+                    } else {
+                        -1.0
+                    }
                 } else {
                     1.0
                 };
@@ -417,13 +453,11 @@ impl PureMps {
                                 let bra = c_conj(t.get(phys, l1, r1));
                                 let ket = t.get(phys, l2, r2);
                                 let env_val = env[l1 * env_cols + l2];
-                                val = c_add(val, c_scale(z_factor, c_mul(c_mul(bra, env_val), ket)));
+                                val =
+                                    c_add(val, c_scale(z_factor, c_mul(c_mul(bra, env_val), ket)));
                             }
                         }
-                        new_env[r1 * new_cols + r2] = c_add(
-                            new_env[r1 * new_cols + r2],
-                            val,
-                        );
+                        new_env[r1 * new_cols + r2] = c_add(new_env[r1 * new_cols + r2], val);
                     }
                 }
             }
@@ -440,23 +474,28 @@ impl PureMps {
 
     /// Estimate total memory usage in bytes.
     pub fn memory_bytes(&self) -> usize {
-        self.tensors.iter()
+        self.tensors
+            .iter()
             .map(|t| t.data.len() * 16) // 16 bytes per complex (2 × f64)
             .sum()
     }
 
     /// Convert to CJC-inspectable Value::Map.
     pub fn to_value_map(&self) -> Value {
-        let tensors: Vec<Value> = self.tensors.iter().map(|t| {
-            let data_re: Vec<Value> = t.data.iter().map(|c| Value::Float(c.0)).collect();
-            let data_im: Vec<Value> = t.data.iter().map(|c| Value::Float(c.1)).collect();
-            make_map(vec![
-                ("bond_left", Value::Int(t.bond_left as i64)),
-                ("bond_right", Value::Int(t.bond_right as i64)),
-                ("data_re", Value::Array(Rc::new(data_re))),
-                ("data_im", Value::Array(Rc::new(data_im))),
-            ])
-        }).collect();
+        let tensors: Vec<Value> = self
+            .tensors
+            .iter()
+            .map(|t| {
+                let data_re: Vec<Value> = t.data.iter().map(|c| Value::Float(c.0)).collect();
+                let data_im: Vec<Value> = t.data.iter().map(|c| Value::Float(c.1)).collect();
+                make_map(vec![
+                    ("bond_left", Value::Int(t.bond_left as i64)),
+                    ("bond_right", Value::Int(t.bond_right as i64)),
+                    ("data_re", Value::Array(Rc::new(data_re))),
+                    ("data_im", Value::Array(Rc::new(data_im))),
+                ])
+            })
+            .collect();
 
         make_map(vec![
             ("_backend", Value::String(Rc::new("pure".into()))),
@@ -511,11 +550,17 @@ impl PureStabilizer {
         for i in 0..n {
             let w = i / 64;
             let b = i % 64;
-            z[i][w] = 1u64 << b;          // stabilizer i = Z_i
-            x[n + i][w] = 1u64 << b;      // destabilizer i = X_i
+            z[i][w] = 1u64 << b; // stabilizer i = Z_i
+            x[n + i][w] = 1u64 << b; // destabilizer i = X_i
         }
 
-        PureStabilizer { n, words_per_row: words, x, z, phase }
+        PureStabilizer {
+            n,
+            words_per_row: words,
+            x,
+            z,
+            phase,
+        }
     }
 
     fn get_x(&self, row: usize, qubit: usize) -> bool {
@@ -564,10 +609,10 @@ impl PureStabilizer {
             // Count +i and -i contributions from Pauli multiplication
             let pos = (x1 & !z1 & x2 & z2)       // X * Y → +i
                     | (!x1 & z1 & x2 & !z2)       // Z * X → +i
-                    | (x1 & z1 & z2 & !x2);       // Y * Z → +i
+                    | (x1 & z1 & z2 & !x2); // Y * Z → +i
             let neg = (x1 & !z1 & !x2 & z2)       // X * Z → -i
                     | (!x1 & z1 & x2 & z2)         // Z * Y → -i
-                    | (x1 & z1 & x2 & !z2);        // Y * X → -i
+                    | (x1 & z1 & x2 & !z2); // Y * X → -i
 
             phase_sum += pos.count_ones() as i64;
             phase_sum -= neg.count_ones() as i64;
@@ -728,12 +773,16 @@ impl PureStabilizer {
 
     /// Convert to CJC-inspectable Value::Map.
     pub fn to_value_map(&self) -> Value {
-        let x_arr: Vec<Value> = self.x.iter().map(|row| {
-            Value::Array(Rc::new(row.iter().map(|&w| Value::Int(w as i64)).collect()))
-        }).collect();
-        let z_arr: Vec<Value> = self.z.iter().map(|row| {
-            Value::Array(Rc::new(row.iter().map(|&w| Value::Int(w as i64)).collect()))
-        }).collect();
+        let x_arr: Vec<Value> = self
+            .x
+            .iter()
+            .map(|row| Value::Array(Rc::new(row.iter().map(|&w| Value::Int(w as i64)).collect())))
+            .collect();
+        let z_arr: Vec<Value> = self
+            .z
+            .iter()
+            .map(|row| Value::Array(Rc::new(row.iter().map(|&w| Value::Int(w as i64)).collect())))
+            .collect();
         let phase_arr: Vec<Value> = self.phase.iter().map(|&p| Value::Int(p as i64)).collect();
 
         make_map(vec![
@@ -770,7 +819,11 @@ impl PureDensity {
         let dim = 1 << n_qubits;
         let mut data = vec![CZERO; dim * dim];
         data[0] = CONE; // |0⟩⟨0|
-        PureDensity { n_qubits, dim, data }
+        PureDensity {
+            n_qubits,
+            dim,
+            data,
+        }
     }
 
     fn get(&self, r: usize, c: usize) -> C {
@@ -953,7 +1006,9 @@ impl PureDensity {
 
     /// Measurement probabilities: P(k) = rho[k,k].re for each basis state k.
     pub fn probabilities(&self) -> Vec<f64> {
-        (0..self.dim).map(|i| c_re(self.get(i, i)).max(0.0)).collect()
+        (0..self.dim)
+            .map(|i| c_re(self.get(i, i)).max(0.0))
+            .collect()
     }
 
     /// Compute eigenvalues of Hermitian matrix using Jacobi eigenvalue algorithm.
@@ -1090,7 +1145,10 @@ pub struct PureCircuit {
 impl PureCircuit {
     /// Create an empty circuit on `n` qubits.
     pub fn new(n: usize) -> Self {
-        PureCircuit { n_qubits: n, gates: vec![] }
+        PureCircuit {
+            n_qubits: n,
+            gates: vec![],
+        }
     }
 
     /// Append a gate to the circuit.
@@ -1127,7 +1185,10 @@ impl PureCircuit {
             }
         }
 
-        PureStatevector { n_qubits: self.n_qubits, amplitudes: sv }
+        PureStatevector {
+            n_qubits: self.n_qubits,
+            amplitudes: sv,
+        }
     }
 
     fn apply_1q(&self, sv: &mut [C], q: usize, u: &[[C; 2]; 2]) {
@@ -1240,19 +1301,21 @@ impl PureStatevector {
     /// Sample `n_shots` measurement outcomes as basis-state indices.
     pub fn sample(&self, n_shots: usize, rng: &mut u64) -> Vec<usize> {
         let probs = self.probabilities();
-        (0..n_shots).map(|_| {
-            let r = splitmix64_f64(rng);
-            let mut cum = 0.0;
-            let mut out = 0;
-            for (i, &p) in probs.iter().enumerate() {
-                cum += p;
-                if r < cum {
-                    out = i;
-                    break;
+        (0..n_shots)
+            .map(|_| {
+                let r = splitmix64_f64(rng);
+                let mut cum = 0.0;
+                let mut out = 0;
+                for (i, &p) in probs.iter().enumerate() {
+                    cum += p;
+                    if r < cum {
+                        out = i;
+                        break;
+                    }
                 }
-            }
-            out
-        }).collect()
+                out
+            })
+            .collect()
     }
 }
 
@@ -1263,8 +1326,7 @@ impl PureStatevector {
 /// Return the 2x2 Hadamard gate matrix.
 pub fn h_matrix() -> [[C; 2]; 2] {
     let isq2 = 1.0 / 2.0f64.sqrt();
-    [[(isq2, 0.0), (isq2, 0.0)],
-     [(isq2, 0.0), (-isq2, 0.0)]]
+    [[(isq2, 0.0), (isq2, 0.0)], [(isq2, 0.0), (-isq2, 0.0)]]
 }
 
 /// Return the 2x2 Pauli-X gate matrix.
@@ -1370,7 +1432,10 @@ pub struct PureFermionicHamiltonian {
 impl PureFermionicHamiltonian {
     /// Create an empty Hamiltonian on `n` qubits.
     pub fn new(n: usize) -> Self {
-        PureFermionicHamiltonian { n_qubits: n, terms: Vec::new() }
+        PureFermionicHamiltonian {
+            n_qubits: n,
+            terms: Vec::new(),
+        }
     }
 
     /// Add a Pauli term to the Hamiltonian.
@@ -1423,7 +1488,9 @@ fn pure_apply_pauli(ops: &[PurePauli], k: usize) -> (usize, C) {
         let bit = (k >> q) & 1;
         match op {
             PurePauli::I => {}
-            PurePauli::X => { k_new ^= 1 << q; }
+            PurePauli::X => {
+                k_new ^= 1 << q;
+            }
             PurePauli::Y => {
                 k_new ^= 1 << q;
                 if bit == 0 {
@@ -1433,7 +1500,9 @@ fn pure_apply_pauli(ops: &[PurePauli], k: usize) -> (usize, C) {
                 }
             }
             PurePauli::Z => {
-                if bit == 1 { phase = c_neg(phase); }
+                if bit == 1 {
+                    phase = c_neg(phase);
+                }
             }
         }
     }
@@ -1443,13 +1512,17 @@ fn pure_apply_pauli(ops: &[PurePauli], k: usize) -> (usize, C) {
 /// Pure CJC H₂ Hamiltonian (same coefficients as Rust backend).
 pub fn pure_h2_hamiltonian() -> PureFermionicHamiltonian {
     let mut h = PureFermionicHamiltonian::new(2);
-    let mk = |re: f64, ops: Vec<PurePauli>| PurePauliTerm { coeff_re: re, coeff_im: 0.0, ops };
+    let mk = |re: f64, ops: Vec<PurePauli>| PurePauliTerm {
+        coeff_re: re,
+        coeff_im: 0.0,
+        ops,
+    };
     h.add_term(mk(-0.4804, vec![PurePauli::I, PurePauli::I]));
-    h.add_term(mk(0.3435,  vec![PurePauli::Z, PurePauli::I]));
+    h.add_term(mk(0.3435, vec![PurePauli::Z, PurePauli::I]));
     h.add_term(mk(-0.4347, vec![PurePauli::I, PurePauli::Z]));
-    h.add_term(mk(0.5716,  vec![PurePauli::Z, PurePauli::Z]));
-    h.add_term(mk(0.0910,  vec![PurePauli::X, PurePauli::X]));
-    h.add_term(mk(0.0910,  vec![PurePauli::Y, PurePauli::Y]));
+    h.add_term(mk(0.5716, vec![PurePauli::Z, PurePauli::Z]));
+    h.add_term(mk(0.0910, vec![PurePauli::X, PurePauli::X]));
+    h.add_term(mk(0.0910, vec![PurePauli::Y, PurePauli::Y]));
     h
 }
 
@@ -1601,7 +1674,10 @@ pub fn pure_richardson_extrapolate(
         let mut max_row = col;
         for row in (col + 1)..n {
             let v = mat[row][col].abs();
-            if v > max_val { max_val = v; max_row = row; }
+            if v > max_val {
+                max_val = v;
+                max_row = row;
+            }
         }
         if max_val < 1e-15 {
             return Err("singular Vandermonde system".into());
@@ -1612,14 +1688,18 @@ pub fn pure_richardson_extrapolate(
         }
         for row in (col + 1)..n {
             let factor = mat[row][col] / mat[col][col];
-            for j in col..n { mat[row][j] -= factor * mat[col][j]; }
+            for j in col..n {
+                mat[row][j] -= factor * mat[col][j];
+            }
             rhs[row] -= factor * rhs[col];
         }
     }
     let mut coefficients = vec![0.0f64; n];
     for i in (0..n).rev() {
         let mut sum = rhs[i];
-        for j in (i + 1)..n { sum -= mat[i][j] * coefficients[j]; }
+        for j in (i + 1)..n {
+            sum -= mat[i][j] * coefficients[j];
+        }
         coefficients[i] = sum / mat[i][i];
     }
 
@@ -1725,7 +1805,11 @@ mod tests {
         let mps = PureMps::new(3, 4);
         assert_eq!(mps.n_qubits, 3);
         let z0 = mps.z_expectation(0);
-        assert!((z0 - 1.0).abs() < 1e-10, "|0⟩ Z-exp should be 1, got {}", z0);
+        assert!(
+            (z0 - 1.0).abs() < 1e-10,
+            "|0⟩ Z-exp should be 1, got {}",
+            z0
+        );
     }
 
     #[test]
@@ -1741,7 +1825,11 @@ mod tests {
         let mut mps = PureMps::new(3, 4);
         mps.apply_single_qubit(1, x_matrix());
         let z = mps.z_expectation(1);
-        assert!((z - (-1.0)).abs() < 1e-10, "X|0⟩ Z-exp should be -1, got {}", z);
+        assert!(
+            (z - (-1.0)).abs() < 1e-10,
+            "X|0⟩ Z-exp should be -1, got {}",
+            z
+        );
     }
 
     #[test]
@@ -1800,7 +1888,11 @@ mod tests {
         let mut d = PureDensity::new(2);
         d.apply_gate_2x2(0, h_matrix());
         let p = d.purity();
-        assert!((p - 1.0).abs() < 1e-10, "Pure state purity should be 1, got {}", p);
+        assert!(
+            (p - 1.0).abs() < 1e-10,
+            "Pure state purity should be 1, got {}",
+            p
+        );
     }
 
     #[test]

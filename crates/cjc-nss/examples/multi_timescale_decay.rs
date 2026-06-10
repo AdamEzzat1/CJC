@@ -23,14 +23,16 @@ fn main() {
     };
     let engine = MultiTimescaleEngine::from_seed(cfg.clone(), NssSeed(2026)).unwrap();
 
-    println!("[config] {} timescales, per_scale_dim={}, total_state_dim={}",
+    println!(
+        "[config] {} timescales, per_scale_dim={}, total_state_dim={}",
         cfg.timescales.len(),
         cfg.per_scale_dim,
         cfg.total_state_dim(),
     );
     println!("[half-lives] expected exponential decay half-lives (ticks):");
     for ts in &cfg.timescales {
-        println!("    {:>10}  α={:.2}  half-life ≈ {:.1} ticks",
+        println!(
+            "    {:>10}  α={:.2}  half-life ≈ {:.1} ticks",
             ts.label(),
             ts.default_alpha(),
             ts.half_life_ticks(),
@@ -69,7 +71,9 @@ fn main() {
 
     // --- Experiment 3: spike + sustained (composite signal) ---
     println!("\n[experiment 3] spike at t=0, sustained low input thereafter");
-    println!("    interpretation: short captures the spike; structural integrates the sustained signal");
+    println!(
+        "    interpretation: short captures the spike; structural integrates the sustained signal"
+    );
     println!("    tick  | short    | medium   | long     | structural");
     println!("    ------+----------+----------+----------+-----------");
     let spike = vec![1.0; 4];

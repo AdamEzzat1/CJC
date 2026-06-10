@@ -109,7 +109,11 @@ impl SystemEvent {
         failure: FailureState,
     ) -> Result<Self, NssError> {
         state.validate()?;
-        Ok(Self { state, action, failure })
+        Ok(Self {
+            state,
+            action,
+            failure,
+        })
     }
 
     /// Canonical bytes covering state + action + failure. Order is
@@ -284,10 +288,8 @@ mod tests {
         for i in 0..10 {
             let mut s = SystemState::initial();
             s.tick = i;
-            s.pressures.set(
-                PressureKind::Queue,
-                Pressure::new(0.1, 1.0, 0.0).unwrap(),
-            );
+            s.pressures
+                .set(PressureKind::Queue, Pressure::new(0.1, 1.0, 0.0).unwrap());
             t.push(SystemEvent::new(s, SchedulerAction::idle(), FailureState::nominal()).unwrap())
                 .unwrap();
         }

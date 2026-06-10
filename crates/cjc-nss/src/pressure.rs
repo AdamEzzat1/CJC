@@ -383,11 +383,7 @@ impl PressureGraph {
         }
         if self.edges.contains_key(&(src, dst)) {
             return Err(NssError::PressureGraph {
-                detail: format!(
-                    "duplicate edge {} -> {}",
-                    src.label(),
-                    dst.label()
-                ),
+                detail: format!("duplicate edge {} -> {}", src.label(), dst.label()),
             });
         }
         self.edges.insert((src, dst), edge);
@@ -457,7 +453,10 @@ mod tests {
         let kinds = PressureKind::all();
         let mut sorted = kinds;
         sorted.sort();
-        assert_eq!(kinds, sorted, "PressureKind variants must be declared in Ord-sorted order");
+        assert_eq!(
+            kinds, sorted,
+            "PressureKind variants must be declared in Ord-sorted order"
+        );
     }
 
     #[test]
@@ -517,17 +516,11 @@ mod tests {
     fn canonical_bytes_stable_under_reinsertion() {
         // Insert in different orders, must hash to identical bytes.
         let mut a = PressureField::empty();
-        a.set(
-            PressureKind::Queue,
-            Pressure::new(0.2, 1.0, 0.1).unwrap(),
-        );
+        a.set(PressureKind::Queue, Pressure::new(0.2, 1.0, 0.1).unwrap());
         a.set(PressureKind::Cpu, Pressure::new(0.5, 1.0, 0.1).unwrap());
         let mut b = PressureField::empty();
         b.set(PressureKind::Cpu, Pressure::new(0.5, 1.0, 0.1).unwrap());
-        b.set(
-            PressureKind::Queue,
-            Pressure::new(0.2, 1.0, 0.1).unwrap(),
-        );
+        b.set(PressureKind::Queue, Pressure::new(0.2, 1.0, 0.1).unwrap());
         assert_eq!(a.canonical_bytes(), b.canonical_bytes());
     }
 
@@ -536,18 +529,25 @@ mod tests {
         let mut g = PressureGraph::empty();
         let e = PressureEdge::new(0.5, false).unwrap();
         assert!(g.add_edge(PressureKind::Cpu, PressureKind::Cpu, e).is_err());
-        assert!(g.add_edge(PressureKind::Cpu, PressureKind::Queue, e).is_ok());
-        assert!(g.add_edge(PressureKind::Cpu, PressureKind::Queue, e).is_err());
+        assert!(g
+            .add_edge(PressureKind::Cpu, PressureKind::Queue, e)
+            .is_ok());
+        assert!(g
+            .add_edge(PressureKind::Cpu, PressureKind::Queue, e)
+            .is_err());
     }
 
     #[test]
     fn default_phase1_graph_topology() {
         let g = PressureGraph::default_phase1();
-        assert!(g.get(PressureKind::Queue, PressureKind::Scheduler).is_some());
         assert!(g
             .get(PressureKind::Queue, PressureKind::Scheduler)
-            .unwrap()
-            .amplify_on_instability);
+            .is_some());
+        assert!(
+            g.get(PressureKind::Queue, PressureKind::Scheduler)
+                .unwrap()
+                .amplify_on_instability
+        );
         // No self-loops.
         for k in PressureKind::all() {
             assert!(g.get(k, k).is_none(), "self-loop on {:?}", k);

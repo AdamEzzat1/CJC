@@ -267,11 +267,7 @@ impl MultiTimescaleEngine {
     ///
     /// `h_prev` must have length `total_state_dim()`; the function
     /// slices it into per-scale chunks in `Timescale` order.
-    pub fn step_concatenated(
-        &self,
-        h_prev: &[f64],
-        z: &[f64],
-    ) -> Result<Vec<f64>, NssError> {
+    pub fn step_concatenated(&self, h_prev: &[f64], z: &[f64]) -> Result<Vec<f64>, NssError> {
         let total = self.cfg.total_state_dim();
         if h_prev.len() != total {
             return Err(NssError::InvalidState {
@@ -480,7 +476,11 @@ mod tests {
         );
         // Short should be ~zero (well below 0.1 after 32 ticks of α=0.5 decay
         // starting from a tanh-bounded state).
-        assert!(short_mag < 0.01, "short-term memory must decay fast, got {}", short_mag);
+        assert!(
+            short_mag < 0.01,
+            "short-term memory must decay fast, got {}",
+            short_mag
+        );
     }
 
     #[test]

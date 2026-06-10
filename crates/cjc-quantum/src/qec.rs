@@ -186,9 +186,7 @@ pub fn syndrome_extraction(
     code: &SurfaceCode,
     rng: &mut u64,
 ) -> Vec<u8> {
-    let mut syndrome = Vec::with_capacity(
-        code.z_stabilizers.len() + code.x_stabilizers.len(),
-    );
+    let mut syndrome = Vec::with_capacity(code.z_stabilizers.len() + code.x_stabilizers.len());
 
     // Z-stabilizer measurements.
     // CNOT(data -> ancilla) computes the parity of data qubit Z-basis values
@@ -491,7 +489,10 @@ mod tests {
         let syndrome = syndrome_extraction(&mut state, &code, &mut rng);
         // Stabilizers 1 (Z_1 Z_2) and 2 (Z_2 Z_3) should fire.
         let nonzero: usize = syndrome.iter().filter(|&&s| s == 1).count();
-        assert!(nonzero > 0, "Single X error should trigger at least one syndrome bit");
+        assert!(
+            nonzero > 0,
+            "Single X error should trigger at least one syndrome bit"
+        );
     }
 
     #[test]
@@ -514,7 +515,10 @@ mod tests {
         // Syndrome pattern for an error on data qubit 1: stabilizers 0 and 1 fire.
         let syndrome = vec![1, 1, 0, 0];
         let corrections = decode_repetition_code(&syndrome, &code);
-        assert!(!corrections.is_empty(), "Should suggest at least one correction");
+        assert!(
+            !corrections.is_empty(),
+            "Should suggest at least one correction"
+        );
     }
 
     #[test]
@@ -522,7 +526,10 @@ mod tests {
         let code = build_repetition_code(5);
         let syndrome = vec![0, 0, 0, 0];
         let corrections = decode_repetition_code(&syndrome, &code);
-        assert!(corrections.is_empty(), "No syndrome defects -> no corrections");
+        assert!(
+            corrections.is_empty(),
+            "No syndrome defects -> no corrections"
+        );
     }
 
     #[test]
@@ -531,7 +538,10 @@ mod tests {
         // Single defect at the boundary: only stabilizer 0 fires.
         let syndrome = vec![1, 0, 0, 0];
         let corrections = decode_repetition_code(&syndrome, &code);
-        assert!(!corrections.is_empty(), "Boundary defect should produce correction");
+        assert!(
+            !corrections.is_empty(),
+            "Boundary defect should produce correction"
+        );
     }
 
     // -- Logical error rate --------------------------------------------------

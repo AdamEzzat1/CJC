@@ -10,9 +10,9 @@
 //! - Post-measurement renormalization uses Kahan summation
 //! - Basis states processed in ascending index order
 
+use crate::statevector::Statevector;
 use cjc_repro::KahanAccumulatorF64;
 use cjc_runtime::complex::ComplexF64;
-use crate::statevector::Statevector;
 
 /// Measure a single qubit, collapsing the statevector.
 ///
@@ -23,7 +23,11 @@ use crate::statevector::Statevector;
 ///
 /// The `rng_state` parameter is a mutable SplitMix64 state. Same seed
 /// produces identical measurement outcomes across runs and platforms.
-pub fn measure_qubit(sv: &mut Statevector, qubit: usize, rng_state: &mut u64) -> Result<u8, String> {
+pub fn measure_qubit(
+    sv: &mut Statevector,
+    qubit: usize,
+    rng_state: &mut u64,
+) -> Result<u8, String> {
     sv.validate_qubit(qubit)?;
 
     let n = sv.n_states();
@@ -172,8 +176,10 @@ mod tests {
         let outcomes = measure_all(&mut sv, &mut rng).unwrap();
         assert_eq!(outcomes.len(), 2);
         // In Bell state (|00⟩+|11⟩)/√2, both qubits should agree
-        assert_eq!(outcomes[0], outcomes[1],
-            "Bell state qubits must be correlated");
+        assert_eq!(
+            outcomes[0], outcomes[1],
+            "Bell state qubits must be correlated"
+        );
     }
 
     #[test]
@@ -186,12 +192,19 @@ mod tests {
             Gate::H(0).apply(&mut sv).unwrap();
             let mut rng = seed;
             let outcome = measure_qubit(&mut sv, 0, &mut rng).unwrap();
-            if outcome == 0 { count0 += 1; } else { count1 += 1; }
+            if outcome == 0 {
+                count0 += 1;
+            } else {
+                count1 += 1;
+            }
         }
         // Should be roughly 50/50 (within 10% tolerance)
         let ratio = count0 as f64 / 1000.0;
-        assert!(ratio > 0.4 && ratio < 0.6,
-            "H|0⟩ measurement ratio: {} (expected ~0.5)", ratio);
+        assert!(
+            ratio > 0.4 && ratio < 0.6,
+            "H|0⟩ measurement ratio: {} (expected ~0.5)",
+            ratio
+        );
     }
 
     #[test]

@@ -5,8 +5,8 @@
 
 use cjc_nss::{
     ClusterConfig, ClusterNeuralSystemsSimulator, ClusterNssConfig, ClusterReplayValidator,
-    ClusterSimulator, ClusterSystemState, ClusterTopology, ClusterTrace, FailureKind,
-    Intervention, NodeHealth, NodeId, NssError, NssSeed, RoutingPolicy, NSS_MODEL_VERSION,
+    ClusterSimulator, ClusterSystemState, ClusterTopology, ClusterTrace, FailureKind, Intervention,
+    NodeHealth, NodeId, NssError, NssSeed, RoutingPolicy, NSS_MODEL_VERSION,
 };
 
 #[test]
@@ -242,7 +242,10 @@ fn intervention_changes_run_id() {
     let nss = ClusterNeuralSystemsSimulator::from_seed(nss_cfg, seed).unwrap();
     let pa = nss.predict_next(ta.last_state().unwrap()).unwrap();
     let pb = nss.predict_next(tb.last_state().unwrap()).unwrap();
-    assert_ne!(pa.run_id, pb.run_id, "intervention must change input state and thus run_id");
+    assert_ne!(
+        pa.run_id, pb.run_id,
+        "intervention must change input state and thus run_id"
+    );
 }
 
 #[test]

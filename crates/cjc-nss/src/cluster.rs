@@ -385,10 +385,7 @@ impl ClusterSystemState {
         for ((src, dst), c) in self.link_congestion.iter() {
             if !c.is_finite() || !(0.0..=1.0).contains(c) {
                 return Err(NssError::InvalidState {
-                    detail: format!(
-                        "link {}->{} congestion {} out of [0, 1]",
-                        src, dst, c
-                    ),
+                    detail: format!("link {}->{} congestion {} out of [0, 1]", src, dst, c),
                 });
             }
         }
@@ -424,9 +421,7 @@ impl ClusterSystemState {
 
     /// True if every node is healthy.
     pub fn all_healthy(&self) -> bool {
-        self.node_health
-            .values()
-            .all(|h| *h == NodeHealth::Healthy)
+        self.node_health.values().all(|h| *h == NodeHealth::Healthy)
     }
 
     /// Number of failed nodes.
@@ -650,6 +645,9 @@ mod tests {
             failures: BTreeMap::new(),
             cluster_failure: FailureState::nominal(),
         };
-        assert!(tr.push(ev2).is_err(), "non-consecutive tick must be rejected");
+        assert!(
+            tr.push(ev2).is_err(),
+            "non-consecutive tick must be rejected"
+        );
     }
 }

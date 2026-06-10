@@ -9,9 +9,9 @@
 //! 4. Pressure-graph propagation invariants on long runs.
 
 use cjc_nss::{
-    FailureKind, NeuralSystemsSimulator, NssConfig, NssError, NssSeed,
-    PredictionTrace, PressureField, PressureKind, PressureGraph, PressurePropagator,
-    PropagationConfig, QueueConfig, QueueSimulator, ReplayValidator,
+    FailureKind, NeuralSystemsSimulator, NssConfig, NssError, NssSeed, PredictionTrace,
+    PressureField, PressureGraph, PressureKind, PressurePropagator, PropagationConfig, QueueConfig,
+    QueueSimulator, ReplayValidator,
 };
 
 #[test]
@@ -33,7 +33,9 @@ fn end_to_end_simulator_to_replay() {
         input_seed: seed,
         training_trajectory: Some(traj),
     };
-    ReplayValidator::new().verify(&trace).expect("replay should succeed");
+    ReplayValidator::new()
+        .verify(&trace)
+        .expect("replay should succeed");
 }
 
 #[test]
@@ -108,7 +110,10 @@ fn sustained_overload_eventually_collapses() {
         .iter()
         .filter(|ev| ev.failure.kind == FailureKind::Collapse)
         .count();
-    assert!(collapses > 4, "sustained overload should collapse repeatedly");
+    assert!(
+        collapses > 4,
+        "sustained overload should collapse repeatedly"
+    );
 }
 
 #[test]
@@ -131,8 +136,18 @@ fn long_run_pressures_stay_finite_and_bounded() {
     for ev in t.iter() {
         for k in PressureKind::all() {
             let p = ev.state.pressures.get(k).expect("kind set");
-            assert!(p.magnitude.is_finite(), "{:?} non-finite at tick {}", k, ev.state.tick);
-            assert!(p.magnitude >= 0.0, "{:?} negative at tick {}", k, ev.state.tick);
+            assert!(
+                p.magnitude.is_finite(),
+                "{:?} non-finite at tick {}",
+                k,
+                ev.state.tick
+            );
+            assert!(
+                p.magnitude >= 0.0,
+                "{:?} negative at tick {}",
+                k,
+                ev.state.tick
+            );
             // magnitude_cap defaults to 1e6.
             assert!(p.magnitude <= 1e6 + 1e-9);
         }
@@ -179,6 +194,10 @@ fn propagator_steady_state_under_constant_input_is_finite() {
     }
     // Queue should have grown above zero; throughput should also rise.
     let queue = f.get(PressureKind::Queue).unwrap().magnitude;
-    assert!(queue > 0.0, "expected propagation to lift queue pressure, got {}", queue);
+    assert!(
+        queue > 0.0,
+        "expected propagation to lift queue pressure, got {}",
+        queue
+    );
     assert!(queue.is_finite());
 }

@@ -11,10 +11,10 @@
 //! - No HashMap or non-deterministic data structures
 //! - Eigenvalues computed via sign-stabilized SVD (Hermitian => singular values = eigenvalues)
 
-use cjc_runtime::complex::ComplexF64;
 use crate::gates::Gate;
-use crate::mps::{DenseMatrix, svd_sign_stabilized};
+use crate::mps::{svd_sign_stabilized, DenseMatrix};
 use crate::statevector::Statevector;
+use cjc_runtime::complex::ComplexF64;
 
 /// Maximum supported qubits for density matrix simulation.
 const MAX_QUBITS: usize = 14;
@@ -47,28 +47,43 @@ fn gate_matrix(gate: &Gate) -> Option<(usize, [[ComplexF64; 2]; 2])> {
             let ms = ComplexF64::real(-INV_SQRT2);
             Some((*q, [[s, s], [s, ms]]))
         }
-        Gate::X(q) => Some((*q, [
-            [ComplexF64::ZERO, ComplexF64::ONE],
-            [ComplexF64::ONE, ComplexF64::ZERO],
-        ])),
-        Gate::Y(q) => Some((*q, [
-            [ComplexF64::ZERO, ComplexF64::new(0.0, -1.0)],
-            [ComplexF64::new(0.0, 1.0), ComplexF64::ZERO],
-        ])),
-        Gate::Z(q) => Some((*q, [
-            [ComplexF64::ONE, ComplexF64::ZERO],
-            [ComplexF64::ZERO, ComplexF64::new(-1.0, 0.0)],
-        ])),
-        Gate::S(q) => Some((*q, [
-            [ComplexF64::ONE, ComplexF64::ZERO],
-            [ComplexF64::ZERO, ComplexF64::I],
-        ])),
+        Gate::X(q) => Some((
+            *q,
+            [
+                [ComplexF64::ZERO, ComplexF64::ONE],
+                [ComplexF64::ONE, ComplexF64::ZERO],
+            ],
+        )),
+        Gate::Y(q) => Some((
+            *q,
+            [
+                [ComplexF64::ZERO, ComplexF64::new(0.0, -1.0)],
+                [ComplexF64::new(0.0, 1.0), ComplexF64::ZERO],
+            ],
+        )),
+        Gate::Z(q) => Some((
+            *q,
+            [
+                [ComplexF64::ONE, ComplexF64::ZERO],
+                [ComplexF64::ZERO, ComplexF64::new(-1.0, 0.0)],
+            ],
+        )),
+        Gate::S(q) => Some((
+            *q,
+            [
+                [ComplexF64::ONE, ComplexF64::ZERO],
+                [ComplexF64::ZERO, ComplexF64::I],
+            ],
+        )),
         Gate::T(q) => {
             let phase = ComplexF64::new(INV_SQRT2, INV_SQRT2);
-            Some((*q, [
-                [ComplexF64::ONE, ComplexF64::ZERO],
-                [ComplexF64::ZERO, phase],
-            ]))
+            Some((
+                *q,
+                [
+                    [ComplexF64::ONE, ComplexF64::ZERO],
+                    [ComplexF64::ZERO, phase],
+                ],
+            ))
         }
         Gate::Rx(q, theta) => {
             let c = ComplexF64::real((theta / 2.0).cos());
@@ -84,10 +99,7 @@ fn gate_matrix(gate: &Gate) -> Option<(usize, [[ComplexF64; 2]; 2])> {
         Gate::Rz(q, theta) => {
             let pos = ComplexF64::new((theta / 2.0).cos(), (theta / 2.0).sin());
             let neg = ComplexF64::new((theta / 2.0).cos(), -(theta / 2.0).sin());
-            Some((*q, [
-                [neg, ComplexF64::ZERO],
-                [ComplexF64::ZERO, pos],
-            ]))
+            Some((*q, [[neg, ComplexF64::ZERO], [ComplexF64::ZERO, pos]]))
         }
         Gate::CNOT(_, _) | Gate::CZ(_, _) | Gate::SWAP(_, _) | Gate::Toffoli(_, _, _) => None,
     }
@@ -137,12 +149,17 @@ impl DensityMatrix {
         assert!(
             n_qubits <= MAX_QUBITS,
             "density matrix supports at most {} qubits, got {}",
-            MAX_QUBITS, n_qubits
+            MAX_QUBITS,
+            n_qubits
         );
         let dim = 1usize << n_qubits;
         let mut data = vec![ComplexF64::ZERO; dim * dim];
         data[0] = ComplexF64::ONE; // |0><0| element
-        DensityMatrix { n_qubits, dim, data }
+        DensityMatrix {
+            n_qubits,
+            dim,
+            data,
+        }
     }
 
     /// Construct a density matrix from a statevector: rho = |psi><psi|.
@@ -151,7 +168,8 @@ impl DensityMatrix {
         assert!(
             n_qubits <= MAX_QUBITS,
             "density matrix supports at most {} qubits, got {}",
-            MAX_QUBITS, n_qubits
+            MAX_QUBITS,
+            n_qubits
         );
         let dim = 1usize << n_qubits;
         let mut data = vec![ComplexF64::ZERO; dim * dim];
@@ -161,7 +179,11 @@ impl DensityMatrix {
                 data[i * dim + j] = sv.amplitudes[i].mul_fixed(sv.amplitudes[j].conj());
             }
         }
-        DensityMatrix { n_qubits, dim, data }
+        DensityMatrix {
+            n_qubits,
+            dim,
+            data,
+        }
     }
 
     /// Get element rho[r, c].
@@ -185,10 +207,14 @@ impl DensityMatrix {
             self.apply_single_qubit_gate(q, &u);
         } else {
             match gate {
-                Gate::CNOT(ctrl, tgt) => self.apply_permutation_gate(|idx| cnot_map(idx, *ctrl, *tgt)),
+                Gate::CNOT(ctrl, tgt) => {
+                    self.apply_permutation_gate(|idx| cnot_map(idx, *ctrl, *tgt))
+                }
                 Gate::CZ(a, b) => self.apply_cz_gate(*a, *b),
                 Gate::SWAP(a, b) => self.apply_permutation_gate(|idx| swap_map(idx, *a, *b)),
-                Gate::Toffoli(c1, c2, tgt) => self.apply_permutation_gate(|idx| toffoli_map(idx, *c1, *c2, *tgt)),
+                Gate::Toffoli(c1, c2, tgt) => {
+                    self.apply_permutation_gate(|idx| toffoli_map(idx, *c1, *c2, *tgt))
+                }
                 _ => unreachable!(),
             }
         }
@@ -214,7 +240,7 @@ impl DensityMatrix {
             if i & bit != 0 {
                 continue; // process only when bit q is 0
             }
-            let i0 = i;       // bit q = 0
+            let i0 = i; // bit q = 0
             let i1 = i | bit; // bit q = 1
             for j in 0..dim {
                 let r0 = self.get(i0, j);
@@ -239,8 +265,16 @@ impl DensityMatrix {
                 let r1 = self.get(i, j1);
                 // new_rho[i, j0] = r0 * U_dag[0,0] + r1 * U_dag[1,0]
                 // new_rho[i, j1] = r0 * U_dag[0,1] + r1 * U_dag[1,1]
-                self.set(i, j0, r0.mul_fixed(u_dag[0][0]).add(r1.mul_fixed(u_dag[1][0])));
-                self.set(i, j1, r0.mul_fixed(u_dag[0][1]).add(r1.mul_fixed(u_dag[1][1])));
+                self.set(
+                    i,
+                    j0,
+                    r0.mul_fixed(u_dag[0][0]).add(r1.mul_fixed(u_dag[1][0])),
+                );
+                self.set(
+                    i,
+                    j1,
+                    r0.mul_fixed(u_dag[0][1]).add(r1.mul_fixed(u_dag[1][1])),
+                );
             }
         }
     }
@@ -259,7 +293,9 @@ impl DensityMatrix {
         let mut visited = vec![false; n];
 
         for start in 0..n {
-            if visited[start] { continue; }
+            if visited[start] {
+                continue;
+            }
 
             let start_i = start / dim;
             let start_j = start % dim;
@@ -298,9 +334,17 @@ impl DensityMatrix {
         let a_bit = 1usize << a;
         let b_bit = 1usize << b;
         for i in 0..dim {
-            let phase_i = if (i & a_bit) != 0 && (i & b_bit) != 0 { -1.0 } else { 1.0 };
+            let phase_i = if (i & a_bit) != 0 && (i & b_bit) != 0 {
+                -1.0
+            } else {
+                1.0
+            };
             for j in 0..dim {
-                let phase_j = if (j & a_bit) != 0 && (j & b_bit) != 0 { -1.0 } else { 1.0 };
+                let phase_j = if (j & a_bit) != 0 && (j & b_bit) != 0 {
+                    -1.0
+                } else {
+                    1.0
+                };
                 let phase = phase_i * phase_j;
                 if phase < 0.0 {
                     let idx = i * dim + j;
@@ -420,7 +464,10 @@ impl DensityMatrix {
     /// requires matrix square roots. This simplified version suffices for most
     /// quantum circuit validation.
     pub fn fidelity(rho: &DensityMatrix, sigma: &DensityMatrix) -> f64 {
-        assert_eq!(rho.dim, sigma.dim, "density matrices must have same dimension");
+        assert_eq!(
+            rho.dim, sigma.dim,
+            "density matrices must have same dimension"
+        );
         let dim = rho.dim;
         // Tr(rho * sigma) = Sum_{i,k} rho[i,k] * sigma[k,i]
         let mut sum = 0.0f64;
@@ -535,7 +582,10 @@ fn build_full_index(
 ///   K2 = sqrt(p/3) * Y
 ///   K3 = sqrt(p/3) * Z
 pub fn depolarizing_channel(p: f64) -> KrausOps2x2 {
-    assert!((0.0..=1.0).contains(&p), "depolarizing parameter p must be in [0, 1]");
+    assert!(
+        (0.0..=1.0).contains(&p),
+        "depolarizing parameter p must be in [0, 1]"
+    );
     let s0 = (1.0 - p).sqrt();
     let s1 = (p / 3.0).sqrt();
 
@@ -567,7 +617,10 @@ pub fn depolarizing_channel(p: f64) -> KrausOps2x2 {
 ///   K0 = [[1, 0], [0, sqrt(1-p)]]
 ///   K1 = [[0, 0], [0, sqrt(p)]]
 pub fn dephasing_channel(p: f64) -> KrausOps2x2 {
-    assert!((0.0..=1.0).contains(&p), "dephasing parameter p must be in [0, 1]");
+    assert!(
+        (0.0..=1.0).contains(&p),
+        "dephasing parameter p must be in [0, 1]"
+    );
 
     let k0 = [
         [ComplexF64::ONE, ComplexF64::ZERO],
@@ -590,7 +643,10 @@ pub fn dephasing_channel(p: f64) -> KrausOps2x2 {
 ///   K0 = [[1, 0], [0, sqrt(1-gamma)]]
 ///   K1 = [[0, sqrt(gamma)], [0, 0]]
 pub fn amplitude_damping_channel(gamma: f64) -> KrausOps2x2 {
-    assert!((0.0..=1.0).contains(&gamma), "damping parameter gamma must be in [0, 1]");
+    assert!(
+        (0.0..=1.0).contains(&gamma),
+        "damping parameter gamma must be in [0, 1]"
+    );
 
     let k0 = [
         [ComplexF64::ONE, ComplexF64::ZERO],
@@ -697,7 +753,10 @@ mod tests {
         for i in 0..4 {
             assert!(
                 (sv_probs[i] - dm_probs[i]).abs() < TOL,
-                "prob[{}]: sv={} dm={}", i, sv_probs[i], dm_probs[i]
+                "prob[{}]: sv={} dm={}",
+                i,
+                sv_probs[i],
+                dm_probs[i]
             );
         }
     }
@@ -710,7 +769,10 @@ mod tests {
         let kraus = depolarizing_channel(0.1);
         dm.apply_single_qubit_channel(0, &kraus);
         let purity_after = dm.purity();
-        assert!(purity_after < purity_before, "Depolarizing should reduce purity");
+        assert!(
+            purity_after < purity_before,
+            "Depolarizing should reduce purity"
+        );
         assert!((dm.trace() - 1.0).abs() < TOL, "Trace must be preserved");
     }
 
@@ -718,7 +780,7 @@ mod tests {
     fn test_amplitude_damping_drives_to_zero() {
         let mut dm = DensityMatrix::new(1);
         dm.apply_gate(&Gate::X(0)); // |1>
-        // Apply strong amplitude damping
+                                    // Apply strong amplitude damping
         let kraus = amplitude_damping_channel(0.9);
         dm.apply_single_qubit_channel(0, &kraus);
         // Should be mostly |0> now
@@ -743,7 +805,11 @@ mod tests {
         dm.set(1, 0, ComplexF64::ZERO);
         let s = dm.von_neumann_entropy();
         let expected = 2.0f64.ln(); // ln(2) ~ 0.693
-        assert!((s - expected).abs() < 1e-6, "Max mixed entropy should be ln(2), got {}", s);
+        assert!(
+            (s - expected).abs() < 1e-6,
+            "Max mixed entropy should be ln(2), got {}",
+            s
+        );
     }
 
     #[test]
@@ -784,7 +850,11 @@ mod tests {
         let mut dm1 = DensityMatrix::new(1);
         dm1.apply_gate(&Gate::X(0)); // |1><1|
         let f = DensityMatrix::fidelity(&dm0, &dm1);
-        assert!(f.abs() < TOL, "Orthogonal states should have fidelity 0, got {}", f);
+        assert!(
+            f.abs() < TOL,
+            "Orthogonal states should have fidelity 0, got {}",
+            f
+        );
     }
 
     #[test]
@@ -808,7 +878,10 @@ mod tests {
         let kraus = dephasing_channel(0.5);
         dm.apply_single_qubit_channel(0, &kraus);
         let off_after = dm.get(0, 1).norm_sq();
-        assert!(off_after < off_before, "Dephasing should reduce off-diagonal elements");
+        assert!(
+            off_after < off_before,
+            "Dephasing should reduce off-diagonal elements"
+        );
     }
 
     #[test]
@@ -820,8 +893,8 @@ mod tests {
         dm.apply_single_qubit_channel(0, &kraus);
         for i in 0..dm.data.len() {
             assert!(
-                (dm.data[i].re - before[i].re).abs() < TOL &&
-                (dm.data[i].im - before[i].im).abs() < TOL,
+                (dm.data[i].re - before[i].re).abs() < TOL
+                    && (dm.data[i].im - before[i].im).abs() < TOL,
                 "p=0 depolarizing should be identity"
             );
         }
@@ -837,8 +910,8 @@ mod tests {
         dm.apply_kraus(&[id]);
         for i in 0..dm.data.len() {
             assert!(
-                (dm.data[i].re - before[i].re).abs() < TOL &&
-                (dm.data[i].im - before[i].im).abs() < TOL,
+                (dm.data[i].re - before[i].re).abs() < TOL
+                    && (dm.data[i].im - before[i].im).abs() < TOL,
                 "Identity Kraus should preserve state"
             );
         }
@@ -865,7 +938,7 @@ mod tests {
         let mut dm = DensityMatrix::new(3);
         dm.apply_gate(&Gate::X(0)); // set qubit 0
         dm.apply_gate(&Gate::X(1)); // set qubit 1
-        // Now state is |11> on q0,q1, |0> on q2 -> index 3
+                                    // Now state is |11> on q0,q1, |0> on q2 -> index 3
         dm.apply_gate(&Gate::Toffoli(0, 1, 2));
         // Should flip q2: index 3 -> index 7
         assert!((dm.get(7, 7).re - 1.0).abs() < TOL);
@@ -892,7 +965,10 @@ mod tests {
         for i in 0..8 {
             assert!(
                 (sv_probs[i] - dm_probs[i]).abs() < TOL,
-                "prob[{}]: sv={} dm={}", i, sv_probs[i], dm_probs[i]
+                "prob[{}]: sv={} dm={}",
+                i,
+                sv_probs[i],
+                dm_probs[i]
             );
         }
     }

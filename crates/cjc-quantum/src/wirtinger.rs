@@ -96,8 +96,14 @@ impl WirtingerDual {
     pub fn mul(self, rhs: WirtingerDual) -> WirtingerDual {
         WirtingerDual {
             value: self.value.mul_fixed(rhs.value),
-            dz: self.dz.mul_fixed(rhs.value).add(self.value.mul_fixed(rhs.dz)),
-            dz_conj: self.dz_conj.mul_fixed(rhs.value).add(self.value.mul_fixed(rhs.dz_conj)),
+            dz: self
+                .dz
+                .mul_fixed(rhs.value)
+                .add(self.value.mul_fixed(rhs.dz)),
+            dz_conj: self
+                .dz_conj
+                .mul_fixed(rhs.value)
+                .add(self.value.mul_fixed(rhs.dz_conj)),
         }
     }
 
@@ -133,11 +139,19 @@ impl WirtingerDual {
         let val = ComplexF64::real(f.norm_sq());
 
         // ∂|f|²/∂z = f* · df/dz + f · (df/dz*)*
-        let dz = f_conj.mul_fixed(self.dz).add(f.mul_fixed(self.dz_conj.conj()));
+        let dz = f_conj
+            .mul_fixed(self.dz)
+            .add(f.mul_fixed(self.dz_conj.conj()));
         // ∂|f|²/∂z* = f* · df/dz* + f · (df/dz)*
-        let dz_conj = f_conj.mul_fixed(self.dz_conj).add(f.mul_fixed(self.dz.conj()));
+        let dz_conj = f_conj
+            .mul_fixed(self.dz_conj)
+            .add(f.mul_fixed(self.dz.conj()));
 
-        WirtingerDual { value: val, dz, dz_conj }
+        WirtingerDual {
+            value: val,
+            dz,
+            dz_conj,
+        }
     }
 
     /// Extract the real part of the conjugate gradient (for optimization).
@@ -177,10 +191,7 @@ pub fn probability_gradient(amplitude: ComplexF64) -> (ComplexF64, ComplexF64) {
 ///
 /// This function computes the gradient for a single parameter using the
 /// parameter-shift rule with two circuit evaluations.
-pub fn parameter_shift_gradient(
-    expectation_plus: f64,
-    expectation_minus: f64,
-) -> f64 {
+pub fn parameter_shift_gradient(expectation_plus: f64, expectation_minus: f64) -> f64 {
     (expectation_plus - expectation_minus) / 2.0
 }
 
@@ -193,10 +204,14 @@ pub fn weighted_probability_gradient(
     weights: &[f64],
 ) -> Vec<(ComplexF64, ComplexF64)> {
     assert_eq!(amplitudes.len(), weights.len());
-    amplitudes.iter().zip(weights.iter()).map(|(&a, &w)| {
-        let (dz, dz_conj) = probability_gradient(a);
-        (dz.scale(w), dz_conj.scale(w))
-    }).collect()
+    amplitudes
+        .iter()
+        .zip(weights.iter())
+        .map(|(&a, &w)| {
+            let (dz, dz_conj) = probability_gradient(a);
+            (dz.scale(w), dz_conj.scale(w))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -211,8 +226,15 @@ mod tests {
     const TOL: f64 = 1e-12;
 
     fn assert_complex_approx(a: ComplexF64, b: ComplexF64, msg: &str) {
-        assert!((a.re - b.re).abs() < TOL && (a.im - b.im).abs() < TOL,
-            "{}: got ({}, {}) expected ({}, {})", msg, a.re, a.im, b.re, b.im);
+        assert!(
+            (a.re - b.re).abs() < TOL && (a.im - b.im).abs() < TOL,
+            "{}: got ({}, {}) expected ({}, {})",
+            msg,
+            a.re,
+            a.im,
+            b.re,
+            b.im
+        );
     }
 
     #[test]
@@ -283,7 +305,10 @@ mod tests {
 
         assert!((result.value.re - 5.0).abs() < TOL, "chain rule value");
         // The derivatives should be computed correctly through the chain
-        assert!(result.dz.norm_sq() > 0.0, "chain rule dz should be non-zero");
+        assert!(
+            result.dz.norm_sq() > 0.0,
+            "chain rule dz should be non-zero"
+        );
     }
 
     #[test]
@@ -303,16 +328,17 @@ mod tests {
         let e_minus = (theta / 2.0 - PI / 4.0).cos().powi(2);
         let grad = parameter_shift_gradient(e_plus, e_minus);
         let expected = -(theta).sin() / 2.0;
-        assert!((grad - expected).abs() < 1e-10,
-            "parameter shift: got {}, expected {}", grad, expected);
+        assert!(
+            (grad - expected).abs() < 1e-10,
+            "parameter shift: got {}, expected {}",
+            grad,
+            expected
+        );
     }
 
     #[test]
     fn test_weighted_probability_gradient() {
-        let amps = vec![
-            ComplexF64::new(0.5, 0.5),
-            ComplexF64::new(0.5, -0.5),
-        ];
+        let amps = vec![ComplexF64::new(0.5, 0.5), ComplexF64::new(0.5, -0.5)];
         let weights = vec![1.0, -1.0]; // observable = diag(1, -1) = Z
         let grads = weighted_probability_gradient(&amps, &weights);
         assert_eq!(grads.len(), 2);
@@ -342,9 +368,17 @@ mod tests {
         // Analytical: ∂|z|²/∂z* = z
         let analytical = z0;
 
-        assert!((wirtinger_conj.re - analytical.re).abs() < 1e-5,
-            "numerical vs analytical re: {} vs {}", wirtinger_conj.re, analytical.re);
-        assert!((wirtinger_conj.im - analytical.im).abs() < 1e-5,
-            "numerical vs analytical im: {} vs {}", wirtinger_conj.im, analytical.im);
+        assert!(
+            (wirtinger_conj.re - analytical.re).abs() < 1e-5,
+            "numerical vs analytical re: {} vs {}",
+            wirtinger_conj.re,
+            analytical.re
+        );
+        assert!(
+            (wirtinger_conj.im - analytical.im).abs() < 1e-5,
+            "numerical vs analytical im: {} vs {}",
+            wirtinger_conj.im,
+            analytical.im
+        );
     }
 }

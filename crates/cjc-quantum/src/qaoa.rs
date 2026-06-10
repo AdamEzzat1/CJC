@@ -18,8 +18,8 @@
 //! - Complex arithmetic uses fixed-sequence multiplication (no FMA)
 //! - Gradient computation via parameter-shift rule is deterministic
 
-use cjc_runtime::complex::ComplexF64;
 use crate::mps::{Mps, MpsTensor};
+use cjc_runtime::complex::ComplexF64;
 
 // ---------------------------------------------------------------------------
 // Graph
@@ -53,7 +53,10 @@ impl Graph {
             edges.push((i, i + 1));
         }
         edges.push((n - 1, 0));
-        Self { n_vertices: n, edges }
+        Self {
+            n_vertices: n,
+            edges,
+        }
     }
 
     /// Create a complete graph K_n.
@@ -66,7 +69,10 @@ impl Graph {
                 edges.push((i, j));
             }
         }
-        Self { n_vertices: n, edges }
+        Self {
+            n_vertices: n,
+            edges,
+        }
     }
 }
 
@@ -135,10 +141,7 @@ fn transfer_matrix_identity_local(
 ///
 /// Z eigenvalues: o_0 = +1, o_1 = -1.
 /// T_new[a,b] = sum_{j,j'} sum_s z_s * env[j,j'] * conj(A^s[j,a]) * A^s[j',b]
-fn transfer_matrix_z_local(
-    tensor: &MpsTensor,
-    env: &[Vec<ComplexF64>],
-) -> Vec<Vec<ComplexF64>> {
+fn transfer_matrix_z_local(tensor: &MpsTensor, env: &[Vec<ComplexF64>]) -> Vec<Vec<ComplexF64>> {
     let bl = tensor.bond_left;
     let br = tensor.bond_right;
     assert_eq!(env.len(), bl);
@@ -259,12 +262,7 @@ pub fn qaoa_maxcut_energy(mps: &Mps, graph: &Graph) -> f64 {
 ///
 /// Non-adjacent edges are skipped in the cost unitary (MPS limitation).
 /// The number of QAOA layers is determined by the length of gammas/betas.
-pub fn build_qaoa_ansatz(
-    graph: &Graph,
-    gammas: &[f64],
-    betas: &[f64],
-    max_bond: usize,
-) -> Mps {
+pub fn build_qaoa_ansatz(graph: &Graph, gammas: &[f64], betas: &[f64], max_bond: usize) -> Mps {
     let n = graph.n_vertices;
     let p = gammas.len();
     assert_eq!(
@@ -395,14 +393,8 @@ pub fn qaoa_maxcut(
             let mut gm = gammas.clone();
             gm[k] -= shift;
 
-            let ep = qaoa_maxcut_energy(
-                &build_qaoa_ansatz(graph, &gp, &betas, max_bond),
-                graph,
-            );
-            let em = qaoa_maxcut_energy(
-                &build_qaoa_ansatz(graph, &gm, &betas, max_bond),
-                graph,
-            );
+            let ep = qaoa_maxcut_energy(&build_qaoa_ansatz(graph, &gp, &betas, max_bond), graph);
+            let em = qaoa_maxcut_energy(&build_qaoa_ansatz(graph, &gm, &betas, max_bond), graph);
             gamma_grads[k] = (ep - em) / 2.0;
         }
 
@@ -413,14 +405,8 @@ pub fn qaoa_maxcut(
             let mut bm = betas.clone();
             bm[k] -= shift;
 
-            let ep = qaoa_maxcut_energy(
-                &build_qaoa_ansatz(graph, &gammas, &bp, max_bond),
-                graph,
-            );
-            let em = qaoa_maxcut_energy(
-                &build_qaoa_ansatz(graph, &gammas, &bm, max_bond),
-                graph,
-            );
+            let ep = qaoa_maxcut_energy(&build_qaoa_ansatz(graph, &gammas, &bp, max_bond), graph);
+            let em = qaoa_maxcut_energy(&build_qaoa_ansatz(graph, &gammas, &bm, max_bond), graph);
             beta_grads[k] = (ep - em) / 2.0;
         }
 
@@ -488,11 +474,7 @@ mod tests {
             mps.apply_single_qubit(q, h);
         }
         let cost = qaoa_maxcut_energy(&mps, &g);
-        assert!(
-            (cost - 1.5).abs() < TOL,
-            "Expected 1.5, got {}",
-            cost
-        ); // 3 edges * 0.5
+        assert!((cost - 1.5).abs() < TOL, "Expected 1.5, got {}", cost); // 3 edges * 0.5
     }
 
     #[test]

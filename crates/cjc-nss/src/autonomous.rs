@@ -661,8 +661,7 @@ mod tests {
         // Initial step + 4 control checks at ticks 4/8/12/16.
         assert!(report.decisions.len() >= 4);
         // applied + skipped + no_ops == decisions.len()
-        let total =
-            report.actions_applied + report.actions_skipped + report.no_ops;
+        let total = report.actions_applied + report.actions_skipped + report.no_ops;
         assert_eq!(total as usize, report.decisions.len());
     }
 

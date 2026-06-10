@@ -15,9 +15,9 @@
 //!   without error.
 
 use cjc_nss::{
-    FailureKind, NeuralSystemsSimulator, NssConfig, NssSeed, Pressure, PressureField,
-    PressureGraph, PressureKind, PressurePropagator, PropagationConfig, QueueConfig,
-    QueueSimulator, ReplayValidator, PredictionTrace,
+    FailureKind, NeuralSystemsSimulator, NssConfig, NssSeed, PredictionTrace, Pressure,
+    PressureField, PressureGraph, PressureKind, PressurePropagator, PropagationConfig, QueueConfig,
+    QueueSimulator, ReplayValidator,
 };
 use proptest::prelude::*;
 
@@ -25,26 +25,28 @@ use proptest::prelude::*;
 /// arrival rate and queue sizes to keep test runs fast.
 fn queue_config_strategy() -> impl Strategy<Value = QueueConfig> {
     (
-        1u32..=8,         // workers
-        1u32..=8,         // capacity_over_workers (so capacity >= workers)
-        0.5f64..6.0,      // arrival_rate
-        0.5f64..2.0,      // service_min
-        0.5f64..2.0,      // service_extra (added to service_min for max)
-        0.3f64..0.95,     // degraded_knee
-        1u32..=4,         // collapse_window
-        0.0f64..2.0,      // retry_amplifier
+        1u32..=8,     // workers
+        1u32..=8,     // capacity_over_workers (so capacity >= workers)
+        0.5f64..6.0,  // arrival_rate
+        0.5f64..2.0,  // service_min
+        0.5f64..2.0,  // service_extra (added to service_min for max)
+        0.3f64..0.95, // degraded_knee
+        1u32..=4,     // collapse_window
+        0.0f64..2.0,  // retry_amplifier
     )
-        .prop_map(|(w, cap_mult, lam, smin, sextra, knee, win, retry)| QueueConfig {
-            workers: w,
-            queue_capacity: w * cap_mult,
-            arrival_rate: lam,
-            service_min: smin,
-            service_max: smin + sextra,
-            degraded_knee: knee,
-            collapse_window: win,
-            retry_amplifier: retry,
-            propagation: PropagationConfig::default(),
-        })
+        .prop_map(
+            |(w, cap_mult, lam, smin, sextra, knee, win, retry)| QueueConfig {
+                workers: w,
+                queue_capacity: w * cap_mult,
+                arrival_rate: lam,
+                service_min: smin,
+                service_max: smin + sextra,
+                degraded_knee: knee,
+                collapse_window: win,
+                retry_amplifier: retry,
+                propagation: PropagationConfig::default(),
+            },
+        )
 }
 
 proptest! {

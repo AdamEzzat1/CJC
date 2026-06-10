@@ -4,9 +4,7 @@
 //! a fuzzer.
 
 use bolero::check;
-use cjc_nss::{
-    NeuralSystemsSimulator, NssConfig, NssSeed, Pressure, PressureKind, SystemState,
-};
+use cjc_nss::{NeuralSystemsSimulator, NssConfig, NssSeed, Pressure, PressureKind, SystemState};
 
 #[derive(Debug, bolero::TypeGenerator)]
 struct FuzzInput {
@@ -40,7 +38,11 @@ fn fuzz_predict_never_panics() {
             // Sanitise scalar f32 → f64; clip pathological values that
             // we'd never accept on the boundary anyway.
             let mst = input.mean_service_time as f64;
-            state.mean_service_time = if mst.is_finite() && mst >= 0.0 { mst } else { 1.0 };
+            state.mean_service_time = if mst.is_finite() && mst >= 0.0 {
+                mst
+            } else {
+                1.0
+            };
 
             // Fill the pressure field with fuzzed (magnitude,
             // threshold, dissipation) triples. We sanitise each
@@ -53,9 +55,18 @@ fn fuzz_predict_never_panics() {
                 let t = input.thresholds[i] as f64;
                 let d = input.dissipations[i] as f64;
                 let m = if m.is_finite() && m >= 0.0 { m } else { 0.0 };
-                let t = if t.is_finite() && t > 0.0 { t.max(1e-6) } else { 1.0 };
-                let d = if d.is_finite() { d.clamp(0.0, 1.0) } else { 0.1 };
-                let p = Pressure::new(m, t, d).unwrap_or_else(|_| Pressure::new(0.0, 1.0, 0.1).unwrap());
+                let t = if t.is_finite() && t > 0.0 {
+                    t.max(1e-6)
+                } else {
+                    1.0
+                };
+                let d = if d.is_finite() {
+                    d.clamp(0.0, 1.0)
+                } else {
+                    0.1
+                };
+                let p = Pressure::new(m, t, d)
+                    .unwrap_or_else(|_| Pressure::new(0.0, 1.0, 0.1).unwrap());
                 state.pressures.set(*k, p);
             }
 
@@ -65,8 +76,14 @@ fn fuzz_predict_never_panics() {
             match nss.predict_next(&state) {
                 Ok(p) => {
                     assert!(p.failure.collapse_probability.is_finite());
-                    assert!(p.failure.collapse_probability >= 0.0 && p.failure.collapse_probability <= 1.0);
-                    assert!(p.failure.degraded_probability >= 0.0 && p.failure.degraded_probability <= 1.0);
+                    assert!(
+                        p.failure.collapse_probability >= 0.0
+                            && p.failure.collapse_probability <= 1.0
+                    );
+                    assert!(
+                        p.failure.degraded_probability >= 0.0
+                            && p.failure.degraded_probability <= 1.0
+                    );
                 }
                 Err(_) => {
                     // Typed error is acceptable on intentionally

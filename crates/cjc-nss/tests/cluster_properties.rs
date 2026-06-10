@@ -8,19 +8,19 @@ use proptest::prelude::*;
 
 fn cluster_config_strategy() -> impl Strategy<Value = ClusterConfig> {
     (
-        1u32..=4,         // workers_per_node
-        1u32..=8,         // capacity_multiplier (so capacity >= workers)
-        0.5f64..8.0,      // cluster_arrival_rate
-        0.5f64..2.0,      // service_min
-        0.5f64..2.0,      // service_extra
-        0.3f64..0.95,     // degraded_knee
-        1u32..=4,         // collapse_window
+        1u32..=4,     // workers_per_node
+        1u32..=8,     // capacity_multiplier (so capacity >= workers)
+        0.5f64..8.0,  // cluster_arrival_rate
+        0.5f64..2.0,  // service_min
+        0.5f64..2.0,  // service_extra
+        0.3f64..0.95, // degraded_knee
+        1u32..=4,     // collapse_window
         prop_oneof![
             Just(RoutingPolicy::RoundRobin),
             Just(RoutingPolicy::LeastLoaded),
             Just(RoutingPolicy::HashPartition),
         ],
-        0.05f64..0.5,     // link_dissipation
+        0.05f64..0.5, // link_dissipation
     )
         .prop_map(
             |(w, mul, lam, smin, sextra, knee, win, routing, link_diss)| ClusterConfig {

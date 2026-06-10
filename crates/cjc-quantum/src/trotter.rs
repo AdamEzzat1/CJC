@@ -16,10 +16,10 @@
 //! - Matrix exponential via explicit analytic formulas for Pauli terms
 //! - Fixed iteration order throughout
 
-use cjc_runtime::complex::ComplexF64;
-use cjc_repro::KahanAccumulatorF64;
-use crate::fermion::{Pauli, PauliTerm, FermionicHamiltonian};
+use crate::fermion::{FermionicHamiltonian, Pauli, PauliTerm};
 use crate::statevector::Statevector;
+use cjc_repro::KahanAccumulatorF64;
+use cjc_runtime::complex::ComplexF64;
 
 // ---------------------------------------------------------------------------
 // Trotter Order
@@ -324,7 +324,10 @@ mod tests {
         crate::gates::Gate::H(0).apply(&mut sv).unwrap();
 
         trotter_evolve(&mut sv, &h, 1.0, 50, TrotterOrder::Second);
-        assert!(sv.is_normalized(1e-10), "2nd order Trotter must preserve norm");
+        assert!(
+            sv.is_normalized(1e-10),
+            "2nd order Trotter must preserve norm"
+        );
     }
 
     #[test]
@@ -354,10 +357,18 @@ mod tests {
         trotter_evolve(&mut sv2, &h, 0.5, 20, TrotterOrder::First);
 
         for i in 0..sv1.n_states() {
-            assert_eq!(sv1.amplitudes[i].re.to_bits(), sv2.amplitudes[i].re.to_bits(),
-                "Trotter must be bit-identical (re[{}])", i);
-            assert_eq!(sv1.amplitudes[i].im.to_bits(), sv2.amplitudes[i].im.to_bits(),
-                "Trotter must be bit-identical (im[{}])", i);
+            assert_eq!(
+                sv1.amplitudes[i].re.to_bits(),
+                sv2.amplitudes[i].re.to_bits(),
+                "Trotter must be bit-identical (re[{}])",
+                i
+            );
+            assert_eq!(
+                sv1.amplitudes[i].im.to_bits(),
+                sv2.amplitudes[i].im.to_bits(),
+                "Trotter must be bit-identical (im[{}])",
+                i
+            );
         }
     }
 
@@ -387,8 +398,12 @@ mod tests {
         // Compare fidelities
         let fid1 = fidelity(&sv1, &sv_ref);
         let fid2 = fidelity(&sv2, &sv_ref);
-        assert!(fid2 >= fid1 - 0.01,
-            "2nd order fidelity ({:.6}) should be >= 1st order ({:.6})", fid2, fid1);
+        assert!(
+            fid2 >= fid1 - 0.01,
+            "2nd order fidelity ({:.6}) should be >= 1st order ({:.6})",
+            fid2,
+            fid1
+        );
     }
 
     #[test]

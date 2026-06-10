@@ -33,9 +33,7 @@ use crate::cluster_simulator::ClusterConfig;
 use crate::encoder::{EncoderConfig, SystemEncoder};
 use crate::error::NssError;
 use crate::failure::{FailureKind, FailurePrediction};
-use crate::heads::{
-    CausalAttribution, CausalAttributionHead, HeadConfig, PressureContribution,
-};
+use crate::heads::{CausalAttribution, CausalAttributionHead, HeadConfig, PressureContribution};
 use crate::multi_timescale::{MultiTimescaleConfig, MultiTimescaleEngine, Timescale};
 use crate::pressure::PressureKind;
 use crate::seed::{InputHash, NssRunId, NssSeed};
@@ -137,8 +135,7 @@ impl ClusterNssConfig {
                 ),
             });
         }
-        let expected_head_dim =
-            self.temporal.state_dim * self.temporal_mode.timescale_count();
+        let expected_head_dim = self.temporal.state_dim * self.temporal_mode.timescale_count();
         if self.head.state_dim != expected_head_dim {
             return Err(NssError::InvalidConfig {
                 detail: format!(
@@ -406,9 +403,7 @@ impl ClusterNeuralSystemsSimulator {
     /// Build the fixed-size cluster summary feature vector for a
     /// single `ClusterSystemState`. Stable layout — see
     /// [`cluster_summary_label`] for the index → name map.
-    pub fn build_cluster_summary(
-        state: &ClusterSystemState,
-    ) -> [f64; CLUSTER_SUMMARY_FEATURES] {
+    pub fn build_cluster_summary(state: &ClusterSystemState) -> [f64; CLUSTER_SUMMARY_FEATURES] {
         let n_nodes = state.nodes.len().max(1) as f64;
         let failed_count = state.failed_count() as f64;
         let failed_fraction = failed_count / n_nodes;
@@ -467,10 +462,7 @@ impl ClusterNeuralSystemsSimulator {
     }
 
     /// One-step cluster prediction.
-    pub fn predict_next(
-        &self,
-        state: &ClusterSystemState,
-    ) -> Result<ClusterPrediction, NssError> {
+    pub fn predict_next(&self, state: &ClusterSystemState) -> Result<ClusterPrediction, NssError> {
         state.validate()?;
         let z = self.cluster_latent(state);
         let h = self.temporal.step(&self.h0, &z)?;
@@ -506,12 +498,7 @@ impl ClusterNeuralSystemsSimulator {
         // not per-node features — but the per-node head was seeded
         // identically and gives consistent decomposition.)
         let mut per_node: BTreeMap<NodeId, CausalAttribution> = BTreeMap::new();
-        let mut dominant_node: NodeId = state
-            .nodes
-            .keys()
-            .copied()
-            .next()
-            .unwrap_or(NodeId(0));
+        let mut dominant_node: NodeId = state.nodes.keys().copied().next().unwrap_or(NodeId(0));
         let mut dominant_mag = f64::NEG_INFINITY;
         let mut dominant_contrib = PressureContribution {
             kind: PressureKind::Queue,
@@ -559,7 +546,8 @@ impl ClusterNeuralSystemsSimulator {
         }
         // Re-seed both heads so fit is idempotent.
         self.head = ClusterFailurePredictionHead::from_seed(self.cfg, self.seed)?;
-        self.per_node_head = crate::heads::FailurePredictionHead::from_seed(self.cfg.head, self.seed)?;
+        self.per_node_head =
+            crate::heads::FailurePredictionHead::from_seed(self.cfg.head, self.seed)?;
         self.h0 = self.temporal.zero_state();
 
         // Cluster-summary calibration.
@@ -798,8 +786,7 @@ impl ClusterReplayValidator {
 
     /// Reproduce the prediction from the bundled inputs.
     pub fn verify(&self, trace: &ClusterTrace) -> Result<(), NssError> {
-        let mut nss =
-            ClusterNeuralSystemsSimulator::from_seed(trace.nss_config, trace.seed)?;
+        let mut nss = ClusterNeuralSystemsSimulator::from_seed(trace.nss_config, trace.seed)?;
         if let Some(t) = trace.training_trajectory.as_ref() {
             nss.fit(t)?;
         }
@@ -905,7 +892,10 @@ mod tests {
             .zip(after.iter())
             .filter(|(a, b)| (*a - *b).abs() > 1e-15)
             .count();
-        assert!(n_changed > 0, "fit did not adjust any cluster-summary weight");
+        assert!(
+            n_changed > 0,
+            "fit did not adjust any cluster-summary weight"
+        );
     }
 
     // ---- Phase 3b: cluster NSS with multi-timescale memory ----
@@ -959,7 +949,9 @@ mod tests {
         let state = ClusterSystemState::initial(&top);
         let pred = nss.predict_next(&state).unwrap();
         assert!(pred.failure.collapse_probability.is_finite());
-        assert!(pred.failure.collapse_probability >= 0.0 && pred.failure.collapse_probability <= 1.0);
+        assert!(
+            pred.failure.collapse_probability >= 0.0 && pred.failure.collapse_probability <= 1.0
+        );
     }
 
     #[test]

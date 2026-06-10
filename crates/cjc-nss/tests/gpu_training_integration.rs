@@ -36,7 +36,8 @@ fn gpu_training_replay_round_trip() {
     let seed = NssSeed(7);
     let mut sim = GpuTrainingSimulator::new(cfg, top.clone(), seed, vec![]).unwrap();
     let traj = sim.run(48).unwrap();
-    let mut nss = ClusterNeuralSystemsSimulator::from_seed(ClusterNssConfig::default(), seed).unwrap();
+    let mut nss =
+        ClusterNeuralSystemsSimulator::from_seed(ClusterNssConfig::default(), seed).unwrap();
     nss.fit(&traj).unwrap();
     let last = traj.last_state().unwrap().clone();
     let pred = nss.predict_next(&last).unwrap();
@@ -118,7 +119,12 @@ fn memory_pressure_eventually_dominates_long_runs_without_gc() {
     };
     let start = mem_at(2);
     let end = mem_at(19);
-    assert!(end > start + 0.5, "memory pressure must climb (start={}, end={})", start, end);
+    assert!(
+        end > start + 0.5,
+        "memory pressure must climb (start={}, end={})",
+        start,
+        end
+    );
 }
 
 #[test]

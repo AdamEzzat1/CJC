@@ -10,10 +10,9 @@
 //! ```
 
 use cjc_nss::{
-    cluster_summary_label, ClusterNeuralSystemsSimulator, ClusterNssConfig,
-    ClusterReplayValidator, ClusterTopology, ClusterTrace, FailureKind, GpuTrainingConfig,
-    GpuTrainingSimulator, Intervention, NodeId, NssSeed, PressureKind, CLUSTER_SUMMARY_FEATURES,
-    NSS_MODEL_VERSION,
+    cluster_summary_label, ClusterNeuralSystemsSimulator, ClusterNssConfig, ClusterReplayValidator,
+    ClusterTopology, ClusterTrace, FailureKind, GpuTrainingConfig, GpuTrainingSimulator,
+    Intervention, NodeId, NssSeed, PressureKind, CLUSTER_SUMMARY_FEATURES, NSS_MODEL_VERSION,
 };
 
 fn main() {
@@ -27,14 +26,14 @@ fn main() {
         service_mean: 1.0,
         service_jitter: 0.05,
         allreduce_base: 0.02,
-        allreduce_bytes: 2.0e9,   // 2 GB per iter
-        nccl_bandwidth: 5.0e10,   // 50 GB/s
+        allreduce_bytes: 2.0e9, // 2 GB per iter
+        nccl_bandwidth: 5.0e10, // 50 GB/s
         memory_per_microbatch: 0.015,
         gc_interval: 20,
         gc_recovery: 0.7,
         fragmentation_growth: 0.002,
         memory_capacity: 1.0,
-        pipeline_stages: 1,         // pure data-parallel
+        pipeline_stages: 1, // pure data-parallel
         microbatches_per_iteration: 1,
         ..GpuTrainingConfig::default()
     };
@@ -160,7 +159,11 @@ fn main() {
         .expect("GPU-training replay must succeed");
     println!(
         "\n[replay] verified: trajectory={} iterations, topology={} GPUs",
-        trace.training_trajectory.as_ref().map(|t| t.len()).unwrap_or(0),
+        trace
+            .training_trajectory
+            .as_ref()
+            .map(|t| t.len())
+            .unwrap_or(0),
         trace.topology.node_count(),
     );
 
