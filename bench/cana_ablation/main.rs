@@ -44,6 +44,7 @@ use cjc_cana::cost_model::CostModel;
 use cjc_cana::features::CanaFeatures;
 use cjc_cana::legality::{LegalityVerdict, PerPassLegalityGate};
 use cjc_cana::pass_ranker::{pass_plan_from, PassRanker, RankingReport};
+use cjc_cana::physical_cost::PhysicalConstraints;
 use cjc_cana::physical_cost::{build_physical_query, predict_physical, PhysicalCoefficients};
 use cjc_cana::pinn_cost_model::PinnPhysicalCostModel;
 use cjc_cana::pressure::{NullPressurePredictor, PressurePredictor};
@@ -56,9 +57,23 @@ use cjc_cana_compress::EnergyAwarePassRanker;
 use cjc_cana_nss::{NssPressurePredictor, RecordedPressurePredictor};
 use cjc_mir::optimize::optimize_program_with_plan;
 use cjc_mir::MirProgram;
-use cjc_mir_exec::run_program_instrumented;
+use cjc_mir_exec::{run_program_instrumented, trace};
+use cjc_repro::KahanAccumulatorF64;
+
+/// Train-cost-model corpus (95 programs), included by path rather than
+/// snapshot-copied: training rows want feature-space BREADTH; rows
+/// carry `program_hash`, so upstream corpus drift produces new rows
+/// instead of silently corrupting old ones.
+#[path = "../cana_train_cost_model/programs.rs"]
+mod train_programs;
 
 const SEED: u64 = 42;
+
+/// Energy weight of one FP binop relative to one executed statement.
+/// FP units burn more power than integer ALUs; 3.0 ≈ "an FP op costs
+/// 4× an int op" (1 base + 3 extra). Hand-tuned v1 constant — v2's
+/// trained model replaces it.
+const FP_ENERGY_WEIGHT: f64 = 3.0;
 
 // =============================================================================
 // Program corpus (snapshot — see module docs)
@@ -263,6 +278,102 @@ const PROGRAMS: &[Program] = &[
 ];
 
 // =============================================================================
+// Workload assembly: static snapshot + thermal-gradient family + train corpus
+// =============================================================================
+
+/// Owned workload — generated and path-included programs aren't
+/// `'static`, so the harness iterates these instead of `Program`.
+struct Workload {
+    name: String,
+    source: String,
+}
+
+/// Generate the thermal-gradient family: per loop iteration, `fp_k` of
+/// 10 work statements are float ops and `10 - fp_k` are integer ops,
+/// so the recorded FP-op density (→ Thermal) forms a gradient across
+/// the family instead of fp_hot's 0/1 step. Crossed with loop size and
+/// nesting depth for feature-space spread.
+fn thermal_gradient_workloads() -> Vec<Workload> {
+    let mut out = Vec::new();
+    for &fp_k in &[1u32, 3, 5, 7, 9] {
+        for &outer in &[64i64, 256, 1024] {
+            for &depth in &[1u32, 2] {
+                let int_k = 10 - fp_k;
+                let mut body = String::new();
+                for f in 0..fp_k {
+                    body.push_str(&format!("            facc = facc + 0.5{f:01};\n"));
+                }
+                for i in 0..int_k {
+                    body.push_str(&format!("            iacc = iacc + i * {};\n", i + 3));
+                }
+                let source = if depth == 1 {
+                    format!(
+                        r#"
+fn work(n: i64) -> i64 {{
+    let mut facc: f64 = 0.0;
+    let mut iacc: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {{
+{body}            i = i + 1;
+    }}
+    print(facc);
+    return iacc;
+}}
+print(work({outer}));
+"#
+                    )
+                } else {
+                    format!(
+                        r#"
+fn work(n: i64) -> i64 {{
+    let mut facc: f64 = 0.0;
+    let mut iacc: i64 = 0;
+    let mut o: i64 = 0;
+    while o < n {{
+        let mut i: i64 = 0;
+        while i < 8 {{
+{body}            i = i + 1;
+        }}
+        o = o + 1;
+    }}
+    print(facc);
+    return iacc;
+}}
+print(work({outer}));
+"#
+                    )
+                };
+                out.push(Workload {
+                    name: format!("grad_f{fp_k}0_d{depth}_n{outer}"),
+                    source,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Assemble the full workload list: 9 static snapshot programs +
+/// 30 thermal-gradient programs + the 95-program train corpus.
+fn all_workloads() -> Vec<Workload> {
+    let mut out: Vec<Workload> = PROGRAMS
+        .iter()
+        .map(|p| Workload {
+            name: p.name.to_string(),
+            source: p.source.to_string(),
+        })
+        .collect();
+    out.extend(thermal_gradient_workloads());
+    for p in train_programs::PROGRAMS {
+        out.push(Workload {
+            name: format!("train_{}", p.name),
+            source: p.source.to_string(),
+        });
+    }
+    out
+}
+
+// =============================================================================
 // Ablation configurations
 // =============================================================================
 
@@ -275,7 +386,20 @@ const CONFIG_IDS: &[&str] = &["baseline", "nss", "quantum", "nss_quantum", "full
 /// [`RecordedPressurePredictor`] built from a real instrumented run of
 /// the program. `baseline` and `quantum` don't consume pressure, so
 /// they have no recorded variant.
-const CONFIG_IDS_RECORDED: &[&str] = &["nss_rec", "nss_quantum_rec", "full_pinn_rec"];
+///
+/// The `_t50` / `_c80` / `_c60` variants sweep the thermal threshold /
+/// hard cap — a legitimate ablation axis now that recorded thermal
+/// forms a gradient: different caps trip on different subsets of the
+/// gradient family, which is exactly the label variance v2 training
+/// needs.
+const CONFIG_IDS_RECORDED: &[&str] = &[
+    "nss_rec",
+    "nss_rec_t50",
+    "nss_quantum_rec",
+    "full_pinn_rec",
+    "full_pinn_rec_c80",
+    "full_pinn_rec_c60",
+];
 
 /// Rank `mir` under one ablation configuration. Returns the report plus
 /// the cost-model identity that drove it. `recorded` backs the `*_rec`
@@ -304,6 +428,13 @@ fn rank_under(
         }
         "nss_rec" => {
             let model = ThermalAwareCostModel::new(LinearCostModel::trained(), recorded.clone());
+            let (id, ver) = (model.name().to_string(), model.version());
+            let report = PassRanker::new(model, PerPassLegalityGate::new()).rank(mir, features);
+            (report, id, ver)
+        }
+        "nss_rec_t50" => {
+            let model = ThermalAwareCostModel::new(LinearCostModel::trained(), recorded.clone())
+                .with_thermal_threshold(0.5);
             let (id, ver) = (model.name().to_string(), model.version());
             let report = PassRanker::new(model, PerPassLegalityGate::new()).rank(mir, features);
             (report, id, ver)
@@ -356,6 +487,20 @@ fn rank_under(
             );
             (adapter.rank(mir, features), id, ver)
         }
+        "full_pinn_rec_c80" | "full_pinn_rec_c60" => {
+            let cap = if config.ends_with("c80") { 0.80 } else { 0.60 };
+            let model = PinnPhysicalCostModel::new(LinearCostModel::trained(), recorded.clone())
+                .with_constraints(PhysicalConstraints {
+                    max_thermal_pressure: cap,
+                    ..PhysicalConstraints::default()
+                });
+            let (id, ver) = (model.name().to_string(), model.version());
+            let adapter = EnergyAwarePassRanker::new(
+                PassRanker::new(model, PerPassLegalityGate::new()),
+                Box::new(recorded.clone()),
+            );
+            (adapter.rank(mir, features), id, ver)
+        }
         other => panic!("unknown ablation config {other}"),
     }
 }
@@ -372,15 +517,18 @@ fn total_expr_count(features: &CanaFeatures) -> u64 {
         .fold(0u64, |a, b| a.saturating_add(b))
 }
 
+/// One `(workload × config)` experiment. Returns the row plus the RAW
+/// energy proxy of the optimized run; the caller normalizes `score`
+/// against the program's `baseline` config before persisting.
 fn run_experiment(
-    prog: &Program,
+    prog: &Workload,
     config: &str,
     recorded: &RecordedPressurePredictor,
-) -> CompilationProfile {
+) -> (CompilationProfile, f64) {
     let wall_start = Instant::now();
 
     // -- Compile + rank ----------------------------------------------------
-    let (ast, diags) = cjc_parser::parse_source(prog.source);
+    let (ast, diags) = cjc_parser::parse_source(&prog.source);
     assert!(
         !diags.has_errors(),
         "parse errors in {}: {:?}",
@@ -399,11 +547,11 @@ fn run_experiment(
     cjc_mir::escape::annotate_program(&mut optimized);
     let compile_wall_micros = wall_start.elapsed().as_micros() as u64;
 
-    // -- Deterministic size metric ------------------------------------------
+    // -- Deterministic size metric (kept in the row as structural info;
+    //    no longer the score) ------------------------------------------------
     let mir_nodes_before = total_expr_count(&features);
     let optimized_features = cjc_cana::features::extract(&optimized);
     let mir_nodes_after = total_expr_count(&optimized_features);
-    let score = mir_nodes_after as f64 / (mir_nodes_before.max(1)) as f64;
 
     // -- Workload estimates + PINN predictions ------------------------------
     // Neutral pass ("dce" has identity physical amplification) so the
@@ -451,16 +599,52 @@ fn run_experiment(
         )
     };
 
-    // -- Parity: AST-eval vs MIR-exec on the OPTIMIZED program ---------------
+    // -- Parity + energy: AST-eval vs INSTRUMENTED MIR-exec on the
+    //    OPTIMIZED program. The same run serves both purposes — the
+    //    instrumented-vs-uninstrumented output identity is locked by
+    //    tests/test_mir_exec_instrumented.rs, so enabling tracing here
+    //    cannot perturb the parity verdict.
     let mut interp = cjc_eval::Interpreter::new(SEED);
     let eval_result = interp.exec(&ast);
+
+    trace::with_trace(|c| {
+        c.reset();
+        c.enable();
+    });
     let mut exec = cjc_mir_exec::MirExecutor::new(SEED);
     exec.scan_ast_imports(&ast);
     let exec_result = exec.exec(&optimized);
+    let opt_events = trace::with_trace(|c| {
+        c.disable();
+        let e = c.take();
+        c.reset();
+        e
+    });
+
     let parity_match = match (&eval_result, &exec_result) {
         (Ok(_), Ok(_)) => Some(interp.output == exec.output),
         _ => Some(false),
     };
+
+    // Deterministic modeled energy of the OPTIMIZED run (§5.3 metric 5):
+    //   energy = executed_statements + FP_ENERGY_WEIGHT · fp_ops + heap_pages
+    // Plans that eliminate executed work (unroll fewer cond evals, CF/DCE
+    // fewer statements) lower it; the FP term prices the thermal
+    // dimension a size-ratio metric was structurally blind to.
+    let mut instr_total: u64 = 0;
+    let mut heap_max: u64 = 0;
+    let mut fp_acc = KahanAccumulatorF64::new();
+    for ev in &opt_events {
+        instr_total = instr_total.saturating_add(ev.instruction_count as u64);
+        heap_max = heap_max.max(ev.heap_bytes_in_use);
+        let fp_in_window = ev.thermal_intensity * ev.instruction_count as f64;
+        fp_acc.add(fp_in_window);
+    }
+    let fp_total = fp_acc.finalize();
+    let fp_term = FP_ENERGY_WEIGHT * fp_total;
+    let heap_term = heap_max as f64 / 4096.0;
+    let energy_partial = instr_total as f64 + fp_term;
+    let raw_energy = energy_partial + heap_term;
 
     // -- Legality + counts ----------------------------------------------------
     let (legality_approved, legality_violation_count) = match &report.verdict {
@@ -474,7 +658,7 @@ fn run_experiment(
         .map(|(f, seq)| (f.clone(), seq.clone()))
         .collect();
 
-    CompilationProfile {
+    let row = CompilationProfile {
         schema_version: PROFILE_SCHEMA_VERSION,
         program_name: prog.name.to_string(),
         program_hash: features.program_hash.0,
@@ -503,8 +687,11 @@ fn run_experiment(
         legality_violation_count,
         parity_match,
         compile_wall_micros,
-        score,
-    }
+        // Placeholder — the caller overwrites with the
+        // baseline-relative energy ratio before persisting.
+        score: raw_energy,
+    };
+    (row, raw_energy)
 }
 
 // =============================================================================
@@ -521,90 +708,141 @@ fn main() {
     // concatenate archives.)
     let _ = fs::remove_file(&db_path);
 
+    let workloads = all_workloads();
+    let n_configs = CONFIG_IDS.len() + CONFIG_IDS_RECORDED.len();
     println!("=================================================================");
     println!(
-        "Phase A6 — ablation over {} programs (seed {SEED}): 5 synthetic + 3 recorded configs",
-        PROGRAMS.len()
+        "Phase A6 v3 — {} programs × {} configs = {} experiments (seed {SEED})",
+        workloads.len(),
+        n_configs,
+        workloads.len() * n_configs,
     );
+    println!("Score = energy(optimized run) / energy(baseline config), lower = better");
     println!("=================================================================\n");
 
     // Per program: one instrumented run (Option B) feeds the recorded
     // predictor used by the *_rec configs.
-    let mut recorded_preds: BTreeMap<&str, RecordedPressurePredictor> = BTreeMap::new();
-    for prog in PROGRAMS {
-        let (ast, diags) = cjc_parser::parse_source(prog.source);
+    let mut recorded_preds: BTreeMap<String, RecordedPressurePredictor> = BTreeMap::new();
+    for prog in &workloads {
+        let (ast, diags) = cjc_parser::parse_source(&prog.source);
         assert!(!diags.has_errors(), "parse errors in {}", prog.name);
         let (_val, exec, events) = run_program_instrumented(&ast, SEED).expect("instrumented run");
         let recorded = RecordedPressurePredictor::from_recorded_events(
             events,
             exec.trace_node_assignments().clone(),
         );
-        recorded_preds.insert(prog.name, recorded);
+        recorded_preds.insert(prog.name.clone(), recorded);
     }
 
-    // rows[program][config] = profile
-    let mut rows: BTreeMap<&str, BTreeMap<&str, CompilationProfile>> = BTreeMap::new();
-    for prog in PROGRAMS {
-        let recorded = &recorded_preds[prog.name];
-        for config in CONFIG_IDS.iter().chain(CONFIG_IDS_RECORDED.iter()) {
-            let row = run_experiment(prog, config, recorded);
+    // rows[program][config] = profile (score already baseline-relative).
+    let mut rows: BTreeMap<String, BTreeMap<&str, CompilationProfile>> = BTreeMap::new();
+    for prog in &workloads {
+        let recorded = &recorded_preds[&prog.name];
+        // Baseline first — its raw energy normalizes the others.
+        let (mut base_row, base_energy) = run_experiment(prog, "baseline", recorded);
+        let normalizer = base_energy.max(1.0);
+        base_row.score = base_energy / normalizer; // 1.0 by construction
+        append_row(&db_path, &base_row).expect("append profile row");
+        rows.entry(prog.name.clone())
+            .or_default()
+            .insert("baseline", base_row);
+        for config in CONFIG_IDS
+            .iter()
+            .chain(CONFIG_IDS_RECORDED.iter())
+            .filter(|c| **c != "baseline")
+        {
+            let (mut row, raw_energy) = run_experiment(prog, config, recorded);
+            row.score = raw_energy / normalizer;
             append_row(&db_path, &row).expect("append profile row");
-            rows.entry(prog.name).or_default().insert(config, row);
+            rows.entry(prog.name.clone())
+                .or_default()
+                .insert(config, row);
         }
     }
 
-    // -- Synthetic cohort (Option A predictors) -----------------------------
-    println!("Synthetic (Option A) cohort — scores (lower = better):");
-    println!(
-        "{:<10} | {:>9} | {:>9} | {:>9} | {:>11} | {:>9}",
-        "program", "baseline", "nss", "quantum", "nss_quantum", "full_pinn"
-    );
-    println!("{}", "-".repeat(74));
-    for (prog, per_config) in &rows {
-        let score = |c: &str| per_config.get(c).map(|r| r.score).unwrap_or(f64::NAN);
-        println!(
-            "{:<10} | {:>9.4} | {:>9.4} | {:>9.4} | {:>11.4} | {:>9.4}",
-            prog,
-            score("baseline"),
-            score("nss"),
-            score("quantum"),
-            score("nss_quantum"),
-            score("full_pinn"),
-        );
+    // -- Thermal-gradient verification ----------------------------------------
+    // The gradient family must produce a SPREAD of recorded thermal
+    // values, not fp_hot's 0/1 step — this is the label-variance
+    // prerequisite for v2 training.
+    println!("Thermal gradient (recorded max thermal per gradient program):");
+    let mut gradient_thermals: Vec<(String, f64)> = rows
+        .iter()
+        .filter(|(p, _)| p.starts_with("grad_"))
+        .map(|(p, per_config)| {
+            let t = per_config
+                .get("full_pinn_rec")
+                .map(|r| r.nss_predicted_thermal_max)
+                .unwrap_or(f64::NAN);
+            (p.clone(), t)
+        })
+        .collect();
+    gradient_thermals.sort_by(|a, b| a.1.total_cmp(&b.1));
+    for chunk in gradient_thermals.chunks(3) {
+        let line: Vec<String> = chunk
+            .iter()
+            .map(|(p, t)| format!("{p:<22} {t:>6.3}"))
+            .collect();
+        println!("  {}", line.join("   "));
     }
+    let distinct_bands = {
+        let mut bands: Vec<u32> = gradient_thermals
+            .iter()
+            .filter(|(_, t)| t.is_finite())
+            .map(|(_, t)| (t * 10.0).floor() as u32)
+            .collect();
+        bands.sort_unstable();
+        bands.dedup();
+        bands.len()
+    };
+    println!("  → {distinct_bands} distinct 0.1-wide thermal bands across the gradient family");
 
-    // -- Recorded cohort (Option B real traces) ------------------------------
-    println!("\nRecorded (Option B) cohort — scores + recorded max thermal:");
+    // -- Score spread summary -------------------------------------------------
     println!(
-        "{:<10} | {:>9} | {:>15} | {:>13} | {:>11} | parity",
-        "program", "nss_rec", "nss_quantum_rec", "full_pinn_rec", "rec_thermal"
+        "\nPer-config score statistics across {} programs:",
+        rows.len()
     );
-    println!("{}", "-".repeat(78));
-    for (prog, per_config) in &rows {
-        let score = |c: &str| per_config.get(c).map(|r| r.score).unwrap_or(f64::NAN);
-        let rec_thermal = per_config
-            .get("full_pinn_rec")
-            .map(|r| r.nss_predicted_thermal_max)
-            .unwrap_or(f64::NAN);
-        let parity_all = per_config.values().all(|r| r.parity_match == Some(true));
+    println!(
+        "{:<18} | {:>8} | {:>8} | {:>8} | {:>10}",
+        "config", "min", "mean", "max", "≠baseline"
+    );
+    println!("{}", "-".repeat(64));
+    for config in CONFIG_IDS.iter().chain(CONFIG_IDS_RECORDED.iter()) {
+        let mut acc = KahanAccumulatorF64::new();
+        let mut min = f64::INFINITY;
+        let mut max = f64::NEG_INFINITY;
+        let mut n = 0u32;
+        let mut differs = 0u32;
+        for per_config in rows.values() {
+            if let Some(r) = per_config.get(config) {
+                acc.add(r.score);
+                min = min.min(r.score);
+                max = max.max(r.score);
+                n += 1;
+                if (r.score - 1.0).abs() > 1e-9 {
+                    differs += 1;
+                }
+            }
+        }
+        let mean = acc.finalize() / n.max(1) as f64;
         println!(
-            "{:<10} | {:>9.4} | {:>15.4} | {:>13.4} | {:>11.4} | {}",
-            prog,
-            score("nss_rec"),
-            score("nss_quantum_rec"),
-            score("full_pinn_rec"),
-            rec_thermal,
-            if parity_all { "ok" } else { "MISMATCH" },
+            "{:<18} | {:>8.4} | {:>8.4} | {:>8.4} | {:>10}",
+            config, min, mean, max, differs
         );
     }
 
     // -- Differentiation check: did real traces change ANY plan? ------------
     let mut diverged: Vec<String> = Vec::new();
+    let mut diff_lines_printed = 0usize;
+    const MAX_DIFF_LINES: usize = 24;
+    println!("\nPlan diffs (synthetic vs recorded, first {MAX_DIFF_LINES} lines):");
     for (prog, per_config) in &rows {
         for (syn, rec) in [
             ("nss", "nss_rec"),
+            ("nss", "nss_rec_t50"),
             ("nss_quantum", "nss_quantum_rec"),
             ("full_pinn", "full_pinn_rec"),
+            ("full_pinn", "full_pinn_rec_c80"),
+            ("full_pinn", "full_pinn_rec_c60"),
         ] {
             if per_config[syn].pass_sequence != per_config[rec].pass_sequence {
                 diverged.push(format!("{prog}:{rec}"));
@@ -630,11 +868,12 @@ fn main() {
                 for func in all_fns {
                     let syn_passes = syn_map.get(func).copied().unwrap_or(&empty);
                     let rec_passes = rec_map.get(func).copied().unwrap_or(&empty);
-                    if syn_passes != rec_passes {
+                    if syn_passes != rec_passes && diff_lines_printed < MAX_DIFF_LINES {
                         println!(
                             "  [plan diff] {prog}/{func} under {rec}: {:?} -> {:?}",
                             syn_passes, rec_passes
                         );
+                        diff_lines_printed += 1;
                     }
                 }
             }
@@ -642,7 +881,9 @@ fn main() {
     }
 
     // -- §5.2 promotion gate over the recorded cohort -------------------------
-    // full_pinn_rec vs every other config (both cohorts). Lower = better.
+    // full_pinn_rec vs the best NON-PINN config (cap variants are PINN
+    // too — comparing PINN against itself would inflate ties). Lower =
+    // better.
     let margin = 0.1;
     let mut pinn_wins = 0usize;
     let mut ties = 0usize;
@@ -650,7 +891,7 @@ fn main() {
         let pinn = per_config["full_pinn_rec"].score;
         let best_other = per_config
             .iter()
-            .filter(|(c, _)| **c != "full_pinn_rec")
+            .filter(|(c, _)| !c.starts_with("full_pinn"))
             .map(|(_, r)| r.score)
             .fold(f64::INFINITY, f64::min);
         if pinn <= best_other - margin {
@@ -671,11 +912,7 @@ fn main() {
         if diverged.is_empty() {
             "NONE — recorded pressures did not change any plan".to_string()
         } else {
-            format!(
-                "{} config-program pairs: {}",
-                diverged.len(),
-                diverged.join(", ")
-            )
+            format!("{} config-program pairs", diverged.len())
         }
     );
     println!(
@@ -686,13 +923,14 @@ fn main() {
         if parity_all { "100%" } else { "FAILED" }
     );
 
-    // Row-hash stability canary: re-run one recorded experiment.
-    let again = run_experiment(
-        &PROGRAMS[0],
-        "full_pinn_rec",
-        &recorded_preds[PROGRAMS[0].name],
-    );
-    let stable = rows[PROGRAMS[0].name]["full_pinn_rec"].row_hash() == again.row_hash();
+    // Row-hash stability canary: re-run one recorded experiment on the
+    // fp_hot program (index 8 in the static set — the one with maximal
+    // thermal signal, so the canary covers the most instrumented path).
+    let canary = &workloads[8];
+    let (mut again, raw) = run_experiment(canary, "full_pinn_rec", &recorded_preds[&canary.name]);
+    let (_, base_raw) = run_experiment(canary, "baseline", &recorded_preds[&canary.name]);
+    again.score = raw / base_raw.max(1.0);
+    let stable = rows[&canary.name]["full_pinn_rec"].row_hash() == again.row_hash();
     println!(
         "Row-hash stability (double-run, wall-clock excluded): {}",
         if stable { "byte-identical" } else { "DRIFT" }
@@ -700,12 +938,22 @@ fn main() {
 
     let back = read_all(&db_path).expect("read back profile db");
     println!("\nProfile DB: {} rows at {}", back.len(), db_path.display());
-    let verdict = if pinn_wins * 10 >= total * 6 {
-        "PINN v2 promotion gate: WOULD PASS (≥60% wins)"
+    let row_target_met = back.len() >= 1000;
+    println!(
+        "≥1000-row corpus prerequisite: {}",
+        if row_target_met { "MET" } else { "NOT MET" }
+    );
+    let verdict = if pinn_wins * 10 >= total * 6 && row_target_met {
+        "PINN v2 promotion gate: WOULD PASS (≥60% wins + 1000 rows)"
     } else {
-        "PINN v2 promotion gate: NOT MET — see §5.4 (also requires 1000+ rows)"
+        "PINN v2 promotion gate: NOT MET — see §5.4"
     };
     println!("{verdict}");
     assert!(parity_all, "parity must hold across every ablation row");
     assert!(stable, "row hash must be double-run stable");
+    assert!(
+        distinct_bands >= 4,
+        "thermal gradient must span ≥4 distinct bands, got {distinct_bands}"
+    );
+    assert!(row_target_met, "corpus must reach 1000 rows");
 }

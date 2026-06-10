@@ -234,6 +234,7 @@ dependencies = [
  "cjc-mir",
  "cjc-mir-exec",
  "cjc-parser",
+ "cjc-repro",
 ]
 
 [[package]]

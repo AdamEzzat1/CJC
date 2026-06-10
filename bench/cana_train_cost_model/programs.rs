@@ -1631,121 +1631,501 @@ print(compute(5));
 
 pub const PROGRAMS: &[Program] = &[
     // CF (6)
-    Program { name: "arith_tiny",            source: PROG_ARITH_TINY,            expected_dominant_pass: "constant_fold" },
-    Program { name: "arith_med",             source: PROG_ARITH_MED,             expected_dominant_pass: "constant_fold" },
-    Program { name: "arith_heavy",           source: PROG_ARITH_HEAVY,           expected_dominant_pass: "constant_fold" },
-    Program { name: "cf_forty",              source: PROG_CF_FORTY,              expected_dominant_pass: "constant_fold" },
-    Program { name: "cf_in_hot_loop",        source: PROG_CF_IN_HOT_LOOP,        expected_dominant_pass: "constant_fold" },
-    Program { name: "cf_pure_float",         source: PROG_CF_PURE_FLOAT,         expected_dominant_pass: "constant_fold" },
+    Program {
+        name: "arith_tiny",
+        source: PROG_ARITH_TINY,
+        expected_dominant_pass: "constant_fold",
+    },
+    Program {
+        name: "arith_med",
+        source: PROG_ARITH_MED,
+        expected_dominant_pass: "constant_fold",
+    },
+    Program {
+        name: "arith_heavy",
+        source: PROG_ARITH_HEAVY,
+        expected_dominant_pass: "constant_fold",
+    },
+    Program {
+        name: "cf_forty",
+        source: PROG_CF_FORTY,
+        expected_dominant_pass: "constant_fold",
+    },
+    Program {
+        name: "cf_in_hot_loop",
+        source: PROG_CF_IN_HOT_LOOP,
+        expected_dominant_pass: "constant_fold",
+    },
+    Program {
+        name: "cf_pure_float",
+        source: PROG_CF_PURE_FLOAT,
+        expected_dominant_pass: "constant_fold",
+    },
     // LICM (7)
-    Program { name: "loop_invariant_big",    source: PROG_LOOP_INVARIANT_BIG,    expected_dominant_pass: "licm" },
-    Program { name: "loop_nested2_big",      source: PROG_LOOP_NESTED2_BIG,      expected_dominant_pass: "licm" },
-    Program { name: "loop_nested3_big",      source: PROG_LOOP_NESTED3_BIG,      expected_dominant_pass: "licm" },
-    Program { name: "loop_nested4_big",      source: PROG_LOOP_NESTED4_BIG,      expected_dominant_pass: "licm" },
-    Program { name: "licm_many_inv",         source: PROG_LICM_MANY_INV,         expected_dominant_pass: "licm" },
-    Program { name: "licm_branchy",          source: PROG_LICM_BRANCHY,          expected_dominant_pass: "licm" },
-    Program { name: "licm_long_outer",       source: PROG_LICM_LONG_OUTER,       expected_dominant_pass: "licm" },
+    Program {
+        name: "loop_invariant_big",
+        source: PROG_LOOP_INVARIANT_BIG,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "loop_nested2_big",
+        source: PROG_LOOP_NESTED2_BIG,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "loop_nested3_big",
+        source: PROG_LOOP_NESTED3_BIG,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "loop_nested4_big",
+        source: PROG_LOOP_NESTED4_BIG,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "licm_many_inv",
+        source: PROG_LICM_MANY_INV,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "licm_branchy",
+        source: PROG_LICM_BRANCHY,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "licm_long_outer",
+        source: PROG_LICM_LONG_OUTER,
+        expected_dominant_pass: "licm",
+    },
     // CSE (4)
-    Program { name: "cse_repeat",            source: PROG_CSE_REPEAT,            expected_dominant_pass: "cse" },
-    Program { name: "cse_in_loop_big",       source: PROG_CSE_IN_LOOP_BIG,       expected_dominant_pass: "cse" },
-    Program { name: "cse_heavy",             source: PROG_CSE_HEAVY,             expected_dominant_pass: "cse" },
-    Program { name: "cse_double_loop",       source: PROG_CSE_DOUBLE_LOOP,       expected_dominant_pass: "cse" },
+    Program {
+        name: "cse_repeat",
+        source: PROG_CSE_REPEAT,
+        expected_dominant_pass: "cse",
+    },
+    Program {
+        name: "cse_in_loop_big",
+        source: PROG_CSE_IN_LOOP_BIG,
+        expected_dominant_pass: "cse",
+    },
+    Program {
+        name: "cse_heavy",
+        source: PROG_CSE_HEAVY,
+        expected_dominant_pass: "cse",
+    },
+    Program {
+        name: "cse_double_loop",
+        source: PROG_CSE_DOUBLE_LOOP,
+        expected_dominant_pass: "cse",
+    },
     // SR (4)
-    Program { name: "sr_pow2",               source: PROG_SR_POW2,               expected_dominant_pass: "strength_reduce" },
-    Program { name: "sr_in_loop_big",        source: PROG_SR_IN_LOOP_BIG,        expected_dominant_pass: "strength_reduce" },
-    Program { name: "sr_heavy_loop",         source: PROG_SR_HEAVY_LOOP,         expected_dominant_pass: "strength_reduce" },
-    Program { name: "sr_div_pow2",           source: PROG_SR_DIV_POW2,           expected_dominant_pass: "strength_reduce" },
+    Program {
+        name: "sr_pow2",
+        source: PROG_SR_POW2,
+        expected_dominant_pass: "strength_reduce",
+    },
+    Program {
+        name: "sr_in_loop_big",
+        source: PROG_SR_IN_LOOP_BIG,
+        expected_dominant_pass: "strength_reduce",
+    },
+    Program {
+        name: "sr_heavy_loop",
+        source: PROG_SR_HEAVY_LOOP,
+        expected_dominant_pass: "strength_reduce",
+    },
+    Program {
+        name: "sr_div_pow2",
+        source: PROG_SR_DIV_POW2,
+        expected_dominant_pass: "strength_reduce",
+    },
     // DCE (4)
-    Program { name: "dce_dead",              source: PROG_DCE_DEAD,              expected_dominant_pass: "dce" },
-    Program { name: "dce_branchy",           source: PROG_DCE_BRANCHY,           expected_dominant_pass: "dce" },
-    Program { name: "dce_twenty_dead",       source: PROG_DCE_TWENTY_DEAD,       expected_dominant_pass: "dce" },
-    Program { name: "dce_in_loop",           source: PROG_DCE_IN_LOOP,           expected_dominant_pass: "dce" },
+    Program {
+        name: "dce_dead",
+        source: PROG_DCE_DEAD,
+        expected_dominant_pass: "dce",
+    },
+    Program {
+        name: "dce_branchy",
+        source: PROG_DCE_BRANCHY,
+        expected_dominant_pass: "dce",
+    },
+    Program {
+        name: "dce_twenty_dead",
+        source: PROG_DCE_TWENTY_DEAD,
+        expected_dominant_pass: "dce",
+    },
+    Program {
+        name: "dce_in_loop",
+        source: PROG_DCE_IN_LOOP,
+        expected_dominant_pass: "dce",
+    },
     // Branch-heavy (3)
-    Program { name: "branch_ladder",         source: PROG_BRANCH_LADDER,         expected_dominant_pass: "dce" },
-    Program { name: "nested_ifs",            source: PROG_NESTED_IFS,            expected_dominant_pass: "constant_fold" },
-    Program { name: "branch_heavy",          source: PROG_BRANCH_HEAVY,          expected_dominant_pass: "dce" },
+    Program {
+        name: "branch_ladder",
+        source: PROG_BRANCH_LADDER,
+        expected_dominant_pass: "dce",
+    },
+    Program {
+        name: "nested_ifs",
+        source: PROG_NESTED_IFS,
+        expected_dominant_pass: "constant_fold",
+    },
+    Program {
+        name: "branch_heavy",
+        source: PROG_BRANCH_HEAVY,
+        expected_dominant_pass: "dce",
+    },
     // Mixed multi-fn (5)
-    Program { name: "many_fn",               source: PROG_MANY_FN,               expected_dominant_pass: "constant_fold" },
-    Program { name: "recursive",             source: PROG_RECURSIVE,             expected_dominant_pass: "constant_fold" },
-    Program { name: "float",                 source: PROG_FLOAT,                 expected_dominant_pass: "constant_fold" },
-    Program { name: "mixed_big",             source: PROG_MIXED_BIG,             expected_dominant_pass: "licm" },
-    Program { name: "large",                 source: PROG_LARGE,                 expected_dominant_pass: "licm" },
+    Program {
+        name: "many_fn",
+        source: PROG_MANY_FN,
+        expected_dominant_pass: "constant_fold",
+    },
+    Program {
+        name: "recursive",
+        source: PROG_RECURSIVE,
+        expected_dominant_pass: "constant_fold",
+    },
+    Program {
+        name: "float",
+        source: PROG_FLOAT,
+        expected_dominant_pass: "constant_fold",
+    },
+    Program {
+        name: "mixed_big",
+        source: PROG_MIXED_BIG,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "large",
+        source: PROG_LARGE,
+        expected_dominant_pass: "licm",
+    },
     // Recursion (3)
-    Program { name: "recursive_big",         source: PROG_RECURSIVE_BIG,         expected_dominant_pass: "constant_fold" },
-    Program { name: "fib_rec",               source: PROG_FIB_REC,               expected_dominant_pass: "constant_fold" },
-    Program { name: "mutual_rec",            source: PROG_MUTUAL_REC,            expected_dominant_pass: "constant_fold" },
+    Program {
+        name: "recursive_big",
+        source: PROG_RECURSIVE_BIG,
+        expected_dominant_pass: "constant_fold",
+    },
+    Program {
+        name: "fib_rec",
+        source: PROG_FIB_REC,
+        expected_dominant_pass: "constant_fold",
+    },
+    Program {
+        name: "mutual_rec",
+        source: PROG_MUTUAL_REC,
+        expected_dominant_pass: "constant_fold",
+    },
     // Float (3)
-    Program { name: "float_loop",            source: PROG_FLOAT_LOOP,            expected_dominant_pass: "licm" },
-    Program { name: "float_poly",            source: PROG_FLOAT_POLY,            expected_dominant_pass: "licm" },
-    Program { name: "float_trig",            source: PROG_FLOAT_TRIG,            expected_dominant_pass: "constant_fold" },
+    Program {
+        name: "float_loop",
+        source: PROG_FLOAT_LOOP,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "float_poly",
+        source: PROG_FLOAT_POLY,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "float_trig",
+        source: PROG_FLOAT_TRIG,
+        expected_dominant_pass: "constant_fold",
+    },
     // Straight-line (3)
-    Program { name: "straight_short",        source: PROG_STRAIGHT_SHORT,        expected_dominant_pass: "constant_fold" },
-    Program { name: "straight_med",          source: PROG_STRAIGHT_MED,          expected_dominant_pass: "constant_fold" },
-    Program { name: "straight_long",         source: PROG_STRAIGHT_LONG,         expected_dominant_pass: "constant_fold" },
+    Program {
+        name: "straight_short",
+        source: PROG_STRAIGHT_SHORT,
+        expected_dominant_pass: "constant_fold",
+    },
+    Program {
+        name: "straight_med",
+        source: PROG_STRAIGHT_MED,
+        expected_dominant_pass: "constant_fold",
+    },
+    Program {
+        name: "straight_long",
+        source: PROG_STRAIGHT_LONG,
+        expected_dominant_pass: "constant_fold",
+    },
     // Degenerate (3)
-    Program { name: "empty_return",          source: PROG_EMPTY_RETURN,          expected_dominant_pass: "constant_fold" },
-    Program { name: "single_lit",            source: PROG_SINGLE_LIT,            expected_dominant_pass: "constant_fold" },
-    Program { name: "identity",              source: PROG_IDENTITY,              expected_dominant_pass: "constant_fold" },
+    Program {
+        name: "empty_return",
+        source: PROG_EMPTY_RETURN,
+        expected_dominant_pass: "constant_fold",
+    },
+    Program {
+        name: "single_lit",
+        source: PROG_SINGLE_LIT,
+        expected_dominant_pass: "constant_fold",
+    },
+    Program {
+        name: "identity",
+        source: PROG_IDENTITY,
+        expected_dominant_pass: "constant_fold",
+    },
     // LICM × CSE mix (2)
-    Program { name: "hot_inner",             source: PROG_HOT_INNER,             expected_dominant_pass: "licm" },
-    Program { name: "licm_cse_mix",          source: PROG_LICM_CSE_MIX,          expected_dominant_pass: "licm" },
+    Program {
+        name: "hot_inner",
+        source: PROG_HOT_INNER,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "licm_cse_mix",
+        source: PROG_LICM_CSE_MIX,
+        expected_dominant_pass: "licm",
+    },
     // Many-fn (2)
-    Program { name: "chain_of_ten",          source: PROG_CHAIN_OF_TEN,          expected_dominant_pass: "constant_fold" },
-    Program { name: "three_loop_fns",        source: PROG_THREE_LOOP_FNS,        expected_dominant_pass: "licm" },
+    Program {
+        name: "chain_of_ten",
+        source: PROG_CHAIN_OF_TEN,
+        expected_dominant_pass: "constant_fold",
+    },
+    Program {
+        name: "three_loop_fns",
+        source: PROG_THREE_LOOP_FNS,
+        expected_dominant_pass: "licm",
+    },
     // Mixed arith / funcall (2)
-    Program { name: "mixed_arith",           source: PROG_MIXED_ARITH,           expected_dominant_pass: "constant_fold" },
-    Program { name: "funcall_in_loop",       source: PROG_FUNCALL_IN_LOOP,       expected_dominant_pass: "licm" },
+    Program {
+        name: "mixed_arith",
+        source: PROG_MIXED_ARITH,
+        expected_dominant_pass: "constant_fold",
+    },
+    Program {
+        name: "funcall_in_loop",
+        source: PROG_FUNCALL_IN_LOOP,
+        expected_dominant_pass: "licm",
+    },
     // Big composites (3)
-    Program { name: "big_composite_1",       source: PROG_BIG_COMPOSITE_1,       expected_dominant_pass: "dce" },
-    Program { name: "big_composite_2",       source: PROG_BIG_COMPOSITE_2,       expected_dominant_pass: "cse" },
-    Program { name: "big_composite_3",       source: PROG_BIG_COMPOSITE_3,       expected_dominant_pass: "licm" },
+    Program {
+        name: "big_composite_1",
+        source: PROG_BIG_COMPOSITE_1,
+        expected_dominant_pass: "dce",
+    },
+    Program {
+        name: "big_composite_2",
+        source: PROG_BIG_COMPOSITE_2,
+        expected_dominant_pass: "cse",
+    },
+    Program {
+        name: "big_composite_3",
+        source: PROG_BIG_COMPOSITE_3,
+        expected_dominant_pass: "licm",
+    },
     // 10-pack additions (10)
-    Program { name: "loop_with_branch_1",    source: PROG_LOOP_WITH_BRANCH_1,    expected_dominant_pass: "licm" },
-    Program { name: "loop_with_branch_2",    source: PROG_LOOP_WITH_BRANCH_2,    expected_dominant_pass: "licm" },
-    Program { name: "many_lets_loop",        source: PROG_MANY_LETS_LOOP,        expected_dominant_pass: "cse" },
-    Program { name: "accumulator",           source: PROG_ACCUMULATOR,           expected_dominant_pass: "licm" },
-    Program { name: "ranged_loop",           source: PROG_RANGED_LOOP,           expected_dominant_pass: "licm" },
-    Program { name: "while_double",          source: PROG_WHILE_DOUBLE,          expected_dominant_pass: "licm" },
-    Program { name: "cond_accum",            source: PROG_COND_ACCUM,            expected_dominant_pass: "licm" },
-    Program { name: "two_loops_sequential",  source: PROG_TWO_LOOPS_SEQUENTIAL,  expected_dominant_pass: "licm" },
-    Program { name: "inner_loop_break_like", source: PROG_INNER_LOOP_BREAK_LIKE, expected_dominant_pass: "licm" },
-    Program { name: "nested2_with_inv",      source: PROG_NESTED2_WITH_INV,      expected_dominant_pass: "licm" },
+    Program {
+        name: "loop_with_branch_1",
+        source: PROG_LOOP_WITH_BRANCH_1,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "loop_with_branch_2",
+        source: PROG_LOOP_WITH_BRANCH_2,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "many_lets_loop",
+        source: PROG_MANY_LETS_LOOP,
+        expected_dominant_pass: "cse",
+    },
+    Program {
+        name: "accumulator",
+        source: PROG_ACCUMULATOR,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "ranged_loop",
+        source: PROG_RANGED_LOOP,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "while_double",
+        source: PROG_WHILE_DOUBLE,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "cond_accum",
+        source: PROG_COND_ACCUM,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "two_loops_sequential",
+        source: PROG_TWO_LOOPS_SEQUENTIAL,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "inner_loop_break_like",
+        source: PROG_INNER_LOOP_BREAK_LIKE,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "nested2_with_inv",
+        source: PROG_NESTED2_WITH_INV,
+        expected_dominant_pass: "licm",
+    },
     // CSE-eligible programs with explicit duplicate let bindings (4)
-    Program { name: "cse_let_dup_tiny",       source: PROG_CSE_LET_DUP_TINY,      expected_dominant_pass: "cse" },
-    Program { name: "cse_let_dup_five",       source: PROG_CSE_LET_DUP_FIVE,      expected_dominant_pass: "cse" },
-    Program { name: "cse_pairs",              source: PROG_CSE_PAIRS,             expected_dominant_pass: "cse" },
-    Program { name: "cse_dup_in_loop",        source: PROG_CSE_DUP_IN_LOOP,       expected_dominant_pass: "cse" },
+    Program {
+        name: "cse_let_dup_tiny",
+        source: PROG_CSE_LET_DUP_TINY,
+        expected_dominant_pass: "cse",
+    },
+    Program {
+        name: "cse_let_dup_five",
+        source: PROG_CSE_LET_DUP_FIVE,
+        expected_dominant_pass: "cse",
+    },
+    Program {
+        name: "cse_pairs",
+        source: PROG_CSE_PAIRS,
+        expected_dominant_pass: "cse",
+    },
+    Program {
+        name: "cse_dup_in_loop",
+        source: PROG_CSE_DUP_IN_LOOP,
+        expected_dominant_pass: "cse",
+    },
     // LICM-eligible programs with explicit invariant let bindings (4)
-    Program { name: "licm_one_let",           source: PROG_LICM_ONE_LET,          expected_dominant_pass: "licm" },
-    Program { name: "licm_three_lets",        source: PROG_LICM_THREE_LETS,       expected_dominant_pass: "licm" },
-    Program { name: "licm_nested",            source: PROG_LICM_NESTED,           expected_dominant_pass: "licm" },
-    Program { name: "licm_five_lets",         source: PROG_LICM_FIVE_LETS,        expected_dominant_pass: "licm" },
+    Program {
+        name: "licm_one_let",
+        source: PROG_LICM_ONE_LET,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "licm_three_lets",
+        source: PROG_LICM_THREE_LETS,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "licm_nested",
+        source: PROG_LICM_NESTED,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "licm_five_lets",
+        source: PROG_LICM_FIVE_LETS,
+        expected_dominant_pass: "licm",
+    },
     // Mixed CSE + LICM eligible (1)
-    Program { name: "cse_licm_dup_inv",       source: PROG_CSE_LICM_DUP_INV,      expected_dominant_pass: "licm" },
+    Program {
+        name: "cse_licm_dup_inv",
+        source: PROG_CSE_LICM_DUP_INV,
+        expected_dominant_pass: "licm",
+    },
     // §3A.4 follow-up — Alloc-heavy (3) — closes alloc_sites blind dimension
-    Program { name: "alloc_array_fold",       source: PROG_ALLOC_ARRAY_FOLD,      expected_dominant_pass: "constant_fold" },
-    Program { name: "alloc_tuples_chain",     source: PROG_ALLOC_TUPLES_CHAIN,    expected_dominant_pass: "constant_fold" },
-    Program { name: "alloc_strings_loop",     source: PROG_ALLOC_STRINGS_LOOP,    expected_dominant_pass: "licm" },
+    Program {
+        name: "alloc_array_fold",
+        source: PROG_ALLOC_ARRAY_FOLD,
+        expected_dominant_pass: "constant_fold",
+    },
+    Program {
+        name: "alloc_tuples_chain",
+        source: PROG_ALLOC_TUPLES_CHAIN,
+        expected_dominant_pass: "constant_fold",
+    },
+    Program {
+        name: "alloc_strings_loop",
+        source: PROG_ALLOC_STRINGS_LOOP,
+        expected_dominant_pass: "licm",
+    },
     // §3A.4 follow-up — High-branch (3) — saturates branch_count tail
-    Program { name: "branch_ladder_12",       source: PROG_BRANCH_LADDER_12,      expected_dominant_pass: "constant_fold" },
-    Program { name: "branch_nested_15",       source: PROG_BRANCH_NESTED_15,      expected_dominant_pass: "constant_fold" },
-    Program { name: "branch_loop_mix",        source: PROG_BRANCH_LOOP_MIX,       expected_dominant_pass: "licm" },
+    Program {
+        name: "branch_ladder_12",
+        source: PROG_BRANCH_LADDER_12,
+        expected_dominant_pass: "constant_fold",
+    },
+    Program {
+        name: "branch_nested_15",
+        source: PROG_BRANCH_NESTED_15,
+        expected_dominant_pass: "constant_fold",
+    },
+    Program {
+        name: "branch_loop_mix",
+        source: PROG_BRANCH_LOOP_MIX,
+        expected_dominant_pass: "licm",
+    },
     // §17 Option A — PINN-shaped (6) — small loop+branch functions
-    Program { name: "pinn_inner_accum",       source: PROG_PINN_INNER_ACCUM,      expected_dominant_pass: "licm" },
-    Program { name: "pinn_dot_product",       source: PROG_PINN_DOT_PRODUCT,      expected_dominant_pass: "licm" },
-    Program { name: "pinn_grad_step",         source: PROG_PINN_GRAD_STEP,        expected_dominant_pass: "licm" },
-    Program { name: "pinn_loss_term",         source: PROG_PINN_LOSS_TERM,        expected_dominant_pass: "licm" },
-    Program { name: "pinn_nested_small",      source: PROG_PINN_NESTED_SMALL,     expected_dominant_pass: "licm" },
-    Program { name: "pinn_tanh_estimate",     source: PROG_PINN_TANH_ESTIMATE,    expected_dominant_pass: "constant_fold" },
+    Program {
+        name: "pinn_inner_accum",
+        source: PROG_PINN_INNER_ACCUM,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "pinn_dot_product",
+        source: PROG_PINN_DOT_PRODUCT,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "pinn_grad_step",
+        source: PROG_PINN_GRAD_STEP,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "pinn_loss_term",
+        source: PROG_PINN_LOSS_TERM,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "pinn_nested_small",
+        source: PROG_PINN_NESTED_SMALL,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "pinn_tanh_estimate",
+        source: PROG_PINN_TANH_ESTIMATE,
+        expected_dominant_pass: "constant_fold",
+    },
     // §3.2 — loop_unroll active (8) + rejected (2)
-    Program { name: "unroll_tiny_3",          source: PROG_UNROLL_TINY_3,         expected_dominant_pass: "loop_unroll" },
-    Program { name: "unroll_max_8",           source: PROG_UNROLL_MAX_8,          expected_dominant_pass: "loop_unroll" },
-    Program { name: "unroll_float_accum",     source: PROG_UNROLL_FLOAT_ACCUM,    expected_dominant_pass: "loop_unroll" },
-    Program { name: "unroll_two_seq",         source: PROG_UNROLL_TWO_SEQ,        expected_dominant_pass: "loop_unroll" },
-    Program { name: "unroll_nested",          source: PROG_UNROLL_NESTED,         expected_dominant_pass: "loop_unroll" },
-    Program { name: "unroll_with_branch",     source: PROG_UNROLL_WITH_BRANCH,    expected_dominant_pass: "loop_unroll" },
-    Program { name: "unroll_big_func",        source: PROG_UNROLL_BIG_FUNC,       expected_dominant_pass: "loop_unroll" },
-    Program { name: "unroll_heavy_body",      source: PROG_UNROLL_HEAVY_BODY,     expected_dominant_pass: "loop_unroll" },
-    Program { name: "unroll_rejected_n9",     source: PROG_UNROLL_REJECTED_N9,    expected_dominant_pass: "licm" },
-    Program { name: "unroll_rejected_var",    source: PROG_UNROLL_REJECTED_VAR_BOUND, expected_dominant_pass: "licm" },
+    Program {
+        name: "unroll_tiny_3",
+        source: PROG_UNROLL_TINY_3,
+        expected_dominant_pass: "loop_unroll",
+    },
+    Program {
+        name: "unroll_max_8",
+        source: PROG_UNROLL_MAX_8,
+        expected_dominant_pass: "loop_unroll",
+    },
+    Program {
+        name: "unroll_float_accum",
+        source: PROG_UNROLL_FLOAT_ACCUM,
+        expected_dominant_pass: "loop_unroll",
+    },
+    Program {
+        name: "unroll_two_seq",
+        source: PROG_UNROLL_TWO_SEQ,
+        expected_dominant_pass: "loop_unroll",
+    },
+    Program {
+        name: "unroll_nested",
+        source: PROG_UNROLL_NESTED,
+        expected_dominant_pass: "loop_unroll",
+    },
+    Program {
+        name: "unroll_with_branch",
+        source: PROG_UNROLL_WITH_BRANCH,
+        expected_dominant_pass: "loop_unroll",
+    },
+    Program {
+        name: "unroll_big_func",
+        source: PROG_UNROLL_BIG_FUNC,
+        expected_dominant_pass: "loop_unroll",
+    },
+    Program {
+        name: "unroll_heavy_body",
+        source: PROG_UNROLL_HEAVY_BODY,
+        expected_dominant_pass: "loop_unroll",
+    },
+    Program {
+        name: "unroll_rejected_n9",
+        source: PROG_UNROLL_REJECTED_N9,
+        expected_dominant_pass: "licm",
+    },
+    Program {
+        name: "unroll_rejected_var",
+        source: PROG_UNROLL_REJECTED_VAR_BOUND,
+        expected_dominant_pass: "licm",
+    },
 ];

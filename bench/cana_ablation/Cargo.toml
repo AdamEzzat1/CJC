@@ -17,6 +17,7 @@ name = "cana_ablation"
 path = "main.rs"
 
 [dependencies]
+cjc-repro = { path = "../../crates/cjc-repro" }
 cjc-ast = { path = "../../crates/cjc-ast" }
 cjc-parser = { path = "../../crates/cjc-parser" }
 cjc-hir = { path = "../../crates/cjc-hir" }

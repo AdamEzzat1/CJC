@@ -560,9 +560,22 @@ impl MirExecutor {
 
             // If there is a user-defined `main` function, call it
             if self.functions.contains_key("main") {
-                return self.call_function("main", &[]);
+                let r = self.call_function("main", &[]);
+                if self.trace_enabled {
+                    // Option B: drain the residual instruction window.
+                    // Without this, statements executed after the LAST
+                    // emit site (e.g. straight-lined code whose loops
+                    // were optimized away) would never be counted —
+                    // under-reporting energy on exactly the programs
+                    // optimization helped most.
+                    self.trace_emit(false);
+                }
+                return r;
             }
 
+            if self.trace_enabled {
+                self.trace_emit(false);
+            }
             return Ok(result);
         }
 
