@@ -53,9 +53,10 @@ use cjc_cana_compress::profile_db::{
     append_row, read_all, CompilationProfile, PROFILE_SCHEMA_VERSION,
 };
 use cjc_cana_compress::EnergyAwarePassRanker;
-use cjc_cana_nss::NssPressurePredictor;
+use cjc_cana_nss::{NssPressurePredictor, RecordedPressurePredictor};
 use cjc_mir::optimize::optimize_program_with_plan;
 use cjc_mir::MirProgram;
+use cjc_mir_exec::run_program_instrumented;
 
 const SEED: u64 = 42;
 
@@ -197,6 +198,31 @@ fn combined(n: i64) -> i64 {
 print(combined(50));
 "#;
 
+/// FP-hot workload — ADDED for the Option-B re-run (not part of the
+/// original cana_ab_corpus snapshot). The Track-2 ablation concluded
+/// the corpus had no program whose thermal signal could differentiate
+/// the stacks; this one runs dense float arithmetic inside a nested
+/// loop, so the recorded FP-op density (→ Thermal) is high while the
+/// integer programs' stays near zero.
+const PROG_FP_HOT: &str = r#"
+fn horner(x: f64, n: i64) -> f64 {
+    let mut acc: f64 = 0.0;
+    let mut i: i64 = 0;
+    while i < n {
+        let mut j: i64 = 0;
+        let mut p: f64 = 1.0;
+        while j < 16 {
+            p = p * x + 0.5;
+            acc = acc + p * 0.001;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return acc;
+}
+print(horner(1.01, 200));
+"#;
+
 const PROGRAMS: &[Program] = &[
     Program {
         name: "arith",
@@ -230,20 +256,35 @@ const PROGRAMS: &[Program] = &[
         name: "large",
         source: PROG_LARGE,
     },
+    Program {
+        name: "fp_hot",
+        source: PROG_FP_HOT,
+    },
 ];
 
 // =============================================================================
 // Ablation configurations
 // =============================================================================
 
+/// Synthetic-predictor configurations (Option A) — the original
+/// Track-2 set, kept for cross-session comparability.
 const CONFIG_IDS: &[&str] = &["baseline", "nss", "quantum", "nss_quantum", "full_pinn"];
 
+/// Recorded-trace configurations (Option B). Same stacks as the three
+/// pressure-consuming synthetic configs, but the predictor is a
+/// [`RecordedPressurePredictor`] built from a real instrumented run of
+/// the program. `baseline` and `quantum` don't consume pressure, so
+/// they have no recorded variant.
+const CONFIG_IDS_RECORDED: &[&str] = &["nss_rec", "nss_quantum_rec", "full_pinn_rec"];
+
 /// Rank `mir` under one ablation configuration. Returns the report plus
-/// the cost-model identity that drove it.
+/// the cost-model identity that drove it. `recorded` backs the `*_rec`
+/// configs.
 fn rank_under(
     config: &str,
     mir: &MirProgram,
     features: &CanaFeatures,
+    recorded: &RecordedPressurePredictor,
 ) -> (RankingReport, String, u32) {
     match config {
         "baseline" => {
@@ -257,6 +298,12 @@ fn rank_under(
                 LinearCostModel::trained(),
                 NssPressurePredictor::default(),
             );
+            let (id, ver) = (model.name().to_string(), model.version());
+            let report = PassRanker::new(model, PerPassLegalityGate::new()).rank(mir, features);
+            (report, id, ver)
+        }
+        "nss_rec" => {
+            let model = ThermalAwareCostModel::new(LinearCostModel::trained(), recorded.clone());
             let (id, ver) = (model.name().to_string(), model.version());
             let report = PassRanker::new(model, PerPassLegalityGate::new()).rank(mir, features);
             (report, id, ver)
@@ -279,6 +326,15 @@ fn rank_under(
             );
             (adapter.rank(mir, features), id, ver)
         }
+        "nss_quantum_rec" => {
+            let model = LinearCostModel::trained();
+            let (id, ver) = (model.name().to_string(), model.version());
+            let adapter = EnergyAwarePassRanker::new(
+                PassRanker::new(model, PerPassLegalityGate::new()),
+                Box::new(recorded.clone()),
+            );
+            (adapter.rank(mir, features), id, ver)
+        }
         "full_pinn" => {
             let model = PinnPhysicalCostModel::new(
                 LinearCostModel::trained(),
@@ -288,6 +344,15 @@ fn rank_under(
             let adapter = EnergyAwarePassRanker::new(
                 PassRanker::new(model, PerPassLegalityGate::new()),
                 Box::new(NssPressurePredictor::default()),
+            );
+            (adapter.rank(mir, features), id, ver)
+        }
+        "full_pinn_rec" => {
+            let model = PinnPhysicalCostModel::new(LinearCostModel::trained(), recorded.clone());
+            let (id, ver) = (model.name().to_string(), model.version());
+            let adapter = EnergyAwarePassRanker::new(
+                PassRanker::new(model, PerPassLegalityGate::new()),
+                Box::new(recorded.clone()),
             );
             (adapter.rank(mir, features), id, ver)
         }
@@ -307,7 +372,11 @@ fn total_expr_count(features: &CanaFeatures) -> u64 {
         .fold(0u64, |a, b| a.saturating_add(b))
 }
 
-fn run_experiment(prog: &Program, config: &str) -> CompilationProfile {
+fn run_experiment(
+    prog: &Program,
+    config: &str,
+    recorded: &RecordedPressurePredictor,
+) -> CompilationProfile {
     let wall_start = Instant::now();
 
     // -- Compile + rank ----------------------------------------------------
@@ -324,7 +393,7 @@ fn run_experiment(prog: &Program, config: &str) -> CompilationProfile {
     let mir = h2m.lower_program(&hir);
     let features = analyze_program(&mir).features;
 
-    let (report, cost_model_id, cost_model_version) = rank_under(config, &mir, &features);
+    let (report, cost_model_id, cost_model_version) = rank_under(config, &mir, &features, recorded);
     let plan = pass_plan_from(&report.sequence);
     let mut optimized = optimize_program_with_plan(&mir, &plan);
     cjc_mir::escape::annotate_program(&mut optimized);
@@ -364,11 +433,23 @@ fn run_experiment(prog: &Program, config: &str) -> CompilationProfile {
     }
 
     // -- NSS predictions -----------------------------------------------------
-    let nss = NssPressurePredictor::default();
+    // Recorded configs record the recorded predictor's view; synthetic
+    // configs record Option A's — the row reflects what the ranker saw.
     let max_of = |m: BTreeMap<String, f64>| m.values().copied().fold(0.0f64, f64::max);
-    let nss_cpu_max = max_of(nss.predict_cpu_saturation(&mir, &features));
-    let nss_memory_max = max_of(nss.predict_memory_peak(&mir, &features));
-    let nss_thermal_max = max_of(nss.predict_thermal(&mir, &features));
+    let (nss_cpu_max, nss_memory_max, nss_thermal_max) = if config.ends_with("_rec") {
+        (
+            max_of(recorded.predict_cpu_saturation(&mir, &features)),
+            max_of(recorded.predict_memory_peak(&mir, &features)),
+            max_of(recorded.predict_thermal(&mir, &features)),
+        )
+    } else {
+        let nss = NssPressurePredictor::default();
+        (
+            max_of(nss.predict_cpu_saturation(&mir, &features)),
+            max_of(nss.predict_memory_peak(&mir, &features)),
+            max_of(nss.predict_thermal(&mir, &features)),
+        )
+    };
 
     // -- Parity: AST-eval vs MIR-exec on the OPTIMIZED program ---------------
     let mut interp = cjc_eval::Interpreter::new(SEED);
@@ -442,54 +523,135 @@ fn main() {
 
     println!("=================================================================");
     println!(
-        "Phase A6 — 5-way ablation over {} programs (seed {SEED})",
+        "Phase A6 — ablation over {} programs (seed {SEED}): 5 synthetic + 3 recorded configs",
         PROGRAMS.len()
     );
     println!("=================================================================\n");
 
+    // Per program: one instrumented run (Option B) feeds the recorded
+    // predictor used by the *_rec configs.
+    let mut recorded_preds: BTreeMap<&str, RecordedPressurePredictor> = BTreeMap::new();
+    for prog in PROGRAMS {
+        let (ast, diags) = cjc_parser::parse_source(prog.source);
+        assert!(!diags.has_errors(), "parse errors in {}", prog.name);
+        let (_val, exec, events) = run_program_instrumented(&ast, SEED).expect("instrumented run");
+        let recorded = RecordedPressurePredictor::from_recorded_events(
+            events,
+            exec.trace_node_assignments().clone(),
+        );
+        recorded_preds.insert(prog.name, recorded);
+    }
+
     // rows[program][config] = profile
     let mut rows: BTreeMap<&str, BTreeMap<&str, CompilationProfile>> = BTreeMap::new();
     for prog in PROGRAMS {
-        for config in CONFIG_IDS {
-            let row = run_experiment(prog, config);
+        let recorded = &recorded_preds[prog.name];
+        for config in CONFIG_IDS.iter().chain(CONFIG_IDS_RECORDED.iter()) {
+            let row = run_experiment(prog, config, recorded);
             append_row(&db_path, &row).expect("append profile row");
             rows.entry(prog.name).or_default().insert(config, row);
         }
     }
 
-    // -- Per-program table -----------------------------------------------
+    // -- Synthetic cohort (Option A predictors) -----------------------------
+    println!("Synthetic (Option A) cohort — scores (lower = better):");
     println!(
-        "{:<10} | {:>9} | {:>9} | {:>9} | {:>11} | {:>9} | parity",
+        "{:<10} | {:>9} | {:>9} | {:>9} | {:>11} | {:>9}",
         "program", "baseline", "nss", "quantum", "nss_quantum", "full_pinn"
     );
-    println!("{}", "-".repeat(84));
+    println!("{}", "-".repeat(74));
     for (prog, per_config) in &rows {
         let score = |c: &str| per_config.get(c).map(|r| r.score).unwrap_or(f64::NAN);
-        let parity_all = per_config.values().all(|r| r.parity_match == Some(true));
         println!(
-            "{:<10} | {:>9.4} | {:>9.4} | {:>9.4} | {:>11.4} | {:>9.4} | {}",
+            "{:<10} | {:>9.4} | {:>9.4} | {:>9.4} | {:>11.4} | {:>9.4}",
             prog,
             score("baseline"),
             score("nss"),
             score("quantum"),
             score("nss_quantum"),
             score("full_pinn"),
+        );
+    }
+
+    // -- Recorded cohort (Option B real traces) ------------------------------
+    println!("\nRecorded (Option B) cohort — scores + recorded max thermal:");
+    println!(
+        "{:<10} | {:>9} | {:>15} | {:>13} | {:>11} | parity",
+        "program", "nss_rec", "nss_quantum_rec", "full_pinn_rec", "rec_thermal"
+    );
+    println!("{}", "-".repeat(78));
+    for (prog, per_config) in &rows {
+        let score = |c: &str| per_config.get(c).map(|r| r.score).unwrap_or(f64::NAN);
+        let rec_thermal = per_config
+            .get("full_pinn_rec")
+            .map(|r| r.nss_predicted_thermal_max)
+            .unwrap_or(f64::NAN);
+        let parity_all = per_config.values().all(|r| r.parity_match == Some(true));
+        println!(
+            "{:<10} | {:>9.4} | {:>15.4} | {:>13.4} | {:>11.4} | {}",
+            prog,
+            score("nss_rec"),
+            score("nss_quantum_rec"),
+            score("full_pinn_rec"),
+            rec_thermal,
             if parity_all { "ok" } else { "MISMATCH" },
         );
     }
 
-    // -- §5.2 promotion gate ----------------------------------------------
-    // "PINN must beat the second-best ablation by ≥ margin on ≥60% of
-    // programs." Lower score = better (post-optimization size ratio).
+    // -- Differentiation check: did real traces change ANY plan? ------------
+    let mut diverged: Vec<String> = Vec::new();
+    for (prog, per_config) in &rows {
+        for (syn, rec) in [
+            ("nss", "nss_rec"),
+            ("nss_quantum", "nss_quantum_rec"),
+            ("full_pinn", "full_pinn_rec"),
+        ] {
+            if per_config[syn].pass_sequence != per_config[rec].pass_sequence {
+                diverged.push(format!("{prog}:{rec}"));
+                // Show exactly which passes the real pressure withheld
+                // (or added) per function — union of both plans, so a
+                // function dropped ENTIRELY (PINN hard limit zeroing
+                // every benefit) still prints.
+                let syn_map: BTreeMap<&String, &Vec<String>> = per_config[syn]
+                    .pass_sequence
+                    .iter()
+                    .map(|(f, p)| (f, p))
+                    .collect();
+                let rec_map: BTreeMap<&String, &Vec<String>> = per_config[rec]
+                    .pass_sequence
+                    .iter()
+                    .map(|(f, p)| (f, p))
+                    .collect();
+                let empty: Vec<String> = Vec::new();
+                let mut all_fns: Vec<&String> =
+                    syn_map.keys().chain(rec_map.keys()).copied().collect();
+                all_fns.sort();
+                all_fns.dedup();
+                for func in all_fns {
+                    let syn_passes = syn_map.get(func).copied().unwrap_or(&empty);
+                    let rec_passes = rec_map.get(func).copied().unwrap_or(&empty);
+                    if syn_passes != rec_passes {
+                        println!(
+                            "  [plan diff] {prog}/{func} under {rec}: {:?} -> {:?}",
+                            syn_passes, rec_passes
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // -- §5.2 promotion gate over the recorded cohort -------------------------
+    // full_pinn_rec vs every other config (both cohorts). Lower = better.
     let margin = 0.1;
     let mut pinn_wins = 0usize;
     let mut ties = 0usize;
     for per_config in rows.values() {
-        let pinn = per_config["full_pinn"].score;
-        let best_other = CONFIG_IDS
+        let pinn = per_config["full_pinn_rec"].score;
+        let best_other = per_config
             .iter()
-            .filter(|c| **c != "full_pinn")
-            .map(|c| per_config[*c].score)
+            .filter(|(c, _)| **c != "full_pinn_rec")
+            .map(|(_, r)| r.score)
             .fold(f64::INFINITY, f64::min);
         if pinn <= best_other - margin {
             pinn_wins += 1;
@@ -504,33 +666,44 @@ fn main() {
         .all(|r| r.parity_match == Some(true));
 
     println!("\n----------------------------------------------------------------");
-    println!("§5.2 gate: PINN wins (≥{margin} margin): {pinn_wins}/{total}   ties: {ties}/{total}");
+    println!(
+        "Plan divergence (synthetic vs recorded): {}",
+        if diverged.is_empty() {
+            "NONE — recorded pressures did not change any plan".to_string()
+        } else {
+            format!(
+                "{} config-program pairs: {}",
+                diverged.len(),
+                diverged.join(", ")
+            )
+        }
+    );
+    println!(
+        "§5.2 gate (full_pinn_rec): wins (≥{margin} margin): {pinn_wins}/{total}   ties: {ties}/{total}"
+    );
     println!(
         "Parity (all rows): {}",
         if parity_all { "100%" } else { "FAILED" }
     );
 
-    // Row-hash stability canary: re-run one experiment and compare.
-    let again = run_experiment(&PROGRAMS[0], "full_pinn");
-    let stable = rows[PROGRAMS[0].name]["full_pinn"].row_hash() == again.row_hash();
+    // Row-hash stability canary: re-run one recorded experiment.
+    let again = run_experiment(
+        &PROGRAMS[0],
+        "full_pinn_rec",
+        &recorded_preds[PROGRAMS[0].name],
+    );
+    let stable = rows[PROGRAMS[0].name]["full_pinn_rec"].row_hash() == again.row_hash();
     println!(
         "Row-hash stability (double-run, wall-clock excluded): {}",
         if stable { "byte-identical" } else { "DRIFT" }
     );
 
     let back = read_all(&db_path).expect("read back profile db");
-    println!(
-        "
-
-Profile DB: {} rows at {}",
-        back.len(),
-        db_path.display()
-    );
+    println!("\nProfile DB: {} rows at {}", back.len(), db_path.display());
     let verdict = if pinn_wins * 10 >= total * 6 {
         "PINN v2 promotion gate: WOULD PASS (≥60% wins)"
     } else {
-        "PINN v2 promotion gate: NOT MET (expected at this corpus size — \
-         see §5.4: gate also requires 1000+ rows)"
+        "PINN v2 promotion gate: NOT MET — see §5.4 (also requires 1000+ rows)"
     };
     println!("{verdict}");
     assert!(parity_all, "parity must hold across every ablation row");

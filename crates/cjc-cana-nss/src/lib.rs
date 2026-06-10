@@ -129,7 +129,9 @@ impl NssPressurePredictor {
     /// signature is stable across the future Option-A and Option-B
     /// migrations — those will need an RNG substream salt.
     pub fn from_seed(seed: u64) -> Self {
-        Self { seed: NssSeed(seed) }
+        Self {
+            seed: NssSeed(seed),
+        }
     }
 
     /// Return the seed this predictor was constructed with. Exposed for
@@ -193,6 +195,12 @@ impl NssPressurePredictor {
                     io_event: false,
                     gc_event: false,
                     instruction_count: 8,
+                    // Option A carries no thermal signal — static
+                    // features can't estimate FP-op density. This
+                    // preserves the documented pre-Option-B behaviour
+                    // (predict_thermal → 0.0 under synthesis); real
+                    // thermal comes from Option-B recorded traces.
+                    thermal_intensity: 0.0,
                 });
                 tick = tick.saturating_add(1);
             }
@@ -228,7 +236,8 @@ impl NssPressurePredictor {
         if node_assignments.is_empty() {
             return BTreeMap::new();
         }
-        let n_blocks = (node_assignments.values().copied().max().unwrap_or(0) as u32).saturating_add(1);
+        let n_blocks =
+            (node_assignments.values().copied().max().unwrap_or(0) as u32).saturating_add(1);
 
         // 2. Synthesize events.
         let events = self.synthesize_events(&node_assignments, features);
@@ -365,6 +374,152 @@ impl PressurePredictor for NssPressurePredictor {
 
     fn version(&self) -> u32 {
         2
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Option B (PR 5) — RecordedPressurePredictor
+// ---------------------------------------------------------------------------
+
+/// A [`PressurePredictor`] backed by REAL recorded executor traces
+/// (Option B), instead of Option A's synthetic projection.
+///
+/// Construct from the outputs of
+/// `cjc_mir_exec::run_program_instrumented`: the event vec plus the
+/// executor's `trace_node_assignments()` (the fn-name → node-index map
+/// captured at execution time — using the recorded assignment instead
+/// of re-deriving it at predict time makes the pairing immune to any
+/// re-lowering reordering).
+///
+/// ## What changes vs Option A
+///
+/// Every event field reflects actual runtime observation: real
+/// per-iteration loop events, real FP-op density (→ Thermal — a kind
+/// Option A structurally cannot populate), real frame sizes, real
+/// branch outcomes. Per-function pressures genuinely diverge, which is
+/// what makes `ThermalAwareCostModel` / `PinnPhysicalCostModel`
+/// penalties non-degenerate.
+///
+/// ## Determinism
+///
+/// The stored events came from a deterministic instrumented run; the
+/// adapter pipeline is deterministic; `predict_*` is a pure function
+/// of `(stored events, stored assignments, queried features)`.
+#[derive(Debug, Clone)]
+pub struct RecordedPressurePredictor {
+    events: Vec<MirTraceEvent>,
+    node_assignments: BTreeMap<String, u32>,
+}
+
+impl RecordedPressurePredictor {
+    /// Build from a recorded instrumented run. `node_assignments` is
+    /// `MirExecutor::trace_node_assignments()` cloned.
+    pub fn from_recorded_events(
+        events: Vec<MirTraceEvent>,
+        node_assignments: BTreeMap<String, u32>,
+    ) -> Self {
+        Self {
+            events,
+            node_assignments,
+        }
+    }
+
+    /// Number of recorded events backing this predictor.
+    pub fn event_count(&self) -> usize {
+        self.events.len()
+    }
+
+    /// Shared core: adapter over the RECORDED events, then per-function
+    /// extraction of one pressure kind. Mirrors
+    /// `NssPressurePredictor::predict_kind` except the event source.
+    fn predict_kind(
+        &self,
+        _program: &MirProgram,
+        features: &CanaFeatures,
+        kind: PressureKind,
+    ) -> BTreeMap<String, f64> {
+        if self.events.is_empty() || self.node_assignments.is_empty() {
+            return BTreeMap::new();
+        }
+        let n_blocks = self
+            .node_assignments
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let cfg = MirAdapterConfig {
+            n_blocks,
+            ..Default::default()
+        };
+        let Ok(adapter_out) = adapt_mir_trace_to_cluster_trajectory(&self.events, &cfg) else {
+            return BTreeMap::new();
+        };
+        let Some(last_state) = adapter_out.trajectory.last_state() else {
+            return BTreeMap::new();
+        };
+        let mut result = BTreeMap::new();
+        for (fname, node_idx) in &self.node_assignments {
+            // Only report functions the caller actually featurized —
+            // keeps the output surface identical to Option A's.
+            if !features.per_fn.contains_key(fname) {
+                continue;
+            }
+            let node_id = NodeId(*node_idx);
+            if let Some(node_state) = last_state.nodes.get(&node_id) {
+                let magnitude = node_state
+                    .pressures
+                    .get(kind)
+                    .map(|p| p.magnitude)
+                    .unwrap_or(0.0);
+                result.insert(fname.clone(), magnitude.clamp(0.0, 1.0));
+            }
+        }
+        result
+    }
+}
+
+impl PressurePredictor for RecordedPressurePredictor {
+    fn predict_thermal(
+        &self,
+        program: &MirProgram,
+        features: &CanaFeatures,
+    ) -> BTreeMap<String, f64> {
+        self.predict_kind(program, features, PressureKind::Thermal)
+    }
+
+    fn predict_memory_peak(
+        &self,
+        program: &MirProgram,
+        features: &CanaFeatures,
+    ) -> BTreeMap<String, f64> {
+        self.predict_kind(program, features, PressureKind::Memory)
+    }
+
+    fn predict_cpu_saturation(
+        &self,
+        program: &MirProgram,
+        features: &CanaFeatures,
+    ) -> BTreeMap<String, f64> {
+        self.predict_kind(program, features, PressureKind::Cpu)
+    }
+
+    fn identify_structural_hot_kernels(
+        &self,
+        program: &MirProgram,
+        features: &CanaFeatures,
+    ) -> Vec<String> {
+        // Structural identification is static — delegate to the same
+        // logic Option A uses (it consults features, not events).
+        NssPressurePredictor::default().identify_structural_hot_kernels(program, features)
+    }
+
+    fn name(&self) -> &'static str {
+        "nss_recorded_trace_v1"
+    }
+
+    fn version(&self) -> u32 {
+        1
     }
 }
 

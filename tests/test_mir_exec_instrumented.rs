@@ -1,27 +1,23 @@
-//! Option B PR 1 — parity gate for `run_program_instrumented`.
+//! Option B PRs 1-4 — parity gate for `run_program_instrumented`.
 //!
 //! Critical contract: an instrumented run of any program must produce
 //! byte-identical output to an uninstrumented run of the same program
 //! with the same seed. If instrumentation ever breaks this, every
 //! downstream consumer of MIR-exec results is silently corrupted.
 //!
-//! After PR 1 (this commit), the instrumented run also returns an
-//! empty `Vec<MirTraceEvent>` because no instrumentation sites are
-//! wired yet. As PRs 2-4 add sites, this test continues to assert
-//! identical *program output* and the event count grows — but never
-//! becomes a parity gate for events themselves (those have their own
-//! tests in `crates/cjc-mir-exec/src/trace.rs`).
+//! PRs 2-4 wired real instrumentation sites (function entry,
+//! loop-iteration boundary, branch resolution, FP-op counting, IO/GC
+//! flags), so instrumented runs now return non-empty event vecs. The
+//! output-parity assertions are unchanged — they are the load-bearing
+//! contract; the event-count assertions flipped from `== 0` (PR 1) to
+//! `> 0` per the original test's own forward note.
 
 use cjc_mir_exec::{run_program_instrumented, run_program_with_executor};
 use cjc_parser::parse_source;
 
 fn run_both(src: &str, seed: u64) -> (String, String, usize) {
     let (program, diags) = parse_source(src);
-    assert!(
-        !diags.has_errors(),
-        "parse failed: {:?}",
-        diags.diagnostics
-    );
+    assert!(!diags.has_errors(), "parse failed: {:?}", diags.diagnostics);
 
     let (_v_uninst, exec_uninst) =
         run_program_with_executor(&program, seed).expect("uninstrumented run failed");
@@ -54,11 +50,11 @@ fn instrumented_run_byte_identical_to_uninstrumented_on_arithmetic() {
         uninst, inst,
         "program output must be byte-identical between instrumented and uninstrumented runs",
     );
-    assert_eq!(
-        event_count, 0,
-        "PR 1 ships with no instrumentation sites wired — events vec should be empty. \
-         If this changes, instrumentation sites have landed (PRs 2-4) and this assertion \
-         needs to be revisited.",
+    // 10+20+30 loop iterations + 3 function entries — well over 60
+    // events under PRs 2-4 instrumentation.
+    assert!(
+        event_count >= 60,
+        "loop-heavy program must emit one event per iteration; got {event_count}",
     );
 }
 
@@ -82,7 +78,11 @@ fn instrumented_run_byte_identical_with_branches() {
     "#;
     let (uninst, inst, event_count) = run_both(src, 7);
     assert_eq!(uninst, inst);
-    assert_eq!(event_count, 0);
+    // 3 calls to classify, each resolving ≥1 branch → ≥6 events.
+    assert!(
+        event_count >= 6,
+        "branchy program must emit function-entry + branch events; got {event_count}",
+    );
 }
 
 #[test]
@@ -107,7 +107,8 @@ fn instrumented_run_byte_identical_with_float_arithmetic() {
         "float arithmetic must produce byte-identical output \
          (any reordering by the instrumentation path would surface here)",
     );
-    assert_eq!(event_count, 0);
+    // 100 loop iterations → ≥100 events.
+    assert!(event_count >= 100, "got {event_count}");
 }
 
 #[test]
@@ -156,13 +157,19 @@ fn uninstrumented_runs_do_not_leak_state_into_subsequent_instrumented() {
     let _ = run_program_with_executor(&program, 1).unwrap();
     let _ = run_program_with_executor(&program, 2).unwrap();
 
-    // Now run instrumented — events should be empty (PR 1 has no
-    // instrumentation sites) and NOT contain leakage from the
-    // uninstrumented runs above.
+    // Now run instrumented — the event vec must reflect ONLY this
+    // run. A fresh instrumented run of the same program gives the
+    // reference count; leakage from the uninstrumented runs above
+    // would inflate the first count.
     let (_, _, events) = run_program_instrumented(&program, 3).unwrap();
+    let (_, _, fresh) = run_program_instrumented(&program, 3).unwrap();
     assert_eq!(
         events.len(),
-        0,
+        fresh.len(),
         "uninstrumented runs must not leak state into the instrumented collector",
+    );
+    assert!(
+        !events.is_empty(),
+        "function-call program must emit at least the entry event",
     );
 }

@@ -176,17 +176,18 @@ thread_local! {
 /// Example (from a future PR):
 ///
 /// ```ignore
-/// // In a basic-block entry instrumentation site:
+/// // In a function-entry / loop-iteration instrumentation site:
 /// with_trace(|c| c.emit(MirTraceEvent {
 ///     tick: 0, // overwritten by emit()
-///     block_id: current_block_id,
-///     register_pressure: sample_register_pressure(executor),
-///     heap_bytes_in_use: sample_heap(executor),
-///     call_depth: executor.call_stack().len() as u32,
+///     block_id: fn_node_id,
+///     register_pressure: live_frame_slots_normalized,
+///     heap_bytes_in_use: heap_proxy_bytes,
+///     call_depth: frame_stack_depth,
 ///     branch_taken: incoming_branch_taken,
-///     io_event: false,
-///     gc_event: false,
+///     io_event: io_since_last_event,
+///     gc_event: gc_since_last_event,
 ///     instruction_count: stmts_since_last_event,
+///     thermal_intensity: fp_ops_since_last_event_density,
 /// }));
 /// ```
 pub fn with_trace<F, R>(f: F) -> R
@@ -215,6 +216,7 @@ mod tests {
             io_event: false,
             gc_event: false,
             instruction_count: 8,
+            thermal_intensity: 0.25,
         }
     }
 

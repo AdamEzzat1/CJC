@@ -107,6 +107,16 @@ pub struct MirTraceEvent {
     /// (typically the size of the basic block). Used by the adapter
     /// to weight per-block aggregates.
     pub instruction_count: u32,
+    /// FP-op density in `[0, 1]` for this event window — fraction of
+    /// executed instructions that were floating-point arithmetic.
+    /// Loads [`PressureKind::Thermal`] (FPU utilisation is the
+    /// dominant heat source on numeric workloads).
+    ///
+    /// Option B (real instrumentation) populates this from the
+    /// executor's FP-op counter; Option A (synthetic traces) leaves it
+    /// `0.0`, which preserves the documented pre-Option-B behaviour
+    /// that synthetic predictions carry no thermal signal.
+    pub thermal_intensity: f64,
 }
 
 impl MirTraceEvent {
@@ -124,6 +134,7 @@ impl MirTraceEvent {
             io_event: false,
             gc_event: false,
             instruction_count: 1,
+            thermal_intensity: 0.0,
         }
     }
 }
@@ -255,6 +266,8 @@ pub struct MirAdapterOutput {
 ///    - `Sync` ← mean (call_depth / depth_threshold) + GC density
 ///    - `Io` ← fraction of events with `io_event = true`
 ///    - `Throughput` ← fraction of events with `branch_taken = true`
+///    - `Thermal` ← mean thermal_intensity (FP-op density; 0.0 on
+///      synthetic Option-A traces, real under Option-B instrumentation)
 /// 5. Emit one [`ClusterEvent`] per tick bucket.
 pub fn adapt_mir_trace_to_cluster_trajectory(
     events: &[MirTraceEvent],
@@ -331,6 +344,7 @@ fn build_cluster_state(
         reg_sum: KahanAccumulatorF64,
         heap_sum: KahanAccumulatorF64, // bytes
         call_sum: KahanAccumulatorF64,
+        thermal_sum: KahanAccumulatorF64,
         branch_count: u64,
         io_count: u64,
         gc_count: u64,
@@ -343,6 +357,7 @@ fn build_cluster_state(
                 reg_sum: KahanAccumulatorF64::new(),
                 heap_sum: KahanAccumulatorF64::new(),
                 call_sum: KahanAccumulatorF64::new(),
+                thermal_sum: KahanAccumulatorF64::new(),
                 branch_count: 0,
                 io_count: 0,
                 gc_count: 0,
@@ -357,6 +372,7 @@ fn build_cluster_state(
         agg.reg_sum.add(ev.register_pressure);
         agg.heap_sum.add(ev.heap_bytes_in_use as f64);
         agg.call_sum.add(ev.call_depth as f64);
+        agg.thermal_sum.add(ev.thermal_intensity);
         if ev.branch_taken {
             agg.branch_count += 1;
         }
@@ -394,11 +410,13 @@ fn build_cluster_state(
             let sync_p = (call_sat + gc_density).min(1.5);
             let branch_p = agg.branch_count as f64 / n;
             let io_p = agg.io_count as f64 / n;
+            let thermal_p = (agg.thermal_sum.finalize() / n).clamp(0.0, 1.5);
             field.set(PressureKind::Cpu, Pressure::new(cpu_p, 1.0, 0.1)?);
             field.set(PressureKind::Memory, Pressure::new(mem_p, 1.0, 0.05)?);
             field.set(PressureKind::Sync, Pressure::new(sync_p, 1.0, 0.1)?);
             field.set(PressureKind::Io, Pressure::new(io_p, 1.0, 0.1)?);
             field.set(PressureKind::Throughput, Pressure::new(branch_p, 1.0, 0.1)?);
+            field.set(PressureKind::Thermal, Pressure::new(thermal_p, 1.0, 0.1)?);
         }
         // in_flight: events seen in this tick on this block; completed:
         // running total of instructions executed.
@@ -454,6 +472,7 @@ mod tests {
                 io_event: i % 11 == 0,
                 gc_event: i % 17 == 0,
                 instruction_count: 4,
+                thermal_intensity: 0.2 + (block as f64) * 0.2, // 0.2/0.4/0.6
             });
         }
         v
@@ -548,6 +567,67 @@ mod tests {
         let mem0 = b0.pressures.get(PressureKind::Memory).unwrap().saturation();
         let mem2 = b2.pressures.get(PressureKind::Memory).unwrap().saturation();
         assert!(mem2 > mem0);
+    }
+
+    #[test]
+    fn adapter_loads_thermal_from_thermal_intensity() {
+        // three_block_trace assigns thermal_intensity 0.2/0.4/0.6 to
+        // blocks 0/1/2 — the per-block Thermal magnitudes must follow,
+        // and (the Option-B point) Thermal must NOT be degenerate with
+        // Cpu, which derives from register_pressure (0.3/0.4/0.5).
+        let cfg = MirAdapterConfig {
+            n_blocks: 3,
+            events_per_tick: 16,
+            ..MirAdapterConfig::default()
+        };
+        let events = three_block_trace();
+        let out = adapt_mir_trace_to_cluster_trajectory(&events, &cfg).unwrap();
+        let last = out.trajectory.iter().last().unwrap();
+        let thermal_of = |b: u32| {
+            last.state
+                .nodes
+                .get(&NodeId(b))
+                .unwrap()
+                .pressures
+                .get(PressureKind::Thermal)
+                .unwrap()
+                .magnitude
+        };
+        assert!((thermal_of(0) - 0.2).abs() < 1e-12, "block 0 thermal");
+        assert!((thermal_of(1) - 0.4).abs() < 1e-12, "block 1 thermal");
+        assert!((thermal_of(2) - 0.6).abs() < 1e-12, "block 2 thermal");
+        // Not degenerate with Cpu (0.3/0.4/0.5 from register_pressure):
+        let b0 = last.state.nodes.get(&NodeId(0)).unwrap();
+        let cpu0 = b0.pressures.get(PressureKind::Cpu).unwrap().magnitude;
+        assert!(
+            (thermal_of(0) - cpu0).abs() > 1e-6,
+            "thermal must carry independent signal from cpu"
+        );
+    }
+
+    #[test]
+    fn zero_thermal_intensity_events_produce_zero_thermal() {
+        // Option-A synthetic traces leave thermal_intensity at 0.0 —
+        // the documented pre-Option-B behaviour (no thermal signal)
+        // must be preserved exactly.
+        let cfg = MirAdapterConfig {
+            n_blocks: 1,
+            events_per_tick: 4,
+            ..MirAdapterConfig::default()
+        };
+        let events: Vec<MirTraceEvent> = (0..8).map(|i| MirTraceEvent::minimal(i, 0)).collect();
+        let out = adapt_mir_trace_to_cluster_trajectory(&events, &cfg).unwrap();
+        let last = out.trajectory.iter().last().unwrap();
+        let thermal = last
+            .state
+            .nodes
+            .get(&NodeId(0))
+            .unwrap()
+            .pressures
+            .get(PressureKind::Thermal)
+            .unwrap()
+            .magnitude;
+        assert_eq!(thermal, 0.0);
     }
 
     #[test]
