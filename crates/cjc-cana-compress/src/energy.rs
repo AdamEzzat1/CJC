@@ -26,13 +26,21 @@
 //!     + runtime_cost
 //!     + memory_pressure
 //!     + thermal_pressure
-//!     + code_size_cost
+//!     + bandwidth_pressure
+//!     + code_size_pressure
 //!     + reconstruction_risk
 //!     + verifier_risk_penalty
 //!     - fusion_reward
 //!     - reuse_reward
 //!     - compression_reward
+//!     - locality_reward
 //! ```
+//!
+//! `bandwidth_pressure`, `code_size_pressure` (renamed from
+//! `code_size_cost`), and `locality_reward` were added for the PINN v1
+//! physical layer (see `cjc_cana::physical_cost`) — the physical model
+//! prices memory traffic and cache locality, and this decomposition is
+//! where those prices surface for ranking.
 //!
 //! Every term is a non-negative `f64`. Costs add; rewards subtract. The
 //! Kahan accumulator keeps the running sum compensated against catastrophic
@@ -73,8 +81,14 @@ pub struct EnergyComponents {
     pub memory_pressure: f64,
     /// Predicted thermal pressure delta. Non-negative.
     pub thermal_pressure: f64,
-    /// Predicted code-size cost. Non-negative.
-    pub code_size_cost: f64,
+    /// Predicted memory-traffic / bandwidth saturation delta.
+    /// Non-negative. Populated by the PINN physical layer; 0.0 when no
+    /// physical model is in the stack.
+    pub bandwidth_pressure: f64,
+    /// Predicted code-size cost. Non-negative. (Renamed from
+    /// `code_size_cost` for the PINN v1 vocabulary; the builder keeps
+    /// a deprecated `.code_size_cost()` alias for one release.)
+    pub code_size_pressure: f64,
     /// Risk of high reconstruction error (for advisory compression plans).
     /// Non-negative.
     pub reconstruction_risk: f64,
@@ -90,6 +104,11 @@ pub struct EnergyComponents {
     /// Reward for plans that reduce memory pressure via compression.
     /// Non-negative.
     pub compression_reward: f64,
+    /// Reward for plans that improve cache locality (small working
+    /// set relative to the cache proxy). Non-negative. Populated by
+    /// the PINN physical layer; 0.0 when no physical model is in the
+    /// stack.
+    pub locality_reward: f64,
 }
 
 impl EnergyComponents {
@@ -99,12 +118,14 @@ impl EnergyComponents {
             self.runtime_cost,
             self.memory_pressure,
             self.thermal_pressure,
-            self.code_size_cost,
+            self.bandwidth_pressure,
+            self.code_size_pressure,
             self.reconstruction_risk,
             self.verifier_risk_penalty,
             self.fusion_reward,
             self.reuse_reward,
             self.compression_reward,
+            self.locality_reward,
         ];
         fs.iter().all(|x| x.is_finite() && *x >= 0.0)
     }
@@ -117,23 +138,27 @@ impl EnergyComponents {
         runtime_cost: f64,
         memory_pressure: f64,
         thermal_pressure: f64,
-        code_size_cost: f64,
+        bandwidth_pressure: f64,
+        code_size_pressure: f64,
         reconstruction_risk: f64,
         verifier_risk_penalty: f64,
         fusion_reward: f64,
         reuse_reward: f64,
         compression_reward: f64,
+        locality_reward: f64,
     ) -> Result<Self, CompressionError> {
         let c = Self {
             runtime_cost,
             memory_pressure,
             thermal_pressure,
-            code_size_cost,
+            bandwidth_pressure,
+            code_size_pressure,
             reconstruction_risk,
             verifier_risk_penalty,
             fusion_reward,
             reuse_reward,
             compression_reward,
+            locality_reward,
         };
         if !c.is_valid() {
             return Err(CompressionError::InvalidTolerance {
@@ -158,13 +183,15 @@ impl EnergyComponents {
         acc.add(self.runtime_cost);
         acc.add(self.memory_pressure);
         acc.add(self.thermal_pressure);
-        acc.add(self.code_size_cost);
+        acc.add(self.bandwidth_pressure);
+        acc.add(self.code_size_pressure);
         acc.add(self.reconstruction_risk);
         acc.add(self.verifier_risk_penalty);
         // Rewards (negated).
         acc.add(-self.fusion_reward);
         acc.add(-self.reuse_reward);
         acc.add(-self.compression_reward);
+        acc.add(-self.locality_reward);
         acc.finalize()
     }
 }
@@ -191,10 +218,21 @@ impl EnergyComponentsBuilder {
         self.inner.thermal_pressure = v;
         self
     }
-    /// Set code-size cost.
-    pub fn code_size_cost(mut self, v: f64) -> Self {
-        self.inner.code_size_cost = v;
+    /// Set bandwidth pressure.
+    pub fn bandwidth_pressure(mut self, v: f64) -> Self {
+        self.inner.bandwidth_pressure = v;
         self
+    }
+    /// Set code-size pressure.
+    pub fn code_size_pressure(mut self, v: f64) -> Self {
+        self.inner.code_size_pressure = v;
+        self
+    }
+    /// Deprecated alias for [`Self::code_size_pressure`] — the field
+    /// was renamed for the PINN v1 vocabulary. Removed next release.
+    #[deprecated(since = "0.1.12", note = "renamed to code_size_pressure")]
+    pub fn code_size_cost(self, v: f64) -> Self {
+        self.code_size_pressure(v)
     }
     /// Set reconstruction risk.
     pub fn reconstruction_risk(mut self, v: f64) -> Self {
@@ -219,6 +257,11 @@ impl EnergyComponentsBuilder {
     /// Set compression reward.
     pub fn compression_reward(mut self, v: f64) -> Self {
         self.inner.compression_reward = v;
+        self
+    }
+    /// Set locality reward.
+    pub fn locality_reward(mut self, v: f64) -> Self {
+        self.inner.locality_reward = v;
         self
     }
     /// Validate and produce [`EnergyComponents`].
@@ -401,14 +444,58 @@ mod tests {
 
     #[test]
     fn components_validate_non_negative() {
-        let bad = EnergyComponents::new(-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let bad = EnergyComponents::new(-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         assert!(bad.is_err());
-        let nan = EnergyComponents::new(f64::NAN, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let nan = EnergyComponents::new(f64::NAN, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         assert!(nan.is_err());
-        let inf = EnergyComponents::new(f64::INFINITY, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let inf = EnergyComponents::new(
+            f64::INFINITY,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        );
         assert!(inf.is_err());
-        let neg_rew = EnergyComponents::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.1, 0.0, 0.0);
+        let neg_rew = EnergyComponents::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.1, 0.0, 0.0, 0.0);
         assert!(neg_rew.is_err());
+        let neg_bandwidth =
+            EnergyComponents::new(0.0, 0.0, 0.0, -0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        assert!(neg_bandwidth.is_err());
+        let neg_locality =
+            EnergyComponents::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.1);
+        assert!(neg_locality.is_err());
+    }
+
+    #[test]
+    fn pinn_fields_participate_in_total() {
+        // bandwidth_pressure is a cost; locality_reward subtracts.
+        let c = EnergyComponents::builder()
+            .bandwidth_pressure(0.5)
+            .locality_reward(0.2)
+            .build()
+            .unwrap();
+        let s = EnergyScore::from_components(c);
+        assert!(
+            (s.total - 0.3).abs() < 1e-12,
+            "0.5 - 0.2 = 0.3, got {}",
+            s.total
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn deprecated_code_size_cost_alias_sets_renamed_field() {
+        let c = EnergyComponents::builder()
+            .code_size_cost(0.4)
+            .build()
+            .unwrap();
+        assert_eq!(c.code_size_pressure, 0.4);
     }
 
     #[test]
@@ -516,12 +603,14 @@ mod tests {
         // actually guarantees: the sum of N small values (N ≥ 2) is
         // exact, vs naive summation which would drift.
         let small = 0.1f64;
-        let c =
-            EnergyComponents::new(small, small, small, small, small, small, 0.0, 0.0, 0.0).unwrap();
+        let c = EnergyComponents::new(
+            small, small, small, small, small, small, small, 0.0, 0.0, 0.0, 0.0,
+        )
+        .unwrap();
         let s = EnergyScore::from_components(c);
-        // 6 × 0.1 == 0.6 exactly under Kahan; naive f64 sum drifts ~1e-17.
+        // 7 × 0.1 == 0.7 exactly under Kahan; naive f64 sum drifts ~1e-17.
         assert!(
-            (s.total - 0.6).abs() < 1e-15,
+            (s.total - 0.7).abs() < 1e-15,
             "Kahan sum drifted on small-value sequence: total = {}",
             s.total
         );

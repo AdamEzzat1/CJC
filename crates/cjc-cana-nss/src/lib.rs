@@ -78,6 +78,10 @@
 
 #![warn(missing_docs)]
 
+pub mod pinn_bridge;
+
+pub use pinn_bridge::physical_estimate_to_pressure_deltas;
+
 use std::collections::BTreeMap;
 
 use cjc_cana::features::{CanaFeatures, FnFeatures};

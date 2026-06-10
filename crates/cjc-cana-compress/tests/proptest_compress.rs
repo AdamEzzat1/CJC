@@ -53,19 +53,27 @@ fn arb_small_tensor() -> impl Strategy<Value = (Vec<f64>, Vec<usize>)> {
 }
 
 fn arb_energy_component() -> impl Strategy<Value = EnergyComponents> {
+    // Nested tuples keep each group under proptest's tuple-arity limit
+    // now that EnergyComponents has 11 fields (7 costs + 4 rewards).
     (
-        0.0f64..1000.0,
-        0.0f64..1.0,
-        0.0f64..1.0,
-        0.0f64..1000.0,
-        0.0f64..1.0,
-        0.0f64..1.0,
-        0.0f64..500.0,
-        0.0f64..500.0,
-        0.0f64..500.0,
+        (
+            0.0f64..1000.0, // runtime_cost
+            0.0f64..1.0,    // memory_pressure
+            0.0f64..1.0,    // thermal_pressure
+            0.0f64..1.0,    // bandwidth_pressure
+            0.0f64..1000.0, // code_size_pressure
+            0.0f64..1.0,    // reconstruction_risk
+            0.0f64..1.0,    // verifier_risk_penalty
+        ),
+        (
+            0.0f64..500.0, // fusion_reward
+            0.0f64..500.0, // reuse_reward
+            0.0f64..500.0, // compression_reward
+            0.0f64..500.0, // locality_reward
+        ),
     )
-        .prop_map(|t| {
-            EnergyComponents::new(t.0, t.1, t.2, t.3, t.4, t.5, t.6, t.7, t.8)
+        .prop_map(|(c, r)| {
+            EnergyComponents::new(c.0, c.1, c.2, c.3, c.4, c.5, c.6, r.0, r.1, r.2, r.3)
                 .expect("all components are non-negative and finite by strategy")
         })
 }

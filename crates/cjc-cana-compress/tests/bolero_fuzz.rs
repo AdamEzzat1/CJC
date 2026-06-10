@@ -141,20 +141,31 @@ fn fuzz_quantum_inspired_ranking_total_order() {
             if raw.is_empty() {
                 return;
             }
-            // Build candidates from bytes: each chunk of 18 bytes encodes
-            // 9 component magnitudes (each in [0, 1]).
+            // Build candidates from bytes: each chunk of 22 bytes encodes
+            // 11 component magnitudes (each in [0, 1]).
             let mut inputs = Vec::new();
-            for (i, chunk) in raw.chunks(18).enumerate() {
-                if chunk.len() < 18 {
+            for (i, chunk) in raw.chunks(22).enumerate() {
+                if chunk.len() < 22 {
                     break;
                 }
                 let v = |off: usize| -> f64 {
                     let raw = u16::from_le_bytes([chunk[off], chunk[off + 1]]) as f64;
                     raw / u16::MAX as f64
                 };
-                let components =
-                    EnergyComponents::new(v(0), v(2), v(4), v(6), v(8), v(10), v(12), v(14), v(16))
-                        .expect("non-negative finite values by construction");
+                let components = EnergyComponents::new(
+                    v(0),
+                    v(2),
+                    v(4),
+                    v(6),
+                    v(8),
+                    v(10),
+                    v(12),
+                    v(14),
+                    v(16),
+                    v(18),
+                    v(20),
+                )
+                .expect("non-negative finite values by construction");
                 inputs.push((CandidateId(i as u64), components));
             }
             if inputs.is_empty() {
@@ -210,5 +221,103 @@ fn fuzz_pressure_trajectory_never_panics() {
             let summary = state.summary();
             assert!(summary.saturation_score.is_finite());
             assert!(!summary.saturation_score.is_nan());
+        });
+}
+
+// ---------------------------------------------------------------------------
+// 8. PINN v1 physical-cost model — arbitrary queries never panic, outputs
+//    always valid (or the coefficient set is provably invalid)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fuzz_physical_cost_prediction_stays_clamped() {
+    use cjc_cana::physical_cost::{predict_physical, PhysicalCoefficients, PhysicalCostQuery};
+
+    check!()
+        .with_max_len(256)
+        .with_iterations(1000)
+        .for_each(|raw: &[u8]| {
+            // 6 u64 workload counters + 2 u32 = 56 bytes for the query,
+            // 8 f64 = 64 bytes for the coefficients.
+            if raw.len() < 120 {
+                return;
+            }
+            let u64_at =
+                |i: usize| -> u64 { u64::from_le_bytes(raw[i..i + 8].try_into().unwrap()) };
+            let u32_at =
+                |i: usize| -> u32 { u32::from_le_bytes(raw[i..i + 4].try_into().unwrap()) };
+            let f64_at =
+                |i: usize| -> f64 { f64::from_le_bytes(raw[i..i + 8].try_into().unwrap()) };
+
+            let query = PhysicalCostQuery {
+                function_name: "fuzz",
+                strategy_id: "loop_unroll",
+                flops_estimate: u64_at(0),
+                bytes_read_estimate: u64_at(8),
+                bytes_written_estimate: u64_at(16),
+                allocation_bytes_estimate: u64_at(24),
+                working_set_bytes_estimate: u64_at(32),
+                thread_count: u32_at(40),
+                batch_size: u32_at(44),
+            };
+            // Raw-bit f64s are frequently NaN / negative / subnormal —
+            // exactly the inputs the validity gate must catch.
+            let coeffs = PhysicalCoefficients {
+                flops_norm_scale: f64_at(48),
+                cooling_rate: f64_at(56),
+                bytes_per_flop_scale: f64_at(64),
+                bytes_norm_scale: f64_at(72),
+                alloc_norm_scale: f64_at(80),
+                thread_amplification: f64_at(88),
+                batch_amplification: f64_at(96),
+                locality_weight: f64_at(104),
+            };
+
+            match predict_physical(&query, &coeffs) {
+                Some(est) => assert!(
+                    est.is_valid(),
+                    "valid coefficients must produce a valid estimate: {est:?}"
+                ),
+                None => assert!(
+                    !coeffs.is_valid(),
+                    "predict_physical may only abstain on invalid coefficients"
+                ),
+            }
+        });
+}
+
+// ---------------------------------------------------------------------------
+// 9. PINN v1 — default coefficients accept every possible workload query
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fuzz_default_coefficients_never_abstain() {
+    use cjc_cana::physical_cost::{predict_physical, PhysicalCoefficients, PhysicalCostQuery};
+
+    check!()
+        .with_max_len(64)
+        .with_iterations(1000)
+        .for_each(|raw: &[u8]| {
+            if raw.len() < 48 {
+                return;
+            }
+            let u64_at =
+                |i: usize| -> u64 { u64::from_le_bytes(raw[i..i + 8].try_into().unwrap()) };
+            let u32_at =
+                |i: usize| -> u32 { u32::from_le_bytes(raw[i..i + 4].try_into().unwrap()) };
+            let query = PhysicalCostQuery {
+                function_name: "fuzz",
+                strategy_id: "vectorize",
+                flops_estimate: u64_at(0),
+                bytes_read_estimate: u64_at(8),
+                bytes_written_estimate: u64_at(16),
+                allocation_bytes_estimate: u64_at(24),
+                working_set_bytes_estimate: u64_at(32),
+                thread_count: u32_at(40),
+                batch_size: u32_at(44),
+            };
+            let est = predict_physical(&query, &PhysicalCoefficients::default())
+                .expect("default coefficients are valid by construction");
+            assert!(est.is_valid(), "{est:?}");
         });
 }

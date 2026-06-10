@@ -51,6 +51,7 @@ use cjc_cana::cost_model::CostModel;
 use cjc_cana::features::{CanaFeatures, FnFeatures};
 use cjc_cana::legality::{pass_safety_tier, LegalityGate, PassSafetyTier, ProposedPass};
 use cjc_cana::pass_ranker::{PassRanker, PassRecommendation, RankingReport};
+use cjc_cana::physical_cost::{build_physical_query, predict_physical, PhysicalCoefficients};
 use cjc_cana::pressure::PressurePredictor;
 use cjc_mir::MirProgram;
 
@@ -61,8 +62,9 @@ use crate::energy::{EnergyComponents, EnergyRanker};
 // EnergyComponentsConfig
 // ---------------------------------------------------------------------------
 
-/// Scaling factors that map the base ranker's outputs and the NSS
-/// predictor's outputs into the 9 [`EnergyComponents`] fields.
+/// Scaling factors that map the base ranker's outputs, the NSS
+/// predictor's outputs, and the PINN v1 physical estimate into the 11
+/// [`EnergyComponents`] fields.
 ///
 /// All fields are non-negative, finite `f64`. The defaults are
 /// hand-picked conservative weights matched against the existing
@@ -104,6 +106,18 @@ pub struct EnergyComponentsConfig {
     /// (confidence ^ confidence_exponent)`. Default `1.0` (linear);
     /// raise to penalise low-confidence predictions more strongly.
     pub confidence_exponent: f64,
+    /// Multiplier on the PINN v1 physical model's `bandwidth_pressure`
+    /// estimate (see `cjc_cana::physical_cost`). Default `0.1` —
+    /// conservative bias-ordering, mirroring the PINN soft-blend
+    /// margin. Set to `0.0` to disable the physical bandwidth term.
+    pub bandwidth_pressure_scale: f64,
+    /// Multiplier on `1.0 - locality_risk` from the PINN v1 physical
+    /// model, routed into `locality_reward`. Default `0.05`. Note:
+    /// working-set estimates are per-function (not per-pass), so
+    /// within one function's candidate list this reward is constant —
+    /// it surfaces in the audit decomposition rather than changing
+    /// intra-function order.
+    pub locality_reward_scale: f64,
 }
 
 impl Default for EnergyComponentsConfig {
@@ -117,6 +131,8 @@ impl Default for EnergyComponentsConfig {
             no_strict_reductions_risk: 0.02,
             benefit_reward_scale: 1.0,
             confidence_exponent: 1.0,
+            bandwidth_pressure_scale: 0.1,
+            locality_reward_scale: 0.05,
         }
     }
 }
@@ -134,6 +150,8 @@ impl EnergyComponentsConfig {
             no_strict_reductions_risk: 0.0,
             benefit_reward_scale: 0.0,
             confidence_exponent: 1.0,
+            bandwidth_pressure_scale: 0.0,
+            locality_reward_scale: 0.0,
         }
     }
 }
@@ -179,7 +197,7 @@ pub fn pass_benefit_channel(pass_name: &str) -> BenefitChannel {
 
 /// Code-size cost factor in `[0.0, 1.0]` for each canonical pass.
 /// Multiplied by [`EnergyComponentsConfig::code_size_scale`] to produce
-/// the final `code_size_cost` term.
+/// the final `code_size_pressure` term.
 ///
 /// - `loop_unroll` → 0.3 (replicates body N times in sequence)
 /// - `vectorize` → 0.15 (lane variants)
@@ -212,15 +230,21 @@ pub fn pass_code_size_factor(pass_name: &str) -> f64 {
 /// | `runtime_cost` | `predicted_compile_cost * runtime_cost_scale + cpu_saturation * cpu_pressure_to_runtime_scale` |
 /// | `memory_pressure` | `nss_memory_peak * memory_pressure_scale` |
 /// | `thermal_pressure` | `nss_thermal * thermal_pressure_scale` |
-/// | `code_size_cost` | `pass_code_size_factor * code_size_scale` |
+/// | `bandwidth_pressure` | PINN v1 `bandwidth_pressure * bandwidth_pressure_scale` |
+/// | `code_size_pressure` | `pass_code_size_factor * code_size_scale` |
 /// | `reconstruction_risk` | 0 (not used for pass ranking) |
 /// | `verifier_risk_penalty` | `no_strict_reductions_risk` if `pass_safety_tier == NoStrictReductions` |
 /// | `fusion_reward` | `predicted_benefit * confidence^exp * benefit_reward_scale` if channel is Fusion |
 /// | `reuse_reward` | `predicted_benefit * confidence^exp * benefit_reward_scale` if channel is Reuse |
 /// | `compression_reward` | 0 (not used for pass ranking) |
+/// | `locality_reward` | PINN v1 `(1 - locality_risk) * locality_reward_scale` |
+///
+/// The PINN v1 terms run [`predict_physical`] with default
+/// [`PhysicalCoefficients`] over a query derived from `features` —
+/// pure and deterministic, same contract as every other term.
 pub fn derive_energy_components(
     recommendation: &PassRecommendation,
-    _features: &FnFeatures,
+    features: &FnFeatures,
     thermal: f64,
     memory: f64,
     cpu: f64,
@@ -243,11 +267,26 @@ pub fn derive_energy_components(
         + (cpu_norm * config.cpu_pressure_to_runtime_scale);
     let thermal_pressure = thermal_norm * config.thermal_pressure_scale;
     let memory_pressure = memory_norm * config.memory_pressure_scale;
-    let code_size_cost = pass_code_size_factor(pass_name) * config.code_size_scale;
+    let code_size_pressure = pass_code_size_factor(pass_name) * config.code_size_scale;
     let verifier_risk_penalty = match tier {
         PassSafetyTier::NoStrictReductions => config.no_strict_reductions_risk,
         PassSafetyTier::Universal => 0.0,
     };
+
+    // PINN v1 physical terms. `predict_physical` returns `None` only
+    // for invalid coefficients; the defaults are valid by construction,
+    // but degrade to zero contributions rather than unwrapping.
+    let phys_query = build_physical_query("", pass_name, features);
+    let (bandwidth_pressure, locality_reward) =
+        match predict_physical(&phys_query, &PhysicalCoefficients::default()) {
+            Some(est) => {
+                let bw = est.bandwidth_pressure * config.bandwidth_pressure_scale;
+                let locality_headroom = 1.0 - est.locality_risk;
+                let lr = locality_headroom * config.locality_reward_scale;
+                (bw, lr)
+            }
+            None => (0.0, 0.0),
+        };
 
     // Confidence-weighted benefit reward.
     let confidence_weighted = recommendation.predicted_benefit
@@ -268,12 +307,14 @@ pub fn derive_energy_components(
         non_neg_finite(runtime_cost),
         non_neg_finite(memory_pressure),
         non_neg_finite(thermal_pressure),
-        non_neg_finite(code_size_cost),
+        non_neg_finite(bandwidth_pressure),
+        non_neg_finite(code_size_pressure),
         0.0, // reconstruction_risk
         non_neg_finite(verifier_risk_penalty),
         non_neg_finite(fusion_reward),
         non_neg_finite(reuse_reward),
         0.0, // compression_reward
+        non_neg_finite(locality_reward),
     )
     .unwrap_or_default()
 }
@@ -786,8 +827,8 @@ mod tests {
         let c = derive_energy_components(&rec, fn_features, 0.0, 0.0, 0.0, &config);
         assert!(c.fusion_reward > 0.0);
         assert_eq!(c.reuse_reward, 0.0);
-        // Code-size cost is non-zero for loop_unroll.
-        assert!(c.code_size_cost > 0.0);
+        // Code-size pressure is non-zero for loop_unroll.
+        assert!(c.code_size_pressure > 0.0);
     }
 
     #[test]
@@ -849,10 +890,12 @@ mod tests {
         assert_eq!(c.runtime_cost, 0.0);
         assert_eq!(c.memory_pressure, 0.0);
         assert_eq!(c.thermal_pressure, 0.0);
-        assert_eq!(c.code_size_cost, 0.0);
+        assert_eq!(c.bandwidth_pressure, 0.0);
+        assert_eq!(c.code_size_pressure, 0.0);
         assert_eq!(c.verifier_risk_penalty, 0.0);
         assert_eq!(c.fusion_reward, 0.0);
         assert_eq!(c.reuse_reward, 0.0);
+        assert_eq!(c.locality_reward, 0.0);
     }
 
     // ----- EnergyAwarePassRanker ---------------------------------------

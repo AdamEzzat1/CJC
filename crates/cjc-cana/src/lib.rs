@@ -72,6 +72,8 @@ pub mod linear_cost_model;
 pub mod memory_proxy;
 pub mod pass_history;
 pub mod pass_ranker;
+pub mod physical_cost;
+pub mod pinn_cost_model;
 pub mod pressure;
 pub mod reduction_axes;
 pub mod report;
@@ -105,6 +107,13 @@ pub use crate::pass_ranker::{
     default_ranker, pass_plan_from, recommend_pass_plan, FunctionRanking, PassRanker,
     PassRecommendation, RankingRationale, RankingReport, CANONICAL_PASSES,
     DEFAULT_SKIP_THRESHOLD,
+};
+pub use crate::physical_cost::{
+    build_physical_query, predict_physical, PhysicalCoefficients, PhysicalConstraints,
+    PhysicalCostEstimate, PhysicalCostQuery,
+};
+pub use crate::pinn_cost_model::{
+    PinnPhysicalCostModel, PINN_V1_MODEL_ID, PINN_V1_MODEL_VERSION,
 };
 pub use crate::reduction_axes::ReductionAxes;
 pub use crate::report::CanaReport;
