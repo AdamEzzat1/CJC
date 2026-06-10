@@ -1,0 +1,22 @@
+[package]
+name = "cjc-cana-compress"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "CANA Phase 6 — quantum-inspired compression layer + Ising-style energy ranker + NSS pressure-density bridge. Advisory only; verifier/legality gates retain final authority."
+publish = false
+
+[dependencies]
+cjc-cana = { workspace = true }
+cjc-mir = { workspace = true }
+cjc-nss = { workspace = true }
+cjc-quantum = { workspace = true }
+cjc-runtime = { workspace = true }
+cjc-repro = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"
+bolero = "0.13.4"
+cjc-ast = { workspace = true }

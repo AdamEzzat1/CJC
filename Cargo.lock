@@ -329,6 +329,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cjc-cana-compress"
+version = "0.1.11"
+dependencies = [
+ "bolero",
+ "cjc-ast",
+ "cjc-cana",
+ "cjc-mir",
+ "cjc-nss",
+ "cjc-quantum",
+ "cjc-repro",
+ "cjc-runtime",
+ "proptest",
+]
+
+[[package]]
 name = "cjc-cana-nss"
 version = "0.1.11"
 dependencies = [

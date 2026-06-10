@@ -60,6 +60,7 @@ members = [
     "crates/cjc-cana",
     "crates/cjc-nss",
     "crates/cjc-cana-nss",
+    "crates/cjc-cana-compress",
     "bench/cana_train_cost_model",
     "bench/cana_ab_pinn",
     "bench/cana_ab_corpus",
@@ -169,6 +170,7 @@ cjc-cronos-gan = { path = "crates/cjc-cronos-gan", version = "0.1.11" }
 cjc-cana = { path = "crates/cjc-cana", version = "0.1.11" }
 cjc-nss = { path = "crates/cjc-nss", version = "0.1.11" }
 cjc-cana-nss = { path = "crates/cjc-cana-nss", version = "0.1.11" }
+cjc-cana-compress = { path = "crates/cjc-cana-compress", version = "0.1.11" }
 
 [[test]]
 name = "fixtures"
