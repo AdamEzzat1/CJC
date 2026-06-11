@@ -1601,12 +1601,14 @@ fn main() {
         let mut beats_v2_ranked = 0usize;
         let mut worse_than_v2_ranked = 0usize;
         let mut sel_acc = KahanAccumulatorF64::new();
-        for per_config in rows.values() {
+        let mut winners: Vec<(String, f64)> = Vec::new();
+        for (prog, per_config) in &rows {
             let sel = per_config["selector_rec"].score;
             let v2 = per_config["full_pinn_v2_rec"].score;
             sel_acc.add(sel);
             if sel < 1.0 - 1e-9 {
                 beats_baseline_plan += 1;
+                winners.push((prog.clone(), sel));
             }
             if sel < v2 - 1e-9 {
                 beats_v2_ranked += 1;
@@ -1614,6 +1616,13 @@ fn main() {
             if sel > v2 + 1e-9 {
                 worse_than_v2_ranked += 1;
             }
+        }
+        winners.sort_by(|a, b| a.1.total_cmp(&b.1));
+        // Named winners: these are Phase D's first wall-clock A/B
+        // subjects — the report keeps them visible so the diagnostics
+        // session never has to re-derive them from the corpus.
+        for (prog, score) in &winners {
+            println!("  [selector win] {prog:<24} measured score {score:.5}");
         }
         println!(
             "\nPhase C exit criterion (selector_rec, measured energy): \

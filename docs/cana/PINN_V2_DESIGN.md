@@ -486,6 +486,15 @@ byte-identically.
   the out-of-distribution effect Phase B's caveat predicted: the head
   scores novel pass combinations (e.g. 5-pass reordered plans) it
   never saw in training.
+- **The wins, NAMED (post-commit report addition)**: `mem_grad_a{1..5}`
+  + `holdout_alloc_pulse`, all ≈0.496 — every win is the
+  allocation-churn shape (dead per-iteration allocations in loops),
+  i.e. ONE mechanism: the selector recommends DCE where the ranked
+  stack under-recommends it. Strong part: `holdout_alloc_pulse` is a
+  FROZEN-HOLDOUT program — the mechanism generalized to code neither
+  head trained on. Weak part: dead-alloc loops are maximally
+  DCE-friendly synthetic shapes; win DIVERSITY is 1 family. Recorded
+  so Phase D's A/B and any external claim carry the right caveat.
 
 ### NOT done / next
 
