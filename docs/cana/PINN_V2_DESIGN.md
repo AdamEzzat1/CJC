@@ -430,3 +430,71 @@ structural. **Verdict: PROMOTE — the trained head is Phase C's
 selector criterion.** Caveat recorded: regret was evaluated over the
 20-config plan space as a proxy; Phase C re-validates on its actual
 10-candidate-per-function space before any activation.
+
+## 10. Phase C (2026-06-11, same session): PassPlanSelector — the energy layer's first measured outcome effect
+
+### What shipped
+
+`crates/cjc-cana/src/plan_selector.rs` — `PassPlanSelector` per the
+research-doc architecture (choose-among-plans wrapping the ranker's
+decide-a-plan, NOT inside `EnergyAwarePassRanker`). Candidate set per
+function, fixed IDs: ranked plan (explicit `DEFAULT_PASS_SEQUENCE`
+when the ranked plan has no entry — the absence trap), none, all 7
+canonical passes, and each canonical singleton = 10. Per-(function,
+pass) legality filtering through the SAME `PerPassLegalityGate` the
+forced configs use; scoring via the committed CPB1 head over
+per-function `EnergyQuery`s with the post-plan node count obtained by
+ACTUALLY applying each candidate (deterministic, cached per distinct
+filtered plan); `(predicted, candidate_id)` argmin under
+`f64::total_cmp` (`select_argmin` is public for the property tests).
+Identity: `energy_selector_v1` v1 joins row identity as
+`energy_selector_v1+pinn_energy_v1`.
+
+Gates (`tests/test_cana_energy_selector.rs`, 7 tests): the four QA
+gates (independent legality re-verification of every selected pass;
+double-run determinism; selector-on output parity vs AST eval on
+int/FP/tensor/multi-fn programs; never-worse-than-ranked on the
+predicted criterion) + the explicit-entries trap test + argmin
+total-order proptest + committed-head totality fuzz (bolero over u64
+query extremes). Plus 7 in-crate unit tests (neutral-head tie-break
+keeps the ranked plan; absence-means-default made explicit; etc.).
+
+Feedback-loop guard: `selector_rec` rows are EXCLUDED from energy-head
+training and evaluation (`ENERGY_EXCLUDED_CONFIGS` in the trainer) —
+a model must never train on its own decisions. Verified: after the
+selector regen, re-running BOTH trainers reproduces BOTH bundles
+byte-identically.
+
+### The measured exit criterion (`selector_rec`, 158 × 21 = 3,318 rows)
+
+| config | mean measured score | divergent rows | range |
+|---|---|---|---|
+| baseline plan | 1.00000 | 0 | — |
+| `full_pinn_v2_rec` (ranked incumbent) | 1.00329 | 8 | [0.967, 1.508] |
+| **`selector_rec`** | **0.98230** | 22 | [**0.496**, 1.143] |
+
+- **Exit criterion MET**: selector beats the baseline plan on
+  6/158 programs on measured energy (the requirement was >0);
+  parity 100% on all 3,318 rows; verifiers green; row-hash stable.
+- **First nonzero outcome effect for the energy layer, ever** — every
+  prior ablation measured exactly zero because the layer had a
+  one-candidate space.
+- **Honest texture**: the selector makes bold bets. 6 large wins
+  (down to 0.496 = −50% modeled energy) against 16 modest regressions
+  (worst +14.3%); vs the ranked incumbent it is better on 7, worse on
+  11, but **mean −2.1 points** (0.982 vs 1.003). The regressions are
+  the out-of-distribution effect Phase B's caveat predicted: the head
+  scores novel pass combinations (e.g. 5-pass reordered plans) it
+  never saw in training.
+
+### NOT done / next
+
+The selector is ablation-grade, not default-on: 16 measured
+regressions disqualify unconditional activation. Candidate guardrails
+for a future session (in evidence order): (a) margin gating — keep
+the ranked plan unless the predicted gain exceeds a threshold
+calibrated on the corpus; (b) add selector-produced plan shapes to
+training via a SEPARATE exploration config whose rows are
+head-independent (forced versions of the selector's candidate set),
+closing the OOD gap without the feedback loop; (c) Phase D wall-clock
+validation before any of this matters to users.

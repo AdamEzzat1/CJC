@@ -206,3 +206,15 @@ are methodologically invalid; only within-run trends count.
   10/10 frozen holdout) at R² 0.21. The shipped `pinn_energy_v1`
   CPB1 head uses the regret-chosen recipe; shadow verdict PROMOTE.
   Phase C must re-validate regret on its actual 10-candidate space.
+- **2026-06-11 — "selector finds energy wins on real programs":
+  SETTLED, CONFIRMED with honest texture** (Phase C;
+  `PINN_V2_DESIGN.md` §10). `selector_rec` is the FIRST config in
+  project history with mean measured energy below baseline: 0.98230
+  (ranked incumbent: 1.00329). Exit criterion met — beats the
+  baseline plan on 6/158 programs, parity 100% across 3,318 rows.
+  Texture: 6 large wins (to −50%) vs 16 modest regressions (worst
+  +14%) — the predicted out-of-distribution effect on novel pass
+  combinations. Ablation-grade, NOT default-on; margin gating /
+  head-independent exploration configs / Phase-D wall-clock are the
+  paths forward. Feedback-loop guard live: selector rows excluded
+  from energy training, both bundle fixed points byte-verified.

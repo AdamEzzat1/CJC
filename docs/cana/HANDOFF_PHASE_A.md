@@ -198,15 +198,27 @@ regret, 32/34 exact-best, 10/10 frozen holdout); shipped
 `train-energy`/`shadow-energy` + `tests/test_energy_head.rs`).
 Shadow verdict through the persisted artifact: **PROMOTE**.
 
-**Next session: Phase C** (PassPlanSelector — research doc §1): 10
-deterministic candidates/function, the trained energy head as
-criterion, selector gates (legality-of-selected, determinism, on/off
-parity, never-worse-than-baseline), ablation config, corpus re-run.
-MANDATORY first step: re-validate selector regret on the REAL
-10-candidate-per-function space (Phase B's regret used the 20-config
-plan space as proxy). Traps: plan-absence semantics
-(`cjc-mir/src/optimize.rs:342-356` — insert explicit per-function
-entries); selector identity must join report hashes.
+**Phase C — EXECUTED same session: selector shipped, exit criterion
+MET.** Full record: `PINN_V2_DESIGN.md` §10. `PassPlanSelector`
+(`crates/cjc-cana/src/plan_selector.rs`, 10 candidates/function,
+committed CPB1 head as criterion, legality-gate authority retained,
+explicit per-function entries) + the four QA gates + props/fuzz
+(`tests/test_cana_energy_selector.rs`, 7) + `selector_rec` ablation
+config (158 × 21 = 3,318 rows). Measured: **first config ever with
+mean energy below baseline (0.98230 vs incumbent 1.00329)**; beats
+baseline plan on 6 programs (−50% best), 16 modest regressions
+(+14% worst) — ablation-grade, NOT default-on. Feedback-loop guard:
+selector rows excluded from energy training; both bundle fixed
+points byte-verified after the regen.
+
+**Next session: Phase D** (diagnostics harness — research doc §3):
+`bench/cana_diagnostics`, determinism gate FIRST (byte-equal outputs
+between A/B arms), then wall-clock + peak-RSS (+ best-effort thermal)
+with interleaved A/B/A/B and median-of-5; subjects: fp_hot, grad_f9*,
+the tensor family, and now the 6 selector-win programs — Phase D
+decides whether modeled-energy wins are real-silicon wins. Selector
+follow-ups queued for later sessions: margin gating; head-independent
+exploration configs to close the OOD gap.
 
 Open debt queued: serializer/replay 5 pre-existing failures
 (`docs/cana/CANA_PHASE_1_REGRESSION_FAILURES.md`, chip task_a41b1c8d

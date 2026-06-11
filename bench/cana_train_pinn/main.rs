@@ -299,6 +299,16 @@ fn is_holdout_program(program_name: &str) -> bool {
     program_name.starts_with("holdout_")
 }
 
+/// Feedback-loop guard (Phase C): rows whose plan was CHOSEN BY the
+/// energy head are excluded from energy-head training AND evaluation —
+/// a model must never train on its own decisions, and regret
+/// comparisons must stay on the head-independent 20-config plan space.
+const ENERGY_EXCLUDED_CONFIGS: &[&str] = &["selector_rec"];
+
+fn is_energy_excluded(r: &CompilationProfile) -> bool {
+    ENERGY_EXCLUDED_CONFIGS.contains(&r.config_id.as_str())
+}
+
 fn log1p_u64(v: u64) -> f64 {
     (v as f64).ln_1p()
 }
@@ -844,14 +854,23 @@ fn run_train_energy() {
     };
 
     // Evidence-chosen recipe (sanity-energy §3): fit on ALL working
-    // train rows (ties included), ln(score) target.
+    // train rows (ties included), ln(score) target. Selector-driven
+    // rows excluded (feedback-loop guard).
     let fit_rows: Vec<&CompilationProfile> = rows
         .iter()
-        .filter(|r| !is_holdout_program(&r.program_name) && !is_test_program(&r.program_name))
+        .filter(|r| {
+            !is_energy_excluded(r)
+                && !is_holdout_program(&r.program_name)
+                && !is_test_program(&r.program_name)
+        })
         .collect();
     let test_rows: Vec<&CompilationProfile> = rows
         .iter()
-        .filter(|r| !is_holdout_program(&r.program_name) && is_test_program(&r.program_name))
+        .filter(|r| {
+            !is_energy_excluded(r)
+                && !is_holdout_program(&r.program_name)
+                && is_test_program(&r.program_name)
+        })
         .collect();
 
     println!("=== PINN energy-head training (deterministic ridge OLS, ln target) ===");
@@ -947,11 +966,15 @@ fn run_shadow_energy() {
 
     let test_rows: Vec<&CompilationProfile> = rows
         .iter()
-        .filter(|r| !is_holdout_program(&r.program_name) && is_test_program(&r.program_name))
+        .filter(|r| {
+            !is_energy_excluded(r)
+                && !is_holdout_program(&r.program_name)
+                && is_test_program(&r.program_name)
+        })
         .collect();
     let holdout_rows: Vec<&CompilationProfile> = rows
         .iter()
-        .filter(|r| is_holdout_program(&r.program_name))
+        .filter(|r| !is_energy_excluded(r) && is_holdout_program(&r.program_name))
         .collect();
 
     // R² in ln space on the diverged FNV-test subset (prediction-
@@ -1055,14 +1078,15 @@ fn run_sanity_energy() {
     };
 
     // Cohorts: holdout rows are excluded from BOTH fit and the FNV test
-    // split, reported separately (frozen promotion cohort).
+    // split, reported separately (frozen promotion cohort). Selector-
+    // driven rows excluded everywhere (feedback-loop guard).
     let working: Vec<&CompilationProfile> = rows
         .iter()
-        .filter(|r| !is_holdout_program(&r.program_name))
+        .filter(|r| !is_energy_excluded(r) && !is_holdout_program(&r.program_name))
         .collect();
     let holdout: Vec<&CompilationProfile> = rows
         .iter()
-        .filter(|r| is_holdout_program(&r.program_name))
+        .filter(|r| !is_energy_excluded(r) && is_holdout_program(&r.program_name))
         .collect();
     let diverged: Vec<&CompilationProfile> = working
         .iter()

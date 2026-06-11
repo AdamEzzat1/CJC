@@ -49,7 +49,9 @@ use cjc_cana::pass_ranker::{pass_plan_from, PassRanker, RankingReport, CANONICAL
 use cjc_cana::physical_cost::PhysicalConstraints;
 use cjc_cana::physical_cost::{build_physical_query, predict_physical, PhysicalCoefficients};
 use cjc_cana::pinn_cost_model::PinnPhysicalCostModel;
+use cjc_cana::pinn_energy_v1::{PinnEnergyV1, PINN_ENERGY_V1_MODEL_ID};
 use cjc_cana::pinn_thermal_v2::PinnThermalV2;
+use cjc_cana::plan_selector::{PassPlanSelector, ENERGY_SELECTOR_ID, ENERGY_SELECTOR_VERSION};
 use cjc_cana::pressure::{NullPressurePredictor, PressurePredictor};
 use cjc_cana::thermal_cost_model::ThermalAwareCostModel;
 use cjc_cana::{analyze_program, LinearCostModel};
@@ -821,6 +823,14 @@ const CONFIG_IDS_RECORDED: &[&str] = &[
     // is replaced by the TRAINED head (CPB0 bundle, shadow-gate
     // PROMOTE) — measures the PLAN-level consequence of promotion.
     "full_pinn_v2_rec",
+    // Phase C: the energy SELECTOR — full_pinn_v2_rec's ranking is
+    // candidate 0; the selector chooses among 10 candidates/function
+    // with the trained energy head (CPB1, shadow-gate PROMOTE) as
+    // criterion. APPENDED LAST so the trainer's first-`_rec`-row label
+    // pick stays nss_rec. Rows from this config are EXCLUDED from
+    // energy-head training (feedback-loop guard — the model must never
+    // train on plans it chose itself).
+    "selector_rec",
 ];
 
 /// Forced-plan diagnostic configs (PINN v2 §5 follow-up): apply a fixed
@@ -1012,7 +1022,40 @@ fn plan_under(
     features: &CanaFeatures,
     recorded: &RecordedPressurePredictor,
     v2_head: &PinnThermalV2,
+    energy_head: &PinnEnergyV1,
 ) -> PlannedExperiment {
+    if config == "selector_rec" {
+        // Phase C: candidate 0 is the full_pinn_v2_rec stack's ranked
+        // plan; the selector chooses among 10 candidates per function
+        // with the trained energy head. Per-(function, pass) legality
+        // filtering happens INSIDE the selector through the same gate.
+        let (report, _, _) = rank_under("full_pinn_v2_rec", mir, features, recorded, v2_head);
+        let ranked = pass_plan_from(&report.sequence);
+        let selector =
+            PassPlanSelector::new(energy_head.clone()).expect("committed energy head is valid");
+        let sel = selector.select(mir, features, &ranked, &PerPassLegalityGate::new());
+        let recommended: u32 = sel
+            .plan
+            .per_function
+            .values()
+            .map(|p| p.len() as u32)
+            .fold(0, |a, b| a.saturating_add(b));
+        let dropped: u32 = sel
+            .per_function
+            .values()
+            .map(|s| s.chosen.dropped)
+            .fold(0, |a, b| a.saturating_add(b));
+        return PlannedExperiment {
+            plan: sel.plan,
+            cost_model_id: format!("{ENERGY_SELECTOR_ID}+{PINN_ENERGY_V1_MODEL_ID}"),
+            cost_model_version: ENERGY_SELECTOR_VERSION,
+            recommended_count: recommended,
+            dropped_count: dropped,
+            legality_approved: dropped == 0,
+            legality_violation_count: dropped,
+        };
+    }
+
     if let Some(forced) = forced_passes(config) {
         let gate = PerPassLegalityGate::new();
         let mut plan = PassPlan::empty();
@@ -1074,6 +1117,7 @@ fn run_experiment(
     config: &str,
     recorded: &RecordedPressurePredictor,
     v2_head: &PinnThermalV2,
+    energy_head: &PinnEnergyV1,
 ) -> (CompilationProfile, f64) {
     let wall_start = Instant::now();
 
@@ -1091,7 +1135,7 @@ fn run_experiment(
     let mir = h2m.lower_program(&hir);
     let features = analyze_program(&mir).features;
 
-    let planned = plan_under(config, &mir, &features, recorded, v2_head);
+    let planned = plan_under(config, &mir, &features, recorded, v2_head, energy_head);
     let plan = planned.plan;
     let mut optimized = optimize_program_with_plan(&mir, &plan);
     cjc_mir::escape::annotate_program(&mut optimized);
@@ -1337,6 +1381,16 @@ fn main() {
     .expect("CPB0 bundle missing/corrupt — run `cargo run --release -p cana-train-pinn -- train`")
     .head;
 
+    // Phase C: the trained energy head (CPB1) driving the selector_rec
+    // config. Same offline-only contract as the thermal bundle.
+    let energy_head = cjc_cana_compress::energy_bundle::read_energy_bundle(&PathBuf::from(
+        "bench_results/cana_train_pinn/pinn_energy_v1.cpb",
+    ))
+    .expect(
+        "CPB1 bundle missing/corrupt — run `cargo run --release -p cana-train-pinn -- train-energy`",
+    )
+    .head;
+
     let workloads = all_workloads();
     let n_configs = CONFIG_IDS.len() + CONFIG_IDS_RECORDED.len() + CONFIG_IDS_FORCED.len();
     println!("=================================================================");
@@ -1368,7 +1422,8 @@ fn main() {
     for prog in &workloads {
         let recorded = &recorded_preds[&prog.name];
         // Baseline first — its raw energy normalizes the others.
-        let (mut base_row, base_energy) = run_experiment(prog, "baseline", recorded, &v2_head);
+        let (mut base_row, base_energy) =
+            run_experiment(prog, "baseline", recorded, &v2_head, &energy_head);
         let normalizer = base_energy.max(1.0);
         base_row.score = base_energy / normalizer; // 1.0 by construction
         append_row(&db_path, &base_row).expect("append profile row");
@@ -1381,7 +1436,8 @@ fn main() {
             .chain(CONFIG_IDS_FORCED.iter())
             .filter(|c| **c != "baseline")
         {
-            let (mut row, raw_energy) = run_experiment(prog, config, recorded, &v2_head);
+            let (mut row, raw_energy) =
+                run_experiment(prog, config, recorded, &v2_head, &energy_head);
             row.score = raw_energy / normalizer;
             append_row(&db_path, &row).expect("append profile row");
             rows.entry(prog.name.clone())
@@ -1499,6 +1555,7 @@ fn main() {
             ("full_pinn", "full_pinn_rec_c80"),
             ("full_pinn", "full_pinn_rec_c60"),
             ("full_pinn", "full_pinn_v2_rec"),
+            ("full_pinn", "selector_rec"),
         ] {
             if per_config[syn].pass_sequence != per_config[rec].pass_sequence {
                 diverged.push(format!("{prog}:{rec}"));
@@ -1536,6 +1593,38 @@ fn main() {
         }
     }
 
+    // -- Phase C exit criterion: selector vs ranked incumbent, MEASURED ------
+    // "Selected plans beat the ranked baseline on measured energy on
+    // >0 programs; parity 100%" (research doc §6 row C). Lower = better.
+    {
+        let mut beats_baseline_plan = 0usize;
+        let mut beats_v2_ranked = 0usize;
+        let mut worse_than_v2_ranked = 0usize;
+        let mut sel_acc = KahanAccumulatorF64::new();
+        for per_config in rows.values() {
+            let sel = per_config["selector_rec"].score;
+            let v2 = per_config["full_pinn_v2_rec"].score;
+            sel_acc.add(sel);
+            if sel < 1.0 - 1e-9 {
+                beats_baseline_plan += 1;
+            }
+            if sel < v2 - 1e-9 {
+                beats_v2_ranked += 1;
+            }
+            if sel > v2 + 1e-9 {
+                worse_than_v2_ranked += 1;
+            }
+        }
+        println!(
+            "\nPhase C exit criterion (selector_rec, measured energy): \
+             beats baseline plan on {beats_baseline_plan}/{} programs; \
+             vs full_pinn_v2_rec: better on {beats_v2_ranked}, worse on {worse_than_v2_ranked}; \
+             mean score {:.5}",
+            rows.len(),
+            sel_acc.finalize() / rows.len().max(1) as f64,
+        );
+    }
+
     // -- PINN v1 head vs v2 trained head: did promotion change PLANS? --------
     let mut v2_plan_diffs = 0usize;
     let mut v2_score_diffs = 0usize;
@@ -1568,7 +1657,13 @@ fn main() {
         let pinn = per_config["full_pinn_rec"].score;
         let best_other = per_config
             .iter()
-            .filter(|(c, _)| !c.starts_with("full_pinn") && !c.starts_with("force_"))
+            // Selector excluded: it is PINN-criterion-driven too, and
+            // this gate's historical meaning is "PINN vs non-PINN".
+            .filter(|(c, _)| {
+                !c.starts_with("full_pinn")
+                    && !c.starts_with("force_")
+                    && !c.starts_with("selector")
+            })
             .map(|(_, r)| r.score)
             .fold(f64::INFINITY, f64::min);
         if pinn <= best_other - margin {
@@ -1604,10 +1699,20 @@ fn main() {
     // fp_hot program (index 8 in the static set — the one with maximal
     // thermal signal, so the canary covers the most instrumented path).
     let canary = &workloads[8];
-    let (mut again, raw) =
-        run_experiment(canary, "full_pinn_rec", &recorded_preds[&canary.name], &v2_head);
-    let (_, base_raw) =
-        run_experiment(canary, "baseline", &recorded_preds[&canary.name], &v2_head);
+    let (mut again, raw) = run_experiment(
+        canary,
+        "full_pinn_rec",
+        &recorded_preds[&canary.name],
+        &v2_head,
+        &energy_head,
+    );
+    let (_, base_raw) = run_experiment(
+        canary,
+        "baseline",
+        &recorded_preds[&canary.name],
+        &v2_head,
+        &energy_head,
+    );
     again.score = raw / base_raw.max(1.0);
     let stable = rows[&canary.name]["full_pinn_rec"].row_hash() == again.row_hash();
     println!(
