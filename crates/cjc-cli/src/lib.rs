@@ -124,6 +124,14 @@ struct Config {
     /// CANA Phase-1 passive observer: when set, emit a JSON sidecar at this
     /// path with per-function MIR features. Opt-in; never affects execution.
     cana_report: Option<String>,
+    /// `--pinn-weights PATH`: load a CPB0 weight bundle (trained
+    /// offline by `bench/cana_train_pinn`) and optimize through the
+    /// PINN v2 stack — `PinnPhysicalCostModel` with the trained
+    /// thermal head. Implies `--mir-opt`. Takes PRECEDENCE over
+    /// `--thermal-aware`: the multi-axis PINN model supersedes the
+    /// single-axis thermal wrapper (stacking both double-penalizes
+    /// thermal — see `cjc-cana/src/pinn_cost_model.rs` module docs).
+    pinn_weights: Option<String>,
 }
 
 /// Known flags for typo suggestions.
@@ -136,6 +144,7 @@ const KNOWN_FLAGS: &[&str] = &[
     "--no-thermal-aware",
     "--mir-mono",
     "--cana-report",
+    "--pinn-weights",
     "--multi-file",
     "--color",
     "--no-color",
@@ -258,6 +267,7 @@ impl Config {
                     diag_format: cjc_diag::DiagnosticFormat::Rich,
                     output_format: OutputFormat::Plain,
                     cana_report: None,
+                    pinn_weights: None,
                 };
             }
         }
@@ -274,6 +284,7 @@ impl Config {
         let mut diag_format = cjc_diag::DiagnosticFormat::Rich;
         let mut output_format = OutputFormat::Plain;
         let mut cana_report: Option<String> = None;
+        let mut pinn_weights: Option<String> = None;
         let mut positional: Vec<String> = Vec::new();
 
         let mut i = 1;
@@ -313,6 +324,27 @@ impl Config {
                         cli_error("--cana-report= requires a non-empty path");
                     }
                     cana_report = Some(path.to_string());
+                }
+                // PINN v2 trained weights. Two forms:
+                //   --pinn-weights PATH
+                //   --pinn-weights=PATH
+                // Implies --mir-opt (a trained cost model only matters
+                // when optimization is being ranked).
+                "--pinn-weights" => {
+                    i += 1;
+                    if i >= args.len() {
+                        cli_error("--pinn-weights requires a path argument");
+                    }
+                    pinn_weights = Some(args[i].clone());
+                    mir_opt = true;
+                }
+                arg if arg.starts_with("--pinn-weights=") => {
+                    let path = &arg["--pinn-weights=".len()..];
+                    if path.is_empty() {
+                        cli_error("--pinn-weights= requires a non-empty path");
+                    }
+                    pinn_weights = Some(path.to_string());
+                    mir_opt = true;
                 }
                 "--color" => force_color = Some(true),
                 "--no-color" => force_color = Some(false),
@@ -448,7 +480,20 @@ impl Config {
             diag_format,
             output_format,
             cana_report,
+            pinn_weights,
         }
+    }
+}
+
+/// Load a CPB0 weight bundle for `--pinn-weights`, exiting with a CLI
+/// error on any failure — a missing or corrupt bundle must never
+/// silently degrade to a different cost model than the user asked for.
+fn load_pinn_head(path: &str) -> cjc_cana::pinn_thermal_v2::PinnThermalV2 {
+    match cjc_cana_compress::pinn_bundle::read_bundle(std::path::Path::new(path)) {
+        Ok(bundle) => bundle.head,
+        Err(e) => cli_error(&format!(
+            "--pinn-weights: cannot load CPB0 bundle at `{path}`: {e}"
+        )),
     }
 }
 
@@ -1014,6 +1059,16 @@ fn cmd_run(source: &str, filename: &str, config: &Config) {
                 eprintln!("{}", e);
                 process::exit(EXIT_RUNTIME);
             }
+        } else if let Some(weights_path) = &config.pinn_weights {
+            // PINN v2: trained thermal head loaded from a CPB0 bundle.
+            // Takes precedence over thermal_aware — the multi-axis PINN
+            // model supersedes the single-axis thermal wrapper.
+            let head = load_pinn_head(weights_path);
+            if let Err(e) = cjc_mir_exec::run_program_optimized_pinn_v2(&program, config.seed, &head)
+            {
+                eprintln!("{}", e);
+                process::exit(EXIT_RUNTIME);
+            }
         } else if config.thermal_aware {
             // §20: thermal-aware MIR optimization is the new default for
             // `cjcl run --mir-opt`. The `thermal_aware` field of Config
@@ -1090,12 +1145,19 @@ fn cmd_run_formatted(source: &str, filename: &str, config: &Config) {
     //
     // Priority order matches cmd_run (and §20 thermal-aware default):
     //   --mir-mono → run_program_monomorphized_with_executor
+    //   --pinn-weights PATH → run_program_optimized_pinn_v2_with_executor
+    //                 (PINN v2 trained head; supersedes thermal-aware)
     //   thermal_aware (= --thermal-aware OR --mir-opt without --no-thermal-aware)
     //                 → run_program_optimized_thermal_aware_with_executor
     //   --mir-opt with --no-thermal-aware → run_program_optimized_with_executor
     //   (none) → cjc_eval::Interpreter (AST tree-walk, original behavior)
     let exec_result: Result<Vec<String>, String> = if config.mir_mono {
         cjc_mir_exec::run_program_monomorphized_with_executor(&program, config.seed)
+            .map(|(_, exec)| exec.output)
+            .map_err(|e| format!("{}", e))
+    } else if let Some(weights_path) = &config.pinn_weights {
+        let head = load_pinn_head(weights_path);
+        cjc_mir_exec::run_program_optimized_pinn_v2_with_executor(&program, config.seed, &head)
             .map(|(_, exec)| exec.output)
             .map_err(|e| format!("{}", e))
     } else if config.thermal_aware {

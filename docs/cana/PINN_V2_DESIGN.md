@@ -143,17 +143,58 @@ reports `pinn_thermal_v2` v2 into report hashes.
 
 ### Out of scope / follow-ups
 
-1. **Energy head**: needs label variance first — extend the ablation
-   harness with forced-plan configs (apply each pass unconditionally)
-   so more than 39/1,474 rows diverge from baseline; then revisit
-   `FP_ENERGY_WEIGHT = 3.0`.
+1. ~~**Energy head**: needs label variance first~~ — **variance landed**
+   (see §6); the trained energy head itself remains future work.
 2. **cpu/memory heads**: recorded label ranges are too small to train
    on (std 0.013 / 0.0007); v1 closed form stays.
-3. **Harness ablation config with the trained head** (e.g.
-   `full_pinn_v2_rec`): would measure PLAN-level consequences of v2;
-   the §2.5 gate measured prediction quality, which is the promotion
-   criterion.
-4. **CLI loading of CPB0 bundles** (`cjcl --pinn-weights …`), and the
-   Phase-6 `--compression-report` flag (pre-existing follow-up).
+3. ~~**Harness ablation config with the trained head**~~ — DONE, §6.
+4. ~~**CLI loading of CPB0 bundles**~~ — DONE, §6. The Phase-6
+   `--compression-report` flag remains open (pre-existing follow-up).
 5. **Cross-function float propagation** in `TypeMix` (calls are
    conservatively non-float today).
+
+## 6. Second arc (same day): activation + energy-variance groundwork
+
+Shipped after the merge-to-master reconciliation (the merge was a pure
+ancestry join — `27c8d6f`'s tree contributed nothing the branch didn't
+already have; `git diff` between pre-merge HEAD and the merge commit is
+empty).
+
+### `full_pinn_v2_rec` ablation config (plan-level consequences)
+
+The harness loads the committed CPB0 bundle and runs the trained head
+as a 12th ranked config. Result: **14/134 plans differ from
+`full_pinn_rec`** (3/134 scores differ). The v2 head withholds passes
+on FP-dense functions (`float/polynomial`, `fp_hot/horner`,
+`fp_hot/__main`) where v1's closed-form thermal was structurally
+near-zero (max ≈ 0.0001) — promotion changes real decisions, not just
+metrics.
+
+### Forced-plan configs (energy-label variance)
+
+Eight `force_*` configs apply a fixed pass list to EVERY function
+(per-`(function, pass)` legality checks retained — 282/2,680 rows show
+gate-filtered pairs). `force_none` pins the unoptimized anchor.
+Corpus: **134 × 20 = 2,680 rows**; parity 100%; row-hash double-run
+stable. Energy signal: **295 informative rows** (was 39), 49 distinct
+scores, range **[0.909, 11.16]** (was [0.967, 1.009]). Notably
+`force_unroll`/`force_all` sometimes BEAT the ranked baseline (0.909)
+— direct evidence the linear benefit model mis-ranks, i.e. learnable
+signal. Honest negative: linear OLS on the diverged rows now
+catastrophically fails held-out (R²(test) ≈ −32 vs train 0.79) — the
+energy head needs a log-ratio target and/or nonlinearity; THAT is the
+evidence-based §2.2-style verdict for the future energy session.
+
+### `cjcl run --pinn-weights PATH`
+
+CLI flag (both `PATH` and `=PATH` forms; implies `--mir-opt`; takes
+precedence over `--thermal-aware` per the don't-double-wrap rule).
+Loads a CPB0 bundle via `cjc-cana-compress::pinn_bundle` (missing or
+corrupt bundle = hard CLI error, never silent degradation) and runs
+`cjc_mir_exec::run_program_optimized_pinn_v2[_with_executor]` — new
+entry points mirroring the thermal-aware pair, same
+`PerPassLegalityGate`. Locked by `tests/test_pinn_v2_runner.rs`
+(4 tests: AST↔MIR output parity on int/FP/nested-FP programs with the
+committed bundle + determinism) and an end-to-end CLI smoke
+(`--pinn-weights` output byte-equal to the plain run; missing bundle →
+exit 1).

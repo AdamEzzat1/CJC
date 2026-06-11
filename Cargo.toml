@@ -122,6 +122,9 @@ insta = "1"
 # CANA Phase 3.5a integration tests need to assert against the fusion
 # identifier's NATIVE_PRIMITIVES set.
 cjc-cana = { workspace = true }
+# PINN v2 runner parity gate (tests/test_pinn_v2_runner.rs) loads the
+# committed CPB0 weight bundle.
+cjc-cana-compress = { workspace = true }
 
 # Phase 0.8 Item B3 — feature propagation so the test binary in
 # `tests/abng/serialize_compressed.rs` can call the gated

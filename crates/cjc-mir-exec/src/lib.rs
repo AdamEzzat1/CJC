@@ -6042,6 +6042,83 @@ fn cana_plan_for(mir: &cjc_mir::MirProgram) -> cjc_mir::optimize::PassPlan {
     plan
 }
 
+/// Plan builder for the PINN v2 path (`cjcl run --pinn-weights PATH`).
+///
+/// Stack: `PinnPhysicalCostModel<LinearCostModel::trained(),
+/// NssPressurePredictor>` with the TRAINED thermal head attached —
+/// the multi-axis physical model SUPERSEDES the single-axis
+/// `ThermalAwareCostModel` wrapper (stacking both double-penalizes
+/// thermal; see `cjc-cana/src/pinn_cost_model.rs` module docs), which
+/// is why `--pinn-weights` takes precedence over `--thermal-aware`
+/// rather than composing with it. Same `PerPassLegalityGate` as the
+/// §19/§20 paths, so legality verdicts stay consistent across
+/// `--mir-opt` / `--thermal-aware` / `--pinn-weights`.
+fn cana_pinn_v2_plan_for(
+    mir: &cjc_mir::MirProgram,
+    head: &cjc_cana::pinn_thermal_v2::PinnThermalV2,
+) -> cjc_mir::optimize::PassPlan {
+    let features = cjc_cana::analyze_program(mir).features;
+    let cost_model = cjc_cana::pinn_cost_model::PinnPhysicalCostModel::new(
+        cjc_cana::LinearCostModel::trained(),
+        cjc_cana_nss::NssPressurePredictor::default(),
+    )
+    .with_thermal_head(head.clone());
+    let ranker = cjc_cana::pass_ranker::PassRanker::new(
+        cost_model,
+        cjc_cana::legality::PerPassLegalityGate::new(),
+    );
+    let report = ranker.rank(mir, &features);
+    cjc_cana::pass_ranker::pass_plan_from(&report.sequence)
+}
+
+/// Run a full AST program with the PINN v2 trained-thermal-head
+/// optimization plan. Wired through `cjcl run --pinn-weights PATH`;
+/// the caller loads the CPB0 bundle (weights are trained OFFLINE by
+/// `bench/cana_train_pinn` — compilation only ever loads them).
+pub fn run_program_optimized_pinn_v2(
+    program: &cjc_ast::Program,
+    seed: u64,
+    head: &cjc_cana::pinn_thermal_v2::PinnThermalV2,
+) -> MirExecResult {
+    let mut ast_lowering = cjc_hir::AstLowering::new();
+    let hir = ast_lowering.lower_program(program);
+
+    let mut hir_to_mir = cjc_mir::HirToMir::new();
+    let mir = hir_to_mir.lower_program(&hir);
+
+    let plan = cana_pinn_v2_plan_for(&mir, head);
+    let mut optimized = cjc_mir::optimize::optimize_program_with_plan(&mir, &plan);
+    cjc_mir::escape::annotate_program(&mut optimized);
+
+    let mut executor = MirExecutor::new(seed);
+    executor.scan_ast_imports(program);
+    executor.exec(&optimized)
+}
+
+/// [`run_program_optimized_pinn_v2`] variant that also returns the
+/// [`MirExecutor`] for post-execution inspection (the `--format
+/// json/csv` path needs the captured output).
+pub fn run_program_optimized_pinn_v2_with_executor(
+    program: &cjc_ast::Program,
+    seed: u64,
+    head: &cjc_cana::pinn_thermal_v2::PinnThermalV2,
+) -> Result<(Value, MirExecutor), MirExecError> {
+    let mut ast_lowering = cjc_hir::AstLowering::new();
+    let hir = ast_lowering.lower_program(program);
+
+    let mut hir_to_mir = cjc_mir::HirToMir::new();
+    let mir = hir_to_mir.lower_program(&hir);
+
+    let plan = cana_pinn_v2_plan_for(&mir, head);
+    let mut optimized = cjc_mir::optimize::optimize_program_with_plan(&mir, &plan);
+    cjc_mir::escape::annotate_program(&mut optimized);
+
+    let mut executor = MirExecutor::new(seed);
+    executor.scan_ast_imports(program);
+    let result = executor.exec(&optimized)?;
+    Ok((result, executor))
+}
+
 /// Build a pass plan using a CANA ranker wrapped in the **thermal-aware
 /// cost model** (NSS Phase 4, Option C — see
 /// `docs/cana/CANA_PHASE_4_NSS_BRIDGE_DESIGN_OPTIONS.md`).

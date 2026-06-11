@@ -42,20 +42,24 @@ use std::time::Instant;
 
 use cjc_cana::cost_model::CostModel;
 use cjc_cana::features::CanaFeatures;
-use cjc_cana::legality::{LegalityVerdict, PerPassLegalityGate};
-use cjc_cana::pass_ranker::{pass_plan_from, PassRanker, RankingReport};
+use cjc_cana::legality::{
+    LegalityGate, LegalityVerdict, PassSequence, PerPassLegalityGate, ProposedPass,
+};
+use cjc_cana::pass_ranker::{pass_plan_from, PassRanker, RankingReport, CANONICAL_PASSES};
 use cjc_cana::physical_cost::PhysicalConstraints;
 use cjc_cana::physical_cost::{build_physical_query, predict_physical, PhysicalCoefficients};
 use cjc_cana::pinn_cost_model::PinnPhysicalCostModel;
+use cjc_cana::pinn_thermal_v2::PinnThermalV2;
 use cjc_cana::pressure::{NullPressurePredictor, PressurePredictor};
 use cjc_cana::thermal_cost_model::ThermalAwareCostModel;
 use cjc_cana::{analyze_program, LinearCostModel};
+use cjc_cana_compress::pinn_bundle::read_bundle;
 use cjc_cana_compress::profile_db::{
     append_row, read_all, CompilationProfile, PROFILE_SCHEMA_VERSION,
 };
 use cjc_cana_compress::EnergyAwarePassRanker;
 use cjc_cana_nss::{NssPressurePredictor, RecordedPressurePredictor};
-use cjc_mir::optimize::optimize_program_with_plan;
+use cjc_mir::optimize::{optimize_program_with_plan, PassPlan};
 use cjc_mir::MirProgram;
 use cjc_mir_exec::{run_program_instrumented, trace};
 use cjc_repro::KahanAccumulatorF64;
@@ -399,7 +403,46 @@ const CONFIG_IDS_RECORDED: &[&str] = &[
     "full_pinn_rec",
     "full_pinn_rec_c80",
     "full_pinn_rec_c60",
+    // PINN v2: same stack as full_pinn_rec but the closed-form thermal
+    // is replaced by the TRAINED head (CPB0 bundle, shadow-gate
+    // PROMOTE) — measures the PLAN-level consequence of promotion.
+    "full_pinn_v2_rec",
 ];
+
+/// Forced-plan diagnostic configs (PINN v2 §5 follow-up): apply a fixed
+/// pass list to EVERY function, bypassing cost-model ranking but NOT
+/// legality — each `(function, pass)` pair is individually gate-checked
+/// and rejected pairs are dropped from the plan. Purpose: generate
+/// energy-label variance across plans (pre-v2, only 39/1474 rows
+/// diverged from baseline because ranked plans mostly tie it), so a
+/// future energy head has something to train on. `force_none` pins the
+/// fully-unoptimized anchor (empty per-function plans).
+const CONFIG_IDS_FORCED: &[&str] = &[
+    "force_none",
+    "force_cf",
+    "force_sr",
+    "force_dce",
+    "force_cse",
+    "force_licm",
+    "force_unroll",
+    "force_all",
+];
+
+/// The pass list a forced config applies to every function; `None` for
+/// ranked configs.
+fn forced_passes(config: &str) -> Option<Vec<&'static str>> {
+    Some(match config {
+        "force_none" => vec![],
+        "force_cf" => vec!["constant_fold"],
+        "force_sr" => vec!["strength_reduce"],
+        "force_dce" => vec!["dce"],
+        "force_cse" => vec!["cse"],
+        "force_licm" => vec!["licm"],
+        "force_unroll" => vec!["loop_unroll"],
+        "force_all" => CANONICAL_PASSES.to_vec(),
+        _ => return None,
+    })
+}
 
 /// Rank `mir` under one ablation configuration. Returns the report plus
 /// the cost-model identity that drove it. `recorded` backs the `*_rec`
@@ -409,6 +452,7 @@ fn rank_under(
     mir: &MirProgram,
     features: &CanaFeatures,
     recorded: &RecordedPressurePredictor,
+    v2_head: &PinnThermalV2,
 ) -> (RankingReport, String, u32) {
     match config {
         "baseline" => {
@@ -487,6 +531,16 @@ fn rank_under(
             );
             (adapter.rank(mir, features), id, ver)
         }
+        "full_pinn_v2_rec" => {
+            let model = PinnPhysicalCostModel::new(LinearCostModel::trained(), recorded.clone())
+                .with_thermal_head(v2_head.clone());
+            let (id, ver) = (model.name().to_string(), model.version());
+            let adapter = EnergyAwarePassRanker::new(
+                PassRanker::new(model, PerPassLegalityGate::new()),
+                Box::new(recorded.clone()),
+            );
+            (adapter.rank(mir, features), id, ver)
+        }
         "full_pinn_rec_c80" | "full_pinn_rec_c60" => {
             let cap = if config.ends_with("c80") { 0.80 } else { 0.60 };
             let model = PinnPhysicalCostModel::new(LinearCostModel::trained(), recorded.clone())
@@ -517,6 +571,87 @@ fn total_expr_count(features: &CanaFeatures) -> u64 {
         .fold(0u64, |a, b| a.saturating_add(b))
 }
 
+/// Unified output of planning one experiment, whether the plan came
+/// from a cost-model ranking or a forced pass list.
+struct PlannedExperiment {
+    plan: PassPlan,
+    cost_model_id: String,
+    cost_model_version: u32,
+    recommended_count: u32,
+    dropped_count: u32,
+    legality_approved: bool,
+    legality_violation_count: u32,
+}
+
+/// Produce the pass plan for `config`. Ranked configs go through
+/// `rank_under`; `force_*` configs apply a fixed list to EVERY function
+/// with per-`(function, pass)` legality checks — the gate retains final
+/// authority, rejected pairs are dropped (counted in `dropped_count`),
+/// and the row's `legality_approved` records whether the gate filtered
+/// anything. Every featurized function is inserted into the plan map
+/// (an empty list = run NOTHING for that function — without the
+/// insertion, `optimize_program_with_plan` falls back to the FULL
+/// default sequence).
+fn plan_under(
+    config: &str,
+    mir: &MirProgram,
+    features: &CanaFeatures,
+    recorded: &RecordedPressurePredictor,
+    v2_head: &PinnThermalV2,
+) -> PlannedExperiment {
+    if let Some(forced) = forced_passes(config) {
+        let gate = PerPassLegalityGate::new();
+        let mut plan = PassPlan::empty();
+        let mut kept = 0u32;
+        let mut dropped = 0u32;
+        let mut violation_count = 0u32;
+        for fn_name in features.per_fn.keys() {
+            let mut passes: Vec<String> = Vec::new();
+            for p in &forced {
+                let mut seq = PassSequence::default();
+                seq.per_function
+                    .insert(fn_name.clone(), vec![ProposedPass::Run(p.to_string())]);
+                match gate.verify(mir, &seq, features) {
+                    LegalityVerdict::Approved => {
+                        passes.push(p.to_string());
+                        kept = kept.saturating_add(1);
+                    }
+                    LegalityVerdict::Rejected(v) => {
+                        dropped = dropped.saturating_add(1);
+                        violation_count = violation_count.saturating_add(v.len() as u32);
+                    }
+                }
+            }
+            plan.per_function.insert(fn_name.clone(), passes);
+        }
+        return PlannedExperiment {
+            plan,
+            cost_model_id: "forced_plan".to_string(),
+            cost_model_version: 0,
+            recommended_count: kept,
+            dropped_count: dropped,
+            legality_approved: violation_count == 0,
+            legality_violation_count: violation_count,
+        };
+    }
+
+    let (report, cost_model_id, cost_model_version) =
+        rank_under(config, mir, features, recorded, v2_head);
+    let (legality_approved, legality_violation_count) = match &report.verdict {
+        LegalityVerdict::Approved => (true, 0u32),
+        LegalityVerdict::Rejected(v) => (false, v.len() as u32),
+    };
+    PlannedExperiment {
+        plan: pass_plan_from(&report.sequence),
+        cost_model_id,
+        cost_model_version,
+        recommended_count: report.total_recommended() as u32,
+        dropped_count: report.total_dropped() as u32,
+        legality_approved,
+        legality_violation_count,
+    }
+}
+
 /// One `(workload × config)` experiment. Returns the row plus the RAW
 /// energy proxy of the optimized run; the caller normalizes `score`
 /// against the program's `baseline` config before persisting.
@@ -524,10 +659,11 @@ fn run_experiment(
     prog: &Workload,
     config: &str,
     recorded: &RecordedPressurePredictor,
+    v2_head: &PinnThermalV2,
 ) -> (CompilationProfile, f64) {
     let wall_start = Instant::now();
 
-    // -- Compile + rank ----------------------------------------------------
+    // -- Compile + plan (ranked or forced) -----------------------------------
     let (ast, diags) = cjc_parser::parse_source(&prog.source);
     assert!(
         !diags.has_errors(),
@@ -541,8 +677,8 @@ fn run_experiment(
     let mir = h2m.lower_program(&hir);
     let features = analyze_program(&mir).features;
 
-    let (report, cost_model_id, cost_model_version) = rank_under(config, &mir, &features, recorded);
-    let plan = pass_plan_from(&report.sequence);
+    let planned = plan_under(config, &mir, &features, recorded, v2_head);
+    let plan = planned.plan;
     let mut optimized = optimize_program_with_plan(&mir, &plan);
     cjc_mir::escape::annotate_program(&mut optimized);
     let compile_wall_micros = wall_start.elapsed().as_micros() as u64;
@@ -652,12 +788,6 @@ fn run_experiment(
     let energy_partial = instr_total as f64 + fp_term;
     let raw_energy = energy_partial + heap_term;
 
-    // -- Legality + counts ----------------------------------------------------
-    let (legality_approved, legality_violation_count) = match &report.verdict {
-        LegalityVerdict::Approved => (true, 0u32),
-        LegalityVerdict::Rejected(v) => (false, v.len() as u32),
-    };
-
     let pass_sequence: Vec<(String, Vec<String>)> = plan
         .per_function
         .iter()
@@ -671,8 +801,8 @@ fn run_experiment(
         feature_hash: features.feature_hash.0,
         sidecar_bundle_hash: 0, // no sidecar in the ablation harness (yet)
         config_id: config.to_string(),
-        cost_model_id,
-        cost_model_version,
+        cost_model_id: planned.cost_model_id,
+        cost_model_version: planned.cost_model_version,
         pass_sequence,
         estimated_flops: est_flops,
         estimated_bytes_read: est_read,
@@ -688,10 +818,10 @@ fn run_experiment(
         pinn_predicted_bandwidth_max: pinn_bandwidth_max,
         mir_nodes_before,
         mir_nodes_after,
-        recommended_count: report.total_recommended() as u32,
-        dropped_count: report.total_dropped() as u32,
-        legality_approved,
-        legality_violation_count,
+        recommended_count: planned.recommended_count,
+        dropped_count: planned.dropped_count,
+        legality_approved: planned.legality_approved,
+        legality_violation_count: planned.legality_violation_count,
         parity_match,
         compile_wall_micros,
         // Placeholder — the caller overwrites with the
@@ -715,11 +845,20 @@ fn main() {
     // concatenate archives.)
     let _ = fs::remove_file(&db_path);
 
+    // PINN v2 trained head — offline-trained weights, loaded read-only
+    // (training never runs during compilation). The bundle is committed,
+    // so a missing file means a broken checkout, not a fresh one.
+    let v2_head = read_bundle(&PathBuf::from(
+        "bench_results/cana_train_pinn/pinn_thermal_v2.cpb",
+    ))
+    .expect("CPB0 bundle missing/corrupt — run `cargo run --release -p cana-train-pinn -- train`")
+    .head;
+
     let workloads = all_workloads();
-    let n_configs = CONFIG_IDS.len() + CONFIG_IDS_RECORDED.len();
+    let n_configs = CONFIG_IDS.len() + CONFIG_IDS_RECORDED.len() + CONFIG_IDS_FORCED.len();
     println!("=================================================================");
     println!(
-        "Phase A6 v3 — {} programs × {} configs = {} experiments (seed {SEED})",
+        "Phase A6 v4 — {} programs × {} configs = {} experiments (seed {SEED})",
         workloads.len(),
         n_configs,
         workloads.len() * n_configs,
@@ -746,7 +885,7 @@ fn main() {
     for prog in &workloads {
         let recorded = &recorded_preds[&prog.name];
         // Baseline first — its raw energy normalizes the others.
-        let (mut base_row, base_energy) = run_experiment(prog, "baseline", recorded);
+        let (mut base_row, base_energy) = run_experiment(prog, "baseline", recorded, &v2_head);
         let normalizer = base_energy.max(1.0);
         base_row.score = base_energy / normalizer; // 1.0 by construction
         append_row(&db_path, &base_row).expect("append profile row");
@@ -756,9 +895,10 @@ fn main() {
         for config in CONFIG_IDS
             .iter()
             .chain(CONFIG_IDS_RECORDED.iter())
+            .chain(CONFIG_IDS_FORCED.iter())
             .filter(|c| **c != "baseline")
         {
-            let (mut row, raw_energy) = run_experiment(prog, config, recorded);
+            let (mut row, raw_energy) = run_experiment(prog, config, recorded, &v2_head);
             row.score = raw_energy / normalizer;
             append_row(&db_path, &row).expect("append profile row");
             rows.entry(prog.name.clone())
@@ -813,7 +953,11 @@ fn main() {
         "config", "min", "mean", "max", "≠baseline"
     );
     println!("{}", "-".repeat(64));
-    for config in CONFIG_IDS.iter().chain(CONFIG_IDS_RECORDED.iter()) {
+    for config in CONFIG_IDS
+        .iter()
+        .chain(CONFIG_IDS_RECORDED.iter())
+        .chain(CONFIG_IDS_FORCED.iter())
+    {
         let mut acc = KahanAccumulatorF64::new();
         let mut min = f64::INFINITY;
         let mut max = f64::NEG_INFINITY;
@@ -850,6 +994,7 @@ fn main() {
             ("full_pinn", "full_pinn_rec"),
             ("full_pinn", "full_pinn_rec_c80"),
             ("full_pinn", "full_pinn_rec_c60"),
+            ("full_pinn", "full_pinn_v2_rec"),
         ] {
             if per_config[syn].pass_sequence != per_config[rec].pass_sequence {
                 diverged.push(format!("{prog}:{rec}"));
@@ -887,10 +1032,31 @@ fn main() {
         }
     }
 
+    // -- PINN v1 head vs v2 trained head: did promotion change PLANS? --------
+    let mut v2_plan_diffs = 0usize;
+    let mut v2_score_diffs = 0usize;
+    for per_config in rows.values() {
+        let v1 = &per_config["full_pinn_rec"];
+        let v2 = &per_config["full_pinn_v2_rec"];
+        if v1.pass_sequence != v2.pass_sequence {
+            v2_plan_diffs += 1;
+        }
+        if (v1.score - v2.score).abs() > 1e-12 {
+            v2_score_diffs += 1;
+        }
+    }
+    println!(
+        "\nPINN v2 head vs v1 closed form (full_pinn_v2_rec vs full_pinn_rec): \
+         {v2_plan_diffs}/{} plans differ, {v2_score_diffs}/{} scores differ",
+        rows.len(),
+        rows.len()
+    );
+
     // -- §5.2 promotion gate over the recorded cohort -------------------------
-    // full_pinn_rec vs the best NON-PINN config (cap variants are PINN
-    // too — comparing PINN against itself would inflate ties). Lower =
-    // better.
+    // full_pinn_rec vs the best NON-PINN RANKED config (cap variants are
+    // PINN too — comparing PINN against itself would inflate ties; the
+    // force_* diagnostics are not real ranking candidates and would
+    // poison the comparison). Lower = better.
     let margin = 0.1;
     let mut pinn_wins = 0usize;
     let mut ties = 0usize;
@@ -898,7 +1064,7 @@ fn main() {
         let pinn = per_config["full_pinn_rec"].score;
         let best_other = per_config
             .iter()
-            .filter(|(c, _)| !c.starts_with("full_pinn"))
+            .filter(|(c, _)| !c.starts_with("full_pinn") && !c.starts_with("force_"))
             .map(|(_, r)| r.score)
             .fold(f64::INFINITY, f64::min);
         if pinn <= best_other - margin {
@@ -934,8 +1100,10 @@ fn main() {
     // fp_hot program (index 8 in the static set — the one with maximal
     // thermal signal, so the canary covers the most instrumented path).
     let canary = &workloads[8];
-    let (mut again, raw) = run_experiment(canary, "full_pinn_rec", &recorded_preds[&canary.name]);
-    let (_, base_raw) = run_experiment(canary, "baseline", &recorded_preds[&canary.name]);
+    let (mut again, raw) =
+        run_experiment(canary, "full_pinn_rec", &recorded_preds[&canary.name], &v2_head);
+    let (_, base_raw) =
+        run_experiment(canary, "baseline", &recorded_preds[&canary.name], &v2_head);
     again.score = raw / base_raw.max(1.0);
     let stable = rows[&canary.name]["full_pinn_rec"].row_hash() == again.row_hash();
     println!(

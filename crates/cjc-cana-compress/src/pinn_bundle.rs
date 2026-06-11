@@ -128,7 +128,7 @@ impl PinnBundle {
                 "feature count does not match this build's basis",
             ));
         }
-        let mut read_arr =
+        let read_arr =
             |pos: &mut usize| -> Result<[f64; PINN_V2_FEATURE_COUNT], PinnBundleError> {
                 let mut arr = [0.0f64; PINN_V2_FEATURE_COUNT];
                 for slot in arr.iter_mut() {
