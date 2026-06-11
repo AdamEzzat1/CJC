@@ -359,3 +359,74 @@ existence: true never-seen generalization is MAE 0.19/corr +0.81, a
 than v1). Report the holdout line, not the FNV line, when making
 external claims about head accuracy. Plan-level: 38/158 plans differ
 between `full_pinn_v2_rec` and `full_pinn_rec` post-retrain.
+
+## 9. Phase B (2026-06-11, same session): the trained energy head — PROMOTE
+
+### Data sanity settled the hypothesis (`-- sanity-energy`)
+
+Working rows 2,960 (holdout's 200 frozen), 306 diverged, score range
+[0.496, 11.16] — note the new sub-1.0 tail: some plans now HALVE
+modeled energy on tensor programs. The grid (program-level split):
+
+| recipe | R²(test) |
+|---|---|
+| REPLICATION: config one-hots + raw score, diverged rows | **−16.98** (the −32-class failure reproduces on v3) |
+| raw-score target, any features, any rows | −1.3 … −18 |
+| ln(score), diverged, base features | −0.36 |
+| ln(score), diverged, +loop features | +0.45 |
+| ln(score), diverged, +structural | +0.34 |
+| **ln(score), diverged, +loops+structural** | **+0.8207** |
+
+The research doc's 0.65–0.75 expectation is **settled: exceeded** —
+the Numerics diagnosis (collinear one-hots + missing loop features +
+heavy-tailed raw target) was correct on all three counts.
+
+### The regret-vs-R² fork (the load-bearing finding)
+
+The deployed consumer is a plan SELECTOR; its metric is **regret**
+(measured score of the predicted-cheapest plan minus the true
+minimum). Two fits compete:
+
+| fit rows | R²(test, diverged, ln) | test regret | holdout regret |
+|---|---|---|---|
+| diverged only | **0.82** | +0.0509 (30/34) — *worse than always-baseline* | +0.0504 (9/10) |
+| **ALL rows (ties included)** | 0.21 | **+0.0014 (32/34 exact-best)** | **0.0000 (10/10)** |
+
+The R²-best model is the regret-WORST option: trained only on
+divergent plans, it never learned where ties live and confidently
+mispredicts no-change plans. **Shipped recipe: all-rows fit, ln
+target, +loops+structural, no one-hots** — chosen by the deployment
+metric. Baselines on test: always-baseline +0.0332,
+structural-argmin +0.0081 (28/34). On holdout the structural
+heuristic also reaches 0.0 — the separation shows on the test cohort.
+
+### Shipped surface
+
+- `crates/cjc-cana/src/pinn_energy_v1.rs` — `PinnEnergyV1`
+  (variable-length basis: 10 workload + P pass counts + 4 tail;
+  the pass vocabulary is part of the trained artifact),
+  `EnergyQuery` + `features_from_query` as THE single basis
+  definition (trainer and future selector both lift into it),
+  `predict_ln_score` (fixed-order, no FMA, dimension-guarded).
+- `crates/cjc-cana-compress/src/energy_bundle.rs` — CPB1 codec
+  (magic `CPB1`; vocabulary persisted; adversarial-length guards;
+  corruption matrix + double-write determinism unit tests; proptest
+  round-trip ∀ vocabulary; bolero decoder fuzz).
+- Trainer modes `train-energy` / `shadow-energy`; weights at
+  `bench_results/cana_train_pinn/pinn_energy_v1.cpb` (21 features:
+  vocabulary = the 7 corpus passes). Baseline-plan sanity
+  prediction +0.031 ≈ tie.
+- `tests/test_energy_head.rs` — 5 wiring tests on the committed
+  bundle (identity, bit-determinism, finite across the plan space,
+  plan-discrimination, unknown-pass alignment).
+
+### Shadow gate (through the persisted CPB1 artifact)
+
+Diverged FNV-test R²(ln) 0.2091 (positive floor passes; the 0.82
+belongs to the regret-losing fit — both recorded). Regret: test
++0.00140 (exact 32/34) beats always-baseline (+0.03316) and
+structural-argmin (+0.00806); holdout 0.00000 (10/10) ties
+structural. **Verdict: PROMOTE — the trained head is Phase C's
+selector criterion.** Caveat recorded: regret was evaluated over the
+20-config plan space as a proxy; Phase C re-validates on its actual
+10-candidate-per-function space before any activation.

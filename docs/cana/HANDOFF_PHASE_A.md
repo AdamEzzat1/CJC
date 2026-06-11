@@ -184,15 +184,34 @@ All §5 traps from `HANDOFF_NEXT_ARC.md` remain live, plus:
 | Selector finds energy wins on real programs | **Hypothesis** (Phase C) |
 | Quantum layer zero effect is structural | **Measured + code-verified** (unchanged) |
 
-## 7. Next session: Phase B (energy head)
+## 7. Phase B — EXECUTED same session (2026-06-11 PM): energy head PROMOTE
 
-Per `NEXT_ARC_RESEARCH.md` §1/§6: ridge on the v3 feature surface
-(workload + NEW loop features + pass counts), log-ratio target
-candidate, CPB1 bundle, shadow vs `FP_ENERGY_WEIGHT = 3.0`. Open debt
-queued: serializer/replay 5 pre-existing failures
-(`docs/cana/CANA_PHASE_1_REGRESSION_FAILURES.md`) before CPB1 lands;
-cjc-quantum wide-matrix SVD upstream fix; embed default weights as
-compiled-in const; Locke/LendingClub peak-RSS macro A/B.
+Full record: `PINN_V2_DESIGN.md` §9. Summary: sanity-energy settled
+the R² hypothesis (0.8207 > the 0.65–0.75 band; −32-class failure
+replicated at −16.98 under the old recipe); the regret-vs-R² fork was
+the load-bearing finding (the R²-best fit loses to the always-baseline
+heuristic on selector regret; the all-rows fit reaches +0.0014 test
+regret, 32/34 exact-best, 10/10 frozen holdout); shipped
+`pinn_energy_v1` (CPB1, vocabulary-carrying basis,
+`crates/cjc-cana/src/pinn_energy_v1.rs` +
+`crates/cjc-cana-compress/src/energy_bundle.rs` + trainer modes
+`train-energy`/`shadow-energy` + `tests/test_energy_head.rs`).
+Shadow verdict through the persisted artifact: **PROMOTE**.
+
+**Next session: Phase C** (PassPlanSelector — research doc §1): 10
+deterministic candidates/function, the trained energy head as
+criterion, selector gates (legality-of-selected, determinism, on/off
+parity, never-worse-than-baseline), ablation config, corpus re-run.
+MANDATORY first step: re-validate selector regret on the REAL
+10-candidate-per-function space (Phase B's regret used the 20-config
+plan space as proxy). Traps: plan-absence semantics
+(`cjc-mir/src/optimize.rs:342-356` — insert explicit per-function
+entries); selector identity must join report hashes.
+
+Open debt queued: serializer/replay 5 pre-existing failures
+(`docs/cana/CANA_PHASE_1_REGRESSION_FAILURES.md`, chip task_a41b1c8d
+raised); cjc-quantum wide-matrix SVD upstream fix; embed default
+weights as compiled-in const; Locke/LendingClub peak-RSS macro A/B.
 
 ## 8. File map (Phase A surface, additive to prior maps)
 

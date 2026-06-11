@@ -1,4 +1,4 @@
-//! # `cjc-cana-compress` — Quantum-inspired CANA compression + energy ranking
+﻿//! # `cjc-cana-compress` â€” Quantum-inspired CANA compression + energy ranking
 //!
 //! Phase 6 of the CANA roadmap. Adds an **advisory** compression layer that
 //! sits between CANA's feature/pass-history substrate and NSS's pressure
@@ -22,15 +22,15 @@
 //!    constructing a `SemanticCritical` candidate with a lossy kind returns
 //!    [`CompressionError::LossyOnCritical`].
 //!
-//! 3. **Quantum-inspired ≠ quantum-dependent.** We reuse the deterministic
-//!    discipline of [`cjc_quantum`] — sign-stabilized SVD, Kahan
-//!    accumulation, fixed iteration order, no FMA — but no quantum hardware
+//! 3. **Quantum-inspired â‰  quantum-dependent.** We reuse the deterministic
+//!    discipline of [`cjc_quantum`] â€” sign-stabilized SVD, Kahan
+//!    accumulation, fixed iteration order, no FMA â€” but no quantum hardware
 //!    is required. The Ising/QAOA terminology is honest only because (a)
 //!    the energy decomposition is exposed for audit (no hidden weights),
 //!    and (b) the optimization is over a finite, deterministic candidate
 //!    set with stable tie-breaking, not a stochastic minimum search.
 //!
-//! 4. **Determinism contract.** Identical input → byte-identical
+//! 4. **Determinism contract.** Identical input â†’ byte-identical
 //!    [`CompressionReport`] hash, identical
 //!    [`EnergyRanking`](energy::EnergyRanking) order, identical
 //!    [`PressureDensityState`](cjc_nss::PressureDensityState) bytes. The
@@ -47,38 +47,38 @@
 //!
 //! ```text
 //!   CANA features / pass history
-//!      │
-//!      ▼
+//!      â”‚
+//!      â–¼
 //!   CompressionCandidate (advisory or semantic-critical)
-//!      │
-//!      ▼
-//!   CompressionPlan ─► chosen [`CompressionKind`]:
-//!      │                 LosslessTrace, MotifDictionary,
-//!      │                 LowRankAdvisory, TensorTrainAdvisory
-//!      ▼
+//!      â”‚
+//!      â–¼
+//!   CompressionPlan â”€â–º chosen [`CompressionKind`]:
+//!      â”‚                 LosslessTrace, MotifDictionary,
+//!      â”‚                 LowRankAdvisory, TensorTrainAdvisory
+//!      â–¼
 //!   CompressionReport (input/compressed/reconstructed hashes,
 //!                      observed reconstruction error, stable bytes)
-//!      │
-//!      ├─► [`bridge::pressure_delta`] ─► NSS PressureDensityState Δ
-//!      │       └─► [`cjc_nss::PressureCorrelationSummary`] update
-//!      │
-//!      └─► [`energy::EnergyRanker`] ─► deterministic ordering
+//!      â”‚
+//!      â”œâ”€â–º [`bridge::pressure_delta`] â”€â–º NSS PressureDensityState Î”
+//!      â”‚       â””â”€â–º [`cjc_nss::PressureCorrelationSummary`] update
+//!      â”‚
+//!      â””â”€â–º [`energy::EnergyRanker`] â”€â–º deterministic ordering
 //!              of candidate plans by Ising/QAOA-style scalar
 //!
-//!   ⮡ legality / verifier remain final authority over MIR shape
+//!   â®¡ legality / verifier remain final authority over MIR shape
 //! ```
 //!
 //! ## Cross-references
 //!
-//! - [`cjc_cana`] — the passive observer this crate extends.
-//! - [`cjc_nss`] — pressure-modelling substrate this crate emits deltas
+//! - [`cjc_cana`] â€” the passive observer this crate extends.
+//! - [`cjc_nss`] â€” pressure-modelling substrate this crate emits deltas
 //!   into; the new `density` module ships
 //!   [`cjc_nss::PressureDensityState`].
-//! - [`cjc_quantum`] — source of MPS truncation + sign-stabilized SVD
+//! - [`cjc_quantum`] â€” source of MPS truncation + sign-stabilized SVD
 //!   used by [`tensor_train`].
-//! - `docs/cana_compress/DESIGN.md` — design rationale.
-//! - `docs/cana_compress/ARCHITECTURE.md` — diagram + flow.
-//! - `docs/cana_compress/BLOG_NOTES.md` — blog seed for the eventual
+//! - `docs/cana_compress/DESIGN.md` â€” design rationale.
+//! - `docs/cana_compress/ARCHITECTURE.md` â€” diagram + flow.
+//! - `docs/cana_compress/BLOG_NOTES.md` â€” blog seed for the eventual
 //!   write-up.
 
 #![forbid(unsafe_code)]
@@ -91,6 +91,7 @@ pub mod energy_pass_ranker;
 pub mod lossless_trace;
 pub mod lowrank;
 pub mod motif_dictionary;
+pub mod energy_bundle;
 pub mod pinn_bundle;
 pub mod plan;
 pub mod profile_db;

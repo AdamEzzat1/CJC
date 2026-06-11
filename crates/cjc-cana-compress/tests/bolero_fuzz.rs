@@ -60,6 +60,23 @@ fn fuzz_profile_row_decoder_never_panics() {
 }
 
 // ---------------------------------------------------------------------------
+// 1c. CPB1 energy-bundle decoder on arbitrary bytes — no panic
+//     (Phase B: variable-length vocabulary adds adversarial length
+//     prefixes; the decoder must reject, never allocate unbounded or
+//     panic.)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fuzz_energy_bundle_decoder_never_panics() {
+    check!()
+        .with_max_len(4096)
+        .with_iterations(1000)
+        .for_each(|bytes: &[u8]| {
+            let _ = cjc_cana_compress::energy_bundle::EnergyBundle::from_canonical_bytes(bytes);
+        });
+}
+
+// ---------------------------------------------------------------------------
 // 2. Motif decoder on arbitrary bytes — no panic
 // ---------------------------------------------------------------------------
 

@@ -74,6 +74,7 @@ pub mod pass_history;
 pub mod pass_ranker;
 pub mod physical_cost;
 pub mod pinn_cost_model;
+pub mod pinn_energy_v1;
 pub mod pinn_thermal_v2;
 pub mod pressure;
 pub mod reduction_axes;

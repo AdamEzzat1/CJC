@@ -272,6 +272,37 @@ proptest! {
             .expect("canonical round-trip");
         prop_assert_eq!(row, back);
     }
+
+    /// **CPB1 energy bundles round-trip for any pass vocabulary and
+    /// finite weights.** (Phase B: the variable-length basis — the
+    /// part CPB0 didn't have — survives the codec exactly.)
+    #[test]
+    fn energy_bundle_roundtrips_any_vocabulary(
+        names in vec("[a-z_]{1,16}", 0..12),
+        seed in -100.0f64..100.0,
+    ) {
+        use cjc_cana::pinn_energy_v1::{PinnEnergyV1, ENERGY_TAIL_FEATURES, ENERGY_WORKLOAD_FEATURES};
+        use cjc_cana_compress::energy_bundle::EnergyBundle;
+        // Dedup: the basis assumes distinct pass names.
+        let mut names = names;
+        names.sort();
+        names.dedup();
+        let n = ENERGY_WORKLOAD_FEATURES + names.len() + ENERGY_TAIL_FEATURES;
+        let bundle = EnergyBundle {
+            model_id: "pinn_energy_v1".to_string(),
+            model_version: 1,
+            head: PinnEnergyV1 {
+                pass_names: names,
+                feature_means: (0..n).map(|i| seed + i as f64).collect(),
+                feature_stds: (0..n).map(|i| 1.0 + (i as f64) * 0.25).collect(),
+                coefficients: (0..n).map(|i| seed * 0.01 - i as f64 * 0.001).collect(),
+                intercept: seed * 0.5,
+            },
+        };
+        let back = EnergyBundle::from_canonical_bytes(&bundle.canonical_bytes())
+            .expect("canonical round-trip");
+        prop_assert_eq!(bundle, back);
+    }
 }
 
 // ---------------------------------------------------------------------------

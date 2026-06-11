@@ -384,8 +384,13 @@ fn main() {
         "sanity" => run_sanity(),
         "train" => run_train(),
         "shadow" => run_shadow(),
+        "sanity-energy" => run_sanity_energy(),
+        "train-energy" => run_train_energy(),
+        "shadow-energy" => run_shadow_energy(),
         other => {
-            eprintln!("unknown mode '{other}' — available: sanity, train, shadow");
+            eprintln!(
+                "unknown mode '{other}' — available: sanity, train, shadow, sanity-energy, train-energy, shadow-energy"
+            );
             std::process::exit(2);
         }
     }
@@ -667,6 +672,552 @@ fn run_shadow() {
             "DO NOT PROMOTE — v1 closed form stays active"
         }
     );
+}
+
+// =============================================================================
+// Mode: sanity-energy — Phase B §B1 data-sanity pass over the energy signal
+// =============================================================================
+//
+// Settles the research doc's hypothesis (ridge + loop features reaches
+// R²(test) 0.65–0.75 on energy) BEFORE any training code ships. The
+// only empirical datum so far is the −32 held-out R² from the v2
+// corpus. Two design facts shape the grid:
+//
+// 1. The deployed consumer is Phase C's PLAN SELECTOR, which scores
+//    candidate plans — those carry pass counts, workload, loop shape,
+//    and a statically-computable post-plan node count, but NO config
+//    identity. Config one-hots (the diagnosed collinearity culprit)
+//    are therefore excluded from every deployable feature set; one
+//    grid row keeps them solely to replicate the −32 failure.
+// 2. The selector-relevant quality metric is REGRET (measured score of
+//    the predicted-argmin plan minus the measured minimum), not R².
+//    Both are reported; regret against honest baselines (always-pick-
+//    baseline-plan, structural-ratio-argmin) decides Phase C's go/no-go.
+
+/// Loop-feature aggregates from the schema-v3 per-function records:
+/// total countable loops + max nesting depth across functions
+/// (mirrors `build_physical_query`'s amplification view).
+fn loop_features(row: &CompilationProfile) -> (f64, f64) {
+    let mut countable = 0u64;
+    let mut depth = 0u32;
+    for (_f, fp) in &row.per_function {
+        countable = countable.saturating_add(fp.countable_loop_count as u64);
+        depth = depth.max(fp.max_loop_depth);
+    }
+    (countable as f64, depth as f64)
+}
+
+/// Deployable feature surface for energy prediction (NO config
+/// one-hots — see mode docs). `with_loops` / `with_structural` toggle
+/// the grid axes.
+fn energy_features(
+    row: &CompilationProfile,
+    vocab: &[String],
+    with_loops: bool,
+    with_structural: bool,
+) -> Vec<f64> {
+    let mut x = vec![
+        log1p_u64(row.estimated_flops),
+        log1p_u64(row.estimated_bytes_read),
+        log1p_u64(row.estimated_bytes_written),
+        log1p_u64(row.estimated_alloc_bytes),
+        log1p_u64(row.estimated_working_set),
+        log1p_u64(row.estimated_float_ops),
+        fp_density(row),
+        log1p_u64(row.mir_nodes_before),
+        row.recommended_count as f64,
+        row.dropped_count as f64,
+    ];
+    x.extend(pass_counts(row, vocab));
+    if with_loops {
+        let (countable, depth) = loop_features(row);
+        x.push((1.0 + countable).ln());
+        x.push(depth);
+    }
+    if with_structural {
+        x.push(log1p_u64(row.mir_nodes_after));
+        let ratio = if row.mir_nodes_before > 0 {
+            row.mir_nodes_after as f64 / row.mir_nodes_before as f64
+        } else {
+            1.0
+        };
+        x.push(ratio);
+    }
+    x
+}
+
+/// Selector regret on one cohort of programs: fit predictions are
+/// supplied per row; for each program pick the argmin-predicted row
+/// among its configs and charge the measured-score gap to the true
+/// minimum. Deterministic: ties break by config id (BTreeMap order).
+fn mean_regret(
+    rows_by_prog: &BTreeMap<&str, Vec<(&CompilationProfile, f64)>>,
+) -> (f64, usize, usize) {
+    let mut acc = KahanAccumulatorF64::new();
+    let mut n = 0usize;
+    let mut hits = 0usize;
+    for per_prog in rows_by_prog.values() {
+        let measured_min = per_prog
+            .iter()
+            .map(|(r, _)| r.score)
+            .fold(f64::INFINITY, f64::min);
+        // argmin by predicted value; first-in-BTreeMap-order wins ties.
+        let mut best_pred = f64::INFINITY;
+        let mut chosen_score = f64::NAN;
+        for (r, pred) in per_prog {
+            if *pred < best_pred {
+                best_pred = *pred;
+                chosen_score = r.score;
+            }
+        }
+        let regret = chosen_score - measured_min;
+        acc.add(regret);
+        n += 1;
+        if regret.abs() < 1e-9 {
+            hits += 1;
+        }
+    }
+    (acc.finalize() / n.max(1) as f64, hits, n)
+}
+
+// =============================================================================
+// Mode: train-energy — fit the energy head, persist as CPB1 (Phase B §B2)
+// =============================================================================
+
+/// Default output path for the trained energy bundle.
+const ENERGY_BUNDLE_PATH: &str = "bench_results/cana_train_pinn/pinn_energy_v1.cpb";
+
+/// Lift one corpus row into the head's [`EnergyQuery`] — the single
+/// basis definition lives in `cjc-cana::pinn_energy_v1`; this only
+/// adapts row fields onto it.
+fn energy_query_from_row(
+    head: &cjc_cana::pinn_energy_v1::PinnEnergyV1,
+    r: &CompilationProfile,
+) -> cjc_cana::pinn_energy_v1::EnergyQuery {
+    let (countable, depth) = loop_features(r);
+    cjc_cana::pinn_energy_v1::EnergyQuery {
+        flops_estimate: r.estimated_flops,
+        bytes_read_estimate: r.estimated_bytes_read,
+        bytes_written_estimate: r.estimated_bytes_written,
+        allocation_bytes_estimate: r.estimated_alloc_bytes,
+        working_set_bytes_estimate: r.estimated_working_set,
+        float_ops_estimate: r.estimated_float_ops,
+        mir_nodes_before: r.mir_nodes_before,
+        recommended_count: r.recommended_count,
+        dropped_count: r.dropped_count,
+        pass_counts: head.pass_counts(
+            r.pass_sequence
+                .iter()
+                .flat_map(|(_, ps)| ps.iter().map(|s| s.as_str())),
+        ),
+        countable_loop_count: countable as u64,
+        max_loop_depth: depth as u32,
+        mir_nodes_after: r.mir_nodes_after,
+    }
+}
+
+fn run_train_energy() {
+    use cjc_cana::pinn_energy_v1::{
+        PinnEnergyV1, ENERGY_TAIL_FEATURES, ENERGY_WORKLOAD_FEATURES, PINN_ENERGY_V1_MODEL_ID,
+        PINN_ENERGY_V1_MODEL_VERSION,
+    };
+    use cjc_cana_compress::energy_bundle::{write_energy_bundle, EnergyBundle};
+
+    let rows = read_all(&PathBuf::from(DB_PATH)).expect("corpus");
+    let vocab: Vec<String> = {
+        let set: BTreeSet<String> = rows
+            .iter()
+            .flat_map(|r| r.pass_sequence.iter())
+            .flat_map(|(_, ps)| ps.iter().cloned())
+            .collect();
+        set.into_iter().collect()
+    };
+    let n_features = ENERGY_WORKLOAD_FEATURES + vocab.len() + ENERGY_TAIL_FEATURES;
+    // Template head: vocabulary fixed, parameters identity — used only
+    // to build the design matrix through THE shared basis definition.
+    let template = PinnEnergyV1 {
+        pass_names: vocab.clone(),
+        feature_means: vec![0.0; n_features],
+        feature_stds: vec![1.0; n_features],
+        coefficients: vec![0.0; n_features],
+        intercept: 0.0,
+    };
+
+    // Evidence-chosen recipe (sanity-energy §3): fit on ALL working
+    // train rows (ties included), ln(score) target.
+    let fit_rows: Vec<&CompilationProfile> = rows
+        .iter()
+        .filter(|r| !is_holdout_program(&r.program_name) && !is_test_program(&r.program_name))
+        .collect();
+    let test_rows: Vec<&CompilationProfile> = rows
+        .iter()
+        .filter(|r| !is_holdout_program(&r.program_name) && is_test_program(&r.program_name))
+        .collect();
+
+    println!("=== PINN energy-head training (deterministic ridge OLS, ln target) ===");
+    println!(
+        "  rows: {} fit / {} FNV-test / holdout frozen; pass vocabulary ({}): {:?}",
+        fit_rows.len(),
+        test_rows.len(),
+        vocab.len(),
+        vocab
+    );
+
+    let feats: Vec<Vec<f64>> = fit_rows
+        .iter()
+        .map(|r| template.features_from_query(&energy_query_from_row(&template, r)))
+        .collect();
+    let targets: Vec<f64> = fit_rows.iter().map(|r| r.score.max(1e-12).ln()).collect();
+    let train_idx: Vec<usize> = (0..fit_rows.len()).collect();
+    let model = fit_ridge(&feats, &targets, &train_idx).expect("fit failed");
+
+    let r2_fit = r2_over(&model, &feats, &targets, &train_idx);
+    let test_feats: Vec<Vec<f64>> = test_rows
+        .iter()
+        .map(|r| template.features_from_query(&energy_query_from_row(&template, r)))
+        .collect();
+    let test_targets: Vec<f64> = test_rows.iter().map(|r| r.score.max(1e-12).ln()).collect();
+    let test_idx: Vec<usize> = (0..test_rows.len()).collect();
+    let fit_for_eval = FittedLinear {
+        col_mean: model.col_mean.clone(),
+        col_std: model.col_std.clone(),
+        beta: model.beta.clone(),
+    };
+    let r2_test = r2_over(&fit_for_eval, &test_feats, &test_targets, &test_idx);
+    println!("  R²(fit rows, ln) = {r2_fit:.4}   R²(FNV-test rows, ln) = {r2_test:.4}");
+    println!("  (all-rows R² is tie-dominated by design — the shadow gate judges on regret;");
+    println!("   diverged-subset R² is reported there.)");
+
+    let head = PinnEnergyV1 {
+        pass_names: vocab,
+        feature_means: model.col_mean.clone(),
+        feature_stds: model.col_std.clone(),
+        coefficients: model.beta[..n_features].to_vec(),
+        intercept: model.beta[n_features],
+    };
+    assert!(head.is_valid(), "trained head must validate");
+
+    // Sanity: a baseline-identical plan should predict near ln(1)=0.
+    if let Some(baseline_row) = rows.iter().find(|r| r.config_id == "baseline") {
+        let pred = head.predict_ln_score(&energy_query_from_row(&head, baseline_row));
+        println!("  sanity: baseline-plan prediction = {pred:+.4} (expect ≈ 0 = tie)");
+    }
+
+    let bundle = EnergyBundle {
+        model_id: PINN_ENERGY_V1_MODEL_ID.to_string(),
+        model_version: PINN_ENERGY_V1_MODEL_VERSION,
+        head,
+    };
+    let path = PathBuf::from(ENERGY_BUNDLE_PATH);
+    fs::create_dir_all(path.parent().unwrap()).expect("create bundle dir");
+    write_energy_bundle(&path, &bundle).expect("write bundle");
+    println!(
+        "  bundle written: {} ({} / v{})",
+        path.display(),
+        bundle.model_id,
+        bundle.model_version
+    );
+    let first = fs::read(&path).unwrap();
+    write_energy_bundle(&path, &bundle).expect("re-write bundle");
+    assert_eq!(first, fs::read(&path).unwrap(), "bundle must be byte-stable");
+    println!("  bundle double-write: byte-identical");
+    println!("\nNext: `cargo run --release -p cana-train-pinn -- shadow-energy`.");
+}
+
+// =============================================================================
+// Mode: shadow-energy — trained head vs baselines against measured labels
+// =============================================================================
+
+fn run_shadow_energy() {
+    use cjc_cana_compress::energy_bundle::read_energy_bundle;
+
+    let rows = read_all(&PathBuf::from(DB_PATH)).expect("corpus");
+    let bundle = read_energy_bundle(&PathBuf::from(ENERGY_BUNDLE_PATH)).unwrap_or_else(|e| {
+        panic!("cannot read bundle at {ENERGY_BUNDLE_PATH} — run `-- train-energy` first: {e}")
+    });
+    println!(
+        "=== Energy shadow mode — trained head ({} v{}) vs plan-choice baselines ===",
+        bundle.model_id, bundle.model_version
+    );
+    println!("  ground truth: measured baseline-relative modeled energy (row score)");
+
+    // Predictions through the REAL persisted head (CPB1 round-trip is
+    // part of what this gate proves).
+    let predict = |r: &CompilationProfile| bundle.head.predict_ln_score(&energy_query_from_row(&bundle.head, r));
+
+    let test_rows: Vec<&CompilationProfile> = rows
+        .iter()
+        .filter(|r| !is_holdout_program(&r.program_name) && is_test_program(&r.program_name))
+        .collect();
+    let holdout_rows: Vec<&CompilationProfile> = rows
+        .iter()
+        .filter(|r| is_holdout_program(&r.program_name))
+        .collect();
+
+    // R² in ln space on the diverged FNV-test subset (prediction-
+    // quality diagnostic; the gate itself judges regret).
+    let div_test: Vec<&CompilationProfile> = test_rows
+        .iter()
+        .copied()
+        .filter(|r| (r.score - 1.0).abs() > SCORE_DIVERGENCE_EPS)
+        .collect();
+    let r2_diag = {
+        let ys: Vec<f64> = div_test.iter().map(|r| r.score.max(1e-12).ln()).collect();
+        let preds: Vec<f64> = div_test.iter().map(|r| predict(r)).collect();
+        let s = stats(&ys);
+        if s.std == 0.0 || ys.is_empty() {
+            f64::NAN
+        } else {
+            let mut ss_res = KahanAccumulatorF64::new();
+            let mut ss_tot = KahanAccumulatorF64::new();
+            for (y, p) in ys.iter().zip(preds.iter()) {
+                let e = y - p;
+                ss_res.add(e * e);
+                let d = y - s.mean;
+                ss_tot.add(d * d);
+            }
+            1.0 - ss_res.finalize() / ss_tot.finalize()
+        }
+    };
+    println!(
+        "  diagnostic: R²(ln, diverged FNV-test rows, n={}) = {r2_diag:.4}",
+        div_test.len()
+    );
+
+    // Regret per cohort: model vs always-baseline vs structural-argmin.
+    let cohort = |label: &str, rows_in: &[&CompilationProfile]| -> (f64, f64, f64) {
+        let mut by_model: BTreeMap<&str, Vec<(&CompilationProfile, f64)>> = BTreeMap::new();
+        let mut by_struct: BTreeMap<&str, Vec<(&CompilationProfile, f64)>> = BTreeMap::new();
+        for r in rows_in {
+            by_model
+                .entry(r.program_name.as_str())
+                .or_default()
+                .push((r, predict(r)));
+            by_struct
+                .entry(r.program_name.as_str())
+                .or_default()
+                .push((r, r.mir_nodes_after as f64));
+        }
+        let (model_regret, hits, n) = mean_regret(&by_model);
+        let (struct_regret, struct_hits, _) = mean_regret(&by_struct);
+        let mut base_acc = KahanAccumulatorF64::new();
+        for per_prog in by_model.values() {
+            let min = per_prog
+                .iter()
+                .map(|(r, _)| r.score)
+                .fold(f64::INFINITY, f64::min);
+            base_acc.add(1.0 - min);
+        }
+        let base_regret = base_acc.finalize() / by_model.len().max(1) as f64;
+        println!(
+            "  {label:<10} model regret {model_regret:+.5} (exact {hits}/{n}) | always-baseline {base_regret:+.5} | structural {struct_regret:+.5} (exact {struct_hits}/{n})"
+        );
+        (model_regret, base_regret, struct_regret)
+    };
+    let (t_model, t_base, t_struct) = cohort("test", &test_rows);
+    let (h_model, _h_base, h_struct) = cohort("holdout", &holdout_rows);
+
+    // Promotion gate: the deployment metric decides. R² is a floor
+    // sanity (must be positive on the diverged test subset), not the
+    // criterion — sanity-energy measured that the regret-best fit is
+    // NOT the R²-best fit.
+    let promote =
+        t_model < t_base && t_model < t_struct && h_model <= h_struct && r2_diag > 0.0;
+    println!(
+        "\nPhase-B promotion gate (test regret beats BOTH baselines, holdout regret ≤ structural, diverged R² > 0): {}",
+        if promote {
+            "PROMOTE — the trained energy head is the selector criterion for Phase C"
+        } else {
+            "DO NOT PROMOTE — hand-tuned criteria stay; record the numbers and stop"
+        }
+    );
+}
+
+fn run_sanity_energy() {
+    let path = PathBuf::from(DB_PATH);
+    let rows = read_all(&path).unwrap_or_else(|e| {
+        panic!(
+            "cannot read corpus at {} — run `cargo run --release -p cana-ablation` first: {e}",
+            path.display()
+        )
+    });
+    let vocab: Vec<String> = {
+        let set: BTreeSet<String> = rows
+            .iter()
+            .flat_map(|r| r.pass_sequence.iter())
+            .flat_map(|(_, ps)| ps.iter().cloned())
+            .collect();
+        set.into_iter().collect()
+    };
+    let configs: Vec<String> = {
+        let set: BTreeSet<String> = rows.iter().map(|r| r.config_id.clone()).collect();
+        set.into_iter().collect()
+    };
+
+    // Cohorts: holdout rows are excluded from BOTH fit and the FNV test
+    // split, reported separately (frozen promotion cohort).
+    let working: Vec<&CompilationProfile> = rows
+        .iter()
+        .filter(|r| !is_holdout_program(&r.program_name))
+        .collect();
+    let holdout: Vec<&CompilationProfile> = rows
+        .iter()
+        .filter(|r| is_holdout_program(&r.program_name))
+        .collect();
+    let diverged: Vec<&CompilationProfile> = working
+        .iter()
+        .copied()
+        .filter(|r| (r.score - 1.0).abs() > SCORE_DIVERGENCE_EPS)
+        .collect();
+
+    section("1. Energy label distribution (schema-v3 corpus)");
+    let all_scores: Vec<f64> = working.iter().map(|r| r.score).collect();
+    let div_scores: Vec<f64> = diverged.iter().map(|r| r.score).collect();
+    print_stats_line("score (working rows)", &stats(&all_scores));
+    print_stats_line("score (diverged only)", &stats(&div_scores));
+    println!(
+        "  diverged rows: {}/{} working ({} holdout rows kept frozen)",
+        diverged.len(),
+        working.len(),
+        holdout.len()
+    );
+
+    // ---- 2. The OLS grid -----------------------------------------------------
+    section("2. Ridge grid (program-level split; holdout excluded everywhere)");
+    println!("  target ln(score) is evaluated in ln space; argmin/ranking is transform-invariant.");
+    let grid_ols = |label: &str,
+                    subset: &[&CompilationProfile],
+                    feats_of: &dyn Fn(&CompilationProfile) -> Vec<f64>,
+                    log_target: bool| {
+        let feats: Vec<Vec<f64>> = subset.iter().map(|r| feats_of(r)).collect();
+        let targets: Vec<f64> = subset
+            .iter()
+            .map(|r| if log_target { r.score.max(1e-12).ln() } else { r.score })
+            .collect();
+        let mask: Vec<bool> = subset
+            .iter()
+            .map(|r| is_test_program(&r.program_name))
+            .collect();
+        match ols(&feats, &targets, &mask) {
+            Some(rep) => println!(
+                "  {label:<58} R²(train)={:>8.4}  R²(test)={:>8.4}  (n={}+{})",
+                rep.r2_train, rep.r2_test, rep.n_train, rep.n_test
+            ),
+            None => println!("  {label:<58} — insufficient rows"),
+        }
+    };
+
+    // Replication row: the −32 failure recipe (config one-hots, raw
+    // score, diverged rows) on the v3 corpus.
+    let v2_recipe = |r: &CompilationProfile| score_features(r, &vocab, &configs, false);
+    grid_ols(
+        "REPLICATION: one-hots, raw score, diverged rows",
+        &diverged,
+        &v2_recipe,
+        false,
+    );
+    // Deployable surfaces.
+    for (rows_label, subset) in [("all rows", &working), ("diverged", &diverged)] {
+        for log_target in [false, true] {
+            for (with_loops, with_structural, fl) in [
+                (false, false, "base"),
+                (true, false, "+loops"),
+                (false, true, "+structural"),
+                (true, true, "+loops+structural"),
+            ] {
+                let f = |r: &CompilationProfile| {
+                    energy_features(r, &vocab, with_loops, with_structural)
+                };
+                let t = if log_target { "ln(score)" } else { "score" };
+                grid_ols(
+                    &format!("{rows_label:<9} {t:<9} {fl}"),
+                    subset,
+                    &f,
+                    log_target,
+                );
+            }
+        }
+    }
+
+    // ---- 3. Selector regret (the Phase-C go/no-go number) --------------------
+    // Two fit recipes compete: ALL train rows (ties included — teaches
+    // the model where score == 1.0) vs DIVERGED-only (the R²-0.82 fit).
+    // The shipped recipe is whichever wins held-out + holdout regret.
+    section("3. Selector regret (ln target, +loops+structural; model vs baselines)");
+    let feats_of = |r: &CompilationProfile| energy_features(r, &vocab, true, true);
+    let fit_on = |label: &str, fit_rows: &[&CompilationProfile]| -> Option<FittedLinear> {
+        let fit_feats: Vec<Vec<f64>> = fit_rows.iter().map(|r| feats_of(r)).collect();
+        let fit_targets: Vec<f64> = fit_rows.iter().map(|r| r.score.max(1e-12).ln()).collect();
+        let train_idx: Vec<usize> = (0..fit_rows.len()).collect();
+        let m = fit_ridge(&fit_feats, &fit_targets, &train_idx);
+        if m.is_none() {
+            println!("  {label}: fit failed");
+        }
+        m
+    };
+    let all_train: Vec<&CompilationProfile> = working
+        .iter()
+        .copied()
+        .filter(|r| !is_test_program(&r.program_name))
+        .collect();
+    let div_train: Vec<&CompilationProfile> = diverged
+        .iter()
+        .copied()
+        .filter(|r| !is_test_program(&r.program_name))
+        .collect();
+    let test_rows: Vec<&CompilationProfile> = working
+        .iter()
+        .copied()
+        .filter(|r| is_test_program(&r.program_name))
+        .collect();
+
+    let cohort_regret = |label: &str, cohort: &[&CompilationProfile], model: &FittedLinear| {
+        let mut by_prog: BTreeMap<&str, Vec<(&CompilationProfile, f64)>> = BTreeMap::new();
+        for r in cohort {
+            by_prog
+                .entry(r.program_name.as_str())
+                .or_default()
+                .push((r, model.predict(&feats_of(r))));
+        }
+        let (regret, hits, n) = mean_regret(&by_prog);
+        println!("    {label:<10} mean regret {regret:+.5} (exact-best {hits}/{n})");
+    };
+    for (fit_label, fit_rows) in [("fit on ALL train rows", &all_train), ("fit on DIVERGED train rows", &div_train)]
+    {
+        if let Some(model) = fit_on(fit_label, fit_rows) {
+            println!("  {fit_label}:");
+            cohort_regret("test", &test_rows, &model);
+            cohort_regret("holdout", &holdout, &model);
+        }
+    }
+
+    // Baselines (model-free), per cohort.
+    let baselines = |label: &str, cohort: &[&CompilationProfile]| {
+        let mut by_prog: BTreeMap<&str, Vec<(&CompilationProfile, f64)>> = BTreeMap::new();
+        for r in cohort {
+            by_prog
+                .entry(r.program_name.as_str())
+                .or_default()
+                .push((r, r.mir_nodes_after as f64));
+        }
+        let (struct_regret, struct_hits, n) = mean_regret(&by_prog);
+        let mut base_acc = KahanAccumulatorF64::new();
+        for per_prog in by_prog.values() {
+            let min = per_prog
+                .iter()
+                .map(|(r, _)| r.score)
+                .fold(f64::INFINITY, f64::min);
+            base_acc.add(1.0 - min);
+        }
+        let base_regret = base_acc.finalize() / by_prog.len().max(1) as f64;
+        println!(
+            "  baselines {label:<10} always-baseline: {base_regret:+.5} | structural-argmin: {struct_regret:+.5} (exact {struct_hits}/{n})"
+        );
+    };
+    baselines("test", &test_rows);
+    baselines("holdout", &holdout);
+
+    println!("\nSanity-energy pass complete — corpus read-only, nothing written.");
 }
 
 fn run_sanity() {

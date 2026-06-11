@@ -194,3 +194,15 @@ are methodologically invalid; only within-run trends count.
   a 6× optimism gap. Promotion gates keep PASSing (v1 is at 0.4761
   on the same cohort), but external accuracy claims must quote the
   frozen-holdout line.
+- **2026-06-11 — "ridge + loop features reaches energy R² 0.65–0.75":
+  SETTLED, EXCEEDED** (Phase B; `PINN_V2_DESIGN.md` §9). On diverged
+  rows with ln(score) target + loop + structural features:
+  R²(test) **0.8207** (the −32-class failure replicated at −16.98
+  with the old recipe — the §1 collinearity diagnosis was right on
+  all three counts). NEW finding the hypothesis didn't anticipate:
+  the R²-best fit (diverged-only) is the regret-WORST selector
+  criterion (+0.051 test regret, worse than always-baseline +0.033);
+  the all-rows fit wins deployment (+0.0014, 32/34 exact-best picks,
+  10/10 frozen holdout) at R² 0.21. The shipped `pinn_energy_v1`
+  CPB1 head uses the regret-chosen recipe; shadow verdict PROMOTE.
+  Phase C must re-validate regret on its actual 10-candidate space.
