@@ -71,6 +71,15 @@ const BYTES_PER_COW_WRITE: u64 = 256;
 const BYTES_PER_ALLOC_SITE: u64 = 64;
 const WORKING_SET_PER_TENSOR_OP: u64 = 1024;
 
+/// Estimated element-wise FP operations per tensor op site (Phase A1
+/// fix). Static analysis cannot know runtime shapes; 128 elements =
+/// `WORKING_SET_PER_TENSOR_OP / 8` bytes-per-f64, keeping the two
+/// tensor proxies on one assumed working-set scale. The runtime
+/// counter records EXACT element counts; this constant only has to put
+/// tensor sites on the right order of magnitude relative to scalar
+/// float binops (1 each) so the trained head can separate them.
+const TENSOR_FP_PER_OP: u64 = 128;
+
 // ---------------------------------------------------------------------------
 // PhysicalCostQuery
 // ---------------------------------------------------------------------------
@@ -351,8 +360,17 @@ pub fn build_physical_query<'a>(
     let flops_base = expr.saturating_mul(loop_amp);
     let flops_estimate = flops_base.saturating_mul(amp.flops);
 
+    // Scalar float binops count 1 each; tensor op sites (element-wise
+    // binops from TypeMix + builtin/method calls from MemoryProxy) are
+    // priced at the assumed element count — mirroring the runtime
+    // counter, which records exact element counts per tensor op
+    // (Phase A1 fix).
     let float_binops = features.type_mix.float_binop_count as u64;
+    let tensor_fp_sites = (features.type_mix.tensor_binop_count as u64)
+        .saturating_add(features.memory.tensor_heavy_ops as u64);
+    let tensor_fp = tensor_fp_sites.saturating_mul(TENSOR_FP_PER_OP);
     let float_ops_estimate = float_binops
+        .saturating_add(tensor_fp)
         .saturating_mul(loop_amp)
         .saturating_mul(amp.flops);
 
@@ -782,6 +800,31 @@ mod tests {
         assert_eq!(q_flat.allocation_bytes_estimate, 3 * 64);
         assert_eq!(q_nested.allocation_bytes_estimate, 3 * 64);
         assert_eq!(q_flat.working_set_bytes_estimate, 3 * 64 + 4 * 1024);
+    }
+
+    #[test]
+    fn build_query_prices_tensor_sites_as_fp_work() {
+        // Phase A1 fix: tensor binops + tensor-heavy call sites enter
+        // float_ops_estimate at TENSOR_FP_PER_OP each; scalar float
+        // binops still count 1 each.
+        let mut f = fn_features(100, 2, 0, 0, 0);
+        f.type_mix = TypeMix {
+            float_binop_count: 5,
+            binop_count: 20,
+            float_param_count: 0,
+            tensor_binop_count: 3,
+        };
+        let q = build_physical_query("f", "dce", &f);
+        // (5 scalar + (3 binop-sites + 2 call-sites) × 128) × amp 1
+        assert_eq!(q.float_ops_estimate, 5 + 5 * 128);
+
+        // Loop amplification applies to the combined estimate.
+        let mut nested = f;
+        nested.cfg.max_loop_depth = 2;
+        nested.cfg.loop_count = 1;
+        nested.cfg.back_edge_count = 1;
+        let qn = build_physical_query("f", "dce", &nested);
+        assert_eq!(qn.float_ops_estimate, (5 + 5 * 128) * 15);
     }
 
     #[test]

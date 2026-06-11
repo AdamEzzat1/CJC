@@ -19,6 +19,7 @@
 //!   `frobenius_error ≤ 1.0` (after clamping) and `≥ 0.0`.
 
 use cjc_cana_compress::lossless_trace::{lossless_compress_bytes, lossless_decompress_bytes};
+use cjc_cana_compress::profile_db::{CompilationProfile, FnProfile, PROFILE_SCHEMA_VERSION};
 use cjc_cana_compress::{
     compress_low_rank, compress_motif_dictionary, compress_pass_history, compress_tensor_train,
     decompress_motif_dictionary, decompress_pass_history, CandidateId, CompressionCandidate,
@@ -251,5 +252,103 @@ proptest! {
             prop_assert!(rc.score.total.is_finite());
             prop_assert!(!rc.score.total.is_nan());
         }
+    }
+
+    /// **Schema-v3 profile rows round-trip for any per-function map.**
+    /// (Phase A items 2+3: the nested `FnProfile` records — arbitrary
+    /// names, counters, and finite labels — survive the canonical
+    /// codec exactly.)
+    #[test]
+    fn profile_row_roundtrips_any_per_function(
+        fns in vec(arb_fn_profile_entry(), 0..10),
+        flops in any::<u64>(),
+        score in -1.0e9f64..1.0e9,
+    ) {
+        let mut row = base_profile_row();
+        row.per_function = fns;
+        row.estimated_flops = flops;
+        row.score = score;
+        let back = CompilationProfile::from_canonical_bytes(&row.canonical_bytes())
+            .expect("canonical round-trip");
+        prop_assert_eq!(row, back);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Schema-v3 profile-row strategies (Phase A items 2+3)
+// ---------------------------------------------------------------------------
+
+fn arb_fn_profile_entry() -> impl Strategy<Value = (String, FnProfile)> {
+    (
+        "[a-z_][a-z0-9_]{0,12}",
+        any::<u64>(),
+        any::<u64>(),
+        any::<u64>(),
+        any::<u64>(),
+        any::<u64>(),
+        any::<u64>(),
+        any::<u32>(),
+        any::<u32>(),
+        // Finite labels: NaN breaks PartialEq-based round-trip asserts
+        // and the writer never produces it (labels are clamped [0,1]).
+        -1.0e6f64..1.0e6,
+        -1.0e6f64..1.0e6,
+        -1.0e6f64..1.0e6,
+    )
+        .prop_map(
+            |(name, fl, br, bw, ab, ws, fo, clc, mld, cpu, mem, thermal)| {
+                (
+                    name,
+                    FnProfile {
+                        flops: fl,
+                        bytes_read: br,
+                        bytes_written: bw,
+                        alloc_bytes: ab,
+                        working_set: ws,
+                        float_ops: fo,
+                        countable_loop_count: clc,
+                        max_loop_depth: mld,
+                        nss_cpu: cpu,
+                        nss_memory: mem,
+                        nss_thermal: thermal,
+                    },
+                )
+            },
+        )
+}
+
+fn base_profile_row() -> CompilationProfile {
+    CompilationProfile {
+        schema_version: PROFILE_SCHEMA_VERSION,
+        program_name: "prop".to_string(),
+        program_hash: 1,
+        feature_hash: 2,
+        sidecar_bundle_hash: 0,
+        config_id: "baseline".to_string(),
+        cost_model_id: "linear_v1".to_string(),
+        cost_model_version: 1,
+        pass_sequence: vec![("f".to_string(), vec!["dce".to_string()])],
+        per_function: vec![],
+        estimated_flops: 0,
+        estimated_bytes_read: 0,
+        estimated_bytes_written: 0,
+        estimated_alloc_bytes: 0,
+        estimated_working_set: 0,
+        estimated_float_ops: 0,
+        nss_predicted_cpu_max: 0.0,
+        nss_predicted_memory_max: 0.0,
+        nss_predicted_thermal_max: 0.0,
+        pinn_predicted_energy_max: 0.0,
+        pinn_predicted_thermal_max: 0.0,
+        pinn_predicted_bandwidth_max: 0.0,
+        mir_nodes_before: 0,
+        mir_nodes_after: 0,
+        recommended_count: 0,
+        dropped_count: 0,
+        legality_approved: true,
+        legality_violation_count: 0,
+        parity_match: Some(true),
+        compile_wall_micros: 0,
+        score: 1.0,
     }
 }

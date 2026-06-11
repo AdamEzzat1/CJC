@@ -62,7 +62,54 @@ const ROW_MAGIC: &[u8; 4] = b"CPR0";
 /// recorded thermal (FP-op density) unpredictable by ANY model class.
 /// The corpus regenerates deterministically in ~35 s, so no v1→v2
 /// migration path is provided; v1 files are rejected on read.
-pub const PROFILE_SCHEMA_VERSION: u32 = 2;
+///
+/// v3 (Phase A items 2+3): added [`FnProfile`] per-function records —
+/// workload estimates, the loop features (`countable_loop_count`,
+/// `max_loop_depth` existed in `CfgMetrics` but never reached rows),
+/// and per-function pressure labels (the per-program MAX was a harness
+/// reporting choice; the per-node data always flowed). Effective
+/// label count grows from one per program to one per function. Same
+/// no-migration policy: v2 files are rejected on read, regenerate.
+pub const PROFILE_SCHEMA_VERSION: u32 = 3;
+
+// ---------------------------------------------------------------------------
+// FnProfile — per-function sub-record (schema v3)
+// ---------------------------------------------------------------------------
+
+/// Per-function profile record (schema v3, Phase A items 2+3).
+///
+/// One per featurized function, stored sorted by function name inside
+/// [`CompilationProfile::per_function`]. Workload estimates come from
+/// the neutral-pass `build_physical_query`; loop features from
+/// `CfgMetrics`; pressure labels from the predictor the ranker
+/// actually consulted (recorded for `*_rec` configs, synthetic
+/// otherwise — mirroring the program-level `nss_predicted_*_max`
+/// fields, which remain as the maxes over these).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FnProfile {
+    /// Per-function `flops_estimate` (neutral pass).
+    pub flops: u64,
+    /// Per-function `bytes_read_estimate`.
+    pub bytes_read: u64,
+    /// Per-function `bytes_written_estimate`.
+    pub bytes_written: u64,
+    /// Per-function `allocation_bytes_estimate`.
+    pub alloc_bytes: u64,
+    /// Per-function `working_set_bytes_estimate`.
+    pub working_set: u64,
+    /// Per-function `float_ops_estimate` (scalar + tensor FP, A1 fix).
+    pub float_ops: u64,
+    /// Loops with statically known trip counts (`CfgMetrics`).
+    pub countable_loop_count: u32,
+    /// Maximum loop nesting depth (`CfgMetrics`).
+    pub max_loop_depth: u32,
+    /// Per-function CPU-saturation label the ranker saw.
+    pub nss_cpu: f64,
+    /// Per-function memory-peak label the ranker saw.
+    pub nss_memory: f64,
+    /// Per-function thermal label the ranker saw.
+    pub nss_thermal: f64,
+}
 
 // ---------------------------------------------------------------------------
 // CompilationProfile — one experiment row
@@ -96,6 +143,8 @@ pub struct CompilationProfile {
     /// Per-function pass sequences, sorted by function name. Flattened
     /// as `(function, passes)` pairs to keep the codec simple.
     pub pass_sequence: Vec<(String, Vec<String>)>,
+    /// Per-function profiles (schema v3), sorted by function name.
+    pub per_function: Vec<(String, FnProfile)>,
 
     // -- Workload estimates (deterministic; from the physical layer) --
     /// Sum of per-function `flops_estimate` (saturating).
@@ -182,6 +231,21 @@ impl CompilationProfile {
                 push_str(&mut out, p);
             }
         }
+        push_u32(&mut out, self.per_function.len() as u32);
+        for (func, fp) in &self.per_function {
+            push_str(&mut out, func);
+            push_u64(&mut out, fp.flops);
+            push_u64(&mut out, fp.bytes_read);
+            push_u64(&mut out, fp.bytes_written);
+            push_u64(&mut out, fp.alloc_bytes);
+            push_u64(&mut out, fp.working_set);
+            push_u64(&mut out, fp.float_ops);
+            push_u32(&mut out, fp.countable_loop_count);
+            push_u32(&mut out, fp.max_loop_depth);
+            push_f64(&mut out, fp.nss_cpu);
+            push_f64(&mut out, fp.nss_memory);
+            push_f64(&mut out, fp.nss_thermal);
+        }
         push_u64(&mut out, self.estimated_flops);
         push_u64(&mut out, self.estimated_bytes_read);
         push_u64(&mut out, self.estimated_bytes_written);
@@ -251,6 +315,27 @@ impl CompilationProfile {
             }
             pass_sequence.push((func, passes));
         }
+        let n_profiles = r.read_u32()? as usize;
+        let mut per_function = Vec::with_capacity(n_profiles.min(1024));
+        for _ in 0..n_profiles {
+            let func = r.read_str()?;
+            per_function.push((
+                func,
+                FnProfile {
+                    flops: r.read_u64()?,
+                    bytes_read: r.read_u64()?,
+                    bytes_written: r.read_u64()?,
+                    alloc_bytes: r.read_u64()?,
+                    working_set: r.read_u64()?,
+                    float_ops: r.read_u64()?,
+                    countable_loop_count: r.read_u32()?,
+                    max_loop_depth: r.read_u32()?,
+                    nss_cpu: r.read_f64()?,
+                    nss_memory: r.read_f64()?,
+                    nss_thermal: r.read_f64()?,
+                },
+            ));
+        }
         let estimated_flops = r.read_u64()?;
         let estimated_bytes_read = r.read_u64()?;
         let estimated_bytes_written = r.read_u64()?;
@@ -298,6 +383,7 @@ impl CompilationProfile {
             cost_model_id,
             cost_model_version,
             pass_sequence,
+            per_function,
             estimated_flops,
             estimated_bytes_read,
             estimated_bytes_written,
@@ -502,6 +588,22 @@ mod tests {
                 ),
                 ("main".to_string(), vec![]),
             ],
+            per_function: vec![(
+                "compute".to_string(),
+                FnProfile {
+                    flops: 500_000,
+                    bytes_read: 4_000_000,
+                    bytes_written: 1_000_000,
+                    alloc_bytes: 32_000,
+                    working_set: 64_000,
+                    float_ops: 125_000,
+                    countable_loop_count: 2,
+                    max_loop_depth: 1,
+                    nss_cpu: 0.4,
+                    nss_memory: 0.2,
+                    nss_thermal: 0.6,
+                },
+            )],
             estimated_flops: 1_000_000,
             estimated_bytes_read: 8_000_000,
             estimated_bytes_written: 2_000_000,
@@ -570,6 +672,50 @@ mod tests {
             other_score.row_hash(),
             "score is a deterministic output; must perturb the stable hash"
         );
+    }
+
+    #[test]
+    fn per_function_round_trips_zero_one_many() {
+        // Schema v3: the nested per-function records survive the codec
+        // at every cardinality.
+        for n in [0usize, 1, 7] {
+            let mut row = sample_row();
+            row.per_function = (0..n)
+                .map(|i| {
+                    (
+                        format!("fn_{i}"),
+                        FnProfile {
+                            flops: i as u64 * 1000,
+                            bytes_read: i as u64 * 8000,
+                            bytes_written: i as u64 * 2000,
+                            alloc_bytes: i as u64 * 64,
+                            working_set: i as u64 * 1024,
+                            float_ops: i as u64 * 250,
+                            countable_loop_count: i as u32,
+                            max_loop_depth: (i % 4) as u32,
+                            nss_cpu: i as f64 * 0.1,
+                            nss_memory: i as f64 * 0.05,
+                            nss_thermal: i as f64 * 0.125,
+                        },
+                    )
+                })
+                .collect();
+            let back = CompilationProfile::from_canonical_bytes(&row.canonical_bytes()).unwrap();
+            assert_eq!(row, back, "n={n}");
+        }
+    }
+
+    #[test]
+    fn row_hash_sensitive_to_per_function_labels() {
+        // Per-function labels are deterministic data, not diagnostics —
+        // they must perturb the stable hash.
+        let row = sample_row();
+        let mut other = row.clone();
+        other.per_function[0].1.nss_thermal = 0.9999;
+        assert_ne!(row.row_hash(), other.row_hash());
+        let mut other2 = row.clone();
+        other2.per_function[0].1.max_loop_depth += 1;
+        assert_ne!(row.row_hash(), other2.row_hash());
     }
 
     #[test]

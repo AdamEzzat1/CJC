@@ -36,6 +36,30 @@
 //! Under-counting is the safe direction for a *density* signal: it can
 //! only make hot-FP functions look cooler, never invent heat that
 //! would withhold passes from cold code.
+//!
+//! ## Tensor tracking (Phase A1 fix)
+//!
+//! The A1 probe (`bench/cana_tensor_probe`) showed both instruments
+//! were tensor-blind: a `Tensor + Tensor` binop is statically just a
+//! `Binary` node and dynamically one statement, yet it executes
+//! `len()` hardware FP operations. The runtime counter now prices
+//! tensor ops by element count; this module mirrors it with a second
+//! propagated set:
+//!
+//! - Seed: parameters annotated `Tensor`.
+//! - `TensorLit`, `Broadcast`, `LinalgInv` are tensors. Calls to
+//!   tensor-returning builtins (`matmul`, `transpose`, `zeros`, ...),
+//!   `Tensor.<constructor>(...)` static methods, and
+//!   tensor-to-tensor methods (`t.add(u)`, `t.reshape(...)`, ...)
+//!   are tensors.
+//! - Arithmetic with a tensor operand produces a tensor (broadcast
+//!   promotion), and counts as [`TypeMix::tensor_binop_count`] — NOT
+//!   as a scalar float binop, mirroring the runtime dispatch arms
+//!   which skip the scalar counter for tensor pairs.
+//!
+//! The element-count scale lives in `physical_cost.rs`
+//! (`TENSOR_FP_PER_OP`), not here: TypeMix stays a pure op-count
+//! mirror of the runtime sites.
 
 use std::collections::BTreeSet;
 
@@ -50,39 +74,62 @@ use crate::hash::CanaHasher;
 /// pathological copy chains, not a tuning knob.
 const PROPAGATION_ROUND_CAP: usize = 8;
 
-/// Float/int operation mix for one MIR function.
+/// Float/int/tensor operation mix for one MIR function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TypeMix {
     /// `Binary` nodes (any operator) where the conservative propagation
-    /// marks at least one operand float. Static analog of the runtime
-    /// FP-binop trace counter.
+    /// marks at least one operand float AND no operand tensor. Static
+    /// analog of the runtime SCALAR FP-binop trace counter (the tensor
+    /// arms skip that counter, so tensor-involving binops are excluded
+    /// here too).
     pub float_binop_count: u32,
     /// All `Binary` expression nodes walked.
     pub binop_count: u32,
     /// Parameters annotated `f64`.
     pub float_param_count: u32,
+    /// `Binary` nodes where at least one operand is a tensor
+    /// (element-wise arithmetic / scalar broadcast). Static analog of
+    /// the runtime tensor-binop accounting (Phase A1 fix); priced at
+    /// `TENSOR_FP_PER_OP` elements each by `build_physical_query`.
+    pub tensor_binop_count: u32,
+}
+
+/// The two monotone binding sets the propagation converges.
+#[derive(Debug, Default)]
+struct Bindings {
+    floats: BTreeSet<String>,
+    tensors: BTreeSet<String>,
+}
+
+impl Bindings {
+    fn len(&self) -> usize {
+        self.floats.len() + self.tensors.len()
+    }
 }
 
 impl TypeMix {
-    /// Analyze one function: propagate float bindings to fixpoint, then
-    /// count binary ops by operand type.
+    /// Analyze one function: propagate float + tensor bindings to
+    /// fixpoint, then count binary ops by operand type.
     pub fn from_function(func: &MirFunction) -> Self {
-        let mut float_vars: BTreeSet<String> = BTreeSet::new();
+        let mut bindings = Bindings::default();
         let mut float_param_count: u32 = 0;
         for p in &func.params {
             if p.ty_name == "f64" {
-                float_vars.insert(p.name.clone());
+                bindings.floats.insert(p.name.clone());
                 float_param_count = float_param_count.saturating_add(1);
+            }
+            if p.ty_name == "Tensor" {
+                bindings.tensors.insert(p.name.clone());
             }
         }
 
         // Fixpoint: each round walks the whole body, marking bindings
-        // whose initializer/assigned value is float under the current
-        // set. Monotone — stop as soon as a round adds nothing.
+        // whose initializer/assigned value is float/tensor under the
+        // current sets. Monotone — stop as soon as a round adds nothing.
         for _ in 0..PROPAGATION_ROUND_CAP {
-            let before = float_vars.len();
-            propagate_body(&func.body, &mut float_vars);
-            if float_vars.len() == before {
+            let before = bindings.len();
+            propagate_body(&func.body, &mut bindings);
+            if bindings.len() == before {
                 break;
             }
         }
@@ -91,8 +138,9 @@ impl TypeMix {
             float_binop_count: 0,
             binop_count: 0,
             float_param_count,
+            tensor_binop_count: 0,
         };
-        count_body(&func.body, &float_vars, &mut mix);
+        count_body(&func.body, &bindings, &mut mix);
         mix
     }
 
@@ -102,6 +150,7 @@ impl TypeMix {
         hasher.write_u32(self.float_binop_count);
         hasher.write_u32(self.binop_count);
         hasher.write_u32(self.float_param_count);
+        hasher.write_u32(self.tensor_binop_count);
     }
 
     /// FP-op density in `[0, 1]`: float binops over all binops. The
@@ -120,120 +169,129 @@ impl TypeMix {
 const TAG_TYPE_MIX: u8 = 0xC0;
 
 // ---------------------------------------------------------------------------
-// Pass 1 — float-binding propagation
+// Pass 1 — float/tensor-binding propagation
 // ---------------------------------------------------------------------------
 
-fn propagate_body(body: &MirBody, floats: &mut BTreeSet<String>) {
+fn propagate_body(body: &MirBody, b: &mut Bindings) {
     for stmt in &body.stmts {
-        propagate_stmt(stmt, floats);
+        propagate_stmt(stmt, b);
     }
     if let Some(result) = &body.result {
-        propagate_expr(result, floats);
+        propagate_expr(result, b);
     }
 }
 
-fn propagate_stmt(stmt: &MirStmt, floats: &mut BTreeSet<String>) {
+fn mark_binding(name: &str, value: &MirExpr, b: &mut Bindings) {
+    // Tensor takes precedence: `2.0 * t` is a tensor, not a float.
+    if expr_is_tensor(value, b) {
+        b.tensors.insert(name.to_string());
+    } else if expr_is_float(value, b) {
+        b.floats.insert(name.to_string());
+    }
+}
+
+fn propagate_stmt(stmt: &MirStmt, b: &mut Bindings) {
     match stmt {
         MirStmt::Let { name, init, .. } => {
-            propagate_expr(init, floats);
-            if expr_is_float(init, floats) {
-                floats.insert(name.clone());
-            }
+            propagate_expr(init, b);
+            mark_binding(name, init, b);
         }
-        MirStmt::Expr(e) => propagate_expr(e, floats),
+        MirStmt::Expr(e) => propagate_expr(e, b),
         MirStmt::If {
             cond,
             then_body,
             else_body,
         } => {
-            propagate_expr(cond, floats);
-            propagate_body(then_body, floats);
+            propagate_expr(cond, b);
+            propagate_body(then_body, b);
             if let Some(eb) = else_body {
-                propagate_body(eb, floats);
+                propagate_body(eb, b);
             }
         }
         MirStmt::While { cond, body } => {
-            propagate_expr(cond, floats);
-            propagate_body(body, floats);
+            propagate_expr(cond, b);
+            propagate_body(body, b);
         }
-        MirStmt::Return(Some(e)) => propagate_expr(e, floats),
+        MirStmt::Return(Some(e)) => propagate_expr(e, b),
         MirStmt::Return(None) | MirStmt::Break | MirStmt::Continue => {}
-        MirStmt::NoGcBlock(b) => propagate_body(b, floats),
+        MirStmt::NoGcBlock(body) => propagate_body(body, b),
     }
 }
 
-fn propagate_expr(expr: &MirExpr, floats: &mut BTreeSet<String>) {
+fn propagate_expr(expr: &MirExpr, b: &mut Bindings) {
     if let MirExprKind::Assign { target, value } = &expr.kind {
-        propagate_expr(value, floats);
-        if expr_is_float(value, floats) {
-            match &target.kind {
-                MirExprKind::Var(name) | MirExprKind::VarLocal { name, .. } => {
-                    floats.insert(name.clone());
-                }
-                _ => {}
+        propagate_expr(value, b);
+        match &target.kind {
+            MirExprKind::Var(name) | MirExprKind::VarLocal { name, .. } => {
+                mark_binding(name, value, b);
             }
+            _ => {}
         }
         return;
     }
     for child in expr_children(expr) {
-        propagate_expr(child, floats);
+        propagate_expr(child, b);
     }
     for body in expr_bodies(expr) {
-        propagate_body(body, floats);
+        propagate_body(body, b);
     }
 }
 
 // ---------------------------------------------------------------------------
-// Pass 2 — binop counting under the converged float set
+// Pass 2 — binop counting under the converged binding sets
 // ---------------------------------------------------------------------------
 
-fn count_body(body: &MirBody, floats: &BTreeSet<String>, mix: &mut TypeMix) {
+fn count_body(body: &MirBody, b: &Bindings, mix: &mut TypeMix) {
     for stmt in &body.stmts {
-        count_stmt(stmt, floats, mix);
+        count_stmt(stmt, b, mix);
     }
     if let Some(result) = &body.result {
-        count_expr(result, floats, mix);
+        count_expr(result, b, mix);
     }
 }
 
-fn count_stmt(stmt: &MirStmt, floats: &BTreeSet<String>, mix: &mut TypeMix) {
+fn count_stmt(stmt: &MirStmt, b: &Bindings, mix: &mut TypeMix) {
     match stmt {
-        MirStmt::Let { init, .. } => count_expr(init, floats, mix),
-        MirStmt::Expr(e) => count_expr(e, floats, mix),
+        MirStmt::Let { init, .. } => count_expr(init, b, mix),
+        MirStmt::Expr(e) => count_expr(e, b, mix),
         MirStmt::If {
             cond,
             then_body,
             else_body,
         } => {
-            count_expr(cond, floats, mix);
-            count_body(then_body, floats, mix);
+            count_expr(cond, b, mix);
+            count_body(then_body, b, mix);
             if let Some(eb) = else_body {
-                count_body(eb, floats, mix);
+                count_body(eb, b, mix);
             }
         }
         MirStmt::While { cond, body } => {
-            count_expr(cond, floats, mix);
-            count_body(body, floats, mix);
+            count_expr(cond, b, mix);
+            count_body(body, b, mix);
         }
-        MirStmt::Return(Some(e)) => count_expr(e, floats, mix),
+        MirStmt::Return(Some(e)) => count_expr(e, b, mix),
         MirStmt::Return(None) | MirStmt::Break | MirStmt::Continue => {}
-        MirStmt::NoGcBlock(b) => count_body(b, floats, mix),
+        MirStmt::NoGcBlock(body) => count_body(body, b, mix),
     }
 }
 
-fn count_expr(expr: &MirExpr, floats: &BTreeSet<String>, mix: &mut TypeMix) {
+fn count_expr(expr: &MirExpr, b: &Bindings, mix: &mut TypeMix) {
     if let MirExprKind::Binary { left, right, .. } = &expr.kind {
         mix.binop_count = mix.binop_count.saturating_add(1);
-        // Runtime-counter semantics: ANY operator, either operand float.
-        if expr_is_float(left, floats) || expr_is_float(right, floats) {
+        // Runtime-counter semantics: tensor arms skip the scalar
+        // counter, so the tensor check takes precedence; otherwise ANY
+        // operator with either operand float counts as scalar FP.
+        if expr_is_tensor(left, b) || expr_is_tensor(right, b) {
+            mix.tensor_binop_count = mix.tensor_binop_count.saturating_add(1);
+        } else if expr_is_float(left, b) || expr_is_float(right, b) {
             mix.float_binop_count = mix.float_binop_count.saturating_add(1);
         }
     }
     for child in expr_children(expr) {
-        count_expr(child, floats, mix);
+        count_expr(child, b, mix);
     }
     for body in expr_bodies(expr) {
-        count_body(body, floats, mix);
+        count_body(body, b, mix);
     }
 }
 
@@ -241,28 +299,67 @@ fn count_expr(expr: &MirExpr, floats: &BTreeSet<String>, mix: &mut TypeMix) {
 // Conservative value typing
 // ---------------------------------------------------------------------------
 
-/// Is the VALUE of this expression float under the current binding set?
-fn expr_is_float(expr: &MirExpr, floats: &BTreeSet<String>) -> bool {
+/// Free-call builtins that return tensors. Mirrors the runtime's
+/// tensor-returning dispatch surface (curated; missing one under-counts).
+const TENSOR_RESULT_BUILTINS: &[&str] = &[
+    "matmul",
+    "transpose",
+    "tensor_new",
+    "tensor_zeros",
+    "tensor_ones",
+    "zeros",
+    "ones",
+    "tensor_concat_1d",
+];
+
+/// `Tensor.<name>(...)` static constructors.
+const TENSOR_STATIC_CONSTRUCTORS: &[&str] = &["from_vec", "zeros", "ones", "randn", "eye", "new"];
+
+/// Methods on a tensor receiver that return tensors (`t.add(u)`,
+/// `t.reshape(...)`, ...). Reductions (`sum`, `mean`) return floats and
+/// are deliberately absent — their result would need cross-call
+/// propagation to reach the float set (conservative under-count today).
+const TENSOR_TO_TENSOR_METHODS: &[&str] = &[
+    "add",
+    "sub",
+    "transpose",
+    "reshape",
+    "abs",
+    "relu",
+    "gelu",
+    "softmax",
+];
+
+/// Is the VALUE of this expression float under the current binding sets?
+/// Tensor-ness dominates: `2.0 * t` broadcasts to a tensor, so it is
+/// NOT a scalar float (mirrors the runtime dispatch arm precedence).
+fn expr_is_float(expr: &MirExpr, b: &Bindings) -> bool {
     match &expr.kind {
         MirExprKind::FloatLit(_) => true,
-        MirExprKind::Var(name) | MirExprKind::VarLocal { name, .. } => floats.contains(name),
-        MirExprKind::Binary { op, left, right } => {
-            arith_op(op) && (expr_is_float(left, floats) || expr_is_float(right, floats))
+        MirExprKind::Var(name) | MirExprKind::VarLocal { name, .. } => {
+            b.floats.contains(name) && !b.tensors.contains(name)
         }
-        MirExprKind::Unary { operand, .. } => expr_is_float(operand, floats),
+        MirExprKind::Binary { op, left, right } => {
+            arith_op(op)
+                && (expr_is_float(left, b) || expr_is_float(right, b))
+                && !(expr_is_tensor(left, b) || expr_is_tensor(right, b))
+        }
+        MirExprKind::Unary { operand, .. } => {
+            expr_is_float(operand, b) && !expr_is_tensor(operand, b)
+        }
         MirExprKind::If {
             then_body,
             else_body,
             ..
         } => {
-            body_result_is_float(then_body, floats)
+            body_result_is(then_body, b, expr_is_float)
                 || else_body
                     .as_ref()
-                    .map(|b| body_result_is_float(b, floats))
+                    .map(|eb| body_result_is(eb, b, expr_is_float))
                     .unwrap_or(false)
         }
-        MirExprKind::Block(body) => body_result_is_float(body, floats),
-        MirExprKind::Assign { value, .. } => expr_is_float(value, floats),
+        MirExprKind::Block(body) => body_result_is(body, b, expr_is_float),
+        MirExprKind::Assign { value, .. } => expr_is_float(value, b),
         // Calls, indexing, fields, literals of other types: conservatively
         // non-float (see module docs — under-counting is the safe
         // direction for a density signal).
@@ -270,11 +367,53 @@ fn expr_is_float(expr: &MirExpr, floats: &BTreeSet<String>) -> bool {
     }
 }
 
-fn body_result_is_float(body: &MirBody, floats: &BTreeSet<String>) -> bool {
-    body.result
-        .as_ref()
-        .map(|e| expr_is_float(e, floats))
-        .unwrap_or(false)
+/// Is the VALUE of this expression a tensor under the current binding
+/// sets? (Phase A1 fix — see module docs "Tensor tracking".)
+fn expr_is_tensor(expr: &MirExpr, b: &Bindings) -> bool {
+    match &expr.kind {
+        MirExprKind::TensorLit { .. } => true,
+        MirExprKind::Broadcast { .. } => true,
+        MirExprKind::LinalgInv { .. } => true,
+        // LU/QR/Cholesky return tuples of tensors — tracking those
+        // requires tuple-element typing; conservatively non-tensor.
+        MirExprKind::Var(name) | MirExprKind::VarLocal { name, .. } => b.tensors.contains(name),
+        MirExprKind::Binary { op, left, right } => {
+            arith_op(op) && (expr_is_tensor(left, b) || expr_is_tensor(right, b))
+        }
+        MirExprKind::Unary { operand, .. } => expr_is_tensor(operand, b),
+        MirExprKind::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            body_result_is(then_body, b, expr_is_tensor)
+                || else_body
+                    .as_ref()
+                    .map(|eb| body_result_is(eb, b, expr_is_tensor))
+                    .unwrap_or(false)
+        }
+        MirExprKind::Block(body) => body_result_is(body, b, expr_is_tensor),
+        MirExprKind::Assign { value, .. } => expr_is_tensor(value, b),
+        MirExprKind::Call { callee, .. } => match &callee.kind {
+            MirExprKind::Var(name) => TENSOR_RESULT_BUILTINS.contains(&name.as_str()),
+            MirExprKind::Field { object, name } => {
+                // `Tensor.from_vec(...)` static constructor…
+                if let MirExprKind::Var(obj) = &object.kind {
+                    if obj == "Tensor" && TENSOR_STATIC_CONSTRUCTORS.contains(&name.as_str()) {
+                        return true;
+                    }
+                }
+                // …or a tensor-to-tensor method on a tensor receiver.
+                expr_is_tensor(object, b) && TENSOR_TO_TENSOR_METHODS.contains(&name.as_str())
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn body_result_is(body: &MirBody, b: &Bindings, pred: fn(&MirExpr, &Bindings) -> bool) -> bool {
+    body.result.as_ref().map(|e| pred(e, b)).unwrap_or(false)
 }
 
 /// Float-producing operators. Comparisons/logic produce `Bool` and are
@@ -496,8 +635,117 @@ print(scale(3));
             float_binop_count: 3,
             binop_count: 12,
             float_param_count: 0,
+            tensor_binop_count: 0,
         };
         assert!((mix.float_density() - 0.25).abs() < 1e-15);
         assert_eq!(TypeMix::default().float_density(), 0.0);
+    }
+
+    // -- Tensor tracking (Phase A1 fix) -----------------------------------
+
+    #[test]
+    fn tensor_param_seeds_tensor_binops() {
+        // a + b and a * b on Tensor params are tensor binops, NOT
+        // scalar float binops (mirrors the runtime arm precedence).
+        let mix = mix_of(
+            r#"
+fn ew(a: Tensor, b: Tensor) -> Tensor {
+    let c: Tensor = a + b;
+    let d: Tensor = a * b;
+    return c + d;
+}
+let t: Tensor = Tensor.from_vec([1.0, 2.0], [2]);
+let u: Tensor = Tensor.from_vec([3.0, 4.0], [2]);
+print(1);
+"#,
+            "ew",
+        );
+        assert_eq!(mix.tensor_binop_count, 3);
+        assert_eq!(mix.float_binop_count, 0);
+        assert_eq!(mix.binop_count, 3);
+    }
+
+    #[test]
+    fn scalar_broadcast_is_tensor_not_float() {
+        // 2.0 * t broadcasts: the float literal must NOT make this a
+        // scalar float binop.
+        let mix = mix_of(
+            r#"
+fn scale(t: Tensor) -> Tensor {
+    return 2.0 * t + 1.0;
+}
+print(1);
+"#,
+            "scale",
+        );
+        // (2.0 * t) is tensor; (... + 1.0) is tensor + float → tensor.
+        assert_eq!(mix.tensor_binop_count, 2);
+        assert_eq!(mix.float_binop_count, 0);
+    }
+
+    #[test]
+    fn tensor_constructor_call_propagates() {
+        // Tensor.from_vec result assigned to a local; subsequent binop
+        // on the local is a tensor binop only via propagation.
+        let mix = mix_of(
+            r#"
+fn build(n: i64) -> Tensor {
+    let mut buf: Any = [];
+    let mut i: i64 = 0;
+    while i < n {
+        buf = array_push(buf, 0.5);
+        i = i + 1;
+    }
+    let t: Tensor = Tensor.from_vec(buf, [n]);
+    let u: Tensor = t + t;
+    return u;
+}
+print(1);
+"#,
+            "build",
+        );
+        assert_eq!(mix.tensor_binop_count, 1);
+        // i < n, i + 1 are int; no scalar float binops.
+        assert_eq!(mix.float_binop_count, 0);
+    }
+
+    #[test]
+    fn matmul_free_call_result_is_tensor() {
+        let mix = mix_of(
+            r#"
+fn mm(a: Tensor, b: Tensor) -> Tensor {
+    let c: Tensor = matmul(a, b);
+    return c + a;
+}
+print(1);
+"#,
+            "mm",
+        );
+        assert_eq!(mix.tensor_binop_count, 1);
+        assert_eq!(mix.float_binop_count, 0);
+    }
+
+    #[test]
+    fn scalar_float_counting_unchanged_by_tensor_tracking() {
+        // Regression: a function with BOTH scalar FP and tensor work
+        // keeps the scalar count the runtime scalar counter would see.
+        let mix = mix_of(
+            r#"
+fn mixed(t: Tensor, n: i64) -> f64 {
+    let mut acc: f64 = 0.0;
+    let mut i: i64 = 0;
+    while i < n {
+        let u: Tensor = t * 2.0;
+        acc = acc + 0.001;
+        i = i + 1;
+    }
+    return acc;
+}
+print(1);
+"#,
+            "mixed",
+        );
+        assert_eq!(mix.tensor_binop_count, 1); // t * 2.0
+        assert_eq!(mix.float_binop_count, 1); // acc + 0.001
     }
 }

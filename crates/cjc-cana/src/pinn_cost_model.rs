@@ -654,7 +654,12 @@ mod tests {
         let model = PinnPhysicalCostModel::new(NullCostModel, NullPressurePredictor)
             .with_thermal_head(constant_head(0.1));
         assert_eq!(model.name(), "pinn_thermal_v2");
-        assert_eq!(model.version(), 2);
+        // Tracks the const, not a literal: the version bumps whenever
+        // the basis semantics change (v3 = Phase A1 tensor FP fix).
+        assert_eq!(
+            model.version(),
+            crate::pinn_thermal_v2::PINN_V2_MODEL_VERSION
+        );
     }
 
     #[test]

@@ -303,13 +303,99 @@ pub struct MirExecutor {
     trace_node_ids: BTreeMap<String, u32>,
     /// Option B: MIR statements executed since the last emitted event.
     trace_instr_count: u32,
-    /// Option B: floating-point binops evaluated since the last
+    /// Option B: floating-point operations evaluated since the last
     /// emitted event. `thermal_intensity = fp_ops / instructions`.
-    trace_fp_ops: u32,
+    /// Scalar float binops count 1 each; tensor operations count their
+    /// element-wise FP work (Phase A1 fix — see [`tensor_binop_fp_work`]),
+    /// hence `u64`: a single window can hold a whole matmul.
+    trace_fp_ops: u64,
     /// Option B: whether an IO-family builtin ran since the last emit.
     trace_io_pending: bool,
     /// Option B: whether a GC collection ran since the last emit.
     trace_gc_pending: bool,
+}
+
+// -- Option B tensor FP accounting (Phase A1 fix) ---------------------------
+//
+// The scalar trace counter increments once per scalar float binop; a
+// tensor operation executes `len()` (or `2·m·n·k` for matmul) hardware
+// FP operations inside ONE MIR statement, which the A1 probe showed
+// makes tensor workloads read as thermally cold (recorded thermal ≈ 0
+// where dense scalar FP reads 1.0). These helpers price the curated
+// FP-heavy tensor operations; pure data movement (`transpose`,
+// `reshape`, `get`, `shape`) deliberately counts 0. Under-counting
+// remains the safe direction — unlisted ops make hot code look cooler,
+// never the reverse. All values derive from operand shapes (no clocks,
+// no sensors — determinism invariant #7).
+
+/// FP work of one tensor-involving BINARY op (element-wise arithmetic
+/// or scalar broadcast). Mirrors the scalar sites' "increment before
+/// dispatch on the operator" semantics. Returns 0 for non-tensor pairs.
+fn tensor_binop_fp_work(a: &Value, b: &Value) -> u64 {
+    match (a, b) {
+        (Value::Tensor(x), Value::Tensor(y)) => x.len().max(y.len()) as u64,
+        (Value::Tensor(t), Value::Float(_))
+        | (Value::Float(_), Value::Tensor(t))
+        | (Value::Tensor(t), Value::Int(_))
+        | (Value::Int(_), Value::Tensor(t)) => t.len() as u64,
+        _ => 0,
+    }
+}
+
+/// FP work of a 2-D matmul `[m×k]·[k×n]`: one multiply + one add per
+/// MAC = `2·m·k·n`. Non-2-D or shape-mismatched inputs fall back to
+/// the larger element count (the runtime will error or broadcast; the
+/// bound stays conservative either way).
+fn matmul_fp_work(a: &Value, b: &Value) -> u64 {
+    if let (Value::Tensor(x), Value::Tensor(y)) = (a, b) {
+        let (sa, sb) = (x.shape(), y.shape());
+        if sa.len() == 2 && sb.len() == 2 {
+            let m = sa[0] as u64;
+            let k = sa[1].min(sb[0]) as u64;
+            let n = sb[1] as u64;
+            return m.saturating_mul(k).saturating_mul(n).saturating_mul(2);
+        }
+        return x.len().max(y.len()) as u64;
+    }
+    0
+}
+
+/// FP work of a FREE-CALL builtin (`matmul(a, b)`, `dot(a, b)`,
+/// `adam_step(...)`, ...). Curated: names not listed count 0.
+fn builtin_tensor_fp_work(name: &str, args: &[Value]) -> u64 {
+    match name {
+        "matmul" => match (args.first(), args.get(1)) {
+            (Some(a), Some(b)) => matmul_fp_work(a, b),
+            _ => 0,
+        },
+        "dot" => match args.first() {
+            Some(Value::Tensor(t)) => (t.len() as u64).saturating_mul(2),
+            _ => 0,
+        },
+        "sum" | "mean" | "binned_sum" | "adam_step" => match args.first() {
+            Some(Value::Tensor(t)) => t.len() as u64,
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
+
+/// FP work of a METHOD call on a tensor receiver (`t.sum()`,
+/// `t.matmul(u)`, ...). Curated: methods not listed count 0.
+fn method_tensor_fp_work(receiver: &Value, method: &str, args: &[Value]) -> u64 {
+    let Value::Tensor(t) = receiver else {
+        return 0;
+    };
+    match method {
+        "sum" | "mean" | "binned_sum" | "abs" | "relu" | "gelu" | "softmax" | "var" | "std"
+        | "add" | "sub" => t.len() as u64,
+        "dot" => (t.len() as u64).saturating_mul(2),
+        "matmul" => match args.first() {
+            Some(b) => matmul_fp_work(receiver, b),
+            None => 0,
+        },
+        _ => 0,
+    }
 }
 
 impl MirExecutor {
@@ -1336,6 +1422,16 @@ impl MirExecutor {
         let lv = self.eval_expr(left)?;
         let rv = self.eval_expr(right)?;
 
+        // Option B (Phase A1): tensor binops execute element-wise FP
+        // work the scalar sites below cannot see — account it before
+        // dispatch, mirroring the scalar counter's semantics.
+        if self.trace_enabled {
+            let w = tensor_binop_fp_work(&lv, &rv);
+            if w > 0 {
+                self.trace_fp_ops = self.trace_fp_ops.saturating_add(w);
+            }
+        }
+
         match (&lv, &rv) {
             // NA propagation: any operation involving NA returns NA,
             // except == and != which return false/true respectively (SQL semantics).
@@ -1558,7 +1654,13 @@ impl MirExecutor {
         match (op, &val) {
             (UnaryOp::Neg, Value::Int(v)) => Ok(Value::Int(-v)),
             (UnaryOp::Neg, Value::Float(v)) => Ok(Value::Float(-v)),
-            (UnaryOp::Neg, Value::Tensor(t)) => Ok(Value::Tensor(t.map(|x| -x))),
+            (UnaryOp::Neg, Value::Tensor(t)) => {
+                // Option B (Phase A1): element-wise FP negation.
+                if self.trace_enabled {
+                    self.trace_fp_ops = self.trace_fp_ops.saturating_add(t.len() as u64);
+                }
+                Ok(Value::Tensor(t.map(|x| -x)))
+            }
             (UnaryOp::Neg, Value::F16(v)) => Ok(Value::F16(v.neg())),
             (UnaryOp::Neg, Value::Complex(z)) => Ok(Value::Complex(z.neg())),
             (UnaryOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
@@ -2024,6 +2126,20 @@ impl MirExecutor {
                     }
                     _ => {}
                 }
+            }
+        }
+
+        // Option B (Phase A1): FP-heavy tensor builtins (`matmul`,
+        // `dot`, `sum`, ...) perform element-wise FP work the scalar
+        // binop counter cannot see — account it pre-dispatch. Placed
+        // after the user-function/closure short-circuits (a user
+        // function shadowing `matmul` must not be priced as a tensor
+        // op) and before BOTH dispatch paths below (inline cache + slow
+        // path), so each call is counted exactly once.
+        if self.trace_enabled {
+            let w = builtin_tensor_fp_work(name, &args);
+            if w > 0 {
+                self.trace_fp_ops = self.trace_fp_ops.saturating_add(w);
             }
         }
 
@@ -3540,6 +3656,14 @@ impl MirExecutor {
         method: &str,
         args: Vec<Value>,
     ) -> MirExecResult {
+        // Option B (Phase A1): method-form tensor FP work (`t.sum()`,
+        // `t.matmul(u)`, ...) — same accounting as the free-call path.
+        if self.trace_enabled {
+            let w = method_tensor_fp_work(&receiver, method, &args);
+            if w > 0 {
+                self.trace_fp_ops = self.trace_fp_ops.saturating_add(w);
+            }
+        }
         match (&receiver, method) {
             (Value::Tensor(t), "sum") => Ok(Value::Float(t.sum())),
             (Value::Tensor(t), "mean") => Ok(Value::Float(t.mean())),

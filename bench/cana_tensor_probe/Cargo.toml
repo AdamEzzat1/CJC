@@ -1,0 +1,27 @@
+# Phase A item 1 — tensor-blindness probe for the PINN v2 thermal head.
+#
+# Read-only diagnostic: instruments tensor-using programs, compares the
+# recorded thermal label (Option-B trace), the v1 closed form, and the
+# trained v2 head against hand-derived analytic FP-work lower bounds.
+# Writes nothing; the verdict drives the Phase-A FP-accounting fix.
+
+[package]
+name = "cana-tensor-probe"
+version = "0.1.11"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "cana_tensor_probe"
+path = "main.rs"
+
+[dependencies]
+cjc-repro = { path = "../../crates/cjc-repro" }
+cjc-ast = { path = "../../crates/cjc-ast" }
+cjc-parser = { path = "../../crates/cjc-parser" }
+cjc-hir = { path = "../../crates/cjc-hir" }
+cjc-mir = { path = "../../crates/cjc-mir" }
+cjc-mir-exec = { path = "../../crates/cjc-mir-exec" }
+cjc-cana = { path = "../../crates/cjc-cana" }
+cjc-cana-nss = { path = "../../crates/cjc-cana-nss" }
+cjc-cana-compress = { path = "../../crates/cjc-cana-compress" }

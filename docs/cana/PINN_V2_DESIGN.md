@@ -198,3 +198,164 @@ entry points mirroring the thermal-aware pair, same
 committed bundle + determinism) and an end-to-end CLI smoke
 (`--pinn-weights` output byte-equal to the plain run; missing bundle →
 exit 1).
+
+## 7. Phase A1 (2026-06-11): tensor blindness — measured, fixed, retrained (model v3)
+
+### The experiment (`bench/cana_tensor_probe`, read-only)
+
+The next-arc handoff ranked "the thermal head is tensor-blind" as the
+highest-information hypothesis. The probe instrumented 4 tensor
+programs (matmul / element-wise / method-form reduction / mix; each
+running ≥ 409,600 analytic FP ops) plus two controls, and separated
+three comparisons the shadow gate conflates: head-vs-label,
+label-vs-analytic-FP, and static-features-vs-both.
+
+**Measured (pre-fix): blindness was DUAL — worse than hypothesized.**
+
+| instrument | result on tensor programs |
+|---|---|
+| recorded thermal label | **0.0000** on all 4 (dense-scalar control: 1.0000) |
+| runtime trace FP total | equal to the SCALAR subset to **0.00% error** — 409,600+ tensor FP ops invisible |
+| static `est_float_ops` | 16–24 (scalar builder ops only) |
+| `tensor_heavy_ops` | missed element-wise binops entirely AND method forms (`.sum()` → 0); only free-call `matmul(a,b)` counted |
+| v2 head vs label | \|Δ\| ≈ 0.42 — did not even match the blind label out-of-distribution |
+
+Root cause, code-verified: the runtime counter increments only at the
+three scalar Float-binop dispatch arms; the tensor arms
+(`cjc-mir-exec`, `(Tensor, …)` binary dispatch) and tensor
+builtin/method dispatch never touched it. A "head accurately predicts
+the label" result on tensor workloads would have been agreement
+between two blind instruments — the probe's analytic lower bounds
+(loop trip counts × tensor shapes) are what broke the tie.
+
+**Bonus finding:** the per-window 1.0 intensity cap
+(`thermal_raw.min(1.0)`) clips ~23% of FP density on multi-FP-op
+STATEMENTS (the scalar control recovers only 76.6% through
+`Σ intensity·instr`). This also bounds the harness energy formula's FP
+term. Left as-is deliberately — intensity is a density in [0, 1] and
+the label semantics want saturation — but recorded for Phase B, whose
+energy target reconstructs FP through the same capped field.
+
+### The fix (dual-side, mirror-semantics preserved)
+
+- **Runtime (label):** `trace_fp_ops` widened u32→u64; tensor binops
+  count element-wise FP work pre-dispatch (`tensor_binop_fp_work`),
+  matmul counts `2·m·k·n` from runtime shapes, curated FP-heavy
+  builtins/methods (`sum`, `mean`, `dot`, `adam_step`, …) count
+  element work at both free-call and method dispatch choke points.
+  Pure data movement (`transpose`, `reshape`, `get`) deliberately
+  counts 0; under-counting stays the safe direction. All accounting
+  gated on `trace_enabled`.
+- **Static (features):** `TypeMix` propagates a second monotone
+  binding set (tensor-ness; seeds: `Tensor` params, `TensorLit`,
+  tensor-returning calls/constructors/methods) and reports
+  `tensor_binop_count` — tensor-involving binops are EXCLUDED from
+  `float_binop_count`, mirroring the runtime arm precedence
+  (`2.0 * t` is a tensor op, not a scalar FP op). `MemoryProxy` now
+  classifies method-call callees (`.sum()` counts; `Tensor.from_vec`
+  is an alloc site). `build_physical_query` prices tensor sites at
+  `TENSOR_FP_PER_OP = 128` elements into `float_ops_estimate`.
+- **Basis (model v3):** the density feature is capped at 1.0 to mirror
+  the label's intensity cap (tensor functions push the raw ratio to
+  5–10 against a label pinned at 1.0); magnitude survives in
+  `ln(1+float_ops)`. `PINN_V2_MODEL_VERSION` 2 → 3.
+- **Corpus:** 9-program `tensor_` family added to the ablation
+  harness (4 hot-loop shapes covering each blind path + graded
+  `tensor_tg_k{0..4}` sweeping tensor-vs-scalar FP share). Without
+  it, the new signal would have had zero training variance — the
+  pre-A1 corpus contained no tensor ops at all, so all 134 existing
+  programs' rows are label-identical before/after the runtime fix.
+
+### Post-fix measurements
+
+Probe re-run: all 4 tensor programs' labels flipped 0.0000 → 1.0000;
+static `est_float_ops` 16 → 1,040–3,088; the committed probe now
+asserts the post-fix state (a return to "CONFIRMED blind" = regression).
+
+Corpus: **143 × 20 = 2,860 rows**, parity 100% (tensor programs are
+byte-identical across eval/MIR-exec — locked in
+`tests/test_tensor_fp_accounting.rs` BEFORE the family entered the
+harness), row-hash double-run stable. Recorded thermal: std 0.0
+→ **0.3495** across programs, 15 programs in the saturated band.
+
+Retrain + shadow (model v3, 111 train / 32 held-out):
+
+| cohort | v1 MAE | v1 corr | v2(v3) MAE | v2(v3) corr |
+|---|---|---|---|---|
+| train (111) | 0.2035 | +0.2972 | 0.0312 | +0.9873 |
+| **held-out (32)** | 0.2150 | +0.1626 | **0.0319** | **+0.9819** |
+| overall (143) | 0.2061 | +0.2692 | 0.0314 | +0.9861 |
+
+**Verdict: PROMOTE** (R²(test) 0.9564; FP-density coefficient +0.7444
+> 0 asserted). Train→regen fixed point verified: regenerating the
+corpus under the v3 bundle and retraining reproduces the bundle
+byte-for-byte (labels feed from `nss_rec` rows, which don't depend on
+the head). Plan-level consequence grew: 23/143 plans differ between
+`full_pinn_v2_rec` and `full_pinn_rec` (was 14/134).
+
+### Test surface added
+
+- `tests/test_tensor_fp_accounting.rs` — 6 wiring tests (label reads
+  hot end-to-end; counter exceeds scalar-only bound; static pricing;
+  instrumented-output identity; eval↔MIR parity on tensor programs).
+- `tests/test_tensor_typemix_props.rs` — 3 proptest properties (exact
+  graded counting, order invariance, density bounds) + 1 bolero
+  structural fuzz (copy-chain totality/consistency).
+- `cjc-cana` lib: +10 unit tests (TypeMix tensor propagation,
+  MemoryProxy method classification, physical-cost tensor pricing,
+  density cap) → 195 lib tests.
+
+## 8. Phase A items 2–7 (same session): schema v3, families, gates, holdout
+
+Full sequencing record in `docs/cana/HANDOFF_PHASE_A.md`; this section
+is the numbers ledger.
+
+### Schema v3 + final corpus
+
+`FnProfile` per-function records (workload estimates + the
+previously-unstored `countable_loop_count`/`max_loop_depth` + per-fn
+cpu/memory/thermal labels). `PROFILE_SCHEMA_VERSION = 3`. Corpus:
+**158 programs × 20 configs = 3,160 rows** (134 prior + 9 `tensor_` +
+5 `mem_grad_` + 10 `holdout_`); parity 100%; row-hash double-run
+byte-identical. **Per-function labels: 360** (vs 158 per-program) —
+fn-granularity thermal std 0.3214 (usable), cpu 0.0128, memory 0.0008.
+
+### A4 measured (negative result, mechanism-confirmed)
+
+`mem_grad_a{1..5}` sweeps ×4 arena-let executions per step. Measured
+program-level memory label: max **0.0078** at `mem_grad_a5` — exactly
+the mechanism's prediction (≈ mean of cumulative 64 B × 65,536
+arena-let executions / 1 GiB), std 0.0009. The label is structurally
+blind to Rc memory (`gc_alloc` objects + arena-let executions are ALL
+it sees); no honest program family can reach the research doc's
+std > 0.05 expectation. Phase F starts with a label-side fix.
+
+### A5 measured (bound refuted and re-set)
+
+First gated regen: the research doc's 1.5× code-size bound tripped on
+the ranked BASELINE plan — full unroll of a countable 8-trip loop grew
+`grad_f10_d2_n64` 97 → 605 nodes (**6.24×, by design**). Cap re-set to
+16× (runaway-duplication scale), with a measured corpus-max printed
+every regen. NoGC + MIR-legality verifiers now run on every optimized
+program in every config (3,160/3,160 green).
+
+### Retrain on v3 corpus (114 train / 34 FNV-test / 10 holdout-frozen)
+
+R²(train) 0.9587, **R²(test) 0.9552**, FP-density coefficient +0.7212.
+Train↔regen fixed point re-verified after the coherence regen.
+
+### Shadow (the frozen-holdout debut)
+
+| cohort | v1 MAE | v1 corr | v2(v3) MAE | v2(v3) corr |
+|---|---|---|---|---|
+| train (114) | 0.1982 | +0.3014 | 0.0315 | +0.9865 |
+| held-out FNV (34) | 0.2023 | +0.1735 | 0.0314 | +0.9820 |
+| **holdout-frozen (10)** | 0.4761 | −0.1038 | **0.1885** | **+0.8107** |
+| overall (158) | 0.2166 | +0.2419 | 0.0414 | +0.9690 |
+
+**Verdict: PROMOTE** — and the frozen cohort immediately justified its
+existence: true never-seen generalization is MAE 0.19/corr +0.81, a
+6× degradation from the eroding FNV split's 0.031 (still 2.5× better
+than v1). Report the holdout line, not the FNV line, when making
+external claims about head accuracy. Plan-level: 38/158 plans differ
+between `full_pinn_v2_rec` and `full_pinn_rec` post-retrain.

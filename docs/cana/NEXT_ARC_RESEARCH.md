@@ -159,3 +159,38 @@ the only measurement so far (−32); Phase B exists to settle it
 empirically. The 20–30% peak-memory-reduction figure for the runtime
 scheduler is unmeasured speculation. Cross-machine thermal comparisons
 are methodologically invalid; only within-run trends count.
+
+## 7. Hypotheses settled since this synthesis (update log)
+
+- **2026-06-11 — "thermal head is tensor-blind": SETTLED, CONFIRMED,
+  FIXED** (Phase A item 1; full record in `PINN_V2_DESIGN.md` §7).
+  Measured worse than hypothesized: blindness was DUAL — the recorded
+  LABEL (runtime FP counter counts scalar binops only) and the static
+  basis both read tensor workloads as cold (label 0.0000 on programs
+  running 409,600+ FP ops; trace totals matched the scalar subset to
+  0.00% error). Fixed on both sides (element-count runtime accounting
+  + TypeMix tensor propagation + method-call classification), corpus
+  extended with a 9-program `tensor_` family (143 × 20 = 2,860 rows),
+  head retrained as model v3: shadow MAE held-out 0.0319 vs v1 0.2150,
+  corr +0.98, PROMOTE. New bonus finding for Phase B: the per-window
+  intensity cap clips ~23% of FP density on multi-FP-op statements —
+  the energy formula's FP term inherits this bound.
+- **2026-06-11 — "memory-gradient programs reach label std ~0.1+":
+  REFUTED** (Phase A item 4; `PINN_V2_DESIGN.md` §8). The memory label
+  is structurally blind to Rc memory: `heap_bytes_in_use` = gc_alloc'd
+  objects × 4096 + executed arena-classified `Let`s × 64 (flat,
+  size-blind, cumulative) — arrays/tensors/strings never register.
+  The `mem_grad_a{1..5}` family hit the mechanism-exact ceiling
+  (max 0.0078, std 0.0009). §2's "0.0007 → ~0.1+" expectation cannot
+  be met by programs; Phase F starts with a label-side fix.
+- **2026-06-11 — "code-size bound nodes_after/before ≤ 1.5": REFUTED
+  on first contact** (Phase A item 5). The ranked BASELINE plan fully
+  unrolls countable 8-trip loops at 6.24× node growth by design
+  (`grad_f10_d2_n64`: 97 → 605). Gate shipped at 16× (runaway scale)
+  with a measured corpus-max report each regen.
+- **2026-06-11 — FNV-split erosion quantified** (Phase A item 7): the
+  frozen holdout's debut shadow shows true never-seen generalization
+  at MAE 0.1885 / corr +0.8107 vs the FNV split's 0.0314 / +0.9820 —
+  a 6× optimism gap. Promotion gates keep PASSing (v1 is at 0.4761
+  on the same cohort), but external accuracy claims must quote the
+  frozen-holdout line.

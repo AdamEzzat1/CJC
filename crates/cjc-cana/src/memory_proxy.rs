@@ -173,10 +173,18 @@ impl MemoryProxy {
                 }
             }
 
-            // ----- Calls — classify by callee name when it's a Var -----
+            // ----- Calls — classify by callee name (free call) or by
+            // method name (Field callee). The method form was invisible
+            // pre-Phase-A1: `t.sum()` performed the same tensor work as
+            // `sum(t)` but counted zero tensor_heavy_ops (found by the
+            // tensor-blindness probe).
             MirExprKind::Call { callee, args } => {
-                if let MirExprKind::Var(name) = &callee.kind {
-                    classify_builtin_call(name, self);
+                match &callee.kind {
+                    MirExprKind::Var(name) => classify_builtin_call(name, self),
+                    MirExprKind::Field { object, name } => {
+                        classify_method_call(object, name, self)
+                    }
+                    _ => {}
                 }
                 self.walk_expr(callee);
                 for a in args {
@@ -311,6 +319,47 @@ fn classify_builtin_call(name: &str, p: &mut MemoryProxy) {
     }
 }
 
+/// Tensor-heavy METHOD names (`t.sum()`, `t.matmul(u)`, ...). Same
+/// surface as [`TENSOR_HEAVY_BUILTINS`] plus the tensor reductions and
+/// activations only reachable as methods. Classification is by name
+/// alone (MIR has no receiver types); a `.sum()` on a DataFrame
+/// over-counts tensor_heavy_ops, which the module docs already declare
+/// the safe direction.
+const TENSOR_HEAVY_METHODS: &[&str] = &[
+    "matmul",
+    "dot",
+    "sum",
+    "mean",
+    "binned_sum",
+    "transpose",
+    "reshape",
+    "add",
+    "sub",
+    "abs",
+    "relu",
+    "gelu",
+    "softmax",
+    "layer_norm",
+    "var",
+    "std",
+];
+
+/// `Tensor.<name>(...)` static constructors — allocation sites in
+/// method form (`Tensor.from_vec` materializes a fresh buffer exactly
+/// like the free-call `tensor_new`).
+const TENSOR_CONSTRUCTOR_METHODS: &[&str] = &["from_vec", "zeros", "ones", "randn", "eye", "new"];
+
+fn classify_method_call(object: &MirExpr, name: &str, p: &mut MemoryProxy) {
+    if TENSOR_HEAVY_METHODS.contains(&name) {
+        p.tensor_heavy_ops = p.tensor_heavy_ops.saturating_add(1);
+    }
+    if let MirExprKind::Var(obj) = &object.kind {
+        if obj == "Tensor" && TENSOR_CONSTRUCTOR_METHODS.contains(&name) {
+            p.alloc_sites = p.alloc_sites.saturating_add(1);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -389,6 +438,54 @@ mod tests {
         let p = MemoryProxy::from_function(&f);
         assert_eq!(p.tensor_heavy_ops, 1);
         assert_eq!(p.alloc_sites, 1);
+    }
+
+    #[test]
+    fn method_call_sum_counts_tensor_heavy() {
+        // `t.sum()` — Field callee. Pre-Phase-A1 this counted zero.
+        let mut f = empty_main();
+        f.body.stmts.push(MirStmt::Expr(ekind(MirExprKind::Call {
+            callee: Box::new(ekind(MirExprKind::Field {
+                object: Box::new(ekind(MirExprKind::Var("t".to_string()))),
+                name: "sum".to_string(),
+            })),
+            args: vec![],
+        })));
+        let p = MemoryProxy::from_function(&f);
+        assert_eq!(p.tensor_heavy_ops, 1);
+        assert_eq!(p.alloc_sites, 0);
+    }
+
+    #[test]
+    fn tensor_from_vec_counts_alloc_site() {
+        // `Tensor.from_vec(buf, shape)` — static constructor method.
+        let mut f = empty_main();
+        f.body.stmts.push(MirStmt::Expr(ekind(MirExprKind::Call {
+            callee: Box::new(ekind(MirExprKind::Field {
+                object: Box::new(ekind(MirExprKind::Var("Tensor".to_string()))),
+                name: "from_vec".to_string(),
+            })),
+            args: vec![ekind(MirExprKind::Var("buf".to_string()))],
+        })));
+        let p = MemoryProxy::from_function(&f);
+        assert_eq!(p.alloc_sites, 1);
+        // from_vec is a constructor, not an FP-heavy op.
+        assert_eq!(p.tensor_heavy_ops, 0);
+    }
+
+    #[test]
+    fn non_tensor_method_counts_nothing() {
+        let mut f = empty_main();
+        f.body.stmts.push(MirStmt::Expr(ekind(MirExprKind::Call {
+            callee: Box::new(ekind(MirExprKind::Field {
+                object: Box::new(ekind(MirExprKind::Var("s".to_string()))),
+                name: "to_upper".to_string(),
+            })),
+            args: vec![],
+        })));
+        let p = MemoryProxy::from_function(&f);
+        assert_eq!(p.tensor_heavy_ops, 0);
+        assert_eq!(p.alloc_sites, 0);
     }
 
     #[test]

@@ -22,6 +22,7 @@
 use bolero::check;
 use cjc_cana_compress::lossless_trace::{lossless_compress_bytes, lossless_decompress_bytes};
 use cjc_cana_compress::motif_dictionary::{compress_motif_dictionary, decompress_motif_dictionary};
+use cjc_cana_compress::profile_db::CompilationProfile;
 use cjc_cana_compress::{CandidateId, EnergyComponents, EnergyRanker};
 use cjc_nss::PressureDensityState;
 use cjc_nss::{Pressure, PressureField, PressureKind};
@@ -38,6 +39,23 @@ fn fuzz_lossless_decoder_never_panics() {
         .for_each(|bytes: &[u8]| {
             // Decoder must produce either Ok(_) or Err(_), never panic.
             let _ = lossless_decompress_bytes(bytes);
+        });
+}
+
+// ---------------------------------------------------------------------------
+// 1b. Schema-v3 profile-row decoder on arbitrary bytes — no panic
+//     (Phase A items 2+3: the nested per-function records add a second
+//     length-prefixed section; truncation/garbage there must reject
+//     cleanly, never panic or over-allocate.)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fuzz_profile_row_decoder_never_panics() {
+    check!()
+        .with_max_len(4096)
+        .with_iterations(1000)
+        .for_each(|bytes: &[u8]| {
+            let _ = CompilationProfile::from_canonical_bytes(bytes);
         });
 }
 

@@ -279,6 +279,8 @@ fn family(program_name: &str) -> &'static str {
         "grad"
     } else if program_name.starts_with("train_") {
         "train"
+    } else if program_name.starts_with("tensor_") {
+        "tensor"
     } else {
         "static"
     }
@@ -286,6 +288,15 @@ fn family(program_name: &str) -> &'static str {
 
 fn is_test_program(program_name: &str) -> bool {
     hash_bytes(program_name.as_bytes()) % SPLIT_MOD == 0
+}
+
+/// Frozen holdout (Phase A item 7): `holdout_`-prefixed programs are
+/// excluded from BOTH the train set and the FNV-split test set — they
+/// were never part of any training or tuning decision and are
+/// evaluated only as a separate cohort at promotion gates. The FNV
+/// test split erodes as heads get tuned against it; this set does not.
+fn is_holdout_program(program_name: &str) -> bool {
+    program_name.starts_with("holdout_")
 }
 
 fn log1p_u64(v: u64) -> f64 {
@@ -419,6 +430,9 @@ struct ProgramDataset {
     v1_preds: Vec<f64>,
     train_idx: Vec<usize>,
     test_idx: Vec<usize>,
+    /// Frozen holdout (`holdout_` prefix) — never trained or tuned on;
+    /// reported as its own cohort at promotion gates only.
+    holdout_idx: Vec<usize>,
 }
 
 fn load_program_dataset() -> ProgramDataset {
@@ -437,13 +451,16 @@ fn load_program_dataset() -> ProgramDataset {
     let mut v1_preds = Vec::new();
     let mut train_idx = Vec::new();
     let mut test_idx = Vec::new();
+    let mut holdout_idx = Vec::new();
     for (i, (name, r)) in by_prog.iter().enumerate() {
         names.push(name.to_string());
         let q = query_from_row(r);
         feats.push(cjc_cana::pinn_thermal_v2::features_from_query(&q).to_vec());
         labels.push(r.nss_predicted_thermal_max);
         v1_preds.push(r.pinn_predicted_thermal_max);
-        if is_test_program(name) {
+        if is_holdout_program(name) {
+            holdout_idx.push(i);
+        } else if is_test_program(name) {
             test_idx.push(i);
         } else {
             train_idx.push(i);
@@ -456,6 +473,7 @@ fn load_program_dataset() -> ProgramDataset {
         v1_preds,
         train_idx,
         test_idx,
+        holdout_idx,
     }
 }
 
@@ -483,10 +501,11 @@ fn run_train() {
     let ds = load_program_dataset();
     println!("=== PINN v2 thermal-head training (deterministic ridge OLS) ===");
     println!(
-        "  programs: {} ({} train / {} test by FNV%{SPLIT_MOD})",
+        "  programs: {} ({} train / {} test by FNV%{SPLIT_MOD} / {} holdout-frozen, untouched)",
         ds.names.len(),
         ds.train_idx.len(),
-        ds.test_idx.len()
+        ds.test_idx.len(),
+        ds.holdout_idx.len()
     );
 
     let model = fit_ridge(&ds.feats, &ds.labels, &ds.train_idx)
@@ -632,6 +651,11 @@ fn run_shadow() {
     };
     report("train", &ds.train_idx);
     let (v1_test, v2_test) = report("held-out", &ds.test_idx);
+    // Frozen holdout (Phase A item 7): never used in any training or
+    // tuning decision — THE promotion-gate cohort that doesn't erode.
+    if !ds.holdout_idx.is_empty() {
+        report("holdout", &ds.holdout_idx);
+    }
     let (v1_all, v2_all) = report("overall", &all_idx);
 
     let promote = v2_test < v1_test && v2_all < v1_all;
@@ -681,11 +705,16 @@ fn run_sanity() {
     println!("  parity Some(true): {}/{}", parity_ok, rows.len());
     println!("  legality approved: {}/{}", legal_ok, rows.len());
     println!("  cost models seen: {:?}", models);
-    let test_programs = programs.iter().filter(|p| is_test_program(p)).count();
+    let holdout_programs = programs.iter().filter(|p| is_holdout_program(p)).count();
+    let test_programs = programs
+        .iter()
+        .filter(|p| !is_holdout_program(p) && is_test_program(p))
+        .count();
     println!(
-        "  train/test split (FNV%{SPLIT_MOD}==0 → test): {} train / {} test programs",
-        programs.len() - test_programs,
-        test_programs
+        "  train/test split (FNV%{SPLIT_MOD}==0 → test): {} train / {} test / {} holdout-frozen programs",
+        programs.len() - test_programs - holdout_programs,
+        test_programs,
+        holdout_programs
     );
 
     // ---- 2. Score label: distribution per config ---------------------------
@@ -824,6 +853,26 @@ fn run_sanity() {
         .map(|(b, n)| format!("[0.{b}0,0.{}0): {n}", b + 1))
         .collect();
     println!("  thermal bands: {}", band_view.join("  "));
+
+    // Schema v3 (Phase A item 2): per-FUNCTION recorded labels — the
+    // effective-label-count multiplier the per-program MAX was hiding.
+    let mut fn_cpu: Vec<f64> = Vec::new();
+    let mut fn_memory: Vec<f64> = Vec::new();
+    let mut fn_thermal: Vec<f64> = Vec::new();
+    for r in rec_by_prog.values() {
+        for (_fname, fp) in &r.per_function {
+            fn_cpu.push(fp.nss_cpu);
+            fn_memory.push(fp.nss_memory);
+            fn_thermal.push(fp.nss_thermal);
+        }
+    }
+    println!(
+        "  recorded labels at FUNCTION granularity ({} labels):",
+        fn_thermal.len()
+    );
+    print_stats_line("fn cpu", &stats(&fn_cpu));
+    print_stats_line("fn memory", &stats(&fn_memory));
+    print_stats_line("fn thermal", &stats(&fn_thermal));
 
     // ---- 5. PINN v1 closed-form vs recorded labels (the bar v2 must beat) --
     section("5. PINN v1 predictions vs recorded labels (program granularity)");

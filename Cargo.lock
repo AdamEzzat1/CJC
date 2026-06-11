@@ -251,6 +251,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cana-tensor-probe"
+version = "0.1.11"
+dependencies = [
+ "cjc-ast",
+ "cjc-cana",
+ "cjc-cana-compress",
+ "cjc-cana-nss",
+ "cjc-hir",
+ "cjc-mir",
+ "cjc-mir-exec",
+ "cjc-parser",
+ "cjc-repro",
+]
+
+[[package]]
 name = "cana-threshold-probe"
 version = "0.1.11"
 dependencies = [
@@ -486,6 +501,7 @@ dependencies = [
  "cjc-ast",
  "cjc-cana",
  "cjc-cana-compress",
+ "cjc-cana-nss",
  "cjc-cli",
  "cjc-data",
  "cjc-diag",

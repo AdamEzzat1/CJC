@@ -55,7 +55,7 @@ use cjc_cana::thermal_cost_model::ThermalAwareCostModel;
 use cjc_cana::{analyze_program, LinearCostModel};
 use cjc_cana_compress::pinn_bundle::read_bundle;
 use cjc_cana_compress::profile_db::{
-    append_row, read_all, CompilationProfile, PROFILE_SCHEMA_VERSION,
+    append_row, read_all, CompilationProfile, FnProfile, PROFILE_SCHEMA_VERSION,
 };
 use cjc_cana_compress::EnergyAwarePassRanker;
 use cjc_cana_nss::{NssPressurePredictor, RecordedPressurePredictor};
@@ -357,8 +357,419 @@ print(work({outer}));
     out
 }
 
+/// Shared tensor builder for the tensor family: deterministic values,
+/// one `Tensor.from_vec` alloc, 2 scalar FP binops per element.
+const TENSOR_BUILDER: &str = r#"
+fn build(n: i64, scale: f64) -> Tensor {
+    let mut buf: Any = [];
+    let mut i: i64 = 0;
+    while i < n * n {
+        buf = array_push(buf, scale * float(i % 7) + 0.25);
+        i = i + 1;
+    }
+    return Tensor.from_vec(buf, [n, n]);
+}
+"#;
+
+/// Tensor workload family (Phase A1 fix). The pre-A1 corpus had ZERO
+/// tensor programs, so the tensor-FP accounting (runtime counter +
+/// TypeMix/MemoryProxy/physical_cost) would have zero training
+/// variance — the retrained head could only ignore the new signal.
+/// Four hot-loop shapes (matmul, element-wise, method-form reduction,
+/// tensor+scalar mix) cover each accounting path the A1 probe found
+/// blind, and a graded `tensor_tg_k{0..4}` sub-family sweeps the
+/// tensor-vs-scalar FP share at fixed size (the tensor analog of the
+/// `grad_` family). Eval↔MIR parity for these shapes is locked by
+/// `tests/test_tensor_fp_accounting.rs` before they enter the harness.
+fn tensor_workloads() -> Vec<Workload> {
+    let mut out = Vec::new();
+    out.push(Workload {
+        name: "tensor_mm_n16_i50".to_string(),
+        source: format!(
+            r#"{TENSOR_BUILDER}
+fn mm_hot(a: Tensor, b: Tensor, iters: i64) -> f64 {{
+    let mut s: f64 = 0.0;
+    let mut i: i64 = 0;
+    while i < iters {{
+        let c: Tensor = matmul(a, b);
+        s = c.sum();
+        i = i + 1;
+    }}
+    return s;
+}}
+let a: Tensor = build(16, 0.5);
+let b: Tensor = build(16, 0.25);
+print(mm_hot(a, b, 50));
+"#
+        ),
+    });
+    out.push(Workload {
+        name: "tensor_ew_n32_i200".to_string(),
+        source: format!(
+            r#"{TENSOR_BUILDER}
+fn ew_hot(a: Tensor, b: Tensor, iters: i64) -> Tensor {{
+    let mut c: Tensor = a + b;
+    let mut i: i64 = 1;
+    while i < iters {{
+        c = a * b;
+        c = c + a;
+        i = i + 1;
+    }}
+    return c;
+}}
+let a: Tensor = build(32, 0.5);
+let b: Tensor = build(32, 0.25);
+let r: Tensor = ew_hot(a, b, 200);
+print(r.sum());
+"#
+        ),
+    });
+    out.push(Workload {
+        name: "tensor_red_n64_i100".to_string(),
+        source: format!(
+            r#"{TENSOR_BUILDER}
+fn red_hot(a: Tensor, iters: i64) -> f64 {{
+    let mut s: f64 = 0.0;
+    let mut i: i64 = 0;
+    while i < iters {{
+        s = a.sum();
+        i = i + 1;
+    }}
+    return s;
+}}
+let a: Tensor = build(64, 0.5);
+print(red_hot(a, 100));
+"#
+        ),
+    });
+    out.push(Workload {
+        name: "tensor_mix_n16_i50".to_string(),
+        source: format!(
+            r#"{TENSOR_BUILDER}
+fn mix_hot(a: Tensor, b: Tensor, iters: i64) -> f64 {{
+    let mut acc: f64 = 0.0;
+    let mut i: i64 = 0;
+    while i < iters {{
+        let c: Tensor = matmul(a, b);
+        acc = acc + 0.001;
+        i = i + 1;
+    }}
+    return acc;
+}}
+let a: Tensor = build(16, 0.5);
+let b: Tensor = build(16, 0.25);
+print(mix_hot(a, b, 50));
+"#
+        ),
+    });
+    // Graded sub-family: per loop iteration, `k` tensor scalar-mul ops
+    // and `4 - k` scalar float adds — sweeps tensor share 0%→100%.
+    for k in 0u32..=4 {
+        let mut body = String::new();
+        for _ in 0..k {
+            body.push_str("        u = u * 0.999;\n");
+        }
+        for j in 0..(4 - k) {
+            body.push_str(&format!("        facc = facc + 0.5{j:01};\n"));
+        }
+        out.push(Workload {
+            name: format!("tensor_tg_k{k}"),
+            source: format!(
+                r#"{TENSOR_BUILDER}
+fn work(t: Tensor, n: i64) -> f64 {{
+    let mut facc: f64 = 0.0;
+    let mut u: Tensor = t * 1.0;
+    let mut i: i64 = 0;
+    while i < n {{
+{body}        i = i + 1;
+    }}
+    print(facc);
+    return u.sum();
+}}
+let t: Tensor = build(16, 0.5);
+print(work(t, 128));
+"#
+            ),
+        });
+    }
+    out
+}
+
+/// Memory-gradient family (Phase A item 4). What the recorded memory
+/// label CAN see (verified against the executor): `heap_bytes_in_use =
+/// gc_live × 4096 + arena_alloc_count × 64`, where `gc_live` moves only
+/// via the explicit `gc_alloc` builtin and `arena_alloc_count` counts
+/// EXECUTED `Let` statements whose escape analysis classified them
+/// `AllocHint::Arena` — flat 64 bytes per execution, size-blind,
+/// cumulative (never decremented). Rc-buffer memory — arrays, tensors,
+/// strings, i.e. the actual memory consumers — is INVISIBLE to the
+/// label (`cjc-mir-exec/src/lib.rs` heap proxy; same structural
+/// blindness pattern A1 found for thermal). This family therefore
+/// sweeps per-iteration arena-let executions ×4 per step — the one
+/// honest dial a `.cjcl` program has — and the resulting label spread
+/// is MEASURED, not assumed; the expected outcome is a small gradient
+/// that documents the label's ceiling, not std > 0.05.
+fn memory_gradient_workloads() -> Vec<Workload> {
+    let mut out = Vec::new();
+    for k in 1u32..=5 {
+        let iters = 4i64.pow(k) * 64; // 256 .. 65,536
+        out.push(Workload {
+            name: format!("mem_grad_a{k}"),
+            source: format!(
+                r#"
+fn churn(n: i64) -> i64 {{
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {{
+        let cell: Any = [i, i + 1];
+        let pair: Any = (i, i * 2);
+        total = total + i;
+        i = i + 1;
+    }}
+    return total;
+}}
+print(churn({iters}));
+"#
+            ),
+        });
+    }
+    out
+}
+
+/// Frozen holdout set (Phase A item 7). Ten NEW programs, never used
+/// in any training or tuning decision; the trainer excludes the
+/// `holdout_` prefix from BOTH the train and the FNV-split test sets
+/// and reports them only as a separate shadow cohort at promotion
+/// gates. Shapes deliberately overlap no existing family member:
+/// different constants, different loop structures, different
+/// tensor/scalar mixes.
+fn holdout_workloads() -> Vec<Workload> {
+    let mk = |name: &str, source: &str| Workload {
+        name: name.to_string(),
+        source: source.to_string(),
+    };
+    vec![
+        mk(
+            "holdout_int_collatz",
+            r#"
+fn steps(start: i64) -> i64 {
+    let mut x: i64 = start;
+    let mut c: i64 = 0;
+    while x > 1 {
+        if x / 2 * 2 == x {
+            x = x / 2;
+        } else {
+            x = 3 * x + 1;
+        }
+        c = c + 1;
+    }
+    return c;
+}
+print(steps(27));
+"#,
+        ),
+        mk(
+            "holdout_int_gcd_grid",
+            r#"
+fn gcd(a: i64, b: i64) -> i64 {
+    let mut x: i64 = a;
+    let mut y: i64 = b;
+    while y != 0 {
+        let t: i64 = y;
+        y = x - x / y * y;
+        x = t;
+    }
+    return x;
+}
+fn grid(n: i64) -> i64 {
+    let mut s: i64 = 0;
+    let mut i: i64 = 1;
+    while i <= n {
+        let mut j: i64 = 1;
+        while j <= n {
+            s = s + gcd(i, j);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return s;
+}
+print(grid(24));
+"#,
+        ),
+        mk(
+            "holdout_fp_logistic",
+            r#"
+fn iterate(r: f64, n: i64) -> f64 {
+    let mut x: f64 = 0.37;
+    let mut i: i64 = 0;
+    while i < n {
+        x = r * x * (1.0 - x);
+        i = i + 1;
+    }
+    return x;
+}
+print(iterate(3.61, 4000));
+"#,
+        ),
+        mk(
+            "holdout_fp_mandel_cell",
+            r#"
+fn escape_steps(cr: f64, ci: f64, cap: i64) -> i64 {
+    let mut zr: f64 = 0.0;
+    let mut zi: f64 = 0.0;
+    let mut i: i64 = 0;
+    while i < cap {
+        let zr2: f64 = zr * zr - zi * zi + cr;
+        zi = 2.0 * zr * zi + ci;
+        zr = zr2;
+        if zr * zr + zi * zi > 4.0 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return cap;
+}
+print(escape_steps(-0.7436, 0.1318, 3000));
+"#,
+        ),
+        mk(
+            "holdout_fp_int_alternate",
+            r#"
+fn alternate(n: i64) -> f64 {
+    let mut acc: f64 = 0.0;
+    let mut parity: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        if parity == 0 {
+            acc = acc + 1.0 / (1.0 + float(i));
+            parity = 1;
+        } else {
+            parity = 0;
+        }
+        i = i + 1;
+    }
+    return acc;
+}
+print(alternate(2500));
+"#,
+        ),
+        mk(
+            "holdout_tensor_scale_chain",
+            r#"
+fn build(n: i64) -> Tensor {
+    let mut buf: Any = [];
+    let mut i: i64 = 0;
+    while i < n * n {
+        buf = array_push(buf, 0.125 * float(i % 11) + 0.5);
+        i = i + 1;
+    }
+    return Tensor.from_vec(buf, [n, n]);
+}
+fn chain(t: Tensor, iters: i64) -> f64 {
+    let mut u: Tensor = t * 1.0;
+    let mut i: i64 = 0;
+    while i < iters {
+        u = u * 1.0009;
+        u = u - 0.0004;
+        i = i + 1;
+    }
+    return u.sum();
+}
+let t: Tensor = build(24);
+print(chain(t, 160));
+"#,
+        ),
+        mk(
+            "holdout_tensor_mm_rect",
+            r#"
+fn build_rect(rows: i64, cols: i64, scale: f64) -> Tensor {
+    let mut buf: Any = [];
+    let mut i: i64 = 0;
+    while i < rows * cols {
+        buf = array_push(buf, scale * float(i % 5) + 0.2);
+        i = i + 1;
+    }
+    return Tensor.from_vec(buf, [rows, cols]);
+}
+fn mm(a: Tensor, b: Tensor, iters: i64) -> f64 {
+    let mut s: f64 = 0.0;
+    let mut i: i64 = 0;
+    while i < iters {
+        let c: Tensor = matmul(a, b);
+        s = c.sum();
+        i = i + 1;
+    }
+    return s;
+}
+let a: Tensor = build_rect(8, 24, 0.4);
+let b: Tensor = build_rect(24, 12, 0.3);
+print(mm(a, b, 40));
+"#,
+        ),
+        mk(
+            "holdout_mixed_ema",
+            r#"
+fn ema(n: i64) -> f64 {
+    let mut level: f64 = 10.0;
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let sample: f64 = float(i % 17) * 0.3;
+        level = 0.9 * level + 0.1 * sample;
+        total = total + i % 3;
+        i = i + 1;
+    }
+    print(total);
+    return level;
+}
+print(ema(3000));
+"#,
+        ),
+        mk(
+            "holdout_deep_calls",
+            r#"
+fn leaf(x: i64) -> i64 { return x * 2 + 1; }
+fn mid(x: i64) -> i64 { return leaf(x) + leaf(x + 1); }
+fn top(x: i64) -> i64 { return mid(x) + mid(x + 2); }
+fn drive(n: i64) -> i64 {
+    let mut s: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        s = s + top(i);
+        i = i + 1;
+    }
+    return s;
+}
+print(drive(800));
+"#,
+        ),
+        mk(
+            "holdout_alloc_pulse",
+            r#"
+fn pulse(n: i64) -> i64 {
+    let mut keep: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let burst: Any = [i, i + 1, i + 2, i + 3];
+        let tag: Any = (i, i * i);
+        keep = keep + i % 7;
+        i = i + 1;
+    }
+    return keep;
+}
+print(pulse(5000));
+"#,
+        ),
+    ]
+}
+
 /// Assemble the full workload list: 9 static snapshot programs +
-/// 30 thermal-gradient programs + the 95-program train corpus.
+/// 30 thermal-gradient programs + the 95-program train corpus +
+/// 9 tensor-family programs (Phase A1) + 5 memory-gradient programs
+/// (Phase A4) + 10 frozen holdout programs (Phase A7). Order matters:
+/// the row-hash canary indexes `workloads[8]` (fp_hot), so new
+/// families append AFTER the static set.
 fn all_workloads() -> Vec<Workload> {
     let mut out: Vec<Workload> = PROGRAMS
         .iter()
@@ -374,6 +785,9 @@ fn all_workloads() -> Vec<Workload> {
             source: p.source.to_string(),
         });
     }
+    out.extend(tensor_workloads());
+    out.extend(memory_gradient_workloads());
+    out.extend(holdout_workloads());
     out
 }
 
@@ -683,16 +1097,90 @@ fn run_experiment(
     cjc_mir::escape::annotate_program(&mut optimized);
     let compile_wall_micros = wall_start.elapsed().as_micros() as u64;
 
+    // -- Phase A item 5: run the EXISTING verifiers on every optimized
+    //    program. They existed but were never exercised here; mandatory
+    //    before forced/selected plans get more aggressive. Hard panic =
+    //    the regen gate fails loudly, never a silently-poisoned corpus.
+    if let Err(errors) = cjc_mir::nogc_verify::verify_nogc(&optimized) {
+        panic!(
+            "NoGC verifier rejected optimized {}/{}: {:?}",
+            prog.name, config, errors
+        );
+    }
+    let mir_legality = cjc_mir::verify::verify_mir_legality(&optimized);
+    assert!(
+        mir_legality.is_ok(),
+        "MIR legality verifier rejected optimized {}/{}: {:?}",
+        prog.name,
+        config,
+        mir_legality.errors()
+    );
+
     // -- Deterministic size metric (kept in the row as structural info;
     //    no longer the score) ------------------------------------------------
     let mir_nodes_before = total_expr_count(&features);
     let optimized_features = cjc_cana::features::extract(&optimized);
     let mir_nodes_after = total_expr_count(&optimized_features);
 
-    // -- Workload estimates + PINN predictions ------------------------------
+    // Unroll-explosion guard (Phase A item 5). The research doc
+    // proposed 1.5×; the first gated regen MEASURED that bound wrong:
+    // the ranked BASELINE plan fully unrolls countable 8-trip loops,
+    // legitimately growing `grad_f10_d2_n64` 97 → 605 nodes (6.24×).
+    // Full unroll of trip count N is ~N× body growth by design, so the
+    // runaway-duplication cap sits above the designed maximum: 16×.
+    // The end-of-run report prints the measured corpus-wide max so the
+    // bound stays evidence-tightened, not guessed.
+    let size_ratio = if mir_nodes_before > 0 {
+        mir_nodes_after as f64 / mir_nodes_before as f64
+    } else {
+        1.0
+    };
+    assert!(
+        size_ratio <= 16.0,
+        "code-size explosion in {}/{}: {} -> {} nodes (ratio {size_ratio:.3} > 16)",
+        prog.name,
+        config,
+        mir_nodes_before,
+        mir_nodes_after
+    );
+
+    // -- NSS predictions (full per-function maps; schema v3 persists
+    //    them per function, not just the max) --------------------------------
+    // Recorded configs record the recorded predictor's view; synthetic
+    // configs record Option A's — the row reflects what the ranker saw.
+    // Membership test, NOT `ends_with("_rec")`: the `_t50`/`_c80`/`_c60`
+    // variants rank under recorded pressures too, and a suffix match
+    // silently stamped them with Option-A labels (caught by the v2 §2.1
+    // data-sanity pass).
+    let (nss_cpu_map, nss_memory_map, nss_thermal_map) =
+        if CONFIG_IDS_RECORDED.contains(&config) {
+            (
+                recorded.predict_cpu_saturation(&mir, &features),
+                recorded.predict_memory_peak(&mir, &features),
+                recorded.predict_thermal(&mir, &features),
+            )
+        } else {
+            let nss = NssPressurePredictor::default();
+            (
+                nss.predict_cpu_saturation(&mir, &features),
+                nss.predict_memory_peak(&mir, &features),
+                nss.predict_thermal(&mir, &features),
+            )
+        };
+    let max_of = |m: &BTreeMap<String, f64>| m.values().copied().fold(0.0f64, f64::max);
+    let (nss_cpu_max, nss_memory_max, nss_thermal_max) = (
+        max_of(&nss_cpu_map),
+        max_of(&nss_memory_map),
+        max_of(&nss_thermal_map),
+    );
+
+    // -- Workload estimates + PINN predictions + per-function profiles ------
     // Neutral pass ("dce" has identity physical amplification) so the
     // row captures the program's intrinsic workload, not a per-pass
-    // variant.
+    // variant. Schema v3 (Phase A items 2+3): the per-function query
+    // values, the loop features from CfgMetrics (which existed but
+    // never reached rows), and the per-function pressure labels all
+    // persist alongside the program-level sums/maxes.
     let coeffs = PhysicalCoefficients::default();
     let mut est_flops = 0u64;
     let mut est_read = 0u64;
@@ -703,6 +1191,7 @@ fn run_experiment(
     let mut pinn_energy_max = 0.0f64;
     let mut pinn_thermal_max = 0.0f64;
     let mut pinn_bandwidth_max = 0.0f64;
+    let mut per_function: Vec<(String, FnProfile)> = Vec::new();
     for (fn_name, ff) in &features.per_fn {
         let q = build_physical_query(fn_name, "dce", ff);
         est_flops = est_flops.saturating_add(q.flops_estimate);
@@ -716,30 +1205,23 @@ fn run_experiment(
             pinn_thermal_max = pinn_thermal_max.max(est.thermal_pressure);
             pinn_bandwidth_max = pinn_bandwidth_max.max(est.bandwidth_pressure);
         }
+        per_function.push((
+            fn_name.clone(),
+            FnProfile {
+                flops: q.flops_estimate,
+                bytes_read: q.bytes_read_estimate,
+                bytes_written: q.bytes_written_estimate,
+                alloc_bytes: q.allocation_bytes_estimate,
+                working_set: q.working_set_bytes_estimate,
+                float_ops: q.float_ops_estimate,
+                countable_loop_count: ff.cfg.countable_loop_count,
+                max_loop_depth: ff.cfg.max_loop_depth,
+                nss_cpu: nss_cpu_map.get(fn_name).copied().unwrap_or(0.0),
+                nss_memory: nss_memory_map.get(fn_name).copied().unwrap_or(0.0),
+                nss_thermal: nss_thermal_map.get(fn_name).copied().unwrap_or(0.0),
+            },
+        ));
     }
-
-    // -- NSS predictions -----------------------------------------------------
-    // Recorded configs record the recorded predictor's view; synthetic
-    // configs record Option A's — the row reflects what the ranker saw.
-    // Membership test, NOT `ends_with("_rec")`: the `_t50`/`_c80`/`_c60`
-    // variants rank under recorded pressures too, and a suffix match
-    // silently stamped them with Option-A labels (caught by the v2 §2.1
-    // data-sanity pass).
-    let max_of = |m: BTreeMap<String, f64>| m.values().copied().fold(0.0f64, f64::max);
-    let (nss_cpu_max, nss_memory_max, nss_thermal_max) = if CONFIG_IDS_RECORDED.contains(&config) {
-        (
-            max_of(recorded.predict_cpu_saturation(&mir, &features)),
-            max_of(recorded.predict_memory_peak(&mir, &features)),
-            max_of(recorded.predict_thermal(&mir, &features)),
-        )
-    } else {
-        let nss = NssPressurePredictor::default();
-        (
-            max_of(nss.predict_cpu_saturation(&mir, &features)),
-            max_of(nss.predict_memory_peak(&mir, &features)),
-            max_of(nss.predict_thermal(&mir, &features)),
-        )
-    };
 
     // -- Parity + energy: AST-eval vs INSTRUMENTED MIR-exec on the
     //    OPTIMIZED program. The same run serves both purposes — the
@@ -804,6 +1286,7 @@ fn run_experiment(
         cost_model_id: planned.cost_model_id,
         cost_model_version: planned.cost_model_version,
         pass_sequence,
+        per_function,
         estimated_flops: est_flops,
         estimated_bytes_read: est_read,
         estimated_bytes_written: est_written,
@@ -980,6 +1463,27 @@ fn main() {
             config, min, mean, max, differs
         );
     }
+
+    // -- Code-size ratio report (Phase A item 5) ------------------------------
+    // Measured corpus-wide max — the evidence base for the explosion
+    // cap above (16×). If this number creeps toward the cap, the cap
+    // is doing its job; tighten or investigate, don't raise it blindly.
+    let mut max_ratio = 0.0f64;
+    let mut max_ratio_at = String::new();
+    for (prog, per_config) in &rows {
+        for (config, r) in per_config {
+            if r.mir_nodes_before > 0 {
+                let ratio = r.mir_nodes_after as f64 / r.mir_nodes_before as f64;
+                if ratio > max_ratio {
+                    max_ratio = ratio;
+                    max_ratio_at = format!("{prog}/{config}");
+                }
+            }
+        }
+    }
+    println!(
+        "\nCode-size ratio (nodes_after/nodes_before): corpus max {max_ratio:.3} at {max_ratio_at} (hard cap 16)"
+    );
 
     // -- Differentiation check: did real traces change ANY plan? ------------
     let mut diverged: Vec<String> = Vec::new();

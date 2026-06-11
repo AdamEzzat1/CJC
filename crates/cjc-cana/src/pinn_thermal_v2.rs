@@ -58,7 +58,13 @@ pub const PINN_V2_MODEL_ID: &str = "pinn_thermal_v2";
 
 /// Monotonic v2 model version; bump on any change to the feature
 /// basis, the standardization scheme, or the training recipe.
-pub const PINN_V2_MODEL_VERSION: u32 = 2;
+///
+/// v3 (Phase A1 fix): `float_ops_estimate` now includes tensor-op FP
+/// work (`TENSOR_FP_PER_OP` per site), and the density feature is
+/// capped at 1.0 to mirror the runtime label's per-window intensity
+/// cap — tensor sites can push the raw ratio far above 1 while the
+/// label saturates there.
+pub const PINN_V2_MODEL_VERSION: u32 = 3;
 
 /// Number of features in the v2 basis (see module docs table).
 pub const PINN_V2_FEATURE_COUNT: usize = 7;
@@ -119,10 +125,15 @@ impl PinnThermalV2 {
 /// synthetic query) and the predictor use — drift between the two
 /// would silently invalidate the weights.
 pub fn features_from_query(q: &PhysicalCostQuery<'_>) -> [f64; PINN_V2_FEATURE_COUNT] {
+    // Capped at 1.0 (v3): the recorded label's per-window intensity is
+    // `min(fp/instr, 1.0)`, so density beyond 1 carries no label
+    // information — tensor-heavy functions would otherwise push the
+    // raw ratio to 5–10 against a label pinned at 1.0. The uncapped
+    // magnitude survives in feature 5 (`ln(1+float_ops)`).
     let density = if q.flops_estimate == 0 {
         0.0
     } else {
-        q.float_ops_estimate as f64 / q.flops_estimate as f64
+        (q.float_ops_estimate as f64 / q.flops_estimate as f64).min(1.0)
     };
     [
         log1p_u64(q.flops_estimate),
@@ -186,6 +197,16 @@ mod tests {
     fn zero_flops_density_is_zero_not_nan() {
         let x = features_from_query(&query_with(0, 0));
         assert_eq!(x[6], 0.0);
+    }
+
+    #[test]
+    fn density_caps_at_one_for_tensor_heavy_queries() {
+        // v3: tensor FP estimates can exceed the expr-count flops proxy
+        // several-fold; the density feature saturates like the label.
+        let x = features_from_query(&query_with(100, 850));
+        assert_eq!(x[6], 1.0);
+        // The magnitude channel keeps the uncapped signal.
+        assert!(x[5] > x[0]);
     }
 
     #[test]
