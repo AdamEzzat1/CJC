@@ -147,6 +147,7 @@ fn extreme_values_roundtrip_bit_exactly() {
     weird.gc_event = true;
     weird.instruction_count = u32::MAX;
     weird.thermal_intensity = -0.0;
+    weird.alloc_bytes_in_window = u64::MAX;
     let events = vec![weird, event(0, 0), weird];
 
     let canon_back = canonical_bytes_to_events(&events_to_canonical_bytes(&events)).unwrap();
@@ -216,9 +217,9 @@ mod props {
             any::<u32>(),
             any::<(bool, bool, bool)>(),
             any::<u32>(),
-            any::<u64>(), // thermal bits
+            (any::<u64>(), any::<u64>()), // thermal bits + alloc bytes
         )
-            .prop_map(|(tick, block, rp, heap, depth, (b, io, gc), ic, th)| {
+            .prop_map(|(tick, block, rp, heap, depth, (b, io, gc), ic, (th, alloc))| {
                 let mut e = MirTraceEvent::minimal(tick, block);
                 e.register_pressure = f64::from_bits(rp);
                 e.heap_bytes_in_use = heap;
@@ -228,6 +229,7 @@ mod props {
                 e.gc_event = gc;
                 e.instruction_count = ic;
                 e.thermal_intensity = f64::from_bits(th);
+                e.alloc_bytes_in_window = alloc;
                 e
             })
     }

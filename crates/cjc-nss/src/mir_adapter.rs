@@ -117,6 +117,18 @@ pub struct MirTraceEvent {
     /// `0.0`, which preserves the documented pre-Option-B behaviour
     /// that synthetic predictions carry no thermal signal.
     pub thermal_intensity: f64,
+    /// Bytes of Rc-buffer payload allocated at creation sites since
+    /// the last emitted event (Phase F label fix). The pre-F memory
+    /// label was structurally blind to Rc memory — arrays, tensors and
+    /// strings, i.e. the actual memory consumers — because
+    /// `heap_bytes_in_use` only sees `gc_alloc` objects and
+    /// arena-classified `Let`s (measured corpus ceiling 0.0078). This
+    /// field carries MODEL prices (fixed per-element constants chosen
+    /// for platform stability, not `size_of` truths) and loads
+    /// [`PressureKind::Memory`] via the adapter's CUMULATIVE
+    /// `alloc_capacity_bytes` saturation. Option A (synthetic traces)
+    /// leaves it `0` — same precedent as `thermal_intensity`.
+    pub alloc_bytes_in_window: u64,
 }
 
 impl MirTraceEvent {
@@ -135,6 +147,7 @@ impl MirTraceEvent {
             gc_event: false,
             instruction_count: 1,
             thermal_intensity: 0.0,
+            alloc_bytes_in_window: 0,
         }
     }
 }
@@ -153,6 +166,23 @@ pub struct MirAdapterConfig {
     /// `heap_bytes_in_use` into a `[0, 1]` saturation. Must be ≥ 1.
     /// Default 1 GiB.
     pub heap_capacity_bytes: u64,
+    /// Allocation-capacity reference value (Phase F). Normalises the
+    /// CUMULATIVE `alloc_bytes_in_window` total per block into a
+    /// `[0, 1.5]` saturation that joins [`PressureKind::Memory`] via
+    /// `max` with the heap term. Cumulative (not per-window) so
+    /// allocation-VOLUME gradients — e.g. the `mem_grad_a{1..5}`
+    /// corpus family, which varies iteration count at fixed
+    /// per-iteration churn — produce label variance. Must be ≥ 1.
+    ///
+    /// Default 4 MiB — evidence-tightened, not guessed: the first
+    /// Phase-F corpus regen measured the corpus-max cumulative
+    /// creation-site allocation at ~4.2 MB (`mem_grad_a5`, 65,536
+    /// iterations × 64 B model price); a 64 MiB default squashed all
+    /// 158 programs into [0, 0.0625] (label std 0.0068, below the
+    /// 0.05 trainability bar). 4 MiB spreads the corpus across the
+    /// full saturation range. Same retune-from-regen-evidence
+    /// precedent as the ablation harness's code-size cap.
+    pub alloc_capacity_bytes: u64,
     /// Call-depth threshold above which `Sync` pressure saturates.
     /// Default 32 (deep call chains).
     pub call_depth_threshold: u32,
@@ -173,6 +203,7 @@ impl Default for MirAdapterConfig {
             events_per_tick: 16,
             n_blocks: 1,
             heap_capacity_bytes: 1024 * 1024 * 1024, // 1 GiB
+            alloc_capacity_bytes: 4 * 1024 * 1024,   // 4 MiB (see field docs)
             call_depth_threshold: 32,
             link_capacity: 8,
             link_weight: 0.25,
@@ -197,6 +228,11 @@ impl MirAdapterConfig {
         if self.heap_capacity_bytes == 0 {
             return Err(NssError::InvalidConfig {
                 detail: "heap_capacity_bytes must be >= 1".into(),
+            });
+        }
+        if self.alloc_capacity_bytes == 0 {
+            return Err(NssError::InvalidConfig {
+                detail: "alloc_capacity_bytes must be >= 1".into(),
             });
         }
         if self.call_depth_threshold == 0 {
@@ -298,11 +334,22 @@ pub fn adapt_mir_trace_to_cluster_trajectory(
     // Build the trajectory tick by tick. We iterate over buckets in
     // ascending key order (BTreeMap iteration) so the resulting tick
     // sequence is monotonic.
+    //
+    // Phase F: cumulative allocated bytes per block, carried ACROSS
+    // buckets — the memory label reads the trajectory's last state, so
+    // a cumulative term turns allocation VOLUME into label signal
+    // (a per-window rate would be flat across the `mem_grad` family,
+    // which varies iteration count at fixed per-iteration churn).
     let mut traj = ClusterTrajectory::empty();
     let mut produced: u64 = 0;
+    let mut cum_alloc: BTreeMap<u32, u64> = BTreeMap::new();
     for (bucket_idx, bucket_events) in buckets.iter() {
         let nss_tick = cfg.initial_tick + bucket_idx;
-        let state = build_cluster_state(nss_tick, bucket_events, cfg, &topology)?;
+        for ev in bucket_events {
+            let slot = cum_alloc.entry(ev.block_id).or_insert(0);
+            *slot = slot.saturating_add(ev.alloc_bytes_in_window);
+        }
+        let state = build_cluster_state(nss_tick, bucket_events, cfg, &topology, &cum_alloc)?;
         // Phase 5a: scheduler actions + per-node failure labels are
         // synthesised as Idle + Nominal. A future Phase 5c could
         // refine these (e.g. tag a basic block with `Collapse` if
@@ -338,6 +385,7 @@ fn build_cluster_state(
     bucket_events: &[&MirTraceEvent],
     cfg: &MirAdapterConfig,
     topology: &ClusterTopology,
+    cum_alloc: &BTreeMap<u32, u64>,
 ) -> Result<ClusterSystemState, NssError> {
     // Per-block aggregates.
     struct BlockAgg {
@@ -402,7 +450,14 @@ fn build_cluster_state(
             let n = agg.event_count.max(1) as f64;
             let cpu_p = (agg.reg_sum.finalize() / n).clamp(0.0, 1.5);
             let heap_avg = agg.heap_sum.finalize() / n;
-            let mem_p = (heap_avg / cfg.heap_capacity_bytes as f64).min(1.5);
+            // Phase F: Memory pressure is the max of the (Rc-blind)
+            // heap-proxy saturation and the cumulative creation-site
+            // allocation saturation — the latter is the label fix.
+            let heap_term = (heap_avg / cfg.heap_capacity_bytes as f64).min(1.5);
+            let alloc_total = cum_alloc.get(&block).copied().unwrap_or(0);
+            let alloc_term =
+                (alloc_total as f64 / cfg.alloc_capacity_bytes as f64).min(1.5);
+            let mem_p = heap_term.max(alloc_term);
             let call_avg = agg.call_sum.finalize() / n;
             let call_sat = (call_avg / cfg.call_depth_threshold as f64).min(1.0);
             let gc_density = agg.gc_count as f64 / n;
@@ -473,6 +528,7 @@ mod tests {
                 gc_event: i % 17 == 0,
                 instruction_count: 4,
                 thermal_intensity: 0.2 + (block as f64) * 0.2, // 0.2/0.4/0.6
+                alloc_bytes_in_window: 0,
             });
         }
         v
@@ -658,6 +714,71 @@ mod tests {
             a.trajectory.canonical_bytes(),
             b.trajectory.canonical_bytes()
         );
+    }
+
+    #[test]
+    fn cumulative_alloc_bytes_load_memory_pressure() {
+        // Phase F label fix: two blocks with the SAME per-window alloc
+        // rate but different event counts must end with DIFFERENT
+        // Memory pressure — the term is cumulative, so allocation
+        // VOLUME (not rate) is the signal. This is exactly the
+        // mem_grad_a{1..5} family's shape.
+        let cfg = MirAdapterConfig {
+            n_blocks: 2,
+            events_per_tick: 4,
+            alloc_capacity_bytes: 1024,
+            ..MirAdapterConfig::default()
+        };
+        let mut events = Vec::new();
+        for i in 0..16u64 {
+            let block = if i % 4 == 0 { 0 } else { 1 };
+            events.push(MirTraceEvent {
+                alloc_bytes_in_window: 64,
+                ..MirTraceEvent::minimal(i, block)
+            });
+        }
+        let out = adapt_mir_trace_to_cluster_trajectory(&events, &cfg).unwrap();
+        let last = out.trajectory.last_state().unwrap();
+        let mem = |b: u32| {
+            last.nodes
+                .get(&NodeId(b))
+                .unwrap()
+                .pressures
+                .get(PressureKind::Memory)
+                .map(|p| p.magnitude)
+                .unwrap()
+        };
+        // block 0: 4 windows × 64 B = 256 / 1024 capacity = 0.25
+        // block 1: 12 windows × 64 B = 768 / 1024 capacity = 0.75
+        assert!((mem(0) - 0.25).abs() < 1e-12, "block 0 mem {}", mem(0));
+        assert!((mem(1) - 0.75).abs() < 1e-12, "block 1 mem {}", mem(1));
+    }
+
+    #[test]
+    fn zero_alloc_traces_preserve_heap_only_memory_behavior() {
+        // Backward compatibility: traces with alloc_bytes_in_window = 0
+        // (all Option-A synthetic traces, all pre-F recorded traces)
+        // must produce the same Memory pressure as before the field
+        // existed — the max() with a zero alloc term is the heap term.
+        let cfg = MirAdapterConfig {
+            n_blocks: 3,
+            events_per_tick: 16,
+            ..MirAdapterConfig::default()
+        };
+        let events = three_block_trace();
+        let out = adapt_mir_trace_to_cluster_trajectory(&events, &cfg).unwrap();
+        let last = out.trajectory.last_state().unwrap();
+        let mem0 = last
+            .nodes
+            .get(&NodeId(0))
+            .unwrap()
+            .pressures
+            .get(PressureKind::Memory)
+            .map(|p| p.magnitude)
+            .unwrap();
+        // 1 MiB heap / 1 GiB capacity.
+        let expected = (1024.0 * 1024.0) / (1024.0 * 1024.0 * 1024.0);
+        assert!((mem0 - expected).abs() < 1e-12, "mem0 {mem0} vs {expected}");
     }
 
     #[test]

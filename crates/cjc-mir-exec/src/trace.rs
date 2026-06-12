@@ -217,6 +217,7 @@ mod tests {
             gc_event: false,
             instruction_count: 8,
             thermal_intensity: 0.25,
+            alloc_bytes_in_window: 0,
         }
     }
 

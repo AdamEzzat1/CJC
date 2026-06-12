@@ -313,6 +313,13 @@ pub struct MirExecutor {
     trace_io_pending: bool,
     /// Option B: whether a GC collection ran since the last emit.
     trace_gc_pending: bool,
+    /// Phase F: bytes of Rc-buffer payload allocated at creation sites
+    /// since the last emit. MODEL prices (fixed constants for platform
+    /// stability — see [`ARRAY_ELEM_ALLOC_BYTES`]), not `size_of`
+    /// truths. Curated under-counting is the safe direction: unlisted
+    /// creation sites make programs look allocation-lighter, never
+    /// heavier.
+    trace_alloc_bytes: u64,
 }
 
 // -- Option B tensor FP accounting (Phase A1 fix) ---------------------------
@@ -398,6 +405,101 @@ fn method_tensor_fp_work(receiver: &Value, method: &str, args: &[Value]) -> u64 
     }
 }
 
+// -- Option B allocation accounting (Phase F label fix) ----------------------
+//
+// The recorded memory label was structurally blind to Rc-buffer memory
+// (arrays, tensors, strings — the actual consumers): the heap proxy
+// only sees `gc_alloc` objects ×4096 and arena-classified `Let`s ×64,
+// measured corpus ceiling 0.0078. These helpers price values CREATED
+// at curated sites into `trace_alloc_bytes`, drained per window into
+// `MirTraceEvent::alloc_bytes_in_window`. The same A1 discipline as
+// the tensor FP helpers above: prices derive from operand shapes only
+// (no clocks, no `size_of` — platform-stable model constants), and
+// unlisted sites under-count (programs look lighter, never heavier).
+
+/// Model price of one array/tuple ELEMENT slot. A deliberate constant,
+/// not `size_of::<Value>()` — labels must be platform-stable.
+const ARRAY_ELEM_ALLOC_BYTES: u64 = 16;
+
+/// Model price of one f64 tensor element (exact: the payload is f64).
+const TENSOR_ELEM_ALLOC_BYTES: u64 = 8;
+
+/// Allocation bytes of the RESULT of a tensor-involving binary op
+/// (element-wise / broadcast ops materialize a new tensor of the
+/// larger operand's length).
+fn tensor_binop_alloc_bytes(a: &Value, b: &Value) -> u64 {
+    match (a, b) {
+        (Value::Tensor(x), Value::Tensor(y)) => {
+            (x.len().max(y.len()) as u64).saturating_mul(TENSOR_ELEM_ALLOC_BYTES)
+        }
+        (Value::Tensor(t), Value::Float(_))
+        | (Value::Float(_), Value::Tensor(t))
+        | (Value::Tensor(t), Value::Int(_))
+        | (Value::Int(_), Value::Tensor(t)) => {
+            (t.len() as u64).saturating_mul(TENSOR_ELEM_ALLOC_BYTES)
+        }
+        _ => 0,
+    }
+}
+
+/// Allocation bytes of a FREE-CALL builtin's result. Curated: names
+/// not listed count 0.
+fn builtin_alloc_bytes(name: &str, args: &[Value]) -> u64 {
+    match name {
+        // COW append: one element slot (amortized; in-place when the
+        // Rc is unique, a clone otherwise — the model prices the
+        // logical growth, not the COW internals).
+        "array_push" => ARRAY_ELEM_ALLOC_BYTES,
+        // Matmul materializes an [m × n] result.
+        "matmul" => match (args.first(), args.get(1)) {
+            (Some(Value::Tensor(x)), Some(Value::Tensor(y))) => {
+                let (sa, sb) = (x.shape(), y.shape());
+                if sa.len() == 2 && sb.len() == 2 {
+                    (sa[0] as u64)
+                        .saturating_mul(sb[1] as u64)
+                        .saturating_mul(TENSOR_ELEM_ALLOC_BYTES)
+                } else {
+                    (x.len().max(y.len()) as u64).saturating_mul(TENSOR_ELEM_ALLOC_BYTES)
+                }
+            }
+            _ => 0,
+        },
+        // Element-wise tensor producers: result has the input's length.
+        "adam_step" => match args.first() {
+            Some(Value::Tensor(t)) => (t.len() as u64).saturating_mul(TENSOR_ELEM_ALLOC_BYTES),
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
+
+/// Allocation bytes of a METHOD call's result on a tensor receiver.
+/// Reductions (`sum`, `mean`, `dot`, ...) produce scalars — count 0.
+fn method_alloc_bytes(receiver: &Value, method: &str, args: &[Value]) -> u64 {
+    let Value::Tensor(t) = receiver else {
+        return 0;
+    };
+    match method {
+        "abs" | "relu" | "gelu" | "softmax" | "add" | "sub" | "transpose" | "reshape" => {
+            (t.len() as u64).saturating_mul(TENSOR_ELEM_ALLOC_BYTES)
+        }
+        "matmul" => match args.first() {
+            Some(Value::Tensor(b)) => {
+                let (sa, sb) = (t.shape(), b.shape());
+                if sa.len() == 2 && sb.len() == 2 {
+                    (sa[0] as u64)
+                        .saturating_mul(sb[1] as u64)
+                        .saturating_mul(TENSOR_ELEM_ALLOC_BYTES)
+                } else {
+                    (t.len().max(b.len()) as u64).saturating_mul(TENSOR_ELEM_ALLOC_BYTES)
+                }
+            }
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
+
 impl MirExecutor {
     /// Create a new MIR executor with the given deterministic RNG seed.
     ///
@@ -432,6 +534,7 @@ impl MirExecutor {
             trace_fp_ops: 0,
             trace_io_pending: false,
             trace_gc_pending: false,
+            trace_alloc_bytes: 0,
         }
     }
 
@@ -472,6 +575,7 @@ impl MirExecutor {
         };
         let instr = std::mem::take(&mut self.trace_instr_count);
         let fp = std::mem::take(&mut self.trace_fp_ops);
+        let alloc = std::mem::take(&mut self.trace_alloc_bytes);
         let denom = instr.max(1) as f64;
         let thermal_raw = fp as f64 / denom;
         // Heap proxy: GC-heap live objects at page granularity plus
@@ -493,6 +597,7 @@ impl MirExecutor {
             gc_event: std::mem::take(&mut self.trace_gc_pending),
             instruction_count: instr.max(1),
             thermal_intensity: thermal_raw.min(1.0),
+            alloc_bytes_in_window: alloc,
         };
         trace::with_trace(|c| c.emit(event));
     }
@@ -1010,6 +1115,14 @@ impl MirExecutor {
                 for e in elems {
                     vals.push(self.eval_expr(e)?);
                 }
+                // Phase F: array literals are the highest-volume Rc
+                // creation site in churn loops — price the element
+                // slots into the allocation window.
+                if self.trace_enabled {
+                    self.trace_alloc_bytes = self
+                        .trace_alloc_bytes
+                        .saturating_add((vals.len() as u64).saturating_mul(ARRAY_ELEM_ALLOC_BYTES));
+                }
                 Ok(Value::Array(Rc::new(vals)))
             }
             MirExprKind::Col(name) => {
@@ -1128,6 +1241,12 @@ impl MirExecutor {
                 let mut vals = Vec::with_capacity(elems.len());
                 for e in elems {
                     vals.push(self.eval_expr(e)?);
+                }
+                // Phase F: same pricing as array literals.
+                if self.trace_enabled {
+                    self.trace_alloc_bytes = self
+                        .trace_alloc_bytes
+                        .saturating_add((vals.len() as u64).saturating_mul(ARRAY_ELEM_ALLOC_BYTES));
                 }
                 Ok(Value::Tuple(Rc::new(vals)))
             }
@@ -1429,6 +1548,11 @@ impl MirExecutor {
             let w = tensor_binop_fp_work(&lv, &rv);
             if w > 0 {
                 self.trace_fp_ops = self.trace_fp_ops.saturating_add(w);
+            }
+            // Phase F: the result tensor is a fresh Rc buffer.
+            let a = tensor_binop_alloc_bytes(&lv, &rv);
+            if a > 0 {
+                self.trace_alloc_bytes = self.trace_alloc_bytes.saturating_add(a);
             }
         }
 
@@ -2140,6 +2264,11 @@ impl MirExecutor {
             let w = builtin_tensor_fp_work(name, &args);
             if w > 0 {
                 self.trace_fp_ops = self.trace_fp_ops.saturating_add(w);
+            }
+            // Phase F: builtin results that materialize Rc buffers.
+            let a = builtin_alloc_bytes(name, &args);
+            if a > 0 {
+                self.trace_alloc_bytes = self.trace_alloc_bytes.saturating_add(a);
             }
         }
 
@@ -3662,6 +3791,11 @@ impl MirExecutor {
             let w = method_tensor_fp_work(&receiver, method, &args);
             if w > 0 {
                 self.trace_fp_ops = self.trace_fp_ops.saturating_add(w);
+            }
+            // Phase F: method results that materialize Rc buffers.
+            let a = method_alloc_bytes(&receiver, method, &args);
+            if a > 0 {
+                self.trace_alloc_bytes = self.trace_alloc_bytes.saturating_add(a);
             }
         }
         match (&receiver, method) {

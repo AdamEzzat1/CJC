@@ -201,6 +201,10 @@ impl NssPressurePredictor {
                     // (predict_thermal → 0.0 under synthesis); real
                     // thermal comes from Option-B recorded traces.
                     thermal_intensity: 0.0,
+                    // Same precedent (Phase F): synthetic traces carry
+                    // no creation-site allocation signal; real alloc
+                    // bytes come from Option-B recorded traces.
+                    alloc_bytes_in_window: 0,
                 });
                 tick = tick.saturating_add(1);
             }

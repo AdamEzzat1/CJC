@@ -38,10 +38,11 @@ use cjc_runtime::{Tensor, Value};
 // Trace-stream serialization (prototype transforms; bit-exact invertible)
 // =============================================================================
 
-const CANON_MAGIC: &[u8; 4] = b"CTE0";
-const DELTA_MAGIC: &[u8; 4] = b"CTD0";
+// Format v1: adds the Phase F `alloc_bytes_in_window` column.
+const CANON_MAGIC: &[u8; 4] = b"CTE1";
+const DELTA_MAGIC: &[u8; 4] = b"CTD1";
 /// Bytes per event in the canonical encoding (see layout below).
-const EVENT_BYTES: usize = 45;
+const EVENT_BYTES: usize = 53;
 
 fn event_flags(e: &MirTraceEvent) -> u8 {
     (e.branch_taken as u8) | ((e.io_event as u8) << 1) | ((e.gc_event as u8) << 2)
@@ -49,8 +50,9 @@ fn event_flags(e: &MirTraceEvent) -> u8 {
 
 /// Canonical row-major encoding: `magic + count:u64` then per event
 /// `tick:u64, block_id:u32, register_pressure:f64bits, heap:u64,
-/// call_depth:u32, flags:u8, instruction_count:u32, thermal:f64bits`
-/// (45 bytes/event, all little-endian, floats by bit pattern).
+/// call_depth:u32, flags:u8, instruction_count:u32, thermal:f64bits,
+/// alloc_bytes:u64` (53 bytes/event, all little-endian, floats by bit
+/// pattern).
 pub fn events_to_canonical_bytes(events: &[MirTraceEvent]) -> Vec<u8> {
     let mut out = Vec::with_capacity(12 + events.len() * EVENT_BYTES);
     out.extend_from_slice(CANON_MAGIC);
@@ -64,6 +66,7 @@ pub fn events_to_canonical_bytes(events: &[MirTraceEvent]) -> Vec<u8> {
         out.push(event_flags(e));
         out.extend_from_slice(&e.instruction_count.to_le_bytes());
         out.extend_from_slice(&e.thermal_intensity.to_bits().to_le_bytes());
+        out.extend_from_slice(&e.alloc_bytes_in_window.to_le_bytes());
     }
     out
 }
@@ -119,6 +122,7 @@ pub fn events_to_delta_bytes(events: &[MirTraceEvent]) -> Vec<u8> {
     }
     prev_u32(|e| e.instruction_count, &mut out);
     xor_f64(|e| e.thermal_intensity, &mut out);
+    prev_u64(|e| e.alloc_bytes_in_window, &mut out);
     out
 }
 
@@ -186,6 +190,7 @@ pub fn canonical_bytes_to_events(bytes: &[u8]) -> Option<Vec<MirTraceEvent>> {
         apply_flags(&mut e, r.u8()?)?;
         e.instruction_count = r.u32()?;
         e.thermal_intensity = f64::from_bits(r.u64()?);
+        e.alloc_bytes_in_window = r.u64()?;
         events.push(e);
     }
     Some(events)
@@ -270,6 +275,15 @@ pub fn delta_bytes_to_events(bytes: &[u8]) -> Option<Vec<MirTraceEvent>> {
             prev = bits;
         }
     }
+    {
+        let mut prev = 0u64;
+        for (i, e) in events.iter_mut().enumerate() {
+            let stored = r.u64()?;
+            let v = if i == 0 { stored } else { stored.wrapping_add(prev) };
+            e.alloc_bytes_in_window = v;
+            prev = v;
+        }
+    }
     Some(events)
 }
 
@@ -289,6 +303,7 @@ pub fn events_bitwise_equal(a: &[MirTraceEvent], b: &[MirTraceEvent]) -> bool {
                 && x.gc_event == y.gc_event
                 && x.instruction_count == y.instruction_count
                 && x.thermal_intensity.to_bits() == y.thermal_intensity.to_bits()
+                && x.alloc_bytes_in_window == y.alloc_bytes_in_window
         })
 }
 

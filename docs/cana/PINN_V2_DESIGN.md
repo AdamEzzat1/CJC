@@ -562,3 +562,24 @@ Full record: `docs/cana/PHASE_E_COMPRESSION.md`; harness:
 - Recommended graduation: delta-columnar transform into
   `cjc-cana-compress` as a lossless `CompressionKind` so corpus regens
   can archive full traces at ~40×.
+
+## 13. Phase F0 (2026-06-12, same branch): memory-label fix — variance unblocked
+
+Full record: `docs/cana/PHASE_F0_MEMORY_LABEL.md`.
+
+- **Exit criterion MET**: recorded memory label std 0.0009 → **0.1083**
+  (max 0.0078 → 1.0000) via `MirTraceEvent.alloc_bytes_in_window` —
+  creation-site Rc allocation at platform-stable model prices (5
+  curated executor sites), folded into Memory pressure as a CUMULATIVE
+  per-block term (`alloc_capacity_bytes`, 4 MiB — evidence-tightened
+  from the first regen's measured corpus max of ~4.2 MB).
+- **Nothing else moved**: plans byte-identical (diagnostics gates
+  pass), scores byte-identical (same 6 selector wins, mean 0.98230),
+  both bundles retrain to byte-identical fixed points, instrumented
+  output transparency re-proven.
+- **F1 blocker identified, not guessed**: `rec memory ~ workload`
+  R²(train) 0.77 / R²(test) 0.048 — the static features don't carry
+  creation-site allocation (the §1 information-gap pattern, memory
+  edition). F1 prerequisite: TypeMix-style static alloc estimate →
+  FeatureHash ripple → regen → retrain both heads → re-shadow. Memory
+  head NOT trained this session (it would fail its shadow gate).

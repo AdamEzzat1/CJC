@@ -35,6 +35,17 @@ was updated in place as B and C executed; THIS doc consolidates).
 > cjc-snap), disk artifacts **motif 8.34×** on profiles.cpdb while
 > byte-RLE EXPANDS (0.96×). Record: `docs/cana/PHASE_E_COMPRESSION.md`
 > + ledger §12. Phase F remains blocked on the memory-label fix (§4).
+>
+> **STATUS UPDATE 3 (2026-06-12): §4's Phase F0 (memory-label fix)
+> EXECUTED.** `MirTraceEvent.alloc_bytes_in_window` + cumulative
+> adapter term: label std 0.0009 → **0.1083 (trainability bar
+> CLEARED)**, max → 1.0. Plans, scores and both trained bundles
+> byte-identical (pure label signal); capacity evidence-tightened
+> (64 MiB → 4 MiB from measured corpus max). **F1 (the head) is now
+> blocked one layer down**: static features fail held-out (R²(test)
+> 0.048 vs 0.77 train) — needs a TypeMix-style creation-site alloc
+> estimate (FeatureHash ripple, own session). Record:
+> `docs/cana/PHASE_F0_MEMORY_LABEL.md` + ledger §13.
 
 ---
 

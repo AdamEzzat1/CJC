@@ -249,3 +249,14 @@ are methodologically invalid; only within-run trends count.
   (3) Disk artifacts "2–5×": motif hits 8.34× on profiles.cpdb while
   byte-RLE EXPANDS it (0.96×) — codec/representation pairing rule now
   measured, not assumed.
+- **2026-06-12 — "memory label fixable via creation-site byte
+  counting": SETTLED, CONFIRMED — and the blocker moved one layer
+  down** (Phase F0; `PHASE_F0_MEMORY_LABEL.md`). Label std 0.0009 →
+  0.1083 (trainability bar 0.05 CLEARED) via
+  `alloc_bytes_in_window` + cumulative adapter term; capacity
+  calibrated from regen evidence (64 MiB guess → 4 MiB measured).
+  Plans/scores/bundles all byte-identical — pure label signal. NEW
+  finding: the static feature set now fails where the label used to
+  (R²(test) 0.048 vs 0.77 train) — the A1/§2.1 information-gap
+  pattern on the memory axis. F1 = static creation-site alloc
+  estimate (FeatureHash ripple, own session), THEN the memory head.
