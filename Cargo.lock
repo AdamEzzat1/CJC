@@ -238,6 +238,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cana-compress-probe"
+version = "0.1.11"
+dependencies = [
+ "bolero",
+ "cana-diagnostics",
+ "cjc-cana-compress",
+ "cjc-mir-exec",
+ "cjc-nss",
+ "cjc-runtime",
+ "cjc-snap",
+ "proptest",
+]
+
+[[package]]
 name = "cana-diagnostics"
 version = "0.1.11"
 dependencies = [

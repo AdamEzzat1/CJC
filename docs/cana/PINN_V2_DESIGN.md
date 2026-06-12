@@ -539,3 +539,26 @@ Full record: `docs/cana/PHASE_D_DIAGNOSTICS.md`; harness:
   corpus-gated, so the timed plans are unaffected).
 - RSS: plan choice does not move peak memory (≈0.999 ratios), as
   expected for freed-within-iteration allocations.
+
+## 12. Phase E (2026-06-12, same branch): compression prototypes — measured
+
+Full record: `docs/cana/PHASE_E_COMPRESSION.md`; harness:
+`bench/cana_compress_probe` (14 tests); report:
+`bench_results/cana_compress_probe/REPORT.md`.
+
+- **Trace streams: 35–43× lossless, EXCEEDS the §2 "plausible 5–28×"
+  band** — delta/XOR-columnar transform + motif codec on instrumented
+  streams of six hash-pinned Phase-D subjects, bit-exact roundtrip
+  proven per measurement (NaN payloads included). The transform
+  contributes more than the codec (raw+RLE is only ~2×).
+- **Checkpoint low-rank: 1.38× at ≤5% rel-Frobenius — honest miss of
+  the 2–3× band** on the real chess-RL ep60 checkpoint. Near-init
+  weight matrices are full-rank (kept raw, correctly); the
+  compressible half reaches rank 13–33 (best matrix 3.0×). Format
+  correction: the artifact is `tensor_snap` (CJCT), not cjc-snap.
+- **Disk artifacts: motif 8.34× on profiles.cpdb; byte-RLE EXPANDS
+  (0.96×)** — measured pairing rule: RLE only after a delta transform
+  manufactures runs; motif is the general disk codec.
+- Recommended graduation: delta-columnar transform into
+  `cjc-cana-compress` as a lossless `CompressionKind` so corpus regens
+  can archive full traces at ~40×.

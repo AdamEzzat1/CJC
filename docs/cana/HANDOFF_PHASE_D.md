@@ -25,6 +25,16 @@ was updated in place as B and C executed; THIS doc consolidates).
 > measured 1.63 GB selector planning spike; plan identity
 > corpus-gated). Next per §3: margin gating — now verifiable on a
 > stopwatch.
+>
+> **STATUS UPDATE 2 (2026-06-12): §4's Phase E EXECUTED.**
+> `bench/cana_compress_probe` (14 tests) measured all three prototypes
+> on real artifacts: trace streams **35–43× lossless** (delta-columnar
+> + motif, bit-exact proven — EXCEEDS the 5–28× band), checkpoint
+> low-rank **1.38×** at ≤5% rel-Frobenius on the near-init chess-RL
+> checkpoint (honest miss of 2–3×; format is `tensor_snap`/CJCT, not
+> cjc-snap), disk artifacts **motif 8.34×** on profiles.cpdb while
+> byte-RLE EXPANDS (0.96×). Record: `docs/cana/PHASE_E_COMPRESSION.md`
+> + ledger §12. Phase F remains blocked on the memory-label fix (§4).
 
 ---
 

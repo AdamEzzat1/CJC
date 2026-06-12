@@ -236,3 +236,16 @@ are methodologically invalid; only within-run trends count.
   regression `tensor_tg_k3` band-lo 1.017). Bonus finding: selector
   candidate-probing peaked 1.63 GB RSS on the real example program
   (planning-time) — per-function optimize API now evidence-backed.
+- **2026-06-12 — Phase E compression plausibility bands: SETTLED in
+  all three lanes, two surprises** (`PHASE_E_COMPRESSION.md`;
+  `bench/cana_compress_probe`). (1) Trace streams: "plausible 5–28×"
+  EXCEEDED — 35–43× lossless via delta/XOR-columnar + motif,
+  bit-exact roundtrip proven; the representation transform matters
+  more than the codec. (2) Checkpoint low-rank "2–3×": measured
+  1.38× at ≤5% rel-Frobenius on the real (near-init, 60-episode)
+  chess-RL checkpoint — full-rank init-like matrices correctly kept
+  raw; band unresolved for converged models. Format correction: the
+  checkpoint is `tensor_snap` (CJCT), not cjc-snap as §2 claimed.
+  (3) Disk artifacts "2–5×": motif hits 8.34× on profiles.cpdb while
+  byte-RLE EXPANDS it (0.96×) — codec/representation pairing rule now
+  measured, not assumed.

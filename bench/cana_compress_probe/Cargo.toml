@@ -1,0 +1,35 @@
+# Phase E — compression prototypes on REAL artifacts (research doc §2,
+# roadmap §6 row E). Measures before/after bytes at bounded
+# reconstruction error for: (1) MirTraceEvent streams from instrumented
+# runs of the hash-pinned Phase-D subjects, (2) chess-RL weight
+# checkpoints under low-rank with an AdvisoryOnly Frobenius tolerance,
+# (3) committed disk artifacts (profile DB, phases CSV) byte-level.
+#
+# Prototype code lives HERE, not in crates/ — transforms graduate to
+# cjc-cana-compress only after they earn it with measured numbers.
+
+[package]
+name = "cana-compress-probe"
+version = "0.1.11"
+edition = "2021"
+publish = false
+
+[lib]
+name = "cana_compress_probe"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cana_compress_probe"
+path = "src/main.rs"
+
+[dependencies]
+cjc-nss = { path = "../../crates/cjc-nss" }
+cjc-mir-exec = { path = "../../crates/cjc-mir-exec" }
+cjc-runtime = { path = "../../crates/cjc-runtime" }
+cjc-snap = { path = "../../crates/cjc-snap" }
+cjc-cana-compress = { path = "../../crates/cjc-cana-compress" }
+cana-diagnostics = { path = "../cana_diagnostics" }
+
+[dev-dependencies]
+proptest = "1"
+bolero = "0.13.4"
