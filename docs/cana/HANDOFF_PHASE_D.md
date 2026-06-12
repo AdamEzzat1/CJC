@@ -110,10 +110,24 @@ recalibration) before anything else is built on it.
   the selector's candidate shapes (e.g. `force_reordered_full`) so
   training sees novel pass combinations WITHOUT the feedback loop;
   then retrain energy head → regret should improve out-of-distribution.
-- Per-function `optimize` API to avoid whole-program re-optimization
-  per candidate (selector currently optimizes the program once per
-  distinct candidate plan per function — fine for the corpus,
-  wasteful at scale).
+- ~~Per-function `optimize` API to avoid whole-program re-optimization
+  per candidate~~ **SHIPPED** (pulled forward of the Phase D verdict —
+  Phase D diagnostics §3.1 measured the whole-program probe at
+  **1.63 GB planning-time peak RSS** on
+  `examples/08_pinn_heat_equation.cjcl` vs 206 MB for the baseline
+  arm). `cjc_mir::optimize::optimize_function_with_passes` optimizes
+  ONE function under an explicit pass list;
+  `PassPlanSelector::post_plan_node_count` now clones one function
+  per scored candidate instead of the whole program. Plan identity is
+  locked three ways: per-function vs whole-program function equality
+  (`cjc-mir/src/optimize.rs` tests), probe-level node-count identity
+  (`plan_selector.rs::post_plan_node_count_matches_whole_program_probe`),
+  and the committed-corpus gate
+  (`cana-ablation::tests::gate_selector_rec_plans_unchanged_on_committed_corpus`
+  — re-runs the selector on every program with a `selector_rec` row in
+  `profiles.cpdb`, candidate 0 reconstructed from the
+  `full_pinn_v2_rec` sibling row, asserts byte-equal plans;
+  `cargo test -p cana-ablation --release`).
 
 ## 4. Phases E/F (unchanged from research doc §6)
 

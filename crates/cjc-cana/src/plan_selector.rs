@@ -50,10 +50,11 @@
 
 use std::collections::BTreeMap;
 
-use cjc_mir::optimize::{optimize_program_with_plan, PassPlan, DEFAULT_PASS_SEQUENCE};
+use cjc_mir::optimize::{optimize_function_with_passes, PassPlan, DEFAULT_PASS_SEQUENCE};
 use cjc_mir::MirProgram;
 
 use crate::features::CanaFeatures;
+use crate::memory_proxy::MemoryProxy;
 use crate::legality::{LegalityGate, LegalityVerdict, PassSequence, PerPassLegalityGate, ProposedPass};
 use crate::pass_ranker::CANONICAL_PASSES;
 use crate::physical_cost::build_physical_query;
@@ -192,7 +193,7 @@ impl PassPlanSelector {
                 let (predicted, _nodes_after) = match cache.get(&passes) {
                     Some(&hit) => hit,
                     None => {
-                        let nodes_after = self.post_plan_node_count(mir, features, fn_name, &passes);
+                        let nodes_after = self.post_plan_node_count(mir, fn_name, &passes);
                         let q = self.query_for(fn_name, ff, &passes, dropped, nodes_after);
                         let predicted = self.head.predict_ln_score(&q);
                         cache.insert(passes.clone(), (predicted, nodes_after));
@@ -234,30 +235,42 @@ impl PassPlanSelector {
         SelectionReport { plan, per_function }
     }
 
-    /// Post-plan node count for ONE function: apply a program plan that
-    /// runs `passes` on `fn_name` and NOTHING anywhere else (explicit
-    /// empty entries — without them, every other function would run the
-    /// full default sequence), then count the function's expression
+    /// Post-plan node count for ONE function: optimize a lone clone of
+    /// THAT function under `passes`
+    /// ([`optimize_function_with_passes`]) and count its expression
     /// nodes. Deterministic and compile-time.
-    fn post_plan_node_count(
-        &self,
-        mir: &MirProgram,
-        features: &CanaFeatures,
-        fn_name: &str,
-        passes: &[String],
-    ) -> u64 {
-        let mut probe_plan = PassPlan::empty();
-        for other in features.per_fn.keys() {
-            probe_plan.per_function.insert(other.clone(), Vec::new());
-        }
-        probe_plan
-            .per_function
-            .insert(fn_name.to_string(), passes.to_vec());
-        let optimized = optimize_program_with_plan(mir, &probe_plan);
-        let post = crate::features::extract(&optimized);
-        post.per_fn
-            .get(fn_name)
-            .map(|f| f.memory.expr_count as u64)
+    ///
+    /// ## Memory note (Phase D diagnostics §3.1)
+    ///
+    /// This probe originally went through
+    /// `optimize_program_with_plan` — a plan running `passes` on
+    /// `fn_name` and nothing anywhere else (explicit empty entries) —
+    /// which clones the WHOLE program once per scored candidate. On a
+    /// real workload (`examples/08_pinn_heat_equation.cjcl`) that put
+    /// planning-time peak RSS at 1.63 GB vs 206 MB for the baseline
+    /// arm. The per-function entry point produces a byte-identical
+    /// optimized function (locked by
+    /// `post_plan_node_count_matches_whole_program_probe` below and
+    /// the equivalence test in `cjc-mir/src/optimize.rs`), so node
+    /// counts — and therefore queries, predictions, and selected
+    /// plans — are unchanged; only the footprint drops to one
+    /// function clone per candidate.
+    ///
+    /// `expr_count` comes from [`MemoryProxy::from_function`], a pure
+    /// per-function walk — exactly the value whole-program
+    /// `features::extract` reported for this function. The reverse
+    /// find mirrors `extract`'s last-insert-wins keying should two
+    /// functions ever share a name; a missing function still counts
+    /// as 0, matching the old `.get(fn_name)` fallback.
+    fn post_plan_node_count(&self, mir: &MirProgram, fn_name: &str, passes: &[String]) -> u64 {
+        mir.functions
+            .iter()
+            .rev()
+            .find(|f| f.name == fn_name)
+            .map(|f| {
+                let optimized = optimize_function_with_passes(f, passes);
+                MemoryProxy::from_function(&optimized).expr_count as u64
+            })
             .unwrap_or(0)
     }
 
@@ -414,6 +427,81 @@ print(work(100));
                 sel.chosen.predicted_ln_score <= sel.ranked_predicted,
                 "{f}: argmin over a set containing the ranked candidate can never be worse"
             );
+        }
+    }
+
+    /// Two-function source (plus synthetic `__main`) covering loop and
+    /// straight-line shapes — exercises passes that rewrite (CF/SR),
+    /// shrink (DCE), and restructure (LICM/unroll).
+    const SRC_MULTI: &str = r#"
+fn hot(n: i64) -> i64 {
+    let mut total: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let waste: i64 = 3 * 4 + 5;
+        total = total + i * 2 + waste;
+        i = i + 1;
+    }
+    return total;
+}
+fn flat(x: i64) -> i64 {
+    let a: i64 = 10 * 5 + 2;
+    let b: i64 = a + x;
+    return b + a;
+}
+print(hot(100) + flat(7));
+"#;
+
+    /// Plan-identity proof at the probe level: the per-function probe
+    /// must return EXACTLY what the original whole-program probe
+    /// (optimize_program_with_plan over explicit-empty entries for
+    /// every other function, then whole-program feature extraction)
+    /// returned — for every function and every candidate-shaped pass
+    /// list. Identical node counts → identical queries → identical
+    /// predictions → identical selected plans; the corpus-level
+    /// consequence is locked by the `selector_rec` gate in
+    /// `bench/cana_ablation`.
+    #[test]
+    fn post_plan_node_count_matches_whole_program_probe() {
+        use cjc_mir::optimize::optimize_program_with_plan;
+
+        let (mir, features) = lower(SRC_MULTI);
+        let selector = PassPlanSelector::new(neutral_head()).unwrap();
+
+        let mut candidate_lists: Vec<Vec<String>> = vec![
+            Vec::new(),
+            DEFAULT_PASS_SEQUENCE.iter().map(|s| s.to_string()).collect(),
+            CANONICAL_PASSES.iter().map(|s| s.to_string()).collect(),
+        ];
+        for p in CANONICAL_PASSES {
+            candidate_lists.push(vec![p.to_string()]);
+        }
+
+        for fn_name in features.per_fn.keys() {
+            for passes in &candidate_lists {
+                let per_function = selector.post_plan_node_count(&mir, fn_name, passes);
+
+                // The original whole-program probe, verbatim.
+                let mut probe_plan = PassPlan::empty();
+                for other in features.per_fn.keys() {
+                    probe_plan.per_function.insert(other.clone(), Vec::new());
+                }
+                probe_plan
+                    .per_function
+                    .insert(fn_name.clone(), passes.clone());
+                let optimized = optimize_program_with_plan(&mir, &probe_plan);
+                let post = crate::features::extract(&optimized);
+                let whole_program = post
+                    .per_fn
+                    .get(fn_name)
+                    .map(|f| f.memory.expr_count as u64)
+                    .unwrap_or(0);
+
+                assert_eq!(
+                    per_function, whole_program,
+                    "{fn_name} under {passes:?}: probe paths disagree"
+                );
+            }
         }
     }
 
