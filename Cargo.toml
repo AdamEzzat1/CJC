@@ -65,6 +65,7 @@ members = [
     "bench/cana_ab_pinn",
     "bench/cana_ab_corpus",
     "bench/cana_ablation",
+    "bench/cana_diagnostics",
     "bench/cana_train_pinn",
     "bench/cana_tensor_probe",
     "bench/cana_threshold_probe",

@@ -238,6 +238,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "cana-diagnostics"
+version = "0.1.11"
+dependencies = [
+ "bolero",
+ "cjc-ast",
+ "cjc-cana",
+ "cjc-cana-compress",
+ "cjc-cana-nss",
+ "cjc-eval",
+ "cjc-hir",
+ "cjc-mir",
+ "cjc-mir-exec",
+ "cjc-parser",
+ "cjc-repro",
+ "cjc-runtime",
+ "proptest",
+]
+
+[[package]]
 name = "cana-pass-ordering"
 version = "0.1.11"
 dependencies = [

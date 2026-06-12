@@ -1,0 +1,4 @@
+CANA_PLAN_V1
+__main	dce,cf_round_2,constant_fold,strength_reduce
+build	cf_round_2,constant_fold,licm
+mm_hot	cf_round_2,constant_fold,licm

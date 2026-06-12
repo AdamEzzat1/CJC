@@ -507,3 +507,35 @@ training via a SEPARATE exploration config whose rows are
 head-independent (forced versions of the selector's candidate set),
 closing the OOD gap without the feedback loop; (c) Phase D wall-clock
 validation before any of this matters to users.
+
+## 11. Phase D (2026-06-11, follow-on session): silicon validation — the wins hold
+
+Full record: `docs/cana/PHASE_D_DIAGNOSTICS.md`; harness:
+`bench/cana_diagnostics`; artifacts:
+`bench_results/cana_diagnostics/{REPORT.md,phases.csv,plans/}`.
+
+- **The §10 caveat resolved in the wins' favor**: 5 of the 6 named
+  selector wins hold on wall-clock with the ENTIRE conservative
+  median-of-5 band below 1.0 — `mem_grad_a2..a5` at 0.287–0.371
+  median, `holdout_alloc_pulse` (frozen holdout) at 0.301.
+  `mem_grad_a1` direction-consistent (median 0.668) but
+  noise-inconclusive. Byte-identical outputs everywhere (gate before
+  any timing), corpus scores reproduced to 1e-9 in the measured build.
+- **Measured beats modeled** (0.29–0.37 vs 0.496): the energy formula
+  prices every non-FP statement at 1, but the DCE'd statements are
+  ALLOCATIONS (~2–3× an average interpreter statement). Formula
+  recalibration direction: allocation-statement weight analogous to
+  `FP_ENERGY_WEIGHT`.
+- **Modeled ties measure as ties**: all thermal-family and
+  tensor-family subjects (modeled 1.000) land inconclusive, except one
+  borderline noise-suspect regression (`tensor_tg_k3`, band lo 1.017).
+  The thermal-aware stack shows NO wall-clock effect on the Track-3
+  subjects — its plans tie baseline on executed work.
+- **Real-program guard**: `examples/08_pinn_heat_equation.cjcl` under
+  the selector plan — output byte-identical, no measurable wall/RSS
+  delta. Also exposed a 1.63 GB selector candidate-probing RSS spike
+  (planning-time, not execution) → fixed same day on master
+  (`e3f631b`, `optimize_function_with_passes`; plan identity
+  corpus-gated, so the timed plans are unaffected).
+- RSS: plan choice does not move peak memory (≈0.999 ratios), as
+  expected for freed-within-iteration allocations.

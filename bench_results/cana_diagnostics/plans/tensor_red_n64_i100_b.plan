@@ -1,0 +1,4 @@
+CANA_PLAN_V1
+__main	constant_fold,strength_reduce,dce,cse,licm,loop_unroll,cf_round_2
+build	constant_fold,dce,licm,loop_unroll,cf_round_2
+red_hot	constant_fold,dce,licm,loop_unroll,cf_round_2

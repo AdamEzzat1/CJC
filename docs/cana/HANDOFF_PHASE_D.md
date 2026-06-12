@@ -12,6 +12,20 @@ was updated in place as B and C executed; THIS doc consolidates).
 **Numbers ledger:** `docs/cana/PINN_V2_DESIGN.md` §7–§10.
 **Hypothesis log:** `docs/cana/NEXT_ARC_RESEARCH.md` §7.
 
+> **STATUS UPDATE (2026-06-11, Phase D session): §2 EXECUTED.**
+> `bench/cana_diagnostics` shipped (23 tests); full A/B run completed.
+> **The central hypothesis is CONFIRMED: 5/6 named selector wins hold
+> on wall-clock with whole-band reductions (medians 0.287–0.371,
+> frozen holdout included); measured effect EXCEEDS modeled (formula
+> underprices allocation statements).** Thermal/tensor modeled ties
+> measure as ties; real-program subject unharmed, byte-identical.
+> Full record: `docs/cana/PHASE_D_DIAGNOSTICS.md` + ledger §11; raw:
+> `bench_results/cana_diagnostics/`. The §3 per-function optimize API
+> shipped on master in parallel (`e3f631b`, motivated by Phase D's
+> measured 1.63 GB selector planning spike; plan identity
+> corpus-gated). Next per §3: margin gating — now verifiable on a
+> stopwatch.
+
 ---
 
 ## 0. THE RULE (now paid for 13+ times)
@@ -188,7 +202,8 @@ heads) → re-shadow → verify BOTH bundle fixed points byte-identically
 | Thermal head accurate incl. tensor programs (v3) | **Measured** (holdout MAE 0.19 vs v1 0.48) |
 | Energy signal learnable; recipe = ln target + loops + structural, all-rows fit | **Measured** (R² 0.82 exists; regret-chosen fit ships) |
 | Selector finds measured energy wins | **Measured** (6 wins, mean 0.982, +16 regressions) |
-| Modeled-energy wins appear on wall-clock | **HYPOTHESIS — Phase D's entire job** |
+| Modeled-energy wins appear on wall-clock | **MEASURED, CONFIRMED** (Phase D 2026-06-11: 5/6 wins whole-band < 1.0, medians 0.287–0.371 incl. frozen holdout; 6th direction-consistent, noise-inconclusive — `PHASE_D_DIAGNOSTICS.md`) |
+| Energy formula prices allocation statements correctly | **REFUTED — measured wall reduction exceeds modeled 1.3–1.7×**; alloc-statement weight is the recalibration sketch (Phase D §4.1) |
 | Selector regressions fixable by margin gating | Hypothesis (§3) |
 | Memory label fixable via creation-site byte counting | Design sketch only (Phase F) |
 | Training bit-reproducible across build profiles | **Measured** (dev = release, byte-identical) |

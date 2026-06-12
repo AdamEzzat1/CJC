@@ -218,3 +218,21 @@ are methodologically invalid; only within-run trends count.
   head-independent exploration configs / Phase-D wall-clock are the
   paths forward. Feedback-loop guard live: selector rows excluded
   from energy training, both bundle fixed points byte-verified.
+- **2026-06-11 — "modeled-energy wins appear on wall-clock": SETTLED,
+  CONFIRMED — and the model UNDERSELLS them** (Phase D;
+  `PHASE_D_DIAGNOSTICS.md`, harness `bench/cana_diagnostics`). 5 of
+  the 6 named selector wins hold on silicon with the ENTIRE
+  conservative median-of-5 band below 1.0: `mem_grad_a2..a5` at
+  0.287–0.371 median wall ratio, `holdout_alloc_pulse` (frozen
+  holdout) at 0.301; `mem_grad_a1` direction-consistent but
+  noise-inconclusive. Byte-identical outputs on all 23 subjects;
+  corpus scores reproduced to 1e-9 in the measured build before any
+  clock was read. NEW finding: measured reduction EXCEEDS modeled
+  (0.29–0.37 vs 0.496) because the formula prices every non-FP
+  statement at 1 while the DCE'd statements are allocations (~2–3×
+  an interpreter statement) — alloc-statement weight is the
+  recalibration sketch. Modeled ties measured as ties (thermal +
+  tensor families inconclusive; one borderline noise-suspect
+  regression `tensor_tg_k3` band-lo 1.017). Bonus finding: selector
+  candidate-probing peaked 1.63 GB RSS on the real example program
+  (planning-time) — per-function optimize API now evidence-backed.

@@ -1,0 +1,5 @@
+CANA_PLAN_V1
+forward	cf_round_2,constant_fold,dce,licm,loop_unroll
+init_weights	cf_round_2,constant_fold,licm
+main	cf_round_2,constant_fold,dce,licm
+perturb	cf_round_2,constant_fold,dce,licm
