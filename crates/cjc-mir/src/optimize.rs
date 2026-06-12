@@ -364,6 +364,40 @@ pub fn optimize_program_with_plan(program: &MirProgram, plan: &PassPlan) -> MirP
     optimized
 }
 
+/// Optimize ONE function under an explicit pass list, leaving the rest
+/// of the program untouched.
+///
+/// For the targeted function this is byte-identical to
+/// [`optimize_program_with_plan`] with a plan that maps `func.name` to
+/// `passes`: every pass operates on a single `MirFunction` with no
+/// cross-function state, so applying the same list to a lone clone
+/// produces the same function. The equivalence is locked by
+/// `optimize_function_with_passes_matches_whole_program_path` below.
+///
+/// Same plan semantics as the program-level entry point: passes run in
+/// list order, unknown names are silently skipped, and an EMPTY list
+/// runs nothing. There is no absence-means-default fallback here — the
+/// list is explicit by construction; callers that want a function's
+/// default treatment pass [`DEFAULT_PASS_SEQUENCE`].
+///
+/// ## Why this exists (memory)
+///
+/// Plan-search callers (CANA's `PassPlanSelector`) probe up to 10
+/// candidate pass lists per function, and probing each candidate
+/// through `optimize_program_with_plan` clones the WHOLE program per
+/// probe. Phase D diagnostics (§3.1) measured that at a 1.63 GB
+/// planning-time peak RSS on `examples/08_pinn_heat_equation.cjcl`
+/// vs 206 MB for the baseline arm. This entry point clones one
+/// function instead — same output, footprint independent of program
+/// size.
+pub fn optimize_function_with_passes(func: &MirFunction, passes: &[String]) -> MirFunction {
+    let mut optimized = func.clone();
+    for pass in passes {
+        apply_pass(pass, &mut optimized);
+    }
+    optimized
+}
+
 // ===========================================================================
 // Constant Folding
 // ===========================================================================
@@ -2640,6 +2674,104 @@ mod tests {
         let first = optimize_program_with_plan(&prog, &plan);
         for _ in 0..50 {
             let again = optimize_program_with_plan(&prog, &plan);
+            assert_eq!(format!("{:?}", first), format!("{:?}", again));
+        }
+    }
+
+    // -- Per-function entry point (selector memory fix) ----------------
+
+    /// Multi-function program for the per-function/whole-program
+    /// equivalence tests: same body shape as [`make_program_with_fn`],
+    /// one function per `(name, init_value)` pair.
+    fn make_multi_fn_program(fns: &[(&str, i64)]) -> MirProgram {
+        let mut program = MirProgram {
+            functions: vec![],
+            struct_defs: vec![],
+            enum_defs: vec![],
+            entry: MirFnId(0),
+        };
+        for (i, (name, init_value)) in fns.iter().enumerate() {
+            let mut single = make_program_with_fn(name, *init_value);
+            let mut func = single.functions.remove(0);
+            func.id = MirFnId(i as u32);
+            program.functions.push(func);
+        }
+        program
+    }
+
+    /// THE equivalence lock: for every function and every
+    /// candidate-shaped pass list (empty, default sequence, each
+    /// canonical pass as a singleton, an unknown pass),
+    /// `optimize_function_with_passes` must produce a function
+    /// byte-identical to the one `optimize_program_with_plan` yields
+    /// under a plan mapping that function to the same list (with
+    /// explicit empty entries everywhere else — the selector's probe
+    /// shape). This is what lets `PassPlanSelector::post_plan_node_count`
+    /// drop the whole-program clone without changing any selected plan.
+    #[test]
+    fn optimize_function_with_passes_matches_whole_program_path() {
+        let prog = make_multi_fn_program(&[("alpha", 11), ("beta", 22), ("gamma", 33)]);
+        let all_names: Vec<String> =
+            prog.functions.iter().map(|f| f.name.clone()).collect();
+
+        let mut candidate_lists: Vec<Vec<String>> = vec![
+            Vec::new(),
+            DEFAULT_PASS_SEQUENCE.iter().map(|s| s.to_string()).collect(),
+            vec!["nonexistent_pass".to_string()],
+        ];
+        for pass in DEFAULT_PASS_SEQUENCE {
+            candidate_lists.push(vec![pass.to_string()]);
+        }
+
+        for func in &prog.functions {
+            for passes in &candidate_lists {
+                // Whole-program probe (the selector's original shape).
+                let mut plan = PassPlan::empty();
+                for other in &all_names {
+                    plan.per_function.insert(other.clone(), Vec::new());
+                }
+                plan.per_function.insert(func.name.clone(), passes.clone());
+                let whole = optimize_program_with_plan(&prog, &plan);
+                let from_whole = whole
+                    .functions
+                    .iter()
+                    .find(|f| f.name == func.name)
+                    .expect("function survives optimization");
+
+                // Per-function path.
+                let alone = optimize_function_with_passes(func, passes);
+
+                assert_eq!(
+                    format!("{:?}", from_whole),
+                    format!("{:?}", alone),
+                    "{} under {:?}: per-function path diverged from whole-program path",
+                    func.name,
+                    passes
+                );
+            }
+        }
+    }
+
+    /// The per-function path must not touch the input — callers hold
+    /// `&MirFunction` into a shared program.
+    #[test]
+    fn optimize_function_with_passes_leaves_input_unchanged() {
+        let prog = make_program_with_fn("main", 42);
+        let before = format!("{:?}", prog.functions[0]);
+        let default: Vec<String> =
+            DEFAULT_PASS_SEQUENCE.iter().map(|s| s.to_string()).collect();
+        let _ = optimize_function_with_passes(&prog.functions[0], &default);
+        assert_eq!(before, format!("{:?}", prog.functions[0]));
+    }
+
+    #[test]
+    fn optimize_function_with_passes_is_deterministic() {
+        let prog = make_program_with_fn("main", 42);
+        let passes: Vec<String> =
+            DEFAULT_PASS_SEQUENCE.iter().map(|s| s.to_string()).collect();
+        let first = optimize_function_with_passes(&prog.functions[0], &passes);
+        for _ in 0..50 {
+            let again = optimize_function_with_passes(&prog.functions[0], &passes);
             assert_eq!(format!("{:?}", first), format!("{:?}", again));
         }
     }

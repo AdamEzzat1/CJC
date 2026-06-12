@@ -1750,3 +1750,120 @@ fn main() {
     );
     assert!(row_target_met, "corpus must reach 1000 rows");
 }
+
+// =============================================================================
+// Gate tests — run via `cargo test -p cana-ablation --release`
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// Plan-identity gate for the selector's per-function probe
+    /// (Phase D handoff §3 queued item, pulled forward by the 1.63 GB
+    /// planning-RSS finding): re-running the selector over the FULL
+    /// committed corpus must reproduce every `selector_rec` plan in
+    /// `bench_results/cana_ablation/profiles.cpdb` byte-for-byte.
+    ///
+    /// Candidate 0 (the ranked plan) is reconstructed from the
+    /// committed `full_pinn_v2_rec` sibling row — `run_experiment`
+    /// records `plan.per_function` verbatim as `pass_sequence`, and
+    /// for ranked configs that plan IS `pass_plan_from(report.sequence)`,
+    /// exactly what `plan_under("selector_rec", ...)` feeds the
+    /// selector. So no `RecordedPressurePredictor` (i.e. no
+    /// instrumented re-run) is needed: the committed rows pin both
+    /// the selector's input and its expected output.
+    ///
+    /// Program/feature hashes are checked first so a corpus-source
+    /// drift fails with a "regen" message instead of a misleading
+    /// plan mismatch.
+    #[test]
+    fn gate_selector_rec_plans_unchanged_on_committed_corpus() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        let rows = read_all(&root.join("bench_results/cana_ablation/profiles.cpdb"))
+            .expect("committed profiles.cpdb must load");
+
+        let mut selector_rows: BTreeMap<&str, &CompilationProfile> = BTreeMap::new();
+        let mut ranked_rows: BTreeMap<&str, &CompilationProfile> = BTreeMap::new();
+        for r in &rows {
+            match r.config_id.as_str() {
+                "selector_rec" => {
+                    selector_rows.insert(r.program_name.as_str(), r);
+                }
+                "full_pinn_v2_rec" => {
+                    ranked_rows.insert(r.program_name.as_str(), r);
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            !selector_rows.is_empty(),
+            "no selector_rec rows in the committed corpus — pre-Phase-C cpdb?"
+        );
+
+        let energy_head = cjc_cana_compress::energy_bundle::read_energy_bundle(
+            &root.join("bench_results/cana_train_pinn/pinn_energy_v1.cpb"),
+        )
+        .expect("committed CPB1 bundle must load")
+        .head;
+        let selector =
+            PassPlanSelector::new(energy_head).expect("committed energy head is valid");
+        let gate = PerPassLegalityGate::new();
+
+        let mut checked = 0usize;
+        for w in all_workloads() {
+            let Some(expected) = selector_rows.get(w.name.as_str()) else {
+                continue;
+            };
+            let ranked_row = ranked_rows
+                .get(w.name.as_str())
+                .expect("selector_rec row without its full_pinn_v2_rec sibling");
+
+            let (ast, diags) = cjc_parser::parse_source(&w.source);
+            assert!(!diags.has_errors(), "{}: parse errors {:?}", w.name, diags.diagnostics);
+            let mut al = cjc_hir::AstLowering::new();
+            let hir = al.lower_program(&ast);
+            let mut h2m = cjc_mir::HirToMir::new();
+            let mir = h2m.lower_program(&hir);
+            let features = analyze_program(&mir).features;
+
+            assert_eq!(
+                features.program_hash.0, expected.program_hash,
+                "{}: program hash drifted from the committed corpus — \
+                 regen profiles.cpdb (cargo run --release -p cana-ablation) before judging plans",
+                w.name
+            );
+            assert_eq!(
+                features.feature_hash.0, expected.feature_hash,
+                "{}: feature hash drifted from the committed corpus — \
+                 regen profiles.cpdb before judging plans",
+                w.name
+            );
+
+            let mut ranked = PassPlan::empty();
+            for (f, passes) in &ranked_row.pass_sequence {
+                ranked.per_function.insert(f.clone(), passes.clone());
+            }
+            let report = selector.select(&mir, &features, &ranked, &gate);
+            let got: Vec<(String, Vec<String>)> = report
+                .plan
+                .per_function
+                .iter()
+                .map(|(f, seq)| (f.clone(), seq.clone()))
+                .collect();
+            assert_eq!(
+                got, expected.pass_sequence,
+                "{}: selector_rec plan CHANGED vs the committed corpus",
+                w.name
+            );
+            checked += 1;
+        }
+        assert_eq!(
+            checked,
+            selector_rows.len(),
+            "every committed selector_rec row must be re-checked \
+             (a workload was renamed/removed without a corpus regen?)"
+        );
+    }
+}
