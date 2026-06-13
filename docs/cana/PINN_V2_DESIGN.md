@@ -583,3 +583,30 @@ Full record: `docs/cana/PHASE_F0_MEMORY_LABEL.md`.
   edition). F1 prerequisite: TypeMix-style static alloc estimate →
   FeatureHash ripple → regen → retrain both heads → re-shadow. Memory
   head NOT trained this session (it would fail its shadow gate).
+
+## 14. Phase F1 (2026-06-13, same branch): the memory head — feature gap partially closed, PROMOTE
+
+Full record: `docs/cana/PHASE_F1_MEMORY_HEAD.md`.
+
+- **The F0 blocker (R²(test) 0.048) addressed**: new static feature
+  `MemoryProxy::lit_elem_slots` → `creation_alloc_bytes_estimate`
+  (schema v4) — the compile-time mirror of F0's runtime allocation
+  prices. Sanity decision: R²(test) 0.019 → **0.088** (~4.6×) over the
+  no-creation ablation. Partial, not total — the memory signal is
+  harder than thermal (allocation volume is trip-count-dominated; static
+  loop-amplification only approximates it).
+- **Memory head `pinn_memory_v1` (CPB2, 8-feature linear) → PROMOTE**:
+  beats BOTH train-mean climatology AND the no-creation ablation on
+  held-out (MAE 0.0412) AND overall (0.0196) MAE; frozen-holdout corr
+  +0.96; creation-volume coefficient +0.18 (physics check). Ships
+  SHADOW-ONLY — attached to nothing; activation is a separate later
+  decision needing a use case + measured outcome.
+- **Existing heads undisturbed BYTE-IDENTICALLY**: thermal (CPB0) +
+  energy (CPB1) retrain bit-identical on the v4 corpus (their bases
+  don't read the new field, labels unchanged); both still PROMOTE.
+  Plans byte-identical (6 selector wins reproduce 0.49613–0.49855,
+  parity 100%, row-hash stable).
+- **F2 lever identified**: the FNV held-out corr +0.32 says static
+  loop-amplification under-explains volume on unseen shapes; a
+  trip-count-aware amplification would sharpen creation AND flops/bytes
+  estimates (its own FeatureHash ripple).

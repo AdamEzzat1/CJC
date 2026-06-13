@@ -75,6 +75,7 @@ pub mod pass_ranker;
 pub mod physical_cost;
 pub mod pinn_cost_model;
 pub mod pinn_energy_v1;
+pub mod pinn_memory_v1;
 pub mod pinn_thermal_v2;
 pub mod plan_selector;
 pub mod pressure;

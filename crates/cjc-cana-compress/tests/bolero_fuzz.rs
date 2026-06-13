@@ -298,6 +298,9 @@ fn fuzz_physical_cost_prediction_stays_clamped() {
                 // v1 ignores this field by contract; fuzz it anyway so
                 // the contract is exercised, not assumed.
                 float_ops_estimate: u64_at(16) ^ u64_at(0),
+                // Phase F1 — v1 ignores this field too; fuzzed for the
+                // same reason.
+                creation_alloc_bytes_estimate: u64_at(24) ^ u64_at(8),
             };
             // Raw-bit f64s are frequently NaN / negative / subnormal —
             // exactly the inputs the validity gate must catch.
@@ -356,6 +359,7 @@ fn fuzz_default_coefficients_never_abstain() {
                 batch_size: u32_at(44),
                 compression_overhead_bytes: 0,
                 float_ops_estimate: u64_at(8),
+                creation_alloc_bytes_estimate: u64_at(24),
             };
             let est = predict_physical(&query, &PhysicalCoefficients::default())
                 .expect("default coefficients are valid by construction");

@@ -260,3 +260,20 @@ are methodologically invalid; only within-run trends count.
   (R²(test) 0.048 vs 0.77 train) — the A1/§2.1 information-gap
   pattern on the memory axis. F1 = static creation-site alloc
   estimate (FeatureHash ripple, own session), THEN the memory head.
+- **2026-06-13 — "the F0 feature-side blocker is fixable with a static
+  creation-volume feature": SETTLED, PARTIALLY CONFIRMED + memory head
+  PROMOTE** (Phase F1; `PHASE_F1_MEMORY_HEAD.md`). New
+  `MemoryProxy::lit_elem_slots` → `creation_alloc_bytes_estimate`
+  (schema v4) lifted R²(test) 0.019 → 0.088 (~4.6×) over its
+  no-creation ablation — the feature is load-bearing (beats ablation on
+  every cohort) but does NOT fully close the gap; the memory signal is
+  harder than thermal because allocation volume is trip-count-dominated
+  and static loop-amplification only approximates it. `pinn_memory_v1`
+  (CPB2, 8-feature linear) SHADOW verdict PROMOTE: beats train-mean
+  climatology AND the ablation on held-out (MAE 0.0412) and overall
+  (0.0196) MAE, frozen-holdout corr +0.96, creation coeff +0.18.
+  Ships shadow-only. KEY safety result: thermal+energy bundles retrain
+  BYTE-IDENTICAL on the v4 corpus (invisible to them), both still
+  PROMOTE, plans byte-identical. F2 lever: trip-count-aware
+  amplification (sharpens creation AND flops/bytes; own FeatureHash
+  ripple).

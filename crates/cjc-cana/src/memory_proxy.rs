@@ -38,6 +38,16 @@ pub struct MemoryProxy {
     /// Total expression-node count walked. Useful as a normalization
     /// denominator and as a sanity check that the walker visited everything.
     pub expr_count: u32,
+    /// Phase F1: total ELEMENT SLOTS across array/tuple literals — the
+    /// static mirror of the runtime's creation-site allocation prices.
+    /// `alloc_sites` counts a 2-element and a 774-element literal the
+    /// same (1 site each); the recorded Phase-F label prices them 16 B
+    /// per ELEMENT, so the per-site count carries no volume signal —
+    /// the measured cause of the memory head's R²(test) 0.048
+    /// generalization failure. Literal element counts are statically
+    /// EXACT; array/tuple only, mirroring exactly which runtime hooks
+    /// price per-element (TensorLit/StructLit price 0 at runtime too).
+    pub lit_elem_slots: u32,
 }
 
 impl MemoryProxy {
@@ -48,6 +58,7 @@ impl MemoryProxy {
             cow_write_sites: 0,
             tensor_heavy_ops: 0,
             expr_count: 0,
+            lit_elem_slots: 0,
         };
         p.walk_body(&func.body);
         p
@@ -60,6 +71,9 @@ impl MemoryProxy {
         hasher.write_u32(self.cow_write_sites);
         hasher.write_u32(self.tensor_heavy_ops);
         hasher.write_u32(self.expr_count);
+        // Phase F1 — a content-addressed fingerprint doing its job:
+        // the features genuinely changed, so every FeatureHash changes.
+        hasher.write_u32(self.lit_elem_slots);
     }
 
     fn walk_body(&mut self, body: &MirBody) {
@@ -114,6 +128,7 @@ impl MemoryProxy {
             }
             MirExprKind::ArrayLit(elems) => {
                 self.alloc_sites = self.alloc_sites.saturating_add(1);
+                self.lit_elem_slots = self.lit_elem_slots.saturating_add(elems.len() as u32);
                 for e in elems {
                     self.walk_expr(e);
                 }
@@ -126,6 +141,7 @@ impl MemoryProxy {
             }
             MirExprKind::TupleLit(elems) => {
                 self.alloc_sites = self.alloc_sites.saturating_add(1);
+                self.lit_elem_slots = self.lit_elem_slots.saturating_add(elems.len() as u32);
                 for e in elems {
                     self.walk_expr(e);
                 }
@@ -412,6 +428,36 @@ mod tests {
         assert_eq!(p.alloc_sites, 1);
         // expr_count: ArrayLit + 2 IntLits = 3
         assert_eq!(p.expr_count, 3);
+        // Phase F1: 2 element slots — sites are volume-blind, slots are not.
+        assert_eq!(p.lit_elem_slots, 2);
+    }
+
+    #[test]
+    fn lit_elem_slots_distinguish_literal_sizes() {
+        // Two functions with ONE alloc site each but different element
+        // counts must produce identical alloc_sites and different
+        // lit_elem_slots — the exact blindness Phase F1 fixes.
+        let mk = |n: usize| {
+            let mut f = empty_main();
+            f.body.stmts.push(MirStmt::Expr(ekind(MirExprKind::ArrayLit(
+                (0..n).map(|i| ekind(MirExprKind::IntLit(i as i64))).collect(),
+            ))));
+            MemoryProxy::from_function(&f)
+        };
+        let small = mk(2);
+        let large = mk(40);
+        assert_eq!(small.alloc_sites, large.alloc_sites);
+        assert_eq!(small.lit_elem_slots, 2);
+        assert_eq!(large.lit_elem_slots, 40);
+        // Tuples count slots too; struct/variant/tensor literals do NOT
+        // (mirroring which runtime hooks price per element).
+        let mut f = empty_main();
+        f.body.stmts.push(MirStmt::Expr(ekind(MirExprKind::TupleLit(vec![
+            ekind(MirExprKind::IntLit(1)),
+            ekind(MirExprKind::IntLit(2)),
+            ekind(MirExprKind::IntLit(3)),
+        ]))));
+        assert_eq!(MemoryProxy::from_function(&f).lit_elem_slots, 3);
     }
 
     #[test]

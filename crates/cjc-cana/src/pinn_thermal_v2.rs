@@ -171,6 +171,7 @@ mod tests {
             batch_size: 1,
             compression_overhead_bytes: 0,
             float_ops_estimate: float_ops,
+            creation_alloc_bytes_estimate: 0,
         }
     }
 

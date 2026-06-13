@@ -397,9 +397,12 @@ fn main() {
         "sanity-energy" => run_sanity_energy(),
         "train-energy" => run_train_energy(),
         "shadow-energy" => run_shadow_energy(),
+        "sanity-memory" => run_sanity_memory(),
+        "train-memory" => run_train_memory(),
+        "shadow-memory" => run_shadow_memory(),
         other => {
             eprintln!(
-                "unknown mode '{other}' — available: sanity, train, shadow, sanity-energy, train-energy, shadow-energy"
+                "unknown mode '{other}' — available: sanity, train, shadow, sanity-energy, train-energy, shadow-energy, sanity-memory, train-memory, shadow-memory"
             );
             std::process::exit(2);
         }
@@ -430,6 +433,7 @@ fn query_from_row(r: &CompilationProfile) -> cjc_cana::physical_cost::PhysicalCo
         batch_size: 1,
         compression_overhead_bytes: 0,
         float_ops_estimate: r.estimated_float_ops,
+        creation_alloc_bytes_estimate: r.estimated_creation_alloc_bytes,
     }
 }
 
@@ -551,6 +555,7 @@ fn run_train() {
         batch_size: 1,
         compression_overhead_bytes: 0,
         float_ops_estimate: 0,
+        creation_alloc_bytes_estimate: 0,
     };
     let zero_feats = cjc_cana::pinn_thermal_v2::features_from_query(&zero_q);
     let zero_pred_raw = model.predict(&zero_feats);
@@ -680,6 +685,267 @@ fn run_shadow() {
             "PROMOTE — attach the trained head via PinnPhysicalCostModel::with_thermal_head"
         } else {
             "DO NOT PROMOTE — v1 closed form stays active"
+        }
+    );
+}
+
+// =============================================================================
+// Phase F1 — the memory head: sanity-memory / train-memory / shadow-memory
+// =============================================================================
+//
+// Third run of the information-gap pattern. F0 fixed the LABEL
+// (creation-site runtime accounting: corpus std 0.0009 → 0.1083) and
+// its sanity pass measured the v3 features memorizing without
+// generalizing (R²(train) 0.77 / R²(test) 0.048). F1 adds the static
+// creation-volume feature (`lit_elem_slots` →
+// `creation_alloc_bytes_estimate`, schema v4) and trains an 8-feature
+// linear head. There is NO closed-form v1 memory prediction persisted
+// in rows, so the shadow baselines are (a) train-mean climatology and
+// (b) the SAME ridge recipe WITHOUT the creation features — isolating
+// exactly what the new feature buys.
+
+/// Default output path for the trained memory bundle (CPB2).
+const MEMORY_BUNDLE_PATH: &str = "bench_results/cana_train_pinn/pinn_memory_v1.cpb";
+
+/// Memory-basis dataset plus the creation-ablated feature view.
+struct MemoryDataset {
+    names: Vec<String>,
+    /// Full 8-feature memory basis (`memory_features_from_query`).
+    feats: Vec<Vec<f64>>,
+    /// The same rows WITHOUT features 6+7 (creation volume + density) —
+    /// the F0-era feature set, kept for the ablation baseline.
+    feats_no_creation: Vec<Vec<f64>>,
+    labels: Vec<f64>,
+    train_idx: Vec<usize>,
+    test_idx: Vec<usize>,
+    holdout_idx: Vec<usize>,
+}
+
+fn load_memory_dataset() -> MemoryDataset {
+    let rows = read_all(&PathBuf::from(DB_PATH)).unwrap_or_else(|e| {
+        panic!("cannot read corpus at {DB_PATH} — run `cargo run --release -p cana-ablation`: {e}")
+    });
+    let mut by_prog: BTreeMap<&str, &CompilationProfile> = BTreeMap::new();
+    for r in &rows {
+        if r.config_id.contains("_rec") {
+            by_prog.entry(r.program_name.as_str()).or_insert(r);
+        }
+    }
+    let mut names = Vec::new();
+    let mut feats = Vec::new();
+    let mut feats_no_creation = Vec::new();
+    let mut labels = Vec::new();
+    let mut train_idx = Vec::new();
+    let mut test_idx = Vec::new();
+    let mut holdout_idx = Vec::new();
+    for (i, (name, r)) in by_prog.iter().enumerate() {
+        names.push(name.to_string());
+        let q = query_from_row(r);
+        let full = cjc_cana::pinn_memory_v1::memory_features_from_query(&q);
+        feats_no_creation.push(full[..6].to_vec());
+        feats.push(full.to_vec());
+        labels.push(r.nss_predicted_memory_max);
+        if is_holdout_program(name) {
+            holdout_idx.push(i);
+        } else if is_test_program(name) {
+            test_idx.push(i);
+        } else {
+            train_idx.push(i);
+        }
+    }
+    MemoryDataset {
+        names,
+        feats,
+        feats_no_creation,
+        labels,
+        train_idx,
+        test_idx,
+        holdout_idx,
+    }
+}
+
+fn run_sanity_memory() {
+    let ds = load_memory_dataset();
+    println!("=== Phase F1 memory data-sanity pass (corpus read-only) ===");
+    println!(
+        "  programs: {} ({} train / {} test by FNV%{SPLIT_MOD} / {} holdout-frozen)",
+        ds.names.len(),
+        ds.train_idx.len(),
+        ds.test_idx.len(),
+        ds.holdout_idx.len()
+    );
+    let label_stats = stats(&ds.labels);
+    print_stats_line("memory label (recorded)", &label_stats);
+
+    // THE decision numbers: does the creation feature close the F0
+    // generalization gap (R²(test) 0.048 with the old feature set)?
+    let no_creation = fit_ridge(&ds.feats_no_creation, &ds.labels, &ds.train_idx)
+        .expect("ablation fit failed");
+    let full = fit_ridge(&ds.feats, &ds.labels, &ds.train_idx).expect("full fit failed");
+    println!(
+        "  mem ~ workload (no creation feats)  R²(train)={:.4}  R²(test)={:.4}",
+        r2_over(&no_creation, &ds.feats_no_creation, &ds.labels, &ds.train_idx),
+        r2_over(&no_creation, &ds.feats_no_creation, &ds.labels, &ds.test_idx),
+    );
+    println!(
+        "  mem ~ workload + creation (F1)      R²(train)={:.4}  R²(test)={:.4}",
+        r2_over(&full, &ds.feats, &ds.labels, &ds.train_idx),
+        r2_over(&full, &ds.feats, &ds.labels, &ds.test_idx),
+    );
+    println!("\nSanity pass complete — corpus read-only, nothing written.");
+}
+
+fn run_train_memory() {
+    use cjc_cana::pinn_memory_v1::{
+        PinnMemoryV1, PINN_MEMORY_V1_FEATURE_COUNT, PINN_MEMORY_V1_MODEL_ID,
+        PINN_MEMORY_V1_MODEL_VERSION,
+    };
+    use cjc_cana_compress::memory_bundle::{write_memory_bundle, MemoryBundle};
+
+    let ds = load_memory_dataset();
+    println!("=== Phase F1 memory-head training (deterministic ridge OLS) ===");
+    println!(
+        "  programs: {} ({} train / {} test / {} holdout-frozen, untouched)",
+        ds.names.len(),
+        ds.train_idx.len(),
+        ds.test_idx.len(),
+        ds.holdout_idx.len()
+    );
+
+    let model = fit_ridge(&ds.feats, &ds.labels, &ds.train_idx)
+        .expect("fit failed — corpus too small for the 8-feature basis?");
+
+    let r2_train = r2_over(&model, &ds.feats, &ds.labels, &ds.train_idx);
+    let r2_test = r2_over(&model, &ds.feats, &ds.labels, &ds.test_idx);
+    let preds: Vec<f64> = ds.feats.iter().map(|x| model.predict(x)).collect();
+    println!("  R²(train) = {r2_train:.4}   R²(test) = {r2_test:.4}");
+    println!(
+        "  MAE(train) = {:.4}  MAE(test) = {:.4}",
+        mae_over(&preds, &ds.labels, &ds.train_idx),
+        mae_over(&preds, &ds.labels, &ds.test_idx)
+    );
+
+    // Physics check: the standardized creation-volume coefficient must
+    // be positive — more allocation cannot predict LESS memory
+    // pressure when the label is a cumulative allocation saturation.
+    let creation_coeff = model.beta[6];
+    println!(
+        "  physics: standardized creation-volume coefficient = {creation_coeff:+.4} (must be > 0)"
+    );
+    assert!(
+        creation_coeff > 0.0,
+        "physics violation: memory pressure must increase with creation volume"
+    );
+
+    let mut feature_means = [0.0f64; PINN_MEMORY_V1_FEATURE_COUNT];
+    let mut feature_stds = [1.0f64; PINN_MEMORY_V1_FEATURE_COUNT];
+    let mut coefficients = [0.0f64; PINN_MEMORY_V1_FEATURE_COUNT];
+    feature_means.copy_from_slice(&model.col_mean);
+    feature_stds.copy_from_slice(&model.col_std);
+    coefficients.copy_from_slice(&model.beta[..PINN_MEMORY_V1_FEATURE_COUNT]);
+    let head = PinnMemoryV1 {
+        feature_means,
+        feature_stds,
+        coefficients,
+        intercept: model.beta[PINN_MEMORY_V1_FEATURE_COUNT],
+    };
+    assert!(head.is_valid(), "trained head must validate");
+    let bundle = MemoryBundle {
+        model_id: PINN_MEMORY_V1_MODEL_ID.to_string(),
+        model_version: PINN_MEMORY_V1_MODEL_VERSION,
+        head,
+    };
+    let path = PathBuf::from(MEMORY_BUNDLE_PATH);
+    fs::create_dir_all(path.parent().unwrap()).expect("create bundle dir");
+    write_memory_bundle(&path, &bundle).expect("write bundle");
+    println!(
+        "  bundle written: {} ({} / v{})",
+        path.display(),
+        bundle.model_id,
+        bundle.model_version
+    );
+    let first = fs::read(&path).unwrap();
+    write_memory_bundle(&path, &bundle).expect("re-write bundle");
+    assert_eq!(first, fs::read(&path).unwrap(), "bundle must be byte-stable");
+    println!("  bundle double-write: byte-identical");
+    println!("\nNext: `cargo run --release -p cana-train-pinn -- shadow-memory`.");
+}
+
+fn run_shadow_memory() {
+    use cjc_cana_compress::memory_bundle::read_memory_bundle;
+
+    let ds = load_memory_dataset();
+    let bundle = read_memory_bundle(&PathBuf::from(MEMORY_BUNDLE_PATH)).unwrap_or_else(|e| {
+        panic!("cannot read bundle at {MEMORY_BUNDLE_PATH} — run `-- train-memory` first: {e}")
+    });
+    println!(
+        "=== Phase F1 shadow mode — baselines vs trained memory head ({} v{}) ===",
+        bundle.model_id, bundle.model_version
+    );
+    println!("  ground truth: recorded per-program memory labels (Phase F0 creation-site accounting)");
+
+    // Head predictions through the REAL API (clamping included).
+    let rows = read_all(&PathBuf::from(DB_PATH)).expect("corpus");
+    let mut by_prog: BTreeMap<&str, &CompilationProfile> = BTreeMap::new();
+    for r in &rows {
+        if r.config_id.contains("_rec") {
+            by_prog.entry(r.program_name.as_str()).or_insert(r);
+        }
+    }
+    let head_preds: Vec<f64> = ds
+        .names
+        .iter()
+        .map(|n| bundle.head.predict_memory(&query_from_row(by_prog[n.as_str()])))
+        .collect();
+
+    // Baseline (a): train-mean climatology — the no-information floor.
+    let mut acc = KahanAccumulatorF64::new();
+    for &i in &ds.train_idx {
+        acc.add(ds.labels[i]);
+    }
+    let train_mean = acc.finalize() / ds.train_idx.len().max(1) as f64;
+    let mean_preds: Vec<f64> = vec![train_mean; ds.names.len()];
+
+    // Baseline (b): the F0-era feature set (no creation features) under
+    // the SAME ridge recipe — what the new feature specifically buys.
+    let ablated = fit_ridge(&ds.feats_no_creation, &ds.labels, &ds.train_idx)
+        .expect("ablation fit failed");
+    let ablated_preds: Vec<f64> = ds
+        .feats_no_creation
+        .iter()
+        .map(|x| ablated.predict(x).clamp(0.0, 1.0))
+        .collect();
+
+    let all_idx: Vec<usize> = (0..ds.names.len()).collect();
+    let report = |label: &str, idx: &[usize]| {
+        let mean_mae = mae_over(&mean_preds, &ds.labels, idx);
+        let abl_mae = mae_over(&ablated_preds, &ds.labels, idx);
+        let head_mae = mae_over(&head_preds, &ds.labels, idx);
+        let pick = |src: &[f64]| -> Vec<f64> { idx.iter().map(|&i| src[i]).collect() };
+        let lab = pick(&ds.labels);
+        println!(
+            "  {label:<10} n={:<4} | mean: MAE={mean_mae:.4} | no-creation: MAE={abl_mae:.4} corr={:+.4} | head: MAE={head_mae:.4} corr={:+.4}",
+            idx.len(),
+            pearson(&pick(&ablated_preds), &lab),
+            pearson(&pick(&head_preds), &lab),
+        );
+        (mean_mae, abl_mae, head_mae)
+    };
+    report("train", &ds.train_idx);
+    let (mean_test, abl_test, head_test) = report("held-out", &ds.test_idx);
+    if !ds.holdout_idx.is_empty() {
+        report("holdout", &ds.holdout_idx);
+    }
+    let (mean_all, abl_all, head_all) = report("overall", &all_idx);
+
+    let promote =
+        head_test < mean_test && head_test < abl_test && head_all < mean_all && head_all < abl_all;
+    println!(
+        "\nPhase F1 promotion gate (head must beat BOTH baselines on held-out AND overall MAE): {}",
+        if promote {
+            "PROMOTE — shadow verdict positive; activation is a separate, later decision"
+        } else {
+            "DO NOT PROMOTE — record the verdict; the head ships nowhere"
         }
     );
 }

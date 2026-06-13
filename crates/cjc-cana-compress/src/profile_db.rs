@@ -70,7 +70,14 @@ const ROW_MAGIC: &[u8; 4] = b"CPR0";
 /// reporting choice; the per-node data always flowed). Effective
 /// label count grows from one per program to one per function. Same
 /// no-migration policy: v2 files are rejected on read, regenerate.
-pub const PROFILE_SCHEMA_VERSION: u32 = 3;
+///
+/// v4 (Phase F1): added `creation_alloc` (per-function) +
+/// `estimated_creation_alloc_bytes` (program sum) — the static mirror
+/// of the Phase-F0 recorded allocation label. The F0 sanity pass
+/// measured the v3 feature set memorizing the new label without
+/// generalizing (R²(train) 0.77 / R²(test) 0.048); these columns carry
+/// the missing creation-volume signal. Same no-migration policy.
+pub const PROFILE_SCHEMA_VERSION: u32 = 4;
 
 // ---------------------------------------------------------------------------
 // FnProfile — per-function sub-record (schema v3)
@@ -99,6 +106,9 @@ pub struct FnProfile {
     pub working_set: u64,
     /// Per-function `float_ops_estimate` (scalar + tensor FP, A1 fix).
     pub float_ops: u64,
+    /// Per-function `creation_alloc_bytes_estimate` (Phase F1 — the
+    /// static creation-site allocation mirror of the F0 label).
+    pub creation_alloc: u64,
     /// Loops with statically known trip counts (`CfgMetrics`).
     pub countable_loop_count: u32,
     /// Maximum loop nesting depth (`CfgMetrics`).
@@ -161,6 +171,10 @@ pub struct CompilationProfile {
     /// v2: the FP-density signal (`estimated_float_ops /
     /// estimated_flops`) the thermal head trains on.
     pub estimated_float_ops: u64,
+    /// Sum of per-function `creation_alloc_bytes_estimate`
+    /// (saturating). Schema v4: the creation-volume signal the memory
+    /// head trains on (Phase F1).
+    pub estimated_creation_alloc_bytes: u64,
 
     // -- Predictions (deterministic; recorded at rank time) --
     /// Max per-function NSS CPU saturation.
@@ -240,6 +254,7 @@ impl CompilationProfile {
             push_u64(&mut out, fp.alloc_bytes);
             push_u64(&mut out, fp.working_set);
             push_u64(&mut out, fp.float_ops);
+            push_u64(&mut out, fp.creation_alloc);
             push_u32(&mut out, fp.countable_loop_count);
             push_u32(&mut out, fp.max_loop_depth);
             push_f64(&mut out, fp.nss_cpu);
@@ -252,6 +267,7 @@ impl CompilationProfile {
         push_u64(&mut out, self.estimated_alloc_bytes);
         push_u64(&mut out, self.estimated_working_set);
         push_u64(&mut out, self.estimated_float_ops);
+        push_u64(&mut out, self.estimated_creation_alloc_bytes);
         push_f64(&mut out, self.nss_predicted_cpu_max);
         push_f64(&mut out, self.nss_predicted_memory_max);
         push_f64(&mut out, self.nss_predicted_thermal_max);
@@ -328,6 +344,7 @@ impl CompilationProfile {
                     alloc_bytes: r.read_u64()?,
                     working_set: r.read_u64()?,
                     float_ops: r.read_u64()?,
+                    creation_alloc: r.read_u64()?,
                     countable_loop_count: r.read_u32()?,
                     max_loop_depth: r.read_u32()?,
                     nss_cpu: r.read_f64()?,
@@ -342,6 +359,7 @@ impl CompilationProfile {
         let estimated_alloc_bytes = r.read_u64()?;
         let estimated_working_set = r.read_u64()?;
         let estimated_float_ops = r.read_u64()?;
+        let estimated_creation_alloc_bytes = r.read_u64()?;
         let nss_predicted_cpu_max = r.read_f64()?;
         let nss_predicted_memory_max = r.read_f64()?;
         let nss_predicted_thermal_max = r.read_f64()?;
@@ -390,6 +408,7 @@ impl CompilationProfile {
             estimated_alloc_bytes,
             estimated_working_set,
             estimated_float_ops,
+            estimated_creation_alloc_bytes,
             nss_predicted_cpu_max,
             nss_predicted_memory_max,
             nss_predicted_thermal_max,
@@ -597,6 +616,7 @@ mod tests {
                     alloc_bytes: 32_000,
                     working_set: 64_000,
                     float_ops: 125_000,
+                    creation_alloc: 48_000,
                     countable_loop_count: 2,
                     max_loop_depth: 1,
                     nss_cpu: 0.4,
@@ -610,6 +630,7 @@ mod tests {
             estimated_alloc_bytes: 64_000,
             estimated_working_set: 128_000,
             estimated_float_ops: 250_000,
+            estimated_creation_alloc_bytes: 96_000,
             nss_predicted_cpu_max: 0.5,
             nss_predicted_memory_max: 0.25,
             nss_predicted_thermal_max: 0.75,
@@ -691,6 +712,7 @@ mod tests {
                             alloc_bytes: i as u64 * 64,
                             working_set: i as u64 * 1024,
                             float_ops: i as u64 * 250,
+                            creation_alloc: i as u64 * 96,
                             countable_loop_count: i as u32,
                             max_loop_depth: (i % 4) as u32,
                             nss_cpu: i as f64 * 0.1,

@@ -337,6 +337,10 @@ fn arb_fn_profile_entry() -> impl Strategy<Value = (String, FnProfile)> {
                         alloc_bytes: ab,
                         working_set: ws,
                         float_ops: fo,
+                        // Schema v4: derived deterministically from the
+                        // generated fields so the strategy tuple stays
+                        // within proptest's arity limit.
+                        creation_alloc: ab.rotate_left(7) ^ fo,
                         countable_loop_count: clc,
                         max_loop_depth: mld,
                         nss_cpu: cpu,
@@ -366,6 +370,7 @@ fn base_profile_row() -> CompilationProfile {
         estimated_alloc_bytes: 0,
         estimated_working_set: 0,
         estimated_float_ops: 0,
+        estimated_creation_alloc_bytes: 0,
         nss_predicted_cpu_max: 0.0,
         nss_predicted_memory_max: 0.0,
         nss_predicted_thermal_max: 0.0,

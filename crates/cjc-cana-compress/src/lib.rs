@@ -90,6 +90,7 @@ pub mod energy;
 pub mod energy_pass_ranker;
 pub mod lossless_trace;
 pub mod lowrank;
+pub mod memory_bundle;
 pub mod motif_dictionary;
 pub mod energy_bundle;
 pub mod pinn_bundle;
@@ -118,6 +119,10 @@ pub use lossless_trace::{compress_pass_history, decompress_pass_history, Lossles
 pub use lowrank::{compress_low_rank, LowRankPayload};
 pub use motif_dictionary::{
     compress_motif_dictionary, decompress_motif_dictionary, MotifDictionaryPayload,
+};
+pub use memory_bundle::{
+    read_memory_bundle, write_memory_bundle, MemoryBundle, MemoryBundleError,
+    MEMORY_BUNDLE_SCHEMA_VERSION,
 };
 pub use pinn_bundle::{
     read_bundle, write_bundle, PinnBundle, PinnBundleError, PINN_BUNDLE_SCHEMA_VERSION,

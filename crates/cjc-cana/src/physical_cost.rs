@@ -80,6 +80,16 @@ const WORKING_SET_PER_TENSOR_OP: u64 = 1024;
 /// float binops (1 each) so the trained head can separate them.
 const TENSOR_FP_PER_OP: u64 = 128;
 
+// Phase F1 — static mirror of the runtime creation-site allocation
+// prices (Phase F0's `trace_alloc_bytes` model constants). Literal
+// element slots are statically EXACT and share the runtime's
+// 16 B/slot price; COW appends 16 B/site; tensor result sites at the
+// nominal element count × 8 B/f64 = the alloc analog of
+// [`TENSOR_FP_PER_OP`] (same assumed 128-element scale).
+const CREATION_BYTES_PER_LIT_SLOT: u64 = 16;
+const CREATION_BYTES_PER_COW_WRITE: u64 = 16;
+const CREATION_BYTES_PER_TENSOR_OP: u64 = TENSOR_FP_PER_OP * 8;
+
 // ---------------------------------------------------------------------------
 // PhysicalCostQuery
 // ---------------------------------------------------------------------------
@@ -121,6 +131,14 @@ pub struct PhysicalCostQuery<'a> {
     /// (`float_ops_estimate / flops_estimate` ≈ runtime
     /// `thermal_intensity`).
     pub float_ops_estimate: u64,
+    /// CREATION-SITE allocation estimate (Phase F1): the static mirror
+    /// of the runtime's `alloc_bytes_in_window` model prices — literal
+    /// element slots × 16 + COW appends × 16 + tensor result sites ×
+    /// nominal element bytes, loop/pass amplified. Additive field —
+    /// the v1 closed form does NOT read it (same precedent as
+    /// `float_ops_estimate`); the memory head consumes it as its
+    /// allocation-volume signal against the Phase-F0 recorded label.
+    pub creation_alloc_bytes_estimate: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -388,6 +406,18 @@ pub fn build_physical_query<'a>(
 
     let allocation_bytes_estimate = alloc.saturating_mul(BYTES_PER_ALLOC_SITE);
 
+    // Phase F1: creation-site allocation, amplified like the bytes
+    // terms so the feature and the (cumulative) recorded label share
+    // scaling shape across loop-heavy programs.
+    let lit_slots = features.memory.lit_elem_slots as u64;
+    let creation_base = lit_slots
+        .saturating_mul(CREATION_BYTES_PER_LIT_SLOT)
+        .saturating_add(cow.saturating_mul(CREATION_BYTES_PER_COW_WRITE))
+        .saturating_add(tensor_fp_sites.saturating_mul(CREATION_BYTES_PER_TENSOR_OP));
+    let creation_alloc_bytes_estimate = creation_base
+        .saturating_mul(loop_amp)
+        .saturating_mul(amp.bytes);
+
     let working_set_bytes_estimate = alloc
         .saturating_mul(BYTES_PER_ALLOC_SITE)
         .saturating_add(tensor.saturating_mul(WORKING_SET_PER_TENSOR_OP));
@@ -404,6 +434,7 @@ pub fn build_physical_query<'a>(
         batch_size: 1,
         compression_overhead_bytes: 0,
         float_ops_estimate,
+        creation_alloc_bytes_estimate,
     }
 }
 
@@ -531,6 +562,7 @@ mod tests {
             batch_size: 1,
             compression_overhead_bytes: 0,
             float_ops_estimate: 0,
+            creation_alloc_bytes_estimate: 0,
         }
     }
 
@@ -547,6 +579,7 @@ mod tests {
             batch_size: 1,
             compression_overhead_bytes: 0,
             float_ops_estimate: 2_500_000,
+            creation_alloc_bytes_estimate: 250_000,
         }
     }
 
@@ -577,6 +610,7 @@ mod tests {
                 cow_write_sites,
                 tensor_heavy_ops,
                 expr_count,
+                lit_elem_slots: 0,
             },
             reductions: ReductionAxes::default(),
             type_mix: TypeMix::default(),

@@ -1232,6 +1232,7 @@ fn run_experiment(
     let mut est_alloc = 0u64;
     let mut est_ws = 0u64;
     let mut est_float_ops = 0u64;
+    let mut est_creation_alloc = 0u64;
     let mut pinn_energy_max = 0.0f64;
     let mut pinn_thermal_max = 0.0f64;
     let mut pinn_bandwidth_max = 0.0f64;
@@ -1244,6 +1245,7 @@ fn run_experiment(
         est_alloc = est_alloc.saturating_add(q.allocation_bytes_estimate);
         est_ws = est_ws.saturating_add(q.working_set_bytes_estimate);
         est_float_ops = est_float_ops.saturating_add(q.float_ops_estimate);
+        est_creation_alloc = est_creation_alloc.saturating_add(q.creation_alloc_bytes_estimate);
         if let Some(est) = predict_physical(&q, &coeffs) {
             pinn_energy_max = pinn_energy_max.max(est.energy_estimate);
             pinn_thermal_max = pinn_thermal_max.max(est.thermal_pressure);
@@ -1258,6 +1260,7 @@ fn run_experiment(
                 alloc_bytes: q.allocation_bytes_estimate,
                 working_set: q.working_set_bytes_estimate,
                 float_ops: q.float_ops_estimate,
+                creation_alloc: q.creation_alloc_bytes_estimate,
                 countable_loop_count: ff.cfg.countable_loop_count,
                 max_loop_depth: ff.cfg.max_loop_depth,
                 nss_cpu: nss_cpu_map.get(fn_name).copied().unwrap_or(0.0),
@@ -1337,6 +1340,7 @@ fn run_experiment(
         estimated_alloc_bytes: est_alloc,
         estimated_working_set: est_ws,
         estimated_float_ops: est_float_ops,
+        estimated_creation_alloc_bytes: est_creation_alloc,
         nss_predicted_cpu_max: nss_cpu_max,
         nss_predicted_memory_max: nss_memory_max,
         nss_predicted_thermal_max: nss_thermal_max,
