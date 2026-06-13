@@ -292,3 +292,18 @@ are methodologically invalid; only within-run trends count.
   can't reach the floor; it needs head-independent exploration configs
   (handoff §3b) to retrain the head on the OOD pass combinations. The
   selector is closer to default-on but not there.
+- **2026-06-13 — "head-independent exploration configs shrink the
+  regression floor": SETTLED, CONFIRMED DRAMATICALLY + Phase-G gating
+  SUPERSEDED** (Phase H; `PHASE_H_EXPLORATION_CONFIGS.md`). 5 forced
+  anchors in the 2–6-pass interaction gap (force_cf2 + 4 multi-pass)
+  retrained the energy head → ungated selector regressions **16 → 1**,
+  wins held at 6, mean improved. The Pipeline-Engineer diagnosis (linear
+  extrapolation across an unlabeled interaction gap) was exactly right.
+  INVERSION finding: margin gating (Phase G) now HURTS — with the
+  accurate head τ=0 dominates (1 regr) and gating re-introduces
+  regressions by suppressing the head's now-correct switches. Phase G
+  treated the symptom, H fixed the cause; calibrated default flips to
+  τ=0. Head still PROMOTE (holdout regret exact 10/10), thermal
+  byte-identical. The 1 residual regression is a non-linear-head problem
+  (tiny MLP / pairwise feature), not more anchors. Selector now 6 wins /
+  1 regression — closest to default-on yet, modeled metric.

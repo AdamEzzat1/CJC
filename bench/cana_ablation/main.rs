@@ -878,6 +878,25 @@ const CONFIG_IDS_FORCED: &[&str] = &[
     "force_licm",
     "force_unroll",
     "force_all",
+    // Phase H — head-independent EXPLORATION configs. The Phase-G margin
+    // gating left a floor of 7 selector regressions: confident energy-
+    // head MISPREDICTIONS, not marginal switches. Diagnosis (design
+    // panel): the head trains only at pass-counts {0, 1, 7} (force_none,
+    // the singletons, force_all) and extrapolates LINEARLY across the
+    // 2–6-pass gap, where the surviving regressions live — and those are
+    // pass-INTERACTION effects (licm+unroll node growth, cf+dce) an
+    // additive head cannot see without examples. These configs place
+    // labeled, head-independent anchors in that gap. They are NOT in
+    // ENERGY_EXCLUDED_CONFIGS (the whole point: the head MUST train on
+    // them — they were never chosen by the head, so no feedback loop).
+    // `force_default_seq` was considered and REJECTED: it would equal
+    // force_all (the head's pass-count features are order-invariant and
+    // CANONICAL_PASSES ≡ DEFAULT_PASS_SEQUENCE), adding no signal.
+    "force_cf2",            // the one uncovered singleton (selector candidate id 9)
+    "force_cf_dce",         // 2-pass: the canonical fold→prune pair (the win mechanism)
+    "force_licm_unroll",    // 2-pass: the loop-interaction pair driving node-growth mispredictions
+    "force_cf_dce_cse",     // 3-pass mid-count anchor
+    "force_sr_licm_unroll", // 3-pass loop-heavy anchor
 ];
 
 /// The pass list a forced config applies to every function; `None` for
@@ -892,6 +911,13 @@ fn forced_passes(config: &str) -> Option<Vec<&'static str>> {
         "force_licm" => vec!["licm"],
         "force_unroll" => vec!["loop_unroll"],
         "force_all" => CANONICAL_PASSES.to_vec(),
+        // Phase H exploration anchors. Pass order follows CANONICAL_PASSES
+        // so node-count outcomes are deterministic and comparable.
+        "force_cf2" => vec!["cf_round_2"],
+        "force_cf_dce" => vec!["constant_fold", "dce"],
+        "force_licm_unroll" => vec!["licm", "loop_unroll"],
+        "force_cf_dce_cse" => vec!["constant_fold", "dce", "cse"],
+        "force_sr_licm_unroll" => vec!["strength_reduce", "licm", "loop_unroll"],
         _ => return None,
     })
 }

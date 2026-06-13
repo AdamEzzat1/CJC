@@ -636,3 +636,33 @@ Full record: `docs/cana/PHASE_G_MARGIN_GATING.md`.
 - **Still NOT default-on**: the 7-regression floor needs a better-
   trained head (head-independent exploration configs, handoff §3b), not
   a bigger τ. Selector remains ablation-grade, now meaningfully closer.
+
+## 16. Phase H (2026-06-13, same branch): exploration configs — regressions 16→1, gating superseded
+
+Full record: `docs/cana/PHASE_H_EXPLORATION_CONFIGS.md`. Designed by the
+Compiler-Pipeline-Engineer pass of the stacked-role optimization arc.
+
+- **The fix (handoff §3b)**: 5 head-INDEPENDENT forced configs at the
+  pass-count gap the energy head extrapolated blind across — `force_cf2`
+  + `force_cf_dce` + `force_licm_unroll` + `force_cf_dce_cse` +
+  `force_sr_licm_unroll`. NOT in ENERGY_EXCLUDED_CONFIGS (head never
+  chose them → no feedback loop). `force_default_seq` rejected
+  (duplicate of force_all — pass-count features are order-invariant).
+  No vocab/schema ripple (cf_round_2 already in via force_all).
+- **RESULT — ungated selector regressions 16 → 1** (wins held at 6,
+  mean 0.98230 → 0.98179). The head, given labeled anchors in the
+  2–6-pass INTERACTION region, stopped confidently mis-scoring those
+  combinations.
+- **INVERSION**: margin gating (Phase G) is now SUPERSEDED. With the
+  accurate head, τ=0 dominates (1 regr) and the gated configs show 7 —
+  gating now re-introduces regressions by suppressing the improved
+  head's correct switches. Phase G treated the symptom; H fixed the
+  cause. Calibrated default flips to τ=0. (with_margin kept as the no-op
+  byte-identical tool for a future noisier head.)
+- **Safety**: thermal CPB0 byte-identical, energy CPB1 retrained still
+  PROMOTE (holdout regret exact 10/10; test regret +0.00140→+0.00256,
+  marginally worse on the forced-plan prediction space but downstream
+  selector decisions much better). Parity 100%, corpus 3318→4740 rows.
+- **1 residual regression**: a non-linear-head problem (single confident
+  misprediction), not a more-anchors problem — tiny MLP / pairwise-
+  interaction feature is the next lever.
