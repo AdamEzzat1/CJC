@@ -277,3 +277,18 @@ are methodologically invalid; only within-run trends count.
   PROMOTE, plans byte-identical. F2 lever: trip-count-aware
   amplification (sharpens creation AND flops/bytes; own FeatureHash
   ripple).
+- **2026-06-13 — "the selector's 16 regressions are fixable by margin
+  gating": SETTLED, PARTIALLY — half of them, for free** (Phase G;
+  `PHASE_G_MARGIN_GATING.md`). `with_margin(τ)` keeps the ranked plan
+  unless a switch's predicted advantage clears τ. Calibrated τ=0.02
+  STRICTLY DOMINATES the ungated selector: regressions 16 → 7 (−56%),
+  wins 6 → 7, mean 0.98230 → 0.98186, frozen-holdout win preserved,
+  selector_rec + energy bundle byte-identical. NEW findings: optimal τ
+  is SMALL (0.02, not the hypothesized ~0.70 — the head gates on
+  per-function advantages compressed by the program→function
+  granularity mismatch; above 0.05 wins get gated away and mean climbs
+  >1.0); and a regression FLOOR of 7 survives any τ — confident head
+  MISPREDICTIONS, not marginal switches. Margin gating structurally
+  can't reach the floor; it needs head-independent exploration configs
+  (handoff §3b) to retrain the head on the OOD pass combinations. The
+  selector is closer to default-on but not there.

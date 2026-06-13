@@ -303,7 +303,16 @@ fn is_holdout_program(program_name: &str) -> bool {
 /// energy head are excluded from energy-head training AND evaluation —
 /// a model must never train on its own decisions, and regret
 /// comparisons must stay on the head-independent 20-config plan space.
-const ENERGY_EXCLUDED_CONFIGS: &[&str] = &["selector_rec"];
+const ENERGY_EXCLUDED_CONFIGS: &[&str] = &[
+    "selector_rec",
+    // Phase G margin-gated selector configs — selector-driven, so the
+    // same feedback-loop guard applies (the energy head must never
+    // train on plans it chose, gated or not).
+    "selector_mg_rec_t02",
+    "selector_mg_rec_t05",
+    "selector_mg_rec_t10",
+    "selector_mg_rec_t20",
+];
 
 fn is_energy_excluded(r: &CompilationProfile) -> bool {
     ENERGY_EXCLUDED_CONFIGS.contains(&r.config_id.as_str())

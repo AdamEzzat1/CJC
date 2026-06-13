@@ -610,3 +610,29 @@ Full record: `docs/cana/PHASE_F1_MEMORY_HEAD.md`.
   loop-amplification under-explains volume on unseen shapes; a
   trip-count-aware amplification would sharpen creation AND flops/bytes
   estimates (its own FeatureHash ripple).
+
+## 15. Phase G (2026-06-13, same branch): margin gating — regressions halved, τ=0.02 dominates
+
+Full record: `docs/cana/PHASE_G_MARGIN_GATING.md`.
+
+- **The selector's 16 Phase-C regressions, addressed**:
+  `PassPlanSelector::with_margin(τ)` keeps the ranked plan unless an
+  argmin switch's predicted advantage (ln-score units) clears τ. τ=0 is
+  byte-identical to Phase C (proven). Calibrated by a τ sweep as
+  ablation configs (`selector_mg_rec_t{02,05,10,20}`, excluded from
+  energy training — feedback guard).
+- **τ=0.02 STRICTLY DOMINATES** ungated: regressions 16 → **7** (−56%),
+  wins 6 → **7**, mean 0.98230 → **0.98186**. Frozen-holdout win
+  preserved. Two forced findings: (a) optimal τ is small (0.02) not the
+  hypothesized ~0.70 — the head gates on per-FUNCTION advantages
+  (compressed by the program→function granularity mismatch), and above
+  τ=0.05 real wins get gated away (mean climbs above 1.0); (b) a
+  regression FLOOR of 7 at every τ≥0.02 — confident head MISPREDICTIONS,
+  not marginal switches, which gating structurally cannot reach.
+- **Safety**: selector_rec byte-identical (gate passes), energy bundle
+  byte-identical (feedback guard verified by hash). Margin clamps
+  negative/non-finite to 0 (can only make the selector more
+  conservative).
+- **Still NOT default-on**: the 7-regression floor needs a better-
+  trained head (head-independent exploration configs, handoff §3b), not
+  a bigger τ. Selector remains ablation-grade, now meaningfully closer.

@@ -66,7 +66,18 @@ pub const ENERGY_SELECTOR_ID: &str = "energy_selector_v1";
 
 /// Monotonic selector version; bump on any change to the candidate
 /// set, the scoring query construction, or the tie-break rule.
+///
+/// v2 (Phase G): adds margin gating — a `margin = 0.0` selector is
+/// byte-identical to v1, so the version only advances in report
+/// identity for margin-gated configs (the ablation stamps the margin
+/// into `cost_model_version`; see `ENERGY_SELECTOR_VERSION_MG`).
 pub const ENERGY_SELECTOR_VERSION: u32 = 1;
+
+/// Report version for a MARGIN-GATED selector (Phase G). Distinct from
+/// the v1 ungated version so a gated plan and an ungated plan never
+/// collide in row identity even when they happen to select the same
+/// passes.
+pub const ENERGY_SELECTOR_VERSION_MG: u32 = 2;
 
 /// One scored candidate for one function.
 #[derive(Debug, Clone, PartialEq)]
@@ -84,7 +95,9 @@ pub struct ScoredCandidate {
 /// Per-function selection outcome.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionSelection {
-    /// The winning candidate.
+    /// The winning candidate AFTER margin gating (margin = 0 → pure
+    /// argmin; margin > 0 → the ranked plan unless the argmin's
+    /// predicted advantage cleared the threshold).
     pub chosen: ScoredCandidate,
     /// Predicted `ln(score)` of candidate 0 (the ranked plan) — the
     /// never-worse-than-ranked gate compares against this.
@@ -92,6 +105,11 @@ pub struct FunctionSelection {
     /// Number of candidates scored (always 10 today; recorded so the
     /// report stays honest if the set ever changes).
     pub candidates_scored: u32,
+    /// Phase G: `true` when the unconstrained argmin chose a non-ranked
+    /// candidate but its predicted advantage fell BELOW the margin, so
+    /// the ranked plan was kept. Lets the harness count "switches the
+    /// margin suppressed" without re-deriving them.
+    pub gated_to_ranked: bool,
 }
 
 /// Whole-program selection report.
@@ -121,18 +139,42 @@ pub fn select_argmin(scored: &[(f64, u32)]) -> Option<u32> {
 #[derive(Debug, Clone)]
 pub struct PassPlanSelector {
     head: PinnEnergyV1,
+    /// Phase G margin (in `ln(score)` units, ≥ 0). A non-ranked argmin
+    /// is taken ONLY when its predicted advantage over the ranked plan
+    /// `(ranked_predicted - argmin_predicted)` is ≥ this. `0.0`
+    /// reproduces the pure-argmin v1 behavior byte-for-byte.
+    margin: f64,
 }
 
 impl PassPlanSelector {
-    /// Build a selector around a trained (validated) energy head.
+    /// Build a selector around a trained (validated) energy head with
+    /// NO margin (pure argmin — byte-identical to the Phase C v1).
     /// Invalid heads are refused — the caller must fall back to the
     /// ranked plan rather than select with garbage weights.
     pub fn new(head: PinnEnergyV1) -> Option<Self> {
         if head.is_valid() {
-            Some(Self { head })
+            Some(Self { head, margin: 0.0 })
         } else {
             None
         }
+    }
+
+    /// Set the Phase-G margin (in `ln(score)` units). Negative or
+    /// non-finite values are clamped to `0.0` — a margin can only make
+    /// the selector MORE conservative, never invert the gate. Builder
+    /// style: `PassPlanSelector::new(head)?.with_margin(0.15)`.
+    pub fn with_margin(mut self, margin: f64) -> Self {
+        self.margin = if margin.is_finite() && margin > 0.0 {
+            margin
+        } else {
+            0.0
+        };
+        self
+    }
+
+    /// The active margin (`ln(score)` units).
+    pub fn margin(&self) -> f64 {
+        self.margin
     }
 
     /// Access the head (read-only; identity feeds report hashes).
@@ -208,16 +250,45 @@ impl PassPlanSelector {
                 });
             }
 
+            // Candidate 0 (the ranked plan) — captured before `scored`
+            // is consumed, so the margin gate can restore it without a
+            // re-score.
             let ranked_predicted = scored[0].predicted_ln_score;
+            let ranked_passes = scored[0].passes.clone();
+            let ranked_dropped = scored[0].dropped;
             let pairs: Vec<(f64, u32)> = scored
                 .iter()
                 .map(|c| (c.predicted_ln_score, c.id))
                 .collect();
             let winner_id = select_argmin(&pairs).expect("candidate set is non-empty");
-            let chosen = scored
+            let argmin = scored
                 .into_iter()
                 .find(|c| c.id == winner_id)
                 .expect("winner id comes from the same set");
+
+            // -- Phase G margin gate -------------------------------------------
+            // The argmin can never be WORSE than ranked (it's in the
+            // set), but a tiny predicted advantage on an out-of-
+            // distribution pass combination is exactly what produced
+            // Phase C's regressions. Keep the ranked plan unless the
+            // predicted advantage clears the margin. `margin == 0.0` and
+            // a ranked winner both pass through untouched, so the v1
+            // selector is reproduced byte-for-byte.
+            let advantage = ranked_predicted - argmin.predicted_ln_score;
+            let gated_to_ranked = argmin.id != 0 && advantage < self.margin;
+            let chosen = if gated_to_ranked {
+                // Re-score candidate 0 is unnecessary — scored[0] held it
+                // before the move; recompute its passes from the ranked
+                // source the same way candidate 0 was built.
+                ScoredCandidate {
+                    id: 0,
+                    passes: ranked_passes.clone(),
+                    dropped: ranked_dropped,
+                    predicted_ln_score: ranked_predicted,
+                }
+            } else {
+                argmin
+            };
 
             // EXPLICIT entry — the absence-means-default trap.
             plan.per_function
@@ -228,6 +299,7 @@ impl PassPlanSelector {
                     chosen,
                     ranked_predicted,
                     candidates_scored: 10,
+                    gated_to_ranked,
                 },
             );
         }
@@ -335,6 +407,18 @@ mod tests {
         head
     }
 
+    /// A head that prefers LARGER post-plan node counts — the negated
+    /// direction. On any program with a non-trivial default sequence
+    /// this makes the unoptimized candidate (id 1) win, forcing a real
+    /// switch AWAY from the ranked plan — exactly what the margin gate
+    /// must be able to suppress.
+    fn prefer_unoptimized_head() -> PinnEnergyV1 {
+        let mut head = neutral_head();
+        let idx = head.feature_count() - 2; // ln(1+nodes_after)
+        head.coefficients[idx] = -1.0;
+        head
+    }
+
     fn lower(src: &str) -> (MirProgram, CanaFeatures) {
         let (ast, diags) = cjc_parser::parse_source(src);
         assert!(!diags.has_errors(), "{:?}", diags.diagnostics);
@@ -427,6 +511,125 @@ print(work(100));
                 sel.chosen.predicted_ln_score <= sel.ranked_predicted,
                 "{f}: argmin over a set containing the ranked candidate can never be worse"
             );
+        }
+    }
+
+    // -- Phase G: margin gating --------------------------------------------
+
+    #[test]
+    fn margin_clamps_negative_and_nonfinite_to_zero() {
+        let s = PassPlanSelector::new(nodes_after_head()).unwrap();
+        assert_eq!(s.clone().with_margin(-1.0).margin(), 0.0);
+        assert_eq!(s.clone().with_margin(f64::NAN).margin(), 0.0);
+        assert_eq!(s.clone().with_margin(f64::INFINITY).margin(), 0.0);
+        assert_eq!(s.with_margin(0.25).margin(), 0.25);
+    }
+
+    #[test]
+    fn margin_zero_is_byte_identical_to_ungated() {
+        let (mir, features) = lower(SRC_MULTI);
+        let gate = PerPassLegalityGate::new();
+        let ungated = PassPlanSelector::new(nodes_after_head())
+            .unwrap()
+            .select(&mir, &features, &PassPlan::empty(), &gate);
+        let zero_margin = PassPlanSelector::new(nodes_after_head())
+            .unwrap()
+            .with_margin(0.0)
+            .select(&mir, &features, &PassPlan::empty(), &gate);
+        assert_eq!(ungated.plan, zero_margin.plan);
+        // gated_to_ranked must be false everywhere at margin 0.
+        for sel in zero_margin.per_function.values() {
+            assert!(!sel.gated_to_ranked);
+        }
+    }
+
+    #[test]
+    fn huge_margin_forces_ranked_plan_everywhere() {
+        let (mir, features) = lower(SRC_MULTI);
+        let gate = PerPassLegalityGate::new();
+        let ranked = PassPlan::empty(); // candidate 0 = DEFAULT sequence
+        // The switch-forcing head: ungated, it abandons the ranked plan.
+        let ungated = PassPlanSelector::new(prefer_unoptimized_head())
+            .unwrap()
+            .select(&mir, &features, &ranked, &gate);
+        let any_switch = ungated.per_function.values().any(|s| s.chosen.id != 0);
+        assert!(any_switch, "fixture must switch ungated, or the gate proves nothing");
+
+        let report = PassPlanSelector::new(prefer_unoptimized_head())
+            .unwrap()
+            .with_margin(1e9)
+            .select(&mir, &features, &ranked, &gate);
+        for (f, sel) in &report.per_function {
+            assert_eq!(sel.chosen.id, 0, "{f}: an unreachable margin must keep ranked");
+            // Wherever the ungated run switched, the gate must record it.
+            if ungated.per_function[f].chosen.id != 0 {
+                assert!(sel.gated_to_ranked, "{f}: suppressed switch must be flagged");
+            }
+            // A kept (id 0) candidate restores the ranked prediction.
+            assert_eq!(sel.chosen.predicted_ln_score, sel.ranked_predicted);
+        }
+        // The gated plan must actually differ from the ungated one.
+        assert_ne!(report.plan, ungated.plan);
+    }
+
+    #[test]
+    fn margin_gates_exactly_at_the_predicted_advantage_boundary() {
+        // Find a function the ungated selector switches AWAY from ranked,
+        // read its predicted advantage, then prove the gate flips around
+        // that exact value: margin just below keeps the switch, margin
+        // just above suppresses it.
+        let (mir, features) = lower(SRC_MULTI);
+        let gate = PerPassLegalityGate::new();
+        let ungated = PassPlanSelector::new(prefer_unoptimized_head())
+            .unwrap()
+            .select(&mir, &features, &PassPlan::empty(), &gate);
+        let switched = ungated
+            .per_function
+            .iter()
+            .find(|(_, s)| s.chosen.id != 0)
+            .map(|(f, s)| (f.clone(), s.ranked_predicted - s.chosen.predicted_ln_score));
+        let (fn_name, adv) = match switched {
+            Some(x) => x,
+            // If this head switches nothing on this program the test is
+            // vacuous but must not silently pass as if it proved gating.
+            None => panic!("test fixture produced no switch to gate"),
+        };
+        assert!(adv > 0.0, "a real switch must have positive advantage");
+
+        let below = PassPlanSelector::new(prefer_unoptimized_head())
+            .unwrap()
+            .with_margin(adv * 0.5)
+            .select(&mir, &features, &PassPlan::empty(), &gate);
+        assert!(
+            !below.per_function[&fn_name].gated_to_ranked,
+            "margin below the advantage must keep the switch"
+        );
+        assert_ne!(below.per_function[&fn_name].chosen.id, 0);
+
+        let above = PassPlanSelector::new(prefer_unoptimized_head())
+            .unwrap()
+            .with_margin(adv * 2.0)
+            .select(&mir, &features, &PassPlan::empty(), &gate);
+        assert!(
+            above.per_function[&fn_name].gated_to_ranked,
+            "margin above the advantage must suppress the switch"
+        );
+        assert_eq!(above.per_function[&fn_name].chosen.id, 0);
+        // Suppressing the switch restores the ranked plan's prediction.
+        assert_eq!(
+            above.per_function[&fn_name].chosen.predicted_ln_score,
+            above.per_function[&fn_name].ranked_predicted
+        );
+    }
+
+    #[test]
+    fn gated_selection_is_deterministic() {
+        let (mir, features) = lower(SRC_MULTI);
+        let gate = PerPassLegalityGate::new();
+        let sel = PassPlanSelector::new(nodes_after_head()).unwrap().with_margin(0.05);
+        let first = sel.select(&mir, &features, &PassPlan::empty(), &gate);
+        for _ in 0..5 {
+            assert_eq!(first, sel.select(&mir, &features, &PassPlan::empty(), &gate));
         }
     }
 

@@ -51,7 +51,9 @@ use cjc_cana::physical_cost::{build_physical_query, predict_physical, PhysicalCo
 use cjc_cana::pinn_cost_model::PinnPhysicalCostModel;
 use cjc_cana::pinn_energy_v1::{PinnEnergyV1, PINN_ENERGY_V1_MODEL_ID};
 use cjc_cana::pinn_thermal_v2::PinnThermalV2;
-use cjc_cana::plan_selector::{PassPlanSelector, ENERGY_SELECTOR_ID, ENERGY_SELECTOR_VERSION};
+use cjc_cana::plan_selector::{
+    PassPlanSelector, ENERGY_SELECTOR_ID, ENERGY_SELECTOR_VERSION, ENERGY_SELECTOR_VERSION_MG,
+};
 use cjc_cana::pressure::{NullPressurePredictor, PressurePredictor};
 use cjc_cana::thermal_cost_model::ThermalAwareCostModel;
 use cjc_cana::{analyze_program, LinearCostModel};
@@ -831,7 +833,33 @@ const CONFIG_IDS_RECORDED: &[&str] = &[
     // energy-head training (feedback-loop guard — the model must never
     // train on plans it chose itself).
     "selector_rec",
+    // Phase G: MARGIN-GATED selector — same selector, but a non-ranked
+    // candidate is taken only when its predicted advantage over the
+    // ranked plan clears a threshold τ (in ln-score units). The sweep
+    // maps the wins/regressions tradeoff: a higher τ suppresses more of
+    // the small-advantage switches (Phase C's 16 regressions) at the
+    // cost of eventually gating away real wins too. Same feedback-loop
+    // exclusion as selector_rec.
+    "selector_mg_rec_t02",
+    "selector_mg_rec_t05",
+    "selector_mg_rec_t10",
+    "selector_mg_rec_t20",
 ];
+
+/// Parse the margin τ (ln-score units) from a `selector_mg_rec_t<NN>`
+/// config name, where `<NN>` is τ×100 (so `t05` = 0.05). Returns `None`
+/// for any non-margin-gated config. Membership-style exact suffix list,
+/// not arithmetic on arbitrary names — new τ values are added here
+/// explicitly alongside the `CONFIG_IDS_RECORDED` entry.
+fn selector_margin(config: &str) -> Option<f64> {
+    match config {
+        "selector_mg_rec_t02" => Some(0.02),
+        "selector_mg_rec_t05" => Some(0.05),
+        "selector_mg_rec_t10" => Some(0.10),
+        "selector_mg_rec_t20" => Some(0.20),
+        _ => None,
+    }
+}
 
 /// Forced-plan diagnostic configs (PINN v2 §5 follow-up): apply a fixed
 /// pass list to EVERY function, bypassing cost-model ranking but NOT
@@ -1024,15 +1052,20 @@ fn plan_under(
     v2_head: &PinnThermalV2,
     energy_head: &PinnEnergyV1,
 ) -> PlannedExperiment {
-    if config == "selector_rec" {
-        // Phase C: candidate 0 is the full_pinn_v2_rec stack's ranked
-        // plan; the selector chooses among 10 candidates per function
-        // with the trained energy head. Per-(function, pass) legality
-        // filtering happens INSIDE the selector through the same gate.
+    if config == "selector_rec" || selector_margin(config).is_some() {
+        // Phase C / G: candidate 0 is the full_pinn_v2_rec stack's
+        // ranked plan; the selector chooses among 10 candidates per
+        // function with the trained energy head. Per-(function, pass)
+        // legality filtering happens INSIDE the selector through the
+        // same gate. Phase G: a margin τ (0 for plain `selector_rec`)
+        // keeps the ranked plan unless the argmin's predicted advantage
+        // clears τ.
+        let margin = selector_margin(config).unwrap_or(0.0);
         let (report, _, _) = rank_under("full_pinn_v2_rec", mir, features, recorded, v2_head);
         let ranked = pass_plan_from(&report.sequence);
-        let selector =
-            PassPlanSelector::new(energy_head.clone()).expect("committed energy head is valid");
+        let selector = PassPlanSelector::new(energy_head.clone())
+            .expect("committed energy head is valid")
+            .with_margin(margin);
         let sel = selector.select(mir, features, &ranked, &PerPassLegalityGate::new());
         let recommended: u32 = sel
             .plan
@@ -1045,10 +1078,17 @@ fn plan_under(
             .values()
             .map(|s| s.chosen.dropped)
             .fold(0, |a, b| a.saturating_add(b));
+        // Margin-gated configs take a distinct report version so a gated
+        // and an ungated plan never collide in row identity.
+        let version = if margin > 0.0 {
+            ENERGY_SELECTOR_VERSION_MG
+        } else {
+            ENERGY_SELECTOR_VERSION
+        };
         return PlannedExperiment {
             plan: sel.plan,
             cost_model_id: format!("{ENERGY_SELECTOR_ID}+{PINN_ENERGY_V1_MODEL_ID}"),
-            cost_model_version: ENERGY_SELECTOR_VERSION,
+            cost_model_version: version,
             recommended_count: recommended,
             dropped_count: dropped,
             legality_approved: dropped == 0,
@@ -1635,6 +1675,80 @@ fn main() {
              mean score {:.5}",
             rows.len(),
             sel_acc.finalize() / rows.len().max(1) as f64,
+        );
+    }
+
+    // -- Phase G: margin-gating tradeoff curve, MEASURED ----------------------
+    // For τ = 0 (selector_rec) and each gated variant: count wins
+    // (score < 1, beats the baseline plan) and regressions (score > 1,
+    // worse than baseline), and the mean. The goal is a τ that keeps the
+    // wins while shedding the regressions — the report makes the
+    // tradeoff explicit instead of asserting a hand-picked threshold.
+    {
+        println!("\nPhase G — margin-gating tradeoff (lower mean + fewer regressions = better):");
+        println!(
+            "{:<22} | {:>5} | {:>5} | {:>11} | {:>10}",
+            "config (τ)", "wins", "regr", "mean score", "switches"
+        );
+        println!("{}", "-".repeat(66));
+        let gated_configs = [
+            ("selector_rec", 0.0f64),
+            ("selector_mg_rec_t02", 0.02),
+            ("selector_mg_rec_t05", 0.05),
+            ("selector_mg_rec_t10", 0.10),
+            ("selector_mg_rec_t20", 0.20),
+        ];
+        for (cfg, tau) in gated_configs {
+            let mut wins = 0usize;
+            let mut regr = 0usize;
+            let mut acc = KahanAccumulatorF64::new();
+            let mut switches = 0usize;
+            for per_config in rows.values() {
+                let r = &per_config[cfg];
+                acc.add(r.score);
+                if r.score < 1.0 - 1e-9 {
+                    wins += 1;
+                }
+                if r.score > 1.0 + 1e-9 {
+                    regr += 1;
+                }
+                // A plan that differs from the v2 ranked incumbent is a
+                // switch the selector made (gated or not).
+                if r.pass_sequence != per_config["full_pinn_v2_rec"].pass_sequence {
+                    switches += 1;
+                }
+            }
+            println!(
+                "{:<22} | {:>5} | {:>5} | {:>11.5} | {:>10}",
+                format!("{cfg} (τ={tau:.2})"),
+                wins,
+                regr,
+                acc.finalize() / rows.len().max(1) as f64,
+                switches,
+            );
+        }
+        println!(
+            "  → read the knee: the τ that holds wins flat while regr drops is the calibrated default"
+        );
+        // Name the calibrated-τ winners so the generalization claim is
+        // checkable: the frozen-holdout program (`holdout_alloc_pulse`)
+        // must remain a win under gating, not just the trained shapes.
+        const CALIBRATED: &str = "selector_mg_rec_t02";
+        let mut mg_winners: Vec<(String, f64)> = rows
+            .iter()
+            .filter_map(|(prog, per_config)| {
+                let s = per_config[CALIBRATED].score;
+                (s < 1.0 - 1e-9).then(|| (prog.clone(), s))
+            })
+            .collect();
+        mg_winners.sort_by(|a, b| a.1.total_cmp(&b.1));
+        for (prog, score) in &mg_winners {
+            println!("  [mg win τ=0.02] {prog:<24} measured score {score:.5}");
+        }
+        let holdout_kept = mg_winners.iter().any(|(p, _)| p == "holdout_alloc_pulse");
+        println!(
+            "  frozen-holdout (holdout_alloc_pulse) survives τ=0.02 gating: {}",
+            if holdout_kept { "YES" } else { "NO" }
         );
     }
 
