@@ -307,3 +307,16 @@ are methodologically invalid; only within-run trends count.
   byte-identical. The 1 residual regression is a non-linear-head problem
   (tiny MLP / pairwise feature), not more anchors. Selector now 6 wins /
   1 regression — closest to default-on yet, modeled metric.
+- **2026-06-13 — "the panel's contained speed/memory wins are real":
+  REFUTED on verification; ONE contained memory win shipped** (Phase I;
+  `PHASE_I_VALUE_SLIMMING.md` + `PERFORMANCE_ROADMAP.md`). Ground-truthing
+  the design-panel proposals: closure-env "clone" already a move; Tensor
+  shape/strides Rc = ~250 sites; Value-boxing pervasive; view micro-opt
+  <2%. The ONE contained win: `Value` 88 → 72 B (−18%) by boxing
+  SparseTensor(Box<SparseCsr>) — SparseCsr (88 B) was the outlier setting
+  every Value's size, but rare (19 sites). Pure-indirection,
+  determinism-safe, parity green, size-guard test added. The larger wins
+  (Tensor Rc<[usize]>, non-escaping literal elision) are scoped as
+  dedicated sessions because their blast radius (250 sites) makes rushing
+  them a determinism risk. Methodology: measure before claiming — the
+  panel's code-reading estimates did not survive contact with the code.

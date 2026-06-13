@@ -150,7 +150,16 @@ pub enum Value {
     /// N-dimensional tensor backed by [`Buffer<f64>`](crate::buffer::Buffer).
     Tensor(Tensor),
     /// Sparse matrix in CSR (Compressed Sparse Row) format.
-    SparseTensor(SparseCsr),
+    ///
+    /// **Boxed (Phase I):** `SparseCsr` is 88 bytes — the single
+    /// largest `Value` variant, and it set the size of EVERY `Value`
+    /// (88 B). Sparse matrices are rare (19 construction/match sites in
+    /// 6 files), so boxing the payload moves the cost off the hot path:
+    /// `Value` shrinks to 72 B, saving 16 B on every value stored in an
+    /// array (`Rc<Vec<Value>>`), tuple, frame slot, or scope — which is
+    /// nearly all of them. Pure indirection: semantics, ordering, and
+    /// determinism are unchanged (`DETERMINISM_CONTRACT.md`).
+    SparseTensor(Box<SparseCsr>),
     /// Deterministic hash map with interior mutability. Iteration order is
     /// fixed by [`DetMap`]'s MurmurHash3-based bucket ordering.
     Map(Rc<RefCell<DetMap>>),

@@ -666,3 +666,35 @@ Compiler-Pipeline-Engineer pass of the stacked-role optimization arc.
 - **1 residual regression**: a non-linear-head problem (single confident
   misprediction), not a more-anchors problem — tiny MLP / pairwise-
   interaction feature is the next lever.
+
+## 17. Phase I (2026-06-13, same branch): memory — Value slimmed 88→72, the contained win
+
+Full record: `docs/cana/PHASE_I_VALUE_SLIMMING.md`; roadmap
+`docs/cana/PERFORMANCE_ROADMAP.md`. Runtime + Numerical passes of the
+stacked-role arc, ground-truthed against code.
+
+- **Verification changed every panel conclusion** (THE RULE): closure-env
+  "clone" is already a move; Tensor.shape/strides Rc is ~250 sites;
+  Value-boxing is pervasive; view micro-opt <2%. So Phase I lands the ONE
+  win that survived as genuinely contained and scopes the rest as
+  dedicated-session roadmap (don't force a pervasive refactor late and
+  risk the bit-identical guarantee — the determinism contract is final
+  authority).
+- **The win**: `size_of::<Value>()` measured **88 → 72 B (−18%)** by
+  boxing `SparseTensor(Box<SparseCsr>)` — SparseCsr (88 B, 3 Vecs + 2
+  usize) was the single largest variant setting EVERY Value's size, but
+  sparse is rare (19 sites / 6 files). Value is stored by value in arrays
+  (Rc<Vec<Value>>), tuples, frames, scopes — so −16 B/value multiplies
+  across nearly all interpreter memory. Pure indirection; determinism
+  contract invariants all hold.
+- **Not boxed**: Enum (72 B but Option/Result, 52 hot sites), Tensor
+  (64 B but hottest + pervasive — its real win is Rc<[usize]> shape/
+  strides, roadmap P1).
+- **Tests**: `value_size_guard.rs` (size-ceiling regression guard +
+  boxed-sparse roundtrip); sparse-op + cjc-snap suites green unchanged;
+  parity gate (invariant 7) green.
+- **Roadmap (PERFORMANCE_ROADMAP.md)**: P1 Tensor Rc<[usize]> (250 sites),
+  P2 Value cold-variant boxing, P3 non-escaping literal elision (Phase-D
+  churn continuation), P4 softmax scratchpad (accuracy-gated) — each with
+  a concrete alloc/wall-clock measurement + parity gate, for dedicated
+  sessions.

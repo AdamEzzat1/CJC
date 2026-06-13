@@ -225,7 +225,7 @@ mod tests {
             col_indices: vec![0, 1, 2],
             values: vec![1.0, 2.0, 3.0],
         };
-        snap_save_v2(&Value::SparseTensor(sparse), &path).unwrap();
+        snap_save_v2(&Value::SparseTensor(Box::new(sparse)), &path).unwrap();
         let loaded = snap_load(&path).unwrap();
         match loaded {
             Value::SparseTensor(s) => {

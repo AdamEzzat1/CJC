@@ -421,7 +421,7 @@ mod tests {
             col_indices: vec![0, 1, 2],
             values: vec![1.0, 2.0, 3.0],
         };
-        let blob = snap(&Value::SparseTensor(sparse));
+        let blob = snap(&Value::SparseTensor(Box::new(sparse)));
         let restored = restore(&blob).unwrap();
         match restored {
             Value::SparseTensor(s) => {
@@ -444,7 +444,7 @@ mod tests {
             col_indices: vec![],
             values: vec![],
         };
-        let blob = snap(&Value::SparseTensor(sparse));
+        let blob = snap(&Value::SparseTensor(Box::new(sparse)));
         let restored = restore(&blob).unwrap();
         match restored {
             Value::SparseTensor(s) => {
@@ -465,7 +465,7 @@ mod tests {
             col_indices: vec![0],
             values: vec![1.0],
         };
-        assert!(is_snappable(&Value::SparseTensor(sparse)));
+        assert!(is_snappable(&Value::SparseTensor(Box::new(sparse))));
     }
 
     // -- Chunked tensor tests --

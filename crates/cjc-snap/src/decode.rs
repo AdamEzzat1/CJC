@@ -339,7 +339,7 @@ fn decode_value(cursor: &mut Cursor<'_>) -> Result<Value, SnapError> {
                 values.push(cursor.read_f64_le()?);
             }
             let sparse = cjc_runtime::SparseCsr { nrows, ncols, row_offsets: row_ptr, col_indices: col_idx, values };
-            Ok(Value::SparseTensor(sparse))
+            Ok(Value::SparseTensor(Box::new(sparse)))
         }
 
         TAG_CATEGORICAL => {

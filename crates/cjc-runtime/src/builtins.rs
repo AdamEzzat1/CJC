@@ -4054,21 +4054,21 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
         "sparse_add" => {
             let a = value_to_sparse(&args[0])?;
             let b = value_to_sparse(&args[1])?;
-            Ok(Some(Value::SparseTensor(crate::sparse::sparse_add(a, b).map_err(|e| e)?)))
+            Ok(Some(Value::SparseTensor(Box::new(crate::sparse::sparse_add(a, b).map_err(|e| e)?))))
         }
         "sparse_sub" => {
             let a = value_to_sparse(&args[0])?;
             let b = value_to_sparse(&args[1])?;
-            Ok(Some(Value::SparseTensor(crate::sparse::sparse_sub(a, b).map_err(|e| e)?)))
+            Ok(Some(Value::SparseTensor(Box::new(crate::sparse::sparse_sub(a, b).map_err(|e| e)?))))
         }
         "sparse_matmul" => {
             let a = value_to_sparse(&args[0])?;
             let b = value_to_sparse(&args[1])?;
-            Ok(Some(Value::SparseTensor(crate::sparse::sparse_matmul(a, b).map_err(|e| e)?)))
+            Ok(Some(Value::SparseTensor(Box::new(crate::sparse::sparse_matmul(a, b).map_err(|e| e)?))))
         }
         "sparse_transpose" => {
             let a = value_to_sparse(&args[0])?;
-            Ok(Some(Value::SparseTensor(crate::sparse::sparse_transpose(a))))
+            Ok(Some(Value::SparseTensor(Box::new(crate::sparse::sparse_transpose(a)))))
         }
         // -- §4.4 Sparse eigenvalue solvers ------------------------------------
         //
@@ -5590,7 +5590,7 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
 /// Extract a SparseCsr reference from a Value.
 fn value_to_sparse(val: &Value) -> Result<&crate::sparse::SparseCsr, String> {
     match val {
-        Value::SparseTensor(s) => Ok(s),
+        Value::SparseTensor(s) => Ok(&**s),
         _ => Err(format!("expected SparseTensor, got {}", val.type_name())),
     }
 }
@@ -6567,7 +6567,7 @@ mod tests {
             cols.push(i);
         }
         let coo = SparseCoo::new(values, rows, cols, n, n);
-        Value::SparseTensor(SparseCsr::from_coo(&coo))
+        Value::SparseTensor(Box::new(SparseCsr::from_coo(&coo)))
     }
 
     #[test]
