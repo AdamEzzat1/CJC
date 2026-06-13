@@ -121,7 +121,8 @@ print(classify(40));
 
 /// 6. Float arithmetic — exercises CANA's reduction-axis tracking. Every
 ///    float accumulator is a StrictFold per cjc-mir's reduction analyzer.
-///    CANA's DefaultLegalityGate refuses any reorder of these reductions.
+///    CANA's PerPassLegalityGate withholds the reorder-capable passes
+///    (CSE/SR) on these reductions while still allowing CF/DCE/LICM.
 const PROG_FLOAT: &str = r#"
 fn polynomial(x: f64) -> f64 {
     let a: f64 = 3.14;
@@ -245,7 +246,7 @@ struct Measurement {
 
 type CanaCachedRanker = cjc_cana::CachingPassRanker<
     cjc_cana::LinearCostModel,
-    cjc_cana::DefaultLegalityGate,
+    cjc_cana::legality::PerPassLegalityGate,
 >;
 
 fn measure(
