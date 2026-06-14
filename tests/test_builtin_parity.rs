@@ -220,6 +220,139 @@ fn parity_closure_returned_value_used() {
     "#);
 }
 
+// ── Escaping closures: lexical capture parity ──────────────────
+//
+// A closure that outlives its defining scope must observe the values
+// captured at creation time (lexical), identically in both executors.
+// Before cjc-eval grew real capture it either errored (`undefined
+// variable`) or read the caller's live scope (dynamic scoping); these
+// pin the fixed behavior to MIR-exec's lexical capture.
+
+#[test]
+fn parity_closure_escapes_factory() {
+    // The captured `n` is absent from the caller's scope — only lexical
+    // capture can resolve it. Expected: 8 (3 + captured 5).
+    assert_parity(r#"
+        fn make_adder(n: i64) -> Any {
+            let f = |x: i64| x + n;
+            return f;
+        }
+        fn main() -> i64 {
+            let add5 = make_adder(5);
+            return add5(3);
+        }
+        print(main());
+    "#);
+}
+
+#[test]
+fn parity_closure_escapes_with_shadow() {
+    // The caller rebinds `n` after the closure is built. Lexical capture
+    // must ignore the caller's `n` and use the captured 5 → 8.
+    assert_parity(r#"
+        fn make_adder(n: i64) -> Any {
+            let f = |x: i64| x + n;
+            return f;
+        }
+        fn main() -> i64 {
+            let add5 = make_adder(5);
+            let n: i64 = 1000;
+            return add5(3) + n - n;
+        }
+        print(main());
+    "#);
+}
+
+#[test]
+fn parity_closure_factory_multiple_instances() {
+    // Two closures from the same factory capture distinct values.
+    assert_parity(r#"
+        fn make_adder(n: i64) -> Any {
+            let f = |x: i64| x + n;
+            return f;
+        }
+        fn main() -> i64 {
+            let add5 = make_adder(5);
+            let add10 = make_adder(10);
+            print(add5(1));
+            print(add10(1));
+            return add5(0) + add10(0);
+        }
+        print(main());
+    "#);
+}
+
+#[test]
+fn parity_closure_capture_is_snapshot() {
+    // Mutating the captured variable after the closure is built must not
+    // change what the closure sees (capture is by value at creation).
+    assert_parity(r#"
+        fn main() -> i64 {
+            let mut n: i64 = 1;
+            let f = |x: i64| x + n;
+            n = 100;
+            return f(0);
+        }
+        print(main());
+    "#);
+}
+
+#[test]
+fn parity_closure_captures_multiple_vars() {
+    // A closure capturing several distinct free variables.
+    assert_parity(r#"
+        fn main() -> i64 {
+            let a: i64 = 3;
+            let b: i64 = 40;
+            let c: i64 = 500;
+            let f = |x: i64| x + a + b + c;
+            return f(6000);
+        }
+        print(main());
+    "#);
+}
+
+#[test]
+fn parity_closure_returned_then_called_in_loop() {
+    // Factory-built closure invoked repeatedly after escaping.
+    assert_parity(r#"
+        fn make_scaler(k: i64) -> Any {
+            return |x: i64| x * k;
+        }
+        fn main() -> i64 {
+            let triple = make_scaler(3);
+            let mut sum: i64 = 0;
+            let mut i: i64 = 0;
+            while i < 4 {
+                sum = sum + triple(i);
+                i = i + 1;
+            }
+            return sum;
+        }
+        print(main());
+    "#);
+}
+
+#[test]
+fn parity_capturing_closure_through_higher_order_builtins() {
+    // A capturing closure passed to array_map / array_reduce exercises
+    // eval's now-live Value::Closure arms in those builtins (env prepended
+    // to the per-element args). Must match MIR-exec.
+    assert_parity(r#"
+        fn main() -> i64 {
+            let bias: i64 = 10;
+            let shift = |x: i64| x + bias;
+            let arr: Any = [1, 2, 3];
+            let mapped: Any = array_map(arr, shift);
+            let total: i64 = array_reduce(arr, 0, |acc: i64, x: i64| acc + x + bias);
+            print(mapped);
+            print(total);
+            return 0;
+        }
+        print(main());
+    "#);
+}
+
 // ── Determinism: same seed = identical output ──────────────────
 
 #[test]
