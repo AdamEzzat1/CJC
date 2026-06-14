@@ -29,7 +29,9 @@
 //! median = typical). Lowering cost is included in each run -- amortized
 //! across the inner iterations, so deltas remain meaningful.
 
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use cjc_eval::Interpreter;
@@ -38,6 +40,36 @@ use cjc_mir_exec::MirExecutor;
 const N_WARMUP: usize = 3;
 const N_ITERS: usize = 11;
 const SEED: u64 = 42;
+
+/// Process-global allocation counter. Wall-clock on this stack is
+/// dominated by ~2× Windows run-to-run noise (handoff finding #3), which
+/// drowns allocation-level micro-optimizations. The allocation COUNT is
+/// deterministic — the same program executes the same allocations every
+/// run — so it is the correct, noise-free instrument for a change like
+/// the Stage-5b `call_function` Cow elision. Counts `alloc` + `realloc`
+/// (a realloc that grows in place still costs a bookkeeping op; the
+/// default `GlobalAlloc::realloc` would route through `alloc`, but we
+/// override it to count exactly one event either way).
+static ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
+
+struct CountingAlloc;
+
+unsafe impl GlobalAlloc for CountingAlloc {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+        System.alloc(layout)
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        System.dealloc(ptr, layout)
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+        System.realloc(ptr, layout, new_size)
+    }
+}
+
+#[global_allocator]
+static GLOBAL: CountingAlloc = CountingAlloc;
 
 /// Source for an arithmetic-heavy hot path: tight loop, Int + Int, no
 /// allocations or builtin calls.
@@ -100,6 +132,52 @@ fn main() -> i64 {
     while i < 30000 {
         let delta: i64 = abs(i - 15000);
         sum = sum + delta * scale;
+        i = i + 1;
+    }
+    sum
+}
+"#;
+
+/// Source for a closure-call-heavy hot path with ONE capture. Each
+/// `f(i)` is a `VarLocal`-callee call (a slot-resolved local holding a
+/// `Value::Closure`), exercising the Stage-5a dispatch path
+/// (`frame_get(slot).cloned()` then dispatch). The microbench had no
+/// closure workload before, which is precisely why the Stage-5a
+/// chess_rl_v2 regression (closure-call-heavy) never showed up here.
+const SRC_CLOSURE1: &str = r#"
+fn main() -> i64 {
+    let offset: i64 = 100;
+    let f = |x: i64| x + offset;
+    let mut sum: i64 = 0;
+    let mut i: i64 = 0;
+    while i < 50000 {
+        sum = sum + f(i);
+        i = i + 1;
+    }
+    sum
+}
+"#;
+
+/// Source for a closure-call-heavy hot path with EIGHT captures. The
+/// closure's `env: Vec<Value>` has 8 elements, so the per-call
+/// `frame_get(slot).cloned()` reallocates an 8-element Vec every
+/// iteration. If the Stage-5a regression is the env-clone cost, this
+/// workload makes it visible vs `clos1` (1-element env) and vs eval.
+const SRC_CLOSURE8: &str = r#"
+fn main() -> i64 {
+    let a: i64 = 1;
+    let b: i64 = 2;
+    let c: i64 = 3;
+    let d: i64 = 4;
+    let e: i64 = 5;
+    let g: i64 = 6;
+    let h: i64 = 7;
+    let k: i64 = 8;
+    let f = |x: i64| x + a + b + c + d + e + g + h + k;
+    let mut sum: i64 = 0;
+    let mut i: i64 = 0;
+    while i < 50000 {
+        sum = sum + f(i);
         i = i + 1;
     }
     sum
@@ -189,6 +267,20 @@ fn run_workload(name: &str, source: &str) {
 
     let (eval_min, eval_med) = bench(|| time_eval(&program));
 
+    // Deterministic allocation count for ONE steady-state MIR exec.
+    // Warm once so lazily-populated caches (inline cache, etc.) don't
+    // count, then reset and count exactly one exec. Unlike wall-clock
+    // this is noise-free and reproducible run-to-run — the right
+    // instrument for allocation-level changes (Stage-5b Cow elision).
+    let mir_allocs = {
+        let mut executor = MirExecutor::new(SEED);
+        executor.scan_ast_imports(&program);
+        let _ = executor.exec(&mir);
+        ALLOC_COUNT.store(0, Ordering::Relaxed);
+        let _ = executor.exec(&mir);
+        ALLOC_COUNT.load(Ordering::Relaxed)
+    };
+
     // JSONL: one record per (workload, backend, cache-state) triple.
     println!(
         r#"{{"workload":"{name}","backend":"mir_cold","min_ns":{mir_cold_min},"median_ns":{mir_cold_med}}}"#
@@ -199,15 +291,17 @@ fn run_workload(name: &str, source: &str) {
     println!(
         r#"{{"workload":"{name}","backend":"eval","min_ns":{eval_min},"median_ns":{eval_med}}}"#
     );
+    println!(r#"{{"workload":"{name}","backend":"mir_warm","allocs_per_exec":{mir_allocs}}}"#);
 
-    // Human scorecard line: cold-cache mir / warm-cache mir / eval.
+    // Human scorecard line: cold-cache mir / warm-cache mir / eval +
+    // deterministic per-exec allocation count.
     let cm = (mir_cold_min as f64) / 1.0e6;
     let wm = (mir_warm_min as f64) / 1.0e6;
     let em = (eval_min as f64) / 1.0e6;
     let _cmed = (mir_cold_med as f64) / 1.0e6;
     let _wmed = (mir_warm_med as f64) / 1.0e6;
     eprintln!(
-        "  {name:<8}  mir_cold: {cm:>7.2} ms   mir_warm: {wm:>7.2} ms   eval: {em:>7.2} ms"
+        "  {name:<8}  mir_cold: {cm:>7.2} ms   mir_warm: {wm:>7.2} ms   eval: {em:>7.2} ms   allocs: {mir_allocs:>9}"
     );
     let _ = std::io::stderr().flush();
 }
@@ -222,6 +316,8 @@ fn main() {
     run_workload("lookup", SRC_LOOKUP);
     run_workload("call", SRC_CALL);
     run_workload("mixed", SRC_MIXED);
+    run_workload("clos1", SRC_CLOSURE1);
+    run_workload("clos8", SRC_CLOSURE8);
 
     eprintln!("=== done ===");
 }

@@ -33,6 +33,7 @@
 pub mod trace;
 pub use trace::{with_trace, TraceCollector};
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -5576,11 +5577,22 @@ impl MirExecutor {
         // a scope and executes the body. If the body ends with a self-tail-call,
         // the current scope is reused (params rebound) and execution restarts
         // instead of growing the Rust call stack.
-        let mut current_name = name.to_string();
-        let mut current_args: Vec<Value> = args.to_vec();
+        // Tier-0 perf (T0-b Stage 5b): borrow on the common
+        // (non-tail-call) path. The trampoline only needs OWNED
+        // name/args when a tail call actually loops; eagerly
+        // materializing them with `to_string()` / `to_vec()` cost one
+        // String + one Vec heap allocation on EVERY call_function entry
+        // — the hottest path in the executor, and doubly wasteful on the
+        // closure-callee path (which already built an owned `full_args`
+        // that was then re-copied here). `Cow::Borrowed` elides both;
+        // the `TailCall` arm below switches to `Cow::Owned` for the next
+        // iteration. Determinism-safe: allocation-only, no value /
+        // order / FP / RNG change (DETERMINISM_CONTRACT.md).
+        let mut current_name: Cow<'_, str> = Cow::Borrowed(name);
+        let mut current_args: Cow<'_, [Value]> = Cow::Borrowed(args);
 
         loop {
-            let func = self.functions.get(&current_name).cloned().ok_or_else(|| {
+            let func = self.functions.get(current_name.as_ref()).cloned().ok_or_else(|| {
                 MirExecError::Runtime(format!("undefined function `{}`", current_name))
             })?;
 
@@ -5618,7 +5630,7 @@ impl MirExecutor {
             let has_trace = func.decorators.iter().any(|d| d == "trace");
 
             if has_memoize {
-                let key_tuple = Value::Tuple(Rc::new(current_args.clone()));
+                let key_tuple = Value::Tuple(Rc::new(current_args.to_vec()));
                 let key_hash = cjc_snap::snap(&key_tuple).content_hash;
                 if let Some(cached) = self.memo_cache.get(&key_hash) {
                     if has_trace {
@@ -5701,7 +5713,7 @@ impl MirExecutor {
 
             // Track which function we're in for TCO detection.
             let prev_fn = self.current_fn.take();
-            self.current_fn = Some(current_name.clone());
+            self.current_fn = Some(current_name.as_ref().to_string());
 
             // Option B: function-entry event (design §3.4 site 2) —
             // attributes the since-last-emit counters to the CALLER's
@@ -5732,8 +5744,8 @@ impl MirExecutor {
                         self.frame.truncate(frame_base);
                     }
                     self.current_fn = prev_fn;
-                    current_name = tco_name;
-                    current_args = tco_args;
+                    current_name = Cow::Owned(tco_name);
+                    current_args = Cow::Owned(tco_args);
                     continue;
                 }
                 Err(e) => {
