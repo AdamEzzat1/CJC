@@ -352,6 +352,226 @@ impl Interpreter {
         )))
     }
 
+    // -- Lambda free-variable analysis (lexical capture) --------------------
+    //
+    // These mirror the closure-conversion analysis cjc-hir performs for
+    // cjc-mir-exec (`collect_var_refs` / `collect_var_refs_stmt` /
+    // `collect_var_refs_block` in cjc-hir::lower_expr). They are ported here
+    // verbatim so the AST tree-walker captures the same set of free variables
+    // the MIR pipeline does — keeping the two executors at parity for
+    // escaping closures. Kept private and self-contained so cjc-eval does not
+    // take a dependency on the HIR/MIR pipeline crates.
+
+    /// Collect every `Ident` reference reachable from `expr`, in source order
+    /// (with duplicates). Descends into nested-lambda *bodies* (a nested
+    /// lambda referencing an outer variable still references it) but performs
+    /// no scope bookkeeping — the caller filters params/locals afterward.
+    fn collect_var_refs(expr: &cjc_ast::Expr, out: &mut Vec<String>) {
+        match &expr.kind {
+            cjc_ast::ExprKind::Ident(id) => out.push(id.name.clone()),
+            cjc_ast::ExprKind::Binary { left, right, .. } => {
+                Self::collect_var_refs(left, out);
+                Self::collect_var_refs(right, out);
+            }
+            cjc_ast::ExprKind::Unary { operand, .. } => {
+                Self::collect_var_refs(operand, out);
+            }
+            cjc_ast::ExprKind::Call { callee, args } => {
+                Self::collect_var_refs(callee, out);
+                for a in args {
+                    Self::collect_var_refs(&a.value, out);
+                }
+            }
+            cjc_ast::ExprKind::Field { object, .. } => {
+                Self::collect_var_refs(object, out);
+            }
+            cjc_ast::ExprKind::Index { object, index } => {
+                Self::collect_var_refs(object, out);
+                Self::collect_var_refs(index, out);
+            }
+            cjc_ast::ExprKind::MultiIndex { object, indices } => {
+                Self::collect_var_refs(object, out);
+                for i in indices {
+                    Self::collect_var_refs(i, out);
+                }
+            }
+            cjc_ast::ExprKind::Assign { target, value } => {
+                Self::collect_var_refs(target, out);
+                Self::collect_var_refs(value, out);
+            }
+            cjc_ast::ExprKind::Pipe { left, right } => {
+                Self::collect_var_refs(left, out);
+                Self::collect_var_refs(right, out);
+            }
+            cjc_ast::ExprKind::Block(block) => {
+                for stmt in &block.stmts {
+                    Self::collect_var_refs_stmt(stmt, out);
+                }
+                if let Some(e) = &block.expr {
+                    Self::collect_var_refs(e, out);
+                }
+            }
+            cjc_ast::ExprKind::StructLit { fields, .. } => {
+                for f in fields {
+                    Self::collect_var_refs(&f.value, out);
+                }
+            }
+            cjc_ast::ExprKind::ArrayLit(elems) => {
+                for e in elems {
+                    Self::collect_var_refs(e, out);
+                }
+            }
+            cjc_ast::ExprKind::Lambda { body, .. } => {
+                // Descend into the nested lambda body to find references to
+                // *this* lambda's scope; the nested lambda performs its own
+                // capture analysis when it is itself evaluated.
+                Self::collect_var_refs(body, out);
+            }
+            cjc_ast::ExprKind::Match { scrutinee, arms } => {
+                Self::collect_var_refs(scrutinee, out);
+                for arm in arms {
+                    Self::collect_var_refs(&arm.body, out);
+                }
+            }
+            cjc_ast::ExprKind::TupleLit(elems) => {
+                for e in elems {
+                    Self::collect_var_refs(e, out);
+                }
+            }
+            cjc_ast::ExprKind::FStringLit(segments) => {
+                for (_lit, interp) in segments {
+                    if let Some(e) = interp {
+                        Self::collect_var_refs(e, out);
+                    }
+                }
+            }
+            cjc_ast::ExprKind::IntLit(_)
+            | cjc_ast::ExprKind::FloatLit(_)
+            | cjc_ast::ExprKind::StringLit(_)
+            | cjc_ast::ExprKind::ByteStringLit(_)
+            | cjc_ast::ExprKind::ByteCharLit(_)
+            | cjc_ast::ExprKind::RawStringLit(_)
+            | cjc_ast::ExprKind::RawByteStringLit(_)
+            | cjc_ast::ExprKind::RegexLit { .. }
+            | cjc_ast::ExprKind::BoolLit(_)
+            | cjc_ast::ExprKind::NaLit
+            | cjc_ast::ExprKind::Col(_) => {}
+            cjc_ast::ExprKind::TensorLit { rows } => {
+                for row in rows {
+                    for expr in row {
+                        Self::collect_var_refs(expr, out);
+                    }
+                }
+            }
+            cjc_ast::ExprKind::Try(inner) => {
+                Self::collect_var_refs(inner, out);
+            }
+            cjc_ast::ExprKind::VariantLit { fields, .. } => {
+                for f in fields {
+                    Self::collect_var_refs(f, out);
+                }
+            }
+            cjc_ast::ExprKind::CompoundAssign { target, value, .. } => {
+                Self::collect_var_refs(target, out);
+                Self::collect_var_refs(value, out);
+            }
+            cjc_ast::ExprKind::Cast { expr, .. } => {
+                Self::collect_var_refs(expr, out);
+            }
+            cjc_ast::ExprKind::IfExpr { condition, then_block, else_branch } => {
+                Self::collect_var_refs(condition, out);
+                for stmt in &then_block.stmts {
+                    Self::collect_var_refs_stmt(stmt, out);
+                }
+                if let Some(e) = &then_block.expr {
+                    Self::collect_var_refs(e, out);
+                }
+                if let Some(eb) = else_branch {
+                    match eb {
+                        cjc_ast::ElseBranch::ElseIf(elif) => {
+                            Self::collect_var_refs(&cjc_ast::Expr {
+                                kind: cjc_ast::ExprKind::IfExpr {
+                                    condition: Box::new(elif.condition.clone()),
+                                    then_block: elif.then_block.clone(),
+                                    else_branch: elif.else_branch.clone(),
+                                },
+                                span: elif.condition.span.clone(),
+                            }, out);
+                        }
+                        cjc_ast::ElseBranch::Else(block) => {
+                            for stmt in &block.stmts {
+                                Self::collect_var_refs_stmt(stmt, out);
+                            }
+                            if let Some(e) = &block.expr {
+                                Self::collect_var_refs(e, out);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn collect_var_refs_stmt(stmt: &cjc_ast::Stmt, out: &mut Vec<String>) {
+        match &stmt.kind {
+            cjc_ast::StmtKind::Let(l) => {
+                Self::collect_var_refs(&l.init, out);
+            }
+            cjc_ast::StmtKind::Expr(e) => {
+                Self::collect_var_refs(e, out);
+            }
+            cjc_ast::StmtKind::Return(e) => {
+                if let Some(e) = e {
+                    Self::collect_var_refs(e, out);
+                }
+            }
+            cjc_ast::StmtKind::If(if_stmt) => {
+                Self::collect_var_refs(&if_stmt.condition, out);
+                Self::collect_var_refs_block(&if_stmt.then_block, out);
+                if let Some(ref else_branch) = if_stmt.else_branch {
+                    match else_branch {
+                        cjc_ast::ElseBranch::ElseIf(elif) => {
+                            Self::collect_var_refs(&elif.condition, out);
+                            Self::collect_var_refs_block(&elif.then_block, out);
+                        }
+                        cjc_ast::ElseBranch::Else(block) => {
+                            Self::collect_var_refs_block(block, out);
+                        }
+                    }
+                }
+            }
+            cjc_ast::StmtKind::While(w) => {
+                Self::collect_var_refs(&w.condition, out);
+                Self::collect_var_refs_block(&w.body, out);
+            }
+            cjc_ast::StmtKind::For(f) => {
+                match &f.iter {
+                    cjc_ast::ForIter::Range { start, end } => {
+                        Self::collect_var_refs(start, out);
+                        Self::collect_var_refs(end, out);
+                    }
+                    cjc_ast::ForIter::Expr(expr) => {
+                        Self::collect_var_refs(expr, out);
+                    }
+                }
+                Self::collect_var_refs_block(&f.body, out);
+            }
+            cjc_ast::StmtKind::NoGcBlock(block) => {
+                Self::collect_var_refs_block(block, out);
+            }
+            cjc_ast::StmtKind::Break | cjc_ast::StmtKind::Continue => {}
+        }
+    }
+
+    fn collect_var_refs_block(block: &cjc_ast::Block, out: &mut Vec<String>) {
+        for stmt in &block.stmts {
+            Self::collect_var_refs_stmt(stmt, out);
+        }
+        if let Some(e) = &block.expr {
+            Self::collect_var_refs(e, out);
+        }
+    }
+
     // -- Program execution --------------------------------------------------
 
     /// Execute a full [`Program`] AST.
@@ -887,13 +1107,75 @@ impl Interpreter {
             }
 
             ExprKind::Lambda { params, body } => {
-                // For v1, lambdas are not first-class closures. We store them
-                // as named functions with a synthetic name and register them.
+                // Lexical capture (closure conversion). Lift the lambda to a
+                // named function whose parameter list is
+                // `[captured vars..., explicit params...]`, and snapshot the
+                // captured variables' *current* values into a `Value::Closure`
+                // env. This mirrors the closure conversion cjc-hir performs for
+                // cjc-mir-exec (`HirExprKind::Closure` + `MirExprKind::MakeClosure`),
+                // so an escaping closure observes the bindings live at its
+                // creation site, not at its call site — keeping the two
+                // executors at parity.
+                //
+                // A free name is captured iff it resolves to a live local
+                // binding right now (`lookup`). Function names, builtins, and
+                // enum variants are not local bindings (lookup returns `None`),
+                // so they stay unbound and are resolved by name at call time —
+                // exactly MIR-exec's capture set. Names `let`-bound *inside* the
+                // body are not in scope yet, so they are not captured either.
+                // A lambda with no captures lowers to a plain `Value::Fn`, as
+                // before (backward compatible — same registered shape).
+                let mut refs: Vec<String> = Vec::new();
+                Self::collect_var_refs(body, &mut refs);
+                let param_names: BTreeSet<&str> =
+                    params.iter().map(|p| p.name.name.as_str()).collect();
+
+                let mut seen: BTreeSet<String> = BTreeSet::new();
+                let mut capture_names: Vec<String> = Vec::new();
+                let mut env: Vec<Value> = Vec::new();
+                for name in &refs {
+                    if !seen.insert(name.clone()) {
+                        continue; // already captured (first occurrence wins)
+                    }
+                    if param_names.contains(name.as_str()) {
+                        continue; // shadowed by this lambda's own parameter
+                    }
+                    if let Some(val) = self.lookup(name) {
+                        capture_names.push(name.clone());
+                        env.push(val.clone());
+                    }
+                }
+
                 let lambda_name = format!("<lambda@{}>", expr.span.start);
+
+                // Lifted parameter list: captured params first (positionally
+                // aligned with `env`), then the lambda's explicit params. The
+                // captured params carry an `Any` annotation — eval binds by
+                // value and does not type-check call sites.
+                let any_ty = || cjc_ast::TypeExpr {
+                    kind: cjc_ast::TypeExprKind::Named {
+                        name: cjc_ast::Ident::dummy("Any"),
+                        args: vec![],
+                    },
+                    span: cjc_ast::Span::dummy(),
+                };
+                let mut lifted_params: Vec<cjc_ast::Param> =
+                    Vec::with_capacity(capture_names.len() + params.len());
+                for cap in &capture_names {
+                    lifted_params.push(cjc_ast::Param {
+                        name: cjc_ast::Ident::dummy(cap),
+                        ty: any_ty(),
+                        default: None,
+                        is_variadic: false,
+                        span: cjc_ast::Span::dummy(),
+                    });
+                }
+                lifted_params.extend(params.iter().cloned());
+
                 let fn_decl = FnDecl {
                     name: cjc_ast::Ident::dummy(&lambda_name),
                     type_params: vec![],
-                    params: params.clone(),
+                    params: lifted_params,
                     return_type: None,
                     body: Block {
                         stmts: vec![],
@@ -906,11 +1188,21 @@ impl Interpreter {
                     vis: cjc_ast::Visibility::Private,
                 };
                 self.functions.insert(lambda_name.clone(), fn_decl);
-                Ok(Value::Fn(cjc_runtime::FnValue {
-                    name: lambda_name,
-                    arity: params.len(),
-                    body_id: 0,
-                }))
+
+                if env.is_empty() {
+                    // No captures → plain function value (unchanged behavior).
+                    Ok(Value::Fn(cjc_runtime::FnValue {
+                        name: lambda_name,
+                        arity: params.len(),
+                        body_id: 0,
+                    }))
+                } else {
+                    Ok(Value::Closure {
+                        fn_name: lambda_name,
+                        env,
+                        arity: params.len(),
+                    })
+                }
             }
 
             ExprKind::Match { scrutinee, arms } => {
@@ -1557,10 +1849,18 @@ impl Interpreter {
                 self.dispatch_method(obj_val, &name.name, arg_vals)
             }
             _ => {
-                // Callee might be a FnValue.
+                // Callee is an arbitrary expression — evaluate it and
+                // dispatch if it yields a callable. Mirrors the matching
+                // catch-all in cjc-mir-exec::eval_call (Fn + Closure).
                 let callee_val = self.eval_expr(callee)?;
                 match callee_val {
                     Value::Fn(fv) => self.call_function(&fv.name, &arg_vals),
+                    Value::Closure { fn_name, env, .. } => {
+                        // Prepend captured env values to the argument list.
+                        let mut full_args = env;
+                        full_args.extend(arg_vals);
+                        self.call_function(&fn_name, &full_args)
+                    }
                     _ => Err(EvalError::Runtime(format!(
                         "cannot call value of type {}",
                         callee_val.type_name()
@@ -1946,6 +2246,33 @@ impl Interpreter {
         // (allows shadowing builtin names like "outer", "min", etc.)
         if self.functions.contains_key(name) {
             return self.call_function(name, &args);
+        }
+        // If the name refers to a variable holding a Closure or Fn value,
+        // dispatch through it rather than looking for a named function.
+        //
+        // Parity with cjc-mir-exec::dispatch_call (see its Closure/Fn
+        // branch): closes the AST-eval gap where calling a closure bound
+        // to a local — `let f = |x| ...; f(x)` — errored `undefined
+        // function`. AST-eval lowers lambdas to a `Value::Fn` naming a
+        // synthetic `<lambda@..>` function, so the `Value::Fn` arm is the
+        // one that fires here; the `Value::Closure` arm keeps the dispatch
+        // symmetric with MIR-exec, which captures lexically into a Closure.
+        // Gated on `!is_known_builtin` so a builtin name still wins over a
+        // same-named local (matching MIR-exec's precedence).
+        if !self.is_known_builtin(name) {
+            if let Some(val) = self.lookup(name).cloned() {
+                match val {
+                    Value::Closure { fn_name, env, .. } => {
+                        let mut full_args = env;
+                        full_args.extend(args);
+                        return self.call_function(&fn_name, &full_args);
+                    }
+                    Value::Fn(fv) => {
+                        return self.call_function(&fv.name, &args);
+                    }
+                    _ => {}
+                }
+            }
         }
         // Stateful builtins that need interpreter state
         match name {
