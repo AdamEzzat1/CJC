@@ -114,6 +114,112 @@ fn parity_col_desc_asc() {
     "#);
 }
 
+// ── Closures bound to locals & higher-order calls ──────────────
+//
+// Regression guard for the AST-eval ↔ MIR-exec dispatch gap where
+// calling a closure/Fn held in a local variable — `let f = |x| ..;
+// f(x)` — errored `undefined function f` in cjc-eval while MIR-exec
+// dispatched it correctly. See cjc-eval::dispatch_call Closure/Fn
+// branch (mirrors cjc-mir-exec::dispatch_call). Discovered 2026-06-13,
+// docs/T0_STAGE5B_ALLOC_ELISION.md §6.
+
+#[test]
+fn parity_closure_local_call_in_loop() {
+    // The canonical repro: closure captures `offset`, called in a loop.
+    assert_parity(r#"
+        fn main() -> i64 {
+            let offset: i64 = 100;
+            let f = |x: i64| x + offset;
+            let mut sum: i64 = 0;
+            let mut i: i64 = 0;
+            while i < 5 {
+                sum = sum + f(i);
+                i = i + 1;
+            }
+            return sum;
+        }
+        print(main());
+    "#);
+}
+
+#[test]
+fn parity_closure_no_capture() {
+    // A lambda with no free variables, bound to a local and called.
+    assert_parity(r#"
+        fn main() -> i64 {
+            let double = |x: i64| x * 2;
+            return double(21);
+        }
+        print(main());
+    "#);
+}
+
+#[test]
+fn parity_closure_called_multiple_times() {
+    // Same closure invoked repeatedly must agree on every call.
+    assert_parity(r#"
+        fn main() -> i64 {
+            let k: i64 = 3;
+            let scale = |x: i64| x * k;
+            print(scale(1));
+            print(scale(2));
+            print(scale(10));
+            return scale(0);
+        }
+        print(main());
+    "#);
+}
+
+#[test]
+fn parity_closure_passed_as_argument() {
+    // Higher-order: a closure flows into a param and is called there.
+    assert_parity(r#"
+        fn apply(g: Any, x: i64) -> i64 {
+            return g(x);
+        }
+        fn main() -> i64 {
+            let base: i64 = 10;
+            let f = |y: i64| y + base;
+            return apply(f, 5);
+        }
+        print(main());
+    "#);
+}
+
+#[test]
+fn parity_named_fn_value_passed_as_argument() {
+    // Higher-order with a named function used as a first-class value
+    // (`Value::Fn`) bound to a local, then dispatched.
+    assert_parity(r#"
+        fn inc(x: i64) -> i64 {
+            return x + 1;
+        }
+        fn apply(g: Any, x: i64) -> i64 {
+            return g(x);
+        }
+        fn main() -> i64 {
+            let h = inc;
+            return apply(h, 41);
+        }
+        print(main());
+    "#);
+}
+
+#[test]
+fn parity_closure_returned_value_used() {
+    // Two closures in scope; selecting and calling via locals.
+    assert_parity(r#"
+        fn main() -> i64 {
+            let a: i64 = 7;
+            let b: i64 = 100;
+            let addA = |x: i64| x + a;
+            let addB = |x: i64| x + b;
+            return addA(1) + addB(1);
+        }
+        print(main());
+    "#);
+}
+
 // ── Determinism: same seed = identical output ──────────────────
 
 #[test]

@@ -4,6 +4,16 @@ All notable changes to CJC-Lang (Computational Jacobian Core) will be documented
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixes
+
+#### Executor parity: calling a closure/function value bound to a local (`cjc-eval`)
+- **Closed an AST-eval ↔ MIR-exec parity gap** (determinism invariant 7). Calling a closure held in a local — `let f = |x: i64| x + offset; f(i)` — raised `runtime error: undefined function \`f\`` under the AST tree-walk interpreter (`cjcl run`), while the MIR executor (`cjcl run --mir-opt`) evaluated it correctly. Both executors now produce byte-identical output.
+- **Cause:** `cjc-eval::dispatch_call` resolved a callee name only against registered functions and builtins; it never consulted the scope chain for a variable holding a `Value::Closure` / `Value::Fn`. `cjc-mir-exec::dispatch_call` already did. The fix mirrors that branch: when a name is neither a user function nor a known builtin, look it up in scope and dispatch through it (prepending the captured env for closures). The `eval_call` catch-all (arbitrary-expression callees) likewise gained the `Value::Closure` arm for symmetry.
+- **Higher-order forms** — passing a closure or a named function value as an argument and calling it inside the callee — are covered by the same path and verified at parity.
+- **Tests:** 6 new dual-executor parity tests in `tests/test_builtin_parity.rs` (direct call in a loop, no-capture lambda, repeated invocation, closure-as-argument, named-`fn`-value-as-argument, multiple closures in scope). The parity gate now catches this form.
+
 ## [0.1.10] — 2026-05-23
 
 ### Green Compute — Runtime Policy Layer, Adaptive Scheduling & Fused Kernels

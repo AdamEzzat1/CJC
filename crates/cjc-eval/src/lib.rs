@@ -1557,10 +1557,18 @@ impl Interpreter {
                 self.dispatch_method(obj_val, &name.name, arg_vals)
             }
             _ => {
-                // Callee might be a FnValue.
+                // Callee is an arbitrary expression — evaluate it and
+                // dispatch if it yields a callable. Mirrors the matching
+                // catch-all in cjc-mir-exec::eval_call (Fn + Closure).
                 let callee_val = self.eval_expr(callee)?;
                 match callee_val {
                     Value::Fn(fv) => self.call_function(&fv.name, &arg_vals),
+                    Value::Closure { fn_name, env, .. } => {
+                        // Prepend captured env values to the argument list.
+                        let mut full_args = env;
+                        full_args.extend(arg_vals);
+                        self.call_function(&fn_name, &full_args)
+                    }
                     _ => Err(EvalError::Runtime(format!(
                         "cannot call value of type {}",
                         callee_val.type_name()
@@ -1946,6 +1954,33 @@ impl Interpreter {
         // (allows shadowing builtin names like "outer", "min", etc.)
         if self.functions.contains_key(name) {
             return self.call_function(name, &args);
+        }
+        // If the name refers to a variable holding a Closure or Fn value,
+        // dispatch through it rather than looking for a named function.
+        //
+        // Parity with cjc-mir-exec::dispatch_call (see its Closure/Fn
+        // branch): closes the AST-eval gap where calling a closure bound
+        // to a local — `let f = |x| ...; f(x)` — errored `undefined
+        // function`. AST-eval lowers lambdas to a `Value::Fn` naming a
+        // synthetic `<lambda@..>` function, so the `Value::Fn` arm is the
+        // one that fires here; the `Value::Closure` arm keeps the dispatch
+        // symmetric with MIR-exec, which captures lexically into a Closure.
+        // Gated on `!is_known_builtin` so a builtin name still wins over a
+        // same-named local (matching MIR-exec's precedence).
+        if !self.is_known_builtin(name) {
+            if let Some(val) = self.lookup(name).cloned() {
+                match val {
+                    Value::Closure { fn_name, env, .. } => {
+                        let mut full_args = env;
+                        full_args.extend(args);
+                        return self.call_function(&fn_name, &full_args);
+                    }
+                    Value::Fn(fv) => {
+                        return self.call_function(&fv.name, &args);
+                    }
+                    _ => {}
+                }
+            }
         }
         // Stateful builtins that need interpreter state
         match name {
