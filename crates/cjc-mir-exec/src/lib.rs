@@ -197,8 +197,9 @@ fn value_eq(a: &Value, b: &Value) -> bool {
 /// MIR register-machine executor for CJC programs (v2 executor).
 ///
 /// Interpret a lowered [`MirProgram`] by walking MIR statements and
-/// expressions. Maintains a scope stack, GC heap, deterministic RNG, and
-/// per-call-frame arena storage for tail-call optimization.
+/// expressions. Maintains a scope stack (globals + name-keyed fallback),
+/// a slot-resolved call frame for locals, a GC heap, and a deterministic
+/// RNG.
 ///
 /// Must produce **bit-identical** results to [`cjc_eval::Interpreter`] for
 /// every program+seed pair (parity gate G-1 / G-2).
@@ -251,21 +252,19 @@ pub struct MirExecutor {
     pub gc_collections: u64,
     /// Name of the currently-executing function (for TCO detection).
     current_fn: Option<String>,
-    /// Per-call-frame arena stack. Provides bulk-free discipline:
-    /// push on function entry, reset on tail-call, pop on return/error.
-    arena_stack: Vec<cjc_runtime::ArenaStore>,
-    /// Tier-0 perf (T0-b Stage 5b): free-list of reset `ArenaStore`s.
-    /// `ArenaStore::new()` allocates a 4 KB page + its `pages` Vec (2
-    /// heap allocs) and zeroes the page on EVERY `call_function` entry —
-    /// the hottest path. On normal/error return the arena is `reset()`
-    /// (pages retained, capacity never shrinks) and pushed here instead
-    /// of dropped; the next call reuses it, so steady-state calls pay
-    /// zero arena allocations. Determinism-safe: a reset arena yields the
-    /// identical `(page, offset)` sequence as a fresh one for the same
-    /// allocation sequence (DETERMINISM_CONTRACT.md — backing store only,
-    /// no value/order/FP/RNG effect).
-    arena_pool: Vec<cjc_runtime::ArenaStore>,
-    /// Running count of arena allocations (for diagnostics/testing).
+    /// Count of `AllocHint::Arena`-classified `Let` bindings executed.
+    ///
+    /// **Modeled-heap counter, not a real arena.** It is incremented at
+    /// each `Arena`-hinted `Let` (see `exec_stmt`) and feeds the modeled
+    /// `heap_bytes` term that the trace/CANA energy model consumes — so
+    /// its value is determinism- and corpus-load-bearing and must not
+    /// change. There is NO runtime frame-arena: the former
+    /// `ArenaStore`/`arena_stack` machinery was pushed/reset/popped on
+    /// every call but never actually allocated into (`AllocHint::Arena`
+    /// elision is unimplemented — see `docs/PERF_P3_LITERAL_ELISION_DESIGN.md`),
+    /// so it was removed. `cjc-eval` never had one; the executors are now
+    /// structurally consistent. The `cjc_runtime::ArenaStore` primitive
+    /// remains (tested) for when P3 actually wires arena-backed values.
     pub arena_alloc_count: u64,
     /// Snap memoization cache: SHA-256 hash of (fn_name, args) → cached result.
     memo_cache: BTreeMap<[u8; 32], Value>,
@@ -533,8 +532,6 @@ impl MirExecutor {
             start_time: Instant::now(),
             gc_collections: 0,
             current_fn: None,
-            arena_stack: Vec::new(),
-            arena_pool: Vec::new(),
             arena_alloc_count: 0,
             memo_cache: BTreeMap::new(),
             libraries_enabled: std::collections::BTreeSet::new(),
@@ -674,19 +671,6 @@ impl MirExecutor {
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
-    }
-
-    /// Stage 5b: return the top call-frame arena to the reuse pool after
-    /// resetting it (pages retained, capacity preserved). Pairs with the
-    /// pool-acquire at the `call_function` loop head. The tail-call path
-    /// resets the arena in place (no pop) and is intentionally NOT routed
-    /// here — it keeps the same `ArenaStore` for the next trampoline
-    /// iteration.
-    fn release_arena(&mut self) {
-        if let Some(mut arena) = self.arena_stack.pop() {
-            arena.reset();
-            self.arena_pool.push(arena);
-        }
     }
 
     /// Bind a variable in the innermost (current) scope.
@@ -5704,11 +5688,6 @@ impl MirExecutor {
             }
 
             self.push_scope();
-            // Stage 5b: reuse a pooled (already-reset) arena if one is
-            // free; only allocate a fresh 4 KB-backed store when the pool
-            // is empty. Behaviorally identical to a fresh `ArenaStore`.
-            self.arena_stack
-                .push(self.arena_pool.pop().unwrap_or_default());
 
             // Tier-0 perf (Stage 3): if this function uses slot-resolved
             // locals (`local_count > 0`), reserve a span in the flat frame
@@ -5789,10 +5768,7 @@ impl MirExecutor {
                     name: tco_name,
                     args: tco_args,
                 }) => {
-                    // Tail call detected — reset arena for reuse, pop scope, loop.
-                    if let Some(arena) = self.arena_stack.last_mut() {
-                        arena.reset();
-                    }
+                    // Tail call detected — pop scope, loop.
                     self.pop_scope();
                     // Stage 3: also unwind this iteration's frame. The
                     // next loop iteration's func may have a different
@@ -5807,7 +5783,6 @@ impl MirExecutor {
                     continue;
                 }
                 Err(e) => {
-                    self.release_arena();
                     self.pop_scope();
                     if pushed_frame {
                         self.frame_stack.pop();
@@ -5818,7 +5793,6 @@ impl MirExecutor {
                 }
             };
 
-            self.release_arena();
             self.pop_scope();
             if pushed_frame {
                 self.frame_stack.pop();
