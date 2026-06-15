@@ -69,6 +69,17 @@ whole D/F arc is about).
   the boxed variants aren't hot (profile first).
 
 ### P3 — Non-escaping array/tuple literal elision (memory + speed)
+> **VERIFIED + DESIGNED (2026-06-13):** see `docs/PERF_P3_LITERAL_ELISION_DESIGN.md`.
+> Code-grounding changed the scope: the **dead**-literal half is ALREADY
+> done by DCE (`optimize.rs:763`, the Phase-D selector win); the
+> `AllocHint::Arena` is currently a diagnostic no-op (`cjc-mir-exec:864`)
+> and the existing `ArenaStore` wraps in `Rc<RefCell<Box<dyn Any>>>` (no
+> elision). The remaining **live-but-ephemeral** half is a dedicated-
+> session refactor — recommended route is an SROA MIR pass (semantically
+> safe, no `Value` change) which RIPPLES into the CANA corpus (regen +
+> retrain), or an arena-backed `Value` variant (no CANA ripple, unsafe
+> lifetime surface). Not force-landed this session by design.
+
 The churn-loop allocation the mem_grad corpus models: a per-iteration
 `[a, b]` / `(x, y)` that dies immediately. If escape analysis
 (`cjc-mir/src/escape.rs`) can prove the literal does not escape its
