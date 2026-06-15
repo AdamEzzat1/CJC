@@ -254,6 +254,17 @@ pub struct MirExecutor {
     /// Per-call-frame arena stack. Provides bulk-free discipline:
     /// push on function entry, reset on tail-call, pop on return/error.
     arena_stack: Vec<cjc_runtime::ArenaStore>,
+    /// Tier-0 perf (T0-b Stage 5b): free-list of reset `ArenaStore`s.
+    /// `ArenaStore::new()` allocates a 4 KB page + its `pages` Vec (2
+    /// heap allocs) and zeroes the page on EVERY `call_function` entry —
+    /// the hottest path. On normal/error return the arena is `reset()`
+    /// (pages retained, capacity never shrinks) and pushed here instead
+    /// of dropped; the next call reuses it, so steady-state calls pay
+    /// zero arena allocations. Determinism-safe: a reset arena yields the
+    /// identical `(page, offset)` sequence as a fresh one for the same
+    /// allocation sequence (DETERMINISM_CONTRACT.md — backing store only,
+    /// no value/order/FP/RNG effect).
+    arena_pool: Vec<cjc_runtime::ArenaStore>,
     /// Running count of arena allocations (for diagnostics/testing).
     pub arena_alloc_count: u64,
     /// Snap memoization cache: SHA-256 hash of (fn_name, args) → cached result.
@@ -523,6 +534,7 @@ impl MirExecutor {
             gc_collections: 0,
             current_fn: None,
             arena_stack: Vec::new(),
+            arena_pool: Vec::new(),
             arena_alloc_count: 0,
             memo_cache: BTreeMap::new(),
             libraries_enabled: std::collections::BTreeSet::new(),
@@ -662,6 +674,19 @@ impl MirExecutor {
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
+    }
+
+    /// Stage 5b: return the top call-frame arena to the reuse pool after
+    /// resetting it (pages retained, capacity preserved). Pairs with the
+    /// pool-acquire at the `call_function` loop head. The tail-call path
+    /// resets the arena in place (no pop) and is intentionally NOT routed
+    /// here — it keeps the same `ArenaStore` for the next trampoline
+    /// iteration.
+    fn release_arena(&mut self) {
+        if let Some(mut arena) = self.arena_stack.pop() {
+            arena.reset();
+            self.arena_pool.push(arena);
+        }
     }
 
     /// Bind a variable in the innermost (current) scope.
@@ -1827,23 +1852,44 @@ impl MirExecutor {
                 // take priority over builtins`), but only if the local
                 // slot resolves to a non-Fn / non-Closure value (i.e.,
                 // the local isn't actually holding a callable).
-                if let Some(v) = self.frame_get(*slot).cloned() {
-                    match v {
-                        Value::Fn(fv) => {
-                            return self.call_function(&fv.name, &arg_vals);
-                        }
-                        Value::Closure { fn_name, env, .. } => {
-                            let mut full_args = env;
-                            full_args.extend(arg_vals);
-                            return self.call_function(&fn_name, &full_args);
-                        }
-                        _ => {
-                            return Err(MirExecError::Runtime(format!(
-                                "cannot call value of type {}",
-                                v.type_name()
-                            )));
-                        }
+                // Stage 5b: read the callee from the frame by REFERENCE
+                // and build the owned dispatch state without deep-cloning
+                // the whole `Value::Closure`. The old `.cloned()` copied
+                // the closure's `env` Vec on every call and then the
+                // `extend` reallocated it; here we clone the captured
+                // elements straight into a pre-sized `full_args` (no
+                // realloc) and clone only the fn name, releasing the frame
+                // borrow before dispatching. Allocation-only; dispatch
+                // semantics unchanged.
+                enum CalleeKind {
+                    Func(String),
+                    Closure(String, Vec<Value>),
+                    NotCallable(String),
+                }
+                let kind = match self.frame_get(*slot) {
+                    Some(Value::Fn(fv)) => Some(CalleeKind::Func(fv.name.clone())),
+                    Some(Value::Closure { fn_name, env, .. }) => {
+                        let mut full_args = Vec::with_capacity(env.len() + arg_vals.len());
+                        full_args.extend(env.iter().cloned());
+                        Some(CalleeKind::Closure(fn_name.clone(), full_args))
                     }
+                    Some(other) => Some(CalleeKind::NotCallable(other.type_name().to_string())),
+                    None => None,
+                };
+                match kind {
+                    Some(CalleeKind::Func(fname)) => {
+                        return self.call_function(&fname, &arg_vals);
+                    }
+                    Some(CalleeKind::Closure(fn_name, mut full_args)) => {
+                        full_args.extend(arg_vals);
+                        return self.call_function(&fn_name, &full_args);
+                    }
+                    Some(CalleeKind::NotCallable(type_name)) => {
+                        return Err(MirExecError::Runtime(format!(
+                            "cannot call value of type {type_name}"
+                        )));
+                    }
+                    None => {}
                 }
                 // Fallback: frame was empty (no active call) -- treat
                 // as a name reference. Should not happen given lowering
@@ -5658,7 +5704,11 @@ impl MirExecutor {
             }
 
             self.push_scope();
-            self.arena_stack.push(cjc_runtime::ArenaStore::new());
+            // Stage 5b: reuse a pooled (already-reset) arena if one is
+            // free; only allocate a fresh 4 KB-backed store when the pool
+            // is empty. Behaviorally identical to a fresh `ArenaStore`.
+            self.arena_stack
+                .push(self.arena_pool.pop().unwrap_or_default());
 
             // Tier-0 perf (Stage 3): if this function uses slot-resolved
             // locals (`local_count > 0`), reserve a span in the flat frame
@@ -5713,7 +5763,15 @@ impl MirExecutor {
 
             // Track which function we're in for TCO detection.
             let prev_fn = self.current_fn.take();
-            self.current_fn = Some(current_name.as_ref().to_string());
+            // Stage 5b: `current_fn` is read ONLY by `trace_emit`, which
+            // early-returns when `trace_enabled` is false (the normal hot
+            // path). Materializing the owned name string on every
+            // untraced call was pure waste; gate it. `trace_enabled` is
+            // constant for the run (cached at `exec` entry), so a call is
+            // wholly traced or wholly untraced — no mid-run skew.
+            if self.trace_enabled {
+                self.current_fn = Some(current_name.as_ref().to_string());
+            }
 
             // Option B: function-entry event (design §3.4 site 2) —
             // attributes the since-last-emit counters to the CALLER's
@@ -5749,7 +5807,7 @@ impl MirExecutor {
                     continue;
                 }
                 Err(e) => {
-                    self.arena_stack.pop();
+                    self.release_arena();
                     self.pop_scope();
                     if pushed_frame {
                         self.frame_stack.pop();
@@ -5760,7 +5818,7 @@ impl MirExecutor {
                 }
             };
 
-            self.arena_stack.pop();
+            self.release_arena();
             self.pop_scope();
             if pushed_frame {
                 self.frame_stack.pop();
