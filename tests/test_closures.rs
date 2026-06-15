@@ -849,7 +849,7 @@ fn test_exec_closure_with_function_call_in_body() {
 fn test_exec_closure_value_type_name() {
     // Verify that a Closure value reports the right type name
     let val = Value::Closure {
-        fn_name: "__closure_0".to_string(),
+        fn_name: "__closure_0".into(), // Stage 5b: fn_name is Rc<str>
         env: vec![Value::Int(1)],
         arity: 1,
     };

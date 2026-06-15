@@ -182,7 +182,12 @@ pub enum Value {
     Fn(FnValue),
     /// A closure: a function name + captured environment values.
     Closure {
-        fn_name: String,
+        /// Name of the lifted function body. `Rc<str>` (not `String`) so
+        /// cloning a closure on the call path is a refcount bump, not a
+        /// heap allocation (Stage 5b — closures are cloned per call to
+        /// dispatch). `Closure` is runtime-only (never serialized — see
+        /// `cjc-snap`), so this layout change touches no hash/output path.
+        fn_name: Rc<str>,
         env: Vec<Value>,
         /// Arity of the *original* lambda params (not including captures).
         arity: usize,

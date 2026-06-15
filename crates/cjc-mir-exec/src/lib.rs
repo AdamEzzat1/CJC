@@ -1205,7 +1205,7 @@ impl MirExecutor {
                     .unwrap_or(0);
                 let arity = total_params - env.len();
                 Ok(Value::Closure {
-                    fn_name: fn_name.clone(),
+                    fn_name: Rc::from(fn_name.as_str()), // &str -> Rc<str> (once per closure creation)
                     env,
                     arity,
                 })
@@ -1862,12 +1862,12 @@ impl MirExecutor {
                 // borrow before dispatching. Allocation-only; dispatch
                 // semantics unchanged.
                 enum CalleeKind {
-                    Func(String),
-                    Closure(String, Vec<Value>),
+                    Func(Rc<str>),
+                    Closure(Rc<str>, Vec<Value>),
                     NotCallable(String),
                 }
                 let kind = match self.frame_get(*slot) {
-                    Some(Value::Fn(fv)) => Some(CalleeKind::Func(fv.name.clone())),
+                    Some(Value::Fn(fv)) => Some(CalleeKind::Func(Rc::from(fv.name.as_str()))),
                     Some(Value::Closure { fn_name, env, .. }) => {
                         let mut full_args = Vec::with_capacity(env.len() + arg_vals.len());
                         full_args.extend(env.iter().cloned());

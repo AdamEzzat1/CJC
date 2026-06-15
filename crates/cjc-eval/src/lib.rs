@@ -1198,7 +1198,7 @@ impl Interpreter {
                     }))
                 } else {
                     Ok(Value::Closure {
-                        fn_name: lambda_name,
+                        fn_name: lambda_name.into(), // String -> Rc<str>
                         env,
                         arity: params.len(),
                     })
