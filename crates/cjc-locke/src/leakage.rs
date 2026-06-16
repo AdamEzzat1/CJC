@@ -42,6 +42,17 @@ pub struct LeakageConfig {
     /// v0.6.3: maximum number of distinct values an Int target can have
     /// before being treated as continuous and skipped. Default 20.
     pub multiclass_max_classes: u32,
+    /// v0.9: Cramér's V at/above which a categorical FEATURE is flagged as
+    /// near-deterministic target leakage (E9065 **Error**). Default 0.9.
+    pub cramers_v_error_threshold: f64,
+    /// v0.9: Cramér's V at/above which a categorical feature is flagged as
+    /// a strong-association leakage risk (E9065 **Warning**). Default 0.7.
+    pub cramers_v_warn_threshold: f64,
+    /// v0.9: maximum distinct values a categorical feature may have before
+    /// the Cramér's V leakage check skips it. High-cardinality categorical
+    /// association is statistically inflated and is E9072 (ID-like) /
+    /// E9017 (one-hot explosion) territory, not this detector's. Default 50.
+    pub categorical_max_distinct: u32,
 }
 
 impl Default for LeakageConfig {
@@ -53,6 +64,9 @@ impl Default for LeakageConfig {
             id_like_cardinality_ratio: 0.95,
             id_like_min_rows: 50,
             multiclass_max_classes: 20,
+            cramers_v_error_threshold: 0.9,
+            cramers_v_warn_threshold: 0.7,
+            categorical_max_distinct: 50,
         }
     }
 }
@@ -159,6 +173,170 @@ pub fn binary_target_auc(
     let n_neg_f = n_neg as f64;
     let auc = (sum_ranks_positive - n_pos_f * (n_pos_f + 1.0) / 2.0) / (n_pos_f * n_neg_f);
     Some(auc)
+}
+
+/// Extract a target column as canonical class-label strings for the
+/// categorical-association (Cramér's V) leakage check.
+///
+/// Returns `None` for `Float` (continuous) targets, and for targets with
+/// `< 2` or `> max_classes` distinct values (continuous / high-cardinality
+/// — skipped, mirroring the AUC path's multiclass cap).
+fn extract_categorical_target(df: &DataFrame, name: &str, max_classes: u32) -> Option<Vec<String>> {
+    let col = df.get_column(name)?;
+    let labels: Vec<String> = match col {
+        Column::Bool(v) => v
+            .iter()
+            .map(|b| if *b { "true".to_string() } else { "false".to_string() })
+            .collect(),
+        Column::Int(v) => v.iter().map(|x| x.to_string()).collect(),
+        Column::Str(v) => v.clone(),
+        // Float targets are continuous — not a classification target.
+        _ => return None,
+    };
+    let distinct: std::collections::BTreeSet<&String> = labels.iter().collect();
+    if distinct.len() < 2 || distinct.len() as u32 > max_classes {
+        return None;
+    }
+    Some(labels)
+}
+
+/// Detect categorical FEATURES that nearly determine the target, via
+/// **Cramér's V** over a deterministic contingency table. Emits **E9065**.
+///
+/// This fills the gap that the AUC path (numeric features only) and E9072
+/// (ID-like cardinality) leave open: a *low-to-moderate-cardinality*
+/// categorical column that almost perfectly predicts the target — e.g.
+/// `discharge_code = 11 ⇒ readmitted = no`. Such a column is neither
+/// numeric (so AUC never sees it) nor ID-like (so E9072 never fires), yet
+/// it is a textbook leakage vector.
+///
+/// **Cramér's V** = `sqrt( χ² / (n · min(r−1, c−1)) )`, where χ² is the
+/// Pearson statistic of the `r × c` feature×target contingency table; V is
+/// in `[0, 1]`, with `1` a perfect association. Severity: `Error` at
+/// `≥ cfg.cramers_v_error_threshold`, `Warning` at
+/// `≥ cfg.cramers_v_warn_threshold`.
+///
+/// **Guards** (deterministic, each documented):
+/// * target must be categorical with `2..=multiclass_max_classes` classes;
+/// * a feature is skipped if it is the target, not a `Str` column, constant
+///   (`< 2` distinct), or has `> categorical_max_distinct` distinct values
+///   (high-cardinality association is inflated → E9072 / E9017 territory);
+/// * `< min_class_count · 2` rows → skipped (table too sparse to trust).
+///
+/// **Determinism:** contingency counts in `BTreeMap`s (sorted iteration),
+/// χ² accumulated with `KahanAccumulatorF64`, the `(r−1)`/`(c−1)` integer
+/// dims and the final `sqrt` are exact-order. No FMA, no `HashMap`. The
+/// result is routed to the **leakage** belief axis (E9065 in
+/// `belief_routing`).
+pub fn detect_categorical_target_leakage(
+    df: &DataFrame,
+    target_col: &str,
+    cfg: &LeakageConfig,
+) -> Vec<ValidationFinding> {
+    let mut out = Vec::new();
+    // A non-categorical / unusable target is silently skipped here — the
+    // numeric AUC path (and its E9062 diagnostic) own that reporting.
+    let Some(target) = extract_categorical_target(df, target_col, cfg.multiclass_max_classes) else {
+        return out;
+    };
+    let n = target.len();
+    if (n as u64) < cfg.min_class_count.saturating_mul(2) {
+        return out;
+    }
+    // Target classes (columns of every contingency table) + their totals.
+    let classes: Vec<&String> = {
+        let s: std::collections::BTreeSet<&String> = target.iter().collect();
+        s.into_iter().collect()
+    };
+    let c = classes.len();
+
+    for (name, col) in &df.columns {
+        if name == target_col {
+            continue;
+        }
+        let Column::Str(values) = col else { continue };
+        if values.len() != n {
+            continue;
+        }
+        let levels: Vec<&String> = {
+            let s: std::collections::BTreeSet<&String> = values.iter().collect();
+            s.into_iter().collect()
+        };
+        let r = levels.len();
+        if r < 2 || r as u32 > cfg.categorical_max_distinct {
+            continue;
+        }
+        let min_dim = r.min(c).saturating_sub(1);
+        if min_dim == 0 {
+            continue; // r==1 or c==1: no association is representable
+        }
+
+        // Contingency table + marginals, all BTreeMap for determinism.
+        let mut table: std::collections::BTreeMap<&String, std::collections::BTreeMap<&String, u64>> =
+            std::collections::BTreeMap::new();
+        let mut row_tot: std::collections::BTreeMap<&String, u64> = std::collections::BTreeMap::new();
+        let mut col_tot: std::collections::BTreeMap<&String, u64> = std::collections::BTreeMap::new();
+        for (fv, tv) in values.iter().zip(target.iter()) {
+            *table.entry(fv).or_default().entry(tv).or_insert(0) += 1;
+            *row_tot.entry(fv).or_insert(0) += 1;
+            *col_tot.entry(tv).or_insert(0) += 1;
+        }
+
+        // χ² over the FULL r×c grid (zero cells included).
+        let nf = n as f64;
+        let mut chi = cjc_repro::KahanAccumulatorF64::new();
+        for &lvl in &levels {
+            let rt = *row_tot.get(lvl).unwrap_or(&0) as f64;
+            let inner = table.get(lvl);
+            for &cls in &classes {
+                let ct = *col_tot.get(cls).unwrap_or(&0) as f64;
+                let e = rt * ct / nf;
+                if e <= 0.0 {
+                    continue;
+                }
+                let o = inner.and_then(|m| m.get(cls)).copied().unwrap_or(0) as f64;
+                let d = o - e;
+                chi.add(d * d / e);
+            }
+        }
+        let chi2 = chi.finalize();
+        let v = (chi2 / (nf * min_dim as f64)).sqrt();
+        if !v.is_finite() {
+            continue;
+        }
+        let v = v.min(1.0);
+
+        let severity = if v >= cfg.cramers_v_error_threshold {
+            FindingSeverity::Error
+        } else if v >= cfg.cramers_v_warn_threshold {
+            FindingSeverity::Warning
+        } else {
+            continue;
+        };
+        out.push(ValidationFinding::new(
+            "E9065",
+            severity,
+            format!(
+                "categorical feature `{}` nearly determines target `{}` (Cramér's V = {:.3} over {} levels × {} classes) — likely target leakage",
+                name, target_col, v, r, c
+            ),
+            Some(name.clone()),
+            None,
+            vec![FindingEvidence::Metric {
+                label: "cramers_v".into(),
+                value: v,
+            }],
+            n as u64,
+            vec![
+                "Cramér's V on a low-cardinality categorical feature; high-cardinality association is reported by E9072 (ID-like) instead".into(),
+            ],
+            vec![format!(
+                "If `{}` is recorded after the outcome or aliases the target, drop it before modelling",
+                name
+            )],
+        ));
+    }
+    out
 }
 
 // ─── Multi-class leakage (v0.6.3) ─────────────────────────────────────────

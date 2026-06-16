@@ -199,6 +199,19 @@ pub fn looks_like_api_key(s: &str, min_len: usize, min_entropy_bits: f64) -> boo
 
 // ─── Detectors ────────────────────────────────────────────────────────────
 
+/// Mask a PII sample so the report never carries the raw secret (B6.12 —
+/// secrets-in-memory). Every ASCII alphanumeric becomes `*`; structural
+/// punctuation (`-`, `@`, `.`, `+`, `(`, `)`, space, …) and the length are
+/// preserved, so the *shape* stays recognisable (`***-**-****` for an SSN,
+/// `****@****.***` for an email) while the value does not. Pure and
+/// deterministic; distinct secrets collapse to one masked pattern, which
+/// is exactly what a PII finding should surface.
+fn redact_pii_sample(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { '*' } else { c })
+        .collect()
+}
+
 fn emit_pii_finding(
     code: &'static str,
     severity: FindingSeverity,
@@ -272,21 +285,23 @@ pub fn detect_all_pii(df: &DataFrame, cfg: &PiiConfig) -> Vec<ValidationFinding>
         let mut ssn_samples: BTreeMap<String, u64> = BTreeMap::new();
         let mut api_key_samples: BTreeMap<String, u64> = BTreeMap::new();
         for v in values {
+            // B6.12 — store a REDACTED sample, never the raw secret. The
+            // raw `v` is matched but only its masked shape is retained.
             if looks_like_email(v) {
                 email_hits += 1;
-                *email_samples.entry(v.clone()).or_insert(0) += 1;
+                *email_samples.entry(redact_pii_sample(v)).or_insert(0) += 1;
             }
             if looks_like_phone(v) {
                 phone_hits += 1;
-                *phone_samples.entry(v.clone()).or_insert(0) += 1;
+                *phone_samples.entry(redact_pii_sample(v)).or_insert(0) += 1;
             }
             if looks_like_ssn(v) {
                 ssn_hits += 1;
-                *ssn_samples.entry(v.clone()).or_insert(0) += 1;
+                *ssn_samples.entry(redact_pii_sample(v)).or_insert(0) += 1;
             }
             if looks_like_api_key(v, cfg.api_key_min_len, cfg.api_key_min_entropy_bits) {
                 api_key_hits += 1;
-                *api_key_samples.entry(v.clone()).or_insert(0) += 1;
+                *api_key_samples.entry(redact_pii_sample(v)).or_insert(0) += 1;
             }
         }
 

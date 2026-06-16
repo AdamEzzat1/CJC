@@ -38,6 +38,53 @@ fn pii_runs_via_validate_end_to_end() {
 }
 
 #[test]
+fn pii_samples_are_redacted_no_raw_secret_reaches_the_report() {
+    // B6.12 — the raw secret must never reach the report. Real SSN shapes;
+    // the sample evidence must be masked to `***-**-****`, and the full
+    // serialized report must contain no raw SSN digits.
+    let raws = ["123-45-6789", "987-65-4321", "555-66-7777"];
+    let mut values: Vec<&str> = raws.to_vec();
+    values.extend(vec!["filler"; 17]); // 3/20 = 15% ≥ default 10% share
+    let df = df_str("ssn", &values);
+    let report = validate(
+        &df,
+        &ValidateOptions {
+            dataset_label: "redact".into(),
+            config: ValidationConfig::default(),
+            ..Default::default()
+        },
+    );
+    let ssn = report
+        .findings
+        .iter()
+        .find(|f| f.code == "E9092")
+        .expect("E9092 expected");
+
+    // Scope (B6.12): the PII DETECTOR's own sample evidence must be masked
+    // — that is the leak this fix closes. (Whole-report no-leak is a larger
+    // follow-up: non-PII categorical detectors like E9016 rare-category
+    // still echo the raw value; see BELIEF_AXIS_ROUTING.md §follow-ups.)
+    let mut saw_sample = false;
+    for ev in &ssn.evidence {
+        if let cjc_locke::FindingEvidence::Sample { label, value } = ev {
+            if label == "sample" {
+                saw_sample = true;
+                assert!(value.contains("***-**-****"), "expected masked SSN shape, got {value}");
+                for raw in raws {
+                    assert!(!value.contains(raw), "raw SSN leaked into PII sample: {value}");
+                }
+            }
+        }
+    }
+    assert!(saw_sample, "SSN finding must carry a (redacted) sample");
+
+    // The redacted shape must reach serialization (proves the masked sample
+    // is what's persisted, not the raw value).
+    let json = cjc_locke::emit_locke_report_json(&report);
+    assert!(json.contains("***-**-****"), "masked SSN sample must appear in report JSON");
+}
+
+#[test]
 fn pii_weakens_constraint_axis() {
     let mut values = vec!["alice@a.com", "bob@b.com", "carol@c.com"];
     values.extend(vec!["filler"; 17]);

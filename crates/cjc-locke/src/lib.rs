@@ -76,6 +76,7 @@ pub mod algebra;
 pub mod api;
 pub mod auto_promote;
 pub mod belief;
+pub mod belief_routing;
 pub mod categorical;
 pub mod causal;
 pub mod column_summary;
@@ -178,8 +179,9 @@ pub use pii::{
 pub use shape::{detect_distribution_shape, skew_and_kurtosis, top_k_modes, ShapeConfig};
 pub use temporal::{detect_seasonality, SeasonalityConfig};
 pub use leakage::{
-    detect_per_level_target_leakage, detect_target_leakage, detect_target_leakage_multiclass,
-    multiclass_max_one_vs_rest_auc, LeakageConfig, PerLevelLeakageConfig,
+    detect_categorical_target_leakage, detect_per_level_target_leakage, detect_target_leakage,
+    detect_target_leakage_multiclass, multiclass_max_one_vs_rest_auc, LeakageConfig,
+    PerLevelLeakageConfig,
 };
 pub use api::{
     belief_report_from_locke, belief_report_from_locke_with_model, causal_guardrail,

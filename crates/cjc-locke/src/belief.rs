@@ -242,9 +242,12 @@ impl BeliefScore {
 
 /// User-tunable per-severity penalty model (v0.3).
 ///
-/// Each finding in a relevant dimension subtracts `penalty(severity)` from
-/// that dimension's score. `Default` is v0.2's baked-in opinion (Info=0.02,
-/// Notice=0.02, Warning=0.10, Error=0.25).
+/// Each finding in a relevant dimension is an independent "defect event"
+/// with probability `penalty(severity)`; the axis score is the probability
+/// it survives all of them (see [`penalty_from_findings_with_model`]).
+/// `Default` is v0.9's opinion (Info=0.01, Notice=0.02, Warning=0.10,
+/// Error=0.25) — Info is now strictly below Notice, restoring the severity
+/// rank the rest of the system maintains (pre-v0.9 both were 0.02).
 ///
 /// Tunable ≠ calibrated. Users with calibration data (e.g. "in our last 100
 /// production datasets, a Warning was a real defect 60% of the time") can
@@ -260,7 +263,7 @@ pub struct BeliefPenalty {
 impl Default for BeliefPenalty {
     fn default() -> Self {
         Self {
-            info: 0.02,
+            info: 0.01,
             notice: 0.02,
             warning: 0.10,
             error: 0.25,
@@ -332,37 +335,61 @@ pub fn sample_score_from_n(n: u64) -> f64 {
     1.0 - (-(n as f64) / k).exp()
 }
 
-/// Aggregate a flat list of validation findings into a coarse penalty
-/// for the named dimension. Each `Warning` finding contributes `−0.10`
-/// and each `Error` contributes `−0.25`. The result is clamped at zero.
-///
-/// The penalty model is intentionally simple — v0 favours explainability
-/// over calibration. Future versions can use evidence-weighted penalties.
+/// Aggregate a flat list of validation findings into a penalty for the
+/// named dimension under the default model. See
+/// [`penalty_from_findings_with_model`] for the aggregation semantics.
 pub fn penalty_from_findings(findings: &[ValidationFinding], dim_filter: impl Fn(&str) -> bool) -> f64 {
     penalty_from_findings_with_model(findings, dim_filter, &BeliefPenalty::default())
 }
 
-/// v0.3: user-tunable variant. Same shape as `penalty_from_findings`
-/// but takes an explicit `BeliefPenalty` model.
+/// Aggregate matching findings into a `[0, 1]` penalty, with a tunable
+/// per-severity [`BeliefPenalty`] model.
 ///
-/// The return is **clamped to `[0, 1]`**: a sufficiently noisy report
-/// (many high-severity findings) can produce an uncapped sum > 1.0,
-/// but the caller's contract is `axis_score = 1.0 - penalty` which
-/// only makes sense in `[0, 1]`. Every existing caller already routed
-/// the result through `BeliefScore::from_dimensions` (which clamps
-/// per-axis), so the clamp here is byte-identical at the caller's
-/// boundary — it just makes the contract explicit at the source.
+/// **v0.9 — noisy-OR aggregation (replaces the v0.2 linear sum).** Treat
+/// each matching finding as an independent event that the axis is defective
+/// with probability `pᵢ = model.for_severity(sev)`. The axis *survives* all
+/// of them with probability `Π(1 − pᵢ)`, so the aggregate penalty is
+/// `1 − Π(1 − pᵢ)` and the caller's `axis_score = 1.0 − penalty` equals the
+/// survival product directly.
+///
+/// Why this replaced `Σ pᵢ` clamped at 1.0:
+/// * **Discrimination at the bad end.** The old sum saturated: 4 Errors
+///   (4 × 0.25) *or* 10 Warnings drove an axis to exactly `0.0`, and every
+///   worse dataset then scored identically. The product is strictly
+///   monotone in finding count — 40 findings score strictly below 4 — so
+///   ordering is preserved precisely where a dataset is worst.
+/// * **Backward-compatible at low counts.** For 0 or 1 matching finding the
+///   value is byte-identical to the old model (`1 − (1 − p) = p`), so
+///   single-finding axes do not move.
+/// * **Bounded by construction.** Each factor `(1 − pᵢ) ∈ [0, 1]` (pᵢ is
+///   clamped), so the product — and the penalty — stay in `[0, 1]` without
+///   relying on a hard clamp.
+///
+/// **Determinism.** Accumulated in a fixed order over `findings` (already
+/// sorted deterministically upstream). `penalty * p` then a subtraction are
+/// separate operations — no `mul_add`/FMA, so the two roundings the rest of
+/// the codebase relies on are preserved (`DETERMINISM_CONTRACT.md` inv. 2).
+/// No Kahan is needed (this is not a long compensated sum); the only
+/// requirement is the pinned iteration order, which holds.
 pub fn penalty_from_findings_with_model(
     findings: &[ValidationFinding],
     dim_filter: impl Fn(&str) -> bool,
     model: &BeliefPenalty,
 ) -> f64 {
-    let mut penalty = 0.0;
+    // Incremental noisy-OR:
+    //   penaltyₖ = penaltyₖ₋₁ + pₖ − penaltyₖ₋₁·pₖ   (= 1 − Π(1 − pᵢ)).
+    // Accumulating this way (rather than `1 − Π(1 − pᵢ)` directly) makes a
+    // SINGLE finding evaluate to exactly `pₖ` (`0 + p − 0·p = p`) — bit-
+    // identical to the old linear model at one finding, diverging only as
+    // findings accumulate, which is precisely where the saturating sum lost
+    // discrimination.
+    let mut penalty = 0.0_f64;
     for f in findings {
         if !dim_filter(f.code) {
             continue;
         }
-        penalty += model.for_severity(f.severity);
+        let p = model.for_severity(f.severity).clamp(0.0, 1.0);
+        penalty = penalty + p - penalty * p;
     }
     penalty.clamp(0.0, 1.0)
 }
@@ -467,12 +494,18 @@ mod tests {
     }
 
     #[test]
-    fn default_penalty_matches_v02_baked_in_values() {
+    fn default_penalty_v09_values_with_info_below_notice() {
+        // v0.9: Info dropped 0.02 -> 0.01 so it is strictly below Notice,
+        // restoring the severity rank the rest of the system maintains.
         let p = BeliefPenalty::default();
-        assert_eq!(p.info, 0.02);
+        assert_eq!(p.info, 0.01);
         assert_eq!(p.notice, 0.02);
         assert_eq!(p.warning, 0.10);
         assert_eq!(p.error, 0.25);
+        assert!(
+            p.info < p.notice && p.notice < p.warning && p.warning < p.error,
+            "default penalties must be strictly increasing in severity"
+        );
     }
 
     #[test]

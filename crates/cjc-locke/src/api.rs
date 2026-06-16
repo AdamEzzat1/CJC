@@ -287,10 +287,33 @@ fn belief_axis_scores_from_report(
             .unwrap_or(false)
     };
 
+    use crate::belief_routing::builtin_axis_for;
+    use crate::custom_detector::BeliefAxisSet as Axis;
+
+    // v0.9 — one penalty path for every axis. A finding weakens an axis
+    // when the built-in routing registry (`belief_routing`, the single
+    // source of truth, exhaustiveness-guarded in
+    // `tests/locke/belief_tests.rs`) assigns its code to that axis OR a
+    // custom detector declared the axis for that code.
+    //
+    // The drift and leakage axes are wired here for the FIRST time: before
+    // v0.9 they consumed ONLY custom findings, so a report holding an
+    // E9060 (|AUC| >= 0.95, **Error**) or E9064 (per-level deterministic
+    // outcome) leakage finding still scored `leakage = 1.0` — a perfect
+    // score on a demonstrably leaky column (the silent-failures bug class).
+    let axis_penalty = |axis: Axis| -> f64 {
+        penalty_from_findings_with_model(
+            &report.findings,
+            |code| builtin_axis_for(code).contains(axis) || custom_contains(code, axis),
+            penalty,
+        )
+    };
+
     let missingness_score = {
-        // Built-in mean-rate computation across column_reports stays the
-        // baseline. Custom findings on the missingness axis stack a
-        // penalty on top via the standard model.
+        // Baseline is the mean per-column missingness RATE. E9001 informs
+        // this rate, not a penalty — that is why E9001 is `advisory` in the
+        // registry rather than routed to the missingness axis. Custom
+        // missingness findings stack a penalty on top.
         let baseline = if report.column_reports.is_empty() {
             1.0
         } else {
@@ -301,90 +324,17 @@ fn belief_axis_scores_from_report(
                 .sum();
             1.0 - (total / report.column_reports.len() as f64)
         };
-        let custom_penalty = penalty_from_findings_with_model(
-            &report.findings,
-            |code| custom_contains(code, crate::custom_detector::BeliefAxisSet::MISSINGNESS),
-            penalty,
-        );
-        (baseline - custom_penalty).clamp(0.0, 1.0)
+        (baseline - axis_penalty(Axis::MISSINGNESS)).clamp(0.0, 1.0)
     };
-    let duplication_score = 1.0
-        - penalty_from_findings_with_model(
-            &report.findings,
-            |code| {
-                code == "E9003"
-                    || code == "E9004"
-                    || custom_contains(code, crate::custom_detector::BeliefAxisSet::DUPLICATION)
-            },
-            penalty,
-        );
-    let schema_score = 1.0
-        - penalty_from_findings_with_model(
-            &report.findings,
-            |code| {
-                // True schema-shape codes
-                code == "E9020" || code == "E9021" || code == "E9022"
-                // v0.6 batch 2: label-encoding risk weakens schema (the
-                // column's declared type is misleading for downstream).
-                || code == "E9023"
-                // v0.6: semantic-category fragmentation (encoding-risk
-                // E9017, case-fold E9080, whitespace E9081, near-duplicate
-                // E9082, confusable-script E9083, mojibake E9084,
-                // transitive-cluster E9085, NFC/NFD E9086). These weaken
-                // the schema axis because the column's effective alphabet
-                // is ambiguous, even though the row-level types are fine.
-                || code == "E9017"
-                || code == "E9080" || code == "E9081" || code == "E9082"
-                || code == "E9083" || code == "E9084" || code == "E9085"
-                || code == "E9086"
-                || custom_contains(code, crate::custom_detector::BeliefAxisSet::SCHEMA)
-            },
-            penalty,
-        );
-    let constraint_score = 1.0
-        - penalty_from_findings_with_model(
-            &report.findings,
-            // E9014 (legacy constraint) + E9016 (rare-category long-tail
-            // is a distributional constraint risk, not a schema-shape one)
-            // + v0.6 batch 2 PII (E9090-E9093 — presence of PII is a
-            // constraint violation per data-governance policy).
-            |code| {
-                code == "E9014" || code == "E9016"
-                || code == "E9090" || code == "E9091" || code == "E9092" || code == "E9093"
-                || custom_contains(code, crate::custom_detector::BeliefAxisSet::CONSTRAINT)
-            },
-            penalty,
-        );
-    // Drift / leakage / lineage scores are 1.0 by default in the
-    // single-df flow; custom detectors are the FIRST way for these axes
-    // to be touched without a compare/lineage pass. Apply the standard
-    // penalty model where the custom map routes findings to the axis.
-    let drift_score = 1.0
-        - penalty_from_findings_with_model(
-            &report.findings,
-            |code| custom_contains(code, crate::custom_detector::BeliefAxisSet::DRIFT),
-            penalty,
-        );
-    let leakage_score = 1.0
-        - penalty_from_findings_with_model(
-            &report.findings,
-            |code| custom_contains(code, crate::custom_detector::BeliefAxisSet::LEAKAGE),
-            penalty,
-        );
-    let lineage_score = 1.0
-        - penalty_from_findings_with_model(
-            &report.findings,
-            |code| custom_contains(code, crate::custom_detector::BeliefAxisSet::LINEAGE),
-            penalty,
-        );
+    let duplication_score = 1.0 - axis_penalty(Axis::DUPLICATION);
+    let schema_score = 1.0 - axis_penalty(Axis::SCHEMA);
+    let constraint_score = 1.0 - axis_penalty(Axis::CONSTRAINT);
+    let drift_score = 1.0 - axis_penalty(Axis::DRIFT);
+    let leakage_score = 1.0 - axis_penalty(Axis::LEAKAGE);
+    let lineage_score = 1.0 - axis_penalty(Axis::LINEAGE);
     let sample_score = {
         let baseline = sample_score_from_n(n);
-        let custom_penalty = penalty_from_findings_with_model(
-            &report.findings,
-            |code| custom_contains(code, crate::custom_detector::BeliefAxisSet::SAMPLE),
-            penalty,
-        );
-        (baseline - custom_penalty).clamp(0.0, 1.0)
+        (baseline - axis_penalty(Axis::SAMPLE)).clamp(0.0, 1.0)
     };
 
     (
@@ -403,14 +353,42 @@ fn belief_axis_scores_from_report(
 /// recommended next steps) from a finished `BeliefScore`. Shared between
 /// the migrated and inline paths.
 fn finish_belief_report(report: &LockeReport, score: BeliefScore) -> BeliefReport {
+    use crate::belief_routing::builtin_axis_for;
+    use crate::custom_detector::BeliefAxisSet as Axis;
     let mut assumptions = report.assumptions.clone();
-    // If sub-scores defaulted to 1.0 due to absent evidence, say so.
-    assumptions
-        .push("drift_score = 1.0 by default (no comparison dataframe supplied)".into());
-    assumptions
-        .push("leakage_score = 1.0 by default (Locke v0 does not infer leakage automatically)".into());
-    assumptions
-        .push("lineage_score = 1.0 by default (no lineage graph supplied)".into());
+
+    // v0.9 — only disclaim an axis as "no evidence → 1.0" when the report
+    // genuinely contains no finding routed to it. Pre-v0.9 these caveats
+    // were pushed unconditionally, so a report carrying an E9060 leakage
+    // Error still printed "Locke does not infer leakage automatically" —
+    // text that contradicted its own findings. Now the caveat is suppressed
+    // the moment a drift/leakage/lineage finding is present (the score then
+    // reflects it), keeping the assumptions honest against the findings.
+    let axis_has_finding = |axis: Axis| -> bool {
+        report.findings.iter().any(|f| {
+            builtin_axis_for(f.code).contains(axis)
+                || report
+                    .custom_axis_assignments
+                    .get(f.code)
+                    .map(|a| a.contains(axis))
+                    .unwrap_or(false)
+        })
+    };
+    if !axis_has_finding(Axis::DRIFT) {
+        assumptions.push(
+            "drift_score = 1.0 (no drift findings present; supply a comparison dataframe to populate it)"
+                .into(),
+        );
+    }
+    if !axis_has_finding(Axis::LEAKAGE) {
+        assumptions.push(
+            "leakage_score = 1.0 (no leakage findings present; run a target-leakage detector and merge its findings to populate it)"
+                .into(),
+        );
+    }
+    if !axis_has_finding(Axis::LINEAGE) {
+        assumptions.push("lineage_score = 1.0 (no lineage findings present)".into());
+    }
 
     let evidence_summary: BTreeMap<String, String> = report
         .severity_counts
