@@ -11,3 +11,7 @@ description = "Tidyverse-inspired data manipulation: DataFrame, filter, group_by
 cjc-runtime = { workspace = true }
 cjc-repro = { workspace = true }
 cjc-regex.workspace = true
+
+[dev-dependencies]
+proptest = "1"
+bolero = "0.13.4"

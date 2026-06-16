@@ -472,9 +472,11 @@ dependencies = [
 name = "cjc-data"
 version = "0.1.11"
 dependencies = [
+ "bolero",
  "cjc-regex",
  "cjc-repro",
  "cjc-runtime",
+ "proptest",
 ]
 
 [[package]]

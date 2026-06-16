@@ -98,23 +98,138 @@ fn infer_type(s: &str) -> InferredType {
     InferredType::Str
 }
 
-/// Split a byte slice on `delimiter`, returning field sub-slices.
-/// Handles the case where the last field has a trailing `\r`.
-fn split_fields<'a>(row: &'a [u8], delimiter: u8) -> Vec<&'a str> {
-    let mut fields = Vec::new();
-    let mut start = 0usize;
-    for i in 0..row.len() {
-        if row[i] == delimiter {
-            let field = std::str::from_utf8(&row[start..i]).unwrap_or("");
-            fields.push(field);
-            start = i + 1;
+/// Take the accumulated field bytes as an owned `String` (lossy UTF-8) and
+/// clear the buffer for the next field.
+fn take_field(field: &mut Vec<u8>) -> String {
+    let s = String::from_utf8_lossy(field).into_owned();
+    field.clear();
+    s
+}
+
+/// RFC-4180 record tokenizer over the WHOLE input.
+///
+/// A single pass with quotes as the outer context: inside a double-quoted
+/// field, the delimiter and newlines (`\n`, `\r\n`) are literal data, and a
+/// doubled quote `""` is one escaped `"`. This is what makes a field like
+/// `"123 Main St, Apt 4"` stay a single field (the bug that shifted every
+/// later column and blocked LendingClub's joint-application columns from
+/// auto-promoting — ADR-0042 limitation #1).
+///
+/// Blank lines are skipped (matching the prior reader). A lone `"` opening a
+/// non-empty/unquoted field is treated as a literal (lenient, RFC quotes
+/// only at field start). Deterministic single pass — no `HashMap`, no FP.
+fn tokenize_records(input: &[u8], delimiter: u8) -> Vec<Vec<String>> {
+    let mut records: Vec<Vec<String>> = Vec::new();
+    let mut record: Vec<String> = Vec::new();
+    let mut field: Vec<u8> = Vec::new();
+    let mut in_quotes = false;
+    let mut field_started_quoted = false;
+    let n = input.len();
+    let mut i = 0usize;
+
+    // End the current record (push the in-progress field), skipping the
+    // push entirely for a blank line (no field started, nothing buffered).
+    macro_rules! end_record {
+        () => {{
+            if !(record.is_empty() && field.is_empty() && !field_started_quoted) {
+                record.push(take_field(&mut field));
+                records.push(std::mem::take(&mut record));
+            }
+            field_started_quoted = false;
+        }};
+    }
+
+    while i < n {
+        let b = input[i];
+        if in_quotes {
+            if b == b'"' {
+                if i + 1 < n && input[i + 1] == b'"' {
+                    field.push(b'"'); // escaped quote
+                    i += 2;
+                } else {
+                    in_quotes = false; // closing quote
+                    i += 1;
+                }
+            } else {
+                field.push(b);
+                i += 1;
+            }
+        } else if b == b'"' && field.is_empty() && !field_started_quoted {
+            in_quotes = true;
+            field_started_quoted = true;
+            i += 1;
+        } else if b == delimiter {
+            record.push(take_field(&mut field));
+            field_started_quoted = false;
+            i += 1;
+        } else if b == b'\n' {
+            end_record!();
+            i += 1;
+        } else if b == b'\r' {
+            // CRLF: let the following \n end the record. Lone CR: end here.
+            if i + 1 < n && input[i + 1] == b'\n' {
+                i += 1;
+            } else {
+                end_record!();
+                i += 1;
+            }
+        } else {
+            field.push(b);
+            i += 1;
         }
     }
-    // Last field (strip trailing \r if present)
-    let tail = &row[start..];
-    let tail = tail.strip_suffix(b"\r").unwrap_or(tail);
-    let field = std::str::from_utf8(tail).unwrap_or("");
-    fields.push(field);
+    // Flush a final record with no trailing newline.
+    if !field.is_empty() || !record.is_empty() || field_started_quoted {
+        record.push(take_field(&mut field));
+        records.push(record);
+    }
+    records
+}
+
+/// Quote-aware split of a SINGLE row into owned field strings (handles
+/// embedded delimiters and `""` escapes within the row, strips a trailing
+/// `\r`). Used by the streaming processors, which split on `\n` first — so
+/// a quoted field containing a newline is NOT supported in streaming mode
+/// (it is in [`tokenize_records`] / [`CsvReader::parse`]). Acceptable: the
+/// streaming path targets large *numeric* CSVs where quoted newlines are
+/// vanishingly rare.
+fn split_fields_quoted(row: &[u8], delimiter: u8) -> Vec<String> {
+    let row = row.strip_suffix(b"\r").unwrap_or(row);
+    let mut fields = Vec::new();
+    let mut field: Vec<u8> = Vec::new();
+    let mut in_quotes = false;
+    let mut field_started_quoted = false;
+    let n = row.len();
+    let mut i = 0usize;
+    while i < n {
+        let b = row[i];
+        if in_quotes {
+            if b == b'"' {
+                if i + 1 < n && row[i + 1] == b'"' {
+                    field.push(b'"');
+                    i += 2;
+                } else {
+                    in_quotes = false;
+                    i += 1;
+                }
+            } else {
+                field.push(b);
+                i += 1;
+            }
+        } else if b == b'"' && field.is_empty() && !field_started_quoted {
+            in_quotes = true;
+            field_started_quoted = true;
+            i += 1;
+        } else if b == delimiter {
+            fields.push(take_field(&mut field));
+            field_started_quoted = false;
+            i += 1;
+        } else {
+            field.push(b);
+            i += 1;
+        }
+    }
+    fields.push(take_field(&mut field));
     fields
 }
 
@@ -135,36 +250,34 @@ impl CsvReader {
             return Ok(DataFrame::new());
         }
 
-        // Split on newlines, skipping empty trailing lines.
-        let rows: Vec<&[u8]> = input
-            .split(|&b| b == b'\n')
-            .filter(|r| !r.is_empty() && *r != b"\r")
-            .collect();
-
-        if rows.is_empty() {
+        let delim = self.config.delimiter;
+        // RFC-4180 record tokenization — quoted fields may contain the
+        // delimiter and newlines. Replaces the prior split-on-`\n` +
+        // naive-delimiter-split, which shattered quoted fields and shifted
+        // every later column.
+        let records = tokenize_records(input, delim);
+        if records.is_empty() {
             return Ok(DataFrame::new());
         }
 
-        let delim = self.config.delimiter;
-
         // Parse header or generate column names.
-        let (header_names, data_rows) = if self.config.has_header {
-            let names: Vec<String> = split_fields(rows[0], delim)
-                .into_iter()
+        let (header_names, data_rows): (Vec<String>, &[Vec<String>]) = if self.config.has_header {
+            let names: Vec<String> = records[0]
+                .iter()
                 .map(|s| {
                     if self.config.trim_whitespace {
                         s.trim().to_string()
                     } else {
-                        s.to_string()
+                        s.clone()
                     }
                 })
                 .collect();
-            (names, &rows[1..])
+            (names, &records[1..])
         } else {
             // Generate column names: col_0, col_1, ...
-            let ncols = split_fields(rows[0], delim).len();
+            let ncols = records[0].len();
             let names: Vec<String> = (0..ncols).map(|i| format!("col_{}", i)).collect();
-            (names, &rows[..])
+            (names, &records[..])
         };
 
         let ncols = header_names.len();
@@ -189,19 +302,23 @@ impl CsvReader {
         }
 
         // Type-infer from first data row.
-        let first_fields = split_fields(data_rows[0], delim);
-        let mut col_types: Vec<InferredType> = first_fields
+        let mut col_types: Vec<InferredType> = data_rows[0]
             .iter()
             .map(|s| {
-                let s = if self.config.trim_whitespace { s.trim() } else { *s };
+                let s = if self.config.trim_whitespace { s.trim() } else { s.as_str() };
                 infer_type(s)
             })
             .collect();
 
-        // Pad col_types if first row is shorter than header.
+        // Reconcile col_types to the header width: pad when the first data
+        // row is shorter, TRUNCATE when it is longer. Without the truncate,
+        // a data row with more fields than the header indexes past the
+        // ncols-sized column buffers below (a latent panic the bolero fuzz
+        // surfaced). Extra data fields beyond the header are ignored.
         while col_types.len() < ncols {
             col_types.push(InferredType::Str);
         }
+        col_types.truncate(ncols);
 
         // Allocate column buffers.
         let nrows = data_rows.len();
@@ -220,11 +337,10 @@ impl CsvReader {
         }
 
         // Parse each data row.
-        for (row_idx, &row_bytes) in data_rows.iter().enumerate() {
-            let fields = split_fields(row_bytes, delim);
+        for record in data_rows.iter() {
             for col_idx in 0..ncols {
-                let raw = if col_idx < fields.len() {
-                    fields[col_idx]
+                let raw: &str = if col_idx < record.len() {
+                    record[col_idx].as_str()
                 } else {
                     // Missing field: treat as empty string.
                     ""
@@ -248,8 +364,6 @@ impl CsvReader {
                         str_bufs[col_idx].as_mut().unwrap().push(s.to_string());
                     }
                 }
-
-                let _ = row_idx; // suppress unused warning
             }
         }
 
@@ -314,13 +428,13 @@ impl StreamingCsvProcessor {
 
         let delim = self.config.delimiter;
         let (header_names, data_rows) = if self.config.has_header {
-            let names: Vec<String> = split_fields(rows[0], delim)
+            let names: Vec<String> = split_fields_quoted(rows[0], delim)
                 .into_iter()
                 .map(|s| s.trim().to_string())
                 .collect();
             (names, &rows[1..])
         } else {
-            let ncols = split_fields(rows[0], delim).len();
+            let ncols = split_fields_quoted(rows[0], delim).len();
             let names: Vec<String> = (0..ncols).map(|i| format!("col_{}", i)).collect();
             (names, &rows[..])
         };
@@ -338,13 +452,13 @@ impl StreamingCsvProcessor {
         };
 
         for &row_bytes in data_rows {
-            let fields = split_fields(row_bytes, delim);
+            let fields = split_fields_quoted(row_bytes, delim);
             for col_idx in 0..ncols {
                 let s = if col_idx < fields.len() {
                     if self.config.trim_whitespace {
                         fields[col_idx].trim()
                     } else {
-                        fields[col_idx]
+                        fields[col_idx].as_str()
                     }
                 } else {
                     ""
@@ -385,13 +499,13 @@ impl StreamingCsvProcessor {
 
         let delim = self.config.delimiter;
         let (header_names, data_rows) = if self.config.has_header {
-            let names: Vec<String> = split_fields(rows[0], delim)
+            let names: Vec<String> = split_fields_quoted(rows[0], delim)
                 .into_iter()
                 .map(|s| s.trim().to_string())
                 .collect();
             (names, &rows[1..])
         } else {
-            let ncols = split_fields(rows[0], delim).len();
+            let ncols = split_fields_quoted(rows[0], delim).len();
             let names = (0..ncols).map(|i| format!("col_{}", i)).collect();
             (names, &rows[..])
         };
@@ -408,7 +522,7 @@ impl StreamingCsvProcessor {
         };
 
         for &row_bytes in data_rows {
-            let fields = split_fields(row_bytes, delim);
+            let fields = split_fields_quoted(row_bytes, delim);
             for col_idx in 0..ncols {
                 let s = if col_idx < fields.len() {
                     fields[col_idx].trim()
@@ -424,5 +538,157 @@ impl StreamingCsvProcessor {
         }
 
         Ok((header_names, mins, maxs, row_count))
+    }
+}
+
+// ── RFC-4180 tests ───────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod rfc4180_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn parse(csv: &str) -> DataFrame {
+        CsvReader::new(CsvConfig::default())
+            .parse(csv.as_bytes())
+            .unwrap()
+    }
+    fn str_col<'a>(df: &'a DataFrame, name: &str) -> &'a [String] {
+        match df.get_column(name) {
+            Some(Column::Str(v)) => v.as_slice(),
+            _ => panic!("{name} is not a Str column"),
+        }
+    }
+    fn int_col<'a>(df: &'a DataFrame, name: &str) -> &'a [i64] {
+        match df.get_column(name) {
+            Some(Column::Int(v)) => v.as_slice(),
+            _ => panic!("{name} is not an Int column"),
+        }
+    }
+    fn float_col<'a>(df: &'a DataFrame, name: &str) -> &'a [f64] {
+        match df.get_column(name) {
+            Some(Column::Float(v)) => v.as_slice(),
+            _ => panic!("{name} is not a Float column"),
+        }
+    }
+
+    #[test]
+    fn quoted_comma_stays_one_field_and_keeps_columns_aligned() {
+        // The LendingClub shape: a free-text column with commas sits BEFORE
+        // numeric joint-application columns. Pre-fix the quoted commas
+        // shattered `desc` and shifted every later column, so
+        // annual_inc_joint/dti_joint failed to parse as numbers (ADR-0042
+        // limitation #1). Now they land as the right types.
+        let df = parse(
+            "id,desc,annual_inc_joint,dti_joint\n\
+             100,\"income, debt, and more\",50000,12.5\n\
+             200,\"plain\",60000,9.0\n",
+        );
+        assert_eq!(df.ncols(), 4);
+        assert_eq!(df.nrows(), 2);
+        assert_eq!(
+            str_col(&df, "desc"),
+            &["income, debt, and more".to_string(), "plain".to_string()]
+        );
+        assert_eq!(int_col(&df, "annual_inc_joint"), &[50000, 60000]);
+        assert_eq!(float_col(&df, "dti_joint"), &[12.5, 9.0]);
+    }
+
+    #[test]
+    fn quoted_field_with_embedded_newline_is_one_row() {
+        let df = parse("a,b\n10,\"line1\nline2\"\n20,\"x\"\n");
+        assert_eq!(df.nrows(), 2, "embedded newline must not split the record");
+        assert_eq!(
+            str_col(&df, "b"),
+            &["line1\nline2".to_string(), "x".to_string()]
+        );
+    }
+
+    #[test]
+    fn escaped_double_quotes_unescape() {
+        let df = parse("a,b\n10,\"say \"\"hi\"\"\"\n");
+        assert_eq!(str_col(&df, "b"), &["say \"hi\"".to_string()]);
+    }
+
+    #[test]
+    fn unquoted_rows_still_parse() {
+        let df = parse("a,b,c\n10,20,30\n40,50,60\n");
+        assert_eq!(df.ncols(), 3);
+        assert_eq!(int_col(&df, "a"), &[10, 40]);
+        assert_eq!(int_col(&df, "c"), &[30, 60]);
+    }
+
+    #[test]
+    fn crlf_line_endings_with_quotes() {
+        let df = parse("a,b\r\n10,\"x, y\"\r\n20,z\r\n");
+        assert_eq!(df.nrows(), 2);
+        assert_eq!(str_col(&df, "b"), &["x, y".to_string(), "z".to_string()]);
+    }
+
+    #[test]
+    fn quoted_empty_and_blank_lines() {
+        let df = parse("a,b\n10,\"\"\n\n20,y\n");
+        assert_eq!(df.nrows(), 2, "blank line must be skipped");
+        assert_eq!(str_col(&df, "b"), &["".to_string(), "y".to_string()]);
+    }
+
+    #[test]
+    fn data_row_longer_than_header_does_not_panic() {
+        // Regression for the bolero-surfaced panic: a data row with more
+        // fields than the header must ignore the extras, not index past the
+        // header-width column buffers.
+        let df = parse("a,b\n10,20,30,40\n50,60,70\n");
+        assert_eq!(df.ncols(), 2);
+        assert_eq!(df.nrows(), 2);
+        assert_eq!(int_col(&df, "a"), &[10, 50]);
+        assert_eq!(int_col(&df, "b"), &[20, 60]);
+    }
+
+    #[test]
+    fn parse_is_deterministic() {
+        let csv = "id,desc,n\n1,\"a, b\",10\n2,\"c\"\"d\",20\n";
+        let a = parse(csv);
+        let b = parse(csv);
+        assert_eq!(a.nrows(), b.nrows());
+        assert_eq!(a.ncols(), b.ncols());
+        assert_eq!(str_col(&a, "desc"), str_col(&b, "desc"));
+    }
+
+    proptest! {
+        /// Parsing arbitrary content never panics and is shape-stable.
+        #[test]
+        fn parse_arbitrary_never_panics_and_stable(s in ".{0,400}") {
+            let csv = format!("a,b,c\n{}\n", s);
+            let r1 = CsvReader::new(CsvConfig::default()).parse(csv.as_bytes());
+            let r2 = CsvReader::new(CsvConfig::default()).parse(csv.as_bytes());
+            prop_assert_eq!(r1.is_ok(), r2.is_ok());
+            if let (Ok(d1), Ok(d2)) = (r1, r2) {
+                prop_assert_eq!(d1.nrows(), d2.nrows());
+                prop_assert_eq!(d1.ncols(), d2.ncols());
+            }
+        }
+
+        /// A quoted field absorbing N delimiters is still exactly one field.
+        #[test]
+        fn quoted_field_absorbs_delimiters(n in 0usize..20) {
+            let inner = vec!["x"; n + 1].join(",");
+            let csv = format!("a,b\n1,\"{}\"\n", inner);
+            let df = CsvReader::new(CsvConfig::default()).parse(csv.as_bytes()).unwrap();
+            prop_assert_eq!(df.ncols(), 2);
+            match df.get_column("b") {
+                Some(Column::Str(v)) => prop_assert_eq!(&v[0], &inner),
+                _ => prop_assert!(false, "b should be a Str column"),
+            }
+        }
+    }
+
+    #[test]
+    fn fuzz_parse_arbitrary_bytes_never_panics() {
+        bolero::check!()
+            .with_type::<Vec<u8>>()
+            .for_each(|bytes: &Vec<u8>| {
+                let _ = CsvReader::new(CsvConfig::default()).parse(bytes);
+                let _ = StreamingCsvProcessor::new(CsvConfig::default()).sum_columns(bytes);
+            });
     }
 }
