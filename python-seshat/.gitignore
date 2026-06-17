@@ -1,0 +1,10 @@
+# Python bytecode caches — never commit (they are interpreter/version specific).
+__pycache__/
+*.pyc
+*.pyo
+
+# Locally generated traces and build artifacts.
+*.seshat
+*.egg-info/
+build/
+dist/

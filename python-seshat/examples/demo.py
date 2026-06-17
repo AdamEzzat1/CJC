@@ -1,0 +1,74 @@
+"""A tiny mixed Python + native data pipeline, to demonstrate Seshat's
+cross-language capture.
+
+Each `json.*`, `re.*`, `sorted`, and `"".join` call is a *native* (C) call —
+exactly the kind of Python→native boundary that a PyO3 Rust extension also
+produces. Recording this with Seshat shows Python frames and the native boundary
+together in one trace.
+
+Run:
+    python -m seshat run examples/demo.py --out demo_py.seshat
+    seshat analyze demo_py.seshat        # the Rust CLI
+"""
+
+import json
+import re
+
+import seshat
+
+_WORD = re.compile(r"[a-z]+")
+
+
+def parse(raw):
+    # json.loads is a C call -> boundary crossing
+    return [json.loads(line) for line in raw]
+
+
+def tokenize(text):
+    # re.findall is a C call -> boundary crossing
+    return _WORD.findall(text.lower())
+
+
+def transform(records):
+    out = []
+    for rec in records:
+        toks = tokenize(rec["text"])
+        out.append({"id": rec["id"], "n": len(toks), "first": toks[0] if toks else ""})
+    return out
+
+
+def aggregate(rows):
+    # sorted() is a C call -> boundary crossing
+    return sorted(rows, key=lambda r: r["n"], reverse=True)
+
+
+def serialize(rows):
+    # json.dumps is a C call -> boundary crossing
+    return "\n".join(json.dumps(r) for r in rows)
+
+
+def main():
+    # sized so the run lasts long enough for the sampler to collect a few
+    # hundred time-weighted samples (sampling mode); calls mode needs far less.
+    n = 12000
+    with seshat.zone("setup"):
+        raw = [
+            json.dumps({"id": i, "text": f"the quick brown fox number {i} jumps"})
+            for i in range(n)
+        ]
+    with seshat.zone("parse"):
+        records = parse(raw)
+    with seshat.zone("transform"):
+        rows = transform(records)
+    with seshat.zone("aggregate"):
+        ranked = aggregate(rows)
+    with seshat.zone("serialize"):
+        blob = serialize(ranked)
+        # simulate handing the serialized bytes off to a native consumer
+        seshat.mark_copy("rustheap", "numpy", len(blob) * 8)
+    return len(blob)
+
+
+if __name__ == "__main__":
+    total = main()
+    print(f"pipeline produced {total} bytes")

@@ -1,0 +1,25 @@
+[package]
+name = "cjc-seshat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Seshat — deterministic cross-language causal profiler for Python/Rust systems: cross-language flamegraphs, Py↔Rust boundary cost, copy detection, GIL/lock contention, async stalls, memory ownership, peak attribution, and evidence-grounded recommendations"
+publish = false
+
+[dependencies]
+# Only needed for the `.cjcl`-facing satellite dispatch (Value marshalling).
+# The trace model + analysis engine are pure and dependency-free.
+cjc-runtime = { workspace = true }
+
+[features]
+default = []
+# Live OS-level collectors (Rust GlobalAlloc shim, CPython frame walk,
+# perf_event counters). Nondeterministic by nature — quarantined behind
+# this gate so the default build/test surface stays bit-identical.
+collect-live = []
+
+[dev-dependencies]
+proptest = "1"
+bolero = "0.13.4"

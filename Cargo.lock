@@ -512,6 +512,7 @@ dependencies = [
  "cjc-regex",
  "cjc-repro",
  "cjc-runtime",
+ "cjc-seshat",
  "cjc-snap",
  "cjc-types",
  "cjc-vizor",
@@ -553,6 +554,7 @@ dependencies = [
  "cjc-regex",
  "cjc-repro",
  "cjc-runtime",
+ "cjc-seshat",
  "cjc-snap",
  "cjc-types",
  "cjc-vizor",
@@ -613,6 +615,7 @@ dependencies = [
  "cjc-regex",
  "cjc-repro",
  "cjc-runtime",
+ "cjc-seshat",
  "cjc-snap",
  "cjc-types",
  "cjc-vizor",
@@ -676,6 +679,15 @@ dependencies = [
  "cjc-regex",
  "cjc-repro",
  "rayon",
+]
+
+[[package]]
+name = "cjc-seshat"
+version = "0.1.11"
+dependencies = [
+ "bolero",
+ "cjc-runtime",
+ "proptest",
 ]
 
 [[package]]

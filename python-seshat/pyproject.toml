@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "seshat-profiler"
+version = "0.1.0"
+description = "Pure-stdlib Python recorder for the Seshat cross-language (Python/Rust) causal profiler. Captures Python frames + the Python↔native boundary and writes the .seshat format the Rust analyzer reads."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Adam Ezzat" }]
+keywords = ["profiler", "python", "rust", "ffi", "pyo3", "cross-language", "flamegraph", "async", "determinism"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Debuggers",
+    "Topic :: System :: Monitoring",
+    "License :: OSI Approved :: MIT License",
+]
+# Zero runtime dependencies — pure stdlib by design.
+dependencies = []
+
+[project.scripts]
+# `seshat-record <script.py> --out trace.seshat`
+seshat-record = "seshat.__main__:_console"
+
+[project.urls]
+Repository = "https://github.com/AdamEzzat1/CJC"
+
+[tool.setuptools]
+packages = ["seshat"]

@@ -61,6 +61,7 @@ members = [
     "crates/cjc-nss",
     "crates/cjc-cana-nss",
     "crates/cjc-cana-compress",
+    "crates/cjc-seshat",
     "bench/cana_train_cost_model",
     "bench/cana_ab_pinn",
     "bench/cana_ab_corpus",
@@ -131,6 +132,9 @@ cjc-cana-compress = { workspace = true }
 # Phase A1 tensor FP accounting wiring tests
 # (tests/test_tensor_fp_accounting.rs) build the recorded predictor.
 cjc-cana-nss = { workspace = true }
+# Seshat profiler — executor parity tests (tests/seshat/parity.rs) reset the
+# per-thread trace sink between AST-eval and MIR-exec runs.
+cjc-seshat = { workspace = true }
 
 # Phase 0.8 Item B3 — feature propagation so the test binary in
 # `tests/abng/serialize_compressed.rs` can call the gated
@@ -182,6 +186,11 @@ cjc-cana = { path = "crates/cjc-cana", version = "0.1.11" }
 cjc-nss = { path = "crates/cjc-nss", version = "0.1.11" }
 cjc-cana-nss = { path = "crates/cjc-cana-nss", version = "0.1.11" }
 cjc-cana-compress = { path = "crates/cjc-cana-compress", version = "0.1.11" }
+cjc-seshat = { path = "crates/cjc-seshat", version = "0.1.11" }
+
+[[test]]
+name = "seshat_parity"
+path = "tests/seshat/parity.rs"
 
 [[test]]
 name = "fixtures"

@@ -238,6 +238,8 @@ enum CallDispatch {
     Abng,
     /// Resolved by `cjc_locke::dispatch_locke` (v0.2).
     Locke,
+    /// Resolved by `cjc_seshat::dispatch_seshat` (v0.1 profiler markers).
+    Seshat,
 }
 
 pub struct MirExecutor {
@@ -2349,6 +2351,13 @@ impl MirExecutor {
                     ))),
                     Err(msg) => Err(MirExecError::Runtime(msg)),
                 },
+                CallDispatch::Seshat => match cjc_seshat::dispatch_seshat(name, &args) {
+                    Ok(Some(value)) => Ok(value),
+                    Ok(None) => Err(MirExecError::Runtime(format!(
+                        "call cache inconsistency: `{name}` cached as Seshat but dispatcher returned None"
+                    ))),
+                    Err(msg) => Err(MirExecError::Runtime(msg)),
+                },
             };
         }
         // Stateful builtins that need interpreter state
@@ -2845,6 +2854,19 @@ impl MirExecutor {
             }
             Err(msg) => return Err(MirExecError::Runtime(msg)),
             Ok(None) => {} // not a locke_* builtin, fall through
+        }
+
+        // Seshat v0.1: language-level cross-language profiler markers (seshat_*).
+        // Write-only sink emitters; same routing pattern as cjc-locke so both
+        // executors share one per-thread trace sink.
+        match cjc_seshat::dispatch_seshat(name, &args) {
+            Ok(Some(value)) => {
+                self.call_cache
+                    .insert(name.to_string(), CallDispatch::Seshat);
+                return Ok(value);
+            }
+            Err(msg) => return Err(MirExecError::Runtime(msg)),
+            Ok(None) => {} // not a seshat_* builtin, fall through
         }
 
         // PINN training builtins (bypass builtins.rs — cjc-ad dep)
