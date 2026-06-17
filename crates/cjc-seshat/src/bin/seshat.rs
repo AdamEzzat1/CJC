@@ -51,7 +51,7 @@ usage:
   seshat analyze <trace.seshat> [--json] [--svg <out.svg>]
   seshat diff <baseline.seshat> <candidate.seshat>
   seshat variance <run1.seshat> <run2.seshat> [run3.seshat ...]
-  seshat merge <host.seshat> <native.seshat> [--under <name>] [--out <merged.seshat>] [--json] [--svg <out.svg>]
+  seshat merge <host.seshat> <native.seshat> [native2.seshat ...] [--under <name>] [--out <merged.seshat>] [--json] [--svg <out.svg>]
   seshat record-demo <out.seshat> [--ms <interval>] [--unwind]   (needs --features collect-live)";
 
 fn print_usage() {
@@ -183,12 +183,20 @@ fn cmd_merge(args: &[String]) -> Result<(), String> {
         }
         i += 1;
     }
-    if paths.len() != 2 {
-        return Err("merge needs two trace paths: <host.seshat> <native.seshat>".to_string());
+    if paths.len() < 2 {
+        return Err(
+            "merge needs a host trace and at least one native trace: \
+             <host.seshat> <native.seshat> [native2.seshat ...]"
+                .to_string(),
+        );
     }
-    let host = read_trace(paths[0])?;
-    let native = read_trace(paths[1])?;
-    let merged = merge(&host, &native, &MergeOptions { under });
+    // Fold each native into the host. Each native grafts under `--under` if given,
+    // else its own declared host token (`collect::mark_host`), else the heuristic.
+    let mut merged = read_trace(paths[0])?;
+    for np in &paths[1..] {
+        let native = read_trace(np)?;
+        merged = merge(&merged, &native, &MergeOptions { under: under.clone() });
+    }
 
     if let Some(o) = out {
         std::fs::write(o, serialize(&merged)).map_err(|e| format!("cannot write '{o}': {e}"))?;

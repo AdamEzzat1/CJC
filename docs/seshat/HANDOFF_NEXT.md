@@ -24,9 +24,15 @@ the remaining capability gaps. Everything you need to start cold is here.
 >   `--unwind`) — allocations attributed to real Rust functions (e.g.
 >   `seshat::cmd_record_demo (seshat.rs:266)`) via `backtrace`, **scoped to
 >   `collect-live`** (default build still dependency-free).
-> - **Still open:** CPU-time native cross-thread sampling (SIGPROF/SuspendThread),
->   token-based merge correlation, thermal (`psutil`/perf), exact GIL (C ext) —
->   the last two were explicitly deferred per the dependency decision.
+> - **Leftovers pass (best-effort, all green):** thermal capture DONE
+>   (`seshat[thermal]` → psutil `cpu_freq` → Counter events → throttle detection);
+>   explicit token merge correlation DONE (`collect::mark_host` + multi-native
+>   fold); synchronous native CPU sampling DONE (`collect::native_sample()`); GIL
+>   heuristic HARDENED (2-consecutive-tick streak). Golden hash unchanged.
+> - **Genuinely still open:** *automatic* cross-thread CPU sampling
+>   (SIGPROF/SuspendThread — unsafe/platform), *automatic* token injection across
+>   the seam, cache-miss/IPC counters (psutil = freq only), exact GIL (needs a C
+>   ext that defeats the pure-stdlib design — heuristic hardened instead).
 
 ---
 

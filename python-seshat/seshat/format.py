@@ -125,6 +125,14 @@ class TraceWriter:
             self._events.append(_u8(1) + _u8(domain) + _u64(nbytes) + _u32(frame))
             self.event_count += 1
 
+    def counter(self, freq_mhz: int, cache_misses: int = 0, ipc_milli: int = 0, thread: int = 0) -> None:
+        # Hardware/OS counter sample (tag 3) — drives the analyzer's thermal mode.
+        # cache_misses/ipc are 0 from a pure-stdlib/psutil source (no perf access).
+        buf = _u8(3) + _u32(thread) + _u32(freq_mhz) + _u64(cache_misses) + _u32(ipc_milli)
+        with self._lock:
+            self._events.append(buf)
+            self.event_count += 1
+
     def free(self, domain: int, nbytes: int, frame: int) -> None:
         with self._lock:
             self._events.append(_u8(2) + _u8(domain) + _u64(nbytes) + _u32(frame))

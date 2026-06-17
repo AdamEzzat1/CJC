@@ -156,3 +156,26 @@ quarantined to the live-capture feature, per the zero-dep-by-default rule. Therm
 (`psutil`/perf) and exact GIL (C extension) remain deferred — each wants a
 dependency and was not selected. No gated output changed; the golden report hash
 `0xa4cda1369275d1ff` is unchanged.
+
+## Addendum — Gap-D leftovers: thermal, token correlation, native sampling, GIL hardening
+
+A best-effort pass over the four items previously deferred:
+
+- **Thermal capture (DONE)** — Python `seshat[thermal]` extra (psutil) samples
+  `cpu_freq()` → `Counter` events (new `TraceWriter.counter`, byte-matching the
+  engine's existing tag 3) → thermal mode + throttle detection. Optional extra;
+  core stays zero-dep; off by default so calls-mode fixtures are byte-identical.
+- **Explicit token merge correlation (DONE)** — `collect::mark_host(token)` lets a
+  Rust trace declare its host boundary; `merge` reads it to graft precisely
+  (overriding the most-sampled heuristic) and folds multiple natives. Zero format
+  change (token rides the existing boundary marker, then is dropped). *Automatic*
+  per-crossing token injection across the seam remains deferred.
+- **Synchronous native CPU sampling (DONE, partial)** — `collect::native_sample()`
+  captures the *calling* thread's real native stack (safe, cross-platform). The
+  unsafe *automatic* cross-thread variant (SIGPROF / SuspendThread) stays deferred.
+- **Exact GIL (NOT done, by design)** — exact GIL acquisition needs C-level
+  interpreter state; a C extension would defeat the recorder's pure-stdlib design
+  and isn't testable in this environment. Instead the heuristic was hardened
+  (`_GIL_WAIT_STREAK = 2` consecutive frozen ticks) and the limitation documented.
+
+No gated output changed; golden report hash `0xa4cda1369275d1ff` unchanged.

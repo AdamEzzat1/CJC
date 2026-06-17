@@ -161,23 +161,31 @@ cargo run -p cjc-seshat --bin seshat -- analyze merged.seshat        # Python + 
   `seshat record-demo`. With `CaptureConfig { alloc_stacks: true }` (CLI
   `--unwind`) **allocations are attributed to real Rust functions via native
   unwinding** (the `backtrace` crate, scoped strictly to this feature — the
-  default build stays dependency-free). Honest scope: *allocation-site* unwinding
-  is automatic; *CPU-time* sampling is still zone-based (automatic cross-thread
-  native sampling — SIGPROF / thread-suspend — is deferred).
-- **Shipped (trace merge):** `seshat merge <host> <native>` (pure, deterministic)
-  stitches a Python and a Rust trace into one unified trace, grafting the Rust
-  subtree under the matching Py↔Rust boundary frame (name-based correlation).
+  default build stays dependency-free). `collect::native_sample()` takes a
+  synchronous CPU sample of the **calling thread's real native call stack** (no
+  manual zones), and `collect::mark_host(name)` declares the host boundary for
+  merge correlation. Honest scope: *allocation-site* unwinding and *explicit*
+  native sampling are automatic; *automatic* cross-thread CPU sampling (SIGPROF /
+  thread-suspend) is deferred.
+- **Shipped (trace merge):** `seshat merge <host> <native> [native2 ...]` (pure,
+  deterministic) stitches a Python and one-or-more Rust traces into one unified
+  trace, grafting each Rust subtree under the matching Py↔Rust boundary —
+  correlated by an explicit token (`mark_host` / `--under`) or, failing that, the
+  most-sampled boundary.
+- **Shipped (thermal capture):** the Python recorder's `seshat[thermal]` extra
+  (psutil) samples `cpu_freq()` → Counter events → the analyzer's thermal mode
+  (throttle detection). Optional extra; the core stays zero-dep.
 - **Shipped (cross-language capture, [`python-seshat/`](../../python-seshat)):**
   a pure-stdlib Python recorder using `sys.setprofile` to capture **real Python
   frames + the Python↔native (Rust/C) boundary**, writing the same `.seshat`
   format the Rust CLI analyzes. No PyO3/maturin — the file is the interface.
   Proven by `tests/python_bridge.rs` against a committed Python-produced fixture.
-- **Deferred:** perf_event / thermal hardware-counter *capture* (the analysis is
-  ready; `psutil`/perf is the missing source), CPU-time native cross-thread
-  unwinding, exact (non-heuristic) GIL detection, and token-based per-call-site
-  merge correlation. (Python-side capture — `tracemalloc` memory, time-weighted
-  sampling, multi-thread, and the GIL heuristic — is shipped; see
-  [`python-seshat/`](../../python-seshat).)
+- **Deferred:** *automatic* cross-thread CPU-time native sampling (SIGPROF /
+  `SuspendThread`+`StackWalk` — large, unsafe, platform-specific; explicit
+  `native_sample()` is shipped), cache-miss / IPC hardware counters (psutil gives
+  frequency only), exact (non-heuristic) GIL detection (needs a C extension that
+  would defeat the pure-stdlib recorder), and *automatic* token injection across
+  the seam (explicit `mark_host` tokens are shipped).
 
 ## Tests
 

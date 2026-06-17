@@ -27,6 +27,30 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::trace::{CausalEdge, Event, FrameId, FrameKind, Trace, TraceBuilder};
 
+/// Sentinel prefix for the explicit correlation token a native trace declares
+/// via `collect::mark_host(name)`. The token *is* the host boundary name both
+/// sides agree on, so the merge stitches precisely instead of guessing. The
+/// marker is read by [`native_declared_host`] and dropped from the merged trace.
+pub(crate) const HOST_PREFIX: &str = "@seshat-host:";
+
+/// If the `native` trace declared its host boundary (via `collect::mark_host`),
+/// return the token — the boundary name to graft under. This is the explicit,
+/// per-call-site correlation: both sides name the same string. Returns the first
+/// declaration found, in event order (deterministic).
+fn native_declared_host(native: &Trace) -> Option<String> {
+    for ev in native.events() {
+        if let Event::Edge(CausalEdge::BoundaryCross { boundary }) = ev {
+            let name = native.string(native.frame(*boundary).name);
+            if let Some(token) = name.strip_prefix(HOST_PREFIX) {
+                if !token.is_empty() {
+                    return Some(token.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Knobs for [`merge`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MergeOptions {
@@ -50,7 +74,10 @@ pub fn merge(host: &Trace, native: &Trace, opts: &MergeOptions) -> Trace {
     copy_events(&mut b, host, &[], &mut host_frames, &mut host_handles);
 
     // ── 2. choose the graft prefix (path down to the boundary frame) ──
-    let prefix = pick_boundary(host, opts.under.as_deref())
+    // Resolution order: explicit `--under` > the native trace's declared host
+    // token (`collect::mark_host`) > the most-sampled boundary (heuristic).
+    let effective_under = opts.under.clone().or_else(|| native_declared_host(native));
+    let prefix = pick_boundary(host, effective_under.as_deref())
         .map(|b_old| graft_prefix(host, b_old, &host_frames))
         .unwrap_or_default();
 
@@ -138,6 +165,11 @@ fn copy_edge(
             b.copy(*from, *to, *bytes, fr);
         }
         CausalEdge::BoundaryCross { boundary } => {
+            // Drop the `@seshat-host:` correlation marker — it is merge metadata,
+            // not a real boundary crossing, and must not appear in the output.
+            if src.string(src.frame(*boundary).name).starts_with(HOST_PREFIX) {
+                return;
+            }
             let fr = map_frame(b, src, frames, *boundary);
             b.boundary_cross(fr);
         }

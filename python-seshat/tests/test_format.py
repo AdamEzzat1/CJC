@@ -280,21 +280,30 @@ def test_multithread_capture_distinct_thread_ids():
 
 
 def test_gil_classify_states_unit():
-    """Gap C heuristic logic, exercised deterministically (no threads/timing).
-
-    `_classify_states` takes a tick = list of (ident, logical_id, live_stack)."""
+    """Gap C/D heuristic logic, exercised deterministically (no threads/timing).
+    `_classify_states` takes a tick = list of (ident, logical_id, live_stack).
+    GilWait requires _GIL_WAIT_STREAK (=2) consecutive frozen-while-others-progress
+    ticks (the hardening that suppresses single-tick false positives)."""
     rec = Recorder()
     # Tick 1 — first sighting of both threads → Running (no history yet).
-    s1 = rec._classify_states([(101, 0, [9, 1]), (202, 1, [9, 2])])
-    assert s1 == {101: STATE_RUNNING, 202: STATE_RUNNING}
-    # Tick 2 — thread 101 progressed (leaf 1→3); thread 202 frozen (leaf 2) while
-    # another progressed → GilWait.
-    s2 = rec._classify_states([(101, 0, [9, 3]), (202, 1, [9, 2])])
-    assert s2[101] == STATE_RUNNING
-    assert s2[202] == STATE_GIL_WAIT
-    # Tick 3 — nobody progressed (both frozen) → no GilWait (can't attribute).
-    s3 = rec._classify_states([(101, 0, [9, 3]), (202, 1, [9, 2])])
-    assert s3 == {101: STATE_RUNNING, 202: STATE_RUNNING}
+    assert rec._classify_states([(101, 0, [9, 1]), (202, 1, [9, 2])]) == {
+        101: STATE_RUNNING,
+        202: STATE_RUNNING,
+    }
+    # Tick 2 — 101 progressed (1→3), 202 frozen (2) — but only ONE frozen tick →
+    # not yet GilWait (hardening).
+    assert rec._classify_states([(101, 0, [9, 3]), (202, 1, [9, 2])]) == {
+        101: STATE_RUNNING,
+        202: STATE_RUNNING,
+    }
+    # Tick 3 — 202 frozen a SECOND consecutive tick while 101 progressed → GilWait.
+    s3 = rec._classify_states([(101, 0, [9, 4]), (202, 1, [9, 2])])
+    assert s3[101] == STATE_RUNNING and s3[202] == STATE_GIL_WAIT
+    # Tick 4 — 202 resumes (frame changes) → streak resets → Running.
+    assert rec._classify_states([(101, 0, [9, 5]), (202, 1, [9, 7])]) == {
+        101: STATE_RUNNING,
+        202: STATE_RUNNING,
+    }
 
     # A single active thread can never be GIL-starved → always Running.
     solo = Recorder()
@@ -333,6 +342,57 @@ def test_gil_wait_heuristic_live_contention():
     )
 
 
+def test_counter_event_round_trips():
+    """Gap D thermal: TraceWriter.counter emits a Counter event (tag 3) whose
+    byte layout matches the Rust reader (serialize.rs)."""
+    w = TraceWriter()
+    w.counter(3400, cache_misses=12, ipc_milli=1500, thread=2)
+    counters = [ev for ev in w._events if ev and ev[0] == 3]
+    assert len(counters) == 1
+    (thread,) = struct.unpack_from("<I", counters[0], 1)
+    (freq,) = struct.unpack_from("<I", counters[0], 5)
+    (cache,) = struct.unpack_from("<Q", counters[0], 9)
+    (ipc,) = struct.unpack_from("<I", counters[0], 17)
+    assert (thread, freq, cache, ipc) == (2, 3400, 12, 1500)
+
+
+def test_thermal_emits_cpu_freq_counters():
+    """Gap D thermal end-to-end: with trace_thermal, the sampler emits Counter
+    events from psutil.cpu_freq(). Skipped when the optional psutil extra is
+    absent (the feature degrades to off, never crashes)."""
+    try:
+        import psutil  # noqa: F401
+    except Exception:
+        print("  (skipped thermal test — psutil [seshat[thermal]] not installed)")
+        return
+
+    def work():
+        acc = 0
+        for i in range(3_000_000):
+            acc = (acc + i) & 0xFFFFFFFF
+        return acc
+
+    rec = Recorder()
+    rec.start(mode="sampling", interval_ms=1, trace_thermal=True)
+    work()
+    w = rec.stop()
+
+    counters = [ev for ev in w._events if ev and ev[0] == 3]
+    assert counters, "expected Counter events from CPU-frequency sampling"
+    (freq,) = struct.unpack_from("<I", counters[0], 5)
+    assert freq > 0, f"expected a positive CPU frequency (MHz), got {freq}"
+
+
+def test_thermal_off_by_default_emits_no_counters():
+    """Default recording has no thermal counters (so calls-mode fixtures and the
+    deterministic path are untouched)."""
+    rec = Recorder()
+    rec.start(mode="calls")  # thermal defaults off
+    _ = sum(range(1000))
+    w = rec.stop()
+    assert not any(ev and ev[0] == 3 for ev in w._events)
+
+
 def test_async_frames_are_tagged():
     import asyncio
 
@@ -363,5 +423,8 @@ if __name__ == "__main__":
     test_multithread_capture_distinct_thread_ids()
     test_gil_classify_states_unit()
     test_gil_wait_heuristic_live_contention()
+    test_counter_event_round_trips()
+    test_thermal_emits_cpu_freq_counters()
+    test_thermal_off_by_default_emits_no_counters()
     test_async_frames_are_tagged()
     print("ok: all python-seshat format/recorder tests passed")

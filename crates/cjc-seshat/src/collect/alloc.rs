@@ -44,6 +44,9 @@ pub(crate) enum RawEvent {
     Alloc { bytes: u64, zone: u32, ips: Vec<usize> },
     Free { bytes: u64, zone: u32, ips: Vec<usize> },
     Sample { stack: Vec<u32> },
+    /// An explicit synchronous CPU sample of the calling thread's native stack
+    /// (raw IPs, symbolized at finish) — `collect::native_sample()`.
+    NativeSample { ips: Vec<usize> },
     ZoneStart { zone: u32 },
     ZoneStop,
     Copy { from: OwnershipDomain, to: OwnershipDomain, bytes: u64 },
@@ -196,6 +199,15 @@ impl Collector {
         }
         let stack = inner.zone_stack.clone();
         inner.events.push(RawEvent::Sample { stack });
+    }
+    pub(crate) fn record_native_sample(&self) {
+        if !self.is_enabled() {
+            return;
+        }
+        // Hold the Guard so capture_ips's own allocations are not recorded.
+        let _g = Guard::enter();
+        let ips = capture_ips();
+        self.lock().events.push(RawEvent::NativeSample { ips });
     }
     pub(crate) fn record_copy(&self, from: OwnershipDomain, to: OwnershipDomain, bytes: u64) {
         let _g = Guard::enter();

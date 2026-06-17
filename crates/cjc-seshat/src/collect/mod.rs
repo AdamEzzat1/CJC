@@ -31,4 +31,6 @@ mod alloc;
 mod recorder;
 
 pub use alloc::SeshatAlloc;
-pub use recorder::{mark_boundary, mark_copy, zone, CaptureConfig, Recorder, Zone};
+pub use recorder::{
+    mark_boundary, mark_copy, mark_host, native_sample, zone, CaptureConfig, Recorder, Zone,
+};

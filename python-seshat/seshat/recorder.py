@@ -61,6 +61,20 @@ _CO_ASYNC_GENERATOR = 0x200
 _CO_ITERABLE_COROUTINE = 0x100
 _ASYNC_FLAGS = _CO_COROUTINE | _CO_ASYNC_GENERATOR | _CO_ITERABLE_COROUTINE
 
+# GIL-wait heuristic (Gap C / Gap D hardening): a thread must be "frozen while
+# another progressed" for this many consecutive sampler ticks before it is
+# labelled GilWait. >1 suppresses single-tick false positives.
+#
+# Why not EXACT GIL detection? CPython's GIL acquire/release is a C-level event
+# with no pure-Python signal (no hook, no `sys`/`threading` accessor). An exact
+# reading needs a C extension reading interpreter state (e.g. `ceval` lock) or an
+# out-of-process probe (py-spy style) — either is a compiled dependency that
+# defeats this recorder's pure-stdlib, no-compilation design, so it is left to an
+# explicit opt-in extra. This frozen-streak refinement is the best *pure-Python*
+# approximation. (`sys._current_frames()` could sharpen the progress signal in a
+# future refinement, but still cannot observe GIL acquisition itself.)
+_GIL_WAIT_STREAK = 2
+
 # "Transparent" C calls that merely *run Python code* (the script bootstrap and
 # the import machinery). Counting them as boundary crossings would make the
 # whole program look like it lives at the boundary, so they are skipped — but
@@ -156,14 +170,26 @@ class Recorder:
         self._boundary_cache = {}  # native label -> fid
         self._sampled_frame = 0
         self._prev_mem = 0
+        # Thermal capture (optional `seshat[thermal]` extra → psutil). When on,
+        # the sampler emits Counter events from `psutil.cpu_freq()`.
+        self._trace_thermal = False
+        self._psutil = None
         # When True the hook is a no-op (no push/pop, no events) — used to make
         # the recorder's own `threading.setprofile` bootstrap call invisible.
         self._suspend_hook = False
-        # GIL heuristic (Gap C): previous sampler tick's leaf frame per thread.
+        # GIL heuristic (Gap C): previous sampler tick's leaf frame per thread,
+        # and the count of consecutive "frozen while another progressed" ticks.
         # Written only by the sampler thread, so no lock is needed.
         self._prev_tops = {}  # ident -> frame id
+        self._frozen_streak = {}  # ident -> consecutive frozen-while-others-progress ticks
 
-    def start(self, trace_memory: bool = False, mode: str = "sampling", interval_ms: float = 2.0) -> None:
+    def start(
+        self,
+        trace_memory: bool = False,
+        mode: str = "sampling",
+        interval_ms: float = 2.0,
+        trace_thermal: bool = False,
+    ) -> None:
         global _ACTIVE
         _ACTIVE = self
         self._mode = "calls" if mode == "calls" else "sampling"
@@ -178,6 +204,20 @@ class Recorder:
                 self._prev_mem = tracemalloc.get_traced_memory()[0]
             except Exception:
                 self._trace_memory = False
+        # Thermal: only available with the optional `psutil` extra; degrade
+        # silently to "off" if it isn't installed (the analyzer then reports
+        # counters_available=false). Imported before `sys.setprofile` below so the
+        # import machinery is never recorded.
+        self._trace_thermal = trace_thermal
+        self._psutil = None
+        if trace_thermal:
+            try:
+                import psutil
+
+                psutil.cpu_freq()  # validate the platform actually exposes it
+                self._psutil = psutil
+            except Exception:
+                self._trace_thermal = False
         # fallback frame for memory attribution when the stack is empty
         self._sampled_frame = self.w.intern_frame(KIND_PY, "<sampled>", "<sampler>", 0)
         # Pre-register the main thread as logical id 0 so single-threaded traces
@@ -272,6 +312,17 @@ class Recorder:
                         self.w.alloc(DOMAIN_PYHEAP, delta, top)
                     elif delta < 0:
                         self.w.free(DOMAIN_PYHEAP, -delta, top)
+                if self._trace_thermal and self._psutil is not None:
+                    # CPU frequency per tick → Counter events (thermal mode). A
+                    # sustained drop ≥10% below the first reading is flagged as
+                    # throttle by the engine. cache-misses/IPC aren't available
+                    # from psutil, so they stay 0 (honest).
+                    try:
+                        f = self._psutil.cpu_freq()
+                        if f is not None and f.current:
+                            self.w.counter(int(round(f.current)))
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
@@ -408,14 +459,18 @@ class Recorder:
         """GIL-wait heuristic (Gap C) — returns ``{ident: state}`` for this tick.
 
         **This is a heuristic, not an exact measurement.** CPython exposes no
-        pure-Python signal for GIL acquisition, so we infer it: across two
-        consecutive sampler ticks, if *some* thread made progress (its leaf frame
-        changed) while *another* thread's leaf is frozen at the frame it had last
-        tick, the frozen thread is most likely blocked waiting for the GIL →
-        labelled :data:`GilWait`. With fewer than two active threads there is no
-        contention, so everything stays :data:`Running`. A genuinely-running
-        thread in a tight call-free loop can be misread as frozen — the report
-        labels this share as approximate."""
+        pure-Python signal for GIL acquisition (that needs C-level interpreter
+        state — see the module note), so we infer it: if *some* thread made
+        progress (its leaf frame changed) while *another* thread's leaf has been
+        frozen for :data:`_GIL_WAIT_STREAK` consecutive ticks, the frozen thread
+        is most likely blocked waiting for the GIL → labelled :data:`GilWait`.
+
+        The consecutive-tick requirement (hardening) suppresses single-tick false
+        positives — a thread that legitimately spends one tick in the same frame
+        is not flagged. With fewer than two active threads there is no contention,
+        so everything stays :data:`Running`. A genuinely-running thread stuck in a
+        tight call-free loop can still be misread — the report labels the share as
+        approximate."""
         cur_tops = {ident: live[-1] for (ident, _tid, live) in tick}
         progressed = any(
             ident in self._prev_tops and self._prev_tops[ident] != top
@@ -423,12 +478,17 @@ class Recorder:
         )
         multi = len(tick) >= 2
         states = {}
+        new_streak = {}
         for ident, top in cur_tops.items():
             frozen = ident in self._prev_tops and self._prev_tops[ident] == top
             if multi and progressed and frozen:
-                states[ident] = STATE_GIL_WAIT
+                streak = self._frozen_streak.get(ident, 0) + 1
+                new_streak[ident] = streak
+                states[ident] = STATE_GIL_WAIT if streak >= _GIL_WAIT_STREAK else STATE_RUNNING
             else:
+                new_streak[ident] = 0
                 states[ident] = STATE_RUNNING
+        self._frozen_streak = new_streak
         self._prev_tops = cur_tops
         return states
 
@@ -576,15 +636,24 @@ class record:
     Then analyze with the Rust CLI:  ``seshat analyze run.seshat``
     """
 
-    def __init__(self, out_path: str, trace_memory: bool = True, mode: str = "sampling") -> None:
+    def __init__(
+        self,
+        out_path: str,
+        trace_memory: bool = True,
+        mode: str = "sampling",
+        trace_thermal: bool = False,
+    ) -> None:
         self.out_path = out_path
         self.trace_memory = trace_memory
         self.mode = mode
+        self.trace_thermal = trace_thermal
         self.rec = None
 
     def __enter__(self):
         self.rec = Recorder()
-        self.rec.start(trace_memory=self.trace_memory, mode=self.mode)
+        self.rec.start(
+            trace_memory=self.trace_memory, mode=self.mode, trace_thermal=self.trace_thermal
+        )
         return self.rec
 
     def __exit__(self, *exc):
@@ -594,7 +663,13 @@ class record:
         return False
 
 
-def run_path(script_path: str, out_path: str, trace_memory: bool = True, mode: str = "sampling") -> int:
+def run_path(
+    script_path: str,
+    out_path: str,
+    trace_memory: bool = True,
+    mode: str = "sampling",
+    trace_thermal: bool = False,
+) -> int:
     """Execute a Python script under recording; write the trace; return #events."""
     with open(script_path, "r", encoding="utf-8") as fh:
         source = fh.read()
@@ -605,7 +680,7 @@ def run_path(script_path: str, out_path: str, trace_memory: bool = True, mode: s
         "__builtins__": __builtins__,
     }
     rec = Recorder()
-    rec.start(trace_memory=trace_memory, mode=mode)
+    rec.start(trace_memory=trace_memory, mode=mode, trace_thermal=trace_thermal)
     try:
         exec(code, globals_dict)  # noqa: S102 — running the user's own script by design
     finally:

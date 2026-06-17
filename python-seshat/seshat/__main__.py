@@ -8,7 +8,7 @@ import sys
 
 from .recorder import run_path
 
-USAGE = "usage: python -m seshat run <script.py> [--out <trace.seshat>]"
+USAGE = "usage: python -m seshat run <script.py> [--out <trace.seshat>] [--thermal]"
 
 
 def main(argv):
@@ -21,6 +21,7 @@ def main(argv):
     rest = argv[1:]
     script = None
     out = "trace.seshat"
+    thermal = False
     i = 0
     while i < len(rest):
         a = rest[i]
@@ -30,6 +31,8 @@ def main(argv):
                 print("seshat: --out needs a path", file=sys.stderr)
                 return 1
             out = rest[i]
+        elif a == "--thermal":
+            thermal = True  # sample CPU frequency (needs the `seshat[thermal]` extra → psutil)
         elif not a.startswith("--"):
             script = a
         else:
@@ -39,7 +42,7 @@ def main(argv):
     if script is None:
         print(f"seshat: run needs a <script.py>\n{USAGE}", file=sys.stderr)
         return 1
-    n = run_path(script, out)
+    n = run_path(script, out, trace_thermal=thermal)
     print(f"seshat: recorded {n} events -> {out}")
     print(f"seshat: now run  `seshat analyze {out}`  (the Rust CLI) for the report")
     return 0

@@ -21,6 +21,12 @@ classifiers = [
 # Zero runtime dependencies — pure stdlib by design.
 dependencies = []
 
+# Optional extras keep the core zero-dep. `thermal` enables CPU-frequency
+# capture (Counter events → the analyzer's thermal mode) via psutil:
+#   pip install "seshat-profiler[thermal]"
+[project.optional-dependencies]
+thermal = ["psutil>=5.9"]
+
 [project.scripts]
 # `seshat-record <script.py> --out trace.seshat`
 seshat-record = "seshat.__main__:_console"

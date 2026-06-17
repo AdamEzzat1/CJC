@@ -176,30 +176,49 @@ dependency — the recorder stays zero-dep):
   symbolized at `finish`, the dhat/Memray technique) so memory is attributed to
   **real Rust functions** with no manual zones. Uses the `backtrace` crate,
   **scoped strictly to `collect-live`** (default build stays dependency-free).
+- **Synchronous native CPU sampling** — `collect::native_sample()` captures the
+  *calling thread's* real native call stack on demand (symbolized at `finish`) →
+  a sampled native flamegraph without manual zones. Safe and cross-platform.
+- **Explicit token merge correlation** — `collect::mark_host(token)` (Rust) +
+  `seshat.mark_boundary(token)` (Python) name the same string; `merge` reads the
+  native trace's declared token to graft precisely (overriding the most-sampled
+  heuristic) and supports folding multiple native traces, each under its own host.
+  Zero format change (the token rides the existing boundary marker, then is
+  dropped). The token is user-provided; *automatic* injection across the seam is
+  the remaining hard part (§9).
+- **Thermal capture** — the Python recorder's `seshat[thermal]` extra (psutil)
+  samples `cpu_freq()` each tick → `Counter` events (a new `TraceWriter.counter`,
+  byte-matching `serialize.rs`'s existing tag 3) → the analyzer's thermal mode +
+  throttle detection. Optional extra; the core stays zero-dep; off by default
+  (calls-mode fixtures unchanged).
+- **GIL heuristic hardening** — `_classify_states` now requires `_GIL_WAIT_STREAK`
+  (=2) consecutive frozen-while-others-progress ticks before labelling `GilWait`,
+  cutting single-tick false positives. Still a heuristic (see §9).
 
 ## 9. Still deferred and why
 
-- **CPU-time native sampling** (the other half of Gap D1) — alloc-site unwinding is
-  done, but time-weighted sampling of native frames needs cross-thread stack
-  reading (SIGPROF on Unix / `SuspendThread`+`StackWalk` on Windows): a large,
-  unsafe, platform-specific effort. Zones still serve CPU-time attribution.
-- **Token-based merge correlation** — precise per-call-site stitching (vs the
-  name-based v1) would need a runtime correlation token written by both sides — a
-  `.seshat` format addition. Deferred.
-- **Thermal / perf counters** (Gap D2, thermal mode's live data) — no portable
-  stdlib source. An optional Python extra (`seshat[thermal]` → `psutil.cpu_freq()`)
-  or a Linux-only `perf_event` reader behind `collect-live`; opt-in dependency,
-  never a core requirement.
+- **Automatic cross-thread CPU-time native sampling** — explicit `native_sample()`
+  is done, but interrupt-driven sampling of *arbitrary* threads without
+  instrumentation needs cross-thread stack reading (SIGPROF on Unix /
+  `SuspendThread`+`StackWalk` on Windows): large, unsafe, platform-specific.
+- **Automatic token injection** for merge correlation — explicit `mark_host`
+  tokens are shipped; auto-threading a per-crossing token across the pure-stdlib
+  Python ↔ Rust-extension seam at runtime needs a shared channel neither side has.
+- **Cache-miss / IPC counters** — psutil exposes frequency only; cache-miss/IPC
+  need `perf_event` (Linux) or RDPMC, behind `collect-live`.
 - **Exact (non-heuristic) GIL detection** — needs a C extension or out-of-process
-  interpreter-state read; deferred pending an explicit waiver of the zero-dep rule.
+  interpreter-state read (e.g. py-spy style). That is a *compiled* dependency that
+  would defeat the recorder's pure-stdlib, no-compilation design, so it is left to
+  an explicit opt-in — the frozen-streak heuristic is the best pure-Python
+  approximation. `sys._current_frames()` could sharpen the *progress* signal in a
+  future refinement but still cannot observe GIL acquisition itself.
 - **Tokio `tracing` bridge** — straightforward extension.
 
-Decisions recorded: Gaps A (copy auto-discovery), B (multi-thread), C (GIL
-heuristic) closed **zero-dep** (pure stdlib). Gap D's **merge** is **zero-dep**;
-Gap D's **alloc-site native unwinding** adds `backtrace` **scoped to
-`collect-live`** (default build dependency-free, per the zero-dep-by-default rule).
-Thermal and exact-GIL remain deferred (each wants a dependency). None of this
-changes any gated output — the golden report hash is unchanged.
+Decisions recorded: Gaps A/B/C and the merge + thermal + native-sample + token
+work closed **zero-dep** (pure stdlib + an optional `psutil` extra); Gap D's
+**alloc-site native unwinding** + `native_sample` add `backtrace` **scoped to
+`collect-live`** (default build dependency-free). None of this changes any gated
+output — the golden report hash is unchanged.
 
 ## 10. Dogfooding target
 

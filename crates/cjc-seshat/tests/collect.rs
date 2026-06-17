@@ -11,8 +11,12 @@
 #[global_allocator]
 static GLOBAL: cjc_seshat::collect::SeshatAlloc = cjc_seshat::collect::SeshatAlloc;
 
-use cjc_seshat::collect::{mark_boundary, mark_copy, zone, CaptureConfig, Recorder};
-use cjc_seshat::{analyze_trace, replay, serialize, OwnershipDomain};
+use cjc_seshat::collect::{
+    mark_boundary, mark_copy, mark_host, native_sample, zone, CaptureConfig, Recorder,
+};
+use cjc_seshat::{
+    analyze_trace, merge, replay, serialize, Event, FrameKind, MergeOptions, OwnershipDomain, Trace,
+};
 
 // The collector is a process-global singleton (one `#[global_allocator]` + one
 // COLLECTOR), so two recordings must never run concurrently — cargo runs tests
@@ -107,4 +111,56 @@ fn alloc_stacks_attribute_to_real_functions() {
          peak contributors = {:?}",
         report.peak.contributors
     );
+}
+
+#[inline(never)]
+fn seshat_native_probe_inner() {
+    native_sample(); // synchronous CPU sample of THIS call stack
+    std::hint::black_box(());
+}
+
+#[inline(never)]
+fn seshat_native_probe_outer() {
+    seshat_native_probe_inner();
+}
+
+#[test]
+fn native_sample_and_mark_host_integrate_with_merge() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
+    let rec = Recorder::start();
+    mark_host("py.entry"); // declare the host boundary for merge correlation
+    for _ in 0..20 {
+        seshat_native_probe_outer();
+    }
+    let native = rec.finish();
+
+    // (1) native_sample captured the REAL Rust call stack (no manual zones)
+    let nr = analyze_trace(&native);
+    assert!(
+        nr.flamegraph.frame_total.keys().any(|k| k.contains("seshat_native_probe")),
+        "native_sample should capture the probe call stack; got {:?}",
+        nr.flamegraph.frame_total.keys().collect::<Vec<_>>()
+    );
+
+    // (2) mark_host("py.entry") + merge → native frames graft under a Python
+    // boundary of that exact name (proves the token format matches the reader).
+    let mut hb = Trace::builder(0);
+    let main = hb.intern_frame(FrameKind::Py, "main", "app.py", 1);
+    let bnd = hb.intern_frame(FrameKind::FfiBoundary, "py.entry", "<native>", 0);
+    for _ in 0..3 {
+        hb.sample_running(&[main, bnd]);
+    }
+    let host = hb.finish();
+    let merged = merge(&host, &native, &MergeOptions::default());
+
+    let grafted = merged.events().iter().any(|e| match e {
+        Event::Sample { stack, .. } => {
+            let labels: Vec<String> = stack.iter().map(|&f| merged.frame_label(f)).collect();
+            labels.iter().any(|l| l.contains("py.entry"))
+                && labels.iter().any(|l| l.contains("seshat_native_probe"))
+        }
+        _ => false,
+    });
+    assert!(grafted, "native frames should graft under the mark_host('py.entry') boundary");
 }

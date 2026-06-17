@@ -124,9 +124,31 @@ pub fn mark_copy(from: OwnershipDomain, to: OwnershipDomain, bytes: u64) {
     COLLECTOR.record_copy(from, to, bytes);
 }
 
+/// Take an explicit **CPU sample of the calling thread's native call stack** —
+/// real Rust frames (function/file/line), symbolized at `finish`. Call it in a
+/// hot loop or at points of interest to build a sampled native flamegraph
+/// *without* manual zones.
+///
+/// This is *synchronous, in-thread* sampling (safe, cross-platform). Automatic
+/// interrupt-driven cross-thread sampling (SIGPROF / `SuspendThread`+`StackWalk`)
+/// — which would sample arbitrary threads without instrumentation — remains
+/// deferred (it is large, unsafe, and platform-specific).
+pub fn native_sample() {
+    COLLECTOR.record_native_sample();
+}
+
 /// Record an FFI / Py↔Rust boundary crossing live.
 pub fn mark_boundary(name: &str) {
     COLLECTOR.record_boundary(name);
+}
+
+/// Declare the host boundary this Rust trace belongs under, for `seshat merge`'s
+/// explicit (token-based) correlation. `name` must match the Python-side boundary
+/// frame name (the PyO3 entry point, or an explicit `seshat.mark_boundary("...")`).
+/// `merge` reads this token to graft precisely, then drops the marker. Call once,
+/// near the start of the recorded native work.
+pub fn mark_host(name: &str) {
+    COLLECTOR.record_boundary(&format!("@seshat-host:{name}"));
 }
 
 /// Re-intern the raw capture into a deterministic [`Trace`].
@@ -180,6 +202,12 @@ fn build_trace(events: Vec<RawEvent>, names: Vec<String>, wall_ns: u64) -> Trace
                     .filter_map(|&i| zone_frames.get(i as usize).copied())
                     .collect();
                 b.sample_running(&s);
+            }
+            RawEvent::NativeSample { ips } => {
+                let stack = resolve_stack(&mut b, &ips);
+                if !stack.is_empty() {
+                    b.sample_running(&stack);
+                }
             }
             RawEvent::ZoneStart { zone } => {
                 let name = names.get(zone as usize).map(|s| s.as_str()).unwrap_or("<?>");
@@ -236,6 +264,38 @@ fn resolve_alloc_frame(b: &mut TraceBuilder, ips: &[usize]) -> Option<FrameId> {
         }
     }
     None
+}
+
+/// Symbolize a full IP stack into a Sample stack of real Rust frames
+/// (outermost-first, as the trace model expects). Runtime/collector/unwinder
+/// frames are skipped, so the result is the user's call tree at the sample point.
+fn resolve_stack(b: &mut TraceBuilder, ips: &[usize]) -> Vec<FrameId> {
+    let mut frames: Vec<FrameId> = Vec::new();
+    for &ip in ips {
+        // ips are leaf-first; resolve each, skipping plumbing.
+        let mut found: Option<(String, String, u32)> = None;
+        backtrace::resolve(ip as *mut std::ffi::c_void, |sym| {
+            if found.is_some() {
+                return;
+            }
+            let name = sym.name().map(|n| n.to_string()).unwrap_or_default();
+            if name.is_empty() || is_runtime_frame(&name) {
+                return;
+            }
+            let file = sym
+                .filename()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "<native>".to_string());
+            found = Some((name, file, sym.lineno().unwrap_or(0)));
+        });
+        if let Some((name, file, line)) = found {
+            frames.push(b.intern_frame(FrameKind::Rust, &name, &file, line));
+        }
+    }
+    frames.reverse(); // leaf-first → outermost-first for the Sample model
+    frames
 }
 
 /// True for frames belonging to the allocator / collector / unwinder plumbing —

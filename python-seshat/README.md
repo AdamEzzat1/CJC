@@ -83,9 +83,10 @@ seshat analyze run.seshat
 | Async: coroutine frames tagged + **await stalls measured** | ✅ resume counts + max-await via `setprofile` suspend/resume pairing |
 | Deterministic trace for CI | ✅ `mode="calls"` |
 | **Multi-thread capture** | ✅ `threading.setprofile` + per-thread stacks; one Sample per live thread per tick, stable logical thread ids (main = 0) |
-| **GIL-wait detection** | ✅ *heuristic* (sampling) — a thread frozen at one frame while another progresses → `GilWait`; **approximate**, not an exact GIL signal |
-| Native Rust-frame unwinding inside the extension | ⬜ needs a stack unwinder (the Rust extension can self-instrument with `cjc-seshat`'s collector) |
-| Thermal / perf counters | ⬜ no portable stdlib source |
+| **GIL-wait detection** | ✅ *heuristic* (sampling) — a thread frozen for ≥2 consecutive ticks while another progresses → `GilWait`; **approximate**, not an exact GIL signal (exact needs C-level state) |
+| **Thermal / CPU-frequency** | ✅ via the `seshat[thermal]` extra (psutil) — `cpu_freq()` → Counter events → throttle detection; degrades to off if psutil is absent |
+| Native Rust-frame unwinding inside the extension | 🟡 the Rust collector now does it (alloc-site auto + `native_sample()`); merge stitches it under the Py boundary (`seshat merge`). Automatic cross-thread CPU sampling still pending. |
+| Exact (non-heuristic) GIL detection | ⬜ needs a C extension / out-of-process probe (would defeat the pure-stdlib design) |
 
 Weighting note: a Sample is emitted per `call`/`c_call`, so the flamegraph is
 inclusive-call-count weighted (like `cProfile`'s structure). Because a
