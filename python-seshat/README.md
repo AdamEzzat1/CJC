@@ -78,12 +78,13 @@ seshat analyze run.seshat
 | **Low overhead** (~py-spy class) | ✅ sampling mode — 60× fewer events than calls mode |
 | Pipeline stages via `seshat.zone(...)` | ✅ |
 | Python-heap memory (`tracemalloc`) | ✅ temporal (sampling) → true peak; snapshot (calls) → by site |
-| Cross-domain copies via `seshat.mark_copy(...)` | ✅ |
+| Cross-domain copies — manual `seshat.mark_copy(...)` | ✅ |
+| Cross-domain copies — **auto-discovered** (numpy/torch/arrow copy calls) | ✅ heuristic registry; exact bytes for bound methods (`ndarray.copy`), `0`=unknown for free fns (`np.array`) |
 | Async: coroutine frames tagged + **await stalls measured** | ✅ resume counts + max-await via `setprofile` suspend/resume pairing |
 | Deterministic trace for CI | ✅ `mode="calls"` |
+| **Multi-thread capture** | ✅ `threading.setprofile` + per-thread stacks; one Sample per live thread per tick, stable logical thread ids (main = 0) |
+| **GIL-wait detection** | ✅ *heuristic* (sampling) — a thread frozen at one frame while another progresses → `GilWait`; **approximate**, not an exact GIL signal |
 | Native Rust-frame unwinding inside the extension | ⬜ needs a stack unwinder (the Rust extension can self-instrument with `cjc-seshat`'s collector) |
-| Multi-thread capture | ⬜ main thread only (`setprofile` is per-thread) |
-| GIL-wait detection | ⬜ not observable from pure Python (needs C-level state) |
 | Thermal / perf counters | ⬜ no portable stdlib source |
 
 Weighting note: a Sample is emitted per `call`/`c_call`, so the flamegraph is

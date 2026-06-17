@@ -1,7 +1,21 @@
 # Seshat — Handoff for the Next Session
 
 Purpose: pick up Seshat (cross-language Python/Rust causal profiler) and tackle
-the four remaining capability gaps. Everything you need to start cold is here.
+the remaining capability gaps. Everything you need to start cold is here.
+
+> **UPDATE (this session).** The previously-uncommitted Seshat core was first
+> committed as a clean snapshot, then **Gaps A, B, and C were implemented**
+> (all pure stdlib, zero new dependencies):
+> - **A — copy auto-discovery** (`recorder.py` `_COPY_FUNCS`/`_estimate_copy_bytes`/`_maybe_emit_copy`).
+> - **B — multi-thread capture** (`threading.setprofile` + per-thread stacks; `TraceWriter` made thread-safe with an `RLock`).
+> - **C — GIL-wait heuristic** (`_classify_states`; labelled approximate in the report + docs).
+>
+> Proven: Python suite green (incl. new copy/thread/GIL tests), Rust `cjc-seshat`
+> green with the **golden hash `0xa4cda1369275d1ff` unchanged**, `seshat_parity`
+> green, committed fixtures **content-identical** (only advisory `wall_ns` moves),
+> and a 3-thread recording analyses to `running:159 gil_wait:50` through the CLI.
+> **Only Gap D (D1 native Rust unwinding, D2 thermal) remains** — both still need
+> the dependency decision in §5.
 
 ---
 
@@ -12,10 +26,12 @@ Rust CLI analyzes it into a cross-language report. Current capabilities for a
 running Python process:
 
 - 🟢 time-weighted flamegraph, Py↔native boundary (time-weighted), pipeline
-  stages, async-stall measurement, Python-heap memory (temporal), copy detection
-  (manual marker), recommendations, variance/diff (CLI), low overhead (~py-spy),
+  stages, async-stall measurement, Python-heap memory (temporal),
+  **copy detection (manual marker + auto-discovery, Gap A)**,
+  **multi-thread capture (Gap B)**, **GIL-wait heuristic (Gap C)**,
+  recommendations, variance/diff (CLI), low overhead (~py-spy),
   deterministic mode for CI.
-- 🔴 **the four gaps this handoff is about** (see §5).
+- 🔴 **Gap D only** (native Rust-frame unwinding + thermal; see §5) — A/B/C done.
 
 **Where things live**
 
@@ -135,7 +151,10 @@ ratio of value to risk) → **#1 multi-thread sampling** (pure stdlib, unblocks 
 → **#2 GIL heuristic** (rides on #1) → **#3 native unwinding** and **thermal**
 (both need a dependency decision).
 
-### Gap A — Copy auto-discovery (currently manual `mark_copy`)
+> Status: **Gaps A, B, C are DONE** (this session) — see the UPDATE banner above.
+> Only **Gap D** below remains.
+
+### Gap A — Copy auto-discovery ✅ DONE (currently manual `mark_copy`)
 
 **Problem.** Today you must call `seshat.mark_copy(...)`; it doesn't *find* copies.
 Auto-discovery is most of Memray's value.
@@ -163,7 +182,7 @@ copies alongside the marked one.
 **Decision.** None — pure stdlib. Be explicit in docs that byte counts are
 estimates.
 
-### Gap B — Multi-thread Python sampling (prerequisite for GIL)
+### Gap B — Multi-thread Python sampling ✅ DONE (prerequisite for GIL)
 
 **Problem.** `setprofile` is per-thread, and there is a single `self._stack`, so
 only the main thread is captured.
@@ -183,7 +202,7 @@ per-thread samples (`thread` field in `analyze::contention`/`thermal`).
 thread ids appear in the trace.
 **Decision.** None — pure stdlib. Note it raises overhead (hook on every thread).
 
-### Gap C — GIL-wait detection (heuristic, rides on Gap B)
+### Gap C — GIL-wait detection ✅ DONE (heuristic, rides on Gap B)
 
 **Problem.** `setprofile` cannot see GIL acquisition; there is no pure-Python
 exact signal.

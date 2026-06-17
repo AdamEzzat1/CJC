@@ -64,8 +64,21 @@ def main():
         ranked = aggregate(rows)
     with seshat.zone("serialize"):
         blob = serialize(ranked)
-        # simulate handing the serialized bytes off to a native consumer
+        # The manual way: you *tell* Seshat about a cross-domain copy.
         seshat.mark_copy("rustheap", "numpy", len(blob) * 8)
+    with seshat.zone("handoff"):
+        # The automatic way: Seshat *finds* copy-inducing native calls on its
+        # own (no mark_copy). If NumPy is installed, these calls emit Copy edges
+        # that show up in `seshat analyze`'s copy section next to the marked one.
+        # Guarded so the demo still runs with a pure-stdlib environment.
+        try:
+            import numpy as np
+
+            buf = np.frombuffer(blob.encode("utf-8"), dtype=np.uint8)  # zero-copy view
+            strided = np.ascontiguousarray(buf[::2])  # non-contiguous → real copy
+            _ = strided.copy()                        # bound method → exact nbytes
+        except Exception:
+            pass
     return len(blob)
 
 

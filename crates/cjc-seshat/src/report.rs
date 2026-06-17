@@ -201,7 +201,10 @@ fn recommend(
             title: "Workload is GIL-bound".to_string(),
             detail: "Threads spend a large share blocked acquiring the Python GIL. \
                      Release the GIL around heavy Rust compute (PyO3 `allow_threads`) \
-                     so Rust work runs in parallel."
+                     so Rust work runs in parallel. NOTE: from the pure-Python \
+                     recorder this GIL-wait share is a sampling heuristic (a thread \
+                     frozen at one frame while another progresses), not an exact \
+                     GIL-acquisition measurement; treat it as directional."
                 .to_string(),
             evidence: format!(
                 "gil_wait={}.{:03}% of {} samples",

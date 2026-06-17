@@ -107,3 +107,27 @@ They are feature-gated so the default build/test surface stays pure.
   markers + opaque integer handles.
 - **`cjc-runtime` calling into `cjc-seshat` directly.** Dependency cycle;
   rejected for satellite dispatch.
+
+## Addendum — recorder capture gaps A/B/C closed (pure stdlib, zero-dep)
+
+Three Python-recorder capture capabilities were added *entirely on the collection
+side*, leaving the deterministic analysis engine (and the golden report hash
+`0xa4cda1369275d1ff`) untouched — the collection⟂analysis split doing exactly its
+job:
+
+- **A — copy auto-discovery.** A `_COPY_FUNCS` registry + bound-method `__self__`
+  byte estimation emits `Copy` edges for numpy/torch/arrow copy calls, so the
+  copy detector no longer needs manual `mark_copy`. Conservative (ambiguous
+  `bytes`/`bytearray` excluded) to keep the detector's no-false-positives contract.
+- **B — multi-thread capture.** `threading.setprofile` + per-OS-thread stacks +
+  per-tick per-thread samples with stable logical thread ids. The `.seshat`
+  `Sample.thread` field already existed; only capture was wired. `TraceWriter`
+  gained an `RLock` (output bytes unchanged) for concurrent interning safety.
+- **C — GIL-wait heuristic.** Frozen-leaf-while-another-progresses → `GilWait`.
+  Explicitly **approximate** (no exact pure-Python GIL signal), labelled as such
+  in the `SES-GIL-BOUND` recommendation and the README.
+
+**Decision:** A/B/C honored the zero-dep rule (no dependency added). Gap D (D1
+native Rust-frame unwinding, D2 thermal counters) each *wants* a dependency and is
+deferred with the decision still open — see `SESHAT_DESIGN.md` §9. No gated output
+changed; the `Value` enum / MIR remain untouched.

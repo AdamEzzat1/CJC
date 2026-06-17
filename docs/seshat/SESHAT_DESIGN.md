@@ -134,16 +134,55 @@ headers, no compilation**.
   end-to-end: a Python-recorded fixture (`crates/cjc-seshat/tests/fixtures/python_demo.seshat`)
   is analyzed by Rust in `tests/python_bridge.rs`, no Python needed at build time.
 
+Three further capture capabilities were added on top (all **pure stdlib**, no
+dependency — the recorder stays zero-dep):
+
+- **Copy auto-discovery** (was manual `mark_copy`). A `_COPY_FUNCS` registry maps
+  copy-inducing native callees (`ndarray.copy`, `np.ascontiguousarray`,
+  `Tensor.clone`, Arrow `to_pandas`/`combine_chunks`, …) to a `(from, to)`
+  ownership-domain guess; the `c_call` hook emits a `Copy` edge when it sees one.
+  Byte counts are best-effort: **exact** when the callee is a bound method (the
+  source operand is its `__self__`, so `.nbytes` is readable), **0 = unknown**
+  for free functions whose operand the hook cannot see. Heuristic and deliberately
+  conservative — ambiguous builtins like `bytes`/`bytearray` (alloc vs copy) are
+  excluded to keep the copy detector's "no false positives" contract.
+- **Multi-thread capture.** `threading.setprofile` installs the hook on every
+  future thread; stacks are per-OS-thread (`get_ident()` → list), and the sampler
+  emits one Sample per live thread per tick, stamped with a stable logical thread
+  id (main = 0). The `TraceWriter` gained an `RLock` so concurrent interning from
+  many threads can't corrupt the tables (the lock never changes emitted bytes, so
+  single-threaded output is unaffected). The sampler thread is started *before*
+  `threading.setprofile`, so it is never hooked; and the `threading.setprofile`
+  bootstrap call is made with the hook suspended so it leaves no frame in the
+  trace (keeping calls-mode fixtures byte-identical).
+- **GIL-wait detection — heuristic.** With multi-thread sampling, a thread whose
+  leaf frame is frozen across consecutive ticks while another thread progressed is
+  labelled `GilWait` (`_classify_states`). **This is approximate, not an exact
+  GIL-acquisition signal** (CPython exposes none from pure Python); the report's
+  `SES-GIL-BOUND` recommendation and the README say so explicitly. A genuinely
+  running thread in a tight call-free loop can be misread — accepted, and labelled.
+
 ## 9. Still deferred and why
 
-- **perf_event hardware counters** (thermal mode's live data) and the **Tokio
-  `tracing` bridge** — platform/OS facilities beyond the zero-dep budget.
-- **Python-heap allocation capture** (`tracemalloc`) and **time-weighted Python
-  sampling** (vs the current call-weighted structure) — straightforward
-  extensions of the Python recorder.
-- **Multi-thread Python capture** — `sys.setprofile` is per-thread.
+- **Native Rust-frame unwinding inside the extension** (Gap D1) — the Python side
+  sees the boundary, not the Rust functions past it. Decision pending: manual
+  `collect::zone` brackets + a `seshat merge` step (zero-dep) vs the `backtrace`
+  crate for automatic unwinding (a dependency, to be scoped strictly to
+  `collect-live`). Not yet taken — needs the merge/correlation-token design first.
+- **Thermal / perf counters** (Gap D2, thermal mode's live data) — no portable
+  stdlib source. Decision pending: an optional Python extra (`seshat[thermal]` →
+  `psutil.cpu_freq()`) or a Linux-only `perf_event` reader behind `collect-live`.
+  Either is an opt-in dependency, never a core requirement.
+- **Exact (non-heuristic) GIL detection** — needs a C extension or out-of-process
+  interpreter-state read; deferred pending an explicit waiver of the zero-dep rule.
+- **Tokio `tracing` bridge**, and **time-weighted Python sampling** refinements —
+  straightforward extensions.
 
-None of these change any gated output; they only widen what can be *captured*.
+Decisions recorded: Gaps A (copy auto-discovery), B (multi-thread), and C (GIL
+heuristic) were all closed **with zero new dependencies** (pure stdlib). The two
+remaining gaps (D1 native unwinding, D2 thermal) each *want* a dependency and are
+left open with the decision deferred, per the zero-dep-by-default rule. None of
+the shipped work changes any gated output; it only widens what can be *captured*.
 
 ## 10. Dogfooding target
 
