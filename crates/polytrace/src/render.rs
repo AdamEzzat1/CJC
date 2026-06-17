@@ -3,7 +3,7 @@
 //! content-addressable and diffable in CI.
 
 use crate::analyze::{pct_milli, FlameNode};
-use crate::report::SeshatReport;
+use crate::report::PolytraceReport;
 
 // ─── tiny deterministic JSON helpers (no serde dependency) ──────────────────
 
@@ -41,7 +41,7 @@ fn flame_json(n: &FlameNode, out: &mut String) {
 
 /// Render the report as a deterministic JSON string. Keys are in a fixed order;
 /// `content_hash` is embedded so a reader can verify reproducibility.
-pub fn json(r: &SeshatReport) -> String {
+pub fn json(r: &PolytraceReport) -> String {
     let mut s = String::new();
     s.push('{');
     s.push_str(&format!("\"content_hash\":\"{:016x}\",", r.content_hash()));
@@ -163,9 +163,9 @@ pub fn json(r: &SeshatReport) -> String {
 }
 
 /// Render a human-readable CLI text report.
-pub fn text(r: &SeshatReport) -> String {
+pub fn text(r: &PolytraceReport) -> String {
     let mut s = String::new();
-    s.push_str("═══ Seshat report ═══════════════════════════════════════════\n");
+    s.push_str("═══ Polytrace report ═══════════════════════════════════════════\n");
     s.push_str(&format!(
         "  content_hash : {:016x}\n",
         r.content_hash()
@@ -250,7 +250,7 @@ pub fn text(r: &SeshatReport) -> String {
 
 /// Render the flamegraph as a minimal, dependency-free SVG (icicle layout).
 /// Width is proportional to inclusive sample count; depth is stack depth.
-pub fn flamegraph_svg(r: &SeshatReport) -> String {
+pub fn flamegraph_svg(r: &PolytraceReport) -> String {
     const W: u64 = 1000;
     const ROW_H: u64 = 18;
     let total = r.flamegraph.total_samples.max(1);

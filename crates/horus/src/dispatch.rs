@@ -6,7 +6,7 @@
 //! `cjc_runtime::dispatch_builtin` and the other satellites
 //! (`dispatch_quantum`, `dispatch_grad_graph`, `dispatch_abng`, `dispatch_locke`)
 //! — the exact precedent established by those crates, which keeps
-//! `cjc-runtime → cjc-seshat` from becoming a dependency cycle.
+//! `cjc-runtime → horus` from becoming a dependency cycle.
 //!
 //! # Determinism & the write-only rule
 //!
@@ -22,7 +22,7 @@ use std::cell::RefCell;
 
 use cjc_runtime::value::Value;
 
-use crate::trace::{FrameKind, OwnershipDomain, Trace, TraceBuilder};
+use polytrace::trace::{FrameKind, OwnershipDomain, Trace, TraceBuilder};
 
 thread_local! {
     /// The per-thread trace sink. Reset by `seshat_reset()`.
@@ -159,7 +159,7 @@ pub fn dispatch_seshat(name: &str, args: &[Value]) -> Result<Option<Value>, Stri
             want(name, args, 1)?;
             let path = as_str(name, &args[0])?;
             let trace = snapshot();
-            let bytes = crate::serialize::serialize(&trace);
+            let bytes = polytrace::serialize::serialize(&trace);
             std::fs::write(&path, &bytes)
                 .map_err(|e| format!("{name}: failed to write '{path}': {e}"))?;
             // Return the (deterministic) event count, not the path/byte count, so
@@ -247,7 +247,7 @@ mod tests {
         dispatch_seshat("seshat_mark_copy", &[s("rust"), s("numpy"), Value::Int(100)]).unwrap();
         let t = snapshot();
         assert_eq!(t.num_events(), 2);
-        let report = crate::analyze_trace(&t);
+        let report = polytrace::analyze_trace(&t);
         assert_eq!(report.ownership.total_allocated, 100);
         assert_eq!(report.copy.total_bytes, 100);
         assert!(report.copy.flows[0].avoidable); // rust→numpy is zero-copy-compatible

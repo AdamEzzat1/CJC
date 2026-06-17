@@ -261,13 +261,13 @@ impl Drop for Guard {
 ///
 /// ```ignore
 /// #[global_allocator]
-/// static GLOBAL: cjc_seshat::collect::SeshatAlloc = cjc_seshat::collect::SeshatAlloc;
+/// static GLOBAL: polytrace::collect::PolytraceAlloc = polytrace::collect::PolytraceAlloc;
 /// ```
 ///
 /// When no recording is active, overhead is a single relaxed atomic load.
-pub struct SeshatAlloc;
+pub struct PolytraceAlloc;
 
-unsafe impl GlobalAlloc for SeshatAlloc {
+unsafe impl GlobalAlloc for PolytraceAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let ptr = System.alloc(layout);
         if !ptr.is_null() && COLLECTOR.is_enabled() {

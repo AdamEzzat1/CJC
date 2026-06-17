@@ -1,4 +1,4 @@
-//! The aggregate [`SeshatReport`] over a single trace, plus **Feature 8** —
+//! The aggregate [`PolytraceReport`] over a single trace, plus **Feature 8** —
 //! optimization recommendations as a *deterministic rule table* (a predicate
 //! over the report → a templated message whose slots are filled from report
 //! facts), so the same report always yields the same advice in the same order.
@@ -7,7 +7,7 @@ use crate::analyze::{
     self, AsyncReport, BoundaryReport, ContentionReport, CopyReport, FlamegraphReport,
     OwnershipReport, PeakReport, PipelineReport, ThermalReport,
 };
-use crate::hash::SeshatHasher;
+use crate::hash::PolytraceHasher;
 use crate::trace::Trace;
 
 /// Knobs for analysis. Defaults are conservative; all thresholds are in the
@@ -53,7 +53,7 @@ pub struct Recommendation {
 /// The full single-trace report — features 1–8, 10, 11. (Variance/regression
 /// are multi-trace; see [`analyze::variance`] / [`analyze::diff`].)
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SeshatReport {
+pub struct PolytraceReport {
     pub flamegraph: FlamegraphReport,
     pub boundary: BoundaryReport,
     pub copy: CopyReport,
@@ -68,12 +68,12 @@ pub struct SeshatReport {
     pub wall_ns_total: u64,
 }
 
-impl SeshatReport {
+impl PolytraceReport {
     /// Deterministic content hash of every gated field. **Excludes** advisory
     /// wall-clock and all display-only narrative/evidence strings. Two identical
     /// traces produce byte-identical reports and therefore identical hashes.
     pub fn content_hash(&self) -> u64 {
-        let mut h = SeshatHasher::new();
+        let mut h = PolytraceHasher::new();
         h.write(b"seshat-report-v1");
         self.flamegraph.hash_into(&mut h);
         self.boundary.hash_into(&mut h);
@@ -96,12 +96,12 @@ impl SeshatReport {
 }
 
 /// Run every single-trace analysis with default options.
-pub fn analyze_trace(trace: &Trace) -> SeshatReport {
+pub fn analyze_trace(trace: &Trace) -> PolytraceReport {
     analyze_trace_with(trace, &AnalyzeOptions::default())
 }
 
 /// Run every single-trace analysis with explicit options.
-pub fn analyze_trace_with(trace: &Trace, opts: &AnalyzeOptions) -> SeshatReport {
+pub fn analyze_trace_with(trace: &Trace, opts: &AnalyzeOptions) -> PolytraceReport {
     let flamegraph = analyze::flamegraph(trace);
     let boundary = analyze::boundary(trace);
     let copy = analyze::copy(trace);
@@ -122,7 +122,7 @@ pub fn analyze_trace_with(trace: &Trace, opts: &AnalyzeOptions) -> SeshatReport 
         &ownership,
     );
 
-    SeshatReport {
+    PolytraceReport {
         flamegraph,
         boundary,
         copy,

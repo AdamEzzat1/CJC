@@ -1,0 +1,18 @@
+[package]
+name = "horus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "CJC-Lang binding layer for the Polytrace profiler — write-only seshat_* .cjcl builtins over polytrace's trace model, routed from cjc-eval and cjc-mir-exec."
+publish = false
+
+[dependencies]
+# The standalone profiler engine (published separately as `polytrace`).
+polytrace = { workspace = true }
+# Value marshalling for the `.cjcl`-facing builtins.
+cjc-runtime = { workspace = true }
+
+[dev-dependencies]
+bolero = "0.13.4"

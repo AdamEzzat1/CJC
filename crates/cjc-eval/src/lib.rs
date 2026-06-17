@@ -2817,7 +2817,7 @@ impl Interpreter {
         // Write-only event emitters into a per-thread trace sink; same
         // satellite-dispatch pattern as cjc-ad / cjc-abng / cjc-locke so AST and
         // MIR executors share one sink per thread (builtin parity).
-        match cjc_seshat::dispatch_seshat(name, &args) {
+        match horus::dispatch_seshat(name, &args) {
             Ok(Some(value)) => return Ok(value),
             Err(msg) => return Err(EvalError::Runtime(msg)),
             Ok(None) => {} // not a seshat_* builtin, fall through

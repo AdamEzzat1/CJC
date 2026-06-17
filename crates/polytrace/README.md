@@ -1,6 +1,6 @@
 # cjc-seshat
 
-**Seshat** — a deterministic cross-language causal profiler for Python/Rust
+**Polytrace** — a deterministic cross-language causal profiler for Python/Rust
 systems. It explains, in one trace, where a mixed Python/Rust program spends
 CPU, memory, copies, async stalls, GIL contention, Rust lock contention, and
 deterministic performance variance — and *why*, causally, rather than as a flat
@@ -14,7 +14,7 @@ list of self-times.
 
 Modern Python projects use Rust for speed (PyO3/maturin), but profiling the
 *seam* between them is still awkward: Rust tools (`perf`, `samply`, `pprof`) and
-Python tools (Scalene, Memray, py-spy) each see only one side. Seshat's unique
+Python tools (Scalene, Memray, py-spy) each see only one side. Polytrace's unique
 capability is to show **one merged timeline** where Python frames, Rust frames,
 native frames, async tasks, and FFI boundary crossings appear together — see
 `seshat merge` (feature 13), which stitches a Python `.seshat` and a Rust
@@ -41,7 +41,7 @@ native frames, async tasks, and FFI boundary crossings appear together — see
 ## Architecture: collection ⟂ analysis
 
 A profiler measures time, and time is nondeterministic; CJC-Lang demands
-bit-identical output. Seshat resolves this the way `cjc-cana` does — by splitting
+bit-identical output. Polytrace resolves this the way `cjc-cana` does — by splitting
 the system in two:
 
 - **Collection** (feature `collect-live`): the nondeterministic, platform-specific
@@ -54,7 +54,7 @@ the system in two:
 The unit of reproducibility is the `.seshat` trace (`serialize` / `replay`).
 Ordering/structure use a **logical clock** (event index), reproducible
 attribution uses **sample counts**, and wall-clock is a single advisory scalar
-excluded from the content hash. See [`docs/seshat/SESHAT_DETERMINISM.md`](../../docs/seshat/SESHAT_DETERMINISM.md).
+excluded from the content hash. See [`docs/seshat/SESHAT_DETERMINISM.md`](https://github.com/AdamEzzat1/CJC/blob/master/docs/seshat/SESHAT_DETERMINISM.md).
 
 ## Quickstart (Rust)
 
@@ -79,7 +79,7 @@ let _json = render::json(&report);            // deterministic, content-addresse
 
 ## `.cjcl`-facing builtins (write-only markers)
 
-A CJC-Lang program can annotate its own execution into a Seshat trace. These are
+A CJC-Lang program can annotate its own execution into a Polytrace trace. These are
 write-only event emitters (they never feed analysis back into program state),
 generalizing the older `profile_zone_*` builtins. They work identically in
 `cjc-eval` and `cjc-mir-exec`.
@@ -106,13 +106,13 @@ seshat_dump_trace("run.seshat");
 
 ## Recording a real trace (Rust, feature `collect-live`)
 
-Seshat can capture a real `.seshat` from a running Rust process. Install the
+Polytrace can capture a real `.seshat` from a running Rust process. Install the
 allocator shim and bracket your work in zones; heap traffic is captured
 automatically and a background thread samples the zone stack.
 
 ```rust
 #[global_allocator]
-static GLOBAL: cjc_seshat::collect::SeshatAlloc = cjc_seshat::collect::SeshatAlloc;
+static GLOBAL: cjc_seshat::collect::PolytraceAlloc = cjc_seshat::collect::PolytraceAlloc;
 
 use cjc_seshat::collect::{Recorder, zone, mark_copy};
 use cjc_seshat::OwnershipDomain;
@@ -175,7 +175,7 @@ cargo run -p cjc-seshat --bin seshat -- analyze merged.seshat        # Python + 
 - **Shipped (thermal capture):** the Python recorder's `seshat[thermal]` extra
   (psutil) samples `cpu_freq()` → Counter events → the analyzer's thermal mode
   (throttle detection). Optional extra; the core stays zero-dep.
-- **Shipped (cross-language capture, [`python-seshat/`](../../python-seshat)):**
+- **Shipped (cross-language capture, [`python-seshat/`](https://github.com/AdamEzzat1/CJC/tree/master/python-seshat)):**
   a pure-stdlib Python recorder using `sys.setprofile` to capture **real Python
   frames + the Python↔native (Rust/C) boundary**, writing the same `.seshat`
   format the Rust CLI analyzes. No PyO3/maturin — the file is the interface.

@@ -1,6 +1,6 @@
 //! Integration + property tests for `seshat merge` (Feature 13).
 
-use cjc_seshat::{
+use polytrace::{
     analyze_trace, diff, merge, replay, serialize, Event, FrameKind, MergeOptions, OwnershipDomain,
     Trace,
 };

@@ -1,23 +1,23 @@
-//! `seshat` — the Seshat profiler CLI.
+//! `polytrace` — the Polytrace profiler CLI.
 //!
 //! Subcommands:
-//!   seshat analyze <trace.seshat> [--json] [--svg <out.svg>]
-//!   seshat diff <baseline.seshat> <candidate.seshat>
-//!   seshat record-demo <out.seshat> [--ms <interval>]   (needs --features collect-live)
+//!   polytrace analyze <trace.seshat> [--json] [--svg <out.svg>]
+//!   polytrace diff <baseline.seshat> <candidate.seshat>
+//!   polytrace record-demo <out.seshat> [--ms <interval>]   (needs --features collect-live)
 //!
 //! `analyze`/`diff` are pure and always available. `record-demo` installs the
 //! live allocator and records a real in-process Rust workload — the proof that
-//! Seshat can capture a real `.seshat`, not just analyze synthetic ones.
+//! Polytrace can capture a real `.seshat`, not just analyze synthetic ones.
 
 // Install the live allocator only when the collector feature is on, so the
 // default build pays nothing.
 #[cfg(feature = "collect-live")]
 #[global_allocator]
-static GLOBAL: cjc_seshat::collect::SeshatAlloc = cjc_seshat::collect::SeshatAlloc;
+static GLOBAL: polytrace::collect::PolytraceAlloc = polytrace::collect::PolytraceAlloc;
 
 use std::process::ExitCode;
 
-use cjc_seshat::{analyze_trace, diff, render, replay};
+use polytrace::{analyze_trace, diff, render, replay};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -40,7 +40,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {
-            eprintln!("seshat: {msg}");
+            eprintln!("polytrace: {msg}");
             ExitCode::FAILURE
         }
     }
@@ -48,17 +48,17 @@ fn main() -> ExitCode {
 
 const USAGE: &str = "\
 usage:
-  seshat analyze <trace.seshat> [--json] [--svg <out.svg>]
-  seshat diff <baseline.seshat> <candidate.seshat>
-  seshat variance <run1.seshat> <run2.seshat> [run3.seshat ...]
-  seshat merge <host.seshat> <native.seshat> [native2.seshat ...] [--under <name>] [--out <merged.seshat>] [--json] [--svg <out.svg>]
-  seshat record-demo <out.seshat> [--ms <interval>] [--unwind]   (needs --features collect-live)";
+  polytrace analyze <trace.seshat> [--json] [--svg <out.svg>]
+  polytrace diff <baseline.seshat> <candidate.seshat>
+  polytrace variance <run1.seshat> <run2.seshat> [run3.seshat ...]
+  polytrace merge <host.seshat> <native.seshat> [native2.seshat ...] [--under <name>] [--out <merged.seshat>] [--json] [--svg <out.svg>]
+  polytrace record-demo <out.seshat> [--ms <interval>] [--unwind]   (needs --features collect-live)";
 
 fn print_usage() {
     println!("{USAGE}");
 }
 
-fn read_trace(path: &str) -> Result<cjc_seshat::Trace, String> {
+fn read_trace(path: &str) -> Result<polytrace::Trace, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("cannot read '{path}': {e}"))?;
     replay(&bytes).map_err(|e| format!("'{path}' is not a valid .seshat trace: {e}"))
 }
@@ -106,7 +106,7 @@ fn cmd_diff(args: &[String]) -> Result<(), String> {
     let base = read_trace(files[0])?;
     let cand = read_trace(files[1])?;
     let d = diff(&base, &cand);
-    println!("═══ Seshat regression diff ══════════════════════════════════");
+    println!("═══ Polytrace regression diff ══════════════════════════════════");
     println!("  baseline samples : {}", d.baseline_samples);
     println!("  candidate samples: {}", d.candidate_samples);
     println!("  {}", d.summary);
@@ -131,10 +131,10 @@ fn cmd_variance(args: &[String]) -> Result<(), String> {
     if files.len() < 2 {
         return Err("variance needs at least two trace paths (runs of the same program)".to_string());
     }
-    let traces: Vec<cjc_seshat::Trace> = files.iter().map(|f| read_trace(f)).collect::<Result<_, _>>()?;
+    let traces: Vec<polytrace::Trace> = files.iter().map(|f| read_trace(f)).collect::<Result<_, _>>()?;
     // 5 percentage points (= 5_000 milli-percent) spread to flag a frame.
-    let v = cjc_seshat::variance(&traces, 5_000);
-    println!("═══ Seshat variance — {} runs ═══════════════════════════════", v.runs);
+    let v = polytrace::variance(&traces, 5_000);
+    println!("═══ Polytrace variance — {} runs ═══════════════════════════════", v.runs);
     println!("  samples per run : {:?}", v.total_samples);
     if v.variant_frames.is_empty() {
         println!("  no frame's share varied by ≥5.000 pp across runs (stable).");
@@ -155,7 +155,7 @@ fn cmd_variance(args: &[String]) -> Result<(), String> {
 }
 
 fn cmd_merge(args: &[String]) -> Result<(), String> {
-    use cjc_seshat::{merge, serialize, MergeOptions};
+    use polytrace::{merge, serialize, MergeOptions};
 
     let mut paths: Vec<&str> = Vec::new();
     let mut under: Option<String> = None;
@@ -221,8 +221,8 @@ fn cmd_merge(args: &[String]) -> Result<(), String> {
 
 #[cfg(feature = "collect-live")]
 fn cmd_record_demo(args: &[String]) -> Result<(), String> {
-    use cjc_seshat::collect::{mark_copy, zone, CaptureConfig, Recorder};
-    use cjc_seshat::{serialize, OwnershipDomain};
+    use polytrace::collect::{mark_copy, zone, CaptureConfig, Recorder};
+    use polytrace::{serialize, OwnershipDomain};
 
     let mut path: Option<&str> = None;
     let mut interval_ms: u64 = 1;
@@ -311,7 +311,7 @@ fn cmd_record_demo(args: &[String]) -> Result<(), String> {
 #[cfg(not(feature = "collect-live"))]
 fn cmd_record_demo(_args: &[String]) -> Result<(), String> {
     Err("record-demo needs live capture; rebuild with:\n    \
-         cargo run -p cjc-seshat --features collect-live --bin seshat -- record-demo out.seshat"
+         cargo run -p polytrace --features collect-live -- record-demo out.seshat"
         .to_string())
 }
 

@@ -3,18 +3,18 @@
 //! analyzes without panic — NOT specific timing/sample values, which are
 //! inherently nondeterministic for a live recording.
 //!
-//! Run with: `cargo test -p cjc-seshat --features collect-live --test collect`
+//! Run with: `cargo test -p polytrace --features collect-live --test collect`
 
 #![cfg(feature = "collect-live")]
 
-// The whole test binary profiles itself through the Seshat allocator.
+// The whole test binary profiles itself through the Polytrace allocator.
 #[global_allocator]
-static GLOBAL: cjc_seshat::collect::SeshatAlloc = cjc_seshat::collect::SeshatAlloc;
+static GLOBAL: polytrace::collect::PolytraceAlloc = polytrace::collect::PolytraceAlloc;
 
-use cjc_seshat::collect::{
+use polytrace::collect::{
     mark_boundary, mark_copy, mark_host, native_sample, zone, CaptureConfig, Recorder,
 };
-use cjc_seshat::{
+use polytrace::{
     analyze_trace, merge, replay, serialize, Event, FrameKind, MergeOptions, OwnershipDomain, Trace,
 };
 

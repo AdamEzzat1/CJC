@@ -1,6 +1,6 @@
-//! # Seshat — a cross-language causal profiler for Python/Rust systems
+//! # Polytrace — a cross-language causal profiler for Python/Rust systems
 //!
-//! Seshat explains, in one trace, where a mixed Python/Rust program spends CPU,
+//! Polytrace explains, in one trace, where a mixed Python/Rust program spends CPU,
 //! memory, copies, async stalls, GIL contention, Rust lock contention, and
 //! deterministic performance variance — and *why*, causally, rather than as a
 //! flat list of self-times.
@@ -8,7 +8,7 @@
 //! ## Architecture: collection ⟂ analysis
 //!
 //! A profiler measures time, and time is nondeterministic; CJC-Lang demands
-//! bit-identical output. Seshat resolves this the way `cjc-cana` does — by
+//! bit-identical output. Polytrace resolves this the way `cjc-cana` does — by
 //! splitting the system in two:
 //!
 //! - **Collection** (feature `collect-live`, the `collect` module): the
@@ -17,7 +17,7 @@
 //!   [`Trace`]; nothing else reads wall-clock.
 //! - **Analysis** (this crate's default surface): a **pure, deterministic
 //!   function of a recorded [`Trace`]**. Same trace → byte-identical
-//!   [`SeshatReport`], on every platform, every run.
+//!   [`PolytraceReport`], on every platform, every run.
 //!
 //! The unit of reproducibility is the `.seshat` trace ([`serialize`] /
 //! [`replay`]). Live re-recording of the same program is *not* expected to be
@@ -43,7 +43,7 @@
 //! ## Quickstart
 //!
 //! ```
-//! use cjc_seshat::{Trace, FrameKind, OwnershipDomain, analyze_trace};
+//! use polytrace::{Trace, FrameKind, OwnershipDomain, analyze_trace};
 //!
 //! let mut b = Trace::builder(/* run_id */ 42);
 //! let main = b.intern_frame(FrameKind::Py, "main", "app.py", 10);
@@ -62,7 +62,6 @@
 //! ```
 
 pub mod analyze;
-pub mod dispatch;
 pub mod hash;
 mod merge;
 pub mod render;
@@ -88,10 +87,8 @@ pub use analyze::{
 
 pub use merge::{merge, MergeOptions};
 
-pub use report::{analyze_trace, analyze_trace_with, AnalyzeOptions, Recommendation, SeshatReport};
+pub use report::{analyze_trace, analyze_trace_with, AnalyzeOptions, Recommendation, PolytraceReport};
 
 pub use serialize::{replay, serialize, DecodeError};
 
-pub use dispatch::{dispatch_seshat, is_seshat_builtin, SESHAT_BUILTINS};
-
-pub use hash::SeshatHasher;
+pub use hash::PolytraceHasher;

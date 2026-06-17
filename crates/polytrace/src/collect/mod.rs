@@ -3,7 +3,7 @@
 //! engine never reads wall-clock.
 //!
 //! What's here today (minimal Rust in-process collector):
-//! - [`SeshatAlloc`] — a `#[global_allocator]` shim capturing real heap traffic.
+//! - [`PolytraceAlloc`] — a `#[global_allocator]` shim capturing real heap traffic.
 //! - [`Recorder`] — a recording session with a background zone-stack sampler.
 //! - [`zone`] / [`Zone`] — RAII pipeline-stage scopes for attribution.
 //! - [`mark_copy`] / [`mark_boundary`] — live causal-edge markers.
@@ -11,15 +11,15 @@
 //! ```ignore
 //! // In your binary:
 //! #[global_allocator]
-//! static GLOBAL: cjc_seshat::collect::SeshatAlloc = cjc_seshat::collect::SeshatAlloc;
+//! static GLOBAL: polytrace::collect::PolytraceAlloc = polytrace::collect::PolytraceAlloc;
 //!
-//! let rec = cjc_seshat::collect::Recorder::start();
+//! let rec = polytrace::collect::Recorder::start();
 //! {
-//!     let _z = cjc_seshat::collect::zone("compute");
+//!     let _z = polytrace::collect::zone("compute");
 //!     // ... real Rust work; allocations are captured automatically ...
 //! }
 //! let trace = rec.finish();                 // a real .seshat trace
-//! let report = cjc_seshat::analyze_trace(&trace);
+//! let report = polytrace::analyze_trace(&trace);
 //! ```
 //!
 //! Honest scope: the sampler records the *zone* stack, not native unwound
@@ -30,7 +30,7 @@
 mod alloc;
 mod recorder;
 
-pub use alloc::SeshatAlloc;
+pub use alloc::PolytraceAlloc;
 pub use recorder::{
     mark_boundary, mark_copy, mark_host, native_sample, zone, CaptureConfig, Recorder, Zone,
 };

@@ -23,4 +23,4 @@ cjc-module = { workspace = true }
 cjc-quantum.workspace = true
 cjc-abng.workspace = true
 cjc-locke.workspace = true
-cjc-seshat.workspace = true
+horus.workspace = true

@@ -22,14 +22,14 @@
 
 use std::collections::BTreeMap;
 
-use crate::hash::SeshatHasher;
+use crate::hash::PolytraceHasher;
 
 /// Index into the trace's frame table.
 pub type FrameId = u32;
 /// Index into the trace's string table.
 pub type StrId = u32;
 
-/// What language/layer a stack frame belongs to. The whole point of Seshat is
+/// What language/layer a stack frame belongs to. The whole point of Polytrace is
 /// that these coexist in one merged stack.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub enum FrameKind {
@@ -93,7 +93,7 @@ impl FrameKind {
     }
 }
 
-/// Where a byte originates / is owned. Seshat's unique angle vs Memray is
+/// Where a byte originates / is owned. Polytrace's unique angle vs Memray is
 /// tracking *ownership transfer* of these domains across the Py↔Rust seam.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub enum OwnershipDomain {
@@ -258,7 +258,7 @@ pub struct Frame {
 }
 
 /// A causal edge connecting two points in the logical timeline. These are what
-/// make Seshat *causal* rather than just a flat profile.
+/// make Polytrace *causal* rather than just a flat profile.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum CausalEdge {
     /// `by` woke up async task `task`.
@@ -386,7 +386,7 @@ impl Trace {
     /// (the advisory channel). Two traces with identical tables + event stream
     /// hash identically on every platform.
     pub fn content_hash(&self) -> u64 {
-        let mut h = SeshatHasher::new();
+        let mut h = PolytraceHasher::new();
         h.write(b"seshat-trace-v1");
         h.write_u64(self.strings.len() as u64);
         for s in &self.strings {
@@ -408,7 +408,7 @@ impl Trace {
 }
 
 /// Hash a single event (used by both `content_hash` and serialization sanity).
-fn hash_event(h: &mut SeshatHasher, e: &Event) {
+fn hash_event(h: &mut PolytraceHasher, e: &Event) {
     match e {
         Event::Sample { thread, state, stack } => {
             h.write_u8(0);
@@ -454,7 +454,7 @@ fn hash_event(h: &mut SeshatHasher, e: &Event) {
     }
 }
 
-fn hash_edge(h: &mut SeshatHasher, e: &CausalEdge) {
+fn hash_edge(h: &mut PolytraceHasher, e: &CausalEdge) {
     match e {
         CausalEdge::Wakeup { task, by } => {
             h.write_u8(0);

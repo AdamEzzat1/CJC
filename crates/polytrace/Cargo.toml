@@ -1,0 +1,29 @@
+[package]
+name = "polytrace"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Adam Ezzat"]
+repository = "https://github.com/AdamEzzat1/CJC"
+homepage = "https://github.com/AdamEzzat1/CJC"
+description = "Deterministic cross-language (Python/Rust) causal profiler: cross-language flamegraphs, Python↔native boundary cost, copy/ownership tracking, GIL/lock contention, async stalls, peak-memory attribution, trace merge, and reproducible (content-hashed) reports."
+readme = "README.md"
+keywords = ["profiler", "profiling", "flamegraph", "python", "rust"]
+categories = ["development-tools::profiling"]
+
+[dependencies]
+# Native stack unwinding for the live collector's allocation-site attribution.
+# OPTIONAL and pulled in ONLY by `collect-live` — the default analysis build
+# (and the whole deterministic core) stays dependency-free.
+backtrace = { version = "0.3", optional = true }
+
+[features]
+default = []
+# Live in-process collectors (Rust GlobalAlloc shim + native unwinding).
+# Nondeterministic by nature — quarantined behind this gate so the default
+# build/test surface stays bit-identical and dependency-free.
+collect-live = ["dep:backtrace"]
+
+[dev-dependencies]
+proptest = "1"
+bolero = "0.13.4"

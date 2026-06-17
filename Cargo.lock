@@ -536,10 +536,10 @@ dependencies = [
  "cjc-regex",
  "cjc-repro",
  "cjc-runtime",
- "cjc-seshat",
  "cjc-snap",
  "cjc-types",
  "cjc-vizor",
+ "horus",
 ]
 
 [[package]]
@@ -578,10 +578,10 @@ dependencies = [
  "cjc-regex",
  "cjc-repro",
  "cjc-runtime",
- "cjc-seshat",
  "cjc-snap",
  "cjc-types",
  "cjc-vizor",
+ "horus",
  "insta",
  "proptest",
  "tempfile",
@@ -639,10 +639,10 @@ dependencies = [
  "cjc-regex",
  "cjc-repro",
  "cjc-runtime",
- "cjc-seshat",
  "cjc-snap",
  "cjc-types",
  "cjc-vizor",
+ "horus",
 ]
 
 [[package]]
@@ -703,16 +703,6 @@ dependencies = [
  "cjc-regex",
  "cjc-repro",
  "rayon",
-]
-
-[[package]]
-name = "cjc-seshat"
-version = "0.1.11"
-dependencies = [
- "backtrace",
- "bolero",
- "cjc-runtime",
- "proptest",
 ]
 
 [[package]]
@@ -927,6 +917,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "horus"
+version = "0.1.11"
+dependencies = [
+ "bolero",
+ "cjc-runtime",
+ "polytrace",
+]
+
+[[package]]
 name = "id-arena"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1127,6 +1126,15 @@ dependencies = [
  "fdeflate",
  "flate2",
  "miniz_oxide",
+]
+
+[[package]]
+name = "polytrace"
+version = "0.1.0"
+dependencies = [
+ "backtrace",
+ "bolero",
+ "proptest",
 ]
 
 [[package]]

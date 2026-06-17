@@ -6,7 +6,7 @@
 //! and committed, so this test needs no Python at build time — it proves the
 //! `.seshat` format is a stable interface between the two languages.
 
-use cjc_seshat::{analyze_trace, replay};
+use polytrace::{analyze_trace, replay};
 
 /// A real `.seshat` recorded by the Python side (json pipeline: a Python `work`
 /// function calling `json.loads`, which crosses into the C JSON scanner).

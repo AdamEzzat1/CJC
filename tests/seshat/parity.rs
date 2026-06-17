@@ -2,7 +2,7 @@
 //!
 //! Each test runs a tiny `.cjcl` snippet through both backends and asserts
 //! byte-identical printed output — the canonical gate that the satellite
-//! dispatch (`cjc_seshat::dispatch_seshat`) routes identically from both
+//! dispatch (`horus::dispatch_seshat`) routes identically from both
 //! executors, exactly as `grad_graph_*` / `abng_*` / `locke_*` are held.
 //!
 //! The per-thread trace sink is reset before every backend invocation so the
@@ -10,7 +10,7 @@
 
 #![allow(clippy::needless_raw_string_hashes)]
 
-use cjc_seshat::dispatch::reset as reset_sink;
+use horus::dispatch::reset as reset_sink;
 
 #[derive(Clone, Copy, Debug)]
 enum Backend {

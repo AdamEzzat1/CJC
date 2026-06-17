@@ -100,7 +100,7 @@ impl Drop for Recorder {
 /// are attributed to `name`. Nest them freely.
 ///
 /// ```ignore
-/// let _z = cjc_seshat::collect::zone("parse");
+/// let _z = polytrace::collect::zone("parse");
 /// // ... work attributed to "parse" ...
 /// ```
 pub struct Zone {
@@ -303,7 +303,7 @@ fn resolve_stack(b: &mut TraceBuilder, ips: &[usize]) -> Vec<FrameId> {
 fn is_runtime_frame(name: &str) -> bool {
     const SKIP: &[&str] = &[
         "backtrace::",
-        "cjc_seshat::collect",
+        "polytrace::collect",
         "__rust_alloc",
         "__rg_alloc",
         "__rdl_alloc",
@@ -312,7 +312,7 @@ fn is_runtime_frame(name: &str) -> bool {
         "alloc::vec::", // Vec construction plumbing (incl. spec_from_iter/in_place)
         "core::alloc::",
         "GlobalAlloc",
-        "SeshatAlloc",
+        "PolytraceAlloc",
     ];
     SKIP.iter().any(|s| name.contains(s))
 }

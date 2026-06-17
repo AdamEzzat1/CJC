@@ -1,4 +1,4 @@
-//! The analysis engine — the 12 Seshat features, each a **pure, deterministic
+//! The analysis engine — the 12 Polytrace features, each a **pure, deterministic
 //! reduction** over a [`Trace`]. No wall-clock, no `HashMap`, no float
 //! summation in the hashed path: counts and bytes are integers, percentages are
 //! expressed as integer *milli-percent* (`100% == 100_000`) so reports hash
@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::hash::SeshatHasher;
+use crate::hash::PolytraceHasher;
 use crate::trace::{CausalEdge, Event, FrameKind, ThreadState, Trace};
 
 /// Integer milli-percent: `part/total` scaled so 100% == 100_000. Deterministic
@@ -134,7 +134,7 @@ pub fn flamegraph(trace: &Trace) -> FlamegraphReport {
     }
 }
 
-fn hash_node(h: &mut SeshatHasher, n: &FlameNode) {
+fn hash_node(h: &mut PolytraceHasher, n: &FlameNode) {
     h.write_str(&n.label);
     h.write_u8(n.kind_tag);
     h.write_u64(n.self_count);
@@ -146,14 +146,14 @@ fn hash_node(h: &mut SeshatHasher, n: &FlameNode) {
 }
 
 impl FlamegraphReport {
-    pub fn hash_into(&self, h: &mut SeshatHasher) {
+    pub fn hash_into(&self, h: &mut PolytraceHasher) {
         h.write_u64(self.total_samples);
         hash_node(h, &self.root);
     }
     /// Standalone content hash of the merged tree. Independent of the order in
     /// which independent samples were recorded (property #3).
     pub fn content_hash(&self) -> u64 {
-        let mut h = SeshatHasher::new();
+        let mut h = PolytraceHasher::new();
         h.write(b"seshat-flamegraph-v1");
         self.hash_into(&mut h);
         h.finish()
@@ -224,7 +224,7 @@ pub fn boundary(trace: &Trace) -> BoundaryReport {
 }
 
 impl BoundaryReport {
-    pub fn hash_into(&self, h: &mut SeshatHasher) {
+    pub fn hash_into(&self, h: &mut PolytraceHasher) {
         h.write_u64(self.total_samples);
         h.write_u64(self.boundary_samples);
         h.write_u64(self.boundary_self);
@@ -304,7 +304,7 @@ pub fn copy(trace: &Trace) -> CopyReport {
 }
 
 impl CopyReport {
-    pub fn hash_into(&self, h: &mut SeshatHasher) {
+    pub fn hash_into(&self, h: &mut PolytraceHasher) {
         h.write_u64(self.total_bytes);
         h.write_u64(self.total_count);
         h.write_u64(self.avoidable_bytes);
@@ -357,7 +357,7 @@ impl ContentionReport {
     pub fn rust_blocked(&self) -> u64 {
         self.lock_wait + self.channel_wait
     }
-    pub fn hash_into(&self, h: &mut SeshatHasher) {
+    pub fn hash_into(&self, h: &mut PolytraceHasher) {
         for v in [
             self.running,
             self.gil_wait,
@@ -426,7 +426,7 @@ pub fn async_stall(trace: &Trace) -> AsyncReport {
 }
 
 impl AsyncReport {
-    pub fn hash_into(&self, h: &mut SeshatHasher) {
+    pub fn hash_into(&self, h: &mut PolytraceHasher) {
         h.write_u64(self.total_wakeups);
         h.write_u64(self.total_resumes);
         h.write_u64(self.total_stall_ticks);
@@ -488,7 +488,7 @@ pub fn ownership(trace: &Trace) -> OwnershipReport {
 }
 
 impl OwnershipReport {
-    pub fn hash_into(&self, h: &mut SeshatHasher) {
+    pub fn hash_into(&self, h: &mut PolytraceHasher) {
         h.write_u64(self.total_allocated);
         for (label, map) in [
             ("alloc", &self.per_domain_alloc),
@@ -613,7 +613,7 @@ pub fn peak(trace: &Trace) -> PeakReport {
 }
 
 impl PeakReport {
-    pub fn hash_into(&self, h: &mut SeshatHasher) {
+    pub fn hash_into(&self, h: &mut PolytraceHasher) {
         h.write_u64(self.peak_bytes);
         h.write_u64(self.peak_seq);
         h.write_u64(self.contributors.len() as u64);
@@ -718,7 +718,7 @@ pub fn thermal(trace: &Trace, cores: u32) -> ThermalReport {
 }
 
 impl ThermalReport {
-    pub fn hash_into(&self, h: &mut SeshatHasher) {
+    pub fn hash_into(&self, h: &mut PolytraceHasher) {
         h.write_u8(self.counters_available as u8);
         h.write_u32(self.baseline_mhz);
         h.write_u32(self.min_mhz);
@@ -773,7 +773,7 @@ pub fn pipeline(trace: &Trace) -> PipelineReport {
 }
 
 impl PipelineReport {
-    pub fn hash_into(&self, h: &mut SeshatHasher) {
+    pub fn hash_into(&self, h: &mut PolytraceHasher) {
         h.write_u64(self.total_samples);
         h.write_u64(self.per_stage.len() as u64);
         for (k, v) in &self.per_stage {
@@ -872,7 +872,7 @@ pub fn variance(traces: &[Trace], threshold_milli: u64) -> VarianceReport {
 }
 
 impl VarianceReport {
-    pub fn hash_into(&self, h: &mut SeshatHasher) {
+    pub fn hash_into(&self, h: &mut PolytraceHasher) {
         h.write_u64(self.runs as u64);
         h.write_u64(self.threshold_milli);
         for t in &self.total_samples {
@@ -888,7 +888,7 @@ impl VarianceReport {
         }
     }
     pub fn content_hash(&self) -> u64 {
-        let mut h = SeshatHasher::new();
+        let mut h = PolytraceHasher::new();
         h.write(b"seshat-variance-v1");
         self.hash_into(&mut h);
         h.finish()
@@ -1000,7 +1000,7 @@ pub fn diff(baseline: &Trace, candidate: &Trace) -> RegressionReport {
 }
 
 impl RegressionReport {
-    pub fn hash_into(&self, h: &mut SeshatHasher) {
+    pub fn hash_into(&self, h: &mut PolytraceHasher) {
         h.write_u64(self.baseline_samples);
         h.write_u64(self.candidate_samples);
         h.write_i64(self.boundary_delta_milli);
@@ -1014,7 +1014,7 @@ impl RegressionReport {
         }
     }
     pub fn content_hash(&self) -> u64 {
-        let mut h = SeshatHasher::new();
+        let mut h = PolytraceHasher::new();
         h.write(b"seshat-regression-v1");
         self.hash_into(&mut h);
         h.finish()

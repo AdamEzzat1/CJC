@@ -27,7 +27,7 @@ cjc-vizor.workspace = true
 cjc-quantum.workspace = true
 cjc-abng.workspace = true
 cjc-locke.workspace = true
-cjc-seshat.workspace = true
+horus.workspace = true
 cjc-cana.workspace = true
 cjc-cana-nss.workspace = true
 # Option B PR 1 — MirTraceEvent type for the runtime trace collector.

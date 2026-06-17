@@ -1,9 +1,9 @@
-//! Property tests for the Seshat analysis engine. Each invariant runs over
+//! Property tests for the Polytrace analysis engine. Each invariant runs over
 //! randomly-generated traces (proptest default 256 cases) and encodes a
 //! guarantee the determinism/soundness contract depends on.
 
-use cjc_seshat::analyze::{self, pct_milli};
-use cjc_seshat::{
+use polytrace::analyze::{self, pct_milli};
+use polytrace::{
     analyze_trace, diff, replay, serialize, FlameNode, FrameKind, OwnershipDomain, Trace,
 };
 use proptest::prelude::*;

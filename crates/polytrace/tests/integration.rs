@@ -1,11 +1,11 @@
-//! Seshat integration + determinism + golden tests.
+//! Polytrace integration + determinism + golden tests.
 //!
 //! These build a rich synthetic cross-language trace (no live collector) and
 //! assert each of the 12 features produces the expected structure, that the
 //! report is byte-stable across repeated analyses (determinism gate), and that
 //! the report survives a serialize→replay round-trip unchanged.
 
-use cjc_seshat::{
+use polytrace::{
     analyze_trace, diff, replay, serialize, variance, FrameKind, OwnershipDomain, ThreadState,
     Trace,
 };
@@ -63,7 +63,7 @@ fn workload() -> Trace {
     for _ in 0..3 {
         b.sample(3, ThreadState::AsyncIdle, &[task]);
     }
-    b.edge(cjc_seshat::CausalEdge::AwaitResume {
+    b.edge(polytrace::CausalEdge::AwaitResume {
         task,
         waited_ticks: 12,
     });
@@ -92,7 +92,7 @@ fn boundary_cost_is_measured() {
     // 38 of 103 samples cross the FFI boundary.
     assert_eq!(r.boundary.boundary_samples, 38);
     assert_eq!(r.boundary.crossings, 1);
-    let share = cjc_seshat::analyze::pct_milli(r.boundary.boundary_samples, r.boundary.total_samples);
+    let share = polytrace::analyze::pct_milli(r.boundary.boundary_samples, r.boundary.total_samples);
     assert!(share > 36_000 && share < 38_000, "≈36.9%, got {share} milli-%");
 }
 
@@ -265,13 +265,13 @@ fn variance_flags_a_drifting_frame() {
 
 #[test]
 fn renderers_are_deterministic_and_nonempty() {
-    use cjc_seshat::render;
+    use polytrace::render;
     let r = analyze_trace(&workload());
     let j1 = render::json(&r);
     let j2 = render::json(&r);
     assert_eq!(j1, j2, "JSON render is deterministic");
     assert!(j1.contains("\"content_hash\""));
-    assert!(render::text(&r).contains("Seshat report"));
+    assert!(render::text(&r).contains("Polytrace report"));
     let svg = render::flamegraph_svg(&r);
     assert!(svg.starts_with("<svg"));
     assert!(svg.contains("process_batch"));
