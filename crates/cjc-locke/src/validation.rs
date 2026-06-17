@@ -1433,89 +1433,128 @@ pub fn detect_conditional_missingness(
         return out;
     }
 
-    // **v0.6.4 fix** — the v0.5 version was Float-only (it skipped
-    // `Str` / `Int` / etc. columns entirely, so a `?`-sentinel-bearing
-    // `Str` column was invisible to the pairwise implication check
-    // even when the caller had passed a `NullMaskMap`). We now build
-    // the per-column missing-row set by *unioning* Float NaN positions
-    // with the caller-supplied `null_masks`, for every column type.
-    let mut miss_sets: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
-    for (name, col) in &df.columns {
-        let mut s: BTreeSet<usize> = BTreeSet::new();
-        // Float NaN positions (no-op for non-Float).
-        if let Column::Float(v) = col {
-            for (i, x) in v.iter().enumerate() {
-                if x.is_nan() {
-                    s.insert(i);
+    // **v0.6.4** — build each column's missing-row set by *unioning* Float
+    // NaN positions with the caller-supplied `null_masks`, for every column
+    // type (a `?`-sentinel-bearing `Str` column must be visible to the
+    // pairwise implication check, not only Float-NaN columns).
+    //
+    // **v0.9.1 perf** — the missing-row sets are stored as fixed-width
+    // **bitvectors** (`Vec<u64>`, one bit per row) rather than
+    // `BTreeSet<usize>`. Pairwise intersection then becomes word-wise
+    // `AND` + `count_ones` (hardware popcount): O(n_rows / 64) per pair
+    // instead of O(|A|·log|B|) pointer-chasing set probes. On wide,
+    // densely-missing frames (LendingClub: ~46 columns missing in ~85% of
+    // ~1.3M rows) this detector was *measured* at ~45% of the whole
+    // `validate` phase; the bitvector form collapses it to near-zero (and
+    // uses far less memory than a million-entry `BTreeSet` per column).
+    // Determinism is preserved exactly: the popcount is the same integer the
+    // `BTreeSet` filter produced, columns are visited in sorted (`BTreeMap`)
+    // name order, no FP enters the count, and the emitted finding set is
+    // byte-identical (the report sorts by content-addressed id, so emission
+    // order is washed out).
+    let n_words = (n_rows + 63) / 64;
+    let mut names: Vec<&String> = Vec::new();
+    let mut masks: Vec<Vec<u64>> = Vec::new();
+    let mut counts: Vec<u64> = Vec::new();
+    {
+        // Sorted-by-name order (matches the historical `BTreeSet`-keyed map).
+        let mut by_name: BTreeMap<&String, (Vec<u64>, u64)> = BTreeMap::new();
+        for (name, col) in &df.columns {
+            let mut bv = vec![0u64; n_words];
+            // Float NaN positions (no-op for non-Float).
+            if let Column::Float(v) = col {
+                for (i, x) in v.iter().enumerate() {
+                    if x.is_nan() {
+                        bv[i >> 6] |= 1u64 << (i & 63);
+                    }
                 }
             }
-        }
-        // Mask-driven null positions for ALL types (Str, Int, Bool,
-        // Categorical, DateTime), bounded to col length.
-        if let Some(mask) = null_masks.get(name) {
-            let col_len = col.len();
-            for r in &mask.null_rows {
-                if *r < col_len {
-                    s.insert(*r);
+            // Mask-driven null positions for ALL types (Str, Int, Bool,
+            // Categorical, DateTime), bounded to col length. Re-setting an
+            // already-set bit is idempotent, so the union semantics of the
+            // old `BTreeSet` are preserved.
+            if let Some(mask) = null_masks.get(name) {
+                let col_len = col.len();
+                for r in &mask.null_rows {
+                    if *r < col_len {
+                        bv[*r >> 6] |= 1u64 << (*r & 63);
+                    }
                 }
             }
+            let count: u64 = bv.iter().map(|w| w.count_ones() as u64).sum();
+            if count >= cfg.min_missing_in_a {
+                by_name.insert(name, (bv, count));
+            }
         }
-        if (s.len() as u64) >= cfg.min_missing_in_a {
-            miss_sets.insert(name.clone(), s);
+        for (name, (bv, count)) in by_name {
+            names.push(name);
+            masks.push(bv);
+            counts.push(count);
         }
     }
 
-    // Pairwise check.
-    let names: Vec<&String> = miss_sets.keys().collect();
-    for i in 0..names.len() {
-        for j in 0..names.len() {
-            if i == j {
-                continue;
+    // Build one E9070 finding for the directional implication `a ⟹ b`.
+    let make_finding = |a: &String, b: &String, intersection: u64, n_a: u64| {
+        let p = intersection as f64 / n_a.max(1) as f64;
+        ValidationFinding::new(
+            "E9070",
+            FindingSeverity::Notice,
+            format!(
+                "missing(`{}`) implies missing(`{}`) in {:.1}% of rows ({}/{})",
+                a, b, p * 100.0, intersection, n_a
+            ),
+            Some(a.clone()),
+            None,
+            vec![
+                FindingEvidence::Ratio {
+                    label: "implication_strength".into(),
+                    value: p,
+                },
+                FindingEvidence::Count {
+                    label: "n_jointly_missing".into(),
+                    value: intersection,
+                },
+                FindingEvidence::Count {
+                    label: "n_missing_in_a".into(),
+                    value: n_a,
+                },
+                FindingEvidence::Sample {
+                    label: "implied_column".into(),
+                    value: b.clone(),
+                },
+            ],
+            n_rows as u64,
+            vec![
+                "joint missingness often signals a failed join or a shared upstream pipeline failure".into(),
+            ],
+            vec![
+                format!("inspect the rows where both `{}` and `{}` are NaN", a, b),
+                "verify whether the upstream join keys are correct".into(),
+            ],
+        )
+    };
+
+    // Pairwise check. `|A ∩ B|` is **symmetric**, so it is computed **once**
+    // per unordered pair {i, j} (i < j) and reused for both directions —
+    // halving the intersection work versus the old all-ordered-pairs loop.
+    // `p(A⟹B) = |A∩B| / |A|` differs only in the divisor, so each direction
+    // is tested independently against the threshold.
+    let k = names.len();
+    let thr = cfg.implication_threshold;
+    for i in 0..k {
+        for j in (i + 1)..k {
+            let intersection: u64 = masks[i]
+                .iter()
+                .zip(masks[j].iter())
+                .map(|(x, y)| (x & y).count_ones() as u64)
+                .sum();
+            // direction i ⟹ j
+            if intersection as f64 / counts[i].max(1) as f64 >= thr {
+                out.push(make_finding(names[i], names[j], intersection, counts[i]));
             }
-            let a = names[i];
-            let b = names[j];
-            let set_a = &miss_sets[a];
-            let set_b = &miss_sets[b];
-            let n_a = set_a.len() as u64;
-            let intersection = set_a.iter().filter(|r| set_b.contains(r)).count() as u64;
-            let p = intersection as f64 / n_a.max(1) as f64;
-            if p >= cfg.implication_threshold {
-                out.push(ValidationFinding::new(
-                    "E9070",
-                    FindingSeverity::Notice,
-                    format!(
-                        "missing(`{}`) implies missing(`{}`) in {:.1}% of rows ({}/{})",
-                        a, b, p * 100.0, intersection, n_a
-                    ),
-                    Some(a.clone()),
-                    None,
-                    vec![
-                        FindingEvidence::Ratio {
-                            label: "implication_strength".into(),
-                            value: p,
-                        },
-                        FindingEvidence::Count {
-                            label: "n_jointly_missing".into(),
-                            value: intersection,
-                        },
-                        FindingEvidence::Count {
-                            label: "n_missing_in_a".into(),
-                            value: n_a,
-                        },
-                        FindingEvidence::Sample {
-                            label: "implied_column".into(),
-                            value: b.clone(),
-                        },
-                    ],
-                    n_rows as u64,
-                    vec![
-                        "joint missingness often signals a failed join or a shared upstream pipeline failure".into(),
-                    ],
-                    vec![
-                        format!("inspect the rows where both `{}` and `{}` are NaN", a, b),
-                        "verify whether the upstream join keys are correct".into(),
-                    ],
-                ));
+            // direction j ⟹ i
+            if intersection as f64 / counts[j].max(1) as f64 >= thr {
+                out.push(make_finding(names[j], names[i], intersection, counts[j]));
             }
         }
     }

@@ -200,15 +200,95 @@ fn extract_categorical_target(df: &DataFrame, name: &str, max_classes: u32) -> O
     Some(labels)
 }
 
+/// Compute **Cramér's V** of a categorical feature — supplied as a per-row
+/// slice of ordered level keys — against a categorical `target`. Returns
+/// `Some((v, n_levels))` with `v ∈ [0, 1]`, or `None` when the feature is
+/// unusable for the statistic: constant (`< 2` distinct levels), too
+/// high-cardinality (`> max_distinct` levels → E9072 / E9017 territory),
+/// degenerate (`min(r, c) == 1`), or the χ² normalisation is non-finite.
+///
+/// Generic over the level-key type `K: Ord` so the **same exact-order**
+/// contingency/χ² math backs both `Str`-valued (`K = String`) and `Int`-coded
+/// (`K = i64`) categorical features. This is deliberate: routing both column
+/// shapes through one function is what keeps the `Str` path byte-identical to
+/// its pre-Int form (same `BTreeSet`/`BTreeMap` iteration order, same Kahan
+/// accumulation order) while the `Int` path costs no extra math.
+///
+/// **Determinism:** feature levels iterate in `BTreeSet`/`BTreeMap` order,
+/// target classes in the caller's pre-sorted order, χ² is Kahan-summed —
+/// no FMA, no `HashMap`. `f64` keys never reach this helper (`Float`
+/// features are filtered out by the caller).
+fn cramers_v_against_target<K: Ord>(
+    feature_levels: &[K],
+    target: &[String],
+    classes: &[&String],
+    n: usize,
+    max_distinct: u32,
+) -> Option<(f64, usize)> {
+    let c = classes.len();
+    let levels: Vec<&K> = {
+        let s: std::collections::BTreeSet<&K> = feature_levels.iter().collect();
+        s.into_iter().collect()
+    };
+    let r = levels.len();
+    if r < 2 || r as u32 > max_distinct {
+        return None;
+    }
+    let min_dim = r.min(c).saturating_sub(1);
+    if min_dim == 0 {
+        return None; // r==1 or c==1: no association is representable
+    }
+
+    // Contingency table + marginals, all BTreeMap for determinism.
+    let mut table: std::collections::BTreeMap<&K, std::collections::BTreeMap<&String, u64>> =
+        std::collections::BTreeMap::new();
+    let mut row_tot: std::collections::BTreeMap<&K, u64> = std::collections::BTreeMap::new();
+    let mut col_tot: std::collections::BTreeMap<&String, u64> = std::collections::BTreeMap::new();
+    for (fv, tv) in feature_levels.iter().zip(target.iter()) {
+        *table.entry(fv).or_default().entry(tv).or_insert(0) += 1;
+        *row_tot.entry(fv).or_insert(0) += 1;
+        *col_tot.entry(tv).or_insert(0) += 1;
+    }
+
+    // χ² over the FULL r×c grid (zero cells included).
+    let nf = n as f64;
+    let mut chi = cjc_repro::KahanAccumulatorF64::new();
+    for &lvl in &levels {
+        let rt = *row_tot.get(lvl).unwrap_or(&0) as f64;
+        let inner = table.get(lvl);
+        for &cls in classes {
+            let ct = *col_tot.get(cls).unwrap_or(&0) as f64;
+            let e = rt * ct / nf;
+            if e <= 0.0 {
+                continue;
+            }
+            let o = inner.and_then(|m| m.get(cls)).copied().unwrap_or(0) as f64;
+            let d = o - e;
+            chi.add(d * d / e);
+        }
+    }
+    let chi2 = chi.finalize();
+    let v = (chi2 / (nf * min_dim as f64)).sqrt();
+    if !v.is_finite() {
+        return None;
+    }
+    Some((v.min(1.0), r))
+}
+
 /// Detect categorical FEATURES that nearly determine the target, via
 /// **Cramér's V** over a deterministic contingency table. Emits **E9065**.
 ///
-/// This fills the gap that the AUC path (numeric features only) and E9072
-/// (ID-like cardinality) leave open: a *low-to-moderate-cardinality*
-/// categorical column that almost perfectly predicts the target — e.g.
-/// `discharge_code = 11 ⇒ readmitted = no`. Such a column is neither
-/// numeric (so AUC never sees it) nor ID-like (so E9072 never fires), yet
-/// it is a textbook leakage vector.
+/// This fills the gap that the AUC path and E9072 (ID-like cardinality)
+/// leave open: a *low-to-moderate-cardinality* categorical column that
+/// almost perfectly predicts the target — e.g. `discharge_code = 11 ⇒
+/// readmitted = no`. Such a column is either non-numeric (so AUC never sees
+/// it) **or Int-coded with no meaningful ordering** (so the rank-based AUC
+/// stays low while the nominal association is near-perfect — death codes
+/// 11/13/14 sit numerically *between* non-death codes 12/15/16), and it is
+/// not ID-like (so E9072 never fires) — yet it is a textbook leakage vector.
+/// Both `Str` and low-cardinality `Int` features are measured (v0.9.1); the
+/// `Int` reach is what surfaces ID-coded categoricals like diabetes-130's
+/// `discharge_disposition_id` / `admission_type_id`.
 ///
 /// **Cramér's V** = `sqrt( χ² / (n · min(r−1, c−1)) )`, where χ² is the
 /// Pearson statistic of the `r × c` feature×target contingency table; V is
@@ -218,9 +298,11 @@ fn extract_categorical_target(df: &DataFrame, name: &str, max_classes: u32) -> O
 ///
 /// **Guards** (deterministic, each documented):
 /// * target must be categorical with `2..=multiclass_max_classes` classes;
-/// * a feature is skipped if it is the target, not a `Str` column, constant
-///   (`< 2` distinct), or has `> categorical_max_distinct` distinct values
-///   (high-cardinality association is inflated → E9072 / E9017 territory);
+/// * a feature is skipped if it is the target, not a categorical-capable
+///   column (`Str` or `Int`-coded; `Float`/`Bool`/`Categorical`/… are
+///   skipped here), constant (`< 2` distinct), or has
+///   `> categorical_max_distinct` distinct values (high-cardinality
+///   association is inflated → E9072 / E9017 territory);
 /// * `< min_class_count · 2` rows → skipped (table too sparse to trust).
 ///
 /// **Determinism:** contingency counts in `BTreeMap`s (sorted iteration),
@@ -254,57 +336,24 @@ pub fn detect_categorical_target_leakage(
         if name == target_col {
             continue;
         }
-        let Column::Str(values) = col else { continue };
-        if values.len() != n {
-            continue;
-        }
-        let levels: Vec<&String> = {
-            let s: std::collections::BTreeSet<&String> = values.iter().collect();
-            s.into_iter().collect()
-        };
-        let r = levels.len();
-        if r < 2 || r as u32 > cfg.categorical_max_distinct {
-            continue;
-        }
-        let min_dim = r.min(c).saturating_sub(1);
-        if min_dim == 0 {
-            continue; // r==1 or c==1: no association is representable
-        }
-
-        // Contingency table + marginals, all BTreeMap for determinism.
-        let mut table: std::collections::BTreeMap<&String, std::collections::BTreeMap<&String, u64>> =
-            std::collections::BTreeMap::new();
-        let mut row_tot: std::collections::BTreeMap<&String, u64> = std::collections::BTreeMap::new();
-        let mut col_tot: std::collections::BTreeMap<&String, u64> = std::collections::BTreeMap::new();
-        for (fv, tv) in values.iter().zip(target.iter()) {
-            *table.entry(fv).or_default().entry(tv).or_insert(0) += 1;
-            *row_tot.entry(fv).or_insert(0) += 1;
-            *col_tot.entry(tv).or_insert(0) += 1;
-        }
-
-        // χ² over the FULL r×c grid (zero cells included).
-        let nf = n as f64;
-        let mut chi = cjc_repro::KahanAccumulatorF64::new();
-        for &lvl in &levels {
-            let rt = *row_tot.get(lvl).unwrap_or(&0) as f64;
-            let inner = table.get(lvl);
-            for &cls in &classes {
-                let ct = *col_tot.get(cls).unwrap_or(&0) as f64;
-                let e = rt * ct / nf;
-                if e <= 0.0 {
-                    continue;
-                }
-                let o = inner.and_then(|m| m.get(cls)).copied().unwrap_or(0) as f64;
-                let d = o - e;
-                chi.add(d * d / e);
+        // Measure association over whichever categorical representation the
+        // column offers. v0.9.1: `Int`-coded low-cardinality categoricals are
+        // now handled alongside `Str` — many real categoricals (discharge
+        // codes, admission types, ICD groupings) arrive as integer codes and
+        // were previously invisible to this detector. Both shapes route
+        // through the same `cramers_v_against_target` math, so the `Str`
+        // result is byte-identical to its pre-Int form. A length mismatch
+        // (ragged frame) falls through to `None` and is skipped.
+        let result = match col {
+            Column::Str(values) if values.len() == n => {
+                cramers_v_against_target(values, &target, &classes, n, cfg.categorical_max_distinct)
             }
-        }
-        let chi2 = chi.finalize();
-        let v = (chi2 / (nf * min_dim as f64)).sqrt();
-        if !v.is_finite() {
-            continue;
-        }
-        let v = v.min(1.0);
+            Column::Int(values) if values.len() == n => {
+                cramers_v_against_target(values, &target, &classes, n, cfg.categorical_max_distinct)
+            }
+            _ => None,
+        };
+        let Some((v, r)) = result else { continue };
 
         let severity = if v >= cfg.cramers_v_error_threshold {
             FindingSeverity::Error

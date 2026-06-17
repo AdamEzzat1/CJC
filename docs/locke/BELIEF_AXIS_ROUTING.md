@@ -132,17 +132,30 @@ the larger list landed:
 
 ### #4 — Categorical-feature target leakage (E9065, Cramér's V)
 `leakage::detect_categorical_target_leakage` fills the gap between the
-numeric AUC path (never sees a `Str` column) and E9072 (only ID-like
-cardinality): a *low-to-moderate-cardinality* categorical column that
-nearly determines the target (e.g. `discharge_code = 11 ⇒ readmitted=no`).
+numeric AUC path and E9072 (only ID-like cardinality): a
+*low-to-moderate-cardinality* categorical column that nearly determines the
+target (e.g. `discharge_code = 11 ⇒ readmitted=no`).
 Cramér's V = `sqrt(χ²/(n·min(r−1,c−1)))` over a deterministic contingency
 table (`BTreeMap` counts, Kahan χ², no FMA). Error at V ≥ 0.9, Warning at
-≥ 0.7; guards skip the target, non-`Str`, constant, high-cardinality
-(> `categorical_max_distinct`, → E9072/E9017), and sparse (< 2·min_class)
-cases. **E9065 routes to the leakage axis via the registry — a one-line,
-guard-checked addition, exactly the payoff #2 was built for.** Tests:
-`tests/locke/categorical_leakage_tests.rs` (+11: 9 unit incl. perfect/
-independent/high-card/constant/float/multiclass + axis-feed + determinism,
+≥ 0.7; guards skip the target, non-categorical types, constant,
+high-cardinality (> `categorical_max_distinct`, → E9072/E9017), and sparse
+(< 2·min_class) cases. **E9065 routes to the leakage axis via the registry —
+a one-line, guard-checked addition, exactly the payoff #2 was built for.**
+
+**v0.9.1 — Int-coded categoricals.** Originally `Str`-only; many real
+categoricals (`discharge_disposition_id`, `admission_type_id`, ICD code
+groupings) arrive as integer codes. The contingency/χ² math is now factored
+into a generic `cramers_v_against_target<K: Ord>` so both `Str` (`K=String`)
+and low-cardinality `Int` (`K=i64`) features route through the *same
+exact-order* computation — the `Str` path stays byte-identical to its
+pre-Int form. This is genuinely additive over the AUC paths, not redundant:
+Cramér's V treats levels as **nominal** (orderless), so it catches a leak the
+rank-based AUC is blind to whenever codes are numerically *interleaved* with
+the target (death codes 11/13/14 sitting between non-death 12/15/16 → AUC
+collapses to ~0.5 while V = 1.0). Tests:
+`tests/locke/categorical_leakage_tests.rs` (+11 Str baseline, **+10 Int**:
+8 unit incl. perfect-predictor / *AUC-blind-spot* / Int↔Str V parity /
+high-card / constant / independent / multiclass + Int determinism,
 1 proptest, 1 bolero).
 
 ### #5 — Secrets-in-memory: redact PII samples (B6.12)

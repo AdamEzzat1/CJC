@@ -13,9 +13,12 @@
 //! data, not a synthetic fixture.
 //!
 //! `discharge_disposition_id` (codes 11/13/14 ⇒ death/hospice ⇒
-//! `readmitted = NO` by construction) is the canonical leakage column;
-//! string categoricals such as `medical_specialty` are where the v0.9
-//! E9065 Cramér's-V detector adds reach beyond the numeric AUC path.
+//! `readmitted = NO` by construction) is the canonical leakage column. The
+//! v0.9.1 Int reach of the E9065 Cramér's-V detector now measures this
+//! Int-coded categorical directly — death codes sit numerically *between*
+//! non-death codes, so the rank-based AUC is blind while the nominal
+//! association is near-perfect. String categoricals such as
+//! `medical_specialty` are the other place E9065 adds reach over AUC.
 
 use std::path::Path;
 

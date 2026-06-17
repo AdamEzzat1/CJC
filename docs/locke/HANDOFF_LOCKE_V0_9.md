@@ -46,11 +46,17 @@ surfaced and fixed (`col_types.truncate(ncols)`).
 ## 3. What's NOT done (pick up here, priority order)
 
 **#4 capability remainder**
-- **Extend E9065 to Int-coded low-cardinality categoricals.** Today it is
-  `Str`-only; many real categoricals (incl. diabetes `discharge_disposition_id`)
-  are integer codes, caught only by the numeric AUC / per-level paths. A
-  low-distinct-Int branch in `detect_categorical_target_leakage` would
-  close this — highest-value, cohesive next step.
+- ~~**Extend E9065 to Int-coded low-cardinality categoricals.**~~ **DONE
+  (v0.9.1, this arc).** The contingency/χ² math was factored into a generic
+  `cramers_v_against_target<K: Ord>`; the per-column loop now dispatches both
+  `Str` (`K=String`) and `Int` (`K=i64`) through it, so the `Str` path stays
+  byte-identical while Int-coded categoricals (diabetes
+  `discharge_disposition_id`, `admission_type_id`) are now measured. The
+  motivating "AUC blind spot" (codes numerically interleaved with the target →
+  rank-AUC ~0.5 but Cramér's V = 1.0) is captured by a dedicated test. +10
+  tests in `categorical_leakage_tests.rs`. **Next within #4:** the same branch
+  for `Bool`/`Categorical` features (now trivial via the generic helper), then
+  functional dependency below.
 - **Functional dependency** (`zip → state`): redundancy + leakage vector;
   the per-level machinery is most of the scaffolding.
 - **PII Luhn (credit card) / IBAN / IPv4-6** — deterministic, zero-dep,
