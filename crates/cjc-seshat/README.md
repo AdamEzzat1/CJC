@@ -16,9 +16,11 @@ Modern Python projects use Rust for speed (PyO3/maturin), but profiling the
 *seam* between them is still awkward: Rust tools (`perf`, `samply`, `pprof`) and
 Python tools (Scalene, Memray, py-spy) each see only one side. Seshat's unique
 capability is to show **one merged timeline** where Python frames, Rust frames,
-native frames, async tasks, and FFI boundary crossings appear together.
+native frames, async tasks, and FFI boundary crossings appear together — see
+`seshat merge` (feature 13), which stitches a Python `.seshat` and a Rust
+`.seshat` into a single unified trace.
 
-## The 12 features
+## The 13 features
 
 | # | Feature | Entry point |
 |---|---------|-------------|
@@ -34,6 +36,7 @@ native frames, async tasks, and FFI boundary crossings appear together.
 | 10 | Thermal / power-aware mode | `analyze::thermal` |
 | 11 | Data-pipeline profiler | `analyze::pipeline` |
 | 12 | "What changed?" regression diff | `diff` |
+| 13 | **Python+Rust trace merge** | `merge` |
 
 ## Architecture: collection ⟂ analysis
 
@@ -130,11 +133,20 @@ std::fs::write("run.seshat", cjc_seshat::serialize(&trace)).unwrap();
 # Record a real in-process Rust workload (proof of live capture):
 cargo run -p cjc-seshat --features collect-live --bin seshat -- record-demo run.seshat
 
+# Attribute Rust allocations to real functions (no manual zones) via native
+# unwinding — adds a backtrace per allocation, so it is opt-in:
+cargo run -p cjc-seshat --features collect-live --bin seshat -- record-demo run.seshat --unwind
+
 # Analyze any .seshat (pure — no feature needed):
 cargo run -p cjc-seshat --bin seshat -- analyze run.seshat            # text report
 cargo run -p cjc-seshat --bin seshat -- analyze run.seshat --json     # deterministic JSON
 cargo run -p cjc-seshat --bin seshat -- analyze run.seshat --svg fg.svg
 cargo run -p cjc-seshat --bin seshat -- diff base.seshat cand.seshat  # regression diff
+
+# Merge a Python trace and a Rust trace into one unified cross-language trace
+# (Rust nests under the matching Py↔Rust boundary frame):
+cargo run -p cjc-seshat --bin seshat -- merge py.seshat rust.seshat --under myext --out merged.seshat
+cargo run -p cjc-seshat --bin seshat -- analyze merged.seshat        # Python + Rust in one report
 ```
 
 ## Status
@@ -146,16 +158,26 @@ cargo run -p cjc-seshat --bin seshat -- diff base.seshat cand.seshat  # regressi
 - **Shipped (Rust live capture, feature `collect-live`):** a real Rust in-process
   collector — `GlobalAlloc` shim capturing actual heap traffic, RAII `zone`
   scopes, a zone-stack wall-clock sampler, `Recorder` session, and
-  `seshat record-demo`. Honest scope: the sampler records *zone* frames, not
-  native unwound frames; allocation capture is automatic and exact.
+  `seshat record-demo`. With `CaptureConfig { alloc_stacks: true }` (CLI
+  `--unwind`) **allocations are attributed to real Rust functions via native
+  unwinding** (the `backtrace` crate, scoped strictly to this feature — the
+  default build stays dependency-free). Honest scope: *allocation-site* unwinding
+  is automatic; *CPU-time* sampling is still zone-based (automatic cross-thread
+  native sampling — SIGPROF / thread-suspend — is deferred).
+- **Shipped (trace merge):** `seshat merge <host> <native>` (pure, deterministic)
+  stitches a Python and a Rust trace into one unified trace, grafting the Rust
+  subtree under the matching Py↔Rust boundary frame (name-based correlation).
 - **Shipped (cross-language capture, [`python-seshat/`](../../python-seshat)):**
   a pure-stdlib Python recorder using `sys.setprofile` to capture **real Python
   frames + the Python↔native (Rust/C) boundary**, writing the same `.seshat`
   format the Rust CLI analyzes. No PyO3/maturin — the file is the interface.
   Proven by `tests/python_bridge.rs` against a committed Python-produced fixture.
-- **Deferred:** perf_event hardware counters (thermal live data), Python-heap
-  allocation capture (`tracemalloc`), time-weighted (vs call-weighted) Python
-  sampling, and multi-thread capture.
+- **Deferred:** perf_event / thermal hardware-counter *capture* (the analysis is
+  ready; `psutil`/perf is the missing source), CPU-time native cross-thread
+  unwinding, exact (non-heuristic) GIL detection, and token-based per-call-site
+  merge correlation. (Python-side capture — `tracemalloc` memory, time-weighted
+  sampling, multi-thread, and the GIL heuristic — is shipped; see
+  [`python-seshat/`](../../python-seshat).)
 
 ## Tests
 

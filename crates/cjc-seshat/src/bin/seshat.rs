@@ -28,6 +28,7 @@ fn main() -> ExitCode {
         "analyze" => cmd_analyze(rest),
         "diff" => cmd_diff(rest),
         "variance" => cmd_variance(rest),
+        "merge" => cmd_merge(rest),
         "record-demo" => cmd_record_demo(rest),
         "help" | "-h" | "--help" => {
             print_usage();
@@ -50,7 +51,8 @@ usage:
   seshat analyze <trace.seshat> [--json] [--svg <out.svg>]
   seshat diff <baseline.seshat> <candidate.seshat>
   seshat variance <run1.seshat> <run2.seshat> [run3.seshat ...]
-  seshat record-demo <out.seshat> [--ms <interval>]   (needs --features collect-live)";
+  seshat merge <host.seshat> <native.seshat> [--under <name>] [--out <merged.seshat>] [--json] [--svg <out.svg>]
+  seshat record-demo <out.seshat> [--ms <interval>] [--unwind]   (needs --features collect-live)";
 
 fn print_usage() {
     println!("{USAGE}");
@@ -152,15 +154,71 @@ fn cmd_variance(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn cmd_merge(args: &[String]) -> Result<(), String> {
+    use cjc_seshat::{merge, serialize, MergeOptions};
+
+    let mut paths: Vec<&str> = Vec::new();
+    let mut under: Option<String> = None;
+    let mut out: Option<&str> = None;
+    let mut as_json = false;
+    let mut svg_out: Option<&str> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--under" => {
+                i += 1;
+                under = Some(args.get(i).ok_or("--under needs a name")?.clone());
+            }
+            "--out" => {
+                i += 1;
+                out = Some(args.get(i).ok_or("--out needs a path")?.as_str());
+            }
+            "--json" => as_json = true,
+            "--svg" => {
+                i += 1;
+                svg_out = Some(args.get(i).ok_or("--svg needs a path")?.as_str());
+            }
+            p if !p.starts_with("--") => paths.push(p),
+            other => return Err(format!("unknown flag `{other}`")),
+        }
+        i += 1;
+    }
+    if paths.len() != 2 {
+        return Err("merge needs two trace paths: <host.seshat> <native.seshat>".to_string());
+    }
+    let host = read_trace(paths[0])?;
+    let native = read_trace(paths[1])?;
+    let merged = merge(&host, &native, &MergeOptions { under });
+
+    if let Some(o) = out {
+        std::fs::write(o, serialize(&merged)).map_err(|e| format!("cannot write '{o}': {e}"))?;
+        eprintln!("wrote merged trace to {o}");
+    }
+
+    let report = analyze_trace(&merged);
+    if let Some(s) = svg_out {
+        let svg = render::flamegraph_svg(&report);
+        std::fs::write(s, svg).map_err(|e| format!("cannot write '{s}': {e}"))?;
+        eprintln!("wrote flamegraph SVG to {s}");
+    }
+    if as_json {
+        println!("{}", render::json(&report));
+    } else {
+        print!("{}", render::text(&report));
+    }
+    Ok(())
+}
+
 // ─── record-demo ─────────────────────────────────────────────────────────────
 
 #[cfg(feature = "collect-live")]
 fn cmd_record_demo(args: &[String]) -> Result<(), String> {
-    use cjc_seshat::collect::{mark_copy, zone, Recorder};
+    use cjc_seshat::collect::{mark_copy, zone, CaptureConfig, Recorder};
     use cjc_seshat::{serialize, OwnershipDomain};
 
     let mut path: Option<&str> = None;
     let mut interval_ms: u64 = 1;
+    let mut unwind = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -172,6 +230,9 @@ fn cmd_record_demo(args: &[String]) -> Result<(), String> {
                     .parse()
                     .map_err(|_| "--ms must be an integer")?;
             }
+            // Attribute allocations to real Rust functions via native unwinding
+            // (instead of just the open zone). Adds a backtrace per allocation.
+            "--unwind" => unwind = true,
             p if !p.starts_with("--") => path = Some(p),
             other => return Err(format!("unknown flag `{other}`")),
         }
@@ -179,8 +240,10 @@ fn cmd_record_demo(args: &[String]) -> Result<(), String> {
     }
     let path = path.ok_or("record-demo needs an <out.seshat> path")?;
 
-    eprintln!("recording a demo Rust workload (interval {interval_ms} ms)…");
-    let rec = Recorder::start_with_interval_ms(interval_ms);
+    eprintln!(
+        "recording a demo Rust workload (interval {interval_ms} ms, unwind={unwind})…"
+    );
+    let rec = Recorder::start_with_config(CaptureConfig { interval_ms, alloc_stacks: unwind });
 
     // ── stage: parse — lots of small allocations ──
     {

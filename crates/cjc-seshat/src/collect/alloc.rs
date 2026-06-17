@@ -29,17 +29,38 @@ use crate::trace::OwnershipDomain;
 /// Sentinel zone id for "no zone open".
 pub(crate) const NO_ZONE: u32 = u32::MAX;
 
+/// Max native frames captured per allocation when stack capture is on.
+const MAX_STACK_DEPTH: usize = 64;
+
 /// A recorded raw event, in capture order. Interning into a [`Trace`] is
 /// deferred to [`Recorder::finish`](crate::collect::Recorder::finish).
+///
+/// `Alloc`/`Free` carry an `ips` field: the raw instruction pointers of the
+/// allocating thread's native call stack, captured cheaply at alloc time and
+/// **symbolized later** (the dhat/Memray technique). Empty unless
+/// [`CaptureConfig::alloc_stacks`](crate::collect::CaptureConfig) is on.
 #[derive(Clone, Debug)]
 pub(crate) enum RawEvent {
-    Alloc { bytes: u64, zone: u32 },
-    Free { bytes: u64, zone: u32 },
+    Alloc { bytes: u64, zone: u32, ips: Vec<usize> },
+    Free { bytes: u64, zone: u32, ips: Vec<usize> },
     Sample { stack: Vec<u32> },
     ZoneStart { zone: u32 },
     ZoneStop,
     Copy { from: OwnershipDomain, to: OwnershipDomain, bytes: u64 },
     Boundary { name: u32 },
+}
+
+/// Capture the current thread's native call stack as raw instruction pointers.
+/// Called only while a [`Guard`] is held, so its own allocations are forwarded
+/// straight to the system allocator and never recorded (no recursion). Symbol
+/// resolution is deferred to `build_trace`.
+pub(crate) fn capture_ips() -> Vec<usize> {
+    let mut ips = Vec::with_capacity(MAX_STACK_DEPTH);
+    backtrace::trace(|frame| {
+        ips.push(frame.ip() as usize);
+        ips.len() < MAX_STACK_DEPTH
+    });
+    ips
 }
 
 struct Inner {
@@ -78,11 +99,15 @@ impl Inner {
 /// The process-global collector. A single instance shared by all threads.
 pub(crate) struct Collector {
     enabled: AtomicBool,
+    /// When set, `record_alloc`/`record_free` capture a native call stack so
+    /// memory is attributed to real Rust functions (not just the open zone).
+    capture_stacks: AtomicBool,
     inner: Mutex<Inner>,
 }
 
 pub(crate) static COLLECTOR: Collector = Collector {
     enabled: AtomicBool::new(false),
+    capture_stacks: AtomicBool::new(false),
     inner: Mutex::new(Inner::new()),
 };
 
@@ -93,6 +118,11 @@ impl Collector {
 
     pub(crate) fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::SeqCst)
+    }
+
+    /// Toggle native-stack capture at allocation sites (Recorder config).
+    pub(crate) fn set_capture_stacks(&self, on: bool) {
+        self.capture_stacks.store(on, Ordering::SeqCst);
     }
 
     /// Reset the buffer and begin recording.
@@ -120,14 +150,26 @@ impl Collector {
 
     // ── allocator path (caller already holds the Guard) ──
     fn record_alloc(&self, bytes: u64) {
+        // Capture the stack BEFORE taking the lock (minimizes hold time; the
+        // capture's own allocations are suppressed by the held Guard).
+        let ips = if self.capture_stacks.load(Ordering::Relaxed) {
+            capture_ips()
+        } else {
+            Vec::new()
+        };
         let mut inner = self.lock();
         let zone = inner.zone_stack.last().copied().unwrap_or(NO_ZONE);
-        inner.events.push(RawEvent::Alloc { bytes, zone });
+        inner.events.push(RawEvent::Alloc { bytes, zone, ips });
     }
     fn record_free(&self, bytes: u64) {
+        let ips = if self.capture_stacks.load(Ordering::Relaxed) {
+            capture_ips()
+        } else {
+            Vec::new()
+        };
         let mut inner = self.lock();
         let zone = inner.zone_stack.last().copied().unwrap_or(NO_ZONE);
-        inner.events.push(RawEvent::Free { bytes, zone });
+        inner.events.push(RawEvent::Free { bytes, zone, ips });
     }
 
     // ── user-facing path (establish the Guard so bookkeeping allocs are not

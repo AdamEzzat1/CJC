@@ -162,27 +162,44 @@ dependency — the recorder stays zero-dep):
   `SES-GIL-BOUND` recommendation and the README say so explicitly. A genuinely
   running thread in a tight call-free loop can be misread — accepted, and labelled.
 
+## 8b. Gap D — unified Python+Rust trace + native unwinding (DONE in part)
+
+- **Trace merge** (`merge.rs`, feature 13) — a pure `merge(host, native, opts) ->
+  Trace` that grafts a Rust trace beneath the matching Python boundary frame, so
+  the merged flamegraph reads `python → boundary → rust`, ownership shows
+  `PyHeap + RustHeap`, and copies/zones union. **Zero-dependency, deterministic**,
+  no `.seshat` format change (it reuses `serialize`/`replay`). CLI: `seshat merge`.
+  Correlation is **name-based (v1)** — `--under <name>` or the most-sampled
+  boundary; unmatched ⇒ the Rust tree unions at the root (never fabricated).
+- **Automatic Rust unwinding for allocations** — `CaptureConfig { alloc_stacks }`
+  (CLI `--unwind`) captures the allocating thread's native stack (raw IPs, cheap;
+  symbolized at `finish`, the dhat/Memray technique) so memory is attributed to
+  **real Rust functions** with no manual zones. Uses the `backtrace` crate,
+  **scoped strictly to `collect-live`** (default build stays dependency-free).
+
 ## 9. Still deferred and why
 
-- **Native Rust-frame unwinding inside the extension** (Gap D1) — the Python side
-  sees the boundary, not the Rust functions past it. Decision pending: manual
-  `collect::zone` brackets + a `seshat merge` step (zero-dep) vs the `backtrace`
-  crate for automatic unwinding (a dependency, to be scoped strictly to
-  `collect-live`). Not yet taken — needs the merge/correlation-token design first.
+- **CPU-time native sampling** (the other half of Gap D1) — alloc-site unwinding is
+  done, but time-weighted sampling of native frames needs cross-thread stack
+  reading (SIGPROF on Unix / `SuspendThread`+`StackWalk` on Windows): a large,
+  unsafe, platform-specific effort. Zones still serve CPU-time attribution.
+- **Token-based merge correlation** — precise per-call-site stitching (vs the
+  name-based v1) would need a runtime correlation token written by both sides — a
+  `.seshat` format addition. Deferred.
 - **Thermal / perf counters** (Gap D2, thermal mode's live data) — no portable
-  stdlib source. Decision pending: an optional Python extra (`seshat[thermal]` →
-  `psutil.cpu_freq()`) or a Linux-only `perf_event` reader behind `collect-live`.
-  Either is an opt-in dependency, never a core requirement.
+  stdlib source. An optional Python extra (`seshat[thermal]` → `psutil.cpu_freq()`)
+  or a Linux-only `perf_event` reader behind `collect-live`; opt-in dependency,
+  never a core requirement.
 - **Exact (non-heuristic) GIL detection** — needs a C extension or out-of-process
   interpreter-state read; deferred pending an explicit waiver of the zero-dep rule.
-- **Tokio `tracing` bridge**, and **time-weighted Python sampling** refinements —
-  straightforward extensions.
+- **Tokio `tracing` bridge** — straightforward extension.
 
-Decisions recorded: Gaps A (copy auto-discovery), B (multi-thread), and C (GIL
-heuristic) were all closed **with zero new dependencies** (pure stdlib). The two
-remaining gaps (D1 native unwinding, D2 thermal) each *want* a dependency and are
-left open with the decision deferred, per the zero-dep-by-default rule. None of
-the shipped work changes any gated output; it only widens what can be *captured*.
+Decisions recorded: Gaps A (copy auto-discovery), B (multi-thread), C (GIL
+heuristic) closed **zero-dep** (pure stdlib). Gap D's **merge** is **zero-dep**;
+Gap D's **alloc-site native unwinding** adds `backtrace` **scoped to
+`collect-live`** (default build dependency-free, per the zero-dep-by-default rule).
+Thermal and exact-GIL remain deferred (each wants a dependency). None of this
+changes any gated output — the golden report hash is unchanged.
 
 ## 10. Dogfooding target
 

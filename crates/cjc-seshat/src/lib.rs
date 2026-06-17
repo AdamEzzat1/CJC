@@ -64,6 +64,7 @@
 pub mod analyze;
 pub mod dispatch;
 pub mod hash;
+mod merge;
 pub mod render;
 pub mod report;
 pub mod serialize;
@@ -84,6 +85,8 @@ pub use analyze::{
     FlameNode, FlamegraphReport, OwnershipReport, PeakReport, PipelineReport, RegressionReport,
     ThermalReport, VarianceReport,
 };
+
+pub use merge::{merge, MergeOptions};
 
 pub use report::{analyze_trace, analyze_trace_with, AnalyzeOptions, Recommendation, SeshatReport};
 

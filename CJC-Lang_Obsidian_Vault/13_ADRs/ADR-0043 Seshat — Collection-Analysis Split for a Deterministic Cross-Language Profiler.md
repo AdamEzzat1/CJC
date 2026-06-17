@@ -131,3 +131,28 @@ job:
 native Rust-frame unwinding, D2 thermal counters) each *wants* a dependency and is
 deferred with the decision still open — see `SESHAT_DESIGN.md` §9. No gated output
 changed; the `Value` enum / MIR remain untouched.
+
+## Addendum — Gap D: unified Py+Rust trace + native unwinding (partial)
+
+Two of the four Gap-D items shipped; the split held in both:
+
+- **`seshat merge` (feature 13)** — a pure `merge(host, native) -> Trace` on the
+  **analysis** side (not a collector): it grafts a Rust trace under the matching
+  Python boundary frame, producing one unified `python → boundary → rust` trace
+  with `PyHeap + RustHeap` memory and unioned copies/zones. **Zero-dependency,
+  deterministic, no `.seshat` format change** (reuses `serialize`/`replay`).
+  Correlation is name-based v1 (`--under` or most-sampled boundary); a precise
+  per-call-site **correlation token** (a format addition) is deferred.
+- **Automatic Rust alloc-site unwinding** — `CaptureConfig { alloc_stacks }` (CLI
+  `--unwind`) captures the allocating thread's native stack (cheap raw-IP capture,
+  symbolized at `finish` — the dhat/Memray technique) and attributes memory to the
+  **real Rust function**. Uses the `backtrace` crate **scoped strictly to
+  `collect-live`** (`dep:backtrace`) — the default analysis build and the whole
+  deterministic core stay dependency-free. CPU-time native sampling (cross-thread
+  unwinding) is deferred.
+
+**Decision:** merge honored zero-dep; alloc-site unwinding takes one dependency,
+quarantined to the live-capture feature, per the zero-dep-by-default rule. Thermal
+(`psutil`/perf) and exact GIL (C extension) remain deferred — each wants a
+dependency and was not selected. No gated output changed; the golden report hash
+`0xa4cda1369275d1ff` is unchanged.

@@ -9,7 +9,25 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::collect::alloc::{Guard, RawEvent, COLLECTOR, NO_ZONE};
-use crate::trace::{FrameId, FrameKind, OwnershipDomain, Trace};
+use crate::trace::{FrameId, FrameKind, OwnershipDomain, Trace, TraceBuilder};
+
+/// Recording configuration.
+#[derive(Clone, Copy, Debug)]
+pub struct CaptureConfig {
+    /// Sampling interval in milliseconds (clamped to ≥1).
+    pub interval_ms: u64,
+    /// Capture a native call stack at each allocation/free (dhat/Memray-style)
+    /// so memory is attributed to the **real Rust function**, automatically,
+    /// instead of just the open `zone(...)`. Off by default — it adds real
+    /// overhead (one backtrace per allocation).
+    pub alloc_stacks: bool,
+}
+
+impl Default for CaptureConfig {
+    fn default() -> Self {
+        CaptureConfig { interval_ms: 1, alloc_stacks: false }
+    }
+}
 
 /// An active recording session. Drop or call [`finish`](Recorder::finish) to
 /// stop sampling and produce the trace.
@@ -24,15 +42,23 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    /// Start recording with a 1 ms sampling interval.
+    /// Start recording with a 1 ms sampling interval and zone-based attribution.
     pub fn start() -> Recorder {
-        Recorder::start_with_interval_ms(1)
+        Recorder::start_with_config(CaptureConfig::default())
     }
 
     /// Start recording with a custom sampling interval (clamped to ≥1 ms).
     pub fn start_with_interval_ms(interval_ms: u64) -> Recorder {
+        Recorder::start_with_config(CaptureConfig { interval_ms, ..CaptureConfig::default() })
+    }
+
+    /// Start recording with an explicit [`CaptureConfig`]. With
+    /// `alloc_stacks = true`, allocations are attributed to real Rust functions
+    /// via native unwinding (automatic — no manual zones needed for memory).
+    pub fn start_with_config(cfg: CaptureConfig) -> Recorder {
+        COLLECTOR.set_capture_stacks(cfg.alloc_stacks);
         COLLECTOR.enable();
-        let interval = Duration::from_millis(interval_ms.max(1));
+        let interval = Duration::from_millis(cfg.interval_ms.max(1));
         let sampler = thread::Builder::new()
             .name("seshat-sampler".to_string())
             .spawn(move || {
@@ -130,11 +156,23 @@ fn build_trace(events: Vec<RawEvent>, names: Vec<String>, wall_ns: u64) -> Trace
     let mut handles: Vec<u64> = Vec::new();
     for ev in events {
         match ev {
-            RawEvent::Alloc { bytes, zone } => {
-                b.alloc(OwnershipDomain::RustHeap, bytes, frame_for(zone, &zone_frames));
+            RawEvent::Alloc { bytes, zone, ips } => {
+                let frame = if ips.is_empty() {
+                    frame_for(zone, &zone_frames)
+                } else {
+                    resolve_alloc_frame(&mut b, &ips)
+                        .unwrap_or_else(|| frame_for(zone, &zone_frames))
+                };
+                b.alloc(OwnershipDomain::RustHeap, bytes, frame);
             }
-            RawEvent::Free { bytes, zone } => {
-                b.free(OwnershipDomain::RustHeap, bytes, frame_for(zone, &zone_frames));
+            RawEvent::Free { bytes, zone, ips } => {
+                let frame = if ips.is_empty() {
+                    frame_for(zone, &zone_frames)
+                } else {
+                    resolve_alloc_frame(&mut b, &ips)
+                        .unwrap_or_else(|| frame_for(zone, &zone_frames))
+                };
+                b.free(OwnershipDomain::RustHeap, bytes, frame);
             }
             RawEvent::Sample { stack } => {
                 let s: Vec<FrameId> = stack
@@ -166,4 +204,55 @@ fn build_trace(events: Vec<RawEvent>, names: Vec<String>, wall_ns: u64) -> Trace
 
     b.set_wall_ns(wall_ns);
     b.finish()
+}
+
+/// Symbolize a captured IP stack and intern the **first user frame** as a real
+/// Rust frame. Walks outermost-leaf first, skipping the allocator/collector/
+/// unwinder machinery, so the allocation lands on the function that actually
+/// asked for memory. Best-effort: returns `None` if nothing resolves (then the
+/// caller falls back to zone attribution).
+fn resolve_alloc_frame(b: &mut TraceBuilder, ips: &[usize]) -> Option<FrameId> {
+    for &ip in ips {
+        let mut found: Option<(String, String, u32)> = None;
+        backtrace::resolve(ip as *mut std::ffi::c_void, |sym| {
+            if found.is_some() {
+                return;
+            }
+            let name = sym.name().map(|n| n.to_string()).unwrap_or_default();
+            if name.is_empty() || is_runtime_frame(&name) {
+                return;
+            }
+            let file = sym
+                .filename()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "<native>".to_string());
+            let line = sym.lineno().unwrap_or(0);
+            found = Some((name, file, line));
+        });
+        if let Some((name, file, line)) = found {
+            return Some(b.intern_frame(FrameKind::Rust, &name, &file, line));
+        }
+    }
+    None
+}
+
+/// True for frames belonging to the allocator / collector / unwinder plumbing —
+/// skipped so attribution reaches the user's real allocating function.
+fn is_runtime_frame(name: &str) -> bool {
+    const SKIP: &[&str] = &[
+        "backtrace::",
+        "cjc_seshat::collect",
+        "__rust_alloc",
+        "__rg_alloc",
+        "__rdl_alloc",
+        "alloc::alloc::",
+        "alloc::raw_vec::",
+        "alloc::vec::", // Vec construction plumbing (incl. spec_from_iter/in_place)
+        "core::alloc::",
+        "GlobalAlloc",
+        "SeshatAlloc",
+    ];
+    SKIP.iter().any(|s| name.contains(s))
 }

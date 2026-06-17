@@ -14,8 +14,19 @@ the remaining capability gaps. Everything you need to start cold is here.
 > green with the **golden hash `0xa4cda1369275d1ff` unchanged**, `seshat_parity`
 > green, committed fixtures **content-identical** (only advisory `wall_ns` moves),
 > and a 3-thread recording analyses to `running:159 gil_wait:50` through the CLI.
-> **Only Gap D (D1 native Rust unwinding, D2 thermal) remains** — both still need
-> the dependency decision in §5.
+>
+> **Gap D — partly DONE (next session):**
+> - **`seshat merge`** (feature 13, `merge.rs` + CLI) — unifies a Python and a Rust
+>   `.seshat` into one trace (Rust grafted under the Py↔Rust boundary). Zero-dep,
+>   deterministic, no format change. Proven e2e: merged report shows py + ffi +
+>   rust frames together.
+> - **Automatic Rust alloc-site unwinding** (`CaptureConfig{alloc_stacks}` / CLI
+>   `--unwind`) — allocations attributed to real Rust functions (e.g.
+>   `seshat::cmd_record_demo (seshat.rs:266)`) via `backtrace`, **scoped to
+>   `collect-live`** (default build still dependency-free).
+> - **Still open:** CPU-time native cross-thread sampling (SIGPROF/SuspendThread),
+>   token-based merge correlation, thermal (`psutil`/perf), exact GIL (C ext) —
+>   the last two were explicitly deferred per the dependency decision.
 
 ---
 
@@ -29,9 +40,11 @@ running Python process:
   stages, async-stall measurement, Python-heap memory (temporal),
   **copy detection (manual marker + auto-discovery, Gap A)**,
   **multi-thread capture (Gap B)**, **GIL-wait heuristic (Gap C)**,
-  recommendations, variance/diff (CLI), low overhead (~py-spy),
-  deterministic mode for CI.
-- 🔴 **Gap D only** (native Rust-frame unwinding + thermal; see §5) — A/B/C done.
+  recommendations, variance/diff (CLI), **Python+Rust trace merge (`seshat merge`)**,
+  **automatic Rust alloc-site unwinding (`--unwind`, `collect-live`)**,
+  low overhead (~py-spy), deterministic mode for CI.
+- 🟡 **Gap D partly done** — merge + alloc-site unwinding shipped; CPU-time native
+  sampling, thermal, and exact GIL remain (see the UPDATE banner + §5).
 
 **Where things live**
 
