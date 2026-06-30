@@ -1,0 +1,77 @@
+// =============================================================
+// Quantum Demo 01: Single-qubit Pauli/Hadamard gates
+// =============================================================
+//
+// What this proves about CJC-Lang:
+//   - The shipped quantum statevector simulator gives closed-form
+//     correct probabilities on the simplest non-trivial circuits.
+//   - The same .cjcl source produces bit-identical results in
+//     AST-eval and MIR-exec (parity gate).
+//
+// Closed-form expected values:
+//   |0> -> H -> (|0> + |1>)/sqrt(2)   so  P(0) = P(1) = 0.5
+//   |0> -> X -> |1>                   so  P(0) = 0, P(1) = 1
+//   |0> -> Z -> |0>                   so  P(0) = 1, P(1) = 0  (phase only)
+//   |0> -> H -> Z -> H -> |1>         so  P(0) = 0, P(1) = 1  (HZH = X)
+// =============================================================
+
+fn check(label: Any, p0: f64, p1: f64, e0: f64, e1: f64) {
+    let tol = 1e-12;
+    let d0 = p0 - e0;
+    let d1 = p1 - e1;
+    if d0 < 0.0 { d0 = -d0; }
+    if d1 < 0.0 { d1 = -d1; }
+    let pass = "PASS";
+    if d0 > tol { pass = "FAIL"; }
+    if d1 > tol { pass = "FAIL"; }
+    print(pass + " " + label
+          + "  P0=" + to_string(round(p0 * 1e9) / 1e9)
+          + "  P1=" + to_string(round(p1 * 1e9) / 1e9));
+}
+
+fn norm_check(label: Any, p0: f64, p1: f64) {
+    let s = p0 + p1;
+    let d = s - 1.0;
+    if d < 0.0 { d = -d; }
+    let pass = "PASS";
+    if d > 1e-12 { pass = "FAIL"; }
+    print(pass + " " + label + " norm  sum=" + to_string(round(s * 1e9) / 1e9));
+}
+
+fn main() {
+    print("Quantum Demo 01: Single-qubit gates (closed-form check)");
+    print("-------------------------------------------------------");
+
+    // |0> -> H
+    let c1 = qubits(1);
+    c1 = q_h(c1, 0);
+    let p1 = q_probs(c1);
+    check("H|0>", p1[0], p1[1], 0.5, 0.5);
+    norm_check("H|0>", p1[0], p1[1]);
+
+    // |0> -> X
+    let c2 = qubits(1);
+    c2 = q_x(c2, 0);
+    let p2 = q_probs(c2);
+    check("X|0>", p2[0], p2[1], 0.0, 1.0);
+    norm_check("X|0>", p2[0], p2[1]);
+
+    // |0> -> Z (phase only; probs unchanged)
+    let c3 = qubits(1);
+    c3 = q_z(c3, 0);
+    let p3 = q_probs(c3);
+    check("Z|0>", p3[0], p3[1], 1.0, 0.0);
+    norm_check("Z|0>", p3[0], p3[1]);
+
+    // |0> -> H -> Z -> H = X|0>
+    let c4 = qubits(1);
+    c4 = q_h(c4, 0);
+    c4 = q_z(c4, 0);
+    c4 = q_h(c4, 0);
+    let p4 = q_probs(c4);
+    check("HZH|0>", p4[0], p4[1], 0.0, 1.0);
+    norm_check("HZH|0>", p4[0], p4[1]);
+
+    print("");
+    print("done");
+}

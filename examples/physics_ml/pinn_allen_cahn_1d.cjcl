@@ -1,0 +1,60 @@
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 3 Benchmark: 1D Allen-Cahn Equation PINN
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Equation:    u_t = ε²·u_xx + u - u³        on x ∈ [-1, 1], t ∈ [0, 1]
+// IC:          u(x, 0) = x²·cos(π·x)
+// BCs:         periodic, u(-1, t) = u(1, t)
+// Reference:   No closed-form solution. The trainer's `mean_residual`
+//              (RMS of u_t − ε²·u_xx − u + u³) is the most meaningful
+//              global signal. Full-domain L2 (against an external IC
+//              reproduction grid) is checked by the Rust test harness;
+//              this .cjcl example gates only on the residual + finiteness.
+// ε = 0.01 (default; small diffusion ⇒ stiff cubic reaction)
+//
+// Phase 3b will wire `pinn_eval_at` as a builtin so .cjcl examples can
+// also do their own external L2 gating against a reference grid.
+//
+// Run:
+//   cjcl run examples/physics_ml/pinn_allen_cahn_1d.cjcl
+//   cjcl run --mir-opt examples/physics_ml/pinn_allen_cahn_1d.cjcl
+// ═══════════════════════════════════════════════════════════════════════
+
+fn main() {
+    let epochs: i64 = 500;
+    let lr: f64 = 1e-3;
+    let n_colloc: i64 = 64;
+    let epsilon: f64 = 0.01;
+    let seed: i64 = 42;
+
+    print("PINN benchmark: 1D Allen-Cahn equation");
+    print("======================================");
+    print("u_t = " + to_string(epsilon) + "^2 * u_xx + u - u^3");
+    print("Domain: x in [-1,1], t in [0,1] (periodic)");
+    print("epochs=" + to_string(epochs) + " lr=" + to_string(lr) + " seed=" + to_string(seed));
+    print("");
+
+    let result = pinn_train_allen_cahn(epochs, lr, n_colloc, epsilon, seed);
+
+    print("Final metrics:");
+    print("  Mean residual  : " + to_string(result.mean_residual));
+    print("  Epochs recorded: " + to_string(result.n_epochs));
+
+    // Calibrated post-run: observed mean_residual ≈ 0.0265 at seed=42, 500 epochs.
+    // 3× headroom matches Phase 1/2 convention. The Rust test harness gates on
+    // IC L2 (≤0.40) and IC max abs (≤0.85) over 50 uniform x-points using
+    // `pinn_mlp_eval_grid` — this .cjcl example only exercises residual+finiteness.
+    let resid_threshold: f64 = 0.10;
+
+    let resid_ok: bool = result.mean_residual < resid_threshold;
+
+    print("");
+    print("Threshold check:");
+    print("  Resid < " + to_string(resid_threshold) + " -> " + to_string(resid_ok));
+
+    if resid_ok {
+        print("PASS");
+    } else {
+        print("FAIL: residual above threshold");
+    }
+}

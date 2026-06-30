@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 1200px; height: 630px; overflow: hidden;
+    background: #0d1117;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    color: #e6edf3;
+    display: flex; flex-direction: column;
+    padding: 36px 60px 30px 60px;
+  }
+
+  .header {
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin-bottom: 6px;
+  }
+  .header h1 { font-size: 26px; font-weight: 800; letter-spacing: -0.3px; }
+  .header .right {
+    font-size: 12px; color: #8b949e;
+    font-family: 'Cascadia Code', monospace;
+  }
+  .sub {
+    font-size: 13px; color: #8b949e;
+    margin-bottom: 22px;
+  }
+
+  .bars {
+    display: flex; flex-direction: column;
+    flex: 1;
+    justify-content: space-around;
+    padding: 8px 0;
+  }
+  .row { display: grid; grid-template-columns: 230px 1fr 110px; align-items: center; gap: 16px; }
+
+  .label {
+    font-size: 14px; font-weight: 600; color: #c9d1d9;
+    line-height: 1.2;
+  }
+  .label .small { font-size: 11px; color: #8b949e; font-weight: 400; }
+
+  .track {
+    background: #161b22; border-radius: 6px;
+    height: 32px; position: relative;
+    border: 1px solid #21262d;
+    overflow: hidden;
+  }
+  .bar-v2 {
+    position: absolute; left: 0; top: 0; height: 100%;
+    background: #21262d;
+    border-radius: 5px;
+    display: flex; align-items: center;
+    justify-content: flex-end;
+    padding-right: 14px;
+    font-size: 12px; color: #8b949e;
+    font-family: 'Cascadia Code', monospace;
+  }
+  .bar-v3 {
+    position: absolute; left: 0; top: 0; height: 100%;
+    min-width: 60px;
+    border-radius: 5px;
+    display: flex; align-items: center;
+    padding-left: 12px;
+    font-size: 12px; color: #ffffff;
+    font-family: 'Cascadia Code', monospace;
+    font-weight: 700;
+    box-shadow: 0 0 8px rgba(31,111,235,0.3);
+  }
+  .bar-v3.b1 { background: linear-gradient(90deg, #1f6feb, #58a6ff); }
+  .bar-v3.b2 { background: linear-gradient(90deg, #2ea043, #3fb950); }
+  .bar-v3.b3 { background: linear-gradient(90deg, #db6d28, #f0883e); }
+  .bar-v3.b4 { background: linear-gradient(90deg, #8957e5, #bc8cff); }
+  .bar-v3.b5 { background: linear-gradient(90deg, #cf222e, #ff7b72); }
+
+  .speedup {
+    text-align: right;
+    font-family: 'Cascadia Code', monospace;
+    font-size: 17px; font-weight: 800;
+  }
+  .speedup.b1 { color: #58a6ff; }
+  .speedup.b2 { color: #3fb950; }
+  .speedup.b3 { color: #f0883e; }
+  .speedup.b4 { color: #bc8cff; }
+  .speedup.b5 { color: #ff7b72; }
+
+  .legend {
+    display: flex; gap: 18px; align-items: center;
+    margin-top: 14px;
+    font-size: 12px; color: #8b949e;
+  }
+  .legend .swatch {
+    display: inline-block; width: 14px; height: 14px;
+    border-radius: 3px; vertical-align: middle; margin-right: 6px;
+  }
+  .legend .v2 { background: #21262d; border: 1px solid #484f58; }
+  .legend .v3 { background: linear-gradient(90deg, #1f6feb, #58a6ff); }
+
+  .footer {
+    display: flex; justify-content: space-between;
+    margin-top: 12px;
+    font-size: 11px; color: #6e7681;
+  }
+  .footer .determ { color: #3fb950; font-weight: 600; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <h1>v2 → v3 — measured today, Chrome closed</h1>
+    <div class="right">cjc-lang v0.1.7</div>
+  </div>
+  <div class="sub">Same workloads. Same determinism contract. Faster paths.</div>
+
+  <div class="bars">
+    <div class="row">
+      <div class="label">group_by<div class="small">1M rows × 100 categorical keys</div></div>
+      <div class="track">
+        <div class="bar-v2" style="width: 100%;">v2: 401.6 ms</div>
+        <div class="bar-v3 b1" style="width: 12.4%;">49.6 ms</div>
+      </div>
+      <div class="speedup b1">8.09×</div>
+    </div>
+
+    <div class="row">
+      <div class="label">arrange<div class="small">100k rows × 100 cat levels</div></div>
+      <div class="track">
+        <div class="bar-v2" style="width: 100%;">v2: 768.2 ms</div>
+        <div class="bar-v3 b2" style="width: 5.34%;">41 ms</div>
+      </div>
+      <div class="speedup b2">18.74×</div>
+    </div>
+
+    <div class="row">
+      <div class="label">Hybrid set ops<div class="small">100k-row chained intersect</div></div>
+      <div class="track">
+        <div class="bar-v2" style="width: 100%;">v2: 772.8 μs</div>
+        <div class="bar-v3 b3" style="width: 0.84%;">6.5 μs</div>
+      </div>
+      <div class="speedup b3">119×</div>
+    </div>
+
+    <div class="row">
+      <div class="label">u64 lookup<div class="small">DHarht Mem vs std::HashMap (7-run range)</div></div>
+      <div class="track">
+        <div class="bar-v2" style="width: 100%;">HashMap: 84–1628 ns</div>
+        <div class="bar-v3 b4" style="width: 60%;">DHarht: 105–992 ns</div>
+      </div>
+      <div class="speedup b4" style="font-size: 13px; line-height: 1.2;">≈ matches<br/><span style="font-size: 10px; opacity: 0.8;">2× less<br/>variance</span></div>
+    </div>
+
+    <div class="row">
+      <div class="label">streaming summarise<div class="small">memory: 100M rows × 1k groups</div></div>
+      <div class="track">
+        <div class="bar-v2" style="width: 100%;">v2: ~800 MB</div>
+        <div class="bar-v3 b5" style="width: 0.004%;">32 KB</div>
+      </div>
+      <div class="speedup b5">25 000×</div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <span><span class="swatch v2"></span>v2 (BTreeMap + Vec&lt;String&gt; keys)</span>
+    <span><span class="swatch v3"></span>v3 (codes + DHarht Memory + streaming)</span>
+  </div>
+
+  <div class="footer">
+    <div>tests: 495 passing &nbsp;·&nbsp; cjc-data inline: 258 passing</div>
+    <div class="determ">determinism contract preserved bit-equal</div>
+  </div>
+</body>
+</html>

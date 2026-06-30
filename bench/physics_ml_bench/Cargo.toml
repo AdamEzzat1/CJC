@@ -1,0 +1,14 @@
+[package]
+name = "physics-ml-bench"
+version = "0.1.6"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "physics_ml_bench"
+path = "src/main.rs"
+
+[dependencies]
+cjc-ad      = { path = "../../crates/cjc-ad" }
+cjc-runtime = { path = "../../crates/cjc-runtime" }
+cjc-repro   = { path = "../../crates/cjc-repro" }

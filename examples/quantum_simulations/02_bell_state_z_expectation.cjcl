@@ -1,0 +1,125 @@
+// =============================================================
+// Quantum Demo 02: Bell state |Phi+> and Z-basis observables
+// =============================================================
+//
+// What this proves about CJC-Lang:
+//   - Two-qubit entanglement (CNOT after H) is correctly simulated:
+//     |Phi+> = (|00> + |11>) / sqrt(2)  ->  P(00)=P(11)=1/2, P(01)=P(10)=0.
+//   - <Z_0>, <Z_1>, <Z_0 Z_1> are computable from q_probs alone.
+//     For |Phi+>:  <Z_0> = 0,  <Z_1> = 0,  <Z_0 Z_1> = +1.
+//   - Seeded q_sample is reproducible across runs (and identical between
+//     AST-eval and MIR-exec for the same seed). 1000-shot frequencies
+//     converge to the closed-form probabilities within sampling noise.
+//
+// Z eigenvalues are +1 on bit=0 and -1 on bit=1, so for an n-qubit
+// computational-basis state |b_{n-1} ... b_0>:
+//   <Z_i>     = sum_b (1 - 2*bit_i(b)) * P(b)
+//   <Z_i Z_j> = sum_b (1 - 2*xor(bit_i(b), bit_j(b))) * P(b)
+// =============================================================
+
+fn bit(idx: i64, pos: i64) -> i64 {
+    let v = idx;
+    let p = 0;
+    while p < pos {
+        v = v / 2;
+        p = p + 1;
+    }
+    v - (v / 2) * 2
+}
+
+fn z_expectation(probs: Any, n: i64, qubit: i64) -> f64 {
+    let total = 0.0;
+    let i = 0;
+    let dim = 1;
+    let k = 0;
+    while k < n { dim = dim * 2; k = k + 1; }
+    while i < dim {
+        let b = bit(i, qubit);
+        let sign = 1.0 - 2.0 * float(b);
+        total = total + sign * probs[i];
+        i = i + 1;
+    }
+    total
+}
+
+fn zz_expectation(probs: Any, n: i64, q0: i64, q1: i64) -> f64 {
+    let total = 0.0;
+    let i = 0;
+    let dim = 1;
+    let k = 0;
+    while k < n { dim = dim * 2; k = k + 1; }
+    while i < dim {
+        let b0 = bit(i, q0);
+        let b1 = bit(i, q1);
+        let par = b0 + b1 - 2 * b0 * b1;  // xor
+        let sign = 1.0 - 2.0 * float(par);
+        total = total + sign * probs[i];
+        i = i + 1;
+    }
+    total
+}
+
+fn approx(label: Any, got: f64, want: f64, tol: f64) {
+    let d = got - want;
+    if d < 0.0 { d = -d; }
+    let pass = "PASS";
+    if d > tol { pass = "FAIL"; }
+    print(pass + " " + label
+          + "  got=" + to_string(round(got * 1e6) / 1e6)
+          + "  want=" + to_string(want)
+          + "  |d|=" + to_string(round(d * 1e9) / 1e9));
+}
+
+fn main() {
+    print("Quantum Demo 02: Bell state and Z observables");
+    print("---------------------------------------------");
+
+    let c = qubits(2);
+    c = q_h(c, 0);
+    c = q_cx(c, 0, 1);
+
+    let p = q_probs(c);
+    let tol = 1e-12;
+    approx("P(00)", p[0], 0.5, tol);
+    approx("P(01)", p[1], 0.0, tol);
+    approx("P(10)", p[2], 0.0, tol);
+    approx("P(11)", p[3], 0.5, tol);
+
+    let s = p[0] + p[1] + p[2] + p[3];
+    approx("norm",  s,    1.0, tol);
+
+    let z0  = z_expectation(p,  2, 0);
+    let z1  = z_expectation(p,  2, 1);
+    let zz  = zz_expectation(p, 2, 0, 1);
+    approx("<Z_0>",      z0, 0.0, tol);
+    approx("<Z_1>",      z1, 0.0, tol);
+    approx("<Z_0 Z_1>",  zz, 1.0, tol);
+
+    // Deterministic shot sampling
+    print("");
+    print("Sampling 200 shots, seed=42 (reproducible)");
+    let n_shots = 200;
+    let samples = q_sample(c, n_shots, 42);
+    let n00 = 0; let n01 = 0; let n10 = 0; let n11 = 0;
+    let i = 0;
+    while i < n_shots {
+        let s = samples[i];
+        if s == 0 { n00 = n00 + 1; }
+        if s == 1 { n01 = n01 + 1; }
+        if s == 2 { n10 = n10 + 1; }
+        if s == 3 { n11 = n11 + 1; }
+        i = i + 1;
+    }
+    print("  shots: 00=" + to_string(n00)
+          + "  01=" + to_string(n01)
+          + "  10=" + to_string(n10)
+          + "  11=" + to_string(n11));
+    // 01 and 10 must never occur (closed-form zero)
+    let pass = "PASS";
+    if n01 != 0 { pass = "FAIL"; }
+    if n10 != 0 { pass = "FAIL"; }
+    print(pass + " forbidden outcomes never sampled");
+
+    print("");
+    print("done");
+}

@@ -1,0 +1,94 @@
+// =============================================================
+// PIML Demo 03: GradGraph one-step gradient descent (verifiable)
+// =============================================================
+//
+// We deliberately keep the problem tiny so the gradient is
+// computable in closed form and the test is unambiguous.
+//
+// Problem:   parameter a (scalar tensor), target c = 2.0.
+//            loss L(a) = (a - c)^2.
+//            dL/da    = 2 * (a - c).
+//
+// At a = 0:  L = 4.0,  grad = -4.0.
+// One step:  a_new = a - lr * grad
+//                  = 0 - 0.1 * (-4) = 0.4.
+// New loss:  (0.4 - 2)^2 = 2.56.
+//
+// Closed-form checks below verify each of those numbers exactly,
+// using only existing grad_graph_* builtins (Phase 3c).
+//
+// What this proves about CJC-Lang:
+//   - GradGraph forward, backward, and param_grad readback all
+//     work end-to-end from .cjcl source.
+//   - Reverse-mode AD returns the analytic gradient for the simplest
+//     non-trivial case. Higher-arity training is built on this.
+//   - The graph-rebuild loop (the same pattern PINN demos use) is
+//     observably correct: a single SGD step reduces the loss to
+//     the closed-form post-step value.
+// =============================================================
+
+fn approx(label: Any, got: f64, want: f64, tol: f64) {
+    let d = got - want;
+    if d < 0.0 { d = -d; }
+    let pass = "PASS";
+    if d > tol { pass = "FAIL"; }
+    print(pass + " " + label
+          + "  got=" + to_string(round(got * 1e9) / 1e9)
+          + "  want=" + to_string(want));
+}
+
+// Build (a - c)^2 -> sum, with `a_val` plugged in as the parameter.
+// Returns a 4-tuple-like row tensor [loss, grad, _, _] via two calls;
+// instead we just return the loss-then-grad sequence in main.
+
+fn main() {
+    print("PIML Demo 03: GradGraph one-step descent");
+    print("----------------------------------------");
+
+    // ── Iteration 0: a = 0.0 ─────────────────────────────────────
+    grad_graph_new();
+    let a0_t  = Tensor.from_vec([0.0], [1]);
+    let c_t   = Tensor.from_vec([2.0], [1]);
+    let a_idx = grad_graph_param(a0_t);
+    let c_idx = grad_graph_const(c_t);
+    let diff  = grad_graph_sub(a_idx, c_idx);
+    let sq    = grad_graph_mul(diff, diff);
+    let loss  = grad_graph_sum(sq);
+
+    let l0_t = grad_graph_forward(loss);
+    let l0   = l0_t[0];
+    approx("forward loss at a=0", l0, 4.0, 1e-12);
+
+    grad_graph_zero_grad();
+    grad_graph_backward(loss);
+    let g_t = grad_graph_param_grad(a_idx);
+    let g0  = g_t[0];
+    approx("dL/da at a=0", g0, -4.0, 1e-12);
+
+    // Manual SGD step: a_new = a - lr * grad
+    let lr = 0.1;
+    let a_new_val = 0.0 - lr * g0;
+    approx("a_new", a_new_val, 0.4, 1e-12);
+
+    // ── Iteration 1: rebuild graph at a = 0.4 ────────────────────
+    grad_graph_new();
+    let a1_t   = Tensor.from_vec([a_new_val], [1]);
+    let c_t2   = Tensor.from_vec([2.0], [1]);
+    let a_idx2 = grad_graph_param(a1_t);
+    let c_idx2 = grad_graph_const(c_t2);
+    let diff2  = grad_graph_sub(a_idx2, c_idx2);
+    let sq2    = grad_graph_mul(diff2, diff2);
+    let loss2  = grad_graph_sum(sq2);
+
+    let l1_t = grad_graph_forward(loss2);
+    let l1   = l1_t[0];
+    approx("forward loss at a=0.4", l1, 2.56, 1e-9);
+
+    let pass_dec = "PASS";
+    if l1 >= l0 { pass_dec = "FAIL"; }
+    print(pass_dec + " loss decreased  L0=" + to_string(round(l0*1e6)/1e6)
+          + "  L1=" + to_string(round(l1*1e6)/1e6));
+
+    print("");
+    print("done");
+}

@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 1200px; height: 630px; overflow: hidden;
+    background: linear-gradient(135deg, #0d1117 0%, #161b22 100%);
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    color: #e6edf3;
+    display: flex; flex-direction: column;
+    padding: 44px 60px 36px 60px;
+  }
+
+  .header {
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin-bottom: 14px;
+  }
+  .title-block h1 {
+    font-size: 38px; font-weight: 800; letter-spacing: -0.5px;
+    background: linear-gradient(90deg, #58a6ff 0%, #79c0ff 50%, #d2a8ff 100%);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .title-block .sub { font-size: 17px; color: #8b949e; margin-top: 4px; }
+
+  .version-pill {
+    background: #161b22; border: 1px solid #1f6feb; border-radius: 24px;
+    padding: 8px 22px;
+    font-size: 16px; font-weight: 700; color: #58a6ff;
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  }
+
+  .tag-line {
+    font-size: 18px; color: #c9d1d9; margin-bottom: 26px;
+    line-height: 1.45;
+  }
+  .tag-line .pop { color: #58a6ff; font-weight: 700; }
+
+  .stats {
+    display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px;
+    flex: 1;
+  }
+  .stat {
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 12px;
+    padding: 18px 12px;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 4px;
+  }
+  .stat .num {
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: 36px; font-weight: 800;
+    line-height: 1;
+  }
+  .stat .num .x { font-size: 22px; opacity: 0.7; margin-left: 2px; }
+  .stat .label {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: #8b949e; text-align: center;
+    line-height: 1.3; margin-top: 4px;
+  }
+
+  .stat.s1 { border-color: #1f6feb55; } .stat.s1 .num { color: #58a6ff; }
+  .stat.s2 { border-color: #3fb95055; } .stat.s2 .num { color: #3fb950; }
+  .stat.s3 { border-color: #f0883e55; } .stat.s3 .num { color: #f0883e; }
+  .stat.s4 { border-color: #bc8cff55; } .stat.s4 .num { color: #bc8cff; }
+  .stat.s5 { border-color: #ff7b7255; } .stat.s5 .num { color: #ff7b72; }
+
+  .footer {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-top: 22px;
+    font-size: 13px; color: #8b949e;
+  }
+  .footer .left { font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; }
+  .footer .left .pop { color: #58a6ff; }
+  .footer .right { color: #6e7681; }
+
+  .determ {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px;
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 12px;
+    font-size: 11px; color: #8b949e; letter-spacing: 0.04em;
+  }
+  .determ .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #3fb950;
+    box-shadow: 0 0 6px #3fb95088;
+  }
+</style>
+</head>
+<body>
+  <div class="header">
+    <div class="title-block">
+      <h1>TidyView v3 — same determinism, 8× faster</h1>
+      <div class="sub">CJC-Lang's data engine, verified on today's hardware</div>
+    </div>
+    <div class="version-pill">cjc-lang v0.1.7</div>
+  </div>
+
+  <div class="tag-line">
+    <span class="pop">12 phases</span> of optimization to a deterministic data engine —
+    same bit-equal output as before, but the slow paths are gone.
+  </div>
+
+  <div class="stats">
+    <div class="stat s1">
+      <div class="num">8.09<span class="x">×</span></div>
+      <div class="label">group_by<br/>1M rows</div>
+    </div>
+    <div class="stat s2">
+      <div class="num">18.7<span class="x">×</span></div>
+      <div class="label">cat-aware<br/>arrange</div>
+    </div>
+    <div class="stat s3">
+      <div class="num">119<span class="x">×</span></div>
+      <div class="label">Hybrid<br/>set ops</div>
+    </div>
+    <div class="stat s4">
+      <div class="num" style="font-size: 26px;">≈ HashMap</div>
+      <div class="label">DHarht-Mem<br/>2× less variance</div>
+    </div>
+    <div class="stat s5">
+      <div class="num">25k<span class="x">×</span></div>
+      <div class="label">streaming<br/>memory cut</div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <div class="left">
+      <span class="pop">cargo install</span> cjc-lang
+    </div>
+    <div class="determ">
+      <span class="dot"></span>
+      same seed → bit-identical output, every run
+    </div>
+  </div>
+</body>
+</html>

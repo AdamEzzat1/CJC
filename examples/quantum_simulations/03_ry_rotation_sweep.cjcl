@@ -1,0 +1,54 @@
+// =============================================================
+// Quantum Demo 03: Ry(theta) rotation sweep — closed-form curve
+// =============================================================
+//
+// What this proves about CJC-Lang:
+//   - Parameterized rotations agree with the analytic formula
+//     Ry(theta)|0> = cos(theta/2)|0> + sin(theta/2)|1>,
+//     so P(0) = cos^2(theta/2),  P(1) = sin^2(theta/2),
+//     and <Z> = cos(theta).
+//   - Tested at theta in {0, pi/4, pi/2, 3pi/4, pi}.
+//   - This is the building block of every variational ansatz (VQE/QAOA);
+//     getting it right at 1 qubit is a precondition for every multi-qubit
+//     workflow.
+// =============================================================
+
+fn approx(label: Any, got: f64, want: f64, tol: f64) {
+    let d = got - want;
+    if d < 0.0 { d = -d; }
+    let pass = "PASS";
+    if d > tol { pass = "FAIL"; }
+    print(pass + " " + label
+          + "  got=" + to_string(round(got * 1e9) / 1e9)
+          + "  want=" + to_string(round(want * 1e9) / 1e9));
+}
+
+fn main() {
+    let pi = 3.14159265358979323846;
+    print("Quantum Demo 03: Ry(theta) rotation sweep");
+    print("-----------------------------------------");
+
+    let n = 5;
+    let i = 0;
+    while i < n {
+        let theta = pi * float(i) / float(n - 1);
+        let c = qubits(1);
+        c = q_ry(c, 0, theta);
+        let p = q_probs(c);
+        let half = theta / 2.0;
+        let want_p0 = cos(half) * cos(half);
+        let want_p1 = sin(half) * sin(half);
+        let want_z  = cos(theta);
+        let got_z   = p[0] - p[1];
+
+        approx("P0(theta=" + to_string(round(theta * 1e3) / 1e3) + ")",
+               p[0], want_p0, 1e-12);
+        approx("P1(theta=" + to_string(round(theta * 1e3) / 1e3) + ")",
+               p[1], want_p1, 1e-12);
+        approx("<Z>(theta=" + to_string(round(theta * 1e3) / 1e3) + ")",
+               got_z, want_z, 1e-12);
+        i = i + 1;
+    }
+    print("");
+    print("done");
+}

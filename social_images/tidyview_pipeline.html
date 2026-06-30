@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 1200px; height: 630px; overflow: hidden;
+    background: #0d1117;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    color: #e6edf3;
+    display: flex; flex-direction: column;
+    padding: 48px 56px;
+  }
+
+  .header {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    margin-bottom: 36px;
+  }
+  .badge {
+    font-size: 12px; font-weight: 600; letter-spacing: 0.08em;
+    color: #58a6ff; text-transform: uppercase;
+    border: 1px solid #1f6feb; border-radius: 4px;
+    padding: 4px 10px;
+  }
+  .lang-badge {
+    font-size: 12px; color: #8b949e;
+    background: #161b22; border: 1px solid #30363d; border-radius: 4px;
+    padding: 4px 10px;
+  }
+
+  h1 { font-size: 32px; font-weight: 700; color: #e6edf3; margin-bottom: 6px; }
+  .subtitle { font-size: 15px; color: #8b949e; margin-bottom: 36px; }
+
+  .pipeline {
+    display: flex; align-items: center; gap: 0;
+    margin-bottom: 36px;
+  }
+
+  .stage {
+    display: flex; flex-direction: column; align-items: center;
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    padding: 16px 20px;
+    min-width: 140px;
+    position: relative;
+  }
+  .stage.highlight { border-color: #1f6feb; background: #0d2041; }
+
+  .stage-icon { font-size: 22px; margin-bottom: 6px; }
+  .stage-name { font-size: 13px; font-weight: 600; color: #e6edf3; margin-bottom: 3px; }
+  .stage-sub { font-size: 11px; color: #8b949e; text-align: center; }
+  .stage-sub.blue { color: #58a6ff; }
+  .stage-sub.green { color: #3fb950; }
+
+  .arrow {
+    color: #30363d; font-size: 20px; padding: 0 6px;
+    flex-shrink: 0;
+  }
+
+  .memory-row {
+    display: flex; gap: 16px; align-items: stretch;
+  }
+
+  .mem-card {
+    flex: 1;
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    padding: 16px 20px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .mem-card.accent { border-color: #3fb950; }
+  .mem-title { font-size: 12px; font-weight: 600; color: #8b949e; text-transform: uppercase; letter-spacing: 0.06em; }
+  .mem-value { font-size: 26px; font-weight: 700; color: #3fb950; }
+  .mem-desc { font-size: 12px; color: #8b949e; }
+
+  .mem-card.blue .mem-value { color: #58a6ff; }
+  .mem-card.orange .mem-value { color: #f0883e; }
+  .mem-card.purple .mem-value { color: #bc8cff; }
+
+  .footer-row {
+    margin-top: auto;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .crates { font-size: 12px; color: #8b949e; }
+  .crates span { color: #58a6ff; font-family: monospace; }
+  .tag { font-size: 12px; color: #3fb950; }
+</style>
+</head>
+<body>
+
+  <div class="header">
+    <div>
+      <div class="badge" style="display:inline-block; margin-bottom:10px;">TidyView</div>
+      <h1>Zero-Copy Columnar Data Engine</h1>
+      <p class="subtitle">Operations compose lazily over shared data — nothing is copied until you call <code style="color:#58a6ff;font-size:14px;">materialize()</code></p>
+    </div>
+    <div class="lang-badge">CJC-Lang · Rust</div>
+  </div>
+
+  <div class="pipeline">
+    <div class="stage">
+      <div class="stage-icon">📦</div>
+      <div class="stage-name">DataFrame</div>
+      <div class="stage-sub">columnar storage<br>immutable base</div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="stage highlight">
+      <div class="stage-icon">🔲</div>
+      <div class="stage-name">filter()</div>
+      <div class="stage-sub blue">bitmask flip<br>no data copy</div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="stage highlight">
+      <div class="stage-icon">📊</div>
+      <div class="stage-name">group_by()</div>
+      <div class="stage-sub blue">BTreeMap index<br>deterministic order</div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="stage highlight">
+      <div class="stage-icon">∑</div>
+      <div class="stage-name">summarise()</div>
+      <div class="stage-sub blue">Kahan summation<br>bit-identical results</div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="stage" style="border-color:#3fb950; background:#0d2a18;">
+      <div class="stage-icon">✅</div>
+      <div class="stage-name">materialize()</div>
+      <div class="stage-sub green">one allocation<br>at the end</div>
+    </div>
+  </div>
+
+  <div class="memory-row">
+    <div class="mem-card accent">
+      <div class="mem-title">1M-row filter cost</div>
+      <div class="mem-value">122 KB</div>
+      <div class="mem-desc">bitmask only — data unchanged</div>
+    </div>
+    <div class="mem-card blue">
+      <div class="mem-title">DataFrame operations</div>
+      <div class="mem-value">103</div>
+      <div class="mem-desc">filter · select · mutate · join · pivot</div>
+    </div>
+    <div class="mem-card orange">
+      <div class="mem-title">Aggregation functions</div>
+      <div class="mem-value">12</div>
+      <div class="mem-desc">Sum · Mean · Median · Sd · Quantile…</div>
+    </div>
+    <div class="mem-card purple">
+      <div class="mem-title">Hash maps used</div>
+      <div class="mem-value">0</div>
+      <div class="mem-desc">BTreeMap everywhere → deterministic order</div>
+    </div>
+  </div>
+
+  <div class="footer-row">
+    <div class="crates">install: <span>cargo install cjc-lang</span></div>
+    <div class="tag">same seed → same result · every run</div>
+  </div>
+
+</body>
+</html>

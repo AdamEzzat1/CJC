@@ -1,0 +1,116 @@
+// =============================================================
+// PIML Demo 02: 1D heat equation residual on the analytic solution
+// =============================================================
+//
+// PDE:           du/dt = alpha * d^2u/dx^2,    x in [0,1], t >= 0
+// IC:            u(x, 0) = sin(pi * x)
+// BCs:           u(0,t) = u(1,t) = 0
+// Analytic sol:  u(x,t) = sin(pi*x) * exp(-alpha * pi^2 * t)
+// Residual:      r(x,t) = du/dt - alpha * d^2u/dx^2     (should be 0)
+//
+// We compute du/dt and d^2u/dx^2 by 3-point central finite differences
+// applied to the closed-form u itself. This isolates the physics-law
+// composition from any neural network. PINN demos elsewhere
+// (examples/08_pinn_heat_equation.cjcl, examples/physics_ml/) train a
+// network to *learn* this residual; here we only verify the substrate
+// can express it correctly.
+//
+// Truncation error (mixed derivatives, 3-pt central FD):
+//   r ~= O(h_t^2) + O(h_x^2 * pi^4)
+// At alpha=0.01, h_x=h_t=1e-3, that is ~1e-4. We use tol=5e-4.
+//
+// What this proves about CJC-Lang:
+//   - Mixed-derivative residual evaluates to FD-truncation order
+//     (no extra drift) on a non-trivial PDE.
+//   - exp, sin, scalar arithmetic, and array indexing all compose
+//     correctly for spatio-temporal physics.
+// =============================================================
+
+fn u_exact(x: f64, t: f64, alpha: f64, pi: f64) -> f64 {
+    sin(pi * x) * exp(-alpha * pi * pi * t)
+}
+
+fn dudt_fd(x: f64, t: f64, alpha: f64, pi: f64, h: f64) -> f64 {
+    (u_exact(x, t + h, alpha, pi) - u_exact(x, t - h, alpha, pi)) / (2.0 * h)
+}
+
+fn d2udx2_fd(x: f64, t: f64, alpha: f64, pi: f64, h: f64) -> f64 {
+    let um = u_exact(x - h, t, alpha, pi);
+    let uc = u_exact(x,     t, alpha, pi);
+    let up = u_exact(x + h, t, alpha, pi);
+    (um - 2.0 * uc + up) / (h * h)
+}
+
+fn main() {
+    let pi    = 3.14159265358979323846;
+    let alpha = 0.01;
+    let h     = 1e-3;
+    let n_x   = 9;
+    let n_t   = 5;
+
+    print("PIML Demo 02: 1D heat equation residual on analytic u");
+    print("-----------------------------------------------------");
+
+    let max_abs = 0.0;
+    let ic_max  = 0.0;
+    let bc_max  = 0.0;
+
+    let i = 1;
+    while i < n_x - 1 {     // skip boundaries for FD interior
+        let x = float(i) / float(n_x - 1);
+        let j = 0;
+        while j < n_t {
+            let t = 0.05 + 0.1 * float(j);
+            let dudt    = dudt_fd(x, t, alpha, pi, h);
+            let d2udx2  = d2udx2_fd(x, t, alpha, pi, h);
+            let r       = dudt - alpha * d2udx2;
+            let ar = r;
+            if ar < 0.0 { ar = -ar; }
+            if ar > max_abs { max_abs = ar; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    // IC sanity
+    let i2 = 0;
+    while i2 < n_x {
+        let x = float(i2) / float(n_x - 1);
+        let u0 = u_exact(x, 0.0, alpha, pi);
+        let want = sin(pi * x);
+        let d = u0 - want;
+        if d < 0.0 { d = -d; }
+        if d > ic_max { ic_max = d; }
+        i2 = i2 + 1;
+    }
+
+    // BC sanity (u(0,t) = u(1,t) = 0)
+    let j2 = 0;
+    while j2 < n_t {
+        let t = 0.05 + 0.1 * float(j2);
+        let l = u_exact(0.0, t, alpha, pi);
+        let r = u_exact(1.0, t, alpha, pi);
+        if l < 0.0 { l = -l; }
+        if r < 0.0 { r = -r; }
+        if l > bc_max { bc_max = l; }
+        if r > bc_max { bc_max = r; }
+        j2 = j2 + 1;
+    }
+
+    let tol = 5e-4;  // O(h^2 * pi^4) FD bound at h=1e-3 is ~1e-4
+    let pass = "PASS";
+    if max_abs > tol { pass = "FAIL"; }
+    let pass_ic = "PASS";
+    if ic_max > 1e-12 { pass_ic = "FAIL"; }
+    let pass_bc = "PASS";
+    if bc_max > 1e-12 { pass_bc = "FAIL"; }
+
+    print(pass    + " interior PDE residual   L_inf=" + to_string(round(max_abs * 1e9) / 1e9));
+    print(pass_ic + " initial condition       L_inf=" + to_string(round(ic_max  * 1e15) / 1e15));
+    print(pass_bc + " boundary conditions     L_inf=" + to_string(round(bc_max  * 1e15) / 1e15));
+    print("  tolerance(PDE) = " + to_string(tol));
+    print("  alpha = " + to_string(alpha) + "  h = " + to_string(h)
+          + "  grid = " + to_string(n_x) + "x" + to_string(n_t));
+    print("");
+    print("done");
+}

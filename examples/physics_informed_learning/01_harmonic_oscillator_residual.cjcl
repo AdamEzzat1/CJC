@@ -1,0 +1,74 @@
+// =============================================================
+// PIML Demo 01: Simple harmonic oscillator residual check
+// =============================================================
+//
+// ODE:           u''(t) + omega^2 * u(t) = 0
+// Analytic sol:  u(t) = cos(omega * t)
+// Residual:      r(t) = u''(t) + omega^2 * u(t)   (should be 0)
+//
+// We approximate u'' by a 3-point central finite difference:
+//   u''(t) ~= (u(t-h) - 2 u(t) + u(t+h)) / h^2
+// using the analytic u itself. The residual then measures how well
+// the language's `cos`, arithmetic, and reductions implement the
+// physics relationship — independent of any neural network.
+//
+// Note on tolerance:
+//   3-point central FD has truncation error h^2 / 12 * u''''(xi),
+//   so for u = cos(omega*t) the residual is bounded by
+//       h^2 * omega^4 / 12.
+//   With omega = 2, h = 1e-3 that bound is ~1.33e-6, so we use
+//   tol = 5e-6 (~4x safety margin). This is finite-difference
+//   error — not a language defect.
+//
+// What this proves about CJC-Lang:
+//   - Math primitives (cos, *, +, -) compose to express physics laws.
+//   - The realized residual matches the analytic FD truncation bound,
+//     evidence the floating-point stack is well behaved.
+// =============================================================
+
+fn u_exact(t: f64, omega: f64) -> f64 {
+    cos(omega * t)
+}
+
+fn second_derivative_fd(t: f64, omega: f64, h: f64) -> f64 {
+    let um = u_exact(t - h, omega);
+    let uc = u_exact(t,     omega);
+    let up = u_exact(t + h, omega);
+    (um - 2.0 * uc + up) / (h * h)
+}
+
+fn main() {
+    print("PIML Demo 01: Harmonic oscillator residual");
+    print("------------------------------------------");
+
+    let omega = 2.0;
+    let h     = 1e-3;
+    let n_pts = 21;
+    let t_lo  = 0.0;
+    let t_hi  = 2.0;
+
+    let max_abs = 0.0;
+    let i = 0;
+    while i < n_pts {
+        let t = t_lo + (t_hi - t_lo) * float(i) / float(n_pts - 1);
+        let upp = second_derivative_fd(t, omega, h);
+        let u   = u_exact(t, omega);
+        let r   = upp + omega * omega * u;
+        let ar  = r;
+        if ar < 0.0 { ar = -ar; }
+        if ar > max_abs { max_abs = ar; }
+        i = i + 1;
+    }
+
+    let tol = 5e-6;  // 4x safety margin over h^2*omega^4/12 ~= 1.33e-6
+    let pass = "PASS";
+    if max_abs > tol { pass = "FAIL"; }
+    print(pass + " harmonic-oscillator analytic residual");
+    print("  omega = " + to_string(omega));
+    print("  h     = " + to_string(h));
+    print("  n     = " + to_string(n_pts));
+    print("  L_inf residual = " + to_string(round(max_abs * 1e12) / 1e12));
+    print("  tolerance      = " + to_string(tol));
+    print("");
+    print("done");
+}

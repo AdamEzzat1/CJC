@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 1200px; height: 630px; overflow: hidden;
+    background: #0d1117;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    color: #e6edf3;
+    display: flex; flex-direction: column;
+    padding: 36px 56px 30px 56px;
+  }
+
+  .header h1 {
+    font-size: 26px; font-weight: 800; letter-spacing: -0.3px;
+    margin-bottom: 4px;
+  }
+  .header .sub { font-size: 13px; color: #8b949e; margin-bottom: 22px; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    flex: 1;
+  }
+
+  .card {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    padding: 14px 14px 12px 14px;
+    display: flex; flex-direction: column;
+    gap: 6px;
+    position: relative;
+  }
+  .card .tag {
+    font-family: 'Cascadia Code', monospace;
+    font-size: 12px; font-weight: 700;
+    letter-spacing: -0.2px;
+  }
+  .card .niche { font-size: 11px; color: #8b949e; line-height: 1.35; }
+  .card .props {
+    display: flex; flex-wrap: wrap; gap: 4px;
+    margin-top: 4px;
+  }
+  .card .prop {
+    font-size: 9px;
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 3px;
+    padding: 2px 6px;
+    color: #c9d1d9;
+    letter-spacing: 0.02em;
+  }
+
+  .card.featured {
+    grid-column: span 2;
+    background: linear-gradient(135deg, #161b22, #1c2128);
+    border-color: #1f6feb;
+    box-shadow: 0 0 20px rgba(31,111,235,0.18);
+  }
+  .card.featured .tag { font-size: 16px; color: #58a6ff; }
+  .card.featured .niche { font-size: 12px; color: #c9d1d9; }
+  .card.featured .star {
+    position: absolute; top: 12px; right: 14px;
+    background: #1f6feb; color: white;
+    font-size: 9px; padding: 2px 8px; border-radius: 10px;
+    font-weight: 700; letter-spacing: 0.05em;
+  }
+
+  .card.t-fast .tag { color: #58a6ff; }
+  .card.t-tree .tag { color: #3fb950; }
+  .card.t-tiny .tag { color: #f0883e; }
+  .card.t-vec  .tag { color: #bc8cff; }
+  .card.t-open .tag { color: #ff7b72; }
+  .card.t-byte .tag { color: #79c0ff; }
+
+  .footer {
+    display: flex; justify-content: space-between;
+    margin-top: 16px;
+    font-size: 12px;
+  }
+  .footer .l { color: #c9d1d9; }
+  .footer .l .pop { color: #58a6ff; font-family: 'Cascadia Code', monospace; }
+  .footer .r {
+    color: #3fb950;
+    font-family: 'Cascadia Code', monospace;
+    font-size: 11px;
+  }
+</style>
+</head>
+<body>
+  <div class="header">
+    <h1>The deterministic collection family</h1>
+    <div class="sub">Pick by workload shape. Each one's a deliberate trade — none replaces the others.</div>
+  </div>
+
+  <div class="grid">
+    <div class="card featured t-fast">
+      <div class="star">v3 NEW</div>
+      <div class="tag">DHarhtMemory&lt;V&gt; · SealedU64Map&lt;V&gt;</div>
+      <div class="niche">u64-keyed sealed lookup. 256 shards × splitmix64 × sparse paged 16-bit front directory × MicroBucket4/8/16 + ART fallback. Matches std::HashMap speed with byte-equal iteration order across runs.</div>
+      <div class="props">
+        <span class="prop">~108 ns/op</span>
+        <span class="prop">deterministic iter</span>
+        <span class="prop">sealed lifecycle</span>
+        <span class="prop">HashDoS-resistant</span>
+      </div>
+    </div>
+
+    <div class="card t-tree">
+      <div class="tag">BTreeMap&lt;K, V&gt;</div>
+      <div class="niche">Mutable, ordered, range queries, canonical output.</div>
+      <div class="props">
+        <span class="prop">range</span>
+        <span class="prop">sorted iter</span>
+        <span class="prop">mutate-safe</span>
+      </div>
+    </div>
+
+    <div class="card t-byte">
+      <div class="tag">DHarht&lt;V&gt; (v.01)</div>
+      <div class="niche">Arbitrary byte keys, sealed. Categorical dictionaries + interning.</div>
+      <div class="props">
+        <span class="prop">slab + handle</span>
+        <span class="prop">inline-keys SSO</span>
+        <span class="prop">ART fallback</span>
+      </div>
+    </div>
+
+    <div class="card t-vec">
+      <div class="tag">IndexVec&lt;I, V&gt;</div>
+      <div class="niche">Dense IdType→V tables. SymbolId, NodeId, ValueId.</div>
+      <div class="props">
+        <span class="prop">O(1)</span>
+        <span class="prop">contiguous</span>
+        <span class="prop">insertion order</span>
+      </div>
+    </div>
+
+    <div class="card t-tiny">
+      <div class="tag">TinyDetMap&lt;K, V&gt;</div>
+      <div class="niche">Tiny maps (≤16 entries). Linear scan beats binary search at this size.</div>
+      <div class="props">
+        <span class="prop">sorted iter</span>
+        <span class="prop">cache-tight</span>
+      </div>
+    </div>
+
+    <div class="card t-tiny">
+      <div class="tag">SortedVecMap&lt;K, V&gt;</div>
+      <div class="niche">Small-medium sealed sorted maps with range queries.</div>
+      <div class="props">
+        <span class="prop">binary search</span>
+        <span class="prop">range</span>
+        <span class="prop">sorted iter</span>
+      </div>
+    </div>
+
+    <div class="card t-open">
+      <div class="tag">DetOpenMap&lt;K, V&gt;</div>
+      <div class="niche">Sparse mutable equality lookup. Open addressing + bounded probe + BTreeMap fallback on adversarial input.</div>
+      <div class="props">
+        <span class="prop">MAX_PROBE=32</span>
+        <span class="prop">det fallback</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <div class="l"><span class="pop">cjc_data::detcoll</span> · 7 deterministic collection types</div>
+    <div class="r">no HashMap on canonical-output paths · ever</div>
+  </div>
+</body>
+</html>

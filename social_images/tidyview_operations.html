@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 1200px; height: 630px; overflow: hidden;
+    background: #0d1117;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    color: #e6edf3;
+    display: flex; flex-direction: column;
+    padding: 40px 52px;
+  }
+
+  .header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 24px;
+  }
+  .left h1 { font-size: 27px; font-weight: 700; }
+  .left p  { font-size: 13px; color: #8b949e; margin-top: 3px; }
+  .count-pill {
+    background: #161b22; border: 1px solid #1f6feb; border-radius: 20px;
+    padding: 8px 18px;
+    font-size: 15px; font-weight: 700; color: #58a6ff;
+  }
+
+  .categories { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; flex: 1; }
+
+  .cat {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    padding: 14px 16px;
+    display: flex; flex-direction: column;
+    gap: 8px;
+  }
+
+  .cat-header {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 4px;
+  }
+  .cat-icon { font-size: 16px; }
+  .cat-name { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; }
+
+  .ops { display: flex; flex-wrap: wrap; gap: 5px; }
+  .op {
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: 11px;
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    padding: 3px 7px;
+    color: #c9d1d9;
+  }
+
+  /* category accent colours */
+  .cat.filter  { border-color: #1f6feb22; }
+  .cat.filter  .cat-name { color: #58a6ff; }
+  .cat.filter  .op       { border-color: #1f6feb44; color: #79c0ff; }
+
+  .cat.reshape { border-color: #3fb95022; }
+  .cat.reshape .cat-name { color: #3fb950; }
+  .cat.reshape .op       { border-color: #3fb95044; color: #56d364; }
+
+  .cat.agg     { border-color: #f0883e22; }
+  .cat.agg     .cat-name { color: #f0883e; }
+  .cat.agg     .op       { border-color: #f0883e44; color: #ffa657; }
+
+  .cat.join    { border-color: #bc8cff22; }
+  .cat.join    .cat-name { color: #bc8cff; }
+  .cat.join    .op       { border-color: #bc8cff44; color: #d2a8ff; }
+
+  .cat.string  { border-color: #ff7b7222; }
+  .cat.string  .cat-name { color: #ff7b72; }
+  .cat.string  .op       { border-color: #ff7b7244; color: #ffa198; }
+
+  .cat.sort    { border-color: #e3b34122; }
+  .cat.sort    .cat-name { color: #e3b341; }
+  .cat.sort    .op       { border-color: #e3b34144; color: #e3b341; }
+
+  .cat.inspect { border-color: #39d35322; }
+  .cat.inspect .cat-name { color: #39d353; }
+  .cat.inspect .op       { border-color: #39d35344; color: #39d353; }
+
+  .cat.meta    { border-color: #8b949e22; }
+  .cat.meta    .cat-name { color: #8b949e; }
+  .cat.meta    .op       { border-color: #8b949e44; color: #8b949e; }
+
+  .footer {
+    margin-top: 14px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .footer-note { font-size: 12px; color: #8b949e; }
+  .footer-note span { color: #3fb950; }
+</style>
+</head>
+<body>
+
+  <div class="header">
+    <div class="left">
+      <h1>TidyView — 103 DataFrame Operations</h1>
+      <p>All using BTreeMap ordering · Kahan-compensated summation · zero hidden mutations</p>
+    </div>
+    <div class="count-pill">103 ops · 0 HashMaps</div>
+  </div>
+
+  <div class="categories">
+
+    <div class="cat filter">
+      <div class="cat-header">
+        <span class="cat-icon">🔲</span>
+        <span class="cat-name">Filter &amp; Select</span>
+      </div>
+      <div class="ops">
+        <span class="op">filter()</span>
+        <span class="op">select()</span>
+        <span class="op">drop()</span>
+        <span class="op">distinct()</span>
+        <span class="op">slice_head()</span>
+        <span class="op">slice_tail()</span>
+        <span class="op">slice_sample()</span>
+        <span class="op">where()</span>
+      </div>
+    </div>
+
+    <div class="cat reshape">
+      <div class="cat-header">
+        <span class="cat-icon">🔄</span>
+        <span class="cat-name">Reshape</span>
+      </div>
+      <div class="ops">
+        <span class="op">pivot_longer()</span>
+        <span class="op">pivot_wider()</span>
+        <span class="op">unnest()</span>
+        <span class="op">nest()</span>
+        <span class="op">relocate()</span>
+        <span class="op">rename()</span>
+        <span class="op">transpose()</span>
+      </div>
+    </div>
+
+    <div class="cat agg">
+      <div class="cat-header">
+        <span class="cat-icon">∑</span>
+        <span class="cat-name">Aggregate (12)</span>
+      </div>
+      <div class="ops">
+        <span class="op">sum()</span>
+        <span class="op">mean()</span>
+        <span class="op">median()</span>
+        <span class="op">min()</span>
+        <span class="op">max()</span>
+        <span class="op">count()</span>
+        <span class="op">sd()</span>
+        <span class="op">var()</span>
+        <span class="op">quantile()</span>
+        <span class="op">first()</span>
+        <span class="op">last()</span>
+        <span class="op">n_distinct()</span>
+      </div>
+    </div>
+
+    <div class="cat join">
+      <div class="cat-header">
+        <span class="cat-icon">⟕</span>
+        <span class="cat-name">Join (7 types)</span>
+      </div>
+      <div class="ops">
+        <span class="op">inner_join()</span>
+        <span class="op">left_join()</span>
+        <span class="op">semi_join()</span>
+        <span class="op">anti_join()</span>
+        <span class="op">full_join()</span>
+        <span class="op">cross_join()</span>
+        <span class="op">natural_join()</span>
+      </div>
+    </div>
+
+    <div class="cat string">
+      <div class="cat-header">
+        <span class="cat-icon">🔤</span>
+        <span class="cat-name">String / Regex (14)</span>
+      </div>
+      <div class="ops">
+        <span class="op">str_detect()</span>
+        <span class="op">str_extract()</span>
+        <span class="op">str_replace()</span>
+        <span class="op">str_split()</span>
+        <span class="op">str_count()</span>
+        <span class="op">str_sub()</span>
+        <span class="op">str_len()</span>
+        <span class="op">str_trim()</span>
+        <span class="op">str_starts()</span>
+        <span class="op">str_ends()</span>
+      </div>
+    </div>
+
+    <div class="cat sort">
+      <div class="cat-header">
+        <span class="cat-icon">↕</span>
+        <span class="cat-name">Sort &amp; Mutate</span>
+      </div>
+      <div class="ops">
+        <span class="op">arrange()</span>
+        <span class="op">arrange_desc()</span>
+        <span class="op">mutate()</span>
+        <span class="op">transmute()</span>
+        <span class="op">add_column()</span>
+        <span class="op">row_number()</span>
+        <span class="op">rank()</span>
+      </div>
+    </div>
+
+    <div class="cat inspect">
+      <div class="cat-header">
+        <span class="cat-icon">🔍</span>
+        <span class="cat-name">Inspect &amp; Audit</span>
+      </div>
+      <div class="ops">
+        <span class="op">glimpse()</span>
+        <span class="op">head()</span>
+        <span class="op">tail()</span>
+        <span class="op">n_rows()</span>
+        <span class="op">n_cols()</span>
+        <span class="op">col_names()</span>
+        <span class="op">mask()</span>
+        <span class="op">proj()</span>
+      </div>
+    </div>
+
+    <div class="cat meta">
+      <div class="cat-header">
+        <span class="cat-icon">⚙</span>
+        <span class="cat-name">Group &amp; Window</span>
+      </div>
+      <div class="ops">
+        <span class="op">group_by()</span>
+        <span class="op">summarise()</span>
+        <span class="op">ungroup()</span>
+        <span class="op">group_keys()</span>
+        <span class="op">group_size()</span>
+        <span class="op">row_lineage()</span>
+        <span class="op">snapshot()</span>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="footer">
+    <div class="footer-note">All float reductions: <span>Kahan-compensated</span> · All ordering: <span>BTreeMap (deterministic)</span> · Nulls: <span>quarantined in NullCol type</span></div>
+    <div class="footer-note" style="color:#58a6ff;">CJC-Lang · crates.io</div>
+  </div>
+
+</body>
+</html>

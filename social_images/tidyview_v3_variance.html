@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 1200px; height: 630px; overflow: hidden;
+    background: #0d1117;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    color: #e6edf3;
+    display: flex; flex-direction: column;
+    padding: 32px 50px 26px 50px;
+  }
+
+  .header { margin-bottom: 4px; }
+  .header h1 { font-size: 24px; font-weight: 800; letter-spacing: -0.3px; }
+  .header .sub { font-size: 12px; color: #8b949e; margin-top: 3px; }
+
+  .chart {
+    flex: 1;
+    display: flex; flex-direction: column;
+    gap: 8px;
+    margin-top: 14px;
+    position: relative;
+  }
+
+  .axis-label {
+    font-family: 'Cascadia Code', monospace;
+    font-size: 10px; color: #6e7681;
+    text-align: right; padding-right: 6px;
+  }
+
+  /* Plot area: 7 runs as columns */
+  .plot {
+    display: grid;
+    grid-template-columns: 60px 1fr;
+    gap: 8px;
+    flex: 1;
+    height: 100%;
+  }
+
+  .y-axis {
+    display: flex; flex-direction: column;
+    justify-content: space-between;
+    text-align: right;
+    padding-right: 4px;
+    padding-top: 4px;
+    padding-bottom: 28px;
+  }
+  .y-axis .tick {
+    font-size: 9px; color: #6e7681;
+    font-family: 'Cascadia Code', monospace;
+  }
+
+  .runs {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 6px;
+    position: relative;
+    border-left: 1px solid #21262d;
+    border-bottom: 1px solid #21262d;
+    padding: 4px 6px 4px 6px;
+  }
+
+  /* Each run is two stacked bars */
+  .run {
+    display: flex; flex-direction: column;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 2px;
+    position: relative;
+  }
+
+  .bar-pair {
+    flex: 1;
+    width: 100%;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 4px;
+    height: 100%;
+  }
+
+  .bar {
+    width: 22px;
+    border-radius: 3px 3px 0 0;
+    position: relative;
+    box-shadow: 0 0 4px rgba(0,0,0,0.3);
+  }
+  .bar.dharht { background: linear-gradient(180deg, #58a6ff, #1f6feb); border: 1px solid #1f6feb; }
+  .bar.hashmap { background: linear-gradient(180deg, #ff7b72, #cf222e); border: 1px solid #cf222e; }
+
+  .bar-label {
+    position: absolute;
+    top: -16px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-family: 'Cascadia Code', monospace;
+    font-size: 8px;
+    color: #c9d1d9;
+    white-space: nowrap;
+  }
+
+  .run-label {
+    margin-top: 4px;
+    font-size: 9px; color: #8b949e;
+    text-align: center;
+    line-height: 1.2;
+    height: 22px;
+  }
+  .run-label .num { font-weight: 700; color: #c9d1d9; }
+  .run-label .ctx { display: block; font-size: 8px; color: #6e7681; margin-top: 1px; }
+
+  /* Insight footer */
+  .insights {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    margin-top: 12px;
+    padding: 12px 14px;
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+  }
+  .insight {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .insight .head {
+    font-size: 11px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .insight .head .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+  }
+  .insight.dharht .head { color: #58a6ff; }
+  .insight.dharht .head .dot { background: #58a6ff; }
+  .insight.hashmap .head { color: #ff7b72; }
+  .insight.hashmap .head .dot { background: #ff7b72; }
+  .insight .body { font-size: 11px; color: #c9d1d9; line-height: 1.4; }
+  .insight .stat {
+    font-family: 'Cascadia Code', monospace;
+    font-size: 11px;
+    color: #e6edf3;
+  }
+  .insight .stat .key { color: #8b949e; }
+  .insight .stat .val { font-weight: 700; }
+
+  .legend {
+    display: flex; gap: 16px; align-items: center;
+    margin-top: 8px;
+    font-size: 11px; color: #8b949e;
+  }
+  .legend .swatch {
+    display: inline-block; width: 12px; height: 12px;
+    border-radius: 2px; vertical-align: middle; margin-right: 5px;
+  }
+  .legend .dh { background: linear-gradient(180deg, #58a6ff, #1f6feb); }
+  .legend .hm { background: linear-gradient(180deg, #ff7b72, #cf222e); }
+</style>
+</head>
+<body>
+  <div class="header">
+    <h1>u64 lookup: 7 runs of DHarht Memory vs std::HashMap (100k keys, 2M lookups each)</h1>
+    <div class="sub">Same workload, same code, same machine — only the system state varies. Both are highly variable; DHarht is the more predictable.</div>
+  </div>
+
+  <div class="plot">
+    <div class="y-axis">
+      <span class="tick">1700 ns</span>
+      <span class="tick">1300 ns</span>
+      <span class="tick">900 ns</span>
+      <span class="tick">500 ns</span>
+      <span class="tick">100 ns</span>
+      <span class="tick">0</span>
+    </div>
+
+    <div class="runs">
+      <!-- max scale for plot: 1700 ns. Heights = ns/op / 1700 * 100% -->
+      <!-- Run 1: DHarht 105, HashMap 148 -->
+      <div class="run">
+        <div class="bar-pair">
+          <div class="bar dharht" style="height: 6.2%;"><div class="bar-label">105</div></div>
+          <div class="bar hashmap" style="height: 8.7%;"><div class="bar-label">148</div></div>
+        </div>
+        <div class="run-label"><span class="num">Run 1</span><span class="ctx">Chrome open, warm</span></div>
+      </div>
+      <!-- Run 2: DHarht 108, HashMap 91 -->
+      <div class="run">
+        <div class="bar-pair">
+          <div class="bar dharht" style="height: 6.4%;"><div class="bar-label">108</div></div>
+          <div class="bar hashmap" style="height: 5.4%;"><div class="bar-label">91</div></div>
+        </div>
+        <div class="run-label"><span class="num">Run 2</span><span class="ctx">cache hot</span></div>
+      </div>
+      <!-- Run 3: DHarht 112, HashMap 84 -->
+      <div class="run">
+        <div class="bar-pair">
+          <div class="bar dharht" style="height: 6.6%;"><div class="bar-label">112</div></div>
+          <div class="bar hashmap" style="height: 5.0%;"><div class="bar-label">84</div></div>
+        </div>
+        <div class="run-label"><span class="num">Run 3</span><span class="ctx">cache hot</span></div>
+      </div>
+      <!-- Run 4: DHarht 992, HashMap 892 -->
+      <div class="run">
+        <div class="bar-pair">
+          <div class="bar dharht" style="height: 58.4%;"><div class="bar-label">992</div></div>
+          <div class="bar hashmap" style="height: 52.5%;"><div class="bar-label">892</div></div>
+        </div>
+        <div class="run-label"><span class="num">Run 4</span><span class="ctx">after mem bench</span></div>
+      </div>
+      <!-- Run 5: DHarht 763, HashMap 1633 -->
+      <div class="run">
+        <div class="bar-pair">
+          <div class="bar dharht" style="height: 44.9%;"><div class="bar-label">763</div></div>
+          <div class="bar hashmap" style="height: 96.1%;"><div class="bar-label">1633</div></div>
+        </div>
+        <div class="run-label"><span class="num">Run 5</span><span class="ctx">Chrome closed</span></div>
+      </div>
+      <!-- Run 6: DHarht 992, HashMap 892 -->
+      <div class="run">
+        <div class="bar-pair">
+          <div class="bar dharht" style="height: 58.4%;"><div class="bar-label">992</div></div>
+          <div class="bar hashmap" style="height: 52.5%;"><div class="bar-label">892</div></div>
+        </div>
+        <div class="run-label"><span class="num">Run 6</span><span class="ctx">cold cache</span></div>
+      </div>
+      <!-- Run 7: DHarht 402, HashMap 1628 -->
+      <div class="run">
+        <div class="bar-pair">
+          <div class="bar dharht" style="height: 23.6%;"><div class="bar-label">402</div></div>
+          <div class="bar hashmap" style="height: 95.8%;"><div class="bar-label">1628</div></div>
+        </div>
+        <div class="run-label"><span class="num">Run 7</span><span class="ctx">cleanest state</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="insights">
+    <div class="insight dharht">
+      <div class="head"><span class="dot"></span>DHarht Memory · sealed lookup</div>
+      <div class="body">Layout fixed at seal time — splitmix64 scatter, 256 shards, 16-bit sparse front directory, MicroBucket4/8/16. No per-process random seed.</div>
+      <div class="stat"><span class="key">range:</span> <span class="val">105 – 992 ns</span> · <span class="key">9.4× swing</span></div>
+    </div>
+    <div class="insight hashmap">
+      <div class="head"><span class="dot"></span>std::HashMap · randomized SipHash</div>
+      <div class="body">Adaptive table sizing + per-process random seed → cache footprint and probe sequence shift on every fresh process. Faster on warm cache, more brittle under pressure.</div>
+      <div class="stat"><span class="key">range:</span> <span class="val">84 – 1633 ns</span> · <span class="key">19.4× swing</span></div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <span><span class="swatch dh"></span>DHarht Memory</span>
+    <span><span class="swatch hm"></span>std::HashMap (SipHash)</span>
+    <span style="margin-left: auto; color: #6e7681; font-size: 10px;">lower bar = faster · runs 1-3 (system warm) · runs 4-6 (system loaded) · run 7 (cleanest)</span>
+  </div>
+</body>
+</html>

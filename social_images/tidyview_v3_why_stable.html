@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 1200px; height: 630px; overflow: hidden;
+    background: #0d1117;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    color: #e6edf3;
+    display: flex; flex-direction: column;
+    padding: 28px 44px 22px 44px;
+  }
+
+  .header {
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin-bottom: 4px;
+  }
+  .header h1 { font-size: 22px; font-weight: 800; letter-spacing: -0.3px; }
+  .header .right { font-size: 11px; color: #8b949e; font-family: 'Cascadia Code', monospace; }
+  .sub {
+    font-size: 12px; color: #8b949e;
+    margin-bottom: 14px;
+  }
+
+  /* TOP HALF: side-by-side architecture comparison */
+  .compare {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    margin-bottom: 14px;
+  }
+
+  .col {
+    background: #161b22;
+    border-radius: 10px;
+    padding: 14px 16px 12px 16px;
+    border: 1px solid #30363d;
+  }
+  .col.hm { border-color: #cf222e44; }
+  .col.dh { border-color: #1f6feb55; }
+
+  .col-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 8px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #30363d;
+  }
+  .col-title {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 14px; font-weight: 700;
+  }
+  .col-title .dot {
+    width: 9px; height: 9px; border-radius: 50%;
+  }
+  .col.hm .col-title { color: #ff7b72; }
+  .col.hm .col-title .dot { background: #ff7b72; }
+  .col.dh .col-title { color: #58a6ff; }
+  .col.dh .col-title .dot { background: #58a6ff; }
+  .col-range {
+    font-family: 'Cascadia Code', monospace;
+    font-size: 11px; color: #8b949e;
+  }
+  .col-range .val { color: #c9d1d9; }
+  .col-range .swing { color: #ff7b72; font-weight: 700; }
+  .col.dh .col-range .swing { color: #58a6ff; }
+
+  .reasons { display: flex; flex-direction: column; gap: 6px; }
+  .reason {
+    display: grid;
+    grid-template-columns: 18px 1fr;
+    gap: 8px;
+    font-size: 11px;
+    line-height: 1.4;
+    align-items: start;
+  }
+  .reason .icon {
+    font-family: 'Cascadia Code', monospace;
+    font-size: 11px; font-weight: 700;
+    color: #8b949e;
+    width: 18px; text-align: center;
+  }
+  .reason .body {
+    color: #c9d1d9;
+  }
+  .reason .body .head {
+    font-weight: 700;
+    color: #e6edf3;
+    margin-right: 4px;
+  }
+  .reason .body code {
+    font-family: 'Cascadia Code', monospace;
+    font-size: 10px;
+    background: #0d1117;
+    padding: 1px 5px;
+    border-radius: 3px;
+    border: 1px solid #30363d;
+    color: #c9d1d9;
+  }
+
+  /* BOTTOM HALF: unique advantages */
+  .advantages {
+    flex: 1;
+    background: linear-gradient(135deg, #161b22 0%, #1c2128 100%);
+    border: 1px solid #1f6feb55;
+    border-radius: 10px;
+    padding: 14px 16px;
+    display: flex; flex-direction: column;
+  }
+  .adv-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .adv-head h2 {
+    font-size: 15px; font-weight: 800;
+    color: #58a6ff;
+  }
+  .adv-head .tag {
+    font-size: 10px; color: #8b949e;
+    font-family: 'Cascadia Code', monospace;
+  }
+
+  .adv-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    flex: 1;
+  }
+  .adv-card {
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 8px 10px;
+    display: flex; flex-direction: column;
+    gap: 3px;
+  }
+  .adv-card .title {
+    font-size: 11px; font-weight: 700;
+    color: #58a6ff;
+    display: flex; align-items: center; gap: 5px;
+  }
+  .adv-card .title .check { color: #3fb950; font-weight: 800; }
+  .adv-card .desc {
+    font-size: 10px; color: #c9d1d9;
+    line-height: 1.35;
+  }
+  .adv-card .vs {
+    font-size: 9px;
+    color: #ff7b72;
+    margin-top: auto;
+    font-family: 'Cascadia Code', monospace;
+  }
+
+  .footer {
+    margin-top: 8px;
+    font-size: 10px; color: #6e7681;
+    text-align: center;
+    font-family: 'Cascadia Code', monospace;
+  }
+  .footer .pop { color: #3fb950; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <h1>Why DHarht's range is tighter — and what that buys you</h1>
+    <div class="right">cjc-lang v0.1.7 · u64 lookup</div>
+  </div>
+  <div class="sub">Same workload, 7 runs. The architectural reasons for the variance gap, and the structural properties HashMap can't match.</div>
+
+  <div class="compare">
+    <div class="col hm">
+      <div class="col-head">
+        <div class="col-title"><span class="dot"></span>std::HashMap (SipHash)</div>
+        <div class="col-range"><span class="val">84–1633 ns</span> · <span class="swing">19.4× swing</span></div>
+      </div>
+      <div class="reasons">
+        <div class="reason">
+          <div class="icon">!</div>
+          <div class="body"><span class="head">Random SipHash key per process.</span> Same input lands at different slots in different runs. Cache layout drifts.</div>
+        </div>
+        <div class="reason">
+          <div class="icon">!</div>
+          <div class="body"><span class="head">Adaptive table sizing.</span> Power-of-2 grow events copy the old table; allocation is bursty. Final layout depends on insertion path.</div>
+        </div>
+        <div class="reason">
+          <div class="icon">!</div>
+          <div class="body"><span class="head">Probe sequence is seed-dependent.</span> Robin-hood probing means cache footprint shifts per process.</div>
+        </div>
+        <div class="reason">
+          <div class="icon">!</div>
+          <div class="body"><span class="head">Memory pressure penalizes it harder.</span> Fresh process + cold cache + random layout = the 1633 ns peak.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col dh">
+      <div class="col-head">
+        <div class="col-title"><span class="dot"></span>DHarht Memory (sealed)</div>
+        <div class="col-range"><span class="val">105–992 ns</span> · <span class="swing">9.4× swing</span></div>
+      </div>
+      <div class="reasons">
+        <div class="reason">
+          <div class="icon">✓</div>
+          <div class="body"><span class="head">Pure splitmix64 scatter.</span> Same input → same shard, same prefix, same slot. <code>fn(u64) → u64</code> with no state.</div>
+        </div>
+        <div class="reason">
+          <div class="icon">✓</div>
+          <div class="body"><span class="head">Layout fixed at <code>seal()</code>.</span> 256 shards × 16-bit sparse paged front directory. Never reshapes after build.</div>
+        </div>
+        <div class="reason">
+          <div class="icon">✓</div>
+          <div class="body"><span class="head">Direct indexing, no probing.</span> Front directory is a jump table; MicroBucket scan is bounded at 16 entries with parallel match_mask.</div>
+        </div>
+        <div class="reason">
+          <div class="icon">✓</div>
+          <div class="body"><span class="head">Bursty allocator pressure absent.</span> Per-shard slab arenas append monotonically during build, then zero allocation post-seal.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="advantages">
+    <div class="adv-head">
+      <h2>What HashMap structurally cannot offer</h2>
+      <div class="tag">unique to DHarht Memory</div>
+    </div>
+    <div class="adv-grid">
+      <div class="adv-card">
+        <div class="title"><span class="check">✓</span>Cross-process byte-equal iter</div>
+        <div class="desc">Two processes, same input → identical iteration order. Use as snapshot identifier or audit checksum.</div>
+        <div class="vs">HashMap: random seed kills this</div>
+      </div>
+      <div class="adv-card">
+        <div class="title"><span class="check">✓</span>HashDoS-bounded by construction</div>
+        <div class="desc">Worst-case bucket = 16 entries. Beyond that, ART fallback caps depth at 8 byte-radix levels. No probe-length amplification.</div>
+        <div class="vs">HashMap: random seed is the *only* defense</div>
+      </div>
+      <div class="adv-card">
+        <div class="title"><span class="check">✓</span>shape_hash() determinism proof</div>
+        <div class="desc">One u64 hash over the sorted entry set + counters. Byte-equal across runs proves layout is what you expect.</div>
+        <div class="vs">HashMap: no such surface exists</div>
+      </div>
+      <div class="adv-card">
+        <div class="title"><span class="check">✓</span>Adversarial diagnostics surface</div>
+        <div class="desc">overflow_count() and max_collision_group() are queryable. Detect bucket pressure before it becomes a problem.</div>
+        <div class="vs">HashMap: no equivalent counters</div>
+      </div>
+      <div class="adv-card">
+        <div class="title"><span class="check">✓</span>Pre-computed hash lookup</div>
+        <div class="desc">lookup_by_hash(u64) accepts an externally-computed content hash. Skip rehashing in pipelines that already carry it.</div>
+        <div class="vs">HashMap: no API to pass hash directly</div>
+      </div>
+      <div class="adv-card">
+        <div class="title"><span class="check">✓</span>Predictable SLA</div>
+        <div class="desc">9.4× variance vs HashMap's 19.4×. When p99 latency matters more than p50, the tighter envelope is the win.</div>
+        <div class="vs">HashMap: tail latency is harder to bound</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    HashMap wins peak speed on warm cache · DHarht wins <span class="pop">predictability + reproducibility</span> · pick by what your workload values
+  </div>
+</body>
+</html>

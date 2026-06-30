@@ -1,0 +1,69 @@
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 1 Benchmark: 1D Heat Equation PINN
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Equation:    u_t = α · u_xx              on x ∈ [0, 1], t ∈ [0, 1]
+// IC:          u(x, 0) = sin(π·x)
+// BCs:         u(0, t) = 0,  u(1, t) = 0
+// Analytical:  u(x, t) = exp(-α·π²·t) · sin(π·x)
+// α (diffusivity) = 0.01
+//
+// This example invokes the v0.1.5 production builtin `pinn_train_heat`,
+// which is wired identically in both `cjc-eval` (AST) and `cjc-mir-exec`
+// (MIR) — see crates/cjc-eval/src/lib.rs:2459 and
+// crates/cjc-mir-exec/src/lib.rs:1941.
+//
+// The trainer reports L2 / max error against the analytical solution
+// internally; we just print and threshold-check those metrics here.
+//
+// Run:
+//   cjcl run examples/physics_ml/pinn_heat_1d.cjcl
+//   cjcl run --mir-opt examples/physics_ml/pinn_heat_1d.cjcl
+// Both should produce bit-identical output.
+// ═══════════════════════════════════════════════════════════════════════
+
+fn main() {
+    let epochs: i64 = 500;
+    let lr: f64 = 1e-3;
+    let n_colloc: i64 = 64;
+    let alpha: f64 = 0.01;
+    let seed: i64 = 42;
+
+    print("PINN benchmark: 1D heat equation");
+    print("================================");
+    print("u_t = " + to_string(alpha) + " * u_xx");
+    print("Domain: x in [0,1], t in [0,1]");
+    print("epochs=" + to_string(epochs) + " lr=" + to_string(lr) + " seed=" + to_string(seed));
+    print("");
+
+    let result = pinn_train_heat(epochs, lr, n_colloc, alpha, seed);
+
+    print("Final metrics:");
+    print("  L2 relative error : " + to_string(result.l2_error));
+    print("  Max abs  error    : " + to_string(result.max_error));
+    print("  Mean residual     : " + to_string(result.mean_residual));
+    print("  Epochs recorded   : " + to_string(result.n_epochs));
+
+    // Pass/fail thresholds — chosen to be passable on the default
+    // 500-epoch budget. Tighten in long-running benchmark.
+    let l2_threshold: f64 = 0.20;
+    let max_threshold: f64 = 0.40;
+
+    let l2_ok: bool = result.l2_error < l2_threshold;
+    let max_ok: bool = result.max_error < max_threshold;
+
+    print("");
+    print("Threshold check:");
+    print("  L2 < " + to_string(l2_threshold) + "  -> " + to_string(l2_ok));
+    print("  Max < " + to_string(max_threshold) + " -> " + to_string(max_ok));
+
+    if l2_ok {
+        if max_ok {
+            print("PASS");
+        } else {
+            print("FAIL: max error above threshold");
+        }
+    } else {
+        print("FAIL: L2 error above threshold");
+    }
+}

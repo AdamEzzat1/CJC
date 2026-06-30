@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 1200px; height: 630px; overflow: hidden;
+    background: #0d1117;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    color: #e6edf3;
+    display: flex; flex-direction: column;
+    padding: 44px 56px;
+  }
+
+  .header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 28px;
+  }
+  .left h1 { font-size: 28px; font-weight: 700; color: #e6edf3; }
+  .left p  { font-size: 14px; color: #8b949e; margin-top: 4px; }
+  .badge {
+    font-size: 12px; font-weight: 600; letter-spacing: 0.07em;
+    color: #bc8cff; text-transform: uppercase;
+    border: 1px solid #6e40c9; border-radius: 4px;
+    padding: 4px 10px;
+  }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; flex: 1; }
+
+  .code-card {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  .card-header {
+    background: #1c2128;
+    border-bottom: 1px solid #30363d;
+    padding: 8px 16px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .card-title { font-size: 12px; color: #8b949e; font-weight: 500; margin-left: 4px; }
+
+  pre {
+    padding: 14px 18px;
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: 13px;
+    line-height: 1.7;
+    overflow: hidden;
+  }
+
+  /* syntax colours */
+  .kw  { color: #ff7b72; }   /* keyword */
+  .fn  { color: #d2a8ff; }   /* function */
+  .str { color: #a5d6ff; }   /* string */
+  .rx  { color: #f0883e; }   /* regex literal */
+  .op  { color: #79c0ff; }   /* operator ~= !~ */
+  .cm  { color: #8b949e; }   /* comment */
+  .bool{ color: #56d364; }   /* true/false */
+  .ty  { color: #ffa657; }   /* type */
+  .num { color: #56d364; }   /* number */
+  .arr { color: #58a6ff; }   /* arrow */
+
+  .bottom-row {
+    margin-top: 16px;
+    display: flex; gap: 12px;
+  }
+  .pill {
+    background: #161b22; border: 1px solid #30363d; border-radius: 20px;
+    padding: 6px 14px; font-size: 12px; color: #8b949e;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .pill .label { color: #e6edf3; font-weight: 600; }
+  .pill.purple { border-color: #6e40c9; }
+  .pill.blue   { border-color: #1f6feb; }
+  .pill.orange { border-color: #9e5a00; }
+</style>
+</head>
+<body>
+
+  <div class="header">
+    <div class="left">
+      <h1>Regex in CJC-Lang</h1>
+      <p>Thompson NFA engine · O(n·m) guarantee · Perl-style syntax · 14 stringr functions</p>
+    </div>
+    <div class="badge">NFA · No Backtracking</div>
+  </div>
+
+  <div class="grid">
+
+    <!-- Card 1: match / not-match operators -->
+    <div class="code-card">
+      <div class="card-header">
+        <div class="dot" style="background:#ff5f57"></div>
+        <div class="dot" style="background:#febc2e"></div>
+        <div class="dot" style="background:#28c840"></div>
+        <span class="card-title">~= match  ·  !~ not-match operators</span>
+      </div>
+      <pre><span class="cm">// ~= returns true if pattern matches</span>
+<span class="kw">let</span> email = <span class="str">"alice@company.com"</span>;
+<span class="fn">print</span>(email <span class="op">~=</span> <span class="rx">/\w+@\w+\.\w+/</span>);  <span class="cm">// true</span>
+
+<span class="cm">// !~ returns true if pattern does NOT match</span>
+<span class="kw">let</span> code = <span class="str">"ABC-123"</span>;
+<span class="fn">print</span>(code <span class="op">!~</span> <span class="rx">/^\d+$/</span>);           <span class="cm">// true</span>
+
+<span class="cm">// works in conditionals</span>
+<span class="kw">if</span> email <span class="op">~=</span> <span class="rx">/^admin/</span> {
+    <span class="fn">print</span>(<span class="str">"admin account"</span>);
+}</pre>
+    </div>
+
+    <!-- Card 2: validate function -->
+    <div class="code-card">
+      <div class="card-header">
+        <div class="dot" style="background:#ff5f57"></div>
+        <div class="dot" style="background:#febc2e"></div>
+        <div class="dot" style="background:#28c840"></div>
+        <span class="card-title">regex inside functions</span>
+      </div>
+      <pre><span class="kw">fn</span> <span class="fn">validate_email</span>(s: <span class="ty">String</span>) <span class="arr">-></span> <span class="ty">Bool</span> {
+    <span class="kw">return</span> s <span class="op">~=</span> <span class="rx">/\w+@\w+\.\w+/</span>;
+}
+
+<span class="fn">print</span>(<span class="fn">validate_email</span>(<span class="str">"bob@example.org"</span>));
+<span class="cm">// → true</span>
+<span class="fn">print</span>(<span class="fn">validate_email</span>(<span class="str">"not-an-email"</span>));
+<span class="cm">// → false</span>
+
+<span class="kw">fn</span> <span class="fn">is_numeric</span>(s: <span class="ty">String</span>) <span class="arr">-></span> <span class="ty">Bool</span> {
+    <span class="kw">return</span> s <span class="op">~=</span> <span class="rx">/^\d+(\.\d+)?$/</span>;
+}</pre>
+    </div>
+
+    <!-- Card 3: stringr functions -->
+    <div class="code-card">
+      <div class="card-header">
+        <div class="dot" style="background:#ff5f57"></div>
+        <div class="dot" style="background:#febc2e"></div>
+        <div class="dot" style="background:#28c840"></div>
+        <span class="card-title">14 stringr-style functions</span>
+      </div>
+      <pre><span class="cm">// str_replace  str_detect  str_extract</span>
+<span class="fn">print</span>(<span class="fn">str_replace</span>(<span class="str">"hello world"</span>, <span class="str">"world"</span>, <span class="str">"CJC"</span>));
+<span class="cm">// → hello CJC</span>
+
+<span class="fn">print</span>(<span class="fn">str_detect</span>(<span class="str">"foo_bar_123"</span>, <span class="rx">/\d+/</span>));
+<span class="cm">// → true</span>
+
+<span class="fn">print</span>(<span class="fn">str_extract</span>(<span class="str">"price: $42.50"</span>, <span class="rx">/\d+\.\d+/</span>));
+<span class="cm">// → "42.50"</span>
+
+<span class="fn">print</span>(<span class="fn">str_split</span>(<span class="str">"a,b,c"</span>, <span class="str">","</span>));
+<span class="cm">// → ["a", "b", "c"]</span></pre>
+    </div>
+
+    <!-- Card 4: TidyView integration -->
+    <div class="code-card">
+      <div class="card-header">
+        <div class="dot" style="background:#ff5f57"></div>
+        <div class="dot" style="background:#febc2e"></div>
+        <div class="dot" style="background:#28c840"></div>
+        <span class="card-title">regex inside TidyView filter &amp; mutate</span>
+      </div>
+      <pre><span class="cm">// filter rows where email is valid</span>
+<span class="kw">let</span> clean = df
+    .<span class="fn">filter</span>(<span class="fn">col</span>(<span class="str">"email"</span>) <span class="op">~=</span> <span class="rx">/\w+@\w+\.\w+/</span>)
+    .<span class="fn">mutate</span>(<span class="str">"domain"</span>,
+        <span class="fn">str_extract</span>(<span class="fn">col</span>(<span class="str">"email"</span>), <span class="rx">/@(\w+\.\w+)/</span>))
+    .<span class="fn">select</span>([<span class="str">"name"</span>, <span class="str">"email"</span>, <span class="str">"domain"</span>]);
+
+<span class="cm">// result: only valid emails, domain extracted</span></pre>
+    </div>
+
+  </div>
+
+  <div class="bottom-row">
+    <div class="pill purple"><span class="label">str_detect</span> · <span class="label">str_extract</span> · <span class="label">str_replace</span> · <span class="label">str_split</span> · <span class="label">str_count</span> · <span class="label">str_sub</span></div>
+    <div class="pill blue"><span class="label">str_starts</span> · <span class="label">str_ends</span> · <span class="label">str_len</span> · <span class="label">str_to_lower</span> · <span class="label">str_to_upper</span> · <span class="label">str_trim</span> · <span class="label">str_replace_all</span> · <span class="label">str_extract_all</span></div>
+  </div>
+
+</body>
+</html>

@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 1080px; height: 1080px; overflow: hidden;
+    background:
+      radial-gradient(circle at 20% 0%, #1f2937 0%, transparent 50%),
+      radial-gradient(circle at 80% 100%, #2d1b3d 0%, transparent 50%),
+      linear-gradient(135deg, #0d1117 0%, #161b22 100%);
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    color: #e6edf3;
+    display: flex; flex-direction: column;
+    padding: 38px 44px 38px 44px;
+  }
+
+  /* ── Top: command + version ─────────────────────────── */
+  .header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 18px;
+  }
+  .breadcrumb {
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: 22px; color: #c9d1d9;
+  }
+  .breadcrumb .prompt { color: #7ee787; }
+  .breadcrumb .cmd { color: #58a6ff; }
+  .breadcrumb .arg { color: #ffa657; font-weight: 700; }
+  .version-pill {
+    background: #161b22; border: 1px solid #1f6feb; border-radius: 26px;
+    padding: 7px 18px;
+    font-size: 14px; font-weight: 700; color: #58a6ff;
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  }
+
+  /* ── Card containing the explanation ────────────────── */
+  .card {
+    flex: 1;
+    background: #010409;
+    border: 1px solid #30363d;
+    border-radius: 14px;
+    padding: 28px 32px 26px 32px;
+    overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+  .code-header {
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: 18px;
+    color: #c9d1d9;
+    margin-bottom: 6px;
+  }
+  .code-header .code { color: #ffa657; font-weight: 700; }
+  .code-header .cat { color: #8b949e; font-weight: 400; }
+  .divider {
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    color: #30363d;
+    margin-bottom: 18px;
+    letter-spacing: -1px;
+    font-size: 14px;
+  }
+
+  h1.title {
+    font-size: 38px; font-weight: 800;
+    letter-spacing: -0.5px;
+    line-height: 1.15;
+    background: linear-gradient(90deg, #58a6ff 0%, #d2a8ff 100%);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 20px;
+  }
+
+  .section {
+    margin-bottom: 18px;
+  }
+  .section .h {
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: 18px; font-weight: 700;
+    color: #79c0ff;
+    margin-bottom: 8px;
+  }
+  .section p, .section li {
+    font-size: 18px; color: #c9d1d9;
+    line-height: 1.5;
+    margin-bottom: 8px;
+  }
+  .section strong { color: #e6edf3; font-weight: 700; }
+
+  .inline-code {
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    background: #161b22;
+    color: #79c0ff;
+    padding: 2px 8px;
+    border-radius: 5px;
+    font-size: 16px;
+  }
+
+  /* Code sample */
+  .code-sample {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin: 10px 0 12px 0;
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: 17px;
+    line-height: 1.55;
+  }
+  .code-sample .kw { color: #ff7b72; }
+  .code-sample .fn { color: #d2a8ff; }
+  .code-sample .var { color: #79c0ff; }
+  .code-sample .punct { color: #8b949e; }
+
+  /* "Why it matters" callout */
+  .why-callout {
+    background: rgba(86, 211, 255, 0.07);
+    border-left: 4px solid #56d3ff;
+    border-radius: 0 10px 10px 0;
+    padding: 16px 20px;
+    margin: 6px 0 8px 0;
+  }
+  .why-callout .h {
+    color: #56d3ff;
+    margin-bottom: 10px;
+  }
+  .why-callout ol {
+    margin-left: 22px;
+    margin-top: 6px;
+  }
+  .why-callout li { margin-bottom: 10px; }
+  .why-callout li:last-child { margin-bottom: 0; }
+
+  /* Footer: continues hint */
+  .footer {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid #21262d;
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: 14px;
+    color: #6e7681;
+    display: flex; justify-content: space-between;
+  }
+  .footer .cont { color: #58a6ff; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <div class="breadcrumb">
+      <span class="prompt">$</span> <span class="cmd">cjcl explain</span> <span class="arg">E1003</span>
+    </div>
+    <div class="version-pill">CJC-Lang · 1 of 82</div>
+  </div>
+
+  <div class="card">
+    <div class="code-header">
+      <span class="code">E1003</span> <span class="cat">[parser]</span> · missing type annotation on function parameter
+    </div>
+    <div class="divider">──────────────────────────────────────────────────────</div>
+
+    <h1 class="title">Function parameters<br/>need explicit types</h1>
+
+    <div class="section">
+      <div class="h">## What happened</div>
+      <p>You wrote a function whose parameter has no type annotation, like this:</p>
+      <div class="code-sample">
+        <span class="kw">fn</span> <span class="fn">solve</span><span class="punct">(</span><span class="var">x</span><span class="punct">) {</span> <span class="var">x</span> <span class="punct">*</span> 2 <span class="punct">}</span>
+      </div>
+      <p>CJC-Lang stopped at <span class="inline-code">x</span> because it couldn't tell what kind of value it is supposed to be.</p>
+    </div>
+
+    <div class="why-callout section">
+      <div class="h">## Why it matters</div>
+      <p>CJC-Lang treats parameter types as part of the <strong>determinism contract</strong>. Two reasons this is enforced, not just suggested:</p>
+      <ol>
+        <li><strong>Different types reduce differently.</strong> A sum of <span class="inline-code">f32</span> values and a sum of <span class="inline-code">f64</span> values give different bit patterns for the same logical numbers — silently breaking the "same seed, same output" guarantee.</li>
+        <li><strong>Different types pick different kernels.</strong> <span class="inline-code">f64</span> routes through Kahan-compensated summation; <span class="inline-code">i64</span> through overflow-checked paths. Without the annotation the compiler can't pick.</li>
+      </ol>
+    </div>
+
+    <div class="footer">
+      <div>→ <span class="cont">How to fix</span> · <span class="cont">Common pitfall</span> · <span class="cont">Learn more</span></div>
+      <div>github.com/AdamEzzat1/CJC</div>
+    </div>
+  </div>
+</body>
+</html>

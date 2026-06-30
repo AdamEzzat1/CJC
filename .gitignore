@@ -40,3 +40,7 @@ python/**/__pycache__/
 python/.pytest_cache/
 python/*.egg-info/
 
+
+# Node deps for the social-image generator (regenerated via npm install)
+node_modules/
+social_images/node_modules/

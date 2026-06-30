@@ -1,0 +1,75 @@
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 2 Benchmark: 1D Viscous Burgers' Equation PINN
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Equation:    u_t + u·u_x = ν·u_xx         on x ∈ [-1, 1], t ∈ [0, 1]
+// IC:          u(x, 0) = -sin(π·x)
+// BCs:         u(-1, t) = u(1, t) = 0
+// Reference:   No closed-form analytical solution. Cole-Hopf transform
+//              exists but trainer does not compute it. Trainer's reported
+//              `l2_error` measures IC reproduction at t=0 (50 points)
+//              against -sin(π·x), NOT a full space-time L2.
+// ν = 0.01 / π ≈ 0.00318 (default kinematic viscosity)
+//
+// Burgers is the canonical "shock formation" PDE: a smooth IC steepens
+// into a near-discontinuity by t≈1/π. Mean physics residual is the
+// most meaningful convergence indicator; full-domain accuracy gating
+// is deferred to Phase 3 (independent reference suite).
+//
+// Run:
+//   cjcl run examples/physics_ml/pinn_burgers_1d.cjcl
+//   cjcl run --mir-opt examples/physics_ml/pinn_burgers_1d.cjcl
+// ═══════════════════════════════════════════════════════════════════════
+
+fn main() {
+    let epochs: i64 = 500;
+    let lr: f64 = 1e-3;
+    let n_colloc: i64 = 64;
+    let nu: f64 = 0.0031831;  // ≈ 0.01/π
+    let seed: i64 = 42;
+
+    print("PINN benchmark: 1D Burgers equation");
+    print("===================================");
+    print("u_t + u*u_x = " + to_string(nu) + " * u_xx");
+    print("Domain: x in [-1,1], t in [0,1]");
+    print("epochs=" + to_string(epochs) + " lr=" + to_string(lr) + " seed=" + to_string(seed));
+    print("");
+
+    let result = pinn_train_burgers(epochs, lr, n_colloc, nu, seed);
+
+    print("Final metrics:");
+    print("  IC L2 error    : " + to_string(result.l2_error));
+    print("  IC max error   : " + to_string(result.max_error));
+    print("  Mean residual  : " + to_string(result.mean_residual));
+    print("  Epochs recorded: " + to_string(result.n_epochs));
+
+    // Calibrated post-run: observed IC L2~0.095, IC max~0.173, residual~0.252.
+    // ~3x headroom over observed.
+    let ic_l2_threshold: f64 = 0.30;
+    let ic_max_threshold: f64 = 0.55;
+    let resid_threshold: f64 = 0.80;
+
+    let ic_l2_ok: bool = result.l2_error < ic_l2_threshold;
+    let ic_max_ok: bool = result.max_error < ic_max_threshold;
+    let resid_ok: bool = result.mean_residual < resid_threshold;
+
+    print("");
+    print("Threshold check:");
+    print("  IC L2  < " + to_string(ic_l2_threshold) + " -> " + to_string(ic_l2_ok));
+    print("  IC max < " + to_string(ic_max_threshold) + " -> " + to_string(ic_max_ok));
+    print("  Resid  < " + to_string(resid_threshold) + " -> " + to_string(resid_ok));
+
+    if ic_l2_ok {
+        if ic_max_ok {
+            if resid_ok {
+                print("PASS");
+            } else {
+                print("FAIL: residual above threshold");
+            }
+        } else {
+            print("FAIL: IC max error above threshold");
+        }
+    } else {
+        print("FAIL: IC L2 error above threshold");
+    }
+}

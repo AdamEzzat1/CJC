@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 1200px; height: 630px; overflow: hidden;
+    background: linear-gradient(135deg, #0d1117 0%, #161b22 100%);
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    color: #e6edf3;
+    display: flex; flex-direction: column;
+    padding: 36px 48px 28px 48px;
+  }
+
+  /* ── Header ───────────────────────────────────────────── */
+  .header {
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin-bottom: 8px;
+  }
+  .title-block h1 {
+    font-size: 38px; font-weight: 800; letter-spacing: -0.5px;
+    background: linear-gradient(90deg, #58a6ff 0%, #79c0ff 45%, #d2a8ff 100%);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .title-block .sub {
+    font-size: 16px; color: #8b949e; margin-top: 2px;
+  }
+  .version-pill {
+    background: #161b22; border: 1px solid #1f6feb; border-radius: 24px;
+    padding: 7px 18px;
+    font-size: 14px; font-weight: 700; color: #58a6ff;
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  }
+
+  .tag-line {
+    font-size: 16px; color: #c9d1d9; margin-bottom: 18px;
+    line-height: 1.4;
+  }
+  .tag-line .pop { color: #58a6ff; font-weight: 700; }
+  .tag-line .accent { color: #d2a8ff; font-weight: 700; }
+
+  /* ── Body grid: terminal | stats ──────────────────────── */
+  .body {
+    display: grid; grid-template-columns: 1.25fr 1fr; gap: 22px;
+    flex: 1;
+  }
+
+  /* Terminal card */
+  .terminal {
+    background: #010409;
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    padding: 16px 18px 18px 18px;
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: 13px;
+    line-height: 1.52;
+    overflow: hidden;
+  }
+  .terminal .dot-row {
+    display: flex; gap: 6px; margin-bottom: 12px;
+  }
+  .terminal .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+  }
+  .terminal .dot.r { background: #ff5f56; }
+  .terminal .dot.y { background: #ffbd2e; }
+  .terminal .dot.g { background: #27c93f; }
+
+  .terminal .prompt { color: #7ee787; }
+  .terminal .file { color: #d2a8ff; }
+  .terminal .err { color: #ff7b72; font-weight: 700; }
+  .terminal .code { color: #ffa657; font-weight: 700; }
+  .terminal .caret { color: #ff7b72; }
+  .terminal .blue { color: #58a6ff; }
+  .terminal .dim { color: #6e7681; }
+  .terminal .hint-row {
+    background: rgba(86, 211, 255, 0.08);
+    border-left: 3px solid #56d3ff;
+    padding: 3px 8px;
+    margin: 4px -8px;
+  }
+  .terminal .hint-label { color: #56d3ff; font-weight: 700; }
+  .terminal .hint-body { color: #56d3ff; }
+
+  /* Stats column */
+  .stats {
+    display: grid; grid-template-rows: repeat(4, 1fr); gap: 12px;
+  }
+  .stat {
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    padding: 12px 16px;
+    display: flex; align-items: center; gap: 14px;
+  }
+  .stat .num {
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: 30px; font-weight: 800; line-height: 1;
+    min-width: 100px; text-align: left;
+  }
+  .stat .num .x { font-size: 18px; opacity: 0.65; margin-left: 2px; }
+  .stat .label {
+    font-size: 12px; color: #c9d1d9;
+    line-height: 1.35;
+    text-transform: none; letter-spacing: 0;
+  }
+  .stat .label .sub {
+    font-size: 11px; color: #6e7681; display: block; margin-top: 1px;
+  }
+
+  .stat.s1 { border-color: #1f6feb55; } .stat.s1 .num { color: #58a6ff; }
+  .stat.s2 { border-color: #3fb95055; } .stat.s2 .num { color: #3fb950; }
+  .stat.s3 { border-color: #f0883e55; } .stat.s3 .num { color: #f0883e; }
+  .stat.s4 { border-color: #bc8cff55; } .stat.s4 .num { color: #bc8cff; }
+
+  /* ── Footer ───────────────────────────────────────────── */
+  .footer {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-top: 16px;
+    font-size: 12px; color: #8b949e;
+  }
+  .footer .left {
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  }
+  .footer .left .pop { color: #58a6ff; }
+  .footer .right { color: #6e7681; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <div class="title-block">
+      <h1>Compiler errors that teach.</h1>
+      <div class="sub">Rust-grade precision + Elm-grade pedagogy, auto-linked on every error.</div>
+    </div>
+    <div class="version-pill">CJC-Lang v0.1.7</div>
+  </div>
+
+  <div class="tag-line">
+    Two-fold error system: the terse <span class="pop">diagnostic</span> tells you <span class="pop">where</span>; the auto-attached hint tells you <span class="accent">where to learn why</span>.
+  </div>
+
+  <div class="body">
+    <!-- ── Terminal showing the new error format ─────────── -->
+    <div class="terminal">
+      <div class="dot-row">
+        <div class="dot r"></div><div class="dot y"></div><div class="dot g"></div>
+      </div>
+
+      <div><span class="prompt">$</span> cjcl run buggy.cjcl</div>
+      <div>&nbsp;</div>
+      <div><span class="file">buggy.cjcl:3:5:</span> <span class="err">error</span>[<span class="code">E1001</span>]: expected `;`, found `let`</div>
+      <div><span class="blue">&nbsp;&nbsp;--&gt;</span> buggy.cjcl:3:5</div>
+      <div><span class="blue">&nbsp;&nbsp;|</span></div>
+      <div><span class="blue">3 |</span> &nbsp;&nbsp;&nbsp;&nbsp;let arr: [i64] = [10, 20, 30];</div>
+      <div><span class="blue">&nbsp;&nbsp;|</span> &nbsp;&nbsp;&nbsp;&nbsp;<span class="caret">^^^ expected `;` here</span></div>
+      <div><span class="blue">&nbsp;&nbsp;|</span></div>
+      <div class="hint-row">
+        &nbsp;&nbsp;= <span class="hint-label">hint:</span> <span class="hint-body">for the full explanation: cjcl explain E1001</span>
+      </div>
+      <div>&nbsp;</div>
+      <div><span class="dim">runtime error</span> [<span class="code">E8001</span>]: index 7 out of bounds for array of length 3</div>
+      <div class="hint-row">
+        <span class="hint-label">hint:</span> <span class="hint-body">for the full explanation: cjcl explain E8001</span>
+      </div>
+    </div>
+
+    <!-- ── Stats column ────────────────────────────────── -->
+    <div class="stats">
+      <div class="stat s1">
+        <div class="num">82<span class="x">/82</span></div>
+        <div class="label">
+          error codes documented
+          <span class="sub">100% pedagogy coverage</span>
+        </div>
+      </div>
+      <div class="stat s2">
+        <div class="num">2</div>
+        <div class="label">
+          layers, auto-linked
+          <span class="sub">precision + pedagogy on every error</span>
+        </div>
+      </div>
+      <div class="stat s3">
+        <div class="num">3</div>
+        <div class="label">
+          drift tests, no regression possible
+          <span class="sub">new code w/o explanation breaks build</span>
+        </div>
+      </div>
+      <div class="stat s4">
+        <div class="num">2,505<span class="x">/2,505</span></div>
+        <div class="label">
+          workspace tests passing
+          <span class="sub">eval ↔ MIR-exec parity preserved</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <div class="left">
+      <span class="pop">$</span> cjcl explain &lt;code&gt; &nbsp;·&nbsp; every error tells you what happened, <em>why</em>, and how to fix it
+    </div>
+    <div class="right">github.com/AdamEzzat1/CJC</div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,92 @@
+// =============================================================
+// Quantum Demo 06: Zero-noise extrapolation (Richardson, ZNE)
+// =============================================================
+//
+// ZNE recovers a noise-free observable E(0) from measurements taken
+// at several noise scale factors λ_1 < λ_2 < ... < λ_k via
+//
+//   E(0) ≈ Σ_i c_i · E(λ_i)
+//
+// where the coefficients c_i are the Richardson weights derived from
+// a Vandermonde system. Implementation: cjc-quantum/src/mitigation.rs.
+// Builtin: q_zne_mitigate(scales[], values[]) → [E0_estimate, coeffs[]]
+//          q_zne_linear(λ1, v1, λ2, v2)       → E0_linear
+//
+// We synthesize an analytic noise model so the closed-form answer
+// is known. Two cases:
+//
+//   (a) Linear noise:    E(λ) = E_true + a·λ
+//       Two-point extrapolation must recover E_true exactly.
+//
+//   (b) Quadratic noise: E(λ) = E_true + a·λ + b·λ²
+//       Three-point Richardson with degree-2 polynomial fit must
+//       recover E_true exactly (deterministic Vandermonde solve,
+//       Kahan-summed coefficients).
+//
+// Numbers used:
+//   E_true = -1.0,  a = 0.20,  b = -0.05
+//   Scales: 1.0, 2.0, 3.0
+//   Measured (analytic): -0.85,  -0.80,  -0.85
+//
+// What this proves about CJC-Lang:
+//   - q_zne_mitigate composes with the rest of the runtime: arrays in,
+//     [E0, coeffs] out, accessible from .cjcl source.
+//   - On exact-polynomial inputs the recovered value is the true zero-
+//     noise observable to floating-point precision.
+//   - The "deterministic mitigation" claim (Kahan + no-pivot Vandermonde)
+//     holds bit-equally between AST and MIR.
+// =============================================================
+
+fn approx(label: Any, got: f64, want: f64, tol: f64) {
+    let d = got - want;
+    if d < 0.0 { d = -d; }
+    let pass = "PASS";
+    if d > tol { pass = "FAIL"; }
+    print(pass + " " + label
+          + "  got=" + to_string(round(got * 1e9) / 1e9)
+          + "  want=" + to_string(want));
+}
+
+fn main() {
+    print("Quantum Demo 06: Richardson zero-noise extrapolation");
+    print("----------------------------------------------------");
+
+    let e_true = -1.0;
+    let a = 0.20;
+    let b = -0.05;
+
+    // ── (a) Linear two-point extrapolation ─────────────────────────
+    let l1 = 1.0;
+    let l2 = 2.0;
+    let v1_lin = e_true + a * l1;          // -0.8
+    let v2_lin = e_true + a * l2;          // -0.6
+    let e_lin = q_zne_linear(l1, v1_lin, l2, v2_lin);
+    approx("linear ZNE recovers E_true", e_lin, e_true, 1e-12);
+
+    // ── (b) Quadratic three-point Richardson ──────────────────────
+    let scales  = [1.0, 2.0, 3.0];
+    let v1 = e_true + a * 1.0 + b * 1.0 * 1.0;     // -0.85
+    let v2 = e_true + a * 2.0 + b * 2.0 * 2.0;     // -0.80
+    let v3 = e_true + a * 3.0 + b * 3.0 * 3.0;     // -0.85
+    let measured = [v1, v2, v3];
+    let result = q_zne_mitigate(scales, measured);
+    let e0_richardson = result[0];
+    let coeffs        = result[1];
+    approx("Richardson recovers E_true", e0_richardson, e_true, 1e-12);
+
+    // Coefficients sum to 1 by construction (interpolating polynomial at 0).
+    let s = coeffs[0] + coeffs[1] + coeffs[2];
+    approx("sum(c_i) = 1", s, 1.0, 1e-12);
+
+    print("Richardson coefficients:");
+    print("  c_0 = " + to_string(round(coeffs[0] * 1e6) / 1e6));
+    print("  c_1 = " + to_string(round(coeffs[1] * 1e6) / 1e6));
+    print("  c_2 = " + to_string(round(coeffs[2] * 1e6) / 1e6));
+
+    // ── (c) Stress: recovered value must equal Σ c_i · v_i exactly ──
+    let manual = coeffs[0] * v1 + coeffs[1] * v2 + coeffs[2] * v3;
+    approx("E0 matches sum(c_i v_i)", e0_richardson, manual, 1e-9);
+
+    print("");
+    print("done");
+}

@@ -1,0 +1,61 @@
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 3 Benchmark: 1D KdV Equation PINN (single soliton)
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Equation:    u_t + 6·u·u_x + u_xxx = 0     on x ∈ [-5, 5], t ∈ [0, 1]
+// IC:          u(x, 0) = 0.5·sech²(x/2)      (single soliton)
+// Reference:   Analytical 1-soliton `u(x,t) = 0.5·sech²(0.5·(x-t))` (c=1).
+//              The IC matches this expression at t=0 exactly, so the
+//              trained network targets a known traveling wave.
+//
+// Trainer reports `mean_residual` (RMS of u_t + 6·u·u_x + u_xxx). Full-
+// domain L2 over a 50×11 (x,t) grid against the soliton reference is
+// checked by the Rust test harness via `pinn_mlp_eval_grid`. This .cjcl
+// example gates only on residual + finiteness; Phase 3b will add a
+// `pinn_eval_at` builtin so the .cjcl side can do its own L2 too.
+//
+// Run:
+//   cjcl run examples/physics_ml/pinn_kdv_1d.cjcl
+//   cjcl run --mir-opt examples/physics_ml/pinn_kdv_1d.cjcl
+// ═══════════════════════════════════════════════════════════════════════
+
+fn main() {
+    let epochs: i64 = 500;
+    let lr: f64 = 1e-3;
+    let n_colloc: i64 = 64;
+    let seed: i64 = 42;
+
+    print("PINN benchmark: 1D KdV equation (single soliton)");
+    print("================================================");
+    print("u_t + 6*u*u_x + u_xxx = 0");
+    print("Domain: x in [-5,5], t in [0,1]");
+    print("IC: 0.5 * sech^2(x/2)");
+    print("epochs=" + to_string(epochs) + " lr=" + to_string(lr) + " seed=" + to_string(seed));
+    print("");
+
+    let result = pinn_train_kdv(epochs, lr, n_colloc, seed);
+
+    print("Final metrics:");
+    print("  Mean residual  : " + to_string(result.mean_residual));
+    print("  Epochs recorded: " + to_string(result.n_epochs));
+
+    // Calibrated post-run: observed mean_residual ≈ 3.1e-3 at seed=42, 500 epochs.
+    // ~6× headroom (residual is unusually small here because the IC matches the
+    // analytical 1-soliton exactly at t=0). The Rust test harness gates on
+    // full-domain RMSE (≤0.15) and max abs (≤0.40) over a 50×11 (x,t) grid via
+    // `pinn_mlp_eval_grid` against `(c/2)·sech²(√c/2·(x-c·t))` — this .cjcl
+    // example only exercises residual+finiteness.
+    let resid_threshold: f64 = 0.02;
+
+    let resid_ok: bool = result.mean_residual < resid_threshold;
+
+    print("");
+    print("Threshold check:");
+    print("  Resid < " + to_string(resid_threshold) + " -> " + to_string(resid_ok));
+
+    if resid_ok {
+        print("PASS");
+    } else {
+        print("FAIL: residual above threshold");
+    }
+}

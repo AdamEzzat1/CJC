@@ -1,0 +1,136 @@
+// =============================================================
+// Quantum Demo 04: GHZ states for n = 3, 4, 5 qubits
+// =============================================================
+//
+// |GHZ_n> = (|0...0> + |1...1>) / sqrt(2)
+// Construction: H on qubit 0, then CNOT(0, k) for k = 1..n-1
+//
+// Closed-form expectations:
+//   P(00...0)  = 1/2
+//   P(11...1)  = 1/2
+//   all other  = 0
+//   <Z_0 Z_1 ... Z_{n-1}>:
+//     = +1 if n is even (eigenvalue of all-Z parity on |0...0>+|1...1>)
+//     = -1 if n is odd  (because (+1)^n on |0...0> = +1 and (-1)^n on |1...1> = -1)
+//   ... wait, careful:
+//     <Z_0...Z_{n-1}> on (|0..0>+|1..1>)/sqrt(2):
+//       (+1)*(1/2)*(+1)^n + (+1)*(1/2)*(-1)^n        (cross terms vanish)
+//       = (1 + (-1)^n) / 2   (for n>=1)
+//       = 1 if n even, 0 if n odd
+//     But wait, the |0..0> and |1..1> components are eigenvectors of
+//     the all-Z product:
+//       Z_0...Z_{n-1} |0..0> = (+1)^n |0..0> = +|0..0>
+//       Z_0...Z_{n-1} |1..1> = (-1)^n |1..1>
+//     So <Z..Z> = (1/2)(1) + (1/2)(-1)^n = (1 + (-1)^n)/2
+//     n=3 -> 0,  n=4 -> 1,  n=5 -> 0
+//
+// What this proves about CJC-Lang:
+//   - The statevector simulator scales beyond 2 qubits.
+//   - q_h, q_cx compose to build n-body entanglement.
+//   - <Z_0 Z_1 ... Z_{n-1}> is computable purely from q_probs.
+//   - Same source runs in both AST and MIR with byte-equal output.
+// =============================================================
+
+fn bit(idx: i64, pos: i64) -> i64 {
+    let v = idx;
+    let p = 0;
+    while p < pos { v = v / 2; p = p + 1; }
+    v - (v / 2) * 2
+}
+
+// Parity of all bits of `idx` (0 or 1).
+fn parity_all(idx: i64, n: i64) -> i64 {
+    let par = 0;
+    let p = 0;
+    while p < n {
+        par = par + bit(idx, p);
+        p = p + 1;
+    }
+    par - (par / 2) * 2
+}
+
+// <Z_0 Z_1 ... Z_{n-1}> from probabilities.
+fn z_string_expectation(probs: Any, n: i64) -> f64 {
+    let total = 0.0;
+    let dim = 1;
+    let k = 0;
+    while k < n { dim = dim * 2; k = k + 1; }
+    let i = 0;
+    while i < dim {
+        let par = parity_all(i, n);
+        let sign = 1.0 - 2.0 * float(par);
+        total = total + sign * probs[i];
+        i = i + 1;
+    }
+    total
+}
+
+fn approx(label: Any, got: f64, want: f64, tol: f64) {
+    let d = got - want;
+    if d < 0.0 { d = -d; }
+    let pass = "PASS";
+    if d > tol { pass = "FAIL"; }
+    print(pass + " " + label
+          + "  got=" + to_string(round(got * 1e9) / 1e9)
+          + "  want=" + to_string(want));
+}
+
+fn build_ghz(n: i64) -> Any {
+    let c = qubits(n);
+    c = q_h(c, 0);
+    let k = 1;
+    while k < n {
+        c = q_cx(c, 0, k);
+        k = k + 1;
+    }
+    c
+}
+
+fn check_ghz(n: i64, expected_zstring: f64) {
+    print("GHZ_" + to_string(n));
+    let c = build_ghz(n);
+    let p = q_probs(c);
+
+    // Endpoints
+    let dim = 1;
+    let k = 0;
+    while k < n { dim = dim * 2; k = k + 1; }
+    let p_all0 = p[0];
+    let p_all1 = p[dim - 1];
+    approx("  P(0...0)", p_all0, 0.5, 1e-12);
+    approx("  P(1...1)", p_all1, 0.5, 1e-12);
+
+    // All other amplitudes must be 0
+    let max_other = 0.0;
+    let i = 1;
+    while i < dim - 1 {
+        let pi = p[i];
+        if pi < 0.0 { pi = -pi; }
+        if pi > max_other { max_other = pi; }
+        i = i + 1;
+    }
+    approx("  max P(other)", max_other, 0.0, 1e-12);
+
+    // <Z_0 ... Z_{n-1}>
+    let z_string = z_string_expectation(p, n);
+    approx("  <Z..Z>", z_string, expected_zstring, 1e-12);
+
+    // Norm
+    let s = 0.0;
+    let i2 = 0;
+    while i2 < dim { s = s + p[i2]; i2 = i2 + 1; }
+    approx("  norm", s, 1.0, 1e-12);
+}
+
+fn main() {
+    print("Quantum Demo 04: GHZ_n entanglement");
+    print("-----------------------------------");
+    // n=3: <Z..Z> = (1 + (-1)^3)/2 = 0
+    check_ghz(3, 0.0);
+    // n=4: <Z..Z> = (1 + (-1)^4)/2 = 1
+    check_ghz(4, 1.0);
+    // n=5: <Z..Z> = 0
+    check_ghz(5, 0.0);
+    print("");
+    print("done");
+}
