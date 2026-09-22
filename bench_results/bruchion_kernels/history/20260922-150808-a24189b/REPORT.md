@@ -6,9 +6,8 @@ The Rust fallback path against the Bruchion kernel path, routed through `runtime
 
 - repo: C:/Users/adame/CJC
 - branch: bruchion-kernels-m1
-- commit: dab5f6c41413ee535df71d2411c11b4db6074899
-- dirty tree: false
-- dirty paths: (none outside the record directory)
+- commit: a24189b95f0a563a4b6ab10824629602938206e4
+- dirty tree: true
 - rustc: rustc 1.97.1 (8bab26f4f 2026-07-14); host: x86_64-pc-windows-msvc
 - profile: release
 - target: windows-x86_64
@@ -21,11 +20,11 @@ The Rust fallback path against the Bruchion kernel path, routed through `runtime
 - elements per call (n): 65536
 - protocol: iterations calibrated once on the fallback arm to ~1000000 us per phase (max 1000000); 1 warm-up phase(s) per arm; 5 measured phases, arms interleaved A1/A2/B; statistic: ns per call, median [min, max] over phases
 - seed: 42
-- unix time: 1790114917
+- unix time: 1790114429
 - launcher: bench/bruchion_kernels_bench/run.ps1 (PowerShell, load-gated)
-- load gate: total CPU avg 15.0% max 23.2% over 20 s (thresholds 15% / 25%); busiest processes (% of one core): svchost 21%, wmiprvse 14%, claude 12%
-- last boot: 9/21/2026 9:47:14 PM (uptime 17.3 h)
-- peak RSS at exit: 20744 KiB
+- load gate: total CPU avg 13.3% max 18.3% over 20 s (thresholds 15% / 25%); busiest processes (% of one core): svchost 26%, claude 24%, wmiprvse 22%
+- last boot: 9/21/2026 9:47:14 PM (uptime 17.2 h)
+- peak RSS at exit: 20736 KiB
 
 ## Results
 
@@ -35,17 +34,17 @@ The Rust fallback path against the Bruchion kernel path, routed through `runtime
 
 | workload | iters/phase | fallback | fallback (A/A) | kernel | A/A band | kernel band (lo, med, hi) | allocs/call (fallback, kernel) | verdict |
 |---|---:|---:|---:|---:|---:|---:|---:|---|
-| relu | 33557 | 0.1530 [0.1516, 0.1602] ns/elem | 0.1544 [0.1495, 0.1689] ns/elem | 0.1944 [0.1879, 0.2008] ns/elem | 0.933, 1.009, 1.114 | 1.173, 1.271, 1.325 | 0, 0 | kernel slower, 1.27x |
-| axpy | 24449 | 0.4193 [0.3867, 0.4523] ns/elem | 0.4316 [0.3870, 0.4659] ns/elem | 0.5547 [0.5246, 0.5889] ns/elem | 0.856, 1.029, 1.205 | 1.160, 1.323, 1.523 | 0, 0 | kernel slower, 1.32x |
-| dot_kahan | 4777 | 3.1348 [3.0926, 3.8598] ns/elem | 3.1120 [3.0475, 3.3092] ns/elem | 3.0705 [3.0146, 3.6247] ns/elem | 0.790, 0.993, 1.070 | 0.781, 0.979, 1.172 | 0, 0 | inside band (within A/A) |
-| mse | 5002 | 3.0615 [3.0092, 3.4032] ns/elem | 3.0873 [3.0474, 3.1659] ns/elem | 3.0580 [3.0106, 3.4883] ns/elem | 0.895, 1.008, 1.052 | 0.885, 0.999, 1.159 | 0, 0 | inside band (within A/A) |
-| matmul 64x17x33 | 15267 | 1.9963 [1.8732, 2.1242] ns/elem | 1.9780 [1.8671, 2.3821] ns/elem | 1.2761 [1.2562, 1.7469] ns/elem | 0.879, 0.991, 1.272 | 0.591, 0.639, 0.933 | 0, 0 | kernel faster, 1.56x |
-| matmul 128x128x128 | 155 | 3.3157 [3.0228, 3.6791] ns/elem | 3.5223 [3.0413, 3.9464] ns/elem | 3.1666 [2.8817, 3.6561] ns/elem | 0.827, 1.062, 1.306 | 0.783, 0.955, 1.209 | 0, 0 | inside band (within A/A) |
-| adam_step (t = 7) | 3776 | 3.1278 [3.0818, 3.8442] ns/elem | 3.2918 [3.2144, 3.6309] ns/elem | 54.7514 [54.2238, 58.5336] ns/elem | 0.836, 1.052, 1.178 | 14.105, 17.505, 18.993 | 0, 0 | kernel slower, 17.50x |
-| heat1d_residual_grad 1000x9 | 55555 | 2.6294 [2.3965, 3.3094] ns/elem | 2.6376 [2.4194, 3.1007] ns/elem | 2.4590 [2.2876, 2.6729] ns/elem | 0.731, 1.003, 1.294 | 0.691, 0.935, 1.115 | 0, 0 | inside band (within A/A) |
-| heat1d_residual_grad 8192x9 | 5817 | 2.8738 [2.3741, 3.2460] ns/elem | 2.5044 [2.4407, 3.8306] ns/elem | 2.3584 [2.2997, 3.1920] ns/elem | 0.752, 0.871, 1.614 | 0.708, 0.821, 1.345 | 0, 0 | inside band (within A/A) |
-| mse_loss_grad | 4916 | 2.8177 [2.6756, 3.4106] ns/elem | 2.8197 [2.6949, 3.1320] ns/elem | 2.4355 [2.3476, 2.7679] ns/elem | 0.790, 1.001, 1.171 | 0.688, 0.864, 1.035 | 0, 0 | inside band (within A/A) |
-| mse+grad via GradGraph (status quo) | 614 | 16.6151 [15.3876, 19.9595] ns/elem | 16.0280 [15.5374, 19.6578] ns/elem | - | 0.778, 0.965, 1.278 | - | 122, - | status quo, not routed |
+| relu | 48076 | 0.1967 [0.1866, 0.2292] ns/elem | 0.1907 [0.1848, 0.2371] ns/elem | 0.2358 [0.2157, 0.3128] ns/elem | 0.806, 0.969, 1.271 | 0.941, 1.199, 1.676 | 0, 0 | inside band (within A/A) |
+| axpy | 10319 | 0.4749 [0.4383, 0.4931] ns/elem | 0.4834 [0.4621, 0.5141] ns/elem | 0.6526 [0.6034, 0.6930] ns/elem | 0.937, 1.018, 1.173 | 1.224, 1.374, 1.581 | 0, 0 | kernel slower, 1.37x |
+| dot_kahan | 4152 | 3.3237 [3.2552, 3.3474] ns/elem | 3.1975 [3.1252, 3.9750] ns/elem | 3.1969 [3.1918, 3.9623] ns/elem | 0.934, 0.962, 1.221 | 0.954, 0.962, 1.217 | 0, 0 | inside band (within A/A) |
+| mse | 3739 | 3.2296 [3.1925, 4.0694] ns/elem | 3.2951 [3.0710, 3.7494] ns/elem | 3.3030 [3.1032, 3.8072] ns/elem | 0.755, 1.020, 1.174 | 0.763, 1.023, 1.193 | 0, 0 | inside band (within A/A) |
+| matmul 64x17x33 | 14388 | 2.0536 [1.9671, 2.3208] ns/elem | 1.9868 [1.9446, 2.5571] ns/elem | 1.3517 [1.2637, 1.5108] ns/elem | 0.838, 0.967, 1.300 | 0.545, 0.658, 0.768 | 0, 0 | kernel faster, 1.52x |
+| matmul 128x128x128 | 164 | 3.4590 [3.1811, 3.7899] ns/elem | 3.1269 [2.9843, 3.9795] ns/elem | 3.2253 [2.8885, 3.5673] ns/elem | 0.787, 0.904, 1.251 | 0.762, 0.932, 1.121 | 0, 0 | inside band (within A/A) |
+| adam_step (t = 7) | 3937 | 3.5760 [3.0898, 3.8470] ns/elem | 3.5166 [3.2414, 3.6833] ns/elem | 55.1397 [54.1807, 58.0744] ns/elem | 0.843, 0.983, 1.192 | 14.084, 15.420, 18.796 | 0, 0 | kernel slower, 15.42x |
+| heat1d_residual_grad 1000x9 | 41493 | 2.7189 [2.6946, 3.4241] ns/elem | 2.8958 [2.6379, 3.4726] ns/elem | 2.3072 [2.2262, 2.3215] ns/elem | 0.770, 1.065, 1.289 | 0.650, 0.849, 0.862 | 0, 0 | kernel faster, 1.18x (within A/A) |
+| heat1d_residual_grad 8192x9 | 5521 | 3.1649 [2.7153, 3.5458] ns/elem | 3.2798 [2.6896, 3.6840] ns/elem | 2.4395 [2.1276, 2.7547] ns/elem | 0.759, 1.036, 1.357 | 0.600, 0.771, 1.015 | 0, 0 | inside band (within A/A) |
+| mse_loss_grad | 5757 | 2.6007 [2.5323, 3.4451] ns/elem | 2.7029 [2.5456, 2.9433] ns/elem | 2.3113 [2.2923, 2.5685] ns/elem | 0.739, 1.039, 1.162 | 0.665, 0.889, 1.014 | 0, 0 | inside band (within A/A) |
+| mse+grad via GradGraph (status quo) | 592 | 11.4504 [11.3711, 15.1398] ns/elem | 11.4175 [11.1665, 13.1521] ns/elem | - | 0.738, 0.997, 1.157 | - | 122, - | status quo, not routed |
 
 ## Reading it
 

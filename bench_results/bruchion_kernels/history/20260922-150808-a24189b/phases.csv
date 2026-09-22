@@ -1,0 +1,161 @@
+workload,phase,arm,ns_per_call
+relu,0,fallback,12891.344953823113
+relu,0,fallback (A/A),12495.910641484317
+relu,0,kernel,15363.717863382977
+relu,1,fallback,12226.973957899992
+relu,1,fallback (A/A),12776.364506198519
+relu,1,kernel,15454.929694650138
+relu,2,fallback,13552.379565687661
+relu,2,fallback (A/A),12110.749646393211
+relu,2,kernel,14135.059073134204
+relu,3,fallback,12418.514435477162
+relu,3,fallback (A/A),12440.067809301938
+relu,3,kernel,16516.864963807304
+relu,4,fallback,15019.215408935852
+relu,4,fallback (A/A),15537.424078542308
+relu,4,kernel,20498.350528330146
+axpy,0,fallback,28727.41544723326
+axpy,0,fallback (A/A),30695.997674193237
+axpy,0,kernel,42534.896792324835
+axpy,1,fallback,31116.87178990212
+axpy,1,fallback (A/A),32520.001938172303
+axpy,1,kernel,45416.55199147204
+axpy,2,fallback,31768.86326194399
+axpy,2,fallback (A/A),30284.194204864812
+axpy,2,kernel,39543.93836612075
+axpy,3,fallback,32316.900862486676
+axpy,3,fallback (A/A),33689.73737765288
+axpy,3,kernel,43970.78205252447
+axpy,4,fallback,31124.45004360888
+axpy,4,fallback (A/A),31676.92605872662
+axpy,4,kernel,42768.640372129084
+dot_kahan,0,fallback,213330.9007707129
+dot_kahan,0,fallback (A/A),260503.27552986512
+dot_kahan,0,kernel,259671.67630057802
+dot_kahan,1,fallback,217819.62909441232
+dot_kahan,1,fallback (A/A),220885.16377649325
+dot_kahan,1,kernel,209177.26396917147
+dot_kahan,2,fallback,218910.26011560694
+dot_kahan,2,fallback (A/A),204810.95857418113
+dot_kahan,2,kernel,209504.3352601156
+dot_kahan,3,fallback,217802.21579961464
+dot_kahan,3,fallback (A/A),207733.88728323698
+dot_kahan,3,kernel,209512.5
+dot_kahan,4,fallback,219374.10886319846
+dot_kahan,4,fallback (A/A),209553.44412331405
+dot_kahan,4,kernel,230326.71001926783
+mse,0,fallback,215044.53062316126
+mse,0,fallback (A/A),213850.57502005884
+mse,0,kernel,203373.60256753143
+mse,1,fallback,211656.56592671838
+mse,1,fallback (A/A),215944.4236426852
+mse,1,kernel,237243.5677988767
+mse,2,fallback,209222.25193902114
+mse,2,fallback (A/A),218146.4027814924
+mse,2,kernel,211241.5084247125
+mse,3,fallback,211263.41267718642
+mse,3,fallback (A/A),201259.07996790585
+mse,3,kernel,249508.23749665686
+mse,4,fallback,266689.97058036906
+mse,4,fallback (A/A),245720.27280021395
+mse,4,kernel,216468.38726932334
+matmul 64x17x33,0,fallback,83325.08340283569
+matmul 64x17x33,0,fallback (A/A),71334.57742563247
+matmul 64x17x33,0,kernel,46740.651932165696
+matmul 64x17x33,1,fallback,73731.75562969141
+matmul 64x17x33,1,fallback (A/A),69818.36252432583
+matmul 64x17x33,1,kernel,48529.74701139839
+matmul 64x17x33,2,fallback,82304.88601612455
+matmul 64x17x33,2,fallback (A/A),91810.78676675007
+matmul 64x17x33,2,kernel,54242.236586043924
+matmul 64x17x33,3,fallback,70626.85571309425
+matmul 64x17x33,3,fallback (A/A),73604.4968028913
+matmul 64x17x33,3,kernel,49194.405059772034
+matmul 64x17x33,4,fallback,72957.42980261329
+matmul 64x17x33,4,fallback (A/A),70933.60439254934
+matmul 64x17x33,4,kernel,45371.198220739505
+matmul 128x128x128,0,fallback,7497723.780487805
+matmul 128x128x128,0,fallback (A/A),8284579.268292683
+matmul 128x128x128,0,kernel,7398895.12195122
+matmul 128x128x128,1,fallback,7254067.073170732
+matmul 128x128x128,1,fallback (A/A),6556843.292682927
+matmul 128x128x128,1,kernel,6640031.707317073
+matmul 128x128x128,2,fallback,6685628.048780488
+matmul 128x128x128,2,fallback (A/A),8345680.4878048785
+matmul 128x128x128,2,kernel,6763992.073170732
+matmul 128x128x128,3,fallback,6671173.1707317075
+matmul 128x128x128,3,fallback (A/A),6258582.317073171
+matmul 128x128x128,3,kernel,7481258.536585365
+matmul 128x128x128,4,fallback,7947907.317073171
+matmul 128x128x128,4,fallback (A/A),6557495.731707317
+matmul 128x128x128,4,kernel,6057564.024390244
+adam_step (t = 7),0,fallback,234353.61950723903
+adam_step (t = 7),0,fallback (A/A),231381.25476250952
+adam_step (t = 7),0,kernel,3613634.696469393
+adam_step (t = 7),1,fallback,252117.34823469646
+adam_step (t = 7),1,fallback (A/A),241386.91897383795
+adam_step (t = 7),1,kernel,3805961.341122682
+adam_step (t = 7),2,fallback,202492.25298450596
+adam_step (t = 7),2,fallback (A/A),226163.47472694944
+adam_step (t = 7),2,kernel,3550787.7571755145
+adam_step (t = 7),3,fallback,204868.93573787148
+adam_step (t = 7),3,fallback (A/A),212428.4988569977
+adam_step (t = 7),3,kernel,3591393.116586233
+adam_step (t = 7),4,fallback,252059.89331978664
+adam_step (t = 7),4,fallback (A/A),230465.04953009906
+adam_step (t = 7),4,kernel,3772223.622047244
+heat1d_residual_grad 1000x9,0,fallback,24469.86961656183
+heat1d_residual_grad 1000x9,0,fallback (A/A),23741.004506784277
+heat1d_residual_grad 1000x9,0,kernel,20764.613308268865
+heat1d_residual_grad 1000x9,1,fallback,30816.817294483408
+heat1d_residual_grad 1000x9,1,fallback (A/A),31253.68134384113
+heat1d_residual_grad 1000x9,1,kernel,20294.17733111609
+heat1d_residual_grad 1000x9,2,fallback,24251.032704311572
+heat1d_residual_grad 1000x9,2,fallback (A/A),26061.91646783795
+heat1d_residual_grad 1000x9,2,kernel,20868.558552044924
+heat1d_residual_grad 1000x9,3,fallback,24532.451256838503
+heat1d_residual_grad 1000x9,3,fallback (A/A),24186.339864555466
+heat1d_residual_grad 1000x9,3,kernel,20893.601330344878
+heat1d_residual_grad 1000x9,4,fallback,24366.129226616536
+heat1d_residual_grad 1000x9,4,fallback (A/A),26213.30826886463
+heat1d_residual_grad 1000x9,4,kernel,20035.384281686067
+heat1d_residual_grad 8192x9,0,fallback,233343.5247237819
+heat1d_residual_grad 8192x9,0,fallback (A/A),241812.08114472017
+heat1d_residual_grad 8192x9,0,kernel,203098.49664915775
+heat1d_residual_grad 8192x9,1,fallback,240683.91595725412
+heat1d_residual_grad 8192x9,1,fallback (A/A),246627.04220249955
+heat1d_residual_grad 8192x9,1,kernel,200694.2945118638
+heat1d_residual_grad 8192x9,2,fallback,261425.6475276218
+heat1d_residual_grad 8192x9,2,fallback (A/A),271617.5873935881
+heat1d_residual_grad 8192x9,2,kernel,179862.76036949828
+heat1d_residual_grad 8192x9,3,fallback,200195.03713095453
+heat1d_residual_grad 8192x9,3,fallback (A/A),198296.2144539033
+heat1d_residual_grad 8192x9,3,kernel,168480.22097446115
+heat1d_residual_grad 8192x9,4,fallback,205761.89096178228
+heat1d_residual_grad 8192x9,4,fallback (A/A),226612.44339793516
+heat1d_residual_grad 8192x9,4,kernel,156864.66219887702
+mse_loss_grad,0,fallback,225781.17074865382
+mse_loss_grad,0,fallback (A/A),192893.48619072433
+mse_loss_grad,0,kernel,151470.14069828036
+mse_loss_grad,1,fallback,170438.70071217648
+mse_loss_grad,1,fallback (A/A),166828.1917665451
+mse_loss_grad,1,kernel,161992.131318395
+mse_loss_grad,2,fallback,169560.67396213306
+mse_loss_grad,2,fallback (A/A),170041.35834636094
+mse_loss_grad,2,kernel,150229.14712523884
+mse_loss_grad,3,fallback,165957.47785304848
+mse_loss_grad,3,fallback (A/A),177138.38804933126
+mse_loss_grad,3,kernel,168331.8742400556
+mse_loss_grad,4,fallback,214909.136703144
+mse_loss_grad,4,fallback (A/A),192779.72902553412
+mse_loss_grad,4,kernel,150378.51311446933
+mse+grad via GradGraph (status quo),0,fallback,992200.6756756756
+mse+grad via GradGraph (status quo),0,fallback (A/A),861932.7702702703
+mse+grad via GradGraph (status quo),1,fallback,746709.2905405406
+mse+grad via GradGraph (status quo),1,fallback (A/A),731808.277027027
+mse+grad via GradGraph (status quo),2,fallback,745216.3851351351
+mse+grad via GradGraph (status quo),2,fallback (A/A),734447.6351351351
+mse+grad via GradGraph (status quo),3,fallback,750411.1486486486
+mse+grad via GradGraph (status quo),3,fallback (A/A),748257.9391891892
+mse+grad via GradGraph (status quo),4,fallback,770916.3851351351
+mse+grad via GradGraph (status quo),4,fallback (A/A),801153.8851351351
