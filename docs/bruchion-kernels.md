@@ -134,22 +134,26 @@ On a GNU toolchain (Linux, MinGW) neither is needed and `build.rs` adds nothing.
   milestone 1's "a record shows the timing" clause is therefore **not** met. What
   the probe said on 2026-09-22 (one machine, no interleaving, no A/A):
 
-| `timing_probe`, release, 2^16 elements, min of 25 after a warm-up | kernel (scalar, session 3) | kernel (2-lane `@simd`, SIMD step 2) | Rust body |
-|---|---:|---:|---:|
-| `axpy` (ns per element) | 0.4532 | 0.4547 | 0.2075 |
-| `dot_kahan` | 3.0075 | 2.8885 | 2.9068 |
-| `relu` | 0.3052 | 0.2213 | 0.1221 |
-| `mse` | 2.8870 | 2.8870 | 2.9037 |
+| `timing_probe`, release, 2^16 elements, min of 25 after a warm-up | kernel (scalar, session 3) | kernel (2-lane `@simd`, SIMD step 2) | kernel (unrolled, `restrict`) | Rust body |
+|---|---:|---:|---:|---:|
+| `axpy` (ns per element) | 0.4532 | 0.4547 | 0.3815–0.5066 | 0.2075–0.2975 |
+| `dot_kahan` | 3.0075 | 2.8885 | 3.0075–3.5248 | 3.0289–3.6331 |
+| `relu` | 0.3052 | 0.2213 | 0.1663–0.2579 | 0.1282–0.1953 |
+| `mse` | 2.8870 | 2.8870 | 3.0075–3.6087 | 2.9205–3.6377 |
 
-  The Kahan kernels tie (a serial dependency chain either way). The elementwise
-  kernels are **slower** than the Rust bodies: with the scalar kernels 2.2–2.4x,
-  and after the Bruchion side's SIMD step 2 (two-lane `@simd` slice twins, the
-  same bits — the parity tests above passed unchanged against the new archive)
-  still 2.2x for `axpy` and 1.8x for `relu`. The release Rust loop is auto-
-  vectorized by LLVM on the same SSE2 baseline, with `noalias` slices and
-  unrolling; the kernel's C has neither, since its slices may alias by contract
-  and gcc `-O2` unrolls nothing. Switching the kernels on for `relu_raw` today is
-  therefore still a slowdown; the remaining gap is a Bruchion codegen question
-  (unrolling, `restrict`), not a width one.
+  The last two columns are three samples in a row (the machine's state drifted
+  between them, so the ratio within a sample is the number: `axpy` 1.70–1.86x,
+  `relu` 1.30–1.32x, the Kahan kernels 0.97–0.99x). The Kahan kernels tie (a serial
+  dependency chain either way). The elementwise kernels are **slower** than the
+  Rust bodies: with the scalar kernels 2.2–2.4x; after the Bruchion side's SIMD
+  step 2 (two-lane `@simd` slice twins) 2.2x for `axpy` and 1.8x for `relu`; after
+  unrolling the lane head and `restrict`-qualifying its pointers about 1.8x and
+  1.3x. The same bits throughout — the parity tests above passed unchanged
+  against each archive. The release Rust loop is auto-vectorized by LLVM on the
+  same SSE2 baseline; the rest of the gap is scheduling, which gcc 8 at the locked
+  `-O2` flags does conservatively. Switching the kernels on for `relu_raw` today
+  is therefore still a slowdown, by less.
+  With `restrict` the kernels' `x` and `y` must not overlap; the dispatch
+  functions take `&[f64]` and `&mut [f64]`, so that holds by construction.
 - `powi` in CJC's own code still lowers to `pow` on MSVC targets (above); the fix
   belongs in `cjc-repro`, not behind this feature.
