@@ -1,221 +1,221 @@
 workload,phase,arm,ns_per_call
-relu,0,fallback,11267.554667554668
-relu,0,fallback (A/A),10171.42117142117
-relu,0,kernel,12560.868760868761
-relu,1,fallback,9980.67673067673
-relu,1,fallback (A/A),10286.485736485736
-relu,1,kernel,12498.144448144449
-relu,2,fallback,9944.668294668294
-relu,2,fallback (A/A),10712.757612757612
-relu,2,kernel,13668.997668997668
-relu,3,fallback,11667.906167906169
-relu,3,fallback (A/A),11189.71028971029
-relu,3,kernel,13784.569134569134
-relu,4,fallback,10158.334258334258
-relu,4,fallback (A/A),10231.686831686831
-relu,4,kernel,12962.872312872312
-axpy,0,fallback,25355.382603008504
-axpy,0,fallback (A/A),25650.29431000654
-axpy,0,kernel,35317.87660780467
-axpy,1,fallback,25300.88947024199
-axpy,1,fallback (A/A),26031.872683671245
-axpy,1,kernel,37018.86200130804
-axpy,2,fallback,26436.154349247874
-axpy,2,fallback (A/A),25820.9679529104
-axpy,2,kernel,34989.06474820144
-axpy,3,fallback,29243.38347503815
-axpy,3,fallback (A/A),29773.62546326575
-axpy,3,kernel,36061.486810551556
-axpy,4,fallback,25539.7776324395
-axpy,4,fallback (A/A),26845.56354916067
-axpy,4,kernel,35715.195116633964
-dot_kahan,0,fallback,202263.40103544405
-dot_kahan,0,fallback (A/A),204364.05814416567
-dot_kahan,0,kernel,201805.09757068896
-dot_kahan,1,fallback,203941.17881322184
-dot_kahan,1,fallback (A/A),206077.61847869374
-dot_kahan,1,kernel,206270.9279171645
-dot_kahan,2,fallback,209388.11230585424
-dot_kahan,2,fallback (A/A),204613.46077260055
-dot_kahan,2,kernel,201955.3166069295
-dot_kahan,3,fallback,202570.90800477896
-dot_kahan,3,fallback (A/A),199068.339307049
-dot_kahan,3,kernel,201336.2803663879
-dot_kahan,4,fallback,202546.9334926324
-dot_kahan,4,fallback (A/A),199566.76622859418
-dot_kahan,4,kernel,197093.86698526485
-mse,0,fallback,201584.49799196786
-mse,0,fallback (A/A),201551.16465863455
-mse,0,kernel,199282.9718875502
-mse,1,fallback,199639.3172690763
-mse,1,fallback (A/A),210492.63052208835
-mse,1,kernel,198423.99598393575
-mse,2,fallback,201976.16465863455
-mse,2,fallback (A/A),199990.2610441767
-mse,2,kernel,197811.70682730924
-mse,3,fallback,204162.3092369478
-mse,3,fallback (A/A),206062.3293172691
-mse,3,kernel,200351.6465863454
-mse,4,fallback,198791.12449799196
-mse,4,fallback (A/A),199186.56626506025
-mse,4,kernel,201667.51004016065
-matmul 64x17x33,0,fallback,62736.8253748877
-matmul 64x17x33,0,fallback (A/A),63509.10096054177
-matmul 64x17x33,0,kernel,46297.01471909336
-matmul 64x17x33,1,fallback,64567.9773339783
-matmul 64x17x33,1,fallback (A/A),67410.83546403151
-matmul 64x17x33,1,kernel,48303.60030405639
-matmul 64x17x33,2,fallback,63945.24220855504
-matmul 64x17x33,2,fallback (A/A),63549.457535761176
-matmul 64x17x33,2,kernel,47483.65005873817
-matmul 64x17x33,3,fallback,62243.68046437703
-matmul 64x17x33,3,fallback (A/A),63819.30067030613
-matmul 64x17x33,3,kernel,44573.7198535001
-matmul 64x17x33,4,fallback,61764.76401078018
-matmul 64x17x33,4,fallback (A/A),62119.46651924539
-matmul 64x17x33,4,kernel,46838.71881694423
-matmul 128x128x128,0,fallback,6461493.167701864
-matmul 128x128x128,0,fallback (A/A),6252440.99378882
-matmul 128x128x128,0,kernel,5990819.875776397
-matmul 128x128x128,1,fallback,6065001.242236025
-matmul 128x128x128,1,fallback (A/A),6086657.763975156
-matmul 128x128x128,1,kernel,5845242.857142857
-matmul 128x128x128,2,fallback,6008119.875776397
-matmul 128x128x128,2,fallback (A/A),6229865.217391305
-matmul 128x128x128,2,kernel,6051211.180124223
-matmul 128x128x128,3,fallback,6021576.397515528
-matmul 128x128x128,3,fallback (A/A),6092777.639751553
-matmul 128x128x128,3,kernel,6080799.378881987
-matmul 128x128x128,4,fallback,6783224.844720497
-matmul 128x128x128,4,fallback (A/A),6281204.347826087
-matmul 128x128x128,4,kernel,5832962.111801242
-adam_step (t = 7),0,fallback,188769.52580195258
-adam_step (t = 7),0,fallback (A/A),189110.01859600187
-adam_step (t = 7),0,kernel,3462078.7773128776
-adam_step (t = 7),1,fallback,195295.8158995816
-adam_step (t = 7),1,fallback (A/A),188491.44583914458
-adam_step (t = 7),1,kernel,3524073.0590423057
-adam_step (t = 7),2,fallback,244258.87959088795
-adam_step (t = 7),2,fallback (A/A),240570.33937703393
-adam_step (t = 7),2,kernel,4473996.582984658
-adam_step (t = 7),3,fallback,222324.22129242212
-adam_step (t = 7),3,fallback (A/A),219113.87726638772
-adam_step (t = 7),3,kernel,3638806.415620642
-adam_step (t = 7),4,fallback,211068.82845188284
-adam_step (t = 7),4,fallback (A/A),209275.59274755928
-adam_step (t = 7),4,kernel,3691812.180381218
-heat1d_residual_grad 1000x9,0,fallback,24811.148322531077
-heat1d_residual_grad 1000x9,0,fallback (A/A),24675.110813419753
-heat1d_residual_grad 1000x9,0,kernel,19903.045645278857
-heat1d_residual_grad 1000x9,1,fallback,27436.683674474498
-heat1d_residual_grad 1000x9,1,fallback (A/A),33279.91962333288
-heat1d_residual_grad 1000x9,1,kernel,21288.0341206832
-heat1d_residual_grad 1000x9,2,fallback,24357.855440200154
-heat1d_residual_grad 1000x9,2,fallback (A/A),26911.130592383917
-heat1d_residual_grad 1000x9,2,kernel,21909.932822442428
-heat1d_residual_grad 1000x9,3,fallback,24493.788538444867
-heat1d_residual_grad 1000x9,3,fallback (A/A),24097.872382340774
-heat1d_residual_grad 1000x9,3,kernel,21407.832785012117
-heat1d_residual_grad 1000x9,4,fallback,26013.689643624042
-heat1d_residual_grad 1000x9,4,fallback (A/A),29280.749000216703
-heat1d_residual_grad 1000x9,4,kernel,26018.693485155927
-heat1d_residual_grad 8192x9,0,fallback,203679.49334319527
-heat1d_residual_grad 8192x9,0,fallback (A/A),215644.84097633135
-heat1d_residual_grad 8192x9,0,kernel,187890.5325443787
-heat1d_residual_grad 8192x9,1,fallback,250482.34097633135
-heat1d_residual_grad 8192x9,1,fallback (A/A),238042.52958579882
-heat1d_residual_grad 8192x9,1,kernel,219699.1678994083
-heat1d_residual_grad 8192x9,2,fallback,294955.325443787
-heat1d_residual_grad 8192x9,2,fallback (A/A),253527.88461538462
-heat1d_residual_grad 8192x9,2,kernel,202138.2026627219
-heat1d_residual_grad 8192x9,3,fallback,237228.05103550295
-heat1d_residual_grad 8192x9,3,fallback (A/A),208197.74408284025
-heat1d_residual_grad 8192x9,3,kernel,184057.10059171598
-heat1d_residual_grad 8192x9,4,fallback,206731.87869822484
-heat1d_residual_grad 8192x9,4,fallback (A/A),198591.49408284025
-heat1d_residual_grad 8192x9,4,kernel,167695.21079881658
-matmul tiled 128x128x128,0,fallback,540783.4061135371
-matmul tiled 128x128x128,0,fallback (A/A),585860.2134885978
-matmul tiled 128x128x128,0,kernel,842035.6622998544
-matmul tiled 128x128x128,1,fallback,540634.4978165939
-matmul tiled 128x128x128,1,fallback (A/A),593318.5346918971
-matmul tiled 128x128x128,1,kernel,873639.2527899079
-matmul tiled 128x128x128,2,fallback,675341.6787967007
-matmul tiled 128x128x128,2,fallback (A/A),689896.5065502183
-matmul tiled 128x128x128,2,kernel,845421.7370208637
-matmul tiled 128x128x128,3,fallback,577476.9529354682
-matmul tiled 128x128x128,3,fallback (A/A),551910.7229500243
-matmul tiled 128x128x128,3,kernel,829589.859291606
-matmul tiled 128x128x128,4,fallback,580182.5327510918
-matmul tiled 128x128x128,4,fallback (A/A),613873.7506065017
-matmul tiled 128x128x128,4,kernel,868228.6268801553
-matmul tiled 256x256x256,0,fallback,4281805.291005291
-matmul tiled 256x256x256,0,fallback (A/A),4408295.767195767
-matmul tiled 256x256x256,0,kernel,6691355.026455026
-matmul tiled 256x256x256,1,fallback,4617003.174603174
-matmul tiled 256x256x256,1,fallback (A/A),4511423.80952381
-matmul tiled 256x256x256,1,kernel,6942122.222222222
-matmul tiled 256x256x256,2,fallback,4448547.619047619
-matmul tiled 256x256x256,2,fallback (A/A),4157573.015873016
-matmul tiled 256x256x256,2,kernel,7686113.7566137565
-matmul tiled 256x256x256,3,fallback,5843517.98941799
-matmul tiled 256x256x256,3,fallback (A/A),5026850.264550265
-matmul tiled 256x256x256,3,kernel,6729370.899470899
-matmul tiled 256x256x256,4,fallback,4302977.777777778
-matmul tiled 256x256x256,4,fallback (A/A),4581379.365079365
-matmul tiled 256x256x256,4,kernel,7241198.941798942
-relu call path: bare ffi | kernel::relu_raw,0,fallback,14203.541507996953
-relu call path: bare ffi | kernel::relu_raw,0,fallback (A/A),14170.492193450114
-relu call path: bare ffi | kernel::relu_raw,0,kernel,14635.817307692309
-relu call path: bare ffi | kernel::relu_raw,1,fallback,16024.897658035034
-relu call path: bare ffi | kernel::relu_raw,1,fallback (A/A),14801.739813404418
-relu call path: bare ffi | kernel::relu_raw,1,kernel,17910.3650990099
-relu call path: bare ffi | kernel::relu_raw,2,fallback,19280.074257425742
-relu call path: bare ffi | kernel::relu_raw,2,fallback (A/A),17283.62052551409
-relu call path: bare ffi | kernel::relu_raw,2,kernel,15162.79750571211
-relu call path: bare ffi | kernel::relu_raw,3,fallback,14158.16355674029
-relu call path: bare ffi | kernel::relu_raw,3,fallback (A/A),13901.263804265041
-relu call path: bare ffi | kernel::relu_raw,3,kernel,15643.945163747145
-relu call path: bare ffi | kernel::relu_raw,4,fallback,16003.715251332826
-relu call path: bare ffi | kernel::relu_raw,4,fallback (A/A),15127.272943640517
-relu call path: bare ffi | kernel::relu_raw,4,kernel,13994.366431835491
-relu loop: Rust body | bare ffi,0,fallback,11364.824876388862
-relu loop: Rust body | bare ffi,0,fallback (A/A),12592.267488860898
-relu loop: Rust body | bare ffi,0,kernel,15755.310108853002
-relu loop: Rust body | bare ffi,1,fallback,12136.30501400613
-relu loop: Rust body | bare ffi,1,fallback (A/A),11477.509353086049
-relu loop: Rust body | bare ffi,1,kernel,17483.93525220432
-relu loop: Rust body | bare ffi,2,fallback,15006.463499464195
-relu loop: Rust body | bare ffi,2,fallback (A/A),14539.42208268316
-relu loop: Rust body | bare ffi,2,kernel,15996.003083228366
-relu loop: Rust body | bare ffi,3,fallback,12064.324791788085
-relu loop: Rust body | bare ffi,3,fallback (A/A),11954.558101934537
-relu loop: Rust body | bare ffi,3,kernel,14105.942734673159
-relu loop: Rust body | bare ffi,4,fallback,11243.061796168524
-relu loop: Rust body | bare ffi,4,fallback (A/A),11144.753811735069
-relu loop: Rust body | bare ffi,4,kernel,14374.382884322536
-mse_loss_grad,0,fallback,127870.16566894055
-mse_loss_grad,0,fallback (A/A),124424.79465404426
-mse_loss_grad,0,kernel,96746.26200751775
-mse_loss_grad,1,fallback,165290.7837950717
-mse_loss_grad,1,fallback (A/A),170891.8696923291
-mse_loss_grad,1,kernel,101600.25059167479
-mse_loss_grad,2,fallback,137380.70444104134
-mse_loss_grad,2,fallback (A/A),133004.566337185
-mse_loss_grad,2,kernel,97450.61951830711
-mse_loss_grad,3,fallback,135462.13281358764
-mse_loss_grad,3,fallback (A/A),146714.71530001392
-mse_loss_grad,3,kernel,110290.44967283864
-mse_loss_grad,4,fallback,152798.20409299736
-mse_loss_grad,4,fallback (A/A),150139.87191981066
-mse_loss_grad,4,kernel,99544.14590004177
-mse+grad via GradGraph (status quo),0,fallback,1855021.3861386138
-mse+grad via GradGraph (status quo),0,fallback (A/A),1584161.9801980199
-mse+grad via GradGraph (status quo),1,fallback,1455862.3762376239
-mse+grad via GradGraph (status quo),1,fallback (A/A),1366916.0396039605
-mse+grad via GradGraph (status quo),2,fallback,1516543.3663366337
-mse+grad via GradGraph (status quo),2,fallback (A/A),1340780.5940594058
-mse+grad via GradGraph (status quo),3,fallback,1425941.188118812
-mse+grad via GradGraph (status quo),3,fallback (A/A),1360493.2673267326
-mse+grad via GradGraph (status quo),4,fallback,1430922.7722772278
-mse+grad via GradGraph (status quo),4,fallback (A/A),1400435.8415841584
+relu,0,fallback,10023.698980808675
+relu,0,fallback (A/A),9883.328828327476
+relu,0,kernel,12336.71950773536
+relu,1,fallback,9954.54820091266
+relu,1,fallback (A/A),9951.474726917146
+relu,1,kernel,13154.990221487287
+relu,2,fallback,10425.964733754154
+relu,2,fallback (A/A),10206.011797815338
+relu,2,kernel,12451.20124656162
+relu,3,fallback,10063.859253017028
+relu,3,fallback (A/A),10025.115672650374
+relu,3,kernel,13038.38582990158
+relu,4,fallback,11383.527578585852
+relu,4,fallback (A/A),10898.05860747619
+relu,4,kernel,13303.558424625951
+axpy,0,fallback,25862.84510613931
+axpy,0,fallback (A/A),28997.537731604563
+axpy,0,kernel,42898.39257229334
+axpy,1,fallback,35566.05996155262
+axpy,1,fallback (A/A),31155.95729886703
+axpy,1,kernel,40528.921428279275
+axpy,2,fallback,30720.880199599167
+axpy,2,fallback (A/A),31423.95599002004
+axpy,2,kernel,44278.228148390524
+axpy,3,fallback,38067.1397603174
+axpy,3,fallback (A/A),36219.59589349257
+axpy,3,kernel,41965.0537854309
+axpy,4,fallback,29269.385250930507
+axpy,4,fallback (A/A),29097.14916765512
+axpy,4,kernel,41594.731890874886
+dot_kahan,0,fallback,202452.10850239344
+dot_kahan,0,fallback (A/A),202353.45338500114
+dot_kahan,0,kernel,201450.3305219968
+dot_kahan,1,fallback,202901.75518577616
+dot_kahan,1,fallback (A/A),223976.43036243448
+dot_kahan,1,kernel,241768.8397538181
+dot_kahan,2,fallback,212875.38180989286
+dot_kahan,2,fallback (A/A),201081.14884887167
+dot_kahan,2,kernel,201996.19329838158
+dot_kahan,3,fallback,200701.20811488488
+dot_kahan,3,fallback (A/A),196808.57077729655
+dot_kahan,3,kernel,194527.42192842488
+dot_kahan,4,fallback,199816.57168908138
+dot_kahan,4,fallback (A/A),200559.58513790744
+dot_kahan,4,kernel,199243.26418965124
+mse,0,fallback,233165.6978967495
+mse,0,fallback (A/A),205487.89674952198
+mse,0,kernel,199028.77629063098
+mse,1,fallback,198809.6175908222
+mse,1,fallback (A/A),196513.86233269598
+mse,1,kernel,198636.6156787763
+mse,2,fallback,199695.62141491397
+mse,2,fallback (A/A),196526.67304015296
+mse,2,kernel,199484.09177820268
+mse,3,fallback,198580.45889101338
+mse,3,fallback (A/A),245232.96367112812
+mse,3,kernel,238355.5449330784
+mse,4,fallback,198772.31357552583
+mse,4,fallback (A/A),197332.25621414915
+mse,4,kernel,196905.44933078394
+matmul 64x17x33,0,fallback,63268.07795698925
+matmul 64x17x33,0,fallback (A/A),62735.467069892475
+matmul 64x17x33,0,kernel,44571.3625672043
+matmul 64x17x33,1,fallback,63434.551411290326
+matmul 64x17x33,1,fallback (A/A),74116.12903225806
+matmul 64x17x33,1,kernel,57257.91330645161
+matmul 64x17x33,2,fallback,90231.08198924731
+matmul 64x17x33,2,fallback (A/A),87251.63810483871
+matmul 64x17x33,2,kernel,52529.04905913978
+matmul 64x17x33,3,fallback,67887.22278225806
+matmul 64x17x33,3,fallback (A/A),71380.99798387097
+matmul 64x17x33,3,kernel,51239.95295698925
+matmul 64x17x33,4,fallback,72903.05779569893
+matmul 64x17x33,4,fallback (A/A),80379.1498655914
+matmul 64x17x33,4,kernel,56249.78998655914
+matmul 128x128x128,0,fallback,6569572.307692308
+matmul 128x128x128,0,fallback (A/A),6477187.692307692
+matmul 128x128x128,0,kernel,7364842.307692308
+matmul 128x128x128,1,fallback,7726968.461538462
+matmul 128x128x128,1,fallback (A/A),6546325.384615385
+matmul 128x128x128,1,kernel,6248987.692307692
+matmul 128x128x128,2,fallback,6518366.153846154
+matmul 128x128x128,2,fallback (A/A),6423250
+matmul 128x128x128,2,kernel,5961428.461538462
+matmul 128x128x128,3,fallback,6390423.076923077
+matmul 128x128x128,3,fallback (A/A),6278003.846153846
+matmul 128x128x128,3,kernel,6336261.538461538
+matmul 128x128x128,4,fallback,6369663.076923077
+matmul 128x128x128,4,fallback (A/A),6676973.076923077
+matmul 128x128x128,4,kernel,5992304.615384615
+adam_step (t = 7),0,fallback,201714.76664116298
+adam_step (t = 7),0,fallback (A/A),187626.88089773018
+adam_step (t = 7),0,kernel,3594963.8357561845
+adam_step (t = 7),1,fallback,191684.59576638613
+adam_step (t = 7),1,fallback (A/A),191160.36725325172
+adam_step (t = 7),1,kernel,3587872.404998725
+adam_step (t = 7),2,fallback,206712.675337924
+adam_step (t = 7),2,fallback (A/A),194343.05024228513
+adam_step (t = 7),2,kernel,3557371.4613618976
+adam_step (t = 7),3,fallback,192053.78729915837
+adam_step (t = 7),3,fallback (A/A),203137.00586585054
+adam_step (t = 7),3,kernel,4818010.609538383
+adam_step (t = 7),4,fallback,391923.28487630707
+adam_step (t = 7),4,fallback (A/A),306377.2507013517
+adam_step (t = 7),4,kernel,3975622.7492986484
+heat1d_residual_grad 1000x9,0,fallback,29568.610117314252
+heat1d_residual_grad 1000x9,0,fallback (A/A),51032.29678009818
+heat1d_residual_grad 1000x9,0,kernel,33751.09410100674
+heat1d_residual_grad 1000x9,1,fallback,28552.518928363424
+heat1d_residual_grad 1000x9,1,fallback (A/A),24377.70821199767
+heat1d_residual_grad 1000x9,1,kernel,31793.774440469257
+heat1d_residual_grad 1000x9,2,fallback,33959.3289791164
+heat1d_residual_grad 1000x9,2,fallback (A/A),28776.53714951327
+heat1d_residual_grad 1000x9,2,kernel,25135.18595557035
+heat1d_residual_grad 1000x9,3,fallback,31021.072884599384
+heat1d_residual_grad 1000x9,3,fallback (A/A),34988.86970629836
+heat1d_residual_grad 1000x9,3,kernel,31549.841916964804
+heat1d_residual_grad 1000x9,4,fallback,31539.707962392877
+heat1d_residual_grad 1000x9,4,fallback (A/A),33863.59306098677
+heat1d_residual_grad 1000x9,4,kernel,21661.442299692153
+heat1d_residual_grad 8192x9,0,fallback,294080.09250693803
+heat1d_residual_grad 8192x9,0,fallback (A/A),301135.87419056427
+heat1d_residual_grad 8192x9,0,kernel,252866.308973173
+heat1d_residual_grad 8192x9,1,fallback,279712.11840888066
+heat1d_residual_grad 8192x9,1,fallback (A/A),286774.76410730806
+heat1d_residual_grad 8192x9,1,kernel,291364.8843663275
+heat1d_residual_grad 8192x9,2,fallback,247112.58094357076
+heat1d_residual_grad 8192x9,2,fallback (A/A),268155.28214616096
+heat1d_residual_grad 8192x9,2,kernel,246038.96392229418
+heat1d_residual_grad 8192x9,3,fallback,345310.98982423684
+heat1d_residual_grad 8192x9,3,fallback (A/A),338066.8455134135
+heat1d_residual_grad 8192x9,3,kernel,199493.37650323776
+heat1d_residual_grad 8192x9,4,fallback,264283.4967622572
+heat1d_residual_grad 8192x9,4,fallback (A/A),236112.43293246994
+heat1d_residual_grad 8192x9,4,kernel,233077.11378353377
+matmul tiled 128x128x128,0,fallback,855118.4315684316
+matmul tiled 128x128x128,0,fallback (A/A),779487.7622377622
+matmul tiled 128x128x128,0,kernel,952703.0469530469
+matmul tiled 128x128x128,1,fallback,635415.5844155845
+matmul tiled 128x128x128,1,fallback (A/A),741112.987012987
+matmul tiled 128x128x128,1,kernel,1175083.8661338661
+matmul tiled 128x128x128,2,fallback,707973.1768231768
+matmul tiled 128x128x128,2,fallback (A/A),776875.1748251749
+matmul tiled 128x128x128,2,kernel,1181741.2087912087
+matmul tiled 128x128x128,3,fallback,697194.3556443556
+matmul tiled 128x128x128,3,fallback (A/A),618845.1548451548
+matmul tiled 128x128x128,3,kernel,1365221.3786213787
+matmul tiled 128x128x128,4,fallback,733228.6713286713
+matmul tiled 128x128x128,4,fallback (A/A),649060.2897102897
+matmul tiled 128x128x128,4,kernel,1387340.9090909092
+matmul tiled 256x256x256,0,fallback,7783771.951219512
+matmul tiled 256x256x256,0,fallback (A/A),8514469.512195121
+matmul tiled 256x256x256,0,kernel,12248443.902439024
+matmul tiled 256x256x256,1,fallback,5502608.536585365
+matmul tiled 256x256x256,1,fallback (A/A),5135526.219512195
+matmul tiled 256x256x256,1,kernel,11922993.292682927
+matmul tiled 256x256x256,2,fallback,7179684.146341464
+matmul tiled 256x256x256,2,fallback (A/A),6392602.439024391
+matmul tiled 256x256x256,2,kernel,9269315.853658536
+matmul tiled 256x256x256,3,fallback,5222874.390243903
+matmul tiled 256x256x256,3,fallback (A/A),4760475
+matmul tiled 256x256x256,3,kernel,8404385.365853658
+matmul tiled 256x256x256,4,fallback,5892718.902439024
+matmul tiled 256x256x256,4,fallback (A/A),4666310.365853659
+matmul tiled 256x256x256,4,kernel,9292973.170731707
+relu call path: bare ffi vs kernel::relu_raw,0,fallback,21520.88823144931
+relu call path: bare ffi vs kernel::relu_raw,0,fallback (A/A),19489.834531631634
+relu call path: bare ffi vs kernel::relu_raw,0,kernel,15343.610031304826
+relu call path: bare ffi vs kernel::relu_raw,1,fallback,15384.06893942
+relu call path: bare ffi vs kernel::relu_raw,1,fallback (A/A),14351.377756372769
+relu call path: bare ffi vs kernel::relu_raw,1,kernel,14572.823282534659
+relu call path: bare ffi vs kernel::relu_raw,2,fallback,14520.141731741718
+relu call path: bare ffi vs kernel::relu_raw,2,fallback (A/A),16068.815576731226
+relu call path: bare ffi vs kernel::relu_raw,2,kernel,15065.526849908838
+relu call path: bare ffi vs kernel::relu_raw,3,fallback,14209.59785338333
+relu call path: bare ffi vs kernel::relu_raw,3,fallback (A/A),13884.251264233375
+relu call path: bare ffi vs kernel::relu_raw,3,kernel,14750.314768309883
+relu call path: bare ffi vs kernel::relu_raw,4,fallback,15478.970724827135
+relu call path: bare ffi vs kernel::relu_raw,4,fallback (A/A),15554.408476383776
+relu call path: bare ffi vs kernel::relu_raw,4,kernel,14038.762943341704
+relu loop: Rust body vs bare ffi,0,fallback,12789.102
+relu loop: Rust body vs bare ffi,0,fallback (A/A),11799.038
+relu loop: Rust body vs bare ffi,0,kernel,14613.936
+relu loop: Rust body vs bare ffi,1,fallback,15233.054
+relu loop: Rust body vs bare ffi,1,fallback (A/A),17240.928
+relu loop: Rust body vs bare ffi,1,kernel,20608.422
+relu loop: Rust body vs bare ffi,2,fallback,15830.726
+relu loop: Rust body vs bare ffi,2,fallback (A/A),15424.646
+relu loop: Rust body vs bare ffi,2,kernel,14976.476
+relu loop: Rust body vs bare ffi,3,fallback,12931.684
+relu loop: Rust body vs bare ffi,3,fallback (A/A),14238.01
+relu loop: Rust body vs bare ffi,3,kernel,14985.358
+relu loop: Rust body vs bare ffi,4,fallback,11151.102
+relu loop: Rust body vs bare ffi,4,fallback (A/A),11255.196
+relu loop: Rust body vs bare ffi,4,kernel,16280.504
+mse_loss_grad,0,fallback,139218.22552447554
+mse_loss_grad,0,fallback (A/A),135573.16433566433
+mse_loss_grad,0,kernel,93109.15646853147
+mse_loss_grad,1,fallback,153290.9527972028
+mse_loss_grad,1,fallback (A/A),166564.46678321678
+mse_loss_grad,1,kernel,130419.14335664336
+mse_loss_grad,2,fallback,141252.03234265733
+mse_loss_grad,2,fallback (A/A),133670.30157342658
+mse_loss_grad,2,kernel,87003.62762237762
+mse_loss_grad,3,fallback,139103.9117132867
+mse_loss_grad,3,fallback (A/A),124601.61713286713
+mse_loss_grad,3,kernel,94837.08479020979
+mse_loss_grad,4,fallback,122032.99825174826
+mse_loss_grad,4,fallback (A/A),124376.70454545454
+mse_loss_grad,4,kernel,92753.80244755244
+mse+grad via GradGraph (status quo),0,fallback,1599190.1851851852
+mse+grad via GradGraph (status quo),0,fallback (A/A),1479356.4814814816
+mse+grad via GradGraph (status quo),1,fallback,1345276.851851852
+mse+grad via GradGraph (status quo),1,fallback (A/A),1424716.851851852
+mse+grad via GradGraph (status quo),2,fallback,1797189.8148148148
+mse+grad via GradGraph (status quo),2,fallback (A/A),1671284.0740740742
+mse+grad via GradGraph (status quo),3,fallback,1759014.8148148148
+mse+grad via GradGraph (status quo),3,fallback (A/A),1311523.3333333333
+mse+grad via GradGraph (status quo),4,fallback,1383265.5555555555
+mse+grad via GradGraph (status quo),4,fallback (A/A),1359866.111111111

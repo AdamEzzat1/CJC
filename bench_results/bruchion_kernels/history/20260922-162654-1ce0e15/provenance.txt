@@ -1,6 +1,6 @@
 repo: C:/Users/adame/CJC
 branch: bruchion-kernels-m1
-commit: 28c104cfad8c4d88204028764be2a08961f2caaa
+commit: 1ce0e1581589849ee28a6fec4a45ca21f0c3b19c
 dirty tree: false
 dirty paths: (none outside the record directory)
 rustc: rustc 1.97.1 (8bab26f4f 2026-07-14); host: x86_64-pc-windows-msvc
@@ -15,7 +15,7 @@ f64::powi is binary exponentiation on this target: false
 elements per call (n): 65536
 protocol: iterations calibrated once on the fallback arm to ~1000000 us per phase (max 1000000); 1 warm-up phase(s) per arm; 5 measured phases, arms interleaved A1/A2/B; statistic: ns per call, median [min, max] over phases
 seed: 42
-unix time: 1790119622
+unix time: 1790118944
 launcher: bench/bruchion_kernels_bench/run.ps1 (PowerShell, load-gated)
-load gate: total CPU avg 10.2% max 15.7% over 20 s (thresholds 15% / 25%); busiest processes (% of one core): svchost 21%, wmiprvse 15%, claude 8%
-last boot: 9/21/2026 9:47:14 PM (uptime 18.7 h)
+load gate: total CPU avg 14.5% max 23.5% over 20 s (thresholds 15% / 25%); busiest processes (% of one core): claude 20%, cefsharp.browsersubprocess 9%, svchost 8%
+last boot: 9/21/2026 9:47:14 PM (uptime 18.5 h)
