@@ -1,0 +1,26 @@
+[package]
+name = "bruchion-kernels-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "bruchion_kernels_bench"
+path = "main.rs"
+
+# The CJC-side benchmark record for the Bruchion kernel pack: the Rust fallback path
+# against the kernel path, routed through the runtime switch, on the same buffers, with
+# provenance. No criterion dep -- the interp_micro / cana_diagnostics convention of manual
+# Instant timing, interleaved A/B phases, JSONL rows and a REPORT.md.
+#
+# Without the feature the binary builds and runs the fallback arm (and its A/A) only, and
+# the report says the kernel arm was not compiled in. With it, cjc-runtime's build.rs
+# needs BRUCHION_KERNELS_DIR, which is why the feature is off by default here: a plain
+# `cargo build --workspace` must not require a kernel directory.
+[features]
+default = []
+bruchion-kernels = ["cjc-runtime/bruchion-kernels"]
+
+[dependencies]
+cjc-runtime = { path = "../../crates/cjc-runtime" }
+cjc-repro = { path = "../../crates/cjc-repro" }
