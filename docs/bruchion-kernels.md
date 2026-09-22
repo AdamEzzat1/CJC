@@ -186,20 +186,30 @@ On a GNU toolchain (Linux, MinGW) neither is needed and `build.rs` adds nothing.
 - `piml_heat_1d_train` is routed (above); the other PINN problems (Burgers, the
   harmonic oscillator) go through `GradGraph` and are not.
 - `ml::mse_loss_grad` and the switch itself have no CJC-language entry point.
-- `adam_step` is routed and should not be: the record has the kernel about 20x slower
-  (a software `sqrt` in the libm-free pack against `sqrtsd`); the change that makes
-  `adam_step_raw` take the fallback regardless of the switch is deferred until the
-  clean record that documents the number is committed.
+- `adam_step` is **not routed any more**: the record has the kernel 17.85x slower
+  (a software `sqrt` in the libm-free pack against `sqrtsd`), so `adam_step_raw` takes
+  the fallback regardless of the switch; the kernel, its parity test and its bench row
+  stay.
 - A registered timing record now exists: `bench/bruchion_kernels_bench` (run through
   `bench/bruchion_kernels_bench/run.ps1`, which refuses to record on a loaded machine
   and stamps the gate readings, the kernel hash and the tree state into the
   provenance), writing `bench_results/bruchion_kernels/{REPORT.md, rows.jsonl,
   phases.csv, provenance.txt}` and archiving the previous record under `history/`.
-  Its verdicts so far (2^16 elements, five interleaved phases, an A/A arm): `relu`
-  slower, whole band above 1 (about 1.27x); `adam_step` slower, about 20x; every other
-  row inside the band or within the A/A spread, i.e. this run cannot tell the arms
-  apart. Nothing in it is a CJC win. `dispatch::timing_probe` remains as a probe. What
-  the probe said on 2026-09-22 (one machine, no interleaving, no A/A):
+  The clean-tree record at `abe6b21` (2^16 elements, five interleaved phases of one
+  second, an A/A arm, gate 12.5% avg / 24.4% max): `relu` slower 1.27x and `axpy`
+  slower 1.31x, whole band above 1; `adam_step` slower 17.85x; `matmul 64x17x33`
+  **faster 1.52x**, whole band below 1 (the one kernel win in the record, one shape,
+  one run — the earlier dirty record had that row inside its wider band, so it is a
+  number to reproduce, not a result to quote); `matmul 128^3`, `dot_kahan`, `mse`,
+  both `heat1d_residual_grad` shapes and `mse_loss_grad` within the A/A spread, i.e.
+  the run cannot tell the arms apart there. `mse_loss_grad` against its unrouted
+  status quo (the `GradGraph` chain): 2.84 against 14.69 ns per element and 0 against
+  122 allocations per call — a CJC-side comparison of two Rust paths, not a kernel
+  win. The elementwise kernels are still slower than CJC's release Rust bodies, and
+  role 6's flag sweep (`-O3`, AVX2, gcc 16, in the C harness) found no setting that
+  runs them faster than the locked `-O2` does. `dispatch::timing_probe` remains as a
+  probe. What the probe said on 2026-09-22 (one machine,
+  no interleaving, no A/A):
 
 | `timing_probe`, release, 2^16 elements, min of 25 after a warm-up | kernel (scalar, session 3) | kernel (2-lane `@simd`, SIMD step 2) | kernel (unrolled, `restrict`) | Rust body | kernel, A/A re-run under a runaway service host | Rust body, same re-run | kernel, A/A re-run, quiet (gated) | Rust body, quiet |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|

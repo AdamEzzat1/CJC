@@ -256,10 +256,10 @@ fn workloads(o: &Opts) -> Vec<Workload> {
             digest: Box::new(move || fnv1a(c.borrow().iter().map(|v| v.to_bits()))),
         });
     }
-    // adam_step_raw at a fixed step (t = 7): params, m, v restored before every call.
-    // This is the dispatch entry, where `1 - beta^t` is hoisted on both arms; the
-    // `ml::adam_step` fallback loop recomputes `powf` per element, which is a CJC-side
-    // cost, not the kernel's, and is not what this row compares.
+    // Adam at a fixed step (t = 7): params, m, v restored before every call. The two
+    // dispatch bodies with `1 - beta^t` hoisted on both arms (the `ml::adam_step`
+    // fallback loop recomputes `powf` per element, a CJC-side cost this row does not
+    // charge to either side). `adam_step_raw` itself no longer routes to the kernel.
     {
         let p0 = g.f64s(n);
         let grads = g.f64s(n);
@@ -277,7 +277,15 @@ fn workloads(o: &Opts) -> Vec<Workload> {
                 p.copy_from_slice(&p0);
                 m.copy_from_slice(&m0);
                 v.copy_from_slice(&v0);
-                dispatch::adam_step_raw(p, &grads, m, v, 1e-3, 0.9, 0.999, 1e-8, 7.0);
+                // `adam_step_raw` no longer takes the kernel (this row is why); the row
+                // keeps measuring the kernel itself so the record shows the number.
+                let (bc1, bc2) = (1.0 - 0.9f64.powf(7.0), 1.0 - 0.999f64.powf(7.0));
+                #[cfg(feature = "bruchion-kernels")]
+                if dispatch::enabled() {
+                    dispatch::adam_step_kernel(p, &grads, m, v, 1e-3, 0.9, 0.999, 1e-8, bc1, bc2);
+                    return;
+                }
+                dispatch::adam_step_fallback(p, &grads, m, v, 1e-3, 0.9, 0.999, 1e-8, bc1, bc2);
             }),
             digest: Box::new(move || {
                 let s = st.borrow();
