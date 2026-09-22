@@ -347,7 +347,7 @@ fn workloads(o: &Opts) -> Vec<Workload> {
         let o1 = out.clone();
         ws.push(Workload {
             routed: true,
-            name: "relu call path: bare ffi | kernel::relu_raw".into(),
+            name: "relu call path: bare ffi vs kernel::relu_raw".into(),
             elems: n,
             call: Box::new(move || {
                 let mut o = o1.borrow_mut();
@@ -365,7 +365,7 @@ fn workloads(o: &Opts) -> Vec<Workload> {
         let o1 = out.clone();
         ws.push(Workload {
             routed: true,
-            name: "relu loop: Rust body | bare ffi".into(),
+            name: "relu loop: Rust body vs bare ffi".into(),
             elems: n,
             call: Box::new(move || {
                 let mut o = o1.borrow_mut();

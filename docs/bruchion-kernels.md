@@ -52,6 +52,10 @@ plus the edge cases each kernel has:
   zero skip differs in the last bit (both sides must give `13510798882111492`);
 - `relu` on `-0.0`, NaN and the infinities;
 - `matmul` at seven shapes including `k = 0` and `m = 0`;
+- `matmul_tiled` (`TiledMatmul`'s order — the plain ascending-`p` sum `Tensor::matmul`
+  uses from 64 in any dimension) against the engine itself at eight shapes including
+  the 64-blocking edges and `k = 0`, and asserted NOT the Kahan `matmul`'s value at
+  128^3;
 - `adam_step` over five steps with `1 − β^t` from `powf` on this side;
 - `powi` against a Rust transcription of compiler-builtins' `__powidf2`
   (`powi_reference`) for exponents −12..=12 over 200 bases plus the edge cases; and,
@@ -185,7 +189,11 @@ On a GNU toolchain (Linux, MinGW) neither is needed and `build.rs` adds nothing.
   is the Rust API); the builtin and its AST/MIR wiring are the next step.
 - `piml_heat_1d_train` is routed (above); the other PINN problems (Burgers, the
   harmonic oscillator) go through `GradGraph` and are not.
-- `ml::mse_loss_grad` and the switch itself have no CJC-language entry point.
+- `ml::mse_loss_grad` and the switch now have CJC-language entry points — the builtins
+  `mse_loss_grad(pred, target) -> (loss, grad)`, `bruchion_kernels(on) -> previous`,
+  `bruchion_kernels_enabled()` (`tests/bruchion_builtins.rs`, both executors) — but the
+  graph's own `mean((pred - target)^2)` chain does not lower to the fused function; that
+  pattern match is still unwritten.
 - `adam_step` is **not routed any more**: the record has the kernel 17.85x slower
   (a software `sqrt` in the libm-free pack against `sqrtsd`), so `adam_step_raw` takes
   the fallback regardless of the switch; the kernel, its parity test and its bench row
@@ -204,7 +212,17 @@ On a GNU toolchain (Linux, MinGW) neither is needed and `build.rs` adds nothing.
   `dot_kahan`, `mse`, both `heat1d_residual_grad` shapes and `mse_loss_grad` within
   the A/A spread every time, i.e. the runs cannot tell those arms apart. (The
   `a24189b` record's provenance says `dirty tree: true` on a clean tree: a parsing
-  bug in the runner, fixed in `dab5f6c`; the archived file is left as written.) `mse_loss_grad` against its unrouted
+  bug in the runner, fixed in `dab5f6c`; the archived file is left as written.) A fourth record (`41f161c`, taken at `1ce0e15`, kernel `5c897aa0…`) adds the tiled
+  matmul rows — `TiledMatmul` against `cjc_matmul_tiled_f64` on the same buffer: kernel
+  slower 1.46x at 128^3 and 1.56x at 256^3, whole band above 1, the loss that was
+  expected before measuring (a 4-wide AVX2 micro-kernel against two SSE2 lanes) — and
+  the relu call-path probe: the routed entry against the bare ffi symbol, both arms
+  the kernel, is 0.947 and within the A/A, so routing costs nothing the record can
+  see; the Rust body against the bare ffi is 1.31x (median), so the recorded `relu`
+  gap is the loop's codegen, not the call path. The same object measured 0.161 ns per
+  element in the Bruchion-side C harness and 0.23 here: two harnesses, two buffer
+  placements, not comparable with each other. `matmul 64x17x33` was faster a fourth
+  time (1.34x; the medians of the four clean records span 0.64–0.75). `mse_loss_grad` against its unrouted
   status quo (the `GradGraph` chain): 2.84 against 14.69 ns per element and 0 against
   122 allocations per call — a CJC-side comparison of two Rust paths, not a kernel
   win. The elementwise kernels are still slower than CJC's release Rust bodies, and
