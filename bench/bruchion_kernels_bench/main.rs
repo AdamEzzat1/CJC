@@ -702,7 +702,8 @@ fn main() {
         let _ = writeln!(
             md,
             "| {} | {} | {} | {} | {} | {:.3}, {:.3}, {:.3} | {} | {} | {} |",
-            r.name,
+            // A `|` in a name would split its table row (the record at 1ce0e15 shows it).
+            r.name.replace('|', "\\|"),
             r.iters,
             fmt_band(&r.a1, r.elems),
             fmt_band(&r.a2, r.elems),
