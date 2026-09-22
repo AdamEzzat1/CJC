@@ -643,7 +643,7 @@ pub fn piml_heat_1d_train(
             // d(residual²)/d(aᵢ) = 2*residual * d(u_xx)/d(aᵢ)
             // d(u_xx)/d(aᵢ) = i*(i-1) * x^{i-2} for i >= 2, else 0
             for i in 2..n_params {
-                let du_xx_dai = (i * (i - 1)) as f64 * x.powi(i as i32 - 2);
+                let du_xx_dai = (i * (i - 1)) as f64 * cjc_repro::powi_f64(x, i as i32 - 2);
                 phys_grads[i] += 2.0 * residual * du_xx_dai / n_colloc as f64;
             }
         }

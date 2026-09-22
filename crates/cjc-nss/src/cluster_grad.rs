@@ -381,8 +381,8 @@ pub fn fit_with_adam(
 
             // Adam step.
             adam_step += 1;
-            let bc1 = 1.0 - beta1.powi(adam_step as i32);
-            let bc2 = 1.0 - beta2.powi(adam_step as i32);
+            let bc1 = 1.0 - cjc_repro::powi_f64(beta1, adam_step as i32);
+            let bc2 = 1.0 - cjc_repro::powi_f64(beta2, adam_step as i32);
             for i in 0..in_dim {
                 m_wc[i] = beta1 * m_wc[i] + (1.0 - beta1) * g_wc[i];
                 v_wc[i] = beta2 * v_wc[i] + (1.0 - beta2) * g_wc[i].powi(2);

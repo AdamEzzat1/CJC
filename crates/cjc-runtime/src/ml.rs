@@ -588,7 +588,7 @@ pub fn apply_dropout(data: &[f64], mask: &[f64]) -> Result<Vec<f64>, String> {
 /// Learning rate schedule: step decay.
 /// lr = initial_lr * decay_rate^(floor(epoch / step_size))
 pub fn lr_step_decay(initial_lr: f64, decay_rate: f64, epoch: usize, step_size: usize) -> f64 {
-    initial_lr * decay_rate.powi((epoch / step_size) as i32)
+    initial_lr * cjc_repro::powi_f64(decay_rate, (epoch / step_size) as i32)
 }
 
 /// Learning rate schedule: cosine annealing.

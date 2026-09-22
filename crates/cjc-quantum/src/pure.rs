@@ -1665,7 +1665,7 @@ pub fn pure_richardson_extrapolate(
     rhs[0] = 1.0;
     for k in 0..n {
         for i in 0..n {
-            mat[k][i] = scale_factors[i].powi(k as i32);
+            mat[k][i] = cjc_repro::powi_f64(scale_factors[i], k as i32);
         }
     }
     // Gaussian elimination with partial pivoting

@@ -112,7 +112,7 @@ fn compute_richardson_coefficients(lambdas: &[f64]) -> Result<Vec<f64>, String> 
 
     for k in 0..n {
         for i in 0..n {
-            mat[k][i] = lambdas[i].powi(k as i32);
+            mat[k][i] = cjc_repro::powi_f64(lambdas[i], k as i32);
         }
     }
 

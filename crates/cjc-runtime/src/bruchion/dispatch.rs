@@ -231,24 +231,12 @@ pub fn powi_kernel(a: f64, b: i32) -> f64 {
 }
 
 /// compiler-builtins' `__powidf2`, transcribed: `r = r * a` on each set bit of `|b|`,
-/// `a = a * a` between bits, `1 / r` for a negative exponent. Kept in Rust so the kernel
-/// can be checked against the *algorithm* on every target, whatever that target's
-/// `f64::powi` turns out to compute.
-pub fn powi_reference(mut a: f64, b: i32) -> f64 {
-    let recip = b < 0;
-    let mut e = b.unsigned_abs();
-    let mut r = 1.0f64;
-    loop {
-        if e & 1 != 0 {
-            r *= a;
-        }
-        e >>= 1;
-        if e == 0 {
-            break;
-        }
-        a *= a;
-    }
-    if recip { 1.0 / r } else { r }
+/// `a = a * a` between bits, `1 / r` for a negative exponent. The one copy of the
+/// algorithm lives in `cjc_repro::powi_f64`, which every CJC site with a runtime
+/// exponent now calls; this name is kept so the kernel is checked against the
+/// *algorithm* on every target, whatever that target's `f64::powi` turns out to compute.
+pub fn powi_reference(a: f64, b: i32) -> f64 {
+    cjc_repro::powi_f64(a, b)
 }
 
 /// Whether this target's `f64::powi` with a runtime exponent is binary exponentiation.
@@ -345,37 +333,19 @@ pub fn heat1d_residual_grad_fallback(x: &[f64], coeffs: &[f64], f: &[f64], r: &m
         r[j] = residual;
         phys_acc.add(residual * residual);
         for i in 2..n_params {
-            let du_xx_dai = (i * (i - 1)) as f64 * xj.powi(i as i32 - 2);
+            let du_xx_dai = (i * (i - 1)) as f64 * cjc_repro::powi_f64(xj, i as i32 - 2);
             grad[i] += 2.0 * residual * du_xx_dai / n as f64;
         }
     }
     phys_acc.finalize() / n as f64
 }
 
-/// `heat1d_residual_grad_fallback` with `powi_reference` in place of `f64::powi`: the
-/// arithmetic the kernel implements, stated in Rust. It differs from the fallback
-/// exactly where this target's `f64::powi` is not binary exponentiation.
+/// The arithmetic the kernel implements, stated in Rust. Since CJC's own loop
+/// (`piml_heat_1d_train`, and `heat1d_residual_grad_fallback` above) took
+/// `cjc_repro::powi_f64`, the fallback IS this arithmetic on every target; the name is
+/// kept so the tests still say which side is the specification.
 pub fn heat1d_residual_grad_reference(x: &[f64], coeffs: &[f64], f: &[f64], r: &mut [f64], grad: &mut [f64]) -> f64 {
-    let n_params = coeffs.len().min(grad.len());
-    for g in grad.iter_mut().take(n_params) {
-        *g = 0.0;
-    }
-    let n = x.len().min(f.len()).min(r.len());
-    if n == 0 {
-        return 0.0;
-    }
-    let mut phys_acc = KahanAccumulatorF64::new();
-    for j in 0..n {
-        let xj = x[j];
-        let residual = poly_eval_dd(coeffs, xj) - f[j];
-        r[j] = residual;
-        phys_acc.add(residual * residual);
-        for i in 2..n_params {
-            let du_xx_dai = (i * (i - 1)) as f64 * powi_reference(xj, i as i32 - 2);
-            grad[i] += 2.0 * residual * du_xx_dai / n as f64;
-        }
-    }
-    phys_acc.finalize() / n as f64
+    heat1d_residual_grad_fallback(x, coeffs, f, r, grad)
 }
 
 #[cfg(feature = "bruchion-kernels")]
@@ -563,9 +533,12 @@ mod parity {
     /// binary exponentiation: e.g. x = 3.8511975033176533, b = -11 gives
     /// 4510433485740570284 (the C runtime's `pow`), where `__powidf2` and the kernel give
     /// 4510433485740570282. On x86_64-unknown-linux-gnu (rustc 1.98.1) every probe
-    /// agrees. So this passes on Linux and is ignored, with the reason, on MSVC.
+    /// agrees. So this passes on Linux and is ignored, with the reason, on MSVC. It is a
+    /// statement about *Rust's* `f64::powi`, which no CJC arithmetic depends on any more:
+    /// every runtime-exponent site calls `cjc_repro::powi_f64` (the test below is the one
+    /// that matters for CJC's bits).
     #[test]
-    #[cfg_attr(target_env = "msvc", ignore = "f64::powi with a runtime exponent is the C runtime's pow on MSVC targets, not binary exponentiation (docs/bruchion-kernels.md)")]
+    #[cfg_attr(target_env = "msvc", ignore = "f64::powi with a runtime exponent is the C runtime's pow on MSVC targets, not binary exponentiation (docs/bruchion-kernels.md); CJC's own arithmetic uses cjc_repro::powi_f64 and does not depend on it")]
     fn f64_powi_is_binary_exponentiation_on_this_target() {
         assert!(f64_powi_is_binary_exponentiation());
         let xs = inputs(200, 80);
@@ -610,10 +583,11 @@ mod parity {
     /// exponentiation the two differ — one ulp in `grad[7]` at 1000x9 on
     /// x86_64-pc-windows-msvc, found 2026-09-22 — which means `piml_heat_1d_train` itself
     /// computes different bits on that target than on Linux.
+    /// Runs on every target now: CJC's loop uses `cjc_repro::powi_f64`, so the one-ulp
+    /// difference in `grad[7]` at 1000x9 that MSVC's `f64::powi` produced is gone, and
+    /// this is a cross-platform gate rather than a Linux-only one.
     #[test]
-    #[cfg_attr(target_env = "msvc", ignore = "f64::powi is not binary exponentiation on MSVC targets: the kernel and CJC's loop differ by one ulp in grad[7] at 1000x9 (docs/bruchion-kernels.md)")]
     fn heat1d_gradient_matches_cjcs_own_loop_bit_for_bit() {
-        assert!(f64_powi_is_binary_exponentiation());
         for &(n_colloc, n_params) in &HEAT1D_SHAPES {
             let (x, coeffs, f) = heat1d_case(n_colloc, n_params);
             let mut r1 = vec![0.0; n_colloc];

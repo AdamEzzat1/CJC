@@ -533,7 +533,7 @@ pub fn log_ticks(data_min: f64, data_max: f64, base: f64) -> Vec<f64> {
 
     let mut ticks = Vec::new();
     for exp in log_min..=log_max {
-        let val = base.powi(exp);
+        let val = cjc_repro::powi_f64(base, exp);
         if val >= data_min * 0.999 && val <= data_max * 1.001 && ticks.len() < 20 {
             ticks.push(val);
         }
@@ -544,7 +544,7 @@ pub fn log_ticks(data_min: f64, data_max: f64, base: f64) -> Vec<f64> {
         let mut sub_ticks = Vec::new();
         for exp in (log_min - 1)..=log_max {
             for &mult in &[2.0, 5.0] {
-                let val = mult * base.powi(exp);
+                let val = mult * cjc_repro::powi_f64(base, exp);
                 if val >= data_min * 0.999 && val <= data_max * 1.001 {
                     sub_ticks.push(val);
                 }

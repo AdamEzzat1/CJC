@@ -13,6 +13,9 @@
 //!   Kahan summation for leaves of 32 elements or fewer.
 //! - [`ReproConfig`] -- a lightweight toggle that carries the reproducibility
 //!   seed through the compiler pipeline.
+//! - [`powi_f64`] -- integer powers by binary exponentiation (`__powidf2`'s
+//!   multiplications in its order), because `f64::powi` with a runtime exponent
+//!   is the C runtime's `pow` on MSVC targets and computes different bits there.
 //!
 //! # Determinism contract
 //!
@@ -23,9 +26,11 @@
 //! No `HashMap`, no FMA, no non-deterministic SIMD reductions.
 
 pub mod kahan;
+pub mod powi;
 pub use kahan::{
     KahanAccumulatorF32, KahanAccumulatorF64, KahanAccumulatorF64x4, KahanAccumulatorF64x8,
 };
+pub use powi::powi_f64;
 
 /// Deterministic pseudo-random number generator using the SplitMix64 algorithm.
 ///

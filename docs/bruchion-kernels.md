@@ -107,7 +107,16 @@ is the runtime probe they and any CJC code can ask.
 **What it means for the switch.** With the kernels on, Windows CJC computes the
 Linux bits for these paths; with them off, it does not. That is an argument for a
 CJC-owned `powi` (the eleven lines of `powi_reference`, in `cjc-repro`) used at every
-site, independent of this integration — proposed, not done here.
+site, independent of this integration — **done** (the performance stack, 2026-09-22):
+`cjc_repro::powi_f64` is the one copy of `__powidf2`'s algorithm, every runtime-exponent
+site calls it (`pinn.rs`'s heat gradient, `ml::lr_step_decay`, `cjc-nss`'s Adam bias
+correction, `cjc-quantum`'s Vandermonde rows, `cjc-vizor`'s log-axis ticks, and this
+file's fallback), `powi_reference` delegates to it, and spec tests pin the bits with
+hard-coded values, the MSVC witness among them, on every platform. With that,
+`heat1d_gradient_matches_cjcs_own_loop_bit_for_bit` runs on MSVC and passes: CJC's own
+loop and the kernel agree there now, and `piml_heat_1d_train` computes the Linux bits
+on Windows. `f64_powi_is_binary_exponentiation_on_this_target` stays ignored on MSVC as
+a statement about Rust's `f64::powi`, which no CJC arithmetic depends on any more.
 
 ## Linking on an MSVC toolchain
 
@@ -189,5 +198,5 @@ On a GNU toolchain (Linux, MinGW) neither is needed and `build.rs` adds nothing.
   measured load, and "rebooted" is checked against `LastBootUpTime` first.
   With `restrict` the kernels' `x` and `y` must not overlap; the dispatch
   functions take `&[f64]` and `&mut [f64]`, so that holds by construction.
-- `powi` in CJC's own code still lowers to `pow` on MSVC targets (above); the fix
-  belongs in `cjc-repro`, not behind this feature.
+- ~~`powi` in CJC's own code still lowers to `pow` on MSVC targets~~ — done, see above:
+  `cjc_repro::powi_f64` at every runtime-exponent site.
