@@ -315,6 +315,70 @@ fn workloads(o: &Opts) -> Vec<Workload> {
             }),
         });
     }
+    // matmul in TiledMatmul's order: the engine itself on the fallback arms (allocating
+    // its result, as it does under Tensor::matmul, then copied into the row's buffer), the
+    // tiled kernel into the same buffer on the kernel arm. Same bits (the parity test).
+    // The expectation, stated before measuring: parity or a loss against the engine's
+    // 4-wide AVX2 axpy micro-kernel, the pack's twin being two lanes at the locked -O2.
+    for &(m, k, nn) in &[(128usize, 128usize, 128usize), (256, 256, 256)] {
+        let a = g.f64s(m * k);
+        let b = g.f64s(k * nn);
+        let c = std::rc::Rc::new(std::cell::RefCell::new(vec![0.0f64; m * nn]));
+        let c1 = c.clone();
+        ws.push(Workload {
+            routed: true,
+            name: format!("matmul tiled {m}x{k}x{nn}"),
+            elems: m * k * nn,
+            call: Box::new(move || dispatch::matmul_tiled(&a, &b, &mut c1.borrow_mut(), m, k, nn)),
+            digest: Box::new(move || fnv1a(c.borrow().iter().map(|v| v.to_bits()))),
+        });
+    }
+    // The call-path probe. Both arms of the first row run the KERNEL: the fallback arm
+    // calls the bare ffi symbol, the kernel arm goes through the routed entry
+    // `kernel::relu_raw` (two switch reads, the dispatch call, the slice narrowing), so
+    // the ratio is the call path's cost and nothing else. The second row puts the Rust
+    // body on the fallback arm against the bare ffi on the kernel arm: the loop gap with
+    // no call path in it. Together they say where the recorded `relu` gap lives.
+    #[cfg(feature = "bruchion-kernels")]
+    {
+        use cjc_runtime::bruchion::ffi;
+        let xs = x.clone();
+        let out = std::rc::Rc::new(std::cell::RefCell::new(vec![0.0f64; n]));
+        let o1 = out.clone();
+        ws.push(Workload {
+            routed: true,
+            name: "relu call path: bare ffi | kernel::relu_raw".into(),
+            elems: n,
+            call: Box::new(move || {
+                let mut o = o1.borrow_mut();
+                if dispatch::enabled() {
+                    kernel::relu_raw(&xs, &mut o);
+                } else {
+                    // SAFETY: two live buffers of n doubles.
+                    unsafe { ffi::cjc_relu_f64(n as i64, xs.as_ptr(), o.as_mut_ptr()) }
+                }
+            }),
+            digest: Box::new(move || fnv1a(out.borrow().iter().map(|v| v.to_bits()))),
+        });
+        let xs = x.clone();
+        let out = std::rc::Rc::new(std::cell::RefCell::new(vec![0.0f64; n]));
+        let o1 = out.clone();
+        ws.push(Workload {
+            routed: true,
+            name: "relu loop: Rust body | bare ffi".into(),
+            elems: n,
+            call: Box::new(move || {
+                let mut o = o1.borrow_mut();
+                if dispatch::enabled() {
+                    // SAFETY: two live buffers of n doubles.
+                    unsafe { ffi::cjc_relu_f64(n as i64, xs.as_ptr(), o.as_mut_ptr()) }
+                } else {
+                    dispatch::relu_fallback(&xs, &mut o);
+                }
+            }),
+            digest: Box::new(move || fnv1a(out.borrow().iter().map(|v| v.to_bits()))),
+        });
+    }
     // mse_loss_grad: the fused loss and gradient of mean((pred - target)^2), one pass into
     // a caller buffer, routed. Beside it, unrouted, the status quo it replaces: the
     // GradGraph chain `sub -> mul -> mean -> backward` on the same two tensors, which is

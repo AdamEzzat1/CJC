@@ -208,6 +208,35 @@ pub fn matmul_kernel(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usize, n:
     unsafe { super::ffi::cjc_matmul_f64(m as i64, k as i64, n as i64, a.as_ptr(), b.as_ptr(), c.as_mut_ptr()) }
 }
 
+// ── matmul, TiledMatmul's order ────────────────────────────────────────────
+
+/// `C[m×n] = A[m×k]·B[k×n]` in `TiledMatmul`'s bits — the order `Tensor::matmul` takes
+/// when any dimension is 64 or more: each output the plain sequential sum of its products
+/// in ascending `p`, no compensation, no fusion. NOT `matmul`'s Kahan value (the parity
+/// test asserts the two part at 128^3). The fallback is the engine itself, copied into
+/// `c`; the kernel writes `c` directly.
+pub fn matmul_tiled(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usize, n: usize) {
+    debug_assert!(a.len() >= m * k && b.len() >= k * n && c.len() >= m * n);
+    #[cfg(feature = "bruchion-kernels")]
+    if enabled() {
+        matmul_tiled_kernel(a, b, c, m, k, n);
+        return;
+    }
+    matmul_tiled_fallback(a, b, c, m, k, n);
+}
+
+pub fn matmul_tiled_fallback(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usize, n: usize) {
+    let r = crate::tensor_tiled::TiledMatmul::new().matmul(&a[..m * k], m, k, &b[..k * n], n);
+    c[..m * n].copy_from_slice(&r);
+}
+
+#[cfg(feature = "bruchion-kernels")]
+pub fn matmul_tiled_kernel(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usize, n: usize) {
+    assert!(a.len() >= m * k && b.len() >= k * n && c.len() >= m * n, "matmul_tiled: buffer shorter than its shape");
+    // SAFETY: the three buffers hold at least m·k, k·n and m·n doubles (asserted).
+    unsafe { super::ffi::cjc_matmul_tiled_f64(m as i64, k as i64, n as i64, a.as_ptr(), b.as_ptr(), c.as_mut_ptr()) }
+}
+
 // ── adam ───────────────────────────────────────────────────────────────────
 
 /// One Adam update over every parameter — `ml::adam_step`'s arithmetic, with the bias
@@ -516,6 +545,41 @@ mod parity {
         }
         let k = unsafe { crate::bruchion::ffi::cjc_sum_expbinned_f64(0, w.as_ptr()) };
         assert_eq!(k.to_bits(), binned_sum_f64(&[]).to_bits());
+    }
+
+    /// The tiled kernel against `TiledMatmul` itself, `to_bits`, at shapes on the edges of
+    /// the 64-blocking in each dimension, a tiny one, the record's two, and `k = 0`; the
+    /// fallback held to the same; the public entry switch-off against switch-on; and the
+    /// negative: at 128^3 it is NOT the Kahan `matmul`'s value, so a test that compared
+    /// the wrong pair could not pass.
+    #[test]
+    fn matmul_tiled_is_tiled_matmuls_bits_and_not_kahans() {
+        for &(m, k, n) in &[(1usize, 1usize, 1usize), (3, 5, 2), (64, 17, 33), (65, 65, 65), (200, 3, 7), (7, 200, 3), (128, 128, 128), (2, 0, 3)] {
+            let a = inputs(m * k, 31);
+            let b = inputs(k * n, 32);
+            let want = crate::tensor_tiled::TiledMatmul::new().matmul(&a, m, k, &b, n);
+            let mut c = vec![7.0; m * n];
+            matmul_tiled_kernel(&a, &b, &mut c, m, k, n);
+            assert_eq!(bits(&c), bits(&want), "kernel at {m}x{k}x{n}");
+            let mut f = vec![7.0; m * n];
+            matmul_tiled_fallback(&a, &b, &mut f, m, k, n);
+            assert_eq!(bits(&f), bits(&want), "fallback at {m}x{k}x{n}");
+        }
+        let (m, k, n) = (128usize, 128usize, 128usize);
+        let a = inputs(m * k, 31);
+        let b = inputs(k * n, 32);
+        let mut tiled = vec![0.0; m * n];
+        let mut kahan = vec![0.0; m * n];
+        matmul_tiled_kernel(&a, &b, &mut tiled, m, k, n);
+        matmul_fallback(&a, &b, &mut kahan, m, k, n);
+        assert_ne!(bits(&tiled), bits(&kahan), "the plain sum and the Kahan sum must part somewhere at 128^3");
+        let mut off = vec![0.0; m * n];
+        let mut on = vec![0.0; m * n];
+        matmul_tiled(&a, &b, &mut off, m, k, n);
+        crate::runtime_policy::set_bruchion_kernels(true);
+        matmul_tiled(&a, &b, &mut on, m, k, n);
+        crate::runtime_policy::set_bruchion_kernels(false);
+        assert_eq!(bits(&on), bits(&off));
     }
 
     /// The fused kernel against its Rust twin: the loss (CJC's exponent-binned sum, which

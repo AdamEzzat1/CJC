@@ -3902,6 +3902,48 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let result = x.fused_axpy(alpha, &y).map_err(|e| format!("fused_axpy: {e}"))?;
             Ok(Some(Value::Tensor(result)))
         }
+        "bruchion_kernels" => {
+            // bruchion_kernels(on: Bool) -> Bool: the runtime switch that routes the
+            // kernel-backed operations (relu, axpy, mse, matmul, the heat residual, the
+            // fused mse_loss_grad) to the Bruchion pack. Returns the previous state. With
+            // a runtime built without the `bruchion-kernels` feature the switch is
+            // recorded but nothing is routed: `bruchion_kernels_enabled()` says which.
+            if args.len() != 1 {
+                return Err("bruchion_kernels requires 1 argument (on: Bool)".into());
+            }
+            let on = match &args[0] {
+                Value::Bool(b) => *b,
+                other => return Err(format!("bruchion_kernels expects Bool, got {}", other.type_name())),
+            };
+            let prev = crate::runtime_policy::get().bruchion_kernels;
+            crate::runtime_policy::set_bruchion_kernels(on);
+            Ok(Some(Value::Bool(prev)))
+        }
+        "bruchion_kernels_enabled" => {
+            // bruchion_kernels_enabled() -> Bool: whether kernel-backed operations reach
+            // the pack right now (the switch on AND the feature built in).
+            if !args.is_empty() {
+                return Err("bruchion_kernels_enabled takes no arguments".into());
+            }
+            Ok(Some(Value::Bool(crate::bruchion::dispatch::enabled())))
+        }
+        "mse_loss_grad" => {
+            // mse_loss_grad(pred: Tensor, target: Tensor) -> (Float, Tensor): the loss of
+            // mean((pred - target)^2) and its gradient with respect to `pred`, in one pass
+            // and GradGraph's bits (the loss is the binned mean; each gradient element is
+            // (1/n)·d + (1/n)·d). Goes through the switch.
+            if args.len() != 2 {
+                return Err("mse_loss_grad requires 2 arguments (pred: Tensor, target: Tensor)".into());
+            }
+            let pred = value_to_tensor(&args[0])?;
+            let target = value_to_tensor(&args[1])?;
+            let p = pred.to_vec();
+            let t = target.to_vec();
+            let mut grad = vec![0.0f64; p.len()];
+            let loss = crate::ml::mse_loss_grad(&p, &t, &mut grad)?;
+            let grad = Tensor::from_vec(grad, pred.shape()).map_err(|e| format!("mse_loss_grad: {e}"))?;
+            Ok(Some(Value::Tuple(Rc::new(vec![Value::Float(loss), Value::Tensor(grad)]))))
+        }
         "fused_mul_sub" => {
             // fused_mul_sub(a, b, c) = a * b - c, one pass.
             if args.len() != 3 {
