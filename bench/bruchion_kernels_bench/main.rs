@@ -516,9 +516,17 @@ fn provenance(o: &Opts, feature: bool) -> Vec<(String, String)> {
     // The record's own output directory is untracked until it is committed; it is the one
     // path that does not make the tree dirty. Anything else untracked or modified does.
     let out_prefix = o.out.to_string_lossy().replace('\\', "/");
-    let dirty = git(&["status", "--porcelain"])
+    // `sh` trims the whole output, so a first porcelain line that begins with a space
+    // (" D path": a tracked file deleted, as the launcher's archive step does to the
+    // previous record) has lost its status column; a fixed-offset slice then took the
+    // path's first letter off and called the tree dirty (the record at a24189b says so,
+    // wrongly). Each line is trimmed on its own and split after its status word.
+    let dirty_paths: Vec<String> = git(&["status", "--porcelain"])
         .lines()
-        .any(|l| !l.get(3..).unwrap_or("").replace('\\', "/").starts_with(out_prefix.trim_end_matches('/')));
+        .map(|l| l.trim_start().splitn(2, ' ').nth(1).unwrap_or("").trim_start().replace('\\', "/"))
+        .filter(|p| !p.is_empty() && !p.starts_with(out_prefix.trim_end_matches('/')))
+        .collect();
+    let dirty = !dirty_paths.is_empty();
     let kdir = std::env::var("BRUCHION_KERNELS_DIR").unwrap_or_else(|_| "(unset)".into());
     let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let mut p = vec![
@@ -526,6 +534,7 @@ fn provenance(o: &Opts, feature: bool) -> Vec<(String, String)> {
         ("branch".to_string(), git(&["rev-parse", "--abbrev-ref", "HEAD"])),
         ("commit".to_string(), git(&["rev-parse", "HEAD"])),
         ("dirty tree".to_string(), dirty.to_string()),
+        ("dirty paths".to_string(), if dirty { dirty_paths.join(", ") } else { "(none outside the record directory)".into() }),
         ("rustc".to_string(), sh("rustc", &["-vV"]).lines().filter(|l| l.starts_with("rustc ") || l.starts_with("host:")).collect::<Vec<_>>().join("; ")),
         ("profile".to_string(), if cfg!(debug_assertions) { "debug (NOT a record: the fallback is not auto-vectorized)".into() } else { "release".into() }),
         ("target".to_string(), format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)),
