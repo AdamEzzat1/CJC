@@ -195,14 +195,16 @@ On a GNU toolchain (Linux, MinGW) neither is needed and `build.rs` adds nothing.
   and stamps the gate readings, the kernel hash and the tree state into the
   provenance), writing `bench_results/bruchion_kernels/{REPORT.md, rows.jsonl,
   phases.csv, provenance.txt}` and archiving the previous record under `history/`.
-  The clean-tree record at `abe6b21` (2^16 elements, five interleaved phases of one
-  second, an A/A arm, gate 12.5% avg / 24.4% max): `relu` slower 1.27x and `axpy`
-  slower 1.31x, whole band above 1; `adam_step` slower 17.85x; `matmul 64x17x33`
-  **faster 1.52x**, whole band below 1 (the one kernel win in the record, one shape,
-  one run — the earlier dirty record had that row inside its wider band, so it is a
-  number to reproduce, not a result to quote); `matmul 128^3`, `dot_kahan`, `mse`,
-  both `heat1d_residual_grad` shapes and `mse_loss_grad` within the A/A spread, i.e.
-  the run cannot tell the arms apart there. `mse_loss_grad` against its unrouted
+  Three clean-tree records, at `abe6b21`, `a24189b` and `dab5f6c` (the last is on
+  disk, the others under `history/`; 2^16 elements, five interleaved phases of one
+  second, an A/A arm, the gate open each time), agree: `relu` slower 1.27x and `axpy`
+  slower 1.31–1.37x, whole band above 1; `adam_step` slower 15–18x; `matmul 64x17x33`
+  **faster about 1.5x**, whole band below 1 on all three (median ratios 0.658, 0.658,
+  0.639) — the one kernel win, one shape, one machine, reproduced; `matmul 128^3`,
+  `dot_kahan`, `mse`, both `heat1d_residual_grad` shapes and `mse_loss_grad` within
+  the A/A spread every time, i.e. the runs cannot tell those arms apart. (The
+  `a24189b` record's provenance says `dirty tree: true` on a clean tree: a parsing
+  bug in the runner, fixed in `dab5f6c`; the archived file is left as written.) `mse_loss_grad` against its unrouted
   status quo (the `GradGraph` chain): 2.84 against 14.69 ns per element and 0 against
   122 allocations per call — a CJC-side comparison of two Rust paths, not a kernel
   win. The elementwise kernels are still slower than CJC's release Rust bodies, and
