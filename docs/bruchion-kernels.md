@@ -134,19 +134,22 @@ On a GNU toolchain (Linux, MinGW) neither is needed and `build.rs` adds nothing.
   milestone 1's "a record shows the timing" clause is therefore **not** met. What
   the probe said on 2026-09-22 (one machine, no interleaving, no A/A):
 
-| `timing_probe`, release, 2^16 elements, min of 25 after a warm-up | kernel | Rust body |
-|---|---:|---:|
-| `axpy` (ns per element) | 0.4532 | 0.2075 |
-| `dot_kahan` | 3.0075 | 3.0273 |
-| `relu` | 0.3052 | 0.1266 |
-| `mse` | 2.8870 | 2.9037 |
+| `timing_probe`, release, 2^16 elements, min of 25 after a warm-up | kernel (scalar, session 3) | kernel (2-lane `@simd`, SIMD step 2) | Rust body |
+|---|---:|---:|---:|
+| `axpy` (ns per element) | 0.4532 | 0.4547 | 0.2075 |
+| `dot_kahan` | 3.0075 | 2.8885 | 2.9068 |
+| `relu` | 0.3052 | 0.2213 | 0.1221 |
+| `mse` | 2.8870 | 2.8870 | 2.9037 |
 
   The Kahan kernels tie (a serial dependency chain either way). The elementwise
-  kernels are about 2.2–2.4x **slower** than the Rust bodies, because the release
-  Rust loop is auto-vectorized by LLVM and the kernel is gcc's scalar `-O2` loop
-  (`-ffp-contract=off`, no `-O3`). Switching the kernels on for `relu_raw` today
-  is therefore a slowdown; the Bruchion side's SIMD step 2 (an explicit,
-  bit-identical lane loop for `axpy`/`relu`) is the prerequisite for routing the
-  elementwise kernels at all.
+  kernels are **slower** than the Rust bodies: with the scalar kernels 2.2–2.4x,
+  and after the Bruchion side's SIMD step 2 (two-lane `@simd` slice twins, the
+  same bits — the parity tests above passed unchanged against the new archive)
+  still 2.2x for `axpy` and 1.8x for `relu`. The release Rust loop is auto-
+  vectorized by LLVM on the same SSE2 baseline, with `noalias` slices and
+  unrolling; the kernel's C has neither, since its slices may alias by contract
+  and gcc `-O2` unrolls nothing. Switching the kernels on for `relu_raw` today is
+  therefore still a slowdown; the remaining gap is a Bruchion codegen question
+  (unrolling, `restrict`), not a width one.
 - `powi` in CJC's own code still lowers to `pow` on MSVC targets (above); the fix
   belongs in `cjc-repro`, not behind this feature.
