@@ -134,12 +134,12 @@ On a GNU toolchain (Linux, MinGW) neither is needed and `build.rs` adds nothing.
   milestone 1's "a record shows the timing" clause is therefore **not** met. What
   the probe said on 2026-09-22 (one machine, no interleaving, no A/A):
 
-| `timing_probe`, release, 2^16 elements, min of 25 after a warm-up | kernel (scalar, session 3) | kernel (2-lane `@simd`, SIMD step 2) | kernel (unrolled, `restrict`) | Rust body |
-|---|---:|---:|---:|---:|
-| `axpy` (ns per element) | 0.4532 | 0.4547 | 0.3815–0.5066 | 0.2075–0.2975 |
-| `dot_kahan` | 3.0075 | 2.8885 | 3.0075–3.5248 | 3.0289–3.6331 |
-| `relu` | 0.3052 | 0.2213 | 0.1663–0.2579 | 0.1282–0.1953 |
-| `mse` | 2.8870 | 2.8870 | 3.0075–3.6087 | 2.9205–3.6377 |
+| `timing_probe`, release, 2^16 elements, min of 25 after a warm-up | kernel (scalar, session 3) | kernel (2-lane `@simd`, SIMD step 2) | kernel (unrolled, `restrict`) | Rust body | kernel, A/A re-run (same archive bits) | Rust body, same re-run |
+|---|---:|---:|---:|---:|---:|---:|
+| `axpy` (ns per element) | 0.4532 | 0.4547 | 0.3815–0.5066 | 0.2075–0.2975 | 0.6638–0.9003 | 0.3555–0.5035 |
+| `dot_kahan` | 3.0075 | 2.8885 | 3.0075–3.5248 | 3.0289–3.6331 | 5.1559–5.5618 | 5.0186–5.3955 |
+| `relu` | 0.3052 | 0.2213 | 0.1663–0.2579 | 0.1282–0.1953 | 0.2975–0.4532 | 0.2106–0.3647 |
+| `mse` | 2.8870 | 2.8870 | 3.0075–3.6087 | 2.9205–3.6377 | 4.9820–5.4596 | 5.1636–5.5984 |
 
   The last two columns are three samples in a row (the machine's state drifted
   between them, so the ratio within a sample is the number: `axpy` 1.70–1.86x,
@@ -153,6 +153,22 @@ On a GNU toolchain (Linux, MinGW) neither is needed and `build.rs` adds nothing.
   same SSE2 baseline; the rest of the gap is scheduling, which gcc 8 at the locked
   `-O2` flags does conservatively. Switching the kernels on for `relu_raw` today
   is therefore still a slowdown, by less.
+  **The A/A re-run** (last two columns, later the same day, after the Bruchion side
+  mirrored these forms into its self-hosted compiler — a change that emits no
+  different C): the archive is byte-identical to the previous column's
+  (`abi-check` reports the same `kernel_sha256`, the harness hash is
+  `15a6e852fe202fdc` again, the parity tests pass unchanged, 794 / 3 ignored), so
+  this run measures the probe, not the kernels. Every row, kernel and Rust alike,
+  came out about 1.7x slower in absolute terms — machine state, the run followed a
+  twenty-minute test ladder — which is why only the ratio within a sample is read.
+  Those ratios, three samples in a row: `axpy` 1.87x, 1.79x, 1.60x; `relu` 1.84x,
+  1.24x, 1.31x; `dot_kahan` 1.03x, 1.03x, 0.99x; `mse` 0.96x, 0.98x, 0.99x. The
+  previous column's bands (`axpy` 1.70–1.86x, `relu` 1.30–1.32x) reproduce, and
+  widen: on identical bits this probe's `relu` ratio spread 1.24–1.84x across three
+  runs, so a `relu` reading from it is good to about ±0.3x, an `axpy` reading to
+  about ±0.15x, and a change smaller than that is not something this probe can see.
+  The conclusion is unchanged: the kernels are slower than the release Rust bodies,
+  by about 1.3x (`relu`) and about 1.8x (`axpy`), and the Kahan kernels tie.
   With `restrict` the kernels' `x` and `y` must not overlap; the dispatch
   functions take `&[f64]` and `&mut [f64]`, so that holds by construction.
 - `powi` in CJC's own code still lowers to `pow` on MSVC targets (above); the fix
