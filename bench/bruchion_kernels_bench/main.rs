@@ -395,10 +395,10 @@ fn provenance(o: &Opts, feature: bool) -> Vec<(String, String)> {
     let git = |args: &[&str]| sh("git", args);
     // The record's own output directory is untracked until it is committed; it is the one
     // path that does not make the tree dirty. Anything else untracked or modified does.
-    let out_prefix = o.out.to_string_lossy().replace('\', "/");
+    let out_prefix = o.out.to_string_lossy().replace('\\', "/");
     let dirty = git(&["status", "--porcelain"])
         .lines()
-        .any(|l| !l.get(3..).unwrap_or("").replace('\', "/").starts_with(out_prefix.trim_end_matches('/')));
+        .any(|l| !l.get(3..).unwrap_or("").replace('\\', "/").starts_with(out_prefix.trim_end_matches('/')));
     let kdir = std::env::var("BRUCHION_KERNELS_DIR").unwrap_or_else(|_| "(unset)".into());
     let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let mut p = vec![
