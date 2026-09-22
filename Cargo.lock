@@ -221,6 +221,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bruchion-kernels-bench"
+version = "0.1.0"
+dependencies = [
+ "cjc-repro",
+ "cjc-runtime",
+]
+
+[[package]]
 name = "cana-ab-corpus"
 version = "0.1.11"
 dependencies = [
