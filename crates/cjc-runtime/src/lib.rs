@@ -89,6 +89,8 @@ pub mod aligned_pool;
 /// Internal bridge to compiled SIMD/tiled kernel functions.
 mod kernel_bridge;
 pub use kernel_bridge::kernel;
+/// Bruchion native kernels behind the `bruchion-kernels` feature and a runtime switch.
+pub mod bruchion;
 /// Block-paged KV-cache (vLLM-style) for efficient autoregressive decoding.
 pub mod paged_kv;
 /// Size-class binned allocator for deterministic memory management.

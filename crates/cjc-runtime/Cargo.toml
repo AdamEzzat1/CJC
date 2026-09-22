@@ -18,3 +18,7 @@ optional = true
 [features]
 default = ["parallel"]
 parallel = ["rayon"]
+# Link the Bruchion native kernel pack (a prebuilt C-ABI static archive, no crate) and
+# route selected hot loops to it behind a runtime switch that is off by default.
+# Needs BRUCHION_KERNELS_DIR at build time; see build.rs and src/bruchion/mod.rs.
+bruchion-kernels = []

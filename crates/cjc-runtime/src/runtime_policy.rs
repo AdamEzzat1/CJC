@@ -265,6 +265,13 @@ pub struct RuntimePolicy {
     /// uniformly (a fixed, reproducible schedule). Moot when the cap equals the
     /// core count (`max-perf`). Never affects results — only the schedule.
     pub adaptive: bool,
+    /// Route selected hot loops to the Bruchion native kernels
+    /// (`crate::bruchion::dispatch`). Has an effect only when the crate was built
+    /// with the `bruchion-kernels` feature; off by default either way, so one binary
+    /// can run both paths — which the parity tests and the benchmark need. The
+    /// kernels transcribe the Rust bodies' arithmetic and are tested bit-for-bit
+    /// against them, so this switch is meant never to change a result.
+    pub bruchion_kernels: bool,
 }
 
 impl RuntimePolicy {
@@ -281,13 +288,14 @@ impl RuntimePolicy {
             batch_size: mode.preset_batch_size(),
             audit_mode: mode.preset_audit_mode(),
             adaptive: true,
+            bruchion_kernels: false,
         }
     }
 
     /// One-line, deterministic, BTreeMap-free summary for reporting.
     pub fn summary(&self) -> String {
         format!(
-            "runtime_policy: thermal={} threads={} batch={} audit={} numeric={} determinism={} adaptive={}",
+            "runtime_policy: thermal={} threads={} batch={} audit={} numeric={} determinism={} adaptive={} bruchion_kernels={}",
             self.thermal_mode.as_str(),
             effective_threads(self, detect_cores()),
             self.batch_size,
@@ -295,6 +303,7 @@ impl RuntimePolicy {
             self.numeric_mode.as_str(),
             self.determinism.as_str(),
             self.adaptive,
+            self.bruchion_kernels,
         )
     }
 }
@@ -552,6 +561,13 @@ pub fn set_adaptive(on: bool) {
     POLICY.with(|c| c.borrow_mut().adaptive = on);
 }
 
+/// Route selected hot loops to the Bruchion native kernels (see
+/// [`RuntimePolicy::bruchion_kernels`]). Without the `bruchion-kernels` feature the
+/// flag is recorded but nothing is routed.
+pub fn set_bruchion_kernels(on: bool) {
+    POLICY.with(|c| c.borrow_mut().bruchion_kernels = on);
+}
+
 /// Resolved effective thread cap for the current policy on this machine.
 pub fn current_effective_threads() -> usize {
     effective_threads(&get(), detect_cores())
@@ -571,6 +587,18 @@ mod tests {
         assert_eq!(p.batch_size, 128);
         assert_eq!(p.audit_mode, AuditMode::Full);
         assert!(p.adaptive, "adaptive (race-to-idle) is on by default");
+        assert!(!p.bruchion_kernels, "the Bruchion kernels are opt-in at run time");
+    }
+
+    #[test]
+    fn set_bruchion_kernels_round_trip() {
+        reset();
+        assert!(!get().bruchion_kernels);
+        set_bruchion_kernels(true);
+        assert!(get().bruchion_kernels);
+        assert!(get().summary().ends_with("bruchion_kernels=true"));
+        reset();
+        assert!(!get().bruchion_kernels);
     }
 
     #[test]

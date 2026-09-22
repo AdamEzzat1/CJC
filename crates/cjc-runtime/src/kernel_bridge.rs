@@ -53,6 +53,13 @@ pub mod kernel {
         debug_assert_eq!(a.len(), m * k);
         debug_assert_eq!(b.len(), k * n);
         debug_assert_eq!(c.len(), m * n);
+        // The Bruchion kernel is this loop transcribed (`crate::bruchion::dispatch`);
+        // it runs only under the feature AND the runtime switch, and is tested to give
+        // these exact bits.
+        if crate::bruchion::dispatch::enabled() {
+            crate::bruchion::dispatch::matmul(a, b, c, m, k, n);
+            return;
+        }
         for i in 0..m {
             for j in 0..n {
                 let mut acc = KahanAccumulatorF64::new();
@@ -168,6 +175,10 @@ pub mod kernel {
     #[inline]
     pub fn relu_raw(data: &[f64], out: &mut [f64]) {
         debug_assert_eq!(data.len(), out.len());
+        if crate::bruchion::dispatch::enabled() {
+            crate::bruchion::dispatch::relu(data, out);
+            return;
+        }
         for (o, &x) in out.iter_mut().zip(data.iter()) {
             *o = if x > 0.0 { x } else { 0.0 };
         }

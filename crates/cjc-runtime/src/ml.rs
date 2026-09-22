@@ -23,6 +23,11 @@ pub fn mse_loss(pred: &[f64], target: &[f64]) -> Result<f64, String> {
     if pred.is_empty() {
         return Err("mse_loss: empty data".into());
     }
+    // The Bruchion kernel is this loop transcribed (`crate::bruchion::dispatch`); it
+    // runs only under the feature AND the runtime switch, after the checks above.
+    if crate::bruchion::dispatch::enabled() {
+        return Ok(crate::bruchion::dispatch::mse(pred, target));
+    }
     let mut acc = KahanAccumulatorF64::new();
     for i in 0..pred.len() {
         let d = pred[i] - target[i];
@@ -232,6 +237,13 @@ pub fn adam_step(params: &mut [f64], grads: &[f64], state: &mut AdamState) {
     state.t += 1;
     let t = state.t as f64;
     let n = params.len();
+    // The Bruchion kernel is this loop transcribed, with `1 - beta^t` computed here
+    // (`powf` stays on this side) — under the feature AND the runtime switch only.
+    if crate::bruchion::dispatch::enabled() {
+        let (lr, beta1, beta2, eps) = (state.lr, state.beta1, state.beta2, state.eps);
+        crate::bruchion::dispatch::adam_step_raw(params, grads, &mut state.m, &mut state.v, lr, beta1, beta2, eps, t);
+        return;
+    }
     for i in 0..n {
         let p = ParamIdx::from_usize(i);
         let new_m = state.beta1 * state.m_at(p) + (1.0 - state.beta1) * grads[i];
