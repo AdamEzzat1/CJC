@@ -132,11 +132,46 @@ fn fnv1a(bits: impl Iterator<Item = u64>) -> u64 {
     h
 }
 
+// ---- allocations -------------------------------------------------------------------
+
+/// Every heap allocation (and reallocation) in the process is counted, so each row can
+/// say how many a single call makes on each arm — the memory audit's number, next to the
+/// time. Counting is a relaxed atomic increment per allocation; it is the same overhead
+/// on every arm and it is stated in the provenance.
+static ALLOC_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+struct CountingAlloc;
+
+unsafe impl std::alloc::GlobalAlloc for CountingAlloc {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        ALLOC_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::alloc::System.alloc(layout)
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        std::alloc::System.dealloc(ptr, layout)
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, new_size: usize) -> *mut u8 {
+        ALLOC_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::alloc::System.realloc(ptr, layout, new_size)
+    }
+}
+
+#[global_allocator]
+static GLOBAL: CountingAlloc = CountingAlloc;
+
+fn allocations_now() -> u64 {
+    ALLOC_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 // ---- workloads ---------------------------------------------------------------------
 
 /// One workload: a call to time, and a digest of what the call produced.
 struct Workload {
     name: String,
+    /// Whether the switch changes what the call does. A status-quo row (the unfused
+    /// chain the kernel replaces) is not routed: it runs the two fallback arms only and
+    /// is read against the routed row it stands beside, never as a kernel ratio.
+    routed: bool,
     /// Elements per call, for the ns-per-element column (0: report ns per call only).
     elems: usize,
     call: Box<dyn FnMut()>,
@@ -156,6 +191,7 @@ fn workloads(o: &Opts) -> Vec<Workload> {
         let out = std::rc::Rc::new(std::cell::RefCell::new(vec![0.0f64; n]));
         let o1 = out.clone();
         ws.push(Workload {
+            routed: true,
             name: "relu".into(),
             elems: n,
             call: Box::new(move || kernel::relu_raw(&xs, &mut o1.borrow_mut())),
@@ -170,6 +206,7 @@ fn workloads(o: &Opts) -> Vec<Workload> {
         let y = std::rc::Rc::new(std::cell::RefCell::new(y0.clone()));
         let y1 = y.clone();
         ws.push(Workload {
+            routed: true,
             name: "axpy".into(),
             elems: n,
             call: Box::new(move || {
@@ -186,6 +223,7 @@ fn workloads(o: &Opts) -> Vec<Workload> {
         let last = std::rc::Rc::new(std::cell::Cell::new(0.0f64));
         let l1 = last.clone();
         ws.push(Workload {
+            routed: true,
             name: "dot_kahan".into(),
             elems: n,
             call: Box::new(move || l1.set(black_box(dispatch::dot_kahan(&xs, &ys)))),
@@ -197,6 +235,7 @@ fn workloads(o: &Opts) -> Vec<Workload> {
         let last = std::rc::Rc::new(std::cell::Cell::new(0.0f64));
         let l1 = last.clone();
         ws.push(Workload {
+            routed: true,
             name: "mse".into(),
             elems: n,
             call: Box::new(move || l1.set(black_box(ml::mse_loss(&xs, &ys).expect("mse")))),
@@ -210,6 +249,7 @@ fn workloads(o: &Opts) -> Vec<Workload> {
         let c = std::rc::Rc::new(std::cell::RefCell::new(vec![0.0f64; m * nn]));
         let c1 = c.clone();
         ws.push(Workload {
+            routed: true,
             name: format!("matmul {m}x{k}x{nn}"),
             elems: m * k * nn,
             call: Box::new(move || kernel::matmul_raw(&a, &b, &mut c1.borrow_mut(), m, k, nn)),
@@ -228,6 +268,7 @@ fn workloads(o: &Opts) -> Vec<Workload> {
         let st = std::rc::Rc::new(std::cell::RefCell::new((p0.clone(), m0.clone(), v0.clone())));
         let s1 = st.clone();
         ws.push(Workload {
+            routed: true,
             name: "adam_step (t = 7)".into(),
             elems: n,
             call: Box::new(move || {
@@ -252,6 +293,7 @@ fn workloads(o: &Opts) -> Vec<Workload> {
         let bufs = std::rc::Rc::new(std::cell::RefCell::new((vec![0.0f64; nc], vec![0.0f64; np], 0.0f64)));
         let b1 = bufs.clone();
         ws.push(Workload {
+            routed: true,
             name: format!("heat1d_residual_grad {nc}x{np}"),
             elems: nc * np,
             call: Box::new(move || {
@@ -262,6 +304,57 @@ fn workloads(o: &Opts) -> Vec<Workload> {
             digest: Box::new(move || {
                 let b = bufs.borrow();
                 fnv1a(b.0.iter().chain(b.1.iter()).map(|v| v.to_bits()).chain(std::iter::once(b.2.to_bits())))
+            }),
+        });
+    }
+    // mse_loss_grad: the fused loss and gradient of mean((pred - target)^2), one pass into
+    // a caller buffer, routed. Beside it, unrouted, the status quo it replaces: the
+    // GradGraph chain `sub -> mul -> mean -> backward` on the same two tensors, which is
+    // what a CJC program's `mean((pred - target)^2)` with a gradient costs today. The two
+    // rows produce the same bits (the cjc-ad parity test holds them to it); the digests
+    // here are asserted equal across phases within a row, not across the rows.
+    {
+        let (xs, ys) = (x.clone(), y0.clone());
+        let out = std::rc::Rc::new(std::cell::RefCell::new((0.0f64, vec![0.0f64; n])));
+        let o1 = out.clone();
+        ws.push(Workload {
+            routed: true,
+            name: "mse_loss_grad".into(),
+            elems: n,
+            call: Box::new(move || {
+                let mut o = o1.borrow_mut();
+                let (loss, grad) = &mut *o;
+                *loss = black_box(ml::mse_loss_grad(&xs, &ys, grad).expect("mse_loss_grad"));
+            }),
+            digest: Box::new(move || {
+                let o = out.borrow();
+                fnv1a(std::iter::once(o.0.to_bits()).chain(o.1.iter().map(|v| v.to_bits())))
+            }),
+        });
+        let pt = cjc_runtime::tensor::Tensor::from_vec(x.clone(), &[n]).expect("tensor");
+        let tt = cjc_runtime::tensor::Tensor::from_vec(y0.clone(), &[n]).expect("tensor");
+        let out = std::rc::Rc::new(std::cell::RefCell::new((0.0f64, vec![0.0f64; n])));
+        let o1 = out.clone();
+        ws.push(Workload {
+            routed: false,
+            name: "mse+grad via GradGraph (status quo)".into(),
+            elems: n,
+            call: Box::new(move || {
+                let mut g = cjc_ad::GradGraph::new();
+                let p = g.parameter(pt.clone());
+                let t = g.parameter(tt.clone());
+                let diff = g.sub(p, t);
+                let sq = g.mul(diff, diff);
+                let loss = g.mean(sq);
+                g.backward(loss);
+                let mut o = o1.borrow_mut();
+                o.0 = g.tensor(loss).to_vec()[0];
+                o.1.copy_from_slice(&g.grad(p).expect("a gradient").to_vec());
+                black_box(&o.1);
+            }),
+            digest: Box::new(move || {
+                let o = out.borrow();
+                fnv1a(std::iter::once(o.0.to_bits()).chain(o.1.iter().map(|v| v.to_bits())))
             }),
         });
     }
@@ -306,8 +399,11 @@ fn ratio_band(a: &Band, b: &Band) -> (f64, f64, f64) {
 
 struct Row {
     name: String,
+    routed: bool,
     elems: usize,
     iters: u64,
+    /// Heap allocations one call makes on the fallback arm and, when run, the kernel arm.
+    allocs: (u64, Option<u64>),
     a1: Band,
     a2: Band,
     b: Option<Band>,
@@ -316,6 +412,7 @@ struct Row {
 }
 
 fn run_workload(w: &mut Workload, o: &Opts, kernel_arm: bool) -> Row {
+    let kernel_arm = kernel_arm && w.routed;
     let arms: Vec<Arm> = if kernel_arm { vec![Arm::A1, Arm::A2, Arm::B] } else { vec![Arm::A1, Arm::A2] };
     // Calibrate once on the fallback arm.
     runtime_policy::set_bruchion_kernels(false);
@@ -324,6 +421,19 @@ fn run_workload(w: &mut Workload, o: &Opts, kernel_arm: bool) -> Row {
     (w.call)();
     let single_ns = t0.elapsed().as_nanos().max(1) as u64;
     let iters = ((o.phase_micros * 1000) / single_ns).clamp(1, o.max_iters);
+    // Allocations of one call per arm, after a first call on that arm has warmed any
+    // lazily built state.
+    let mut allocs_of = |on: bool| -> u64 {
+        runtime_policy::set_bruchion_kernels(on);
+        (w.call)();
+        let before = allocations_now();
+        (w.call)();
+        let after = allocations_now();
+        runtime_policy::set_bruchion_kernels(false);
+        after - before
+    };
+    let allocs_a = allocs_of(false);
+    let allocs_b = if kernel_arm { Some(allocs_of(true)) } else { None };
     let mut phase = |arm: Arm| -> f64 {
         runtime_policy::set_bruchion_kernels(arm.kernel_on());
         let t0 = Instant::now();
@@ -357,8 +467,10 @@ fn run_workload(w: &mut Workload, o: &Opts, kernel_arm: bool) -> Row {
     }
     Row {
         name: w.name.clone(),
+        routed: w.routed,
         elems: w.elems,
         iters,
+        allocs: (allocs_a, allocs_b),
         a1: band(&samples[0]),
         a2: band(&samples[1]),
         b: if kernel_arm { Some(band(&samples[2])) } else { None },
@@ -469,8 +581,9 @@ fn main() {
     let _ = writeln!(md, "- peak RSS at exit: {peak_rss_kb} KiB\n");
     let _ = writeln!(md, "## Results\n");
     let _ = writeln!(md, "`median [min, max]` per arm over the measured phases; ratio band = kernel / fallback with the most conservative bounds the two bands allow; A/A band = the second fallback arm over the first. A row is **faster** only when the whole kernel band sits below 1.0 and **slower** only when it sits above; \"inside band\" otherwise. \"within A/A\" means the kernel's median ratio is no further from 1 than the A/A band reaches, so this run cannot tell the arms apart.\n");
-    let _ = writeln!(md, "| workload | iters/phase | fallback | fallback (A/A) | kernel | A/A band | kernel band (lo, med, hi) | verdict |");
-    let _ = writeln!(md, "|---|---:|---:|---:|---:|---:|---:|---|");
+    let _ = writeln!(md, "\"allocs/call\" is the number of heap allocations one call makes on the fallback arm and on the kernel arm (counted by the process's global allocator). A row marked *status quo* is not routed: it is the unfused chain the row above it replaces, timed on the fallback arms only, and it is read against that row, not as a kernel ratio.\n");
+    let _ = writeln!(md, "| workload | iters/phase | fallback | fallback (A/A) | kernel | A/A band | kernel band (lo, med, hi) | allocs/call (fallback, kernel) | verdict |");
+    let _ = writeln!(md, "|---|---:|---:|---:|---:|---:|---:|---:|---|");
     let mut jsonl = String::new();
     let mut csv = String::from("workload,phase,arm,ns_per_call\n");
     let mut bits_failures = 0;
@@ -498,11 +611,16 @@ fn main() {
                 }
                 (format!("{lo:.3}, {med:.3}, {hi:.3}"), v)
             }
+            None if !r.routed => ("-".to_string(), "status quo, not routed".to_string()),
             None => ("-".to_string(), "kernel arm not compiled in".to_string()),
+        };
+        let allocs = match r.allocs.1 {
+            Some(b) => format!("{}, {}", r.allocs.0, b),
+            None => format!("{}, -", r.allocs.0),
         };
         let _ = writeln!(
             md,
-            "| {} | {} | {} | {} | {} | {:.3}, {:.3}, {:.3} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {:.3}, {:.3}, {:.3} | {} | {} | {} |",
             r.name,
             r.iters,
             fmt_band(&r.a1, r.elems),
@@ -512,6 +630,7 @@ fn main() {
             aa_med,
             aa_hi,
             kb,
+            allocs,
             verdict
         );
         let b_json = match &r.b {
@@ -520,8 +639,9 @@ fn main() {
         };
         let _ = writeln!(
             jsonl,
-            "{{\"workload\":\"{}\",\"elems\":{},\"iters\":{},\"a1\":{{\"min\":{},\"med\":{},\"max\":{}}},\"a2\":{{\"min\":{},\"med\":{},\"max\":{}}},\"b\":{},\"digest_a1\":\"{:016x}\",\"digest_a2\":\"{:016x}\",\"digest_b\":{},\"verdict\":\"{}\"}}",
-            r.name, r.elems, r.iters, r.a1.min, r.a1.med, r.a1.max, r.a2.min, r.a2.med, r.a2.max, b_json, r.digests.0, r.digests.1,
+            "{{\"workload\":\"{}\",\"routed\":{},\"elems\":{},\"iters\":{},\"a1\":{{\"min\":{},\"med\":{},\"max\":{}}},\"a2\":{{\"min\":{},\"med\":{},\"max\":{}}},\"b\":{},\"allocs_a1\":{},\"allocs_b\":{},\"digest_a1\":\"{:016x}\",\"digest_a2\":\"{:016x}\",\"digest_b\":{},\"verdict\":\"{}\"}}",
+            r.name, r.routed, r.elems, r.iters, r.a1.min, r.a1.med, r.a1.max, r.a2.min, r.a2.med, r.a2.max, b_json,
+            r.allocs.0, r.allocs.1.map(|a| a.to_string()).unwrap_or_else(|| "null".into()), r.digests.0, r.digests.1,
             r.digests.2.map(|d| format!("\"{d:016x}\"")).unwrap_or_else(|| "null".into()), verdict
         );
         for (p, arm, ns) in &r.phases {

@@ -24,3 +24,5 @@ bruchion-kernels = ["cjc-runtime/bruchion-kernels"]
 [dependencies]
 cjc-runtime = { path = "../../crates/cjc-runtime" }
 cjc-repro = { path = "../../crates/cjc-repro" }
+# For the status-quo rows: the GradGraph chain the fused `mse_loss_grad` stands in for.
+cjc-ad = { path = "../../crates/cjc-ad" }

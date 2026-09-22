@@ -133,6 +133,46 @@ pub fn mse_kernel(pred: &[f64], target: &[f64]) -> f64 {
     unsafe { super::ffi::cjc_mse_f64(n as i64, pred.as_ptr(), target.as_ptr()) }
 }
 
+/// The fused loss AND gradient of the graph's `mean((pred − target)²)`, in the bits
+/// `GradGraph`'s `sub → mul(diff, diff) → mean → backward` produces: the loss is the
+/// BINNED sum of the squares over `n` (`Tensor::mean` is `binned_sum_f64 / n`, not
+/// `mse`'s Kahan), and `grad[i] = h + h` with `h = (1 / n) * d` — the backward of
+/// `mul(diff, diff)` accumulates `grad_val * d` once per operand, `grad_val = 1 / n`.
+/// That is not `2 * d / n` (the two differ in the last bit; the tests pin a witness).
+/// One pass into the caller's `grad` where the graph builds six buffers —
+/// `ml::mse_loss_grad`. `0.0` and no writes for an empty input.
+pub fn mse_grad(pred: &[f64], target: &[f64], grad: &mut [f64]) -> f64 {
+    let n = pred.len().min(target.len()).min(grad.len());
+    #[cfg(feature = "bruchion-kernels")]
+    if enabled() {
+        return mse_grad_kernel(&pred[..n], &target[..n], &mut grad[..n]);
+    }
+    mse_grad_fallback(&pred[..n], &target[..n], &mut grad[..n])
+}
+
+pub fn mse_grad_fallback(pred: &[f64], target: &[f64], grad: &mut [f64]) -> f64 {
+    let n = pred.len().min(target.len()).min(grad.len());
+    if n == 0 {
+        return 0.0;
+    }
+    let inv = 1.0 / n as f64;
+    let mut acc = crate::accumulator::BinnedAccumulatorF64::new();
+    for i in 0..n {
+        let d = pred[i] - target[i];
+        acc.add(d * d);
+        let h = inv * d;
+        grad[i] = h + h;
+    }
+    acc.finalize() / n as f64
+}
+
+#[cfg(feature = "bruchion-kernels")]
+pub fn mse_grad_kernel(pred: &[f64], target: &[f64], grad: &mut [f64]) -> f64 {
+    let n = pred.len().min(target.len()).min(grad.len());
+    // SAFETY: three live slices of at least `n` elements; `grad` is the only one written.
+    unsafe { super::ffi::cjc_mse_grad_f64(n as i64, pred.as_ptr(), target.as_ptr(), grad.as_mut_ptr()) }
+}
+
 // ── matmul ─────────────────────────────────────────────────────────────────
 
 /// `C[m×n] = A[m×k]·B[k×n]`, row-major, one `KahanAccumulatorF64` per output with the
@@ -438,6 +478,80 @@ mod parity {
         assert_eq!(bits(&a), bits(&b));
         assert_eq!(a[0].to_bits(), 0.0f64.to_bits(), "-0.0 maps to +0.0 on both sides");
         assert_eq!(a[1].to_bits(), 0.0f64.to_bits(), "NaN maps to 0.0 on both sides");
+    }
+
+    /// The pack's `cjc_sum_expbinned_f64` is `BinnedAccumulatorF64` — `binned_sum_f64`'s
+    /// bits on the spanning inputs (zeros, signed zeros, four sizes), and on the specials
+    /// CJC keeps aside: a NaN anywhere (Rust's `f64::NAN` bit for bit), one infinity, both
+    /// infinities. The first version of the fused kernel used the pack's OWN binned
+    /// accumulator (core's integer bins, correctly rounded) and this parity found the two
+    /// part by an ulp at `n = 4093`: CJC's float bins round on every same-exponent add.
+    /// The witness is the smallest case: `{1, 1+2^-52, 1+2^-52}` is `3 + 2^-51` exactly,
+    /// and CJC's accumulator says `3.0`. The kernel says `3.0` too, and must.
+    #[test]
+    fn sum_expbinned_is_binned_sum_f64s_bits_and_the_witness() {
+        use crate::accumulator::binned_sum_f64;
+        for &n in &SIZES {
+            let x = inputs(n, 21);
+            let k = unsafe { crate::bruchion::ffi::cjc_sum_expbinned_f64(n as i64, x.as_ptr()) };
+            assert_eq!(k.to_bits(), binned_sum_f64(&x).to_bits(), "n = {n}");
+        }
+        let up = f64::from_bits(0x3FF0000000000001);
+        let w = [1.0, up, up];
+        let k = unsafe { crate::bruchion::ffi::cjc_sum_expbinned_f64(3, w.as_ptr()) };
+        assert_eq!(k.to_bits(), 3.0f64.to_bits());
+        assert_eq!(binned_sum_f64(&w).to_bits(), 3.0f64.to_bits());
+        assert_eq!(f64::from_bits(0x4008000000000001), 3.0 + 2.0f64.powi(-51), "the exact sum is representable");
+        assert_ne!(binned_sum_f64(&w).to_bits(), (3.0 + 2.0f64.powi(-51)).to_bits(), "and CJC's accumulator does not give it");
+        for s in [
+            [1.0, f64::NAN, 2.0],
+            [1.0, f64::INFINITY, 2.0],
+            [1.0, f64::NEG_INFINITY, 2.0],
+            [f64::INFINITY, f64::NEG_INFINITY, 2.0],
+            [0.0, -0.0, f64::from_bits(1)],
+        ] {
+            let k = unsafe { crate::bruchion::ffi::cjc_sum_expbinned_f64(3, s.as_ptr()) };
+            assert_eq!(k.to_bits(), binned_sum_f64(&s).to_bits(), "{s:?}");
+        }
+        let k = unsafe { crate::bruchion::ffi::cjc_sum_expbinned_f64(0, w.as_ptr()) };
+        assert_eq!(k.to_bits(), binned_sum_f64(&[]).to_bits());
+    }
+
+    /// The fused kernel against its Rust twin: the loss (CJC's exponent-binned sum, which
+    /// the kernel carries itself — see `sum_expbinned_is_binned_sum_f64s_bits_and_the_witness`
+    /// for why not the pack's own accumulator), and every gradient element. The witness
+    /// pins the gradient's definition: at `n = 3`, `d = 2.9`, `h + h` and `(2 * d) / n`
+    /// differ in the last bit, and the kernel gives the former.
+    #[test]
+    fn mse_grad_bit_for_bit_and_the_witness() {
+        for &n in &SIZES {
+            let p = inputs(n, 12);
+            let t = inputs(n, 13);
+            let mut g1 = vec![7.0; n];
+            let mut g2 = vec![7.0; n];
+            let l1 = mse_grad_kernel(&p, &t, &mut g1);
+            let l2 = mse_grad_fallback(&p, &t, &mut g2);
+            assert_eq!(l1.to_bits(), l2.to_bits(), "loss at n = {n}");
+            assert_eq!(bits(&g1), bits(&g2), "grad at n = {n}");
+        }
+        let p = [2.9, 0.2, -0.4];
+        let t = [0.0; 3];
+        let mut g = [0.0; 3];
+        mse_grad_kernel(&p, &t, &mut g);
+        let h = (1.0f64 / 3.0) * 2.9;
+        assert_eq!(g[0].to_bits(), (h + h).to_bits());
+        assert_ne!(g[0].to_bits(), ((2.0f64 * 2.9) / 3.0).to_bits(), "the textbook spelling is a different value here");
+        // `ml::mse_loss_grad` through the switch agrees with its own Rust path.
+        let p = inputs(1001, 14);
+        let t = inputs(1001, 15);
+        let mut off = vec![0.0; 1001];
+        let mut on = vec![0.0; 1001];
+        let l_off = crate::ml::mse_loss_grad(&p, &t, &mut off).unwrap();
+        crate::runtime_policy::set_bruchion_kernels(true);
+        let l_on = crate::ml::mse_loss_grad(&p, &t, &mut on).unwrap();
+        crate::runtime_policy::set_bruchion_kernels(false);
+        assert_eq!(l_on.to_bits(), l_off.to_bits());
+        assert_eq!(bits(&on), bits(&off));
     }
 
     #[test]

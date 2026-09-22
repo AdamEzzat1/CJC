@@ -41,10 +41,11 @@ cargo test -p cjc-runtime --features bruchion-kernels bruchion
 
 ## What the parity tests assert
 
-`dispatch::parity` (compiled only with the feature; 9 tests, 2 of them
-platform-ignored, plus the timing probe) compares every kernel with its
-Rust body **bit for bit** (`to_bits`), on SplitMix64 inputs spanning 2^-8 to 2^8 with
-exact zeros and negative zeros mixed in, plus the edge cases each kernel has:
+`dispatch::parity` (compiled only with the feature; 15 tests, two of them not run by default:
+the timing probe (`#[ignore]`) and one platform-ignored statement about Rust's own
+`f64::powi`) compares every kernel with its Rust body **bit for bit** (`to_bits`), on
+SplitMix64 inputs spanning 2^-8 to 2^8 with exact zeros and negative zeros mixed in,
+plus the edge cases each kernel has:
 
 - `axpy`, `mse`, `dot_kahan` at 0, 1, 7 and 4093 elements; `dot_kahan` also on the
   input `[2^52+1, 0.1, 0, 2^53+2, 0]`, where a Kahan recurrence without CJC's
@@ -58,8 +59,19 @@ exact zeros and negative zeros mixed in, plus the edge cases each kernel has:
 - the heat-equation residual and its gradient at six `(n_colloc, n_params)` shapes
   with the source term from `sin` on this side, against the same loop with
   `powi_reference`; and, separately, against CJC's own loop with `f64::powi`;
-- and the routed public functions (`mse_loss`, `matmul_raw`, `adam_step`) with the
-  switch off versus on.
+- `sum_expbinned` (the pack's transcription of `BinnedAccumulatorF64`) against
+  `accumulator::binned_sum_f64` at the four sizes, on a NaN, on each infinity and on
+  both, on `[0, -0, the smallest subnormal]`, and on the three-value witness below;
+- the fused `mse_grad` against its Rust twin at the four sizes, loss and every
+  gradient element, plus the gradient witness (`n = 3`, `d = 2.9`: `h + h` with
+  `h = d / 3` is not `(2 d) / 3`, and the kernel gives the former);
+- and the routed public functions (`mse_loss`, `mse_loss_grad`, `matmul_raw`,
+  `adam_step`) with the switch off versus on.
+
+`crates/cjc-ad/tests/mse_grad_parity.rs` holds `ml::mse_loss_grad` to the `GradGraph`
+chain it stands in for (`sub -> mul -> mean -> backward`) at six sizes, and with the
+feature runs the same comparison through the switch. `crates/cjc-ad/tests/
+pinn_routing_bits.rs` pins `piml_heat_1d_train`'s bits (see below).
 
 A disagreement in any of these is the deliverable, not a failure to hide: it names a
 place where "the same algorithm" was not "the same arithmetic".
@@ -118,6 +130,43 @@ loop and the kernel agree there now, and `piml_heat_1d_train` computes the Linux
 on Windows. `f64_powi_is_binary_exponentiation_on_this_target` stays ignored on MSVC as
 a statement about Rust's `f64::powi`, which no CJC arithmetic depends on any more.
 
+## The second disagreement: two "binned" accumulators
+
+The fused kernel's first version summed the squared errors with the pack's own
+`core.binned_*` accumulator, on the pack's claim that it and `BinnedAccumulatorF64`
+give the same bits. The parity test disagreed at `n = 4093` by one ulp. They are
+different algorithms: core's keeps integer significands per exponent with carries and
+rounds once at the end (a correctly rounded sum); CJC's keeps one `f64` per biased
+exponent, adds into it with a plain `+=` (a rounding on every same-exponent add) and
+Kahan-folds the touched bins in ascending order. The smallest witness is three values:
+`{1, 1+2^-52, 1+2^-52}` sums to `3 + 2^-51` exactly, which is representable, which
+core's returns, and which CJC's gives as `3.0`. The kernel now carries CJC's accumulator
+(`cjc_sum_expbinned_f64` is that accumulator alone, exported so it can be held to parity
+directly); the pack's `cjc_sum_binned_f64` stays as the correctly rounded sum, documented
+as not CJC's, and nothing here routes to it. The lesson is the powi one again: "the same
+algorithm" is a claim to measure, and the parity test is where it gets measured.
+
+## The fused loss and gradient, and the PINN routing
+
+`ml::mse_loss_grad(pred, target, grad) -> Result<f64>` is the loss of
+`mean((pred - target)^2)` and its gradient with respect to `pred` in one pass into a
+caller buffer — the bits `GradGraph` produces for the chain, including the gradient's
+spelling `h + h` with `h = (1/n) d` (the backward of `mul(diff, diff)` accumulates through
+both operands). It goes through `dispatch::mse_grad` and so the switch. No CJC-language
+builtin reaches it yet: a program's `mean((pred - target)^2)` with a gradient still
+builds the graph and its buffers; the record's `mse_loss_grad` row and its
+`status quo` neighbour show the two costs side by side.
+
+`cjc-ad`'s `piml_heat_1d_train` routes its physics loss through
+`dispatch::heat1d_residual_grad` when the feature is built and the switch is on; the loop
+that defines it runs otherwise. The source term at the collocation points is computed
+once per training rather than once per point per epoch, and the per-epoch buffers are
+allocated once and zeroed — both bit-neutral, both held to digests of the training
+captured before the change (`tests/pinn_routing_bits.rs`: four shapes, the final
+parameters, every epoch's five logged values and the summary numbers; the tests also
+assert that a flipped bit, another seed and one more epoch are rejected, so they can
+fail). With the feature, the routed training gives the same digests.
+
 ## Linking on an MSVC toolchain
 
 The archive is built by MinGW gcc; the host Rust toolchain here is
@@ -134,13 +183,22 @@ On a GNU toolchain (Linux, MinGW) neither is needed and `build.rs` adds nothing.
 
 - No CJC-source builtin toggles the switch (`runtime_policy::set_bruchion_kernels`
   is the Rust API); the builtin and its AST/MIR wiring are the next step.
-- `cjc-ad`'s `piml_heat_1d_train` still runs its own physics loop; the kernels for
-  it exist and are parity-tested, the call site is not yet routed.
-- No registered timing record exists on the CJC side. `dispatch::timing_probe`
-  prints nanoseconds per element for kernel versus fallback when run with
-  `--ignored` (`cargo test -p cjc-runtime --release --features bruchion-kernels
-  timing_probe -- --ignored --nocapture`); it is a probe, not a benchmark record, and
-  milestone 1's "a record shows the timing" clause is therefore **not** met. What
+- `piml_heat_1d_train` is routed (above); the other PINN problems (Burgers, the
+  harmonic oscillator) go through `GradGraph` and are not.
+- `ml::mse_loss_grad` and the switch itself have no CJC-language entry point.
+- `adam_step` is routed and should not be: the record has the kernel about 20x slower
+  (a software `sqrt` in the libm-free pack against `sqrtsd`); the change that makes
+  `adam_step_raw` take the fallback regardless of the switch is deferred until the
+  clean record that documents the number is committed.
+- A registered timing record now exists: `bench/bruchion_kernels_bench` (run through
+  `bench/bruchion_kernels_bench/run.ps1`, which refuses to record on a loaded machine
+  and stamps the gate readings, the kernel hash and the tree state into the
+  provenance), writing `bench_results/bruchion_kernels/{REPORT.md, rows.jsonl,
+  phases.csv, provenance.txt}` and archiving the previous record under `history/`.
+  Its verdicts so far (2^16 elements, five interleaved phases, an A/A arm): `relu`
+  slower, whole band above 1 (about 1.27x); `adam_step` slower, about 20x; every other
+  row inside the band or within the A/A spread, i.e. this run cannot tell the arms
+  apart. Nothing in it is a CJC win. `dispatch::timing_probe` remains as a probe. What
   the probe said on 2026-09-22 (one machine, no interleaving, no A/A):
 
 | `timing_probe`, release, 2^16 elements, min of 25 after a warm-up | kernel (scalar, session 3) | kernel (2-lane `@simd`, SIMD step 2) | kernel (unrolled, `restrict`) | Rust body | kernel, A/A re-run under a runaway service host | Rust body, same re-run | kernel, A/A re-run, quiet (gated) | Rust body, quiet |

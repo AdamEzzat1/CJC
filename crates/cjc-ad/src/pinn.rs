@@ -615,10 +615,24 @@ pub fn piml_heat_1d_train(
     let mut adam = AdamState::new(n_params, lr);
     let mut history = Vec::with_capacity(epochs);
 
+    // The source term f(x) = -pi^2 sin(pi x) at the collocation points is a constant of
+    // the training: computed once (through libm, as before), not once per epoch per
+    // point. The same values, so the same bits; `epochs * n_colloc` fewer `sin` calls.
+    let f_colloc: Vec<f64> = x_colloc.iter().map(|&x| heat_source(x)).collect();
+    // The per-epoch buffers, allocated once and zeroed per epoch (the loops below only
+    // ever `+=` into them from zero, so a zeroed reuse is the fresh vector's bits).
+    let mut data_grads = vec![0.0f64; n_params];
+    let mut phys_grads = vec![0.0f64; n_params];
+    let mut bnd_grads = vec![0.0f64; n_params];
+    let mut total_grads = vec![0.0f64; n_params];
+    let mut r_colloc = vec![0.0f64; n_colloc];
+
     for epoch in 0..epochs {
         // --- Data loss: MSE(u_approx(x_data), u_data) ---
         let mut data_acc = KahanAccumulatorF64::new();
-        let mut data_grads = vec![0.0f64; n_params];
+        for g in data_grads.iter_mut() {
+            *g = 0.0;
+        }
         for (j, &x) in x_data.iter().enumerate() {
             let u_pred = poly_eval(&coeffs, x);
             let err = u_pred - u_data[j];
@@ -633,27 +647,42 @@ pub fn piml_heat_1d_train(
         let data_loss = data_acc.finalize() / n_data as f64;
 
         // --- Physics loss: MSE(u_xx(x_colloc) - f(x_colloc)) ---
-        let mut phys_acc = KahanAccumulatorF64::new();
-        let mut phys_grads = vec![0.0f64; n_params];
-        for &x in &x_colloc {
-            let u_xx = poly_eval_dd(&coeffs, x);
-            let f_x = heat_source(x);
-            let residual = u_xx - f_x;
-            phys_acc.add(residual * residual);
-            // d(residual²)/d(aᵢ) = 2*residual * d(u_xx)/d(aᵢ)
-            // d(u_xx)/d(aᵢ) = i*(i-1) * x^{i-2} for i >= 2, else 0
-            for i in 2..n_params {
-                let du_xx_dai = (i * (i - 1)) as f64 * cjc_repro::powi_f64(x, i as i32 - 2);
-                phys_grads[i] += 2.0 * residual * du_xx_dai / n_colloc as f64;
+        // Routed to the Bruchion kernel `cjc_heat1d_residual_grad_f64` under the feature
+        // AND the runtime switch: the same arithmetic (the parity tests in cjc-runtime
+        // hold it to this loop's bits on every target, now that both use
+        // `cjc_repro::powi_f64`), one call, the residuals into `r_colloc`. The loop
+        // below is the definition and runs otherwise.
+        let physics_loss = if cjc_runtime::bruchion::dispatch::enabled() {
+            cjc_runtime::bruchion::dispatch::heat1d_residual_grad(
+                &x_colloc, &coeffs, &f_colloc, &mut r_colloc, &mut phys_grads,
+            )
+        } else {
+            let mut phys_acc = KahanAccumulatorF64::new();
+            for g in phys_grads.iter_mut() {
+                *g = 0.0;
             }
-        }
-        let physics_loss = phys_acc.finalize() / n_colloc as f64;
+            for (j, &x) in x_colloc.iter().enumerate() {
+                let u_xx = poly_eval_dd(&coeffs, x);
+                let f_x = f_colloc[j];
+                let residual = u_xx - f_x;
+                phys_acc.add(residual * residual);
+                // d(residual²)/d(aᵢ) = 2*residual * d(u_xx)/d(aᵢ)
+                // d(u_xx)/d(aᵢ) = i*(i-1) * x^{i-2} for i >= 2, else 0
+                for i in 2..n_params {
+                    let du_xx_dai = (i * (i - 1)) as f64 * cjc_repro::powi_f64(x, i as i32 - 2);
+                    phys_grads[i] += 2.0 * residual * du_xx_dai / n_colloc as f64;
+                }
+            }
+            phys_acc.finalize() / n_colloc as f64
+        };
 
         // --- Boundary loss: u(0)² + u(1)² ---
         let u0 = poly_eval(&coeffs, 0.0);
         let u1 = poly_eval(&coeffs, 1.0);
         let boundary_loss = u0 * u0 + u1 * u1;
-        let mut bnd_grads = vec![0.0f64; n_params];
+        for g in bnd_grads.iter_mut() {
+            *g = 0.0;
+        }
         // d(u(0)²)/d(a0) = 2*u(0), d(u(0)²)/d(aᵢ) = 0 for i>0 (since 0^i=0)
         bnd_grads[0] += 2.0 * u0;
         // d(u(1)²)/d(aᵢ) = 2*u(1) * 1^i = 2*u(1)
@@ -662,7 +691,6 @@ pub fn piml_heat_1d_train(
         }
 
         // --- Total gradient ---
-        let mut total_grads = vec![0.0f64; n_params];
         let mut grad_norm_acc = KahanAccumulatorF64::new();
         for i in 0..n_params {
             total_grads[i] = data_grads[i]

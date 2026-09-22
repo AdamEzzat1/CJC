@@ -36,6 +36,22 @@ pub fn mse_loss(pred: &[f64], target: &[f64]) -> Result<f64, String> {
     Ok(acc.finalize() / pred.len() as f64)
 }
 
+/// The loss and its gradient of `mean((pred − target)²)` in one pass, written into the
+/// caller's `grad` — the bits `GradGraph`'s `sub → mul(diff, diff) → mean → backward`
+/// produces (the binned mean, and `(1/n)·d + (1/n)·d` per element), where the graph
+/// materializes six buffers. Not the same loss as [`mse_loss`], whose sum is Kahan's;
+/// this one is the graph's. Routed to the Bruchion kernel under the feature and the
+/// runtime switch, after the checks.
+pub fn mse_loss_grad(pred: &[f64], target: &[f64], grad: &mut [f64]) -> Result<f64, String> {
+    if pred.len() != target.len() || grad.len() != pred.len() {
+        return Err("mse_loss_grad: arrays must have same length".into());
+    }
+    if pred.is_empty() {
+        return Err("mse_loss_grad: empty data".into());
+    }
+    Ok(crate::bruchion::dispatch::mse_grad(pred, target, grad))
+}
+
 /// Cross-entropy loss: -sum(target * ln(pred + eps)) / n.
 pub fn cross_entropy_loss(pred: &[f64], target: &[f64]) -> Result<f64, String> {
     if pred.len() != target.len() {

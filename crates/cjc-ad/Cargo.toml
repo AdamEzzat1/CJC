@@ -10,3 +10,8 @@ description = "Automatic differentiation: forward-mode dual numbers and reverse-
 [dependencies]
 cjc-runtime = { workspace = true }
 cjc-repro = { workspace = true }
+
+[features]
+# Forwarded so `cargo test -p cjc-ad --features bruchion-kernels` can exercise the routed
+# paths (the switch is still off by default at run time; see cjc-runtime).
+bruchion-kernels = ["cjc-runtime/bruchion-kernels"]
