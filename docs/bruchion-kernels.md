@@ -169,6 +169,14 @@ On a GNU toolchain (Linux, MinGW) neither is needed and `build.rs` adds nothing.
   about ±0.15x, and a change smaller than that is not something this probe can see.
   The conclusion is unchanged: the kernels are slower than the release Rust bodies,
   by about 1.3x (`relu`) and about 1.8x (`axpy`), and the Kahan kernels tie.
+  A quiet-machine re-run was attempted afterwards and **not obtained**: a gate
+  that waits for the CPU to average under 10% never opened in fifteen minutes; the
+  machine idled at 22–30% with about 10 points of it kernel time, no containers
+  or WSL running, and the load traced to one system service host (`svchost`
+  hosting DcomLaunch, Power, PlugPlay and the brokers) at about 131% of one core
+  throughout — so "machine state" above most likely means that runaway host, not
+  only the ladder's tail. The next probe should be taken after that host is idle
+  (a reboot is the usual cure) and gated on the load, not on the calendar.
   With `restrict` the kernels' `x` and `y` must not overlap; the dispatch
   functions take `&[f64]` and `&mut [f64]`, so that holds by construction.
 - `powi` in CJC's own code still lowers to `pow` on MSVC targets (above); the fix
