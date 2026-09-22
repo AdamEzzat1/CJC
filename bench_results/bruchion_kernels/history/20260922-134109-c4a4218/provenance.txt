@@ -1,0 +1,20 @@
+repo: C:/Users/adame/CJC
+branch: bruchion-kernels-m1
+commit: c4a421860fb96faac1b9ad25f648240d2b11eb72
+dirty tree: true
+rustc: rustc 1.97.1 (8bab26f4f 2026-07-14); host: x86_64-pc-windows-msvc
+profile: release
+target: windows-x86_64
+logical cores: 8
+runtime policy: runtime_policy: thermal=balanced threads=4 batch=128 audit=full numeric=kahan determinism=strict adaptive=true bruchion_kernels=false
+feature bruchion-kernels: true
+BRUCHION_KERNELS_DIR: C:\Users\adame\AppData\Local\Temp\claude\C--Users-adame-Bruchion--claude-worktrees-bruchion-cjc-kernel-substrate-fcbb2e\3fecc690-652f-4f32-9887-52dc9c9ff71a\scratchpad\k8
+kernel_sha256: 87265ae8e7636392ab514b8895c8ce88bb71deaf923142fb62dab6fbf3a2ff91
+f64::powi is binary exponentiation on this target: false
+elements per call (n): 65536
+protocol: iterations calibrated once on the fallback arm to ~500000 us per phase (max 1000000); 1 warm-up phase(s) per arm; 5 measured phases, arms interleaved A1/A2/B; statistic: ns per call, median [min, max] over phases
+seed: 42
+unix time: 1790106709
+launcher: bench/bruchion_kernels_bench/run.ps1 (PowerShell, load-gated)
+load gate: total CPU avg 13.8% max 23.3% over 20 s (thresholds 15% / 25%); busiest processes (% of one core): svchost 29%, wmiprvse 21%, claude 8%
+last boot: 9/21/2026 9:47:14 PM (uptime 15.1 h)
