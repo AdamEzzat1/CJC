@@ -134,12 +134,12 @@ On a GNU toolchain (Linux, MinGW) neither is needed and `build.rs` adds nothing.
   milestone 1's "a record shows the timing" clause is therefore **not** met. What
   the probe said on 2026-09-22 (one machine, no interleaving, no A/A):
 
-| `timing_probe`, release, 2^16 elements, min of 25 after a warm-up | kernel (scalar, session 3) | kernel (2-lane `@simd`, SIMD step 2) | kernel (unrolled, `restrict`) | Rust body | kernel, A/A re-run (same archive bits) | Rust body, same re-run |
-|---|---:|---:|---:|---:|---:|---:|
-| `axpy` (ns per element) | 0.4532 | 0.4547 | 0.3815–0.5066 | 0.2075–0.2975 | 0.6638–0.9003 | 0.3555–0.5035 |
-| `dot_kahan` | 3.0075 | 2.8885 | 3.0075–3.5248 | 3.0289–3.6331 | 5.1559–5.5618 | 5.0186–5.3955 |
-| `relu` | 0.3052 | 0.2213 | 0.1663–0.2579 | 0.1282–0.1953 | 0.2975–0.4532 | 0.2106–0.3647 |
-| `mse` | 2.8870 | 2.8870 | 3.0075–3.6087 | 2.9205–3.6377 | 4.9820–5.4596 | 5.1636–5.5984 |
+| `timing_probe`, release, 2^16 elements, min of 25 after a warm-up | kernel (scalar, session 3) | kernel (2-lane `@simd`, SIMD step 2) | kernel (unrolled, `restrict`) | Rust body | kernel, A/A re-run under a runaway service host | Rust body, same re-run | kernel, A/A re-run, quiet (gated) | Rust body, quiet |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `axpy` (ns per element) | 0.4532 | 0.4547 | 0.3815–0.5066 | 0.2075–0.2975 | 0.6638–0.9003 | 0.3555–0.5035 | 0.3830–0.3998 | 0.2075–0.2533 |
+| `dot_kahan` | 3.0075 | 2.8885 | 3.0075–3.5248 | 3.0289–3.6331 | 5.1559–5.5618 | 5.0186–5.3955 | 2.8931–3.0075 | 2.9068–3.0273 |
+| `relu` | 0.3052 | 0.2213 | 0.1663–0.2579 | 0.1282–0.1953 | 0.2975–0.4532 | 0.2106–0.3647 | 0.1663 | 0.1221–0.1282 |
+| `mse` | 2.8870 | 2.8870 | 3.0075–3.6087 | 2.9205–3.6377 | 4.9820–5.4596 | 5.1636–5.5984 | 2.8870–3.0075 | 2.9037–3.0258 |
 
   The last two columns are three samples in a row (the machine's state drifted
   between them, so the ratio within a sample is the number: `axpy` 1.70–1.86x,
@@ -169,14 +169,24 @@ On a GNU toolchain (Linux, MinGW) neither is needed and `build.rs` adds nothing.
   about ±0.15x, and a change smaller than that is not something this probe can see.
   The conclusion is unchanged: the kernels are slower than the release Rust bodies,
   by about 1.3x (`relu`) and about 1.8x (`axpy`), and the Kahan kernels tie.
-  A quiet-machine re-run was attempted afterwards and **not obtained**: a gate
-  that waits for the CPU to average under 10% never opened in fifteen minutes; the
-  machine idled at 22–30% with about 10 points of it kernel time, no containers
-  or WSL running, and the load traced to one system service host (`svchost`
-  hosting DcomLaunch, Power, PlugPlay and the brokers) at about 131% of one core
-  throughout — so "machine state" above most likely means that runaway host, not
-  only the ladder's tail. The next probe should be taken after that host is idle
-  (a reboot is the usual cure) and gated on the load, not on the calendar.
+  **The quiet re-run** (last two columns) resolves what "machine state" was. The
+  first A/A re-run happened under a runaway system service host (`svchost` hosting
+  DcomLaunch, Power, PlugPlay and the brokers, at about 130% of one core for over
+  an hour, driven by a user-mode driver host resetting the power scheme to itself
+  up to once a second); a gate waiting for the CPU to average under 10% never
+  opened while it ran. It stopped on its own — the machine was not rebooted in
+  between, which `LastBootUpTime` and the event log both said, Fast Startup having
+  turned a "shut down" into a resume — and the gate then read 12.5% average, 19.4%
+  peak, the host at 0%, the residual being the desktop app. Three samples in a row
+  on the same archive bits: `axpy` 1.85x, 1.58x, 1.86x; `relu` 1.31x, 1.36x, 1.30x;
+  `dot_kahan` 0.99x, 1.00x, 0.99x; `mse` 0.99x, 0.99x, 0.99x — and the absolute
+  numbers are the unrolled column's again, tight across the three. So the 1.7x in
+  the loaded columns was the host, the ratios were sound even then, and the probe's
+  own spread on a quiet machine is about ±0.03x for `relu` and ±0.15x for `axpy`
+  (one sample's Rust body ran slower, not the kernel). The conclusion stands: the
+  kernels are slower than the release Rust bodies, by about 1.3x (`relu`) and
+  about 1.8x (`axpy`), and the Kahan kernels tie. Any future probe is gated on the
+  measured load, and "rebooted" is checked against `LastBootUpTime` first.
   With `restrict` the kernels' `x` and `y` must not overlap; the dispatch
   functions take `&[f64]` and `&mut [f64]`, so that holds by construction.
 - `powi` in CJC's own code still lowers to `pow` on MSVC targets (above); the fix
