@@ -373,11 +373,13 @@ fn workloads(o: &Opts) -> Vec<Workload> {
         });
     }
     // mse_loss_grad: the fused loss and gradient of mean((pred - target)^2), one pass into
-    // a caller buffer, routed. Beside it, unrouted, the status quo it replaces: the
-    // GradGraph chain `sub -> mul -> mean -> backward` on the same two tensors, which is
-    // what a CJC program's `mean((pred - target)^2)` with a gradient costs today. The two
-    // rows produce the same bits (the cjc-ad parity test holds them to it); the digests
-    // here are asserted equal across phases within a row, not across the rows.
+    // a caller buffer, routed. Beside it the GradGraph chain `sub -> mul -> mean ->
+    // backward` on the same two tensors, twice: with `mean` (the fused `MseMean` node,
+    // whose backward is one pass through `dispatch::mse_grad_scaled` and so the switch —
+    // routed) and with `mean_unfused` (the plain chain, the status quo a CJC program's
+    // `mean((pred - target)^2)` with a gradient cost before the node — unrouted). The
+    // three rows produce the same bits (the cjc-ad parity test holds them to it); the
+    // digests here are asserted equal across phases within a row, not across the rows.
     {
         let (xs, ys) = (x.clone(), y0.clone());
         let out = std::rc::Rc::new(std::cell::RefCell::new((0.0f64, vec![0.0f64; n])));
@@ -398,11 +400,36 @@ fn workloads(o: &Opts) -> Vec<Workload> {
         });
         let pt = cjc_runtime::tensor::Tensor::from_vec(x.clone(), &[n]).expect("tensor");
         let tt = cjc_runtime::tensor::Tensor::from_vec(y0.clone(), &[n]).expect("tensor");
+        let (pt2, tt2) = (pt.clone(), tt.clone());
+        let out = std::rc::Rc::new(std::cell::RefCell::new((0.0f64, vec![0.0f64; n])));
+        let o1 = out.clone();
+        ws.push(Workload {
+            routed: true,
+            name: "mse+grad via GradGraph, fused mean".into(),
+            elems: n,
+            call: Box::new(move || {
+                let mut g = cjc_ad::GradGraph::new();
+                let p = g.parameter(pt2.clone());
+                let t = g.parameter(tt2.clone());
+                let diff = g.sub(p, t);
+                let sq = g.mul(diff, diff);
+                let loss = g.mean(sq);
+                g.backward(loss);
+                let mut o = o1.borrow_mut();
+                o.0 = g.tensor(loss).to_vec()[0];
+                o.1.copy_from_slice(&g.grad(p).expect("a gradient").to_vec());
+                black_box(&o.1);
+            }),
+            digest: Box::new(move || {
+                let o = out.borrow();
+                fnv1a(std::iter::once(o.0.to_bits()).chain(o.1.iter().map(|v| v.to_bits())))
+            }),
+        });
         let out = std::rc::Rc::new(std::cell::RefCell::new((0.0f64, vec![0.0f64; n])));
         let o1 = out.clone();
         ws.push(Workload {
             routed: false,
-            name: "mse+grad via GradGraph (status quo)".into(),
+            name: "mse+grad via GradGraph, unfused (status quo)".into(),
             elems: n,
             call: Box::new(move || {
                 let mut g = cjc_ad::GradGraph::new();
@@ -410,7 +437,7 @@ fn workloads(o: &Opts) -> Vec<Workload> {
                 let t = g.parameter(tt.clone());
                 let diff = g.sub(p, t);
                 let sq = g.mul(diff, diff);
-                let loss = g.mean(sq);
+                let loss = g.mean_unfused(sq);
                 g.backward(loss);
                 let mut o = o1.borrow_mut();
                 o.0 = g.tensor(loss).to_vec()[0];

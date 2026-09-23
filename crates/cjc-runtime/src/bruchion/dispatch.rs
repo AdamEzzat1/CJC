@@ -173,6 +173,44 @@ pub fn mse_grad_kernel(pred: &[f64], target: &[f64], grad: &mut [f64]) -> f64 {
     unsafe { super::ffi::cjc_mse_grad_f64(n as i64, pred.as_ptr(), target.as_ptr(), grad.as_mut_ptr()) }
 }
 
+// ── mse grad, scaled — the fused graph node's backward ─────────────────────
+
+/// The gradient of the graph's `mean((pred − target)²)` with respect to its materialized
+/// difference, for an arbitrary upstream gradient `g`: `grad[i] = h + h` with
+/// `h = (g / n) * diff[i]` — the bits `GradGraph`'s backward produces through
+/// `mean → mul(diff, diff)`: the Mean arm divides the upstream scalar by `n` once, the Mul
+/// arm multiplies that by the other operand once per operand, and the two accumulate.
+/// With `g = 1` it is [`mse_grad`]'s gradient. `GradOp::MseMean`'s backward calls here;
+/// no loss, the graph has it from the forward pass. Writes nothing for an empty input.
+pub fn mse_grad_scaled(g: f64, diff: &[f64], grad: &mut [f64]) {
+    let n = diff.len().min(grad.len());
+    #[cfg(feature = "bruchion-kernels")]
+    if enabled() {
+        mse_grad_scaled_kernel(g, &diff[..n], &mut grad[..n]);
+        return;
+    }
+    mse_grad_scaled_fallback(g, &diff[..n], &mut grad[..n]);
+}
+
+pub fn mse_grad_scaled_fallback(g: f64, diff: &[f64], grad: &mut [f64]) {
+    let n = diff.len().min(grad.len());
+    if n == 0 {
+        return;
+    }
+    let s = g / n as f64;
+    for i in 0..n {
+        let h = s * diff[i];
+        grad[i] = h + h;
+    }
+}
+
+#[cfg(feature = "bruchion-kernels")]
+pub fn mse_grad_scaled_kernel(g: f64, diff: &[f64], grad: &mut [f64]) {
+    let n = diff.len().min(grad.len());
+    // SAFETY: two live slices of at least `n` elements; `grad` is the only one written.
+    unsafe { super::ffi::cjc_mse_grad_scaled_f64(n as i64, g, diff.as_ptr(), grad.as_mut_ptr()) }
+}
+
 // ── matmul ─────────────────────────────────────────────────────────────────
 
 /// `C[m×n] = A[m×k]·B[k×n]`, row-major, one `KahanAccumulatorF64` per output with the
@@ -622,6 +660,29 @@ mod parity {
         crate::runtime_policy::set_bruchion_kernels(false);
         assert_eq!(l_on.to_bits(), l_off.to_bits());
         assert_eq!(bits(&on), bits(&off));
+    }
+
+    /// The scaled gradient kernel against its Rust twin at four upstream values, and at
+    /// `g = 1` against `mse_grad`'s gradient (pred = the input, target = 0, so the
+    /// difference is the input itself).
+    #[test]
+    fn mse_grad_scaled_bit_for_bit_and_at_one_the_fused_gradient() {
+        for &n in &SIZES {
+            let d = inputs(n, 16);
+            for &g in &[1.0f64, -0.37, 3.0, 1e-9] {
+                let mut k = vec![7.0; n];
+                let mut f = vec![7.0; n];
+                mse_grad_scaled_kernel(g, &d, &mut k);
+                mse_grad_scaled_fallback(g, &d, &mut f);
+                assert_eq!(bits(&k), bits(&f), "n = {n}, g = {g}");
+            }
+            let z = vec![0.0; n];
+            let mut a = vec![7.0; n];
+            let mut b = vec![7.0; n];
+            mse_grad_scaled_kernel(1.0, &d, &mut a);
+            mse_grad_kernel(&d, &z, &mut b);
+            assert_eq!(bits(&a), bits(&b), "g = 1 is the fused gradient, n = {n}");
+        }
     }
 
     #[test]

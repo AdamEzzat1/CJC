@@ -14,7 +14,7 @@ runtime switch, with the existing Rust bodies as the fallback and as the referen
 | the generated FFI skeleton, `include!`d from that directory | `crates/cjc-runtime/src/bruchion/mod.rs` |
 | one safe function per kernel, its Rust fallback, and the parity tests | `crates/cjc-runtime/src/bruchion/dispatch.rs` |
 | the runtime switch `RuntimePolicy::bruchion_kernels` (+ `set_bruchion_kernels`) | `crates/cjc-runtime/src/runtime_policy.rs` |
-| the routed call sites: `kernel::relu_raw`, `kernel::matmul_raw`, `ml::mse_loss`, `ml::adam_step` | `kernel_bridge.rs`, `ml.rs` |
+| the routed call sites: `kernel::relu_raw`, `kernel::matmul_raw`, `ml::mse_loss`, `ml::adam_step`, `ml::mse_loss_grad`, and the graph's own loss chain (`GradGraph::mean` builds `GradOp::MseMean`, whose backward is `dispatch::mse_grad_scaled`) | `kernel_bridge.rs`, `ml.rs`, `crates/cjc-ad/src/lib.rs` |
 
 Nothing changes unless **both** the feature is compiled in and the switch is on. The
 default build has no build-script work, no foreign symbol and no new dependency, so
@@ -69,12 +69,18 @@ plus the edge cases each kernel has:
 - the fused `mse_grad` against its Rust twin at the four sizes, loss and every
   gradient element, plus the gradient witness (`n = 3`, `d = 2.9`: `h + h` with
   `h = d / 3` is not `(2 d) / 3`, and the kernel gives the former);
+- the scaled gradient `mse_grad_scaled` (the fused graph node's backward) against its
+  Rust twin at the four sizes and four upstream values, and at `g = 1` against
+  `mse_grad`'s gradient;
 - and the routed public functions (`mse_loss`, `mse_loss_grad`, `matmul_raw`,
   `adam_step`) with the switch off versus on.
 
-`crates/cjc-ad/tests/mse_grad_parity.rs` holds `ml::mse_loss_grad` to the `GradGraph`
-chain it stands in for (`sub -> mul -> mean -> backward`) at six sizes, and with the
-feature runs the same comparison through the switch. `crates/cjc-ad/tests/
+`crates/cjc-ad/tests/mse_grad_parity.rs` holds `ml::mse_loss_grad` and the fused graph
+node `GradOp::MseMean` to the unfused `GradGraph` chain (`sub -> mul -> mean_unfused ->
+backward`) at six sizes — loss and both gradients, at the unit seed and two others, and
+for a chain that is not the node's own (`diff` or `sq` shared), which must take the plain
+arms and keep the bits — and with the feature runs the same comparisons through the
+switch. `crates/cjc-ad/tests/
 pinn_routing_bits.rs` pins `piml_heat_1d_train`'s bits (see below).
 
 A disagreement in any of these is the deliverable, not a failure to hide: it names a
@@ -156,10 +162,22 @@ algorithm" is a claim to measure, and the parity test is where it gets measured.
 `mean((pred - target)^2)` and its gradient with respect to `pred` in one pass into a
 caller buffer — the bits `GradGraph` produces for the chain, including the gradient's
 spelling `h + h` with `h = (1/n) d` (the backward of `mul(diff, diff)` accumulates through
-both operands). It goes through `dispatch::mse_grad` and so the switch. No CJC-language
-builtin reaches it yet: a program's `mean((pred - target)^2)` with a gradient still
-builds the graph and its buffers; the record's `mse_loss_grad` row and its
-`status quo` neighbour show the two costs side by side.
+both operands). It goes through `dispatch::mse_grad` and so the switch, and CJC source
+reaches it as the builtin `mse_loss_grad(pred, target)`.
+
+The graph's own chain lowers too. `GradGraph::mean(a)` builds the fused node
+`GradOp::MseMean { sq, diff }` when `a` is `mul(d, d)` for a `d` that is a `sub` —
+recognized at construction, so `grad_graph_mean` in either executor gets it. The value is
+`Mean(sq)`'s. The backward, when `sq` and `diff` have no other consumer, writes `diff`'s
+gradient in one pass through `dispatch::mse_grad_scaled(g, diff, grad)` — `h + h` with
+`h = (g / n) * diff[i]`, the bits the Mean and Mul arms produce through five buffers, for
+any upstream `g` — and takes the plain `Mean` arm otherwise, so a shared chain keeps the
+order in which every contribution reached its parameter; the `Sub` arm runs as it always
+did. The forward tensors (`diff`, `sq`) are still materialized, because the graph
+evaluates eagerly: what the node removes is the backward's buffers and passes, not the
+forward's. `mean_unfused` builds the plain node, the reference the parity test holds the
+fused one to. The record's three rows — `mse_loss_grad`, the fused graph, the unfused
+graph — show the costs side by side.
 
 `cjc-ad`'s `piml_heat_1d_train` routes its physics loss through
 `dispatch::heat1d_residual_grad` when the feature is built and the switch is on; the loop
@@ -185,15 +203,15 @@ On a GNU toolchain (Linux, MinGW) neither is needed and `build.rs` adds nothing.
 
 ## Not done in this milestone
 
-- No CJC-source builtin toggles the switch (`runtime_policy::set_bruchion_kernels`
-  is the Rust API); the builtin and its AST/MIR wiring are the next step.
 - `piml_heat_1d_train` is routed (above); the other PINN problems (Burgers, the
-  harmonic oscillator) go through `GradGraph` and are not.
-- `ml::mse_loss_grad` and the switch now have CJC-language entry points — the builtins
+  harmonic oscillator) go through `GradGraph` and are not — except that any
+  `mean((pred - target)^2)` they build is the fused node now.
+- `ml::mse_loss_grad` and the switch have CJC-language entry points — the builtins
   `mse_loss_grad(pred, target) -> (loss, grad)`, `bruchion_kernels(on) -> previous`,
-  `bruchion_kernels_enabled()` (`tests/bruchion_builtins.rs`, both executors) — but the
-  graph's own `mean((pred - target)^2)` chain does not lower to the fused function; that
-  pattern match is still unwritten.
+  `bruchion_kernels_enabled()` (`tests/bruchion_builtins.rs`, both executors) — and the
+  graph's own `mean((pred - target)^2)` chain lowers to the fused node (above). Not
+  matched: `mean(pow(d, 2))`, whose forward is `powf(2.0)` and whose backward is
+  `2 * d^1`, different bits from `mul(d, d)`'s `h + h`; it stays the plain chain.
 - `adam_step` is routed again: the records up to `28c104c` had the kernel 15-20x slower
   because the pack's square root was `std/math`'s software root; the pack now takes the
   hardware instruction (`sqrt_f64`, correctly rounded by IEEE 754, the same bits as

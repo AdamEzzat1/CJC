@@ -221,6 +221,15 @@ pub enum GradOp {
     Sum(usize),
     /// Mean of all elements to a scalar `[1]` tensor.
     Mean(usize),
+    /// `Mean(sq)` where `sq = Mul(diff, diff)` and `diff = Sub(_, _)` — the loss
+    /// `mean((pred - target)^2)`, recognized by [`GradGraph::mean`] at construction. Its
+    /// value is `Mean(sq)`'s. Its backward writes the chain's gradient for `diff`,
+    /// `h + h` with `h = (g / n) * diff[i]`, in one pass (`dispatch::mse_grad_scaled`,
+    /// the Bruchion kernel under the switch) when `sq` and `diff` have no other consumer
+    /// — the bits `Mean` and `Mul` produce through their two arms and five buffers — and
+    /// is `Mean(sq)`'s arm otherwise. The `Sub` node runs as it always did, so every
+    /// gradient reaches its parameter in the order it did before.
+    MseMean { sq: usize, diff: usize },
     /// Multiply every element by a constant scalar.
     ScalarMul(usize, f64),
     /// Element-wise exponential.
@@ -380,6 +389,9 @@ pub struct GradGraph {
     ops: Vec<GradOp>,
     tensors: Vec<Tensor>,
     param_grads: Vec<Option<Tensor>>,
+    /// Whether any node is a [`GradOp::MseMean`]; only then does a backward pass count
+    /// consumers for the exclusivity check.
+    has_fused: bool,
 }
 
 impl GradGraph {
@@ -388,6 +400,7 @@ impl GradGraph {
             ops: Vec::new(),
             tensors: Vec::new(),
             param_grads: Vec::new(),
+            has_fused: false,
         }
     }
 
@@ -405,6 +418,9 @@ impl GradGraph {
     /// accessed `self.nodes` directly.
     pub fn push_node(&mut self, op: GradOp, tensor: Tensor, grad: Option<Tensor>) -> usize {
         let idx = self.ops.len();
+        if matches!(op, GradOp::MseMean { .. }) {
+            self.has_fused = true;
+        }
         self.ops.push(op);
         self.tensors.push(tensor);
         self.param_grads.push(grad);
@@ -490,8 +506,30 @@ impl GradGraph {
         idx
     }
 
-    /// Mean of all elements.
+    /// Mean of all elements. When `a` is `mul(d, d)` for a `d` that is a `sub`, the node
+    /// is the fused [`GradOp::MseMean`] — the same value, the same bits on backward, one
+    /// buffer and one pass where the plain chain's backward has five and three (the
+    /// `tests/mse_grad_parity.rs` suite holds the two to each other). [`Self::mean_unfused`]
+    /// is the plain node, for the reference.
     pub fn mean(&mut self, a: usize) -> usize {
+        if let GradOp::Mul(x, y) = &self.ops[a] {
+            let (x, y) = (*x, *y);
+            if x == y && matches!(self.ops[x], GradOp::Sub(..)) {
+                let m = self.tensors[a].mean();
+                let idx = self.ops.len();
+                self.ops.push(GradOp::MseMean { sq: a, diff: x });
+                self.tensors.push(Tensor::from_vec_unchecked(vec![m], &[1]));
+                self.param_grads.push(None);
+                self.has_fused = true;
+                return idx;
+            }
+        }
+        self.mean_unfused(a)
+    }
+
+    /// Mean of all elements as the plain [`GradOp::Mean`] node, whatever `a` is — the
+    /// unfused chain, which [`Self::mean`] is held to.
+    pub fn mean_unfused(&mut self, a: usize) -> usize {
         let a_t = self.tensors[a].clone();
         let m = a_t.mean();
         let result = Tensor::from_vec_unchecked(vec![m], &[1]);
@@ -1251,6 +1289,11 @@ impl GradGraph {
     }
 
     /// Get the scalar value from a 1-element tensor node.
+    /// The operation at node `idx`.
+    pub fn op(&self, idx: usize) -> &GradOp {
+        &self.ops[idx]
+    }
+
     pub fn value(&self, idx: usize) -> f64 {
         let data = self.tensors[idx].to_vec();
         data[0]
@@ -1336,14 +1379,16 @@ impl GradGraph {
         global_norm
     }
 
-    /// Mark the children of node `i` as reachable for dead-node elimination.
-    fn mark_children_reachable(&self, i: usize, reachable: &mut [bool]) {
+    /// Call `f` once per operand slot of node `i` — `mul(x, x)` calls it twice with `x`.
+    /// The one place the graph's edges are enumerated: reachability and the consumer
+    /// counts both walk it.
+    fn for_each_child(&self, i: usize, mut f: impl FnMut(usize)) {
         match &self.ops[i] {
             GradOp::Input | GradOp::Parameter => {}
             GradOp::Add(a, b) | GradOp::Sub(a, b) | GradOp::Mul(a, b)
             | GradOp::Div(a, b) | GradOp::MatMul(a, b) => {
-                reachable[*a] = true;
-                reachable[*b] = true;
+                f(*a);
+                f(*b);
             }
             GradOp::Neg(a) | GradOp::Sum(a) | GradOp::Mean(a)
             | GradOp::Exp(a) | GradOp::Ln(a) | GradOp::Sin(a)
@@ -1353,51 +1398,115 @@ impl GradGraph {
             | GradOp::BatchNorm(a) | GradOp::TransposeOp(a)
             | GradOp::Gelu(a) | GradOp::Silu(a) | GradOp::Elu(a)
             | GradOp::Selu(a) => {
-                reachable[*a] = true;
+                f(*a);
+            }
+            // The fused mean's one operand is `sq`; `sq`'s own edges reach `diff` and its
+            // operands, so the walk from a fused node covers the chain it stands for.
+            GradOp::MseMean { sq, .. } => {
+                f(*sq);
             }
             GradOp::ScalarMul(a, _) | GradOp::Pow(a, _) => {
-                reachable[*a] = true;
+                f(*a);
             }
             GradOp::CrossEntropy { logits, targets } => {
-                reachable[*logits] = true;
-                reachable[*targets] = true;
+                f(*logits);
+                f(*targets);
             }
             GradOp::Clamp { input, .. } => {
-                reachable[*input] = true;
+                f(*input);
             }
             GradOp::Where { cond, on_true, on_false } => {
-                reachable[*cond] = true;
-                reachable[*on_true] = true;
-                reachable[*on_false] = true;
+                f(*cond);
+                f(*on_true);
+                f(*on_false);
             }
             GradOp::Reshape { input, .. } => {
-                reachable[*input] = true;
+                f(*input);
             }
             GradOp::CatOp { inputs, .. } => {
                 for &idx in inputs {
-                    reachable[idx] = true;
+                    f(idx);
                 }
             }
             GradOp::GatherOp { input, .. } => {
-                reachable[*input] = true;
+                f(*input);
             }
             GradOp::StructField { parent, .. } => {
-                reachable[*parent] = true;
+                f(*parent);
             }
             GradOp::MapLookup { map_node, .. } => {
-                reachable[*map_node] = true;
+                f(*map_node);
             }
             GradOp::MlpLayer { input, weight, bias, .. } => {
-                reachable[*input] = true;
-                reachable[*weight] = true;
-                reachable[*bias] = true;
+                f(*input);
+                f(*weight);
+                f(*bias);
             }
             GradOp::MlpLayerMatMul { input, w1, b1, w2, .. } => {
-                reachable[*input] = true;
-                reachable[*w1] = true;
-                reachable[*b1] = true;
-                reachable[*w2] = true;
+                f(*input);
+                f(*w1);
+                f(*b1);
+                f(*w2);
             }
+        }
+    }
+
+    /// Mark the children of node `i` as reachable for dead-node elimination.
+    fn mark_children_reachable(&self, i: usize, reachable: &mut [bool]) {
+        self.for_each_child(i, |c| reachable[c] = true);
+    }
+
+    /// How many operand slots among the ops `0..limit` name each node. Computed only when
+    /// the graph holds a fused node, for its exclusivity check.
+    fn consumer_counts(&self, limit: usize) -> Vec<u32> {
+        let mut counts = vec![0u32; self.ops.len()];
+        for i in 0..limit {
+            self.for_each_child(i, |c| counts[c] += 1);
+        }
+        counts
+    }
+
+    /// Whether a [`GradOp::MseMean`] node's chain is its own: `sq` consumed by this node
+    /// alone, `diff` by `sq`'s two operand slots alone. Then the fused backward can write
+    /// `diff`'s gradient directly, because no other contribution would have reached `sq`
+    /// or `diff` before the chain's arms ran.
+    fn mse_mean_exclusive(consumers: Option<&Vec<u32>>, sq: usize, diff: usize) -> bool {
+        consumers.map_or(false, |c| c[sq] == 1 && c[diff] == 2)
+    }
+
+    /// The backward of a fused [`GradOp::MseMean`] node with upstream gradient `upstream`
+    /// (a `[1]` tensor): when the chain is exclusive, `diff`'s gradient in one pass —
+    /// `h + h`, `h = (g / n) * diff[i]`, through `dispatch::mse_grad_scaled` (the Bruchion
+    /// kernel under the switch, the Rust loop otherwise); when it is not, `Mean(sq)`'s own
+    /// arm, so the `Mul` and `Sub` arms run as they always did. The two give the same bits
+    /// (`tests/mse_grad_parity.rs`); the first allocates one buffer where the arms allocate
+    /// five and read `sq`'s operands twice.
+    fn mse_mean_backward(&self, sq: usize, diff: usize, upstream: &Tensor, exclusive: bool, grads: &mut [Option<Tensor>]) {
+        if exclusive {
+            let g = upstream.to_vec()[0];
+            let d = &self.tensors[diff];
+            let n = d.len();
+            let mut out = vec![0.0f64; n];
+            if d.is_contiguous() {
+                let data = d.buffer.borrow_data();
+                cjc_runtime::bruchion::dispatch::mse_grad_scaled(g, &data[..n], &mut out);
+            } else {
+                cjc_runtime::bruchion::dispatch::mse_grad_scaled(g, &d.to_vec(), &mut out);
+            }
+            let t = Tensor::from_vec_unchecked(out, d.shape());
+            match &mut grads[diff] {
+                Some(existing) => existing.add_assign_unchecked(&t),
+                slot @ None => *slot = Some(t),
+            }
+        } else {
+            let a_shape = self.tensors[sq].shape().to_vec();
+            let n_elem = a_shape.iter().product::<usize>() as f64;
+            let grad_val = upstream.to_vec()[0] / n_elem;
+            let expanded = Tensor::from_vec_unchecked(
+                vec![grad_val; a_shape.iter().product()],
+                &a_shape,
+            );
+            accumulate_grad(grads, sq, &expanded);
         }
     }
 
@@ -1422,6 +1531,9 @@ impl GradGraph {
         // Loss gradient is 1.0
         let loss_shape = self.tensors[loss_idx].shape().to_vec();
         grads[loss_idx] = Some(Tensor::ones(&loss_shape));
+
+        // The fused nodes' exclusivity check, over the nodes this pass can visit.
+        let consumers = if self.has_fused { Some(self.consumer_counts(loss_idx + 1)) } else { None };
 
         // Phase 2: Backward pass — skip unreachable nodes
         for i in (0..=loss_idx).rev() {
@@ -1515,6 +1627,10 @@ impl GradGraph {
                         &a_shape,
                     );
                     accumulate_grad(&mut grads, a, &expanded);
+                }
+                GradOp::MseMean { sq, diff } => {
+                    let exclusive = Self::mse_mean_exclusive(consumers.as_ref(), sq, diff);
+                    self.mse_mean_backward(sq, diff, &grad, exclusive, &mut grads);
                 }
                 GradOp::ScalarMul(a, s) => {
                     let scaled = grad.scalar_mul(s);
@@ -2483,7 +2599,7 @@ impl GradGraph {
                     let s = self.tensors[*a].sum();
                     Tensor::from_vec_unchecked(vec![s], &[1])
                 }
-                GradOp::Mean(a) => {
+                GradOp::Mean(a) | GradOp::MseMean { sq: a, .. } => {
                     let m = self.tensors[*a].mean();
                     Tensor::from_vec_unchecked(vec![m], &[1])
                 }
@@ -2816,7 +2932,7 @@ impl GradGraph {
                         let shape = vec![1usize];
                         Tensor::from_vec_unchecked(vec![s], &shape)
                     }
-                    GradOp::Mean(a) => {
+                    GradOp::Mean(a) | GradOp::MseMean { sq: a, .. } => {
                         let m = self.tensors[*a].mean();
                         Tensor::from_vec_unchecked(vec![m], &[1])
                     }
@@ -2967,6 +3083,7 @@ impl GradGraph {
         let n = self.ops.len();
         let mut grads: Vec<Option<Tensor>> = vec![None; n];
         grads[loss_idx] = Some(seed.clone());
+        let consumers = if self.has_fused { Some(self.consumer_counts(n)) } else { None };
 
         for i in (0..n).rev() {
             let grad = match grads[i].take() {
@@ -3159,6 +3276,10 @@ impl GradGraph {
                         &a_shape,
                     );
                     accumulate_grad(&mut grads, *a, &expanded);
+                }
+                GradOp::MseMean { sq, diff } => {
+                    let exclusive = Self::mse_mean_exclusive(consumers.as_ref(), *sq, *diff);
+                    self.mse_mean_backward(*sq, *diff, &grad, exclusive, &mut grads);
                 }
                 GradOp::StructField { parent, field_index, total_fields } => {
                     let parent_shape = self.tensors[*parent].shape().to_vec();
