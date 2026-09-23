@@ -218,10 +218,21 @@ pub mod kernel {
             let filter_slice = &filters[filter_start..filter_start + kernel_size];
             let out_row_start = ch * out_len;
             for pos in 0..out_len {
-                let products: Vec<f64> = (0..kernel_size)
-                    .map(|k| signal[pos + k] * filter_slice[k])
-                    .collect();
-                out[out_row_start + pos] = kahan_sum_f64(&products) + bias[ch];
+                // `kahan_sum_f64`'s recurrence, inline, over the products in index order
+                // (no zero skip: that is the accumulator's rule, not this function's) —
+                // the bits the collected `Vec` gave, without the `Vec`: the old form
+                // allocated once per output element, `out_channels * out_len` times per
+                // call (`conv1d_allocation_free_tests` holds the two to each other).
+                let mut sum = 0.0f64;
+                let mut compensation = 0.0f64;
+                for k in 0..kernel_size {
+                    let val = signal[pos + k] * filter_slice[k];
+                    let y = val - compensation;
+                    let t = sum + y;
+                    compensation = (t - sum) - y;
+                    sum = t;
+                }
+                out[out_row_start + pos] = sum + bias[ch];
             }
         }
     }
@@ -566,3 +577,61 @@ pub mod kernel {
     }
 }
 
+#[cfg(test)]
+mod conv1d_allocation_free_tests {
+    //! `conv1d_raw` against the form it replaced — one collected `Vec` of products per
+    //! output element, summed by `kahan_sum_f64` — bit for bit, over a seeded sweep of
+    //! shapes (the repository's runtime crate has no property-test framework; a seeded
+    //! sweep over 200 shapes is the closest equivalent), and the Kahan-order witness:
+    //! the products must be summed in index order with compensation, not naively.
+    use super::kernel::conv1d_raw;
+    use cjc_repro::kahan_sum_f64;
+
+    fn old_form(signal: &[f64], filters: &[f64], bias: &[f64], out: &mut [f64], signal_len: usize, out_channels: usize, kernel_size: usize) {
+        let out_len = signal_len - kernel_size + 1;
+        for ch in 0..out_channels {
+            let filter_slice = &filters[ch * kernel_size..(ch + 1) * kernel_size];
+            for pos in 0..out_len {
+                let products: Vec<f64> = (0..kernel_size).map(|k| signal[pos + k] * filter_slice[k]).collect();
+                out[ch * out_len + pos] = kahan_sum_f64(&products) + bias[ch];
+            }
+        }
+    }
+
+    fn values(rng: &mut cjc_repro::Rng, n: usize) -> Vec<f64> {
+        (0..n).map(|i| if i % 13 == 12 { 0.0 } else { (rng.next_f64() * 2.0 - 1.0) * cjc_repro::powi_f64(2.0, (rng.next_u64() % 20) as i32 - 10) }).collect()
+    }
+
+    #[test]
+    fn conv1d_raw_is_the_collected_forms_bits_over_a_seeded_sweep() {
+        let mut rng = cjc_repro::Rng::seeded(2026_09_22);
+        for case in 0..200u64 {
+            let kernel_size = 1 + (rng.next_u64() % 16) as usize;
+            let signal_len = kernel_size + (rng.next_u64() % 300) as usize;
+            let out_channels = 1 + (rng.next_u64() % 6) as usize;
+            let signal = values(&mut rng, signal_len);
+            let filters = values(&mut rng, out_channels * kernel_size);
+            let bias = values(&mut rng, out_channels);
+            let out_len = signal_len - kernel_size + 1;
+            let mut a = vec![7.0; out_channels * out_len];
+            let mut b = vec![7.0; out_channels * out_len];
+            conv1d_raw(&signal, &filters, &bias, &mut a, signal_len, out_channels, kernel_size);
+            old_form(&signal, &filters, &bias, &mut b, signal_len, out_channels, kernel_size);
+            let ab: Vec<u64> = a.iter().map(|v| v.to_bits()).collect();
+            let bb: Vec<u64> = b.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(ab, bb, "case {case}: {signal_len}x{out_channels}x{kernel_size}");
+        }
+    }
+
+    #[test]
+    fn conv1d_raw_sums_in_kahan_order_not_naively() {
+        // 1, 2^-53, 2^-53 as products: naive left-to-right gives 1.0, Kahan gives 1 + 2^-52.
+        let signal = [1.0f64, 1.0, 1.0];
+        let filters = [1.0f64, 2.0f64.powi(-53), 2.0f64.powi(-53)];
+        let bias = [0.0f64];
+        let mut out = [0.0f64];
+        conv1d_raw(&signal, &filters, &bias, &mut out, 3, 1, 3);
+        assert_eq!(out[0].to_bits(), (1.0 + 2.0f64.powi(-52)).to_bits());
+        assert_ne!(out[0].to_bits(), ((1.0 + 2.0f64.powi(-53)) + 2.0f64.powi(-53)).to_bits());
+    }
+}

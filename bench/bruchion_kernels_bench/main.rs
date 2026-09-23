@@ -242,8 +242,11 @@ fn workloads(o: &Opts) -> Vec<Workload> {
             digest: Box::new(move || last.get().to_bits()),
         });
     }
-    // matmul, through kernel::matmul_raw (Kahan per output element on both sides).
-    for &(m, k, nn) in &[(64usize, 17usize, 33usize), (128, 128, 128)] {
+    // matmul, through kernel::matmul_raw (Kahan per output element on both sides). The
+    // first two shapes are the original rows; the rest are the second research stack's
+    // shape family around the reproduced 64x17x33 win: the same k and n with a longer m,
+    // the roles rotated, a small square, a short k, a long k.
+    for &(m, k, nn) in &[(64usize, 17usize, 33usize), (128, 128, 128), (256, 17, 33), (33, 64, 17), (17, 33, 64), (32, 32, 32), (64, 64, 8), (16, 16, 1024)] {
         let a = g.f64s(m * k);
         let b = g.f64s(k * nn);
         let c = std::rc::Rc::new(std::cell::RefCell::new(vec![0.0f64; m * nn]));
@@ -448,6 +451,119 @@ fn workloads(o: &Opts) -> Vec<Workload> {
                 let o = out.borrow();
                 fnv1a(std::iter::once(o.0.to_bits()).chain(o.1.iter().map(|v| v.to_bits())))
             }),
+        });
+    }
+    // ---- the second research stack's rows (2026-09-22, night) ----
+    // conv1d through kernel::conv1d_raw: one Kahan dot per output element. Unrouted; the
+    // row is here for its allocation count (the form before 2026-09-22 allocated a Vec
+    // per output element).
+    {
+        let (sig_len, ch, ks) = (4096usize, 8usize, 9usize);
+        let signal = g.f64s(sig_len);
+        let filters = g.f64s(ch * ks);
+        let bias = g.f64s(ch);
+        let out_len = sig_len - ks + 1;
+        let out = std::rc::Rc::new(std::cell::RefCell::new(vec![0.0f64; ch * out_len]));
+        let o1 = out.clone();
+        ws.push(Workload {
+            routed: false,
+            name: format!("conv1d {sig_len}x{ch}x{ks} (kernel::conv1d_raw)"),
+            elems: ch * out_len * ks,
+            call: Box::new(move || kernel::conv1d_raw(&signal, &filters, &bias, &mut o1.borrow_mut(), sig_len, ch, ks)),
+            digest: Box::new(move || fnv1a(out.borrow().iter().map(|v| v.to_bits()))),
+        });
+    }
+    // The PINN end to end: piml_heat_1d_train at the pinn_routing_bits shape with 1000
+    // collocation points, 9 parameters and 20 epochs. Routed: the physics loss goes
+    // through dispatch::heat1d_residual_grad under the switch (in the default set); the
+    // digest is over the final parameters, and the elems figure is nominal (points x
+    // params x epochs) so the ns-per-elem column stays comparable across records.
+    {
+        let out = std::rc::Rc::new(std::cell::RefCell::new(Vec::<f64>::new()));
+        let o1 = out.clone();
+        ws.push(Workload {
+            routed: true,
+            name: "piml_heat_1d_train 1000x9, 20 epochs (end to end)".into(),
+            elems: 1000 * 9 * 20,
+            call: Box::new(move || {
+                let r = cjc_ad::pinn::piml_heat_1d_train(8, 16, 1000, 0.05, 20, 1e-3, 10.0, 100.0, 1);
+                *o1.borrow_mut() = r.final_params;
+            }),
+            digest: Box::new(move || fnv1a(out.borrow().iter().map(|v| v.to_bits()))),
+        });
+    }
+    // Quantum: one Hadamard on qubit 9 of a 20-qubit state (2^20 amplitudes, 16 MiB),
+    // through the crate's Gate::apply — a loop over every index with a branch on half of
+    // them — and the same update as a strided pair loop written here with the crate's own
+    // complex arithmetic in the same pair order: the same bits (asserted when the rows are
+    // built). Both unrouted, both restore the state from a base copy before the gate (the
+    // copy is in both rows' time); a CJC-side loop-shape comparison, not a kernel.
+    {
+        use cjc_quantum::gates::Gate;
+        use cjc_quantum::statevector::Statevector;
+        use cjc_runtime::complex::ComplexF64;
+        let nq = 20usize;
+        let q = 9usize;
+        let mut sv = Statevector::new(nq);
+        for i in 0..nq {
+            Gate::H(i).apply(&mut sv).expect("H");
+            Gate::Ry(i, 0.1 * (i as f64 + 1.0)).apply(&mut sv).expect("Ry");
+        }
+        let base: Vec<ComplexF64> = sv.amplitudes.clone();
+        fn h_strided(amps: &mut [ComplexF64], q: usize) {
+            // h_matrix() of cjc_quantum::gates, and apply_single_qubit's pair arithmetic,
+            // over the pairs in the same ascending order without the per-index branch.
+            let s = ComplexF64::real(std::f64::consts::FRAC_1_SQRT_2);
+            let ms = ComplexF64::real(-std::f64::consts::FRAC_1_SQRT_2);
+            let u = [[s, s], [s, ms]];
+            let bit = 1usize << q;
+            let mut lo = 0usize;
+            while lo < amps.len() {
+                for i in lo..lo + bit {
+                    let j = i | bit;
+                    let a0 = amps[i];
+                    let a1 = amps[j];
+                    amps[i] = u[0][0].mul_fixed(a0).add(u[0][1].mul_fixed(a1));
+                    amps[j] = u[1][0].mul_fixed(a0).add(u[1][1].mul_fixed(a1));
+                }
+                lo += 2 * bit;
+            }
+        }
+        // The two forms agree bit for bit, or the rows are not comparable.
+        {
+            let mut a = Statevector::new(nq);
+            a.amplitudes.copy_from_slice(&base);
+            Gate::H(q).apply(&mut a).expect("H");
+            let mut b = base.clone();
+            h_strided(&mut b, q);
+            assert!(a.amplitudes.iter().zip(&b).all(|(x, y)| x.re.to_bits() == y.re.to_bits() && x.im.to_bits() == y.im.to_bits()), "the strided Hadamard is not Gate::apply's bits");
+        }
+        let work = std::rc::Rc::new(std::cell::RefCell::new(sv));
+        let (w1, w2) = (work.clone(), work.clone());
+        let (base1, base2) = (base.clone(), base);
+        ws.push(Workload {
+            routed: false,
+            name: format!("q_h on {nq} qubits (Gate::apply, a branch per index)"),
+            elems: 1 << nq,
+            call: Box::new(move || {
+                let mut s = w1.borrow_mut();
+                s.amplitudes.copy_from_slice(&base1);
+                Gate::H(q).apply(&mut s).expect("H");
+            }),
+            digest: Box::new(move || fnv1a(w2.borrow().amplitudes.iter().flat_map(|c| [c.re.to_bits(), c.im.to_bits()]))),
+        });
+        let work = std::rc::Rc::new(std::cell::RefCell::new(Statevector::new(nq)));
+        let (w1, w2) = (work.clone(), work.clone());
+        ws.push(Workload {
+            routed: false,
+            name: format!("q_h on {nq} qubits (strided pair loop, same bits)"),
+            elems: 1 << nq,
+            call: Box::new(move || {
+                let mut s = w1.borrow_mut();
+                s.amplitudes.copy_from_slice(&base2);
+                h_strided(&mut s.amplitudes, q);
+            }),
+            digest: Box::new(move || fnv1a(w2.borrow().amplitudes.iter().flat_map(|c| [c.re.to_bits(), c.im.to_bits()]))),
         });
     }
     ws

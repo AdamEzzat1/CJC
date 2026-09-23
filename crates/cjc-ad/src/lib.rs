@@ -1551,7 +1551,11 @@ impl GradGraph {
                 GradOp::Input => {}
                 GradOp::Parameter => {
                     if let Some(ref mut existing_grad) = self.param_grads[i] {
-                        *existing_grad = existing_grad.add_unchecked(&grad);
+                        // In place: `a + b` per element, the bits `add_unchecked` gave in
+                        // a new tensor; `add_assign_unchecked` copies first if the slot's
+                        // buffer is shared (a `grad()` the caller still holds), so a
+                        // handed-out gradient never changes under its owner.
+                        existing_grad.add_assign_unchecked(&grad);
                     } else {
                         self.param_grads[i] = Some(grad);
                     }

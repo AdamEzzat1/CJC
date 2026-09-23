@@ -225,6 +225,7 @@ name = "bruchion-kernels-bench"
 version = "0.1.0"
 dependencies = [
  "cjc-ad",
+ "cjc-quantum",
  "cjc-repro",
  "cjc-runtime",
 ]
