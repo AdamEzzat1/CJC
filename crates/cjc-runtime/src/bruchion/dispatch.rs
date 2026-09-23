@@ -246,12 +246,17 @@ pub fn matmul_tiled_kernel(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usi
 pub fn adam_step_raw(params: &mut [f64], grads: &[f64], m: &mut [f64], v: &mut [f64], lr: f64, beta1: f64, beta2: f64, eps: f64, t: f64) {
     let bc1 = 1.0 - beta1.powf(t);
     let bc2 = 1.0 - beta2.powf(t);
-    // Not routed, on purpose. The record (`bench_results/bruchion_kernels`, at `abe6b21`)
-    // has the kernel 17.85x slower than this loop, whole band above 1: `cjc_adam_step_f64`
-    // takes its square root from the libm-free `std/math`, a software `sqrt`, where Rust
-    // emits `sqrtsd`. The kernel and its parity test stay (the bits agree, and the bench
-    // row keeps measuring it so the record shows why); the switch does not send Adam
-    // there until the pack has a hardware `sqrt` with the same bits on every target.
+    // Routed again. The records at abe6b21..28c104c had the kernel 15-20x slower than this
+    // loop because the pack took its square root from the libm-free `std/math`, a software
+    // root; the pack now uses the hardware instruction (`sqrt_f64`: `sqrtsd`, correctly
+    // rounded by IEEE 754, so the same bits as `f64::sqrt` here and on every conforming
+    // target — the parity test below is the check), and the record after this commit
+    // says what that is worth.
+    #[cfg(feature = "bruchion-kernels")]
+    if enabled() {
+        adam_step_kernel(params, grads, m, v, lr, beta1, beta2, eps, bc1, bc2);
+        return;
+    }
     adam_step_fallback(params, grads, m, v, lr, beta1, beta2, eps, bc1, bc2);
 }
 

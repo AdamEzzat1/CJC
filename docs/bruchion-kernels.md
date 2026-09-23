@@ -194,10 +194,11 @@ On a GNU toolchain (Linux, MinGW) neither is needed and `build.rs` adds nothing.
   `bruchion_kernels_enabled()` (`tests/bruchion_builtins.rs`, both executors) — but the
   graph's own `mean((pred - target)^2)` chain does not lower to the fused function; that
   pattern match is still unwritten.
-- `adam_step` is **not routed any more**: the record has the kernel 17.85x slower
-  (a software `sqrt` in the libm-free pack against `sqrtsd`), so `adam_step_raw` takes
-  the fallback regardless of the switch; the kernel, its parity test and its bench row
-  stay.
+- `adam_step` is routed again: the records up to `28c104c` had the kernel 15-20x slower
+  because the pack's square root was `std/math`'s software root; the pack now takes the
+  hardware instruction (`sqrt_f64`, correctly rounded by IEEE 754, the same bits as
+  `f64::sqrt` — the Adam parity test is the check on this target), and the record after
+  the change says what that is worth.
 - A registered timing record now exists: `bench/bruchion_kernels_bench` (run through
   `bench/bruchion_kernels_bench/run.ps1`, which refuses to record on a loaded machine
   and stamps the gate readings, the kernel hash and the tree state into the
