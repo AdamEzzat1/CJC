@@ -5524,43 +5524,19 @@ impl MirExecutor {
                     ));
                 }
                 let params_t = match &args[0] {
-                    Value::Tensor(t) => t.clone(),
+                    Value::Tensor(t) => t,
                     _ => return Err(MirExecError::Runtime("expected Tensor for params".into())),
                 };
                 let grads_t = match &args[1] {
-                    Value::Tensor(t) => t.clone(),
+                    Value::Tensor(t) => t,
                     _ => return Err(MirExecError::Runtime("expected Tensor for grads".into())),
                 };
-                let mut params = params_t.to_vec();
-                let grads = grads_t.to_vec();
-                if params.len() != grads.len() {
-                    return Err(MirExecError::Runtime(
-                        "params and grads must have same length".into(),
-                    ));
-                }
+                // The step itself (Adam or SGD, the size checks, the words of the errors)
+                // is `ml::optimizer_step_tensors`, shared with the tree-walking interpreter.
                 let mut borrow = inner.borrow_mut();
-                if let Some(adam) = borrow.downcast_mut::<cjc_runtime::ml::AdamState>() {
-                    if params.len() != adam.m.len() {
-                        return Err(MirExecError::Runtime(format!(
-                            "param size mismatch: optimizer expects {}, got {}",
-                            adam.m.len(),
-                            params.len()
-                        )));
-                    }
-                    cjc_runtime::ml::adam_step(&mut params, &grads, adam);
-                } else if let Some(sgd) = borrow.downcast_mut::<cjc_runtime::ml::SgdState>() {
-                    if params.len() != sgd.velocity.len() {
-                        return Err(MirExecError::Runtime(format!(
-                            "param size mismatch: optimizer expects {}, got {}",
-                            sgd.velocity.len(),
-                            params.len()
-                        )));
-                    }
-                    cjc_runtime::ml::sgd_step(&mut params, &grads, sgd);
-                } else {
-                    return Err(MirExecError::Runtime("unknown optimizer type".into()));
-                }
-                Ok(Value::Tensor(Tensor::from_vec(params, params_t.shape())?))
+                let out = cjc_runtime::ml::optimizer_step_tensors(&mut *borrow, params_t, grads_t)
+                    .map_err(MirExecError::Runtime)?;
+                Ok(Value::Tensor(out))
             }
             (Value::OptimizerState(_), method) => Err(MirExecError::Runtime(format!(
                 "no method `{method}` on OptimizerState"

@@ -246,7 +246,18 @@ fn workloads(o: &Opts) -> Vec<Workload> {
     // first two shapes are the original rows; the rest are the second research stack's
     // shape family around the reproduced 64x17x33 win: the same k and n with a longer m,
     // the roles rotated, a small square, a short k, a long k.
-    for &(m, k, nn) in &[(64usize, 17usize, 33usize), (128, 128, 128), (256, 17, 33), (33, 64, 17), (17, 33, 64), (32, 32, 32), (64, 64, 8), (16, 16, 1024)] {
+    // The third stack's sweep (2026-09-23) follows the original rows: k at (64, _, 33), m
+    // at (_, 17, 33), n at (16, 16, _), and four shapes with every dimension below 64 —
+    // the only shapes `Tensor::matmul` sends to this loop (it takes the tiled engine at
+    // 64 and above). The shape reaches each call through `black_box`, so the linker cannot
+    // specialize a row's loop on its dimensions.
+    for &(m, k, nn) in &[
+        (64usize, 17usize, 33usize), (128, 128, 128), (256, 17, 33), (33, 64, 17), (17, 33, 64), (32, 32, 32), (64, 64, 8), (16, 16, 1024),
+        (64, 4, 33), (64, 8, 33), (64, 16, 33), (64, 24, 33), (64, 32, 33), (64, 48, 33), (64, 64, 33), (64, 128, 33),
+        (8, 17, 33), (16, 17, 33), (32, 17, 33), (63, 17, 33),
+        (16, 16, 16), (16, 16, 64), (16, 16, 256),
+        (8, 8, 8), (48, 17, 33), (32, 48, 16), (63, 63, 63),
+    ] {
         let a = g.f64s(m * k);
         let b = g.f64s(k * nn);
         let c = std::rc::Rc::new(std::cell::RefCell::new(vec![0.0f64; m * nn]));
@@ -255,7 +266,10 @@ fn workloads(o: &Opts) -> Vec<Workload> {
             routed: true,
             name: format!("matmul {m}x{k}x{nn}"),
             elems: m * k * nn,
-            call: Box::new(move || kernel::matmul_raw(&a, &b, &mut c1.borrow_mut(), m, k, nn)),
+            call: Box::new(move || {
+                let (m, k, nn) = black_box((m, k, nn));
+                kernel::matmul_raw(&a, &b, &mut c1.borrow_mut(), m, k, nn)
+            }),
             digest: Box::new(move || fnv1a(c.borrow().iter().map(|v| v.to_bits()))),
         });
     }
@@ -475,9 +489,17 @@ fn workloads(o: &Opts) -> Vec<Workload> {
     }
     // The PINN end to end: piml_heat_1d_train at the pinn_routing_bits shape with 1000
     // collocation points, 9 parameters and 20 epochs. Routed: the physics loss goes
-    // through dispatch::heat1d_residual_grad under the switch (in the default set); the
-    // digest is over the final parameters, and the elems figure is nominal (points x
-    // params x epochs) so the ns-per-elem column stays comparable across records.
+    // through dispatch::heat1d_residual_grad under the switch; the digest is over the
+    // final parameters, and the elems figure is nominal (points x params x epochs) so
+    // the ns-per-elem column stays comparable across records.
+    //
+    // Two rows. The first passes its arguments as literals, as record 8 did: under fat
+    // LTO the linker inlines the trainer into this one call site and specializes it on
+    // degree 8 and 1000 points (the parameter loop unrolls, `powi` becomes multiplies),
+    // which no interpreter call can do. The second passes the same arguments through
+    // `black_box`: the trainer as a program reaches it, with runtime shapes. The two
+    // fallback arms differ by that specialization alone, and it is the second row that
+    // decides routing (2026-09-23).
     {
         let out = std::rc::Rc::new(std::cell::RefCell::new(Vec::<f64>::new()));
         let o1 = out.clone();
@@ -487,6 +509,20 @@ fn workloads(o: &Opts) -> Vec<Workload> {
             elems: 1000 * 9 * 20,
             call: Box::new(move || {
                 let r = cjc_ad::pinn::piml_heat_1d_train(8, 16, 1000, 0.05, 20, 1e-3, 10.0, 100.0, 1);
+                *o1.borrow_mut() = r.final_params;
+            }),
+            digest: Box::new(move || fnv1a(out.borrow().iter().map(|v| v.to_bits()))),
+        });
+        let out = std::rc::Rc::new(std::cell::RefCell::new(Vec::<f64>::new()));
+        let o1 = out.clone();
+        ws.push(Workload {
+            routed: true,
+            name: "piml_heat_1d_train 1000x9, 20 epochs (end to end, arguments opaque)".into(),
+            elems: 1000 * 9 * 20,
+            call: Box::new(move || {
+                let (degree, n_data, n_colloc, noise, epochs, lr, pw, bw, seed) =
+                    black_box((8usize, 16usize, 1000usize, 0.05f64, 20usize, 1e-3f64, 10.0f64, 100.0f64, 1u64));
+                let r = cjc_ad::pinn::piml_heat_1d_train(degree, n_data, n_colloc, noise, epochs, lr, pw, bw, seed);
                 *o1.borrow_mut() = r.final_params;
             }),
             digest: Box::new(move || fnv1a(out.borrow().iter().map(|v| v.to_bits()))),
@@ -565,6 +601,273 @@ fn workloads(o: &Opts) -> Vec<Workload> {
             }),
             digest: Box::new(move || fnv1a(w2.borrow().amplitudes.iter().flat_map(|c| [c.re.to_bits(), c.im.to_bits()]))),
         });
+    }
+    // ---- the third research stack's rows (2026-09-23) ----
+    //
+    // Tensor::matmul end to end, at shapes below the tile threshold: the language's own
+    // entry (two `to_vec` copies, the result tensor) over `kernel::matmul_raw`, which it
+    // now calls (before, it ran its own copy of that loop and no routing reached it).
+    // Routed; the digest is over the result's bits.
+    for &(m, k, nn) in &[(8usize, 8usize, 8usize), (32, 32, 32), (48, 17, 33), (63, 63, 63)] {
+        let at = cjc_runtime::tensor::Tensor::from_vec(g.f64s(m * k), &[m, k]).expect("tensor");
+        let bt = cjc_runtime::tensor::Tensor::from_vec(g.f64s(k * nn), &[k, nn]).expect("tensor");
+        let out = std::rc::Rc::new(std::cell::RefCell::new(None::<cjc_runtime::tensor::Tensor>));
+        let o1 = out.clone();
+        ws.push(Workload {
+            routed: true,
+            name: format!("Tensor::matmul {m}x{k}x{nn} (end to end)"),
+            elems: m * k * nn,
+            call: Box::new(move || {
+                let (at, bt) = black_box((&at, &bt));
+                *o1.borrow_mut() = Some(at.matmul(bt).expect("matmul"));
+            }),
+            digest: Box::new(move || fnv1a(out.borrow().as_ref().expect("a result").to_vec().iter().map(|v| v.to_bits()))),
+        });
+    }
+    // The per-output-element binned accumulator, replaced by one scratch per call
+    // (`BinnedScratchF64`): conv2d, linear and sum_axis, each beside the form before
+    // (stated here, inline: `BinnedAccumulatorF64::new()` per output, which zeroes 40 KiB
+    // and walks 2048 bins for every output element). Both rows of a pair are unrouted
+    // CJC-side forms; a pair is read against itself. The other sites that changed the
+    // same way (mean_axis, var_axis, einsum) share the mechanism and are not timed.
+    {
+        use cjc_runtime::accumulator::BinnedAccumulatorF64;
+        use cjc_runtime::tensor::Tensor;
+        // conv2d: 2 images, 3 channels, 28x28, 8 filters of 3x3, stride 1 — 10,816 outputs
+        // of 27 products each.
+        let (n, c_in, h_in, w_in, c_out, kh, kw, stride) = (2usize, 3usize, 28usize, 28usize, 8usize, 3usize, 3usize, 1usize);
+        let (h_out, w_out) = ((h_in - kh) / stride + 1, (w_in - kw) / stride + 1);
+        let input = g.f64s(n * c_in * h_in * w_in);
+        let filters = g.f64s(c_out * c_in * kh * kw);
+        let bias = g.f64s(c_out);
+        #[allow(clippy::too_many_arguments)]
+        fn conv2d_before(input: &[f64], filters: &[f64], bias: &[f64], out: &mut [f64],
+                         n: usize, c_in: usize, h_in: usize, w_in: usize, c_out: usize, kh: usize, kw: usize, stride: usize) {
+            let h_out = (h_in - kh) / stride + 1;
+            let w_out = (w_in - kw) / stride + 1;
+            for bn in 0..n {
+                for co in 0..c_out {
+                    for oh in 0..h_out {
+                        for ow in 0..w_out {
+                            let mut acc = BinnedAccumulatorF64::new();
+                            for ci in 0..c_in {
+                                for ki in 0..kh {
+                                    for kj in 0..kw {
+                                        let ih = oh * stride + ki;
+                                        let iw = ow * stride + kj;
+                                        acc.add(input[((bn * c_in + ci) * h_in + ih) * w_in + iw] * filters[((co * c_in + ci) * kh + ki) * kw + kj]);
+                                    }
+                                }
+                            }
+                            out[((bn * c_out + co) * h_out + oh) * w_out + ow] = acc.finalize() + bias[co];
+                        }
+                    }
+                }
+            }
+        }
+        let out = std::rc::Rc::new(std::cell::RefCell::new(vec![0.0f64; n * c_out * h_out * w_out]));
+        let elems = n * c_out * h_out * w_out * c_in * kh * kw;
+        {
+            let (i1, f1, b1, o1) = (input.clone(), filters.clone(), bias.clone(), out.clone());
+            let o2 = out.clone();
+            ws.push(Workload {
+                routed: false,
+                name: format!("conv2d {n}x{c_in}x{h_in}x{w_in} * {c_out}x{kh}x{kw} (kernel::conv2d_raw, one scratch per call)"),
+                elems,
+                call: Box::new(move || {
+                    let (n, c_in, h_in, w_in, c_out, kh, kw, stride) = black_box((n, c_in, h_in, w_in, c_out, kh, kw, stride));
+                    kernel::conv2d_raw(&i1, &f1, &b1, &mut o1.borrow_mut(), n, c_in, h_in, w_in, c_out, kh, kw, stride)
+                }),
+                digest: Box::new(move || fnv1a(o2.borrow().iter().map(|v| v.to_bits()))),
+            });
+        }
+        {
+            let (i1, f1, b1, o1) = (input.clone(), filters.clone(), bias.clone(), out.clone());
+            let o2 = out.clone();
+            ws.push(Workload {
+                routed: false,
+                name: format!("conv2d {n}x{c_in}x{h_in}x{w_in} * {c_out}x{kh}x{kw} (an accumulator per output, the form before)"),
+                elems,
+                call: Box::new(move || {
+                    let (n, c_in, h_in, w_in, c_out, kh, kw, stride) = black_box((n, c_in, h_in, w_in, c_out, kh, kw, stride));
+                    conv2d_before(&i1, &f1, &b1, &mut o1.borrow_mut(), n, c_in, h_in, w_in, c_out, kh, kw, stride)
+                }),
+                digest: Box::new(move || fnv1a(o2.borrow().iter().map(|v| v.to_bits()))),
+            });
+        }
+        // linear: [64, 128] x [32, 128]^T + [32] — 2,048 outputs of 128 products, through
+        // Tensor::linear and through the form before on the same tensors (its `to_vec`
+        // copies and result tensor included, as Tensor::linear has them).
+        let (outer, inf, outf) = (64usize, 128usize, 32usize);
+        let xt = Tensor::from_vec(g.f64s(outer * inf), &[outer, inf]).expect("tensor");
+        let wt = Tensor::from_vec(g.f64s(outf * inf), &[outf, inf]).expect("tensor");
+        let bt = Tensor::from_vec(g.f64s(outf), &[outf]).expect("tensor");
+        fn linear_before(x: &Tensor, w: &Tensor, b: &Tensor) -> Tensor {
+            let (data, w, b) = (x.to_vec(), w.to_vec(), b.to_vec());
+            let out_features = b.len();
+            let in_features = x.shape()[x.shape().len() - 1];
+            let outer = data.len() / in_features;
+            let mut result = vec![0.0f64; outer * out_features];
+            for row in 0..outer {
+                for j in 0..out_features {
+                    let mut acc = BinnedAccumulatorF64::new();
+                    for p in 0..in_features {
+                        acc.add(data[row * in_features + p] * w[j * in_features + p]);
+                    }
+                    result[row * out_features + j] = acc.finalize() + b[j];
+                }
+            }
+            Tensor::from_vec(result, &[outer, out_features]).expect("tensor")
+        }
+        let out = std::rc::Rc::new(std::cell::RefCell::new(None::<Tensor>));
+        {
+            let (x1, w1, b1, o1) = (xt.clone(), wt.clone(), bt.clone(), out.clone());
+            let o2 = out.clone();
+            ws.push(Workload {
+                routed: false,
+                name: format!("Tensor::linear [{outer}, {inf}] x [{outf}, {inf}] (one scratch per call)"),
+                elems: outer * inf * outf,
+                call: Box::new(move || {
+                    let (x, w, b) = black_box((&x1, &w1, &b1));
+                    *o1.borrow_mut() = Some(x.linear(w, b).expect("linear"));
+                }),
+                digest: Box::new(move || fnv1a(o2.borrow().as_ref().expect("a result").to_vec().iter().map(|v| v.to_bits()))),
+            });
+        }
+        {
+            let (x1, w1, b1, o1) = (xt, wt, bt, out.clone());
+            let o2 = out.clone();
+            ws.push(Workload {
+                routed: false,
+                name: format!("Tensor::linear [{outer}, {inf}] x [{outf}, {inf}] (an accumulator per output, the form before)"),
+                elems: outer * inf * outf,
+                call: Box::new(move || {
+                    let (x, w, b) = black_box((&x1, &w1, &b1));
+                    *o1.borrow_mut() = Some(linear_before(x, w, b));
+                }),
+                digest: Box::new(move || fnv1a(o2.borrow().as_ref().expect("a result").to_vec().iter().map(|v| v.to_bits()))),
+            });
+        }
+        // sum_axis: [256, 64] along axis 1 — 256 outputs of 64 values.
+        let (rows, cols) = (256usize, 64usize);
+        let st = Tensor::from_vec(g.f64s(rows * cols), &[rows, cols]).expect("tensor");
+        fn sum_axis1_before(t: &Tensor) -> Tensor {
+            let data = t.to_vec();
+            let (rows, cols) = (t.shape()[0], t.shape()[1]);
+            let mut result = vec![0.0f64; rows];
+            for r in 0..rows {
+                let mut acc = BinnedAccumulatorF64::new();
+                for c in 0..cols {
+                    acc.add(data[r * cols + c]);
+                }
+                result[r] = acc.finalize();
+            }
+            Tensor::from_vec(result, &[rows]).expect("tensor")
+        }
+        let out = std::rc::Rc::new(std::cell::RefCell::new(None::<Tensor>));
+        {
+            let (s1, o1) = (st.clone(), out.clone());
+            let o2 = out.clone();
+            ws.push(Workload {
+                routed: false,
+                name: format!("Tensor::sum_axis [{rows}, {cols}] axis 1 (one scratch per call)"),
+                elems: rows * cols,
+                call: Box::new(move || {
+                    let s = black_box(&s1);
+                    *o1.borrow_mut() = Some(s.sum_axis(1).expect("sum_axis"));
+                }),
+                digest: Box::new(move || fnv1a(o2.borrow().as_ref().expect("a result").to_vec().iter().map(|v| v.to_bits()))),
+            });
+        }
+        {
+            let (s1, o1) = (st, out.clone());
+            let o2 = out.clone();
+            ws.push(Workload {
+                routed: false,
+                name: format!("Tensor::sum_axis [{rows}, {cols}] axis 1 (an accumulator per output, the form before)"),
+                elems: rows * cols,
+                call: Box::new(move || {
+                    let s = black_box(&s1);
+                    *o1.borrow_mut() = Some(sum_axis1_before(s));
+                }),
+                digest: Box::new(move || fnv1a(o2.borrow().as_ref().expect("a result").to_vec().iter().map(|v| v.to_bits()))),
+            });
+        }
+        // OptimizerState.step as the interpreters run it: `ml::optimizer_step_tensors`
+        // (the gradient borrowed) beside the form before (both tensors copied, the code
+        // each interpreter carried). SGD without momentum, so the result is the same
+        // bits every call and the digest holds across phases; the point of the pair is
+        // the allocation column.
+        let pt = Tensor::from_vec(g.f64s(n), &[n]).expect("tensor");
+        let gt = Tensor::from_vec(g.f64s(n), &[n]).expect("tensor");
+        fn step_before(state: &mut dyn std::any::Any, params_t: &Tensor, grads_t: &Tensor) -> Tensor {
+            let mut params = params_t.to_vec();
+            let grads = grads_t.to_vec();
+            if let Some(sgd) = state.downcast_mut::<ml::SgdState>() {
+                ml::sgd_step(&mut params, &grads, sgd);
+            } else {
+                panic!("an SGD state");
+            }
+            Tensor::from_vec(params, params_t.shape()).expect("tensor")
+        }
+        let out = std::rc::Rc::new(std::cell::RefCell::new(None::<Tensor>));
+        {
+            let (p1, g1, o1) = (pt.clone(), gt.clone(), out.clone());
+            let o2 = out.clone();
+            let mut state: Box<dyn std::any::Any> = Box::new(ml::SgdState::new(n, 1e-3, 0.0));
+            ws.push(Workload {
+                routed: false,
+                name: "OptimizerState.step, SGD (ml::optimizer_step_tensors, the gradient borrowed)".into(),
+                elems: n,
+                call: Box::new(move || {
+                    let (p, gr) = black_box((&p1, &g1));
+                    *o1.borrow_mut() = Some(ml::optimizer_step_tensors(state.as_mut(), p, gr).expect("step"));
+                }),
+                digest: Box::new(move || fnv1a(o2.borrow().as_ref().expect("a result").to_vec().iter().map(|v| v.to_bits()))),
+            });
+        }
+        {
+            let (p1, g1, o1) = (pt, gt, out.clone());
+            let o2 = out.clone();
+            let mut state: Box<dyn std::any::Any> = Box::new(ml::SgdState::new(n, 1e-3, 0.0));
+            ws.push(Workload {
+                routed: false,
+                name: "OptimizerState.step, SGD (both tensors copied, the form before)".into(),
+                elems: n,
+                call: Box::new(move || {
+                    let (p, gr) = black_box((&p1, &g1));
+                    *o1.borrow_mut() = Some(step_before(state.as_mut(), p, gr));
+                }),
+                digest: Box::new(move || fnv1a(o2.borrow().as_ref().expect("a result").to_vec().iter().map(|v| v.to_bits()))),
+            });
+        }
+        // GradGraph zero_grad + backward + clip_grad on a held graph: the slots are
+        // written in place now (before: a zeros tensor per parameter per zero_grad and a
+        // new tensor per parameter per clip_grad, by construction — that form is not
+        // kept, so this row has no partner; its allocation count is the record).
+        {
+            let mut gg = cjc_ad::GradGraph::new();
+            let p = gg.parameter(Tensor::from_vec(g.f64s(n), &[n]).expect("tensor"));
+            let t = gg.parameter(Tensor::from_vec(g.f64s(n), &[n]).expect("tensor"));
+            let d = gg.sub(p, t);
+            let sq = gg.mul(d, d);
+            let loss = gg.mean_unfused(sq);
+            gg.backward(loss);
+            let graph = std::rc::Rc::new(std::cell::RefCell::new(gg));
+            let (g1, g2) = (graph.clone(), graph);
+            ws.push(Workload {
+                routed: false,
+                name: "GradGraph zero_grad + backward + clip_grad, 2 parameters (in place)".into(),
+                elems: n,
+                call: Box::new(move || {
+                    let mut gg = g1.borrow_mut();
+                    gg.zero_grad();
+                    gg.backward(loss);
+                    gg.clip_grad(0.5);
+                }),
+                digest: Box::new(move || fnv1a(g2.borrow().grad(p).expect("a gradient").to_vec().iter().map(|v| v.to_bits()))),
+            });
+        }
     }
     ws
 }

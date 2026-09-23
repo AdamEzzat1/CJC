@@ -41,7 +41,7 @@
 
 use cjc_repro::Rng;
 
-use crate::accumulator::{binned_sum_f64, BinnedAccumulatorF64};
+use crate::accumulator::{binned_sum_f64, BinnedScratchF64};
 use cjc_repro::KahanAccumulatorF64;
 
 use crate::accumulator;
@@ -747,6 +747,9 @@ impl Tensor {
 
         // For each output position, sum over the reduced axis with binned accumulation.
         let mut indices = vec![0usize; ndim];
+        // One set of bins for the call, reset per output (`BinnedScratchF64`: the
+        // reference accumulator's bits without its 40 KiB zeroing per output element).
+        let mut acc = BinnedScratchF64::new();
         for out_idx in 0..out_numel {
             // Compute the N-D index from flat output index
             {
@@ -757,7 +760,7 @@ impl Tensor {
                 }
             }
 
-            let mut acc = BinnedAccumulatorF64::new();
+            acc.reset();
             for k in 0..axis_len {
                 // Compute input flat index with indices[axis] = k
                 let mut flat = self.offset;
@@ -865,6 +868,37 @@ impl Tensor {
         }
     }
 
+    /// Overwrite every element with `v`. In place — no allocation — when this tensor is
+    /// contiguous and its buffer's only owner; a shared buffer is copied first (COW, as
+    /// `add_assign_unchecked`), and a view is replaced by a fresh contiguous tensor. The
+    /// bits of `Tensor::zeros(shape)` when `v == 0.0`.
+    pub fn fill_in_place(&mut self, v: f64) {
+        if self.is_contiguous() && self.buffer.len() == self.len() {
+            self.buffer.make_unique();
+            for x in self.buffer.borrow_data_mut().iter_mut() {
+                *x = v;
+            }
+        } else {
+            let numel = self.len();
+            self.buffer = Buffer::alloc(numel, v);
+            self.strides = Self::compute_strides(&self.shape);
+            self.offset = 0;
+        }
+    }
+
+    /// Replace every element `x` with `f(x)`. In place when contiguous and uniquely
+    /// owned (see `fill_in_place`); otherwise the bits of `self.map(f)`.
+    pub fn map_in_place<F: Fn(f64) -> f64>(&mut self, f: F) {
+        if self.is_contiguous() && self.buffer.len() == self.len() {
+            self.buffer.make_unique();
+            for x in self.buffer.borrow_data_mut().iter_mut() {
+                *x = f(*x);
+            }
+        } else {
+            *self = self.map(f);
+        }
+    }
+
     /// Element-wise subtraction. **Panics** on shape mismatch.
     pub fn sub_unchecked(&self, other: &Tensor) -> Tensor {
         self.sub(other).expect("Tensor::sub shape mismatch")
@@ -929,20 +963,17 @@ impl Tensor {
         Self::matmul_sequential(&a, &b, m, n, k)
     }
 
-    /// Sequential matmul (always available, deterministic reference).
+    /// Sequential matmul (always available, deterministic reference): one Kahan
+    /// accumulator per output element, products in `p` order — `kernel::matmul_raw`, the
+    /// loop the Bruchion kernel `cjc_matmul_f64` transcribes. Before 2026-09-23 this was
+    /// its own copy of that loop, which no routing could reach; the bits are the same
+    /// (the loop is the same), and the kernel now stands behind `Tensor::matmul` for the
+    /// shapes that take this path, when routed.
     fn matmul_sequential(
         a: &[f64], b: &[f64], m: usize, n: usize, k: usize,
     ) -> Result<Tensor, RuntimeError> {
         let mut result = vec![0.0f64; m * n];
-        for i in 0..m {
-            for j in 0..n {
-                let mut acc = KahanAccumulatorF64::new();
-                for p in 0..k {
-                    acc.add(a[i * k + p] * b[p * n + j]);
-                }
-                result[i * n + j] = acc.finalize();
-            }
-        }
+        kernel_fns::matmul_raw(a, b, &mut result, m, k, n);
         Tensor::from_vec(result, &[m, n])
     }
 
@@ -1563,13 +1594,16 @@ impl Tensor {
         let outer = data.len() / in_features;
         let mut result = vec![0.0f64; outer * out_features];
 
+        // One set of bins for the call, reset per output element (the reference
+        // accumulator's bits without its 40 KiB zeroing per output).
+        let mut acc = BinnedScratchF64::new();
         for row in 0..outer {
             let x_start = row * in_features;
             let x_slice = &data[x_start..x_start + in_features];
             let y_start = row * out_features;
             for j in 0..out_features {
                 let w_start = j * in_features;
-                let mut acc = BinnedAccumulatorF64::new();
+                acc.reset();
                 for p in 0..in_features {
                     acc.add(x_slice[p] * w[w_start + p]);
                 }
@@ -2350,8 +2384,12 @@ impl Tensor {
     /// Uses [`BinnedAccumulatorF64`](crate::accumulator::BinnedAccumulatorF64)
     /// for deterministic summation before dividing by the axis length.
     pub fn mean_axis(&self, axis: usize, keepdim: bool) -> Result<Tensor, RuntimeError> {
+        // One set of bins for the call, reset per output (the closure is called for one
+        // output at a time; the reference accumulator's bits without its zeroing per output).
+        let scratch = std::cell::RefCell::new(BinnedScratchF64::new());
         self.reduce_axis(axis, keepdim, |vals| {
-            let mut acc = BinnedAccumulatorF64::new();
+            let mut acc = scratch.borrow_mut();
+            acc.reset();
             for &v in vals { acc.add(v); }
             acc.finalize() / vals.len() as f64
         })
@@ -2489,6 +2527,8 @@ impl Tensor {
         let mean_data = mean_t.to_vec();
         let mut result = Vec::with_capacity(out_numel);
         let mut indices = vec![0usize; ndim];
+        // One set of bins for the call, reset per output.
+        let mut acc = BinnedScratchF64::new();
 
         for out_idx in 0..out_numel {
             let mut remaining = out_idx;
@@ -2497,7 +2537,7 @@ impl Tensor {
                 remaining %= out_strides[d];
             }
             let mu = mean_data[out_idx];
-            let mut acc = BinnedAccumulatorF64::new();
+            acc.reset();
             for k in 0..axis_len {
                 let mut flat = self.offset;
                 for d in 0..ndim {
@@ -2787,6 +2827,8 @@ impl Tensor {
         let input_data: Vec<Vec<f64>> = inputs.iter().map(|t| t.to_vec()).collect();
         let input_strides: Vec<Vec<usize>> = inputs.iter().map(|t| t.strides.clone()).collect();
         let input_offsets: Vec<usize> = inputs.iter().map(|t| t.offset).collect();
+        // One set of bins for the call, reset per output.
+        let mut acc = BinnedScratchF64::new();
 
         for out_idx in 0..out_numel {
             // Compute output label values
@@ -2798,7 +2840,7 @@ impl Tensor {
                 remaining %= stride;
             }
 
-            let mut acc = BinnedAccumulatorF64::new();
+            acc.reset();
             // Iterate over all contraction index combinations
             for cidx in 0..contract_numel {
                 // Compute contraction label values
@@ -2973,3 +3015,198 @@ impl Tensor {
     }
 }
 
+
+// The sites that summed with a `BinnedAccumulatorF64` built per output element now reuse
+// one `BinnedScratchF64` per call (2026-09-23). Each test below states the old arithmetic
+// inline -- the reference accumulator, one per output -- and holds the tensor operation
+// to its bits on seeded inputs, special values included.
+#[cfg(test)]
+mod binned_scratch_site_tests {
+    use super::Tensor;
+    use crate::accumulator::BinnedAccumulatorF64;
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 >> 11
+        }
+        fn f64(&mut self) -> f64 {
+            let v = (self.next() % 2_000_000) as f64 / 1_000_000.0 - 1.0;
+            v * 2f64.powi((self.next() % 30) as i32 - 15)
+        }
+        fn f64s(&mut self, n: usize) -> Vec<f64> {
+            (0..n).map(|_| self.f64()).collect()
+        }
+        fn f64s_with_specials(&mut self, n: usize) -> Vec<f64> {
+            let mut v = self.f64s(n);
+            if n > 4 {
+                v[self.next() as usize % n] = -0.0;
+                v[self.next() as usize % n] = 0.0;
+                v[self.next() as usize % n] = 1e-310;
+            }
+            v
+        }
+    }
+
+    fn bits(t: &Tensor) -> Vec<u64> {
+        t.to_vec().iter().map(|v| v.to_bits()).collect()
+    }
+    fn same(a: &[f64], b: &Tensor, what: &str) {
+        let got = bits(b);
+        let want: Vec<u64> = a.iter().map(|v| v.to_bits()).collect();
+        assert_eq!(want.len(), got.len(), "{what}: length");
+        for (i, (w, g)) in want.iter().zip(got.iter()).enumerate() {
+            let (wf, gf) = (f64::from_bits(*w), f64::from_bits(*g));
+            assert!(w == g || (wf.is_nan() && gf.is_nan()), "{what}: element {i}: want {w:016x} got {g:016x}");
+        }
+    }
+
+    #[test]
+    fn linear_is_the_per_output_binned_dot_plus_bias() {
+        let mut g = Lcg(11);
+        for round in 0..60 {
+            let (outer, inf, outf) = (1 + g.next() as usize % 7, 1 + g.next() as usize % 40, 1 + g.next() as usize % 9);
+            let x = if round % 5 == 0 { g.f64s_with_specials(outer * inf) } else { g.f64s(outer * inf) };
+            let w = g.f64s(outf * inf);
+            let b = g.f64s(outf);
+            let mut want = vec![0.0f64; outer * outf];
+            for row in 0..outer {
+                for j in 0..outf {
+                    let mut acc = BinnedAccumulatorF64::new();
+                    for p in 0..inf {
+                        acc.add(x[row * inf + p] * w[j * inf + p]);
+                    }
+                    want[row * outf + j] = acc.finalize() + b[j];
+                }
+            }
+            let xt = Tensor::from_vec(x, &[outer, inf]).unwrap();
+            let wt = Tensor::from_vec(w, &[outf, inf]).unwrap();
+            let bt = Tensor::from_vec(b, &[outf]).unwrap();
+            same(&want, &xt.linear(&wt, &bt).unwrap(), &format!("linear round {round}"));
+        }
+    }
+
+    #[test]
+    fn sum_mean_and_var_along_an_axis_are_the_per_output_binned_sums() {
+        let mut g = Lcg(23);
+        for round in 0..60 {
+            let shape = [1 + g.next() as usize % 5, 1 + g.next() as usize % 9, 1 + g.next() as usize % 7];
+            let numel = shape[0] * shape[1] * shape[2];
+            let data = if round % 4 == 0 { g.f64s_with_specials(numel) } else { g.f64s(numel) };
+            let t = Tensor::from_vec(data.clone(), &shape).unwrap();
+            for axis in 0..3 {
+                let axis_len = shape[axis];
+                let (o0, o1) = match axis { 0 => (shape[1], shape[2]), 1 => (shape[0], shape[2]), _ => (shape[0], shape[1]) };
+                let idx = |a: usize, b: usize, k: usize| -> usize {
+                    let (i, j, l) = match axis { 0 => (k, a, b), 1 => (a, k, b), _ => (a, b, k) };
+                    (i * shape[1] + j) * shape[2] + l
+                };
+                let (mut sum, mut mean, mut var) = (Vec::new(), Vec::new(), Vec::new());
+                for a in 0..o0 {
+                    for b in 0..o1 {
+                        let mut acc = BinnedAccumulatorF64::new();
+                        for k in 0..axis_len { acc.add(data[idx(a, b, k)]); }
+                        sum.push(acc.finalize());
+                        // mean_axis goes through reduce_axis: the same values, mean = sum / len.
+                        let mut acc = BinnedAccumulatorF64::new();
+                        for k in 0..axis_len { acc.add(data[idx(a, b, k)]); }
+                        let mu = acc.finalize() / axis_len as f64;
+                        mean.push(mu);
+                        let mut acc = BinnedAccumulatorF64::new();
+                        for k in 0..axis_len { let d = data[idx(a, b, k)] - mu; acc.add(d * d); }
+                        var.push(acc.finalize() / axis_len as f64);
+                    }
+                }
+                same(&sum, &t.sum_axis(axis).unwrap(), &format!("sum_axis round {round} axis {axis}"));
+                same(&mean, &t.mean_axis(axis, false).unwrap(), &format!("mean_axis round {round} axis {axis}"));
+                same(&var, &t.var_axis(axis, false).unwrap(), &format!("var_axis round {round} axis {axis}"));
+            }
+        }
+    }
+
+    #[test]
+    fn einsum_matrix_product_is_the_per_output_binned_contraction() {
+        let mut g = Lcg(37);
+        for round in 0..40 {
+            let (m, k, n) = (1 + g.next() as usize % 6, 1 + g.next() as usize % 9, 1 + g.next() as usize % 6);
+            let a = if round % 3 == 0 { g.f64s_with_specials(m * k) } else { g.f64s(m * k) };
+            let b = g.f64s(k * n);
+            let mut want = vec![0.0f64; m * n];
+            for i in 0..m {
+                for j in 0..n {
+                    let mut acc = BinnedAccumulatorF64::new();
+                    for p in 0..k {
+                        // einsum's product: the inputs' elements multiplied in input order.
+                        let mut product = 1.0f64;
+                        product *= a[i * k + p];
+                        product *= b[p * n + j];
+                        acc.add(product);
+                    }
+                    want[i * n + j] = acc.finalize();
+                }
+            }
+            let at = Tensor::from_vec(a, &[m, k]).unwrap();
+            let bt = Tensor::from_vec(b, &[k, n]).unwrap();
+            same(&want, &Tensor::einsum("ij,jk->ik", &[&at, &bt]).unwrap(), &format!("einsum round {round}"));
+        }
+    }
+
+    #[test]
+    fn a_sum_with_special_values_keeps_the_reference_policy() {
+        let data = vec![1.0, f64::NAN, 2.0, 3.0, f64::INFINITY, 4.0, f64::INFINITY, f64::NEG_INFINITY, 1e300, -1e300, 5.0, 0.0];
+        let t = Tensor::from_vec(data.clone(), &[4, 3]).unwrap();
+        let got = t.sum_axis(1).unwrap().to_vec();
+        assert!(got[0].is_nan());
+        assert_eq!(got[1], f64::INFINITY);
+        assert!(got[2].is_nan(), "+inf and -inf together are NaN in the reference policy");
+        let mut acc = BinnedAccumulatorF64::new();
+        for &v in &data[9..12] { acc.add(v); }
+        assert_eq!(got[3].to_bits(), acc.finalize().to_bits());
+    }
+
+    #[test]
+    fn matmul_below_the_tile_threshold_is_the_kahan_reference_loop() {
+        use cjc_repro::KahanAccumulatorF64;
+        let mut g = Lcg(41);
+        for round in 0..30 {
+            let (m, k, n) = (1 + g.next() as usize % 63, 1 + g.next() as usize % 63, 1 + g.next() as usize % 63);
+            let a = if round % 4 == 0 { g.f64s_with_specials(m * k) } else { g.f64s(m * k) };
+            let b = g.f64s(k * n);
+            let mut want = vec![0.0f64; m * n];
+            for i in 0..m {
+                for j in 0..n {
+                    let mut acc = KahanAccumulatorF64::new();
+                    for p in 0..k { acc.add(a[i * k + p] * b[p * n + j]); }
+                    want[i * n + j] = acc.finalize();
+                }
+            }
+            let at = Tensor::from_vec(a, &[m, k]).unwrap();
+            let bt = Tensor::from_vec(b, &[k, n]).unwrap();
+            same(&want, &at.matmul(&bt).unwrap(), &format!("matmul round {round} {m}x{k}x{n}"));
+        }
+    }
+
+    #[test]
+    fn fill_and_map_in_place_keep_the_bits_and_never_touch_a_shared_owner() {
+        let t = Tensor::from_vec(vec![1.0, -2.0, 3.5, -0.0], &[2, 2]).unwrap();
+        let mut u = t.clone(); // shares the buffer
+        u.fill_in_place(0.0);
+        assert_eq!(bits(&u), bits(&Tensor::zeros(&[2, 2])));
+        assert_eq!(t.to_vec(), vec![1.0, -2.0, 3.5, -0.0], "the other owner is untouched");
+        let mut w = t.clone();
+        w.map_in_place(|x| x.max(-1.5).min(1.5));
+        assert_eq!(bits(&w), bits(&t.map(|x| x.max(-1.5).min(1.5))));
+        assert_eq!(t.to_vec(), vec![1.0, -2.0, 3.5, -0.0]);
+        // A view (non-contiguous) is replaced, not written through.
+        let v = t.transpose();
+        let mut v2 = v.clone();
+        v2.fill_in_place(7.0);
+        assert!(v2.is_contiguous());
+        assert_eq!(v2.to_vec(), vec![7.0; 4]);
+        assert_eq!(v.to_vec(), v.to_vec());
+        let mut v3 = t.transpose();
+        v3.map_in_place(|x| x + 1.0);
+        assert_eq!(bits(&v3), bits(&t.transpose().map(|x| x + 1.0)));
+    }
+}

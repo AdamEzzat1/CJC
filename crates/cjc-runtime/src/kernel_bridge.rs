@@ -294,7 +294,7 @@ pub mod kernel {
         c_out: usize, kh: usize, kw: usize,
         stride: usize,
     ) {
-        use crate::accumulator::BinnedAccumulatorF64;
+        use crate::accumulator::BinnedScratchF64;
 
         let h_out: u64 = ((h_in - kh) / stride + 1) as u64;
         let w_out: u64 = ((w_in - kw) / stride + 1) as u64;
@@ -318,11 +318,15 @@ pub mod kernel {
         debug_assert_eq!(bias.len(),    c_out);
         debug_assert_eq!(out.len(),     n * c_out * h_out as usize * w_out as usize);
 
+        // One set of bins for the call, reset per output element: the reference
+        // accumulator's bits (`BinnedScratchF64`) without its 40 KiB zeroing and 2048-bin
+        // walk per output, which cost more than the dot itself at any kernel size.
+        let mut acc = BinnedScratchF64::new();
         for bn in 0..n as u64 {
             for co in 0..c_out as u64 {
                 for oh in 0..h_out {
                     for ow in 0..w_out {
-                        let mut acc = BinnedAccumulatorF64::new();
+                        acc.reset();
 
                         // Sum over input channels and kernel spatial extent.
                         for ci in 0..c_in as u64 {
@@ -633,5 +637,92 @@ mod conv1d_allocation_free_tests {
         conv1d_raw(&signal, &filters, &bias, &mut out, 3, 1, 3);
         assert_eq!(out[0].to_bits(), (1.0 + 2.0f64.powi(-52)).to_bits());
         assert_ne!(out[0].to_bits(), ((1.0 + 2.0f64.powi(-53)) + 2.0f64.powi(-53)).to_bits());
+    }
+}
+
+/// `conv2d_raw` reuses one `BinnedScratchF64` per call (2026-09-23) where it built a
+/// `BinnedAccumulatorF64` per output element. The form before is stated here, inline,
+/// and the two are held to the same bits over a seeded sweep of shapes and strides.
+#[cfg(test)]
+mod conv2d_scratch_tests {
+    use super::kernel::conv2d_raw;
+    use crate::accumulator::BinnedAccumulatorF64;
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 >> 11
+        }
+        fn f64(&mut self) -> f64 {
+            let v = (self.next() % 2_000_000) as f64 / 1_000_000.0 - 1.0;
+            v * 2f64.powi((self.next() % 30) as i32 - 15)
+        }
+        fn f64s(&mut self, n: usize) -> Vec<f64> {
+            (0..n).map(|_| self.f64()).collect()
+        }
+    }
+
+    /// The form before: one reference accumulator per output element.
+    #[allow(clippy::too_many_arguments)]
+    fn conv2d_before(input: &[f64], filters: &[f64], bias: &[f64], out: &mut [f64],
+                     n: usize, c_in: usize, h_in: usize, w_in: usize, c_out: usize, kh: usize, kw: usize, stride: usize) {
+        let h_out = (h_in - kh) / stride + 1;
+        let w_out = (w_in - kw) / stride + 1;
+        for bn in 0..n {
+            for co in 0..c_out {
+                for oh in 0..h_out {
+                    for ow in 0..w_out {
+                        let mut acc = BinnedAccumulatorF64::new();
+                        for ci in 0..c_in {
+                            for ki in 0..kh {
+                                for kj in 0..kw {
+                                    let ih = oh * stride + ki;
+                                    let iw = ow * stride + kj;
+                                    let inp = ((bn * c_in + ci) * h_in + ih) * w_in + iw;
+                                    let flt = ((co * c_in + ci) * kh + ki) * kw + kj;
+                                    acc.add(input[inp] * filters[flt]);
+                                }
+                            }
+                        }
+                        out[((bn * c_out + co) * h_out + oh) * w_out + ow] = acc.finalize() + bias[co];
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn conv2d_with_one_scratch_per_call_is_the_per_output_accumulator_bit_for_bit() {
+        let mut g = Lcg(0xc0_2d);
+        for round in 0..120 {
+            let (n, c_in, c_out) = (1 + g.next() as usize % 3, 1 + g.next() as usize % 4, 1 + g.next() as usize % 5);
+            let (kh, kw) = (1 + g.next() as usize % 5, 1 + g.next() as usize % 5);
+            let (h_in, w_in) = (kh + g.next() as usize % 12, kw + g.next() as usize % 12);
+            let stride = 1 + g.next() as usize % 3;
+            let mut input = g.f64s(n * c_in * h_in * w_in);
+            if round % 6 == 0 && !input.is_empty() {
+                let i = g.next() as usize % input.len();
+                input[i] = -0.0;
+                let i = g.next() as usize % input.len();
+                input[i] = 1e-310;
+                if round % 12 == 0 {
+                    let i = g.next() as usize % input.len();
+                    input[i] = f64::NAN;
+                }
+            }
+            let filters = g.f64s(c_out * c_in * kh * kw);
+            let bias = g.f64s(c_out);
+            let h_out = (h_in - kh) / stride + 1;
+            let w_out = (w_in - kw) / stride + 1;
+            let mut want = vec![0.0f64; n * c_out * h_out * w_out];
+            let mut got = vec![0.0f64; n * c_out * h_out * w_out];
+            conv2d_before(&input, &filters, &bias, &mut want, n, c_in, h_in, w_in, c_out, kh, kw, stride);
+            conv2d_raw(&input, &filters, &bias, &mut got, n, c_in, h_in, w_in, c_out, kh, kw, stride);
+            for (i, (w, g)) in want.iter().zip(got.iter()).enumerate() {
+                assert!(w.to_bits() == g.to_bits() || (w.is_nan() && g.is_nan()),
+                    "round {round} ({n}x{c_in}x{h_in}x{w_in} * {c_out}x{kh}x{kw} stride {stride}) element {i}: {:016x} vs {:016x}", w.to_bits(), g.to_bits());
+            }
+        }
     }
 }

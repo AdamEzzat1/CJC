@@ -616,6 +616,284 @@ pub fn binned_sum_f32(values: &[f32]) -> f32 {
 // Inline tests
 // ---------------------------------------------------------------------------
 
+
+// ---------------------------------------------------------------------------------------
+// A binned accumulator that is reset between sums instead of rebuilt.
+//
+// `BinnedAccumulatorF64::new()` zeroes three arrays of 2048 entries -- 40 KiB -- and
+// `finalize` walks all 2048 counts. A loop that builds one per output element (a
+// convolution, a linear layer, a reduction along an axis) pays that for every output,
+// however short the sum: a 9-product dot costs a 40 KiB memset. This type keeps one set
+// of bins for a whole call and remembers which exponents were touched, so a reset clears
+// only those and a finalize folds only those, in the same ascending order. It has no
+// `merge` and so no compensation terms; `finalize` still adds the zero that
+// `BinnedAccumulatorF64` adds (`bins[i] + comp[i]` with `comp[i] == 0.0`), which is what
+// turns a bin that holds `-0.0` into `+0.0` there -- the same bits, held by
+// `scratch_tests` below against the reference on every class of input.
+// ---------------------------------------------------------------------------------------
+
+/// [`BinnedAccumulatorF64`]'s arithmetic, reusable: `reset` between sums, one set of bins
+/// per call. Same bits as the reference for every sequence (see the tests); no `merge`.
+pub struct BinnedScratchF64 {
+    bins: [f64; F64_BIN_COUNT],
+    counts: [u32; F64_BIN_COUNT],
+    /// The biased exponents touched since the last reset, in touch order, each once.
+    touched: [u16; F64_BIN_COUNT],
+    n_touched: usize,
+    pos_inf_count: u32,
+    neg_inf_count: u32,
+    has_nan: bool,
+    total_count: u64,
+}
+
+impl Default for BinnedScratchF64 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BinnedScratchF64 {
+    /// An empty scratch: the one 28 KiB zeroing of a call, not of an output element.
+    #[inline]
+    pub fn new() -> Self {
+        BinnedScratchF64 {
+            bins: [0.0; F64_BIN_COUNT],
+            counts: [0; F64_BIN_COUNT],
+            touched: [0; F64_BIN_COUNT],
+            n_touched: 0,
+            pos_inf_count: 0,
+            neg_inf_count: 0,
+            has_nan: false,
+            total_count: 0,
+        }
+    }
+
+    /// Back to empty: only the touched bins are cleared.
+    #[inline]
+    pub fn reset(&mut self) {
+        for t in 0..self.n_touched {
+            let e = self.touched[t] as usize;
+            self.bins[e] = 0.0;
+            self.counts[e] = 0;
+        }
+        self.n_touched = 0;
+        self.pos_inf_count = 0;
+        self.neg_inf_count = 0;
+        self.has_nan = false;
+        self.total_count = 0;
+    }
+
+    /// `BinnedAccumulatorF64::add`, plus the touch record.
+    #[inline]
+    pub fn add(&mut self, value: f64) {
+        self.total_count += 1;
+        if value.is_nan() {
+            self.has_nan = true;
+            return;
+        }
+        if value.is_infinite() {
+            if value > 0.0 {
+                self.pos_inf_count += 1;
+            } else {
+                self.neg_inf_count += 1;
+            }
+            return;
+        }
+        let bits = value.to_bits();
+        let biased_exp = ((bits >> 52) & 0x7FF) as usize;
+        if self.counts[biased_exp] == 0 {
+            self.touched[self.n_touched] = biased_exp as u16;
+            self.n_touched += 1;
+        }
+        self.bins[biased_exp] += value;
+        self.counts[biased_exp] += 1;
+    }
+
+    /// Add a slice of values.
+    #[inline]
+    pub fn add_slice(&mut self, values: &[f64]) {
+        for &v in values {
+            self.add(v);
+        }
+    }
+
+    /// `BinnedAccumulatorF64::finalize`: the special-value policy, then the Kahan fold of
+    /// the touched bins in ascending exponent order, each bin `+ 0.0` as the reference
+    /// adds its (zero) compensation term.
+    #[inline]
+    pub fn finalize(&mut self) -> f64 {
+        if self.has_nan {
+            return f64::NAN;
+        }
+        if self.pos_inf_count > 0 && self.neg_inf_count > 0 {
+            return f64::NAN;
+        }
+        if self.pos_inf_count > 0 {
+            return f64::INFINITY;
+        }
+        if self.neg_inf_count > 0 {
+            return f64::NEG_INFINITY;
+        }
+        self.touched[..self.n_touched].sort_unstable();
+        let mut sum = 0.0f64;
+        let mut kahan_comp = 0.0f64;
+        for k in 0..self.n_touched {
+            let i = self.touched[k] as usize;
+            let val = self.bins[i] + 0.0;
+            let y = val - kahan_comp;
+            let t = sum + y;
+            kahan_comp = (t - sum) - y;
+            sum = t;
+        }
+        sum
+    }
+
+    /// Total number of values added since the last reset.
+    #[inline]
+    pub fn count(&self) -> u64 {
+        self.total_count
+    }
+
+    /// Whether a NaN was added since the last reset.
+    #[inline]
+    pub fn has_nan(&self) -> bool {
+        self.has_nan
+    }
+}
+
+#[cfg(test)]
+mod scratch_tests {
+    use super::{BinnedAccumulatorF64, BinnedScratchF64};
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 >> 11
+        }
+        /// A value from one of the classes the accumulator distinguishes.
+        fn value(&mut self) -> f64 {
+            match self.next() % 16 {
+                0 => 0.0,
+                1 => -0.0,
+                2 => f64::from_bits(self.next() % 4503599627370496), // a subnormal (or zero)
+                3 => -f64::from_bits(1 + self.next() % 4503599627370496),
+                4 => f64::MIN_POSITIVE * (1.0 + (self.next() % 1000) as f64 / 1000.0),
+                5 => {
+                    // A wide range of exponents.
+                    let e = (self.next() % 2046) as i32 - 1022;
+                    let m = 1.0 + (self.next() % 1_000_000) as f64 / 1_000_000.0;
+                    let v = m * 2f64.powi(e);
+                    if self.next() % 2 == 0 { v } else { -v }
+                }
+                _ => {
+                    // Ordinary magnitudes around one, both signs.
+                    let v = (self.next() % 2_000_000) as f64 / 1_000_000.0 - 1.0;
+                    v * 2f64.powi((self.next() % 24) as i32 - 12)
+                }
+            }
+        }
+    }
+
+    fn same_bits(a: f64, b: f64) -> bool {
+        a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
+    }
+
+    #[test]
+    fn the_scratch_gives_the_reference_bits_on_every_class_of_sequence_and_across_resets() {
+        let mut g = Lcg(0x5eed_2026_0923);
+        let mut scratch = BinnedScratchF64::new();
+        let mut checked = 0usize;
+        for round in 0..4000 {
+            let len = match round % 7 {
+                0 => 0,
+                1 => 1,
+                2 => 2,
+                3 => 9,
+                4 => 64,
+                5 => (g.next() % 500) as usize,
+                _ => (g.next() % 3000) as usize,
+            };
+            let mut values: Vec<f64> = (0..len).map(|_| g.value()).collect();
+            // Some rounds carry the special values.
+            match round % 11 {
+                3 => values.push(f64::NAN),
+                4 => values.push(f64::INFINITY),
+                5 => values.push(f64::NEG_INFINITY),
+                6 => {
+                    values.push(f64::INFINITY);
+                    values.push(f64::NEG_INFINITY);
+                }
+                7 => {
+                    // A bin of nothing but negative zeros: the reference's `+ comp` makes it +0.0.
+                    values.clear();
+                    for _ in 0..(1 + g.next() % 5) {
+                        values.push(-0.0);
+                    }
+                }
+                _ => {}
+            }
+            let mut reference = BinnedAccumulatorF64::new();
+            scratch.reset();
+            for &v in &values {
+                reference.add(v);
+                scratch.add(v);
+            }
+            let (r, s) = (reference.finalize(), scratch.finalize());
+            assert!(same_bits(r, s), "round {round}: reference {:016x} scratch {:016x} over {} values", r.to_bits(), s.to_bits(), values.len());
+            assert_eq!(reference.count(), scratch.count(), "round {round}: count");
+            assert_eq!(reference.has_nan(), scratch.has_nan(), "round {round}: has_nan");
+            checked += 1;
+        }
+        assert_eq!(checked, 4000);
+    }
+
+    #[test]
+    fn a_bin_of_negative_zeros_finalizes_to_positive_zero_like_the_reference() {
+        let mut reference = BinnedAccumulatorF64::new();
+        let mut scratch = BinnedScratchF64::new();
+        for _ in 0..3 {
+            reference.add(-0.0);
+            scratch.add(-0.0);
+        }
+        assert_eq!(reference.finalize().to_bits(), 0, "the reference gives +0.0 (its `+ comp`)");
+        assert_eq!(scratch.finalize().to_bits(), 0);
+        // And the wrong value, to pin the choice: the bin itself holds -0.0.
+        assert_eq!((-0.0f64 + -0.0).to_bits(), (-0.0f64).to_bits());
+    }
+
+    #[test]
+    fn a_reset_scratch_is_an_empty_accumulator() {
+        let mut scratch = BinnedScratchF64::new();
+        scratch.add(1.0);
+        scratch.add(f64::NAN);
+        scratch.add(f64::INFINITY);
+        scratch.add(1e-310);
+        scratch.reset();
+        assert_eq!(scratch.count(), 0);
+        assert!(!scratch.has_nan());
+        assert_eq!(scratch.finalize().to_bits(), 0);
+        scratch.add(0.5);
+        scratch.add(0.25);
+        assert_eq!(scratch.finalize(), 0.75);
+        assert_eq!(scratch.count(), 2);
+    }
+
+    #[test]
+    fn finalize_orders_the_touched_bins_ascending_whatever_the_touch_order() {
+        // Touch a large exponent first, then small ones; the fold must still go small first
+        // (the reference walks bin 0 upward) -- a case where order changes the bits.
+        let values = [1e300, 1.0, 1e-300, 3.0, -1e300, 1e16, 1.0];
+        let mut reference = BinnedAccumulatorF64::new();
+        let mut scratch = BinnedScratchF64::new();
+        for &v in &values {
+            reference.add(v);
+            scratch.add(v);
+        }
+        assert_eq!(reference.finalize().to_bits(), scratch.finalize().to_bits());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

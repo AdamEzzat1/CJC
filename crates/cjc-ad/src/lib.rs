@@ -1323,12 +1323,13 @@ impl GradGraph {
         param_indices.iter().map(|&idx| self.grad(idx)).collect()
     }
 
-    /// Zero out all gradients.
+    /// Zero out all gradients. In place: a slot whose buffer this graph alone owns is
+    /// overwritten, not reallocated (the bits of `Tensor::zeros`); a buffer a caller still
+    /// holds through `grad()` is copied first, so a handed-out gradient never changes.
     pub fn zero_grad(&mut self) {
         for pg in &mut self.param_grads {
             if let Some(ref mut grad) = pg {
-                let shape = grad.shape().to_vec();
-                *grad = Tensor::zeros(&shape);
+                grad.fill_in_place(0.0);
             }
         }
     }
@@ -1336,14 +1337,10 @@ impl GradGraph {
     /// Clip all gradients to `[-max_norm, max_norm]` (element-wise).
     /// This prevents gradient explosion during backpropagation.
     pub fn clip_grad(&mut self, max_norm: f64) {
+        // In place (the same `max`/`min` per element; a shared buffer is copied first).
         for pg in &mut self.param_grads {
             if let Some(ref mut grad) = pg {
-                let data = grad.to_vec();
-                let clipped: Vec<f64> = data.iter()
-                    .map(|&x| x.max(-max_norm).min(max_norm))
-                    .collect();
-                let shape = grad.shape().to_vec();
-                *grad = Tensor::from_vec_unchecked(clipped, &shape);
+                grad.map_in_place(|x| x.max(-max_norm).min(max_norm));
             }
         }
     }
@@ -4674,5 +4671,62 @@ mod tests {
         g.set_tensor(p, Tensor::from_vec_unchecked(vec![3.0, 4.0], &[2]));
         let h2 = g.hessian(s, p);
         assert_eq!(h1.to_vec(), h2.to_vec(), "Hessian must be deterministic");
+    }
+}
+
+/// `zero_grad` and `clip_grad` write the gradient slots in place (2026-09-23) where they
+/// built new tensors; the bits are those of the tensors they built, and a gradient the
+/// caller holds is never changed under it.
+#[cfg(test)]
+mod in_place_grad_tests {
+    use super::GradGraph;
+    use cjc_runtime::Tensor;
+
+    fn graph_with_grads() -> (GradGraph, usize, usize) {
+        let mut g = GradGraph::new();
+        let p = g.parameter(Tensor::from_vec(vec![1.0, -2.0, 3.0, -0.5], &[4]).unwrap());
+        let t = g.parameter(Tensor::from_vec(vec![0.5, 0.5, 0.5, 0.5], &[4]).unwrap());
+        let d = g.sub(p, t);
+        let sq = g.mul(d, d);
+        let loss = g.mean(sq);
+        g.backward(loss);
+        (g, p, t)
+    }
+
+    #[test]
+    fn zero_grad_gives_the_bits_of_zeros_and_keeps_a_handed_out_gradient() {
+        let (mut g, p, t) = graph_with_grads();
+        let held = g.grad(p).expect("a gradient");
+        let held_bits: Vec<u64> = held.to_vec().iter().map(|v| v.to_bits()).collect();
+        assert!(held_bits.iter().any(|&b| b != 0), "the gradient is not zero before");
+        g.zero_grad();
+        for idx in [p, t] {
+            let z = g.grad(idx).expect("a slot");
+            assert_eq!(z.to_vec().iter().map(|v| v.to_bits()).collect::<Vec<_>>(), vec![0u64; 4]);
+            assert_eq!(z.shape(), &[4]);
+        }
+        assert_eq!(held.to_vec().iter().map(|v| v.to_bits()).collect::<Vec<_>>(), held_bits, "the held gradient is unchanged");
+        // The next backward accumulates from zero, as before.
+        let (mut g2, p2, t2) = graph_with_grads();
+        let (mut g3, p3, t3) = graph_with_grads();
+        g2.zero_grad();
+        let loss2 = { let d = g2.sub(p2, t2); let sq = g2.mul(d, d); g2.mean(sq) };
+        g2.backward(loss2);
+        g3.zero_grad();
+        let loss3 = { let d = g3.sub(p3, t3); let sq = g3.mul(d, d); g3.mean(sq) };
+        g3.backward(loss3);
+        assert_eq!(g2.grad(p2).unwrap().to_vec(), g3.grad(p3).unwrap().to_vec());
+    }
+
+    #[test]
+    fn clip_grad_is_the_elementwise_clamp_in_place() {
+        let (mut g, p, _) = graph_with_grads();
+        let before = g.grad(p).unwrap().to_vec();
+        let want: Vec<f64> = before.iter().map(|&x| x.max(-0.3).min(0.3)).collect();
+        let held = g.grad(p).unwrap();
+        g.clip_grad(0.3);
+        assert_eq!(g.grad(p).unwrap().to_vec(), want);
+        assert_eq!(held.to_vec(), before, "the held gradient is unchanged");
+        assert!(want.iter().any(|&x| x.abs() == 0.3), "the clamp bit");
     }
 }

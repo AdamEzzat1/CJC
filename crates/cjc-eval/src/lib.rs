@@ -4156,35 +4156,14 @@ impl Interpreter {
                 if args.len() != 2 {
                     return Err(EvalError::Runtime("step requires 2 args: params_tensor, grads_tensor".into()));
                 }
-                let params_t = match &args[0] { Value::Tensor(t) => t.clone(), _ => return Err(EvalError::Runtime("expected Tensor for params".into())) };
-                let grads_t = match &args[1] { Value::Tensor(t) => t.clone(), _ => return Err(EvalError::Runtime("expected Tensor for grads".into())) };
-                let mut params = params_t.to_vec();
-                let grads = grads_t.to_vec();
-                if params.len() != grads.len() {
-                    return Err(EvalError::Runtime("params and grads must have same length".into()));
-                }
+                let params_t = match &args[0] { Value::Tensor(t) => t, _ => return Err(EvalError::Runtime("expected Tensor for params".into())) };
+                let grads_t = match &args[1] { Value::Tensor(t) => t, _ => return Err(EvalError::Runtime("expected Tensor for grads".into())) };
+                // The step itself (Adam or SGD, the size checks, the words of the errors)
+                // is `ml::optimizer_step_tensors`, shared with the MIR interpreter.
                 let mut borrow = inner.borrow_mut();
-                // Try Adam first, then SGD
-                if let Some(adam) = borrow.downcast_mut::<cjc_runtime::ml::AdamState>() {
-                    if params.len() != adam.m.len() {
-                        return Err(EvalError::Runtime(format!(
-                            "param size mismatch: optimizer expects {}, got {}",
-                            adam.m.len(), params.len()
-                        )));
-                    }
-                    cjc_runtime::ml::adam_step(&mut params, &grads, adam);
-                } else if let Some(sgd) = borrow.downcast_mut::<cjc_runtime::ml::SgdState>() {
-                    if params.len() != sgd.velocity.len() {
-                        return Err(EvalError::Runtime(format!(
-                            "param size mismatch: optimizer expects {}, got {}",
-                            sgd.velocity.len(), params.len()
-                        )));
-                    }
-                    cjc_runtime::ml::sgd_step(&mut params, &grads, sgd);
-                } else {
-                    return Err(EvalError::Runtime("unknown optimizer type".into()));
-                }
-                Ok(Value::Tensor(Tensor::from_vec(params, params_t.shape())?))
+                let out = cjc_runtime::ml::optimizer_step_tensors(&mut *borrow, params_t, grads_t)
+                    .map_err(EvalError::Runtime)?;
+                Ok(Value::Tensor(out))
             }
             (Value::OptimizerState(_), method) => {
                 Err(EvalError::Runtime(format!("no method `{method}` on OptimizerState")))

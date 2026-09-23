@@ -276,6 +276,109 @@ pub fn adam_step(params: &mut [f64], grads: &[f64], state: &mut AdamState) {
 // Classification metrics (Sprint 6)
 // ---------------------------------------------------------------------------
 
+/// `OptimizerState.step(params, grads)` as the tree-walking and the MIR interpreters run
+/// it, in one place: the state (an `AdamState` or an `SgdState` behind `dyn Any`) is
+/// advanced and the new parameter tensor is returned; the input tensors are not changed
+/// (value semantics — the language's `params = opt.step(params, grads)`). The parameters
+/// are copied once, into the buffer the result owns; the gradient is borrowed when it is
+/// contiguous and copied only when it is a view. Before 2026-09-23 each interpreter
+/// carried this code and copied both tensors.
+pub fn optimizer_step_tensors(state: &mut dyn std::any::Any, params_t: &Tensor, grads_t: &Tensor) -> Result<Tensor, String> {
+    let mut params = params_t.to_vec();
+    let borrowed;
+    let owned;
+    let grads: &[f64] = if grads_t.is_contiguous() && grads_t.buffer.len() == grads_t.len() {
+        borrowed = grads_t.buffer.borrow_data();
+        &borrowed[..]
+    } else {
+        owned = grads_t.to_vec();
+        &owned[..]
+    };
+    if params.len() != grads.len() {
+        return Err("params and grads must have same length".into());
+    }
+    if let Some(adam) = state.downcast_mut::<AdamState>() {
+        if params.len() != adam.m.len() {
+            return Err(format!("param size mismatch: optimizer expects {}, got {}", adam.m.len(), params.len()));
+        }
+        adam_step(&mut params, grads, adam);
+    } else if let Some(sgd) = state.downcast_mut::<SgdState>() {
+        if params.len() != sgd.velocity.len() {
+            return Err(format!("param size mismatch: optimizer expects {}, got {}", sgd.velocity.len(), params.len()));
+        }
+        sgd_step(&mut params, grads, sgd);
+    } else {
+        return Err("unknown optimizer type".into());
+    }
+    Tensor::from_vec(params, params_t.shape()).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod optimizer_step_tensors_tests {
+    use super::*;
+
+    fn tensors() -> (Tensor, Tensor) {
+        let p = Tensor::from_vec(vec![0.5, -1.25, 2.0, 0.0, -0.0, 3.5], &[2, 3]).unwrap();
+        let g = Tensor::from_vec(vec![0.1, -0.2, 0.3, 0.4, -0.5, 0.6], &[2, 3]).unwrap();
+        (p, g)
+    }
+
+    #[test]
+    fn the_step_is_the_plain_update_on_copies_for_adam_and_sgd_and_leaves_the_inputs() {
+        let (p, g) = tensors();
+        // Adam, three steps: the same bits as adam_step on Vecs.
+        let mut want_state = AdamState::new(6, 1e-2);
+        let mut state: Box<dyn std::any::Any> = Box::new(AdamState::new(6, 1e-2));
+        let mut want = p.to_vec();
+        let mut cur = p.clone();
+        for _ in 0..3 {
+            adam_step(&mut want, &g.to_vec(), &mut want_state);
+            cur = optimizer_step_tensors(state.as_mut(), &cur, &g).unwrap();
+        }
+        assert_eq!(cur.to_vec(), want);
+        assert_eq!(cur.shape(), &[2, 3]);
+        assert_eq!(p.to_vec(), vec![0.5, -1.25, 2.0, 0.0, -0.0, 3.5], "the input tensor is untouched");
+        // SGD with momentum.
+        let mut want_state = SgdState::new(6, 0.1, 0.9);
+        let mut state: Box<dyn std::any::Any> = Box::new(SgdState::new(6, 0.1, 0.9));
+        let mut want = p.to_vec();
+        let mut cur = p.clone();
+        for _ in 0..3 {
+            sgd_step(&mut want, &g.to_vec(), &mut want_state);
+            cur = optimizer_step_tensors(state.as_mut(), &cur, &g).unwrap();
+        }
+        assert_eq!(cur.to_vec(), want);
+    }
+
+    #[test]
+    fn a_gradient_view_is_read_through_its_strides() {
+        let (p, g) = tensors();
+        let gt = g.transpose(); // a non-contiguous view of the same buffer
+        let pt = p.transpose();
+        let mut state: Box<dyn std::any::Any> = Box::new(SgdState::new(6, 0.1, 0.0));
+        let got = optimizer_step_tensors(state.as_mut(), &pt, &gt).unwrap();
+        let mut want = pt.to_vec();
+        let mut ws = SgdState::new(6, 0.1, 0.0);
+        sgd_step(&mut want, &gt.to_vec(), &mut ws);
+        assert_eq!(got.to_vec(), want);
+        assert_eq!(got.shape(), &[3, 2]);
+    }
+
+    #[test]
+    fn the_errors_are_the_interpreters_words() {
+        let (p, g) = tensors();
+        let mut state: Box<dyn std::any::Any> = Box::new(AdamState::new(4, 1e-2));
+        assert_eq!(optimizer_step_tensors(state.as_mut(), &p, &g).unwrap_err(), "param size mismatch: optimizer expects 4, got 6");
+        let mut state: Box<dyn std::any::Any> = Box::new(SgdState::new(4, 1e-2, 0.9));
+        assert_eq!(optimizer_step_tensors(state.as_mut(), &p, &g).unwrap_err(), "param size mismatch: optimizer expects 4, got 6");
+        let mut not_an_optimizer: Box<dyn std::any::Any> = Box::new(17u32);
+        assert_eq!(optimizer_step_tensors(not_an_optimizer.as_mut(), &p, &g).unwrap_err(), "unknown optimizer type");
+        let short = Tensor::from_vec(vec![1.0, 2.0], &[2]).unwrap();
+        let mut state: Box<dyn std::any::Any> = Box::new(AdamState::new(6, 1e-2));
+        assert_eq!(optimizer_step_tensors(state.as_mut(), &p, &short).unwrap_err(), "params and grads must have same length");
+    }
+}
+
 /// Binary confusion matrix.
 #[derive(Debug, Clone)]
 pub struct ConfusionMatrix {
