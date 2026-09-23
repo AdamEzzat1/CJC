@@ -272,6 +272,11 @@ pub struct RuntimePolicy {
     /// kernels transcribe the Rust bodies' arithmetic and are tested bit-for-bit
     /// against them, so this switch is meant never to change a result.
     pub bruchion_kernels: bool,
+    /// Which operations the switch routes, as `bruchion::dispatch::KernelOps` bits:
+    /// the switch on sends an operation to the pack only if its bit is set here. The
+    /// default is `KernelOps::MEASURED`, the operations whose record shows no loss;
+    /// `KernelOps::ALL` is what the parity tests and the benchmark's kernel arm use.
+    pub bruchion_kernel_ops: u16,
 }
 
 impl RuntimePolicy {
@@ -289,13 +294,14 @@ impl RuntimePolicy {
             audit_mode: mode.preset_audit_mode(),
             adaptive: true,
             bruchion_kernels: false,
+            bruchion_kernel_ops: crate::bruchion::dispatch::KernelOps::MEASURED.0,
         }
     }
 
     /// One-line, deterministic, BTreeMap-free summary for reporting.
     pub fn summary(&self) -> String {
         format!(
-            "runtime_policy: thermal={} threads={} batch={} audit={} numeric={} determinism={} adaptive={} bruchion_kernels={}",
+            "runtime_policy: thermal={} threads={} batch={} audit={} numeric={} determinism={} adaptive={} bruchion_kernel_ops=0x{:03x} bruchion_kernels={}",
             self.thermal_mode.as_str(),
             effective_threads(self, detect_cores()),
             self.batch_size,
@@ -303,6 +309,7 @@ impl RuntimePolicy {
             self.numeric_mode.as_str(),
             self.determinism.as_str(),
             self.adaptive,
+            self.bruchion_kernel_ops,
             self.bruchion_kernels,
         )
     }
@@ -568,6 +575,12 @@ pub fn set_bruchion_kernels(on: bool) {
     POLICY.with(|c| c.borrow_mut().bruchion_kernels = on);
 }
 
+/// The operations the switch routes (see [`RuntimePolicy::bruchion_kernel_ops`]); the
+/// value is `bruchion::dispatch::KernelOps`'s bits.
+pub fn set_bruchion_kernel_ops(ops: u16) {
+    POLICY.with(|c| c.borrow_mut().bruchion_kernel_ops = ops);
+}
+
 /// Resolved effective thread cap for the current policy on this machine.
 pub fn current_effective_threads() -> usize {
     effective_threads(&get(), detect_cores())
@@ -588,6 +601,7 @@ mod tests {
         assert_eq!(p.audit_mode, AuditMode::Full);
         assert!(p.adaptive, "adaptive (race-to-idle) is on by default");
         assert!(!p.bruchion_kernels, "the Bruchion kernels are opt-in at run time");
+        assert_eq!(p.bruchion_kernel_ops, crate::bruchion::dispatch::KernelOps::MEASURED.0, "and the switch routes the measured set");
     }
 
     #[test]
@@ -596,9 +610,12 @@ mod tests {
         assert!(!get().bruchion_kernels);
         set_bruchion_kernels(true);
         assert!(get().bruchion_kernels);
-        assert!(get().summary().ends_with("bruchion_kernels=true"));
+        assert!(get().summary().ends_with("bruchion_kernel_ops=0x85a bruchion_kernels=true"));
+        set_bruchion_kernel_ops(0x1);
+        assert_eq!(get().bruchion_kernel_ops, 1);
         reset();
         assert!(!get().bruchion_kernels);
+        assert_eq!(get().bruchion_kernel_ops, 0x85a);
     }
 
     #[test]

@@ -13,13 +13,28 @@ runtime switch, with the existing Rust bodies as the fallback and as the referen
 | the build script that links `libkernels_f64.a` from `BRUCHION_KERNELS_DIR` | `crates/cjc-runtime/build.rs` |
 | the generated FFI skeleton, `include!`d from that directory | `crates/cjc-runtime/src/bruchion/mod.rs` |
 | one safe function per kernel, its Rust fallback, and the parity tests | `crates/cjc-runtime/src/bruchion/dispatch.rs` |
-| the runtime switch `RuntimePolicy::bruchion_kernels` (+ `set_bruchion_kernels`) | `crates/cjc-runtime/src/runtime_policy.rs` |
+| the runtime switch `RuntimePolicy::bruchion_kernels` (+ `set_bruchion_kernels`) and the routing set `bruchion_kernel_ops` (+ `set_bruchion_kernel_ops`) | `crates/cjc-runtime/src/runtime_policy.rs` |
+| the routing set's vocabulary: `KernelOp` (one bit per operation, each with its record's verdict), `KernelOps::MEASURED` (the default), `routes(op)`, `route_everything(on)` | `crates/cjc-runtime/src/bruchion/dispatch.rs` |
 | the routed call sites: `kernel::relu_raw`, `kernel::matmul_raw`, `ml::mse_loss`, `ml::adam_step`, `ml::mse_loss_grad`, and the graph's own loss chain (`GradGraph::mean` builds `GradOp::MseMean`, whose backward is `dispatch::mse_grad_scaled`) | `kernel_bridge.rs`, `ml.rs`, `crates/cjc-ad/src/lib.rs` |
 
 Nothing changes unless **both** the feature is compiled in and the switch is on. The
 default build has no build-script work, no foreign symbol and no new dependency, so
 CI's `cargo test --workspace` is unaffected; the `without_the_feature` test asserts
 the switch is inert there.
+
+The switch routes a *set* of operations, not everything the pack exports:
+`RuntimePolicy::bruchion_kernel_ops` holds one bit per `dispatch::KernelOp`, and
+`dispatch::routes(op)` is what every routed entry and every pre-checking caller asks.
+The default set is `KernelOps::MEASURED` — `dot_kahan`, `mse`, `mse_grad`, `matmul`,
+`heat1d_residual_grad`: the operations whose record shows a win or the A/A band, and
+whose routing moves no bit on any target. What it leaves out, and why, is on each
+variant of `KernelOp`: `axpy`, `relu`, `adam_step` and `matmul_tiled` lose on every
+record; `mse_grad_scaled` and `heat1d_residual` were not timed on their own; `powi`
+changes bits on MSVC targets (it makes them agree with Linux, but a default must not
+move a bit). `route_everything(true)` is the switch on with every bit set — what the
+parity tests and the benchmark's kernel arm use, so a kernel the default leaves out is
+still held to its bits and still measured — and `route_everything(false)` restores the
+default. The record's provenance names both sets.
 
 ## Building the kernel directory
 
@@ -212,13 +227,14 @@ On a GNU toolchain (Linux, MinGW) neither is needed and `build.rs` adds nothing.
   graph's own `mean((pred - target)^2)` chain lowers to the fused node (above). Not
   matched: `mean(pow(d, 2))`, whose forward is `powf(2.0)` and whose backward is
   `2 * d^1`, different bits from `mul(d, d)`'s `h + h`; it stays the plain chain.
-- `adam_step` is routed again: the records up to `28c104c` had the kernel 15-20x slower
-  because the pack's square root was `std/math`'s software root; the pack now takes the
-  hardware instruction (`sqrt_f64`, correctly rounded by IEEE 754, the same bits as
-  `f64::sqrt` — the Adam parity test is the check on this target). The record after the
-  change (taken at `1cf178b`): `adam_step` kernel slower 1.61x, band 1.35–2.03, down
-  from 15–20x — the remaining gap is the same elementwise loop-codegen gap `relu` and
-  `axpy` show (1.3x), with more arithmetic per element.
+- `adam_step` is routable again but outside the default set: the records up to `28c104c`
+  had the kernel 15-20x slower because the pack's square root was `std/math`'s software
+  root; the pack now takes the hardware instruction (`sqrt_f64`, correctly rounded by
+  IEEE 754, the same bits as `f64::sqrt` — the Adam parity test is the check on this
+  target). The records after the change (`1cf178b`, `295f6d1`): `adam_step` kernel
+  slower 1.61x and 1.67x, down from 15–20x — the remaining gap is the same elementwise
+  loop-codegen gap `relu` and `axpy` show, with more arithmetic per element — so
+  `KernelOps::MEASURED` leaves it out and `route_everything(true)` still measures it.
 - A registered timing record now exists: `bench/bruchion_kernels_bench` (run through
   `bench/bruchion_kernels_bench/run.ps1`, which refuses to record on a loaded machine
   and stamps the gate readings, the kernel hash and the tree state into the
@@ -251,6 +267,39 @@ On a GNU toolchain (Linux, MinGW) neither is needed and `build.rs` adds nothing.
   runs them faster than the locked `-O2` does. `dispatch::timing_probe` remains as a
   probe. What the probe said on 2026-09-22 (one machine,
   no interleaving, no A/A):
+- A seventh record (`70190e6`, taken at `295f6d1`, kernel `83208dd7…`, gate open at
+  11.9 % / 19.5 %) adds the fused graph node: the `GradGraph` chain
+  `sub -> mul -> mean -> backward` on 2^16 elements with the fused `MseMean` node at
+  21.85 ns per element and 97 allocations per call, against the plain `Mean` node's
+  31.54 and 122 — the same bits, a CJC-side comparison of two Rust paths. The fused
+  row's kernel arm (the one-pass scaled gradient through the switch) is inside the
+  A/A band, one elementwise pass among the graph's other work; `mse_loss_grad` is
+  faster 1.41x (within A/A); the other rows as before (`matmul 64x17x33` faster 1.39x,
+  `adam_step` slower 1.67x, the tiled rows slower 1.35x and 1.61x).
+- **The assembly, read (2026-09-22).** The elementwise gap was attributed to "what the
+  two compilers make of the same loop shape" without anyone reading the code. Read
+  from the LTO'd bench binary (`cargo rustc -p bruchion-kernels-bench --release
+  --features bruchion-kernels -- --emit asm`; an rlib's own `--emit asm` shows the
+  pre-link pipeline, which has not vectorized yet, and misleads) and from
+  `gcc -O2 -S` of the k13 kernel C: LLVM's `axpy` main loop is `movupd` ×2, `mulpd`,
+  `movupd` ×2, `addpd`, `movupd` ×2 for four elements — five instructions per lane
+  pair — and its `relu` is `movupd`, `maxpd`, `movupd`, three per pair. gcc 8's
+  `cjc_axpy_slice_f64` is seven per pair, because every 16-byte load is split into
+  `movq` + `movhpd`; its `cjc_relu_slice_f64` is five per pair, because the emitter's
+  mask blend (`(v & (v > 0)) | (0 & ~(v > 0))`) is not the `max` idiom gcc recognizes
+  in the scalar tail (`maxsd`). Two facts settle where each cause lives: the split
+  loads are gcc 8's *generic tuning*, not a spelling — `memcpy` into a vector,
+  `_mm_loadu_pd` and an `aligned(8)` vector pointer all split at `-mtune=generic` and
+  all become one `movupd` at `-mtune=haswell`, and gcc 16's generic tuning does not
+  split — while the blend is the emitter's: `_mm_max_pd(v, 0)` at `-mtune=haswell`
+  gives LLVM's three-instruction loop, and at generic tuning gains nothing, because
+  the FP-domain load and store then split too. Both variants keep the harness hash
+  `15a6e852fe202fdc` (the tune flag changes instruction selection among equivalent
+  forms, never an arithmetic result; the max instruction's NaN and signed-zero
+  behaviour is exactly the select's). Neither is adopted here: `-mtune` is a change
+  to the locked flags, which `abi-check` calls breaking, and the max idiom is a
+  change to the emitter's `@simd` lowering; both are Bruchion decisions, taken with
+  the timing beside them in the Bruchion note.
 
 | `timing_probe`, release, 2^16 elements, min of 25 after a warm-up | kernel (scalar, session 3) | kernel (2-lane `@simd`, SIMD step 2) | kernel (unrolled, `restrict`) | Rust body | kernel, A/A re-run under a runaway service host | Rust body, same re-run | kernel, A/A re-run, quiet (gated) | Rust body, quiet |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -269,7 +318,8 @@ On a GNU toolchain (Linux, MinGW) neither is needed and `build.rs` adds nothing.
   1.3x. The same bits throughout — the parity tests above passed unchanged
   against each archive. The release Rust loop is auto-vectorized by LLVM on the
   same SSE2 baseline; the rest of the gap is scheduling, which gcc 8 at the locked
-  `-O2` flags does conservatively. Switching the kernels on for `relu_raw` today
+  `-O2` flags does conservatively. (Superseded below: the assembly was read on
+  2026-09-22 and the gap has two named causes.) Switching the kernels on for `relu_raw` today
   is therefore still a slowdown, by less.
   **The A/A re-run** (last two columns, later the same day, after the Bruchion side
   mirrored these forms into its self-hosted compiler — a change that emits no

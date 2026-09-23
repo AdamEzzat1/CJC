@@ -25,7 +25,7 @@ pub fn mse_loss(pred: &[f64], target: &[f64]) -> Result<f64, String> {
     }
     // The Bruchion kernel is this loop transcribed (`crate::bruchion::dispatch`); it
     // runs only under the feature AND the runtime switch, after the checks above.
-    if crate::bruchion::dispatch::enabled() {
+    if crate::bruchion::dispatch::routes(crate::bruchion::dispatch::KernelOp::Mse) {
         return Ok(crate::bruchion::dispatch::mse(pred, target));
     }
     let mut acc = KahanAccumulatorF64::new();
@@ -255,7 +255,7 @@ pub fn adam_step(params: &mut [f64], grads: &[f64], state: &mut AdamState) {
     let n = params.len();
     // The Bruchion kernel is this loop transcribed, with `1 - beta^t` computed here
     // (`powf` stays on this side) — under the feature AND the runtime switch only.
-    if crate::bruchion::dispatch::enabled() {
+    if crate::bruchion::dispatch::routes(crate::bruchion::dispatch::KernelOp::AdamStep) {
         let (lr, beta1, beta2, eps) = (state.lr, state.beta1, state.beta2, state.eps);
         crate::bruchion::dispatch::adam_step_raw(params, grads, &mut state.m, &mut state.v, lr, beta1, beta2, eps, t);
         return;

@@ -1,5 +1,5 @@
-//! One safe function per kernel: the Bruchion kernel when [`enabled`], the Rust body
-//! otherwise. The Rust bodies are the *reference* — each is the arithmetic of the CJC
+//! One safe function per kernel: the Bruchion kernel when the switch is on AND the
+//! operation is in the routing set ([`routes`]), the Rust body otherwise. The Rust bodies are the *reference* — each is the arithmetic of the CJC
 //! function it stands for (or that function itself, for the ones that call here) — and
 //! the `parity` tests assert kernel and reference agree bit for bit.
 //!
@@ -17,6 +17,126 @@ pub fn enabled() -> bool {
     cfg!(feature = "bruchion-kernels") && crate::runtime_policy::get().bruchion_kernels
 }
 
+/// The operations the switch can route, one bit each. The set the policy holds
+/// (`RuntimePolicy::bruchion_kernel_ops`) says which of them the switch actually sends to
+/// the pack; the default set is [`KernelOps::MEASURED`], and the reason for each
+/// membership is the CJC record (`bench_results/bruchion_kernels`), never a guess.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u16)]
+pub enum KernelOp {
+    /// `y = a x + y`. Slower 1.3–1.4x on every record: two SSE2 lanes against the Rust
+    /// loop's two lanes, with gcc 8's split loads. Off by default.
+    Axpy = 1 << 0,
+    /// The Kahan dot. Inside the A/A band on every record. On.
+    DotKahan = 1 << 1,
+    /// `max(0, x)`. Slower about 1.3x on every record (the emitter's mask blend against
+    /// `maxpd`). Off.
+    Relu = 1 << 2,
+    /// The Kahan mean of squares. Inside the A/A band. On.
+    Mse = 1 << 3,
+    /// The fused loss and gradient. Faster 1.3–1.4x, within A/A. On.
+    MseGrad = 1 << 4,
+    /// The scaled gradient the fused graph node's backward takes. Not measured on its
+    /// own (the graph row that carries it is inside A/A); an elementwise loop like `axpy`,
+    /// which loses. Off until measured.
+    MseGradScaled = 1 << 5,
+    /// The Kahan matmul. Faster about 1.4–1.5x at 64x17x33 on six records, inside A/A at
+    /// 128^3. On.
+    Matmul = 1 << 6,
+    /// `TiledMatmul`'s order. Slower 1.35–1.6x (two lanes against AVX2's four). Off.
+    MatmulTiled = 1 << 7,
+    /// The Adam step. Slower 1.6–1.7x with the hardware root. Off.
+    AdamStep = 1 << 8,
+    /// `powi` with a runtime exponent. Not timed, and on MSVC targets routing it CHANGES
+    /// bits relative to `f64::powi` (which is the CRT `pow` there) — see
+    /// [`f64_powi_is_binary_exponentiation`]. Off, so the default set never moves a bit.
+    Powi = 1 << 9,
+    /// The heat residual without the gradient. Not timed (nothing routed calls it). Off.
+    Heat1dResidual = 1 << 10,
+    /// The heat residual and gradient. Faster 1.34x or inside A/A. On.
+    Heat1dResidualGrad = 1 << 11,
+}
+
+impl KernelOp {
+    pub const EVERY: [KernelOp; 12] = [
+        KernelOp::Axpy, KernelOp::DotKahan, KernelOp::Relu, KernelOp::Mse, KernelOp::MseGrad,
+        KernelOp::MseGradScaled, KernelOp::Matmul, KernelOp::MatmulTiled, KernelOp::AdamStep,
+        KernelOp::Powi, KernelOp::Heat1dResidual, KernelOp::Heat1dResidualGrad,
+    ];
+
+    #[inline]
+    pub fn bit(self) -> u16 {
+        self as u16
+    }
+
+    /// The name the record and the provenance print.
+    pub fn name(self) -> &'static str {
+        match self {
+            KernelOp::Axpy => "axpy",
+            KernelOp::DotKahan => "dot_kahan",
+            KernelOp::Relu => "relu",
+            KernelOp::Mse => "mse",
+            KernelOp::MseGrad => "mse_grad",
+            KernelOp::MseGradScaled => "mse_grad_scaled",
+            KernelOp::Matmul => "matmul",
+            KernelOp::MatmulTiled => "matmul_tiled",
+            KernelOp::AdamStep => "adam_step",
+            KernelOp::Powi => "powi",
+            KernelOp::Heat1dResidual => "heat1d_residual",
+            KernelOp::Heat1dResidualGrad => "heat1d_residual_grad",
+        }
+    }
+}
+
+/// A set of [`KernelOp`]s, the value `RuntimePolicy::bruchion_kernel_ops` holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KernelOps(pub u16);
+
+impl KernelOps {
+    pub const NONE: KernelOps = KernelOps(0);
+    pub const ALL: KernelOps = KernelOps((1 << 12) - 1);
+    /// The default: the operations whose record shows no loss — a win or the A/A band —
+    /// and whose routing moves no bit on any target.
+    pub const MEASURED: KernelOps = KernelOps(
+        KernelOp::DotKahan as u16 | KernelOp::Mse as u16 | KernelOp::MseGrad as u16
+        | KernelOp::Matmul as u16 | KernelOp::Heat1dResidualGrad as u16,
+    );
+
+    #[inline]
+    pub fn contains(self, op: KernelOp) -> bool {
+        self.0 & op.bit() != 0
+    }
+    pub fn with(self, op: KernelOp) -> KernelOps {
+        KernelOps(self.0 | op.bit())
+    }
+    pub fn without(self, op: KernelOp) -> KernelOps {
+        KernelOps(self.0 & !op.bit())
+    }
+    /// The members' names, in bit order, comma-separated; `(none)` for the empty set.
+    pub fn names(self) -> String {
+        let v: Vec<&str> = KernelOp::EVERY.iter().filter(|&&o| self.contains(o)).map(|o| o.name()).collect();
+        if v.is_empty() { "(none)".into() } else { v.join(", ") }
+    }
+}
+
+/// Whether `op` goes to the pack right now: the feature, the switch, and the set.
+#[inline]
+pub fn routes(op: KernelOp) -> bool {
+    if !cfg!(feature = "bruchion-kernels") {
+        return false;
+    }
+    let p = crate::runtime_policy::get();
+    p.bruchion_kernels && KernelOps(p.bruchion_kernel_ops).contains(op)
+}
+
+/// The switch on with every operation in the set, or the switch off with the default
+/// set restored — what the parity tests and the benchmark's kernel arm want, so that a
+/// kernel the default set leaves out is still held to its bits and still measured.
+pub fn route_everything(on: bool) {
+    crate::runtime_policy::set_bruchion_kernel_ops(if on { KernelOps::ALL.0 } else { KernelOps::MEASURED.0 });
+    crate::runtime_policy::set_bruchion_kernels(on);
+}
+
 // ── axpy ───────────────────────────────────────────────────────────────────
 
 /// `y[i] = a * x[i] + y[i]` — separate multiply and add, never fused (the contract
@@ -24,7 +144,7 @@ pub fn enabled() -> bool {
 pub fn axpy(a: f64, x: &[f64], y: &mut [f64]) {
     let n = x.len().min(y.len());
     #[cfg(feature = "bruchion-kernels")]
-    if enabled() {
+    if routes(KernelOp::Axpy) {
         axpy_kernel(a, &x[..n], &mut y[..n]);
         return;
     }
@@ -52,7 +172,7 @@ pub fn axpy_kernel(a: f64, x: &[f64], y: &mut [f64]) {
 pub fn dot_kahan(x: &[f64], y: &[f64]) -> f64 {
     let n = x.len().min(y.len());
     #[cfg(feature = "bruchion-kernels")]
-    if enabled() {
+    if routes(KernelOp::DotKahan) {
         return dot_kahan_kernel(&x[..n], &y[..n]);
     }
     dot_kahan_fallback(&x[..n], &y[..n])
@@ -80,7 +200,7 @@ pub fn dot_kahan_kernel(x: &[f64], y: &[f64]) -> f64 {
 pub fn relu(data: &[f64], out: &mut [f64]) {
     let n = data.len().min(out.len());
     #[cfg(feature = "bruchion-kernels")]
-    if enabled() {
+    if routes(KernelOp::Relu) {
         relu_kernel(&data[..n], &mut out[..n]);
         return;
     }
@@ -107,7 +227,7 @@ pub fn relu_kernel(data: &[f64], out: &mut [f64]) {
 pub fn mse(pred: &[f64], target: &[f64]) -> f64 {
     let n = pred.len().min(target.len());
     #[cfg(feature = "bruchion-kernels")]
-    if enabled() {
+    if routes(KernelOp::Mse) {
         return mse_kernel(&pred[..n], &target[..n]);
     }
     mse_fallback(&pred[..n], &target[..n])
@@ -144,7 +264,7 @@ pub fn mse_kernel(pred: &[f64], target: &[f64]) -> f64 {
 pub fn mse_grad(pred: &[f64], target: &[f64], grad: &mut [f64]) -> f64 {
     let n = pred.len().min(target.len()).min(grad.len());
     #[cfg(feature = "bruchion-kernels")]
-    if enabled() {
+    if routes(KernelOp::MseGrad) {
         return mse_grad_kernel(&pred[..n], &target[..n], &mut grad[..n]);
     }
     mse_grad_fallback(&pred[..n], &target[..n], &mut grad[..n])
@@ -185,7 +305,7 @@ pub fn mse_grad_kernel(pred: &[f64], target: &[f64], grad: &mut [f64]) -> f64 {
 pub fn mse_grad_scaled(g: f64, diff: &[f64], grad: &mut [f64]) {
     let n = diff.len().min(grad.len());
     #[cfg(feature = "bruchion-kernels")]
-    if enabled() {
+    if routes(KernelOp::MseGradScaled) {
         mse_grad_scaled_kernel(g, &diff[..n], &mut grad[..n]);
         return;
     }
@@ -220,7 +340,7 @@ pub fn matmul(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usize, n: usize)
     debug_assert_eq!(b.len(), k * n);
     debug_assert_eq!(c.len(), m * n);
     #[cfg(feature = "bruchion-kernels")]
-    if enabled() {
+    if routes(KernelOp::Matmul) {
         matmul_kernel(a, b, c, m, k, n);
         return;
     }
@@ -256,7 +376,7 @@ pub fn matmul_kernel(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usize, n:
 pub fn matmul_tiled(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usize, n: usize) {
     debug_assert!(a.len() >= m * k && b.len() >= k * n && c.len() >= m * n);
     #[cfg(feature = "bruchion-kernels")]
-    if enabled() {
+    if routes(KernelOp::MatmulTiled) {
         matmul_tiled_kernel(a, b, c, m, k, n);
         return;
     }
@@ -284,14 +404,14 @@ pub fn matmul_tiled_kernel(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usi
 pub fn adam_step_raw(params: &mut [f64], grads: &[f64], m: &mut [f64], v: &mut [f64], lr: f64, beta1: f64, beta2: f64, eps: f64, t: f64) {
     let bc1 = 1.0 - beta1.powf(t);
     let bc2 = 1.0 - beta2.powf(t);
-    // Routed again. The records at abe6b21..28c104c had the kernel 15-20x slower than this
-    // loop because the pack took its square root from the libm-free `std/math`, a software
-    // root; the pack now uses the hardware instruction (`sqrt_f64`: `sqrtsd`, correctly
-    // rounded by IEEE 754, so the same bits as `f64::sqrt` here and on every conforming
-    // target — the parity test below is the check), and the record after this commit
-    // says what that is worth.
+    // Routable, but not in the default set: the records at abe6b21..28c104c had the kernel
+    // 15-20x slower than this loop because the pack took its square root from the libm-free
+    // `std/math`, a software root; with the hardware instruction (`sqrt_f64`: `sqrtsd`,
+    // correctly rounded by IEEE 754, so the same bits as `f64::sqrt` here and on every
+    // conforming target — the parity test below is the check) it is 1.6-1.7x slower, the
+    // elementwise codegen gap, so `KernelOps::MEASURED` leaves it out.
     #[cfg(feature = "bruchion-kernels")]
-    if enabled() {
+    if routes(KernelOp::AdamStep) {
         adam_step_kernel(params, grads, m, v, lr, beta1, beta2, eps, bc1, bc2);
         return;
     }
@@ -331,7 +451,7 @@ pub fn adam_step_kernel(params: &mut [f64], grads: &[f64], m: &mut [f64], v: &mu
 /// path — and makes them agree with Linux instead.
 pub fn powi(a: f64, b: i32) -> f64 {
     #[cfg(feature = "bruchion-kernels")]
-    if enabled() {
+    if routes(KernelOp::Powi) {
         return powi_kernel(a, b);
     }
     a.powi(b)
@@ -391,7 +511,7 @@ fn poly_eval_dd(coeffs: &[f64], x: f64) -> f64 {
 pub fn heat1d_residual(x: &[f64], coeffs: &[f64], f: &[f64], r: &mut [f64]) -> f64 {
     let n = x.len().min(f.len()).min(r.len());
     #[cfg(feature = "bruchion-kernels")]
-    if enabled() {
+    if routes(KernelOp::Heat1dResidual) {
         return heat1d_residual_kernel(&x[..n], coeffs, &f[..n], &mut r[..n]);
     }
     heat1d_residual_fallback(&x[..n], coeffs, &f[..n], &mut r[..n])
@@ -424,7 +544,7 @@ pub fn heat1d_residual_kernel(x: &[f64], coeffs: &[f64], f: &[f64], r: &mut [f64
 pub fn heat1d_residual_grad(x: &[f64], coeffs: &[f64], f: &[f64], r: &mut [f64], grad: &mut [f64]) -> f64 {
     let n = x.len().min(f.len()).min(r.len());
     #[cfg(feature = "bruchion-kernels")]
-    if enabled() {
+    if routes(KernelOp::Heat1dResidualGrad) {
         return heat1d_residual_grad_kernel(&x[..n], coeffs, &f[..n], &mut r[..n], grad);
     }
     heat1d_residual_grad_fallback(&x[..n], coeffs, &f[..n], &mut r[..n], grad)
@@ -619,9 +739,9 @@ mod parity {
         let mut off = vec![0.0; m * n];
         let mut on = vec![0.0; m * n];
         matmul_tiled(&a, &b, &mut off, m, k, n);
-        crate::runtime_policy::set_bruchion_kernels(true);
+        route_everything(true);
         matmul_tiled(&a, &b, &mut on, m, k, n);
-        crate::runtime_policy::set_bruchion_kernels(false);
+        route_everything(false);
         assert_eq!(bits(&on), bits(&off));
     }
 
@@ -655,9 +775,9 @@ mod parity {
         let mut off = vec![0.0; 1001];
         let mut on = vec![0.0; 1001];
         let l_off = crate::ml::mse_loss_grad(&p, &t, &mut off).unwrap();
-        crate::runtime_policy::set_bruchion_kernels(true);
+        route_everything(true);
         let l_on = crate::ml::mse_loss_grad(&p, &t, &mut on).unwrap();
-        crate::runtime_policy::set_bruchion_kernels(false);
+        route_everything(false);
         assert_eq!(l_on.to_bits(), l_off.to_bits());
         assert_eq!(bits(&on), bits(&off));
     }
@@ -685,6 +805,34 @@ mod parity {
         }
     }
 
+    /// The set: off by default; the switch alone routes the measured set and nothing
+    /// else; `route_everything` routes all of them and restores the default on the way
+    /// back; a set edited by hand is honoured bit by bit.
+    #[test]
+    fn the_routing_set_gates_each_operation() {
+        route_everything(false);
+        assert!(!enabled());
+        for op in KernelOp::EVERY {
+            assert!(!routes(op), "{}: off by default", op.name());
+        }
+        crate::runtime_policy::set_bruchion_kernels(true);
+        for op in KernelOp::EVERY {
+            assert_eq!(routes(op), KernelOps::MEASURED.contains(op), "{}: the default set", op.name());
+        }
+        assert!(routes(KernelOp::Matmul) && routes(KernelOp::MseGrad) && !routes(KernelOp::Axpy) && !routes(KernelOp::Powi));
+        crate::runtime_policy::set_bruchion_kernel_ops(KernelOps::MEASURED.with(KernelOp::Relu).without(KernelOp::Mse).0);
+        assert!(routes(KernelOp::Relu) && !routes(KernelOp::Mse) && routes(KernelOp::Matmul));
+        route_everything(true);
+        for op in KernelOp::EVERY {
+            assert!(routes(op), "{}: everything", op.name());
+        }
+        route_everything(false);
+        assert_eq!(crate::runtime_policy::get().bruchion_kernel_ops, KernelOps::MEASURED.0);
+        assert_eq!(KernelOps::MEASURED.names(), "dot_kahan, mse, mse_grad, matmul, heat1d_residual_grad");
+        assert_eq!(KernelOps::NONE.names(), "(none)");
+        assert_eq!(KernelOps::ALL.names().matches(", ").count(), 11);
+    }
+
     #[test]
     fn mse_bit_for_bit() {
         for &n in &SIZES {
@@ -696,9 +844,9 @@ mod parity {
         let p = inputs(1001, 8);
         let t = inputs(1001, 9);
         let off = crate::ml::mse_loss(&p, &t).unwrap();
-        crate::runtime_policy::set_bruchion_kernels(true);
+        route_everything(true);
         let on = crate::ml::mse_loss(&p, &t).unwrap();
-        crate::runtime_policy::set_bruchion_kernels(false);
+        route_everything(false);
         assert_eq!(on.to_bits(), off.to_bits());
     }
 
@@ -719,9 +867,9 @@ mod parity {
         let mut off = vec![0.0; 6];
         let mut on = vec![0.0; 6];
         crate::kernel::matmul_raw(&a, &b, &mut off, 3, 4, 2);
-        crate::runtime_policy::set_bruchion_kernels(true);
+        route_everything(true);
         crate::kernel::matmul_raw(&a, &b, &mut on, 3, 4, 2);
-        crate::runtime_policy::set_bruchion_kernels(false);
+        route_everything(false);
         assert_eq!(bits(&on), bits(&off));
     }
 
@@ -753,9 +901,9 @@ mod parity {
         for t in 1..=3u64 {
             let g = inputs(n, 70 + t);
             crate::ml::adam_step(&mut pa, &g, &mut sa);
-            crate::runtime_policy::set_bruchion_kernels(true);
+            route_everything(true);
             crate::ml::adam_step(&mut pb, &g, &mut sb);
-            crate::runtime_policy::set_bruchion_kernels(false);
+            route_everything(false);
             assert_eq!(bits(&pa), bits(&pb), "step {t}");
         }
     }
@@ -849,9 +997,9 @@ mod parity {
     #[test]
     fn the_runtime_switch_is_off_by_default_and_routes_when_on() {
         assert!(!enabled(), "the policy default must not route to the kernels");
-        crate::runtime_policy::set_bruchion_kernels(true);
+        route_everything(true);
         assert!(enabled());
-        crate::runtime_policy::set_bruchion_kernels(false);
+        route_everything(false);
         assert!(!enabled());
     }
     /// A probe, not a benchmark record: nanoseconds per element, kernel versus Rust body,
@@ -912,9 +1060,9 @@ mod without_the_feature {
 
     #[test]
     fn enabled_is_always_false_and_the_bodies_run() {
-        crate::runtime_policy::set_bruchion_kernels(true);
+        route_everything(true);
         assert!(!enabled());
-        crate::runtime_policy::set_bruchion_kernels(false);
+        route_everything(false);
         let x = [1.0, 2.0, 3.0];
         let mut y = [0.5, 0.5, 0.5];
         axpy(2.0, &x, &mut y);

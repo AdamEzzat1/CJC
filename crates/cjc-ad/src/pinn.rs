@@ -652,7 +652,7 @@ pub fn piml_heat_1d_train(
         // hold it to this loop's bits on every target, now that both use
         // `cjc_repro::powi_f64`), one call, the residuals into `r_colloc`. The loop
         // below is the definition and runs otherwise.
-        let physics_loss = if cjc_runtime::bruchion::dispatch::enabled() {
+        let physics_loss = if cjc_runtime::bruchion::dispatch::routes(cjc_runtime::bruchion::dispatch::KernelOp::Heat1dResidualGrad) {
             cjc_runtime::bruchion::dispatch::heat1d_residual_grad(
                 &x_colloc, &coeffs, &f_colloc, &mut r_colloc, &mut phys_grads,
             )

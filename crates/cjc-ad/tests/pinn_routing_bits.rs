@@ -122,13 +122,13 @@ fn the_digest_sees_a_wrong_training() {
 #[cfg(feature = "bruchion-kernels")]
 #[test]
 fn the_routed_training_gives_the_pinned_bits() {
-    use cjc_runtime::runtime_policy::set_bruchion_kernels;
+    use cjc_runtime::bruchion::dispatch::{route_everything, routes, KernelOp};
     for (i, &s) in SHAPES.iter().enumerate() {
         let off = train(s);
-        set_bruchion_kernels(true);
-        assert!(cjc_runtime::bruchion::dispatch::enabled());
+        route_everything(true);
+        assert!(routes(KernelOp::Heat1dResidualGrad));
         let on = train(s);
-        set_bruchion_kernels(false);
+        route_everything(false);
         assert_eq!(digest(&on), PINNED[i], "routed, shape {i}: {s:?}");
         assert_eq!(digest(&off), digest(&on), "shape {i}");
         for (j, (a, b)) in off.final_params.iter().zip(&on.final_params).enumerate() {

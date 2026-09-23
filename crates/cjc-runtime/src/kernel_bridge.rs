@@ -56,7 +56,7 @@ pub mod kernel {
         // The Bruchion kernel is this loop transcribed (`crate::bruchion::dispatch`);
         // it runs only under the feature AND the runtime switch, and is tested to give
         // these exact bits.
-        if crate::bruchion::dispatch::enabled() {
+        if crate::bruchion::dispatch::routes(crate::bruchion::dispatch::KernelOp::Matmul) {
             crate::bruchion::dispatch::matmul(a, b, c, m, k, n);
             return;
         }
@@ -175,7 +175,7 @@ pub mod kernel {
     #[inline]
     pub fn relu_raw(data: &[f64], out: &mut [f64]) {
         debug_assert_eq!(data.len(), out.len());
-        if crate::bruchion::dispatch::enabled() {
+        if crate::bruchion::dispatch::routes(crate::bruchion::dispatch::KernelOp::Relu) {
             crate::bruchion::dispatch::relu(data, out);
             return;
         }

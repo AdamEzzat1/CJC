@@ -12,7 +12,8 @@
 //! The reference is the unfused chain, built with `mean_unfused`; the assertion that the
 //! textbook `2·d/n` is NOT what the graph computes keeps the test from passing by
 //! comparing a value with itself. Under `--features bruchion-kernels` the same comparisons
-//! run with the switch on, so the two Bruchion kernels are held to the graph's bits too.
+//! run with the switch on and every operation in the routing set, so the two Bruchion
+//! kernels are held to the graph's bits too.
 
 use cjc_ad::{GradGraph, GradOp};
 use cjc_runtime::ml::mse_loss_grad;
@@ -62,7 +63,7 @@ fn chain(pred: &[f64], target: &[f64], fused: bool, seed: Option<f64>) -> (f64, 
 }
 
 fn check_fused_function(switch_on: bool) {
-    cjc_runtime::runtime_policy::set_bruchion_kernels(switch_on);
+    cjc_runtime::bruchion::dispatch::route_everything(switch_on);
     for &n in &SIZES {
         let p = inputs(n, 100 + n as u64);
         let t = inputs(n, 200 + n as u64);
@@ -83,11 +84,11 @@ fn check_fused_function(switch_on: bool) {
     assert_eq!(gg[0].to_bits(), (h + h).to_bits());
     assert_eq!(fg[0].to_bits(), (h + h).to_bits());
     assert_ne!(fg[0].to_bits(), ((2.0f64 * 2.9) / 3.0).to_bits(), "the textbook spelling is a different value here");
-    cjc_runtime::runtime_policy::set_bruchion_kernels(false);
+    cjc_runtime::bruchion::dispatch::route_everything(false);
 }
 
 fn check_fused_node(switch_on: bool) {
-    cjc_runtime::runtime_policy::set_bruchion_kernels(switch_on);
+    cjc_runtime::bruchion::dispatch::route_everything(switch_on);
     for &n in &SIZES {
         let p = inputs(n, 300 + n as u64);
         let t = inputs(n, 400 + n as u64);
@@ -105,7 +106,7 @@ fn check_fused_node(switch_on: bool) {
     assert_eq!(fp[0].to_bits(), (h + h).to_bits());
     assert_eq!(ft[0].to_bits(), (-(h + h)).to_bits());
     assert_ne!(fp[0].to_bits(), ((2.0f64 * 2.9) / 3.0).to_bits());
-    cjc_runtime::runtime_policy::set_bruchion_kernels(false);
+    cjc_runtime::bruchion::dispatch::route_everything(false);
 }
 
 /// A chain that is not the node's own: `diff` also feeds a `sum`, or `sq` does, and the
@@ -113,7 +114,7 @@ fn check_fused_node(switch_on: bool) {
 /// construction), its backward must take the plain arms, and every gradient must be the
 /// unfused graph's bits — including the order the two contributions reach each parameter.
 fn check_not_exclusive(switch_on: bool) {
-    cjc_runtime::runtime_policy::set_bruchion_kernels(switch_on);
+    cjc_runtime::bruchion::dispatch::route_everything(switch_on);
     for &n in &[3usize, 64, 1001] {
         let p = inputs(n, 500 + n as u64);
         let t = inputs(n, 600 + n as u64);
@@ -137,7 +138,7 @@ fn check_not_exclusive(switch_on: bool) {
             assert_eq!(bits(&ft), bits(&ut), "target gradient, n = {n}, shared diff {share_diff}");
         }
     }
-    cjc_runtime::runtime_policy::set_bruchion_kernels(false);
+    cjc_runtime::bruchion::dispatch::route_everything(false);
 }
 
 /// `mean` fuses only the exact shape: `mul(d, d)` of a `sub`. A `pow(d, 2)`, a

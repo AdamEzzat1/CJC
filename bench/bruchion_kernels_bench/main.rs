@@ -625,6 +625,8 @@ fn provenance(o: &Opts, feature: bool) -> Vec<(String, String)> {
         ("logical cores".to_string(), runtime_policy::detect_cores().to_string()),
         ("runtime policy".to_string(), runtime_policy::get().summary()),
         ("feature bruchion-kernels".to_string(), feature.to_string()),
+        ("routing set, kernel arm".to_string(), dispatch::KernelOps(runtime_policy::get().bruchion_kernel_ops).names()),
+        ("routing set, default".to_string(), dispatch::KernelOps::MEASURED.names()),
         ("BRUCHION_KERNELS_DIR".to_string(), kdir.clone()),
         ("kernel_sha256".to_string(), if feature { kernel_sha256(&kdir) } else { "(no kernel arm)".into() }),
         ("f64::powi is binary exponentiation on this target".to_string(), dispatch::f64_powi_is_binary_exponentiation().to_string()),
@@ -655,9 +657,14 @@ fn main() {
     let o = parse_opts();
     let feature = cfg!(feature = "bruchion-kernels");
     eprintln!("bruchion_kernels_bench: n = {}, phases = {}, kernel arm compiled in: {}", o.n, o.phases, feature);
+    // The kernel arm measures every kernel, the ones the default routing set leaves out
+    // included (their rows are why it leaves them out): the set is widened to all for the
+    // whole run, and the arms flip only the switch.
+    runtime_policy::set_bruchion_kernel_ops(dispatch::KernelOps::ALL.0);
     if feature && !runtime_policy::get().bruchion_kernels {
         runtime_policy::set_bruchion_kernels(true);
         assert!(dispatch::enabled(), "the switch did not enable the kernels");
+        assert!(dispatch::KernelOp::EVERY.iter().all(|&op| dispatch::routes(op)), "the kernel arm must route every operation");
         runtime_policy::set_bruchion_kernels(false);
     }
     let prov = provenance(&o, feature);
