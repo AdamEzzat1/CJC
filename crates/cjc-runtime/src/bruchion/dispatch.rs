@@ -40,8 +40,14 @@ pub enum KernelOp {
     /// own (the graph row that carries it is inside A/A); an elementwise loop like `axpy`,
     /// which loses. Off until measured.
     MseGradScaled = 1 << 5,
-    /// The Kahan matmul. Faster about 1.4–1.5x at 64x17x33 on six records, inside A/A at
-    /// 128^3. On.
+    /// The Kahan matmul. Faster about 1.4–1.5x at 64x17x33 on seven records, inside A/A
+    /// at 128^3. Record 9's sweep: the win is a short-`k` family — 1.3–1.6x for `k` up
+    /// to 24, 1.1x at 32–48, inside A/A from 64 (the kernel saves about 10 ns per
+    /// output element and a little per product on short inner loops; the products
+    /// themselves run at the same pace). Reachable since 2026-09-23: `Tensor::matmul`
+    /// calls this loop for every shape below 64 in all dimensions (before, it ran its
+    /// own copy and no routing reached it); at that entry 8x8x8 is faster 1.16x (whole
+    /// band), the other three shapes inside A/A. On.
     Matmul = 1 << 6,
     /// `TiledMatmul`'s order. Slower 1.35–1.6x (two lanes against AVX2's four). Off.
     MatmulTiled = 1 << 7,
@@ -53,11 +59,17 @@ pub enum KernelOp {
     Powi = 1 << 9,
     /// The heat residual without the gradient. Not timed (nothing routed calls it). Off.
     Heat1dResidual = 1 << 10,
-    /// The heat residual and gradient. Its own row is inside A/A or a small win — but the
-    /// row compares the kernel with the dispatch twin, a bit reference, not the trainer's
-    /// loop: `piml_heat_1d_train` end to end is 2.47x SLOWER routed (record 8), because
-    /// the trainer's inlined loop is several times faster than the twin. Off: the
-    /// end-to-end row is the one that counts when there is one.
+    /// The heat residual and gradient. Record 8 had `piml_heat_1d_train` end to end 2.47x
+    /// SLOWER routed and took this off the default set; record 9 found why and undid
+    /// it. That row called the trainer with literal arguments, and under fat LTO the
+    /// linker inlined the trainer into its one call site and specialized it on degree 8
+    /// and 1000 points — a loop no interpreter call can run. Record 9 adds a row whose
+    /// arguments pass through `black_box`, and with two call sites in the binary the
+    /// specialization is gone from both: the fallback arm went from 184 to 512 µs per
+    /// call while the kernel arm stayed at 444–454 µs. Record 9: the literal row 1.15x
+    /// faster routed (whole band), the opaque row inside A/A, the kernel's own row
+    /// 1.15x faster (whole band) at 1000x9 and inside A/A at 8192x9. One record; no
+    /// loss on any of the four rows. On.
     Heat1dResidualGrad = 1 << 11,
 }
 
@@ -100,11 +112,11 @@ impl KernelOps {
     pub const NONE: KernelOps = KernelOps(0);
     pub const ALL: KernelOps = KernelOps((1 << 12) - 1);
     /// The default: the operations whose record shows no loss — a win or the A/A band,
-    /// judged on the end-to-end row when one exists — and whose routing moves no bit on
-    /// any target.
+    /// judged on the end-to-end row when one exists, with that row's arguments opaque
+    /// to the linker — and whose routing moves no bit on any target.
     pub const MEASURED: KernelOps = KernelOps(
         KernelOp::DotKahan as u16 | KernelOp::Mse as u16 | KernelOp::MseGrad as u16
-        | KernelOp::Matmul as u16,
+        | KernelOp::Matmul as u16 | KernelOp::Heat1dResidualGrad as u16,
     );
 
     #[inline]
@@ -824,7 +836,7 @@ mod parity {
         for op in KernelOp::EVERY {
             assert_eq!(routes(op), KernelOps::MEASURED.contains(op), "{}: the default set", op.name());
         }
-        assert!(routes(KernelOp::Matmul) && routes(KernelOp::MseGrad) && !routes(KernelOp::Axpy) && !routes(KernelOp::Powi) && !routes(KernelOp::Heat1dResidualGrad));
+        assert!(routes(KernelOp::Matmul) && routes(KernelOp::MseGrad) && routes(KernelOp::Heat1dResidualGrad) && !routes(KernelOp::Axpy) && !routes(KernelOp::Powi));
         crate::runtime_policy::set_bruchion_kernel_ops(KernelOps::MEASURED.with(KernelOp::Relu).without(KernelOp::Mse).0);
         assert!(routes(KernelOp::Relu) && !routes(KernelOp::Mse) && routes(KernelOp::Matmul));
         route_everything(true);
@@ -833,7 +845,7 @@ mod parity {
         }
         route_everything(false);
         assert_eq!(crate::runtime_policy::get().bruchion_kernel_ops, KernelOps::MEASURED.0);
-        assert_eq!(KernelOps::MEASURED.names(), "dot_kahan, mse, mse_grad, matmul");
+        assert_eq!(KernelOps::MEASURED.names(), "dot_kahan, mse, mse_grad, matmul, heat1d_residual_grad");
         assert_eq!(KernelOps::NONE.names(), "(none)");
         assert_eq!(KernelOps::ALL.names().matches(", ").count(), 11);
     }

@@ -610,12 +610,12 @@ mod tests {
         assert!(!get().bruchion_kernels);
         set_bruchion_kernels(true);
         assert!(get().bruchion_kernels);
-        assert!(get().summary().ends_with("bruchion_kernel_ops=0x05a bruchion_kernels=true"));
+        assert!(get().summary().ends_with("bruchion_kernel_ops=0x85a bruchion_kernels=true"));
         set_bruchion_kernel_ops(0x1);
         assert_eq!(get().bruchion_kernel_ops, 1);
         reset();
         assert!(!get().bruchion_kernels);
-        assert_eq!(get().bruchion_kernel_ops, 0x05a);
+        assert_eq!(get().bruchion_kernel_ops, 0x85a);
     }
 
     #[test]

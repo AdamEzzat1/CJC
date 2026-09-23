@@ -25,15 +25,18 @@ the switch is inert there.
 The switch routes a *set* of operations, not everything the pack exports:
 `RuntimePolicy::bruchion_kernel_ops` holds one bit per `dispatch::KernelOp`, and
 `dispatch::routes(op)` is what every routed entry and every pre-checking caller asks.
-The default set is `KernelOps::MEASURED` — `dot_kahan`, `mse`, `mse_grad`, `matmul`:
-the operations whose record shows a win or the A/A band, judged on the end-to-end row
-when one exists, and whose routing moves no bit on any target. What it leaves out, and
-why, is on each variant of `KernelOp`: `axpy`, `relu`, `adam_step` and `matmul_tiled`
-lose on every record; `heat1d_residual_grad`'s own row is inside A/A but
-`piml_heat_1d_train` end to end is 2.47x slower routed (record 8: the row's dispatch
-twin is a bit reference, not the trainer's inlined loop); `mse_grad_scaled` and
-`heat1d_residual` were not timed on their own; `powi` changes bits on MSVC targets (it
-makes them agree with Linux, but a default must not move a bit). `route_everything(true)` is the switch on with every bit set — what the
+The default set is `KernelOps::MEASURED` — `dot_kahan`, `mse`, `mse_grad`, `matmul`,
+`heat1d_residual_grad`: the operations whose record shows a win or the A/A band, judged
+on the end-to-end row when one exists (with that row's arguments opaque to the linker —
+see the ninth record), and whose routing moves no bit on any target. What it leaves out,
+and why, is on each variant of `KernelOp`: `axpy`, `relu`, `adam_step` and
+`matmul_tiled` lose on every record; `mse_grad_scaled` and `heat1d_residual` were not
+timed on their own; `powi` changes bits on MSVC targets (it makes them agree with
+Linux, but a default must not move a bit). `heat1d_residual_grad` left the set after
+record 8 (`piml_heat_1d_train` end to end 2.47x slower routed) and returned after
+record 9, which found that row's fallback arm was the trainer specialized by the linker
+on the row's literal arguments — a loop no interpreter call runs; with the arguments
+opaque the end-to-end row is inside A/A and the kernel's own row is 1.15x faster. `route_everything(true)` is the switch on with every bit set — what the
 parity tests and the benchmark's kernel arm use, so a kernel the default leaves out is
 still held to its bits and still measured — and `route_everything(false)` restores the
 default. The record's provenance names both sets.
@@ -278,6 +281,64 @@ On a GNU toolchain (Linux, MinGW) neither is needed and `build.rs` adds nothing.
   A/A band, one elementwise pass among the graph's other work; `mse_loss_grad` is
   faster 1.41x (within A/A); the other rows as before (`matmul 64x17x33` faster 1.39x,
   `adam_step` slower 1.67x, the tiled rows slower 1.35x and 1.61x).
+- An eighth record (`f0d3092`, taken at `c4d0a83`, kernel `83208dd7…`): the Kahan
+  matmul win as a family (256x17x33 1.47x, 16x16x1024 1.32x, 64x17x33 1.47x, whole
+  band; squares, 64x64x8 and 128^3 inside A/A), `conv1d_raw` at 0 allocations per
+  call (32,704 before, a `Vec` per output element), the fused graph row at 85
+  allocations (97), the PINN end to end 2.47x slower routed — the number the ninth
+  record explains — and two quantum rows inside noise.
+- **A ninth record (`59865b2`, 2026-09-23, kernel `83208dd7…`, gate open at 14.2 % /
+  17.6 %), the third research stack's.** Three findings. (1) The PINN end to end: the
+  eighth record's row called `piml_heat_1d_train` with literal arguments, and under fat
+  LTO the linker had inlined the trainer into that one call site and specialized it on
+  degree 8 and 1000 points; a second row with the arguments through `black_box` gives
+  the binary two call sites, the specialization is gone from both, and the fallback arm
+  is 512 µs per call (184 before) while the kernel arm is 444 µs (454 before). Routed,
+  the literal row is 1.15x faster (band 0.78–0.91), the opaque row inside A/A
+  (0.68–1.09); `heat1d_residual_grad 1000x9` is 1.15x faster (0.81–0.93). The heat
+  kernel is back in the default set on that evidence, one record. A benchmark row that
+  passes literals to the function it times is measuring a program that cannot exist.
+  (2) The matmul sweep (28 shapes, shapes through `black_box`): at 64xkx33 the kernel
+  is 1.42–1.46x faster for k = 4, 8, 16, 1.30x at 24, 1.12x at 32, 1.11x at 48
+  (within A/A), inside A/A at 64 and 128; at (8, 16, 32, 63)x17x33 1.39–1.44x (8 inside a
+  wide band); at 16x16x(16, 64, 256) 1.30–1.58x; 8x8x8 1.32x, 32x32x32 1.17x, 32x48x16
+  1.20x, 63x63x63 inside A/A. Per output element the kernel saves about 10 ns whatever
+  k, and per product it is cheaper only while the inner loop is short (0.9 against 1.3
+  ns at k = 4, 3.21 against 3.25 at k = 128): a short-`k` family, not a matmul
+  speedup. `Tensor::matmul` never called this loop before 2026-09-23 — it ran its own
+  copy in `matmul_sequential`, so the routed kernel was reachable from one dispatch
+  test and nothing else, and the eighth record's three "family" shapes all have a
+  dimension at 64 or more, where `Tensor::matmul` takes the tiled engine. It calls
+  `kernel::matmul_raw` now (the same loop, the same bits, held by a test at seeded
+  shapes), and the language entry, end to end (two `to_vec` copies and the result
+  tensor in the time): 8x8x8 1.16x faster (0.74–0.92), 48x17x33 1.35x at the median
+  inside a wide A/A band, 32x32x32 and 63x63x63 inside A/A. (3) Six CJC-side sites
+  built a `BinnedAccumulatorF64` per output element — 40 KiB zeroed and 2048 bins
+  walked for every output, more than a 27-product dot costs — and now reuse one
+  `BinnedScratchF64` per call (the same bits: the reference's own fold order and its
+  `+ 0.0`, held over 4000 seeded sequences of every value class and at each site):
+  `conv2d_raw` 2x3x28x28 by 8x3x3 from 10.76 to 4.68 ms per call (2.30x; conservative
+  1.83–2.50), `Tensor::linear` [64, 128] by [32, 128] from 2.57 to 1.58 ms (1.62x;
+  1.29–2.18), `sum_axis` [256, 64] from 257 to 135 µs (1.90x; 1.28–2.16);
+  `mean_axis`, `var_axis` and `einsum` changed the same way and were not timed. Two
+  Rust paths against each other, no kernel. Also in this record: the optimizer step
+  both interpreters run, in one place, borrowing the gradient (7 to 6 allocations per
+  step); the graph's `zero_grad` and `clip_grad` in place; those three rows ran at 2
+  elements by a shadowing mistake in the bench (fixed after), so only their
+  allocation columns are read. `relu` 1.23x and `axpy` 1.50x slower, `adam_step`
+  1.60x, the tiled rows 1.91x and 1.50x, `mse_loss_grad` 1.39x faster — as before.
+- **The cost of a kernel change, decomposed (2026-09-23).** The second stack called
+  it "a 38–46 s fat-LTO relink". Measured at `45d90e7` by alternating
+  `BRUCHION_KERNELS_DIR` between two directories holding the same archive (so
+  `cjc-runtime`'s build script reruns, the crate rebuilds and every binary relinks),
+  four times each, one cargo at a time: release 39.6–43.2 s; a profile inheriting
+  release with `lto = false` and 16 codegen units 36.0–37.2 s. Touching only the
+  bench crate's `main.rs`: release 9–11 s, the no-LTO profile 4 s. So a kernel change
+  is about 31–33 s of recompiling `cjc-runtime` and its dependents and 5–7 s of LTO
+  link; the profile was not adopted (10 % of the loop). What would remove the cost
+  is scoping: the archive's build script and `extern` block in a crate of their own,
+  so a kernel change rebuilds that crate and relinks — about the leaf figure above,
+  which is an estimate from that measurement, not a measurement. Design only.
 - **The assembly, read (2026-09-22).** The elementwise gap was attributed to "what the
   two compilers make of the same loop shape" without anyone reading the code. Read
   from the LTO'd bench binary (`cargo rustc -p bruchion-kernels-bench --release

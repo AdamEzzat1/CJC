@@ -633,6 +633,10 @@ fn workloads(o: &Opts) -> Vec<Workload> {
     {
         use cjc_runtime::accumulator::BinnedAccumulatorF64;
         use cjc_runtime::tensor::Tensor;
+        // The run's element count, for the optimizer and graph rows below: the conv2d
+        // shape's `n` shadows it (record 9 ran those rows at 2 elements for that reason;
+        // their allocation counts do not depend on it, their times did).
+        let n_step = n;
         // conv2d: 2 images, 3 channels, 28x28, 8 filters of 3x3, stride 1 — 10,816 outputs
         // of 27 products each.
         let (n, c_in, h_in, w_in, c_out, kh, kw, stride) = (2usize, 3usize, 28usize, 28usize, 8usize, 3usize, 3usize, 1usize);
@@ -798,8 +802,8 @@ fn workloads(o: &Opts) -> Vec<Workload> {
         // each interpreter carried). SGD without momentum, so the result is the same
         // bits every call and the digest holds across phases; the point of the pair is
         // the allocation column.
-        let pt = Tensor::from_vec(g.f64s(n), &[n]).expect("tensor");
-        let gt = Tensor::from_vec(g.f64s(n), &[n]).expect("tensor");
+        let pt = Tensor::from_vec(g.f64s(n_step), &[n_step]).expect("tensor");
+        let gt = Tensor::from_vec(g.f64s(n_step), &[n_step]).expect("tensor");
         fn step_before(state: &mut dyn std::any::Any, params_t: &Tensor, grads_t: &Tensor) -> Tensor {
             let mut params = params_t.to_vec();
             let grads = grads_t.to_vec();
@@ -814,11 +818,11 @@ fn workloads(o: &Opts) -> Vec<Workload> {
         {
             let (p1, g1, o1) = (pt.clone(), gt.clone(), out.clone());
             let o2 = out.clone();
-            let mut state: Box<dyn std::any::Any> = Box::new(ml::SgdState::new(n, 1e-3, 0.0));
+            let mut state: Box<dyn std::any::Any> = Box::new(ml::SgdState::new(n_step, 1e-3, 0.0));
             ws.push(Workload {
                 routed: false,
                 name: "OptimizerState.step, SGD (ml::optimizer_step_tensors, the gradient borrowed)".into(),
-                elems: n,
+                elems: n_step,
                 call: Box::new(move || {
                     let (p, gr) = black_box((&p1, &g1));
                     *o1.borrow_mut() = Some(ml::optimizer_step_tensors(state.as_mut(), p, gr).expect("step"));
@@ -829,11 +833,11 @@ fn workloads(o: &Opts) -> Vec<Workload> {
         {
             let (p1, g1, o1) = (pt, gt, out.clone());
             let o2 = out.clone();
-            let mut state: Box<dyn std::any::Any> = Box::new(ml::SgdState::new(n, 1e-3, 0.0));
+            let mut state: Box<dyn std::any::Any> = Box::new(ml::SgdState::new(n_step, 1e-3, 0.0));
             ws.push(Workload {
                 routed: false,
                 name: "OptimizerState.step, SGD (both tensors copied, the form before)".into(),
-                elems: n,
+                elems: n_step,
                 call: Box::new(move || {
                     let (p, gr) = black_box((&p1, &g1));
                     *o1.borrow_mut() = Some(step_before(state.as_mut(), p, gr));
@@ -847,8 +851,8 @@ fn workloads(o: &Opts) -> Vec<Workload> {
         // kept, so this row has no partner; its allocation count is the record).
         {
             let mut gg = cjc_ad::GradGraph::new();
-            let p = gg.parameter(Tensor::from_vec(g.f64s(n), &[n]).expect("tensor"));
-            let t = gg.parameter(Tensor::from_vec(g.f64s(n), &[n]).expect("tensor"));
+            let p = gg.parameter(Tensor::from_vec(g.f64s(n_step), &[n_step]).expect("tensor"));
+            let t = gg.parameter(Tensor::from_vec(g.f64s(n_step), &[n_step]).expect("tensor"));
             let d = gg.sub(p, t);
             let sq = gg.mul(d, d);
             let loss = gg.mean_unfused(sq);
@@ -858,7 +862,7 @@ fn workloads(o: &Opts) -> Vec<Workload> {
             ws.push(Workload {
                 routed: false,
                 name: "GradGraph zero_grad + backward + clip_grad, 2 parameters (in place)".into(),
-                elems: n,
+                elems: n_step,
                 call: Box::new(move || {
                     let mut gg = g1.borrow_mut();
                     gg.zero_grad();
