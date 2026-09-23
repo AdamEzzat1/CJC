@@ -3905,8 +3905,8 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
         "bruchion_kernels" => {
             // bruchion_kernels(on: Bool) -> Bool: the runtime switch that routes the
             // kernel-backed operations in the routing set (by default the measured set:
-            // dot_kahan, mse, the fused mse_loss_grad, matmul, the heat residual and
-            // gradient — `dispatch::KernelOps::MEASURED`) to the Bruchion pack. Returns
+            // dot_kahan, mse, the fused mse_loss_grad, matmul —
+            // `dispatch::KernelOps::MEASURED`) to the Bruchion pack. Returns
             // the previous state. With a runtime built without the `bruchion-kernels`
             // feature the switch is recorded but nothing is routed:
             // `bruchion_kernels_enabled()` says which.

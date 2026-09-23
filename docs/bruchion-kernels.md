@@ -25,13 +25,15 @@ the switch is inert there.
 The switch routes a *set* of operations, not everything the pack exports:
 `RuntimePolicy::bruchion_kernel_ops` holds one bit per `dispatch::KernelOp`, and
 `dispatch::routes(op)` is what every routed entry and every pre-checking caller asks.
-The default set is `KernelOps::MEASURED` — `dot_kahan`, `mse`, `mse_grad`, `matmul`,
-`heat1d_residual_grad`: the operations whose record shows a win or the A/A band, and
-whose routing moves no bit on any target. What it leaves out, and why, is on each
-variant of `KernelOp`: `axpy`, `relu`, `adam_step` and `matmul_tiled` lose on every
-record; `mse_grad_scaled` and `heat1d_residual` were not timed on their own; `powi`
-changes bits on MSVC targets (it makes them agree with Linux, but a default must not
-move a bit). `route_everything(true)` is the switch on with every bit set — what the
+The default set is `KernelOps::MEASURED` — `dot_kahan`, `mse`, `mse_grad`, `matmul`:
+the operations whose record shows a win or the A/A band, judged on the end-to-end row
+when one exists, and whose routing moves no bit on any target. What it leaves out, and
+why, is on each variant of `KernelOp`: `axpy`, `relu`, `adam_step` and `matmul_tiled`
+lose on every record; `heat1d_residual_grad`'s own row is inside A/A but
+`piml_heat_1d_train` end to end is 2.47x slower routed (record 8: the row's dispatch
+twin is a bit reference, not the trainer's inlined loop); `mse_grad_scaled` and
+`heat1d_residual` were not timed on their own; `powi` changes bits on MSVC targets (it
+makes them agree with Linux, but a default must not move a bit). `route_everything(true)` is the switch on with every bit set — what the
 parity tests and the benchmark's kernel arm use, so a kernel the default leaves out is
 still held to its bits and still measured — and `route_everything(false)` restores the
 default. The record's provenance names both sets.

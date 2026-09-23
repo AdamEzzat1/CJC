@@ -53,7 +53,11 @@ pub enum KernelOp {
     Powi = 1 << 9,
     /// The heat residual without the gradient. Not timed (nothing routed calls it). Off.
     Heat1dResidual = 1 << 10,
-    /// The heat residual and gradient. Faster 1.34x or inside A/A. On.
+    /// The heat residual and gradient. Its own row is inside A/A or a small win — but the
+    /// row compares the kernel with the dispatch twin, a bit reference, not the trainer's
+    /// loop: `piml_heat_1d_train` end to end is 2.47x SLOWER routed (record 8), because
+    /// the trainer's inlined loop is several times faster than the twin. Off: the
+    /// end-to-end row is the one that counts when there is one.
     Heat1dResidualGrad = 1 << 11,
 }
 
@@ -95,11 +99,12 @@ pub struct KernelOps(pub u16);
 impl KernelOps {
     pub const NONE: KernelOps = KernelOps(0);
     pub const ALL: KernelOps = KernelOps((1 << 12) - 1);
-    /// The default: the operations whose record shows no loss — a win or the A/A band —
-    /// and whose routing moves no bit on any target.
+    /// The default: the operations whose record shows no loss — a win or the A/A band,
+    /// judged on the end-to-end row when one exists — and whose routing moves no bit on
+    /// any target.
     pub const MEASURED: KernelOps = KernelOps(
         KernelOp::DotKahan as u16 | KernelOp::Mse as u16 | KernelOp::MseGrad as u16
-        | KernelOp::Matmul as u16 | KernelOp::Heat1dResidualGrad as u16,
+        | KernelOp::Matmul as u16,
     );
 
     #[inline]
@@ -819,7 +824,7 @@ mod parity {
         for op in KernelOp::EVERY {
             assert_eq!(routes(op), KernelOps::MEASURED.contains(op), "{}: the default set", op.name());
         }
-        assert!(routes(KernelOp::Matmul) && routes(KernelOp::MseGrad) && !routes(KernelOp::Axpy) && !routes(KernelOp::Powi));
+        assert!(routes(KernelOp::Matmul) && routes(KernelOp::MseGrad) && !routes(KernelOp::Axpy) && !routes(KernelOp::Powi) && !routes(KernelOp::Heat1dResidualGrad));
         crate::runtime_policy::set_bruchion_kernel_ops(KernelOps::MEASURED.with(KernelOp::Relu).without(KernelOp::Mse).0);
         assert!(routes(KernelOp::Relu) && !routes(KernelOp::Mse) && routes(KernelOp::Matmul));
         route_everything(true);
@@ -828,7 +833,7 @@ mod parity {
         }
         route_everything(false);
         assert_eq!(crate::runtime_policy::get().bruchion_kernel_ops, KernelOps::MEASURED.0);
-        assert_eq!(KernelOps::MEASURED.names(), "dot_kahan, mse, mse_grad, matmul, heat1d_residual_grad");
+        assert_eq!(KernelOps::MEASURED.names(), "dot_kahan, mse, mse_grad, matmul");
         assert_eq!(KernelOps::NONE.names(), "(none)");
         assert_eq!(KernelOps::ALL.names().matches(", ").count(), 11);
     }
