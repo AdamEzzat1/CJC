@@ -6,7 +6,7 @@ The Rust fallback path against the Bruchion kernel path, routed through `runtime
 
 - repo: C:/Users/adame/CJC
 - branch: bruchion-kernels-m1
-- commit: 28c104cfad8c4d88204028764be2a08961f2caaa
+- commit: 1cf178b62619ddac1089df9814919a3b86bea36b
 - dirty tree: false
 - dirty paths: (none outside the record directory)
 - rustc: rustc 1.97.1 (8bab26f4f 2026-07-14); host: x86_64-pc-windows-msvc
@@ -15,17 +15,17 @@ The Rust fallback path against the Bruchion kernel path, routed through `runtime
 - logical cores: 8
 - runtime policy: runtime_policy: thermal=balanced threads=4 batch=128 audit=full numeric=kahan determinism=strict adaptive=true bruchion_kernels=false
 - feature bruchion-kernels: true
-- BRUCHION_KERNELS_DIR: C:\Users\adame\AppData\Local\Temp\claude\C--Users-adame-Bruchion--claude-worktrees-bruchion-cjc-kernel-substrate-fcbb2e\3fecc690-652f-4f32-9887-52dc9c9ff71a\scratchpad\k11
-- kernel_sha256: 5c897aa07c64ce07f1517736dda9f78247485315b95db202a5dbcd9df794432c
+- BRUCHION_KERNELS_DIR: C:\Users\adame\AppData\Local\Temp\claude\C--Users-adame-Bruchion--claude-worktrees-bruchion-cjc-kernel-substrate-fcbb2e\3fecc690-652f-4f32-9887-52dc9c9ff71a\scratchpad\k12
+- kernel_sha256: f76281e378749f8f6097b0db0aafc0355995bf0a8af10daeae69f211b79f4298
 - f64::powi is binary exponentiation on this target: false
 - elements per call (n): 65536
 - protocol: iterations calibrated once on the fallback arm to ~1000000 us per phase (max 1000000); 1 warm-up phase(s) per arm; 5 measured phases, arms interleaved A1/A2/B; statistic: ns per call, median [min, max] over phases
 - seed: 42
-- unix time: 1790119622
+- unix time: 1790123770
 - launcher: bench/bruchion_kernels_bench/run.ps1 (PowerShell, load-gated)
-- load gate: total CPU avg 10.2% max 15.7% over 20 s (thresholds 15% / 25%); busiest processes (% of one core): svchost 21%, wmiprvse 15%, claude 8%
-- last boot: 9/21/2026 9:47:14 PM (uptime 18.7 h)
-- peak RSS at exit: 24856 KiB
+- load gate: total CPU avg 12.4% max 16.5% over 20 s (thresholds 15% / 25%); busiest processes (% of one core): claude 26%, svchost 12%, msmpeng 9%
+- last boot: 9/21/2026 9:47:14 PM (uptime 19.8 h)
+- peak RSS at exit: 24716 KiB
 
 ## Results
 
@@ -35,21 +35,21 @@ The Rust fallback path against the Bruchion kernel path, routed through `runtime
 
 | workload | iters/phase | fallback | fallback (A/A) | kernel | A/A band | kernel band (lo, med, hi) | allocs/call (fallback, kernel) | verdict |
 |---|---:|---:|---:|---:|---:|---:|---:|---|
-| relu | 62893 | 0.1536 [0.1519, 0.1737] ns/elem | 0.1530 [0.1508, 0.1663] ns/elem | 0.1989 [0.1882, 0.2030] ns/elem | 0.868, 0.996, 1.095 | 1.084, 1.296, 1.336 | 0, 0 | kernel slower, 1.30x |
-| axpy | 24449 | 0.4688 [0.3946, 0.5809] ns/elem | 0.4754 [0.4425, 0.5527] ns/elem | 0.6403 [0.6184, 0.6756] ns/elem | 0.762, 1.014, 1.400 | 1.065, 1.366, 1.712 | 0, 0 | kernel slower, 1.37x (within A/A) |
-| dot_kahan | 4387 | 3.0892 [3.0490, 3.2482] ns/elem | 3.0683 [3.0031, 3.4176] ns/elem | 3.0739 [2.9683, 3.6891] ns/elem | 0.925, 0.993, 1.121 | 0.914, 0.995, 1.210 | 0, 0 | inside band (within A/A) |
-| mse | 5230 | 3.0336 [3.0301, 3.5578] ns/elem | 3.0111 [2.9986, 3.7420] ns/elem | 3.0369 [3.0045, 3.6370] ns/elem | 0.843, 0.993, 1.235 | 0.844, 1.001, 1.200 | 0, 0 | inside band (within A/A) |
-| matmul 64x17x33 | 11904 | 1.8908 [1.7621, 2.5131] ns/elem | 2.0643 [1.7473, 2.4301] ns/elem | 1.4630 [1.2414, 1.5948] ns/elem | 0.695, 1.092, 1.379 | 0.494, 0.774, 0.905 | 0, 0 | kernel faster, 1.29x (within A/A) |
-| matmul 128x128x128 | 130 | 3.1082 [3.0373, 3.6845] ns/elem | 3.0886 [2.9936, 3.1838] ns/elem | 2.9797 [2.8426, 3.5118] ns/elem | 0.812, 0.994, 1.048 | 0.772, 0.959, 1.156 | 0, 0 | inside band (within A/A) |
-| adam_step (t = 7) | 3921 | 3.0779 [2.9249, 5.9803] ns/elem | 2.9654 [2.8630, 4.6749] ns/elem | 54.8548 [54.2812, 73.5170] ns/elem | 0.479, 0.963, 1.598 | 9.077, 17.822, 25.135 | 0, 0 | kernel slower, 17.82x |
-| heat1d_residual_grad 1000x9 | 48076 | 3.4468 [3.1725, 3.7733] ns/elem | 3.7626 [2.7086, 5.6703] ns/elem | 3.5055 [2.4068, 3.7501] ns/elem | 0.718, 1.092, 1.787 | 0.638, 1.017, 1.182 | 0, 0 | inside band (within A/A) |
-| heat1d_residual_grad 8192x9 | 5405 | 3.7938 [3.3517, 4.6836] ns/elem | 3.8896 [3.2025, 4.5853] ns/elem | 3.3371 [2.7058, 3.9519] ns/elem | 0.684, 1.025, 1.368 | 0.578, 0.880, 1.179 | 0, 0 | inside band (within A/A) |
-| matmul tiled 128x128x128 | 2002 | 0.3376 [0.3030, 0.4078] ns/elem | 0.3534 [0.2951, 0.3717] ns/elem | 0.5635 [0.4543, 0.6615] ns/elem | 0.724, 1.047, 1.227 | 1.114, 1.669, 2.183 | 1, 0 | kernel slower, 1.67x |
-| matmul tiled 256x256x256 | 164 | 0.3512 [0.3113, 0.4639] ns/elem | 0.3061 [0.2781, 0.5075] ns/elem | 0.5539 [0.5009, 0.7301] ns/elem | 0.599, 0.872, 1.630 | 1.080, 1.577, 2.345 | 1, 0 | kernel slower, 1.58x (within A/A) |
-| relu call path: bare ffi vs kernel::relu_raw | 29069 | 0.2347 [0.2168, 0.3284] ns/elem | 0.2373 [0.2119, 0.2974] ns/elem | 0.2251 [0.2142, 0.2341] ns/elem | 0.645, 1.011, 1.372 | 0.652, 0.959, 1.080 | 0, 0 | inside band (within A/A) |
-| relu loop: Rust body vs bare ffi | 50000 | 0.1973 [0.1702, 0.2416] ns/elem | 0.2173 [0.1717, 0.2631] ns/elem | 0.2287 [0.2230, 0.3145] ns/elem | 0.711, 1.101, 1.546 | 0.923, 1.159, 1.848 | 0, 0 | inside band (within A/A) |
-| mse_loss_grad | 4576 | 2.1243 [1.8621, 2.3390] ns/elem | 2.0396 [1.8978, 2.5416] ns/elem | 1.4207 [1.3276, 1.9900] ns/elem | 0.811, 0.960, 1.365 | 0.568, 0.669, 1.069 | 0, 0 | inside band (within A/A) |
-| mse+grad via GradGraph (status quo) | 540 | 24.4017 [20.5273, 27.4229] ns/elem | 21.7395 [20.0123, 25.5018] ns/elem | - | 0.730, 0.891, 1.242 | - | 122, - | status quo, not routed |
+| relu | 36630 | 0.1767 [0.1727, 0.2258] ns/elem | 0.1846 [0.1706, 0.2336] ns/elem | 0.2330 [0.2196, 0.2779] ns/elem | 0.755, 1.045, 1.353 | 0.973, 1.319, 1.609 | 0, 0 | inside band (within A/A) |
+| axpy | 20703 | 0.4857 [0.4499, 0.5859] ns/elem | 0.4900 [0.4685, 0.5362] ns/elem | 0.6310 [0.6076, 0.7642] ns/elem | 0.800, 1.009, 1.192 | 1.037, 1.299, 1.699 | 0, 0 | kernel slower, 1.30x |
+| dot_kahan | 4185 | 3.1564 [3.1222, 3.7780] ns/elem | 3.1378 [3.0468, 3.2087] ns/elem | 3.1253 [3.0211, 3.8771] ns/elem | 0.806, 0.994, 1.028 | 0.800, 0.990, 1.242 | 0, 0 | inside band (within A/A) |
+| mse | 4965 | 3.0847 [3.0682, 3.9751] ns/elem | 3.1352 [3.0900, 3.4973] ns/elem | 3.1418 [3.0335, 3.2892] ns/elem | 0.777, 1.016, 1.140 | 0.763, 1.019, 1.072 | 0, 0 | inside band (within A/A) |
+| matmul 64x17x33 | 9756 | 1.9215 [1.8417, 2.6013] ns/elem | 2.0537 [1.9173, 2.4062] ns/elem | 1.3714 [1.3130, 1.7088] ns/elem | 0.737, 1.069, 1.307 | 0.505, 0.714, 0.928 | 0, 0 | kernel faster, 1.40x (within A/A) |
+| matmul 128x128x128 | 154 | 3.1530 [3.1296, 3.9452] ns/elem | 3.2939 [3.2351, 3.4443] ns/elem | 3.0538 [2.9694, 3.6242] ns/elem | 0.820, 1.045, 1.101 | 0.753, 0.969, 1.158 | 0, 0 | inside band (within A/A) |
+| adam_step (t = 7) | 3749 | 3.3705 [3.2204, 3.9292] ns/elem | 3.3577 [3.2422, 3.3819] ns/elem | 5.4118 [5.2955, 6.5474] ns/elem | 0.825, 0.996, 1.050 | 1.348, 1.606, 2.033 | 0, 0 | kernel slower, 1.61x |
+| heat1d_residual_grad 1000x9 | 43668 | 2.6961 [2.4741, 3.1607] ns/elem | 2.8903 [2.7522, 3.4468] ns/elem | 2.4934 [2.2748, 3.0448] ns/elem | 0.871, 1.072, 1.393 | 0.720, 0.925, 1.231 | 0, 0 | inside band (within A/A) |
+| heat1d_residual_grad 8192x9 | 6009 | 2.7250 [2.5152, 3.3843] ns/elem | 2.5997 [2.5702, 2.7879] ns/elem | 2.3143 [2.2435, 2.6032] ns/elem | 0.759, 0.954, 1.108 | 0.663, 0.849, 1.035 | 0, 0 | inside band (within A/A) |
+| matmul tiled 128x128x128 | 1975 | 0.2762 [0.2600, 0.2852] ns/elem | 0.2838 [0.2675, 0.3405] ns/elem | 0.4054 [0.3863, 0.4178] ns/elem | 0.938, 1.027, 1.310 | 1.355, 1.468, 1.607 | 1, 0 | kernel slower, 1.47x |
+| matmul tiled 256x256x256 | 199 | 0.2726 [0.2638, 0.3410] ns/elem | 0.2784 [0.2622, 0.3308] ns/elem | 0.4206 [0.3978, 0.4299] ns/elem | 0.769, 1.021, 1.254 | 1.167, 1.543, 1.630 | 1, 0 | kernel slower, 1.54x |
+| relu call path: bare ffi vs kernel::relu_raw | 47169 | 0.2315 [0.2186, 0.2589] ns/elem | 0.2221 [0.2153, 0.2815] ns/elem | 0.2246 [0.2122, 0.2851] ns/elem | 0.832, 0.960, 1.288 | 0.820, 0.970, 1.304 | 0, 0 | inside band (within A/A) |
+| relu loop: Rust body vs bare ffi | 54644 | 0.1840 [0.1727, 0.2196] ns/elem | 0.1836 [0.1740, 0.2266] ns/elem | 0.2441 [0.2161, 0.2538] ns/elem | 0.793, 0.998, 1.312 | 0.984, 1.327, 1.469 | 0, 0 | inside band |
+| mse_loss_grad | 5555 | 1.9176 [1.8540, 2.4998] ns/elem | 2.0132 [1.8670, 2.2216] ns/elem | 1.5005 [1.4875, 1.8094] ns/elem | 0.747, 1.050, 1.198 | 0.595, 0.782, 0.976 | 0, 0 | kernel faster, 1.28x (within A/A) |
+| mse+grad via GradGraph (status quo) | 593 | 23.6569 [22.2967, 27.0963] ns/elem | 23.5025 [22.3323, 25.7040] ns/elem | - | 0.824, 0.993, 1.153 | - | 122, - | status quo, not routed |
 
 ## Reading it
 

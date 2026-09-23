@@ -1,6 +1,6 @@
 repo: C:/Users/adame/CJC
 branch: bruchion-kernels-m1
-commit: 28c104cfad8c4d88204028764be2a08961f2caaa
+commit: 1cf178b62619ddac1089df9814919a3b86bea36b
 dirty tree: false
 dirty paths: (none outside the record directory)
 rustc: rustc 1.97.1 (8bab26f4f 2026-07-14); host: x86_64-pc-windows-msvc
@@ -9,13 +9,13 @@ target: windows-x86_64
 logical cores: 8
 runtime policy: runtime_policy: thermal=balanced threads=4 batch=128 audit=full numeric=kahan determinism=strict adaptive=true bruchion_kernels=false
 feature bruchion-kernels: true
-BRUCHION_KERNELS_DIR: C:\Users\adame\AppData\Local\Temp\claude\C--Users-adame-Bruchion--claude-worktrees-bruchion-cjc-kernel-substrate-fcbb2e\3fecc690-652f-4f32-9887-52dc9c9ff71a\scratchpad\k11
-kernel_sha256: 5c897aa07c64ce07f1517736dda9f78247485315b95db202a5dbcd9df794432c
+BRUCHION_KERNELS_DIR: C:\Users\adame\AppData\Local\Temp\claude\C--Users-adame-Bruchion--claude-worktrees-bruchion-cjc-kernel-substrate-fcbb2e\3fecc690-652f-4f32-9887-52dc9c9ff71a\scratchpad\k12
+kernel_sha256: f76281e378749f8f6097b0db0aafc0355995bf0a8af10daeae69f211b79f4298
 f64::powi is binary exponentiation on this target: false
 elements per call (n): 65536
 protocol: iterations calibrated once on the fallback arm to ~1000000 us per phase (max 1000000); 1 warm-up phase(s) per arm; 5 measured phases, arms interleaved A1/A2/B; statistic: ns per call, median [min, max] over phases
 seed: 42
-unix time: 1790119622
+unix time: 1790123770
 launcher: bench/bruchion_kernels_bench/run.ps1 (PowerShell, load-gated)
-load gate: total CPU avg 10.2% max 15.7% over 20 s (thresholds 15% / 25%); busiest processes (% of one core): svchost 21%, wmiprvse 15%, claude 8%
-last boot: 9/21/2026 9:47:14 PM (uptime 18.7 h)
+load gate: total CPU avg 12.4% max 16.5% over 20 s (thresholds 15% / 25%); busiest processes (% of one core): claude 26%, svchost 12%, msmpeng 9%
+last boot: 9/21/2026 9:47:14 PM (uptime 19.8 h)
