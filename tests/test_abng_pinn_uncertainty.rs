@@ -282,6 +282,8 @@ fn pinn_double_run_chain_head_byte_identical() {
 fn pinn_replay_round_trip_preserves_predictions() {
     let mut g = build_pinn_graph(7);
     train_pinn(&mut g);
+    // R0-3 contract: flush mid-interval BLR witnesses before serialize.
+    g.checkpoint_blr();
     let blob = serialize(&g);
     let g2 = replay(&blob).unwrap();
     for x in [0.10, 0.30, 0.50, 0.70, 0.90] {
@@ -300,6 +302,8 @@ fn pinn_replay_round_trip_preserves_predictions() {
 fn pinn_smart_replay_byte_identical_to_naive() {
     let mut g = build_pinn_graph(7);
     train_pinn(&mut g);
+    // R0-3 contract: flush mid-interval BLR witnesses before serialize.
+    g.checkpoint_blr();
     let blob = serialize(&g);
     let g_naive = replay(&blob).unwrap();
     let g_smart = smart_replay(&blob).unwrap();
@@ -314,6 +318,8 @@ fn pinn_bc_provenance_stamp_persists_through_replay() {
     let mut g = build_pinn_graph(7);
     train_pinn(&mut g);
     assert_eq!(g.nodes[0].provenance_stamp_hash, PINN_BC_STAMP);
+    // R0-3 contract: flush mid-interval BLR witnesses before serialize.
+    g.checkpoint_blr();
     let blob = serialize(&g);
     let g2 = replay(&blob).unwrap();
     assert_eq!(g2.nodes[0].provenance_stamp_hash, PINN_BC_STAMP);

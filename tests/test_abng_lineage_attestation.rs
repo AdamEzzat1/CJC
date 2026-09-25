@@ -298,7 +298,9 @@ fn lineage_serialize_replay_round_trip_preserves_lineage() {
     // The serialized model preserves the audit chain + provenance
     // stamp byte-for-byte. A regulator who archives the snapshot
     // can replay it years later and reproduce every fingerprint.
-    let g = train_and_stamp(7, &dataset_a());
+    let mut g = train_and_stamp(7, &dataset_a());
+    // R0-3 contract: flush mid-interval BLR witnesses before serialize.
+    g.checkpoint_blr();
     let blob = serialize(&g);
     let g2 = replay(&blob).unwrap();
     assert_eq!(g.chain_head, g2.chain_head);
