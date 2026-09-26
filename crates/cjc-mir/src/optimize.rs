@@ -1166,8 +1166,72 @@ pub(crate) fn is_int_total(expr: &MirExpr) -> bool {
 fn is_trivial_operand(expr: &MirExpr) -> bool {
     matches!(
         expr.kind,
-        MirExprKind::IntLit(_) | MirExprKind::Var(_) | MirExprKind::VarLocal { .. }
+        MirExprKind::IntLit(_)
+            | MirExprKind::FloatLit(_)
+            | MirExprKind::Var(_)
+            | MirExprKind::VarLocal { .. }
     )
+}
+
+/// What the optimizer can prove about an expression's runtime value **if its
+/// evaluation succeeds**. MIR is untyped here, so variables, calls, fields,
+/// etc. are `Unknown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StaticKind {
+    Int,
+    Float,
+    Bool,
+    Unknown,
+}
+
+impl StaticKind {
+    pub(crate) fn is_numeric(self) -> bool {
+        matches!(self, StaticKind::Int | StaticKind::Float)
+    }
+}
+
+/// Classify `expr` (see [`StaticKind`]). Mirrors the executors' `binop_int` /
+/// `binop_float` / `eval_unary` result types for scalar operands.
+///
+/// Identity rewrites (`x * 1 => x`, `true && x => x`, `!!x => x`, …) keep
+/// evaluating `x`, so `x`'s errors survive — but they are only sound when `x`
+/// has the type the identity holds for. On an untyped variable the runtime
+/// may raise a type error (`"a" * 1`, `true && 5`) that the rewrite would
+/// silently erase, or produce different bits (`-0.0 + 0` is `+0.0`).
+pub(crate) fn static_kind(expr: &MirExpr) -> StaticKind {
+    use StaticKind::*;
+    match &expr.kind {
+        MirExprKind::IntLit(_) => Int,
+        MirExprKind::FloatLit(_) => Float,
+        MirExprKind::BoolLit(_) => Bool,
+        MirExprKind::Unary { op, operand } => match (op, static_kind(operand)) {
+            (UnaryOp::Neg, k @ (Int | Float)) => k,
+            (UnaryOp::Not, Bool) => Bool,
+            _ => Unknown,
+        },
+        MirExprKind::Binary { op, left, right } => {
+            let (l, r) = (static_kind(left), static_kind(right));
+            match op {
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow => {
+                    match (l, r) {
+                        (Int, Int) => Int,
+                        (Int | Float, Int | Float) => Float,
+                        _ => Unknown,
+                    }
+                }
+                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                    if (l.is_numeric() && r.is_numeric()) || (l == Bool && r == Bool) {
+                        Bool
+                    } else {
+                        Unknown
+                    }
+                }
+                BinOp::And | BinOp::Or if l == Bool && r == Bool => Bool,
+                _ => Unknown,
+            }
+        }
+        _ => Unknown,
+    }
 }
 
 /// Attempt to reduce an expression to a cheaper form.
@@ -1184,16 +1248,21 @@ fn try_strength_reduce(expr: &MirExpr) -> Option<MirExpr> {
                     if matches!(left.kind, MirExprKind::IntLit(0)) && is_int_total(right) {
                         return Some(MirExpr { kind: MirExprKind::IntLit(0) });
                     }
-                    // x * 1 => x
-                    if matches!(right.kind, MirExprKind::IntLit(1)) {
+                    // x * 1 => x: bit-exact for Int and Float (x * 1.0 == x,
+                    // incl. -0.0/NaN); a non-numeric `x` must keep its error.
+                    if matches!(right.kind, MirExprKind::IntLit(1)) && static_kind(left).is_numeric() {
                         return Some(*left.clone());
                     }
-                    if matches!(left.kind, MirExprKind::IntLit(1)) {
+                    if matches!(left.kind, MirExprKind::IntLit(1)) && static_kind(right).is_numeric() {
                         return Some(*right.clone());
                     }
                     // x * 2 => x + x  (cheaper on many architectures); `x` is
-                    // evaluated twice, so only for trivial operands.
-                    if matches!(right.kind, MirExprKind::IntLit(2)) && is_trivial_operand(left) {
+                    // evaluated twice, so only for trivial operands, and only
+                    // numeric (`"a" * 2` is an error but `"a" + "a"` is "aa").
+                    if matches!(right.kind, MirExprKind::IntLit(2))
+                        && is_trivial_operand(left)
+                        && static_kind(left).is_numeric()
+                    {
                         return Some(MirExpr {
                             kind: MirExprKind::Binary {
                                 op: BinOp::Add,
@@ -1204,26 +1273,26 @@ fn try_strength_reduce(expr: &MirExpr) -> Option<MirExpr> {
                     }
                     None
                 }
-                // x + 0 => x (int only; float +0 is identity but we keep it safe)
+                // x + 0 => x: Int only — for Float, -0.0 + 0 is +0.0.
                 BinOp::Add => {
-                    if matches!(right.kind, MirExprKind::IntLit(0)) {
+                    if matches!(right.kind, MirExprKind::IntLit(0)) && static_kind(left) == StaticKind::Int {
                         return Some(*left.clone());
                     }
-                    if matches!(left.kind, MirExprKind::IntLit(0)) {
+                    if matches!(left.kind, MirExprKind::IntLit(0)) && static_kind(right) == StaticKind::Int {
                         return Some(*right.clone());
                     }
                     None
                 }
-                // x - 0 => x (int only)
+                // x - 0 => x: bit-exact for Int and Float (-0.0 - 0.0 == -0.0).
                 BinOp::Sub => {
-                    if matches!(right.kind, MirExprKind::IntLit(0)) {
+                    if matches!(right.kind, MirExprKind::IntLit(0)) && static_kind(left).is_numeric() {
                         return Some(*left.clone());
                     }
                     None
                 }
-                // x / 1 => x (int only)
+                // x / 1 => x: bit-exact for Int and Float.
                 BinOp::Div => {
-                    if matches!(right.kind, MirExprKind::IntLit(1)) {
+                    if matches!(right.kind, MirExprKind::IntLit(1)) && static_kind(left).is_numeric() {
                         return Some(*left.clone());
                     }
                     None
@@ -2276,51 +2345,97 @@ mod tests {
         assert!(matches!(expr.kind, MirExprKind::Binary { op: BinOp::Mul, .. }));
     }
 
+    /// An Int-kinded non-literal operand: `3 + 4` (strength_reduce_expr does
+    /// not constant-fold, so this survives as a Binary).
+    fn int_operand() -> MirExpr {
+        mk_binary(BinOp::Add, mk_int(3), mk_int(4))
+    }
+
+    /// A Float-kinded non-literal operand: `1.5 * 2.5`.
+    fn float_operand() -> MirExpr {
+        mk_binary(BinOp::Mul, mk_float(1.5), mk_float(2.5))
+    }
+
+    /// Reduce `lhs op rhs`; return the result.
+    fn sr(op: BinOp, lhs: MirExpr, rhs: MirExpr) -> MirExpr {
+        let mut expr = mk_binary(op, lhs, rhs);
+        strength_reduce_expr(&mut expr);
+        expr
+    }
+
+    /// True iff `e` is exactly `int_operand()` (`3 + 4`), i.e. fully reduced.
+    fn is_int_operand(e: &MirExpr) -> bool {
+        matches!(&e.kind, MirExprKind::Binary { op: BinOp::Add, left, right }
+            if matches!(left.kind, MirExprKind::IntLit(3)) && matches!(right.kind, MirExprKind::IntLit(4)))
+    }
+
+    fn is_unreduced(e: &MirExpr, op: BinOp) -> bool {
+        matches!(e.kind, MirExprKind::Binary { op: o, .. } if o == op)
+    }
+
     #[test]
     fn test_sr_mul_by_one() {
-        // x * 1 => x
-        let mut expr = mk_binary(BinOp::Mul, mk_var("x"), mk_int(1));
-        strength_reduce_expr(&mut expr);
-        assert!(matches!(expr.kind, MirExprKind::Var(ref n) if n == "x"));
+        // x * 1 => x for numeric x (both sides), not for an untyped variable.
+        assert!(is_int_operand(&sr(BinOp::Mul, int_operand(), mk_int(1))));
+        assert!(is_int_operand(&sr(BinOp::Mul, mk_int(1), int_operand())));
+        assert!(matches!(sr(BinOp::Mul, float_operand(), mk_int(1)).kind,
+            MirExprKind::Binary { op: BinOp::Mul, ref left, .. } if matches!(left.kind, MirExprKind::FloatLit(_))));
+        // `x` may be a String: "a" * 1 is a runtime error the rewrite would erase.
+        assert!(is_unreduced(&sr(BinOp::Mul, mk_var("x"), mk_int(1)), BinOp::Mul));
     }
 
     #[test]
     fn test_sr_mul_by_two() {
-        // x * 2 => x + x
-        let mut expr = mk_binary(BinOp::Mul, mk_var("x"), mk_int(2));
-        strength_reduce_expr(&mut expr);
-        match &expr.kind {
+        // x * 2 => x + x for a trivial numeric operand only.
+        match &sr(BinOp::Mul, mk_int(21), mk_int(2)).kind {
             MirExprKind::Binary { op, left, right } => {
                 assert_eq!(*op, BinOp::Add);
-                assert!(matches!(left.kind, MirExprKind::Var(ref n) if n == "x"));
-                assert!(matches!(right.kind, MirExprKind::Var(ref n) if n == "x"));
+                assert!(matches!(left.kind, MirExprKind::IntLit(21)));
+                assert!(matches!(right.kind, MirExprKind::IntLit(21)));
             }
             _ => panic!("expected Binary Add"),
         }
+        // Untyped var: "a" * 2 errors but "a" + "a" is "aa" — no rewrite.
+        assert!(is_unreduced(&sr(BinOp::Mul, mk_var("x"), mk_int(2)), BinOp::Mul));
     }
 
     #[test]
     fn test_sr_add_zero() {
-        // x + 0 => x
-        let mut expr = mk_binary(BinOp::Add, mk_var("x"), mk_int(0));
-        strength_reduce_expr(&mut expr);
-        assert!(matches!(expr.kind, MirExprKind::Var(ref n) if n == "x"));
+        // x + 0 => x for Int only.
+        assert!(is_int_operand(&sr(BinOp::Add, int_operand(), mk_int(0))));
+        assert!(is_int_operand(&sr(BinOp::Add, mk_int(0), int_operand())));
+        // Float: -0.0 + 0 is +0.0, so the rewrite would change bits.
+        assert!(is_unreduced(&sr(BinOp::Add, float_operand(), mk_int(0)), BinOp::Add));
+        assert!(is_unreduced(&sr(BinOp::Add, mk_var("x"), mk_int(0)), BinOp::Add));
     }
 
     #[test]
     fn test_sr_sub_zero() {
-        // x - 0 => x
-        let mut expr = mk_binary(BinOp::Sub, mk_var("x"), mk_int(0));
-        strength_reduce_expr(&mut expr);
-        assert!(matches!(expr.kind, MirExprKind::Var(ref n) if n == "x"));
+        // x - 0 => x for Int and Float (-0.0 - 0.0 == -0.0).
+        assert!(is_int_operand(&sr(BinOp::Sub, int_operand(), mk_int(0))));
+        assert!(!is_unreduced(&sr(BinOp::Sub, float_operand(), mk_int(0)), BinOp::Sub));
+        assert!(is_unreduced(&sr(BinOp::Sub, mk_var("x"), mk_int(0)), BinOp::Sub));
     }
 
     #[test]
     fn test_sr_div_by_one() {
-        // x / 1 => x
-        let mut expr = mk_binary(BinOp::Div, mk_var("x"), mk_int(1));
-        strength_reduce_expr(&mut expr);
-        assert!(matches!(expr.kind, MirExprKind::Var(ref n) if n == "x"));
+        // x / 1 => x for Int and Float.
+        assert!(is_int_operand(&sr(BinOp::Div, int_operand(), mk_int(1))));
+        assert!(!is_unreduced(&sr(BinOp::Div, float_operand(), mk_int(1)), BinOp::Div));
+        assert!(is_unreduced(&sr(BinOp::Div, mk_var("x"), mk_int(1)), BinOp::Div));
+    }
+
+    #[test]
+    fn test_static_kind_classifies_scalars_and_refuses_unknowns() {
+        assert_eq!(static_kind(&int_operand()), StaticKind::Int);
+        assert_eq!(static_kind(&float_operand()), StaticKind::Float);
+        assert_eq!(static_kind(&mk_binary(BinOp::Add, mk_int(1), mk_float(2.0))), StaticKind::Float);
+        assert_eq!(static_kind(&mk_binary(BinOp::Lt, mk_int(1), mk_int(2))), StaticKind::Bool);
+        assert_eq!(static_kind(&mk_unary(UnaryOp::Not, mk_bool(true))), StaticKind::Bool);
+        assert_eq!(static_kind(&mk_var("x")), StaticKind::Unknown);
+        // `x + 1` may be String concatenation or a Tensor: unknown.
+        assert_eq!(static_kind(&mk_binary(BinOp::Add, mk_var("x"), mk_int(1))), StaticKind::Unknown);
+        assert_eq!(static_kind(&mk_binary(BinOp::Lt, mk_var("x"), mk_int(1))), StaticKind::Unknown);
     }
 
     // -- CSE tests --
@@ -2474,8 +2589,10 @@ mod tests {
 
     #[test]
     fn test_full_optimize_with_strength_reduction() {
-        // let x = y * 1  (should be reduced to y)
-        // let z = y + 0  (should be reduced to y)
+        // let x = y * 1 ; let z = y + 0 — `y` is an untyped variable (MIR has
+        // no types; it could hold a String, for which `y * 1` is a runtime
+        // error, or a Float, for which `-0.0 + 0` is `+0.0`). The full
+        // pipeline must therefore leave both identities in place.
         let program = mk_program(vec![mk_fn(
             "__main",
             vec![
@@ -2507,18 +2624,17 @@ mod tests {
         let optimized = optimize_program(&program);
         let main = &optimized.functions[0];
 
-        // After SR: x = y, z = y
-        // After CSE: z should alias x (both are just "y")
-        // Check that x's init is now just Var("y")
-        match &main.body.stmts[1] {
-            MirStmt::Let { init, .. } => {
-                assert!(
-                    matches!(init.kind, MirExprKind::Var(ref n) if n == "y"),
-                    "expected Var(y) after strength reduction, got {:?}",
-                    init.kind
-                );
+        for (i, op) in [(1, BinOp::Mul), (2, BinOp::Add)] {
+            match &main.body.stmts[i] {
+                MirStmt::Let { init, .. } => {
+                    assert!(
+                        matches!(init.kind, MirExprKind::Binary { op: o, .. } if o == op),
+                        "identity on untyped `y` must not be reduced, got {:?}",
+                        init.kind
+                    );
+                }
+                _ => panic!("expected Let"),
             }
-            _ => panic!("expected Let"),
         }
     }
 
@@ -3297,14 +3413,15 @@ mod tests {
 
     #[test]
     fn sr_in_place_rewrite_counts_but_doesnt_shrink() {
-        // x * 2 → x + x  (1 rewrite, node count unchanged)
+        // 21 * 2 → 21 + 21  (1 rewrite, node count unchanged). The operand
+        // must be trivial AND numeric; an untyped Var is correctly refused.
         let body = MirBody {
             stmts: vec![MirStmt::Let {
                 name: "a".to_string(),
                 mutable: false,
                 init: ekind(MirExprKind::Binary {
                     op: BinOp::Mul,
-                    left: Box::new(ekind(MirExprKind::Var("x".to_string()))),
+                    left: Box::new(ekind(MirExprKind::IntLit(21))),
                     right: Box::new(ekind(MirExprKind::IntLit(2))),
                 }),
                 alloc_hint: None,

@@ -1082,13 +1082,25 @@ fn eval_expr_row(df: &DataFrame, expr: &DExpr, row: usize) -> Result<ExprValue, 
     }
 }
 
+/// Error message for integer division by zero, shared by the row and
+/// vectorized evaluators so both report byte-identical errors.
+const INT_DIV_BY_ZERO: &str = "integer division by zero";
+
 fn eval_binop(op: DBinOp, left: ExprValue, right: ExprValue) -> Result<ExprValue, DataError> {
     match (left, right) {
+        // Integer arithmetic wraps like the language executors; `/` by zero
+        // is an error (was a panic). Keep in sync with `vectorized_binop`.
         (ExprValue::Int(a), ExprValue::Int(b)) => match op {
-            DBinOp::Add => Ok(ExprValue::Int(a + b)),
-            DBinOp::Sub => Ok(ExprValue::Int(a - b)),
-            DBinOp::Mul => Ok(ExprValue::Int(a * b)),
-            DBinOp::Div => Ok(ExprValue::Int(a / b)),
+            DBinOp::Add => Ok(ExprValue::Int(a.wrapping_add(b))),
+            DBinOp::Sub => Ok(ExprValue::Int(a.wrapping_sub(b))),
+            DBinOp::Mul => Ok(ExprValue::Int(a.wrapping_mul(b))),
+            DBinOp::Div => {
+                if b == 0 {
+                    Err(DataError::InvalidOperation(INT_DIV_BY_ZERO.into()))
+                } else {
+                    Ok(ExprValue::Int(a.wrapping_div(b)))
+                }
+            }
             DBinOp::Gt => Ok(ExprValue::Bool(a > b)),
             DBinOp::Lt => Ok(ExprValue::Bool(a < b)),
             DBinOp::Ge => Ok(ExprValue::Bool(a >= b)),
@@ -3153,10 +3165,18 @@ fn vectorized_binop(op: DBinOp, left: &Column, right: &Column) -> Result<Column,
         (Column::Int(a), Column::Int(b)) => {
             let n = a.len();
             match op {
-                DBinOp::Add => { let mut r = vec![0i64; n]; for i in 0..n { r[i] = a[i] + b[i]; } Ok(Column::Int(r)) }
-                DBinOp::Sub => { let mut r = vec![0i64; n]; for i in 0..n { r[i] = a[i] - b[i]; } Ok(Column::Int(r)) }
-                DBinOp::Mul => { let mut r = vec![0i64; n]; for i in 0..n { r[i] = a[i] * b[i]; } Ok(Column::Int(r)) }
-                DBinOp::Div => { let mut r = vec![0i64; n]; for i in 0..n { r[i] = a[i] / b[i]; } Ok(Column::Int(r)) }
+                DBinOp::Add => { let mut r = vec![0i64; n]; for i in 0..n { r[i] = a[i].wrapping_add(b[i]); } Ok(Column::Int(r)) }
+                DBinOp::Sub => { let mut r = vec![0i64; n]; for i in 0..n { r[i] = a[i].wrapping_sub(b[i]); } Ok(Column::Int(r)) }
+                DBinOp::Mul => { let mut r = vec![0i64; n]; for i in 0..n { r[i] = a[i].wrapping_mul(b[i]); } Ok(Column::Int(r)) }
+                DBinOp::Div => {
+                    // Same semantics and message as the row path (`eval_binop`).
+                    if b.contains(&0) {
+                        return Err(TidyError::Internal(
+                            DataError::InvalidOperation(INT_DIV_BY_ZERO.into()).to_string(),
+                        ));
+                    }
+                    let mut r = vec![0i64; n]; for i in 0..n { r[i] = a[i].wrapping_div(b[i]); } Ok(Column::Int(r))
+                }
                 DBinOp::Gt => { let mut r = vec![false; n]; for i in 0..n { r[i] = a[i] > b[i]; } Ok(Column::Bool(r)) }
                 DBinOp::Lt => { let mut r = vec![false; n]; for i in 0..n { r[i] = a[i] < b[i]; } Ok(Column::Bool(r)) }
                 DBinOp::Ge => { let mut r = vec![false; n]; for i in 0..n { r[i] = a[i] >= b[i]; } Ok(Column::Bool(r)) }
@@ -5280,6 +5300,57 @@ mod phase10_unit_tests {
             assert_eq!(v[4], 15);
         } else {
             panic!("expected Int column");
+        }
+    }
+
+    /// Regression: DExpr integer `/` by zero panicked ("attempt to divide by
+    /// zero") in both the row and vectorized evaluators, and `+ - *` panicked
+    /// on overflow in debug builds. Both paths must now agree: wrapping
+    /// arithmetic, and a byte-identical error for division by zero.
+    #[test]
+    fn int_arith_edge_cases_row_and_vectorized_agree() {
+        let cases: &[(DBinOp, i64, i64)] = &[
+            (DBinOp::Div, i64::MIN, -1),
+            (DBinOp::Add, i64::MAX, 1),
+            (DBinOp::Sub, i64::MIN, 1),
+            (DBinOp::Mul, i64::MAX, 2),
+            (DBinOp::Div, -7, 2),
+        ];
+        for &(op, a, b) in cases {
+            let want = match op {
+                DBinOp::Div => a.wrapping_div(b),
+                DBinOp::Add => a.wrapping_add(b),
+                DBinOp::Sub => a.wrapping_sub(b),
+                _ => a.wrapping_mul(b),
+            };
+            let row = eval_binop(op, ExprValue::Int(a), ExprValue::Int(b)).unwrap();
+            assert!(matches!(row, ExprValue::Int(v) if v == want), "row {op:?} {a} {b}");
+            let col = vectorized_binop(op, &Column::Int(vec![a]), &Column::Int(vec![b])).unwrap();
+            assert!(matches!(col, Column::Int(ref v) if v == &vec![want]), "vec {op:?} {a} {b}");
+        }
+
+        let row_err = eval_binop(DBinOp::Div, ExprValue::Int(1), ExprValue::Int(0)).unwrap_err();
+        let vec_err =
+            vectorized_binop(DBinOp::Div, &Column::Int(vec![1, 2]), &Column::Int(vec![1, 0]))
+                .unwrap_err();
+        // The row path reaches callers as TidyError::Internal(DataError text).
+        assert_eq!(TidyError::Internal(row_err.to_string()).to_string(), vec_err.to_string());
+    }
+
+    #[test]
+    fn mutate_int_div_by_zero_is_error_not_panic() {
+        let df = make_df();
+        let frame = df.tidy().mutate(&[("q", DExpr::BinOp {
+            op: DBinOp::Div,
+            left: Box::new(DExpr::Col("x".into())),
+            right: Box::new(DExpr::LitInt(0)),
+        })]);
+        match frame {
+            Ok(_) => panic!("x / 0 on an Int column must be an error"),
+            Err(e) => {
+                let err = e.to_string();
+                assert!(err.contains("integer division by zero"), "got: {err}");
+            }
         }
     }
 
