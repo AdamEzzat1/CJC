@@ -58,8 +58,13 @@ fn compact_scaled_chain_head_canary_locked() {
     let out = run_parity(abng_demos::compact_scaled_source::SOURCE, SEED);
     let chain = extract_value(&out, "chain_head");
     println!("compact_scaled cjcl canary chain_head = {chain}");
+    // Re-locked 2026-09-26 — runtime math builtins moved to
+    // `cjc_repro::dmath` (ADR-0046 amendment): the source's `sin` builtin
+    // now returns platform-independent bits. audit_grew_correctly and
+    // verify_post are unchanged. Pre-dmath hex:
+    // `00cba297e7532b877fe6507910e96d7ee0f50c72e672e83947f162e436a1e9f6`.
     const CANARY_HEX: &str =
-        "00cba297e7532b877fe6507910e96d7ee0f50c72e672e83947f162e436a1e9f6";
+        "b8db6447e2f0bb584c12ad53edcdd6c6927792c1ecc1e13572b9ee530bc50021";
     assert_eq!(
         chain, CANARY_HEX,
         "compact_scaled cjcl chain_head canary mismatch — see comment"

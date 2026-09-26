@@ -17,6 +17,7 @@
 //! - Side-effecting operations (calls, assigns, index) must not be removed.
 //! - All passes are deterministic and platform-independent.
 
+use cjc_repro::dmath::DetMath;
 use crate::{MirBody, MirExpr, MirExprKind, MirFunction, MirProgram, MirStmt};
 use cjc_ast::{BinOp, UnaryOp};
 use std::collections::{BTreeMap, BTreeSet};
@@ -686,7 +687,7 @@ fn fold_int_binop(op: BinOp, a: i64, b: i64) -> Option<MirExprKind> {
                 // Must be bit-identical to the executors' `binop_int` Pow,
                 // which goes through f64 (saturating on overflow). An exact
                 // `wrapping_pow` fold diverged for results beyond 2^53.
-                Some(MirExprKind::IntLit((a as f64).powf(b as f64) as i64))
+                Some(MirExprKind::IntLit((a as f64).det_powf(b as f64) as i64))
             }
         }
         BinOp::BitAnd => Some(MirExprKind::IntLit(a & b)),
@@ -715,7 +716,7 @@ fn fold_float_binop(op: BinOp, a: f64, b: f64) -> Option<MirExprKind> {
         BinOp::Mul => Some(MirExprKind::FloatLit(a * b)),
         BinOp::Div => Some(MirExprKind::FloatLit(a / b)), // IEEE 754: div by 0 => Inf
         BinOp::Mod => Some(MirExprKind::FloatLit(a % b)),
-        BinOp::Pow => Some(MirExprKind::FloatLit(a.powf(b))),
+        BinOp::Pow => Some(MirExprKind::FloatLit(a.det_powf(b))),
         BinOp::Eq => Some(MirExprKind::BoolLit(a == b)),
         BinOp::Ne => Some(MirExprKind::BoolLit(a != b)),
         BinOp::Lt => Some(MirExprKind::BoolLit(a < b)),

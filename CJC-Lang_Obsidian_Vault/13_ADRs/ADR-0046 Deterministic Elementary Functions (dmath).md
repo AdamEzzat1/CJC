@@ -1,6 +1,6 @@
 # ADR-0046 Deterministic Elementary Functions (`cjc_repro::dmath`)
 
-- **Status:** Accepted (2026-09-24). Scope: `cjc-quantum`. `cjc-runtime` builtins deferred (see "Not decided here").
+- **Status:** Accepted (2026-09-24). Scope: `cjc-quantum`. **Amended 2026-09-26:** extended to everything a `.cjcl` program can observe (see "Amendment 2026-09-26").
 - **Crates:** `cjc-repro` (new module `dmath`), `cjc-quantum` (59 call sites switched)
 - **Companion docs:** `docs/quantum_simulation_research_stack/VERIFY_FOLLOWUPS.md` (the 6.0% Windows/Linux divergence measurement), `verification/dmath_check.py`, `verification/dmath_check/`
 - **Related:** [[ADR-0004 SplitMix64 RNG]], [[ADR-0002 Kahan Accumulator]], [[ADR-0044 Quantum Value Semantics]]
@@ -66,5 +66,58 @@ Known fdlibm results reproduced exactly: `exp(1) = 2.7182818284590455`, which is
 
 ## Not decided here
 
-- **`cjc-runtime` builtins** (`sin`, `cos`, `exp`, `log`, `pow`, `tanh`, … exposed to `.cjcl`, plus `cjc-ad`'s dual and tape ops) still use platform libm. Switching them changes the last bits of every existing golden hash in the repo (chess RL weight hashes, PINN, ABNG canaries). That needs its own decision, a hash-migration plan, and `tan`/`atan2`/`tanh`/`asin`/… implementations. Tracked as a follow-up.
+- ~~`cjc-runtime` builtins still use platform libm~~ — decided in the amendment below.
 - `sqrt` needs nothing: IEEE requires it to be correctly rounded.
+- **Analytics crates** (`cjc-vizor`, `cjc-nss`, `cjc-cana`, `cjc-abng`, `cjc-locke`, `cjc-cronos-gan`, ~110 sites) still call platform libm internally. Their outputs are not bit-identical across OSes yet. Deliberately out of scope for the amendment; a follow-up.
+
+## Amendment 2026-09-26 — runtime math builtins
+
+**Decision.** Every transcendental a `.cjcl` program can observe now comes
+from `dmath`: `cjc-runtime` (builtins, tensor ops, activations,
+distributions incl. `randn`, stats), `cjc-ad` (autodiff forward and backward
+ops, so they match the forward builtins), both executors' `**`, both MIR
+constant folders, and `cjc-data` `DExpr` functions. 387 call sites, migrated
+by renaming `x.exp()` → `x.det_exp()` through a new `DetMath` extension
+trait (inherent `f64` methods would shadow same-named trait methods). The
+trait exists only for `f64`, so every compiled rename is on an `f64`; the 12
+renames that hit `GradGraph` node builders (`g.exp(node)`) failed to compile
+and were reverted.
+
+**New functions** (all needed by the runtime): `tan`, `asin`, `acos`,
+`atan`, `atan2`, `sinh`, `cosh`, `tanh`, `atanh`, `exp_m1`, `ln_1p`, `log2`,
+`log10`, `hypot`, and an accurate `pow`. The old `pow = exp(y · ln x)` lost
+~|y · ln x| ulps (e.g. tens of ulps for `10.0 ** 20`) — acceptable for
+quantum noise factors, not for the language's `**`. It is replaced by
+fdlibm `e_pow.c`. Sources: musl (fdlibm ports and musl's own
+`tanh`/`sinh`/`cosh`/`atanh`/`hypot`, MIT), FreeBSD `msun` for `log2` and
+`pow` (musl replaced both with table-driven code).
+
+**Evidence.**
+
+| Check | Result |
+|---|---|
+| mpmath, 609,860 evaluations (`verification/dmath_ext_check.py`), inputs concentrated on each algorithm's branch thresholds | < 1 ulp: `tan asin acos atan exp_m1 ln_1p log2 log10 pow hypot` (pow 0.81, log2 0.74, tan 0.75). Above 1 ulp: `atan2` 1.20, `cosh` 1.24, `atanh` 1.49, `sinh` 1.67, `tanh` 1.95 |
+| Bit-compare with musl's own C code (`verification/musl_bitcompare/`, MinGW gcc, no FMA) | Bit-identical on every comparable input (377,655 across 10 functions; `sinh`/`cosh` except paths that call musl's table-driven `exp`). So the >1 ulp cases are musl's algorithms, not transcription loss |
+| Platform-libm cross-check | Found Windows UCRT `atanh` off by up to 8.4 ulp near ±1 (mpmath-confirmed; dmath 0.41 ulp) — an example of the inconsistency this removes |
+| `dmath` golden hashes | `GOLDEN_HASH` 0xa92df4d4e1fb935e → 0x8ae8ded20ae0ffde (pow replaced; sin/cos/exp/ln unchanged); new `GOLDEN_HASH_EXTENDED` 0xa7a13cc95309466a. Enforced on Linux/Windows/macOS CI |
+
+**Hash migration.** Full workspace after the switch: 5 of 12,218 tests moved,
+each attributed to a `.cjcl` transcendental builtin feeding the hashed
+output and re-locked with its pre-dmath value recorded in a comment:
+`primitive_master_hash_golden` (fixture calls `sin cos exp log randn`) and
+the ABNG `.cjcl` chain-head canaries `pinn_cjcl`, `pinn_scaled`,
+`compact_scaled` (sources call `sin`/`cos`/`exp`); every functional
+assertion in those programs is unchanged. Three property tests used the
+platform libm as an **exact** oracle for runtime output, which made them
+seed-dependent after the switch: `tanh_forward_matches_direct` (failed on
+the first run), `prop_adam_step_matches_oracle` (bias correction via
+`powf`; passed on the first run, failed on the second), and
+`reconstructed_first_step_from_extracted_b` (tanh; in
+`tests/state_space_tests/`, which no test target currently compiles). All
+now use `dmath`. The `fused_matmul_norm` p-norm references were
+aligned to `dmath::pow` too (their exact comparisons cover only L1/L2 today,
+so they were not failing). The chess RL weight hash did not move.
+
+**Not verified locally:** Linux bit-identity (no Docker daemon on the dev
+machine). The golden-hash tests run in the three-OS CI matrix, which is the
+cross-platform check.

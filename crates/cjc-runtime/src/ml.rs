@@ -5,6 +5,7 @@
 //! - Kahan summation for all reductions.
 //! - Stable sort for AUC-ROC with index tie-breaking.
 
+use cjc_repro::dmath::DetMath;
 use cjc_repro::KahanAccumulatorF64;
 
 use crate::accumulator::BinnedAccumulatorF64;
@@ -42,7 +43,7 @@ pub fn cross_entropy_loss(pred: &[f64], target: &[f64]) -> Result<f64, String> {
     let eps = 1e-12;
     let mut acc = KahanAccumulatorF64::new();
     for i in 0..pred.len() {
-        acc.add(-target[i] * (pred[i] + eps).ln());
+        acc.add(-target[i] * (pred[i] + eps).det_ln());
     }
     Ok(acc.finalize() / pred.len() as f64)
 }
@@ -59,7 +60,7 @@ pub fn binary_cross_entropy(pred: &[f64], target: &[f64]) -> Result<f64, String>
     let mut acc = KahanAccumulatorF64::new();
     for i in 0..pred.len() {
         let p = pred[i].max(eps).min(1.0 - eps);
-        acc.add(-(target[i] * p.ln() + (1.0 - target[i]) * (1.0 - p).ln()));
+        acc.add(-(target[i] * p.det_ln() + (1.0 - target[i]) * (1.0 - p).det_ln()));
     }
     Ok(acc.finalize() / pred.len() as f64)
 }
@@ -238,8 +239,8 @@ pub fn adam_step(params: &mut [f64], grads: &[f64], state: &mut AdamState) {
         let new_v = state.beta2 * state.v_at(p) + (1.0 - state.beta2) * grads[i] * grads[i];
         state.set_m_at(p, new_m);
         state.set_v_at(p, new_v);
-        let m_hat = new_m / (1.0 - state.beta1.powf(t));
-        let v_hat = new_v / (1.0 - state.beta2.powf(t));
+        let m_hat = new_m / (1.0 - state.beta1.det_powf(t));
+        let v_hat = new_v / (1.0 - state.beta2.det_powf(t));
         params[i] -= state.lr * m_hat / (v_hat.sqrt() + state.eps);
     }
 }
@@ -576,14 +577,14 @@ pub fn apply_dropout(data: &[f64], mask: &[f64]) -> Result<Vec<f64>, String> {
 /// Learning rate schedule: step decay.
 /// lr = initial_lr * decay_rate^(floor(epoch / step_size))
 pub fn lr_step_decay(initial_lr: f64, decay_rate: f64, epoch: usize, step_size: usize) -> f64 {
-    initial_lr * decay_rate.powi((epoch / step_size) as i32)
+    initial_lr * decay_rate.det_powi((epoch / step_size) as i32)
 }
 
 /// Learning rate schedule: cosine annealing.
 /// lr = min_lr + 0.5 * (max_lr - min_lr) * (1 + cos(pi * epoch / total_epochs))
 pub fn lr_cosine(max_lr: f64, min_lr: f64, epoch: usize, total_epochs: usize) -> f64 {
     let ratio = epoch as f64 / total_epochs as f64;
-    min_lr + 0.5 * (max_lr - min_lr) * (1.0 + (std::f64::consts::PI * ratio).cos())
+    min_lr + 0.5 * (max_lr - min_lr) * (1.0 + (std::f64::consts::PI * ratio).det_cos())
 }
 
 /// Learning rate schedule: linear warmup.
@@ -1383,16 +1384,16 @@ pub fn lstm_cell_fused(
             let go = gih[base + 3 * hidden_size + h] + ghh[base + 3 * hidden_size + h];
 
             // Activations (scalar, no tensor allocation)
-            let i_val = 1.0 / (1.0 + (-gi).exp()); // sigmoid
-            let f_val = 1.0 / (1.0 + (-gf).exp()); // sigmoid
-            let g_val = gg.tanh();                   // tanh
-            let o_val = 1.0 / (1.0 + (-go).exp()); // sigmoid
+            let i_val = 1.0 / (1.0 + (-gi).det_exp()); // sigmoid
+            let f_val = 1.0 / (1.0 + (-gf).det_exp()); // sigmoid
+            let g_val = gg.det_tanh();                   // tanh
+            let o_val = 1.0 / (1.0 + (-go).det_exp()); // sigmoid
 
             // Cell and hidden state update
             let c_idx = b_idx * hidden_size + h;
             let c_val = f_val * cprev[c_idx] + i_val * g_val;
             c_new_data[c_idx] = c_val;
-            h_new_data[c_idx] = o_val * c_val.tanh();
+            h_new_data[c_idx] = o_val * c_val.det_tanh();
         }
     }
 
@@ -1476,17 +1477,17 @@ pub fn gru_cell_fused(
         for h in 0..hidden_size {
             // r = sigmoid(ih_r + hh_r)
             let r_val =
-                1.0 / (1.0 + (-(gih[base + h] + ghh[base + h])).exp());
+                1.0 / (1.0 + (-(gih[base + h] + ghh[base + h])).det_exp());
             // z = sigmoid(ih_z + hh_z)
             let z_val = 1.0
                 / (1.0
                     + (-(gih[base + hidden_size + h]
                         + ghh[base + hidden_size + h]))
-                        .exp());
+                        .det_exp());
             // n = tanh(ih_n + r * hh_n)
             let n_val = (gih[base + 2 * hidden_size + h]
                 + r_val * ghh[base + 2 * hidden_size + h])
-                .tanh();
+                .det_tanh();
 
             // h_new = (1 - z) * n + z * h_prev
             let h_idx = b_idx * hidden_size + h;

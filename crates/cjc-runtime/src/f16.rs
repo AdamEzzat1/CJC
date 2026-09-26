@@ -17,6 +17,7 @@
 //!
 //! Range: ±65504 (max normal), ±6.1e-5 (min positive subnormal)
 
+use cjc_repro::dmath::DetMath;
 use crate::accumulator::BinnedAccumulatorF64;
 
 // ---------------------------------------------------------------------------
@@ -64,7 +65,7 @@ impl F16 {
                 if sign == 1 { -0.0 } else { 0.0 }
             } else {
                 // Subnormal: value = sign * 2^(-14) * (mant / 1024)
-                sign_f * (mant as f64) * 2.0f64.powi(-24)
+                sign_f * (mant as f64) * 2.0f64.det_powi(-24)
             }
         } else if exp == 0x1F {
             if mant == 0 {
@@ -76,7 +77,7 @@ impl F16 {
             }
         } else {
             // Normal: value = sign * 2^(exp-15) * (1 + mant/1024)
-            sign_f * 2.0f64.powi(exp as i32 - 15) * (1.0 + mant as f64 / 1024.0)
+            sign_f * 2.0f64.det_powi(exp as i32 - 15) * (1.0 + mant as f64 / 1024.0)
         }
     }
 
@@ -107,7 +108,7 @@ impl F16 {
         // Subnormal range: < 2^(-14) = 6.103515625e-5
         if abs_val < 6.103515625e-5 {
             // Subnormal: round to nearest subnormal representation.
-            let mant = (abs_val / 2.0f64.powi(-24)).round() as u16;
+            let mant = (abs_val / 2.0f64.det_powi(-24)).round() as u16;
             if mant == 0 {
                 return F16(sign); // Underflow to signed zero
             }
@@ -115,7 +116,7 @@ impl F16 {
         }
 
         // Normal range.
-        let log2_val = abs_val.log2();
+        let log2_val = abs_val.det_log2();
         let exp = log2_val.floor() as i32;
         let biased_exp = (exp + 15) as u16;
 
@@ -123,7 +124,7 @@ impl F16 {
             return F16(sign | 0x7C00); // Overflow
         }
 
-        let significand = abs_val / 2.0f64.powi(exp) - 1.0;
+        let significand = abs_val / 2.0f64.det_powi(exp) - 1.0;
         let mant = (significand * 1024.0).round() as u16;
 
         // Handle rounding that pushes mantissa to 1024 (overflow to next exponent).

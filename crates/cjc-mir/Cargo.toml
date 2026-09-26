@@ -12,3 +12,6 @@ cjc-hir.workspace = true
 cjc-ast.workspace = true
 cjc-types.workspace = true
 cjc-diag.workspace = true
+# Constant folding must compute `**` bit-identically to the executors, which
+# use `cjc_repro::dmath` (zero-dependency crate, so no cycle).
+cjc-repro.workspace = true

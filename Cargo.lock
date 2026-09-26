@@ -613,6 +613,7 @@ dependencies = [
  "cjc-ast",
  "cjc-diag",
  "cjc-hir",
+ "cjc-repro",
  "cjc-types",
 ]
 

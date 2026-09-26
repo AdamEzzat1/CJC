@@ -27,6 +27,7 @@
 //! - [`Interpreter::new`] + [`Interpreter::exec`] for single-file programs.
 //! - [`run_program_with_modules_eval`] for multi-file module programs.
 
+use cjc_repro::dmath::DetMath;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -1757,7 +1758,7 @@ impl Interpreter {
             BinOp::Gt => Ok(Value::Bool(a > b)),
             BinOp::Le => Ok(Value::Bool(a <= b)),
             BinOp::Ge => Ok(Value::Bool(a >= b)),
-            BinOp::Pow => Ok(Value::Int((a as f64).powf(b as f64) as i64)),
+            BinOp::Pow => Ok(Value::Int((a as f64).det_powf(b as f64) as i64)),
             BinOp::BitAnd => Ok(Value::Int(a & b)),
             BinOp::BitOr => Ok(Value::Int(a | b)),
             BinOp::BitXor => Ok(Value::Int(a ^ b)),
@@ -1782,7 +1783,7 @@ impl Interpreter {
             BinOp::Gt => Ok(Value::Bool(a > b)),
             BinOp::Le => Ok(Value::Bool(a <= b)),
             BinOp::Ge => Ok(Value::Bool(a >= b)),
-            BinOp::Pow => Ok(Value::Float(a.powf(b))),
+            BinOp::Pow => Ok(Value::Float(a.det_powf(b))),
             BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => Err(EvalError::Runtime(format!(
                 "cannot apply `{op}` to Float values"
             ))),

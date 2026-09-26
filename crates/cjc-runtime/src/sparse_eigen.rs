@@ -4,6 +4,7 @@
 //! general (Arnoldi) matrices. All operations use Kahan summation for
 //! order-invariant deterministic reductions.
 
+use cjc_repro::dmath::DetMath;
 use crate::sparse::SparseCsr;
 use cjc_repro::kahan_sum_f64;
 
@@ -368,7 +369,7 @@ fn tridiagonal_qr(diag: &[f64], offdiag: &[f64]) -> (Vec<f64>, usize) {
 
             // Wilkinson shift
             let mut g = (d[l_start + 1] - d[l_start]) / (2.0 * e[l_start]);
-            let r = g.hypot(1.0);
+            let r = g.det_hypot(1.0);
             g = d[m] - d[l_start] + e[l_start] / (g + r.copysign(g));
 
             let mut s = 1.0;
@@ -380,7 +381,7 @@ fn tridiagonal_qr(diag: &[f64], offdiag: &[f64]) -> (Vec<f64>, usize) {
             for i in (l_start..m).rev() {
                 let f = s * e[i];
                 let b = c * e[i];
-                let r = f.hypot(g);
+                let r = f.det_hypot(g);
                 e[i + 1] = r;
                 if r.abs() < 1e-30 {
                     // Deflation
@@ -487,7 +488,7 @@ fn tridiagonal_qr_with_vectors(
             }
 
             let mut g = (d[l_start + 1] - d[l_start]) / (2.0 * e[l_start]);
-            let r = g.hypot(1.0);
+            let r = g.det_hypot(1.0);
             g = d[m] - d[l_start] + e[l_start] / (g + r.copysign(g));
 
             let mut s = 1.0;
@@ -498,7 +499,7 @@ fn tridiagonal_qr_with_vectors(
             for i in (l_start..m).rev() {
                 let f = s * e[i];
                 let b = c * e[i];
-                let r = f.hypot(g);
+                let r = f.det_hypot(g);
                 e[i + 1] = r;
                 if r.abs() < 1e-30 {
                     d[i + 1] -= p;

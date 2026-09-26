@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+#### Math builtins are now bit-identical across platforms (ADR-0046 amendment)
+- Every transcendental a `.cjcl` program can observe — the math builtins (`sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `exp`, `log`, `log2`, `log10`, `pow`, …), tensor ops and activations, distributions (including `randn`), stats functions, autodiff, the `**` operator in both executors, MIR constant folding, and data-frame `DExpr` functions — now uses `cjc_repro::dmath` instead of the platform C math library. The same program and seed give the **same bits on Windows, Linux, and macOS**; previously the libraries disagreed in the last bit (e.g. Windows' `atanh` is off by up to 8 ulps near ±1).
+- **Results may change in the last bit** on any given OS. Five golden hashes moved and were re-locked, each with its previous value recorded: the `bench_v0_1` primitive master hash and three ABNG `.cjcl` chain-head canaries. The chess RL weight hash is unchanged.
+- **`**` is more accurate:** `dmath::pow` is now fdlibm `e_pow.c` (0.81 ulp max measured), replacing `exp(y · ln x)`, which lost ~|y · ln x| ulps.
+- **New in `dmath`:** `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `atanh`, `exp_m1`, `ln_1p`, `log2`, `log10`, `hypot`, plus the `DetMath` trait (`x.det_exp()`) used to migrate 387 call sites. Verified against mpmath over 609,860 evaluations (`verification/dmath_ext_check.py`); the musl-derived functions are bit-identical to musl's own C code (`verification/musl_bitcompare/`). Measured max errors are documented per function — five inherit >1 ulp from musl's algorithms (`atan2`, `cosh`, `atanh`, `sinh`, `tanh`, ≤ 1.95 ulp).
+- Not yet covered: the analytics crates (`cjc-vizor`, `cjc-nss`, `cjc-cana`, `cjc-abng`, `cjc-locke`, `cjc-cronos-gan`) still use the platform library internally.
+
 #### Quantum: faster statevector simulation, same bits
 - Gates are applied by new strided kernels (`cjc-quantum/src/kernels.rs`). They walk only the amplitude pairs a gate touches and split large states across threads (`std::thread::scope`; the count comes from `cjc_runtime::runtime_policy`, and threads are used only above 2^15 pairs per thread).
   - Each pair is owned by one thread and nothing is reduced across threads, so output is bit-identical at any thread count.

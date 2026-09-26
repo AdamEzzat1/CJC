@@ -5,6 +5,7 @@
 //! All functions are pure math — no randomness, no iteration order dependency.
 //! Approximations use deterministic, fixed-sequence algorithms.
 
+use cjc_repro::dmath::DetMath;
 use std::f64::consts::PI;
 
 // ---------------------------------------------------------------------------
@@ -32,7 +33,7 @@ pub fn ln_gamma(x: f64) -> f64 {
     let xx = if x < 0.5 {
         // Reflection formula
         let reflected = ln_gamma(1.0 - x);
-        return (PI / (PI * x).sin()).ln() - reflected;
+        return (PI / (PI * x).det_sin()).det_ln() - reflected;
     } else {
         x - 1.0
     };
@@ -41,7 +42,7 @@ pub fn ln_gamma(x: f64) -> f64 {
         sum += c / (xx + i as f64);
     }
     let t = xx + g + 0.5;
-    0.5 * (2.0 * PI).ln() + (t.ln() * (xx + 0.5)) - t + sum.ln()
+    0.5 * (2.0 * PI).det_ln() + (t.det_ln() * (xx + 0.5)) - t + sum.det_ln()
 }
 
 // ---------------------------------------------------------------------------
@@ -60,7 +61,7 @@ fn regularized_incomplete_beta(a: f64, b: f64, x: f64) -> f64 {
     }
 
     let lbeta = ln_gamma(a) + ln_gamma(b) - ln_gamma(a + b);
-    let front = (x.ln() * a + (1.0 - x).ln() * b - lbeta).exp() / a;
+    let front = (x.det_ln() * a + (1.0 - x).det_ln() * b - lbeta).det_exp() / a;
 
     // Lentz continued fraction
     let eps = 1e-14;
@@ -135,7 +136,7 @@ fn gamma_series(a: f64, x: f64) -> f64 {
             break;
         }
     }
-    sum * (-x + a * x.ln() - ln_gamma(a)).exp()
+    sum * (-x + a * x.det_ln() - ln_gamma(a)).det_exp()
 }
 
 fn gamma_cf(a: f64, x: f64) -> f64 {
@@ -165,7 +166,7 @@ fn gamma_cf(a: f64, x: f64) -> f64 {
         }
     }
 
-    (-x + a * x.ln() - ln_gamma(a)).exp() * f
+    (-x + a * x.det_ln() - ln_gamma(a)).det_exp() * f
 }
 
 // ---------------------------------------------------------------------------
@@ -214,7 +215,7 @@ pub fn erfc(x: f64) -> f64 {
 
     let z = x.abs();
     let t = 1.0 / (1.0 + p * z);
-    let y = (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-z * z).exp();
+    let y = (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-z * z).det_exp();
 
     if x < 0.0 {
         2.0 - y  // erfc(-x) = 2 - erfc(x)
@@ -243,14 +244,14 @@ pub fn normal_cdf(x: f64) -> f64 {
     let sign = if x < 0.0 { -1.0 } else { 1.0 };
     let x_abs = x.abs() / 2.0_f64.sqrt();
     let t = 1.0 / (1.0 + p * x_abs);
-    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x_abs * x_abs).exp();
+    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x_abs * x_abs).det_exp();
 
     0.5 * (1.0 + sign * y)
 }
 
 /// Normal distribution PDF: (1/sqrt(2*pi)) * exp(-x^2/2).
 pub fn normal_pdf(x: f64) -> f64 {
-    (1.0 / (2.0 * PI).sqrt()) * (-x * x / 2.0).exp()
+    (1.0 / (2.0 * PI).sqrt()) * (-x * x / 2.0).det_exp()
 }
 
 /// Normal distribution PPF (inverse CDF / quantile function).
@@ -296,7 +297,7 @@ pub fn normal_ppf(p: f64) -> Result<f64, String> {
 
     let result = if p < p_low {
         // Lower tail
-        let q = (-2.0 * p.ln()).sqrt();
+        let q = (-2.0 * p.det_ln()).sqrt();
         (((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5])
             / ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1.0)
     } else if p <= p_high {
@@ -307,7 +308,7 @@ pub fn normal_ppf(p: f64) -> Result<f64, String> {
             / (((((b[0]*r+b[1])*r+b[2])*r+b[3])*r+b[4])*r+1.0)
     } else {
         // Upper tail
-        let q = (-2.0 * (1.0 - p).ln()).sqrt();
+        let q = (-2.0 * (1.0 - p).det_ln()).sqrt();
         -(((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5])
             / ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1.0)
     };
@@ -417,8 +418,8 @@ pub fn f_ppf(p: f64, df1: f64, df2: f64) -> Result<f64, String> {
 pub fn binomial_pmf(k: u64, n: u64, p: f64) -> f64 {
     if k > n { return 0.0; }
     let log_coeff = ln_gamma(n as f64 + 1.0) - ln_gamma(k as f64 + 1.0) - ln_gamma((n - k) as f64 + 1.0);
-    let log_prob = k as f64 * p.ln() + (n - k) as f64 * (1.0 - p).ln();
-    (log_coeff + log_prob).exp()
+    let log_prob = k as f64 * p.det_ln() + (n - k) as f64 * (1.0 - p).det_ln();
+    (log_coeff + log_prob).det_exp()
 }
 
 /// Binomial CDF: sum_{i=0}^{k} binomial_pmf(i, n, p).
@@ -436,8 +437,8 @@ pub fn binomial_cdf(k: u64, n: u64, p: f64) -> f64 {
 
 /// Poisson PMF: (lambda^k * e^-lambda) / k!
 pub fn poisson_pmf(k: u64, lambda: f64) -> f64 {
-    let log_prob = k as f64 * lambda.ln() - lambda - ln_gamma(k as f64 + 1.0);
-    log_prob.exp()
+    let log_prob = k as f64 * lambda.det_ln() - lambda - ln_gamma(k as f64 + 1.0);
+    log_prob.det_exp()
 }
 
 /// Poisson CDF: sum_{i=0}^{k} poisson_pmf(i, lambda).
@@ -460,7 +461,7 @@ pub fn beta_pdf(x: f64, a: f64, b: f64) -> f64 {
     if x == 0.0 && a < 1.0 { return f64::INFINITY; }
     if x == 1.0 && b < 1.0 { return f64::INFINITY; }
     let log_beta = ln_gamma(a) + ln_gamma(b) - ln_gamma(a + b);
-    ((a - 1.0) * x.ln() + (b - 1.0) * (1.0 - x).ln() - log_beta).exp()
+    ((a - 1.0) * x.det_ln() + (b - 1.0) * (1.0 - x).det_ln() - log_beta).det_exp()
 }
 
 /// Beta distribution CDF via regularized incomplete beta function.
@@ -479,8 +480,8 @@ pub fn gamma_pdf(x: f64, k: f64, theta: f64) -> f64 {
         if k == 1.0 { return 1.0 / theta; }
         return 0.0;
     }
-    let log_pdf = (k - 1.0) * x.ln() - x / theta - k * theta.ln() - ln_gamma(k);
-    log_pdf.exp()
+    let log_pdf = (k - 1.0) * x.det_ln() - x / theta - k * theta.det_ln() - ln_gamma(k);
+    log_pdf.det_exp()
 }
 
 /// Gamma distribution CDF via regularized lower incomplete gamma function.
@@ -493,13 +494,13 @@ pub fn gamma_cdf(x: f64, k: f64, theta: f64) -> f64 {
 /// x >= 0, lambda > 0 (rate).
 pub fn exp_pdf(x: f64, lambda: f64) -> f64 {
     if x < 0.0 { return 0.0; }
-    lambda * (-lambda * x).exp()
+    lambda * (-lambda * x).det_exp()
 }
 
 /// Exponential distribution CDF: 1 - exp(-lambda * x).
 pub fn exp_cdf(x: f64, lambda: f64) -> f64 {
     if x <= 0.0 { return 0.0; }
-    1.0 - (-lambda * x).exp()
+    1.0 - (-lambda * x).det_exp()
 }
 
 /// Weibull distribution PDF: (k/lambda) * (x/lambda)^(k-1) * exp(-(x/lambda)^k).
@@ -511,13 +512,13 @@ pub fn weibull_pdf(x: f64, k: f64, lambda: f64) -> f64 {
         if k == 1.0 { return 1.0 / lambda; }
         return 0.0;
     }
-    (k / lambda) * (x / lambda).powf(k - 1.0) * (-(x / lambda).powf(k)).exp()
+    (k / lambda) * (x / lambda).det_powf(k - 1.0) * (-(x / lambda).det_powf(k)).det_exp()
 }
 
 /// Weibull distribution CDF: 1 - exp(-(x/lambda)^k).
 pub fn weibull_cdf(x: f64, k: f64, lambda: f64) -> f64 {
     if x <= 0.0 { return 0.0; }
-    1.0 - (-(x / lambda).powf(k)).exp()
+    1.0 - (-(x / lambda).det_powf(k)).det_exp()
 }
 
 // ===========================================================================
@@ -571,7 +572,7 @@ pub fn exponential_sample(lambda: f64, n: usize, rng: &mut cjc_repro::Rng) -> Ve
     for _ in 0..n {
         // 1.0 - next_f64() gives (0, 1] which avoids ln(0)
         let u = 1.0 - rng.next_f64();
-        out.push(-u.ln() / lambda);
+        out.push(-u.det_ln() / lambda);
     }
     out
 }
@@ -593,7 +594,7 @@ fn gamma_sample_single(shape: f64, rng: &mut cjc_repro::Rng) -> f64 {
         let g = gamma_sample_single(shape + 1.0, rng);
         let u = rng.next_f64();
         // Use 1.0 - u to avoid u = 0 (which would give 0^(1/a) = 0 always)
-        return g * (1.0 - u).powf(1.0 / shape);
+        return g * (1.0 - u).det_powf(1.0 / shape);
     }
 
     let d = shape - 1.0 / 3.0;
@@ -613,7 +614,7 @@ fn gamma_sample_single(shape: f64, rng: &mut cjc_repro::Rng) -> f64 {
             return d * v;
         }
         // Full test
-        if u.ln() < 0.5 * x * x + d * (1.0 - v + v.ln()) {
+        if u.det_ln() < 0.5 * x * x + d * (1.0 - v + v.det_ln()) {
             return d * v;
         }
     }
@@ -690,7 +691,7 @@ pub fn t_sample(df: f64, n: usize, rng: &mut cjc_repro::Rng) -> Vec<f64> {
 fn poisson_sample_single(lambda: f64, rng: &mut cjc_repro::Rng) -> i64 {
     if lambda < 30.0 {
         // Knuth's algorithm
-        let l = (-lambda).exp();
+        let l = (-lambda).det_exp();
         let mut k: i64 = 0;
         let mut p = 1.0;
         loop {
@@ -705,7 +706,7 @@ fn poisson_sample_single(lambda: f64, rng: &mut cjc_repro::Rng) -> i64 {
         // Approximation: Poisson ~ floor(Normal(lambda, sqrt(lambda)) + 0.5) with
         // acceptance-rejection correction.
         let sqrt_lam = lambda.sqrt();
-        let log_lam = lambda.ln();
+        let log_lam = lambda.det_ln();
         let b = 0.931 + 2.53 * sqrt_lam;
         let a = -0.059 + 0.02483 * b;
         let inv_alpha = 1.1239 + 1.1328 / (b - 3.4);
@@ -732,7 +733,7 @@ fn poisson_sample_single(lambda: f64, rng: &mut cjc_repro::Rng) -> i64 {
             let log_prob = kf * log_lam - lambda - log_fk;
 
             if (us >= 0.013 || v <= us)
-                && v.ln() + inv_alpha.ln() - (a / (us * us) + b).ln()
+                && v.det_ln() + inv_alpha.det_ln() - (a / (us * us) + b).det_ln()
                     <= log_prob
             {
                 return k;

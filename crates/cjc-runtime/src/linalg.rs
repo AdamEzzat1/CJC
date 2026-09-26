@@ -13,6 +13,7 @@
 //!   eigenvector / singular vector is forced positive.
 //! - No `HashMap`, no parallel iteration, no OS randomness.
 
+use cjc_repro::dmath::DetMath;
 use crate::accumulator::BinnedAccumulatorF64;
 use crate::error::RuntimeError;
 use crate::tensor::Tensor;
@@ -1424,11 +1425,11 @@ impl Tensor {
         let s = if norm <= THETA_13 {
             0u32
         } else {
-            (norm / THETA_13).log2().ceil() as u32
+            (norm / THETA_13).det_log2().ceil() as u32
         };
 
         // B = A / 2^s
-        let scale = 2.0_f64.powi(-(s as i32));
+        let scale = 2.0_f64.det_powi(-(s as i32));
         let b_data: Vec<f64> = self.to_vec().iter().map(|&x| x * scale).collect();
         let b = Tensor::from_vec(b_data, &[n, n])?;
 

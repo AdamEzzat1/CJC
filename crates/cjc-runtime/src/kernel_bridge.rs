@@ -37,6 +37,7 @@
 /// The "raw pointer" concept means: the interpreter does one `to_vec()` or
 /// `buffer.borrow()` at entry, then passes the contiguous slice through.
 pub mod kernel {
+    use cjc_repro::dmath::DetMath;
     use cjc_repro::{kahan_sum_f64, KahanAccumulatorF64};
 
     /// Matrix multiply: C[m,n] = A[m,k] × B[k,n] with Kahan-summed dots.
@@ -86,7 +87,7 @@ pub mod kernel {
             let mut sum = 0.0f64;
             let mut comp = 0.0f64;
             for i in 0..n {
-                let e = (slice[i] - max_val).exp();
+                let e = (slice[i] - max_val).det_exp();
                 out[start + i] = e;
                 let y = e - comp;
                 let t = sum + y;
@@ -180,7 +181,7 @@ pub mod kernel {
         let sqrt_2_over_pi: f64 = (2.0 / std::f64::consts::PI).sqrt();
         for (o, &x) in out.iter_mut().zip(data.iter()) {
             let inner = sqrt_2_over_pi * (x + 0.044715 * x * x * x);
-            *o = 0.5 * x * (1.0 + inner.tanh());
+            *o = 0.5 * x * (1.0 + inner.det_tanh());
         }
     }
 

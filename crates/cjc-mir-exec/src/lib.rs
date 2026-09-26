@@ -33,6 +33,7 @@
 pub mod trace;
 pub use trace::{with_trace, TraceCollector};
 
+use cjc_repro::dmath::DetMath;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -1798,7 +1799,7 @@ impl MirExecutor {
             BinOp::Gt => Ok(Value::Bool(a > b)),
             BinOp::Le => Ok(Value::Bool(a <= b)),
             BinOp::Ge => Ok(Value::Bool(a >= b)),
-            BinOp::Pow => Ok(Value::Int((a as f64).powf(b as f64) as i64)),
+            BinOp::Pow => Ok(Value::Int((a as f64).det_powf(b as f64) as i64)),
             BinOp::BitAnd => Ok(Value::Int(a & b)),
             BinOp::BitOr => Ok(Value::Int(a | b)),
             BinOp::BitXor => Ok(Value::Int(a ^ b)),
@@ -1823,7 +1824,7 @@ impl MirExecutor {
             BinOp::Gt => Ok(Value::Bool(a > b)),
             BinOp::Le => Ok(Value::Bool(a <= b)),
             BinOp::Ge => Ok(Value::Bool(a >= b)),
-            BinOp::Pow => Ok(Value::Float(a.powf(b))),
+            BinOp::Pow => Ok(Value::Float(a.det_powf(b))),
             BinOp::And
             | BinOp::Or
             | BinOp::Match

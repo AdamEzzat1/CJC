@@ -11,6 +11,7 @@
 //! - No `HashMap`, no `par_iter`, no OS randomness.
 //! - Same input => bit-identical output.
 
+use cjc_repro::dmath::DetMath;
 use crate::accumulator::BinnedAccumulatorF64;
 use cjc_repro::KahanAccumulatorF64;
 
@@ -162,7 +163,7 @@ pub fn skewness(data: &[f64]) -> Result<f64, String> {
     }
     let m2 = m2_acc.finalize() / n;
     let m3 = m3_acc.finalize() / n;
-    let sigma3 = m2.powf(1.5);
+    let sigma3 = m2.det_powf(1.5);
     if sigma3 == 0.0 {
         return Err("skewness: zero variance".into());
     }
@@ -743,11 +744,11 @@ pub fn cor_ci(x: &[f64], y: &[f64], alpha: f64) -> Result<(f64, f64), String> {
         return Err("cor_ci: alpha must be in (0, 1)".into());
     }
     let r = cor(x, y)?;
-    let z_r = r.atanh(); // Fisher z-transform
+    let z_r = r.det_atanh(); // Fisher z-transform
     let se = 1.0 / ((n as f64 - 3.0).sqrt());
     let z_crit = crate::distributions::normal_ppf(1.0 - alpha / 2.0)?;
-    let lo = (z_r - z_crit * se).tanh();
-    let hi = (z_r + z_crit * se).tanh();
+    let lo = (z_r - z_crit * se).det_tanh();
+    let hi = (z_r + z_crit * se).det_tanh();
     Ok((lo, hi))
 }
 

@@ -39,6 +39,7 @@
 //! [`BinnedAccumulatorF64`]: crate::accumulator::BinnedAccumulatorF64
 //! [`tensor_simd`]: crate::tensor_simd
 
+use cjc_repro::dmath::DetMath;
 use cjc_repro::Rng;
 
 use crate::accumulator::{binned_sum_f64, BinnedAccumulatorF64};
@@ -626,7 +627,7 @@ impl Tensor {
 
     /// Element-wise power: `a^b`.
     pub fn elem_pow(&self, other: &Tensor) -> Result<Tensor, RuntimeError> {
-        self.elementwise_binop(other, |a, b| a.powf(b))
+        self.elementwise_binop(other, |a, b| a.det_powf(b))
     }
 
     /// Element-wise minimum.
@@ -641,12 +642,12 @@ impl Tensor {
 
     /// Element-wise atan2(self, other).
     pub fn elem_atan2(&self, other: &Tensor) -> Result<Tensor, RuntimeError> {
-        self.elementwise_binop(other, |a, b| a.atan2(b))
+        self.elementwise_binop(other, |a, b| a.det_atan2(b))
     }
 
     /// Element-wise hypot(self, other).
     pub fn elem_hypot(&self, other: &Tensor) -> Result<Tensor, RuntimeError> {
-        self.elementwise_binop(other, |a, b| a.hypot(b))
+        self.elementwise_binop(other, |a, b| a.det_hypot(b))
     }
 
     /// Apply a unary function to every element, returning a new contiguous tensor.
@@ -1190,7 +1191,7 @@ impl Tensor {
             let mut sum = 0.0f64;
             let mut comp = 0.0f64; // Kahan compensation
             for i in 0..n {
-                let e = (slice[i] - max_val).exp();
+                let e = (slice[i] - max_val).det_exp();
                 exp_vals[i] = e;
                 // Kahan summation for the denominator
                 let y = e - comp;
@@ -1307,12 +1308,12 @@ impl Tensor {
 
     /// Sigmoid activation: 1 / (1 + exp(-x)) element-wise.
     pub fn sigmoid(&self) -> Tensor {
-        self.map_elementwise(|x| 1.0 / (1.0 + (-x).exp()))
+        self.map_elementwise(|x| 1.0 / (1.0 + (-x).det_exp()))
     }
 
     /// Tanh activation element-wise.
     pub fn tanh_activation(&self) -> Tensor {
-        self.map_elementwise(|x| x.tanh())
+        self.map_elementwise(|x| x.det_tanh())
     }
 
     /// Leaky ReLU activation: max(alpha*x, x) element-wise.
@@ -1323,7 +1324,7 @@ impl Tensor {
     /// SiLU (Swish) activation: x * sigmoid(x) element-wise.
     pub fn silu(&self) -> Tensor {
         let data = self.to_vec();
-        let result: Vec<f64> = data.iter().map(|&x| x / (1.0 + (-x).exp())).collect();
+        let result: Vec<f64> = data.iter().map(|&x| x / (1.0 + (-x).det_exp())).collect();
         Tensor::from_vec(result, &self.shape).unwrap()
     }
 
@@ -1331,8 +1332,8 @@ impl Tensor {
     pub fn mish(&self) -> Tensor {
         let data = self.to_vec();
         let result: Vec<f64> = data.iter().map(|&x| {
-            let sp = (1.0 + x.exp()).ln();
-            x * sp.tanh()
+            let sp = (1.0 + x.det_exp()).det_ln();
+            x * sp.det_tanh()
         }).collect();
         Tensor::from_vec(result, &self.shape).unwrap()
     }
@@ -1516,7 +1517,7 @@ impl Tensor {
         let sqrt_2_over_pi = (2.0_f64 / std::f64::consts::PI).sqrt();
         let result: Vec<f64> = data.iter().map(|&x| {
             let inner = sqrt_2_over_pi * (x + 0.044715 * x * x * x);
-            0.5 * x * (1.0 + inner.tanh())
+            0.5 * x * (1.0 + inner.det_tanh())
         }).collect();
         Tensor::from_vec(result, &self.shape).unwrap()
     }

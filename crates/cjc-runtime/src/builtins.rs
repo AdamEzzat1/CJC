@@ -8,6 +8,7 @@
 //! state. Anything that needs `&mut self` on an interpreter (print, gc_*,
 //! clock, Tensor.randn) stays in each executor.
 
+use cjc_repro::dmath::DetMath;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -670,8 +671,8 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 return Err("log requires exactly 1 argument".into());
             }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.ln()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).ln()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_ln()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_ln()))),
                 _ => Err(format!("log requires a number, got {}", args[0].type_name())),
             }
         }
@@ -680,8 +681,8 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 return Err("exp requires exactly 1 argument".into());
             }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.exp()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).exp()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_exp()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_exp()))),
                 _ => Err(format!("exp requires a number, got {}", args[0].type_name())),
             }
         }
@@ -689,48 +690,48 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
         "sin" => {
             if args.len() != 1 { return Err("sin requires exactly 1 argument".into()); }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.sin()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).sin()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_sin()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_sin()))),
                 _ => Err(format!("sin requires a number, got {}", args[0].type_name())),
             }
         }
         "cos" => {
             if args.len() != 1 { return Err("cos requires exactly 1 argument".into()); }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.cos()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).cos()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_cos()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_cos()))),
                 _ => Err(format!("cos requires a number, got {}", args[0].type_name())),
             }
         }
         "tan" => {
             if args.len() != 1 { return Err("tan requires exactly 1 argument".into()); }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.tan()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).tan()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_tan()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_tan()))),
                 _ => Err(format!("tan requires a number, got {}", args[0].type_name())),
             }
         }
         "asin" => {
             if args.len() != 1 { return Err("asin requires exactly 1 argument".into()); }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.asin()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).asin()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_asin()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_asin()))),
                 _ => Err(format!("asin requires a number, got {}", args[0].type_name())),
             }
         }
         "acos" => {
             if args.len() != 1 { return Err("acos requires exactly 1 argument".into()); }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.acos()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).acos()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_acos()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_acos()))),
                 _ => Err(format!("acos requires a number, got {}", args[0].type_name())),
             }
         }
         "atan" => {
             if args.len() != 1 { return Err("atan requires exactly 1 argument".into()); }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.atan()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).atan()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_atan()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_atan()))),
                 _ => Err(format!("atan requires a number, got {}", args[0].type_name())),
             }
         }
@@ -746,30 +747,30 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 Value::Int(i) => *i as f64,
                 _ => return Err(format!("atan2 requires numbers, got {}", args[1].type_name())),
             };
-            Ok(Some(Value::Float(y.atan2(x))))
+            Ok(Some(Value::Float(y.det_atan2(x))))
         }
         // ---- Mathematics Hardening Phase: Hyperbolic ----
         "sinh" => {
             if args.len() != 1 { return Err("sinh requires exactly 1 argument".into()); }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.sinh()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).sinh()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_sinh()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_sinh()))),
                 _ => Err(format!("sinh requires a number, got {}", args[0].type_name())),
             }
         }
         "cosh" => {
             if args.len() != 1 { return Err("cosh requires exactly 1 argument".into()); }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.cosh()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).cosh()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_cosh()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_cosh()))),
                 _ => Err(format!("cosh requires a number, got {}", args[0].type_name())),
             }
         }
         "tanh" | "tanh_scalar" => {
             if args.len() != 1 { return Err("tanh requires exactly 1 argument".into()); }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.tanh()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).tanh()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_tanh()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_tanh()))),
                 Value::Tensor(t) => Ok(Some(Value::Tensor(t.tanh_activation()))),
                 _ => Err(format!("tanh requires a number or Tensor, got {}", args[0].type_name())),
             }
@@ -787,37 +788,37 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 Value::Int(i) => *i as f64,
                 _ => return Err(format!("pow requires numbers, got {}", args[1].type_name())),
             };
-            Ok(Some(Value::Float(base.powf(exp))))
+            Ok(Some(Value::Float(base.det_powf(exp))))
         }
         "log2" => {
             if args.len() != 1 { return Err("log2 requires exactly 1 argument".into()); }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.log2()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).log2()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_log2()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_log2()))),
                 _ => Err(format!("log2 requires a number, got {}", args[0].type_name())),
             }
         }
         "log10" => {
             if args.len() != 1 { return Err("log10 requires exactly 1 argument".into()); }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.log10()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).log10()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_log10()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_log10()))),
                 _ => Err(format!("log10 requires a number, got {}", args[0].type_name())),
             }
         }
         "log1p" => {
             if args.len() != 1 { return Err("log1p requires exactly 1 argument".into()); }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.ln_1p()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).ln_1p()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_ln_1p()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_ln_1p()))),
                 _ => Err(format!("log1p requires a number, got {}", args[0].type_name())),
             }
         }
         "expm1" => {
             if args.len() != 1 { return Err("expm1 requires exactly 1 argument".into()); }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.exp_m1()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).exp_m1()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_exp_m1()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_exp_m1()))),
                 _ => Err(format!("expm1 requires a number, got {}", args[0].type_name())),
             }
         }
@@ -950,7 +951,7 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 Value::Int(i) => *i as f64,
                 _ => return Err(format!("hypot requires numbers, got {}", args[1].type_name())),
             };
-            Ok(Some(Value::Float(x.hypot(y))))
+            Ok(Some(Value::Float(x.det_hypot(y))))
         }
         // ---- Mathematics Hardening Phase: Constants ----
         "PI" => {
@@ -1265,8 +1266,8 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 }
                 _ => {
                     let p = ord as f64;
-                    let pow_vals: Vec<f64> = data.iter().map(|x| x.abs().powf(p)).collect();
-                    crate::accumulator::binned_sum_f64(&pow_vals).powf(1.0 / p)
+                    let pow_vals: Vec<f64> = data.iter().map(|x| x.abs().det_powf(p)).collect();
+                    crate::accumulator::binned_sum_f64(&pow_vals).det_powf(1.0 / p)
                 }
             };
             Ok(Some(Value::Float(result)))
@@ -2329,8 +2330,8 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let v_flat = v.to_vec();
             let n = w_flat.len();
             // Bias correction computed once.
-            let bc1 = 1.0 - b1.powf(t as f64);
-            let bc2 = 1.0 - b2.powf(t as f64);
+            let bc1 = 1.0 - b1.det_powf(t as f64);
+            let bc2 = 1.0 - b2.det_powf(t as f64);
             let inv_b1 = 1.0 - b1;
             let inv_b2 = 1.0 - b2;
             let mut new_w = Vec::with_capacity(n);
@@ -3806,24 +3807,24 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             // These cannot be trivially SIMD-vectorized while preserving
             // bit-identical results with libm scalar implementations.
             let f: Box<dyn Fn(f64) -> f64> = match fn_name.as_str() {
-                "sin"     => Box::new(|x: f64| x.sin()),
-                "cos"     => Box::new(|x: f64| x.cos()),
-                "tan"     => Box::new(|x: f64| x.tan()),
-                "asin"    => Box::new(|x: f64| x.asin()),
-                "acos"    => Box::new(|x: f64| x.acos()),
-                "atan"    => Box::new(|x: f64| x.atan()),
-                "exp"     => Box::new(|x: f64| x.exp()),
-                "ln"      => Box::new(|x: f64| x.ln()),
-                "log"     => Box::new(|x: f64| x.ln()),
-                "log2"    => Box::new(|x: f64| x.log2()),
-                "log10"   => Box::new(|x: f64| x.log10()),
-                "log1p"   => Box::new(|x: f64| x.ln_1p()),
-                "expm1"   => Box::new(|x: f64| x.exp_m1()),
+                "sin"     => Box::new(|x: f64| x.det_sin()),
+                "cos"     => Box::new(|x: f64| x.det_cos()),
+                "tan"     => Box::new(|x: f64| x.det_tan()),
+                "asin"    => Box::new(|x: f64| x.det_asin()),
+                "acos"    => Box::new(|x: f64| x.det_acos()),
+                "atan"    => Box::new(|x: f64| x.det_atan()),
+                "exp"     => Box::new(|x: f64| x.det_exp()),
+                "ln"      => Box::new(|x: f64| x.det_ln()),
+                "log"     => Box::new(|x: f64| x.det_ln()),
+                "log2"    => Box::new(|x: f64| x.det_log2()),
+                "log10"   => Box::new(|x: f64| x.det_log10()),
+                "log1p"   => Box::new(|x: f64| x.det_ln_1p()),
+                "expm1"   => Box::new(|x: f64| x.det_exp_m1()),
                 "floor"   => Box::new(|x: f64| x.floor()),
                 "ceil"    => Box::new(|x: f64| x.ceil()),
                 "round"   => Box::new(|x: f64| x.round()),
-                "sigmoid" => Box::new(|x: f64| 1.0 / (1.0 + (-x).exp())),
-                "tanh"    => Box::new(|x: f64| x.tanh()),
+                "sigmoid" => Box::new(|x: f64| 1.0 / (1.0 + (-x).det_exp())),
+                "tanh"    => Box::new(|x: f64| x.det_tanh()),
                 "sign"    => Box::new(|x: f64| {
                     if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 }
                 }),

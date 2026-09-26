@@ -10,6 +10,7 @@
 //! All floating-point reductions use Kahan summation.
 //! All randomness is seeded via SplitMix64 (cjc_repro::Rng).
 
+use cjc_repro::dmath::DetMath;
 use cjc_runtime::tensor::Tensor;
 use cjc_repro::KahanAccumulatorF64;
 use cjc_runtime::ml::{AdamState, adam_step};
@@ -262,7 +263,7 @@ pub fn pinn_mlp_eval_grid(
                 y[o] = if is_last {
                     z
                 } else {
-                    z.tanh()
+                    z.det_tanh()
                 };
             }
             x[..out_f].copy_from_slice(&y[..out_f]);
@@ -285,7 +286,7 @@ pub fn pinn_mlp_eval_grid(
 /// space-time domain.
 pub fn kdv_soliton_reference(x: f64, t: f64, c: f64) -> f64 {
     let arg = (c.sqrt() * 0.5) * (x - c * t);
-    let sech = 1.0 / arg.cosh();
+    let sech = 1.0 / arg.det_cosh();
     0.5 * c * sech * sech
 }
 
@@ -325,7 +326,7 @@ pub fn kdv_reference_grid(
 /// final parameters. Phase 3b will add a high-resolution implicit-FD
 /// reference for full-domain comparison.
 pub fn allen_cahn_ic_reference(x: f64) -> f64 {
-    x * x * (std::f64::consts::PI * x).cos()
+    x * x * (std::f64::consts::PI * x).det_cos()
 }
 
 /// Build IC-reproduction inputs `(x, 0)` and target `u(x, 0)` arrays for
@@ -545,11 +546,11 @@ pub fn heat_1d_generate_data(n: usize, noise_std: f64, seed: u64) -> (Vec<f64>, 
 
     for i in 0..n {
         let x = (i as f64 + 0.5) / n as f64; // uniform grid on (0, 1)
-        let u_exact = (std::f64::consts::PI * x).sin();
+        let u_exact = (std::f64::consts::PI * x).det_sin();
         // Box-Muller for Gaussian noise
         let u1 = rng.next_f64().max(1e-300);
         let u2 = rng.next_f64();
-        let noise = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+        let noise = (-2.0 * u1.det_ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).det_cos();
         x_data.push(x);
         u_data.push(u_exact + noise_std * noise);
     }
@@ -581,7 +582,7 @@ fn poly_eval_dd(coeffs: &[f64], x: f64) -> f64 {
 
 /// Source term f(x) = -π² sin(πx) for the heat equation.
 fn heat_source(x: f64) -> f64 {
-    -std::f64::consts::PI.powi(2) * (std::f64::consts::PI * x).sin()
+    -std::f64::consts::PI.det_powi(2) * (std::f64::consts::PI * x).det_sin()
 }
 
 /// Train a PIML polynomial model for the 1D heat equation.
@@ -643,7 +644,7 @@ pub fn piml_heat_1d_train(
             // d(residual²)/d(aᵢ) = 2*residual * d(u_xx)/d(aᵢ)
             // d(u_xx)/d(aᵢ) = i*(i-1) * x^{i-2} for i >= 2, else 0
             for i in 2..n_params {
-                let du_xx_dai = (i * (i - 1)) as f64 * x.powi(i as i32 - 2);
+                let du_xx_dai = (i * (i - 1)) as f64 * x.det_powi(i as i32 - 2);
                 phys_grads[i] += 2.0 * residual * du_xx_dai / n_colloc as f64;
             }
         }
@@ -695,7 +696,7 @@ pub fn piml_heat_1d_train(
 
     for i in 0..n_eval {
         let x = (i as f64 + 0.5) / n_eval as f64;
-        let u_exact = (std::f64::consts::PI * x).sin();
+        let u_exact = (std::f64::consts::PI * x).det_sin();
         let u_pred = poly_eval(&coeffs, x);
         let err = (u_pred - u_exact).abs();
         l2_acc.add(err * err);
@@ -744,11 +745,11 @@ pub fn pinn_harmonic_train(config: &PinnConfig) -> PinnResult {
     let mut u_data = Vec::with_capacity(n_d);
     for i in 0..n_d {
         let x = domain.0 + (i as f64 + 0.5) / n_d as f64 * (domain.1 - domain.0);
-        let u_exact = x.sin();
+        let u_exact = x.det_sin();
         // Small noise
         let u1 = rng.next_f64().max(1e-300);
         let u2 = rng.next_f64();
-        let noise = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+        let noise = (-2.0 * u1.det_ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).det_cos();
         x_data.push(x);
         u_data.push(u_exact + 0.01 * noise);
     }
@@ -906,7 +907,7 @@ pub fn pinn_harmonic_train(config: &PinnConfig) -> PinnResult {
     for epoch in 0..config.epochs {
         // Cosine LR annealing
         let lr_min = config.lr * 0.01;
-        let cos_decay = 0.5 * (1.0 + (std::f64::consts::PI * epoch as f64 / config.epochs as f64).cos());
+        let cos_decay = 0.5 * (1.0 + (std::f64::consts::PI * epoch as f64 / config.epochs as f64).det_cos());
         adam.lr = lr_min + (config.lr - lr_min) * cos_decay;
 
         // Ramp boundary weight
@@ -994,7 +995,7 @@ pub fn pinn_harmonic_train(config: &PinnConfig) -> PinnResult {
 
     for i in 0..n_eval {
         let x = (i as f64 + 0.5) / n_eval as f64 * std::f64::consts::PI;
-        let u_exact = x.sin();
+        let u_exact = x.det_sin();
 
         // Evaluate network at x
         let mut eval_graph = crate::GradGraph::new();
@@ -1139,7 +1140,7 @@ pub fn plot_loss_history(history: &[TrainLog], width: usize, height: usize) -> S
     }
 
     let epochs: Vec<f64> = history.iter().map(|h| h.epoch as f64).collect();
-    let losses: Vec<f64> = history.iter().map(|h| h.total_loss.ln().max(-20.0)).collect();
+    let losses: Vec<f64> = history.iter().map(|h| h.total_loss.det_ln().max(-20.0)).collect();
 
     ascii_plot(&epochs, &losses, width, height, "Training Loss (log scale)")
 }
@@ -1367,8 +1368,8 @@ impl PinnDomain {
                 let mut out = Vec::with_capacity(n * 2);
                 for i in 0..n {
                     let theta = 2.0 * std::f64::consts::PI * i as f64 / n as f64;
-                    out.push(center.0 + radius * theta.cos());
-                    out.push(center.1 + radius * theta.sin());
+                    out.push(center.0 + radius * theta.det_cos());
+                    out.push(center.1 + radius * theta.det_sin());
                 }
                 out
             }
@@ -1568,13 +1569,13 @@ fn point_to_segment_dist(px: f64, py: f64, x0: f64, y0: f64, x1: f64, y1: f64) -
     let dy = y1 - y0;
     let len_sq = dx * dx + dy * dy;
     if len_sq < 1e-30 {
-        return ((px - x0).powi(2) + (py - y0).powi(2)).sqrt();
+        return ((px - x0).det_powi(2) + (py - y0).det_powi(2)).sqrt();
     }
     let t = ((px - x0) * dx + (py - y0) * dy) / len_sq;
     let t = t.max(0.0).min(1.0);
     let proj_x = x0 + t * dx;
     let proj_y = y0 + t * dy;
-    ((px - proj_x).powi(2) + (py - proj_y).powi(2)).sqrt()
+    ((px - proj_x).det_powi(2) + (py - proj_y).det_powi(2)).sqrt()
 }
 
 // ---------------------------------------------------------------------------
@@ -1618,7 +1619,7 @@ pub fn hard_bc_1d(
     let d_x = graph.mul(x_minus_a, b_minus_x);
 
     // Normalize: d_norm = d(x) / ((b-a)/2)^2 so peak = 1 at midpoint
-    let half_range_sq = ((b - a) / 2.0).powi(2);
+    let half_range_sq = ((b - a) / 2.0).det_powi(2);
     let d_norm = graph.scalar_mul(d_x, 1.0 / half_range_sq);
 
     // u(x) = g(x) + d_norm(x) * NN(x)
@@ -1902,7 +1903,7 @@ pub fn pinn_burgers_train(config: &BurgersConfig) -> PinnResult {
     for i in 0..config.n_ic {
         let x = x_range.0 + (i as f64 + 0.5) / config.n_ic as f64 * (x_range.1 - x_range.0);
         ic_x.push(x);
-        ic_u.push(-(std::f64::consts::PI * x).sin());
+        ic_u.push(-(std::f64::consts::PI * x).det_sin());
     }
 
     // BC points: u(-1, t) = 0, u(1, t) = 0
@@ -1939,7 +1940,7 @@ pub fn pinn_burgers_train(config: &BurgersConfig) -> PinnResult {
     for epoch in 0..config.epochs {
         // Cosine LR annealing
         let lr_min = config.lr * 0.01;
-        let cos_decay = 0.5 * (1.0 + (std::f64::consts::PI * epoch as f64 / config.epochs as f64).cos());
+        let cos_decay = 0.5 * (1.0 + (std::f64::consts::PI * epoch as f64 / config.epochs as f64).det_cos());
         adam.lr = lr_min + (config.lr - lr_min) * cos_decay;
 
         // Build graph fresh each epoch (simpler than reforward for 2D input)
@@ -2111,7 +2112,7 @@ pub fn pinn_burgers_train(config: &BurgersConfig) -> PinnResult {
     let n_eval = 50;
     for i in 0..n_eval {
         let x = x_range.0 + (i as f64 + 0.5) / n_eval as f64 * (x_range.1 - x_range.0);
-        let u_exact = -(std::f64::consts::PI * x).sin();
+        let u_exact = -(std::f64::consts::PI * x).det_sin();
         let mut eval_graph = crate::GradGraph::new();
         let mut ep = Vec::new();
         for (li, layer) in mlp_spec.layers.iter().enumerate() {
@@ -2217,7 +2218,7 @@ pub fn pinn_poisson_2d_train(config: &PoissonConfig) -> PinnResult {
 
     for epoch in 0..config.epochs {
         let lr_min = config.lr * 0.01;
-        let cos_decay = 0.5 * (1.0 + (pi * epoch as f64 / config.epochs as f64).cos());
+        let cos_decay = 0.5 * (1.0 + (pi * epoch as f64 / config.epochs as f64).det_cos());
         adam.lr = lr_min + (config.lr - lr_min) * cos_decay;
 
         let mut graph = crate::GradGraph::new();
@@ -2267,7 +2268,7 @@ pub fn pinn_poisson_2d_train(config: &PoissonConfig) -> PinnResult {
             let u_yy = graph.scalar_mul(diff_y, 1.0 / (eps * eps));
 
             // f(x,y) = -2π² sin(πx) sin(πy)
-            let f_val = -2.0 * pi * pi * (pi * x).sin() * (pi * y).sin();
+            let f_val = -2.0 * pi * pi * (pi * x).det_sin() * (pi * y).det_sin();
             let f_node = graph.input(Tensor::from_vec_unchecked(vec![f_val], &[1, 1]));
 
             // residual = u_xx + u_yy - f
@@ -2353,7 +2354,7 @@ pub fn pinn_poisson_2d_train(config: &PoissonConfig) -> PinnResult {
         for iy in 0..n_eval {
             let x = (ix as f64 + 0.5) / n_eval as f64;
             let y = (iy as f64 + 0.5) / n_eval as f64;
-            let u_exact = (pi * x).sin() * (pi * y).sin();
+            let u_exact = (pi * x).det_sin() * (pi * y).det_sin();
 
             let mut eg = crate::GradGraph::new();
             let mut ep = Vec::new();
@@ -2450,7 +2451,7 @@ pub fn pinn_heat_1d_nn_train(config: &HeatConfig) -> PinnResult {
     for i in 0..config.n_ic {
         let x = (i as f64 + 0.5) / config.n_ic as f64;
         ic_x.push(x);
-        ic_u.push((pi * x).sin());
+        ic_u.push((pi * x).det_sin());
     }
 
     // BC: u(0, t) = 0, u(1, t) = 0
@@ -2481,7 +2482,7 @@ pub fn pinn_heat_1d_nn_train(config: &HeatConfig) -> PinnResult {
 
     for epoch in 0..config.epochs {
         let lr_min = config.lr * 0.01;
-        let cos_decay = 0.5 * (1.0 + (pi * epoch as f64 / config.epochs as f64).cos());
+        let cos_decay = 0.5 * (1.0 + (pi * epoch as f64 / config.epochs as f64).det_cos());
         adam.lr = lr_min + (config.lr - lr_min) * cos_decay;
 
         let mut graph = crate::GradGraph::new();
@@ -2622,7 +2623,7 @@ pub fn pinn_heat_1d_nn_train(config: &HeatConfig) -> PinnResult {
 
     for i in 0..n_eval {
         let x = (i as f64 + 0.5) / n_eval as f64;
-        let u_exact = (-alpha * pi * pi * t_eval).exp() * (pi * x).sin();
+        let u_exact = (-alpha * pi * pi * t_eval).det_exp() * (pi * x).det_sin();
 
         let mut eg = crate::GradGraph::new();
         let mut ep = Vec::new();
@@ -2721,7 +2722,7 @@ pub fn pinn_wave_train(config: &WaveConfig) -> PinnResult {
     for i in 0..config.n_ic {
         let x = (i as f64 + 0.5) / config.n_ic as f64;
         ic_x.push(x);
-        ic_u.push((std::f64::consts::PI * x).sin());
+        ic_u.push((std::f64::consts::PI * x).det_sin());
     }
 
     // BC: u(0,t)=0, u(1,t)=0
@@ -2745,7 +2746,7 @@ pub fn pinn_wave_train(config: &WaveConfig) -> PinnResult {
 
     for epoch in 0..config.epochs {
         let lr_min = config.lr * 0.01;
-        let cos_decay = 0.5 * (1.0 + (std::f64::consts::PI * epoch as f64 / config.epochs as f64).cos());
+        let cos_decay = 0.5 * (1.0 + (std::f64::consts::PI * epoch as f64 / config.epochs as f64).det_cos());
         adam.lr = lr_min + (config.lr - lr_min) * cos_decay;
 
         let mut graph = crate::GradGraph::new();
@@ -2889,7 +2890,7 @@ pub fn pinn_wave_train(config: &WaveConfig) -> PinnResult {
     for i in 0..n_eval {
         let x = (i as f64 + 0.5) / n_eval as f64;
         let t = 0.5;
-        let exact = (std::f64::consts::PI * x).sin() * (config.c * std::f64::consts::PI * t).cos();
+        let exact = (std::f64::consts::PI * x).det_sin() * (config.c * std::f64::consts::PI * t).det_cos();
         let inp = eval_graph.input(Tensor::from_vec_unchecked(vec![x, t], &[1, 2]));
         let pred_idx = mlp_forward(&mut eval_graph, &eval_mlp, inp);
         let pred = eval_graph.tensor(pred_idx).to_vec()[0];
@@ -2951,7 +2952,7 @@ pub fn pinn_helmholtz_train(config: &HelmholtzConfig) -> PinnResult {
 
     // Source term for exact sol sin(πx)sin(πy): f = -(2π² - k²)·sin(πx)sin(πy)
     let source = |x: f64, y: f64| -> f64 {
-        -(2.0 * std::f64::consts::PI * std::f64::consts::PI - k2) * (std::f64::consts::PI * x).sin() * (std::f64::consts::PI * y).sin()
+        -(2.0 * std::f64::consts::PI * std::f64::consts::PI - k2) * (std::f64::consts::PI * x).det_sin() * (std::f64::consts::PI * y).det_sin()
     };
 
     let mut temp_graph = crate::GradGraph::new();
@@ -2965,7 +2966,7 @@ pub fn pinn_helmholtz_train(config: &HelmholtzConfig) -> PinnResult {
 
     for epoch in 0..config.epochs {
         let lr_min = config.lr * 0.01;
-        adam.lr = lr_min + (config.lr - lr_min) * 0.5 * (1.0 + (std::f64::consts::PI * epoch as f64 / config.epochs as f64).cos());
+        adam.lr = lr_min + (config.lr - lr_min) * 0.5 * (1.0 + (std::f64::consts::PI * epoch as f64 / config.epochs as f64).det_cos());
 
         let mut graph = crate::GradGraph::new();
         let mut p_indices = Vec::new();
@@ -3078,7 +3079,7 @@ pub fn pinn_helmholtz_train(config: &HelmholtzConfig) -> PinnResult {
     for i in 0..n_eval {
         let x = (i as f64 + 0.5) / n_eval as f64;
         let y = 0.5;
-        let exact = (std::f64::consts::PI * x).sin() * (std::f64::consts::PI * y).sin();
+        let exact = (std::f64::consts::PI * x).det_sin() * (std::f64::consts::PI * y).det_sin();
         let inp = eval_graph.input(Tensor::from_vec_unchecked(vec![x, y], &[1, 2]));
         let pred_idx = mlp_forward(&mut eval_graph, &eval_mlp, inp);
         let pred = eval_graph.tensor(pred_idx).to_vec()[0];
@@ -3145,7 +3146,7 @@ pub fn pinn_diffreact_train(config: &DiffReactConfig) -> PinnResult {
     for i in 0..config.n_ic {
         let x = (i as f64 + 0.5) / config.n_ic as f64;
         ic_x.push(x);
-        ic_u.push((-50.0 * (x - 0.5) * (x - 0.5)).exp());
+        ic_u.push((-50.0 * (x - 0.5) * (x - 0.5)).det_exp());
     }
 
     let mut temp_graph = crate::GradGraph::new();
@@ -3159,7 +3160,7 @@ pub fn pinn_diffreact_train(config: &DiffReactConfig) -> PinnResult {
 
     for epoch in 0..config.epochs {
         let lr_min = config.lr * 0.01;
-        adam.lr = lr_min + (config.lr - lr_min) * 0.5 * (1.0 + (std::f64::consts::PI * epoch as f64 / config.epochs as f64).cos());
+        adam.lr = lr_min + (config.lr - lr_min) * 0.5 * (1.0 + (std::f64::consts::PI * epoch as f64 / config.epochs as f64).det_cos());
 
         let mut graph = crate::GradGraph::new();
         let mut p_indices = Vec::new();
@@ -3331,7 +3332,7 @@ pub fn pinn_allen_cahn_train(config: &AllenCahnConfig) -> PinnResult {
     for i in 0..config.n_ic {
         let x = x_range.0 + (i as f64 + 0.5) / config.n_ic as f64 * 2.0;
         ic_x.push(x);
-        ic_u.push(x * x * (std::f64::consts::PI * x).cos());
+        ic_u.push(x * x * (std::f64::consts::PI * x).det_cos());
     }
 
     let mut temp_graph = crate::GradGraph::new();
@@ -3345,7 +3346,7 @@ pub fn pinn_allen_cahn_train(config: &AllenCahnConfig) -> PinnResult {
 
     for epoch in 0..config.epochs {
         let lr_min = config.lr * 0.01;
-        adam.lr = lr_min + (config.lr - lr_min) * 0.5 * (1.0 + (std::f64::consts::PI * epoch as f64 / config.epochs as f64).cos());
+        adam.lr = lr_min + (config.lr - lr_min) * 0.5 * (1.0 + (std::f64::consts::PI * epoch as f64 / config.epochs as f64).det_cos());
 
         let mut graph = crate::GradGraph::new();
         let mut p_indices = Vec::new();
@@ -3501,7 +3502,7 @@ pub fn pinn_kdv_train(config: &KdvConfig) -> PinnResult {
     let interior = domain.sample_interior(config.n_collocation, config.seed);
 
     // IC: u(x,0) = 0.5·sech²(x/2) (single soliton)
-    let sech2 = |x: f64| -> f64 { let c = x.cosh(); 1.0 / (c * c) };
+    let sech2 = |x: f64| -> f64 { let c = x.det_cosh(); 1.0 / (c * c) };
     let mut ic_x = Vec::with_capacity(config.n_ic);
     let mut ic_u = Vec::with_capacity(config.n_ic);
     for i in 0..config.n_ic {
@@ -3521,7 +3522,7 @@ pub fn pinn_kdv_train(config: &KdvConfig) -> PinnResult {
 
     for epoch in 0..config.epochs {
         let lr_min = config.lr * 0.01;
-        adam.lr = lr_min + (config.lr - lr_min) * 0.5 * (1.0 + (std::f64::consts::PI * epoch as f64 / config.epochs as f64).cos());
+        adam.lr = lr_min + (config.lr - lr_min) * 0.5 * (1.0 + (std::f64::consts::PI * epoch as f64 / config.epochs as f64).det_cos());
 
         let mut graph = crate::GradGraph::new();
         let mut p_indices = Vec::new();
@@ -3671,7 +3672,7 @@ pub fn pinn_schrodinger_train(config: &SchrodingerConfig) -> PinnResult {
     let interior = domain.sample_interior(config.n_collocation, config.seed);
 
     // IC: ψ(x,0) = 2·sech(x) → u(x,0) = 2·sech(x), v(x,0) = 0
-    let sech = |x: f64| -> f64 { 1.0 / x.cosh() };
+    let sech = |x: f64| -> f64 { 1.0 / x.det_cosh() };
     let mut ic_x = Vec::with_capacity(config.n_ic);
     let mut ic_u = Vec::with_capacity(config.n_ic);
     for i in 0..config.n_ic {
@@ -3694,7 +3695,7 @@ pub fn pinn_schrodinger_train(config: &SchrodingerConfig) -> PinnResult {
 
     for epoch in 0..config.epochs {
         let lr_min = config.lr * 0.01;
-        adam.lr = lr_min + (config.lr - lr_min) * 0.5 * (1.0 + (std::f64::consts::PI * epoch as f64 / config.epochs as f64).cos());
+        adam.lr = lr_min + (config.lr - lr_min) * 0.5 * (1.0 + (std::f64::consts::PI * epoch as f64 / config.epochs as f64).det_cos());
 
         let mut graph = crate::GradGraph::new();
         let mut p_indices = Vec::new();
@@ -3858,7 +3859,7 @@ pub fn pinn_navier_stokes_train(config: &NavierStokesConfig) -> PinnResult {
 
     for epoch in 0..config.epochs {
         let lr_min = config.lr * 0.01;
-        adam.lr = lr_min + (config.lr - lr_min) * 0.5 * (1.0 + (std::f64::consts::PI * epoch as f64 / config.epochs as f64).cos());
+        adam.lr = lr_min + (config.lr - lr_min) * 0.5 * (1.0 + (std::f64::consts::PI * epoch as f64 / config.epochs as f64).det_cos());
 
         let mut graph = crate::GradGraph::new();
         let mut p_indices = Vec::new();
@@ -4071,7 +4072,7 @@ pub fn pinn_burgers_2d_train(config: &Burgers2DConfig) -> PinnResult {
         let x = -1.0 + 2.0 * rng.next_f64();
         let y = -1.0 + 2.0 * rng.next_f64();
         ic_pts.push(x); ic_pts.push(y); ic_pts.push(0.0);
-        ic_vals.push(-(std::f64::consts::PI * x).sin() * (std::f64::consts::PI * y).sin());
+        ic_vals.push(-(std::f64::consts::PI * x).det_sin() * (std::f64::consts::PI * y).det_sin());
     }
 
     let mut temp_graph = crate::GradGraph::new();
@@ -4085,7 +4086,7 @@ pub fn pinn_burgers_2d_train(config: &Burgers2DConfig) -> PinnResult {
 
     for epoch in 0..config.epochs {
         let lr_min = config.lr * 0.01;
-        adam.lr = lr_min + (config.lr - lr_min) * 0.5 * (1.0 + (std::f64::consts::PI * epoch as f64 / config.epochs as f64).cos());
+        adam.lr = lr_min + (config.lr - lr_min) * 0.5 * (1.0 + (std::f64::consts::PI * epoch as f64 / config.epochs as f64).det_cos());
 
         let mut graph = crate::GradGraph::new();
         let mut p_indices = Vec::new();
@@ -4261,7 +4262,7 @@ pub fn inverse_diffusion_train(
 
     for epoch in 0..config.epochs {
         let lr_min = config.lr * 0.01;
-        adam.lr = lr_min + (config.lr - lr_min) * 0.5 * (1.0 + (std::f64::consts::PI * epoch as f64 / config.epochs as f64).cos());
+        adam.lr = lr_min + (config.lr - lr_min) * 0.5 * (1.0 + (std::f64::consts::PI * epoch as f64 / config.epochs as f64).det_cos());
 
         let mut graph = crate::GradGraph::new();
         let mut p_indices = Vec::new();

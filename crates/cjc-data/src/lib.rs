@@ -6,6 +6,7 @@
 //! df |> filter(col("age") > 18) |> group_by("dept") |> summarize(avg_salary = mean(col("salary")))
 //! ```
 
+use cjc_repro::dmath::DetMath;
 use cjc_repro::kahan_sum_f64;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -1054,16 +1055,16 @@ fn eval_expr_row(df: &DataFrame, expr: &DExpr, row: usize) -> Result<ExprValue, 
                 )),
             };
             let result = match name.as_str() {
-                "log" => x.ln(),
-                "exp" => x.exp(),
+                "log" => x.det_ln(),
+                "exp" => x.det_exp(),
                 "sqrt" => x.sqrt(),
                 "abs" => x.abs(),
                 "ceil" => x.ceil(),
                 "floor" => x.floor(),
                 "round" => x.round(),
-                "sin" => x.sin(),
-                "cos" => x.cos(),
-                "tan" => x.tan(),
+                "sin" => x.det_sin(),
+                "cos" => x.det_cos(),
+                "tan" => x.det_tan(),
                 other => return Err(DataError::InvalidOperation(
                     format!("unknown DExpr function: {}", other),
                 )),

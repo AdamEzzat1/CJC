@@ -24,8 +24,8 @@ fn unfused_reference(a: &[f64], w: &[f64], ord: i64, m: usize, k: usize, n: usiz
         2 => binned_sum_f64(&intermediate.iter().map(|x| x * x).collect::<Vec<_>>()).sqrt(),
         p => {
             let pf = p as f64;
-            binned_sum_f64(&intermediate.iter().map(|x| x.abs().powf(pf)).collect::<Vec<_>>())
-                .powf(1.0 / pf)
+            let pv: Vec<f64> = intermediate.iter().map(|x| cjc_repro::dmath::pow(x.abs(), pf)).collect();
+            cjc_repro::dmath::pow(binned_sum_f64(&pv), 1.0 / pf)
         }
     }
 }
