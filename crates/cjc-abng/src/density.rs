@@ -154,7 +154,20 @@ impl DensityTracker {
         for i in 0..(self.d as usize) {
             let diff = phi[i] - mean[i];
             let v = var[i].max(VARIANCE_FLOOR);
-            acc.add(diff * diff / v);
+            let mut term = diff * diff / v;
+            if term.is_nan() {
+                // Extreme-but-finite features can overflow both `diff²` and
+                // the variance to +inf (`inf / inf = NaN`). Rescale only on
+                // this path so ordinary scores stay bit-identical.
+                let z = diff / v.sqrt();
+                term = z * z;
+            }
+            if term.is_infinite() {
+                // Saturated: the distance is unbounded. Return directly —
+                // Kahan compensation turns an added +inf into NaN.
+                return Ok(f64::INFINITY);
+            }
+            acc.add(term);
         }
         Ok(acc.finalize())
     }
@@ -241,6 +254,24 @@ mod tests {
         let far = t.mahalanobis_squared(&[10.0]).unwrap();
         assert!(far > mid);
         assert!(mid > near);
+    }
+
+    /// Regression (found by `fuzz_abng_numerical_scores_bounded`): extreme but
+    /// finite features overflowed `m2` and `diff²` to +inf, giving
+    /// `inf / inf = NaN` — a NaN density score. Must saturate to 1.0 instead.
+    #[test]
+    fn density_score_finite_for_extreme_finite_features() {
+        let mut t = DensityTracker::new(2);
+        t.observe_batch(&[2.6815615859885194e154, 0.0, 0.0, 0.0]).unwrap();
+        assert!(t.variance()[0].is_infinite(), "precondition: variance overflowed");
+        for phi in [[0.0, 0.0], [1e300, -1e300], [f64::MAX, f64::MIN]] {
+            let s = t.density_score(&phi).unwrap();
+            assert!(s.is_finite() && (0.0..=1.0).contains(&s), "density {s} for {phi:?}");
+        }
+        // Ordinary inputs are unaffected (same expression as before).
+        let mut u = DensityTracker::new(1);
+        u.observe_batch(&[0.0, 1.0, 2.0, 3.0, 4.0]).unwrap();
+        assert_eq!(u.mahalanobis_squared(&[5.0]).unwrap(), 9.0 / 2.5);
     }
 
     #[test]

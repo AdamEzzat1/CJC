@@ -1740,14 +1740,15 @@ impl Interpreter {
                         "division by zero".to_string(),
                     ))
                 } else {
-                    Ok(Value::Int(a / b))
+                    // Wrapping, like `+ - *`: `i64::MIN / -1` would otherwise panic.
+                    Ok(Value::Int(a.wrapping_div(b)))
                 }
             }
             BinOp::Mod => {
                 if b == 0 {
                     Err(EvalError::Runtime("modulo by zero".to_string()))
                 } else {
-                    Ok(Value::Int(a % b))
+                    Ok(Value::Int(a.wrapping_rem(b)))
                 }
             }
             BinOp::Eq => Ok(Value::Bool(a == b)),
@@ -1796,7 +1797,8 @@ impl Interpreter {
     fn eval_unary(&mut self, op: UnaryOp, operand: &Expr) -> EvalResult {
         let val = self.eval_expr(operand)?;
         match (op, &val) {
-            (UnaryOp::Neg, Value::Int(v)) => Ok(Value::Int(-v)),
+            // Wrapping, like binary `-`: `-i64::MIN` panics in debug builds.
+            (UnaryOp::Neg, Value::Int(v)) => Ok(Value::Int(v.wrapping_neg())),
             (UnaryOp::Neg, Value::Float(v)) => Ok(Value::Float(-v)),
             (UnaryOp::Neg, Value::Tensor(t)) => Ok(Value::Tensor(t.map(|x| -x))),
             (UnaryOp::Neg, Value::F16(v)) => Ok(Value::F16(v.neg())),

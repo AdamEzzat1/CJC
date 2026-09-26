@@ -668,21 +668,25 @@ fn fold_int_binop(op: BinOp, a: i64, b: i64) -> Option<MirExprKind> {
             if b == 0 {
                 None
             } else {
-                Some(MirExprKind::IntLit(a / b))
+                // Wrapping, like both executors: `i64::MIN / -1` must not panic.
+                Some(MirExprKind::IntLit(a.wrapping_div(b)))
             }
         }
         BinOp::Mod => {
             if b == 0 {
                 None
             } else {
-                Some(MirExprKind::IntLit(a % b))
+                Some(MirExprKind::IntLit(a.wrapping_rem(b)))
             }
         }
         BinOp::Pow => {
             if b < 0 {
                 None // Negative exponent on ints — let runtime handle
             } else {
-                Some(MirExprKind::IntLit(a.wrapping_pow(b as u32)))
+                // Must be bit-identical to the executors' `binop_int` Pow,
+                // which goes through f64 (saturating on overflow). An exact
+                // `wrapping_pow` fold diverged for results beyond 2^53.
+                Some(MirExprKind::IntLit((a as f64).powf(b as f64) as i64))
             }
         }
         BinOp::BitAnd => Some(MirExprKind::IntLit(a & b)),
@@ -727,7 +731,7 @@ fn fold_float_binop(op: BinOp, a: f64, b: f64) -> Option<MirExprKind> {
 fn try_fold_unary(op: UnaryOp, operand: &MirExpr) -> Option<MirExpr> {
     match (&op, &operand.kind) {
         (UnaryOp::Neg, MirExprKind::IntLit(v)) => Some(MirExpr {
-            kind: MirExprKind::IntLit(-v),
+            kind: MirExprKind::IntLit(v.wrapping_neg()),
         }),
         (UnaryOp::Neg, MirExprKind::FloatLit(v)) => Some(MirExpr {
             kind: MirExprKind::FloatLit(-v),
@@ -1138,17 +1142,46 @@ fn strength_reduce_expr(expr: &mut MirExpr) -> usize {
     count
 }
 
+/// True if `expr` certainly evaluates to an `Int` with no error and no side
+/// effect: integer literals combined with wrapping `+ - *` and unary `-`.
+///
+/// Rewrites that DROP an operand (`x * 0 => 0`) are only sound for such
+/// operands. MIR is untyped here, so a variable may hold a Float, Tensor or
+/// NA (`t * 0` is a zero tensor, not `Int 0`), and a general expression may
+/// fail — `(0 % 0) * 0` must still raise "modulo by zero".
+pub(crate) fn is_int_total(expr: &MirExpr) -> bool {
+    match &expr.kind {
+        MirExprKind::IntLit(_) => true,
+        MirExprKind::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, left, right } => {
+            is_int_total(left) && is_int_total(right)
+        }
+        MirExprKind::Unary { op: UnaryOp::Neg, operand } => is_int_total(operand),
+        _ => false,
+    }
+}
+
+/// True if evaluating `expr` twice is indistinguishable from once: a plain
+/// variable read or a literal. Required by rewrites that DUPLICATE an
+/// operand (`x * 2 => x + x`) — duplicating a call would repeat its effects.
+fn is_trivial_operand(expr: &MirExpr) -> bool {
+    matches!(
+        expr.kind,
+        MirExprKind::IntLit(_) | MirExprKind::Var(_) | MirExprKind::VarLocal { .. }
+    )
+}
+
 /// Attempt to reduce an expression to a cheaper form.
 fn try_strength_reduce(expr: &MirExpr) -> Option<MirExpr> {
     match &expr.kind {
         MirExprKind::Binary { op, left, right } => {
             match op {
-                // x * 0 => 0  (int only; float * 0 can produce -0.0 or NaN)
+                // x * 0 => 0, only when dropping `x` is unobservable (see
+                // `is_int_total`); float * 0 can also produce -0.0 or NaN.
                 BinOp::Mul => {
-                    if matches!(right.kind, MirExprKind::IntLit(0)) {
+                    if matches!(right.kind, MirExprKind::IntLit(0)) && is_int_total(left) {
                         return Some(MirExpr { kind: MirExprKind::IntLit(0) });
                     }
-                    if matches!(left.kind, MirExprKind::IntLit(0)) {
+                    if matches!(left.kind, MirExprKind::IntLit(0)) && is_int_total(right) {
                         return Some(MirExpr { kind: MirExprKind::IntLit(0) });
                     }
                     // x * 1 => x
@@ -1158,8 +1191,9 @@ fn try_strength_reduce(expr: &MirExpr) -> Option<MirExpr> {
                     if matches!(left.kind, MirExprKind::IntLit(1)) {
                         return Some(*right.clone());
                     }
-                    // x * 2 => x + x  (cheaper on many architectures)
-                    if matches!(right.kind, MirExprKind::IntLit(2)) {
+                    // x * 2 => x + x  (cheaper on many architectures); `x` is
+                    // evaluated twice, so only for trivial operands.
+                    if matches!(right.kind, MirExprKind::IntLit(2)) && is_trivial_operand(left) {
                         return Some(MirExpr {
                             kind: MirExprKind::Binary {
                                 op: BinOp::Add,
@@ -2207,10 +2241,39 @@ mod tests {
 
     #[test]
     fn test_sr_mul_by_zero() {
-        // x * 0 => 0
-        let mut expr = mk_binary(BinOp::Mul, mk_var("x"), mk_int(0));
+        // (a + b) * 0 => 0 when the dropped operand is int-total.
+        let total = mk_binary(BinOp::Add, mk_int(3), mk_int(4));
+        let mut expr = mk_binary(BinOp::Mul, total, mk_int(0));
         strength_reduce_expr(&mut expr);
         assert!(matches!(expr.kind, MirExprKind::IntLit(0)));
+    }
+
+    #[test]
+    fn test_sr_mul_by_zero_keeps_operand_that_may_fail_or_not_be_int() {
+        // `x` may hold a Tensor (x * 0 is a zero tensor, not Int 0), and
+        // `(0 % 0) * 0` must still raise "modulo by zero": no rewrite.
+        for operand in [
+            mk_var("x"),
+            mk_binary(BinOp::Mod, mk_int(0), mk_int(0)),
+        ] {
+            let mut expr = mk_binary(BinOp::Mul, operand.clone(), mk_int(0));
+            strength_reduce_expr(&mut expr);
+            assert!(matches!(expr.kind, MirExprKind::Binary { op: BinOp::Mul, .. }));
+            let mut expr = mk_binary(BinOp::Mul, mk_int(0), operand);
+            strength_reduce_expr(&mut expr);
+            assert!(matches!(expr.kind, MirExprKind::Binary { op: BinOp::Mul, .. }));
+        }
+    }
+
+    #[test]
+    fn test_sr_mul_by_two_does_not_duplicate_calls() {
+        // f() * 2 must not become f() + f(): the call would run twice.
+        let call = MirExpr {
+            kind: MirExprKind::Call { callee: Box::new(mk_var("f")), args: vec![] },
+        };
+        let mut expr = mk_binary(BinOp::Mul, call, mk_int(2));
+        strength_reduce_expr(&mut expr);
+        assert!(matches!(expr.kind, MirExprKind::Binary { op: BinOp::Mul, .. }));
     }
 
     #[test]
@@ -3207,14 +3270,18 @@ mod tests {
 
     #[test]
     fn sr_counts_native_rewrites() {
-        // x * 0 → 0  (1 rewrite, shrinks 3 nodes to 1)
+        // (-7) * 0 → 0  (1 rewrite, shrinks 4 nodes to 1). The dropped
+        // operand must be int-total; a bare `Var` is correctly refused.
         let body = MirBody {
             stmts: vec![MirStmt::Let {
                 name: "a".to_string(),
                 mutable: false,
                 init: ekind(MirExprKind::Binary {
                     op: BinOp::Mul,
-                    left: Box::new(ekind(MirExprKind::Var("x".to_string()))),
+                    left: Box::new(ekind(MirExprKind::Unary {
+                        op: UnaryOp::Neg,
+                        operand: Box::new(ekind(MirExprKind::IntLit(7))),
+                    })),
                     right: Box::new(ekind(MirExprKind::IntLit(0))),
                 }),
                 alloc_hint: None,

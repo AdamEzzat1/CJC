@@ -11,7 +11,6 @@
 //! the two output frames render identically.
 
 use cjc_data::{Column, DataFrame, TidyView};
-use std::panic;
 
 /// Limit cardinality + length so bolero finds counterexamples fast.
 const FUZZ_NLEVELS: usize = 8;
@@ -76,77 +75,71 @@ fn frame_rows(df: &DataFrame) -> Vec<Vec<String>> {
 #[test]
 fn fuzz_phase4_inner_join_oracle() {
     bolero::check!().with_type::<Vec<u8>>().for_each(|input: &Vec<u8>| {
-        let _ = panic::catch_unwind(|| {
-            let Some((left_pairs, right_pairs)) = split_pairs(input) else {
-                return;
-            };
-            let (l_str, l_cat) = build_pair(&left_pairs);
-            let (r_str, r_cat) = build_pair(&right_pairs);
+        let Some((left_pairs, right_pairs)) = split_pairs(input) else {
+            return;
+        };
+        let (l_str, l_cat) = build_pair(&left_pairs);
+        let (r_str, r_cat) = build_pair(&right_pairs);
 
-            let lv_str = TidyView::from_df(l_str);
-            let rv_str = TidyView::from_df(r_str);
-            let lv_cat = TidyView::from_df(l_cat);
-            let rv_cat = TidyView::from_df(r_cat);
+        let lv_str = TidyView::from_df(l_str);
+        let rv_str = TidyView::from_df(r_str);
+        let lv_cat = TidyView::from_df(l_cat);
+        let rv_cat = TidyView::from_df(r_cat);
 
-            let s = lv_str.inner_join(&rv_str, &[("key", "key")]).unwrap();
-            let c = lv_cat.inner_join(&rv_cat, &[("key", "key")]).unwrap();
-            assert_eq!(frame_rows(&s.borrow()), frame_rows(&c.borrow()));
-        });
+        let s = lv_str.inner_join(&rv_str, &[("key", "key")]).unwrap();
+        let c = lv_cat.inner_join(&rv_cat, &[("key", "key")]).unwrap();
+        assert_eq!(frame_rows(&s.borrow()), frame_rows(&c.borrow()));
     });
 }
 
 #[test]
 fn fuzz_phase4_left_join_oracle() {
     bolero::check!().with_type::<Vec<u8>>().for_each(|input: &Vec<u8>| {
-        let _ = panic::catch_unwind(|| {
-            let Some((left_pairs, right_pairs)) = split_pairs(input) else {
-                return;
-            };
-            let (l_str, l_cat) = build_pair(&left_pairs);
-            let (r_str, r_cat) = build_pair(&right_pairs);
+        let Some((left_pairs, right_pairs)) = split_pairs(input) else {
+            return;
+        };
+        let (l_str, l_cat) = build_pair(&left_pairs);
+        let (r_str, r_cat) = build_pair(&right_pairs);
 
-            let lv_str = TidyView::from_df(l_str);
-            let rv_str = TidyView::from_df(r_str);
-            let lv_cat = TidyView::from_df(l_cat);
-            let rv_cat = TidyView::from_df(r_cat);
+        let lv_str = TidyView::from_df(l_str);
+        let rv_str = TidyView::from_df(r_str);
+        let lv_cat = TidyView::from_df(l_cat);
+        let rv_cat = TidyView::from_df(r_cat);
 
-            let s = lv_str.left_join(&rv_str, &[("key", "key")]).unwrap();
-            let c = lv_cat.left_join(&rv_cat, &[("key", "key")]).unwrap();
-            assert_eq!(frame_rows(&s.borrow()), frame_rows(&c.borrow()));
-        });
+        let s = lv_str.left_join(&rv_str, &[("key", "key")]).unwrap();
+        let c = lv_cat.left_join(&rv_cat, &[("key", "key")]).unwrap();
+        assert_eq!(frame_rows(&s.borrow()), frame_rows(&c.borrow()));
     });
 }
 
 #[test]
 fn fuzz_phase4_semi_anti_join_oracle() {
     bolero::check!().with_type::<Vec<u8>>().for_each(|input: &Vec<u8>| {
-        let _ = panic::catch_unwind(|| {
-            let Some((left_pairs, right_pairs)) = split_pairs(input) else {
-                return;
-            };
-            let (l_str, l_cat) = build_pair(&left_pairs);
-            let (r_str, r_cat) = build_pair(&right_pairs);
+        let Some((left_pairs, right_pairs)) = split_pairs(input) else {
+            return;
+        };
+        let (l_str, l_cat) = build_pair(&left_pairs);
+        let (r_str, r_cat) = build_pair(&right_pairs);
 
-            let lv_str = TidyView::from_df(l_str);
-            let rv_str = TidyView::from_df(r_str);
-            let lv_cat = TidyView::from_df(l_cat);
-            let rv_cat = TidyView::from_df(r_cat);
+        let lv_str = TidyView::from_df(l_str);
+        let rv_str = TidyView::from_df(r_str);
+        let lv_cat = TidyView::from_df(l_cat);
+        let rv_cat = TidyView::from_df(r_cat);
 
-            // semi-join
-            let s = lv_str.semi_join(&rv_str, &[("key", "key")]).unwrap();
-            let c = lv_cat.semi_join(&rv_cat, &[("key", "key")]).unwrap();
-            assert_eq!(
-                frame_rows(&s.materialize().unwrap()),
-                frame_rows(&c.materialize().unwrap())
-            );
+        // semi-join
+        let s = lv_str.semi_join(&rv_str, &[("key", "key")]).unwrap();
+        let c = lv_cat.semi_join(&rv_cat, &[("key", "key")]).unwrap();
+        assert_eq!(
+            frame_rows(&s.materialize().unwrap()),
+            frame_rows(&c.materialize().unwrap())
+        );
 
-            // anti-join
-            let s = lv_str.anti_join(&rv_str, &[("key", "key")]).unwrap();
-            let c = lv_cat.anti_join(&rv_cat, &[("key", "key")]).unwrap();
-            assert_eq!(
-                frame_rows(&s.materialize().unwrap()),
-                frame_rows(&c.materialize().unwrap())
-            );
-        });
+        // anti-join
+        let s = lv_str.anti_join(&rv_str, &[("key", "key")]).unwrap();
+        let c = lv_cat.anti_join(&rv_cat, &[("key", "key")]).unwrap();
+        assert_eq!(
+            frame_rows(&s.materialize().unwrap()),
+            frame_rows(&c.materialize().unwrap())
+        );
     });
 }

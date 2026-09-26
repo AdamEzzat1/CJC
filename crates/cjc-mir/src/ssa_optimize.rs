@@ -126,8 +126,9 @@ fn fold_binary(op: BinOp, left: &MirExpr, right: &MirExpr) -> Option<MirExpr> {
                 BinOp::Add => Some(MirExprKind::IntLit(a.wrapping_add(*b))),
                 BinOp::Sub => Some(MirExprKind::IntLit(a.wrapping_sub(*b))),
                 BinOp::Mul => Some(MirExprKind::IntLit(a.wrapping_mul(*b))),
-                BinOp::Div if *b != 0 => Some(MirExprKind::IntLit(a / b)),
-                BinOp::Mod if *b != 0 => Some(MirExprKind::IntLit(a % b)),
+                // Wrapping to match both executors (`i64::MIN / -1` must not panic).
+                BinOp::Div if *b != 0 => Some(MirExprKind::IntLit(a.wrapping_div(*b))),
+                BinOp::Mod if *b != 0 => Some(MirExprKind::IntLit(a.wrapping_rem(*b))),
                 BinOp::Eq => Some(MirExprKind::BoolLit(a == b)),
                 BinOp::Ne => Some(MirExprKind::BoolLit(a != b)),
                 BinOp::Lt => Some(MirExprKind::BoolLit(a < b)),
@@ -471,8 +472,9 @@ fn eval_binary_const(op: BinOp, left: &ConstVal, right: &ConstVal) -> Lattice {
                 BinOp::Add => Some(ConstVal::Int(a.wrapping_add(*b))),
                 BinOp::Sub => Some(ConstVal::Int(a.wrapping_sub(*b))),
                 BinOp::Mul => Some(ConstVal::Int(a.wrapping_mul(*b))),
-                BinOp::Div if *b != 0 => Some(ConstVal::Int(a / b)),
-                BinOp::Mod if *b != 0 => Some(ConstVal::Int(a % b)),
+                // Wrapping to match both executors (`i64::MIN / -1` must not panic).
+                BinOp::Div if *b != 0 => Some(ConstVal::Int(a.wrapping_div(*b))),
+                BinOp::Mod if *b != 0 => Some(ConstVal::Int(a.wrapping_rem(*b))),
                 BinOp::Eq => Some(ConstVal::Bool(a == b)),
                 BinOp::Ne => Some(ConstVal::Bool(a != b)),
                 BinOp::Lt => Some(ConstVal::Bool(a < b)),
@@ -513,7 +515,7 @@ fn eval_binary_const(op: BinOp, left: &ConstVal, right: &ConstVal) -> Lattice {
 
 fn eval_unary_const(op: UnaryOp, val: &ConstVal) -> Lattice {
     match (val, op) {
-        (ConstVal::Int(v), UnaryOp::Neg) => Lattice::Constant(ConstVal::Int(-v)),
+        (ConstVal::Int(v), UnaryOp::Neg) => Lattice::Constant(ConstVal::Int(v.wrapping_neg())),
         (ConstVal::Float(v), UnaryOp::Neg) => Lattice::Constant(ConstVal::Float(-v)),
         (ConstVal::Bool(v), UnaryOp::Not) => Lattice::Constant(ConstVal::Bool(!v)),
         _ => Lattice::Bottom,
@@ -638,12 +640,18 @@ fn try_strength_reduce(expr: &MirExpr) -> Option<MirExpr> {
                     }
                     None
                 }
-                // x * 0 => 0, x * 1 => x, 0 * x => 0, 1 * x => x
+                // x * 0 => 0, x * 1 => x, 0 * x => 0, 1 * x => x.
+                // Dropping `x` is only sound when it cannot fail and is
+                // certainly an Int (see `optimize::is_int_total`).
                 BinOp::Mul => {
-                    if matches!(right.kind, MirExprKind::IntLit(0)) {
+                    if matches!(right.kind, MirExprKind::IntLit(0))
+                        && crate::optimize::is_int_total(left)
+                    {
                         return Some(MirExpr { kind: MirExprKind::IntLit(0) });
                     }
-                    if matches!(left.kind, MirExprKind::IntLit(0)) {
+                    if matches!(left.kind, MirExprKind::IntLit(0))
+                        && crate::optimize::is_int_total(right)
+                    {
                         return Some(MirExpr { kind: MirExprKind::IntLit(0) });
                     }
                     if is_one(&right.kind) {
@@ -1112,11 +1120,12 @@ mod tests {
             entry: BlockId(0),
         };
         let opt = optimize_cfg(&cfg, &["a".to_string()]);
-        // SR reduces a * 0 to 0. Check the let init was simplified.
+        // `a` is a parameter of unknown type (it may be a Float or Tensor,
+        // for which `a * 0` is not `Int 0`), so SR must NOT drop it.
         if let Some(CfgStmt::Let { init, .. }) = opt.basic_blocks[0].statements.first() {
             assert!(
-                matches!(init.kind, MirExprKind::IntLit(0)),
-                "a * 0 should be reduced to 0, got {:?}",
+                !matches!(init.kind, MirExprKind::IntLit(0)),
+                "a * 0 must not be reduced to Int 0 for an untyped `a`, got {:?}",
                 init.kind
             );
         }
