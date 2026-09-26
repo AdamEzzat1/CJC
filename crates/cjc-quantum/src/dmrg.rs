@@ -27,6 +27,7 @@
 //! - RNG is SplitMix64 with fixed seed (42).
 //! - No HashMap or HashSet; all iteration is deterministic.
 
+use cjc_repro::dmath;
 use cjc_runtime::complex::ComplexF64;
 
 use crate::mps::{svd_sign_stabilized, DenseMatrix, Mps, MpsTensor, SvdResult};
@@ -910,8 +911,8 @@ pub fn dmrg_1d(
     let mut rng = 42u64;
     for q in 0..n_qubits {
         let theta_val = crate::rand_f64(&mut rng) * std::f64::consts::PI;
-        let c = (theta_val / 2.0).cos();
-        let s = (theta_val / 2.0).sin();
+        let c = dmath::cos(theta_val / 2.0);
+        let s = dmath::sin(theta_val / 2.0);
         let ry = [
             [ComplexF64::real(c), ComplexF64::real(-s)],
             [ComplexF64::real(s), ComplexF64::real(c)],

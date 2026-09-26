@@ -164,66 +164,140 @@ fn fuzz_ast_metrics() {
 
 /// Fuzz the Jordan-Wigner Hamiltonian expectation: must not panic and must
 /// be deterministic for any valid state.
+///
+/// No `catch_unwind` here: the determinism assertion has to be able to fail
+/// the target (it previously sat inside a discarded `catch_unwind`, so no
+/// input could ever make this target fail).
 #[test]
 fn fuzz_fermion_expectation_determinism() {
+    use cjc_quantum::fermion::{h2_hamiltonian, lih_hamiltonian};
+    use cjc_quantum::statevector::Statevector;
+    use cjc_runtime::complex::ComplexF64;
     bolero::check!()
         .with_type::<(f64, f64, f64, f64)>()
         .for_each(|&(a0_re, a0_im, a1_re, a1_im): &(f64, f64, f64, f64)| {
-            let _ = panic::catch_unwind(|| {
-                use cjc_quantum::fermion::h2_hamiltonian;
-                use cjc_quantum::statevector::Statevector;
-                use cjc_runtime::complex::ComplexF64;
+            if ![a0_re, a0_im, a1_re, a1_im].iter().all(|x| x.is_finite() && x.abs() < 1e150) {
+                return;
+            }
+            let amps = vec![
+                ComplexF64::new(a0_re, a0_im),
+                ComplexF64::new(a1_re, a1_im),
+                ComplexF64::ZERO,
+                ComplexF64::ZERO,
+            ];
+            let mut sv = Statevector::from_amplitudes(amps).unwrap();
+            sv.normalize();
+            if !sv.is_normalized(1e-9) {
+                return; // all-zero input
+            }
+            let h = h2_hamiltonian();
+            let e1 = h.expectation(&sv);
+            let e2 = h.expectation(&sv);
+            assert!(e1.is_finite(), "H2 expectation not finite for normalized state");
+            assert_eq!(e1.to_bits(), e2.to_bits(), "H2 expectation not deterministic");
 
-                // Construct a normalized 2-qubit state from fuzz input
-                let amps = vec![
-                    ComplexF64::new(a0_re, a0_im),
-                    ComplexF64::new(a1_re, a1_im),
-                    ComplexF64::ZERO,
-                    ComplexF64::ZERO,
-                ];
-                if let Ok(mut sv) = Statevector::from_amplitudes(amps) {
-                    sv.normalize();
-                    if sv.is_normalized(0.1) {
-                        let h = h2_hamiltonian();
-                        let e1 = h.expectation(&sv);
-                        let e2 = h.expectation(&sv);
-                        // Determinism
-                        assert_eq!(e1.to_bits(), e2.to_bits());
-                    }
-                }
-            });
+            // Same for LiH on a 4-qubit state built from the same inputs.
+            let mut a4 = vec![ComplexF64::ZERO; 16];
+            a4[0b0011] = ComplexF64::new(a0_re, a0_im);
+            a4[0b1100] = ComplexF64::new(a1_re, a1_im);
+            let mut sv4 = Statevector::from_amplitudes(a4).unwrap();
+            sv4.normalize();
+            if sv4.is_normalized(1e-9) {
+                let l = lih_hamiltonian();
+                let (x, y) = (l.expectation(&sv4), l.expectation(&sv4));
+                assert!(x.is_finite());
+                assert_eq!(x.to_bits(), y.to_bits(), "LiH expectation not deterministic");
+            }
         });
 }
 
 /// Fuzz Richardson extrapolation: must not panic and must be deterministic.
+///
+/// No `catch_unwind`: panics and determinism failures must fail the target.
 #[test]
 fn fuzz_zne_richardson_determinism() {
+    use cjc_quantum::mitigation::richardson_extrapolate;
     bolero::check!()
         .with_type::<(f64, f64, f64, f64, f64, f64)>()
         .for_each(|&(l1, l2, l3, v1, v2, v3): &(f64, f64, f64, f64, f64, f64)| {
-            let _ = panic::catch_unwind(|| {
-                use cjc_quantum::mitigation::richardson_extrapolate;
-
-                // Only test with finite, distinct scale factors
-                if l1.is_finite() && l2.is_finite() && l3.is_finite()
-                    && v1.is_finite() && v2.is_finite() && v3.is_finite()
-                    && (l1 - l2).abs() > 1e-10
-                    && (l2 - l3).abs() > 1e-10
-                    && (l1 - l3).abs() > 1e-10
-                    && l1.abs() < 1e6 && l2.abs() < 1e6 && l3.abs() < 1e6
-                {
-                    let r1 = richardson_extrapolate(&[l1, l2, l3], &[v1, v2, v3]);
-                    let r2 = richardson_extrapolate(&[l1, l2, l3], &[v1, v2, v3]);
-                    match (r1, r2) {
-                        (Ok(a), Ok(b)) => {
-                            if a.mitigated_value.is_finite() && b.mitigated_value.is_finite() {
-                                assert_eq!(a.mitigated_value.to_bits(), b.mitigated_value.to_bits());
-                            }
-                        }
-                        _ => {}
-                    }
+            // Any finite input must return Ok or Err, never panic.
+            let r1 = richardson_extrapolate(&[l1, l2, l3], &[v1, v2, v3]);
+            let r2 = richardson_extrapolate(&[l1, l2, l3], &[v1, v2, v3]);
+            match (r1, r2) {
+                (Ok(a), Ok(b)) => {
+                    assert_eq!(
+                        a.mitigated_value.to_bits(),
+                        b.mitigated_value.to_bits(),
+                        "Richardson extrapolation not deterministic"
+                    );
                 }
-            });
+                (Err(a), Err(b)) => assert_eq!(a, b),
+                _ => panic!("Richardson extrapolation: Ok/Err differs between identical calls"),
+            }
+        });
+}
+
+/// Fuzz every quantum builtin at the language boundary: arbitrary builtin name
+/// index plus an arbitrary argument vector decoded from bytes must never panic.
+#[test]
+fn fuzz_quantum_dispatch_no_panic() {
+    use cjc_quantum::dispatch_quantum;
+    use cjc_runtime::value::Value;
+    use std::rc::Rc;
+    const NAMES: &[&str] = &[
+        "qubits", "q_h", "q_cx", "q_rz", "q_toffoli", "q_run", "q_measure", "q_probs",
+        "q_sample", "q_amplitudes", "mps_new", "mps_h", "mps_ry", "mps_cnot", "mps_swap",
+        "mps_energy", "mps_mixed_canonicalize", "vqe_heisenberg", "qaoa_graph_cycle",
+        "qaoa_maxcut", "stabilizer_new", "stabilizer_cnot", "stabilizer_measure", "density_new",
+        "density_gate", "density_cnot", "density_depolarize", "density_probs", "dmrg_ising",
+        "qec_repetition_code", "qec_surface_code", "qec_syndrome", "qec_decode",
+        "qec_logical_error_rate", "qml_train", "qml_predict", "quantum_inspect",
+        "q_fermion_h2", "q_fermion_new", "q_fermion_expectation", "q_trotter_evolve",
+        "q_trotter_error", "q_zne_mitigate", "q_zne_linear", "q_scale_noise",
+        "q_expect_pauli", "q_fermion_add_term", "density_from_state", "q_copy",
+        "q_to_qasm", "q_from_qasm",
+    ];
+    fn state(k: u8) -> Value {
+        let ok = |n: &str, a: &[Value]| dispatch_quantum(n, a).unwrap().unwrap();
+        let pure = || Value::String(Rc::new("pure".to_string()));
+        match k % 9 {
+            0 => ok("qubits", &[Value::Int(3)]),
+            1 => ok("qubits", &[Value::Int(3), pure()]),
+            2 => ok("mps_new", &[Value::Int(4), Value::Int(4)]),
+            3 => ok("stabilizer_new", &[Value::Int(4)]),
+            4 => ok("density_new", &[Value::Int(2)]),
+            5 => ok("qaoa_graph_cycle", &[Value::Int(4)]),
+            6 => ok("qec_repetition_code", &[Value::Int(3)]),
+            7 => ok("q_fermion_h2", &[]),
+            _ => ok("q_run", &[ok("qubits", &[Value::Int(2)])]),
+        }
+    }
+    fn decode(b: &[u8]) -> Value {
+        let (tag, x) = (b[0], b[1]);
+        match tag % 6 {
+            0 => Value::Int((x as i8 as i64) % 6), // small ints incl. negatives
+            1 => Value::Float(match x % 5 {
+                0 => f64::NAN,
+                1 => f64::INFINITY,
+                2 => -0.5,
+                3 => 1.5,
+                _ => x as f64 / 64.0,
+            }),
+            2 => Value::String(Rc::new(
+                ["pure", "H", "heisenberg", "ising", "x", ""][x as usize % 6].to_string(),
+            )),
+            3 => Value::Array(Rc::new(vec![Value::Int(x as i64 % 3), Value::Float(0.5)])),
+            4 => Value::Array(Rc::new(vec![Value::Array(Rc::new(vec![Value::Float(0.1)]))])),
+            _ => state(x),
+        }
+    }
+    bolero::check!()
+        .with_type::<(u8, Vec<(u8, u8)>)>()
+        .for_each(|(name_idx, raw): &(u8, Vec<(u8, u8)>)| {
+            let name = NAMES[*name_idx as usize % NAMES.len()];
+            let args: Vec<Value> = raw.iter().take(9).map(|&(a, b)| decode(&[a, b])).collect();
+            let r = panic::catch_unwind(panic::AssertUnwindSafe(|| dispatch_quantum(name, &args)));
+            assert!(r.is_ok(), "dispatch_quantum panicked: {}({:?})", name, args);
         });
 }
 

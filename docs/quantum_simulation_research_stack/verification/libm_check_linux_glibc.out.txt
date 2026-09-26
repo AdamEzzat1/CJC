@@ -1,0 +1,10 @@
+file: libm_bits_linux_glibc.txt
+angles: 220020; evaluations: 440040
+not correctly rounded: cos 293, sin 289; max error 1 ulp
+  small(|t|<=4pi): 200017 angles, 528 non-correctly-rounded results
+  large(|t|>4pi): 20003 angles, 54 non-correctly-rounded results
+  example: sin(5.213666177077723/2) got 0.5096341860499327 ref 0.5096341860499326 (1 ulp)
+  example: sin(-11.82428645307732/2) got 0.3625867957221047 ref 0.36258679572210467 (1 ulp)
+  example: sin(12.18332534136533/2) got -0.19035391095999998 ref -0.19035391095999996 (1 ulp)
+  example: cos(-5.1181077660646705/2) got -0.8350686487259471 ref -0.835068648725947 (1 ulp)
+  example: cos(-6.794439149993494/2) got -0.9675049674918914 ref -0.9675049674918915 (1 ulp)

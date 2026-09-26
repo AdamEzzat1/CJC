@@ -1,0 +1,10 @@
+fn main() -> Any {
+    let __r = __body();
+    print(__r);
+    __r
+}
+fn __body() -> Any {
+    let m = mps_new(4, 8);
+    let m = mps_h(m, 1.9);
+    mps_z_expectation(m, 1)
+}

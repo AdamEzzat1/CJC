@@ -11,3 +11,7 @@ pub mod test_qec;
 pub mod test_qml;
 pub mod test_quantum_native_types;
 pub mod test_quantum_pure_backend;
+pub mod test_quantum_chemistry_reference;
+pub mod test_quantum_value_semantics;
+pub mod test_quantum_state_interop;
+pub mod test_qasm;

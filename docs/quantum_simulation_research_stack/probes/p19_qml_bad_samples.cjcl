@@ -1,0 +1,8 @@
+fn main() -> Any {
+    let __r = __body();
+    print(__r);
+    __r
+}
+fn __body() -> Any {
+    qml_train(2, 1, 2, 4, 0.1, 1, 42, [[0.1, "x"], [0.2, 0.3]], [0, 1])
+}

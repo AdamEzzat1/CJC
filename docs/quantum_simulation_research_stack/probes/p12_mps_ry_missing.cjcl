@@ -1,0 +1,4 @@
+fn main() -> Any {
+    let m = mps_new(2, 4);
+    mps_ry(m, 0)
+}

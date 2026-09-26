@@ -71,7 +71,8 @@ impl Statevector {
     /// Compute the probability of each basis state: |αᵢ|².
     /// Uses Kahan summation internally for normalization verification.
     pub fn probabilities(&self) -> Vec<f64> {
-        self.amplitudes.iter().map(|a| a.norm_sq()).collect()
+        // Elementwise |a|², threaded for large states; bit-identical.
+        crate::kernels::probabilities(&self.amplitudes)
     }
 
     /// Check if the statevector is normalized (Σ|αᵢ|² ≈ 1.0).

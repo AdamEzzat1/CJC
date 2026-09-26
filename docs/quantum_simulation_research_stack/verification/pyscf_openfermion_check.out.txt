@@ -1,0 +1,18 @@
+
+pyscf 2.14.0  openfermion 1.8.1  numpy 2.4.6
+
+== H2 R=0.7414 A: E_nuc=0.713754  E_RHF=-1.116684  E_FCI(total)=-1.137270
+   JW qubits=4; N=2 sector ground (electronic, excl. const)=-1.851024; +const=-1.137270
+   CJC h2 (from CJC code): hermiticity err=4.4e-16; spectrum=[-1.851199 -0.252801  0.        0.1824  ]
+   CJC min=-1.851199; min + E_nuc=-1.137445; vs FCI total diff=-1.75e-04 Ha
+   PySCF/OpenFermion N=2 spectrum=[-1.851024 -1.246233 -1.246233 -1.246233 -0.883655 -0.233918]
+
+== LiH R=1.546 A (full space): E_nuc=1.026864  E_RHF=-7.863134  E_FCI(total)=-7.882762
+   JW qubits=12; N=4 sector ground (electronic, excl. const)=-8.909626; +const=-7.882762
+
+== LiH R=1.546 A (4-qubit active space: 2e in 2 orbitals, frozen core): E_nuc=1.026864  E_RHF=-7.863134  E_FCI(total)=-7.882762
+   JW qubits=4; N=2 sector ground (electronic, excl. const)=-1.070928; +const=-7.863374
+
+   CJC lih (from CJC code): hermiticity err=7.1e-15; lowest 4=[-11.1375   -10.573333 -10.573333 -10.009166]
+   CJC docstring claims ground ~ -7.8825 Ha; CJC matrix min = -11.137500
+   diff vs full FCI total = -3.2547 Ha; vs 4-qubit active-space total = -3.2741 Ha

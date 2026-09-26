@@ -384,6 +384,27 @@ impl StabilizerState {
     // Measurement
     // -------------------------------------------------------------------
 
+    /// Z-basis measurement outcome of qubit `q` without measuring: `+1` if the
+    /// outcome is certainly 0, `-1` if it is certainly 1, and `0` if it is
+    /// random. Same convention as Stim's `TableauSimulator.peek_z`, which makes
+    /// it a seed-independent oracle for comparing simulators.
+    ///
+    /// Cost: O(n) to detect a random outcome, O(n²) otherwise (it measures a
+    /// copy; the deterministic branch of [`measure`](Self::measure) uses no
+    /// randomness).
+    pub fn peek_z(&self, q: usize) -> i8 {
+        assert!(q < self.n, "qubit index {} out of range (n={})", q, self.n);
+        if (self.n..2 * self.n).any(|i| get_bit(&self.x[i], q)) {
+            return 0;
+        }
+        let mut rng = 0u64; // unused on the deterministic branch
+        if self.clone().measure(q, &mut rng) == 0 {
+            1
+        } else {
+            -1
+        }
+    }
+
     /// Measure qubit `q` in the computational basis.
     ///
     /// Returns 0 or 1. The measurement may be deterministic (if the qubit's
@@ -491,12 +512,31 @@ impl StabilizerState {
         let n = self.n;
         let dim = 1usize << n;
 
-        // Start with uniform superposition |+...+⟩ = (1/sqrt(2^n)) * sum_k |k⟩
-        // This guarantees nonzero overlap with any stabilizer state, unlike |0...0⟩
-        // which can have zero overlap (e.g., the state |1⟩ has zero overlap with |0⟩).
+        // Project a start vector onto the joint +1 eigenspace of all stabilizer
+        // generators: P = Π_i (I + S_i)/2. P|v⟩ is the stabilizer state (up to
+        // phase) iff |v⟩ overlaps it. |+…+⟩ is tried first. It is NOT enough on
+        // its own: e.g. |−⟩ is orthogonal to |+⟩. A stabilizer state always has
+        // support on at least one computational basis state, so falling back to
+        // |k⟩ for k = 0, 1, … always succeeds.
         let amp = 1.0 / (dim as f64).sqrt();
-        let mut sv = vec![ComplexF64::real(amp); dim];
+        if let Some(sv) = self.project_onto_stabilizers(vec![ComplexF64::real(amp); dim]) {
+            return Some(sv);
+        }
+        for k in 0..dim {
+            let mut basis = vec![ComplexF64::ZERO; dim];
+            basis[k] = ComplexF64::ONE;
+            if let Some(sv) = self.project_onto_stabilizers(basis) {
+                return Some(sv);
+            }
+        }
+        None
+    }
 
+    /// Apply Π_i (I + S_i)/2 to `sv` with renormalisation after each factor.
+    /// Returns `None` if the result vanishes (start vector orthogonal to the state).
+    fn project_onto_stabilizers(&self, mut sv: Vec<ComplexF64>) -> Option<Vec<ComplexF64>> {
+        let n = self.n;
+        let dim = 1usize << n;
         // For each stabilizer generator, project onto its +1 eigenspace:
         // sv_new = (I + S_i) * sv / ||(I + S_i) * sv||
         for stab_idx in n..(2 * n) {
@@ -556,9 +596,13 @@ impl StabilizerState {
             for k in 0..dim {
                 norm_sq += sv[k].norm_sq();
             }
-            if norm_sq < 1e-30 {
-                // Degenerate — should not happen for valid stabilizer states
-                continue;
+            // Every intermediate vector is a stabilizer state, so each
+            // projection keeps probability exactly 0, 1/2, or 1 (up to
+            // rounding). A 1e-6 threshold separates "orthogonal" from rounding
+            // residue even at n = 12 (4096 amplitudes).
+            if norm_sq < 1e-6 {
+                // The start vector is orthogonal to the stabilizer state.
+                return None;
             }
             let inv_norm = 1.0 / norm_sq.sqrt();
             for k in 0..dim {
@@ -585,6 +629,30 @@ impl StabilizerState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn peek_z_matches_dense_probabilities() {
+        // |0>, X|0>, H|0>, and a Bell pair: peek agrees with P(1) in {0, 1, 1/2}.
+        let mut s = StabilizerState::new(4);
+        s.x(1);
+        s.h(2);
+        s.h(3);
+        s.cnot(3, 0);
+        assert_eq!(s.peek_z(1), -1);
+        assert_eq!(s.peek_z(2), 0);
+        assert_eq!(s.peek_z(0), 0);
+        assert_eq!(s.peek_z(3), 0);
+        // After measuring qubit 3, its Bell partner (qubit 0) is determined.
+        let mut rng = 7u64;
+        let m = s.measure(3, &mut rng);
+        let want = if m == 0 { 1 } else { -1 };
+        assert_eq!(s.peek_z(0), want);
+        assert_eq!(s.peek_z(3), want);
+        // peek does not change the state.
+        let before = format!("{:?}", s);
+        let _ = s.peek_z(2);
+        assert_eq!(before, format!("{:?}", s));
+    }
+
     use super::*;
 
     #[test]

@@ -20,6 +20,7 @@
 //! - All reductions use Kahan summation
 //! - Bond truncation uses deterministic sorted ordering
 
+use cjc_repro::KahanAccumulatorF64;
 use cjc_runtime::complex::ComplexF64;
 
 /// Maximum bond dimension before truncation.
@@ -27,6 +28,19 @@ const DEFAULT_MAX_BOND: usize = 64;
 
 /// Convergence tolerance for Jacobi SVD.
 const SVD_TOL: f64 = 1e-14;
+
+/// Truncation only counts as discarding state when the largest dropped
+/// singular value exceeds this fraction of the largest one. Below it the
+/// dropped values are SVD round-off (measured ~1e-13 relative on brickwork
+/// circuits), and canonicalizing the whole chain to drop them optimally
+/// would cost O(n) SVDs per gate for no change in the state.
+const TRUNC_REL_TOL: f64 = 1e-10;
+
+/// True when keeping the first `max_bond` of the descending singular values
+/// `s` discards more than round-off.
+fn truncation_is_significant(s: &[f64], max_bond: usize) -> bool {
+    s.len() > max_bond && s[max_bond] > TRUNC_REL_TOL * s[0]
+}
 
 /// Maximum Jacobi SVD iterations.
 const SVD_MAX_ITER: usize = 200;
@@ -361,12 +375,19 @@ fn jacobi_rotation_complex(aii: f64, ajj: f64, aij: ComplexF64) -> (f64, f64, Co
     // Phase of aij: e^{iφ} = aij / |aij|, conjugate: e^{-iφ}
     let conj_phase = ComplexF64::new(aij.re / off_mag, -aij.im / off_mag);
 
-    // Real Jacobi rotation for [[aii, |aij|], [|aij|, ajj]]
+    // Real Jacobi rotation for [[aii, b], [b, ajj]] with b = |aij|.
+    // The caller applies new_i = c*col_i + s*col_j', new_j = -s*col_i + c*col_j',
+    // whose Gram off-diagonal is c*s*(ajj - aii) + (c^2 - s^2)*b. Setting it to
+    // zero with t = s/c gives t^2 - 2*tau*t - 1 = 0, tau = (ajj - aii) / (2b);
+    // take the root of smaller magnitude (|t| <= 1, rotation angle <= pi/4).
+    // (Before 2026-09-25 this used the root of t^2 + 2*tau*t - 1 = 0, the
+    // Golub-Van Loan sign for the opposite rotation convention, so rotations
+    // only zeroed aij when aii == ajj and the SVD rarely converged.)
     let tau = (ajj - aii) / (2.0 * off_mag);
     let t = if tau >= 0.0 {
-        1.0 / (tau + (1.0 + tau * tau).sqrt())
+        -1.0 / (tau + (1.0 + tau * tau).sqrt())
     } else {
-        -1.0 / (-tau + (1.0 + tau * tau).sqrt())
+        1.0 / (-tau + (1.0 + tau * tau).sqrt())
     };
 
     let cs = 1.0 / (1.0 + t * t).sqrt();
@@ -487,6 +508,12 @@ impl Mps {
     /// Optimized: gate permutation is fused into the contraction step, eliminating
     /// 4 intermediate matrix clones. Combined matrix is built directly from theta.
     pub fn apply_cnot_adjacent(&mut self, ctrl: usize, targ: usize) {
+        self.apply_cnot_adjacent_impl(ctrl, targ, false);
+    }
+
+    /// `canonical`: the MPS is already in mixed-canonical form around this
+    /// bond. See [`Mps::apply_two_qubit_gate`] for why truncation needs it.
+    fn apply_cnot_adjacent_impl(&mut self, ctrl: usize, targ: usize, canonical: bool) {
         assert!(
             targ == ctrl + 1 || ctrl == targ + 1,
             "CNOT requires adjacent qubits for MPS"
@@ -542,13 +569,13 @@ impl Mps {
 
         // SVD and truncate
         let svd = svd_sign_stabilized(&combined);
-        let chi = svd
-            .s
-            .iter()
-            .filter(|&&s| s > SVD_TOL)
-            .count()
-            .min(self.max_bond);
-        let chi = chi.max(1); // at least bond dim 1
+        let nonzero = svd.s.iter().filter(|&&s| s > SVD_TOL).count();
+        if !canonical && truncation_is_significant(&svd.s, self.max_bond) {
+            self.mixed_canonicalize(q_left);
+            return self.apply_cnot_adjacent_impl(ctrl, targ, true);
+        }
+        let chi = nonzero.min(self.max_bond).max(1); // at least bond dim 1
+        let sv = truncated_singular_values(&svd.s, chi, canonical);
 
         // Build new left tensor: A_left[s](i, j) from U * sqrt(S)
         let mut new_left = MpsTensor::new(bl, chi);
@@ -556,7 +583,7 @@ impl Mps {
             for i in 0..bl {
                 for j in 0..chi {
                     let row = s * bl + i;
-                    let val = svd.u.get(row, j).scale(svd.s[j].sqrt());
+                    let val = svd.u.get(row, j).scale(sv[j].sqrt());
                     new_left.a[s].set(i, j, val);
                 }
             }
@@ -568,7 +595,7 @@ impl Mps {
             for j in 0..chi {
                 for k in 0..br {
                     let col = s * br + k;
-                    let val = svd.vh.get(j, col).scale(svd.s[j].sqrt());
+                    let val = svd.vh.get(j, col).scale(sv[j].sqrt());
                     new_right.a[s].set(j, k, val);
                 }
             }
@@ -846,7 +873,25 @@ impl Mps {
 
     /// Apply a 4×4 two-qubit gate on adjacent sites (i, i+1).
     /// Contracts both tensors, applies the gate, then decomposes via SVD.
+    ///
+    /// Truncation. Keeping the largest `max_bond` singular values of the
+    /// two-site matrix is only the optimal (least-weight-discarded) cut when
+    /// the rest of the chain is in mixed-canonical form around this bond;
+    /// in any other gauge the local singular values are not the Schmidt
+    /// coefficients and truncating them can discard most of the state. So:
+    ///
+    /// - If every singular value past `max_bond` is round-off (below
+    ///   `TRUNC_REL_TOL` of the largest), nothing meaningful is dropped and
+    ///   the gauge does not matter; the local SVD is used as is.
+    /// - Otherwise the chain is first brought into mixed-canonical form with
+    ///   centre `i` (lossless, because every bond is already <= `max_bond`),
+    ///   the SVD is redone, and the kept singular values are rescaled so the
+    ///   state keeps its norm (the convention Qiskit Aer's MPS uses).
     fn apply_two_qubit_gate(&mut self, i: usize, gate: [[ComplexF64; 4]; 4]) {
+        self.apply_two_qubit_gate_impl(i, gate, false);
+    }
+
+    fn apply_two_qubit_gate_impl(&mut self, i: usize, gate: [[ComplexF64; 4]; 4], canonical: bool) {
         let bl = self.tensors[i].bond_left;
         let br = self.tensors[i + 1].bond_right;
         let bond_mid = self.tensors[i].bond_right;
@@ -910,13 +955,13 @@ impl Mps {
         }
 
         let svd = svd_sign_stabilized(&svd_mat);
-        let k = svd
-            .s
-            .iter()
-            .filter(|&&s| s > SVD_TOL)
-            .count()
-            .min(self.max_bond);
-        let k = k.max(1);
+        let nonzero = svd.s.iter().filter(|&&s| s > SVD_TOL).count();
+        if !canonical && truncation_is_significant(&svd.s, self.max_bond) {
+            self.mixed_canonicalize(i);
+            return self.apply_two_qubit_gate_impl(i, gate, true);
+        }
+        let k = nonzero.min(self.max_bond).max(1);
+        let sv = truncated_singular_values(&svd.s, k, canonical);
 
         // New tensor i: U[:, :k] reshaped to (bl, 2, k)
         let mut new_i = MpsTensor::new(bl, k);
@@ -933,7 +978,7 @@ impl Mps {
         for s2 in 0..2 {
             for r in 0..k {
                 for c in 0..br {
-                    new_ip1.a[s2].set(r, c, svd.vh.get(r, s2 * br + c).scale(svd.s[r]));
+                    new_ip1.a[s2].set(r, c, svd.vh.get(r, s2 * br + c).scale(sv[r]));
                 }
             }
         }
@@ -941,6 +986,30 @@ impl Mps {
         self.tensors[i] = new_i;
         self.tensors[i + 1] = new_ip1;
     }
+}
+
+/// The first `chi` singular values. On the canonical path, when truncation
+/// drops nonzero values, the kept ones are rescaled so their squares sum to
+/// the squares of all of them: in mixed-canonical form that is the squared
+/// norm of the state, so the truncated state keeps its norm. (Off the
+/// canonical path only round-off is dropped and the values are kept as is.)
+/// Sums use Kahan accumulation in index order (deterministic).
+fn truncated_singular_values(s: &[f64], chi: usize, renormalize: bool) -> Vec<f64> {
+    let chi = chi.min(s.len());
+    let (kept, dropped) = s.split_at(chi);
+    if !renormalize || dropped.iter().all(|&x| x <= SVD_TOL) {
+        return kept.to_vec();
+    }
+    let mut total = KahanAccumulatorF64::new();
+    for &x in s {
+        total.add(x * x);
+    }
+    let mut part = KahanAccumulatorF64::new();
+    for &x in kept {
+        part.add(x * x);
+    }
+    let factor = (total.finalize() / part.finalize()).sqrt();
+    kept.iter().map(|&x| x * factor).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1290,5 +1359,129 @@ mod tests {
 
     fn tensors_bond_right(mps: &Mps, site: usize) -> usize {
         mps.tensors[site].bond_right
+    }
+}
+
+/// Accuracy regressions for the SVD and for truncation (found by the
+/// `bench/quantum_compare` harness, which saw <Z_i> off by 0.53 against
+/// Qiskit Aer on a depth-8 brickwork at chi = 16).
+#[cfg(test)]
+mod accuracy_tests {
+    use super::*;
+    use crate::circuit::Circuit;
+    use crate::gates::Gate;
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> f64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((self.0 >> 11) as f64 / (1u64 << 53) as f64) - 0.5
+        }
+    }
+
+    /// Rank-r product of random complex m x r and r x n factors.
+    fn low_rank(m: usize, n: usize, r: usize, seed: u64) -> DenseMatrix {
+        let mut g = Lcg(seed);
+        let a: Vec<ComplexF64> = (0..m * r).map(|_| ComplexF64::new(g.next(), g.next())).collect();
+        let b: Vec<ComplexF64> = (0..r * n).map(|_| ComplexF64::new(g.next(), g.next())).collect();
+        let mut out = DenseMatrix::zeros(m, n);
+        for i in 0..m {
+            for j in 0..n {
+                let mut acc = ComplexF64::ZERO;
+                for k in 0..r {
+                    acc = acc.add(a[i * r + k].mul_fixed(b[k * n + j]));
+                }
+                out.set(i, j, acc);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn svd_finds_the_rank_and_an_orthonormal_u() {
+        // Square, tall and wide, complex, unequal column norms: the cases the
+        // wrong-sign Jacobi rotation got wrong (it only worked for aii == ajj).
+        for (m, n, r) in [(8, 8, 2), (16, 16, 4), (32, 32, 8), (32, 16, 4), (16, 32, 4), (6, 5, 5)] {
+            let a = low_rank(m, n, r, (m * 1000 + n * 10 + r) as u64);
+            let svd = svd_sign_stabilized(&a);
+            let nonzero = svd.s.iter().filter(|&&x| x > SVD_TOL).count();
+            assert_eq!(nonzero, r, "{m}x{n} rank {r}: singular values {:?}", svd.s);
+            for p in 0..r {
+                for q in 0..r {
+                    let mut dot = ComplexF64::ZERO;
+                    for i in 0..m {
+                        dot = dot.add(svd.u.get(i, p).conj().mul_fixed(svd.u.get(i, q)));
+                    }
+                    let want = if p == q { 1.0 } else { 0.0 };
+                    assert!((dot.re - want).abs() < 1e-12 && dot.im.abs() < 1e-12, "{m}x{n}: U^H U[{p}][{q}] = {dot:?}");
+                }
+            }
+            // Singular values are descending.
+            assert!(svd.s.windows(2).all(|w| w[0] >= w[1]));
+        }
+    }
+
+    fn ry(theta: f64) -> [[ComplexF64; 2]; 2] {
+        let (c, s) = (cjc_repro::dmath::cos(theta / 2.0), cjc_repro::dmath::sin(theta / 2.0));
+        [[ComplexF64::real(c), ComplexF64::real(-s)], [ComplexF64::real(s), ComplexF64::real(c)]]
+    }
+
+    /// Brickwork of Ry layers and CNOTs on alternating pairs, on the MPS and
+    /// on a dense statevector. Returns max_i |<Z_i>_mps - <Z_i>_dense| and the
+    /// MPS norm.
+    fn brickwork_error(n: usize, depth: usize, chi: usize) -> (f64, f64) {
+        let mut g = Lcg(depth as u64 * 7919 + n as u64);
+        let mut mps = Mps::with_max_bond(n, chi);
+        let mut circ = Circuit::new(n);
+        for layer in 0..depth {
+            for q in 0..n {
+                let th = (g.next() + 0.5) * std::f64::consts::TAU;
+                mps.apply_single_qubit(q, ry(th));
+                circ.add(Gate::Ry(q, th));
+            }
+            let mut a = layer % 2;
+            while a + 1 < n {
+                mps.apply_cnot_adjacent(a, a + 1);
+                circ.add(Gate::CNOT(a, a + 1));
+                a += 2;
+            }
+        }
+        let p = circ.execute().unwrap().probabilities();
+        let mut err: f64 = 0.0;
+        for q in 0..n {
+            let dense: f64 = p.iter().enumerate().map(|(i, x)| if i >> q & 1 == 0 { *x } else { -*x }).sum();
+            err = err.max((dense - crate::qml::mps_single_z_expectation(&mps, q)).abs());
+        }
+        let norm: f64 = mps.to_statevector().iter().map(|a| a.norm_sq()).sum();
+        (err, norm)
+    }
+
+    #[test]
+    fn mps_is_exact_when_chi_covers_the_schmidt_rank() {
+        // Depth d crosses each cut with at most ceil(d/2) CNOTs, so the
+        // Schmidt rank is <= 2^ceil(d/2); chi = 16 is exact through depth 8.
+        for depth in 1..=8 {
+            let (err, norm) = brickwork_error(10, depth, 16);
+            assert!(err < 1e-12, "depth {depth}: max |dZ| = {err:e}");
+            assert!((norm - 1.0).abs() < 1e-12, "depth {depth}: norm {norm}");
+        }
+    }
+
+    #[test]
+    fn truncation_error_shrinks_with_chi_and_keeps_the_norm() {
+        let e: Vec<f64> = [4, 8, 16, 32].iter().map(|&chi| {
+            let (err, norm) = brickwork_error(10, 10, chi);
+            assert!((norm - 1.0).abs() < 1e-12, "chi {chi}: norm {norm}");
+            err
+        }).collect();
+        assert!(e[0] > e[1] && e[1] > e[2], "{e:?}");
+        assert!(e[2] < 1e-6 && e[3] < 1e-12, "{e:?}");
+    }
+
+    #[test]
+    fn truncated_evolution_is_deterministic() {
+        let a = brickwork_error(10, 10, 4);
+        let b = brickwork_error(10, 10, 4);
+        assert_eq!((a.0.to_bits(), a.1.to_bits()), (b.0.to_bits(), b.1.to_bits()));
     }
 }

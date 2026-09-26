@@ -10,6 +10,46 @@ use cjc_runtime::complex::ComplexF64;
 
 const TOL: f64 = 1e-10;
 
+/// Dense-statevector oracle for the MPS QAOA ansatz.
+///
+/// Mirrors `build_qaoa_ansatz` gate for gate: H on every qubit, then per layer
+/// CNOT(i,j) · Rz(j, 2γ) · CNOT(i,j) for each *adjacent* edge (non-adjacent
+/// edges are skipped in the ansatz, as in the MPS code), then Rx(q, 2β).
+/// The energy counts **all** edges, as `qaoa_maxcut_energy` does.
+fn dense_qaoa_energy(graph: &Graph, gammas: &[f64], betas: &[f64]) -> f64 {
+    use cjc_quantum::{Circuit, Gate};
+    let n = graph.n_vertices;
+    let mut c = Circuit::new(n);
+    for q in 0..n {
+        c.add(Gate::H(q));
+    }
+    for (&g, &b) in gammas.iter().zip(betas) {
+        for &(i, j) in &graph.edges {
+            let (lo, hi) = if i < j { (i, j) } else { (j, i) };
+            if hi == lo + 1 {
+                c.add(Gate::CNOT(lo, hi));
+                c.add(Gate::Rz(hi, 2.0 * g));
+                c.add(Gate::CNOT(lo, hi));
+            }
+        }
+        for q in 0..n {
+            c.add(Gate::Rx(q, 2.0 * b));
+        }
+    }
+    let probs = c.execute().unwrap().probabilities();
+    let mut cost = 0.0;
+    for &(i, j) in &graph.edges {
+        let mut zz = 0.0;
+        for (k, p) in probs.iter().enumerate() {
+            let zi = if (k >> i) & 1 == 0 { 1.0 } else { -1.0 };
+            let zj = if (k >> j) & 1 == 0 { 1.0 } else { -1.0 };
+            zz += zi * zj * p;
+        }
+        cost += (1.0 - zz) / 2.0;
+    }
+    cost
+}
+
 // ---------------------------------------------------------------------------
 // 1. Graph construction
 // ---------------------------------------------------------------------------
@@ -155,18 +195,106 @@ fn qaoa_triangle_graph_energy_improves() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn qaoa_4_cycle_finds_good_cut() {
-    // 4-cycle: 0-1-2-3-0. Optimal MaxCut = 4 (bipartite: {0,2} vs {1,3}).
-    // Only adjacent edges (0,1), (1,2), (2,3) are applied in ansatz;
-    // the wrap-around (3,0) is non-adjacent.
-    // Use a path graph for the ansatz-active edges.
+fn qaoa_4_path_optimizer_improves_and_matches_dense_oracle() {
+    // 4-vertex path 0-1-2-3: MaxCut optimum = 3.
+    //
+    // History (2026-09-24 audit):
+    // - This test used to be `qaoa_4_cycle_finds_good_cut` with `energy >= 1.5`.
+    // - It began failing after 66b65bd fixed `svd_sign_stabilized` dropping
+    //   singular vectors for wide matrices. Before that fix, MPS QAOA energies
+    //   were wrong: `qaoa_mps_energy_matches_dense_oracle` fails without it.
+    // - Root cause of the low value: the optimizer applied a ±π/2 shift to
+    //   *shared* parameters, which is identically zero for QAOA. The optimizer
+    //   never moved, so the result was just the random initial point (1.4394).
+    // - With exact per-gate shifts (`qaoa_gradient`) this seed reaches 2.609.
+    //   The 2.0 bound below leaves margin but would catch a frozen optimizer.
     let g = Graph::new(4, vec![(0, 1), (1, 2), (2, 3)]);
     let result = qaoa_maxcut(&g, 2, 16, 0.3, 30, 42);
     assert!(
-        result.energy >= 1.5,
-        "QAOA on 4-vertex path should find reasonable cut value, got {}",
+        result.energy >= 2.0,
+        "QAOA p=2 on a 4-path should reach at least 2 of the optimum 3, got {}",
         result.energy
     );
+    let initial = result.energy_history[0];
+    assert!(
+        result.energy > initial + 1e-6,
+        "optimizer must improve on its initial point: best={}, initial={}",
+        result.energy,
+        initial
+    );
+    assert!(result.energy <= 3.0 + TOL, "cannot exceed MaxCut optimum 3");
+    // `energy` should be the energy of *some* point the optimizer visited.
+    assert!(
+        result.energy_history.iter().any(|&e| (e - result.energy).abs() < TOL),
+        "best energy must appear in the history"
+    );
+}
+
+#[test]
+fn qaoa_gradient_matches_finite_differences() {
+    // Regression for the shared-parameter bug: a ±π/2 whole-parameter shift is
+    // identically zero for QAOA (π-periodic energy), which froze the optimizer.
+    let graphs = [Graph::new(4, vec![(0, 1), (1, 2), (2, 3)]), Graph::cycle(6)];
+    let h = 1e-6;
+    let mut rng = 11u64;
+    for g in &graphs {
+        for p in 1..=2 {
+            let gammas: Vec<f64> = (0..p).map(|_| cjc_quantum::rand_f64(&mut rng) * 2.0 - 1.0).collect();
+            let betas: Vec<f64> = (0..p).map(|_| cjc_quantum::rand_f64(&mut rng) * 2.0 - 1.0).collect();
+            let f = |gs: &[f64], bs: &[f64]| {
+                qaoa_maxcut_energy(&build_qaoa_ansatz(g, gs, bs, 16), g)
+            };
+            let (dg, db) = qaoa_gradient(g, &gammas, &betas, 16);
+            for k in 0..p {
+                let (mut gp, mut gm) = (gammas.clone(), gammas.clone());
+                gp[k] += h;
+                gm[k] -= h;
+                let fd = (f(&gp, &betas) - f(&gm, &betas)) / (2.0 * h);
+                assert!((dg[k] - fd).abs() < 1e-6, "d/dgamma[{k}]: shift={} fd={fd}", dg[k]);
+                let (mut bp, mut bm) = (betas.clone(), betas.clone());
+                bp[k] += h;
+                bm[k] -= h;
+                let fd = (f(&gammas, &bp) - f(&gammas, &bm)) / (2.0 * h);
+                assert!((db[k] - fd).abs() < 1e-6, "d/dbeta[{k}]: shift={} fd={fd}", db[k]);
+            }
+        }
+    }
+}
+
+#[test]
+fn qaoa_mps_energy_matches_dense_oracle() {
+    // χ = 16 is exact for n ≤ 8, so MPS and dense must agree to rounding.
+    let graphs = [
+        Graph::new(4, vec![(0, 1), (1, 2), (2, 3)]),
+        Graph::cycle(5), // includes non-adjacent edge (4,0): skipped in ansatz, counted in energy
+        Graph::new(6, vec![(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)]),
+    ];
+    let mut rng = 7u64;
+    for g in &graphs {
+        for p in 1..=3 {
+            for _ in 0..5 {
+                let gammas: Vec<f64> = (0..p)
+                    .map(|_| (cjc_quantum::rand_f64(&mut rng) - 0.5) * 3.0)
+                    .collect();
+                let betas: Vec<f64> = (0..p)
+                    .map(|_| (cjc_quantum::rand_f64(&mut rng) - 0.5) * 3.0)
+                    .collect();
+                let mps = build_qaoa_ansatz(g, &gammas, &betas, 16);
+                let e_mps = qaoa_maxcut_energy(&mps, g);
+                let e_dense = dense_qaoa_energy(g, &gammas, &betas);
+                assert!(
+                    (e_mps - e_dense).abs() < 1e-9,
+                    "MPS vs dense mismatch: n={} p={} gammas={:?} betas={:?} mps={} dense={}",
+                    g.n_vertices,
+                    p,
+                    gammas,
+                    betas,
+                    e_mps,
+                    e_dense
+                );
+            }
+        }
+    }
 }
 
 #[test]

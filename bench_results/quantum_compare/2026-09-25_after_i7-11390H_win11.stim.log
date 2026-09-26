@@ -1,0 +1,9 @@
+W3_n100_d100_s1      stim-tableau           median 0.0018s {'peek_z_mismatches': 0, 'deterministic_qubits': 0, 'record_forced_outcomes': 1, 'record_forced_mismatches': 0, 'n': 100}
+W3_n100_d100_s1      stim-compile_sampler   median 0.0052s 
+W3_n250_d250_s1      stim-tableau           median 0.0139s {'peek_z_mismatches': 0, 'deterministic_qubits': 0, 'record_forced_outcomes': 1, 'record_forced_mismatches': 0, 'n': 250}
+W3_n250_d250_s1      stim-compile_sampler   median 0.0292s 
+W3_n500_d500_s1      stim-tableau           median 0.0567s {'peek_z_mismatches': 0, 'deterministic_qubits': 0, 'record_forced_outcomes': 0, 'record_forced_mismatches': 0, 'n': 500}
+W3_n500_d500_s1      stim-compile_sampler   median 0.1268s 
+W3_n1000_d1000_s1    stim-tableau           median 0.6822s {'peek_z_mismatches': 0, 'deterministic_qubits': 0, 'record_forced_outcomes': 0, 'record_forced_mismatches': 0, 'n': 1000}
+W3_n1000_d1000_s1    stim-compile_sampler   median 1.0348s 
+wrote bench_results/quantum_compare/2026-09-25_after_i7-11390H_win11\results_stim.jsonl

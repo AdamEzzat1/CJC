@@ -1,0 +1,4 @@
+fn main() -> Any {
+    let d = density_new(15);
+    density_trace(d)
+}

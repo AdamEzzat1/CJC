@@ -1,0 +1,18 @@
+[package]
+name = "quantum-compare"
+version.workspace = true
+edition = "2021"
+publish = false
+description = "Benchmark harness: CJC quantum simulation vs Qiskit Aer and Stim (BENCHMARK_PLAN.md)"
+
+[[bin]]
+name = "quantum_compare"
+path = "src/main.rs"
+
+[dependencies]
+cjc-quantum = { path = "../../crates/cjc-quantum" }
+cjc-runtime = { path = "../../crates/cjc-runtime" }
+cjc-repro = { path = "../../crates/cjc-repro" }
+cjc-parser = { path = "../../crates/cjc-parser" }
+cjc-eval = { path = "../../crates/cjc-eval" }
+cjc-mir-exec = { path = "../../crates/cjc-mir-exec" }

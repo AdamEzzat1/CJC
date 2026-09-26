@@ -1,0 +1,10 @@
+file: libm_bits_windows_msvc.txt
+angles: 220020; evaluations: 440040
+not correctly rounded: cos 6904, sin 6746; max error 1 ulp
+  small(|t|<=4pi): 200017 angles, 12448 non-correctly-rounded results
+  large(|t|>4pi): 20003 angles, 1202 non-correctly-rounded results
+  example: sin(1.5707963267948966/2) got 0.7071067811865476 ref 0.7071067811865475 (1 ulp)
+  example: cos(-8.547384090400854/2) got -0.42476015372246545 ref -0.4247601537224655 (1 ulp)
+  example: cos(4.150908733116477/2) got -0.48350813717195346 ref -0.4835081371719535 (1 ulp)
+  example: cos(-7.4534886554804425/2) got -0.8336283219253836 ref -0.8336283219253837 (1 ulp)
+  example: sin(-10.98237974400319/2) got 0.7117563349600717 ref 0.7117563349600718 (1 ulp)

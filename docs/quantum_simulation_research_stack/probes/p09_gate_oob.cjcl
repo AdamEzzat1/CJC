@@ -1,0 +1,5 @@
+fn main() -> Any {
+    let c = qubits(2);
+    let c = q_h(c, 7);
+    q_probs(c)
+}

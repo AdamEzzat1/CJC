@@ -1,0 +1,11 @@
+[package]
+name = "copy_cost"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+cjc-quantum = { path = "../../../../crates/cjc-quantum" }
+cjc-runtime = { path = "../../../../crates/cjc-runtime" }

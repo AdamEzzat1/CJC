@@ -18,6 +18,7 @@
 //! - All arithmetic uses explicit sequencing (no FMA)
 //! - Kahan summation for coefficient accumulation
 
+use cjc_repro::dmath;
 use cjc_repro::KahanAccumulatorF64;
 
 // ---------------------------------------------------------------------------
@@ -112,7 +113,7 @@ fn compute_richardson_coefficients(lambdas: &[f64]) -> Result<Vec<f64>, String> 
 
     for k in 0..n {
         for i in 0..n {
-            mat[k][i] = lambdas[i].powi(k as i32);
+            mat[k][i] = dmath::powi(lambdas[i], k as i32);
         }
     }
 
@@ -194,17 +195,17 @@ pub fn linear_extrapolate(
 ///
 /// This is used to generate the noisy measurements at different scale factors.
 pub fn scale_depolarizing_noise(base_p: f64, scale_factor: f64) -> f64 {
-    1.0 - (1.0 - base_p).powf(scale_factor)
+    1.0 - dmath::pow(1.0 - base_p, scale_factor)
 }
 
 /// Scale dephasing noise by a factor.
 pub fn scale_dephasing_noise(base_p: f64, scale_factor: f64) -> f64 {
-    1.0 - (1.0 - base_p).powf(scale_factor)
+    1.0 - dmath::pow(1.0 - base_p, scale_factor)
 }
 
 /// Scale amplitude damping noise by a factor.
 pub fn scale_amplitude_damping(base_gamma: f64, scale_factor: f64) -> f64 {
-    1.0 - (1.0 - base_gamma).powf(scale_factor)
+    1.0 - dmath::pow(1.0 - base_gamma, scale_factor)
 }
 
 // ---------------------------------------------------------------------------

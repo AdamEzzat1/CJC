@@ -21,8 +21,11 @@ use cjc_runtime::complex::ComplexF64;
 ///
 /// # Determinism
 ///
-/// The `rng_state` parameter is a mutable SplitMix64 state. Same seed
-/// produces identical measurement outcomes across runs and platforms.
+/// The `rng_state` parameter is a mutable SplitMix64 state. Same seed and
+/// same statevector produce identical outcomes across runs and platforms:
+/// sampling uses only integer RNG arithmetic and Kahan-summed probabilities,
+/// and the statevector itself is platform-independent because gate matrices
+/// use `cjc_repro::dmath` (ADR-0046).
 pub fn measure_qubit(
     sv: &mut Statevector,
     qubit: usize,
@@ -99,6 +102,42 @@ pub fn sample_basis_state(sv: &Statevector, rng_state: &mut u64) -> usize {
     n - 1
 }
 
+/// Draw `n_shots` samples; returns exactly what `n_shots` calls to
+/// [`sample_basis_state`] with the same `rng_state` would, in
+/// O(2ⁿ + shots · n) instead of O(shots · 2ⁿ).
+///
+/// [`sample_basis_state`] returns the first index whose Kahan-finalized
+/// running sum exceeds the draw `r`. That running sum is not guaranteed to be
+/// monotone (Kahan's compensation can lower it by an ulp when a zero term is
+/// added), so a plain binary search over it could disagree. The first index
+/// where the *running maximum* of those sums exceeds `r` is always the same
+/// index, and the running maximum is monotone, so it is binary-searched.
+pub fn sample_basis_states(sv: &Statevector, n_shots: usize, rng_state: &mut u64) -> Vec<usize> {
+    let n = sv.n_states();
+    let mut running_max = Vec::with_capacity(n);
+    let mut acc = KahanAccumulatorF64::new();
+    let mut m = f64::NEG_INFINITY;
+    for a in &sv.amplitudes {
+        acc.add(a.norm_sq());
+        let c = acc.finalize();
+        if c > m {
+            m = c;
+        }
+        running_max.push(m);
+    }
+    (0..n_shots)
+        .map(|_| {
+            let r = crate::rand_f64(rng_state);
+            let i = running_max.partition_point(|&c| c <= r);
+            if i < n {
+                i
+            } else {
+                n - 1
+            }
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -109,6 +148,45 @@ mod tests {
     use crate::gates::Gate;
 
     const TOL: f64 = 1e-12;
+
+    #[test]
+    fn batch_sampler_matches_per_shot_sampler_bit_for_bit() {
+        // Random states with many exact zeros (where Kahan's running sum can
+        // dip), unnormalised states (the fallback), and several seeds.
+        let mut s = 99u64;
+        let mut next = || {
+            s = s.wrapping_add(0x9e3779b97f4a7c15);
+            let mut z = s;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+            z ^ (z >> 31)
+        };
+        for trial in 0..60 {
+            let n_q = 1 + trial % 9;
+            let amps: Vec<ComplexF64> = (0..1usize << n_q)
+                .map(|k| {
+                    if next() % 3 == 0 {
+                        ComplexF64::ZERO
+                    } else {
+                        let x = (next() >> 11) as f64 / (1u64 << 53) as f64;
+                        let tiny = if k % 5 == 0 { 1e-300 } else { 1.0 };
+                        ComplexF64::new(x * tiny, 0.0)
+                    }
+                })
+                .collect();
+            let mut sv = Statevector::from_amplitudes(amps).unwrap();
+            if trial % 4 != 0 {
+                sv.normalize();
+            }
+            for seed in [0u64, 1, 12345, u64::MAX] {
+                let (mut a, mut b) = (seed, seed);
+                let per_shot: Vec<usize> = (0..257).map(|_| sample_basis_state(&sv, &mut a)).collect();
+                let batch = sample_basis_states(&sv, 257, &mut b);
+                assert_eq!(per_shot, batch, "trial {} seed {}", trial, seed);
+                assert_eq!(a, b, "rng state must advance identically");
+            }
+        }
+    }
 
     #[test]
     fn test_measure_basis_state_0() {

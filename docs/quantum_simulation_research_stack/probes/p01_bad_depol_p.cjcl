@@ -1,0 +1,5 @@
+fn main() -> Any {
+    let d = density_new(1);
+    let d = density_depolarize(d, 0, 1.5);
+    density_trace(d)
+}

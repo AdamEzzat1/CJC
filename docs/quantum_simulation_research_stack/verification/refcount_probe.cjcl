@@ -1,0 +1,14 @@
+fn build(c: Any) -> Any {
+    c = q_h(c, 0);
+    return c;
+}
+let a = qubits(2);
+a = q_x(a, 0);
+a = q_h(a, 1);
+let b = a;
+b = q_x(b, 1);
+let c = build(a);
+let m = mps_new(3, 4);
+m = mps_h(m, 0);
+print(q_n_gates(a));
+print(q_n_gates(b));

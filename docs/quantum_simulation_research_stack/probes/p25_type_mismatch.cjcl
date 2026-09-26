@@ -1,0 +1,5 @@
+fn main() -> Any {
+    let c = qubits(2);
+    let m = mps_h(c, 0);
+    0
+}

@@ -2,7 +2,8 @@
 //!
 //! Represents quantum states as rho (2^N x 2^N complex matrix).
 //! Supports noise channels via Kraus operators: rho -> Sum_k K_k rho K_k^dagger.
-//! Max ~12-13 qubits (2^26 entries x 16 bytes ~ 1 GB).
+//! At most 14 qubits (`MAX_QUBITS`): 4^14 entries x 16 bytes = 4 GiB. Note that
+//! 12 qubits already needs 256 MiB, and 13 needs 1 GiB.
 //!
 //! # Determinism
 //!
@@ -11,6 +12,7 @@
 //! - No HashMap or non-deterministic data structures
 //! - Eigenvalues computed via sign-stabilized SVD (Hermitian => singular values = eigenvalues)
 
+use cjc_repro::dmath;
 use crate::gates::Gate;
 use crate::mps::{svd_sign_stabilized, DenseMatrix};
 use crate::statevector::Statevector;
@@ -26,6 +28,7 @@ pub type KrausOps2x2 = Vec<[[ComplexF64; 2]; 2]>;
 ///
 /// Stored as a dim x dim row-major complex matrix where dim = 2^n_qubits.
 /// Pure states satisfy Tr(rho^2) = 1; mixed states have Tr(rho^2) < 1.
+#[derive(Debug, Clone)]
 pub struct DensityMatrix {
     pub n_qubits: usize,
     dim: usize,
@@ -86,19 +89,19 @@ fn gate_matrix(gate: &Gate) -> Option<(usize, [[ComplexF64; 2]; 2])> {
             ))
         }
         Gate::Rx(q, theta) => {
-            let c = ComplexF64::real((theta / 2.0).cos());
-            let s = ComplexF64::new(0.0, -(theta / 2.0).sin());
+            let c = ComplexF64::real(dmath::cos(theta / 2.0));
+            let s = ComplexF64::new(0.0, -dmath::sin(theta / 2.0));
             Some((*q, [[c, s], [s, c]]))
         }
         Gate::Ry(q, theta) => {
-            let c = ComplexF64::real((theta / 2.0).cos());
-            let s = ComplexF64::real((theta / 2.0).sin());
-            let ms = ComplexF64::real(-(theta / 2.0).sin());
+            let c = ComplexF64::real(dmath::cos(theta / 2.0));
+            let s = ComplexF64::real(dmath::sin(theta / 2.0));
+            let ms = ComplexF64::real(-dmath::sin(theta / 2.0));
             Some((*q, [[c, ms], [s, c]]))
         }
         Gate::Rz(q, theta) => {
-            let pos = ComplexF64::new((theta / 2.0).cos(), (theta / 2.0).sin());
-            let neg = ComplexF64::new((theta / 2.0).cos(), -(theta / 2.0).sin());
+            let pos = ComplexF64::new(dmath::cos(theta / 2.0), dmath::sin(theta / 2.0));
+            let neg = ComplexF64::new(dmath::cos(theta / 2.0), -dmath::sin(theta / 2.0));
             Some((*q, [[neg, ComplexF64::ZERO], [ComplexF64::ZERO, pos]]))
         }
         Gate::CNOT(_, _) | Gate::CZ(_, _) | Gate::SWAP(_, _) | Gate::Toffoli(_, _, _) => None,
@@ -498,7 +501,7 @@ impl DensityMatrix {
         let mut entropy = 0.0f64;
         for &lambda in &svd.s {
             if lambda > 1e-15 {
-                entropy -= lambda * lambda.ln();
+                entropy -= lambda * dmath::ln(lambda);
             }
         }
         entropy
@@ -573,8 +576,11 @@ fn build_full_index(
 
 /// Depolarizing channel for a single qubit.
 ///
-/// With probability p the qubit is replaced by the maximally mixed state;
-/// with probability (1-p) it is left unchanged.
+/// ρ → (1-p)·ρ + (p/3)·(XρX + YρY + ZρZ): with probability p one of X, Y, Z
+/// is applied, each equally likely. Equivalently, the qubit is replaced by
+/// the maximally mixed state I/2 with probability **4p/3** (not p). Keep this
+/// in mind when comparing with simulators that parameterise depolarizing
+/// noise by the replacement probability (e.g. Qiskit's `depolarizing_error`).
 ///
 /// Kraus operators:
 ///   K0 = sqrt(1 - p) * I

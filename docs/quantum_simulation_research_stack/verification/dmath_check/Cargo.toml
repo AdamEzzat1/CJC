@@ -1,0 +1,10 @@
+[package]
+name = "dmath_check"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+cjc-repro = { path = "../../../../crates/cjc-repro" }

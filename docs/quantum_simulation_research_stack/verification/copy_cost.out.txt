@@ -1,0 +1,11 @@
+stabilizer n=100                   gate      0.553 µs   copy     27.620 µs   copy/gate     49.9x
+stabilizer n=1000                  gate      7.597 µs   copy    455.892 µs   copy/gate     60.0x
+stabilizer n=10000                 gate    368.315 µs   copy  26586.095 µs   copy/gate     72.2x
+mps n=50 chi=16 (bond-saturated)   gate      0.005 µs   copy      5.761 µs   copy/gate   1152.1x
+mps n=100 chi=32 (bond-saturated)  gate      0.007 µs   copy      8.786 µs   copy/gate   1255.1x
+density n=6                        gate     12.410 µs   copy      2.243 µs   copy/gate      0.2x
+density n=8                        gate    152.184 µs   copy    224.444 µs   copy/gate      1.5x
+density n=10                       gate   3636.315 µs   copy   3782.025 µs   copy/gate      1.0x
+circuit gates=100 (clone vs append) gate      0.082 µs   copy      0.470 µs   copy/gate      5.7x
+circuit gates=1000 (clone vs append) gate      0.091 µs   copy      1.662 µs   copy/gate     18.4x
+circuit gates=10000 (clone vs append) gate      0.089 µs   copy     39.007 µs   copy/gate    439.8x

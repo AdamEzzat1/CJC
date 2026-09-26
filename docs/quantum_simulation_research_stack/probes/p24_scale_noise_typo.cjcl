@@ -1,0 +1,8 @@
+fn main() -> Any {
+    let __r = __body();
+    print(__r);
+    __r
+}
+fn __body() -> Any {
+    q_scale_noise(0.1, 2.0, "amplitude-damping")
+}

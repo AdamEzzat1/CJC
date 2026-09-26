@@ -1,24 +1,31 @@
-//! Pure CJC Quantum Backend — "CJC all the way down"
+//! "Pure" quantum backend: a second, simpler Rust implementation.
 //!
-//! This module implements quantum simulation algorithms using only basic
-//! data structures (Vec<f64>, Vec<u64>) that map directly to CJC arrays.
-//! All state is inspectable and modifiable from CJC programs.
+//! Selected from `.cjcl` with a trailing `"pure"` argument, e.g.
+//! `qubits(3, "pure")` or `mps_new(50, 16, "pure")`. It is Rust code, like the
+//! default backend, but keeps state in plain containers (`Vec<(f64, f64)>`,
+//! `Vec<u64>`) and uses straightforward algorithms. What that buys:
+//! - **Inspectability**: `quantum_inspect(state)` returns the internals as a
+//!   CJC map (read-only; there is no write-back into the state)
+//! - **Readability**: the algorithms are short and unoptimised
+//! - **A second implementation** to cross-check the default backend against
 //!
-//! The pure backend is an alternative to the optimized Rust backend.
-//! It trades speed for:
-//! - **Inspectability**: Users can print/examine quantum state internals
-//! - **Modifiability**: Researchers can tweak algorithms without recompiling
-//! - **Educational value**: Algorithms are transparent and readable
-//! - **AD integration**: CJC's autodiff can differentiate through operations
+//! It is not written in CJC-Lang, cannot be changed without recompiling, and
+//! has no autodiff integration.
 //!
 //! # Determinism
 //!
-//! Same seed = bit-identical output across runs, guaranteed by:
+//! Same inputs and seed give bit-identical output across runs and operating
+//! systems (covered by `tests/cross_platform_golden.rs`), guaranteed by:
 //! - Fixed iteration order in all loops
 //! - Kahan summation for floating-point reductions
 //! - No FMA (fused multiply-add)
 //! - SplitMix64 PRNG with explicit seed threading
+//! - `cjc_repro::dmath` for `sin`/`cos`/`ln`/powers (ADR-0046)
+//!
+//! The two backends are *not* bit-identical to each other: they use different
+//! algorithms, and agree to within ~1e-10 on the tested cases.
 
+use cjc_repro::dmath;
 use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -826,6 +833,22 @@ impl PureDensity {
         }
     }
 
+    /// Density matrix of a pure state: ρ = |ψ⟩⟨ψ|, i.e. ρ[i][j] = ψ_i · conj(ψ_j).
+    pub fn from_statevector(sv: &PureStatevector) -> Self {
+        let dim = 1 << sv.n_qubits;
+        let mut data = vec![CZERO; dim * dim];
+        for i in 0..dim {
+            for j in 0..dim {
+                data[i * dim + j] = c_mul(sv.amplitudes[i], c_conj(sv.amplitudes[j]));
+            }
+        }
+        PureDensity {
+            n_qubits: sv.n_qubits,
+            dim,
+            data,
+        }
+    }
+
     fn get(&self, r: usize, c: usize) -> C {
         self.data[r * self.dim + c]
     }
@@ -998,7 +1021,7 @@ impl PureDensity {
         let mut entropy = 0.0f64;
         for &lam in &eigenvalues {
             if lam > 1e-15 {
-                entropy -= lam * lam.ln();
+                entropy -= lam * dmath::ln(lam);
             }
         }
         entropy
@@ -1357,22 +1380,22 @@ pub fn t_matrix() -> [[C; 2]; 2] {
 
 /// Return the 2x2 Rx(theta) rotation matrix.
 pub fn rx_matrix(theta: f64) -> [[C; 2]; 2] {
-    let c = (theta / 2.0).cos();
-    let s = (theta / 2.0).sin();
+    let c = dmath::cos(theta / 2.0);
+    let s = dmath::sin(theta / 2.0);
     [[(c, 0.0), (0.0, -s)], [(0.0, -s), (c, 0.0)]]
 }
 
 /// Return the 2x2 Ry(theta) rotation matrix.
 pub fn ry_matrix(theta: f64) -> [[C; 2]; 2] {
-    let c = (theta / 2.0).cos();
-    let s = (theta / 2.0).sin();
+    let c = dmath::cos(theta / 2.0);
+    let s = dmath::sin(theta / 2.0);
     [[(c, 0.0), (-s, 0.0)], [(s, 0.0), (c, 0.0)]]
 }
 
 /// Return the 2x2 Rz(theta) rotation matrix.
 pub fn rz_matrix(theta: f64) -> [[C; 2]; 2] {
-    let c = (theta / 2.0).cos();
-    let s = (theta / 2.0).sin();
+    let c = dmath::cos(theta / 2.0);
+    let s = dmath::sin(theta / 2.0);
     [[(c, -s), CZERO], [CZERO, (c, s)]]
 }
 
@@ -1591,12 +1614,12 @@ fn pure_pauli_rotation(amplitudes: &mut Vec<C>, n: usize, ops: &[PurePauli], the
         for k in 0..n {
             let eigenvalue = pure_z_eigenvalue(ops, k);
             let angle = -theta * eigenvalue;
-            let phase = (angle.cos(), angle.sin());
+            let phase = (dmath::cos(angle), dmath::sin(angle));
             amplitudes[k] = c_mul(amplitudes[k], phase);
         }
     } else {
-        let cos_t = theta.cos();
-        let sin_t = theta.sin();
+        let cos_t = dmath::cos(theta);
+        let sin_t = dmath::sin(theta);
         let mut new_amps = vec![CZERO; n];
         for k in 0..n {
             new_amps[k] = c_scale(cos_t, amplitudes[k]);
@@ -1665,7 +1688,7 @@ pub fn pure_richardson_extrapolate(
     rhs[0] = 1.0;
     for k in 0..n {
         for i in 0..n {
-            mat[k][i] = scale_factors[i].powi(k as i32);
+            mat[k][i] = dmath::powi(scale_factors[i], k as i32);
         }
     }
     // Gaussian elimination with partial pivoting

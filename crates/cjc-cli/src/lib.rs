@@ -37,7 +37,7 @@ use std::path::Path;
 use std::process;
 use std::time::Instant;
 
-const VERSION: &str = "0.1.4";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ── Typed CLI configuration ──────────────────────────────────────────
 

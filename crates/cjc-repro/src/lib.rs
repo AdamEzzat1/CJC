@@ -13,6 +13,8 @@
 //!   Kahan summation for leaves of 32 elements or fewer.
 //! - [`ReproConfig`] -- a lightweight toggle that carries the reproducibility
 //!   seed through the compiler pipeline.
+//! - [`dmath`] -- platform-independent `sin`, `cos`, `exp`, `ln` (the
+//!   platform libm differs in the last bit between Windows and Linux).
 //!
 //! # Determinism contract
 //!
@@ -22,6 +24,7 @@
 //!
 //! No `HashMap`, no FMA, no non-deterministic SIMD reductions.
 
+pub mod dmath;
 pub mod kahan;
 pub use kahan::{
     KahanAccumulatorF32, KahanAccumulatorF64, KahanAccumulatorF64x4, KahanAccumulatorF64x8,
