@@ -424,6 +424,22 @@ pub fn dispatch_abng(name: &str, args: &[Value]) -> Result<Option<Value>, String
             let id = arg_i64(name, &args[0])?;
             with_graph(name, id, |g| Value::Bool(g.verify_chain().is_ok()))?
         }
+        "abng_checkpoint_blr" => {
+            // Phase 0.9.5 R0-3 — flush-before-serialize contract.
+            // abng_checkpoint_blr(graph_id) -> Int (events emitted)
+            //
+            // Re-anchors the final d×d BLR state of every node left
+            // mid-interval by n=1 training (`abng_train_step` /
+            // single-row `abng_blr_update`). Call once after training
+            // and before `abng_serialize`, or `abng_replay` fails with
+            // BlrStateHashMismatch. Not idempotent: each call re-emits
+            // for nodes still mid-interval, so it is deliberately NOT
+            // folded into `abng_serialize`.
+            arg_count(name, args, 1)?;
+            let id = arg_i64(name, &args[0])?;
+            let emitted = with_graph(name, id, |g| g.checkpoint_blr())?;
+            Value::Int(emitted as i64)
+        }
         "abng_serialize" => {
             arg_count(name, args, 1)?;
             let id = arg_i64(name, &args[0])?;
