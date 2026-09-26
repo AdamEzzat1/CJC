@@ -368,12 +368,11 @@ fn extract_metadata_from_bytes(bytes: &[u8]) -> (&'static str, Option<String>) {
 #[test]
 fn fuzz_load_jsonl() {
     bolero::check!().with_type::<Vec<u8>>().for_each(|input: &Vec<u8>| {
-        if let Ok(s) = std::str::from_utf8(input) {
-            let s = s.to_string();
-            let _ = panic::catch_unwind(|| {
-                let _ = load_jsonl(&s);
-            });
-        }
+        let Ok(s) = std::str::from_utf8(input) else { return };
+        let r = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            let _ = load_jsonl(s);
+        }));
+        assert!(r.is_ok(), "load_jsonl panicked on input {s:?}");
     });
 }
 
@@ -392,29 +391,28 @@ fn fuzz_detect_from_magic() {
 #[test]
 fn fuzz_load_delimited_csv() {
     bolero::check!().with_type::<Vec<u8>>().for_each(|input: &Vec<u8>| {
-        if let Ok(s) = std::str::from_utf8(input) {
-            let s = s.to_string();
-            let _ = panic::catch_unwind(|| {
-                let _ = load_delimited(&s, ',', true);
-                let _ = load_delimited(&s, ',', false);
-            });
-        }
+        let Ok(s) = std::str::from_utf8(input) else { return };
+        let r = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            let _ = load_delimited(s, ',', true);
+            let _ = load_delimited(s, ',', false);
+        }));
+        assert!(r.is_ok(), "load_delimited(',') panicked on input {s:?}");
     });
 }
 
-/// Fuzz: random bytes as file metadata should never panic extract_metadata.
+/// Fuzz: random bytes as file metadata must not panic extract_metadata and
+/// must yield a non-empty format plus hex-only magic. Runs directly.
 #[test]
 fn fuzz_extract_metadata() {
     bolero::check!().with_type::<Vec<u8>>().for_each(|input: &Vec<u8>| {
-        let _ = panic::catch_unwind(|| {
-            let (fmt, magic) = extract_metadata_from_bytes(input);
-            // Should always return a valid format string.
-            assert!(!fmt.is_empty());
-            // Magic bytes string should be well-formed hex or None.
-            if let Some(ref hex) = magic {
-                assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
-            }
-        });
+        let (fmt, magic) = extract_metadata_from_bytes(input);
+        assert!(!fmt.is_empty(), "empty format for input {input:?}");
+        if let Some(ref hex) = magic {
+            assert!(
+                hex.chars().all(|c| c.is_ascii_hexdigit()),
+                "non-hex magic {hex:?} for input {input:?}"
+            );
+        }
     });
 }
 
@@ -422,13 +420,13 @@ fn fuzz_extract_metadata() {
 #[test]
 fn fuzz_jsonl_unicode_fields() {
     bolero::check!().with_type::<Vec<u8>>().for_each(|input: &Vec<u8>| {
-        if let Ok(s) = std::str::from_utf8(input) {
-            // Wrap in a JSON object structure.
-            let jsonl_line = format!("{{\"{}\":\"value\"}}", s.replace('\\', "\\\\").replace('"', "\\\""));
-            let _ = panic::catch_unwind(|| {
-                let _ = load_jsonl(&jsonl_line);
-            });
-        }
+        let Ok(s) = std::str::from_utf8(input) else { return };
+        // Wrap in a JSON object structure.
+        let jsonl_line = format!("{{\"{}\":\"value\"}}", s.replace('\\', "\\\\").replace('"', "\\\""));
+        let r = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            let _ = load_jsonl(&jsonl_line);
+        }));
+        assert!(r.is_ok(), "load_jsonl panicked on line {jsonl_line:?}");
     });
 }
 
@@ -438,17 +436,17 @@ fn fuzz_csv_random_delimiters() {
     bolero::check!()
         .with_type::<(Vec<u8>, u8)>()
         .for_each(|&(ref input, delim_byte): &(Vec<u8>, u8)| {
-            if let Ok(s) = std::str::from_utf8(input) {
-                let s = s.to_string();
-                // Use the byte as a char delimiter (valid ASCII range).
-                if delim_byte.is_ascii() && delim_byte != 0 {
-                    let delimiter = delim_byte as char;
-                    let _ = panic::catch_unwind(|| {
-                        let _ = load_delimited(&s, delimiter, true);
-                        let _ = load_delimited(&s, delimiter, false);
-                    });
-                }
+            let Ok(s) = std::str::from_utf8(input) else { return };
+            // Delimiters are single ASCII chars; NUL is not a delimiter.
+            if !delim_byte.is_ascii() || delim_byte == 0 {
+                return;
             }
+            let delimiter = delim_byte as char;
+            let r = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                let _ = load_delimited(s, delimiter, true);
+                let _ = load_delimited(s, delimiter, false);
+            }));
+            assert!(r.is_ok(), "load_delimited({delimiter:?}) panicked on input {s:?}");
         });
 }
 
@@ -456,13 +454,11 @@ fn fuzz_csv_random_delimiters() {
 #[test]
 fn fuzz_json_object_parsing() {
     bolero::check!().with_type::<Vec<u8>>().for_each(|input: &Vec<u8>| {
-        if let Ok(s) = std::str::from_utf8(input) {
-            let s = s.to_string();
-            let _ = panic::catch_unwind(|| {
-                // parse_json_object returns Result, so it should gracefully
-                // handle any input. We just ensure no panic.
-                let _ = parse_json_object(&s);
-            });
-        }
+        let Ok(s) = std::str::from_utf8(input) else { return };
+        // parse_json_object returns Result; any input must yield Ok or Err.
+        let r = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            let _ = parse_json_object(s);
+        }));
+        assert!(r.is_ok(), "parse_json_object panicked on input {s:?}");
     });
 }

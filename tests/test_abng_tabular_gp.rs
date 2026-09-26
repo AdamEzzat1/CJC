@@ -256,6 +256,8 @@ fn tabular_routing_partitions_input_space_disjointly() {
 fn tabular_serialize_replay_preserves_predictions_byte_for_byte() {
     let mut g = build_tabular_graph(11);
     train_n(&mut g, 31, 64);
+    // R0-3 contract: flush mid-interval BLR witnesses before serialize.
+    g.checkpoint_blr();
     let blob = serialize(&g);
     let g2 = replay(&blob).unwrap();
     for k in 0..16u64 {
