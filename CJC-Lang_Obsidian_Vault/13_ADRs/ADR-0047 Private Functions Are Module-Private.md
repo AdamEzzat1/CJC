@@ -1,78 +1,117 @@
-# ADR-0047 Private Functions Are Module-Private
+# ADR-0047 Module-Scoped Name Resolution; Private Functions Are Module-Private
 
-- **Status:** Accepted (2026-09-26)
-- **Crates:** `cjc-module` (`check_visibility`, new `enforce_visibility`), `cjc-eval` and `cjc-mir-exec` (multi-file entry points call it)
+- **Status:** Accepted (2026-09-27). Supersedes this ADR's first version (2026-09-26, commit `94111b5`). That version kept the aliases and rejected cross-module uses of private names with a static check. As a result, a private `fn abs` in one module made the builtin `abs` unusable in the modules that imported it, and it did not fix the two executor divergences below.
+- **Crates:**
+  - `cjc-module`: new `resolve` module (`resolve_modules`, `explain_undefined`); `merge_programs` now resolves first and creates no aliases; `merge_resolved`; symbol-import fallback.
+  - `cjc-ast`: new `visit_mut` (mutating visitor).
+  - `cjc-eval` and `cjc-mir-exec`: multi-file entry points run the resolved ASTs.
 - **Related:** [[Module System]], [[ADR-0003 Backward-compatible run_program]]
 
 ## Context
 
-A function declared without `pub` was callable from any module that
-imported its module. Nothing enforced it, and the two halves of the
-visibility code each said the other one did:
+In multi-file programs, a function declared without `pub` was callable from
+any module that imported its module. The two executors also resolved
+multi-file names in different ways, and each was wrong somewhere:
 
-- `merge_programs` aliased *every* function of an imported module under its
-  unprefixed name, citing `check_visibility` for enforcement.
-- `check_visibility` said module-level imports were "enforced during alias
-  creation" and checked nothing for them. It only checked `import m.Symbol`.
+| Program | AST-eval | MIR-exec | Correct |
+|---|---|---|---|
+| Modules `alpha` and `beta` each have a private `helper`; `alpha.fa()*100 + beta.fb()` | 202 | 101 | 102 |
+| `alpha` imports `beta` and calls `beta`'s pub `fb` | 11 | error: undefined `fb` | 11 |
+| `alpha` has a private `fn abs`; `main` calls the builtin `abs` | alpha's `abs` | alpha's `abs` | builtin |
 
-The aliasing of private functions is load-bearing. Merging renames each
-function to `module::name` but does not rewrite call sites inside bodies, so
-a `pub fn` that calls a private helper finds the helper only through its
-unprefixed alias.
+The two causes:
 
-The executors also disagree on how multi-file names resolve. `cjc-mir-exec`
-uses the prefixed merge plus aliases; `cjc-eval` runs every module in one
-interpreter with a single namespace. A fix in only one resolver would make
-the executors accept different programs.
+- **`merge_programs`** (MIR-exec) renamed each module's functions to
+  `module::name`, but left call sites untouched. It then aliased *every*
+  function of the entry module's imports under its bare name, private ones
+  included. So private functions were callable, the first same-named alias
+  won, and nested imports had no alias at all.
+- **The AST evaluator** ran every module in one interpreter with a single
+  namespace, so the last function registered under a name won.
 
-The gap was found when `tests/final_phase_hardening_before_vm/`, a suite
-that had never been compiled, was wired in. Its test asserting that private
-functions are not aliased failed.
+`check_visibility` checked only `import m.Symbol`. Each half of the code
+said the other half enforced privacy.
 
 ## Decision
 
-1. **Rule:** a module may not reference, by bare name, a function that
-   another module declares without `pub`. This covers calls `f(x)` and
-   function values `g(f)`. `import m` exposes `m`'s `pub` functions only.
-2. **Enforcement is a static check on the ASTs** (`check_visibility`, rule 2),
-   not a change to name resolution. A name is reported only if all of these
-   hold:
-   - the referencing module neither defines it nor binds it anywhere (as a
-     `let`, `const`, `for` variable, parameter, or pattern binding);
-   - another module declares it as a private top-level `fn`;
-   - no module declares a `pub fn` with that name.
+**One name-resolution pass, shared by both executors.**
+`cjc_module::resolve_modules` clones each module's AST and rewrites every
+free identifier that names a function to that function's qualified name.
+It also renames top-level `fn` declarations to match. For a bare name `n`
+in module `M`:
 
-   The binding test is scope-insensitive on purpose, so shadowing can
-   never cause a false positive.
-3. **Both executors' multi-file entry points call `enforce_visibility`**
-   before running, so they reject the same programs with the same message.
-   The CLI (`cjcl run --multi-file`) already called `check_visibility`, so
-   it gets the rule automatically.
-4. **Aliasing and resolution are unchanged.** Private functions are still
-   aliased, so intra-module helper calls keep working. No other module can
-   reach the alias, because the check rejects any reference to it.
+1. If a binding in scope shadows `n`, leave it: parameters, `let`, `for`,
+   lambda parameters, match-pattern bindings, and module-level `let`/`const`.
+2. Otherwise, if `M` defines a top-level `fn n`, it becomes `M::n`. The
+   entry module's names stay bare, so `main` is still `main`.
+3. Otherwise, if one of `M`'s direct imports provides `n`, it becomes that
+   module's `X::n`. `import X` provides `X`'s `pub` functions;
+   `import X.f [as g]` provides `f` as `g` if `f` is `pub`. The first
+   import in source order wins.
+4. Otherwise, leave `n` alone. The executor resolves it as in a
+   single-file program: a builtin, an enum variant, or "undefined".
+
+Consequences of these rules:
+
+- **Private functions are out of scope outside their module.** This is
+  rule 3: only `pub` functions are provided by imports.
+- **A `pub fn` can call its module's private helpers.** Rule 2 applies
+  inside the module.
+- **Builtins are never shadowed by another module's function.** Rule 4.
+
+**Both executors run the resolved ASTs.** `merge_programs` no longer
+creates aliases, and the AST evaluator's shared namespace can no longer
+collide, because names are qualified.
+
+**Diagnostics.** A private function of another module is simply not in
+scope. That is exact, but by itself unhelpful. So the resolver records
+unresolved names that are private functions elsewhere, and
+`explain_undefined` appends a note to the executors' "undefined
+function/variable" errors. Both executors call it, so the text is
+identical:
+
+```
+undefined function `double`
+note: `double` is a private function of module `utils`; mark it `pub` to use it from other modules
+```
+
+This is a note, not a static error: a name may be a private function
+elsewhere and also a builtin (rule 4), and `cjc-module` has no authoritative
+list of builtins.
+
+**Also fixed.** `import m.f` with a lowercase `f` was classified as the
+module path `m/f`. When no such file existed, the import was dropped
+silently, even though `classify_import`'s comment described a fallback.
+`build_module_graph` now tries `(m, symbol f)` in that case.
+
+## Evidence
+
+- All three table rows now give the correct value in both executors
+  (`tests/final_phase_hardening_before_vm/test_module_visibility.rs`,
+  `same_named_private_helpers_do_not_collide`,
+  `nested_import_resolves_in_both_executors`,
+  `private_fn_does_not_shadow_builtin_in_importer`).
+- The tests run every program through both executors' multi-file entry
+  points. Before this, the AST-eval multi-file path had no tests.
+- Scoping, precedence, recursion and lambdas inside modules, `import m.f as
+  g`, and determinism are covered (the resolver's output is compared across
+  repeated runs).
 
 ## Consequences
 
-- **Breaking:** multi-file programs that call a non-`pub` function of an
-  imported module now fail with, for example:
-  ``visibility error: function `double` is private to module `mathlib` and
-  cannot be used from module `main` (mark it `pub` to export it)``. One
-  existing test relied on this (`test_module_system::module_exec_two_files`)
-  and now marks its function `pub`. The documented examples already use
-  `pub fn`.
-- **Builtin shadowing is still loud rather than right.** Suppose a module
-  has a private `fn mean` and the importer calls `mean(x)` intending the
-  builtin. Previously both executors silently called the private function;
-  now the program is rejected. Resolving it to the builtin needs
-  module-scoped name resolution in both executors.
-- Parity: the multi-file AST-eval entry point had no tests. The new tests
-  run valid programs through both executors and compare the results.
+- **Breaking:** calling a non-`pub` function of another module now fails.
+  One test relied on it (`test_module_system::module_exec_two_files`) and
+  now marks its function `pub`. Programs that depended on either
+  executor's old collision behaviour change results. The old results were
+  wrong, and the two executors disagreed.
+- `VisibilityViolation` and `check_visibility` are unchanged from before
+  this ADR.
 
 ## Not decided here
 
-- **Call-site rewriting and module-scoped resolution.** These would let the
-  merge alias only `pub` functions, fix the builtin-shadowing case, and
-  unify the two executors' resolvers.
-- **Private structs and records used by bare name.** Only `import m.Struct`
-  is checked today.
+- **Qualified calls** (`utils::double(x)`) do not parse. The docs showed
+  them; the docs are corrected. Supporting them needs parser work.
+- **Module-level `let` globals and struct/enum names** are still shared
+  across modules the old way. Only functions are resolved.
+- **Transitive access.** A module sees only its direct imports. Importing
+  `a` does not make `a`'s imports visible.

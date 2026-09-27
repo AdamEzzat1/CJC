@@ -17,7 +17,7 @@ The multi-file module system is **fully implemented and wired into the CLI**. Pr
 import math.linalg
 
 fn main() -> i64 {
-    print(math::linalg::add(1, 2));
+    print(add(1, 2));
     0
 }
 ```
@@ -35,18 +35,34 @@ cjcl run --multi-file main.cjcl
 
 Modules resolve relative to the entry file's directory. Cyclic imports are detected and reported as diagnostics.
 
-## Visibility
+## Name resolution and visibility
 
-Functions are private to their module unless marked `pub` ([[ADR-0047 Private Functions Are Module-Private]]). `import m` makes `m`'s `pub` functions callable by bare name; referencing a private one from another module is a `visibility error` before execution, in both executors. A `pub fn` may call private helpers in its own module. `import m.Symbol` must name a `pub` symbol.
+[[ADR-0047 Private Functions Are Module-Private]]. Before either executor
+runs, `resolve_modules` rewrites every function reference to its qualified
+name, so AST-eval and MIR-exec agree on what each name means:
+
+- A module's own functions come first. `import m` provides `m`'s `pub`
+  functions; `import m.f [as g]` provides one function. The first import
+  wins, and only direct imports count.
+- Local bindings shadow function names.
+- Functions without `pub` are private: callable inside their module, not in
+  scope elsewhere. Calling one from another module fails as "undefined",
+  with a note naming the owning module.
+- A name no module provides is left as is, so builtins are never shadowed
+  by another module's function.
+- Qualified call syntax (`m::f(x)`) does not parse; call imported
+  functions by bare name.
 
 ## Pipeline
 
 ```
 entry.cjcl ─► build_module_graph() ─► ModuleGraph
                                           │
-                     check_visibility() ◄─┤  (enforce pub/priv)
+                     check_visibility() ◄─┤  (`import m.Symbol` must be pub)
                                           │
-                     merge_programs() ◄───┘
+                     resolve_modules() ◄──┤  (qualify every function name)
+                                          │
+                     merge_resolved()  ◄──┘  (MIR-exec; AST-eval runs the resolved ASTs)
                             │
                      escape::annotate_program()
                             │
@@ -63,7 +79,8 @@ entry.cjcl ─► build_module_graph() ─► ModuleGraph
 - `ModuleGraph` (line 200) — dependency graph with deterministic iteration
 - `build_module_graph(entry_path)` (line 426) — DFS cycle detection, returns `Result<ModuleGraph>`
 - `merge_programs(graph)` (line 576) — merges per-module `MirProgram`s into one
-- `check_visibility(graph)` — enforces `pub` / private boundaries (`import m.Symbol`, and bare-name uses of other modules' private functions); `enforce_visibility(graph)` wraps it as a `Result` for the executors
+- `check_visibility(graph)` / `enforce_visibility(graph)` — `import m.Symbol` must name a `pub` symbol
+- `resolve_modules(graph)` (`resolve.rs`) — module-scoped name resolution shared by both executors; `explain_undefined` adds the private-function note
 - `build_import_aliases(graph)` (line 844) — resolves short names to full paths
 - 17+ inline tests (lines 903–1089)
 

@@ -4881,32 +4881,31 @@ pub fn run_program_with_modules_eval(
         .map_err(|e| EvalError::Runtime(format!("module error: {}", e)))?;
     cjc_module::enforce_visibility(&graph).map_err(EvalError::Runtime)?;
 
-    let order = graph
-        .topological_order()
+    // Module-scoped names (ADR-0047): every function reference is already
+    // qualified, so the interpreter's single namespace cannot confuse two
+    // modules' functions, and private functions are out of scope elsewhere.
+    let resolved = cjc_module::resolve_modules(&graph)
         .map_err(|e| EvalError::Runtime(format!("module error: {}", e)))?;
+    let explain = |e: EvalError| match e {
+        EvalError::Runtime(m) => {
+            EvalError::Runtime(cjc_module::explain_undefined(m, &resolved.private_hints))
+        }
+        other => other,
+    };
 
     let mut interp = Interpreter::new(seed);
 
-    for mod_id in &order {
-        let module = graph
-            .modules
-            .get(mod_id)
-            .expect("module in topo order must exist in graph");
-
-        let ast = match &module.ast {
-            Some(ast) => ast,
-            None => continue,
-        };
-
-        if module.is_entry {
+    // Dependencies first; the entry module is last.
+    for (mod_id, ast) in &resolved.modules {
+        if graph.modules[mod_id].is_entry {
             // Entry module: full execution including main() call and
             // library-enable scanning from its imports.
-            return interp.exec(ast);
+            return interp.exec(ast).map_err(explain);
         }
 
         // Non-entry (dependency) module: register declarations and run
         // top-level statements without calling main().
-        interp.exec_module(ast)?;
+        interp.exec_module(ast).map_err(explain)?;
     }
 
     // Fallback: if the graph had no entry module (shouldn't happen).

@@ -15,20 +15,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **New in `dmath`:** `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `atanh`, `exp_m1`, `ln_1p`, `log2`, `log10`, `hypot`, plus the `DetMath` trait (`x.det_exp()`) used to migrate 387 call sites. Verified against mpmath over 609,860 evaluations (`verification/dmath_ext_check.py`); the musl-derived functions are bit-identical to musl's own C code (`verification/musl_bitcompare/`). Measured max errors are documented per function — five inherit >1 ulp from musl's algorithms (`atan2`, `cosh`, `atanh`, `sinh`, `tanh`, ≤ 1.95 ulp).
 - The analytics crates (`cjc-vizor`, `cjc-nss`, `cjc-cana`, `cjc-cana-compress`, `cjc-abng`, `cjc-locke`, `cjc-cronos-gan`; 91 sites) use `dmath` too, so no workspace crate calls platform libm transcendentals outside tests.
 
-### Fixed
-
-#### State-space builtins were never reachable
-- `crates/cjc-runtime/src/state_space.rs` (ADR-0020/0021: `state_space_*`, `tensor_concat_1d`) was committed without its `mod` declaration or dispatch hook, so the module was never compiled and every `state_space_*` call was an unknown builtin. It is now reached from `dispatch_builtin`'s fallback arm, as the ADR describes; both executors inherit it.
-
-#### Three test suites that never ran
-- `tests/state_space_tests/` (62 tests) and `tests/final_phase_hardening_before_vm/` (53) had no `[[test]]` entry, and `tests/audit_tests/test_parallel_matmul.rs` was never declared as a module. All are wired in and pass.
-- `final_phase_hardening_before_vm` had drifted from the language: it used a bare trailing expression as the program result, match arms without commas, trait signatures without `;`, `Color::Red` variant paths, `rand()`, `array_get`, `GradGraph::variable` and `Value == Value`. Its parity tests now compare printed output, and they fail if nothing is printed; the old form compared `Void` with `Void` and could not fail.
-- Its module-visibility test expected private functions of an imported module not to be aliased. They are aliased, deliberately: merging leaves call sites inside module bodies unprefixed, so a `pub fn` calling a private helper needs the alias. The test now matches the in-crate test and says so. The hole it pointed at is closed below.
-
-#### Private functions are now module-private (ADR-0047) — breaking
-- A module may no longer reference a function that another module declares without `pub`, either as a call or as a function value. Previously `import m` exposed all of `m`'s functions, because nothing enforced visibility for module-level imports. Programs that relied on this now fail before running with ``visibility error: function `f` is private to module `m` and cannot be used from module `main` (mark it `pub` to export it)``. Add `pub` to fix.
-- Enforced by a static check (`cjc_module::check_visibility` / `enforce_visibility`) that both executors' multi-file entry points and `cjcl run --multi-file` run first, so AST-eval and MIR-exec reject the same programs. A `pub fn` calling a private helper in its own module still works, and local bindings that share a private function's name are never reported.
-
 #### Quantum: faster statevector simulation, same bits
 - Gates are applied by new strided kernels (`cjc-quantum/src/kernels.rs`). They walk only the amplitude pairs a gate touches and split large states across threads (`std::thread::scope`; the count comes from `cjc_runtime::runtime_policy`, and threads are used only above 2^15 pairs per thread).
   - Each pair is owned by one thread and nothing is reduced across threads, so output is bit-identical at any thread count.
@@ -49,6 +35,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - A 348,004-line output dump is byte-identical on Windows (UCRT) and Linux (glibc 2.36). The `golden_hash_is_platform_independent` test runs on all three CI operating systems.
 - Quantum outputs on a given OS may change in the last bit. For example, `sin(π/6)` is now 0.5 on every platform.
 - `cjc-runtime`'s `.cjcl` math builtins still use the platform libm. Moving them is a separate decision, because it changes existing golden hashes.
+
+#### Multi-file programs: module-scoped name resolution; private functions are module-private (ADR-0047) — breaking
+- Both executors now resolve function names in multi-file programs through one shared pass (`cjc_module::resolve_modules`). Before, they disagreed and each was wrong somewhere:
+  - two modules with a private `helper` of the same name: AST-eval gave 202 and MIR-exec 101, where the correct result was 102;
+  - a module calling a `pub fn` of its own import: MIR-exec failed;
+  - a private `fn abs` in one module shadowed the builtin `abs` in every module that imported it.
+- **Breaking:** a function without `pub` is no longer callable from other modules. Such a call fails with ``undefined function `f` `` plus ``note: `f` is a private function of module `m`; mark it `pub` to use it from other modules``, identically in both executors. A `pub fn` can still call its module's private helpers.
+- `import m.f` (lowercase `f`) now imports the function `f` of module `m`. It was silently ignored before.
+- Docs no longer show `m::f(x)` calls, which do not parse.
 
 ### Added
 
@@ -87,6 +82,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   - fuzz and Bolero builtin lists extended to 82 names
 
 ### Fixes
+
+#### State-space builtins were never reachable
+- `crates/cjc-runtime/src/state_space.rs` (ADR-0020/0021: `state_space_*`, `tensor_concat_1d`) was committed without its `mod` declaration or dispatch hook, so the module was never compiled and every `state_space_*` call was an unknown builtin. It is now reached from `dispatch_builtin`'s fallback arm, as the ADR describes; both executors inherit it.
+
+#### Three test suites that never ran
+- `tests/state_space_tests/` (62 tests) and `tests/final_phase_hardening_before_vm/` (53) had no `[[test]]` entry, and `tests/audit_tests/test_parallel_matmul.rs` was never declared as a module. All are wired in and pass.
+- `final_phase_hardening_before_vm` had drifted from the language: it used a bare trailing expression as the program result, match arms without commas, trait signatures without `;`, `Color::Red` variant paths, `rand()`, `array_get`, `GradGraph::variable` and `Value == Value`. Its parity tests now compare printed output, and they fail if nothing is printed; the old form compared `Void` with `Void` and could not fail.
+- Its module-visibility test expected private functions of an imported module not to be aliased, but they were. That test exposed the privacy hole fixed by ADR-0047 (see Changed); it now passes with its original assertion.
 
 #### Quantum: MPS truncation discarded the wrong directions
 - The one-sided Jacobi SVD in `mps.rs` solved for the rotation with the wrong sign. Its reconstructions were exact, but its singular values and U were wrong whenever two columns had unequal norms (|UᴴU − I| ≈ 0.99 on a random rank-2 matrix), so χ-truncation kept arbitrary directions.

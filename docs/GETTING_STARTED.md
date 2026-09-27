@@ -84,10 +84,18 @@ CJC-Lang supports multi-file programs via the `--multi-file` flag. Use `import` 
 import math.linalg
 
 fn main() -> i64 {
-    print(math::linalg::add(1, 2));
+    print(add(1, 2));
     0
 }
 ```
+
+```
+// math/linalg.cjcl
+pub fn add(a: i64, b: i64) -> i64 { scale(a) + scale(b) }
+fn scale(x: i64) -> i64 { x }   // private: callable only inside math/linalg
+```
+
+`import math.linalg` makes the module's `pub` functions callable by name. Functions without `pub` are private to their module. A private function can be called by its own module's functions, but not from other modules. `import math.linalg.add` (optionally `as other_name`) imports a single function.
 
 Run with:
 

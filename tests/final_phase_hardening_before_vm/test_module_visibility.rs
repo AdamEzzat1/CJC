@@ -15,8 +15,10 @@ fn setup_test_dir(files: &[(&str, &str)]) -> tempfile::TempDir {
     dir
 }
 
+/// A call to an imported `pub fn` is resolved to its qualified name; no
+/// unprefixed alias is created (ADR-0047).
 #[test]
-fn test_pub_fn_aliased_in_merged_program() {
+fn test_pub_fn_call_resolves_to_qualified_name() {
     let dir = setup_test_dir(&[
         ("main.cjcl", "import utils\nlet x = double(21);"),
         ("utils.cjcl", "pub fn double(n: i64) -> i64 { n * 2 }"),
@@ -25,17 +27,12 @@ fn test_pub_fn_aliased_in_merged_program() {
     let graph = cjc_module::build_module_graph(&entry).unwrap();
     let merged = cjc_module::merge_programs(&graph).unwrap();
     let names: Vec<&str> = merged.functions.iter().map(|f| f.name.as_str()).collect();
-    assert!(names.contains(&"double"), "pub fn should be aliased: {:?}", names);
+    assert!(names.contains(&"utils::double"), "{:?}", names);
+    assert!(!names.contains(&"double"), "no unprefixed alias: {:?}", names);
 }
 
-/// Private functions of an imported module are aliased too. Merging renames
-/// functions to `utils::name` but leaves call sites in bodies unprefixed, so
-/// a `pub fn` that calls a private helper resolves the helper only through
-/// its unprefixed alias. Matches `test_visibility_pub_functions_aliased` in
-/// `cjc-module`. Other modules still cannot use the alias: `check_visibility`
-/// rejects any reference to it (see the `private_fn_*` tests below).
 #[test]
-fn test_private_fn_aliased_for_intra_module_calls() {
+fn test_private_fn_not_aliased() {
     let dir = setup_test_dir(&[
         ("main.cjcl", "import utils\nlet x = 1;"),
         ("utils.cjcl", "pub fn public_fn() -> i64 { 1 }\nfn private_fn() -> i64 { 2 }"),
@@ -44,8 +41,7 @@ fn test_private_fn_aliased_for_intra_module_calls() {
     let graph = cjc_module::build_module_graph(&entry).unwrap();
     let merged = cjc_module::merge_programs(&graph).unwrap();
     let names: Vec<&str> = merged.functions.iter().map(|f| f.name.as_str()).collect();
-    assert!(names.contains(&"public_fn"), "pub fn should be aliased");
-    assert!(names.contains(&"private_fn"), "private fn is aliased for intra-module calls");
+    assert!(!names.contains(&"private_fn"), "private fn should not be aliased");
     assert!(names.contains(&"utils::private_fn"), "private fn still exists with prefix");
 }
 
@@ -121,22 +117,14 @@ fn test_module_merge_deterministic() {
 }
 
 // ---------------------------------------------------------------------------
-// Private functions are not usable from other modules. `check_visibility`
-// is a static check on the ASTs, and both executors' multi-file entry points
-// run it first, so they accept and reject exactly the same programs.
+// Module-scoped name resolution (ADR-0047). `cjc_module::resolve_modules`
+// qualifies every function reference before either executor runs, so both
+// executors see the same names. A private function is not in scope outside
+// its module; a failed call to one gets a note saying why.
 // ---------------------------------------------------------------------------
 
-fn violation_strings(files: &[(&str, &str)]) -> Vec<String> {
-    let dir = setup_test_dir(files);
-    let graph = cjc_module::build_module_graph(&dir.path().join("main.cjcl")).unwrap();
-    cjc_module::check_visibility(&graph)
-        .iter()
-        .map(|v| v.to_string())
-        .collect()
-}
-
 /// Runs the program in both executors; returns (eval, mir) results with
-/// values and errors rendered as strings.
+/// values rendered via Display and errors via Debug.
 fn run_both(files: &[(&str, &str)]) -> (Result<String, String>, Result<String, String>) {
     let dir = setup_test_dir(files);
     let entry: PathBuf = dir.path().join("main.cjcl");
@@ -149,108 +137,185 @@ fn run_both(files: &[(&str, &str)]) -> (Result<String, String>, Result<String, S
     (eval, mir)
 }
 
+/// Both executors return `Ok(expected)`.
+fn assert_both_ok(files: &[(&str, &str)], expected: &str) {
+    let (eval, mir) = run_both(files);
+    assert_eq!(eval, Ok(expected.to_string()), "AST-eval");
+    assert_eq!(mir, Ok(expected.to_string()), "MIR-exec");
+}
+
+/// Both executors fail, and both errors contain every fragment.
+fn assert_both_err(files: &[(&str, &str)], fragments: &[&str]) {
+    let (eval, mir) = run_both(files);
+    for (who, r) in [("AST-eval", eval), ("MIR-exec", mir)] {
+        let e = r.expect_err(who);
+        for frag in fragments {
+            assert!(e.contains(frag), "{who} error lacks {frag:?}: {e}");
+        }
+    }
+}
+
 const UTILS: &str = "pub fn quad(x: i64) -> i64 { double(double(x)) }\n\
                      fn double(x: i64) -> i64 { x * 2 }";
 
-#[test]
-fn private_fn_call_from_importer_is_rejected() {
-    let files = [
-        ("main.cjcl", "import utils\nfn main() -> i64 { double(3) }"),
-        ("utils.cjcl", UTILS),
-    ];
-    let v = violation_strings(&files);
-    assert_eq!(
-        v,
-        vec!["function `double` is private to module `utils` and cannot be used \
-              from module `main` (mark it `pub` to export it)"
-            .to_string()]
-    );
-
-    let (eval, mir) = run_both(&files);
-    let (eval_err, mir_err) = (eval.unwrap_err(), mir.unwrap_err());
-    assert!(eval_err.contains("visibility error: function `double` is private"), "{eval_err}");
-    assert!(mir_err.contains("visibility error: function `double` is private"), "{mir_err}");
-}
+const PRIVATE_NOTE: &str = "note: `double` is a private function of module `utils`; \
+                            mark it `pub` to use it from other modules";
 
 #[test]
 fn pub_fn_calling_private_helper_runs_in_both_executors() {
-    let files = [
-        ("main.cjcl", "import utils\nfn main() -> i64 { quad(3) }"),
-        ("utils.cjcl", UTILS),
-    ];
-    assert!(violation_strings(&files).is_empty());
-    let (eval, mir) = run_both(&files);
-    assert_eq!(eval, Ok("12".to_string()));
-    assert_eq!(mir, Ok("12".to_string()));
-}
-
-#[test]
-fn private_fn_used_as_value_is_rejected() {
-    let v = violation_strings(&[
-        ("main.cjcl", "import utils\nlet f = double;"),
-        ("utils.cjcl", UTILS),
-    ]);
-    assert_eq!(v.len(), 1, "{v:?}");
-    assert!(v[0].contains("`double` is private to module `utils`"), "{v:?}");
-}
-
-#[test]
-fn local_binding_with_private_fn_name_is_not_a_violation() {
-    // `double` here is the importer's own variable, not utils' function.
-    let files = [
-        ("main.cjcl", "import utils\nfn main() -> i64 { let double = 5; double + quad(1) }"),
-        ("utils.cjcl", UTILS),
-    ];
-    assert!(violation_strings(&files).is_empty());
-    let (eval, mir) = run_both(&files);
-    assert_eq!(eval, Ok("9".to_string()));
-    assert_eq!(mir, eval);
-}
-
-#[test]
-fn own_private_fn_of_same_name_is_not_a_violation() {
-    let v = violation_strings(&[
-        ("main.cjcl", "import utils\nfn double(x: i64) -> i64 { x + x }\nlet y = double(2);"),
-        ("utils.cjcl", UTILS),
-    ]);
-    assert!(v.is_empty(), "{v:?}");
-}
-
-#[test]
-fn name_that_is_pub_in_some_module_is_not_a_violation() {
-    let v = violation_strings(&[
-        ("main.cjcl", "import alpha\nimport beta\nlet y = shared(1);"),
-        ("alpha.cjcl", "pub fn shared(x: i64) -> i64 { x }"),
-        ("beta.cjcl", "fn shared(x: i64) -> i64 { x + 1 }"),
-    ]);
-    assert!(v.is_empty(), "{v:?}");
-}
-
-#[test]
-fn dependency_module_using_another_modules_private_fn_is_rejected() {
-    let v = violation_strings(&[
-        ("main.cjcl", "import alpha\nimport beta\nlet y = b(1);"),
-        ("alpha.cjcl", "fn secret(x: i64) -> i64 { x }"),
-        ("beta.cjcl", "import alpha\npub fn b(x: i64) -> i64 { secret(x) }"),
-    ]);
-    assert_eq!(
-        v,
-        vec!["function `secret` is private to module `alpha` and cannot be used \
-              from module `beta` (mark it `pub` to export it)"
-            .to_string()]
+    assert_both_ok(
+        &[("main.cjcl", "import utils\nfn main() -> i64 { quad(3) }"), ("utils.cjcl", UTILS)],
+        "12",
     );
 }
 
 #[test]
-fn visibility_violations_are_deterministic() {
+fn private_fn_is_not_in_scope_for_importer() {
+    assert_both_err(
+        &[("main.cjcl", "import utils\nfn main() -> i64 { double(3) }"), ("utils.cjcl", UTILS)],
+        &["undefined function `double`", PRIVATE_NOTE],
+    );
+}
+
+#[test]
+fn private_fn_used_as_value_is_not_in_scope() {
+    assert_both_err(
+        &[
+            ("main.cjcl", "import utils\nfn main() -> i64 { let f = double; f(3) }"),
+            ("utils.cjcl", UTILS),
+        ],
+        &[PRIVATE_NOTE],
+    );
+}
+
+#[test]
+fn dependency_module_cannot_use_another_modules_private_fn() {
+    assert_both_err(
+        &[
+            ("main.cjcl", "import alpha\nimport beta\nfn main() -> i64 { b(1) }"),
+            ("alpha.cjcl", "fn secret(x: i64) -> i64 { x }"),
+            ("beta.cjcl", "import alpha\npub fn b(x: i64) -> i64 { secret(x) }"),
+        ],
+        &["undefined function `secret`", "`secret` is a private function of module `alpha`"],
+    );
+}
+
+#[test]
+fn same_named_private_helpers_do_not_collide() {
+    // Each module's `pub fn` must call its own `helper`. Before module-scoped
+    // resolution AST-eval returned 202 and MIR-exec 101.
+    assert_both_ok(
+        &[
+            ("main.cjcl", "import alpha\nimport beta\nfn main() -> i64 { fa() * 100 + fb() }"),
+            ("alpha.cjcl", "pub fn fa() -> i64 { helper() }\nfn helper() -> i64 { 1 }"),
+            ("beta.cjcl", "pub fn fb() -> i64 { helper() }\nfn helper() -> i64 { 2 }"),
+        ],
+        "102",
+    );
+}
+
+#[test]
+fn nested_import_resolves_in_both_executors() {
+    // MIR-exec used to fail with "undefined function `fb`": only the entry
+    // module's imports were aliased.
+    assert_both_ok(
+        &[
+            ("main.cjcl", "import alpha\nfn main() -> i64 { fa() }"),
+            ("alpha.cjcl", "import beta\npub fn fa() -> i64 { fb() + 1 }"),
+            ("beta.cjcl", "pub fn fb() -> i64 { 10 }"),
+        ],
+        "11",
+    );
+}
+
+#[test]
+fn private_fn_does_not_shadow_builtin_in_importer() {
+    // main's `abs` is the builtin (2.0); alpha's `fa` calls alpha's own
+    // private `abs` (100.0).
+    assert_both_ok(
+        &[
+            ("main.cjcl", "import alpha\nfn main() -> f64 { abs(-2.0) + fa() }"),
+            ("alpha.cjcl", "pub fn fa() -> f64 { abs(1.0) }\nfn abs(x: f64) -> f64 { 100.0 }"),
+        ],
+        "102",
+    );
+}
+
+#[test]
+fn local_binding_shadows_imported_fn() {
+    // `double` in main is the local variable, not utils' function.
+    assert_both_ok(
+        &[
+            ("main.cjcl", "import utils\nfn main() -> i64 { let double = 5; double + quad(1) }"),
+            ("utils.cjcl", UTILS),
+        ],
+        "9",
+    );
+}
+
+#[test]
+fn own_fn_takes_precedence_over_imported_one() {
+    assert_both_ok(
+        &[
+            ("main.cjcl", "import alpha\nfn f(x: i64) -> i64 { x + 1 }\nfn main() -> i64 { f(1) }"),
+            ("alpha.cjcl", "pub fn f(x: i64) -> i64 { x * 100 }"),
+        ],
+        "2",
+    );
+}
+
+#[test]
+fn private_fn_elsewhere_does_not_hide_pub_fn_of_same_name() {
+    assert_both_ok(
+        &[
+            ("main.cjcl", "import alpha\nimport beta\nfn main() -> i64 { shared(1) }"),
+            ("alpha.cjcl", "pub fn shared(x: i64) -> i64 { x }"),
+            ("beta.cjcl", "fn shared(x: i64) -> i64 { x + 1 }"),
+        ],
+        "1",
+    );
+}
+
+#[test]
+fn symbol_import_with_alias_resolves() {
+    assert_both_ok(
+        &[("main.cjcl", "import utils.quad as q\nfn main() -> i64 { q(2) }"), ("utils.cjcl", UTILS)],
+        "8",
+    );
+}
+
+#[test]
+fn recursion_and_lambdas_inside_a_module_resolve() {
+    assert_both_ok(
+        &[
+            ("main.cjcl", "import m\nfn main() -> i64 { run(5) }"),
+            (
+                "m.cjcl",
+                "fn fact(n: i64) -> i64 { if n <= 1 { 1 } else { n * fact(n - 1) } }\n\
+                 pub fn run(n: i64) -> i64 { let g = |x: i64| fact(x); g(n) }",
+            ),
+        ],
+        "120",
+    );
+}
+
+#[test]
+fn resolution_is_deterministic() {
     let files = [
-        ("main.cjcl", "import alpha\nimport beta\nlet y = s1(1) + s2(2);"),
-        ("alpha.cjcl", "fn s2(x: i64) -> i64 { x }\nfn s1(x: i64) -> i64 { x }"),
-        ("beta.cjcl", "import alpha\nlet z = s1(3);"),
+        ("main.cjcl", "import alpha\nimport beta\nfn main() -> i64 { a1(1) + b1(2) }"),
+        ("alpha.cjcl", "pub fn a1(x: i64) -> i64 { h(x) }\nfn h(x: i64) -> i64 { x }"),
+        (
+            "beta.cjcl",
+            "import alpha\npub fn b1(x: i64) -> i64 { a1(x) + h(x) }\nfn h(x: i64) -> i64 { x * 3 }",
+        ),
     ];
-    let first = violation_strings(&files);
-    assert_eq!(first.len(), 3, "{first:?}");
+    let dir = setup_test_dir(&files);
+    let graph = cjc_module::build_module_graph(&dir.path().join("main.cjcl")).unwrap();
+    let render = |r: &cjc_module::ResolvedModules| format!("{:?}", r);
+    let first = render(&cjc_module::resolve_modules(&graph).unwrap());
     for _ in 0..5 {
-        assert_eq!(violation_strings(&files), first);
+        assert_eq!(render(&cjc_module::resolve_modules(&graph).unwrap()), first);
     }
+    // a1(1) = 1; b1(2) = a1(2) + beta's h(2) = 2 + 6.
+    assert_both_ok(&files, "9");
 }

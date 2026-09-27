@@ -6766,13 +6766,25 @@ pub fn run_program_with_modules(entry_path: &std::path::Path, seed: u64) -> MirE
         .map_err(|e| MirExecError::Runtime(format!("module error: {}", e)))?;
     cjc_module::enforce_visibility(&graph).map_err(MirExecError::Runtime)?;
 
-    let mut mir = cjc_module::merge_programs(&graph)
+    let resolved = cjc_module::resolve_modules(&graph)
+        .map_err(|e| MirExecError::Runtime(format!("module error: {}", e)))?;
+    let mut mir = cjc_module::merge_resolved(&graph, &resolved)
         .map_err(|e| MirExecError::Runtime(format!("module merge error: {}", e)))?;
 
     cjc_mir::escape::annotate_program(&mut mir);
 
     let mut executor = MirExecutor::new(seed);
-    executor.exec(&mir)
+    executor.exec(&mir).map_err(|e| explain_module_error(e, &resolved))
+}
+
+/// Add [`cjc_module::explain_undefined`]'s note to a runtime error.
+fn explain_module_error(e: MirExecError, resolved: &cjc_module::ResolvedModules) -> MirExecError {
+    match e {
+        MirExecError::Runtime(m) => {
+            MirExecError::Runtime(cjc_module::explain_undefined(m, &resolved.private_hints))
+        }
+        other => other,
+    }
 }
 
 /// Run a multi-file CJC program and return the executor for inspection.
@@ -6784,13 +6796,17 @@ pub fn run_program_with_modules_executor(
         .map_err(|e| MirExecError::Runtime(format!("module error: {}", e)))?;
     cjc_module::enforce_visibility(&graph).map_err(MirExecError::Runtime)?;
 
-    let mut mir = cjc_module::merge_programs(&graph)
+    let resolved = cjc_module::resolve_modules(&graph)
+        .map_err(|e| MirExecError::Runtime(format!("module error: {}", e)))?;
+    let mut mir = cjc_module::merge_resolved(&graph, &resolved)
         .map_err(|e| MirExecError::Runtime(format!("module merge error: {}", e)))?;
 
     cjc_mir::escape::annotate_program(&mut mir);
 
     let mut executor = MirExecutor::new(seed);
-    let result = executor.exec(&mir)?;
+    let result = executor
+        .exec(&mir)
+        .map_err(|e| explain_module_error(e, &resolved))?;
     Ok((result, executor))
 }
 
