@@ -165,6 +165,9 @@ pub mod runtime_policy;
 /// Phase 2b — typed-ID newtypes for ML metadata. Currently provides
 /// only `ParamIdx`, used by `crate::ml::AdamState` and `SgdState`.
 pub mod idx;
+/// State-space-model primitives (`state_space_*`, `tensor_concat_1d`;
+/// ADR-0020/0021). Reached from `dispatch_builtin`'s fallback arm.
+pub mod state_space;
 
 // --- Re-exports for backward compatibility ---
 // All downstream crates that were doing `use cjc_runtime::Tensor` etc. continue to work.

@@ -11,6 +11,7 @@
 //! Complexity in NSS comes from the *graph-aware propagation*, not from
 //! deep stacks. Phase 3+ may grow this; Phase 1 keeps it transparent.
 
+use cjc_repro::dmath::DetMath;
 use crate::error::NssError;
 use crate::pressure::PressureKind;
 use crate::seed::NssSeed;
@@ -119,12 +120,12 @@ impl SystemEncoder {
         // Scalar features. log1p keeps them bounded for growing
         // counters.
         let n = 9; // start of scalar features
-        out[n] = (state.in_flight as f64).ln_1p();
+        out[n] = (state.in_flight as f64).det_ln_1p();
         // Use saturating_add so fuzz inputs with `tick = u64::MAX`
         // can't overflow the denominator computation. Same for the
         // `completed + rejected` total below.
         let denom = state.tick.saturating_add(1) as f64;
-        out[n + 1] = (state.completed as f64 / denom).ln_1p();
+        out[n + 1] = (state.completed as f64 / denom).det_ln_1p();
         let total = state.completed.saturating_add(state.rejected).max(1) as f64;
         out[n + 2] = state.rejected as f64 / total;
         out[n + 3] = state.mean_service_time;
@@ -143,7 +144,7 @@ impl SystemEncoder {
             for j in 0..EncoderConfig::INPUT_FEATURES {
                 acc.add(self.w[row_off + j] * x[j]);
             }
-            out[i] = acc.finalize().tanh();
+            out[i] = acc.finalize().det_tanh();
         }
         out
     }

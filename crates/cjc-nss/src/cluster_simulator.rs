@@ -32,6 +32,7 @@
 //!   `(ClusterConfig, ClusterTopology, intervention_script, NssSeed)`
 //!   produce byte-identical [`crate::ClusterTrajectory`]s.
 
+use cjc_repro::dmath::DetMath;
 use crate::cluster::{
     ClusterEvent, ClusterSystemState, ClusterTopology, ClusterTrajectory, NodeHealth, NodeId,
 };
@@ -993,7 +994,7 @@ fn poisson_clamped(rng: &mut Rng, lambda: f64, max: u32) -> u32 {
     if !lambda.is_finite() || lambda <= 0.0 {
         return 0;
     }
-    let l = (-lambda).exp();
+    let l = (-lambda).det_exp();
     let mut k: u32 = 0;
     let mut p = 1.0f64;
     loop {

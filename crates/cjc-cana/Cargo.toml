@@ -12,6 +12,8 @@ publish = false
 cjc-ast.workspace = true
 cjc-mir.workspace = true
 cjc-diag.workspace = true
+# Deterministic math (ADR-0046): cost-model features must not depend on platform libm.
+cjc-repro.workspace = true
 
 [dev-dependencies]
 proptest = "1"

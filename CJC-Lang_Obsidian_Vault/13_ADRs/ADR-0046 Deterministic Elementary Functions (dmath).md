@@ -68,7 +68,7 @@ Known fdlibm results reproduced exactly: `exp(1) = 2.7182818284590455`, which is
 
 - ~~`cjc-runtime` builtins still use platform libm~~ — decided in the amendment below.
 - `sqrt` needs nothing: IEEE requires it to be correctly rounded.
-- **Analytics crates** (`cjc-vizor`, `cjc-nss`, `cjc-cana`, `cjc-abng`, `cjc-locke`, `cjc-cronos-gan`, ~110 sites) still call platform libm internally. Their outputs are not bit-identical across OSes yet. Deliberately out of scope for the amendment; a follow-up.
+- ~~**Analytics crates** still call platform libm~~ — moved in the second amendment below.
 
 ## Amendment 2026-09-26 — runtime math builtins
 
@@ -121,3 +121,23 @@ so they were not failing). The chess RL weight hash did not move.
 **Not verified locally:** Linux bit-identity (no Docker daemon on the dev
 machine). The golden-hash tests run in the three-OS CI matrix, which is the
 cross-platform check.
+
+## Amendment 2026-09-26 (2) — analytics crates
+
+**Decision.** The analytics crates move to `dmath` as well: `cjc-vizor`
+(layout, render, stats), `cjc-nss`, `cjc-cana`, `cjc-cana-compress`,
+`cjc-abng`, `cjc-locke`, `cjc-cronos-gan`. That is 91 method-call sites via
+the same `DetMath` rename (`cjc-cana` gains a `cjc-repro` dependency). Four
+renames hit `GradGraph::ln` node builders in `cjc-nss/cluster_grad.rs`,
+failed to compile, and were reverted, as in the first amendment. No
+`f64::exp`-style path calls or other libm methods (`log`, `exp2`, `cbrt`,
+`asinh`, `acosh`) exist in non-test code, so after this amendment no
+workspace crate calls platform libm transcendentals outside tests and
+`#[cfg(test)]` items. `sqrt` stays on std (correctly rounded by IEEE).
+
+**Also found.** `cjc-runtime/src/state_space.rs` (ADR-0020/0021) had never
+been compiled: the commit that added it (`671dfeb`) carried only new files,
+so the `mod` declaration and the dispatch fallback were lost, and none of
+the `state_space_*` builtins were reachable. Its first-amendment dmath
+migration was therefore dead code until the module was wired in alongside
+this amendment.

@@ -35,6 +35,10 @@ cjcl run --multi-file main.cjcl
 
 Modules resolve relative to the entry file's directory. Cyclic imports are detected and reported as diagnostics.
 
+## Visibility
+
+Functions are private to their module unless marked `pub` ([[ADR-0047 Private Functions Are Module-Private]]). `import m` makes `m`'s `pub` functions callable by bare name; referencing a private one from another module is a `visibility error` before execution, in both executors. A `pub fn` may call private helpers in its own module. `import m.Symbol` must name a `pub` symbol.
+
 ## Pipeline
 
 ```
@@ -59,7 +63,7 @@ entry.cjcl ─► build_module_graph() ─► ModuleGraph
 - `ModuleGraph` (line 200) — dependency graph with deterministic iteration
 - `build_module_graph(entry_path)` (line 426) — DFS cycle detection, returns `Result<ModuleGraph>`
 - `merge_programs(graph)` (line 576) — merges per-module `MirProgram`s into one
-- `check_visibility(graph)` (line 769) — enforces `pub` / private boundaries
+- `check_visibility(graph)` — enforces `pub` / private boundaries (`import m.Symbol`, and bare-name uses of other modules' private functions); `enforce_visibility(graph)` wraps it as a `Result` for the executors
 - `build_import_aliases(graph)` (line 844) — resolves short names to full paths
 - 17+ inline tests (lines 903–1089)
 

@@ -688,8 +688,12 @@ pub fn merge_programs(graph: &ModuleGraph) -> Result<cjc_mir::MirProgram, Module
                 if let Some(ast) = &imp_mod.ast {
                     for decl in &ast.declarations {
                         if let cjc_ast::DeclKind::Fn(f) = &decl.kind {
-                            // Alias all functions from imported modules.
-                            // Visibility enforcement is handled separately by check_visibility().
+                            // Alias all functions from imported modules, private
+                            // ones included: call sites inside a module's bodies
+                            // keep unprefixed names, so a `pub fn` calling a
+                            // private helper resolves it through this alias.
+                            // Other modules may not reference private functions;
+                            // `check_visibility` rejects that before execution.
                             let unprefixed = f.name.name.clone();
                             let prefixed = format!("{}{}", prefix, unprefixed);
                             // Only add alias if unprefixed name not already taken
@@ -749,26 +753,110 @@ pub fn merge_programs(graph: &ModuleGraph) -> Result<cjc_mir::MirProgram, Module
 #[derive(Debug, Clone)]
 pub struct VisibilityViolation {
     pub symbol: String,
+    /// The module that declares the private symbol.
     pub module_id: ModuleId,
     pub kind: &'static str, // "function", "struct", "field", etc.
+    /// For a private function referenced by name from another module: the
+    /// module containing the reference. `None` for `import m.Symbol`.
+    pub used_in: Option<ModuleId>,
 }
 
 impl std::fmt::Display for VisibilityViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} `{}` in module `{}` is private and cannot be imported",
-            self.kind, self.symbol, self.module_id
-        )
+        match &self.used_in {
+            None => write!(
+                f,
+                "{} `{}` in module `{}` is private and cannot be imported",
+                self.kind, self.symbol, self.module_id
+            ),
+            Some(user) => write!(
+                f,
+                "{} `{}` is private to module `{}` and cannot be used from module `{}` \
+                 (mark it `pub` to export it)",
+                self.kind, self.symbol, self.module_id, user
+            ),
+        }
     }
 }
 
-/// Check visibility constraints after merging.
+/// Names one module binds locally and references by bare identifier.
+/// Used by [`check_visibility`] to find uses of other modules' private
+/// functions.
+#[derive(Default)]
+struct NameUses {
+    /// `let`/`const`/`for` names, parameters, and pattern bindings anywhere
+    /// in the module. Deliberately scope-insensitive: a name bound anywhere
+    /// is never reported, which rules out false positives from shadowing.
+    bound: BTreeSet<String>,
+    /// Every `ExprKind::Ident`: calls `f(x)` and function values `g(f)`.
+    referenced: BTreeSet<String>,
+}
+
+impl cjc_ast::visit::AstVisitor for NameUses {
+    fn visit_decl(&mut self, decl: &cjc_ast::Decl) {
+        match &decl.kind {
+            cjc_ast::DeclKind::Let(l) => {
+                self.bound.insert(l.name.name.clone());
+            }
+            cjc_ast::DeclKind::Const(c) => {
+                self.bound.insert(c.name.name.clone());
+            }
+            _ => {}
+        }
+        cjc_ast::visit::walk_decl(self, decl);
+    }
+
+    fn visit_stmt(&mut self, stmt: &cjc_ast::Stmt) {
+        match &stmt.kind {
+            cjc_ast::StmtKind::Let(l) => {
+                self.bound.insert(l.name.name.clone());
+            }
+            cjc_ast::StmtKind::For(f) => {
+                self.bound.insert(f.ident.name.clone());
+            }
+            _ => {}
+        }
+        cjc_ast::visit::walk_stmt(self, stmt);
+    }
+
+    fn visit_param(&mut self, param: &cjc_ast::Param) {
+        self.bound.insert(param.name.name.clone());
+        cjc_ast::visit::walk_param(self, param);
+    }
+
+    fn visit_pattern(&mut self, pattern: &cjc_ast::Pattern) {
+        if let cjc_ast::PatternKind::Binding(id) = &pattern.kind {
+            self.bound.insert(id.name.clone());
+        }
+        cjc_ast::visit::walk_pattern(self, pattern);
+    }
+
+    fn visit_expr(&mut self, expr: &cjc_ast::Expr) {
+        if let cjc_ast::ExprKind::Ident(id) = &expr.kind {
+            self.referenced.insert(id.name.clone());
+        }
+        cjc_ast::visit::walk_expr(self, expr);
+    }
+}
+
+/// Check visibility constraints.
 ///
-/// For each import in the entry module, verify that the imported symbol
-/// is marked `pub` in the source module. Returns a list of violations.
+/// 1. `import m.Symbol` must name a `pub` symbol of `m`.
+/// 2. A module may not reference, by bare name, a function that another
+///    module declares without `pub`. A module-level `import m` makes `m`'s
+///    `pub` functions callable, not its private ones.
+///
+/// Rule 2 is a static check on the ASTs, so it gives the same answer for
+/// both executors, whose multi-file name resolution differs (`merge_programs`
+/// prefixes and aliases; the AST evaluator shares one namespace). A name is
+/// reported only if the referencing module neither defines nor binds it, at
+/// least one other module declares it as a private top-level `fn`, and no
+/// module declares a `pub fn` of that name.
+///
+/// Returns the violations in deterministic order.
 pub fn check_visibility(graph: &ModuleGraph) -> Vec<VisibilityViolation> {
     let mut violations = Vec::new();
+    violations.extend(check_private_fn_uses(graph));
 
     // For each module, check its imports
     for (mod_id, module) in &graph.modules {
@@ -796,6 +884,7 @@ pub fn check_visibility(graph: &ModuleGraph) -> Vec<VisibilityViolation> {
                                     symbol: symbol.clone(),
                                     module_id: resolved.clone(),
                                     kind: "function",
+                                    used_in: None,
                                 });
                             }
                         }
@@ -805,6 +894,7 @@ pub fn check_visibility(graph: &ModuleGraph) -> Vec<VisibilityViolation> {
                                     symbol: symbol.clone(),
                                     module_id: resolved.clone(),
                                     kind: "struct",
+                                    used_in: None,
                                 });
                             }
                         }
@@ -814,23 +904,96 @@ pub fn check_visibility(graph: &ModuleGraph) -> Vec<VisibilityViolation> {
                                     symbol: symbol.clone(),
                                     module_id: resolved.clone(),
                                     kind: "record",
+                                    used_in: None,
                                 });
                             }
                         }
                         _ => {}
                     }
                 }
-            } else {
-                // Module-level import: check that at least one `pub` symbol exists.
-                // For module imports, only `pub` functions get aliased into the
-                // importing module. Private functions remain inaccessible.
-                // (This is enforced during alias creation, not here.)
             }
+            // Module-level imports (`import m`) are covered by
+            // `check_private_fn_uses`: what matters is which of `m`'s
+            // functions the module then references.
         }
         let _ = mod_id; // suppress unused warning
     }
 
     violations
+}
+
+/// Rule 2 of [`check_visibility`]: references to other modules' private
+/// functions.
+fn check_private_fn_uses(graph: &ModuleGraph) -> Vec<VisibilityViolation> {
+    // Top-level functions by name: which modules declare them privately,
+    // and whether any module declares one `pub`.
+    let mut private_owners: BTreeMap<String, Vec<ModuleId>> = BTreeMap::new();
+    let mut has_pub: BTreeSet<String> = BTreeSet::new();
+    for (mod_id, module) in &graph.modules {
+        let Some(ast) = &module.ast else { continue };
+        for decl in &ast.declarations {
+            if let cjc_ast::DeclKind::Fn(f) = &decl.kind {
+                if f.vis == cjc_ast::Visibility::Private {
+                    private_owners
+                        .entry(f.name.name.clone())
+                        .or_default()
+                        .push(mod_id.clone());
+                } else {
+                    has_pub.insert(f.name.name.clone());
+                }
+            }
+        }
+    }
+
+    let mut violations = Vec::new();
+    for (mod_id, module) in &graph.modules {
+        let Some(ast) = &module.ast else { continue };
+        let own_fns: BTreeSet<&str> = ast
+            .declarations
+            .iter()
+            .filter_map(|d| match &d.kind {
+                cjc_ast::DeclKind::Fn(f) => Some(f.name.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        let mut uses = NameUses::default();
+        cjc_ast::visit::walk_program(&mut uses, ast);
+
+        for name in &uses.referenced {
+            if own_fns.contains(name.as_str())
+                || uses.bound.contains(name)
+                || has_pub.contains(name)
+            {
+                continue;
+            }
+            if let Some(owners) = private_owners.get(name) {
+                for owner in owners.iter().filter(|o| *o != mod_id) {
+                    violations.push(VisibilityViolation {
+                        symbol: name.clone(),
+                        module_id: owner.clone(),
+                        kind: "function",
+                        used_in: Some(mod_id.clone()),
+                    });
+                }
+            }
+        }
+    }
+    violations
+}
+
+/// [`check_visibility`] as a gate: `Err` with one violation per line if
+/// there are any. Both executors' multi-file entry points call this before
+/// running, so they reject the same programs with the same message.
+pub fn enforce_visibility(graph: &ModuleGraph) -> Result<(), String> {
+    let violations = check_visibility(graph);
+    if violations.is_empty() {
+        return Ok(());
+    }
+    Err(violations
+        .iter()
+        .map(|v| format!("visibility error: {}", v))
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 // ---------------------------------------------------------------------------

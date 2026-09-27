@@ -3,6 +3,7 @@
 //! Pipeline: PlotSpec → Layout → Scene elements (deterministic).
 //! Order: background → axes → gridlines → geom layers → annotations → labels.
 
+use cjc_repro::dmath::DetMath;
 use crate::annotation::{Annotation, Position, format_pvalue, format_r_squared, format_ci};
 use crate::color::{self, Color};
 use crate::layout::{self, compute_layout, histogram_counts, LayoutResult};
@@ -1618,13 +1619,13 @@ fn render_pie(
             for j in 0..=n_pts {
                 let t = j as f64 / n_pts as f64;
                 let angle = start_angle - t * sweep;
-                points.push((cx + inner_r * angle.cos(), cy - inner_r * angle.sin()));
+                points.push((cx + inner_r * angle.det_cos(), cy - inner_r * angle.det_sin()));
             }
             // Outer arc (forward direction)
             for j in (0..=n_pts).rev() {
                 let t = j as f64 / n_pts as f64;
                 let angle = start_angle - t * sweep;
-                points.push((cx + outer_r * angle.cos(), cy - outer_r * angle.sin()));
+                points.push((cx + outer_r * angle.det_cos(), cy - outer_r * angle.det_sin()));
             }
         } else {
             // Full pie: center → outer arc → close.
@@ -1632,7 +1633,7 @@ fn render_pie(
             for j in 0..=n_pts {
                 let t = j as f64 / n_pts as f64;
                 let angle = start_angle - t * sweep;
-                points.push((cx + outer_r * angle.cos(), cy - outer_r * angle.sin()));
+                points.push((cx + outer_r * angle.det_cos(), cy - outer_r * angle.det_sin()));
             }
             points.push((cx, cy));
         }
@@ -1648,8 +1649,8 @@ fn render_pie(
         if layer.params.show_labels && val > 0.0 {
             let mid_angle = start_angle - sweep / 2.0;
             let label_r = if inner_r > 0.0 { (inner_r + outer_r) / 2.0 } else { outer_r * 0.65 };
-            let lx = cx + label_r * mid_angle.cos();
-            let ly = cy - label_r * mid_angle.sin();
+            let lx = cx + label_r * mid_angle.det_cos();
+            let ly = cy - label_r * mid_angle.det_sin();
             let pct = val / total * 100.0;
             let text = if cats.len() <= 6 {
                 format!("{} ({:.1}%)", cats[i], pct)
@@ -1707,7 +1708,7 @@ fn render_rose(
         for j in 0..=n_pts {
             let t = j as f64 / n_pts as f64;
             let angle = start_angle - t * slice_angle;
-            points.push((cx + r * angle.cos(), cy - r * angle.sin()));
+            points.push((cx + r * angle.det_cos(), cy - r * angle.det_sin()));
         }
         points.push((cx, cy));
 
@@ -1722,8 +1723,8 @@ fn render_rose(
         if layer.params.show_labels {
             let mid_angle = start_angle - slice_angle / 2.0;
             let label_r = max_r + 15.0;
-            let lx = cx + label_r * mid_angle.cos();
-            let ly = cy - label_r * mid_angle.sin();
+            let lx = cx + label_r * mid_angle.det_cos();
+            let ly = cy - label_r * mid_angle.det_sin();
             scene.push(SceneElement::Text {
                 x: lx,
                 y: ly,
@@ -1768,7 +1769,7 @@ fn render_radar(
         let mut ring_pts = Vec::with_capacity(n_axes + 1);
         for k in 0..=n_axes {
             let angle = std::f64::consts::FRAC_PI_2 - k as f64 * angle_step;
-            ring_pts.push((cx + r * angle.cos(), cy - r * angle.sin()));
+            ring_pts.push((cx + r * angle.det_cos(), cy - r * angle.det_sin()));
         }
         scene.push(SceneElement::Polyline {
             points: ring_pts,
@@ -1784,8 +1785,8 @@ fn render_radar(
         scene.push(SceneElement::Line {
             x1: cx,
             y1: cy,
-            x2: cx + max_r * angle.cos(),
-            y2: cy - max_r * angle.sin(),
+            x2: cx + max_r * angle.det_cos(),
+            y2: cy - max_r * angle.det_sin(),
             stroke: spec.theme.grid_color,
             width: 0.5,
         });
@@ -1797,7 +1798,7 @@ fn render_radar(
     for k in 0..n_axes {
         let angle = std::f64::consts::FRAC_PI_2 - k as f64 * angle_step;
         let r = max_r * (values[k] / max_val);
-        data_pts.push((cx + r * angle.cos(), cy - r * angle.sin()));
+        data_pts.push((cx + r * angle.det_cos(), cy - r * angle.det_sin()));
     }
     // Close the polygon.
     if let Some(&first) = data_pts.first() {
@@ -1827,8 +1828,8 @@ fn render_radar(
         for k in 0..n_axes {
             let angle = std::f64::consts::FRAC_PI_2 - k as f64 * angle_step;
             let label_r = max_r + 18.0;
-            let lx = cx + label_r * angle.cos();
-            let ly = cy - label_r * angle.sin();
+            let lx = cx + label_r * angle.det_cos();
+            let ly = cy - label_r * angle.det_sin();
             scene.push(SceneElement::Text {
                 x: lx,
                 y: ly,

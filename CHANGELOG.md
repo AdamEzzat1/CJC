@@ -10,10 +10,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 #### Math builtins are now bit-identical across platforms (ADR-0046 amendment)
 - Every transcendental a `.cjcl` program can observe — the math builtins (`sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `exp`, `log`, `log2`, `log10`, `pow`, …), tensor ops and activations, distributions (including `randn`), stats functions, autodiff, the `**` operator in both executors, MIR constant folding, and data-frame `DExpr` functions — now uses `cjc_repro::dmath` instead of the platform C math library. The same program and seed give the **same bits on Windows, Linux, and macOS**; previously the libraries disagreed in the last bit (e.g. Windows' `atanh` is off by up to 8 ulps near ±1).
-- **Results may change in the last bit** on any given OS. Five golden hashes moved and were re-locked, each with its previous value recorded: the `bench_v0_1` primitive master hash and three ABNG `.cjcl` chain-head canaries. The chess RL weight hash is unchanged.
+- **Results may change in the last bit** on any given OS. Four golden hashes moved and were re-locked, each with its previous value recorded: the `bench_v0_1` primitive master hash and three ABNG `.cjcl` chain-head canaries. The chess RL weight hash is unchanged.
 - **`**` is more accurate:** `dmath::pow` is now fdlibm `e_pow.c` (0.81 ulp max measured), replacing `exp(y · ln x)`, which lost ~|y · ln x| ulps.
 - **New in `dmath`:** `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `atanh`, `exp_m1`, `ln_1p`, `log2`, `log10`, `hypot`, plus the `DetMath` trait (`x.det_exp()`) used to migrate 387 call sites. Verified against mpmath over 609,860 evaluations (`verification/dmath_ext_check.py`); the musl-derived functions are bit-identical to musl's own C code (`verification/musl_bitcompare/`). Measured max errors are documented per function — five inherit >1 ulp from musl's algorithms (`atan2`, `cosh`, `atanh`, `sinh`, `tanh`, ≤ 1.95 ulp).
-- Not yet covered: the analytics crates (`cjc-vizor`, `cjc-nss`, `cjc-cana`, `cjc-abng`, `cjc-locke`, `cjc-cronos-gan`) still use the platform library internally.
+- The analytics crates (`cjc-vizor`, `cjc-nss`, `cjc-cana`, `cjc-cana-compress`, `cjc-abng`, `cjc-locke`, `cjc-cronos-gan`; 91 sites) use `dmath` too, so no workspace crate calls platform libm transcendentals outside tests.
+
+### Fixed
+
+#### State-space builtins were never reachable
+- `crates/cjc-runtime/src/state_space.rs` (ADR-0020/0021: `state_space_*`, `tensor_concat_1d`) was committed without its `mod` declaration or dispatch hook, so the module was never compiled and every `state_space_*` call was an unknown builtin. It is now reached from `dispatch_builtin`'s fallback arm, as the ADR describes; both executors inherit it.
+
+#### Three test suites that never ran
+- `tests/state_space_tests/` (62 tests) and `tests/final_phase_hardening_before_vm/` (53) had no `[[test]]` entry, and `tests/audit_tests/test_parallel_matmul.rs` was never declared as a module. All are wired in and pass.
+- `final_phase_hardening_before_vm` had drifted from the language: it used a bare trailing expression as the program result, match arms without commas, trait signatures without `;`, `Color::Red` variant paths, `rand()`, `array_get`, `GradGraph::variable` and `Value == Value`. Its parity tests now compare printed output, and they fail if nothing is printed; the old form compared `Void` with `Void` and could not fail.
+- Its module-visibility test expected private functions of an imported module not to be aliased. They are aliased, deliberately: merging leaves call sites inside module bodies unprefixed, so a `pub fn` calling a private helper needs the alias. The test now matches the in-crate test and says so. The hole it pointed at is closed below.
+
+#### Private functions are now module-private (ADR-0047) — breaking
+- A module may no longer reference a function that another module declares without `pub`, either as a call or as a function value. Previously `import m` exposed all of `m`'s functions, because nothing enforced visibility for module-level imports. Programs that relied on this now fail before running with ``visibility error: function `f` is private to module `m` and cannot be used from module `main` (mark it `pub` to export it)``. Add `pub` to fix.
+- Enforced by a static check (`cjc_module::check_visibility` / `enforce_visibility`) that both executors' multi-file entry points and `cjcl run --multi-file` run first, so AST-eval and MIR-exec reject the same programs. A `pub fn` calling a private helper in its own module still works, and local bindings that share a private function's name are never reported.
 
 #### Quantum: faster statevector simulation, same bits
 - Gates are applied by new strided kernels (`cjc-quantum/src/kernels.rs`). They walk only the amplitude pairs a gate touches and split large states across threads (`std::thread::scope`; the count comes from `cjc_runtime::runtime_policy`, and threads are used only above 2^15 pairs per thread).

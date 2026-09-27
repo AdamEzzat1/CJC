@@ -39,6 +39,7 @@
 //! Phase 2 will replace this with a richer distributed-cluster
 //! simulator. The interface (configure → run → trajectory) stays.
 
+use cjc_repro::dmath::DetMath;
 use crate::error::NssError;
 use crate::failure::FailureState;
 use crate::pressure::PressureGraph;
@@ -429,7 +430,7 @@ fn poisson_clamped(rng: &mut Rng, lambda: f64, max: u32) -> u32 {
     // exp(-λ). Stable for λ up to about 30; for larger λ we'd switch
     // to a normal approximation, but Phase 1 caps `arrival_rate` at a
     // sensible single-tier load.
-    let l = (-lambda).exp();
+    let l = (-lambda).det_exp();
     let mut k: u32 = 0;
     let mut p = 1.0f64;
     loop {

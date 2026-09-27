@@ -41,6 +41,7 @@
 //! property that matters because the entire point of multi-timescale
 //! memory is to *decorrelate* the signals.
 
+use cjc_repro::dmath::DetMath;
 use crate::error::NssError;
 use crate::seed::NssSeed;
 use crate::temporal::{TemporalStateConfig, TemporalStateEngine};
@@ -79,7 +80,7 @@ impl Timescale {
     /// Approximate exponential half-life in ticks: `ln(0.5) / ln(α)`.
     /// Useful for documentation + tests asserting the decay separation.
     pub fn half_life_ticks(self) -> f64 {
-        (0.5_f64.ln()) / (self.default_alpha().ln())
+        (0.5_f64.det_ln()) / (self.default_alpha().det_ln())
     }
 
     /// Canonical short label used by RNG salt + canonical bytes.

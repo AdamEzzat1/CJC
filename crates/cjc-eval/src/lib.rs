@@ -4879,6 +4879,7 @@ pub fn run_program_with_modules_eval(
 ) -> Result<Value, EvalError> {
     let graph = cjc_module::build_module_graph(entry_path)
         .map_err(|e| EvalError::Runtime(format!("module error: {}", e)))?;
+    cjc_module::enforce_visibility(&graph).map_err(EvalError::Runtime)?;
 
     let order = graph
         .topological_order()

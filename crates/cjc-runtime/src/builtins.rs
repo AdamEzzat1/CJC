@@ -5584,7 +5584,9 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             )
         }
 
-        _ => Ok(None), // Not a shared builtin
+        // State-space-model primitives (ADR-0020/0021) live in their own
+        // module; it returns Ok(None) for names it does not own.
+        _ => crate::state_space::dispatch_state_space(name, args),
     }
 }
 

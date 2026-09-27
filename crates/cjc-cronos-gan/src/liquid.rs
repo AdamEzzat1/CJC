@@ -46,6 +46,7 @@
 //! - `softplus(x)` is implemented as `if x > 20 then x else ln(1 + e^x)`
 //!   so it cannot overflow for any finite `f64` input.
 
+use cjc_repro::dmath::DetMath;
 use crate::error::CronosGanError;
 use crate::seed::CronosSeed;
 use crate::temporal_state::TemporalState;
@@ -374,7 +375,7 @@ impl LiquidNetwork {
         }
 
         // act = tanh(pre)
-        let act: Vec<f64> = pre.iter().map(|v| v.tanh()).collect();
+        let act: Vec<f64> = pre.iter().map(|v| v.det_tanh()).collect();
 
         // tau = tau_min + (tau_max − tau_min) · sigmoid(W_tau_u u + W_tau_h h + b_tau)
         // — bounded by construction, smoothly differentiable everywhere.
@@ -472,10 +473,10 @@ pub(crate) fn set_params_internal(model: &mut LiquidNetwork, new_params: LiquidP
 /// invariant depends on.
 fn sigmoid(x: f64) -> f64 {
     if x >= 0.0 {
-        let z = (-x).exp();
+        let z = (-x).det_exp();
         1.0 / (1.0 + z)
     } else {
-        let z = x.exp();
+        let z = x.det_exp();
         z / (1.0 + z)
     }
 }
@@ -492,9 +493,9 @@ fn standard_normal(rng: &mut Rng) -> f64 {
         u1 = rng.next_f64();
     }
     let u2 = rng.next_f64();
-    let r = (-2.0 * u1.ln()).sqrt();
+    let r = (-2.0 * u1.det_ln()).sqrt();
     let theta = std::f64::consts::TAU * u2;
-    r * theta.cos()
+    r * theta.det_cos()
 }
 
 fn matvec_kahan(m: &[f64], v: &[f64], rows: usize, cols: usize) -> Vec<f64> {

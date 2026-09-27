@@ -19,6 +19,7 @@
 //! - Multi-timescale memory (short/medium/long/structural buffers).
 //! - State-space layer with diagonal-plus-low-rank parameterisation.
 
+use cjc_repro::dmath::DetMath;
 use crate::error::NssError;
 use crate::seed::NssSeed;
 use cjc_repro::{KahanAccumulatorF64, Rng};
@@ -146,7 +147,7 @@ impl TemporalStateEngine {
             for j in 0..self.cfg.input_dim {
                 acc.add(self.b[b_off + j] * z[j]);
             }
-            h_next[i] = acc.finalize().tanh();
+            h_next[i] = acc.finalize().det_tanh();
         }
         Ok(h_next)
     }

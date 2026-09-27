@@ -19,6 +19,7 @@
 //! `f64::to_bits().to_be_bytes()`. Bit-deterministic for a fixed
 //! observation order.
 
+use cjc_repro::dmath::DetMath;
 use cjc_repro::KahanAccumulatorF64;
 use cjc_runtime::tensor::Tensor;
 
@@ -175,7 +176,7 @@ impl DensityTracker {
     /// Density score `1 − exp(−mahal²)`, in `[0, 1)`. Higher = more OOD.
     pub fn density_score(&self, phi: &[f64]) -> Result<f64, DensityError> {
         let m2 = self.mahalanobis_squared(phi)?;
-        Ok(1.0 - (-m2).exp())
+        Ok(1.0 - (-m2).det_exp())
     }
 
     /// Canonical big-endian byte encoding for hashing.

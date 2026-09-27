@@ -21,6 +21,7 @@
 //! * Central moments use Kahan summation.
 //! * NaN excluded throughout (matching the rest of Locke's numeric path).
 
+use cjc_repro::dmath::DetMath;
 use std::collections::BTreeMap;
 
 use cjc_data::{Column, DataFrame};
@@ -89,7 +90,7 @@ pub fn skew_and_kurtosis(values: &[f64]) -> Option<(f64, f64)> {
     if m2 <= 0.0 || !m2.is_finite() || !m3.is_finite() || !m4.is_finite() {
         return None;
     }
-    let skew = m3 / m2.powf(1.5);
+    let skew = m3 / m2.det_powf(1.5);
     let excess_kurt = m4 / (m2 * m2) - 3.0;
     // Final guard: m2.powf(1.5) or m2*m2 may underflow / overflow even
     // when m2, m3, m4 are all finite (e.g. m2 = 1e-300, m3 = 1e-200

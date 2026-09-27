@@ -33,6 +33,7 @@
 //! plain `+`/`-`/`*`/`/`/`sqrt` on `f64` with no FMA. Bit-deterministic
 //! for fixed input order across runs and platforms.
 
+use cjc_repro::dmath::DetMath;
 use std::cell::RefCell;
 
 use cjc_repro::{KahanAccumulatorF64, KahanAccumulatorF64x4, KahanAccumulatorF64x8};
@@ -758,8 +759,8 @@ impl BlrState {
         // log|Λ_1| − log|Λ_2| = 2 ∑ (log L_1_ii − log L_2_ii)
         let mut logdet_acc = KahanAccumulatorF64::new();
         for i in 0..d {
-            logdet_acc.add(2.0 * l1[i * d + i].ln());
-            logdet_acc.add(-2.0 * l2[i * d + i].ln());
+            logdet_acc.add(2.0 * l1[i * d + i].det_ln());
+            logdet_acc.add(-2.0 * l2[i * d + i].det_ln());
         }
         let logdet = logdet_acc.finalize();
 

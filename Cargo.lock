@@ -424,6 +424,7 @@ dependencies = [
  "cjc-hir",
  "cjc-mir",
  "cjc-parser",
+ "cjc-repro",
  "proptest",
 ]
 

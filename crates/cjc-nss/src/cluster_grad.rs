@@ -31,6 +31,7 @@
 //!   order, deterministic chunking across epochs.
 //! - No randomness inside the training loop.
 
+use cjc_repro::dmath::DetMath;
 use crate::cluster::ClusterTrajectory;
 use crate::cluster_nss::{
     ClusterFailurePredictionHead, ClusterNeuralSystemsSimulator, ClusterNssConfig,
@@ -381,25 +382,25 @@ pub fn fit_with_adam(
 
             // Adam step.
             adam_step += 1;
-            let bc1 = 1.0 - beta1.powi(adam_step as i32);
-            let bc2 = 1.0 - beta2.powi(adam_step as i32);
+            let bc1 = 1.0 - beta1.det_powi(adam_step as i32);
+            let bc2 = 1.0 - beta2.det_powi(adam_step as i32);
             for i in 0..in_dim {
                 m_wc[i] = beta1 * m_wc[i] + (1.0 - beta1) * g_wc[i];
-                v_wc[i] = beta2 * v_wc[i] + (1.0 - beta2) * g_wc[i].powi(2);
+                v_wc[i] = beta2 * v_wc[i] + (1.0 - beta2) * g_wc[i].det_powi(2);
                 let m_hat = m_wc[i] / bc1;
                 let v_hat = v_wc[i] / bc2;
                 w_c[i] -= lr * m_hat / (v_hat.sqrt() + eps);
                 m_wd[i] = beta1 * m_wd[i] + (1.0 - beta1) * g_wd[i];
-                v_wd[i] = beta2 * v_wd[i] + (1.0 - beta2) * g_wd[i].powi(2);
+                v_wd[i] = beta2 * v_wd[i] + (1.0 - beta2) * g_wd[i].det_powi(2);
                 let m_hat_d = m_wd[i] / bc1;
                 let v_hat_d = v_wd[i] / bc2;
                 w_d[i] -= lr * m_hat_d / (v_hat_d.sqrt() + eps);
             }
             m_bc = beta1 * m_bc + (1.0 - beta1) * g_bc;
-            v_bc = beta2 * v_bc + (1.0 - beta2) * g_bc.powi(2);
+            v_bc = beta2 * v_bc + (1.0 - beta2) * g_bc.det_powi(2);
             b_c -= lr * (m_bc / bc1) / ((v_bc / bc2).sqrt() + eps);
             m_bd = beta1 * m_bd + (1.0 - beta1) * g_bd;
-            v_bd = beta2 * v_bd + (1.0 - beta2) * g_bd.powi(2);
+            v_bd = beta2 * v_bd + (1.0 - beta2) * g_bd.det_powi(2);
             b_d -= lr * (m_bd / bc1) / ((v_bd / bc2).sqrt() + eps);
         }
 

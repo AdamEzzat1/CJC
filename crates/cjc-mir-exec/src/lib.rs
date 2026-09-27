@@ -6764,6 +6764,7 @@ pub fn run_program_monomorphized_with_executor(
 pub fn run_program_with_modules(entry_path: &std::path::Path, seed: u64) -> MirExecResult {
     let graph = cjc_module::build_module_graph(entry_path)
         .map_err(|e| MirExecError::Runtime(format!("module error: {}", e)))?;
+    cjc_module::enforce_visibility(&graph).map_err(MirExecError::Runtime)?;
 
     let mut mir = cjc_module::merge_programs(&graph)
         .map_err(|e| MirExecError::Runtime(format!("module merge error: {}", e)))?;
@@ -6781,6 +6782,7 @@ pub fn run_program_with_modules_executor(
 ) -> Result<(Value, MirExecutor), MirExecError> {
     let graph = cjc_module::build_module_graph(entry_path)
         .map_err(|e| MirExecError::Runtime(format!("module error: {}", e)))?;
+    cjc_module::enforce_visibility(&graph).map_err(MirExecError::Runtime)?;
 
     let mut mir = cjc_module::merge_programs(&graph)
         .map_err(|e| MirExecError::Runtime(format!("module merge error: {}", e)))?;
