@@ -738,8 +738,6 @@ impl AstLowering {
     }
 
     /// Check if a variable is defined in any enclosing scope.
-    /// (Used by future mutable-capture error checking.)
-    #[allow(dead_code)]
     fn is_defined(&self, name: &str) -> bool {
         self.scopes.iter().rev().any(|s| s.contains_key(name))
     }
@@ -1757,6 +1755,16 @@ impl AstLowering {
                     }
                     // Skip builtins
                     if Self::is_builtin(var_name) {
+                        continue;
+                    }
+                    // Skip names with no enclosing binding (builtins such
+                    // as `array_len` that aren't in `is_builtin`, globals
+                    // resolved at call time). Capturing them made
+                    // `MakeClosure` evaluate an unbound `Var` and fail with
+                    // "undefined variable". Same rule as cjc-eval's lexical
+                    // capture: a free name is captured iff it resolves to a
+                    // live local binding.
+                    if !self.is_defined(var_name) {
                         continue;
                     }
                     // This is a captured variable
