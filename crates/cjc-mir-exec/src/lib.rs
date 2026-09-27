@@ -712,6 +712,132 @@ impl MirExecutor {
         )))
     }
 
+    /// Mutable access to the scope-chain binding `assign(name, ..)` would write.
+    fn lookup_mut(&mut self, name: &str) -> Option<&mut Value> {
+        self.scopes.iter_mut().rev().find_map(|scope| scope.get_mut(name))
+    }
+
+    /// Mutable access to the binding that `exec_assign(target, ..)` writes,
+    /// for a bare-variable target: the frame slot for `VarLocal` (only
+    /// when a frame is active, since `exec_assign` never falls back to
+    /// the scope chain for `VarLocal`) and the scope chain for `Var`.
+    fn binding_mut(&mut self, target: &MirExprKind) -> Option<&mut Value> {
+        match target {
+            MirExprKind::Var(name) => self.lookup_mut(name),
+            MirExprKind::VarLocal { slot, .. } => {
+                if self.frame_stack.is_empty() {
+                    return None;
+                }
+                let idx = self.frame_base() + *slot as usize;
+                self.frame.get_mut(idx)
+            }
+            _ => None,
+        }
+    }
+
+    /// Option B / Phase F cost accounting for a builtin call: element-wise
+    /// FP work and Rc-buffer allocation. Every path that dispatches to a
+    /// builtin table runs this exactly once, so traces are the same
+    /// whether or not the call took the ADR-0048 move path.
+    fn trace_builtin_call(&mut self, name: &str, args: &[Value]) {
+        if self.trace_enabled {
+            let w = builtin_tensor_fp_work(name, args);
+            if w > 0 {
+                self.trace_fp_ops = self.trace_fp_ops.saturating_add(w);
+            }
+            // Phase F: builtin results that materialize Rc buffers.
+            let a = builtin_alloc_bytes(name, args);
+            if a > 0 {
+                self.trace_alloc_bytes = self.trace_alloc_bytes.saturating_add(a);
+            }
+        }
+    }
+
+    // -- Move on last use (ADR-0048) ------------------------------------------
+
+    /// Fast path for `x = f(..., x, ...)` where `f` is an owned-argument
+    /// builtin (`cjc_runtime::builtins::OWNED_ARG_BUILTINS`) and `x` is a
+    /// variable passed exactly once as a bare argument.
+    ///
+    /// Semantics are identical to `cjc-eval`'s `try_assign_move`. The
+    /// sibling arguments are evaluated left to right, then `x` is moved
+    /// out of its binding (leaving `Void`) into the argument vector so the
+    /// builtin's `Rc::make_mut` sees refcount 1 and mutates in place. On
+    /// success the result is written back to `x`; on failure the argument
+    /// is restored before the error propagates. No user code runs in
+    /// between, so the placeholder is unobservable.
+    ///
+    /// Binding resolution follows ADR-0024: the target and the argument
+    /// must be the same `VarLocal { slot }` (frame storage) or the same
+    /// `Var(name)` (scope chain). `binding_mut` returns exactly the storage
+    /// `exec_assign` writes. Captured variables inside a lifted closure
+    /// body are ordinary `Var` params of that body. Closure envs hold
+    /// their own snapshot (an extra refcount), so `make_mut` copies and the
+    /// closure never sees the mutation.
+    ///
+    /// Returns `None` (having evaluated nothing) when the pattern doesn't apply.
+    fn try_assign_move(&mut self, target: &MirExpr, value: &MirExpr) -> Option<MirExecResult> {
+        if !matches!(target.kind, MirExprKind::Var(_) | MirExprKind::VarLocal { .. }) {
+            return None;
+        }
+        let MirExprKind::Call { callee, args } = &value.kind else { return None };
+        // Builtins are emitted as `Var(name)`; a `VarLocal` callee is a
+        // local binding, so it never reaches the builtin tables.
+        let MirExprKind::Var(fname) = &callee.kind else { return None };
+        // Must resolve to the shared builtin exactly as `dispatch_call`
+        // would: no user fn shadowing it, and (conservatively) no
+        // scope binding of the same name.
+        if !cjc_runtime::builtins::is_owned_arg_builtin(fname)
+            || self.functions.contains_key(fname.as_str())
+            || self.lookup(fname).is_some()
+        {
+            return None;
+        }
+        let same_binding = |arg: &MirExpr| match (&arg.kind, &target.kind) {
+            (MirExprKind::Var(a), MirExprKind::Var(t)) => a == t,
+            (MirExprKind::VarLocal { slot: a, .. }, MirExprKind::VarLocal { slot: t, .. }) => a == t,
+            _ => false,
+        };
+        let mut bare = args.iter().enumerate().filter(|(_, a)| same_binding(a));
+        let (pos, _) = bare.next()?;
+        if bare.next().is_some() || self.binding_mut(&target.kind).is_none() {
+            return None;
+        }
+
+        let mut vals: Vec<Value> = Vec::with_capacity(args.len());
+        for (i, arg) in args.iter().enumerate() {
+            if i == pos {
+                vals.push(Value::Void); // filled by the move below
+            } else {
+                match self.eval_expr(arg) {
+                    Ok(v) => vals.push(v),
+                    Err(e) => return Some(Err(e)), // binding untouched
+                }
+            }
+        }
+        let binding = self.binding_mut(&target.kind)?;
+        vals[pos] = std::mem::replace(binding, Value::Void);
+
+        self.trace_builtin_call(fname, &vals);
+        match cjc_runtime::builtins::dispatch_builtin_owned(fname, &mut vals) {
+            Ok(Some(result)) => {
+                let binding = self.binding_mut(&target.kind)?;
+                *binding = result;
+                Some(Ok(Value::Void))
+            }
+            outcome => {
+                // Restore before propagating so the binding is intact.
+                if let Some(binding) = self.binding_mut(&target.kind) {
+                    *binding = std::mem::replace(&mut vals[pos], Value::Void);
+                }
+                Some(Err(MirExecError::Runtime(match outcome {
+                    Err(msg) => msg,
+                    _ => format!("internal: owned-arg builtin `{fname}` was not dispatched"),
+                })))
+            }
+        }
+    }
+
     // -- Program execution --------------------------------------------------
 
     /// Execute a lowered [`MirProgram`].
@@ -1208,6 +1334,10 @@ impl MirExecutor {
             MirExprKind::Index { object, index } => self.eval_index(object, index),
             MirExprKind::MultiIndex { object, indices } => self.eval_multi_index(object, indices),
             MirExprKind::Assign { target, value } => {
+                // ADR-0048: `x = f(..., x, ...)` moves `x` into the call.
+                if let Some(result) = self.try_assign_move(target, value) {
+                    return result;
+                }
                 let val = self.eval_expr(value)?;
                 self.exec_assign(target, val)?;
                 Ok(Value::Void)
@@ -2350,17 +2480,7 @@ impl MirExecutor {
         // function shadowing `matmul` must not be priced as a tensor
         // op) and before BOTH dispatch paths below (inline cache + slow
         // path), so each call is counted exactly once.
-        if self.trace_enabled {
-            let w = builtin_tensor_fp_work(name, &args);
-            if w > 0 {
-                self.trace_fp_ops = self.trace_fp_ops.saturating_add(w);
-            }
-            // Phase F: builtin results that materialize Rc buffers.
-            let a = builtin_alloc_bytes(name, &args);
-            if a > 0 {
-                self.trace_alloc_bytes = self.trace_alloc_bytes.saturating_add(a);
-            }
-        }
+        self.trace_builtin_call(name, &args);
 
         // Tier-0 inline cache: if we've seen this name resolve to a specific
         // satellite dispatcher before, jump straight there. Skips the slow

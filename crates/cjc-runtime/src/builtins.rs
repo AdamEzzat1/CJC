@@ -179,6 +179,206 @@ pub fn categorical_sample_with_u(probs: &Tensor, u: f64) -> Result<i64, String> 
 }
 
 // ---------------------------------------------------------------------------
+// Owned-argument dispatch (move-on-last-use, ADR-0048)
+// ---------------------------------------------------------------------------
+
+/// Builtins that have an ownership-taking fast path in
+/// [`dispatch_builtin_owned`].
+///
+/// Both executors consult this list to decide whether
+/// `x = f(..., x, ...)` may move `x` out of its binding before the call
+/// (ADR-0048). Every name here must satisfy two properties:
+///
+/// 1. It is dispatched by the shared stateless table (no executor-stateful
+///    arm intercepts it, and it never calls back into user code), so no
+///    user code can run while the binding holds a placeholder.
+/// 2. Its `dispatch_builtin_owned` arm leaves `args` untouched whenever it
+///    returns `Err`, so the executor can restore the binding on failure.
+pub const OWNED_ARG_BUILTINS: &[&str] = &["array_push", "array_pop", "array_reverse"];
+
+/// Whether `name` has an ownership-taking fast path. See [`OWNED_ARG_BUILTINS`].
+pub fn is_owned_arg_builtin(name: &str) -> bool {
+    OWNED_ARG_BUILTINS.contains(&name)
+}
+
+/// Dispatch a stateless builtin that may take ownership of its arguments.
+///
+/// Same results and error messages as [`dispatch_builtin`], but the COW
+/// builtins in [`OWNED_ARG_BUILTINS`] move their array argument out of
+/// `args` (leaving `Value::Void`) instead of cloning the `Rc`. When the
+/// executor moved the caller's binding into `args` (ADR-0048), the
+/// refcount is 1 and `Rc::make_mut` mutates in place: O(1) amortized for
+/// `array_push`/`array_pop`, no allocation for `array_reverse`. When
+/// the value is still shared, `Rc::make_mut` copies, exactly as before,
+/// so aliasing semantics are unchanged.
+///
+/// **Contract:** when this returns `Err`, `args` is unmodified; every arm
+/// validates before it takes. Names outside [`OWNED_ARG_BUILTINS`] are
+/// forwarded to [`dispatch_builtin`] and never modify `args`.
+pub fn dispatch_builtin_owned(name: &str, args: &mut [Value]) -> Result<Option<Value>, String> {
+    match name {
+        "array_push" => {
+            check_array_push(args)?;
+            let arr = take_array(&mut args[0]);
+            let val = std::mem::replace(&mut args[1], Value::Void);
+            Ok(Some(array_push_rc(arr, val)))
+        }
+        "array_pop" => {
+            check_array_pop(args)?;
+            Ok(Some(array_pop_rc(take_array(&mut args[0]))))
+        }
+        "array_reverse" => {
+            check_array_reverse(args)?;
+            Ok(Some(array_reverse_rc(take_array(&mut args[0]))))
+        }
+        _ => dispatch_builtin(name, args),
+    }
+}
+
+/// Move a validated `Value::Array` out of `slot`, leaving `Value::Void`.
+fn take_array(slot: &mut Value) -> Rc<Vec<Value>> {
+    match std::mem::replace(slot, Value::Void) {
+        Value::Array(a) => a,
+        _ => unreachable!("take_array: caller validated the argument as Array"),
+    }
+}
+
+fn check_array_push(args: &[Value]) -> Result<&Rc<Vec<Value>>, String> {
+    if args.len() != 2 { return Err("array_push requires 2 args: array, value".into()); }
+    match &args[0] { Value::Array(a) => Ok(a), _ => Err("array_push: first arg must be Array".into()) }
+}
+
+fn check_array_pop(args: &[Value]) -> Result<&Rc<Vec<Value>>, String> {
+    if args.len() != 1 { return Err("array_pop requires 1 arg: array".into()); }
+    let arr = match &args[0] { Value::Array(a) => a, _ => return Err("array_pop: expected Array".into()) };
+    if arr.is_empty() { return Err("array_pop: empty array".into()); }
+    Ok(arr)
+}
+
+fn check_array_reverse(args: &[Value]) -> Result<&Rc<Vec<Value>>, String> {
+    if args.len() != 1 { return Err("array_reverse requires 1 arg: array".into()); }
+    match &args[0] { Value::Array(a) => Ok(a), _ => Err("array_reverse: expected Array".into()) }
+}
+
+// `Rc::make_mut` mutates in place iff `arr` is the only reference;
+// otherwise it clones the Vec first (copy-on-write).
+fn array_push_rc(mut arr: Rc<Vec<Value>>, val: Value) -> Value {
+    Rc::make_mut(&mut arr).push(val);
+    Value::Array(arr)
+}
+
+fn array_pop_rc(mut arr: Rc<Vec<Value>>) -> Value {
+    let last = Rc::make_mut(&mut arr).pop().expect("array_pop: caller checked non-empty");
+    Value::Tuple(Rc::new(vec![last, Value::Array(arr)]))
+}
+
+fn array_reverse_rc(mut arr: Rc<Vec<Value>>) -> Value {
+    Rc::make_mut(&mut arr).reverse();
+    Value::Array(arr)
+}
+
+#[cfg(test)]
+mod owned_dispatch_tests {
+    use super::*;
+
+    fn ints(v: &[i64]) -> Rc<Vec<Value>> {
+        Rc::new(v.iter().map(|&i| Value::Int(i)).collect())
+    }
+
+    fn as_array(v: &Value) -> &Rc<Vec<Value>> {
+        match v {
+            Value::Array(a) => a,
+            other => panic!("expected Array, got {}", other.type_name()),
+        }
+    }
+
+    #[test]
+    fn unique_array_is_mutated_in_place() {
+        let arr = ints(&[1, 2, 3]);
+        let ptr = Rc::as_ptr(&arr);
+        let mut args = vec![Value::Array(arr)];
+        let out = dispatch_builtin_owned("array_reverse", &mut args).unwrap().unwrap();
+        assert_eq!(Rc::as_ptr(as_array(&out)), ptr, "unique Rc must not be copied");
+        assert!(matches!(args[0], Value::Void), "argument was moved out");
+        assert_eq!(format!("{out}"), "[3, 2, 1]");
+    }
+
+    #[test]
+    fn unique_push_reuses_the_allocation() {
+        let mut v = Vec::with_capacity(8);
+        v.extend([Value::Int(1)]);
+        let arr = Rc::new(v);
+        let ptr = Rc::as_ptr(&arr);
+        let mut args = vec![Value::Array(arr), Value::Int(2)];
+        let out = dispatch_builtin_owned("array_push", &mut args).unwrap().unwrap();
+        assert_eq!(Rc::as_ptr(as_array(&out)), ptr);
+        assert_eq!(format!("{out}"), "[1, 2]");
+    }
+
+    #[test]
+    fn shared_array_is_copied_and_alias_unchanged() {
+        let arr = ints(&[1, 2]);
+        let alias = Rc::clone(&arr);
+        let mut args = vec![Value::Array(arr), Value::Int(3)];
+        let out = dispatch_builtin_owned("array_push", &mut args).unwrap().unwrap();
+        assert_ne!(Rc::as_ptr(as_array(&out)), Rc::as_ptr(&alias));
+        assert_eq!(alias.len(), 2);
+        assert_eq!(format!("{out}"), "[1, 2, 3]");
+    }
+
+    #[test]
+    fn borrowed_path_always_copies() {
+        let arr = ints(&[1, 2]);
+        let args = vec![Value::Array(Rc::clone(&arr))];
+        let out = dispatch_builtin("array_reverse", &args).unwrap().unwrap();
+        assert_ne!(Rc::as_ptr(as_array(&out)), Rc::as_ptr(&arr));
+        assert_eq!(format!("{}", args[0]), "[1, 2]");
+    }
+
+    #[test]
+    fn err_leaves_args_untouched() {
+        let cases: Vec<(&str, Vec<Value>)> = vec![
+            ("array_push", vec![Value::Array(ints(&[1]))]),
+            ("array_push", vec![Value::Int(1), Value::Int(2)]),
+            ("array_pop", vec![Value::Array(ints(&[]))]),
+            ("array_pop", vec![Value::Array(ints(&[1])), Value::Int(0)]),
+            ("array_reverse", vec![Value::Float(1.0)]),
+        ];
+        for (name, mut args) in cases {
+            let before: Vec<String> = args.iter().map(|v| format!("{v}")).collect();
+            let owned = dispatch_builtin_owned(name, &mut args).unwrap_err();
+            let borrowed = dispatch_builtin(name, &args).unwrap_err();
+            let after: Vec<String> = args.iter().map(|v| format!("{v}")).collect();
+            assert_eq!(before, after, "{name}: args modified on Err");
+            assert_eq!(owned, borrowed, "{name}: error messages diverge");
+        }
+    }
+
+    #[test]
+    fn owned_and_borrowed_results_agree() {
+        for name in OWNED_ARG_BUILTINS {
+            let mut owned_args = vec![Value::Array(ints(&[4, 5, 6]))];
+            if *name == "array_push" {
+                owned_args.push(Value::Int(7));
+            }
+            let borrowed_args = owned_args.clone();
+            let a = dispatch_builtin_owned(name, &mut owned_args).unwrap().unwrap();
+            let b = dispatch_builtin(name, &borrowed_args).unwrap().unwrap();
+            assert_eq!(format!("{a}"), format!("{b}"), "{name}");
+        }
+    }
+
+    #[test]
+    fn non_owned_names_forward_without_touching_args() {
+        let mut args = vec![Value::Array(ints(&[1, 2, 3]))];
+        let out = dispatch_builtin_owned("array_len", &mut args).unwrap().unwrap();
+        assert_eq!(format!("{out}"), "3");
+        assert!(matches!(args[0], Value::Array(_)));
+        assert_eq!(dispatch_builtin_owned("no_such_builtin", &mut args).unwrap().map(|_| ()), None);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Stateless builtin functions
 // ---------------------------------------------------------------------------
 
@@ -3599,22 +3799,19 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
         }
 
         // Phase C6: Collection utilities
+        // COW collection builtins. Borrowed-args path: `args` is `&[Value]`,
+        // so the array is reached through `Rc::clone` and `Rc::make_mut`
+        // ALWAYS copies here (the caller's slice still holds a reference,
+        // so the count is >= 2). This path is O(n) per call. The zero-copy
+        // path is `dispatch_builtin_owned`, which the executors take for
+        // `x = array_push(x, v)` under move-on-last-use (ADR-0048).
         "array_push" => {
-            if args.len() != 2 { return Err("array_push requires 2 args: array, value".into()); }
-            let mut arr_rc = match &args[0] { Value::Array(a) => Rc::clone(a), _ => return Err("array_push: first arg must be Array".into()) };
-            // COW: Rc::make_mut only clones if refcount > 1.
-            // For `arr = array_push(arr, val)` where old binding is overwritten,
-            // refcount is 1 → zero-copy push (amortized O(1) instead of O(n)).
-            Rc::make_mut(&mut arr_rc).push(args[1].clone());
-            Ok(Some(Value::Array(arr_rc)))
+            let arr = check_array_push(args)?;
+            Ok(Some(array_push_rc(Rc::clone(arr), args[1].clone())))
         }
         "array_pop" => {
-            if args.len() != 1 { return Err("array_pop requires 1 arg: array".into()); }
-            let mut arr_rc = match &args[0] { Value::Array(a) => Rc::clone(a), _ => return Err("array_pop: expected Array".into()) };
-            if arr_rc.is_empty() { return Err("array_pop: empty array".into()); }
-            // COW: Rc::make_mut only clones if refcount > 1.
-            let last = Rc::make_mut(&mut arr_rc).pop().unwrap();
-            Ok(Some(Value::Tuple(Rc::new(vec![last, Value::Array(arr_rc)]))))
+            let arr = check_array_pop(args)?;
+            Ok(Some(array_pop_rc(Rc::clone(arr))))
         }
         "array_contains" => {
             if args.len() != 2 { return Err("array_contains requires 2 args: array, value".into()); }
@@ -3624,11 +3821,8 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             Ok(Some(Value::Bool(found)))
         }
         "array_reverse" => {
-            if args.len() != 1 { return Err("array_reverse requires 1 arg: array".into()); }
-            let mut arr_rc = match &args[0] { Value::Array(a) => Rc::clone(a), _ => return Err("array_reverse: expected Array".into()) };
-            // COW: Rc::make_mut only clones if refcount > 1.
-            Rc::make_mut(&mut arr_rc).reverse();
-            Ok(Some(Value::Array(arr_rc)))
+            let arr = check_array_reverse(args)?;
+            Ok(Some(array_reverse_rc(Rc::clone(arr))))
         }
         "array_flatten" => {
             if args.len() != 1 { return Err("array_flatten requires 1 arg: array".into()); }

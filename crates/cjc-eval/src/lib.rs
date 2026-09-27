@@ -353,6 +353,90 @@ impl Interpreter {
         )))
     }
 
+    /// Mutable access to the binding `assign(name, ..)` would write.
+    fn lookup_mut(&mut self, name: &str) -> Option<&mut Value> {
+        self.scopes.iter_mut().rev().find_map(|scope| scope.get_mut(name))
+    }
+
+    // -- Move on last use (ADR-0048) ------------------------------------------
+
+    /// Fast path for `x = f(..., x, ...)` where `f` is an owned-argument
+    /// builtin (`cjc_runtime::builtins::OWNED_ARG_BUILTINS`) and `x` is a
+    /// variable passed exactly once as a bare argument.
+    ///
+    /// The other arguments are evaluated left to right first. Then `x` is
+    /// moved out of its binding (leaving `Void`) straight into the argument
+    /// vector, so the builtin holds the only reference and its
+    /// `Rc::make_mut` mutates in place. Reading a bare variable has no side
+    /// effects, so taking it last is indistinguishable from reading it in
+    /// its argument position, and sibling arguments that mention `x` (e.g.
+    /// `len(x)`) still see the intact value.
+    ///
+    /// The placeholder is never observable:
+    /// - no user code runs between the take and the write-back (owned-arg
+    ///   builtins are stateless and never call back into the program);
+    /// - on success the result is assigned to `x`;
+    /// - on failure the argument is restored to the binding before the
+    ///   error propagates (`dispatch_builtin_owned` leaves `args`
+    ///   untouched on `Err`).
+    ///
+    /// Returns `None` when the pattern doesn't apply. Nothing has been
+    /// evaluated in that case, and the caller takes the ordinary path.
+    /// Semantics are identical to `cjc-mir-exec`'s `try_assign_move`.
+    fn try_assign_move(&mut self, target: &Expr, value: &Expr) -> Option<EvalResult> {
+        let ExprKind::Ident(dst) = &target.kind else { return None };
+        let ExprKind::Call { callee, args } = &value.kind else { return None };
+        let ExprKind::Ident(callee_id) = &callee.kind else { return None };
+        let fname = callee_id.name.as_str();
+        // Must resolve to the shared builtin exactly as `eval_call` would:
+        // no user fn or variant constructor shadowing it, and (to stay
+        // conservative) no local binding of the same name.
+        if !cjc_runtime::builtins::is_owned_arg_builtin(fname)
+            || self.functions.contains_key(fname)
+            || self.variant_to_enum.contains_key(fname)
+            || self.lookup(fname).is_some()
+        {
+            return None;
+        }
+        let name = dst.name.as_str();
+        let mut bare = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| matches!(&a.value.kind, ExprKind::Ident(id) if id.name == name));
+        let (pos, _) = bare.next()?;
+        if bare.next().is_some() || self.lookup(name).is_none() {
+            return None;
+        }
+
+        let mut vals: Vec<Value> = Vec::with_capacity(args.len());
+        for (i, arg) in args.iter().enumerate() {
+            if i == pos {
+                vals.push(Value::Void); // filled by the move below
+            } else {
+                match self.eval_expr(&arg.value) {
+                    Ok(v) => vals.push(v),
+                    Err(e) => return Some(Err(e)), // binding untouched
+                }
+            }
+        }
+        let binding = self.lookup_mut(name)?;
+        vals[pos] = std::mem::replace(binding, Value::Void);
+
+        match cjc_runtime::builtins::dispatch_builtin_owned(fname, &mut vals) {
+            Ok(Some(result)) => Some(self.assign(name, result).map(|()| Value::Void)),
+            outcome => {
+                // Restore before propagating so the binding is intact.
+                if let Some(binding) = self.lookup_mut(name) {
+                    *binding = std::mem::replace(&mut vals[pos], Value::Void);
+                }
+                Some(Err(EvalError::Runtime(match outcome {
+                    Err(msg) => msg,
+                    _ => format!("internal: owned-arg builtin `{fname}` was not dispatched"),
+                })))
+            }
+        }
+    }
+
     // -- Lambda free-variable analysis (lexical capture) --------------------
     //
     // These mirror the closure-conversion analysis cjc-hir performs for
@@ -1073,6 +1157,10 @@ impl Interpreter {
             ExprKind::MultiIndex { object, indices } => self.eval_multi_index(object, indices),
 
             ExprKind::Assign { target, value } => {
+                // ADR-0048: `x = f(..., x, ...)` moves `x` into the call.
+                if let Some(result) = self.try_assign_move(target, value) {
+                    return result;
+                }
                 let val = self.eval_expr(value)?;
                 self.exec_assign(target, val)?;
                 Ok(Value::Void)
