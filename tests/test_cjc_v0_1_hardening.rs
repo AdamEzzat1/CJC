@@ -20,79 +20,89 @@
 #[path = "cjc_v0_1_hardening/mod.rs"]
 mod cjc_v0_1_hardening;
 
-// Re-export submodules so Cargo discovers all #[test] functions
+// Re-export submodules so Cargo discovers all #[test] functions.
+//
+// Each inline module carries its own `#[path]` directory. Without it the
+// nested paths resolve against `tests/<module>/`, which does not exist: Windows
+// collapses `tests/unit/../x` lexically, but Linux and macOS fail with "No such
+// file or directory", which kept this workspace's test job from compiling there.
+#[path = "cjc_v0_1_hardening/unit"]
 mod unit {
-    #[path = "../cjc_v0_1_hardening/unit/test_lexer_hardening.rs"]
+    #[path = "test_lexer_hardening.rs"]
     pub mod test_lexer_hardening;
 
-    #[path = "../cjc_v0_1_hardening/unit/test_parser_hardening.rs"]
+    #[path = "test_parser_hardening.rs"]
     pub mod test_parser_hardening;
 
-    #[path = "../cjc_v0_1_hardening/unit/test_type_checker_hardening.rs"]
+    #[path = "test_type_checker_hardening.rs"]
     pub mod test_type_checker_hardening;
 
-    #[path = "../cjc_v0_1_hardening/unit/test_runtime_builtins_hardening.rs"]
+    #[path = "test_runtime_builtins_hardening.rs"]
     pub mod test_runtime_builtins_hardening;
 
-    #[path = "../cjc_v0_1_hardening/unit/test_eval_hardening.rs"]
+    #[path = "test_eval_hardening.rs"]
     pub mod test_eval_hardening;
 
-    #[path = "../cjc_v0_1_hardening/unit/test_mir_exec_hardening.rs"]
+    #[path = "test_mir_exec_hardening.rs"]
     pub mod test_mir_exec_hardening;
 
-    #[path = "../cjc_v0_1_hardening/unit/test_dispatch_hardening.rs"]
+    #[path = "test_dispatch_hardening.rs"]
     pub mod test_dispatch_hardening;
 
-    #[path = "../cjc_v0_1_hardening/unit/test_data_hardening.rs"]
+    #[path = "test_data_hardening.rs"]
     pub mod test_data_hardening;
 
-    #[path = "../cjc_v0_1_hardening/unit/test_snap_hardening.rs"]
+    #[path = "test_snap_hardening.rs"]
     pub mod test_snap_hardening;
 
-    #[path = "../cjc_v0_1_hardening/unit/test_regex_hardening.rs"]
+    #[path = "test_regex_hardening.rs"]
     pub mod test_regex_hardening;
 
-    #[path = "../cjc_v0_1_hardening/unit/test_repro_hardening.rs"]
+    #[path = "test_repro_hardening.rs"]
     pub mod test_repro_hardening;
 }
 
+#[path = "cjc_v0_1_hardening/prop"]
 mod prop {
-    #[path = "../cjc_v0_1_hardening/prop/test_lexer_props.rs"]
+    #[path = "test_lexer_props.rs"]
     pub mod test_lexer_props;
 
-    #[path = "../cjc_v0_1_hardening/prop/test_eval_props.rs"]
+    #[path = "test_eval_props.rs"]
     pub mod test_eval_props;
 
-    #[path = "../cjc_v0_1_hardening/prop/test_snap_props.rs"]
+    #[path = "test_snap_props.rs"]
     pub mod test_snap_props;
 
-    #[path = "../cjc_v0_1_hardening/prop/test_repro_props.rs"]
+    #[path = "test_repro_props.rs"]
     pub mod test_repro_props;
 
-    #[path = "../cjc_v0_1_hardening/prop/test_dispatch_props.rs"]
+    #[path = "test_dispatch_props.rs"]
     pub mod test_dispatch_props;
 }
 
+#[path = "cjc_v0_1_hardening/fuzz"]
 mod fuzz {
-    #[path = "../cjc_v0_1_hardening/fuzz/test_fuzz_hardening.rs"]
+    #[path = "test_fuzz_hardening.rs"]
     pub mod test_fuzz_hardening;
 }
 
+#[path = "cjc_v0_1_hardening/integration"]
 mod integration {
-    #[path = "../cjc_v0_1_hardening/integration/test_wiring_parity.rs"]
+    #[path = "test_wiring_parity.rs"]
     pub mod test_wiring_parity;
 
-    #[path = "../cjc_v0_1_hardening/integration/test_wiring_builtins.rs"]
+    #[path = "test_wiring_builtins.rs"]
     pub mod test_wiring_builtins;
 
-    #[path = "../cjc_v0_1_hardening/integration/test_wiring_hir_mir.rs"]
+    #[path = "test_wiring_hir_mir.rs"]
     pub mod test_wiring_hir_mir;
 }
 
+#[path = "cjc_v0_1_hardening/determinism"]
 mod determinism {
-    #[path = "../cjc_v0_1_hardening/determinism/test_execution_determinism.rs"]
+    #[path = "test_execution_determinism.rs"]
     pub mod test_execution_determinism;
 
-    #[path = "../cjc_v0_1_hardening/determinism/test_numerical_determinism.rs"]
+    #[path = "test_numerical_determinism.rs"]
     pub mod test_numerical_determinism;
 }
