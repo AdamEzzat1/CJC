@@ -44,8 +44,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run all tests
-        run: cargo test --workspace
-        timeout-minutes: 30
+        # --no-fail-fast: run every test binary and report all failures. Without
+        # it the job stops at the first failing binary and later crates (for
+        # example the cjc-quantum cross-platform golden hash) never run.
+        run: cargo test --workspace --no-fail-fast
+        timeout-minutes: 60
 
   # Cross-platform parity gate: ensure both OS produce identical test counts
   determinism-gate:

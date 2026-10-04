@@ -92,6 +92,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 #### CI test job could not compile on Linux and macOS
 - `tests/test_cjc_v0_1_hardening.rs` used `#[path = "../…"]` inside inline modules, which resolves through a directory that does not exist. Windows tolerated it; Linux and macOS did not, so the workspace test job never compiled there.
+- The job now runs `cargo test --workspace --no-fail-fast` (timeout 60 minutes), so one failing binary no longer hides the results of every crate after it.
 
 #### State-space builtins were never reachable
 - `crates/cjc-runtime/src/state_space.rs` (ADR-0020/0021: `state_space_*`, `tensor_concat_1d`) was committed without its `mod` declaration or dispatch hook, so the module was never compiled and every `state_space_*` call was an unknown builtin. It is now reached from `dispatch_builtin`'s fallback arm, as the ADR describes; both executors inherit it.
