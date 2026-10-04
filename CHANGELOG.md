@@ -83,6 +83,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixes
 
+#### Tampered ABNG blobs could overflow a tensor shape (`cjc-abng`, `cjc-runtime`)
+- A tampered blob could carry a tensor shape with several huge dimensions and one zero. `decode_tensor` guarded the element count with a saturating multiply, so the count came out as 0 and passed the size check. `Tensor::from_vec` then recomputed it with an unchecked product, which overflowed: a panic in debug builds, a silently wrapped count in release.
+  - CI's debug builds failed `fuzz_abng_tamper_no_panic` and `fuzz_abng_smart_replay_tamper_no_panic` on all three operating systems. Local `--release` runs passed.
+- `decode_tensor` now rejects a shape whose running product overflows.
+- `Tensor::from_vec`, `Tensor::reshape`, and `Tensor::from_bytes` return an error for any shape whose element count or strides do not fit in `usize`. Valid shapes, including empty ones, are unchanged.
+- **Tests:** `crates/cjc-abng/tests/tamper_exhaustive.rs` flips every bit and inverts every byte of two serialized graphs (88 and 59 single-bit flips panicked before); `crates/cjc-runtime/tests/tensor_shape_overflow.rs`.
+
+#### CI test job could not compile on Linux and macOS
+- `tests/test_cjc_v0_1_hardening.rs` used `#[path = "../…"]` inside inline modules, which resolves through a directory that does not exist. Windows tolerated it; Linux and macOS did not, so the workspace test job never compiled there.
+
 #### State-space builtins were never reachable
 - `crates/cjc-runtime/src/state_space.rs` (ADR-0020/0021: `state_space_*`, `tensor_concat_1d`) was committed without its `mod` declaration or dispatch hook, so the module was never compiled and every `state_space_*` call was an unknown builtin. It is now reached from `dispatch_builtin`'s fallback arm, as the ADR describes; both executors inherit it.
 

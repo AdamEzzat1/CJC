@@ -1087,7 +1087,12 @@ fn decode_tensor(cur: &mut Cursor) -> Result<Tensor, DecodeError> {
     let mut numel: usize = 1;
     for _ in 0..ndim {
         let d = cur.u32_be()? as usize;
-        numel = numel.saturating_mul(d);
+        // `checked_mul`, not `saturating_mul`: a saturated product times a
+        // later zero dimension is 0, which passed the size check below and
+        // then overflowed inside `Tensor::from_vec` (a panic in debug builds,
+        // a wrapped element count in release). No valid blob has a shape
+        // whose running product overflows.
+        numel = numel.checked_mul(d).ok_or(DecodeError::UnexpectedEof)?;
         shape.push(d);
     }
     // Defensive: untrusted shape can drive `numel` to absurd values

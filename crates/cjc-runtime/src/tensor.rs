@@ -102,6 +102,27 @@ impl Tensor {
         shape.iter().product()
     }
 
+    /// Element count of an untrusted `shape`, or `None` if the shape cannot
+    /// be represented: the product of its nonzero dimensions overflows
+    /// `usize`. That bound also covers every stride (`compute_strides`
+    /// multiplies suffixes of the shape), so a shape accepted here can be
+    /// stored without overflow even when it contains a zero dimension.
+    ///
+    /// The fallible constructors use this instead of `shape_numel`, whose
+    /// plain product panics on overflow in debug builds and wraps in release.
+    fn checked_shape_numel(shape: &[usize]) -> Option<usize> {
+        let mut nonzero_product = 1usize;
+        let mut has_zero = false;
+        for &d in shape {
+            if d == 0 {
+                has_zero = true;
+            } else {
+                nonzero_product = nonzero_product.checked_mul(d)?;
+            }
+        }
+        Some(if has_zero { 0 } else { nonzero_product })
+    }
+
     /// Create a tensor filled with zeros.
     pub fn zeros(shape: &[usize]) -> Self {
         let numel = Self::shape_numel(shape);
@@ -140,7 +161,11 @@ impl Tensor {
     /// Create a tensor from raw data and a shape. Returns an error if the
     /// number of elements does not match the shape.
     pub fn from_vec(data: Vec<f64>, shape: &[usize]) -> Result<Self, RuntimeError> {
-        let numel = Self::shape_numel(shape);
+        // An unrepresentable shape can never match a real buffer.
+        let numel = Self::checked_shape_numel(shape).ok_or(RuntimeError::ShapeMismatch {
+            expected: usize::MAX,
+            got: data.len(),
+        })?;
         if data.len() != numel {
             return Err(RuntimeError::ShapeMismatch {
                 expected: numel,
@@ -345,7 +370,10 @@ impl Tensor {
     /// Reshape to `new_shape`. The new shape must have the same total number
     /// of elements. The returned tensor **shares** the underlying buffer.
     pub fn reshape(&self, new_shape: &[usize]) -> Result<Tensor, RuntimeError> {
-        let new_numel = Self::shape_numel(new_shape);
+        let new_numel = Self::checked_shape_numel(new_shape).ok_or(RuntimeError::ShapeMismatch {
+            expected: self.len(),
+            got: usize::MAX,
+        })?;
         if new_numel != self.len() {
             return Err(RuntimeError::ShapeMismatch {
                 expected: self.len(),
@@ -1881,10 +1909,14 @@ impl Tensor {
     /// The returned tensor **owns** its buffer (copied from the raw bytes)
     /// but performs exactly one allocation for the data vector.
     pub fn from_bytes(bytes: &[u8], shape: &[usize], dtype: &str) -> Result<Tensor, RuntimeError> {
-        let numel = Self::shape_numel(shape);
+        let overflow = RuntimeError::ShapeMismatch {
+            expected: usize::MAX,
+            got: bytes.len(),
+        };
+        let numel = Self::checked_shape_numel(shape).ok_or(overflow.clone())?;
         match dtype {
             "f64" => {
-                let expected = numel * 8;
+                let expected = numel.checked_mul(8).ok_or(overflow.clone())?;
                 if bytes.len() != expected {
                     return Err(RuntimeError::ShapeMismatch {
                         expected,
@@ -1906,7 +1938,7 @@ impl Tensor {
                 })
             }
             "f32" => {
-                let expected = numel * 4;
+                let expected = numel.checked_mul(4).ok_or(overflow)?;
                 if bytes.len() != expected {
                     return Err(RuntimeError::ShapeMismatch {
                         expected,
