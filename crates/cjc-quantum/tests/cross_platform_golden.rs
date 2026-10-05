@@ -167,9 +167,9 @@ fn outputs() -> Vec<Value> {
 ///   and `qml_train` outputs hashed here, and nothing else: reverting only
 ///   that sign reproduces the old hash with every other 2026-09-25 change
 ///   (gate kernels, batch sampler, execution cache) in place. Recorded on
-///   Windows 11; not yet re-run on Linux (the fix uses only IEEE + - * / and
-///   sqrt, which are correctly rounded on every platform, so the Linux run
-///   is expected to match).
+///   Windows 11 and confirmed identical on ubuntu-latest (x86_64) and
+///   macos-latest (aarch64) in CI run 37246735503 (commit 24376e0), the first
+///   run in which the workspace test job compiled and ran on those systems.
 const GOLDEN: u64 = 0x5957_1534_8913_7325;
 
 #[test]
