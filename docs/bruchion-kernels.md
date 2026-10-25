@@ -59,6 +59,15 @@ $env:BRUCHION_KERNELS_DIR = "<that directory>"
 cargo test -p cjc-runtime --features bruchion-kernels bruchion
 ```
 
+**Current pin: `kernels_f64-99a4ce9f339cc7aa`** (`kernel_sha256 99a4ce9f…ebfa36`), built
+at Bruchion `0804330` with `--abi-version 1`, re-pinned 2026-10-24. Against the pack the
+last records used (built at Bruchion `59ee02c`, `kernel_sha256 2ca229cf…`), `abi-check`
+reports 0 breaking and 1 compatible change (`cjc_q_h_f64` added) and a changed
+implementation: the Bruchion changes in between moved the kernel C. The parity tests say
+the values did not move: `cargo test --release -p cjc-runtime --features bruchion-kernels`
+gives 816 passed, 2 ignored, the 16 parity tests bit for bit. No timing was taken against
+this pack; the benchmark records below were measured on the earlier ones.
+
 ## What the parity tests assert
 
 `dispatch::parity` (compiled only with the feature; 15 tests, two of them not run by default:
