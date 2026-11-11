@@ -1,0 +1,6 @@
+// Probe P6: DMRG ground-state energy vs exact diagonalisation (reference from p6_exact.py).
+fn main() {
+    print(dmrg_heisenberg(4, 8, 10, 1e-10));
+    print(dmrg_heisenberg(6, 16, 10, 1e-10));
+    print(dmrg_heisenberg(8, 32, 10, 1e-10));
+}

@@ -1,0 +1,5 @@
+// Probe P7: is `bisect` callable from .cjcl?
+fn f(x: f64) -> f64 { x * x - 2.0 }
+fn main() {
+    print(bisect(f, 0.0, 2.0, 1e-12));
+}

@@ -1,0 +1,12 @@
+// Probe P4: erf / erfc accuracy (A&S 7.1.26).
+// References (mpmath, 30 digits, rounded to f64):
+//   erf(0.5)  = 0.5204998778130465
+//   erf(1.0)  = 0.8427007929497149
+//   erfc(3.0) = 2.209049699858544e-05
+//   erfc(5.0) = 1.5374597944280349e-12
+fn main() {
+    print(erf(0.5));
+    print(erf(1.0));
+    print(erfc(3.0));
+    print(erfc(5.0));
+}

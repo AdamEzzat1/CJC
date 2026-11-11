@@ -1,0 +1,19 @@
+// Probe P1: GradGraph.hessian_diag does not re-run the forward pass.
+// loss = (p*p)*(p*p) = p^4, so d2 loss / dp2 = 12 p^2 = 12 at p = 1.
+fn main() {
+    let g = GradGraph.new();
+    let p = g.parameter(Tensor.from_vec([1.0], [1]));
+    let y = g.mul(p, p);
+    let loss = g.mul(y, y);
+    g.backward(loss);
+    let hd = g.hessian_diag(loss, p);
+    print("expected 12.0 (exact)");
+    print(hd);
+    // Direct case: loss2 = p*p*... consumed directly -> correct
+    let g2 = GradGraph.new();
+    let q = g2.parameter(Tensor.from_vec([1.0], [1]));
+    let l2 = g2.mul(q, q);
+    g2.backward(l2);
+    print("expected 2.0 (direct consumer, FD should be right)");
+    print(g2.hessian_diag(l2, q));
+}
