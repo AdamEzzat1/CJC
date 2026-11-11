@@ -37,7 +37,7 @@ of fooling ourselves.
   - Three canaries change because of the `randn` fix: `pinn_scaled_chain_head_canary_locked`, `tabular_scaled_chain_head_canary_locked` and `primitive_master_hash_golden`. These are the same canaries that fail on Linux and macOS CI. **Re-locked 2026-11-10 with the user's approval**; each test's comment keeps the pre-fix (Windows libm) hash. New values: `1361407d…`, `e2b49c4a…`, `eff68faf…`.
   - `test_acf_sinusoidal_periodicity` asserted `> 0.9` on a quantity whose exact value is 0.9. It now asserts `|r − 0.9| < 1e-12`, which is stricter.
 - **V10:** not yet run. Cross-OS identity of `randn` and the sums can only be shown by ubuntu and macOS CI.
-- **Behaviour change:** with correct gradients, `examples/01_mlp_xor.cjcl` no longer converges in 200 epochs. The old low loss came from a per-sample bias that the bug created.
+- **Behaviour change:** with correct gradients, `examples/01_mlp_xor.cjcl` no longer converges in 200 epochs. The old low loss came from a per-sample bias that the bug created. **Retuned:** the example now runs 2000 epochs, with the same init and learning rate. Loss reaches 0.0045 by epoch 1600; predictions are 0.033 / 0.938 / 0.951 / 0.064 for targets 0 / 1 / 1 / 0; both executors are IDENTICAL. It converges for all 8 seeds tried, and so do five other settings in the sweep.
 - **Follow-ups fixed in the same session**, each through red, green and a mutation check:
   - **`vmap_forward`** now reuses `reforward_masked`, recomputing only the nodes that depend on the input. It returns `Err` for a dependent node that can't be recomputed (`StructField`, `MapLookup`).
     - Red: 12 of 14 failed. Mutation: 13 failed.

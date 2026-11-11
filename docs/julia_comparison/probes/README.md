@@ -44,7 +44,7 @@ Parity is therefore not evidence of correctness for these findings.
   stops being "one bias per unit" without any error. This was checked by
   running a copy with `n_epochs = 2` and `print(b1.shape());` after the
   update, which prints `[4, 4]` twice:
-  `sed 's/    let n_epochs = 200;/    let n_epochs = 2;/; s/^\(        b1 = b1 - gb1 \* lr;\)/\1\n        print(b1.shape());/' examples/01_mlp_xor.cjcl > /tmp/x.cjcl && cjcl run /tmp/x.cjcl`.
+  `sed 's/    let n_epochs = [0-9]*;/    let n_epochs = 2;/; s/^\(        b1 = b1 - gb1 \* lr;\)/\1\n        print(b1.shape());/' examples/01_mlp_xor.cjcl > /tmp/x.cjcl && cjcl run /tmp/x.cjcl`.
   The fused `mlp_layer` op
   reduces the bias gradient correctly, which is why most trainers in the repo
   (which use the fused op) never hit this.
