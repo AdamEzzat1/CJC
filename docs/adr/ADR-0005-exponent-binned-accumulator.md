@@ -38,6 +38,38 @@ The accumulator maintains a `[f64; 64]` bucket array indexed by the exponent bit
 - `BinnedAccumulatorF64` is ~3x slower than Kahan for single-threaded use, so the serial matmul path retains `KahanAccumulatorF64`.
 - Numbers requiring more than 64 distinct exponents in a single reduction may lose precision at bucket boundaries (documented as acceptable).
 
+## Amendment (2026-11-10, bug P5): exact superaccumulator
+
+The binned implementation was **not** order-invariant: within a bin it did
+plain IEEE `bins[e] += v`, which rounds, so e.g. with `b = 1 + 2^-52`,
+`[1, b, b]` summed to `3.0` but `[b, b, 1]` to `3.0000000000000004`; the
+2Sum merge and the cancelling-overflow paths (`[MAX, MAX, -MAX]` → `Inf` or
+`NaN`) were order-dependent as well.
+
+`BinnedAccumulatorF64` (same public API) is now a fixed-point
+superaccumulator (option 1 above, Kulisch / ExBLAS style): every finite f64
+is an integer multiple of 2^-1074, and the accumulator keeps the exact
+integer sum in 68 `i64` limbs of radix 2^32 with deferred carry
+propagation; `merge` is limb-wise integer addition; `finalize` rounds the
+exact sum once to nearest-even. Integer addition is exactly commutative and
+associative, so the result is a function of the multiset of inputs only
+(proof in the module docs of `crates/cjc-runtime/src/accumulator.rs`). The
+state shrank from ~40 KiB to under 600 bytes. Special values: NaN → NaN, +Inf with
+−Inf → NaN, a lone signed Inf wins, an exactly-zero sum is `+0.0`, overflow
+is decided on the exact sum. Results change versus the old implementation
+wherever the old one was not correctly rounded — usually by a few ulps, but
+the old in-bin rounding error grew with n (on 10^6 uniform values in
+[-1, 1) it was ~17 ulps off the exact sum), and cancelling-overflow inputs
+change from Inf/NaN to a finite value. Cost: about 3–4x slower per `add`
+than the old in-bin `+=` on 10^6-element sums (release build, noisy
+machine), while `new()` + `finalize()` of a small accumulator is ~10x
+cheaper (no 40 KiB zeroing). Oracle and
+property tests: `tests/test_binned_order_invariance.rs`,
+`tests/refs/binned_exact.py`.
+
+`BinnedAccumulatorF32` is unchanged; its bins are exact (hence
+order-invariant) only while a bin holds fewer than 2^29 values.
+
 ## Implementation Notes
 
 - Crates affected: `cjc-runtime`

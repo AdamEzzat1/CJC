@@ -1141,24 +1141,50 @@ impl Tensor {
     }
 
     // -----------------------------------------------------------------------
-    // Phase 3A: SVD via Golub-Kahan Bidiagonalization
+    // Phase 3A: SVD via one-sided Jacobi (Hestenes)
     // -----------------------------------------------------------------------
 
     /// Compute the Singular Value Decomposition: `A = U * diag(S) * Vt`.
     ///
     /// Returns `(U, S, Vt)` where `S` is a `Vec<f64>` of singular values in
     /// descending order, `U` is m x k, and `Vt` is k x n (k = min(m, n)).
+    /// The columns of `U` and the rows of `Vt` are orthonormal, also for zero
+    /// or numerically zero singular values.
     ///
     /// # Algorithm
     ///
-    /// Eigendecomposition of `A^T * A` yields `V` and `sigma^2`. Then
-    /// `U = A * V * diag(1 / sigma_i)`. Sign-canonical: largest-magnitude
-    /// element of each `U` column is positive.
+    /// One-sided Jacobi (Hestenes) applied directly to `B = A` (m >= n) or
+    /// `B = A^T` (m < n), so the condition number is never squared (the old
+    /// `eigh(A^T A)` path flushed sigma_min of `[[1,1],[1,1+1e-10]]` to 0):
+    ///
+    /// 1. `B` is scaled by an exact power of two so `max|b_ij|` lies in
+    ///    [1, 2): no overflow/underflow in the sums of squares.
+    /// 2. Sweeps visit the pairs (p, q), p < q, in fixed cyclic-by-rows
+    ///    order. For each pair, `alpha = |b_p|^2`, `beta = |b_q|^2`,
+    ///    `gamma = b_p . b_q` are Kahan-compensated sums. The pair is
+    ///    rotated (and the rotation accumulated into `V`) unless
+    ///    `|gamma| <= tol * sqrt(alpha) * sqrt(beta)` with
+    ///    `tol = sqrt(rows) * eps` (the LAPACK `dgesvj` threshold).
+    /// 3. Convergence: a full sweep with no rotation, or `SVD_JACOBI_MAX_SWEEPS` (60)
+    ///    sweeps (Jacobi converges quadratically; small matrices need < 15).
+    /// 4. `sigma_j = |b_j|`, `u_j = b_j / sigma_j`. Columns with
+    ///    `sigma_j <= 2^-500` (in the scaled units, i.e. ~3e-151 * max|a_ij|),
+    ///    including exact zeros, are completed deterministically: Gram-Schmidt
+    ///    (two passes) of the unit vector `e_i` with the largest residual
+    ///    against the columns already chosen (lowest `i` on ties).
+    /// 5. Singular values are sorted descending; ties keep the original column
+    ///    order (stable sort).
+    /// 6. Sign-canonical: the first largest-magnitude entry of every `U`
+    ///    column is positive (the matching `V` column is flipped with it).
+    ///
+    /// Accuracy: each sigma_i has absolute error O(n eps sigma_max); the
+    /// orthogonality of `U` and `V` and the residual `|U S Vt - A| / |A|` are
+    /// O(n eps).
     ///
     /// # Determinism
     ///
-    /// All intermediate floating-point reductions use [`BinnedAccumulatorF64`].
-    /// Iteration order is fixed row-major.
+    /// Fixed sweep order, fixed sweep cap, Kahan-compensated reductions in a
+    /// fixed order, no FMA, stable sort: bit-identical on every run/platform.
     pub fn svd(&self) -> Result<(Tensor, Vec<f64>, Tensor), RuntimeError> {
         if self.ndim() != 2 {
             return Err(RuntimeError::InvalidOperation(
@@ -1173,92 +1199,181 @@ impl Tensor {
             ));
         }
 
-        let min_mn = m.min(n);
+        // Work on B = A (m >= n) or B = A^T (m < n); B is rows x cols with
+        // rows >= cols, stored column-major (column j = w[j*rows..(j+1)*rows]).
+        let transpose = m < n;
+        let (rows, cols) = if transpose { (n, m) } else { (m, n) };
+        let a = self.to_vec();
+        let mut w = vec![0.0f64; rows * cols];
+        for j in 0..cols {
+            for i in 0..rows {
+                w[j * rows + i] = if transpose { a[j * n + i] } else { a[i * n + j] };
+            }
+        }
 
-        // Compute A^T * A (n x n symmetric matrix)
-        let at = self.transpose();
-        let ata = at.matmul(self)?;
+        // 1. Exact power-of-two pre-scaling.
+        let all_finite = w.iter().all(|x| x.is_finite());
+        let max_abs = w.iter().fold(0.0f64, |acc, &x| if x.abs() > acc { x.abs() } else { acc });
+        let scale_exp = if all_finite && max_abs > 0.0 { svd_floor_log2(max_abs) } else { 0 };
+        if scale_exp != 0 {
+            for x in w.iter_mut() {
+                *x = svd_mul_pow2(*x, -scale_exp);
+            }
+        }
 
-        // Eigendecomposition of A^T*A gives V and eigenvalues = sigma^2
-        let (eigenvalues, eigenvectors) = ata.eigh()?;
+        // V accumulates the rotations: cols x cols, column-major.
+        let mut v = vec![0.0f64; cols * cols];
+        for j in 0..cols {
+            v[j * cols + j] = 1.0;
+        }
 
-        // eigenvalues are in ascending order from eigh; we want descending singular values
-        // Singular values = sqrt(eigenvalues), clamp negatives to 0
-        let mut singular_values: Vec<f64> = eigenvalues.iter()
-            .map(|&ev| if ev > 0.0 { ev.sqrt() } else { 0.0 })
+        // 2-3. Cyclic one-sided Jacobi sweeps.
+        if all_finite {
+            let tol = (rows as f64).sqrt() * f64::EPSILON;
+            for _sweep in 0..SVD_JACOBI_MAX_SWEEPS {
+                let mut rotated = false;
+                for p in 0..cols {
+                    for q in (p + 1)..cols {
+                        let (wp, wq) = svd_two_cols(&mut w, rows, p, q);
+                        let alpha = svd_kahan_dot(wp, wp);
+                        let beta = svd_kahan_dot(wq, wq);
+                        let gamma = svd_kahan_dot(wp, wq);
+                        if gamma == 0.0 || alpha == 0.0 || beta == 0.0 {
+                            continue;
+                        }
+                        if gamma.abs() <= tol * alpha.sqrt() * beta.sqrt() {
+                            continue;
+                        }
+                        let zeta = (beta - alpha) / (2.0 * gamma);
+                        let t = if zeta.abs() > 1e150 {
+                            0.5 / zeta
+                        } else {
+                            let sign = if zeta >= 0.0 { 1.0 } else { -1.0 };
+                            sign / (zeta.abs() + (1.0 + zeta * zeta).sqrt())
+                        };
+                        let c = 1.0 / (1.0 + t * t).sqrt();
+                        let s = c * t;
+                        if s == 0.0 {
+                            continue; // rotation is the identity in f64
+                        }
+                        rotated = true;
+                        svd_rotate(wp, wq, c, s);
+                        let (vp, vq) = svd_two_cols(&mut v, cols, p, q);
+                        svd_rotate(vp, vq, c, s);
+                    }
+                }
+                if !rotated {
+                    break;
+                }
+            }
+        }
+
+        // 4. Singular values (scaled units) and stable descending order.
+        let sigma_scaled: Vec<f64> = (0..cols)
+            .map(|j| svd_col_norm(&w[j * rows..(j + 1) * rows]))
+            .collect();
+        let mut order: Vec<usize> = (0..cols).collect();
+        order.sort_by(|&x, &y| sigma_scaled[y].total_cmp(&sigma_scaled[x]));
+
+        let null_threshold = svd_mul_pow2(1.0, -500);
+        let mut ub = vec![0.0f64; rows * cols]; // left vectors of B, column-major
+        let mut vb = vec![0.0f64; cols * cols]; // right vectors of B, column-major
+        let mut is_set = vec![false; cols];
+        for (k, &j) in order.iter().enumerate() {
+            for i in 0..cols {
+                vb[k * cols + i] = v[j * cols + i];
+            }
+            let sj = sigma_scaled[j];
+            if sj.is_finite() && sj > null_threshold {
+                for i in 0..rows {
+                    ub[k * rows + i] = w[j * rows + i] / sj;
+                }
+                is_set[k] = true;
+            } else if !sj.is_finite() {
+                // Non-finite input: propagate NaN, nothing to orthogonalise.
+                for i in 0..rows {
+                    ub[k * rows + i] = f64::NAN;
+                }
+                is_set[k] = true;
+            }
+        }
+        // Deterministic basis completion for (numerically) null columns.
+        for k in 0..cols {
+            if is_set[k] {
+                continue;
+            }
+            let chosen: Vec<usize> = (0..cols).filter(|&c| is_set[c]).collect();
+            // Residual norm^2 of e_i against the chosen columns: 1 - sum_c u_c[i]^2.
+            let mut best_i = 0usize;
+            let mut best_res = f64::NEG_INFINITY;
+            for i in 0..rows {
+                let mut acc = cjc_repro::KahanAccumulatorF64::new();
+                acc.add(1.0);
+                for &c in &chosen {
+                    let x = ub[c * rows + i];
+                    acc.add(-(x * x));
+                }
+                let res = acc.finalize();
+                if res > best_res {
+                    best_res = res;
+                    best_i = i;
+                }
+            }
+            let mut r = vec![0.0f64; rows];
+            r[best_i] = 1.0;
+            for _pass in 0..2 {
+                for &c in &chosen {
+                    let uc = &ub[c * rows..(c + 1) * rows];
+                    let d = svd_kahan_dot(uc, &r);
+                    for i in 0..rows {
+                        r[i] -= d * uc[i];
+                    }
+                }
+            }
+            let nr = svd_col_norm(&r);
+            for i in 0..rows {
+                ub[k * rows + i] = r[i] / nr;
+            }
+            is_set[k] = true;
+        }
+
+        let s: Vec<f64> = order
+            .iter()
+            .map(|&j| svd_mul_pow2(sigma_scaled[j], scale_exp))
             .collect();
 
-        // Reverse to get descending order
-        singular_values.reverse();
+        // A = B (U = Ub, V = Vb) or A = B^T (U = Vb, V = Ub).
+        let k = cols;
+        let (mut u_cm, mut v_cm) = if transpose { (vb, ub) } else { (ub, vb) };
 
-        // Take only min(m,n) singular values
-        let k = min_mn.min(singular_values.len());
-        let s: Vec<f64> = singular_values[..k].to_vec();
-
-        // V columns are eigenvectors of A^T*A, reversed for descending order
-        // eigenvectors is n x n, columns are eigenvectors
-        let ev_data = eigenvectors.to_vec();
-        let ev_n = eigenvectors.shape()[1]; // should be n
-
-        // Build V matrix (n x k) with columns in descending singular value order
-        let mut v_data = vec![0.0f64; n * k];
-        for col in 0..k {
-            let ev_col = n - 1 - col; // reverse index for descending order
-            for row in 0..n {
-                v_data[row * k + col] = ev_data[row * ev_n + ev_col];
+        // 6. Sign convention on U.
+        for c in 0..k {
+            let col = &u_cm[c * m..(c + 1) * m];
+            let mut best = 0usize;
+            for i in 1..m {
+                if col[i].abs() > col[best].abs() {
+                    best = i;
+                }
+            }
+            if col[best] < 0.0 {
+                for x in u_cm[c * m..(c + 1) * m].iter_mut() {
+                    *x = -*x;
+                }
+                for x in v_cm[c * n..(c + 1) * n].iter_mut() {
+                    *x = -*x;
+                }
             }
         }
-        let v_mat = Tensor::from_vec(v_data.clone(), &[n, k])?;
 
-        // U = A * V * diag(1/s)
-        // First compute A * V
-        let av = self.matmul(&v_mat)?;
-        let av_data = av.to_vec();
-
-        // Then scale each column by 1/s_i
+        // U row-major (m x k); Vt row-major (k x n) is exactly V column-major.
         let mut u_data = vec![0.0f64; m * k];
-        for col in 0..k {
-            if s[col] > 1e-14 {
-                let inv_s = 1.0 / s[col];
-                for row in 0..m {
-                    u_data[row * k + col] = av_data[row * k + col] * inv_s;
-                }
-            }
-            // If s[col] ≈ 0, leave u column as zeros
-        }
-
-        // Sign-canonical: ensure largest-magnitude element of each u column is positive
-        for col in 0..k {
-            let mut max_abs = 0.0f64;
-            let mut max_sign = 1.0f64;
-            for row in 0..m {
-                let val = u_data[row * k + col];
-                if val.abs() > max_abs {
-                    max_abs = val.abs();
-                    max_sign = if val >= 0.0 { 1.0 } else { -1.0 };
-                }
-            }
-            if max_sign < 0.0 {
-                for row in 0..m {
-                    u_data[row * k + col] = -u_data[row * k + col];
-                }
-                for row in 0..n {
-                    v_data[row * k + col] = -v_data[row * k + col];
-                }
+        for c in 0..k {
+            for i in 0..m {
+                u_data[i * k + c] = u_cm[c * m + i];
             }
         }
-
         let u_tensor = Tensor::from_vec(u_data, &[m, k])?;
-
-        // Vt = V^T (k x n)
-        let mut vt_data = vec![0.0f64; k * n];
-        for row in 0..k {
-            for col in 0..n {
-                vt_data[row * n + col] = v_data[col * k + row];
-            }
-        }
-        let vt_tensor = Tensor::from_vec(vt_data, &[k, n])?;
-
+        let vt_tensor = Tensor::from_vec(v_cm, &[k, n])?;
         Ok((u_tensor, s, vt_tensor))
     }
 
@@ -1561,6 +1676,88 @@ impl Tensor {
         }
 
         Ok(r)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// One-sided Jacobi SVD helpers (see `Tensor::svd`)
+// ---------------------------------------------------------------------------
+
+/// Sweep cap for the one-sided Jacobi SVD. Convergence is quadratic; matrices
+/// up to a few hundred columns converge in well under 20 sweeps.
+const SVD_JACOBI_MAX_SWEEPS: usize = 60;
+
+/// Kahan-compensated dot product in index order (no FMA).
+#[inline]
+fn svd_kahan_dot(a: &[f64], b: &[f64]) -> f64 {
+    let mut acc = cjc_repro::KahanAccumulatorF64::new();
+    for i in 0..a.len() {
+        acc.add(a[i] * b[i]);
+    }
+    acc.finalize()
+}
+
+/// floor(log2(|x|)) for finite non-zero x (subnormals included).
+fn svd_floor_log2(x: f64) -> i32 {
+    let bits = x.abs().to_bits();
+    let biased = ((bits >> 52) & 0x7ff) as i32;
+    if biased == 0 {
+        // subnormal: value = mantissa * 2^-1074
+        let mant = bits & 0x000f_ffff_ffff_ffff;
+        (63 - mant.leading_zeros() as i32) - 1074
+    } else {
+        biased - 1023
+    }
+}
+
+/// `x * 2^e`, exact unless the result over/underflows. Split into two
+/// factors so each power of two is a normal number.
+fn svd_mul_pow2(x: f64, e: i32) -> f64 {
+    let pow2 = |k: i32| f64::from_bits(((k + 1023) as u64) << 52);
+    let e1 = e / 2;
+    let e2 = e - e1;
+    x * pow2(e1) * pow2(e2)
+}
+
+/// Euclidean norm with Kahan-compensated sum of squares. Columns whose largest
+/// entry is far from 1 are first scaled by an exact power of two so the
+/// squares neither overflow nor underflow.
+fn svd_col_norm(col: &[f64]) -> f64 {
+    let max_abs = col.iter().fold(0.0f64, |acc, &x| if x.abs() > acc { x.abs() } else { acc });
+    if max_abs == 0.0 || !max_abs.is_finite() {
+        if col.iter().any(|x| x.is_nan()) {
+            return f64::NAN;
+        }
+        return max_abs;
+    }
+    let e = svd_floor_log2(max_abs);
+    if (-400..=400).contains(&e) {
+        return svd_kahan_dot(col, col).sqrt();
+    }
+    let mut acc = cjc_repro::KahanAccumulatorF64::new();
+    for &x in col {
+        let y = svd_mul_pow2(x, -e);
+        acc.add(y * y);
+    }
+    svd_mul_pow2(acc.finalize().sqrt(), e)
+}
+
+/// Mutable views of columns `p < q` of a column-major matrix with `ld` rows.
+#[inline]
+fn svd_two_cols(w: &mut [f64], ld: usize, p: usize, q: usize) -> (&mut [f64], &mut [f64]) {
+    debug_assert!(p < q);
+    let (left, right) = w.split_at_mut(q * ld);
+    (&mut left[p * ld..(p + 1) * ld], &mut right[..ld])
+}
+
+/// Apply the plane rotation `[x_p, x_q] <- [c x_p - s x_q, s x_p + c x_q]`.
+#[inline]
+fn svd_rotate(xp: &mut [f64], xq: &mut [f64], c: f64, s: f64) {
+    for i in 0..xp.len() {
+        let a = xp[i];
+        let b = xq[i];
+        xp[i] = c * a - s * b;
+        xq[i] = s * a + c * b;
     }
 }
 

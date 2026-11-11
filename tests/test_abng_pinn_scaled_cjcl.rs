@@ -66,8 +66,16 @@ fn pinn_scaled_chain_head_canary_locked() {
     // builtins now return platform-independent bits. max_err, n_per_leaf,
     // recovers_truth and verify_chain are unchanged. Pre-dmath hex:
     // `2d2ddec36850b487b9b714a584382df306f7730a328edb1b06d11fe7c4d7dcd0`.
+    //
+    // Re-locked 2026-11-10 — `randn`'s Box–Muller transform
+    // (`cjc_repro::Rng::next_normal_f64`) still called the platform `ln`/`cos`
+    // and now uses `dmath::ln`/`dmath::cos` (docs/julia_comparison, P0-6).
+    // This demo's `Tensor.randn` noise changes in the last bits, so the chain
+    // hashes change; recovers_truth and verify_chain are unchanged. This is
+    // the canary that failed on Linux/macOS CI. Pre-fix (Windows libm) hex:
+    // `10b56196f81faec0935b725dcf98c203a476255edff720a3d19f39c6fc39c36e`.
     const CANARY_HEX: &str =
-        "10b56196f81faec0935b725dcf98c203a476255edff720a3d19f39c6fc39c36e";
+        "1361407d555378566fc9870d431077ac62e336ae4de7865958f050212fc8a6fa";
     assert_eq!(
         chain, CANARY_HEX,
         "pinn_scaled cjcl chain_head canary mismatch — see comment"

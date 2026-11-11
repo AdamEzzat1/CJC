@@ -935,7 +935,9 @@ pub fn pinn_harmonic_train(config: &PinnConfig) -> PinnResult {
             // Update adaptive boundary weight
             graph.set_tensor(bw, Tensor::from_vec_unchecked(vec![effective_bnd_weight], &[1]));
             // Recompute all derived tensors
-            graph.reforward(reforward_start, total_loss_node);
+            graph
+                .reforward(reforward_start, total_loss_node)
+                .expect("PINN graph contains only recomputable ops");
         }
 
         // Read loss values

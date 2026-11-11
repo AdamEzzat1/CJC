@@ -36,6 +36,9 @@ use cjc_abng::audit::AuditKind;
 use cjc_abng::graph::AdaptiveBeliefGraph;
 use cjc_abng::serialize::{replay, serialize, smart_replay};
 use cjc_ad::pinn::Activation;
+// The training data must have the same bits on every OS, so the demo's
+// own math goes through dmath rather than the platform libm (f64::sin etc.).
+use cjc_repro::dmath::DetMath;
 
 /// Heat-equation diffusivity. α = 1.0 keeps the solution numerically
 /// well-behaved at t = 0.1.
@@ -56,8 +59,8 @@ const PINN_BC_STAMP: [u8; 32] = [
 
 /// Analytical solution to the heat equation at time `T_SLICE`.
 fn analytical_u(x: f64) -> f64 {
-    (-ALPHA * std::f64::consts::PI.powi(2) * T_SLICE).exp()
-        * (std::f64::consts::PI * x).sin()
+    (-ALPHA * std::f64::consts::PI.det_powi(2) * T_SLICE).det_exp()
+        * (std::f64::consts::PI * x).det_sin()
 }
 
 /// Build the BLR feature vector `[1, x, sin(πx), cos(πx)]` for query
@@ -67,8 +70,8 @@ fn pinn_features(x: f64) -> [f64; 4] {
     [
         1.0,
         x,
-        (std::f64::consts::PI * x).sin(),
-        (std::f64::consts::PI * x).cos(),
+        (std::f64::consts::PI * x).det_sin(),
+        (std::f64::consts::PI * x).det_cos(),
     ]
 }
 
@@ -398,8 +401,14 @@ fn pinn_chain_head_canary_locked() {
     // Per-step audit-chain bytes shifted; end-to-end training is
     // still bit-deterministic. Pre-R0/R1 hex:
     // `280fd661a59ff09126696a61475e3564552d7135c1471972976ec4478facf5c0`.
+    //
+    // Re-locked 2026-11-10 — the demo's own training data (analytical_u,
+    // pinn_features) used f64::sin/cos/exp/powi from the platform libm, so
+    // CI got a different head on every OS (ubuntu `2e440935…`, macOS
+    // `b6a9b139…`). It now uses dmath. Pre-fix (Windows libm) hex:
+    // `a10785165693ee22277c5a1e51e54900c513d73e526852ed53f36fe967ced8c7`.
     const CANARY_HEX: &str =
-        "a10785165693ee22277c5a1e51e54900c513d73e526852ed53f36fe967ced8c7";
+        "039406aa52c8fd60f9945f0b8c7b8669692ab44fc52bef5835401861c2eef7c9";
     assert_eq!(
         actual_hex, CANARY_HEX,
         "PINN chain_head canary mismatch — see comment"

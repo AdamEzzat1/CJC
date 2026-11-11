@@ -69,12 +69,29 @@ proptest! {
     }
 
     /// Arbitrary byte sequences don't crash the decoder.
-    /// Note: snap_decode trusts length prefixes, so random bytes can trigger
-    /// huge allocations. We use catch_unwind + 8-byte limit to stay safe.
+    ///
+    /// snap_decode used to trust length prefixes, so this test wrapped the call
+    /// in catch_unwind and kept inputs under 8 bytes. That was not enough: an
+    /// allocation failure aborts rather than panics, and 5 bytes
+    /// (`[TAG_CATEGORICAL, u32 n_levels]`) could request ~57 GB, which killed
+    /// the whole test binary on Windows CI. Counts are now capped by the
+    /// remaining input (crates/cjc-snap/tests/decode_untrusted_lengths.rs), so
+    /// a panic here is a real failure and inputs can be long.
     #[test]
-    fn snap_decode_no_panic(bytes in proptest::collection::vec(0u8..=255, 0..8)) {
-        let _ = std::panic::catch_unwind(|| {
-            let _ = cjc_snap::snap_decode(&bytes);
-        });
+    fn snap_decode_no_panic(bytes in proptest::collection::vec(0u8..=255, 0..256)) {
+        let _ = cjc_snap::snap_decode(&bytes);
+        let _ = cjc_snap::snap_decode_v2(&bytes);
+    }
+
+    /// Same, with a valid tag first so random bytes reach every decoder arm
+    /// (a uniformly random first byte is an invalid tag ~90% of the time).
+    #[test]
+    fn snap_decode_no_panic_after_valid_tag(
+        tag in 0u8..=0x18,
+        rest in proptest::collection::vec(0u8..=255, 0..256),
+    ) {
+        let mut bytes = vec![tag];
+        bytes.extend_from_slice(&rest);
+        let _ = cjc_snap::snap_decode(&bytes);
     }
 }

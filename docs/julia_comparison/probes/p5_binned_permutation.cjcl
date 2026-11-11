@@ -1,0 +1,12 @@
+// Probe P5: is Tensor sum invariant under permutation of its inputs?
+// a = 1, b = c = 1 + 2^-52, all in the same exponent bin [1, 2).
+// Exact sum = 3 + 2^-51 = 3.0000000000000004 (representable).
+fn main() {
+    let a = 1.0;
+    let b = 1.0000000000000002;
+    let t1 = Tensor.from_vec([a, b, b], [3]);
+    let t2 = Tensor.from_vec([b, b, a], [3]);
+    print(t1.sum());
+    print(t2.sum());
+    print(t1.sum() == t2.sum());
+}

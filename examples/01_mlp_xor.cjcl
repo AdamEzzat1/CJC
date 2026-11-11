@@ -25,7 +25,12 @@ fn main() {
     let b2 = Tensor.zeros([1, 1]);
 
     let lr = 1.0;
-    let n_epochs = 200;
+    // Sigmoid + MSE on XOR sits on a loss ≈ 0.25 plateau (all predictions
+    // ≈ 0.5) for the first few hundred full-batch steps before the hidden
+    // units break symmetry. 2000 epochs converges for every seed tried
+    // (42, 1, 2, 3, 7, 99, 123, 2024). It used to "converge" in 200 only
+    // because a backward-pass bug gave each sample its own bias row.
+    let n_epochs = 2000;
 
     // ── Training loop ──────────────────────────────────────────────
     let epoch = 0;
@@ -59,7 +64,7 @@ fn main() {
         g.backward(loss);
 
         let loss_val = g.value(loss);
-        if epoch % 40 == 0 {
+        if epoch % 400 == 0 {
             print("Epoch " + to_string(epoch) + "  loss=" + to_string(round(loss_val * 10000.0) / 10000.0));
         }
 

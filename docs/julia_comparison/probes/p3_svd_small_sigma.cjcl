@@ -1,0 +1,16 @@
+// Probe P3: svd is computed as eigh(A^T A), which squares the condition number.
+// A = [[1, 1], [1, 1 + 1e-10]] is symmetric positive definite, so its singular
+// values equal its eigenvalues:
+//   sigma_max = 2.00000000005, sigma_min = 1e-10 / sigma_max = 4.999999999875e-11
+// (det(A) = 1e-10 up to the rounding of the literal 1 + 1e-10).
+fn main() {
+    let a = Tensor.from_vec([1.0, 1.0, 1.0, 1.0 + 1e-10], [2, 2]);
+    print("svd singular values; expected about [2.00000000005, 5.0e-11]");
+    match svd(a) {
+        (u, s, vt) => { print(s); }
+    };
+    print("eigh eigenvalues of the same matrix");
+    match eigh(a) {
+        (vals, vecs) => { print(vals); }
+    };
+}
