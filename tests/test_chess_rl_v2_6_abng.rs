@@ -48,6 +48,7 @@ use cjc_abng::audit::AuditKind;
 use cjc_abng::graph::AdaptiveBeliefGraph;
 use cjc_abng::serialize::{replay, serialize, smart_replay};
 use cjc_ad::pinn::Activation;
+use cjc_repro::dmath::DetMath;
 
 // ── Locked v2.6 canaries ───────────────────────────────────────────────
 
@@ -120,7 +121,9 @@ fn rollout_v2_6(g: &mut AdaptiveBeliefGraph) {
         // leaf head input_dim resolution).
         let bx: Vec<f64> = phi.iter().take(4).copied().collect();
         // Synthetic TD target: tanh of the L2 norm of bx.
-        let y = bx.iter().map(|v| v * v).sum::<f64>().sqrt().tanh();
+        // dmath tanh, not the platform libm, so the target has the same bits
+        // on every OS (sqrt is correctly rounded by IEEE 754 already).
+        let y = bx.iter().map(|v| v * v).sum::<f64>().sqrt().det_tanh();
         // Update the root's BLR posterior with a single observation.
         g.blr_update(0, &bx, &[y]).unwrap();
         // Fold the value into the per-node stats so the chain has
@@ -309,8 +312,13 @@ fn v2_6_chain_head_canary_locked() {
     // with checkpoint_blr here; the head pins the raw training trace.
     // Pre-R0/R1 hex:
     // `27d547b8f721b6631e3cbbe5fc4de560c6f09e6cc93eaf6c9e1bf36a3db6847b`.
+    //
+    // Re-locked 2026-11-10 — the rollout's TD target used the platform
+    // libm `tanh`; it now uses dmath `det_tanh` so the head is the same on
+    // every OS. Pre-fix (Windows libm) hex:
+    // `b0dff576cacdeb2d24b959a3c4fb1522c6abe8645663bb8e229a1ba5031852aa`.
     const CANARY_HEX: &str =
-        "b0dff576cacdeb2d24b959a3c4fb1522c6abe8645663bb8e229a1ba5031852aa";
+        "0057d8784bbfa18afaee3eaa9938da16fe39730c1b1ea7d43155d1d9eaf5a133";
     assert_eq!(
         actual_hex, CANARY_HEX,
         "v2.6 chess RL chain_head canary mismatch — see comment"
@@ -351,8 +359,13 @@ fn v2_6_blr_state_hash_canary_locked() {
     //              reorders the d² reduction → current hex.
     // Still bit-deterministic across runs. Pre-R0/R1 hex:
     // `869b32bdf937d27ec032b789980583fa1bf5871c528a7ee1f26d1d40fb6cfabc`.
+    //
+    // Re-locked 2026-11-10 — the rollout's TD target now uses dmath
+    // `det_tanh` instead of the platform libm `tanh` (see the chain_head
+    // canary above). Pre-fix (Windows libm) hex:
+    // `40fd993bf978be816064cf5d6f9a48c9979df4e73f00d97b23b475756704bb9a`.
     const CANARY_HEX: &str =
-        "40fd993bf978be816064cf5d6f9a48c9979df4e73f00d97b23b475756704bb9a";
+        "3fa291dc02809dfb5b2a6f7cf554170e3dd3030545dab66c8ba3b5db6b57ba42";
     assert_eq!(
         actual, CANARY_HEX,
         "v2.6 chess RL BLR state_hash canary mismatch — see comment"
