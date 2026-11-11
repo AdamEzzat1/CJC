@@ -37,6 +37,22 @@ pub struct LayoutResult {
     pub y_log: Option<f64>,
 }
 
+/// `log_base(x)` through `cjc_repro::dmath`.
+///
+/// `f64::log` is platform `ln(x) / ln(base)`: its bits depend on the OS libm,
+/// and exact decades are not exact (`ln(1000)/ln(10)` = 2.9999999999999996).
+/// Bases 10 and 2 use dmath's dedicated `log10`/`log2`, which are exact at
+/// powers of the base; any other base uses `det_ln(x) / det_ln(base)`.
+fn det_log_base(x: f64, base: f64) -> f64 {
+    if base == 10.0 {
+        x.det_log10()
+    } else if base == 2.0 {
+        x.det_log2()
+    } else {
+        x.det_ln() / base.det_ln()
+    }
+}
+
 impl LayoutResult {
     /// Map a data x-value to pixel x-coordinate.
     /// Supports both linear and log scale mapping.
@@ -46,9 +62,9 @@ impl LayoutResult {
         }
         if let Some(base) = self.x_log {
             // Log-scale mapping.
-            let log_min = self.x_min.max(1e-15).log(base);
-            let log_max = self.x_max.max(1e-15).log(base);
-            let log_x = x.max(1e-15).log(base);
+            let log_min = det_log_base(self.x_min.max(1e-15), base);
+            let log_max = det_log_base(self.x_max.max(1e-15), base);
+            let log_x = det_log_base(x.max(1e-15), base);
             if (log_max - log_min).abs() < 1e-15 {
                 return self.plot_x + self.plot_w / 2.0;
             }
@@ -66,9 +82,9 @@ impl LayoutResult {
         }
         if let Some(base) = self.y_log {
             // Log-scale mapping.
-            let log_min = self.y_min.max(1e-15).log(base);
-            let log_max = self.y_max.max(1e-15).log(base);
-            let log_y = y.max(1e-15).log(base);
+            let log_min = det_log_base(self.y_min.max(1e-15), base);
+            let log_max = det_log_base(self.y_max.max(1e-15), base);
+            let log_y = det_log_base(y.max(1e-15), base);
             if (log_max - log_min).abs() < 1e-15 {
                 return self.plot_y + self.plot_h / 2.0;
             }
@@ -529,8 +545,8 @@ pub fn log_ticks(data_min: f64, data_max: f64, base: f64) -> Vec<f64> {
         return vec![];
     }
 
-    let log_min = data_min.log(base).floor() as i32;
-    let log_max = data_max.log(base).ceil() as i32;
+    let log_min = det_log_base(data_min, base).floor() as i32;
+    let log_max = det_log_base(data_max, base).ceil() as i32;
 
     let mut ticks = Vec::new();
     for exp in log_min..=log_max {
