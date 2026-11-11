@@ -606,6 +606,14 @@ fn kron_i_op(op: &[[ComplexF64; 2]; 2]) -> [[ComplexF64; 4]; 4] {
 }
 
 /// Apply one term: result += left_env ⊗ phys_op ⊗ right_env applied to theta.
+///
+/// Both environments are stored `[bra][ket]` (see `transfer_left_op` /
+/// `transfer_right_op`), so the output (bra) index comes first:
+///   result[s', a', t', b'] += Σ L[a'][a] · Op[(s' t'), (s t)] · R[b'][b] · θ[s, a, t, b]
+///
+/// Contracted factor by factor (L, then R, then the 4×4 physical operator):
+/// O(bl²·br + bl·br²) per term instead of O(bl²·br²). Every sum runs in a
+/// fixed index order, so the result is deterministic.
 fn apply_term(
     theta: &[ComplexF64],
     left_env: &[Vec<ComplexF64>],
@@ -616,47 +624,61 @@ fn apply_term(
     result: &mut [ComplexF64],
 ) {
     let rd = 2 * br;
+    let idx = |s: usize, a: usize, t: usize, b: usize| (s * bl + a) * rd + t * br + b;
 
-    for ap in 0..bl {
-        for bp in 0..br {
-            let mut out = [ComplexF64::ZERO; 4];
-
+    // t1[s, a', t, b] = Σ_a L[a'][a] θ[s, a, t, b]
+    let mut t1 = vec![ComplexF64::ZERO; theta.len()];
+    for s in 0..2 {
+        for ap in 0..bl {
             for a in 0..bl {
                 let lv = left_env[ap][a];
                 if lv.re == 0.0 && lv.im == 0.0 {
                     continue;
                 }
-                for b in 0..br {
-                    let rv = right_env[b][bp];
-                    if rv.re == 0.0 && rv.im == 0.0 {
-                        continue;
-                    }
-                    let lr = lv.mul_fixed(rv);
-
-                    let mut phys = [ComplexF64::ZERO; 4];
-                    for si in 0..2 {
-                        for sj in 0..2 {
-                            phys[si * 2 + sj] = theta[(si * bl + a) * rd + sj * br + b];
-                        }
-                    }
-
-                    for row in 0..4 {
-                        for col in 0..4 {
-                            let h = phys_op[row][col];
-                            if h.re == 0.0 && h.im == 0.0 {
-                                continue;
-                            }
-                            out[row] = out[row].add(lr.mul_fixed(phys[col]).mul_fixed(h));
-                        }
+                for t in 0..2 {
+                    for b in 0..br {
+                        let k = idx(s, ap, t, b);
+                        t1[k] = t1[k].add(lv.mul_fixed(theta[idx(s, a, t, b)]));
                     }
                 }
             }
+        }
+    }
 
-            for si in 0..2 {
-                for sj in 0..2 {
-                    let idx = (si * bl + ap) * rd + sj * br + bp;
-                    result[idx] = result[idx].add(out[si * 2 + sj]);
+    // t2[s, a', t, b'] = Σ_b R[b'][b] t1[s, a', t, b]
+    let mut t2 = vec![ComplexF64::ZERO; theta.len()];
+    for s in 0..2 {
+        for ap in 0..bl {
+            for t in 0..2 {
+                for bp in 0..br {
+                    let mut acc = ComplexF64::ZERO;
+                    for b in 0..br {
+                        let rv = right_env[bp][b];
+                        if rv.re == 0.0 && rv.im == 0.0 {
+                            continue;
+                        }
+                        acc = acc.add(rv.mul_fixed(t1[idx(s, ap, t, b)]));
+                    }
+                    t2[idx(s, ap, t, bp)] = acc;
                 }
+            }
+        }
+    }
+
+    // result[s', a', t', b'] += Σ_{s,t} Op[(s' t'), (s t)] t2[s, a', t, b']
+    for ap in 0..bl {
+        for bp in 0..br {
+            for row in 0..4 {
+                let mut acc = ComplexF64::ZERO;
+                for col in 0..4 {
+                    let h = phys_op[row][col];
+                    if h.re == 0.0 && h.im == 0.0 {
+                        continue;
+                    }
+                    acc = acc.add(h.mul_fixed(t2[idx(col / 2, ap, col % 2, bp)]));
+                }
+                let k = idx(row / 2, ap, row % 2, bp);
+                result[k] = result[k].add(acc);
             }
         }
     }
@@ -1155,5 +1177,212 @@ mod tests {
         assert!((n * n - 15.0).abs() < 1e-12);
         let dot = complex_real_dot(&v, &v);
         assert!((dot - 15.0).abs() < 1e-12);
+    }
+
+    // -----------------------------------------------------------------------
+    // Exact-value tests against exact diagonalisation (bug P6).
+    //
+    // Expected energies are produced by numpy `eigvalsh` in
+    // `tests/refs/dmrg_ed.py` (repo root) -- never from DMRG output.
+    // Bond dimension chi = 2^(n/2) is full rank, so DMRG must be exact.
+    // -----------------------------------------------------------------------
+
+    const ED_HEISENBERG: [(usize, f64); 4] = [
+        (4, -6.464101615137755),
+        (6, -9.974308535551705),
+        (8, -13.499730394751575),
+        (10, -17.032140829131553),
+    ];
+
+    fn full_rank_chi(n: usize) -> usize {
+        1usize << (n / 2)
+    }
+
+    fn assert_rel(got: f64, want: f64, what: &str) {
+        let rel = ((got - want) / want).abs();
+        assert!(
+            rel <= 1e-10,
+            "{what}: DMRG {got:.17} vs ED {want:.17} (rel err {rel:.3e})"
+        );
+    }
+
+    fn assert_monotone(energies: &[f64], what: &str) {
+        for k in 1..energies.len() {
+            assert!(
+                energies[k] <= energies[k - 1] + 1e-12,
+                "{what}: energy rose at sweep {k}: {:.17} -> {:.17} (history {energies:?})",
+                energies[k - 1],
+                energies[k]
+            );
+        }
+    }
+
+    #[test]
+    fn test_dmrg_heisenberg_matches_ed_n4_n6_n8() {
+        for &(n, ed) in &ED_HEISENBERG[..3] {
+            let r = dmrg_full_heisenberg_1d(n, full_rank_chi(n), 20, 1e-13);
+            assert_rel(r.energy, ed, &format!("Heisenberg n={n}"));
+            assert_monotone(&r.energies, &format!("Heisenberg n={n}"));
+        }
+    }
+
+    #[test]
+    fn test_dmrg_heisenberg_matches_ed_n10() {
+        let (n, ed) = ED_HEISENBERG[3];
+        let r = dmrg_full_heisenberg_1d(n, full_rank_chi(n), 20, 1e-13);
+        assert_rel(r.energy, ed, "Heisenberg n=10");
+        assert_monotone(&r.energies, "Heisenberg n=10");
+    }
+
+    #[test]
+    fn test_dmrg_ising_matches_ed() {
+        // H = sum Z_i Z_{i+1} is diagonal; ED ground energy is -(n-1).
+        for &n in &[4usize, 6, 8, 10] {
+            let ed = -((n - 1) as f64);
+            let r = dmrg_heisenberg_1d(n, full_rank_chi(n), 20, 1e-13);
+            assert_rel(r.energy, ed, &format!("Ising n={n}"));
+            assert_monotone(&r.energies, &format!("Ising n={n}"));
+        }
+    }
+
+    #[test]
+    fn test_dmrg_heisenberg_exact_deterministic() {
+        let a = dmrg_full_heisenberg_1d(6, 8, 20, 1e-13);
+        let b = dmrg_full_heisenberg_1d(6, 8, 20, 1e-13);
+        assert_eq!(a.energy.to_bits(), b.energy.to_bits());
+        assert_eq!(a.energies.len(), b.energies.len());
+        for (x, y) in a.energies.iter().zip(&b.energies) {
+            assert_eq!(x.to_bits(), y.to_bits());
+        }
+    }
+
+    // Dense oracle helpers: H as a 2^n x 2^n matrix (bit q of the basis index
+    // is site q, matching `Mps::to_statevector`) and the isometry P that maps
+    // two-site coordinates at a bond to the full statevector.
+
+    fn dense_hamiltonian(n: usize, h: DmrgHamiltonian) -> Vec<Vec<ComplexF64>> {
+        let dim = 1usize << n;
+        let mut m = vec![vec![ComplexF64::ZERO; dim]; dim];
+        let ops = hamiltonian_ops(h);
+        for i in 0..n - 1 {
+            for op in &ops {
+                for col in 0..dim {
+                    let si = (col >> i) & 1;
+                    let sj = (col >> (i + 1)) & 1;
+                    for ri in 0..2 {
+                        for rj in 0..2 {
+                            let v = op[ri][si].mul_fixed(op[rj][sj]);
+                            let row = (col & !(1 << i) & !(1 << (i + 1)))
+                                | (ri << i)
+                                | (rj << (i + 1));
+                            m[row][col] = m[row][col].add(v);
+                        }
+                    }
+                }
+            }
+        }
+        m
+    }
+
+    fn bond_projector(mps: &Mps, bond: usize) -> Vec<Vec<ComplexF64>> {
+        let n = mps.n_qubits;
+        let bl = mps.tensors[bond].bond_left;
+        let br = mps.tensors[bond + 1].bond_right;
+        let rd = 2 * br;
+        let dim = 1usize << n;
+        let mut p = vec![vec![ComplexF64::ZERO; 2 * bl * rd]; dim];
+        for basis in 0..dim {
+            let mut lv = vec![ComplexF64::ONE];
+            for q in 0..bond {
+                let s = (basis >> q) & 1;
+                let t = &mps.tensors[q];
+                let mut nx = vec![ComplexF64::ZERO; t.bond_right];
+                for k in 0..t.bond_right {
+                    for j in 0..t.bond_left {
+                        nx[k] = nx[k].add(lv[j].mul_fixed(t.a[s].get(j, k)));
+                    }
+                }
+                lv = nx;
+            }
+            let mut rv = vec![ComplexF64::ONE];
+            for q in (bond + 2..n).rev() {
+                let s = (basis >> q) & 1;
+                let t = &mps.tensors[q];
+                let mut nx = vec![ComplexF64::ZERO; t.bond_left];
+                for j in 0..t.bond_left {
+                    for k in 0..t.bond_right {
+                        nx[j] = nx[j].add(t.a[s].get(j, k).mul_fixed(rv[k]));
+                    }
+                }
+                rv = nx;
+            }
+            let si = (basis >> bond) & 1;
+            let sj = (basis >> (bond + 1)) & 1;
+            for a in 0..bl {
+                for b in 0..br {
+                    p[basis][(si * bl + a) * rd + sj * br + b] = lv[a].mul_fixed(rv[b]);
+                }
+            }
+        }
+        p
+    }
+
+    /// The environment-built effective Hamiltonian must equal P^dagger H P
+    /// formed densely, at every bond, for a generic complex MPS. Gauge-free:
+    /// holds whether or not the MPS is canonical.
+    #[test]
+    fn test_effective_hamiltonian_matches_dense_projection() {
+        let n = 5;
+        // Generic MPS with complex entries and bond dims (2, 3, 3, 2).
+        let dims = [1usize, 2, 3, 3, 2, 1];
+        let mut rng = 2024u64;
+        let mut mps = Mps::with_max_bond(n, 8);
+        for q in 0..n {
+            let mut t = MpsTensor::new(dims[q], dims[q + 1]);
+            for s in 0..2 {
+                for r in 0..dims[q] {
+                    for c in 0..dims[q + 1] {
+                        let re = crate::rand_f64(&mut rng) - 0.5;
+                        let im = crate::rand_f64(&mut rng) - 0.5;
+                        t.a[s].set(r, c, ComplexF64::new(re, im));
+                    }
+                }
+            }
+            mps.tensors[q] = t;
+        }
+        for &h in &[DmrgHamiltonian::Heisenberg, DmrgHamiltonian::Ising] {
+            let hm = dense_hamiltonian(n, h);
+            let h_local = local_hamiltonian(h);
+            let dim = 1usize << n;
+            for bond in 0..n - 1 {
+                let envs = build_bond_envs(&mps, bond, h);
+                let bl = mps.tensors[bond].bond_left;
+                let br = mps.tensors[bond + 1].bond_right;
+                let total = 4 * bl * br;
+                let p = bond_projector(&mps, bond);
+                for c in 0..total {
+                    let mut e = vec![ComplexF64::ZERO; total];
+                    e[c] = ComplexF64::ONE;
+                    let col = apply_h_eff_full(&e, &h_local, &envs, h, bl, br);
+                    for r in 0..total {
+                        let mut want = ComplexF64::ZERO;
+                        for x in 0..dim {
+                            let mut hp = ComplexF64::ZERO;
+                            for y in 0..dim {
+                                hp = hp.add(hm[x][y].mul_fixed(p[y][c]));
+                            }
+                            want = want.add(p[x][r].conj().mul_fixed(hp));
+                        }
+                        let d = col[r].sub(want);
+                        assert!(
+                            d.norm_sq().sqrt() < 1e-12,
+                            "{h:?} bond {bond}: H_eff[{r}][{c}] = {:?}, P'HP = {:?}",
+                            col[r],
+                            want
+                        );
+                    }
+                }
+            }
+        }
     }
 }

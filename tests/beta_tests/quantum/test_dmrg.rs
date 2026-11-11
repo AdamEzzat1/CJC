@@ -50,11 +50,21 @@ fn test_dmrg_4_qubit_ising_energy_below_threshold() {
 
 #[test]
 fn test_dmrg_4_qubit_heisenberg_energy_negative() {
+    // Exact value from numpy ED (tests/refs/dmrg_ed.py); chi=8 is full rank at n=4.
+    let ed = -6.464101615137755_f64;
     let result = dmrg_1d(4, 8, 10, 1e-8, DmrgHamiltonian::Heisenberg);
     assert!(
         result.energy < 0.0,
         "4-qubit Heisenberg energy should be negative, got {}",
         result.energy
+    );
+    let rel = ((result.energy - ed) / ed).abs();
+    assert!(
+        rel <= 1e-10,
+        "4-qubit Heisenberg energy {} vs ED {} (rel err {:.3e})",
+        result.energy,
+        ed,
+        rel
     );
 }
 
