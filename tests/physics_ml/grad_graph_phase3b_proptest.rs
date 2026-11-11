@@ -166,7 +166,7 @@ proptest! {
         let y = g.parameter(Tensor::from_vec(y_init.clone(), &[3]).unwrap());
         let xy = g.mul(x, y);
         g.set_tensor(x, Tensor::from_vec(x_new.clone(), &[3]).unwrap());
-        g.reforward(xy, xy);
+        g.reforward(xy, xy).unwrap();
         let direct = g.tensor(xy).to_vec();
 
         // Dispatch.

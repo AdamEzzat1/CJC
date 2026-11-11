@@ -717,18 +717,7 @@ impl GradGraph {
     /// Softmax along the last axis (treats tensor as a flat vector for 1-D).
     /// Uses numerically stable log-sum-exp: softmax(x_i) = exp(x_i - max(x)) / sum(exp(x_j - max(x)))
     pub fn softmax(&mut self, a: usize) -> usize {
-        use cjc_repro::KahanAccumulatorF64;
-        let a_t = self.tensors[a].clone();
-        let data = a_t.to_vec();
-        let max_val = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let exp_shifted: Vec<f64> = data.iter().map(|&x| (x - max_val).det_exp()).collect();
-        let mut sum_acc = KahanAccumulatorF64::new();
-        for &v in &exp_shifted {
-            sum_acc.add(v);
-        }
-        let sum_exp = sum_acc.finalize();
-        let softmax_data: Vec<f64> = exp_shifted.iter().map(|&e| e / sum_exp).collect();
-        let result = Tensor::from_vec_unchecked(softmax_data, a_t.shape());
+        let result = Self::softmax_forward(&self.tensors[a]);
         let idx = self.ops.len();
         self.ops.push(GradOp::Softmax(a));
         self.tensors.push(result);
@@ -740,9 +729,32 @@ impl GradGraph {
     /// Uses numerically stable log-sum-exp internally.
     /// Returns a scalar [1] tensor.
     pub fn cross_entropy(&mut self, logits: usize, targets: usize) -> usize {
+        let result = Self::cross_entropy_forward(&self.tensors[logits], &self.tensors[targets]);
+        let idx = self.ops.len();
+        self.ops.push(GradOp::CrossEntropy { logits, targets });
+        self.tensors.push(result);
+        self.param_grads.push(None);
+        idx
+    }
+
+    /// Forward kernel of [`GradGraph::softmax`], shared with `reforward`.
+    fn softmax_forward(a_t: &Tensor) -> Tensor {
         use cjc_repro::KahanAccumulatorF64;
-        let logits_t = self.tensors[logits].clone();
-        let targets_t = self.tensors[targets].clone();
+        let data = a_t.to_vec();
+        let max_val = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let exp_shifted: Vec<f64> = data.iter().map(|&x| (x - max_val).det_exp()).collect();
+        let mut sum_acc = KahanAccumulatorF64::new();
+        for &v in &exp_shifted {
+            sum_acc.add(v);
+        }
+        let sum_exp = sum_acc.finalize();
+        let softmax_data: Vec<f64> = exp_shifted.iter().map(|&e| e / sum_exp).collect();
+        Tensor::from_vec_unchecked(softmax_data, a_t.shape())
+    }
+
+    /// Forward kernel of [`GradGraph::cross_entropy`], shared with `reforward`.
+    fn cross_entropy_forward(logits_t: &Tensor, targets_t: &Tensor) -> Tensor {
+        use cjc_repro::KahanAccumulatorF64;
         let logits_data = logits_t.to_vec();
         let targets_data = targets_t.to_vec();
         // Numerically stable: log_softmax = x_i - max(x) - log(sum(exp(x_j - max(x))))
@@ -761,19 +773,36 @@ impl GradGraph {
             ce_acc.add(-t * ls);
         }
         let ce = ce_acc.finalize();
-        let result = Tensor::from_vec_unchecked(vec![ce], &[1]);
-        let idx = self.ops.len();
-        self.ops.push(GradOp::CrossEntropy { logits, targets });
-        self.tensors.push(result);
-        self.param_grads.push(None);
-        idx
+        Tensor::from_vec_unchecked(vec![ce], &[1])
     }
 
     /// Layer normalization: normalize input to zero mean and unit variance.
     /// y = (x - mean(x)) / sqrt(var(x) + eps), where eps = 1e-5.
     pub fn layer_norm(&mut self, a: usize) -> usize {
+        let result = Self::layer_norm_forward(&self.tensors[a]);
+        let idx = self.ops.len();
+        self.ops.push(GradOp::LayerNorm(a));
+        self.tensors.push(result);
+        self.param_grads.push(None);
+        idx
+    }
+
+    /// Batch normalization: normalize along the first axis (batch dimension).
+    /// For a tensor of shape [batch, features], normalizes each feature across the batch.
+    /// y = (x - mean(x)) / sqrt(var(x) + eps), where eps = 1e-5.
+    /// For 1-D inputs, behaves identically to layer_norm.
+    pub fn batch_norm(&mut self, a: usize) -> usize {
+        let result = Self::batch_norm_forward(&self.tensors[a]);
+        let idx = self.ops.len();
+        self.ops.push(GradOp::BatchNorm(a));
+        self.tensors.push(result);
+        self.param_grads.push(None);
+        idx
+    }
+
+    /// Forward kernel of [`GradGraph::layer_norm`], shared with `reforward`.
+    fn layer_norm_forward(a_t: &Tensor) -> Tensor {
         use cjc_repro::KahanAccumulatorF64;
-        let a_t = self.tensors[a].clone();
         let data = a_t.to_vec();
         let n = data.len() as f64;
         // Mean
@@ -792,21 +821,12 @@ impl GradGraph {
         let eps = 1e-5;
         let std = (var + eps).sqrt();
         let normed: Vec<f64> = data.iter().map(|&x| (x - mean) / std).collect();
-        let result = Tensor::from_vec_unchecked(normed, a_t.shape());
-        let idx = self.ops.len();
-        self.ops.push(GradOp::LayerNorm(a));
-        self.tensors.push(result);
-        self.param_grads.push(None);
-        idx
+        Tensor::from_vec_unchecked(normed, a_t.shape())
     }
 
-    /// Batch normalization: normalize along the first axis (batch dimension).
-    /// For a tensor of shape [batch, features], normalizes each feature across the batch.
-    /// y = (x - mean(x)) / sqrt(var(x) + eps), where eps = 1e-5.
-    /// For 1-D inputs, behaves identically to layer_norm.
-    pub fn batch_norm(&mut self, a: usize) -> usize {
+    /// Forward kernel of [`GradGraph::batch_norm`], shared with `reforward`.
+    fn batch_norm_forward(a_t: &Tensor) -> Tensor {
         use cjc_repro::KahanAccumulatorF64;
-        let a_t = self.tensors[a].clone();
         let data = a_t.to_vec();
         let n = data.len() as f64;
         let mut mean_acc = KahanAccumulatorF64::new();
@@ -823,12 +843,7 @@ impl GradGraph {
         let eps = 1e-5;
         let std = (var + eps).sqrt();
         let normed: Vec<f64> = data.iter().map(|&x| (x - mean) / std).collect();
-        let result = Tensor::from_vec_unchecked(normed, a_t.shape());
-        let idx = self.ops.len();
-        self.ops.push(GradOp::BatchNorm(a));
-        self.tensors.push(result);
-        self.param_grads.push(None);
-        idx
+        Tensor::from_vec_unchecked(normed, a_t.shape())
     }
 
     /// Element-wise clamp to [min, max].
@@ -849,21 +864,27 @@ impl GradGraph {
     /// Conditional select: where(cond, on_true, on_false).
     /// cond is a tensor of 0.0/1.0 values acting as a mask.
     pub fn where_cond(&mut self, cond: usize, on_true: usize, on_false: usize) -> usize {
-        let cond_t = self.tensors[cond].clone();
-        let true_t = self.tensors[on_true].clone();
-        let false_t = self.tensors[on_false].clone();
+        let result = Self::where_forward(
+            &self.tensors[cond],
+            &self.tensors[on_true],
+            &self.tensors[on_false],
+        );
+        let idx = self.ops.len();
+        self.ops.push(GradOp::Where { cond, on_true, on_false });
+        self.tensors.push(result);
+        self.param_grads.push(None);
+        idx
+    }
+
+    /// Forward kernel of [`GradGraph::where_cond`], shared with `reforward`.
+    fn where_forward(cond_t: &Tensor, true_t: &Tensor, false_t: &Tensor) -> Tensor {
         let c = cond_t.to_vec();
         let t = true_t.to_vec();
         let f = false_t.to_vec();
         let result_data: Vec<f64> = c.iter().zip(t.iter().zip(f.iter()))
             .map(|(&ci, (&ti, &fi))| if ci != 0.0 { ti } else { fi })
             .collect();
-        let result = Tensor::from_vec_unchecked(result_data, cond_t.shape());
-        let idx = self.ops.len();
-        self.ops.push(GradOp::Where { cond, on_true, on_false });
-        self.tensors.push(result);
-        self.param_grads.push(None);
-        idx
+        Tensor::from_vec_unchecked(result_data, cond_t.shape())
     }
 
     /// Reshape a tensor. Stores the original shape for backward.
@@ -1096,6 +1117,17 @@ impl GradGraph {
         let sizes: Vec<usize> = tensors.iter()
             .map(|t| t.shape()[axis])
             .collect();
+        let result = Self::cat_forward(&tensors, axis, &sizes);
+        let input_vec = inputs.to_vec();
+        let idx = self.ops.len();
+        self.ops.push(GradOp::CatOp { inputs: input_vec, axis, sizes });
+        self.tensors.push(result);
+        self.param_grads.push(None);
+        idx
+    }
+
+    /// Forward kernel of [`GradGraph::cat`], shared with `reforward`.
+    fn cat_forward(tensors: &[Tensor], axis: usize, sizes: &[usize]) -> Tensor {
         // Build concatenated data along axis
         // For simplicity, handle axis=0 for 1-D and 2-D tensors
         let mut all_data = Vec::new();
@@ -1105,14 +1137,14 @@ impl GradGraph {
 
         if ndim == 1 {
             // 1-D: just concatenate flat data
-            for t in &tensors {
+            for t in tensors {
                 all_data.extend(t.to_vec());
                 total_along_axis += t.shape()[0];
             }
             result_shape[0] = total_along_axis;
         } else if ndim == 2 && axis == 0 {
             // Concat along rows
-            for t in &tensors {
+            for t in tensors {
                 all_data.extend(t.to_vec());
                 total_along_axis += t.shape()[0];
             }
@@ -1121,7 +1153,7 @@ impl GradGraph {
             // Concat along columns
             let nrows = tensors[0].shape()[0];
             for row in 0..nrows {
-                for t in &tensors {
+                for t in tensors {
                     let cols = t.shape()[1];
                     let row_data = t.to_vec();
                     let start = row * cols;
@@ -1132,26 +1164,29 @@ impl GradGraph {
             result_shape[1] = total_along_axis;
         } else {
             // General case: flatten, cat, reshape (deterministic but limited)
-            for t in &tensors {
+            for t in tensors {
                 all_data.extend(t.to_vec());
                 total_along_axis += t.shape()[axis];
             }
             result_shape[axis] = total_along_axis;
         }
 
-        let result = Tensor::from_vec_unchecked(all_data, &result_shape);
-        let input_vec = inputs.to_vec();
-        let idx = self.ops.len();
-        self.ops.push(GradOp::CatOp { inputs: input_vec, axis, sizes });
-        self.tensors.push(result);
-        self.param_grads.push(None);
-        idx
+        Tensor::from_vec_unchecked(all_data, &result_shape)
     }
 
     /// Gather elements along an axis using indices.
     /// For a 1-D tensor, returns tensor[indices].
     pub fn gather(&mut self, a: usize, indices: &[usize], axis: usize) -> usize {
-        let a_t = self.tensors[a].clone();
+        let result = Self::gather_forward(&self.tensors[a], indices, axis);
+        let idx = self.ops.len();
+        self.ops.push(GradOp::GatherOp { input: a, indices: indices.to_vec(), axis });
+        self.tensors.push(result);
+        self.param_grads.push(None);
+        idx
+    }
+
+    /// Forward kernel of [`GradGraph::gather`], shared with `reforward`.
+    fn gather_forward(a_t: &Tensor, indices: &[usize], axis: usize) -> Tensor {
         let data = a_t.to_vec();
         // For 1-D: just pick elements at indices
         let gathered: Vec<f64> = if a_t.ndim() == 1 {
@@ -1174,12 +1209,7 @@ impl GradGraph {
         } else {
             result_shape[axis] = indices.len();
         }
-        let result = Tensor::from_vec_unchecked(gathered, &result_shape);
-        let idx = self.ops.len();
-        self.ops.push(GradOp::GatherOp { input: a, indices: indices.to_vec(), axis });
-        self.tensors.push(result);
-        self.param_grads.push(None);
-        idx
+        Tensor::from_vec_unchecked(gathered, &result_shape)
     }
 
     // ── Phase C1: Missing forward methods ──
@@ -1445,14 +1475,17 @@ impl GradGraph {
                         self.param_grads[i] = Some(grad);
                     }
                 }
+                // Element-wise binary ops broadcast their operands in the
+                // forward pass, so the upstream gradient has the output
+                // shape; reduce it back to each operand's own shape.
                 GradOp::Add(a, b) => {
-                    accumulate_grad(&mut grads, a, &grad);
-                    accumulate_grad(&mut grads, b, &grad);
+                    accumulate_grad_unbroadcast(&mut grads, a, &grad, self.tensors[a].shape());
+                    accumulate_grad_unbroadcast(&mut grads, b, &grad, self.tensors[b].shape());
                 }
                 GradOp::Sub(a, b) => {
-                    accumulate_grad(&mut grads, a, &grad);
+                    accumulate_grad_unbroadcast(&mut grads, a, &grad, self.tensors[a].shape());
                     let neg_grad = grad.neg();
-                    accumulate_grad(&mut grads, b, &neg_grad);
+                    accumulate_grad_unbroadcast(&mut grads, b, &neg_grad, self.tensors[b].shape());
                 }
                 GradOp::Mul(a, b) => {
                     let a_val = self.tensors[a].clone();
@@ -1461,8 +1494,8 @@ impl GradGraph {
                     let grad_a = grad.mul_elem_unchecked(&b_val);
                     let grad_b = grad.mul_elem_unchecked(&a_val);
 
-                    accumulate_grad(&mut grads, a, &grad_a);
-                    accumulate_grad(&mut grads, b, &grad_b);
+                    accumulate_grad_unbroadcast(&mut grads, a, &grad_a, a_val.shape());
+                    accumulate_grad_unbroadcast(&mut grads, b, &grad_b, b_val.shape());
                 }
                 GradOp::Div(a, b) => {
                     let a_val = self.tensors[a].clone();
@@ -1475,8 +1508,8 @@ impl GradGraph {
                     let neg_a = a_val.neg();
                     let grad_b = grad.mul_elem_unchecked(&neg_a.div_elem_unchecked(&b_sq));
 
-                    accumulate_grad(&mut grads, a, &grad_a);
-                    accumulate_grad(&mut grads, b, &grad_b);
+                    accumulate_grad_unbroadcast(&mut grads, a, &grad_a, a_val.shape());
+                    accumulate_grad_unbroadcast(&mut grads, b, &grad_b, b_val.shape());
                 }
                 GradOp::Neg(a) => {
                     let neg_grad = grad.neg();
@@ -2336,49 +2369,25 @@ impl GradGraph {
     }
 
     /// Compute the diagonal of the Hessian of a scalar loss with respect to
-    /// a parameter node. Uses finite differences on the gradient
-    /// (compute grad, perturb, re-compute grad).
+    /// a parameter node. Uses central finite differences on the gradient:
+    /// for each element, perturb the parameter by `±eps`, re-run the forward
+    /// pass for every node that depends on the parameter, run backward, and
+    /// difference the two gradients.
     ///
-    /// Returns a tensor of the same shape as the parameter.
-    pub fn hessian_diag(&mut self, loss_idx: usize, param_idx: usize, eps: f64) -> Tensor {
+    /// Returns a tensor of the same shape as the parameter. The graph's
+    /// forward values and gradients are left exactly as they were on entry.
+    ///
+    /// # Errors
+    /// If a node downstream of the parameter cannot be recomputed by
+    /// [`GradGraph::reforward`] (see there). Nothing is modified in that case.
+    pub fn hessian_diag(&mut self, loss_idx: usize, param_idx: usize, eps: f64) -> Result<Tensor, String> {
         let param_shape = self.tensors[param_idx].shape().to_vec();
         let param_dim: usize = param_shape.iter().product();
-        let original = self.tensors[param_idx].to_vec();
         let mut hess_diag = vec![0.0_f64; param_dim];
-
-        for i in 0..param_dim {
-            // Perturb +eps
-            let mut plus = original.clone();
-            plus[i] += eps;
-            self.tensors[param_idx] =
-                Tensor::from_vec_unchecked(plus, &param_shape);
-            self.zero_grad();
-            self.backward(loss_idx);
-            let grad_plus = self.param_grads[param_idx]
-                .as_ref()
-                .map(|g| g.to_vec()[i])
-                .unwrap_or(0.0);
-
-            // Perturb -eps
-            let mut minus = original.clone();
-            minus[i] -= eps;
-            self.tensors[param_idx] =
-                Tensor::from_vec_unchecked(minus, &param_shape);
-            self.zero_grad();
-            self.backward(loss_idx);
-            let grad_minus = self.param_grads[param_idx]
-                .as_ref()
-                .map(|g| g.to_vec()[i])
-                .unwrap_or(0.0);
-
-            hess_diag[i] = (grad_plus - grad_minus) / (2.0 * eps);
-        }
-
-        // Restore original parameter
-        self.tensors[param_idx] =
-            Tensor::from_vec_unchecked(original, &param_shape);
-
-        Tensor::from_vec_unchecked(hess_diag, &param_shape)
+        self.fd_gradient_sweep(loss_idx, param_idx, eps, |i, grad_plus, grad_minus| {
+            hess_diag[i] = (grad_plus[i] - grad_minus[i]) / (2.0 * eps);
+        })?;
+        Ok(Tensor::from_vec_unchecked(hess_diag, &param_shape))
     }
 
     /// Compute the full Hessian matrix of a scalar loss with respect to a parameter node.
@@ -2388,53 +2397,144 @@ impl GradGraph {
     /// Strategy: For each parameter element i, perturb param[i] by +eps and -eps, re-run
     /// the forward pass to update intermediate node values, then run backward() to get the
     /// gradient vector. The i-th row of the Hessian is (grad_plus - grad_minus) / (2 * eps).
-    /// Uses eps = 1e-5 for accurate central differences.
-    pub fn hessian(&mut self, loss_idx: usize, param_idx: usize) -> Tensor {
+    /// Uses eps = 1e-5 for accurate central differences. The graph's forward values and
+    /// gradients are left exactly as they were on entry.
+    ///
+    /// # Errors
+    /// Same as [`GradGraph::hessian_diag`].
+    pub fn hessian(&mut self, loss_idx: usize, param_idx: usize) -> Result<Tensor, String> {
         let eps = 1e-5;
         let param_shape = self.tensors[param_idx].shape().to_vec();
         let param_dim: usize = param_shape.iter().product();
-        let original = self.tensors[param_idx].to_vec();
         let mut hess_data = vec![0.0_f64; param_dim * param_dim];
-
-        for i in 0..param_dim {
-            // Perturb +eps at index i, re-forward so intermediate nodes are up-to-date
-            let mut plus = original.clone();
-            plus[i] += eps;
-            self.tensors[param_idx] =
-                Tensor::from_vec_unchecked(plus, &param_shape);
-            self.reforward(param_idx + 1, loss_idx);
-            self.zero_grad();
-            self.backward(loss_idx);
-            let grad_plus: Vec<f64> = self.param_grads[param_idx]
-                .as_ref()
-                .map(|g| g.to_vec())
-                .unwrap_or_else(|| vec![0.0; param_dim]);
-
-            // Perturb -eps at index i, re-forward
-            let mut minus = original.clone();
-            minus[i] -= eps;
-            self.tensors[param_idx] =
-                Tensor::from_vec_unchecked(minus, &param_shape);
-            self.reforward(param_idx + 1, loss_idx);
-            self.zero_grad();
-            self.backward(loss_idx);
-            let grad_minus: Vec<f64> = self.param_grads[param_idx]
-                .as_ref()
-                .map(|g| g.to_vec())
-                .unwrap_or_else(|| vec![0.0; param_dim]);
-
+        self.fd_gradient_sweep(loss_idx, param_idx, eps, |i, grad_plus, grad_minus| {
             // Row i of the Hessian: (grad_plus[j] - grad_minus[j]) / (2 * eps) for each j
             for j in 0..param_dim {
                 hess_data[i * param_dim + j] = (grad_plus[j] - grad_minus[j]) / (2.0 * eps);
             }
+        })?;
+        Ok(Tensor::from_vec_unchecked(hess_data, &[param_dim, param_dim]))
+    }
+
+    /// Shared driver for the finite-difference second-derivative methods.
+    ///
+    /// For each element `i` of the parameter, sets `param[i] ± eps`, re-runs
+    /// the forward pass for exactly the nodes in `param_idx+1..=loss_idx`
+    /// that depend on the parameter, runs `backward(loss_idx)`, and hands the
+    /// parameter's two gradient vectors to `sink(i, grad_plus, grad_minus)`.
+    ///
+    /// Every node is checked for recomputability *before* anything is
+    /// mutated, and on exit the parameter, all re-forwarded node tensors, and
+    /// all parameter gradients are restored to their entry values.
+    fn fd_gradient_sweep(
+        &mut self,
+        loss_idx: usize,
+        param_idx: usize,
+        eps: f64,
+        mut sink: impl FnMut(usize, &[f64], &[f64]),
+    ) -> Result<(), String> {
+        let param_shape = self.tensors[param_idx].shape().to_vec();
+        let param_dim: usize = param_shape.iter().product();
+        let original = self.tensors[param_idx].clone();
+        let original_data = original.to_vec();
+
+        let dirty = self.dependents_of(param_idx, loss_idx);
+        for node_i in (param_idx + 1)..=loss_idx {
+            if dirty[node_i] {
+                self.check_recomputable(node_i)?;
+            }
+        }
+        let saved_tensors: Vec<(usize, Tensor)> = ((param_idx + 1)..=loss_idx)
+            .filter(|&k| dirty[k])
+            .map(|k| (k, self.tensors[k].clone()))
+            .collect();
+        let saved_grads = self.param_grads.clone();
+
+        let mut result = Ok(());
+        'elements: for i in 0..param_dim {
+            let mut grads_pm: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
+            for (slot, delta) in [eps, -eps].into_iter().enumerate() {
+                let mut perturbed = original_data.clone();
+                perturbed[i] += delta;
+                self.tensors[param_idx] = Tensor::from_vec_unchecked(perturbed, &param_shape);
+                if let Err(e) = self.reforward_masked(param_idx + 1, loss_idx, Some(&dirty)) {
+                    result = Err(e);
+                    break 'elements;
+                }
+                self.zero_grad();
+                self.backward(loss_idx);
+                grads_pm[slot] = self.param_grads[param_idx]
+                    .as_ref()
+                    .map(|g| g.to_vec())
+                    .unwrap_or_else(|| vec![0.0; param_dim]);
+            }
+            sink(i, &grads_pm[0], &grads_pm[1]);
         }
 
-        // Restore original parameter and re-forward to clean state
-        self.tensors[param_idx] =
-            Tensor::from_vec_unchecked(original, &param_shape);
-        self.reforward(param_idx + 1, loss_idx);
+        // Restore the entry state exactly (no recomputation needed).
+        self.tensors[param_idx] = original;
+        for (k, t) in saved_tensors {
+            self.tensors[k] = t;
+        }
+        self.param_grads = saved_grads;
+        result
+    }
 
-        Tensor::from_vec_unchecked(hess_data, &[param_dim, param_dim])
+    /// Direct operand indices of node `i`, in the same order as
+    /// `mark_children_reachable`.
+    fn op_inputs(&self, i: usize) -> Vec<usize> {
+        match &self.ops[i] {
+            GradOp::Input | GradOp::Parameter => vec![],
+            GradOp::Add(a, b) | GradOp::Sub(a, b) | GradOp::Mul(a, b)
+            | GradOp::Div(a, b) | GradOp::MatMul(a, b) => vec![*a, *b],
+            GradOp::Neg(a) | GradOp::Sum(a) | GradOp::Mean(a)
+            | GradOp::Exp(a) | GradOp::Ln(a) | GradOp::Sin(a)
+            | GradOp::Cos(a) | GradOp::Sqrt(a) | GradOp::Sigmoid(a)
+            | GradOp::Relu(a) | GradOp::TanhAct(a) | GradOp::Abs(a)
+            | GradOp::Log2(a) | GradOp::Softmax(a) | GradOp::LayerNorm(a)
+            | GradOp::BatchNorm(a) | GradOp::TransposeOp(a)
+            | GradOp::Gelu(a) | GradOp::Silu(a) | GradOp::Elu(a)
+            | GradOp::Selu(a) | GradOp::ScalarMul(a, _) | GradOp::Pow(a, _) => vec![*a],
+            GradOp::CrossEntropy { logits, targets } => vec![*logits, *targets],
+            GradOp::Clamp { input, .. } | GradOp::Reshape { input, .. }
+            | GradOp::GatherOp { input, .. } => vec![*input],
+            GradOp::Where { cond, on_true, on_false } => vec![*cond, *on_true, *on_false],
+            GradOp::CatOp { inputs, .. } => inputs.clone(),
+            GradOp::StructField { parent, .. } => vec![*parent],
+            GradOp::MapLookup { map_node, .. } => vec![*map_node],
+            GradOp::MlpLayer { input, weight, bias, .. } => vec![*input, *weight, *bias],
+            GradOp::MlpLayerMatMul { input, w1, b1, w2, .. } => vec![*input, *w1, *b1, *w2],
+        }
+    }
+
+    /// `dirty[k]` is true iff node `k` (for `k` in `src..=end`) is `src` or
+    /// transitively depends on it. Nodes only reference earlier nodes, so one
+    /// forward scan suffices.
+    fn dependents_of(&self, src: usize, end: usize) -> Vec<bool> {
+        let len = end.max(src) + 1;
+        let mut dirty = vec![false; len];
+        dirty[src] = true;
+        for k in (src + 1)..len {
+            dirty[k] = self.op_inputs(k).iter().any(|&c| c < len && dirty[c]);
+        }
+        dirty
+    }
+
+    /// `Err` if `reforward` has no rule to recompute node `node_i`.
+    ///
+    /// `StructField` and `MapLookup` nodes carry a tensor supplied from
+    /// outside the graph (via `push_node`); the graph does not know how to
+    /// derive it from the parent, so it cannot be recomputed.
+    fn check_recomputable(&self, node_i: usize) -> Result<(), String> {
+        let name = match &self.ops[node_i] {
+            GradOp::StructField { .. } => "StructField",
+            GradOp::MapLookup { .. } => "MapLookup",
+            _ => return Ok(()),
+        };
+        Err(format!(
+            "reforward: cannot recompute node {node_i} ({name}): its value is supplied \
+             from outside the graph, so it would keep a stale forward value"
+        ))
     }
 
     /// Re-run the forward pass for all nodes from `start` up to and including `end`.
@@ -2444,8 +2544,28 @@ impl GradGraph {
     /// Recompute forward-pass tensors for nodes `start..=end`, skipping
     /// `Input` and `Parameter` nodes (whose tensors are assumed up-to-date).
     /// Call `set_tensor()` on any parameters that changed before calling this.
-    pub fn reforward(&mut self, start: usize, end: usize) {
+    ///
+    /// # Errors
+    /// If any node in the range cannot be recomputed (`StructField`,
+    /// `MapLookup`). The range is checked before any tensor is written, so on
+    /// error the graph is unchanged.
+    pub fn reforward(&mut self, start: usize, end: usize) -> Result<(), String> {
+        self.reforward_masked(start, end, None)
+    }
+
+    /// [`GradGraph::reforward`], optionally restricted to the nodes whose
+    /// `mask` entry is true.
+    fn reforward_masked(&mut self, start: usize, end: usize, mask: Option<&[bool]>) -> Result<(), String> {
+        let selected = |k: usize| mask.map_or(true, |m| m[k]);
         for node_i in start..=end {
+            if selected(node_i) {
+                self.check_recomputable(node_i)?;
+            }
+        }
+        for node_i in start..=end {
+            if !selected(node_i) {
+                continue;
+            }
             let op = self.ops[node_i].clone();
             let new_tensor = match &op {
                 GradOp::Input | GradOp::Parameter => continue,
@@ -2687,12 +2807,38 @@ impl GradGraph {
                     };
                     h.matmul_unchecked(w2_t)
                 }
-                // For complex ops (softmax, layernorm, etc.), keep existing tensor.
-                // These are not typically used in simple Hessian computations.
-                _ => self.tensors[node_i].clone(),
+                GradOp::Log2(a) => {
+                    let data = self.tensors[*a].to_vec();
+                    let shape = self.tensors[*a].shape().to_vec();
+                    Tensor::from_vec_unchecked(data.iter().map(|&x| x.det_log2()).collect(), &shape)
+                }
+                GradOp::Softmax(a) => Self::softmax_forward(&self.tensors[*a]),
+                GradOp::CrossEntropy { logits, targets } => {
+                    Self::cross_entropy_forward(&self.tensors[*logits], &self.tensors[*targets])
+                }
+                GradOp::LayerNorm(a) => Self::layer_norm_forward(&self.tensors[*a]),
+                GradOp::BatchNorm(a) => Self::batch_norm_forward(&self.tensors[*a]),
+                GradOp::Where { cond, on_true, on_false } => Self::where_forward(
+                    &self.tensors[*cond],
+                    &self.tensors[*on_true],
+                    &self.tensors[*on_false],
+                ),
+                GradOp::CatOp { inputs, axis, sizes } => {
+                    let ts: Vec<Tensor> = inputs.iter().map(|&k| self.tensors[k].clone()).collect();
+                    Self::cat_forward(&ts, *axis, sizes)
+                }
+                GradOp::GatherOp { input, indices, axis } => {
+                    Self::gather_forward(&self.tensors[*input], indices, *axis)
+                }
+                // Rejected by check_recomputable above; never silently keep
+                // a stale value.
+                GradOp::StructField { .. } | GradOp::MapLookup { .. } => {
+                    return Err(self.check_recomputable(node_i).unwrap_err());
+                }
             };
             self.tensors[node_i] = new_tensor;
         }
+        Ok(())
     }
 
     /// Compute the second derivative of a scalar loss with respect to a parameter node.
@@ -2703,49 +2849,12 @@ impl GradGraph {
     /// exact second derivative d²loss/dparam².
     ///
     /// Returns a tensor of the same shape as the parameter containing second derivatives.
-    pub fn double_backward(&mut self, loss_idx: usize, param_idx: usize) -> Tensor {
-        let eps = 1e-5;
-        let param_shape = self.tensors[param_idx].shape().to_vec();
-        let param_dim: usize = param_shape.iter().product();
-        let original = self.tensors[param_idx].to_vec();
-        let mut diag = vec![0.0_f64; param_dim];
-
-        for i in 0..param_dim {
-            // Perturb +eps, re-forward, backward
-            let mut plus = original.clone();
-            plus[i] += eps;
-            self.tensors[param_idx] =
-                Tensor::from_vec_unchecked(plus, &param_shape);
-            self.reforward(param_idx + 1, loss_idx);
-            self.zero_grad();
-            self.backward(loss_idx);
-            let grad_plus = self.param_grads[param_idx]
-                .as_ref()
-                .map(|g| g.to_vec()[i])
-                .unwrap_or(0.0);
-
-            // Perturb -eps, re-forward, backward
-            let mut minus = original.clone();
-            minus[i] -= eps;
-            self.tensors[param_idx] =
-                Tensor::from_vec_unchecked(minus, &param_shape);
-            self.reforward(param_idx + 1, loss_idx);
-            self.zero_grad();
-            self.backward(loss_idx);
-            let grad_minus = self.param_grads[param_idx]
-                .as_ref()
-                .map(|g| g.to_vec()[i])
-                .unwrap_or(0.0);
-
-            diag[i] = (grad_plus - grad_minus) / (2.0 * eps);
-        }
-
-        // Restore original parameter and re-forward to clean state
-        self.tensors[param_idx] =
-            Tensor::from_vec_unchecked(original, &param_shape);
-        self.reforward(param_idx + 1, loss_idx);
-
-        Tensor::from_vec_unchecked(diag, &param_shape)
+    /// The graph's forward values and gradients are left exactly as they were on entry.
+    ///
+    /// # Errors
+    /// Same as [`GradGraph::hessian_diag`].
+    pub fn double_backward(&mut self, loss_idx: usize, param_idx: usize) -> Result<Tensor, String> {
+        self.hessian_diag(loss_idx, param_idx, 1e-5)
     }
 
     /// Vectorized map (batched evaluation) over a batch dimension.
@@ -2996,19 +3105,21 @@ impl GradGraph {
             let node_tensor = self.tensors[i].clone();
             match &op {
                 GradOp::Input | GradOp::Parameter => {}
+                // Broadcast operands: reduce to each operand's shape
+                // (same rule as backward()).
                 GradOp::Add(a, b) => {
-                    accumulate_grad(&mut grads, *a, &grad);
-                    accumulate_grad(&mut grads, *b, &grad);
+                    accumulate_grad_unbroadcast(&mut grads, *a, &grad, self.tensors[*a].shape());
+                    accumulate_grad_unbroadcast(&mut grads, *b, &grad, self.tensors[*b].shape());
                 }
                 GradOp::Sub(a, b) => {
-                    accumulate_grad(&mut grads, *a, &grad);
-                    accumulate_grad(&mut grads, *b, &grad.neg());
+                    accumulate_grad_unbroadcast(&mut grads, *a, &grad, self.tensors[*a].shape());
+                    accumulate_grad_unbroadcast(&mut grads, *b, &grad.neg(), self.tensors[*b].shape());
                 }
                 GradOp::Mul(a, b) => {
                     let a_val = self.tensors[*a].clone();
                     let b_val = self.tensors[*b].clone();
-                    accumulate_grad(&mut grads, *a, &grad.mul_elem_unchecked(&b_val));
-                    accumulate_grad(&mut grads, *b, &grad.mul_elem_unchecked(&a_val));
+                    accumulate_grad_unbroadcast(&mut grads, *a, &grad.mul_elem_unchecked(&b_val), a_val.shape());
+                    accumulate_grad_unbroadcast(&mut grads, *b, &grad.mul_elem_unchecked(&a_val), b_val.shape());
                 }
                 GradOp::Div(a, b) => {
                     let a_val = self.tensors[*a].clone();
@@ -3018,8 +3129,8 @@ impl GradGraph {
                         &b_val.mul_elem_unchecked(&b_val),
                     );
                     let grad_b = grad.mul_elem_unchecked(&neg_a_over_b2);
-                    accumulate_grad(&mut grads, *a, &grad_a);
-                    accumulate_grad(&mut grads, *b, &grad_b);
+                    accumulate_grad_unbroadcast(&mut grads, *a, &grad_a, a_val.shape());
+                    accumulate_grad_unbroadcast(&mut grads, *b, &grad_b, b_val.shape());
                 }
                 GradOp::Neg(a) => {
                     accumulate_grad(&mut grads, *a, &grad.neg());
@@ -3664,6 +3775,92 @@ fn accumulate_grad(grads: &mut [Option<Tensor>], idx: usize, grad: &Tensor) {
             *slot = Some(grad.clone());
         }
     }
+}
+
+/// [`accumulate_grad`] for an operand of a broadcasting op: when `grad` has
+/// the (larger) broadcast output shape, it is first reduced to
+/// `target_shape` with [`unbroadcast`]. The same-shape case is passed
+/// through untouched, so non-broadcast graphs are bit-identical to before.
+fn accumulate_grad_unbroadcast(
+    grads: &mut [Option<Tensor>],
+    idx: usize,
+    grad: &Tensor,
+    target_shape: &[usize],
+) {
+    if grad.shape() == target_shape {
+        accumulate_grad(grads, idx, grad);
+    } else {
+        accumulate_grad(grads, idx, &unbroadcast(grad, target_shape));
+    }
+}
+
+/// Reduce a gradient computed at a broadcast output shape back to the shape
+/// of the operand that was broadcast (NumPy rules; the adjoint of
+/// `Tensor::broadcast_to`).
+///
+/// Sums over (a) the leading axes the operand did not have and (b) every
+/// axis where the operand had size 1 but the gradient does not. Each output
+/// element accumulates its contributions in increasing row-major order of
+/// the gradient with a Kahan-compensated accumulator, so the result is
+/// deterministic and independent of thread count.
+///
+/// A gradient whose rank is *smaller* than `target_shape` is treated as
+/// left-padded with size-1 axes (e.g. `[3]` into `[1, 3]` is a pure reshape).
+///
+/// # Panics
+/// If `target_shape` does not broadcast to `grad`'s shape.
+pub fn unbroadcast(grad: &Tensor, target_shape: &[usize]) -> Tensor {
+    use cjc_repro::KahanAccumulatorF64;
+
+    let gshape = grad.shape();
+    if gshape == target_shape {
+        return grad.clone();
+    }
+    let nd = gshape.len().max(target_shape.len());
+    let pad_dims = |s: &[usize]| -> Vec<usize> {
+        let mut v = vec![1usize; nd - s.len()];
+        v.extend_from_slice(s);
+        v
+    };
+    let gdims = pad_dims(gshape);
+    let tdims = pad_dims(target_shape);
+    for d in 0..nd {
+        assert!(
+            tdims[d] == gdims[d] || tdims[d] == 1,
+            "unbroadcast: gradient shape {:?} is not a broadcast of {:?}",
+            gshape,
+            target_shape
+        );
+    }
+    // Row-major strides of the target, with stride 0 on reduced axes.
+    let mut tstrides = vec![0usize; nd];
+    let mut stride = 1usize;
+    for d in (0..nd).rev() {
+        if tdims[d] == gdims[d] {
+            tstrides[d] = stride;
+        }
+        stride *= tdims[d];
+    }
+    let out_len: usize = target_shape.iter().product();
+    let mut accs: Vec<KahanAccumulatorF64> =
+        (0..out_len).map(|_| KahanAccumulatorF64::new()).collect();
+    let data = grad.to_vec();
+    let mut index = vec![0usize; nd];
+    for &v in &data {
+        let mut o = 0usize;
+        for d in 0..nd {
+            o += index[d] * tstrides[d];
+        }
+        accs[o].add(v);
+        for d in (0..nd).rev() {
+            index[d] += 1;
+            if index[d] < gdims[d] {
+                break;
+            }
+            index[d] = 0;
+        }
+    }
+    Tensor::from_vec_unchecked(accs.into_iter().map(|a| a.finalize()).collect(), target_shape)
 }
 
 // Close the impl block — backward_with_seed, jacobian, hessian_diag are all inside impl GradGraph
@@ -4498,7 +4695,7 @@ mod tests {
         let x2 = g.mul(x, x);
         let x3 = g.mul(x2, x);
         let loss = g.sum(x3);
-        let hess = g.double_backward(loss, x);
+        let hess = g.double_backward(loss, x).unwrap();
         // f''(2) = 6*2 = 12
         assert!((hess.to_vec()[0] - 12.0).abs() < 1e-4);
     }
@@ -4511,7 +4708,7 @@ mod tests {
         let p = g.parameter(Tensor::from_vec_unchecked(vec![1.0, 1.0], &[2]));
         let p2 = g.mul(p, p); // [x^2, y^2]
         let s = g.sum(p2); // x^2 + y^2
-        let hess = g.hessian(s, p);
+        let hess = g.hessian(s, p).unwrap();
         let h = hess.to_vec();
         assert!((h[0] - 2.0).abs() < 1e-3); // d2f/dx2 = 2
         assert!((h[1] - 0.0).abs() < 1e-3); // d2f/dxdy = 0
@@ -4545,10 +4742,10 @@ mod tests {
         let p = g.parameter(Tensor::from_vec_unchecked(vec![3.0, 4.0], &[2]));
         let p2 = g.mul(p, p);
         let s = g.sum(p2);
-        let h1 = g.hessian(s, p);
+        let h1 = g.hessian(s, p).unwrap();
         // Reset and redo
         g.set_tensor(p, Tensor::from_vec_unchecked(vec![3.0, 4.0], &[2]));
-        let h2 = g.hessian(s, p);
+        let h2 = g.hessian(s, p).unwrap();
         assert_eq!(h1.to_vec(), h2.to_vec(), "Hessian must be deterministic");
     }
 }

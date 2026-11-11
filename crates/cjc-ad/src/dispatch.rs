@@ -580,7 +580,8 @@ pub fn dispatch_grad_graph(name: &str, args: &[Value]) -> Result<Option<Value>, 
                     "grad_graph_reforward: start ({start}) must be ≤ end ({end})"
                 ));
             }
-            with_ambient(|g| g.reforward(start.index(), end.index()));
+            with_ambient(|g| g.reforward(start.index(), end.index()))
+                .map_err(|e| format!("grad_graph_reforward: {e}"))?;
             Value::Void
         }
 

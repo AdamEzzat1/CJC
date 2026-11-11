@@ -4235,7 +4235,7 @@ impl Interpreter {
                         } else { 1e-5 };
                         let mut borrow = inner.borrow_mut();
                         let graph = borrow.downcast_mut::<cjc_ad::GradGraph>().ok_or_else(|| EvalError::Runtime("expected GradGraph object".into()))?;
-                        let hd = graph.hessian_diag(loss_idx, param_idx, eps);
+                        let hd = graph.hessian_diag(loss_idx, param_idx, eps).map_err(|e| EvalError::Runtime(format!("hessian_diag: {e}")))?;
                         Ok(Value::Tensor(hd))
                     }
                     _ => Err(EvalError::Runtime(format!("no method `{method}` on GradGraph"))),

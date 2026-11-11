@@ -5685,7 +5685,9 @@ impl MirExecutor {
                     let graph = borrow
                         .downcast_mut::<cjc_ad::GradGraph>()
                         .ok_or_else(|| MirExecError::Runtime("expected GradGraph object".into()))?;
-                    let hd = graph.hessian_diag(loss_idx, param_idx, eps);
+                    let hd = graph
+                        .hessian_diag(loss_idx, param_idx, eps)
+                        .map_err(|e| MirExecError::Runtime(format!("hessian_diag: {e}")))?;
                     Ok(Value::Tensor(hd))
                 }
                 _ => Err(MirExecError::Runtime(format!(
