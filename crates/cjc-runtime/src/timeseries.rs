@@ -508,10 +508,13 @@ mod tests {
             .map(|i| (2.0 * std::f64::consts::PI * i as f64 / 20.0).sin())
             .collect();
         let result = acf(&data, 25);
-        // ACF at lag 20 should be close to 1.0 (same phase)
+        // ACF at lag 20: 9 of the 10 periods overlap, so the exact value is
+        // 90/100 = 0.9 (checked with exact rational arithmetic on these f64
+        // inputs). The old `> 0.9` only passed because the summation rounded
+        // up; the correctly rounded order-invariant sum lands on 0.9 itself.
         assert!(
-            result[20] > 0.9,
-            "ACF at lag=period should be high, got {}",
+            (result[20] - 0.9).abs() < 1e-12,
+            "ACF at lag=period should be 0.9, got {}",
             result[20]
         );
         // ACF at lag 10 should be close to -1.0 (half period)

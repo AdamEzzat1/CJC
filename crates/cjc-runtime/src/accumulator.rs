@@ -2,65 +2,117 @@
 //!
 //! # Determinism Contract
 //!
-//! This module provides a superaccumulator strategy that guarantees **bit-identical**
-//! results regardless of:
+//! [`BinnedAccumulatorF64`] returns the **exact** real sum of its finite
+//! inputs, rounded **once** to the nearest f64 (ties to even).  Its result is
+//! therefore a function of the *multiset* of inputs only, and is bit-identical
+//! regardless of:
 //! - Addition order (commutative + associative within the accumulator)
 //! - Thread count
 //! - Chunk size
-//! - Scheduling order
-//! - CPU core topology
+//! - Merge order / merge-tree shape
+//! - Scheduling order and CPU core topology
 //!
-//! # Architecture
+//! # Architecture (f64): fixed-point superaccumulator
 //!
-//! The accumulator uses **exponent binning** — each IEEE-754 f64 value is classified
-//! by its biased exponent and accumulated into the corresponding bin. Within each bin,
-//! values share similar magnitudes, preventing catastrophic cancellation. The bins are
-//! then reduced in a deterministic order (lowest exponent first) using compensated
-//! summation for the final fold.
+//! (Kulisch-style long accumulator with deferred carries, as in ExBLAS /
+//! Demmel–Nguyen; the type keeps its historical "Binned" name for API
+//! stability.)
+//!
+//! Every finite f64 is an integer multiple of 2^-1074 (the smallest
+//! subnormal): `x = M · 2^-1074` with `M` a signed integer, `|M| < 2^2098`.
+//! The accumulator stores one signed integer
+//!
+//! ```text
+//!     S = Σ_k limbs[k] · 2^(32·k),   k = 0..F64_LIMBS
+//! ```
+//!
+//! in 68 `i64` limbs of radix 2^32 (2176 bits: 2098 for the f64 range plus 64
+//! bits of headroom for up to 2^64 summands, plus the sign carried by the
+//! signed top limb).
+//!
+//! - `add(x)` splits `M`'s 53-bit significand into three 32-bit digits at
+//!   the right offset and adds (or subtracts) them to three limbs.  This is
+//!   integer arithmetic: exact, no rounding.
+//! - Carries are **deferred**: each `add` changes any limb by less than
+//!   2^32, so after `p` un-normalised contributions `|limb| < (p+1)·2^32`.
+//!   `pending` counts them and carry propagation (`normalize`) runs before
+//!   `p` can reach 2^30, so no `i64` limb can overflow (2^30·2^32 ≪ 2^63).
+//!   `normalize` moves `floor(limb / 2^32)` into the next limb, which leaves
+//!   `S` unchanged exactly.
+//! - `merge(other)` adds `other`'s limbs element-wise: `S ← S + S_other`,
+//!   again exact integer addition (normalising first if the pending bound
+//!   would be exceeded).
+//! - `finalize()` copies the limbs, normalises to the canonical form
+//!   (limbs `0..N-1` in `[0, 2^32)`, signed top limb — unique for a given
+//!   `S`), takes sign and magnitude, and rounds `|S| · 2^-1074` to the
+//!   nearest f64 with round / sticky bits, ties to even.
+//!
+//! **Why this is order-invariant.**  After any sequence of `add`/`merge`/
+//! `normalize` calls over a multiset `X` of finite inputs, the represented
+//! integer is exactly `S = Σ_{x∈X} M(x)`: every step is an exact integer
+//! addition (no limb overflows, by the `pending` bound), and integer addition
+//! is commutative and associative.  `finalize` is a pure function of `S`
+//! (via its unique canonical form) and of the special-value flags (an OR and
+//! two counts, also commutative and associative).  Hence the result depends
+//! only on the multiset — not on order, chunking or merge tree — and it is the
+//! correctly rounded exact sum.  (Contrast the previous design, plain IEEE
+//! `+=` inside each exponent bin: that rounds, so `fl(fl(a+b)+c) ≠
+//! fl(fl(c+b)+a)` in general — bug P5.)
 //!
 //! # Memory Rules
 //!
 //! - **Stack-allocated only.** No `Vec`, `Box`, or heap allocation.
-//! - **Fixed-size.** Bin count is a compile-time constant.
-//! - **Merge is allocation-free.** Two accumulators merge via element-wise addition.
+//! - **Fixed-size.** 68 limbs (544 bytes) for f64.
+//! - **Merge is allocation-free.**
 //!
-//! # IEEE-754 Special Value Policy
+//! # IEEE-754 Special Value Policy (f64)
 //!
-//! | Value       | Policy                                           |
-//! |-------------|--------------------------------------------------|
-//! | NaN         | Canonical NaN (positive, quiet). Any NaN input    |
-//! |             | sets the `has_nan` flag; result is canonical NaN. |
-//! | +Inf / -Inf | Tracked separately. +Inf + -Inf = NaN.           |
-//! | ±0.0        | Treated as exponent-bin 0. +0.0 and -0.0 both    |
-//! |             | accumulate into the zero bin normally.            |
-//! | Subnormals  | **Not flushed.** Accumulated into bin 0 (the     |
-//! |             | sub-normal/zero exponent bin). No FTZ applied.    |
+//! | Inputs                        | Result                                   |
+//! |-------------------------------|------------------------------------------|
+//! | any NaN                       | NaN (`f64::NAN`)                         |
+//! | +Inf and -Inf (no NaN)        | NaN (indeterminate)                      |
+//! | +Inf only (no NaN)            | +Inf (finite inputs ignored)             |
+//! | -Inf only (no NaN)            | -Inf (finite inputs ignored)             |
+//! | finite only, exact sum == 0   | +0.0 (also `[-0.0]`, `[-0.0, -0.0]`, empty) |
+//! | finite only, otherwise        | exact sum rounded to nearest, ties-to-even |
+//! | exact sum ≥ 2^1024 − 2^970    | ±Inf (IEEE round-to-nearest overflow)    |
+//!
+//! Overflow is decided on the **exact** sum, so an intermediate overflow that
+//! cancels (`[MAX, MAX, -MAX]`) yields `MAX` in every order.  Subnormals are
+//! never flushed.  This matches the previous policy except that the previous
+//! code returned `Inf`/`NaN` for such cancelling overflows depending on order.
 //!
 //! # Platform Control
 //!
-//! - **FMA:** Not used. All multiplications and additions are separate operations.
-//!   The accumulator only performs additions, so FMA is not relevant.
-//! - **FTZ/DAZ:** Not enabled. Subnormals are preserved and binned normally.
-//! - **SIMD:** No SIMD intrinsics used. The compiler may auto-vectorize the bin
-//!   accumulation loop, but the binning step prevents reassociation across bins.
-//! - **Rounding mode:** IEEE-754 round-to-nearest-ties-to-even (default).
+//! - **FMA / SIMD / rounding mode:** irrelevant to the f64 path — it uses only
+//!   integer arithmetic plus bit manipulation of the IEEE encoding.
+//! - **FTZ/DAZ:** Not enabled. Subnormals are preserved.
 //!
 //! # Supported Types
 //!
-//! - `f64`: 2048 bins (one per biased exponent, 0..=2047, 11-bit exponent field).
-//! - `f32`: 256 bins (one per biased exponent, 0..=255, 8-bit exponent field).
+//! - `f64`: exact fixed-point superaccumulator (above).
+//! - `f32`: 256 exponent bins accumulated in f64 (see [`BinnedAccumulatorF32`]).
 
 use cjc_repro::dmath::DetMath;
 // ---------------------------------------------------------------------------
-// f64 BinnedAccumulator
+// f64 BinnedAccumulator (exact fixed-point superaccumulator)
 // ---------------------------------------------------------------------------
 
-/// Number of exponent bins for f64 (2^11 = 2048 distinct biased exponents).
-const F64_BIN_COUNT: usize = 2048;
+/// Number of 32-bit-radix limbs. Bit `b` of the fixed-point integer has
+/// weight `2^(b - 1074)`; 68 × 32 = 2176 bits ≥ 2098 (f64 range) + 64
+/// (headroom for 2^64 summands) + sign.
+const F64_LIMBS: usize = 68;
 
-/// Deterministic superaccumulator for f64.
+/// Carry propagation must run before this many un-normalised contributions
+/// accumulate in any limb (each contributes < 2^32; i64 holds < 2^63).
+const F64_PENDING_LIMIT: u32 = 1 << 30;
+
+const F64_FRAC_MASK: u64 = (1u64 << 52) - 1;
+
+/// Deterministic, exact superaccumulator for f64.
 ///
 /// Stack-allocated, fixed-size. No heap allocation on any path.
+/// See the module docs for the order-invariance argument.
 ///
 /// # Usage
 ///
@@ -73,17 +125,11 @@ const F64_BIN_COUNT: usize = 2048;
 /// ```
 #[derive(Clone)]
 pub struct BinnedAccumulatorF64 {
-    /// One bin per biased exponent. Index = biased exponent (0..2047).
-    /// Bin 0 holds subnormals and ±0.0.
-    /// Within each bin, values have similar magnitudes, so naive addition
-    /// is well-conditioned (commutative by IEEE-754: a + b == b + a).
-    bins: [f64; F64_BIN_COUNT],
-    /// Compensation terms per bin, capturing rounding errors from merge operations.
-    /// Updated via two-sum (Knuth's error-free transformation) during merge to
-    /// ensure merge associativity: `(a.merge(b)).merge(c) == a.merge(b.merge(c))`.
-    comp: [f64; F64_BIN_COUNT],
-    /// Count of values added to each bin (for diagnostics and skip optimization).
-    counts: [u32; F64_BIN_COUNT],
+    /// Fixed-point integer `S = Σ limbs[k]·2^(32k)` in units of 2^-1074.
+    /// Between normalisations limbs may be any i64 within the pending bound.
+    limbs: [i64; F64_LIMBS],
+    /// Contributions added to the limbs since the last carry propagation.
+    pending: u32,
     /// Positive infinity count.
     pos_inf_count: u32,
     /// Negative infinity count.
@@ -94,14 +140,51 @@ pub struct BinnedAccumulatorF64 {
     total_count: u64,
 }
 
+/// Propagate carries so limbs `0..N-1` lie in `[0, 2^32)`; the top limb keeps
+/// the (signed) remainder. Preserves `Σ limbs[k]·2^(32k)` exactly.
+#[inline]
+fn f64_normalize_limbs(limbs: &mut [i64; F64_LIMBS]) {
+    for k in 0..F64_LIMBS - 1 {
+        let carry = limbs[k] >> 32; // arithmetic shift = floor(limb / 2^32)
+        limbs[k] -= carry << 32;
+        limbs[k + 1] += carry;
+    }
+}
+
+/// Bits `[lo, lo + n)` (n ≤ 53) of a canonical non-negative limb array.
+#[inline]
+fn f64_extract_bits(limbs: &[i64; F64_LIMBS], lo: usize, n: u32) -> u64 {
+    let idx = lo / 32;
+    let off = (lo % 32) as u32;
+    let get = |i: usize| -> u128 {
+        if i < F64_LIMBS {
+            limbs[i] as u64 as u128
+        } else {
+            0
+        }
+    };
+    let w = get(idx) | (get(idx + 1) << 32) | (get(idx + 2) << 64);
+    ((w >> off) as u64) & ((1u64 << n) - 1)
+}
+
+/// Whether any bit strictly below position `pos` is set (canonical limbs).
+#[inline]
+fn f64_any_below(limbs: &[i64; F64_LIMBS], pos: usize) -> bool {
+    let idx = pos / 32;
+    let off = (pos % 32) as u32;
+    if limbs[..idx].iter().any(|&l| l != 0) {
+        return true;
+    }
+    off > 0 && (limbs[idx] as u64 & ((1u64 << off) - 1)) != 0
+}
+
 impl BinnedAccumulatorF64 {
-    /// Create a new, empty accumulator. All bins zeroed.
+    /// Create a new, empty accumulator.
     #[inline]
     pub fn new() -> Self {
         BinnedAccumulatorF64 {
-            bins: [0.0; F64_BIN_COUNT],
-            comp: [0.0; F64_BIN_COUNT],
-            counts: [0; F64_BIN_COUNT],
+            limbs: [0; F64_LIMBS],
+            pending: 0,
             pos_inf_count: 0,
             neg_inf_count: 0,
             has_nan: false,
@@ -109,22 +192,25 @@ impl BinnedAccumulatorF64 {
         }
     }
 
-    /// Add a single f64 value to the accumulator.
+    /// Add a single f64 value to the accumulator (exactly).
     ///
     /// Special values are handled according to the policy:
-    /// - NaN: sets `has_nan` flag, value is not binned.
-    /// - ±Inf: tracked separately, not binned.
-    /// - Subnormals and ±0.0: binned into exponent 0.
+    /// - NaN: sets `has_nan` flag, value is not accumulated.
+    /// - ±Inf: counted separately, not accumulated.
+    /// - ±0.0: contributes nothing.
+    /// - Subnormals: accumulated exactly (no flush).
     #[inline]
     pub fn add(&mut self, value: f64) {
         self.total_count += 1;
 
-        if value.is_nan() {
-            self.has_nan = true;
-            return;
-        }
-        if value.is_infinite() {
-            if value > 0.0 {
+        let bits = value.to_bits();
+        let biased_exp = ((bits >> 52) & 0x7FF) as u32;
+        let frac = bits & F64_FRAC_MASK;
+
+        if biased_exp == 0x7FF {
+            if frac != 0 {
+                self.has_nan = true;
+            } else if bits >> 63 == 0 {
                 self.pos_inf_count += 1;
             } else {
                 self.neg_inf_count += 1;
@@ -132,16 +218,35 @@ impl BinnedAccumulatorF64 {
             return;
         }
 
-        // Extract biased exponent from IEEE-754 bits.
-        let bits = value.to_bits();
-        let biased_exp = ((bits >> 52) & 0x7FF) as usize;
+        // |value| = mant · 2^(pos - 1074).
+        let (mant, pos) = if biased_exp == 0 {
+            (frac, 0u32)
+        } else {
+            (frac | (1u64 << 52), biased_exp - 1)
+        };
+        if mant == 0 {
+            return; // ±0.0
+        }
 
-        // Simple addition within the bin. Values in the same exponent bin
-        // have similar magnitudes, so naive addition is well-conditioned
-        // (relative error bounded by ε per addition, not nε).
-        // This makes the accumulation order-invariant: a + b = b + a in IEEE-754.
-        self.bins[biased_exp] += value;
-        self.counts[biased_exp] += 1;
+        let k = (pos >> 5) as usize; // pos ≤ 2045 → k ≤ 63, k + 2 ≤ 65
+        let w = (mant as u128) << (pos & 31); // < 2^84
+        let d0 = (w as u64 & 0xFFFF_FFFF) as i64;
+        let d1 = ((w >> 32) as u64 & 0xFFFF_FFFF) as i64;
+        let d2 = (w >> 64) as i64;
+        if bits >> 63 == 0 {
+            self.limbs[k] += d0;
+            self.limbs[k + 1] += d1;
+            self.limbs[k + 2] += d2;
+        } else {
+            self.limbs[k] -= d0;
+            self.limbs[k + 1] -= d1;
+            self.limbs[k + 2] -= d2;
+        }
+
+        self.pending += 1;
+        if self.pending >= F64_PENDING_LIMIT {
+            self.normalize();
+        }
     }
 
     /// Add a slice of f64 values.
@@ -152,40 +257,36 @@ impl BinnedAccumulatorF64 {
         }
     }
 
-    /// Deterministic merge of two accumulators.
+    /// Carry-propagate the limbs. Does not change the represented value.
+    #[inline]
+    fn normalize(&mut self) {
+        f64_normalize_limbs(&mut self.limbs);
+        self.pending = 0;
+    }
+
+    /// Deterministic, exact merge of two accumulators: `S ← S + S_other`.
     ///
-    /// The merge is **commutative** and **associative**:
-    /// - `a.merge(b)` produces the same result as `b.merge(a)` (commutativity)
-    /// - `(a.merge(b)).merge(c)` equals `a.merge(b.merge(c))` (associativity)
-    ///
-    /// ## Strategy: Two-Sum Error-Free Transformation
-    ///
-    /// For each bin, the merge uses Knuth's 2Sum to compute the exact
-    /// sum and rounding error:
-    ///   `s = fl(a + b)`  (rounded sum)
-    ///   `e = (a - (s - (s - a))) + (b - (s - a))`  (exact rounding error)
-    ///
-    /// The error `e` is accumulated into `self.comp[i]`, preserving all
-    /// rounding information. The compensation terms are also merged directly
-    /// (comp += other.comp) since they're small and additive.
-    ///
-    /// This ensures that multi-way merge order doesn't affect the final result:
-    /// all rounding errors are captured and included in finalize().
+    /// Integer addition of the fixed-point limbs, so the merge is exactly
+    /// commutative and associative; any merge tree over any chunking of the
+    /// inputs yields the same `S` and hence the same `finalize()` bits.
     ///
     /// No heap allocation.
     #[inline]
     pub fn merge(&mut self, other: &BinnedAccumulatorF64) {
-        for i in 0..F64_BIN_COUNT {
-            let a = self.bins[i];
-            let b = other.bins[i];
-            // Knuth 2Sum: exact and commutative (swapping a,b gives same s,e).
-            let s = a + b;
-            let v = s - a;
-            let e = (a - (s - v)) + (b - v);
-            self.bins[i] = s;
-            // Accumulate rounding error + other's compensation.
-            self.comp[i] += e + other.comp[i];
-            self.counts[i] += other.counts[i];
+        // After adding, |limb| < (p_self + 1 + p_other + 1) · 2^32.
+        if self.pending as u64 + other.pending as u64 + 1 >= F64_PENDING_LIMIT as u64 {
+            self.normalize();
+            let mut o = other.limbs;
+            f64_normalize_limbs(&mut o);
+            for k in 0..F64_LIMBS {
+                self.limbs[k] += o[k];
+            }
+            self.pending = 1;
+        } else {
+            for k in 0..F64_LIMBS {
+                self.limbs[k] += other.limbs[k];
+            }
+            self.pending += other.pending + 1;
         }
         self.pos_inf_count += other.pos_inf_count;
         self.neg_inf_count += other.neg_inf_count;
@@ -193,21 +294,17 @@ impl BinnedAccumulatorF64 {
         self.total_count += other.total_count;
     }
 
-    /// Finalize the accumulator, producing the deterministic sum.
-    ///
-    /// Bins are reduced in ascending exponent order (smallest magnitude first)
-    /// using Kahan summation for the final fold. This ensures that small values
-    /// are accumulated before large ones, maximizing precision.
+    /// Finalize: the exact sum rounded once to nearest f64 (ties to even).
     ///
     /// # Special value semantics
     ///
-    /// - If `has_nan` is true, returns canonical NaN.
+    /// - If `has_nan` is true, returns NaN.
     /// - If both +Inf and -Inf were seen, returns NaN (indeterminate).
-    /// - If only +Inf was seen, returns +Inf.
-    /// - If only -Inf was seen, returns -Inf.
+    /// - If only +Inf was seen, returns +Inf; if only -Inf, returns -Inf.
+    /// - An exactly-zero finite sum returns +0.0.
+    /// - A finite sum whose rounding overflows returns ±Inf.
     #[inline]
     pub fn finalize(&self) -> f64 {
-        // Check special values first.
         if self.has_nan {
             return f64::NAN;
         }
@@ -221,30 +318,48 @@ impl BinnedAccumulatorF64 {
             return f64::NEG_INFINITY;
         }
 
-        // Fold bins in ascending exponent order (small magnitudes first).
-        // This is the deterministic reduction: the order is fixed regardless
-        // of the order values were added.
-        //
-        // First, fold compensation terms into their bins so that all
-        // rounding errors from merges are included.
-        // Then, Kahan-sum the bins in ascending order.
-        let mut sum = 0.0f64;
-        let mut kahan_comp = 0.0f64;
-
-        for i in 0..F64_BIN_COUNT {
-            if self.counts[i] == 0 {
-                continue;
+        // Canonical form, then sign/magnitude.
+        let mut l = self.limbs;
+        f64_normalize_limbs(&mut l);
+        let negative = l[F64_LIMBS - 1] < 0;
+        if negative {
+            for x in l.iter_mut() {
+                *x = -*x;
             }
-            // Add both the bin value and its accumulated compensation.
-            // The compensation captures rounding errors from merge operations.
-            let val = self.bins[i] + self.comp[i];
-            let y = val - kahan_comp;
-            let t = sum + y;
-            kahan_comp = (t - sum) - y;
-            sum = t;
+            f64_normalize_limbs(&mut l);
         }
+        let hi = match l.iter().rposition(|&x| x != 0) {
+            Some(i) => i,
+            None => return 0.0,
+        };
+        // Highest set bit of |S|.
+        let h = hi * 32 + (63 - (l[hi] as u64).leading_zeros()) as usize;
+        let sign = if negative { 1u64 << 63 } else { 0 };
 
-        sum
+        let mag = if h <= 52 {
+            // |S| < 2^53: subnormal or smallest binade, exactly representable;
+            // its bit pattern is |S| itself.
+            f64_extract_bits(&l, 0, 53)
+        } else {
+            let lo = h - 52;
+            let mut mant = f64_extract_bits(&l, lo, 53);
+            let round = f64_extract_bits(&l, lo - 1, 1) == 1;
+            let sticky = f64_any_below(&l, lo - 1);
+            if round && (sticky || mant & 1 == 1) {
+                mant += 1;
+            }
+            // value = mant · 2^(lo - 1074) = mant · 2^(E - 1075) with E = lo + 1.
+            let mut e = (lo + 1) as u64;
+            if mant == 1u64 << 53 {
+                mant >>= 1;
+                e += 1;
+            }
+            if e >= 0x7FF {
+                return f64::from_bits(sign | 0x7FF0_0000_0000_0000); // ±Inf
+            }
+            (e << 52) | (mant & F64_FRAC_MASK)
+        };
+        f64::from_bits(sign | mag)
     }
 
     /// Total number of values added.
@@ -268,10 +383,8 @@ impl Default for BinnedAccumulatorF64 {
 
 impl std::fmt::Debug for BinnedAccumulatorF64 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let active_bins = self.counts.iter().filter(|&&c| c > 0).count();
         f.debug_struct("BinnedAccumulatorF64")
             .field("total_count", &self.total_count)
-            .field("active_bins", &active_bins)
             .field("has_nan", &self.has_nan)
             .field("pos_inf_count", &self.pos_inf_count)
             .field("neg_inf_count", &self.neg_inf_count)
@@ -290,6 +403,14 @@ const F32_BIN_COUNT: usize = 256;
 ///
 /// Stack-allocated, fixed-size. No heap allocation on any path.
 /// Internally accumulates in f64 for precision, converts to f32 on finalize.
+///
+/// **Order-invariance scope:** f32 values sharing a biased exponent are
+/// multiples of a common power of two and need 24 + log2(n) bits, so each
+/// f64 bin sum is *exact* (hence order-free) while a bin holds fewer than
+/// 2^29 values; the final fixed-order fold is then a deterministic function
+/// of the bins.  The result is not correctly rounded (fold in f64, then
+/// narrowed to f32), and this type is not an exact superaccumulator like
+/// [`BinnedAccumulatorF64`].
 #[derive(Clone)]
 pub struct BinnedAccumulatorF32 {
     /// One bin per biased exponent (f32 has 8-bit exponent field, 256 values).
@@ -726,6 +847,74 @@ mod tests {
         // Both zeros accumulate normally; result should be 0.0.
         let result = acc.finalize();
         assert_eq!(result, 0.0);
+    }
+
+    // -- P5: exact superaccumulator -------------------------------------
+
+    #[test]
+    fn test_p5_same_bin_order_invariance() {
+        let b = 1.0000000000000002_f64; // 1 + 2^-52
+        let exact = 3.0000000000000004_f64.to_bits(); // 3 + 2^-51
+        assert_eq!(binned_sum_f64(&[1.0, b, b]).to_bits(), exact);
+        assert_eq!(binned_sum_f64(&[b, b, 1.0]).to_bits(), exact);
+        assert_eq!(binned_sum_f64(&[b, 1.0, b]).to_bits(), exact);
+    }
+
+    #[test]
+    fn test_negative_and_subnormal_exact() {
+        assert_eq!(binned_sum_f64(&[-1.0, -2.0, -0.5]), -3.5);
+        assert_eq!(binned_sum_f64(&[5e-324, 5e-324]).to_bits(), 2);
+        assert_eq!(binned_sum_f64(&[-5e-324]).to_bits(), (-5e-324f64).to_bits());
+        assert_eq!(binned_sum_f64(&[f64::MAX, -f64::MAX, 1e-300]), 1e-300);
+        assert_eq!(binned_sum_f64(&[f64::MAX, f64::MAX]), f64::INFINITY);
+        assert_eq!(binned_sum_f64(&[-f64::MAX, -f64::MAX]), f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn test_signed_zero_result_is_positive() {
+        assert_eq!(binned_sum_f64(&[-0.0]).to_bits(), 0);
+        assert_eq!(binned_sum_f64(&[-0.0, -0.0]).to_bits(), 0);
+        assert_eq!(binned_sum_f64(&[2.5, -2.5]).to_bits(), 0);
+    }
+
+    /// Force the deferred-carry paths (add-triggered and merge-triggered
+    /// normalisation) and check they do not change the result.
+    #[test]
+    fn test_pending_limit_normalisation_paths() {
+        let xs: Vec<f64> = (0..5000)
+            .map(|i| ((i * 7919) % 1000) as f64 * 1.37e-3 - 0.61 + (i as f64) * 1e-9)
+            .collect();
+        let reference = binned_sum_f64(&xs).to_bits();
+
+        // add() crossing the limit.
+        let mut a = BinnedAccumulatorF64::new();
+        a.add_slice(&xs[..2500]);
+        a.pending = F64_PENDING_LIMIT - 3;
+        a.add_slice(&xs[2500..]);
+        assert!(a.pending < 2500, "normalisation did not run");
+        assert_eq!(a.finalize().to_bits(), reference);
+
+        // merge() crossing the limit, both directions.
+        let mut l = BinnedAccumulatorF64::new();
+        l.add_slice(&xs[..1234]);
+        let mut r = BinnedAccumulatorF64::new();
+        r.add_slice(&xs[1234..]);
+        let mut lr = l.clone();
+        lr.pending = F64_PENDING_LIMIT / 2;
+        let mut r_hi = r.clone();
+        r_hi.pending = F64_PENDING_LIMIT / 2;
+        lr.merge(&r_hi);
+        assert_eq!(lr.pending, 1);
+        assert_eq!(lr.finalize().to_bits(), reference);
+        let mut rl = r.clone();
+        rl.merge(&l);
+        assert_eq!(rl.finalize().to_bits(), reference);
+    }
+
+    #[test]
+    fn test_size_is_small() {
+        // 68 limbs + flags; the old layout was ~40 KiB.
+        assert!(std::mem::size_of::<BinnedAccumulatorF64>() <= 600);
     }
 
     #[test]
