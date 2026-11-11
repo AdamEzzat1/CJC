@@ -68,8 +68,16 @@ fn tabular_scaled_chain_head_canary_locked() {
     // 4 lanes of `KahanAccumulatorF64x4` instead of summing them
     // strictly left-to-right. Same Kahan stability, different
     // (still deterministic) f64 bits.
+    //
+    // Re-locked 2026-11-10 — `randn`'s Box–Muller transform
+    // (`cjc_repro::Rng::next_normal_f64`) still called the platform `ln`/`cos`
+    // and now uses `dmath::ln`/`dmath::cos` (docs/julia_comparison, P0-6).
+    // The heteroskedastic noise changes in the last bits; recovers_truth,
+    // leverage_responds_to_noise and verify_chain are unchanged. This is the
+    // canary that failed on Linux/macOS CI. Pre-fix (Windows libm) hex:
+    // `e1adbf41024db1fd42a5bfc5e9aae9d2288501dc22bca6a5bf8de27815bec003`.
     const CANARY_HEX: &str =
-        "e1adbf41024db1fd42a5bfc5e9aae9d2288501dc22bca6a5bf8de27815bec003";
+        "e2b49c4a10880f3a29ce7199156b4c4350d8afc27ad3fceb2e170b79741be224";
     assert_eq!(
         chain, CANARY_HEX,
         "tabular_scaled cjcl chain_head canary mismatch — see comment"

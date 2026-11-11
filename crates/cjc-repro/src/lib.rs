@@ -120,13 +120,18 @@ impl Rng {
     /// Consumes **two** uniform samples from [`next_f64`](Self::next_f64) per call.
     /// The transform is: `sqrt(-2 ln(u1)) * cos(2 pi u2)`.
     ///
+    /// `ln` and `cos` are the deterministic [`dmath`] kernels, not the
+    /// platform libm (whose last bit differs between Windows, Linux and
+    /// macOS); `sqrt` is IEEE-754 correctly rounded everywhere.  The draw is
+    /// therefore bit-identical on every platform.
+    ///
     /// # Returns
     ///
     /// A deterministic `f64` drawn from N(0, 1).
     pub fn next_normal_f64(&mut self) -> f64 {
         let u1 = self.next_f64();
         let u2 = self.next_f64();
-        (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+        (-2.0 * dmath::ln(u1)).sqrt() * dmath::cos(2.0 * std::f64::consts::PI * u2)
     }
 
     /// Generates a standard-normal `f32` sample.
@@ -387,5 +392,29 @@ mod tests {
         let values: Vec<f64> = (0..10000).map(|_| 0.0001).collect();
         let result = pairwise_sum_f64(&values);
         assert!((result - 1.0).abs() < 1e-10);
+    }
+
+    /// P0-6: Box–Muller goes through dmath, so the stream is platform-free.
+    /// Golden = FNV-1a over the LE bit patterns of the first 10^4 draws of
+    /// seed 42 (same value as `tests/test_randn_dmath.rs`).
+    #[test]
+    fn test_next_normal_dmath_golden() {
+        let mut rng = Rng::seeded(42);
+        let mut h: u64 = 0xcbf29ce484222325;
+        for _ in 0..10_000 {
+            for b in rng.next_normal_f64().to_bits().to_le_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+        }
+        assert_eq!(h, 0x857ac02faffc60d4, "got 0x{h:016x}");
+
+        let mut a = Rng::seeded(3);
+        let mut b = Rng::seeded(3);
+        for _ in 0..1000 {
+            let (u1, u2) = (b.next_f64(), b.next_f64());
+            let want = (-2.0 * dmath::ln(u1)).sqrt() * dmath::cos(2.0 * std::f64::consts::PI * u2);
+            assert_eq!(a.next_normal_f64().to_bits(), want.to_bits());
+        }
     }
 }

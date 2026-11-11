@@ -9,7 +9,13 @@ use super::helpers;
 /// (ADR-0046 amendment), so their last bits are now platform-independent
 /// rather than the Windows libm's. `primitive_eval_mir_parity` still holds.
 /// Pre-dmath hash: 7c2e0248d8e50c7a58d9e8c64afb9b8c31db43e81835673eac2ca46a077275d5.
-const GOLDEN_MASTER: &str = "3599ec0babc930be334895821ab54257149481a3d50b8550c9b7ddd1e53f6fc3";
+///
+/// Re-pinned 2026-11-10: contrary to the note above, `randn` had NOT moved —
+/// `cjc_repro::Rng::next_normal_f64` still called the platform `ln`/`cos`.
+/// It now uses `dmath::ln`/`dmath::cos` (docs/julia_comparison, P0-6). This
+/// is the hash that failed on Linux/macOS CI. Pre-fix (Windows libm) hash:
+/// 3599ec0babc930be334895821ab54257149481a3d50b8550c9b7ddd1e53f6fc3.
+const GOLDEN_MASTER: &str = "eff68faf2ac4218ec6571ac49dfe8a0704c56188e2c2443e3c3260c7d2ff12a9";
 
 #[test]
 fn primitive_master_hash_golden() {
