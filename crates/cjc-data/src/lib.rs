@@ -3243,17 +3243,22 @@ fn vectorized_fn_call(name: &str, arg: &Column) -> Result<Column, TidyError> {
             "FnCall '{}' requires numeric argument", name
         ))),
     };
+    // Transcendentals go through `cjc_repro::dmath`, exactly as in
+    // `eval_expr_row`. `f64::ln` etc. are inherent methods that call platform
+    // libm, so the fast path and the row fallback would disagree in bits, and
+    // results would differ across OSes. sqrt/abs/ceil/floor/round are exact
+    // IEEE operations and need no dmath equivalent.
     let f: fn(f64) -> f64 = match name {
-        "log"   => f64::ln,
-        "exp"   => f64::exp,
+        "log"   => |x| x.det_ln(),
+        "exp"   => |x| x.det_exp(),
         "sqrt"  => f64::sqrt,
         "abs"   => f64::abs,
         "ceil"  => f64::ceil,
         "floor" => f64::floor,
         "round" => f64::round,
-        "sin"   => f64::sin,
-        "cos"   => f64::cos,
-        "tan"   => f64::tan,
+        "sin"   => |x| x.det_sin(),
+        "cos"   => |x| x.det_cos(),
+        "tan"   => |x| x.det_tan(),
         _ => return Err(TidyError::Internal(format!(
             "unknown DExpr function: {}", name
         ))),
@@ -3263,6 +3268,41 @@ fn vectorized_fn_call(name: &str, arg: &Column) -> Result<Column, TidyError> {
         result[i] = f(floats[i]);
     }
     Ok(Column::Float(result))
+}
+
+#[cfg(test)]
+mod vectorized_fn_call_parity {
+    use super::*;
+
+    /// The vectorized fast path and the row-by-row evaluator must give the
+    /// same bits for every function, so it never matters which one runs.
+    #[test]
+    fn fast_path_matches_row_evaluator_bit_for_bit() {
+        // Deterministic spread over several decades, both signs.
+        let mut xs = Vec::new();
+        let mut v = 0.3_f64;
+        for i in 0..3000 {
+            v = (v * 3.7 + 0.11) % 23.0;
+            let scale = [1e-3, 1.0, 50.0, 1e4][i % 4];
+            xs.push(if i % 2 == 0 { v * scale } else { -v * scale });
+        }
+        let df = DataFrame::from_columns(vec![("x".into(), Column::Float(xs.clone()))]).unwrap();
+        for name in ["log", "exp", "sqrt", "abs", "ceil", "floor", "round", "sin", "cos", "tan"] {
+            let fast = match vectorized_fn_call(name, &Column::Float(xs.clone())).unwrap() {
+                Column::Float(v) => v,
+                _ => panic!("{name}: Float expected"),
+            };
+            let expr = DExpr::FnCall(name.into(), vec![DExpr::Col("x".into())]);
+            for (row, got) in fast.iter().enumerate() {
+                let want = match eval_expr_row(&df, &expr, row).unwrap() {
+                    ExprValue::Float(f) => f,
+                    other => panic!("{name}: Float expected, got {other:?}"),
+                };
+                let same = (got.is_nan() && want.is_nan()) || got.to_bits() == want.to_bits();
+                assert!(same, "{name}(x={}): fast path {got:?}, row path {want:?}", xs[row]);
+            }
+        }
+    }
 }
 
 /// O7: Try vectorized column-level evaluation of a DExpr.
