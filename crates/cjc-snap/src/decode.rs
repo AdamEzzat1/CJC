@@ -29,9 +29,22 @@ impl<'a> Cursor<'a> {
         Cursor { data, pos: 0 }
     }
 
-    #[allow(dead_code)]
     fn remaining(&self) -> usize {
         self.data.len() - self.pos
+    }
+
+    /// A `Vec` capacity for `count` elements that each take at least
+    /// `min_bytes` of the remaining input.
+    ///
+    /// Counts come from the payload, so they are untrusted: a few bytes can
+    /// claim billions of elements, and an allocation failure aborts the
+    /// process (it is not a panic). The count is therefore only a hint,
+    /// capped by how many elements the rest of the input could hold. A
+    /// well-formed payload is never capped below its real size; the vector
+    /// still grows if the hint is low, and decoding a short payload fails with
+    /// `UnexpectedEof` when the bytes run out.
+    fn capacity_hint(&self, count: usize, min_bytes: usize) -> usize {
+        count.min(self.remaining() / min_bytes.max(1))
     }
 
     fn read_byte(&mut self) -> Result<u8, SnapError> {
@@ -44,7 +57,9 @@ impl<'a> Cursor<'a> {
     }
 
     fn read_bytes(&mut self, n: usize) -> Result<&'a [u8], SnapError> {
-        if self.pos + n > self.data.len() {
+        // `n > remaining` rather than `pos + n > len`: `n` comes from the
+        // payload and `pos + n` can overflow.
+        if n > self.remaining() {
             return Err(SnapError::UnexpectedEof);
         }
         let slice = &self.data[self.pos..self.pos + n];
@@ -82,6 +97,53 @@ impl<'a> Cursor<'a> {
         let len = self.read_u64_le()? as usize;
         let bytes = self.read_bytes(len)?;
         Ok(bytes.to_vec())
+    }
+}
+
+/// Element count of a tensor shape read from the payload. An overflowing
+/// product cannot describe real data, so it is an error rather than a panic
+/// (or a silently wrapped size).
+fn checked_numel(shape: &[usize]) -> Result<usize, SnapError> {
+    shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or(SnapError::UnexpectedEof)
+}
+
+/// Decode `numel` fixed-width elements from `raw`, which must hold at least
+/// `numel * width` bytes.
+fn decode_fixed_width(
+    raw: &[u8],
+    numel: usize,
+    width: usize,
+    f: impl Fn(&[u8]) -> f64,
+) -> Result<Vec<f64>, SnapError> {
+    if numel > raw.len() / width {
+        return Err(SnapError::UnexpectedEof);
+    }
+    Ok(raw.chunks_exact(width).take(numel).map(f).collect())
+}
+
+/// Shared by TAG_TYPED_TENSOR and TAG_CHUNKED_TENSOR: convert raw element
+/// bytes of dtype `dtype_tag` to f64.
+fn typed_raw_to_f64(dtype_tag: u8, raw: &[u8], numel: usize) -> Result<Vec<f64>, SnapError> {
+    match dtype_tag {
+        0 => decode_fixed_width(raw, numel, 8, |b| f64::from_bits(u64::from_le_bytes(b.try_into().unwrap()))),
+        1 => decode_fixed_width(raw, numel, 4, |b| f32::from_bits(u32::from_le_bytes(b.try_into().unwrap())) as f64),
+        2 => decode_fixed_width(raw, numel, 8, |b| i64::from_le_bytes(b.try_into().unwrap()) as f64),
+        3 => decode_fixed_width(raw, numel, 4, |b| i32::from_le_bytes(b.try_into().unwrap()) as f64),
+        4 => Ok(raw.iter().take(numel).map(|&b| b as f64).collect()),
+        _ => {
+            // Other dtypes (Bool, Bf16, F16, Complex) fall back to f64 zeros.
+            // Each of them takes at least one byte per element, so a payload
+            // with fewer raw bytes than elements cannot be a real tensor;
+            // without this check a 30-byte payload could request a
+            // terabyte-sized zero fill.
+            if numel > raw.len() {
+                return Err(SnapError::UnexpectedEof);
+            }
+            Ok(vec![0.0f64; numel])
+        }
     }
 }
 
@@ -163,7 +225,8 @@ fn decode_value(cursor: &mut Cursor<'_>) -> Result<Value, SnapError> {
 
         TAG_ARRAY => {
             let len = cursor.read_u64_le()? as usize;
-            let mut elems = Vec::with_capacity(len);
+            // Each element is at least its 1-byte tag.
+            let mut elems = Vec::with_capacity(cursor.capacity_hint(len, 1));
             for _ in 0..len {
                 elems.push(decode_value(cursor)?);
             }
@@ -172,7 +235,7 @@ fn decode_value(cursor: &mut Cursor<'_>) -> Result<Value, SnapError> {
 
         TAG_TUPLE => {
             let len = cursor.read_u64_le()? as usize;
-            let mut elems = Vec::with_capacity(len);
+            let mut elems = Vec::with_capacity(cursor.capacity_hint(len, 1));
             for _ in 0..len {
                 elems.push(decode_value(cursor)?);
             }
@@ -193,14 +256,12 @@ fn decode_value(cursor: &mut Cursor<'_>) -> Result<Value, SnapError> {
 
         TAG_TENSOR => {
             let ndim = cursor.read_u64_le()? as usize;
-            let mut shape = Vec::with_capacity(ndim);
-            let mut numel: usize = 1;
+            let mut shape = Vec::with_capacity(cursor.capacity_hint(ndim, 8));
             for _ in 0..ndim {
-                let dim = cursor.read_u64_le()? as usize;
-                numel = numel.saturating_mul(dim);
-                shape.push(dim);
+                shape.push(cursor.read_u64_le()? as usize);
             }
-            let mut data = Vec::with_capacity(numel);
+            let numel = checked_numel(&shape)?;
+            let mut data = Vec::with_capacity(cursor.capacity_hint(numel, 8));
             for _ in 0..numel {
                 data.push(cursor.read_f64_le()?);
             }
@@ -213,7 +274,7 @@ fn decode_value(cursor: &mut Cursor<'_>) -> Result<Value, SnapError> {
             let enum_name = cursor.read_string()?;
             let variant = cursor.read_string()?;
             let count = cursor.read_u64_le()? as usize;
-            let mut fields = Vec::with_capacity(count);
+            let mut fields = Vec::with_capacity(cursor.capacity_hint(count, 1));
             for _ in 0..count {
                 fields.push(decode_value(cursor)?);
             }
@@ -255,7 +316,7 @@ fn decode_value(cursor: &mut Cursor<'_>) -> Result<Value, SnapError> {
         TAG_TYPED_TENSOR => {
             let dtype_tag = cursor.read_byte()?;
             let ndim = cursor.read_u64_le()? as usize;
-            let mut shape = Vec::with_capacity(ndim);
+            let mut shape = Vec::with_capacity(cursor.capacity_hint(ndim, 8));
             for _ in 0..ndim {
                 shape.push(cursor.read_u64_le()? as usize);
             }
@@ -263,56 +324,8 @@ fn decode_value(cursor: &mut Cursor<'_>) -> Result<Value, SnapError> {
             let raw_bytes = cursor.read_bytes(byte_len)?;
 
             // Convert typed tensor back to f64 Tensor based on dtype_tag
-            let numel: usize = shape.iter().product();
-            let data: Vec<f64> = match dtype_tag {
-                0 => { // F64
-                    let mut vals = Vec::with_capacity(numel);
-                    for i in 0..numel {
-                        let off = i * 8;
-                        if off + 8 > raw_bytes.len() { return Err(SnapError::UnexpectedEof); }
-                        let bits = u64::from_le_bytes(raw_bytes[off..off+8].try_into().unwrap());
-                        vals.push(f64::from_bits(bits));
-                    }
-                    vals
-                }
-                1 => { // F32
-                    let mut vals = Vec::with_capacity(numel);
-                    for i in 0..numel {
-                        let off = i * 4;
-                        if off + 4 > raw_bytes.len() { return Err(SnapError::UnexpectedEof); }
-                        let bits = u32::from_le_bytes(raw_bytes[off..off+4].try_into().unwrap());
-                        vals.push(f32::from_bits(bits) as f64);
-                    }
-                    vals
-                }
-                2 => { // I64
-                    let mut vals = Vec::with_capacity(numel);
-                    for i in 0..numel {
-                        let off = i * 8;
-                        if off + 8 > raw_bytes.len() { return Err(SnapError::UnexpectedEof); }
-                        let v = i64::from_le_bytes(raw_bytes[off..off+8].try_into().unwrap());
-                        vals.push(v as f64);
-                    }
-                    vals
-                }
-                3 => { // I32
-                    let mut vals = Vec::with_capacity(numel);
-                    for i in 0..numel {
-                        let off = i * 4;
-                        if off + 4 > raw_bytes.len() { return Err(SnapError::UnexpectedEof); }
-                        let v = i32::from_le_bytes(raw_bytes[off..off+4].try_into().unwrap());
-                        vals.push(v as f64);
-                    }
-                    vals
-                }
-                4 => { // U8
-                    raw_bytes.iter().take(numel).map(|&b| b as f64).collect()
-                }
-                _ => {
-                    // For other dtypes (Bool, Bf16, F16, Complex), fall back to f64 zeros
-                    vec![0.0f64; numel]
-                }
-            };
+            let numel = checked_numel(&shape)?;
+            let data = typed_raw_to_f64(dtype_tag, raw_bytes, numel)?;
             let tensor = Tensor::from_vec(data, &shape)
                 .map_err(|_| SnapError::UnexpectedEof)?;
             Ok(Value::Tensor(tensor))
@@ -324,17 +337,17 @@ fn decode_value(cursor: &mut Cursor<'_>) -> Result<Value, SnapError> {
             let ncols = cursor.read_u64_le()? as usize;
             let nnz = cursor.read_u64_le()? as usize;
             // Read row_ptr
-            let mut row_ptr = Vec::with_capacity(nrows + 1);
+            let mut row_ptr = Vec::with_capacity(cursor.capacity_hint(nrows.saturating_add(1), 8));
             for _ in 0..=nrows {
                 row_ptr.push(cursor.read_u64_le()? as usize);
             }
             // Read col_idx
-            let mut col_idx = Vec::with_capacity(nnz);
+            let mut col_idx = Vec::with_capacity(cursor.capacity_hint(nnz, 8));
             for _ in 0..nnz {
                 col_idx.push(cursor.read_u64_le()? as usize);
             }
             // Read values
-            let mut values = Vec::with_capacity(nnz);
+            let mut values = Vec::with_capacity(cursor.capacity_hint(nnz, 8));
             for _ in 0..nnz {
                 values.push(cursor.read_f64_le()?);
             }
@@ -348,12 +361,14 @@ fn decode_value(cursor: &mut Cursor<'_>) -> Result<Value, SnapError> {
                 let bytes = cursor.read_bytes(4)?;
                 u32::from_le_bytes(bytes.try_into().unwrap()) as usize
             };
-            let mut levels = Vec::with_capacity(n_levels);
+            // Each level is at least its 8-byte length prefix.
+            let mut levels = Vec::with_capacity(cursor.capacity_hint(n_levels, 8));
             for _ in 0..n_levels {
                 levels.push(cursor.read_string()?);
             }
             let n_rows = cursor.read_u64_le()? as usize;
-            let mut strings = Vec::with_capacity(n_rows);
+            // Each row is a 4-byte code.
+            let mut strings = Vec::with_capacity(cursor.capacity_hint(n_rows, 4));
             for _ in 0..n_rows {
                 let bytes = cursor.read_bytes(4)?;
                 let code = u32::from_le_bytes(bytes.try_into().unwrap()) as usize;
@@ -381,7 +396,7 @@ fn decode_value(cursor: &mut Cursor<'_>) -> Result<Value, SnapError> {
         TAG_CHUNKED_TENSOR => {
             let dtype_tag = cursor.read_byte()?;
             let ndim = cursor.read_u64_le()? as usize;
-            let mut shape = Vec::with_capacity(ndim);
+            let mut shape = Vec::with_capacity(cursor.capacity_hint(ndim, 8));
             for _ in 0..ndim {
                 shape.push(cursor.read_u64_le()? as usize);
             }
@@ -409,55 +424,8 @@ fn decode_value(cursor: &mut Cursor<'_>) -> Result<Value, SnapError> {
             }
 
             // Convert raw bytes to f64 Tensor (same logic as TAG_TYPED_TENSOR)
-            let numel: usize = shape.iter().product();
-            let data: Vec<f64> = match dtype_tag {
-                0 => { // F64
-                    let mut vals = Vec::with_capacity(numel);
-                    for i in 0..numel {
-                        let off = i * 8;
-                        if off + 8 > raw_bytes.len() { return Err(SnapError::UnexpectedEof); }
-                        let bits = u64::from_le_bytes(raw_bytes[off..off+8].try_into().unwrap());
-                        vals.push(f64::from_bits(bits));
-                    }
-                    vals
-                }
-                1 => { // F32
-                    let mut vals = Vec::with_capacity(numel);
-                    for i in 0..numel {
-                        let off = i * 4;
-                        if off + 4 > raw_bytes.len() { return Err(SnapError::UnexpectedEof); }
-                        let bits = u32::from_le_bytes(raw_bytes[off..off+4].try_into().unwrap());
-                        vals.push(f32::from_bits(bits) as f64);
-                    }
-                    vals
-                }
-                2 => { // I64
-                    let mut vals = Vec::with_capacity(numel);
-                    for i in 0..numel {
-                        let off = i * 8;
-                        if off + 8 > raw_bytes.len() { return Err(SnapError::UnexpectedEof); }
-                        let v = i64::from_le_bytes(raw_bytes[off..off+8].try_into().unwrap());
-                        vals.push(v as f64);
-                    }
-                    vals
-                }
-                3 => { // I32
-                    let mut vals = Vec::with_capacity(numel);
-                    for i in 0..numel {
-                        let off = i * 4;
-                        if off + 4 > raw_bytes.len() { return Err(SnapError::UnexpectedEof); }
-                        let v = i32::from_le_bytes(raw_bytes[off..off+4].try_into().unwrap());
-                        vals.push(v as f64);
-                    }
-                    vals
-                }
-                4 => { // U8
-                    raw_bytes.iter().take(numel).map(|&b| b as f64).collect()
-                }
-                _ => {
-                    vec![0.0f64; numel]
-                }
-            };
+            let numel = checked_numel(&shape)?;
+            let data = typed_raw_to_f64(dtype_tag, &raw_bytes, numel)?;
             let tensor = Tensor::from_vec(data, &shape)
                 .map_err(|_| SnapError::UnexpectedEof)?;
             Ok(Value::Tensor(tensor))
@@ -471,35 +439,35 @@ fn decode_value(cursor: &mut Cursor<'_>) -> Result<Value, SnapError> {
             let n_rows = cursor.read_u64_le()? as usize;
 
             // Decode each column into a Value::Array, then build a struct
-            let mut col_entries = Vec::with_capacity(n_cols);
+            let mut col_entries = Vec::with_capacity(cursor.capacity_hint(n_cols, 9));
             for _ in 0..n_cols {
                 let col_name = cursor.read_string()?;
                 let col_type = cursor.read_byte()?;
 
                 let col_value = match col_type {
                     0 => { // Int
-                        let mut vals = Vec::with_capacity(n_rows);
+                        let mut vals = Vec::with_capacity(cursor.capacity_hint(n_rows, 8));
                         for _ in 0..n_rows {
                             vals.push(Value::Int(cursor.read_i64_le()?));
                         }
                         Value::Array(Rc::new(vals))
                     }
                     1 => { // Float
-                        let mut vals = Vec::with_capacity(n_rows);
+                        let mut vals = Vec::with_capacity(cursor.capacity_hint(n_rows, 8));
                         for _ in 0..n_rows {
                             vals.push(Value::Float(cursor.read_f64_le()?));
                         }
                         Value::Array(Rc::new(vals))
                     }
                     2 => { // Str
-                        let mut vals = Vec::with_capacity(n_rows);
+                        let mut vals = Vec::with_capacity(cursor.capacity_hint(n_rows, 8));
                         for _ in 0..n_rows {
                             vals.push(Value::String(Rc::new(cursor.read_string()?)));
                         }
                         Value::Array(Rc::new(vals))
                     }
                     3 => { // Bool
-                        let mut vals = Vec::with_capacity(n_rows);
+                        let mut vals = Vec::with_capacity(cursor.capacity_hint(n_rows, 1));
                         for _ in 0..n_rows {
                             vals.push(Value::Bool(cursor.read_byte()? != 0));
                         }
@@ -510,11 +478,11 @@ fn decode_value(cursor: &mut Cursor<'_>) -> Result<Value, SnapError> {
                             let bytes = cursor.read_bytes(4)?;
                             u32::from_le_bytes(bytes.try_into().unwrap()) as usize
                         };
-                        let mut levels = Vec::with_capacity(n_levels);
+                        let mut levels = Vec::with_capacity(cursor.capacity_hint(n_levels, 8));
                         for _ in 0..n_levels {
                             levels.push(cursor.read_string()?);
                         }
-                        let mut vals = Vec::with_capacity(n_rows);
+                        let mut vals = Vec::with_capacity(cursor.capacity_hint(n_rows, 4));
                         for _ in 0..n_rows {
                             let bytes = cursor.read_bytes(4)?;
                             let code = u32::from_le_bytes(bytes.try_into().unwrap()) as usize;
@@ -524,7 +492,7 @@ fn decode_value(cursor: &mut Cursor<'_>) -> Result<Value, SnapError> {
                         Value::Array(Rc::new(vals))
                     }
                     5 => { // DateTime (epoch millis)
-                        let mut vals = Vec::with_capacity(n_rows);
+                        let mut vals = Vec::with_capacity(cursor.capacity_hint(n_rows, 8));
                         for _ in 0..n_rows {
                             vals.push(Value::Int(cursor.read_i64_le()?));
                         }
@@ -540,7 +508,7 @@ fn decode_value(cursor: &mut Cursor<'_>) -> Result<Value, SnapError> {
 
             // Build as a Struct with column names as fields
             let mut fields = BTreeMap::new();
-            let mut col_names_arr = Vec::with_capacity(n_cols);
+            let mut col_names_arr = Vec::with_capacity(col_entries.len());
             for (name, data) in col_entries {
                 col_names_arr.push(Value::String(Rc::new(name.clone())));
                 fields.insert(name, data);
