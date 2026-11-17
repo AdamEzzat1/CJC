@@ -1446,20 +1446,25 @@ impl GradGraph {
                     }
                 }
                 GradOp::Add(a, b) => {
-                    accumulate_grad(&mut grads, a, &grad);
-                    accumulate_grad(&mut grads, b, &grad);
+                    // Broadcasting: reduce the upstream gradient back to each input's shape.
+                    let ga = reduce_grad_to_shape(&grad, self.tensors[a].shape());
+                    let gb = reduce_grad_to_shape(&grad, self.tensors[b].shape());
+                    accumulate_grad(&mut grads, a, &ga);
+                    accumulate_grad(&mut grads, b, &gb);
                 }
                 GradOp::Sub(a, b) => {
-                    accumulate_grad(&mut grads, a, &grad);
+                    let ga = reduce_grad_to_shape(&grad, self.tensors[a].shape());
                     let neg_grad = grad.neg();
-                    accumulate_grad(&mut grads, b, &neg_grad);
+                    let gb = reduce_grad_to_shape(&neg_grad, self.tensors[b].shape());
+                    accumulate_grad(&mut grads, a, &ga);
+                    accumulate_grad(&mut grads, b, &gb);
                 }
                 GradOp::Mul(a, b) => {
                     let a_val = self.tensors[a].clone();
                     let b_val = self.tensors[b].clone();
 
-                    let grad_a = grad.mul_elem_unchecked(&b_val);
-                    let grad_b = grad.mul_elem_unchecked(&a_val);
+                    let grad_a = reduce_grad_to_shape(&grad.mul_elem_unchecked(&b_val), a_val.shape());
+                    let grad_b = reduce_grad_to_shape(&grad.mul_elem_unchecked(&a_val), b_val.shape());
 
                     accumulate_grad(&mut grads, a, &grad_a);
                     accumulate_grad(&mut grads, b, &grad_b);
@@ -1469,11 +1474,14 @@ impl GradGraph {
                     let b_val = self.tensors[b].clone();
 
                     // d/da (a/b) = 1/b
-                    let grad_a = grad.div_elem_unchecked(&b_val);
+                    let grad_a = reduce_grad_to_shape(&grad.div_elem_unchecked(&b_val), a_val.shape());
                     // d/db (a/b) = -a/b^2
                     let b_sq = b_val.mul_elem_unchecked(&b_val);
                     let neg_a = a_val.neg();
-                    let grad_b = grad.mul_elem_unchecked(&neg_a.div_elem_unchecked(&b_sq));
+                    let grad_b = reduce_grad_to_shape(
+                        &grad.mul_elem_unchecked(&neg_a.div_elem_unchecked(&b_sq)),
+                        b_val.shape(),
+                    );
 
                     accumulate_grad(&mut grads, a, &grad_a);
                     accumulate_grad(&mut grads, b, &grad_b);
@@ -2352,6 +2360,9 @@ impl GradGraph {
             plus[i] += eps;
             self.tensors[param_idx] =
                 Tensor::from_vec_unchecked(plus, &param_shape);
+            // Without this, backward() reads intermediate values from the unperturbed
+            // point and the result is wrong for any nonlinear graph.
+            self.reforward(param_idx + 1, loss_idx);
             self.zero_grad();
             self.backward(loss_idx);
             let grad_plus = self.param_grads[param_idx]
@@ -2364,6 +2375,7 @@ impl GradGraph {
             minus[i] -= eps;
             self.tensors[param_idx] =
                 Tensor::from_vec_unchecked(minus, &param_shape);
+            self.reforward(param_idx + 1, loss_idx);
             self.zero_grad();
             self.backward(loss_idx);
             let grad_minus = self.param_grads[param_idx]
@@ -2374,9 +2386,10 @@ impl GradGraph {
             hess_diag[i] = (grad_plus - grad_minus) / (2.0 * eps);
         }
 
-        // Restore original parameter
+        // Restore original parameter and re-forward to a clean state
         self.tensors[param_idx] =
             Tensor::from_vec_unchecked(original, &param_shape);
+        self.reforward(param_idx + 1, loss_idx);
 
         Tensor::from_vec_unchecked(hess_diag, &param_shape)
     }
@@ -2977,16 +2990,11 @@ impl GradGraph {
 
             if let Some(ref _param_grad) = self.param_grads[i] {
                 // Accumulate into parameter grad storage
-                let new_grad = {
-                    if let Some(ref existing) = self.param_grads[i] {
-                        if existing.to_vec().iter().all(|&x| x == 0.0) {
-                            grad.clone()
-                        } else {
-                            existing.add_unchecked(&grad)
-                        }
-                    } else {
-                        grad.clone()
-                    }
+                // Accumulate exactly as backward() does (existing + grad). Replacing an
+                // all-zero gradient instead kept -0.0 where backward() produces +0.0.
+                let new_grad = match self.param_grads[i] {
+                    Some(ref existing) => existing.add_unchecked(&grad),
+                    None => grad.clone(),
                 };
                 self.param_grads[i] = Some(new_grad);
             }
@@ -2997,27 +3005,35 @@ impl GradGraph {
             match &op {
                 GradOp::Input | GradOp::Parameter => {}
                 GradOp::Add(a, b) => {
-                    accumulate_grad(&mut grads, *a, &grad);
-                    accumulate_grad(&mut grads, *b, &grad);
+                    let ga = reduce_grad_to_shape(&grad, self.tensors[*a].shape());
+                    let gb = reduce_grad_to_shape(&grad, self.tensors[*b].shape());
+                    accumulate_grad(&mut grads, *a, &ga);
+                    accumulate_grad(&mut grads, *b, &gb);
                 }
                 GradOp::Sub(a, b) => {
-                    accumulate_grad(&mut grads, *a, &grad);
-                    accumulate_grad(&mut grads, *b, &grad.neg());
+                    let ga = reduce_grad_to_shape(&grad, self.tensors[*a].shape());
+                    let gb = reduce_grad_to_shape(&grad.neg(), self.tensors[*b].shape());
+                    accumulate_grad(&mut grads, *a, &ga);
+                    accumulate_grad(&mut grads, *b, &gb);
                 }
                 GradOp::Mul(a, b) => {
                     let a_val = self.tensors[*a].clone();
                     let b_val = self.tensors[*b].clone();
-                    accumulate_grad(&mut grads, *a, &grad.mul_elem_unchecked(&b_val));
-                    accumulate_grad(&mut grads, *b, &grad.mul_elem_unchecked(&a_val));
+                    let ga = reduce_grad_to_shape(&grad.mul_elem_unchecked(&b_val), a_val.shape());
+                    let gb = reduce_grad_to_shape(&grad.mul_elem_unchecked(&a_val), b_val.shape());
+                    accumulate_grad(&mut grads, *a, &ga);
+                    accumulate_grad(&mut grads, *b, &gb);
                 }
                 GradOp::Div(a, b) => {
                     let a_val = self.tensors[*a].clone();
                     let b_val = self.tensors[*b].clone();
-                    let grad_a = grad.div_elem_unchecked(&b_val);
-                    let neg_a_over_b2 = a_val.neg().div_elem_unchecked(
-                        &b_val.mul_elem_unchecked(&b_val),
+                    let grad_a = reduce_grad_to_shape(&grad.div_elem_unchecked(&b_val), a_val.shape());
+                    let b_sq = b_val.mul_elem_unchecked(&b_val);
+                    let neg_a = a_val.neg();
+                    let grad_b = reduce_grad_to_shape(
+                        &grad.mul_elem_unchecked(&neg_a.div_elem_unchecked(&b_sq)),
+                        b_val.shape(),
                     );
-                    let grad_b = grad.mul_elem_unchecked(&neg_a_over_b2);
                     accumulate_grad(&mut grads, *a, &grad_a);
                     accumulate_grad(&mut grads, *b, &grad_b);
                 }
@@ -3031,12 +3047,10 @@ impl GradGraph {
                     accumulate_grad(&mut grads, *a, &grad.mul_elem_unchecked(&node_tensor));
                 }
                 GradOp::Ln(a) => {
+                    // Same expression as backward(): grad / x. Computing grad * (1/x) rounds
+                    // twice and differs by 1 ulp, breaking bit-identity between the two paths.
                     let a_val = self.tensors[*a].clone();
-                    let inv = Tensor::from_vec_unchecked(
-                        a_val.to_vec().iter().map(|&x| 1.0 / x).collect(),
-                        a_val.shape(),
-                    );
-                    accumulate_grad(&mut grads, *a, &grad.mul_elem_unchecked(&inv));
+                    accumulate_grad(&mut grads, *a, &grad.div_elem_unchecked(&a_val));
                 }
                 GradOp::Sin(a) => {
                     let a_val = self.tensors[*a].clone();
@@ -3653,6 +3667,47 @@ impl GradGraph {
             }
         }
     }
+}
+
+/// Reduce a gradient to `target` shape by summing over broadcast axes
+/// (right-aligned NumPy rules, the same ones the forward pass broadcasts with).
+///
+/// The gradient of a broadcast is the sum over the broadcast axes. Summation runs in
+/// ascending flat order of `grad`, so the result is deterministic.
+fn reduce_grad_to_shape(grad: &Tensor, target: &[usize]) -> Tensor {
+    let gshape = grad.shape().to_vec();
+    if gshape.as_slice() == target {
+        return grad.clone();
+    }
+    let rank = gshape.len();
+    assert!(target.len() <= rank, "reduce_grad_to_shape: {target:?} has higher rank than {gshape:?}");
+    let off = rank - target.len();
+    let mut tstride = vec![0usize; rank];
+    let mut acc = 1usize;
+    for i in (0..target.len()).rev() {
+        assert!(
+            target[i] == 1 || target[i] == gshape[off + i],
+            "reduce_grad_to_shape: {target:?} does not broadcast to {gshape:?}"
+        );
+        if target[i] != 1 {
+            tstride[off + i] = acc;
+        }
+        acc *= target[i];
+    }
+    let mut out = vec![0.0_f64; target.iter().product()];
+    let mut idx = vec![0usize; rank];
+    for g in grad.to_vec() {
+        let t: usize = idx.iter().zip(&tstride).map(|(i, s)| i * s).sum();
+        out[t] += g;
+        for ax in (0..rank).rev() {
+            idx[ax] += 1;
+            if idx[ax] < gshape[ax] {
+                break;
+            }
+            idx[ax] = 0;
+        }
+    }
+    Tensor::from_vec_unchecked(out, target)
 }
 
 fn accumulate_grad(grads: &mut [Option<Tensor>], idx: usize, grad: &Tensor) {
