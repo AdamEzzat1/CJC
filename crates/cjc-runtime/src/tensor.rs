@@ -1596,8 +1596,10 @@ impl Tensor {
         let data = self.to_vec();
         let sqrt_2_over_pi = (2.0_f64 / std::f64::consts::PI).sqrt();
         let result: Vec<f64> = data.iter().map(|&x| {
-            let inner = sqrt_2_over_pi * (x + 0.044715 * x * x * x);
-            0.5 * x * (1.0 + inner.det_tanh())
+            // Same value as 0.5 * x * (1 + tanh(k)) via 1 + tanh(k) = 2 * sigmoid(2k),
+            // without the cancellation that form suffers for negative x.
+            let k = sqrt_2_over_pi * (x + 0.044715 * x * x * x);
+            x / (1.0 + (-2.0 * k).det_exp())
         }).collect();
         Tensor::from_vec(result, &self.shape).unwrap()
     }
