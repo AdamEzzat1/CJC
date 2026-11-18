@@ -22,6 +22,7 @@ fn mk_expr(kind: MirExprKind) -> MirExpr {
 
 fn mk_call(name: &str, args: Vec<MirExpr>) -> MirExpr {
     mk_expr(MirExprKind::Call {
+        span: None,
         callee: Box::new(mk_expr(MirExprKind::Var(name.to_string()))),
         args,
     })
@@ -212,6 +213,7 @@ fn g8_indirect_call_in_nogc_rejected() {
     let program = mk_program(vec![
         mk_fn("nogc_fn", true, vec![
             MirStmt::Expr(mk_expr(MirExprKind::Call {
+                span: None,
                 callee: Box::new(mk_expr(MirExprKind::Index {
                     object: Box::new(mk_expr(MirExprKind::Var("callbacks".to_string()))),
                     index: Box::new(mk_expr(MirExprKind::IntLit(0))),

@@ -381,6 +381,10 @@ pub enum MirExprKind {
         callee: Box<MirExpr>,
         /// Positional arguments.
         args: Vec<MirExpr>,
+        /// Source span of the call expression, carried from HIR for tools
+        /// (Postulate's GradGraph spans). Never read by semantics or passes;
+        /// `None` for calls a pass synthesized.
+        span: Option<cjc_ast::Span>,
     },
     /// Field access: `object.name`.
     Field {
@@ -1010,7 +1014,8 @@ impl HirToMir {
                 op: *op,
                 operand: Box::new(self.lower_expr(operand)),
             },
-            HirExprKind::Call { callee, args } => MirExprKind::Call {
+            HirExprKind::Call { callee, args, span } => MirExprKind::Call {
+                span: *span,
                 callee: Box::new(self.lower_expr(callee)),
                 args: args.iter().map(|a| self.lower_expr(a)).collect(),
             },

@@ -48,6 +48,7 @@ fn mk_unary(op: UnaryOp, operand: MirExpr) -> MirExpr {
 
 fn mk_call(name: &str, args: Vec<MirExpr>) -> MirExpr {
     mk_expr(MirExprKind::Call {
+        span: None,
         callee: Box::new(mk_expr(MirExprKind::Var(name.to_string()))),
         args,
     })

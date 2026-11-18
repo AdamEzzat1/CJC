@@ -181,7 +181,7 @@ impl<'a> Monomorphizer<'a> {
 
     fn collect_from_expr(&mut self, expr: &MirExpr) {
         match &expr.kind {
-            MirExprKind::Call { callee, args } => {
+            MirExprKind::Call { callee, args, .. } => {
                 // Check if this is a call to a generic function
                 if let MirExprKind::Var(name) = &callee.kind {
                     if self.generic_fns.contains(name) {
@@ -554,7 +554,8 @@ fn substitute_expr(expr: &MirExpr, subst: &BTreeMap<String, String>) -> MirExpr 
             op: *op,
             operand: Box::new(substitute_expr(operand, subst)),
         },
-        MirExprKind::Call { callee, args } => MirExprKind::Call {
+        MirExprKind::Call { callee, args, span } => MirExprKind::Call {
+            span: *span,
             callee: Box::new(substitute_expr(callee, subst)),
             args: args.iter().map(|a| substitute_expr(a, subst)).collect(),
         },
@@ -738,7 +739,7 @@ fn rewrite_calls_in_expr(
     fn_map: &BTreeMap<String, &MirFunction>,
 ) {
     match &mut expr.kind {
-        MirExprKind::Call { callee, args } => {
+        MirExprKind::Call { callee, args, .. } => {
             // First rewrite sub-expressions
             rewrite_calls_in_expr(callee, inst_lookup, fn_map);
             for arg in args.iter_mut() {
@@ -921,6 +922,7 @@ mod tests {
     fn mk_call(callee: &str, args: Vec<MirExpr>) -> MirExpr {
         MirExpr {
             kind: MirExprKind::Call {
+                span: None,
                 callee: Box::new(mk_var(callee)),
                 args,
             },

@@ -9,6 +9,9 @@ use cjc_runtime::Tensor;
 pub mod idx;
 pub mod pinn;
 pub mod dispatch;
+pub mod export;
+pub mod tracker;
+pub mod telemetry;
 
 pub use dispatch::dispatch_grad_graph;
 pub use idx::{LayerIdx, NodeIdx, ParamIdx};
@@ -392,6 +395,9 @@ pub struct GradGraph {
     /// Whether any node is a [`GradOp::MseMean`]; only then does a backward pass count
     /// consumers for the exclusivity check.
     has_fused: bool,
+    /// Postulate side tables (spans, groups, off-tape records). Never read by the
+    /// forward or backward arms; see [`export`].
+    meta: export::NodeMeta,
 }
 
 impl GradGraph {
@@ -401,7 +407,109 @@ impl GradGraph {
             tensors: Vec::new(),
             param_grads: Vec::new(),
             has_fused: false,
+            meta: export::NodeMeta::default(),
         }
+    }
+
+    // ── Postulate hooks (see `export`) ──────────────────────────────────
+
+    /// Give every node recorded since the previous stamp the source span of the
+    /// call that created it, and its layer group (the layer the program named
+    /// with [`Self::set_layer`], else `fn_group`). Executors call this after each
+    /// tape call. It never touches tensors or gradients.
+    pub fn stamp(&mut self, span: Option<export::SourceSpan>, fn_group: Option<&str>) {
+        self.meta.stamp(self.ops.len(), span, fn_group);
+    }
+
+    /// Name the layer that subsequent nodes belong to (`None` returns to grouping
+    /// by enclosing function). This is how a program assigns a `LayerIdx`.
+    pub fn set_layer(&mut self, name: Option<String>) {
+        self.meta.layer = name.filter(|n| !n.is_empty());
+    }
+
+    /// Source span recorded for node `i`, if an executor stamped one.
+    pub fn span(&self, i: usize) -> Option<export::SourceSpan> {
+        self.meta.spans.get(i).copied().flatten()
+    }
+
+    /// Record that `op` ran outside the tape on node `node`'s value.
+    pub fn record_off_tape(&mut self, op: &str, span: Option<export::SourceSpan>, node: usize) {
+        let rec = export::OffTape { op: op.to_owned(), span, node: node as u32 };
+        if !self.meta.off_tape.contains(&rec) {
+            self.meta.off_tape.push(rec);
+        }
+    }
+
+    /// Whether node `node` is an operand of any op on the tape.
+    pub fn has_consumer(&self, node: usize) -> bool {
+        let mut found = false;
+        for i in node + 1..self.ops.len() {
+            self.for_each_child(i, |c| found |= c == node);
+            if found {
+                break;
+            }
+        }
+        found
+    }
+
+    /// Everything the tape knows about itself, in arena order.
+    /// Bit patterns of every value on the tape and every parameter gradient,
+    /// in node order, each prefixed by its length. Two graphs with equal
+    /// `state_bits` hold the same numbers exactly — the parity gates compare
+    /// this, since printed output rounds.
+    pub fn state_bits(&self) -> Vec<u64> {
+        let mut out = Vec::new();
+        for t in self.tensors.iter().chain(self.param_grads.iter().flatten()) {
+            let v = t.to_vec();
+            out.push(v.len() as u64);
+            out.extend(v.iter().map(|x| x.to_bits()));
+        }
+        out
+    }
+
+    pub fn export(&self) -> export::GraphExport {
+        let mut nodes = Vec::with_capacity(self.ops.len());
+        for i in 0..self.ops.len() {
+            let mut inputs = Vec::new();
+            self.for_each_child(i, |c| inputs.push(c as u32));
+            let grad_norm = match self.ops[i] {
+                GradOp::Parameter => self.param_grads[i].as_ref().map(|g| export::l2_norm(&g.to_vec())),
+                _ => None,
+            };
+            nodes.push(export::NodeExport {
+                id: i as u32,
+                op: export::op_name(&self.ops[i]),
+                inputs,
+                shape: self.tensors[i].shape().to_vec(),
+                span: self.span(i),
+                group: self.meta.groups.get(i).copied().flatten(),
+                grad_norm,
+            });
+        }
+        let groups = self
+            .meta
+            .group_names
+            .iter()
+            .enumerate()
+            .map(|(gid, name)| export::GroupExport {
+                id: gid as u32,
+                name: name.clone(),
+                nodes: (0..self.ops.len() as u32)
+                    .filter(|&i| self.meta.groups.get(i as usize).copied().flatten() == Some(gid as u32))
+                    .collect(),
+            })
+            .collect();
+        // An off-tape op on a node the tape also consumes is ordinary use of a
+        // trained value (an SGD update, an eval pass); only a node the tape never
+        // consumed means the computation that matters ran outside the graph.
+        let off_tape = self
+            .meta
+            .off_tape
+            .iter()
+            .filter(|t| !self.has_consumer(t.node as usize))
+            .cloned()
+            .collect();
+        export::GraphExport { nodes, groups, off_tape }
     }
 
     /// Backward compatibility: return number of nodes.
@@ -1507,6 +1615,32 @@ impl GradGraph {
         }
     }
 
+    /// Accumulate `grad` (the shape of an element-wise op's broadcast result)
+    /// into operand `idx`, reduced to that operand's shape. A same-shape
+    /// gradient takes the old path unchanged (no reduction, no copy), so every
+    /// non-broadcast program keeps its bits.
+    fn accumulate_operand_grad(&self, grads: &mut [Option<Tensor>], idx: usize, grad: &Tensor) {
+        let shape = self.tensors[idx].shape();
+        if grad.shape() == shape {
+            accumulate_grad(grads, idx, grad);
+        } else {
+            accumulate_grad(grads, idx, &reduce_to_shape(grad, shape));
+        }
+    }
+
+    /// One-hot gradient for a container access: chunk `index` of `total` in
+    /// node `parent` gets `grad`, every other element zero.
+    fn chunk_grad(&self, parent: usize, index: usize, total: usize, grad: &Tensor) -> Tensor {
+        let shape = self.tensors[parent].shape().to_vec();
+        let n: usize = shape.iter().product();
+        let start = index * (n / total.max(1));
+        let mut out = vec![0.0_f64; n];
+        for (j, gv) in grad.to_vec().into_iter().enumerate() {
+            out[start + j] = gv;
+        }
+        Tensor::from_vec_unchecked(out, &shape)
+    }
+
     /// Run backward pass from a loss node.
     ///
     /// Includes dead-node elimination: only visits nodes reachable from the
@@ -1557,14 +1691,16 @@ impl GradGraph {
                         self.param_grads[i] = Some(grad);
                     }
                 }
+                // Element-wise ops broadcast (NumPy rules), so each operand's
+                // gradient is reduced back to that operand's shape.
                 GradOp::Add(a, b) => {
-                    accumulate_grad(&mut grads, a, &grad);
-                    accumulate_grad(&mut grads, b, &grad);
+                    self.accumulate_operand_grad(&mut grads, a, &grad);
+                    self.accumulate_operand_grad(&mut grads, b, &grad);
                 }
                 GradOp::Sub(a, b) => {
-                    accumulate_grad(&mut grads, a, &grad);
+                    self.accumulate_operand_grad(&mut grads, a, &grad);
                     let neg_grad = grad.neg();
-                    accumulate_grad(&mut grads, b, &neg_grad);
+                    self.accumulate_operand_grad(&mut grads, b, &neg_grad);
                 }
                 GradOp::Mul(a, b) => {
                     let a_val = self.tensors[a].clone();
@@ -1573,8 +1709,8 @@ impl GradGraph {
                     let grad_a = grad.mul_elem_unchecked(&b_val);
                     let grad_b = grad.mul_elem_unchecked(&a_val);
 
-                    accumulate_grad(&mut grads, a, &grad_a);
-                    accumulate_grad(&mut grads, b, &grad_b);
+                    self.accumulate_operand_grad(&mut grads, a, &grad_a);
+                    self.accumulate_operand_grad(&mut grads, b, &grad_b);
                 }
                 GradOp::Div(a, b) => {
                     let a_val = self.tensors[a].clone();
@@ -1587,8 +1723,8 @@ impl GradGraph {
                     let neg_a = a_val.neg();
                     let grad_b = grad.mul_elem_unchecked(&neg_a.div_elem_unchecked(&b_sq));
 
-                    accumulate_grad(&mut grads, a, &grad_a);
-                    accumulate_grad(&mut grads, b, &grad_b);
+                    self.accumulate_operand_grad(&mut grads, a, &grad_a);
+                    self.accumulate_operand_grad(&mut grads, b, &grad_b);
                 }
                 GradOp::Neg(a) => {
                     let neg_grad = grad.neg();
@@ -1647,26 +1783,23 @@ impl GradGraph {
                     accumulate_grad(&mut grads, a, &grad_a);
                 }
                 // Differentiable container ops: gradient flows back to parent
+                // The accessed field's / key's chunk of the parent gets the
+                // incoming gradient; every other element gets zero.
                 GradOp::StructField {
                     parent,
                     field_index,
                     total_fields,
                 } => {
-                    // Gradient for field access: create a "one-hot" gradient
-                    // where only the accessed field gets the incoming gradient.
-                    // For now, accumulate directly to parent.
-                    let _ = (field_index, total_fields);
-                    accumulate_grad(&mut grads, parent, &grad);
+                    let pg = self.chunk_grad(parent, field_index, total_fields, &grad);
+                    accumulate_grad(&mut grads, parent, &pg);
                 }
                 GradOp::MapLookup {
                     map_node,
                     key_index,
                     total_keys,
                 } => {
-                    // Gradient for map lookup: accumulate to map node.
-                    // Deterministic: key_index determines order of accumulation.
-                    let _ = (key_index, total_keys);
-                    accumulate_grad(&mut grads, map_node, &grad);
+                    let mg = self.chunk_grad(map_node, key_index, total_keys, &grad);
+                    accumulate_grad(&mut grads, map_node, &mg);
                 }
                 // Phase B8: Transcendental & activation backward
                 GradOp::Sin(a) => {
@@ -3114,18 +3247,18 @@ impl GradGraph {
             match &op {
                 GradOp::Input | GradOp::Parameter => {}
                 GradOp::Add(a, b) => {
-                    accumulate_grad(&mut grads, *a, &grad);
-                    accumulate_grad(&mut grads, *b, &grad);
+                    self.accumulate_operand_grad(&mut grads, *a, &grad);
+                    self.accumulate_operand_grad(&mut grads, *b, &grad);
                 }
                 GradOp::Sub(a, b) => {
-                    accumulate_grad(&mut grads, *a, &grad);
-                    accumulate_grad(&mut grads, *b, &grad.neg());
+                    self.accumulate_operand_grad(&mut grads, *a, &grad);
+                    self.accumulate_operand_grad(&mut grads, *b, &grad.neg());
                 }
                 GradOp::Mul(a, b) => {
                     let a_val = self.tensors[*a].clone();
                     let b_val = self.tensors[*b].clone();
-                    accumulate_grad(&mut grads, *a, &grad.mul_elem_unchecked(&b_val));
-                    accumulate_grad(&mut grads, *b, &grad.mul_elem_unchecked(&a_val));
+                    self.accumulate_operand_grad(&mut grads, *a, &grad.mul_elem_unchecked(&b_val));
+                    self.accumulate_operand_grad(&mut grads, *b, &grad.mul_elem_unchecked(&a_val));
                 }
                 GradOp::Div(a, b) => {
                     let a_val = self.tensors[*a].clone();
@@ -3135,8 +3268,8 @@ impl GradGraph {
                         &b_val.mul_elem_unchecked(&b_val),
                     );
                     let grad_b = grad.mul_elem_unchecked(&neg_a_over_b2);
-                    accumulate_grad(&mut grads, *a, &grad_a);
-                    accumulate_grad(&mut grads, *b, &grad_b);
+                    self.accumulate_operand_grad(&mut grads, *a, &grad_a);
+                    self.accumulate_operand_grad(&mut grads, *b, &grad_b);
                 }
                 GradOp::Neg(a) => {
                     accumulate_grad(&mut grads, *a, &grad.neg());
@@ -3283,29 +3416,11 @@ impl GradGraph {
                     self.mse_mean_backward(*sq, *diff, &grad, exclusive, &mut grads);
                 }
                 GradOp::StructField { parent, field_index, total_fields } => {
-                    let parent_shape = self.tensors[*parent].shape().to_vec();
-                    let parent_n: usize = parent_shape.iter().product();
-                    let chunk = parent_n / total_fields;
-                    let start = field_index * chunk;
-                    let mut parent_grad = vec![0.0_f64; parent_n];
-                    let g_vec = grad.to_vec();
-                    for (j, &gv) in g_vec.iter().enumerate() {
-                        parent_grad[start + j] = gv;
-                    }
-                    let pg = Tensor::from_vec_unchecked(parent_grad, &parent_shape);
+                    let pg = self.chunk_grad(*parent, *field_index, *total_fields, &grad);
                     accumulate_grad(&mut grads, *parent, &pg);
                 }
                 GradOp::MapLookup { map_node, key_index, total_keys } => {
-                    let map_shape = self.tensors[*map_node].shape().to_vec();
-                    let map_n: usize = map_shape.iter().product();
-                    let chunk = map_n / total_keys;
-                    let start = key_index * chunk;
-                    let mut map_grad = vec![0.0_f64; map_n];
-                    let g_vec = grad.to_vec();
-                    for (j, &gv) in g_vec.iter().enumerate() {
-                        map_grad[start + j] = gv;
-                    }
-                    let mg = Tensor::from_vec_unchecked(map_grad, &map_shape);
+                    let mg = self.chunk_grad(*map_node, *key_index, *total_keys, &grad);
                     accumulate_grad(&mut grads, *map_node, &mg);
                 }
                 // Phase 8: Extended AD backward (backward_with_seed)
@@ -3774,6 +3889,31 @@ impl GradGraph {
             }
         }
     }
+}
+
+/// Sum a broadcast gradient back down to `shape`: over the leading axes
+/// `shape` lacks, and over every axis where `shape` has 1 and `grad` does not
+/// (NumPy broadcasting, inverted). Each axis is reduced with `sum_axis`
+/// (binned accumulation), in axis order, so the result is deterministic.
+///
+/// **Panics** if `grad`'s shape is not a broadcast of `shape`.
+pub fn reduce_to_shape(grad: &Tensor, shape: &[usize]) -> Tensor {
+    let gs = grad.shape().to_vec();
+    assert!(
+        gs.len() >= shape.len(),
+        "reduce_to_shape: gradient {gs:?} has fewer axes than operand {shape:?}"
+    );
+    let lead = gs.len() - shape.len();
+    let mut g = grad.clone();
+    for (axis, &n) in gs.iter().enumerate() {
+        let want = if axis < lead { 1 } else { shape[axis - lead] };
+        if want == n {
+            continue;
+        }
+        assert!(want == 1, "reduce_to_shape: gradient {gs:?} is not a broadcast of {shape:?}");
+        g = g.sum_axis(axis).expect("axis in range");
+    }
+    g.reshape(shape).expect("same element count")
 }
 
 fn accumulate_grad(grads: &mut [Option<Tensor>], idx: usize, grad: &Tensor) {

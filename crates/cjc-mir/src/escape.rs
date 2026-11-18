@@ -356,7 +356,7 @@ fn collect_bindings_expr(expr: &MirExpr, ctx: &mut AnalysisCtx) {
                 collect_bindings_body(&arm.body, ctx);
             }
         }
-        MirExprKind::Call { callee, args } => {
+        MirExprKind::Call { callee, args, .. } => {
             collect_bindings_expr(callee, ctx);
             for a in args {
                 collect_bindings_expr(a, ctx);
@@ -580,7 +580,7 @@ fn walk_expr_for_escapes(expr: &MirExpr, ctx: &mut AnalysisCtx) {
         }
 
         // Call args: if callee is not a known-safe builtin, args may escape.
-        MirExprKind::Call { callee, args } => {
+        MirExprKind::Call { callee, args, .. } => {
             // Conservative: all args to unknown callees escape.
             let callee_name = extract_callee_name(callee);
             let is_known_safe = callee_name
@@ -805,7 +805,7 @@ fn collect_var_refs_inner(expr: &MirExpr, vars: &mut Vec<String>) {
                 collect_var_refs_inner(i, vars);
             }
         }
-        MirExprKind::Call { callee, args } => {
+        MirExprKind::Call { callee, args, .. } => {
             collect_var_refs_inner(callee, vars);
             for a in args {
                 collect_var_refs_inner(a, vars);
@@ -1020,6 +1020,7 @@ mod tests {
     fn mk_call(callee: &str, args: Vec<MirExpr>) -> MirExpr {
         MirExpr {
             kind: MirExprKind::Call {
+                span: None,
                 callee: Box::new(mk_var(callee)),
                 args,
             },

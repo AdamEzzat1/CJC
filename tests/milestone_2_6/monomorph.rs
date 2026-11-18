@@ -52,6 +52,7 @@ fn mk_string(s: &str) -> MirExpr {
 fn mk_call(callee: &str, args: Vec<MirExpr>) -> MirExpr {
     MirExpr {
         kind: MirExprKind::Call {
+            span: None,
             callee: Box::new(mk_var(callee)),
             args,
         },

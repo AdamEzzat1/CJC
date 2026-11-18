@@ -71,7 +71,7 @@ fn count_calls_in_body(body: &cjc_mir::MirBody, name: &str) -> usize {
 
 fn count_calls_in_expr(expr: &cjc_mir::MirExpr, name: &str) -> usize {
     let mut count = 0;
-    if let MirExprKind::Call { callee, args } = &expr.kind {
+    if let MirExprKind::Call { callee, args, .. } = &expr.kind {
         let cname = match &callee.kind {
             MirExprKind::Var(n) | MirExprKind::VarLocal { name: n, .. } => Some(n.as_str()),
             _ => None,

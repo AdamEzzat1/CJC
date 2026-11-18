@@ -1,0 +1,26 @@
+# cargo run --release -p postulate-overhead -- 101 --check 15   (Windows 11, 2026-11-17; mlp_xor = examples/01_mlp_xor.cjcl, unmodified)
+# run A
+runs per mode: 101 (interleaved); times are exec-only, ms; release build
+fixture   exec       off    track    tel10     tel1    mem10   track%  tel10%   tel1%  mem10%    A/A%
+mlp_xor   eval     7.582    8.505    8.370    9.920    8.116   +12.2%  +10.4%  +30.8%   +7.0%    0.6%
+  gate: ok mlp_xor/eval tel10 +10.4% <= 15%
+mlp_xor   mir      7.261    7.846    7.907    9.896    7.905    +8.0%   +8.9%  +36.3%   +8.9%    3.2%
+  gate: ok mlp_xor/mir tel10 +8.9% <= 15%
+linreg    eval     2.158    2.256    2.704    3.501    2.384    +4.6%  +25.3%  +62.3%  +10.5%    0.5%
+linreg    mir      2.147    2.268    2.700    3.596    2.432    +5.7%  +25.8%  +67.5%  +13.3%    1.4%
+tanh_fit  eval     1.740    1.756    2.244    2.721    2.023    +0.9%  +29.0%  +56.4%  +16.2%    4.5%
+tanh_fit  mir      1.395    1.554    1.944    2.392    1.713   +11.4%  +39.4%  +71.5%  +22.8%    1.9%
+exit 0
+
+# run B
+runs per mode: 101 (interleaved); times are exec-only, ms; release build
+fixture   exec       off    track    tel10     tel1    mem10   track%  tel10%   tel1%  mem10%    A/A%
+mlp_xor   eval     8.507    9.229    9.251   11.324    8.915    +8.5%   +8.8%  +33.1%   +4.8%    4.2%
+  gate: ok mlp_xor/eval tel10 +8.8% <= 15%
+mlp_xor   mir      6.620    7.185    7.405    8.942    7.125    +8.5%  +11.9%  +35.1%   +7.6%    2.0%
+  gate: ok mlp_xor/mir tel10 +11.9% <= 15%
+linreg    eval     2.263    2.327    2.844    3.768    2.512    +2.8%  +25.7%  +66.5%  +11.0%    0.5%
+linreg    mir      2.100    2.211    2.626    3.446    2.388    +5.3%  +25.1%  +64.1%  +13.7%    0.1%
+tanh_fit  eval     1.934    1.981    2.394    3.061    2.335    +2.5%  +23.8%  +58.3%  +20.7%    1.2%
+tanh_fit  mir      1.702    1.834    2.305    2.997    2.011    +7.7%  +35.4%  +76.1%  +18.2%    0.3%
+exit 0

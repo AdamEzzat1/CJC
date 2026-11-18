@@ -1,0 +1,16 @@
+// Postulate Phase 1 fixture: cnn_example.cjcl in a form that runs. That file
+// calls `Tensor.conv2d(...)` and `GradGraph.input(g, ...)`, neither of which
+// either executor provides; conv2d is a tensor method.
+// The image and kernel are registered with the graph, then the convolution
+// runs on the plain tensors, so nothing the graph records is ever trained.
+fn main() {
+    let x_val = Tensor.randn([1, 1, 8, 8]);
+    let g = GradGraph.new();
+    let input_node = g.input(x_val);
+    let k_val = Tensor.randn([2, 1, 3, 3]);
+    let kernel_node = g.parameter(k_val);
+    let conv_bias = Tensor.zeros([2]);
+    let conv_out = x_val.conv2d(k_val, conv_bias);
+    let pooled = conv_out.maxpool2d(2, 2);
+    print("conv ran off the tape");
+}

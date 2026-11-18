@@ -103,7 +103,7 @@ fn test_lower_pipe_desugaring() {
     };
     let hir = lowering.lower_expr(&ast_expr);
     match &hir.kind {
-        HirExprKind::Call { callee, args } => {
+        HirExprKind::Call { callee, args, .. } => {
             assert!(matches!(callee.kind, HirExprKind::Var(ref n) if n == "f"));
             assert_eq!(args.len(), 2);
             assert!(matches!(args[0].kind, HirExprKind::Var(ref n) if n == "x"));
@@ -125,7 +125,7 @@ fn test_lower_pipe_simple_ident() {
     };
     let hir = lowering.lower_expr(&ast_expr);
     match &hir.kind {
-        HirExprKind::Call { callee, args } => {
+        HirExprKind::Call { callee, args, .. } => {
             assert!(matches!(callee.kind, HirExprKind::Var(ref n) if n == "f"));
             assert_eq!(args.len(), 1);
             assert!(matches!(args[0].kind, HirExprKind::Var(ref n) if n == "x"));
@@ -424,7 +424,7 @@ fn test_lower_call_with_args() {
     };
     let hir = lowering.lower_expr(&ast_expr);
     match &hir.kind {
-        HirExprKind::Call { callee, args } => {
+        HirExprKind::Call { callee, args, .. } => {
             assert!(matches!(callee.kind, HirExprKind::Var(ref n) if n == "add"));
             assert_eq!(args.len(), 2);
         }

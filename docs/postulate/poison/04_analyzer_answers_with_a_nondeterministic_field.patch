@@ -1,0 +1,10 @@
+--- a/crates/cjc-analyzer/src/postulate.rs
++++ b/crates/cjc-analyzer/src/postulate.rs
+@@ -144,6 +144,7 @@
+     json!({
+         "seed": run.seed,
+         "executor": "cjc-eval",
++        "nonce": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64,
+         "error": e.error,
+         "graph": e.graph.as_ref().map(graph_json),
+         "param_names": e.graph.as_ref().map(|g| {

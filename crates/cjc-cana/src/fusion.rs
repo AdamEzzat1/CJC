@@ -263,7 +263,7 @@ fn identify_in_body(body: &MirBody, fn_name: &str) -> Vec<FusionCandidate> {
 /// arg_names contains only the Var/VarLocal name strings — literals and
 /// nested expressions are ignored (they can't be chain links).
 fn extract_primitive_call(expr: &MirExpr) -> Option<(String, Vec<String>)> {
-    let MirExprKind::Call { callee, args } = &expr.kind else {
+    let MirExprKind::Call { callee, args, .. } = &expr.kind else {
         return None;
     };
     let callee_name = match &callee.kind {
@@ -342,6 +342,7 @@ mod tests {
             name: name.to_string(),
             mutable: false,
             init: ekind(MirExprKind::Call {
+                span: None,
                 callee: Box::new(ekind(MirExprKind::Var(primitive.to_string()))),
                 args: call_args,
             }),
@@ -498,6 +499,7 @@ mod tests {
             name: "y".to_string(),
             mutable: false,
             init: ekind(MirExprKind::Call {
+                span: None,
                 callee: Box::new(ekind(MirExprKind::VarLocal {
                     name: "matmul".to_string(),
                     slot: 7,

@@ -196,6 +196,12 @@ fn value_deep_eq(a: &Value, b: &Value) -> bool {
 /// let result = interp.exec(&program)?;
 /// ```
 pub struct Interpreter {
+    /// Postulate GradGraph hooks: call spans, layer groups, off-tape ops.
+    /// See `cjc_ad::tracker`. Never affects a computed value.
+    pub ad: cjc_ad::tracker::Tracker,
+    /// Echo `print` output to stdout as well as `output` (default on). A host
+    /// that owns stdout, such as the language server, turns it off.
+    pub echo: bool,
     /// User-defined functions indexed by name.
     functions: BTreeMap<String, FnDecl>,
 
@@ -256,6 +262,8 @@ impl Interpreter {
         variant_to_enum.insert("Err".into(), "Result".into());
 
         Self {
+            ad: cjc_ad::tracker::Tracker::default(),
+            echo: true,
             functions: BTreeMap::new(),
             struct_defs: BTreeMap::new(),
             variant_to_enum,
@@ -1066,7 +1074,7 @@ impl Interpreter {
 
             ExprKind::Binary { op, left, right } => self.eval_binary(*op, left, right),
             ExprKind::Unary { op, operand } => self.eval_unary(*op, operand),
-            ExprKind::Call { callee, args } => self.eval_call(callee, args),
+            ExprKind::Call { callee, args } => self.eval_call(callee, args, expr.span),
             ExprKind::Field { object, name } => self.eval_field(object, &name.name),
             ExprKind::Index { object, index } => self.eval_index(object, index),
             ExprKind::MultiIndex { object, indices } => self.eval_multi_index(object, indices),
@@ -1077,7 +1085,7 @@ impl Interpreter {
                 Ok(Value::Void)
             }
 
-            ExprKind::Pipe { left, right } => self.eval_pipe(left, right),
+            ExprKind::Pipe { left, right } => self.eval_pipe(left, right, expr.span),
             ExprKind::Block(block) => self.exec_block(block),
 
             ExprKind::StructLit { name, fields } => {
@@ -1812,12 +1820,14 @@ impl Interpreter {
 
     // -- Function / method calls --------------------------------------------
 
-    fn eval_call(&mut self, callee: &Expr, args: &[CallArg]) -> EvalResult {
+    fn eval_call(&mut self, callee: &Expr, args: &[CallArg], span: cjc_ast::Span) -> EvalResult {
         // Evaluate arguments eagerly.
         let mut arg_vals: Vec<Value> = Vec::with_capacity(args.len());
         for arg in args {
             arg_vals.push(self.eval_expr(&arg.value)?);
         }
+        // Set after the arguments, so a nested call cannot leave its span behind.
+        self.ad.set_span(span.start, span.end);
 
         match &callee.kind {
             ExprKind::Ident(id) => {
@@ -1846,6 +1856,7 @@ impl Interpreter {
 
                 // Instance method: evaluate the object and call the method.
                 let obj_val = self.eval_expr(object)?;
+                self.ad.set_span(span.start, span.end);
                 self.dispatch_method(obj_val, &name.name, arg_vals)
             }
             _ => {
@@ -2241,7 +2252,26 @@ impl Interpreter {
         ))
     }
 
+    /// Postulate hook around [`Self::dispatch_call_inner`]: notes new graphs and
+    /// tensor builtins that read a graph-owned value off the tape.
     fn dispatch_call(&mut self, name: &str, args: Vec<Value>) -> EvalResult {
+        if !self.ad.enabled {
+            return self.dispatch_call_inner(name, args);
+        }
+        let operands: Vec<cjc_runtime::Tensor> = args
+            .iter()
+            .filter_map(|a| if let Value::Tensor(t) = a { Some(t.clone()) } else { None })
+            .collect();
+        let out = self.dispatch_call_inner(name, args)?;
+        match &out {
+            Value::GradGraph(h) => self.ad.on_graph_new(h),
+            Value::Tensor(_) => self.ad.after_tensor_op(name, operands.iter()),
+            _ => {}
+        }
+        Ok(out)
+    }
+
+    fn dispatch_call_inner(&mut self, name: &str, args: Vec<Value>) -> EvalResult {
         // User-defined functions always take priority over builtins
         // (allows shadowing builtin names like "outer", "min", etc.)
         if self.functions.contains_key(name) {
@@ -2279,7 +2309,7 @@ impl Interpreter {
             "print" => {
                 let parts: Vec<String> = args.iter().map(|v| format!("{v}")).collect();
                 let line = parts.join(" ");
-                println!("{line}");
+                if self.echo { println!("{line}"); }
                 self.output.push(line);
                 return Ok(Value::Void);
             }
@@ -3084,7 +3114,51 @@ impl Interpreter {
         }
     }
 
+    /// Postulate hook around [`Self::dispatch_method_inner`]: stamps GradGraph
+    /// nodes with their call span and group, handles `g.layer(name)`, and notes
+    /// tensor methods that read a graph-owned value off the tape.
     fn dispatch_method(&mut self, receiver: Value, method: &str, args: Vec<Value>) -> EvalResult {
+        match &receiver {
+            Value::GradGraph(h) => {
+                let h = h.clone();
+                if method == "layer" {
+                    let name = match args.as_slice() {
+                        [Value::String(s)] => Some(s.as_str().to_string()),
+                        [Value::Void] | [] => None,
+                        _ => return Err(EvalError::Runtime("layer requires 1 arg: name (String)".into())),
+                    };
+                    if let Some(g) = h.borrow_mut().downcast_mut::<cjc_ad::GradGraph>() {
+                        g.set_layer(name);
+                    }
+                    return Ok(Value::Void);
+                }
+                let arg_tensor = match args.first() {
+                    Some(Value::Tensor(t)) if matches!(method, "input" | "parameter") => Some(t.clone()),
+                    _ => None,
+                };
+                let first_int = match args.first() {
+                    Some(Value::Int(i)) if *i >= 0 => Some(*i as usize),
+                    _ => None,
+                };
+                let out = self.dispatch_method_inner(receiver, method, args)?;
+                let node = if let Value::Int(i) = &out { Some(*i as usize) } else { None };
+                self.ad.after_graph_method(&h, method, arg_tensor.as_ref(), first_int, node);
+                Ok(out)
+            }
+            Value::Tensor(t) if self.ad.enabled => {
+                let mut operands = vec![t.clone()];
+                operands.extend(args.iter().filter_map(|a| if let Value::Tensor(t) = a { Some(t.clone()) } else { None }));
+                let out = self.dispatch_method_inner(receiver, method, args)?;
+                if matches!(out, Value::Tensor(_)) {
+                    self.ad.after_tensor_op(&format!("Tensor.{method}"), operands.iter());
+                }
+                Ok(out)
+            }
+            _ => self.dispatch_method_inner(receiver, method, args),
+        }
+    }
+
+    fn dispatch_method_inner(&mut self, receiver: Value, method: &str, args: Vec<Value>) -> EvalResult {
         match (&receiver, method) {
             // Tensor methods
             (Value::Tensor(t), "sum") => Ok(Value::Float(t.sum())),
@@ -4175,7 +4249,7 @@ impl Interpreter {
                     Ok(Some(Value::String(s))) if method == "print" => {
                         // print returns a formatted string; output it
                         let line = s.as_ref().clone();
-                        println!("{line}");
+                        if self.echo { println!("{line}"); }
                         self.output.push(line);
                         Ok(Value::Void)
                     }
@@ -4230,7 +4304,16 @@ impl Interpreter {
         }
     }
 
+    /// Postulate hook around [`Self::call_function_inner`]: the enclosing
+    /// function is a GradGraph node's default layer group.
     fn call_function(&mut self, name: &str, args: &[Value]) -> EvalResult {
+        self.ad.enter_fn(name);
+        let out = self.call_function_inner(name, args);
+        self.ad.exit_fn();
+        out
+    }
+
+    fn call_function_inner(&mut self, name: &str, args: &[Value]) -> EvalResult {
         let func = self.functions.get(name).cloned().ok_or_else(|| {
             EvalError::Runtime(format!("undefined function `{name}`"))
         })?;
@@ -4537,7 +4620,7 @@ impl Interpreter {
 
     // -- Pipe operator ------------------------------------------------------
 
-    fn eval_pipe(&mut self, left: &Expr, right: &Expr) -> EvalResult {
+    fn eval_pipe(&mut self, left: &Expr, right: &Expr, span: cjc_ast::Span) -> EvalResult {
         // `a |> f(b, c)` desugars to `f(a, b, c)`.
         let left_val = self.eval_expr(left)?;
 
@@ -4549,6 +4632,7 @@ impl Interpreter {
                 for arg in args {
                     new_args.push(self.eval_expr(&arg.value)?);
                 }
+                self.ad.set_span(span.start, span.end);
 
                 match &callee.kind {
                     ExprKind::Ident(id) => self.dispatch_call(&id.name, new_args),
@@ -4562,6 +4646,7 @@ impl Interpreter {
                             }
                         }
                         let obj_val = self.eval_expr(object)?;
+                        self.ad.set_span(span.start, span.end);
                         self.dispatch_method(obj_val, &name.name, new_args)
                     }
                     _ => {
@@ -4577,6 +4662,7 @@ impl Interpreter {
             }
             ExprKind::Ident(id) => {
                 // `a |> f` is shorthand for `f(a)`.
+                self.ad.set_span(span.start, span.end);
                 self.dispatch_call(&id.name, vec![left_val])
             }
             _ => Err(EvalError::Runtime(

@@ -21,3 +21,11 @@ cjc-lexer.workspace = true
 cjc-parser.workspace = true
 cjc-runtime.workspace = true
 cjc-vizor.workspace = true
+
+# Postulate Phase 1: run documents in both executors (src/postulate.rs)
+cjc-ad.workspace = true
+cjc-eval.workspace = true
+cjc-hir.workspace = true
+cjc-mir.workspace = true
+cjc-mir-exec.workspace = true
+cjc-snap.workspace = true

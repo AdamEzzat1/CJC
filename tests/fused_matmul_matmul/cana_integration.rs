@@ -22,6 +22,7 @@ fn matmul_chain_is_identified_as_fusion_candidate() {
     let var = |n: &str| MirExpr { kind: MirExprKind::Var(n.to_string()) };
     let call = |callee: &str, args: Vec<MirExpr>| MirExpr {
         kind: MirExprKind::Call {
+            span: None,
             callee: Box::new(var(callee)),
             args,
         },

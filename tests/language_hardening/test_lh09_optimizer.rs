@@ -270,7 +270,7 @@ fn expr_contains_int_lit(expr: &cjc_mir::MirExpr, value: i64) -> bool {
             expr_contains_int_lit(left, value) || expr_contains_int_lit(right, value)
         }
         cjc_mir::MirExprKind::Unary { operand, .. } => expr_contains_int_lit(operand, value),
-        cjc_mir::MirExprKind::Call { callee, args } => {
+        cjc_mir::MirExprKind::Call { callee, args, .. } => {
             expr_contains_int_lit(callee, value)
                 || args.iter().any(|a| expr_contains_int_lit(a, value))
         }

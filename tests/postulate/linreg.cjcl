@@ -1,0 +1,25 @@
+// Postulate Phase 1 fixture: least-squares line fit with GradGraph.
+fn main() {
+    let X = Tensor.from_vec([0.0, 1.0, 2.0, 3.0, 4.0, 5.0], [6, 1]);
+    let Y = Tensor.from_vec([1.0, 3.1, 4.9, 7.2, 8.8, 11.1], [6, 1]);
+    let w = Tensor.randn([1, 1]) * 0.1;
+    let b = Tensor.zeros([6, 1]);
+    let step = 0;
+    while step < 120 {
+        let g = GradGraph.new();
+        let w_id = g.parameter(w);
+        let b_id = g.parameter(b);
+        let x_id = g.input(X);
+        let y_id = g.input(Y);
+        let pred = g.add(g.matmul(x_id, w_id), b_id);
+        let diff = g.sub(pred, y_id);
+        let loss = g.mean(g.mul(diff, diff));
+        g.backward(loss);
+        w = w - g.grad(w_id) * 0.02;
+        b = b - g.grad(b_id) * 0.02;
+        if step % 30 == 0 {
+            print("step " + to_string(step) + " loss=" + to_string(g.value(loss)));
+        }
+        step = step + 1;
+    }
+}

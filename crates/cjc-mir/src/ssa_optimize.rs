@@ -92,7 +92,7 @@ fn constant_fold_expr(expr: &mut MirExpr) {
         MirExprKind::Unary { operand, .. } => {
             constant_fold_expr(operand);
         }
-        MirExprKind::Call { callee, args } => {
+        MirExprKind::Call { callee, args, .. } => {
             constant_fold_expr(callee);
             for arg in args {
                 constant_fold_expr(arg);
@@ -535,7 +535,7 @@ fn replace_constants(expr: &mut MirExpr, lattice: &BTreeMap<String, Lattice>) {
         MirExprKind::Unary { operand, .. } => {
             replace_constants(operand, lattice);
         }
-        MirExprKind::Call { callee, args } => {
+        MirExprKind::Call { callee, args, .. } => {
             replace_constants(callee, lattice);
             for arg in args {
                 replace_constants(arg, lattice);
@@ -589,7 +589,7 @@ fn strength_reduce_expr(expr: &mut MirExpr) {
         MirExprKind::Unary { operand, .. } => {
             strength_reduce_expr(operand);
         }
-        MirExprKind::Call { callee, args } => {
+        MirExprKind::Call { callee, args, .. } => {
             strength_reduce_expr(callee);
             for arg in args {
                 strength_reduce_expr(arg);
@@ -791,7 +791,7 @@ fn count_uses_in_expr(expr: &MirExpr, counts: &mut BTreeMap<String, usize>) {
         MirExprKind::Unary { operand, .. } => {
             count_uses_in_expr(operand, counts);
         }
-        MirExprKind::Call { callee, args } => {
+        MirExprKind::Call { callee, args, .. } => {
             count_uses_in_expr(callee, counts);
             for arg in args {
                 count_uses_in_expr(arg, counts);
@@ -1214,6 +1214,7 @@ mod tests {
                     },
                     CfgStmt::Expr(MirExpr {
                         kind: MirExprKind::Call {
+                            span: None,
                             callee: Box::new(var_expr("print")),
                             args: vec![var_expr("used")],
                         },
@@ -1248,6 +1249,7 @@ mod tests {
                     mutable: false,
                     init: MirExpr {
                         kind: MirExprKind::Call {
+                            span: None,
                             callee: Box::new(var_expr("print")),
                             args: vec![int_expr(42)],
                         },

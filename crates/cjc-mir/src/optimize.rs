@@ -278,7 +278,7 @@ fn count_expr_node_total(expr: &MirExpr) -> usize {
             count_expr_node_total(left) + count_expr_node_total(right)
         }
         MirExprKind::Unary { operand, .. } => count_expr_node_total(operand),
-        MirExprKind::Call { callee, args } => {
+        MirExprKind::Call { callee, args, .. } => {
             count_expr_node_total(callee) + args.iter().map(count_expr_node_total).sum::<usize>()
         }
         MirExprKind::Assign { target, value } => {
@@ -460,7 +460,7 @@ fn constant_fold_expr(expr: &mut MirExpr) {
         MirExprKind::Unary { operand, .. } => {
             constant_fold_expr(operand);
         }
-        MirExprKind::Call { callee, args } => {
+        MirExprKind::Call { callee, args, .. } => {
             constant_fold_expr(callee);
             for arg in args {
                 constant_fold_expr(arg);
@@ -958,7 +958,7 @@ fn collect_used_vars_expr(expr: &MirExpr, used: &mut BTreeSet<String>) {
         MirExprKind::Unary { operand, .. } => {
             collect_used_vars_expr(operand, used);
         }
-        MirExprKind::Call { callee, args } => {
+        MirExprKind::Call { callee, args, .. } => {
             collect_used_vars_expr(callee, used);
             for arg in args {
                 collect_used_vars_expr(arg, used);
@@ -1115,7 +1115,7 @@ fn strength_reduce_expr(expr: &mut MirExpr) -> usize {
             strength_reduce_expr(left) + strength_reduce_expr(right)
         }
         MirExprKind::Unary { operand, .. } => strength_reduce_expr(operand),
-        MirExprKind::Call { callee, args } => {
+        MirExprKind::Call { callee, args, .. } => {
             let mut c = strength_reduce_expr(callee);
             for arg in args { c += strength_reduce_expr(arg); }
             c
@@ -1340,7 +1340,7 @@ fn apply_cse_replacements_expr(expr: &mut MirExpr, replacements: &BTreeMap<Strin
         MirExprKind::Unary { operand, .. } => {
             apply_cse_replacements_expr(operand, replacements);
         }
-        MirExprKind::Call { callee, args } => {
+        MirExprKind::Call { callee, args, .. } => {
             apply_cse_replacements_expr(callee, replacements);
             for arg in args { apply_cse_replacements_expr(arg, replacements); }
         }
@@ -1520,7 +1520,7 @@ fn collect_modified_vars_expr(expr: &MirExpr, modified: &mut BTreeSet<String>) {
             collect_modified_vars_expr(left, modified);
             collect_modified_vars_expr(right, modified);
         }
-        MirExprKind::Call { callee, args } => {
+        MirExprKind::Call { callee, args, .. } => {
             collect_modified_vars_expr(callee, modified);
             for arg in args { collect_modified_vars_expr(arg, modified); }
         }
@@ -1575,7 +1575,7 @@ fn collect_assigned_vars_expr(expr: &MirExpr, assigned: &mut BTreeSet<String>) {
             collect_assigned_vars_expr(left, assigned);
             collect_assigned_vars_expr(right, assigned);
         }
-        MirExprKind::Call { callee, args } => {
+        MirExprKind::Call { callee, args, .. } => {
             collect_assigned_vars_expr(callee, assigned);
             for arg in args { collect_assigned_vars_expr(arg, assigned); }
         }
@@ -2088,6 +2088,7 @@ mod tests {
                     slot: None,
                 },
                 MirStmt::Expr(mk_expr(MirExprKind::Call {
+                    span: None,
                     callee: Box::new(mk_expr(MirExprKind::Var("print".to_string()))),
                     args: vec![mk_expr(MirExprKind::StringLit("hi".to_string()))],
                 })),

@@ -1,0 +1,9 @@
+$ cargo test --test postulate_phase1 -- span_is_the_method_call
+exit code: 101
+
+test span_is_the_method_call_when_its_receiver_is_itself_a_call ... FAILED
+thread 'span_is_the_method_call_when_its_receiver_is_itself_a_call' (58096) panicked at tests\postulate_phase1.rs:257:9:
+  left: "same(g)"
+ right: "same(g).parameter(w)"
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.01s
+error: test failed, to rerun pass `--test postulate_phase1`

@@ -140,7 +140,7 @@ fn collect_calls_stmt(stmt: &MirStmt, in_nogc_block: bool, info: &mut FnCallInfo
 
 fn collect_calls_expr(expr: &MirExpr, in_nogc_block: bool, info: &mut FnCallInfo) {
     match &expr.kind {
-        MirExprKind::Call { callee, args } => {
+        MirExprKind::Call { callee, args, .. } => {
             // Determine call target
             match &callee.kind {
                 MirExprKind::Var(name) => {
@@ -573,6 +573,7 @@ mod tests {
 
     fn mk_call(name: &str, args: Vec<MirExpr>) -> MirExpr {
         mk_expr(MirExprKind::Call {
+            span: None,
             callee: Box::new(mk_expr(MirExprKind::Var(name.to_string()))),
             args,
         })
@@ -662,6 +663,7 @@ mod tests {
         let program = mk_program(vec![
             mk_fn("caller", true, vec![
                 MirStmt::Expr(mk_expr(MirExprKind::Call {
+                    span: None,
                     callee: Box::new(mk_expr(MirExprKind::Index {
                         object: Box::new(mk_expr(MirExprKind::Var("fns".to_string()))),
                         index: Box::new(mk_expr(MirExprKind::IntLit(0))),

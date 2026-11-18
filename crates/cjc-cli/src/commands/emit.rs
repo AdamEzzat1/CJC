@@ -412,7 +412,7 @@ fn format_mir_expr(expr: &cjc_mir::MirExpr) -> String {
         cjc_mir::MirExprKind::Unary { op, operand } => {
             format!("({}{})", op, format_mir_expr(operand))
         }
-        cjc_mir::MirExprKind::Call { callee, args } => {
+        cjc_mir::MirExprKind::Call { callee, args, .. } => {
             let arg_strs: Vec<String> = args.iter().map(format_mir_expr).collect();
             format!("{}({})", format_mir_expr(callee), arg_strs.join(", "))
         }

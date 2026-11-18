@@ -35,6 +35,11 @@ pub struct Buffer<T: Clone> {
 }
 
 impl<T: Clone> Buffer<T> {
+    /// Whether `self` and `other` share one allocation (identity, not contents).
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.inner, &other.inner)
+    }
+
     /// Allocate a buffer of `len` elements, each initialized to `default`.
     pub fn alloc(len: usize, default: T) -> Self {
         Buffer {

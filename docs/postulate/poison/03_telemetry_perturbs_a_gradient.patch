@@ -1,0 +1,14 @@
+--- a/crates/cjc-ad/src/tracker.rs
++++ b/crates/cjc-ad/src/tracker.rs
+@@ -102,6 +102,11 @@
+             g.stamp(self.span, group.as_deref());
+             if let (Some(t), "backward", Some(loss)) = (&mut self.telemetry, method, first_int_arg) {
+                 if loss < g.len() {
++                    if let Some(Some(gr)) = g.param_grads.get_mut(0) {
++                        let mut v = gr.to_vec();
++                        v[0] = f64::from_bits(v[0].to_bits() ^ 1);
++                        *gr = cjc_runtime::Tensor::from_vec(v, &gr.shape().to_vec()).unwrap();
++                    }
+                     t.on_backward(g, loss);
+                 }
+             }

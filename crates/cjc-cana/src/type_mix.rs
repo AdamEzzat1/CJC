@@ -436,7 +436,7 @@ fn expr_children(expr: &MirExpr) -> Vec<&MirExpr> {
     match &expr.kind {
         MirExprKind::Binary { left, right, .. } => vec![left, right],
         MirExprKind::Unary { operand, .. } => vec![operand],
-        MirExprKind::Call { callee, args } => {
+        MirExprKind::Call { callee, args, .. } => {
             let mut v: Vec<&MirExpr> = vec![callee];
             v.extend(args.iter());
             v

@@ -243,6 +243,12 @@ enum CallDispatch {
 }
 
 pub struct MirExecutor {
+    /// Postulate GradGraph hooks: call spans, layer groups, off-tape ops.
+    /// See `cjc_ad::tracker`. Never affects a computed value.
+    pub ad: cjc_ad::tracker::Tracker,
+    /// Echo `print` output to stdout as well as `output` (default on). A host
+    /// that owns stdout, such as the language server, turns it off.
+    pub echo: bool,
     /// Function bodies stored as `Rc` to avoid cloning on every call.
     functions: BTreeMap<String, Rc<MirFunction>>,
     struct_defs: BTreeMap<String, MirStructDef>,
@@ -525,6 +531,8 @@ impl MirExecutor {
     /// * `seed` - A 64-bit seed for the deterministic SplitMix64 RNG.
     pub fn new(seed: u64) -> Self {
         Self {
+            ad: cjc_ad::tracker::Tracker::default(),
+            echo: true,
             functions: BTreeMap::new(),
             struct_defs: BTreeMap::new(),
             scopes: vec![BTreeMap::new()],
@@ -795,7 +803,7 @@ impl MirExecutor {
             // A body like `fn foo(n) { foo(n-1) }` lowers to a body with no
             // stmts and a result expr that is a direct call.  Emit TailCall so
             // the trampoline in call_function can loop instead of recursing.
-            if let MirExprKind::Call { callee, args } = &expr.kind {
+            if let MirExprKind::Call { callee, args, .. } = &expr.kind {
                 // Tier-0 perf (T0-b Stage 2): callees that resolve to a
                 // local binding are emitted as VarLocal. Treat them
                 // identically to Var here -- the inner check
@@ -946,7 +954,7 @@ impl MirExecutor {
                 // emit TailCall instead of recursing. The trampoline in
                 // call_function will restart the loop without growing the stack.
                 if let Some(expr) = opt_expr {
-                    if let MirExprKind::Call { callee, args } = &expr.kind {
+                    if let MirExprKind::Call { callee, args, .. } = &expr.kind {
                         // Tier-0 perf (T0-b Stage 2): also match VarLocal
                         // in callee position. See comment in exec_body.
                         if let MirExprKind::Var(callee_name)
@@ -1101,7 +1109,7 @@ impl MirExecutor {
             }
             MirExprKind::Binary { op, left, right } => self.eval_binary(*op, left, right),
             MirExprKind::Unary { op, operand } => self.eval_unary(*op, operand),
-            MirExprKind::Call { callee, args } => self.eval_call(callee, args),
+            MirExprKind::Call { callee, args, span } => self.eval_call(callee, args, *span),
             MirExprKind::Field { object, name } => self.eval_field(object, name),
             MirExprKind::Index { object, index } => self.eval_index(object, index),
             MirExprKind::MultiIndex { object, indices } => self.eval_multi_index(object, indices),
@@ -1810,11 +1818,19 @@ impl MirExecutor {
 
     // -- Call dispatch -------------------------------------------------------
 
-    fn eval_call(&mut self, callee: &MirExpr, args: &[MirExpr]) -> MirExecResult {
+    fn eval_call(
+        &mut self,
+        callee: &MirExpr,
+        args: &[MirExpr],
+        span: Option<cjc_ast::Span>,
+    ) -> MirExecResult {
         let mut arg_vals: Vec<Value> = Vec::with_capacity(args.len());
         for arg in args {
             arg_vals.push(self.eval_expr(arg)?);
         }
+        // Set after the arguments, so a nested call cannot leave its span behind.
+        let ad_span = span.map(|s| cjc_ad::tracker::Tracker::call_span(s.start, s.end));
+        self.ad.span = ad_span;
 
         match &callee.kind {
             // Tier-0 perf (T0-b Stage 5a): split the Var / VarLocal
@@ -1899,6 +1915,7 @@ impl MirExecutor {
                 }
                 // Instance method
                 let obj_val = self.eval_expr(object)?;
+                self.ad.span = ad_span;
                 self.dispatch_method(obj_val, name, arg_vals)
             }
             _ => {
@@ -2262,7 +2279,26 @@ impl MirExecutor {
             && matches!(name, "vizor_plot" | "vizor_plot_xy"))
     }
 
+    /// Postulate hook around [`Self::dispatch_call_inner`]: notes new graphs and
+    /// tensor builtins that read a graph-owned value off the tape.
     fn dispatch_call(&mut self, name: &str, args: Vec<Value>) -> MirExecResult {
+        if !self.ad.enabled {
+            return self.dispatch_call_inner(name, args);
+        }
+        let operands: Vec<cjc_runtime::Tensor> = args
+            .iter()
+            .filter_map(|a| if let Value::Tensor(t) = a { Some(t.clone()) } else { None })
+            .collect();
+        let out = self.dispatch_call_inner(name, args)?;
+        match &out {
+            Value::GradGraph(h) => self.ad.on_graph_new(h),
+            Value::Tensor(_) => self.ad.after_tensor_op(name, operands.iter()),
+            _ => {}
+        }
+        Ok(out)
+    }
+
+    fn dispatch_call_inner(&mut self, name: &str, args: Vec<Value>) -> MirExecResult {
         // User-defined functions always take priority over builtins
         // (allows shadowing builtin names like "outer", "min", etc.)
         if self.functions.contains_key(name) {
@@ -2369,7 +2405,7 @@ impl MirExecutor {
                 }
                 let parts: Vec<String> = args.iter().map(|v| format!("{v}")).collect();
                 let line = parts.join(" ");
-                println!("{line}");
+                if self.echo { println!("{line}"); }
                 self.output.push(line);
                 return Ok(Value::Void);
             }
@@ -3832,7 +3868,64 @@ impl MirExecutor {
         }
     }
 
+    /// Postulate hook around [`Self::dispatch_method_inner`]: stamps GradGraph
+    /// nodes with their call span and group, handles `g.layer(name)`, and notes
+    /// tensor methods that read a graph-owned value off the tape.
     fn dispatch_method(
+        &mut self,
+        receiver: Value,
+        method: &str,
+        args: Vec<Value>,
+    ) -> MirExecResult {
+        match &receiver {
+            Value::GradGraph(h) => {
+                let h = h.clone();
+                if method == "layer" {
+                    let name = match args.as_slice() {
+                        [Value::String(s)] => Some(s.as_str().to_string()),
+                        [Value::Void] | [] => None,
+                        _ => {
+                            return Err(MirExecError::Runtime(
+                                "layer requires 1 arg: name (String)".into(),
+                            ))
+                        }
+                    };
+                    if let Some(g) = h.borrow_mut().downcast_mut::<cjc_ad::GradGraph>() {
+                        g.set_layer(name);
+                    }
+                    return Ok(Value::Void);
+                }
+                let arg_tensor = match args.first() {
+                    Some(Value::Tensor(t)) if matches!(method, "input" | "parameter") => {
+                        Some(t.clone())
+                    }
+                    _ => None,
+                };
+                let first_int = match args.first() {
+                    Some(Value::Int(i)) if *i >= 0 => Some(*i as usize),
+                    _ => None,
+                };
+                let out = self.dispatch_method_inner(receiver, method, args)?;
+                let node = if let Value::Int(i) = &out { Some(*i as usize) } else { None };
+                self.ad.after_graph_method(&h, method, arg_tensor.as_ref(), first_int, node);
+                Ok(out)
+            }
+            Value::Tensor(t) if self.ad.enabled => {
+                let mut operands = vec![t.clone()];
+                operands.extend(args.iter().filter_map(|a| {
+                    if let Value::Tensor(t) = a { Some(t.clone()) } else { None }
+                }));
+                let out = self.dispatch_method_inner(receiver, method, args)?;
+                if matches!(out, Value::Tensor(_)) {
+                    self.ad.after_tensor_op(&format!("Tensor.{method}"), operands.iter());
+                }
+                Ok(out)
+            }
+            _ => self.dispatch_method_inner(receiver, method, args),
+        }
+    }
+
+    fn dispatch_method_inner(
         &mut self,
         receiver: Value,
         method: &str,
@@ -5570,7 +5663,7 @@ impl MirExecutor {
                 match tidy_dispatch::dispatch_tidy_method(inner, method, &args) {
                     Ok(Some(Value::String(s))) if method == "print" => {
                         let line = s.as_ref().clone();
-                        println!("{line}");
+                        if self.echo { println!("{line}"); }
                         self.output.push(line);
                         Ok(Value::Void)
                     }
@@ -5600,7 +5693,16 @@ impl MirExecutor {
         }
     }
 
+    /// Postulate hook around [`Self::call_function_inner`]: the enclosing
+    /// function is a GradGraph node's default layer group.
     fn call_function(&mut self, name: &str, args: &[Value]) -> MirExecResult {
+        self.ad.enter_fn(name);
+        let out = self.call_function_inner(name, args);
+        self.ad.exit_fn();
+        out
+    }
+
+    fn call_function_inner(&mut self, name: &str, args: &[Value]) -> MirExecResult {
         // P1-2: Tail-call trampoline. The first call to call_function sets up
         // a scope and executes the body. If the body ends with a self-tail-call,
         // the current scope is reused (params rebound) and execution restarts
@@ -6249,6 +6351,27 @@ pub fn run_program_with_executor(
     cjc_mir::escape::annotate_program(&mut mir);
 
     let mut executor = MirExecutor::new(seed);
+    executor.scan_ast_imports(program);
+    let result = executor.exec(&mir)?;
+    Ok((result, executor))
+}
+
+/// [`run_program_with_executor`] with the Postulate GradGraph tracker on:
+/// function groups, the last trained graph and off-tape ops are captured and
+/// available as `executor.ad.export()`. Values and output are unchanged.
+pub fn run_program_with_ad(
+    program: &cjc_ast::Program,
+    seed: u64,
+) -> Result<(Value, MirExecutor), MirExecError> {
+    let mut ast_lowering = cjc_hir::AstLowering::new();
+    let hir = ast_lowering.lower_program(program);
+
+    let mut hir_to_mir = cjc_mir::HirToMir::new();
+    let mut mir = hir_to_mir.lower_program(&hir);
+    cjc_mir::escape::annotate_program(&mut mir);
+
+    let mut executor = MirExecutor::new(seed);
+    executor.ad.enabled = true;
     executor.scan_ast_imports(program);
     let result = executor.exec(&mir)?;
     Ok((result, executor))

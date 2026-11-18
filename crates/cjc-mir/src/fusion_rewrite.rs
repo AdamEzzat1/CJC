@@ -187,7 +187,7 @@ fn match_matmul_norm_pair<'a>(
 
     // stmt1 init must be Call(matmul, [a, w])
     let (m_callee, m_args) = match &init_m.kind {
-        MirExprKind::Call { callee, args } => (callee, args),
+        MirExprKind::Call { callee, args, .. } => (callee, args),
         _ => return None,
     };
     if callee_name(m_callee) != Some("matmul") {
@@ -199,7 +199,7 @@ fn match_matmul_norm_pair<'a>(
 
     // stmt2 init must be Call(norm, [Var(h_name), ord?])
     let (n_callee, n_args) = match &init_n.kind {
-        MirExprKind::Call { callee, args } => (callee, args),
+        MirExprKind::Call { callee, args, .. } => (callee, args),
         _ => return None,
     };
     if callee_name(n_callee) != Some("norm") {
@@ -253,6 +253,7 @@ fn build_fused_let(m: MatmulNormMatch<'_>) -> MirStmt {
     }
     let call = MirExpr {
         kind: MirExprKind::Call {
+            span: None,
             callee: Box::new(MirExpr {
                 kind: MirExprKind::Var("fused_matmul_norm".to_string()),
             }),
@@ -293,7 +294,7 @@ fn match_matmul_matmul_pair<'a>(
 
     // stmt1: Call(matmul, [a, b])
     let (h_callee, h_args) = match &init_h.kind {
-        MirExprKind::Call { callee, args } => (callee, args),
+        MirExprKind::Call { callee, args, .. } => (callee, args),
         _ => return None,
     };
     if callee_name(h_callee) != Some("matmul") || h_args.len() != 2 {
@@ -302,7 +303,7 @@ fn match_matmul_matmul_pair<'a>(
 
     // stmt2: Call(matmul, [Var(h_name), c])
     let (r_callee, r_args) = match &init_r.kind {
-        MirExprKind::Call { callee, args } => (callee, args),
+        MirExprKind::Call { callee, args, .. } => (callee, args),
         _ => return None,
     };
     if callee_name(r_callee) != Some("matmul") || r_args.len() != 2 {
@@ -326,6 +327,7 @@ fn match_matmul_matmul_pair<'a>(
 fn build_fused_matmul_matmul_let(m: MatmulMatmulMatch<'_>) -> MirStmt {
     let call = MirExpr {
         kind: MirExprKind::Call {
+            span: None,
             callee: Box::new(MirExpr {
                 kind: MirExprKind::Var("fused_matmul_matmul".to_string()),
             }),
@@ -412,7 +414,7 @@ fn count_uses_in_expr(expr: &MirExpr, counts: &mut BTreeMap<String, usize>) {
             count_uses_in_expr(right, counts);
         }
         MirExprKind::Unary { operand, .. } => count_uses_in_expr(operand, counts),
-        MirExprKind::Call { callee, args } => {
+        MirExprKind::Call { callee, args, .. } => {
             count_uses_in_expr(callee, counts);
             for a in args {
                 count_uses_in_expr(a, counts);
@@ -465,6 +467,7 @@ mod tests {
 
     fn call(callee: &str, args: Vec<MirExpr>) -> MirExpr {
         ekind(MirExprKind::Call {
+            span: None,
             callee: Box::new(var(callee)),
             args,
         })
@@ -524,7 +527,7 @@ mod tests {
             MirStmt::Let { name, init, .. } => {
                 assert_eq!(name, "n");
                 match &init.kind {
-                    MirExprKind::Call { callee, args } => {
+                    MirExprKind::Call { callee, args, .. } => {
                         assert_eq!(callee_name(callee), Some("fused_matmul_norm"));
                         assert_eq!(args.len(), 2);
                         assert_eq!(var_name(&args[0]), Some("a"));
@@ -661,6 +664,7 @@ mod tests {
                 name: "h".to_string(),
                 mutable: false,
                 init: ekind(MirExprKind::Call {
+                    span: None,
                     callee: Box::new(ekind(MirExprKind::VarLocal {
                         name: "matmul".to_string(),
                         slot: 7,
@@ -674,6 +678,7 @@ mod tests {
                 name: "n".to_string(),
                 mutable: false,
                 init: ekind(MirExprKind::Call {
+                    span: None,
                     callee: Box::new(ekind(MirExprKind::VarLocal {
                         name: "norm".to_string(),
                         slot: 9,
@@ -722,7 +727,7 @@ mod tests {
             MirStmt::Let { name, init, .. } => {
                 assert_eq!(name, "r");
                 match &init.kind {
-                    MirExprKind::Call { callee, args } => {
+                    MirExprKind::Call { callee, args, .. } => {
                         assert_eq!(callee_name(callee), Some("fused_matmul_matmul"));
                         assert_eq!(args.len(), 3);
                         assert_eq!(var_name(&args[0]), Some("a"));

@@ -1,0 +1,13 @@
+$ cargo test --test postulate_phase1 -- gate_
+exit code: 101
+
+test gate_executor_parity_cnn_off_tape ... FAILED
+test gate_spans_cover_the_creating_call_mir ... FAILED
+test gate_spans_cover_the_creating_call_eval ... ok
+test gate_executor_parity_xor ... FAILED
+test gate_telemetry_parity_three_programs ... ok
+thread 'gate_executor_parity_cnn_off_tape' (59872) panicked at tests\postulate_phase1.rs:144:26:
+thread 'gate_spans_cover_the_creating_call_mir' (57304) panicked at tests\postulate_phase1.rs:108:26:
+thread 'gate_executor_parity_xor' (59604) panicked at tests\postulate_phase1.rs:137:26:
+test result: FAILED. 2 passed; 3 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.93s
+error: test failed, to rerun pass `--test postulate_phase1`

@@ -1,0 +1,11 @@
+--- a/crates/cjc-ad/src/tracker.rs
++++ b/crates/cjc-ad/src/tracker.rs
+@@ -50,7 +50,7 @@
+     /// The span recorded for a call at `start..end` (single-file: file 0).
+     /// Both executors build call spans only through this.
+     pub fn call_span(start: usize, end: usize) -> SourceSpan {
+-        SourceSpan::new(0, start, end)
++        SourceSpan::new(0, start + 1, end)
+     }
+ 
+     pub fn set_span(&mut self, start: usize, end: usize) {

@@ -94,6 +94,7 @@ fn decode_expr(bytes: &[u8], cursor: &mut usize, depth: u32) -> MirExpr {
                 .collect(),
         ),
         6 => MirExprKind::Call {
+            span: None,
             callee: Box::new(MirExpr {
                 kind: MirExprKind::Var(format!("fn{}", take_u8(bytes, cursor) % 4)),
             }),

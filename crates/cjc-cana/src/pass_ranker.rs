@@ -814,6 +814,7 @@ mod tests {
     fn call(callee: &str, args: Vec<MirExpr>) -> MirExpr {
         MirExpr {
             kind: MirExprKind::Call {
+                span: None,
                 callee: Box::new(var(callee)),
                 args,
             },

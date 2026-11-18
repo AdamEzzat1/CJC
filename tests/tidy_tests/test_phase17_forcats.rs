@@ -27,6 +27,7 @@ fn opt_strs(v: &[Option<&str>]) -> Vec<Option<String>> {
 fn mk_expr(kind: MirExprKind) -> MirExpr { MirExpr { kind } }
 fn mk_call(name: &str) -> MirExpr {
     mk_expr(MirExprKind::Call {
+        span: None,
         callee: Box::new(mk_expr(MirExprKind::Var(name.to_string()))),
         args: vec![],
     })

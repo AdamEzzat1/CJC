@@ -1,0 +1,12 @@
+--- a/crates/cjc-ad/src/telemetry.rs
++++ b/crates/cjc-ad/src/telemetry.rs
+@@ -84,7 +84,9 @@
+     pub fn on_backward(&mut self, g: &GradGraph, loss_idx: usize) {
+         let step = self.step;
+         self.step += 1;
++        let line = record(g, loss_idx, step, self.seed);
+         if step % self.every != 0 {
++            drop(line);
+             return;
+         }
+         let line = record(g, loss_idx, step, self.seed);

@@ -398,6 +398,9 @@ pub enum HirExprKind {
         callee: Box<HirExpr>,
         /// Positional arguments.
         args: Vec<HirExpr>,
+        /// Source span of the call expression, for tools (Postulate's GradGraph
+        /// spans). Never read by semantics; `None` for synthesized calls.
+        span: Option<cjc_ast::Span>,
     },
 
     // -- Field access --
@@ -1255,6 +1258,7 @@ impl AstLowering {
         // let __for_len_N = len(__for_arr_N);
         let len_call = HirExpr {
             kind: HirExprKind::Call {
+                span: None,
                 callee: Box::new(HirExpr {
                     kind: HirExprKind::Var("len".to_string()),
                     hir_id: self.fresh_id(),
@@ -1528,6 +1532,7 @@ impl AstLowering {
                         parts.push(HirExpr {
                             hir_id: self.fresh_id(),
                             kind: HirExprKind::Call {
+                                span: None,
                                 callee: Box::new(HirExpr {
                                     hir_id: self.fresh_id(),
                                     kind: HirExprKind::Var("to_string".to_string()),
@@ -1606,6 +1611,7 @@ impl AstLowering {
                         let hir_callee = Box::new(self.lower_expr(callee));
                         let hir_args = args.iter().map(|a| self.lower_expr(&a.value)).collect();
                         HirExprKind::Call {
+                            span: Some(expr.span),
                             callee: hir_callee,
                             args: hir_args,
                         }
@@ -1614,6 +1620,7 @@ impl AstLowering {
                     let hir_callee = Box::new(self.lower_expr(callee));
                     let hir_args = args.iter().map(|a| self.lower_expr(&a.value)).collect();
                     HirExprKind::Call {
+                        span: Some(expr.span),
                         callee: hir_callee,
                         args: hir_args,
                     }
@@ -1652,6 +1659,7 @@ impl AstLowering {
                             hir_args.push(self.lower_expr(&a.value));
                         }
                         HirExprKind::Call {
+                            span: Some(expr.span),
                             callee: hir_callee,
                             args: hir_args,
                         }
@@ -1660,6 +1668,7 @@ impl AstLowering {
                     cjc_ast::ExprKind::Ident(_) => {
                         let hir_callee = Box::new(self.lower_expr(right));
                         HirExprKind::Call {
+                            span: Some(expr.span),
                             callee: hir_callee,
                             args: vec![lhs],
                         }
@@ -1668,6 +1677,7 @@ impl AstLowering {
                         // Fallback: just call the right with left as arg
                         let hir_callee = Box::new(self.lower_expr(right));
                         HirExprKind::Call {
+                            span: Some(expr.span),
                             callee: hir_callee,
                             args: vec![lhs],
                         }
@@ -1931,6 +1941,7 @@ impl AstLowering {
                     }
                 };
                 HirExprKind::Call {
+                    span: None,
                     callee: Box::new(HirExpr {
                         kind: HirExprKind::Var(builtin.to_string()),
                         hir_id: self.fresh_id(),
@@ -2423,7 +2434,7 @@ mod tests {
         };
         let hir = lowering.lower_expr(&ast_expr);
         match &hir.kind {
-            HirExprKind::Call { callee, args } => {
+            HirExprKind::Call { callee, args, .. } => {
                 assert!(matches!(callee.kind, HirExprKind::Var(ref n) if n == "f"));
                 assert_eq!(args.len(), 2);
                 assert!(matches!(args[0].kind, HirExprKind::Var(ref n) if n == "x"));
@@ -2446,7 +2457,7 @@ mod tests {
         };
         let hir = lowering.lower_expr(&ast_expr);
         match &hir.kind {
-            HirExprKind::Call { callee, args } => {
+            HirExprKind::Call { callee, args, .. } => {
                 assert!(matches!(callee.kind, HirExprKind::Var(ref n) if n == "f"));
                 assert_eq!(args.len(), 1);
                 assert!(matches!(args[0].kind, HirExprKind::Var(ref n) if n == "x"));
@@ -2783,7 +2794,7 @@ mod tests {
         };
         let hir = lowering.lower_expr(&ast_expr);
         match &hir.kind {
-            HirExprKind::Call { callee, args } => {
+            HirExprKind::Call { callee, args, .. } => {
                 assert!(matches!(callee.kind, HirExprKind::Var(ref n) if n == "add"));
                 assert_eq!(args.len(), 2);
             }

@@ -45,6 +45,7 @@ fn build_complex_program() -> MirProgram {
                     slot: None,
                 },
                 MirStmt::Expr(ekind(MirExprKind::Call {
+                    span: None,
                     callee: Box::new(ekind(MirExprKind::Var("array_push".to_string()))),
                     args: vec![
                         ekind(MirExprKind::Var("x".to_string())),

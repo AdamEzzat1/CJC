@@ -532,7 +532,7 @@ fn detect_builtin_reductions_expr(
     next_id: &mut u32,
 ) {
     match &expr.kind {
-        MirExprKind::Call { callee, args } => {
+        MirExprKind::Call { callee, args, .. } => {
             if let MirExprKind::Var(callee_name) = &callee.kind {
                 if BUILTIN_REDUCTIONS.contains(&callee_name.as_str()) {
                     let (reassoc, strict, semantics) = classify_builtin_reduction(callee_name);
@@ -641,6 +641,7 @@ mod tests {
     fn call_expr(name: &str, args: Vec<MirExpr>) -> MirExpr {
         MirExpr {
             kind: MirExprKind::Call {
+                span: None,
                 callee: Box::new(var_expr(name)),
                 args,
             },

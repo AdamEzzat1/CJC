@@ -1,0 +1,12 @@
+$ cargo run --release -q -p postulate-overhead -- 101 --check 15
+exit code: 1
+
+fixture   exec       off    track    tel10     tel1    mem10   track%  tel10%   tel1%  mem10%    A/A%
+mlp_xor   eval     6.199    6.592    8.066    9.309    7.667    +6.3%  +30.1%  +50.2%  +23.7%    2.5%
+  gate: FAIL mlp_xor/eval tel10 +30.1% > 15%
+mlp_xor   mir      5.508    6.032    7.223    8.478    6.960    +9.5%  +31.2%  +53.9%  +26.4%    0.3%
+  gate: FAIL mlp_xor/mir tel10 +31.2% > 15%
+linreg    eval     1.862    1.990    2.668    3.315    2.363    +6.8%  +43.2%  +78.0%  +26.9%    5.3%
+linreg    mir      1.697    1.852    2.597    3.317    2.419    +9.1%  +53.0%  +95.5%  +42.6%    2.8%
+tanh_fit  eval     1.415    1.519    2.064    2.337    1.809    +7.4%  +45.9%  +65.2%  +27.9%    2.1%
+tanh_fit  mir      1.101    1.250    1.705    1.983    1.459   +13.5%  +54.8%  +80.0%  +32.4%    0.6%

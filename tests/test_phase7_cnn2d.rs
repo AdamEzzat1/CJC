@@ -520,6 +520,7 @@ fn mk_mir_expr(kind: cjc_mir::MirExprKind) -> cjc_mir::MirExpr {
 /// callee is `Call { callee: Field { object: Var(obj_name), name: method }, args }`.
 fn mk_mir_tensor_call(method: &str, args: Vec<cjc_mir::MirExpr>) -> cjc_mir::MirExpr {
     mk_mir_expr(cjc_mir::MirExprKind::Call {
+        span: None,
         callee: Box::new(mk_mir_expr(cjc_mir::MirExprKind::Field {
             object: Box::new(mk_mir_var("Tensor")),
             name: method.to_string(),

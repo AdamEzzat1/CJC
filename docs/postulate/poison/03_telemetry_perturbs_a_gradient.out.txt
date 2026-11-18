@@ -1,0 +1,7 @@
+$ cargo test --test postulate_phase1 -- gate_telemetry_parity
+exit code: 101
+
+test gate_telemetry_parity_three_programs ... FAILED
+thread 'gate_telemetry_parity_three_programs' (53192) panicked at tests\postulate_phase1.rs:367:66:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.14s
+error: test failed, to rerun pass `--test postulate_phase1`

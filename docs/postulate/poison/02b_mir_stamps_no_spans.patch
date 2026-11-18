@@ -1,0 +1,11 @@
+--- a/crates/cjc-mir-exec/src/lib.rs
++++ b/crates/cjc-mir-exec/src/lib.rs
+@@ -1829,7 +1829,7 @@
+             arg_vals.push(self.eval_expr(arg)?);
+         }
+         // Set after the arguments, so a nested call cannot leave its span behind.
+-        let ad_span = span.map(|s| cjc_ad::tracker::Tracker::call_span(s.start, s.end));
++        let ad_span: Option<cjc_ad::export::SourceSpan> = { let _ = span; None };
+         self.ad.span = ad_span;
+ 
+         match &callee.kind {

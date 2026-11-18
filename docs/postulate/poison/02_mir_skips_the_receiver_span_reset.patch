@@ -1,0 +1,10 @@
+--- a/crates/cjc-mir-exec/src/lib.rs
++++ b/crates/cjc-mir-exec/src/lib.rs
+@@ -1915,7 +1915,6 @@
+                 }
+                 // Instance method
+                 let obj_val = self.eval_expr(object)?;
+-                self.ad.span = ad_span;
+                 self.dispatch_method(obj_val, name, arg_vals)
+             }
+             _ => {

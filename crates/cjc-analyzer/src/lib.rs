@@ -5,7 +5,8 @@
 //! - `hover`: Provides hover documentation
 //! - `completion`: Generates completion items
 //! - `diagnostics`: Bridges CJC diagnostics to LSP format
-//! - `server`: Main LSP event loop (stdin/stdout JSON-RPC via `lsp-server`)
+//! - `postulate`: Postulate IDE requests (`postulate/*`) and tensor-shape inlay hints
+//! - `server`: In-process [`server::Analyzer`] core plus the stdio LSP loop
 //!
 //! The analyzer is import-aware: `import vizor` activates Vizor symbols in
 //! completion and hover. Other libraries follow the same pattern.
@@ -14,4 +15,5 @@ pub mod symbol_index;
 pub mod hover;
 pub mod completion;
 pub mod diagnostics;
+pub mod postulate;
 pub mod server;

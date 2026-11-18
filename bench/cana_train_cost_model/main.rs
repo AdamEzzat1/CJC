@@ -184,7 +184,7 @@ fn count_expr_nodes(expr: &MirExpr) -> usize {
             count_expr_nodes(left) + count_expr_nodes(right)
         }
         MirExprKind::Unary { operand, .. } => count_expr_nodes(operand),
-        MirExprKind::Call { callee, args } => {
+        MirExprKind::Call { callee, args, .. } => {
             count_expr_nodes(callee) + args.iter().map(count_expr_nodes).sum::<usize>()
         }
         MirExprKind::Assign { target, value } => {

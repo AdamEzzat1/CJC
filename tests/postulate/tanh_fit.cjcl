@@ -1,0 +1,34 @@
+// Postulate Phase 1 fixture: a tanh network fitting a curve, with named layers.
+fn forward(g: Any, x_id: i64, w1_id: i64, w2_id: i64) -> i64 {
+    g.layer("hidden");
+    let h = g.tanh(g.matmul(x_id, w1_id));
+    g.layer("out");
+    let o = g.matmul(h, w2_id);
+    g.layer("");
+    return o;
+}
+
+fn main() {
+    let X = Tensor.from_vec([-1.0, -0.5, 0.0, 0.5, 1.0], [5, 1]);
+    let Y = Tensor.from_vec([-0.84, -0.48, 0.0, 0.48, 0.84], [5, 1]);
+    let W1 = Tensor.randn([1, 8]) * 0.5;
+    let W2 = Tensor.randn([8, 1]) * 0.5;
+    let epoch = 0;
+    while epoch < 60 {
+        let g = GradGraph.new();
+        let w1_id = g.parameter(W1);
+        let w2_id = g.parameter(W2);
+        let x_id = g.input(X);
+        let y_id = g.input(Y);
+        let o = forward(g, x_id, w1_id, w2_id);
+        let d = g.sub(o, y_id);
+        let loss = g.mean(g.mul(d, d));
+        g.backward(loss);
+        W1 = W1 - g.grad(w1_id) * 0.1;
+        W2 = W2 - g.grad(w2_id) * 0.1;
+        if epoch % 20 == 0 {
+            print("epoch " + to_string(epoch) + " loss=" + to_string(g.value(loss)));
+        }
+        epoch = epoch + 1;
+    }
+}

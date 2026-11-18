@@ -194,7 +194,7 @@ impl MemoryProxy {
             // pre-Phase-A1: `t.sum()` performed the same tensor work as
             // `sum(t)` but counted zero tensor_heavy_ops (found by the
             // tensor-blindness probe).
-            MirExprKind::Call { callee, args } => {
+            MirExprKind::Call { callee, args, .. } => {
                 match &callee.kind {
                     MirExprKind::Var(name) => classify_builtin_call(name, self),
                     MirExprKind::Field { object, name } => {
@@ -464,6 +464,7 @@ mod tests {
     fn array_push_counts_cow_write() {
         let mut f = empty_main();
         f.body.stmts.push(MirStmt::Expr(ekind(MirExprKind::Call {
+            span: None,
             callee: Box::new(ekind(MirExprKind::Var("array_push".to_string()))),
             args: vec![
                 ekind(MirExprKind::Var("arr".to_string())),
@@ -491,6 +492,7 @@ mod tests {
         // `t.sum()` — Field callee. Pre-Phase-A1 this counted zero.
         let mut f = empty_main();
         f.body.stmts.push(MirStmt::Expr(ekind(MirExprKind::Call {
+            span: None,
             callee: Box::new(ekind(MirExprKind::Field {
                 object: Box::new(ekind(MirExprKind::Var("t".to_string()))),
                 name: "sum".to_string(),
@@ -507,6 +509,7 @@ mod tests {
         // `Tensor.from_vec(buf, shape)` — static constructor method.
         let mut f = empty_main();
         f.body.stmts.push(MirStmt::Expr(ekind(MirExprKind::Call {
+            span: None,
             callee: Box::new(ekind(MirExprKind::Field {
                 object: Box::new(ekind(MirExprKind::Var("Tensor".to_string()))),
                 name: "from_vec".to_string(),
@@ -523,6 +526,7 @@ mod tests {
     fn non_tensor_method_counts_nothing() {
         let mut f = empty_main();
         f.body.stmts.push(MirStmt::Expr(ekind(MirExprKind::Call {
+            span: None,
             callee: Box::new(ekind(MirExprKind::Field {
                 object: Box::new(ekind(MirExprKind::Var("s".to_string()))),
                 name: "to_upper".to_string(),
