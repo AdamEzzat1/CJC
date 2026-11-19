@@ -869,8 +869,18 @@ impl Tensor {
     ///
     /// Mutates `self` instead of allocating a new tensor. Uses COW: if the
     /// underlying buffer is shared, `make_unique()` deep-copies first.
+    ///
+    /// In place only when both tensors are contiguous and own their whole buffer, so
+    /// that buffer order is element order. A view (transpose, slice, broadcast) has its
+    /// elements elsewhere in the buffer; pairing raw buffers would add the wrong
+    /// elements, so that case takes the bits of `self.add_unchecked(other)` instead.
     pub fn add_assign_unchecked(&mut self, other: &Tensor) {
         assert_eq!(self.shape, other.shape, "Tensor::add_assign shape mismatch");
+        let dense = |t: &Tensor| t.is_contiguous() && t.buffer.len() == t.len();
+        if !(dense(self) && dense(other)) {
+            *self = self.add_unchecked(other);
+            return;
+        }
         self.buffer.make_unique();
         let other_data = other.buffer.borrow_data();
         let mut self_data = self.buffer.borrow_data_mut();
