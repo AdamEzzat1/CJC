@@ -1211,22 +1211,13 @@ pub fn log10(x: f64) -> f64 {
 
 /// `x^n` by binary exponentiation. Deterministic (fixed multiply order), not
 /// correctly rounded: about `log2(n)` roundings.
+///
+/// This is [`crate::powi_f64`]: one copy of the algorithm, so `det_powi` and the sites
+/// that call `powi_f64` directly (the ones the Bruchion kernel parity tests name) cannot
+/// drift apart. The loop that stood here made the same multiplications in the same order.
+#[inline]
 pub fn powi(x: f64, n: i32) -> f64 {
-    let mut base = x;
-    let mut e = n.unsigned_abs();
-    let mut acc = 1.0;
-    while e > 0 {
-        if e & 1 == 1 {
-            acc *= base;
-        }
-        base *= base;
-        e >>= 1;
-    }
-    if n < 0 {
-        1.0 / acc
-    } else {
-        acc
-    }
+    crate::powi_f64(x, n)
 }
 
 const BP: [f64; 2] = [1.0, 1.5];
