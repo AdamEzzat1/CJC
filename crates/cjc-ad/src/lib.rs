@@ -2601,6 +2601,9 @@ impl GradGraph {
             plus[i] += eps;
             self.tensors[param_idx] =
                 Tensor::from_vec_unchecked(plus, &param_shape);
+            // Without this, backward() reads intermediate values from the unperturbed
+            // point and the result is wrong for any nonlinear graph.
+            self.reforward(param_idx + 1, loss_idx);
             self.zero_grad();
             self.backward(loss_idx);
             let grad_plus = self.param_grads[param_idx]
@@ -2613,6 +2616,7 @@ impl GradGraph {
             minus[i] -= eps;
             self.tensors[param_idx] =
                 Tensor::from_vec_unchecked(minus, &param_shape);
+            self.reforward(param_idx + 1, loss_idx);
             self.zero_grad();
             self.backward(loss_idx);
             let grad_minus = self.param_grads[param_idx]
@@ -2623,9 +2627,10 @@ impl GradGraph {
             hess_diag[i] = (grad_plus - grad_minus) / (2.0 * eps);
         }
 
-        // Restore original parameter
+        // Restore original parameter and re-forward to a clean state
         self.tensors[param_idx] =
             Tensor::from_vec_unchecked(original, &param_shape);
+        self.reforward(param_idx + 1, loss_idx);
 
         Tensor::from_vec_unchecked(hess_diag, &param_shape)
     }
@@ -3227,16 +3232,11 @@ impl GradGraph {
 
             if let Some(ref _param_grad) = self.param_grads[i] {
                 // Accumulate into parameter grad storage
-                let new_grad = {
-                    if let Some(ref existing) = self.param_grads[i] {
-                        if existing.to_vec().iter().all(|&x| x == 0.0) {
-                            grad.clone()
-                        } else {
-                            existing.add_unchecked(&grad)
-                        }
-                    } else {
-                        grad.clone()
-                    }
+                // Accumulate exactly as backward() does (existing + grad). Replacing an
+                // all-zero gradient instead kept -0.0 where backward() produces +0.0.
+                let new_grad = match self.param_grads[i] {
+                    Some(ref existing) => existing.add_unchecked(&grad),
+                    None => grad.clone(),
                 };
                 self.param_grads[i] = Some(new_grad);
             }
@@ -3282,11 +3282,9 @@ impl GradGraph {
                 }
                 GradOp::Ln(a) => {
                     let a_val = self.tensors[*a].clone();
-                    let inv = Tensor::from_vec_unchecked(
-                        a_val.to_vec().iter().map(|&x| 1.0 / x).collect(),
-                        a_val.shape(),
-                    );
-                    accumulate_grad(&mut grads, *a, &grad.mul_elem_unchecked(&inv));
+                    // Same expression as backward(): grad / x. Computing grad * (1/x) rounds
+                    // twice and differs by 1 ulp, breaking bit-identity between the two paths.
+                    accumulate_grad(&mut grads, *a, &grad.div_elem_unchecked(&a_val));
                 }
                 GradOp::Sin(a) => {
                     let a_val = self.tensors[*a].clone();
