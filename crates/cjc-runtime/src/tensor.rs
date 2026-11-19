@@ -679,24 +679,32 @@ impl Tensor {
 
     /// Sum of all elements (binned accumulation — order-invariant, deterministic).
     pub fn sum(&self) -> f64 {
-        let data = self.buffer.borrow_data();
-        binned_sum_f64(&data)
+        self.binned_sum()
     }
 
     /// Sum of all elements using BinnedAccumulator (order-invariant, deterministic).
     ///
     /// Bit-identical results regardless of element ordering or reduction schedule.
     pub fn binned_sum(&self) -> f64 {
-        let data = self.buffer.borrow_data();
-        accumulator::binned_sum_f64(&data)
+        // Sum the tensor's logical elements. Reading the raw buffer summed everything
+        // in it, which is wrong for slice and broadcast views (and for buffers with
+        // spare capacity).
+        if self.is_contiguous() {
+            let data = self.buffer.borrow_data();
+            return accumulator::binned_sum_f64(&data[..self.len()]);
+        }
+        accumulator::binned_sum_f64(&self.to_vec())
     }
 
     /// Sum with dispatched strategy based on execution context.
     ///
     /// Uses Kahan in serial mode, Binned in parallel/@nogc/strict/linalg mode.
     pub fn dispatched_sum(&self, ctx: &dispatch::ReductionContext) -> f64 {
-        let data = self.buffer.borrow_data();
-        dispatch::dispatch_sum_f64(&data, ctx)
+        if self.is_contiguous() {
+            let data = self.buffer.borrow_data();
+            return dispatch::dispatch_sum_f64(&data[..self.len()], ctx);
+        }
+        dispatch::dispatch_sum_f64(&self.to_vec(), ctx)
     }
 
     /// Mean of all elements (binned sum / count).
@@ -742,6 +750,9 @@ impl Tensor {
         let out_strides = Self::compute_strides(&out_shape);
 
         let data = self.to_vec();
+        // `data` is in logical row-major order (to_vec applies offset and strides),
+        // so index it with logical strides, not the view's physical ones.
+        let logical_strides = Self::compute_strides(&self.shape);
         let axis_len = self.shape[axis];
         let mut result = vec![0.0f64; out_numel];
 
@@ -763,10 +774,10 @@ impl Tensor {
             acc.reset();
             for k in 0..axis_len {
                 // Compute input flat index with indices[axis] = k
-                let mut flat = self.offset;
+                let mut flat = 0;
                 for d in 0..ndim {
                     let idx = if d == axis { k } else { indices[d] };
-                    flat += idx * self.strides[d];
+                    flat += idx * logical_strides[d];
                 }
                 acc.add(data[flat]);
             }
@@ -2336,6 +2347,9 @@ impl Tensor {
         let out_strides = Self::compute_strides(&out_shape);
 
         let data = self.to_vec();
+        // `data` is in logical row-major order (to_vec applies offset and strides),
+        // so index it with logical strides, not the view's physical ones.
+        let logical_strides = Self::compute_strides(&self.shape);
         let mut result = Vec::with_capacity(out_numel);
         let mut indices = vec![0usize; ndim];
 
@@ -2352,10 +2366,10 @@ impl Tensor {
             // Gather values along the reduction axis
             let mut vals = Vec::with_capacity(axis_len);
             for k in 0..axis_len {
-                let mut flat = self.offset;
+                let mut flat = 0;
                 for d in 0..ndim {
                     let idx = if d == axis { k } else { indices[d] };
-                    flat += idx * self.strides[d];
+                    flat += idx * logical_strides[d];
                 }
                 vals.push(data[flat]);
             }
@@ -2409,6 +2423,9 @@ impl Tensor {
         let out_numel = Self::shape_numel(&out_shape);
         let out_strides = Self::compute_strides(&out_shape);
         let data = self.to_vec();
+        // `data` is in logical row-major order (to_vec applies offset and strides),
+        // so index it with logical strides, not the view's physical ones.
+        let logical_strides = Self::compute_strides(&self.shape);
         let mut values = Vec::with_capacity(out_numel);
         let mut idx_vals = Vec::with_capacity(out_numel);
         let mut indices = vec![0usize; ndim];
@@ -2422,10 +2439,10 @@ impl Tensor {
             let mut best_val = f64::NEG_INFINITY;
             let mut best_idx = 0usize;
             for k in 0..axis_len {
-                let mut flat = self.offset;
+                let mut flat = 0;
                 for d in 0..ndim {
                     let idx = if d == axis { k } else { indices[d] };
-                    flat += idx * self.strides[d];
+                    flat += idx * logical_strides[d];
                 }
                 let v = data[flat];
                 if v > best_val {
@@ -2465,6 +2482,9 @@ impl Tensor {
         let out_numel = Self::shape_numel(&out_shape);
         let out_strides = Self::compute_strides(&out_shape);
         let data = self.to_vec();
+        // `data` is in logical row-major order (to_vec applies offset and strides),
+        // so index it with logical strides, not the view's physical ones.
+        let logical_strides = Self::compute_strides(&self.shape);
         let mut values = Vec::with_capacity(out_numel);
         let mut idx_vals = Vec::with_capacity(out_numel);
         let mut indices = vec![0usize; ndim];
@@ -2478,10 +2498,10 @@ impl Tensor {
             let mut best_val = f64::INFINITY;
             let mut best_idx = 0usize;
             for k in 0..axis_len {
-                let mut flat = self.offset;
+                let mut flat = 0;
                 for d in 0..ndim {
                     let idx = if d == axis { k } else { indices[d] };
-                    flat += idx * self.strides[d];
+                    flat += idx * logical_strides[d];
                 }
                 let v = data[flat];
                 if v < best_val {
@@ -2524,6 +2544,9 @@ impl Tensor {
         let out_numel = Self::shape_numel(&out_shape);
         let out_strides = Self::compute_strides(&out_shape);
         let data = self.to_vec();
+        // `data` is in logical row-major order (to_vec applies offset and strides),
+        // so index it with logical strides, not the view's physical ones.
+        let logical_strides = Self::compute_strides(&self.shape);
         let mean_data = mean_t.to_vec();
         let mut result = Vec::with_capacity(out_numel);
         let mut indices = vec![0usize; ndim];
@@ -2539,10 +2562,10 @@ impl Tensor {
             let mu = mean_data[out_idx];
             acc.reset();
             for k in 0..axis_len {
-                let mut flat = self.offset;
+                let mut flat = 0;
                 for d in 0..ndim {
                     let idx = if d == axis { k } else { indices[d] };
-                    flat += idx * self.strides[d];
+                    flat += idx * logical_strides[d];
                 }
                 let diff = data[flat] - mu;
                 acc.add(diff * diff);
@@ -2596,7 +2619,14 @@ impl Tensor {
         if axis >= ndim {
             return Err(RuntimeError::IndexOutOfBounds { index: axis, length: ndim });
         }
+        // An empty tensor has nothing to sort (the loop below would index into it).
+        if self.len() == 0 {
+            return Ok(self.to_contiguous());
+        }
         let data = self.to_vec();
+        // `data` is in logical row-major order (to_vec applies offset and strides),
+        // so index it with logical strides, not the view's physical ones.
+        let logical_strides = Self::compute_strides(&self.shape);
         let axis_len = self.shape[axis];
         let out_shape = self.shape.clone();
         let out_numel = Self::shape_numel(&out_shape);
@@ -2639,10 +2669,10 @@ impl Tensor {
             // Gather values along axis
             let mut vals: Vec<(f64, usize)> = Vec::with_capacity(axis_len);
             for k in 0..axis_len {
-                let mut flat = self.offset;
+                let mut flat = 0;
                 for d in 0..ndim {
                     let idx = if d == axis { k } else { pos[d] };
-                    flat += idx * self.strides[d];
+                    flat += idx * logical_strides[d];
                 }
                 vals.push((data[flat], k));
             }
@@ -2680,7 +2710,14 @@ impl Tensor {
         if axis >= ndim {
             return Err(RuntimeError::IndexOutOfBounds { index: axis, length: ndim });
         }
+        // An empty tensor has nothing to sort (the loop below would index into it).
+        if self.len() == 0 {
+            return Tensor::from_vec(Vec::new(), &self.shape);
+        }
         let data = self.to_vec();
+        // `data` is in logical row-major order (to_vec applies offset and strides),
+        // so index it with logical strides, not the view's physical ones.
+        let logical_strides = Self::compute_strides(&self.shape);
         let axis_len = self.shape[axis];
         let out_shape = self.shape.clone();
         let out_numel = Self::shape_numel(&out_shape);
@@ -2719,10 +2756,10 @@ impl Tensor {
 
             let mut vals: Vec<(f64, usize)> = Vec::with_capacity(axis_len);
             for k in 0..axis_len {
-                let mut flat = self.offset;
+                let mut flat = 0;
                 for d in 0..ndim {
                     let idx = if d == axis { k } else { pos[d] };
-                    flat += idx * self.strides[d];
+                    flat += idx * logical_strides[d];
                 }
                 vals.push((data[flat], k));
             }
