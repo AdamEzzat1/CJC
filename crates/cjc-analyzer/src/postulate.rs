@@ -7,7 +7,9 @@
 //! | `postulate/gradGraph` | The last trained `GradGraph`: nodes, spans, groups, off-tape ops, parameter names |
 //! | `postulate/snapshotHash` | cjc-snap SHA-256 of the run's output, per executor |
 //! | `postulate/executorAgreement` | Do `cjc-eval` and `cjc-mir-exec` agree on output and graph? |
-//! | `postulate/runReport` | Wall time (measured), telemetry steps, graph size |
+//! | `postulate/runReport` | Wall time and peak heap (measured), telemetry steps, graph size |
+//! | `postulate/telemetry` | The run's telemetry records (one per sampled step) |
+//! | `postulate/cursorContext` | Symbol, function, training loop and graph nodes at a position (see [`crate::cursor`]) |
 //!
 //! Plus tensor-shape inlay hints (`textDocument/inlayHint`) from the same run.
 //!
@@ -33,12 +35,19 @@ pub struct ExecRun {
     pub graph: Option<GraphExport>,
     pub error: Option<String>,
     pub telemetry_steps: u64,
+    /// Telemetry lines, when the run sampled any.
+    pub telemetry: Vec<String>,
+    /// Every bit of the last tape (`Tracker::state_bits`).
+    pub state: Option<Vec<u64>>,
 }
 
 pub struct RunCapture {
     pub seed: u64,
     pub eval: ExecRun,
     pub mir: ExecRun,
+    /// The MIR run with telemetry *off* printed the same output and left the
+    /// same tape bits as the MIR run with telemetry on.
+    pub telemetry_parity: bool,
 }
 
 fn panic_text(p: Box<dyn std::any::Any + Send>) -> String {
@@ -48,36 +57,52 @@ fn panic_text(p: Box<dyn std::any::Any + Send>) -> String {
         .unwrap_or_else(|| "panic".into())
 }
 
-fn telemetry() -> Option<cjc_ad::telemetry::Telemetry> {
-    Some(cjc_ad::telemetry::Telemetry::in_memory(0, u64::MAX))
+/// In-memory telemetry sampled every `every` steps, or none.
+fn telemetry(seed: u64, every: Option<u64>) -> Option<cjc_ad::telemetry::Telemetry> {
+    every.map(|e| cjc_ad::telemetry::Telemetry::in_memory(seed, e))
 }
 
-pub fn run_eval(src: &str, seed: u64) -> ExecRun {
+fn telemetry_lines(ad: &mut cjc_ad::tracker::Tracker) -> (u64, Vec<String>) {
+    match ad.telemetry.as_mut() {
+        Some(t) => {
+            t.flush();
+            (t.step(), t.memory.clone().unwrap_or_default())
+        }
+        None => (0, Vec::new()),
+    }
+}
+
+/// Run on `cjc-eval`, with telemetry sampled every `every` steps (or off).
+pub fn run_eval(src: &str, seed: u64, every: Option<u64>) -> ExecRun {
     let (program, _) = cjc_parser::parse_source(src);
     let mut it = cjc_eval::Interpreter::new(seed);
     it.echo = false;
     it.ad.enabled = true;
-    it.ad.telemetry = telemetry();
+    it.ad.telemetry = telemetry(seed, every);
     let r = catch_unwind(AssertUnwindSafe(|| it.exec(&program)));
     let error = match r {
         Ok(Ok(_)) => None,
         Ok(Err(e)) => Some(format!("{e:?}")),
         Err(p) => Some(format!("panic: {}", panic_text(p))),
     };
+    let (telemetry_steps, telemetry) = telemetry_lines(&mut it.ad);
     ExecRun {
         output: it.output.clone(),
         graph: it.ad.export(),
         error,
-        telemetry_steps: it.ad.telemetry.as_ref().map_or(0, |t| t.step()),
+        telemetry_steps,
+        telemetry,
+        state: it.ad.state_bits(),
     }
 }
 
-pub fn run_mir(src: &str, seed: u64) -> ExecRun {
+/// Run on `cjc-mir-exec`, with telemetry sampled every `every` steps (or off).
+pub fn run_mir(src: &str, seed: u64, every: Option<u64>) -> ExecRun {
     let (program, _) = cjc_parser::parse_source(src);
     let mut ex = cjc_mir_exec::MirExecutor::new(seed);
     ex.echo = false;
     ex.ad.enabled = true;
-    ex.ad.telemetry = telemetry();
+    ex.ad.telemetry = telemetry(seed, every);
     let r = catch_unwind(AssertUnwindSafe(|| {
         let hir = cjc_hir::AstLowering::new().lower_program(&program);
         let mut mir = cjc_mir::HirToMir::new().lower_program(&hir);
@@ -90,23 +115,30 @@ pub fn run_mir(src: &str, seed: u64) -> ExecRun {
         Ok(Err(e)) => Some(format!("{e}")),
         Err(p) => Some(format!("panic: {}", panic_text(p))),
     };
+    let (telemetry_steps, telemetry) = telemetry_lines(&mut ex.ad);
     ExecRun {
         output: ex.output.clone(),
         graph: ex.ad.export(),
         error,
-        telemetry_steps: ex.ad.telemetry.as_ref().map_or(0, |t| t.step()),
+        telemetry_steps,
+        telemetry,
+        state: ex.ad.state_bits(),
     }
 }
+
+const EVERY: Option<u64> = Some(cjc_ad::telemetry::DEFAULT_EVERY);
 
 pub fn capture(src: &str, seed: u64) -> Rc<RunCapture> {
     // The executors print panics through the default hook; keep them off the
     // server's stderr noise but leave the hook as it was afterwards.
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
-    let eval = run_eval(src, seed);
-    let mir = run_mir(src, seed);
+    let eval = run_eval(src, seed, EVERY);
+    let mir = run_mir(src, seed, EVERY);
+    let plain = run_mir(src, seed, None);
     std::panic::set_hook(hook);
-    Rc::new(RunCapture { seed, eval, mir })
+    let telemetry_parity = mir.output == plain.output && mir.state == plain.state && mir.error == plain.error;
+    Rc::new(RunCapture { seed, eval, mir, telemetry_parity })
 }
 
 /// cjc-snap content hash of a run's printed output, as hex.
@@ -174,16 +206,37 @@ pub fn executor_agreement_response(run: &RunCapture) -> Json {
         "mir_hash": output_hash(&run.mir.output),
         "eval_error": run.eval.error,
         "mir_error": run.mir.error,
+        "telemetry_parity": run.telemetry_parity,
     })
 }
 
-/// Median and spread (max − min) of `TIMING_RUNS` MIR runs, in ms. Measured,
-/// not reproducible: listed under `"measured"`.
+/// The MIR run's telemetry records, parsed: the same objects
+/// `cjcl run --telemetry` writes, one per sampled step.
+pub fn telemetry_response(run: &RunCapture) -> Json {
+    let records: Vec<Json> = run.mir.telemetry.iter().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    json!({
+        "seed": run.seed,
+        "every": cjc_ad::telemetry::DEFAULT_EVERY,
+        "steps": run.mir.telemetry_steps,
+        "records": records,
+        "error": run.mir.error,
+    })
+}
+
+/// Median and spread (max − min) of `TIMING_RUNS` MIR runs, in ms, and the
+/// peak heap above the starting level during the first run (when the binary
+/// installed [`crate::alloc_meter::CountingAlloc`]). Measured, not
+/// reproducible: listed under `"measured"`.
 pub fn run_report_response(src: &str, run: &RunCapture) -> Json {
+    let mut peak_bytes = None;
     let mut ms: Vec<f64> = (0..TIMING_RUNS)
-        .map(|_| {
+        .map(|i| {
             let t = Instant::now();
-            let _ = run_mir(src, run.seed);
+            if i == 0 {
+                peak_bytes = crate::alloc_meter::measure(|| run_mir(src, run.seed, EVERY)).1;
+            } else {
+                let _ = run_mir(src, run.seed, EVERY);
+            }
             t.elapsed().as_secs_f64() * 1e3
         })
         .collect();
@@ -195,11 +248,11 @@ pub fn run_report_response(src: &str, run: &RunCapture) -> Json {
         "runs": TIMING_RUNS,
         "wall_ms_median": median,
         "wall_ms_spread": spread,
-        "measured": ["wall_ms_median", "wall_ms_spread"],
+        "measured": ["wall_ms_median", "wall_ms_spread", "peak_bytes"],
         "telemetry_steps": run.mir.telemetry_steps,
         "graph_nodes": run.mir.graph.as_ref().map(|g| g.nodes.len()),
-        // polytrace wiring (peak memory, copies, zones) is Phase 5.
-        "peak_bytes": Json::Null,
+        "peak_bytes": peak_bytes,
+        // polytrace wiring (the peak's line, copies, zones) is Phase 5.
         "copies": Json::Null,
         "hottest_zone": Json::Null,
         "error": run.mir.error,

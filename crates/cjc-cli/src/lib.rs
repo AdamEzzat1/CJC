@@ -132,6 +132,12 @@ struct Config {
     /// single-axis thermal wrapper (stacking both double-penalizes
     /// thermal — see `cjc-cana/src/pinn_cost_model.rs` module docs).
     pinn_weights: Option<String>,
+    /// `--telemetry PATH`: append the Postulate training-telemetry stream
+    /// (one JSON record per sampled `backward`) to PATH. Opt-in and
+    /// write-only: it never changes a computed value.
+    telemetry: Option<String>,
+    /// `--telemetry-every N`: sample every N-th step (default 10).
+    telemetry_every: u64,
 }
 
 /// Known flags for typo suggestions.
@@ -145,6 +151,8 @@ const KNOWN_FLAGS: &[&str] = &[
     "--mir-mono",
     "--cana-report",
     "--pinn-weights",
+    "--telemetry",
+    "--telemetry-every",
     "--multi-file",
     "--color",
     "--no-color",
@@ -268,6 +276,8 @@ impl Config {
                     output_format: OutputFormat::Plain,
                     cana_report: None,
                     pinn_weights: None,
+                    telemetry: None,
+                    telemetry_every: cjc_ad::telemetry::DEFAULT_EVERY,
                 };
             }
         }
@@ -285,6 +295,8 @@ impl Config {
         let mut output_format = OutputFormat::Plain;
         let mut cana_report: Option<String> = None;
         let mut pinn_weights: Option<String> = None;
+        let mut telemetry: Option<String> = None;
+        let mut telemetry_every: u64 = cjc_ad::telemetry::DEFAULT_EVERY;
         let mut positional: Vec<String> = Vec::new();
 
         let mut i = 1;
@@ -360,6 +372,21 @@ impl Config {
                             "unknown diagnostic format `{}` (expected `short` or `rich`)", other
                         )),
                     }
+                }
+                "--telemetry" => {
+                    i += 1;
+                    if i >= args.len() {
+                        cli_error("--telemetry requires a file path");
+                    }
+                    telemetry = Some(args[i].clone());
+                }
+                "--telemetry-every" => {
+                    i += 1;
+                    telemetry_every = args
+                        .get(i)
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .filter(|&n| n > 0)
+                        .unwrap_or_else(|| cli_error("--telemetry-every requires a positive integer"));
                 }
                 "--seed" => {
                     i += 1;
@@ -481,6 +508,8 @@ impl Config {
             output_format,
             cana_report,
             pinn_weights,
+            telemetry,
+            telemetry_every,
         }
     }
 }
@@ -889,6 +918,8 @@ fn print_usage() {
     eprintln!("Flags:");
     eprintln!("  --reproducible                   Enable reproducibility mode");
     eprintln!("  --seed <N>                       Set RNG seed (default: 42)");
+    eprintln!("  --telemetry <path>               Append training telemetry (JSON lines) to <path>");
+    eprintln!("  --telemetry-every <N>            Telemetry sampling interval in steps (default: 10)");
     eprintln!("  --time                           Print execution time after running");
     eprintln!("  --mir-opt                        Enable MIR optimizations (defaults to thermal-aware)");
     eprintln!("  --thermal-aware                  Explicit thermal-aware (now the default; redundant with --mir-opt)");
@@ -1002,6 +1033,12 @@ const EXIT_PARITY: i32 = 4;
 fn cmd_run(source: &str, filename: &str, config: &Config) {
     let start = Instant::now();
 
+    if config.telemetry.is_some()
+        && (config.multi_file || config.mir_mono || config.mir_opt || config.thermal_aware || config.pinn_weights.is_some())
+    {
+        cli_error("--telemetry is supported on the default executor only (no --multi-file, --mir-opt, --mir-mono or --pinn-weights)");
+    }
+
     if config.multi_file {
         let entry_path = Path::new(filename)
             .canonicalize()
@@ -1106,7 +1143,19 @@ fn cmd_run(source: &str, filename: &str, config: &Config) {
             }
         } else {
             let mut interpreter = cjc_eval::Interpreter::new(config.seed);
-            if let Err(e) = interpreter.exec(&program) {
+            if let Some(path) = &config.telemetry {
+                // Ring of one record: each sampled step is flushed as it is
+                // taken, so a client tailing the file sees training live.
+                interpreter.ad.telemetry = Some(
+                    cjc_ad::telemetry::Telemetry::to_file(path, config.seed, config.telemetry_every)
+                        .with_capacity(1),
+                );
+            }
+            let result = interpreter.exec(&program);
+            if let Some(t) = interpreter.ad.telemetry.as_mut() {
+                t.flush();
+            }
+            if let Err(e) = result {
                 eprintln!("{}", e);
                 process::exit(EXIT_RUNTIME);
             }

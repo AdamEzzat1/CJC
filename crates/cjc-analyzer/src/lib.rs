@@ -15,5 +15,8 @@ pub mod symbol_index;
 pub mod hover;
 pub mod completion;
 pub mod diagnostics;
+pub mod alloc_meter;
+pub mod companion;
+pub mod cursor;
 pub mod postulate;
 pub mod server;

@@ -11,17 +11,22 @@
 //! - textDocument/completion
 //! - textDocument/publishDiagnostics (on edit)
 //! - textDocument/inlayHint (tensor shapes, Postulate)
+//! - textDocument/documentHighlight (occurrences of the identifier under the cursor)
 //! - postulate/gradGraph, postulate/snapshotHash, postulate/executorAgreement,
-//!   postulate/runReport (see [`crate::postulate`])
+//!   postulate/runReport, postulate/telemetry (see [`crate::postulate`])
+//! - postulate/cursorContext (see [`crate::cursor`])
+//!
+//! `cjc-analyzer --companion PATH` also mirrors the editor's buffer and cursor
+//! to files a Postulate HUD watches (see [`crate::companion`]).
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _};
-use lsp_types::request::{Completion, HoverRequest, InlayHintRequest, Request as _};
+use lsp_types::request::{Completion, DocumentHighlightRequest, HoverRequest, InlayHintRequest, Request as _};
 use lsp_types::{
-    CompletionOptions, CompletionParams, DidChangeTextDocumentParams,
+    CompletionOptions, CompletionParams, DidChangeTextDocumentParams, DocumentHighlightParams,
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, Hover, HoverContents,
     HoverParams, HoverProviderCapability, InitializeParams, InlayHintParams, MarkupContent,
     MarkupKind, OneOf, PublishDiagnosticsParams, ServerCapabilities, TextDocumentSyncCapability,
@@ -29,7 +34,9 @@ use lsp_types::{
 };
 use serde_json::Value as Json;
 
+use crate::companion::Companion;
 use crate::completion;
+use crate::cursor;
 use crate::diagnostics;
 use crate::hover::{hover_for_symbol, word_at_offset};
 use crate::postulate::{self, RunCapture};
@@ -73,6 +80,7 @@ impl Analyzer {
                 ..Default::default()
             }),
             inlay_hint_provider: Some(OneOf::Left(true)),
+            document_highlight_provider: Some(OneOf::Left(true)),
             ..Default::default()
         }
     }
@@ -150,10 +158,42 @@ impl Analyzer {
                 };
                 Response::new_ok(id, hints)
             }
+            DocumentHighlightRequest::METHOD => {
+                let (id, params): (RequestId, DocumentHighlightParams) = extract_request(req)?;
+                let tdp = params.text_document_position_params;
+                let hl = self
+                    .documents
+                    .get(&tdp.text_document.uri)
+                    .map(|d| cursor::highlights(&d.text, tdp.position.line, tdp.position.character))
+                    .unwrap_or_default();
+                Response::new_ok(id, hl)
+            }
+            "postulate/cursorContext" => {
+                let (uri, seed) = postulate_params(&req.params)?;
+                let line = req.params.pointer("/position/line").and_then(Json::as_u64).ok_or("missing position.line")?;
+                let ch = req
+                    .params
+                    .pointer("/position/character")
+                    .and_then(Json::as_u64)
+                    .ok_or("missing position.character")?;
+                let Some(doc) = self.documents.get(&uri) else {
+                    return Err(format!("document not open: {}", uri.as_str()).into());
+                };
+                // A cursor move never starts a run: use this version's run if cached.
+                let cached = self
+                    .runs
+                    .get(&(uri.as_str().to_owned(), seed))
+                    .filter(|(v, _)| *v == doc.version)
+                    .map(|(_, r)| r.clone());
+                let mut body = cursor::cursor_context(&doc.text, line as u32, ch as u32, cached.as_deref());
+                body["version"] = doc.version.into();
+                Response::new_ok(req.id, body)
+            }
             "postulate/gradGraph"
             | "postulate/snapshotHash"
             | "postulate/executorAgreement"
-            | "postulate/runReport" => {
+            | "postulate/runReport"
+            | "postulate/telemetry" => {
                 let (uri, seed) = postulate_params(&req.params)?;
                 let Some((src, run)) = self.run(&uri, seed) else {
                     return Err(format!("document not open: {}", uri.as_str()).into());
@@ -162,6 +202,7 @@ impl Analyzer {
                     "postulate/gradGraph" => postulate::grad_graph_response(&src, &run),
                     "postulate/snapshotHash" => postulate::snapshot_hash_response(&run),
                     "postulate/executorAgreement" => postulate::executor_agreement_response(&run),
+                    "postulate/telemetry" => postulate::telemetry_response(&run),
                     _ => postulate::run_report_response(&src, &run),
                 };
                 Response::new_ok(req.id, body)
@@ -244,25 +285,35 @@ fn postulate_params(params: &Json) -> Result<(Uri, u64), BoxError> {
     Ok((uri, seed))
 }
 
-/// Run the LSP server. Blocks until the client disconnects.
-pub fn run_server() -> Result<(), BoxError> {
+/// Run the LSP server. Blocks until the client disconnects. With a
+/// `companion` path, the editor's buffer and cursor are mirrored there.
+pub fn run_server(companion: Option<std::path::PathBuf>) -> Result<(), BoxError> {
     let (connection, io_threads) = Connection::stdio();
 
     let caps_json = serde_json::to_value(Analyzer::capabilities())?;
     let _init_params: InitializeParams = serde_json::from_value(connection.initialize(caps_json)?)?;
 
-    main_loop(&connection)?;
+    main_loop(&connection, companion.map(Companion::new))?;
+    // Drop the connection first: its sender keeps the writer thread alive, so
+    // joining with it still held never returns. Without this, a server whose
+    // client exits without `shutdown` (a crash, a killed editor) never exits.
+    drop(connection);
     io_threads.join()?;
     Ok(())
 }
 
 /// The main message loop.
-fn main_loop(conn: &Connection) -> Result<(), BoxError> {
+fn main_loop(conn: &Connection, mut companion: Option<Companion>) -> Result<(), BoxError> {
     let mut analyzer = Analyzer::new();
     for msg in &conn.receiver {
         if let Message::Request(req) = &msg {
             if conn.handle_shutdown(req)? {
                 return Ok(());
+            }
+        }
+        if let Some(c) = companion.as_mut() {
+            if let Err(e) = c.observe(&msg) {
+                eprintln!("cjc-analyzer: companion write failed: {e}");
             }
         }
         for out in analyzer.handle(msg) {

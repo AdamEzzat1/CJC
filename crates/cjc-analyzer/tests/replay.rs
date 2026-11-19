@@ -1,7 +1,8 @@
 //! Postulate Phase 1 gate — LSP replay.
 //!
-//! A scripted session (open, hover, completion, inlay hints, the four
-//! `postulate/*` requests, an edit, a second seed) is replayed against a fresh
+//! A scripted session (open, hover, completion, inlay hints, document
+//! highlights, the `postulate/*` requests including Phase 2's `telemetry` and
+//! `cursorContext`, an edit, a second seed) is replayed against a fresh
 //! in-process `Analyzer` ten times. Every response must be byte-identical
 //! across runs once the fields a response itself lists under `"measured"`
 //! (wall time) are masked. The poison test shows the comparison is not
@@ -43,6 +44,12 @@ fn script() -> Vec<Message> {
         req(6, "postulate/executorAgreement", doc(a)),
         req(7, "postulate/runReport", doc(a)),
         req(8, "postulate/snapshotHash", json!({ "textDocument": {"uri": a}, "seed": 7 })),
+        req(14, "postulate/telemetry", doc(a)),
+        // Inside the training loop, on the `g` of `g.sub(o, y_id)`.
+        req(15, "postulate/cursorContext", json!({ "textDocument": {"uri": a}, "position": {"line": 23, "character": 16} })),
+        // Inside `forward`, on `g.matmul(x_id, w1_id)`: not inside the loop's text.
+        req(16, "postulate/cursorContext", json!({ "textDocument": {"uri": a}, "position": {"line": 3, "character": 22} })),
+        req(17, "textDocument/documentHighlight", json!({ "textDocument": {"uri": a}, "position": {"line": 18, "character": 12} })),
         notif("textDocument/didChange", json!({
             "textDocument": {"uri": a, "version": 2},
             "contentChanges": [{ "text": edited }] })),
@@ -114,7 +121,7 @@ fn gate_lsp_replay_is_identical_over_ten_runs() {
     }
 
     // The session says something real, not just the same nothing ten times.
-    assert_eq!(first.len(), 17, "13 responses + 4 diagnostics notifications");
+    assert_eq!(first.len(), 21, "17 responses + 4 diagnostics notifications");
     let hints = result_of(&first, 3)["result"].as_array().cloned().unwrap();
     assert!(!hints.is_empty(), "shape hints");
     assert!(hints.iter().any(|h| h["label"] == ": [5, 8]"), "tanh(matmul(x, w1)) is [5, 8]: {hints:?}");
@@ -123,6 +130,22 @@ fn gate_lsp_replay_is_identical_over_ten_runs() {
     assert_eq!(g["param_names"], json!([{"node": 0, "name": "W1"}, {"node": 1, "name": "W2"}]));
     let agree = &result_of(&first, 6)["result"];
     assert_eq!(agree["executors_agree"], json!(true), "{agree}");
+    assert_eq!(agree["telemetry_parity"], json!(true), "{agree}");
+    let tel = &result_of(&first, 14)["result"];
+    let recs = tel["records"].as_array().unwrap();
+    assert_eq!((tel["steps"].as_u64(), recs.len()), (Some(60), 6), "60 steps sampled every 10");
+    assert_eq!(recs[3]["step"], 30);
+    assert!(recs[0]["grad_norms"]["n0"].is_number(), "{}", recs[0]);
+    let in_loop = &result_of(&first, 15)["result"];
+    assert_eq!(in_loop["symbol"], "g");
+    assert_eq!(in_loop["function"], "main");
+    assert_eq!(in_loop["training_loop"]["start"]["line"], 16, "{in_loop}");
+    assert_eq!(in_loop["nodes"][0]["op"], "Sub", "{in_loop}");
+    let in_fn = &result_of(&first, 16)["result"];
+    assert_eq!(in_fn["function"], "forward");
+    assert_eq!(in_fn["training_loop"], Json::Null, "{in_fn}");
+    assert_eq!(in_fn["nodes"][0]["op"], "MatMul", "{in_fn}");
+    assert_eq!(result_of(&first, 17)["result"].as_array().unwrap().len(), 5, "w1_id by name: forward(..) param + use, let, call arg, grad");
     let report = &result_of(&first, 7)["result"];
     assert_eq!(report["wall_ms_median"], json!("<measured>"));
     assert!(report["telemetry_steps"].as_u64().unwrap() == 60);
