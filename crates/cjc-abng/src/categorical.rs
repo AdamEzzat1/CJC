@@ -26,6 +26,7 @@
 //!
 //! See `docs/abng/PHASE_0_9_5_HANDOFF.md` §3 for the full design.
 
+use cjc_repro::dmath::DetMath;
 use std::collections::{BTreeMap, BTreeSet};
 
 use cjc_repro::{kahan_sum_f64, KahanAccumulatorF64};
@@ -720,7 +721,7 @@ fn mutual_information(buckets: &[u8], target: &[u8], n_buckets: usize) -> f64 {
             }
             let p_by = (nby as f64) / total;
             let p_y = (margin_y[yi] as f64) / total;
-            acc.add(p_by * (p_by / (p_b * p_y)).ln());
+            acc.add(p_by * (p_by / (p_b * p_y)).det_ln());
         }
     }
     // MI is non-negative; clamp tiny round-off below zero.

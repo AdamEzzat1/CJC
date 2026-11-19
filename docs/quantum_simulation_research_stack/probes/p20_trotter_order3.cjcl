@@ -1,0 +1,12 @@
+fn main() -> Any {
+    let __r = __body();
+    print(__r);
+    __r
+}
+fn __body() -> Any {
+    let h = q_fermion_h2();
+    let c = qubits(2);
+    let a = q_trotter_error(h, 1.0, 4, 1);
+    let b = q_trotter_error(h, 1.0, 4, 3);
+    [a, b]
+}

@@ -37,6 +37,7 @@
 //! contract documented in [`crate::tokenizer`]. Two runs over the
 //! same inputs produce byte-identical findings.
 
+use cjc_repro::dmath::DetMath;
 use std::collections::BTreeMap;
 
 use cjc_data::{Column, DataFrame};
@@ -178,7 +179,7 @@ fn shannon_entropy(freqs: &BTreeMap<u32, u64>) -> f64 {
             continue;
         }
         let p = c as f64 / total_f;
-        acc.add(-p * p.ln());
+        acc.add(-p * p.det_ln());
     }
     acc.finalize()
 }

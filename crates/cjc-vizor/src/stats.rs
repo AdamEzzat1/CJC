@@ -3,6 +3,7 @@
 //! All functions are fully deterministic: same input → same output.
 //! No external dependencies. Pure Rust, no RNG.
 
+use cjc_repro::dmath::DetMath;
 use std::f64::consts::PI;
 
 // ─── KDE ─────────────────────────────────────────────────────────────
@@ -14,12 +15,12 @@ pub fn silverman_bandwidth(values: &[f64]) -> f64 {
         return 1.0;
     }
     let mean = values.iter().sum::<f64>() / n;
-    let var = values.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
+    let var = values.iter().map(|x| (x - mean).det_powi(2)).sum::<f64>() / (n - 1.0);
     let std = var.sqrt();
     if std < 1e-15 {
         return 1.0;
     }
-    1.06 * std * n.powf(-0.2)
+    1.06 * std * n.det_powf(-0.2)
 }
 
 /// Gaussian kernel density estimation.
@@ -62,7 +63,7 @@ pub fn kde_bw(values: &[f64], n_points: usize, bw_override: Option<f64>) -> (Vec
         let mut sum = 0.0;
         for &v in values {
             let u = (x - v) / bw;
-            sum += (-0.5 * u * u).exp();
+            sum += (-0.5 * u * u).det_exp();
         }
         density.push(sum * norm);
     }
@@ -190,11 +191,11 @@ pub fn letter_value_stats(values: &[f64]) -> Vec<(f64, f64)> {
 
     let n = sorted.len();
     // Number of letter-value levels: floor(log2(n)), minimum 1.
-    let k = ((n as f64).log2().floor() as usize).max(1);
+    let k = ((n as f64).det_log2().floor() as usize).max(1);
 
     let mut levels = Vec::with_capacity(k);
     for i in (1..=k).rev() {
-        let p = 0.5_f64.powi(i as i32);
+        let p = 0.5_f64.det_powi(i as i32);
         let lo = quantile(&sorted, p);
         let hi = quantile(&sorted, 1.0 - p);
         // Skip degenerate levels where lo ≈ hi (e.g., the median-only level).
@@ -358,7 +359,7 @@ pub fn correlation_matrix(columns: &[&[f64]]) -> Vec<Vec<f64>> {
         .collect();
     let stds: Vec<f64> = columns.iter().enumerate()
         .map(|(i, c)| {
-            let var = c.iter().map(|&v| (v - means[i]).powi(2)).sum::<f64>()
+            let var = c.iter().map(|&v| (v - means[i]).det_powi(2)).sum::<f64>()
                 / (c.len().max(1) - 1).max(1) as f64;
             var.sqrt()
         })
@@ -419,7 +420,7 @@ pub fn distance_matrix(data: &[&[f64]]) -> Vec<Vec<f64>> {
     for i in 0..n {
         for j in (i + 1)..n {
             let d: f64 = data[i].iter().zip(data[j].iter())
-                .map(|(&a, &b)| (a - b).powi(2))
+                .map(|(&a, &b)| (a - b).det_powi(2))
                 .sum::<f64>()
                 .sqrt();
             dist[i][j] = d;
@@ -577,7 +578,7 @@ pub fn kde_2d(
             for k in 0..n {
                 let ux = (gx - x[k]) / bw_x;
                 let uy = (gy - y[k]) / bw_y;
-                sum += (-0.5 * (ux * ux + uy * uy)).exp();
+                sum += (-0.5 * (ux * ux + uy * uy)).det_exp();
             }
             density[i][j] = sum * norm;
         }

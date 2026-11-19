@@ -311,7 +311,9 @@ fn reconstruct_step_from_extracted_weights() {
         for j in 0..2 {
             acc += b[i * 2 + j] * x_d[j];
         }
-        h1_recon[i] = acc.tanh();
+        // The runtime's tanh is `cjc_repro::dmath::tanh`; the platform libm
+        // can differ in the last bit, and this comparison is exact.
+        h1_recon[i] = cjc_repro::dmath::tanh(acc);
     }
     assert_eq!(h1_cell, h1_recon, "reconstructed step must match cell step");
 }

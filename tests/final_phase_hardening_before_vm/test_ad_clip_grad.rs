@@ -6,8 +6,8 @@ use cjc_ad::GradGraph;
 #[test]
 fn test_clip_grad_basic() {
     let mut graph = GradGraph::new();
-    let a = graph.variable(Tensor::from_vec_unchecked(vec![1.0, 2.0, 3.0], &[3]));
-    let b = graph.variable(Tensor::from_vec_unchecked(vec![10.0, 20.0, 30.0], &[3]));
+    let a = graph.parameter(Tensor::from_vec_unchecked(vec![1.0, 2.0, 3.0], &[3]));
+    let b = graph.parameter(Tensor::from_vec_unchecked(vec![10.0, 20.0, 30.0], &[3]));
     let c = graph.mul(a, b);
     let loss = graph.sum(c);
     graph.backward(loss);
@@ -35,8 +35,8 @@ fn test_clip_grad_basic() {
 #[test]
 fn test_clip_grad_norm() {
     let mut graph = GradGraph::new();
-    let a = graph.variable(Tensor::from_vec_unchecked(vec![3.0, 4.0], &[2]));
-    let b = graph.variable(Tensor::from_vec_unchecked(vec![100.0, 200.0], &[2]));
+    let a = graph.parameter(Tensor::from_vec_unchecked(vec![3.0, 4.0], &[2]));
+    let b = graph.parameter(Tensor::from_vec_unchecked(vec![100.0, 200.0], &[2]));
     let c = graph.mul(a, b);
     let loss = graph.sum(c);
     graph.backward(loss);
@@ -57,7 +57,7 @@ fn test_clip_grad_norm() {
 #[test]
 fn test_clip_grad_no_clip_needed() {
     let mut graph = GradGraph::new();
-    let a = graph.variable(Tensor::from_vec_unchecked(vec![1.0, 2.0], &[2]));
+    let a = graph.parameter(Tensor::from_vec_unchecked(vec![1.0, 2.0], &[2]));
     let loss = graph.sum(a);
     graph.backward(loss);
 

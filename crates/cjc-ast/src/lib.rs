@@ -21,6 +21,7 @@ pub mod metrics;
 pub mod node_utils;
 pub mod validate;
 pub mod visit;
+pub mod visit_mut;
 
 use std::fmt;
 

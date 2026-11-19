@@ -69,12 +69,20 @@ final value). All three demos return `IDENTICAL`.
 | 1-qubit rotations | `q_rx`, `q_ry`, `q_rz` | ✓ |
 | 2-qubit | `q_cx`/`q_cnot`, `q_cz`, `q_swap` | ✓ |
 | 3-qubit | `q_toffoli`/`q_ccx` | ✓ |
-| Observables | `q_probs`, `q_amplitudes`, `q_n_qubits`, `q_n_gates` | ✓ |
-| Sampling / measurement | `q_sample(c, n_shots, seed)`, `q_measure(c, seed)` | ✓ (terminal-only — see limits) |
-| Fermionic Hamiltonians | `q_fermion_h2`, `q_fermion_lih`, `q_fermion_new`, `q_fermion_n_terms`, `q_fermion_expectation` | ✓ |
-| Trotter time evolution | `q_trotter_evolve`, `q_trotter_error` | partial — see limits |
+| Observables (circuit **or** statevector) | `q_probs`, `q_amplitudes`, `q_n_qubits`, `q_n_gates`, `q_expect_pauli` | ✓ |
+| Sampling / measurement | `q_sample(state, n_shots, seed)`, `q_measure(state, seed)` | ✓ (terminal-only — see limits) |
+| Fermionic Hamiltonians | `q_fermion_h2`, `q_fermion_lih`, `q_fermion_new`, `q_fermion_add_term`, `q_fermion_n_terms`, `q_fermion_expectation` | ✓ |
+| Trotter time evolution | `q_trotter_evolve`, `q_trotter_error` | ✓ (output feeds observables) |
 | Noise mitigation (ZNE) | `q_zne_mitigate`, `q_zne_linear`, `q_scale_noise` | ✓ |
-| Pure (no-GC) circuits | same gate set on `qubits(n, "pure")` | ✓ (separate guarded dispatch arms) |
+| MPS, VQE, QAOA, DMRG | `mps_*`, `vqe_heisenberg`, `vqe_full_heisenberg`, `qaoa_*`, `dmrg_*` | ✓ (no demo here yet) |
+| Stabilizer, QEC | `stabilizer_*`, `qec_*` | ✓ (no demo here yet) |
+| Density matrix + noise | `density_*`, `density_from_state` | ✓ (no demo here yet) |
+| QML | `qml_train`, `qml_predict` | ✓ (no demo here yet) |
+| Copies | `q_copy` | ✓ |
+| `"pure"` backend | the same builtins on `qubits(n, "pure")`, `mps_new(…, "pure")`, … | ✓ (a second Rust implementation; unrelated to NoGC) |
+
+The complete list of 84 builtins, with arguments, is the "Builtin
+Reference" in [`docs/QUANTUM_SIMULATION.md`](../../docs/QUANTUM_SIMULATION.md).
 
 ## What this does **not** prove
 
@@ -82,15 +90,14 @@ final value). All three demos return `IDENTICAL`.
   algorithmic breadth, or hardware connectivity. The demos exercise a
   *subset* of the surface above and at small qubit counts (≤5).
 - They do not demonstrate **variational training** of a quantum circuit
-  (no parameter-shift gradients, no gradient-based VQE optimiser at the
-  language level). Demo 05 is a 51-point grid sweep, not a trained VQE.
-  Trained VQE infrastructure exists in `cjc-quantum/src/vqe.rs` but is
-  not yet exposed as a `q_vqe_*` builtin family.
+  of a user-written circuit. Demo 05 is a 51-point grid sweep, not a
+  trained VQE. The `vqe_*`, `qaoa_maxcut`, and `qml_train` builtins do train,
+  but only their built-in ansätze, and they return results rather than
+  gradients. There is no language-level gradient of an arbitrary circuit.
 - They do not demonstrate noise-channel simulation, density matrices,
-  MPS/DMRG, stabilizer circuits, or QEC at the language level. Those
-  modules exist in the `cjc-quantum` crate (`density.rs`, `mps.rs`,
-  `dmrg.rs`, `stabilizer.rs`, `qec.rs`) and have unit tests, but their
-  builtins are not part of the surface mapped above.
+  MPS/DMRG, stabilizer circuits, or QEC. Those **are** exposed as builtins
+  (table above) and covered by `tests/beta_tests/quantum/`, but no demo in
+  this directory uses them yet.
 
 ## Known limitations of the language-level surface
 
@@ -98,12 +105,9 @@ final value). All three demos return `IDENTICAL`.
   *terminal* outcomes after executing the entire circuit. A canonical
   teleportation circuit with a Bell measurement followed by conditional
   X/Z corrections cannot be expressed in `.cjcl` source today.
-- **Trotter return doesn't compose with observables.**
-  `q_trotter_evolve(...)` returns a `Statevector`, but `q_probs`,
-  `q_amplitudes`, and `q_fermion_expectation` accept only a `Circuit`
-  (verified by reading the `with_circuit` helper in
-  `cjc-quantum/src/dispatch.rs:1399`). There is currently no language-
-  level way to feed a Trotter-evolved state back into an observable.
-- **`adjoint`, density-matrix, MPS, DMRG, stabilizer, QEC, QML, QAOA,
-  VQE optimisers, Wirtinger AD** — all present as Rust modules under
-  `cjc-quantum/src/`, none yet exposed as language-level builtins.
+- **Not exposed to `.cjcl`:** adjoint differentiation, Wirtinger AD, and
+  `HybridCircuit` (mid-circuit measurement with classical control). These
+  exist only as Rust modules under `cjc-quantum/src/`.
+- *(Fixed 2026-09-24, ADR-0045: Trotter output now composes with
+  observables. `q_probs`, `q_sample`, `q_fermion_expectation`, … accept the
+  statevector that `q_trotter_evolve` returns.)*

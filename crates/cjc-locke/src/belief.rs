@@ -23,6 +23,7 @@
 //! bad signal) **and** added to the `assumptions` list, so an empty
 //! report cannot artificially boost the score without acknowledgement.
 
+use cjc_repro::dmath::DetMath;
 use std::collections::BTreeMap;
 
 use crate::report::{FindingSeverity, ValidationFinding};
@@ -332,7 +333,7 @@ pub fn sample_score_from_n(n: u64) -> f64 {
     }
     // 1 - exp(-n / k) tuned so n=30 ≈ 0.5 (k ≈ 43.3).
     let k = 43.281; // = -30 / ln(0.5)
-    1.0 - (-(n as f64) / k).exp()
+    1.0 - (-(n as f64) / k).det_exp()
 }
 
 /// Aggregate a flat list of validation findings into a penalty for the

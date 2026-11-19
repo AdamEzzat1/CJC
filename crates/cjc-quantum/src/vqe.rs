@@ -19,6 +19,7 @@
 //! - Gradient computation uses deterministic MPS operations
 //! - Sign-stabilized SVD ensures bit-identical bond truncation
 
+use cjc_repro::dmath;
 use crate::mps::Mps;
 use cjc_runtime::complex::ComplexF64;
 
@@ -562,8 +563,8 @@ pub fn build_mps_ansatz(n_qubits: usize, thetas: &[f64], max_bond: usize) -> Mps
 
     // Ry layer
     for (q, &theta) in thetas.iter().enumerate() {
-        let c = (theta / 2.0).cos();
-        let s = (theta / 2.0).sin();
+        let c = dmath::cos(theta / 2.0);
+        let s = dmath::sin(theta / 2.0);
         let ry = [
             [ComplexF64::real(c), ComplexF64::real(-s)],
             [ComplexF64::real(s), ComplexF64::real(c)],

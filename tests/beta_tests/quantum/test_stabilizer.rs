@@ -473,3 +473,28 @@ fn large_system_500_qubits_no_crash() {
         "500-qubit GHZ: qubit 0 and 499 must agree"
     );
 }
+
+// Regression (2026-09-24 audit): to_statevector() projected |+…+⟩ onto the
+// stabilizer group and returned an all-zero vector whenever the state was
+// orthogonal to |+…+⟩ (e.g. |−⟩ = Z·H|0⟩). Found by prop_stabilizer_matches_dense.
+#[test]
+fn stabilizer_to_statevector_minus_state_is_normalized() {
+    let cases: [&[&str]; 4] = [&["H", "Z"], &["X", "H"], &["H", "Y"], &["H", "Z", "S"]];
+    for seq in cases {
+        let mut s = StabilizerState::new(1);
+        for g in seq {
+            match *g {
+                "H" => s.h(0),
+                "X" => s.x(0),
+                "Y" => s.y(0),
+                "Z" => s.z(0),
+                _ => s.s(0),
+            }
+        }
+        let sv = s.to_statevector().unwrap();
+        let p0 = sv[0].norm_sq();
+        let p1 = sv[1].norm_sq();
+        assert!((p0 + p1 - 1.0).abs() < 1e-12, "{:?}: not normalized ({}, {})", seq, p0, p1);
+        assert!((p0 - 0.5).abs() < 1e-12, "{:?}: expected equal superposition, got {}", seq, p0);
+    }
+}

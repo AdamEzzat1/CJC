@@ -180,7 +180,10 @@ proptest! {
             for j in 0..input_dim {
                 acc += b[i * input_dim + j] * x[j];
             }
-            recon[i] = acc.tanh();
+            // The runtime's tanh is `cjc_repro::dmath::tanh`; the platform
+            // libm differs in the last bit on some inputs, which made this
+            // exact comparison seed-dependent.
+            recon[i] = cjc_repro::dmath::tanh(acc);
         }
         prop_assert_eq!(h_after, recon);
     }

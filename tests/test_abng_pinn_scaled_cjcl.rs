@@ -60,8 +60,14 @@ fn pinn_scaled_chain_head_canary_locked() {
     // `11191d718c961259d10e108dfd3368d5603d708c8fce34bd0355867f43c1e2f2`.
     // PINN-scaled exercises BLR at d=4 with n≥5 per-leaf batches —
     // hits the new `KahanAccumulatorF64x4::add_lanes` path.
+    //
+    // Re-locked 2026-09-26 — runtime math builtins moved to
+    // `cjc_repro::dmath` (ADR-0046 amendment): the source's `sin`/`cos`/`exp`
+    // builtins now return platform-independent bits. max_err, n_per_leaf,
+    // recovers_truth and verify_chain are unchanged. Pre-dmath hex:
+    // `2d2ddec36850b487b9b714a584382df306f7730a328edb1b06d11fe7c4d7dcd0`.
     const CANARY_HEX: &str =
-        "2d2ddec36850b487b9b714a584382df306f7730a328edb1b06d11fe7c4d7dcd0";
+        "10b56196f81faec0935b725dcf98c203a476255edff720a3d19f39c6fc39c36e";
     assert_eq!(
         chain, CANARY_HEX,
         "pinn_scaled cjcl chain_head canary mismatch — see comment"

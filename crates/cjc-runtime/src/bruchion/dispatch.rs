@@ -415,12 +415,13 @@ pub fn matmul_tiled_kernel(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usi
 // ── adam ───────────────────────────────────────────────────────────────────
 
 /// One Adam update over every parameter — `ml::adam_step`'s arithmetic, with the bias
-/// corrections `1 − β^t` computed HERE through `powf` (libm stays on this side, so the
-/// kernel is libm-free) and passed to the kernel as values.
+/// corrections `1 − β^t` computed HERE through `dmath`'s `det_powf`, the same call
+/// `ml::adam_step` makes (the power stays on this side, so the kernel is libm-free), and
+/// passed to the kernel as values.
 #[allow(clippy::too_many_arguments)]
 pub fn adam_step_raw(params: &mut [f64], grads: &[f64], m: &mut [f64], v: &mut [f64], lr: f64, beta1: f64, beta2: f64, eps: f64, t: f64) {
-    let bc1 = 1.0 - beta1.powf(t);
-    let bc2 = 1.0 - beta2.powf(t);
+    let bc1 = 1.0 - cjc_repro::dmath::DetMath::det_powf(beta1, t);
+    let bc2 = 1.0 - cjc_repro::dmath::DetMath::det_powf(beta2, t);
     // Routable, but not in the default set: the records at abe6b21..28c104c had the kernel
     // 15-20x slower than this loop because the pack took its square root from the libm-free
     // `std/math`, a software root; with the hardware instruction (`sqrt_f64`: `sqrtsd`,

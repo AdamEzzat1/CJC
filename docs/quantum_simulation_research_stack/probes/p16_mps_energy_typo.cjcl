@@ -1,0 +1,9 @@
+fn main() -> Any {
+    let __r = __body();
+    print(__r);
+    __r
+}
+fn __body() -> Any {
+    let m = mps_new(4, 8);
+    mps_energy(m, "heisenbrg")
+}

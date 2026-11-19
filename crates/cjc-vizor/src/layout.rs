@@ -2,6 +2,7 @@
 //!
 //! All operations are deterministic: same input → same output.
 
+use cjc_repro::dmath::DetMath;
 use crate::spec::{PlotSpec, Scale, CoordSystem};
 use crate::text::format_tick;
 
@@ -503,8 +504,8 @@ pub fn nice_ticks(data_min: f64, data_max: f64, target_count: usize) -> Vec<f64>
 
 /// Round a step size to a "nice" number (1, 2, 5, 10, 20, 50, ...).
 fn nice_step(rough: f64) -> f64 {
-    let exp = rough.log10().floor();
-    let frac = rough / 10.0_f64.powf(exp);
+    let exp = rough.det_log10().floor();
+    let frac = rough / 10.0_f64.det_powf(exp);
 
     let nice_frac = if frac <= 1.5 {
         1.0
@@ -516,7 +517,7 @@ fn nice_step(rough: f64) -> f64 {
         10.0
     };
 
-    nice_frac * 10.0_f64.powf(exp)
+    nice_frac * 10.0_f64.det_powf(exp)
 }
 
 /// Generate tick positions for a logarithmic scale.

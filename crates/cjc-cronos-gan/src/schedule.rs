@@ -33,6 +33,7 @@
 //! different bytes — this is what makes the schedule safe to feed into
 //! `TemporalGanConfig::canonical_bytes` and downstream replay hashes.
 
+use cjc_repro::dmath::DetMath;
 /// Schedule for the asymmetric-mode challenger weight λ.
 ///
 /// See module docs for variant semantics.
@@ -110,11 +111,11 @@ impl LambdaSchedule {
             } => {
                 if n_train_steps == 0 {
                     // Degenerate: every step "is" the terminal step.
-                    return start * (-decay_rate).exp();
+                    return start * (-decay_rate).det_exp();
                 }
                 let t_clamped = step.min(n_train_steps) as f64;
                 let n = n_train_steps as f64;
-                start * (-decay_rate * t_clamped / n).exp()
+                start * (-decay_rate * t_clamped / n).det_exp()
             }
             LambdaSchedule::WarmupThenLinear {
                 start,

@@ -1,0 +1,26 @@
+R = 0.7414 Å = 1.401043 bohr
+S12 = 0.658957
+h_mo diag = [-1.25246357 -0.4759487 ]
+(gg|gg)=0.674489 (uu|uu)=0.697394 (gg|uu)=0.663468 (gu|gu)=0.181289
+E_nuc = 1/R = 0.713754 Ha
+E_HF electronic = -1.830438  total = -1.116684
+FCI electronic ground (N=2, Sz=0) = -1.851024  total = -1.137270
+N=2, Sz=0 electronic spectrum = [-1.851024 -1.246233 -0.883655 -0.233918]
+CJC 2-qubit matrix spectrum    = [-1.851199 -0.252801  0.        0.1824  ]
+CJC min + E_nuc = -1.137445
+|CJC min - FCI electronic| = 1.75e-04 Ha
+
+Full Fock-space spectrum by (N, 2Sz):
+  N=0 2Sz=+0: [0.]
+  N=1 2Sz=-1: [-1.252464 -0.475949]
+  N=1 2Sz=+1: [-1.252464 -0.475949]
+  N=2 2Sz=-2: [-1.246233]
+  N=2 2Sz=+0: [-1.851024 -1.246233 -0.883655 -0.233918]
+  N=2 2Sz=+2: [-1.246233]
+  N=3 2Sz=-1: [-1.16074 -0.36132]
+  N=3 2Sz=+1: [-1.16074 -0.36132]
+  N=4 2Sz=+0: [0.206353]
+CJC eigenvalue -1.851199 -> nearest physical state N=2 2Sz=+0 E=-1.851024 (diff 1.7e-04)
+CJC eigenvalue -0.252801 -> nearest physical state N=2 2Sz=+0 E=-0.233918 (diff 1.9e-02)
+CJC eigenvalue +0.000000 -> nearest physical state N=0 2Sz=+0 E=+0.000000 (diff 1.1e-16)
+CJC eigenvalue +0.182400 -> nearest physical state N=4 2Sz=+0 E=+0.206353 (diff 2.4e-02)

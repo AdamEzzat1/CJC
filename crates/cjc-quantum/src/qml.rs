@@ -5,7 +5,7 @@
 //! - Adjacent CNOT entanglement (1D MPS-friendly)
 //! - Multiple re-upload passes
 //! - Softmax classification head via Z expectation values
-//! - Parameter-shift gradient training
+//! - Gradient training with central finite differences (ε = 1e-4)
 //!
 //! # Determinism
 //!
@@ -14,6 +14,7 @@
 //! - RNG via SplitMix64 with explicit seed threading
 //! - Same seed = bit-identical training trajectory
 
+use cjc_repro::dmath;
 use crate::mps::Mps;
 use crate::vqe::{transfer_matrix_identity, transfer_matrix_z};
 use cjc_runtime::complex::ComplexF64;
@@ -84,21 +85,21 @@ pub struct QmlDataset {
 // ---------------------------------------------------------------------------
 
 fn rx_mat(theta: f64) -> [[ComplexF64; 2]; 2] {
-    let c = ComplexF64::real((theta / 2.0).cos());
-    let s = ComplexF64::new(0.0, -(theta / 2.0).sin());
+    let c = ComplexF64::real(dmath::cos(theta / 2.0));
+    let s = ComplexF64::new(0.0, -dmath::sin(theta / 2.0));
     [[c, s], [s, c]]
 }
 
 fn ry_mat(theta: f64) -> [[ComplexF64; 2]; 2] {
-    let c = ComplexF64::real((theta / 2.0).cos());
-    let s = ComplexF64::real((theta / 2.0).sin());
+    let c = ComplexF64::real(dmath::cos(theta / 2.0));
+    let s = ComplexF64::real(dmath::sin(theta / 2.0));
     [[c, ComplexF64::real(-s.re)], [s, c]]
 }
 
 fn rz_mat(theta: f64) -> [[ComplexF64; 2]; 2] {
     let half = theta / 2.0;
-    let e_neg = ComplexF64::new(half.cos(), -half.sin());
-    let e_pos = ComplexF64::new(half.cos(), half.sin());
+    let e_neg = ComplexF64::new(dmath::cos(half), -dmath::sin(half));
+    let e_pos = ComplexF64::new(dmath::cos(half), dmath::sin(half));
     [[e_neg, ComplexF64::ZERO], [ComplexF64::ZERO, e_pos]]
 }
 
@@ -229,7 +230,7 @@ pub fn classify(mps: &Mps, readout_qubits: &[usize], n_classes: usize) -> Vec<f6
 
     // Softmax: p_c = exp(z_c - max) / sum(exp(z_j - max))
     let max_z = z_values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let exp_values: Vec<f64> = z_values.iter().map(|z| (z - max_z).exp()).collect();
+    let exp_values: Vec<f64> = z_values.iter().map(|z| dmath::exp(z - max_z)).collect();
     let sum_exp: f64 = exp_values.iter().sum();
 
     exp_values.iter().map(|e| e / sum_exp).collect()
@@ -242,7 +243,7 @@ pub fn classify(mps: &Mps, readout_qubits: &[usize], n_classes: usize) -> Vec<f6
 /// Cross-entropy loss: -log(p[true_class]).
 fn cross_entropy_loss(probs: &[f64], label: usize) -> f64 {
     let p = probs[label].max(1e-15); // clamp to avoid log(0)
-    -p.ln()
+    -dmath::ln(p)
 }
 
 /// MSE loss: sum_c (p[c] - one_hot[c])^2 / n_classes.
@@ -314,7 +315,7 @@ pub fn compute_accuracy(config: &QmlConfig, params: &[f64], dataset: &QmlDataset
 }
 
 // ---------------------------------------------------------------------------
-// Parameter-Shift Gradient
+// Finite-Difference Gradient
 // ---------------------------------------------------------------------------
 
 /// Compute gradient of average batch loss w.r.t. all parameters.

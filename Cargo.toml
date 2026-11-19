@@ -74,6 +74,7 @@ members = [
     "bench/cana_threshold_probe",
     "bench/ad_bench",
     "bench/postulate_overhead",
+    "bench/quantum_compare",
     "bench/nlp_preprocess_bench",
     "bench/abng_micro",
     "bench/abng_result_profile",
@@ -284,3 +285,11 @@ path = "tests/fused_matmul_matmul/mod.rs"
 [[test]]
 name = "locke"
 path = "tests/locke/mod.rs"
+
+[[test]]
+name = "state_space_tests"
+path = "tests/state_space_tests/mod.rs"
+
+[[test]]
+name = "final_phase_hardening_before_vm"
+path = "tests/final_phase_hardening_before_vm/mod.rs"

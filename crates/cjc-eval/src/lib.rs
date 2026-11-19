@@ -27,6 +27,7 @@
 //! - [`Interpreter::new`] + [`Interpreter::exec`] for single-file programs.
 //! - [`run_program_with_modules_eval`] for multi-file module programs.
 
+use cjc_repro::dmath::DetMath;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -358,6 +359,90 @@ impl Interpreter {
         Err(EvalError::Runtime(format!(
             "assignment to undefined variable `{name}`"
         )))
+    }
+
+    /// Mutable access to the binding `assign(name, ..)` would write.
+    fn lookup_mut(&mut self, name: &str) -> Option<&mut Value> {
+        self.scopes.iter_mut().rev().find_map(|scope| scope.get_mut(name))
+    }
+
+    // -- Move on last use (ADR-0048) ------------------------------------------
+
+    /// Fast path for `x = f(..., x, ...)` where `f` is an owned-argument
+    /// builtin (`cjc_runtime::builtins::OWNED_ARG_BUILTINS`) and `x` is a
+    /// variable passed exactly once as a bare argument.
+    ///
+    /// The other arguments are evaluated left to right first. Then `x` is
+    /// moved out of its binding (leaving `Void`) straight into the argument
+    /// vector, so the builtin holds the only reference and its
+    /// `Rc::make_mut` mutates in place. Reading a bare variable has no side
+    /// effects, so taking it last is indistinguishable from reading it in
+    /// its argument position, and sibling arguments that mention `x` (e.g.
+    /// `len(x)`) still see the intact value.
+    ///
+    /// The placeholder is never observable:
+    /// - no user code runs between the take and the write-back (owned-arg
+    ///   builtins are stateless and never call back into the program);
+    /// - on success the result is assigned to `x`;
+    /// - on failure the argument is restored to the binding before the
+    ///   error propagates (`dispatch_builtin_owned` leaves `args`
+    ///   untouched on `Err`).
+    ///
+    /// Returns `None` when the pattern doesn't apply. Nothing has been
+    /// evaluated in that case, and the caller takes the ordinary path.
+    /// Semantics are identical to `cjc-mir-exec`'s `try_assign_move`.
+    fn try_assign_move(&mut self, target: &Expr, value: &Expr) -> Option<EvalResult> {
+        let ExprKind::Ident(dst) = &target.kind else { return None };
+        let ExprKind::Call { callee, args } = &value.kind else { return None };
+        let ExprKind::Ident(callee_id) = &callee.kind else { return None };
+        let fname = callee_id.name.as_str();
+        // Must resolve to the shared builtin exactly as `eval_call` would:
+        // no user fn or variant constructor shadowing it, and (to stay
+        // conservative) no local binding of the same name.
+        if !cjc_runtime::builtins::is_owned_arg_builtin(fname)
+            || self.functions.contains_key(fname)
+            || self.variant_to_enum.contains_key(fname)
+            || self.lookup(fname).is_some()
+        {
+            return None;
+        }
+        let name = dst.name.as_str();
+        let mut bare = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| matches!(&a.value.kind, ExprKind::Ident(id) if id.name == name));
+        let (pos, _) = bare.next()?;
+        if bare.next().is_some() || self.lookup(name).is_none() {
+            return None;
+        }
+
+        let mut vals: Vec<Value> = Vec::with_capacity(args.len());
+        for (i, arg) in args.iter().enumerate() {
+            if i == pos {
+                vals.push(Value::Void); // filled by the move below
+            } else {
+                match self.eval_expr(&arg.value) {
+                    Ok(v) => vals.push(v),
+                    Err(e) => return Some(Err(e)), // binding untouched
+                }
+            }
+        }
+        let binding = self.lookup_mut(name)?;
+        vals[pos] = std::mem::replace(binding, Value::Void);
+
+        match cjc_runtime::builtins::dispatch_builtin_owned(fname, &mut vals) {
+            Ok(Some(result)) => Some(self.assign(name, result).map(|()| Value::Void)),
+            outcome => {
+                // Restore before propagating so the binding is intact.
+                if let Some(binding) = self.lookup_mut(name) {
+                    *binding = std::mem::replace(&mut vals[pos], Value::Void);
+                }
+                Some(Err(EvalError::Runtime(match outcome {
+                    Err(msg) => msg,
+                    _ => format!("internal: owned-arg builtin `{fname}` was not dispatched"),
+                })))
+            }
+        }
     }
 
     // -- Lambda free-variable analysis (lexical capture) --------------------
@@ -1080,6 +1165,10 @@ impl Interpreter {
             ExprKind::MultiIndex { object, indices } => self.eval_multi_index(object, indices),
 
             ExprKind::Assign { target, value } => {
+                // ADR-0048: `x = f(..., x, ...)` moves `x` into the call.
+                if let Some(result) = self.try_assign_move(target, value) {
+                    return result;
+                }
                 let val = self.eval_expr(value)?;
                 self.exec_assign(target, val)?;
                 Ok(Value::Void)
@@ -1748,14 +1837,15 @@ impl Interpreter {
                         "division by zero".to_string(),
                     ))
                 } else {
-                    Ok(Value::Int(a / b))
+                    // Wrapping, like `+ - *`: `i64::MIN / -1` would otherwise panic.
+                    Ok(Value::Int(a.wrapping_div(b)))
                 }
             }
             BinOp::Mod => {
                 if b == 0 {
                     Err(EvalError::Runtime("modulo by zero".to_string()))
                 } else {
-                    Ok(Value::Int(a % b))
+                    Ok(Value::Int(a.wrapping_rem(b)))
                 }
             }
             BinOp::Eq => Ok(Value::Bool(a == b)),
@@ -1764,7 +1854,7 @@ impl Interpreter {
             BinOp::Gt => Ok(Value::Bool(a > b)),
             BinOp::Le => Ok(Value::Bool(a <= b)),
             BinOp::Ge => Ok(Value::Bool(a >= b)),
-            BinOp::Pow => Ok(Value::Int((a as f64).powf(b as f64) as i64)),
+            BinOp::Pow => Ok(Value::Int((a as f64).det_powf(b as f64) as i64)),
             BinOp::BitAnd => Ok(Value::Int(a & b)),
             BinOp::BitOr => Ok(Value::Int(a | b)),
             BinOp::BitXor => Ok(Value::Int(a ^ b)),
@@ -1789,7 +1879,7 @@ impl Interpreter {
             BinOp::Gt => Ok(Value::Bool(a > b)),
             BinOp::Le => Ok(Value::Bool(a <= b)),
             BinOp::Ge => Ok(Value::Bool(a >= b)),
-            BinOp::Pow => Ok(Value::Float(a.powf(b))),
+            BinOp::Pow => Ok(Value::Float(a.det_powf(b))),
             BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => Err(EvalError::Runtime(format!(
                 "cannot apply `{op}` to Float values"
             ))),
@@ -1804,7 +1894,8 @@ impl Interpreter {
     fn eval_unary(&mut self, op: UnaryOp, operand: &Expr) -> EvalResult {
         let val = self.eval_expr(operand)?;
         match (op, &val) {
-            (UnaryOp::Neg, Value::Int(v)) => Ok(Value::Int(-v)),
+            // Wrapping, like binary `-`: `-i64::MIN` panics in debug builds.
+            (UnaryOp::Neg, Value::Int(v)) => Ok(Value::Int(v.wrapping_neg())),
             (UnaryOp::Neg, Value::Float(v)) => Ok(Value::Float(-v)),
             (UnaryOp::Neg, Value::Tensor(t)) => Ok(Value::Tensor(t.map(|x| -x))),
             (UnaryOp::Neg, Value::F16(v)) => Ok(Value::F16(v.neg())),
@@ -4941,33 +5032,33 @@ pub fn run_program_with_modules_eval(
 ) -> Result<Value, EvalError> {
     let graph = cjc_module::build_module_graph(entry_path)
         .map_err(|e| EvalError::Runtime(format!("module error: {}", e)))?;
+    cjc_module::enforce_visibility(&graph).map_err(EvalError::Runtime)?;
 
-    let order = graph
-        .topological_order()
+    // Module-scoped names (ADR-0047): every function reference is already
+    // qualified, so the interpreter's single namespace cannot confuse two
+    // modules' functions, and private functions are out of scope elsewhere.
+    let resolved = cjc_module::resolve_modules(&graph)
         .map_err(|e| EvalError::Runtime(format!("module error: {}", e)))?;
+    let explain = |e: EvalError| match e {
+        EvalError::Runtime(m) => {
+            EvalError::Runtime(cjc_module::explain_undefined(m, &resolved.private_hints))
+        }
+        other => other,
+    };
 
     let mut interp = Interpreter::new(seed);
 
-    for mod_id in &order {
-        let module = graph
-            .modules
-            .get(mod_id)
-            .expect("module in topo order must exist in graph");
-
-        let ast = match &module.ast {
-            Some(ast) => ast,
-            None => continue,
-        };
-
-        if module.is_entry {
+    // Dependencies first; the entry module is last.
+    for (mod_id, ast) in &resolved.modules {
+        if graph.modules[mod_id].is_entry {
             // Entry module: full execution including main() call and
             // library-enable scanning from its imports.
-            return interp.exec(ast);
+            return interp.exec(ast).map_err(explain);
         }
 
         // Non-entry (dependency) module: register declarations and run
         // top-level statements without calling main().
-        interp.exec_module(ast)?;
+        interp.exec_module(ast).map_err(explain)?;
     }
 
     // Fallback: if the graph had no entry module (shouldn't happen).

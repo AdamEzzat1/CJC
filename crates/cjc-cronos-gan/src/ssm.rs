@@ -31,6 +31,7 @@
 //!   draw, matching the cjc-tempest sampler convention so cross-stream
 //!   determinism debugging is uniform across the workspace.
 
+use cjc_repro::dmath::DetMath;
 use crate::error::CronosGanError;
 use crate::seed::CronosSeed;
 use crate::temporal_state::TemporalState;
@@ -375,9 +376,9 @@ fn standard_normal(rng: &mut Rng) -> f64 {
         u1 = rng.next_f64();
     }
     let u2 = rng.next_f64();
-    let r = (-2.0 * u1.ln()).sqrt();
+    let r = (-2.0 * u1.det_ln()).sqrt();
     let theta = std::f64::consts::TAU * u2;
-    r * theta.cos()
+    r * theta.det_cos()
 }
 
 /// Matrix-vector product with Kahan-compensated dot products.

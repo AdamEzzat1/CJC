@@ -27,6 +27,7 @@
 //! samples sorted by canonical key, so two runs over the same input
 //! produce byte-identical findings.
 
+use cjc_repro::dmath::DetMath;
 use std::collections::BTreeMap;
 
 use cjc_data::{Column, DataFrame};
@@ -178,7 +179,7 @@ fn shannon_entropy_bits(s: &str) -> f64 {
     for &count in hist.values() {
         let p = count as f64 / n;
         if p > 0.0 {
-            acc.add(-p * p.log2());
+            acc.add(-p * p.det_log2());
         }
     }
     acc.finalize()

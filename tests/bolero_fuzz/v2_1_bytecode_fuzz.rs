@@ -18,7 +18,6 @@
 //!   cargo test --test bolero_fuzz v2_1_bytecode
 
 use cjc_data::{Column, DBinOp, DExpr, DataFrame};
-use std::panic;
 
 /// Decode the first byte as op, second byte as literal magnitude, third
 /// byte as a "compose with And/Or another op" flag. Remainder of bytes
@@ -125,28 +124,26 @@ fn scalar_eval(xs: &[i64], pred: &DExpr) -> Vec<usize> {
 #[test]
 fn fuzz_bytecode_vs_scalar() {
     bolero::check!().with_type::<Vec<u8>>().for_each(|input: &Vec<u8>| {
-        let _ = panic::catch_unwind(|| {
-            let Some((xs, pred)) = parse_input(input) else {
-                return;
-            };
-            let df = DataFrame::from_columns(vec![("x".into(), Column::Int(xs.clone()))]).unwrap();
+        let Some((xs, pred)) = parse_input(input) else {
+            return;
+        };
+        let df = DataFrame::from_columns(vec![("x".into(), Column::Int(xs.clone()))]).unwrap();
 
-            let got: Vec<usize> = df
-                .clone()
-                .tidy()
-                .filter(&pred)
-                .unwrap()
-                .selection()
-                .iter_indices()
-                .collect();
+        let got: Vec<usize> = df
+            .clone()
+            .tidy()
+            .filter(&pred)
+            .unwrap()
+            .selection()
+            .iter_indices()
+            .collect();
 
-            let expected = scalar_eval(&xs, &pred);
+        let expected = scalar_eval(&xs, &pred);
 
-            assert_eq!(
-                got, expected,
-                "bytecode/filter ≠ scalar reference for predicate"
-            );
-        });
+        assert_eq!(
+            got, expected,
+            "bytecode/filter ≠ scalar reference for predicate"
+        );
     });
 }
 
@@ -154,31 +151,29 @@ fn fuzz_bytecode_vs_scalar() {
 #[test]
 fn fuzz_bytecode_determinism() {
     bolero::check!().with_type::<Vec<u8>>().for_each(|input: &Vec<u8>| {
-        let _ = panic::catch_unwind(|| {
-            let Some((xs, pred)) = parse_input(input) else {
-                return;
-            };
-            let df = DataFrame::from_columns(vec![("x".into(), Column::Int(xs))]).unwrap();
+        let Some((xs, pred)) = parse_input(input) else {
+            return;
+        };
+        let df = DataFrame::from_columns(vec![("x".into(), Column::Int(xs))]).unwrap();
 
-            let r1: Vec<usize> = df
-                .clone()
-                .tidy()
-                .filter(&pred)
-                .unwrap()
-                .selection()
-                .iter_indices()
-                .collect();
-            let r2: Vec<usize> = df
-                .clone()
-                .tidy()
-                .filter(&pred)
-                .unwrap()
-                .selection()
-                .iter_indices()
-                .collect();
+        let r1: Vec<usize> = df
+            .clone()
+            .tidy()
+            .filter(&pred)
+            .unwrap()
+            .selection()
+            .iter_indices()
+            .collect();
+        let r2: Vec<usize> = df
+            .clone()
+            .tidy()
+            .filter(&pred)
+            .unwrap()
+            .selection()
+            .iter_indices()
+            .collect();
 
-            assert_eq!(r1, r2, "bytecode non-deterministic across runs");
-        });
+        assert_eq!(r1, r2, "bytecode non-deterministic across runs");
     });
 }
 
@@ -190,46 +185,44 @@ fn fuzz_bytecode_determinism() {
 #[test]
 fn fuzz_bytecode_cardinality_identity() {
     bolero::check!().with_type::<Vec<u8>>().for_each(|input: &Vec<u8>| {
-        let _ = panic::catch_unwind(|| {
-            if input.len() < 4 {
-                return;
-            }
-            let lit_a = (input[0] as i8) as i64;
-            let lit_b = (input[1] as i8) as i64;
-            let xs: Vec<i64> = input[2..].iter().take(1024).map(|&b| (b as i8) as i64).collect();
-            if xs.is_empty() {
-                return;
-            }
+        if input.len() < 4 {
+            return;
+        }
+        let lit_a = (input[0] as i8) as i64;
+        let lit_b = (input[1] as i8) as i64;
+        let xs: Vec<i64> = input[2..].iter().take(1024).map(|&b| (b as i8) as i64).collect();
+        if xs.is_empty() {
+            return;
+        }
 
-            let df = DataFrame::from_columns(vec![("x".into(), Column::Int(xs))]).unwrap();
+        let df = DataFrame::from_columns(vec![("x".into(), Column::Int(xs))]).unwrap();
 
-            let pa = DExpr::BinOp {
-                op: DBinOp::Lt,
-                left: Box::new(DExpr::Col("x".into())),
-                right: Box::new(DExpr::LitInt(lit_a)),
-            };
-            let pb = DExpr::BinOp {
-                op: DBinOp::Ge,
-                left: Box::new(DExpr::Col("x".into())),
-                right: Box::new(DExpr::LitInt(lit_b)),
-            };
-            let p_and = DExpr::BinOp {
-                op: DBinOp::And,
-                left: Box::new(pa.clone()),
-                right: Box::new(pb.clone()),
-            };
-            let p_or = DExpr::BinOp {
-                op: DBinOp::Or,
-                left: Box::new(pa.clone()),
-                right: Box::new(pb.clone()),
-            };
+        let pa = DExpr::BinOp {
+            op: DBinOp::Lt,
+            left: Box::new(DExpr::Col("x".into())),
+            right: Box::new(DExpr::LitInt(lit_a)),
+        };
+        let pb = DExpr::BinOp {
+            op: DBinOp::Ge,
+            left: Box::new(DExpr::Col("x".into())),
+            right: Box::new(DExpr::LitInt(lit_b)),
+        };
+        let p_and = DExpr::BinOp {
+            op: DBinOp::And,
+            left: Box::new(pa.clone()),
+            right: Box::new(pb.clone()),
+        };
+        let p_or = DExpr::BinOp {
+            op: DBinOp::Or,
+            left: Box::new(pa.clone()),
+            right: Box::new(pb.clone()),
+        };
 
-            let a = df.clone().tidy().filter(&pa).unwrap().nrows();
-            let b = df.clone().tidy().filter(&pb).unwrap().nrows();
-            let ab = df.clone().tidy().filter(&p_and).unwrap().nrows();
-            let aob = df.clone().tidy().filter(&p_or).unwrap().nrows();
+        let a = df.clone().tidy().filter(&pa).unwrap().nrows();
+        let b = df.clone().tidy().filter(&pb).unwrap().nrows();
+        let ab = df.clone().tidy().filter(&p_and).unwrap().nrows();
+        let aob = df.clone().tidy().filter(&p_or).unwrap().nrows();
 
-            assert_eq!(a + b, ab + aob, "cardinality identity violated");
-        });
+        assert_eq!(a + b, ab + aob, "cardinality identity violated");
     });
 }

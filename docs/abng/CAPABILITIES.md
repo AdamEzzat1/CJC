@@ -571,3 +571,25 @@ a loud `BlrStateHashMismatch` at replay, never silent corruption).
 
 `cargo test --test abng` 624/0 (1 known wall-clock flake passes in
 isolation); 9 new tests pin Option C.
+
+**API surface (cjcl + Rust).** The flush is exposed to `.cjcl` as
+`abng_checkpoint_blr(g) -> Int` (number of checkpoint events emitted):
+
+```rust
+g.checkpoint_blr();
+let blob = serialize(&g);
+```
+
+```cjcl
+abng_train_step(g, x, phi, y);   // ... n rows
+abng_checkpoint_blr(g);          // once, after training
+let g2 = abng_replay(abng_serialize(g));
+```
+
+`checkpoint_blr` is **not idempotent**: each call re-emits a
+`BlrUpdated` for every node still mid-interval, so it is deliberately
+not folded into `serialize` / `abng_serialize` (an implicit flush would
+move `chain_head` on every save). Tests:
+`tests/abng/blr_checkpoint_builtin_tests.rs` (round-trip, missing-flush
+failure in both backends, determinism, skip rules, Err paths, AST↔MIR
+parity).

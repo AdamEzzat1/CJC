@@ -4,17 +4,40 @@
 //! The builder pattern allows constructing circuits declaratively, then
 //! executing them with a specific seed for deterministic results.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use crate::gates::Gate;
 use crate::measure;
 use crate::statevector::Statevector;
 
+/// Largest circuit whose executed statevector is cached (2^24 amplitudes =
+/// 256 MiB). Above this, a cache would silently hold gigabytes, so
+/// [`Circuit::execute_shared`] recomputes instead.
+pub const EXEC_CACHE_MAX_QUBITS: usize = 24;
+
 /// A quantum circuit: an ordered list of gates on N qubits.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Circuit {
     /// Number of qubits in the circuit.
     n_qubits: usize,
     /// Gates in application order.
     gates: Vec<Gate>,
+    /// Result of executing `gates`, filled by `execute_shared` and cleared by
+    /// `add`. Execution is deterministic, so a cached result is bit-identical
+    /// to a fresh one.
+    exec_cache: RefCell<Option<Rc<Statevector>>>,
+}
+
+impl Clone for Circuit {
+    /// Copies the gates; the copy starts without a cached execution.
+    fn clone(&self) -> Self {
+        Circuit {
+            n_qubits: self.n_qubits,
+            gates: self.gates.clone(),
+            exec_cache: RefCell::new(None),
+        }
+    }
 }
 
 impl Circuit {
@@ -23,6 +46,7 @@ impl Circuit {
         Circuit {
             n_qubits,
             gates: Vec::new(),
+            exec_cache: RefCell::new(None),
         }
     }
 
@@ -39,6 +63,7 @@ impl Circuit {
     /// Add a gate to the circuit. Returns `&mut Self` for chaining.
     pub fn add(&mut self, gate: Gate) -> &mut Self {
         self.gates.push(gate);
+        *self.exec_cache.get_mut() = None;
         self
     }
 
@@ -105,6 +130,22 @@ impl Circuit {
         Ok(sv)
     }
 
+    /// Execute once and share the result: later calls on the same circuit
+    /// return the cached statevector (circuits up to
+    /// [`EXEC_CACHE_MAX_QUBITS`]). Used by the `.cjcl` observables, so
+    /// `q_probs(c)` followed by `q_sample(c, …)` simulates `c` once.
+    pub fn execute_shared(&self) -> Result<Rc<Statevector>, String> {
+        if self.n_qubits > EXEC_CACHE_MAX_QUBITS {
+            return Ok(Rc::new(self.execute()?));
+        }
+        if let Some(sv) = self.exec_cache.borrow().as_ref() {
+            return Ok(Rc::clone(sv));
+        }
+        let sv = Rc::new(self.execute()?);
+        *self.exec_cache.borrow_mut() = Some(Rc::clone(&sv));
+        Ok(sv)
+    }
+
     /// Execute the circuit and measure all qubits.
     /// Returns (measurement outcomes, final collapsed statevector).
     pub fn execute_and_measure(
@@ -121,12 +162,8 @@ impl Circuit {
     /// Returns a vector of `n_shots` basis state indices. The statevector is
     /// not collapsed (sampling without measurement).
     pub fn sample(&self, n_shots: usize, rng_state: &mut u64) -> Result<Vec<usize>, String> {
-        let sv = self.execute()?;
-        let mut results = Vec::with_capacity(n_shots);
-        for _ in 0..n_shots {
-            results.push(measure::sample_basis_state(&sv, rng_state));
-        }
-        Ok(results)
+        let sv = self.execute_shared()?;
+        Ok(measure::sample_basis_states(&sv, n_shots, rng_state))
     }
 
     /// Get the list of gates.
@@ -156,6 +193,25 @@ impl std::fmt::Display for Circuit {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn execute_shared_caches_until_the_circuit_changes() {
+        let bits = |sv: &Statevector| -> Vec<(u64, u64)> {
+            sv.amplitudes.iter().map(|a| (a.re.to_bits(), a.im.to_bits())).collect()
+        };
+        let mut c = Circuit::new(3);
+        c.h(0).ry(1, 0.7).cnot(0, 2);
+        let a = c.execute_shared().unwrap();
+        let b = c.execute_shared().unwrap();
+        assert!(std::rc::Rc::ptr_eq(&a, &b), "second call must reuse the cache");
+        assert_eq!(bits(&a), bits(&c.execute().unwrap()), "cache is bit-identical");
+        let copy = c.clone();
+        assert!(!std::rc::Rc::ptr_eq(&a, &copy.execute_shared().unwrap()), "clone starts uncached");
+        c.x(1);
+        let d = c.execute_shared().unwrap();
+        assert!(!std::rc::Rc::ptr_eq(&a, &d), "add must invalidate");
+        assert_eq!(bits(&d), bits(&c.execute().unwrap()));
+    }
+
     use super::*;
     use cjc_runtime::complex::ComplexF64;
 

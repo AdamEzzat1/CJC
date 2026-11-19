@@ -18,6 +18,7 @@
 //! - Complex arithmetic uses fixed-sequence multiplication (no FMA)
 //! - Gradient computation via parameter-shift rule is deterministic
 
+use cjc_repro::dmath;
 use crate::mps::{Mps, MpsTensor};
 use cjc_runtime::complex::ComplexF64;
 
@@ -263,6 +264,36 @@ pub fn qaoa_maxcut_energy(mps: &Mps, graph: &Graph) -> f64 {
 /// Non-adjacent edges are skipped in the cost unitary (MPS limitation).
 /// The number of QAOA layers is determined by the length of gammas/betas.
 pub fn build_qaoa_ansatz(graph: &Graph, gammas: &[f64], betas: &[f64], max_bond: usize) -> Mps {
+    build_qaoa_ansatz_shifted(graph, gammas, betas, max_bond, None)
+}
+
+/// Which single gate of the ansatz receives an angle offset (for exact
+/// per-gate parameter-shift gradients of shared parameters).
+#[derive(Clone, Copy)]
+enum ShiftTarget {
+    /// The cost gate built from `graph.edges[edge_idx]`.
+    CostEdge(usize),
+    /// The mixer gate on this qubit.
+    Mixer(usize),
+}
+
+#[derive(Clone, Copy)]
+struct GateShift {
+    layer: usize,
+    target: ShiftTarget,
+    delta: f64,
+}
+
+/// `build_qaoa_ansatz` with an optional angle offset applied to exactly one
+/// gate. With `shift = None` the gate sequence (and therefore the result) is
+/// identical to `build_qaoa_ansatz`.
+fn build_qaoa_ansatz_shifted(
+    graph: &Graph,
+    gammas: &[f64],
+    betas: &[f64],
+    max_bond: usize,
+    shift: Option<GateShift>,
+) -> Mps {
     let n = graph.n_vertices;
     let p = gammas.len();
     assert_eq!(
@@ -290,23 +321,39 @@ pub fn build_qaoa_ansatz(graph: &Graph, gammas: &[f64], betas: &[f64], max_bond:
 
         // Cost unitary: e^{-i gamma Z_i Z_{i+1}} for each adjacent edge
         // Decomposition: CNOT(i, i+1), Rz(2*gamma, i+1), CNOT(i, i+1)
-        for &(i, j) in &graph.edges {
+        for (e, &(i, j)) in graph.edges.iter().enumerate() {
+            let g = match shift {
+                Some(GateShift { layer: l, target: ShiftTarget::CostEdge(k), delta })
+                    if l == layer && k == e =>
+                {
+                    gamma + delta
+                }
+                _ => gamma,
+            };
             if j == i + 1 {
-                apply_zz_rotation(&mut mps, i, j, gamma);
+                apply_zz_rotation(&mut mps, i, j, g);
             } else if i == j + 1 {
-                apply_zz_rotation(&mut mps, j, i, gamma);
+                apply_zz_rotation(&mut mps, j, i, g);
             }
             // Non-adjacent edges: skipped (MPS limitation)
         }
 
         // Mixer unitary: Rx(2*beta) on each qubit
-        let c = beta.cos();
-        let s = beta.sin();
-        let rx = [
-            [ComplexF64::real(c), ComplexF64::new(0.0, -s)],
-            [ComplexF64::new(0.0, -s), ComplexF64::real(c)],
-        ];
         for q in 0..n {
+            let b = match shift {
+                Some(GateShift { layer: l, target: ShiftTarget::Mixer(k), delta })
+                    if l == layer && k == q =>
+                {
+                    beta + delta
+                }
+                _ => beta,
+            };
+            let c = dmath::cos(b);
+            let s = dmath::sin(b);
+            let rx = [
+                [ComplexF64::real(c), ComplexF64::new(0.0, -s)],
+                [ComplexF64::new(0.0, -s), ComplexF64::real(c)],
+            ];
             mps.apply_single_qubit(q, rx);
         }
     }
@@ -323,8 +370,8 @@ fn apply_zz_rotation(mps: &mut Mps, i: usize, j: usize, gamma: f64) {
     mps.apply_cnot_adjacent(i, j);
 
     // Rz(2*gamma) = diag(e^{-i*gamma}, e^{+i*gamma})
-    let c = gamma.cos();
-    let s = gamma.sin();
+    let c = dmath::cos(gamma);
+    let s = dmath::sin(gamma);
     let rz = [
         [ComplexF64::new(c, -s), ComplexF64::ZERO],
         [ComplexF64::ZERO, ComplexF64::new(c, s)],
@@ -332,6 +379,57 @@ fn apply_zz_rotation(mps: &mut Mps, i: usize, j: usize, gamma: f64) {
     mps.apply_single_qubit(j, rz);
 
     mps.apply_cnot_adjacent(i, j);
+}
+
+// ---------------------------------------------------------------------------
+// QAOA Gradient
+// ---------------------------------------------------------------------------
+
+/// Exact gradient of `qaoa_maxcut_energy(build_qaoa_ansatz(..))` with respect to
+/// every gamma and beta.
+///
+/// Each gamma is shared by all applied cost gates `e^{-i γ Z_i Z_j}` of its layer,
+/// and each beta by all mixer gates `e^{-i β X_q}`. Every one of those gates has
+/// the form `e^{-i θ G}` with `G² = I`, for which the parameter-shift rule is
+/// `∂f/∂θ = f(θ + π/4) − f(θ − π/4)`. A shared parameter's derivative is the
+/// sum of that rule over the gates it drives (product rule), evaluated by
+/// shifting one gate at a time.
+///
+/// Note: shifting a *shared* parameter by ±π/2 (the rule for `e^{-iθG/2}`)
+/// is not valid here. Because `e^{-iπ Z_iZ_j} = −I` and `e^{-iπ X} = −I`, the
+/// energy is π-periodic in each parameter, so that rule returns exactly zero.
+pub fn qaoa_gradient(
+    graph: &Graph,
+    gammas: &[f64],
+    betas: &[f64],
+    max_bond: usize,
+) -> (Vec<f64>, Vec<f64>) {
+    let shift = std::f64::consts::FRAC_PI_4;
+    let energy = |s: GateShift| {
+        qaoa_maxcut_energy(
+            &build_qaoa_ansatz_shifted(graph, gammas, betas, max_bond, Some(s)),
+            graph,
+        )
+    };
+    let p = gammas.len();
+    let mut gamma_grads = vec![0.0; p];
+    let mut beta_grads = vec![0.0; p];
+    for layer in 0..p {
+        for (e, &(i, j)) in graph.edges.iter().enumerate() {
+            if j != i + 1 && i != j + 1 {
+                continue; // non-adjacent edges are not in the ansatz
+            }
+            let target = ShiftTarget::CostEdge(e);
+            gamma_grads[layer] += energy(GateShift { layer, target, delta: shift })
+                - energy(GateShift { layer, target, delta: -shift });
+        }
+        for q in 0..graph.n_vertices {
+            let target = ShiftTarget::Mixer(q);
+            beta_grads[layer] += energy(GateShift { layer, target, delta: shift })
+                - energy(GateShift { layer, target, delta: -shift });
+        }
+    }
+    (gamma_grads, beta_grads)
 }
 
 // ---------------------------------------------------------------------------
@@ -379,36 +477,8 @@ pub fn qaoa_maxcut(
     let mut best_energy = qaoa_maxcut_energy(&mps, graph);
     energy_history.push(best_energy);
 
-    // Parameter-shift rule: df/dtheta = (f(theta + pi/2) - f(theta - pi/2)) / 2
-    let shift = std::f64::consts::FRAC_PI_2;
-
     for _iter in 0..max_iters {
-        let mut gamma_grads = vec![0.0; p_layers];
-        let mut beta_grads = vec![0.0; p_layers];
-
-        // Compute gradients for all gamma parameters
-        for k in 0..p_layers {
-            let mut gp = gammas.clone();
-            gp[k] += shift;
-            let mut gm = gammas.clone();
-            gm[k] -= shift;
-
-            let ep = qaoa_maxcut_energy(&build_qaoa_ansatz(graph, &gp, &betas, max_bond), graph);
-            let em = qaoa_maxcut_energy(&build_qaoa_ansatz(graph, &gm, &betas, max_bond), graph);
-            gamma_grads[k] = (ep - em) / 2.0;
-        }
-
-        // Compute gradients for all beta parameters
-        for k in 0..p_layers {
-            let mut bp = betas.clone();
-            bp[k] += shift;
-            let mut bm = betas.clone();
-            bm[k] -= shift;
-
-            let ep = qaoa_maxcut_energy(&build_qaoa_ansatz(graph, &gammas, &bp, max_bond), graph);
-            let em = qaoa_maxcut_energy(&build_qaoa_ansatz(graph, &gammas, &bm, max_bond), graph);
-            beta_grads[k] = (ep - em) / 2.0;
-        }
+        let (gamma_grads, beta_grads) = qaoa_gradient(graph, &gammas, &betas, max_bond);
 
         // Gradient ascent (maximizing cut value)
         for k in 0..p_layers {

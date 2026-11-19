@@ -16,6 +16,8 @@
 //! - [`powi_f64`] -- integer powers by binary exponentiation (`__powidf2`'s
 //!   multiplications in its order), because `f64::powi` with a runtime exponent
 //!   is the C runtime's `pow` on MSVC targets and computes different bits there.
+//! - [`dmath`] -- platform-independent `sin`, `cos`, `exp`, `ln` (the
+//!   platform libm differs in the last bit between Windows and Linux).
 //!
 //! # Determinism contract
 //!
@@ -25,6 +27,7 @@
 //!
 //! No `HashMap`, no FMA, no non-deterministic SIMD reductions.
 
+pub mod dmath;
 pub mod kahan;
 pub mod powi;
 pub use kahan::{

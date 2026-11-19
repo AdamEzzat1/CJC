@@ -16,6 +16,7 @@
 //! Routing follows the existing satellite-dispatch pattern; both
 //! `cjc-eval` and `cjc-mir-exec` call `dispatch_locke(name, args)`.
 
+use cjc_repro::dmath::DetMath;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -213,7 +214,7 @@ fn builtin_psi(args: &[Value]) -> Result<Value, String> {
     for i in 0..p.len() {
         let pi = p[i].max(eps);
         let qi = q[i].max(eps);
-        acc.add((qi - pi) * (qi / pi).ln());
+        acc.add((qi - pi) * (qi / pi).det_ln());
     }
     Ok(Value::Float(acc.finalize()))
 }

@@ -6,13 +6,13 @@ status: Implemented (research-grade)
 
 # Quantum Simulation
 
-**Crate**: `cjc-quantum` — `crates/cjc-quantum/src/` (~20 source files, ~500K+ LOC total for this crate based on the survey).
+**Crate**: `cjc-quantum` — `crates/cjc-quantum/src/` (21 source files, ~16K lines as of 2026-09-25).
 
 **Docs**: `docs/QUANTUM_SIMULATION.md`.
 
 ## Summary
 
-A full deterministic classical simulator for quantum circuits. This is not a stub — the crate contains real implementations of multiple simulation paradigms.
+A deterministic classical simulator for quantum circuits (dense statevector, MPS, stabilizer, and density-matrix backends). This is not a stub — the crate contains real implementations of multiple simulation paradigms.
 
 ## Modules
 
@@ -50,8 +50,8 @@ From the crate's lib.rs docstring:
 
 ## Limitations (stated in lib.rs)
 
-- Classical simulation: ~25-30 qubits max (2^N memory scaling)
-- No noise model in `pure.rs` (use `density.rs` for noise)
+- Dense statevector: at most 26 qubits from `.cjcl` (hard cap in `dispatch.rs`); density matrix: at most 14
+- Noise only on the density backend (depolarizing, dephasing, amplitude damping)
 - No hardware backend — simulation only
 
 ## Surface from user code

@@ -3,7 +3,13 @@
 use super::helpers;
 
 /// Golden master hash — set to "TBD" initially, will be pinned after first run.
-const GOLDEN_MASTER: &str = "7c2e0248d8e50c7a58d9e8c64afb9b8c31db43e81835673eac2ca46a077275d5";
+///
+/// Re-pinned 2026-09-26: the runtime math builtins (`sin`, `cos`, `exp`,
+/// `log`, and `randn`'s Box–Muller `ln`/`cos`) moved to `cjc_repro::dmath`
+/// (ADR-0046 amendment), so their last bits are now platform-independent
+/// rather than the Windows libm's. `primitive_eval_mir_parity` still holds.
+/// Pre-dmath hash: 7c2e0248d8e50c7a58d9e8c64afb9b8c31db43e81835673eac2ca46a077275d5.
+const GOLDEN_MASTER: &str = "3599ec0babc930be334895821ab54257149481a3d50b8550c9b7ddd1e53f6fc3";
 
 #[test]
 fn primitive_master_hash_golden() {

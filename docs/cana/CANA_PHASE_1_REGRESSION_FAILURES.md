@@ -406,3 +406,39 @@ cargo test --release --no-fail-fast --test test_chess_rl_hardening \
 # #12-14 are ignored:
 cargo test --release --no-fail-fast --test physics_ml heat_1d_pure_cjcl_parity
 ```
+
+---
+
+## 2026-09-25 — replay failures resolved (root cause: R0-3 flush contract)
+
+The 5 "still open" replay tests above were **not** a serializer bug. Root cause is
+`7bef0c1` (ABNG 0.9.5 R0-3, periodic BLR audit checkpoints). Since R0-3, n=1
+`train_step` / `blr_update` rows carry the `BLR_INTERMEDIATE_WITNESS` zero
+sentinel unless `n_seen % BLR_CHECKPOINT_INTERVAL (64) == 0`, and a trained graph
+**must** call `AdaptiveBeliefGraph::checkpoint_blr()` before `serialize`, or
+`replay` fails with `DecodeError::BlrStateHashMismatch` (by design, a loud
+failure rather than silent acceptance of an un-anchored state; pinned by
+`tests/abng/blr_checkpoint_tests.rs::replay_without_checkpoint_blr_fails`).
+R0-3 updated the `tests/abng/` callers but missed the root-level demo tests.
+
+The fix adds `g.checkpoint_blr()` before every replay-bound `serialize` in:
+- `tests/test_abng_lineage_attestation.rs` (1 site)
+- `tests/test_abng_pinn_uncertainty.rs` (3 sites)
+- `tests/test_abng_tabular_gp.rs` (1 site)
+- `tests/test_chess_rl_v2_6_abng.rs` (2 sites, same bug, not previously catalogued)
+
+The chain-head canaries are unaffected: they pin the raw training trace
+without a flush.
+
+The earlier 2026-06-09 drift attribution also left out `7bef0c1`. The sentinel
+witness is what moves BLR-bearing chain heads. The two
+`test_chess_rl_v2_6_abng` canaries (never catalogued here) were re-locked after
+probing each commit:
+
+| Commit | BLR `state_hash` | `chain_head` |
+|---|---|---|
+| `7029e2f` (pre-R0/R1) | `869b32bd…` (old lock) | `27d547b8…` (old lock) |
+| `08a4a6b` rank-1 Cholesky | → `39b886c0…` | → `3d73cf03…` |
+| `7bef0c1` R0-3 checkpoints | — | → `b0dff576…` (new lock) |
+| `614b7d7` R1-1 lanes | → `40fd993b…` (new lock) | — |
+| `f678997` R1-2 | — | — |

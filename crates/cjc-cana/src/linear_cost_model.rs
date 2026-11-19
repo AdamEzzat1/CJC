@@ -35,6 +35,7 @@
 //! - `query()` is a pure function of `(program, features, query)`. Same
 //!   inputs → same outputs across runs, OS, and CPU architecture.
 
+use cjc_repro::dmath::DetMath;
 use cjc_mir::MirProgram;
 
 use crate::cost_model::{CostEstimate, CostModel, CostQuery};
@@ -340,7 +341,7 @@ impl LinearCostModel {
     fn predict_pass_compile_cost(coefs: &PassCoefficients, ff: &FnFeatures) -> f64 {
         // Compile cost grows with program size; the per-pass base cost is
         // multiplied by a size factor.
-        let size_factor = 1.0 + (ff.memory.expr_count as f64).log10().max(0.0) * 0.3;
+        let size_factor = 1.0 + (ff.memory.expr_count as f64).det_log10().max(0.0) * 0.3;
         (coefs.base_compile_cost * size_factor).clamp(0.01, 1.0)
     }
 

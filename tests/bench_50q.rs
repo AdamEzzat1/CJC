@@ -164,15 +164,15 @@ fn main() -> Any {
 // ===========================================================================
 
 #[test]
-fn bench_20q_dmrg() {
-    // Use fewer sweeps in debug mode to avoid timeout (10 sweeps takes >60s unoptimized)
+fn bench_8q_dmrg() {
+    // 8 qubits, 3 sweeps: small enough for debug builds (10 sweeps took >60s unoptimized).
     let src = "fn main() -> Any { dmrg_heisenberg(8, 8, 3, 0.01) }";
     let t = Instant::now();
     let result = eval(src);
     let elapsed = t.elapsed();
     let e: f64 = result.parse().unwrap();
     assert!(e < 0.0);
-    println!("  20q DMRG 10-sweep:       {:>8.2}ms  (E={})", elapsed.as_secs_f64() * 1000.0, e);
+    println!("  8q DMRG 3-sweep:         {:>8.2}ms  (E={})", elapsed.as_secs_f64() * 1000.0, e);
 }
 
 // ===========================================================================

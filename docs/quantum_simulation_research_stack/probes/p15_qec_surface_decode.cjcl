@@ -1,0 +1,11 @@
+fn main() -> Any {
+    let __r = __body();
+    print(__r);
+    __r
+}
+fn __body() -> Any {
+    let code = qec_surface_code(3);
+    let s = stabilizer_new(20);
+    let syn = qec_syndrome(s, code, 1);
+    qec_decode(syn, code)
+}

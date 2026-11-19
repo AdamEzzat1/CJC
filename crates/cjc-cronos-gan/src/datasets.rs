@@ -29,6 +29,7 @@
 //! supervised setup that makes both networks' forecasts directly
 //! comparable.
 
+use cjc_repro::dmath::DetMath;
 use crate::error::CronosGanError;
 use crate::seed::CronosSeed;
 use cjc_repro::Rng;
@@ -41,7 +42,7 @@ use cjc_repro::Rng;
 pub fn smooth_sine(_seed: CronosSeed, n_steps: usize) -> Result<(Vec<f64>, Vec<f64>), CronosGanError> {
     validate_n_steps(n_steps, "smooth_sine")?;
     let omega = 0.4_f64;
-    let series: Vec<f64> = (0..(n_steps + 1)).map(|t| (omega * t as f64).sin()).collect();
+    let series: Vec<f64> = (0..(n_steps + 1)).map(|t| (omega * t as f64).det_sin()).collect();
     Ok(split_next_step(series, n_steps))
 }
 
@@ -54,7 +55,7 @@ pub fn noisy_sine(seed: CronosSeed, n_steps: usize) -> Result<(Vec<f64>, Vec<f64
     let omega = 0.4_f64;
     let sigma = 0.15_f64;
     let series: Vec<f64> = (0..(n_steps + 1))
-        .map(|t| (omega * t as f64).sin() + sigma * standard_normal(&mut rng))
+        .map(|t| (omega * t as f64).det_sin() + sigma * standard_normal(&mut rng))
         .collect();
     Ok(split_next_step(series, n_steps))
 }
@@ -117,7 +118,7 @@ pub fn chaotic_spike(
     let omega = 0.4_f64;
     let series: Vec<f64> = (0..(n_steps + 1))
         .map(|t| {
-            let base = (omega * t as f64).sin();
+            let base = (omega * t as f64).det_sin();
             let spike = if t > 3 && (t - 3) % 10 == 0 { 3.0 } else { 0.0 };
             base + spike
         })
@@ -182,9 +183,9 @@ fn standard_normal(rng: &mut Rng) -> f64 {
         u1 = rng.next_f64();
     }
     let u2 = rng.next_f64();
-    let r = (-2.0 * u1.ln()).sqrt();
+    let r = (-2.0 * u1.det_ln()).sqrt();
     let theta = std::f64::consts::TAU * u2;
-    r * theta.cos()
+    r * theta.det_cos()
 }
 
 /// Split `series[0..=n_steps]` into `inputs = series[0..n_steps]` and

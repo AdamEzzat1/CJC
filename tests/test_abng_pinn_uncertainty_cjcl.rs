@@ -94,8 +94,15 @@ fn pinn_cjcl_chain_head_canary_locked() {
     // the CJC-Lang dispatch path. Commits 614b7d7 / 08a4a6b / f678997.
     // Pre-R0/R1 hex:
     // `be14b783c16b34f6bdf944a23c4ccdfdd2039eef3fee2ad8f81242f3c766388d`.
+    //
+    // Re-locked 2026-09-26 — runtime math builtins moved to
+    // `cjc_repro::dmath` (ADR-0046 amendment): the source's `sin`/`cos`/`exp`
+    // builtins now return platform-independent bits, which can differ in the
+    // last bit from the Windows libm this was locked on. Every functional
+    // check in the program is unchanged. Pre-dmath hex:
+    // `639fd29ccf4390844542363ba3e1b81e049c8ef1baf924cb262edbda2bba8603`.
     const CANARY_HEX: &str =
-        "639fd29ccf4390844542363ba3e1b81e049c8ef1baf924cb262edbda2bba8603";
+        "ed1cdb1964396d08bdd8f133c95a784052f42aa034112594d4c2fd830aa2fdd9";
     assert_eq!(
         chain, CANARY_HEX,
         "cjcl PINN chain_head canary mismatch — see comment"

@@ -1,0 +1,4 @@
+fn main() -> Any {
+    let s = stabilizer_new(2);
+    stabilizer_measure(s, 5, 1)
+}

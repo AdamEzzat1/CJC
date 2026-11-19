@@ -613,8 +613,10 @@ impl ErrorCode {
     /// // Documented codes return Some(markdown).
     /// assert!(ErrorCode::E1003.explanation().is_some());
     ///
-    /// // Undocumented codes return None — no error, just no extra prose.
-    /// assert!(ErrorCode::E5001.explanation().is_none());
+    /// // Coverage is currently 100%: every code in the taxonomy is
+    /// // documented. A future code added without an explanation file
+    /// // would return None — no error, just no extra prose.
+    /// assert!(ErrorCode::ALL_CODES.iter().all(|c| c.explanation().is_some()));
     /// ```
     pub fn explanation(&self) -> Option<&'static str> {
         match self {

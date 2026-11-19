@@ -45,6 +45,7 @@
 //! built on `GradGraph`) learns to use those features. Plumbing SSM into
 //! GradGraph is deferred — see `docs/state_space/ADR-0018-state-space.md`.
 
+use cjc_repro::dmath::DetMath;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
@@ -241,7 +242,7 @@ fn add_inplace(a: &mut [f64], b: &[f64]) {
 
 fn tanh_inplace(a: &mut [f64]) {
     for v in a.iter_mut() {
-        *v = v.tanh();
+        *v = v.det_tanh();
     }
 }
 

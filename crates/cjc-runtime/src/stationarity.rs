@@ -2,6 +2,7 @@
 //! ADF (Augmented Dickey-Fuller), KPSS, and Phillips-Perron tests.
 //! All use Kahan-compensated sums for numerical determinism.
 
+use cjc_repro::dmath::DetMath;
 use cjc_repro::kahan_sum_f64;
 
 // ═══════════════════════════════════════════════════════════════
@@ -115,7 +116,7 @@ fn long_run_variance(resid: &[f64], max_lag: Option<usize>) -> f64 {
         Some(v) => v.min(n - 1),
         None => {
             let nf = n as f64;
-            let bw = (12.0 * (nf / 100.0).powf(0.25)).ceil() as usize;
+            let bw = (12.0 * (nf / 100.0).det_powf(0.25)).ceil() as usize;
             bw.max(1).min(n - 1)
         }
     };

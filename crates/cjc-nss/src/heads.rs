@@ -13,6 +13,7 @@
 //! Phase 3 will add separate heads for throughput-degradation, latency
 //! spike, and partial outage, plus a scheduler-advisory head.
 
+use cjc_repro::dmath::DetMath;
 use crate::encoder::EncoderConfig;
 use crate::error::NssError;
 use crate::failure::FailurePrediction;
@@ -257,10 +258,10 @@ fn sigmoid(x: f64) -> f64 {
     // Numerically-safe sigmoid: branch on sign so we never compute
     // exp of a large positive number.
     if x >= 0.0 {
-        let e = (-x).exp();
+        let e = (-x).det_exp();
         1.0 / (1.0 + e)
     } else {
-        let e = x.exp();
+        let e = x.det_exp();
         e / (1.0 + e)
     }
 }

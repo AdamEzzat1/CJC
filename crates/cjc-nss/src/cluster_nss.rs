@@ -28,6 +28,7 @@
 //!   cluster_input_hash)` — replaying with the same trajectory + topology
 //!   + interventions produces an identical id.
 
+use cjc_repro::dmath::DetMath;
 use crate::cluster::{ClusterSystemState, ClusterTopology, ClusterTrajectory, NodeId};
 use crate::cluster_simulator::ClusterConfig;
 use crate::encoder::{EncoderConfig, SystemEncoder};
@@ -439,7 +440,7 @@ impl ClusterNeuralSystemsSimulator {
             failed_fraction,
             max_congestion,
             mean_congestion,
-            (total_in_flight as f64).ln_1p(),
+            (total_in_flight as f64).det_ln_1p(),
             rejected_fraction,
             max_queue_saturation,
         ]
@@ -722,10 +723,10 @@ pub(crate) fn __degraded_bias(head: &ClusterFailurePredictionHead) -> f64 {
 
 fn sigmoid(x: f64) -> f64 {
     if x >= 0.0 {
-        let e = (-x).exp();
+        let e = (-x).det_exp();
         1.0 / (1.0 + e)
     } else {
-        let e = x.exp();
+        let e = x.det_exp();
         e / (1.0 + e)
     }
 }

@@ -8,6 +8,7 @@
 //! state. Anything that needs `&mut self` on an interpreter (print, gc_*,
 //! clock, Tensor.randn) stays in each executor.
 
+use cjc_repro::dmath::DetMath;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -175,6 +176,206 @@ pub fn categorical_sample_with_u(probs: &Tensor, u: f64) -> Result<i64, String> 
     }
     // Numerical safety: return last valid index
     Ok((data.len() - 1) as i64)
+}
+
+// ---------------------------------------------------------------------------
+// Owned-argument dispatch (move-on-last-use, ADR-0048)
+// ---------------------------------------------------------------------------
+
+/// Builtins that have an ownership-taking fast path in
+/// [`dispatch_builtin_owned`].
+///
+/// Both executors consult this list to decide whether
+/// `x = f(..., x, ...)` may move `x` out of its binding before the call
+/// (ADR-0048). Every name here must satisfy two properties:
+///
+/// 1. It is dispatched by the shared stateless table (no executor-stateful
+///    arm intercepts it, and it never calls back into user code), so no
+///    user code can run while the binding holds a placeholder.
+/// 2. Its `dispatch_builtin_owned` arm leaves `args` untouched whenever it
+///    returns `Err`, so the executor can restore the binding on failure.
+pub const OWNED_ARG_BUILTINS: &[&str] = &["array_push", "array_pop", "array_reverse"];
+
+/// Whether `name` has an ownership-taking fast path. See [`OWNED_ARG_BUILTINS`].
+pub fn is_owned_arg_builtin(name: &str) -> bool {
+    OWNED_ARG_BUILTINS.contains(&name)
+}
+
+/// Dispatch a stateless builtin that may take ownership of its arguments.
+///
+/// Same results and error messages as [`dispatch_builtin`], but the COW
+/// builtins in [`OWNED_ARG_BUILTINS`] move their array argument out of
+/// `args` (leaving `Value::Void`) instead of cloning the `Rc`. When the
+/// executor moved the caller's binding into `args` (ADR-0048), the
+/// refcount is 1 and `Rc::make_mut` mutates in place: O(1) amortized for
+/// `array_push`/`array_pop`, no allocation for `array_reverse`. When
+/// the value is still shared, `Rc::make_mut` copies, exactly as before,
+/// so aliasing semantics are unchanged.
+///
+/// **Contract:** when this returns `Err`, `args` is unmodified; every arm
+/// validates before it takes. Names outside [`OWNED_ARG_BUILTINS`] are
+/// forwarded to [`dispatch_builtin`] and never modify `args`.
+pub fn dispatch_builtin_owned(name: &str, args: &mut [Value]) -> Result<Option<Value>, String> {
+    match name {
+        "array_push" => {
+            check_array_push(args)?;
+            let arr = take_array(&mut args[0]);
+            let val = std::mem::replace(&mut args[1], Value::Void);
+            Ok(Some(array_push_rc(arr, val)))
+        }
+        "array_pop" => {
+            check_array_pop(args)?;
+            Ok(Some(array_pop_rc(take_array(&mut args[0]))))
+        }
+        "array_reverse" => {
+            check_array_reverse(args)?;
+            Ok(Some(array_reverse_rc(take_array(&mut args[0]))))
+        }
+        _ => dispatch_builtin(name, args),
+    }
+}
+
+/// Move a validated `Value::Array` out of `slot`, leaving `Value::Void`.
+fn take_array(slot: &mut Value) -> Rc<Vec<Value>> {
+    match std::mem::replace(slot, Value::Void) {
+        Value::Array(a) => a,
+        _ => unreachable!("take_array: caller validated the argument as Array"),
+    }
+}
+
+fn check_array_push(args: &[Value]) -> Result<&Rc<Vec<Value>>, String> {
+    if args.len() != 2 { return Err("array_push requires 2 args: array, value".into()); }
+    match &args[0] { Value::Array(a) => Ok(a), _ => Err("array_push: first arg must be Array".into()) }
+}
+
+fn check_array_pop(args: &[Value]) -> Result<&Rc<Vec<Value>>, String> {
+    if args.len() != 1 { return Err("array_pop requires 1 arg: array".into()); }
+    let arr = match &args[0] { Value::Array(a) => a, _ => return Err("array_pop: expected Array".into()) };
+    if arr.is_empty() { return Err("array_pop: empty array".into()); }
+    Ok(arr)
+}
+
+fn check_array_reverse(args: &[Value]) -> Result<&Rc<Vec<Value>>, String> {
+    if args.len() != 1 { return Err("array_reverse requires 1 arg: array".into()); }
+    match &args[0] { Value::Array(a) => Ok(a), _ => Err("array_reverse: expected Array".into()) }
+}
+
+// `Rc::make_mut` mutates in place iff `arr` is the only reference;
+// otherwise it clones the Vec first (copy-on-write).
+fn array_push_rc(mut arr: Rc<Vec<Value>>, val: Value) -> Value {
+    Rc::make_mut(&mut arr).push(val);
+    Value::Array(arr)
+}
+
+fn array_pop_rc(mut arr: Rc<Vec<Value>>) -> Value {
+    let last = Rc::make_mut(&mut arr).pop().expect("array_pop: caller checked non-empty");
+    Value::Tuple(Rc::new(vec![last, Value::Array(arr)]))
+}
+
+fn array_reverse_rc(mut arr: Rc<Vec<Value>>) -> Value {
+    Rc::make_mut(&mut arr).reverse();
+    Value::Array(arr)
+}
+
+#[cfg(test)]
+mod owned_dispatch_tests {
+    use super::*;
+
+    fn ints(v: &[i64]) -> Rc<Vec<Value>> {
+        Rc::new(v.iter().map(|&i| Value::Int(i)).collect())
+    }
+
+    fn as_array(v: &Value) -> &Rc<Vec<Value>> {
+        match v {
+            Value::Array(a) => a,
+            other => panic!("expected Array, got {}", other.type_name()),
+        }
+    }
+
+    #[test]
+    fn unique_array_is_mutated_in_place() {
+        let arr = ints(&[1, 2, 3]);
+        let ptr = Rc::as_ptr(&arr);
+        let mut args = vec![Value::Array(arr)];
+        let out = dispatch_builtin_owned("array_reverse", &mut args).unwrap().unwrap();
+        assert_eq!(Rc::as_ptr(as_array(&out)), ptr, "unique Rc must not be copied");
+        assert!(matches!(args[0], Value::Void), "argument was moved out");
+        assert_eq!(format!("{out}"), "[3, 2, 1]");
+    }
+
+    #[test]
+    fn unique_push_reuses_the_allocation() {
+        let mut v = Vec::with_capacity(8);
+        v.extend([Value::Int(1)]);
+        let arr = Rc::new(v);
+        let ptr = Rc::as_ptr(&arr);
+        let mut args = vec![Value::Array(arr), Value::Int(2)];
+        let out = dispatch_builtin_owned("array_push", &mut args).unwrap().unwrap();
+        assert_eq!(Rc::as_ptr(as_array(&out)), ptr);
+        assert_eq!(format!("{out}"), "[1, 2]");
+    }
+
+    #[test]
+    fn shared_array_is_copied_and_alias_unchanged() {
+        let arr = ints(&[1, 2]);
+        let alias = Rc::clone(&arr);
+        let mut args = vec![Value::Array(arr), Value::Int(3)];
+        let out = dispatch_builtin_owned("array_push", &mut args).unwrap().unwrap();
+        assert_ne!(Rc::as_ptr(as_array(&out)), Rc::as_ptr(&alias));
+        assert_eq!(alias.len(), 2);
+        assert_eq!(format!("{out}"), "[1, 2, 3]");
+    }
+
+    #[test]
+    fn borrowed_path_always_copies() {
+        let arr = ints(&[1, 2]);
+        let args = vec![Value::Array(Rc::clone(&arr))];
+        let out = dispatch_builtin("array_reverse", &args).unwrap().unwrap();
+        assert_ne!(Rc::as_ptr(as_array(&out)), Rc::as_ptr(&arr));
+        assert_eq!(format!("{}", args[0]), "[1, 2]");
+    }
+
+    #[test]
+    fn err_leaves_args_untouched() {
+        let cases: Vec<(&str, Vec<Value>)> = vec![
+            ("array_push", vec![Value::Array(ints(&[1]))]),
+            ("array_push", vec![Value::Int(1), Value::Int(2)]),
+            ("array_pop", vec![Value::Array(ints(&[]))]),
+            ("array_pop", vec![Value::Array(ints(&[1])), Value::Int(0)]),
+            ("array_reverse", vec![Value::Float(1.0)]),
+        ];
+        for (name, mut args) in cases {
+            let before: Vec<String> = args.iter().map(|v| format!("{v}")).collect();
+            let owned = dispatch_builtin_owned(name, &mut args).unwrap_err();
+            let borrowed = dispatch_builtin(name, &args).unwrap_err();
+            let after: Vec<String> = args.iter().map(|v| format!("{v}")).collect();
+            assert_eq!(before, after, "{name}: args modified on Err");
+            assert_eq!(owned, borrowed, "{name}: error messages diverge");
+        }
+    }
+
+    #[test]
+    fn owned_and_borrowed_results_agree() {
+        for name in OWNED_ARG_BUILTINS {
+            let mut owned_args = vec![Value::Array(ints(&[4, 5, 6]))];
+            if *name == "array_push" {
+                owned_args.push(Value::Int(7));
+            }
+            let borrowed_args = owned_args.clone();
+            let a = dispatch_builtin_owned(name, &mut owned_args).unwrap().unwrap();
+            let b = dispatch_builtin(name, &borrowed_args).unwrap().unwrap();
+            assert_eq!(format!("{a}"), format!("{b}"), "{name}");
+        }
+    }
+
+    #[test]
+    fn non_owned_names_forward_without_touching_args() {
+        let mut args = vec![Value::Array(ints(&[1, 2, 3]))];
+        let out = dispatch_builtin_owned("array_len", &mut args).unwrap().unwrap();
+        assert_eq!(format!("{out}"), "3");
+        assert!(matches!(args[0], Value::Array(_)));
+        assert_eq!(dispatch_builtin_owned("no_such_builtin", &mut args).unwrap().map(|_| ()), None);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -670,8 +871,8 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 return Err("log requires exactly 1 argument".into());
             }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.ln()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).ln()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_ln()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_ln()))),
                 _ => Err(format!("log requires a number, got {}", args[0].type_name())),
             }
         }
@@ -680,8 +881,8 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 return Err("exp requires exactly 1 argument".into());
             }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.exp()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).exp()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_exp()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_exp()))),
                 _ => Err(format!("exp requires a number, got {}", args[0].type_name())),
             }
         }
@@ -689,48 +890,48 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
         "sin" => {
             if args.len() != 1 { return Err("sin requires exactly 1 argument".into()); }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.sin()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).sin()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_sin()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_sin()))),
                 _ => Err(format!("sin requires a number, got {}", args[0].type_name())),
             }
         }
         "cos" => {
             if args.len() != 1 { return Err("cos requires exactly 1 argument".into()); }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.cos()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).cos()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_cos()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_cos()))),
                 _ => Err(format!("cos requires a number, got {}", args[0].type_name())),
             }
         }
         "tan" => {
             if args.len() != 1 { return Err("tan requires exactly 1 argument".into()); }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.tan()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).tan()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_tan()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_tan()))),
                 _ => Err(format!("tan requires a number, got {}", args[0].type_name())),
             }
         }
         "asin" => {
             if args.len() != 1 { return Err("asin requires exactly 1 argument".into()); }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.asin()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).asin()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_asin()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_asin()))),
                 _ => Err(format!("asin requires a number, got {}", args[0].type_name())),
             }
         }
         "acos" => {
             if args.len() != 1 { return Err("acos requires exactly 1 argument".into()); }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.acos()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).acos()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_acos()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_acos()))),
                 _ => Err(format!("acos requires a number, got {}", args[0].type_name())),
             }
         }
         "atan" => {
             if args.len() != 1 { return Err("atan requires exactly 1 argument".into()); }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.atan()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).atan()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_atan()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_atan()))),
                 _ => Err(format!("atan requires a number, got {}", args[0].type_name())),
             }
         }
@@ -746,30 +947,30 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 Value::Int(i) => *i as f64,
                 _ => return Err(format!("atan2 requires numbers, got {}", args[1].type_name())),
             };
-            Ok(Some(Value::Float(y.atan2(x))))
+            Ok(Some(Value::Float(y.det_atan2(x))))
         }
         // ---- Mathematics Hardening Phase: Hyperbolic ----
         "sinh" => {
             if args.len() != 1 { return Err("sinh requires exactly 1 argument".into()); }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.sinh()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).sinh()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_sinh()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_sinh()))),
                 _ => Err(format!("sinh requires a number, got {}", args[0].type_name())),
             }
         }
         "cosh" => {
             if args.len() != 1 { return Err("cosh requires exactly 1 argument".into()); }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.cosh()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).cosh()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_cosh()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_cosh()))),
                 _ => Err(format!("cosh requires a number, got {}", args[0].type_name())),
             }
         }
         "tanh" | "tanh_scalar" => {
             if args.len() != 1 { return Err("tanh requires exactly 1 argument".into()); }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.tanh()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).tanh()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_tanh()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_tanh()))),
                 Value::Tensor(t) => Ok(Some(Value::Tensor(t.tanh_activation()))),
                 _ => Err(format!("tanh requires a number or Tensor, got {}", args[0].type_name())),
             }
@@ -787,37 +988,37 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 Value::Int(i) => *i as f64,
                 _ => return Err(format!("pow requires numbers, got {}", args[1].type_name())),
             };
-            Ok(Some(Value::Float(base.powf(exp))))
+            Ok(Some(Value::Float(base.det_powf(exp))))
         }
         "log2" => {
             if args.len() != 1 { return Err("log2 requires exactly 1 argument".into()); }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.log2()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).log2()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_log2()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_log2()))),
                 _ => Err(format!("log2 requires a number, got {}", args[0].type_name())),
             }
         }
         "log10" => {
             if args.len() != 1 { return Err("log10 requires exactly 1 argument".into()); }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.log10()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).log10()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_log10()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_log10()))),
                 _ => Err(format!("log10 requires a number, got {}", args[0].type_name())),
             }
         }
         "log1p" => {
             if args.len() != 1 { return Err("log1p requires exactly 1 argument".into()); }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.ln_1p()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).ln_1p()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_ln_1p()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_ln_1p()))),
                 _ => Err(format!("log1p requires a number, got {}", args[0].type_name())),
             }
         }
         "expm1" => {
             if args.len() != 1 { return Err("expm1 requires exactly 1 argument".into()); }
             match &args[0] {
-                Value::Float(f) => Ok(Some(Value::Float(f.exp_m1()))),
-                Value::Int(i) => Ok(Some(Value::Float((*i as f64).exp_m1()))),
+                Value::Float(f) => Ok(Some(Value::Float(f.det_exp_m1()))),
+                Value::Int(i) => Ok(Some(Value::Float((*i as f64).det_exp_m1()))),
                 _ => Err(format!("expm1 requires a number, got {}", args[0].type_name())),
             }
         }
@@ -950,7 +1151,7 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 Value::Int(i) => *i as f64,
                 _ => return Err(format!("hypot requires numbers, got {}", args[1].type_name())),
             };
-            Ok(Some(Value::Float(x.hypot(y))))
+            Ok(Some(Value::Float(x.det_hypot(y))))
         }
         // ---- Mathematics Hardening Phase: Constants ----
         "PI" => {
@@ -1265,8 +1466,8 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
                 }
                 _ => {
                     let p = ord as f64;
-                    let pow_vals: Vec<f64> = data.iter().map(|x| x.abs().powf(p)).collect();
-                    crate::accumulator::binned_sum_f64(&pow_vals).powf(1.0 / p)
+                    let pow_vals: Vec<f64> = data.iter().map(|x| x.abs().det_powf(p)).collect();
+                    crate::accumulator::binned_sum_f64(&pow_vals).det_powf(1.0 / p)
                 }
             };
             Ok(Some(Value::Float(result)))
@@ -2329,8 +2530,8 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             let v_flat = v.to_vec();
             let n = w_flat.len();
             // Bias correction computed once.
-            let bc1 = 1.0 - b1.powf(t as f64);
-            let bc2 = 1.0 - b2.powf(t as f64);
+            let bc1 = 1.0 - b1.det_powf(t as f64);
+            let bc2 = 1.0 - b2.det_powf(t as f64);
             let inv_b1 = 1.0 - b1;
             let inv_b2 = 1.0 - b2;
             let mut new_w = Vec::with_capacity(n);
@@ -3598,22 +3799,19 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
         }
 
         // Phase C6: Collection utilities
+        // COW collection builtins. Borrowed-args path: `args` is `&[Value]`,
+        // so the array is reached through `Rc::clone` and `Rc::make_mut`
+        // ALWAYS copies here (the caller's slice still holds a reference,
+        // so the count is >= 2). This path is O(n) per call. The zero-copy
+        // path is `dispatch_builtin_owned`, which the executors take for
+        // `x = array_push(x, v)` under move-on-last-use (ADR-0048).
         "array_push" => {
-            if args.len() != 2 { return Err("array_push requires 2 args: array, value".into()); }
-            let mut arr_rc = match &args[0] { Value::Array(a) => Rc::clone(a), _ => return Err("array_push: first arg must be Array".into()) };
-            // COW: Rc::make_mut only clones if refcount > 1.
-            // For `arr = array_push(arr, val)` where old binding is overwritten,
-            // refcount is 1 → zero-copy push (amortized O(1) instead of O(n)).
-            Rc::make_mut(&mut arr_rc).push(args[1].clone());
-            Ok(Some(Value::Array(arr_rc)))
+            let arr = check_array_push(args)?;
+            Ok(Some(array_push_rc(Rc::clone(arr), args[1].clone())))
         }
         "array_pop" => {
-            if args.len() != 1 { return Err("array_pop requires 1 arg: array".into()); }
-            let mut arr_rc = match &args[0] { Value::Array(a) => Rc::clone(a), _ => return Err("array_pop: expected Array".into()) };
-            if arr_rc.is_empty() { return Err("array_pop: empty array".into()); }
-            // COW: Rc::make_mut only clones if refcount > 1.
-            let last = Rc::make_mut(&mut arr_rc).pop().unwrap();
-            Ok(Some(Value::Tuple(Rc::new(vec![last, Value::Array(arr_rc)]))))
+            let arr = check_array_pop(args)?;
+            Ok(Some(array_pop_rc(Rc::clone(arr))))
         }
         "array_contains" => {
             if args.len() != 2 { return Err("array_contains requires 2 args: array, value".into()); }
@@ -3623,11 +3821,8 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             Ok(Some(Value::Bool(found)))
         }
         "array_reverse" => {
-            if args.len() != 1 { return Err("array_reverse requires 1 arg: array".into()); }
-            let mut arr_rc = match &args[0] { Value::Array(a) => Rc::clone(a), _ => return Err("array_reverse: expected Array".into()) };
-            // COW: Rc::make_mut only clones if refcount > 1.
-            Rc::make_mut(&mut arr_rc).reverse();
-            Ok(Some(Value::Array(arr_rc)))
+            let arr = check_array_reverse(args)?;
+            Ok(Some(array_reverse_rc(Rc::clone(arr))))
         }
         "array_flatten" => {
             if args.len() != 1 { return Err("array_flatten requires 1 arg: array".into()); }
@@ -3806,24 +4001,24 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             // These cannot be trivially SIMD-vectorized while preserving
             // bit-identical results with libm scalar implementations.
             let f: Box<dyn Fn(f64) -> f64> = match fn_name.as_str() {
-                "sin"     => Box::new(|x: f64| x.sin()),
-                "cos"     => Box::new(|x: f64| x.cos()),
-                "tan"     => Box::new(|x: f64| x.tan()),
-                "asin"    => Box::new(|x: f64| x.asin()),
-                "acos"    => Box::new(|x: f64| x.acos()),
-                "atan"    => Box::new(|x: f64| x.atan()),
-                "exp"     => Box::new(|x: f64| x.exp()),
-                "ln"      => Box::new(|x: f64| x.ln()),
-                "log"     => Box::new(|x: f64| x.ln()),
-                "log2"    => Box::new(|x: f64| x.log2()),
-                "log10"   => Box::new(|x: f64| x.log10()),
-                "log1p"   => Box::new(|x: f64| x.ln_1p()),
-                "expm1"   => Box::new(|x: f64| x.exp_m1()),
+                "sin"     => Box::new(|x: f64| x.det_sin()),
+                "cos"     => Box::new(|x: f64| x.det_cos()),
+                "tan"     => Box::new(|x: f64| x.det_tan()),
+                "asin"    => Box::new(|x: f64| x.det_asin()),
+                "acos"    => Box::new(|x: f64| x.det_acos()),
+                "atan"    => Box::new(|x: f64| x.det_atan()),
+                "exp"     => Box::new(|x: f64| x.det_exp()),
+                "ln"      => Box::new(|x: f64| x.det_ln()),
+                "log"     => Box::new(|x: f64| x.det_ln()),
+                "log2"    => Box::new(|x: f64| x.det_log2()),
+                "log10"   => Box::new(|x: f64| x.det_log10()),
+                "log1p"   => Box::new(|x: f64| x.det_ln_1p()),
+                "expm1"   => Box::new(|x: f64| x.det_exp_m1()),
                 "floor"   => Box::new(|x: f64| x.floor()),
                 "ceil"    => Box::new(|x: f64| x.ceil()),
                 "round"   => Box::new(|x: f64| x.round()),
-                "sigmoid" => Box::new(|x: f64| 1.0 / (1.0 + (-x).exp())),
-                "tanh"    => Box::new(|x: f64| x.tanh()),
+                "sigmoid" => Box::new(|x: f64| 1.0 / (1.0 + (-x).det_exp())),
+                "tanh"    => Box::new(|x: f64| x.det_tanh()),
                 "sign"    => Box::new(|x: f64| {
                     if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 }
                 }),
@@ -5627,7 +5822,9 @@ pub fn dispatch_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, Str
             )
         }
 
-        _ => Ok(None), // Not a shared builtin
+        // State-space-model primitives (ADR-0020/0021) live in their own
+        // module; it returns Ok(None) for names it does not own.
+        _ => crate::state_space::dispatch_state_space(name, args),
     }
 }
 

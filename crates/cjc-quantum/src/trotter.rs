@@ -16,6 +16,7 @@
 //! - Matrix exponential via explicit analytic formulas for Pauli terms
 //! - Fixed iteration order throughout
 
+use cjc_repro::dmath;
 use crate::fermion::{FermionicHamiltonian, Pauli, PauliTerm};
 use crate::statevector::Statevector;
 use cjc_repro::KahanAccumulatorF64;
@@ -45,8 +46,8 @@ pub enum TrotterOrder {
 ///
 /// This is exact (not an approximation) because P² = I for any Pauli string.
 pub fn apply_pauli_exp(sv: &mut Statevector, term: &PauliTerm, theta: f64) {
-    let cos_t = ComplexF64::real(theta.cos());
-    let sin_t = ComplexF64::new(0.0, -theta.sin()); // -i sin(θ)
+    let cos_t = ComplexF64::real(dmath::cos(theta));
+    let sin_t = ComplexF64::new(0.0, -dmath::sin(theta)); // -i sin(θ)
 
     let n = sv.n_states();
 
@@ -180,8 +181,8 @@ pub fn trotter_evolve(
 /// This is the core rotation: cos(θ)I - i·sin(θ)P.
 fn apply_pauli_rotation(sv: &mut Statevector, ops: &[Pauli], theta: f64) {
     let n = sv.n_states();
-    let cos_t = theta.cos();
-    let sin_t = theta.sin();
+    let cos_t = dmath::cos(theta);
+    let sin_t = dmath::sin(theta);
 
     // Check if all ops are diagonal (I or Z only)
     let all_diagonal = ops.iter().all(|&p| p == Pauli::I || p == Pauli::Z);
@@ -192,7 +193,7 @@ fn apply_pauli_rotation(sv: &mut Statevector, ops: &[Pauli], theta: f64) {
         for k in 0..n {
             let eigenvalue = compute_z_eigenvalue(ops, k);
             let angle = -theta * eigenvalue;
-            let phase = ComplexF64::new(angle.cos(), angle.sin());
+            let phase = ComplexF64::new(dmath::cos(angle), dmath::sin(angle));
             sv.amplitudes[k] = sv.amplitudes[k].mul_fixed(phase);
         }
     } else {

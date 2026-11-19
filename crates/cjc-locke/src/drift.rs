@@ -24,6 +24,7 @@
 //! * Label-drift conditional on features (requires modelling).
 //! * Time-split detection (requires user-supplied time column).
 
+use cjc_repro::dmath::DetMath;
 use std::collections::BTreeMap;
 
 use cjc_data::{Column, DataFrame};
@@ -133,7 +134,7 @@ fn psi(p: &[f64], q: &[f64]) -> f64 {
     for i in 0..p.len() {
         let pi = p[i].max(eps);
         let qi = q[i].max(eps);
-        acc.add((qi - pi) * (qi / pi).ln());
+        acc.add((qi - pi) * (qi / pi).det_ln());
     }
     acc.finalize()
 }
@@ -712,7 +713,7 @@ fn category_entropy_shift_finding(
                 continue;
             }
             let p = c as f64 / total;
-            acc.add(-p * p.ln());
+            acc.add(-p * p.det_ln());
         }
         acc.finalize()
     };

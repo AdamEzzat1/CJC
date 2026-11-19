@@ -44,6 +44,7 @@
 //! fixed-order standardize → dot with named intermediates (no FMA) →
 //! clamp to `[0, 1]` (the label range).
 
+use cjc_repro::dmath::DetMath;
 use crate::physical_cost::PhysicalCostQuery;
 
 /// Stable model identifier; flows into report hashes if/when a trained
@@ -144,7 +145,7 @@ pub fn memory_features_from_query(
 }
 
 fn log1p_u64(v: u64) -> f64 {
-    (v as f64).ln_1p()
+    (v as f64).det_ln_1p()
 }
 
 // ---------------------------------------------------------------------------

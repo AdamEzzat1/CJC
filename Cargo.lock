@@ -440,6 +440,7 @@ dependencies = [
  "cjc-hir",
  "cjc-mir",
  "cjc-parser",
+ "cjc-repro",
  "proptest",
 ]
 
@@ -629,6 +630,7 @@ dependencies = [
  "cjc-ast",
  "cjc-diag",
  "cjc-hir",
+ "cjc-repro",
  "cjc-types",
 ]
 
@@ -1226,6 +1228,18 @@ dependencies = [
  "rusty-fork",
  "tempfile",
  "unarray",
+]
+
+[[package]]
+name = "quantum-compare"
+version = "0.1.11"
+dependencies = [
+ "cjc-eval",
+ "cjc-mir-exec",
+ "cjc-parser",
+ "cjc-quantum",
+ "cjc-repro",
+ "cjc-runtime",
 ]
 
 [[package]]

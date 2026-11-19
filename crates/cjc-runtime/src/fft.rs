@@ -5,6 +5,7 @@
 //! - Butterfly operations in fixed order.
 //! - Zero-padding to next power of 2 is deterministic.
 
+use cjc_repro::dmath::DetMath;
 use std::f64::consts::PI;
 
 /// Compute the Cooley-Tukey radix-2 FFT in-place.
@@ -45,7 +46,7 @@ pub fn fft(data: &[(f64, f64)]) -> Vec<(f64, f64)> {
     while size <= n {
         let half = size / 2;
         let angle = -2.0 * PI / size as f64;
-        let w_base = (angle.cos(), angle.sin());
+        let w_base = (angle.det_cos(), angle.det_sin());
         for start in (0..n).step_by(size) {
             let mut w = (1.0, 0.0);
             for k in 0..half {
@@ -133,14 +134,14 @@ fn next_power_of_2(n: usize) -> usize {
 /// For N=1, returns [1.0].
 pub fn hann_window(n: usize) -> Vec<f64> {
     if n <= 1 { return vec![1.0; n]; }
-    (0..n).map(|k| 0.5 * (1.0 - (2.0 * PI * k as f64 / (n - 1) as f64).cos())).collect()
+    (0..n).map(|k| 0.5 * (1.0 - (2.0 * PI * k as f64 / (n - 1) as f64).det_cos())).collect()
 }
 
 /// Hamming window: w[k] = 0.54 - 0.46 * cos(2*pi*k / (N-1)).
 /// For N=1, returns [1.0].
 pub fn hamming_window(n: usize) -> Vec<f64> {
     if n <= 1 { return vec![1.0; n]; }
-    (0..n).map(|k| 0.54 - 0.46 * (2.0 * PI * k as f64 / (n - 1) as f64).cos()).collect()
+    (0..n).map(|k| 0.54 - 0.46 * (2.0 * PI * k as f64 / (n - 1) as f64).det_cos()).collect()
 }
 
 /// Blackman window: w[k] = 0.42 - 0.5*cos(2*pi*k/(N-1)) + 0.08*cos(4*pi*k/(N-1)).
@@ -149,7 +150,7 @@ pub fn blackman_window(n: usize) -> Vec<f64> {
     if n <= 1 { return vec![1.0; n]; }
     (0..n).map(|k| {
         let frac = k as f64 / (n - 1) as f64;
-        0.42 - 0.5 * (2.0 * PI * frac).cos() + 0.08 * (4.0 * PI * frac).cos()
+        0.42 - 0.5 * (2.0 * PI * frac).det_cos() + 0.08 * (4.0 * PI * frac).det_cos()
     }).collect()
 }
 
@@ -176,7 +177,7 @@ pub fn fft_arbitrary(data: &[(f64, f64)]) -> Vec<(f64, f64)> {
     // Chirp sequence: w[k] = exp(-i * pi * k^2 / N)
     let chirp: Vec<(f64, f64)> = (0..n).map(|k| {
         let angle = -PI * (k * k) as f64 / n as f64;
-        (angle.cos(), angle.sin())
+        (angle.det_cos(), angle.det_sin())
     }).collect();
 
     // Multiply input by chirp: a[k] = x[k] * chirp[k]

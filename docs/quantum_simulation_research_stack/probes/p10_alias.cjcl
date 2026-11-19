@@ -1,0 +1,10 @@
+fn main() -> Any {
+    let __r = __body();
+    print(__r);
+    __r
+}
+fn __body() -> Any {
+    let a = qubits(1);
+    let b = q_x(a, 0);
+    q_probs(a)
+}

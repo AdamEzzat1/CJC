@@ -63,8 +63,10 @@ fn adam_step_oracle(
     eps: f64,
     t: i64,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-    let bc1 = 1.0 - b1.powf(t as f64);
-    let bc2 = 1.0 - b2.powf(t as f64);
+    // The runtime's `adam_step` uses `cjc_repro::dmath::pow`; the platform
+    // libm's powf can differ in the last bit, which this exact oracle sees.
+    let bc1 = 1.0 - cjc_repro::dmath::pow(b1, t as f64);
+    let bc2 = 1.0 - cjc_repro::dmath::pow(b2, t as f64);
     let n = w.len();
     let mut nw = Vec::with_capacity(n);
     let mut nm = Vec::with_capacity(n);

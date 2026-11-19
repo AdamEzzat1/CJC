@@ -5,6 +5,7 @@
 //! All tests are deterministic — same input => identical results.
 //! Uses Kahan summation for all reductions.
 
+use cjc_repro::dmath::DetMath;
 use cjc_repro::KahanAccumulatorF64;
 use crate::distributions::{t_cdf, chi2_cdf, f_cdf, normal_cdf};
 use crate::stats;
@@ -65,8 +66,8 @@ pub fn t_test_two_sample(x: &[f64], y: &[f64]) -> Result<TTestResult, String> {
     let se = (var_x / nx + var_y / ny).sqrt();
     let t = (mean_x - mean_y) / se;
     // Welch-Satterthwaite degrees of freedom
-    let num = (var_x / nx + var_y / ny).powi(2);
-    let denom = (var_x / nx).powi(2) / (nx - 1.0) + (var_y / ny).powi(2) / (ny - 1.0);
+    let num = (var_x / nx + var_y / ny).det_powi(2);
+    let denom = (var_x / nx).det_powi(2) / (nx - 1.0) + (var_y / ny).det_powi(2) / (ny - 1.0);
     let df = num / denom;
     let p = 2.0 * (1.0 - t_cdf(t.abs(), df));
     Ok(TTestResult { t_statistic: t, p_value: p, df, mean: mean_x - mean_y, se })
@@ -759,7 +760,7 @@ pub fn logistic_regression(
             for j in 0..pp {
                 eta += x[i * pp + j] * beta[j];
             }
-            mu[i] = 1.0 / (1.0 + (-eta).exp());
+            mu[i] = 1.0 / (1.0 + (-eta).det_exp());
             // Clamp for numerical stability
             mu[i] = mu[i].max(1e-10).min(1.0 - 1e-10);
         }
@@ -807,14 +808,14 @@ pub fn logistic_regression(
     for i in 0..n {
         let mut eta = 0.0;
         for j in 0..pp { eta += x[i * pp + j] * beta[j]; }
-        mu[i] = 1.0 / (1.0 + (-eta).exp());
+        mu[i] = 1.0 / (1.0 + (-eta).det_exp());
         mu[i] = mu[i].max(1e-10).min(1.0 - 1e-10);
     }
 
     // Log-likelihood
     let mut ll = KahanAccumulatorF64::new();
     for i in 0..n {
-        ll.add(y[i] * mu[i].ln() + (1.0 - y[i]) * (1.0 - mu[i]).ln());
+        ll.add(y[i] * mu[i].det_ln() + (1.0 - y[i]) * (1.0 - mu[i]).det_ln());
     }
     let log_likelihood = ll.finalize();
     let aic = -2.0 * log_likelihood + 2.0 * pp as f64;
@@ -948,14 +949,14 @@ pub fn jarque_bera(data: &[f64]) -> Result<NormalityResult, String> {
 
     if m2 == 0.0 { return Err("jarque_bera: zero variance".into()); }
 
-    let skewness = m3 / m2.powf(1.5);
+    let skewness = m3 / m2.det_powf(1.5);
     let kurtosis = m4 / (m2 * m2);
 
-    let jb = (nf / 6.0) * (skewness * skewness + (kurtosis - 3.0).powi(2) / 4.0);
+    let jb = (nf / 6.0) * (skewness * skewness + (kurtosis - 3.0).det_powi(2) / 4.0);
 
     // p-value from chi-squared distribution with 2 degrees of freedom
     // P(X > jb) = exp(-jb/2) for chi2(2)
-    let p_value = (-jb / 2.0).exp();
+    let p_value = (-jb / 2.0).det_exp();
 
     Ok(NormalityResult { statistic: jb, p_value })
 }
@@ -989,7 +990,7 @@ pub fn anderson_darling(data: &[f64]) -> Result<NormalityResult, String> {
         // Clamp to avoid log(0)
         let p1 = phi_zi.max(1e-15).min(1.0 - 1e-15);
         let p2 = phi_zn.max(1e-15).min(1.0 - 1e-15);
-        let term = (2.0 * (i as f64) + 1.0) * (p1.ln() + (1.0 - p2).ln());
+        let term = (2.0 * (i as f64) + 1.0) * (p1.det_ln() + (1.0 - p2).det_ln());
         a2_acc.add(term);
     }
     let a2 = -nf - a2_acc.finalize() / nf;
@@ -1046,7 +1047,7 @@ pub fn ks_test_normal(data: &[f64]) -> Result<NormalityResult, String> {
     for k in 1..=100 {
         let kf = k as f64;
         let sign = if k % 2 == 1 { 1.0 } else { -1.0 };
-        let term = sign * (-2.0 * kf * kf * nd2).exp();
+        let term = sign * (-2.0 * kf * kf * nd2).det_exp();
         p_value += term;
         if term.abs() < 1e-15 { break; }
     }
@@ -1099,9 +1100,9 @@ pub fn eta_squared(groups: &[&[f64]]) -> Result<f64, String> {
     for g in groups {
         let gm = kahan_mean(g);
         let ni = g.len() as f64;
-        ss_between.add(ni * (gm - grand_mean).powi(2));
+        ss_between.add(ni * (gm - grand_mean).det_powi(2));
         for &x in *g {
-            ss_total.add((x - grand_mean).powi(2));
+            ss_total.add((x - grand_mean).det_powi(2));
         }
     }
 
@@ -1216,10 +1217,10 @@ pub fn bartlett_test(groups: &[&[f64]]) -> Result<(f64, f64), String> {
     let mut denom_acc = KahanAccumulatorF64::new();
     for i in 0..k {
         let ni_m1 = ns[i] as f64 - 1.0;
-        num_acc.add(ni_m1 * (vars[i] / sp2).max(1e-300).ln());
+        num_acc.add(ni_m1 * (vars[i] / sp2).max(1e-300).det_ln());
         denom_acc.add(1.0 / ni_m1);
     }
-    let t = nkf * sp2.ln() - num_acc.finalize();
+    let t = nkf * sp2.det_ln() - num_acc.finalize();
     let c = 1.0 + (1.0 / (3.0 * (k as f64 - 1.0))) * (denom_acc.finalize() - 1.0 / nkf);
     let bartlett = t / c;
 
@@ -1261,7 +1262,7 @@ fn gamma_series(a: f64, x: f64) -> f64 {
         sum += term;
         if term.abs() < sum.abs() * 1e-15 { break; }
     }
-    sum * (-x + a * x.ln() - ln_gamma_a).exp()
+    sum * (-x + a * x.det_ln() - ln_gamma_a).det_exp()
 }
 
 fn gamma_cf(a: f64, x: f64) -> f64 {
@@ -1282,7 +1283,7 @@ fn gamma_cf(a: f64, x: f64) -> f64 {
         f *= delta;
         if (delta - 1.0).abs() < 1e-15 { break; }
     }
-    f * (-x + a * x.ln() - ln_gamma_a).exp()
+    f * (-x + a * x.det_ln() - ln_gamma_a).det_exp()
 }
 
 /// Stirling's approximation for ln(Gamma(x)).
@@ -1300,8 +1301,8 @@ fn ln_gamma(x: f64) -> f64 {
         1.5056327351493116e-7,
     ];
     if x < 0.5 {
-        let s = std::f64::consts::PI / (std::f64::consts::PI * x).sin();
-        return s.abs().ln() - ln_gamma(1.0 - x);
+        let s = std::f64::consts::PI / (std::f64::consts::PI * x).det_sin();
+        return s.abs().det_ln() - ln_gamma(1.0 - x);
     }
     let x = x - 1.0;
     let mut ag = coeffs[0];
@@ -1309,7 +1310,7 @@ fn ln_gamma(x: f64) -> f64 {
         ag += coeffs[i] / (x + i as f64);
     }
     let t = x + 7.5;
-    0.5 * (2.0 * std::f64::consts::PI).ln() + (x + 0.5) * t.ln() - t + ag.ln()
+    0.5 * (2.0 * std::f64::consts::PI).det_ln() + (x + 0.5) * t.det_ln() - t + ag.det_ln()
 }
 
 // Kahan-mean helper (used by effect size functions).

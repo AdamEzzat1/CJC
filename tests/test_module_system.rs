@@ -159,8 +159,9 @@ print(square(7));
 fn module_exec_two_files() {
     let dir = tempfile::tempdir().unwrap();
 
+    // `pub`: a module-level import exposes only public functions.
     std::fs::write(dir.path().join("mathlib.cjcl"), r#"
-fn double(x: i64) -> i64 {
+pub fn double(x: i64) -> i64 {
     x * 2
 }
 "#).unwrap();

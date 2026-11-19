@@ -4,6 +4,7 @@
 //! They provide the foundational stepping functions; full solver loops and
 //! adaptive algorithms will be built as CJC library code on top of these.
 
+use cjc_repro::dmath::DetMath;
 use crate::tensor::Tensor;
 use cjc_repro::kahan_sum_f64;
 
@@ -229,11 +230,11 @@ impl SymExpr {
             SymExpr::Var(name) => *bindings.get(name).unwrap_or(&0.0),
             SymExpr::Add(a, b) => a.eval(bindings) + b.eval(bindings),
             SymExpr::Mul(a, b) => a.eval(bindings) * b.eval(bindings),
-            SymExpr::Pow(base, exp) => base.eval(bindings).powf(*exp),
-            SymExpr::Sin(inner) => inner.eval(bindings).sin(),
-            SymExpr::Cos(inner) => inner.eval(bindings).cos(),
-            SymExpr::Exp(inner) => inner.eval(bindings).exp(),
-            SymExpr::Ln(inner) => inner.eval(bindings).ln(),
+            SymExpr::Pow(base, exp) => base.eval(bindings).det_powf(*exp),
+            SymExpr::Sin(inner) => inner.eval(bindings).det_sin(),
+            SymExpr::Cos(inner) => inner.eval(bindings).det_cos(),
+            SymExpr::Exp(inner) => inner.eval(bindings).det_exp(),
+            SymExpr::Ln(inner) => inner.eval(bindings).det_ln(),
             SymExpr::Neg(inner) => -inner.eval(bindings),
         }
     }
@@ -514,14 +515,14 @@ where
             step_count += 1;
 
             // Compute new step size
-            let factor = safety * err_norm.powf(-0.2).min(max_factor).max(min_factor);
+            let factor = safety * err_norm.det_powf(-0.2).min(max_factor).max(min_factor);
             h = (h * factor).min(t1 - t);
             if h < 1e-14 {
                 break;
             }
         } else {
             // Reject step — reduce h
-            let factor = (safety * err_norm.powf(-0.25)).max(min_factor);
+            let factor = (safety * err_norm.det_powf(-0.25)).max(min_factor);
             h *= factor;
             if h < 1e-14 {
                 break;

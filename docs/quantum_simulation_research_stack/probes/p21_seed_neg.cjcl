@@ -1,0 +1,10 @@
+fn main() -> Any {
+    let __r = __body();
+    print(__r);
+    __r
+}
+fn __body() -> Any {
+    let c = qubits(1);
+    let c = q_h(c, 0);
+    [q_sample(c, 8, -1), q_sample(c, 8, 7)]
+}

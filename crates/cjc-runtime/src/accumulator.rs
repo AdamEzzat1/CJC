@@ -50,6 +50,7 @@
 //! - `f64`: 2048 bins (one per biased exponent, 0..=2047, 11-bit exponent field).
 //! - `f32`: 256 bins (one per biased exponent, 0..=255, 8-bit exponent field).
 
+use cjc_repro::dmath::DetMath;
 // ---------------------------------------------------------------------------
 // f64 BinnedAccumulator
 // ---------------------------------------------------------------------------
@@ -554,7 +555,7 @@ pub fn fused_matmul_norm_kernel(
             let transformed = match ord {
                 1 => h_ij.abs(),
                 2 => h_ij * h_ij,
-                p => h_ij.abs().powf(p as f64),
+                p => h_ij.abs().det_powf(p as f64),
             };
             outer.add(transformed);
         }
@@ -564,7 +565,7 @@ pub fn fused_matmul_norm_kernel(
     match ord {
         1 => raw_sum,
         2 => raw_sum.sqrt(),
-        p => raw_sum.powf(1.0 / (p as f64)),
+        p => raw_sum.det_powf(1.0 / (p as f64)),
     }
 }
 

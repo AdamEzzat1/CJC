@@ -223,7 +223,9 @@ proptest! {
         prop_assert_eq!(got.to_vec(), expected.to_vec());
     }
 
-    /// `grad_graph_tanh(a)` matches element-wise `f64::tanh`.
+    /// `grad_graph_tanh(a)` matches element-wise `tanh` — the runtime's
+    /// deterministic `cjc_repro::dmath::tanh`, not the platform libm, which
+    /// differs in the last bit on some inputs and platforms.
     #[test]
     fn tanh_forward_matches_direct(
         n in 1usize..16,
@@ -232,7 +234,7 @@ proptest! {
         let a_data = det_floats(seed, n);
         let a = Tensor::from_vec(a_data.clone(), &[n]).unwrap();
 
-        let expected: Vec<f64> = a_data.iter().map(|x| x.tanh()).collect();
+        let expected: Vec<f64> = a_data.iter().map(|&x| cjc_repro::dmath::tanh(x)).collect();
 
         reset();
         let ai = input_node(a);

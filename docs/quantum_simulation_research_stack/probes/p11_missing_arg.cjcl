@@ -1,0 +1,4 @@
+fn main() -> Any {
+    let c = qubits(1);
+    q_h(c)
+}

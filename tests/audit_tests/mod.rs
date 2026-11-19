@@ -19,3 +19,6 @@ mod test_phase2_monomorphization;
 
 // F5 Complex Numbers audit tests
 mod test_complex_f64_runtime;
+
+// B2 parallel matmul determinism
+mod test_parallel_matmul;

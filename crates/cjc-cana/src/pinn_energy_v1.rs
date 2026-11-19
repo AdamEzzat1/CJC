@@ -60,6 +60,7 @@
 //! the head (Phase C); training is offline-only; shadow gating
 //! precedes any activation (invariants unchanged).
 
+use cjc_repro::dmath::DetMath;
 use crate::hash::CanaHasher;
 
 /// Stable model identifier for report hashes.
@@ -247,7 +248,7 @@ impl PinnEnergyV1 {
 const TAG_ENERGY_HEAD: u8 = 0xD0;
 
 fn log1p_u64(v: u64) -> f64 {
-    (v as f64).ln_1p()
+    (v as f64).det_ln_1p()
 }
 
 // ---------------------------------------------------------------------------

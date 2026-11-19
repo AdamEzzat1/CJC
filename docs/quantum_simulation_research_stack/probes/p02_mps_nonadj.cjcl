@@ -1,0 +1,5 @@
+fn main() -> Any {
+    let m = mps_new(4, 8);
+    let m = mps_cnot(m, 0, 2);
+    mps_z_expectation(m, 0)
+}

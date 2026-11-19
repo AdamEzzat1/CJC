@@ -11,6 +11,7 @@
 //! - Basis states are processed in ascending index order
 //! - No HashMap or non-deterministic data structures
 
+use cjc_repro::dmath;
 use crate::statevector::Statevector;
 use cjc_runtime::complex::ComplexF64;
 
@@ -76,7 +77,45 @@ impl Gate {
             sv.validate_qubit(q)?;
         }
 
-        match self {
+        // Strided (optionally threaded) kernels; bit-identical to the
+        // reference loops below (see kernels.rs).
+        let amps = &mut sv.amplitudes[..];
+        match *self {
+            Gate::CNOT(c, t) => crate::kernels::apply_cnot(amps, c, t),
+            Gate::CZ(a, b) => crate::kernels::apply_cz(amps, a, b),
+            Gate::SWAP(a, b) => crate::kernels::apply_swap(amps, a, b),
+            Gate::Toffoli(a, b, c) => crate::kernels::apply_toffoli(amps, a, b, c),
+            _ => {
+                let (q, u) = single_qubit_matrix(self).expect("single-qubit gate");
+                crate::kernels::apply_single_qubit(amps, q, u);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The qubit and 2×2 matrix of a single-qubit gate (`None` for multi-qubit gates).
+pub(crate) fn single_qubit_matrix(g: &Gate) -> Option<(usize, Mat2x2)> {
+    Some(match *g {
+        Gate::H(q) => (q, h_matrix()),
+        Gate::X(q) => (q, x_matrix()),
+        Gate::Y(q) => (q, y_matrix()),
+        Gate::Z(q) => (q, z_matrix()),
+        Gate::S(q) => (q, s_matrix()),
+        Gate::T(q) => (q, t_matrix()),
+        Gate::Rx(q, t) => (q, rx_matrix(t)),
+        Gate::Ry(q, t) => (q, ry_matrix(t)),
+        Gate::Rz(q, t) => (q, rz_matrix(t)),
+        _ => return None,
+    })
+}
+
+/// The original full-scan loops, kept as the reference the optimised
+/// kernels are tested against bit for bit. Indices must already be valid.
+#[doc(hidden)]
+pub fn apply_reference(gate: &Gate, sv: &mut Statevector) {
+    {
+        match gate {
             // --- Single-qubit gates ---
             Gate::H(q) => apply_single_qubit(sv, *q, h_matrix()),
             Gate::X(q) => apply_single_qubit(sv, *q, x_matrix()),
@@ -96,8 +135,6 @@ impl Gate {
             // --- Three-qubit gates ---
             Gate::Toffoli(c1, c2, tgt) => apply_toffoli(sv, *c1, *c2, *tgt),
         }
-
-        Ok(())
     }
 }
 
@@ -172,21 +209,21 @@ fn t_matrix() -> Mat2x2 {
 }
 
 fn rx_matrix(theta: f64) -> Mat2x2 {
-    let c = ComplexF64::real((theta / 2.0).cos());
-    let s = ComplexF64::new(0.0, -(theta / 2.0).sin());
+    let c = ComplexF64::real(dmath::cos(theta / 2.0));
+    let s = ComplexF64::new(0.0, -dmath::sin(theta / 2.0));
     [[c, s], [s, c]]
 }
 
 fn ry_matrix(theta: f64) -> Mat2x2 {
-    let c = ComplexF64::real((theta / 2.0).cos());
-    let s = ComplexF64::real((theta / 2.0).sin());
-    let ms = ComplexF64::real(-(theta / 2.0).sin());
+    let c = ComplexF64::real(dmath::cos(theta / 2.0));
+    let s = ComplexF64::real(dmath::sin(theta / 2.0));
+    let ms = ComplexF64::real(-dmath::sin(theta / 2.0));
     [[c, ms], [s, c]]
 }
 
 fn rz_matrix(theta: f64) -> Mat2x2 {
-    let pos = ComplexF64::new((theta / 2.0).cos(), (theta / 2.0).sin());
-    let neg = ComplexF64::new((theta / 2.0).cos(), -(theta / 2.0).sin());
+    let pos = ComplexF64::new(dmath::cos(theta / 2.0), dmath::sin(theta / 2.0));
+    let neg = ComplexF64::new(dmath::cos(theta / 2.0), -dmath::sin(theta / 2.0));
     [[neg, ComplexF64::ZERO], [ComplexF64::ZERO, pos]]
 }
 

@@ -39,6 +39,7 @@
 //! [`BinnedAccumulatorF64`]: crate::accumulator::BinnedAccumulatorF64
 //! [`tensor_simd`]: crate::tensor_simd
 
+use cjc_repro::dmath::DetMath;
 use cjc_repro::Rng;
 
 use crate::accumulator::{binned_sum_f64, BinnedScratchF64};
@@ -101,6 +102,27 @@ impl Tensor {
         shape.iter().product()
     }
 
+    /// Element count of an untrusted `shape`, or `None` if the shape cannot
+    /// be represented: the product of its nonzero dimensions overflows
+    /// `usize`. That bound also covers every stride (`compute_strides`
+    /// multiplies suffixes of the shape), so a shape accepted here can be
+    /// stored without overflow even when it contains a zero dimension.
+    ///
+    /// The fallible constructors use this instead of `shape_numel`, whose
+    /// plain product panics on overflow in debug builds and wraps in release.
+    fn checked_shape_numel(shape: &[usize]) -> Option<usize> {
+        let mut nonzero_product = 1usize;
+        let mut has_zero = false;
+        for &d in shape {
+            if d == 0 {
+                has_zero = true;
+            } else {
+                nonzero_product = nonzero_product.checked_mul(d)?;
+            }
+        }
+        Some(if has_zero { 0 } else { nonzero_product })
+    }
+
     /// Create a tensor filled with zeros.
     pub fn zeros(shape: &[usize]) -> Self {
         let numel = Self::shape_numel(shape);
@@ -139,7 +161,11 @@ impl Tensor {
     /// Create a tensor from raw data and a shape. Returns an error if the
     /// number of elements does not match the shape.
     pub fn from_vec(data: Vec<f64>, shape: &[usize]) -> Result<Self, RuntimeError> {
-        let numel = Self::shape_numel(shape);
+        // An unrepresentable shape can never match a real buffer.
+        let numel = Self::checked_shape_numel(shape).ok_or(RuntimeError::ShapeMismatch {
+            expected: usize::MAX,
+            got: data.len(),
+        })?;
         if data.len() != numel {
             return Err(RuntimeError::ShapeMismatch {
                 expected: numel,
@@ -344,7 +370,10 @@ impl Tensor {
     /// Reshape to `new_shape`. The new shape must have the same total number
     /// of elements. The returned tensor **shares** the underlying buffer.
     pub fn reshape(&self, new_shape: &[usize]) -> Result<Tensor, RuntimeError> {
-        let new_numel = Self::shape_numel(new_shape);
+        let new_numel = Self::checked_shape_numel(new_shape).ok_or(RuntimeError::ShapeMismatch {
+            expected: self.len(),
+            got: usize::MAX,
+        })?;
         if new_numel != self.len() {
             return Err(RuntimeError::ShapeMismatch {
                 expected: self.len(),
@@ -626,7 +655,7 @@ impl Tensor {
 
     /// Element-wise power: `a^b`.
     pub fn elem_pow(&self, other: &Tensor) -> Result<Tensor, RuntimeError> {
-        self.elementwise_binop(other, |a, b| a.powf(b))
+        self.elementwise_binop(other, |a, b| a.det_powf(b))
     }
 
     /// Element-wise minimum.
@@ -641,12 +670,12 @@ impl Tensor {
 
     /// Element-wise atan2(self, other).
     pub fn elem_atan2(&self, other: &Tensor) -> Result<Tensor, RuntimeError> {
-        self.elementwise_binop(other, |a, b| a.atan2(b))
+        self.elementwise_binop(other, |a, b| a.det_atan2(b))
     }
 
     /// Element-wise hypot(self, other).
     pub fn elem_hypot(&self, other: &Tensor) -> Result<Tensor, RuntimeError> {
-        self.elementwise_binop(other, |a, b| a.hypot(b))
+        self.elementwise_binop(other, |a, b| a.det_hypot(b))
     }
 
     /// Apply a unary function to every element, returning a new contiguous tensor.
@@ -1242,7 +1271,7 @@ impl Tensor {
             let mut sum = 0.0f64;
             let mut comp = 0.0f64; // Kahan compensation
             for i in 0..n {
-                let e = (slice[i] - max_val).exp();
+                let e = (slice[i] - max_val).det_exp();
                 exp_vals[i] = e;
                 // Kahan summation for the denominator
                 let y = e - comp;
@@ -1359,12 +1388,12 @@ impl Tensor {
 
     /// Sigmoid activation: 1 / (1 + exp(-x)) element-wise.
     pub fn sigmoid(&self) -> Tensor {
-        self.map_elementwise(|x| 1.0 / (1.0 + (-x).exp()))
+        self.map_elementwise(|x| 1.0 / (1.0 + (-x).det_exp()))
     }
 
     /// Tanh activation element-wise.
     pub fn tanh_activation(&self) -> Tensor {
-        self.map_elementwise(|x| x.tanh())
+        self.map_elementwise(|x| x.det_tanh())
     }
 
     /// Leaky ReLU activation: max(alpha*x, x) element-wise.
@@ -1375,7 +1404,7 @@ impl Tensor {
     /// SiLU (Swish) activation: x * sigmoid(x) element-wise.
     pub fn silu(&self) -> Tensor {
         let data = self.to_vec();
-        let result: Vec<f64> = data.iter().map(|&x| x / (1.0 + (-x).exp())).collect();
+        let result: Vec<f64> = data.iter().map(|&x| x / (1.0 + (-x).det_exp())).collect();
         Tensor::from_vec(result, &self.shape).unwrap()
     }
 
@@ -1383,8 +1412,8 @@ impl Tensor {
     pub fn mish(&self) -> Tensor {
         let data = self.to_vec();
         let result: Vec<f64> = data.iter().map(|&x| {
-            let sp = (1.0 + x.exp()).ln();
-            x * sp.tanh()
+            let sp = (1.0 + x.det_exp()).det_ln();
+            x * sp.det_tanh()
         }).collect();
         Tensor::from_vec(result, &self.shape).unwrap()
     }
@@ -1568,7 +1597,7 @@ impl Tensor {
         let sqrt_2_over_pi = (2.0_f64 / std::f64::consts::PI).sqrt();
         let result: Vec<f64> = data.iter().map(|&x| {
             let inner = sqrt_2_over_pi * (x + 0.044715 * x * x * x);
-            0.5 * x * (1.0 + inner.tanh())
+            0.5 * x * (1.0 + inner.det_tanh())
         }).collect();
         Tensor::from_vec(result, &self.shape).unwrap()
     }
@@ -1935,10 +1964,14 @@ impl Tensor {
     /// The returned tensor **owns** its buffer (copied from the raw bytes)
     /// but performs exactly one allocation for the data vector.
     pub fn from_bytes(bytes: &[u8], shape: &[usize], dtype: &str) -> Result<Tensor, RuntimeError> {
-        let numel = Self::shape_numel(shape);
+        let overflow = RuntimeError::ShapeMismatch {
+            expected: usize::MAX,
+            got: bytes.len(),
+        };
+        let numel = Self::checked_shape_numel(shape).ok_or(overflow.clone())?;
         match dtype {
             "f64" => {
-                let expected = numel * 8;
+                let expected = numel.checked_mul(8).ok_or(overflow.clone())?;
                 if bytes.len() != expected {
                     return Err(RuntimeError::ShapeMismatch {
                         expected,
@@ -1960,7 +1993,7 @@ impl Tensor {
                 })
             }
             "f32" => {
-                let expected = numel * 4;
+                let expected = numel.checked_mul(4).ok_or(overflow)?;
                 if bytes.len() != expected {
                     return Err(RuntimeError::ShapeMismatch {
                         expected,

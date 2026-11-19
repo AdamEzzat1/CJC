@@ -45,6 +45,7 @@
 //! - All `EnergyComponents` derivation uses fixed scaling factors from
 //!   [`EnergyComponentsConfig`] — no wall-clock, no RNG.
 
+use cjc_repro::dmath::DetMath;
 use std::collections::BTreeMap;
 
 use cjc_cana::cost_model::CostModel;
@@ -347,7 +348,7 @@ fn confidence_exp_safe(confidence: f64, exp: f64) -> f64 {
     if c == 0.0 {
         return 0.0;
     }
-    c.powf(exp)
+    c.det_powf(exp)
 }
 
 // ---------------------------------------------------------------------------

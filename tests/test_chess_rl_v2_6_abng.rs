@@ -165,6 +165,8 @@ fn v2_6_value_head_byte_identical_after_replay() {
     rollout_v2_6(&mut g);
     let phi: Vec<f64> = synth_chess_features(V2_6_GRAPH_SEED, 7).iter().take(4).copied().collect();
     let pre = g.blr_predict(0, &phi).unwrap();
+    // R0-3 contract: flush mid-interval BLR witnesses before serialize.
+    g.checkpoint_blr();
     let blob = serialize(&g);
     let g2 = replay(&blob).unwrap();
     let post = g2.blr_predict(0, &phi).unwrap();
@@ -293,8 +295,22 @@ fn v2_6_chain_head_canary_locked() {
     // you change the rollout, codebook, leaf head, BLR prior, or
     // v12 layout. The companion v2.5 weight hash on master is
     // 9.790915694115341 (different topology, different math).
+    //
+    // Re-locked at ABNG 0.9.5 R0/R1 (verified by probing each commit):
+    //   * 08a4a6b  O(d²) rank-1 Cholesky update — the per-row
+    //              BlrUpdated witness is the BLR state_hash, which
+    //              shifted (see the state_hash canary below).
+    //   * 7bef0c1  R0-3 periodic BLR audit checkpoints — the 16 n=1
+    //              blr_update rows are all mid-interval (< 64), so each
+    //              BlrUpdated now carries the BLR_INTERMEDIATE_WITNESS
+    //              zero sentinel instead of the full state_hash.
+    // 614b7d7 / f678997 leave this head unchanged (sentinel witnesses
+    // don't depend on the BLR arithmetic). The rollout is NOT flushed
+    // with checkpoint_blr here; the head pins the raw training trace.
+    // Pre-R0/R1 hex:
+    // `27d547b8f721b6631e3cbbe5fc4de560c6f09e6cc93eaf6c9e1bf36a3db6847b`.
     const CANARY_HEX: &str =
-        "27d547b8f721b6631e3cbbe5fc4de560c6f09e6cc93eaf6c9e1bf36a3db6847b";
+        "b0dff576cacdeb2d24b959a3c4fb1522c6abe8645663bb8e229a1ba5031852aa";
     assert_eq!(
         actual_hex, CANARY_HEX,
         "v2.6 chess RL chain_head canary mismatch — see comment"
@@ -325,8 +341,18 @@ fn v2_6_blr_state_hash_canary_locked() {
     // Locked at Phase 0.5 ship — recompute and update if BLR
     // conjugate update arithmetic changes (independent of chain
     // layout — this canary fires only on numerical changes).
+    //
+    // Re-locked at ABNG 0.9.5 R0/R1 (verified by probing each commit) —
+    // two intentional, documented n=1 BLR arithmetic changes:
+    //   * 08a4a6b  O(d²) rank-1 Cholesky update: `mean` / `b` are solved
+    //              from the rank-1-updated factor (same Λ, different
+    //              rounding) → `39b886c0…`.
+    //   * 614b7d7  R1-1 lane-parallel x8 Kahan in `update_rank1`
+    //              reorders the d² reduction → current hex.
+    // Still bit-deterministic across runs. Pre-R0/R1 hex:
+    // `869b32bdf937d27ec032b789980583fa1bf5871c528a7ee1f26d1d40fb6cfabc`.
     const CANARY_HEX: &str =
-        "869b32bdf937d27ec032b789980583fa1bf5871c528a7ee1f26d1d40fb6cfabc";
+        "40fd993bf978be816064cf5d6f9a48c9979df4e73f00d97b23b475756704bb9a";
     assert_eq!(
         actual, CANARY_HEX,
         "v2.6 chess RL BLR state_hash canary mismatch — see comment"
@@ -346,6 +372,8 @@ fn v2_6_audit_chain_verifies_post_rollout() {
 fn v2_6_smart_replay_byte_identical_to_naive() {
     let mut g = build_v2_6_graph();
     rollout_v2_6(&mut g);
+    // R0-3 contract: flush mid-interval BLR witnesses before serialize.
+    g.checkpoint_blr();
     let blob = serialize(&g);
     let g_naive = replay(&blob).unwrap();
     let g_smart = smart_replay(&blob).unwrap();

@@ -20,17 +20,16 @@
 
 use std::path::PathBuf;
 
-// NOTE on coverage: the original three quantum demos and three PIML demos
-// were already exercised by this file's first revision. A second tier of
-// quantum demos (`04_ghz_n_qubits.cjcl`, `05_h2_vqe_sweep.cjcl`,
-// `06_zne_richardson.cjcl`) ships in the same folder and is verified out-
-// of-band via `cjcl parity` (all three return Verdict: IDENTICAL); they are
-// intentionally not re-listed here because that keeps this file's
-// dependency closure minimal (cjc-parser + cjc-eval + cjc-mir-exec only).
+// NOTE on coverage: all six quantum demos are gated here. Demos 04-06 were
+// previously "verified out-of-band via `cjcl parity`" only; they now run in CI
+// with the same byte-equal / determinism / PASS-only contracts.
 const DEMOS: &[&str] = &[
     "examples/quantum_simulations/01_single_qubit_gates.cjcl",
     "examples/quantum_simulations/02_bell_state_z_expectation.cjcl",
     "examples/quantum_simulations/03_ry_rotation_sweep.cjcl",
+    "examples/quantum_simulations/04_ghz_n_qubits.cjcl",
+    "examples/quantum_simulations/05_h2_vqe_sweep.cjcl",
+    "examples/quantum_simulations/06_zne_richardson.cjcl",
     "examples/physics_informed_learning/01_harmonic_oscillator_residual.cjcl",
     "examples/physics_informed_learning/02_heat_1d_analytic_residual.cjcl",
     "examples/physics_informed_learning/03_grad_graph_one_step_descent.cjcl",

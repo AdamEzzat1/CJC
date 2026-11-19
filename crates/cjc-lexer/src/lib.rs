@@ -583,6 +583,31 @@ impl<'a> Lexer<'a> {
         ch
     }
 
+    /// Complete the character whose first byte `first` was just returned by
+    /// `advance()`. ASCII is returned as-is; for a multi-byte UTF-8 lead byte
+    /// the remaining bytes are consumed and the full `char` is returned.
+    ///
+    /// Invariant: `pos` sits on a UTF-8 char boundary whenever a token starts.
+    /// Byte-wise `advance()` alone breaks it on non-ASCII input, and slicing
+    /// `source` at a non-boundary panics.
+    fn finish_char(&mut self, first: u8) -> char {
+        if first.is_ascii() {
+            return first as char;
+        }
+        let start = self.pos - 1;
+        let c = self.source[start..].chars().next().unwrap_or(char::REPLACEMENT_CHARACTER);
+        self.pos = start + c.len_utf8();
+        c
+    }
+
+    /// Move `pos` forward to the next UTF-8 char boundary (no-op if already on one).
+    /// Used by fixed-width byte paths (e.g. `\xNN`) that may stop mid-character.
+    fn realign_to_char_boundary(&mut self) {
+        while self.pos < self.bytes.len() && !self.source.is_char_boundary(self.pos) {
+            self.pos += 1;
+        }
+    }
+
     fn skip_whitespace_and_comments(&mut self) {
         loop {
             // Skip whitespace
@@ -914,9 +939,14 @@ impl<'a> Lexer<'a> {
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.lex_ident(start),
 
             _ => {
+                // `start` is always a char boundary, but `advance()` consumed
+                // only one byte. For a multi-byte UTF-8 character, consume the
+                // rest of it so `pos` stays on a boundary (slicing `source`
+                // mid-character panics) and the diagnostic names the real char.
+                let c = self.finish_char(ch);
                 self.diagnostics.emit(Diagnostic::error(
                     "E0002",
-                    format!("unexpected character `{}`", ch as char),
+                    format!("unexpected character `{}`", c),
                     Span::new(start, self.pos),
                 ));
                 Token::new(
@@ -963,19 +993,21 @@ impl<'a> Lexer<'a> {
                         b'"' => value.push('"'),
                         b'0' => value.push('\0'),
                         _ => {
+                            let esc_start = self.pos - 1;
+                            let c = self.finish_char(esc);
                             self.diagnostics.emit(
                                 Diagnostic::error(
                                     "E0004",
-                                    format!("unknown escape sequence `\\{}`", esc as char),
-                                    Span::new(self.pos - 2, self.pos),
+                                    format!("unknown escape sequence `\\{}`", c),
+                                    Span::new(esc_start - 1, self.pos),
                                 )
                                 .with_hint("valid escapes: \\n, \\t, \\r, \\\\, \\\", \\0"),
                             );
-                            value.push(esc as char);
+                            value.push(c);
                         }
                     }
                 }
-                _ => value.push(ch as char),
+                _ => value.push(self.finish_char(ch)),
             }
         }
         Token::new(TokenKind::StringLit, Span::new(start, self.pos), value)
@@ -1007,7 +1039,7 @@ impl<'a> Lexer<'a> {
                     }
                     let esc = self.advance();
                     raw.push('\\');
-                    raw.push(esc as char);
+                    raw.push(self.finish_char(esc));
                 }
                 b'{' => {
                     // `{{` is an escaped literal `{`
@@ -1021,7 +1053,7 @@ impl<'a> Lexer<'a> {
                         let mut depth = 1usize;
                         while self.pos < self.bytes.len() && depth > 0 {
                             let inner = self.advance();
-                            raw.push(inner as char);
+                            raw.push(self.finish_char(inner));
                             if inner == b'{' {
                                 depth += 1;
                             } else if inner == b'}' {
@@ -1044,7 +1076,7 @@ impl<'a> Lexer<'a> {
                         raw.push('}');
                     }
                 }
-                _ => raw.push(ch as char),
+                _ => raw.push(self.finish_char(ch)),
             }
         }
         Token::new(TokenKind::FStringLit, Span::new(start, self.pos), raw)
@@ -1186,11 +1218,13 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 _ => {
+                    let esc_start = self.pos - 1;
+                    let c = self.finish_char(esc);
                     self.diagnostics.emit(
                         Diagnostic::error(
                             "E0004",
-                            format!("unknown escape `\\{}` in byte char literal", esc as char),
-                            Span::new(self.pos - 2, self.pos),
+                            format!("unknown escape `\\{}` in byte char literal", c),
+                            Span::new(esc_start - 1, self.pos),
                         )
                         .with_hint("valid escapes: \\n, \\t, \\r, \\\\, \\', \\0, \\xNN"),
                     );
@@ -1198,8 +1232,22 @@ impl<'a> Lexer<'a> {
                 }
             }
         } else {
-            self.advance()
+            let b = self.advance();
+            if !b.is_ascii() {
+                let c = self.finish_char(b);
+                self.diagnostics.emit(
+                    Diagnostic::error(
+                        "E0004",
+                        format!("non-ASCII character `{}` in byte char literal", c),
+                        Span::new(start, self.pos),
+                    )
+                    .with_hint("use a `\\xNN` escape for bytes above 0x7F"),
+                );
+            }
+            b
         };
+        // A `\xNN` escape reads two raw bytes and may stop mid-character.
+        self.realign_to_char_boundary();
 
         // Expect closing '
         if self.pos < self.bytes.len() && self.peek() == b'\'' {
@@ -1257,7 +1305,9 @@ impl<'a> Lexer<'a> {
                     value.push('#');
                 }
             } else {
-                value.push(ch as char);
+                // Text holds the source verbatim; the parser takes a raw byte
+                // string's bytes via `.bytes()`, so UTF-8 is preserved as-is.
+                value.push(self.finish_char(ch));
             }
         }
         let kind = if is_byte {
@@ -1294,7 +1344,7 @@ impl<'a> Lexer<'a> {
                     pattern.push('\\');
                     if self.pos < self.bytes.len() {
                         let esc = self.advance();
-                        pattern.push(esc as char);
+                        pattern.push(self.finish_char(esc));
                     } else {
                         self.diagnostics.emit(Diagnostic::error(
                             "E0011",
@@ -1318,7 +1368,7 @@ impl<'a> Lexer<'a> {
                     let text = format!("/{}", pattern);
                     return Token::new(TokenKind::Error, Span::new(start, self.pos), text);
                 }
-                _ => pattern.push(ch as char),
+                _ => pattern.push(self.finish_char(ch)),
             }
         }
         // Parse flags after closing /
@@ -1755,6 +1805,63 @@ mod tests {
                 TokenKind::Eof,
             ]
         );
+    }
+
+    /// Regression (found by `fuzz_lexer`): an unexpected multi-byte UTF-8
+    /// character used to leave `pos` mid-character and panic when slicing.
+    #[test]
+    fn test_unexpected_multibyte_char_is_one_error_token() {
+        let (tokens, diags) = Lexer::new("aʄ1 즉 \u{86}").tokenize();
+        assert!(diags.has_errors());
+        let errors: Vec<&Token> = tokens.iter().filter(|t| t.kind == TokenKind::Error).collect();
+        let texts: Vec<&str> = errors.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, vec!["ʄ", "즉", "\u{86}"]);
+        assert_eq!((errors[0].span.start, errors[0].span.end), (1, 3));
+        // Lexing continues past the bad char: `1` is still an int literal.
+        assert!(tokens.iter().any(|t| t.kind == TokenKind::IntLit && t.text == "1"));
+    }
+
+    /// Non-ASCII text inside literals must survive lexing verbatim (it used
+    /// to be pushed one byte per `char`, turning "é" into "Ã©").
+    #[test]
+    fn test_non_ascii_in_string_literals_preserved() {
+        let cases: &[(&str, TokenKind, &str)] = &[
+            ("\"héllo 日本 🦀\"", TokenKind::StringLit, "héllo 日本 🦀"),
+            ("f\"é{x}ü\"", TokenKind::FStringLit, "é{x}ü"),
+            ("f\"{\"日\"}\"", TokenKind::FStringLit, "{\"日\"}"),
+            ("r\"日本\"", TokenKind::RawStringLit, "日本"),
+            ("r#\"é\"#", TokenKind::RawStringLit, "é"),
+            ("br\"é\"", TokenKind::RawByteStringLit, "é"),
+            ("/café/i", TokenKind::RegexLit, "café\0i"),
+            ("/\\é/", TokenKind::RegexLit, "\\é"),
+        ];
+        for &(src, kind, text) in cases {
+            let (tokens, diags) = Lexer::new(src).tokenize();
+            assert!(!diags.has_errors(), "unexpected errors lexing {src:?}");
+            assert_eq!(tokens[0].kind, kind, "kind for {src:?}");
+            assert_eq!(tokens[0].text, text, "text for {src:?}");
+        }
+    }
+
+    /// Unknown escapes followed by a multi-byte char keep the whole char.
+    #[test]
+    fn test_unknown_escape_non_ascii() {
+        let (tokens, diags) = Lexer::new("\"a\\éb\"").tokenize();
+        assert!(diags.has_errors());
+        assert_eq!(tokens[0].kind, TokenKind::StringLit);
+        assert_eq!(tokens[0].text, "aéb");
+    }
+
+    /// Byte char literals that stop mid-character (non-ASCII body, or a
+    /// `\xNN` escape eating half a char) must not leave `pos` mid-char:
+    /// the next token would slice `source` off a char boundary and panic.
+    #[test]
+    fn test_byte_char_non_ascii_does_not_panic() {
+        for src in ["b'é'", "b'é", "b'\\x즉'", "b'\\é' x", "b'즉' 1"] {
+            let (tokens, diags) = Lexer::new(src).tokenize();
+            assert!(diags.has_errors(), "expected an error for {src:?}");
+            assert_eq!(tokens.last().unwrap().kind, TokenKind::Eof);
+        }
     }
 
     #[test]

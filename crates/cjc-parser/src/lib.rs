@@ -989,8 +989,11 @@ impl Parser {
                 literal.clear();
                 i = j; // skip past the `}`
             } else {
-                literal.push(bytes[i] as char);
-                i += 1;
+                // Copy up to the next `{` as one slice. `{` is ASCII, so the
+                // cut never splits a multi-byte UTF-8 character.
+                let next = raw[i..].find('{').map_or(raw.len(), |k| i + k);
+                literal.push_str(&raw[i..next]);
+                i = next;
             }
         }
 

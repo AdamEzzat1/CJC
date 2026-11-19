@@ -1,21 +1,35 @@
 //! CJC Quantum — Deterministic Quantum Circuit Simulator
 //!
-//! Classical simulation of quantum circuits using statevector representation.
-//! All operations are deterministic: same seed = bit-identical measurement outcomes.
+//! Classical simulation of quantum circuits: dense statevector, MPS,
+//! stabilizer (Clifford), and density-matrix backends, plus VQE, QAOA, QML,
+//! QEC, fermion/Trotter, and zero-noise extrapolation on top of them.
 //!
-//! # Determinism Guarantees
+//! # Determinism
+//!
+//! Same inputs and seed give bit-identical results, across runs and across
+//! operating systems (Linux, Windows, macOS):
 //!
 //! - Amplitude accumulations use Kahan summation
 //! - Complex multiplication uses fixed-sequence (no FMA)
 //! - Measurement sampling via SplitMix64 with explicit seed threading
 //! - Gate application processes basis states in ascending index order
 //! - All collections use deterministic ordering (Vec, not HashMap)
+//! - `sin`, `cos`, `exp`, `ln`, and powers come from `cjc_repro::dmath`, never
+//!   the platform libm, which differs between operating systems (ADR-0046)
+//!
+//! Evidence: `tests/cross_platform_golden.rs` hashes the bits of every
+//! transcendental-dependent output and runs in the Linux/Windows/macOS CI
+//! matrix. Scope: an angle computed in `.cjcl` with the `cjc-runtime` math
+//! builtins (`sin`, `exp`, …) still uses the platform libm *before* it reaches
+//! this crate.
 //!
 //! # Limitations
 //!
-//! - Classical simulation: ~25-30 qubits max (2^N memory scaling)
-//! - No noise model (pure unitary evolution only)
-//! - No hardware backend (simulation only)
+//! - Dense statevector: at most 26 qubits from `.cjcl` (2^N memory);
+//!   density matrix: at most 14 (4^N)
+//! - Noise: depolarizing, dephasing, and amplitude damping on the density
+//!   backend only; no noisy trajectories on the statevector backend
+//! - No hardware backend (classical simulation only, by design)
 
 pub mod adjoint;
 pub mod circuit;
@@ -24,11 +38,13 @@ pub mod dispatch;
 pub mod dmrg;
 pub mod fermion;
 pub mod gates;
+pub mod kernels;
 pub mod measure;
 pub mod mitigation;
 pub mod mps;
 pub mod pure;
 pub mod qaoa;
+pub mod qasm;
 pub mod qec;
 pub mod qml;
 pub mod simd_kernel;

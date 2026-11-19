@@ -34,6 +34,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+pub mod resolve;
+pub use resolve::{explain_undefined, resolve_modules, ResolvedModules};
+
 // ---------------------------------------------------------------------------
 // Module identity
 // ---------------------------------------------------------------------------
@@ -470,7 +473,20 @@ pub fn build_module_graph(entry_path: &Path) -> Result<ModuleGraph, ModuleError>
                 // Determine if this is a module import or symbol import.
                 // Convention: if the last segment starts with uppercase, it's a symbol.
                 // Otherwise treat the whole path as a module reference.
-                let (module_path, symbol) = classify_import(&path_segments);
+                let (mut module_path, mut symbol) = classify_import(&path_segments);
+
+                // `import m.f` with a lowercase last segment is classified as
+                // the module `m/f`. If no such file exists, it is the symbol
+                // `f` of module `m` (see `classify_import`).
+                if symbol.is_none()
+                    && module_path.len() > 1
+                    && resolve_file(&root, &module_path).is_err()
+                {
+                    let parent = module_path[..module_path.len() - 1].to_vec();
+                    if resolve_file(&root, &parent).is_ok() {
+                        symbol = module_path.pop();
+                    }
+                }
 
                 // Resolve the file for the module portion
                 let resolved_module = match resolve_file(&root, &module_path) {
@@ -545,7 +561,7 @@ fn classify_import(path: &[String]) -> (Vec<String>, Option<String>) {
     }
 
     // Try the full path as a module first; if that fails during resolution,
-    // the caller can try (all_but_last, last) as (module, symbol).
+    // `build_module_graph` tries (all_but_last, last) as (module, symbol).
     // For graph building, we assume the full path is the module to check.
     // We'll also store the last segment as a potential symbol.
     let last = &path[path.len() - 1];
@@ -568,15 +584,25 @@ fn classify_import(path: &[String]) -> (Vec<String>, Option<String>) {
 
 /// Merge multiple module ASTs into a single combined MIR program.
 ///
-/// Processes modules in topological order (dependencies first). Symbols
-/// from non-entry modules are prefixed with `module_path::` to avoid
-/// collisions.
+/// Resolves names first ([`resolve_modules`]), then lowers each module and
+/// concatenates the functions. Resolution has already given every
+/// top-level function its qualified name (`module::name`) and rewritten
+/// every reference to it, so no aliases are needed: a private function is
+/// reachable only from its own module, and a builtin is never shadowed by
+/// another module's function.
 ///
 /// Returns a merged `MirProgram` ready for execution.
 pub fn merge_programs(graph: &ModuleGraph) -> Result<cjc_mir::MirProgram, ModuleError> {
-    let order = graph.topological_order()?;
+    let resolved = resolve_modules(graph)?;
+    merge_resolved(graph, &resolved)
+}
 
-    // We'll collect all HIR items, prefixing non-entry module symbols
+/// [`merge_programs`] for an already-resolved graph, for callers that also
+/// need [`ResolvedModules::private_hints`].
+pub fn merge_resolved(
+    graph: &ModuleGraph,
+    resolved: &ResolvedModules,
+) -> Result<cjc_mir::MirProgram, ModuleError> {
     let mut all_functions: Vec<cjc_mir::MirFunction> = Vec::new();
     let mut all_struct_defs: Vec<cjc_mir::MirStructDef> = Vec::new();
     let mut all_enum_defs: Vec<cjc_mir::MirEnumDef> = Vec::new();
@@ -588,16 +614,11 @@ pub fn merge_programs(graph: &ModuleGraph) -> Result<cjc_mir::MirProgram, Module
     // Per-module: lower AST → HIR → MIR, then merge
     let mut fn_id_counter: u32 = 0;
 
-    for mod_id in &order {
+    for (mod_id, ast) in &resolved.modules {
         let module = graph
             .modules
             .get(mod_id)
-            .expect("module in topo order must exist in graph");
-
-        let ast = match &module.ast {
-            Some(ast) => ast,
-            None => continue,
-        };
+            .expect("resolved module must exist in graph");
 
         // Type-check (with filename for cross-file diagnostics)
         let filename = module.file_path.display().to_string();
@@ -620,7 +641,10 @@ pub fn merge_programs(graph: &ModuleGraph) -> Result<cjc_mir::MirProgram, Module
         for mut func in mir.functions {
             let original_name = func.name.clone();
 
-            if !module.is_entry && original_name != "__main" {
+            // Top-level functions already carry their qualified name from
+            // resolution; other lowered functions (impl methods) are
+            // prefixed here as before.
+            if !module.is_entry && original_name != "__main" && !original_name.starts_with(&prefix) {
                 func.name = format!("{}{}", prefix, original_name);
             }
 
@@ -671,43 +695,6 @@ pub fn merge_programs(graph: &ModuleGraph) -> Result<cjc_mir::MirProgram, Module
                 edef.name = format!("{}{}", prefix, edef.name);
             }
             all_enum_defs.push(edef);
-        }
-    }
-
-    // Create function aliases for imported symbols so the entry module
-    // can call them by their unmangled names (e.g., `double(x)` instead
-    // of `mathlib::double(x)`).
-    let entry_module = graph.modules.get(&graph.entry).expect("entry must exist");
-    for import in &entry_module.imports {
-        if let Some(resolved) = &import.resolved_module {
-            let prefix = resolved.symbol_prefix();
-            // For each function in the imported module, register an alias
-            // under the original (unprefixed) name if it doesn't conflict.
-            let imported_mod = graph.modules.get(resolved);
-            if let Some(imp_mod) = imported_mod {
-                if let Some(ast) = &imp_mod.ast {
-                    for decl in &ast.declarations {
-                        if let cjc_ast::DeclKind::Fn(f) = &decl.kind {
-                            // Alias all functions from imported modules.
-                            // Visibility enforcement is handled separately by check_visibility().
-                            let unprefixed = f.name.name.clone();
-                            let prefixed = format!("{}{}", prefix, unprefixed);
-                            // Only add alias if unprefixed name not already taken
-                            if !symbol_origins.contains_key(&unprefixed) {
-                                // Find the prefixed function and clone it with unprefixed name
-                                if let Some(orig) = all_functions.iter().find(|f| f.name == prefixed) {
-                                    let mut alias = orig.clone();
-                                    alias.name = unprefixed.clone();
-                                    alias.id = cjc_mir::MirFnId(fn_id_counter);
-                                    fn_id_counter += 1;
-                                    symbol_origins.insert(unprefixed, graph.entry.clone());
-                                    all_functions.push(alias);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -763,10 +750,16 @@ impl std::fmt::Display for VisibilityViolation {
     }
 }
 
-/// Check visibility constraints after merging.
+/// Check visibility constraints: `import m.Symbol` must name a `pub`
+/// symbol of `m`.
 ///
-/// For each import in the entry module, verify that the imported symbol
-/// is marked `pub` in the source module. Returns a list of violations.
+/// Uses of other modules' private functions by bare name need no check
+/// here: [`resolve_modules`] never resolves a bare name to another module's
+/// private function, so such a name is simply not in scope (it resolves to
+/// a builtin if there is one, else fails as undefined, with a note from
+/// [`explain_undefined`]).
+///
+/// Returns the violations in deterministic order.
 pub fn check_visibility(graph: &ModuleGraph) -> Vec<VisibilityViolation> {
     let mut violations = Vec::new();
 
@@ -820,17 +813,29 @@ pub fn check_visibility(graph: &ModuleGraph) -> Vec<VisibilityViolation> {
                         _ => {}
                     }
                 }
-            } else {
-                // Module-level import: check that at least one `pub` symbol exists.
-                // For module imports, only `pub` functions get aliased into the
-                // importing module. Private functions remain inaccessible.
-                // (This is enforced during alias creation, not here.)
             }
+            // Module-level imports (`import m`) expose only `m`'s `pub`
+            // functions; that is enforced by name resolution.
         }
         let _ = mod_id; // suppress unused warning
     }
 
     violations
+}
+
+/// [`check_visibility`] as a gate: `Err` with one violation per line if
+/// there are any. Both executors' multi-file entry points call this before
+/// running, so they reject the same programs with the same message.
+pub fn enforce_visibility(graph: &ModuleGraph) -> Result<(), String> {
+    let violations = check_visibility(graph);
+    if violations.is_empty() {
+        return Ok(());
+    }
+    Err(violations
+        .iter()
+        .map(|v| format!("visibility error: {}", v))
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1125,9 +1130,9 @@ mod tests {
     // -- Visibility enforcement tests --
 
     #[test]
-    fn test_visibility_pub_functions_aliased() {
+    fn test_merge_uses_qualified_names_without_aliases() {
         let dir = setup_test_dir(&[
-            ("main.cjcl", "import math\nlet x = 1;"),
+            ("main.cjcl", "import math\nlet x = add(1.0, 2.0);"),
             ("math.cjcl", "pub fn add(a: f64, b: f64) -> f64 { a + b }\nfn private_helper() -> f64 { 0.0 }"),
         ]);
         let entry = dir.path().join("main.cjcl");
@@ -1135,13 +1140,12 @@ mod tests {
         let merged = merge_programs(&graph).unwrap();
 
         let names: Vec<&str> = merged.functions.iter().map(|f| f.name.as_str()).collect();
-        // pub fn add should be aliased as both math::add and add
+        // Every module function appears once, under its qualified name;
+        // resolution rewrote main's call `add(..)` to `math::add(..)`.
         assert!(names.contains(&"math::add"), "expected math::add in {:?}", names);
-        assert!(names.contains(&"add"), "expected add alias in {:?}", names);
-        // private_helper should be prefixed and aliased (merge includes all;
-        // visibility enforcement is handled separately by check_visibility())
         assert!(names.contains(&"math::private_helper"), "expected math::private_helper in {:?}", names);
-        assert!(names.contains(&"private_helper"), "private_helper should be aliased (enforcement is separate): {:?}", names);
+        assert!(!names.contains(&"add"), "no unprefixed alias: {:?}", names);
+        assert!(!names.contains(&"private_helper"), "no unprefixed alias: {:?}", names);
     }
 
     #[test]

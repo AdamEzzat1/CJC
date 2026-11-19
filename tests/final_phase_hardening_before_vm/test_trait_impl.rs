@@ -2,25 +2,33 @@
 //!
 //! Verifies: parsing, HIR lowering, MIR lowering, eval dispatch, MIR-exec dispatch.
 
-fn eval(src: &str) -> cjc_runtime::Value {
+// Both helpers return printed output: a top-level expression statement
+// evaluates to Void, so programs report results with `print`.
+fn eval(src: &str) -> Vec<String> {
     let (program, diags) = cjc_parser::parse_source(src);
     assert!(!diags.has_errors(), "parse errors: {:?}", diags.diagnostics);
     let mut interp = cjc_eval::Interpreter::new(42);
-    interp.exec(&program).unwrap()
+    interp.exec(&program).unwrap();
+    interp.output.clone()
 }
 
-fn mir_exec(src: &str) -> cjc_runtime::Value {
+fn mir_exec(src: &str) -> Vec<String> {
     let (program, diags) = cjc_parser::parse_source(src);
     assert!(!diags.has_errors(), "parse errors: {:?}", diags.diagnostics);
-    let (val, _) = cjc_mir_exec::run_program_with_executor(&program, 42).unwrap();
-    val
+    let (_, executor) = cjc_mir_exec::run_program_with_executor(&program, 42).unwrap();
+    executor.output
+}
+
+fn printed_f64(out: &[String]) -> f64 {
+    assert_eq!(out.len(), 1, "expected one printed value, got {:?}", out);
+    out[0].trim().parse().unwrap_or_else(|_| panic!("not a float: {:?}", out))
 }
 
 #[test]
 fn test_trait_decl_parses() {
     let src = r#"
 trait Printable {
-    fn to_str(self: Any) -> str
+    fn to_str(self: Any) -> str;
 }
 let x = 1;
 "#;
@@ -38,15 +46,11 @@ impl Point {
 }
 let p = Point { x: 3.0, y: 4.0 };
 let m = p.magnitude();
-m
+print(m);
 "#;
     let result = eval(src);
-    match result {
-        cjc_runtime::Value::Float(v) => {
-            assert!((v - 5.0).abs() < 1e-10, "expected 5.0, got {}", v);
-        }
-        _ => panic!("expected Float, got {:?}", result),
-    }
+    let v = printed_f64(&result);
+    assert!((v - 5.0).abs() < 1e-10, "expected 5.0, got {}", v);
 }
 
 #[test]
@@ -60,22 +64,18 @@ impl Point {
 }
 let p = Point { x: 10.0, y: 20.0 };
 let s = p.sum_coords();
-s
+print(s);
 "#;
     let result = mir_exec(src);
-    match result {
-        cjc_runtime::Value::Float(v) => {
-            assert!((v - 30.0).abs() < 1e-10, "expected 30.0, got {}", v);
-        }
-        _ => panic!("expected Float, got {:?}", result),
-    }
+    let v = printed_f64(&result);
+    assert!((v - 30.0).abs() < 1e-10, "expected 30.0, got {}", v);
 }
 
 #[test]
 fn test_trait_conformance_check() {
     let src = r#"
 trait Addable {
-    fn add(self: Any, other: Any) -> Any
+    fn add(self: Any, other: Any) -> Any;
 }
 impl i64 : Addable {
     fn add(self: i64, other: i64) -> i64 { self + other }
@@ -101,13 +101,10 @@ impl Vec2 {
 }
 let a = Vec2 { x: 1.0, y: 2.0 };
 let b = Vec2 { x: 3.0, y: 4.0 };
-a.dot(b)
+print(a.dot(b));
 "#;
     let eval_result = eval(src);
     let mir_result = mir_exec(src);
-    assert_eq!(
-        format!("{}", eval_result),
-        format!("{}", mir_result),
-        "eval and MIR must agree"
-    );
+    assert!(!eval_result.is_empty(), "program printed nothing");
+    assert_eq!(eval_result, mir_result, "eval and MIR must agree");
 }

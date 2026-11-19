@@ -1,0 +1,9 @@
+dill==0.3.8
+numpy==2.2.6
+qiskit==2.5.2
+qiskit-aer==0.17.2
+rustworkx==0.18.1
+scipy==1.16.1
+stevedore==5.9.1
+stim==1.16.0
+sympy==1.14.0

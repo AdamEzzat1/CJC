@@ -33,6 +33,7 @@
 pub mod trace;
 pub use trace::{with_trace, TraceCollector};
 
+use cjc_repro::dmath::DetMath;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -719,6 +720,132 @@ impl MirExecutor {
         )))
     }
 
+    /// Mutable access to the scope-chain binding `assign(name, ..)` would write.
+    fn lookup_mut(&mut self, name: &str) -> Option<&mut Value> {
+        self.scopes.iter_mut().rev().find_map(|scope| scope.get_mut(name))
+    }
+
+    /// Mutable access to the binding that `exec_assign(target, ..)` writes,
+    /// for a bare-variable target: the frame slot for `VarLocal` (only
+    /// when a frame is active, since `exec_assign` never falls back to
+    /// the scope chain for `VarLocal`) and the scope chain for `Var`.
+    fn binding_mut(&mut self, target: &MirExprKind) -> Option<&mut Value> {
+        match target {
+            MirExprKind::Var(name) => self.lookup_mut(name),
+            MirExprKind::VarLocal { slot, .. } => {
+                if self.frame_stack.is_empty() {
+                    return None;
+                }
+                let idx = self.frame_base() + *slot as usize;
+                self.frame.get_mut(idx)
+            }
+            _ => None,
+        }
+    }
+
+    /// Option B / Phase F cost accounting for a builtin call: element-wise
+    /// FP work and Rc-buffer allocation. Every path that dispatches to a
+    /// builtin table runs this exactly once, so traces are the same
+    /// whether or not the call took the ADR-0048 move path.
+    fn trace_builtin_call(&mut self, name: &str, args: &[Value]) {
+        if self.trace_enabled {
+            let w = builtin_tensor_fp_work(name, args);
+            if w > 0 {
+                self.trace_fp_ops = self.trace_fp_ops.saturating_add(w);
+            }
+            // Phase F: builtin results that materialize Rc buffers.
+            let a = builtin_alloc_bytes(name, args);
+            if a > 0 {
+                self.trace_alloc_bytes = self.trace_alloc_bytes.saturating_add(a);
+            }
+        }
+    }
+
+    // -- Move on last use (ADR-0048) ------------------------------------------
+
+    /// Fast path for `x = f(..., x, ...)` where `f` is an owned-argument
+    /// builtin (`cjc_runtime::builtins::OWNED_ARG_BUILTINS`) and `x` is a
+    /// variable passed exactly once as a bare argument.
+    ///
+    /// Semantics are identical to `cjc-eval`'s `try_assign_move`. The
+    /// sibling arguments are evaluated left to right, then `x` is moved
+    /// out of its binding (leaving `Void`) into the argument vector so the
+    /// builtin's `Rc::make_mut` sees refcount 1 and mutates in place. On
+    /// success the result is written back to `x`; on failure the argument
+    /// is restored before the error propagates. No user code runs in
+    /// between, so the placeholder is unobservable.
+    ///
+    /// Binding resolution follows ADR-0024: the target and the argument
+    /// must be the same `VarLocal { slot }` (frame storage) or the same
+    /// `Var(name)` (scope chain). `binding_mut` returns exactly the storage
+    /// `exec_assign` writes. Captured variables inside a lifted closure
+    /// body are ordinary `Var` params of that body. Closure envs hold
+    /// their own snapshot (an extra refcount), so `make_mut` copies and the
+    /// closure never sees the mutation.
+    ///
+    /// Returns `None` (having evaluated nothing) when the pattern doesn't apply.
+    fn try_assign_move(&mut self, target: &MirExpr, value: &MirExpr) -> Option<MirExecResult> {
+        if !matches!(target.kind, MirExprKind::Var(_) | MirExprKind::VarLocal { .. }) {
+            return None;
+        }
+        let MirExprKind::Call { callee, args, .. } = &value.kind else { return None };
+        // Builtins are emitted as `Var(name)`; a `VarLocal` callee is a
+        // local binding, so it never reaches the builtin tables.
+        let MirExprKind::Var(fname) = &callee.kind else { return None };
+        // Must resolve to the shared builtin exactly as `dispatch_call`
+        // would: no user fn shadowing it, and (conservatively) no
+        // scope binding of the same name.
+        if !cjc_runtime::builtins::is_owned_arg_builtin(fname)
+            || self.functions.contains_key(fname.as_str())
+            || self.lookup(fname).is_some()
+        {
+            return None;
+        }
+        let same_binding = |arg: &MirExpr| match (&arg.kind, &target.kind) {
+            (MirExprKind::Var(a), MirExprKind::Var(t)) => a == t,
+            (MirExprKind::VarLocal { slot: a, .. }, MirExprKind::VarLocal { slot: t, .. }) => a == t,
+            _ => false,
+        };
+        let mut bare = args.iter().enumerate().filter(|(_, a)| same_binding(a));
+        let (pos, _) = bare.next()?;
+        if bare.next().is_some() || self.binding_mut(&target.kind).is_none() {
+            return None;
+        }
+
+        let mut vals: Vec<Value> = Vec::with_capacity(args.len());
+        for (i, arg) in args.iter().enumerate() {
+            if i == pos {
+                vals.push(Value::Void); // filled by the move below
+            } else {
+                match self.eval_expr(arg) {
+                    Ok(v) => vals.push(v),
+                    Err(e) => return Some(Err(e)), // binding untouched
+                }
+            }
+        }
+        let binding = self.binding_mut(&target.kind)?;
+        vals[pos] = std::mem::replace(binding, Value::Void);
+
+        self.trace_builtin_call(fname, &vals);
+        match cjc_runtime::builtins::dispatch_builtin_owned(fname, &mut vals) {
+            Ok(Some(result)) => {
+                let binding = self.binding_mut(&target.kind)?;
+                *binding = result;
+                Some(Ok(Value::Void))
+            }
+            outcome => {
+                // Restore before propagating so the binding is intact.
+                if let Some(binding) = self.binding_mut(&target.kind) {
+                    *binding = std::mem::replace(&mut vals[pos], Value::Void);
+                }
+                Some(Err(MirExecError::Runtime(match outcome {
+                    Err(msg) => msg,
+                    _ => format!("internal: owned-arg builtin `{fname}` was not dispatched"),
+                })))
+            }
+        }
+    }
+
     // -- Program execution --------------------------------------------------
 
     /// Execute a lowered [`MirProgram`].
@@ -793,12 +920,33 @@ impl MirExecutor {
         Ok(Value::Void)
     }
 
+    /// Execute a body that is NOT in tail position (see [`Self::exec_body_in`]).
     fn exec_body(&mut self, body: &MirBody) -> MirExecResult {
+        self.exec_body_in(body, false)
+    }
+
+    /// Execute a body. `tail` is true only when this body's value becomes the
+    /// enclosing function's return value: the function body itself, and —
+    /// recursively — the branches of an `if`/`match`/block that is in tail
+    /// position (as a result expression, or as the final statement of a
+    /// result-less tail body). Only then may a direct call in result position
+    /// be emitted as `TailCall` for the trampoline in `call_function`.
+    ///
+    /// A body nested anywhere else (a call argument, an operand, a loop body,
+    /// `__main`) must use `tail = false`: otherwise the `TailCall` signal
+    /// escapes that expression and the trampoline jumps to the callee in the
+    /// middle of evaluating the caller — a silently wrong result.
+    fn exec_body_in(&mut self, body: &MirBody, tail: bool) -> MirExecResult {
         let mut last = Value::Void;
-        for stmt in &body.stmts {
-            last = self.exec_stmt(stmt)?;
+        let n = body.stmts.len();
+        for (i, stmt) in body.stmts.iter().enumerate() {
+            let stmt_tail = tail && body.result.is_none() && i + 1 == n;
+            last = self.exec_stmt_in(stmt, stmt_tail)?;
         }
         if let Some(ref expr) = body.result {
+            if !tail {
+                return self.eval_expr(expr);
+            }
             // P1-2: Detect tail call in the result-expression position.
             // A body like `fn foo(n) { foo(n-1) }` lowers to a body with no
             // stmts and a result expr that is a direct call.  Emit TailCall so
@@ -826,20 +974,100 @@ impl MirExecutor {
                     }
                 }
             }
-            self.eval_expr(expr)
+            self.eval_expr_in_tail(expr)
         } else {
             Ok(last)
         }
     }
 
     fn exec_body_scoped(&mut self, body: &MirBody) -> MirExecResult {
+        self.exec_body_scoped_in(body, false)
+    }
+
+    fn exec_body_scoped_in(&mut self, body: &MirBody, tail: bool) -> MirExecResult {
         self.push_scope();
-        let result = self.exec_body(body);
+        let result = self.exec_body_in(body, tail);
         self.pop_scope();
         result
     }
 
+    /// Evaluate an expression in tail position: `if` / `match` / block
+    /// forward tail position to their branches; anything else is ordinary.
+    fn eval_expr_in_tail(&mut self, expr: &MirExpr) -> MirExecResult {
+        match &expr.kind {
+            MirExprKind::If { cond, then_body, else_body } => {
+                self.eval_if(cond, then_body, else_body.as_ref(), true)
+            }
+            MirExprKind::Match { scrutinee, arms } => self.eval_match(scrutinee, arms, true),
+            MirExprKind::Block(body) => self.exec_body_scoped_in(body, true),
+            _ => self.eval_expr(expr),
+        }
+    }
+
+    fn eval_if(
+        &mut self,
+        cond: &MirExpr,
+        then_body: &MirBody,
+        else_body: Option<&MirBody>,
+        tail: bool,
+    ) -> MirExecResult {
+        let cond_val = self.eval_expr(cond)?;
+        let cond_bool = match cond_val {
+            Value::Bool(b) => b,
+            other => {
+                return Err(MirExecError::Runtime(format!(
+                    "if condition must be Bool, got {}",
+                    other.type_name()
+                )));
+            }
+        };
+        if cond_bool {
+            self.exec_body_scoped_in(then_body, tail)
+        } else if let Some(else_b) = else_body {
+            self.exec_body_scoped_in(else_b, tail)
+        } else {
+            Ok(Value::Void)
+        }
+    }
+
+    fn eval_match(&mut self, scrutinee: &MirExpr, arms: &[MirMatchArm], tail: bool) -> MirExecResult {
+        let scrut_val = self.eval_expr(scrutinee)?;
+        for arm in arms {
+            if let Some(bindings) = self.match_pattern(&arm.pattern, &scrut_val) {
+                self.push_scope();
+                // Tier-0 perf (Stage 5a): same source-of-truth
+                // discipline as Let -- slot-carrying bindings
+                // route through the frame ONLY; slot-less
+                // bindings (none after Stage 4 inside fns, but
+                // the variant supports them defensively) route
+                // through the name chain ONLY.
+                for (name, slot, val) in bindings {
+                    match slot {
+                        Some(s) => {
+                            self.frame_set(s, val);
+                        }
+                        None => {
+                            self.define(&name, val);
+                        }
+                    }
+                }
+                let result = self.exec_body_in(&arm.body, tail);
+                self.pop_scope();
+                return result;
+            }
+        }
+        Err(MirExecError::Runtime(
+            "non-exhaustive match: no arm matched".to_string(),
+        ))
+    }
+
     fn exec_stmt(&mut self, stmt: &MirStmt) -> MirExecResult {
+        self.exec_stmt_in(stmt, false)
+    }
+
+    /// `tail`: this statement is the final statement of a result-less body in
+    /// tail position, so its value is the function's return value.
+    fn exec_stmt_in(&mut self, stmt: &MirStmt, tail: bool) -> MirExecResult {
         // Option B: count executed statements between trace events.
         // Single predictable branch on the uninstrumented path.
         if self.trace_enabled {
@@ -910,9 +1138,9 @@ impl MirExecutor {
                     self.trace_emit(cond_bool);
                 }
                 if cond_bool {
-                    self.exec_body_scoped(then_body)
+                    self.exec_body_scoped_in(then_body, tail)
                 } else if let Some(else_b) = else_body {
-                    self.exec_body_scoped(else_b)
+                    self.exec_body_scoped_in(else_b, tail)
                 } else {
                     Ok(Value::Void)
                 }
@@ -983,7 +1211,7 @@ impl MirExecutor {
             }
             MirStmt::Break => Err(MirExecError::Break),
             MirStmt::Continue => Err(MirExecError::Continue),
-            MirStmt::NoGcBlock(body) => self.exec_body_scoped(body),
+            MirStmt::NoGcBlock(body) => self.exec_body_scoped_in(body, tail),
         }
     }
 
@@ -1114,6 +1342,10 @@ impl MirExecutor {
             MirExprKind::Index { object, index } => self.eval_index(object, index),
             MirExprKind::MultiIndex { object, indices } => self.eval_multi_index(object, indices),
             MirExprKind::Assign { target, value } => {
+                // ADR-0048: `x = f(..., x, ...)` moves `x` into the call.
+                if let Some(result) = self.try_assign_move(target, value) {
+                    return result;
+                }
                 let val = self.eval_expr(value)?;
                 self.exec_assign(target, val)?;
                 Ok(Value::Void)
@@ -1208,55 +1440,8 @@ impl MirExecutor {
                 cond,
                 then_body,
                 else_body,
-            } => {
-                let cond_val = self.eval_expr(cond)?;
-                let cond_bool = match cond_val {
-                    Value::Bool(b) => b,
-                    other => {
-                        return Err(MirExecError::Runtime(format!(
-                            "if condition must be Bool, got {}",
-                            other.type_name()
-                        )));
-                    }
-                };
-                if cond_bool {
-                    self.exec_body_scoped(then_body)
-                } else if let Some(else_b) = else_body {
-                    self.exec_body_scoped(else_b)
-                } else {
-                    Ok(Value::Void)
-                }
-            }
-            MirExprKind::Match { scrutinee, arms } => {
-                let scrut_val = self.eval_expr(scrutinee)?;
-                for arm in arms {
-                    if let Some(bindings) = self.match_pattern(&arm.pattern, &scrut_val) {
-                        self.push_scope();
-                        // Tier-0 perf (Stage 5a): same source-of-truth
-                        // discipline as Let -- slot-carrying bindings
-                        // route through the frame ONLY; slot-less
-                        // bindings (none after Stage 4 inside fns, but
-                        // the variant supports them defensively) route
-                        // through the name chain ONLY.
-                        for (name, slot, val) in bindings {
-                            match slot {
-                                Some(s) => {
-                                    self.frame_set(s, val);
-                                }
-                                None => {
-                                    self.define(&name, val);
-                                }
-                            }
-                        }
-                        let result = self.exec_body(&arm.body);
-                        self.pop_scope();
-                        return result;
-                    }
-                }
-                Err(MirExecError::Runtime(
-                    "non-exhaustive match: no arm matched".to_string(),
-                ))
-            }
+            } => self.eval_if(cond, then_body, else_body.as_ref(), false),
+            MirExprKind::Match { scrutinee, arms } => self.eval_match(scrutinee, arms, false),
             MirExprKind::TupleLit(elems) => {
                 let mut vals = Vec::with_capacity(elems.len());
                 for e in elems {
@@ -1735,14 +1920,15 @@ impl MirExecutor {
                         "division by zero".to_string(),
                     ))
                 } else {
-                    Ok(Value::Int(a / b))
+                    // Wrapping, like `+ - *`: `i64::MIN / -1` would otherwise panic.
+                    Ok(Value::Int(a.wrapping_div(b)))
                 }
             }
             BinOp::Mod => {
                 if b == 0 {
                     Err(MirExecError::Runtime("modulo by zero".to_string()))
                 } else {
-                    Ok(Value::Int(a % b))
+                    Ok(Value::Int(a.wrapping_rem(b)))
                 }
             }
             BinOp::Eq => Ok(Value::Bool(a == b)),
@@ -1751,7 +1937,7 @@ impl MirExecutor {
             BinOp::Gt => Ok(Value::Bool(a > b)),
             BinOp::Le => Ok(Value::Bool(a <= b)),
             BinOp::Ge => Ok(Value::Bool(a >= b)),
-            BinOp::Pow => Ok(Value::Int((a as f64).powf(b as f64) as i64)),
+            BinOp::Pow => Ok(Value::Int((a as f64).det_powf(b as f64) as i64)),
             BinOp::BitAnd => Ok(Value::Int(a & b)),
             BinOp::BitOr => Ok(Value::Int(a | b)),
             BinOp::BitXor => Ok(Value::Int(a ^ b)),
@@ -1776,7 +1962,7 @@ impl MirExecutor {
             BinOp::Gt => Ok(Value::Bool(a > b)),
             BinOp::Le => Ok(Value::Bool(a <= b)),
             BinOp::Ge => Ok(Value::Bool(a >= b)),
-            BinOp::Pow => Ok(Value::Float(a.powf(b))),
+            BinOp::Pow => Ok(Value::Float(a.det_powf(b))),
             BinOp::And
             | BinOp::Or
             | BinOp::Match
@@ -1796,7 +1982,8 @@ impl MirExecutor {
     fn eval_unary(&mut self, op: UnaryOp, operand: &MirExpr) -> MirExecResult {
         let val = self.eval_expr(operand)?;
         match (op, &val) {
-            (UnaryOp::Neg, Value::Int(v)) => Ok(Value::Int(-v)),
+            // Wrapping, like binary `-`: `-i64::MIN` panics in debug builds.
+            (UnaryOp::Neg, Value::Int(v)) => Ok(Value::Int(v.wrapping_neg())),
             (UnaryOp::Neg, Value::Float(v)) => Ok(Value::Float(-v)),
             (UnaryOp::Neg, Value::Tensor(t)) => {
                 // Option B (Phase A1): element-wise FP negation.
@@ -2329,17 +2516,7 @@ impl MirExecutor {
         // function shadowing `matmul` must not be priced as a tensor
         // op) and before BOTH dispatch paths below (inline cache + slow
         // path), so each call is counted exactly once.
-        if self.trace_enabled {
-            let w = builtin_tensor_fp_work(name, &args);
-            if w > 0 {
-                self.trace_fp_ops = self.trace_fp_ops.saturating_add(w);
-            }
-            // Phase F: builtin results that materialize Rc buffers.
-            let a = builtin_alloc_bytes(name, &args);
-            if a > 0 {
-                self.trace_alloc_bytes = self.trace_alloc_bytes.saturating_add(a);
-            }
-        }
+        self.trace_builtin_call(name, &args);
 
         // Tier-0 inline cache: if we've seen this name resolve to a specific
         // satellite dispatcher before, jump straight there. Skips the slow
@@ -5861,7 +6038,7 @@ impl MirExecutor {
                 self.trace_emit(false);
             }
 
-            let result = match self.exec_body(&func.body) {
+            let result = match self.exec_body_in(&func.body, true) {
                 Ok(val) => val,
                 Err(MirExecError::Return(val)) => val,
                 Err(MirExecError::TailCall {
@@ -6806,14 +6983,27 @@ pub fn run_program_monomorphized_with_executor(
 pub fn run_program_with_modules(entry_path: &std::path::Path, seed: u64) -> MirExecResult {
     let graph = cjc_module::build_module_graph(entry_path)
         .map_err(|e| MirExecError::Runtime(format!("module error: {}", e)))?;
+    cjc_module::enforce_visibility(&graph).map_err(MirExecError::Runtime)?;
 
-    let mut mir = cjc_module::merge_programs(&graph)
+    let resolved = cjc_module::resolve_modules(&graph)
+        .map_err(|e| MirExecError::Runtime(format!("module error: {}", e)))?;
+    let mut mir = cjc_module::merge_resolved(&graph, &resolved)
         .map_err(|e| MirExecError::Runtime(format!("module merge error: {}", e)))?;
 
     cjc_mir::escape::annotate_program(&mut mir);
 
     let mut executor = MirExecutor::new(seed);
-    executor.exec(&mir)
+    executor.exec(&mir).map_err(|e| explain_module_error(e, &resolved))
+}
+
+/// Add [`cjc_module::explain_undefined`]'s note to a runtime error.
+fn explain_module_error(e: MirExecError, resolved: &cjc_module::ResolvedModules) -> MirExecError {
+    match e {
+        MirExecError::Runtime(m) => {
+            MirExecError::Runtime(cjc_module::explain_undefined(m, &resolved.private_hints))
+        }
+        other => other,
+    }
 }
 
 /// Run a multi-file CJC program and return the executor for inspection.
@@ -6823,14 +7013,19 @@ pub fn run_program_with_modules_executor(
 ) -> Result<(Value, MirExecutor), MirExecError> {
     let graph = cjc_module::build_module_graph(entry_path)
         .map_err(|e| MirExecError::Runtime(format!("module error: {}", e)))?;
+    cjc_module::enforce_visibility(&graph).map_err(MirExecError::Runtime)?;
 
-    let mut mir = cjc_module::merge_programs(&graph)
+    let resolved = cjc_module::resolve_modules(&graph)
+        .map_err(|e| MirExecError::Runtime(format!("module error: {}", e)))?;
+    let mut mir = cjc_module::merge_resolved(&graph, &resolved)
         .map_err(|e| MirExecError::Runtime(format!("module merge error: {}", e)))?;
 
     cjc_mir::escape::annotate_program(&mut mir);
 
     let mut executor = MirExecutor::new(seed);
-    let result = executor.exec(&mir)?;
+    let result = executor
+        .exec(&mir)
+        .map_err(|e| explain_module_error(e, &resolved))?;
     Ok((result, executor))
 }
 

@@ -17,6 +17,7 @@
 //! * `verify_chain()` — recompute every event's `new_hash` and confirm
 //!   the chain is consistent.
 
+use cjc_repro::dmath::DetMath;
 use std::cell::RefCell;
 
 use cjc_ad::pinn::Activation;
@@ -3439,7 +3440,7 @@ fn fit_gaussian(data: &[f64]) -> (f64, f64) {
     let n = data.len() as f64;
     let mean = data.iter().sum::<f64>() / n;
     let var = if data.len() > 1 {
-        data.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0)
+        data.iter().map(|&x| (x - mean).det_powi(2)).sum::<f64>() / (n - 1.0)
     } else {
         f64::EPSILON
     };
@@ -3447,8 +3448,8 @@ fn fit_gaussian(data: &[f64]) -> (f64, f64) {
 }
 
 fn single_sample_nll(x: f64, mean: f64, var: f64) -> f64 {
-    let z = (x - mean).powi(2) / var;
-    0.5 * (z + var.ln() + (2.0 * std::f64::consts::PI).ln())
+    let z = (x - mean).det_powi(2) / var;
+    0.5 * (z + var.det_ln() + (2.0 * std::f64::consts::PI).det_ln())
 }
 
 fn nll_under_gaussian(samples: &[f64], mean: f64, var: f64) -> f64 {
@@ -3541,7 +3542,7 @@ fn route_key_entropy_at_candidate_depth(g: &AdaptiveBeliefGraph, node_id: NodeId
     for &c in counts.iter() {
         if c > 0 {
             let p = (c as f64) / total_f;
-            h_acc.add(-p * p.ln());
+            h_acc.add(-p * p.det_ln());
         }
     }
     h_acc.finalize()

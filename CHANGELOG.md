@@ -6,7 +6,207 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+#### Math builtins are now bit-identical across platforms (ADR-0046 amendment)
+- Every transcendental a `.cjcl` program can observe — the math builtins (`sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `exp`, `log`, `log2`, `log10`, `pow`, …), tensor ops and activations, distributions (including `randn`), stats functions, autodiff, the `**` operator in both executors, MIR constant folding, and data-frame `DExpr` functions — now uses `cjc_repro::dmath` instead of the platform C math library. The same program and seed give the **same bits on Windows, Linux, and macOS**; previously the libraries disagreed in the last bit (e.g. Windows' `atanh` is off by up to 8 ulps near ±1).
+- **Results may change in the last bit** on any given OS. Four golden hashes moved and were re-locked, each with its previous value recorded: the `bench_v0_1` primitive master hash and three ABNG `.cjcl` chain-head canaries. The chess RL weight hash is unchanged.
+- **`**` is more accurate:** `dmath::pow` is now fdlibm `e_pow.c` (0.81 ulp max measured), replacing `exp(y · ln x)`, which lost ~|y · ln x| ulps.
+- **New in `dmath`:** `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `atanh`, `exp_m1`, `ln_1p`, `log2`, `log10`, `hypot`, plus the `DetMath` trait (`x.det_exp()`) used to migrate 387 call sites. Verified against mpmath over 609,860 evaluations (`verification/dmath_ext_check.py`); the musl-derived functions are bit-identical to musl's own C code (`verification/musl_bitcompare/`). Measured max errors are documented per function — five inherit >1 ulp from musl's algorithms (`atan2`, `cosh`, `atanh`, `sinh`, `tanh`, ≤ 1.95 ulp).
+- The analytics crates (`cjc-vizor`, `cjc-nss`, `cjc-cana`, `cjc-cana-compress`, `cjc-abng`, `cjc-locke`, `cjc-cronos-gan`; 91 sites) use `dmath` too, so no workspace crate calls platform libm transcendentals outside tests.
+
+#### Quantum: faster statevector simulation, same bits
+- Gates are applied by new strided kernels (`cjc-quantum/src/kernels.rs`). They walk only the amplitude pairs a gate touches and split large states across threads (`std::thread::scope`; the count comes from `cjc_runtime::runtime_policy`, and threads are used only above 2^15 pairs per thread).
+  - Each pair is owned by one thread and nothing is reduced across threads, so output is bit-identical at any thread count.
+  - Over whole circuits at 20–22 qubits this is 1.2–1.5× faster, measured as an interleaved A/B.
+- Seeded sampling (`q_sample`, `Circuit::sample`) builds one monotone prefix array and binary-searches it per shot. It is O(2ⁿ + shots·n) instead of O(shots·2ⁿ), with the same shots bit for bit. 1,000 shots at 22 qubits went from ~4–9 s to ~15–23 ms.
+- A circuit value caches its executed statevector (≤ 24 qubits), so observing one circuit several times (`q_probs`, then `q_sample`, then `q_measure`) simulates it once: 2.3× faster for three observations at 20 qubits.
+- The AVX2 kernels in `simd_kernel.rs` were measured and left unused: 3–5× slower than the scalar loop.
+- The cross-platform golden hash is unchanged by these changes.
+
+#### Quantum: circuits are values; simulator states are documented handles (ADR-0044)
+- **Breaking:** a gate on a circuit (`q_h`, `q_rx`, `q_cx`, `q_toffoli`, …, both backends) now returns a **new** circuit and leaves its argument unchanged. Before, every name bound to one circuit shared it, so `let b = a; b = q_x(b, 1);` also added the X to `a`, and so did building parameter-sweep variants from a shared base circuit. A gate call whose result is discarded (`q_x(c, 0);`) is now a no-op. No shipped demo or test relied on the old aliasing.
+- MPS, stabilizer, and density operations keep updating their state in place. That behaviour is now documented, not incidental: copying those states on every gate would cost 10–1000× (measured in ADR-0044), and measurement collapse must change the state.
+- Simulation results are unchanged for code that reassigns (`c = q_h(c, 0)`).
+
+#### Quantum: platform-independent transcendental functions (ADR-0046)
+- New `cjc_repro::dmath` provides `sin`, `cos`, `sin_cos`, `exp`, `ln`, `pow`, and `powi` built from IEEE `+ - * /` only (fdlibm algorithms plus a `u128` Payne–Hanek reduction). They are accurate to < 1 ulp against mpmath, over 348k evaluations.
+- All 59 non-test `sin`/`cos`/`exp`/`ln`/`pow` calls in `cjc-quantum` now use it. The same program and seed give **bit-identical results on Windows, Linux, and macOS**. Before, Windows and Linux disagreed on 6.0% of gate angles.
+- A 348,004-line output dump is byte-identical on Windows (UCRT) and Linux (glibc 2.36). The `golden_hash_is_platform_independent` test runs on all three CI operating systems.
+- Quantum outputs on a given OS may change in the last bit. For example, `sin(π/6)` is now 0.5 on every platform.
+- `cjc-runtime`'s `.cjcl` math builtins still use the platform libm. Moving them is a separate decision, because it changes existing golden hashes.
+
+#### Multi-file programs: module-scoped name resolution; private functions are module-private (ADR-0047) — breaking
+- Both executors now resolve function names in multi-file programs through one shared pass (`cjc_module::resolve_modules`). Before, they disagreed and each was wrong somewhere:
+  - two modules with a private `helper` of the same name: AST-eval gave 202 and MIR-exec 101, where the correct result was 102;
+  - a module calling a `pub fn` of its own import: MIR-exec failed;
+  - a private `fn abs` in one module shadowed the builtin `abs` in every module that imported it.
+- **Breaking:** a function without `pub` is no longer callable from other modules. Such a call fails with ``undefined function `f` `` plus ``note: `f` is a private function of module `m`; mark it `pub` to use it from other modules``, identically in both executors. A `pub fn` can still call its module's private helpers.
+- `import m.f` (lowercase `f`) now imports the function `f` of module `m`. It was silently ignored before.
+- Docs no longer show `m::f(x)` calls, which do not parse.
+
+### Added
+
+#### Quantum: OpenQASM 2.0 import and export
+- `q_to_qasm(circuit)` returns OpenQASM 2.0 text. `q_from_qasm(text[, "pure"])` parses it into a circuit. Both work on both backends and in both executors.
+- The accepted subset is the `qelib1` gates CJC simulates exactly: `h x y z s t rx ry rz cx CX cz swap ccx id`, plus `barrier`, `creg`, multiple `qreg`s (flattened in declaration order), whole-register broadcast, and trailing `measure`. Parameter expressions take `pi`, `+ - * / ^`, and `sin cos tan exp ln sqrt`, evaluated with `cjc_repro::dmath`.
+- Anything else is an error naming the line, never a silent drop, including `u1`–`u3`, `sdg`, gate definitions, `reset`, `if`, OpenQASM 3, and more than 26 qubits.
+- Angles print in shortest round-trip form, so export then import is bit-identical.
+- **Tests:** `tests/beta_tests/quantum/test_qasm.rs` (6), including four Qiskit-written fixtures that reproduce Qiskit Aer's amplitudes to < 1e-12, 200 seeded round trips, and a malformed-input sweep. Also 9 unit tests in `qasm.rs`. The fuzz and Bolero builtin lists now have 84 names.
+
+#### Quantum benchmark harness (`bench/quantum_compare`)
+- A seeded circuit generator:
+  - W1: dense GHZ
+  - W2: random
+  - W3: Clifford
+  - W4: MPS GHZ and brickwork
+  - W6: one circuit observed three times
+- It emits each circuit as QASM, Stim, and `.cjcl`, and runs it through the Rust API, `cjc-eval`, and `cjc-mir-exec`.
+- It writes `cjc-quantum-bench/v1` records with SHA-256 output hashes, fresh-process replay, and a cross-path byte-identity check.
+- Python drivers for Qiskit Aer (1 thread without fusion, and default) and Stim (tableau and bulk sampler), with versions pinned in `externals/requirements.lock`.
+- `report.py` renders `REPORT.md`.
+- `quantum_compare kernels` runs interleaved old-vs-new A/B timings.
+- Results for one machine are in `bench_results/quantum_compare/2026-09-25_*`. They are summarised in `docs/QUANTUM_SIMULATION.md` → "Measured Performance (harness)".
+
+#### Quantum: passing states between builtins (ADR-0045)
+- `q_probs`, `q_amplitudes`, `q_sample`, `q_measure`, `q_n_qubits`, `q_fermion_expectation`, and `q_trotter_evolve` accept a statevector (from `q_run` / `q_trotter_evolve`) as well as a circuit. Seeded sampling and measurement give the same bits for `c` and `q_run(c)`. The pure backend's `q_fermion_expectation` accepts a circuit as well as a statevector.
+- `q_expect_pauli(state, "XZIY")`: the expectation of a single Pauli string, where character k acts on qubit k.
+- `q_fermion_add_term(h, "ZZ", coeff)`: returns a new Hamiltonian with the term added, on both backends. `q_fermion_new(n)` is now usable.
+- `density_from_state(state)`: ρ = |ψ⟩⟨ψ| (≤ 14 qubits), so noise can be applied to a prepared state. Pure-backend input gives a pure-backend density matrix.
+- `q_copy(value)`: an independent deep copy of any quantum value.
+- Type-checker overloads for the statevector forms and the new builtins.
+- **Tests:**
+  - `tests/beta_tests/quantum/test_quantum_value_semantics.rs` (11)
+  - `tests/beta_tests/quantum/test_quantum_state_interop.rs` (16)
+  - 7 `dmath` unit tests in `cjc-repro`
+  - fuzz and Bolero builtin lists extended to 82 names
+
 ### Fixes
+
+#### Tampered ABNG blobs could overflow a tensor shape (`cjc-abng`, `cjc-runtime`)
+- A tampered blob could carry a tensor shape with several huge dimensions and one zero. `decode_tensor` guarded the element count with a saturating multiply, so the count came out as 0 and passed the size check. `Tensor::from_vec` then recomputed it with an unchecked product, which overflowed: a panic in debug builds, a silently wrapped count in release.
+  - CI's debug builds failed `fuzz_abng_tamper_no_panic` and `fuzz_abng_smart_replay_tamper_no_panic` on all three operating systems. Local `--release` runs passed.
+- `decode_tensor` now rejects a shape whose running product overflows.
+- `Tensor::from_vec`, `Tensor::reshape`, and `Tensor::from_bytes` return an error for any shape whose element count or strides do not fit in `usize`. Valid shapes, including empty ones, are unchanged.
+- **Tests:** `crates/cjc-abng/tests/tamper_exhaustive.rs` flips every bit and inverts every byte of two serialized graphs (88 and 59 single-bit flips panicked before); `crates/cjc-runtime/tests/tensor_shape_overflow.rs`.
+
+#### CI test job could not compile on Linux and macOS
+- `tests/test_cjc_v0_1_hardening.rs` used `#[path = "../…"]` inside inline modules, which resolves through a directory that does not exist. Windows tolerated it; Linux and macOS did not, so the workspace test job never compiled there.
+- The job now runs `cargo test --workspace --no-fail-fast` (timeout 60 minutes), so one failing binary no longer hides the results of every crate after it.
+
+#### State-space builtins were never reachable
+- `crates/cjc-runtime/src/state_space.rs` (ADR-0020/0021: `state_space_*`, `tensor_concat_1d`) was committed without its `mod` declaration or dispatch hook, so the module was never compiled and every `state_space_*` call was an unknown builtin. It is now reached from `dispatch_builtin`'s fallback arm, as the ADR describes; both executors inherit it.
+
+#### Three test suites that never ran
+- `tests/state_space_tests/` (62 tests) and `tests/final_phase_hardening_before_vm/` (53) had no `[[test]]` entry, and `tests/audit_tests/test_parallel_matmul.rs` was never declared as a module. All are wired in and pass.
+- `final_phase_hardening_before_vm` had drifted from the language: it used a bare trailing expression as the program result, match arms without commas, trait signatures without `;`, `Color::Red` variant paths, `rand()`, `array_get`, `GradGraph::variable` and `Value == Value`. Its parity tests now compare printed output, and they fail if nothing is printed; the old form compared `Void` with `Void` and could not fail.
+- Its module-visibility test expected private functions of an imported module not to be aliased, but they were. That test exposed the privacy hole fixed by ADR-0047 (see Changed); it now passes with its original assertion.
+
+#### Quantum: MPS truncation discarded the wrong directions
+- The one-sided Jacobi SVD in `mps.rs` solved for the rotation with the wrong sign. Its reconstructions were exact, but its singular values and U were wrong whenever two columns had unequal norms (|UᴴU − I| ≈ 0.99 on a random rank-2 matrix), so χ-truncation kept arbitrary directions.
+  - Found by the new harness: on a 50-qubit depth-8 brickwork at χ = 16, ⟨Z_i⟩ differed from Qiskit Aer by 0.53, although χ = 16 is exact for that circuit. They now agree within 8.5e-11, and against a dense statevector within 1e-14.
+- Truncation also now happens in mixed-canonical form. When a two-site update would drop more than round-off (`TRUNC_REL_TOL` = 1e-10 relative), the chain is canonicalised around that bond, the top χ Schmidt values are kept, and they are rescaled to preserve the norm.
+- **Outputs change** for MPS, DMRG, QML, and QAOA-on-MPS results. The cross-platform golden hash moves from `0x65eead6855ab878d` to `0x5957153489137325`. Reverting only the rotation sign restores the old hash.
+- **Tests:** 4 new `mps.rs` `accuracy_tests`:
+  - rank and orthonormality of the SVD
+  - exact ⟨Z_i⟩ when χ covers the Schmidt rank
+  - error that shrinks with χ while the norm is preserved
+  - deterministic truncation
+
+#### Quantum documentation matches the code (audit drift D1–D26)
+- `docs/QUANTUM_SIMULATION.md` has a new **Builtin Reference** covering all 82 builtins: arguments, return values, pure-backend and type-signature support, and caps. The test `fuzz_dispatch_reference_documents_every_builtin` fails if a builtin is added to `dispatch.rs` without a row.
+- Corrected claims:
+  - "every builtin is type-checked": 65 of 82 have signatures, and `cjcl run` does not type-check;
+  - pure backend "CJC all the way down", "modifiable without recompiling", and "AD integration": it is a second Rust implementation with read-only inspection;
+  - "both backends bit-identical": each backend is bit-identical with itself, and the two agree to 1e-10;
+  - SIMD kernels presented as active: nothing calls them;
+  - density caps (14 everywhere), stabilizer complexity, and test counts (regenerated);
+  - performance tables, now labelled unverified.
+- The `cjc-quantum` crate header no longer says "No noise model" or "~25-30 qubits".
+- The QML docs say finite differences, not parameter shift.
+- The depolarizing docstring states the 4p/3 replacement probability.
+- `examples/quantum_simulations/README.md` no longer says density, MPS, stabilizer, QEC, and VQE are unexposed.
+- The vault note no longer says "~500K+ LOC" (the crate is ~16K lines).
+- `cjcl --version` printed a hard-coded `0.1.4`. It now reports the crate version (0.1.11).
+- `bench_20q_dmrg` ran 8 qubits for 3 sweeps. It is renamed `bench_8q_dmrg`, with a matching message.
+
+#### Quantum determinism claims now verified end to end
+- `crates/cjc-quantum/tests/cross_platform_golden.rs` hashes the bits of every transcendental-dependent output on both backends. That covers rotation gates, MPS, Trotter, density channels and entropy, QAOA, VQE, QML, and noise scaling. The test runs in the Linux/Windows/macOS CI matrix, and the hash matched on Windows and Linux. The "across platforms" wording in `lib.rs`, `measure.rs`, and `pure.rs` is now backed by this test, and states its one scope limit: angles computed with `cjc-runtime` math builtins.
+
+#### Quantum research stack: `STACK_ROLE_GROUP.md`
+- The audit brief cited `docs/quantum_simulation_research_stack/STACK_ROLE_GROUP.md` as its scope authority, but the file did not exist. It is now written in the format of the other phases' role files. It codifies the brief's scope and rules, and records per-role status.
+
+#### Quantum: QAOA optimizer never moved (`cjc-quantum`)
+- **`qaoa_maxcut` returned its random initial point.** The optimizer applied a ±π/2 parameter shift to γ and β, but those parameters are *shared* across all cost gates `e^{-iγZZ}` and all mixer gates `e^{-iβX}`. The energy is π-periodic in each of them, so every "gradient" was exactly 0. Across 31 iterations the energy varied by ~1e-14.
+- **Fix:** new `qaoa::qaoa_gradient` computes exact gradients with per-gate shifts (`f(θ+π/4) − f(θ−π/4)` per gate, summed over the gates each parameter drives). `build_qaoa_ansatz` output is unchanged (bit-identical).
+- **Effect:** on a 4-vertex path (optimum 3) the seeded result goes from 1.439 to 2.609; on an 8-cycle (optimum 8) from 3.859 to 5.685. `qaoa_maxcut` results therefore **change** for all inputs.
+- **Test that exposed it:** `qaoa_4_cycle_finds_good_cut` had failed since 66b65bd. That commit fixed `svd_sign_stabilized` for wide matrices; before it, MPS QAOA energies disagreed with a dense statevector (1.52 vs 1.71). The test's old threshold had been calibrated against that wrong state.
+- **New tests:** `qaoa_mps_energy_matches_dense_oracle` (fails without the SVD fix), `qaoa_gradient_matches_finite_differences`, and `qaoa_4_path_optimizer_improves_and_matches_dense_oracle`.
+
+#### Quantum: malformed `.cjcl` input no longer crashes the process (`cjc-quantum` dispatch)
+- **Nine audited inputs panicked `cjcl` (exit 101), and one aborted on a 16 TiB allocation.** Examples: `density_depolarize(d, 0, 1.5)`, non-adjacent `mps_cnot`, out-of-range `stabilizer_measure`, `density_new(15)`, `mps_new(0)`, `mps_new(-1)`, `mps_ry(m, 0)`, Trotter size mismatch or `n_steps = 0`, and `density_new(20, "pure")`. All now return a runtime error, identically in both executors.
+- **Validation at the language boundary:** `dispatch_quantum` now checks, before any backend runs:
+  - arity, for every builtin;
+  - qubit indices against the state's size and for duplicates;
+  - MPS adjacency, probability domains, and finite numbers (NaN/∞ rejected);
+  - size caps: density ≤ 14 qubits, now on the pure backend too; MPS ≤ 100,000; stabilizer ≤ 32,768; QEC distance ≤ 1,024.
+- **Library APIs are unchanged.** The Rust `assert!` contracts remain but are no longer reachable from `.cjcl`.
+
+#### Quantum: silent defaults are now errors
+- These inputs are now runtime errors:
+  - `q_cx(c, 0, 0)` and other duplicate-operand gates (previously a silent no-op).
+  - `qec_decode` on a surface code (previously applied the repetition decoder and returned a meaningless correction). No surface-code decoder exists yet.
+  - `mps_energy` with an unknown Hamiltonian name (previously Ising). `"ising"` is now accepted explicitly.
+  - `q_scale_noise` with an unknown noise type (previously depolarizing).
+  - A Trotter `order` other than 1 or 2 (previously 1st order).
+  - Non-integral float indices such as `mps_h(m, 1.9)` (previously truncated to 1).
+  - Non-numeric QML/ZNE array elements and non-0/1 syndrome entries (previously 0.0 / 0).
+  - QML sample rows whose length differs from `n_qubits`, and labels ≥ `n_classes`.
+- Clearer messages for a pure-backend circuit passed to an unsupported builtin, and for a statevector passed where a circuit is expected.
+
+#### Quantum: LiH Hamiltonian replaced; H₂ documentation corrected
+- **`q_fermion_lih` / `lih_hamiltonian()` did not describe LiH.** Its 2-electron ground state was −10.009 Ha, about 2.1 Ha below the true value. Its "nuclear repulsion" constant was −7.4983 (true: +1.027), and its one-body terms were H₂'s.
+- It is now a **frozen-core CAS(2,2) STO-3G Hamiltonian at R = 1.546 Å**, generated with PySCF 2.14.0 + OpenFermion 1.8.1 by `docs/quantum_simulation_research_stack/verification/gen_lih_hamiltonian.py`. It has 27 Pauli terms, and its eigenvalues are total energies:
+  - HF = −7.8631336887 Ha
+  - ground state = −7.8633736643 Ha
+- **H₂ coefficients are unchanged.** The docs now state that the H₂ Hamiltonian is electronic-only (add 1/R = 0.713754 Ha). Its ground state matches FCI to 1.75e-4 Ha, but its excited levels are off by 19–24 mHa.
+- **New tests:** `tests/beta_tests/quantum/test_quantum_chemistry_reference.rs` asserts the PySCF reference energies through CJC's own expectation path.
+
+#### Quantum: `StabilizerState::to_statevector` returned a zero vector for some states
+- It projected |+…+⟩ onto the stabilizer group, which gives zero for states orthogonal to |+…+⟩, such as |−⟩. It now falls back to computational basis states. Found by the new property tests.
+
+#### Quantum test-suite integrity
+- The two quantum Bolero targets wrapped their assertions in a discarded `catch_unwind`, so they could never fail. They now assert properly.
+- New Bolero target `fuzz_quantum_dispatch_no_panic`.
+- New seeded sweep `test_fuzz_quantum_dispatch.rs`: 250 random calls per builtin across all 82 builtins, plus checks that the builtin list matches `dispatch.rs`. It aborts against the previous dispatch code.
+- `beta_tests/quantum_prop/` compiled 0 tests. It now holds 8 proptest properties:
+  - normalization;
+  - inverse circuits;
+  - bit-identical replay;
+  - MPS ≡ dense, density ≡ dense, and stabilizer ≡ dense;
+  - channel trace and purity;
+  - eval ≡ MIR on generated `.cjcl` programs.
+- Removed three byte-identical duplicate test files (46 tests counted twice, plus one uncompiled orphan copy).
+- Quantum demos 04–06 are now in the CI parity gate.
+#### Optimizer identity rewrites respect operand types (`cjc-mir`)
+- **Strength reduction changed program results on untyped operands.** MIR carries no types, but both optimizers applied identity rewrites as if every operand were an `Int` (or `Bool`): `s * 1 => s` and `s / 1 => s` erased the runtime type error for a String `s`; `s * 2 => s + s` turned that error into `"aa"`; `z + 0 => z` kept `-0.0` where the runtime produces `+0.0` (so `1.0 / w` flipped from `inf` to `-inf`); in the SSA optimizer, `x * 1.0` / `x + 0.0` silently turned an Int into a Float, `x - (-0.0)` flipped `-0.0`, and `true && x`, `x || false`, `!!x`, `--x` erased type errors for non-Bool / non-numeric `x`.
+- **Fix:** a new `StaticKind` classifier (`optimize::static_kind`) proves an expression's kind *if it succeeds* (Int / Float / Bool; variables and calls are `Unknown`), mirroring the executors' `binop_int` / `binop_float` / `eval_unary` result types. Each rewrite now fires only when it is exact — same type and bits — for that kind: `x + 0` Int only; `x - 0`, `x * 1`, `x / 1` Int or Float with an Int literal (Float literals only for Float `x`, and never `-0.0`); `x * 2 => x + x` for trivial numeric operands; logic identities that return `x` only for Bool `x`; `--x` numeric, `!!x` Bool. The short-circuit rules `false && x => false` and `true || x => true` stay unconditional (`x` is never evaluated).
+- **Trade-off:** on untyped variables these rewrites no longer fire. None of them affected executor results or determinism goldens; the full workspace suite is unchanged.
+- **Tests:** unit tests for every rule × operand kind in both optimizers; `tests/test_optimizer_identity_parity.rs` checks AST-eval ↔ MIR ↔ `--mir-opt` ↔ default-pass pipeline parity (verified to fail against the old behaviour).
+
+#### Data DSL integer arithmetic no longer panics (`cjc-data`)
+- **`DExpr` integer `/` by zero panicked** ("attempt to divide by zero") in both the row evaluator (`eval_binop`) and the vectorized column evaluator (`vectorized_binop`), and `i64::MIN / -1` and overflowing `+ - *` panicked too (the latter in debug builds). Integer arithmetic now wraps like the language executors, and division by zero returns an `invalid operation: integer division by zero` error — byte-identical from both evaluators.
+
+#### Fuzz targets can fail again — and the bugs they had been hiding
+- **Bolero fuzz targets were unable to fail.** ~37 targets in `tests/bolero_fuzz/` wrapped their bodies in `let _ = panic::catch_unwind(..)`, discarding every panic and failed assertion. They now run directly (determinism / oracle / parity properties) or assert `catch_unwind(..).is_ok()` naming the input (panic-freedom properties). Each target was verified to fail when its property is deliberately broken. The three `hybrid_streaming_fuzz` targets were additionally vacuous — their decoder required ≥ 4096 input bytes, so every case returned early — and now expand inputs of any length.
+- **New grammar-aware program generator** (`tests/bolero_fuzz/program_gen.rs`): random bytes almost never parse, so the MIR-verifier / AST / optimizer-parity targets had only ever checked the empty program. Generated programs (typed state, helper fns, `if`/`for`, int edge values, `/ % **`) now feed those targets plus two new ones: `fuzz_generated_programs_parse` and `fuzz_generated_eval_mir_parity` (AST-eval ↔ MIR-exec output parity, prime directive 7).
+- **Lexer panicked on non-ASCII input** (`cjc-lexer`): an unexpected multi-byte UTF-8 character outside a literal left the byte cursor mid-character and slicing the source panicked (`"aʄ1"`). Also `b'é'` and `b'\x즉'`. The lexer now maintains the "cursor is on a char boundary" invariant and reports one `E0002`/`E0004` diagnostic naming the real character.
+- **Non-ASCII text in literals was mangled** (`cjc-lexer`, `cjc-parser`): string, f-string, raw-string and regex literal contents were pushed one byte per `char`, so `"é"` became `"Ã©"` (double-encoded through f-strings), `len("é")` was 4 instead of 2, and `/é/` could never match `"café"`. Literal text now reaches both executors verbatim.
+- **`i64::MIN / -1` and `i64::MIN % -1` panicked** ("attempt to divide with overflow") in both executors and in both constant folders; **`-i64::MIN` panicked in debug builds**. Integer `/`, `%` and unary `-` now wrap, consistent with the existing wrapping `+ - *`: `MIN / -1 == MIN`, `MIN % -1 == 0`, `-MIN == MIN`.
+- **Optimizer changed program results** (`cjc-mir`): (1) int `**` was folded with an exact `wrapping_pow` while both executors compute it through f64 (saturating), so `--mir-opt` printed different numbers beyond 2^53 (`3 ** 39`, `3 ** 40`); the fold now uses the executors' formula. (2) Strength reduction rewrote `x * 0 => 0` for any `x`, erasing runtime errors (`(0 % 0) * 0`) and turning `tensor * 0` into `Int 0`; it now applies only to operands that are certainly-`Int` and cannot fail. `x * 2 => x + x` no longer duplicates non-trivial operands (a call would run twice).
+- **MIR-exec tail calls escaped their expression** (`cjc-mir-exec`): any body whose result was a direct call was treated as a tail call, including `if`-expression branches nested in a call argument and loop bodies. At top level this surfaced as `Err(TailCall)`; inside a function the trampoline jumped to the callee mid-expression and **silently returned the wrong value** (`add(1, if c { inc(10) } else { 0 })` returned 11, not 12). Tail position is now tracked explicitly (function body → result `if`/`match`/block branches); genuine tail recursion is still trampolined (200k-deep recursion verified).
+- **ABNG `density_score` returned NaN** (`cjc-abng`) for extreme-but-finite features: the Welford variance and `diff²` both overflowed to `+inf` and `inf / inf = NaN`. The Mahalanobis term now rescales on that path only (ordinary scores stay bit-identical) and saturates to `density = 1.0`.
+- **Tests:** new `tests/test_unicode_literals.rs`, `tests/test_int_arith_edge_parity.rs`, `tests/test_tail_call_position.rs` (all eval ↔ MIR ↔ MIR-opt parity), lexer / optimizer / density unit regressions, and a generator coverage check (most generated programs must run to completion). The frozen-dictionary fuzz oracle was corrected to the documented contract (a known value resolves to its existing code after `freeze`; only unknown values are rejected).
 
 #### Executor parity: calling a closure/function value bound to a local (`cjc-eval`)
 - **Closed an AST-eval ↔ MIR-exec parity gap** (determinism invariant 7). Calling a closure held in a local — `let f = |x: i64| x + offset; f(i)` — raised `runtime error: undefined function \`f\`` under the AST tree-walk interpreter (`cjcl run`), while the MIR executor (`cjcl run --mir-opt`) evaluated it correctly. Both executors now produce byte-identical output.

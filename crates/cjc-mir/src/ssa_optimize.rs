@@ -126,8 +126,9 @@ fn fold_binary(op: BinOp, left: &MirExpr, right: &MirExpr) -> Option<MirExpr> {
                 BinOp::Add => Some(MirExprKind::IntLit(a.wrapping_add(*b))),
                 BinOp::Sub => Some(MirExprKind::IntLit(a.wrapping_sub(*b))),
                 BinOp::Mul => Some(MirExprKind::IntLit(a.wrapping_mul(*b))),
-                BinOp::Div if *b != 0 => Some(MirExprKind::IntLit(a / b)),
-                BinOp::Mod if *b != 0 => Some(MirExprKind::IntLit(a % b)),
+                // Wrapping to match both executors (`i64::MIN / -1` must not panic).
+                BinOp::Div if *b != 0 => Some(MirExprKind::IntLit(a.wrapping_div(*b))),
+                BinOp::Mod if *b != 0 => Some(MirExprKind::IntLit(a.wrapping_rem(*b))),
                 BinOp::Eq => Some(MirExprKind::BoolLit(a == b)),
                 BinOp::Ne => Some(MirExprKind::BoolLit(a != b)),
                 BinOp::Lt => Some(MirExprKind::BoolLit(a < b)),
@@ -471,8 +472,9 @@ fn eval_binary_const(op: BinOp, left: &ConstVal, right: &ConstVal) -> Lattice {
                 BinOp::Add => Some(ConstVal::Int(a.wrapping_add(*b))),
                 BinOp::Sub => Some(ConstVal::Int(a.wrapping_sub(*b))),
                 BinOp::Mul => Some(ConstVal::Int(a.wrapping_mul(*b))),
-                BinOp::Div if *b != 0 => Some(ConstVal::Int(a / b)),
-                BinOp::Mod if *b != 0 => Some(ConstVal::Int(a % b)),
+                // Wrapping to match both executors (`i64::MIN / -1` must not panic).
+                BinOp::Div if *b != 0 => Some(ConstVal::Int(a.wrapping_div(*b))),
+                BinOp::Mod if *b != 0 => Some(ConstVal::Int(a.wrapping_rem(*b))),
                 BinOp::Eq => Some(ConstVal::Bool(a == b)),
                 BinOp::Ne => Some(ConstVal::Bool(a != b)),
                 BinOp::Lt => Some(ConstVal::Bool(a < b)),
@@ -513,7 +515,7 @@ fn eval_binary_const(op: BinOp, left: &ConstVal, right: &ConstVal) -> Lattice {
 
 fn eval_unary_const(op: UnaryOp, val: &ConstVal) -> Lattice {
     match (val, op) {
-        (ConstVal::Int(v), UnaryOp::Neg) => Lattice::Constant(ConstVal::Int(-v)),
+        (ConstVal::Int(v), UnaryOp::Neg) => Lattice::Constant(ConstVal::Int(v.wrapping_neg())),
         (ConstVal::Float(v), UnaryOp::Neg) => Lattice::Constant(ConstVal::Float(-v)),
         (ConstVal::Bool(v), UnaryOp::Not) => Lattice::Constant(ConstVal::Bool(!v)),
         _ => Lattice::Bottom,
@@ -617,56 +619,96 @@ fn is_one(kind: &MirExprKind) -> bool {
         || matches!(kind, MirExprKind::FloatLit(v) if *v == 1.0)
 }
 
+/// True if `x op lit` evaluates to exactly `x` — same type AND same bits —
+/// for every value `x` can have per [`crate::optimize::static_kind`]. MIR is
+/// untyped, so an `Unknown` `x` (e.g. a variable holding a String) never
+/// qualifies: `"a" * 1` is a runtime error the rewrite would erase.
+///
+/// - `x + 0`: Int only — for Float, `-0.0 + 0` is `+0.0`.
+/// - `x - 0`: Int or Float with an Int `0`; with a Float literal only `+0.0`
+///   (`-0.0 - (-0.0)` is `+0.0`) and only for Float `x` (Int `x - 0.0` is a
+///   Float).
+/// - `x * 1`, `x / 1`: Int or Float with an Int `1`; a Float `1.0` would
+///   turn an Int `x` into a Float.
+fn is_exact_identity(op: BinOp, x: &MirExpr, lit: &MirExprKind) -> bool {
+    use crate::optimize::{static_kind, StaticKind};
+    let k = static_kind(x);
+    match (op, lit) {
+        (BinOp::Add, MirExprKind::IntLit(0)) => k == StaticKind::Int,
+        (BinOp::Sub, MirExprKind::IntLit(0)) => k.is_numeric(),
+        (BinOp::Sub, MirExprKind::FloatLit(v)) if *v == 0.0 && v.is_sign_positive() => {
+            k == StaticKind::Float
+        }
+        (BinOp::Mul | BinOp::Div, MirExprKind::IntLit(1)) => k.is_numeric(),
+        (BinOp::Mul | BinOp::Div, MirExprKind::FloatLit(v)) if *v == 1.0 => k == StaticKind::Float,
+        _ => false,
+    }
+}
+
+fn is_bool(expr: &MirExpr) -> bool {
+    crate::optimize::static_kind(expr) == crate::optimize::StaticKind::Bool
+}
+
 fn try_strength_reduce(expr: &MirExpr) -> Option<MirExpr> {
     match &expr.kind {
         MirExprKind::Binary { op, left, right } => {
             match op {
-                // x + 0 => x, 0 + x => x
+                // x + 0 => x, 0 + x => x (see `is_exact_identity`)
                 BinOp::Add => {
-                    if is_zero(&right.kind) {
+                    if is_zero(&right.kind) && is_exact_identity(BinOp::Add, left, &right.kind) {
                         return Some((**left).clone());
                     }
-                    if is_zero(&left.kind) {
+                    if is_zero(&left.kind) && is_exact_identity(BinOp::Add, right, &left.kind) {
                         return Some((**right).clone());
                     }
                     None
                 }
                 // x - 0 => x
                 BinOp::Sub => {
-                    if is_zero(&right.kind) {
+                    if is_zero(&right.kind) && is_exact_identity(BinOp::Sub, left, &right.kind) {
                         return Some((**left).clone());
                     }
                     None
                 }
-                // x * 0 => 0, x * 1 => x, 0 * x => 0, 1 * x => x
+                // x * 0 => 0, x * 1 => x, 0 * x => 0, 1 * x => x.
+                // Dropping `x` is only sound when it cannot fail and is
+                // certainly an Int (see `optimize::is_int_total`).
                 BinOp::Mul => {
-                    if matches!(right.kind, MirExprKind::IntLit(0)) {
+                    if matches!(right.kind, MirExprKind::IntLit(0))
+                        && crate::optimize::is_int_total(left)
+                    {
                         return Some(MirExpr { kind: MirExprKind::IntLit(0) });
                     }
-                    if matches!(left.kind, MirExprKind::IntLit(0)) {
+                    if matches!(left.kind, MirExprKind::IntLit(0))
+                        && crate::optimize::is_int_total(right)
+                    {
                         return Some(MirExpr { kind: MirExprKind::IntLit(0) });
                     }
-                    if is_one(&right.kind) {
+                    if is_one(&right.kind) && is_exact_identity(BinOp::Mul, left, &right.kind) {
                         return Some((**left).clone());
                     }
-                    if is_one(&left.kind) {
+                    if is_one(&left.kind) && is_exact_identity(BinOp::Mul, right, &left.kind) {
                         return Some((**right).clone());
                     }
                     None
                 }
                 // x / 1 => x
                 BinOp::Div => {
-                    if is_one(&right.kind) {
+                    if is_one(&right.kind) && is_exact_identity(BinOp::Div, left, &right.kind) {
                         return Some((**left).clone());
                     }
                     None
                 }
-                // true && x => x, x && true => x, false && x => false, false || x => x
+                // `&&` / `||` short-circuit, so `false && x => false` and
+                // `true || x => true` are always sound (`x` is never
+                // evaluated). Rules that return `x` itself need `x` to be a
+                // Bool: at runtime a non-Bool right operand is an error
+                // ("`&&` requires Bool operands"), which `x` alone would erase.
                 BinOp::And => {
-                    if matches!(left.kind, MirExprKind::BoolLit(true)) {
+                    if matches!(left.kind, MirExprKind::BoolLit(true)) && is_bool(right) {
                         return Some((**right).clone());
                     }
-                    if matches!(right.kind, MirExprKind::BoolLit(true)) {
+                    if matches!(right.kind, MirExprKind::BoolLit(true)) && is_bool(left) {
                         return Some((**left).clone());
                     }
                     if matches!(left.kind, MirExprKind::BoolLit(false)) {
@@ -675,10 +717,10 @@ fn try_strength_reduce(expr: &MirExpr) -> Option<MirExpr> {
                     None
                 }
                 BinOp::Or => {
-                    if matches!(left.kind, MirExprKind::BoolLit(false)) {
+                    if matches!(left.kind, MirExprKind::BoolLit(false)) && is_bool(right) {
                         return Some((**right).clone());
                     }
-                    if matches!(right.kind, MirExprKind::BoolLit(false)) {
+                    if matches!(right.kind, MirExprKind::BoolLit(false)) && is_bool(left) {
                         return Some((**left).clone());
                     }
                     if matches!(left.kind, MirExprKind::BoolLit(true)) {
@@ -689,17 +731,22 @@ fn try_strength_reduce(expr: &MirExpr) -> Option<MirExpr> {
                 _ => None,
             }
         }
-        // Double negation: --x => x
+        // Double negation: --x => x, only for Int/Float (wrapping `-` makes
+        // it exact even for i64::MIN); `-` on other types is a runtime error.
         MirExprKind::Unary { op: UnaryOp::Neg, operand } => {
             if let MirExprKind::Unary { op: UnaryOp::Neg, operand: inner } = &operand.kind {
-                return Some((**inner).clone());
+                if crate::optimize::static_kind(inner).is_numeric() {
+                    return Some((**inner).clone());
+                }
             }
             None
         }
-        // Double not: !!x => x
+        // Double not: !!x => x, only for Bool (`!` on non-Bool is an error).
         MirExprKind::Unary { op: UnaryOp::Not, operand } => {
             if let MirExprKind::Unary { op: UnaryOp::Not, operand: inner } = &operand.kind {
-                return Some((**inner).clone());
+                if is_bool(inner) {
+                    return Some((**inner).clone());
+                }
             }
             None
         }
@@ -1040,26 +1087,85 @@ mod tests {
             entry: BlockId(0),
         };
         let opt = optimize_cfg(&cfg, &["a".to_string()]);
-        // x = a * 1 strength-reduces to x = a. Check the let init.
-        if let Some(CfgStmt::Let { init, .. }) = opt.basic_blocks[0].statements.first() {
-            assert!(
-                matches!(init.kind, MirExprKind::Var(ref n) if n == "a"),
-                "x * 1 should reduce to x, got {:?}",
-                init.kind
-            );
-        } else {
-            // DCE may have removed the let and propagated to return.
-            match &opt.basic_blocks[0].terminator {
-                Terminator::Return(Some(expr)) => {
-                    assert!(
-                        matches!(expr.kind, MirExprKind::Var(ref n) if n == "a"),
-                        "return should be 'a' after propagation, got {:?}",
-                        expr.kind
-                    );
-                }
-                other => panic!("expected a statement or return with 'a', got {:?}", other),
-            }
+        // `a` is a parameter of unknown type: if it holds a String, `a * 1`
+        // is a runtime error that reducing to `a` would erase. No rewrite.
+        assert!(
+            !cfg_mentions_bare_var_result(&opt, "a"),
+            "a * 1 must not reduce to a for an untyped `a`: {opt:?}"
+        );
+    }
+
+    /// True if the first Let's init — or, if DCE removed it, the return
+    /// expression — is the bare variable `name` (i.e. an identity was reduced).
+    fn cfg_mentions_bare_var_result(cfg: &MirCfg, name: &str) -> bool {
+        let is_var = |e: &MirExpr| matches!(e.kind, MirExprKind::Var(ref n) if n == name);
+        match cfg.basic_blocks[0].statements.first() {
+            Some(CfgStmt::Let { init, .. }) => is_var(init),
+            _ => matches!(&cfg.basic_blocks[0].terminator, Terminator::Return(Some(e)) if is_var(e)),
         }
+    }
+
+    // Direct rule tests: which identities are exact for which operand kinds.
+
+    fn bin(op: BinOp, l: MirExpr, r: MirExpr) -> MirExpr {
+        MirExpr { kind: MirExprKind::Binary { op, left: Box::new(l), right: Box::new(r) } }
+    }
+    fn float_expr(v: f64) -> MirExpr {
+        MirExpr { kind: MirExprKind::FloatLit(v) }
+    }
+    fn unary(op: UnaryOp, e: MirExpr) -> MirExpr {
+        MirExpr { kind: MirExprKind::Unary { op, operand: Box::new(e) } }
+    }
+    /// A Float-kinded non-literal: `1.5 * 2.5`.
+    fn fop() -> MirExpr {
+        bin(BinOp::Mul, float_expr(1.5), float_expr(2.5))
+    }
+    /// An Int-kinded non-literal: `3 - 4`.
+    fn iop() -> MirExpr {
+        bin(BinOp::Sub, int_expr(3), int_expr(4))
+    }
+    /// A Bool-kinded non-literal: `3 < 4`.
+    fn bop() -> MirExpr {
+        bin(BinOp::Lt, int_expr(3), int_expr(4))
+    }
+    fn reduces(e: MirExpr) -> bool {
+        try_strength_reduce(&e).is_some()
+    }
+
+    #[test]
+    fn test_sr_identity_rules_respect_operand_kind() {
+        // x + 0: Int only (Float -0.0 + 0 is +0.0).
+        assert!(reduces(bin(BinOp::Add, iop(), int_expr(0))));
+        assert!(!reduces(bin(BinOp::Add, fop(), int_expr(0))));
+        assert!(!reduces(bin(BinOp::Add, fop(), float_expr(0.0))));
+        // x - 0: Int/Float with Int 0; Float literal only +0.0 and Float x.
+        assert!(reduces(bin(BinOp::Sub, fop(), int_expr(0))));
+        assert!(reduces(bin(BinOp::Sub, fop(), float_expr(0.0))));
+        assert!(!reduces(bin(BinOp::Sub, fop(), float_expr(-0.0))), "-0.0 - -0.0 is +0.0");
+        assert!(!reduces(bin(BinOp::Sub, iop(), float_expr(0.0))), "Int - 0.0 is a Float");
+        // x * 1.0 / x / 1.0 would turn an Int x into a Float.
+        assert!(reduces(bin(BinOp::Mul, fop(), float_expr(1.0))));
+        assert!(!reduces(bin(BinOp::Mul, iop(), float_expr(1.0))));
+        assert!(!reduces(bin(BinOp::Div, iop(), float_expr(1.0))));
+        assert!(reduces(bin(BinOp::Div, iop(), int_expr(1))));
+        // Untyped variables never qualify.
+        assert!(!reduces(bin(BinOp::Mul, var_expr("s"), int_expr(1))));
+    }
+
+    #[test]
+    fn test_sr_logic_and_negation_rules_need_known_kinds() {
+        // Returning `x` itself needs x: Bool (non-Bool operands are runtime errors).
+        assert!(reduces(bin(BinOp::And, bool_expr(true), bop())));
+        assert!(!reduces(bin(BinOp::And, bool_expr(true), var_expr("x"))));
+        assert!(!reduces(bin(BinOp::Or, var_expr("x"), bool_expr(false))));
+        // Short-circuit forms never evaluate x: always sound.
+        assert!(reduces(bin(BinOp::And, bool_expr(false), var_expr("x"))));
+        assert!(reduces(bin(BinOp::Or, bool_expr(true), var_expr("x"))));
+        // !!x needs Bool; --x needs Int/Float.
+        assert!(reduces(unary(UnaryOp::Not, unary(UnaryOp::Not, bop()))));
+        assert!(!reduces(unary(UnaryOp::Not, unary(UnaryOp::Not, var_expr("x")))));
+        assert!(reduces(unary(UnaryOp::Neg, unary(UnaryOp::Neg, fop()))));
+        assert!(!reduces(unary(UnaryOp::Neg, unary(UnaryOp::Neg, var_expr("x")))));
     }
 
     #[test]
@@ -1077,24 +1183,12 @@ mod tests {
             entry: BlockId(0),
         };
         let opt = optimize_cfg(&cfg, &["a".to_string()]);
-        if let Some(CfgStmt::Let { init, .. }) = opt.basic_blocks[0].statements.first() {
-            assert!(
-                matches!(init.kind, MirExprKind::Var(ref n) if n == "a"),
-                "a + 0 should reduce to a, got {:?}",
-                init.kind
-            );
-        } else {
-            match &opt.basic_blocks[0].terminator {
-                Terminator::Return(Some(expr)) => {
-                    assert!(
-                        matches!(expr.kind, MirExprKind::Var(ref n) if n == "a"),
-                        "return should be 'a', got {:?}",
-                        expr.kind
-                    );
-                }
-                other => panic!("expected 'a', got {:?}", other),
-            }
-        }
+        // `a` is untyped: for a Float `a = -0.0`, `a + 0` is +0.0 — reducing
+        // to `a` would change the bits. No rewrite.
+        assert!(
+            !cfg_mentions_bare_var_result(&opt, "a"),
+            "a + 0 must not reduce to a for an untyped `a`: {opt:?}"
+        );
     }
 
     #[test]
@@ -1112,11 +1206,12 @@ mod tests {
             entry: BlockId(0),
         };
         let opt = optimize_cfg(&cfg, &["a".to_string()]);
-        // SR reduces a * 0 to 0. Check the let init was simplified.
+        // `a` is a parameter of unknown type (it may be a Float or Tensor,
+        // for which `a * 0` is not `Int 0`), so SR must NOT drop it.
         if let Some(CfgStmt::Let { init, .. }) = opt.basic_blocks[0].statements.first() {
             assert!(
-                matches!(init.kind, MirExprKind::IntLit(0)),
-                "a * 0 should be reduced to 0, got {:?}",
+                !matches!(init.kind, MirExprKind::IntLit(0)),
+                "a * 0 must not be reduced to Int 0 for an untyped `a`, got {:?}",
                 init.kind
             );
         }

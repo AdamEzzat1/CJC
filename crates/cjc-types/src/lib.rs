@@ -2089,6 +2089,30 @@ fn register_quantum_builtins(env: &mut TypeEnv) {
         Array { elem: Box::new(Complex), len: 0 });
     q_sig(env, "q_n_qubits", vec![("circuit", QuantumCircuit)], I64);
     q_sig(env, "q_n_gates", vec![("circuit", QuantumCircuit)], I64);
+    // ADR-0045: observables also accept a statevector (from q_run / q_trotter_evolve).
+    q_sig(env, "q_measure", vec![("state", QuantumStatevector), ("seed", I64)],
+        Array { elem: Box::new(I64), len: 0 });
+    q_sig(env, "q_probs", vec![("state", QuantumStatevector)],
+        Array { elem: Box::new(F64), len: 0 });
+    q_sig(env, "q_sample", vec![("state", QuantumStatevector), ("n_shots", I64), ("seed", I64)],
+        Array { elem: Box::new(I64), len: 0 });
+    q_sig(env, "q_amplitudes", vec![("state", QuantumStatevector)],
+        Array { elem: Box::new(Complex), len: 0 });
+    q_sig(env, "q_n_qubits", vec![("state", QuantumStatevector)], I64);
+    for state in [QuantumCircuit, QuantumStatevector] {
+        q_sig(env, "q_expect_pauli", vec![("state", state.clone()), ("pauli", Str)], F64);
+        q_sig(env, "density_from_state", vec![("state", state)], QuantumDensity);
+    }
+    // OpenQASM 2.0 interchange.
+    q_sig(env, "q_to_qasm", vec![("circuit", QuantumCircuit)], Str);
+    q_sig(env, "q_from_qasm", vec![("text", Str)], QuantumCircuit);
+    // ADR-0044: q_copy returns an independent copy of the same kind of value.
+    for t in [
+        QuantumCircuit, QuantumStatevector, QuantumMps, QuantumStabilizer, QuantumDensity,
+        QuantumGraph, QuantumSurfaceCode,
+    ] {
+        q_sig(env, "q_copy", vec![("value", t.clone())], t);
+    }
 
     // === MPS (Matrix Product States, 50+ qubits) ===
     q_sig(env, "mps_new", vec![("n_qubits", I64), ("max_bond", I64)], QuantumMps);

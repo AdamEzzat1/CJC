@@ -94,7 +94,10 @@ fn test_builder_with_default_message() {
     assert_eq!(diag.severity, Severity::Error);
     assert_eq!(diag.span, Span::new(10, 20));
     assert!(diag.labels.is_empty());
-    assert!(diag.hints.is_empty());
+    // Every code is documented, so the builder auto-attaches exactly one
+    // pedagogy hint linking to `cjcl explain`.
+    assert_eq!(diag.hints.len(), 1);
+    assert!(diag.hints[0].contains("cjcl explain E2001"));
     assert!(diag.fix_suggestions.is_empty());
 }
 
@@ -116,8 +119,10 @@ fn test_builder_with_labels_and_hints() {
 
     assert_eq!(diag.labels.len(), 1);
     assert_eq!(diag.labels[0].message, "extra argument here");
-    assert_eq!(diag.hints.len(), 1);
+    // User hint first, then the auto-attached pedagogy hint.
+    assert_eq!(diag.hints.len(), 2);
     assert_eq!(diag.hints[0], "remove the third argument");
+    assert!(diag.hints[1].contains("cjcl explain E2005"));
 }
 
 #[test]

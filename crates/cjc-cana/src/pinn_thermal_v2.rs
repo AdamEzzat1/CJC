@@ -49,6 +49,7 @@
 //! #3). Weights carry `model_id`/`model_version` into report hashes via
 //! `CostModel::name()/version()` exactly like v1.
 
+use cjc_repro::dmath::DetMath;
 use crate::physical_cost::PhysicalCostQuery;
 
 /// Stable v2 model identifier; flows into report hashes via
@@ -147,7 +148,7 @@ pub fn features_from_query(q: &PhysicalCostQuery<'_>) -> [f64; PINN_V2_FEATURE_C
 }
 
 fn log1p_u64(v: u64) -> f64 {
-    (v as f64).ln_1p()
+    (v as f64).det_ln_1p()
 }
 
 // ---------------------------------------------------------------------------
