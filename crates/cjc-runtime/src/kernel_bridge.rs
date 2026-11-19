@@ -180,8 +180,10 @@ pub mod kernel {
         debug_assert_eq!(data.len(), out.len());
         let sqrt_2_over_pi: f64 = (2.0 / std::f64::consts::PI).sqrt();
         for (o, &x) in out.iter_mut().zip(data.iter()) {
-            let inner = sqrt_2_over_pi * (x + 0.044715 * x * x * x);
-            *o = 0.5 * x * (1.0 + inner.det_tanh());
+            // Same value as 0.5 * x * (1 + tanh(k)) via 1 + tanh(k) = 2 * sigmoid(2k),
+            // without the cancellation that form suffers for negative x.
+            let k = sqrt_2_over_pi * (x + 0.044715 * x * x * x);
+            *o = x / (1.0 + (-2.0 * k).det_exp());
         }
     }
 
